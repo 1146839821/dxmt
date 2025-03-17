@@ -30,7 +30,7 @@
 namespace dxmt {
 
 constexpr size_t kCommandChunkCPUHeapSize = 0x1000000;
-constexpr size_t kCommandChunkGPUHeapSize = 0x400000;
+constexpr size_t kCommandChunkGPUHeapSize = 0x1000000;
 
 inline std::size_t
 align_forward_adjustment(const void *const ptr, const std::size_t &alignment) noexcept {
