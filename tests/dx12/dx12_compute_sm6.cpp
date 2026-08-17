@@ -25,7 +25,8 @@ int main(int argc, char **argv) {
   if (argc < 2 || argc > 3) {
     std::cerr << "usage: dx12_compute_sm6 <shader.cso> "
                  "[--root-uav|--descriptor-uav|--descriptor-resources|--"
-                 "root-cbv|--root-constants|--root-srv]\n";
+                 "descriptor-resources-space|--root-cbv|--root-constants|--"
+                 "root-srv]\n";
     return 2;
   }
   const bool root_uav = argc == 3 && strcmp(argv[2], "--root-uav") == 0;
@@ -33,17 +34,22 @@ int main(int argc, char **argv) {
       argc == 3 && strcmp(argv[2], "--descriptor-uav") == 0;
   const bool descriptor_resources =
       argc == 3 && strcmp(argv[2], "--descriptor-resources") == 0;
+  const bool descriptor_resources_space =
+      argc == 3 && strcmp(argv[2], "--descriptor-resources-space") == 0;
+  const bool descriptor_table_resources =
+      descriptor_resources || descriptor_resources_space;
   const bool root_cbv = argc == 3 && strcmp(argv[2], "--root-cbv") == 0;
   const bool root_constants =
       argc == 3 && strcmp(argv[2], "--root-constants") == 0;
   const bool root_srv = argc == 3 && strcmp(argv[2], "--root-srv") == 0;
   if (argc == 3 && !root_uav && !descriptor_uav && !descriptor_resources &&
-      !root_cbv && !root_constants && !root_srv) {
+      !descriptor_resources_space && !root_cbv && !root_constants &&
+      !root_srv) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
   const bool needs_root_signature = root_uav || descriptor_uav ||
-                                    descriptor_resources || root_cbv ||
+                                    descriptor_table_resources || root_cbv ||
                                     root_constants || root_srv;
   const bool needs_output = needs_root_signature;
 
@@ -129,10 +135,14 @@ int main(int argc, char **argv) {
       root_parameters[1].Descriptor.RegisterSpace = 0;
       root_desc.NumParameters = 2;
       root_desc.pParameters = root_parameters;
-    } else if (descriptor_resources) {
-      descriptor_ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0, 0};
-      descriptor_ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 1};
-      descriptor_ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 2};
+    } else if (descriptor_table_resources) {
+      const UINT resource_space = descriptor_resources_space ? 1 : 0;
+      descriptor_ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0,
+                              resource_space, 0};
+      descriptor_ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0,
+                              resource_space, 1};
+      descriptor_ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0,
+                              resource_space, 2};
       root_parameters[0].ParameterType =
           D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
       root_parameters[0].DescriptorTable.NumDescriptorRanges = 3;
@@ -170,10 +180,10 @@ int main(int argc, char **argv) {
                                              IID_PPV_ARGS(&root_signature))))
       goto cleanup;
 
-    if (descriptor_uav || descriptor_resources) {
+    if (descriptor_uav || descriptor_table_resources) {
       D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
       heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-      heap_desc.NumDescriptors = descriptor_resources ? 3 : 1;
+      heap_desc.NumDescriptors = descriptor_table_resources ? 3 : 1;
       heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
       if (!CheckHR("CreateDescriptorHeap",
                    device->CreateDescriptorHeap(
@@ -183,7 +193,7 @@ int main(int argc, char **argv) {
           D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     }
 
-    if (root_cbv || root_constants || root_srv || descriptor_resources) {
+    if (root_cbv || root_constants || root_srv || descriptor_table_resources) {
       upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
       upload_heap.CreationNodeMask = 1;
       upload_heap.VisibleNodeMask = 1;
@@ -206,7 +216,7 @@ int main(int argc, char **argv) {
       memcpy(mapped_input, &input_value, sizeof(input_value));
       input_buffer->Unmap(0, nullptr);
 
-      if (descriptor_resources) {
+      if (descriptor_table_resources) {
         descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
         cbv_desc.BufferLocation = input_buffer->GetGPUVirtualAddress();
         cbv_desc.SizeInBytes = 256;
@@ -242,13 +252,13 @@ int main(int argc, char **argv) {
                      IID_PPV_ARGS(&output_buffer))))
       goto cleanup;
 
-    if (descriptor_uav || descriptor_resources) {
+    if (descriptor_uav || descriptor_table_resources) {
       uav_desc.Format = DXGI_FORMAT_UNKNOWN;
       uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
       uav_desc.Buffer.NumElements = 64;
       uav_desc.Buffer.StructureByteStride = sizeof(UINT);
       descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
-      if (descriptor_resources)
+      if (descriptor_table_resources)
         descriptor_cpu.ptr += descriptor_increment * 2;
       device->CreateUnorderedAccessView(output_buffer, nullptr, &uav_desc,
                                         descriptor_cpu);
@@ -294,7 +304,7 @@ int main(int argc, char **argv) {
           0, input_buffer->GetGPUVirtualAddress());
       list->SetComputeRootUnorderedAccessView(
           1, output_buffer->GetGPUVirtualAddress());
-    } else if (descriptor_resources) {
+    } else if (descriptor_table_resources) {
       ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
       list->SetDescriptorHeaps(1, heaps);
       list->SetComputeRootDescriptorTable(
@@ -335,7 +345,7 @@ int main(int argc, char **argv) {
       goto cleanup;
     output_value = *mapped;
     readback_buffer->Unmap(0, nullptr);
-    const UINT expected_value = descriptor_resources ? input_value * 2
+    const UINT expected_value = descriptor_table_resources ? input_value * 2
                                 : root_cbv || root_constants || root_srv
                                     ? input_value
                                     : 1234;
@@ -344,11 +354,11 @@ int main(int argc, char **argv) {
       goto cleanup;
     }
     std::cout << "DXIL cs_6_0 "
-              << (root_cbv               ? "root CBV"
-                  : root_constants       ? "root constants"
-                  : root_srv             ? "root SRV"
-                  : descriptor_resources ? "descriptor resources"
-                                         : "root UAV")
+              << (root_cbv                     ? "root CBV"
+                  : root_constants             ? "root constants"
+                  : root_srv                   ? "root SRV"
+                  : descriptor_table_resources ? "descriptor resources"
+                                               : "root UAV")
               << " readback passed: " << output_value << "\n";
   } else {
     std::cout << "DXIL cs_6_0 no-resource Dispatch passed\n";
