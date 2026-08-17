@@ -26,7 +26,7 @@ int main(int argc, char **argv) {
     std::cerr << "usage: dx12_compute_sm6 <shader.cso> "
                  "[--root-uav|--descriptor-uav|--descriptor-resources|--"
                  "descriptor-resources-space|--root-cbv|--root-constants|--"
-                 "root-srv]\n";
+                 "descriptor-resources-1-1|--root-srv]\n";
     return 2;
   }
   const bool root_uav = argc == 3 && strcmp(argv[2], "--root-uav") == 0;
@@ -36,15 +36,18 @@ int main(int argc, char **argv) {
       argc == 3 && strcmp(argv[2], "--descriptor-resources") == 0;
   const bool descriptor_resources_space =
       argc == 3 && strcmp(argv[2], "--descriptor-resources-space") == 0;
-  const bool descriptor_table_resources =
-      descriptor_resources || descriptor_resources_space;
+  const bool descriptor_resources_1_1 =
+      argc == 3 && strcmp(argv[2], "--descriptor-resources-1-1") == 0;
+  const bool descriptor_table_resources = descriptor_resources ||
+                                          descriptor_resources_space ||
+                                          descriptor_resources_1_1;
   const bool root_cbv = argc == 3 && strcmp(argv[2], "--root-cbv") == 0;
   const bool root_constants =
       argc == 3 && strcmp(argv[2], "--root-constants") == 0;
   const bool root_srv = argc == 3 && strcmp(argv[2], "--root-srv") == 0;
   if (argc == 3 && !root_uav && !descriptor_uav && !descriptor_resources &&
-      !descriptor_resources_space && !root_cbv && !root_constants &&
-      !root_srv) {
+      !descriptor_resources_space && !descriptor_resources_1_1 && !root_cbv &&
+      !root_constants && !root_srv) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
@@ -83,7 +86,10 @@ int main(int argc, char **argv) {
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   D3D12_ROOT_PARAMETER root_parameters[2] = {};
   D3D12_DESCRIPTOR_RANGE descriptor_ranges[3] = {};
+  D3D12_ROOT_PARAMETER1 root_parameters_1[1] = {};
+  D3D12_DESCRIPTOR_RANGE1 descriptor_ranges_1[3] = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+  D3D12_VERSIONED_ROOT_SIGNATURE_DESC versioned_root_desc = {};
   D3D12_HEAP_PROPERTIES default_heap = {};
   D3D12_HEAP_PROPERTIES upload_heap = {};
   D3D12_HEAP_PROPERTIES readback_heap = {};
@@ -137,18 +143,39 @@ int main(int argc, char **argv) {
       root_desc.pParameters = root_parameters;
     } else if (descriptor_table_resources) {
       const UINT resource_space = descriptor_resources_space ? 1 : 0;
-      descriptor_ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0,
-                              resource_space, 0};
-      descriptor_ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0,
-                              resource_space, 1};
-      descriptor_ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0,
-                              resource_space, 2};
-      root_parameters[0].ParameterType =
-          D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-      root_parameters[0].DescriptorTable.NumDescriptorRanges = 3;
-      root_parameters[0].DescriptorTable.pDescriptorRanges = descriptor_ranges;
-      root_desc.NumParameters = 1;
-      root_desc.pParameters = root_parameters;
+      if (descriptor_resources_1_1) {
+        const auto flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
+                           D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+        descriptor_ranges_1[0] = {
+            D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, resource_space, flags, 0};
+        descriptor_ranges_1[1] = {
+            D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, resource_space, flags, 1};
+        descriptor_ranges_1[2] = {
+            D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, resource_space, flags, 2};
+        root_parameters_1[0].ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        root_parameters_1[0].DescriptorTable.NumDescriptorRanges = 3;
+        root_parameters_1[0].DescriptorTable.pDescriptorRanges =
+            descriptor_ranges_1;
+        root_parameters_1[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        versioned_root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+        versioned_root_desc.Desc_1_1.NumParameters = 1;
+        versioned_root_desc.Desc_1_1.pParameters = root_parameters_1;
+      } else {
+        descriptor_ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0,
+                                resource_space, 0};
+        descriptor_ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0,
+                                resource_space, 1};
+        descriptor_ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0,
+                                resource_space, 2};
+        root_parameters[0].ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        root_parameters[0].DescriptorTable.NumDescriptorRanges = 3;
+        root_parameters[0].DescriptorTable.pDescriptorRanges =
+            descriptor_ranges;
+        root_desc.NumParameters = 1;
+        root_desc.pParameters = root_parameters;
+      }
     } else {
       if (root_uav) {
         root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
@@ -169,10 +196,14 @@ int main(int argc, char **argv) {
       root_desc.NumParameters = 1;
       root_desc.pParameters = root_parameters;
     }
-    if (!CheckHR("D3D12SerializeRootSignature",
-                 D3D12SerializeRootSignature(&root_desc,
-                                             D3D_ROOT_SIGNATURE_VERSION_1,
-                                             &root_blob, &root_error)))
+    HRESULT serialize_hr =
+        descriptor_resources_1_1
+            ? D3D12SerializeVersionedRootSignature(&versioned_root_desc,
+                                                   &root_blob, &root_error)
+            : D3D12SerializeRootSignature(&root_desc,
+                                          D3D_ROOT_SIGNATURE_VERSION_1,
+                                          &root_blob, &root_error);
+    if (!CheckHR("D3D12SerializeRootSignature", serialize_hr))
       goto cleanup;
     if (!CheckHR("CreateRootSignature",
                  device->CreateRootSignature(0, root_blob->GetBufferPointer(),
