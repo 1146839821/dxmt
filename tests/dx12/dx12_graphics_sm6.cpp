@@ -23,7 +23,10 @@ bool CheckHR(const char *name, HRESULT hr) {
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 3)
+  if (argc < 3 || argc > 4)
+    return 2;
+  const bool textured = argc == 4 && strcmp(argv[3], "--texture") == 0;
+  if (argc == 4 && !textured)
     return 2;
 
   std::ifstream vertex_file(argv[1], std::ios::binary | std::ios::ate);
@@ -58,22 +61,32 @@ int main(int argc, char **argv) {
   ID3D12PipelineState *pso = nullptr;
   ID3D12GraphicsCommandList *list = nullptr;
   ID3D12DescriptorHeap *rtv_heap = nullptr;
+  ID3D12DescriptorHeap *resource_heap = nullptr;
+  ID3D12DescriptorHeap *sampler_heap = nullptr;
   ID3D12Resource *render_target = nullptr;
   ID3D12Resource *vertex_buffer = nullptr;
+  ID3D12Resource *texture = nullptr;
+  ID3D12Resource *texture_upload = nullptr;
   ID3D12Resource *readback = nullptr;
   ID3D12Fence *fence = nullptr;
   HANDLE event = nullptr;
   ID3D12CommandList *lists[1] = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+  D3D12_DESCRIPTOR_RANGE descriptor_ranges[2] = {};
+  D3D12_ROOT_PARAMETER root_parameters[2] = {};
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   D3D12_HEAP_PROPERTIES default_heap = {};
   D3D12_HEAP_PROPERTIES upload_heap = {};
+  D3D12_HEAP_PROPERTIES texture_upload_heap = {};
   D3D12_HEAP_PROPERTIES readback_heap = {};
   D3D12_RESOURCE_DESC render_target_desc = {};
   D3D12_RESOURCE_DESC buffer_desc = {};
+  D3D12_RESOURCE_DESC texture_desc = {};
   D3D12_RESOURCE_DESC readback_desc = {};
   D3D12_CLEAR_VALUE clear_value = {};
   D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc = {};
+  D3D12_DESCRIPTOR_HEAP_DESC resource_heap_desc = {};
+  D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_desc = {};
   D3D12_INPUT_ELEMENT_DESC input_layout[] = {
       {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0,
        D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -86,11 +99,20 @@ int main(int argc, char **argv) {
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
   D3D12_TEXTURE_COPY_LOCATION copy_dst = {};
   D3D12_TEXTURE_COPY_LOCATION copy_src = {};
+  D3D12_TEXTURE_COPY_LOCATION texture_upload_dst = {};
+  D3D12_TEXTURE_COPY_LOCATION texture_upload_src = {};
   D3D12_RESOURCE_BARRIER barrier = {};
+  D3D12_RESOURCE_BARRIER texture_barrier = {};
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+  D3D12_SAMPLER_DESC sampler_desc = {};
+  D3D12_CPU_DESCRIPTOR_HANDLE resource_cpu = {};
+  D3D12_CPU_DESCRIPTOR_HANDLE sampler_cpu = {};
+  ID3D12DescriptorHeap *descriptor_heaps[2] = {};
   UINT row_count = 0;
   UINT64 row_size = 0;
   UINT64 total_size = 0;
   void *mapped_upload = nullptr;
+  void *mapped_texture_upload = nullptr;
   BYTE *mapped_readback = nullptr;
   UINT pixel = 0;
   int result = 1;
@@ -108,6 +130,20 @@ int main(int argc, char **argv) {
                device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                               IID_PPV_ARGS(&allocator))))
     goto cleanup;
+
+  if (textured) {
+    descriptor_ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
+    descriptor_ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
+    for (unsigned i = 0; i < 2; i++) {
+      root_parameters[i].ParameterType =
+          D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      root_parameters[i].DescriptorTable.NumDescriptorRanges = 1;
+      root_parameters[i].DescriptorTable.pDescriptorRanges =
+          &descriptor_ranges[i];
+    }
+    root_desc.NumParameters = 2;
+    root_desc.pParameters = root_parameters;
+  }
 
   if (!CheckHR("D3D12SerializeRootSignature",
                D3D12SerializeRootSignature(&root_desc,
@@ -150,6 +186,81 @@ int main(int argc, char **argv) {
     goto cleanup;
   rtv_handle = rtv_heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateRenderTargetView(render_target, nullptr, rtv_handle);
+
+  if (textured) {
+    resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    resource_heap_desc.NumDescriptors = 1;
+    resource_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    sampler_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+    sampler_heap_desc.NumDescriptors = 1;
+    sampler_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (!CheckHR("CreateResourceHeap",
+                 device->CreateDescriptorHeap(&resource_heap_desc,
+                                              IID_PPV_ARGS(&resource_heap))))
+      goto cleanup;
+    if (!CheckHR("CreateSamplerHeap",
+                 device->CreateDescriptorHeap(&sampler_heap_desc,
+                                              IID_PPV_ARGS(&sampler_heap))))
+      goto cleanup;
+    texture_upload_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    texture_upload_heap.CreationNodeMask = 1;
+    texture_upload_heap.VisibleNodeMask = 1;
+    texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texture_desc.Width = 1;
+    texture_desc.Height = 1;
+    texture_desc.DepthOrArraySize = 1;
+    texture_desc.MipLevels = 1;
+    texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texture_desc.SampleDesc.Count = 1;
+    if (!CheckHR("CreateTexture",
+                 device->CreateCommittedResource(
+                     &texture_upload_heap, D3D12_HEAP_FLAG_NONE, &texture_desc,
+                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                     IID_PPV_ARGS(&texture))))
+      goto cleanup;
+
+    upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    upload_heap.CreationNodeMask = 1;
+    upload_heap.VisibleNodeMask = 1;
+    buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer_desc.Width = 256;
+    buffer_desc.Height = 1;
+    buffer_desc.DepthOrArraySize = 1;
+    buffer_desc.MipLevels = 1;
+    buffer_desc.SampleDesc.Count = 1;
+    buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (!CheckHR("CreateTextureUpload",
+                 device->CreateCommittedResource(
+                     &upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                     D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                     IID_PPV_ARGS(&texture_upload))))
+      goto cleanup;
+    device->GetCopyableFootprints(&texture_desc, 0, 1, 0,
+                                  &texture_upload_dst.PlacedFootprint,
+                                  &row_count, &row_size, &total_size);
+    if (!CheckHR("MapTextureUpload",
+                 texture_upload->Map(0, nullptr, &mapped_texture_upload)))
+      goto cleanup;
+    static const UINT texture_pixel = 0xff0000ff;
+    memcpy(mapped_texture_upload, &texture_pixel, sizeof(texture_pixel));
+    texture_upload->Unmap(0, nullptr);
+
+    srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv_desc.Texture2D.MipLevels = 1;
+    resource_cpu = resource_heap->GetCPUDescriptorHandleForHeapStart();
+    device->CreateShaderResourceView(texture, &srv_desc, resource_cpu);
+
+    sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler_desc.MinLOD = 0;
+    sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler_cpu = sampler_heap->GetCPUDescriptorHandleForHeapStart();
+    device->CreateSampler(&sampler_desc, sampler_cpu);
+  }
 
   upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
   upload_heap.CreationNodeMask = 1;
@@ -202,8 +313,34 @@ int main(int argc, char **argv) {
                device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                          allocator, pso, IID_PPV_ARGS(&list))))
     goto cleanup;
+  if (textured) {
+    texture_upload_dst.pResource = texture;
+    texture_upload_dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    texture_upload_src.pResource = texture_upload;
+    texture_upload_src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    texture_upload_src.PlacedFootprint = texture_upload_dst.PlacedFootprint;
+    list->CopyTextureRegion(&texture_upload_dst, 0, 0, 0, &texture_upload_src,
+                            nullptr);
+    texture_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    texture_barrier.Transition.pResource = texture;
+    texture_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    texture_barrier.Transition.StateAfter =
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    texture_barrier.Transition.Subresource =
+        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list->ResourceBarrier(1, &texture_barrier);
+  }
   list->SetPipelineState(pso);
   list->SetGraphicsRootSignature(root_signature);
+  if (textured) {
+    descriptor_heaps[0] = resource_heap;
+    descriptor_heaps[1] = sampler_heap;
+    list->SetDescriptorHeaps(2, descriptor_heaps);
+    list->SetGraphicsRootDescriptorTable(
+        0, resource_heap->GetGPUDescriptorHandleForHeapStart());
+    list->SetGraphicsRootDescriptorTable(
+        1, sampler_heap->GetGPUDescriptorHandleForHeapStart());
+  }
   list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   list->IASetVertexBuffers(0, 1, &vertex_view);
   list->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
@@ -267,8 +404,8 @@ int main(int argc, char **argv) {
               << std::dec << "\n";
     goto cleanup;
   }
-  std::cout << "DXIL graphics readback passed: 0x" << std::hex << pixel
-            << std::dec << "\n";
+  std::cout << "DXIL " << (textured ? "textured graphics" : "graphics")
+            << " readback passed: 0x" << std::hex << pixel << std::dec << "\n";
   result = 0;
 
 cleanup:
@@ -282,12 +419,20 @@ cleanup:
     pso->Release();
   if (readback)
     readback->Release();
+  if (texture_upload)
+    texture_upload->Release();
+  if (texture)
+    texture->Release();
   if (vertex_buffer)
     vertex_buffer->Release();
   if (render_target)
     render_target->Release();
   if (rtv_heap)
     rtv_heap->Release();
+  if (sampler_heap)
+    sampler_heap->Release();
+  if (resource_heap)
+    resource_heap->Release();
   if (root_signature)
     root_signature->Release();
   if (root_blob)
