@@ -24,24 +24,27 @@ bool CheckHR(const char *name, HRESULT hr) {
 int main(int argc, char **argv) {
   if (argc < 2 || argc > 3) {
     std::cerr << "usage: dx12_compute_sm6 <shader.cso> "
-                 "[--root-uav|--descriptor-uav|--root-cbv|--root-constants|--"
-                 "root-srv]\n";
+                 "[--root-uav|--descriptor-uav|--descriptor-resources|--"
+                 "root-cbv|--root-constants|--root-srv]\n";
     return 2;
   }
   const bool root_uav = argc == 3 && strcmp(argv[2], "--root-uav") == 0;
   const bool descriptor_uav =
       argc == 3 && strcmp(argv[2], "--descriptor-uav") == 0;
+  const bool descriptor_resources =
+      argc == 3 && strcmp(argv[2], "--descriptor-resources") == 0;
   const bool root_cbv = argc == 3 && strcmp(argv[2], "--root-cbv") == 0;
   const bool root_constants =
       argc == 3 && strcmp(argv[2], "--root-constants") == 0;
   const bool root_srv = argc == 3 && strcmp(argv[2], "--root-srv") == 0;
-  if (argc == 3 && !root_uav && !descriptor_uav && !root_cbv &&
-      !root_constants && !root_srv) {
+  if (argc == 3 && !root_uav && !descriptor_uav && !descriptor_resources &&
+      !root_cbv && !root_constants && !root_srv) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
-  const bool needs_root_signature =
-      root_uav || descriptor_uav || root_cbv || root_constants || root_srv;
+  const bool needs_root_signature = root_uav || descriptor_uav ||
+                                    descriptor_resources || root_cbv ||
+                                    root_constants || root_srv;
   const bool needs_output = needs_root_signature;
 
   std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
@@ -73,7 +76,7 @@ int main(int argc, char **argv) {
   UINT output_value = 0;
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   D3D12_ROOT_PARAMETER root_parameters[2] = {};
-  D3D12_DESCRIPTOR_RANGE descriptor_range = {};
+  D3D12_DESCRIPTOR_RANGE descriptor_ranges[3] = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
   D3D12_HEAP_PROPERTIES default_heap = {};
   D3D12_HEAP_PROPERTIES upload_heap = {};
@@ -81,6 +84,11 @@ int main(int argc, char **argv) {
   D3D12_RESOURCE_DESC output_desc = {};
   D3D12_RESOURCE_DESC input_desc = {};
   D3D12_COMPUTE_PIPELINE_STATE_DESC pso_desc = {};
+  D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_desc = {};
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+  D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+  D3D12_CPU_DESCRIPTOR_HANDLE descriptor_cpu = {};
+  UINT descriptor_increment = 0;
   UINT input_value = 777;
   void *mapped_input = nullptr;
   int result = 1;
@@ -121,22 +129,32 @@ int main(int argc, char **argv) {
       root_parameters[1].Descriptor.RegisterSpace = 0;
       root_desc.NumParameters = 2;
       root_desc.pParameters = root_parameters;
+    } else if (descriptor_resources) {
+      descriptor_ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0, 0};
+      descriptor_ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 1};
+      descriptor_ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 2};
+      root_parameters[0].ParameterType =
+          D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      root_parameters[0].DescriptorTable.NumDescriptorRanges = 3;
+      root_parameters[0].DescriptorTable.pDescriptorRanges = descriptor_ranges;
+      root_desc.NumParameters = 1;
+      root_desc.pParameters = root_parameters;
     } else {
       if (root_uav) {
         root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
         root_parameters[0].Descriptor.ShaderRegister = 0;
         root_parameters[0].Descriptor.RegisterSpace = 0;
       } else {
-        descriptor_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        descriptor_range.NumDescriptors = 1;
-        descriptor_range.BaseShaderRegister = 0;
-        descriptor_range.RegisterSpace = 0;
-        descriptor_range.OffsetInDescriptorsFromTableStart = 0;
+        descriptor_ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        descriptor_ranges[0].NumDescriptors = 1;
+        descriptor_ranges[0].BaseShaderRegister = 0;
+        descriptor_ranges[0].RegisterSpace = 0;
+        descriptor_ranges[0].OffsetInDescriptorsFromTableStart = 0;
         root_parameters[0].ParameterType =
             D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         root_parameters[0].DescriptorTable.NumDescriptorRanges = 1;
         root_parameters[0].DescriptorTable.pDescriptorRanges =
-            &descriptor_range;
+            descriptor_ranges;
       }
       root_desc.NumParameters = 1;
       root_desc.pParameters = root_parameters;
@@ -152,18 +170,20 @@ int main(int argc, char **argv) {
                                              IID_PPV_ARGS(&root_signature))))
       goto cleanup;
 
-    if (descriptor_uav) {
+    if (descriptor_uav || descriptor_resources) {
       D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
       heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-      heap_desc.NumDescriptors = 1;
+      heap_desc.NumDescriptors = descriptor_resources ? 3 : 1;
       heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
       if (!CheckHR("CreateDescriptorHeap",
                    device->CreateDescriptorHeap(
                        &heap_desc, IID_PPV_ARGS(&descriptor_heap))))
         goto cleanup;
+      descriptor_increment = device->GetDescriptorHandleIncrementSize(
+          D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     }
 
-    if (root_cbv || root_constants || root_srv) {
+    if (root_cbv || root_constants || root_srv || descriptor_resources) {
       upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
       upload_heap.CreationNodeMask = 1;
       upload_heap.VisibleNodeMask = 1;
@@ -185,6 +205,23 @@ int main(int argc, char **argv) {
         goto cleanup;
       memcpy(mapped_input, &input_value, sizeof(input_value));
       input_buffer->Unmap(0, nullptr);
+
+      if (descriptor_resources) {
+        descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        cbv_desc.BufferLocation = input_buffer->GetGPUVirtualAddress();
+        cbv_desc.SizeInBytes = 256;
+        device->CreateConstantBufferView(&cbv_desc, descriptor_cpu);
+
+        descriptor_cpu.ptr += descriptor_increment;
+        srv_desc.Format = DXGI_FORMAT_UNKNOWN;
+        srv_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv_desc.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv_desc.Buffer.NumElements = 64;
+        srv_desc.Buffer.StructureByteStride = sizeof(UINT);
+        device->CreateShaderResourceView(input_buffer, &srv_desc,
+                                         descriptor_cpu);
+      }
     }
 
     default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -205,15 +242,16 @@ int main(int argc, char **argv) {
                      IID_PPV_ARGS(&output_buffer))))
       goto cleanup;
 
-    if (descriptor_uav) {
-      D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+    if (descriptor_uav || descriptor_resources) {
       uav_desc.Format = DXGI_FORMAT_UNKNOWN;
       uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
       uav_desc.Buffer.NumElements = 64;
       uav_desc.Buffer.StructureByteStride = sizeof(UINT);
-      device->CreateUnorderedAccessView(
-          output_buffer, nullptr, &uav_desc,
-          descriptor_heap->GetCPUDescriptorHandleForHeapStart());
+      descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+      if (descriptor_resources)
+        descriptor_cpu.ptr += descriptor_increment * 2;
+      device->CreateUnorderedAccessView(output_buffer, nullptr, &uav_desc,
+                                        descriptor_cpu);
     }
 
     readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
@@ -256,6 +294,11 @@ int main(int argc, char **argv) {
           0, input_buffer->GetGPUVirtualAddress());
       list->SetComputeRootUnorderedAccessView(
           1, output_buffer->GetGPUVirtualAddress());
+    } else if (descriptor_resources) {
+      ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
+      list->SetDescriptorHeaps(1, heaps);
+      list->SetComputeRootDescriptorTable(
+          0, descriptor_heap->GetGPUDescriptorHandleForHeapStart());
     } else if (root_uav) {
       list->SetComputeRootUnorderedAccessView(
           0, output_buffer->GetGPUVirtualAddress());
@@ -292,17 +335,20 @@ int main(int argc, char **argv) {
       goto cleanup;
     output_value = *mapped;
     readback_buffer->Unmap(0, nullptr);
-    const UINT expected_value =
-        root_cbv || root_constants || root_srv ? input_value : 1234;
+    const UINT expected_value = descriptor_resources ? input_value * 2
+                                : root_cbv || root_constants || root_srv
+                                    ? input_value
+                                    : 1234;
     if (output_value != expected_value) {
       std::cerr << "root parameter readback mismatch: " << output_value << "\n";
       goto cleanup;
     }
     std::cout << "DXIL cs_6_0 "
-              << (root_cbv         ? "root CBV"
-                  : root_constants ? "root constants"
-                  : root_srv       ? "root SRV"
-                                   : "root UAV")
+              << (root_cbv               ? "root CBV"
+                  : root_constants       ? "root constants"
+                  : root_srv             ? "root SRV"
+                  : descriptor_resources ? "descriptor resources"
+                                         : "root UAV")
               << " readback passed: " << output_value << "\n";
   } else {
     std::cout << "DXIL cs_6_0 no-resource Dispatch passed\n";
