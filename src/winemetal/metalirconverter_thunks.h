@@ -36,11 +36,13 @@ enum dxmt_msc_result {
 };
 
 enum dxmt_msc_resource_type {
+  /* Values mirror IRResourceType in metal_irconverter.h. */
   DXMT_MSC_RESOURCE_TABLE = 0,
   DXMT_MSC_RESOURCE_CONSTANT = 1,
   DXMT_MSC_RESOURCE_CBV = 2,
   DXMT_MSC_RESOURCE_SRV = 3,
   DXMT_MSC_RESOURCE_UAV = 4,
+  DXMT_MSC_RESOURCE_SAMPLER = 5,
 };
 
 enum dxmt_msc_binding_point {

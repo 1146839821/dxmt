@@ -521,6 +521,21 @@ public:
   }
 
   uint64_t
+  EncodeMSCStaticSamplers(MTLD3D12RootSignature *pRootSig) {
+    if (!pRootSig->NumStaticSamplers || !pRootSig->EncodedStaticSamplers)
+      return 0;
+
+    auto table_size = sizeof(dxmt_msc_descriptor_entry) * pRootSig->NumStaticSamplers;
+    auto [Ptr, Offset] = allocator_->AllocateGPUHeap(table_size, 16);
+    auto *entries = reinterpret_cast<dxmt_msc_descriptor_entry *>(Ptr);
+    auto *encoded = pRootSig->EncodedStaticSamplers;
+    for (size_t i = 0; i < pRootSig->NumStaticSamplers; i++) {
+      entries[i] = {encoded[i * 4], 0, encoded[i * 4 + 2]};
+    }
+    return allocator_->gpu_heap_buffer_address_ + Offset;
+  }
+
+  uint64_t
   EncodeMSCArgumentBuffer(
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
       MTLD3D12SamplerDescriptorHeap *sampler_heap
@@ -530,20 +545,33 @@ public:
 
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(pRootSig->MSCArgumentBufferSize, 16);
     memset(Ptr, 0, pRootSig->MSCArgumentBufferSize);
+    uint64_t static_sampler_table_address = 0;
 
     for (uint32_t i = 0; i < pRootSig->MSCParameterCount; i++) {
       auto &layout = pRootSig->MSCParameterLayouts[i];
-      if (layout.parameter_index == UINT32_MAX || layout.parameter_index >= pRootSig->ParameterSlots)
-        continue;
       if (layout.top_level_offset > pRootSig->MSCArgumentBufferSize ||
           layout.size_bytes > pRootSig->MSCArgumentBufferSize - layout.top_level_offset)
         continue;
 
+      auto destination = reinterpret_cast<uint8_t *>(Ptr) + layout.top_level_offset;
+
+      if (layout.resource_type == DXMT_MSC_RESOURCE_SAMPLER) {
+        if (!static_sampler_table_address)
+          static_sampler_table_address = EncodeMSCStaticSamplers(pRootSig);
+        if (!static_sampler_table_address) {
+          ERR("MSC static sampler table is unavailable");
+          continue;
+        }
+        memcpy(destination, &static_sampler_table_address, std::min<size_t>(layout.size_bytes, sizeof(uint64_t)));
+        continue;
+      }
+
+      if (layout.parameter_index == UINT32_MAX || layout.parameter_index >= pRootSig->ParameterSlots)
+        continue;
       auto source_qword = pRootSig->SlotQwordOffsets[layout.parameter_index];
       if (source_qword >= pRootSig->UploadQwords)
         continue;
       auto source = reinterpret_cast<const uint8_t *>(pStaging) + source_qword * sizeof(uint64_t);
-      auto destination = reinterpret_cast<uint8_t *>(Ptr) + layout.top_level_offset;
       auto source_size = (pRootSig->UploadQwords - source_qword) * sizeof(uint64_t);
       auto copy_size = std::min<size_t>(layout.size_bytes, source_size);
 
@@ -1029,7 +1057,7 @@ public:
   void STDMETHODCALLTYPE SetComputeRootDescriptorTable(UINT Index, D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor) {
     if (!rootsig_compute_)
       return;
-    if (Index > rootsig_compute_->ParameterSlots)
+    if (Index >= rootsig_compute_->ParameterSlots)
       return;
     rootarg_compute_staging_[rootsig_compute_->SlotQwordOffsets[Index]] = BaseDescriptor.ptr;
     dirty_state_.set(DirtyState::ComputeRootArguments);
@@ -1039,7 +1067,7 @@ public:
   SetGraphicsRootDescriptorTable(UINT Index, D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor) {
     if (!rootsig_graphics_)
       return;
-    if (Index > rootsig_graphics_->ParameterSlots)
+    if (Index >= rootsig_graphics_->ParameterSlots)
       return;
     rootarg_graphics_staging_[rootsig_graphics_->SlotQwordOffsets[Index]] = BaseDescriptor.ptr;
     dirty_state_.set(DirtyState::GraphicsRootArguments);
@@ -1048,7 +1076,7 @@ public:
   void STDMETHODCALLTYPE SetComputeRoot32BitConstant(UINT Index, UINT Data, UINT DstOffset) {
     if (!rootsig_compute_)
       return;
-    if (Index > rootsig_compute_->ParameterSlots)
+    if (Index >= rootsig_compute_->ParameterSlots)
       return;
     auto dst = reinterpret_cast<uint32_t *>(rootarg_compute_staging_ + rootsig_compute_->SlotQwordOffsets[Index]);
     dst[DstOffset] = Data;
@@ -1059,7 +1087,7 @@ public:
   SetGraphicsRoot32BitConstant(UINT Index, UINT Data, UINT DstOffset) {
     if (!rootsig_graphics_)
       return;
-    if (Index > rootsig_graphics_->ParameterSlots)
+    if (Index >= rootsig_graphics_->ParameterSlots)
       return;
     auto dst = reinterpret_cast<uint32_t *>(rootarg_graphics_staging_ + rootsig_graphics_->SlotQwordOffsets[Index]);
     dst[DstOffset] = Data;
@@ -1070,7 +1098,7 @@ public:
   SetComputeRoot32BitConstants(UINT Index, UINT ConstantCount, const void *pData, UINT DstOffset) {
     if (!rootsig_compute_)
       return;
-    if (Index > rootsig_compute_->ParameterSlots)
+    if (Index >= rootsig_compute_->ParameterSlots)
       return;
     auto src = reinterpret_cast<const uint32_t *>(pData);
     auto dst = reinterpret_cast<uint32_t *>(rootarg_compute_staging_ + rootsig_compute_->SlotQwordOffsets[Index]);
@@ -1084,7 +1112,7 @@ public:
   SetGraphicsRoot32BitConstants(UINT Index, UINT ConstantCount, const void *pData, UINT DstOffset) {
     if (!rootsig_graphics_)
       return;
-    if (Index > rootsig_graphics_->ParameterSlots)
+    if (Index >= rootsig_graphics_->ParameterSlots)
       return;
     auto src = reinterpret_cast<const uint32_t *>(pData);
     auto dst = reinterpret_cast<uint32_t *>(rootarg_graphics_staging_ + rootsig_graphics_->SlotQwordOffsets[Index]);
@@ -1097,7 +1125,7 @@ public:
   void STDMETHODCALLTYPE SetComputeRootConstantBufferView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
     if (!rootsig_compute_)
       return;
-    if (Index > rootsig_compute_->ParameterSlots)
+    if (Index >= rootsig_compute_->ParameterSlots)
       return;
     rootarg_compute_staging_[rootsig_compute_->SlotQwordOffsets[Index]] = VA;
     dirty_state_.set(DirtyState::ComputeRootArguments);
@@ -1107,7 +1135,7 @@ public:
   SetGraphicsRootConstantBufferView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
     if (!rootsig_graphics_)
       return;
-    if (Index > rootsig_graphics_->ParameterSlots)
+    if (Index >= rootsig_graphics_->ParameterSlots)
       return;
     rootarg_graphics_staging_[rootsig_graphics_->SlotQwordOffsets[Index]] = VA;
     dirty_state_.set(DirtyState::GraphicsRootArguments);
@@ -1116,7 +1144,7 @@ public:
   void STDMETHODCALLTYPE SetComputeRootShaderResourceView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
     if (!rootsig_compute_)
       return;
-    if (Index > rootsig_compute_->ParameterSlots)
+    if (Index >= rootsig_compute_->ParameterSlots)
       return;
     rootarg_compute_staging_[rootsig_compute_->SlotQwordOffsets[Index]] = VA;
     dirty_state_.set(DirtyState::ComputeRootArguments);
@@ -1126,7 +1154,7 @@ public:
   SetGraphicsRootShaderResourceView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
     if (!rootsig_graphics_)
       return;
-    if (Index > rootsig_graphics_->ParameterSlots)
+    if (Index >= rootsig_graphics_->ParameterSlots)
       return;
     rootarg_graphics_staging_[rootsig_graphics_->SlotQwordOffsets[Index]] = VA;
     dirty_state_.set(DirtyState::GraphicsRootArguments);
@@ -1135,7 +1163,7 @@ public:
   void STDMETHODCALLTYPE SetComputeRootUnorderedAccessView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
     if (!rootsig_compute_)
       return;
-    if (Index > rootsig_compute_->ParameterSlots)
+    if (Index >= rootsig_compute_->ParameterSlots)
       return;
     rootarg_compute_staging_[rootsig_compute_->SlotQwordOffsets[Index]] = VA;
     dirty_state_.set(DirtyState::ComputeRootArguments);
@@ -1145,7 +1173,7 @@ public:
   SetGraphicsRootUnorderedAccessView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
     if (!rootsig_graphics_)
       return;
-    if (Index > rootsig_graphics_->ParameterSlots)
+    if (Index >= rootsig_graphics_->ParameterSlots)
       return;
     rootarg_graphics_staging_[rootsig_graphics_->SlotQwordOffsets[Index]] = VA;
     dirty_state_.set(DirtyState::GraphicsRootArguments);

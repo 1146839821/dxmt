@@ -19,7 +19,10 @@ CheckHR(const char *name, HRESULT hr) {
 
 int
 main(int argc, char **argv) {
-  if (argc != 2)
+  if (argc < 2 || argc > 3)
+    return 2;
+  const bool static_sampler = argc == 3 && strcmp(argv[2], "--static-sampler") == 0;
+  if (argc == 3 && !static_sampler)
     return 2;
 
   std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
@@ -50,12 +53,14 @@ main(int argc, char **argv) {
   UINT *mapped = nullptr;
   UINT value = 0;
   UINT descriptor_increment = 0;
+  unsigned root_parameter_count = 0;
   int result = 1;
 
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   D3D12_DESCRIPTOR_RANGE ranges[3] = {};
   D3D12_ROOT_PARAMETER root_parameters[3] = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+  D3D12_STATIC_SAMPLER_DESC static_sampler_desc = {};
   D3D12_DESCRIPTOR_HEAP_DESC resource_heap_desc = {};
   D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_desc = {};
   D3D12_HEAP_PROPERTIES default_heap = {};
@@ -90,15 +95,33 @@ main(int argc, char **argv) {
     goto cleanup;
 
   ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
-  ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
-  ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
-  for (unsigned i = 0; i < 3; i++) {
+  ranges[1] = {static_sampler ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV : D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
+  if (!static_sampler)
+    ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
+  root_parameter_count = static_sampler ? 2 : 3;
+  for (unsigned i = 0; i < root_parameter_count; i++) {
     root_parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     root_parameters[i].DescriptorTable.NumDescriptorRanges = 1;
     root_parameters[i].DescriptorTable.pDescriptorRanges = &ranges[i];
   }
-  root_desc.NumParameters = 3;
+  root_desc.NumParameters = root_parameter_count;
   root_desc.pParameters = root_parameters;
+  if (static_sampler) {
+    static_sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    static_sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    static_sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    static_sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    static_sampler_desc.MaxAnisotropy = 1;
+    static_sampler_desc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+    static_sampler_desc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+    static_sampler_desc.MinLOD = 0;
+    static_sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
+    static_sampler_desc.ShaderRegister = 0;
+    static_sampler_desc.RegisterSpace = 0;
+    static_sampler_desc.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    root_desc.NumStaticSamplers = 1;
+    root_desc.pStaticSamplers = &static_sampler_desc;
+  }
   if (!CheckHR(
           "D3D12SerializeRootSignature",
           D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob, &root_error)))
@@ -117,7 +140,8 @@ main(int argc, char **argv) {
   sampler_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
   if (!CheckHR("CreateResourceHeap", device->CreateDescriptorHeap(&resource_heap_desc, IID_PPV_ARGS(&resource_heap))))
     goto cleanup;
-  if (!CheckHR("CreateSamplerHeap", device->CreateDescriptorHeap(&sampler_heap_desc, IID_PPV_ARGS(&sampler_heap))))
+  if (!static_sampler &&
+      !CheckHR("CreateSamplerHeap", device->CreateDescriptorHeap(&sampler_heap_desc, IID_PPV_ARGS(&sampler_heap))))
     goto cleanup;
   descriptor_increment = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
@@ -180,13 +204,15 @@ main(int argc, char **argv) {
     goto cleanup;
   device->CreateUnorderedAccessView(output, nullptr, &uav_desc, uav_cpu);
 
-  sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-  sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-  sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-  sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-  sampler_desc.MinLOD = 0;
-  sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
-  device->CreateSampler(&sampler_desc, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+  if (!static_sampler) {
+    sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler_desc.MinLOD = 0;
+    sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
+    device->CreateSampler(&sampler_desc, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+  }
 
   readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
   readback_heap.CreationNodeMask = 1;
@@ -215,14 +241,19 @@ main(int argc, char **argv) {
   texture_src.PlacedFootprint = footprint;
   list->CopyTextureRegion(&texture_dst, 0, 0, 0, &texture_src, nullptr);
   heaps[0] = resource_heap;
-  heaps[1] = sampler_heap;
-  list->SetDescriptorHeaps(2, heaps);
+  if (!static_sampler)
+    heaps[1] = sampler_heap;
+  list->SetDescriptorHeaps(static_sampler ? 1 : 2, heaps);
   list->SetComputeRootSignature(root_signature);
   list->SetComputeRootDescriptorTable(0, resource_heap->GetGPUDescriptorHandleForHeapStart());
-  list->SetComputeRootDescriptorTable(1, sampler_heap->GetGPUDescriptorHandleForHeapStart());
   resource_gpu = resource_heap->GetGPUDescriptorHandleForHeapStart();
   resource_gpu.ptr += descriptor_increment;
-  list->SetComputeRootDescriptorTable(2, resource_gpu);
+  if (static_sampler) {
+    list->SetComputeRootDescriptorTable(1, resource_gpu);
+  } else {
+    list->SetComputeRootDescriptorTable(1, sampler_heap->GetGPUDescriptorHandleForHeapStart());
+    list->SetComputeRootDescriptorTable(2, resource_gpu);
+  }
   list->Dispatch(1, 1, 1);
   list->CopyBufferRegion(readback, 0, output, 0, sizeof(UINT));
   if (!CheckHR("Close", list->Close()))
@@ -245,7 +276,8 @@ main(int argc, char **argv) {
     std::cerr << "texture sampler readback mismatch: " << value << "\n";
     goto cleanup;
   }
-  std::cout << "DXIL texture sampler readback passed: " << value << "\n";
+  std::cout << "DXIL " << (static_sampler ? "static" : "dynamic") << " texture sampler readback passed: " << value
+            << "\n";
   result = 0;
 
 cleanup:
