@@ -24,7 +24,8 @@ bool CheckHR(const char *name, HRESULT hr) {
 int main(int argc, char **argv) {
   if (argc < 2 || argc > 3) {
     std::cerr << "usage: dx12_compute_sm6 <shader.cso> "
-                 "[--root-uav|--descriptor-uav|--root-cbv|--root-constants]\n";
+                 "[--root-uav|--descriptor-uav|--root-cbv|--root-constants|--"
+                 "root-srv]\n";
     return 2;
   }
   const bool root_uav = argc == 3 && strcmp(argv[2], "--root-uav") == 0;
@@ -33,13 +34,14 @@ int main(int argc, char **argv) {
   const bool root_cbv = argc == 3 && strcmp(argv[2], "--root-cbv") == 0;
   const bool root_constants =
       argc == 3 && strcmp(argv[2], "--root-constants") == 0;
+  const bool root_srv = argc == 3 && strcmp(argv[2], "--root-srv") == 0;
   if (argc == 3 && !root_uav && !descriptor_uav && !root_cbv &&
-      !root_constants) {
+      !root_constants && !root_srv) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
   const bool needs_root_signature =
-      root_uav || descriptor_uav || root_cbv || root_constants;
+      root_uav || descriptor_uav || root_cbv || root_constants || root_srv;
   const bool needs_output = needs_root_signature;
 
   std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
@@ -98,9 +100,13 @@ int main(int argc, char **argv) {
     goto cleanup;
 
   if (needs_root_signature) {
-    if (root_cbv || root_constants) {
+    if (root_cbv || root_constants || root_srv) {
       if (root_cbv) {
         root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        root_parameters[0].Descriptor.ShaderRegister = 0;
+        root_parameters[0].Descriptor.RegisterSpace = 0;
+      } else if (root_srv) {
+        root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
         root_parameters[0].Descriptor.ShaderRegister = 0;
         root_parameters[0].Descriptor.RegisterSpace = 0;
       } else {
@@ -157,7 +163,7 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
-    if (root_cbv || root_constants) {
+    if (root_cbv || root_constants || root_srv) {
       upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
       upload_heap.CreationNodeMask = 1;
       upload_heap.VisibleNodeMask = 1;
@@ -245,6 +251,11 @@ int main(int argc, char **argv) {
       list->SetComputeRoot32BitConstants(0, 1, &input_value, 0);
       list->SetComputeRootUnorderedAccessView(
           1, output_buffer->GetGPUVirtualAddress());
+    } else if (root_srv) {
+      list->SetComputeRootShaderResourceView(
+          0, input_buffer->GetGPUVirtualAddress());
+      list->SetComputeRootUnorderedAccessView(
+          1, output_buffer->GetGPUVirtualAddress());
     } else if (root_uav) {
       list->SetComputeRootUnorderedAccessView(
           0, output_buffer->GetGPUVirtualAddress());
@@ -281,7 +292,8 @@ int main(int argc, char **argv) {
       goto cleanup;
     output_value = *mapped;
     readback_buffer->Unmap(0, nullptr);
-    const UINT expected_value = root_cbv || root_constants ? input_value : 1234;
+    const UINT expected_value =
+        root_cbv || root_constants || root_srv ? input_value : 1234;
     if (output_value != expected_value) {
       std::cerr << "root parameter readback mismatch: " << output_value << "\n";
       goto cleanup;
@@ -289,6 +301,7 @@ int main(int argc, char **argv) {
     std::cout << "DXIL cs_6_0 "
               << (root_cbv         ? "root CBV"
                   : root_constants ? "root constants"
+                  : root_srv       ? "root SRV"
                                    : "root UAV")
               << " readback passed: " << output_value << "\n";
   } else {
