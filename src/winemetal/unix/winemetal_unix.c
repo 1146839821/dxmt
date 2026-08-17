@@ -12,6 +12,8 @@
 #define WINEMETAL_API
 #include "../winemetal_thunks.h"
 #include "../airconv_thunks.h"
+#include "../metalirconverter_thunks.h"
+#include "metalirconverter_native.h"
 
 typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
@@ -1824,12 +1826,110 @@ thunk_SM50GetArgumentsInfo(void *args) {
   return STATUS_SUCCESS;
 }
 
+static NTSTATUS
+thunk_DXMTMSCIsAvailable(void *args) {
+  struct {
+    int32_t ret;
+  } *params = args;
+
+  params->ret = dxmt_msc_is_available();
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk_DXMTMSCCompileDXIL(void *args) {
+  struct dxmt_msc_compile_dxil_params *params = args;
+  params->ret = dxmt_msc_compile(params);
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk_DXMTMSCGetRootLayout(void *args) {
+  struct dxmt_msc_get_root_layout_params *params = args;
+  params->ret = dxmt_msc_get_root_layout(params);
+  return STATUS_SUCCESS;
+}
+
 static inline void *
 UInt32ToPtr(uint32_t v) {
   return (void *)(uint64_t)v;
 }
 
 #ifndef DXMT_NATIVE
+
+static NTSTATUS
+thunk32_DXMTMSCIsAvailable(void *args) {
+  struct {
+    int32_t ret;
+  } *params = args;
+
+  params->ret = dxmt_msc_is_available();
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk32_DXMTMSCCompileDXIL(void *args) {
+  struct dxmt_msc_compile_dxil_params32 *src = args;
+  struct dxmt_msc_compile_dxil_params params = {};
+
+  params.dxil = UInt32ToPtr(src->dxil);
+  params.dxil_size = src->dxil_size;
+  params.stage = src->stage;
+  params.reserved = src->reserved;
+  params.root_signature = UInt32ToPtr(src->root_signature);
+  params.root_signature_size = src->root_signature_size;
+  params.entry_point = UInt32ToPtr(src->entry_point);
+  params.entry_point_length = src->entry_point_length;
+  params.metallib = UInt32ToPtr(src->metallib);
+  params.metallib_capacity = src->metallib_capacity;
+  params.metallib_size = src->metallib_size;
+  params.entry_point_out = UInt32ToPtr(src->entry_point_out);
+  params.entry_point_capacity = src->entry_point_capacity;
+  params.entry_point_size = src->entry_point_size;
+  params.threadgroup_size[0] = src->threadgroup_size[0];
+  params.threadgroup_size[1] = src->threadgroup_size[1];
+  params.threadgroup_size[2] = src->threadgroup_size[2];
+  params.error_code = src->error_code;
+  params.error_message = UInt32ToPtr(src->error_message);
+  params.error_message_capacity = src->error_message_capacity;
+  params.error_message_size = src->error_message_size;
+
+  params.ret = dxmt_msc_compile(&params);
+
+  src->metallib_size = (uint32_t)params.metallib_size;
+  src->entry_point_size = (uint32_t)params.entry_point_size;
+  src->threadgroup_size[0] = params.threadgroup_size[0];
+  src->threadgroup_size[1] = params.threadgroup_size[1];
+  src->threadgroup_size[2] = params.threadgroup_size[2];
+  src->error_code = params.error_code;
+  src->error_message_size = (uint32_t)params.error_message_size;
+  src->ret = params.ret;
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk32_DXMTMSCGetRootLayout(void *args) {
+  struct dxmt_msc_get_root_layout_params32 *src = args;
+  struct dxmt_msc_get_root_layout_params params = {};
+
+  params.root_signature = UInt32ToPtr(src->root_signature);
+  params.root_signature_size = src->root_signature_size;
+  params.layouts = UInt32ToPtr(src->layouts);
+  params.layout_capacity = src->layout_capacity;
+  params.layout_count = src->layout_count;
+  params.argument_buffer_size = src->argument_buffer_size;
+  params.error_message = UInt32ToPtr(src->error_message);
+  params.error_message_capacity = src->error_message_capacity;
+  params.error_message_size = src->error_message_size;
+
+  params.ret = dxmt_msc_get_root_layout(&params);
+
+  src->layout_count = (uint32_t)params.layout_count;
+  src->argument_buffer_size = params.argument_buffer_size;
+  src->error_message_size = (uint32_t)params.error_message_size;
+  src->ret = params.ret;
+  return STATUS_SUCCESS;
+}
 
 static NTSTATUS
 thunk32_SM50Initialize(void *args) {
@@ -3248,6 +3348,9 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLHeap_newTexture,
     &_MTLDevice_newIndirectCommandBuffer,
     &_MTLDevice_newLibraryWithSource,
+    &thunk_DXMTMSCIsAvailable,
+    &thunk_DXMTMSCCompileDXIL,
+    &thunk_DXMTMSCGetRootLayout,
 };
 
 #ifndef DXMT_NATIVE
@@ -3397,5 +3500,8 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLHeap_newTexture,
     &_MTLDevice_newIndirectCommandBuffer,
     &_MTLDevice_newLibraryWithSource,
+    &thunk32_DXMTMSCIsAvailable,
+    &thunk32_DXMTMSCCompileDXIL,
+    &thunk32_DXMTMSCGetRootLayout,
 };
 #endif
