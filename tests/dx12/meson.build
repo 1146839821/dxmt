@@ -6,6 +6,10 @@ dx12_texture_sampler = executable('dx12_texture_sampler', 'dx12_texture_sampler.
   dependencies: [ d3d12_dep ],
 )
 
+dx12_graphics_sm6 = executable('dx12_graphics_sm6', 'dx12_graphics_sm6.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dxc = find_program('dxc', required: false)
 if dxc.found()
   custom_target('dx12_compute_sm6_fixture',
@@ -24,6 +28,18 @@ if dxc.found()
     input: 'texture_sampler.hlsl',
     output: 'texture_sampler.cs.cso',
     command: [ dxc, '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_sm6_vs_fixture',
+    input: 'graphics_sm6.hlsl',
+    output: 'graphics_sm6.vs.cso',
+    command: [ dxc, '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_sm6_ps_fixture',
+    input: 'graphics_sm6.hlsl',
+    output: 'graphics_sm6.ps.cso',
+    command: [ dxc, '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
 endif

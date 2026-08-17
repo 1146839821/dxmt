@@ -18,6 +18,7 @@
 
 #include "d3d12_device.hpp"
 #include "d3d12_pageable.hpp"
+#include "d3d12_shader_converter.hpp"
 #include "dxmt_format.hpp"
 #include "com/com_object.hpp"
 #include "com/com_pointer.hpp"
@@ -249,6 +250,69 @@ public:
   }
 
   HRESULT
+  InitializeMSCVertexInput(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, WMTRenderPipelineInfo &info) {
+    std::vector<SM50_IA_INPUT_ELEMENT> elements(pDesc->InputLayout.NumElements);
+    uint32_t element_count = 0;
+    HRESULT hr = ExtractMTLInputLayoutElements(
+        device_, pDesc->VS.pShaderBytecode, pDesc->InputLayout.pInputElementDescs, pDesc->InputLayout.NumElements,
+        elements.data(), &element_count
+    );
+    if (FAILED(hr))
+      return hr;
+    if (element_count > WMT_MAX_VERTEX_ATTRIBUTES)
+      return E_NOTIMPL;
+
+    uint32_t append_offset[32] = {};
+    uint32_t strides[WMT_MAX_VERTEX_BUFFER_LAYOUTS] = {};
+    for (UINT i = 0; i < pDesc->InputLayout.NumElements; i++) {
+      auto &desc = pDesc->InputLayout.pInputElementDescs[i];
+      if (desc.InputSlot >= std::size(append_offset))
+        return E_INVALIDARG;
+
+      MTL_DXGI_FORMAT_DESC format_desc;
+      if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc.Format, format_desc)) || !format_desc.BytesPerTexel)
+        return E_INVALIDARG;
+      auto aligned_offset = desc.AlignedByteOffset == D3D12_APPEND_ALIGNED_ELEMENT
+                                ? align(append_offset[desc.InputSlot], std::min(4u, format_desc.BytesPerTexel))
+                                : desc.AlignedByteOffset;
+      append_offset[desc.InputSlot] = aligned_offset + format_desc.BytesPerTexel;
+      strides[desc.InputSlot] = std::max(strides[desc.InputSlot], append_offset[desc.InputSlot]);
+    }
+
+    bool layout_initialized[WMT_MAX_VERTEX_BUFFER_LAYOUTS] = {};
+    this->slot_mask = 0;
+    for (uint32_t i = 0; i < element_count; i++) {
+      auto &element = elements[i];
+      auto attribute_index = DXMT_MSC_STAGE_IN_ATTRIBUTE_START_INDEX + element.reg;
+      auto buffer_index = DXMT_MSC_VERTEX_BUFFER_BIND_POINT + element.slot;
+      if (attribute_index >= WMT_MAX_VERTEX_ATTRIBUTES || buffer_index >= WMT_MAX_VERTEX_BUFFER_LAYOUTS)
+        return E_NOTIMPL;
+
+      info.vertex_attributes[info.vertex_attribute_count++] = {
+          attribute_index,
+          static_cast<WMTAttributeFormat>(element.format),
+          element.aligned_byte_offset,
+          buffer_index,
+      };
+      this->slot_mask |= 1u << element.slot;
+
+      if (!layout_initialized[element.slot]) {
+        if (info.vertex_buffer_layout_count >= WMT_MAX_VERTEX_BUFFER_LAYOUTS)
+          return E_NOTIMPL;
+        info.vertex_buffer_layouts[info.vertex_buffer_layout_count++] = {
+            buffer_index,
+            strides[element.slot],
+            element.step_function == D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA ? WMTVertexStepFunctionPerInstance
+                                                                                  : WMTVertexStepFunctionPerVertex,
+            element.step_rate,
+        };
+        layout_initialized[element.slot] = true;
+      }
+    }
+    return S_OK;
+  }
+
+  HRESULT
   Initialize(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) {
     if (pDesc->StreamOutput.NumEntries) {
       ERR("CreatePipelineState: SO not supported");
@@ -270,6 +334,16 @@ public:
     auto metal = device_->GetMTLDevice();
     WMT::Reference<WMT::Error> err;
     WMT::Reference<WMT::Function> vs_func, ps_func;
+    auto vs_backend = DetectD3D12ShaderBackend(pDesc->VS);
+    auto ps_backend = pDesc->PS.pShaderBytecode ? DetectD3D12ShaderBackend(pDesc->PS) : D3D12ShaderBackend::Airconv;
+    const bool use_msc = vs_backend == D3D12ShaderBackend::MetalShaderConverter;
+    if (vs_backend == D3D12ShaderBackend::Unsupported || ps_backend == D3D12ShaderBackend::Unsupported)
+      return E_FAIL;
+    if ((ps_backend == D3D12ShaderBackend::MetalShaderConverter) != use_msc)
+      return E_NOTIMPL;
+
+    D3D12ConvertedShader converted_vs;
+    D3D12ConvertedShader converted_ps;
 
     SM50_SHADER_COMMON_DATA common;
     common.flags = {};
@@ -277,63 +351,106 @@ public:
     common.metal_version = SM50_SHADER_METAL_310;
     common.next = nullptr;
 
-    if (pDesc->VS.pShaderBytecode) {
-      if (SM50Initialize(pDesc->VS.pShaderBytecode, pDesc->VS.BytecodeLength, &shader_vs, &ref_vs, &sm50_err)) {
-        ERR("Failed to parse vs shader");
-        return E_FAIL;
-      }
-      SM50_SHADER_IA_INPUT_LAYOUT_DATA data_ia_layout;
-      data_ia_layout.type = SM50_SHADER_IA_INPUT_LAYOUT;
-      data_ia_layout.index_buffer_format = SM50_INDEX_BUFFER_FORMAT_NONE;
-      std::vector<SM50_IA_INPUT_ELEMENT> elements(pDesc->InputLayout.NumElements);
-      hr = ExtractMTLInputLayoutElements(
-          device_, pDesc->VS.pShaderBytecode, pDesc->InputLayout.pInputElementDescs, pDesc->InputLayout.NumElements,
-          elements.data(), &data_ia_layout.num_elements
-      );
-      elements.resize(data_ia_layout.num_elements);
-      data_ia_layout.elements = elements.data();
-      if (FAILED(hr)) {
-        return hr;
-      }
-      slot_mask = 0;
-      for (auto &element : elements) {
-        slot_mask |= (1 << element.slot);
-      }
-      data_ia_layout.slot_mask = slot_mask;
-      data_ia_layout.next = &common;
-
-      SM50_SHADER_ROOT_SIGNATURE_DATA rootsig;
-      rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
+    if (use_msc) {
+      const void *root_signature = nullptr;
+      size_t root_signature_size = 0;
       if (pDesc->pRootSignature) {
-        rootsig.bytecode_length =
-            static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&rootsig.bytecode);
-      } else {
-        rootsig.bytecode = pDesc->VS.pShaderBytecode;
-        rootsig.bytecode_length = pDesc->VS.BytecodeLength;
+        root_signature_size = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&root_signature);
       }
-      rootsig.next = &data_ia_layout;
 
-      sm50_bitcode_t vs_bitcode;
-
-      if (SM50Compile(
-              shader_vs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig, "vs_main", &vs_bitcode, &sm50_err
-          )) {
-        ERR("Failed to compile vs shader");
+      if (!pDesc->VS.pShaderBytecode)
+        return E_INVALIDARG;
+      if (FAILED(
+              hr = ConvertD3D12Shader(
+                  pDesc->VS, DXMT_MSC_STAGE_VERTEX, converted_vs, root_signature, root_signature_size
+              )
+          ))
+        return hr;
+      auto vs_lib = metal.newLibrary(converted_vs.metallib.data(), converted_vs.metallib.size(), err);
+      if (!vs_lib)
         return E_FAIL;
-      }
+      vs_func = vs_lib.newFunction(converted_vs.entry_point.c_str());
+      if (!vs_func)
+        return E_FAIL;
 
-      SM50_COMPILED_BITCODE vs_bitcode_compiled;
-      SM50GetCompiledBitcode(vs_bitcode, &vs_bitcode_compiled);
-      auto vs_data = WMT::MakeDispatchData(vs_bitcode_compiled.Data, vs_bitcode_compiled.Size);
-      auto vs_lib = metal.newLibrary(vs_data, err);
-      vs_func = vs_lib.newFunction("vs_main");
-    } else {
-      ERR("no vertex shader");
-      return E_INVALIDARG;
+      if (pDesc->PS.pShaderBytecode) {
+        if (FAILED(
+                hr = ConvertD3D12Shader(
+                    pDesc->PS, DXMT_MSC_STAGE_FRAGMENT, converted_ps, root_signature, root_signature_size
+                )
+            ))
+          return hr;
+        auto ps_lib = metal.newLibrary(converted_ps.metallib.data(), converted_ps.metallib.size(), err);
+        if (!ps_lib)
+          return E_FAIL;
+        ps_func = ps_lib.newFunction(converted_ps.entry_point.c_str());
+        if (!ps_func)
+          return E_FAIL;
+      }
+      shader_backend = D3D12ShaderBackend::MetalShaderConverter;
+    }
+
+    if (!use_msc) {
+      if (pDesc->VS.pShaderBytecode) {
+        if (SM50Initialize(pDesc->VS.pShaderBytecode, pDesc->VS.BytecodeLength, &shader_vs, &ref_vs, &sm50_err)) {
+          ERR("Failed to parse vs shader");
+          return E_FAIL;
+        }
+        SM50_SHADER_IA_INPUT_LAYOUT_DATA data_ia_layout;
+        data_ia_layout.type = SM50_SHADER_IA_INPUT_LAYOUT;
+        data_ia_layout.index_buffer_format = SM50_INDEX_BUFFER_FORMAT_NONE;
+        std::vector<SM50_IA_INPUT_ELEMENT> elements(pDesc->InputLayout.NumElements);
+        hr = ExtractMTLInputLayoutElements(
+            device_, pDesc->VS.pShaderBytecode, pDesc->InputLayout.pInputElementDescs, pDesc->InputLayout.NumElements,
+            elements.data(), &data_ia_layout.num_elements
+        );
+        elements.resize(data_ia_layout.num_elements);
+        data_ia_layout.elements = elements.data();
+        if (FAILED(hr)) {
+          return hr;
+        }
+        slot_mask = 0;
+        for (auto &element : elements) {
+          slot_mask |= (1 << element.slot);
+        }
+        data_ia_layout.slot_mask = slot_mask;
+        data_ia_layout.next = &common;
+
+        SM50_SHADER_ROOT_SIGNATURE_DATA rootsig;
+        rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
+        if (pDesc->pRootSignature) {
+          rootsig.bytecode_length =
+              static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&rootsig.bytecode);
+        } else {
+          rootsig.bytecode = pDesc->VS.pShaderBytecode;
+          rootsig.bytecode_length = pDesc->VS.BytecodeLength;
+        }
+        rootsig.next = &data_ia_layout;
+
+        sm50_bitcode_t vs_bitcode;
+
+        if (SM50Compile(
+                shader_vs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig, "vs_main", &vs_bitcode, &sm50_err
+            )) {
+          ERR("Failed to compile vs shader");
+          return E_FAIL;
+        }
+
+        SM50_COMPILED_BITCODE vs_bitcode_compiled;
+        SM50GetCompiledBitcode(vs_bitcode, &vs_bitcode_compiled);
+        auto vs_data = WMT::MakeDispatchData(vs_bitcode_compiled.Data, vs_bitcode_compiled.Size);
+        auto vs_lib = metal.newLibrary(vs_data, err);
+        vs_func = vs_lib.newFunction("vs_main");
+      } else {
+        ERR("no vertex shader");
+        return E_INVALIDARG;
+      }
     }
 
     WMTRenderPipelineInfo info;
     WMT::InitializeRenderPipelineInfo(info);
+    if (use_msc && FAILED(hr = InitializeMSCVertexInput(pDesc, info)))
+      return hr;
 
     bool dual_source_blending = false;
 
@@ -399,7 +516,7 @@ public:
       }
     }
 
-    if (pDesc->PS.pShaderBytecode) {
+    if (!use_msc && pDesc->PS.pShaderBytecode) {
       auto sha1 = Sha1HashState::compute(pDesc->PS.pShaderBytecode, pDesc->PS.BytecodeLength);
 
       std::string ps_name = "ps_main" + sha1.string().substr(0, 8);

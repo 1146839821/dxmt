@@ -399,10 +399,15 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     goto cleanup;
   }
 
+  if (!g_msc_api.IRObjectGetReflection(compiled, ir_stage, reflection)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "shader reflection is unavailable");
+    result = DXMT_MSC_ERROR_COMPILATION;
+    goto cleanup;
+  }
+
   if (ir_stage == IRShaderStageCompute) {
     compute_info.version = IRReflectionVersion_1_0;
-    if (!g_msc_api.IRObjectGetReflection(compiled, ir_stage, reflection) ||
-        !g_msc_api.IRShaderReflectionCopyComputeInfo(reflection, IRReflectionVersion_1_0, &compute_info)) {
+    if (!g_msc_api.IRShaderReflectionCopyComputeInfo(reflection, IRReflectionVersion_1_0, &compute_info)) {
       dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "compute shader reflection is unavailable");
       result = DXMT_MSC_ERROR_COMPILATION;
       goto cleanup;

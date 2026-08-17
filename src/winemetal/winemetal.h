@@ -602,6 +602,33 @@ enum WMTAttributeFormat : uint32_t {
   WMTAttributeFormatFloatRGB9E5 = 55,
 };
 
+enum WMTVertexStepFunction : uint32_t {
+  WMTVertexStepFunctionConstant = 0,
+  WMTVertexStepFunctionPerVertex = 1,
+  WMTVertexStepFunctionPerInstance = 2,
+  WMTVertexStepFunctionPerPatch = 3,
+  WMTVertexStepFunctionPerPatchControlPoint = 4,
+};
+
+enum {
+  WMT_MAX_VERTEX_ATTRIBUTES = 31,
+  WMT_MAX_VERTEX_BUFFER_LAYOUTS = 31,
+};
+
+struct WMTVertexAttribute {
+  uint32_t attribute_index;
+  enum WMTAttributeFormat format;
+  uint32_t offset;
+  uint32_t buffer_index;
+};
+
+struct WMTVertexBufferLayout {
+  uint32_t buffer_index;
+  uint32_t stride;
+  enum WMTVertexStepFunction step_function;
+  uint32_t step_rate;
+};
+
 WINEMETAL_API obj_handle_t MTLDevice_newLibrary(obj_handle_t device, obj_handle_t data, obj_handle_t *err_out);
 
 WINEMETAL_API obj_handle_t MTLLibrary_newFunction(obj_handle_t library, const char *name);
@@ -828,7 +855,10 @@ struct WMTRenderPipelineInfo {
   uint8_t num_binary_archives_for_lookup;
   bool fail_on_binary_archive_miss;
   bool support_indirect_command_buffers;
-  uint8_t padding[5];
+  uint32_t vertex_attribute_count;
+  uint32_t vertex_buffer_layout_count;
+  struct WMTVertexAttribute vertex_attributes[WMT_MAX_VERTEX_ATTRIBUTES];
+  struct WMTVertexBufferLayout vertex_buffer_layouts[WMT_MAX_VERTEX_BUFFER_LAYOUTS];
 };
 
 struct WMTMeshRenderPipelineInfo {

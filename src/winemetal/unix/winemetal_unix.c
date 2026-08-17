@@ -562,6 +562,30 @@ _MTLDevice_newRenderPipelineState(void *obj) {
   descriptor.tessellationOutputWindingOrder = (MTLWinding)info->tessellation_output_winding_order;
   descriptor.maxTessellationFactor = info->max_tessellation_factor;
 
+  if (info->vertex_attribute_count || info->vertex_buffer_layout_count) {
+    MTLVertexDescriptor *vertex_descriptor = [[MTLVertexDescriptor alloc] init];
+    for (uint32_t i = 0; i < info->vertex_attribute_count && i < WMT_MAX_VERTEX_ATTRIBUTES; i++) {
+      const struct WMTVertexAttribute *attribute = &info->vertex_attributes[i];
+      if (attribute->attribute_index >= WMT_MAX_VERTEX_ATTRIBUTES ||
+          attribute->buffer_index >= WMT_MAX_VERTEX_BUFFER_LAYOUTS)
+        continue;
+      vertex_descriptor.attributes[attribute->attribute_index].format = (MTLVertexFormat)attribute->format;
+      vertex_descriptor.attributes[attribute->attribute_index].offset = attribute->offset;
+      vertex_descriptor.attributes[attribute->attribute_index].bufferIndex = attribute->buffer_index;
+    }
+    for (uint32_t i = 0; i < info->vertex_buffer_layout_count && i < WMT_MAX_VERTEX_BUFFER_LAYOUTS; i++) {
+      const struct WMTVertexBufferLayout *layout = &info->vertex_buffer_layouts[i];
+      if (layout->buffer_index >= WMT_MAX_VERTEX_BUFFER_LAYOUTS)
+        continue;
+      vertex_descriptor.layouts[layout->buffer_index].stride = layout->stride;
+      vertex_descriptor.layouts[layout->buffer_index].stepFunction =
+          (MTLVertexStepFunction)layout->step_function;
+      vertex_descriptor.layouts[layout->buffer_index].stepRate = layout->step_rate;
+    }
+    descriptor.vertexDescriptor = vertex_descriptor;
+    [vertex_descriptor release];
+  }
+
   descriptor.vertexFunction = (id<MTLFunction>)info->vertex_function;
   descriptor.fragmentFunction = (id<MTLFunction>)info->fragment_function;
   descriptor.supportIndirectCommandBuffers = info->support_indirect_command_buffers;

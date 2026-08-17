@@ -35,18 +35,20 @@ HasDXBCHeader(const D3D12_SHADER_BYTECODE &shader) {
 void
 LogMSCFailure(const dxmt_msc_compile_dxil_params &params, int result) {
   const char *message = params.error_message ? params.error_message : "";
-  ERR("DXIL compute conversion failed, result=", result, " code=", params.error_code, " message=", message);
+  ERR("DXIL conversion failed, result=", result, " code=", params.error_code, " message=", message);
 }
 
 int
-CompileDXIL(const D3D12_SHADER_BYTECODE &shader, const void *root_signature, size_t root_signature_size, void *metallib,
-           size_t metallib_capacity, char *entry_point,
-           size_t entry_point_capacity, size_t *metallib_size, size_t *entry_point_size,
-           std::array<uint32_t, 3> *threadgroup_size, char *error_message, size_t error_message_capacity) {
+CompileDXIL(
+    const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const void *root_signature, size_t root_signature_size,
+    void *metallib, size_t metallib_capacity, char *entry_point, size_t entry_point_capacity, size_t *metallib_size,
+    size_t *entry_point_size, std::array<uint32_t, 3> *threadgroup_size, char *error_message,
+    size_t error_message_capacity
+) {
   dxmt_msc_compile_dxil_params params = {};
   params.dxil = shader.pShaderBytecode;
   params.dxil_size = shader.BytecodeLength;
-  params.stage = DXMT_MSC_STAGE_COMPUTE;
+  params.stage = stage;
   params.root_signature = root_signature;
   params.root_signature_size = root_signature_size;
   params.metallib = metallib;
@@ -92,8 +94,8 @@ DetectD3D12ShaderBackend(const D3D12_SHADER_BYTECODE &shader) {
 }
 
 HRESULT
-ConvertD3D12ComputeShader(
-    const D3D12_SHADER_BYTECODE &shader, D3D12ConvertedShader &converted, const void *root_signature,
+ConvertD3D12Shader(
+    const D3D12_SHADER_BYTECODE &shader, uint32_t stage, D3D12ConvertedShader &converted, const void *root_signature,
     size_t root_signature_size
 ) {
   if (DetectD3D12ShaderBackend(shader) != D3D12ShaderBackend::MetalShaderConverter)
@@ -110,7 +112,7 @@ ConvertD3D12ComputeShader(
   std::array<uint32_t, 3> threadgroup_size = {};
 
   int result = CompileDXIL(
-      shader, root_signature, root_signature_size, nullptr, 0, nullptr, 0, &metallib_size, &entry_point_size,
+      shader, stage, root_signature, root_signature_size, nullptr, 0, nullptr, 0, &metallib_size, &entry_point_size,
       &threadgroup_size, error_message, sizeof(error_message)
   );
   if (result != DXMT_MSC_SUCCESS)
@@ -123,7 +125,7 @@ ConvertD3D12ComputeShader(
   error_message[0] = '\0';
 
   result = CompileDXIL(
-      shader, root_signature, root_signature_size, converted.metallib.data(), converted.metallib.size(),
+      shader, stage, root_signature, root_signature_size, converted.metallib.data(), converted.metallib.size(),
       entry_point.data(), entry_point.size(), &metallib_size, &entry_point_size, &threadgroup_size, error_message,
       sizeof(error_message)
   );
@@ -139,6 +141,14 @@ ConvertD3D12ComputeShader(
   converted.threadgroup_size = threadgroup_size;
   converted.backend = D3D12ShaderBackend::MetalShaderConverter;
   return S_OK;
+}
+
+HRESULT
+ConvertD3D12ComputeShader(
+    const D3D12_SHADER_BYTECODE &shader, D3D12ConvertedShader &converted, const void *root_signature,
+    size_t root_signature_size
+) {
+  return ConvertD3D12Shader(shader, DXMT_MSC_STAGE_COMPUTE, converted, root_signature, root_signature_size);
 }
 
 } // namespace dxmt

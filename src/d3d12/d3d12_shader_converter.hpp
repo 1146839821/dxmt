@@ -28,6 +28,12 @@ D3D12ShaderBackend
 DetectD3D12ShaderBackend(const D3D12_SHADER_BYTECODE &shader);
 
 HRESULT
+ConvertD3D12Shader(
+    const D3D12_SHADER_BYTECODE &shader, uint32_t stage, D3D12ConvertedShader &converted,
+    const void *root_signature = nullptr, size_t root_signature_size = 0
+);
+
+HRESULT
 ConvertD3D12ComputeShader(
     const D3D12_SHADER_BYTECODE &shader, D3D12ConvertedShader &converted, const void *root_signature = nullptr,
     size_t root_signature_size = 0

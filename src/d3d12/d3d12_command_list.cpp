@@ -286,6 +286,23 @@ public:
 
   void
   EncodeVertexBuffers() {
+    if (pso_graphics_ && pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter) {
+      auto slot_mask = pso_graphics_->slot_mask;
+      for (unsigned slot = 0; slot < 32; slot++) {
+        if (!(slot_mask & (1u << slot)))
+          continue;
+        auto &state = vertex_buffers_[slot];
+        uint64_t buffer_offset = 0;
+        auto allocation = state.BufferLocation ? device_->LookupBufferByVA(state.BufferLocation, &buffer_offset) : nullptr;
+        auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+        cmd.type = WMTRenderCommandSetVertexBuffer;
+        cmd.buffer = allocation ? allocation->buffer() : 0;
+        cmd.offset = buffer_offset;
+        cmd.index = DXMT_MSC_VERTEX_BUFFER_BIND_POINT + slot;
+      }
+      return;
+    }
+
     auto [Offset, Stride] = PopulateVertexBufferTable(1);
     if (!Stride)
       return;
@@ -299,6 +316,10 @@ public:
 
   DrawCallStatus
   PreDraw(bool SkipResourceBinding = false) {
+    const bool use_msc = pso_graphics_ && pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
+    if (use_msc && rootsig_graphics_ && FAILED(rootsig_graphics_->InitializeMSCLayout()))
+      return DrawCallStatus::Invalid;
+
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render) {
 
       allocator_->InvalidateCurrentPass();
@@ -378,24 +399,30 @@ public:
     }
 
     if (dirty_state_.test(DirtyState::GraphicsRootArguments) && !SkipResourceBinding) {
-      if (rootsig_graphics_) {
-        auto Offset = EncodeRootArgument(rootsig_graphics_.ptr(), rootarg_graphics_staging_);
+      if (rootsig_graphics_ && (!use_msc || rootsig_graphics_->MSCArgumentBufferSize)) {
+        auto Offset = use_msc
+                          ? EncodeMSCArgumentBuffer(
+                                rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr()
+                            )
+                          : EncodeRootArgument(rootsig_graphics_.ptr(), rootarg_graphics_staging_);
         auto &cmd_vsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
         cmd_vsargbuf.type = WMTRenderCommandSetVertexBuffer;
         cmd_vsargbuf.buffer = allocator_->gpu_heap_buffer_;
         cmd_vsargbuf.offset = Offset;
-        cmd_vsargbuf.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
+        cmd_vsargbuf.index = use_msc ? static_cast<uint8_t>(DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT)
+                                     : static_cast<uint8_t>(SM50_BINDING_INDEX_ROOT_ARGUMENTS);
         auto &cmd_fsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
         cmd_fsargbuf.type = WMTRenderCommandSetFragmentBuffer;
         cmd_fsargbuf.buffer = allocator_->gpu_heap_buffer_;
         cmd_fsargbuf.offset = Offset;
-        cmd_fsargbuf.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
+        cmd_fsargbuf.index = use_msc ? static_cast<uint8_t>(DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT)
+                                     : static_cast<uint8_t>(SM50_BINDING_INDEX_ROOT_ARGUMENTS);
       }
       dirty_state_.clr(DirtyState::GraphicsRootArguments);
     }
 
     if (dirty_state_.test(DirtyState::GraphicsRootSignature) && !SkipResourceBinding) {
-      if (rootsig_graphics_) {
+      if (rootsig_graphics_ && !use_msc) {
         auto Offset = EncodeStaticSamplers(rootsig_graphics_.ptr());
         auto &cmd_vsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
         cmd_vsargbuf.type = WMTRenderCommandSetVertexBuffer;

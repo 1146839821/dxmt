@@ -1151,6 +1151,8 @@ InitializeRenderPipelineInfo(WMTRenderPipelineInfo &info) {
   info.num_binary_archives_for_lookup = 0;
   info.fail_on_binary_archive_miss = false;
   info.support_indirect_command_buffers = false;
+  info.vertex_attribute_count = 0;
+  info.vertex_buffer_layout_count = 0;
 }
 
 inline void
