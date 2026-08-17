@@ -27,6 +27,7 @@
 #include "dxmt_command.hpp"
 #include "dxmt_fence.hpp"
 #include "dxmt_presenter.hpp"
+#include "d3d12_shader_converter.hpp"
 #include "dxmt_texture.hpp"
 #include "log/log.hpp"
 
@@ -94,6 +95,7 @@ public:
 class MTLD3D12RootSignature : public ID3D12RootSignature {
 public:
   virtual UINT GetBlob(const void **ppBlob) = 0;
+  virtual HRESULT InitializeMSCLayout() = 0;
 
   virtual void AddRefPrivate() = 0;
   virtual void ReleasePrivate() = 0;
@@ -104,6 +106,10 @@ public:
 
   size_t NumStaticSamplers;
   uint64_t const *EncodedStaticSamplers;
+
+  uint64_t MSCArgumentBufferSize = 0;
+  uint32_t MSCParameterCount = 0;
+  const dxmt_msc_root_parameter_layout *MSCParameterLayouts = nullptr;
 };
 
 class MTLD3D12CommandSignature : public ID3D12CommandSignature {
@@ -127,6 +133,7 @@ public:
 class MTLD3D12PipelineState : public ID3D12PipelineState {
 public:
   UINT IsComputePipelineState;
+  D3D12ShaderBackend shader_backend = D3D12ShaderBackend::Airconv;
 };
 
 class MTLD3D12GraphicsPipelineState : public MTLD3D12PipelineState {

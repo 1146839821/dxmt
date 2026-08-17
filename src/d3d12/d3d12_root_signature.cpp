@@ -379,6 +379,8 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
   Let's do it in the simple way
   */
   std::vector<uint64_t> static_samplers_encoded_;
+  std::vector<dxmt_msc_root_parameter_layout> msc_layout_;
+  bool msc_layout_initialized_ = false;
 
 public:
   MTLD3D12RootSignatureImpl(MTLD3D12Device *pDevice, const void *pBytecode, SIZE_T BytecodeLength) :
@@ -458,6 +460,60 @@ public:
     ParameterSlots = qword_offsets_.size();
     SlotQwordOffsets = qword_offsets_.data();
 
+    return S_OK;
+  }
+
+  HRESULT
+  InitializeMSCLayout() override {
+    if (msc_layout_initialized_)
+      return S_OK;
+    if (DXMTMSCIsAvailable() != 1)
+      return E_FAIL;
+
+    const void *blob = nullptr;
+    size_t blob_size = GetBlob(&blob);
+    char error_message[1024] = {};
+
+    dxmt_msc_get_root_layout_params params = {};
+    params.root_signature = blob;
+    params.root_signature_size = blob_size;
+    params.error_message = error_message;
+    params.error_message_capacity = sizeof(error_message);
+
+    int result = DXMTMSCGetRootSignatureLayout(&params);
+    if (result != DXMT_MSC_SUCCESS) {
+      ERR("Failed to query MSC root signature layout, result=", result, " message=", error_message);
+      return E_FAIL;
+    }
+
+    msc_layout_.resize(params.layout_count);
+    if (!msc_layout_.empty()) {
+      params.layouts = msc_layout_.data();
+      params.layout_capacity = msc_layout_.size();
+      params.layout_count = 0;
+      params.argument_buffer_size = 0;
+      error_message[0] = '\0';
+      result = DXMTMSCGetRootSignatureLayout(&params);
+      if (result != DXMT_MSC_SUCCESS) {
+        ERR("Failed to retrieve MSC root signature layout, result=", result, " message=", error_message);
+        msc_layout_.clear();
+        return E_FAIL;
+      }
+    }
+
+    MSCArgumentBufferSize = params.argument_buffer_size;
+    MSCParameterCount = msc_layout_.size();
+    MSCParameterLayouts = msc_layout_.data();
+    msc_layout_initialized_ = true;
+
+    DEBUG("MSC root layout size=", MSCArgumentBufferSize, " resources=", MSCParameterCount);
+    for (auto &layout : msc_layout_) {
+      DEBUG(
+          "MSC root parameter ", layout.parameter_index, " type=", layout.resource_type,
+          " register=", layout.shader_register, " space=", layout.register_space,
+          " offset=", layout.top_level_offset, " size=", layout.size_bytes
+      );
+    }
     return S_OK;
   }
 

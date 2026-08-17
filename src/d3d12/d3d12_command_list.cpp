@@ -517,6 +517,35 @@ public:
   }
 
   uint64_t
+  EncodeMSCArgumentBuffer(MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64]) {
+    if (!pRootSig->MSCArgumentBufferSize)
+      return 0;
+
+    auto [Ptr, Offset] = allocator_->AllocateGPUHeap(pRootSig->MSCArgumentBufferSize, 16);
+    memset(Ptr, 0, pRootSig->MSCArgumentBufferSize);
+
+    for (uint32_t i = 0; i < pRootSig->MSCParameterCount; i++) {
+      auto &layout = pRootSig->MSCParameterLayouts[i];
+      if (layout.parameter_index == UINT32_MAX || layout.parameter_index >= pRootSig->ParameterSlots)
+        continue;
+      if (layout.top_level_offset > pRootSig->MSCArgumentBufferSize ||
+          layout.size_bytes > pRootSig->MSCArgumentBufferSize - layout.top_level_offset)
+        continue;
+
+      auto source_qword = pRootSig->SlotQwordOffsets[layout.parameter_index];
+      if (source_qword >= pRootSig->UploadQwords)
+        continue;
+      auto source = reinterpret_cast<const uint8_t *>(pStaging) + source_qword * sizeof(uint64_t);
+      auto destination = reinterpret_cast<uint8_t *>(Ptr) + layout.top_level_offset;
+      auto source_size = (pRootSig->UploadQwords - source_qword) * sizeof(uint64_t);
+      auto copy_size = std::min<size_t>(layout.size_bytes, source_size);
+
+      memcpy(destination, source, copy_size);
+    }
+    return Offset;
+  }
+
+  uint64_t
   EncodeStaticSamplers(MTLD3D12RootSignature *pRootSig) {
     auto static_sampler_encode_size = sizeof(uint64_t) * pRootSig->NumStaticSamplers * 4;
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(static_sampler_encode_size, 64);
@@ -542,20 +571,38 @@ public:
       }
     }
 
+    const bool use_msc = pso_compute_ && pso_compute_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
+    if (use_msc && rootsig_compute_) {
+      if (FAILED(rootsig_compute_->InitializeMSCLayout()))
+        return false;
+      for (uint32_t i = 0; i < rootsig_compute_->MSCParameterCount; i++) {
+        if (rootsig_compute_->MSCParameterLayouts[i].resource_type == DXMT_MSC_RESOURCE_TABLE) {
+          ERR("MSC descriptor tables are not supported by this compute backend yet");
+          return false;
+        }
+      }
+    }
+
     if (dirty_state_.test(DirtyState::ComputeRootArguments) && !SkipResourceBinding) {
       if (rootsig_compute_) {
-        auto Offset = EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_);
-        auto &cmd_argbuf = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
-        cmd_argbuf.type = WMTComputeCommandSetBuffer;
-        cmd_argbuf.buffer = allocator_->gpu_heap_buffer_;
-        cmd_argbuf.offset = Offset;
-        cmd_argbuf.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
+        auto Offset = use_msc ? EncodeMSCArgumentBuffer(rootsig_compute_.ptr(), rootarg_compute_staging_)
+                              : EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_);
+        if (!use_msc || rootsig_compute_->MSCArgumentBufferSize) {
+          auto &cmd_argbuf = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+          cmd_argbuf.type = WMTComputeCommandSetBuffer;
+          cmd_argbuf.buffer = allocator_->gpu_heap_buffer_;
+          cmd_argbuf.offset = Offset;
+          cmd_argbuf.index = static_cast<uint8_t>(
+              use_msc ? static_cast<uint32_t>(DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT)
+                      : static_cast<uint32_t>(SM50_BINDING_INDEX_ROOT_ARGUMENTS)
+          );
+        }
       }
       dirty_state_.clr(DirtyState::ComputeRootArguments);
     }
 
     if (dirty_state_.test(DirtyState::ComputeRootSignature) && !SkipResourceBinding) {
-      if (rootsig_compute_) {
+      if (rootsig_compute_ && !use_msc) {
         auto Offset = EncodeStaticSamplers(rootsig_compute_.ptr());
         auto &cmd_argbuf = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
         cmd_argbuf.type = WMTComputeCommandSetBuffer;
