@@ -24,11 +24,12 @@ CheckHR(const char *name, HRESULT hr) {
 int
 main(int argc, char **argv) {
   if (argc < 2 || argc > 3) {
-    std::cerr << "usage: dx12_compute_sm6 <shader.cso> [--root-uav]\n";
+    std::cerr << "usage: dx12_compute_sm6 <shader.cso> [--root-uav|--descriptor-uav]\n";
     return 2;
   }
   const bool root_uav = argc == 3 && strcmp(argv[2], "--root-uav") == 0;
-  if (argc == 3 && !root_uav) {
+  const bool descriptor_uav = argc == 3 && strcmp(argv[2], "--descriptor-uav") == 0;
+  if (argc == 3 && !root_uav && !descriptor_uav) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
@@ -49,6 +50,7 @@ main(int argc, char **argv) {
   ID3D12RootSignature *root_signature = nullptr;
   ID3DBlob *root_blob = nullptr;
   ID3DBlob *root_error = nullptr;
+  ID3D12DescriptorHeap *descriptor_heap = nullptr;
   ID3D12Resource *output_buffer = nullptr;
   ID3D12Resource *readback_buffer = nullptr;
   ID3D12PipelineState *pso = nullptr;
@@ -60,6 +62,7 @@ main(int argc, char **argv) {
   UINT output_value = 0;
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   D3D12_ROOT_PARAMETER root_parameter = {};
+  D3D12_DESCRIPTOR_RANGE descriptor_range = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
   D3D12_HEAP_PROPERTIES default_heap = {};
   D3D12_HEAP_PROPERTIES readback_heap = {};
@@ -78,10 +81,21 @@ main(int argc, char **argv) {
           device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))))
     goto cleanup;
 
-  if (root_uav) {
-    root_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-    root_parameter.Descriptor.ShaderRegister = 0;
-    root_parameter.Descriptor.RegisterSpace = 0;
+  if (root_uav || descriptor_uav) {
+    if (root_uav) {
+      root_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+      root_parameter.Descriptor.ShaderRegister = 0;
+      root_parameter.Descriptor.RegisterSpace = 0;
+    } else {
+      descriptor_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+      descriptor_range.NumDescriptors = 1;
+      descriptor_range.BaseShaderRegister = 0;
+      descriptor_range.RegisterSpace = 0;
+      descriptor_range.OffsetInDescriptorsFromTableStart = 0;
+      root_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      root_parameter.DescriptorTable.NumDescriptorRanges = 1;
+      root_parameter.DescriptorTable.pDescriptorRanges = &descriptor_range;
+    }
     root_desc.NumParameters = 1;
     root_desc.pParameters = &root_parameter;
     if (!CheckHR(
@@ -93,6 +107,15 @@ main(int argc, char **argv) {
             device->CreateRootSignature(0, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
                                          IID_PPV_ARGS(&root_signature))))
       goto cleanup;
+
+    if (descriptor_uav) {
+      D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
+      heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+      heap_desc.NumDescriptors = 1;
+      heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+      if (!CheckHR("CreateDescriptorHeap", device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&descriptor_heap))))
+        goto cleanup;
+    }
 
     default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
     default_heap.CreationNodeMask = 1;
@@ -111,6 +134,17 @@ main(int argc, char **argv) {
                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
                                              IID_PPV_ARGS(&output_buffer))))
       goto cleanup;
+
+    if (descriptor_uav) {
+      D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+      uav_desc.Format = DXGI_FORMAT_UNKNOWN;
+      uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+      uav_desc.Buffer.NumElements = 64;
+      uav_desc.Buffer.StructureByteStride = sizeof(UINT);
+      device->CreateUnorderedAccessView(
+          output_buffer, nullptr, &uav_desc, descriptor_heap->GetCPUDescriptorHandleForHeapStart()
+      );
+    }
 
     readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
     readback_heap.CreationNodeMask = 1;
@@ -134,12 +168,18 @@ main(int argc, char **argv) {
           device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, pso, IID_PPV_ARGS(&list))))
     goto cleanup;
 
-  if (root_uav) {
+  if (root_uav || descriptor_uav) {
     list->SetComputeRootSignature(root_signature);
-    list->SetComputeRootUnorderedAccessView(0, output_buffer->GetGPUVirtualAddress());
+    if (root_uav) {
+      list->SetComputeRootUnorderedAccessView(0, output_buffer->GetGPUVirtualAddress());
+    } else {
+      ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
+      list->SetDescriptorHeaps(1, heaps);
+      list->SetComputeRootDescriptorTable(0, descriptor_heap->GetGPUDescriptorHandleForHeapStart());
+    }
   }
   list->Dispatch(1, 1, 1);
-  if (root_uav)
+  if (root_uav || descriptor_uav)
     list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0, sizeof(UINT));
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
@@ -155,7 +195,7 @@ main(int argc, char **argv) {
     goto cleanup;
   WaitForSingleObject(event, INFINITE);
 
-  if (root_uav) {
+  if (root_uav || descriptor_uav) {
     if (!CheckHR("MapReadback", readback_buffer->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
       goto cleanup;
     output_value = *mapped;
@@ -183,6 +223,8 @@ cleanup:
     readback_buffer->Release();
   if (output_buffer)
     output_buffer->Release();
+  if (descriptor_heap)
+    descriptor_heap->Release();
   if (root_signature)
     root_signature->Release();
   if (root_blob)

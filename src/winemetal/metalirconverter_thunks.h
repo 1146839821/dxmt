@@ -49,6 +49,12 @@ enum dxmt_msc_binding_point {
   DXMT_MSC_SAMPLER_HEAP_BIND_POINT = 1,
 };
 
+struct dxmt_msc_descriptor_entry {
+  uint64_t gpu_va;
+  uint64_t texture_view_id;
+  uint64_t metadata;
+};
+
 enum dxmt_msc_unixcall {
   unix_dxmt_msc_is_available = 145,
   unix_dxmt_msc_compile_dxil,

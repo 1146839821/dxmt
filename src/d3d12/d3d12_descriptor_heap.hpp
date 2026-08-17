@@ -20,6 +20,7 @@
 #include "d3d12.h"
 #include "dxmt_buffer.hpp"
 #include "dxmt_texture.hpp"
+#include "metalirconverter_thunks.h"
 #include <cstdint>
 
 #if UINTPTR_MAX == 0xffffffffffffffffULL
@@ -130,6 +131,8 @@ struct ShaderVisibleDescriptorCPUStorage {
 
 class MTLD3D12DescriptorHeap : public ID3D12DescriptorHeap {
 public:
+  virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
+
   virtual HRESULT
   AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp) = 0;
 
@@ -158,6 +161,8 @@ public:
 
 class MTLD3D12SamplerDescriptorHeap : public ID3D12DescriptorHeap {
 public:
+  virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
+
   virtual HRESULT AddSampler(UINT Index, const D3D12_SAMPLER_DESC *Desc) = 0;
 
   virtual void CopyDescriptors(UINT From, MTLD3D12SamplerDescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;

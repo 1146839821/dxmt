@@ -145,6 +145,8 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
 
   Com<MTLD3D12ComputePipelineState, false> pso_compute_;
   Com<MTLD3D12RootSignature, false> rootsig_compute_;
+  Com<MTLD3D12DescriptorHeap, true> descriptor_heap_;
+  Com<MTLD3D12SamplerDescriptorHeap, true> sampler_heap_;
   uint64_t rootarg_compute_staging_[64];
 
   FLOAT blend_factor_[4];
@@ -193,6 +195,8 @@ public:
     memset(rootarg_graphics_staging_, 0, sizeof(rootarg_graphics_staging_));
 
     rootsig_compute_ = nullptr;
+    descriptor_heap_ = nullptr;
+    sampler_heap_ = nullptr;
     memset(rootarg_compute_staging_, 0, sizeof(rootarg_compute_staging_));
 
     memset(vertex_buffers_.data(), 0, sizeof(vertex_buffers_));
@@ -517,7 +521,10 @@ public:
   }
 
   uint64_t
-  EncodeMSCArgumentBuffer(MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64]) {
+  EncodeMSCArgumentBuffer(
+      MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
+      MTLD3D12SamplerDescriptorHeap *sampler_heap
+  ) {
     if (!pRootSig->MSCArgumentBufferSize)
       return 0;
 
@@ -539,6 +546,19 @@ public:
       auto destination = reinterpret_cast<uint8_t *>(Ptr) + layout.top_level_offset;
       auto source_size = (pRootSig->UploadQwords - source_qword) * sizeof(uint64_t);
       auto copy_size = std::min<size_t>(layout.size_bytes, source_size);
+
+      if (layout.resource_type == DXMT_MSC_RESOURCE_TABLE) {
+        D3D12_GPU_DESCRIPTOR_HANDLE handle = {pStaging[source_qword]};
+        uint64_t table_address = descriptor_heap ? descriptor_heap->GetMSCDescriptorTableAddress(handle) : 0;
+        if (!table_address && sampler_heap)
+          table_address = sampler_heap->GetMSCDescriptorTableAddress(handle);
+        if (!table_address) {
+          ERR("MSC descriptor table handle is not from a shader-visible heap");
+          continue;
+        }
+        memcpy(destination, &table_address, std::min<size_t>(layout.size_bytes, sizeof(table_address)));
+        continue;
+      }
 
       memcpy(destination, source, copy_size);
     }
@@ -575,17 +595,14 @@ public:
     if (use_msc && rootsig_compute_) {
       if (FAILED(rootsig_compute_->InitializeMSCLayout()))
         return false;
-      for (uint32_t i = 0; i < rootsig_compute_->MSCParameterCount; i++) {
-        if (rootsig_compute_->MSCParameterLayouts[i].resource_type == DXMT_MSC_RESOURCE_TABLE) {
-          ERR("MSC descriptor tables are not supported by this compute backend yet");
-          return false;
-        }
-      }
     }
 
     if (dirty_state_.test(DirtyState::ComputeRootArguments) && !SkipResourceBinding) {
       if (rootsig_compute_) {
-        auto Offset = use_msc ? EncodeMSCArgumentBuffer(rootsig_compute_.ptr(), rootarg_compute_staging_)
+        auto Offset = use_msc
+                          ? EncodeMSCArgumentBuffer(
+                                rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr()
+                            )
                               : EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_);
         if (!use_msc || rootsig_compute_->MSCArgumentBufferSize) {
           auto &cmd_argbuf = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
@@ -970,7 +987,17 @@ public:
   void STDMETHODCALLTYPE ExecuteBundle(ID3D12GraphicsCommandList *CommandList) { IMPLEMENT_ME };
 
   void STDMETHODCALLTYPE SetDescriptorHeaps(UINT HeapCount, ID3D12DescriptorHeap *const *Heaps) {
-    // no need to do anything here because because we encode the full descriptor table address in root argument
+    descriptor_heap_ = nullptr;
+    sampler_heap_ = nullptr;
+    for (UINT i = 0; i < HeapCount; i++) {
+      if (!Heaps[i])
+        continue;
+      auto desc = Heaps[i]->GetDesc();
+      if (desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        descriptor_heap_ = static_cast<MTLD3D12DescriptorHeap *>(Heaps[i]);
+      else if (desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
+        sampler_heap_ = static_cast<MTLD3D12SamplerDescriptorHeap *>(Heaps[i]);
+    }
   };
 
   void STDMETHODCALLTYPE

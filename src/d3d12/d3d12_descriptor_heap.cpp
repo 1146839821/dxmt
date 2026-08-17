@@ -20,6 +20,7 @@
 #include "d3d12_descriptor_heap.hpp"
 #include "d3d12_pageable.hpp"
 #include "com/com_pointer.hpp"
+#include "dxmt_format.hpp"
 #include "dxmt_sampler.hpp"
 #include "log/log.hpp"
 
@@ -65,7 +66,10 @@ struct ShaderVisibleDescriptorGPUStorage {
   ShaderVisibleDescriptorGPUStorage();
 };
 
+ShaderVisibleDescriptorGPUStorage::ShaderVisibleDescriptorGPUStorage() : ZeroFilled{} {}
+
 static_assert(sizeof(ShaderVisibleDescriptorGPUStorage) == 32);
+static_assert(sizeof(dxmt_msc_descriptor_entry) == 24);
 
 inline uint64_t
 TextureMetadata(uint32_t array_length, float min_lod) {
@@ -80,6 +84,15 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
   Rc<Buffer> buffer_;
   ShaderVisibleDescriptorGPUStorage *mapped_argument_buffer_ = nullptr;
   uint64_t argument_buffer_gpu_address_ = 0;
+  Rc<Buffer> msc_buffer_;
+  dxmt_msc_descriptor_entry *mapped_msc_argument_buffer_ = nullptr;
+  uint64_t msc_argument_buffer_gpu_address_ = 0;
+
+  void
+  SetMSCDescriptor(UINT Index, dxmt_msc_descriptor_entry Entry) {
+    if (mapped_msc_argument_buffer_)
+      mapped_msc_argument_buffer_[Index] = Entry;
+  }
 
 public:
   MTLD3D12DescriptorHeapImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12DescriptorHeap>(pDevice) {}
@@ -110,9 +123,22 @@ public:
           reinterpret_cast<ShaderVisibleDescriptorGPUStorage *>(buffer_->current()->mappedMemory(0));
       argument_buffer_gpu_address_ = buffer_->current()->gpuAddress();
       device_->RegisterResidencyAndVA(buffer_->current());
+
+      msc_buffer_ = new Buffer(descriptors_.size() * sizeof(dxmt_msc_descriptor_entry), device_->GetMTLDevice());
+      msc_buffer_->rename(msc_buffer_->allocate(flags));
+      mapped_msc_argument_buffer_ =
+          reinterpret_cast<dxmt_msc_descriptor_entry *>(msc_buffer_->current()->mappedMemory(0));
+      msc_argument_buffer_gpu_address_ = msc_buffer_->current()->gpuAddress();
+      device_->RegisterResidencyAndVA(msc_buffer_->current());
+      for (size_t i = 0; i < descriptors_.size(); i++)
+        mapped_argument_buffer_[i] = {};
+      memset(mapped_msc_argument_buffer_, 0, descriptors_.size() * sizeof(dxmt_msc_descriptor_entry));
     } else {
       mapped_argument_buffer_ = reinterpret_cast<ShaderVisibleDescriptorGPUStorage *>(
           malloc(descriptors_.size() * sizeof(ShaderVisibleDescriptorGPUStorage))
+      );
+      mapped_msc_argument_buffer_ = reinterpret_cast<dxmt_msc_descriptor_entry *>(
+          calloc(descriptors_.size(), sizeof(dxmt_msc_descriptor_entry))
       );
     }
 
@@ -122,8 +148,10 @@ public:
   ~MTLD3D12DescriptorHeapImpl() {
     if (buffer_) {
       device_->UnregisterResidencyAndVA(buffer_->current());
+      device_->UnregisterResidencyAndVA(msc_buffer_->current());
     } else {
       free(mapped_argument_buffer_);
+      free(mapped_msc_argument_buffer_);
     }
   }
 
@@ -166,6 +194,19 @@ public:
     return __ret;
   }
 
+  uint64_t
+  GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) override {
+    if (!msc_buffer_ || Handle.ptr < argument_buffer_gpu_address_)
+      return 0;
+    uint64_t byte_offset = Handle.ptr - argument_buffer_gpu_address_;
+    if (byte_offset % sizeof(ShaderVisibleDescriptorGPUStorage))
+      return 0;
+    uint64_t index = byte_offset / sizeof(ShaderVisibleDescriptorGPUStorage);
+    if (index >= descriptors_.size())
+      return 0;
+    return msc_argument_buffer_gpu_address_ + index * sizeof(dxmt_msc_descriptor_entry);
+  }
+
   virtual HRESULT
   AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp) {
     if (Index >= descriptors_.size())
@@ -179,6 +220,7 @@ public:
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.SRVTexture.resource_id = texture_view.gpuResourceID;
       gpu_storage.SRVTexture.metadata = TextureMetadata(Texture->arrayLength(View), ResourceMinLODClamp);
+      SetMSCDescriptor(Index, {0, texture_view.gpuResourceID, std::bit_cast<uint32_t>(ResourceMinLODClamp)});
     }
     return S_OK;
   }
@@ -195,6 +237,7 @@ public:
       gpu_storage.ConstantBuffer.address = VA;
       gpu_storage.ConstantBuffer.size = SizeInBytes;
     }
+    SetMSCDescriptor(Index, {VA, 0, SizeInBytes});
     return S_OK;
   }
 
@@ -211,6 +254,7 @@ public:
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.UAVTexture.resource_id = texture_view.gpuResourceID;
       gpu_storage.UAVTexture.metadata = TextureMetadata(Texture->arrayLength(View), 0);
+      SetMSCDescriptor(Index, {0, texture_view.gpuResourceID, 0});
     }
     return S_OK;
   }
@@ -230,9 +274,17 @@ public:
         auto &buffer_view = UAVBuffer->view_(View);
         gpu_storage.UAVTexelBuffer.resource_id = buffer_view.gpu_resource_id;
         gpu_storage.UAVTexelBuffer.metadata = ((uint64_t)Slice.elementCount << 32) | (uint64_t)(Slice.firstElement);
+        auto texel_size = MTLGetTexelSize(UAVBuffer->pixelFormat(View));
+        uint64_t metadata = Slice.byteLength;
+        metadata |= ((uint64_t)(Slice.byteOffset / texel_size) & 0xff) << 32;
+        metadata |= 1ull << 63;
+        SetMSCDescriptor(
+            Index, {UAVBuffer->current()->gpuAddress() + Slice.byteOffset, buffer_view.gpu_resource_id, metadata}
+        );
       } else {
         gpu_storage.UAVTexelBuffer.resource_id = 0;
         gpu_storage.UAVTexelBuffer.metadata = 0;
+        SetMSCDescriptor(Index, {});
       }
     }
     return S_OK;
@@ -252,10 +304,12 @@ public:
         gpu_storage.UAVBuffer.pointer = UAVBuffer->current()->gpuAddress() + Slice.byteOffset;
         gpu_storage.UAVBuffer.metadata = Slice.byteLength;
         gpu_storage.UAVBuffer.counter_pointer = Counter ? Counter->current()->gpuAddress() + CounterOffsetInBytes : 0;
+        SetMSCDescriptor(Index, {gpu_storage.UAVBuffer.pointer, 0, Slice.byteLength});
       } else {
         gpu_storage.UAVBuffer.pointer = 0;
         gpu_storage.UAVBuffer.metadata = 0;
         gpu_storage.UAVBuffer.counter_pointer = 0;
+        SetMSCDescriptor(Index, {});
       }
     }
     return S_OK;
@@ -275,9 +329,15 @@ public:
         auto &buffer_view = Buffer->view_(View);
         gpu_storage.UAVTexelBuffer.resource_id = buffer_view.gpu_resource_id;
         gpu_storage.UAVTexelBuffer.metadata = ((uint64_t)Slice.elementCount << 32) | (uint64_t)(Slice.firstElement);
+        auto texel_size = MTLGetTexelSize(Buffer->pixelFormat(View));
+        uint64_t metadata = Slice.byteLength;
+        metadata |= ((uint64_t)(Slice.byteOffset / texel_size) & 0xff) << 32;
+        metadata |= 1ull << 63;
+        SetMSCDescriptor(Index, {Buffer->current()->gpuAddress() + Slice.byteOffset, buffer_view.gpu_resource_id, metadata});
       } else {
         gpu_storage.UAVTexelBuffer.resource_id = 0;
         gpu_storage.UAVTexelBuffer.metadata = 0;
+        SetMSCDescriptor(Index, {});
       }
     }
     return S_OK;
@@ -295,9 +355,11 @@ public:
       if (Buffer) {
         gpu_storage.SRVBuffer.pointer = Buffer->current()->gpuAddress() + Slice.byteOffset;
         gpu_storage.SRVBuffer.metadata = Slice.byteLength;
+        SetMSCDescriptor(Index, {gpu_storage.SRVBuffer.pointer, 0, Slice.byteLength});
       } else {
         gpu_storage.SRVBuffer.pointer = 0;
         gpu_storage.SRVBuffer.metadata = 0;
+        SetMSCDescriptor(Index, {});
       }
     }
     return S_OK;
@@ -318,6 +380,7 @@ public:
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.ZeroFilled = {{}};
     }
+    SetMSCDescriptor(Index, {});
     return S_OK;
   }
 
@@ -336,6 +399,7 @@ public:
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.ZeroFilled = {{}};
     }
+    SetMSCDescriptor(Index, {});
     return S_OK;
   }
 
@@ -350,6 +414,9 @@ public:
       static_cast<MTLD3D12DescriptorHeapImpl *>(pHeapTo)->descriptors_[DescriptorTo + i] = descriptors_[From + i];
       static_cast<MTLD3D12DescriptorHeapImpl *>(pHeapTo)->mapped_argument_buffer_[DescriptorTo + i] =
           mapped_argument_buffer_[From + i];
+      if (mapped_msc_argument_buffer_ && static_cast<MTLD3D12DescriptorHeapImpl *>(pHeapTo)->mapped_msc_argument_buffer_)
+        static_cast<MTLD3D12DescriptorHeapImpl *>(pHeapTo)->mapped_msc_argument_buffer_[DescriptorTo + i] =
+            mapped_msc_argument_buffer_[From + i];
     }
   }
 };
@@ -463,6 +530,15 @@ class MTLD3D12SamplerDescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12Sample
   Rc<Buffer> buffer_;
   SamplerGPUStorage *mapped_argument_buffer_ = nullptr;
   uint64_t argument_buffer_gpu_address_ = 0;
+  Rc<Buffer> msc_buffer_;
+  dxmt_msc_descriptor_entry *mapped_msc_argument_buffer_ = nullptr;
+  uint64_t msc_argument_buffer_gpu_address_ = 0;
+
+  void
+  SetMSCDescriptor(UINT Index, dxmt_msc_descriptor_entry Entry) {
+    if (mapped_msc_argument_buffer_)
+      mapped_msc_argument_buffer_[Index] = Entry;
+  }
 
 public:
   MTLD3D12SamplerDescriptorHeapImpl(MTLD3D12Device *pDevice) :
@@ -494,9 +570,21 @@ public:
       argument_buffer_gpu_address_ = buffer_->current()->gpuAddress();
       // FIXME: is residency required for descriptor heap? Should be the case for Metal 4
       device_->RegisterResidencyAndVA(buffer_->current());
+
+      msc_buffer_ = new Buffer(samplers_.size() * sizeof(dxmt_msc_descriptor_entry), device_->GetMTLDevice());
+      msc_buffer_->rename(msc_buffer_->allocate(flags));
+      mapped_msc_argument_buffer_ =
+          reinterpret_cast<dxmt_msc_descriptor_entry *>(msc_buffer_->current()->mappedMemory(0));
+      msc_argument_buffer_gpu_address_ = msc_buffer_->current()->gpuAddress();
+      device_->RegisterResidencyAndVA(msc_buffer_->current());
+      memset(mapped_argument_buffer_, 0, samplers_.size() * sizeof(SamplerGPUStorage));
+      memset(mapped_msc_argument_buffer_, 0, samplers_.size() * sizeof(dxmt_msc_descriptor_entry));
     } else {
       mapped_argument_buffer_ =
           reinterpret_cast<SamplerGPUStorage *>(malloc(samplers_.size() * sizeof(SamplerGPUStorage)));
+      mapped_msc_argument_buffer_ = reinterpret_cast<dxmt_msc_descriptor_entry *>(
+          calloc(samplers_.size(), sizeof(dxmt_msc_descriptor_entry))
+      );
     }
 
     return S_OK;
@@ -504,9 +592,11 @@ public:
 
   ~MTLD3D12SamplerDescriptorHeapImpl() {
      if (buffer_) {
-      device_->UnregisterResidencyAndVA(buffer_->current());
-    } else {
-      free(mapped_argument_buffer_);
+       device_->UnregisterResidencyAndVA(buffer_->current());
+       device_->UnregisterResidencyAndVA(msc_buffer_->current());
+     } else {
+       free(mapped_argument_buffer_);
+       free(mapped_msc_argument_buffer_);
     }
   }
 
@@ -549,6 +639,19 @@ public:
     return __ret;
   }
 
+  uint64_t
+  GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) override {
+    if (!msc_buffer_ || Handle.ptr < argument_buffer_gpu_address_)
+      return 0;
+    uint64_t byte_offset = Handle.ptr - argument_buffer_gpu_address_;
+    if (byte_offset % sizeof(SamplerGPUStorage))
+      return 0;
+    uint64_t index = byte_offset / sizeof(SamplerGPUStorage);
+    if (index >= samplers_.size())
+      return 0;
+    return msc_argument_buffer_gpu_address_ + index * sizeof(dxmt_msc_descriptor_entry);
+  }
+
 
   virtual HRESULT
   AddSampler(UINT Index, const D3D12_SAMPLER_DESC *pDesc) {
@@ -568,6 +671,7 @@ public:
       gpu_storage.cube_sampler = sampler->sampler_state_cube_handle;
       gpu_storage.metadata = (uint64_t)std::bit_cast<uint32_t>(sampler->lod_bias);
     }
+    SetMSCDescriptor(Index, {sampler->sampler_state_handle, 0, std::bit_cast<uint32_t>(sampler->lod_bias)});
 
     return S_OK;
   }
@@ -578,6 +682,9 @@ public:
       static_cast<MTLD3D12SamplerDescriptorHeapImpl *>(pHeapTo)->samplers_[DescriptorTo + i] = samplers_[From + i];
       static_cast<MTLD3D12SamplerDescriptorHeapImpl *>(pHeapTo)->mapped_argument_buffer_[DescriptorTo + i] =
           mapped_argument_buffer_[From + i];
+      if (mapped_msc_argument_buffer_ && static_cast<MTLD3D12SamplerDescriptorHeapImpl *>(pHeapTo)->mapped_msc_argument_buffer_)
+        static_cast<MTLD3D12SamplerDescriptorHeapImpl *>(pHeapTo)->mapped_msc_argument_buffer_[DescriptorTo + i] =
+            mapped_msc_argument_buffer_[From + i];
     }
   }
 };
