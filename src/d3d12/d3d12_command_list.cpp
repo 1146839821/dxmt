@@ -296,7 +296,7 @@ public:
         auto allocation = state.BufferLocation ? device_->LookupBufferByVA(state.BufferLocation, &buffer_offset) : nullptr;
         auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
         cmd.type = WMTRenderCommandSetVertexBuffer;
-        cmd.buffer = allocation ? allocation->buffer() : 0;
+        cmd.buffer = allocation ? allocation->buffer().handle : 0;
         cmd.offset = buffer_offset;
         cmd.index = DXMT_MSC_VERTEX_BUFFER_BIND_POINT + slot;
       }
@@ -582,7 +582,9 @@ public:
 
       auto destination = reinterpret_cast<uint8_t *>(Ptr) + layout.top_level_offset;
 
-      if (layout.resource_type == DXMT_MSC_RESOURCE_SAMPLER) {
+      const bool is_static_sampler_table =
+          layout.parameter_index == UINT32_MAX && layout.resource_type == DXMT_MSC_RESOURCE_TABLE;
+      if (layout.resource_type == DXMT_MSC_RESOURCE_SAMPLER || is_static_sampler_table) {
         if (!static_sampler_table_address)
           static_sampler_table_address = EncodeMSCStaticSamplers(pRootSig);
         if (!static_sampler_table_address) {
