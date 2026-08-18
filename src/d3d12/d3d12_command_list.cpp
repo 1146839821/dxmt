@@ -273,7 +273,7 @@ public:
     for (unsigned i = 0; i < Count; i++) {
       VERTEX_BUFFER_ENTRY *entries = (VERTEX_BUFFER_ENTRY *)(reinterpret_cast<char *>(mapped) + i * stride);
       for (unsigned slot = 0, index = 0; slot < max_slot; slot++) {
-        if (!(slot_mask & (1 << slot)))
+        if (!(slot_mask & (1u << slot)))
           continue;
         auto &state = vertex_buffers_[slot];
         entries[index].buffer_handle = state.BufferLocation;

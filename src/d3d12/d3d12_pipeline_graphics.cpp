@@ -212,13 +212,13 @@ ExtractMTLInputLayoutElements(
     attribute.step_function = desc.InputSlotClass;
     attribute.step_rate =
         desc.InputSlotClass == D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA ? desc.InstanceDataStepRate : 1;
-    register_mask |= (1 << inputSig.Register);
+    register_mask |= (1u << inputSig.Register);
   }
   for (UINT i = 0; i < num_parameters; i++) {
     auto &inputSig = pParameters[i];
     if (inputSig.SystemValue != D3D10_SB_NAME_UNDEFINED)
       continue; // ignore SIV & SGV
-    if (!(register_mask & (1 << inputSig.Register))) {
+    if (!(register_mask & (1u << inputSig.Register))) {
       WARN(
           "CreateInputLayout: Vertex shader expects ", inputSig.SemanticName, "_", inputSig.SemanticIndex,
           " but it's not in input layout element descriptors"
@@ -413,7 +413,7 @@ public:
         }
         slot_mask = 0;
         for (auto &element : elements) {
-          slot_mask |= (1 << element.slot);
+          slot_mask |= (1u << element.slot);
         }
         data_ia_layout.slot_mask = slot_mask;
         data_ia_layout.next = &common;
