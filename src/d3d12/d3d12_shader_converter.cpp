@@ -36,6 +36,7 @@ constexpr uint32_t kMSCMetalTargetVersion = 0;
 constexpr uint32_t kMSCCompileFlags = 0;
 constexpr uint32_t kMSCBindingLayoutVersion = 1;
 constexpr char kMSCConversionCacheNamespace[] = "dxmt-msc-conversion";
+constexpr char kMSCEntryPointPolicy[] = "auto-from-dxil";
 constexpr uint32_t kMSCSerializedCacheMagic = MakeFourCC('M', 'S', 'C', 'C');
 constexpr uint64_t kMSCSerializedCacheLimit = 256ull * 1024ull * 1024ull;
 
@@ -65,6 +66,7 @@ MakeMSCConversionCacheKey(
 ) {
   Sha1HashState hash;
   hash.update(kMSCConversionCacheNamespace, sizeof(kMSCConversionCacheNamespace) - 1);
+  hash.update(kMSCEntryPointPolicy, sizeof(kMSCEntryPointPolicy) - 1);
   hash.update(kMSCConversionCacheVersion);
   hash.update(kMSCConverterAPIVersion);
   hash.update(kMSCMetalTargetVersion);
@@ -73,11 +75,13 @@ MakeMSCConversionCacheKey(
   hash.update(stage);
   uint64_t shader_size = shader.BytecodeLength;
   hash.update(shader_size);
-  hash.update(shader.pShaderBytecode, shader.BytecodeLength);
+  hash.update(Sha1HashState::compute(shader.pShaderBytecode, shader.BytecodeLength));
   uint64_t root_size = root_signature ? root_signature_size : 0;
   hash.update(root_size);
+  Sha1Digest root_signature_hash = {};
   if (root_size)
-    hash.update(root_signature, root_signature_size);
+    root_signature_hash = Sha1HashState::compute(root_signature, root_signature_size);
+  hash.update(root_signature_hash);
   return hash.final();
 }
 

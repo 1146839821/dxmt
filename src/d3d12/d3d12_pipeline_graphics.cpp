@@ -268,6 +268,8 @@ public:
       auto &desc = pDesc->InputLayout.pInputElementDescs[i];
       if (desc.InputSlot >= std::size(append_offset))
         return E_INVALIDARG;
+      if (DXMT_MSC_VERTEX_BUFFER_BIND_POINT + desc.InputSlot >= WMT_MAX_VERTEX_BUFFER_LAYOUTS)
+        return E_NOTIMPL;
 
       MTL_DXGI_FORMAT_DESC format_desc;
       if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc.Format, format_desc)) || !format_desc.BytesPerTexel)
