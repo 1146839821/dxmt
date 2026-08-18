@@ -26,7 +26,8 @@ int main(int argc, char **argv) {
   if (argc < 3 || argc > 4)
     return 2;
   const bool textured = argc == 4 && strcmp(argv[3], "--texture") == 0;
-  if (argc == 4 && !textured)
+  const bool root_cbv = argc == 4 && strcmp(argv[3], "--root-cbv") == 0;
+  if (argc == 4 && !textured && !root_cbv)
     return 2;
 
   std::ifstream vertex_file(argv[1], std::ios::binary | std::ios::ate);
@@ -51,6 +52,7 @@ int main(int argc, char **argv) {
       {{3.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
       {{-1.0f, 3.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
   };
+  static const float root_color[] = {0.0f, 1.0f, 0.0f, 1.0f};
 
   ID3D12Device *device = nullptr;
   ID3D12CommandQueue *queue = nullptr;
@@ -65,6 +67,7 @@ int main(int argc, char **argv) {
   ID3D12DescriptorHeap *sampler_heap = nullptr;
   ID3D12Resource *render_target = nullptr;
   ID3D12Resource *vertex_buffer = nullptr;
+  ID3D12Resource *root_cbv_buffer = nullptr;
   ID3D12Resource *texture = nullptr;
   ID3D12Resource *texture_upload = nullptr;
   ID3D12Resource *readback = nullptr;
@@ -112,9 +115,11 @@ int main(int argc, char **argv) {
   UINT64 row_size = 0;
   UINT64 total_size = 0;
   void *mapped_upload = nullptr;
+  void *mapped_root_cbv = nullptr;
   void *mapped_texture_upload = nullptr;
   BYTE *mapped_readback = nullptr;
   UINT pixel = 0;
+  UINT expected_pixel = 0;
   int result = 1;
 
   if (!CheckHR("D3D12CreateDevice",
@@ -131,7 +136,14 @@ int main(int argc, char **argv) {
                                               IID_PPV_ARGS(&allocator))))
     goto cleanup;
 
-  if (textured) {
+  if (root_cbv) {
+    root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    root_parameters[0].Descriptor.ShaderRegister = 0;
+    root_parameters[0].Descriptor.RegisterSpace = 0;
+    root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    root_desc.NumParameters = 1;
+    root_desc.pParameters = root_parameters;
+  } else if (textured) {
     descriptor_ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
     descriptor_ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
     for (unsigned i = 0; i < 2; i++) {
@@ -287,6 +299,21 @@ int main(int argc, char **argv) {
   vertex_view.SizeInBytes = sizeof(vertices);
   vertex_view.StrideInBytes = sizeof(Vertex);
 
+  if (root_cbv) {
+    buffer_desc.Width = 256;
+    if (!CheckHR("CreateRootCBV",
+                 device->CreateCommittedResource(
+                     &upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                     D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                     IID_PPV_ARGS(&root_cbv_buffer))))
+      goto cleanup;
+    if (!CheckHR("MapRootCBV",
+                 root_cbv_buffer->Map(0, nullptr, &mapped_root_cbv)))
+      goto cleanup;
+    memcpy(mapped_root_cbv, root_color, sizeof(root_color));
+    root_cbv_buffer->Unmap(0, nullptr);
+  }
+
   pso_desc.pRootSignature = root_signature;
   pso_desc.VS.pShaderBytecode = vertex_shader.data();
   pso_desc.VS.BytecodeLength = vertex_shader.size();
@@ -341,6 +368,8 @@ int main(int argc, char **argv) {
     list->SetGraphicsRootDescriptorTable(
         1, sampler_heap->GetGPUDescriptorHandleForHeapStart());
   }
+  if (root_cbv)
+    list->SetGraphicsRootConstantBufferView(0, root_cbv_buffer->GetGPUVirtualAddress());
   list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   list->IASetVertexBuffers(0, 1, &vertex_view);
   list->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
@@ -399,12 +428,13 @@ int main(int argc, char **argv) {
     goto cleanup;
   pixel = *reinterpret_cast<UINT *>(mapped_readback);
   readback->Unmap(0, nullptr);
-  if ((pixel & 0x00ffffffu) != 0x000000ffu) {
+  expected_pixel = root_cbv ? 0xff00ff00u : 0xff0000ffu;
+  if ((pixel & 0x00ffffffu) != (expected_pixel & 0x00ffffffu)) {
     std::cerr << "graphics readback mismatch: 0x" << std::hex << pixel
               << std::dec << "\n";
     goto cleanup;
   }
-  std::cout << "DXIL " << (textured ? "textured graphics" : "graphics")
+  std::cout << "DXIL " << (root_cbv ? "root CBV graphics" : textured ? "textured graphics" : "graphics")
             << " readback passed: 0x" << std::hex << pixel << std::dec << "\n";
   result = 0;
 
@@ -423,6 +453,8 @@ cleanup:
     texture_upload->Release();
   if (texture)
     texture->Release();
+  if (root_cbv_buffer)
+    root_cbv_buffer->Release();
   if (vertex_buffer)
     vertex_buffer->Release();
   if (render_target)
