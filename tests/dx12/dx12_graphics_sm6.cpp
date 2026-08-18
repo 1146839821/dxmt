@@ -28,7 +28,8 @@ int main(int argc, char **argv) {
   const bool textured = argc == 4 && strcmp(argv[3], "--texture") == 0;
   const bool root_cbv = argc == 4 && strcmp(argv[3], "--root-cbv") == 0;
   const bool root_constants = argc == 4 && strcmp(argv[3], "--root-constants") == 0;
-  if (argc == 4 && !textured && !root_cbv && !root_constants)
+  const bool root_srv = argc == 4 && strcmp(argv[3], "--root-srv") == 0;
+  if (argc == 4 && !textured && !root_cbv && !root_constants && !root_srv)
     return 2;
 
   std::ifstream vertex_file(argv[1], std::ios::binary | std::ios::ate);
@@ -69,7 +70,7 @@ int main(int argc, char **argv) {
   ID3D12DescriptorHeap *sampler_heap = nullptr;
   ID3D12Resource *render_target = nullptr;
   ID3D12Resource *vertex_buffer = nullptr;
-  ID3D12Resource *root_cbv_buffer = nullptr;
+  ID3D12Resource *root_data_buffer = nullptr;
   ID3D12Resource *texture = nullptr;
   ID3D12Resource *texture_upload = nullptr;
   ID3D12Resource *readback = nullptr;
@@ -117,7 +118,7 @@ int main(int argc, char **argv) {
   UINT64 row_size = 0;
   UINT64 total_size = 0;
   void *mapped_upload = nullptr;
-  void *mapped_root_cbv = nullptr;
+  void *mapped_root_data = nullptr;
   void *mapped_texture_upload = nullptr;
   BYTE *mapped_readback = nullptr;
   UINT pixel = 0;
@@ -150,6 +151,13 @@ int main(int argc, char **argv) {
     root_parameters[0].Constants.Num32BitValues = 4;
     root_parameters[0].Constants.ShaderRegister = 0;
     root_parameters[0].Constants.RegisterSpace = 0;
+    root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    root_desc.NumParameters = 1;
+    root_desc.pParameters = root_parameters;
+  } else if (root_srv) {
+    root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    root_parameters[0].Descriptor.ShaderRegister = 0;
+    root_parameters[0].Descriptor.RegisterSpace = 0;
     root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
     root_desc.NumParameters = 1;
     root_desc.pParameters = root_parameters;
@@ -309,19 +317,19 @@ int main(int argc, char **argv) {
   vertex_view.SizeInBytes = sizeof(vertices);
   vertex_view.StrideInBytes = sizeof(Vertex);
 
-  if (root_cbv) {
+  if (root_cbv || root_srv) {
     buffer_desc.Width = 256;
-    if (!CheckHR("CreateRootCBV",
+    if (!CheckHR("CreateRootData",
                  device->CreateCommittedResource(
                      &upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
                      D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                     IID_PPV_ARGS(&root_cbv_buffer))))
+                     IID_PPV_ARGS(&root_data_buffer))))
       goto cleanup;
-    if (!CheckHR("MapRootCBV",
-                 root_cbv_buffer->Map(0, nullptr, &mapped_root_cbv)))
+    if (!CheckHR("MapRootData",
+                 root_data_buffer->Map(0, nullptr, &mapped_root_data)))
       goto cleanup;
-    memcpy(mapped_root_cbv, root_color, sizeof(root_color));
-    root_cbv_buffer->Unmap(0, nullptr);
+    memcpy(mapped_root_data, root_color, sizeof(root_color));
+    root_data_buffer->Unmap(0, nullptr);
   }
 
   pso_desc.pRootSignature = root_signature;
@@ -379,9 +387,11 @@ int main(int argc, char **argv) {
         1, sampler_heap->GetGPUDescriptorHandleForHeapStart());
   }
   if (root_cbv)
-    list->SetGraphicsRootConstantBufferView(0, root_cbv_buffer->GetGPUVirtualAddress());
+    list->SetGraphicsRootConstantBufferView(0, root_data_buffer->GetGPUVirtualAddress());
   if (root_constants)
     list->SetGraphicsRoot32BitConstants(0, 4, root_color_bits, 0);
+  if (root_srv)
+    list->SetGraphicsRootShaderResourceView(0, root_data_buffer->GetGPUVirtualAddress());
   list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   list->IASetVertexBuffers(0, 1, &vertex_view);
   list->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
@@ -440,7 +450,7 @@ int main(int argc, char **argv) {
     goto cleanup;
   pixel = *reinterpret_cast<UINT *>(mapped_readback);
   readback->Unmap(0, nullptr);
-  expected_pixel = (root_cbv || root_constants) ? 0xff00ff00u : 0xff0000ffu;
+  expected_pixel = (root_cbv || root_constants || root_srv) ? 0xff00ff00u : 0xff0000ffu;
   if ((pixel & 0x00ffffffu) != (expected_pixel & 0x00ffffffu)) {
     std::cerr << "graphics readback mismatch: 0x" << std::hex << pixel
               << std::dec << "\n";
@@ -449,6 +459,7 @@ int main(int argc, char **argv) {
   std::cout << "DXIL "
             << (root_cbv ? "root CBV graphics"
                 : root_constants ? "root constants graphics"
+                : root_srv ? "root SRV graphics"
                 : textured ? "textured graphics"
                            : "graphics")
             << " readback passed: 0x" << std::hex << pixel << std::dec << "\n";
@@ -469,8 +480,8 @@ cleanup:
     texture_upload->Release();
   if (texture)
     texture->Release();
-  if (root_cbv_buffer)
-    root_cbv_buffer->Release();
+  if (root_data_buffer)
+    root_data_buffer->Release();
   if (vertex_buffer)
     vertex_buffer->Release();
   if (render_target)

@@ -90,6 +90,18 @@ if dxc.found()
     command: [ dxc, '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_graphics_root_srv_sm6_vs_fixture',
+    input: 'graphics_root_srv_sm6.hlsl',
+    output: 'graphics_root_srv_sm6.vs.cso',
+    command: [ dxc, '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_root_srv_sm6_ps_fixture',
+    input: 'graphics_root_srv_sm6.hlsl',
+    output: 'graphics_root_srv_sm6.ps.cso',
+    command: [ dxc, '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_graphics_texture_sm6_vs_fixture',
     input: 'graphics_texture_sm6.hlsl',
     output: 'graphics_texture_sm6.vs.cso',
