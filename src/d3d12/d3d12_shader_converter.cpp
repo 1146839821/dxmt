@@ -3,10 +3,14 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <mutex>
+#include <shared_mutex>
+#include <unordered_map>
 
 #include "DXBCParser/BlobContainer.h"
 #include "log/log.hpp"
 #include "metalirconverter_thunks.h"
+#include "sha1/sha1_util.hpp"
 
 namespace dxmt {
 
@@ -21,6 +25,47 @@ MakeFourCC(char a, char b, char c, char d) {
 }
 
 constexpr uint32_t kDXILFourCC = MakeFourCC('D', 'X', 'I', 'L');
+
+// This cache is process-local, but the key still encodes every converter input
+// that can change the generated metallib. Bump the version when the ABI or
+// converter defaults change.
+constexpr uint32_t kMSCConversionCacheVersion = 1;
+constexpr uint32_t kMSCConverterAPIVersion = 0x040001;
+constexpr uint32_t kMSCMetalTargetVersion = 0;
+constexpr uint32_t kMSCCompileFlags = 0;
+constexpr uint32_t kMSCBindingLayoutVersion = 1;
+
+struct MSCConversionCache {
+  std::shared_mutex mutex;
+  std::unordered_map<Sha1Digest, D3D12ConvertedShader> entries;
+};
+
+MSCConversionCache &
+GetMSCConversionCache() {
+  static MSCConversionCache cache;
+  return cache;
+}
+
+Sha1Digest
+MakeMSCConversionCacheKey(
+    const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const void *root_signature, size_t root_signature_size
+) {
+  Sha1HashState hash;
+  hash.update(kMSCConversionCacheVersion);
+  hash.update(kMSCConverterAPIVersion);
+  hash.update(kMSCMetalTargetVersion);
+  hash.update(kMSCCompileFlags);
+  hash.update(kMSCBindingLayoutVersion);
+  hash.update(stage);
+  uint64_t shader_size = shader.BytecodeLength;
+  hash.update(shader_size);
+  hash.update(shader.pShaderBytecode, shader.BytecodeLength);
+  uint64_t root_size = root_signature ? root_signature_size : 0;
+  hash.update(root_size);
+  if (root_size)
+    hash.update(root_signature, root_signature_size);
+  return hash.final();
+}
 
 bool
 HasDXBCHeader(const D3D12_SHADER_BYTECODE &shader) {
@@ -106,6 +151,18 @@ ConvertD3D12Shader(
     return E_FAIL;
   }
 
+  auto cache_key = MakeMSCConversionCacheKey(shader, stage, root_signature, root_signature_size);
+  auto &cache = GetMSCConversionCache();
+  {
+    std::shared_lock<std::shared_mutex> lock(cache.mutex);
+    auto cached = cache.entries.find(cache_key);
+    if (cached != cache.entries.end()) {
+      converted = cached->second;
+      DEBUG("MSC shader conversion cache hit");
+      return S_OK;
+    }
+  }
+
   char error_message[1024] = {};
   size_t metallib_size = 0;
   size_t entry_point_size = 0;
@@ -140,6 +197,11 @@ ConvertD3D12Shader(
   converted.entry_point.assign(entry_point.data(), entry_point_size - 1);
   converted.threadgroup_size = threadgroup_size;
   converted.backend = D3D12ShaderBackend::MetalShaderConverter;
+
+  {
+    std::unique_lock<std::shared_mutex> lock(cache.mutex);
+    cache.entries.emplace(cache_key, converted);
+  }
   return S_OK;
 }
 

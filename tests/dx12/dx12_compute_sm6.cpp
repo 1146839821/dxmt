@@ -26,7 +26,8 @@ int main(int argc, char **argv) {
     std::cerr << "usage: dx12_compute_sm6 <shader.cso> "
                  "[--root-uav|--descriptor-uav|--descriptor-resources|--"
                  "descriptor-resources-space|--root-cbv|--root-constants|--"
-                 "descriptor-resources-1-1|--direct-indexed|--root-srv]\n";
+                 "descriptor-resources-1-1|--direct-indexed|--root-srv|--"
+                 "cache-probe]\n";
     return 2;
   }
   const bool root_uav = argc == 3 && strcmp(argv[2], "--root-uav") == 0;
@@ -47,9 +48,10 @@ int main(int argc, char **argv) {
   const bool root_constants =
       argc == 3 && strcmp(argv[2], "--root-constants") == 0;
   const bool root_srv = argc == 3 && strcmp(argv[2], "--root-srv") == 0;
+  const bool cache_probe = argc == 3 && strcmp(argv[2], "--cache-probe") == 0;
   if (argc == 3 && !root_uav && !descriptor_uav && !descriptor_resources &&
       !descriptor_resources_space && !descriptor_resources_1_1 && !root_cbv &&
-      !root_constants && !root_srv && !direct_indexed) {
+      !root_constants && !root_srv && !direct_indexed && !cache_probe) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
@@ -79,6 +81,7 @@ int main(int argc, char **argv) {
   ID3D12Resource *output_buffer = nullptr;
   ID3D12Resource *readback_buffer = nullptr;
   ID3D12PipelineState *pso = nullptr;
+  ID3D12PipelineState *cache_probe_pso = nullptr;
   ID3D12GraphicsCommandList *list = nullptr;
   ID3D12Fence *fence = nullptr;
   HANDLE event = nullptr;
@@ -320,6 +323,11 @@ int main(int argc, char **argv) {
           "CreateComputePipelineState",
           device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso))))
     goto cleanup;
+  if (cache_probe &&
+      !CheckHR("CreateCachedComputePipelineState",
+               device->CreateComputePipelineState(&pso_desc,
+                                                  IID_PPV_ARGS(&cache_probe_pso))))
+    goto cleanup;
   if (!CheckHR("CreateCommandList",
                device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                          allocator, pso, IID_PPV_ARGS(&list))))
@@ -416,6 +424,8 @@ cleanup:
     list->Release();
   if (pso)
     pso->Release();
+  if (cache_probe_pso)
+    cache_probe_pso->Release();
   if (readback_buffer)
     readback_buffer->Release();
   if (input_buffer)
