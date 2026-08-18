@@ -60,6 +60,12 @@ if dxc.found()
     command: [ dxc, '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_texture_sampler_direct_indexed_fixture',
+    input: 'texture_sampler_direct_indexed.hlsl',
+    output: 'texture_sampler_direct_indexed.cs.cso',
+    command: [ dxc, '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_graphics_sm6_vs_fixture',
     input: 'graphics_sm6.hlsl',
     output: 'graphics_sm6.vs.cso',

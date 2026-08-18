@@ -22,7 +22,8 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 3)
     return 2;
   const bool static_sampler = argc == 3 && strcmp(argv[2], "--static-sampler") == 0;
-  if (argc == 3 && !static_sampler)
+  const bool direct_indexed = argc == 3 && strcmp(argv[2], "--direct-indexed") == 0;
+  if (argc == 3 && !static_sampler && !direct_indexed)
     return 2;
 
   std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
@@ -54,12 +55,14 @@ main(int argc, char **argv) {
   UINT value = 0;
   UINT descriptor_increment = 0;
   unsigned root_parameter_count = 0;
+  HRESULT serialize_hr = E_FAIL;
   int result = 1;
 
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   D3D12_DESCRIPTOR_RANGE ranges[3] = {};
   D3D12_ROOT_PARAMETER root_parameters[3] = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+  D3D12_VERSIONED_ROOT_SIGNATURE_DESC versioned_root_desc = {};
   D3D12_STATIC_SAMPLER_DESC static_sampler_desc = {};
   D3D12_DESCRIPTOR_HEAP_DESC resource_heap_desc = {};
   D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_desc = {};
@@ -94,18 +97,25 @@ main(int argc, char **argv) {
           device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))))
     goto cleanup;
 
-  ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
-  ranges[1] = {static_sampler ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV : D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
-  if (!static_sampler)
-    ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
-  root_parameter_count = static_sampler ? 2 : 3;
-  for (unsigned i = 0; i < root_parameter_count; i++) {
-    root_parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    root_parameters[i].DescriptorTable.NumDescriptorRanges = 1;
-    root_parameters[i].DescriptorTable.pDescriptorRanges = &ranges[i];
+  if (direct_indexed) {
+    versioned_root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    versioned_root_desc.Desc_1_1.Flags =
+        D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+        D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED;
+  } else {
+    ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
+    ranges[1] = {static_sampler ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV : D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
+    if (!static_sampler)
+      ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
+    root_parameter_count = static_sampler ? 2 : 3;
+    for (unsigned i = 0; i < root_parameter_count; i++) {
+      root_parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      root_parameters[i].DescriptorTable.NumDescriptorRanges = 1;
+      root_parameters[i].DescriptorTable.pDescriptorRanges = &ranges[i];
+    }
+    root_desc.NumParameters = root_parameter_count;
+    root_desc.pParameters = root_parameters;
   }
-  root_desc.NumParameters = root_parameter_count;
-  root_desc.pParameters = root_parameters;
   if (static_sampler) {
     static_sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     static_sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -122,9 +132,10 @@ main(int argc, char **argv) {
     root_desc.NumStaticSamplers = 1;
     root_desc.pStaticSamplers = &static_sampler_desc;
   }
-  if (!CheckHR(
-          "D3D12SerializeRootSignature",
-          D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob, &root_error)))
+  serialize_hr = direct_indexed
+                     ? D3D12SerializeVersionedRootSignature(&versioned_root_desc, &root_blob, &root_error)
+                     : D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob, &root_error);
+  if (!CheckHR("D3D12SerializeRootSignature", serialize_hr))
     goto cleanup;
   if (!CheckHR(
           "CreateRootSignature",
@@ -245,14 +256,16 @@ main(int argc, char **argv) {
     heaps[1] = sampler_heap;
   list->SetDescriptorHeaps(static_sampler ? 1 : 2, heaps);
   list->SetComputeRootSignature(root_signature);
-  list->SetComputeRootDescriptorTable(0, resource_heap->GetGPUDescriptorHandleForHeapStart());
-  resource_gpu = resource_heap->GetGPUDescriptorHandleForHeapStart();
-  resource_gpu.ptr += descriptor_increment;
-  if (static_sampler) {
-    list->SetComputeRootDescriptorTable(1, resource_gpu);
-  } else {
-    list->SetComputeRootDescriptorTable(1, sampler_heap->GetGPUDescriptorHandleForHeapStart());
-    list->SetComputeRootDescriptorTable(2, resource_gpu);
+  if (!direct_indexed) {
+    list->SetComputeRootDescriptorTable(0, resource_heap->GetGPUDescriptorHandleForHeapStart());
+    resource_gpu = resource_heap->GetGPUDescriptorHandleForHeapStart();
+    resource_gpu.ptr += descriptor_increment;
+    if (static_sampler) {
+      list->SetComputeRootDescriptorTable(1, resource_gpu);
+    } else {
+      list->SetComputeRootDescriptorTable(1, sampler_heap->GetGPUDescriptorHandleForHeapStart());
+      list->SetComputeRootDescriptorTable(2, resource_gpu);
+    }
   }
   list->Dispatch(1, 1, 1);
   list->CopyBufferRegion(readback, 0, output, 0, sizeof(UINT));
@@ -276,8 +289,8 @@ main(int argc, char **argv) {
     std::cerr << "texture sampler readback mismatch: " << value << "\n";
     goto cleanup;
   }
-  std::cout << "DXIL " << (static_sampler ? "static" : "dynamic") << " texture sampler readback passed: " << value
-            << "\n";
+  std::cout << "DXIL " << (direct_indexed ? "direct indexed" : static_sampler ? "static" : "dynamic")
+            << " texture sampler readback passed: " << value << "\n";
   result = 0;
 
 cleanup:
