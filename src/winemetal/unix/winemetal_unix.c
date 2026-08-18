@@ -2776,6 +2776,22 @@ _DispatchData_alloc_init(void *obj) {
   return STATUS_SUCCESS;
 }
 
+static NTSTATUS
+_DispatchData_copy(void *obj) {
+  struct unixcall_dispatchdata_copy *params = obj;
+  dispatch_data_t data = (dispatch_data_t)params->data;
+  size_t size = dispatch_data_get_size(data);
+  params->ret_size = size;
+  if (!params->destination || params->capacity < size)
+    return STATUS_SUCCESS;
+
+  dispatch_data_apply(data, ^bool(dispatch_data_t region, size_t offset, const void *buffer, size_t region_size) {
+    memcpy((uint8_t *)(uintptr_t)params->destination + offset, buffer, region_size);
+    return true;
+  });
+  return STATUS_SUCCESS;
+}
+
 @interface MTLSharedTextureHandle ()
 
 - (MTLSharedTextureHandle *)initWithMachPort:(mach_port_t)port;
@@ -3375,6 +3391,7 @@ const void *__wine_unix_call_funcs[] = {
     &thunk_DXMTMSCIsAvailable,
     &thunk_DXMTMSCCompileDXIL,
     &thunk_DXMTMSCGetRootLayout,
+    &_DispatchData_copy,
 };
 
 #ifndef DXMT_NATIVE
@@ -3527,5 +3544,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &thunk32_DXMTMSCIsAvailable,
     &thunk32_DXMTMSCCompileDXIL,
     &thunk32_DXMTMSCGetRootLayout,
+    &_DispatchData_copy,
 };
 #endif

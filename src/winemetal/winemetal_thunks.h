@@ -6,6 +6,10 @@
 
 #pragma pack(push, 8)
 
+enum winemetal_unixcall {
+  unix_dispatchdata_copy = 148,
+};
+
 struct unixcall_generic_obj_ret {
   obj_handle_t ret;
 };
@@ -55,6 +59,13 @@ struct unixcall_generic_obj_uint64_uint64_ret {
   obj_handle_t handle;
   uint64_t arg;
   uint64_t ret;
+};
+
+struct unixcall_dispatchdata_copy {
+  obj_handle_t data;
+  uint64_t destination;
+  uint64_t capacity;
+  uint64_t ret_size;
 };
 
 struct unixcall_nsstring_getcstring {

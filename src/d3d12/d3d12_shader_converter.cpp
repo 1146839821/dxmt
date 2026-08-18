@@ -8,6 +8,7 @@
 #include <unordered_map>
 
 #include "DXBCParser/BlobContainer.h"
+#include "dxmt_shader_cache.hpp"
 #include "log/log.hpp"
 #include "metalirconverter_thunks.h"
 #include "sha1/sha1_util.hpp"
@@ -34,6 +35,18 @@ constexpr uint32_t kMSCConverterAPIVersion = 0x040001;
 constexpr uint32_t kMSCMetalTargetVersion = 0;
 constexpr uint32_t kMSCCompileFlags = 0;
 constexpr uint32_t kMSCBindingLayoutVersion = 1;
+constexpr char kMSCConversionCacheNamespace[] = "dxmt-msc-conversion";
+constexpr uint32_t kMSCSerializedCacheMagic = MakeFourCC('M', 'S', 'C', 'C');
+constexpr uint64_t kMSCSerializedCacheLimit = 256ull * 1024ull * 1024ull;
+
+struct MSCSerializedCacheHeader {
+  uint32_t magic;
+  uint32_t version;
+  uint64_t metallib_size;
+  uint64_t entry_point_size;
+  uint32_t threadgroup_size[3];
+  uint32_t reserved;
+};
 
 struct MSCConversionCache {
   std::shared_mutex mutex;
@@ -51,6 +64,7 @@ MakeMSCConversionCacheKey(
     const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const void *root_signature, size_t root_signature_size
 ) {
   Sha1HashState hash;
+  hash.update(kMSCConversionCacheNamespace, sizeof(kMSCConversionCacheNamespace) - 1);
   hash.update(kMSCConversionCacheVersion);
   hash.update(kMSCConverterAPIVersion);
   hash.update(kMSCMetalTargetVersion);
@@ -65,6 +79,98 @@ MakeMSCConversionCacheKey(
   if (root_size)
     hash.update(root_signature, root_signature_size);
   return hash.final();
+}
+
+bool
+DeserializeMSCConversionCache(const uint8_t *data, size_t data_size, D3D12ConvertedShader &converted) {
+  if (!data || data_size < sizeof(MSCSerializedCacheHeader))
+    return false;
+
+  MSCSerializedCacheHeader header;
+  memcpy(&header, data, sizeof(header));
+  if (header.magic != kMSCSerializedCacheMagic || header.version != kMSCConversionCacheVersion)
+    return false;
+  if (header.metallib_size > kMSCSerializedCacheLimit || header.entry_point_size > kMSCSerializedCacheLimit)
+    return false;
+
+  uint64_t payload_size = header.metallib_size + header.entry_point_size;
+  if (payload_size < header.metallib_size || payload_size > data_size - sizeof(header))
+    return false;
+
+  size_t offset = sizeof(header);
+  converted.metallib.assign(data + offset, data + offset + static_cast<size_t>(header.metallib_size));
+  offset += static_cast<size_t>(header.metallib_size);
+  converted.entry_point.assign(reinterpret_cast<const char *>(data + offset),
+                               static_cast<size_t>(header.entry_point_size));
+  converted.threadgroup_size = {
+      header.threadgroup_size[0], header.threadgroup_size[1], header.threadgroup_size[2]
+  };
+  converted.backend = D3D12ShaderBackend::MetalShaderConverter;
+  return !converted.metallib.empty() && !converted.entry_point.empty();
+}
+
+std::vector<uint8_t>
+SerializeMSCConversionCache(const D3D12ConvertedShader &converted) {
+  if (converted.metallib.empty() || converted.entry_point.empty() ||
+      converted.metallib.size() > kMSCSerializedCacheLimit ||
+      converted.entry_point.size() > kMSCSerializedCacheLimit)
+    return {};
+
+  MSCSerializedCacheHeader header = {};
+  header.magic = kMSCSerializedCacheMagic;
+  header.version = kMSCConversionCacheVersion;
+  header.metallib_size = converted.metallib.size();
+  header.entry_point_size = converted.entry_point.size();
+  header.threadgroup_size[0] = converted.threadgroup_size[0];
+  header.threadgroup_size[1] = converted.threadgroup_size[1];
+  header.threadgroup_size[2] = converted.threadgroup_size[2];
+
+  uint64_t total_size = sizeof(header) + header.metallib_size + header.entry_point_size;
+  if (total_size < sizeof(header) || total_size > kMSCSerializedCacheLimit || total_size > SIZE_MAX)
+    return {};
+
+  std::vector<uint8_t> result(static_cast<size_t>(total_size));
+  memcpy(result.data(), &header, sizeof(header));
+  size_t offset = sizeof(header);
+  memcpy(result.data() + offset, converted.metallib.data(), converted.metallib.size());
+  offset += converted.metallib.size();
+  memcpy(result.data() + offset, converted.entry_point.data(), converted.entry_point.size());
+  return result;
+}
+
+bool
+LoadPersistentMSCConversion(const Sha1Digest &key, D3D12ConvertedShader &converted) {
+  auto &cache = ShaderCache::getInstance(WMTMetalVersionMax);
+  auto reader = cache.getReader();
+  if (!reader)
+    return false;
+
+  auto data = reader->get(key);
+  if (!data)
+    return false;
+  uint64_t data_size = data.size();
+  if (!data_size || data_size > kMSCSerializedCacheLimit || data_size > SIZE_MAX)
+    return false;
+
+  std::vector<uint8_t> serialized(static_cast<size_t>(data_size));
+  if (data.copy(serialized.data(), data_size) != data_size)
+    return false;
+  return DeserializeMSCConversionCache(serialized.data(), serialized.size(), converted);
+}
+
+void
+StorePersistentMSCConversion(const Sha1Digest &key, const D3D12ConvertedShader &converted) {
+  auto serialized = SerializeMSCConversionCache(converted);
+  if (serialized.empty())
+    return;
+
+  auto &cache = ShaderCache::getInstance(WMTMetalVersionMax);
+  auto writer = cache.getWriter();
+  if (!writer)
+    return;
+  auto data = WMT::MakeDispatchData(serialized.data(), serialized.size());
+  if (data)
+    writer->set(key, data);
 }
 
 bool
@@ -162,6 +268,12 @@ ConvertD3D12Shader(
       return S_OK;
     }
   }
+  if (LoadPersistentMSCConversion(cache_key, converted)) {
+    std::unique_lock<std::shared_mutex> lock(cache.mutex);
+    cache.entries.emplace(cache_key, converted);
+    DEBUG("MSC shader persistent cache hit");
+    return S_OK;
+  }
 
   char error_message[1024] = {};
   size_t metallib_size = 0;
@@ -202,6 +314,7 @@ ConvertD3D12Shader(
     std::unique_lock<std::shared_mutex> lock(cache.mutex);
     cache.entries.emplace(cache_key, converted);
   }
+  StorePersistentMSCConversion(cache_key, converted);
   return S_OK;
 }
 

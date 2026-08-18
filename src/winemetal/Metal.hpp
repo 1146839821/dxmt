@@ -171,6 +171,15 @@ public:
 
 class DispatchData : public Object {
 public:
+  uint64_t
+  size() const {
+    return DispatchData_copy(handle, nullptr, 0);
+  }
+
+  uint64_t
+  copy(void *destination, uint64_t capacity) const {
+    return DispatchData_copy(handle, destination, capacity);
+  }
 };
 
 class Event : public Object {

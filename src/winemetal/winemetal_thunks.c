@@ -1001,6 +1001,17 @@ DispatchData_alloc_init(uint64_t native_ptr, uint64_t length) {
   return params.ret;
 }
 
+WINEMETAL_API uint64_t
+DispatchData_copy(obj_handle_t data, void *destination, uint64_t capacity) {
+  struct unixcall_dispatchdata_copy params;
+  params.data = data;
+  params.destination = (uint64_t)destination;
+  params.capacity = capacity;
+  params.ret_size = 0;
+  UNIX_CALL(unix_dispatchdata_copy, &params);
+  return params.ret_size;
+}
+
 WINEMETAL_API obj_handle_t
 CacheReader_alloc_init(const char *path, uint64_t version) {
   struct unixcall_cache_alloc_init params;
