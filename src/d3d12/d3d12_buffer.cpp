@@ -47,6 +47,10 @@ public:
     buffer = new Buffer(desc_.Width, device_->GetMTLDevice());
 
     Flags<BufferAllocationFlag> flags;
+#ifdef __i386__
+    if (pHeapProps->Type == D3D12_HEAP_TYPE_UPLOAD || pHeapProps->Type == D3D12_HEAP_TYPE_READBACK)
+      flags.set(BufferAllocationFlag::CpuPlaced);
+#endif
     buffer->rename(buffer->allocate(flags));
     device_->RegisterResidencyAndVA(buffer->current());
 
