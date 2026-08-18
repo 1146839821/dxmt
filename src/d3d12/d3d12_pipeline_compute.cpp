@@ -102,21 +102,20 @@ public:
 
     sm50_error_t sm50_err;
 
-    SM50_SHADER_ROOT_SIGNATURE_DATA rootsig;
-    rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
+    SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
     if (pDesc->pRootSignature) {
+      rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
       rootsig.bytecode_length = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&rootsig.bytecode);
+      rootsig.next = nullptr;
     } else {
-      rootsig.bytecode = pDesc->CS.pShaderBytecode;
-      rootsig.bytecode_length = pDesc->CS.BytecodeLength;
+      rootsig.next = nullptr;
     }
-    rootsig.next = nullptr;
 
     SM50_SHADER_COMMON_DATA common;
     common.flags = {};
     common.type = SM50_SHADER_COMMON;
     common.metal_version = SM50_SHADER_METAL_310;
-    common.next = &rootsig;
+    common.next = pDesc->pRootSignature ? &rootsig : nullptr;
 
     if (SM50Initialize(pDesc->CS.pShaderBytecode, pDesc->CS.BytecodeLength, &shader_cs, &ref_cs, &sm50_err)) {
       ERR("Failed to parse cs shader");

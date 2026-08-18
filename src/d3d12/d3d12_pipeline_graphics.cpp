@@ -418,21 +418,23 @@ public:
         data_ia_layout.slot_mask = slot_mask;
         data_ia_layout.next = &common;
 
-        SM50_SHADER_ROOT_SIGNATURE_DATA rootsig;
-        rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
+        SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
+        SM50_SHADER_COMPILATION_ARGUMENT_DATA *shader_args =
+            reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&data_ia_layout);
         if (pDesc->pRootSignature) {
+          rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
           rootsig.bytecode_length =
               static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&rootsig.bytecode);
+          rootsig.next = &data_ia_layout;
+          shader_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
         } else {
-          rootsig.bytecode = pDesc->VS.pShaderBytecode;
-          rootsig.bytecode_length = pDesc->VS.BytecodeLength;
+          data_ia_layout.next = &common;
         }
-        rootsig.next = &data_ia_layout;
 
         sm50_bitcode_t vs_bitcode;
 
         if (SM50Compile(
-                shader_vs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig, "vs_main", &vs_bitcode, &sm50_err
+                shader_vs, shader_args, "vs_main", &vs_bitcode, &sm50_err
             )) {
           ERR("Failed to compile vs shader");
           return E_FAIL;
@@ -535,20 +537,22 @@ public:
       data_ps.type = SM50_SHADER_PSO_PIXEL_SHADER;
       data_ps.next = &common;
 
-      SM50_SHADER_ROOT_SIGNATURE_DATA rootsig;
-      rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
+      SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
+      SM50_SHADER_COMPILATION_ARGUMENT_DATA *shader_args =
+          reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&data_ps);
       if (pDesc->pRootSignature) {
+        rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
         rootsig.bytecode_length =
             static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&rootsig.bytecode);
+        rootsig.next = &data_ps;
+        shader_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
       } else {
-        rootsig.bytecode = pDesc->PS.pShaderBytecode;
-        rootsig.bytecode_length = pDesc->PS.BytecodeLength;
+        data_ps.next = &common;
       }
-      rootsig.next = &data_ps;
 
       sm50_bitcode_t ps_bitcode;
       if (SM50Compile(
-              shader_ps, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig, ps_name.c_str(), &ps_bitcode, &sm50_err
+              shader_ps, shader_args, ps_name.c_str(), &ps_bitcode, &sm50_err
           )) {
         ERR("Failed to compile ps shader");
         return E_FAIL;

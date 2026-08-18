@@ -69,6 +69,7 @@ int main(int argc, char **argv) {
   shader_file.seekg(0);
   std::vector<char> shader(static_cast<size_t>(shader_size));
   shader_file.read(shader.data(), shader.size());
+  const bool is_dxbc = shader.size() >= 4 && memcmp(shader.data(), "DXBC", 4) == 0;
 
   ID3D12Device *device = nullptr;
   ID3D12CommandQueue *queue = nullptr;
@@ -402,7 +403,7 @@ int main(int argc, char **argv) {
       std::cerr << "root parameter readback mismatch: " << output_value << "\n";
       goto cleanup;
     }
-    std::cout << "DXIL cs_6_0 "
+    std::cout << (is_dxbc ? "DXBC" : "DXIL") << " cs_6_0 "
               << (root_cbv                     ? "root CBV"
                   : root_constants             ? "root constants"
                   : root_srv                   ? "root SRV"
@@ -411,7 +412,7 @@ int main(int argc, char **argv) {
                                                : "root UAV")
               << " readback passed: " << output_value << "\n";
   } else {
-    std::cout << "DXIL cs_6_0 no-resource Dispatch passed\n";
+    std::cout << (is_dxbc ? "DXBC" : "DXIL") << " cs_6_0 no-resource Dispatch passed\n";
   }
   result = 0;
 
