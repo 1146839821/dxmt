@@ -29,7 +29,8 @@ int main(int argc, char **argv) {
   const bool root_cbv = argc == 4 && strcmp(argv[3], "--root-cbv") == 0;
   const bool root_constants = argc == 4 && strcmp(argv[3], "--root-constants") == 0;
   const bool root_srv = argc == 4 && strcmp(argv[3], "--root-srv") == 0;
-  if (argc == 4 && !textured && !root_cbv && !root_constants && !root_srv)
+  const bool root_uav = argc == 4 && strcmp(argv[3], "--root-uav") == 0;
+  if (argc == 4 && !textured && !root_cbv && !root_constants && !root_srv && !root_uav)
     return 2;
 
   std::ifstream vertex_file(argv[1], std::ios::binary | std::ios::ate);
@@ -71,6 +72,7 @@ int main(int argc, char **argv) {
   ID3D12Resource *render_target = nullptr;
   ID3D12Resource *vertex_buffer = nullptr;
   ID3D12Resource *root_data_buffer = nullptr;
+  ID3D12Resource *root_uav_buffer = nullptr;
   ID3D12Resource *texture = nullptr;
   ID3D12Resource *texture_upload = nullptr;
   ID3D12Resource *readback = nullptr;
@@ -108,6 +110,7 @@ int main(int argc, char **argv) {
   D3D12_TEXTURE_COPY_LOCATION texture_upload_dst = {};
   D3D12_TEXTURE_COPY_LOCATION texture_upload_src = {};
   D3D12_RESOURCE_BARRIER barrier = {};
+  D3D12_RESOURCE_BARRIER root_uav_barrier = {};
   D3D12_RESOURCE_BARRIER texture_barrier = {};
   D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
   D3D12_SAMPLER_DESC sampler_desc = {};
@@ -156,6 +159,13 @@ int main(int argc, char **argv) {
     root_desc.pParameters = root_parameters;
   } else if (root_srv) {
     root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    root_parameters[0].Descriptor.ShaderRegister = 0;
+    root_parameters[0].Descriptor.RegisterSpace = 0;
+    root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    root_desc.NumParameters = 1;
+    root_desc.pParameters = root_parameters;
+  } else if (root_uav) {
+    root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
     root_parameters[0].Descriptor.ShaderRegister = 0;
     root_parameters[0].Descriptor.RegisterSpace = 0;
     root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
@@ -331,6 +341,16 @@ int main(int argc, char **argv) {
     memcpy(mapped_root_data, root_color, sizeof(root_color));
     root_data_buffer->Unmap(0, nullptr);
   }
+  if (root_uav) {
+    buffer_desc.Width = 256;
+    buffer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (!CheckHR("CreateRootUAV",
+                 device->CreateCommittedResource(
+                     &default_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                     IID_PPV_ARGS(&root_uav_buffer))))
+      goto cleanup;
+  }
 
   pso_desc.pRootSignature = root_signature;
   pso_desc.VS.pShaderBytecode = vertex_shader.data();
@@ -392,25 +412,37 @@ int main(int argc, char **argv) {
     list->SetGraphicsRoot32BitConstants(0, 4, root_color_bits, 0);
   if (root_srv)
     list->SetGraphicsRootShaderResourceView(0, root_data_buffer->GetGPUVirtualAddress());
+  if (root_uav)
+    list->SetGraphicsRootUnorderedAccessView(0, root_uav_buffer->GetGPUVirtualAddress());
   list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   list->IASetVertexBuffers(0, 1, &vertex_view);
   list->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
   list->DrawInstanced(3, 1, 0, 0);
 
-  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-  barrier.Transition.pResource = render_target;
-  barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-  barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-  barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-  list->ResourceBarrier(1, &barrier);
+  if (root_uav) {
+    root_uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    root_uav_barrier.Transition.pResource = root_uav_buffer;
+    root_uav_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    root_uav_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    root_uav_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list->ResourceBarrier(1, &root_uav_barrier);
+    readback_desc.Width = 256;
+  } else {
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = render_target;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list->ResourceBarrier(1, &barrier);
 
-  device->GetCopyableFootprints(&render_target_desc, 0, 1, 0, &footprint,
-                                &row_count, &row_size, &total_size);
+    device->GetCopyableFootprints(&render_target_desc, 0, 1, 0, &footprint,
+                                  &row_count, &row_size, &total_size);
+    readback_desc.Width = total_size;
+  }
   readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
   readback_heap.CreationNodeMask = 1;
   readback_heap.VisibleNodeMask = 1;
   readback_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  readback_desc.Width = total_size;
   readback_desc.Height = 1;
   readback_desc.DepthOrArraySize = 1;
   readback_desc.MipLevels = 1;
@@ -422,12 +454,16 @@ int main(int argc, char **argv) {
                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                    IID_PPV_ARGS(&readback))))
     goto cleanup;
-  copy_dst.pResource = readback;
-  copy_dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-  copy_dst.PlacedFootprint = footprint;
-  copy_src.pResource = render_target;
-  copy_src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-  list->CopyTextureRegion(&copy_dst, 0, 0, 0, &copy_src, nullptr);
+  if (root_uav) {
+    list->CopyBufferRegion(readback, 0, root_uav_buffer, 0, sizeof(UINT));
+  } else {
+    copy_dst.pResource = readback;
+    copy_dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    copy_dst.PlacedFootprint = footprint;
+    copy_src.pResource = render_target;
+    copy_src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    list->CopyTextureRegion(&copy_dst, 0, 0, 0, &copy_src, nullptr);
+  }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
 
@@ -450,7 +486,7 @@ int main(int argc, char **argv) {
     goto cleanup;
   pixel = *reinterpret_cast<UINT *>(mapped_readback);
   readback->Unmap(0, nullptr);
-  expected_pixel = (root_cbv || root_constants || root_srv) ? 0xff00ff00u : 0xff0000ffu;
+  expected_pixel = (root_cbv || root_constants || root_srv || root_uav) ? 0xff00ff00u : 0xff0000ffu;
   if ((pixel & 0x00ffffffu) != (expected_pixel & 0x00ffffffu)) {
     std::cerr << "graphics readback mismatch: 0x" << std::hex << pixel
               << std::dec << "\n";
@@ -460,6 +496,7 @@ int main(int argc, char **argv) {
             << (root_cbv ? "root CBV graphics"
                 : root_constants ? "root constants graphics"
                 : root_srv ? "root SRV graphics"
+                : root_uav ? "root UAV graphics"
                 : textured ? "textured graphics"
                            : "graphics")
             << " readback passed: 0x" << std::hex << pixel << std::dec << "\n";
@@ -480,6 +517,8 @@ cleanup:
     texture_upload->Release();
   if (texture)
     texture->Release();
+  if (root_uav_buffer)
+    root_uav_buffer->Release();
   if (root_data_buffer)
     root_data_buffer->Release();
   if (vertex_buffer)
