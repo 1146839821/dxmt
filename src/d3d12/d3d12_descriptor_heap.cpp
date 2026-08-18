@@ -207,6 +207,11 @@ public:
     return msc_argument_buffer_gpu_address_ + index * sizeof(dxmt_msc_descriptor_entry);
   }
 
+  WMT::Buffer
+  GetMSCDescriptorHeapBuffer() override {
+    return msc_buffer_ ? msc_buffer_->current()->buffer() : WMT::Buffer{};
+  }
+
   virtual HRESULT
   AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp) {
     if (Index >= descriptors_.size())
@@ -650,6 +655,11 @@ public:
     if (index >= samplers_.size())
       return 0;
     return msc_argument_buffer_gpu_address_ + index * sizeof(dxmt_msc_descriptor_entry);
+  }
+
+  WMT::Buffer
+  GetMSCDescriptorHeapBuffer() override {
+    return msc_buffer_ ? msc_buffer_->current()->buffer() : WMT::Buffer{};
   }
 
 

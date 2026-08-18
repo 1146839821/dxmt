@@ -26,6 +26,7 @@ enum class DirtyState {
   VertexBuffer,
   GraphicsRootArguments,
   GraphicsRootSignature,
+  DescriptorHeaps,
   Viewport,
   ScissorRect,
   ComputeRootArguments,
@@ -389,13 +390,50 @@ public:
       if (pso_graphics_) {
         UpdateGraphicsPSO(pso_graphics_.ptr());
       }
-      dirty_state_.set(DirtyState::VertexBuffer, DirtyState::GraphicsRootArguments, DirtyState::GraphicsRootSignature);
+      dirty_state_.set(
+          DirtyState::VertexBuffer, DirtyState::GraphicsRootArguments, DirtyState::GraphicsRootSignature,
+          DirtyState::DescriptorHeaps
+      );
       dirty_state_.set(DirtyState::Viewport, DirtyState::ScissorRect);
       dirty_state_.set(DirtyState::BlendFactor, DirtyState::StencilRef);
     }
     if (dirty_state_.test(DirtyState::VertexBuffer)) {
       EncodeVertexBuffers();
       dirty_state_.clr(DirtyState::VertexBuffer);
+    }
+
+    if (use_msc && dirty_state_.test(DirtyState::DescriptorHeaps)) {
+      if (descriptor_heap_) {
+        auto buffer = descriptor_heap_->GetMSCDescriptorHeapBuffer();
+        if (buffer) {
+          auto &cmd_vs = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+          cmd_vs.type = WMTRenderCommandSetVertexBuffer;
+          cmd_vs.buffer = buffer.handle;
+          cmd_vs.offset = 0;
+          cmd_vs.index = DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT;
+          auto &cmd_fs = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+          cmd_fs.type = WMTRenderCommandSetFragmentBuffer;
+          cmd_fs.buffer = buffer.handle;
+          cmd_fs.offset = 0;
+          cmd_fs.index = DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT;
+        }
+      }
+      if (sampler_heap_) {
+        auto buffer = sampler_heap_->GetMSCDescriptorHeapBuffer();
+        if (buffer) {
+          auto &cmd_vs = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+          cmd_vs.type = WMTRenderCommandSetVertexBuffer;
+          cmd_vs.buffer = buffer.handle;
+          cmd_vs.offset = 0;
+          cmd_vs.index = DXMT_MSC_SAMPLER_HEAP_BIND_POINT;
+          auto &cmd_fs = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+          cmd_fs.type = WMTRenderCommandSetFragmentBuffer;
+          cmd_fs.buffer = buffer.handle;
+          cmd_fs.offset = 0;
+          cmd_fs.index = DXMT_MSC_SAMPLER_HEAP_BIND_POINT;
+        }
+      }
+      dirty_state_.clr(DirtyState::DescriptorHeaps);
     }
 
     if (dirty_state_.test(DirtyState::GraphicsRootArguments) && !SkipResourceBinding) {
@@ -639,7 +677,9 @@ public:
       compute->cmd_head.type = WMTComputeCommandNop;
       compute->cmd_head.next.set(0);
       compute->cmd_tail = (wmtcmd_base *)&compute->cmd_head;
-      dirty_state_.set(DirtyState::ComputeRootArguments, DirtyState::ComputeRootSignature);
+      dirty_state_.set(
+          DirtyState::ComputeRootArguments, DirtyState::ComputeRootSignature, DirtyState::DescriptorHeaps
+      );
       if (pso_compute_) {
         auto &cmd_setpso = allocator_->EncodeComputeCommand<wmtcmd_compute_setpso>();
         cmd_setpso.type = WMTComputeCommandSetPSO;
@@ -652,6 +692,30 @@ public:
     if (use_msc && rootsig_compute_) {
       if (FAILED(rootsig_compute_->InitializeMSCLayout()))
         return false;
+    }
+
+    if (use_msc && dirty_state_.test(DirtyState::DescriptorHeaps)) {
+      if (descriptor_heap_) {
+        auto buffer = descriptor_heap_->GetMSCDescriptorHeapBuffer();
+        if (buffer) {
+          auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+          cmd.type = WMTComputeCommandSetBuffer;
+          cmd.buffer = buffer.handle;
+          cmd.offset = 0;
+          cmd.index = DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT;
+        }
+      }
+      if (sampler_heap_) {
+        auto buffer = sampler_heap_->GetMSCDescriptorHeapBuffer();
+        if (buffer) {
+          auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+          cmd.type = WMTComputeCommandSetBuffer;
+          cmd.buffer = buffer.handle;
+          cmd.offset = 0;
+          cmd.index = DXMT_MSC_SAMPLER_HEAP_BIND_POINT;
+        }
+      }
+      dirty_state_.clr(DirtyState::DescriptorHeaps);
     }
 
     if (dirty_state_.test(DirtyState::ComputeRootArguments) && !SkipResourceBinding) {
@@ -1015,6 +1079,7 @@ public:
         return;
       pso_compute_ = compute_pso;
       pso_graphics_ = nullptr;
+      dirty_state_.set(DirtyState::DescriptorHeaps);
       if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Compute)
         return;
       auto &cmd_setpso = allocator_->EncodeComputeCommand<wmtcmd_compute_setpso>();
@@ -1029,6 +1094,7 @@ public:
       return;
     pso_graphics_ = graphics_pso;
     pso_compute_ = nullptr;
+    dirty_state_.set(DirtyState::DescriptorHeaps);
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render)
       return;
 
@@ -1055,6 +1121,7 @@ public:
       else if (desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
         sampler_heap_ = static_cast<MTLD3D12SamplerDescriptorHeap *>(Heaps[i]);
     }
+    dirty_state_.set(DirtyState::DescriptorHeaps);
   };
 
   void STDMETHODCALLTYPE

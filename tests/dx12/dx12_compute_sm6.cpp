@@ -26,7 +26,7 @@ int main(int argc, char **argv) {
     std::cerr << "usage: dx12_compute_sm6 <shader.cso> "
                  "[--root-uav|--descriptor-uav|--descriptor-resources|--"
                  "descriptor-resources-space|--root-cbv|--root-constants|--"
-                 "descriptor-resources-1-1|--root-srv]\n";
+                 "descriptor-resources-1-1|--direct-indexed|--root-srv]\n";
     return 2;
   }
   const bool root_uav = argc == 3 && strcmp(argv[2], "--root-uav") == 0;
@@ -38,6 +38,8 @@ int main(int argc, char **argv) {
       argc == 3 && strcmp(argv[2], "--descriptor-resources-space") == 0;
   const bool descriptor_resources_1_1 =
       argc == 3 && strcmp(argv[2], "--descriptor-resources-1-1") == 0;
+  const bool direct_indexed =
+      argc == 3 && strcmp(argv[2], "--direct-indexed") == 0;
   const bool descriptor_table_resources = descriptor_resources ||
                                           descriptor_resources_space ||
                                           descriptor_resources_1_1;
@@ -47,13 +49,13 @@ int main(int argc, char **argv) {
   const bool root_srv = argc == 3 && strcmp(argv[2], "--root-srv") == 0;
   if (argc == 3 && !root_uav && !descriptor_uav && !descriptor_resources &&
       !descriptor_resources_space && !descriptor_resources_1_1 && !root_cbv &&
-      !root_constants && !root_srv) {
+      !root_constants && !root_srv && !direct_indexed) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
-  const bool needs_root_signature = root_uav || descriptor_uav ||
-                                    descriptor_table_resources || root_cbv ||
-                                    root_constants || root_srv;
+  const bool needs_root_signature =
+      root_uav || descriptor_uav || descriptor_table_resources ||
+      direct_indexed || root_cbv || root_constants || root_srv;
   const bool needs_output = needs_root_signature;
 
   std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
@@ -141,6 +143,10 @@ int main(int argc, char **argv) {
       root_parameters[1].Descriptor.RegisterSpace = 0;
       root_desc.NumParameters = 2;
       root_desc.pParameters = root_parameters;
+    } else if (direct_indexed) {
+      versioned_root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+      versioned_root_desc.Desc_1_1.Flags =
+          D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
     } else if (descriptor_table_resources) {
       const UINT resource_space = descriptor_resources_space ? 1 : 0;
       if (descriptor_resources_1_1) {
@@ -197,7 +203,7 @@ int main(int argc, char **argv) {
       root_desc.pParameters = root_parameters;
     }
     HRESULT serialize_hr =
-        descriptor_resources_1_1
+        descriptor_resources_1_1 || direct_indexed
             ? D3D12SerializeVersionedRootSignature(&versioned_root_desc,
                                                    &root_blob, &root_error)
             : D3D12SerializeRootSignature(&root_desc,
@@ -211,7 +217,7 @@ int main(int argc, char **argv) {
                                              IID_PPV_ARGS(&root_signature))))
       goto cleanup;
 
-    if (descriptor_uav || descriptor_table_resources) {
+    if (descriptor_uav || descriptor_table_resources || direct_indexed) {
       D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
       heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
       heap_desc.NumDescriptors = descriptor_table_resources ? 3 : 1;
@@ -283,7 +289,7 @@ int main(int argc, char **argv) {
                      IID_PPV_ARGS(&output_buffer))))
       goto cleanup;
 
-    if (descriptor_uav || descriptor_table_resources) {
+    if (descriptor_uav || descriptor_table_resources || direct_indexed) {
       uav_desc.Format = DXGI_FORMAT_UNKNOWN;
       uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
       uav_desc.Buffer.NumElements = 64;
@@ -335,6 +341,9 @@ int main(int argc, char **argv) {
           0, input_buffer->GetGPUVirtualAddress());
       list->SetComputeRootUnorderedAccessView(
           1, output_buffer->GetGPUVirtualAddress());
+    } else if (direct_indexed) {
+      ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
+      list->SetDescriptorHeaps(1, heaps);
     } else if (descriptor_table_resources) {
       ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
       list->SetDescriptorHeaps(1, heaps);
@@ -376,7 +385,8 @@ int main(int argc, char **argv) {
       goto cleanup;
     output_value = *mapped;
     readback_buffer->Unmap(0, nullptr);
-    const UINT expected_value = descriptor_table_resources ? input_value * 2
+    const UINT expected_value = direct_indexed               ? 4321
+                                : descriptor_table_resources ? input_value * 2
                                 : root_cbv || root_constants || root_srv
                                     ? input_value
                                     : 1234;
@@ -388,6 +398,7 @@ int main(int argc, char **argv) {
               << (root_cbv                     ? "root CBV"
                   : root_constants             ? "root constants"
                   : root_srv                   ? "root SRV"
+                  : direct_indexed             ? "direct indexed"
                   : descriptor_table_resources ? "descriptor resources"
                                                : "root UAV")
               << " readback passed: " << output_value << "\n";
