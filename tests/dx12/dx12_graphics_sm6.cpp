@@ -30,7 +30,8 @@ int main(int argc, char **argv) {
   const bool root_constants = argc == 4 && strcmp(argv[3], "--root-constants") == 0;
   const bool root_srv = argc == 4 && strcmp(argv[3], "--root-srv") == 0;
   const bool root_uav = argc == 4 && strcmp(argv[3], "--root-uav") == 0;
-  if (argc == 4 && !textured && !root_cbv && !root_constants && !root_srv && !root_uav)
+  const bool textured_root_cbv = argc == 4 && strcmp(argv[3], "--texture-root-cbv") == 0;
+  if (argc == 4 && !textured && !root_cbv && !root_constants && !root_srv && !root_uav && !textured_root_cbv)
     return 2;
 
   std::ifstream vertex_file(argv[1], std::ios::binary | std::ios::ate);
@@ -81,7 +82,7 @@ int main(int argc, char **argv) {
   ID3D12CommandList *lists[1] = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
   D3D12_DESCRIPTOR_RANGE descriptor_ranges[2] = {};
-  D3D12_ROOT_PARAMETER root_parameters[2] = {};
+  D3D12_ROOT_PARAMETER root_parameters[3] = {};
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   D3D12_HEAP_PROPERTIES default_heap = {};
   D3D12_HEAP_PROPERTIES upload_heap = {};
@@ -171,6 +172,22 @@ int main(int argc, char **argv) {
     root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
     root_desc.NumParameters = 1;
     root_desc.pParameters = root_parameters;
+  } else if (textured_root_cbv) {
+    root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    root_parameters[0].Descriptor.ShaderRegister = 0;
+    root_parameters[0].Descriptor.RegisterSpace = 0;
+    root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    descriptor_ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
+    descriptor_ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
+    for (unsigned i = 0; i < 2; i++) {
+      root_parameters[i + 1].ParameterType =
+          D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      root_parameters[i + 1].DescriptorTable.NumDescriptorRanges = 1;
+      root_parameters[i + 1].DescriptorTable.pDescriptorRanges =
+          &descriptor_ranges[i];
+    }
+    root_desc.NumParameters = 3;
+    root_desc.pParameters = root_parameters;
   } else if (textured) {
     descriptor_ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
     descriptor_ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
@@ -227,7 +244,7 @@ int main(int argc, char **argv) {
   rtv_handle = rtv_heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateRenderTargetView(render_target, nullptr, rtv_handle);
 
-  if (textured) {
+  if (textured || textured_root_cbv) {
     resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     resource_heap_desc.NumDescriptors = 1;
     resource_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
@@ -327,7 +344,7 @@ int main(int argc, char **argv) {
   vertex_view.SizeInBytes = sizeof(vertices);
   vertex_view.StrideInBytes = sizeof(Vertex);
 
-  if (root_cbv || root_srv) {
+  if (root_cbv || root_srv || textured_root_cbv) {
     buffer_desc.Width = 256;
     if (!CheckHR("CreateRootData",
                  device->CreateCommittedResource(
@@ -378,7 +395,7 @@ int main(int argc, char **argv) {
                device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                          allocator, pso, IID_PPV_ARGS(&list))))
     goto cleanup;
-  if (textured) {
+  if (textured || textured_root_cbv) {
     texture_upload_dst.pResource = texture;
     texture_upload_dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     texture_upload_src.pResource = texture_upload;
@@ -397,16 +414,18 @@ int main(int argc, char **argv) {
   }
   list->SetPipelineState(pso);
   list->SetGraphicsRootSignature(root_signature);
-  if (textured) {
+  if (textured || textured_root_cbv) {
     descriptor_heaps[0] = resource_heap;
     descriptor_heaps[1] = sampler_heap;
     list->SetDescriptorHeaps(2, descriptor_heaps);
+    const UINT resource_root_index = textured_root_cbv ? 1 : 0;
+    const UINT sampler_root_index = textured_root_cbv ? 2 : 1;
     list->SetGraphicsRootDescriptorTable(
-        0, resource_heap->GetGPUDescriptorHandleForHeapStart());
+        resource_root_index, resource_heap->GetGPUDescriptorHandleForHeapStart());
     list->SetGraphicsRootDescriptorTable(
-        1, sampler_heap->GetGPUDescriptorHandleForHeapStart());
+        sampler_root_index, sampler_heap->GetGPUDescriptorHandleForHeapStart());
   }
-  if (root_cbv)
+  if (root_cbv || textured_root_cbv)
     list->SetGraphicsRootConstantBufferView(0, root_data_buffer->GetGPUVirtualAddress());
   if (root_constants)
     list->SetGraphicsRoot32BitConstants(0, 4, root_color_bits, 0);
@@ -486,7 +505,8 @@ int main(int argc, char **argv) {
     goto cleanup;
   pixel = *reinterpret_cast<UINT *>(mapped_readback);
   readback->Unmap(0, nullptr);
-  expected_pixel = (root_cbv || root_constants || root_srv || root_uav) ? 0xff00ff00u : 0xff0000ffu;
+  expected_pixel = (root_cbv || root_constants || root_srv || root_uav || textured_root_cbv) ? 0xff00ff00u
+                                                                                         : 0xff0000ffu;
   if ((pixel & 0x00ffffffu) != (expected_pixel & 0x00ffffffu)) {
     std::cerr << "graphics readback mismatch: 0x" << std::hex << pixel
               << std::dec << "\n";
@@ -497,6 +517,7 @@ int main(int argc, char **argv) {
                 : root_constants ? "root constants graphics"
                 : root_srv ? "root SRV graphics"
                 : root_uav ? "root UAV graphics"
+                : textured_root_cbv ? "root CBV textured graphics"
                 : textured ? "textured graphics"
                            : "graphics")
             << " readback passed: 0x" << std::hex << pixel << std::dec << "\n";
