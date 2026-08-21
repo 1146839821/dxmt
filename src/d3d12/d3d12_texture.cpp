@@ -25,6 +25,7 @@ namespace dxmt {
 
 HRESULT
 PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_RESOURCE_DESC &Desc) {
+  InfoOut = {};
   MTL_DXGI_FORMAT_DESC Format;
   HRESULT hr = MTLQueryDXGIFormat(Device, Desc.Format, Format);
   if (FAILED(hr))
@@ -141,6 +142,8 @@ EncodeComponentMapping(UINT Shader4ComponentMapping, WMTPixelFormat Format) {
 
 class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
   D3D12_RESOURCE_DESC desc_;
+  D3D12_HEAP_PROPERTIES heap_props_;
+  D3D12_HEAP_FLAGS heap_flags_;
 
 public:
   MTLD3D12Texture(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12Resource>(pDevice) {}
@@ -148,10 +151,12 @@ public:
   HRESULT
   Initialize(
       const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS HeapFlags, const D3D12_RESOURCE_DESC *pDesc,
-      D3D12_RESOURCE_STATES InitialState, MTLD3D12Heap *pHeap
+      D3D12_RESOURCE_STATES InitialState, MTLD3D12Heap *pHeap, UINT64 HeapOffset
   ) {
     // TODO: validate and normalize
     desc_ = *pDesc;
+    heap_props_ = *pHeapProps;
+    heap_flags_ = HeapFlags;
 
     switch (InitialState) {
     case D3D12_RESOURCE_STATE_RENDER_TARGET: {
@@ -173,14 +178,21 @@ public:
 
     texture = new Texture(texture_info, device_->GetMTLDevice());
     Flags<TextureAllocationFlag> flags = {};
-    texture->rename(texture->allocate(flags));
+    if (pHeapProps->Type == D3D12_HEAP_TYPE_DEFAULT ||
+        (pHeapProps->Type == D3D12_HEAP_TYPE_CUSTOM &&
+         pHeapProps->CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE))
+      flags.set(TextureAllocationFlag::CpuInvisible);
+    auto allocation = pHeap ? texture->allocate(pHeap->GetMetalHeap(), HeapOffset, flags) : texture->allocate(flags);
+    if (!allocation || !allocation->texture())
+      return E_OUTOFMEMORY;
+    texture->rename(std::move(allocation));
     device_->RegisterResidency(texture->current()->texture());
 
     return S_OK;
   };
 
   ~MTLD3D12Texture() {
-    if (texture)
+    if (texture && texture->current())
       device_->UnregisterResidency(texture->current()->texture());
   }
 
@@ -239,7 +251,11 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   GetHeapProperties(D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS *pFlags) {
-    return E_NOTIMPL;
+    if (pHeapProps)
+      *pHeapProps = heap_props_;
+    if (pFlags)
+      *pFlags = heap_flags_;
+    return S_OK;
   };
 
   virtual HRESULT STDMETHODCALLTYPE
@@ -739,7 +755,7 @@ CreateCommittedTexture(
     REFIID riid, void **ppResource
 ) {
   auto texture = Com(new MTLD3D12Texture(pDevice));
-  HRESULT hr = texture->Initialize(pHeapProps, HeapFlags, pDesc, InitialState, nullptr);
+  HRESULT hr = texture->Initialize(pHeapProps, HeapFlags, pDesc, InitialState, nullptr, ~0ull);
   if (FAILED(hr))
     return hr;
   if (!ppResource)
@@ -750,15 +766,18 @@ CreateCommittedTexture(
 HRESULT
 CreatePlacedTexture(
     MTLD3D12Device *pDevice, MTLD3D12Heap *pHeap, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
-    const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
+    UINT64 HeapOffset, const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
 ) {
   auto texture = Com(new MTLD3D12Texture(pDevice));
   D3D12_HEAP_DESC heap_desc = pHeap->GetDesc();
 
-  if (heap_desc.Flags & D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS)
+  const auto resource_type_flags = heap_desc.Flags &
+      (D3D12_HEAP_FLAG_DENY_BUFFERS | D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES |
+       D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES);
+  if (resource_type_flags == D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS)
     return E_INVALIDARG;
 
-  HRESULT hr = texture->Initialize(&heap_desc.Properties, heap_desc.Flags, pDesc, InitialState, pHeap);
+  HRESULT hr = texture->Initialize(&heap_desc.Properties, heap_desc.Flags, pDesc, InitialState, pHeap, HeapOffset);
   if (FAILED(hr))
     return hr;
   if (!ppResource)

@@ -29,7 +29,10 @@ namespace dxmt {
 
 std::atomic_uint64_t global_buffer_seq = {0};
 
-BufferAllocation::BufferAllocation(WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags) :
+BufferAllocation::BufferAllocation(
+    WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags, WMT::Heap heap, uint64_t offset
+) :
+    heap_(heap),
     info_(info),
     flags_(flags) {
   // (sub)allocate a minimum of 256B buffer so that texture can be created
@@ -41,11 +44,11 @@ BufferAllocation::BufferAllocation(WMT::Device device, const WMTBufferInfo &info
     info_.length = DXMT_PAGE_SIZE;
   }
   fenceTrackers.resize(suballocation_count_);
-  if (flags_.test(BufferAllocationFlag::CpuPlaced)) {
+  if (flags_.test(BufferAllocationFlag::CpuPlaced) && !heap_) {
     placed_buffer = wsi::aligned_malloc(info_.length, DXMT_PAGE_SIZE);
     info_.memory.set(placed_buffer);
   }
-  obj_ = device.newBuffer(info_);
+  obj_ = heap_ ? heap_.newBuffer(info_, offset) : device.newBuffer(info_);
   gpuAddress_ = info_.gpu_address;
   mappedMemory_ = info_.memory.get_accessible_or_null();
 };
@@ -165,6 +168,22 @@ Buffer::allocate(Flags<BufferAllocationFlag> flags) {
   info.length = length_;
   info.options = options;
   return new BufferAllocation(device_, info, flags);
+};
+
+Rc<BufferAllocation>
+Buffer::allocate(WMT::Heap heap, uint64_t offset, Flags<BufferAllocationFlag> flags) {
+  WMTResourceOptions options = WMTResourceHazardTrackingModeUntracked;
+  if (flags.test(BufferAllocationFlag::CpuWriteCombined))
+    options |= WMTResourceOptionCPUCacheModeWriteCombined;
+  if (flags.test(BufferAllocationFlag::CpuInvisible))
+    options |= WMTResourceStorageModePrivate;
+  if (flags.test(BufferAllocationFlag::GpuManaged))
+    options |= WMTResourceStorageModeManaged;
+  WMTBufferInfo info;
+  info.memory.set(0);
+  info.length = length_;
+  info.options = options;
+  return new BufferAllocation(device_, info, flags, heap, offset);
 };
 
 Rc<BufferAllocation>

@@ -146,13 +146,17 @@ public:
   small_vector<GenericAccessTracker, 1> fenceTrackers;
 
 private:
-  BufferAllocation(WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags);
+  BufferAllocation(
+      WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags, WMT::Heap heap = {},
+      uint64_t offset = ~0ull
+  );
   void free();
 
   BufferAllocation(const BufferAllocation &) = delete;
   BufferAllocation(BufferAllocation &&) = delete;
 
   WMT::Reference<WMT::Buffer> obj_;
+  WMT::Reference<WMT::Heap> heap_;
   WMTBufferInfo info_;
   uint32_t version_ = 0;
   Flags<BufferAllocationFlag> flags_;
@@ -179,6 +183,8 @@ public:
   }
 
   Rc<BufferAllocation> allocate(Flags<BufferAllocationFlag> flags);
+
+  Rc<BufferAllocation> allocate(WMT::Heap heap, uint64_t offset, Flags<BufferAllocationFlag> flags);
 
   Rc<BufferAllocation> rename(Rc<BufferAllocation> &&newAllocation);
 

@@ -84,7 +84,7 @@ class MTLD3D12SwapChain final : public MTLDXGISubObject<IDXGISwapChain4, MTLD3D1
   DXGI_SWAP_CHAIN_DESC1 desc_;
   D3D12_RESOURCE_DESC backbuffer_desc_;
   DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreen_desc_;
-  HANDLE present_semaphore_;
+  HANDLE present_semaphore_ = nullptr;
   std::unique_ptr<CpuFence> frame_latency_fence_;
   WMT::Object native_view_;
   WMT::MetalLayer layer_weak_;
@@ -123,7 +123,7 @@ public:
 
     if (!native_view_) {
       ERR("Failed to create metal view, it seems like your Wine has no exported symbols needed by DXMT.");
-      abort();
+      return;
     }
 
     presenter = Rc(new Presenter(pDevice->GetMTLDevice(), layer_weak_, lib, scale_factor, desc_.SampleDesc.Count));
@@ -167,10 +167,16 @@ public:
       backbuffer_desc_.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   }
 
+  bool
+  IsInitialized() const {
+    return native_view_ && presenter && present_semaphore_;
+  }
+
   ~MTLD3D12SwapChain() {
     WMT::ReleaseMetalView(native_view_);
     native_view_ = {};
-    CloseHandle(present_semaphore_);
+    if (present_semaphore_)
+      CloseHandle(present_semaphore_);
   };
 
   HRESULT
@@ -451,43 +457,50 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   GetRestrictToOutput(IDXGIOutput **ppRestrictToOutput) final {
-    IMPLEMENT_ME;
+    if (!ppRestrictToOutput)
+      return E_POINTER;
+    *ppRestrictToOutput = nullptr;
+    return E_NOTIMPL;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   SetBackgroundColor(const DXGI_RGBA *pColor) final {
-    IMPLEMENT_ME;
+    return E_NOTIMPL;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   GetBackgroundColor(DXGI_RGBA *pColor) final {
-    IMPLEMENT_ME;
+    if (!pColor)
+      return E_POINTER;
+    return E_NOTIMPL;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   SetRotation(DXGI_MODE_ROTATION Rotation) final {
-    IMPLEMENT_ME;
+    return E_NOTIMPL;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   GetRotation(DXGI_MODE_ROTATION *pRotation) final {
-    IMPLEMENT_ME;
+    if (!pRotation)
+      return E_POINTER;
+    return E_NOTIMPL;
   };
 
   HRESULT STDMETHODCALLTYPE
   SetSourceSize(UINT width, UINT height) override {
-    IMPLEMENT_ME
-    return S_OK;
+    return E_NOTIMPL;
   };
 
   HRESULT STDMETHODCALLTYPE
   GetSourceSize(UINT *width, UINT *height) override {
-    IMPLEMENT_ME
-    return S_OK;
+    if (!width || !height)
+      return E_POINTER;
+    return E_NOTIMPL;
   };
 
   HRESULT STDMETHODCALLTYPE
@@ -595,6 +608,8 @@ CreateSwapChain(
     IDXGISwapChain1 **ppSwapChain
 ) {
   auto swapchain = Com(new MTLD3D12SwapChain(pFactory, pDevice, pQueue, hWnd, pDesc, pFullscreenDesc));
+  if (!swapchain->IsInitialized())
+    return E_FAIL;
   HRESULT hr = swapchain->ResizeBuffers(0, pDesc->Width, pDesc->Height, DXGI_FORMAT_UNKNOWN, 0);
   if (FAILED(hr))
     return hr;

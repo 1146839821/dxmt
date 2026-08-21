@@ -110,6 +110,11 @@ public:
 
   HRESULT STDMETHODCALLTYPE Reset();
 
+  D3D12_COMMAND_LIST_TYPE
+  GetType() const {
+    return type_;
+  }
+
   HRESULT STDMETHODCALLTYPE CreateCommandList(
       UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, ID3D12PipelineState *pInitialPipelineState, REFIID riid,
       void **ppCommandList

@@ -34,7 +34,7 @@ public:
   HRESULT
   Initialize(
       const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS HeapFlags, const D3D12_RESOURCE_DESC *pDesc,
-      const D3D12_CLEAR_VALUE *OptimizedClearValue, MTLD3D12Heap *pHeap
+      const D3D12_CLEAR_VALUE *OptimizedClearValue, MTLD3D12Heap *pHeap, UINT64 HeapOffset
   ) {
     if (OptimizedClearValue)
       return E_INVALIDARG;
@@ -47,18 +47,31 @@ public:
     buffer = new Buffer(desc_.Width, device_->GetMTLDevice());
 
     Flags<BufferAllocationFlag> flags;
+    if (pHeapProps->Type == D3D12_HEAP_TYPE_DEFAULT ||
+        (pHeapProps->Type == D3D12_HEAP_TYPE_CUSTOM &&
+         pHeapProps->CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE))
+      flags.set(BufferAllocationFlag::CpuInvisible);
 #ifdef __i386__
     if (pHeapProps->Type == D3D12_HEAP_TYPE_UPLOAD || pHeapProps->Type == D3D12_HEAP_TYPE_READBACK)
       flags.set(BufferAllocationFlag::CpuPlaced);
 #endif
-    buffer->rename(buffer->allocate(flags));
+    bool use_heap = pHeap != nullptr;
+#ifdef __i386__
+    // A shared heap may return a contents pointer above the 32-bit address space.
+    if (flags.test(BufferAllocationFlag::CpuPlaced))
+      use_heap = false;
+#endif
+    auto allocation = use_heap ? buffer->allocate(pHeap->GetMetalHeap(), HeapOffset, flags) : buffer->allocate(flags);
+    if (!allocation || !allocation->buffer())
+      return E_OUTOFMEMORY;
+    buffer->rename(std::move(allocation));
     device_->RegisterResidencyAndVA(buffer->current());
 
     return S_OK;
   };
 
   ~MTLD3D12Buffer() {
-    if (buffer)
+    if (buffer && buffer->current())
       device_->UnregisterResidencyAndVA(buffer->current());
   }
 
@@ -89,8 +102,6 @@ public:
       return E_INVALIDARG;
     if (heap_props_.Type == D3D12_HEAP_TYPE_DEFAULT)
       return E_INVALIDARG;
-    if (pReadRange && pReadRange->Begin != 0)
-      IMPLEMENT_ME
     if (ppData)
       *ppData = buffer->current()->mappedMemory(0);
     return S_OK;
@@ -228,14 +239,12 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   CreateRenderTargetView(const D3D12_RENDER_TARGET_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) {
-    IMPLEMENT_ME
-    return S_OK;
+    return E_INVALIDARG;
   };
 
   virtual HRESULT STDMETHODCALLTYPE
   CreateDepthStencilView(const D3D12_DEPTH_STENCIL_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) {
-    IMPLEMENT_ME
-    return S_OK;
+    return E_INVALIDARG;
   };
 
   virtual void STDMETHODCALLTYPE GetResourceTiling(
@@ -253,7 +262,7 @@ CreateCommittedBuffer(
     REFIID riid, void **ppResource
 ) {
   auto buffer = Com(new MTLD3D12Buffer(pDevice));
-  HRESULT hr = buffer->Initialize(pHeapProps, HeapFlags, pDesc, OptimizedClearValue, nullptr);
+  HRESULT hr = buffer->Initialize(pHeapProps, HeapFlags, pDesc, OptimizedClearValue, nullptr, ~0ull);
   if (FAILED(hr))
     return hr;
   if (!ppResource)
@@ -264,13 +273,15 @@ CreateCommittedBuffer(
 HRESULT
 CreatePlacedBuffer(
     MTLD3D12Device *pDevice, MTLD3D12Heap *pHeap, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
-    const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
+    UINT64 HeapOffset, const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
 ) {
   auto buffer = Com(new MTLD3D12Buffer(pDevice));
   D3D12_HEAP_DESC heap_desc = pHeap->GetDesc();
-  HRESULT hr = buffer->Initialize(&heap_desc.Properties, heap_desc.Flags, pDesc, OptimizedClearValue, pHeap);
-  if (FAILED(hr))
+  HRESULT hr = buffer->Initialize(&heap_desc.Properties, heap_desc.Flags, pDesc, OptimizedClearValue, pHeap, HeapOffset);
+  if (FAILED(hr)) {
+    ERR("CreatePlacedBuffer: initialization failed: 0x", std::hex, hr, std::dec);
     return hr;
+  }
   if (!ppResource)
     return S_FALSE;
   return buffer->QueryInterface(riid, ppResource);

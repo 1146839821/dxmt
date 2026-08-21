@@ -25,11 +25,37 @@ namespace dxmt {
 class MTLD3D12HeapImpl : public MTLD3D12Pageable<MTLD3D12Heap> {
 
   D3D12_HEAP_DESC desc_;
+  WMT::Reference<WMT::Heap> heap_;
+
+  static WMTResourceOptions
+  GetResourceOptions(const D3D12_HEAP_PROPERTIES &properties) {
+    WMTResourceOptions options = WMTResourceHazardTrackingModeUntracked;
+    switch (properties.Type) {
+    case D3D12_HEAP_TYPE_DEFAULT:
+      options |= WMTResourceStorageModePrivate;
+      break;
+    case D3D12_HEAP_TYPE_UPLOAD:
+    case D3D12_HEAP_TYPE_READBACK:
+      break;
+    case D3D12_HEAP_TYPE_CUSTOM:
+      if (properties.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE)
+        options |= WMTResourceStorageModePrivate;
+      if (properties.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE)
+        options |= WMTResourceOptionCPUCacheModeWriteCombined;
+      break;
+    default:
+      break;
+    }
+    return options;
+  }
 
 public:
   MTLD3D12HeapImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12Heap>(pDevice) {}
 
-  ~MTLD3D12HeapImpl() {}
+  ~MTLD3D12HeapImpl() {
+    if (heap_)
+      device_->UnregisterResidency(heap_);
+  }
 
   HRESULT
   STDMETHODCALLTYPE
@@ -54,8 +80,19 @@ public:
 
   HRESULT
   Initialize(const D3D12_HEAP_DESC *pDesc) {
+    if (!pDesc || !pDesc->SizeInBytes)
+      return E_INVALIDARG;
     if (pDesc->Flags & D3D12_HEAP_FLAG_ALLOW_DISPLAY)
       return E_INVALIDARG; // must be committed resource
+
+    const auto type_flags = pDesc->Flags &
+                            (D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS |
+                             D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES |
+                             D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES);
+    if ((type_flags == (D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS | D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES)) ||
+        (type_flags == (D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS | D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES)) ||
+        (type_flags == (D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES | D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES)))
+      return E_INVALIDARG;
 
     desc_ = *pDesc;
     desc_.Properties.CreationNodeMask = 1;
@@ -77,7 +114,21 @@ public:
     if (!size_aligned)
       return E_INVALIDARG;
 
-    return S_OK;
+    WMTHeapInfo info = {};
+    info.size = desc_.SizeInBytes;
+    info.options = GetResourceOptions(desc_.Properties);
+    info.type = WMTHeapTypePlacement;
+    info.sparse_page_size = WMTSparsePageSize64;
+    heap_ = device_->GetMTLDevice().newHeap(info);
+    if (!heap_)
+      return E_OUTOFMEMORY;
+
+    return device_->RegisterResidency(heap_);
+  }
+
+  WMT::Heap
+  GetMetalHeap() override {
+    return heap_;
   }
 
   virtual D3D12_HEAP_DESC *STDMETHODCALLTYPE

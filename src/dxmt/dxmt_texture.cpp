@@ -57,11 +57,12 @@ TextureView::TextureView(TextureAllocation *allocation, unsigned index, TextureV
 
 TextureAllocation::TextureAllocation(
     Texture *descriptor, WMT::Reference<WMT::Buffer> &&buffer, void *mapped_buffer, const WMTTextureInfo &info,
-    unsigned bytes_per_row, Flags<TextureAllocationFlag> flags
+    unsigned bytes_per_row, Flags<TextureAllocationFlag> flags, WMT::Heap heap
 ) :
     descriptor(descriptor),
     mappedMemory(mapped_buffer),
     buffer_(std::move(buffer)),
+    heap_(heap),
     flags_(flags) {
   auto info_copy = info;
   obj_ = buffer_.newTexture(info_copy, 0, bytes_per_row);
@@ -75,10 +76,11 @@ TextureAllocation::TextureAllocation(
 
 TextureAllocation::TextureAllocation(
     Texture *descriptor, WMT::Reference<WMT::Texture> &&texture, const WMTTextureInfo &textureDescriptor,
-    Flags<TextureAllocationFlag> flags
+    Flags<TextureAllocationFlag> flags, WMT::Heap heap
 ) :
     descriptor(descriptor),
     obj_(std::move(texture)),
+    heap_(heap),
     flags_(flags) {
   mappedMemory = nullptr;
   gpuResourceID = textureDescriptor.gpu_resource_id;
@@ -201,6 +203,32 @@ Texture::allocate(Flags<TextureAllocationFlag> flags) {
   }
   auto texture = flags.test(TextureAllocationFlag::Shared) ? device_.newSharedTexture(info) : device_.newTexture(info);
   return new TextureAllocation(this, std::move(texture), info, flags);
+}
+
+Rc<TextureAllocation>
+Texture::allocate(WMT::Heap heap, uint64_t offset, Flags<TextureAllocationFlag> flags) {
+  WMTResourceOptions options = WMTResourceHazardTrackingModeUntracked;
+  WMTTextureInfo info = info_;
+  info.mach_port = 0;
+  if (flags.test(TextureAllocationFlag::CpuWriteCombined))
+    options |= WMTResourceOptionCPUCacheModeWriteCombined;
+  if (flags.test(TextureAllocationFlag::CpuInvisible))
+    options |= WMTResourceStorageModePrivate;
+  if (flags.test(TextureAllocationFlag::GpuManaged))
+    options |= WMTResourceStorageModeManaged;
+  info.options = options;
+
+  if (bytes_per_image_) {
+    WMTBufferInfo buffer_info;
+    buffer_info.length = bytes_per_image_;
+    buffer_info.options = options;
+    buffer_info.memory.set(nullptr);
+    auto buffer = heap.newBuffer(buffer_info, offset);
+    return new TextureAllocation(this, std::move(buffer), buffer_info.memory.get(), info, bytes_per_row_, flags, heap);
+  }
+
+  auto texture = heap.newTexture(info, offset);
+  return new TextureAllocation(this, std::move(texture), info, flags, heap);
 }
 
 Rc<TextureAllocation>

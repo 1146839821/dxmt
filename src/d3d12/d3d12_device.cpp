@@ -333,7 +333,8 @@ public:
   ) {
     if (!pResource) {
       auto [Heap, Index] = GetShaderVisibleDescriptorHeap(this, Descriptor);
-      Heap->AddShaderResourceView(Index, pDesc);
+      if (Heap)
+        Heap->AddShaderResourceView(Index, pDesc);
       return;
     }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
@@ -347,7 +348,8 @@ public:
   ) {
     if (!pResource) {
       auto [Heap, Index] = GetShaderVisibleDescriptorHeap(this, Descriptor);
-      Heap->AddUnorderedAccessView(Index, pDesc);
+      if (Heap)
+        Heap->AddUnorderedAccessView(Index, pDesc);
       return;
     }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
@@ -360,7 +362,10 @@ public:
   ) {
     if (!pResource) {
       // null descriptor
-      IMPLEMENT_ME
+      auto [Heap, Index] = GetRenderTargetHeap(this, Descriptor);
+      if (Heap)
+        Heap->AddRenderTarget(Index, nullptr);
+      return;
     }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
     d3d12res->CreateRenderTargetView(pDesc, Descriptor);
@@ -372,7 +377,10 @@ public:
   ) {
     if (!pResource) {
       // null descriptor
-      IMPLEMENT_ME
+      auto [Heap, Index] = GetRenderTargetHeap(this, Descriptor);
+      if (Heap)
+        Heap->AddRenderTarget(Index, nullptr);
+      return;
     }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
     d3d12res->CreateDepthStencilView(pDesc, Descriptor);
@@ -381,7 +389,8 @@ public:
   void STDMETHODCALLTYPE
   CreateSampler(const D3D12_SAMPLER_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) {
     auto [Heap, Index] = GetSamplerDescriptorHeap(this, Descriptor);
-    Heap->AddSampler(Index, pDesc);
+    if (Heap)
+      Heap->AddSampler(Index, pDesc);
   };
 
   void STDMETHODCALLTYPE
@@ -455,9 +464,76 @@ public:
   };
 
   D3D12_RESOURCE_ALLOCATION_INFO *STDMETHODCALLTYPE GetResourceAllocationInfo(
-      D3D12_RESOURCE_ALLOCATION_INFO *__ret, UINT VisibleMask, UINT ResourceDestCount, const D3D12_RESOURCE_DESC *pDescs
+       D3D12_RESOURCE_ALLOCATION_INFO *__ret, UINT VisibleMask, UINT ResourceDestCount, const D3D12_RESOURCE_DESC *pDescs
   ) {
-    IMPLEMENT_ME
+    if (!__ret)
+      return nullptr;
+
+    constexpr UINT64 default_alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    *__ret = {0, default_alignment};
+    if ((VisibleMask & ~1u) || (ResourceDestCount && !pDescs)) {
+      *__ret = {UINT64_MAX, UINT64_MAX};
+      return __ret;
+    }
+
+    UINT64 total_size = 0;
+    UINT64 max_alignment = default_alignment;
+    for (UINT i = 0; i < ResourceDestCount; i++) {
+      const auto &desc = pDescs[i];
+      WMTSizeAndAlign size_and_align = {};
+      UINT64 minimum_alignment = default_alignment;
+
+      switch (desc.Alignment) {
+      case 0:
+      case D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT:
+      case D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT:
+      case D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT:
+        minimum_alignment = std::max<UINT64>(minimum_alignment, desc.Alignment);
+        break;
+      default:
+        *__ret = {UINT64_MAX, UINT64_MAX};
+        return __ret;
+      }
+
+      if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+        if (!desc.Width || desc.Height != 1 || desc.DepthOrArraySize != 1 || desc.MipLevels != 1 ||
+            desc.SampleDesc.Count != 1 || desc.Format != DXGI_FORMAT_UNKNOWN) {
+          *__ret = {UINT64_MAX, UINT64_MAX};
+          return __ret;
+        }
+        size_and_align = GetMTLDevice().heapBufferSizeAndAlign(desc.Width, WMTResourceHazardTrackingModeUntracked | WMTResourceStorageModePrivate);
+      } else {
+        if (!desc.Width || !desc.Height || !desc.DepthOrArraySize || !desc.SampleDesc.Count) {
+          *__ret = {UINT64_MAX, UINT64_MAX};
+          return __ret;
+        }
+        WMTTextureInfo texture_info = {};
+        if (FAILED(PopulateWMTTextureInfo(GetMTLDevice(), texture_info, desc))) {
+          *__ret = {UINT64_MAX, UINT64_MAX};
+          return __ret;
+        }
+        size_and_align = GetMTLDevice().heapTextureSizeAndAlign(texture_info);
+        if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.SampleDesc.Count > 1)
+          minimum_alignment = D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;
+      }
+
+      UINT64 resource_alignment = std::max<UINT64>(minimum_alignment, size_and_align.align);
+      if (!size_and_align.size || !resource_alignment || resource_alignment > UINT64_MAX - total_size) {
+        *__ret = {UINT64_MAX, UINT64_MAX};
+        return __ret;
+      }
+      total_size = align(total_size, resource_alignment);
+      if (total_size > UINT64_MAX - size_and_align.size) {
+        *__ret = {UINT64_MAX, UINT64_MAX};
+        return __ret;
+      }
+      total_size += size_and_align.size;
+      max_alignment = std::max(max_alignment, resource_alignment);
+    }
+
+    __ret->SizeInBytes = total_size;
+    __ret->Alignment = max_alignment;
+    return __ret;
   };
 
   D3D12_HEAP_PROPERTIES *STDMETHODCALLTYPE
@@ -491,6 +567,8 @@ public:
       D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
   ) {
     InitReturnPtr(ppResource);
+    if (!pHeapProps || !pDesc)
+      return E_INVALIDARG;
     HRESULT hr = S_OK;
     hr = ValidateHeapProperties(pHeapProps, HeapFlags, advertise_numa_);
     if (FAILED(hr))
@@ -520,6 +598,9 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   CreateHeap(const D3D12_HEAP_DESC *pDesc, REFIID riid, void **ppHeap) {
+    InitReturnPtr(ppHeap);
+    if (!pDesc)
+      return E_INVALIDARG;
     HRESULT hr = S_OK;
     hr = ValidateHeapProperties(&pDesc->Properties, pDesc->Flags, advertise_numa_);
     if (FAILED(hr))
@@ -533,27 +614,68 @@ public:
       const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
   ) {
     InitReturnPtr(ppResource);
-    if (!pHeap)
+    if (!pHeap || !pDesc)
       return E_INVALIDARG;
     auto d3d12heap = static_cast<MTLD3D12Heap *>(pHeap);
     auto heap_desc = d3d12heap->GetDesc();
+
+    const bool is_buffer = pDesc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
+    const bool is_render_target_or_depth =
+        pDesc->Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    const auto resource_type_flags = heap_desc.Flags &
+        (D3D12_HEAP_FLAG_DENY_BUFFERS | D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES |
+         D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES);
+    if (resource_type_flags == D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS && !is_buffer) {
+      ERR("CreatePlacedResource: heap only allows buffers");
+      return E_INVALIDARG;
+    }
+    if (resource_type_flags == D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES &&
+        (is_buffer || is_render_target_or_depth)) {
+      ERR("CreatePlacedResource: heap only allows non-RT/DS textures");
+      return E_INVALIDARG;
+    }
+    if (resource_type_flags == D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES &&
+        (is_buffer || !is_render_target_or_depth)) {
+      ERR("CreatePlacedResource: heap only allows RT/DS textures");
+      return E_INVALIDARG;
+    }
+
+    D3D12_RESOURCE_ALLOCATION_INFO allocation_info;
+    GetResourceAllocationInfo(&allocation_info, 1, 1, pDesc);
+    if (allocation_info.SizeInBytes == UINT64_MAX || allocation_info.Alignment == UINT64_MAX) {
+      ERR("CreatePlacedResource: invalid allocation info");
+      return E_INVALIDARG;
+    }
+    if ((Offset % allocation_info.Alignment) || Offset > heap_desc.SizeInBytes ||
+        allocation_info.SizeInBytes > heap_desc.SizeInBytes - Offset) {
+      ERR("CreatePlacedResource: offset outside heap, offset=", Offset, " size=", allocation_info.SizeInBytes,
+          " alignment=", allocation_info.Alignment, " heap=", heap_desc.SizeInBytes);
+      return E_INVALIDARG;
+    }
+
     HRESULT hr = S_OK;
     hr = ValidateHeapProperties(&heap_desc.Properties, heap_desc.Flags, advertise_numa_);
-    if (FAILED(hr))
+    if (FAILED(hr)) {
+      ERR("CreatePlacedResource: invalid heap properties");
       return hr;
+    }
     hr = ValidateResourceDescs(pDesc, heap_desc.Properties.Type);
-    if (FAILED(hr))
+    if (FAILED(hr)) {
+      ERR("CreatePlacedResource: invalid resource description");
       return hr;
+    }
     hr = ValidateResourceStates(InitialState, &heap_desc.Properties);
-    if (FAILED(hr))
+    if (FAILED(hr)) {
+      ERR("CreatePlacedResource: invalid initial state");
       return hr;
+    }
     switch (pDesc->Dimension) {
     case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
     case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
     case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
-      return CreatePlacedTexture(this, d3d12heap, pDesc, InitialState, OptimizedClearValue, riid, ppResource);
+      return CreatePlacedTexture(this, d3d12heap, pDesc, InitialState, Offset, OptimizedClearValue, riid, ppResource);
     case D3D12_RESOURCE_DIMENSION_BUFFER:
-      return CreatePlacedBuffer(this, d3d12heap, pDesc, InitialState, OptimizedClearValue, riid, ppResource);
+      return CreatePlacedBuffer(this, d3d12heap, pDesc, InitialState, Offset, OptimizedClearValue, riid, ppResource);
     default:
       break;
     }

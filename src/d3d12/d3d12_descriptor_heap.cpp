@@ -23,8 +23,47 @@
 #include "dxmt_format.hpp"
 #include "dxmt_sampler.hpp"
 #include "log/log.hpp"
+#include <array>
+#include <mutex>
 
 namespace dxmt {
+
+namespace {
+std::mutex descriptor_heap_registry_lock;
+std::array<const void *, 1u << 7> descriptor_heap_registry = {};
+}
+
+SIZE_T
+RegisterDescriptorHeap(const void *heap) {
+  std::lock_guard<std::mutex> lock(descriptor_heap_registry_lock);
+  for (SIZE_T i = 1; i < descriptor_heap_registry.size(); i++) {
+    if (descriptor_heap_registry[i] == heap)
+      return i;
+  }
+  for (SIZE_T i = 1; i < descriptor_heap_registry.size(); i++) {
+    if (!descriptor_heap_registry[i]) {
+      descriptor_heap_registry[i] = heap;
+      return i;
+    }
+  }
+  WARN("D3D12 descriptor heap registry is full");
+  return 0;
+}
+
+void
+UnregisterDescriptorHeap(const void *heap) {
+  std::lock_guard<std::mutex> lock(descriptor_heap_registry_lock);
+  for (auto &entry : descriptor_heap_registry) {
+    if (entry == heap)
+      entry = nullptr;
+  }
+}
+
+const void *
+LookupDescriptorHeap(SIZE_T index) {
+  std::lock_guard<std::mutex> lock(descriptor_heap_registry_lock);
+  return index < descriptor_heap_registry.size() ? descriptor_heap_registry[index] : nullptr;
+}
 
 struct SRVTextureGPUStorage {
   uint64_t resource_id;
@@ -116,9 +155,11 @@ public:
 
       Flags<BufferAllocationFlag> flags;
 #ifdef __i386__
-      IMPLEMENT_ME
+      flags.set(BufferAllocationFlag::CpuPlaced);
 #endif
       buffer_->rename(buffer_->allocate(flags));
+      if (!buffer_->current())
+        return E_OUTOFMEMORY;
       mapped_argument_buffer_ =
           reinterpret_cast<ShaderVisibleDescriptorGPUStorage *>(buffer_->current()->mappedMemory(0));
       argument_buffer_gpu_address_ = buffer_->current()->gpuAddress();
@@ -126,6 +167,8 @@ public:
 
       msc_buffer_ = new Buffer(descriptors_.size() * sizeof(dxmt_msc_descriptor_entry), device_->GetMTLDevice());
       msc_buffer_->rename(msc_buffer_->allocate(flags));
+      if (!msc_buffer_->current())
+        return E_OUTOFMEMORY;
       mapped_msc_argument_buffer_ =
           reinterpret_cast<dxmt_msc_descriptor_entry *>(msc_buffer_->current()->mappedMemory(0));
       msc_argument_buffer_gpu_address_ = msc_buffer_->current()->gpuAddress();
@@ -146,9 +189,12 @@ public:
   };
 
   ~MTLD3D12DescriptorHeapImpl() {
+    UnregisterDescriptorHeap(this);
     if (buffer_) {
-      device_->UnregisterResidencyAndVA(buffer_->current());
-      device_->UnregisterResidencyAndVA(msc_buffer_->current());
+      if (buffer_->current())
+        device_->UnregisterResidencyAndVA(buffer_->current());
+      if (msc_buffer_ && msc_buffer_->current())
+        device_->UnregisterResidencyAndVA(msc_buffer_->current());
     } else {
       free(mapped_argument_buffer_);
       free(mapped_msc_argument_buffer_);
@@ -436,6 +482,10 @@ public:
   MTLD3D12RenderTargetDescriptorHeapImpl(MTLD3D12Device *pDevice) :
       MTLD3D12Pageable<MTLD3D12RenderTargetDescriptorHeap>(pDevice) {}
 
+  ~MTLD3D12RenderTargetDescriptorHeapImpl() {
+    UnregisterDescriptorHeap(this);
+  }
+
   HRESULT
   Initialize(const D3D12_DESCRIPTOR_HEAP_DESC *pDesc) {
     if (!pDesc)
@@ -568,9 +618,11 @@ public:
 
       Flags<BufferAllocationFlag> flags;
 #ifdef __i386__
-      IMPLEMENT_ME
+      flags.set(BufferAllocationFlag::CpuPlaced);
 #endif
       buffer_->rename(buffer_->allocate(flags));
+      if (!buffer_->current())
+        return E_OUTOFMEMORY;
       mapped_argument_buffer_ = reinterpret_cast<SamplerGPUStorage *>(buffer_->current()->mappedMemory(0));
       argument_buffer_gpu_address_ = buffer_->current()->gpuAddress();
       // FIXME: is residency required for descriptor heap? Should be the case for Metal 4
@@ -578,6 +630,8 @@ public:
 
       msc_buffer_ = new Buffer(samplers_.size() * sizeof(dxmt_msc_descriptor_entry), device_->GetMTLDevice());
       msc_buffer_->rename(msc_buffer_->allocate(flags));
+      if (!msc_buffer_->current())
+        return E_OUTOFMEMORY;
       mapped_msc_argument_buffer_ =
           reinterpret_cast<dxmt_msc_descriptor_entry *>(msc_buffer_->current()->mappedMemory(0));
       msc_argument_buffer_gpu_address_ = msc_buffer_->current()->gpuAddress();
@@ -596,12 +650,15 @@ public:
   };
 
   ~MTLD3D12SamplerDescriptorHeapImpl() {
-     if (buffer_) {
-       device_->UnregisterResidencyAndVA(buffer_->current());
-       device_->UnregisterResidencyAndVA(msc_buffer_->current());
-     } else {
-       free(mapped_argument_buffer_);
-       free(mapped_msc_argument_buffer_);
+    UnregisterDescriptorHeap(this);
+    if (buffer_) {
+      if (buffer_->current())
+        device_->UnregisterResidencyAndVA(buffer_->current());
+      if (msc_buffer_ && msc_buffer_->current())
+        device_->UnregisterResidencyAndVA(msc_buffer_->current());
+    } else {
+      free(mapped_argument_buffer_);
+      free(mapped_msc_argument_buffer_);
     }
   }
 

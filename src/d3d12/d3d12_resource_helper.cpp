@@ -338,6 +338,18 @@ ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, D3D12_HEAP_TYPE HeapType
 
 HRESULT
 ValidateHeapProperties(const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS Flags, bool AdapterIsNUMA) {
+  const auto resource_type_flags = Flags &
+      (D3D12_HEAP_FLAG_DENY_BUFFERS | D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES |
+       D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES);
+  if (resource_type_flags != D3D12_HEAP_FLAG_NONE &&
+      resource_type_flags != D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS &&
+      resource_type_flags != D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES &&
+      resource_type_flags != D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES)
+    return E_INVALIDARG;
+
+  if (Flags & (D3D12_HEAP_FLAG_SHARED | D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER))
+    return E_NOTIMPL;
+
   switch (pHeapProps->Type) {
   case D3D12_HEAP_TYPE_DEFAULT:
   case D3D12_HEAP_TYPE_READBACK: {

@@ -33,9 +33,7 @@
 
 #define IMPLEMENT_ME                                                                                                   \
   do {                                                                                                                 \
-    Logger::err(str::format(__FILE__, ":", __FUNCTION__, "(", __LINE__, ") is not implemented."));                     \
-    abort();                                                                                                           \
-    __builtin_unreachable();                                                                                           \
+    WARN(__FILE__, ":", __FUNCTION__, "(", __LINE__, ") is not implemented.");                                      \
   } while (0);
 
 namespace dxmt {
@@ -85,6 +83,7 @@ public:
 
 class MTLD3D12Heap : public ID3D12Heap {
 public:
+  virtual WMT::Heap GetMetalHeap() = 0;
 };
 
 class MTLD3D12Fence : public ID3D12Fence1 {
@@ -211,7 +210,7 @@ HRESULT CreateCommittedTexture(
 HRESULT
 CreatePlacedTexture(
     MTLD3D12Device *pDevice, MTLD3D12Heap *pHeap, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
-    const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
+    UINT64 HeapOffset, const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
 );
 
 HRESULT CreateCommittedBuffer(
@@ -223,7 +222,7 @@ HRESULT CreateCommittedBuffer(
 HRESULT
 CreatePlacedBuffer(
     MTLD3D12Device *pDevice, MTLD3D12Heap *pHeap, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
-    const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
+    UINT64 HeapOffset, const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
 );
 
 HRESULT
@@ -265,68 +264,39 @@ void PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_S
 
 void PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_SAMPLER_DESC const &Desc);
 
+HRESULT PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_RESOURCE_DESC &Desc);
+
 inline std::tuple<MTLD3D12RenderTargetDescriptorHeap *, UINT>
 GetRenderTargetHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
   return {impl.extract<MTLD3D12RenderTargetDescriptorHeap>(), (UINT)impl.Descriptor};
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
 }
 
 inline D3D12_CPU_DESCRIPTOR_HANDLE
 GetRenderTargetDescriptor(MTLD3D12RenderTargetDescriptorHeap *pHeap, UINT Index) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   return EMBEDDED_DESCRIPTOR_HANDLE(pHeap, Index);
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
 }
 
 inline std::tuple<MTLD3D12DescriptorHeap *, UINT>
 GetShaderVisibleDescriptorHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
   return {impl.extract<MTLD3D12DescriptorHeap>(), (UINT)impl.Descriptor};
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
 }
 
 inline D3D12_CPU_DESCRIPTOR_HANDLE
 GetShaderVisibleDescriptor(MTLD3D12DescriptorHeap *pHeap, UINT Index) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   return EMBEDDED_DESCRIPTOR_HANDLE(pHeap, Index);
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
-  //
 }
 
 inline std::tuple<MTLD3D12SamplerDescriptorHeap *, UINT>
 GetSamplerDescriptorHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
   return {impl.extract<MTLD3D12SamplerDescriptorHeap>(), (UINT)impl.Descriptor};
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
 }
 
 inline D3D12_CPU_DESCRIPTOR_HANDLE
 GetSamplerDescriptor(MTLD3D12SamplerDescriptorHeap *pHeap, UINT Index) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   return EMBEDDED_DESCRIPTOR_HANDLE(pHeap, Index);
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
 }
 
 template <typename VIEW_DESC>

@@ -23,35 +23,32 @@
 #include "metalirconverter_thunks.h"
 #include <cstdint>
 
-#if UINTPTR_MAX == 0xffffffffffffffffULL
-#define DXMT_USE_EMBEDDED_HEAP_POINTER
-#endif
-
 namespace dxmt {
 
-struct EMBEDDED_DESCRIPTOR_HANDLE {
-#ifndef DXMT_USE_EMBEDDED_HEAP_POINTER
-  SIZE_T Tag        : 5;
-  SIZE_T Descriptor : 20;
-  SIZE_T Heap       : 7;
-#else
-  SIZE_T Tag        : 5;
-  SIZE_T Descriptor : 20;
-  SIZE_T Heap       : 39;
+SIZE_T RegisterDescriptorHeap(const void *heap);
+void UnregisterDescriptorHeap(const void *heap);
+const void *LookupDescriptorHeap(SIZE_T index);
 
-  // assume pointer is 8-byte aligned, providing 3 free bits
+constexpr SIZE_T kDescriptorHeapTag = 0x1f;
+
+struct EMBEDDED_DESCRIPTOR_HANDLE {
+  SIZE_T Tag        : 5;
+  SIZE_T Descriptor : 20;
+  SIZE_T Heap       : sizeof(SIZE_T) == 4 ? 7 : 39;
+
   template <typename T>
   T *
   extract() {
-    return reinterpret_cast<T *>((Heap << 8) | (Tag << 3));
+    if (Tag != kDescriptorHeapTag)
+      return nullptr;
+    return reinterpret_cast<T *>(const_cast<void *>(LookupDescriptorHeap(Heap)));
   }
 
   EMBEDDED_DESCRIPTOR_HANDLE(const void *heap, SIZE_T index) {
-    Heap = (SIZE_T)heap >> 8;
-    Tag = (SIZE_T)heap >> 3;
+    Heap = RegisterDescriptorHeap(heap);
+    Tag = kDescriptorHeapTag;
     Descriptor = index;
   }
-#endif
 
   EMBEDDED_DESCRIPTOR_HANDLE(D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
     union {

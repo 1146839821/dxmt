@@ -1,0 +1,89 @@
+#define WIN32_LEAN_AND_MEAN
+
+#include <windows.h>
+#include <d3d12.h>
+
+#include <iostream>
+
+namespace {
+
+bool CheckHR(const char *name, HRESULT hr) {
+  if (FAILED(hr)) {
+    std::cerr << name << " failed: 0x" << std::hex << static_cast<unsigned long>(hr) << std::dec << "\n";
+    return false;
+  }
+  return true;
+}
+
+} // namespace
+
+int main() {
+  ID3D12Device *device = nullptr;
+  if (!CheckHR("D3D12CreateDevice", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))))
+    return 1;
+
+  const D3D12_COMMAND_LIST_TYPE types[] = {
+      D3D12_COMMAND_LIST_TYPE_DIRECT,
+      D3D12_COMMAND_LIST_TYPE_COMPUTE,
+      D3D12_COMMAND_LIST_TYPE_COPY,
+      D3D12_COMMAND_LIST_TYPE_BUNDLE,
+  };
+
+  int result = 0;
+  for (auto type : types) {
+    ID3D12CommandAllocator *allocator = nullptr;
+    ID3D12GraphicsCommandList *list = nullptr;
+    if (!CheckHR("CreateCommandAllocator", device->CreateCommandAllocator(type, IID_PPV_ARGS(&allocator))) ||
+        !CheckHR("CreateCommandList", device->CreateCommandList(0, type, allocator, nullptr, IID_PPV_ARGS(&list)))) {
+      result = 1;
+      if (list)
+        list->Release();
+      if (allocator)
+        allocator->Release();
+      break;
+    }
+    if (list->GetType() != type) {
+      std::cerr << "GetType mismatch for command list type " << type << "\n";
+      result = 1;
+    }
+    if (!CheckHR("Close", list->Close()))
+      result = 1;
+    list->Release();
+    allocator->Release();
+  }
+
+  ID3D12CommandAllocator *copy_allocator = nullptr;
+  ID3D12GraphicsCommandList *copy_list = nullptr;
+  HRESULT mismatch_hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&copy_allocator));
+  if (!CheckHR("CreateCopyAllocator", mismatch_hr) ||
+      device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, copy_allocator, nullptr, IID_PPV_ARGS(&copy_list)) != E_INVALIDARG) {
+    std::cerr << "allocator/list type mismatch was accepted\n";
+    result = 1;
+  }
+  if (copy_list)
+    copy_list->Release();
+  if (copy_allocator)
+    copy_allocator->Release();
+
+  ID3D12CommandAllocator *invalid_allocator = nullptr;
+  ID3D12GraphicsCommandList *invalid_list = nullptr;
+  if (!CheckHR("CreateInvalidAllocator", device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&invalid_allocator))) ||
+      !CheckHR("CreateInvalidList", device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, invalid_allocator, nullptr, IID_PPV_ARGS(&invalid_list)))) {
+    result = 1;
+  } else {
+    invalid_list->Dispatch(1, 1, 1);
+    if (invalid_list->Close() != E_FAIL) {
+      std::cerr << "invalid copy-list Dispatch was not rejected\n";
+      result = 1;
+    }
+  }
+  if (invalid_list)
+    invalid_list->Release();
+  if (invalid_allocator)
+    invalid_allocator->Release();
+
+  device->Release();
+  if (!result)
+    std::cout << "D3D12 command list type tests passed\n";
+  return result;
+}

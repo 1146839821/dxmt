@@ -114,6 +114,8 @@ unsigned getPlanarCount(WMTPixelFormat format);
 class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12GraphicsCommandList> {
 
   Com<MTLD3D12CommandAllocatorImpl, false> allocator_;
+  D3D12_COMMAND_LIST_TYPE type_;
+  bool recording_failed_;
 
   /* state */
 
@@ -154,13 +156,19 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   UINT8 stencil_ref_;
 
 public:
-  MTLD3D12GraphicsCommandListImpl(MTLD3D12Device *pDevice) : MTLD3D12DeviceChild<MTLD3D12GraphicsCommandList>(pDevice) {}
+  MTLD3D12GraphicsCommandListImpl(MTLD3D12Device *pDevice, D3D12_COMMAND_LIST_TYPE type) :
+      MTLD3D12DeviceChild<MTLD3D12GraphicsCommandList>(pDevice), type_(type), recording_failed_(false) {}
 
   ~MTLD3D12GraphicsCommandListImpl() {}
 
   HRESULT
   Initialize(ID3D12CommandAllocator *pAllocator, ID3D12PipelineState *pInitialPipelineState) {
+    if (!pAllocator)
+      return E_INVALIDARG;
     auto allocator = static_cast<MTLD3D12CommandAllocatorImpl *>(pAllocator);
+
+    if (allocator->GetType() != type_)
+      return E_INVALIDARG;
 
     if (allocator_ != allocator)
       allocator_ = allocator;
@@ -208,6 +216,7 @@ public:
     index_offset = 0;
 
     dirty_state_.clrAll();
+    recording_failed_ = false;
 
     encoder_count = std::numeric_limits<size_t>::max();
     return allocator_->StartRecord(&entry);
@@ -236,14 +245,17 @@ public:
 
   D3D12_COMMAND_LIST_TYPE STDMETHODCALLTYPE
   GetType() {
-    return D3D12_COMMAND_LIST_TYPE_DIRECT;
+    return type_;
   }
 
   HRESULT STDMETHODCALLTYPE
   Close() {
     if (encoder_count < std::numeric_limits<size_t>::max())
       return E_FAIL;
-    return allocator_->EndRecord(&encoder_count);
+    HRESULT hr = allocator_->EndRecord(&encoder_count);
+    if (FAILED(hr))
+      return hr;
+    return recording_failed_ ? E_FAIL : S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE
@@ -254,6 +266,30 @@ public:
   };
 
   void STDMETHODCALLTYPE ClearState(ID3D12PipelineState *pPipelineState) { IMPLEMENT_ME };
+
+  bool
+  ValidateCommand(bool valid, const char *name) {
+    if (valid)
+      return true;
+    WARN("D3D12 command list type ", type_, " cannot execute ", name);
+    recording_failed_ = true;
+    return false;
+  }
+
+  bool
+  SupportsGraphics() const {
+    return type_ == D3D12_COMMAND_LIST_TYPE_DIRECT || type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE;
+  }
+
+  bool
+  SupportsCompute() const {
+    return type_ == D3D12_COMMAND_LIST_TYPE_DIRECT || type_ == D3D12_COMMAND_LIST_TYPE_COMPUTE;
+  }
+
+  bool
+  SupportsCopy() const {
+    return type_ != D3D12_COMMAND_LIST_TYPE_BUNDLE;
+  }
 
   std::tuple<uint64_t, uint64_t>
   PopulateVertexBufferTable(uint32_t Count) {
@@ -533,6 +569,8 @@ public:
 
   void STDMETHODCALLTYPE
   DrawInstanced(UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation) {
+    if (!ValidateCommand(SupportsGraphics(), "DrawInstanced"))
+      return;
     WMTPrimitiveType primitive_type;
     uint32_t cp_count;
     if (!to_metal_primitive_type(topology_, primitive_type, cp_count))
@@ -555,6 +593,8 @@ public:
       UINT IndexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, INT BaseVertexLocation,
       UINT StartInstanceLocation
   ) {
+    if (!ValidateCommand(SupportsGraphics(), "DrawIndexedInstanced"))
+      return;
     WMTPrimitiveType primitive_type;
     uint32_t cp_count;
     if (!to_metal_primitive_type(topology_, primitive_type, cp_count))
@@ -756,6 +796,8 @@ public:
 
   void STDMETHODCALLTYPE
   Dispatch(UINT X, UINT Y, UINT Z) {
+    if (!ValidateCommand(SupportsCompute(), "Dispatch"))
+      return;
     if (!PreDispatch())
       return;
 
@@ -781,6 +823,8 @@ public:
   CopyBufferRegion(
       ID3D12Resource *pDstBuffer, UINT64 DstOffset, ID3D12Resource *pSrcBuffer, UINT64 SrcOffset, UINT64 ByteCount
   ) {
+    if (!ValidateCommand(SupportsCopy(), "CopyBufferRegion"))
+      return;
     if (!pDstBuffer || !pSrcBuffer)
       return;
     if (!PreBlit())
@@ -800,6 +844,8 @@ public:
       const D3D12_TEXTURE_COPY_LOCATION *pDst, UINT DstX, UINT DstY, UINT DstZ, const D3D12_TEXTURE_COPY_LOCATION *pSrc,
       const D3D12_BOX *pSrcBox
   ) {
+    if (!ValidateCommand(SupportsCopy(), "CopyTextureRegion"))
+      return;
     if (!pDst || !pSrc)
       return;
     if (!PreBlit())
@@ -818,8 +864,10 @@ public:
         auto &src = static_cast<MTLD3D12Resource *>(pSrc->pResource)->buffer;
         if (!src)
           return;
-        if (pSrcBox)
-          IMPLEMENT_ME
+        if (pSrcBox) {
+          WARN("CopyTextureRegion: source box for buffer footprints is not implemented");
+          return;
+        }
 
         auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture_withblitoption>();
         cmd_cp.type = WMTBlitCommandCopyFromBufferToTextureWithBlitOption;
@@ -845,12 +893,16 @@ public:
         if (!src)
           return;
         auto src_planar_count = getPlanarCount(src->pixelFormat());
-        if (!pSrcBox)
-          IMPLEMENT_ME
+        if (!pSrcBox) {
+          WARN("CopyTextureRegion: full texture copy without a source box is not implemented");
+          return;
+        }
 
         // copy between depth-stencil texture is tricky
-        if (dst_planar_count > 1 || src_planar_count > 1)
-          IMPLEMENT_ME
+        if (dst_planar_count > 1 || src_planar_count > 1) {
+          WARN("CopyTextureRegion: depth-stencil texture copy is not implemented");
+          return;
+        }
 
         auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_texture>();
         cmd_cp.type = WMTBlitCommandCopyFromTextureToTexture;
@@ -870,8 +922,10 @@ public:
       auto &dst = static_cast<MTLD3D12Resource *>(pDst->pResource)->buffer;
       if (!dst)
         return;
-      if (pSrcBox)
-        IMPLEMENT_ME
+      if (pSrcBox) {
+        WARN("CopyTextureRegion: source box for buffer footprints is not implemented");
+        return;
+      }
       if (pSrc->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX) {
         auto &src = static_cast<MTLD3D12Resource *>(pSrc->pResource)->texture;
         if (!src)
@@ -902,13 +956,15 @@ public:
                                                 : WMTBlitOptionNone;
       } else {
         // so it is buffer to buffer copy?
-        IMPLEMENT_ME
+        WARN("CopyTextureRegion: buffer-to-buffer footprint copy is not implemented");
       }
     }
   };
 
   void STDMETHODCALLTYPE
   CopyResource(ID3D12Resource *pDstResource, ID3D12Resource *pSrcResource) {
+    if (!ValidateCommand(SupportsCopy(), "CopyResource"))
+      return;
     auto *pDst = static_cast<MTLD3D12Resource *>(pDstResource);
     auto *pSrc = static_cast<MTLD3D12Resource *>(pSrcResource);
     if (!pDst || !pSrc || (pDst == pSrc))
@@ -933,7 +989,7 @@ public:
       return;
     }
 
-    IMPLEMENT_ME
+    WARN("CopyResource: texture copy is not implemented");
   };
 
   void STDMETHODCALLTYPE CopyTiles(
@@ -941,13 +997,17 @@ public:
       const D3D12_TILE_REGION_SIZE *tile_region_size, ID3D12Resource *buffer, UINT64 buffer_offset,
       D3D12_TILE_COPY_FLAGS flags
   ) {
-    IMPLEMENT_ME
+    if (!ValidateCommand(SupportsCopy(), "CopyTiles"))
+      return;
+    WARN("CopyTiles is not implemented");
   };
 
   void STDMETHODCALLTYPE ResolveSubresource(
       ID3D12Resource *pDstResource, UINT DstSubresource, ID3D12Resource *pSrcResource, UINT SrcSubresource,
       DXGI_FORMAT Format
   ) {
+    if (!ValidateCommand(SupportsCopy(), "ResolveSubresource"))
+      return;
     auto *pDst = static_cast<MTLD3D12Resource *>(pDstResource);
     auto *pSrc = static_cast<MTLD3D12Resource *>(pSrcResource);
 
@@ -1074,6 +1134,8 @@ public:
 
     auto pso = static_cast<MTLD3D12PipelineState *>(pPSO);
     if (pso->IsComputePipelineState) {
+      if (!ValidateCommand(SupportsCompute(), "SetPipelineState(compute)"))
+        return;
       auto compute_pso = static_cast<MTLD3D12ComputePipelineState *>(pPSO);
       if (pso_compute_.ptr() == compute_pso)
         return;
@@ -1090,6 +1152,8 @@ public:
     }
 
     auto graphics_pso = static_cast<MTLD3D12GraphicsPipelineState *>(pPSO);
+    if (!ValidateCommand(SupportsGraphics(), "SetPipelineState(graphics)"))
+      return;
     if (pso_graphics_.ptr() == graphics_pso)
       return;
     pso_graphics_ = graphics_pso;
@@ -1519,6 +1583,14 @@ public:
       UINT64 ArgBufferOffset, ID3D12Resource *pCountBuffer, UINT64 CountBufferOffset
   ) {
     auto sig = static_cast<MTLD3D12CommandSignature *>(pCommandSignature);
+    if (!sig)
+      return;
+    if (sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH) {
+      if (!ValidateCommand(SupportsCompute(), "ExecuteIndirect(Dispatch)"))
+        return;
+    } else if (!ValidateCommand(SupportsGraphics(), "ExecuteIndirect(Draw)")) {
+      return;
+    }
     auto arg_buffer = static_cast<MTLD3D12Resource *>(pArgBuffer);
     if (!arg_buffer || !arg_buffer->buffer)
       return;
@@ -1586,7 +1658,7 @@ MTLD3D12CommandAllocatorImpl::CreateCommandList(
   if (Type != type_)
     return E_INVALIDARG;
 
-  auto cmd_list = Com(new MTLD3D12GraphicsCommandListImpl(device_));
+  auto cmd_list = Com(new MTLD3D12GraphicsCommandListImpl(device_, Type));
   HRESULT hr = cmd_list->Initialize(this, pInitialPipelineState);
   if (FAILED(hr))
     return hr;

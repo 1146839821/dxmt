@@ -10,6 +10,14 @@ dx12_graphics_sm6 = executable('dx12_graphics_sm6', 'dx12_graphics_sm6.cpp',
   dependencies: [ d3d12_dep ],
 )
 
+dx12_command_list_type = executable('dx12_command_list_type', 'dx12_command_list_type.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_resource_tests = executable('dx12_resource_tests', 'dx12_resource_tests.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dxc = find_program('dxc', required: false)
 if dxc.found()
   custom_target('dx12_compute_sm6_fixture',
