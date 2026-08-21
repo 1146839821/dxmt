@@ -1077,7 +1077,34 @@ public:
       return;
     }
 
-    WARN("CopyResource: texture copy is not implemented");
+    if (DstDesc.Format != SrcDesc.Format || DstDesc.Width != SrcDesc.Width || DstDesc.Height != SrcDesc.Height ||
+        DstDesc.DepthOrArraySize != SrcDesc.DepthOrArraySize || DstDesc.MipLevels != SrcDesc.MipLevels ||
+        DstDesc.SampleDesc.Count != SrcDesc.SampleDesc.Count)
+      return;
+
+    const UINT mip_levels = DstDesc.MipLevels;
+    const UINT slice_count = DstDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : DstDesc.DepthOrArraySize;
+    for (UINT slice = 0; slice < slice_count; slice++) {
+      for (UINT mip = 0; mip < mip_levels; mip++) {
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource = pDstResource;
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = mip + slice * mip_levels;
+
+        D3D12_TEXTURE_COPY_LOCATION src = dst;
+        src.pResource = pSrcResource;
+
+        D3D12_BOX box = {};
+        box.right = std::max<UINT>(1, (UINT)(SrcDesc.Width >> mip));
+        box.bottom = DstDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D
+                         ? 1
+                         : std::max<UINT>(1, SrcDesc.Height >> mip);
+        box.back = DstDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                       ? std::max<UINT>(1, (UINT)SrcDesc.DepthOrArraySize >> mip)
+                       : 1;
+        CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+      }
+    }
   };
 
   void STDMETHODCALLTYPE CopyTiles(
