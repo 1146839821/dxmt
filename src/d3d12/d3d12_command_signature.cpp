@@ -95,6 +95,11 @@ public:
 
   HRESULT
   Initialize(const D3D12_COMMAND_SIGNATURE_DESC *pDesc, ID3D12RootSignature *pRootSignature) {
+    if (!pDesc || (!pDesc->NumArgumentDescs && pDesc->pArgumentDescs) ||
+        (pDesc->NumArgumentDescs && !pDesc->pArgumentDescs) || !pDesc->ByteStride ||
+        (pDesc->ByteStride & 3))
+      return E_INVALIDARG;
+
     std::stringstream source;
     D3D12_INDIRECT_ARGUMENT_TYPE side_effect = ~(D3D12_INDIRECT_ARGUMENT_TYPE){};
     UpdateRootArguments = false;

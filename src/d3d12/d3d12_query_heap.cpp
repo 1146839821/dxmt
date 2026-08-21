@@ -17,6 +17,7 @@
  */
 
 #include "com/com_pointer.hpp"
+#include "d3d12_device.hpp"
 #include "d3d12_pageable.hpp"
 
 namespace dxmt {
@@ -27,6 +28,26 @@ public:
 
   HRESULT
   Initialize(const D3D12_QUERY_HEAP_DESC *pDesc) {
+    if (!pDesc || !pDesc->Count)
+      return E_INVALIDARG;
+    if (pDesc->Type != D3D12_QUERY_HEAP_TYPE_OCCLUSION && pDesc->Type != D3D12_QUERY_HEAP_TYPE_TIMESTAMP)
+      return E_NOTIMPL;
+
+    if (pDesc->Type == D3D12_QUERY_HEAP_TYPE_OCCLUSION) {
+      WMTBufferInfo info = {};
+      info.length = uint64_t(pDesc->Count) * sizeof(uint64_t);
+      info.options = WMTResourceHazardTrackingModeUntracked;
+      info.memory.set(nullptr);
+      visibility_buffer = device_->GetMTLDevice().newBuffer(info);
+      if (!visibility_buffer)
+        return E_OUTOFMEMORY;
+    } else {
+      timestamp_buffer = device_->GetMTLDevice().newCounterSampleBuffer(pDesc->Count, true);
+      if (!timestamp_buffer)
+        return E_NOTIMPL;
+    }
+    type = pDesc->Type;
+    count = pDesc->Count;
     return S_OK;
   }
 
@@ -54,6 +75,7 @@ public:
 
 HRESULT
 CreateQueryHeap(MTLD3D12Device *pDevice, const D3D12_QUERY_HEAP_DESC *pDesc, REFIID riid, void **ppQueryHeap) {
+  InitReturnPtr(ppQueryHeap);
   auto heap = Com(new MTLD3D12QueryHeapImpl(pDevice));
   HRESULT hr = heap->Initialize(pDesc);
   if (FAILED(hr))

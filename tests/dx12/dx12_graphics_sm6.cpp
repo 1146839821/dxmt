@@ -70,6 +70,8 @@ int main(int argc, char **argv) {
   ID3D12DescriptorHeap *rtv_heap = nullptr;
   ID3D12DescriptorHeap *resource_heap = nullptr;
   ID3D12DescriptorHeap *sampler_heap = nullptr;
+  ID3D12QueryHeap *query_heap = nullptr;
+  ID3D12QueryHeap *timestamp_heap = nullptr;
   ID3D12Resource *render_target = nullptr;
   ID3D12Resource *vertex_buffer = nullptr;
   ID3D12Resource *root_data_buffer = nullptr;
@@ -77,6 +79,7 @@ int main(int argc, char **argv) {
   ID3D12Resource *texture = nullptr;
   ID3D12Resource *texture_upload = nullptr;
   ID3D12Resource *readback = nullptr;
+  ID3D12Resource *query_readback = nullptr;
   ID3D12Fence *fence = nullptr;
   HANDLE event = nullptr;
   ID3D12CommandList *lists[1] = {};
@@ -92,6 +95,8 @@ int main(int argc, char **argv) {
   D3D12_RESOURCE_DESC buffer_desc = {};
   D3D12_RESOURCE_DESC texture_desc = {};
   D3D12_RESOURCE_DESC readback_desc = {};
+  D3D12_RESOURCE_DESC query_readback_desc = {};
+  D3D12_QUERY_HEAP_DESC query_heap_desc = {};
   D3D12_CLEAR_VALUE clear_value = {};
   D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc = {};
   D3D12_DESCRIPTOR_HEAP_DESC resource_heap_desc = {};
@@ -125,8 +130,15 @@ int main(int argc, char **argv) {
   void *mapped_root_data = nullptr;
   void *mapped_texture_upload = nullptr;
   BYTE *mapped_readback = nullptr;
+  UINT64 *mapped_query_readback = nullptr;
   UINT pixel = 0;
   UINT expected_pixel = 0;
+  UINT64 query_result = 0;
+  UINT64 timestamp_frequency = 0;
+  UINT64 timestamp_begin = 0;
+  UINT64 timestamp_end = 0;
+  UINT64 calibration_gpu = 0;
+  UINT64 calibration_cpu = 0;
   int result = 1;
 
   if (!CheckHR("D3D12CreateDevice",
@@ -142,6 +154,26 @@ int main(int argc, char **argv) {
                device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                               IID_PPV_ARGS(&allocator))))
     goto cleanup;
+  query_heap_desc.Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+  query_heap_desc.Count = 1;
+  if (!CheckHR("CreateQueryHeap", device->CreateQueryHeap(&query_heap_desc, IID_PPV_ARGS(&query_heap))))
+    goto cleanup;
+  query_heap_desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+  query_heap_desc.Count = 2;
+  if (!CheckHR("CreateTimestampQueryHeap", device->CreateQueryHeap(&query_heap_desc, IID_PPV_ARGS(&timestamp_heap))))
+    goto cleanup;
+  if (!CheckHR("GetTimestampFrequency", queue->GetTimestampFrequency(&timestamp_frequency)))
+    goto cleanup;
+  if (!timestamp_frequency) {
+    std::cerr << "timestamp frequency returned zero\n";
+    goto cleanup;
+  }
+  if (!CheckHR("GetClockCalibration", queue->GetClockCalibration(&calibration_gpu, &calibration_cpu)))
+    goto cleanup;
+  if (!calibration_gpu || !calibration_cpu) {
+    std::cerr << "clock calibration returned zero\n";
+    goto cleanup;
+  }
 
   if (root_cbv) {
     root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -436,7 +468,11 @@ int main(int argc, char **argv) {
   list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   list->IASetVertexBuffers(0, 1, &vertex_view);
   list->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
+  list->EndQuery(timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
+  list->BeginQuery(query_heap, D3D12_QUERY_TYPE_OCCLUSION, 0);
   list->DrawInstanced(3, 1, 0, 0);
+  list->EndQuery(query_heap, D3D12_QUERY_TYPE_OCCLUSION, 0);
+  list->EndQuery(timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
 
   if (root_uav) {
     root_uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -467,6 +503,13 @@ int main(int argc, char **argv) {
   readback_desc.MipLevels = 1;
   readback_desc.SampleDesc.Count = 1;
   readback_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  query_readback_desc = readback_desc;
+  query_readback_desc.Width = sizeof(UINT64) * 3;
+  if (!CheckHR("CreateQueryReadback",
+               device->CreateCommittedResource(
+                   &readback_heap, D3D12_HEAP_FLAG_NONE, &query_readback_desc,
+                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&query_readback))))
+    goto cleanup;
   if (!CheckHR("CreateReadbackBuffer",
                device->CreateCommittedResource(
                    &readback_heap, D3D12_HEAP_FLAG_NONE, &readback_desc,
@@ -483,6 +526,8 @@ int main(int argc, char **argv) {
     copy_src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     list->CopyTextureRegion(&copy_dst, 0, 0, 0, &copy_src, nullptr);
   }
+  list->ResolveQueryData(query_heap, D3D12_QUERY_TYPE_OCCLUSION, 0, 1, query_readback, sizeof(UINT64) * 2);
+  list->ResolveQueryData(timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, query_readback, 0);
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
 
@@ -505,6 +550,21 @@ int main(int argc, char **argv) {
     goto cleanup;
   pixel = *reinterpret_cast<UINT *>(mapped_readback);
   readback->Unmap(0, nullptr);
+  if (!CheckHR("MapQueryReadback",
+               query_readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped_query_readback))))
+    goto cleanup;
+  timestamp_begin = mapped_query_readback[0];
+  timestamp_end = mapped_query_readback[1];
+  query_result = mapped_query_readback[2];
+  query_readback->Unmap(0, nullptr);
+  if (!query_result) {
+    std::cerr << "occlusion query returned zero\n";
+    goto cleanup;
+  }
+  if (timestamp_end <= timestamp_begin) {
+    std::cerr << "timestamp query did not advance: " << timestamp_begin << " -> " << timestamp_end << "\n";
+    goto cleanup;
+  }
   expected_pixel = (root_cbv || root_constants || root_srv || root_uav || textured_root_cbv) ? 0xff00ff00u
                                                                                          : 0xff0000ffu;
   if ((pixel & 0x00ffffffu) != (expected_pixel & 0x00ffffffu)) {
@@ -534,6 +594,8 @@ cleanup:
     pso->Release();
   if (readback)
     readback->Release();
+  if (query_readback)
+    query_readback->Release();
   if (texture_upload)
     texture_upload->Release();
   if (texture)
@@ -552,6 +614,10 @@ cleanup:
     sampler_heap->Release();
   if (resource_heap)
     resource_heap->Release();
+  if (query_heap)
+    query_heap->Release();
+  if (timestamp_heap)
+    timestamp_heap->Release();
   if (root_signature)
     root_signature->Release();
   if (root_blob)

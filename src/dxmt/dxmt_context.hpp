@@ -36,7 +36,7 @@
 #include "airconv_public.h"
 #include <cassert>
 
-#define DXMT_IMPLEMENT_ME __builtin_unreachable();
+#define DXMT_IMPLEMENT_ME do { WARN("DXMT: operation is not implemented"); } while (0)
 #define DXMT_UNREACHABLE __builtin_unreachable();
 
 namespace dxmt {

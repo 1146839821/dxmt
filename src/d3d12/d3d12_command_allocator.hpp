@@ -111,7 +111,7 @@ public:
   HRESULT STDMETHODCALLTYPE Reset();
 
   D3D12_COMMAND_LIST_TYPE
-  GetType() const {
+  GetType() const override {
     return type_;
   }
 

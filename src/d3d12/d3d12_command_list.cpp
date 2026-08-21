@@ -110,6 +110,31 @@ to_metal_primitive_type(D3D12_PRIMITIVE_TOPOLOGY topo, WMTPrimitiveType &primiti
 /* FIXME: it's not *public* */
 unsigned getPlanarCount(WMTPixelFormat format);
 
+struct D3D12TextureSubresource {
+  UINT mip;
+  UINT slice;
+  UINT plane;
+};
+
+inline bool
+decode_texture_subresource(Texture *texture, UINT subresource, D3D12TextureSubresource &decoded) {
+  if (!texture)
+    return false;
+  const uint64_t mip_levels = texture->miplevelCount();
+  const uint64_t array_size = texture->arrayLength();
+  const uint64_t plane_count = getPlanarCount(texture->pixelFormat());
+  const uint64_t plane_stride = mip_levels * array_size;
+  if (!mip_levels || !array_size || !plane_count || !plane_stride ||
+      subresource >= plane_stride * plane_count)
+    return false;
+
+  decoded.plane = static_cast<UINT>(subresource / plane_stride);
+  auto plane_subresource = subresource % plane_stride;
+  decoded.slice = static_cast<UINT>(plane_subresource / mip_levels);
+  decoded.mip = static_cast<UINT>(plane_subresource % mip_levels);
+  return true;
+}
+
 inline WMTBarrierScope
 resource_barrier_scope(MTLD3D12Resource *resource) {
   if (!resource)
@@ -323,6 +348,36 @@ public:
   bool
   SupportsCopy() const {
     return type_ != D3D12_COMMAND_LIST_TYPE_BUNDLE;
+  }
+
+  bool
+  SupportsTimestamp() const {
+    return type_ != D3D12_COMMAND_LIST_TYPE_BUNDLE;
+  }
+
+  bool
+  ValidateRootArgumentRange(
+      MTLD3D12RootSignature *root_signature, UINT index, UINT dword_offset, UINT dword_count, const char *name
+  ) {
+    constexpr UINT staging_qwords = 64;
+    if (!root_signature || index >= root_signature->ParameterSlots)
+      return false;
+
+    const auto slot = root_signature->SlotQwordOffsets[index];
+    if (slot > staging_qwords || dword_offset > (staging_qwords - slot) * 2 ||
+        dword_count > (staging_qwords - slot) * 2 - dword_offset) {
+      WARN("D3D12 ", name, " root argument is outside the 64-qword staging area");
+      recording_failed_ = true;
+      return false;
+    }
+
+    const auto required_qwords = (dword_offset + dword_count + 1) / 2;
+    if (slot > root_signature->UploadQwords || required_qwords > root_signature->UploadQwords - slot) {
+      WARN("D3D12 ", name, " root argument exceeds the root signature payload");
+      recording_failed_ = true;
+      return false;
+    }
+    return true;
   }
 
   void
@@ -703,7 +758,20 @@ public:
 
   uint64_t
   EncodeRootArgument(MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], UINT Count = 1) {
-    auto [Ptr, Offset] = allocator_->AllocateGPUHeap(sizeof(uint64_t) * pRootSig->UploadQwords * Count, 64);
+    if (!pRootSig || !pStaging || !Count || pRootSig->UploadQwords > 64) {
+      recording_failed_ = true;
+      return 0;
+    }
+    const auto qword_bytes = sizeof(uint64_t) * size_t(pRootSig->UploadQwords);
+    if (!qword_bytes || Count > std::numeric_limits<size_t>::max() / qword_bytes) {
+      recording_failed_ = true;
+      return 0;
+    }
+    auto [Ptr, Offset] = allocator_->AllocateGPUHeap(qword_bytes * Count, 64);
+    if (!Ptr) {
+      recording_failed_ = true;
+      return 0;
+    }
     for (unsigned i = 0; i < Count; i++)
       memcpy(
           reinterpret_cast<uint64_t *>(Ptr) + i * pRootSig->UploadQwords, pStaging,
@@ -939,19 +1007,40 @@ public:
     if (!PreBlit())
       return;
 
+    D3D12_BOX full_source_box = {};
+    if (pDst->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX &&
+        pSrc->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX && !pSrcBox) {
+      auto source = static_cast<MTLD3D12Resource *>(pSrc->pResource);
+      D3D12TextureSubresource source_subresource = {};
+      if (!source || !decode_texture_subresource(source->texture.ptr(), pSrc->SubresourceIndex, source_subresource))
+        return;
+      auto desc = source->GetDesc();
+      full_source_box.right = std::max<UINT>(1, static_cast<UINT>(desc.Width >> source_subresource.mip));
+      full_source_box.bottom = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D
+                                   ? 1
+                                   : std::max<UINT>(1, desc.Height >> source_subresource.mip);
+      full_source_box.back = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                                 ? std::max<UINT>(1, static_cast<UINT>(desc.DepthOrArraySize >> source_subresource.mip))
+                                 : 1;
+      pSrcBox = &full_source_box;
+    }
+
     if (pDst->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX) {
-      auto &dst = static_cast<MTLD3D12Resource *>(pDst->pResource)->texture;
-      if (!dst)
+      auto dst_resource = static_cast<MTLD3D12Resource *>(pDst->pResource);
+      if (!dst_resource)
+        return;
+      auto &dst = dst_resource->texture;
+      D3D12TextureSubresource dst_subresource = {};
+      if (!decode_texture_subresource(dst.ptr(), pDst->SubresourceIndex, dst_subresource))
         return;
 
       auto dst_planar_count = getPlanarCount(dst->pixelFormat());
-      auto dst_subresource_index = pDst->SubresourceIndex / dst_planar_count;
-      auto dst_subresource_planar = pDst->SubresourceIndex % dst_planar_count;
 
       if (pSrc->Type == D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT) {
-        auto &src = static_cast<MTLD3D12Resource *>(pSrc->pResource)->buffer;
-        if (!src)
+        auto src_resource = static_cast<MTLD3D12Resource *>(pSrc->pResource);
+        if (!src_resource || !src_resource->buffer)
           return;
+        auto &src = src_resource->buffer;
         if (pSrcBox) {
           WARN("CopyTextureRegion: source box for buffer footprints is not implemented");
           return;
@@ -970,64 +1059,112 @@ public:
             pSrc->PlacedFootprint.Footprint.Depth
         };
         cmd_cp.dst = dst->current()->texture();
-        cmd_cp.level = dst_subresource_index % dst->miplevelCount();
-        cmd_cp.slice = dst_subresource_index / dst->miplevelCount();
-        cmd_cp.options = (dst_planar_count > 1) ? (dst_subresource_planar ? WMTBlitOptionStencilFromDepthStencil
-                                                                          : WMTBlitOptionDepthFromDepthStencil)
+        cmd_cp.level = dst_subresource.mip;
+        cmd_cp.slice = dst_subresource.slice;
+        cmd_cp.options = (dst_planar_count > 1) ? (dst_subresource.plane ? WMTBlitOptionStencilFromDepthStencil
+                                                                         : WMTBlitOptionDepthFromDepthStencil)
                                                 : WMTBlitOptionNone;
         cmd_cp.origin = {DstX, DstY, DstZ};
       } else {
-        auto &src = static_cast<MTLD3D12Resource *>(pSrc->pResource)->texture;
-        if (!src)
+        auto src_resource = static_cast<MTLD3D12Resource *>(pSrc->pResource);
+        if (!src_resource || !src_resource->texture)
+          return;
+        auto &src = src_resource->texture;
+        D3D12TextureSubresource src_subresource = {};
+        if (!decode_texture_subresource(src.ptr(), pSrc->SubresourceIndex, src_subresource))
           return;
         auto src_planar_count = getPlanarCount(src->pixelFormat());
-        if (!pSrcBox) {
-          WARN("CopyTextureRegion: full texture copy without a source box is not implemented");
-          return;
-        }
-
         // copy between depth-stencil texture is tricky
         if (dst_planar_count > 1 || src_planar_count > 1) {
-          WARN("CopyTextureRegion: depth-stencil texture copy is not implemented");
-          return;
+          if (dst_planar_count > 1 && src_planar_count > 1 && dst_subresource.plane != src_subresource.plane) {
+            WARN("CopyTextureRegion: mismatched depth-stencil planes");
+            return;
+          }
         }
 
-        auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_texture>();
-        cmd_cp.type = WMTBlitCommandCopyFromTextureToTexture;
-        cmd_cp.src = src->current()->texture();
-        cmd_cp.src_level = pSrc->SubresourceIndex % src->miplevelCount();
-        cmd_cp.src_slice = pSrc->SubresourceIndex / src->miplevelCount();
-        cmd_cp.src_origin = {pSrcBox->left, pSrcBox->top, pSrcBox->front};
-        cmd_cp.src_size = {
-            pSrcBox->right - pSrcBox->left, pSrcBox->bottom - pSrcBox->top, pSrcBox->back - pSrcBox->front
-        };
-        cmd_cp.dst = dst->current()->texture();
-        cmd_cp.dst_level = pDst->SubresourceIndex % dst->miplevelCount();
-        cmd_cp.dst_slice = pDst->SubresourceIndex / dst->miplevelCount();
-        cmd_cp.dst_origin = {DstX, DstY, DstZ};
+        if (dst_planar_count > 1 || src_planar_count > 1) {
+          // Metal exposes depth/stencil aspect selection on texture-buffer copies, not texture-to-texture copies.
+          const UINT plane = src_planar_count > 1 ? src_subresource.plane : dst_subresource.plane;
+          const UINT bytes_per_pixel = plane ? 1 : 4;
+          const UINT width = pSrcBox->right - pSrcBox->left;
+          const UINT height = pSrcBox->bottom - pSrcBox->top;
+          const UINT depth = pSrcBox->back - pSrcBox->front;
+          const uint64_t row_pitch = (uint64_t(width) * bytes_per_pixel + 255u) & ~uint64_t(255u);
+          const uint64_t image_pitch = row_pitch * height;
+          const uint64_t staging_size = image_pitch * depth;
+          if (!width || !height || !depth || row_pitch > UINT_MAX || staging_size > kGPUHeapSize) {
+            WARN("CopyTextureRegion: depth-stencil staging range is invalid");
+            return;
+          }
+          auto [mapped, staging_offset] = allocator_->AllocateGPUHeap(staging_size, 256);
+          (void)mapped;
+
+          auto &to_buffer = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer_withblitoption>();
+          to_buffer.type = WMTBlitCommandCopyFromTextureToBufferWithBlitOption;
+          to_buffer.src = src->current()->texture();
+          to_buffer.slice = src_subresource.slice;
+          to_buffer.level = src_subresource.mip;
+          to_buffer.origin = {pSrcBox->left, pSrcBox->top, pSrcBox->front};
+          to_buffer.size = {width, height, depth};
+          to_buffer.dst = allocator_->gpu_heap_buffer_;
+          to_buffer.offset = staging_offset;
+          to_buffer.bytes_per_row = static_cast<uint32_t>(row_pitch);
+          to_buffer.bytes_per_image = src->textureType() == WMTTextureType3D ? image_pitch : 0;
+          to_buffer.options = plane ? WMTBlitOptionStencilFromDepthStencil : WMTBlitOptionDepthFromDepthStencil;
+
+          auto &from_buffer = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture_withblitoption>();
+          from_buffer.type = WMTBlitCommandCopyFromBufferToTextureWithBlitOption;
+          from_buffer.src = allocator_->gpu_heap_buffer_;
+          from_buffer.src_offset = staging_offset;
+          from_buffer.bytes_per_row = static_cast<uint32_t>(row_pitch);
+          from_buffer.bytes_per_image = dst->textureType() == WMTTextureType3D ? image_pitch : 0;
+          from_buffer.size = {width, height, depth};
+          from_buffer.dst = dst->current()->texture();
+          from_buffer.slice = dst_subresource.slice;
+          from_buffer.level = dst_subresource.mip;
+          from_buffer.options = to_buffer.options;
+          from_buffer.origin = {DstX, DstY, DstZ};
+        } else {
+          auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_texture>();
+          cmd_cp.type = WMTBlitCommandCopyFromTextureToTexture;
+          cmd_cp.src = src->current()->texture();
+          cmd_cp.src_level = src_subresource.mip;
+          cmd_cp.src_slice = src_subresource.slice;
+          cmd_cp.src_origin = {pSrcBox->left, pSrcBox->top, pSrcBox->front};
+          cmd_cp.src_size = {
+              pSrcBox->right - pSrcBox->left, pSrcBox->bottom - pSrcBox->top, pSrcBox->back - pSrcBox->front
+          };
+          cmd_cp.dst = dst->current()->texture();
+          cmd_cp.dst_level = dst_subresource.mip;
+          cmd_cp.dst_slice = dst_subresource.slice;
+          cmd_cp.dst_origin = {DstX, DstY, DstZ};
+        }
       }
     } else if (pDst->Type == D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT) {
-      auto &dst = static_cast<MTLD3D12Resource *>(pDst->pResource)->buffer;
-      if (!dst)
+      auto dst_resource = static_cast<MTLD3D12Resource *>(pDst->pResource);
+      if (!dst_resource || !dst_resource->buffer)
         return;
+      auto &dst = dst_resource->buffer;
       if (pSrcBox) {
         WARN("CopyTextureRegion: source box for buffer footprints is not implemented");
         return;
       }
       if (pSrc->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX) {
-        auto &src = static_cast<MTLD3D12Resource *>(pSrc->pResource)->texture;
-        if (!src)
+        auto src_resource = static_cast<MTLD3D12Resource *>(pSrc->pResource);
+        if (!src_resource || !src_resource->texture)
+          return;
+        auto &src = src_resource->texture;
+        D3D12TextureSubresource src_subresource = {};
+        if (!decode_texture_subresource(src.ptr(), pSrc->SubresourceIndex, src_subresource))
           return;
 
         auto src_planar_count = getPlanarCount(src->pixelFormat());
-        auto src_subresource_index = pSrc->SubresourceIndex / src_planar_count;
-        auto src_subresource_planar = pSrc->SubresourceIndex % src_planar_count;
 
         auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer_withblitoption>();
         cmd_cp.type = WMTBlitCommandCopyFromTextureToBufferWithBlitOption;
         cmd_cp.src = src->current()->texture();
-        cmd_cp.level = src_subresource_index % src->miplevelCount();
-        cmd_cp.slice = src_subresource_index / src->miplevelCount();
+        cmd_cp.level = src_subresource.mip;
+        cmd_cp.slice = src_subresource.slice;
         cmd_cp.origin = {0, 0, 0};
         cmd_cp.size = {
             pDst->PlacedFootprint.Footprint.Width, pDst->PlacedFootprint.Footprint.Height,
@@ -1039,7 +1176,7 @@ public:
         cmd_cp.bytes_per_image = src->textureType() == WMTTextureType3D
                                      ? pDst->PlacedFootprint.Footprint.Height * pDst->PlacedFootprint.Footprint.RowPitch
                                      : 0;
-        cmd_cp.options = (src_planar_count > 1) ? (src_subresource_planar ? WMTBlitOptionStencilFromDepthStencil
+        cmd_cp.options = (src_planar_count > 1) ? (src_subresource.plane ? WMTBlitOptionStencilFromDepthStencil
                                                                           : WMTBlitOptionDepthFromDepthStencil)
                                                 : WMTBlitOptionNone;
       } else {
@@ -1084,25 +1221,28 @@ public:
 
     const UINT mip_levels = DstDesc.MipLevels;
     const UINT slice_count = DstDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : DstDesc.DepthOrArraySize;
-    for (UINT slice = 0; slice < slice_count; slice++) {
-      for (UINT mip = 0; mip < mip_levels; mip++) {
-        D3D12_TEXTURE_COPY_LOCATION dst = {};
-        dst.pResource = pDstResource;
-        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        dst.SubresourceIndex = mip + slice * mip_levels;
+    const UINT plane_count = getPlanarCount(pDst->texture->pixelFormat());
+    for (UINT plane = 0; plane < plane_count; plane++) {
+      for (UINT slice = 0; slice < slice_count; slice++) {
+        for (UINT mip = 0; mip < mip_levels; mip++) {
+          D3D12_TEXTURE_COPY_LOCATION dst = {};
+          dst.pResource = pDstResource;
+          dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+          dst.SubresourceIndex = mip + mip_levels * (slice + slice_count * plane);
 
-        D3D12_TEXTURE_COPY_LOCATION src = dst;
-        src.pResource = pSrcResource;
+          D3D12_TEXTURE_COPY_LOCATION src = dst;
+          src.pResource = pSrcResource;
 
-        D3D12_BOX box = {};
-        box.right = std::max<UINT>(1, (UINT)(SrcDesc.Width >> mip));
-        box.bottom = DstDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D
-                         ? 1
-                         : std::max<UINT>(1, SrcDesc.Height >> mip);
-        box.back = DstDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
-                       ? std::max<UINT>(1, (UINT)SrcDesc.DepthOrArraySize >> mip)
-                       : 1;
-        CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+          D3D12_BOX box = {};
+          box.right = std::max<UINT>(1, (UINT)(SrcDesc.Width >> mip));
+          box.bottom = DstDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D
+                           ? 1
+                           : std::max<UINT>(1, SrcDesc.Height >> mip);
+          box.back = DstDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                         ? std::max<UINT>(1, (UINT)SrcDesc.DepthOrArraySize >> mip)
+                         : 1;
+          CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+        }
       }
     }
   };
@@ -1287,10 +1427,6 @@ public:
 
     for (UINT i = 0; i < Count; i++) {
       const auto &barrier = barriers[i];
-      if (barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) {
-        WARN("D3D12 split ResourceBarrier flags are not implemented");
-        continue;
-      }
 
       switch (barrier.Type) {
       case D3D12_RESOURCE_BARRIER_TYPE_TRANSITION: {
@@ -1299,15 +1435,41 @@ public:
           recording_failed_ = true;
           continue;
         }
-        if (barrier.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES)
-          WARN("D3D12 subresource ResourceBarrier is tracked at whole-resource granularity");
-        if (resource->state != barrier.Transition.StateBefore)
+        const bool split_end = barrier.Flags & D3D12_RESOURCE_BARRIER_FLAG_END_ONLY;
+        if (barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE)
+          WARN("D3D12 split transition is lowered to an immediate transition");
+
+        if (barrier.Transition.Subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) {
+          bool needs_barrier = false;
+          bool state_mismatch = false;
+          for (auto current : resource->subresource_states) {
+            state_mismatch |= current != barrier.Transition.StateBefore &&
+                              !(split_end && current == barrier.Transition.StateAfter);
+            needs_barrier |= current != barrier.Transition.StateAfter;
+          }
+          if (state_mismatch)
+            WARN("D3D12 ResourceBarrier state mismatch");
+          if (needs_barrier)
+            EncodeMemoryBarrier(
+                resource_barrier_scope(resource), barrier.Transition.StateBefore, barrier.Transition.StateAfter
+            );
+          resource->SetAllSubresourceStates(barrier.Transition.StateAfter);
+          break;
+        }
+
+        if (!resource->HasSubresource(barrier.Transition.Subresource)) {
+          WARN("D3D12 ResourceBarrier subresource is out of range");
+          continue;
+        }
+        auto current = resource->GetSubresourceState(barrier.Transition.Subresource);
+        if (current != barrier.Transition.StateBefore &&
+            !(split_end && current == barrier.Transition.StateAfter))
           WARN("D3D12 ResourceBarrier state mismatch");
-        if (resource->state != barrier.Transition.StateAfter)
+        if (current != barrier.Transition.StateAfter)
           EncodeMemoryBarrier(
               resource_barrier_scope(resource), barrier.Transition.StateBefore, barrier.Transition.StateAfter
           );
-        resource->state = barrier.Transition.StateAfter;
+        resource->SetSubresourceState(barrier.Transition.Subresource, barrier.Transition.StateAfter);
         break;
       }
       case D3D12_RESOURCE_BARRIER_TYPE_UAV:
@@ -1315,7 +1477,8 @@ public:
                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         break;
       case D3D12_RESOURCE_BARRIER_TYPE_ALIASING:
-        WARN("D3D12 aliasing ResourceBarrier is not implemented");
+        // Metal serializes the encoder boundary, which is the visibility point needed for alias reuse.
+        allocator_->InvalidateCurrentPass();
         break;
       default:
         recording_failed_ = true;
@@ -1347,7 +1510,7 @@ public:
       return;
     if (pRootSignature) {
       rootsig_compute_ = static_cast<MTLD3D12RootSignature *>(pRootSignature);
-      assert(rootsig_compute_->UploadQwords < std::size(rootarg_compute_staging_));
+      assert(rootsig_compute_->UploadQwords <= std::size(rootarg_compute_staging_));
     } else {
       rootsig_compute_ = nullptr;
     }
@@ -1360,7 +1523,7 @@ public:
       return;
     if (pRootSignature) {
       rootsig_graphics_ = static_cast<MTLD3D12RootSignature *>(pRootSignature);
-      assert(rootsig_graphics_->UploadQwords < std::size(rootarg_graphics_staging_));
+      assert(rootsig_graphics_->UploadQwords <= std::size(rootarg_graphics_staging_));
     } else {
       rootsig_graphics_ = nullptr;
     }
@@ -1368,9 +1531,7 @@ public:
   };
 
   void STDMETHODCALLTYPE SetComputeRootDescriptorTable(UINT Index, D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor) {
-    if (!rootsig_compute_)
-      return;
-    if (Index >= rootsig_compute_->ParameterSlots)
+    if (!ValidateRootArgumentRange(rootsig_compute_.ptr(), Index, 0, 2, "SetComputeRootDescriptorTable"))
       return;
     rootarg_compute_staging_[rootsig_compute_->SlotQwordOffsets[Index]] = BaseDescriptor.ptr;
     dirty_state_.set(DirtyState::ComputeRootArguments);
@@ -1378,18 +1539,14 @@ public:
 
   void STDMETHODCALLTYPE
   SetGraphicsRootDescriptorTable(UINT Index, D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor) {
-    if (!rootsig_graphics_)
-      return;
-    if (Index >= rootsig_graphics_->ParameterSlots)
+    if (!ValidateRootArgumentRange(rootsig_graphics_.ptr(), Index, 0, 2, "SetGraphicsRootDescriptorTable"))
       return;
     rootarg_graphics_staging_[rootsig_graphics_->SlotQwordOffsets[Index]] = BaseDescriptor.ptr;
     dirty_state_.set(DirtyState::GraphicsRootArguments);
   };
 
   void STDMETHODCALLTYPE SetComputeRoot32BitConstant(UINT Index, UINT Data, UINT DstOffset) {
-    if (!rootsig_compute_)
-      return;
-    if (Index >= rootsig_compute_->ParameterSlots)
+    if (!ValidateRootArgumentRange(rootsig_compute_.ptr(), Index, DstOffset, 1, "SetComputeRoot32BitConstant"))
       return;
     auto dst = reinterpret_cast<uint32_t *>(rootarg_compute_staging_ + rootsig_compute_->SlotQwordOffsets[Index]);
     dst[DstOffset] = Data;
@@ -1398,9 +1555,7 @@ public:
 
   void STDMETHODCALLTYPE
   SetGraphicsRoot32BitConstant(UINT Index, UINT Data, UINT DstOffset) {
-    if (!rootsig_graphics_)
-      return;
-    if (Index >= rootsig_graphics_->ParameterSlots)
+    if (!ValidateRootArgumentRange(rootsig_graphics_.ptr(), Index, DstOffset, 1, "SetGraphicsRoot32BitConstant"))
       return;
     auto dst = reinterpret_cast<uint32_t *>(rootarg_graphics_staging_ + rootsig_graphics_->SlotQwordOffsets[Index]);
     dst[DstOffset] = Data;
@@ -1409,9 +1564,8 @@ public:
 
   void STDMETHODCALLTYPE
   SetComputeRoot32BitConstants(UINT Index, UINT ConstantCount, const void *pData, UINT DstOffset) {
-    if (!rootsig_compute_)
-      return;
-    if (Index >= rootsig_compute_->ParameterSlots)
+    if (!pData || !ValidateRootArgumentRange(
+                     rootsig_compute_.ptr(), Index, DstOffset, ConstantCount, "SetComputeRoot32BitConstants"))
       return;
     auto src = reinterpret_cast<const uint32_t *>(pData);
     auto dst = reinterpret_cast<uint32_t *>(rootarg_compute_staging_ + rootsig_compute_->SlotQwordOffsets[Index]);
@@ -1423,9 +1577,8 @@ public:
 
   void STDMETHODCALLTYPE
   SetGraphicsRoot32BitConstants(UINT Index, UINT ConstantCount, const void *pData, UINT DstOffset) {
-    if (!rootsig_graphics_)
-      return;
-    if (Index >= rootsig_graphics_->ParameterSlots)
+    if (!pData || !ValidateRootArgumentRange(
+                     rootsig_graphics_.ptr(), Index, DstOffset, ConstantCount, "SetGraphicsRoot32BitConstants"))
       return;
     auto src = reinterpret_cast<const uint32_t *>(pData);
     auto dst = reinterpret_cast<uint32_t *>(rootarg_graphics_staging_ + rootsig_graphics_->SlotQwordOffsets[Index]);
@@ -1436,9 +1589,7 @@ public:
   };
 
   void STDMETHODCALLTYPE SetComputeRootConstantBufferView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
-    if (!rootsig_compute_)
-      return;
-    if (Index >= rootsig_compute_->ParameterSlots)
+    if (!ValidateRootArgumentRange(rootsig_compute_.ptr(), Index, 0, 2, "SetComputeRootConstantBufferView"))
       return;
     rootarg_compute_staging_[rootsig_compute_->SlotQwordOffsets[Index]] = VA;
     dirty_state_.set(DirtyState::ComputeRootArguments);
@@ -1446,18 +1597,14 @@ public:
 
   void STDMETHODCALLTYPE
   SetGraphicsRootConstantBufferView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
-    if (!rootsig_graphics_)
-      return;
-    if (Index >= rootsig_graphics_->ParameterSlots)
+    if (!ValidateRootArgumentRange(rootsig_graphics_.ptr(), Index, 0, 2, "SetGraphicsRootConstantBufferView"))
       return;
     rootarg_graphics_staging_[rootsig_graphics_->SlotQwordOffsets[Index]] = VA;
     dirty_state_.set(DirtyState::GraphicsRootArguments);
   };
 
   void STDMETHODCALLTYPE SetComputeRootShaderResourceView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
-    if (!rootsig_compute_)
-      return;
-    if (Index >= rootsig_compute_->ParameterSlots)
+    if (!ValidateRootArgumentRange(rootsig_compute_.ptr(), Index, 0, 2, "SetComputeRootShaderResourceView"))
       return;
     rootarg_compute_staging_[rootsig_compute_->SlotQwordOffsets[Index]] = VA;
     dirty_state_.set(DirtyState::ComputeRootArguments);
@@ -1465,18 +1612,14 @@ public:
 
   void STDMETHODCALLTYPE
   SetGraphicsRootShaderResourceView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
-    if (!rootsig_graphics_)
-      return;
-    if (Index >= rootsig_graphics_->ParameterSlots)
+    if (!ValidateRootArgumentRange(rootsig_graphics_.ptr(), Index, 0, 2, "SetGraphicsRootShaderResourceView"))
       return;
     rootarg_graphics_staging_[rootsig_graphics_->SlotQwordOffsets[Index]] = VA;
     dirty_state_.set(DirtyState::GraphicsRootArguments);
   };
 
   void STDMETHODCALLTYPE SetComputeRootUnorderedAccessView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
-    if (!rootsig_compute_)
-      return;
-    if (Index >= rootsig_compute_->ParameterSlots)
+    if (!ValidateRootArgumentRange(rootsig_compute_.ptr(), Index, 0, 2, "SetComputeRootUnorderedAccessView"))
       return;
     rootarg_compute_staging_[rootsig_compute_->SlotQwordOffsets[Index]] = VA;
     dirty_state_.set(DirtyState::ComputeRootArguments);
@@ -1484,9 +1627,7 @@ public:
 
   void STDMETHODCALLTYPE
   SetGraphicsRootUnorderedAccessView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
-    if (!rootsig_graphics_)
-      return;
-    if (Index >= rootsig_graphics_->ParameterSlots)
+    if (!ValidateRootArgumentRange(rootsig_graphics_.ptr(), Index, 0, 2, "SetGraphicsRootUnorderedAccessView"))
       return;
     rootarg_graphics_staging_[rootsig_graphics_->SlotQwordOffsets[Index]] = VA;
     dirty_state_.set(DirtyState::GraphicsRootArguments);
@@ -1705,12 +1846,53 @@ public:
 
   void STDMETHODCALLTYPE
   BeginQuery(ID3D12QueryHeap *pHeap, D3D12_QUERY_TYPE Type, UINT Index) {
-    DEBUG("BeginQuery");
+    if (Type == D3D12_QUERY_TYPE_TIMESTAMP)
+      return;
+    if (!ValidateCommand(SupportsGraphics(), "BeginQuery"))
+      return;
+    auto query = static_cast<MTLD3D12QueryHeap *>(pHeap);
+    if (!query || query->type != D3D12_QUERY_HEAP_TYPE_OCCLUSION || Index >= query->count ||
+        (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION))
+      return;
+    if (PreDraw() == DrawCallStatus::Invalid)
+      return;
+    auto render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
+    render->use_visibility_result = true;
+    render->visibility_buffer = query->visibility_buffer;
+    auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setvisibilitymode>();
+    cmd.type = WMTRenderCommandSetVisibilityMode;
+    cmd.offset = uint64_t(Index) * sizeof(uint64_t);
+    cmd.mode = Type == D3D12_QUERY_TYPE_BINARY_OCCLUSION ? WMTVisibilityResultModeBoolean
+                                                         : WMTVisibilityResultModeCounting;
   };
 
   void STDMETHODCALLTYPE
   EndQuery(ID3D12QueryHeap *pHeap, D3D12_QUERY_TYPE Type, UINT Index) {
-    DEBUG("EndQuery");
+    if (Type == D3D12_QUERY_TYPE_TIMESTAMP) {
+      if (!ValidateCommand(SupportsTimestamp(), "EndQuery(Timestamp)"))
+        return;
+      auto query = static_cast<MTLD3D12QueryHeap *>(pHeap);
+      if (!query || query->type != D3D12_QUERY_HEAP_TYPE_TIMESTAMP || Index >= query->count || !query->timestamp_buffer)
+        return;
+
+      allocator_->InvalidateCurrentPass();
+      auto timestamp = allocator_->AllocatePass<SampleTimestampData>();
+      timestamp->type = EncoderType::SampleTimestamp;
+      timestamp->sample_buffer = query->timestamp_buffer;
+      timestamp->sample_index = Index;
+      return;
+    }
+    if (!ValidateCommand(SupportsGraphics(), "EndQuery"))
+      return;
+    auto query = static_cast<MTLD3D12QueryHeap *>(pHeap);
+    if (!query || query->type != D3D12_QUERY_HEAP_TYPE_OCCLUSION || Index >= query->count ||
+        (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION) ||
+        !allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render)
+      return;
+    auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setvisibilitymode>();
+    cmd.type = WMTRenderCommandSetVisibilityMode;
+    cmd.offset = 0;
+    cmd.mode = WMTVisibilityResultModeDisabled;
   };
 
   void STDMETHODCALLTYPE
@@ -1718,7 +1900,39 @@ public:
       ID3D12QueryHeap *pHeap, D3D12_QUERY_TYPE Type, UINT StartIndex, UINT QueryCount, ID3D12Resource *pDstBuffer,
       UINT64 AlignedDstBufferOffset
   ) {
-    DEBUG("ResolveQueryData");
+    if (!ValidateCommand(SupportsCopy(), "ResolveQueryData"))
+      return;
+    auto query = static_cast<MTLD3D12QueryHeap *>(pHeap);
+    auto destination = static_cast<MTLD3D12Resource *>(pDstBuffer);
+    if (!query || !destination || !destination->buffer || StartIndex > query->count ||
+        QueryCount > query->count - StartIndex)
+      return;
+    if (!PreBlit())
+      return;
+
+    if (Type == D3D12_QUERY_TYPE_TIMESTAMP) {
+      if (query->type != D3D12_QUERY_HEAP_TYPE_TIMESTAMP || !query->timestamp_buffer)
+        return;
+      auto &cmd = allocator_->EncodeBlitCommand<wmtcmd_blit_resolvecounters>();
+      cmd.type = WMTBlitCommandResolveCounters;
+      cmd.sample_buffer = query->timestamp_buffer.handle;
+      cmd.start = StartIndex;
+      cmd.len = QueryCount;
+      cmd.dst_buffer = destination->buffer->current()->buffer();
+      cmd.dst_offset = AlignedDstBufferOffset;
+      return;
+    }
+
+    if (query->type != D3D12_QUERY_HEAP_TYPE_OCCLUSION ||
+        (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION))
+      return;
+    auto &cmd = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
+    cmd.type = WMTBlitCommandCopyFromBufferToBuffer;
+    cmd.src = query->visibility_buffer;
+    cmd.src_offset = uint64_t(StartIndex) * sizeof(uint64_t);
+    cmd.dst = destination->buffer->current()->buffer();
+    cmd.dst_offset = AlignedDstBufferOffset;
+    cmd.copy_length = uint64_t(QueryCount) * sizeof(uint64_t);
   };
 
   void STDMETHODCALLTYPE SetPredication(ID3D12Resource *pBuffer, UINT64 AlignedBufferOffset, D3D12_PREDICATION_OP Op) {

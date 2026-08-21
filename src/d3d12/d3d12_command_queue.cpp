@@ -33,6 +33,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
 
   WMT::Reference<WMT::CommandQueue> queue_;
   WMT::Reference<WMT::Fence> fence_;
+  WMT::Reference<WMT::Buffer> timestamp_dummy_buffer_;
 
 public:
   MTLD3D12CommandQueueImpl(MTLD3D12Device *pDevice) :
@@ -51,6 +52,14 @@ public:
     queue_.addResidencySet(device_->GetGlobalResidencySet());
 
     fence_ = metal_device.newFence();
+
+    WMTBufferInfo timestamp_dummy_info = {};
+    timestamp_dummy_info.length = sizeof(uint32_t);
+    timestamp_dummy_info.options = WMTResourceHazardTrackingModeUntracked;
+    timestamp_dummy_info.memory.set(nullptr);
+    timestamp_dummy_buffer_ = metal_device.newBuffer(timestamp_dummy_info);
+    if (!timestamp_dummy_buffer_)
+      return E_OUTOFMEMORY;
 
     return S_OK;
   }
@@ -193,6 +202,8 @@ public:
             render_pass_info.render_target_array_length = data->render_target_array_length;
             render_pass_info.render_target_width = data->render_target_width;
             render_pass_info.render_target_height = data->render_target_height;
+            if (data->use_visibility_result)
+              render_pass_info.visibility_buffer = data->visibility_buffer.handle;
           }
           auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
           encoder.waitForFence(fence_, WMTRenderStageVertex);
@@ -237,6 +248,31 @@ public:
 
           break;
         }
+        case EncoderType::SampleTimestamp: {
+          auto data = static_cast<SampleTimestampData *>(current);
+          if (!data->sample_buffer || !timestamp_dummy_buffer_)
+            break;
+
+          WMTSampleBufferAttachmentInfo attachment = {};
+          attachment.sample_buffer = data->sample_buffer.handle;
+          attachment.start_of_encoder_sample_index = data->sample_index;
+          attachment.end_of_encoder_sample_index = ~0ull;
+          auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&attachment, 1);
+          encoder.waitForFence(fence_);
+
+          wmtcmd_blit_fillbuffer fill = {};
+          fill.type = WMTBlitCommandFillBuffer;
+          fill.next.set(nullptr);
+          fill.buffer = timestamp_dummy_buffer_;
+          fill.offset = 0;
+          fill.length = sizeof(uint32_t);
+          fill.value = 0;
+          MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
+
+          encoder.updateFence(fence_);
+          encoder.endEncoding();
+          break;
+        }
         }
         current = current->next;
       }
@@ -272,15 +308,63 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   GetTimestampFrequency(UINT64 *pFrequency) {
-    // FIXME: stub
-    if (pFrequency)
-      *pFrequency = 1;
+    if (!pFrequency)
+      return E_INVALIDARG;
+    *pFrequency = 1000000000ull;
     return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE
   GetClockCalibration(UINT64 *gpu_timestamp, UINT64 *cpu_timestamp) {
-    return E_NOTIMPL;
+    if (!gpu_timestamp || !cpu_timestamp)
+      return E_INVALIDARG;
+
+    auto pool = WMT::MakeAutoreleasePool();
+    auto sample_buffer = device_->GetMTLDevice().newCounterSampleBuffer(1, true);
+    if (!sample_buffer)
+      return E_FAIL;
+
+    LARGE_INTEGER cpu_before = {};
+    LARGE_INTEGER cpu_after = {};
+    if (!QueryPerformanceCounter(&cpu_before))
+      return E_FAIL;
+
+    WMTSampleBufferAttachmentInfo attachment = {};
+    attachment.sample_buffer = sample_buffer.handle;
+    attachment.start_of_encoder_sample_index = 0;
+    attachment.end_of_encoder_sample_index = ~0ull;
+
+    auto cmdbuf = queue_.commandBuffer();
+    auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&attachment, 1);
+    encoder.waitForFence(fence_);
+
+    wmtcmd_blit_fillbuffer fill = {};
+    fill.type = WMTBlitCommandFillBuffer;
+    fill.next.set(nullptr);
+    fill.buffer = timestamp_dummy_buffer_;
+    fill.offset = 0;
+    fill.length = sizeof(uint32_t);
+    fill.value = 0;
+    MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
+
+    encoder.updateFence(fence_);
+    encoder.endEncoding();
+    cmdbuf.commit();
+    cmdbuf.waitUntilCompleted();
+
+    if (!QueryPerformanceCounter(&cpu_after))
+      return E_FAIL;
+
+    UINT64 gpu_value = 0;
+    sample_buffer.resolveCounterRange(0, 1, &gpu_value, sizeof(gpu_value));
+    if (!gpu_value)
+      return E_FAIL;
+
+    const auto cpu_start = static_cast<UINT64>(cpu_before.QuadPart);
+    const auto cpu_end = static_cast<UINT64>(cpu_after.QuadPart);
+    *gpu_timestamp = gpu_value;
+    *cpu_timestamp = cpu_start + (cpu_end - cpu_start) / 2;
+    return S_OK;
   };
 
   D3D12_COMMAND_QUEUE_DESC *STDMETHODCALLTYPE

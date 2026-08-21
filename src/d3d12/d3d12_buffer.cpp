@@ -45,6 +45,7 @@ public:
     heap_props_ = *pHeapProps;
     heap_flags_ = HeapFlags;
     state = InitialState;
+    InitializeStateTracking(desc_, device_->GetMTLDevice());
 
     buffer = new Buffer(desc_.Width, device_->GetMTLDevice());
 

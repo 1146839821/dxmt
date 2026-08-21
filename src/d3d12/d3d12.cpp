@@ -33,7 +33,7 @@ D3D12CreateDevice(IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REF
   Com<IDXGIFactory> dxgi_factory = nullptr;
   Com<IMTLDXGIAdapter> dxgi_adapter_mtl = nullptr;
 
-  if (MinimumFeatureLevel < D3D_FEATURE_LEVEL_11_0)
+  if (MinimumFeatureLevel < D3D_FEATURE_LEVEL_11_0 || MinimumFeatureLevel > D3D_FEATURE_LEVEL_11_0)
     return E_INVALIDARG;
 
   HRESULT hr;

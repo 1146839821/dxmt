@@ -30,6 +30,7 @@ enum class EncoderType {
   Blit,
   Compute,
   Resolve,
+  SampleTimestamp,
 };
 
 struct EncoderData {
@@ -100,6 +101,7 @@ struct RenderEncoderData : EncoderData {
   uint8_t dsv_readonly_flags;
   uint8_t render_target_count;
   bool use_visibility_result = 0;
+  WMT::Reference<WMT::Buffer> visibility_buffer;
   bool use_tessellation = 0;
   bool use_geometry = 0;
 };
@@ -116,6 +118,11 @@ struct ComputeEncoderData : EncoderData {
 struct ResolveEncoderData : EncoderData {
   TextureViewRef src;
   TextureViewRef dst;
+};
+
+struct SampleTimestampData : EncoderData {
+  WMT::Reference<WMT::CounterSampleBuffer> sample_buffer;
+  uint64_t sample_index;
 };
 
 }; // namespace dxmt

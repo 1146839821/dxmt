@@ -110,10 +110,6 @@ public:
       return E_INVALIDARG;
     }
 
-    auto size_aligned = align(pDesc->SizeInBytes, desc_.Alignment);
-    if (!size_aligned)
-      return E_INVALIDARG;
-
     WMTHeapInfo info = {};
     info.size = desc_.SizeInBytes;
     info.options = GetResourceOptions(desc_.Properties);

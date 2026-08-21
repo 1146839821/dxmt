@@ -176,6 +176,7 @@ public:
 
     if (!desc_.MipLevels)
       desc_.MipLevels = texture_info.mipmap_level_count;
+    InitializeStateTracking(desc_, device_->GetMTLDevice());
 
     texture = new Texture(texture_info, device_->GetMTLDevice());
     Flags<TextureAllocationFlag> flags = {};

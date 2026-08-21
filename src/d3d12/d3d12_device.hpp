@@ -25,11 +25,13 @@
 #include "airconv_public.h"
 #include "dxmt_buffer.hpp"
 #include "dxmt_command.hpp"
+#include "dxmt_format.hpp"
 #include "dxmt_fence.hpp"
 #include "dxmt_presenter.hpp"
 #include "d3d12_shader_converter.hpp"
 #include "dxmt_texture.hpp"
 #include "log/log.hpp"
+#include <vector>
 
 #define IMPLEMENT_ME                                                                                                   \
   do {                                                                                                                 \
@@ -46,6 +48,8 @@ public:
 
 class MTLD3D12CommandAllocator : public ID3D12CommandAllocator {
 public:
+  virtual D3D12_COMMAND_LIST_TYPE GetType() const = 0;
+
   virtual HRESULT STDMETHODCALLTYPE CreateCommandList(
       UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, ID3D12PipelineState *pInitialPipelineState, REFIID riid,
       void **ppCommandList
@@ -62,6 +66,45 @@ public:
   Rc<Texture> texture;
   Rc<Buffer> buffer;
   D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
+  std::vector<D3D12_RESOURCE_STATES> subresource_states;
+
+  void
+  InitializeStateTracking(const D3D12_RESOURCE_DESC &desc, WMT::Device device) {
+    UINT mip_levels = std::max<UINT>(1, desc.MipLevels);
+    UINT array_size = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : std::max<UINT>(1, desc.DepthOrArraySize);
+    UINT plane_count = 1;
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) {
+      MTL_DXGI_FORMAT_DESC format_desc;
+      if (SUCCEEDED(MTLQueryDXGIFormat(device, desc.Format, format_desc)))
+        plane_count = std::max<UINT>(1, format_desc.PlanarCount);
+    }
+    subresource_states.assign(size_t(mip_levels) * array_size * plane_count, state);
+  }
+
+  bool
+  HasSubresource(UINT subresource) const {
+    return subresource < subresource_states.size();
+  }
+
+  D3D12_RESOURCE_STATES
+  GetSubresourceState(UINT subresource) const {
+    return HasSubresource(subresource) ? subresource_states[subresource] : state;
+  }
+
+  void
+  SetSubresourceState(UINT subresource, D3D12_RESOURCE_STATES new_state) {
+    if (HasSubresource(subresource)) {
+      subresource_states[subresource] = new_state;
+      return;
+    }
+    state = new_state;
+  }
+
+  void
+  SetAllSubresourceStates(D3D12_RESOURCE_STATES new_state) {
+    std::fill(subresource_states.begin(), subresource_states.end(), new_state);
+    state = new_state;
+  }
 
   virtual HRESULT STDMETHODCALLTYPE
   CreateShaderResourceView(const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) = 0;
@@ -128,6 +171,10 @@ public:
 
 class MTLD3D12QueryHeap : public ID3D12QueryHeap {
 public:
+  WMT::Reference<WMT::Buffer> visibility_buffer;
+  WMT::Reference<WMT::CounterSampleBuffer> timestamp_buffer;
+  D3D12_QUERY_HEAP_TYPE type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+  UINT count = 0;
 };
 
 class MTLD3D12PipelineState : public ID3D12PipelineState {
