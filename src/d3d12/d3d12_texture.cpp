@@ -157,6 +157,7 @@ public:
     desc_ = *pDesc;
     heap_props_ = *pHeapProps;
     heap_flags_ = HeapFlags;
+    state = InitialState;
 
     switch (InitialState) {
     case D3D12_RESOURCE_STATE_RENDER_TARGET: {

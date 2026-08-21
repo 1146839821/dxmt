@@ -110,12 +110,43 @@ to_metal_primitive_type(D3D12_PRIMITIVE_TOPOLOGY topo, WMTPrimitiveType &primiti
 /* FIXME: it's not *public* */
 unsigned getPlanarCount(WMTPixelFormat format);
 
+inline WMTBarrierScope
+resource_barrier_scope(MTLD3D12Resource *resource) {
+  if (!resource)
+    return WMTBarrierScopeBuffers | WMTBarrierScopeTextures | WMTBarrierScopeRenderTargets;
+  if (resource->buffer && !resource->texture)
+    return WMTBarrierScopeBuffers;
+  auto desc = resource->GetDesc();
+  if (desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
+    return WMTBarrierScopeRenderTargets;
+  return WMTBarrierScopeTextures;
+}
+
+inline WMTRenderStages
+render_stages_for_state(D3D12_RESOURCE_STATES state) {
+  WMTRenderStages stages = (WMTRenderStages)0;
+  if (state & (D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER |
+               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT))
+    stages = (WMTRenderStages)(stages | WMTRenderStageVertex);
+  if (state & (D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_RENDER_TARGET |
+               D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE))
+    stages = (WMTRenderStages)(stages | WMTRenderStageFragment);
+  if (state & D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+    stages = (WMTRenderStages)(stages | WMTRenderStageVertex | WMTRenderStageFragment);
+  if (!stages)
+    stages = WMTRenderStageVertex | WMTRenderStageFragment;
+  return stages;
+}
+
 // `Graphics`CommandList is a really confusing name
 class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12GraphicsCommandList> {
 
   Com<MTLD3D12CommandAllocatorImpl, false> allocator_;
   D3D12_COMMAND_LIST_TYPE type_;
   bool recording_failed_;
+  WMTBarrierScope pending_barrier_scope_ = (WMTBarrierScope)0;
+  WMTRenderStages pending_barrier_stages_after_ = (WMTRenderStages)0;
+  WMTRenderStages pending_barrier_stages_before_ = (WMTRenderStages)0;
 
   /* state */
 
@@ -217,6 +248,9 @@ public:
 
     dirty_state_.clrAll();
     recording_failed_ = false;
+    pending_barrier_scope_ = (WMTBarrierScope)0;
+    pending_barrier_stages_after_ = (WMTRenderStages)0;
+    pending_barrier_stages_before_ = (WMTRenderStages)0;
 
     encoder_count = std::numeric_limits<size_t>::max();
     return allocator_->StartRecord(&entry);
@@ -289,6 +323,58 @@ public:
   bool
   SupportsCopy() const {
     return type_ != D3D12_COMMAND_LIST_TYPE_BUNDLE;
+  }
+
+  void
+  EmitMemoryBarrier(WMTBarrierScope scope, WMTRenderStages stages_after, WMTRenderStages stages_before) {
+    switch (allocator_->encoder_current->type) {
+    case EncoderType::Compute: {
+      auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_memory_barrier>();
+      cmd.type = WMTComputeCommandMemoryBarrier;
+      cmd.scope = scope;
+      break;
+    }
+    case EncoderType::Render: {
+      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_memory_barrier>();
+      cmd.type = WMTRenderCommandMemoryBarrier;
+      cmd.scope = scope;
+      cmd.stages_after = stages_after;
+      cmd.stages_before = stages_before;
+      break;
+    }
+    default:
+      break;
+    }
+  }
+
+  void
+  FlushPendingMemoryBarrier() {
+    if (!allocator_->encoder_current || !pending_barrier_scope_)
+      return;
+    if (allocator_->encoder_current->type != EncoderType::Compute &&
+        allocator_->encoder_current->type != EncoderType::Render)
+      return;
+    EmitMemoryBarrier(
+        pending_barrier_scope_, pending_barrier_stages_after_, pending_barrier_stages_before_
+    );
+    pending_barrier_scope_ = (WMTBarrierScope)0;
+    pending_barrier_stages_after_ = (WMTRenderStages)0;
+    pending_barrier_stages_before_ = (WMTRenderStages)0;
+  }
+
+  void
+  EncodeMemoryBarrier(WMTBarrierScope scope, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+    if (!allocator_->encoder_current ||
+        (allocator_->encoder_current->type != EncoderType::Compute &&
+         allocator_->encoder_current->type != EncoderType::Render)) {
+      pending_barrier_scope_ = (WMTBarrierScope)(pending_barrier_scope_ | scope);
+      pending_barrier_stages_after_ =
+          (WMTRenderStages)(pending_barrier_stages_after_ | render_stages_for_state(before));
+      pending_barrier_stages_before_ =
+          (WMTRenderStages)(pending_barrier_stages_before_ | render_stages_for_state(after));
+      return;
+    }
+    EmitMemoryBarrier(scope, render_stages_for_state(before), render_stages_for_state(after));
   }
 
   std::tuple<uint64_t, uint64_t>
@@ -365,6 +451,7 @@ public:
       render->cmd_head.type = WMTRenderCommandNop;
       render->cmd_head.next.set(0);
       render->cmd_tail = (wmtcmd_base *)&render->cmd_head;
+      FlushPendingMemoryBarrier();
       render->dsv_planar_flags = 0;
       render->dsv_readonly_flags = 0;
       render->render_target_count = num_rtvs;
@@ -717,6 +804,7 @@ public:
       compute->cmd_head.type = WMTComputeCommandNop;
       compute->cmd_head.next.set(0);
       compute->cmd_tail = (wmtcmd_base *)&compute->cmd_head;
+      FlushPendingMemoryBarrier();
       dirty_state_.set(
           DirtyState::ComputeRootArguments, DirtyState::ComputeRootSignature, DirtyState::DescriptorHeaps
       );
@@ -1167,8 +1255,46 @@ public:
   };
 
   void STDMETHODCALLTYPE ResourceBarrier(UINT Count, const D3D12_RESOURCE_BARRIER *barriers) {
-    // TODO: in the initial implementation, we force synchronize everything and ignore barriers (which can be used as
-    // optimization hints later)
+    if (!Count || !barriers)
+      return;
+
+    for (UINT i = 0; i < Count; i++) {
+      const auto &barrier = barriers[i];
+      if (barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) {
+        WARN("D3D12 split ResourceBarrier flags are not implemented");
+        continue;
+      }
+
+      switch (barrier.Type) {
+      case D3D12_RESOURCE_BARRIER_TYPE_TRANSITION: {
+        auto resource = static_cast<MTLD3D12Resource *>(barrier.Transition.pResource);
+        if (!resource) {
+          recording_failed_ = true;
+          continue;
+        }
+        if (barrier.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES)
+          WARN("D3D12 subresource ResourceBarrier is tracked at whole-resource granularity");
+        if (resource->state != barrier.Transition.StateBefore)
+          WARN("D3D12 ResourceBarrier state mismatch");
+        if (resource->state != barrier.Transition.StateAfter)
+          EncodeMemoryBarrier(
+              resource_barrier_scope(resource), barrier.Transition.StateBefore, barrier.Transition.StateAfter
+          );
+        resource->state = barrier.Transition.StateAfter;
+        break;
+      }
+      case D3D12_RESOURCE_BARRIER_TYPE_UAV:
+        EncodeMemoryBarrier(resource_barrier_scope(static_cast<MTLD3D12Resource *>(barrier.UAV.pResource)),
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        break;
+      case D3D12_RESOURCE_BARRIER_TYPE_ALIASING:
+        WARN("D3D12 aliasing ResourceBarrier is not implemented");
+        break;
+      default:
+        recording_failed_ = true;
+        break;
+      }
+    }
   };
 
   void STDMETHODCALLTYPE ExecuteBundle(ID3D12GraphicsCommandList *CommandList) { IMPLEMENT_ME };

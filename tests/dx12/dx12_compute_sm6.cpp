@@ -105,6 +105,7 @@ int main(int argc, char **argv) {
   D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_desc = {};
   D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
   D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+  D3D12_RESOURCE_BARRIER uav_barrier = {};
   D3D12_CPU_DESCRIPTOR_HANDLE descriptor_cpu = {};
   UINT descriptor_increment = 0;
   UINT input_value = 777;
@@ -369,8 +370,12 @@ int main(int argc, char **argv) {
     }
   }
   list->Dispatch(1, 1, 1);
-  if (needs_output)
+  if (needs_output) {
+    uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uav_barrier.UAV.pResource = output_buffer;
+    list->ResourceBarrier(1, &uav_barrier);
     list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0, sizeof(UINT));
+  }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
 

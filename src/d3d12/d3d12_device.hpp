@@ -61,6 +61,7 @@ class MTLD3D12Resource : public ID3D12Resource {
 public:
   Rc<Texture> texture;
   Rc<Buffer> buffer;
+  D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
 
   virtual HRESULT STDMETHODCALLTYPE
   CreateShaderResourceView(const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) = 0;

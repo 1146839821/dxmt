@@ -34,7 +34,8 @@ public:
   HRESULT
   Initialize(
       const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS HeapFlags, const D3D12_RESOURCE_DESC *pDesc,
-      const D3D12_CLEAR_VALUE *OptimizedClearValue, MTLD3D12Heap *pHeap, UINT64 HeapOffset
+      D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE *OptimizedClearValue, MTLD3D12Heap *pHeap,
+      UINT64 HeapOffset
   ) {
     if (OptimizedClearValue)
       return E_INVALIDARG;
@@ -43,6 +44,7 @@ public:
     desc_ = *pDesc;
     heap_props_ = *pHeapProps;
     heap_flags_ = HeapFlags;
+    state = InitialState;
 
     buffer = new Buffer(desc_.Width, device_->GetMTLDevice());
 
@@ -262,7 +264,7 @@ CreateCommittedBuffer(
     REFIID riid, void **ppResource
 ) {
   auto buffer = Com(new MTLD3D12Buffer(pDevice));
-  HRESULT hr = buffer->Initialize(pHeapProps, HeapFlags, pDesc, OptimizedClearValue, nullptr, ~0ull);
+  HRESULT hr = buffer->Initialize(pHeapProps, HeapFlags, pDesc, InitialState, OptimizedClearValue, nullptr, ~0ull);
   if (FAILED(hr))
     return hr;
   if (!ppResource)
@@ -277,7 +279,9 @@ CreatePlacedBuffer(
 ) {
   auto buffer = Com(new MTLD3D12Buffer(pDevice));
   D3D12_HEAP_DESC heap_desc = pHeap->GetDesc();
-  HRESULT hr = buffer->Initialize(&heap_desc.Properties, heap_desc.Flags, pDesc, OptimizedClearValue, pHeap, HeapOffset);
+  HRESULT hr = buffer->Initialize(
+      &heap_desc.Properties, heap_desc.Flags, pDesc, InitialState, OptimizedClearValue, pHeap, HeapOffset
+  );
   if (FAILED(hr)) {
     ERR("CreatePlacedBuffer: initialization failed: 0x", std::hex, hr, std::dec);
     return hr;
