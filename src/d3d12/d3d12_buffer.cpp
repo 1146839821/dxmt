@@ -164,6 +164,8 @@ public:
       return E_INVALIDARG;
 
     auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, Descriptor);
+    if (!Heap)
+      return E_INVALIDARG;
     BufferSlice Slice;
 
     if (ViewDesc.Format == DXGI_FORMAT_UNKNOWN || ViewDesc.Buffer.Flags & D3D12_BUFFER_SRV_FLAG_RAW) {
@@ -208,6 +210,8 @@ public:
       return E_INVALIDARG;
 
     auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, Descriptor);
+    if (!Heap)
+      return E_INVALIDARG;
     BufferSlice Slice;
 
     if (ViewDesc.Format == DXGI_FORMAT_UNKNOWN || ViewDesc.Buffer.Flags & D3D12_BUFFER_UAV_FLAG_RAW) {

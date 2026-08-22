@@ -456,18 +456,24 @@ public:
 
   virtual ShaderVisibleDescriptorCPUStorage const &
   GetDescriptor(UINT Index) {
+    static const ShaderVisibleDescriptorCPUStorage null_descriptor{};
+    if (Index >= descriptors_.size())
+      return null_descriptor;
     return descriptors_[Index];
   }
 
   virtual void
   CopyDescriptors(UINT From, MTLD3D12DescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) {
+    auto *heap_to = static_cast<MTLD3D12DescriptorHeapImpl *>(pHeapTo);
+    if (!heap_to || From > descriptors_.size() || CopyCount > descriptors_.size() - From ||
+        DescriptorTo > heap_to->descriptors_.size() || CopyCount > heap_to->descriptors_.size() - DescriptorTo)
+      return;
     for (unsigned i = 0; i < CopyCount; i++) {
-      static_cast<MTLD3D12DescriptorHeapImpl *>(pHeapTo)->descriptors_[DescriptorTo + i] = descriptors_[From + i];
-      static_cast<MTLD3D12DescriptorHeapImpl *>(pHeapTo)->mapped_argument_buffer_[DescriptorTo + i] =
-          mapped_argument_buffer_[From + i];
-      if (mapped_msc_argument_buffer_ && static_cast<MTLD3D12DescriptorHeapImpl *>(pHeapTo)->mapped_msc_argument_buffer_)
-        static_cast<MTLD3D12DescriptorHeapImpl *>(pHeapTo)->mapped_msc_argument_buffer_[DescriptorTo + i] =
-            mapped_msc_argument_buffer_[From + i];
+      heap_to->descriptors_[DescriptorTo + i] = descriptors_[From + i];
+      if (mapped_argument_buffer_ && heap_to->mapped_argument_buffer_)
+        heap_to->mapped_argument_buffer_[DescriptorTo + i] = mapped_argument_buffer_[From + i];
+      if (mapped_msc_argument_buffer_ && heap_to->mapped_msc_argument_buffer_)
+        heap_to->mapped_msc_argument_buffer_[DescriptorTo + i] = mapped_msc_argument_buffer_[From + i];
     }
   }
 };
@@ -557,14 +563,20 @@ public:
 
   virtual MTL_RENDER_TARGET_DESC
   GetRenderTarget(UINT Index) {
+    static MTL_RENDER_TARGET_DESC null_render_target = {};
+    if (Index >= render_targets_.size())
+      return null_render_target;
     return render_targets_[Index];
   }
 
   virtual void
   CopyDescriptors(UINT From, MTLD3D12RenderTargetDescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) {
+    auto *heap_to = static_cast<MTLD3D12RenderTargetDescriptorHeapImpl *>(pHeapTo);
+    if (!heap_to || From > render_targets_.size() || CopyCount > render_targets_.size() - From ||
+        DescriptorTo > heap_to->render_targets_.size() || CopyCount > heap_to->render_targets_.size() - DescriptorTo)
+      return;
     for (unsigned i = 0; i < CopyCount; i++) {
-      static_cast<MTLD3D12RenderTargetDescriptorHeapImpl *>(pHeapTo)->render_targets_[DescriptorTo + i] =
-          render_targets_[From + i];
+      heap_to->render_targets_[DescriptorTo + i] = render_targets_[From + i];
     }
   }
 };
@@ -745,13 +757,16 @@ public:
 
   virtual void
   CopyDescriptors(UINT From, MTLD3D12SamplerDescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) {
+    auto *heap_to = static_cast<MTLD3D12SamplerDescriptorHeapImpl *>(pHeapTo);
+    if (!heap_to || From > samplers_.size() || CopyCount > samplers_.size() - From ||
+        DescriptorTo > heap_to->samplers_.size() || CopyCount > heap_to->samplers_.size() - DescriptorTo)
+      return;
     for (unsigned i = 0; i < CopyCount; i++) {
-      static_cast<MTLD3D12SamplerDescriptorHeapImpl *>(pHeapTo)->samplers_[DescriptorTo + i] = samplers_[From + i];
-      static_cast<MTLD3D12SamplerDescriptorHeapImpl *>(pHeapTo)->mapped_argument_buffer_[DescriptorTo + i] =
-          mapped_argument_buffer_[From + i];
-      if (mapped_msc_argument_buffer_ && static_cast<MTLD3D12SamplerDescriptorHeapImpl *>(pHeapTo)->mapped_msc_argument_buffer_)
-        static_cast<MTLD3D12SamplerDescriptorHeapImpl *>(pHeapTo)->mapped_msc_argument_buffer_[DescriptorTo + i] =
-            mapped_msc_argument_buffer_[From + i];
+      heap_to->samplers_[DescriptorTo + i] = samplers_[From + i];
+      if (mapped_argument_buffer_ && heap_to->mapped_argument_buffer_)
+        heap_to->mapped_argument_buffer_[DescriptorTo + i] = mapped_argument_buffer_[From + i];
+      if (mapped_msc_argument_buffer_ && heap_to->mapped_msc_argument_buffer_)
+        heap_to->mapped_msc_argument_buffer_[DescriptorTo + i] = mapped_msc_argument_buffer_[From + i];
     }
   }
 };

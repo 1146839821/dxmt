@@ -34,6 +34,7 @@ int main() {
   ID3D12CommandAllocator *allocator = nullptr;
   ID3D12GraphicsCommandList *list = nullptr;
   ID3D12Fence *fence = nullptr;
+  ID3D12Fence *multiple_fence = nullptr;
   ID3D12Heap *upload_heap = nullptr;
   ID3D12Heap *readback_heap = nullptr;
   ID3D12Heap *unaligned_heap = nullptr;
@@ -50,17 +51,24 @@ int main() {
   ID3D12Resource *depth_copy = nullptr;
   ID3D12Resource *depth_readback = nullptr;
   ID3D12DescriptorHeap *dsv_heap = nullptr;
+  ID3D12DescriptorHeap *rtv_heap = nullptr;
+  ID3D12DescriptorHeap *shader_heap = nullptr;
   ID3D12CommandSignature *command_signature = nullptr;
   ID3D12Device1 *device1 = nullptr;
   HANDLE event = nullptr;
+  HANDLE multiple_event = nullptr;
   D3D12_RESOURCE_BARRIER aliasing_barrier = {};
   D3D12_RESOURCE_BARRIER depth_barrier = {};
 
   auto cleanup = [&]() {
     if (event)
       CloseHandle(event);
+    if (multiple_event)
+      CloseHandle(multiple_event);
     if (fence)
       fence->Release();
+    if (multiple_fence)
+      multiple_fence->Release();
     if (list)
       list->Release();
     if (destination)
@@ -79,6 +87,10 @@ int main() {
       depth_texture->Release();
     if (dsv_heap)
       dsv_heap->Release();
+    if (rtv_heap)
+      rtv_heap->Release();
+    if (shader_heap)
+      shader_heap->Release();
     if (command_signature)
       command_signature->Release();
     if (device1)
@@ -277,6 +289,7 @@ int main() {
   D3D12_CLEAR_VALUE depth_clear = {};
   D3D12_DESCRIPTOR_HEAP_DESC dsv_heap_desc = {};
   D3D12_CPU_DESCRIPTOR_HANDLE dsv_handle = {};
+  D3D12_CPU_DESCRIPTOR_HANDLE null_dsv_handle = {};
   BYTE *mapped_depth = nullptr;
   texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
   texture_desc.Width = 64;
@@ -442,13 +455,57 @@ int main() {
   }
 
   dsv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-  dsv_heap_desc.NumDescriptors = 1;
+  dsv_heap_desc.NumDescriptors = 2;
   if (!CheckHR("CreateDSVHeap", device->CreateDescriptorHeap(&dsv_heap_desc, IID_PPV_ARGS(&dsv_heap)))) {
     cleanup();
     return 1;
   }
   dsv_handle = dsv_heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateDepthStencilView(depth_texture, nullptr, dsv_handle);
+  null_dsv_handle = dsv_handle;
+  null_dsv_handle.ptr +=
+      device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+
+  D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc = {};
+  rtv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  rtv_heap_desc.NumDescriptors = 1;
+  D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = {};
+  if (!CheckHR("CreateRTVHeap", device->CreateDescriptorHeap(
+                                    &rtv_heap_desc, IID_PPV_ARGS(&rtv_heap)))) {
+    cleanup();
+    return 1;
+  }
+  rtv_handle = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+  device->CreateRenderTargetView(nullptr, nullptr, rtv_handle);
+  device->CreateDepthStencilView(nullptr, nullptr, null_dsv_handle);
+
+  D3D12_DESCRIPTOR_HEAP_DESC shader_heap_desc = {};
+  shader_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  shader_heap_desc.NumDescriptors = 1;
+  D3D12_CPU_DESCRIPTOR_HANDLE shader_handle = {};
+  if (!CheckHR("CreateShaderHeap",
+               device->CreateDescriptorHeap(&shader_heap_desc,
+                                            IID_PPV_ARGS(&shader_heap)))) {
+    cleanup();
+    return 1;
+  }
+  shader_handle = shader_heap->GetCPUDescriptorHandleForHeapStart();
+  D3D12_SHADER_RESOURCE_VIEW_DESC null_srv = {};
+  null_srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+  null_srv.Format = DXGI_FORMAT_UNKNOWN;
+  null_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  device->CreateShaderResourceView(nullptr, &null_srv, shader_handle);
+  device->CreateShaderResourceView(nullptr, &null_srv, rtv_handle);
+  D3D12_UNORDERED_ACCESS_VIEW_DESC null_uav = {};
+  null_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+  null_uav.Format = DXGI_FORMAT_UNKNOWN;
+  device->CreateUnorderedAccessView(nullptr, nullptr, &null_uav, shader_handle);
+  device->CreateUnorderedAccessView(nullptr, nullptr, &null_uav,
+                                    null_dsv_handle);
+  device->CopyDescriptorsSimple(2, shader_handle, shader_handle,
+                                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+  device->CopyDescriptorsSimple(1, shader_handle, rtv_handle,
+                                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
   texture_desc.SampleDesc.Count = 1;
   D3D12_HEAP_DESC texture_heap_desc = {};
@@ -535,6 +592,11 @@ int main() {
   }
 #endif
 
+  D3D12_CPU_DESCRIPTOR_HANDLE invalid_descriptor = {};
+  device->CreateShaderResourceView(source_zero, nullptr, invalid_descriptor);
+  device->CreateUnorderedAccessView(source_zero, nullptr, nullptr,
+                                    invalid_descriptor);
+
   D3D12_HEAP_PROPERTIES queried_properties = {};
   D3D12_HEAP_FLAGS queried_flags = D3D12_HEAP_FLAG_NONE;
   if (!CheckHR("GetHeapProperties", source_placed->GetHeapProperties(&queried_properties, &queried_flags)) ||
@@ -568,6 +630,17 @@ int main() {
     return 1;
   }
 
+  list->OMSetRenderTargets(0, nullptr, FALSE, &null_dsv_handle);
+  list->ClearDepthStencilView(null_dsv_handle,
+                              D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+                              0.25f, 0x5a, 0, nullptr);
+  list->OMSetRenderTargets(0, nullptr, FALSE, &dsv_handle);
+  D3D12_CPU_DESCRIPTOR_HANDLE invalid_dsv = dsv_handle;
+  invalid_dsv.ptr += 2 * device->GetDescriptorHandleIncrementSize(
+                             D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+  list->ClearDepthStencilView(invalid_dsv,
+                              D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+                              0.25f, 0x5a, 0, nullptr);
   list->ClearDepthStencilView(
       dsv_handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 0.25f, 0x5a, 0, nullptr
   );
@@ -619,6 +692,42 @@ int main() {
     return 1;
   }
   WaitForSingleObject(event, INFINITE);
+
+  if (!CheckHR("CreateMultipleFence",
+               device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                   IID_PPV_ARGS(&multiple_fence)))) {
+    cleanup();
+    return 1;
+  }
+  multiple_event = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+  ID3D12Fence *multiple_fences[] = {fence, multiple_fence};
+  UINT64 multiple_values[] = {1, 1};
+  if (!multiple_event ||
+      !CheckHR("SetEventOnMultipleFenceCompletion",
+               device1->SetEventOnMultipleFenceCompletion(
+                   multiple_fences, multiple_values, 2,
+                   D3D12_MULTIPLE_FENCE_WAIT_FLAG_NONE, multiple_event)) ||
+      WaitForSingleObject(multiple_event, 0) != WAIT_TIMEOUT ||
+      !CheckHR("SignalMultipleFence", queue->Signal(multiple_fence, 1)) ||
+      WaitForSingleObject(multiple_event, 5000) != WAIT_OBJECT_0) {
+    std::cerr << "WAIT_ALL multiple fence completion failed\n";
+    cleanup();
+    return 1;
+  }
+
+  ResetEvent(multiple_event);
+  UINT64 any_values[] = {2, 3};
+  if (!CheckHR("SetEventOnAnyFenceCompletion",
+               device1->SetEventOnMultipleFenceCompletion(
+                   multiple_fences, any_values, 2,
+                   D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY, multiple_event)) ||
+      WaitForSingleObject(multiple_event, 0) != WAIT_TIMEOUT ||
+      !CheckHR("SignalAnyFence", queue->Signal(multiple_fence, 3)) ||
+      WaitForSingleObject(multiple_event, 5000) != WAIT_OBJECT_0) {
+    std::cerr << "WAIT_ANY multiple fence completion failed\n";
+    cleanup();
+    return 1;
+  }
 
   if (!CheckHR("MapDepthReadback", depth_readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped_depth)))) {
     cleanup();

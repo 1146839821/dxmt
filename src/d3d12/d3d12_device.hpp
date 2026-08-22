@@ -317,7 +317,16 @@ HRESULT PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, cons
 inline std::tuple<MTLD3D12RenderTargetDescriptorHeap *, UINT>
 GetRenderTargetHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
-  return {impl.extract<MTLD3D12RenderTargetDescriptorHeap>(), (UINT)impl.Descriptor};
+  auto *heap = impl.extract<MTLD3D12RenderTargetDescriptorHeap>();
+  if (!heap)
+    return {nullptr, 0};
+
+  D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+  heap->GetDesc(&desc);
+  if ((desc.Type != D3D12_DESCRIPTOR_HEAP_TYPE_RTV && desc.Type != D3D12_DESCRIPTOR_HEAP_TYPE_DSV) ||
+      impl.Descriptor >= desc.NumDescriptors)
+    return {nullptr, 0};
+  return {heap, (UINT)impl.Descriptor};
 }
 
 inline D3D12_CPU_DESCRIPTOR_HANDLE
@@ -328,7 +337,15 @@ GetRenderTargetDescriptor(MTLD3D12RenderTargetDescriptorHeap *pHeap, UINT Index)
 inline std::tuple<MTLD3D12DescriptorHeap *, UINT>
 GetShaderVisibleDescriptorHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
-  return {impl.extract<MTLD3D12DescriptorHeap>(), (UINT)impl.Descriptor};
+  auto *heap = impl.extract<MTLD3D12DescriptorHeap>();
+  if (!heap)
+    return {nullptr, 0};
+
+  D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+  heap->GetDesc(&desc);
+  if (desc.Type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || impl.Descriptor >= desc.NumDescriptors)
+    return {nullptr, 0};
+  return {heap, (UINT)impl.Descriptor};
 }
 
 inline D3D12_CPU_DESCRIPTOR_HANDLE
@@ -339,7 +356,15 @@ GetShaderVisibleDescriptor(MTLD3D12DescriptorHeap *pHeap, UINT Index) {
 inline std::tuple<MTLD3D12SamplerDescriptorHeap *, UINT>
 GetSamplerDescriptorHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
-  return {impl.extract<MTLD3D12SamplerDescriptorHeap>(), (UINT)impl.Descriptor};
+  auto *heap = impl.extract<MTLD3D12SamplerDescriptorHeap>();
+  if (!heap)
+    return {nullptr, 0};
+
+  D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+  heap->GetDesc(&desc);
+  if (desc.Type != D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER || impl.Descriptor >= desc.NumDescriptors)
+    return {nullptr, 0};
+  return {heap, (UINT)impl.Descriptor};
 }
 
 inline D3D12_CPU_DESCRIPTOR_HANDLE

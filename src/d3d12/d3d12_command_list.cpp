@@ -324,7 +324,47 @@ public:
     return Initialize(pAllocator, pInitialState);
   };
 
-  void STDMETHODCALLTYPE ClearState(ID3D12PipelineState *pPipelineState) { IMPLEMENT_ME };
+  void STDMETHODCALLTYPE
+  ClearState(ID3D12PipelineState *pPipelineState) {
+    allocator_->InvalidateCurrentPass();
+
+    pso_graphics_ = nullptr;
+    pso_compute_ = nullptr;
+    rootsig_graphics_ = nullptr;
+    rootsig_compute_ = nullptr;
+    descriptor_heap_ = nullptr;
+    sampler_heap_ = nullptr;
+
+    memset(rootarg_graphics_staging_, 0, sizeof(rootarg_graphics_staging_));
+    memset(rootarg_compute_staging_, 0, sizeof(rootarg_compute_staging_));
+    memset(vertex_buffers_.data(), 0, sizeof(vertex_buffers_));
+    index_buffer_address = 0;
+    index_buffer = {};
+    index_type = {};
+    index_offset = 0;
+
+    num_rtvs = 0;
+    memset(rtvs, 0, sizeof(rtvs));
+    dsv = {};
+    topology_ = {};
+    num_viewports = 0;
+    memset(viewports, 0, sizeof(viewports));
+    num_scissors = 0;
+    memset(scissors, 0, sizeof(scissors));
+    blend_factor_[0] = 1.0f;
+    blend_factor_[1] = 1.0f;
+    blend_factor_[2] = 1.0f;
+    blend_factor_[3] = 1.0f;
+    stencil_ref_ = 0;
+
+    dirty_state_.clrAll();
+    pending_barrier_scope_ = (WMTBarrierScope)0;
+    pending_barrier_stages_after_ = (WMTRenderStages)0;
+    pending_barrier_stages_before_ = (WMTRenderStages)0;
+
+    if (pPipelineState)
+      SetPipelineState(pPipelineState);
+  };
 
   bool
   ValidateCommand(bool valid, const char *name) {
@@ -374,6 +414,23 @@ public:
     const auto required_qwords = (dword_offset + dword_count + 1) / 2;
     if (slot > root_signature->UploadQwords || required_qwords > root_signature->UploadQwords - slot) {
       WARN("D3D12 ", name, " root argument exceeds the root signature payload");
+      recording_failed_ = true;
+      return false;
+    }
+    return true;
+  }
+
+  bool
+  ValidateIndirectPipeline(MTLD3D12PipelineState *pipeline, MTLD3D12CommandSignature *signature, const char *name) {
+    if (!pipeline) {
+      WARN("D3D12 ", name, " has no bound pipeline state");
+      recording_failed_ = true;
+      return false;
+    }
+
+    if (pipeline->shader_backend == D3D12ShaderBackend::MetalShaderConverter &&
+        (signature->UpdateRootArguments || signature->UpdateVertexBuffers || signature->UpdateIndexBuffer)) {
+      WARN("D3D12 ", name, " with MSC PSO and resource-updating command signature is unsupported");
       recording_failed_ = true;
       return false;
     }
@@ -517,11 +574,13 @@ public:
       for (unsigned i = 0; i < num_rtvs; i++) {
         if (!rtvs[i].ptr)
           continue;
-        effective_rtvs++;
         auto [Heap, Index] = GetRenderTargetHeap(device_, rtvs[i]);
+        if (!Heap)
+          return DrawCallStatus::Invalid;
         auto AttachmentDesc = Heap->GetRenderTarget(Index);
         if (!AttachmentDesc.Texture)
           continue;
+        effective_rtvs++;
         auto &rt = render->colors[i];
         rt.attachment = AttachmentDesc.Texture->view(AttachmentDesc.View);
         rt.depth_plane = AttachmentDesc.DepthPlane;
@@ -532,11 +591,13 @@ public:
         render_target_array_length = std::max(render_target_array_length, AttachmentDesc.RenderTargetArrayLength);
       }
       while (dsv.ptr) {
-        effective_rtvs++;
         auto [Heap, Index] = GetRenderTargetHeap(device_, dsv);
+        if (!Heap)
+          return DrawCallStatus::Invalid;
         auto AttachmentDesc = Heap->GetRenderTarget(Index);
         if (!AttachmentDesc.Texture)
-          continue;
+          break;
+        effective_rtvs++;
         auto dsv_planar_flags = DepthStencilPlanarFlags(AttachmentDesc.Texture->pixelFormat(AttachmentDesc.View));
         if (dsv_planar_flags & 1) {
           auto &rt = render->depth;
@@ -553,6 +614,8 @@ public:
           rt.store_action = WMTStoreActionStore;
         }
         render->dsv_planar_flags = dsv_planar_flags;
+        render->dsv_readonly_flags =
+            AttachmentDesc.Flags & (D3D12_DSV_FLAG_READ_ONLY_DEPTH | D3D12_DSV_FLAG_READ_ONLY_STENCIL);
         render_target_width = std::min(render_target_width, AttachmentDesc.Width);
         render_target_height = std::min(render_target_height, AttachmentDesc.Height);
         render_target_array_length = std::max(render_target_array_length, AttachmentDesc.RenderTargetArrayLength);
@@ -1492,14 +1555,42 @@ public:
   void STDMETHODCALLTYPE SetDescriptorHeaps(UINT HeapCount, ID3D12DescriptorHeap *const *Heaps) {
     descriptor_heap_ = nullptr;
     sampler_heap_ = nullptr;
+    if (HeapCount > 2 || (HeapCount && !Heaps)) {
+      WARN("D3D12 SetDescriptorHeaps received an invalid heap list");
+      recording_failed_ = true;
+      return;
+    }
     for (UINT i = 0; i < HeapCount; i++) {
-      if (!Heaps[i])
-        continue;
+      if (!Heaps[i]) {
+        WARN("D3D12 SetDescriptorHeaps received a null heap");
+        recording_failed_ = true;
+        return;
+      }
       auto desc = Heaps[i]->GetDesc();
-      if (desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+      if (!(desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)) {
+        WARN("D3D12 SetDescriptorHeaps requires shader-visible heaps");
+        recording_failed_ = true;
+        return;
+      }
+      if (desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
+        if (descriptor_heap_) {
+          WARN("D3D12 SetDescriptorHeaps received multiple CBV/SRV/UAV heaps");
+          recording_failed_ = true;
+          return;
+        }
         descriptor_heap_ = static_cast<MTLD3D12DescriptorHeap *>(Heaps[i]);
-      else if (desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
+      } else if (desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) {
+        if (sampler_heap_) {
+          WARN("D3D12 SetDescriptorHeaps received multiple sampler heaps");
+          recording_failed_ = true;
+          return;
+        }
         sampler_heap_ = static_cast<MTLD3D12SamplerDescriptorHeap *>(Heaps[i]);
+      } else {
+        WARN("D3D12 SetDescriptorHeaps received an unsupported heap type");
+        recording_failed_ = true;
+        return;
+      }
     }
     dirty_state_.set(DirtyState::DescriptorHeaps);
   };
@@ -1690,6 +1781,8 @@ public:
     if ((Flags & 3) == 0)
       return;
     auto [Heap, Index] = GetRenderTargetHeap(device_, DSV);
+    if (!Heap)
+      return;
     auto AttachmentDesc = Heap->GetRenderTarget(Index);
     if (!AttachmentDesc.Texture)
       return;
@@ -1714,7 +1807,11 @@ public:
       ERR("ClearRenderTargetView: unhandled parameter Rects=", Rects, " RectCount=", RectCount);
       return;
     }
+    if (!Color)
+      return;
     auto [Heap, Index] = GetRenderTargetHeap(device_, RTV);
+    if (!Heap)
+      return;
     auto AttachmentDesc = Heap->GetRenderTarget(Index);
     if (!AttachmentDesc.Texture)
       return;
@@ -1738,6 +1835,8 @@ public:
       const UINT Values[4], UINT RectCount, const D3D12_RECT *pRects
   ) {
     auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, CpuHandle);
+    if (!Heap || !Values || (RectCount && !pRects))
+      return;
     auto &Descriptor = Heap->GetDescriptor(Index);
     auto color = std::array<uint32_t, 4>({Values[0], Values[1], Values[2], Values[3]});
     D3D12_RECT full_rect;
@@ -1792,6 +1891,8 @@ public:
       const float Values[4], UINT RectCount, const D3D12_RECT *pRects
   ) {
     auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, CpuHandle);
+    if (!Heap || !Values || (RectCount && !pRects))
+      return;
     auto &Descriptor = Heap->GetDescriptor(Index);
     auto color = std::array<float, 4>({Values[0], Values[1], Values[2], Values[3]});
     D3D12_RECT full_rect;
@@ -1955,7 +2056,11 @@ public:
     if (sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH) {
       if (!ValidateCommand(SupportsCompute(), "ExecuteIndirect(Dispatch)"))
         return;
+      if (!ValidateIndirectPipeline(pso_compute_.ptr(), sig, "ExecuteIndirect(Dispatch)"))
+        return;
     } else if (!ValidateCommand(SupportsGraphics(), "ExecuteIndirect(Draw)")) {
+      return;
+    } else if (!ValidateIndirectPipeline(pso_graphics_.ptr(), sig, "ExecuteIndirect(Draw)")) {
       return;
     }
     auto arg_buffer = static_cast<MTLD3D12Resource *>(pArgBuffer);

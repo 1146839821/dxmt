@@ -36,12 +36,15 @@ struct EMBEDDED_DESCRIPTOR_HANDLE {
   SIZE_T Descriptor : 20;
   SIZE_T Heap       : sizeof(SIZE_T) == 4 ? 7 : 39;
 
+  const void *
+  getHeap() const {
+    return Tag == kDescriptorHeapTag ? LookupDescriptorHeap(Heap) : nullptr;
+  }
+
   template <typename T>
   T *
   extract() {
-    if (Tag != kDescriptorHeapTag)
-      return nullptr;
-    return reinterpret_cast<T *>(const_cast<void *>(LookupDescriptorHeap(Heap)));
+    return reinterpret_cast<T *>(const_cast<void *>(getHeap()));
   }
 
   EMBEDDED_DESCRIPTOR_HANDLE(const void *heap, SIZE_T index) {

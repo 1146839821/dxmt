@@ -24,7 +24,10 @@
 #include "dxgi_interfaces.h"
 #include "dxmt_format.hpp"
 #include "log/log.hpp"
+#include <chrono>
 #include <map>
+#include <thread>
+#include <vector>
 
 namespace dxmt {
 
@@ -86,9 +89,14 @@ public:
 
     *ppvObject = nullptr;
 
-    if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12Device) ||
-        riid == __uuidof(ID3D12Device1)) {
-      *ppvObject = ref(this);
+    if (riid == __uuidof(ID3D12Device1)) {
+      auto *device = static_cast<ID3D12Device1 *>(this);
+      *ppvObject = ref(device);
+      return S_OK;
+    }
+
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12Device)) {
+      *ppvObject = ref(static_cast<ID3D12Device *>(this));
       return S_OK;
     }
 
@@ -1182,7 +1190,60 @@ public:
       ID3D12Fence *const *pFences, const UINT64 *pValues, UINT FenceCount, D3D12_MULTIPLE_FENCE_WAIT_FLAGS Flags,
       HANDLE hEvent
   ) {
-    return E_NOTIMPL;
+    if (!FenceCount || !pFences || !pValues || !hEvent ||
+        (Flags != D3D12_MULTIPLE_FENCE_WAIT_FLAG_NONE && Flags != D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY) ||
+        FenceCount > MAXIMUM_WAIT_OBJECTS)
+      return E_INVALIDARG;
+
+    const bool wait_any = Flags == D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY;
+    bool completed = !wait_any;
+    std::vector<Rc<Fence>> fences;
+    std::vector<UINT64> values;
+    fences.reserve(FenceCount);
+    values.reserve(FenceCount);
+
+    for (UINT i = 0; i < FenceCount; i++) {
+      auto fence = static_cast<MTLD3D12Fence *>(pFences[i]);
+      if (!fence || !fence->fence)
+        return E_INVALIDARG;
+
+      const bool fence_completed = fence->fence->completedValue() >= pValues[i];
+      if (wait_any)
+        completed |= fence_completed;
+      else
+        completed &= fence_completed;
+
+      fences.emplace_back(fence->fence);
+      values.push_back(pValues[i]);
+    }
+
+    if (completed) {
+      SetEvent(hEvent);
+      return S_OK;
+    }
+
+    try {
+      std::thread([fences = std::move(fences), values = std::move(values), wait_any, hEvent]() mutable {
+        for (;;) {
+          bool complete = !wait_any;
+          for (size_t i = 0; i < fences.size(); i++) {
+            const bool fence_completed = fences[i]->completedValue() >= values[i];
+            if (wait_any)
+              complete |= fence_completed;
+            else
+              complete &= fence_completed;
+          }
+          if (complete) {
+            SetEvent(hEvent);
+            return;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      }).detach();
+    } catch (...) {
+      return E_OUTOFMEMORY;
+    }
+    return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE

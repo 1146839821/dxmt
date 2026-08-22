@@ -275,6 +275,8 @@ public:
     }
 
     auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, Descriptor);
+    if (!Heap)
+      return E_INVALIDARG;
     TextureViewKey View = texture->fullView;
 
     TextureViewDescriptor view_descriptor;
@@ -438,6 +440,8 @@ public:
     }
 
     auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, Descriptor);
+    if (!Heap)
+      return E_INVALIDARG;
     TextureViewKey View = texture->fullView;
 
     TextureViewDescriptor view_descriptor;
@@ -525,6 +529,8 @@ public:
     }
 
     auto [Heap, Index] = GetRenderTargetHeap(device_, Descriptor);
+    if (!Heap)
+      return E_INVALIDARG;
     TextureViewKey View = texture->fullView;
 
     TextureViewDescriptor view_descriptor;
@@ -655,6 +661,8 @@ public:
     }
 
     auto [Heap, Index] = GetRenderTargetHeap(device_, Descriptor);
+    if (!Heap)
+      return E_INVALIDARG;
     TextureViewKey View = texture->fullView;
 
     TextureViewDescriptor view_descriptor;
