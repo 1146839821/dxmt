@@ -4,6 +4,12 @@ winemetal_unix_src = [
   'metalirconverter.c',
 ]
 
+metalirconverter_runtime = static_library('metalirconverter_runtime', 'metalirconverter_runtime.c',
+  native              : true,
+  include_directories : dxmt_include_path,
+  c_args              : ['-ObjC', '-fobjc-arc'],
+)
+
 if wine_build_path != ''
   winemac_so = join_paths(wine_build_path, 'dlls/winemac.drv/winemac.so')
   ntdll_so = join_paths(wine_build_path, 'dlls/ntdll/ntdll.so')
@@ -31,6 +37,7 @@ shared_library('winemetal', winemetal_unix_src,
   include_directories : dxmt_include_path,
   c_args              : ['-ObjC'],
   link_args           : winemetal_unix_ld_args,
+  link_with           : [ metalirconverter_runtime ],
   native              : true,
   name_suffix         : 'so',
   install_rpath       : '',

@@ -613,6 +613,10 @@ static NTSTATUS
 _MTLDevice_newMeshRenderPipelineState(void *obj) {
   struct unixcall_mtldevice_newmeshrenderpso *params = obj;
   const struct WMTMeshRenderPipelineInfo *info = params->info.ptr;
+  if (info->msc_tessellation) {
+    params->ret_pso = dxmt_msc_new_tessellation_pipeline(params->device, info, &params->ret_error);
+    return STATUS_SUCCESS;
+  }
   MTLMeshRenderPipelineDescriptor *descriptor = [[MTLMeshRenderPipelineDescriptor alloc] init];
 
   for (unsigned i = 0; i < 8; i++) {
@@ -1093,7 +1097,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
                                                           body->mesh_threadgroup_size.width,
                                                           body->mesh_threadgroup_size.height,
                                                           body->mesh_threadgroup_size.depth
-                                                      )];
+                                       )];
       break;
     }
     case WMTRenderCommandMemoryBarrier: {

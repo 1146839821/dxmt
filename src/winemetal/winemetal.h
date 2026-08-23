@@ -861,6 +861,25 @@ struct WMTRenderPipelineInfo {
   struct WMTVertexBufferLayout vertex_buffer_layouts[WMT_MAX_VERTEX_BUFFER_LAYOUTS];
 };
 
+enum WMTMSCTessellationOutputPrimitive : uint8_t {
+  WMTMSCTessellationOutputUndefined = 0,
+  WMTMSCTessellationOutputPoint = 1,
+  WMTMSCTessellationOutputLine = 2,
+  WMTMSCTessellationOutputTriangleCW = 3,
+  WMTMSCTessellationOutputTriangleCCW = 4,
+};
+
+struct WMTMSCTessellationPipelineConfig {
+  enum WMTMSCTessellationOutputPrimitive output_primitive_type;
+  uint32_t vs_output_size_in_bytes;
+  uint32_t gs_max_input_primitives_per_mesh_threadgroup;
+  uint32_t hs_max_patches_per_object_threadgroup;
+  uint32_t hs_input_control_point_count;
+  uint32_t hs_max_object_threads_per_threadgroup;
+  float hs_max_tessellation_factor;
+  uint32_t gs_instance_count;
+};
+
 struct WMTMeshRenderPipelineInfo {
   struct WMTColorAttachmentBlendInfo colors[8];
   bool alpha_to_coverage_enabled;
@@ -885,6 +904,17 @@ struct WMTMeshRenderPipelineInfo {
   bool fail_on_binary_archive_miss;
   bool support_indirect_command_buffers;
   uint8_t padding[5];
+  bool msc_tessellation;
+  obj_handle_t msc_stage_in_library;
+  obj_handle_t msc_vertex_library;
+  obj_handle_t msc_hull_library;
+  obj_handle_t msc_domain_library;
+  obj_handle_t msc_fragment_library;
+  struct WMTConstMemoryPointer msc_vertex_function_name;
+  struct WMTConstMemoryPointer msc_hull_function_name;
+  struct WMTConstMemoryPointer msc_domain_function_name;
+  struct WMTConstMemoryPointer msc_fragment_function_name;
+  struct WMTMSCTessellationPipelineConfig msc_tessellation_config;
 };
 
 WINEMETAL_API obj_handle_t
@@ -1413,6 +1443,33 @@ struct wmtcmd_render_draw_indexed_indirect {
   uint64_t index_buffer_offset;
   obj_handle_t indirect_args_buffer;
   uint64_t indirect_args_offset;
+};
+
+struct wmtcmd_render_msc_tessellation_draw {
+  enum WMTRenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  enum WMTPrimitiveType primitive_type;
+  struct WMTMSCTessellationPipelineConfig pipeline_config;
+  uint32_t instance_count;
+  uint32_t vertex_count;
+  uint32_t base_instance;
+  int32_t base_vertex;
+};
+
+struct wmtcmd_render_msc_tessellation_draw_indexed {
+  enum WMTRenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  enum WMTPrimitiveType primitive_type;
+  enum WMTIndexType index_type;
+  obj_handle_t index_buffer;
+  struct WMTMSCTessellationPipelineConfig pipeline_config;
+  uint32_t instance_count;
+  uint32_t index_count;
+  uint32_t base_instance;
+  int32_t base_vertex;
+  uint32_t start_index;
 };
 
 struct wmtcmd_render_draw_meshthreadgroups {
