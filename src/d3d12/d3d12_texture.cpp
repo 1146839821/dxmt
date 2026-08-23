@@ -140,6 +140,64 @@ EncodeComponentMapping(UINT Shader4ComponentMapping, WMTPixelFormat Format) {
   return WMTPixelFormat(ENCODE_FORMAT_SWIZZLE(Format, Map[MappingR], Map[MappingG], Map[MappingB], Map[MappingA]));
 }
 
+HRESULT
+ValidateTextureView(
+    const D3D12_RESOURCE_DESC &ResourceDesc, UINT FirstMipLevel, UINT MipLevelCount, UINT FirstArraySlice,
+    UINT ArraySize
+) {
+  if (!ResourceDesc.MipLevels || !MipLevelCount || FirstMipLevel >= ResourceDesc.MipLevels ||
+      MipLevelCount > ResourceDesc.MipLevels - FirstMipLevel)
+    return E_INVALIDARG;
+
+  if (!ResourceDesc.DepthOrArraySize || !ArraySize || FirstArraySlice >= ResourceDesc.DepthOrArraySize ||
+      ArraySize > ResourceDesc.DepthOrArraySize - FirstArraySlice)
+    return E_INVALIDARG;
+  return S_OK;
+}
+
+HRESULT
+ValidateTextureViewType(const D3D12_RESOURCE_DESC &ResourceDesc, WMTTextureType ViewType) {
+  const bool ResourceIs3D = ResourceDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+  return ResourceIs3D == (ViewType == WMTTextureType3D) ? S_OK : E_INVALIDARG;
+}
+
+UINT
+ResolveMipLevelCount(UINT ResourceMipLevels, UINT FirstMipLevel, UINT MipLevelCount) {
+  if (MipLevelCount != ~0u)
+    return MipLevelCount;
+  return FirstMipLevel < ResourceMipLevels ? ResourceMipLevels - FirstMipLevel : 0;
+}
+
+HRESULT
+ValidatePlaneSlice(const MTL_DXGI_FORMAT_DESC &FormatDesc, UINT PlaneSlice) {
+  if (PlaneSlice >= FormatDesc.PlanarCount)
+    return E_INVALIDARG;
+  if (FormatDesc.PlanarCount == 2) {
+    const UINT PlaneFlag = PlaneSlice == 0 ? MTL_DXGI_FORMAT_DEPTH_PLANER : MTL_DXGI_FORMAT_STENCIL_PLANER;
+    if (!(FormatDesc.Flag & PlaneFlag))
+      return E_INVALIDARG;
+  }
+  return S_OK;
+}
+
+HRESULT
+ValidateTexture3DRange(const D3D12_RESOURCE_DESC &ResourceDesc, UINT MipSlice, UINT FirstWSlice, UINT &WSize) {
+  if (ResourceDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D || !ResourceDesc.MipLevels ||
+      MipSlice >= ResourceDesc.MipLevels)
+    return E_INVALIDARG;
+
+  UINT MipDepth = std::max<UINT>(ResourceDesc.DepthOrArraySize >> MipSlice, 1u);
+  if (FirstWSlice >= MipDepth)
+    return E_INVALIDARG;
+  if (WSize == ~0u)
+    WSize = MipDepth - FirstWSlice;
+  if (!WSize)
+    return E_INVALIDARG;
+  if (WSize > MipDepth - FirstWSlice)
+    return E_INVALIDARG;
+  return S_OK;
+}
+
 class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
   D3D12_RESOURCE_DESC desc_;
   D3D12_HEAP_PROPERTIES heap_props_;
@@ -292,125 +350,132 @@ public:
     }
 
     FLOAT ResourceMinLODClamp = 0;
+    UINT PlaneSlice = 0;
+    UINT ViewFirstMipLevel = 0;
+    UINT ViewMipLevelCount = 1;
+    UINT ViewFirstArraySlice = 0;
+    UINT ViewArraySize = 1;
+    auto SetViewRange = [&](UINT FirstMipLevel, UINT MipLevelCount, UINT FirstArraySlice, UINT ArraySize) {
+      ViewFirstMipLevel = FirstMipLevel;
+      ViewMipLevelCount = MipLevelCount;
+      ViewFirstArraySlice = FirstArraySlice;
+      ViewArraySize = ArraySize;
+      view_descriptor.firstMiplevel = FirstMipLevel;
+      view_descriptor.miplevelCount = MipLevelCount;
+      view_descriptor.firstArraySlice = FirstArraySlice;
+      view_descriptor.arraySize = ArraySize;
+    };
 
     switch (ViewDesc.ViewDimension) {
     case D3D12_SRV_DIMENSION_TEXTURE1D: {
       view_descriptor.type = WMTTextureType2D; // FIXME: lowering to 2d array
-      view_descriptor.firstMiplevel = ViewDesc.Texture1D.MostDetailedMip;
-      if (ViewDesc.Texture1D.MipLevels == ~0u)
-        view_descriptor.miplevelCount = desc_.MipLevels - ViewDesc.Texture1D.MostDetailedMip;
-      else
-        view_descriptor.miplevelCount = ViewDesc.Texture1D.MipLevels;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      SetViewRange(
+          ViewDesc.Texture1D.MostDetailedMip,
+          ResolveMipLevelCount(desc_.MipLevels, ViewDesc.Texture1D.MostDetailedMip, ViewDesc.Texture1D.MipLevels), 0, 1
+      );
       ResourceMinLODClamp = ViewDesc.Texture1D.ResourceMinLODClamp;
       break;
     }
     case D3D12_SRV_DIMENSION_TEXTURE1DARRAY: {
       view_descriptor.type = WMTTextureType2DArray;
-      view_descriptor.firstMiplevel = ViewDesc.Texture1DArray.MostDetailedMip;
-      if (ViewDesc.Texture1DArray.MipLevels == ~0u)
-        view_descriptor.miplevelCount = desc_.MipLevels - ViewDesc.Texture1DArray.MostDetailedMip;
-      else
-        view_descriptor.miplevelCount = ViewDesc.Texture1DArray.MipLevels;
-      view_descriptor.firstArraySlice = ViewDesc.Texture1DArray.FirstArraySlice;
-      if (ViewDesc.Texture1DArray.ArraySize == ~0u)
-        view_descriptor.arraySize = desc_.DepthOrArraySize - ViewDesc.Texture1DArray.FirstArraySlice;
-      else
-        view_descriptor.arraySize = ViewDesc.Texture1DArray.ArraySize;
-      View = texture->createView(view_descriptor);
+      UINT ArraySize =
+          ViewDesc.Texture1DArray.ArraySize == ~0u && ViewDesc.Texture1DArray.FirstArraySlice <= desc_.DepthOrArraySize
+              ? desc_.DepthOrArraySize - ViewDesc.Texture1DArray.FirstArraySlice
+              : ViewDesc.Texture1DArray.ArraySize;
+      SetViewRange(
+          ViewDesc.Texture1DArray.MostDetailedMip,
+          ResolveMipLevelCount(
+              desc_.MipLevels, ViewDesc.Texture1DArray.MostDetailedMip, ViewDesc.Texture1DArray.MipLevels
+          ),
+          ViewDesc.Texture1DArray.FirstArraySlice, ArraySize
+      );
       ResourceMinLODClamp = ViewDesc.Texture1DArray.ResourceMinLODClamp;
       break;
     }
     case D3D12_SRV_DIMENSION_TEXTURE2D: {
       view_descriptor.type = WMTTextureType2D; // FIXME: lowering to 2d array
-      view_descriptor.firstMiplevel = ViewDesc.Texture2D.MostDetailedMip;
-      if (ViewDesc.Texture2D.MipLevels == ~0u)
-        view_descriptor.miplevelCount = desc_.MipLevels - ViewDesc.Texture2D.MostDetailedMip;
-      else
-        view_descriptor.miplevelCount = ViewDesc.Texture2D.MipLevels;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      SetViewRange(
+          ViewDesc.Texture2D.MostDetailedMip,
+          ResolveMipLevelCount(desc_.MipLevels, ViewDesc.Texture2D.MostDetailedMip, ViewDesc.Texture2D.MipLevels), 0, 1
+      );
+      PlaneSlice = ViewDesc.Texture2D.PlaneSlice;
       ResourceMinLODClamp = ViewDesc.Texture2D.ResourceMinLODClamp;
       break;
     }
     case D3D12_SRV_DIMENSION_TEXTURE2DARRAY: {
       view_descriptor.type = WMTTextureType2DArray;
-      view_descriptor.firstMiplevel = ViewDesc.Texture2DArray.MostDetailedMip;
-      if (ViewDesc.Texture2DArray.MipLevels == ~0u)
-        view_descriptor.miplevelCount = desc_.MipLevels - ViewDesc.Texture2DArray.MostDetailedMip;
-      else
-        view_descriptor.miplevelCount = ViewDesc.Texture2DArray.MipLevels;
-      view_descriptor.firstArraySlice = ViewDesc.Texture2DArray.FirstArraySlice;
-      if (ViewDesc.Texture2DArray.ArraySize == ~0u)
-        view_descriptor.arraySize = desc_.DepthOrArraySize - ViewDesc.Texture2DArray.FirstArraySlice;
-      else
-        view_descriptor.arraySize = ViewDesc.Texture2DArray.ArraySize;
-      View = texture->createView(view_descriptor);
+      UINT ArraySize =
+          ViewDesc.Texture2DArray.ArraySize == ~0u && ViewDesc.Texture2DArray.FirstArraySlice <= desc_.DepthOrArraySize
+              ? desc_.DepthOrArraySize - ViewDesc.Texture2DArray.FirstArraySlice
+              : ViewDesc.Texture2DArray.ArraySize;
+      SetViewRange(
+          ViewDesc.Texture2DArray.MostDetailedMip,
+          ResolveMipLevelCount(
+              desc_.MipLevels, ViewDesc.Texture2DArray.MostDetailedMip, ViewDesc.Texture2DArray.MipLevels
+          ),
+          ViewDesc.Texture2DArray.FirstArraySlice, ArraySize
+      );
+      PlaneSlice = ViewDesc.Texture2DArray.PlaneSlice;
       ResourceMinLODClamp = ViewDesc.Texture2DArray.ResourceMinLODClamp;
       break;
     }
     case D3D12_SRV_DIMENSION_TEXTURECUBE: {
       view_descriptor.type = WMTTextureTypeCube; // FIXME: lowering to cube array
-      view_descriptor.firstMiplevel = ViewDesc.TextureCube.MostDetailedMip;
-      if (ViewDesc.TextureCube.MipLevels == ~0u)
-        view_descriptor.miplevelCount = desc_.MipLevels - ViewDesc.TextureCube.MostDetailedMip;
-      else
-        view_descriptor.miplevelCount = ViewDesc.TextureCube.MipLevels;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 6;
-      View = texture->createView(view_descriptor);
+      SetViewRange(
+          ViewDesc.TextureCube.MostDetailedMip,
+          ResolveMipLevelCount(desc_.MipLevels, ViewDesc.TextureCube.MostDetailedMip, ViewDesc.TextureCube.MipLevels),
+          0, 6
+      );
       ResourceMinLODClamp = ViewDesc.TextureCube.ResourceMinLODClamp;
       break;
     }
     case D3D12_SRV_DIMENSION_TEXTURECUBEARRAY: {
       view_descriptor.type = WMTTextureTypeCubeArray;
-      view_descriptor.firstMiplevel = ViewDesc.TextureCubeArray.MostDetailedMip;
-      if (ViewDesc.TextureCubeArray.MipLevels == ~0u)
-        view_descriptor.miplevelCount = desc_.MipLevels - ViewDesc.TextureCubeArray.MostDetailedMip;
-      else
-        view_descriptor.miplevelCount = ViewDesc.TextureCubeArray.MipLevels;
-      if (ViewDesc.TextureCubeArray.NumCubes == ~0u)
-        view_descriptor.arraySize = desc_.DepthOrArraySize - ViewDesc.TextureCubeArray.First2DArrayFace;
-      else
-        view_descriptor.arraySize = ViewDesc.TextureCubeArray.NumCubes * 6;
-      View = texture->createView(view_descriptor);
+      if (ViewDesc.TextureCubeArray.First2DArrayFace % 6)
+        return E_INVALIDARG;
+      UINT ArraySize;
+      if (ViewDesc.TextureCubeArray.NumCubes == ~0u) {
+        if (ViewDesc.TextureCubeArray.First2DArrayFace > desc_.DepthOrArraySize)
+          return E_INVALIDARG;
+        ArraySize = desc_.DepthOrArraySize - ViewDesc.TextureCubeArray.First2DArrayFace;
+      } else {
+        uint64_t CubeArraySize = uint64_t(ViewDesc.TextureCubeArray.NumCubes) * 6;
+        if (CubeArraySize > UINT_MAX)
+          return E_INVALIDARG;
+        ArraySize = static_cast<UINT>(CubeArraySize);
+      }
+      if (ArraySize % 6)
+        return E_INVALIDARG;
+      SetViewRange(
+          ViewDesc.TextureCubeArray.MostDetailedMip,
+          ResolveMipLevelCount(
+              desc_.MipLevels, ViewDesc.TextureCubeArray.MostDetailedMip, ViewDesc.TextureCubeArray.MipLevels
+          ),
+          ViewDesc.TextureCubeArray.First2DArrayFace, ArraySize
+      );
       ResourceMinLODClamp = ViewDesc.TextureCubeArray.ResourceMinLODClamp;
       break;
     }
     case D3D12_SRV_DIMENSION_TEXTURE2DMS: {
       view_descriptor.type = WMTTextureType2DMultisample; // FIXME: lowering to 2d array
-      view_descriptor.firstMiplevel = 0;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      SetViewRange(0, 1, 0, 1);
       break;
     }
     case D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY: {
       view_descriptor.type = WMTTextureType2DMultisampleArray;
-      view_descriptor.firstMiplevel = 0;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = ViewDesc.Texture2DMSArray.FirstArraySlice;
-      if (ViewDesc.Texture2DMSArray.ArraySize == ~0u)
-        view_descriptor.arraySize = desc_.DepthOrArraySize - ViewDesc.Texture2DMSArray.FirstArraySlice;
-      else
-        view_descriptor.arraySize = ViewDesc.Texture2DMSArray.ArraySize;
-      View = texture->createView(view_descriptor);
+      UINT ArraySize = ViewDesc.Texture2DMSArray.ArraySize == ~0u &&
+                               ViewDesc.Texture2DMSArray.FirstArraySlice <= desc_.DepthOrArraySize
+                           ? desc_.DepthOrArraySize - ViewDesc.Texture2DMSArray.FirstArraySlice
+                           : ViewDesc.Texture2DMSArray.ArraySize;
+      SetViewRange(0, 1, ViewDesc.Texture2DMSArray.FirstArraySlice, ArraySize);
       break;
     }
     case D3D12_SRV_DIMENSION_TEXTURE3D: {
       view_descriptor.type = WMTTextureType3D;
-      view_descriptor.firstMiplevel = ViewDesc.Texture3D.MostDetailedMip;
-      if (ViewDesc.Texture3D.MipLevels == ~0u)
-        view_descriptor.miplevelCount = desc_.MipLevels - ViewDesc.Texture3D.MostDetailedMip;
-      else
-        view_descriptor.miplevelCount = ViewDesc.Texture3D.MipLevels;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      SetViewRange(
+          ViewDesc.Texture3D.MostDetailedMip,
+          ResolveMipLevelCount(desc_.MipLevels, ViewDesc.Texture3D.MostDetailedMip, ViewDesc.Texture3D.MipLevels), 0, 1
+      );
       ResourceMinLODClamp = ViewDesc.Texture3D.ResourceMinLODClamp;
       break;
     }
@@ -418,6 +483,11 @@ public:
       return E_INVALIDARG;
     }
 
+    if (FAILED(ValidateTextureViewType(desc_, view_descriptor.type)) ||
+        FAILED(ValidateTextureView(desc_, ViewFirstMipLevel, ViewMipLevelCount, ViewFirstArraySlice, ViewArraySize)) ||
+        FAILED(ValidatePlaneSlice(metal_format, PlaneSlice)))
+      return E_INVALIDARG;
+    View = texture->createView(view_descriptor);
     ResourceMinLODClamp = FLOAT((INT)ResourceMinLODClamp - view_descriptor.firstMiplevel);
 
     return Heap->AddShaderResourceView(Index, texture.ptr(), View, ResourceMinLODClamp);
@@ -451,66 +521,73 @@ public:
       return hr;
 
     view_descriptor.format = metal_format.PixelFormat;
+    UINT PlaneSlice = 0;
+    UINT ViewFirstMipLevel = 0;
+    UINT ViewMipLevelCount = 1;
+    UINT ViewFirstArraySlice = 0;
+    UINT ViewArraySize = 1;
+    auto SetViewRange = [&](UINT FirstMipLevel, UINT MipLevelCount, UINT FirstArraySlice, UINT ArraySize) {
+      ViewFirstMipLevel = FirstMipLevel;
+      ViewMipLevelCount = MipLevelCount;
+      ViewFirstArraySlice = FirstArraySlice;
+      ViewArraySize = ArraySize;
+      view_descriptor.firstMiplevel = FirstMipLevel;
+      view_descriptor.miplevelCount = MipLevelCount;
+      view_descriptor.firstArraySlice = FirstArraySlice;
+      view_descriptor.arraySize = ArraySize;
+    };
 
     switch (ViewDesc.ViewDimension) {
     case D3D12_UAV_DIMENSION_TEXTURE1D: {
       view_descriptor.type = WMTTextureType2D; // FIXME: lowering to 2d array
-      view_descriptor.firstMiplevel = ViewDesc.Texture1D.MipSlice;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      SetViewRange(ViewDesc.Texture1D.MipSlice, 1, 0, 1);
       break;
     }
     case D3D12_UAV_DIMENSION_TEXTURE2D: {
       view_descriptor.type = WMTTextureType2D; // FIXME: lowering to 2d array
-      view_descriptor.firstMiplevel = ViewDesc.Texture2D.MipSlice;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      SetViewRange(ViewDesc.Texture2D.MipSlice, 1, 0, 1);
+      PlaneSlice = ViewDesc.Texture2D.PlaneSlice;
       break;
     }
     case D3D12_UAV_DIMENSION_TEXTURE1DARRAY: {
       view_descriptor.type = WMTTextureType2DArray;
-      view_descriptor.firstMiplevel = ViewDesc.Texture1DArray.MipSlice;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = ViewDesc.Texture1DArray.FirstArraySlice;
-      if (ViewDesc.Texture1DArray.ArraySize == ~0u)
-        view_descriptor.arraySize = desc_.DepthOrArraySize - ViewDesc.Texture1DArray.FirstArraySlice;
-      else
-        view_descriptor.arraySize = ViewDesc.Texture1DArray.ArraySize;
-      View = texture->createView(view_descriptor);
+      UINT ArraySize =
+          ViewDesc.Texture1DArray.ArraySize == ~0u && ViewDesc.Texture1DArray.FirstArraySlice <= desc_.DepthOrArraySize
+              ? desc_.DepthOrArraySize - ViewDesc.Texture1DArray.FirstArraySlice
+              : ViewDesc.Texture1DArray.ArraySize;
+      SetViewRange(ViewDesc.Texture1DArray.MipSlice, 1, ViewDesc.Texture1DArray.FirstArraySlice, ArraySize);
       break;
     }
     case D3D12_UAV_DIMENSION_TEXTURE2DARRAY: {
       view_descriptor.type = WMTTextureType2DArray;
-      view_descriptor.firstMiplevel = ViewDesc.Texture2DArray.MipSlice;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = ViewDesc.Texture2DArray.FirstArraySlice;
-      if (ViewDesc.Texture2DArray.ArraySize == ~0u)
-        view_descriptor.arraySize = desc_.DepthOrArraySize - ViewDesc.Texture2DArray.FirstArraySlice;
-      else
-        view_descriptor.arraySize = ViewDesc.Texture2DArray.ArraySize;
-      View = texture->createView(view_descriptor);
+      UINT ArraySize =
+          ViewDesc.Texture2DArray.ArraySize == ~0u && ViewDesc.Texture2DArray.FirstArraySlice <= desc_.DepthOrArraySize
+              ? desc_.DepthOrArraySize - ViewDesc.Texture2DArray.FirstArraySlice
+              : ViewDesc.Texture2DArray.ArraySize;
+      SetViewRange(ViewDesc.Texture2DArray.MipSlice, 1, ViewDesc.Texture2DArray.FirstArraySlice, ArraySize);
+      PlaneSlice = ViewDesc.Texture2DArray.PlaneSlice;
       break;
     }
     case D3D12_UAV_DIMENSION_TEXTURE3D: {
       view_descriptor.type = WMTTextureType3D;
-      view_descriptor.firstMiplevel = ViewDesc.Texture3D.MipSlice;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
-      if (ViewDesc.Texture3D.FirstWSlice > 0) {
-        ERR("3D UAV with WSlice unsupported");
-      }
+      UINT WSize = ViewDesc.Texture3D.WSize;
+      if (FAILED(ValidateTexture3DRange(desc_, ViewDesc.Texture3D.MipSlice, ViewDesc.Texture3D.FirstWSlice, WSize)))
+        return E_INVALIDARG;
+      UINT MipDepth = std::max<UINT>(desc_.DepthOrArraySize >> ViewDesc.Texture3D.MipSlice, 1u);
+      if (ViewDesc.Texture3D.FirstWSlice || WSize != MipDepth)
+        return E_NOTIMPL;
+      SetViewRange(ViewDesc.Texture3D.MipSlice, 1, 0, 1);
       break;
     }
     default:
       return E_INVALIDARG;
     }
 
+    if (FAILED(ValidateTextureViewType(desc_, view_descriptor.type)) ||
+        FAILED(ValidateTextureView(desc_, ViewFirstMipLevel, ViewMipLevelCount, ViewFirstArraySlice, ViewArraySize)) ||
+        FAILED(ValidatePlaneSlice(metal_format, PlaneSlice)))
+      return E_INVALIDARG;
+    View = texture->createView(view_descriptor);
     return Heap->AddUnorderedAccessView(Index, texture.ptr(), View);
   };
 
@@ -545,99 +622,93 @@ public:
     RenderTargetDesc.DepthPlane = 0;
     RenderTargetDesc.RenderTargetArrayLength = 0;
     RenderTargetDesc.Flags = 0;
+    UINT PlaneSlice = 0;
+    UINT ViewFirstMipLevel = 0;
+    UINT ViewMipLevelCount = 1;
+    UINT ViewFirstArraySlice = 0;
+    UINT ViewArraySize = 1;
+    auto SetViewRange = [&](UINT FirstMipLevel, UINT MipLevelCount, UINT FirstArraySlice, UINT ArraySize) {
+      ViewFirstMipLevel = FirstMipLevel;
+      ViewMipLevelCount = MipLevelCount;
+      ViewFirstArraySlice = FirstArraySlice;
+      ViewArraySize = ArraySize;
+      view_descriptor.firstMiplevel = FirstMipLevel;
+      view_descriptor.miplevelCount = MipLevelCount;
+      view_descriptor.firstArraySlice = FirstArraySlice;
+      view_descriptor.arraySize = ArraySize;
+    };
 
     switch (ViewDesc.ViewDimension) {
     case D3D12_RTV_DIMENSION_TEXTURE1D: {
       view_descriptor.type = WMTTextureType2D; // FIXME: lowering to 2d array
-      view_descriptor.firstMiplevel = ViewDesc.Texture1D.MipSlice;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      SetViewRange(ViewDesc.Texture1D.MipSlice, 1, 0, 1);
       break;
     }
     case D3D12_RTV_DIMENSION_TEXTURE1DARRAY: {
       view_descriptor.type = WMTTextureType2DArray;
-      view_descriptor.firstMiplevel = ViewDesc.Texture1DArray.MipSlice;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = ViewDesc.Texture1DArray.FirstArraySlice;
-      view_descriptor.arraySize =
-          ViewDesc.Texture1DArray.ArraySize == ~0u ? texture->arrayLength() : ViewDesc.Texture1DArray.ArraySize;
-      RenderTargetDesc.RenderTargetArrayLength = view_descriptor.arraySize;
-      View = texture->createView(view_descriptor);
+      UINT ArraySize =
+          ViewDesc.Texture1DArray.ArraySize == ~0u && ViewDesc.Texture1DArray.FirstArraySlice <= desc_.DepthOrArraySize
+              ? desc_.DepthOrArraySize - ViewDesc.Texture1DArray.FirstArraySlice
+              : ViewDesc.Texture1DArray.ArraySize;
+      SetViewRange(ViewDesc.Texture1DArray.MipSlice, 1, ViewDesc.Texture1DArray.FirstArraySlice, ArraySize);
+      RenderTargetDesc.RenderTargetArrayLength = ArraySize;
       break;
     }
     case D3D12_RTV_DIMENSION_TEXTURE2D: {
-      if (ViewDesc.Texture2D.PlaneSlice)
-        IMPLEMENT_ME
       view_descriptor.type = WMTTextureType2D; // FIXME: lowering to 2d array
-      view_descriptor.firstMiplevel = ViewDesc.Texture2D.MipSlice;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      SetViewRange(ViewDesc.Texture2D.MipSlice, 1, 0, 1);
+      PlaneSlice = ViewDesc.Texture2D.PlaneSlice;
       break;
     }
     case D3D12_RTV_DIMENSION_TEXTURE2DARRAY: {
-      if (ViewDesc.Texture2DArray.PlaneSlice)
-        IMPLEMENT_ME
       view_descriptor.type = WMTTextureType2DArray;
-      view_descriptor.firstMiplevel = ViewDesc.Texture2DArray.MipSlice;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = ViewDesc.Texture2DArray.FirstArraySlice;
-      view_descriptor.arraySize =
-          ViewDesc.Texture2DArray.ArraySize == ~0u ? texture->arrayLength() : ViewDesc.Texture2DArray.ArraySize;
-      RenderTargetDesc.RenderTargetArrayLength = view_descriptor.arraySize;
-      View = texture->createView(view_descriptor);
+      UINT ArraySize =
+          ViewDesc.Texture2DArray.ArraySize == ~0u && ViewDesc.Texture2DArray.FirstArraySlice <= desc_.DepthOrArraySize
+              ? desc_.DepthOrArraySize - ViewDesc.Texture2DArray.FirstArraySlice
+              : ViewDesc.Texture2DArray.ArraySize;
+      SetViewRange(ViewDesc.Texture2DArray.MipSlice, 1, ViewDesc.Texture2DArray.FirstArraySlice, ArraySize);
+      RenderTargetDesc.RenderTargetArrayLength = ArraySize;
+      PlaneSlice = ViewDesc.Texture2DArray.PlaneSlice;
       break;
     }
     case D3D12_RTV_DIMENSION_TEXTURE2DMS: {
       view_descriptor.type = WMTTextureType2DMultisample; // FIXME: lowering to 2d array
-      view_descriptor.firstMiplevel = 0;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      SetViewRange(0, 1, 0, 1);
       break;
     }
     case D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY: {
       view_descriptor.type = WMTTextureType2DMultisampleArray;
-      view_descriptor.firstMiplevel = 0;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = ViewDesc.Texture2DMSArray.FirstArraySlice;
-      view_descriptor.arraySize =
-          ViewDesc.Texture2DMSArray.ArraySize == ~0u ? texture->arrayLength() : ViewDesc.Texture2DMSArray.ArraySize;
-      RenderTargetDesc.RenderTargetArrayLength = view_descriptor.arraySize;
-      View = texture->createView(view_descriptor);
+      UINT ArraySize = ViewDesc.Texture2DMSArray.ArraySize == ~0u &&
+                               ViewDesc.Texture2DMSArray.FirstArraySlice <= desc_.DepthOrArraySize
+                           ? desc_.DepthOrArraySize - ViewDesc.Texture2DMSArray.FirstArraySlice
+                           : ViewDesc.Texture2DMSArray.ArraySize;
+      SetViewRange(0, 1, ViewDesc.Texture2DMSArray.FirstArraySlice, ArraySize);
+      RenderTargetDesc.RenderTargetArrayLength = ArraySize;
       break;
     }
     case D3D12_RTV_DIMENSION_TEXTURE3D: {
       view_descriptor.type = WMTTextureType3D;
-      view_descriptor.firstMiplevel = ViewDesc.Texture3D.MipSlice;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 1;
-      auto ArraySize = std::max<UINT16>(desc_.DepthOrArraySize >> ViewDesc.Texture3D.MipSlice, 1);
-      RenderTargetDesc.RenderTargetArrayLength = view_descriptor.arraySize;
-
-      if (ViewDesc.Texture3D.WSize == 1) {
-        RenderTargetDesc.DepthPlane = ViewDesc.Texture3D.FirstWSlice;
-      } else if (ViewDesc.Texture3D.FirstWSlice == 0) {
-        if (ArraySize != ViewDesc.Texture3D.WSize) {
-          WARN("Created a subview of 3D texture.");
-        }
-        RenderTargetDesc.RenderTargetArrayLength = ArraySize;
-      } else {
-        ERR("Failed to create 3D RTV, FirstWSlice:", ViewDesc.Texture3D.FirstWSlice,
-            " WSize:", ViewDesc.Texture3D.WSize, " MippedDepth:", ArraySize);
-      }
-
+      UINT WSize = ViewDesc.Texture3D.WSize;
+      if (FAILED(ValidateTexture3DRange(desc_, ViewDesc.Texture3D.MipSlice, ViewDesc.Texture3D.FirstWSlice, WSize)))
+        return E_INVALIDARG;
+      SetViewRange(ViewDesc.Texture3D.MipSlice, 1, 0, 1);
+      RenderTargetDesc.DepthPlane = ViewDesc.Texture3D.FirstWSlice;
+      RenderTargetDesc.RenderTargetArrayLength = WSize;
       break;
     }
     default:
       return E_INVALIDARG;
     }
 
+    if ((ViewDesc.ViewDimension == D3D12_RTV_DIMENSION_TEXTURE2D ||
+         ViewDesc.ViewDimension == D3D12_RTV_DIMENSION_TEXTURE2DARRAY) &&
+        PlaneSlice)
+      return E_NOTIMPL;
+    if (FAILED(ValidateTextureViewType(desc_, view_descriptor.type)) ||
+        FAILED(ValidateTextureView(desc_, ViewFirstMipLevel, ViewMipLevelCount, ViewFirstArraySlice, ViewArraySize)) ||
+        FAILED(ValidatePlaneSlice(metal_format, PlaneSlice)))
+      return E_INVALIDARG;
+    View = texture->createView(view_descriptor);
     RenderTargetDesc.Texture = texture.ptr();
     RenderTargetDesc.View = View;
     RenderTargetDesc.Width = std::max<uint32_t>(1u, texture->width() >> view_descriptor.firstMiplevel);
@@ -676,72 +747,75 @@ public:
     RenderTargetDesc.DepthPlane = 0;
     RenderTargetDesc.RenderTargetArrayLength = 0;
     RenderTargetDesc.Flags = ViewDesc.Flags;
+    UINT ViewFirstMipLevel = 0;
+    UINT ViewMipLevelCount = 1;
+    UINT ViewFirstArraySlice = 0;
+    UINT ViewArraySize = 1;
+    auto SetViewRange = [&](UINT FirstMipLevel, UINT MipLevelCount, UINT FirstArraySlice, UINT ArraySize) {
+      ViewFirstMipLevel = FirstMipLevel;
+      ViewMipLevelCount = MipLevelCount;
+      ViewFirstArraySlice = FirstArraySlice;
+      ViewArraySize = ArraySize;
+      view_descriptor.firstMiplevel = FirstMipLevel;
+      view_descriptor.miplevelCount = MipLevelCount;
+      view_descriptor.firstArraySlice = FirstArraySlice;
+      view_descriptor.arraySize = ArraySize;
+    };
 
     switch (ViewDesc.ViewDimension) {
     case D3D12_DSV_DIMENSION_TEXTURE1D: {
       view_descriptor.type = WMTTextureType2D; // FIXME: lowering to 2d array
-      view_descriptor.firstMiplevel = ViewDesc.Texture1D.MipSlice;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      SetViewRange(ViewDesc.Texture1D.MipSlice, 1, 0, 1);
       break;
     }
     case D3D12_DSV_DIMENSION_TEXTURE1DARRAY: {
       view_descriptor.type = WMTTextureType2DArray;
-      view_descriptor.firstMiplevel = ViewDesc.Texture1DArray.MipSlice;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = ViewDesc.Texture1DArray.FirstArraySlice;
-      view_descriptor.arraySize =
-          ViewDesc.Texture1DArray.ArraySize == ~0u ? texture->arrayLength() : ViewDesc.Texture1DArray.ArraySize;
-      RenderTargetDesc.RenderTargetArrayLength = view_descriptor.arraySize;
-      View = texture->createView(view_descriptor);
+      UINT ArraySize =
+          ViewDesc.Texture1DArray.ArraySize == ~0u && ViewDesc.Texture1DArray.FirstArraySlice <= desc_.DepthOrArraySize
+              ? desc_.DepthOrArraySize - ViewDesc.Texture1DArray.FirstArraySlice
+              : ViewDesc.Texture1DArray.ArraySize;
+      SetViewRange(ViewDesc.Texture1DArray.MipSlice, 1, ViewDesc.Texture1DArray.FirstArraySlice, ArraySize);
+      RenderTargetDesc.RenderTargetArrayLength = ArraySize;
       break;
     }
     case D3D12_DSV_DIMENSION_TEXTURE2D: {
       view_descriptor.type = WMTTextureType2D; // FIXME: lowering to 2d array
-      view_descriptor.firstMiplevel = ViewDesc.Texture2D.MipSlice;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      SetViewRange(ViewDesc.Texture2D.MipSlice, 1, 0, 1);
       break;
     }
     case D3D12_DSV_DIMENSION_TEXTURE2DARRAY: {
       view_descriptor.type = WMTTextureType2DArray;
-      view_descriptor.firstMiplevel = ViewDesc.Texture2DArray.MipSlice;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = ViewDesc.Texture2DArray.FirstArraySlice;
-      view_descriptor.arraySize =
-          ViewDesc.Texture2DArray.ArraySize == ~0u ? texture->arrayLength() : ViewDesc.Texture2DArray.ArraySize;
-      RenderTargetDesc.RenderTargetArrayLength = view_descriptor.arraySize;
-      View = texture->createView(view_descriptor);
+      UINT ArraySize =
+          ViewDesc.Texture2DArray.ArraySize == ~0u && ViewDesc.Texture2DArray.FirstArraySlice <= desc_.DepthOrArraySize
+              ? desc_.DepthOrArraySize - ViewDesc.Texture2DArray.FirstArraySlice
+              : ViewDesc.Texture2DArray.ArraySize;
+      SetViewRange(ViewDesc.Texture2DArray.MipSlice, 1, ViewDesc.Texture2DArray.FirstArraySlice, ArraySize);
+      RenderTargetDesc.RenderTargetArrayLength = ArraySize;
       break;
     }
     case D3D12_DSV_DIMENSION_TEXTURE2DMS: {
       view_descriptor.type = WMTTextureType2DMultisample; // FIXME: lowering to 2d array
-      view_descriptor.firstMiplevel = 0;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = 0;
-      view_descriptor.arraySize = 1;
-      View = texture->createView(view_descriptor);
+      SetViewRange(0, 1, 0, 1);
       break;
     }
     case D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY: {
       view_descriptor.type = WMTTextureType2DMultisampleArray;
-      view_descriptor.firstMiplevel = 0;
-      view_descriptor.miplevelCount = 1;
-      view_descriptor.firstArraySlice = ViewDesc.Texture2DMSArray.FirstArraySlice;
-      view_descriptor.arraySize =
-          ViewDesc.Texture2DMSArray.ArraySize == ~0u ? texture->arrayLength() : ViewDesc.Texture2DMSArray.ArraySize;
-      RenderTargetDesc.RenderTargetArrayLength = view_descriptor.arraySize;
-      View = texture->createView(view_descriptor);
+      UINT ArraySize = ViewDesc.Texture2DMSArray.ArraySize == ~0u &&
+                               ViewDesc.Texture2DMSArray.FirstArraySlice <= desc_.DepthOrArraySize
+                           ? desc_.DepthOrArraySize - ViewDesc.Texture2DMSArray.FirstArraySlice
+                           : ViewDesc.Texture2DMSArray.ArraySize;
+      SetViewRange(0, 1, ViewDesc.Texture2DMSArray.FirstArraySlice, ArraySize);
+      RenderTargetDesc.RenderTargetArrayLength = ArraySize;
       break;
     }
     default:
       return E_INVALIDARG;
     }
 
+    if (FAILED(ValidateTextureViewType(desc_, view_descriptor.type)) ||
+        FAILED(ValidateTextureView(desc_, ViewFirstMipLevel, ViewMipLevelCount, ViewFirstArraySlice, ViewArraySize)))
+      return E_INVALIDARG;
+    View = texture->createView(view_descriptor);
     RenderTargetDesc.Texture = texture.ptr();
     RenderTargetDesc.View = View;
     RenderTargetDesc.Width = std::max<uint32_t>(1u, texture->width() >> view_descriptor.firstMiplevel);

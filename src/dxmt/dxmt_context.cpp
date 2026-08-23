@@ -465,7 +465,9 @@ ArgumentEncodingContext::retainAllocation(Allocation* allocation) {
 }
 
 void
-ArgumentEncodingContext::clearColor(Rc<Texture> &&texture, uint64_t viewId, unsigned arrayLength, WMTClearColor color) {
+ArgumentEncodingContext::clearColor(
+    Rc<Texture> &&texture, uint64_t viewId, unsigned arrayLength, unsigned depthPlane, WMTClearColor color
+) {
   assert(!encoder_current);
   auto encoder_info = allocate<ClearEncoderData>();
   encoder_info->type = EncoderType::Clear;
@@ -476,6 +478,7 @@ ArgumentEncodingContext::clearColor(Rc<Texture> &&texture, uint64_t viewId, unsi
   encoder_info->color = color;
   SanitizeRTVClearColor(texture->pixelFormat(viewId), encoder_info->color);
   encoder_info->array_length = arrayLength;
+  encoder_info->depth_plane = depthPlane;
   encoder_info->width = texture->width();
   encoder_info->height = texture->height();
   encoder_current = encoder_info;
@@ -489,7 +492,8 @@ ArgumentEncodingContext::clearColor(Rc<Texture> &&texture, uint64_t viewId, unsi
 
 void
 ArgumentEncodingContext::clearDepthStencil(
-    Rc<Texture> &&texture, uint64_t viewId, unsigned arrayLength, unsigned flag, float depth, uint8_t stencil
+    Rc<Texture> &&texture, uint64_t viewId, unsigned arrayLength, unsigned depthPlane, unsigned flag, float depth,
+    uint8_t stencil
 ) {
   assert(!encoder_current);
   auto encoder_info = allocate<ClearEncoderData>();
@@ -500,6 +504,7 @@ ArgumentEncodingContext::clearDepthStencil(
   encoder_info->clear_dsv = flag & DepthStencilPlanarFlags(texture->pixelFormat());
   encoder_info->depth_stencil = {depth, stencil};
   encoder_info->array_length = arrayLength;
+  encoder_info->depth_plane = depthPlane;
   encoder_info->width = texture->width();
   encoder_info->height = texture->height();
   encoder_current = encoder_info;
@@ -1114,12 +1119,14 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
           if (data->clear_dsv & 1) {
             info.depth.clear_depth = data->depth_stencil.first;
             info.depth.texture = data->attachment.texture();
+            info.depth.depth_plane = data->depth_plane;
             info.depth.load_action = WMTLoadActionClear;
             info.depth.store_action = WMTStoreActionStore;
           }
           if (data->clear_dsv & 2) {
             info.stencil.clear_stencil = data->depth_stencil.second;
             info.stencil.texture = data->attachment.texture();
+            info.stencil.depth_plane = data->depth_plane;
             info.stencil.load_action = WMTLoadActionClear;
             info.stencil.store_action = WMTStoreActionStore;
           }
@@ -1128,6 +1135,7 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
         } else {
           info.colors[0].clear_color = data->color;
           info.colors[0].texture = data->attachment.texture();
+          info.colors[0].depth_plane = data->depth_plane;
           info.colors[0].load_action = WMTLoadActionClear;
           info.colors[0].store_action = WMTStoreActionStore;
         }
@@ -1534,7 +1542,7 @@ RenderEncoderColorAttachmentData *
 ArgumentEncodingContext::isClearColorSignatureMatched(ClearEncoderData *clear, RenderEncoderData *render) {
   for (unsigned i = 0; i < render->render_target_count; i++) {
     auto &attachment = render->colors[i];
-    if (attachment.attachment == clear->attachment) {
+    if (attachment.attachment == clear->attachment && attachment.depth_plane == clear->depth_plane) {
       return &attachment;
     }
   }
@@ -1545,7 +1553,7 @@ RenderEncoderDepthAttachmentData *
 ArgumentEncodingContext::isClearDepthSignatureMatched(ClearEncoderData *clear, RenderEncoderData *render) {
   if ((clear->clear_dsv & 1) == 0)
     return nullptr;
-  if (render->depth.attachment != clear->attachment)
+  if (render->depth.attachment != clear->attachment || render->depth.depth_plane != clear->depth_plane)
     return nullptr;
   return &render->depth;
 }
@@ -1554,7 +1562,7 @@ RenderEncoderStencilAttachmentData *
 ArgumentEncodingContext::isClearStencilSignatureMatched(ClearEncoderData *clear, RenderEncoderData *render) {
   if ((clear->clear_dsv & 2) == 0)
     return nullptr;
-  if (render->stencil.attachment != clear->attachment)
+  if (render->stencil.attachment != clear->attachment || render->stencil.depth_plane != clear->depth_plane)
     return nullptr;
   return &render->stencil;
 }

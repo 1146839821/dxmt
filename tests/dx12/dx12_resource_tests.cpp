@@ -47,6 +47,10 @@ int main() {
   ID3D12Resource *alias_before = nullptr;
   ID3D12Resource *alias_after = nullptr;
   ID3D12Resource *placed_texture = nullptr;
+  ID3D12Resource *array_render_target = nullptr;
+  ID3D12Resource *array_readback = nullptr;
+  ID3D12Resource *texture3d = nullptr;
+  ID3D12Resource *texture3d_readback = nullptr;
   ID3D12Resource *depth_texture = nullptr;
   ID3D12Resource *depth_copy = nullptr;
   ID3D12Resource *depth_readback = nullptr;
@@ -79,6 +83,14 @@ int main() {
       alias_before->Release();
     if (placed_texture)
       placed_texture->Release();
+    if (array_readback)
+      array_readback->Release();
+    if (array_render_target)
+      array_render_target->Release();
+    if (texture3d_readback)
+      texture3d_readback->Release();
+    if (texture3d)
+      texture3d->Release();
     if (depth_readback)
       depth_readback->Release();
     if (depth_copy)
@@ -282,15 +294,34 @@ int main() {
   D3D12_RESOURCE_DESC texture_desc = {};
   D3D12_RESOURCE_DESC depth_desc = {};
   D3D12_RESOURCE_DESC depth_readback_desc = {};
+  D3D12_RESOURCE_DESC array_render_target_desc = {};
+  D3D12_RESOURCE_DESC array_readback_desc = {};
+  D3D12_RESOURCE_DESC texture3d_desc = {};
+  D3D12_RESOURCE_DESC texture3d_readback_desc = {};
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT depth_footprints[2] = {};
   UINT depth_rows[2] = {};
   UINT64 depth_row_sizes[2] = {};
   UINT64 depth_total = 0;
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT array_footprint = {};
+  UINT array_rows = 0;
+  UINT64 array_row_size = 0;
+  UINT64 array_total = 0;
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT texture3d_footprint = {};
+  UINT texture3d_rows = 0;
+  UINT64 texture3d_row_size = 0;
+  UINT64 texture3d_total = 0;
   D3D12_CLEAR_VALUE depth_clear = {};
+  D3D12_CLEAR_VALUE array_clear = {};
+  D3D12_CLEAR_VALUE texture3d_clear = {};
   D3D12_DESCRIPTOR_HEAP_DESC dsv_heap_desc = {};
   D3D12_CPU_DESCRIPTOR_HANDLE dsv_handle = {};
   D3D12_CPU_DESCRIPTOR_HANDLE null_dsv_handle = {};
+  D3D12_CPU_DESCRIPTOR_HANDLE array_rtv_handle = {};
+  D3D12_CPU_DESCRIPTOR_HANDLE texture3d_rtv_handle = {};
+  D3D12_CPU_DESCRIPTOR_HANDLE texture3d_uav_handle = {};
   BYTE *mapped_depth = nullptr;
+  BYTE *mapped_array_readback = nullptr;
+  BYTE *mapped_texture3d_readback = nullptr;
   texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
   texture_desc.Width = 64;
   texture_desc.Height = 64;
@@ -454,6 +485,86 @@ int main() {
     return 1;
   }
 
+  array_render_target_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  array_render_target_desc.Width = 1;
+  array_render_target_desc.Height = 1;
+  array_render_target_desc.DepthOrArraySize = 2;
+  array_render_target_desc.MipLevels = 1;
+  array_render_target_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  array_render_target_desc.SampleDesc.Count = 1;
+  array_render_target_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  array_render_target_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  array_clear.Format = array_render_target_desc.Format;
+  array_clear.Color[3] = 1.0f;
+  if (!CheckHR("CreateArrayRenderTarget",
+               device->CreateCommittedResource(
+                   &depth_properties, D3D12_HEAP_FLAG_NONE,
+                   &array_render_target_desc,
+                   D3D12_RESOURCE_STATE_RENDER_TARGET, &array_clear,
+                   IID_PPV_ARGS(&array_render_target)))) {
+    cleanup();
+    return 1;
+  }
+  device->GetCopyableFootprints(&array_render_target_desc, 1, 1, 0,
+                                &array_footprint, &array_rows, &array_row_size,
+                                &array_total);
+  array_readback_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  array_readback_desc.Width = array_total;
+  array_readback_desc.Height = 1;
+  array_readback_desc.DepthOrArraySize = 1;
+  array_readback_desc.MipLevels = 1;
+  array_readback_desc.SampleDesc.Count = 1;
+  array_readback_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  if (!array_total ||
+      !CheckHR("CreateArrayReadback",
+               device->CreateCommittedResource(
+                   &readback_properties, D3D12_HEAP_FLAG_NONE,
+                   &array_readback_desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                   nullptr, IID_PPV_ARGS(&array_readback)))) {
+    cleanup();
+    return 1;
+  }
+
+  texture3d_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+  texture3d_desc.Width = 1;
+  texture3d_desc.Height = 1;
+  texture3d_desc.DepthOrArraySize = 2;
+  texture3d_desc.MipLevels = 1;
+  texture3d_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  texture3d_desc.SampleDesc.Count = 1;
+  texture3d_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  texture3d_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  texture3d_clear.Format = texture3d_desc.Format;
+  texture3d_clear.Color[3] = 1.0f;
+  if (!CheckHR("Create3DTexture",
+               device->CreateCommittedResource(
+                   &depth_properties, D3D12_HEAP_FLAG_NONE, &texture3d_desc,
+                   D3D12_RESOURCE_STATE_RENDER_TARGET, &texture3d_clear,
+                   IID_PPV_ARGS(&texture3d)))) {
+    cleanup();
+    return 1;
+  }
+  device->GetCopyableFootprints(&texture3d_desc, 0, 1, 0, &texture3d_footprint,
+                                &texture3d_rows, &texture3d_row_size,
+                                &texture3d_total);
+  texture3d_readback_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  texture3d_readback_desc.Width = texture3d_total;
+  texture3d_readback_desc.Height = 1;
+  texture3d_readback_desc.DepthOrArraySize = 1;
+  texture3d_readback_desc.MipLevels = 1;
+  texture3d_readback_desc.SampleDesc.Count = 1;
+  texture3d_readback_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  if (!texture3d_total ||
+      !CheckHR("Create3DReadback",
+               device->CreateCommittedResource(
+                   &readback_properties, D3D12_HEAP_FLAG_NONE,
+                   &texture3d_readback_desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                   nullptr, IID_PPV_ARGS(&texture3d_readback)))) {
+    cleanup();
+    return 1;
+  }
+
   dsv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
   dsv_heap_desc.NumDescriptors = 2;
   if (!CheckHR("CreateDSVHeap", device->CreateDescriptorHeap(&dsv_heap_desc, IID_PPV_ARGS(&dsv_heap)))) {
@@ -468,7 +579,7 @@ int main() {
 
   D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc = {};
   rtv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-  rtv_heap_desc.NumDescriptors = 1;
+  rtv_heap_desc.NumDescriptors = 3;
   D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = {};
   if (!CheckHR("CreateRTVHeap", device->CreateDescriptorHeap(
                                     &rtv_heap_desc, IID_PPV_ARGS(&rtv_heap)))) {
@@ -477,11 +588,39 @@ int main() {
   }
   rtv_handle = rtv_heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateRenderTargetView(nullptr, nullptr, rtv_handle);
+  array_rtv_handle = rtv_handle;
+  array_rtv_handle.ptr +=
+      device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+  D3D12_RENDER_TARGET_VIEW_DESC array_rtv = {};
+  array_rtv.Format = array_render_target_desc.Format;
+  array_rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+  array_rtv.Texture2DArray.MipSlice = 0;
+  array_rtv.Texture2DArray.FirstArraySlice = 1;
+  array_rtv.Texture2DArray.ArraySize = ~0u;
+  device->CreateRenderTargetView(array_render_target, &array_rtv,
+                                 array_rtv_handle);
+  array_rtv.Texture2DArray.PlaneSlice = 1;
+  device->CreateRenderTargetView(array_render_target, &array_rtv,
+                                 array_rtv_handle);
+  texture3d_rtv_handle = rtv_handle;
+  texture3d_rtv_handle.ptr += 2 * device->GetDescriptorHandleIncrementSize(
+                                      D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+  D3D12_RENDER_TARGET_VIEW_DESC texture3d_rtv = {};
+  texture3d_rtv.Format = texture3d_desc.Format;
+  texture3d_rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
+  texture3d_rtv.Texture3D.MipSlice = 0;
+  texture3d_rtv.Texture3D.FirstWSlice = 1;
+  texture3d_rtv.Texture3D.WSize = ~0u;
+  device->CreateRenderTargetView(texture3d, &texture3d_rtv,
+                                 texture3d_rtv_handle);
+  texture3d_rtv.Texture3D.FirstWSlice = 2;
+  device->CreateRenderTargetView(texture3d, &texture3d_rtv,
+                                 texture3d_rtv_handle);
   device->CreateDepthStencilView(nullptr, nullptr, null_dsv_handle);
 
   D3D12_DESCRIPTOR_HEAP_DESC shader_heap_desc = {};
   shader_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-  shader_heap_desc.NumDescriptors = 1;
+  shader_heap_desc.NumDescriptors = 3;
   D3D12_CPU_DESCRIPTOR_HANDLE shader_handle = {};
   if (!CheckHR("CreateShaderHeap",
                device->CreateDescriptorHeap(&shader_heap_desc,
@@ -496,6 +635,32 @@ int main() {
   null_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
   device->CreateShaderResourceView(nullptr, &null_srv, shader_handle);
   device->CreateShaderResourceView(nullptr, &null_srv, rtv_handle);
+  D3D12_CPU_DESCRIPTOR_HANDLE depth_srv_handle = shader_handle;
+  depth_srv_handle.ptr += device->GetDescriptorHandleIncrementSize(
+      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+  D3D12_SHADER_RESOURCE_VIEW_DESC depth_srv = {};
+  depth_srv.Format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+  depth_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+  depth_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  depth_srv.Texture2D.MipLevels = 1;
+  depth_srv.Texture2D.PlaneSlice = 0;
+  device->CreateShaderResourceView(depth_texture, &depth_srv, depth_srv_handle);
+  depth_srv.Format = DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
+  depth_srv.Texture2D.PlaneSlice = 1;
+  device->CreateShaderResourceView(depth_texture, &depth_srv, depth_srv_handle);
+  depth_srv.Texture2D.PlaneSlice = 2;
+  device->CreateShaderResourceView(depth_texture, &depth_srv, depth_srv_handle);
+  texture3d_uav_handle = shader_handle;
+  texture3d_uav_handle.ptr += 2 * device->GetDescriptorHandleIncrementSize(
+                                      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+  D3D12_UNORDERED_ACCESS_VIEW_DESC texture3d_uav = {};
+  texture3d_uav.Format = texture3d_desc.Format;
+  texture3d_uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+  texture3d_uav.Texture3D.MipSlice = 0;
+  texture3d_uav.Texture3D.FirstWSlice = 0;
+  texture3d_uav.Texture3D.WSize = 2;
+  device->CreateUnorderedAccessView(texture3d, nullptr, &texture3d_uav,
+                                    texture3d_uav_handle);
   D3D12_UNORDERED_ACCESS_VIEW_DESC null_uav = {};
   null_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
   null_uav.Format = DXGI_FORMAT_UNKNOWN;
@@ -622,13 +787,62 @@ int main() {
 
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-  if (!CheckHR("CreateCommandQueue", device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue))) ||
-      !CheckHR("CreateCommandAllocator", device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))) ||
-      !CheckHR("CreateCommandList", device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr,
-                                                                IID_PPV_ARGS(&list)))) {
+  if (!CheckHR("CreateCommandQueue",
+               device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue))) ||
+      !CheckHR("CreateCommandAllocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                              IID_PPV_ARGS(&allocator))) ||
+      !CheckHR("CreateCommandList",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                         allocator, nullptr,
+                                         IID_PPV_ARGS(&list)))) {
     cleanup();
     return 1;
   }
+
+  const FLOAT texture3d_clear_color[] = {1.0f, 0.0f, 0.0f, 1.0f};
+  list->OMSetRenderTargets(1, &texture3d_rtv_handle, FALSE, nullptr);
+  list->ClearRenderTargetView(texture3d_rtv_handle, texture3d_clear_color, 0,
+                              nullptr);
+  D3D12_RESOURCE_BARRIER texture3d_barrier = {};
+  texture3d_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  texture3d_barrier.Transition.pResource = texture3d;
+  texture3d_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+  texture3d_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  texture3d_barrier.Transition.Subresource =
+      D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &texture3d_barrier);
+  D3D12_TEXTURE_COPY_LOCATION texture3d_copy_dst = {};
+  texture3d_copy_dst.pResource = texture3d_readback;
+  texture3d_copy_dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  texture3d_copy_dst.PlacedFootprint = texture3d_footprint;
+  D3D12_TEXTURE_COPY_LOCATION texture3d_copy_src = {};
+  texture3d_copy_src.pResource = texture3d;
+  texture3d_copy_src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  texture3d_copy_src.SubresourceIndex = 0;
+  list->CopyTextureRegion(&texture3d_copy_dst, 0, 0, 0, &texture3d_copy_src,
+                          nullptr);
+
+  const FLOAT array_clear_color[] = {0.0f, 1.0f, 0.0f, 1.0f};
+  list->OMSetRenderTargets(1, &array_rtv_handle, FALSE, nullptr);
+  list->ClearRenderTargetView(array_rtv_handle, array_clear_color, 0, nullptr);
+  D3D12_RESOURCE_BARRIER array_barrier = {};
+  array_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  array_barrier.Transition.pResource = array_render_target;
+  array_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+  array_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  array_barrier.Transition.Subresource =
+      D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &array_barrier);
+  D3D12_TEXTURE_COPY_LOCATION array_copy_dst = {};
+  array_copy_dst.pResource = array_readback;
+  array_copy_dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  array_copy_dst.PlacedFootprint = array_footprint;
+  D3D12_TEXTURE_COPY_LOCATION array_copy_src = {};
+  array_copy_src.pResource = array_render_target;
+  array_copy_src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  array_copy_src.SubresourceIndex = 1;
+  list->CopyTextureRegion(&array_copy_dst, 0, 0, 0, &array_copy_src, nullptr);
 
   list->OMSetRenderTargets(0, nullptr, FALSE, &null_dsv_handle);
   list->ClearDepthStencilView(null_dsv_handle,
@@ -740,6 +954,45 @@ int main() {
   if (depth_bits != 0x3e800000u || stencil_value != 0x5a) {
     std::cerr << "depth/stencil copy mismatch: depth=0x" << std::hex << depth_bits
               << " stencil=0x" << static_cast<unsigned>(stencil_value) << std::dec << "\n";
+    cleanup();
+    return 1;
+  }
+
+  if (!CheckHR(
+          "MapArrayReadback",
+          array_readback->Map(
+              0, nullptr, reinterpret_cast<void **>(&mapped_array_readback)))) {
+    cleanup();
+    return 1;
+  }
+  UINT32 array_pixel = 0;
+  std::memcpy(&array_pixel, mapped_array_readback + array_footprint.Offset,
+              sizeof(array_pixel));
+  array_readback->Unmap(0, nullptr);
+  if ((array_pixel & 0x00ffffffu) != 0x0000ff00u) {
+    std::cerr << "array RTV readback mismatch: 0x" << std::hex << array_pixel
+              << std::dec << "\n";
+    cleanup();
+    return 1;
+  }
+
+  if (!CheckHR("Map3DReadback",
+               texture3d_readback->Map(
+                   0, nullptr,
+                   reinterpret_cast<void **>(&mapped_texture3d_readback)))) {
+    cleanup();
+    return 1;
+  }
+  UINT32 texture3d_pixel = 0;
+  std::memcpy(&texture3d_pixel,
+              mapped_texture3d_readback + texture3d_footprint.Offset +
+                  texture3d_footprint.Footprint.RowPitch *
+                      texture3d_footprint.Footprint.Height,
+              sizeof(texture3d_pixel));
+  texture3d_readback->Unmap(0, nullptr);
+  if ((texture3d_pixel & 0x00ffffffu) != 0x000000ffu) {
+    std::cerr << "3D RTV readback mismatch: 0x" << std::hex << texture3d_pixel
+              << std::dec << "\n";
     cleanup();
     return 1;
   }

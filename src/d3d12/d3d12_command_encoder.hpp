@@ -49,6 +49,7 @@ struct ClearEncoderData : EncoderData {
   unsigned array_length;
   unsigned width;
   unsigned height;
+  unsigned depth_plane = 0;
 
   ClearEncoderData() {}
 };

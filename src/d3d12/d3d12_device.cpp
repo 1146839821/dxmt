@@ -592,7 +592,9 @@ public:
       return;
     }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
-    d3d12res->CreateShaderResourceView(pDesc, Descriptor);
+    HRESULT hr = d3d12res->CreateShaderResourceView(pDesc, Descriptor);
+    if (FAILED(hr))
+      WARN("CreateShaderResourceView failed: ", hr);
   };
 
   void STDMETHODCALLTYPE
@@ -607,7 +609,9 @@ public:
       return;
     }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
-    d3d12res->CreateUnorderedAccessView(pCounter, pDesc, Descriptor);
+    HRESULT hr = d3d12res->CreateUnorderedAccessView(pCounter, pDesc, Descriptor);
+    if (FAILED(hr))
+      WARN("CreateUnorderedAccessView failed: ", hr);
   };
 
   void STDMETHODCALLTYPE
@@ -622,7 +626,9 @@ public:
       return;
     }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
-    d3d12res->CreateRenderTargetView(pDesc, Descriptor);
+    HRESULT hr = d3d12res->CreateRenderTargetView(pDesc, Descriptor);
+    if (FAILED(hr))
+      WARN("CreateRenderTargetView failed: ", hr);
   };
 
   void STDMETHODCALLTYPE
@@ -637,7 +643,9 @@ public:
       return;
     }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
-    d3d12res->CreateDepthStencilView(pDesc, Descriptor);
+    HRESULT hr = d3d12res->CreateDepthStencilView(pDesc, Descriptor);
+    if (FAILED(hr))
+      WARN("CreateDepthStencilView failed: ", hr);
   };
 
   void STDMETHODCALLTYPE

@@ -128,12 +128,14 @@ public:
               if (data->clear_dsv & 1) {
                 info.depth.clear_depth = data->depth_stencil.first;
                 info.depth.texture = data->attachment.texture();
+                info.depth.depth_plane = data->depth_plane;
                 info.depth.load_action = WMTLoadActionClear;
                 info.depth.store_action = WMTStoreActionStore;
               }
               if (data->clear_dsv & 2) {
                 info.stencil.clear_stencil = data->depth_stencil.second;
                 info.stencil.texture = data->attachment.texture();
+                info.stencil.depth_plane = data->depth_plane;
                 info.stencil.load_action = WMTLoadActionClear;
                 info.stencil.store_action = WMTStoreActionStore;
               }
@@ -142,6 +144,7 @@ public:
             } else {
               info.colors[0].clear_color = data->color;
               info.colors[0].texture = data->attachment.texture();
+              info.colors[0].depth_plane = data->depth_plane;
               info.colors[0].load_action = WMTLoadActionClear;
               info.colors[0].store_action = WMTStoreActionStore;
             }
