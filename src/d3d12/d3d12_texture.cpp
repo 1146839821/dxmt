@@ -20,8 +20,13 @@
 #include "d3d12_pageable.hpp"
 #include "dxmt_format.hpp"
 #include "com/com_pointer.hpp"
+#include "log/log.hpp"
+#include <atomic>
 
 namespace dxmt {
+
+static std::atomic<unsigned> texture_debug_count = 0;
+static std::atomic<unsigned> texture_srv_debug_count = 0;
 
 HRESULT
 PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_RESOURCE_DESC &Desc) {
@@ -247,6 +252,15 @@ public:
       return E_OUTOFMEMORY;
     texture->rename(std::move(allocation));
     device_->RegisterResidency(texture->current()->texture());
+
+    const auto trace_id = texture_debug_count.fetch_add(1, std::memory_order_relaxed);
+    if (trace_id < 128)
+      DEBUG(
+          "[DEBUG-TEX] create id=", trace_id, " dxgi=", desc_.Format, " metal=", texture_info.pixel_format,
+          " size=", texture_info.width, "x", texture_info.height, "x", texture_info.depth,
+          " array=", texture_info.array_length, " mips=", texture_info.mipmap_level_count,
+          " gpu=", texture->current()->gpuResourceID
+      );
 
     return S_OK;
   };
@@ -489,6 +503,17 @@ public:
       return E_INVALIDARG;
     View = texture->createView(view_descriptor);
     ResourceMinLODClamp = FLOAT((INT)ResourceMinLODClamp - view_descriptor.firstMiplevel);
+
+    const auto trace_id = texture_srv_debug_count.fetch_add(1, std::memory_order_relaxed);
+    if (trace_id < 128) {
+      auto &texture_view = texture->view(View);
+      DEBUG(
+          "[DEBUG-TEX] srv id=", trace_id, " dxgi_resource=", desc_.Format, " dxgi_view=", ViewDesc.Format,
+          " metal_view=", metal_format.PixelFormat, " dimension=", ViewDesc.ViewDimension,
+          " mip=", ViewFirstMipLevel, "+", ViewMipLevelCount, " array=", ViewFirstArraySlice, "+", ViewArraySize,
+          " gpu=", texture_view.gpuResourceID, " key=", uint64_t(View)
+      );
+    }
 
     return Heap->AddShaderResourceView(Index, texture.ptr(), View, ResourceMinLODClamp);
   };

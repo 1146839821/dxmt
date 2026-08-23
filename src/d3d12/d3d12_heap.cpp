@@ -71,6 +71,9 @@ public:
       return S_OK;
     }
 
+    if (riid == __uuidof(ID3D12Resource))
+      return E_NOINTERFACE;
+
     if (logQueryInterfaceError(__uuidof(ID3D12Resource), riid)) {
       WARN("D3D12Heap: Unknown interface query ", str::format(riid));
     }

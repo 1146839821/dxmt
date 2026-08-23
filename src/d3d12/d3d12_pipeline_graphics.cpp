@@ -566,9 +566,11 @@ public:
 
     // PSO
     {
+      info.raster_sample_count = pDesc->SampleDesc.Count;
+      info.support_indirect_command_buffers = true;
+
       info.vertex_function = vs_func.handle;
       info.fragment_function = ps_func.handle;
-
       switch (pDesc->PrimitiveTopologyType) {
       case D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT:
         info.input_primitive_topology = WMTPrimitiveTopologyClassPoint;
@@ -583,10 +585,6 @@ public:
       default:
         break;
       }
-
-      info.raster_sample_count = pDesc->SampleDesc.Count;
-      info.support_indirect_command_buffers = true;
-
       pso = metal.newRenderPipelineState(info, err);
 
       if (!pso) {
@@ -638,6 +636,32 @@ public:
 
       if (!dsso) {
         ERR("Failed to create DSSO");
+        return E_FAIL;
+      }
+
+      auto stencil_disabled_info = info;
+      stencil_disabled_info.front_stencil.enabled = false;
+      stencil_disabled_info.back_stencil.enabled = false;
+      dsso_stencil_disabled = metal.newDepthStencilState(stencil_disabled_info);
+      if (!dsso_stencil_disabled) {
+        ERR("Failed to create DSSO with stencil disabled");
+        return E_FAIL;
+      }
+
+      auto depth_disabled_info = info;
+      depth_disabled_info.depth_compare_function = WMTCompareFunctionAlways;
+      depth_disabled_info.depth_write_enabled = false;
+      dsso_depth_disabled = metal.newDepthStencilState(depth_disabled_info);
+      if (!dsso_depth_disabled) {
+        ERR("Failed to create DSSO with depth disabled");
+        return E_FAIL;
+      }
+
+      depth_disabled_info.front_stencil.enabled = false;
+      depth_disabled_info.back_stencil.enabled = false;
+      dsso_depth_stencil_disabled = metal.newDepthStencilState(depth_disabled_info);
+      if (!dsso_depth_stencil_disabled) {
+        ERR("Failed to create DSSO with depth and stencil disabled");
         return E_FAIL;
       }
     }

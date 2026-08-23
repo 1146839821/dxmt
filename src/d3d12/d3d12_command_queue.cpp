@@ -72,6 +72,11 @@ public:
 
     *ppvObject = nullptr;
 
+    if (riid == DXMT_STREAMLINE_RETRIEVE_BASE_INTERFACE) {
+      *ppvObject = ref(static_cast<ID3D12CommandQueue *>(this));
+      return S_OK;
+    }
+
     if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
         riid == __uuidof(ID3D12Pageable) || riid == __uuidof(ID3D12CommandQueue)) {
       *ppvObject = ref(this);
@@ -82,6 +87,9 @@ public:
       *ppvObject = ref_and_cast<IMTLSwapChainFactory>(this);
       return S_OK;
     }
+
+    if (riid == DXMT_STREAMLINE_D3D12_COMMAND_QUEUE_GUID || riid == DXMT_ID3D11_DEVICE_GUID)
+      return E_NOINTERFACE;
 
     if (logQueryInterfaceError(__uuidof(ID3D12CommandQueue), riid)) {
       WARN("D3D12CommandQueue: Unknown interface query ", str::format(riid));
@@ -279,6 +287,7 @@ public:
         }
         current = current->next;
       }
+      pCommandList->CommitResourceStates();
     }
     cmdbuf.commit();
     // temporary workaround
@@ -386,6 +395,7 @@ public:
 
   HRESULT
   Present(Presenter *presenter, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable) {
+    static uint32_t trace_present_count = 0;
     auto pool = WMT::MakeAutoreleasePool();
     auto cmdbuf = queue_.commandBuffer();
 
@@ -398,6 +408,12 @@ public:
         [&](auto encoder) { encoder.waitForFence(fence_, WMTRenderStageFragment); },
         [&](auto encoder) { encoder.updateFence(fence_, WMTRenderStageFragment); }
     );
+
+    if (trace_present_count++ < 32) {
+      auto drawable_texture = drawable.texture();
+      DEBUG("D3D12 queue Present: backbuffer=", view.texture.handle, " drawable=", drawable.handle,
+            " drawable_texture=", drawable_texture.handle);
+    }
 
     cmdbuf.presentDrawable(drawable);
     cmdbuf.commit();

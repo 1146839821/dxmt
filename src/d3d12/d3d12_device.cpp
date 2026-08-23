@@ -18,6 +18,7 @@
 
 #include "d3d12_device.hpp"
 #include "d3d12_device_child.hpp"
+#include "d3d12sdklayers.h"
 #include "Metal.hpp"
 #include "com/com_pointer.hpp"
 #include "com/com_object.hpp"
@@ -30,6 +31,117 @@
 #include <vector>
 
 namespace dxmt {
+
+class MTLD3D12InfoQueue final : public ComObject<ID3D12InfoQueue> {
+public:
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
+    if (!ppvObject)
+      return E_POINTER;
+    *ppvObject = nullptr;
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12InfoQueue)) {
+      *ppvObject = ref(static_cast<ID3D12InfoQueue *>(this));
+      return S_OK;
+    }
+    return E_NOINTERFACE;
+  }
+
+  HRESULT STDMETHODCALLTYPE SetMessageCountLimit(UINT64 limit) override {
+    message_count_limit_ = limit;
+    return S_OK;
+  }
+
+  void STDMETHODCALLTYPE ClearStoredMessages() override {}
+
+  HRESULT STDMETHODCALLTYPE GetMessage(UINT64, D3D12_MESSAGE *, SIZE_T *length) override {
+    if (!length)
+      return E_INVALIDARG;
+    *length = 0;
+    return DXGI_ERROR_NOT_FOUND;
+  }
+
+  UINT64 STDMETHODCALLTYPE GetNumMessagesAllowedByStorageFilter() override { return 0; }
+  UINT64 STDMETHODCALLTYPE GetNumMessagesDeniedByStorageFilter() override { return 0; }
+  UINT64 STDMETHODCALLTYPE GetNumStoredMessages() override { return 0; }
+  UINT64 STDMETHODCALLTYPE GetNumStoredMessagesAllowedByRetrievalFilter() override { return 0; }
+  UINT64 STDMETHODCALLTYPE GetNumMessagesDiscardedByMessageCountLimit() override { return 0; }
+  UINT64 STDMETHODCALLTYPE GetMessageCountLimit() override { return message_count_limit_; }
+
+  HRESULT STDMETHODCALLTYPE AddStorageFilterEntries(D3D12_INFO_QUEUE_FILTER *) override { return S_OK; }
+
+  HRESULT STDMETHODCALLTYPE GetStorageFilter(D3D12_INFO_QUEUE_FILTER *, SIZE_T *length) override {
+    if (!length)
+      return E_INVALIDARG;
+    *length = 0;
+    return DXGI_ERROR_NOT_FOUND;
+  }
+
+  void STDMETHODCALLTYPE ClearStorageFilter() override {}
+  HRESULT STDMETHODCALLTYPE PushEmptyStorageFilter() override {
+    storage_filter_stack_size_++;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE PushCopyOfStorageFilter() override {
+    storage_filter_stack_size_++;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE PushStorageFilter(D3D12_INFO_QUEUE_FILTER *) override {
+    storage_filter_stack_size_++;
+    return S_OK;
+  }
+  void STDMETHODCALLTYPE PopStorageFilter() override {
+    if (storage_filter_stack_size_)
+      storage_filter_stack_size_--;
+  }
+  UINT STDMETHODCALLTYPE GetStorageFilterStackSize() override { return storage_filter_stack_size_; }
+
+  HRESULT STDMETHODCALLTYPE AddRetrievalFilterEntries(D3D12_INFO_QUEUE_FILTER *) override { return S_OK; }
+
+  HRESULT STDMETHODCALLTYPE GetRetrievalFilter(D3D12_INFO_QUEUE_FILTER *, SIZE_T *length) override {
+    if (!length)
+      return E_INVALIDARG;
+    *length = 0;
+    return DXGI_ERROR_NOT_FOUND;
+  }
+
+  void STDMETHODCALLTYPE ClearRetrievalFilter() override {}
+  HRESULT STDMETHODCALLTYPE PushEmptyRetrievalFilter() override {
+    retrieval_filter_stack_size_++;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE PushCopyOfRetrievalFilter() override {
+    retrieval_filter_stack_size_++;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE PushRetrievalFilter(D3D12_INFO_QUEUE_FILTER *) override {
+    retrieval_filter_stack_size_++;
+    return S_OK;
+  }
+  void STDMETHODCALLTYPE PopRetrievalFilter() override {
+    if (retrieval_filter_stack_size_)
+      retrieval_filter_stack_size_--;
+  }
+  UINT STDMETHODCALLTYPE GetRetrievalFilterStackSize() override { return retrieval_filter_stack_size_; }
+
+  HRESULT STDMETHODCALLTYPE AddMessage(
+      D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY, D3D12_MESSAGE_ID, const char *) override {
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE AddApplicationMessage(D3D12_MESSAGE_SEVERITY, const char *) override { return S_OK; }
+  HRESULT STDMETHODCALLTYPE SetBreakOnCategory(D3D12_MESSAGE_CATEGORY, WINBOOL) override { return S_OK; }
+  HRESULT STDMETHODCALLTYPE SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY, WINBOOL) override { return S_OK; }
+  HRESULT STDMETHODCALLTYPE SetBreakOnID(D3D12_MESSAGE_ID, WINBOOL) override { return S_OK; }
+  WINBOOL STDMETHODCALLTYPE GetBreakOnCategory(D3D12_MESSAGE_CATEGORY) override { return FALSE; }
+  WINBOOL STDMETHODCALLTYPE GetBreakOnSeverity(D3D12_MESSAGE_SEVERITY) override { return FALSE; }
+  WINBOOL STDMETHODCALLTYPE GetBreakOnID(D3D12_MESSAGE_ID) override { return FALSE; }
+  void STDMETHODCALLTYPE SetMuteDebugOutput(WINBOOL mute) override { mute_debug_output_ = mute; }
+  WINBOOL STDMETHODCALLTYPE GetMuteDebugOutput() override { return mute_debug_output_; }
+
+private:
+  UINT64 message_count_limit_ = ~UINT64(0);
+  UINT storage_filter_stack_size_ = 0;
+  UINT retrieval_filter_stack_size_ = 0;
+  WINBOOL mute_debug_output_ = FALSE;
+};
 
 class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
 
@@ -89,15 +201,32 @@ public:
 
     *ppvObject = nullptr;
 
+    if (riid == DXMT_STREAMLINE_RETRIEVE_BASE_INTERFACE) {
+      *ppvObject = ref(static_cast<ID3D12Device *>(this));
+      return S_OK;
+    }
+
     if (riid == __uuidof(ID3D12Device1)) {
       auto *device = static_cast<ID3D12Device1 *>(this);
       *ppvObject = ref(device);
       return S_OK;
     }
 
+    if (riid == __uuidof(ID3D12InfoQueue)) {
+      *ppvObject = ref(new MTLD3D12InfoQueue());
+      return S_OK;
+    }
+
     if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12Device)) {
       *ppvObject = ref(static_cast<ID3D12Device *>(this));
       return S_OK;
+    }
+
+    // Streamline probes for optional interfaces that DXMT does not expose.
+    if (riid == DXMT_STREAMLINE_D3D12_DEVICE_GUID || riid == DXMT_ID3D12_DEVICE4_GUID ||
+        riid == DXMT_ID3D12_DEVICE8_GUID || riid == DXMT_ID3D12_DEVICE10_GUID ||
+        riid == DXMT_ID3D11_DEVICE_GUID) {
+      return E_NOINTERFACE;
     }
 
     if (logQueryInterfaceError(__uuidof(ID3D12Device1), riid)) {

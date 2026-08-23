@@ -19,6 +19,8 @@
 #include "d3d12_command_allocator.hpp"
 #include "com/com_pointer.hpp"
 #include "dxmt_format.hpp"
+#include <atomic>
+#include <unordered_set>
 
 namespace dxmt {
 
@@ -116,6 +118,129 @@ struct D3D12TextureSubresource {
   UINT plane;
 };
 
+struct D3D12CopyFormat {
+  UINT block_width = 1;
+  UINT block_height = 1;
+  UINT bytes_per_block = 0;
+};
+
+inline bool
+get_copy_format(WMT::Device device, DXGI_FORMAT format, D3D12CopyFormat &copy_format) {
+  MTL_DXGI_FORMAT_DESC format_desc = {};
+  if (FAILED(MTLQueryDXGIFormat(device, format, format_desc)))
+    return false;
+
+  if (format_desc.Flag & MTL_DXGI_FORMAT_BC) {
+    copy_format.block_width = 4;
+    copy_format.block_height = 4;
+    copy_format.bytes_per_block = format_desc.BlockSize;
+  } else {
+    copy_format.block_width = 1;
+    copy_format.block_height = 1;
+    copy_format.bytes_per_block = format_desc.BytesPerTexel;
+  }
+  return copy_format.bytes_per_block != 0;
+}
+
+inline UINT64
+copy_row_count(UINT height, const D3D12CopyFormat &copy_format) {
+  return (UINT64(height) + copy_format.block_height - 1) / copy_format.block_height;
+}
+
+inline UINT64
+copy_row_size(UINT width, const D3D12CopyFormat &copy_format) {
+  return ((UINT64(width) + copy_format.block_width - 1) / copy_format.block_width) * copy_format.bytes_per_block;
+}
+
+inline bool
+validate_copy_box(const D3D12_BOX &box, const D3D12_BOX &bounds, const D3D12CopyFormat &copy_format) {
+  if (box.left >= box.right || box.top >= box.bottom || box.front >= box.back || box.right > bounds.right ||
+      box.bottom > bounds.bottom || box.back > bounds.back)
+    return false;
+
+  if (copy_format.block_width > 1) {
+    if (box.left % copy_format.block_width || box.top % copy_format.block_height ||
+        (box.right % copy_format.block_width && box.right != bounds.right) ||
+        (box.bottom % copy_format.block_height && box.bottom != bounds.bottom))
+      return false;
+  }
+  return true;
+}
+
+inline bool
+validate_copy_destination(
+    UINT x, UINT y, UINT z, UINT width, UINT height, UINT depth, const D3D12_BOX &bounds,
+    const D3D12CopyFormat &copy_format
+) {
+  if (x > bounds.right || width > bounds.right - x || y > bounds.bottom || height > bounds.bottom - y ||
+      z > bounds.back || depth > bounds.back - z)
+    return false;
+
+  if (copy_format.block_width > 1 &&
+      (x % copy_format.block_width || y % copy_format.block_height ||
+       ((x + width) % copy_format.block_width && x + width != bounds.right) ||
+       ((y + height) % copy_format.block_height && y + height != bounds.bottom)))
+    return false;
+  return true;
+}
+
+inline D3D12_BOX
+texture_subresource_bounds(const D3D12_RESOURCE_DESC &desc, UINT mip) {
+  D3D12_BOX bounds = {};
+  bounds.right = std::max<UINT>(1, static_cast<UINT>(desc.Width >> mip));
+  bounds.bottom = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D
+                      ? 1
+                      : std::max<UINT>(1, desc.Height >> mip);
+  bounds.back = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                    ? std::max<UINT>(1, static_cast<UINT>(desc.DepthOrArraySize >> mip))
+                    : 1;
+  return bounds;
+}
+
+inline bool
+validate_copy_footprint(
+    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &footprint, const D3D12CopyFormat &copy_format, UINT64 &image_pitch
+) {
+  const auto &description = footprint.Footprint;
+  if (!description.Width || !description.Height || !description.Depth || !description.RowPitch ||
+      footprint.Offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT ||
+      description.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT)
+    return false;
+
+  const UINT64 row_size = copy_row_size(description.Width, copy_format);
+  const UINT64 rows = copy_row_count(description.Height, copy_format);
+  if (row_size > description.RowPitch || description.RowPitch > UINT_MAX ||
+      rows > UINT64_MAX / description.RowPitch)
+    return false;
+
+  image_pitch = rows * description.RowPitch;
+  return true;
+}
+
+inline bool
+validate_copy_buffer_region(
+    UINT64 buffer_size, UINT64 offset, UINT width, UINT height, UINT depth, UINT64 image_pitch, UINT row_pitch,
+    const D3D12CopyFormat &copy_format
+) {
+  const UINT64 row_size = copy_row_size(width, copy_format);
+  const UINT64 rows = copy_row_count(height, copy_format);
+  if (!width || !height || !depth || row_size > row_pitch || rows == 0 ||
+      depth - 1 > UINT64_MAX / image_pitch || (depth - 1) * image_pitch > UINT64_MAX - offset)
+    return false;
+
+  UINT64 end = offset + (depth - 1) * image_pitch;
+  if (rows - 1 > UINT64_MAX / row_pitch || (rows - 1) * row_pitch > UINT64_MAX - end)
+    return false;
+  end += (rows - 1) * row_pitch;
+  if (row_size > UINT64_MAX - end)
+    return false;
+  end += row_size;
+  return offset <= buffer_size && end <= buffer_size;
+}
+
+std::atomic<unsigned> barrier_mismatch_log_count = 0;
+std::atomic<unsigned> texture_copy_debug_count = 0;
+
 inline bool
 decode_texture_subresource(Texture *texture, UINT subresource, D3D12TextureSubresource &decoded) {
   if (!texture)
@@ -201,12 +326,28 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   Com<MTLD3D12GraphicsPipelineState, false> pso_graphics_;
   Com<MTLD3D12RootSignature, false> rootsig_graphics_;
   uint64_t rootarg_graphics_staging_[64];
+  struct MSCResourceUseTable {
+    UINT parameter_index;
+    std::vector<D3D12_DESCRIPTOR_RANGE1> ranges;
+  };
+  MTLD3D12RootSignature *msc_resource_use_root_signature_ = nullptr;
+  std::vector<MSCResourceUseTable> msc_resource_use_tables_;
+  std::unordered_set<obj_handle_t> msc_resources_used_;
 
   Com<MTLD3D12ComputePipelineState, false> pso_compute_;
   Com<MTLD3D12RootSignature, false> rootsig_compute_;
   Com<MTLD3D12DescriptorHeap, true> descriptor_heap_;
   Com<MTLD3D12SamplerDescriptorHeap, true> sampler_heap_;
   uint64_t rootarg_compute_staging_[64];
+
+  struct ResourceStateTransition {
+    MTLD3D12Resource *resource;
+    UINT subresource;
+    D3D12_RESOURCE_STATES before;
+    D3D12_RESOURCE_STATES after;
+    bool split_end;
+  };
+  std::vector<ResourceStateTransition> resource_state_transitions_;
 
   FLOAT blend_factor_[4];
   UINT8 stencil_ref_;
@@ -231,6 +372,9 @@ public:
 
     pso_graphics_ = nullptr;
     pso_compute_ = nullptr;
+    msc_resource_use_root_signature_ = nullptr;
+    msc_resource_use_tables_.clear();
+    msc_resources_used_.clear();
     if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState)) {
       if (!pso->IsComputePipelineState)
         pso_graphics_ = static_cast<MTLD3D12GraphicsPipelineState *>(pInitialPipelineState);
@@ -276,6 +420,7 @@ public:
     pending_barrier_scope_ = (WMTBarrierScope)0;
     pending_barrier_stages_after_ = (WMTRenderStages)0;
     pending_barrier_stages_before_ = (WMTRenderStages)0;
+    resource_state_transitions_.clear();
 
     encoder_count = std::numeric_limits<size_t>::max();
     return allocator_->StartRecord(&entry);
@@ -289,11 +434,19 @@ public:
 
     *ppvObject = nullptr;
 
+    if (riid == DXMT_STREAMLINE_RETRIEVE_BASE_INTERFACE) {
+      *ppvObject = ref(static_cast<ID3D12GraphicsCommandList *>(this));
+      return S_OK;
+    }
+
     if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
         riid == __uuidof(ID3D12CommandList) || riid == __uuidof(ID3D12GraphicsCommandList)) {
       *ppvObject = ref(this);
       return S_OK;
     }
+
+    if (riid == DXMT_STREAMLINE_D3D12_GRAPHICS_COMMAND_LIST_GUID)
+      return E_NOINTERFACE;
 
     if (logQueryInterfaceError(__uuidof(ID3D12GraphicsCommandList), riid)) {
       WARN("D3D12GraphicsCommandList: Unknown interface query ", str::format(riid));
@@ -323,6 +476,49 @@ public:
       return E_FAIL;
     return Initialize(pAllocator, pInitialState);
   };
+
+  void CommitResourceStates() final {
+    for (const auto &transition : resource_state_transitions_) {
+      auto *resource = transition.resource;
+      const auto state_matches = [&, resource](D3D12_RESOURCE_STATES current) {
+        return current == transition.before ||
+               (transition.split_end && current == transition.after) ||
+               current == D3D12_RESOURCE_STATE_COMMON ||
+               transition.before == D3D12_RESOURCE_STATE_COMMON;
+      };
+
+      if (transition.subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) {
+        bool state_mismatch = false;
+        UINT mismatch_subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        D3D12_RESOURCE_STATES mismatch_current = D3D12_RESOURCE_STATE_COMMON;
+        for (UINT subresource = 0; subresource < resource->subresource_states.size(); subresource++) {
+          auto current = resource->subresource_states[subresource];
+          if (!state_matches(current)) {
+            state_mismatch = true;
+            if (mismatch_subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) {
+              mismatch_subresource = subresource;
+              mismatch_current = current;
+            }
+          }
+        }
+        if (state_mismatch && barrier_mismatch_log_count.fetch_add(1, std::memory_order_relaxed) < 16)
+          WARN(
+              "D3D12 ResourceBarrier state mismatch: subresource=", mismatch_subresource, " current=0x", std::hex,
+              mismatch_current, " before=0x", transition.before, " after=0x", transition.after, std::dec
+          );
+        resource->SetAllSubresourceStates(transition.after);
+      } else if (resource->HasSubresource(transition.subresource)) {
+        auto current = resource->GetSubresourceState(transition.subresource);
+        if (!state_matches(current) && barrier_mismatch_log_count.fetch_add(1, std::memory_order_relaxed) < 16)
+          WARN(
+              "D3D12 ResourceBarrier state mismatch: subresource=", transition.subresource, " current=0x", std::hex,
+              current, " before=0x", transition.before, " after=0x", transition.after, std::dec
+          );
+        resource->SetSubresourceState(transition.subresource, transition.after);
+      }
+    }
+    resource_state_transitions_.clear();
+  }
 
   void STDMETHODCALLTYPE
   ClearState(ID3D12PipelineState *pPipelineState) {
@@ -503,6 +699,10 @@ public:
     auto stride = align(sizeof(VERTEX_BUFFER_ENTRY) * max_slot, 16);
 
     auto [mapped, offset] = allocator_->AllocateGPUHeap(stride * Count, 16);
+    if (!mapped) {
+      recording_failed_ = true;
+      return {0, 0};
+    }
 
     for (unsigned i = 0; i < Count; i++) {
       VERTEX_BUFFER_ENTRY *entries = (VERTEX_BUFFER_ENTRY *)(reinterpret_cast<char *>(mapped) + i * stride);
@@ -552,13 +752,19 @@ public:
   DrawCallStatus
   PreDraw(bool SkipResourceBinding = false) {
     const bool use_msc = pso_graphics_ && pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
-    if (use_msc && rootsig_graphics_ && FAILED(rootsig_graphics_->InitializeMSCLayout()))
-      return DrawCallStatus::Invalid;
+    if (use_msc && rootsig_graphics_) {
+      auto hr = rootsig_graphics_->InitializeMSCLayout();
+      if (FAILED(hr)) {
+        DEBUG("[DEBUG-DRAW] PreDraw rejected: MSC layout hr=", hr);
+        return DrawCallStatus::Invalid;
+      }
+    }
 
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render) {
 
       allocator_->InvalidateCurrentPass();
       auto render = allocator_->AllocatePass<RenderEncoderData>();
+      msc_resources_used_.clear();
       render->type = EncoderType::Render;
       render->cmd_head.type = WMTRenderCommandNop;
       render->cmd_head.next.set(0);
@@ -575,8 +781,10 @@ public:
         if (!rtvs[i].ptr)
           continue;
         auto [Heap, Index] = GetRenderTargetHeap(device_, rtvs[i]);
-        if (!Heap)
+        if (!Heap) {
+          DEBUG("[DEBUG-DRAW] PreDraw rejected: invalid RTV descriptor index=", i, " handle=", rtvs[i].ptr);
           return DrawCallStatus::Invalid;
+        }
         auto AttachmentDesc = Heap->GetRenderTarget(Index);
         if (!AttachmentDesc.Texture)
           continue;
@@ -592,8 +800,10 @@ public:
       }
       while (dsv.ptr) {
         auto [Heap, Index] = GetRenderTargetHeap(device_, dsv);
-        if (!Heap)
+        if (!Heap) {
+          DEBUG("[DEBUG-DRAW] PreDraw rejected: invalid DSV descriptor handle=", dsv.ptr);
           return DrawCallStatus::Invalid;
+        }
         auto AttachmentDesc = Heap->GetRenderTarget(Index);
         if (!AttachmentDesc.Texture)
           break;
@@ -638,6 +848,9 @@ public:
       dirty_state_.set(DirtyState::Viewport, DirtyState::ScissorRect);
       dirty_state_.set(DirtyState::BlendFactor, DirtyState::StencilRef);
     }
+    const bool encode_msc_resource_uses =
+        use_msc && !SkipResourceBinding &&
+        (dirty_state_.test(DirtyState::DescriptorHeaps) || dirty_state_.test(DirtyState::GraphicsRootArguments));
     if (dirty_state_.test(DirtyState::VertexBuffer)) {
       EncodeVertexBuffers();
       dirty_state_.clr(DirtyState::VertexBuffer);
@@ -654,11 +867,11 @@ public:
           cmd_vs.index = DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT;
           auto &cmd_fs = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
           cmd_fs.type = WMTRenderCommandSetFragmentBuffer;
-          cmd_fs.buffer = buffer.handle;
-          cmd_fs.offset = 0;
-          cmd_fs.index = DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT;
-        }
-      }
+           cmd_fs.buffer = buffer.handle;
+           cmd_fs.offset = 0;
+           cmd_fs.index = DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT;
+         }
+       }
       if (sampler_heap_) {
         auto buffer = sampler_heap_->GetMSCDescriptorHeapBuffer();
         if (buffer) {
@@ -669,11 +882,11 @@ public:
           cmd_vs.index = DXMT_MSC_SAMPLER_HEAP_BIND_POINT;
           auto &cmd_fs = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
           cmd_fs.type = WMTRenderCommandSetFragmentBuffer;
-          cmd_fs.buffer = buffer.handle;
-          cmd_fs.offset = 0;
-          cmd_fs.index = DXMT_MSC_SAMPLER_HEAP_BIND_POINT;
-        }
-      }
+           cmd_fs.buffer = buffer.handle;
+           cmd_fs.offset = 0;
+           cmd_fs.index = DXMT_MSC_SAMPLER_HEAP_BIND_POINT;
+         }
+       }
       dirty_state_.clr(DirtyState::DescriptorHeaps);
     }
 
@@ -694,11 +907,14 @@ public:
         cmd_fsargbuf.type = WMTRenderCommandSetFragmentBuffer;
         cmd_fsargbuf.buffer = allocator_->gpu_heap_buffer_;
         cmd_fsargbuf.offset = Offset;
-        cmd_fsargbuf.index = use_msc ? static_cast<uint8_t>(DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT)
-                                     : static_cast<uint8_t>(SM50_BINDING_INDEX_ROOT_ARGUMENTS);
-      }
+         cmd_fsargbuf.index = use_msc ? static_cast<uint8_t>(DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT)
+                                      : static_cast<uint8_t>(SM50_BINDING_INDEX_ROOT_ARGUMENTS);
+       }
       dirty_state_.clr(DirtyState::GraphicsRootArguments);
     }
+
+    if (encode_msc_resource_uses)
+      EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
 
     if (dirty_state_.test(DirtyState::GraphicsRootSignature) && !SkipResourceBinding) {
       if (rootsig_graphics_ && !use_msc) {
@@ -769,11 +985,19 @@ public:
       dirty_state_.clr(DirtyState::StencilRef);
     }
 
-    return DrawCallStatus::Ordinary;
+    if (recording_failed_)
+      DEBUG("[DEBUG-DRAW] PreDraw rejected: command list already failed use_msc=", use_msc,
+            " pso=", pso_graphics_ ? pso_graphics_->pso.handle : 0, " rtvs=", num_rtvs);
+    return recording_failed_ ? DrawCallStatus::Invalid : DrawCallStatus::Ordinary;
   }
 
   void STDMETHODCALLTYPE
   DrawInstanced(UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation) {
+    static uint32_t trace_draw_count = 0;
+    uint32_t trace_draw_id = trace_draw_count++;
+    if (trace_draw_id < 32)
+      DEBUG("[DEBUG-DRAW] DrawInstanced: vertices=", VertexCountPerInstance, " instances=", InstanceCount,
+            " vertex_start=", StartVertexLocation, " instance_start=", StartInstanceLocation);
     if (!ValidateCommand(SupportsGraphics(), "DrawInstanced"))
       return;
     WMTPrimitiveType primitive_type;
@@ -781,8 +1005,11 @@ public:
     if (!to_metal_primitive_type(topology_, primitive_type, cp_count))
       return;
     DrawCallStatus status = PreDraw();
-    if (status == DrawCallStatus::Invalid)
+    if (status == DrawCallStatus::Invalid) {
+      if (trace_draw_id < 32)
+        DEBUG("[DEBUG-DRAW] DrawInstanced rejected by PreDraw");
       return;
+    }
 
     auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw>();
     cmd_draw.type = WMTRenderCommandDraw;
@@ -798,6 +1025,12 @@ public:
       UINT IndexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, INT BaseVertexLocation,
       UINT StartInstanceLocation
   ) {
+    static uint32_t trace_draw_indexed_count = 0;
+    uint32_t trace_draw_indexed_id = trace_draw_indexed_count++;
+    if (trace_draw_indexed_id < 32)
+      DEBUG("[DEBUG-DRAW] DrawIndexedInstanced: indices=", IndexCountPerInstance, " instances=", InstanceCount,
+            " index_start=", StartVertexLocation, " base_vertex=", BaseVertexLocation,
+            " instance_start=", StartInstanceLocation);
     if (!ValidateCommand(SupportsGraphics(), "DrawIndexedInstanced"))
       return;
     WMTPrimitiveType primitive_type;
@@ -805,8 +1038,11 @@ public:
     if (!to_metal_primitive_type(topology_, primitive_type, cp_count))
       return;
     DrawCallStatus status = PreDraw();
-    if (status == DrawCallStatus::Invalid)
+    if (status == DrawCallStatus::Invalid) {
+      if (trace_draw_indexed_id < 32)
+        DEBUG("[DEBUG-DRAW] DrawIndexedInstanced rejected by PreDraw");
       return;
+    }
     auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw_indexed>();
     cmd_draw.type = WMTRenderCommandDrawIndexed;
     cmd_draw.primitive_type = primitive_type;
@@ -850,6 +1086,10 @@ public:
 
     auto table_size = sizeof(dxmt_msc_descriptor_entry) * pRootSig->NumStaticSamplers;
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(table_size, 16);
+    if (!Ptr) {
+      recording_failed_ = true;
+      return 0;
+    }
     auto *entries = reinterpret_cast<dxmt_msc_descriptor_entry *>(Ptr);
     auto *encoded = pRootSig->EncodedStaticSamplers;
     for (size_t i = 0; i < pRootSig->NumStaticSamplers; i++) {
@@ -867,6 +1107,10 @@ public:
       return 0;
 
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(pRootSig->MSCArgumentBufferSize, 16);
+    if (!Ptr) {
+      recording_failed_ = true;
+      return 0;
+    }
     memset(Ptr, 0, pRootSig->MSCArgumentBufferSize);
     uint64_t static_sampler_table_address = 0;
 
@@ -909,11 +1153,31 @@ public:
           ERR("MSC descriptor table handle is not from a shader-visible heap");
           continue;
         }
+        static std::atomic<unsigned> trace_msc_table_count = 0;
+        const auto trace_id = trace_msc_table_count.fetch_add(1, std::memory_order_relaxed);
+        if (trace_id < 128)
+          DEBUG(
+              "[DEBUG-TEX] table id=", trace_id, " root=", layout.parameter_index,
+              " handle=", handle.ptr, " address=", table_address
+          );
         memcpy(destination, &table_address, std::min<size_t>(layout.size_bytes, sizeof(table_address)));
         continue;
       }
 
       memcpy(destination, source, copy_size);
+    }
+
+    static std::atomic<unsigned> trace_msc_tlab_count = 0;
+    const auto trace_id = trace_msc_tlab_count.fetch_add(1, std::memory_order_relaxed);
+    if (trace_id < 128) {
+      uint64_t words[4] = {};
+      memcpy(words, Ptr, std::min<size_t>(pRootSig->MSCArgumentBufferSize, sizeof(words)));
+      DEBUG(
+          "[DEBUG-MSC-TLAB] id=", trace_id, " offset=", Offset,
+          " gpu=", allocator_->gpu_heap_buffer_address_ + Offset,
+          " size=", pRootSig->MSCArgumentBufferSize, " w0=", words[0], " w1=", words[1],
+          " w2=", words[2], " w3=", words[3]
+      );
     }
     return Offset;
   }
@@ -921,9 +1185,190 @@ public:
   uint64_t
   EncodeStaticSamplers(MTLD3D12RootSignature *pRootSig) {
     auto static_sampler_encode_size = sizeof(uint64_t) * pRootSig->NumStaticSamplers * 4;
+    if (!static_sampler_encode_size)
+      return 0;
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(static_sampler_encode_size, 64);
+    if (!Ptr) {
+      recording_failed_ = true;
+      return 0;
+    }
     memcpy(Ptr, pRootSig->EncodedStaticSamplers, static_sampler_encode_size);
     return Offset;
+  }
+
+  void
+  EncodeMSCResourceUses(
+      MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap
+  ) {
+    if (!pRootSig || !pStaging || !descriptor_heap || !pRootSig->ParameterSlots || !pRootSig->SlotQwordOffsets)
+      return;
+
+    if (pRootSig != msc_resource_use_root_signature_) {
+      msc_resource_use_root_signature_ = pRootSig;
+      msc_resource_use_tables_.clear();
+
+      const void *blob = nullptr;
+      const auto blob_size = pRootSig->GetBlob(&blob);
+      if (blob && blob_size) {
+        Com<ID3D12VersionedRootSignatureDeserializer> deserializer = nullptr;
+        if (SUCCEEDED(D3D12CreateVersionedRootSignatureDeserializer(blob, blob_size, IID_PPV_ARGS(&deserializer)))) {
+          const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *versioned_desc = nullptr;
+          if (SUCCEEDED(deserializer->GetRootSignatureDescAtVersion(
+                  D3D_ROOT_SIGNATURE_VERSION_1_1, &versioned_desc
+              )) &&
+              versioned_desc) {
+            const auto &root_desc = versioned_desc->Desc_1_1;
+            for (UINT parameter_index = 0; parameter_index < root_desc.NumParameters; parameter_index++) {
+              const auto &parameter = root_desc.pParameters[parameter_index];
+              if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
+                continue;
+              auto &table = msc_resource_use_tables_.emplace_back();
+              table.parameter_index = parameter_index;
+              if (parameter.DescriptorTable.NumDescriptorRanges)
+                table.ranges.assign(
+                    parameter.DescriptorTable.pDescriptorRanges,
+                    parameter.DescriptorTable.pDescriptorRanges + parameter.DescriptorTable.NumDescriptorRanges
+                );
+            }
+          }
+        }
+      }
+    }
+    if (msc_resource_use_tables_.empty())
+      return;
+
+    D3D12_GPU_DESCRIPTOR_HANDLE heap_start = {};
+    descriptor_heap->GetGPUDescriptorHandleForHeapStart(&heap_start);
+    const auto descriptor_stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const auto heap_desc = descriptor_heap->GetDesc();
+    if (!descriptor_stride)
+      return;
+
+    const auto stages = static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
+    const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
+    const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
+    static std::atomic<unsigned> trace_msc_resource_use_call_count = 0;
+    static std::atomic<unsigned> trace_msc_resource_use_count = 0;
+    const auto trace_call_id = trace_msc_resource_use_call_count.fetch_add(1, std::memory_order_relaxed);
+    if (trace_call_id < 4)
+      DEBUG(
+          "[DEBUG-MSC-USE-TABLE] call=", trace_call_id, " heap_descriptors=", heap_desc.NumDescriptors,
+          " tables=", msc_resource_use_tables_.size()
+      );
+
+    auto encode_resource = [&](obj_handle_t resource, WMTResourceUsage usage) {
+      if (!resource || !msc_resources_used_.insert(resource).second)
+        return;
+      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
+      cmd.type = WMTRenderCommandUseResource;
+      cmd.resource = resource;
+      cmd.usage = usage;
+      cmd.stages = stages;
+      const auto trace_id = trace_msc_resource_use_count.fetch_add(1, std::memory_order_relaxed);
+      if (trace_id < 128)
+        DEBUG("[DEBUG-MSC-USE] id=", trace_id, " resource=", resource, " usage=", usage);
+    };
+
+    auto encode_descriptor = [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type) {
+      const auto &descriptor = descriptor_heap->GetDescriptor(index);
+      switch (descriptor.type) {
+      case ShaderVisibleDescriptorType::SRVTexture: {
+        if (range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV || !descriptor.SRVTexture.texture)
+          return;
+        auto &view = descriptor.SRVTexture.texture->view(descriptor.SRVTexture.view);
+        encode_resource(view.texture.handle, sampled_read);
+        break;
+      }
+      case ShaderVisibleDescriptorType::UAVTexture: {
+        if (range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV || !descriptor.UAVTexture.texture)
+          return;
+        auto &view = descriptor.UAVTexture.texture->view(descriptor.UAVTexture.view);
+        encode_resource(view.texture.handle, read_write);
+        break;
+      }
+      case ShaderVisibleDescriptorType::ConstantBuffer: {
+        if (range_type != D3D12_DESCRIPTOR_RANGE_TYPE_CBV)
+          return;
+        uint64_t buffer_offset = 0;
+        auto allocation = device_->LookupBufferByVA(descriptor.ConstantBuffer.address, &buffer_offset);
+        if (allocation)
+          encode_resource(allocation->buffer().handle, WMTResourceUsageRead);
+        break;
+      }
+      case ShaderVisibleDescriptorType::SRVTexelBuffer: {
+        if (range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV || !descriptor.SRVTexelBuffer.buffer ||
+            !descriptor.SRVTexelBuffer.buffer->current())
+          return;
+        encode_resource(descriptor.SRVTexelBuffer.buffer->current()->buffer().handle, WMTResourceUsageRead);
+        break;
+      }
+      case ShaderVisibleDescriptorType::UAVTexelBuffer: {
+        if (range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV || !descriptor.UAVTexelBuffer.buffer ||
+            !descriptor.UAVTexelBuffer.buffer->current())
+          return;
+        encode_resource(descriptor.UAVTexelBuffer.buffer->current()->buffer().handle, read_write);
+        break;
+      }
+      case ShaderVisibleDescriptorType::SRVBuffer: {
+        if (range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV || !descriptor.SRVBuffer.buffer ||
+            !descriptor.SRVBuffer.buffer->current())
+          return;
+        encode_resource(descriptor.SRVBuffer.buffer->current()->buffer().handle, WMTResourceUsageRead);
+        break;
+      }
+      case ShaderVisibleDescriptorType::UAVBuffer: {
+        if (range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV || !descriptor.UAVBuffer.buffer ||
+            !descriptor.UAVBuffer.buffer->current())
+          return;
+        encode_resource(descriptor.UAVBuffer.buffer->current()->buffer().handle, read_write);
+        break;
+      }
+      case ShaderVisibleDescriptorType::Null:
+        break;
+      }
+    };
+
+    for (const auto &table : msc_resource_use_tables_) {
+      const auto parameter_index = table.parameter_index;
+      if (parameter_index >= pRootSig->ParameterSlots)
+        continue;
+      const auto source_qword = pRootSig->SlotQwordOffsets[parameter_index];
+      if (source_qword >= 64 || !pStaging[source_qword])
+        continue;
+
+      const D3D12_GPU_DESCRIPTOR_HANDLE base_handle = {pStaging[source_qword]};
+      if (base_handle.ptr < heap_start.ptr)
+        continue;
+      const auto byte_offset = base_handle.ptr - heap_start.ptr;
+      if (byte_offset % descriptor_stride)
+        continue;
+      const uint64_t base_index = byte_offset / descriptor_stride;
+      if (base_index >= heap_desc.NumDescriptors)
+        continue;
+
+      uint64_t table_offset = 0;
+      for (const auto &range : table.ranges) {
+        if (trace_call_id < 4)
+          DEBUG(
+              "[DEBUG-MSC-USE-TABLE] call=", trace_call_id, " parameter=", parameter_index,
+              " type=", range.RangeType, " descriptors=", range.NumDescriptors,
+              " offset=", range.OffsetInDescriptorsFromTableStart
+          );
+        const uint64_t range_offset = range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
+                                          ? table_offset
+                                          : range.OffsetInDescriptorsFromTableStart;
+        const auto range_start = base_index + range_offset;
+        if (range_start >= heap_desc.NumDescriptors)
+          break;
+        const auto range_count = range.NumDescriptors == UINT_MAX
+                                     ? heap_desc.NumDescriptors - range_start
+                                     : std::min<uint64_t>(range.NumDescriptors, heap_desc.NumDescriptors - range_start);
+        if (range.RangeType != D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
+          for (uint64_t descriptor_index = 0; descriptor_index < range_count; descriptor_index++)
+            encode_descriptor(static_cast<UINT>(range_start + descriptor_index), range.RangeType);
+        table_offset = range_offset + range_count;
+      }
+    }
   }
 
   bool
@@ -1010,7 +1455,7 @@ public:
       dirty_state_.clr(DirtyState::ComputeRootSignature);
     }
 
-    return true;
+    return !recording_failed_;
   }
 
   void STDMETHODCALLTYPE
@@ -1077,14 +1522,7 @@ public:
       D3D12TextureSubresource source_subresource = {};
       if (!source || !decode_texture_subresource(source->texture.ptr(), pSrc->SubresourceIndex, source_subresource))
         return;
-      auto desc = source->GetDesc();
-      full_source_box.right = std::max<UINT>(1, static_cast<UINT>(desc.Width >> source_subresource.mip));
-      full_source_box.bottom = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D
-                                   ? 1
-                                   : std::max<UINT>(1, desc.Height >> source_subresource.mip);
-      full_source_box.back = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
-                                 ? std::max<UINT>(1, static_cast<UINT>(desc.DepthOrArraySize >> source_subresource.mip))
-                                 : 1;
+      full_source_box = texture_subresource_bounds(source->GetDesc(), source_subresource.mip);
       pSrcBox = &full_source_box;
     }
 
@@ -1104,23 +1542,73 @@ public:
         if (!src_resource || !src_resource->buffer)
           return;
         auto &src = src_resource->buffer;
-        if (pSrcBox) {
-          WARN("CopyTextureRegion: source box for buffer footprints is not implemented");
+        D3D12CopyFormat copy_format;
+        UINT64 image_pitch = 0;
+        if (!get_copy_format(device_->GetMTLDevice(), pSrc->PlacedFootprint.Footprint.Format, copy_format) ||
+            !validate_copy_footprint(pSrc->PlacedFootprint, copy_format, image_pitch)) {
+          WARN("CopyTextureRegion: invalid source footprint");
           return;
+        }
+
+        const D3D12_BOX footprint_bounds = {
+            0, 0, 0, pSrc->PlacedFootprint.Footprint.Width, pSrc->PlacedFootprint.Footprint.Height,
+            pSrc->PlacedFootprint.Footprint.Depth
+        };
+        const D3D12_BOX source_box = pSrcBox ? *pSrcBox : footprint_bounds;
+        if (!validate_copy_box(source_box, footprint_bounds, copy_format)) {
+          WARN("CopyTextureRegion: source box is outside the buffer footprint");
+          return;
+        }
+        const auto dst_bounds = texture_subresource_bounds(dst_resource->GetDesc(), dst_subresource.mip);
+        const UINT width = source_box.right - source_box.left;
+        const UINT height = source_box.bottom - source_box.top;
+        const UINT depth = source_box.back - source_box.front;
+        if (DstX > dst_bounds.right || width > dst_bounds.right - DstX || DstY > dst_bounds.bottom ||
+            height > dst_bounds.bottom - DstY || DstZ > dst_bounds.back || depth > dst_bounds.back - DstZ) {
+          WARN("CopyTextureRegion: destination region is outside the texture");
+          return;
+        }
+
+        const UINT64 source_offset =
+            pSrc->PlacedFootprint.Offset + UINT64(source_box.front) * image_pitch +
+            UINT64(source_box.top / copy_format.block_height) * pSrc->PlacedFootprint.Footprint.RowPitch +
+            UINT64(source_box.left / copy_format.block_width) * copy_format.bytes_per_block;
+        if (!validate_copy_buffer_region(
+                src_resource->GetDesc().Width, source_offset, width, height, depth, image_pitch,
+                pSrc->PlacedFootprint.Footprint.RowPitch, copy_format
+            )) {
+          WARN("CopyTextureRegion: source footprint range is outside the buffer");
+          return;
+        }
+
+        const auto trace_id = texture_copy_debug_count.fetch_add(1, std::memory_order_relaxed);
+        if (trace_id < 256) {
+          auto mapped = src->current()->mappedMemory(0);
+          auto source_bytes = mapped ? static_cast<const uint8_t *>(mapped) + source_offset : nullptr;
+          DEBUG(
+              "[DEBUG-TEX-COPY] id=", trace_id, " src_format=", pSrc->PlacedFootprint.Footprint.Format,
+              " dst_format=", dst_resource->GetDesc().Format, " dst_metal=", dst->pixelFormat(),
+              " size=", width, "x", height, "x", depth, " mip=", dst_subresource.mip,
+              " slice=", dst_subresource.slice, " offset=", source_offset,
+              " row_pitch=", pSrc->PlacedFootprint.Footprint.RowPitch, " image_pitch=", image_pitch,
+              " block=", copy_format.block_width, "x", copy_format.block_height, " bytes=", copy_format.bytes_per_block,
+              " src_gpu=", src->current()->gpuAddress(), " dst_gpu=", dst->current()->gpuResourceID,
+              " mapped=", source_bytes ? 1 : 0,
+              source_bytes ? str::format(" first=", unsigned(source_bytes[0]), ",", unsigned(source_bytes[1]),
+                                         ",", unsigned(source_bytes[2]), ",", unsigned(source_bytes[3]))
+                           : ""
+          );
         }
 
         auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture_withblitoption>();
         cmd_cp.type = WMTBlitCommandCopyFromBufferToTextureWithBlitOption;
         cmd_cp.src = src->current()->buffer();
-        cmd_cp.src_offset = pSrc->PlacedFootprint.Offset;
+        cmd_cp.src_offset = source_offset;
         cmd_cp.bytes_per_row = pSrc->PlacedFootprint.Footprint.RowPitch;
         cmd_cp.bytes_per_image = dst->textureType() == WMTTextureType3D
-                                     ? pSrc->PlacedFootprint.Footprint.Height * pSrc->PlacedFootprint.Footprint.RowPitch
+                                     ? image_pitch
                                      : 0;
-        cmd_cp.size = {
-            pSrc->PlacedFootprint.Footprint.Width, pSrc->PlacedFootprint.Footprint.Height,
-            pSrc->PlacedFootprint.Footprint.Depth
-        };
+        cmd_cp.size = {width, height, depth};
         cmd_cp.dst = dst->current()->texture();
         cmd_cp.level = dst_subresource.mip;
         cmd_cp.slice = dst_subresource.slice;
@@ -1159,8 +1647,17 @@ public:
             WARN("CopyTextureRegion: depth-stencil staging range is invalid");
             return;
           }
-          auto [mapped, staging_offset] = allocator_->AllocateGPUHeap(staging_size, 256);
-          (void)mapped;
+           auto [mapped, staging_offset] = allocator_->AllocateGPUHeap(staging_size, 256);
+           static uint32_t trace_staging_count = 0;
+           if (trace_staging_count++ < 32)
+             DEBUG("[DEBUG-STAGING] depth copy: size=", width, "x", height, "x", depth,
+                   " row_pitch=", row_pitch, " bytes=", staging_size,
+                   " heap_offset=", allocator_->gpu_heap_offset_, " heap_size=", kGPUHeapSize,
+                   " allocated=", mapped ? 1 : 0);
+           if (!mapped) {
+            recording_failed_ = true;
+            return;
+          }
 
           auto &to_buffer = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer_withblitoption>();
           to_buffer.type = WMTBlitCommandCopyFromTextureToBufferWithBlitOption;
@@ -1208,10 +1705,6 @@ public:
       if (!dst_resource || !dst_resource->buffer)
         return;
       auto &dst = dst_resource->buffer;
-      if (pSrcBox) {
-        WARN("CopyTextureRegion: source box for buffer footprints is not implemented");
-        return;
-      }
       if (pSrc->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX) {
         auto src_resource = static_cast<MTLD3D12Resource *>(pSrc->pResource);
         if (!src_resource || !src_resource->texture)
@@ -1222,29 +1715,143 @@ public:
           return;
 
         auto src_planar_count = getPlanarCount(src->pixelFormat());
+        D3D12CopyFormat copy_format;
+        UINT64 image_pitch = 0;
+        if (!get_copy_format(device_->GetMTLDevice(), pDst->PlacedFootprint.Footprint.Format, copy_format) ||
+            !validate_copy_footprint(pDst->PlacedFootprint, copy_format, image_pitch)) {
+          WARN("CopyTextureRegion: invalid destination footprint");
+          return;
+        }
+
+        const auto source_bounds = texture_subresource_bounds(src_resource->GetDesc(), src_subresource.mip);
+        const D3D12_BOX destination_bounds = {
+            0, 0, 0, pDst->PlacedFootprint.Footprint.Width, pDst->PlacedFootprint.Footprint.Height,
+            pDst->PlacedFootprint.Footprint.Depth
+        };
+        const D3D12_BOX source_box = pSrcBox ? *pSrcBox : source_bounds;
+        if (!validate_copy_box(source_box, source_bounds, copy_format)) {
+          WARN("CopyTextureRegion: source box is outside the texture");
+          return;
+        }
+        const UINT width = source_box.right - source_box.left;
+        const UINT height = source_box.bottom - source_box.top;
+        const UINT depth = source_box.back - source_box.front;
+        if (!validate_copy_destination(
+                DstX, DstY, DstZ, width, height, depth, destination_bounds, copy_format
+            )) {
+          WARN("CopyTextureRegion: destination region is outside the buffer footprint");
+          return;
+        }
+
+        const UINT64 destination_offset =
+            pDst->PlacedFootprint.Offset + UINT64(DstZ) * image_pitch +
+            UINT64(DstY / copy_format.block_height) * pDst->PlacedFootprint.Footprint.RowPitch +
+            UINT64(DstX / copy_format.block_width) * copy_format.bytes_per_block;
+        if (!validate_copy_buffer_region(
+                dst_resource->GetDesc().Width, destination_offset, width, height, depth, image_pitch,
+                pDst->PlacedFootprint.Footprint.RowPitch, copy_format
+            )) {
+          WARN("CopyTextureRegion: destination footprint range is outside the buffer");
+          return;
+        }
 
         auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer_withblitoption>();
         cmd_cp.type = WMTBlitCommandCopyFromTextureToBufferWithBlitOption;
         cmd_cp.src = src->current()->texture();
         cmd_cp.level = src_subresource.mip;
         cmd_cp.slice = src_subresource.slice;
-        cmd_cp.origin = {0, 0, 0};
-        cmd_cp.size = {
-            pDst->PlacedFootprint.Footprint.Width, pDst->PlacedFootprint.Footprint.Height,
-            pDst->PlacedFootprint.Footprint.Depth
-        };
+        cmd_cp.origin = {source_box.left, source_box.top, source_box.front};
+        cmd_cp.size = {width, height, depth};
         cmd_cp.dst = dst->current()->buffer();
-        cmd_cp.offset = pDst->PlacedFootprint.Offset;
+        cmd_cp.offset = destination_offset;
         cmd_cp.bytes_per_row = pDst->PlacedFootprint.Footprint.RowPitch;
         cmd_cp.bytes_per_image = src->textureType() == WMTTextureType3D
-                                     ? pDst->PlacedFootprint.Footprint.Height * pDst->PlacedFootprint.Footprint.RowPitch
+                                     ? image_pitch
                                      : 0;
         cmd_cp.options = (src_planar_count > 1) ? (src_subresource.plane ? WMTBlitOptionStencilFromDepthStencil
                                                                           : WMTBlitOptionDepthFromDepthStencil)
                                                 : WMTBlitOptionNone;
-      } else {
-        // so it is buffer to buffer copy?
-        WARN("CopyTextureRegion: buffer-to-buffer footprint copy is not implemented");
+      } else if (pSrc->Type == D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT) {
+        auto src_resource = static_cast<MTLD3D12Resource *>(pSrc->pResource);
+        if (!src_resource || !src_resource->buffer)
+          return;
+
+        if (pSrc->PlacedFootprint.Footprint.Format != pDst->PlacedFootprint.Footprint.Format) {
+          WARN("CopyTextureRegion: buffer footprint formats do not match");
+          return;
+        }
+
+        D3D12CopyFormat copy_format;
+        UINT64 src_image_pitch = 0;
+        UINT64 dst_image_pitch = 0;
+        if (!get_copy_format(device_->GetMTLDevice(), pSrc->PlacedFootprint.Footprint.Format, copy_format) ||
+            !validate_copy_footprint(pSrc->PlacedFootprint, copy_format, src_image_pitch) ||
+            !validate_copy_footprint(pDst->PlacedFootprint, copy_format, dst_image_pitch)) {
+          WARN("CopyTextureRegion: invalid buffer footprint");
+          return;
+        }
+
+        const D3D12_BOX source_bounds = {
+            0, 0, 0, pSrc->PlacedFootprint.Footprint.Width, pSrc->PlacedFootprint.Footprint.Height,
+            pSrc->PlacedFootprint.Footprint.Depth
+        };
+        const D3D12_BOX destination_bounds = {
+            0, 0, 0, pDst->PlacedFootprint.Footprint.Width, pDst->PlacedFootprint.Footprint.Height,
+            pDst->PlacedFootprint.Footprint.Depth
+        };
+        const D3D12_BOX source_box = pSrcBox ? *pSrcBox : source_bounds;
+        if (!validate_copy_box(source_box, source_bounds, copy_format)) {
+          WARN("CopyTextureRegion: source box is outside the buffer footprint");
+          return;
+        }
+
+        const UINT width = source_box.right - source_box.left;
+        const UINT height = source_box.bottom - source_box.top;
+        const UINT depth = source_box.back - source_box.front;
+        if (!validate_copy_destination(
+                DstX, DstY, DstZ, width, height, depth, destination_bounds, copy_format
+            )) {
+          WARN("CopyTextureRegion: destination region is outside the buffer footprint");
+          return;
+        }
+
+        const UINT64 row_size = copy_row_size(width, copy_format);
+        const UINT64 rows = copy_row_count(height, copy_format);
+        const UINT64 source_offset =
+            pSrc->PlacedFootprint.Offset + UINT64(source_box.front) * src_image_pitch +
+            UINT64(source_box.top / copy_format.block_height) * pSrc->PlacedFootprint.Footprint.RowPitch +
+            UINT64(source_box.left / copy_format.block_width) * copy_format.bytes_per_block;
+        const UINT64 destination_offset =
+            pDst->PlacedFootprint.Offset + UINT64(DstZ) * dst_image_pitch +
+            UINT64(DstY / copy_format.block_height) * pDst->PlacedFootprint.Footprint.RowPitch +
+            UINT64(DstX / copy_format.block_width) * copy_format.bytes_per_block;
+        if (!validate_copy_buffer_region(
+                src_resource->GetDesc().Width, source_offset, width, height, depth, src_image_pitch,
+                pSrc->PlacedFootprint.Footprint.RowPitch, copy_format
+            ) ||
+            !validate_copy_buffer_region(
+                dst_resource->GetDesc().Width, destination_offset, width, height, depth, dst_image_pitch,
+                pDst->PlacedFootprint.Footprint.RowPitch, copy_format
+            )) {
+          WARN("CopyTextureRegion: buffer footprint range is outside the resource");
+          return;
+        }
+
+        auto &src = src_resource->buffer;
+        auto &dst = dst_resource->buffer;
+        for (UINT z = 0; z < depth; z++) {
+          for (UINT row = 0; row < rows; row++) {
+            auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
+            cmd_cp.type = WMTBlitCommandCopyFromBufferToBuffer;
+            cmd_cp.src = src->current()->buffer();
+            cmd_cp.src_offset = source_offset + UINT64(z) * src_image_pitch +
+                                UINT64(row) * pSrc->PlacedFootprint.Footprint.RowPitch;
+            cmd_cp.dst = dst->current()->buffer();
+            cmd_cp.dst_offset = destination_offset + UINT64(z) * dst_image_pitch +
+                                UINT64(row) * pDst->PlacedFootprint.Footprint.RowPitch;
+            cmd_cp.copy_length = row_size;
+          }
+        }
       }
     }
   };
@@ -1428,7 +2035,21 @@ public:
 
     auto &cmd_setdsso = allocator_->EncodeRenderCommand<wmtcmd_render_setdsso>();
     cmd_setdsso.type = WMTRenderCommandSetDSSO;
-    cmd_setdsso.dsso = pso_graphics->dsso;
+    auto *render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
+    switch (render->dsv_planar_flags & 3) {
+    case 3:
+      cmd_setdsso.dsso = pso_graphics->dsso;
+      break;
+    case 2:
+      cmd_setdsso.dsso = pso_graphics->dsso_depth_disabled;
+      break;
+    case 1:
+      cmd_setdsso.dsso = pso_graphics->dsso_stencil_disabled;
+      break;
+    default:
+      cmd_setdsso.dsso = pso_graphics->dsso_depth_stencil_disabled;
+      break;
+    }
     cmd_setdsso.stencil_ref = 0; /* FIXME */
 
     auto &cmd_setrs = allocator_->EncodeRenderCommand<wmtcmd_render_setrasterizerstate>();
@@ -1502,37 +2123,19 @@ public:
         if (barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE)
           WARN("D3D12 split transition is lowered to an immediate transition");
 
-        if (barrier.Transition.Subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) {
-          bool needs_barrier = false;
-          bool state_mismatch = false;
-          for (auto current : resource->subresource_states) {
-            state_mismatch |= current != barrier.Transition.StateBefore &&
-                              !(split_end && current == barrier.Transition.StateAfter);
-            needs_barrier |= current != barrier.Transition.StateAfter;
-          }
-          if (state_mismatch)
-            WARN("D3D12 ResourceBarrier state mismatch");
-          if (needs_barrier)
-            EncodeMemoryBarrier(
-                resource_barrier_scope(resource), barrier.Transition.StateBefore, barrier.Transition.StateAfter
-            );
-          resource->SetAllSubresourceStates(barrier.Transition.StateAfter);
-          break;
-        }
-
-        if (!resource->HasSubresource(barrier.Transition.Subresource)) {
+        const auto subresource = barrier.Transition.Subresource;
+        if (subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES && !resource->HasSubresource(subresource)) {
           WARN("D3D12 ResourceBarrier subresource is out of range");
           continue;
         }
-        auto current = resource->GetSubresourceState(barrier.Transition.Subresource);
-        if (current != barrier.Transition.StateBefore &&
-            !(split_end && current == barrier.Transition.StateAfter))
-          WARN("D3D12 ResourceBarrier state mismatch");
-        if (current != barrier.Transition.StateAfter)
+
+        if (barrier.Transition.StateBefore != barrier.Transition.StateAfter)
           EncodeMemoryBarrier(
               resource_barrier_scope(resource), barrier.Transition.StateBefore, barrier.Transition.StateAfter
           );
-        resource->SetSubresourceState(barrier.Transition.Subresource, barrier.Transition.StateAfter);
+        resource_state_transitions_.push_back({
+            resource, subresource, barrier.Transition.StateBefore, barrier.Transition.StateAfter, split_end
+        });
         break;
       }
       case D3D12_RESOURCE_BARRIER_TYPE_UAV:
@@ -1774,10 +2377,6 @@ public:
       D3D12_CPU_DESCRIPTOR_HANDLE DSV, D3D12_CLEAR_FLAGS Flags, FLOAT Depth, UINT8 Stencil, UINT RectCount,
       const D3D12_RECT *Rects
   ) {
-    if (Rects || RectCount > 1) {
-      ERR("ClearDepthStencilView: unhandled parameter Rects=", Rects, " RectCount=", RectCount);
-      return;
-    }
     if ((Flags & 3) == 0)
       return;
     auto [Heap, Index] = GetRenderTargetHeap(device_, DSV);
@@ -1786,6 +2385,13 @@ public:
     auto AttachmentDesc = Heap->GetRenderTarget(Index);
     if (!AttachmentDesc.Texture)
       return;
+    if (RectCount > 1 ||
+        (Rects && RectCount &&
+         (Rects[0].left > 0 || Rects[0].top > 0 || Rects[0].right < (LONG)AttachmentDesc.Width ||
+          Rects[0].bottom < (LONG)AttachmentDesc.Height))) {
+      ERR("ClearDepthStencilView: partial rect clear is unsupported RectCount=", RectCount);
+      return;
+    }
     allocator_->InvalidateCurrentPass();
     auto encoder_info = allocator_->AllocatePass<ClearEncoderData>();
     encoder_info->type = EncoderType::Clear;
@@ -1804,10 +2410,6 @@ public:
   ClearRenderTargetView(
       D3D12_CPU_DESCRIPTOR_HANDLE RTV, const FLOAT Color[4], UINT RectCount, const D3D12_RECT *Rects
   ) {
-    if (Rects || RectCount > 1) {
-      ERR("ClearRenderTargetView: unhandled parameter Rects=", Rects, " RectCount=", RectCount);
-      return;
-    }
     if (!Color)
       return;
     auto [Heap, Index] = GetRenderTargetHeap(device_, RTV);
@@ -1816,6 +2418,13 @@ public:
     auto AttachmentDesc = Heap->GetRenderTarget(Index);
     if (!AttachmentDesc.Texture)
       return;
+    if (RectCount > 1 ||
+        (Rects && RectCount &&
+         (Rects[0].left > 0 || Rects[0].top > 0 || Rects[0].right < (LONG)AttachmentDesc.Width ||
+          Rects[0].bottom < (LONG)AttachmentDesc.Height))) {
+      ERR("ClearRenderTargetView: partial rect clear is unsupported RectCount=", RectCount);
+      return;
+    }
     allocator_->InvalidateCurrentPass();
     auto encoder_info = allocator_->AllocatePass<ClearEncoderData>();
     encoder_info->type = EncoderType::Clear;
@@ -2055,6 +2664,12 @@ public:
     auto sig = static_cast<MTLD3D12CommandSignature *>(pCommandSignature);
     if (!sig)
       return;
+    static uint32_t trace_indirect_count = 0;
+    if (trace_indirect_count++ < 32)
+      DEBUG("[DEBUG-ICB] ExecuteIndirect: max_count=", MaxCommandCount, " type=", sig->CommandType,
+            " update_root=", sig->UpdateRootArguments, " update_vb=", sig->UpdateVertexBuffers,
+            " update_ib=", sig->UpdateIndexBuffer, " arg_offset=", ArgBufferOffset,
+            " count_buffer=", pCountBuffer ? 1 : 0, " count_offset=", CountBufferOffset);
     if (sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH) {
       if (!ValidateCommand(SupportsCompute(), "ExecuteIndirect(Dispatch)"))
         return;

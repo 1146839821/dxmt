@@ -24,6 +24,7 @@
 #include "dxmt_sampler.hpp"
 #include "log/log.hpp"
 #include <array>
+#include <atomic>
 #include <mutex>
 
 namespace dxmt {
@@ -31,6 +32,8 @@ namespace dxmt {
 namespace {
 std::mutex descriptor_heap_registry_lock;
 std::array<const void *, 1u << 7> descriptor_heap_registry = {};
+std::atomic<unsigned> descriptor_texture_debug_count = 0;
+std::atomic<unsigned> descriptor_table_debug_count = 0;
 }
 
 SIZE_T
@@ -250,6 +253,17 @@ public:
     uint64_t index = byte_offset / sizeof(ShaderVisibleDescriptorGPUStorage);
     if (index >= descriptors_.size())
       return 0;
+    const auto trace_id = descriptor_table_debug_count.fetch_add(1, std::memory_order_relaxed);
+    if (trace_id < 128) {
+      for (uint64_t entry_index = index; entry_index < std::min<uint64_t>(index + 4, descriptors_.size());
+           entry_index++) {
+        const auto &entry = mapped_msc_argument_buffer_[entry_index];
+        DEBUG(
+            "[DEBUG-MSC-TABLE] id=", trace_id, " index=", entry_index, " handle=", Handle.ptr,
+            " gpu_va=", entry.gpu_va, " texture_view=", entry.texture_view_id, " metadata=", entry.metadata
+        );
+      }
+    }
     return msc_argument_buffer_gpu_address_ + index * sizeof(dxmt_msc_descriptor_entry);
   }
 
@@ -272,6 +286,14 @@ public:
       gpu_storage.SRVTexture.resource_id = texture_view.gpuResourceID;
       gpu_storage.SRVTexture.metadata = TextureMetadata(Texture->arrayLength(View), ResourceMinLODClamp);
       SetMSCDescriptor(Index, {0, texture_view.gpuResourceID, std::bit_cast<uint32_t>(ResourceMinLODClamp)});
+
+      const auto trace_id = descriptor_texture_debug_count.fetch_add(1, std::memory_order_relaxed);
+      if (trace_id < 128)
+        DEBUG(
+            "[DEBUG-TEX] descriptor id=", trace_id, " slot=", Index, " gpu=", texture_view.gpuResourceID,
+            " array=", Texture->arrayLength(View), " minlod=", ResourceMinLODClamp,
+            " msc_metadata=", std::bit_cast<uint32_t>(ResourceMinLODClamp)
+        );
     }
     return S_OK;
   }

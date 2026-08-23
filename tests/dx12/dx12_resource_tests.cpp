@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include <d3d12sdklayers.h>
 
 #include <cstdint>
 #include <cstring>
@@ -30,6 +31,7 @@ UINT64 AlignUp(UINT64 value, UINT64 alignment) {
 
 int main() {
   ID3D12Device *device = nullptr;
+  ID3D12InfoQueue *info_queue = nullptr;
   ID3D12CommandQueue *queue = nullptr;
   ID3D12CommandAllocator *allocator = nullptr;
   ID3D12GraphicsCommandList *list = nullptr;
@@ -47,8 +49,13 @@ int main() {
   ID3D12Resource *alias_before = nullptr;
   ID3D12Resource *alias_after = nullptr;
   ID3D12Resource *placed_texture = nullptr;
+  ID3D12Resource *bc_texture = nullptr;
+  ID3D12Resource *bc_upload = nullptr;
+  ID3D12Resource *bc_readback = nullptr;
   ID3D12Resource *array_render_target = nullptr;
   ID3D12Resource *array_readback = nullptr;
+  ID3D12Resource *array_partial_readback = nullptr;
+  ID3D12Resource *array_upload = nullptr;
   ID3D12Resource *texture3d = nullptr;
   ID3D12Resource *texture3d_readback = nullptr;
   ID3D12Resource *depth_texture = nullptr;
@@ -83,8 +90,18 @@ int main() {
       alias_before->Release();
     if (placed_texture)
       placed_texture->Release();
+    if (bc_readback)
+      bc_readback->Release();
+    if (bc_upload)
+      bc_upload->Release();
+    if (bc_texture)
+      bc_texture->Release();
     if (array_readback)
       array_readback->Release();
+    if (array_partial_readback)
+      array_partial_readback->Release();
+    if (array_upload)
+      array_upload->Release();
     if (array_render_target)
       array_render_target->Release();
     if (texture3d_readback)
@@ -107,6 +124,8 @@ int main() {
       command_signature->Release();
     if (device1)
       device1->Release();
+    if (info_queue)
+      info_queue->Release();
     if (source_placed)
       source_placed->Release();
     if (invalid_placed)
@@ -139,6 +158,11 @@ int main() {
     cleanup();
     return 1;
   }
+  if (!CheckHR("QueryInfoQueue", device->QueryInterface(IID_PPV_ARGS(&info_queue)))) {
+    cleanup();
+    return 1;
+  }
+  info_queue->SetMuteDebugOutput(TRUE);
 
   D3D12_FEATURE_DATA_ARCHITECTURE architecture = {};
   architecture.NodeIndex = 0;
@@ -294,15 +318,26 @@ int main() {
   D3D12_RESOURCE_DESC texture_desc = {};
   D3D12_RESOURCE_DESC depth_desc = {};
   D3D12_RESOURCE_DESC depth_readback_desc = {};
+  D3D12_RESOURCE_DESC bc_desc = {};
+  D3D12_RESOURCE_DESC bc_buffer_desc = {};
   D3D12_RESOURCE_DESC array_render_target_desc = {};
   D3D12_RESOURCE_DESC array_readback_desc = {};
+  D3D12_RESOURCE_DESC array_partial_readback_desc = {};
+  D3D12_RESOURCE_DESC array_upload_desc = {};
   D3D12_RESOURCE_DESC texture3d_desc = {};
   D3D12_RESOURCE_DESC texture3d_readback_desc = {};
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT depth_footprints[2] = {};
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT bc_footprint = {};
   UINT depth_rows[2] = {};
   UINT64 depth_row_sizes[2] = {};
   UINT64 depth_total = 0;
+  UINT bc_rows = 0;
+  UINT64 bc_row_size = 0;
+  UINT64 bc_total = 0;
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT array_footprint = {};
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT array_partial_footprint = {};
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT array_buffer_copy_dst_footprint = {};
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT array_upload_footprint = {};
   UINT array_rows = 0;
   UINT64 array_row_size = 0;
   UINT64 array_total = 0;
@@ -320,7 +355,11 @@ int main() {
   D3D12_CPU_DESCRIPTOR_HANDLE texture3d_rtv_handle = {};
   D3D12_CPU_DESCRIPTOR_HANDLE texture3d_uav_handle = {};
   BYTE *mapped_depth = nullptr;
+  BYTE *mapped_bc_upload = nullptr;
+  BYTE *mapped_bc_readback = nullptr;
   BYTE *mapped_array_readback = nullptr;
+  BYTE *mapped_array_partial_readback = nullptr;
+  BYTE *mapped_array_upload = nullptr;
   BYTE *mapped_texture3d_readback = nullptr;
   texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
   texture_desc.Width = 64;
@@ -486,8 +525,8 @@ int main() {
   }
 
   array_render_target_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-  array_render_target_desc.Width = 1;
-  array_render_target_desc.Height = 1;
+  array_render_target_desc.Width = 4;
+  array_render_target_desc.Height = 4;
   array_render_target_desc.DepthOrArraySize = 2;
   array_render_target_desc.MipLevels = 1;
   array_render_target_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -524,6 +563,97 @@ int main() {
     cleanup();
     return 1;
   }
+  array_partial_readback_desc = array_readback_desc;
+  device->GetCopyableFootprints(&array_render_target_desc, 1, 1, 0,
+                                &array_partial_footprint, &array_rows, &array_row_size,
+                                &array_total);
+  array_partial_readback_desc.Width = array_total + 2048;
+  array_buffer_copy_dst_footprint = array_partial_footprint;
+  array_buffer_copy_dst_footprint.Offset = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+  array_buffer_copy_dst_footprint.Footprint.RowPitch += D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+  if (!CheckHR("CreateArrayPartialReadback",
+               device->CreateCommittedResource(
+                   &readback_properties, D3D12_HEAP_FLAG_NONE,
+                   &array_partial_readback_desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                   nullptr, IID_PPV_ARGS(&array_partial_readback)))) {
+    cleanup();
+    return 1;
+  }
+  array_upload_desc = array_readback_desc;
+  if (!CheckHR("CreateArrayUpload",
+               device->CreateCommittedResource(
+                   &upload_properties, D3D12_HEAP_FLAG_NONE, &array_upload_desc,
+                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                   IID_PPV_ARGS(&array_upload)))) {
+    cleanup();
+    return 1;
+  }
+  device->GetCopyableFootprints(&array_render_target_desc, 1, 1, 0,
+                                &array_upload_footprint, &array_rows,
+                                &array_row_size, &array_total);
+  if (!CheckHR("MapArrayUpload",
+               array_upload->Map(0, nullptr,
+                                 reinterpret_cast<void **>(&mapped_array_upload)))) {
+    cleanup();
+    return 1;
+  }
+  std::memset(mapped_array_upload, 0, static_cast<size_t>(array_upload_desc.Width));
+  for (UINT row = 0; row < 2; row++) {
+    for (UINT column = 0; column < 2; column++) {
+      UINT32 red = 0xff0000ffu;
+      std::memcpy(mapped_array_upload + array_upload_footprint.Offset +
+                                      row * array_upload_footprint.Footprint.RowPitch +
+                                      column * sizeof(red),
+                  &red, sizeof(red));
+    }
+  }
+  array_upload->Unmap(0, nullptr);
+
+  bc_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  bc_desc.Width = 5;
+  bc_desc.Height = 5;
+  bc_desc.DepthOrArraySize = 1;
+  bc_desc.MipLevels = 1;
+  bc_desc.Format = DXGI_FORMAT_BC1_UNORM;
+  bc_desc.SampleDesc.Count = 1;
+  bc_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  if (!CheckHR("CreateBCTexture",
+               device->CreateCommittedResource(
+                   &depth_properties, D3D12_HEAP_FLAG_NONE, &bc_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                   IID_PPV_ARGS(&bc_texture)))) {
+    cleanup();
+    return 1;
+  }
+  device->GetCopyableFootprints(&bc_desc, 0, 1, 0, &bc_footprint, &bc_rows, &bc_row_size, &bc_total);
+  if (bc_total != 512 || bc_rows != 2 || bc_row_size != 16 || bc_footprint.Footprint.RowPitch != 256) {
+    std::cerr << "unexpected BC1 copy footprint: total=" << bc_total << " rows=" << bc_rows
+              << " row_size=" << bc_row_size << " row_pitch=" << bc_footprint.Footprint.RowPitch << "\n";
+    cleanup();
+    return 1;
+  }
+  bc_buffer_desc = buffer_desc;
+  bc_buffer_desc.Width = bc_total;
+  if (!CheckHR("CreateBCUpload",
+               device->CreateCommittedResource(
+                   &upload_properties, D3D12_HEAP_FLAG_NONE, &bc_buffer_desc, D3D12_RESOURCE_STATE_GENERIC_READ,
+                   nullptr, IID_PPV_ARGS(&bc_upload))) ||
+      !CheckHR("CreateBCReadback",
+               device->CreateCommittedResource(
+                   &readback_properties, D3D12_HEAP_FLAG_NONE, &bc_buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                   nullptr, IID_PPV_ARGS(&bc_readback))) ||
+      !CheckHR("MapBCUpload", bc_upload->Map(0, nullptr, reinterpret_cast<void **>(&mapped_bc_upload)))) {
+    cleanup();
+    return 1;
+  }
+  const uint8_t bc_data[32] = {
+      0x00, 0x01, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+      0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
+  };
+  std::memset(mapped_bc_upload, 0, static_cast<size_t>(bc_buffer_desc.Width));
+  for (UINT row = 0; row < bc_rows; row++)
+    std::memcpy(mapped_bc_upload + bc_footprint.Offset + row * bc_footprint.Footprint.RowPitch,
+                bc_data + row * bc_row_size, static_cast<size_t>(bc_row_size));
+  bc_upload->Unmap(0, nullptr);
 
   texture3d_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
   texture3d_desc.Width = 1;
@@ -843,6 +973,77 @@ int main() {
   array_copy_src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
   array_copy_src.SubresourceIndex = 1;
   list->CopyTextureRegion(&array_copy_dst, 0, 0, 0, &array_copy_src, nullptr);
+  D3D12_TEXTURE_COPY_LOCATION array_partial_copy_dst = {};
+  array_partial_copy_dst.pResource = array_partial_readback;
+  array_partial_copy_dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  array_partial_copy_dst.PlacedFootprint = array_partial_footprint;
+  D3D12_BOX array_partial_box = {1, 1, 0, 3, 3, 1};
+  list->CopyTextureRegion(&array_partial_copy_dst, 0, 0, 0, &array_copy_src,
+                          &array_partial_box);
+  array_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  array_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+  list->ResourceBarrier(1, &array_barrier);
+  D3D12_RESOURCE_BARRIER array_upload_barrier = {};
+  array_upload_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  array_upload_barrier.Transition.pResource = array_upload;
+  array_upload_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_GENERIC_READ;
+  array_upload_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  array_upload_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &array_upload_barrier);
+  D3D12_TEXTURE_COPY_LOCATION array_buffer_copy_src = {};
+  array_buffer_copy_src.pResource = array_upload;
+  array_buffer_copy_src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  array_buffer_copy_src.PlacedFootprint = array_upload_footprint;
+  D3D12_TEXTURE_COPY_LOCATION array_texture_copy_dst = {};
+  array_texture_copy_dst.pResource = array_render_target;
+  array_texture_copy_dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  array_texture_copy_dst.SubresourceIndex = 1;
+  D3D12_BOX array_upload_box = {0, 0, 0, 2, 2, 1};
+  list->CopyTextureRegion(&array_texture_copy_dst, 1, 1, 0,
+                          &array_buffer_copy_src, &array_upload_box);
+  D3D12_TEXTURE_COPY_LOCATION array_buffer_copy_dst = {};
+  array_buffer_copy_dst.pResource = array_partial_readback;
+  array_buffer_copy_dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  array_buffer_copy_dst.PlacedFootprint = array_buffer_copy_dst_footprint;
+  list->CopyTextureRegion(&array_buffer_copy_dst, 2, 0, 0,
+                          &array_buffer_copy_src, &array_upload_box);
+  array_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  array_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  list->ResourceBarrier(1, &array_barrier);
+  list->CopyTextureRegion(&array_copy_dst, 0, 0, 0, &array_copy_src, nullptr);
+
+  D3D12_RESOURCE_BARRIER bc_upload_barrier = {};
+  bc_upload_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  bc_upload_barrier.Transition.pResource = bc_upload;
+  bc_upload_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_GENERIC_READ;
+  bc_upload_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  bc_upload_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &bc_upload_barrier);
+  D3D12_TEXTURE_COPY_LOCATION bc_texture_dst = {};
+  bc_texture_dst.pResource = bc_texture;
+  bc_texture_dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  bc_texture_dst.SubresourceIndex = 0;
+  D3D12_TEXTURE_COPY_LOCATION bc_upload_src = {};
+  bc_upload_src.pResource = bc_upload;
+  bc_upload_src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  bc_upload_src.PlacedFootprint = bc_footprint;
+  list->CopyTextureRegion(&bc_texture_dst, 0, 0, 0, &bc_upload_src, nullptr);
+  D3D12_RESOURCE_BARRIER bc_texture_barrier = {};
+  bc_texture_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  bc_texture_barrier.Transition.pResource = bc_texture;
+  bc_texture_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  bc_texture_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  bc_texture_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &bc_texture_barrier);
+  D3D12_TEXTURE_COPY_LOCATION bc_readback_dst = {};
+  bc_readback_dst.pResource = bc_readback;
+  bc_readback_dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  bc_readback_dst.PlacedFootprint = bc_footprint;
+  D3D12_TEXTURE_COPY_LOCATION bc_texture_src = {};
+  bc_texture_src.pResource = bc_texture;
+  bc_texture_src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  bc_texture_src.SubresourceIndex = 0;
+  list->CopyTextureRegion(&bc_readback_dst, 0, 0, 0, &bc_texture_src, nullptr);
 
   list->OMSetRenderTargets(0, nullptr, FALSE, &null_dsv_handle);
   list->ClearDepthStencilView(null_dsv_handle,
@@ -968,10 +1169,76 @@ int main() {
   UINT32 array_pixel = 0;
   std::memcpy(&array_pixel, mapped_array_readback + array_footprint.Offset,
               sizeof(array_pixel));
-  array_readback->Unmap(0, nullptr);
   if ((array_pixel & 0x00ffffffu) != 0x0000ff00u) {
     std::cerr << "array RTV readback mismatch: 0x" << std::hex << array_pixel
               << std::dec << "\n";
+    array_readback->Unmap(0, nullptr);
+    cleanup();
+    return 1;
+  }
+  UINT32 array_offset_pixel = 0;
+  std::memcpy(&array_offset_pixel,
+              mapped_array_readback + array_footprint.Offset +
+                  array_footprint.Footprint.RowPitch + sizeof(UINT32),
+              sizeof(array_offset_pixel));
+  if ((array_offset_pixel & 0x00ffffffu) != 0x000000ffu) {
+    std::cerr << "buffer to array RTV copy mismatch: 0x" << std::hex
+              << array_offset_pixel << std::dec << "\n";
+    array_readback->Unmap(0, nullptr);
+    cleanup();
+    return 1;
+  }
+  array_readback->Unmap(0, nullptr);
+
+  if (!CheckHR("MapArrayPartialReadback",
+               array_partial_readback->Map(
+                   0, nullptr,
+                   reinterpret_cast<void **>(&mapped_array_partial_readback)))) {
+    cleanup();
+    return 1;
+  }
+  UINT32 array_partial_pixel = 0;
+  std::memcpy(&array_partial_pixel, mapped_array_partial_readback +
+                                      array_partial_footprint.Offset,
+              sizeof(array_partial_pixel));
+  UINT32 array_buffer_copy_pixel = 0;
+  UINT32 array_buffer_copy_pixel_next_row = 0;
+  std::memcpy(&array_buffer_copy_pixel,
+              mapped_array_partial_readback + array_buffer_copy_dst_footprint.Offset + 2 * sizeof(UINT32),
+              sizeof(array_buffer_copy_pixel));
+  std::memcpy(&array_buffer_copy_pixel_next_row,
+              mapped_array_partial_readback + array_buffer_copy_dst_footprint.Offset +
+                  array_buffer_copy_dst_footprint.Footprint.RowPitch + 2 * sizeof(UINT32),
+              sizeof(array_buffer_copy_pixel_next_row));
+  array_partial_readback->Unmap(0, nullptr);
+  if ((array_partial_pixel & 0x00ffffffu) != 0x0000ff00u) {
+    std::cerr << "partial array RTV readback mismatch: 0x" << std::hex
+              << array_partial_pixel << std::dec << "\n";
+    cleanup();
+    return 1;
+  }
+  if (array_buffer_copy_pixel != 0xff0000ffu || array_buffer_copy_pixel_next_row != 0xff0000ffu) {
+    std::cerr << "buffer footprint copy mismatch: 0x" << std::hex << array_buffer_copy_pixel
+              << ", 0x" << array_buffer_copy_pixel_next_row << std::dec << "\n";
+    cleanup();
+    return 1;
+  }
+
+  if (!CheckHR("MapBCReadback", bc_readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped_bc_readback)))) {
+    cleanup();
+    return 1;
+  }
+  bool bc_copy_matches = true;
+  for (UINT row = 0; row < bc_rows; row++) {
+    if (std::memcmp(mapped_bc_readback + bc_footprint.Offset + row * bc_footprint.Footprint.RowPitch,
+                    bc_data + row * bc_row_size, static_cast<size_t>(bc_row_size)) != 0) {
+      bc_copy_matches = false;
+      break;
+    }
+  }
+  bc_readback->Unmap(0, nullptr);
+  if (!bc_copy_matches) {
+    std::cerr << "BC1 buffer-to-texture-to-buffer copy mismatch\n";
     cleanup();
     return 1;
   }

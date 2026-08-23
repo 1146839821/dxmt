@@ -40,10 +40,14 @@
 
 namespace dxmt {
 
+class MTLD3D12Resource;
+
 class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList {
 public:
   EncoderData *entry;
   size_t encoder_count;
+
+  virtual void CommitResourceStates() = 0;
 };
 
 class MTLD3D12CommandAllocator : public ID3D12CommandAllocator {
@@ -187,6 +191,9 @@ class MTLD3D12GraphicsPipelineState : public MTLD3D12PipelineState {
 public:
   WMT::Reference<WMT::RenderPipelineState> pso;
   WMT::Reference<WMT::DepthStencilState> dsso;
+  WMT::Reference<WMT::DepthStencilState> dsso_stencil_disabled;
+  WMT::Reference<WMT::DepthStencilState> dsso_depth_disabled;
+  WMT::Reference<WMT::DepthStencilState> dsso_depth_stencil_disabled;
   uint32_t slot_mask = 0;
   enum WMTTriangleFillMode fill_mode;
   enum WMTCullMode cull_mode;
