@@ -1,4 +1,5 @@
 #include "metalirconverter_native.h"
+#include "airconv_public.h"
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -280,6 +281,9 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   IRError *error = NULL;
   IRVersionedCSInfo compute_info = {};
   bool compute_info_valid = false;
+  sm50_bitcode_t patched_metallib = {0};
+  struct SM50_COMPILED_BITCODE patched_data = {0};
+  uint8_t *original_metallib = NULL;
   char *entry_point = NULL;
   int result = DXMT_MSC_SUCCESS;
 
@@ -385,12 +389,28 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     goto cleanup;
   }
 
-  params->metallib_size = g_msc_api.IRMetalLibGetBytecodeSize(binary);
-  if (!params->metallib_size) {
+  size_t original_metallib_size = g_msc_api.IRMetalLibGetBytecodeSize(binary);
+  if (!original_metallib_size) {
     dxmt_msc_set_error(params, DXMT_MSC_ERROR_METALLIB, "compiled metallib is empty");
     result = DXMT_MSC_ERROR_METALLIB;
     goto cleanup;
   }
+  original_metallib = malloc(original_metallib_size);
+  if (!original_metallib ||
+      g_msc_api.IRMetalLibGetBytecode(binary, original_metallib) != original_metallib_size) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_METALLIB, "failed to extract metallib bytecode");
+    result = DXMT_MSC_ERROR_METALLIB;
+    goto cleanup;
+  }
+  if (SM50PatchMetalLibUnsupportedDouble(
+          original_metallib, original_metallib_size, &patched_metallib
+      )) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_METALLIB, "failed to patch unsupported double precision AIR");
+    result = DXMT_MSC_ERROR_METALLIB;
+    goto cleanup;
+  }
+  SM50GetCompiledBitcode(patched_metallib, &patched_data);
+  params->metallib_size = patched_data.Size;
 
   reflection = g_msc_api.IRShaderReflectionCreate();
   if (!reflection) {
@@ -436,12 +456,7 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   }
 
   if (params->metallib) {
-    size_t copied_size = g_msc_api.IRMetalLibGetBytecode(binary, (uint8_t *)params->metallib);
-    if (copied_size != params->metallib_size) {
-      dxmt_msc_set_error(params, DXMT_MSC_ERROR_METALLIB, "failed to extract metallib bytecode");
-      result = DXMT_MSC_ERROR_METALLIB;
-      goto cleanup;
-    }
+    memcpy(params->metallib, patched_data.Data, params->metallib_size);
   }
 
   if (params->entry_point_out) {
@@ -449,6 +464,9 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   }
 
 cleanup:
+  if (patched_metallib)
+    SM50DestroyBitcode(patched_metallib);
+  free(original_metallib);
   if (compute_info_valid)
     g_msc_api.IRShaderReflectionReleaseComputeInfo(&compute_info);
   if (reflection)

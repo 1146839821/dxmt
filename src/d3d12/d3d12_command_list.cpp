@@ -867,11 +867,11 @@ public:
           cmd_vs.index = DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT;
           auto &cmd_fs = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
           cmd_fs.type = WMTRenderCommandSetFragmentBuffer;
-           cmd_fs.buffer = buffer.handle;
-           cmd_fs.offset = 0;
-           cmd_fs.index = DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT;
-         }
-       }
+          cmd_fs.buffer = buffer.handle;
+          cmd_fs.offset = 0;
+          cmd_fs.index = DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT;
+        }
+      }
       if (sampler_heap_) {
         auto buffer = sampler_heap_->GetMSCDescriptorHeapBuffer();
         if (buffer) {
@@ -882,11 +882,11 @@ public:
           cmd_vs.index = DXMT_MSC_SAMPLER_HEAP_BIND_POINT;
           auto &cmd_fs = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
           cmd_fs.type = WMTRenderCommandSetFragmentBuffer;
-           cmd_fs.buffer = buffer.handle;
-           cmd_fs.offset = 0;
-           cmd_fs.index = DXMT_MSC_SAMPLER_HEAP_BIND_POINT;
+          cmd_fs.buffer = buffer.handle;
+          cmd_fs.offset = 0;
+          cmd_fs.index = DXMT_MSC_SAMPLER_HEAP_BIND_POINT;
          }
-       }
+      }
       dirty_state_.clr(DirtyState::DescriptorHeaps);
     }
 
@@ -907,9 +907,9 @@ public:
         cmd_fsargbuf.type = WMTRenderCommandSetFragmentBuffer;
         cmd_fsargbuf.buffer = allocator_->gpu_heap_buffer_;
         cmd_fsargbuf.offset = Offset;
-         cmd_fsargbuf.index = use_msc ? static_cast<uint8_t>(DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT)
-                                      : static_cast<uint8_t>(SM50_BINDING_INDEX_ROOT_ARGUMENTS);
-       }
+        cmd_fsargbuf.index = use_msc ? static_cast<uint8_t>(DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT)
+                                     : static_cast<uint8_t>(SM50_BINDING_INDEX_ROOT_ARGUMENTS);
+      }
       dirty_state_.clr(DirtyState::GraphicsRootArguments);
     }
 

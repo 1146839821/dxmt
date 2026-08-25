@@ -308,6 +308,9 @@ AIRCONV_API int SM50Compile(
   sm50_shader_t pShader, struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs,
   const char *FunctionName, sm50_bitcode_t *ppBitcode, sm50_error_t *ppError
 );
+AIRCONV_API int SM50PatchMetalLibUnsupportedDouble(
+  const void *Data, size_t Size, sm50_bitcode_t *pPatched
+);
 AIRCONV_API void SM50GetCompiledBitcode(
   sm50_bitcode_t pBitcode, struct SM50_COMPILED_BITCODE *pData
 );

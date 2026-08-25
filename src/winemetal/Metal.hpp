@@ -1211,17 +1211,6 @@ InitializeMeshRenderPipelineInfo(WMTMeshRenderPipelineInfo &info) {
   info.num_binary_archives_for_lookup = 0;
   info.fail_on_binary_archive_miss = false;
   info.support_indirect_command_buffers = false;
-  info.msc_tessellation = false;
-  info.msc_stage_in_library = NULL_OBJECT_HANDLE;
-  info.msc_vertex_library = NULL_OBJECT_HANDLE;
-  info.msc_hull_library = NULL_OBJECT_HANDLE;
-  info.msc_domain_library = NULL_OBJECT_HANDLE;
-  info.msc_fragment_library = NULL_OBJECT_HANDLE;
-  info.msc_vertex_function_name.set(nullptr);
-  info.msc_hull_function_name.set(nullptr);
-  info.msc_domain_function_name.set(nullptr);
-  info.msc_fragment_function_name.set(nullptr);
-  info.msc_tessellation_config = {};
 }
 
 inline void

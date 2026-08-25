@@ -340,7 +340,7 @@ public:
     auto ps_backend = pDesc->PS.pShaderBytecode ? DetectD3D12ShaderBackend(pDesc->PS) : D3D12ShaderBackend::Airconv;
     const bool use_msc = vs_backend == D3D12ShaderBackend::MetalShaderConverter;
     if (vs_backend == D3D12ShaderBackend::Unsupported || ps_backend == D3D12ShaderBackend::Unsupported)
-      return E_FAIL;
+    return E_FAIL;
     if ((ps_backend == D3D12ShaderBackend::MetalShaderConverter) != use_msc)
       return E_NOTIMPL;
 
@@ -566,25 +566,27 @@ public:
 
     // PSO
     {
+      info.vertex_function = vs_func.handle;
+      info.fragment_function = ps_func.handle;
+
+      switch (pDesc->PrimitiveTopologyType) {
+      case D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT:
+          info.input_primitive_topology = WMTPrimitiveTopologyClassPoint;
+          break;
+      case D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE:
+          info.input_primitive_topology = WMTPrimitiveTopologyClassLine;
+          break;
+      case D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE:
+      case D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH:
+          info.input_primitive_topology = WMTPrimitiveTopologyClassTriangle;
+          break;
+      default:
+          break;
+      }
+
       info.raster_sample_count = pDesc->SampleDesc.Count;
       info.support_indirect_command_buffers = true;
 
-      info.vertex_function = vs_func.handle;
-      info.fragment_function = ps_func.handle;
-      switch (pDesc->PrimitiveTopologyType) {
-      case D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT:
-        info.input_primitive_topology = WMTPrimitiveTopologyClassPoint;
-        break;
-      case D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE:
-        info.input_primitive_topology = WMTPrimitiveTopologyClassLine;
-        break;
-      case D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE:
-      case D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH:
-        info.input_primitive_topology = WMTPrimitiveTopologyClassTriangle;
-        break;
-      default:
-        break;
-      }
       pso = metal.newRenderPipelineState(info, err);
 
       if (!pso) {

@@ -19,17 +19,13 @@
 #include <vector>
 
 #include "metallib_writer.hpp"
+#include "compiled_bitcode.hpp"
 #include "nt/air_builder.hpp"
 #include "shader_common.hpp"
 
 #include "airconv_context.hpp"
 
 #include "ftl.hpp"
-
-class SM50CompiledBitcodeInternal {
-public:
-  llvm::SmallVector<char, 0> vec;
-};
 
 class SM50ErrorInternal {
 public:

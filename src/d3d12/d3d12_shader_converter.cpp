@@ -30,7 +30,7 @@ constexpr uint32_t kDXILFourCC = MakeFourCC('D', 'X', 'I', 'L');
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
 // converter defaults change.
-constexpr uint32_t kMSCConversionCacheVersion = 1;
+constexpr uint32_t kMSCConversionCacheVersion = 3;
 constexpr uint32_t kMSCConverterAPIVersion = 0x040001;
 constexpr uint32_t kMSCMetalTargetVersion = 0;
 constexpr uint32_t kMSCCompileFlags = 0;
@@ -46,7 +46,6 @@ struct MSCSerializedCacheHeader {
   uint64_t metallib_size;
   uint64_t entry_point_size;
   uint32_t threadgroup_size[3];
-  uint32_t reserved;
 };
 
 struct MSCConversionCache {
@@ -195,10 +194,10 @@ LogMSCFailure(const dxmt_msc_compile_dxil_params &params, int result) {
 
 int
 CompileDXIL(
-    const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const void *root_signature, size_t root_signature_size,
-    void *metallib, size_t metallib_capacity, char *entry_point, size_t entry_point_capacity, size_t *metallib_size,
-    size_t *entry_point_size, std::array<uint32_t, 3> *threadgroup_size, char *error_message,
-    size_t error_message_capacity
+  const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const void *root_signature, size_t root_signature_size,
+  void *metallib, size_t metallib_capacity, char *entry_point, size_t entry_point_capacity, size_t *metallib_size,
+  size_t *entry_point_size, std::array<uint32_t, 3> *threadgroup_size, char *error_message,
+  size_t error_message_capacity
 ) {
   dxmt_msc_compile_dxil_params params = {};
   params.dxil = shader.pShaderBytecode;
@@ -299,8 +298,7 @@ ConvertD3D12Shader(
 
   result = CompileDXIL(
       shader, stage, root_signature, root_signature_size, converted.metallib.data(), converted.metallib.size(),
-      entry_point.data(), entry_point.size(), &metallib_size, &entry_point_size, &threadgroup_size, error_message,
-      sizeof(error_message)
+      entry_point.data(), entry_point.size(), &metallib_size, &entry_point_size, &threadgroup_size, error_message, sizeof(error_message)
   );
   if (result != DXMT_MSC_SUCCESS)
     return E_FAIL;
