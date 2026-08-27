@@ -397,10 +397,7 @@ public:
 
   void
   ApplyLayerProps() {
-    auto target_color_space = ConvertColorSpace(
-        desc_.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : colorspace_,
-        LayerSupportEDR()
-    );
+    auto target_color_space = ConvertColorSpace(colorspace_, LayerSupportEDR());
     if (presenter->changeLayerProperties(
             ConvertSwapChainFormat(desc_.Format), target_color_space, desc_.Width * scale_factor,
             desc_.Height * scale_factor, desc_.SampleDesc.Count
@@ -626,7 +623,7 @@ public:
   CheckColorSpaceSupport(DXGI_COLOR_SPACE_TYPE ColorSpace, UINT *pColorSpaceSupport) override {
     if (!pColorSpaceSupport)
       return E_INVALIDARG;
-    *pColorSpaceSupport = CGColorSpace_checkColorSpaceSupported(ConvertColorSpace(ColorSpace, false))
+    *pColorSpaceSupport = CGColorSpace_checkColorSpaceSupported(ConvertColorSpace(ColorSpace, LayerSupportEDR()))
                               ? DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT
                               : 0;
     return S_OK;
@@ -658,13 +655,12 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type, UINT Size, void *pMetaData) override {
-    return S_OK;
     if (Type == DXGI_HDR_METADATA_TYPE_NONE) {
       presenter->changeHDRMetadata(nullptr);
       return S_OK;
     }
     if (Type == DXGI_HDR_METADATA_TYPE_HDR10) {
-      if (Size != sizeof(WMTHDRMetadata))
+      if (Size != sizeof(WMTHDRMetadata) || !pMetaData)
         return E_INVALIDARG;
       presenter->changeHDRMetadata(reinterpret_cast<const WMTHDRMetadata *>(pMetaData));
       return S_OK;

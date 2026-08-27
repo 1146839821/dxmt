@@ -18,6 +18,10 @@ dx12_resource_tests = executable('dx12_resource_tests', 'dx12_resource_tests.cpp
   dependencies: [ d3d12_dep ],
 )
 
+dx12_hdr = executable('dx12_hdr', 'dx12_hdr.cpp',
+  dependencies: [ d3d12_dep, dxgi_dep ],
+)
+
 dxc_command = []
 dxc = find_program('dxc', required: false)
 if dxc.found()
