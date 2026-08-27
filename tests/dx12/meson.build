@@ -177,4 +177,22 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_hdr_vs_fixture',
+    input: 'dx12_hdr.hlsl',
+    output: 'dx12_hdr.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: true,
+  )
+  custom_target('dx12_hdr_linear_ps_fixture',
+    input: 'dx12_hdr.hlsl',
+    output: 'dx12_hdr.linear.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main_linear', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: true,
+  )
+  custom_target('dx12_hdr_pq_ps_fixture',
+    input: 'dx12_hdr.hlsl',
+    output: 'dx12_hdr.pq.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main_pq', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: true,
+  )
 endif
