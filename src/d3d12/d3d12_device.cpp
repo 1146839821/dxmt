@@ -981,7 +981,7 @@ public:
     hr = ValidateHeapProperties(pHeapProps, HeapFlags, advertise_numa_);
     if (FAILED(hr))
       return hr;
-    hr = ValidateResourceDescs(pDesc, pHeapProps->Type);
+    hr = ValidateResourceDescs(pDesc, pHeapProps);
     if (FAILED(hr))
       return hr;
     hr = ValidateResourceStates(InitialState, pHeapProps);
@@ -1067,7 +1067,7 @@ public:
       ERR("CreatePlacedResource: invalid heap properties");
       return hr;
     }
-    hr = ValidateResourceDescs(pDesc, heap_desc.Properties.Type);
+    hr = ValidateResourceDescs(pDesc, &heap_desc.Properties);
     if (FAILED(hr)) {
       ERR("CreatePlacedResource: invalid resource description");
       return hr;

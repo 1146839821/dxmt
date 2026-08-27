@@ -295,8 +295,25 @@ ValidateResourceStates(D3D12_RESOURCE_STATES State, const D3D12_HEAP_PROPERTIES 
   return S_OK;
 }
 
+bool
+IsCpuVisibleHeap(const D3D12_HEAP_PROPERTIES *pHeapProps) {
+  switch (pHeapProps->Type) {
+  case D3D12_HEAP_TYPE_UPLOAD:
+  case D3D12_HEAP_TYPE_READBACK:
+    return true;
+  case D3D12_HEAP_TYPE_CUSTOM:
+    return pHeapProps->CPUPageProperty != D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE;
+  default:
+    return false;
+  }
+}
+
 HRESULT
-ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, D3D12_HEAP_TYPE HeapType) {
+ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERTIES *pHeapProps) {
+  if (!pDesc || !pHeapProps)
+    return E_INVALIDARG;
+
+  auto HeapType = pHeapProps->Type;
   switch (HeapType) {
   case D3D12_HEAP_TYPE_UPLOAD: {
     if (pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
@@ -327,6 +344,23 @@ ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, D3D12_HEAP_TYPE HeapType
   case D3D12_RESOURCE_DIMENSION_BUFFER: {
     if (pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)
       return E_INVALIDARG;
+    break;
+  }
+  case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+  case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+  case D3D12_RESOURCE_DIMENSION_TEXTURE3D: {
+    if (pDesc->Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR)
+      break;
+    if (pDesc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
+      if (!(pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER))
+        return E_INVALIDARG;
+      if (pDesc->MipLevels != 1 || pDesc->DepthOrArraySize != 1)
+        return E_INVALIDARG;
+      if (IsCpuVisibleHeap(pHeapProps))
+        return E_INVALIDARG;
+    } else {
+      return E_INVALIDARG;
+    }
     break;
   }
   default:
