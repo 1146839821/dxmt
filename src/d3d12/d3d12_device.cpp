@@ -1074,7 +1074,10 @@ public:
       D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE *OptimizedClearValue,
       ID3D12ProtectedResourceSession *pSession, REFIID riid, void **ppResource
   ) {
-    return E_NOTIMPL;
+    InitReturnPtr(ppResource);
+    if (pSession)
+      return E_NOTIMPL;
+    return CreateCommittedResource(pHeapProps, HeapFlags, pDesc, InitialState, OptimizedClearValue, riid, ppResource);
   }
 
   HRESULT STDMETHODCALLTYPE

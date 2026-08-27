@@ -67,6 +67,7 @@ int main() {
   ID3D12CommandSignature *command_signature = nullptr;
   ID3D12Device1 *device1 = nullptr;
   ID3D12Device4 *device4 = nullptr;
+  ID3D12Resource *committed1_resource = nullptr;
   ID3D12GraphicsCommandList2 *list2 = nullptr;
   HANDLE event = nullptr;
   HANDLE multiple_event = nullptr;
@@ -84,6 +85,8 @@ int main() {
       multiple_fence->Release();
     if (list2)
       list2->Release();
+    if (committed1_resource)
+      committed1_resource->Release();
     if (list)
       list->Release();
     if (destination)
@@ -173,6 +176,29 @@ int main() {
     return 1;
   }
   info_queue->SetMuteDebugOutput(TRUE);
+
+  D3D12_HEAP_PROPERTIES committed1_properties = {};
+  committed1_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+  committed1_properties.CreationNodeMask = 1;
+  committed1_properties.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC committed1_desc = {};
+  committed1_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  committed1_desc.Width = 16ull * 1024 * 1024;
+  committed1_desc.Height = 1;
+  committed1_desc.DepthOrArraySize = 1;
+  committed1_desc.MipLevels = 1;
+  committed1_desc.SampleDesc.Count = 1;
+  committed1_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  if (!CheckHR(
+          "CreateCommittedResource1",
+          device4->CreateCommittedResource1(
+              &committed1_properties, D3D12_HEAP_FLAG_NONE, &committed1_desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+              nullptr, IID_PPV_ARGS(&committed1_resource)
+          )
+      )) {
+    cleanup();
+    return 1;
+  }
 
   D3D12_FEATURE_DATA_ARCHITECTURE architecture = {};
   architecture.NodeIndex = 0;
