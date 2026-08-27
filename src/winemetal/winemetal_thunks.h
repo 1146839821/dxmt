@@ -8,6 +8,7 @@
 
 enum winemetal_unixcall {
   unix_dispatchdata_copy = 148,
+  unix_mtltexture_getbytes = 149,
 };
 
 struct unixcall_generic_obj_ret {
