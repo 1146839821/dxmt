@@ -376,6 +376,50 @@ MTLDevice_newMeshRenderPipelineState(
   return params.ret_pso;
 }
 
+WINEMETAL_API obj_handle_t
+MTLDevice_newMSCTessellationPipelineState(
+    obj_handle_t device, const struct WMTMSCTessellationPipelineInfo *info, obj_handle_t *err_out
+) {
+  struct unixcall_mtldevice_newmsctessellationpso params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  params.ret_error = 0;
+  params.ret_pso = 0;
+  UNIX_CALL(unix_mtldevice_newmsctessellationpso, &params);
+  if (err_out)
+    *err_out = params.ret_error;
+  return params.ret_pso;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newMSCTessellatorTables(obj_handle_t device) {
+  struct unixcall_generic_obj_obj_ret params;
+  params.handle = device;
+  params.ret = 0;
+  UNIX_CALL(unix_mtldevice_newmsctessellatortables, &params);
+  return params.ret;
+}
+
+WINEMETAL_API bool
+MTLValidateMSCTessellationPipeline(
+    uint32_t hs_output_primitive, uint32_t gs_input_primitive, uint32_t hs_output_control_point_size,
+    uint32_t ds_input_control_point_size, uint32_t hs_patch_constants_size, uint32_t ds_patch_constants_size,
+    uint32_t hs_output_control_point_count, uint32_t ds_input_control_point_count
+) {
+  struct unixcall_mtlvalidate_msctessellationpipeline params;
+  params.hs_output_primitive = hs_output_primitive;
+  params.gs_input_primitive = gs_input_primitive;
+  params.hs_output_control_point_size = hs_output_control_point_size;
+  params.ds_input_control_point_size = ds_input_control_point_size;
+  params.hs_patch_constants_size = hs_patch_constants_size;
+  params.ds_patch_constants_size = ds_patch_constants_size;
+  params.hs_output_control_point_count = hs_output_control_point_count;
+  params.ds_input_control_point_count = ds_input_control_point_count;
+  params.ret = false;
+  UNIX_CALL(unix_mtlvalidate_msctessellationpipeline, &params);
+  return params.ret;
+}
+
 WINEMETAL_API void
 MTLBlitCommandEncoder_encodeCommands(obj_handle_t encoder, const struct wmtcmd_base *cmd_head) {
   struct unixcall_generic_obj_cmd_noret params;

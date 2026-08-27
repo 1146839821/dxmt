@@ -3,6 +3,7 @@ winemetal_src = [
   '../winemetal/unix/winemetal_unix.c',
   '../winemetal/unix/cache.c',
   '../winemetal/unix/metalirconverter.c',
+  '../winemetal/unix/metalirconverter_runtime.cpp',
 ]
 winemetal_link_depends = []
 

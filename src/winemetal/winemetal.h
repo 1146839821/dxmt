@@ -886,11 +886,50 @@ struct WMTMeshRenderPipelineInfo {
   uint8_t padding[5];
 };
 
+#define WMT_MSC_FUNCTION_NAME_CAPACITY 128
+
+struct WMTMSCTessellationPipelineConfig {
+  uint32_t output_primitive_type;
+  uint32_t vs_output_size_in_bytes;
+  uint32_t gs_max_input_primitives_per_mesh_threadgroup;
+  uint32_t hs_max_patches_per_object_threadgroup;
+  uint32_t hs_input_control_point_count;
+  uint32_t hs_max_object_threads_per_threadgroup;
+  float hs_max_tessellation_factor;
+  uint32_t gs_instance_count;
+};
+
+struct WMTMSCTessellationPipelineInfo {
+  struct WMTMeshRenderPipelineInfo base;
+  obj_handle_t stage_in_library;
+  obj_handle_t vertex_library;
+  obj_handle_t hull_library;
+  obj_handle_t domain_library;
+  obj_handle_t fragment_library;
+  char vertex_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
+  char hull_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
+  char domain_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
+  char fragment_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
+  struct WMTMSCTessellationPipelineConfig config;
+};
+
 WINEMETAL_API obj_handle_t
 MTLDevice_newRenderPipelineState(obj_handle_t device, const struct WMTRenderPipelineInfo *info, obj_handle_t *err_out);
 
 WINEMETAL_API obj_handle_t MTLDevice_newMeshRenderPipelineState(
     obj_handle_t device, const struct WMTMeshRenderPipelineInfo *info, obj_handle_t *err_out
+);
+
+WINEMETAL_API obj_handle_t MTLDevice_newMSCTessellationPipelineState(
+    obj_handle_t device, const struct WMTMSCTessellationPipelineInfo *info, obj_handle_t *err_out
+);
+
+WINEMETAL_API obj_handle_t MTLDevice_newMSCTessellatorTables(obj_handle_t device);
+
+WINEMETAL_API bool MTLValidateMSCTessellationPipeline(
+    uint32_t hs_output_primitive, uint32_t gs_input_primitive, uint32_t hs_output_control_point_size,
+    uint32_t ds_input_control_point_size, uint32_t hs_patch_constants_size, uint32_t ds_patch_constants_size,
+    uint32_t hs_output_control_point_count, uint32_t ds_input_control_point_count
 );
 
 struct WMTSize {
@@ -1245,6 +1284,8 @@ enum WMTRenderCommandType : uint16_t {
   WMTRenderCommandExecuteCommandsInBuffer,
   WMTRenderCommandSetBlendFactor,
   WMTRenderCommandSetStencilRef,
+  WMTRenderCommandMSCTessellationDraw,
+  WMTRenderCommandMSCTessellationDrawIndexed,
 };
 
 struct wmtcmd_render_nop {
@@ -1619,6 +1660,34 @@ struct wmtcmd_render_dxmt_tessellation_mesh_draw_indexed_indirect {
   uint64_t index_buffer_offset;
   uint32_t threads_per_patch;
   uint32_t patch_per_group;
+};
+
+struct wmtcmd_render_msc_tessellation_draw {
+  enum WMTRenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint32_t primitive_topology;
+  uint32_t instance_count;
+  uint32_t vertex_count_per_instance;
+  uint32_t base_instance;
+  uint32_t base_vertex;
+  struct WMTMSCTessellationPipelineConfig config;
+};
+
+struct wmtcmd_render_msc_tessellation_draw_indexed {
+  enum WMTRenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint32_t primitive_topology;
+  uint32_t index_type;
+  obj_handle_t index_buffer;
+  uint64_t index_buffer_offset;
+  uint32_t instance_count;
+  uint32_t index_count_per_instance;
+  uint32_t base_instance;
+  int32_t base_vertex;
+  uint32_t start_index;
+  struct WMTMSCTessellationPipelineConfig config;
 };
 
 struct wmtcmd_render_dispatch_threads_per_tile {

@@ -30,7 +30,7 @@ constexpr uint32_t kDXILFourCC = MakeFourCC('D', 'X', 'I', 'L');
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
 // converter defaults change.
-constexpr uint32_t kMSCConversionCacheVersion = 3;
+constexpr uint32_t kMSCConversionCacheVersion = 4;
 constexpr uint32_t kMSCConverterAPIVersion = 0x040001;
 constexpr uint32_t kMSCMetalTargetVersion = 0;
 constexpr uint32_t kMSCCompileFlags = 0;
@@ -44,8 +44,10 @@ struct MSCSerializedCacheHeader {
   uint32_t magic;
   uint32_t version;
   uint64_t metallib_size;
+  uint64_t stage_in_metallib_size;
   uint64_t entry_point_size;
   uint32_t threadgroup_size[3];
+  dxmt_msc_shader_reflection reflection;
 };
 
 struct MSCConversionCache {
@@ -61,7 +63,8 @@ GetMSCConversionCache() {
 
 Sha1Digest
 MakeMSCConversionCacheKey(
-    const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const void *root_signature, size_t root_signature_size
+    const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const void *root_signature, size_t root_signature_size,
+    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags
 ) {
   Sha1HashState hash;
   hash.update(kMSCConversionCacheNamespace, sizeof(kMSCConversionCacheNamespace) - 1);
@@ -72,6 +75,10 @@ MakeMSCConversionCacheKey(
   hash.update(kMSCCompileFlags);
   hash.update(kMSCBindingLayoutVersion);
   hash.update(stage);
+  compile_flags |= input_layout ? DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0;
+  hash.update(compile_flags);
+  if (input_layout)
+    hash.update(input_layout, sizeof(*input_layout));
   uint64_t shader_size = shader.BytecodeLength;
   hash.update(shader_size);
   hash.update(Sha1HashState::compute(shader.pShaderBytecode, shader.BytecodeLength));
@@ -93,21 +100,33 @@ DeserializeMSCConversionCache(const uint8_t *data, size_t data_size, D3D12Conver
   memcpy(&header, data, sizeof(header));
   if (header.magic != kMSCSerializedCacheMagic || header.version != kMSCConversionCacheVersion)
     return false;
-  if (header.metallib_size > kMSCSerializedCacheLimit || header.entry_point_size > kMSCSerializedCacheLimit)
+  if (header.metallib_size > kMSCSerializedCacheLimit || header.stage_in_metallib_size > kMSCSerializedCacheLimit ||
+      header.entry_point_size > kMSCSerializedCacheLimit)
     return false;
 
-  uint64_t payload_size = header.metallib_size + header.entry_point_size;
-  if (payload_size < header.metallib_size || payload_size > data_size - sizeof(header))
+  uint64_t payload_size = header.metallib_size;
+  if (payload_size > UINT64_MAX - header.stage_in_metallib_size)
+    return false;
+  payload_size += header.stage_in_metallib_size;
+  if (payload_size > UINT64_MAX - header.entry_point_size)
+    return false;
+  payload_size += header.entry_point_size;
+  if (payload_size > data_size - sizeof(header))
     return false;
 
   size_t offset = sizeof(header);
   converted.metallib.assign(data + offset, data + offset + static_cast<size_t>(header.metallib_size));
   offset += static_cast<size_t>(header.metallib_size);
+  converted.stage_in_metallib.assign(
+      data + offset, data + offset + static_cast<size_t>(header.stage_in_metallib_size)
+  );
+  offset += static_cast<size_t>(header.stage_in_metallib_size);
   converted.entry_point.assign(reinterpret_cast<const char *>(data + offset),
                                static_cast<size_t>(header.entry_point_size));
   converted.threadgroup_size = {
       header.threadgroup_size[0], header.threadgroup_size[1], header.threadgroup_size[2]
   };
+  converted.reflection = header.reflection;
   converted.backend = D3D12ShaderBackend::MetalShaderConverter;
   return !converted.metallib.empty() && !converted.entry_point.empty();
 }
@@ -116,6 +135,7 @@ std::vector<uint8_t>
 SerializeMSCConversionCache(const D3D12ConvertedShader &converted) {
   if (converted.metallib.empty() || converted.entry_point.empty() ||
       converted.metallib.size() > kMSCSerializedCacheLimit ||
+      converted.stage_in_metallib.size() > kMSCSerializedCacheLimit ||
       converted.entry_point.size() > kMSCSerializedCacheLimit)
     return {};
 
@@ -123,13 +143,24 @@ SerializeMSCConversionCache(const D3D12ConvertedShader &converted) {
   header.magic = kMSCSerializedCacheMagic;
   header.version = kMSCConversionCacheVersion;
   header.metallib_size = converted.metallib.size();
+  header.stage_in_metallib_size = converted.stage_in_metallib.size();
   header.entry_point_size = converted.entry_point.size();
   header.threadgroup_size[0] = converted.threadgroup_size[0];
   header.threadgroup_size[1] = converted.threadgroup_size[1];
   header.threadgroup_size[2] = converted.threadgroup_size[2];
+  header.reflection = converted.reflection;
 
-  uint64_t total_size = sizeof(header) + header.metallib_size + header.entry_point_size;
-  if (total_size < sizeof(header) || total_size > kMSCSerializedCacheLimit || total_size > SIZE_MAX)
+  uint64_t total_size = sizeof(header);
+  if (header.metallib_size > UINT64_MAX - total_size)
+    return {};
+  total_size += header.metallib_size;
+  if (header.stage_in_metallib_size > UINT64_MAX - total_size)
+    return {};
+  total_size += header.stage_in_metallib_size;
+  if (header.entry_point_size > UINT64_MAX - total_size)
+    return {};
+  total_size += header.entry_point_size;
+  if (total_size > kMSCSerializedCacheLimit || total_size > SIZE_MAX)
     return {};
 
   std::vector<uint8_t> result(static_cast<size_t>(total_size));
@@ -137,6 +168,8 @@ SerializeMSCConversionCache(const D3D12ConvertedShader &converted) {
   size_t offset = sizeof(header);
   memcpy(result.data() + offset, converted.metallib.data(), converted.metallib.size());
   offset += converted.metallib.size();
+  memcpy(result.data() + offset, converted.stage_in_metallib.data(), converted.stage_in_metallib.size());
+  offset += converted.stage_in_metallib.size();
   memcpy(result.data() + offset, converted.entry_point.data(), converted.entry_point.size());
   return result;
 }
@@ -195,18 +228,25 @@ LogMSCFailure(const dxmt_msc_compile_dxil_params &params, int result) {
 int
 CompileDXIL(
   const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const void *root_signature, size_t root_signature_size,
+  const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
   void *metallib, size_t metallib_capacity, char *entry_point, size_t entry_point_capacity, size_t *metallib_size,
-  size_t *entry_point_size, std::array<uint32_t, 3> *threadgroup_size, char *error_message,
-  size_t error_message_capacity
+  size_t *entry_point_size, std::array<uint32_t, 3> *threadgroup_size, void *stage_in_metallib,
+  size_t stage_in_metallib_capacity, size_t *stage_in_metallib_size, dxmt_msc_shader_reflection *reflection,
+  char *error_message, size_t error_message_capacity
 ) {
   dxmt_msc_compile_dxil_params params = {};
   params.dxil = shader.pShaderBytecode;
   params.dxil_size = shader.BytecodeLength;
   params.stage = stage;
+  params.reserved = compile_flags;
+  if (input_layout)
+    params.input_layout = *input_layout;
   params.root_signature = root_signature;
   params.root_signature_size = root_signature_size;
   params.metallib = metallib;
   params.metallib_capacity = metallib_capacity;
+  params.stage_in_metallib = stage_in_metallib;
+  params.stage_in_metallib_capacity = stage_in_metallib_capacity;
   params.entry_point_out = entry_point;
   params.entry_point_capacity = entry_point_capacity;
   params.error_message = error_message;
@@ -217,11 +257,15 @@ CompileDXIL(
     *metallib_size = params.metallib_size;
   if (entry_point_size)
     *entry_point_size = params.entry_point_size;
+  if (stage_in_metallib_size)
+    *stage_in_metallib_size = params.stage_in_metallib_size;
   if (threadgroup_size) {
     (*threadgroup_size)[0] = params.threadgroup_size[0];
     (*threadgroup_size)[1] = params.threadgroup_size[1];
     (*threadgroup_size)[2] = params.threadgroup_size[2];
   }
+  if (reflection)
+    *reflection = params.reflection;
   if (result != DXMT_MSC_SUCCESS)
     LogMSCFailure(params, result);
   return result;
@@ -250,7 +294,7 @@ DetectD3D12ShaderBackend(const D3D12_SHADER_BYTECODE &shader) {
 HRESULT
 ConvertD3D12Shader(
     const D3D12_SHADER_BYTECODE &shader, uint32_t stage, D3D12ConvertedShader &converted, const void *root_signature,
-    size_t root_signature_size
+    size_t root_signature_size, const dxmt_msc_input_layout *input_layout, uint32_t compile_flags
 ) {
   if (DetectD3D12ShaderBackend(shader) != D3D12ShaderBackend::MetalShaderConverter)
     return E_INVALIDARG;
@@ -260,7 +304,10 @@ ConvertD3D12Shader(
     return E_FAIL;
   }
 
-  auto cache_key = MakeMSCConversionCacheKey(shader, stage, root_signature, root_signature_size);
+  compile_flags |= input_layout ? DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0;
+  auto cache_key = MakeMSCConversionCacheKey(
+      shader, stage, root_signature, root_signature_size, input_layout, compile_flags
+  );
   auto &cache = GetMSCConversionCache();
   {
     std::shared_lock<std::shared_mutex> lock(cache.mutex);
@@ -280,12 +327,15 @@ ConvertD3D12Shader(
 
   char error_message[1024] = {};
   size_t metallib_size = 0;
+  size_t stage_in_metallib_size = 0;
   size_t entry_point_size = 0;
   std::array<uint32_t, 3> threadgroup_size = {};
+  dxmt_msc_shader_reflection reflection = {};
 
   int result = CompileDXIL(
-      shader, stage, root_signature, root_signature_size, nullptr, 0, nullptr, 0, &metallib_size, &entry_point_size,
-      &threadgroup_size, error_message, sizeof(error_message)
+      shader, stage, root_signature, root_signature_size, input_layout, compile_flags, nullptr, 0, nullptr, 0,
+      &metallib_size, &entry_point_size, &threadgroup_size, nullptr, 0, &stage_in_metallib_size, &reflection,
+      error_message, sizeof(error_message)
   );
   if (result != DXMT_MSC_SUCCESS)
     return E_FAIL;
@@ -293,12 +343,15 @@ ConvertD3D12Shader(
     return E_FAIL;
 
   converted.metallib.resize(metallib_size);
+  converted.stage_in_metallib.resize(stage_in_metallib_size);
   std::vector<char> entry_point(entry_point_size);
   error_message[0] = '\0';
 
   result = CompileDXIL(
-      shader, stage, root_signature, root_signature_size, converted.metallib.data(), converted.metallib.size(),
-      entry_point.data(), entry_point.size(), &metallib_size, &entry_point_size, &threadgroup_size, error_message, sizeof(error_message)
+      shader, stage, root_signature, root_signature_size, input_layout, compile_flags, converted.metallib.data(),
+      converted.metallib.size(), entry_point.data(), entry_point.size(), &metallib_size, &entry_point_size,
+      &threadgroup_size, converted.stage_in_metallib.data(), converted.stage_in_metallib.size(),
+      &stage_in_metallib_size, &reflection, error_message, sizeof(error_message)
   );
   if (result != DXMT_MSC_SUCCESS)
     return E_FAIL;
@@ -310,6 +363,7 @@ ConvertD3D12Shader(
 
   converted.entry_point.assign(entry_point.data(), entry_point_size - 1);
   converted.threadgroup_size = threadgroup_size;
+  converted.reflection = reflection;
   converted.backend = D3D12ShaderBackend::MetalShaderConverter;
 
   {

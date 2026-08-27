@@ -51,6 +51,59 @@ enum dxmt_msc_binding_point {
   DXMT_MSC_SAMPLER_HEAP_BIND_POINT = 1,
   DXMT_MSC_VERTEX_BUFFER_BIND_POINT = 6,
   DXMT_MSC_STAGE_IN_ATTRIBUTE_START_INDEX = 11,
+  DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT = 3,
+  DXMT_MSC_RUNTIME_TESSELLATOR_TABLES_BIND_POINT = 7,
+};
+
+enum dxmt_msc_compile_flags {
+  /* The existing reserved field carries options for the native compiler. */
+  DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION = 1u << 0,
+  DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN = 1u << 1,
+};
+
+#define DXMT_MSC_SEMANTIC_NAME_CAPACITY 64
+#define DXMT_MSC_PATCH_CONSTANT_NAME_CAPACITY 128
+
+struct dxmt_msc_shader_reflection {
+  uint32_t stage;
+  uint32_t vertex_output_size_in_bytes;
+
+  uint32_t hs_max_patches_per_object_threadgroup;
+  uint32_t hs_max_object_threads_per_patch;
+  uint32_t hs_patch_constants_size;
+  uint32_t hs_static_payload_size;
+  uint32_t hs_payload_size_per_patch;
+  uint32_t hs_input_control_point_count;
+  uint32_t hs_output_control_point_count;
+  uint32_t hs_output_control_point_size;
+  uint32_t hs_tessellator_domain;
+  uint32_t hs_tessellator_partitioning;
+  uint32_t hs_tessellator_output_primitive;
+  uint32_t hs_tessellation_type_half;
+  float hs_max_tessellation_factor;
+  char hs_patch_constant_function[DXMT_MSC_PATCH_CONSTANT_NAME_CAPACITY];
+
+  uint32_t ds_tessellator_domain;
+  uint32_t ds_max_input_prims_per_mesh_threadgroup;
+  uint32_t ds_input_control_point_count;
+  uint32_t ds_input_control_point_size;
+  uint32_t ds_patch_constants_size;
+  uint32_t ds_tessellation_type_half;
+};
+
+struct dxmt_msc_input_element {
+  char semantic_name[DXMT_MSC_SEMANTIC_NAME_CAPACITY];
+  uint32_t semantic_index;
+  uint32_t format;
+  uint32_t input_slot;
+  uint32_t aligned_byte_offset;
+  uint32_t instance_data_step_rate;
+  uint32_t input_slot_class;
+};
+
+struct dxmt_msc_input_layout {
+  uint32_t num_elements;
+  struct dxmt_msc_input_element elements[31];
 };
 
 struct dxmt_msc_descriptor_entry {
@@ -71,7 +124,9 @@ struct dxmt_msc_compile_dxil_params {
   const void *dxil;
   size_t dxil_size;
   uint32_t stage;
-  uint32_t reserved;
+  uint32_t reserved; /* dxmt_msc_compile_flags */
+
+  struct dxmt_msc_input_layout input_layout;
 
   const void *root_signature;
   size_t root_signature_size;
@@ -83,12 +138,17 @@ struct dxmt_msc_compile_dxil_params {
   size_t metallib_capacity;
   size_t metallib_size;
 
+  void *stage_in_metallib;
+  size_t stage_in_metallib_capacity;
+  size_t stage_in_metallib_size;
+
   char *entry_point_out;
   size_t entry_point_capacity;
   size_t entry_point_size;
 
   uint32_t threadgroup_size[3];
   uint32_t error_code;
+  struct dxmt_msc_shader_reflection reflection;
 
   char *error_message;
   size_t error_message_capacity;
@@ -102,7 +162,9 @@ struct dxmt_msc_compile_dxil_params32 {
   uint32_t dxil;
   uint32_t dxil_size;
   uint32_t stage;
-  uint32_t reserved;
+  uint32_t reserved; /* dxmt_msc_compile_flags */
+
+  struct dxmt_msc_input_layout input_layout;
 
   uint32_t root_signature;
   uint32_t root_signature_size;
@@ -114,12 +176,17 @@ struct dxmt_msc_compile_dxil_params32 {
   uint32_t metallib_capacity;
   uint32_t metallib_size;
 
+  uint32_t stage_in_metallib;
+  uint32_t stage_in_metallib_capacity;
+  uint32_t stage_in_metallib_size;
+
   uint32_t entry_point_out;
   uint32_t entry_point_capacity;
   uint32_t entry_point_size;
 
   uint32_t threadgroup_size[3];
   uint32_t error_code;
+  struct dxmt_msc_shader_reflection reflection;
 
   uint32_t error_message;
   uint32_t error_message_capacity;

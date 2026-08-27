@@ -42,6 +42,7 @@ enum class DirtyState {
 enum class DrawCallStatus {
   Invalid,
   Ordinary,
+  MSCTessellation,
 };
 
 inline bool
@@ -340,6 +341,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   Com<MTLD3D12RootSignature, false> rootsig_compute_;
   Com<MTLD3D12DescriptorHeap, true> descriptor_heap_;
   Com<MTLD3D12SamplerDescriptorHeap, true> sampler_heap_;
+  WMT::Reference<WMT::Buffer> msc_dummy_buffer_;
   uint64_t rootarg_compute_staging_[64];
 
   struct ResourceStateTransition {
@@ -408,6 +410,17 @@ public:
     rootsig_compute_ = nullptr;
     descriptor_heap_ = nullptr;
     sampler_heap_ = nullptr;
+    if (!msc_dummy_buffer_) {
+      WMTBufferInfo info = {};
+      info.length = 8;
+      info.memory.set(nullptr);
+      info.options = WMTResourceStorageModeShared | WMTResourceHazardTrackingModeUntracked;
+      msc_dummy_buffer_ = device_->GetMTLDevice().newBuffer(info);
+      if (!msc_dummy_buffer_)
+        return E_OUTOFMEMORY;
+      if (info.memory.ptr)
+        memset(info.memory.ptr, 0, info.length);
+    }
     memset(rootarg_compute_staging_, 0, sizeof(rootarg_compute_staging_));
 
     memset(vertex_buffers_.data(), 0, sizeof(vertex_buffers_));
@@ -633,6 +646,12 @@ public:
       recording_failed_ = true;
       return false;
     }
+    if (!pipeline->IsComputePipelineState && pipeline->shader_backend == D3D12ShaderBackend::MetalShaderConverter &&
+        static_cast<MTLD3D12GraphicsPipelineState *>(pipeline)->msc_tessellation) {
+      WARN("D3D12 ", name, " with MSC tessellation PSO is unsupported");
+      recording_failed_ = true;
+      return false;
+    }
     return true;
   }
 
@@ -722,10 +741,59 @@ public:
     return {offset, stride};
   }
 
+  uint64_t
+  PopulateMSCVertexBufferTable() {
+    struct MSC_VERTEX_BUFFER_ENTRY {
+      uint64_t address;
+      uint32_t length;
+      uint32_t stride;
+    };
+    constexpr uint32_t count = 31;
+    auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(MSC_VERTEX_BUFFER_ENTRY) * count, 16);
+    if (!mapped) {
+      recording_failed_ = true;
+      return 0;
+    }
+    std::memset(mapped, 0, sizeof(MSC_VERTEX_BUFFER_ENTRY) * count);
+
+    auto *entries = static_cast<MSC_VERTEX_BUFFER_ENTRY *>(mapped);
+    for (uint32_t slot = 0; slot < count; slot++) {
+      auto &state = vertex_buffers_[slot];
+      uint64_t buffer_offset = 0;
+      auto allocation = state.BufferLocation ? device_->LookupBufferByVA(state.BufferLocation, &buffer_offset) : nullptr;
+      if (!allocation)
+        continue;
+      entries[slot].address = allocation->gpuAddress() + buffer_offset;
+      entries[slot].length = state.SizeInBytes;
+      entries[slot].stride = state.StrideInBytes;
+
+      if (msc_resources_used_.insert(allocation->buffer().handle).second) {
+        auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
+        cmd.type = WMTRenderCommandUseResource;
+        cmd.resource = allocation->buffer().handle;
+        cmd.usage = WMTResourceUsageRead;
+        cmd.stages = (WMTRenderStages)(WMTRenderStageObject | WMTRenderStageMesh);
+      }
+    }
+    return offset;
+  }
+
   void
   EncodeVertexBuffers() {
     if (pso_graphics_ && pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter) {
       auto slot_mask = pso_graphics_->slot_mask;
+      const bool tessellation = pso_graphics_->msc_tessellation;
+      if (tessellation) {
+        auto offset = PopulateMSCVertexBufferTable();
+        if (recording_failed_)
+          return;
+        auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+        cmd.type = WMTRenderCommandSetObjectBuffer;
+        cmd.buffer = allocator_->gpu_heap_buffer_;
+        cmd.offset = offset;
+        cmd.index = DXMT_MSC_VERTEX_BUFFER_BIND_POINT;
+        return;
+      }
       for (unsigned slot = 0; slot < 32; slot++) {
         if (!(slot_mask & (1u << slot)))
           continue;
@@ -733,7 +801,7 @@ public:
         uint64_t buffer_offset = 0;
         auto allocation = state.BufferLocation ? device_->LookupBufferByVA(state.BufferLocation, &buffer_offset) : nullptr;
         auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-        cmd.type = WMTRenderCommandSetVertexBuffer;
+        cmd.type = tessellation ? WMTRenderCommandSetObjectBuffer : WMTRenderCommandSetVertexBuffer;
         cmd.buffer = allocation ? allocation->buffer().handle : 0;
         cmd.offset = buffer_offset;
         cmd.index = DXMT_MSC_VERTEX_BUFFER_BIND_POINT + slot;
@@ -758,6 +826,26 @@ public:
       return DrawCallStatus::Invalid;
 
     const bool use_msc = pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
+    const bool use_msc_tessellation = pso_graphics_->msc_tessellation;
+    auto encode_msc_buffer = [&](obj_handle_t buffer, uint64_t offset, uint8_t index, bool fragment = true) {
+      auto encode = [&](WMTRenderCommandType type) {
+        auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+        cmd.type = type;
+        cmd.buffer = buffer;
+        cmd.offset = offset;
+        cmd.index = index;
+      };
+      if (use_msc_tessellation) {
+        encode(WMTRenderCommandSetObjectBuffer);
+        encode(WMTRenderCommandSetMeshBuffer);
+        if (fragment)
+          encode(WMTRenderCommandSetFragmentBuffer);
+      } else {
+        encode(WMTRenderCommandSetVertexBuffer);
+        if (fragment)
+          encode(WMTRenderCommandSetFragmentBuffer);
+      }
+    };
     if (use_msc && rootsig_graphics_) {
       auto hr = rootsig_graphics_->InitializeMSCLayout();
       if (FAILED(hr)) {
@@ -867,58 +955,58 @@ public:
     }
 
     if (use_msc && dirty_state_.test(DirtyState::DescriptorHeaps)) {
-      if (descriptor_heap_) {
-        auto buffer = descriptor_heap_->GetMSCDescriptorHeapBuffer();
-        if (buffer) {
-          auto &cmd_vs = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-          cmd_vs.type = WMTRenderCommandSetVertexBuffer;
-          cmd_vs.buffer = buffer.handle;
-          cmd_vs.offset = 0;
-          cmd_vs.index = DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT;
-          auto &cmd_fs = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-          cmd_fs.type = WMTRenderCommandSetFragmentBuffer;
-          cmd_fs.buffer = buffer.handle;
-          cmd_fs.offset = 0;
-          cmd_fs.index = DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT;
-        }
+      auto descriptor_buffer = descriptor_heap_ ? descriptor_heap_->GetMSCDescriptorHeapBuffer() : WMT::Buffer{};
+      if (!descriptor_buffer)
+        descriptor_buffer = msc_dummy_buffer_;
+      if (descriptor_buffer) {
+        encode_msc_buffer(descriptor_buffer.handle, 0, DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT);
       }
-      if (sampler_heap_) {
-        auto buffer = sampler_heap_->GetMSCDescriptorHeapBuffer();
-        if (buffer) {
-          auto &cmd_vs = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-          cmd_vs.type = WMTRenderCommandSetVertexBuffer;
-          cmd_vs.buffer = buffer.handle;
-          cmd_vs.offset = 0;
-          cmd_vs.index = DXMT_MSC_SAMPLER_HEAP_BIND_POINT;
-          auto &cmd_fs = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-          cmd_fs.type = WMTRenderCommandSetFragmentBuffer;
-          cmd_fs.buffer = buffer.handle;
-          cmd_fs.offset = 0;
-          cmd_fs.index = DXMT_MSC_SAMPLER_HEAP_BIND_POINT;
-         }
+      auto sampler_buffer = sampler_heap_ ? sampler_heap_->GetMSCDescriptorHeapBuffer() : WMT::Buffer{};
+      if (!sampler_buffer)
+        sampler_buffer = msc_dummy_buffer_;
+      if (sampler_buffer) {
+        encode_msc_buffer(sampler_buffer.handle, 0, DXMT_MSC_SAMPLER_HEAP_BIND_POINT);
+      }
+      if (use_msc_tessellation && pso_graphics_->msc_tessellator_tables) {
+        encode_msc_buffer(
+            pso_graphics_->msc_tessellator_tables.handle, 0, DXMT_MSC_RUNTIME_TESSELLATOR_TABLES_BIND_POINT, false
+        );
+        auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
+        cmd.type = WMTRenderCommandUseResource;
+        cmd.resource = pso_graphics_->msc_tessellator_tables.handle;
+        cmd.usage = WMTResourceUsageRead;
+        cmd.stages = (WMTRenderStages)(WMTRenderStageObject | WMTRenderStageMesh);
       }
       dirty_state_.clr(DirtyState::DescriptorHeaps);
     }
 
     if (dirty_state_.test(DirtyState::GraphicsRootArguments) && !SkipResourceBinding) {
-      if (rootsig_graphics_ && (!use_msc || rootsig_graphics_->MSCArgumentBufferSize)) {
-        auto Offset = use_msc
+      if (use_msc) {
+        auto offset = rootsig_graphics_ && rootsig_graphics_->MSCArgumentBufferSize
                           ? EncodeMSCArgumentBuffer(
                                 rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr()
                             )
-                          : EncodeRootArgument(rootsig_graphics_.ptr(), rootarg_graphics_staging_);
-        auto &cmd_vsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-        cmd_vsargbuf.type = WMTRenderCommandSetVertexBuffer;
-        cmd_vsargbuf.buffer = allocator_->gpu_heap_buffer_;
-        cmd_vsargbuf.offset = Offset;
-        cmd_vsargbuf.index = use_msc ? static_cast<uint8_t>(DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT)
-                                     : static_cast<uint8_t>(SM50_BINDING_INDEX_ROOT_ARGUMENTS);
-        auto &cmd_fsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-        cmd_fsargbuf.type = WMTRenderCommandSetFragmentBuffer;
-        cmd_fsargbuf.buffer = allocator_->gpu_heap_buffer_;
-        cmd_fsargbuf.offset = Offset;
-        cmd_fsargbuf.index = use_msc ? static_cast<uint8_t>(DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT)
-                                     : static_cast<uint8_t>(SM50_BINDING_INDEX_ROOT_ARGUMENTS);
+                          : 0;
+        auto buffer = rootsig_graphics_ && rootsig_graphics_->MSCArgumentBufferSize
+                          ? allocator_->gpu_heap_buffer_.handle
+                          : msc_dummy_buffer_.handle;
+        encode_msc_buffer(buffer, offset, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
+        if (use_msc_tessellation)
+          encode_msc_buffer(buffer, offset, DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT, false);
+      } else if (rootsig_graphics_) {
+        auto Offset = EncodeRootArgument(rootsig_graphics_.ptr(), rootarg_graphics_staging_);
+        {
+          auto &cmd_vsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+          cmd_vsargbuf.type = WMTRenderCommandSetVertexBuffer;
+          cmd_vsargbuf.buffer = allocator_->gpu_heap_buffer_;
+          cmd_vsargbuf.offset = Offset;
+          cmd_vsargbuf.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
+          auto &cmd_fsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+          cmd_fsargbuf.type = WMTRenderCommandSetFragmentBuffer;
+          cmd_fsargbuf.buffer = allocator_->gpu_heap_buffer_;
+          cmd_fsargbuf.offset = Offset;
+          cmd_fsargbuf.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
+        }
       }
       dirty_state_.clr(DirtyState::GraphicsRootArguments);
     }
@@ -998,7 +1086,9 @@ public:
     if (recording_failed_)
       DEBUG("[DEBUG-DRAW] PreDraw rejected: command list already failed use_msc=", use_msc,
             " pso=", pso_graphics_ ? pso_graphics_->pso.handle : 0, " rtvs=", num_rtvs);
-    return recording_failed_ ? DrawCallStatus::Invalid : DrawCallStatus::Ordinary;
+    if (recording_failed_)
+      return DrawCallStatus::Invalid;
+    return use_msc_tessellation ? DrawCallStatus::MSCTessellation : DrawCallStatus::Ordinary;
   }
 
   void STDMETHODCALLTYPE
@@ -1021,6 +1111,20 @@ public:
       return;
     }
 
+    if (status == DrawCallStatus::MSCTessellation) {
+      if (cp_count != pso_graphics_->msc_tessellation_config.hs_input_control_point_count)
+        return;
+      auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_msc_tessellation_draw>();
+      cmd_draw.type = WMTRenderCommandMSCTessellationDraw;
+      cmd_draw.primitive_topology = WMTPrimitiveTypeTriangle;
+      cmd_draw.instance_count = InstanceCount;
+      cmd_draw.vertex_count_per_instance = VertexCountPerInstance;
+      cmd_draw.base_instance = StartInstanceLocation;
+      cmd_draw.base_vertex = StartVertexLocation;
+      cmd_draw.config = pso_graphics_->msc_tessellation_config;
+      return;
+    }
+
     auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw>();
     cmd_draw.type = WMTRenderCommandDraw;
     cmd_draw.primitive_type = primitive_type;
@@ -1032,14 +1136,14 @@ public:
 
   void STDMETHODCALLTYPE
   DrawIndexedInstanced(
-      UINT IndexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, INT BaseVertexLocation,
+      UINT IndexCountPerInstance, UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation,
       UINT StartInstanceLocation
   ) {
     static uint32_t trace_draw_indexed_count = 0;
     uint32_t trace_draw_indexed_id = trace_draw_indexed_count++;
     if (trace_draw_indexed_id < 32)
       DEBUG("[DEBUG-DRAW] DrawIndexedInstanced: indices=", IndexCountPerInstance, " instances=", InstanceCount,
-            " index_start=", StartVertexLocation, " base_vertex=", BaseVertexLocation,
+            " index_start=", StartIndexLocation, " base_vertex=", BaseVertexLocation,
             " instance_start=", StartInstanceLocation);
     if (!ValidateCommand(SupportsGraphics(), "DrawIndexedInstanced"))
       return;
@@ -1053,13 +1157,30 @@ public:
         DEBUG("[DEBUG-DRAW] DrawIndexedInstanced rejected by PreDraw");
       return;
     }
+    if (status == DrawCallStatus::MSCTessellation) {
+      if (!index_buffer || cp_count != pso_graphics_->msc_tessellation_config.hs_input_control_point_count)
+        return;
+      auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_msc_tessellation_draw_indexed>();
+      cmd_draw.type = WMTRenderCommandMSCTessellationDrawIndexed;
+      cmd_draw.primitive_topology = WMTPrimitiveTypeTriangle;
+      cmd_draw.index_type = index_type;
+      cmd_draw.index_buffer = index_buffer;
+      cmd_draw.index_buffer_offset = index_offset;
+      cmd_draw.instance_count = InstanceCount;
+      cmd_draw.index_count_per_instance = IndexCountPerInstance;
+      cmd_draw.base_instance = StartInstanceLocation;
+      cmd_draw.base_vertex = BaseVertexLocation;
+      cmd_draw.start_index = StartIndexLocation;
+      cmd_draw.config = pso_graphics_->msc_tessellation_config;
+      return;
+    }
     auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw_indexed>();
     cmd_draw.type = WMTRenderCommandDrawIndexed;
     cmd_draw.primitive_type = primitive_type;
     cmd_draw.index_type = index_type;
     cmd_draw.index_count = IndexCountPerInstance;
     cmd_draw.index_buffer = index_buffer;
-    cmd_draw.index_buffer_offset = index_offset + StartVertexLocation * (index_type == WMTIndexTypeUInt32 ? 4 : 2);
+    cmd_draw.index_buffer_offset = index_offset + StartIndexLocation * (index_type == WMTIndexTypeUInt32 ? 4 : 2);
     cmd_draw.instance_count = InstanceCount;
     cmd_draw.base_vertex = BaseVertexLocation;
     cmd_draw.base_instance = StartInstanceLocation;
@@ -1163,13 +1284,6 @@ public:
           ERR("MSC descriptor table handle is not from a shader-visible heap");
           continue;
         }
-        static std::atomic<unsigned> trace_msc_table_count = 0;
-        const auto trace_id = trace_msc_table_count.fetch_add(1, std::memory_order_relaxed);
-        if (trace_id < 128)
-          DEBUG(
-              "[DEBUG-TEX] table id=", trace_id, " root=", layout.parameter_index,
-              " handle=", handle.ptr, " address=", table_address
-          );
         memcpy(destination, &table_address, std::min<size_t>(layout.size_bytes, sizeof(table_address)));
         continue;
       }
@@ -1177,18 +1291,6 @@ public:
       memcpy(destination, source, copy_size);
     }
 
-    static std::atomic<unsigned> trace_msc_tlab_count = 0;
-    const auto trace_id = trace_msc_tlab_count.fetch_add(1, std::memory_order_relaxed);
-    if (trace_id < 128) {
-      uint64_t words[4] = {};
-      memcpy(words, Ptr, std::min<size_t>(pRootSig->MSCArgumentBufferSize, sizeof(words)));
-      DEBUG(
-          "[DEBUG-MSC-TLAB] id=", trace_id, " offset=", Offset,
-          " gpu=", allocator_->gpu_heap_buffer_address_ + Offset,
-          " size=", pRootSig->MSCArgumentBufferSize, " w0=", words[0], " w1=", words[1],
-          " w2=", words[2], " w3=", words[3]
-      );
-    }
     return Offset;
   }
 
@@ -1254,17 +1356,11 @@ public:
     if (!descriptor_stride)
       return;
 
-    const auto stages = static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
+    const auto stages = pso_graphics_ && pso_graphics_->msc_tessellation
+                            ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment)
+                            : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
     const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
     const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
-    static std::atomic<unsigned> trace_msc_resource_use_call_count = 0;
-    static std::atomic<unsigned> trace_msc_resource_use_count = 0;
-    const auto trace_call_id = trace_msc_resource_use_call_count.fetch_add(1, std::memory_order_relaxed);
-    if (trace_call_id < 4)
-      DEBUG(
-          "[DEBUG-MSC-USE-TABLE] call=", trace_call_id, " heap_descriptors=", heap_desc.NumDescriptors,
-          " tables=", msc_resource_use_tables_.size()
-      );
 
     auto encode_resource = [&](obj_handle_t resource, WMTResourceUsage usage) {
       if (!resource || !msc_resources_used_.insert(resource).second)
@@ -1274,9 +1370,6 @@ public:
       cmd.resource = resource;
       cmd.usage = usage;
       cmd.stages = stages;
-      const auto trace_id = trace_msc_resource_use_count.fetch_add(1, std::memory_order_relaxed);
-      if (trace_id < 128)
-        DEBUG("[DEBUG-MSC-USE] id=", trace_id, " resource=", resource, " usage=", usage);
     };
 
     auto encode_descriptor = [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type) {
@@ -1358,12 +1451,6 @@ public:
 
       uint64_t table_offset = 0;
       for (const auto &range : table.ranges) {
-        if (trace_call_id < 4)
-          DEBUG(
-              "[DEBUG-MSC-USE-TABLE] call=", trace_call_id, " parameter=", parameter_index,
-              " type=", range.RangeType, " descriptors=", range.NumDescriptors,
-              " offset=", range.OffsetInDescriptorsFromTableStart
-          );
         const uint64_t range_offset = range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
                                           ? table_offset
                                           : range.OffsetInDescriptorsFromTableStart;
@@ -2737,9 +2824,8 @@ public:
     DrawCallStatus status = PreDraw(encode_binding);
     if (status == DrawCallStatus::Invalid)
       return;
-    if (status != DrawCallStatus::Ordinary) {
-      IMPLEMENT_ME // TODO: (potential) emulated pipeline
-    }
+    if (status != DrawCallStatus::Ordinary)
+      return;
 
     auto cmd = allocator_->EncodeIndirectRenderCommand(sig, pso_graphics_.ptr(), MaxCommandCount);
     cmd->max_count_buffer = CountBufferAddress;

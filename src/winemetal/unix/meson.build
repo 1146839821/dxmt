@@ -2,6 +2,7 @@ winemetal_unix_src = [
   'winemetal_unix.c',
   'cache.c',
   'metalirconverter.c',
+  'metalirconverter_runtime.cpp',
 ]
 
 if wine_build_path != ''

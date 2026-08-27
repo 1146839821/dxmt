@@ -903,6 +903,18 @@ public:
   }
 
   Reference<RenderPipelineState>
+  newMSCTessellationPipelineState(const WMTMSCTessellationPipelineInfo &info, Error &error) {
+    return Reference<RenderPipelineState>(
+        MTLDevice_newMSCTessellationPipelineState(handle, &info, &error.handle)
+    );
+  }
+
+  Reference<Buffer>
+  newMSCTessellatorTables() {
+    return Reference<Buffer>(MTLDevice_newMSCTessellatorTables(handle));
+  }
+
+  Reference<RenderPipelineState>
   newRenderPipelineState(const WMTTileRenderPipelineInfo &info, Error &error) {
     return Reference<RenderPipelineState>(MTLDevice_newTileRenderPipelineState(handle, &info, &error.handle));
   }
@@ -1221,6 +1233,12 @@ InitializeMeshRenderPipelineInfo(WMTMeshRenderPipelineInfo &info) {
   info.num_binary_archives_for_lookup = 0;
   info.fail_on_binary_archive_miss = false;
   info.support_indirect_command_buffers = false;
+}
+
+inline void
+InitializeMSCTessellationPipelineInfo(WMTMSCTessellationPipelineInfo &info) {
+  std::memset(&info, 0, sizeof(info));
+  InitializeMeshRenderPipelineInfo(info.base);
 }
 
 inline void

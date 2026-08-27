@@ -19,8 +19,10 @@ enum class D3D12ShaderBackend {
 
 struct D3D12ConvertedShader {
   std::vector<uint8_t> metallib;
+  std::vector<uint8_t> stage_in_metallib;
   std::string entry_point;
   std::array<uint32_t, 3> threadgroup_size = {};
+  dxmt_msc_shader_reflection reflection = {};
   D3D12ShaderBackend backend = D3D12ShaderBackend::Airconv;
 };
 
@@ -30,7 +32,8 @@ DetectD3D12ShaderBackend(const D3D12_SHADER_BYTECODE &shader);
 HRESULT
 ConvertD3D12Shader(
     const D3D12_SHADER_BYTECODE &shader, uint32_t stage, D3D12ConvertedShader &converted,
-    const void *root_signature = nullptr, size_t root_signature_size = 0
+    const void *root_signature = nullptr, size_t root_signature_size = 0,
+    const dxmt_msc_input_layout *input_layout = nullptr, uint32_t compile_flags = 0
 );
 
 HRESULT

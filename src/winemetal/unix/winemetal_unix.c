@@ -686,6 +686,32 @@ _MTLDevice_newMeshRenderPipelineState(void *obj) {
 }
 
 static NTSTATUS
+_MTLDevice_newMSCTessellationPipelineState(void *obj) {
+  struct unixcall_mtldevice_newmsctessellationpso *params = obj;
+  params->ret_error = 0;
+  params->ret_pso = dxmt_msc_new_tessellation_pipeline(params->device, params->info.ptr, &params->ret_error);
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLDevice_newMSCTessellatorTables(void *obj) {
+  struct unixcall_generic_obj_obj_ret *params = obj;
+  params->ret = dxmt_msc_new_tessellator_tables(params->handle);
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLValidateMSCTessellationPipeline(void *obj) {
+  struct unixcall_mtlvalidate_msctessellationpipeline *params = obj;
+  params->ret = dxmt_msc_validate_tessellation_pipeline(
+      params->hs_output_primitive, params->gs_input_primitive, params->hs_output_control_point_size,
+      params->ds_input_control_point_size, params->hs_patch_constants_size, params->ds_patch_constants_size,
+      params->hs_output_control_point_count, params->ds_input_control_point_count
+  );
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 _MTLBlitCommandEncoder_encodeCommands(void *obj) {
   struct unixcall_generic_obj_cmd_noret *params = obj;
   const struct wmtcmd_base *next = params->cmd_head.ptr;
@@ -1061,6 +1087,28 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
                    indexBufferOffset:body->index_buffer_offset
                       indirectBuffer:(id<MTLBuffer>)body->indirect_args_buffer
                 indirectBufferOffset:body->indirect_args_offset];
+      break;
+    }
+    case WMTRenderCommandMSCTessellationDraw: {
+      struct wmtcmd_render_msc_tessellation_draw *body = (struct wmtcmd_render_msc_tessellation_draw *)next;
+      dxmt_msc_draw_patches(
+          (obj_handle_t)encoder, body->primitive_topology, &body->config, body->instance_count,
+          body->vertex_count_per_instance, body->base_instance, body->base_vertex
+      );
+      break;
+    }
+    case WMTRenderCommandMSCTessellationDrawIndexed: {
+      struct wmtcmd_render_msc_tessellation_draw_indexed *body =
+          (struct wmtcmd_render_msc_tessellation_draw_indexed *)next;
+      uint32_t index_size = body->index_type == WMTIndexTypeUInt32 ? 4 : 2;
+      uint32_t start_index = body->start_index + body->index_buffer_offset / index_size;
+      [encoder useResource:(id<MTLResource>)body->index_buffer
+                      usage:MTLResourceUsageRead
+                     stages:MTLRenderStageObject | MTLRenderStageMesh];
+      dxmt_msc_draw_indexed_patches(
+          (obj_handle_t)encoder, body->primitive_topology, body->index_type, body->index_buffer, &body->config,
+          body->instance_count, body->index_count_per_instance, body->base_instance, body->base_vertex, start_index
+      );
       break;
     }
     case WMTRenderCommandDrawMeshThreadgroups: {
@@ -1900,6 +1948,7 @@ thunk32_DXMTMSCCompileDXIL(void *args) {
   params.dxil_size = src->dxil_size;
   params.stage = src->stage;
   params.reserved = src->reserved;
+  params.input_layout = src->input_layout;
   params.root_signature = UInt32ToPtr(src->root_signature);
   params.root_signature_size = src->root_signature_size;
   params.entry_point = UInt32ToPtr(src->entry_point);
@@ -1907,6 +1956,9 @@ thunk32_DXMTMSCCompileDXIL(void *args) {
   params.metallib = UInt32ToPtr(src->metallib);
   params.metallib_capacity = src->metallib_capacity;
   params.metallib_size = src->metallib_size;
+  params.stage_in_metallib = UInt32ToPtr(src->stage_in_metallib);
+  params.stage_in_metallib_capacity = src->stage_in_metallib_capacity;
+  params.stage_in_metallib_size = src->stage_in_metallib_size;
   params.entry_point_out = UInt32ToPtr(src->entry_point_out);
   params.entry_point_capacity = src->entry_point_capacity;
   params.entry_point_size = src->entry_point_size;
@@ -1921,11 +1973,13 @@ thunk32_DXMTMSCCompileDXIL(void *args) {
   params.ret = dxmt_msc_compile(&params);
 
   src->metallib_size = (uint32_t)params.metallib_size;
+  src->stage_in_metallib_size = (uint32_t)params.stage_in_metallib_size;
   src->entry_point_size = (uint32_t)params.entry_point_size;
   src->threadgroup_size[0] = params.threadgroup_size[0];
   src->threadgroup_size[1] = params.threadgroup_size[1];
   src->threadgroup_size[2] = params.threadgroup_size[2];
   src->error_code = params.error_code;
+  src->reflection = params.reflection;
   src->error_message_size = (uint32_t)params.error_message_size;
   src->ret = params.ret;
   return STATUS_SUCCESS;
@@ -3408,6 +3462,9 @@ const void *__wine_unix_call_funcs[] = {
     &thunk_DXMTMSCGetRootLayout,
     &_DispatchData_copy,
     &_MTLTexture_getBytes,
+    &_MTLDevice_newMSCTessellationPipelineState,
+    &_MTLDevice_newMSCTessellatorTables,
+    &_MTLValidateMSCTessellationPipeline,
 };
 
 #ifndef DXMT_NATIVE
@@ -3562,5 +3619,8 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &thunk32_DXMTMSCGetRootLayout,
     &_DispatchData_copy,
     &_MTLTexture_getBytes,
+    &_MTLDevice_newMSCTessellationPipelineState,
+    &_MTLDevice_newMSCTessellatorTables,
+    &_MTLValidateMSCTessellationPipeline,
 };
 #endif

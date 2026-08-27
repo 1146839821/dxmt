@@ -195,6 +195,9 @@ public:
   WMT::Reference<WMT::DepthStencilState> dsso_depth_disabled;
   WMT::Reference<WMT::DepthStencilState> dsso_depth_stencil_disabled;
   uint32_t slot_mask = 0;
+  bool msc_tessellation = false;
+  WMT::Reference<WMT::Buffer> msc_tessellator_tables;
+  WMTMSCTessellationPipelineConfig msc_tessellation_config = {};
   enum WMTTriangleFillMode fill_mode;
   enum WMTCullMode cull_mode;
   enum WMTDepthClipMode depth_clip_mode;

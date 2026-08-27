@@ -9,6 +9,9 @@
 enum winemetal_unixcall {
   unix_dispatchdata_copy = 148,
   unix_mtltexture_getbytes = 149,
+  unix_mtldevice_newmsctessellationpso = 150,
+  unix_mtldevice_newmsctessellatortables = 151,
+  unix_mtlvalidate_msctessellationpipeline = 152,
 };
 
 struct unixcall_generic_obj_ret {
@@ -156,6 +159,25 @@ struct unixcall_mtldevice_newmeshrenderpso {
   struct WMTConstMemoryPointer info;
   obj_handle_t ret_error;
   obj_handle_t ret_pso;
+};
+
+struct unixcall_mtldevice_newmsctessellationpso {
+  obj_handle_t device;
+  struct WMTConstMemoryPointer info;
+  obj_handle_t ret_error;
+  obj_handle_t ret_pso;
+};
+
+struct unixcall_mtlvalidate_msctessellationpipeline {
+  uint32_t hs_output_primitive;
+  uint32_t gs_input_primitive;
+  uint32_t hs_output_control_point_size;
+  uint32_t ds_input_control_point_size;
+  uint32_t hs_patch_constants_size;
+  uint32_t ds_patch_constants_size;
+  uint32_t hs_output_control_point_count;
+  uint32_t ds_input_control_point_count;
+  bool ret;
 };
 
 struct unixcall_generic_obj_cmd_noret {

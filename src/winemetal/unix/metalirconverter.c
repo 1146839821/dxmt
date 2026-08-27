@@ -14,6 +14,8 @@ typedef struct dxmt_msc_api {
   IRCompiler *(*IRCompilerCreate)(void);
   void (*IRCompilerDestroy)(IRCompiler *);
   void (*IRCompilerSetGlobalRootSignature)(IRCompiler *, const IRRootSignature *);
+  void (*IRCompilerEnableGeometryAndTessellationEmulation)(IRCompiler *, bool);
+  void (*IRCompilerSetStageInGenerationMode)(IRCompiler *, IRStageInCodeGenerationMode);
   IRObject *(*IRObjectCreateFromDXIL)(const uint8_t *, size_t, IRBytecodeOwnership);
   void (*IRObjectDestroy)(IRObject *);
   IRVersionedRootSignatureDescriptor *(*IRVersionedRootSignatureDescriptorCreateFromBlob)(
@@ -36,6 +38,15 @@ typedef struct dxmt_msc_api {
   const char *(*IRShaderReflectionGetEntryPointFunctionName)(const IRShaderReflection *);
   bool (*IRShaderReflectionCopyComputeInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedCSInfo *);
   bool (*IRShaderReflectionReleaseComputeInfo)(IRVersionedCSInfo *);
+  bool (*IRShaderReflectionCopyVertexInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedVSInfo *);
+  bool (*IRShaderReflectionReleaseVertexInfo)(IRVersionedVSInfo *);
+  bool (*IRShaderReflectionCopyHullInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedHSInfo *);
+  bool (*IRShaderReflectionReleaseHullInfo)(IRVersionedHSInfo *);
+  bool (*IRShaderReflectionCopyDomainInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedDSInfo *);
+  bool (*IRShaderReflectionReleaseDomainInfo)(IRVersionedDSInfo *);
+  bool (*IRMetalLibSynthesizeStageInFunction)(
+      const IRCompiler *, const IRShaderReflection *, const IRVersionedInputLayoutDescriptor *, IRMetalLibBinary *
+  );
   uint32_t (*IRErrorGetCode)(const IRError *);
   void (*IRErrorDestroy)(IRError *);
 } dxmt_msc_api;
@@ -154,6 +165,12 @@ dxmt_msc_load_symbol(void **destination, const char *name) {
 }
 
 static bool
+dxmt_msc_load_optional_symbol(void **destination, const char *name) {
+  *destination = dlsym(g_msc_library, name);
+  return *destination != NULL;
+}
+
+static bool
 dxmt_msc_load_symbols(void) {
 #define DXMT_MSC_LOAD(name)                                                                                             \
   do {                                                                                                                   \
@@ -186,6 +203,35 @@ dxmt_msc_load_symbols(void) {
   DXMT_MSC_LOAD(IRShaderReflectionReleaseComputeInfo);
   DXMT_MSC_LOAD(IRErrorGetCode);
   DXMT_MSC_LOAD(IRErrorDestroy);
+
+  dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRCompilerEnableGeometryAndTessellationEmulation,
+      "IRCompilerEnableGeometryAndTessellationEmulation"
+  );
+  dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRCompilerSetStageInGenerationMode, "IRCompilerSetStageInGenerationMode"
+  );
+  dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRMetalLibSynthesizeStageInFunction, "IRMetalLibSynthesizeStageInFunction"
+  );
+  dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyVertexInfo, "IRShaderReflectionCopyVertexInfo"
+  );
+  dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseVertexInfo, "IRShaderReflectionReleaseVertexInfo"
+  );
+  dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyHullInfo, "IRShaderReflectionCopyHullInfo"
+  );
+  dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseHullInfo, "IRShaderReflectionReleaseHullInfo"
+  );
+  dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyDomainInfo, "IRShaderReflectionCopyDomainInfo"
+  );
+  dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseDomainInfo, "IRShaderReflectionReleaseDomainInfo"
+  );
 
 #undef DXMT_MSC_LOAD
   return true;
@@ -277,10 +323,17 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   IRVersionedRootSignatureDescriptor *root_descriptor = NULL;
   IRRootSignature *root_signature = NULL;
   IRMetalLibBinary *binary = NULL;
+  IRMetalLibBinary *stage_in_binary = NULL;
   IRShaderReflection *reflection = NULL;
   IRError *error = NULL;
   IRVersionedCSInfo compute_info = {};
+  IRVersionedVSInfo vertex_info = {};
+  IRVersionedHSInfo hull_info = {};
+  IRVersionedDSInfo domain_info = {};
   bool compute_info_valid = false;
+  bool vertex_info_valid = false;
+  bool hull_info_valid = false;
+  bool domain_info_valid = false;
   sm50_bitcode_t patched_metallib = {0};
   struct SM50_COMPILED_BITCODE patched_data = {0};
   uint8_t *original_metallib = NULL;
@@ -295,8 +348,10 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
 
   params->metallib_size = 0;
   params->entry_point_size = 0;
+  params->stage_in_metallib_size = 0;
   params->error_message_size = 0;
   params->error_code = DXMT_MSC_SUCCESS;
+  memset(&params->reflection, 0, sizeof(params->reflection));
   params->threadgroup_size[0] = 0;
   params->threadgroup_size[1] = 0;
   params->threadgroup_size[2] = 0;
@@ -310,6 +365,29 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   if (ir_stage == IRShaderStageInvalid) {
     dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_SHADER, "shader stage is not supported by Phase 1");
     return DXMT_MSC_ERROR_UNSUPPORTED_SHADER;
+  }
+
+  if ((params->reserved & DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION) &&
+      !g_msc_api.IRCompilerEnableGeometryAndTessellationEmulation) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC tessellation emulation is unavailable");
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  }
+  if ((params->reserved & DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION) && ir_stage == IRShaderStageHull &&
+      (!g_msc_api.IRShaderReflectionCopyHullInfo || !g_msc_api.IRShaderReflectionReleaseHullInfo)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC hull reflection is unavailable");
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  }
+  if ((params->reserved & DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION) && ir_stage == IRShaderStageDomain &&
+      (!g_msc_api.IRShaderReflectionCopyDomainInfo || !g_msc_api.IRShaderReflectionReleaseDomainInfo)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC domain reflection is unavailable");
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  }
+  if ((params->reserved & DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN) &&
+      (ir_stage != IRShaderStageVertex || !g_msc_api.IRCompilerSetStageInGenerationMode ||
+       !g_msc_api.IRMetalLibSynthesizeStageInFunction || !g_msc_api.IRShaderReflectionCopyVertexInfo ||
+       !g_msc_api.IRShaderReflectionReleaseVertexInfo)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC stage-in synthesis is unavailable");
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
   }
 
   if (params->entry_point && params->entry_point_length) {
@@ -343,6 +421,11 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
     goto cleanup;
   }
+
+  if (params->reserved & DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION)
+    g_msc_api.IRCompilerEnableGeometryAndTessellationEmulation(compiler, true);
+  if (params->reserved & DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN)
+    g_msc_api.IRCompilerSetStageInGenerationMode(compiler, IRStageInCodeGenerationModeUseSeparateStageInFunction);
 
   if (params->root_signature && params->root_signature_size) {
     if (params->root_signature_size > UINT32_MAX) {
@@ -438,6 +521,96 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     params->threadgroup_size[2] = compute_info.info_1_0.tg_size[2];
   }
 
+  params->reflection.stage = params->stage;
+  if (ir_stage == IRShaderStageVertex && g_msc_api.IRShaderReflectionCopyVertexInfo) {
+    vertex_info.version = IRReflectionVersion_1_0;
+    if (!g_msc_api.IRShaderReflectionCopyVertexInfo(reflection, IRReflectionVersion_1_0, &vertex_info)) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "vertex shader reflection is unavailable");
+      result = DXMT_MSC_ERROR_COMPILATION;
+      goto cleanup;
+    }
+    vertex_info_valid = true;
+    params->reflection.vertex_output_size_in_bytes = vertex_info.info_1_0.vertex_output_size_in_bytes;
+  }
+  if (ir_stage == IRShaderStageHull) {
+    hull_info.version = IRReflectionVersion_1_0;
+    if (!g_msc_api.IRShaderReflectionCopyHullInfo(reflection, IRReflectionVersion_1_0, &hull_info)) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "hull shader reflection is unavailable");
+      result = DXMT_MSC_ERROR_COMPILATION;
+      goto cleanup;
+    }
+    hull_info_valid = true;
+    params->reflection.hs_max_patches_per_object_threadgroup =
+        hull_info.info_1_0.max_patches_per_object_threadgroup;
+    params->reflection.hs_max_object_threads_per_patch = hull_info.info_1_0.max_object_threads_per_patch;
+    params->reflection.hs_patch_constants_size = hull_info.info_1_0.patch_constants_size;
+    params->reflection.hs_static_payload_size = hull_info.info_1_0.static_payload_size;
+    params->reflection.hs_payload_size_per_patch = hull_info.info_1_0.payload_size_per_patch;
+    params->reflection.hs_input_control_point_count = hull_info.info_1_0.input_control_point_count;
+    params->reflection.hs_output_control_point_count = hull_info.info_1_0.output_control_point_count;
+    params->reflection.hs_output_control_point_size = hull_info.info_1_0.output_control_point_size;
+    params->reflection.hs_tessellator_domain = hull_info.info_1_0.tessellator_domain;
+    params->reflection.hs_tessellator_partitioning = hull_info.info_1_0.tessellator_partitioning;
+    params->reflection.hs_tessellator_output_primitive = hull_info.info_1_0.tessellator_output_primitive;
+    params->reflection.hs_tessellation_type_half = hull_info.info_1_0.tessellation_type_half;
+    params->reflection.hs_max_tessellation_factor = hull_info.info_1_0.max_tessellation_factor;
+    if (hull_info.info_1_0.patch_constant_function) {
+      snprintf(
+          params->reflection.hs_patch_constant_function,
+          sizeof(params->reflection.hs_patch_constant_function),
+          "%s",
+          hull_info.info_1_0.patch_constant_function
+      );
+    }
+  }
+  if (ir_stage == IRShaderStageDomain) {
+    domain_info.version = IRReflectionVersion_1_0;
+    if (!g_msc_api.IRShaderReflectionCopyDomainInfo(reflection, IRReflectionVersion_1_0, &domain_info)) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "domain shader reflection is unavailable");
+      result = DXMT_MSC_ERROR_COMPILATION;
+      goto cleanup;
+    }
+    domain_info_valid = true;
+    params->reflection.ds_tessellator_domain = domain_info.info_1_0.tessellator_domain;
+    params->reflection.ds_max_input_prims_per_mesh_threadgroup =
+        domain_info.info_1_0.max_input_prims_per_mesh_threadgroup;
+    params->reflection.ds_input_control_point_count = domain_info.info_1_0.input_control_point_count;
+    params->reflection.ds_input_control_point_size = domain_info.info_1_0.input_control_point_size;
+    params->reflection.ds_patch_constants_size = domain_info.info_1_0.patch_constants_size;
+    params->reflection.ds_tessellation_type_half = domain_info.info_1_0.tessellation_type_half;
+  }
+
+  if (params->reserved & DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN) {
+    IRVersionedInputLayoutDescriptor layout = {};
+    const char *semantic_names[31] = {};
+    layout.version = IRInputLayoutDescriptorVersion_1;
+    layout.desc_1_0.numElements = params->input_layout.num_elements;
+    if (layout.desc_1_0.numElements > 31) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_INVALID_ARGUMENT, "MSC input layout has too many elements");
+      result = DXMT_MSC_ERROR_INVALID_ARGUMENT;
+      goto cleanup;
+    }
+    for (uint32_t i = 0; i < layout.desc_1_0.numElements; i++) {
+      const struct dxmt_msc_input_element *src = &params->input_layout.elements[i];
+      semantic_names[i] = src->semantic_name;
+      layout.desc_1_0.semanticNames[i] = semantic_names[i];
+      layout.desc_1_0.inputElementDescs[i].semanticIndex = src->semantic_index;
+      layout.desc_1_0.inputElementDescs[i].format = (IRFormat)src->format;
+      layout.desc_1_0.inputElementDescs[i].inputSlot = src->input_slot;
+      layout.desc_1_0.inputElementDescs[i].alignedByteOffset = src->aligned_byte_offset;
+      layout.desc_1_0.inputElementDescs[i].instanceDataStepRate = src->instance_data_step_rate;
+      layout.desc_1_0.inputElementDescs[i].inputSlotClass = (IRInputClassification)src->input_slot_class;
+    }
+    stage_in_binary = g_msc_api.IRMetalLibBinaryCreate();
+    if (!stage_in_binary || !g_msc_api.IRMetalLibSynthesizeStageInFunction(
+                                compiler, reflection, &layout, stage_in_binary
+                            )) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "failed to synthesize MSC stage-in function");
+      result = DXMT_MSC_ERROR_COMPILATION;
+      goto cleanup;
+    }
+  }
+
   const char *compiled_entry_point = g_msc_api.IRShaderReflectionGetEntryPointFunctionName(reflection);
   if (!compiled_entry_point || !compiled_entry_point[0]) {
     dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "compiled shader entry point is unavailable");
@@ -459,6 +632,25 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     memcpy(params->metallib, patched_data.Data, params->metallib_size);
   }
 
+  if (stage_in_binary) {
+    params->stage_in_metallib_size = g_msc_api.IRMetalLibGetBytecodeSize(stage_in_binary);
+    if ((params->stage_in_metallib && params->stage_in_metallib_capacity < params->stage_in_metallib_size) ||
+        (!params->stage_in_metallib && params->stage_in_metallib_capacity)) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_OUTPUT_TOO_SMALL, "MSC stage-in output buffer is too small");
+      result = DXMT_MSC_ERROR_OUTPUT_TOO_SMALL;
+      goto cleanup;
+    }
+    if (params->stage_in_metallib_size && params->stage_in_metallib) {
+      if (g_msc_api.IRMetalLibGetBytecode(
+              stage_in_binary, (uint8_t *)params->stage_in_metallib
+          ) != params->stage_in_metallib_size) {
+        dxmt_msc_set_error(params, DXMT_MSC_ERROR_METALLIB, "failed to extract MSC stage-in metallib");
+        result = DXMT_MSC_ERROR_METALLIB;
+        goto cleanup;
+      }
+    }
+  }
+
   if (params->entry_point_out) {
     memcpy(params->entry_point_out, compiled_entry_point, params->entry_point_size);
   }
@@ -469,6 +661,14 @@ cleanup:
   free(original_metallib);
   if (compute_info_valid)
     g_msc_api.IRShaderReflectionReleaseComputeInfo(&compute_info);
+  if (vertex_info_valid)
+    g_msc_api.IRShaderReflectionReleaseVertexInfo(&vertex_info);
+  if (hull_info_valid)
+    g_msc_api.IRShaderReflectionReleaseHullInfo(&hull_info);
+  if (domain_info_valid)
+    g_msc_api.IRShaderReflectionReleaseDomainInfo(&domain_info);
+  if (stage_in_binary)
+    g_msc_api.IRMetalLibBinaryDestroy(stage_in_binary);
   if (reflection)
     g_msc_api.IRShaderReflectionDestroy(reflection);
   if (binary)

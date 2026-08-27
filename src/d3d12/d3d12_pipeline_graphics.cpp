@@ -26,6 +26,8 @@
 #include "airconv_public.h"
 #include "DXBCParser/DXBCUtils.h"
 
+#include <cstring>
+
 namespace dxmt {
 
 constexpr WMTCompareFunction kCompareFunctionMap[] = {
@@ -315,6 +317,45 @@ public:
   }
 
   HRESULT
+  InitializeMSCStageInLayout(
+      const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, dxmt_msc_input_layout &layout
+  ) {
+    std::memset(&layout, 0, sizeof(layout));
+    if (pDesc->InputLayout.NumElements > std::size(layout.elements))
+      return E_NOTIMPL;
+
+    uint32_t append_offset[32] = {};
+    layout.num_elements = pDesc->InputLayout.NumElements;
+    for (uint32_t i = 0; i < layout.num_elements; i++) {
+      const auto &desc = pDesc->InputLayout.pInputElementDescs[i];
+      if (!desc.SemanticName || std::strlen(desc.SemanticName) >= DXMT_MSC_SEMANTIC_NAME_CAPACITY || desc.InputSlot >= 32)
+        return E_INVALIDARG;
+
+      MTL_DXGI_FORMAT_DESC format_desc;
+      if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc.Format, format_desc)) ||
+          !format_desc.BytesPerTexel)
+        return E_INVALIDARG;
+
+      uint32_t aligned_offset = desc.AlignedByteOffset == D3D12_APPEND_ALIGNED_ELEMENT
+                                    ? align(append_offset[desc.InputSlot], std::min(4u, format_desc.BytesPerTexel))
+                                    : desc.AlignedByteOffset;
+      if (aligned_offset > UINT32_MAX - format_desc.BytesPerTexel)
+        return E_INVALIDARG;
+      append_offset[desc.InputSlot] = aligned_offset + format_desc.BytesPerTexel;
+
+      auto &element = layout.elements[i];
+      std::strcpy(element.semantic_name, desc.SemanticName);
+      element.semantic_index = desc.SemanticIndex;
+      element.format = desc.Format;
+      element.input_slot = desc.InputSlot;
+      element.aligned_byte_offset = aligned_offset;
+      element.instance_data_step_rate = desc.InstanceDataStepRate;
+      element.input_slot_class = desc.InputSlotClass;
+    }
+    return S_OK;
+  }
+
+  HRESULT
   Initialize(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) {
     if (pDesc->StreamOutput.NumEntries) {
       ERR("CreatePipelineState: SO not supported");
@@ -326,9 +367,11 @@ public:
       return E_NOTIMPL;
     }
 
-    if (pDesc->HS.pShaderBytecode || pDesc->DS.pShaderBytecode) {
-      ERR("CreatePipelineState: Tess not supported");
-      return E_NOTIMPL;
+    const bool has_hull = pDesc->HS.pShaderBytecode != nullptr;
+    const bool has_domain = pDesc->DS.pShaderBytecode != nullptr;
+    if (has_hull != has_domain) {
+      ERR("CreatePipelineState: HS and DS must be provided together");
+      return E_INVALIDARG;
     }
 
     HRESULT hr;
@@ -336,16 +379,35 @@ public:
     auto metal = device_->GetMTLDevice();
     WMT::Reference<WMT::Error> err;
     WMT::Reference<WMT::Function> vs_func, ps_func;
+    WMT::Reference<WMT::Library> vs_lib, ps_lib, hs_lib, ds_lib, stage_in_lib;
     auto vs_backend = DetectD3D12ShaderBackend(pDesc->VS);
     auto ps_backend = pDesc->PS.pShaderBytecode ? DetectD3D12ShaderBackend(pDesc->PS) : D3D12ShaderBackend::Airconv;
     const bool use_msc = vs_backend == D3D12ShaderBackend::MetalShaderConverter;
+    const bool use_msc_tessellation = use_msc && has_hull && has_domain;
     if (vs_backend == D3D12ShaderBackend::Unsupported || ps_backend == D3D12ShaderBackend::Unsupported)
     return E_FAIL;
     if ((ps_backend == D3D12ShaderBackend::MetalShaderConverter) != use_msc)
       return E_NOTIMPL;
+    if ((has_hull || has_domain) && !use_msc_tessellation) {
+      ERR("CreatePipelineState: tessellation requires Metal Shader Converter");
+      return E_NOTIMPL;
+    }
+    if (use_msc_tessellation && !pDesc->PS.pShaderBytecode) {
+      ERR("CreatePipelineState: MSC tessellation requires a pixel shader");
+      return E_NOTIMPL;
+    }
 
     D3D12ConvertedShader converted_vs;
     D3D12ConvertedShader converted_ps;
+    D3D12ConvertedShader converted_hs;
+    D3D12ConvertedShader converted_ds;
+    dxmt_msc_input_layout msc_stage_in_layout = {};
+
+    if (use_msc_tessellation) {
+      hr = InitializeMSCStageInLayout(pDesc, msc_stage_in_layout);
+      if (FAILED(hr))
+        return hr;
+    }
 
     SM50_SHADER_COMMON_DATA common;
     common.flags = {};
@@ -364,16 +426,22 @@ public:
         return E_INVALIDARG;
       if (FAILED(
               hr = ConvertD3D12Shader(
-                  pDesc->VS, DXMT_MSC_STAGE_VERTEX, converted_vs, root_signature, root_signature_size
+                  pDesc->VS, DXMT_MSC_STAGE_VERTEX, converted_vs, root_signature, root_signature_size,
+                  use_msc_tessellation ? &msc_stage_in_layout : nullptr,
+                  use_msc_tessellation ? DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION : 0
               )
           ))
+      {
         return hr;
-      auto vs_lib = metal.newLibrary(converted_vs.metallib.data(), converted_vs.metallib.size(), err);
+      }
+      vs_lib = metal.newLibrary(converted_vs.metallib.data(), converted_vs.metallib.size(), err);
       if (!vs_lib)
         return E_FAIL;
-      vs_func = vs_lib.newFunction(converted_vs.entry_point.c_str());
-      if (!vs_func)
-        return E_FAIL;
+      if (!use_msc_tessellation) {
+        vs_func = vs_lib.newFunction(converted_vs.entry_point.c_str());
+        if (!vs_func)
+          return E_FAIL;
+      }
 
       if (pDesc->PS.pShaderBytecode) {
         if (FAILED(
@@ -381,12 +449,49 @@ public:
                     pDesc->PS, DXMT_MSC_STAGE_FRAGMENT, converted_ps, root_signature, root_signature_size
                 )
             ))
+        {
           return hr;
-        auto ps_lib = metal.newLibrary(converted_ps.metallib.data(), converted_ps.metallib.size(), err);
+        }
+        ps_lib = metal.newLibrary(converted_ps.metallib.data(), converted_ps.metallib.size(), err);
         if (!ps_lib)
           return E_FAIL;
         ps_func = ps_lib.newFunction(converted_ps.entry_point.c_str());
         if (!ps_func)
+          return E_FAIL;
+      }
+
+      if (use_msc_tessellation) {
+        if (converted_vs.stage_in_metallib.empty()) {
+          ERR("CreatePipelineState: MSC did not produce a stage-in metallib");
+          return E_FAIL;
+        }
+        stage_in_lib = metal.newLibrary(
+            converted_vs.stage_in_metallib.data(), converted_vs.stage_in_metallib.size(), err
+        );
+        if (!stage_in_lib)
+          return E_FAIL;
+
+        if (FAILED(
+                hr = ConvertD3D12Shader(
+                    pDesc->HS, DXMT_MSC_STAGE_HULL, converted_hs, root_signature, root_signature_size, nullptr,
+                    DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION
+                )
+            ))
+        {
+          return hr;
+        }
+        if (FAILED(
+                hr = ConvertD3D12Shader(
+                    pDesc->DS, DXMT_MSC_STAGE_DOMAIN, converted_ds, root_signature, root_signature_size, nullptr,
+                    DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION
+                )
+            ))
+        {
+          return hr;
+        }
+        hs_lib = metal.newLibrary(converted_hs.metallib.data(), converted_hs.metallib.size(), err);
+        ds_lib = metal.newLibrary(converted_ds.metallib.data(), converted_ds.metallib.size(), err);
+        if (!hs_lib || !ds_lib)
           return E_FAIL;
       }
       shader_backend = D3D12ShaderBackend::MetalShaderConverter;
@@ -591,12 +696,89 @@ public:
       info.raster_sample_count = pDesc->SampleDesc.Count;
       info.support_indirect_command_buffers = true;
 
-      pso = metal.newRenderPipelineState(info, err);
+      if (use_msc_tessellation) {
+        if (pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH)
+          return E_INVALIDARG;
 
-      if (!pso) {
-        ERR("Failed to create PSO: ", err.description().getUTF8String());
-        return E_FAIL;
+        const auto &hs = converted_hs.reflection;
+        const auto &ds = converted_ds.reflection;
+        if (!MTLValidateMSCTessellationPipeline(
+                hs.hs_tessellator_output_primitive, WMTPrimitiveTypeTriangle, hs.hs_output_control_point_size,
+                ds.ds_input_control_point_size, hs.hs_patch_constants_size, ds.ds_patch_constants_size,
+                hs.hs_output_control_point_count, ds.ds_input_control_point_count
+            ) ||
+            !converted_vs.reflection.vertex_output_size_in_bytes || !hs.hs_output_control_point_size ||
+            !ds.ds_input_control_point_size ||
+            hs.hs_output_control_point_size != ds.ds_input_control_point_size ||
+            hs.hs_patch_constants_size != ds.ds_patch_constants_size ||
+            hs.hs_output_control_point_count != ds.ds_input_control_point_count ||
+            hs.hs_tessellator_domain != ds.ds_tessellator_domain ||
+            hs.hs_tessellation_type_half != ds.ds_tessellation_type_half ||
+            !hs.hs_max_patches_per_object_threadgroup || !hs.hs_max_object_threads_per_patch ||
+            !ds.ds_max_input_prims_per_mesh_threadgroup || !hs.hs_max_tessellation_factor)
+          return E_INVALIDARG;
+
+        WMTMSCTessellationPipelineInfo tess_info;
+        WMT::InitializeMSCTessellationPipelineInfo(tess_info);
+        for (unsigned i = 0; i < 8; i++)
+          tess_info.base.colors[i] = info.colors[i];
+        tess_info.base.alpha_to_coverage_enabled = info.alpha_to_coverage_enabled;
+        tess_info.base.logic_operation_enabled = info.logic_operation_enabled;
+        tess_info.base.logic_operation = info.logic_operation;
+        tess_info.base.rasterization_enabled = info.rasterization_enabled;
+        tess_info.base.raster_sample_count = info.raster_sample_count;
+        tess_info.base.depth_pixel_format = info.depth_pixel_format;
+        tess_info.base.stencil_pixel_format = info.stencil_pixel_format;
+        tess_info.base.support_indirect_command_buffers = false;
+        tess_info.stage_in_library = stage_in_lib.handle;
+        tess_info.vertex_library = vs_lib.handle;
+        tess_info.hull_library = hs_lib.handle;
+        tess_info.domain_library = ds_lib.handle;
+        tess_info.fragment_library = ps_lib.handle;
+        std::strncpy(
+            tess_info.vertex_function_name, converted_vs.entry_point.c_str(),
+            sizeof(tess_info.vertex_function_name) - 1
+        );
+        std::strncpy(
+            tess_info.hull_function_name, converted_hs.entry_point.c_str(),
+            sizeof(tess_info.hull_function_name) - 1
+        );
+        std::strncpy(
+            tess_info.domain_function_name, converted_ds.entry_point.c_str(),
+            sizeof(tess_info.domain_function_name) - 1
+        );
+        std::strncpy(
+            tess_info.fragment_function_name, converted_ps.entry_point.c_str(),
+            sizeof(tess_info.fragment_function_name) - 1
+        );
+        tess_info.config.output_primitive_type = hs.hs_tessellator_output_primitive;
+        tess_info.config.vs_output_size_in_bytes = converted_vs.reflection.vertex_output_size_in_bytes;
+        tess_info.config.gs_max_input_primitives_per_mesh_threadgroup = ds.ds_max_input_prims_per_mesh_threadgroup;
+        tess_info.config.hs_max_patches_per_object_threadgroup = hs.hs_max_patches_per_object_threadgroup;
+        tess_info.config.hs_input_control_point_count = hs.hs_input_control_point_count;
+        tess_info.config.hs_max_object_threads_per_threadgroup = hs.hs_max_object_threads_per_patch;
+        tess_info.config.hs_max_tessellation_factor = hs.hs_max_tessellation_factor;
+        tess_info.config.gs_instance_count = 1;
+
+        pso = metal.newMSCTessellationPipelineState(tess_info, err);
+        if (pso)
+          msc_tessellator_tables = metal.newMSCTessellatorTables();
+        if (!pso) {
+          ERR("Failed to create MSC tessellation PSO: ", err ? err.description().getUTF8String() : "unknown error");
+          return E_FAIL;
+        }
+        if (!msc_tessellator_tables)
+          return E_FAIL;
+        msc_tessellation = true;
+        msc_tessellation_config = tess_info.config;
+      } else {
+        pso = metal.newRenderPipelineState(info, err);
       }
+
+       if (!pso) {
+         ERR("Failed to create PSO: ", err ? err.description().getUTF8String() : "unknown error");
+         return E_FAIL;
+       }
     }
 
     // DSSO
