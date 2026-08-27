@@ -206,8 +206,9 @@ public:
       return S_OK;
     }
 
-    if (riid == __uuidof(ID3D12Device1)) {
-      auto *device = static_cast<ID3D12Device1 *>(this);
+    if (riid == __uuidof(ID3D12Device1) || riid == __uuidof(ID3D12Device2) || riid == __uuidof(ID3D12Device3) ||
+        riid == __uuidof(ID3D12Device4)) {
+      auto *device = static_cast<ID3D12Device4 *>(this);
       *ppvObject = ref(device);
       return S_OK;
     }
@@ -869,73 +870,7 @@ public:
   D3D12_RESOURCE_ALLOCATION_INFO *STDMETHODCALLTYPE GetResourceAllocationInfo(
        D3D12_RESOURCE_ALLOCATION_INFO *__ret, UINT VisibleMask, UINT ResourceDestCount, const D3D12_RESOURCE_DESC *pDescs
   ) {
-    if (!__ret)
-      return nullptr;
-
-    constexpr UINT64 default_alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
-    *__ret = {0, default_alignment};
-    if ((VisibleMask & ~1u) || (ResourceDestCount && !pDescs)) {
-      *__ret = {UINT64_MAX, UINT64_MAX};
-      return __ret;
-    }
-
-    UINT64 total_size = 0;
-    UINT64 max_alignment = default_alignment;
-    for (UINT i = 0; i < ResourceDestCount; i++) {
-      const auto &desc = pDescs[i];
-      WMTSizeAndAlign size_and_align = {};
-      UINT64 minimum_alignment = desc.Alignment ? desc.Alignment : default_alignment;
-
-      switch (desc.Alignment) {
-      case 0:
-      case D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT:
-      case D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT:
-      case D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT:
-        break;
-      default:
-        *__ret = {UINT64_MAX, UINT64_MAX};
-        return __ret;
-      }
-
-      if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
-        if (!desc.Width || desc.Height != 1 || desc.DepthOrArraySize != 1 || desc.MipLevels != 1 ||
-            desc.SampleDesc.Count != 1 || desc.Format != DXGI_FORMAT_UNKNOWN) {
-          *__ret = {UINT64_MAX, UINT64_MAX};
-          return __ret;
-        }
-        size_and_align = GetMTLDevice().heapBufferSizeAndAlign(desc.Width, WMTResourceHazardTrackingModeUntracked | WMTResourceStorageModePrivate);
-      } else {
-        if (!desc.Width || !desc.Height || !desc.DepthOrArraySize || !desc.SampleDesc.Count) {
-          *__ret = {UINT64_MAX, UINT64_MAX};
-          return __ret;
-        }
-        WMTTextureInfo texture_info = {};
-        if (FAILED(PopulateWMTTextureInfo(GetMTLDevice(), texture_info, desc))) {
-          *__ret = {UINT64_MAX, UINT64_MAX};
-          return __ret;
-        }
-        size_and_align = GetMTLDevice().heapTextureSizeAndAlign(texture_info);
-        if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.SampleDesc.Count > 1)
-          minimum_alignment = std::max<UINT64>(minimum_alignment, D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT);
-      }
-
-      UINT64 resource_alignment = std::max<UINT64>(minimum_alignment, size_and_align.align);
-      if (!size_and_align.size || !resource_alignment || resource_alignment > UINT64_MAX - total_size) {
-        *__ret = {UINT64_MAX, UINT64_MAX};
-        return __ret;
-      }
-      total_size = align(total_size, resource_alignment);
-      if (total_size > UINT64_MAX - size_and_align.size) {
-        *__ret = {UINT64_MAX, UINT64_MAX};
-        return __ret;
-      }
-      total_size += size_and_align.size;
-      max_alignment = std::max(max_alignment, resource_alignment);
-    }
-
-    __ret->SizeInBytes = total_size;
-    __ret->Alignment = max_alignment;
-    return __ret;
+    return GetResourceAllocationInfo1(__ret, VisibleMask, ResourceDestCount, pDescs, nullptr);
   };
 
   D3D12_HEAP_PROPERTIES *STDMETHODCALLTYPE
@@ -1099,6 +1034,150 @@ public:
   };
 
   HRESULT STDMETHODCALLTYPE
+  CreatePipelineState(const D3D12_PIPELINE_STATE_STREAM_DESC *pDesc, REFIID riid, void **ppPipelineState) {
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  OpenExistingHeapFromAddress(const void *pAddress, REFIID riid, void **ppHeap) {
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  OpenExistingHeapFromFileMapping(HANDLE hFileMapping, REFIID riid, void **ppHeap) {
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  EnqueueMakeResident(
+      D3D12_RESIDENCY_FLAGS Flags, UINT NumObjects, ID3D12Pageable *const *ppObjects, ID3D12Fence *pFence,
+      UINT64 FenceValue
+  ) {
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  CreateCommandList1(
+      UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, D3D12_COMMAND_LIST_FLAGS Flags, REFIID riid, void **ppCommandList
+  ) {
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  CreateProtectedResourceSession(const D3D12_PROTECTED_RESOURCE_SESSION_DESC *pDesc, REFIID riid, void **ppSession) {
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  CreateCommittedResource1(
+      const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS HeapFlags, const D3D12_RESOURCE_DESC *pDesc,
+      D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE *OptimizedClearValue,
+      ID3D12ProtectedResourceSession *pSession, REFIID riid, void **ppResource
+  ) {
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  CreateHeap1(const D3D12_HEAP_DESC *pDesc, ID3D12ProtectedResourceSession *pSession, REFIID riid, void **ppHeap) {
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  CreateReservedResource1(
+      const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
+      const D3D12_CLEAR_VALUE *OptimizedClearValue, ID3D12ProtectedResourceSession *pSession, REFIID riid,
+      void **ppResource
+  ) {
+    return E_NOTIMPL;
+  }
+
+  D3D12_RESOURCE_ALLOCATION_INFO *STDMETHODCALLTYPE
+  GetResourceAllocationInfo1(
+      D3D12_RESOURCE_ALLOCATION_INFO *__ret, UINT VisibleMask, UINT ResourceDestCount,
+      const D3D12_RESOURCE_DESC *pDescs, D3D12_RESOURCE_ALLOCATION_INFO1 *pAllocationInfos
+  ) {
+    if (!__ret)
+      return nullptr;
+
+    constexpr UINT64 default_alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    constexpr UINT64 msaa_alignment = D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;
+    *__ret = {0, default_alignment};
+    if ((VisibleMask & ~1u) || (ResourceDestCount && !pDescs)) {
+      *__ret = {UINT64_MAX, UINT64_MAX};
+      return __ret;
+    }
+
+    UINT64 total_size = 0;
+    UINT64 max_alignment = default_alignment;
+    bool has_msaa_resource = false;
+    for (UINT i = 0; i < ResourceDestCount; i++) {
+      const auto &desc = pDescs[i];
+      D3D12_RESOURCE_ALLOCATION_INFO1 resource_info = {};
+      WMTSizeAndAlign size_and_align = {};
+      UINT64 minimum_alignment = desc.Alignment ? desc.Alignment : default_alignment;
+      has_msaa_resource |= desc.SampleDesc.Count > 1;
+
+      switch (desc.Alignment) {
+      case 0:
+      case D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT:
+      case D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT:
+      case D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT:
+        break;
+      default:
+        goto invalid;
+      }
+
+      if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+        if (desc.Alignment && desc.Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)
+          goto invalid;
+        if (!desc.Width || desc.Height != 1 || desc.DepthOrArraySize != 1 || desc.MipLevels != 1 ||
+            desc.SampleDesc.Count != 1 || desc.Format != DXGI_FORMAT_UNKNOWN)
+          goto invalid;
+        resource_info.Alignment = default_alignment;
+        size_and_align = GetMTLDevice().heapBufferSizeAndAlign(
+            desc.Width, WMTResourceHazardTrackingModeUntracked | WMTResourceStorageModePrivate
+        );
+      } else {
+        if (!desc.Width || !desc.Height || !desc.DepthOrArraySize || !desc.SampleDesc.Count)
+          goto invalid;
+        WMTTextureInfo texture_info = {};
+        if (FAILED(PopulateWMTTextureInfo(GetMTLDevice(), texture_info, desc)))
+          goto invalid;
+        size_and_align = GetMTLDevice().heapTextureSizeAndAlign(texture_info);
+        resource_info.Alignment = size_and_align.align;
+        if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.SampleDesc.Count > 1)
+          minimum_alignment = std::max<UINT64>(minimum_alignment, msaa_alignment);
+      }
+
+      resource_info.Alignment = std::max<UINT64>(resource_info.Alignment, minimum_alignment);
+      if (!size_and_align.size || !resource_info.Alignment ||
+          size_and_align.size > UINT64_MAX - (resource_info.Alignment - 1) ||
+          total_size > UINT64_MAX - (resource_info.Alignment - 1))
+        goto invalid;
+      resource_info.SizeInBytes = align(size_and_align.size, resource_info.Alignment);
+      resource_info.Offset = align(total_size, resource_info.Alignment);
+      if (resource_info.Offset < total_size || resource_info.SizeInBytes > UINT64_MAX - resource_info.Offset)
+        goto invalid;
+
+      if (pAllocationInfos)
+        pAllocationInfos[i] = resource_info;
+
+      total_size = resource_info.Offset + resource_info.SizeInBytes;
+      max_alignment = std::max(max_alignment, resource_info.Alignment);
+    }
+
+    if (total_size > UINT64_MAX - (max_alignment - 1))
+      goto invalid;
+    __ret->SizeInBytes = align(total_size, max_alignment);
+    __ret->Alignment = max_alignment;
+    return __ret;
+
+  invalid:
+    *__ret = {UINT64_MAX, has_msaa_resource ? msaa_alignment : default_alignment};
+    return __ret;
+  }
+
+  HRESULT STDMETHODCALLTYPE
   CreateSharedHandle(
       ID3D12DeviceChild *object, const SECURITY_ATTRIBUTES *attributes, DWORD access, const WCHAR *name, HANDLE *handle
   ) {
@@ -1158,7 +1237,9 @@ public:
     MTL_DXGI_FORMAT_DESC FormatDesc = {};
     UINT64 BlockWidth = 1;
     UINT64 BlockHeight = 1;
-    UINT64 BlockSize = 0;
+    UINT64 PlaneBytesPerTexel[2] = {};
+    DXGI_FORMAT PlaneFormats[2] = {};
+    UINT PlaneCount = 1;
     UINT64 TotalSubresources = 0;
     UINT mip_levels = 0;
     bool valid = true;
@@ -1168,7 +1249,8 @@ public:
       if (pDesc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
         if (pDesc->Format == DXGI_FORMAT_UNKNOWN && pDesc->Height == 1 && pDesc->DepthOrArraySize == 1 &&
             pDesc->MipLevels == 1 && pDesc->SampleDesc.Count == 1) {
-          FormatDesc.BytesPerTexel = 1;
+          PlaneFormats[0] = DXGI_FORMAT_UNKNOWN;
+          PlaneBytesPerTexel[0] = 1;
           mip_levels = 1;
           TotalSubresources = 1;
         }
@@ -1187,33 +1269,68 @@ public:
             ++mip_levels;
           }
         }
-        BlockSize = FormatDesc.Flag & MTL_DXGI_FORMAT_BC ? FormatDesc.BlockSize : FormatDesc.BytesPerTexel;
-        if (BlockSize) {
-          if (FormatDesc.Flag & MTL_DXGI_FORMAT_BC) {
-            BlockWidth = 4;
-            BlockHeight = 4;
+        if (pDesc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D && pDesc->Height != 1)
+          mip_levels = 0;
+
+        if (FormatDesc.Flag & MTL_DXGI_FORMAT_BC) {
+          BlockWidth = 4;
+          BlockHeight = 4;
+        }
+        if (FormatDesc.PlanarCount > 1) {
+          if (FormatDesc.PlanarCount > 2 ||
+              !(FormatDesc.Flag & (MTL_DXGI_FORMAT_DEPTH_PLANER | MTL_DXGI_FORMAT_STENCIL_PLANER))) {
+            mip_levels = 0;
+          } else {
+            PlaneCount = FormatDesc.PlanarCount;
+            PlaneFormats[0] = DXGI_FORMAT_R32_TYPELESS;
+            PlaneBytesPerTexel[0] = 4;
+            PlaneFormats[1] = DXGI_FORMAT_R8_TYPELESS;
+            PlaneBytesPerTexel[1] = 1;
           }
+        } else {
+          PlaneFormats[0] = pDesc->Format;
+          PlaneBytesPerTexel[0] =
+              FormatDesc.Flag & MTL_DXGI_FORMAT_BC ? FormatDesc.BlockSize : FormatDesc.BytesPerTexel;
+          if (!PlaneBytesPerTexel[0])
+            mip_levels = 0;
+        }
+        if (mip_levels) {
           auto array_size = pDesc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : pDesc->DepthOrArraySize;
-          TotalSubresources = uint64_t(mip_levels) * array_size * std::max<UINT>(1, FormatDesc.PlanarCount);
+          TotalSubresources = uint64_t(mip_levels) * array_size * PlaneCount;
         }
       }
 
-      if (BlockSize == 0 && pDesc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
-        BlockSize = 1;
-      if (BlockSize && FirstSubresource <= TotalSubresources && SubresourceCount <= TotalSubresources - FirstSubresource) {
+      if (PlaneBytesPerTexel[0] && FirstSubresource <= TotalSubresources &&
+          SubresourceCount <= TotalSubresources - FirstSubresource) {
         for (UINT i = 0; i < SubresourceCount; i++) {
           auto subresource = uint64_t(FirstSubresource) + i;
-          auto mip_level = subresource % mip_levels;
-          auto width = std::max<UINT64>(1, pDesc->Width >> mip_level);
-          auto height = pDesc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D
-                            ? 1
-                            : std::max<UINT64>(1, pDesc->Height >> mip_level);
-          auto depth = pDesc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
-                           ? std::max<UINT64>(1, pDesc->DepthOrArraySize >> mip_level)
-                           : 1;
-          auto row_count = (height + BlockHeight - 1) / BlockHeight;
-          auto row_size = ((width + BlockWidth - 1) / BlockWidth) * BlockSize;
-          auto row_pitch = align(row_size, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+          UINT mip_level = 0;
+          UINT plane = 0;
+          DecomposeSubresource(*pDesc, static_cast<UINT>(subresource), &mip_level, nullptr, &plane);
+          if (plane >= PlaneCount) {
+            valid = false;
+            break;
+          }
+
+          auto extent = GetResourceExtent(*pDesc, mip_level);
+          auto width = UINT64(extent.right);
+          auto height = UINT64(extent.bottom);
+          auto aligned_width = align(width, BlockWidth);
+          auto aligned_height = align(height, BlockHeight);
+          auto depth = UINT64(extent.back);
+          auto row_count = aligned_height / BlockHeight;
+          if (aligned_width / BlockWidth > UINT64_MAX / PlaneBytesPerTexel[plane]) {
+            valid = false;
+            break;
+          }
+          auto row_size = (aligned_width / BlockWidth) * PlaneBytesPerTexel[plane];
+          constexpr UINT64 pitch_alignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+          if (PlaneCount > UINT64_MAX / pitch_alignment ||
+              row_size > UINT64_MAX - (pitch_alignment * PlaneCount - 1)) {
+            valid = false;
+            break;
+          }
+          auto row_pitch = align(row_size, pitch_alignment * PlaneCount);
           if (row_count && row_pitch > UINT64_MAX / row_count) {
             valid = false;
             break;
@@ -1235,10 +1352,10 @@ public:
               break;
             }
             pLayouts[i].Offset = BaseOffset + Offset;
-            pLayouts[i].Footprint.Format = pDesc->Format;
-            pLayouts[i].Footprint.Width = width;
-            pLayouts[i].Footprint.Height = height;
-            pLayouts[i].Footprint.Depth = depth;
+            pLayouts[i].Footprint.Format = PlaneFormats[plane];
+            pLayouts[i].Footprint.Width = static_cast<UINT>(width);
+            pLayouts[i].Footprint.Height = static_cast<UINT>(height);
+            pLayouts[i].Footprint.Depth = static_cast<UINT>(depth);
             pLayouts[i].Footprint.RowPitch = static_cast<UINT>(row_pitch);
           }
           if (pNumRows)

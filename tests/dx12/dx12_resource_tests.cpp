@@ -66,6 +66,8 @@ int main() {
   ID3D12DescriptorHeap *shader_heap = nullptr;
   ID3D12CommandSignature *command_signature = nullptr;
   ID3D12Device1 *device1 = nullptr;
+  ID3D12Device4 *device4 = nullptr;
+  ID3D12GraphicsCommandList2 *list2 = nullptr;
   HANDLE event = nullptr;
   HANDLE multiple_event = nullptr;
   D3D12_RESOURCE_BARRIER aliasing_barrier = {};
@@ -80,6 +82,8 @@ int main() {
       fence->Release();
     if (multiple_fence)
       multiple_fence->Release();
+    if (list2)
+      list2->Release();
     if (list)
       list->Release();
     if (destination)
@@ -122,6 +126,8 @@ int main() {
       shader_heap->Release();
     if (command_signature)
       command_signature->Release();
+    if (device4)
+      device4->Release();
     if (device1)
       device1->Release();
     if (info_queue)
@@ -155,6 +161,10 @@ int main() {
     return 1;
   }
   if (!CheckHR("QueryDevice1", device->QueryInterface(IID_PPV_ARGS(&device1)))) {
+    cleanup();
+    return 1;
+  }
+  if (!CheckHR("QueryDevice4", device->QueryInterface(IID_PPV_ARGS(&device4)))) {
     cleanup();
     return 1;
   }
@@ -311,6 +321,18 @@ int main() {
       buffer_info.Alignment < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) {
     std::cerr << "invalid buffer allocation info: size=" << buffer_info.SizeInBytes
               << " alignment=" << buffer_info.Alignment << "\n";
+    cleanup();
+    return 1;
+  }
+  D3D12_RESOURCE_ALLOCATION_INFO1 buffer_info1 = {};
+  D3D12_RESOURCE_ALLOCATION_INFO buffer_info4 =
+      device4->GetResourceAllocationInfo1(0, 1, &buffer_desc, &buffer_info1);
+  if (!buffer_info4.SizeInBytes || buffer_info4.SizeInBytes == UINT64_MAX ||
+      !buffer_info1.SizeInBytes || buffer_info1.SizeInBytes == UINT64_MAX || buffer_info1.Offset ||
+      buffer_info1.Alignment < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) {
+    std::cerr << "invalid Device4 allocation info: size=" << buffer_info4.SizeInBytes
+              << " resource_size=" << buffer_info1.SizeInBytes << " offset=" << buffer_info1.Offset
+              << " alignment=" << buffer_info1.Alignment << "\n";
     cleanup();
     return 1;
   }
@@ -926,6 +948,10 @@ int main() {
                device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                          allocator, nullptr,
                                          IID_PPV_ARGS(&list)))) {
+    cleanup();
+    return 1;
+  }
+  if (!CheckHR("QueryCommandList2", list->QueryInterface(IID_PPV_ARGS(&list2)))) {
     cleanup();
     return 1;
   }

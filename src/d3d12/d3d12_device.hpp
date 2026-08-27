@@ -42,7 +42,7 @@ namespace dxmt {
 
 class MTLD3D12Resource;
 
-class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList {
+class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList2 {
 public:
   EncoderData *entry;
   size_t encoder_count;
@@ -217,7 +217,7 @@ public:
   virtual void ReleasePrivate() = 0;
 };
 
-class MTLD3D12Device : public ID3D12Device1 {
+class MTLD3D12Device : public ID3D12Device4 {
 public:
   virtual WMT::Device GetMTLDevice() = 0;
 
