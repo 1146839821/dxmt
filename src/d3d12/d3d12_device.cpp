@@ -1453,6 +1453,14 @@ public:
   GetLib() {
     return command_library;
   }
+
+  FormatCapability
+  GetMTLPixelFormatCapability(WMTPixelFormat Format) final {
+    Format = ORIGINAL_FORMAT(Format);
+    if (!format_capabilities_.textureCapabilities.contains(Format))
+      return FormatCapability(0);
+    return format_capabilities_.textureCapabilities.at(Format);
+  }
 };
 
 HRESULT

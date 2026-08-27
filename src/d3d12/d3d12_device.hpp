@@ -237,6 +237,8 @@ public:
 
   virtual InternalCommandLibrary& GetLib() = 0;
 
+  virtual FormatCapability GetMTLPixelFormatCapability(WMTPixelFormat Format) = 0;
+
   EventListener event_listener;
 };
 

@@ -600,9 +600,14 @@ void handle_signature_ps(
       max_output_register = std::max(reg + 1, max_output_register);
       pso_valid_output_reg_mask |= (1 << reg);
       if (sig.mask() == 0) break;
-      auto type = sig.componentType();
+      auto sig_type = sig.componentType();
       signature_handlers.push_back([=](SignatureContext &ctx) {
         uint32_t assigned_index;
+        auto type = reg < std::size(ctx.pixel_formats)
+                      ? component_type_from_pixel_format(ctx.pixel_formats[reg])
+                      : RegisterComponentType::Unknown;
+        if (ctx.dual_source_blending || type == RegisterComponentType::Unknown)
+          type = sig_type;
         if (ctx.dual_source_blending) {
           if (reg > 1 || reg < 0)
             return;

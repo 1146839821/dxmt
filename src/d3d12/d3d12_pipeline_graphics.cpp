@@ -485,10 +485,10 @@ public:
 
         rt.write_mask = kColorWriteMaskMap[renderTarget.RenderTargetWriteMask];
         if (renderTarget.BlendEnable) {
-          // TODO
-          // if (!any_bit_set(device_->GetMTLPixelFormatCapability(rt.pixel_format) & FormatCapability::Blend)) {
-          //   return E_INVALIDARG;
-          // }
+          if (!any_bit_set(device_->GetMTLPixelFormatCapability(rt.pixel_format) & FormatCapability::Blend)) {
+            WARN("CreateGraphicsPipelineState: pixel format ", rt.pixel_format, " is not blendable");
+            return E_INVALIDARG;
+          }
           if (BlendFactorIsDualSource(renderTarget.SrcBlendAlpha) || BlendFactorIsDualSource(renderTarget.SrcBlend) ||
               BlendFactorIsDualSource(renderTarget.DestBlendAlpha) || BlendFactorIsDualSource(renderTarget.DestBlend)) {
             dual_source_blending = true;
@@ -536,6 +536,10 @@ public:
       data_ps.sample_mask = pDesc->SampleMask;
       data_ps.type = SM50_SHADER_PSO_PIXEL_SHADER;
       data_ps.next = &common;
+
+      memset(data_ps.pixel_formats, 0, sizeof(data_ps.pixel_formats));
+      for (unsigned i = 0; i < pDesc->NumRenderTargets; i++)
+        data_ps.pixel_formats[i] = ORIGINAL_FORMAT(info.colors[i].pixel_format);
 
       SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
       SM50_SHADER_COMPILATION_ARGUMENT_DATA *shader_args =
