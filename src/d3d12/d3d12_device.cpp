@@ -1146,7 +1146,7 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   GetDeviceRemovedReason() {
-    return E_NOTIMPL;
+    return S_OK;
   };
 
   void STDMETHODCALLTYPE GetCopyableFootprints(

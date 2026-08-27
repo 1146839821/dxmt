@@ -269,13 +269,15 @@ public:
 
   HRESULT STDMETHODCALLTYPE RegisterVideoMemoryBudgetChangeNotificationEvent(
       HANDLE event, DWORD *cookie) override {
-    assert(0 && "TODO");
-    return E_NOTIMPL;
+    if (!cookie)
+      return E_INVALIDARG;
+    *cookie = 0;
+    return S_OK;
   }
 
   void STDMETHODCALLTYPE
   UnregisterVideoMemoryBudgetChangeNotification(DWORD cookie) override {
-    assert(0 && "TODO");
+    // no-op
   }
 
   WMT::Device STDMETHODCALLTYPE GetMTLDevice() final { return device_; }
