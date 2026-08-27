@@ -47,6 +47,13 @@ public:
     state = InitialState;
     InitializeStateTracking(desc_, device_->GetMTLDevice());
 
+    if (desc_.Alignment) {
+      if (desc_.Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)
+        return E_INVALIDARG;
+    } else {
+      desc_.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    }
+
     buffer = new Buffer(desc_.Width, device_->GetMTLDevice());
 
     Flags<BufferAllocationFlag> flags;
@@ -64,6 +71,13 @@ public:
     if (flags.test(BufferAllocationFlag::CpuPlaced))
       use_heap = false;
 #endif
+    if (pHeap) {
+      auto size_and_align = device_->GetMTLDevice().heapBufferSizeAndAlign(desc_.Width, {});
+      auto heap_size = pHeap->GetDesc().SizeInBytes;
+      if (HeapOffset > heap_size || size_and_align.size > heap_size - HeapOffset)
+        return E_INVALIDARG;
+    }
+
     auto allocation = use_heap ? buffer->allocate(pHeap->GetMetalHeap(), HeapOffset, flags) : buffer->allocate(flags);
     if (!allocation || !allocation->buffer())
       return E_OUTOFMEMORY;
