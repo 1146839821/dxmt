@@ -5,7 +5,7 @@
 
 #define IR_RUNTIME_METALCPP
 #define IR_PRIVATE_IMPLEMENTATION
-#include <metal_irconverter_runtime/metal_irconverter_runtime.h>
+#include "metal_shader_converter/metal_irconverter_runtime.h"
 
 #include "metalirconverter_native.h"
 
