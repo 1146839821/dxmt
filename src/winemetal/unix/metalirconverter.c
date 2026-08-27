@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <metal_irconverter/metal_irconverter.h>
+#include "metal_shader_converter/metal_irconverter.h"
 
 typedef struct dxmt_msc_api {
   IRCompiler *(*IRCompilerCreate)(void);
