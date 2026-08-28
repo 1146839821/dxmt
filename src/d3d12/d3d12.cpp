@@ -26,6 +26,19 @@ namespace dxmt {
 
 Logger Logger::s_instance("d3d12.log");
 
+static bool
+is_supported_feature_level(D3D_FEATURE_LEVEL level) {
+  switch (level) {
+  case D3D_FEATURE_LEVEL_11_0:
+  case D3D_FEATURE_LEVEL_11_1:
+  case D3D_FEATURE_LEVEL_12_0:
+  case D3D_FEATURE_LEVEL_12_1:
+    return true;
+  default:
+    return false;
+  }
+}
+
 extern "C" HRESULT WINAPI
 D3D12CreateDevice(IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REFIID riid, void **ppDevice) {
 
@@ -33,8 +46,10 @@ D3D12CreateDevice(IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REF
   Com<IDXGIFactory> dxgi_factory = nullptr;
   Com<IMTLDXGIAdapter> dxgi_adapter_mtl = nullptr;
 
-  if (MinimumFeatureLevel < D3D_FEATURE_LEVEL_11_0 || MinimumFeatureLevel > D3D_FEATURE_LEVEL_11_0)
+  if (!is_supported_feature_level(MinimumFeatureLevel)) {
+    WARN("D3D12CreateDevice: unsupported minimum feature level ", static_cast<unsigned>(MinimumFeatureLevel));
     return E_INVALIDARG;
+  }
 
   HRESULT hr;
 
@@ -62,7 +77,7 @@ D3D12CreateDevice(IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REF
   if (!ppDevice)
     return S_FALSE;
 
-  return dxmt::CreateD3D12Device(dxgi_adapter_mtl.ptr(), riid, ppDevice);
+  return dxmt::CreateD3D12Device(dxgi_adapter_mtl.ptr(), MinimumFeatureLevel, riid, ppDevice);
 }
 
 extern "C" HRESULT WINAPI

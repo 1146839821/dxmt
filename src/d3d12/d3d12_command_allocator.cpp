@@ -127,6 +127,9 @@ MTLD3D12CommandAllocatorImpl::Reset() {
       case EncoderType::Resolve:
         reinterpret_cast<ResolveEncoderData *>(next)->~ResolveEncoderData();
         break;
+      case EncoderType::TemporalUpscale:
+        reinterpret_cast<TemporalUpscaleData *>(next)->~TemporalUpscaleData();
+        break;
       case EncoderType::SampleTimestamp:
         reinterpret_cast<SampleTimestampData *>(next)->~SampleTimestampData();
         break;

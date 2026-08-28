@@ -259,6 +259,27 @@ public:
 
           break;
         }
+        case EncoderType::TemporalUpscale: {
+          auto data = static_cast<TemporalUpscaleData *>(current);
+
+          auto begin_scaler = cmdbuf.blitCommandEncoder();
+          begin_scaler.setLabel(WMT::String::string("BeginScaler", WMTUTF8StringEncoding));
+          begin_scaler.waitForFence(fence_);
+          begin_scaler.updateFence(data->scaler->fence());
+          begin_scaler.endEncoding();
+
+          cmdbuf.encodeTemporalScale(
+              data->scaler->scaler(), data->input, data->output, data->depth, data->motion_vector, data->exposure,
+              data->scaler->fence(), data->props
+          );
+
+          auto end_scaler = cmdbuf.blitCommandEncoder();
+          end_scaler.waitForFence(data->scaler->fence());
+          end_scaler.setLabel(WMT::String::string("EndScaler", WMTUTF8StringEncoding));
+          end_scaler.updateFence(fence_);
+          end_scaler.endEncoding();
+          break;
+        }
         case EncoderType::SampleTimestamp: {
           auto data = static_cast<SampleTimestampData *>(current);
           if (!data->sample_buffer || !timestamp_dummy_buffer_)

@@ -19,6 +19,7 @@
 #pragma once
 
 #include "dxmt_texture.hpp"
+#include "dxmt_scaler.hpp"
 #include <cstdint>
 
 namespace dxmt {
@@ -30,6 +31,7 @@ enum class EncoderType {
   Blit,
   Compute,
   Resolve,
+  TemporalUpscale,
   SampleTimestamp,
 };
 
@@ -119,6 +121,16 @@ struct ComputeEncoderData : EncoderData {
 struct ResolveEncoderData : EncoderData {
   TextureViewRef src;
   TextureViewRef dst;
+};
+
+struct TemporalUpscaleData : EncoderData {
+  WMT::Reference<WMT::Texture> input;
+  WMT::Reference<WMT::Texture> output;
+  WMT::Reference<WMT::Texture> depth;
+  WMT::Reference<WMT::Texture> motion_vector;
+  WMT::Reference<WMT::Texture> exposure;
+  Rc<TemporalScaler> scaler;
+  WMTFXTemporalScalerProps props;
 };
 
 struct SampleTimestampData : EncoderData {

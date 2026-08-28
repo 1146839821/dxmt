@@ -18,6 +18,10 @@ dx12_resource_tests = executable('dx12_resource_tests', 'dx12_resource_tests.cpp
   dependencies: [ d3d12_dep ],
 )
 
+dx12_ngx_smoke = executable('dx12_ngx_smoke', 'dx12_ngx_smoke.cpp',
+  dependencies: [ d3d12_dep, dxgi_dep ],
+)
+
 dx12_hdr = executable('dx12_hdr', 'dx12_hdr.cpp',
   dependencies: [ d3d12_dep, dxgi_dep ],
 )

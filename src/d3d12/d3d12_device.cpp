@@ -146,6 +146,7 @@ private:
 class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
 
   Com<IMTLDXGIAdapter> adapter_;
+  D3D_FEATURE_LEVEL feature_level_;
 
   bool advertise_numa_ = false;
 
@@ -157,7 +158,8 @@ class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
   InternalCommandLibrary command_library;
 
 public:
-  MTLD3D12DeviceImpl(IMTLDXGIAdapter *adapter) : adapter_(adapter), command_library(adapter_->GetMTLDevice()) {}
+  MTLD3D12DeviceImpl(IMTLDXGIAdapter *adapter, D3D_FEATURE_LEVEL feature_level)
+      : adapter_(adapter), feature_level_(feature_level), command_library(adapter_->GetMTLDevice()) {}
 
   ~MTLD3D12DeviceImpl() {}
 
@@ -180,7 +182,7 @@ public:
 
   D3D_FEATURE_LEVEL
   GetFeatureLevel() {
-    return D3D_FEATURE_LEVEL_11_0; // FIXME
+    return feature_level_;
   };
 
   HRESULT
@@ -462,6 +464,7 @@ public:
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS3 *>(pFeatureData);
       *out = {};
       out->CopyQueueTimestampQueriesSupported = TRUE;
+      out->CastingFullyTypedFormatSupported = TRUE;
       return S_OK;
     }
     case D3D12_FEATURE_EXISTING_HEAPS: {
@@ -1584,8 +1587,8 @@ public:
 };
 
 HRESULT
-CreateD3D12Device(IMTLDXGIAdapter *adapter, const IID &riid, void **ppDevice) {
-  auto device = Com(new MTLD3D12DeviceImpl(adapter));
+CreateD3D12Device(IMTLDXGIAdapter *adapter, D3D_FEATURE_LEVEL feature_level, const IID &riid, void **ppDevice) {
+  auto device = Com(new MTLD3D12DeviceImpl(adapter, feature_level));
   HRESULT hr = device->Initialize();
   if (FAILED(hr))
     return hr;

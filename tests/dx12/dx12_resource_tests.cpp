@@ -31,6 +31,7 @@ UINT64 AlignUp(UINT64 value, UINT64 alignment) {
 
 int main() {
   ID3D12Device *device = nullptr;
+  ID3D12Device *feature_level_device = nullptr;
   ID3D12InfoQueue *info_queue = nullptr;
   ID3D12CommandQueue *queue = nullptr;
   ID3D12CommandAllocator *allocator = nullptr;
@@ -157,9 +158,18 @@ int main() {
       queue->Release();
     if (device)
       device->Release();
+    if (feature_level_device)
+      feature_level_device->Release();
   };
 
   if (!CheckHR("D3D12CreateDevice", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) {
+    cleanup();
+    return 1;
+  }
+  if (!CheckHR(
+          "D3D12CreateDevice12_1",
+          D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(&feature_level_device))
+      )) {
     cleanup();
     return 1;
   }
@@ -280,7 +290,8 @@ int main() {
       !architecture1.UMA || feature_levels.MaxSupportedFeatureLevel != D3D_FEATURE_LEVEL_11_0 ||
       shader_model.HighestShaderModel != D3D_SHADER_MODEL_6_0 || options.ResourceBindingTier != D3D12_RESOURCE_BINDING_TIER_2 ||
       options.ResourceHeapTier != D3D12_RESOURCE_HEAP_TIER_2 || options.ROVsSupported || options1.WaveOps ||
-      options3.CopyQueueTimestampQueriesSupported != TRUE || options5.RenderPassesTier != D3D12_RENDER_PASS_TIER_0 ||
+       options3.CopyQueueTimestampQueriesSupported != TRUE || !options3.CastingFullyTypedFormatSupported ||
+       options5.RenderPassesTier != D3D12_RENDER_PASS_TIER_0 ||
       options5.RaytracingTier != D3D12_RAYTRACING_TIER_NOT_SUPPORTED || shader_cache.SupportFlags ||
       !queue_priority.PriorityForTypeIsSupported || existing_heaps.Supported ||
       serialization.HeapSerializationTier != D3D12_HEAP_SERIALIZATION_TIER_0 || cross_node.SharingTier != D3D12_CROSS_NODE_SHARING_TIER_NOT_SUPPORTED ||

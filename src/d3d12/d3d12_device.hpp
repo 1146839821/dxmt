@@ -20,6 +20,7 @@
 #include "d3d12.h"
 #include "d3d12_command_encoder.hpp"
 #include "d3d12_descriptor_heap.hpp"
+#include "d3d12_interfaces.hpp"
 #include "dxgi1_2.h"
 #include "dxgi_interfaces.h"
 #include "airconv_public.h"
@@ -42,7 +43,7 @@ namespace dxmt {
 
 class MTLD3D12Resource;
 
-class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList2 {
+class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList2, public IMTLD3D12CommandListExt {
 public:
   EncoderData *entry;
   size_t encoder_count;
@@ -245,7 +246,7 @@ public:
   EventListener event_listener;
 };
 
-HRESULT CreateD3D12Device(IMTLDXGIAdapter *adapter, REFIID riid, void **ppDevice);
+HRESULT CreateD3D12Device(IMTLDXGIAdapter *adapter, D3D_FEATURE_LEVEL feature_level, REFIID riid, void **ppDevice);
 
 HRESULT
 CreateCommandQueue(MTLD3D12Device *pDevice, const D3D12_COMMAND_QUEUE_DESC *pDesc, REFIID riid, void **ppCommandQueue);

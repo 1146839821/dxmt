@@ -18,11 +18,36 @@
 
 #include "d3d12_command_allocator.hpp"
 #include "com/com_pointer.hpp"
+#include "dxmt_command_context.hpp"
 #include "dxmt_format.hpp"
 #include <atomic>
 #include <unordered_set>
 
 namespace dxmt {
+
+inline WMTPixelFormat
+correct_motion_vector_format(WMTPixelFormat format) {
+  switch (format) {
+  case WMTPixelFormatRG16Uint:
+  case WMTPixelFormatRG16Float:
+  case WMTPixelFormatRG16Sint:
+  case WMTPixelFormatRG16Snorm:
+  case WMTPixelFormatRG16Unorm:
+    return WMTPixelFormatRG16Float;
+  case WMTPixelFormatRG32Uint:
+  case WMTPixelFormatRG32Float:
+  case WMTPixelFormatRG32Sint:
+    return WMTPixelFormatRG32Float;
+  case WMTPixelFormatRGBA16Sint:
+  case WMTPixelFormatRGBA16Snorm:
+  case WMTPixelFormatRGBA16Uint:
+  case WMTPixelFormatRGBA16Unorm:
+  case WMTPixelFormatRGBA16Float:
+    return WMTPixelFormatRGBA16Float;
+  default:
+    return WMTPixelFormatInvalid;
+  }
+}
 
 enum class DirtyState {
   VertexBuffer,
@@ -297,6 +322,22 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   Com<MTLD3D12CommandAllocatorImpl, false> allocator_;
   D3D12_COMMAND_LIST_TYPE type_;
   bool recording_failed_;
+  WMT::Reference<WMT::ComputePipelineState> mv_scale_pso_;
+  struct CachedTemporalScaler {
+    WMTPixelFormat color_pixel_format;
+    WMTPixelFormat output_pixel_format;
+    WMTPixelFormat depth_pixel_format;
+    WMTPixelFormat motion_vector_pixel_format;
+    bool auto_exposure;
+    bool motion_vector_in_display_res;
+    uint32_t input_width;
+    uint32_t input_height;
+    uint32_t output_width;
+    uint32_t output_height;
+    Rc<TemporalScaler> scaler;
+    Rc<Texture> mv_downscaled;
+  };
+  std::vector<CachedTemporalScaler> temporal_scaler_cache_;
   WMTBarrierScope pending_barrier_scope_ = (WMTBarrierScope)0;
   WMTRenderStages pending_barrier_stages_after_ = (WMTRenderStages)0;
   WMTRenderStages pending_barrier_stages_before_ = (WMTRenderStages)0;
@@ -361,6 +402,46 @@ public:
       MTLD3D12DeviceChild<MTLD3D12GraphicsCommandList>(pDevice), type_(type), recording_failed_(false) {}
 
   ~MTLD3D12GraphicsCommandListImpl() {}
+
+  WMT::Reference<WMT::ComputePipelineState>
+  getMotionVectorScalePSO() {
+    if (mv_scale_pso_)
+      return mv_scale_pso_;
+
+    auto function = device_->GetLib().getLibrary().newFunction("cs_downscale_dilated_mv");
+    if (!function)
+      return {};
+    WMT::Reference<WMT::Error> error;
+    mv_scale_pso_ = device_->GetMTLDevice().newComputePipelineState(function, error);
+    if (error)
+      ERR("D3D12 TemporalUpscale: failed to create motion-vector scale PSO: ", error.description().getUTF8String());
+    return mv_scale_pso_;
+  }
+
+  HRESULT
+  encodeMotionVectorScale(
+      const Rc<Texture> &motion, TextureViewKey motion_view, const Rc<Texture> &downscaled, float scale_x, float scale_y
+  ) {
+    auto pso = getMotionVectorScalePSO();
+    if (!pso)
+      return E_FAIL;
+
+    SimpleCommandContext<MTLD3D12CommandAllocatorImpl> context{*allocator_.ptr()};
+    context.startComputePass();
+    context.setComputePSO(pso, {8, 4, 1});
+    context.setComputeTexture(0, motion, motion_view, 0);
+    context.setComputeTexture(1, downscaled, downscaled->fullView, 0);
+
+    struct MotionVectorScaleData {
+      float scale_x;
+      float scale_y;
+    } scale_data{scale_x, scale_y};
+    auto mapped = context.setComputeBytes(0, sizeof(scale_data));
+    memcpy(mapped, &scale_data, sizeof(scale_data));
+    context.dispatch({downscaled->width(), downscaled->height(), 1});
+    context.endPass();
+    return S_OK;
+  }
 
   HRESULT
   Initialize(ID3D12CommandAllocator *pAllocator, ID3D12PipelineState *pInitialPipelineState) {
@@ -461,6 +542,11 @@ public:
       return S_OK;
     }
 
+    if (riid == __uuidof(IMTLD3D12CommandListExt)) {
+      *ppvObject = ref(static_cast<IMTLD3D12CommandListExt *>(this));
+      return S_OK;
+    }
+
     if (riid == DXMT_STREAMLINE_D3D12_GRAPHICS_COMMAND_LIST_GUID)
       return E_NOINTERFACE;
 
@@ -469,6 +555,163 @@ public:
     }
 
     return E_NOINTERFACE;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  CheckFeatureSupport(
+      MTL_D3D12_FEATURE feature, void *feature_support_data, UINT feature_support_data_size
+  ) final {
+    if (feature != MTL_D3D12_FEATURE_METALFX_TEMPORAL_SCALER || !feature_support_data ||
+        feature_support_data_size != sizeof(BOOL))
+      return E_INVALIDARG;
+
+    *static_cast<BOOL *>(feature_support_data) = device_->GetMTLDevice().supportsFXTemporalScaler();
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  TemporalUpscale(const MTL_TEMPORAL_UPSCALE_D3D12_DESC *desc) final {
+    if (!desc || !ValidateCommand(SupportsCompute(), "TemporalUpscale"))
+      return E_INVALIDARG;
+
+    auto get_texture = [](ID3D12Resource *resource) -> Rc<Texture> {
+      if (!resource)
+        return {};
+      return static_cast<MTLD3D12Resource *>(resource)->texture;
+    };
+
+    Rc<Texture> input = get_texture(desc->Color);
+    Rc<Texture> output = get_texture(desc->Output);
+    Rc<Texture> depth = get_texture(desc->Depth);
+    Rc<Texture> motion_vector = get_texture(desc->MotionVector);
+    Rc<Texture> exposure = get_texture(desc->ExposureTexture);
+    if (!input || !output || !depth || !motion_vector || (desc->ExposureTexture && !exposure))
+      return E_INVALIDARG;
+
+    auto motion_vector_format = correct_motion_vector_format(motion_vector->pixelFormat());
+    if (motion_vector_format == WMTPixelFormatInvalid)
+      return E_INVALIDARG;
+
+    Rc<TemporalScaler> scaler;
+    Rc<Texture> mv_downscaled;
+    for (auto &entry : temporal_scaler_cache_) {
+      if (desc->AutoExposure != entry.auto_exposure ||
+          desc->MotionVectorInDisplayRes != entry.motion_vector_in_display_res ||
+          input->width() != entry.input_width || input->height() != entry.input_height ||
+          output->width() != entry.output_width || output->height() != entry.output_height ||
+          input->pixelFormat() != entry.color_pixel_format || output->pixelFormat() != entry.output_pixel_format ||
+          depth->pixelFormat() != entry.depth_pixel_format || motion_vector_format != entry.motion_vector_pixel_format)
+        continue;
+
+      scaler = entry.scaler;
+      mv_downscaled = entry.mv_downscaled;
+      break;
+    }
+
+    if (!scaler) {
+      CachedTemporalScaler entry{};
+      entry.color_pixel_format = input->pixelFormat();
+      entry.output_pixel_format = output->pixelFormat();
+      entry.depth_pixel_format = depth->pixelFormat();
+      entry.motion_vector_pixel_format = motion_vector_format;
+      entry.auto_exposure = desc->AutoExposure;
+      entry.motion_vector_in_display_res = desc->MotionVectorInDisplayRes;
+      entry.input_width = input->width();
+      entry.input_height = input->height();
+      entry.output_width = output->width();
+      entry.output_height = output->height();
+
+      WMTFXTemporalScalerInfo info = {};
+      info.color_format = entry.color_pixel_format;
+      info.output_format = entry.output_pixel_format;
+      info.depth_format = entry.depth_pixel_format;
+      info.motion_format = entry.motion_vector_pixel_format;
+      info.input_width = entry.input_width;
+      info.input_height = entry.input_height;
+      info.output_width = entry.output_width;
+      info.output_height = entry.output_height;
+      info.input_content_min_scale = 1.0f;
+      info.input_content_max_scale = 3.0f;
+      info.auto_exposure = entry.auto_exposure;
+      info.input_content_properties_enabled = true;
+      info.requires_synchronous_initialization = true;
+
+      entry.scaler = new TemporalScaler(device_->GetMTLDevice(), info);
+      if (!entry.scaler || !entry.scaler->scaler())
+        return E_FAIL;
+
+      if (desc->MotionVectorInDisplayRes) {
+        WMTTextureInfo texture_info = {};
+        texture_info.width = entry.input_width;
+        texture_info.height = entry.input_height;
+        texture_info.depth = 1;
+        texture_info.array_length = 1;
+        texture_info.mipmap_level_count = 1;
+        texture_info.pixel_format = WMTPixelFormatRG32Float;
+        texture_info.sample_count = 1;
+        texture_info.type = WMTTextureType2D;
+        texture_info.usage = WMTTextureUsageShaderRead | WMTTextureUsageShaderWrite;
+        texture_info.options = WMTResourceStorageModePrivate;
+        entry.mv_downscaled = new Texture(texture_info, device_->GetMTLDevice());
+        Flags<TextureAllocationFlag> flags;
+        flags.set(TextureAllocationFlag::GpuPrivate);
+        auto allocation = entry.mv_downscaled->allocate(flags);
+        if (!allocation)
+          return E_OUTOFMEMORY;
+        entry.mv_downscaled->rename(std::move(allocation));
+      }
+
+      scaler = entry.scaler;
+      mv_downscaled = entry.mv_downscaled;
+      temporal_scaler_cache_.push_back(std::move(entry));
+    }
+
+    auto motion_view = motion_vector->createView({
+        .format = motion_vector_format,
+        .type = WMTTextureType2D,
+        .firstMiplevel = 0,
+        .miplevelCount = 1,
+        .firstArraySlice = 0,
+        .arraySize = 1,
+    });
+    auto input_texture = input->view(input->fullView).texture;
+    auto output_texture = output->view(output->fullView).texture;
+    auto depth_texture = depth->view(depth->fullView).texture;
+    auto motion_texture = motion_vector->view(motion_view).texture;
+    auto exposure_texture = exposure ? exposure->view(exposure->fullView).texture : WMT::Reference<WMT::Texture>{};
+
+    float motion_scale_x = desc->MotionVectorScaleX;
+    float motion_scale_y = desc->MotionVectorScaleY;
+    if (mv_downscaled) {
+      HRESULT hr = encodeMotionVectorScale(
+          motion_vector, motion_view, mv_downscaled, motion_scale_x, motion_scale_y
+      );
+      if (FAILED(hr))
+        return hr;
+      motion_texture = mv_downscaled->view(mv_downscaled->fullView).texture;
+      motion_scale_x = 1.0f;
+      motion_scale_y = 1.0f;
+    }
+
+    allocator_->InvalidateCurrentPass();
+    auto temporal = allocator_->AllocatePass<TemporalUpscaleData>();
+    temporal->type = EncoderType::TemporalUpscale;
+    temporal->input = std::move(input_texture);
+    temporal->output = std::move(output_texture);
+    temporal->depth = std::move(depth_texture);
+    temporal->motion_vector = std::move(motion_texture);
+    temporal->exposure = std::move(exposure_texture);
+    temporal->scaler = std::move(scaler);
+    temporal->props.input_content_width = desc->InputContentWidth;
+    temporal->props.input_content_height = desc->InputContentHeight;
+    temporal->props.reset = desc->InReset;
+    temporal->props.depth_reversed = desc->DepthReversed;
+    temporal->props.motion_vector_scale_x = motion_scale_x;
+    temporal->props.motion_vector_scale_y = motion_scale_y;
+    temporal->props.jitter_offset_x = desc->JitterOffsetX;
+    temporal->props.jitter_offset_y = desc->JitterOffsetY;
+    temporal->props.pre_exposure = desc->PreExposure;
+    return S_OK;
   }
 
   D3D12_COMMAND_LIST_TYPE STDMETHODCALLTYPE
