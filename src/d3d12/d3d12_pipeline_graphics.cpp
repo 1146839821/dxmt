@@ -164,7 +164,7 @@ ExtractMTLInputLayoutElements(
 ) {
 
   using namespace microsoft;
-  uint16_t append_offset[32] = {0};
+  uint32_t append_offset[32] = {0};
   uint32_t register_mask = 0;
 
   CSignatureParser parser;
@@ -196,6 +196,8 @@ ExtractMTLInputLayoutElements(
     auto aligned_byte_offset = desc.AlignedByteOffset == D3D11_APPEND_ALIGNED_ELEMENT
                                    ? align(append_offset[desc.InputSlot], std::min(4u, metal_format.BytesPerTexel))
                                    : desc.AlignedByteOffset;
+    if (aligned_byte_offset > UINT32_MAX - metal_format.BytesPerTexel)
+      return E_INVALIDARG;
     append_offset[desc.InputSlot] = aligned_byte_offset + metal_format.BytesPerTexel;
 
     auto pSig = std::find_if(pParameters, pParameters + num_parameters, [&](const D3D11_SIGNATURE_PARAMETER &inputSig) {

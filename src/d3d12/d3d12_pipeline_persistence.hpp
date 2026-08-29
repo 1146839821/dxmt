@@ -1,10 +1,13 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "d3d12.h"
+#include "com/com_pointer.hpp"
 #include "sha1/sha1_util.hpp"
 
 namespace dxmt {
@@ -27,10 +30,40 @@ struct D3D12PipelineCacheData {
   }
 };
 
+struct D3D12PipelineInputElement {
+  std::string semantic_name;
+  UINT semantic_index = 0;
+  DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+  UINT input_slot = 0;
+  UINT aligned_byte_offset = 0;
+  D3D12_INPUT_CLASSIFICATION input_slot_class = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+  UINT instance_data_step_rate = 0;
+};
+
 struct D3D12PipelineStreamData {
   D3D12PipelineType type = D3D12PipelineType::Unknown;
-  D3D12_COMPUTE_PIPELINE_STATE_DESC compute = {};
-  D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics = {};
+  Com<ID3D12RootSignature> root_signature;
+  std::vector<uint8_t> compute_shader;
+  std::vector<uint8_t> vertex_shader;
+  std::vector<uint8_t> pixel_shader;
+  std::vector<uint8_t> domain_shader;
+  std::vector<uint8_t> hull_shader;
+  std::vector<uint8_t> cached_pso;
+
+  UINT node_mask = 0;
+  D3D12_PIPELINE_STATE_FLAGS flags = {};
+
+  std::vector<D3D12PipelineInputElement> input_layout;
+  D3D12_BLEND_DESC blend_state = {};
+  UINT sample_mask = UINT_MAX;
+  D3D12_RASTERIZER_DESC rasterizer_state = {};
+  D3D12_DEPTH_STENCIL_DESC depth_stencil_state = {};
+  D3D12_INDEX_BUFFER_STRIP_CUT_VALUE ib_strip_cut_value = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+  D3D12_PRIMITIVE_TOPOLOGY_TYPE primitive_topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_UNDEFINED;
+  std::array<DXGI_FORMAT, 8> render_target_formats{};
+  UINT num_render_targets = 0;
+  DXGI_FORMAT depth_stencil_format = DXGI_FORMAT_UNKNOWN;
+  DXGI_SAMPLE_DESC sample_desc = {};
 };
 
 HRESULT BuildD3D12PipelineCacheData(

@@ -23,7 +23,7 @@ namespace dxmt {
 namespace {
 
 constexpr char kPipelineKeyNamespace[] = "dxmt-d3d12-pipeline";
-constexpr uint32_t kPipelineKeyVersion = 1;
+constexpr uint32_t kPipelineKeyVersion = 2;
 constexpr uint32_t kPipelineConverterAPIVersion = 0x040001;
 constexpr uint32_t kPipelineBindingLayoutVersion = 1;
 constexpr uint32_t kPipelineMetalTargetVersion = 0;
@@ -34,7 +34,7 @@ constexpr uint32_t kPipelineCacheBlobVersion = 1;
 constexpr size_t kPipelineCacheBlobSize = sizeof(kPipelineCacheBlobMagic) - 1 + sizeof(uint32_t) * 2 + sizeof(Sha1Digest);
 
 constexpr char kPipelineLibraryMagic[] = "DXMTLIB1";
-constexpr uint32_t kPipelineLibraryVersion = 2;
+constexpr uint32_t kPipelineLibraryVersion = 3;
 constexpr size_t kPipelineLibraryHeaderSize = sizeof(kPipelineLibraryMagic) - 1 + sizeof(uint32_t) + sizeof(uint64_t) +
                                                 sizeof(uint32_t) * 7;
 constexpr size_t kMaxLibraryBlobSize = 16ull * 1024 * 1024;
@@ -45,8 +45,11 @@ constexpr uint32_t kMaxInputLayoutElements = 1u << 20;
 constexpr uint32_t kMaxStreamOutputEntries = 1u << 20;
 constexpr uint32_t kMaxStreamOutputStrides = 1u << 20;
 constexpr size_t kMaxShaderBytecodeSize = 256ull * 1024 * 1024;
+constexpr size_t kMaxCachedBlobSize = 16ull * 1024 * 1024;
 constexpr size_t kMaxPipelineStreamSize = 16ull * 1024 * 1024;
 constexpr size_t kMaxSemanticNameLength = 4096;
+
+bool IsSameDevice(MTLD3D12Device *device, ID3D12DeviceChild *child);
 
 class ByteWriter {
 public:
@@ -179,15 +182,23 @@ PutFloat(ByteWriter &writer, float value) {
 }
 
 bool
+GetBoundedStringLength(const char *value, size_t &length) {
+  if (!value)
+    return false;
+  length = 0;
+  while (length < kMaxSemanticNameLength && value[length])
+    length++;
+  return length < kMaxSemanticNameLength;
+}
+
+bool
 PutString(ByteWriter &writer, const char *value) {
   writer.put_u8(value != nullptr ? 1 : 0);
   if (!value)
     return true;
 
   size_t length = 0;
-  while (length < kMaxSemanticNameLength && value[length])
-    length++;
-  if (length == kMaxSemanticNameLength)
+  if (!GetBoundedStringLength(value, length))
     return false;
 
   writer.put_u32(static_cast<uint32_t>(length));
@@ -209,10 +220,12 @@ PutShader(ByteWriter &writer, const D3D12_SHADER_BYTECODE &shader) {
 }
 
 bool
-PutRootSignature(ByteWriter &writer, ID3D12RootSignature *root_signature) {
+PutRootSignature(ByteWriter &writer, MTLD3D12Device *device, ID3D12RootSignature *root_signature) {
   writer.put_u8(root_signature != nullptr ? 1 : 0);
   if (!root_signature)
     return true;
+  if (!IsSameDevice(device, root_signature))
+    return false;
 
   auto rootsig = static_cast<MTLD3D12RootSignature *>(root_signature);
   const void *blob = nullptr;
@@ -231,22 +244,26 @@ void
 PutRenderTargetBlendDesc(ByteWriter &writer, const D3D12_RENDER_TARGET_BLEND_DESC &desc) {
   PutBool(writer, desc.BlendEnable);
   PutBool(writer, desc.LogicOpEnable);
-  writer.put_u32(static_cast<uint32_t>(desc.SrcBlend));
-  writer.put_u32(static_cast<uint32_t>(desc.DestBlend));
-  writer.put_u32(static_cast<uint32_t>(desc.BlendOp));
-  writer.put_u32(static_cast<uint32_t>(desc.SrcBlendAlpha));
-  writer.put_u32(static_cast<uint32_t>(desc.DestBlendAlpha));
-  writer.put_u32(static_cast<uint32_t>(desc.BlendOpAlpha));
-  writer.put_u32(static_cast<uint32_t>(desc.LogicOp));
+  if (desc.BlendEnable) {
+    writer.put_u32(static_cast<uint32_t>(desc.SrcBlend));
+    writer.put_u32(static_cast<uint32_t>(desc.DestBlend));
+    writer.put_u32(static_cast<uint32_t>(desc.BlendOp));
+    writer.put_u32(static_cast<uint32_t>(desc.SrcBlendAlpha));
+    writer.put_u32(static_cast<uint32_t>(desc.DestBlendAlpha));
+    writer.put_u32(static_cast<uint32_t>(desc.BlendOpAlpha));
+  } else if (desc.LogicOpEnable) {
+    writer.put_u32(static_cast<uint32_t>(desc.LogicOp));
+  }
   writer.put_u8(desc.RenderTargetWriteMask);
 }
 
 void
-PutBlendDesc(ByteWriter &writer, const D3D12_BLEND_DESC &desc) {
+PutBlendDesc(ByteWriter &writer, const D3D12_BLEND_DESC &desc, UINT num_render_targets) {
   PutBool(writer, desc.AlphaToCoverageEnable);
-  PutBool(writer, desc.IndependentBlendEnable);
-  for (unsigned i = 0; i < std::size(desc.RenderTarget); i++) {
-    const auto &target = desc.IndependentBlendEnable ? desc.RenderTarget[i] : desc.RenderTarget[0];
+  const bool independent_blend = desc.IndependentBlendEnable && num_render_targets > 1;
+  PutBool(writer, independent_blend);
+  for (unsigned i = 0; i < num_render_targets; i++) {
+    const auto &target = independent_blend ? desc.RenderTarget[i] : desc.RenderTarget[0];
     PutRenderTargetBlendDesc(writer, target);
   }
 }
@@ -277,13 +294,17 @@ PutDepthStencilOpDesc(ByteWriter &writer, const D3D12_DEPTH_STENCILOP_DESC &desc
 void
 PutDepthStencilDesc(ByteWriter &writer, const D3D12_DEPTH_STENCIL_DESC &desc) {
   PutBool(writer, desc.DepthEnable);
-  writer.put_u32(static_cast<uint32_t>(desc.DepthWriteMask));
-  writer.put_u32(static_cast<uint32_t>(desc.DepthFunc));
+  if (desc.DepthEnable) {
+    writer.put_u32(static_cast<uint32_t>(desc.DepthWriteMask));
+    writer.put_u32(static_cast<uint32_t>(desc.DepthFunc));
+  }
   PutBool(writer, desc.StencilEnable);
-  writer.put_u8(desc.StencilReadMask);
-  writer.put_u8(desc.StencilWriteMask);
-  PutDepthStencilOpDesc(writer, desc.FrontFace);
-  PutDepthStencilOpDesc(writer, desc.BackFace);
+  if (desc.StencilEnable) {
+    writer.put_u8(desc.StencilReadMask);
+    writer.put_u8(desc.StencilWriteMask);
+    PutDepthStencilOpDesc(writer, desc.FrontFace);
+    PutDepthStencilOpDesc(writer, desc.BackFace);
+  }
 }
 
 bool
@@ -332,6 +353,279 @@ PutStreamOutputDesc(ByteWriter &writer, const D3D12_STREAM_OUTPUT_DESC &desc) {
   return true;
 }
 
+bool
+IsValidShaderBytecode(const D3D12_SHADER_BYTECODE &shader, bool required) {
+  if (!shader.BytecodeLength)
+    return !required && !shader.pShaderBytecode;
+  return shader.pShaderBytecode && shader.BytecodeLength <= kMaxShaderBytecodeSize;
+}
+
+bool
+IsValidCachedPSO(const D3D12_CACHED_PIPELINE_STATE &cached_pso) {
+  if (cached_pso.CachedBlobSizeInBytes > kMaxCachedBlobSize)
+    return false;
+  if (!cached_pso.CachedBlobSizeInBytes)
+    return cached_pso.pCachedBlob == nullptr;
+  return cached_pso.pCachedBlob != nullptr;
+}
+
+bool
+IsValidBlend(D3D12_BLEND value) {
+  switch (value) {
+  case D3D12_BLEND_ZERO:
+  case D3D12_BLEND_ONE:
+  case D3D12_BLEND_SRC_COLOR:
+  case D3D12_BLEND_INV_SRC_COLOR:
+  case D3D12_BLEND_SRC_ALPHA:
+  case D3D12_BLEND_INV_SRC_ALPHA:
+  case D3D12_BLEND_DEST_ALPHA:
+  case D3D12_BLEND_INV_DEST_ALPHA:
+  case D3D12_BLEND_DEST_COLOR:
+  case D3D12_BLEND_INV_DEST_COLOR:
+  case D3D12_BLEND_SRC_ALPHA_SAT:
+  case D3D12_BLEND_BLEND_FACTOR:
+  case D3D12_BLEND_INV_BLEND_FACTOR:
+  case D3D12_BLEND_SRC1_COLOR:
+  case D3D12_BLEND_INV_SRC1_COLOR:
+  case D3D12_BLEND_SRC1_ALPHA:
+  case D3D12_BLEND_INV_SRC1_ALPHA:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool
+IsValidBlendOp(D3D12_BLEND_OP value) {
+  return value >= D3D12_BLEND_OP_ADD && value <= D3D12_BLEND_OP_MAX;
+}
+
+bool
+IsValidLogicOp(D3D12_LOGIC_OP value) {
+  return value >= D3D12_LOGIC_OP_CLEAR && value <= D3D12_LOGIC_OP_OR_INVERTED;
+}
+
+bool
+IsValidComparisonFunc(D3D12_COMPARISON_FUNC value) {
+  return value >= D3D12_COMPARISON_FUNC_NEVER && value <= D3D12_COMPARISON_FUNC_ALWAYS;
+}
+
+bool
+IsValidStencilOp(D3D12_STENCIL_OP value) {
+  return value >= D3D12_STENCIL_OP_KEEP && value <= D3D12_STENCIL_OP_DECR;
+}
+
+bool
+IsValidStripCutValue(D3D12_INDEX_BUFFER_STRIP_CUT_VALUE value) {
+  return value == D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED || value == D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF ||
+         value == D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
+}
+
+bool
+IsValidPrimitiveTopologyType(D3D12_PRIMITIVE_TOPOLOGY_TYPE value) {
+  return value >= D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT && value <= D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+}
+
+bool
+IsValidRenderTargetBlendDesc(const D3D12_RENDER_TARGET_BLEND_DESC &desc) {
+  if (static_cast<uint32_t>(desc.RenderTargetWriteMask) & ~0xFu)
+    return false;
+  if (desc.BlendEnable && desc.LogicOpEnable)
+    return false;
+  if (desc.BlendEnable &&
+      (!IsValidBlend(desc.SrcBlend) || !IsValidBlend(desc.DestBlend) || !IsValidBlendOp(desc.BlendOp) ||
+       !IsValidBlend(desc.SrcBlendAlpha) || !IsValidBlend(desc.DestBlendAlpha) ||
+       !IsValidBlendOp(desc.BlendOpAlpha)))
+    return false;
+  if (desc.LogicOpEnable && !IsValidLogicOp(desc.LogicOp))
+    return false;
+  return true;
+}
+
+bool
+IsValidBlendDesc(const D3D12_BLEND_DESC &desc, UINT num_render_targets) {
+  if (num_render_targets > std::size(desc.RenderTarget))
+    return false;
+  for (UINT i = 0; i < num_render_targets; i++) {
+    const auto &target = desc.IndependentBlendEnable ? desc.RenderTarget[i] : desc.RenderTarget[0];
+    if (!IsValidRenderTargetBlendDesc(target))
+      return false;
+  }
+  return true;
+}
+
+bool
+IsValidRasterizerDesc(const D3D12_RASTERIZER_DESC &desc) {
+  if (desc.FillMode != D3D12_FILL_MODE_WIREFRAME && desc.FillMode != D3D12_FILL_MODE_SOLID)
+    return false;
+  if (desc.CullMode < D3D12_CULL_MODE_NONE || desc.CullMode > D3D12_CULL_MODE_BACK)
+    return false;
+  return desc.ConservativeRaster == D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF ||
+         desc.ConservativeRaster == D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON;
+}
+
+bool
+IsValidDepthStencilDesc(const D3D12_DEPTH_STENCIL_DESC &desc) {
+  if (desc.DepthEnable &&
+      (desc.DepthWriteMask != D3D12_DEPTH_WRITE_MASK_ZERO && desc.DepthWriteMask != D3D12_DEPTH_WRITE_MASK_ALL))
+    return false;
+  if (desc.DepthEnable && !IsValidComparisonFunc(desc.DepthFunc))
+    return false;
+  if (!desc.StencilEnable)
+    return true;
+  const auto valid_stencil_face = [](const D3D12_DEPTH_STENCILOP_DESC &face) {
+    return IsValidStencilOp(face.StencilFailOp) && IsValidStencilOp(face.StencilDepthFailOp) &&
+           IsValidStencilOp(face.StencilPassOp) && IsValidComparisonFunc(face.StencilFunc);
+  };
+  return valid_stencil_face(desc.FrontFace) && valid_stencil_face(desc.BackFace);
+}
+
+bool
+IsValidInputLayout(const D3D12_INPUT_LAYOUT_DESC &desc) {
+  if (desc.NumElements > kMaxInputLayoutElements || (desc.NumElements && !desc.pInputElementDescs))
+    return false;
+  for (UINT i = 0; i < desc.NumElements; i++) {
+    const auto &element = desc.pInputElementDescs[i];
+    size_t semantic_length = 0;
+    if (!GetBoundedStringLength(element.SemanticName, semantic_length) || !semantic_length ||
+        element.Format == DXGI_FORMAT_UNKNOWN ||
+        element.InputSlot >= 32 ||
+        (element.InputSlotClass != D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA &&
+         element.InputSlotClass != D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA) ||
+        (element.InputSlotClass == D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA && element.InstanceDataStepRate) ||
+        (element.InputSlotClass == D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA &&
+         element.InstanceDataStepRate > 0x7fffffffu))
+      return false;
+  }
+  return true;
+}
+
+bool
+IsSupportedInputLayout(MTLD3D12Device *device, const D3D12_INPUT_LAYOUT_DESC &desc) {
+  if (!device)
+    return false;
+  for (UINT i = 0; i < desc.NumElements; i++) {
+    MTL_DXGI_FORMAT_DESC format_desc;
+    if (FAILED(MTLQueryDXGIFormat(device->GetMTLDevice(), desc.pInputElementDescs[i].Format, format_desc)) ||
+        !format_desc.AttributeFormat || !format_desc.BytesPerTexel)
+      return false;
+  }
+  return true;
+}
+
+bool
+IsSupportedGraphicsFormats(MTLD3D12Device *device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC &desc) {
+  if (!device)
+    return false;
+  for (UINT i = 0; i < desc.NumRenderTargets; i++) {
+    if (desc.RTVFormats[i] == DXGI_FORMAT_UNKNOWN)
+      return false;
+    MTL_DXGI_FORMAT_DESC format_desc;
+    if (FAILED(MTLQueryDXGIFormat(device->GetMTLDevice(), desc.RTVFormats[i], format_desc)))
+      return false;
+  }
+  if (desc.DSVFormat != DXGI_FORMAT_UNKNOWN) {
+    MTL_DXGI_FORMAT_DESC format_desc;
+    if (FAILED(MTLQueryDXGIFormat(device->GetMTLDevice(), desc.DSVFormat, format_desc)) ||
+        !DepthStencilPlanarFlags(format_desc.PixelFormat))
+      return false;
+  }
+  return true;
+}
+
+bool
+IsValidInputElement(const D3D12PipelineInputElement &element) {
+  if (element.semantic_name.empty() || element.format == DXGI_FORMAT_UNKNOWN || element.input_slot >= 32)
+    return false;
+  if (element.input_slot_class == D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA)
+    return element.instance_data_step_rate == 0;
+  return element.input_slot_class == D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA &&
+         element.instance_data_step_rate <= 0x7fffffffu;
+}
+
+bool
+HasActiveLogicOp(const D3D12_BLEND_DESC &desc, UINT num_render_targets) {
+  for (UINT i = 0; i < num_render_targets; i++) {
+    const auto &target = desc.IndependentBlendEnable ? desc.RenderTarget[i] : desc.RenderTarget[0];
+    if (target.LogicOpEnable)
+      return true;
+  }
+  return false;
+}
+
+bool
+IsValidStreamScalarState(const D3D12PipelineStreamData &data) {
+  if (data.cached_pso.size() > kMaxCachedBlobSize || (data.node_mask & ~1u) || static_cast<uint32_t>(data.flags) > 1)
+    return false;
+  if (data.type == D3D12PipelineType::Compute)
+    return !data.compute_shader.empty();
+  if (data.type != D3D12PipelineType::Graphics || data.vertex_shader.empty() || data.sample_desc.Count == 0 ||
+      data.sample_desc.Quality ||
+      data.num_render_targets > data.render_target_formats.size() || !IsValidBlendDesc(data.blend_state, data.num_render_targets) ||
+      !IsValidRasterizerDesc(data.rasterizer_state) || !IsValidDepthStencilDesc(data.depth_stencil_state) ||
+      !IsValidStripCutValue(data.ib_strip_cut_value) || !IsValidPrimitiveTopologyType(data.primitive_topology_type))
+    return false;
+  for (const auto &element : data.input_layout)
+    if (!IsValidInputElement(element))
+      return false;
+  return true;
+}
+
+HRESULT
+ValidatePipelineStreamData(const D3D12PipelineStreamData &data) {
+  if (!IsValidStreamScalarState(data))
+    return E_INVALIDARG;
+  if (data.type == D3D12PipelineType::Graphics && (data.domain_shader.empty() != data.hull_shader.empty()))
+    return E_INVALIDARG;
+  if (data.type == D3D12PipelineType::Graphics &&
+      (data.blend_state.AlphaToCoverageEnable || HasActiveLogicOp(data.blend_state, data.num_render_targets) ||
+       data.rasterizer_state.ForcedSampleCount ||
+       data.rasterizer_state.ConservativeRaster != D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF))
+    return E_NOTIMPL;
+  return S_OK;
+}
+
+HRESULT
+ValidateComputePipelineDescriptor(MTLD3D12Device *device, const D3D12_COMPUTE_PIPELINE_STATE_DESC &desc) {
+  if (!device || (desc.NodeMask & ~1u) || !IsValidShaderBytecode(desc.CS, true) || !IsValidCachedPSO(desc.CachedPSO) ||
+      static_cast<uint32_t>(desc.Flags) > 1)
+    return E_INVALIDARG;
+  if (desc.pRootSignature && !IsSameDevice(device, desc.pRootSignature))
+    return E_INVALIDARG;
+  return S_OK;
+}
+
+HRESULT
+ValidateGraphicsPipelineDescriptor(MTLD3D12Device *device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC &desc) {
+  if (!device || (desc.NodeMask & ~1u) || !IsValidShaderBytecode(desc.VS, true) || !IsValidShaderBytecode(desc.PS, false) ||
+      !IsValidShaderBytecode(desc.HS, false) || !IsValidShaderBytecode(desc.DS, false) ||
+      !IsValidShaderBytecode(desc.GS, false) || !IsValidCachedPSO(desc.CachedPSO) || desc.NumRenderTargets > 8 ||
+      !IsValidInputLayout(desc.InputLayout) || !IsSupportedInputLayout(device, desc.InputLayout) ||
+      !IsSupportedGraphicsFormats(device, desc) || !IsValidBlendDesc(desc.BlendState, desc.NumRenderTargets) ||
+      !IsValidRasterizerDesc(desc.RasterizerState) || !IsValidDepthStencilDesc(desc.DepthStencilState) ||
+      !IsValidStripCutValue(desc.IBStripCutValue) || !IsValidPrimitiveTopologyType(desc.PrimitiveTopologyType) ||
+      desc.SampleDesc.Count == 0 || desc.SampleDesc.Quality ||
+      !device->GetMTLDevice().supportsTextureSampleCount(desc.SampleDesc.Count) || static_cast<uint32_t>(desc.Flags) > 1)
+    return E_INVALIDARG;
+  if (desc.pRootSignature && !IsSameDevice(device, desc.pRootSignature))
+    return E_INVALIDARG;
+  if ((desc.HS.pShaderBytecode != nullptr) != (desc.DS.pShaderBytecode != nullptr))
+    return E_INVALIDARG;
+  if (desc.BlendState.AlphaToCoverageEnable || HasActiveLogicOp(desc.BlendState, desc.NumRenderTargets) ||
+      desc.RasterizerState.ForcedSampleCount ||
+      desc.RasterizerState.ConservativeRaster != D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF)
+    return E_NOTIMPL;
+  if (desc.GS.pShaderBytecode)
+    return E_NOTIMPL;
+  if (desc.StreamOutput.NumEntries > kMaxStreamOutputEntries || desc.StreamOutput.NumStrides > kMaxStreamOutputStrides ||
+      (desc.StreamOutput.NumEntries && !desc.StreamOutput.pSODeclaration) ||
+      (desc.StreamOutput.NumStrides && !desc.StreamOutput.pBufferStrides))
+    return E_INVALIDARG;
+  if (desc.StreamOutput.NumEntries || desc.StreamOutput.NumStrides)
+    return E_NOTIMPL;
+  return S_OK;
+}
+
 void
 PutKeyEnvironment(ByteWriter &writer, MTLD3D12Device *device, D3D12PipelineType type) {
   writer.put_raw(kPipelineKeyNamespace, sizeof(kPipelineKeyNamespace) - 1);
@@ -349,7 +643,7 @@ PutKeyEnvironment(ByteWriter &writer, MTLD3D12Device *device, D3D12PipelineType 
 bool
 BuildComputeKey(ByteWriter &writer, MTLD3D12Device *device, const D3D12_COMPUTE_PIPELINE_STATE_DESC &desc) {
   PutKeyEnvironment(writer, device, D3D12PipelineType::Compute);
-  if (!PutRootSignature(writer, desc.pRootSignature) || !PutShader(writer, desc.CS))
+  if (!PutRootSignature(writer, device, desc.pRootSignature) || !PutShader(writer, desc.CS))
     return false;
   writer.put_u32(desc.NodeMask);
   writer.put_u32(static_cast<uint32_t>(desc.Flags));
@@ -361,14 +655,14 @@ BuildGraphicsKey(ByteWriter &writer, MTLD3D12Device *device, const D3D12_GRAPHIC
   if (desc.NumRenderTargets > 8)
     return false;
   PutKeyEnvironment(writer, device, D3D12PipelineType::Graphics);
-  if (!PutRootSignature(writer, desc.pRootSignature))
+  if (!PutRootSignature(writer, device, desc.pRootSignature))
     return false;
   if (!PutShader(writer, desc.VS) || !PutShader(writer, desc.PS) || !PutShader(writer, desc.DS) ||
       !PutShader(writer, desc.HS) || !PutShader(writer, desc.GS))
     return false;
   if (!PutStreamOutputDesc(writer, desc.StreamOutput) || !PutInputLayoutDesc(writer, desc.InputLayout))
     return false;
-  PutBlendDesc(writer, desc.BlendState);
+  PutBlendDesc(writer, desc.BlendState, desc.NumRenderTargets);
   writer.put_u32(desc.SampleMask);
   PutRasterizerDesc(writer, desc.RasterizerState);
   PutDepthStencilDesc(writer, desc.DepthStencilState);
@@ -427,16 +721,13 @@ ReadStreamPayload(const uint8_t *stream, size_t stream_size, size_t offset, T &p
 void
 InitializeStreamDefaults(D3D12PipelineStreamData &parsed) {
   parsed = {};
-  parsed.compute.NodeMask = 0;
-  parsed.graphics.SampleMask = UINT_MAX;
-  parsed.graphics.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-  parsed.graphics.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-  parsed.graphics.RasterizerState.DepthClipEnable = TRUE;
-  for (auto &target : parsed.graphics.BlendState.RenderTarget)
+  parsed.sample_mask = UINT_MAX;
+  parsed.rasterizer_state.FillMode = D3D12_FILL_MODE_SOLID;
+  parsed.rasterizer_state.CullMode = D3D12_CULL_MODE_BACK;
+  parsed.rasterizer_state.DepthClipEnable = TRUE;
+  for (auto &target : parsed.blend_state.RenderTarget)
     target.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-  parsed.graphics.SampleDesc.Count = 1;
-  parsed.compute.CachedPSO = {};
-  parsed.graphics.CachedPSO = {};
+  parsed.sample_desc.Count = 1;
 }
 
 bool
@@ -445,6 +736,126 @@ SetStreamType(D3D12PipelineType &current, D3D12PipelineType type) {
     return false;
   current = type;
   return true;
+}
+
+bool
+CopyStreamShader(const D3D12_SHADER_BYTECODE &source, std::vector<uint8_t> &destination) {
+  if (!source.BytecodeLength || !source.pShaderBytecode || source.BytecodeLength > kMaxShaderBytecodeSize)
+    return false;
+  destination.assign(
+      static_cast<const uint8_t *>(source.pShaderBytecode),
+      static_cast<const uint8_t *>(source.pShaderBytecode) + static_cast<size_t>(source.BytecodeLength)
+  );
+  return true;
+}
+
+bool
+CopyStreamCachedPSO(const D3D12_CACHED_PIPELINE_STATE &source, std::vector<uint8_t> &destination) {
+  if (!IsValidCachedPSO(source))
+    return false;
+  destination.clear();
+  if (!source.CachedBlobSizeInBytes)
+    return true;
+  destination.assign(
+      static_cast<const uint8_t *>(source.pCachedBlob),
+      static_cast<const uint8_t *>(source.pCachedBlob) + static_cast<size_t>(source.CachedBlobSizeInBytes)
+  );
+  return true;
+}
+
+bool
+CopyStreamInputLayout(const D3D12_INPUT_LAYOUT_DESC &source, std::vector<D3D12PipelineInputElement> &destination) {
+  if (!IsValidInputLayout(source))
+    return false;
+
+  destination.clear();
+  destination.reserve(source.NumElements);
+  for (UINT i = 0; i < source.NumElements; i++) {
+    const auto &element = source.pInputElementDescs[i];
+    size_t semantic_length = 0;
+    GetBoundedStringLength(element.SemanticName, semantic_length);
+    D3D12PipelineInputElement owned;
+    owned.semantic_name.assign(element.SemanticName, semantic_length);
+    owned.semantic_index = element.SemanticIndex;
+    owned.format = element.Format;
+    owned.input_slot = element.InputSlot;
+    owned.aligned_byte_offset = element.AlignedByteOffset;
+    owned.input_slot_class = element.InputSlotClass;
+    owned.instance_data_step_rate = element.InstanceDataStepRate;
+    destination.push_back(std::move(owned));
+  }
+  return true;
+}
+
+const void *
+DataOrNull(const std::vector<uint8_t> &data) {
+  return data.empty() ? nullptr : data.data();
+}
+
+D3D12_SHADER_BYTECODE
+MaterializeShader(const std::vector<uint8_t> &data) {
+  return {DataOrNull(data), data.size()};
+}
+
+bool
+MaterializeComputeDescriptor(
+    const D3D12PipelineStreamData &source, D3D12_COMPUTE_PIPELINE_STATE_DESC &destination
+) {
+  destination = {};
+  destination.pRootSignature = source.root_signature.ptr();
+  destination.CS = MaterializeShader(source.compute_shader);
+  destination.NodeMask = source.node_mask;
+  destination.CachedPSO = {DataOrNull(source.cached_pso), source.cached_pso.size()};
+  destination.Flags = source.flags;
+  return true;
+}
+
+bool
+MaterializeGraphicsDescriptor(
+    const D3D12PipelineStreamData &source, D3D12_GRAPHICS_PIPELINE_STATE_DESC &destination,
+    std::vector<D3D12_INPUT_ELEMENT_DESC> &input_elements
+) {
+  try {
+    destination = {};
+    destination.pRootSignature = source.root_signature.ptr();
+    destination.VS = MaterializeShader(source.vertex_shader);
+    destination.PS = MaterializeShader(source.pixel_shader);
+    destination.DS = MaterializeShader(source.domain_shader);
+    destination.HS = MaterializeShader(source.hull_shader);
+    destination.InputLayout.NumElements = static_cast<UINT>(source.input_layout.size());
+    input_elements.resize(source.input_layout.size());
+    for (size_t i = 0; i < source.input_layout.size(); i++) {
+      const auto &source_element = source.input_layout[i];
+      auto &destination_element = input_elements[i];
+      destination_element = {
+          source_element.semantic_name.c_str(),
+          source_element.semantic_index,
+          source_element.format,
+          source_element.input_slot,
+          source_element.aligned_byte_offset,
+          source_element.input_slot_class,
+          source_element.instance_data_step_rate,
+      };
+    }
+    destination.InputLayout.pInputElementDescs = input_elements.empty() ? nullptr : input_elements.data();
+    destination.BlendState = source.blend_state;
+    destination.SampleMask = source.sample_mask;
+    destination.RasterizerState = source.rasterizer_state;
+    destination.DepthStencilState = source.depth_stencil_state;
+    destination.IBStripCutValue = source.ib_strip_cut_value;
+    destination.PrimitiveTopologyType = source.primitive_topology_type;
+    destination.NumRenderTargets = source.num_render_targets;
+    for (size_t i = 0; i < source.render_target_formats.size(); i++)
+      destination.RTVFormats[i] = source.render_target_formats[i];
+    destination.DSVFormat = source.depth_stencil_format;
+    destination.SampleDesc = source.sample_desc;
+    destination.NodeMask = source.node_mask;
+    destination.CachedPSO = {DataOrNull(source.cached_pso), source.cached_pso.size()};
+    destination.Flags = source.flags;
+    return true;
+  } catch (...) {
+    return false;
+  }
 }
 
 bool
@@ -495,9 +906,11 @@ struct PipelineLibraryEntry {
 };
 
 bool
-IsSameDevice(MTLD3D12Device *device, ID3D12PipelineState *pipeline) {
+IsSameDevice(MTLD3D12Device *device, ID3D12DeviceChild *child) {
+  if (!device || !child)
+    return false;
   IUnknown *pipeline_identity = nullptr;
-  if (FAILED(pipeline->GetDevice(__uuidof(IUnknown), reinterpret_cast<void **>(&pipeline_identity))))
+  if (FAILED(child->GetDevice(__uuidof(IUnknown), reinterpret_cast<void **>(&pipeline_identity))))
     return false;
   Com<IUnknown> pipeline_identity_ref = Com<IUnknown>::transfer(pipeline_identity);
 
@@ -633,10 +1046,19 @@ public:
     HRESULT hr = ParseD3D12PipelineStateStream(desc, parsed);
     if (FAILED(hr))
       return hr;
-    if (parsed.type == D3D12PipelineType::Graphics)
-      return LoadGraphicsPipeline(name, &parsed.graphics, riid, pipeline_state);
-    if (parsed.type == D3D12PipelineType::Compute)
-      return LoadComputePipeline(name, &parsed.compute, riid, pipeline_state);
+    if (parsed.type == D3D12PipelineType::Graphics) {
+      D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics;
+      std::vector<D3D12_INPUT_ELEMENT_DESC> input_elements;
+      if (!MaterializeGraphicsDescriptor(parsed, graphics, input_elements))
+        return E_OUTOFMEMORY;
+      return LoadGraphicsPipeline(name, &graphics, riid, pipeline_state);
+    }
+    if (parsed.type == D3D12PipelineType::Compute) {
+      D3D12_COMPUTE_PIPELINE_STATE_DESC compute;
+      if (!MaterializeComputeDescriptor(parsed, compute))
+        return E_OUTOFMEMORY;
+      return LoadComputePipeline(name, &compute, riid, pipeline_state);
+    }
     return E_INVALIDARG;
   }
 
@@ -793,8 +1215,9 @@ HRESULT
 BuildD3D12PipelineCacheData(
     MTLD3D12Device *device, const D3D12_COMPUTE_PIPELINE_STATE_DESC &desc, D3D12PipelineCacheData &data
 ) {
-  if (!device)
-    return E_INVALIDARG;
+  HRESULT validation = ValidateComputePipelineDescriptor(device, desc);
+  if (FAILED(validation))
+    return validation;
   try {
     ByteWriter writer;
     if (!BuildComputeKey(writer, device, desc))
@@ -812,8 +1235,9 @@ HRESULT
 BuildD3D12PipelineCacheData(
     MTLD3D12Device *device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC &desc, D3D12PipelineCacheData &data
 ) {
-  if (!device)
-    return E_INVALIDARG;
+  HRESULT validation = ValidateGraphicsPipelineDescriptor(device, desc);
+  if (FAILED(validation))
+    return validation;
   try {
     ByteWriter writer;
     if (!BuildGraphicsKey(writer, device, desc))
@@ -878,145 +1302,185 @@ ParseD3D12PipelineStateStream(const D3D12_PIPELINE_STATE_STREAM_DESC *desc, D3D1
   if (!desc->SizeInBytes || desc->SizeInBytes > kMaxPipelineStreamSize)
     return E_INVALIDARG;
 
-  InitializeStreamDefaults(parsed);
-  const auto *stream = static_cast<const uint8_t *>(desc->pPipelineStateSubobjectStream);
-  const size_t stream_size = static_cast<size_t>(desc->SizeInBytes);
-  std::array<bool, 32> seen{};
-  bool has_graphics_subobject = false;
-  size_t offset = 0;
-  while (offset < stream_size) {
-    if (stream_size - offset < sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE))
-      return E_INVALIDARG;
+  try {
+    InitializeStreamDefaults(parsed);
+    const auto *stream = static_cast<const uint8_t *>(desc->pPipelineStateSubobjectStream);
+    const size_t stream_size = static_cast<size_t>(desc->SizeInBytes);
+    std::array<bool, 32> seen{};
+    bool has_graphics_subobject = false;
+    size_t offset = 0;
+    while (offset < stream_size) {
+      if (stream_size - offset < sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE))
+        return E_INVALIDARG;
 
-    uint32_t type_value;
-    memcpy(&type_value, stream + offset, sizeof(type_value));
-    if (type_value >= seen.size() || seen[type_value])
-      return E_INVALIDARG;
-    seen[type_value] = true;
-    auto type = static_cast<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE>(type_value);
-    has_graphics_subobject = has_graphics_subobject ||
-                             type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND ||
-                             type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK ||
-                             type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER ||
-                             type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL ||
-                             type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT ||
-                             type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE ||
-                             type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY ||
-                             type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS ||
-                             type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT ||
-                             type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC;
-    size_t next_offset;
+      uint32_t type_value;
+      memcpy(&type_value, stream + offset, sizeof(type_value));
+      if (type_value >= seen.size() || seen[type_value])
+        return E_INVALIDARG;
+      seen[type_value] = true;
+      auto type = static_cast<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE>(type_value);
+      has_graphics_subobject = has_graphics_subobject ||
+                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND ||
+                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK ||
+                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER ||
+                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL ||
+                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT ||
+                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE ||
+                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY ||
+                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS ||
+                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT ||
+                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC;
+      size_t next_offset;
 
-    switch (type) {
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE: {
-      ID3D12RootSignature *root_signature;
-      if (!ReadStreamPayload(stream, stream_size, offset, root_signature, next_offset))
+      switch (type) {
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE: {
+        ID3D12RootSignature *root_signature;
+        if (!ReadStreamPayload(stream, stream_size, offset, root_signature, next_offset))
+          return E_INVALIDARG;
+        parsed.root_signature = root_signature;
+        break;
+      }
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS: {
+        D3D12_SHADER_BYTECODE shader;
+        if (!SetStreamType(parsed.type, D3D12PipelineType::Graphics) ||
+            !ReadStreamPayload(stream, stream_size, offset, shader, next_offset) ||
+            !CopyStreamShader(shader, parsed.vertex_shader))
+          return E_INVALIDARG;
+        break;
+      }
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS: {
+        D3D12_SHADER_BYTECODE shader;
+        if (!SetStreamType(parsed.type, D3D12PipelineType::Graphics) ||
+            !ReadStreamPayload(stream, stream_size, offset, shader, next_offset) ||
+            !CopyStreamShader(shader, parsed.pixel_shader))
+          return E_INVALIDARG;
+        break;
+      }
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS: {
+        D3D12_SHADER_BYTECODE shader;
+        if (!SetStreamType(parsed.type, D3D12PipelineType::Graphics) ||
+            !ReadStreamPayload(stream, stream_size, offset, shader, next_offset) ||
+            !CopyStreamShader(shader, parsed.domain_shader))
+          return E_INVALIDARG;
+        break;
+      }
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS: {
+        D3D12_SHADER_BYTECODE shader;
+        if (!SetStreamType(parsed.type, D3D12PipelineType::Graphics) ||
+            !ReadStreamPayload(stream, stream_size, offset, shader, next_offset) ||
+            !CopyStreamShader(shader, parsed.hull_shader))
+          return E_INVALIDARG;
+        break;
+      }
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS: {
+        D3D12_SHADER_BYTECODE shader;
+        if (!SetStreamType(parsed.type, D3D12PipelineType::Compute) ||
+            !ReadStreamPayload(stream, stream_size, offset, shader, next_offset) ||
+            !CopyStreamShader(shader, parsed.compute_shader))
+          return E_INVALIDARG;
+        break;
+      }
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND:
+        if (!ReadStreamPayload(stream, stream_size, offset, parsed.blend_state, next_offset))
+          return E_INVALIDARG;
+        break;
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK:
+        if (!ReadStreamPayload(stream, stream_size, offset, parsed.sample_mask, next_offset))
+          return E_INVALIDARG;
+        break;
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER:
+        if (!ReadStreamPayload(stream, stream_size, offset, parsed.rasterizer_state, next_offset))
+          return E_INVALIDARG;
+        break;
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL:
+        if (!ReadStreamPayload(stream, stream_size, offset, parsed.depth_stencil_state, next_offset))
+          return E_INVALIDARG;
+        break;
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT: {
+        D3D12_INPUT_LAYOUT_DESC input_layout;
+        if (!ReadStreamPayload(stream, stream_size, offset, input_layout, next_offset) ||
+            !CopyStreamInputLayout(input_layout, parsed.input_layout))
+          return E_INVALIDARG;
+        break;
+      }
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE:
+        if (!ReadStreamPayload(stream, stream_size, offset, parsed.ib_strip_cut_value, next_offset))
+          return E_INVALIDARG;
+        break;
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY:
+        if (!ReadStreamPayload(stream, stream_size, offset, parsed.primitive_topology_type, next_offset))
+          return E_INVALIDARG;
+        break;
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS: {
+        D3D12_RT_FORMAT_ARRAY formats;
+        if (!ReadStreamPayload(stream, stream_size, offset, formats, next_offset) || formats.NumRenderTargets > 8)
+          return E_INVALIDARG;
+        parsed.num_render_targets = formats.NumRenderTargets;
+        memcpy(parsed.render_target_formats.data(), formats.RTFormats, sizeof(formats.RTFormats));
+        break;
+      }
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT:
+        if (!ReadStreamPayload(stream, stream_size, offset, parsed.depth_stencil_format, next_offset))
+          return E_INVALIDARG;
+        break;
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC:
+        if (!ReadStreamPayload(stream, stream_size, offset, parsed.sample_desc, next_offset))
+          return E_INVALIDARG;
+        break;
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK:
+        if (!ReadStreamPayload(stream, stream_size, offset, parsed.node_mask, next_offset))
+          return E_INVALIDARG;
+        break;
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO: {
+        D3D12_CACHED_PIPELINE_STATE cached_pso;
+        if (!ReadStreamPayload(stream, stream_size, offset, cached_pso, next_offset) ||
+            !CopyStreamCachedPSO(cached_pso, parsed.cached_pso))
+          return E_INVALIDARG;
+        break;
+      }
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS:
+        if (!ReadStreamPayload(stream, stream_size, offset, parsed.flags, next_offset))
+          return E_INVALIDARG;
+        break;
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT: {
+        D3D12_STREAM_OUTPUT_DESC stream_output;
+        if (!ReadStreamPayload(stream, stream_size, offset, stream_output, next_offset))
+          return E_INVALIDARG;
+        return E_NOTIMPL;
+      }
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS:
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS: {
+        D3D12_SHADER_BYTECODE shader;
+        if (!ReadStreamPayload(stream, stream_size, offset, shader, next_offset))
+          return E_INVALIDARG;
+        return E_NOTIMPL;
+      }
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1: {
+        D3D12_DEPTH_STENCIL_DESC1 depth_stencil;
+        if (!ReadStreamPayload(stream, stream_size, offset, depth_stencil, next_offset))
+          return E_INVALIDARG;
+        return E_NOTIMPL;
+      }
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING: {
+        D3D12_VIEW_INSTANCING_DESC view_instancing;
+        if (!ReadStreamPayload(stream, stream_size, offset, view_instancing, next_offset))
+          return E_INVALIDARG;
+        return E_NOTIMPL;
+      }
+      default:
         return E_INVALIDARG;
-      parsed.compute.pRootSignature = root_signature;
-      parsed.graphics.pRootSignature = root_signature;
-      break;
+      }
+      offset = next_offset;
     }
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS:
-      if (!SetStreamType(parsed.type, D3D12PipelineType::Graphics) ||
-          !ReadStreamPayload(stream, stream_size, offset, parsed.graphics.VS, next_offset))
-        return E_INVALIDARG;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
-      if (!SetStreamType(parsed.type, D3D12PipelineType::Graphics) ||
-          !ReadStreamPayload(stream, stream_size, offset, parsed.graphics.PS, next_offset))
-        return E_INVALIDARG;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS:
-      if (!SetStreamType(parsed.type, D3D12PipelineType::Graphics) ||
-          !ReadStreamPayload(stream, stream_size, offset, parsed.graphics.DS, next_offset))
-        return E_INVALIDARG;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
-      if (!SetStreamType(parsed.type, D3D12PipelineType::Graphics) ||
-          !ReadStreamPayload(stream, stream_size, offset, parsed.graphics.HS, next_offset))
-        return E_INVALIDARG;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS:
-      if (!SetStreamType(parsed.type, D3D12PipelineType::Compute) ||
-          !ReadStreamPayload(stream, stream_size, offset, parsed.compute.CS, next_offset))
-        return E_INVALIDARG;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND:
-      if (!ReadStreamPayload(stream, stream_size, offset, parsed.graphics.BlendState, next_offset))
-        return E_INVALIDARG;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK:
-      if (!ReadStreamPayload(stream, stream_size, offset, parsed.graphics.SampleMask, next_offset))
-        return E_INVALIDARG;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER:
-      if (!ReadStreamPayload(stream, stream_size, offset, parsed.graphics.RasterizerState, next_offset))
-        return E_INVALIDARG;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL:
-      if (!ReadStreamPayload(stream, stream_size, offset, parsed.graphics.DepthStencilState, next_offset))
-        return E_INVALIDARG;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT:
-      if (!ReadStreamPayload(stream, stream_size, offset, parsed.graphics.InputLayout, next_offset))
-        return E_INVALIDARG;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE:
-      if (!ReadStreamPayload(stream, stream_size, offset, parsed.graphics.IBStripCutValue, next_offset))
-        return E_INVALIDARG;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY:
-      if (!ReadStreamPayload(stream, stream_size, offset, parsed.graphics.PrimitiveTopologyType, next_offset))
-        return E_INVALIDARG;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS: {
-      D3D12_RT_FORMAT_ARRAY formats;
-      if (!ReadStreamPayload(stream, stream_size, offset, formats, next_offset) || formats.NumRenderTargets > 8)
-        return E_INVALIDARG;
-      parsed.graphics.NumRenderTargets = formats.NumRenderTargets;
-      memcpy(parsed.graphics.RTVFormats, formats.RTFormats, sizeof(formats.RTFormats));
-      break;
-    }
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT:
-      if (!ReadStreamPayload(stream, stream_size, offset, parsed.graphics.DSVFormat, next_offset))
-        return E_INVALIDARG;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC:
-      if (!ReadStreamPayload(stream, stream_size, offset, parsed.graphics.SampleDesc, next_offset))
-        return E_INVALIDARG;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK:
-      if (!ReadStreamPayload(stream, stream_size, offset, parsed.compute.NodeMask, next_offset))
-        return E_INVALIDARG;
-      parsed.graphics.NodeMask = parsed.compute.NodeMask;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO:
-      if (!ReadStreamPayload(stream, stream_size, offset, parsed.compute.CachedPSO, next_offset))
-        return E_INVALIDARG;
-      parsed.graphics.CachedPSO = parsed.compute.CachedPSO;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS:
-      if (!ReadStreamPayload(stream, stream_size, offset, parsed.compute.Flags, next_offset))
-        return E_INVALIDARG;
-      parsed.graphics.Flags = parsed.compute.Flags;
-      break;
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT:
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1:
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING:
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS:
-    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS:
-      return E_NOTIMPL;
-    default:
+
+    if (!IsValidPipelineType(parsed.type) ||
+        (parsed.type == D3D12PipelineType::Compute && has_graphics_subobject))
       return E_INVALIDARG;
-    }
-    offset = next_offset;
+    return ValidatePipelineStreamData(parsed);
+  } catch (...) {
+    return E_OUTOFMEMORY;
   }
-
-  if (!IsValidPipelineType(parsed.type) ||
-      (parsed.type == D3D12PipelineType::Compute && has_graphics_subobject))
-    return E_INVALIDARG;
-  return S_OK;
 }
 
 HRESULT
@@ -1031,10 +1495,19 @@ CreateD3D12PipelineStateFromStream(
   HRESULT hr = ParseD3D12PipelineStateStream(desc, parsed);
   if (FAILED(hr))
     return hr;
-  if (parsed.type == D3D12PipelineType::Graphics)
-    return CreateGraphicsPipelineState(device, &parsed.graphics, riid, pipeline_state);
-  if (parsed.type == D3D12PipelineType::Compute)
-    return CreateComputePipelineState(device, &parsed.compute, riid, pipeline_state);
+  if (parsed.type == D3D12PipelineType::Graphics) {
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics;
+    std::vector<D3D12_INPUT_ELEMENT_DESC> input_elements;
+    if (!MaterializeGraphicsDescriptor(parsed, graphics, input_elements))
+      return E_OUTOFMEMORY;
+    return CreateGraphicsPipelineState(device, &graphics, riid, pipeline_state);
+  }
+  if (parsed.type == D3D12PipelineType::Compute) {
+    D3D12_COMPUTE_PIPELINE_STATE_DESC compute;
+    if (!MaterializeComputeDescriptor(parsed, compute))
+      return E_OUTOFMEMORY;
+    return CreateComputePipelineState(device, &compute, riid, pipeline_state);
+  }
   return E_INVALIDARG;
 }
 
