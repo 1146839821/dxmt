@@ -24,6 +24,8 @@
 #include "log/log.hpp"
 #include "airconv_public.h"
 
+#include <utility>
+
 namespace dxmt {
 
 class MTLD3D12ComputePipelineStateImpl : public MTLD3D12Pageable<MTLD3D12ComputePipelineState> {
@@ -171,8 +173,7 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   GetCachedBlob(ID3DBlob **blob) {
-    IMPLEMENT_ME
-    return E_NOTIMPL;
+    return CreateD3D12CachedBlob(pipeline_cache, blob);
   }
 };
 
@@ -180,10 +181,22 @@ HRESULT
 CreateComputePipelineState(
     MTLD3D12Device *pDevice, const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc, REFIID riid, void **ppPipelineState
 ) {
-  auto pso = Com(new MTLD3D12ComputePipelineStateImpl(pDevice));
-  HRESULT hr = pso->Initialize(pDesc);
+  if (!pDevice || !pDesc)
+    return E_INVALIDARG;
+  if (!ppPipelineState)
+    return E_POINTER;
+  InitReturnPtr(ppPipelineState);
+
+  D3D12PipelineCacheData pipeline_cache;
+  HRESULT hr = BuildD3D12PipelineCacheData(pDevice, *pDesc, pipeline_cache);
   if (FAILED(hr))
     return hr;
+
+  auto pso = Com(new MTLD3D12ComputePipelineStateImpl(pDevice));
+  hr = pso->Initialize(pDesc);
+  if (FAILED(hr))
+    return hr;
+  pso->pipeline_cache = std::move(pipeline_cache);
   return pso->QueryInterface(riid, ppPipelineState);
 };
 

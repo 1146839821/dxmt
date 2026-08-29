@@ -27,6 +27,7 @@
 #include "DXBCParser/DXBCUtils.h"
 
 #include <cstring>
+#include <utility>
 
 namespace dxmt {
 
@@ -902,8 +903,7 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   GetCachedBlob(ID3DBlob **blob) {
-    IMPLEMENT_ME
-    return E_NOTIMPL;
+    return CreateD3D12CachedBlob(pipeline_cache, blob);
   }
 };
 
@@ -911,11 +911,22 @@ HRESULT
 CreateGraphicsPipelineState(
     MTLD3D12Device *pDevice, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, REFIID riid, void **ppPipelineState
 ) {
+  if (!pDevice || !pDesc)
+    return E_INVALIDARG;
+  if (!ppPipelineState)
+    return E_POINTER;
   InitReturnPtr(ppPipelineState);
-  auto pso = Com(new MTLD3D12GraphicsPipelineStateImpl(pDevice));
-  HRESULT hr = pso->Initialize(pDesc);
+
+  D3D12PipelineCacheData pipeline_cache;
+  HRESULT hr = BuildD3D12PipelineCacheData(pDevice, *pDesc, pipeline_cache);
   if (FAILED(hr))
     return hr;
+
+  auto pso = Com(new MTLD3D12GraphicsPipelineStateImpl(pDevice));
+  hr = pso->Initialize(pDesc);
+  if (FAILED(hr))
+    return hr;
+  pso->pipeline_cache = std::move(pipeline_cache);
   return pso->QueryInterface(riid, ppPipelineState);
 };
 

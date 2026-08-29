@@ -30,6 +30,7 @@
 #include "dxmt_fence.hpp"
 #include "dxmt_presenter.hpp"
 #include "d3d12_shader_converter.hpp"
+#include "d3d12_pipeline_persistence.hpp"
 #include "dxmt_texture.hpp"
 #include "log/log.hpp"
 #include <vector>
@@ -186,6 +187,9 @@ class MTLD3D12PipelineState : public ID3D12PipelineState {
 public:
   UINT IsComputePipelineState;
   D3D12ShaderBackend shader_backend = D3D12ShaderBackend::Airconv;
+  D3D12PipelineCacheData pipeline_cache;
+
+  const D3D12PipelineCacheData &GetPipelineCacheData() const { return pipeline_cache; }
 };
 
 class MTLD3D12GraphicsPipelineState : public MTLD3D12PipelineState {

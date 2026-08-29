@@ -26,6 +26,10 @@ dx12_hdr = executable('dx12_hdr', 'dx12_hdr.cpp',
   dependencies: [ d3d12_dep, dxgi_dep ],
 )
 
+dx12_pipeline_persistence = executable('dx12_pipeline_persistence', 'dx12_pipeline_persistence.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dxc_command = []
 dxc = find_program('dxc', required: false)
 if dxc.found()

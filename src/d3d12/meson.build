@@ -11,6 +11,7 @@ d3d12_src = [
   'd3d12_heap.cpp',
   'd3d12_pipeline_compute.cpp',
   'd3d12_pipeline_graphics.cpp',
+  'd3d12_pipeline_persistence.cpp',
   'd3d12_shader_converter.cpp',
   'd3d12_query_heap.cpp',
   'd3d12_resource_helper.cpp',

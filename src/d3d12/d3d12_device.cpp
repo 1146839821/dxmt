@@ -1038,7 +1038,7 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   CreatePipelineState(const D3D12_PIPELINE_STATE_STREAM_DESC *pDesc, REFIID riid, void **ppPipelineState) {
-    return E_NOTIMPL;
+    return dxmt::CreateD3D12PipelineStateFromStream(this, pDesc, riid, ppPipelineState);
   }
 
   HRESULT STDMETHODCALLTYPE
@@ -1442,7 +1442,7 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   CreatePipelineLibrary(const void *blob, SIZE_T blob_size, REFIID iid, void **lib) {
-    return E_NOTIMPL;
+    return dxmt::CreateD3D12PipelineLibrary(this, blob, blob_size, iid, lib);
   };
 
   HRESULT STDMETHODCALLTYPE
