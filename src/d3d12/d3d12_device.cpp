@@ -1051,11 +1051,13 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   OpenExistingHeapFromAddress(const void *pAddress, REFIID riid, void **ppHeap) {
+    InitReturnPtr(ppHeap);
     return E_NOTIMPL;
   }
 
   HRESULT STDMETHODCALLTYPE
   OpenExistingHeapFromFileMapping(HANDLE hFileMapping, REFIID riid, void **ppHeap) {
+    InitReturnPtr(ppHeap);
     return E_NOTIMPL;
   }
 
@@ -1071,11 +1073,13 @@ public:
   CreateCommandList1(
       UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, D3D12_COMMAND_LIST_FLAGS Flags, REFIID riid, void **ppCommandList
   ) {
+    InitReturnPtr(ppCommandList);
     return E_NOTIMPL;
   }
 
   HRESULT STDMETHODCALLTYPE
   CreateProtectedResourceSession(const D3D12_PROTECTED_RESOURCE_SESSION_DESC *pDesc, REFIID riid, void **ppSession) {
+    InitReturnPtr(ppSession);
     return E_NOTIMPL;
   }
 
@@ -1093,6 +1097,7 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   CreateHeap1(const D3D12_HEAP_DESC *pDesc, ID3D12ProtectedResourceSession *pSession, REFIID riid, void **ppHeap) {
+    InitReturnPtr(ppHeap);
     return E_NOTIMPL;
   }
 
@@ -1196,16 +1201,19 @@ public:
   CreateSharedHandle(
       ID3D12DeviceChild *object, const SECURITY_ATTRIBUTES *attributes, DWORD access, const WCHAR *name, HANDLE *handle
   ) {
+    InitReturnPtr(handle);
     return E_NOTIMPL;
   };
 
   HRESULT STDMETHODCALLTYPE
   OpenSharedHandle(HANDLE handle, REFIID riid, void **object) {
+    InitReturnPtr(object);
     return E_NOTIMPL;
   };
 
   HRESULT STDMETHODCALLTYPE
   OpenSharedHandleByName(const WCHAR *name, DWORD access, HANDLE *handle) {
+    InitReturnPtr(handle);
     return E_NOTIMPL;
   };
 

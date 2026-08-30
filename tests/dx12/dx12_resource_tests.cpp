@@ -186,6 +186,80 @@ int main() {
   }
   info_queue->SetMuteDebugOutput(TRUE);
 
+  auto check_unsupported_output = [](const char *name, HRESULT hr, void *output) {
+    if (hr == E_NOTIMPL && output == nullptr)
+      return true;
+    std::cerr << name << " did not return E_NOTIMPL with a null output\n";
+    return false;
+  };
+  void *unsupported_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+  if (!check_unsupported_output(
+          "OpenExistingHeapFromAddress",
+          device4->OpenExistingHeapFromAddress(nullptr, __uuidof(ID3D12Heap), &unsupported_output), unsupported_output
+      )) {
+    cleanup();
+    return 1;
+  }
+  unsupported_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+  if (!check_unsupported_output(
+          "OpenExistingHeapFromFileMapping",
+          device4->OpenExistingHeapFromFileMapping(nullptr, __uuidof(ID3D12Heap), &unsupported_output), unsupported_output
+      )) {
+    cleanup();
+    return 1;
+  }
+  unsupported_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+  if (!check_unsupported_output(
+          "CreateCommandList1",
+          device4->CreateCommandList1(
+              0, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_FLAG_NONE, __uuidof(ID3D12GraphicsCommandList),
+              &unsupported_output
+          ),
+          unsupported_output
+      )) {
+    cleanup();
+    return 1;
+  }
+  unsupported_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+  if (!check_unsupported_output(
+          "CreateProtectedResourceSession",
+          device4->CreateProtectedResourceSession(nullptr, __uuidof(ID3D12ProtectedResourceSession), &unsupported_output),
+          unsupported_output
+      )) {
+    cleanup();
+    return 1;
+  }
+  unsupported_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+  if (!check_unsupported_output(
+          "CreateHeap1", device4->CreateHeap1(nullptr, nullptr, __uuidof(ID3D12Heap), &unsupported_output), unsupported_output
+      )) {
+    cleanup();
+    return 1;
+  }
+  HANDLE unsupported_handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(1));
+  if (!check_unsupported_output(
+          "CreateSharedHandle",
+          device->CreateSharedHandle(nullptr, nullptr, 0, nullptr, &unsupported_handle), unsupported_handle
+      )) {
+    cleanup();
+    return 1;
+  }
+  unsupported_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+  if (!check_unsupported_output(
+          "OpenSharedHandle",
+          device->OpenSharedHandle(nullptr, __uuidof(ID3D12Heap), &unsupported_output), unsupported_output
+      )) {
+    cleanup();
+    return 1;
+  }
+  unsupported_handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(1));
+  if (!check_unsupported_output(
+          "OpenSharedHandleByName", device->OpenSharedHandleByName(nullptr, 0, &unsupported_handle), unsupported_handle
+      )) {
+    cleanup();
+    return 1;
+  }
+
   D3D12_HEAP_PROPERTIES committed1_properties = {};
   committed1_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
   committed1_properties.CreationNodeMask = 1;
