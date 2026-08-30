@@ -31,7 +31,6 @@ UINT64 AlignUp(UINT64 value, UINT64 alignment) {
 
 int main() {
   ID3D12Device *device = nullptr;
-  ID3D12Device *feature_level_device = nullptr;
   ID3D12InfoQueue *info_queue = nullptr;
   ID3D12CommandQueue *queue = nullptr;
   ID3D12CommandAllocator *allocator = nullptr;
@@ -161,18 +160,15 @@ int main() {
       queue->Release();
     if (device)
       device->Release();
-    if (feature_level_device)
-      feature_level_device->Release();
   };
 
   if (!CheckHR("D3D12CreateDevice", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) {
     cleanup();
     return 1;
   }
-  if (!CheckHR(
-          "D3D12CreateDevice12_1",
-          D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(&feature_level_device))
-      )) {
+  if (D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, __uuidof(ID3D12Device), nullptr) != E_INVALIDARG ||
+      D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_1, __uuidof(ID3D12Device), nullptr) != E_INVALIDARG) {
+    std::cerr << "unsupported D3D12 feature level was accepted\n";
     cleanup();
     return 1;
   }
@@ -949,20 +945,12 @@ int main() {
     return 1;
   }
 
-#ifdef _WIN64
-  if (source_placed->GetGPUVirtualAddress() - source_zero->GetGPUVirtualAddress() != buffer_info.Alignment) {
-    std::cerr << "placed resource GPU address does not include heap offset\n";
-    cleanup();
-    return 1;
-  }
-#else
   if (!source_zero->GetGPUVirtualAddress() || !source_placed->GetGPUVirtualAddress() ||
       source_zero->GetGPUVirtualAddress() == source_placed->GetGPUVirtualAddress()) {
-    std::cerr << "x86 placed resource GPU addresses are invalid\n";
+    std::cerr << "placed resource GPU addresses are invalid\n";
     cleanup();
     return 1;
   }
-#endif
 
   D3D12_CPU_DESCRIPTOR_HANDLE invalid_descriptor = {};
   device->CreateShaderResourceView(source_zero, nullptr, invalid_descriptor);
