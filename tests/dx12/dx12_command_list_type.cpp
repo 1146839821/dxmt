@@ -114,6 +114,19 @@ int main() {
   if (bundle_allocator)
     bundle_allocator->Release();
 
+  ID3D12CommandQueue *queue = nullptr;
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  if (!CheckHR("CreateCommandQueue", device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue)))) {
+    result = 1;
+  } else {
+    queue->ExecuteCommandLists(0, nullptr);
+    queue->ExecuteCommandLists(1, nullptr);
+    ID3D12CommandList *null_list = nullptr;
+    queue->ExecuteCommandLists(1, &null_list);
+  }
+  if (queue)
+    queue->Release();
+
   device->Release();
   if (!result)
     std::cout << "D3D12 command list type tests passed\n";

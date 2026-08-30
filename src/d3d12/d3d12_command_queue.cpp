@@ -22,6 +22,7 @@
 #include "d3d12_pageable.hpp"
 #include "dxgi_interfaces.h"
 #include "log/log.hpp"
+#include <limits>
 
 namespace dxmt {
 
@@ -117,6 +118,34 @@ public:
 
   void STDMETHODCALLTYPE
   ExecuteCommandLists(UINT Count, ID3D12CommandList *const *ppCommandLists) {
+    if (!Count)
+      return;
+    if (!ppCommandLists) {
+      WARN("D3D12 ExecuteCommandLists received a null command list array");
+      return;
+    }
+    for (UINT i = 0; i < Count; i++) {
+      auto command_list = ppCommandLists[i];
+      if (!command_list) {
+        WARN("D3D12 ExecuteCommandLists received a null command list");
+        return;
+      }
+      switch (command_list->GetType()) {
+      case D3D12_COMMAND_LIST_TYPE_DIRECT:
+      case D3D12_COMMAND_LIST_TYPE_COMPUTE:
+      case D3D12_COMMAND_LIST_TYPE_COPY:
+        break;
+      default:
+        WARN("D3D12 ExecuteCommandLists received an unsupported command list type");
+        return;
+      }
+      auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(command_list);
+      if (pCommandList->encoder_count == std::numeric_limits<size_t>::max()) {
+        WARN("D3D12 ExecuteCommandLists received an open command list");
+        return;
+      }
+    }
+
     auto pool = WMT::MakeAutoreleasePool();
 
     auto cmdbuf = queue_.commandBuffer();
