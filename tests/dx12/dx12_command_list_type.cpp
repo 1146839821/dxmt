@@ -114,6 +114,26 @@ int main() {
   if (bundle_allocator)
     bundle_allocator->Release();
 
+  ID3D12CommandAllocator *unsupported_allocator = nullptr;
+  ID3D12GraphicsCommandList *unsupported_list = nullptr;
+  if (!CheckHR("CreateUnsupportedAllocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&unsupported_allocator))) ||
+      !CheckHR("CreateUnsupportedList",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, unsupported_allocator, nullptr,
+                                         IID_PPV_ARGS(&unsupported_list)))) {
+    result = 1;
+  } else {
+    unsupported_list->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+    if (unsupported_list->Close() != E_FAIL) {
+      std::cerr << "unsupported command was silently accepted\n";
+      result = 1;
+    }
+  }
+  if (unsupported_list)
+    unsupported_list->Release();
+  if (unsupported_allocator)
+    unsupported_allocator->Release();
+
   ID3D12CommandQueue *queue = nullptr;
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   if (!CheckHR("CreateCommandQueue", device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue)))) {

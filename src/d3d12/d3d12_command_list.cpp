@@ -531,6 +531,12 @@ public:
     return allocator_->StartRecord(&entry);
   }
 
+  void
+  MarkUnsupportedCommand(const char *name) {
+    WARN("D3D12 ", name, " is not implemented");
+    recording_failed_ = true;
+  }
+
   HRESULT
   STDMETHODCALLTYPE
   QueryInterface(REFIID riid, void **ppvObject) {
@@ -2765,7 +2771,7 @@ public:
   };
 
   void STDMETHODCALLTYPE SOSetTargets(UINT StartSlot, UINT Count, const D3D12_STREAM_OUTPUT_BUFFER_VIEW *Views) {
-    IMPLEMENT_ME
+    MarkUnsupportedCommand("SOSetTargets");
   };
 
   void STDMETHODCALLTYPE
@@ -3070,7 +3076,7 @@ public:
   };
 
   void STDMETHODCALLTYPE SetPredication(ID3D12Resource *pBuffer, UINT64 AlignedBufferOffset, D3D12_PREDICATION_OP Op) {
-    IMPLEMENT_ME
+    MarkUnsupportedCommand("SetPredication");
   };
 
   void STDMETHODCALLTYPE SetMarker(UINT Metadata, const void *data, UINT size) { IMPLEMENT_ME };
@@ -3173,7 +3179,7 @@ public:
       ID3D12Resource *pDstBuffer, UINT64 DstOffset, ID3D12Resource *pSrcBuffer, UINT64 SrcOffset, UINT Dependencies,
       ID3D12Resource *const *ppDependentResources, const D3D12_SUBRESOURCE_RANGE_UINT64 *pDependentSubresourceRanges
   ) {
-    IMPLEMENT_ME
+    MarkUnsupportedCommand("AtomicCopyBufferUINT");
   }
 
   void STDMETHODCALLTYPE
@@ -3181,17 +3187,17 @@ public:
       ID3D12Resource *pDstBuffer, UINT64 DstOffset, ID3D12Resource *pSrcBuffer, UINT64 SrcOffset, UINT Dependencies,
       ID3D12Resource *const *ppDependentResources, const D3D12_SUBRESOURCE_RANGE_UINT64 *pDependentSubresourceRanges
   ) {
-    IMPLEMENT_ME
+    MarkUnsupportedCommand("AtomicCopyBufferUINT64");
   }
 
   void STDMETHODCALLTYPE
   OMSetDepthBounds(FLOAT Min, FLOAT Max) {
-    IMPLEMENT_ME
+    MarkUnsupportedCommand("OMSetDepthBounds");
   }
 
   void STDMETHODCALLTYPE
   SetSamplePositions(UINT NumSamplesPerPixel, UINT NumPixels, D3D12_SAMPLE_POSITION *pSamplePositions) {
-    IMPLEMENT_ME
+    MarkUnsupportedCommand("SetSamplePositions");
   }
 
   void STDMETHODCALLTYPE
@@ -3199,19 +3205,19 @@ public:
       ID3D12Resource *pDstResource, UINT DstSubresource, UINT DstX, UINT DstY, ID3D12Resource *pSrcResource,
       UINT SrcSubresource, D3D12_RECT *pSrcRect, DXGI_FORMAT Format, D3D12_RESOLVE_MODE ResolveMode
   ) {
-    IMPLEMENT_ME
+    MarkUnsupportedCommand("ResolveSubresourceRegion");
   }
 
   void STDMETHODCALLTYPE
   SetViewInstanceMask(UINT Mask) {
-    IMPLEMENT_ME
+    MarkUnsupportedCommand("SetViewInstanceMask");
   }
 
   void STDMETHODCALLTYPE
   WriteBufferImmediate(
       UINT Count, const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER *pParams, const D3D12_WRITEBUFFERIMMEDIATE_MODE *pModes
   ) {
-    IMPLEMENT_ME
+    MarkUnsupportedCommand("WriteBufferImmediate");
   }
 };
 
