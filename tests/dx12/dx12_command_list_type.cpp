@@ -114,9 +114,30 @@ int main() {
   if (bundle_allocator)
     bundle_allocator->Release();
 
+  D3D12_HEAP_PROPERTIES predication_heap = {};
+  predication_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+  predication_heap.CreationNodeMask = 1;
+  predication_heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC predication_desc = {};
+  predication_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  predication_desc.Width = 4;
+  predication_desc.Height = 1;
+  predication_desc.DepthOrArraySize = 1;
+  predication_desc.MipLevels = 1;
+  predication_desc.SampleDesc.Count = 1;
+  predication_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  ID3D12Resource *predication_buffer = nullptr;
+  if (!CheckHR("CreatePredicationBuffer",
+               device->CreateCommittedResource(
+                   &predication_heap, D3D12_HEAP_FLAG_NONE, &predication_desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                   IID_PPV_ARGS(&predication_buffer)))) {
+    result = 1;
+  }
+
   ID3D12CommandAllocator *unsupported_allocator = nullptr;
   ID3D12GraphicsCommandList *unsupported_list = nullptr;
-  if (!CheckHR("CreateUnsupportedAllocator",
+  if (!predication_buffer ||
+      !CheckHR("CreateUnsupportedAllocator",
                device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&unsupported_allocator))) ||
       !CheckHR("CreateUnsupportedList",
                device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, unsupported_allocator, nullptr,
@@ -124,6 +145,7 @@ int main() {
     result = 1;
   } else {
     unsupported_list->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+    unsupported_list->SetPredication(predication_buffer, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
     if (unsupported_list->Close() != E_FAIL) {
       std::cerr << "unsupported command was silently accepted\n";
       result = 1;
@@ -133,6 +155,8 @@ int main() {
     unsupported_list->Release();
   if (unsupported_allocator)
     unsupported_allocator->Release();
+  if (predication_buffer)
+    predication_buffer->Release();
 
   ID3D12CommandQueue *queue = nullptr;
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};

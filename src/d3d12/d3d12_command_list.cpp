@@ -3076,6 +3076,8 @@ public:
   };
 
   void STDMETHODCALLTYPE SetPredication(ID3D12Resource *pBuffer, UINT64 AlignedBufferOffset, D3D12_PREDICATION_OP Op) {
+    if (!pBuffer)
+      return;
     MarkUnsupportedCommand("SetPredication");
   };
 
