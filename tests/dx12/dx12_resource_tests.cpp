@@ -310,8 +310,9 @@ int main() {
   if (!architecture.TileBasedRenderer || !architecture.UMA || !architecture1.TileBasedRenderer ||
       !architecture1.UMA || feature_levels.MaxSupportedFeatureLevel != D3D_FEATURE_LEVEL_11_0 ||
       shader_model.HighestShaderModel != D3D_SHADER_MODEL_6_0 || options.ResourceBindingTier != D3D12_RESOURCE_BINDING_TIER_2 ||
-      shader_model_5_1.HighestShaderModel != D3D_SHADER_MODEL_5_1 ||
-      options.ResourceHeapTier != D3D12_RESOURCE_HEAP_TIER_2 || options.ROVsSupported || options1.WaveOps ||
+       shader_model_5_1.HighestShaderModel != D3D_SHADER_MODEL_5_1 ||
+       options.TiledResourcesTier != D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED ||
+       options.ResourceHeapTier != D3D12_RESOURCE_HEAP_TIER_2 || options.ROVsSupported || options1.WaveOps ||
        options3.CopyQueueTimestampQueriesSupported != TRUE || !options3.CastingFullyTypedFormatSupported ||
        options5.RenderPassesTier != D3D12_RENDER_PASS_TIER_0 ||
       options5.RaytracingTier != D3D12_RAYTRACING_TIER_NOT_SUPPORTED || shader_cache.SupportFlags ||
