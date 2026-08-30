@@ -2519,7 +2519,15 @@ public:
     }
   };
 
-  void STDMETHODCALLTYPE ExecuteBundle(ID3D12GraphicsCommandList *CommandList) { IMPLEMENT_ME };
+  void STDMETHODCALLTYPE ExecuteBundle(ID3D12GraphicsCommandList *CommandList) {
+    if (type_ != D3D12_COMMAND_LIST_TYPE_DIRECT || !CommandList ||
+        CommandList->GetType() != D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      WARN("D3D12 ExecuteBundle received an invalid command list");
+    } else {
+      WARN("D3D12 ExecuteBundle is not implemented");
+    }
+    recording_failed_ = true;
+  };
 
   void STDMETHODCALLTYPE SetDescriptorHeaps(UINT HeapCount, ID3D12DescriptorHeap *const *Heaps) {
     descriptor_heap_ = nullptr;

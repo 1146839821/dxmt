@@ -82,6 +82,38 @@ int main() {
   if (invalid_allocator)
     invalid_allocator->Release();
 
+  ID3D12CommandAllocator *bundle_allocator = nullptr;
+  ID3D12GraphicsCommandList *bundle_list = nullptr;
+  ID3D12CommandAllocator *parent_allocator = nullptr;
+  ID3D12GraphicsCommandList *parent_list = nullptr;
+  if (!CheckHR("CreateBundleAllocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_BUNDLE, IID_PPV_ARGS(&bundle_allocator))) ||
+      !CheckHR("CreateBundleList",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_BUNDLE, bundle_allocator, nullptr,
+                                         IID_PPV_ARGS(&bundle_list))) ||
+      !CheckHR("CloseBundle", bundle_list->Close()) ||
+      !CheckHR("CreateParentAllocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&parent_allocator))) ||
+      !CheckHR("CreateParentList",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, parent_allocator, nullptr,
+                                         IID_PPV_ARGS(&parent_list)))) {
+    result = 1;
+  } else {
+    parent_list->ExecuteBundle(bundle_list);
+    if (parent_list->Close() != E_FAIL) {
+      std::cerr << "unsupported ExecuteBundle was silently accepted\n";
+      result = 1;
+    }
+  }
+  if (parent_list)
+    parent_list->Release();
+  if (parent_allocator)
+    parent_allocator->Release();
+  if (bundle_list)
+    bundle_list->Release();
+  if (bundle_allocator)
+    bundle_allocator->Release();
+
   device->Release();
   if (!result)
     std::cout << "D3D12 command list type tests passed\n";
