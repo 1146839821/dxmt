@@ -23,6 +23,30 @@
 
 namespace dxmt {
 
+namespace {
+
+bool
+MakeBufferSlice(UINT first_element, UINT element_count, uint64_t element_stride, uint64_t buffer_size,
+                BufferSlice &slice) {
+  if (!element_stride || first_element > UINT64_MAX / element_stride ||
+      element_count > UINT64_MAX / element_stride)
+    return false;
+
+  const uint64_t byte_offset = uint64_t(first_element) * element_stride;
+  const uint64_t byte_length = uint64_t(element_count) * element_stride;
+  if (byte_offset > buffer_size || byte_length > buffer_size - byte_offset || byte_offset > UINT32_MAX ||
+      byte_length > UINT32_MAX)
+    return false;
+
+  slice.firstElement = first_element;
+  slice.elementCount = element_count;
+  slice.byteOffset = static_cast<uint32_t>(byte_offset);
+  slice.byteLength = static_cast<uint32_t>(byte_length);
+  return true;
+}
+
+} // namespace
+
 class MTLD3D12Buffer : public MTLD3D12Pageable<MTLD3D12Resource> {
   D3D12_RESOURCE_DESC desc_;
   D3D12_HEAP_PROPERTIES heap_props_;
@@ -115,12 +139,11 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   Map(UINT Subresource, const D3D12_RANGE *pReadRange, void **ppData) {
-    if (Subresource)
+    if (Subresource || !ppData)
       return E_INVALIDARG;
     if (heap_props_.Type == D3D12_HEAP_TYPE_DEFAULT)
       return E_INVALIDARG;
-    if (ppData)
-      *ppData = buffer->current()->mappedMemory(0);
+    *ppData = buffer->current()->mappedMemory(0);
     return S_OK;
   };
 
@@ -183,11 +206,11 @@ public:
     BufferSlice Slice;
 
     if (ViewDesc.Format == DXGI_FORMAT_UNKNOWN || ViewDesc.Buffer.Flags & D3D12_BUFFER_SRV_FLAG_RAW) {
+      if ((ViewDesc.Buffer.Flags & D3D12_BUFFER_SRV_FLAG_RAW) && ViewDesc.Format != DXGI_FORMAT_R32_TYPELESS)
+        return E_INVALIDARG;
       UINT Stride = (ViewDesc.Buffer.Flags & D3D12_BUFFER_SRV_FLAG_RAW) ? 4 : ViewDesc.Buffer.StructureByteStride;
-      Slice.firstElement = ViewDesc.Buffer.FirstElement;
-      Slice.elementCount = ViewDesc.Buffer.NumElements;
-      Slice.byteOffset = Slice.firstElement * Stride;
-      Slice.byteLength = Slice.elementCount * Stride;
+      if (!MakeBufferSlice(ViewDesc.Buffer.FirstElement, ViewDesc.Buffer.NumElements, Stride, desc_.Width, Slice))
+        return E_INVALIDARG;
       return Heap->AddShaderResourceView(Index, buffer.ptr(), Slice);
     }
 
@@ -197,10 +220,8 @@ public:
       return E_FAIL;
     }
     BufferViewDescriptor view_descriptor{Format.PixelFormat};
-    Slice.firstElement = ViewDesc.Buffer.FirstElement;
-    Slice.elementCount = ViewDesc.Buffer.NumElements;
-    Slice.byteOffset = Format.BytesPerTexel * ViewDesc.Buffer.FirstElement;
-    Slice.byteLength = Format.BytesPerTexel * ViewDesc.Buffer.NumElements;
+    if (!MakeBufferSlice(ViewDesc.Buffer.FirstElement, ViewDesc.Buffer.NumElements, Format.BytesPerTexel, desc_.Width, Slice))
+      return E_INVALIDARG;
 
     auto view = buffer->createView(view_descriptor);
     return Heap->AddShaderResourceView(Index, buffer.ptr(), view, Slice);
@@ -229,15 +250,21 @@ public:
     BufferSlice Slice;
 
     if (ViewDesc.Format == DXGI_FORMAT_UNKNOWN || ViewDesc.Buffer.Flags & D3D12_BUFFER_UAV_FLAG_RAW) {
+      if ((ViewDesc.Buffer.Flags & D3D12_BUFFER_UAV_FLAG_RAW) && ViewDesc.Format != DXGI_FORMAT_R32_TYPELESS)
+        return E_INVALIDARG;
       UINT Stride = (ViewDesc.Buffer.Flags & D3D12_BUFFER_UAV_FLAG_RAW) ? 4 : ViewDesc.Buffer.StructureByteStride;
-      Slice.firstElement = ViewDesc.Buffer.FirstElement;
-      Slice.elementCount = ViewDesc.Buffer.NumElements;
-      Slice.byteOffset = Slice.firstElement * Stride;
-      Slice.byteLength = Slice.elementCount * Stride;
+      if (!MakeBufferSlice(ViewDesc.Buffer.FirstElement, ViewDesc.Buffer.NumElements, Stride, desc_.Width, Slice))
+        return E_INVALIDARG;
       if (!pCounter)
         return Heap->AddUnorderedAccessView(Index, buffer.ptr(), Slice, nullptr, 0);
 
-      auto Counter = static_cast<MTLD3D12Buffer *>(pCounter);
+      auto Counter = static_cast<MTLD3D12Resource *>(pCounter);
+      auto counter_desc = Counter->GetDesc();
+      if (!Counter->buffer || counter_desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
+          (ViewDesc.Buffer.CounterOffsetInBytes & 3) ||
+          ViewDesc.Buffer.CounterOffsetInBytes > counter_desc.Width ||
+          sizeof(UINT) > counter_desc.Width - ViewDesc.Buffer.CounterOffsetInBytes)
+        return E_INVALIDARG;
       return Heap->AddUnorderedAccessView(
           Index, buffer.ptr(), Slice, Counter->buffer.ptr(), ViewDesc.Buffer.CounterOffsetInBytes
       );
@@ -248,11 +275,11 @@ public:
       ERR("D3D12Buffer::CreateUnorderedAccessView: not an ordinary or packed format: ", ViewDesc.Format);
       return E_FAIL;
     }
+    if (pCounter)
+      return E_INVALIDARG;
     BufferViewDescriptor view_descriptor{Format.PixelFormat};
-    Slice.firstElement = ViewDesc.Buffer.FirstElement;
-    Slice.elementCount = ViewDesc.Buffer.NumElements;
-    Slice.byteOffset = Format.BytesPerTexel * ViewDesc.Buffer.FirstElement;
-    Slice.byteLength = Format.BytesPerTexel * ViewDesc.Buffer.NumElements;
+    if (!MakeBufferSlice(ViewDesc.Buffer.FirstElement, ViewDesc.Buffer.NumElements, Format.BytesPerTexel, desc_.Width, Slice))
+      return E_INVALIDARG;
 
     auto view = buffer->createView(view_descriptor);
     return Heap->AddUnorderedAccessView(Index, buffer.ptr(), view, Slice);

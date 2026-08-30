@@ -403,8 +403,15 @@ public:
     case D3D12_FEATURE_SHADER_MODEL: {
       if (DataSize != sizeof(D3D12_FEATURE_DATA_SHADER_MODEL))
         return E_INVALIDARG;
-      reinterpret_cast<D3D12_FEATURE_DATA_SHADER_MODEL *>(pFeatureData)->HighestShaderModel = D3D_SHADER_MODEL_6_0;
-      return S_OK;
+      auto *out = reinterpret_cast<D3D12_FEATURE_DATA_SHADER_MODEL *>(pFeatureData);
+      switch (out->HighestShaderModel) {
+      case D3D_SHADER_MODEL_5_1:
+        return S_OK;
+      case D3D_SHADER_MODEL_6_0:
+        return S_OK;
+      default:
+        return E_INVALIDARG;
+      }
     }
     case D3D12_FEATURE_D3D12_OPTIONS: {
       if (DataSize != sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS))
@@ -1561,6 +1568,8 @@ public:
 
   BufferAllocation *
   LookupBufferByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) {
+    if (!pOffset)
+      return {};
     std::unique_lock<dxmt::mutex> lock(residency_lock_);
     auto iter = interval_map_.upper_bound(VA);
     if (iter == interval_map_.begin()) {
@@ -1568,8 +1577,14 @@ public:
       return {};
     }
     --iter;
-    *pOffset = VA - iter->first;
-    return iter->second;
+    auto *allocation = iter->second;
+    auto offset = VA - iter->first;
+    if (offset >= allocation->length()) {
+      *pOffset = 0;
+      return {};
+    }
+    *pOffset = offset;
+    return allocation;
   }
 
   InternalCommandLibrary &

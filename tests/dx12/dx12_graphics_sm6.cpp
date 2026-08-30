@@ -122,6 +122,8 @@ int main(int argc, char **argv) {
   D3D12_SAMPLER_DESC sampler_desc = {};
   D3D12_CPU_DESCRIPTOR_HANDLE resource_cpu = {};
   D3D12_CPU_DESCRIPTOR_HANDLE sampler_cpu = {};
+  D3D12_VIEWPORT viewport = {0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+  D3D12_RECT scissor = {0, 0, 1, 1};
   ID3D12DescriptorHeap *descriptor_heaps[2] = {};
   UINT row_count = 0;
   UINT64 row_size = 0;
@@ -468,6 +470,8 @@ int main(int argc, char **argv) {
   list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   list->IASetVertexBuffers(0, 1, &vertex_view);
   list->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
+  list->RSSetViewports(1, &viewport);
+  list->RSSetScissorRects(1, &scissor);
   list->EndQuery(timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
   list->BeginQuery(query_heap, D3D12_QUERY_TYPE_OCCLUSION, 0);
   list->DrawInstanced(3, 1, 0, 0);

@@ -34,6 +34,7 @@ BufferAllocation::BufferAllocation(
 ) :
     heap_(heap),
     info_(info),
+    length_(info.length),
     flags_(flags) {
   // (sub)allocate a minimum of 256B buffer so that texture can be created
   info_.length = std::max(info_.length, 256ull);

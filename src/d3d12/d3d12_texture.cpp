@@ -334,9 +334,10 @@ public:
       subresource_count *= desc_.DepthOrArraySize;
     if (Subresource >= subresource_count)
       return E_INVALIDARG;
-    if (ppData || (desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D && desc_.MipLevels > 1))
+    if (!ppData || (desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D && desc_.MipLevels > 1))
       return E_INVALIDARG;
-    return S_OK;
+    *ppData = nullptr;
+    return E_NOTIMPL;
   };
 
   virtual void STDMETHODCALLTYPE Unmap(UINT Subresource, const D3D12_RANGE *pWrittenRange) {};

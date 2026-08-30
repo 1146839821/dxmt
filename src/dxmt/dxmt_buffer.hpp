@@ -94,6 +94,11 @@ public:
     return obj_;
   }
 
+  uint64_t
+  length() const noexcept {
+    return length_;
+  }
+
   Flags<BufferAllocationFlag>
   flags() const {
     return flags_;
@@ -158,6 +163,7 @@ private:
   WMT::Reference<WMT::Buffer> obj_;
   WMT::Reference<WMT::Heap> heap_;
   WMTBufferInfo info_;
+  uint64_t length_;
   uint32_t version_ = 0;
   Flags<BufferAllocationFlag> flags_;
   small_vector<std::unique_ptr<BufferView>, 1> cached_view_;

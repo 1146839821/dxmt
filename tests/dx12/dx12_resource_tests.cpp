@@ -66,6 +66,7 @@ int main() {
   ID3D12DescriptorHeap *rtv_heap = nullptr;
   ID3D12DescriptorHeap *shader_heap = nullptr;
   ID3D12CommandSignature *command_signature = nullptr;
+  ID3D12CommandSignature *invalid_command_signature = nullptr;
   ID3D12Device1 *device1 = nullptr;
   ID3D12Device4 *device4 = nullptr;
   ID3D12Resource *committed1_resource = nullptr;
@@ -130,6 +131,8 @@ int main() {
       shader_heap->Release();
     if (command_signature)
       command_signature->Release();
+    if (invalid_command_signature)
+      invalid_command_signature->Release();
     if (device4)
       device4->Release();
     if (device1)
@@ -216,7 +219,9 @@ int main() {
   architecture1.NodeIndex = 0;
   D3D_FEATURE_LEVEL requested_levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
   D3D12_FEATURE_DATA_FEATURE_LEVELS feature_levels = {2, requested_levels, {}};
-  D3D12_FEATURE_DATA_SHADER_MODEL shader_model = {};
+  D3D12_FEATURE_DATA_SHADER_MODEL shader_model = {D3D_SHADER_MODEL_6_0};
+  D3D12_FEATURE_DATA_SHADER_MODEL shader_model_5_1 = {D3D_SHADER_MODEL_5_1};
+  D3D12_FEATURE_DATA_SHADER_MODEL invalid_shader_model = {};
   D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
   D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1 = {};
   D3D12_FEATURE_DATA_D3D12_OPTIONS2 options2 = {};
@@ -254,6 +259,7 @@ int main() {
       !CheckFeature(device, D3D12_FEATURE_ARCHITECTURE1, &architecture1, "CheckArchitecture1") ||
       !CheckFeature(device, D3D12_FEATURE_FEATURE_LEVELS, &feature_levels, "CheckFeatureLevels") ||
       !CheckFeature(device, D3D12_FEATURE_SHADER_MODEL, &shader_model, "CheckShaderModel") ||
+      !CheckFeature(device, D3D12_FEATURE_SHADER_MODEL, &shader_model_5_1, "CheckShaderModel5_1") ||
       !CheckFeature(device, D3D12_FEATURE_D3D12_OPTIONS, &options, "CheckOptions") ||
       !CheckFeature(device, D3D12_FEATURE_D3D12_OPTIONS1, &options1, "CheckOptions1") ||
       !CheckFeature(device, D3D12_FEATURE_D3D12_OPTIONS2, &options2, "CheckOptions2") ||
@@ -289,6 +295,7 @@ int main() {
   if (!architecture.TileBasedRenderer || !architecture.UMA || !architecture1.TileBasedRenderer ||
       !architecture1.UMA || feature_levels.MaxSupportedFeatureLevel != D3D_FEATURE_LEVEL_11_0 ||
       shader_model.HighestShaderModel != D3D_SHADER_MODEL_6_0 || options.ResourceBindingTier != D3D12_RESOURCE_BINDING_TIER_2 ||
+      shader_model_5_1.HighestShaderModel != D3D_SHADER_MODEL_5_1 ||
       options.ResourceHeapTier != D3D12_RESOURCE_HEAP_TIER_2 || options.ROVsSupported || options1.WaveOps ||
        options3.CopyQueueTimestampQueriesSupported != TRUE || !options3.CastingFullyTypedFormatSupported ||
        options5.RenderPassesTier != D3D12_RENDER_PASS_TIER_0 ||
@@ -303,6 +310,8 @@ int main() {
     return 1;
   }
   if (device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, nullptr, 0) != E_INVALIDARG ||
+      device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &invalid_shader_model, sizeof(invalid_shader_model)) !=
+          E_INVALIDARG ||
       device->GetNodeCount() != 1 || device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) != 32 ||
       !device->GetCustomHeapProperties(&custom_default, 0, D3D12_HEAP_TYPE_DEFAULT) ||
       custom_default.Type != D3D12_HEAP_TYPE_CUSTOM ||
@@ -321,6 +330,15 @@ int main() {
   if (!CheckHR("CreateCommandSignature",
                device->CreateCommandSignature(
                    &command_signature_desc, nullptr, IID_PPV_ARGS(&command_signature)))) {
+    cleanup();
+    return 1;
+  }
+  auto undersized_signature_desc = command_signature_desc;
+  undersized_signature_desc.ByteStride -= sizeof(uint32_t);
+  if (device->CreateCommandSignature(
+          &undersized_signature_desc, nullptr, IID_PPV_ARGS(&invalid_command_signature)
+      ) != E_INVALIDARG || invalid_command_signature) {
+    std::cerr << "undersized command signature was accepted\n";
     cleanup();
     return 1;
   }

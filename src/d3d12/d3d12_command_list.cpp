@@ -300,6 +300,15 @@ resource_barrier_scope(MTLD3D12Resource *resource) {
   return WMTBarrierScopeTextures;
 }
 
+inline bool
+buffer_range_in_bounds(MTLD3D12Resource *resource, UINT64 offset, UINT64 length) {
+  if (!resource || !resource->buffer)
+    return false;
+  auto desc = resource->GetDesc();
+  return desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && offset <= desc.Width &&
+         length <= desc.Width - offset;
+}
+
 inline WMTRenderStages
 render_stages_for_state(D3D12_RESOURCE_STATES state) {
   WMTRenderStages stages = (WMTRenderStages)0;
@@ -962,6 +971,11 @@ public:
       uint32_t length;
     };
     auto stride = align(sizeof(VERTEX_BUFFER_ENTRY) * max_slot, 16);
+
+    if (!Count || stride > kGPUHeapSize / Count) {
+      recording_failed_ = true;
+      return {0, 0};
+    }
 
     auto [mapped, offset] = allocator_->AllocateGPUHeap(stride * Count, 16);
     if (!mapped) {
@@ -1835,15 +1849,17 @@ public:
   ) {
     if (!ValidateCommand(SupportsCopy(), "CopyBufferRegion"))
       return;
-    if (!pDstBuffer || !pSrcBuffer)
+    auto *dst = static_cast<MTLD3D12Resource *>(pDstBuffer);
+    auto *src = static_cast<MTLD3D12Resource *>(pSrcBuffer);
+    if (!buffer_range_in_bounds(dst, DstOffset, ByteCount) || !buffer_range_in_bounds(src, SrcOffset, ByteCount))
       return;
     if (!PreBlit())
       return;
 
     auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
     cmd_cp.type = WMTBlitCommandCopyFromBufferToBuffer;
-    cmd_cp.src = static_cast<MTLD3D12Resource *>(pSrcBuffer)->buffer->current()->buffer();
-    cmd_cp.dst = static_cast<MTLD3D12Resource *>(pDstBuffer)->buffer->current()->buffer();
+    cmd_cp.src = src->buffer->current()->buffer();
+    cmd_cp.dst = dst->buffer->current()->buffer();
     cmd_cp.src_offset = SrcOffset;
     cmd_cp.dst_offset = DstOffset;
     cmd_cp.copy_length = ByteCount;
@@ -2220,6 +2236,8 @@ public:
       return;
 
     if (DstDesc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+      if (!pDst->buffer || !pSrc->buffer || DstDesc.Width != SrcDesc.Width)
+        return;
       auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
       cmd_cp.type = WMTBlitCommandCopyFromBufferToBuffer;
       cmd_cp.copy_length = SrcDesc.Width;
@@ -2233,6 +2251,8 @@ public:
     if (DstDesc.Format != SrcDesc.Format || DstDesc.Width != SrcDesc.Width || DstDesc.Height != SrcDesc.Height ||
         DstDesc.DepthOrArraySize != SrcDesc.DepthOrArraySize || DstDesc.MipLevels != SrcDesc.MipLevels ||
         DstDesc.SampleDesc.Count != SrcDesc.SampleDesc.Count)
+      return;
+    if (!pDst->texture || !pSrc->texture)
       return;
 
     const UINT mip_levels = DstDesc.MipLevels;
@@ -2334,8 +2354,11 @@ public:
 
   void STDMETHODCALLTYPE
   RSSetViewports(UINT NumViewports, const D3D12_VIEWPORT *pViewports) {
-    if (NumViewports > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE)
+    if (NumViewports > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE ||
+        (NumViewports && !pViewports)) {
+      recording_failed_ = true;
       return;
+    }
     num_viewports = NumViewports;
     for (auto i = 0u; i < NumViewports; i++) {
       viewports[i] = pViewports[i];
@@ -2345,8 +2368,10 @@ public:
 
   void STDMETHODCALLTYPE
   RSSetScissorRects(UINT NumRects, const D3D12_RECT *rects) {
-    if (NumRects > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE)
+    if (NumRects > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE || (NumRects && !rects)) {
+      recording_failed_ = true;
       return;
+    }
     num_scissors = NumRects;
     for (auto i = 0u; i < NumRects; i++) {
       scissors[i] = rects[i];
@@ -2678,8 +2703,16 @@ public:
       return;
     }
 
+    if (pView->Format != DXGI_FORMAT_R16_UINT && pView->Format != DXGI_FORMAT_R32_UINT) {
+      recording_failed_ = true;
+      return;
+    }
+
     auto allocation = device_->LookupBufferByVA(pView->BufferLocation, &index_offset);
-    if (!allocation) {
+    const uint64_t index_element_size = pView->Format == DXGI_FORMAT_R32_UINT ? sizeof(uint32_t) : sizeof(uint16_t);
+    if (!allocation || pView->SizeInBytes > allocation->length() - index_offset ||
+        (pView->SizeInBytes % index_element_size)) {
+      recording_failed_ = true;
       index_buffer_address = 0;
       index_buffer = {};
       index_type = {};
@@ -2694,8 +2727,28 @@ public:
 
   void STDMETHODCALLTYPE
   IASetVertexBuffers(UINT StartSlot, UINT Count, const D3D12_VERTEX_BUFFER_VIEW *Views) {
-    if (!Views)
+    if (StartSlot > D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT ||
+        Count > D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT - StartSlot || (Count && !Views)) {
+      recording_failed_ = true;
       return;
+    }
+
+    for (unsigned Slot = StartSlot; Slot < StartSlot + Count; Slot++) {
+      const auto &view = Views[Slot - StartSlot];
+      if (!view.BufferLocation) {
+        if (view.SizeInBytes) {
+          recording_failed_ = true;
+          return;
+        }
+        continue;
+      }
+      uint64_t buffer_offset = 0;
+      auto allocation = device_->LookupBufferByVA(view.BufferLocation, &buffer_offset);
+      if (!allocation || view.SizeInBytes > allocation->length() - buffer_offset) {
+        recording_failed_ = true;
+        return;
+      }
+    }
     
     for (unsigned Slot = StartSlot; Slot < StartSlot + Count; Slot++) {
       vertex_buffers_[Slot] = Views[Slot - StartSlot];
@@ -2712,6 +2765,10 @@ public:
       UINT NumRTV, const D3D12_CPU_DESCRIPTOR_HANDLE *RTVs, WINBOOL SingleDescriptor,
       const D3D12_CPU_DESCRIPTOR_HANDLE *DSV
   ) {
+    if (NumRTV > std::size(rtvs) || (NumRTV && !RTVs)) {
+      recording_failed_ = true;
+      return;
+    }
     allocator_->InvalidateCurrentPass();
 
     num_rtvs = NumRTV;
@@ -2970,6 +3027,12 @@ public:
     if (!query || !destination || !destination->buffer || StartIndex > query->count ||
         QueryCount > query->count - StartIndex)
       return;
+    if (Type != D3D12_QUERY_TYPE_TIMESTAMP && Type != D3D12_QUERY_TYPE_OCCLUSION &&
+        Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION)
+      return;
+    if ((AlignedDstBufferOffset & (sizeof(UINT64) - 1)) ||
+        !buffer_range_in_bounds(destination, AlignedDstBufferOffset, uint64_t(QueryCount) * sizeof(UINT64)))
+      return;
     if (!PreBlit())
       return;
 
@@ -3032,13 +3095,22 @@ public:
       return;
     }
     auto arg_buffer = static_cast<MTLD3D12Resource *>(pArgBuffer);
-    if (!arg_buffer || !arg_buffer->buffer)
+    if (!arg_buffer || !arg_buffer->buffer || sig->ByteStride == 0)
       return;
+    auto arg_desc = arg_buffer->GetDesc();
+    if (arg_desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || (ArgBufferOffset & 3) ||
+        ArgBufferOffset > arg_desc.Width ||
+        (MaxCommandCount && sig->ByteStride > (arg_desc.Width - ArgBufferOffset) / MaxCommandCount)) {
+      recording_failed_ = true;
+      return;
+    }
     auto ArgBufferAddress = arg_buffer->buffer->current()->gpuAddress() + ArgBufferOffset;
     uint64_t CountBufferAddress = 0;
     if (auto count_buffer = static_cast<MTLD3D12Resource *>(pCountBuffer)) {
-      if (!count_buffer->buffer)
+      if (!buffer_range_in_bounds(count_buffer, CountBufferOffset, sizeof(UINT)) || (CountBufferOffset & 3)) {
+        recording_failed_ = true;
         return;
+      }
       CountBufferAddress = count_buffer->buffer->current()->gpuAddress() + CountBufferOffset;
     }
     if (sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH) {
