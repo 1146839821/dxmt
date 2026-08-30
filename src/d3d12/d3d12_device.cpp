@@ -1448,7 +1448,15 @@ public:
       D3D12_TILE_SHAPE *StandardTileShape, UINT *SubresourceTilingCount, UINT FirstSubresourceTiling,
       D3D12_SUBRESOURCE_TILING *SubresourceTilings
   ) {
-    IMPLEMENT_ME
+    WARN("D3D12 GetResourceTiling is not implemented");
+    if (TotalTileCount)
+      *TotalTileCount = 0;
+    if (PackedMipInfo)
+      *PackedMipInfo = {};
+    if (StandardTileShape)
+      *StandardTileShape = {};
+    if (SubresourceTilingCount)
+      *SubresourceTilingCount = 0;
   };
 
   LUID *STDMETHODCALLTYPE

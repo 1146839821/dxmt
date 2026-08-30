@@ -299,7 +299,15 @@ public:
       UINT *TotalTileCount, D3D12_PACKED_MIP_INFO *PackedMipInfo, D3D12_TILE_SHAPE *StandardTitleShape,
       UINT *SubresourceTilingCount, UINT FirstSubresourceTiling, D3D12_SUBRESOURCE_TILING *SubresourceTilings
   ) {
-    IMPLEMENT_ME
+    WARN("D3D12 buffer GetResourceTiling is not implemented");
+    if (TotalTileCount)
+      *TotalTileCount = 0;
+    if (PackedMipInfo)
+      *PackedMipInfo = {};
+    if (StandardTitleShape)
+      *StandardTitleShape = {};
+    if (SubresourceTilingCount)
+      *SubresourceTilingCount = 0;
   };
 };
 

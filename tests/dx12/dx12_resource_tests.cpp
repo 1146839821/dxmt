@@ -301,6 +301,25 @@ int main() {
     cleanup();
     return 1;
   }
+  UINT total_tile_count = ~static_cast<UINT>(0);
+  D3D12_PACKED_MIP_INFO packed_mip_info = {
+      static_cast<UINT8>(~static_cast<UINT>(0)), static_cast<UINT8>(~static_cast<UINT>(0)), ~static_cast<UINT>(0),
+      ~static_cast<UINT>(0)};
+  D3D12_TILE_SHAPE standard_tile_shape = {~static_cast<UINT>(0), ~static_cast<UINT>(0), ~static_cast<UINT>(0)};
+  UINT subresource_tiling_count = 1;
+  D3D12_SUBRESOURCE_TILING subresource_tiling = {};
+  device->GetResourceTiling(
+      committed1_resource, &total_tile_count, &packed_mip_info, &standard_tile_shape, &subresource_tiling_count, 0,
+      &subresource_tiling
+  );
+  if (total_tile_count || packed_mip_info.NumStandardMips || packed_mip_info.NumPackedMips ||
+      packed_mip_info.NumTilesForPackedMips || packed_mip_info.StartTileIndexInOverallResource ||
+      standard_tile_shape.WidthInTexels || standard_tile_shape.HeightInTexels || standard_tile_shape.DepthInTexels ||
+      subresource_tiling_count) {
+    std::cerr << "unsupported GetResourceTiling did not clear its outputs\n";
+    cleanup();
+    return 1;
+  }
 
   D3D12_FEATURE_DATA_ARCHITECTURE architecture = {};
   architecture.NodeIndex = 0;
