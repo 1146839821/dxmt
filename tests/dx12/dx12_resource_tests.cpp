@@ -209,6 +209,25 @@ int main() {
     return 1;
   }
 
+  void *reserved_resource = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+  if (device->CreateReservedResource(
+          &committed1_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource), &reserved_resource
+      ) != E_NOTIMPL ||
+      reserved_resource != nullptr) {
+    std::cerr << "CreateReservedResource did not clear its failed output\n";
+    cleanup();
+    return 1;
+  }
+  void *reserved_resource1 = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+  if (device4->CreateReservedResource1(
+          &committed1_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, nullptr, __uuidof(ID3D12Resource), &reserved_resource1
+      ) != E_NOTIMPL ||
+      reserved_resource1 != nullptr) {
+    std::cerr << "CreateReservedResource1 did not clear its failed output\n";
+    cleanup();
+    return 1;
+  }
+
   D3D12_FEATURE_DATA_ARCHITECTURE architecture = {};
   architecture.NodeIndex = 0;
   D3D12_FEATURE_DATA_ARCHITECTURE1 architecture1 = {};

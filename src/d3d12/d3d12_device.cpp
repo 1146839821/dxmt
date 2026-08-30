@@ -1040,6 +1040,7 @@ public:
       const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
       const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **resource
   ) {
+    InitReturnPtr(resource);
     return E_NOTIMPL;
   };
 
@@ -1101,6 +1102,7 @@ public:
       const D3D12_CLEAR_VALUE *OptimizedClearValue, ID3D12ProtectedResourceSession *pSession, REFIID riid,
       void **ppResource
   ) {
+    InitReturnPtr(ppResource);
     return E_NOTIMPL;
   }
 
