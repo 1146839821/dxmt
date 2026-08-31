@@ -20,6 +20,7 @@
 
 #include "d3d12_pageable.hpp"
 #include "dxmt_command_clear.hpp"
+#include <atomic>
 
 namespace dxmt {
 
@@ -83,6 +84,7 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
   EncoderData *encoder_last;
   EncoderData *encoder_current;
   size_t encoder_count_;
+  std::atomic_uint32_t in_flight_submissions_ = {0u};
 
   small_vector<EncoderData, 64> encoder_lists_;
 
@@ -113,6 +115,23 @@ public:
   D3D12_COMMAND_LIST_TYPE
   GetType() const override {
     return type_;
+  }
+
+  void
+  MarkSubmissionSubmitted() final {
+    in_flight_submissions_.fetch_add(1u, std::memory_order_relaxed);
+  }
+
+  void
+  MarkSubmissionCompleted() final {
+    auto previous = in_flight_submissions_.fetch_sub(1u, std::memory_order_release);
+    assert(previous > 0);
+    (void)previous;
+  }
+
+  bool
+  IsInFlight() const final {
+    return in_flight_submissions_.load(std::memory_order_acquire) != 0;
   }
 
   HRESULT STDMETHODCALLTYPE CreateCommandList(

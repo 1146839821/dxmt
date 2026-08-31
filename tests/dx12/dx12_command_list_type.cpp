@@ -15,6 +15,19 @@ bool CheckHR(const char *name, HRESULT hr) {
   return true;
 }
 
+struct ExecuteContext {
+  ID3D12CommandQueue *queue;
+  ID3D12CommandList *command_list;
+  LONG returned;
+};
+
+DWORD WINAPI ExecuteCommandListsThread(void *arg) {
+  auto *context = static_cast<ExecuteContext *>(arg);
+  context->queue->ExecuteCommandLists(1, &context->command_list);
+  InterlockedExchange(&context->returned, 1);
+  return 0;
+}
+
 } // namespace
 
 int main() {
@@ -167,6 +180,67 @@ int main() {
     queue->ExecuteCommandLists(1, nullptr);
     ID3D12CommandList *null_list = nullptr;
     queue->ExecuteCommandLists(1, &null_list);
+
+    ID3D12CommandAllocator *async_allocator = nullptr;
+    ID3D12GraphicsCommandList *async_list = nullptr;
+    ID3D12Fence *async_fence = nullptr;
+    HANDLE execute_thread = nullptr;
+    if (!CheckHR(
+            "CreateAsyncAllocator",
+            device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&async_allocator))
+        ) ||
+        !CheckHR(
+            "CreateAsyncList",
+            device->CreateCommandList(
+                0, D3D12_COMMAND_LIST_TYPE_DIRECT, async_allocator, nullptr, IID_PPV_ARGS(&async_list)
+            )
+        ) ||
+        !CheckHR("CloseAsyncList", async_list->Close()) ||
+        !CheckHR("CreateAsyncFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&async_fence))) ||
+        !CheckHR("QueueWait", queue->Wait(async_fence, 1))) {
+      result = 1;
+    } else {
+      ExecuteContext context = {queue, async_list, 0};
+      execute_thread = CreateThread(nullptr, 0, ExecuteCommandListsThread, &context, 0, nullptr);
+      if (!execute_thread) {
+        std::cerr << "CreateThread failed while testing asynchronous command submission\n";
+        result = 1;
+      } else {
+        Sleep(50);
+        if (InterlockedCompareExchange(&context.returned, 0, 0) == 0) {
+          std::cerr << "ExecuteCommandLists waited for GPU completion\n";
+          result = 1;
+        }
+        if (!CheckHR("SignalAsyncFence", async_fence->Signal(1)))
+          result = 1;
+        if (WaitForSingleObject(execute_thread, INFINITE) != WAIT_OBJECT_0) {
+          std::cerr << "ExecuteCommandLists thread did not finish\n";
+          result = 1;
+        } else if (InterlockedCompareExchange(&context.returned, 0, 0) == 0) {
+          std::cerr << "ExecuteCommandLists thread did not return\n";
+          result = 1;
+        }
+      }
+    }
+    if (execute_thread)
+      CloseHandle(execute_thread);
+    if (async_fence)
+      async_fence->Signal(1);
+    if (async_list)
+      async_list->Release();
+    if (queue) {
+      queue->Release();
+      queue = nullptr;
+    }
+    if (async_fence)
+      async_fence->Release();
+    if (async_allocator) {
+      if (result == 0 && async_allocator->Reset() != S_OK) {
+        std::cerr << "command allocator did not become resettable after completion\n";
+        result = 1;
+      }
+      async_allocator->Release();
+    }
   }
   if (queue)
     queue->Release();

@@ -103,7 +103,7 @@ MTLD3D12CommandAllocatorImpl::QueryInterface(REFIID riid, void **ppvObject) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D12CommandAllocatorImpl::Reset() {
-  if (encoder_last)
+  if (encoder_last || IsInFlight())
     return E_FAIL;
 
   for (auto &encoder_list : encoder_lists_) {

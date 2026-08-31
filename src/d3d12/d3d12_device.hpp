@@ -43,18 +43,27 @@
 namespace dxmt {
 
 class MTLD3D12Resource;
+class MTLD3D12CommandAllocator;
 
 class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList2, public IMTLD3D12CommandListExt {
 public:
   EncoderData *entry;
   size_t encoder_count;
 
+  virtual MTLD3D12CommandAllocator *GetAllocator() = 0;
   virtual void CommitResourceStates() = 0;
 };
 
 class MTLD3D12CommandAllocator : public ID3D12CommandAllocator {
 public:
+  virtual void AddRefPrivate() = 0;
+  virtual void ReleasePrivate() = 0;
+
   virtual D3D12_COMMAND_LIST_TYPE GetType() const = 0;
+
+  virtual void MarkSubmissionSubmitted() = 0;
+  virtual void MarkSubmissionCompleted() = 0;
+  virtual bool IsInFlight() const = 0;
 
   virtual HRESULT STDMETHODCALLTYPE CreateCommandList(
       UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, ID3D12PipelineState *pInitialPipelineState, REFIID riid,

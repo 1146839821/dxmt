@@ -486,6 +486,8 @@ public:
 
     if (allocator->GetType() != type_)
       return E_INVALIDARG;
+    if (allocator->IsInFlight())
+      return E_FAIL;
 
     if (allocator_ != allocator)
       allocator_ = allocator;
@@ -759,6 +761,10 @@ public:
   D3D12_COMMAND_LIST_TYPE STDMETHODCALLTYPE
   GetType() {
     return type_;
+  }
+
+  MTLD3D12CommandAllocator *GetAllocator() final {
+    return allocator_.ptr();
   }
 
   HRESULT STDMETHODCALLTYPE
