@@ -55,6 +55,7 @@ int main() {
   ID3D12GraphicsCommandList *list = nullptr;
   ID3D12Device5 *device5 = nullptr;
   ID3D12Device6 *device6 = nullptr;
+  ID3D12Device7 *device7 = nullptr;
   IDXGIFactory7 *factory = nullptr;
   ID3D12GraphicsCommandList3 *list3 = nullptr;
   bool passed = true;
@@ -70,7 +71,7 @@ int main() {
   passed &= ExpectQuery<ID3D12Device4>(device, "ID3D12Device4", S_OK);
   passed &= ExpectQuery<ID3D12Device5>(device, "ID3D12Device5", S_OK);
   passed &= ExpectQuery<ID3D12Device6>(device, "ID3D12Device6", S_OK);
-  passed &= ExpectQuery<ID3D12Device7>(device, "ID3D12Device7", E_NOINTERFACE);
+  passed &= ExpectQuery<ID3D12Device7>(device, "ID3D12Device7", S_OK);
   passed &= ExpectQuery<ID3D12Device8>(device, "ID3D12Device8", E_NOINTERFACE);
   passed &= ExpectQuery<ID3D12Device9>(device, "ID3D12Device9", E_NOINTERFACE);
   passed &= ExpectQuery<ID3D12Device10>(device, "ID3D12Device10", E_NOINTERFACE);
@@ -109,6 +110,35 @@ int main() {
                 << static_cast<unsigned long>(background_processing_hr) << std::dec << "\n";
       passed = false;
     }
+  }
+  if (device->QueryInterface(IID_PPV_ARGS(&device7)) != S_OK || !device7) {
+    std::cerr << "ID3D12Device7 vtable query failed\n";
+    passed = false;
+  } else {
+    IUnknown *const output_sentinel = reinterpret_cast<IUnknown *>(static_cast<uintptr_t>(1));
+    IUnknown *new_state_object = output_sentinel;
+    const HRESULT add_to_state_object_hr = device7->AddToStateObject(
+        nullptr, nullptr, __uuidof(ID3D12StateObject), reinterpret_cast<void **>(&new_state_object)
+    );
+    if (add_to_state_object_hr != E_NOTIMPL || new_state_object != nullptr) {
+      std::cerr << "ID3D12Device7::AddToStateObject returned 0x" << std::hex
+                << static_cast<unsigned long>(add_to_state_object_hr) << std::dec << "\n";
+      passed = false;
+    }
+    if (new_state_object != output_sentinel)
+      Release(new_state_object);
+
+    IUnknown *protected_session = output_sentinel;
+    const HRESULT protected_session_hr = device7->CreateProtectedResourceSession1(
+        nullptr, __uuidof(ID3D12ProtectedResourceSession), reinterpret_cast<void **>(&protected_session)
+    );
+    if (protected_session_hr != E_NOTIMPL || protected_session != nullptr) {
+      std::cerr << "ID3D12Device7::CreateProtectedResourceSession1 returned 0x" << std::hex
+                << static_cast<unsigned long>(protected_session_hr) << std::dec << "\n";
+      passed = false;
+    }
+    if (protected_session != output_sentinel)
+      Release(protected_session);
   }
 
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
@@ -191,6 +221,7 @@ int main() {
   Release(factory);
   Release(list3);
   Release(list);
+  Release(device7);
   Release(device6);
   Release(device5);
   Release(allocator);
