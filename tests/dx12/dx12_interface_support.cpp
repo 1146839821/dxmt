@@ -58,6 +58,7 @@ int main() {
   ID3D12Device6 *device6 = nullptr;
   ID3D12Device7 *device7 = nullptr;
   ID3D12Device8 *device8 = nullptr;
+  ID3D12Device9 *device9 = nullptr;
   IDXGIFactory7 *factory = nullptr;
   ID3D12GraphicsCommandList3 *list3 = nullptr;
   bool passed = true;
@@ -75,7 +76,7 @@ int main() {
   passed &= ExpectQuery<ID3D12Device6>(device, "ID3D12Device6", S_OK);
   passed &= ExpectQuery<ID3D12Device7>(device, "ID3D12Device7", S_OK);
   passed &= ExpectQuery<ID3D12Device8>(device, "ID3D12Device8", S_OK);
-  passed &= ExpectQuery<ID3D12Device9>(device, "ID3D12Device9", E_NOINTERFACE);
+  passed &= ExpectQuery<ID3D12Device9>(device, "ID3D12Device9", S_OK);
   passed &= ExpectQuery<ID3D12Device10>(device, "ID3D12Device10", E_NOINTERFACE);
   if (device->QueryInterface(IID_PPV_ARGS(&device5)) != S_OK || !device5) {
     std::cerr << "ID3D12Device5 vtable query failed\n";
@@ -206,6 +207,50 @@ int main() {
       passed = false;
     }
   }
+  if (device->QueryInterface(IID_PPV_ARGS(&device9)) != S_OK || !device9) {
+    std::cerr << "ID3D12Device9 vtable query failed\n";
+    passed = false;
+  } else {
+    void *const output_sentinel = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+    void *shader_cache_session = output_sentinel;
+    const HRESULT shader_cache_session_hr = device9->CreateShaderCacheSession(
+        nullptr, __uuidof(IUnknown), &shader_cache_session
+    );
+    if (shader_cache_session_hr != E_NOTIMPL || shader_cache_session != nullptr) {
+      std::cerr << "ID3D12Device9::CreateShaderCacheSession returned 0x" << std::hex
+                << static_cast<unsigned long>(shader_cache_session_hr) << std::dec << "\n";
+      passed = false;
+    }
+    if (shader_cache_session != output_sentinel) {
+      IUnknown *session = reinterpret_cast<IUnknown *>(shader_cache_session);
+      Release(session);
+    }
+
+    const HRESULT shader_cache_control_hr = device9->ShaderCacheControl(
+        static_cast<D3D12_SHADER_CACHE_KIND_FLAGS>(0), static_cast<D3D12_SHADER_CACHE_CONTROL_FLAGS>(0)
+    );
+    if (shader_cache_control_hr != E_NOTIMPL) {
+      std::cerr << "ID3D12Device9::ShaderCacheControl returned 0x" << std::hex
+                << static_cast<unsigned long>(shader_cache_control_hr) << std::dec << "\n";
+      passed = false;
+    }
+
+    D3D12_COMMAND_QUEUE_DESC queue1_desc = {};
+    queue1_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    void *command_queue1 = output_sentinel;
+    const HRESULT command_queue1_hr = device9->CreateCommandQueue1(
+        &queue1_desc, __uuidof(IUnknown), __uuidof(ID3D12CommandQueue), &command_queue1
+    );
+    if (command_queue1_hr != E_NOTIMPL || command_queue1 != nullptr) {
+      std::cerr << "ID3D12Device9::CreateCommandQueue1 returned 0x" << std::hex
+                << static_cast<unsigned long>(command_queue1_hr) << std::dec << "\n";
+      passed = false;
+    }
+    if (command_queue1 != output_sentinel) {
+      IUnknown *queue1 = reinterpret_cast<IUnknown *>(command_queue1);
+      Release(queue1);
+    }
+  }
 
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -287,6 +332,7 @@ int main() {
   Release(factory);
   Release(list3);
   Release(list);
+  Release(device9);
   Release(device8);
   Release(device7);
   Release(device6);

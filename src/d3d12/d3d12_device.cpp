@@ -235,6 +235,11 @@ public:
       return S_OK;
     }
 
+    if (riid == __uuidof(ID3D12Device9)) {
+      *ppvObject = ref(static_cast<ID3D12Device9 *>(this));
+      return S_OK;
+    }
+
     if (riid == __uuidof(ID3D12InfoQueue)) {
       *ppvObject = ref(new MTLD3D12InfoQueue());
       return S_OK;
@@ -246,7 +251,7 @@ public:
     }
 
     // Keep newer interfaces explicit until their methods have an implementation.
-    if (riid == __uuidof(ID3D12Device9) || riid == __uuidof(ID3D12Device10) ||
+    if (riid == __uuidof(ID3D12Device10) ||
         riid == DXMT_STREAMLINE_D3D12_DEVICE_GUID || riid == DXMT_ID3D11_DEVICE_GUID) {
       return E_NOINTERFACE;
     }
@@ -1802,6 +1807,26 @@ public:
         &resource_desc, FirstSubresource, NumSubresources, BaseOffset, pLayouts, pNumRows,
         pRowSizeInBytes, pTotalBytes
     );
+  }
+
+  HRESULT STDMETHODCALLTYPE CreateShaderCacheSession(
+      const D3D12_SHADER_CACHE_SESSION_DESC *pDesc, REFIID riid, void **ppSession
+  ) {
+    InitReturnPtr(ppSession);
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE ShaderCacheControl(
+      D3D12_SHADER_CACHE_KIND_FLAGS Kinds, D3D12_SHADER_CACHE_CONTROL_FLAGS Control
+  ) {
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE CreateCommandQueue1(
+      const D3D12_COMMAND_QUEUE_DESC *pDesc, REFIID CreatorID, REFIID riid, void **ppCommandQueue
+  ) {
+    InitReturnPtr(ppCommandQueue);
+    return E_NOTIMPL;
   }
 };
 
