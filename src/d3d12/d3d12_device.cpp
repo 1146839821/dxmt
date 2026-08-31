@@ -220,6 +220,11 @@ public:
       return S_OK;
     }
 
+    if (riid == __uuidof(ID3D12Device6)) {
+      *ppvObject = ref(static_cast<ID3D12Device6 *>(this));
+      return S_OK;
+    }
+
     if (riid == __uuidof(ID3D12InfoQueue)) {
       *ppvObject = ref(new MTLD3D12InfoQueue());
       return S_OK;
@@ -231,8 +236,7 @@ public:
     }
 
     // Keep newer interfaces explicit until their methods have an implementation.
-    if (riid == __uuidof(ID3D12Device6) || riid == __uuidof(ID3D12Device7) ||
-        riid == __uuidof(ID3D12Device8) ||
+    if (riid == __uuidof(ID3D12Device7) || riid == __uuidof(ID3D12Device8) ||
         riid == __uuidof(ID3D12Device9) || riid == __uuidof(ID3D12Device10) ||
         riid == DXMT_STREAMLINE_D3D12_DEVICE_GUID || riid == DXMT_ID3D11_DEVICE_GUID) {
       return E_NOINTERFACE;
@@ -1696,6 +1700,15 @@ public:
       const D3D12_SERIALIZED_DATA_DRIVER_MATCHING_IDENTIFIER *pIdentifierToCheck
   ) {
     return D3D12_DRIVER_MATCHING_IDENTIFIER_UNSUPPORTED_TYPE;
+  }
+
+  HRESULT STDMETHODCALLTYPE SetBackgroundProcessingMode(
+      D3D12_BACKGROUND_PROCESSING_MODE Mode, D3D12_MEASUREMENTS_ACTION Action, HANDLE hEvent,
+      WINBOOL *pbFurtherMeasurementsDesired
+  ) {
+    if (pbFurtherMeasurementsDesired)
+      *pbFurtherMeasurementsDesired = FALSE;
+    return E_NOTIMPL;
   }
 };
 

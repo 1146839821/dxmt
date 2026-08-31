@@ -54,6 +54,7 @@ int main() {
   ID3D12CommandAllocator *allocator = nullptr;
   ID3D12GraphicsCommandList *list = nullptr;
   ID3D12Device5 *device5 = nullptr;
+  ID3D12Device6 *device6 = nullptr;
   IDXGIFactory7 *factory = nullptr;
   ID3D12GraphicsCommandList3 *list3 = nullptr;
   bool passed = true;
@@ -68,7 +69,7 @@ int main() {
   passed &= ExpectQuery<ID3D12Device3>(device, "ID3D12Device3", S_OK);
   passed &= ExpectQuery<ID3D12Device4>(device, "ID3D12Device4", S_OK);
   passed &= ExpectQuery<ID3D12Device5>(device, "ID3D12Device5", S_OK);
-  passed &= ExpectQuery<ID3D12Device6>(device, "ID3D12Device6", E_NOINTERFACE);
+  passed &= ExpectQuery<ID3D12Device6>(device, "ID3D12Device6", S_OK);
   passed &= ExpectQuery<ID3D12Device7>(device, "ID3D12Device7", E_NOINTERFACE);
   passed &= ExpectQuery<ID3D12Device8>(device, "ID3D12Device8", E_NOINTERFACE);
   passed &= ExpectQuery<ID3D12Device9>(device, "ID3D12Device9", E_NOINTERFACE);
@@ -93,6 +94,21 @@ int main() {
       passed = false;
     }
     Release(state_object);
+  }
+  if (device->QueryInterface(IID_PPV_ARGS(&device6)) != S_OK || !device6) {
+    std::cerr << "ID3D12Device6 vtable query failed\n";
+    passed = false;
+  } else {
+    WINBOOL further_measurements_desired = TRUE;
+    const HRESULT background_processing_hr = device6->SetBackgroundProcessingMode(
+        D3D12_BACKGROUND_PROCESSING_MODE_ALLOWED, D3D12_MEASUREMENTS_ACTION_KEEP_ALL, nullptr,
+        &further_measurements_desired
+    );
+    if (background_processing_hr != E_NOTIMPL || further_measurements_desired != FALSE) {
+      std::cerr << "ID3D12Device6::SetBackgroundProcessingMode returned 0x" << std::hex
+                << static_cast<unsigned long>(background_processing_hr) << std::dec << "\n";
+      passed = false;
+    }
   }
 
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
@@ -175,6 +191,7 @@ int main() {
   Release(factory);
   Release(list3);
   Release(list);
+  Release(device6);
   Release(device5);
   Release(allocator);
   Release(queue);
