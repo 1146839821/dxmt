@@ -215,6 +215,11 @@ public:
       return S_OK;
     }
 
+    if (riid == __uuidof(ID3D12Device5)) {
+      *ppvObject = ref(static_cast<ID3D12Device5 *>(this));
+      return S_OK;
+    }
+
     if (riid == __uuidof(ID3D12InfoQueue)) {
       *ppvObject = ref(new MTLD3D12InfoQueue());
       return S_OK;
@@ -226,8 +231,8 @@ public:
     }
 
     // Keep newer interfaces explicit until their methods have an implementation.
-    if (riid == __uuidof(ID3D12Device5) || riid == __uuidof(ID3D12Device6) ||
-        riid == __uuidof(ID3D12Device7) || riid == __uuidof(ID3D12Device8) ||
+    if (riid == __uuidof(ID3D12Device6) || riid == __uuidof(ID3D12Device7) ||
+        riid == __uuidof(ID3D12Device8) ||
         riid == __uuidof(ID3D12Device9) || riid == __uuidof(ID3D12Device10) ||
         riid == DXMT_STREAMLINE_D3D12_DEVICE_GUID || riid == DXMT_ID3D11_DEVICE_GUID) {
       return E_NOINTERFACE;
@@ -1634,6 +1639,63 @@ public:
     if (!format_capabilities_.textureCapabilities.contains(Format))
       return FormatCapability(0);
     return format_capabilities_.textureCapabilities.at(Format);
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  CreateLifetimeTracker(ID3D12LifetimeOwner *pOwner, REFIID riid, void **ppvTracker) {
+    InitReturnPtr(ppvTracker);
+    return E_NOTIMPL;
+  }
+
+  void STDMETHODCALLTYPE RemoveDevice() {}
+
+  HRESULT STDMETHODCALLTYPE
+  EnumerateMetaCommands(UINT *pNumMetaCommands, D3D12_META_COMMAND_DESC *pDescs) {
+    if (pNumMetaCommands)
+      *pNumMetaCommands = 0;
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  EnumerateMetaCommandParameters(
+      REFGUID CommandId, D3D12_META_COMMAND_PARAMETER_STAGE Stage, UINT *pTotalStructureSizeInBytes,
+      UINT *pParameterCount, D3D12_META_COMMAND_PARAMETER_DESC *pParameterDescs
+  ) {
+    if (pTotalStructureSizeInBytes)
+      *pTotalStructureSizeInBytes = 0;
+    if (pParameterCount)
+      *pParameterCount = 0;
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  CreateMetaCommand(
+      REFGUID CommandId, UINT NodeMask, const void *pCreationParametersData, SIZE_T CreationParametersDataSizeInBytes,
+      REFIID riid, void **ppMetaCommand
+  ) {
+    InitReturnPtr(ppMetaCommand);
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  CreateStateObject(const D3D12_STATE_OBJECT_DESC *pDesc, REFIID riid, void **ppStateObject) {
+    InitReturnPtr(ppStateObject);
+    return E_NOTIMPL;
+  }
+
+  void STDMETHODCALLTYPE GetRaytracingAccelerationStructurePrebuildInfo(
+      const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS *pDesc,
+      D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO *pInfo
+  ) {
+    if (pInfo)
+      *pInfo = {};
+  }
+
+  D3D12_DRIVER_MATCHING_IDENTIFIER_STATUS STDMETHODCALLTYPE CheckDriverMatchingIdentifier(
+      D3D12_SERIALIZED_DATA_TYPE SerializedDataType,
+      const D3D12_SERIALIZED_DATA_DRIVER_MATCHING_IDENTIFIER *pIdentifierToCheck
+  ) {
+    return D3D12_DRIVER_MATCHING_IDENTIFIER_UNSUPPORTED_TYPE;
   }
 };
 

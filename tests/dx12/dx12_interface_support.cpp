@@ -53,6 +53,7 @@ int main() {
   ID3D12CommandQueue *queue = nullptr;
   ID3D12CommandAllocator *allocator = nullptr;
   ID3D12GraphicsCommandList *list = nullptr;
+  ID3D12Device5 *device5 = nullptr;
   IDXGIFactory7 *factory = nullptr;
   ID3D12GraphicsCommandList3 *list3 = nullptr;
   bool passed = true;
@@ -66,12 +67,33 @@ int main() {
   passed &= ExpectQuery<ID3D12Device2>(device, "ID3D12Device2", S_OK);
   passed &= ExpectQuery<ID3D12Device3>(device, "ID3D12Device3", S_OK);
   passed &= ExpectQuery<ID3D12Device4>(device, "ID3D12Device4", S_OK);
-  passed &= ExpectQuery<ID3D12Device5>(device, "ID3D12Device5", E_NOINTERFACE);
+  passed &= ExpectQuery<ID3D12Device5>(device, "ID3D12Device5", S_OK);
   passed &= ExpectQuery<ID3D12Device6>(device, "ID3D12Device6", E_NOINTERFACE);
   passed &= ExpectQuery<ID3D12Device7>(device, "ID3D12Device7", E_NOINTERFACE);
   passed &= ExpectQuery<ID3D12Device8>(device, "ID3D12Device8", E_NOINTERFACE);
   passed &= ExpectQuery<ID3D12Device9>(device, "ID3D12Device9", E_NOINTERFACE);
   passed &= ExpectQuery<ID3D12Device10>(device, "ID3D12Device10", E_NOINTERFACE);
+  if (device->QueryInterface(IID_PPV_ARGS(&device5)) != S_OK || !device5) {
+    std::cerr << "ID3D12Device5 vtable query failed\n";
+    passed = false;
+  } else {
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {1, 1, 1};
+    device5->GetRaytracingAccelerationStructurePrebuildInfo(nullptr, &info);
+    if (info.ResultDataMaxSizeInBytes || info.ScratchDataSizeInBytes || info.UpdateScratchDataSizeInBytes) {
+      std::cerr << "ID3D12Device5 returned unsupported raytracing info\n";
+      passed = false;
+    }
+    IUnknown *state_object = nullptr;
+    const HRESULT state_object_hr = device5->CreateStateObject(
+        nullptr, __uuidof(ID3D12StateObject), reinterpret_cast<void **>(&state_object)
+    );
+    if (state_object_hr != E_NOTIMPL || state_object != nullptr) {
+      std::cerr << "ID3D12Device5::CreateStateObject returned 0x" << std::hex
+                << static_cast<unsigned long>(state_object_hr) << std::dec << "\n";
+      passed = false;
+    }
+    Release(state_object);
+  }
 
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -153,6 +175,7 @@ int main() {
   Release(factory);
   Release(list3);
   Release(list);
+  Release(device5);
   Release(allocator);
   Release(queue);
   Release(device);
