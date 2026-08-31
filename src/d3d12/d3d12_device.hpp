@@ -51,7 +51,7 @@ namespace dxmt {
 class MTLD3D12Resource;
 class MTLD3D12CommandAllocator;
 
-class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList3, public IMTLD3D12CommandListExt {
+class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList4, public IMTLD3D12CommandListExt {
 public:
   EncoderData *entry;
   size_t encoder_count;

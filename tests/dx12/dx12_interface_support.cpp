@@ -62,6 +62,7 @@ int main() {
   ID3D12Device10 *device10 = nullptr;
   IDXGIFactory7 *factory = nullptr;
   ID3D12GraphicsCommandList3 *list3 = nullptr;
+  ID3D12GraphicsCommandList4 *list4 = nullptr;
   bool passed = true;
 
   if (D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)) != S_OK) {
@@ -323,7 +324,7 @@ int main() {
   } else {
     passed &= ExpectQuery<ID3D12GraphicsCommandList2>(list, "ID3D12GraphicsCommandList2", S_OK);
     passed &= ExpectQuery<ID3D12GraphicsCommandList3>(list, "ID3D12GraphicsCommandList3", S_OK);
-    passed &= ExpectQuery<ID3D12GraphicsCommandList4>(list, "ID3D12GraphicsCommandList4", E_NOINTERFACE);
+    passed &= ExpectQuery<ID3D12GraphicsCommandList4>(list, "ID3D12GraphicsCommandList4", S_OK);
     passed &= ExpectQuery<ID3D12GraphicsCommandList5>(list, "ID3D12GraphicsCommandList5", E_NOINTERFACE);
     passed &= ExpectQuery<ID3D12GraphicsCommandList6>(list, "ID3D12GraphicsCommandList6", E_NOINTERFACE);
     passed &= ExpectQuery<ID3D12GraphicsCommandList7>(list, "ID3D12GraphicsCommandList7", E_NOINTERFACE);
@@ -332,6 +333,26 @@ int main() {
       passed = false;
     } else {
       list3->SetProtectedResourceSession(nullptr);
+    }
+    if (list->QueryInterface(IID_PPV_ARGS(&list4)) != S_OK || !list4) {
+      std::cerr << "ID3D12GraphicsCommandList4 vtable query failed\n";
+      passed = false;
+    } else {
+      list4->BeginRenderPass(0, nullptr, nullptr, static_cast<D3D12_RENDER_PASS_FLAGS>(0));
+      list4->EndRenderPass();
+      list4->InitializeMetaCommand(nullptr, nullptr, 0);
+      list4->ExecuteMetaCommand(nullptr, nullptr, 0);
+      list4->BuildRaytracingAccelerationStructure(nullptr, 0, nullptr);
+      list4->EmitRaytracingAccelerationStructurePostbuildInfo(nullptr, 0, nullptr);
+      list4->CopyRaytracingAccelerationStructure(
+          0, 0, static_cast<D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE>(0)
+      );
+      list4->SetPipelineState1(nullptr);
+      list4->DispatchRays(nullptr);
+      if (list->Close() != E_FAIL) {
+        std::cerr << "ID3D12GraphicsCommandList4 unsupported command did not fail Close\n";
+        passed = false;
+      }
     }
   }
 
@@ -381,6 +402,7 @@ int main() {
 #undef CHECK_OPTIONS
 
   Release(factory);
+  Release(list4);
   Release(list3);
   Release(list);
   Release(device10);

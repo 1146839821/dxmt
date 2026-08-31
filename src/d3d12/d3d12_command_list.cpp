@@ -582,7 +582,7 @@ public:
     if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
         riid == __uuidof(ID3D12CommandList) || riid == __uuidof(ID3D12GraphicsCommandList) ||
         riid == __uuidof(ID3D12GraphicsCommandList1) || riid == __uuidof(ID3D12GraphicsCommandList2) ||
-        riid == __uuidof(ID3D12GraphicsCommandList3)) {
+        riid == __uuidof(ID3D12GraphicsCommandList3) || riid == __uuidof(ID3D12GraphicsCommandList4)) {
       *ppvObject = ref(this);
       return S_OK;
     }
@@ -592,9 +592,9 @@ public:
       return S_OK;
     }
 
-    // Ray-tracing, render-pass, VRS, mesh, and work-graph methods are not exposed yet.
-    if (riid == __uuidof(ID3D12GraphicsCommandList4) || riid == __uuidof(ID3D12GraphicsCommandList5) ||
-        riid == __uuidof(ID3D12GraphicsCommandList6) || riid == __uuidof(ID3D12GraphicsCommandList7))
+    // VRS, mesh, and work-graph methods are not exposed yet.
+    if (riid == __uuidof(ID3D12GraphicsCommandList5) || riid == __uuidof(ID3D12GraphicsCommandList6) ||
+        riid == __uuidof(ID3D12GraphicsCommandList7))
       return E_NOINTERFACE;
 
     if (riid == DXMT_STREAMLINE_D3D12_GRAPHICS_COMMAND_LIST_GUID)
@@ -3500,6 +3500,61 @@ public:
   SetProtectedResourceSession(ID3D12ProtectedResourceSession *pProtectedResourceSession) {
     if (pProtectedResourceSession)
       MarkUnsupportedCommand("SetProtectedResourceSession");
+  }
+
+  void STDMETHODCALLTYPE BeginRenderPass(
+      UINT NumRenderTargets, const D3D12_RENDER_PASS_RENDER_TARGET_DESC *pRenderTargets,
+      const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC *pDepthStencil, D3D12_RENDER_PASS_FLAGS Flags
+  ) {
+    MarkUnsupportedCommand("BeginRenderPass");
+  }
+
+  void STDMETHODCALLTYPE EndRenderPass() {
+    MarkUnsupportedCommand("EndRenderPass");
+  }
+
+  void STDMETHODCALLTYPE InitializeMetaCommand(
+      ID3D12MetaCommand *pMetaCommand, const void *pInitializationParametersData,
+      SIZE_T InitializationParametersDataSizeInBytes
+  ) {
+    MarkUnsupportedCommand("InitializeMetaCommand");
+  }
+
+  void STDMETHODCALLTYPE ExecuteMetaCommand(
+      ID3D12MetaCommand *pMetaCommand, const void *pExecutionParametersData,
+      SIZE_T ExecutionParametersDataSizeInBytes
+  ) {
+    MarkUnsupportedCommand("ExecuteMetaCommand");
+  }
+
+  void STDMETHODCALLTYPE BuildRaytracingAccelerationStructure(
+      const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC *pDesc, UINT NumPostbuildInfoDescs,
+      const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC *pPostbuildInfoDescs
+  ) {
+    MarkUnsupportedCommand("BuildRaytracingAccelerationStructure");
+  }
+
+  void STDMETHODCALLTYPE EmitRaytracingAccelerationStructurePostbuildInfo(
+      const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC *pDesc,
+      UINT NumSourceAccelerationStructureData, const D3D12_GPU_VIRTUAL_ADDRESS *pSourceAccelerationStructureData
+  ) {
+    MarkUnsupportedCommand("EmitRaytracingAccelerationStructurePostbuildInfo");
+  }
+
+  void STDMETHODCALLTYPE CopyRaytracingAccelerationStructure(
+      D3D12_GPU_VIRTUAL_ADDRESS DstAccelerationStructureData,
+      D3D12_GPU_VIRTUAL_ADDRESS SrcAccelerationStructureData,
+      D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE Mode
+  ) {
+    MarkUnsupportedCommand("CopyRaytracingAccelerationStructure");
+  }
+
+  void STDMETHODCALLTYPE SetPipelineState1(ID3D12StateObject *pStateObject) {
+    MarkUnsupportedCommand("SetPipelineState1");
+  }
+
+  void STDMETHODCALLTYPE DispatchRays(const D3D12_DISPATCH_RAYS_DESC *pDesc) {
+    MarkUnsupportedCommand("DispatchRays");
   }
 };
 
