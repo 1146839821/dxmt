@@ -240,6 +240,11 @@ public:
       return S_OK;
     }
 
+    if (riid == __uuidof(ID3D12Device10)) {
+      *ppvObject = ref(static_cast<ID3D12Device10 *>(this));
+      return S_OK;
+    }
+
     if (riid == __uuidof(ID3D12InfoQueue)) {
       *ppvObject = ref(new MTLD3D12InfoQueue());
       return S_OK;
@@ -251,8 +256,7 @@ public:
     }
 
     // Keep newer interfaces explicit until their methods have an implementation.
-    if (riid == __uuidof(ID3D12Device10) ||
-        riid == DXMT_STREAMLINE_D3D12_DEVICE_GUID || riid == DXMT_ID3D11_DEVICE_GUID) {
+    if (riid == DXMT_STREAMLINE_D3D12_DEVICE_GUID || riid == DXMT_ID3D11_DEVICE_GUID) {
       return E_NOINTERFACE;
     }
 
@@ -1826,6 +1830,34 @@ public:
       const D3D12_COMMAND_QUEUE_DESC *pDesc, REFIID CreatorID, REFIID riid, void **ppCommandQueue
   ) {
     InitReturnPtr(ppCommandQueue);
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE CreateCommittedResource3(
+      const D3D12_HEAP_PROPERTIES *pHeapProperties, D3D12_HEAP_FLAGS HeapFlags,
+      const D3D12_RESOURCE_DESC1 *pDesc, D3D12_BARRIER_LAYOUT InitialLayout,
+      const D3D12_CLEAR_VALUE *pOptimizedClearValue, ID3D12ProtectedResourceSession *pProtectedSession,
+      UINT32 CastableFormatsCount, DXGI_FORMAT *pCastableFormats, REFIID riidResource, void **ppvResource
+  ) {
+    InitReturnPtr(ppvResource);
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE CreatePlacedResource2(
+      ID3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC1 *pDesc,
+      D3D12_BARRIER_LAYOUT InitialLayout, const D3D12_CLEAR_VALUE *pOptimizedClearValue,
+      UINT32 CastableFormatsCount, DXGI_FORMAT *pCastableFormats, REFIID riid, void **ppvResource
+  ) {
+    InitReturnPtr(ppvResource);
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE CreateReservedResource2(
+      const D3D12_RESOURCE_DESC *pDesc, D3D12_BARRIER_LAYOUT InitialLayout,
+      const D3D12_CLEAR_VALUE *pOptimizedClearValue, ID3D12ProtectedResourceSession *pProtectedSession,
+      UINT32 CastableFormatsCount, DXGI_FORMAT *pCastableFormats, REFIID riid, void **ppvResource
+  ) {
+    InitReturnPtr(ppvResource);
     return E_NOTIMPL;
   }
 };

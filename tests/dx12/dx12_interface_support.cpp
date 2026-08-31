@@ -59,6 +59,7 @@ int main() {
   ID3D12Device7 *device7 = nullptr;
   ID3D12Device8 *device8 = nullptr;
   ID3D12Device9 *device9 = nullptr;
+  ID3D12Device10 *device10 = nullptr;
   IDXGIFactory7 *factory = nullptr;
   ID3D12GraphicsCommandList3 *list3 = nullptr;
   bool passed = true;
@@ -77,7 +78,7 @@ int main() {
   passed &= ExpectQuery<ID3D12Device7>(device, "ID3D12Device7", S_OK);
   passed &= ExpectQuery<ID3D12Device8>(device, "ID3D12Device8", S_OK);
   passed &= ExpectQuery<ID3D12Device9>(device, "ID3D12Device9", S_OK);
-  passed &= ExpectQuery<ID3D12Device10>(device, "ID3D12Device10", E_NOINTERFACE);
+  passed &= ExpectQuery<ID3D12Device10>(device, "ID3D12Device10", S_OK);
   if (device->QueryInterface(IID_PPV_ARGS(&device5)) != S_OK || !device5) {
     std::cerr << "ID3D12Device5 vtable query failed\n";
     passed = false;
@@ -251,6 +252,56 @@ int main() {
       Release(queue1);
     }
   }
+  if (device->QueryInterface(IID_PPV_ARGS(&device10)) != S_OK || !device10) {
+    std::cerr << "ID3D12Device10 vtable query failed\n";
+    passed = false;
+  } else {
+    void *const output_sentinel = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+    void *committed_resource = output_sentinel;
+    const HRESULT committed_resource_hr = device10->CreateCommittedResource3(
+        nullptr, D3D12_HEAP_FLAG_NONE, nullptr, static_cast<D3D12_BARRIER_LAYOUT>(0), nullptr, nullptr, 0,
+        nullptr, __uuidof(ID3D12Resource), &committed_resource
+    );
+    if (committed_resource_hr != E_NOTIMPL || committed_resource != nullptr) {
+      std::cerr << "ID3D12Device10::CreateCommittedResource3 returned 0x" << std::hex
+                << static_cast<unsigned long>(committed_resource_hr) << std::dec << "\n";
+      passed = false;
+    }
+    if (committed_resource != output_sentinel) {
+      IUnknown *resource = reinterpret_cast<IUnknown *>(committed_resource);
+      Release(resource);
+    }
+
+    void *placed_resource = output_sentinel;
+    const HRESULT placed_resource_hr = device10->CreatePlacedResource2(
+        nullptr, 0, nullptr, static_cast<D3D12_BARRIER_LAYOUT>(0), nullptr, 0, nullptr,
+        __uuidof(ID3D12Resource), &placed_resource
+    );
+    if (placed_resource_hr != E_NOTIMPL || placed_resource != nullptr) {
+      std::cerr << "ID3D12Device10::CreatePlacedResource2 returned 0x" << std::hex
+                << static_cast<unsigned long>(placed_resource_hr) << std::dec << "\n";
+      passed = false;
+    }
+    if (placed_resource != output_sentinel) {
+      IUnknown *resource = reinterpret_cast<IUnknown *>(placed_resource);
+      Release(resource);
+    }
+
+    void *reserved_resource = output_sentinel;
+    const HRESULT reserved_resource_hr = device10->CreateReservedResource2(
+        nullptr, static_cast<D3D12_BARRIER_LAYOUT>(0), nullptr, nullptr, 0, nullptr,
+        __uuidof(ID3D12Resource), &reserved_resource
+    );
+    if (reserved_resource_hr != E_NOTIMPL || reserved_resource != nullptr) {
+      std::cerr << "ID3D12Device10::CreateReservedResource2 returned 0x" << std::hex
+                << static_cast<unsigned long>(reserved_resource_hr) << std::dec << "\n";
+      passed = false;
+    }
+    if (reserved_resource != output_sentinel) {
+      IUnknown *resource = reinterpret_cast<IUnknown *>(reserved_resource);
+      Release(resource);
+    }
+  }
 
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -332,6 +383,7 @@ int main() {
   Release(factory);
   Release(list3);
   Release(list);
+  Release(device10);
   Release(device9);
   Release(device8);
   Release(device7);
