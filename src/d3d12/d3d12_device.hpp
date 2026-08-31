@@ -35,6 +35,12 @@
 #include "log/log.hpp"
 #include <vector>
 
+// D3D12 cross builds require the modern MinGW-w64 declarations; the bundled
+// native directx header snapshot predates these interface revisions.
+#if !defined(__ID3D12GraphicsCommandList3_INTERFACE_DEFINED__) || !defined(__ID3D12Device10_INTERFACE_DEFINED__)
+#error "DXMT D3D12 requires modern MinGW-w64 d3d12.h declarations"
+#endif
+
 #define IMPLEMENT_ME                                                                                                   \
   do {                                                                                                                 \
     WARN(__FILE__, ":", __FUNCTION__, "(", __LINE__, ") is not implemented.");                                      \
@@ -45,7 +51,7 @@ namespace dxmt {
 class MTLD3D12Resource;
 class MTLD3D12CommandAllocator;
 
-class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList2, public IMTLD3D12CommandListExt {
+class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList3, public IMTLD3D12CommandListExt {
 public:
   EncoderData *entry;
   size_t encoder_count;

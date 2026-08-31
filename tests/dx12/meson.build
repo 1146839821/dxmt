@@ -18,6 +18,10 @@ dx12_feature_support = executable('dx12_feature_support', 'dx12_feature_support.
   dependencies: [ d3d12_dep ],
 )
 
+dx12_interface_support = executable('dx12_interface_support', 'dx12_interface_support.cpp',
+  dependencies: [ d3d12_dep, dxgi_dep ],
+)
+
 dx12_command_list_type = executable('dx12_command_list_type', 'dx12_command_list_type.cpp',
   dependencies: [ d3d12_dep ],
 )

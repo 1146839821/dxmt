@@ -581,7 +581,8 @@ public:
 
     if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
         riid == __uuidof(ID3D12CommandList) || riid == __uuidof(ID3D12GraphicsCommandList) ||
-        riid == __uuidof(ID3D12GraphicsCommandList1) || riid == __uuidof(ID3D12GraphicsCommandList2)) {
+        riid == __uuidof(ID3D12GraphicsCommandList1) || riid == __uuidof(ID3D12GraphicsCommandList2) ||
+        riid == __uuidof(ID3D12GraphicsCommandList3)) {
       *ppvObject = ref(this);
       return S_OK;
     }
@@ -590,6 +591,11 @@ public:
       *ppvObject = ref(static_cast<IMTLD3D12CommandListExt *>(this));
       return S_OK;
     }
+
+    // Ray-tracing, render-pass, VRS, mesh, and work-graph methods are not exposed yet.
+    if (riid == __uuidof(ID3D12GraphicsCommandList4) || riid == __uuidof(ID3D12GraphicsCommandList5) ||
+        riid == __uuidof(ID3D12GraphicsCommandList6) || riid == __uuidof(ID3D12GraphicsCommandList7))
+      return E_NOINTERFACE;
 
     if (riid == DXMT_STREAMLINE_D3D12_GRAPHICS_COMMAND_LIST_GUID)
       return E_NOINTERFACE;
@@ -3488,6 +3494,12 @@ public:
       UINT Count, const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER *pParams, const D3D12_WRITEBUFFERIMMEDIATE_MODE *pModes
   ) {
     MarkUnsupportedCommand("WriteBufferImmediate");
+  }
+
+  void STDMETHODCALLTYPE
+  SetProtectedResourceSession(ID3D12ProtectedResourceSession *pProtectedResourceSession) {
+    if (pProtectedResourceSession)
+      MarkUnsupportedCommand("SetProtectedResourceSession");
   }
 };
 

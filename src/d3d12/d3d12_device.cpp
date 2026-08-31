@@ -225,10 +225,11 @@ public:
       return S_OK;
     }
 
-    // Streamline probes for optional interfaces that DXMT does not expose.
-    if (riid == DXMT_STREAMLINE_D3D12_DEVICE_GUID || riid == DXMT_ID3D12_DEVICE4_GUID ||
-        riid == DXMT_ID3D12_DEVICE8_GUID || riid == DXMT_ID3D12_DEVICE10_GUID ||
-        riid == DXMT_ID3D11_DEVICE_GUID) {
+    // Keep newer interfaces explicit until their methods have an implementation.
+    if (riid == __uuidof(ID3D12Device5) || riid == __uuidof(ID3D12Device6) ||
+        riid == __uuidof(ID3D12Device7) || riid == __uuidof(ID3D12Device8) ||
+        riid == __uuidof(ID3D12Device9) || riid == __uuidof(ID3D12Device10) ||
+        riid == DXMT_STREAMLINE_D3D12_DEVICE_GUID || riid == DXMT_ID3D11_DEVICE_GUID) {
       return E_NOINTERFACE;
     }
 
