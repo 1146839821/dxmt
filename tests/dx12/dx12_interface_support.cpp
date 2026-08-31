@@ -44,6 +44,38 @@ bool ExpectFeature(ID3D12Device *device, D3D12_FEATURE feature, T *data, const c
   return true;
 }
 
+template <typename T, typename Record>
+bool ExpectUnsupportedCommand(ID3D12Device *device, const char *name, Record &&record) {
+  ID3D12CommandAllocator *allocator = nullptr;
+  ID3D12GraphicsCommandList *list = nullptr;
+  T *typed_list = nullptr;
+  bool passed = true;
+
+  if (device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)) != S_OK) {
+    std::cerr << name << " could not create command allocator\n";
+    passed = false;
+  } else if (device->CreateCommandList(
+                 0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr, IID_PPV_ARGS(&list)
+             ) != S_OK) {
+    std::cerr << name << " could not create command list\n";
+    passed = false;
+  } else if (list->QueryInterface(IID_PPV_ARGS(&typed_list)) != S_OK || !typed_list) {
+    std::cerr << name << " could not query command list interface\n";
+    passed = false;
+  } else {
+    record(typed_list);
+    if (list->Close() != E_FAIL) {
+      std::cerr << name << " did not fail Close\n";
+      passed = false;
+    }
+  }
+
+  Release(typed_list);
+  Release(list);
+  Release(allocator);
+  return passed;
+}
+
 } // namespace
 
 int main() {
@@ -325,9 +357,9 @@ int main() {
     passed &= ExpectQuery<ID3D12GraphicsCommandList2>(list, "ID3D12GraphicsCommandList2", S_OK);
     passed &= ExpectQuery<ID3D12GraphicsCommandList3>(list, "ID3D12GraphicsCommandList3", S_OK);
     passed &= ExpectQuery<ID3D12GraphicsCommandList4>(list, "ID3D12GraphicsCommandList4", S_OK);
-    passed &= ExpectQuery<ID3D12GraphicsCommandList5>(list, "ID3D12GraphicsCommandList5", E_NOINTERFACE);
-    passed &= ExpectQuery<ID3D12GraphicsCommandList6>(list, "ID3D12GraphicsCommandList6", E_NOINTERFACE);
-    passed &= ExpectQuery<ID3D12GraphicsCommandList7>(list, "ID3D12GraphicsCommandList7", E_NOINTERFACE);
+    passed &= ExpectQuery<ID3D12GraphicsCommandList5>(list, "ID3D12GraphicsCommandList5", S_OK);
+    passed &= ExpectQuery<ID3D12GraphicsCommandList6>(list, "ID3D12GraphicsCommandList6", S_OK);
+    passed &= ExpectQuery<ID3D12GraphicsCommandList7>(list, "ID3D12GraphicsCommandList7", S_OK);
     if (list->QueryInterface(IID_PPV_ARGS(&list3)) != S_OK || !list3) {
       std::cerr << "ID3D12GraphicsCommandList3 vtable query failed\n";
       passed = false;
@@ -355,6 +387,27 @@ int main() {
       }
     }
   }
+
+  passed &= ExpectUnsupportedCommand<ID3D12GraphicsCommandList5>(
+      device, "RSSetShadingRate", [](ID3D12GraphicsCommandList5 *list) {
+        list->RSSetShadingRate(static_cast<D3D12_SHADING_RATE>(0), nullptr);
+      }
+  );
+  passed &= ExpectUnsupportedCommand<ID3D12GraphicsCommandList5>(
+      device, "RSSetShadingRateImage", [](ID3D12GraphicsCommandList5 *list) {
+        list->RSSetShadingRateImage(nullptr);
+      }
+  );
+  passed &= ExpectUnsupportedCommand<ID3D12GraphicsCommandList6>(
+      device, "DispatchMesh", [](ID3D12GraphicsCommandList6 *list) {
+        list->DispatchMesh(0, 0, 0);
+      }
+  );
+  passed &= ExpectUnsupportedCommand<ID3D12GraphicsCommandList7>(
+      device, "Barrier", [](ID3D12GraphicsCommandList7 *list) {
+        list->Barrier(0, nullptr);
+      }
+  );
 
   if (CreateDXGIFactory1(IID_PPV_ARGS(&factory)) != S_OK) {
     std::cerr << "CreateDXGIFactory1 failed\n";

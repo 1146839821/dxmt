@@ -582,7 +582,9 @@ public:
     if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
         riid == __uuidof(ID3D12CommandList) || riid == __uuidof(ID3D12GraphicsCommandList) ||
         riid == __uuidof(ID3D12GraphicsCommandList1) || riid == __uuidof(ID3D12GraphicsCommandList2) ||
-        riid == __uuidof(ID3D12GraphicsCommandList3) || riid == __uuidof(ID3D12GraphicsCommandList4)) {
+        riid == __uuidof(ID3D12GraphicsCommandList3) || riid == __uuidof(ID3D12GraphicsCommandList4) ||
+        riid == __uuidof(ID3D12GraphicsCommandList5) || riid == __uuidof(ID3D12GraphicsCommandList6) ||
+        riid == __uuidof(ID3D12GraphicsCommandList7)) {
       *ppvObject = ref(this);
       return S_OK;
     }
@@ -591,11 +593,6 @@ public:
       *ppvObject = ref(static_cast<IMTLD3D12CommandListExt *>(this));
       return S_OK;
     }
-
-    // VRS, mesh, and work-graph methods are not exposed yet.
-    if (riid == __uuidof(ID3D12GraphicsCommandList5) || riid == __uuidof(ID3D12GraphicsCommandList6) ||
-        riid == __uuidof(ID3D12GraphicsCommandList7))
-      return E_NOINTERFACE;
 
     if (riid == DXMT_STREAMLINE_D3D12_GRAPHICS_COMMAND_LIST_GUID)
       return E_NOINTERFACE;
@@ -3555,6 +3552,24 @@ public:
 
   void STDMETHODCALLTYPE DispatchRays(const D3D12_DISPATCH_RAYS_DESC *pDesc) {
     MarkUnsupportedCommand("DispatchRays");
+  }
+
+  void STDMETHODCALLTYPE RSSetShadingRate(
+      D3D12_SHADING_RATE BaseShadingRate, const D3D12_SHADING_RATE_COMBINER *pCombiners
+  ) {
+    MarkUnsupportedCommand("RSSetShadingRate");
+  }
+
+  void STDMETHODCALLTYPE RSSetShadingRateImage(ID3D12Resource *pShadingRateImage) {
+    MarkUnsupportedCommand("RSSetShadingRateImage");
+  }
+
+  void STDMETHODCALLTYPE DispatchMesh(UINT ThreadGroupCountX, UINT ThreadGroupCountY, UINT ThreadGroupCountZ) {
+    MarkUnsupportedCommand("DispatchMesh");
+  }
+
+  void STDMETHODCALLTYPE Barrier(UINT32 NumBarrierGroups, const D3D12_BARRIER_GROUP *pBarrierGroups) {
+    MarkUnsupportedCommand("Barrier");
   }
 };
 
