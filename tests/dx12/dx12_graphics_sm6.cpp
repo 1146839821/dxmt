@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d12.h>
 
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -23,29 +24,55 @@ bool CheckHR(const char *name, HRESULT hr) {
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc < 3 || argc > 4)
+  if (argc < 3 || argc > 5)
     return 2;
+  const bool geometry_adjacency_indexed =
+      argc == 5 && strcmp(argv[3], "--geometry-adj-indexed") == 0;
+  const bool geometry_adjacency =
+      argc == 5 &&
+      (strcmp(argv[3], "--geometry-adj") == 0 || geometry_adjacency_indexed);
+  const bool geometry_root_cbv =
+      argc == 5 && strcmp(argv[3], "--geometry-root-cbv") == 0;
+  const bool geometry_indexed =
+      argc == 5 && (strcmp(argv[3], "--geometry-indexed") == 0 ||
+                    geometry_adjacency_indexed);
+  const bool geometry =
+      argc == 5 && (strcmp(argv[3], "--geometry") == 0 || geometry_indexed ||
+                    geometry_adjacency || geometry_root_cbv);
   const bool textured = argc == 4 && strcmp(argv[3], "--texture") == 0;
   const bool root_cbv = argc == 4 && strcmp(argv[3], "--root-cbv") == 0;
   const bool root_constants = argc == 4 && strcmp(argv[3], "--root-constants") == 0;
   const bool root_srv = argc == 4 && strcmp(argv[3], "--root-srv") == 0;
   const bool root_uav = argc == 4 && strcmp(argv[3], "--root-uav") == 0;
   const bool textured_root_cbv = argc == 4 && strcmp(argv[3], "--texture-root-cbv") == 0;
-  if (argc == 4 && !textured && !root_cbv && !root_constants && !root_srv && !root_uav && !textured_root_cbv)
+  if ((argc == 4 && !textured && !root_cbv && !root_constants && !root_srv &&
+       !root_uav && !textured_root_cbv) ||
+      (argc == 5 && !geometry))
     return 2;
 
   std::ifstream vertex_file(argv[1], std::ios::binary | std::ios::ate);
   std::ifstream pixel_file(argv[2], std::ios::binary | std::ios::ate);
-  if (!vertex_file || !pixel_file)
+  std::ifstream geometry_file;
+  if (geometry)
+    geometry_file.open(argv[4], std::ios::binary | std::ios::ate);
+  if (!vertex_file || !pixel_file || (geometry && !geometry_file))
     return 3;
   auto vertex_size = vertex_file.tellg();
   auto pixel_size = pixel_file.tellg();
+  std::streamoff geometry_size = 0;
+  if (geometry)
+    geometry_size = static_cast<std::streamoff>(geometry_file.tellg());
   vertex_file.seekg(0);
   pixel_file.seekg(0);
+  if (geometry)
+    geometry_file.seekg(0);
   std::vector<char> vertex_shader(static_cast<size_t>(vertex_size));
   std::vector<char> pixel_shader(static_cast<size_t>(pixel_size));
+  std::vector<char> geometry_shader(static_cast<size_t>(geometry_size));
   vertex_file.read(vertex_shader.data(), vertex_shader.size());
   pixel_file.read(pixel_shader.data(), pixel_shader.size());
+  if (geometry)
+    geometry_file.read(geometry_shader.data(), geometry_shader.size());
 
   struct Vertex {
     float position[2];
@@ -56,6 +83,24 @@ int main(int argc, char **argv) {
       {{3.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
       {{-1.0f, 3.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
   };
+  static const Vertex adjacency_vertices[] = {
+      {{-1.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+      {{0.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+      {{3.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+      {{0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+      {{-1.0f, 3.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+      {{0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+  };
+  static const uint16_t indices[] = {0, 1, 2};
+  static const uint16_t adjacency_indices[] = {0, 1, 2, 3, 4, 5};
+  const Vertex *vertex_data =
+      geometry_adjacency ? adjacency_vertices : vertices;
+  const size_t vertex_data_size =
+      geometry_adjacency ? sizeof(adjacency_vertices) : sizeof(vertices);
+  const uint16_t *index_data = geometry_adjacency ? adjacency_indices : indices;
+  const size_t index_data_size =
+      geometry_adjacency ? sizeof(adjacency_indices) : sizeof(indices);
+  const UINT draw_count = geometry_adjacency ? 6 : 3;
   static const float root_color[] = {0.0f, 1.0f, 0.0f, 1.0f};
   static const UINT root_color_bits[] = {0x00000000u, 0x3f800000u, 0x00000000u, 0x3f800000u};
 
@@ -74,6 +119,7 @@ int main(int argc, char **argv) {
   ID3D12QueryHeap *timestamp_heap = nullptr;
   ID3D12Resource *render_target = nullptr;
   ID3D12Resource *vertex_buffer = nullptr;
+  ID3D12Resource *index_buffer = nullptr;
   ID3D12Resource *root_data_buffer = nullptr;
   ID3D12Resource *root_uav_buffer = nullptr;
   ID3D12Resource *texture = nullptr;
@@ -109,6 +155,7 @@ int main(int argc, char **argv) {
   };
   D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc = {};
   D3D12_VERTEX_BUFFER_VIEW vertex_view = {};
+  D3D12_INDEX_BUFFER_VIEW index_view = {};
   D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = {};
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
   D3D12_TEXTURE_COPY_LOCATION copy_dst = {};
@@ -129,6 +176,7 @@ int main(int argc, char **argv) {
   UINT64 row_size = 0;
   UINT64 total_size = 0;
   void *mapped_upload = nullptr;
+  void *mapped_index_upload = nullptr;
   void *mapped_root_data = nullptr;
   void *mapped_texture_upload = nullptr;
   BYTE *mapped_readback = nullptr;
@@ -170,14 +218,18 @@ int main(int argc, char **argv) {
     std::cerr << "timestamp frequency returned zero\n";
     goto cleanup;
   }
-  if (!CheckHR("GetClockCalibration", queue->GetClockCalibration(&calibration_gpu, &calibration_cpu)))
-    goto cleanup;
-  if (!calibration_gpu || !calibration_cpu) {
-    std::cerr << "clock calibration returned zero\n";
-    goto cleanup;
+  if (!geometry) {
+    if (!CheckHR(
+            "GetClockCalibration",
+            queue->GetClockCalibration(&calibration_gpu, &calibration_cpu)))
+      goto cleanup;
+    if (!calibration_gpu || !calibration_cpu) {
+      std::cerr << "clock calibration returned zero\n";
+      goto cleanup;
+    }
   }
 
-  if (root_cbv) {
+  if (root_cbv || geometry_root_cbv) {
     root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     root_parameters[0].Descriptor.ShaderRegister = 0;
     root_parameters[0].Descriptor.RegisterSpace = 0;
@@ -357,7 +409,7 @@ int main(int argc, char **argv) {
   upload_heap.CreationNodeMask = 1;
   upload_heap.VisibleNodeMask = 1;
   buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  buffer_desc.Width = sizeof(vertices);
+  buffer_desc.Width = vertex_data_size;
   buffer_desc.Height = 1;
   buffer_desc.DepthOrArraySize = 1;
   buffer_desc.MipLevels = 1;
@@ -372,13 +424,31 @@ int main(int argc, char **argv) {
   if (!CheckHR("MapVertexBuffer",
                vertex_buffer->Map(0, nullptr, &mapped_upload)))
     goto cleanup;
-  memcpy(mapped_upload, vertices, sizeof(vertices));
+  memcpy(mapped_upload, vertex_data, vertex_data_size);
   vertex_buffer->Unmap(0, nullptr);
   vertex_view.BufferLocation = vertex_buffer->GetGPUVirtualAddress();
-  vertex_view.SizeInBytes = sizeof(vertices);
+  vertex_view.SizeInBytes = vertex_data_size;
   vertex_view.StrideInBytes = sizeof(Vertex);
 
-  if (root_cbv || root_srv || textured_root_cbv) {
+  if (geometry_indexed) {
+    buffer_desc.Width = index_data_size;
+    if (!CheckHR("CreateIndexBuffer",
+                 device->CreateCommittedResource(
+                     &upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                     D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                     IID_PPV_ARGS(&index_buffer))))
+      goto cleanup;
+    if (!CheckHR("MapIndexBuffer",
+                 index_buffer->Map(0, nullptr, &mapped_index_upload)))
+      goto cleanup;
+    memcpy(mapped_index_upload, index_data, index_data_size);
+    index_buffer->Unmap(0, nullptr);
+    index_view.BufferLocation = index_buffer->GetGPUVirtualAddress();
+    index_view.SizeInBytes = index_data_size;
+    index_view.Format = DXGI_FORMAT_R16_UINT;
+  }
+
+  if (root_cbv || root_srv || textured_root_cbv || geometry_root_cbv) {
     buffer_desc.Width = 256;
     if (!CheckHR("CreateRootData",
                  device->CreateCommittedResource(
@@ -408,6 +478,10 @@ int main(int argc, char **argv) {
   pso_desc.VS.BytecodeLength = vertex_shader.size();
   pso_desc.PS.pShaderBytecode = pixel_shader.data();
   pso_desc.PS.BytecodeLength = pixel_shader.size();
+  if (geometry) {
+    pso_desc.GS.pShaderBytecode = geometry_shader.data();
+    pso_desc.GS.BytecodeLength = geometry_shader.size();
+  }
   pso_desc.InputLayout.pInputElementDescs = input_layout;
   pso_desc.InputLayout.NumElements = 2;
   pso_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -459,7 +533,7 @@ int main(int argc, char **argv) {
     list->SetGraphicsRootDescriptorTable(
         sampler_root_index, sampler_heap->GetGPUDescriptorHandleForHeapStart());
   }
-  if (root_cbv || textured_root_cbv)
+  if (root_cbv || textured_root_cbv || geometry_root_cbv)
     list->SetGraphicsRootConstantBufferView(0, root_data_buffer->GetGPUVirtualAddress());
   if (root_constants)
     list->SetGraphicsRoot32BitConstants(0, 4, root_color_bits, 0);
@@ -467,14 +541,21 @@ int main(int argc, char **argv) {
     list->SetGraphicsRootShaderResourceView(0, root_data_buffer->GetGPUVirtualAddress());
   if (root_uav)
     list->SetGraphicsRootUnorderedAccessView(0, root_uav_buffer->GetGPUVirtualAddress());
-  list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  list->IASetPrimitiveTopology(geometry_adjacency
+                                   ? D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ
+                                   : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   list->IASetVertexBuffers(0, 1, &vertex_view);
+  if (geometry_indexed)
+    list->IASetIndexBuffer(&index_view);
   list->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
   list->RSSetViewports(1, &viewport);
   list->RSSetScissorRects(1, &scissor);
   list->EndQuery(timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
   list->BeginQuery(query_heap, D3D12_QUERY_TYPE_OCCLUSION, 0);
-  list->DrawInstanced(3, 1, 0, 0);
+  if (geometry_indexed)
+    list->DrawIndexedInstanced(draw_count, 1, 0, 0, 0);
+  else
+    list->DrawInstanced(draw_count, 1, 0, 0);
   list->EndQuery(query_heap, D3D12_QUERY_TYPE_OCCLUSION, 0);
   list->EndQuery(timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
 
@@ -569,21 +650,29 @@ int main(int argc, char **argv) {
     std::cerr << "timestamp query did not advance: " << timestamp_begin << " -> " << timestamp_end << "\n";
     goto cleanup;
   }
-  expected_pixel = (root_cbv || root_constants || root_srv || root_uav || textured_root_cbv) ? 0xff00ff00u
-                                                                                         : 0xff0000ffu;
+  expected_pixel = (geometry || root_cbv || root_constants || root_srv ||
+                    root_uav || textured_root_cbv)
+                       ? 0xff00ff00u
+                       : 0xff0000ffu;
   if ((pixel & 0x00ffffffu) != (expected_pixel & 0x00ffffffu)) {
     std::cerr << "graphics readback mismatch: 0x" << std::hex << pixel
               << std::dec << "\n";
     goto cleanup;
   }
   std::cout << "DXIL "
-            << (root_cbv ? "root CBV graphics"
-                : root_constants ? "root constants graphics"
-                : root_srv ? "root SRV graphics"
-                : root_uav ? "root UAV graphics"
-                : textured_root_cbv ? "root CBV textured graphics"
-                : textured ? "textured graphics"
-                           : "graphics")
+            << (geometry_adjacency_indexed
+                    ? "indexed adjacency geometry graphics"
+                : geometry_adjacency ? "adjacency geometry graphics"
+                : geometry_root_cbv  ? "root CBV geometry graphics"
+                : geometry_indexed   ? "indexed geometry graphics"
+                : geometry           ? "geometry graphics"
+                : root_cbv           ? "root CBV graphics"
+                : root_constants     ? "root constants graphics"
+                : root_srv           ? "root SRV graphics"
+                : root_uav           ? "root UAV graphics"
+                : textured_root_cbv  ? "root CBV textured graphics"
+                : textured           ? "textured graphics"
+                                     : "graphics")
             << " readback passed: 0x" << std::hex << pixel << std::dec << "\n";
   result = 0;
 
@@ -608,6 +697,8 @@ cleanup:
     root_uav_buffer->Release();
   if (root_data_buffer)
     root_data_buffer->Release();
+  if (index_buffer)
+    index_buffer->Release();
   if (vertex_buffer)
     vertex_buffer->Release();
   if (render_target)

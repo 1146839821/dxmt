@@ -12,6 +12,14 @@ enum winemetal_unixcall {
   unix_mtldevice_newmsctessellationpso = 150,
   unix_mtldevice_newmsctessellatortables = 151,
   unix_mtlvalidate_msctessellationpipeline = 152,
+  unix_mtldevice_newmscgeometrypso = 153,
+};
+
+struct unixcall_mtldevice_newmscgeometrypso {
+  obj_handle_t device;
+  struct WMTConstMemoryPointer info;
+  obj_handle_t ret_error;
+  obj_handle_t ret_pso;
 };
 
 struct unixcall_generic_obj_ret {

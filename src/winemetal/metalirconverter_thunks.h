@@ -59,6 +59,16 @@ enum dxmt_msc_compile_flags {
   /* The existing reserved field carries options for the native compiler. */
   DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION = 1u << 0,
   DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN = 1u << 1,
+  DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION = 1u << 2,
+};
+
+/* Values mirror IRInputPrimitive in metal_irconverter.h. */
+enum dxmt_msc_geometry_input_primitive {
+  DXMT_MSC_GEOMETRY_INPUT_POINT = 1,
+  DXMT_MSC_GEOMETRY_INPUT_LINE = 2,
+  DXMT_MSC_GEOMETRY_INPUT_TRIANGLE = 3,
+  DXMT_MSC_GEOMETRY_INPUT_LINE_ADJ = 6,
+  DXMT_MSC_GEOMETRY_INPUT_TRIANGLE_ADJ = 7,
 };
 
 #define DXMT_MSC_SEMANTIC_NAME_CAPACITY 64
@@ -67,6 +77,10 @@ enum dxmt_msc_compile_flags {
 struct dxmt_msc_shader_reflection {
   uint32_t stage;
   uint32_t vertex_output_size_in_bytes;
+
+  uint32_t gs_input_primitive;
+  uint32_t gs_max_input_primitives_per_mesh_threadgroup;
+  uint32_t gs_instance_count;
 
   uint32_t hs_max_patches_per_object_threadgroup;
   uint32_t hs_max_object_threads_per_patch;

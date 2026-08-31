@@ -392,6 +392,21 @@ MTLDevice_newMSCTessellationPipelineState(
 }
 
 WINEMETAL_API obj_handle_t
+MTLDevice_newMSCGeometryPipelineState(
+    obj_handle_t device, const struct WMTMSCGeometryPipelineInfo *info, obj_handle_t *err_out
+) {
+  struct unixcall_mtldevice_newmscgeometrypso params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  params.ret_error = 0;
+  params.ret_pso = 0;
+  UNIX_CALL(unix_mtldevice_newmscgeometrypso, &params);
+  if (err_out)
+    *err_out = params.ret_error;
+  return params.ret_pso;
+}
+
+WINEMETAL_API obj_handle_t
 MTLDevice_newMSCTessellatorTables(obj_handle_t device) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = device;

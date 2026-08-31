@@ -694,6 +694,14 @@ _MTLDevice_newMSCTessellationPipelineState(void *obj) {
 }
 
 static NTSTATUS
+_MTLDevice_newMSCGeometryPipelineState(void *obj) {
+  struct unixcall_mtldevice_newmscgeometrypso *params = obj;
+  params->ret_error = 0;
+  params->ret_pso = dxmt_msc_new_geometry_pipeline(params->device, params->info.ptr, &params->ret_error);
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 _MTLDevice_newMSCTessellatorTables(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
   params->ret = dxmt_msc_new_tessellator_tables(params->handle);
@@ -1106,6 +1114,27 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
                       usage:MTLResourceUsageRead
                      stages:MTLRenderStageObject | MTLRenderStageMesh];
       dxmt_msc_draw_indexed_patches(
+          (obj_handle_t)encoder, body->primitive_topology, body->index_type, body->index_buffer, &body->config,
+          body->instance_count, body->index_count_per_instance, body->base_instance, body->base_vertex, start_index
+      );
+      break;
+    }
+    case WMTRenderCommandMSCGeometryDraw: {
+      struct wmtcmd_render_msc_geometry_draw *body = (struct wmtcmd_render_msc_geometry_draw *)next;
+      dxmt_msc_draw_geometry(
+          (obj_handle_t)encoder, body->primitive_topology, &body->config, body->instance_count,
+          body->vertex_count_per_instance, body->base_instance, body->base_vertex
+      );
+      break;
+    }
+    case WMTRenderCommandMSCGeometryDrawIndexed: {
+      struct wmtcmd_render_msc_geometry_draw_indexed *body = (struct wmtcmd_render_msc_geometry_draw_indexed *)next;
+      uint32_t index_size = body->index_type == WMTIndexTypeUInt32 ? 4 : 2;
+      uint32_t start_index = body->start_index + body->index_buffer_offset / index_size;
+      [encoder useResource:(id<MTLResource>)body->index_buffer
+                     usage:MTLResourceUsageRead
+                    stages:MTLRenderStageObject | MTLRenderStageMesh];
+      dxmt_msc_draw_indexed_geometry(
           (obj_handle_t)encoder, body->primitive_topology, body->index_type, body->index_buffer, &body->config,
           body->instance_count, body->index_count_per_instance, body->base_instance, body->base_vertex, start_index
       );
@@ -3465,6 +3494,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLDevice_newMSCTessellationPipelineState,
     &_MTLDevice_newMSCTessellatorTables,
     &_MTLValidateMSCTessellationPipeline,
+    &_MTLDevice_newMSCGeometryPipelineState,
 };
 
 #ifndef DXMT_NATIVE
@@ -3622,5 +3652,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_newMSCTessellationPipelineState,
     &_MTLDevice_newMSCTessellatorTables,
     &_MTLValidateMSCTessellationPipeline,
+    &_MTLDevice_newMSCGeometryPipelineState,
 };
 #endif

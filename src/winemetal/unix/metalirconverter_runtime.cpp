@@ -36,6 +36,14 @@ dxmt_msc_tessellation_config(const WMTMSCTessellationPipelineConfig *source) {
   return config;
 }
 
+static IRRuntimeGeometryPipelineConfig
+dxmt_msc_geometry_config(const WMTMSCGeometryPipelineConfig *source) {
+  IRRuntimeGeometryPipelineConfig config = {};
+  config.gsVertexSizeInBytes = source->gs_vertex_size_in_bytes;
+  config.gsMaxInputPrimitivesPerMeshThreadgroup = source->gs_max_input_primitives_per_mesh_threadgroup;
+  return config;
+}
+
 static MTL::MeshRenderPipelineDescriptor *
 dxmt_msc_make_mesh_descriptor(const WMTMeshRenderPipelineInfo *info) {
   MTL::MeshRenderPipelineDescriptor *descriptor = MTL::MeshRenderPipelineDescriptor::alloc()->init();
@@ -121,6 +129,35 @@ dxmt_msc_new_tessellation_pipeline(
 }
 
 obj_handle_t
+dxmt_msc_new_geometry_pipeline(
+    obj_handle_t device, const struct WMTMSCGeometryPipelineInfo *info, obj_handle_t *error
+) {
+  MTL::MeshRenderPipelineDescriptor *base_descriptor = dxmt_msc_make_mesh_descriptor(&info->base);
+  if (!base_descriptor)
+    return 0;
+
+  IRGeometryEmulationPipelineDescriptor pipeline = {};
+  pipeline.stageInLibrary = dxmt_msc_object<MTL::Library>(info->stage_in_library);
+  pipeline.vertexLibrary = dxmt_msc_object<MTL::Library>(info->vertex_library);
+  pipeline.vertexFunctionName = info->vertex_function_name;
+  pipeline.geometryLibrary = dxmt_msc_object<MTL::Library>(info->geometry_library);
+  pipeline.geometryFunctionName = info->geometry_function_name;
+  pipeline.fragmentLibrary = dxmt_msc_object<MTL::Library>(info->fragment_library);
+  pipeline.fragmentFunctionName = info->fragment_function_name;
+  pipeline.basePipelineDescriptor = base_descriptor;
+  pipeline.pipelineConfig = dxmt_msc_geometry_config(&info->config);
+
+  NS::Error *native_error = nullptr;
+  auto pipeline_state =
+      IRRuntimeNewGeometryEmulationPipeline(dxmt_msc_object<MTL::Device>(device), &pipeline, &native_error);
+  if (error)
+    *error = native_error ? dxmt_msc_handle(native_error) : 0;
+  obj_handle_t result = pipeline_state ? dxmt_msc_handle(pipeline_state) : 0;
+  base_descriptor->release();
+  return result;
+}
+
+obj_handle_t
 dxmt_msc_new_tessellator_tables(obj_handle_t device) {
   MTL::Buffer *buffer = dxmt_msc_object<MTL::Device>(device)->newBuffer(
       IRRuntimeTessellatorTablesSize(), MTL::ResourceStorageModeShared
@@ -164,5 +201,29 @@ dxmt_msc_draw_indexed_patches(
       dxmt_msc_object<MTL::RenderCommandEncoder>(encoder), (IRRuntimePrimitiveType)primitive_topology,
       (MTL::IndexType)index_type, dxmt_msc_object<MTL::Buffer>(index_buffer), dxmt_msc_tessellation_config(config),
       instance_count, index_count_per_instance, base_instance, base_vertex, start_index
+  );
+}
+
+void
+dxmt_msc_draw_geometry(
+    obj_handle_t encoder, uint32_t primitive_topology, const struct WMTMSCGeometryPipelineConfig *config,
+    uint32_t instance_count, uint32_t vertex_count_per_instance, uint32_t base_instance, uint32_t base_vertex
+) {
+  IRRuntimeDrawPrimitivesGeometryEmulation(
+      dxmt_msc_object<MTL::RenderCommandEncoder>(encoder), (IRRuntimePrimitiveType)primitive_topology,
+      dxmt_msc_geometry_config(config), instance_count, vertex_count_per_instance, base_vertex, base_instance
+  );
+}
+
+void
+dxmt_msc_draw_indexed_geometry(
+    obj_handle_t encoder, uint32_t primitive_topology, uint32_t index_type, obj_handle_t index_buffer,
+    const struct WMTMSCGeometryPipelineConfig *config, uint32_t instance_count, uint32_t index_count_per_instance,
+    uint32_t base_instance, int32_t base_vertex, uint32_t start_index
+) {
+  IRRuntimeDrawIndexedPrimitivesGeometryEmulation(
+      dxmt_msc_object<MTL::RenderCommandEncoder>(encoder), (IRRuntimePrimitiveType)primitive_topology,
+      (MTL::IndexType)index_type, dxmt_msc_object<MTL::Buffer>(index_buffer), dxmt_msc_geometry_config(config),
+      instance_count, index_count_per_instance, start_index, base_vertex, base_instance
   );
 }

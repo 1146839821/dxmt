@@ -30,7 +30,7 @@ constexpr uint32_t kDXILFourCC = MakeFourCC('D', 'X', 'I', 'L');
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
 // converter defaults change.
-constexpr uint32_t kMSCConversionCacheVersion = 4;
+constexpr uint32_t kMSCConversionCacheVersion = 5;
 constexpr uint32_t kMSCConverterAPIVersion = 0x040001;
 constexpr uint32_t kMSCMetalTargetVersion = 0;
 constexpr uint32_t kMSCCompileFlags = 0;

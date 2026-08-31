@@ -157,8 +157,8 @@ cleanup:
   return result;
 }
 
-bool
-RunGraphics(ID3D12Device *device, ID3D12PipelineState *pipeline) {
+bool RunGraphics(ID3D12Device *device, ID3D12PipelineState *pipeline,
+                 bool geometry) {
   struct Vertex {
     float position[2];
     float color[4];
@@ -198,6 +198,7 @@ RunGraphics(ID3D12Device *device, ID3D12PipelineState *pipeline) {
   void *mapped_upload = nullptr;
   BYTE *mapped_readback = nullptr;
   UINT pixel = 0;
+  UINT expected_pixel = 0;
   bool result = false;
 
   queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -306,7 +307,8 @@ RunGraphics(ID3D12Device *device, ID3D12PipelineState *pipeline) {
     goto cleanup;
   pixel = *reinterpret_cast<const UINT *>(mapped_readback);
   readback->Unmap(0, nullptr);
-  if ((pixel & 0x00ffffffu) != 0x000000ffu) {
+  expected_pixel = geometry ? 0x0000ff00u : 0x000000ffu;
+  if ((pixel & 0x00ffffffu) != expected_pixel) {
     std::cerr << "loaded graphics readback mismatch: 0x" << std::hex << pixel << std::dec << "\n";
     goto cleanup;
   }
@@ -363,15 +365,20 @@ struct InvalidTypeStream {
 
 int
 main(int argc, char **argv) {
-  if (argc != 4) {
-    std::cerr << "usage: dx12_pipeline_persistence <compute_root_uav.cso> <vertex.cso> <pixel.cso>\n";
+  if (argc != 4 && argc != 5) {
+    std::cerr << "usage: dx12_pipeline_persistence <compute_root_uav.cso> "
+                 "<vertex.cso> <pixel.cso> [geometry.cso]\n";
     return 2;
   }
 
   std::vector<char> compute_shader;
   std::vector<char> vertex_shader;
   std::vector<char> pixel_shader;
-  if (!ReadFile(argv[1], compute_shader) || !ReadFile(argv[2], vertex_shader) || !ReadFile(argv[3], pixel_shader)) {
+  std::vector<char> geometry_shader;
+  const bool geometry = argc == 5;
+  if (!ReadFile(argv[1], compute_shader) || !ReadFile(argv[2], vertex_shader) ||
+      !ReadFile(argv[3], pixel_shader) ||
+      (geometry && !ReadFile(argv[4], geometry_shader))) {
     std::cerr << "failed to read shader fixture\n";
     return 3;
   }
@@ -538,6 +545,8 @@ main(int argc, char **argv) {
 
   graphics_desc.VS = {vertex_shader.data(), vertex_shader.size()};
   graphics_desc.PS = {pixel_shader.data(), pixel_shader.size()};
+  if (geometry)
+    graphics_desc.GS = {geometry_shader.data(), geometry_shader.size()};
   graphics_desc.InputLayout = {input_layout, 2};
   graphics_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   graphics_desc.NumRenderTargets = 1;
@@ -810,7 +819,8 @@ main(int argc, char **argv) {
     Release(loaded_compute);
     return fail("live library load failed");
   }
-  if (!RunCompute(device, loaded_compute, root_signature) || !RunGraphics(device, loaded_graphics)) {
+  if (!RunCompute(device, loaded_compute, root_signature) ||
+      !RunGraphics(device, loaded_graphics, geometry)) {
     Release(loaded_graphics);
     Release(loaded_compute);
     return fail("live library pipeline execution failed");
@@ -822,11 +832,12 @@ main(int argc, char **argv) {
   if (!CheckHR("Load stream pipeline", library->LoadPipeline(L"compute", &compute_stream_desc, IID_PPV_ARGS(&loaded_compute))))
     return fail("stream library load failed");
   Release(loaded_compute);
-  if (!CheckHR(
-          "Load graphics stream pipeline",
-          library->LoadPipeline(L"graphics", &graphics_stream_desc, IID_PPV_ARGS(&loaded_graphics))
-      ))
-    return fail("graphics stream library load failed");
+  if (!CheckHR("Load graphics stream pipeline",
+               library->LoadPipeline(L"graphics", &graphics_stream_desc,
+                                     IID_PPV_ARGS(&loaded_graphics)),
+               geometry ? E_INVALIDARG : S_OK))
+    return fail(geometry ? "geometry pipeline accepted an incomplete stream"
+                         : "graphics stream library load failed");
   Release(loaded_graphics);
 
   mismatched_compute_desc = compute_desc;
@@ -867,7 +878,8 @@ main(int argc, char **argv) {
     Release(loaded_compute);
     return fail("rehydrated library load failed");
   }
-  if (!RunCompute(device, loaded_compute, root_signature) || !RunGraphics(device, loaded_graphics)) {
+  if (!RunCompute(device, loaded_compute, root_signature) ||
+      !RunGraphics(device, loaded_graphics, geometry)) {
     Release(loaded_graphics);
     Release(loaded_compute);
     return fail("rehydrated pipeline execution failed");
@@ -881,11 +893,14 @@ main(int argc, char **argv) {
       ))
     return fail("rehydrated stream library load failed");
   Release(loaded_compute);
-  if (!CheckHR(
-          "Load rehydrated graphics stream pipeline",
-          rehydrated_library->LoadPipeline(L"graphics", &graphics_stream_desc, IID_PPV_ARGS(&loaded_graphics))
-      ))
-    return fail("rehydrated graphics stream library load failed");
+  if (!CheckHR("Load rehydrated graphics stream pipeline",
+               rehydrated_library->LoadPipeline(L"graphics",
+                                                &graphics_stream_desc,
+                                                IID_PPV_ARGS(&loaded_graphics)),
+               geometry ? E_INVALIDARG : S_OK))
+    return fail(
+        geometry ? "rehydrated geometry pipeline accepted an incomplete stream"
+                 : "rehydrated graphics stream library load failed");
   Release(loaded_graphics);
 
   if (!CheckHR(

@@ -40,6 +40,8 @@ typedef struct dxmt_msc_api {
   bool (*IRShaderReflectionReleaseComputeInfo)(IRVersionedCSInfo *);
   bool (*IRShaderReflectionCopyVertexInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedVSInfo *);
   bool (*IRShaderReflectionReleaseVertexInfo)(IRVersionedVSInfo *);
+  bool (*IRShaderReflectionCopyGeometryInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedGSInfo *);
+  bool (*IRShaderReflectionReleaseGeometryInfo)(IRVersionedGSInfo *);
   bool (*IRShaderReflectionCopyHullInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedHSInfo *);
   bool (*IRShaderReflectionReleaseHullInfo)(IRVersionedHSInfo *);
   bool (*IRShaderReflectionCopyDomainInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedDSInfo *);
@@ -221,6 +223,12 @@ dxmt_msc_load_symbols(void) {
       (void **)&g_msc_api.IRShaderReflectionReleaseVertexInfo, "IRShaderReflectionReleaseVertexInfo"
   );
   dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyGeometryInfo, "IRShaderReflectionCopyGeometryInfo"
+  );
+  dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseGeometryInfo, "IRShaderReflectionReleaseGeometryInfo"
+  );
+  dxmt_msc_load_optional_symbol(
       (void **)&g_msc_api.IRShaderReflectionCopyHullInfo, "IRShaderReflectionCopyHullInfo"
   );
   dxmt_msc_load_optional_symbol(
@@ -328,10 +336,12 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   IRError *error = NULL;
   IRVersionedCSInfo compute_info = {};
   IRVersionedVSInfo vertex_info = {};
+  IRVersionedGSInfo geometry_info = {};
   IRVersionedHSInfo hull_info = {};
   IRVersionedDSInfo domain_info = {};
   bool compute_info_valid = false;
   bool vertex_info_valid = false;
+  bool geometry_info_valid = false;
   bool hull_info_valid = false;
   bool domain_info_valid = false;
   sm50_bitcode_t patched_metallib = {0};
@@ -367,9 +377,17 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     return DXMT_MSC_ERROR_UNSUPPORTED_SHADER;
   }
 
-  if ((params->reserved & DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION) &&
-      !g_msc_api.IRCompilerEnableGeometryAndTessellationEmulation) {
-    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC tessellation emulation is unavailable");
+  const uint32_t emulation_flags =
+      params->reserved & (DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION | DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION);
+  if (emulation_flags && !g_msc_api.IRCompilerEnableGeometryAndTessellationEmulation) {
+    dxmt_msc_set_error(
+        params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC geometry/tessellation emulation is unavailable"
+    );
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  }
+  if ((params->reserved & DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION) && ir_stage == IRShaderStageGeometry &&
+      (!g_msc_api.IRShaderReflectionCopyGeometryInfo || !g_msc_api.IRShaderReflectionReleaseGeometryInfo)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC geometry reflection is unavailable");
     return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
   }
   if ((params->reserved & DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION) && ir_stage == IRShaderStageHull &&
@@ -422,7 +440,7 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     goto cleanup;
   }
 
-  if (params->reserved & DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION)
+  if (emulation_flags)
     g_msc_api.IRCompilerEnableGeometryAndTessellationEmulation(compiler, true);
   if (params->reserved & DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN)
     g_msc_api.IRCompilerSetStageInGenerationMode(compiler, IRStageInCodeGenerationModeUseSeparateStageInFunction);
@@ -531,6 +549,19 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     }
     vertex_info_valid = true;
     params->reflection.vertex_output_size_in_bytes = vertex_info.info_1_0.vertex_output_size_in_bytes;
+  }
+  if (ir_stage == IRShaderStageGeometry) {
+    geometry_info.version = IRReflectionVersion_1_0;
+    if (!g_msc_api.IRShaderReflectionCopyGeometryInfo(reflection, IRReflectionVersion_1_0, &geometry_info)) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "geometry shader reflection is unavailable");
+      result = DXMT_MSC_ERROR_COMPILATION;
+      goto cleanup;
+    }
+    geometry_info_valid = true;
+    params->reflection.gs_input_primitive = geometry_info.info_1_0.input_primitive;
+    params->reflection.gs_max_input_primitives_per_mesh_threadgroup =
+        geometry_info.info_1_0.max_input_primitives_per_mesh_threadgroup;
+    params->reflection.gs_instance_count = geometry_info.info_1_0.instance_count;
   }
   if (ir_stage == IRShaderStageHull) {
     hull_info.version = IRReflectionVersion_1_0;
@@ -663,6 +694,8 @@ cleanup:
     g_msc_api.IRShaderReflectionReleaseComputeInfo(&compute_info);
   if (vertex_info_valid)
     g_msc_api.IRShaderReflectionReleaseVertexInfo(&vertex_info);
+  if (geometry_info_valid)
+    g_msc_api.IRShaderReflectionReleaseGeometryInfo(&geometry_info);
   if (hull_info_valid)
     g_msc_api.IRShaderReflectionReleaseHullInfo(&hull_info);
   if (domain_info_valid)

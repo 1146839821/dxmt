@@ -204,6 +204,9 @@ public:
   bool msc_tessellation = false;
   WMT::Reference<WMT::Buffer> msc_tessellator_tables;
   WMTMSCTessellationPipelineConfig msc_tessellation_config = {};
+  bool msc_geometry = false;
+  WMTMSCGeometryPipelineConfig msc_geometry_config = {};
+  WMTPrimitiveType msc_geometry_input_primitive = WMTPrimitiveTypePoint;
   enum WMTTriangleFillMode fill_mode;
   enum WMTCullMode cull_mode;
   enum WMTDepthClipMode depth_clip_mode;

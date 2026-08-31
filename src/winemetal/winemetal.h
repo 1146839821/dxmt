@@ -913,6 +913,24 @@ struct WMTMSCTessellationPipelineInfo {
   struct WMTMSCTessellationPipelineConfig config;
 };
 
+struct WMTMSCGeometryPipelineConfig {
+  uint32_t gs_vertex_size_in_bytes;
+  uint32_t gs_max_input_primitives_per_mesh_threadgroup;
+  uint32_t gs_instance_count;
+};
+
+struct WMTMSCGeometryPipelineInfo {
+  struct WMTMeshRenderPipelineInfo base;
+  obj_handle_t stage_in_library;
+  obj_handle_t vertex_library;
+  obj_handle_t geometry_library;
+  obj_handle_t fragment_library;
+  char vertex_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
+  char geometry_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
+  char fragment_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
+  struct WMTMSCGeometryPipelineConfig config;
+};
+
 WINEMETAL_API obj_handle_t
 MTLDevice_newRenderPipelineState(obj_handle_t device, const struct WMTRenderPipelineInfo *info, obj_handle_t *err_out);
 
@@ -922,6 +940,10 @@ WINEMETAL_API obj_handle_t MTLDevice_newMeshRenderPipelineState(
 
 WINEMETAL_API obj_handle_t MTLDevice_newMSCTessellationPipelineState(
     obj_handle_t device, const struct WMTMSCTessellationPipelineInfo *info, obj_handle_t *err_out
+);
+
+WINEMETAL_API obj_handle_t MTLDevice_newMSCGeometryPipelineState(
+    obj_handle_t device, const struct WMTMSCGeometryPipelineInfo *info, obj_handle_t *err_out
 );
 
 WINEMETAL_API obj_handle_t MTLDevice_newMSCTessellatorTables(obj_handle_t device);
@@ -1286,6 +1308,8 @@ enum WMTRenderCommandType : uint16_t {
   WMTRenderCommandSetStencilRef,
   WMTRenderCommandMSCTessellationDraw,
   WMTRenderCommandMSCTessellationDrawIndexed,
+  WMTRenderCommandMSCGeometryDraw,
+  WMTRenderCommandMSCGeometryDrawIndexed,
 };
 
 struct wmtcmd_render_nop {
@@ -1407,6 +1431,9 @@ enum WMTPrimitiveType : uint8_t {
   WMTPrimitiveTypeLineStrip = 2,
   WMTPrimitiveTypeTriangle = 3,
   WMTPrimitiveTypeTriangleStrip = 4,
+  WMTPrimitiveTypeLineWithAdj = 5,
+  WMTPrimitiveTypeTriangleWithAdj = 6,
+  WMTPrimitiveTypeLineStripWithAdj = 7,
 };
 
 struct wmtcmd_render_draw {
@@ -1688,6 +1715,34 @@ struct wmtcmd_render_msc_tessellation_draw_indexed {
   int32_t base_vertex;
   uint32_t start_index;
   struct WMTMSCTessellationPipelineConfig config;
+};
+
+struct wmtcmd_render_msc_geometry_draw {
+  enum WMTRenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint32_t primitive_topology;
+  uint32_t instance_count;
+  uint32_t vertex_count_per_instance;
+  uint32_t base_instance;
+  uint32_t base_vertex;
+  struct WMTMSCGeometryPipelineConfig config;
+};
+
+struct wmtcmd_render_msc_geometry_draw_indexed {
+  enum WMTRenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint32_t primitive_topology;
+  uint32_t index_type;
+  obj_handle_t index_buffer;
+  uint64_t index_buffer_offset;
+  uint32_t instance_count;
+  uint32_t index_count_per_instance;
+  uint32_t base_instance;
+  int32_t base_vertex;
+  uint32_t start_index;
+  struct WMTMSCGeometryPipelineConfig config;
 };
 
 struct wmtcmd_render_dispatch_threads_per_tile {

@@ -193,69 +193,67 @@ int main() {
     return false;
   };
   void *unsupported_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
-  if (!check_unsupported_output(
-          "OpenExistingHeapFromAddress",
-          device4->OpenExistingHeapFromAddress(nullptr, __uuidof(ID3D12Heap), &unsupported_output), unsupported_output
-      )) {
+  HRESULT unsupported_hr = device4->OpenExistingHeapFromAddress(
+      nullptr, __uuidof(ID3D12Heap), &unsupported_output);
+  if (!check_unsupported_output("OpenExistingHeapFromAddress", unsupported_hr,
+                                unsupported_output)) {
     cleanup();
     return 1;
   }
   unsupported_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
-  if (!check_unsupported_output(
-          "OpenExistingHeapFromFileMapping",
-          device4->OpenExistingHeapFromFileMapping(nullptr, __uuidof(ID3D12Heap), &unsupported_output), unsupported_output
-      )) {
+  unsupported_hr = device4->OpenExistingHeapFromFileMapping(
+      nullptr, __uuidof(ID3D12Heap), &unsupported_output);
+  if (!check_unsupported_output("OpenExistingHeapFromFileMapping",
+                                unsupported_hr, unsupported_output)) {
     cleanup();
     return 1;
   }
   unsupported_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
-  if (!check_unsupported_output(
-          "CreateCommandList1",
-          device4->CreateCommandList1(
-              0, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_FLAG_NONE, __uuidof(ID3D12GraphicsCommandList),
-              &unsupported_output
-          ),
-          unsupported_output
-      )) {
+  unsupported_hr = device4->CreateCommandList1(
+      0, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_FLAG_NONE,
+      __uuidof(ID3D12GraphicsCommandList), &unsupported_output);
+  if (!check_unsupported_output("CreateCommandList1", unsupported_hr,
+                                unsupported_output)) {
     cleanup();
     return 1;
   }
   unsupported_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
-  if (!check_unsupported_output(
-          "CreateProtectedResourceSession",
-          device4->CreateProtectedResourceSession(nullptr, __uuidof(ID3D12ProtectedResourceSession), &unsupported_output),
-          unsupported_output
-      )) {
+  unsupported_hr = device4->CreateProtectedResourceSession(
+      nullptr, __uuidof(ID3D12ProtectedResourceSession), &unsupported_output);
+  if (!check_unsupported_output("CreateProtectedResourceSession",
+                                unsupported_hr, unsupported_output)) {
     cleanup();
     return 1;
   }
   unsupported_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
-  if (!check_unsupported_output(
-          "CreateHeap1", device4->CreateHeap1(nullptr, nullptr, __uuidof(ID3D12Heap), &unsupported_output), unsupported_output
-      )) {
+  unsupported_hr = device4->CreateHeap1(nullptr, nullptr, __uuidof(ID3D12Heap),
+                                        &unsupported_output);
+  if (!check_unsupported_output("CreateHeap1", unsupported_hr,
+                                unsupported_output)) {
     cleanup();
     return 1;
   }
   HANDLE unsupported_handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(1));
-  if (!check_unsupported_output(
-          "CreateSharedHandle",
-          device->CreateSharedHandle(nullptr, nullptr, 0, nullptr, &unsupported_handle), unsupported_handle
-      )) {
+  unsupported_hr = device->CreateSharedHandle(nullptr, nullptr, 0, nullptr,
+                                              &unsupported_handle);
+  if (!check_unsupported_output("CreateSharedHandle", unsupported_hr,
+                                unsupported_handle)) {
     cleanup();
     return 1;
   }
   unsupported_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
-  if (!check_unsupported_output(
-          "OpenSharedHandle",
-          device->OpenSharedHandle(nullptr, __uuidof(ID3D12Heap), &unsupported_output), unsupported_output
-      )) {
+  unsupported_hr = device->OpenSharedHandle(nullptr, __uuidof(ID3D12Heap),
+                                            &unsupported_output);
+  if (!check_unsupported_output("OpenSharedHandle", unsupported_hr,
+                                unsupported_output)) {
     cleanup();
     return 1;
   }
   unsupported_handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(1));
-  if (!check_unsupported_output(
-          "OpenSharedHandleByName", device->OpenSharedHandleByName(nullptr, 0, &unsupported_handle), unsupported_handle
-      )) {
+  unsupported_hr =
+      device->OpenSharedHandleByName(nullptr, 0, &unsupported_handle);
+  if (!check_unsupported_output("OpenSharedHandleByName", unsupported_hr,
+                                unsupported_handle)) {
     cleanup();
     return 1;
   }

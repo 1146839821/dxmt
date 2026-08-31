@@ -615,8 +615,6 @@ ValidateGraphicsPipelineDescriptor(MTLD3D12Device *device, const D3D12_GRAPHICS_
       desc.RasterizerState.ForcedSampleCount ||
       desc.RasterizerState.ConservativeRaster != D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF)
     return E_NOTIMPL;
-  if (desc.GS.pShaderBytecode)
-    return E_NOTIMPL;
   if (desc.StreamOutput.NumEntries > kMaxStreamOutputEntries || desc.StreamOutput.NumStrides > kMaxStreamOutputStrides ||
       (desc.StreamOutput.NumEntries && !desc.StreamOutput.pSODeclaration) ||
       (desc.StreamOutput.NumStrides && !desc.StreamOutput.pBufferStrides))

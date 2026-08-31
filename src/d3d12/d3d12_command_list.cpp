@@ -68,6 +68,7 @@ enum class DrawCallStatus {
   Invalid,
   Ordinary,
   MSCTessellation,
+  MSCGeometry,
 };
 
 inline bool
@@ -90,12 +91,16 @@ to_metal_primitive_type(D3D12_PRIMITIVE_TOPOLOGY topo, WMTPrimitiveType &primiti
     primitive = WMTPrimitiveTypeTriangleStrip;
     break;
   case D3D_PRIMITIVE_TOPOLOGY_LINELIST_ADJ:
-  case D3D_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ:
-  case D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ:
-  case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ:
-    // geometry
-    primitive = WMTPrimitiveTypePoint;
+    primitive = WMTPrimitiveTypeLineWithAdj;
     break;
+  case D3D_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ:
+    primitive = WMTPrimitiveTypeLineStripWithAdj;
+    break;
+  case D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ:
+    primitive = WMTPrimitiveTypeTriangleWithAdj;
+    break;
+  case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ:
+    return false;
   case D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST:
   case D3D_PRIMITIVE_TOPOLOGY_2_CONTROL_POINT_PATCHLIST:
   case D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST:
@@ -135,6 +140,24 @@ to_metal_primitive_type(D3D12_PRIMITIVE_TOPOLOGY topo, WMTPrimitiveType &primiti
     return false;
   }
   return true;
+}
+
+inline bool
+geometry_primitive_matches(WMTPrimitiveType primitive, WMTPrimitiveType input_primitive) {
+  switch (input_primitive) {
+  case WMTPrimitiveTypePoint:
+    return primitive == WMTPrimitiveTypePoint;
+  case WMTPrimitiveTypeLine:
+    return primitive == WMTPrimitiveTypeLine || primitive == WMTPrimitiveTypeLineStrip;
+  case WMTPrimitiveTypeTriangle:
+    return primitive == WMTPrimitiveTypeTriangle || primitive == WMTPrimitiveTypeTriangleStrip;
+  case WMTPrimitiveTypeLineWithAdj:
+    return primitive == WMTPrimitiveTypeLineWithAdj || primitive == WMTPrimitiveTypeLineStripWithAdj;
+  case WMTPrimitiveTypeTriangleWithAdj:
+    return primitive == WMTPrimitiveTypeTriangleWithAdj;
+  default:
+    return false;
+  }
 }
 
 /* FIXME: it's not *public* */
@@ -904,11 +927,13 @@ public:
       recording_failed_ = true;
       return false;
     }
-    if (!pipeline->IsComputePipelineState && pipeline->shader_backend == D3D12ShaderBackend::MetalShaderConverter &&
-        static_cast<MTLD3D12GraphicsPipelineState *>(pipeline)->msc_tessellation) {
-      WARN("D3D12 ", name, " with MSC tessellation PSO is unsupported");
-      recording_failed_ = true;
-      return false;
+    if (!pipeline->IsComputePipelineState && pipeline->shader_backend == D3D12ShaderBackend::MetalShaderConverter) {
+      auto graphics = static_cast<MTLD3D12GraphicsPipelineState *>(pipeline);
+      if (graphics->msc_tessellation || graphics->msc_geometry) {
+        WARN("D3D12 ", name, " with MSC emulation PSO is unsupported");
+        recording_failed_ = true;
+        return false;
+      }
     }
     return true;
   }
@@ -1045,8 +1070,8 @@ public:
   EncodeVertexBuffers() {
     if (pso_graphics_ && pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter) {
       auto slot_mask = pso_graphics_->slot_mask;
-      const bool tessellation = pso_graphics_->msc_tessellation;
-      if (tessellation) {
+      const bool emulation = pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry;
+      if (emulation) {
         auto offset = PopulateMSCVertexBufferTable();
         if (recording_failed_)
           return;
@@ -1064,7 +1089,7 @@ public:
         uint64_t buffer_offset = 0;
         auto allocation = state.BufferLocation ? device_->LookupBufferByVA(state.BufferLocation, &buffer_offset) : nullptr;
         auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-        cmd.type = tessellation ? WMTRenderCommandSetObjectBuffer : WMTRenderCommandSetVertexBuffer;
+        cmd.type = WMTRenderCommandSetVertexBuffer;
         cmd.buffer = allocation ? allocation->buffer().handle : 0;
         cmd.offset = buffer_offset;
         cmd.index = DXMT_MSC_VERTEX_BUFFER_BIND_POINT + slot;
@@ -1090,6 +1115,8 @@ public:
 
     const bool use_msc = pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
     const bool use_msc_tessellation = pso_graphics_->msc_tessellation;
+    const bool use_msc_geometry = pso_graphics_->msc_geometry;
+    const bool use_msc_emulation = use_msc_tessellation || use_msc_geometry;
     auto encode_msc_buffer = [&](obj_handle_t buffer, uint64_t offset, uint8_t index, bool fragment = true) {
       auto encode = [&](WMTRenderCommandType type) {
         auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
@@ -1098,7 +1125,7 @@ public:
         cmd.offset = offset;
         cmd.index = index;
       };
-      if (use_msc_tessellation) {
+      if (use_msc_emulation) {
         encode(WMTRenderCommandSetObjectBuffer);
         encode(WMTRenderCommandSetMeshBuffer);
         if (fragment)
@@ -1351,7 +1378,11 @@ public:
             " pso=", pso_graphics_ ? pso_graphics_->pso.handle : 0, " rtvs=", num_rtvs);
     if (recording_failed_)
       return DrawCallStatus::Invalid;
-    return use_msc_tessellation ? DrawCallStatus::MSCTessellation : DrawCallStatus::Ordinary;
+    if (use_msc_tessellation)
+      return DrawCallStatus::MSCTessellation;
+    if (use_msc_geometry)
+      return DrawCallStatus::MSCGeometry;
+    return DrawCallStatus::Ordinary;
   }
 
   void STDMETHODCALLTYPE
@@ -1373,6 +1404,8 @@ public:
         DEBUG("[DEBUG-DRAW] DrawInstanced rejected by PreDraw");
       return;
     }
+    if (status == DrawCallStatus::Ordinary && primitive_type >= WMTPrimitiveTypeLineWithAdj)
+      return;
 
     if (status == DrawCallStatus::MSCTessellation) {
       if (cp_count != pso_graphics_->msc_tessellation_config.hs_input_control_point_count)
@@ -1385,6 +1418,19 @@ public:
       cmd_draw.base_instance = StartInstanceLocation;
       cmd_draw.base_vertex = StartVertexLocation;
       cmd_draw.config = pso_graphics_->msc_tessellation_config;
+      return;
+    }
+    if (status == DrawCallStatus::MSCGeometry) {
+      if (!geometry_primitive_matches(primitive_type, pso_graphics_->msc_geometry_input_primitive))
+        return;
+      auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_msc_geometry_draw>();
+      cmd_draw.type = WMTRenderCommandMSCGeometryDraw;
+      cmd_draw.primitive_topology = primitive_type;
+      cmd_draw.instance_count = InstanceCount;
+      cmd_draw.vertex_count_per_instance = VertexCountPerInstance;
+      cmd_draw.base_instance = StartInstanceLocation;
+      cmd_draw.base_vertex = StartVertexLocation;
+      cmd_draw.config = pso_graphics_->msc_geometry_config;
       return;
     }
 
@@ -1420,6 +1466,8 @@ public:
         DEBUG("[DEBUG-DRAW] DrawIndexedInstanced rejected by PreDraw");
       return;
     }
+    if (status == DrawCallStatus::Ordinary && primitive_type >= WMTPrimitiveTypeLineWithAdj)
+      return;
     if (status == DrawCallStatus::MSCTessellation) {
       if (!index_buffer || cp_count != pso_graphics_->msc_tessellation_config.hs_input_control_point_count)
         return;
@@ -1435,6 +1483,23 @@ public:
       cmd_draw.base_vertex = BaseVertexLocation;
       cmd_draw.start_index = StartIndexLocation;
       cmd_draw.config = pso_graphics_->msc_tessellation_config;
+      return;
+    }
+    if (status == DrawCallStatus::MSCGeometry) {
+      if (!index_buffer || !geometry_primitive_matches(primitive_type, pso_graphics_->msc_geometry_input_primitive))
+        return;
+      auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_msc_geometry_draw_indexed>();
+      cmd_draw.type = WMTRenderCommandMSCGeometryDrawIndexed;
+      cmd_draw.primitive_topology = primitive_type;
+      cmd_draw.index_type = index_type;
+      cmd_draw.index_buffer = index_buffer;
+      cmd_draw.index_buffer_offset = index_offset;
+      cmd_draw.instance_count = InstanceCount;
+      cmd_draw.index_count_per_instance = IndexCountPerInstance;
+      cmd_draw.base_instance = StartInstanceLocation;
+      cmd_draw.base_vertex = BaseVertexLocation;
+      cmd_draw.start_index = StartIndexLocation;
+      cmd_draw.config = pso_graphics_->msc_geometry_config;
       return;
     }
     auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw_indexed>();
@@ -1619,9 +1684,10 @@ public:
     if (!descriptor_stride)
       return;
 
-    const auto stages = pso_graphics_ && pso_graphics_->msc_tessellation
-                            ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment)
-                            : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
+    const auto stages =
+        pso_graphics_ && (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry)
+            ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment)
+            : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
     const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
     const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
 

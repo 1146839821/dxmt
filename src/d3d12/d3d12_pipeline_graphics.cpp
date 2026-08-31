@@ -236,6 +236,43 @@ ExtractMTLInputLayoutElements(
   return S_OK;
 }
 
+static bool
+MapMSCGeometryInputPrimitive(uint32_t input_primitive, WMTPrimitiveType &primitive) {
+  switch (input_primitive) {
+  case DXMT_MSC_GEOMETRY_INPUT_POINT:
+    primitive = WMTPrimitiveTypePoint;
+    return true;
+  case DXMT_MSC_GEOMETRY_INPUT_LINE:
+    primitive = WMTPrimitiveTypeLine;
+    return true;
+  case DXMT_MSC_GEOMETRY_INPUT_TRIANGLE:
+    primitive = WMTPrimitiveTypeTriangle;
+    return true;
+  case DXMT_MSC_GEOMETRY_INPUT_LINE_ADJ:
+    primitive = WMTPrimitiveTypeLineWithAdj;
+    return true;
+  case DXMT_MSC_GEOMETRY_INPUT_TRIANGLE_ADJ:
+    primitive = WMTPrimitiveTypeTriangleWithAdj;
+    return true;
+  default:
+    return false;
+  }
+}
+
+static void
+CopyRenderPipelineInfoToMesh(const WMTRenderPipelineInfo &source, WMTMeshRenderPipelineInfo &destination) {
+  WMT::InitializeMeshRenderPipelineInfo(destination);
+  for (unsigned i = 0; i < 8; i++)
+    destination.colors[i] = source.colors[i];
+  destination.alpha_to_coverage_enabled = source.alpha_to_coverage_enabled;
+  destination.logic_operation_enabled = source.logic_operation_enabled;
+  destination.logic_operation = source.logic_operation;
+  destination.rasterization_enabled = source.rasterization_enabled;
+  destination.raster_sample_count = source.raster_sample_count;
+  destination.depth_pixel_format = source.depth_pixel_format;
+  destination.stencil_pixel_format = source.stencil_pixel_format;
+}
+
 class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12GraphicsPipelineState> {
 
   sm50_shader_t shader_vs;
@@ -365,13 +402,9 @@ public:
       return E_NOTIMPL;
     }
 
-    if (pDesc->GS.pShaderBytecode) {
-      ERR("CreatePipelineState: GS not supported");
-      return E_NOTIMPL;
-    }
-
     const bool has_hull = pDesc->HS.pShaderBytecode != nullptr;
     const bool has_domain = pDesc->DS.pShaderBytecode != nullptr;
+    const bool has_geometry = pDesc->GS.pShaderBytecode != nullptr;
     if (has_hull != has_domain) {
       ERR("CreatePipelineState: HS and DS must be provided together");
       return E_INVALIDARG;
@@ -382,13 +415,32 @@ public:
     auto metal = device_->GetMTLDevice();
     WMT::Reference<WMT::Error> err;
     WMT::Reference<WMT::Function> vs_func, ps_func;
-    WMT::Reference<WMT::Library> vs_lib, ps_lib, hs_lib, ds_lib, stage_in_lib;
+    WMT::Reference<WMT::Library> vs_lib, ps_lib, gs_lib, hs_lib, ds_lib, stage_in_lib;
     auto vs_backend = DetectD3D12ShaderBackend(pDesc->VS);
     auto ps_backend = pDesc->PS.pShaderBytecode ? DetectD3D12ShaderBackend(pDesc->PS) : D3D12ShaderBackend::Airconv;
+    auto gs_backend = has_geometry ? DetectD3D12ShaderBackend(pDesc->GS) : D3D12ShaderBackend::Airconv;
     const bool use_msc = vs_backend == D3D12ShaderBackend::MetalShaderConverter;
     const bool use_msc_tessellation = use_msc && has_hull && has_domain;
+    const bool use_msc_geometry = use_msc && has_geometry;
+    const uint32_t msc_emulation_flags = use_msc_tessellation ? DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION
+                                         : use_msc_geometry   ? DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION
+                                                              : 0;
     if (vs_backend == D3D12ShaderBackend::Unsupported || ps_backend == D3D12ShaderBackend::Unsupported)
-    return E_FAIL;
+      return E_FAIL;
+    if (has_geometry && gs_backend == D3D12ShaderBackend::Unsupported)
+      return E_FAIL;
+    if (has_geometry && !use_msc_geometry) {
+      ERR("CreatePipelineState: GS requires Metal Shader Converter");
+      return E_NOTIMPL;
+    }
+    if (has_geometry && (has_hull || has_domain)) {
+      ERR("CreatePipelineState: geometry and tessellation emulation are not combined");
+      return E_NOTIMPL;
+    }
+    if (has_geometry && gs_backend != D3D12ShaderBackend::MetalShaderConverter) {
+      ERR("CreatePipelineState: GS bytecode is not DXIL");
+      return E_NOTIMPL;
+    }
     if ((ps_backend == D3D12ShaderBackend::MetalShaderConverter) != use_msc)
       return E_NOTIMPL;
     if ((has_hull || has_domain) && !use_msc_tessellation) {
@@ -402,11 +454,12 @@ public:
 
     D3D12ConvertedShader converted_vs;
     D3D12ConvertedShader converted_ps;
+    D3D12ConvertedShader converted_gs;
     D3D12ConvertedShader converted_hs;
     D3D12ConvertedShader converted_ds;
     dxmt_msc_input_layout msc_stage_in_layout = {};
 
-    if (use_msc_tessellation) {
+    if (msc_emulation_flags) {
       hr = InitializeMSCStageInLayout(pDesc, msc_stage_in_layout);
       if (FAILED(hr))
         return hr;
@@ -430,17 +483,15 @@ public:
       if (FAILED(
               hr = ConvertD3D12Shader(
                   pDesc->VS, DXMT_MSC_STAGE_VERTEX, converted_vs, root_signature, root_signature_size,
-                  use_msc_tessellation ? &msc_stage_in_layout : nullptr,
-                  use_msc_tessellation ? DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION : 0
+                  msc_emulation_flags ? &msc_stage_in_layout : nullptr, msc_emulation_flags
               )
-          ))
-      {
+          )) {
         return hr;
       }
       vs_lib = metal.newLibrary(converted_vs.metallib.data(), converted_vs.metallib.size(), err);
       if (!vs_lib)
         return E_FAIL;
-      if (!use_msc_tessellation) {
+      if (!msc_emulation_flags) {
         vs_func = vs_lib.newFunction(converted_vs.entry_point.c_str());
         if (!vs_func)
           return E_FAIL;
@@ -463,7 +514,7 @@ public:
           return E_FAIL;
       }
 
-      if (use_msc_tessellation) {
+      if (msc_emulation_flags) {
         if (converted_vs.stage_in_metallib.empty()) {
           ERR("CreatePipelineState: MSC did not produce a stage-in metallib");
           return E_FAIL;
@@ -473,7 +524,9 @@ public:
         );
         if (!stage_in_lib)
           return E_FAIL;
+      }
 
+      if (use_msc_tessellation) {
         if (FAILED(
                 hr = ConvertD3D12Shader(
                     pDesc->HS, DXMT_MSC_STAGE_HULL, converted_hs, root_signature, root_signature_size, nullptr,
@@ -495,6 +548,19 @@ public:
         hs_lib = metal.newLibrary(converted_hs.metallib.data(), converted_hs.metallib.size(), err);
         ds_lib = metal.newLibrary(converted_ds.metallib.data(), converted_ds.metallib.size(), err);
         if (!hs_lib || !ds_lib)
+          return E_FAIL;
+      }
+      if (use_msc_geometry) {
+        if (FAILED(
+                hr = ConvertD3D12Shader(
+                    pDesc->GS, DXMT_MSC_STAGE_GEOMETRY, converted_gs, root_signature, root_signature_size, nullptr,
+                    DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION
+                )
+            )) {
+          return hr;
+        }
+        gs_lib = metal.newLibrary(converted_gs.metallib.data(), converted_gs.metallib.size(), err);
+        if (!gs_lib)
           return E_FAIL;
       }
       shader_backend = D3D12ShaderBackend::MetalShaderConverter;
@@ -774,6 +840,67 @@ public:
           return E_FAIL;
         msc_tessellation = true;
         msc_tessellation_config = tess_info.config;
+      } else if (use_msc_geometry) {
+        WMTPrimitiveType geometry_input_primitive;
+        if (!MapMSCGeometryInputPrimitive(converted_gs.reflection.gs_input_primitive, geometry_input_primitive) ||
+            !converted_vs.reflection.vertex_output_size_in_bytes ||
+            !converted_gs.reflection.gs_max_input_primitives_per_mesh_threadgroup ||
+            !converted_gs.reflection.gs_instance_count)
+          return E_INVALIDARG;
+
+        switch (geometry_input_primitive) {
+        case WMTPrimitiveTypePoint:
+          if (pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT)
+            return E_INVALIDARG;
+          break;
+        case WMTPrimitiveTypeLine:
+        case WMTPrimitiveTypeLineWithAdj:
+          if (pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE)
+            return E_INVALIDARG;
+          break;
+        case WMTPrimitiveTypeTriangle:
+        case WMTPrimitiveTypeTriangleWithAdj:
+          if (pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE)
+            return E_INVALIDARG;
+          break;
+        default:
+          return E_INVALIDARG;
+        }
+
+        WMTMSCGeometryPipelineInfo geometry_info;
+        WMT::InitializeMSCGeometryPipelineInfo(geometry_info);
+        CopyRenderPipelineInfoToMesh(info, geometry_info.base);
+        geometry_info.stage_in_library = stage_in_lib.handle;
+        geometry_info.vertex_library = vs_lib.handle;
+        geometry_info.geometry_library = gs_lib.handle;
+        geometry_info.fragment_library = ps_lib.handle;
+        std::strncpy(
+            geometry_info.vertex_function_name, converted_vs.entry_point.c_str(),
+            sizeof(geometry_info.vertex_function_name) - 1
+        );
+        std::strncpy(
+            geometry_info.geometry_function_name, converted_gs.entry_point.c_str(),
+            sizeof(geometry_info.geometry_function_name) - 1
+        );
+        if (pDesc->PS.pShaderBytecode) {
+          std::strncpy(
+              geometry_info.fragment_function_name, converted_ps.entry_point.c_str(),
+              sizeof(geometry_info.fragment_function_name) - 1
+          );
+        }
+        geometry_info.config.gs_vertex_size_in_bytes = converted_vs.reflection.vertex_output_size_in_bytes;
+        geometry_info.config.gs_max_input_primitives_per_mesh_threadgroup =
+            converted_gs.reflection.gs_max_input_primitives_per_mesh_threadgroup;
+        geometry_info.config.gs_instance_count = converted_gs.reflection.gs_instance_count;
+
+        pso = metal.newMSCGeometryPipelineState(geometry_info, err);
+        if (!pso)
+          ERR("Failed to create MSC geometry PSO: ", err ? err.description().getUTF8String() : "unknown error");
+        if (!pso)
+          return E_FAIL;
+        msc_geometry = true;
+        msc_geometry_config = geometry_info.config;
+        msc_geometry_input_primitive = geometry_input_primitive;
       } else {
         pso = metal.newRenderPipelineState(info, err);
       }

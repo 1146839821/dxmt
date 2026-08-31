@@ -909,6 +909,11 @@ public:
     );
   }
 
+  Reference<RenderPipelineState>
+  newMSCGeometryPipelineState(const WMTMSCGeometryPipelineInfo &info, Error &error) {
+    return Reference<RenderPipelineState>(MTLDevice_newMSCGeometryPipelineState(handle, &info, &error.handle));
+  }
+
   Reference<Buffer>
   newMSCTessellatorTables() {
     return Reference<Buffer>(MTLDevice_newMSCTessellatorTables(handle));
@@ -1237,6 +1242,12 @@ InitializeMeshRenderPipelineInfo(WMTMeshRenderPipelineInfo &info) {
 
 inline void
 InitializeMSCTessellationPipelineInfo(WMTMSCTessellationPipelineInfo &info) {
+  std::memset(&info, 0, sizeof(info));
+  InitializeMeshRenderPipelineInfo(info.base);
+}
+
+inline void
+InitializeMSCGeometryPipelineInfo(WMTMSCGeometryPipelineInfo &info) {
   std::memset(&info, 0, sizeof(info));
   InitializeMeshRenderPipelineInfo(info.base);
 }
