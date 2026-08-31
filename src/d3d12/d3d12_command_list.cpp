@@ -51,6 +51,7 @@ correct_motion_vector_format(WMTPixelFormat format) {
 
 enum class DirtyState {
   VertexBuffer,
+  StreamOutput,
   GraphicsRootArguments,
   GraphicsRootSignature,
   DescriptorHeaps,
@@ -379,6 +380,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   Flags<DirtyState> dirty_state_;
 
   std::array<D3D12_VERTEX_BUFFER_VIEW, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vertex_buffers_;
+  std::array<D3D12_STREAM_OUTPUT_BUFFER_VIEW, D3D12_SO_BUFFER_SLOT_COUNT> stream_output_views_;
 
   uint64_t index_buffer_address;
   WMT::Buffer index_buffer;
@@ -537,6 +539,7 @@ public:
     memset(rootarg_compute_staging_, 0, sizeof(rootarg_compute_staging_));
 
     memset(vertex_buffers_.data(), 0, sizeof(vertex_buffers_));
+    memset(stream_output_views_.data(), 0, sizeof(stream_output_views_));
 
     index_buffer_address = 0;
     index_buffer = {};
@@ -831,6 +834,7 @@ public:
     memset(rootarg_graphics_staging_, 0, sizeof(rootarg_graphics_staging_));
     memset(rootarg_compute_staging_, 0, sizeof(rootarg_compute_staging_));
     memset(vertex_buffers_.data(), 0, sizeof(vertex_buffers_));
+    memset(stream_output_views_.data(), 0, sizeof(stream_output_views_));
     index_buffer_address = 0;
     index_buffer = {};
     index_type = {};
@@ -1108,6 +1112,89 @@ public:
     cmd.index = SM50_BINDING_INDEX_VERTEX_BUFFER;
   }
 
+  bool
+  ValidateStreamOutputDraw(UINT vertex_count, UINT instance_count) {
+    if (!pso_graphics_ || !pso_graphics_->stream_output)
+      return true;
+
+    uint64_t output_count = vertex_count;
+    if (instance_count && output_count > std::numeric_limits<uint64_t>::max() / instance_count) {
+      recording_failed_ = true;
+      return false;
+    }
+    output_count *= instance_count;
+    if (pso_graphics_->stream_output_stride &&
+        output_count > std::numeric_limits<uint64_t>::max() / pso_graphics_->stream_output_stride) {
+      recording_failed_ = true;
+      return false;
+    }
+    return true;
+  }
+
+  void
+  EncodeStreamOutputBuffers() {
+    if (!pso_graphics_ || !pso_graphics_->stream_output)
+      return;
+
+    struct SO_BUFFER_ENTRY {
+      uint64_t buffer_handle;
+      uint64_t counter_handle;
+      uint64_t size;
+    };
+    auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(SO_BUFFER_ENTRY) * D3D12_SO_BUFFER_SLOT_COUNT, 16);
+    if (!mapped) {
+      recording_failed_ = true;
+      return;
+    }
+    auto *entries = static_cast<SO_BUFFER_ENTRY *>(mapped);
+    std::memset(entries, 0, sizeof(SO_BUFFER_ENTRY) * D3D12_SO_BUFFER_SLOT_COUNT);
+
+    for (UINT slot = 0; slot < D3D12_SO_BUFFER_SLOT_COUNT; slot++) {
+      const auto &view = stream_output_views_[slot];
+      if (!view.SizeInBytes)
+        continue;
+
+      uint64_t buffer_offset = 0;
+      auto buffer = device_->LookupBufferByVA(view.BufferLocation, &buffer_offset);
+      if (!buffer || buffer_offset > buffer->length() || view.SizeInBytes > buffer->length() - buffer_offset ||
+          !view.BufferFilledSizeLocation) {
+        recording_failed_ = true;
+        return;
+      }
+
+      uint64_t counter_offset = 0;
+      auto counter = device_->LookupBufferByVA(view.BufferFilledSizeLocation, &counter_offset);
+      if (!counter || counter_offset > counter->length() || sizeof(uint32_t) > counter->length() - counter_offset) {
+        recording_failed_ = true;
+        return;
+      }
+
+      auto &buffer_use = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
+      buffer_use.type = WMTRenderCommandUseResource;
+      buffer_use.resource = buffer->buffer().handle;
+      buffer_use.usage = WMTResourceUsageWrite;
+      buffer_use.stages = WMTRenderStageVertex;
+
+      if (counter->buffer().handle != buffer->buffer().handle) {
+        auto &counter_use = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
+        counter_use.type = WMTRenderCommandUseResource;
+        counter_use.resource = counter->buffer().handle;
+        counter_use.usage = WMTResourceUsageWrite;
+        counter_use.stages = WMTRenderStageVertex;
+      }
+
+      entries[slot].buffer_handle = buffer->gpuAddress() + buffer_offset;
+      entries[slot].counter_handle = counter->gpuAddress() + counter_offset;
+      entries[slot].size = view.SizeInBytes;
+    }
+
+    auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+    cmd.type = WMTRenderCommandSetVertexBuffer;
+    cmd.buffer = allocator_->gpu_heap_buffer_;
+    cmd.offset = offset;
+    cmd.index = SM50_BINDING_INDEX_STREAM_OUTPUT0;
+  }
+
   DrawCallStatus
   PreDraw(bool SkipResourceBinding = false) {
     if (!pso_graphics_)
@@ -1223,7 +1310,8 @@ public:
       }
 
       dirty_state_.set(
-          DirtyState::VertexBuffer, DirtyState::GraphicsRootArguments, DirtyState::GraphicsRootSignature,
+          DirtyState::VertexBuffer, DirtyState::StreamOutput, DirtyState::GraphicsRootArguments,
+          DirtyState::GraphicsRootSignature,
           DirtyState::DescriptorHeaps
       );
       dirty_state_.set(DirtyState::Viewport, DirtyState::ScissorRect);
@@ -1242,6 +1330,11 @@ public:
     if (dirty_state_.test(DirtyState::VertexBuffer)) {
       EncodeVertexBuffers();
       dirty_state_.clr(DirtyState::VertexBuffer);
+    }
+
+    if (dirty_state_.test(DirtyState::StreamOutput)) {
+      EncodeStreamOutputBuffers();
+      dirty_state_.clr(DirtyState::StreamOutput);
     }
 
     if (use_msc && dirty_state_.test(DirtyState::DescriptorHeaps)) {
@@ -1394,6 +1487,8 @@ public:
             " vertex_start=", StartVertexLocation, " instance_start=", StartInstanceLocation);
     if (!ValidateCommand(SupportsGraphics(), "DrawInstanced"))
       return;
+    if (!ValidateStreamOutputDraw(VertexCountPerInstance, InstanceCount))
+      return;
     WMTPrimitiveType primitive_type;
     uint32_t cp_count;
     if (!to_metal_primitive_type(topology_, primitive_type, cp_count))
@@ -1441,6 +1536,8 @@ public:
     cmd_draw.instance_count = InstanceCount;
     cmd_draw.vertex_start = StartVertexLocation;
     cmd_draw.vertex_count = VertexCountPerInstance;
+    if (pso_graphics_->stream_output)
+      EmitMemoryBarrier(WMTBarrierScopeBuffers, WMTRenderStageVertex, WMTRenderStageVertex);
   };
 
   void STDMETHODCALLTYPE
@@ -1455,6 +1552,8 @@ public:
             " index_start=", StartIndexLocation, " base_vertex=", BaseVertexLocation,
             " instance_start=", StartInstanceLocation);
     if (!ValidateCommand(SupportsGraphics(), "DrawIndexedInstanced"))
+      return;
+    if (!ValidateStreamOutputDraw(IndexCountPerInstance, InstanceCount))
       return;
     WMTPrimitiveType primitive_type;
     uint32_t cp_count;
@@ -1512,6 +1611,8 @@ public:
     cmd_draw.instance_count = InstanceCount;
     cmd_draw.base_vertex = BaseVertexLocation;
     cmd_draw.base_instance = StartInstanceLocation;
+    if (pso_graphics_->stream_output)
+      EmitMemoryBarrier(WMTBarrierScopeBuffers, WMTRenderStageVertex, WMTRenderStageVertex);
   };
 
   uint64_t
@@ -2539,6 +2640,7 @@ public:
     pso_compute_ = nullptr;
     dirty_state_.set(
         DirtyState::GraphicsPipelineState, DirtyState::ComputePipelineState, DirtyState::DescriptorHeaps,
+        DirtyState::StreamOutput,
         DirtyState::VertexBuffer
     );
   };
@@ -2837,7 +2939,14 @@ public:
   };
 
   void STDMETHODCALLTYPE SOSetTargets(UINT StartSlot, UINT Count, const D3D12_STREAM_OUTPUT_BUFFER_VIEW *Views) {
-    MarkUnsupportedCommand("SOSetTargets");
+    if (StartSlot > D3D12_SO_BUFFER_SLOT_COUNT || Count > D3D12_SO_BUFFER_SLOT_COUNT - StartSlot ||
+        (Count && !Views)) {
+      recording_failed_ = true;
+      return;
+    }
+    for (UINT slot = StartSlot; slot < StartSlot + Count; slot++)
+      stream_output_views_[slot] = Views[slot - StartSlot];
+    dirty_state_.set(DirtyState::StreamOutput);
   };
 
   void STDMETHODCALLTYPE

@@ -10,6 +10,10 @@ dx12_graphics_sm6 = executable('dx12_graphics_sm6', 'dx12_graphics_sm6.cpp',
   dependencies: [ d3d12_dep ],
 )
 
+dx12_stream_output = executable('dx12_stream_output', 'dx12_stream_output.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dx12_command_list_type = executable('dx12_command_list_type', 'dx12_command_list_type.cpp',
   dependencies: [ d3d12_dep ],
 )
@@ -164,6 +168,24 @@ if dxc_command.length() > 0
   custom_target('dx12_geometry_root_cbv_sm6_ps_fixture',
     input: 'geometry_root_cbv_sm6.hlsl',
     output: 'geometry_root_cbv_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_instanced_sm6_vs_fixture',
+    input: 'geometry_instanced_sm6.hlsl',
+    output: 'geometry_instanced_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_instanced_sm6_gs_fixture',
+    input: 'geometry_instanced_sm6.hlsl',
+    output: 'geometry_instanced_sm6.gs.cso',
+    command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_instanced_sm6_ps_fixture',
+    input: 'geometry_instanced_sm6.hlsl',
+    output: 'geometry_instanced_sm6.ps.cso',
     command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )

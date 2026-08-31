@@ -40,12 +40,23 @@ struct D3D12PipelineInputElement {
   UINT instance_data_step_rate = 0;
 };
 
+struct D3D12PipelineStreamOutputElement {
+  std::string semantic_name;
+  bool has_semantic_name = false;
+  UINT stream = 0;
+  UINT semantic_index = 0;
+  BYTE start_component = 0;
+  BYTE component_count = 0;
+  BYTE output_slot = 0;
+};
+
 struct D3D12PipelineStreamData {
   D3D12PipelineType type = D3D12PipelineType::Unknown;
   Com<ID3D12RootSignature> root_signature;
   std::vector<uint8_t> compute_shader;
   std::vector<uint8_t> vertex_shader;
   std::vector<uint8_t> pixel_shader;
+  std::vector<uint8_t> geometry_shader;
   std::vector<uint8_t> domain_shader;
   std::vector<uint8_t> hull_shader;
   std::vector<uint8_t> cached_pso;
@@ -54,6 +65,10 @@ struct D3D12PipelineStreamData {
   D3D12_PIPELINE_STATE_FLAGS flags = {};
 
   std::vector<D3D12PipelineInputElement> input_layout;
+  std::vector<D3D12PipelineStreamOutputElement> stream_output;
+  std::array<UINT, 4> stream_output_strides{};
+  UINT stream_output_num_strides = 0;
+  UINT stream_output_rasterized_stream = 0;
   D3D12_BLEND_DESC blend_state = {};
   UINT sample_mask = UINT_MAX;
   D3D12_RASTERIZER_DESC rasterizer_state = {};

@@ -23,9 +23,9 @@ namespace dxmt {
 namespace {
 
 constexpr char kPipelineKeyNamespace[] = "dxmt-d3d12-pipeline";
-constexpr uint32_t kPipelineKeyVersion = 2;
+constexpr uint32_t kPipelineKeyVersion = 3;
 constexpr uint32_t kPipelineConverterAPIVersion = 0x040001;
-constexpr uint32_t kPipelineBindingLayoutVersion = 1;
+constexpr uint32_t kPipelineBindingLayoutVersion = 2;
 constexpr uint32_t kPipelineMetalTargetVersion = 0;
 constexpr char kPipelineEntryPointPolicy[] = "auto-from-dxil";
 
@@ -339,6 +339,7 @@ PutStreamOutputDesc(ByteWriter &writer, const D3D12_STREAM_OUTPUT_DESC &desc) {
   writer.put_u32(desc.NumEntries);
   for (UINT i = 0; i < desc.NumEntries; i++) {
     const auto &entry = desc.pSODeclaration[i];
+    writer.put_u32(entry.Stream);
     if (!PutString(writer, entry.SemanticName))
       return false;
     writer.put_u32(entry.SemanticIndex);
@@ -557,6 +558,10 @@ bool
 IsValidStreamScalarState(const D3D12PipelineStreamData &data) {
   if (data.cached_pso.size() > kMaxCachedBlobSize || (data.node_mask & ~1u) || static_cast<uint32_t>(data.flags) > 1)
     return false;
+  if (data.stream_output.size() > kMaxStreamOutputEntries || data.stream_output_num_strides > 4 ||
+      (data.stream_output.size() && !data.stream_output_num_strides) ||
+      (!data.stream_output.size() && data.stream_output_num_strides))
+    return false;
   if (data.type == D3D12PipelineType::Compute)
     return !data.compute_shader.empty();
   if (data.type != D3D12PipelineType::Graphics || data.vertex_shader.empty() || data.sample_desc.Count == 0 ||
@@ -615,12 +620,27 @@ ValidateGraphicsPipelineDescriptor(MTLD3D12Device *device, const D3D12_GRAPHICS_
       desc.RasterizerState.ForcedSampleCount ||
       desc.RasterizerState.ConservativeRaster != D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF)
     return E_NOTIMPL;
-  if (desc.StreamOutput.NumEntries > kMaxStreamOutputEntries || desc.StreamOutput.NumStrides > kMaxStreamOutputStrides ||
+  if (desc.StreamOutput.NumEntries > kMaxStreamOutputEntries || desc.StreamOutput.NumStrides > 4 ||
       (desc.StreamOutput.NumEntries && !desc.StreamOutput.pSODeclaration) ||
       (desc.StreamOutput.NumStrides && !desc.StreamOutput.pBufferStrides))
     return E_INVALIDARG;
-  if (desc.StreamOutput.NumEntries || desc.StreamOutput.NumStrides)
-    return E_NOTIMPL;
+  if (desc.StreamOutput.NumEntries != 0 || desc.StreamOutput.NumStrides != 0) {
+    if (!desc.StreamOutput.NumEntries || !desc.StreamOutput.NumStrides)
+      return E_INVALIDARG;
+    if (desc.StreamOutput.NumStrides != 1) {
+      ERR("CreateGraphicsPipelineState: Stream Output requires exactly one stride");
+      return E_NOTIMPL;
+    }
+    if (desc.StreamOutput.RasterizedStream != D3D12_SO_NO_RASTERIZED_STREAM) {
+      ERR("CreateGraphicsPipelineState: Stream Output rasterized stream is unsupported: ",
+          desc.StreamOutput.RasterizedStream);
+      return E_NOTIMPL;
+    }
+    if (desc.GS.pShaderBytecode || desc.HS.pShaderBytecode || desc.DS.pShaderBytecode) {
+      ERR("CreateGraphicsPipelineState: Stream Output with GS or tessellation is unsupported");
+      return E_NOTIMPL;
+    }
+  }
   return S_OK;
 }
 
@@ -785,6 +805,41 @@ CopyStreamInputLayout(const D3D12_INPUT_LAYOUT_DESC &source, std::vector<D3D12Pi
   return true;
 }
 
+bool
+CopyStreamOutput(const D3D12_STREAM_OUTPUT_DESC &source, D3D12PipelineStreamData &destination) {
+  if (source.NumEntries > kMaxStreamOutputEntries || source.NumStrides > 4 ||
+      (source.NumEntries && !source.pSODeclaration) || (source.NumStrides && !source.pBufferStrides) ||
+      (source.NumEntries && !source.NumStrides))
+    return false;
+
+  destination.stream_output.clear();
+  destination.stream_output_num_strides = source.NumStrides;
+  destination.stream_output_strides = {};
+  for (UINT i = 0; i < source.NumStrides; i++)
+    destination.stream_output_strides[i] = source.pBufferStrides[i];
+
+  destination.stream_output.reserve(source.NumEntries);
+  for (UINT i = 0; i < source.NumEntries; i++) {
+    const auto &source_element = source.pSODeclaration[i];
+    D3D12PipelineStreamOutputElement destination_element;
+    destination_element.stream = source_element.Stream;
+    destination_element.semantic_index = source_element.SemanticIndex;
+    destination_element.start_component = source_element.StartComponent;
+    destination_element.component_count = source_element.ComponentCount;
+    destination_element.output_slot = source_element.OutputSlot;
+    if (source_element.SemanticName) {
+      size_t semantic_length = 0;
+      if (!GetBoundedStringLength(source_element.SemanticName, semantic_length))
+        return false;
+      destination_element.semantic_name.assign(source_element.SemanticName, semantic_length);
+      destination_element.has_semantic_name = true;
+    }
+    destination.stream_output.push_back(std::move(destination_element));
+  }
+  destination.stream_output_rasterized_stream = source.RasterizedStream;
+  return true;
+}
+
 const void *
 DataOrNull(const std::vector<uint8_t> &data) {
   return data.empty() ? nullptr : data.data();
@@ -811,13 +866,16 @@ MaterializeComputeDescriptor(
 bool
 MaterializeGraphicsDescriptor(
     const D3D12PipelineStreamData &source, D3D12_GRAPHICS_PIPELINE_STATE_DESC &destination,
-    std::vector<D3D12_INPUT_ELEMENT_DESC> &input_elements
+    std::vector<D3D12_INPUT_ELEMENT_DESC> &input_elements,
+    std::vector<D3D12_SO_DECLARATION_ENTRY> &stream_output_entries,
+    std::vector<std::string> &stream_output_names
 ) {
   try {
     destination = {};
     destination.pRootSignature = source.root_signature.ptr();
     destination.VS = MaterializeShader(source.vertex_shader);
     destination.PS = MaterializeShader(source.pixel_shader);
+    destination.GS = MaterializeShader(source.geometry_shader);
     destination.DS = MaterializeShader(source.domain_shader);
     destination.HS = MaterializeShader(source.hull_shader);
     destination.InputLayout.NumElements = static_cast<UINT>(source.input_layout.size());
@@ -836,6 +894,29 @@ MaterializeGraphicsDescriptor(
       };
     }
     destination.InputLayout.pInputElementDescs = input_elements.empty() ? nullptr : input_elements.data();
+    stream_output_entries.resize(source.stream_output.size());
+    stream_output_names.resize(source.stream_output.size());
+    for (size_t i = 0; i < source.stream_output.size(); i++) {
+      const auto &source_element = source.stream_output[i];
+      auto &destination_element = stream_output_entries[i];
+      stream_output_names[i] = source_element.semantic_name;
+      destination_element = {
+          source_element.stream,
+          source_element.has_semantic_name ? stream_output_names[i].c_str() : nullptr,
+          source_element.semantic_index,
+          source_element.start_component,
+          source_element.component_count,
+          source_element.output_slot,
+      };
+    }
+    destination.StreamOutput.pSODeclaration =
+        stream_output_entries.empty() ? nullptr : stream_output_entries.data();
+    destination.StreamOutput.NumEntries = static_cast<UINT>(stream_output_entries.size());
+    destination.StreamOutput.pBufferStrides = source.stream_output_num_strides
+                                                  ? source.stream_output_strides.data()
+                                                  : nullptr;
+    destination.StreamOutput.NumStrides = source.stream_output_num_strides;
+    destination.StreamOutput.RasterizedStream = source.stream_output_rasterized_stream;
     destination.BlendState = source.blend_state;
     destination.SampleMask = source.sample_mask;
     destination.RasterizerState = source.rasterizer_state;
@@ -1047,7 +1128,11 @@ public:
     if (parsed.type == D3D12PipelineType::Graphics) {
       D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics;
       std::vector<D3D12_INPUT_ELEMENT_DESC> input_elements;
-      if (!MaterializeGraphicsDescriptor(parsed, graphics, input_elements))
+      std::vector<D3D12_SO_DECLARATION_ENTRY> stream_output_entries;
+      std::vector<std::string> stream_output_names;
+      if (!MaterializeGraphicsDescriptor(
+              parsed, graphics, input_elements, stream_output_entries, stream_output_names
+          ))
         return E_OUTOFMEMORY;
       return LoadGraphicsPipeline(name, &graphics, riid, pipeline_state);
     }
@@ -1323,11 +1408,13 @@ ParseD3D12PipelineStateStream(const D3D12_PIPELINE_STATE_STREAM_DESC *desc, D3D1
                                type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER ||
                                type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL ||
                                type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT ||
-                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE ||
-                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY ||
-                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS ||
-                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT ||
-                               type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC;
+                                type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE ||
+                                type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY ||
+                                type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS ||
+                                type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT ||
+                                type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC ||
+                                type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT ||
+                                type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS;
       size_t next_offset;
 
       switch (type) {
@@ -1442,11 +1529,20 @@ ParseD3D12PipelineStateStream(const D3D12_PIPELINE_STATE_STREAM_DESC *desc, D3D1
         break;
       case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT: {
         D3D12_STREAM_OUTPUT_DESC stream_output;
-        if (!ReadStreamPayload(stream, stream_size, offset, stream_output, next_offset))
+        if (!SetStreamType(parsed.type, D3D12PipelineType::Graphics) ||
+            !ReadStreamPayload(stream, stream_size, offset, stream_output, next_offset) ||
+            !CopyStreamOutput(stream_output, parsed))
           return E_INVALIDARG;
-        return E_NOTIMPL;
+        break;
       }
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS: {
+        D3D12_SHADER_BYTECODE shader;
+        if (!SetStreamType(parsed.type, D3D12PipelineType::Graphics) ||
+            !ReadStreamPayload(stream, stream_size, offset, shader, next_offset) ||
+            !CopyStreamShader(shader, parsed.geometry_shader))
+          return E_INVALIDARG;
+        break;
+      }
       case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS:
       case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS: {
         D3D12_SHADER_BYTECODE shader;
@@ -1496,7 +1592,11 @@ CreateD3D12PipelineStateFromStream(
   if (parsed.type == D3D12PipelineType::Graphics) {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics;
     std::vector<D3D12_INPUT_ELEMENT_DESC> input_elements;
-    if (!MaterializeGraphicsDescriptor(parsed, graphics, input_elements))
+    std::vector<D3D12_SO_DECLARATION_ENTRY> stream_output_entries;
+    std::vector<std::string> stream_output_names;
+    if (!MaterializeGraphicsDescriptor(
+            parsed, graphics, input_elements, stream_output_entries, stream_output_names
+        ))
       return E_OUTOFMEMORY;
     return CreateGraphicsPipelineState(device, &graphics, riid, pipeline_state);
   }

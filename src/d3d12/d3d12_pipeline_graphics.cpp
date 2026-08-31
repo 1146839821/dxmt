@@ -26,8 +26,12 @@
 #include "airconv_public.h"
 #include "DXBCParser/DXBCUtils.h"
 
+#include <algorithm>
+#include <array>
 #include <cstring>
+#include <limits>
 #include <utility>
+#include <vector>
 
 namespace dxmt {
 
@@ -259,6 +263,78 @@ MapMSCGeometryInputPrimitive(uint32_t input_primitive, WMTPrimitiveType &primiti
   }
 }
 
+static HRESULT
+InitializeD3D12StreamOutput(
+    const void *pShaderBytecode, const D3D12_STREAM_OUTPUT_DESC &desc,
+    std::vector<SM50_STREAM_OUTPUT_ELEMENT> &elements,
+    uint32_t strides[4]
+) {
+  using namespace microsoft;
+
+  if (!desc.NumEntries || desc.NumStrides != 1 || !desc.pSODeclaration || !desc.pBufferStrides) {
+    return E_INVALIDARG;
+  }
+  if (desc.RasterizedStream != D3D12_SO_NO_RASTERIZED_STREAM) {
+    return E_NOTIMPL;
+  }
+
+  CSignatureParser parser;
+  HRESULT hr = DXBCGetOutputSignature(pShaderBytecode, &parser);
+  if (FAILED(hr)) {
+    return hr;
+  }
+
+  const D3D11_SIGNATURE_PARAMETER *parameters;
+  auto parameter_count = parser.GetParameters(&parameters);
+  uint32_t output_offset = 0;
+  elements.clear();
+  elements.reserve(static_cast<size_t>(desc.NumEntries) * 4);
+  strides[0] = desc.pBufferStrides[0];
+  strides[1] = strides[2] = strides[3] = 0;
+
+  for (UINT i = 0; i < desc.NumEntries; i++) {
+    const auto &entry = desc.pSODeclaration[i];
+    const uint32_t component_end = uint32_t(entry.StartComponent) + uint32_t(entry.ComponentCount);
+    if (entry.Stream != 0 || entry.OutputSlot != 0) {
+      return E_NOTIMPL;
+    }
+    if (component_end > 4) {
+      return E_INVALIDARG;
+    }
+    if (entry.ComponentCount == 0)
+      continue;
+    if (output_offset > std::numeric_limits<uint32_t>::max() - uint32_t(entry.ComponentCount) * sizeof(uint32_t))
+      return E_INVALIDARG;
+
+    uint32_t register_id = 0xffffffff;
+    if (entry.SemanticName) {
+      if (!entry.SemanticName[0]) {
+        return E_INVALIDARG;
+      }
+      auto parameter = std::find_if(
+          parameters, parameters + parameter_count, [&](const D3D11_SIGNATURE_PARAMETER &candidate) {
+            return candidate.SemanticIndex == entry.SemanticIndex &&
+                   strcasecmp(candidate.SemanticName, entry.SemanticName) == 0;
+          }
+      );
+      if (parameter == parameters + parameter_count) {
+        return E_INVALIDARG;
+      }
+      register_id = parameter->Register;
+    }
+
+    for (UINT component = 0; component < entry.ComponentCount; component++) {
+      elements.push_back({register_id, entry.StartComponent + component, 0, output_offset});
+      output_offset += sizeof(uint32_t);
+    }
+  }
+
+  if (!strides[0] || strides[0] < output_offset) {
+    return E_INVALIDARG;
+  }
+  return S_OK;
+}
+
 static void
 CopyRenderPipelineInfoToMesh(const WMTRenderPipelineInfo &source, WMTMeshRenderPipelineInfo &destination) {
   WMT::InitializeMeshRenderPipelineInfo(destination);
@@ -397,11 +473,7 @@ public:
 
   HRESULT
   Initialize(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) {
-    if (pDesc->StreamOutput.NumEntries) {
-      ERR("CreatePipelineState: SO not supported");
-      return E_NOTIMPL;
-    }
-
+    const bool has_stream_output = pDesc->StreamOutput.NumEntries != 0;
     const bool has_hull = pDesc->HS.pShaderBytecode != nullptr;
     const bool has_domain = pDesc->DS.pShaderBytecode != nullptr;
     const bool has_geometry = pDesc->GS.pShaderBytecode != nullptr;
@@ -422,6 +494,10 @@ public:
     const bool use_msc = vs_backend == D3D12ShaderBackend::MetalShaderConverter;
     const bool use_msc_tessellation = use_msc && has_hull && has_domain;
     const bool use_msc_geometry = use_msc && has_geometry;
+    if (has_stream_output && (use_msc || has_geometry || has_hull || has_domain)) {
+      ERR("CreatePipelineState: Stream Output requires an ordinary VS without GS or tessellation");
+      return E_NOTIMPL;
+    }
     const uint32_t msc_emulation_flags = use_msc_tessellation ? DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION
                                          : use_msc_geometry   ? DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION
                                                               : 0;
@@ -458,6 +534,16 @@ public:
     D3D12ConvertedShader converted_hs;
     D3D12ConvertedShader converted_ds;
     dxmt_msc_input_layout msc_stage_in_layout = {};
+    std::vector<SM50_STREAM_OUTPUT_ELEMENT> stream_output_elements;
+    uint32_t stream_output_strides[4] = {};
+
+    if (has_stream_output) {
+      hr = InitializeD3D12StreamOutput(
+          pDesc->VS.pShaderBytecode, pDesc->StreamOutput, stream_output_elements, stream_output_strides
+      );
+      if (FAILED(hr))
+        return hr;
+    }
 
     if (msc_emulation_flags) {
       hr = InitializeMSCStageInLayout(pDesc, msc_stage_in_layout);
@@ -592,17 +678,31 @@ public:
         data_ia_layout.slot_mask = slot_mask;
         data_ia_layout.next = &common;
 
+        SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA data_so = {};
+        if (has_stream_output) {
+          data_so.type = SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT;
+          data_so.num_output_slots = 1;
+          data_so.num_elements = static_cast<uint32_t>(stream_output_elements.size());
+          memcpy(data_so.strides, stream_output_strides, sizeof(data_so.strides));
+          data_so.elements = stream_output_elements.data();
+          data_so.next = &data_ia_layout;
+        }
+
         SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
         SM50_SHADER_COMPILATION_ARGUMENT_DATA *shader_args =
-            reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&data_ia_layout);
+            reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(
+                has_stream_output ? static_cast<void *>(&data_so) : static_cast<void *>(&data_ia_layout)
+            );
         if (pDesc->pRootSignature) {
           rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
           rootsig.bytecode_length =
               static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&rootsig.bytecode);
-          rootsig.next = &data_ia_layout;
+          rootsig.next = has_stream_output ? static_cast<void *>(&data_so) : static_cast<void *>(&data_ia_layout);
           shader_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
         } else {
           data_ia_layout.next = &common;
+          if (has_stream_output)
+            data_so.next = &data_ia_layout;
         }
 
         sm50_bitcode_t vs_bitcode;
@@ -694,7 +794,7 @@ public:
       }
     }
 
-    if (!use_msc && pDesc->PS.pShaderBytecode) {
+    if (!use_msc && pDesc->PS.pShaderBytecode && !has_stream_output) {
       auto sha1 = Sha1HashState::compute(pDesc->PS.pShaderBytecode, pDesc->PS.BytecodeLength);
 
       std::string ps_name = "ps_main" + sha1.string().substr(0, 8);
@@ -745,7 +845,8 @@ public:
     // PSO
     {
       info.vertex_function = vs_func.handle;
-      info.fragment_function = ps_func.handle;
+      info.fragment_function = has_stream_output ? NULL_OBJECT_HANDLE : ps_func.handle;
+      info.rasterization_enabled = !has_stream_output;
 
       switch (pDesc->PrimitiveTopologyType) {
       case D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT:
@@ -847,6 +948,10 @@ public:
             !converted_gs.reflection.gs_max_input_primitives_per_mesh_threadgroup ||
             !converted_gs.reflection.gs_instance_count)
           return E_INVALIDARG;
+        if (converted_gs.reflection.gs_instance_count != 1) {
+          ERR("CreatePipelineState: instanced geometry shaders are not supported");
+          return E_NOTIMPL;
+        }
 
         switch (geometry_input_primitive) {
         case WMTPrimitiveTypePoint:
@@ -904,6 +1009,9 @@ public:
       } else {
         pso = metal.newRenderPipelineState(info, err);
       }
+
+      stream_output = has_stream_output;
+      stream_output_stride = has_stream_output ? stream_output_strides[0] : 0;
 
        if (!pso) {
          ERR("Failed to create PSO: ", err ? err.description().getUTF8String() : "unknown error");
@@ -1048,13 +1156,15 @@ CreateGraphicsPipelineState(
 
   D3D12PipelineCacheData pipeline_cache;
   HRESULT hr = BuildD3D12PipelineCacheData(pDevice, *pDesc, pipeline_cache);
-  if (FAILED(hr))
+  if (FAILED(hr)) {
     return hr;
+  }
 
   auto pso = Com(new MTLD3D12GraphicsPipelineStateImpl(pDevice));
   hr = pso->Initialize(pDesc);
-  if (FAILED(hr))
+  if (FAILED(hr)) {
     return hr;
+  }
   pso->pipeline_cache = std::move(pipeline_cache);
   return pso->QueryInterface(riid, ppPipelineState);
 };

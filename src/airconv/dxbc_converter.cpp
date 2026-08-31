@@ -655,10 +655,54 @@ llvm::Error convert_dxbc_vertex_shader(
       auto slot0_entry =
           builder.CreateLoad(so_entries_type, builder.CreateConstInBoundsGEP1_32(so_entries_type, so_entries, 0));
       auto slot0 = builder.CreateExtractValue(slot0_entry, {0});
+      auto slot0_counter = builder.CreateExtractValue(slot0_entry, {1});
+      auto slot0_size = builder.CreateExtractValue(slot0_entry, {2});
       auto adjusted_vertex_id = builder.CreateSub(vertex_id, base_vertex);
       auto output_regs = builder.CreateBitOrPointerCast(
         ctx.resource.output.ptr_int4, llvm::PointerType::get(ctx.types._int, 0)
       );
+
+      auto vertex_offset = builder.CreateMul(adjusted_vertex_id, builder.getInt32(vertex_so->strides[0]));
+      auto *write_block = llvm::BasicBlock::Create(ctx.llvm, "so.write", ctx.function);
+      auto *done_block = llvm::BasicBlock::Create(ctx.llvm, "so.done", ctx.function);
+      auto has_buffer = builder.CreateICmpNE(
+          slot0, llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(slot0->getType()))
+      );
+      builder.CreateCondBr(has_buffer, write_block, done_block);
+      builder.SetInsertPoint(write_block);
+
+      auto *counter_block = llvm::BasicBlock::Create(ctx.llvm, "so.counter", ctx.function);
+      auto *offset_block = llvm::BasicBlock::Create(ctx.llvm, "so.offset", ctx.function);
+      auto has_counter = builder.CreateICmpNE(
+          slot0_counter,
+          llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(slot0_counter->getType()))
+      );
+      builder.CreateCondBr(has_counter, counter_block, offset_block);
+
+      builder.SetInsertPoint(counter_block);
+      auto counter_offset = ctx.air.CreateAtomicRMW(
+          llvm::AtomicRMWInst::Add, slot0_counter, builder.getInt32(vertex_so->strides[0])
+      );
+      if (!counter_offset)
+        return nullptr;
+      builder.CreateBr(offset_block);
+
+      builder.SetInsertPoint(offset_block);
+      auto output_offset = builder.CreatePHI(ctx.types._int, 2);
+      output_offset->addIncoming(vertex_offset, write_block);
+      output_offset->addIncoming(counter_offset, counter_block);
+      auto output_offset_64 = builder.CreateZExt(output_offset, ctx.types._long);
+      uint32_t output_end = 0;
+      for (unsigned i = 0; i < vertex_so->num_elements; i++) {
+        auto &element = vertex_so->elements[i];
+        output_end = std::max(output_end, element.offset + static_cast<uint32_t>(sizeof(uint32_t)));
+      }
+      auto output_end_64 = builder.CreateAdd(output_offset_64, builder.getInt64(output_end));
+      auto output_in_bounds = builder.CreateICmpULE(output_end_64, slot0_size);
+      auto *store_block = llvm::BasicBlock::Create(ctx.llvm, "so.store", ctx.function);
+      builder.CreateCondBr(output_in_bounds, store_block, done_block);
+
+      builder.SetInsertPoint(store_block);
       for (unsigned i = 0; i < vertex_so->num_elements; i++) {
         auto &element = vertex_so->elements[i];
         if (element.reg_id == 0xffffffff)
@@ -667,13 +711,7 @@ llvm::Error convert_dxbc_vertex_shader(
           ctx.types._int, output_regs,
           (unsigned)(element.reg_id * 4 + element.component)
         );
-        auto target_offset = ctx.builder.CreateAdd(
-          ctx.builder.CreateMul(
-            adjusted_vertex_id,
-            ctx.builder.getInt32(vertex_so->strides[element.output_slot /* expected to be 0 */])
-          ),
-          ctx.builder.getInt32(element.offset)
-        );
+        auto target_offset = ctx.builder.CreateAdd(output_offset_64, ctx.builder.getInt64(element.offset));
         auto target_ptr = ctx.builder.CreateGEP(
           ctx.types._int, slot0, {ctx.builder.CreateLShr(target_offset, 2)}
         );
@@ -681,6 +719,8 @@ llvm::Error convert_dxbc_vertex_shader(
           ctx.builder.CreateLoad(ctx.types._int, ptr), target_ptr, true
         );
       }
+      builder.CreateBr(done_block);
+      builder.SetInsertPoint(done_block);
       return nullptr;
     });
   }

@@ -385,7 +385,7 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     );
     return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
   }
-  if ((params->reserved & DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION) && ir_stage == IRShaderStageGeometry &&
+  if (ir_stage == IRShaderStageGeometry &&
       (!g_msc_api.IRShaderReflectionCopyGeometryInfo || !g_msc_api.IRShaderReflectionReleaseGeometryInfo)) {
     dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC geometry reflection is unavailable");
     return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;

@@ -122,6 +122,7 @@ ArgumentEncodingContext::encodeVertexBuffers(uint32_t slot_mask, uint64_t offset
 struct SO_BUFFER_ENTRY {
   uint64_t buffer_handle;
   uint64_t counter_handle;
+  uint64_t size;
 };
 
 template <>
@@ -136,11 +137,15 @@ ArgumentEncodingContext::encodeStreamOutputBuffers<PipelineKind::Ordinary>(uint6
     if (!buffer.ptr()) {
       entries[slot].buffer_handle = 0;
       entries[slot].counter_handle = 0;
+      entries[slot].size = 0;
       continue;
     }
-    auto [buffer_alloc, buffer_offset] = access<PipelineStage::Vertex>(buffer, state.offset, 0, ResourceAccess::Write);
+    auto valid_length = buffer->length() > state.offset ? buffer->length() - state.offset : 0;
+    auto [buffer_alloc, buffer_offset] =
+        access<PipelineStage::Vertex>(buffer, state.offset, valid_length, ResourceAccess::Write);
     entries[slot].buffer_handle = buffer_alloc->gpuAddress() + buffer_offset + state.offset;
     entries[slot].counter_handle = 0; // TODO(stream-output): counter & buffer_filled_size
+    entries[slot].size = valid_length;
     makeResident<PipelineStage::Vertex, PipelineKind::Ordinary>(buffer.ptr(), false, true);
   };
   {

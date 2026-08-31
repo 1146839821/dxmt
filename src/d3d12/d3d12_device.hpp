@@ -207,6 +207,8 @@ public:
   bool msc_geometry = false;
   WMTMSCGeometryPipelineConfig msc_geometry_config = {};
   WMTPrimitiveType msc_geometry_input_primitive = WMTPrimitiveTypePoint;
+  bool stream_output = false;
+  uint32_t stream_output_stride = 0;
   enum WMTTriangleFillMode fill_mode;
   enum WMTCullMode cull_mode;
   enum WMTDepthClipMode depth_clip_mode;

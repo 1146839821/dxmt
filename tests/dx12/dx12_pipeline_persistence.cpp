@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d12.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -354,6 +355,7 @@ struct GraphicsStream {
   StreamSubobject<UINT, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK> sample_mask;
   StreamSubobject<D3D12_RASTERIZER_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER> rasterizer;
   StreamSubobject<D3D12_BLEND_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND> blend;
+  StreamSubobject<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS> gs;
 };
 
 struct InvalidTypeStream {
@@ -749,9 +751,9 @@ main(int argc, char **argv) {
   unsupported_graphics_stream_desc.pPipelineStateSubobjectStream = &unsupported_graphics_stream;
   if (!CheckHR(
           "CreatePipelineState unsupported stream",
-          device2->CreatePipelineState(&unsupported_graphics_stream_desc, IID_PPV_ARGS(&invalid_stream_pso)), E_NOTIMPL
+          device2->CreatePipelineState(&unsupported_graphics_stream_desc, IID_PPV_ARGS(&invalid_stream_pso)), E_INVALIDARG
       ))
-    return fail("unsupported stream subobject was accepted");
+    return fail("incomplete graphics stream was accepted");
 
   D3D12_PIPELINE_STATE_SUBOBJECT_TYPE truncated_unsupported_type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS;
   D3D12_PIPELINE_STATE_STREAM_DESC truncated_unsupported_stream_desc = {
@@ -776,7 +778,9 @@ main(int argc, char **argv) {
   graphics_stream.sample_mask.value = graphics_desc.SampleMask;
   graphics_stream.rasterizer.value = graphics_desc.RasterizerState;
   graphics_stream.blend.value = graphics_desc.BlendState;
-  graphics_stream_desc.SizeInBytes = sizeof(graphics_stream);
+  graphics_stream.gs.value = graphics_desc.GS;
+  graphics_stream_desc.SizeInBytes = offsetof(GraphicsStream, gs) +
+                                     (geometry ? sizeof(graphics_stream.gs) : 0);
   graphics_stream_desc.pPipelineStateSubobjectStream = &graphics_stream;
   if (!CheckHR(
           "CreatePipelineState graphics stream",
@@ -834,10 +838,8 @@ main(int argc, char **argv) {
   Release(loaded_compute);
   if (!CheckHR("Load graphics stream pipeline",
                library->LoadPipeline(L"graphics", &graphics_stream_desc,
-                                     IID_PPV_ARGS(&loaded_graphics)),
-               geometry ? E_INVALIDARG : S_OK))
-    return fail(geometry ? "geometry pipeline accepted an incomplete stream"
-                         : "graphics stream library load failed");
+                                     IID_PPV_ARGS(&loaded_graphics))))
+    return fail("graphics stream library load failed");
   Release(loaded_graphics);
 
   mismatched_compute_desc = compute_desc;
@@ -896,11 +898,8 @@ main(int argc, char **argv) {
   if (!CheckHR("Load rehydrated graphics stream pipeline",
                rehydrated_library->LoadPipeline(L"graphics",
                                                 &graphics_stream_desc,
-                                                IID_PPV_ARGS(&loaded_graphics)),
-               geometry ? E_INVALIDARG : S_OK))
-    return fail(
-        geometry ? "rehydrated geometry pipeline accepted an incomplete stream"
-                 : "rehydrated graphics stream library load failed");
+                                                IID_PPV_ARGS(&loaded_graphics))))
+    return fail("rehydrated graphics stream library load failed");
   Release(loaded_graphics);
 
   if (!CheckHR(

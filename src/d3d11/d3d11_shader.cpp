@@ -325,7 +325,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
     SM50_SHADER_IA_INPUT_LAYOUT_DATA data_vertex_pulling;
     data_so.type = SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT;
     data_so.next = common;
-    data_so.num_output_slots = 0;
+    data_so.num_output_slots = 1;
     data_so.num_elements =
         ((IMTLD3D11StreamOutputLayout *)variant.stream_output_layout_handle)
             ->GetStreamOutputElements(

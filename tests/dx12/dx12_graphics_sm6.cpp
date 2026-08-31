@@ -33,12 +33,14 @@ int main(int argc, char **argv) {
       (strcmp(argv[3], "--geometry-adj") == 0 || geometry_adjacency_indexed);
   const bool geometry_root_cbv =
       argc == 5 && strcmp(argv[3], "--geometry-root-cbv") == 0;
+  const bool geometry_instanced =
+      argc == 5 && strcmp(argv[3], "--geometry-instanced") == 0;
   const bool geometry_indexed =
       argc == 5 && (strcmp(argv[3], "--geometry-indexed") == 0 ||
                     geometry_adjacency_indexed);
   const bool geometry =
       argc == 5 && (strcmp(argv[3], "--geometry") == 0 || geometry_indexed ||
-                    geometry_adjacency || geometry_root_cbv);
+                    geometry_adjacency || geometry_root_cbv || geometry_instanced);
   const bool textured = argc == 4 && strcmp(argv[3], "--texture") == 0;
   const bool root_cbv = argc == 4 && strcmp(argv[3], "--root-cbv") == 0;
   const bool root_constants = argc == 4 && strcmp(argv[3], "--root-constants") == 0;
@@ -189,6 +191,7 @@ int main(int argc, char **argv) {
   UINT64 timestamp_end = 0;
   UINT64 calibration_gpu = 0;
   UINT64 calibration_cpu = 0;
+  HRESULT instanced_geometry_hr = E_FAIL;
   int result = 1;
 
   if (!CheckHR("D3D12CreateDevice",
@@ -494,6 +497,20 @@ int main(int argc, char **argv) {
   pso_desc.RasterizerState.DepthClipEnable = TRUE;
   pso_desc.BlendState.RenderTarget[0].RenderTargetWriteMask =
       D3D12_COLOR_WRITE_ENABLE_ALL;
+  if (geometry_instanced) {
+    instanced_geometry_hr =
+        device->CreateGraphicsPipelineState(&pso_desc, IID_PPV_ARGS(&pso));
+    if (instanced_geometry_hr != E_NOTIMPL || pso) {
+      std::cerr << "CreateGraphicsPipelineState with instanced geometry returned 0x"
+                << std::hex << static_cast<unsigned long>(instanced_geometry_hr)
+                << std::dec << "\n";
+      std::cerr << "instanced geometry shader was not rejected\n";
+      goto cleanup;
+    }
+    std::cout << "DXIL instanced geometry rejection passed\n";
+    result = 0;
+    goto cleanup;
+  }
   if (!CheckHR(
           "CreateGraphicsPipelineState",
           device->CreateGraphicsPipelineState(&pso_desc, IID_PPV_ARGS(&pso))))
