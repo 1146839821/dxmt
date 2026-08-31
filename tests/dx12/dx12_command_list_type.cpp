@@ -171,6 +171,28 @@ int main() {
   if (queue)
     queue->Release();
 
+  ID3D12Device *other_device = nullptr;
+  ID3D12CommandAllocator *foreign_allocator = nullptr;
+  ID3D12GraphicsCommandList *foreign_list = nullptr;
+  if (!CheckHR("CreateOtherDevice", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&other_device))) ||
+      !CheckHR(
+          "CreateForeignAllocator",
+          other_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&foreign_allocator))
+      )) {
+    result = 1;
+  } else if (device->CreateCommandList(
+                 0, D3D12_COMMAND_LIST_TYPE_DIRECT, foreign_allocator, nullptr, IID_PPV_ARGS(&foreign_list)
+             ) != E_INVALIDARG) {
+    std::cerr << "cross-device command allocator was accepted\n";
+    result = 1;
+  }
+  if (foreign_list)
+    foreign_list->Release();
+  if (foreign_allocator)
+    foreign_allocator->Release();
+  if (other_device)
+    other_device->Release();
+
   device->Release();
   if (!result)
     std::cout << "D3D12 command list type tests passed\n";

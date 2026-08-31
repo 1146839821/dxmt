@@ -323,6 +323,10 @@ int main() {
   architecture.NodeIndex = 0;
   D3D12_FEATURE_DATA_ARCHITECTURE1 architecture1 = {};
   architecture1.NodeIndex = 0;
+  const D3D_FEATURE_LEVEL expected_max_feature_level =
+      SUCCEEDED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_1, __uuidof(ID3D12Device), nullptr))
+          ? D3D_FEATURE_LEVEL_11_1
+          : D3D_FEATURE_LEVEL_11_0;
   D3D_FEATURE_LEVEL requested_levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
   D3D12_FEATURE_DATA_FEATURE_LEVELS feature_levels = {2, requested_levels, {}};
   D3D12_FEATURE_DATA_SHADER_MODEL shader_model = {D3D_SHADER_MODEL_6_0};
@@ -399,7 +403,7 @@ int main() {
     return 1;
   }
   if (!architecture.TileBasedRenderer || !architecture.UMA || !architecture1.TileBasedRenderer ||
-      !architecture1.UMA || feature_levels.MaxSupportedFeatureLevel != D3D_FEATURE_LEVEL_11_0 ||
+       !architecture1.UMA || feature_levels.MaxSupportedFeatureLevel != expected_max_feature_level ||
       shader_model.HighestShaderModel != D3D_SHADER_MODEL_6_0 || options.ResourceBindingTier != D3D12_RESOURCE_BINDING_TIER_2 ||
        shader_model_5_1.HighestShaderModel != D3D_SHADER_MODEL_5_1 ||
        options.TiledResourcesTier != D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED ||

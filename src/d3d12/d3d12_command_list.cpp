@@ -479,7 +479,8 @@ public:
 
   HRESULT
   Initialize(ID3D12CommandAllocator *pAllocator, ID3D12PipelineState *pInitialPipelineState) {
-    if (!pAllocator)
+    if (!pAllocator || !IsSameDevice(device_, pAllocator) ||
+        (pInitialPipelineState && !IsSameDevice(device_, pInitialPipelineState)))
       return E_INVALIDARG;
     auto allocator = static_cast<MTLD3D12CommandAllocatorImpl *>(pAllocator);
 
@@ -2022,6 +2023,10 @@ public:
   ) {
     if (!ValidateCommand(SupportsCopy(), "CopyBufferRegion"))
       return;
+    if (!IsSameDevice(device_, pDstBuffer) || !IsSameDevice(device_, pSrcBuffer)) {
+      recording_failed_ = true;
+      return;
+    }
     auto *dst = static_cast<MTLD3D12Resource *>(pDstBuffer);
     auto *src = static_cast<MTLD3D12Resource *>(pSrcBuffer);
     if (!buffer_range_in_bounds(dst, DstOffset, ByteCount) || !buffer_range_in_bounds(src, SrcOffset, ByteCount))
@@ -2045,8 +2050,10 @@ public:
   ) {
     if (!ValidateCommand(SupportsCopy(), "CopyTextureRegion"))
       return;
-    if (!pDst || !pSrc)
+    if (!pDst || !pSrc || !IsSameDevice(device_, pDst->pResource) || !IsSameDevice(device_, pSrc->pResource)) {
+      recording_failed_ = true;
       return;
+    }
     if (!PreBlit())
       return;
 
@@ -2395,6 +2402,10 @@ public:
   CopyResource(ID3D12Resource *pDstResource, ID3D12Resource *pSrcResource) {
     if (!ValidateCommand(SupportsCopy(), "CopyResource"))
       return;
+    if (!IsSameDevice(device_, pDstResource) || !IsSameDevice(device_, pSrcResource)) {
+      recording_failed_ = true;
+      return;
+    }
     auto *pDst = static_cast<MTLD3D12Resource *>(pDstResource);
     auto *pSrc = static_cast<MTLD3D12Resource *>(pSrcResource);
     if (!pDst || !pSrc || (pDst == pSrc))
@@ -2464,6 +2475,7 @@ public:
     if (!ValidateCommand(SupportsCopy(), "CopyTiles"))
       return;
     WARN("CopyTiles is not implemented");
+    recording_failed_ = true;
   };
 
   void STDMETHODCALLTYPE ResolveSubresource(
@@ -2472,10 +2484,14 @@ public:
   ) {
     if (!ValidateCommand(SupportsCopy(), "ResolveSubresource"))
       return;
+    if (!IsSameDevice(device_, pDstResource) || !IsSameDevice(device_, pSrcResource)) {
+      recording_failed_ = true;
+      return;
+    }
     auto *pDst = static_cast<MTLD3D12Resource *>(pDstResource);
     auto *pSrc = static_cast<MTLD3D12Resource *>(pSrcResource);
 
-    if (!pDst->texture || !pSrc->texture)
+    if (!pDst || !pSrc || !pDst->texture || !pSrc->texture)
       return;
 
     auto DstMips = pDst->texture->miplevelCount();
@@ -2616,6 +2632,10 @@ public:
       return;
     }
 
+    if (!IsSameDevice(device_, pPSO)) {
+      recording_failed_ = true;
+      return;
+    }
     auto pso = static_cast<MTLD3D12PipelineState *>(pPSO);
     if (pso->IsComputePipelineState) {
       if (!ValidateCommand(SupportsCompute(), "SetPipelineState(compute)"))
@@ -2654,6 +2674,10 @@ public:
 
       switch (barrier.Type) {
       case D3D12_RESOURCE_BARRIER_TYPE_TRANSITION: {
+        if (!IsSameDevice(device_, barrier.Transition.pResource)) {
+          recording_failed_ = true;
+          continue;
+        }
         auto resource = static_cast<MTLD3D12Resource *>(barrier.Transition.pResource);
         if (!resource) {
           recording_failed_ = true;
@@ -2679,10 +2703,20 @@ public:
         break;
       }
       case D3D12_RESOURCE_BARRIER_TYPE_UAV:
+        if (barrier.UAV.pResource && !IsSameDevice(device_, barrier.UAV.pResource)) {
+          recording_failed_ = true;
+          break;
+        }
         EncodeMemoryBarrier(resource_barrier_scope(static_cast<MTLD3D12Resource *>(barrier.UAV.pResource)),
                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         break;
       case D3D12_RESOURCE_BARRIER_TYPE_ALIASING:
+        if ((barrier.Aliasing.pResourceBefore &&
+             !IsSameDevice(device_, barrier.Aliasing.pResourceBefore)) ||
+            (barrier.Aliasing.pResourceAfter && !IsSameDevice(device_, barrier.Aliasing.pResourceAfter))) {
+          recording_failed_ = true;
+          break;
+        }
         // Metal serializes the encoder boundary, which is the visibility point needed for alias reuse.
         allocator_->InvalidateCurrentPass();
         break;
@@ -2714,6 +2748,11 @@ public:
     for (UINT i = 0; i < HeapCount; i++) {
       if (!Heaps[i]) {
         WARN("D3D12 SetDescriptorHeaps received a null heap");
+        recording_failed_ = true;
+        return;
+      }
+      if (!IsSameDevice(device_, Heaps[i])) {
+        WARN("D3D12 SetDescriptorHeaps received a heap from another device");
         recording_failed_ = true;
         return;
       }
@@ -2751,6 +2790,10 @@ public:
     if (rootsig_compute_.ptr() == pRootSignature)
       return;
     if (pRootSignature) {
+      if (!IsSameDevice(device_, pRootSignature)) {
+        recording_failed_ = true;
+        return;
+      }
       rootsig_compute_ = static_cast<MTLD3D12RootSignature *>(pRootSignature);
       assert(rootsig_compute_->UploadQwords <= std::size(rootarg_compute_staging_));
     } else {
@@ -2764,6 +2807,10 @@ public:
     if (rootsig_graphics_.ptr() == pRootSignature)
       return;
     if (pRootSignature) {
+      if (!IsSameDevice(device_, pRootSignature)) {
+        recording_failed_ = true;
+        return;
+      }
       rootsig_graphics_ = static_cast<MTLD3D12RootSignature *>(pRootSignature);
       assert(rootsig_graphics_->UploadQwords <= std::size(rootarg_graphics_staging_));
     } else {
@@ -2922,6 +2969,7 @@ public:
           recording_failed_ = true;
           return;
         }
+        vertex_buffers_[Slot] = {};
         continue;
       }
       uint64_t buffer_offset = 0;
@@ -3150,19 +3198,27 @@ public:
   };
 
   void STDMETHODCALLTYPE DiscardResource(ID3D12Resource *pResource, const D3D12_DISCARD_REGION *pRegion) {
-    // do nothing for now
+    MarkUnsupportedCommand("DiscardResource");
   };
 
   void STDMETHODCALLTYPE
   BeginQuery(ID3D12QueryHeap *pHeap, D3D12_QUERY_TYPE Type, UINT Index) {
-    if (Type == D3D12_QUERY_TYPE_TIMESTAMP)
+    if (Type == D3D12_QUERY_TYPE_TIMESTAMP) {
+      recording_failed_ = true;
       return;
+    }
     if (!ValidateCommand(SupportsGraphics(), "BeginQuery"))
       return;
+    if (!IsSameDevice(device_, pHeap)) {
+      recording_failed_ = true;
+      return;
+    }
     auto query = static_cast<MTLD3D12QueryHeap *>(pHeap);
     if (!query || query->type != D3D12_QUERY_HEAP_TYPE_OCCLUSION || Index >= query->count ||
-        (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION))
+        (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION)) {
+      recording_failed_ = true;
       return;
+    }
     if (PreDraw() == DrawCallStatus::Invalid)
       return;
     auto render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
@@ -3180,9 +3236,15 @@ public:
     if (Type == D3D12_QUERY_TYPE_TIMESTAMP) {
       if (!ValidateCommand(SupportsTimestamp(), "EndQuery(Timestamp)"))
         return;
-      auto query = static_cast<MTLD3D12QueryHeap *>(pHeap);
-      if (!query || query->type != D3D12_QUERY_HEAP_TYPE_TIMESTAMP || Index >= query->count || !query->timestamp_buffer)
+      if (!IsSameDevice(device_, pHeap)) {
+        recording_failed_ = true;
         return;
+      }
+      auto query = static_cast<MTLD3D12QueryHeap *>(pHeap);
+      if (!query || query->type != D3D12_QUERY_HEAP_TYPE_TIMESTAMP || Index >= query->count || !query->timestamp_buffer) {
+        recording_failed_ = true;
+        return;
+      }
 
       allocator_->InvalidateCurrentPass();
       auto timestamp = allocator_->AllocatePass<SampleTimestampData>();
@@ -3193,11 +3255,17 @@ public:
     }
     if (!ValidateCommand(SupportsGraphics(), "EndQuery"))
       return;
+    if (!IsSameDevice(device_, pHeap)) {
+      recording_failed_ = true;
+      return;
+    }
     auto query = static_cast<MTLD3D12QueryHeap *>(pHeap);
     if (!query || query->type != D3D12_QUERY_HEAP_TYPE_OCCLUSION || Index >= query->count ||
         (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION) ||
-        !allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render)
+        !allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render) {
+      recording_failed_ = true;
       return;
+    }
     auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setvisibilitymode>();
     cmd.type = WMTRenderCommandSetVisibilityMode;
     cmd.offset = 0;
@@ -3211,23 +3279,35 @@ public:
   ) {
     if (!ValidateCommand(SupportsCopy(), "ResolveQueryData"))
       return;
+    if (!IsSameDevice(device_, pHeap) || !IsSameDevice(device_, pDstBuffer)) {
+      recording_failed_ = true;
+      return;
+    }
     auto query = static_cast<MTLD3D12QueryHeap *>(pHeap);
     auto destination = static_cast<MTLD3D12Resource *>(pDstBuffer);
     if (!query || !destination || !destination->buffer || StartIndex > query->count ||
-        QueryCount > query->count - StartIndex)
+        QueryCount > query->count - StartIndex) {
+      recording_failed_ = true;
       return;
+    }
     if (Type != D3D12_QUERY_TYPE_TIMESTAMP && Type != D3D12_QUERY_TYPE_OCCLUSION &&
-        Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION)
+        Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION) {
+      recording_failed_ = true;
       return;
+    }
     if ((AlignedDstBufferOffset & (sizeof(UINT64) - 1)) ||
-        !buffer_range_in_bounds(destination, AlignedDstBufferOffset, uint64_t(QueryCount) * sizeof(UINT64)))
+        !buffer_range_in_bounds(destination, AlignedDstBufferOffset, uint64_t(QueryCount) * sizeof(UINT64))) {
+      recording_failed_ = true;
       return;
+    }
     if (!PreBlit())
       return;
 
     if (Type == D3D12_QUERY_TYPE_TIMESTAMP) {
-      if (query->type != D3D12_QUERY_HEAP_TYPE_TIMESTAMP || !query->timestamp_buffer)
+      if (query->type != D3D12_QUERY_HEAP_TYPE_TIMESTAMP || !query->timestamp_buffer) {
+        recording_failed_ = true;
         return;
+      }
       auto &cmd = allocator_->EncodeBlitCommand<wmtcmd_blit_resolvecounters>();
       cmd.type = WMTBlitCommandResolveCounters;
       cmd.sample_buffer = query->timestamp_buffer.handle;
@@ -3239,8 +3319,10 @@ public:
     }
 
     if (query->type != D3D12_QUERY_HEAP_TYPE_OCCLUSION ||
-        (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION))
+        (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION)) {
+      recording_failed_ = true;
       return;
+    }
     auto &cmd = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
     cmd.type = WMTBlitCommandCopyFromBufferToBuffer;
     cmd.src = query->visibility_buffer;
@@ -3266,6 +3348,11 @@ public:
       ID3D12CommandSignature *pCommandSignature, UINT MaxCommandCount, ID3D12Resource *pArgBuffer,
       UINT64 ArgBufferOffset, ID3D12Resource *pCountBuffer, UINT64 CountBufferOffset
   ) {
+    if (!IsSameDevice(device_, pCommandSignature) || !IsSameDevice(device_, pArgBuffer) ||
+        (pCountBuffer && !IsSameDevice(device_, pCountBuffer))) {
+      recording_failed_ = true;
+      return;
+    }
     auto sig = static_cast<MTLD3D12CommandSignature *>(pCommandSignature);
     if (!sig)
       return;

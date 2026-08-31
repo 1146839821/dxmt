@@ -47,8 +47,9 @@ int main(int argc, char **argv) {
   const bool root_srv = argc == 4 && strcmp(argv[3], "--root-srv") == 0;
   const bool root_uav = argc == 4 && strcmp(argv[3], "--root-uav") == 0;
   const bool textured_root_cbv = argc == 4 && strcmp(argv[3], "--texture-root-cbv") == 0;
+  const bool logic_op = argc == 4 && strcmp(argv[3], "--logic-op") == 0;
   if ((argc == 4 && !textured && !root_cbv && !root_constants && !root_srv &&
-       !root_uav && !textured_root_cbv) ||
+       !root_uav && !textured_root_cbv && !logic_op) ||
       (argc == 5 && !geometry))
     return 2;
 
@@ -310,7 +311,7 @@ int main(int argc, char **argv) {
   render_target_desc.Height = 1;
   render_target_desc.DepthOrArraySize = 1;
   render_target_desc.MipLevels = 1;
-  render_target_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  render_target_desc.Format = logic_op ? DXGI_FORMAT_R8G8B8A8_UINT : DXGI_FORMAT_R8G8B8A8_UNORM;
   render_target_desc.SampleDesc.Count = 1;
   render_target_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
   clear_value.Format = render_target_desc.Format;
@@ -318,6 +319,12 @@ int main(int argc, char **argv) {
   clear_value.Color[1] = 0.0f;
   clear_value.Color[2] = 0.0f;
   clear_value.Color[3] = 1.0f;
+  if (logic_op) {
+    clear_value.Color[0] = 15.0f;
+    clear_value.Color[1] = 240.0f;
+    clear_value.Color[2] = 85.0f;
+    clear_value.Color[3] = 170.0f;
+  }
   if (!CheckHR("CreateRenderTarget",
                device->CreateCommittedResource(
                    &default_heap, D3D12_HEAP_FLAG_NONE, &render_target_desc,
@@ -489,7 +496,7 @@ int main(int argc, char **argv) {
   pso_desc.InputLayout.NumElements = 2;
   pso_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   pso_desc.NumRenderTargets = 1;
-  pso_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+  pso_desc.RTVFormats[0] = logic_op ? DXGI_FORMAT_R8G8B8A8_UINT : DXGI_FORMAT_R8G8B8A8_UNORM;
   pso_desc.SampleDesc.Count = 1;
   pso_desc.SampleMask = UINT_MAX;
   pso_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
@@ -497,6 +504,10 @@ int main(int argc, char **argv) {
   pso_desc.RasterizerState.DepthClipEnable = TRUE;
   pso_desc.BlendState.RenderTarget[0].RenderTargetWriteMask =
       D3D12_COLOR_WRITE_ENABLE_ALL;
+  if (logic_op) {
+    pso_desc.BlendState.RenderTarget[0].LogicOpEnable = TRUE;
+    pso_desc.BlendState.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_OR;
+  }
   if (geometry_instanced) {
     instanced_geometry_hr =
         device->CreateGraphicsPipelineState(&pso_desc, IID_PPV_ARGS(&pso));
@@ -565,6 +576,8 @@ int main(int argc, char **argv) {
   if (geometry_indexed)
     list->IASetIndexBuffer(&index_view);
   list->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
+  if (logic_op)
+    list->ClearRenderTargetView(rtv_handle, clear_value.Color, 0, nullptr);
   list->RSSetViewports(1, &viewport);
   list->RSSetScissorRects(1, &scissor);
   list->EndQuery(timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
@@ -667,10 +680,11 @@ int main(int argc, char **argv) {
     std::cerr << "timestamp query did not advance: " << timestamp_begin << " -> " << timestamp_end << "\n";
     goto cleanup;
   }
-  expected_pixel = (geometry || root_cbv || root_constants || root_srv ||
-                    root_uav || textured_root_cbv)
-                       ? 0xff00ff00u
-                       : 0xff0000ffu;
+  expected_pixel = logic_op
+                       ? 0xffffffffu
+                       : (geometry || root_cbv || root_constants || root_srv || root_uav || textured_root_cbv)
+                           ? 0xff00ff00u
+                           : 0xff0000ffu;
   if ((pixel & 0x00ffffffu) != (expected_pixel & 0x00ffffffu)) {
     std::cerr << "graphics readback mismatch: 0x" << std::hex << pixel
               << std::dec << "\n";
@@ -687,6 +701,7 @@ int main(int argc, char **argv) {
                 : root_constants     ? "root constants graphics"
                 : root_srv           ? "root SRV graphics"
                 : root_uav           ? "root UAV graphics"
+                : logic_op           ? "logic op graphics"
                 : textured_root_cbv  ? "root CBV textured graphics"
                 : textured           ? "textured graphics"
                                      : "graphics")

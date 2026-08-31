@@ -130,6 +130,10 @@ public:
         WARN("D3D12 ExecuteCommandLists received a null command list");
         return;
       }
+      if (!IsSameDevice(device_, command_list)) {
+        WARN("D3D12 ExecuteCommandLists received a command list from another device");
+        return;
+      }
       switch (command_list->GetType()) {
       case D3D12_COMMAND_LIST_TYPE_DIRECT:
       case D3D12_COMMAND_LIST_TYPE_COMPUTE:
@@ -352,6 +356,8 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   Signal(ID3D12Fence *pFence, UINT64 Value) {
+    if (!IsSameDevice(device_, pFence))
+      return E_INVALIDARG;
     auto pool = WMT::MakeAutoreleasePool();
     auto cmdbuf = queue_.commandBuffer();
     static_cast<MTLD3D12Fence *>(pFence)->fence->signal(cmdbuf, Value);
@@ -361,6 +367,8 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   Wait(ID3D12Fence *pFence, UINT64 Value) {
+    if (!IsSameDevice(device_, pFence))
+      return E_INVALIDARG;
     auto pool = WMT::MakeAutoreleasePool();
     auto cmdbuf = queue_.commandBuffer();
     static_cast<MTLD3D12Fence *>(pFence)->fence->wait(cmdbuf, Value);

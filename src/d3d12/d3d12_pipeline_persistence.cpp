@@ -49,8 +49,6 @@ constexpr size_t kMaxCachedBlobSize = 16ull * 1024 * 1024;
 constexpr size_t kMaxPipelineStreamSize = 16ull * 1024 * 1024;
 constexpr size_t kMaxSemanticNameLength = 4096;
 
-bool IsSameDevice(MTLD3D12Device *device, ID3D12DeviceChild *child);
-
 class ByteWriter {
 public:
   void
@@ -583,7 +581,12 @@ ValidatePipelineStreamData(const D3D12PipelineStreamData &data) {
   if (data.type == D3D12PipelineType::Graphics && (data.domain_shader.empty() != data.hull_shader.empty()))
     return E_INVALIDARG;
   if (data.type == D3D12PipelineType::Graphics &&
-      (data.blend_state.AlphaToCoverageEnable || HasActiveLogicOp(data.blend_state, data.num_render_targets) ||
+      (data.blend_state.AlphaToCoverageEnable ||
+#ifdef DXMT_NO_PRIVATE_API
+       HasActiveLogicOp(data.blend_state, data.num_render_targets) ||
+#else
+       (data.blend_state.IndependentBlendEnable && HasActiveLogicOp(data.blend_state, data.num_render_targets)) ||
+#endif
        data.rasterizer_state.ForcedSampleCount ||
        data.rasterizer_state.ConservativeRaster != D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF))
     return E_NOTIMPL;
@@ -616,7 +619,12 @@ ValidateGraphicsPipelineDescriptor(MTLD3D12Device *device, const D3D12_GRAPHICS_
     return E_INVALIDARG;
   if ((desc.HS.pShaderBytecode != nullptr) != (desc.DS.pShaderBytecode != nullptr))
     return E_INVALIDARG;
-  if (desc.BlendState.AlphaToCoverageEnable || HasActiveLogicOp(desc.BlendState, desc.NumRenderTargets) ||
+  if (desc.BlendState.AlphaToCoverageEnable ||
+#ifdef DXMT_NO_PRIVATE_API
+      HasActiveLogicOp(desc.BlendState, desc.NumRenderTargets) ||
+#else
+      (desc.BlendState.IndependentBlendEnable && HasActiveLogicOp(desc.BlendState, desc.NumRenderTargets)) ||
+#endif
       desc.RasterizerState.ForcedSampleCount ||
       desc.RasterizerState.ConservativeRaster != D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF)
     return E_NOTIMPL;
@@ -983,22 +991,6 @@ struct PipelineLibraryEntry {
   std::vector<uint8_t> blob;
   Com<ID3D12PipelineState> pipeline;
 };
-
-bool
-IsSameDevice(MTLD3D12Device *device, ID3D12DeviceChild *child) {
-  if (!device || !child)
-    return false;
-  IUnknown *pipeline_identity = nullptr;
-  if (FAILED(child->GetDevice(__uuidof(IUnknown), reinterpret_cast<void **>(&pipeline_identity))))
-    return false;
-  Com<IUnknown> pipeline_identity_ref = Com<IUnknown>::transfer(pipeline_identity);
-
-  IUnknown *device_identity = nullptr;
-  if (FAILED(device->QueryInterface(__uuidof(IUnknown), reinterpret_cast<void **>(&device_identity))))
-    return false;
-  Com<IUnknown> device_identity_ref = Com<IUnknown>::transfer(device_identity);
-  return pipeline_identity_ref.ptr() == device_identity_ref.ptr();
-}
 
 class MTLD3D12PipelineLibraryImpl final : public MTLD3D12DeviceChild<ID3D12PipelineLibrary1> {
 public:

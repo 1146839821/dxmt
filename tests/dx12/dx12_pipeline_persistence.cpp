@@ -630,14 +630,16 @@ main(int argc, char **argv) {
       ))
     return fail("invalid input format was accepted");
 
-  auto unsupported_logic_desc = graphics_desc;
-  unsupported_logic_desc.BlendState.RenderTarget[0].LogicOpEnable = TRUE;
-  unsupported_logic_desc.BlendState.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_COPY;
+  auto unsupported_alpha_to_coverage_desc = graphics_desc;
+  unsupported_alpha_to_coverage_desc.BlendState.AlphaToCoverageEnable = TRUE;
   if (!CheckHR(
-          "CreateGraphicsPipelineState with unsupported logic op",
-          device->CreateGraphicsPipelineState(&unsupported_logic_desc, IID_PPV_ARGS(&invalid_descriptor_pso)), E_NOTIMPL
+          "CreateGraphicsPipelineState with unsupported alpha-to-coverage",
+          device->CreateGraphicsPipelineState(
+              &unsupported_alpha_to_coverage_desc, IID_PPV_ARGS(&invalid_descriptor_pso)
+          ),
+          E_NOTIMPL
       ))
-    return fail("unsupported logic op was accepted");
+    return fail("unsupported alpha-to-coverage was accepted");
 
   auto unsupported_forced_sample_desc = graphics_desc;
   unsupported_forced_sample_desc.RasterizerState.ForcedSampleCount = 1;

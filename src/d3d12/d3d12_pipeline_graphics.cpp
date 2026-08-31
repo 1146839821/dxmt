@@ -792,6 +792,10 @@ public:
         if (dsv_flags & 2)
           info.stencil_pixel_format = format_desc.PixelFormat;
       }
+      if (!pDesc->BlendState.IndependentBlendEnable && pDesc->BlendState.RenderTarget[0].LogicOpEnable) {
+        info.logic_operation_enabled = true;
+        info.logic_operation = kLogicOpMap[pDesc->BlendState.RenderTarget[0].LogicOp];
+      }
     }
 
     if (!use_msc && pDesc->PS.pShaderBytecode && !has_stream_output) {

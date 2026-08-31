@@ -41,10 +41,14 @@ is_supported_feature_level(D3D_FEATURE_LEVEL level) {
 
 static D3D_FEATURE_LEVEL
 get_max_supported_feature_level(WMT::Device device) {
+#ifdef DXMT_NO_PRIVATE_API
+  return D3D_FEATURE_LEVEL_11_0;
+#else
   // FL12_0 and FL12_1 require Tier 2 tiled resources, which DXMT does not
   // expose yet. Keep the hardware-dependent FL11_1 cutoff consistent with
   // the D3D11 device creation path.
   return device.supportsFamily(WMTGPUFamilyApple7) ? D3D_FEATURE_LEVEL_11_1 : D3D_FEATURE_LEVEL_11_0;
+#endif
 }
 
 extern "C" HRESULT WINAPI
@@ -92,7 +96,7 @@ D3D12CreateDevice(IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REF
   if (!ppDevice)
     return S_FALSE;
 
-  return dxmt::CreateD3D12Device(dxgi_adapter_mtl.ptr(), MinimumFeatureLevel, riid, ppDevice);
+  return dxmt::CreateD3D12Device(dxgi_adapter_mtl.ptr(), max_feature_level, riid, ppDevice);
 }
 
 extern "C" HRESULT WINAPI

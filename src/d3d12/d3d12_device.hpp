@@ -256,6 +256,8 @@ public:
   EventListener event_listener;
 };
 
+bool IsSameDevice(MTLD3D12Device *device, ID3D12DeviceChild *child);
+
 HRESULT CreateD3D12Device(IMTLDXGIAdapter *adapter, D3D_FEATURE_LEVEL feature_level, REFIID riid, void **ppDevice);
 
 HRESULT

@@ -14,6 +14,10 @@ dx12_stream_output = executable('dx12_stream_output', 'dx12_stream_output.cpp',
   dependencies: [ d3d12_dep ],
 )
 
+dx12_feature_support = executable('dx12_feature_support', 'dx12_feature_support.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dx12_command_list_type = executable('dx12_command_list_type', 'dx12_command_list_type.cpp',
   dependencies: [ d3d12_dep ],
 )
@@ -114,6 +118,18 @@ if dxc_command.length() > 0
   custom_target('dx12_graphics_sm6_ps_fixture',
     input: 'graphics_sm6.hlsl',
     output: 'graphics_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_logic_op_sm6_vs_fixture',
+    input: 'graphics_logic_op_sm6.hlsl',
+    output: 'graphics_logic_op_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_logic_op_sm6_ps_fixture',
+    input: 'graphics_logic_op_sm6.hlsl',
+    output: 'graphics_logic_op_sm6.ps.cso',
     command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )

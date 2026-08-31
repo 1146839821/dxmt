@@ -278,7 +278,8 @@ public:
       UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, ID3D12CommandAllocator *pCommandAllocator,
       ID3D12PipelineState *pInitialPipelineState, REFIID riid, void **ppCommandList
   ) {
-    if ((NodeMask & ~1u) || !pCommandAllocator)
+    if ((NodeMask & ~1u) || !pCommandAllocator || !IsSameDevice(this, pCommandAllocator) ||
+        (pInitialPipelineState && !IsSameDevice(this, pInitialPipelineState)))
       return E_INVALIDARG;
     auto allocator = static_cast<MTLD3D12CommandAllocator *>(pCommandAllocator);
     if (allocator->GetType() != Type)
@@ -418,10 +419,16 @@ public:
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS *>(pFeatureData);
       out->DoublePrecisionFloatShaderOps = FALSE;
+#ifdef DXMT_NO_PRIVATE_API
       out->OutputMergerLogicOp = FALSE;
+#else
+      out->OutputMergerLogicOp = TRUE;
+#endif
       out->MinPrecisionSupport = D3D12_SHADER_MIN_PRECISION_SUPPORT_16_BIT;
       out->TiledResourcesTier = D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED;
-      out->ResourceBindingTier = D3D12_RESOURCE_BINDING_TIER_2;
+      out->ResourceBindingTier = metal.supportsFamily(WMTGPUFamilyApple6)
+                                     ? D3D12_RESOURCE_BINDING_TIER_2
+                                     : D3D12_RESOURCE_BINDING_TIER_1;
       out->PSSpecifiedStencilRefSupported = TRUE;
       out->TypedUAVLoadAdditionalFormats = FALSE;
       out->ROVsSupported = FALSE;
@@ -602,6 +609,7 @@ public:
       if (DataSize != sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS16))
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS16 *>(pFeatureData);
+      *out = {};
       out->GPUUploadHeapSupported = FALSE;    // TODO(d3d12): gpu upload heap
       out->DynamicDepthBiasSupported = FALSE; // TODO(d3d12): ID3D12GraphicsCommandList9::RSSetDepthBias
       return S_OK;
@@ -654,6 +662,13 @@ public:
         out->Support1 |= D3D12_FORMAT_SUPPORT1_IA_VERTEX_BUFFER;
       if (format_desc.PixelFormat == WMTPixelFormatR16Uint || format_desc.PixelFormat == WMTPixelFormatR32Uint)
         out->Support1 |= D3D12_FORMAT_SUPPORT1_IA_INDEX_BUFFER;
+      if (out->Format == DXGI_FORMAT_R32_FLOAT || out->Format == DXGI_FORMAT_R32_UINT ||
+          out->Format == DXGI_FORMAT_R32_SINT || out->Format == DXGI_FORMAT_R32G32_FLOAT ||
+          out->Format == DXGI_FORMAT_R32G32_UINT || out->Format == DXGI_FORMAT_R32G32_SINT ||
+          out->Format == DXGI_FORMAT_R32G32B32_FLOAT || out->Format == DXGI_FORMAT_R32G32B32_UINT ||
+          out->Format == DXGI_FORMAT_R32G32B32_SINT || out->Format == DXGI_FORMAT_R32G32B32A32_FLOAT ||
+          out->Format == DXGI_FORMAT_R32G32B32A32_UINT || out->Format == DXGI_FORMAT_R32G32B32A32_SINT)
+        out->Support1 |= D3D12_FORMAT_SUPPORT1_SO_BUFFER;
       if (format_desc.Flag & MTL_DXGI_FORMAT_BACKBUFFER)
         out->Support1 |= D3D12_FORMAT_SUPPORT1_DISPLAY | D3D12_FORMAT_SUPPORT1_BACK_BUFFER_CAST;
       if (has_capability(FormatCapability::Color))
@@ -967,7 +982,7 @@ public:
       const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
   ) {
     InitReturnPtr(ppResource);
-    if (!pHeap || !pDesc)
+    if (!pHeap || !pDesc || !IsSameDevice(this, pHeap))
       return E_INVALIDARG;
     auto d3d12heap = static_cast<MTLD3D12Heap *>(pHeap);
     auto heap_desc = d3d12heap->GetDesc();
@@ -1488,8 +1503,10 @@ public:
     values.reserve(FenceCount);
 
     for (UINT i = 0; i < FenceCount; i++) {
+      if (!IsSameDevice(this, pFences[i]))
+        return E_INVALIDARG;
       auto fence = static_cast<MTLD3D12Fence *>(pFences[i]);
-      if (!fence || !fence->fence)
+      if (!fence->fence)
         return E_INVALIDARG;
 
       const bool fence_completed = fence->fence->completedValue() >= pValues[i];
@@ -1618,6 +1635,23 @@ public:
     return format_capabilities_.textureCapabilities.at(Format);
   }
 };
+
+bool
+IsSameDevice(MTLD3D12Device *device, ID3D12DeviceChild *child) {
+  if (!device || !child)
+    return false;
+
+  IUnknown *child_identity = nullptr;
+  if (FAILED(child->GetDevice(__uuidof(IUnknown), reinterpret_cast<void **>(&child_identity))))
+    return false;
+  Com<IUnknown> child_identity_ref = Com<IUnknown>::transfer(child_identity);
+
+  IUnknown *device_identity = nullptr;
+  if (FAILED(device->QueryInterface(__uuidof(IUnknown), reinterpret_cast<void **>(&device_identity))))
+    return false;
+  Com<IUnknown> device_identity_ref = Com<IUnknown>::transfer(device_identity);
+  return child_identity_ref.ptr() == device_identity_ref.ptr();
+}
 
 HRESULT
 CreateD3D12Device(IMTLDXGIAdapter *adapter, D3D_FEATURE_LEVEL feature_level, const IID &riid, void **ppDevice) {

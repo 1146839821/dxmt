@@ -97,7 +97,7 @@ public:
   Initialize(const D3D12_COMMAND_SIGNATURE_DESC *pDesc, ID3D12RootSignature *pRootSignature) {
     if (!pDesc || (!pDesc->NumArgumentDescs && pDesc->pArgumentDescs) ||
         (pDesc->NumArgumentDescs && !pDesc->pArgumentDescs) || !pDesc->ByteStride ||
-        (pDesc->ByteStride & 3))
+        (pDesc->ByteStride & 3) || (pRootSignature && !IsSameDevice(device_, pRootSignature)))
       return E_INVALIDARG;
 
     std::stringstream source;
