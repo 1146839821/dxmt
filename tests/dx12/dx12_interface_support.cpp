@@ -4,6 +4,7 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
+#include <cstdint>
 #include <iostream>
 
 namespace {
@@ -56,6 +57,7 @@ int main() {
   ID3D12Device5 *device5 = nullptr;
   ID3D12Device6 *device6 = nullptr;
   ID3D12Device7 *device7 = nullptr;
+  ID3D12Device8 *device8 = nullptr;
   IDXGIFactory7 *factory = nullptr;
   ID3D12GraphicsCommandList3 *list3 = nullptr;
   bool passed = true;
@@ -72,7 +74,7 @@ int main() {
   passed &= ExpectQuery<ID3D12Device5>(device, "ID3D12Device5", S_OK);
   passed &= ExpectQuery<ID3D12Device6>(device, "ID3D12Device6", S_OK);
   passed &= ExpectQuery<ID3D12Device7>(device, "ID3D12Device7", S_OK);
-  passed &= ExpectQuery<ID3D12Device8>(device, "ID3D12Device8", E_NOINTERFACE);
+  passed &= ExpectQuery<ID3D12Device8>(device, "ID3D12Device8", S_OK);
   passed &= ExpectQuery<ID3D12Device9>(device, "ID3D12Device9", E_NOINTERFACE);
   passed &= ExpectQuery<ID3D12Device10>(device, "ID3D12Device10", E_NOINTERFACE);
   if (device->QueryInterface(IID_PPV_ARGS(&device5)) != S_OK || !device5) {
@@ -139,6 +141,70 @@ int main() {
     }
     if (protected_session != output_sentinel)
       Release(protected_session);
+  }
+  if (device->QueryInterface(IID_PPV_ARGS(&device8)) != S_OK || !device8) {
+    std::cerr << "ID3D12Device8 vtable query failed\n";
+    passed = false;
+  } else {
+    D3D12_RESOURCE_DESC1 allocation_desc = {};
+    D3D12_RESOURCE_ALLOCATION_INFO1 allocation_info1 = {1, 1, 1};
+    const D3D12_RESOURCE_ALLOCATION_INFO allocation_info = device8->GetResourceAllocationInfo2(
+        1, 1, &allocation_desc, &allocation_info1
+    );
+    if (allocation_info.SizeInBytes != UINT64_MAX || allocation_info.Alignment != UINT64_MAX) {
+      std::cerr << "ID3D12Device8::GetResourceAllocationInfo2 returned a usable allocation\n";
+      passed = false;
+    }
+    if (allocation_info1.Offset || allocation_info1.Alignment || allocation_info1.SizeInBytes) {
+      std::cerr << "ID3D12Device8::GetResourceAllocationInfo2 returned allocation details\n";
+      passed = false;
+    }
+
+    void *const output_sentinel = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+    void *committed_resource = output_sentinel;
+    const HRESULT committed_resource_hr = device8->CreateCommittedResource2(
+        nullptr, D3D12_HEAP_FLAG_NONE, nullptr, D3D12_RESOURCE_STATE_COMMON, nullptr, nullptr,
+        __uuidof(ID3D12Resource), &committed_resource
+    );
+    if (committed_resource_hr != E_NOTIMPL || committed_resource != nullptr) {
+      std::cerr << "ID3D12Device8::CreateCommittedResource2 returned 0x" << std::hex
+                << static_cast<unsigned long>(committed_resource_hr) << std::dec << "\n";
+      passed = false;
+    }
+    if (committed_resource != output_sentinel) {
+      IUnknown *resource = reinterpret_cast<IUnknown *>(committed_resource);
+      Release(resource);
+    }
+
+    void *placed_resource = output_sentinel;
+    const HRESULT placed_resource_hr = device8->CreatePlacedResource1(
+        nullptr, 0, nullptr, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource), &placed_resource
+    );
+    if (placed_resource_hr != E_NOTIMPL || placed_resource != nullptr) {
+      std::cerr << "ID3D12Device8::CreatePlacedResource1 returned 0x" << std::hex
+                << static_cast<unsigned long>(placed_resource_hr) << std::dec << "\n";
+      passed = false;
+    }
+    if (placed_resource != output_sentinel) {
+      IUnknown *resource = reinterpret_cast<IUnknown *>(placed_resource);
+      Release(resource);
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE descriptor = {};
+    device8->CreateSamplerFeedbackUnorderedAccessView(nullptr, nullptr, descriptor);
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout = {};
+    layout.Offset = 1;
+    layout.Footprint.Width = 1;
+    UINT num_rows = 1;
+    UINT64 row_size = 1;
+    UINT64 total_bytes = 1;
+    device8->GetCopyableFootprints1(nullptr, 0, 1, 0, &layout, &num_rows, &row_size, &total_bytes);
+    if (layout.Offset != UINT64_MAX || layout.Footprint.Width != UINT_MAX || num_rows != UINT_MAX ||
+        row_size != UINT64_MAX || total_bytes != UINT64_MAX) {
+      std::cerr << "ID3D12Device8::GetCopyableFootprints1 returned invalid output\n";
+      passed = false;
+    }
   }
 
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
@@ -221,6 +287,7 @@ int main() {
   Release(factory);
   Release(list3);
   Release(list);
+  Release(device8);
   Release(device7);
   Release(device6);
   Release(device5);

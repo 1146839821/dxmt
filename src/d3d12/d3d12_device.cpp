@@ -230,6 +230,11 @@ public:
       return S_OK;
     }
 
+    if (riid == __uuidof(ID3D12Device8)) {
+      *ppvObject = ref(static_cast<ID3D12Device8 *>(this));
+      return S_OK;
+    }
+
     if (riid == __uuidof(ID3D12InfoQueue)) {
       *ppvObject = ref(new MTLD3D12InfoQueue());
       return S_OK;
@@ -241,8 +246,7 @@ public:
     }
 
     // Keep newer interfaces explicit until their methods have an implementation.
-    if (riid == __uuidof(ID3D12Device8) ||
-        riid == __uuidof(ID3D12Device9) || riid == __uuidof(ID3D12Device10) ||
+    if (riid == __uuidof(ID3D12Device9) || riid == __uuidof(ID3D12Device10) ||
         riid == DXMT_STREAMLINE_D3D12_DEVICE_GUID || riid == DXMT_ID3D11_DEVICE_GUID) {
       return E_NOINTERFACE;
     }
@@ -1729,6 +1733,75 @@ public:
   ) {
     InitReturnPtr(ppSession);
     return E_NOTIMPL;
+  }
+
+  D3D12_RESOURCE_ALLOCATION_INFO *STDMETHODCALLTYPE GetResourceAllocationInfo2(
+      D3D12_RESOURCE_ALLOCATION_INFO *__ret, UINT VisibleMask, UINT ResourceDescCount,
+      const D3D12_RESOURCE_DESC1 *pDescs, D3D12_RESOURCE_ALLOCATION_INFO1 *pAllocationInfos
+  ) {
+    if (!__ret)
+      return nullptr;
+    *__ret = {UINT64_MAX, UINT64_MAX};
+    if (pAllocationInfos) {
+      for (UINT i = 0; i < ResourceDescCount; i++)
+        pAllocationInfos[i] = {};
+    }
+    return __ret;
+  }
+
+  HRESULT STDMETHODCALLTYPE CreateCommittedResource2(
+      const D3D12_HEAP_PROPERTIES *pHeapProperties, D3D12_HEAP_FLAGS HeapFlags,
+      const D3D12_RESOURCE_DESC1 *pDesc, D3D12_RESOURCE_STATES InitialResourceState,
+      const D3D12_CLEAR_VALUE *pOptimizedClearValue, ID3D12ProtectedResourceSession *pProtectedSession,
+      REFIID riidResource, void **ppvResource
+  ) {
+    InitReturnPtr(ppvResource);
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE CreatePlacedResource1(
+      ID3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC1 *pDesc,
+      D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE *pOptimizedClearValue,
+      REFIID riid, void **ppvResource
+  ) {
+    InitReturnPtr(ppvResource);
+    return E_NOTIMPL;
+  }
+
+  void STDMETHODCALLTYPE CreateSamplerFeedbackUnorderedAccessView(
+      ID3D12Resource *pTargetedResource, ID3D12Resource *pFeedbackResource,
+      D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor
+  ) {}
+
+  void STDMETHODCALLTYPE GetCopyableFootprints1(
+      const D3D12_RESOURCE_DESC1 *pResourceDesc, UINT FirstSubresource, UINT NumSubresources,
+      UINT64 BaseOffset, D3D12_PLACED_SUBRESOURCE_FOOTPRINT *pLayouts, UINT *pNumRows,
+      UINT64 *pRowSizeInBytes, UINT64 *pTotalBytes
+  ) {
+    if (!pResourceDesc || pResourceDesc->SamplerFeedbackMipRegion.Width ||
+        pResourceDesc->SamplerFeedbackMipRegion.Height || pResourceDesc->SamplerFeedbackMipRegion.Depth) {
+      GetCopyableFootprints(
+          nullptr, FirstSubresource, NumSubresources, BaseOffset, pLayouts, pNumRows,
+          pRowSizeInBytes, pTotalBytes
+      );
+      return;
+    }
+
+    D3D12_RESOURCE_DESC resource_desc = {};
+    resource_desc.Dimension = pResourceDesc->Dimension;
+    resource_desc.Alignment = pResourceDesc->Alignment;
+    resource_desc.Width = pResourceDesc->Width;
+    resource_desc.Height = pResourceDesc->Height;
+    resource_desc.DepthOrArraySize = pResourceDesc->DepthOrArraySize;
+    resource_desc.MipLevels = pResourceDesc->MipLevels;
+    resource_desc.Format = pResourceDesc->Format;
+    resource_desc.SampleDesc = pResourceDesc->SampleDesc;
+    resource_desc.Layout = pResourceDesc->Layout;
+    resource_desc.Flags = pResourceDesc->Flags;
+    GetCopyableFootprints(
+        &resource_desc, FirstSubresource, NumSubresources, BaseOffset, pLayouts, pNumRows,
+        pRowSizeInBytes, pTotalBytes
+    );
   }
 };
 
