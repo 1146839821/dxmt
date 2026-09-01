@@ -590,12 +590,21 @@ int main() {
     passed = false;
   } else {
     void *const output_sentinel = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+    D3D12_RESOURCE_DESC1 resource_desc = {};
+    resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    resource_desc.Width = 4096;
+    resource_desc.Height = 1;
+    resource_desc.DepthOrArraySize = 1;
+    resource_desc.MipLevels = 1;
+    resource_desc.SampleDesc.Count = 1;
+    resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
     void *committed_resource = output_sentinel;
     const HRESULT committed_resource_hr = device10->CreateCommittedResource3(
-        nullptr, D3D12_HEAP_FLAG_NONE, nullptr, static_cast<D3D12_BARRIER_LAYOUT>(0), nullptr, nullptr, 0,
-        nullptr, __uuidof(ID3D12Resource), &committed_resource
+        nullptr, D3D12_HEAP_FLAG_NONE, &resource_desc, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr,
+        __uuidof(ID3D12Resource), &committed_resource
     );
-    if (committed_resource_hr != E_NOTIMPL || committed_resource != nullptr) {
+    if (committed_resource_hr != E_INVALIDARG || committed_resource != nullptr) {
       std::cerr << "ID3D12Device10::CreateCommittedResource3 returned 0x" << std::hex
                 << static_cast<unsigned long>(committed_resource_hr) << std::dec << "\n";
       passed = false;
@@ -605,24 +614,251 @@ int main() {
       Release(resource);
     }
 
-    void *placed_resource = output_sentinel;
-    const HRESULT placed_resource_hr = device10->CreatePlacedResource2(
-        nullptr, 0, nullptr, static_cast<D3D12_BARRIER_LAYOUT>(0), nullptr, 0, nullptr,
-        __uuidof(ID3D12Resource), &placed_resource
+    D3D12_HEAP_PROPERTIES heap_properties = {};
+    heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap_properties.CreationNodeMask = 1;
+    heap_properties.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC base_desc = {};
+    base_desc.Dimension = resource_desc.Dimension;
+    base_desc.Width = resource_desc.Width;
+    base_desc.Height = resource_desc.Height;
+    base_desc.DepthOrArraySize = resource_desc.DepthOrArraySize;
+    base_desc.MipLevels = resource_desc.MipLevels;
+    base_desc.Format = resource_desc.Format;
+    base_desc.SampleDesc = resource_desc.SampleDesc;
+    base_desc.Layout = resource_desc.Layout;
+    base_desc.Flags = resource_desc.Flags;
+    D3D12_RESOURCE_ALLOCATION_INFO allocation_info = {};
+    device->GetResourceAllocationInfo(&allocation_info, 1, 1, &base_desc);
+    D3D12_HEAP_DESC heap_desc = {allocation_info.SizeInBytes, heap_properties, D3D12_HEAP_FLAG_NONE};
+    ID3D12Heap *heap = nullptr;
+    if (!allocation_info.SizeInBytes || allocation_info.SizeInBytes == UINT64_MAX ||
+        device->CreateHeap(&heap_desc, IID_PPV_ARGS(&heap)) != S_OK || !heap) {
+      std::cerr << "CreateHeap for ID3D12Device10::CreatePlacedResource2 failed\n";
+      passed = false;
+    } else {
+      void *placed_resource = output_sentinel;
+      void *null_desc_resource = output_sentinel;
+      const HRESULT null_desc_resource_hr = device10->CreatePlacedResource2(
+          heap, 0, nullptr, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, 0, nullptr,
+          __uuidof(ID3D12Resource), &null_desc_resource
+      );
+      if (null_desc_resource_hr != E_INVALIDARG || null_desc_resource != nullptr) {
+        std::cerr << "ID3D12Device10::CreatePlacedResource2 mishandled a null descriptor\n";
+        passed = false;
+      }
+      if (null_desc_resource != output_sentinel) {
+        IUnknown *resource = reinterpret_cast<IUnknown *>(null_desc_resource);
+        Release(resource);
+      }
+
+      const HRESULT placed_resource_hr = device10->CreatePlacedResource2(
+          heap, 0, &resource_desc, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, 0, nullptr,
+          __uuidof(ID3D12Resource), &placed_resource
+      );
+      if (placed_resource_hr != S_OK || !placed_resource) {
+        std::cerr << "ID3D12Device10::CreatePlacedResource2 returned 0x" << std::hex
+                  << static_cast<unsigned long>(placed_resource_hr) << std::dec << "\n";
+        passed = false;
+      }
+      if (placed_resource != output_sentinel) {
+        IUnknown *resource = reinterpret_cast<IUnknown *>(placed_resource);
+        Release(resource);
+      }
+
+      const HRESULT placed_resource_probe_hr = device10->CreatePlacedResource2(
+          heap, 0, &resource_desc, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, 0, nullptr,
+          __uuidof(ID3D12Resource), nullptr
+      );
+      if (placed_resource_probe_hr != S_FALSE) {
+        std::cerr << "ID3D12Device10::CreatePlacedResource2 did not support a null output pointer\n";
+        passed = false;
+      }
+
+      void *invalid_layout_resource = output_sentinel;
+      const HRESULT invalid_layout_hr = device10->CreatePlacedResource2(
+          heap, 0, &resource_desc, D3D12_BARRIER_LAYOUT_COMMON, nullptr, 0, nullptr,
+          __uuidof(ID3D12Resource), &invalid_layout_resource
+      );
+      if (invalid_layout_hr != E_NOTIMPL || invalid_layout_resource != nullptr) {
+        std::cerr << "ID3D12Device10::CreatePlacedResource2 accepted a buffer layout\n";
+        passed = false;
+      }
+      if (invalid_layout_resource != output_sentinel) {
+        IUnknown *resource = reinterpret_cast<IUnknown *>(invalid_layout_resource);
+        Release(resource);
+      }
+
+      DXGI_FORMAT castable_format = DXGI_FORMAT_R8_UNORM;
+      void *castable_resource = output_sentinel;
+      const HRESULT castable_resource_hr = device10->CreatePlacedResource2(
+          heap, 0, &resource_desc, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, 1, &castable_format,
+          __uuidof(ID3D12Resource), &castable_resource
+      );
+      if (castable_resource_hr != E_NOTIMPL || castable_resource != nullptr) {
+        std::cerr << "ID3D12Device10::CreatePlacedResource2 accepted castable formats\n";
+        passed = false;
+      }
+      if (castable_resource != output_sentinel) {
+        IUnknown *resource = reinterpret_cast<IUnknown *>(castable_resource);
+        Release(resource);
+      }
+    }
+    Release(heap);
+
+    D3D12_RESOURCE_DESC1 texture_desc = resource_desc;
+    texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texture_desc.Width = 4;
+    texture_desc.Height = 4;
+    texture_desc.Format = DXGI_FORMAT_R8_UNORM;
+    texture_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    void *texture_resource = output_sentinel;
+    const HRESULT texture_resource_hr = device10->CreateCommittedResource3(
+        &heap_properties, D3D12_HEAP_FLAG_NONE, &texture_desc, D3D12_BARRIER_LAYOUT_COMMON, nullptr, nullptr, 0,
+        nullptr, __uuidof(ID3D12Resource), &texture_resource
     );
-    if (placed_resource_hr != E_NOTIMPL || placed_resource != nullptr) {
-      std::cerr << "ID3D12Device10::CreatePlacedResource2 returned 0x" << std::hex
-                << static_cast<unsigned long>(placed_resource_hr) << std::dec << "\n";
+    if (texture_resource_hr != S_OK || texture_resource == nullptr) {
+      std::cerr << "ID3D12Device10::CreateCommittedResource3 rejected a common texture\n";
       passed = false;
     }
-    if (placed_resource != output_sentinel) {
-      IUnknown *resource = reinterpret_cast<IUnknown *>(placed_resource);
+    if (texture_resource != output_sentinel) {
+      IUnknown *resource = reinterpret_cast<IUnknown *>(texture_resource);
+      Release(resource);
+    }
+
+    D3D12_RESOURCE_DESC texture_base_desc = base_desc;
+    texture_base_desc.Dimension = texture_desc.Dimension;
+    texture_base_desc.Width = texture_desc.Width;
+    texture_base_desc.Height = texture_desc.Height;
+    texture_base_desc.DepthOrArraySize = texture_desc.DepthOrArraySize;
+    texture_base_desc.MipLevels = texture_desc.MipLevels;
+    texture_base_desc.Format = texture_desc.Format;
+    texture_base_desc.SampleDesc = texture_desc.SampleDesc;
+    texture_base_desc.Layout = texture_desc.Layout;
+    texture_base_desc.Flags = texture_desc.Flags;
+    D3D12_RESOURCE_ALLOCATION_INFO texture_allocation_info = {};
+    device->GetResourceAllocationInfo(&texture_allocation_info, 1, 1, &texture_base_desc);
+    D3D12_HEAP_DESC texture_heap_desc = {
+        texture_allocation_info.SizeInBytes, heap_properties, D3D12_HEAP_FLAG_NONE
+    };
+    ID3D12Heap *texture_heap = nullptr;
+    if (!texture_allocation_info.SizeInBytes || texture_allocation_info.SizeInBytes == UINT64_MAX ||
+        device->CreateHeap(&texture_heap_desc, IID_PPV_ARGS(&texture_heap)) != S_OK || !texture_heap) {
+      std::cerr << "CreateHeap for ID3D12Device10 texture resource failed\n";
+      passed = false;
+    } else {
+      void *placed_texture_resource = output_sentinel;
+      const HRESULT placed_texture_resource_hr = device10->CreatePlacedResource2(
+          texture_heap, 0, &texture_desc, D3D12_BARRIER_LAYOUT_COMMON, nullptr, 0, nullptr,
+          __uuidof(ID3D12Resource), &placed_texture_resource
+      );
+      if (placed_texture_resource_hr != S_OK || placed_texture_resource == nullptr) {
+        std::cerr << "ID3D12Device10::CreatePlacedResource2 rejected a common texture\n";
+        passed = false;
+      }
+      if (placed_texture_resource != output_sentinel) {
+        IUnknown *resource = reinterpret_cast<IUnknown *>(placed_texture_resource);
+        Release(resource);
+      }
+    }
+    Release(texture_heap);
+
+    const D3D12_BARRIER_LAYOUT video_layouts[] = {
+        D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ,
+        D3D12_BARRIER_LAYOUT_VIDEO_DECODE_WRITE,
+        D3D12_BARRIER_LAYOUT_VIDEO_PROCESS_READ,
+        D3D12_BARRIER_LAYOUT_VIDEO_PROCESS_WRITE,
+        D3D12_BARRIER_LAYOUT_VIDEO_ENCODE_READ,
+        D3D12_BARRIER_LAYOUT_VIDEO_ENCODE_WRITE,
+    };
+    for (const auto layout : video_layouts) {
+      void *video_resource = output_sentinel;
+      const HRESULT video_resource_hr = device10->CreateCommittedResource3(
+          &heap_properties, D3D12_HEAP_FLAG_NONE, &texture_desc, layout, nullptr, nullptr, 0, nullptr,
+          __uuidof(ID3D12Resource), &video_resource
+      );
+      if (video_resource_hr != S_OK || video_resource == nullptr) {
+        std::cerr << "ID3D12Device10::CreateCommittedResource3 rejected a video layout\n";
+        passed = false;
+      }
+      if (video_resource != output_sentinel) {
+        IUnknown *resource = reinterpret_cast<IUnknown *>(video_resource);
+        Release(resource);
+      }
+    }
+
+    void *invalid_layout_resource = output_sentinel;
+    const HRESULT invalid_layout_hr = device10->CreateCommittedResource3(
+        &heap_properties, D3D12_HEAP_FLAG_NONE, &resource_desc, D3D12_BARRIER_LAYOUT_COMMON, nullptr, nullptr, 0,
+        nullptr, __uuidof(ID3D12Resource), &invalid_layout_resource
+    );
+    if (invalid_layout_hr != E_NOTIMPL || invalid_layout_resource != nullptr) {
+      std::cerr << "ID3D12Device10::CreateCommittedResource3 accepted a buffer layout\n";
+      passed = false;
+    }
+    if (invalid_layout_resource != output_sentinel) {
+      IUnknown *resource = reinterpret_cast<IUnknown *>(invalid_layout_resource);
+      Release(resource);
+    }
+
+    const HRESULT committed_resource_probe_hr = device10->CreateCommittedResource3(
+        &heap_properties, D3D12_HEAP_FLAG_NONE, &resource_desc, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0,
+        nullptr, __uuidof(ID3D12Resource), nullptr
+    );
+    if (committed_resource_probe_hr != S_FALSE) {
+      std::cerr << "ID3D12Device10::CreateCommittedResource3 did not support a null output pointer\n";
+      passed = false;
+    }
+
+    void *null_desc_resource = output_sentinel;
+    const HRESULT null_desc_resource_hr = device10->CreateCommittedResource3(
+        &heap_properties, D3D12_HEAP_FLAG_NONE, nullptr, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0,
+        nullptr, __uuidof(ID3D12Resource), &null_desc_resource
+    );
+    if (null_desc_resource_hr != E_INVALIDARG || null_desc_resource != nullptr) {
+      std::cerr << "ID3D12Device10::CreateCommittedResource3 mishandled a null descriptor\n";
+      passed = false;
+    }
+    if (null_desc_resource != output_sentinel) {
+      IUnknown *resource = reinterpret_cast<IUnknown *>(null_desc_resource);
+      Release(resource);
+    }
+
+    ID3D12ProtectedResourceSession *const protected_session = reinterpret_cast<ID3D12ProtectedResourceSession *>(
+        static_cast<uintptr_t>(1)
+    );
+    void *protected_resource = output_sentinel;
+    const HRESULT protected_resource_hr = device10->CreateCommittedResource3(
+        &heap_properties, D3D12_HEAP_FLAG_NONE, &resource_desc, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr,
+        protected_session, 0, nullptr, __uuidof(ID3D12Resource), &protected_resource
+    );
+    if (protected_resource_hr != E_NOTIMPL || protected_resource != nullptr) {
+      std::cerr << "ID3D12Device10::CreateCommittedResource3 accepted protected resources\n";
+      passed = false;
+    }
+    if (protected_resource != output_sentinel) {
+      IUnknown *resource = reinterpret_cast<IUnknown *>(protected_resource);
+      Release(resource);
+    }
+
+    DXGI_FORMAT castable_format = DXGI_FORMAT_R8_UNORM;
+    void *castable_resource = output_sentinel;
+    const HRESULT castable_resource_hr = device10->CreateCommittedResource3(
+        &heap_properties, D3D12_HEAP_FLAG_NONE, &resource_desc, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 1,
+        &castable_format, __uuidof(ID3D12Resource), &castable_resource
+    );
+    if (castable_resource_hr != E_NOTIMPL || castable_resource != nullptr) {
+      std::cerr << "ID3D12Device10::CreateCommittedResource3 accepted castable formats\n";
+      passed = false;
+    }
+    if (castable_resource != output_sentinel) {
+      IUnknown *resource = reinterpret_cast<IUnknown *>(castable_resource);
       Release(resource);
     }
 
     void *reserved_resource = output_sentinel;
     const HRESULT reserved_resource_hr = device10->CreateReservedResource2(
-        nullptr, static_cast<D3D12_BARRIER_LAYOUT>(0), nullptr, nullptr, 0, nullptr,
+        nullptr, D3D12_BARRIER_LAYOUT_COMMON, nullptr, nullptr, 0, nullptr,
         __uuidof(ID3D12Resource), &reserved_resource
     );
     if (reserved_resource_hr != E_NOTIMPL || reserved_resource != nullptr) {

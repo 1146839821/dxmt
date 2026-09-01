@@ -53,6 +53,88 @@ ConvertResourceDesc1(const D3D12_RESOURCE_DESC1 *source, D3D12_RESOURCE_DESC *de
   return true;
 }
 
+bool
+ConvertBarrierLayout(
+    D3D12_RESOURCE_DIMENSION dimension, D3D12_BARRIER_LAYOUT source, D3D12_RESOURCE_STATES *destination
+) {
+  if (!destination)
+    return false;
+
+  if (dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+    if (source != D3D12_BARRIER_LAYOUT_UNDEFINED)
+      return false;
+    *destination = D3D12_RESOURCE_STATE_COMMON;
+    return true;
+  }
+
+  switch (source) {
+  case D3D12_BARRIER_LAYOUT_COMMON:
+    *destination = D3D12_RESOURCE_STATE_COMMON;
+    return true;
+  case D3D12_BARRIER_LAYOUT_GENERIC_READ:
+    *destination = D3D12_RESOURCE_STATE_GENERIC_READ;
+    return true;
+  case D3D12_BARRIER_LAYOUT_RENDER_TARGET:
+    *destination = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    return true;
+  case D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS:
+    *destination = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    return true;
+  case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE:
+    *destination = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    return true;
+  case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ:
+    *destination = D3D12_RESOURCE_STATE_DEPTH_READ;
+    return true;
+  case D3D12_BARRIER_LAYOUT_SHADER_RESOURCE:
+    *destination = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    return true;
+  case D3D12_BARRIER_LAYOUT_COPY_SOURCE:
+    *destination = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    return true;
+  case D3D12_BARRIER_LAYOUT_COPY_DEST:
+    *destination = D3D12_RESOURCE_STATE_COPY_DEST;
+    return true;
+  case D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE:
+    *destination = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+    return true;
+  case D3D12_BARRIER_LAYOUT_RESOLVE_DEST:
+    *destination = D3D12_RESOURCE_STATE_RESOLVE_DEST;
+    return true;
+  case D3D12_BARRIER_LAYOUT_SHADING_RATE_SOURCE:
+    *destination = D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE;
+    return true;
+  case D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ:
+    *destination = D3D12_RESOURCE_STATE_VIDEO_DECODE_READ;
+    return true;
+  case D3D12_BARRIER_LAYOUT_VIDEO_DECODE_WRITE:
+    *destination = D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE;
+    return true;
+  case D3D12_BARRIER_LAYOUT_VIDEO_PROCESS_READ:
+    *destination = D3D12_RESOURCE_STATE_VIDEO_PROCESS_READ;
+    return true;
+  case D3D12_BARRIER_LAYOUT_VIDEO_PROCESS_WRITE:
+    *destination = D3D12_RESOURCE_STATE_VIDEO_PROCESS_WRITE;
+    return true;
+  case D3D12_BARRIER_LAYOUT_VIDEO_ENCODE_READ:
+    *destination = D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ;
+    return true;
+  case D3D12_BARRIER_LAYOUT_VIDEO_ENCODE_WRITE:
+    *destination = D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE;
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool
+ConvertResourceDesc1WithLayout(
+    const D3D12_RESOURCE_DESC1 *source, D3D12_RESOURCE_DESC *destination, D3D12_BARRIER_LAYOUT layout,
+    D3D12_RESOURCE_STATES *initial_state
+) {
+  return ConvertResourceDesc1(source, destination) && ConvertBarrierLayout(source->Dimension, layout, initial_state);
+}
+
 } // namespace
 
 class MTLD3D12InfoQueue final : public ComObject<ID3D12InfoQueue> {
@@ -998,6 +1080,8 @@ public:
     hr = ValidateResourceStates(InitialState, pHeapProps);
     if (FAILED(hr))
       return hr;
+    if (!ppResource)
+      return S_FALSE;
     switch (pDesc->Dimension) {
     case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
     case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
@@ -1088,6 +1172,8 @@ public:
       ERR("CreatePlacedResource: invalid initial state");
       return hr;
     }
+    if (!ppResource)
+      return S_FALSE;
     switch (pDesc->Dimension) {
     case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
     case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
@@ -1890,23 +1976,47 @@ public:
     return E_NOTIMPL;
   }
 
-  HRESULT STDMETHODCALLTYPE CreateCommittedResource3(
-      const D3D12_HEAP_PROPERTIES *pHeapProperties, D3D12_HEAP_FLAGS HeapFlags,
-      const D3D12_RESOURCE_DESC1 *pDesc, D3D12_BARRIER_LAYOUT InitialLayout,
-      const D3D12_CLEAR_VALUE *pOptimizedClearValue, ID3D12ProtectedResourceSession *pProtectedSession,
-      UINT32 CastableFormatsCount, DXGI_FORMAT *pCastableFormats, REFIID riidResource, void **ppvResource
+  HRESULT STDMETHODCALLTYPE
+  CreateCommittedResource3(
+      const D3D12_HEAP_PROPERTIES *pHeapProperties, D3D12_HEAP_FLAGS HeapFlags, const D3D12_RESOURCE_DESC1 *pDesc,
+      D3D12_BARRIER_LAYOUT InitialLayout, const D3D12_CLEAR_VALUE *pOptimizedClearValue,
+      ID3D12ProtectedResourceSession *pProtectedSession, UINT32 CastableFormatsCount, DXGI_FORMAT *pCastableFormats,
+      REFIID riidResource, void **ppvResource
   ) {
     InitReturnPtr(ppvResource);
-    return E_NOTIMPL;
+    if (pProtectedSession || CastableFormatsCount)
+      return E_NOTIMPL;
+    if (!pDesc)
+      return E_INVALIDARG;
+
+    D3D12_RESOURCE_DESC resource_desc = {};
+    D3D12_RESOURCE_STATES initial_state = D3D12_RESOURCE_STATE_COMMON;
+    if (!ConvertResourceDesc1WithLayout(pDesc, &resource_desc, InitialLayout, &initial_state))
+      return E_NOTIMPL;
+    return CreateCommittedResource(
+        pHeapProperties, HeapFlags, &resource_desc, initial_state, pOptimizedClearValue, riidResource, ppvResource
+    );
   }
 
-  HRESULT STDMETHODCALLTYPE CreatePlacedResource2(
-      ID3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC1 *pDesc,
-      D3D12_BARRIER_LAYOUT InitialLayout, const D3D12_CLEAR_VALUE *pOptimizedClearValue,
-      UINT32 CastableFormatsCount, DXGI_FORMAT *pCastableFormats, REFIID riid, void **ppvResource
+  HRESULT STDMETHODCALLTYPE
+  CreatePlacedResource2(
+      ID3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC1 *pDesc, D3D12_BARRIER_LAYOUT InitialLayout,
+      const D3D12_CLEAR_VALUE *pOptimizedClearValue, UINT32 CastableFormatsCount, DXGI_FORMAT *pCastableFormats,
+      REFIID riid, void **ppvResource
   ) {
     InitReturnPtr(ppvResource);
-    return E_NOTIMPL;
+    if (CastableFormatsCount)
+      return E_NOTIMPL;
+    if (!pDesc)
+      return E_INVALIDARG;
+
+    D3D12_RESOURCE_DESC resource_desc = {};
+    D3D12_RESOURCE_STATES initial_state = D3D12_RESOURCE_STATE_COMMON;
+    if (!ConvertResourceDesc1WithLayout(pDesc, &resource_desc, InitialLayout, &initial_state))
+      return E_NOTIMPL;
+    return CreatePlacedResource(
+        pHeap, HeapOffset, &resource_desc, initial_state, pOptimizedClearValue, riid, ppvResource
+    );
   }
 
   HRESULT STDMETHODCALLTYPE CreateReservedResource2(
