@@ -134,6 +134,34 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   }
 
   void
+  PauseTranslationForTesting() {
+    char enabled[2] = {};
+    if (!GetEnvironmentVariableA("DXMT_TEST_PAUSE_QUEUE_TRANSLATION", enabled, sizeof(enabled)))
+      return;
+
+    static LONG pause_claimed = 0;
+    HANDLE entered = OpenEventA(EVENT_MODIFY_STATE, FALSE, "DXMT.Test.QueueTranslationEntered");
+    HANDLE resume = OpenEventA(SYNCHRONIZE, FALSE, "DXMT.Test.QueueTranslationResume");
+    if (!entered || !resume) {
+      if (entered)
+        CloseHandle(entered);
+      if (resume)
+        CloseHandle(resume);
+      return;
+    }
+    if (InterlockedCompareExchange(&pause_claimed, 1, 0) != 0) {
+      CloseHandle(entered);
+      CloseHandle(resume);
+      return;
+    }
+
+    SetEvent(entered);
+    WaitForSingleObject(resume, INFINITE);
+    CloseHandle(entered);
+    CloseHandle(resume);
+  }
+
+  void
   StopCompletionThread() {
     {
       std::lock_guard<dxmt::mutex> lock(submission_mutex_);
@@ -224,6 +252,7 @@ public:
       return;
     }
 
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
     auto hr = static_cast<MTLD3D12Resource *>(resource)->UpdateTileMappings(
         region_count, region_start_coordinates, region_sizes, heap, range_count, range_flags, heap_range_offsets,
         range_tile_counts, flags
@@ -242,6 +271,7 @@ public:
       return;
     }
 
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
     auto hr = static_cast<MTLD3D12Resource *>(dst_resource)->CopyTileMappingsFrom(
         static_cast<MTLD3D12Resource *>(src_resource), dst_region_start_coordinate, src_region_start_coordinate,
         region_size, flags
@@ -300,6 +330,8 @@ public:
     }
     for (auto &allocator : submission.allocators)
       allocator->MarkSubmissionSubmitted();
+
+    PauseTranslationForTesting();
 
     for (unsigned i = 0; i < Count; i++) {
       auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i]);

@@ -42,6 +42,93 @@ DWORD WINAPI QueueWaitThread(void *arg) {
   return 0;
 }
 
+bool TestConcurrentCommandSubmission(ID3D12Device *device) {
+  ID3D12CommandQueue *queue = nullptr;
+  ID3D12CommandAllocator *allocator_a = nullptr;
+  ID3D12CommandAllocator *allocator_b = nullptr;
+  ID3D12GraphicsCommandList *list_a = nullptr;
+  ID3D12GraphicsCommandList *list_b = nullptr;
+  HANDLE first_thread = nullptr;
+  HANDLE second_thread = nullptr;
+  HANDLE entered = nullptr;
+  HANDLE resume = nullptr;
+  bool result = false;
+
+  auto cleanup = [&] {
+    if (resume)
+      SetEvent(resume);
+    if (first_thread) {
+      WaitForSingleObject(first_thread, INFINITE);
+      CloseHandle(first_thread);
+    }
+    if (second_thread) {
+      WaitForSingleObject(second_thread, INFINITE);
+      CloseHandle(second_thread);
+    }
+    SetEnvironmentVariableA("DXMT_TEST_PAUSE_QUEUE_TRANSLATION", nullptr);
+    if (resume)
+      CloseHandle(resume);
+    if (entered)
+      CloseHandle(entered);
+    if (list_b)
+      list_b->Release();
+    if (list_a)
+      list_a->Release();
+    if (allocator_b)
+      allocator_b->Release();
+    if (allocator_a)
+      allocator_a->Release();
+    if (queue)
+      queue->Release();
+    return result;
+  };
+
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  if (!CheckHR("CreateConcurrentQueue", device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue))) ||
+      !CheckHR(
+          "CreateConcurrentAllocatorA",
+          device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator_a))
+      ) ||
+      !CheckHR(
+          "CreateConcurrentAllocatorB",
+          device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator_b))
+      ) ||
+      !CheckHR(
+          "CreateConcurrentListA",
+          device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator_a, nullptr, IID_PPV_ARGS(&list_a))
+      ) ||
+      !CheckHR(
+          "CreateConcurrentListB",
+          device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator_b, nullptr, IID_PPV_ARGS(&list_b))
+      ) ||
+      !CheckHR("CloseConcurrentListA", list_a->Close()) ||
+      !CheckHR("CloseConcurrentListB", list_b->Close()))
+    return cleanup();
+
+  entered = CreateEventA(nullptr, FALSE, FALSE, "DXMT.Test.QueueTranslationEntered");
+  resume = CreateEventA(nullptr, TRUE, FALSE, "DXMT.Test.QueueTranslationResume");
+  if (!entered || !resume || !SetEnvironmentVariableA("DXMT_TEST_PAUSE_QUEUE_TRANSLATION", "1"))
+    return cleanup();
+
+  ExecuteContext first = {queue, list_a, 0};
+  first_thread = CreateThread(nullptr, 0, ExecuteCommandListsThread, &first, 0, nullptr);
+  if (!first_thread || WaitForSingleObject(entered, 5000) != WAIT_OBJECT_0)
+    return cleanup();
+
+  ExecuteContext second = {queue, list_b, 0};
+  second_thread = CreateThread(nullptr, 0, ExecuteCommandListsThread, &second, 0, nullptr);
+  if (!second_thread)
+    return cleanup();
+  Sleep(50);
+  if (InterlockedCompareExchange(&second.returned, 0, 0) != 0) {
+    std::cerr << "second command submission completed during first translation\n";
+    return cleanup();
+  }
+
+  result = true;
+  return cleanup();
+}
+
 } // namespace
 
 int main() {
@@ -290,6 +377,9 @@ int main() {
   }
   if (queue)
     queue->Release();
+
+  if (!TestConcurrentCommandSubmission(device))
+    result = 1;
 
   ID3D12Device *other_device = nullptr;
   ID3D12CommandAllocator *foreign_allocator = nullptr;
