@@ -1195,6 +1195,34 @@ public:
   }
 
   HRESULT
+  GetTileIndices(
+      const D3D12_TILED_RESOURCE_COORDINATE *pRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
+      std::vector<UINT> &tile_indices
+  ) const override {
+    return BuildRegionTiles(1, pRegionStartCoordinate, pRegionSize, tile_indices);
+  }
+
+  HRESULT
+  GetTileMapping(UINT tile_index, WMT::Buffer &backing_buffer, UINT64 &backing_offset) const override {
+    backing_buffer = {};
+    backing_offset = 0;
+    if (!reserved_ || tile_index >= tile_mappings_.size())
+      return E_INVALIDARG;
+
+    std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
+    const auto &mapping = tile_mappings_[tile_index];
+    if (!mapping.heap)
+      return S_OK;
+
+    auto *heap = static_cast<MTLD3D12Heap *>(mapping.heap.ptr());
+    backing_buffer = heap->GetTileBackingBuffer();
+    if (!backing_buffer)
+      return E_OUTOFMEMORY;
+    backing_offset = uint64_t(mapping.heap_tile) * 64ull * 1024;
+    return S_OK;
+  }
+
+  HRESULT
   UpdateTileMappings(
       UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
       const D3D12_TILE_REGION_SIZE *pResourceRegionSizes, ID3D12Heap *pHeap, UINT NumRanges,

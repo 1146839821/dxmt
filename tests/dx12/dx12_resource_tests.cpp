@@ -79,6 +79,8 @@ int main() {
   ID3D12Resource *reserved_texture_v2 = nullptr;
   ID3D12Resource *copy_tiles_upload = nullptr;
   ID3D12Resource *copy_tiles_readback = nullptr;
+  ID3D12Resource *copy_tiles_texture_upload = nullptr;
+  ID3D12Resource *copy_tiles_texture_readback = nullptr;
   ID3D12GraphicsCommandList2 *list2 = nullptr;
   HANDLE event = nullptr;
   HANDLE multiple_event = nullptr;
@@ -112,6 +114,10 @@ int main() {
       copy_tiles_readback->Release();
     if (copy_tiles_upload)
       copy_tiles_upload->Release();
+    if (copy_tiles_texture_readback)
+      copy_tiles_texture_readback->Release();
+    if (copy_tiles_texture_upload)
+      copy_tiles_texture_upload->Release();
     if (list)
       list->Release();
     if (destination)
@@ -868,6 +874,37 @@ int main() {
     mapped_copy_tiles_upload[i] = static_cast<BYTE>(i ^ 0x5a);
   copy_tiles_upload->Unmap(0, nullptr);
 
+  D3D12_RESOURCE_DESC copy_tiles_texture_buffer_desc = copy_tiles_buffer_desc;
+  copy_tiles_texture_buffer_desc.Width = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+  if (!CheckHR(
+          "CreateCopyTilesTextureUpload",
+          device->CreateCommittedResource(
+              &upload_properties, D3D12_HEAP_FLAG_NONE, &copy_tiles_texture_buffer_desc,
+              D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&copy_tiles_texture_upload)
+          )
+      ) ||
+      !CheckHR(
+          "CreateCopyTilesTextureReadback",
+          device->CreateCommittedResource(
+              &readback_properties, D3D12_HEAP_FLAG_NONE, &copy_tiles_texture_buffer_desc,
+              D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&copy_tiles_texture_readback)
+          )
+      )) {
+    cleanup();
+    return 1;
+  }
+  BYTE *mapped_copy_tiles_texture_upload = nullptr;
+  if (!CheckHR(
+          "MapCopyTilesTextureUpload",
+          copy_tiles_texture_upload->Map(0, nullptr, reinterpret_cast<void **>(&mapped_copy_tiles_texture_upload))
+      )) {
+    cleanup();
+    return 1;
+  }
+  for (UINT i = 0; i < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; i++)
+    mapped_copy_tiles_texture_upload[i] = static_cast<BYTE>(i ^ 0xa5);
+  copy_tiles_texture_upload->Unmap(0, nullptr);
+
   D3D12_HEAP_DESC unaligned_heap_desc = upload_desc;
   --unaligned_heap_desc.SizeInBytes;
   if (!CheckHR("CreateUnalignedHeap", device->CreateHeap(&unaligned_heap_desc, IID_PPV_ARGS(&unaligned_heap))) ||
@@ -1397,6 +1434,26 @@ int main() {
       reserved_texture, 1, &texture_tile_coordinate, &texture_tile_region, reserved_texture_heap, 2,
       texture_range_flags, texture_heap_tile_offsets, texture_range_tile_counts, D3D12_TILE_MAPPING_FLAG_NONE
   );
+  D3D12_TILE_REGION_SIZE texture_copy_tile_region = texture_tile_region;
+  texture_copy_tile_region.NumTiles = 1;
+  D3D12_RESOURCE_BARRIER reserved_texture_copy_barrier = {};
+  reserved_texture_copy_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  reserved_texture_copy_barrier.Transition.pResource = reserved_texture;
+  reserved_texture_copy_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+  reserved_texture_copy_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+  reserved_texture_copy_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &reserved_texture_copy_barrier);
+  list->CopyTiles(
+      reserved_texture, &texture_tile_coordinate, &texture_copy_tile_region, copy_tiles_texture_upload, 0,
+      D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE
+  );
+  reserved_texture_copy_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  reserved_texture_copy_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  list->ResourceBarrier(1, &reserved_texture_copy_barrier);
+  list->CopyTiles(
+      reserved_texture, &texture_tile_coordinate, &texture_copy_tile_region, copy_tiles_texture_readback, 0,
+      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
   texture_tile_coordinate.Subresource = 1;
   D3D12_TILE_RANGE_FLAGS reuse_range_flag = D3D12_TILE_RANGE_FLAG_REUSE_SINGLE_TILE;
   UINT reuse_range_tile_count = 2;
@@ -1798,6 +1855,28 @@ int main() {
   copy_tiles_readback->Unmap(0, nullptr);
   if (!copy_tiles_matches) {
     std::cerr << "reserved buffer CopyTiles mismatch\n";
+    cleanup();
+    return 1;
+  }
+
+  BYTE *mapped_copy_tiles_texture_readback = nullptr;
+  if (!CheckHR(
+          "MapCopyTilesTextureReadback",
+          copy_tiles_texture_readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped_copy_tiles_texture_readback))
+      )) {
+    cleanup();
+    return 1;
+  }
+  bool copy_tiles_texture_matches = true;
+  for (UINT i = 0; i < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; i++) {
+    if (mapped_copy_tiles_texture_readback[i] != static_cast<BYTE>(i ^ 0xa5)) {
+      copy_tiles_texture_matches = false;
+      break;
+    }
+  }
+  copy_tiles_texture_readback->Unmap(0, nullptr);
+  if (!copy_tiles_texture_matches) {
+    std::cerr << "reserved texture CopyTiles mismatch\n";
     cleanup();
     return 1;
   }

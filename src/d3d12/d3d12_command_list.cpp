@@ -2588,13 +2588,13 @@ public:
     const UINT direction_flags = copy_flags &
                                  (D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE |
                                   D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
-    if (!tiled->IsReservedBuffer() || !linear->buffer || !linear->buffer->current() ||
+    if ((!tiled->IsReservedBuffer() && !tiled->IsReservedTexture()) || !linear->buffer || !linear->buffer->current() ||
         (copy_flags & ~supported_flags) || direction_flags == (
             D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE |
             D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
         ) ||
         buffer_offset % (64ull * 1024)) {
-      WARN("D3D12 CopyTiles currently supports only raw reserved-buffer tile copies");
+      WARN("D3D12 CopyTiles currently supports only logical raw reserved-resource tile copies");
       recording_failed_ = true;
       return;
     }
@@ -2629,6 +2629,9 @@ public:
 
     if (!PreBlit())
       return;
+    // Reserved textures currently use a canonical 64 KiB shadow tile. No Metal
+    // texture view is exposed, so preserve CopyTiles byte semantics without
+    // claiming that the resource is renderable or shader-readable.
     for (size_t index = 0; index < tile_indices.size(); index++) {
       WMT::Buffer tile_buffer;
       UINT64 tile_offset = 0;
