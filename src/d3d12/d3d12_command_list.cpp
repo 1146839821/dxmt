@@ -524,7 +524,10 @@ public:
   MTLD3D12GraphicsCommandListImpl(MTLD3D12Device *pDevice, D3D12_COMMAND_LIST_TYPE type) :
       MTLD3D12DeviceChild<MTLD3D12GraphicsCommandList>(pDevice), type_(type), recording_failed_(false) {}
 
-  ~MTLD3D12GraphicsCommandListImpl() {}
+  ~MTLD3D12GraphicsCommandListImpl() {
+    if (allocator_ && encoder_count == std::numeric_limits<size_t>::max())
+      allocator_->DiscardRecord();
+  }
 
   WMT::Reference<WMT::ComputePipelineState>
   getMotionVectorScalePSO() {
@@ -643,8 +646,10 @@ public:
     pending_barrier_stages_before_ = (WMTRenderStages)0;
     resource_state_transitions_.clear();
 
-    encoder_count = std::numeric_limits<size_t>::max();
-    return allocator_->StartRecord(&entry);
+    HRESULT hr = allocator_->StartRecord(&entry);
+    if (SUCCEEDED(hr))
+      encoder_count = std::numeric_limits<size_t>::max();
+    return hr;
   }
 
   void
@@ -2597,19 +2602,6 @@ public:
       return;
     }
 
-    std::vector<UINT> tile_indices;
-    if (FAILED(tiled->GetTileIndices(tile_region_start_coordinate, tile_region_size, tile_indices)) ||
-        tile_indices.empty()) {
-      recording_failed_ = true;
-      return;
-    }
-    const uint64_t copy_size = uint64_t(tile_indices.size()) * 64ull * 1024;
-    if (copy_size > std::numeric_limits<UINT64>::max() - buffer_offset ||
-        !buffer_range_in_bounds(linear, buffer_offset, copy_size)) {
-      recording_failed_ = true;
-      return;
-    }
-
     bool buffer_to_tiled = direction_flags == D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE;
     bool tiled_to_buffer = direction_flags == D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER;
     if (!direction_flags) {
@@ -2625,53 +2617,20 @@ public:
       }
     }
 
-    if (!PreBlit())
-      return;
-    // Reserved textures currently use a canonical 64 KiB shadow tile. No Metal
-    // texture view is exposed, so preserve CopyTiles byte semantics without
-    // claiming that the resource is renderable or shader-readable.
-    for (size_t index = 0; index < tile_indices.size(); index++) {
-      WMT::Buffer tile_buffer;
-      UINT64 tile_offset = 0;
-      if (FAILED(tiled->GetTileMapping(tile_indices[index], tile_buffer, tile_offset))) {
-        recording_failed_ = true;
-        return;
-      }
-
-      const UINT64 linear_offset = buffer_offset + index * 64ull * 1024;
-      if (buffer_to_tiled) {
-        if (!tile_buffer)
-          continue;
-        auto &copy = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
-        copy.type = WMTBlitCommandCopyFromBufferToBuffer;
-        copy.src = linear->buffer->current()->buffer();
-        copy.src_offset = linear_offset;
-        copy.dst = tile_buffer;
-        copy.dst_offset = tile_offset;
-        copy.copy_length = 64ull * 1024;
-        continue;
-      }
-
-      if (!tiled_to_buffer)
-        return;
-      if (!tile_buffer) {
-        auto &fill = allocator_->EncodeBlitCommand<wmtcmd_blit_fillbuffer>();
-        fill.type = WMTBlitCommandFillBuffer;
-        fill.buffer = linear->buffer->current()->buffer();
-        fill.offset = linear_offset;
-        fill.length = 64ull * 1024;
-        fill.value = 0;
-        continue;
-      }
-
-      auto &copy = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
-      copy.type = WMTBlitCommandCopyFromBufferToBuffer;
-      copy.src = tile_buffer;
-      copy.src_offset = tile_offset;
-      copy.dst = linear->buffer->current()->buffer();
-      copy.dst_offset = linear_offset;
-      copy.copy_length = 64ull * 1024;
+    allocator_->InvalidateCurrentPass();
+    auto copy_tiles = allocator_->AllocatePass<CopyTilesEncoderData>();
+    copy_tiles->type = EncoderType::CopyTiles;
+    copy_tiles->tiled_resource = tiled;
+    copy_tiles->linear_resource = linear;
+    if (tile_region_start_coordinate) {
+      copy_tiles->region_start_coordinate = *tile_region_start_coordinate;
+      copy_tiles->has_region_start_coordinate = true;
     }
+    copy_tiles->region_size = *tile_region_size;
+    copy_tiles->buffer_offset = buffer_offset;
+    copy_tiles->flags = flags;
+    copy_tiles->buffer_to_tiled = buffer_to_tiled;
+    copy_tiles->tiled_to_buffer = tiled_to_buffer;
   };
 
   void STDMETHODCALLTYPE ResolveSubresource(

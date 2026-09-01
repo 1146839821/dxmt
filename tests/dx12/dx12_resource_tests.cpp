@@ -81,6 +81,7 @@ int main() {
   ID3D12Resource *copy_tiles_upload = nullptr;
   ID3D12Resource *copy_tiles_readback = nullptr;
   ID3D12Resource *copy_tiles_mips_readback = nullptr;
+  ID3D12Resource *copy_tiles_remap_readback = nullptr;
   ID3D12Resource *copy_tiles_texture_upload = nullptr;
   ID3D12Resource *copy_tiles_texture_readback = nullptr;
   ID3D12GraphicsCommandList2 *list2 = nullptr;
@@ -120,6 +121,8 @@ int main() {
       copy_tiles_upload->Release();
     if (copy_tiles_mips_readback)
       copy_tiles_mips_readback->Release();
+    if (copy_tiles_remap_readback)
+      copy_tiles_remap_readback->Release();
     if (copy_tiles_texture_readback)
       copy_tiles_texture_readback->Release();
     if (copy_tiles_texture_upload)
@@ -938,6 +941,13 @@ int main() {
               &readback_properties, D3D12_HEAP_FLAG_NONE, &copy_tiles_buffer_desc,
               D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&copy_tiles_mips_readback)
           )
+      ) ||
+      !CheckHR(
+          "CreateCopyTilesRemapReadback",
+          device->CreateCommittedResource(
+              &readback_properties, D3D12_HEAP_FLAG_NONE, &copy_tiles_buffer_desc,
+              D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&copy_tiles_remap_readback)
+          )
       )) {
     cleanup();
     return 1;
@@ -1501,8 +1511,10 @@ int main() {
       reserved_resource, 1, &tile_coordinate, &tile_region, nullptr, 1, &null_range_flags, nullptr, nullptr,
       D3D12_TILE_MAPPING_FLAG_NONE
   );
+  D3D12_TILED_RESOURCE_COORDINATE unmapped_tile_coordinate = tile_coordinate;
+  unmapped_tile_coordinate.X = 1;
   list->CopyTiles(
-      reserved_resource, &tile_coordinate, &tile_region, copy_tiles_readback,
+      reserved_resource, &unmapped_tile_coordinate, &tile_region, copy_tiles_readback,
       D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
   );
 
@@ -1601,6 +1613,10 @@ int main() {
   );
   queue->CopyTileMappings(
       reserved_texture, nullptr, reserved_resource, nullptr, &tile_region, D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  queue->UpdateTileMappings(
+      reserved_resource, 1, &tile_coordinate, &tile_region, reserved_heap, 1, nullptr, &heap_tile_offset, nullptr,
+      D3D12_TILE_MAPPING_FLAG_NONE
   );
 
   const FLOAT texture3d_clear_color[] = {1.0f, 0.0f, 0.0f, 1.0f};
@@ -1804,15 +1820,271 @@ int main() {
   }
 
   ResetEvent(multiple_event);
-  UINT64 any_values[] = {2, 3};
+  UINT64 any_values[] = {3, 4};
   if (!CheckHR("SetEventOnAnyFenceCompletion",
                device1->SetEventOnMultipleFenceCompletion(
                    multiple_fences, any_values, 2,
                    D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY, multiple_event)) ||
       WaitForSingleObject(multiple_event, 0) != WAIT_TIMEOUT ||
-      !CheckHR("SignalAnyFence", queue->Signal(multiple_fence, 3)) ||
+      !CheckHR("SignalAnyFence", queue->Signal(multiple_fence, 4)) ||
       WaitForSingleObject(multiple_event, 5000) != WAIT_OBJECT_0) {
     std::cerr << "WAIT_ANY multiple fence completion failed\n";
+    cleanup();
+    return 1;
+  }
+
+  BYTE *mapped_copy_tiles_remap_readback = nullptr;
+  if (!CheckHR("MapCopyTilesRemapReadback", copy_tiles_remap_readback->Map(
+                                                 0, nullptr,
+                                                 reinterpret_cast<void **>(&mapped_copy_tiles_remap_readback)))) {
+    cleanup();
+    return 1;
+  }
+  std::memset(mapped_copy_tiles_remap_readback, 0xcd, static_cast<size_t>(copy_tiles_buffer_desc.Width));
+  copy_tiles_remap_readback->Unmap(0, nullptr);
+
+  queue->UpdateTileMappings(
+      reserved_resource, 1, &tile_coordinate, &tile_region, reserved_heap, 1, nullptr, &heap_tile_offset, nullptr,
+      D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  if (!CheckHR("ResetForCopyTilesRemap", list->Reset(allocator, nullptr))) {
+    cleanup();
+    return 1;
+  }
+  D3D12_RESOURCE_BARRIER remap_barrier = {};
+  remap_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  remap_barrier.Transition.pResource = reserved_resource;
+  remap_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  remap_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+  remap_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &remap_barrier);
+  list->CopyTiles(
+      reserved_resource, &tile_coordinate, &tile_region, copy_tiles_upload, 0,
+      D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE
+  );
+  remap_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  remap_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  list->ResourceBarrier(1, &remap_barrier);
+  list->CopyTiles(
+      reserved_resource, &tile_coordinate, &tile_region, copy_tiles_remap_readback, 0,
+      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+  queue->UpdateTileMappings(
+      reserved_resource, 1, &tile_coordinate, &tile_region, nullptr, 1, &null_range_flags, nullptr, nullptr,
+      D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  if (!CheckHR("CloseCopyTilesRemap", list->Close())) {
+    cleanup();
+    return 1;
+  }
+  ID3D12CommandList *remap_lists[] = {list};
+  queue->ExecuteCommandLists(1, remap_lists);
+  if (!CheckHR("SignalCopyTilesRemap", queue->Signal(fence, 2)) ||
+      !CheckHR("SetEventOnCopyTilesRemap", fence->SetEventOnCompletion(2, event))) {
+    cleanup();
+    return 1;
+  }
+  WaitForSingleObject(event, INFINITE);
+
+  if (!CheckHR("MapCopyTilesRemapResult", copy_tiles_remap_readback->Map(
+                                                   0, nullptr,
+                                                   reinterpret_cast<void **>(&mapped_copy_tiles_remap_readback)))) {
+    cleanup();
+    return 1;
+  }
+  bool copy_tiles_remap_is_zero = true;
+  for (UINT i = 0; i < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; i++) {
+    if (mapped_copy_tiles_remap_readback[i] != 0) {
+      copy_tiles_remap_is_zero = false;
+      break;
+    }
+  }
+  copy_tiles_remap_readback->Unmap(0, nullptr);
+  if (!copy_tiles_remap_is_zero) {
+    std::cerr << "CopyTiles used a mapping captured before execution\n";
+    cleanup();
+    return 1;
+  }
+
+  D3D12_TILED_RESOURCE_COORDINATE boxed_coordinate = {};
+  D3D12_TILE_REGION_SIZE boxed_region = {};
+  boxed_region.NumTiles = 2;
+  boxed_region.UseBox = TRUE;
+  boxed_region.Width = 1;
+  boxed_region.Height = 1;
+  boxed_region.Depth = 2;
+  UINT boxed_heap_offset = 0;
+  UINT boxed_tile_count = 2;
+  queue->UpdateTileMappings(
+      reserved_texture_mips, 1, &boxed_coordinate, &boxed_region, reserved_texture_heap, 1, nullptr,
+      &boxed_heap_offset, &boxed_tile_count, D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  if (!CheckHR("ResetForCopyTilesBox", list->Reset(allocator, nullptr))) {
+    cleanup();
+    return 1;
+  }
+  D3D12_RESOURCE_BARRIER boxed_barrier = {};
+  boxed_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  boxed_barrier.Transition.pResource = reserved_texture_mips;
+  boxed_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  boxed_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+  boxed_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &boxed_barrier);
+  list->CopyTiles(
+      reserved_texture_mips, &boxed_coordinate, &boxed_region, copy_tiles_upload, 0,
+      D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE
+  );
+  boxed_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  boxed_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  list->ResourceBarrier(1, &boxed_barrier);
+  list->CopyTiles(
+      reserved_texture_mips, &boxed_coordinate, &boxed_region, copy_tiles_remap_readback, 0,
+      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+  if (!CheckHR("CloseCopyTilesBox", list->Close())) {
+    cleanup();
+    return 1;
+  }
+  ID3D12CommandList *boxed_lists[] = {list};
+  queue->ExecuteCommandLists(1, boxed_lists);
+  if (!CheckHR("SignalCopyTilesBox", queue->Signal(fence, 3)) ||
+      !CheckHR("SetEventOnCopyTilesBox", fence->SetEventOnCompletion(3, event))) {
+    cleanup();
+    return 1;
+  }
+  WaitForSingleObject(event, INFINITE);
+
+  if (!CheckHR("MapCopyTilesBoxResult", copy_tiles_remap_readback->Map(
+                                               0, nullptr,
+                                               reinterpret_cast<void **>(&mapped_copy_tiles_remap_readback)))) {
+    cleanup();
+    return 1;
+  }
+  bool copy_tiles_box_matches = true;
+  for (UINT i = 0; i < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; i++) {
+    if (mapped_copy_tiles_remap_readback[i] != static_cast<BYTE>(i ^ 0x5a) ||
+        mapped_copy_tiles_remap_readback[D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT + i] != 0) {
+      copy_tiles_box_matches = false;
+      break;
+    }
+  }
+  copy_tiles_remap_readback->Unmap(0, nullptr);
+  if (!copy_tiles_box_matches) {
+    std::cerr << "boxed multi-mip Texture2D array CopyTiles readback mismatch\n";
+    cleanup();
+    return 1;
+  }
+
+  if (!CheckHR("MapCopyTilesInvalidBoxReadback", copy_tiles_remap_readback->Map(
+                                                        0, nullptr,
+                                                        reinterpret_cast<void **>(&mapped_copy_tiles_remap_readback)))) {
+    cleanup();
+    return 1;
+  }
+  std::memset(mapped_copy_tiles_remap_readback, 0xcd, static_cast<size_t>(copy_tiles_buffer_desc.Width));
+  copy_tiles_remap_readback->Unmap(0, nullptr);
+
+  if (!CheckHR("ResetForCopyTilesInvalidBox", list->Reset(allocator, nullptr))) {
+    cleanup();
+    return 1;
+  }
+  D3D12_TILE_REGION_SIZE valid_copy_region = {};
+  valid_copy_region.NumTiles = 1;
+  list->CopyTiles(
+      reserved_texture_mips, &boxed_coordinate, &valid_copy_region, copy_tiles_remap_readback,
+      D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+  D3D12_TILED_RESOURCE_COORDINATE invalid_box_coordinate = {};
+  invalid_box_coordinate.Subresource = 3;
+  D3D12_TILE_REGION_SIZE invalid_box_region = boxed_region;
+  list->CopyTiles(
+      reserved_texture_mips, &invalid_box_coordinate, &invalid_box_region, copy_tiles_remap_readback, 0,
+      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+  if (!CheckHR("CloseCopyTilesInvalidBox", list->Close())) {
+    cleanup();
+    return 1;
+  }
+  ID3D12CommandList *invalid_box_lists[] = {list};
+  queue->ExecuteCommandLists(1, invalid_box_lists);
+  if (!CheckHR("SignalCopyTilesInvalidBox", queue->Signal(fence, 4)) ||
+      !CheckHR("SetEventOnCopyTilesInvalidBox", fence->SetEventOnCompletion(4, event))) {
+    cleanup();
+    return 1;
+  }
+  WaitForSingleObject(event, INFINITE);
+
+  if (!CheckHR("MapCopyTilesInvalidBoxResult", copy_tiles_remap_readback->Map(
+                                                         0, nullptr,
+                                                         reinterpret_cast<void **>(&mapped_copy_tiles_remap_readback)))) {
+    cleanup();
+    return 1;
+  }
+  bool copy_tiles_invalid_box_preserved = true;
+  for (UINT i = 0; i < copy_tiles_buffer_desc.Width; i++) {
+    if (mapped_copy_tiles_remap_readback[i] != 0xcd) {
+      copy_tiles_invalid_box_preserved = false;
+      break;
+    }
+  }
+  copy_tiles_remap_readback->Unmap(0, nullptr);
+  if (!copy_tiles_invalid_box_preserved) {
+    std::cerr << "invalid boxed Texture2D array CopyTiles modified the buffer\n";
+    cleanup();
+    return 1;
+  }
+
+  if (!CheckHR("ResetForCopyTilesInvalidZ", list->Reset(allocator, nullptr))) {
+    cleanup();
+    return 1;
+  }
+  list->CopyTiles(
+      reserved_texture_mips, &boxed_coordinate, &valid_copy_region, copy_tiles_remap_readback,
+      D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+  D3D12_TILED_RESOURCE_COORDINATE invalid_z_coordinate = boxed_coordinate;
+  invalid_z_coordinate.Z = 1;
+  D3D12_TILE_REGION_SIZE single_tile_region = {};
+  single_tile_region.NumTiles = 1;
+  single_tile_region.UseBox = TRUE;
+  single_tile_region.Width = 1;
+  single_tile_region.Height = 1;
+  single_tile_region.Depth = 1;
+  list->CopyTiles(
+      reserved_texture_mips, &invalid_z_coordinate, &single_tile_region, copy_tiles_remap_readback, 0,
+      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+  if (!CheckHR("CloseCopyTilesInvalidZ", list->Close())) {
+    cleanup();
+    return 1;
+  }
+  ID3D12CommandList *invalid_z_lists[] = {list};
+  queue->ExecuteCommandLists(1, invalid_z_lists);
+  if (!CheckHR("SignalCopyTilesInvalidZ", queue->Signal(fence, 5)) ||
+      !CheckHR("SetEventOnCopyTilesInvalidZ", fence->SetEventOnCompletion(5, event))) {
+    cleanup();
+    return 1;
+  }
+  WaitForSingleObject(event, INFINITE);
+
+  if (!CheckHR("MapCopyTilesInvalidZResult", copy_tiles_remap_readback->Map(
+                                                     0, nullptr,
+                                                     reinterpret_cast<void **>(&mapped_copy_tiles_remap_readback)))) {
+    cleanup();
+    return 1;
+  }
+  bool copy_tiles_invalid_z_preserved = true;
+  for (UINT i = 0; i < copy_tiles_buffer_desc.Width; i++) {
+    if (mapped_copy_tiles_remap_readback[i] != 0xcd) {
+      copy_tiles_invalid_z_preserved = false;
+      break;
+    }
+  }
+  copy_tiles_remap_readback->Unmap(0, nullptr);
+  if (!copy_tiles_invalid_z_preserved) {
+    std::cerr << "non-zero Z boxed Texture2D CopyTiles modified the buffer\n";
     cleanup();
     return 1;
   }

@@ -18,17 +18,22 @@
 
 #pragma once
 
+#include "d3d12.h"
 #include "dxmt_texture.hpp"
 #include "dxmt_scaler.hpp"
+#include "com/com_pointer.hpp"
 #include <cstdint>
 
 namespace dxmt {
+
+class MTLD3D12Resource;
 
 enum class EncoderType {
   Null,
   Clear,
   Render,
   Blit,
+  CopyTiles,
   Compute,
   Resolve,
   TemporalUpscale,
@@ -112,6 +117,18 @@ struct RenderEncoderData : EncoderData {
 struct BlitEncoderData : EncoderData {
   wmtcmd_blit_nop cmd_head;
   wmtcmd_base *cmd_tail;
+};
+
+struct CopyTilesEncoderData : EncoderData {
+  Com<MTLD3D12Resource, false> tiled_resource;
+  Com<MTLD3D12Resource, false> linear_resource;
+  D3D12_TILED_RESOURCE_COORDINATE region_start_coordinate = {};
+  D3D12_TILE_REGION_SIZE region_size = {};
+  UINT64 buffer_offset = 0;
+  D3D12_TILE_COPY_FLAGS flags = D3D12_TILE_COPY_FLAG_NONE;
+  bool has_region_start_coordinate = false;
+  bool buffer_to_tiled = false;
+  bool tiled_to_buffer = false;
 };
 
 struct ComputeEncoderData : EncoderData {

@@ -53,8 +53,8 @@ class MTLD3D12CommandAllocator;
 
 class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList7, public IMTLD3D12CommandListExt {
 public:
-  EncoderData *entry;
-  size_t encoder_count;
+  EncoderData *entry = nullptr;
+  size_t encoder_count = 0;
 
   virtual MTLD3D12CommandAllocator *GetAllocator() = 0;
   virtual void CommitResourceStates() = 0;
@@ -84,6 +84,9 @@ public:
 
 class MTLD3D12Resource : public ID3D12Resource {
 public:
+  virtual void AddRefPrivate() = 0;
+  virtual void ReleasePrivate() = 0;
+
   Rc<Texture> texture;
   Rc<Buffer> buffer;
   D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;

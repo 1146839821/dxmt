@@ -92,10 +92,20 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
 
   ClearUAV<MTLD3D12CommandAllocatorImpl> clear_uav_;
 
+  void
+  DestroyEncoder(EncoderData *encoder);
+
+  void
+  DestroyEncoders();
+
+  void
+  DiscardRecord();
+
 public:
   MTLD3D12CommandAllocatorImpl(MTLD3D12Device *pDevice, D3D12_COMMAND_LIST_TYPE Type);
 
   ~MTLD3D12CommandAllocatorImpl() {
+    DestroyEncoders();
     free(cpu_heap_);
     cpu_heap_ = nullptr;
     gpu_heap_buffer_ = {};
