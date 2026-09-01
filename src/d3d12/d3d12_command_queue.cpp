@@ -102,14 +102,20 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   }
 
   bool
-  CommitSubmission(Submission &submission) {
-    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+  WaitForSubmissionSpaceLocked() {
     std::unique_lock<dxmt::mutex> submission_lock(submission_mutex_);
     submission_space_condition_.wait(submission_lock, [this] {
       return stopping_ || submission_count_ < kCommandQueueSize;
     });
-    if (stopping_)
+    return !stopping_;
+  }
+
+  bool
+  CommitSubmissionLocked(Submission &submission) {
+    std::unique_lock<dxmt::mutex> submission_lock(submission_mutex_);
+    if (stopping_ || submission_count_ >= kCommandQueueSize)
       return false;
+    assert(submission_count_ < kCommandQueueSize);
 
     submission.serial = next_submission_serial_++;
     submission.command_buffer.commit();
@@ -277,6 +283,10 @@ public:
         return;
       }
     }
+
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return;
 
     auto pool = WMT::MakeAutoreleasePool();
 
@@ -481,7 +491,7 @@ public:
       }
       pCommandList->CommitResourceStates();
     }
-    if (!CommitSubmission(submission))
+    if (!CommitSubmissionLocked(submission))
       AbortSubmission(submission);
   };
 
@@ -495,12 +505,16 @@ public:
   Signal(ID3D12Fence *pFence, UINT64 Value) {
     if (!IsSameDevice(device_, pFence))
       return E_INVALIDARG;
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return E_FAIL;
+
     auto pool = WMT::MakeAutoreleasePool();
     auto cmdbuf = queue_.commandBuffer();
     static_cast<MTLD3D12Fence *>(pFence)->fence->signal(cmdbuf, Value);
     Submission submission;
     submission.command_buffer = cmdbuf;
-    if (!CommitSubmission(submission))
+    if (!CommitSubmissionLocked(submission))
       return E_FAIL;
     return S_OK;
   };
@@ -509,12 +523,16 @@ public:
   Wait(ID3D12Fence *pFence, UINT64 Value) {
     if (!IsSameDevice(device_, pFence))
       return E_INVALIDARG;
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return E_FAIL;
+
     auto pool = WMT::MakeAutoreleasePool();
     auto cmdbuf = queue_.commandBuffer();
     static_cast<MTLD3D12Fence *>(pFence)->fence->wait(cmdbuf, Value);
     Submission submission;
     submission.command_buffer = cmdbuf;
-    if (!CommitSubmission(submission))
+    if (!CommitSubmissionLocked(submission))
       return E_FAIL;
     return S_OK;
   };
@@ -531,6 +549,10 @@ public:
   GetClockCalibration(UINT64 *gpu_timestamp, UINT64 *cpu_timestamp) {
     if (!gpu_timestamp || !cpu_timestamp)
       return E_INVALIDARG;
+
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return E_FAIL;
 
     auto pool = WMT::MakeAutoreleasePool();
     auto sample_buffer = device_->GetMTLDevice().newCounterSampleBuffer(1, true);
@@ -562,7 +584,12 @@ public:
 
     encoder.updateFence(fence_);
     encoder.endEncoding();
-    cmdbuf.commit();
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    if (!CommitSubmissionLocked(submission))
+      return E_FAIL;
+
+    commit_lock.unlock();
     cmdbuf.waitUntilCompleted();
 
     if (!QueryPerformanceCounter(&cpu_after))
@@ -597,6 +624,10 @@ public:
   HRESULT
   Present(Presenter *presenter, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable) {
     static uint32_t trace_present_count = 0;
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return E_FAIL;
+
     auto pool = WMT::MakeAutoreleasePool();
     auto cmdbuf = queue_.commandBuffer();
 
@@ -620,7 +651,7 @@ public:
     Submission submission;
     submission.command_buffer = cmdbuf;
     submission.latency_waitable = hLantecyWaitable;
-    if (!CommitSubmission(submission))
+    if (!CommitSubmissionLocked(submission))
       return E_FAIL;
 
     return S_OK;
