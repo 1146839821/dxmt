@@ -22,6 +22,8 @@
 #include "com/com_pointer.hpp"
 #include "log/log.hpp"
 #include <atomic>
+#include <limits>
+#include <mutex>
 
 namespace dxmt {
 
@@ -225,10 +227,61 @@ ValidateTexture3DRange(const D3D12_RESOURCE_DESC &ResourceDesc, UINT MipSlice, U
   return S_OK;
 }
 
+bool
+GetReservedTextureTileShape(const MTL_DXGI_FORMAT_DESC &Format, D3D12_TILE_SHAPE &Shape) {
+  if (Format.PlanarCount != 1 || Format.Flag & (MTL_DXGI_FORMAT_BC | MTL_DXGI_FORMAT_DEPTH_PLANER |
+                                                 MTL_DXGI_FORMAT_STENCIL_PLANER))
+    return false;
+
+  Shape.DepthInTexels = 1;
+  switch (Format.BytesPerTexel) {
+  case 1:
+    Shape.WidthInTexels = 256;
+    Shape.HeightInTexels = 256;
+    return true;
+  case 2:
+    Shape.WidthInTexels = 256;
+    Shape.HeightInTexels = 128;
+    return true;
+  case 4:
+    Shape.WidthInTexels = 128;
+    Shape.HeightInTexels = 128;
+    return true;
+  case 8:
+    Shape.WidthInTexels = 128;
+    Shape.HeightInTexels = 64;
+    return true;
+  case 16:
+    Shape.WidthInTexels = 64;
+    Shape.HeightInTexels = 64;
+    return true;
+  default:
+    return false;
+  }
+}
+
 class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
   D3D12_RESOURCE_DESC desc_;
   D3D12_HEAP_PROPERTIES heap_props_;
   D3D12_HEAP_FLAGS heap_flags_;
+  bool reserved_ = false;
+  D3D12_TILE_SHAPE tile_shape_ = {};
+  UINT total_tile_count_ = 0;
+  std::vector<D3D12_SUBRESOURCE_TILING> subresource_tilings_;
+
+  struct TileMapping {
+    Com<ID3D12Heap> heap;
+    UINT heap_tile = 0;
+  };
+
+  struct TileUpdate {
+    UINT resource_tile = 0;
+    Com<ID3D12Heap> heap;
+    UINT heap_tile = 0;
+  };
+
+  std::vector<TileMapping> tile_mappings_;
+  mutable dxmt::mutex tile_mapping_mutex_;
 
 public:
   MTLD3D12Texture(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12Resource>(pDevice) {}
@@ -299,6 +352,134 @@ public:
     return S_OK;
   };
 
+  HRESULT
+  InitializeReserved(const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState) {
+    if (!pDesc)
+      return E_INVALIDARG;
+    if (pDesc->Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+      return E_NOTIMPL;
+    if (!pDesc->Width || !pDesc->Height || !pDesc->DepthOrArraySize)
+      return E_INVALIDARG;
+    if (pDesc->Width > std::numeric_limits<UINT>::max() || pDesc->MipLevels != 1 || pDesc->SampleDesc.Count != 1 ||
+        pDesc->SampleDesc.Quality != 0)
+      return E_NOTIMPL;
+    if (pDesc->Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN)
+      return E_INVALIDARG;
+    if (pDesc->Alignment && pDesc->Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)
+      return E_INVALIDARG;
+
+    D3D12_HEAP_PROPERTIES default_heap = {};
+    default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    default_heap.CreationNodeMask = 1;
+    default_heap.VisibleNodeMask = 1;
+    if (FAILED(ValidateResourceDescs(pDesc, &default_heap)) ||
+        FAILED(ValidateResourceStates(InitialState, &default_heap)))
+      return E_INVALIDARG;
+
+    WMTTextureInfo texture_info = {};
+    HRESULT hr = PopulateWMTTextureInfo(device_->GetMTLDevice(), texture_info, *pDesc);
+    if (FAILED(hr))
+      return hr;
+
+    MTL_DXGI_FORMAT_DESC format = {};
+    hr = MTLQueryDXGIFormat(device_->GetMTLDevice(), pDesc->Format, format);
+    if (FAILED(hr))
+      return hr;
+    if (!GetReservedTextureTileShape(format, tile_shape_))
+      return E_NOTIMPL;
+
+    const UINT width_in_tiles = static_cast<UINT>((pDesc->Width - 1) / tile_shape_.WidthInTexels + 1);
+    const UINT height_in_tiles = (pDesc->Height - 1) / tile_shape_.HeightInTexels + 1;
+    if (height_in_tiles > std::numeric_limits<UINT16>::max())
+      return E_NOTIMPL;
+
+    const uint64_t tiles_per_subresource = uint64_t(width_in_tiles) * height_in_tiles;
+    const uint64_t total_tiles = tiles_per_subresource * pDesc->DepthOrArraySize;
+    if (!tiles_per_subresource || total_tiles > std::numeric_limits<UINT>::max())
+      return E_NOTIMPL;
+
+    desc_ = *pDesc;
+    heap_props_ = default_heap;
+    heap_flags_ = D3D12_HEAP_FLAG_NONE;
+    state = InitialState;
+    InitializeStateTracking(desc_, device_->GetMTLDevice());
+    reserved_ = true;
+    total_tile_count_ = static_cast<UINT>(total_tiles);
+    subresource_tilings_.resize(pDesc->DepthOrArraySize);
+    tile_mappings_.resize(total_tile_count_);
+    for (UINT subresource = 0; subresource < subresource_tilings_.size(); subresource++) {
+      auto &tiling = subresource_tilings_[subresource];
+      tiling.WidthInTiles = width_in_tiles;
+      tiling.HeightInTiles = static_cast<UINT16>(height_in_tiles);
+      tiling.DepthInTiles = 1;
+      tiling.StartTileIndexInOverallResource = static_cast<UINT>(subresource * tiles_per_subresource);
+    }
+    return S_OK;
+  };
+
+  HRESULT
+  BuildRegionTiles(
+      UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
+      const D3D12_TILE_REGION_SIZE *pResourceRegionSizes, std::vector<UINT> &resource_tiles
+  ) const {
+    if (!NumResourceRegions || (NumResourceRegions > 1 && !pResourceRegionStartCoordinates))
+      return E_INVALIDARG;
+
+    if (!pResourceRegionStartCoordinates && !pResourceRegionSizes) {
+      if (NumResourceRegions != 1)
+        return E_INVALIDARG;
+      resource_tiles.reserve(total_tile_count_);
+      for (UINT tile = 0; tile < total_tile_count_; tile++)
+        resource_tiles.push_back(tile);
+      return S_OK;
+    }
+
+    for (UINT region = 0; region < NumResourceRegions; region++) {
+      const auto coordinate = pResourceRegionStartCoordinates ? pResourceRegionStartCoordinates[region]
+                                                               : D3D12_TILED_RESOURCE_COORDINATE{};
+      if (coordinate.Subresource >= subresource_tilings_.size() || coordinate.Z)
+        return E_INVALIDARG;
+
+      const auto &tiling = subresource_tilings_[coordinate.Subresource];
+      const uint64_t subresource_tile_count = uint64_t(tiling.WidthInTiles) * tiling.HeightInTiles;
+      const auto *region_size = pResourceRegionSizes ? &pResourceRegionSizes[region] : nullptr;
+      if (!region_size) {
+        if (coordinate.X >= tiling.WidthInTiles || coordinate.Y >= tiling.HeightInTiles)
+          return E_INVALIDARG;
+        resource_tiles.push_back(tiling.StartTileIndexInOverallResource + coordinate.Y * tiling.WidthInTiles + coordinate.X);
+        continue;
+      }
+
+      if (!region_size->NumTiles)
+        return E_INVALIDARG;
+      const uint64_t region_start = uint64_t(coordinate.Y) * tiling.WidthInTiles + coordinate.X;
+      if (coordinate.X >= tiling.WidthInTiles || coordinate.Y >= tiling.HeightInTiles || region_start >= subresource_tile_count)
+        return E_INVALIDARG;
+
+      if (!region_size->UseBox) {
+        if (region_size->NumTiles > subresource_tile_count - region_start)
+          return E_INVALIDARG;
+        for (UINT tile = 0; tile < region_size->NumTiles; tile++)
+          resource_tiles.push_back(tiling.StartTileIndexInOverallResource + static_cast<UINT>(region_start + tile));
+        continue;
+      }
+
+      const uint64_t box_tile_count = uint64_t(region_size->Width) * region_size->Height * region_size->Depth;
+      if (!region_size->Width || !region_size->Height || region_size->Depth != 1 ||
+          box_tile_count != region_size->NumTiles || region_size->Width > tiling.WidthInTiles - coordinate.X ||
+          region_size->Height > tiling.HeightInTiles - coordinate.Y)
+        return E_INVALIDARG;
+      for (UINT y = 0; y < region_size->Height; y++) {
+        for (UINT x = 0; x < region_size->Width; x++) {
+          resource_tiles.push_back(
+              tiling.StartTileIndexInOverallResource + (coordinate.Y + y) * tiling.WidthInTiles + coordinate.X + x
+          );
+        }
+      }
+    }
+    return resource_tiles.empty() ? E_INVALIDARG : S_OK;
+  };
+
   ~MTLD3D12Texture() {
     if (texture && texture->current())
       device_->UnregisterResidency(texture->current()->texture());
@@ -327,7 +508,7 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   Map(UINT Subresource, const D3D12_RANGE *pReadRange, void **ppData) {
-    if (!IsCpuVisibleHeap(&heap_props_))
+    if (reserved_ || !texture || !IsCpuVisibleHeap(&heap_props_))
       return E_INVALIDARG;
     UINT subresource_count = desc_.MipLevels;
     if (desc_.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D)
@@ -357,6 +538,8 @@ public:
   WriteToSubresource(
       UINT DstSubresource, const D3D12_BOX *pDstBox, const void *pSrcData, UINT SrcRowPitch, UINT SrcSlicePitch
   ) {
+    if (reserved_ || !texture)
+      return E_INVALIDARG;
     if (desc_.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D)
       SrcSlicePitch = 0;
     if (desc_.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
@@ -394,6 +577,8 @@ public:
   ReadFromSubresource(
       void *pDstData, UINT DstRowPitch, UINT DstSlicePitch, UINT SrcSubresource, const D3D12_BOX *pSrcBox
   ) {
+    if (reserved_ || !texture)
+      return E_INVALIDARG;
     if (desc_.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D)
       DstSlicePitch = 0;
     if (desc_.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
@@ -429,6 +614,8 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   GetHeapProperties(D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS *pFlags) {
+    if (reserved_)
+      return E_INVALIDARG;
     if (pHeapProps)
       *pHeapProps = heap_props_;
     if (pFlags)
@@ -438,6 +625,8 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   CreateShaderResourceView(const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) {
+    if (reserved_)
+      return E_NOTIMPL;
     HRESULT hr;
     D3D12_SHADER_RESOURCE_VIEW_DESC ViewDesc;
     if (!pDesc) {
@@ -626,6 +815,8 @@ public:
   CreateUnorderedAccessView(
       ID3D12Resource *pCounter, const D3D12_UNORDERED_ACCESS_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor
   ) {
+    if (reserved_)
+      return E_NOTIMPL;
     HRESULT hr;
     D3D12_UNORDERED_ACCESS_VIEW_DESC ViewDesc;
     if (!pDesc) {
@@ -722,6 +913,8 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   CreateRenderTargetView(const D3D12_RENDER_TARGET_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) {
+    if (reserved_)
+      return E_NOTIMPL;
     HRESULT hr;
     D3D12_RENDER_TARGET_VIEW_DESC ViewDesc;
     if (!pDesc) {
@@ -848,6 +1041,8 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   CreateDepthStencilView(const D3D12_DEPTH_STENCIL_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) {
+    if (reserved_)
+      return E_NOTIMPL;
     HRESULT hr;
     D3D12_DEPTH_STENCIL_VIEW_DESC ViewDesc;
     if (!pDesc) {
@@ -957,16 +1152,156 @@ public:
       UINT *TotalTileCount, D3D12_PACKED_MIP_INFO *PackedMipInfo, D3D12_TILE_SHAPE *StandardTitleShape,
       UINT *SubresourceTilingCount, UINT FirstSubresourceTiling, D3D12_SUBRESOURCE_TILING *SubresourceTilings
   ) {
-    WARN("D3D12 texture GetResourceTiling is not implemented");
+    if (!reserved_) {
+      WARN("D3D12 texture GetResourceTiling is not implemented");
+      if (TotalTileCount)
+        *TotalTileCount = 0;
+      if (PackedMipInfo)
+        *PackedMipInfo = {};
+      if (StandardTitleShape)
+        *StandardTitleShape = {};
+      if (SubresourceTilingCount)
+        *SubresourceTilingCount = 0;
+      return;
+    }
+
     if (TotalTileCount)
-      *TotalTileCount = 0;
+      *TotalTileCount = total_tile_count_;
     if (PackedMipInfo)
       *PackedMipInfo = {};
     if (StandardTitleShape)
-      *StandardTitleShape = {};
-    if (SubresourceTilingCount)
-      *SubresourceTilingCount = 0;
+      *StandardTitleShape = tile_shape_;
+    if (!SubresourceTilingCount)
+      return;
+
+    const UINT requested = *SubresourceTilingCount;
+    const UINT available = FirstSubresourceTiling < subresource_tilings_.size()
+                               ? static_cast<UINT>(subresource_tilings_.size() - FirstSubresourceTiling)
+                               : 0;
+    const UINT retrieved = std::min(requested, available);
+    *SubresourceTilingCount = retrieved;
+    if (retrieved && SubresourceTilings)
+      std::copy_n(subresource_tilings_.begin() + FirstSubresourceTiling, retrieved, SubresourceTilings);
   };
+
+  bool
+  IsReservedResource() const override {
+    return reserved_;
+  }
+
+  bool
+  IsReservedTexture() const override {
+    return reserved_;
+  }
+
+  HRESULT
+  UpdateTileMappings(
+      UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
+      const D3D12_TILE_REGION_SIZE *pResourceRegionSizes, ID3D12Heap *pHeap, UINT NumRanges,
+      const D3D12_TILE_RANGE_FLAGS *pRangeFlags, const UINT *pHeapRangeStartOffsets, const UINT *pRangeTileCounts,
+      D3D12_TILE_MAPPING_FLAGS Flags
+  ) override {
+    if (!reserved_ || (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD) || !NumRanges)
+      return E_INVALIDARG;
+
+    std::vector<UINT> resource_tiles;
+    HRESULT hr = BuildRegionTiles(
+        NumResourceRegions, pResourceRegionStartCoordinates, pResourceRegionSizes, resource_tiles
+    );
+    if (FAILED(hr))
+      return hr;
+
+    std::vector<TileUpdate> updates;
+    updates.reserve(resource_tiles.size());
+    uint64_t resource_tile = 0;
+    for (UINT range = 0; range < NumRanges; range++) {
+      const auto range_flag = pRangeFlags ? pRangeFlags[range] : D3D12_TILE_RANGE_FLAG_NONE;
+      if (range_flag & ~(D3D12_TILE_RANGE_FLAG_NULL | D3D12_TILE_RANGE_FLAG_SKIP |
+                         D3D12_TILE_RANGE_FLAG_REUSE_SINGLE_TILE))
+        return E_INVALIDARG;
+      if (bit::popcnt(static_cast<unsigned>(range_flag)) > 1)
+        return E_INVALIDARG;
+
+      const UINT tile_count =
+          pRangeTileCounts ? pRangeTileCounts[range] : (NumRanges == 1 ? static_cast<UINT>(resource_tiles.size()) : 0);
+      if (!tile_count || resource_tile > resource_tiles.size() || tile_count > resource_tiles.size() - resource_tile)
+        return E_INVALIDARG;
+
+      const bool needs_heap = range_flag == D3D12_TILE_RANGE_FLAG_NONE ||
+                              range_flag == D3D12_TILE_RANGE_FLAG_REUSE_SINGLE_TILE;
+      if (needs_heap && (!pHeap || !pHeapRangeStartOffsets || !IsSameDevice(device_, pHeap)))
+        return E_INVALIDARG;
+
+      const UINT heap_tile = pHeapRangeStartOffsets ? pHeapRangeStartOffsets[range] : 0;
+      if (needs_heap) {
+        D3D12_HEAP_DESC heap_desc = {};
+        pHeap->GetDesc(&heap_desc);
+        if (!heap_desc.SizeInBytes)
+          return E_INVALIDARG;
+        const uint64_t heap_tile_count = (heap_desc.SizeInBytes - 1) / (64ull * 1024) + 1;
+        if (range_flag == D3D12_TILE_RANGE_FLAG_REUSE_SINGLE_TILE) {
+          if (heap_tile >= heap_tile_count)
+            return E_INVALIDARG;
+        } else if (heap_tile > heap_tile_count || tile_count > heap_tile_count - heap_tile) {
+          return E_INVALIDARG;
+        }
+      }
+
+      if (range_flag != D3D12_TILE_RANGE_FLAG_SKIP) {
+        for (UINT tile = 0; tile < tile_count; tile++) {
+          auto &update = updates.emplace_back();
+          update.resource_tile = resource_tiles[resource_tile + tile];
+          if (needs_heap) {
+            update.heap = pHeap;
+            update.heap_tile = range_flag == D3D12_TILE_RANGE_FLAG_REUSE_SINGLE_TILE ? heap_tile : heap_tile + tile;
+          }
+        }
+      }
+      resource_tile += tile_count;
+    }
+    if (resource_tile != resource_tiles.size())
+      return E_INVALIDARG;
+
+    std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
+    for (const auto &update : updates)
+      tile_mappings_[update.resource_tile] = {update.heap, update.heap_tile};
+    return S_OK;
+  }
+
+  HRESULT
+  CopyTileMappingsFrom(
+      MTLD3D12Resource *pSourceResource, const D3D12_TILED_RESOURCE_COORDINATE *pDstRegionStartCoordinate,
+      const D3D12_TILED_RESOURCE_COORDINATE *pSrcRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
+      D3D12_TILE_MAPPING_FLAGS Flags
+  ) override {
+    if (!reserved_ || !pSourceResource || !pSourceResource->IsReservedTexture() ||
+        !IsSameDevice(device_, pSourceResource) || (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD))
+      return E_INVALIDARG;
+
+    auto *source = static_cast<MTLD3D12Texture *>(pSourceResource);
+    std::vector<UINT> destination_tiles;
+    std::vector<UINT> source_tiles;
+    const HRESULT destination_hr = BuildRegionTiles(
+        1, pDstRegionStartCoordinate, pRegionSize, destination_tiles
+    );
+    const HRESULT source_hr = source->BuildRegionTiles(1, pSrcRegionStartCoordinate, pRegionSize, source_tiles);
+    if (FAILED(destination_hr) || FAILED(source_hr) || destination_tiles.size() != source_tiles.size())
+      return E_INVALIDARG;
+
+    std::vector<TileMapping> copied;
+    {
+      std::unique_lock<dxmt::mutex> source_lock(source->tile_mapping_mutex_);
+      copied.reserve(source_tiles.size());
+      for (UINT tile : source_tiles)
+        copied.push_back(source->tile_mappings_[tile]);
+    }
+    {
+      std::unique_lock<dxmt::mutex> destination_lock(tile_mapping_mutex_);
+      for (size_t i = 0; i < destination_tiles.size(); i++)
+        tile_mappings_[destination_tiles[i]] = copied[i];
+    }
+    return S_OK;
+  }
 };
 
 HRESULT
@@ -999,6 +1334,24 @@ CreatePlacedTexture(
     return E_INVALIDARG;
 
   HRESULT hr = texture->Initialize(&heap_desc.Properties, heap_desc.Flags, pDesc, InitialState, pHeap, HeapOffset);
+  if (FAILED(hr))
+    return hr;
+  if (!ppResource)
+    return S_FALSE;
+  return texture->QueryInterface(riid, ppResource);
+}
+
+HRESULT
+CreateReservedTexture(
+    MTLD3D12Device *pDevice, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
+    const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
+) {
+  InitReturnPtr(ppResource);
+  if (OptimizedClearValue)
+    return E_INVALIDARG;
+
+  auto texture = Com(new MTLD3D12Texture(pDevice));
+  HRESULT hr = texture->InitializeReserved(pDesc, InitialState);
   if (FAILED(hr))
     return hr;
   if (!ppResource)

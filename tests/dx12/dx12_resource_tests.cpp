@@ -43,6 +43,7 @@ int main() {
   ID3D12Heap *texture_heap = nullptr;
   ID3D12Heap *alias_heap = nullptr;
   ID3D12Heap *reserved_heap = nullptr;
+  ID3D12Heap *reserved_texture_heap = nullptr;
   ID3D12Resource *source_zero = nullptr;
   ID3D12Resource *source_placed = nullptr;
   ID3D12Resource *invalid_placed = nullptr;
@@ -69,9 +70,13 @@ int main() {
   ID3D12CommandSignature *invalid_command_signature = nullptr;
   ID3D12Device1 *device1 = nullptr;
   ID3D12Device4 *device4 = nullptr;
+  ID3D12Device10 *device10 = nullptr;
   ID3D12Resource *committed1_resource = nullptr;
   ID3D12Resource *reserved_resource = nullptr;
   ID3D12Resource *reserved_resource_copy = nullptr;
+  ID3D12Resource *reserved_texture = nullptr;
+  ID3D12Resource *reserved_texture_copy = nullptr;
+  ID3D12Resource *reserved_texture_v2 = nullptr;
   ID3D12GraphicsCommandList2 *list2 = nullptr;
   HANDLE event = nullptr;
   HANDLE multiple_event = nullptr;
@@ -95,6 +100,12 @@ int main() {
       reserved_resource_copy->Release();
     if (reserved_resource)
       reserved_resource->Release();
+    if (reserved_texture_copy)
+      reserved_texture_copy->Release();
+    if (reserved_texture)
+      reserved_texture->Release();
+    if (reserved_texture_v2)
+      reserved_texture_v2->Release();
     if (list)
       list->Release();
     if (destination)
@@ -141,6 +152,8 @@ int main() {
       invalid_command_signature->Release();
     if (device4)
       device4->Release();
+    if (device10)
+      device10->Release();
     if (device1)
       device1->Release();
     if (info_queue)
@@ -161,6 +174,8 @@ int main() {
       alias_heap->Release();
     if (reserved_heap)
       reserved_heap->Release();
+    if (reserved_texture_heap)
+      reserved_texture_heap->Release();
     if (upload_heap)
       upload_heap->Release();
     if (allocator)
@@ -186,6 +201,10 @@ int main() {
     return 1;
   }
   if (!CheckHR("QueryDevice4", device->QueryInterface(IID_PPV_ARGS(&device4)))) {
+    cleanup();
+    return 1;
+  }
+  if (!CheckHR("QueryDevice10", device->QueryInterface(IID_PPV_ARGS(&device10)))) {
     cleanup();
     return 1;
   }
@@ -382,6 +401,107 @@ int main() {
       reserved_subresource_tiling.HeightInTiles != 1 || reserved_subresource_tiling.DepthInTiles != 1 ||
       reserved_subresource_tiling.StartTileIndexInOverallResource != 0) {
     std::cerr << "reserved buffer tiling contract mismatch\n";
+    cleanup();
+    return 1;
+  }
+
+  D3D12_RESOURCE_DESC reserved_texture_desc = {};
+  reserved_texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  reserved_texture_desc.Width = 192;
+  reserved_texture_desc.Height = 128;
+  reserved_texture_desc.DepthOrArraySize = 2;
+  reserved_texture_desc.MipLevels = 1;
+  reserved_texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  reserved_texture_desc.SampleDesc.Count = 1;
+  reserved_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  if (!CheckHR(
+          "CreateReservedTexture",
+          device->CreateReservedResource(
+              &reserved_texture_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource),
+              reinterpret_cast<void **>(&reserved_texture)
+          )
+      ) ||
+      !reserved_texture ||
+      !CheckHR(
+          "CreateReservedTexture1",
+          device4->CreateReservedResource1(
+              &reserved_texture_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, nullptr, __uuidof(ID3D12Resource),
+              reinterpret_cast<void **>(&reserved_texture_copy)
+          )
+      ) ||
+      !reserved_texture_copy ||
+      !CheckHR(
+          "CreateReservedTexture2",
+          device10->CreateReservedResource2(
+              &reserved_texture_desc, D3D12_BARRIER_LAYOUT_COMMON, nullptr, nullptr, 0, nullptr,
+              __uuidof(ID3D12Resource), reinterpret_cast<void **>(&reserved_texture_v2)
+          )
+      ) ||
+      !reserved_texture_v2) {
+    std::cerr << "reserved texture creation failed\n";
+    cleanup();
+    return 1;
+  }
+
+  D3D12_RESOURCE_DESC reserved_texture_result = {};
+  reserved_texture->GetDesc(&reserved_texture_result);
+  if (reserved_texture->GetHeapProperties(nullptr, nullptr) != E_INVALIDARG ||
+      reserved_texture->GetGPUVirtualAddress() != 0 || reserved_texture_result.Dimension != reserved_texture_desc.Dimension ||
+      reserved_texture_result.Width != reserved_texture_desc.Width ||
+      reserved_texture_result.Height != reserved_texture_desc.Height ||
+      reserved_texture_result.DepthOrArraySize != reserved_texture_desc.DepthOrArraySize) {
+    std::cerr << "reserved texture resource contract mismatch\n";
+    cleanup();
+    return 1;
+  }
+
+  D3D12_HEAP_DESC reserved_texture_heap_desc = {};
+  reserved_texture_heap_desc.SizeInBytes = 4ull * D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+  reserved_texture_heap_desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+  reserved_texture_heap_desc.Properties.CreationNodeMask = 1;
+  reserved_texture_heap_desc.Properties.VisibleNodeMask = 1;
+  reserved_texture_heap_desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+  reserved_texture_heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+  if (!CheckHR(
+          "CreateReservedTextureHeap",
+          device->CreateHeap(&reserved_texture_heap_desc, IID_PPV_ARGS(&reserved_texture_heap))
+      )) {
+    cleanup();
+    return 1;
+  }
+
+  D3D12_RESOURCE_DESC unsupported_reserved_texture_desc = reserved_texture_desc;
+  unsupported_reserved_texture_desc.MipLevels = 2;
+  void *unsupported_reserved_texture = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+  const HRESULT unsupported_reserved_texture_hr = device->CreateReservedResource(
+      &unsupported_reserved_texture_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource),
+      &unsupported_reserved_texture
+  );
+  if (unsupported_reserved_texture_hr != E_NOTIMPL || unsupported_reserved_texture != nullptr) {
+    std::cerr << "unsupported reserved texture descriptor was accepted\n";
+    cleanup();
+    return 1;
+  }
+
+  UINT reserved_texture_total_tile_count = 0;
+  D3D12_PACKED_MIP_INFO reserved_texture_packed_mip_info = {};
+  D3D12_TILE_SHAPE reserved_texture_tile_shape = {};
+  UINT reserved_texture_subresource_count = 2;
+  D3D12_SUBRESOURCE_TILING reserved_texture_tilings[2] = {};
+  device->GetResourceTiling(
+      reserved_texture, &reserved_texture_total_tile_count, &reserved_texture_packed_mip_info,
+      &reserved_texture_tile_shape, &reserved_texture_subresource_count, 0, reserved_texture_tilings
+  );
+  if (reserved_texture_total_tile_count != 4 || reserved_texture_packed_mip_info.NumStandardMips ||
+      reserved_texture_packed_mip_info.NumPackedMips || reserved_texture_packed_mip_info.NumTilesForPackedMips ||
+      reserved_texture_packed_mip_info.StartTileIndexInOverallResource ||
+      reserved_texture_tile_shape.WidthInTexels != 128 || reserved_texture_tile_shape.HeightInTexels != 128 ||
+      reserved_texture_tile_shape.DepthInTexels != 1 || reserved_texture_subresource_count != 2 ||
+      reserved_texture_tilings[0].WidthInTiles != 2 || reserved_texture_tilings[0].HeightInTiles != 1 ||
+      reserved_texture_tilings[0].DepthInTiles != 1 || reserved_texture_tilings[0].StartTileIndexInOverallResource != 0 ||
+      reserved_texture_tilings[1].WidthInTiles != 2 || reserved_texture_tilings[1].HeightInTiles != 1 ||
+      reserved_texture_tilings[1].DepthInTiles != 1 || reserved_texture_tilings[1].StartTileIndexInOverallResource != 2) {
+    std::cerr << "reserved texture tiling contract mismatch\n";
     cleanup();
     return 1;
   }
@@ -1201,6 +1321,54 @@ int main() {
   );
   queue->CopyTileMappings(
       reserved_resource_copy, nullptr, reserved_resource, nullptr, &tile_region, D3D12_TILE_MAPPING_FLAG_NONE
+  );
+
+  D3D12_TILED_RESOURCE_COORDINATE texture_tile_coordinate = {};
+  D3D12_TILE_REGION_SIZE texture_tile_region = {};
+  texture_tile_region.NumTiles = 2;
+  D3D12_TILE_RANGE_FLAGS texture_range_flags[] = {D3D12_TILE_RANGE_FLAG_NONE, D3D12_TILE_RANGE_FLAG_NULL};
+  UINT texture_heap_tile_offsets[] = {0, 0};
+  UINT texture_range_tile_counts[] = {1, 1};
+  queue->UpdateTileMappings(
+      reserved_texture, 1, &texture_tile_coordinate, &texture_tile_region, reserved_texture_heap, 2,
+      texture_range_flags, texture_heap_tile_offsets, texture_range_tile_counts, D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  texture_tile_coordinate.Subresource = 1;
+  D3D12_TILE_RANGE_FLAGS reuse_range_flag = D3D12_TILE_RANGE_FLAG_REUSE_SINGLE_TILE;
+  UINT reuse_range_tile_count = 2;
+  queue->UpdateTileMappings(
+      reserved_texture, 1, &texture_tile_coordinate, &texture_tile_region, reserved_texture_heap, 1,
+      &reuse_range_flag, texture_heap_tile_offsets, &reuse_range_tile_count, D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  D3D12_TILE_RANGE_FLAGS texture_skip_range_flag = D3D12_TILE_RANGE_FLAG_SKIP;
+  UINT texture_skip_tile_count = 1;
+  queue->UpdateTileMappings(
+      reserved_texture, 1, &texture_tile_coordinate, &texture_tile_region, nullptr, 1, &texture_skip_range_flag,
+      nullptr, &texture_skip_tile_count, D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  D3D12_TILE_REGION_SIZE texture_box_region = {};
+  texture_box_region.NumTiles = 2;
+  texture_box_region.UseBox = TRUE;
+  texture_box_region.Width = 2;
+  texture_box_region.Height = 1;
+  texture_box_region.Depth = 1;
+  D3D12_TILE_RANGE_FLAGS texture_box_skip_range_flag = D3D12_TILE_RANGE_FLAG_SKIP;
+  UINT texture_box_skip_tile_count = 2;
+  queue->UpdateTileMappings(
+      reserved_texture, 1, &texture_tile_coordinate, &texture_box_region, nullptr, 1,
+      &texture_box_skip_range_flag, nullptr, &texture_box_skip_tile_count, D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  D3D12_TILED_RESOURCE_COORDINATE texture_copy_coordinate = {};
+  texture_copy_coordinate.Subresource = 1;
+  queue->CopyTileMappings(
+      reserved_texture_copy, &texture_copy_coordinate, reserved_texture, &texture_copy_coordinate,
+      &texture_box_region, D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  queue->CopyTileMappings(
+      reserved_resource, nullptr, reserved_texture, nullptr, &tile_region, D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  queue->CopyTileMappings(
+      reserved_texture, nullptr, reserved_resource, nullptr, &tile_region, D3D12_TILE_MAPPING_FLAG_NONE
   );
 
   const FLOAT texture3d_clear_color[] = {1.0f, 0.0f, 0.0f, 1.0f};

@@ -150,6 +150,11 @@ public:
     return false;
   }
 
+  virtual bool
+  IsReservedTexture() const {
+    return false;
+  }
+
   virtual HRESULT
   UpdateTileMappings(
       UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
@@ -349,6 +354,12 @@ CreatePlacedBuffer(
 
 HRESULT
 CreateReservedBuffer(
+    MTLD3D12Device *pDevice, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
+    const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
+);
+
+HRESULT
+CreateReservedTexture(
     MTLD3D12Device *pDevice, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
     const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
 );

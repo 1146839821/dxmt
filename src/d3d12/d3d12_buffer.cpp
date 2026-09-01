@@ -512,7 +512,7 @@ public:
       D3D12_TILE_MAPPING_FLAGS Flags
   ) override {
     if (!reserved_ || !pSourceResource || !pSourceResource->IsReservedResource() ||
-        (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD))
+        pSourceResource->IsReservedTexture() || (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD))
       return E_INVALIDARG;
 
     auto *source = static_cast<MTLD3D12Buffer *>(pSourceResource);

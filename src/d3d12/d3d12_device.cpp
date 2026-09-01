@@ -1206,7 +1206,18 @@ public:
       const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **resource
   ) {
     InitReturnPtr(resource);
-    return CreateReservedBuffer(this, pDesc, InitialState, OptimizedClearValue, riid, resource);
+    if (!pDesc)
+      return E_INVALIDARG;
+    switch (pDesc->Dimension) {
+    case D3D12_RESOURCE_DIMENSION_BUFFER:
+      return CreateReservedBuffer(this, pDesc, InitialState, OptimizedClearValue, riid, resource);
+    case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+    case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+    case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
+      return CreateReservedTexture(this, pDesc, InitialState, OptimizedClearValue, riid, resource);
+    default:
+      return E_INVALIDARG;
+    }
   };
 
   HRESULT STDMETHODCALLTYPE
