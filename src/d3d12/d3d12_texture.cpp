@@ -1236,6 +1236,8 @@ public:
       if (needs_heap) {
         D3D12_HEAP_DESC heap_desc = {};
         pHeap->GetDesc(&heap_desc);
+        if (heap_desc.Flags & D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES)
+          return E_INVALIDARG;
         if (!heap_desc.SizeInBytes)
           return E_INVALIDARG;
         const uint64_t heap_tile_count = (heap_desc.SizeInBytes - 1) / (64ull * 1024) + 1;
