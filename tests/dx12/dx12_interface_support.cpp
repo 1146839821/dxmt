@@ -977,9 +977,118 @@ int main() {
         list->DispatchMesh(0, 0, 0);
       }
   );
+  {
+    D3D12_HEAP_PROPERTIES heap_properties = {};
+    heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC buffer_desc = {};
+    buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer_desc.Width = 4096;
+    buffer_desc.Height = 1;
+    buffer_desc.DepthOrArraySize = 1;
+    buffer_desc.MipLevels = 1;
+    buffer_desc.SampleDesc.Count = 1;
+    buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    D3D12_RESOURCE_DESC texture_desc = {};
+    texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texture_desc.Width = 4;
+    texture_desc.Height = 4;
+    texture_desc.DepthOrArraySize = 2;
+    texture_desc.MipLevels = 2;
+    texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texture_desc.SampleDesc.Count = 1;
+    texture_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+    ID3D12Resource *buffer = nullptr;
+    ID3D12Resource *texture = nullptr;
+    ID3D12CommandAllocator *barrier_allocator = nullptr;
+    ID3D12GraphicsCommandList *barrier_list = nullptr;
+    ID3D12GraphicsCommandList7 *barrier_list7 = nullptr;
+
+    if (device->CreateCommittedResource(
+            &heap_properties, D3D12_HEAP_FLAG_NONE, &buffer_desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+            IID_PPV_ARGS(&buffer)
+        ) != S_OK ||
+        device->CreateCommittedResource(
+            &heap_properties, D3D12_HEAP_FLAG_NONE, &texture_desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+            IID_PPV_ARGS(&texture)
+        ) != S_OK) {
+      std::cerr << "Barrier resource creation failed\n";
+      passed = false;
+    } else if (device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&barrier_allocator)) != S_OK ||
+               device->CreateCommandList(
+                   0, D3D12_COMMAND_LIST_TYPE_DIRECT, barrier_allocator, nullptr, IID_PPV_ARGS(&barrier_list)
+               ) != S_OK ||
+               barrier_list->QueryInterface(IID_PPV_ARGS(&barrier_list7)) != S_OK || !barrier_list7) {
+      std::cerr << "Barrier command list creation failed\n";
+      passed = false;
+    } else {
+      barrier_list7->Barrier(0, nullptr);
+
+      D3D12_GLOBAL_BARRIER global_barrier = {};
+      global_barrier.SyncBefore = D3D12_BARRIER_SYNC_COPY;
+      global_barrier.SyncAfter = D3D12_BARRIER_SYNC_COMPUTE_SHADING;
+      global_barrier.AccessBefore = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+      global_barrier.AccessAfter = D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+      D3D12_BARRIER_GROUP global_group = {};
+      global_group.Type = D3D12_BARRIER_TYPE_GLOBAL;
+      global_group.NumBarriers = 1;
+      global_group.pGlobalBarriers = &global_barrier;
+      barrier_list7->Barrier(1, &global_group);
+
+      D3D12_BUFFER_BARRIER buffer_barrier = {};
+      buffer_barrier.SyncBefore = D3D12_BARRIER_SYNC_NONE;
+      buffer_barrier.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+      buffer_barrier.AccessBefore = D3D12_BARRIER_ACCESS_COMMON;
+      buffer_barrier.AccessAfter = D3D12_BARRIER_ACCESS_COPY_DEST;
+      buffer_barrier.pResource = buffer;
+      buffer_barrier.Size = UINT64_MAX;
+      D3D12_BARRIER_GROUP buffer_group = {};
+      buffer_group.Type = D3D12_BARRIER_TYPE_BUFFER;
+      buffer_group.NumBarriers = 1;
+      buffer_group.pBufferBarriers = &buffer_barrier;
+      barrier_list7->Barrier(1, &buffer_group);
+
+      D3D12_TEXTURE_BARRIER texture_barrier = {};
+      texture_barrier.SyncBefore = D3D12_BARRIER_SYNC_NONE;
+      texture_barrier.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+      texture_barrier.AccessBefore = D3D12_BARRIER_ACCESS_COMMON;
+      texture_barrier.AccessAfter = D3D12_BARRIER_ACCESS_COPY_DEST;
+      texture_barrier.LayoutBefore = D3D12_BARRIER_LAYOUT_COMMON;
+      texture_barrier.LayoutAfter = D3D12_BARRIER_LAYOUT_COPY_DEST;
+      texture_barrier.pResource = texture;
+      texture_barrier.Subresources = {D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, 0, 0, 0, 0, 0};
+      D3D12_BARRIER_GROUP texture_group = {};
+      texture_group.Type = D3D12_BARRIER_TYPE_TEXTURE;
+      texture_group.NumBarriers = 1;
+      texture_group.pTextureBarriers = &texture_barrier;
+      barrier_list7->Barrier(1, &texture_group);
+
+      texture_barrier.SyncBefore = D3D12_BARRIER_SYNC_COPY;
+      texture_barrier.SyncAfter = D3D12_BARRIER_SYNC_PIXEL_SHADING;
+      texture_barrier.AccessBefore = D3D12_BARRIER_ACCESS_COPY_DEST;
+      texture_barrier.AccessAfter = D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
+      texture_barrier.LayoutBefore = D3D12_BARRIER_LAYOUT_COPY_DEST;
+      texture_barrier.LayoutAfter = D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
+      texture_barrier.Subresources = {0, 1, 0, 1, 0, 1};
+      barrier_list7->Barrier(1, &texture_group);
+
+      if (barrier_list->Close() != S_OK) {
+        std::cerr << "Barrier command list did not close successfully\n";
+        passed = false;
+      }
+    }
+
+    Release(barrier_list7);
+    Release(barrier_list);
+    Release(barrier_allocator);
+    Release(texture);
+    Release(buffer);
+  }
   passed &= ExpectUnsupportedCommand<ID3D12GraphicsCommandList7>(
-      device, "Barrier", [](ID3D12GraphicsCommandList7 *list) {
-        list->Barrier(0, nullptr);
+      device, "Barrier(null groups)", [](ID3D12GraphicsCommandList7 *list) {
+        list->Barrier(1, nullptr);
       }
   );
 

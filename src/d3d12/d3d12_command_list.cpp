@@ -349,6 +349,95 @@ render_stages_for_state(D3D12_RESOURCE_STATES state) {
   return stages;
 }
 
+inline bool
+barrier_access_to_state(D3D12_BARRIER_ACCESS access, D3D12_RESOURCE_STATES &state) {
+  const UINT32 value = static_cast<UINT32>(access);
+  constexpr UINT32 no_access = static_cast<UINT32>(D3D12_BARRIER_ACCESS_NO_ACCESS);
+  constexpr UINT32 supported =
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_VERTEX_BUFFER) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_CONSTANT_BUFFER) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_INDEX_BUFFER) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_RENDER_TARGET) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_UNORDERED_ACCESS) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_SHADER_RESOURCE) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_STREAM_OUTPUT) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_COPY_DEST) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_COPY_SOURCE) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_RESOLVE_DEST) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_RESOLVE_SOURCE) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_DECODE_READ) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_DECODE_WRITE) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_PROCESS_READ) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_PROCESS_WRITE) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_ENCODE_READ) |
+      static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_ENCODE_WRITE);
+
+  if (value & no_access) {
+    if (value != no_access)
+      return false;
+    state = D3D12_RESOURCE_STATE_COMMON;
+    return true;
+  }
+  if (value & ~supported)
+    return false;
+
+  state = D3D12_RESOURCE_STATE_COMMON;
+  if (value & (static_cast<UINT32>(D3D12_BARRIER_ACCESS_VERTEX_BUFFER) |
+               static_cast<UINT32>(D3D12_BARRIER_ACCESS_CONSTANT_BUFFER)))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_INDEX_BUFFER))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_INDEX_BUFFER);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_RENDER_TARGET))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_RENDER_TARGET);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_UNORDERED_ACCESS))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_DEPTH_WRITE);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_DEPTH_READ);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_SHADER_RESOURCE))
+    state = (D3D12_RESOURCE_STATES)(
+        state | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+    );
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_STREAM_OUTPUT))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_STREAM_OUT);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_COPY_DEST))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_COPY_DEST);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_COPY_SOURCE))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_COPY_SOURCE);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_RESOLVE_DEST))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_RESOLVE_DEST);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_RESOLVE_SOURCE))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_DECODE_READ))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_VIDEO_DECODE_READ);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_DECODE_WRITE))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_PROCESS_READ))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_VIDEO_PROCESS_READ);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_PROCESS_WRITE))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_VIDEO_PROCESS_WRITE);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_ENCODE_READ))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
+  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_ENCODE_WRITE))
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
+  return true;
+}
+
+inline bool
+barrier_has_split_sync(const D3D12_BARRIER_SYNC &before, const D3D12_BARRIER_SYNC &after) {
+  constexpr UINT32 split = static_cast<UINT32>(D3D12_BARRIER_SYNC_SPLIT);
+  return (static_cast<UINT32>(before) | static_cast<UINT32>(after)) & split;
+}
+
 // `Graphics`CommandList is a really confusing name
 class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12GraphicsCommandList> {
 
@@ -3569,7 +3658,220 @@ public:
   }
 
   void STDMETHODCALLTYPE Barrier(UINT32 NumBarrierGroups, const D3D12_BARRIER_GROUP *pBarrierGroups) {
-    MarkUnsupportedCommand("Barrier");
+    if (!NumBarrierGroups)
+      return;
+    if (!pBarrierGroups) {
+      recording_failed_ = true;
+      return;
+    }
+
+    auto invalid_barrier = [&]() {
+      WARN("D3D12 Barrier received an unsupported or invalid barrier");
+      recording_failed_ = true;
+    };
+
+    auto emit_memory_barrier = [&](MTLD3D12Resource *resource, D3D12_RESOURCE_STATES before,
+                                   D3D12_RESOURCE_STATES after, bool force) {
+      if (before != after) {
+        D3D12_RESOURCE_BARRIER transition = {};
+        transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        transition.Transition.pResource = resource;
+        transition.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        transition.Transition.StateBefore = before;
+        transition.Transition.StateAfter = after;
+        ResourceBarrier(1, &transition);
+      } else if (force && (before != D3D12_RESOURCE_STATE_COMMON || after != D3D12_RESOURCE_STATE_COMMON)) {
+        EncodeMemoryBarrier(resource_barrier_scope(resource), before, after);
+      }
+    };
+
+    for (UINT32 group_index = 0; group_index < NumBarrierGroups; group_index++) {
+      const auto &group = pBarrierGroups[group_index];
+      if (!group.NumBarriers)
+        continue;
+
+      switch (group.Type) {
+      case D3D12_BARRIER_TYPE_GLOBAL:
+        if (!group.pGlobalBarriers) {
+          invalid_barrier();
+          continue;
+        }
+        for (UINT32 barrier_index = 0; barrier_index < group.NumBarriers; barrier_index++) {
+          const auto &barrier = group.pGlobalBarriers[barrier_index];
+          if (barrier_has_split_sync(barrier.SyncBefore, barrier.SyncAfter)) {
+            invalid_barrier();
+            continue;
+          }
+
+          D3D12_RESOURCE_STATES before = D3D12_RESOURCE_STATE_COMMON;
+          D3D12_RESOURCE_STATES after = D3D12_RESOURCE_STATE_COMMON;
+          if (!barrier_access_to_state(barrier.AccessBefore, before) ||
+              !barrier_access_to_state(barrier.AccessAfter, after)) {
+            invalid_barrier();
+            continue;
+          }
+
+          const auto before_access = static_cast<UINT32>(barrier.AccessBefore);
+          const auto after_access = static_cast<UINT32>(barrier.AccessAfter);
+          if (before_access != after_access || before != D3D12_RESOURCE_STATE_COMMON ||
+              after != D3D12_RESOURCE_STATE_COMMON)
+            EncodeMemoryBarrier(
+                WMTBarrierScopeBuffers | WMTBarrierScopeTextures | WMTBarrierScopeRenderTargets, before, after
+            );
+        }
+        break;
+
+      case D3D12_BARRIER_TYPE_BUFFER:
+        if (!group.pBufferBarriers) {
+          invalid_barrier();
+          continue;
+        }
+        for (UINT32 barrier_index = 0; barrier_index < group.NumBarriers; barrier_index++) {
+          const auto &barrier = group.pBufferBarriers[barrier_index];
+          if (barrier_has_split_sync(barrier.SyncBefore, barrier.SyncAfter) || !barrier.pResource ||
+              !IsSameDevice(device_, barrier.pResource)) {
+            invalid_barrier();
+            continue;
+          }
+
+          auto resource = static_cast<MTLD3D12Resource *>(barrier.pResource);
+          const auto desc = resource->GetDesc();
+          if (!resource->buffer || desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || barrier.Offset != 0 ||
+              (barrier.Size != UINT64_MAX && barrier.Size != desc.Width)) {
+            invalid_barrier();
+            continue;
+          }
+
+          D3D12_RESOURCE_STATES before = D3D12_RESOURCE_STATE_COMMON;
+          D3D12_RESOURCE_STATES after = D3D12_RESOURCE_STATE_COMMON;
+          if (!barrier_access_to_state(barrier.AccessBefore, before) ||
+              !barrier_access_to_state(barrier.AccessAfter, after)) {
+            invalid_barrier();
+            continue;
+          }
+
+          emit_memory_barrier(
+              resource, before, after,
+              static_cast<UINT32>(barrier.AccessBefore) != static_cast<UINT32>(barrier.AccessAfter) ||
+                  before != D3D12_RESOURCE_STATE_COMMON || after != D3D12_RESOURCE_STATE_COMMON
+          );
+        }
+        break;
+
+      case D3D12_BARRIER_TYPE_TEXTURE:
+        if (!group.pTextureBarriers) {
+          invalid_barrier();
+          continue;
+        }
+        for (UINT32 barrier_index = 0; barrier_index < group.NumBarriers; barrier_index++) {
+          const auto &barrier = group.pTextureBarriers[barrier_index];
+          if (barrier_has_split_sync(barrier.SyncBefore, barrier.SyncAfter) || !barrier.pResource ||
+              !IsSameDevice(device_, barrier.pResource) ||
+              (static_cast<UINT32>(barrier.Flags) & ~static_cast<UINT32>(D3D12_TEXTURE_BARRIER_FLAG_DISCARD))) {
+            invalid_barrier();
+            continue;
+          }
+
+          auto resource = static_cast<MTLD3D12Resource *>(barrier.pResource);
+          const auto desc = resource->GetDesc();
+          if (!resource->texture || desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+            invalid_barrier();
+            continue;
+          }
+
+          D3D12_RESOURCE_STATES before_layout = D3D12_RESOURCE_STATE_COMMON;
+          D3D12_RESOURCE_STATES after_layout = D3D12_RESOURCE_STATE_COMMON;
+          const bool discard = barrier.Flags & D3D12_TEXTURE_BARRIER_FLAG_DISCARD;
+          if (discard && barrier.LayoutBefore == D3D12_BARRIER_LAYOUT_UNDEFINED) {
+            before_layout = D3D12_RESOURCE_STATE_COMMON;
+            if (!ConvertBarrierLayout(desc.Dimension, barrier.LayoutAfter, &after_layout)) {
+              invalid_barrier();
+              continue;
+            }
+          } else if (!ConvertBarrierLayout(desc.Dimension, barrier.LayoutBefore, &before_layout) ||
+                     !ConvertBarrierLayout(desc.Dimension, barrier.LayoutAfter, &after_layout)) {
+            invalid_barrier();
+            continue;
+          }
+
+          D3D12_RESOURCE_STATES before_access = D3D12_RESOURCE_STATE_COMMON;
+          D3D12_RESOURCE_STATES after_access = D3D12_RESOURCE_STATE_COMMON;
+          if (!barrier_access_to_state(barrier.AccessBefore, before_access) ||
+              !barrier_access_to_state(barrier.AccessAfter, after_access)) {
+            invalid_barrier();
+            continue;
+          }
+
+          // Enhanced barriers can keep a common layout while changing the access scope.
+          if (before_access != D3D12_RESOURCE_STATE_COMMON)
+            before_layout = before_access;
+          if (after_access != D3D12_RESOURCE_STATE_COMMON)
+            after_layout = after_access;
+
+          auto emit_subresource = [&](UINT subresource) {
+            if (before_layout != after_layout) {
+              D3D12_RESOURCE_BARRIER transition = {};
+              transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+              transition.Transition.pResource = resource;
+              transition.Transition.Subresource = subresource;
+              transition.Transition.StateBefore = before_layout;
+              transition.Transition.StateAfter = after_layout;
+              ResourceBarrier(1, &transition);
+            } else if (barrier.LayoutBefore != barrier.LayoutAfter ||
+                       static_cast<UINT32>(barrier.AccessBefore) != static_cast<UINT32>(barrier.AccessAfter) ||
+                       before_access != D3D12_RESOURCE_STATE_COMMON ||
+                       after_access != D3D12_RESOURCE_STATE_COMMON) {
+              EncodeMemoryBarrier(resource_barrier_scope(resource), before_access, after_access);
+            }
+          };
+
+          const auto &range = barrier.Subresources;
+          if (!range.NumMipLevels) {
+            if (range.IndexOrFirstMipLevel == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) {
+              emit_subresource(D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES);
+            } else if (!resource->HasSubresource(range.IndexOrFirstMipLevel)) {
+              invalid_barrier();
+            } else {
+              emit_subresource(range.IndexOrFirstMipLevel);
+            }
+            continue;
+          }
+
+          const UINT mip_levels = std::max<UINT>(1, desc.MipLevels);
+          const UINT array_size = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                                      ? 1
+                                      : std::max<UINT>(1, desc.DepthOrArraySize);
+          const size_t subresource_plane_size = size_t(mip_levels) * array_size;
+          if (!subresource_plane_size || resource->subresource_states.size() % subresource_plane_size) {
+            invalid_barrier();
+            continue;
+          }
+          const UINT plane_count = static_cast<UINT>(resource->subresource_states.size() / subresource_plane_size);
+          if (!plane_count || range.IndexOrFirstMipLevel > mip_levels ||
+              range.NumMipLevels > mip_levels - range.IndexOrFirstMipLevel ||
+              range.FirstArraySlice > array_size || range.NumArraySlices > array_size - range.FirstArraySlice ||
+              range.FirstPlane > plane_count || range.NumPlanes > plane_count - range.FirstPlane ||
+              !range.NumArraySlices || !range.NumPlanes) {
+            invalid_barrier();
+            continue;
+          }
+
+          for (UINT plane = range.FirstPlane; plane < range.FirstPlane + range.NumPlanes; plane++) {
+            for (UINT slice = range.FirstArraySlice; slice < range.FirstArraySlice + range.NumArraySlices; slice++) {
+              for (UINT mip = range.IndexOrFirstMipLevel;
+                   mip < range.IndexOrFirstMipLevel + range.NumMipLevels; mip++) {
+                emit_subresource(static_cast<UINT>(mip + mip_levels * (slice + array_size * plane)));
+              }
+            }
+          }
+        }
+        break;
+
+      default:
+        invalid_barrier();
+        break;
+      }
+    }
   }
 };
 

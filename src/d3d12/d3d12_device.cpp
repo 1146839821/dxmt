@@ -54,6 +54,16 @@ ConvertResourceDesc1(const D3D12_RESOURCE_DESC1 *source, D3D12_RESOURCE_DESC *de
 }
 
 bool
+ConvertResourceDesc1WithLayout(
+    const D3D12_RESOURCE_DESC1 *source, D3D12_RESOURCE_DESC *destination, D3D12_BARRIER_LAYOUT layout,
+    D3D12_RESOURCE_STATES *initial_state
+) {
+  return ConvertResourceDesc1(source, destination) && ConvertBarrierLayout(source->Dimension, layout, initial_state);
+}
+
+} // namespace
+
+bool
 ConvertBarrierLayout(
     D3D12_RESOURCE_DIMENSION dimension, D3D12_BARRIER_LAYOUT source, D3D12_RESOURCE_STATES *destination
 ) {
@@ -69,15 +79,22 @@ ConvertBarrierLayout(
 
   switch (source) {
   case D3D12_BARRIER_LAYOUT_COMMON:
+  case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON:
+  case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON:
+  case D3D12_BARRIER_LAYOUT_VIDEO_QUEUE_COMMON:
     *destination = D3D12_RESOURCE_STATE_COMMON;
     return true;
   case D3D12_BARRIER_LAYOUT_GENERIC_READ:
+  case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ:
+  case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_GENERIC_READ:
     *destination = D3D12_RESOURCE_STATE_GENERIC_READ;
     return true;
   case D3D12_BARRIER_LAYOUT_RENDER_TARGET:
     *destination = D3D12_RESOURCE_STATE_RENDER_TARGET;
     return true;
   case D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS:
+  case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS:
+  case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_UNORDERED_ACCESS:
     *destination = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     return true;
   case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE:
@@ -87,12 +104,18 @@ ConvertBarrierLayout(
     *destination = D3D12_RESOURCE_STATE_DEPTH_READ;
     return true;
   case D3D12_BARRIER_LAYOUT_SHADER_RESOURCE:
+  case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE:
+  case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE:
     *destination = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     return true;
   case D3D12_BARRIER_LAYOUT_COPY_SOURCE:
+  case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE:
+  case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_SOURCE:
     *destination = D3D12_RESOURCE_STATE_COPY_SOURCE;
     return true;
   case D3D12_BARRIER_LAYOUT_COPY_DEST:
+  case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST:
+  case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_DEST:
     *destination = D3D12_RESOURCE_STATE_COPY_DEST;
     return true;
   case D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE:
@@ -126,16 +149,6 @@ ConvertBarrierLayout(
     return false;
   }
 }
-
-bool
-ConvertResourceDesc1WithLayout(
-    const D3D12_RESOURCE_DESC1 *source, D3D12_RESOURCE_DESC *destination, D3D12_BARRIER_LAYOUT layout,
-    D3D12_RESOURCE_STATES *initial_state
-) {
-  return ConvertResourceDesc1(source, destination) && ConvertBarrierLayout(source->Dimension, layout, initial_state);
-}
-
-} // namespace
 
 class MTLD3D12InfoQueue final : public ComObject<ID3D12InfoQueue> {
 public:

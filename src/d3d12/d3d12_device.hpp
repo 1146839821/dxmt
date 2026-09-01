@@ -271,6 +271,10 @@ public:
   EventListener event_listener;
 };
 
+bool ConvertBarrierLayout(
+    D3D12_RESOURCE_DIMENSION dimension, D3D12_BARRIER_LAYOUT source, D3D12_RESOURCE_STATES *destination
+);
+
 bool IsSameDevice(MTLD3D12Device *device, ID3D12DeviceChild *child);
 
 HRESULT CreateD3D12Device(IMTLDXGIAdapter *adapter, D3D_FEATURE_LEVEL feature_level, REFIID riid, void **ppDevice);
