@@ -282,6 +282,12 @@ HRESULT
 CreateCommandAllocator(MTLD3D12Device *pDevice, D3D12_COMMAND_LIST_TYPE Type, REFIID riid, void **ppCommandAllocator);
 
 HRESULT
+CreateCommandList1(
+    MTLD3D12Device *pDevice, UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, D3D12_COMMAND_LIST_FLAGS Flags, REFIID riid,
+    void **ppCommandList
+);
+
+HRESULT
 CreateDescriptorHeap(
     MTLD3D12Device *pDevice, const D3D12_DESCRIPTOR_HEAP_DESC *pDesc, REFIID riid, void **ppDescriptorHeap
 );

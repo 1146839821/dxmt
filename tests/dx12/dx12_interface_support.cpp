@@ -569,13 +569,51 @@ int main() {
       passed = false;
     }
 
+    D3D12_HEAP_DESC heap1_desc = {};
+    heap1_desc.SizeInBytes = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    heap1_desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap1_desc.Properties.CreationNodeMask = 1;
+    heap1_desc.Properties.VisibleNodeMask = 1;
+    void *heap1 = output_sentinel;
+    const HRESULT heap1_hr = device9->CreateHeap1(&heap1_desc, nullptr, __uuidof(ID3D12Heap), &heap1);
+    if (heap1_hr != S_OK || heap1 == nullptr) {
+      std::cerr << "ID3D12Device9::CreateHeap1 returned 0x" << std::hex << static_cast<unsigned long>(heap1_hr)
+                << std::dec << "\n";
+      passed = false;
+    }
+    if (heap1 != output_sentinel) {
+      IUnknown *heap = reinterpret_cast<IUnknown *>(heap1);
+      Release(heap);
+    }
+
+    void *command_list1 = output_sentinel;
+    const HRESULT command_list1_hr = device9->CreateCommandList1(
+        0, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_FLAG_NONE, __uuidof(ID3D12GraphicsCommandList),
+        &command_list1
+    );
+    if (command_list1_hr != S_OK || command_list1 == nullptr) {
+      std::cerr << "ID3D12Device9::CreateCommandList1 returned 0x" << std::hex
+                << static_cast<unsigned long>(command_list1_hr) << std::dec << "\n";
+      passed = false;
+    } else {
+      auto *list1 = reinterpret_cast<ID3D12GraphicsCommandList *>(command_list1);
+      if (list1->Close() != E_FAIL) {
+        std::cerr << "ID3D12Device9::CreateCommandList1 did not return a closed command list\n";
+        passed = false;
+      }
+    }
+    if (command_list1 != output_sentinel) {
+      IUnknown *list = reinterpret_cast<IUnknown *>(command_list1);
+      Release(list);
+    }
+
     D3D12_COMMAND_QUEUE_DESC queue1_desc = {};
     queue1_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     void *command_queue1 = output_sentinel;
     const HRESULT command_queue1_hr = device9->CreateCommandQueue1(
         &queue1_desc, __uuidof(IUnknown), __uuidof(ID3D12CommandQueue), &command_queue1
     );
-    if (command_queue1_hr != E_NOTIMPL || command_queue1 != nullptr) {
+    if (command_queue1_hr != S_OK || command_queue1 == nullptr) {
       std::cerr << "ID3D12Device9::CreateCommandQueue1 returned 0x" << std::hex
                 << static_cast<unsigned long>(command_queue1_hr) << std::dec << "\n";
       passed = false;

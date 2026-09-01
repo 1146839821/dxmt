@@ -3588,4 +3588,38 @@ MTLD3D12CommandAllocatorImpl::CreateCommandList(
   return cmd_list->QueryInterface(riid, ppCommandList);
 }
 
+HRESULT
+CreateCommandList1(
+    MTLD3D12Device *pDevice, UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, D3D12_COMMAND_LIST_FLAGS Flags, REFIID riid,
+    void **ppCommandList
+) {
+  InitReturnPtr(ppCommandList);
+  if (!pDevice || (NodeMask & ~1u) || Flags != D3D12_COMMAND_LIST_FLAG_NONE)
+    return E_INVALIDARG;
+
+  switch (Type) {
+  case D3D12_COMMAND_LIST_TYPE_DIRECT:
+  case D3D12_COMMAND_LIST_TYPE_BUNDLE:
+  case D3D12_COMMAND_LIST_TYPE_COMPUTE:
+  case D3D12_COMMAND_LIST_TYPE_COPY:
+    break;
+  default:
+    return E_INVALIDARG;
+  }
+
+  auto allocator = Com(new MTLD3D12CommandAllocatorImpl(pDevice, Type));
+  HRESULT hr = allocator->Initialize();
+  if (FAILED(hr))
+    return hr;
+
+  auto cmd_list = Com(new MTLD3D12GraphicsCommandListImpl(pDevice, Type));
+  hr = cmd_list->Initialize(allocator.ptr(), nullptr);
+  if (FAILED(hr))
+    return hr;
+  hr = cmd_list->Close();
+  if (FAILED(hr))
+    return hr;
+  return cmd_list->QueryInterface(riid, ppCommandList);
+}
+
 }; // namespace dxmt

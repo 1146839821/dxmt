@@ -212,11 +212,20 @@ int main() {
   unsupported_hr = device4->CreateCommandList1(
       0, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_FLAG_NONE,
       __uuidof(ID3D12GraphicsCommandList), &unsupported_output);
-  if (!check_unsupported_output("CreateCommandList1", unsupported_hr,
-                                unsupported_output)) {
+  if (unsupported_hr != S_OK || unsupported_output == nullptr) {
+    std::cerr << "CreateCommandList1 failed: 0x" << std::hex
+              << static_cast<unsigned long>(unsupported_hr) << std::dec << "\n";
     cleanup();
     return 1;
   }
+  auto *command_list1 = reinterpret_cast<ID3D12GraphicsCommandList *>(unsupported_output);
+  if (command_list1->Close() != E_FAIL) {
+    std::cerr << "CreateCommandList1 did not return a closed command list\n";
+    command_list1->Release();
+    cleanup();
+    return 1;
+  }
+  command_list1->Release();
   unsupported_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
   unsupported_hr = device4->CreateProtectedResourceSession(
       nullptr, __uuidof(ID3D12ProtectedResourceSession), &unsupported_output);
@@ -227,9 +236,10 @@ int main() {
   }
   unsupported_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
   unsupported_hr = device4->CreateHeap1(nullptr, nullptr, __uuidof(ID3D12Heap),
-                                        &unsupported_output);
-  if (!check_unsupported_output("CreateHeap1", unsupported_hr,
-                                unsupported_output)) {
+                                         &unsupported_output);
+  if (unsupported_hr != E_INVALIDARG || unsupported_output != nullptr) {
+    std::cerr << "CreateHeap1 mishandled a null descriptor: 0x" << std::hex
+              << static_cast<unsigned long>(unsupported_hr) << std::dec << "\n";
     cleanup();
     return 1;
   }

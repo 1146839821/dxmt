@@ -1226,7 +1226,7 @@ public:
       UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, D3D12_COMMAND_LIST_FLAGS Flags, REFIID riid, void **ppCommandList
   ) {
     InitReturnPtr(ppCommandList);
-    return E_NOTIMPL;
+    return dxmt::CreateCommandList1(this, NodeMask, Type, Flags, riid, ppCommandList);
   }
 
   HRESULT STDMETHODCALLTYPE
@@ -1250,7 +1250,9 @@ public:
   HRESULT STDMETHODCALLTYPE
   CreateHeap1(const D3D12_HEAP_DESC *pDesc, ID3D12ProtectedResourceSession *pSession, REFIID riid, void **ppHeap) {
     InitReturnPtr(ppHeap);
-    return E_NOTIMPL;
+    if (pSession)
+      return E_NOTIMPL;
+    return dxmt::CreateHeap(this, pDesc, riid, ppHeap);
   }
 
   HRESULT STDMETHODCALLTYPE
@@ -1973,7 +1975,9 @@ public:
       const D3D12_COMMAND_QUEUE_DESC *pDesc, REFIID CreatorID, REFIID riid, void **ppCommandQueue
   ) {
     InitReturnPtr(ppCommandQueue);
-    return E_NOTIMPL;
+    if (!pDesc)
+      return E_INVALIDARG;
+    return dxmt::CreateCommandQueue(this, pDesc, riid, ppCommandQueue);
   }
 
   HRESULT STDMETHODCALLTYPE
