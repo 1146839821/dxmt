@@ -32,6 +32,29 @@
 
 namespace dxmt {
 
+namespace {
+
+bool
+ConvertResourceDesc1(const D3D12_RESOURCE_DESC1 *source, D3D12_RESOURCE_DESC *destination) {
+  if (!source || !destination || source->SamplerFeedbackMipRegion.Width || source->SamplerFeedbackMipRegion.Height ||
+      source->SamplerFeedbackMipRegion.Depth)
+    return false;
+
+  destination->Dimension = source->Dimension;
+  destination->Alignment = source->Alignment;
+  destination->Width = source->Width;
+  destination->Height = source->Height;
+  destination->DepthOrArraySize = source->DepthOrArraySize;
+  destination->MipLevels = source->MipLevels;
+  destination->Format = source->Format;
+  destination->SampleDesc = source->SampleDesc;
+  destination->Layout = source->Layout;
+  destination->Flags = source->Flags;
+  return true;
+}
+
+} // namespace
+
 class MTLD3D12InfoQueue final : public ComObject<ID3D12InfoQueue> {
 public:
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
@@ -1744,37 +1767,85 @@ public:
     return E_NOTIMPL;
   }
 
-  D3D12_RESOURCE_ALLOCATION_INFO *STDMETHODCALLTYPE GetResourceAllocationInfo2(
+  D3D12_RESOURCE_ALLOCATION_INFO *STDMETHODCALLTYPE
+  GetResourceAllocationInfo2(
       D3D12_RESOURCE_ALLOCATION_INFO *__ret, UINT VisibleMask, UINT ResourceDescCount,
       const D3D12_RESOURCE_DESC1 *pDescs, D3D12_RESOURCE_ALLOCATION_INFO1 *pAllocationInfos
   ) {
     if (!__ret)
       return nullptr;
-    *__ret = {UINT64_MAX, UINT64_MAX};
     if (pAllocationInfos) {
       for (UINT i = 0; i < ResourceDescCount; i++)
         pAllocationInfos[i] = {};
     }
-    return __ret;
+    if (ResourceDescCount && !pDescs) {
+      *__ret = {UINT64_MAX, UINT64_MAX};
+      return __ret;
+    }
+
+    *__ret = {UINT64_MAX, UINT64_MAX};
+    try {
+      std::vector<D3D12_RESOURCE_DESC> resource_descs(ResourceDescCount);
+      for (UINT i = 0; i < ResourceDescCount; i++) {
+        if (!ConvertResourceDesc1(&pDescs[i], &resource_descs[i])) {
+          return __ret;
+        }
+      }
+      std::vector<D3D12_RESOURCE_ALLOCATION_INFO1> allocation_infos;
+      if (pAllocationInfos)
+        allocation_infos.resize(ResourceDescCount);
+      auto *allocation_info_data = pAllocationInfos ? allocation_infos.data() : nullptr;
+      auto *result = GetResourceAllocationInfo1(
+          __ret, VisibleMask, ResourceDescCount, resource_descs.data(), allocation_info_data
+      );
+      if (pAllocationInfos && result->SizeInBytes != UINT64_MAX) {
+        for (UINT i = 0; i < ResourceDescCount; i++)
+          pAllocationInfos[i] = allocation_infos[i];
+      }
+      return result;
+    } catch (...) {
+      return __ret;
+    }
   }
 
-  HRESULT STDMETHODCALLTYPE CreateCommittedResource2(
-      const D3D12_HEAP_PROPERTIES *pHeapProperties, D3D12_HEAP_FLAGS HeapFlags,
-      const D3D12_RESOURCE_DESC1 *pDesc, D3D12_RESOURCE_STATES InitialResourceState,
-      const D3D12_CLEAR_VALUE *pOptimizedClearValue, ID3D12ProtectedResourceSession *pProtectedSession,
-      REFIID riidResource, void **ppvResource
+  HRESULT STDMETHODCALLTYPE
+  CreateCommittedResource2(
+      const D3D12_HEAP_PROPERTIES *pHeapProperties, D3D12_HEAP_FLAGS HeapFlags, const D3D12_RESOURCE_DESC1 *pDesc,
+      D3D12_RESOURCE_STATES InitialResourceState, const D3D12_CLEAR_VALUE *pOptimizedClearValue,
+      ID3D12ProtectedResourceSession *pProtectedSession, REFIID riidResource, void **ppvResource
   ) {
     InitReturnPtr(ppvResource);
-    return E_NOTIMPL;
+    if (pProtectedSession)
+      return E_NOTIMPL;
+    if (!pDesc)
+      return CreateCommittedResource(
+          pHeapProperties, HeapFlags, nullptr, InitialResourceState, pOptimizedClearValue, riidResource, ppvResource
+      );
+
+    D3D12_RESOURCE_DESC resource_desc = {};
+    if (!ConvertResourceDesc1(pDesc, &resource_desc))
+      return E_NOTIMPL;
+    return CreateCommittedResource(
+        pHeapProperties, HeapFlags, &resource_desc, InitialResourceState, pOptimizedClearValue, riidResource,
+        ppvResource
+    );
   }
 
-  HRESULT STDMETHODCALLTYPE CreatePlacedResource1(
-      ID3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC1 *pDesc,
-      D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE *pOptimizedClearValue,
-      REFIID riid, void **ppvResource
+  HRESULT STDMETHODCALLTYPE
+  CreatePlacedResource1(
+      ID3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC1 *pDesc, D3D12_RESOURCE_STATES InitialState,
+      const D3D12_CLEAR_VALUE *pOptimizedClearValue, REFIID riid, void **ppvResource
   ) {
     InitReturnPtr(ppvResource);
-    return E_NOTIMPL;
+    if (!pDesc)
+      return CreatePlacedResource(pHeap, HeapOffset, nullptr, InitialState, pOptimizedClearValue, riid, ppvResource);
+
+    D3D12_RESOURCE_DESC resource_desc = {};
+    if (!ConvertResourceDesc1(pDesc, &resource_desc))
+      return E_NOTIMPL;
+    return CreatePlacedResource(
+        pHeap, HeapOffset, &resource_desc, InitialState, pOptimizedClearValue, riid, ppvResource
+    );
   }
 
   void STDMETHODCALLTYPE CreateSamplerFeedbackUnorderedAccessView(
@@ -1782,34 +1853,20 @@ public:
       D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor
   ) {}
 
-  void STDMETHODCALLTYPE GetCopyableFootprints1(
-      const D3D12_RESOURCE_DESC1 *pResourceDesc, UINT FirstSubresource, UINT NumSubresources,
-      UINT64 BaseOffset, D3D12_PLACED_SUBRESOURCE_FOOTPRINT *pLayouts, UINT *pNumRows,
-      UINT64 *pRowSizeInBytes, UINT64 *pTotalBytes
+  void STDMETHODCALLTYPE
+  GetCopyableFootprints1(
+      const D3D12_RESOURCE_DESC1 *pResourceDesc, UINT FirstSubresource, UINT NumSubresources, UINT64 BaseOffset,
+      D3D12_PLACED_SUBRESOURCE_FOOTPRINT *pLayouts, UINT *pNumRows, UINT64 *pRowSizeInBytes, UINT64 *pTotalBytes
   ) {
-    if (!pResourceDesc || pResourceDesc->SamplerFeedbackMipRegion.Width ||
-        pResourceDesc->SamplerFeedbackMipRegion.Height || pResourceDesc->SamplerFeedbackMipRegion.Depth) {
+    D3D12_RESOURCE_DESC resource_desc = {};
+    if (!ConvertResourceDesc1(pResourceDesc, &resource_desc)) {
       GetCopyableFootprints(
-          nullptr, FirstSubresource, NumSubresources, BaseOffset, pLayouts, pNumRows,
-          pRowSizeInBytes, pTotalBytes
+          nullptr, FirstSubresource, NumSubresources, BaseOffset, pLayouts, pNumRows, pRowSizeInBytes, pTotalBytes
       );
       return;
     }
-
-    D3D12_RESOURCE_DESC resource_desc = {};
-    resource_desc.Dimension = pResourceDesc->Dimension;
-    resource_desc.Alignment = pResourceDesc->Alignment;
-    resource_desc.Width = pResourceDesc->Width;
-    resource_desc.Height = pResourceDesc->Height;
-    resource_desc.DepthOrArraySize = pResourceDesc->DepthOrArraySize;
-    resource_desc.MipLevels = pResourceDesc->MipLevels;
-    resource_desc.Format = pResourceDesc->Format;
-    resource_desc.SampleDesc = pResourceDesc->SampleDesc;
-    resource_desc.Layout = pResourceDesc->Layout;
-    resource_desc.Flags = pResourceDesc->Flags;
     GetCopyableFootprints(
-        &resource_desc, FirstSubresource, NumSubresources, BaseOffset, pLayouts, pNumRows,
-        pRowSizeInBytes, pTotalBytes
+        &resource_desc, FirstSubresource, NumSubresources, BaseOffset, pLayouts, pNumRows, pRowSizeInBytes, pTotalBytes
     );
   }
 

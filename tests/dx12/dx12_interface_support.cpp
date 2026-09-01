@@ -182,62 +182,362 @@ int main() {
     passed = false;
   } else {
     D3D12_RESOURCE_DESC1 allocation_desc = {};
-    D3D12_RESOURCE_ALLOCATION_INFO1 allocation_info1 = {1, 1, 1};
-    const D3D12_RESOURCE_ALLOCATION_INFO allocation_info = device8->GetResourceAllocationInfo2(
-        1, 1, &allocation_desc, &allocation_info1
+    allocation_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    allocation_desc.Width = 4096;
+    allocation_desc.Height = 1;
+    allocation_desc.DepthOrArraySize = 1;
+    allocation_desc.MipLevels = 1;
+    allocation_desc.SampleDesc.Count = 1;
+    allocation_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    const D3D12_RESOURCE_ALLOCATION_INFO empty_allocation = device8->GetResourceAllocationInfo2(
+        1, 0, nullptr, nullptr
     );
-    if (allocation_info.SizeInBytes != UINT64_MAX || allocation_info.Alignment != UINT64_MAX) {
-      std::cerr << "ID3D12Device8::GetResourceAllocationInfo2 returned a usable allocation\n";
+    if (empty_allocation.SizeInBytes || empty_allocation.Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) {
+      std::cerr << "ID3D12Device8::GetResourceAllocationInfo2 mishandled an empty query\n";
       passed = false;
     }
-    if (allocation_info1.Offset || allocation_info1.Alignment || allocation_info1.SizeInBytes) {
-      std::cerr << "ID3D12Device8::GetResourceAllocationInfo2 returned allocation details\n";
+    D3D12_RESOURCE_ALLOCATION_INFO1 missing_desc_info = {1, 1, 1};
+    const D3D12_RESOURCE_ALLOCATION_INFO missing_desc_allocation = device8->GetResourceAllocationInfo2(
+        1, 1, nullptr, &missing_desc_info
+    );
+    if (missing_desc_allocation.SizeInBytes != UINT64_MAX || missing_desc_allocation.Alignment != UINT64_MAX ||
+        missing_desc_info.Offset || missing_desc_info.Alignment || missing_desc_info.SizeInBytes) {
+      std::cerr << "ID3D12Device8::GetResourceAllocationInfo2 mishandled a missing descriptor\n";
+      passed = false;
+    }
+    D3D12_RESOURCE_DESC1 allocation_descs[2] = {allocation_desc, allocation_desc};
+    D3D12_RESOURCE_ALLOCATION_INFO1 allocation_info1[2] = {{1, 1, 1}, {1, 1, 1}};
+    const D3D12_RESOURCE_ALLOCATION_INFO allocation_info = device8->GetResourceAllocationInfo2(
+        1, 2, allocation_descs, allocation_info1
+    );
+    if (!allocation_info.SizeInBytes || !allocation_info.Alignment || allocation_info.SizeInBytes == UINT64_MAX ||
+        allocation_info.Alignment == UINT64_MAX) {
+      std::cerr << "ID3D12Device8::GetResourceAllocationInfo2 did not return a valid allocation\n";
+      passed = false;
+    }
+    if (allocation_info1[0].Offset || allocation_info1[0].Alignment != allocation_info.Alignment ||
+        !allocation_info1[0].SizeInBytes || allocation_info1[0].SizeInBytes == UINT64_MAX ||
+        allocation_info1[1].Offset != allocation_info1[0].SizeInBytes ||
+        allocation_info1[1].Alignment != allocation_info.Alignment ||
+        allocation_info1[1].SizeInBytes != allocation_info1[0].SizeInBytes) {
+      std::cerr << "ID3D12Device8::GetResourceAllocationInfo2 returned incorrect allocation details\n";
+      passed = false;
+    }
+    const D3D12_RESOURCE_ALLOCATION_INFO allocation_without_details = device8->GetResourceAllocationInfo2(
+        1, 2, allocation_descs, nullptr
+    );
+    if (allocation_without_details.SizeInBytes != allocation_info.SizeInBytes ||
+        allocation_without_details.Alignment != allocation_info.Alignment) {
+      std::cerr << "ID3D12Device8::GetResourceAllocationInfo2 mishandled a null details array\n";
+      passed = false;
+    }
+    D3D12_RESOURCE_DESC1 invalid_allocation_descs[2] = {allocation_desc, allocation_desc};
+    invalid_allocation_descs[1].Width = 0;
+    D3D12_RESOURCE_ALLOCATION_INFO1 invalid_allocation_info[2] = {{1, 1, 1}, {1, 1, 1}};
+    const D3D12_RESOURCE_ALLOCATION_INFO invalid_allocation = device8->GetResourceAllocationInfo2(
+        1, 2, invalid_allocation_descs, invalid_allocation_info
+    );
+    if (invalid_allocation.SizeInBytes != UINT64_MAX ||
+        invalid_allocation.Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT ||
+        invalid_allocation_info[0].Offset || invalid_allocation_info[0].Alignment ||
+        invalid_allocation_info[0].SizeInBytes || invalid_allocation_info[1].Offset ||
+        invalid_allocation_info[1].Alignment || invalid_allocation_info[1].SizeInBytes) {
+      std::cerr << "ID3D12Device8::GetResourceAllocationInfo2 leaked details from an invalid query\n";
       passed = false;
     }
 
-    void *const output_sentinel = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
-    void *committed_resource = output_sentinel;
+    D3D12_HEAP_PROPERTIES heap_properties = {};
+    heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap_properties.CreationNodeMask = 1;
+    heap_properties.VisibleNodeMask = 1;
+    ID3D12Resource *committed_resource = nullptr;
     const HRESULT committed_resource_hr = device8->CreateCommittedResource2(
-        nullptr, D3D12_HEAP_FLAG_NONE, nullptr, D3D12_RESOURCE_STATE_COMMON, nullptr, nullptr,
-        __uuidof(ID3D12Resource), &committed_resource
+        &heap_properties, D3D12_HEAP_FLAG_NONE, &allocation_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, nullptr,
+        IID_PPV_ARGS(&committed_resource)
     );
-    if (committed_resource_hr != E_NOTIMPL || committed_resource != nullptr) {
+    if (committed_resource_hr != S_OK || !committed_resource) {
       std::cerr << "ID3D12Device8::CreateCommittedResource2 returned 0x" << std::hex
                 << static_cast<unsigned long>(committed_resource_hr) << std::dec << "\n";
       passed = false;
     }
-    if (committed_resource != output_sentinel) {
-      IUnknown *resource = reinterpret_cast<IUnknown *>(committed_resource);
-      Release(resource);
-    }
-
-    void *placed_resource = output_sentinel;
-    const HRESULT placed_resource_hr = device8->CreatePlacedResource1(
-        nullptr, 0, nullptr, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource), &placed_resource
+    Release(committed_resource);
+    const HRESULT committed_resource_probe_hr = device8->CreateCommittedResource2(
+        &heap_properties, D3D12_HEAP_FLAG_NONE, &allocation_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, nullptr,
+        __uuidof(ID3D12Resource), nullptr
     );
-    if (placed_resource_hr != E_NOTIMPL || placed_resource != nullptr) {
-      std::cerr << "ID3D12Device8::CreatePlacedResource1 returned 0x" << std::hex
-                << static_cast<unsigned long>(placed_resource_hr) << std::dec << "\n";
+    if (committed_resource_probe_hr != S_FALSE) {
+      std::cerr << "ID3D12Device8::CreateCommittedResource2 did not support a null output pointer\n";
       passed = false;
     }
-    if (placed_resource != output_sentinel) {
-      IUnknown *resource = reinterpret_cast<IUnknown *>(placed_resource);
-      Release(resource);
+    ID3D12Resource *const null_desc_committed_resource_sentinel =
+        reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+    ID3D12Resource *null_desc_committed_resource = null_desc_committed_resource_sentinel;
+    const HRESULT null_desc_committed_resource_hr = device8->CreateCommittedResource2(
+        &heap_properties, D3D12_HEAP_FLAG_NONE, nullptr, D3D12_RESOURCE_STATE_COMMON, nullptr, nullptr,
+        IID_PPV_ARGS(&null_desc_committed_resource)
+    );
+    if (null_desc_committed_resource_hr != E_INVALIDARG || null_desc_committed_resource != nullptr) {
+      std::cerr << "ID3D12Device8::CreateCommittedResource2 mishandled a null descriptor\n";
+      passed = false;
     }
+    if (null_desc_committed_resource != null_desc_committed_resource_sentinel)
+      Release(null_desc_committed_resource);
+
+    ID3D12ProtectedResourceSession *const protected_session = reinterpret_cast<ID3D12ProtectedResourceSession *>(
+        static_cast<uintptr_t>(1)
+    );
+    ID3D12Resource *const protected_resource_sentinel = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+    ID3D12Resource *protected_resource = protected_resource_sentinel;
+    const HRESULT protected_resource_hr = device8->CreateCommittedResource2(
+        &heap_properties, D3D12_HEAP_FLAG_NONE, &allocation_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, protected_session,
+        IID_PPV_ARGS(&protected_resource)
+    );
+    if (protected_resource_hr != E_NOTIMPL || protected_resource != nullptr) {
+      std::cerr << "ID3D12Device8::CreateCommittedResource2 did not reject protected resources explicitly\n";
+      passed = false;
+    }
+    if (protected_resource != protected_resource_sentinel)
+      Release(protected_resource);
+
+    ID3D12Heap *heap = nullptr;
+    D3D12_HEAP_DESC heap_desc = {allocation_info.SizeInBytes, heap_properties, D3D12_HEAP_FLAG_NONE};
+    if (!allocation_info.SizeInBytes || allocation_info.SizeInBytes == UINT64_MAX) {
+      std::cerr << "Skipping ID3D12Device8::CreatePlacedResource1 with invalid allocation\n";
+      passed = false;
+    } else if (device->CreateHeap(&heap_desc, IID_PPV_ARGS(&heap)) != S_OK) {
+      std::cerr << "CreateHeap for ID3D12Device8::CreatePlacedResource1 failed\n";
+      passed = false;
+    } else if (!heap) {
+      std::cerr << "CreateHeap returned a null heap for ID3D12Device8::CreatePlacedResource1\n";
+      passed = false;
+    } else {
+      ID3D12Resource *const null_desc_resource_sentinel =
+          reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+      ID3D12Resource *null_desc_resource = null_desc_resource_sentinel;
+      const HRESULT null_desc_resource_hr = device8->CreatePlacedResource1(
+          heap, 0, nullptr, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&null_desc_resource)
+      );
+      if (null_desc_resource_hr != E_INVALIDARG || null_desc_resource != nullptr) {
+        std::cerr << "ID3D12Device8::CreatePlacedResource1 mishandled a null descriptor\n";
+        passed = false;
+      }
+      if (null_desc_resource != null_desc_resource_sentinel)
+        Release(null_desc_resource);
+
+      ID3D12Resource *placed_resource = nullptr;
+      const HRESULT placed_resource_hr = device8->CreatePlacedResource1(
+          heap, 0, &allocation_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource),
+          reinterpret_cast<void **>(&placed_resource)
+      );
+      if (placed_resource_hr != S_OK || !placed_resource) {
+        std::cerr << "ID3D12Device8::CreatePlacedResource1 returned 0x" << std::hex
+                  << static_cast<unsigned long>(placed_resource_hr) << std::dec << "\n";
+        passed = false;
+      }
+      Release(placed_resource);
+      const HRESULT placed_resource_probe_hr = device8->CreatePlacedResource1(
+          heap, 0, &allocation_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource), nullptr
+      );
+      if (placed_resource_probe_hr != S_FALSE) {
+        std::cerr << "ID3D12Device8::CreatePlacedResource1 did not support a null output pointer\n";
+        passed = false;
+      }
+    }
+    Release(heap);
 
     D3D12_CPU_DESCRIPTOR_HANDLE descriptor = {};
     device8->CreateSamplerFeedbackUnorderedAccessView(nullptr, nullptr, descriptor);
 
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout = {};
     layout.Offset = 1;
+    layout.Footprint.Format = DXGI_FORMAT_R8_UNORM;
     layout.Footprint.Width = 1;
+    layout.Footprint.Height = 1;
+    layout.Footprint.Depth = 1;
+    layout.Footprint.RowPitch = 1;
     UINT num_rows = 1;
     UINT64 row_size = 1;
     UINT64 total_bytes = 1;
     device8->GetCopyableFootprints1(nullptr, 0, 1, 0, &layout, &num_rows, &row_size, &total_bytes);
     if (layout.Offset != UINT64_MAX || layout.Footprint.Width != UINT_MAX || num_rows != UINT_MAX ||
+        layout.Footprint.Format != static_cast<DXGI_FORMAT>(~0u) || layout.Footprint.Height != UINT_MAX ||
+        layout.Footprint.Depth != UINT_MAX || layout.Footprint.RowPitch != UINT_MAX ||
         row_size != UINT64_MAX || total_bytes != UINT64_MAX) {
       std::cerr << "ID3D12Device8::GetCopyableFootprints1 returned invalid output\n";
+      passed = false;
+    }
+
+    D3D12_RESOURCE_DESC base_desc = {};
+    base_desc.Dimension = allocation_desc.Dimension;
+    base_desc.Alignment = allocation_desc.Alignment;
+    base_desc.Width = allocation_desc.Width;
+    base_desc.Height = allocation_desc.Height;
+    base_desc.DepthOrArraySize = allocation_desc.DepthOrArraySize;
+    base_desc.MipLevels = allocation_desc.MipLevels;
+    base_desc.Format = allocation_desc.Format;
+    base_desc.SampleDesc = allocation_desc.SampleDesc;
+    base_desc.Layout = allocation_desc.Layout;
+    base_desc.Flags = allocation_desc.Flags;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT expected_layout = {};
+    UINT expected_num_rows = 0;
+    UINT64 expected_row_size = 0;
+    UINT64 expected_total_bytes = 0;
+    device->GetCopyableFootprints(
+        &base_desc, 0, 1, 0, &expected_layout, &expected_num_rows, &expected_row_size, &expected_total_bytes
+    );
+    const auto footprints_match = [](const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &actual,
+                                     const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &expected) {
+      return actual.Offset == expected.Offset && actual.Footprint.Format == expected.Footprint.Format &&
+             actual.Footprint.Width == expected.Footprint.Width && actual.Footprint.Height == expected.Footprint.Height &&
+             actual.Footprint.Depth == expected.Footprint.Depth && actual.Footprint.RowPitch == expected.Footprint.RowPitch;
+    };
+    layout = {};
+    num_rows = 0;
+    row_size = 0;
+    total_bytes = 0;
+    device8->GetCopyableFootprints1(
+        &allocation_desc, 0, 1, 0, &layout, &num_rows, &row_size, &total_bytes
+    );
+    if (!footprints_match(layout, expected_layout) || num_rows != expected_num_rows ||
+        row_size != expected_row_size || total_bytes != expected_total_bytes) {
+      std::cerr << "ID3D12Device8::GetCopyableFootprints1 disagrees with the base footprint query\n";
+      passed = false;
+    }
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT empty_layout = {};
+    empty_layout.Offset = 1;
+    empty_layout.Footprint.Format = DXGI_FORMAT_R8_UNORM;
+    empty_layout.Footprint.Width = 1;
+    empty_layout.Footprint.Height = 1;
+    empty_layout.Footprint.Depth = 1;
+    empty_layout.Footprint.RowPitch = 1;
+    UINT empty_num_rows = 1;
+    UINT64 empty_row_size = 1;
+    UINT64 empty_total_bytes = 1;
+    device8->GetCopyableFootprints1(
+        &allocation_desc, 0, 0, 0, &empty_layout, &empty_num_rows, &empty_row_size, &empty_total_bytes
+    );
+    if (empty_layout.Offset != 1 || empty_layout.Footprint.Format != DXGI_FORMAT_R8_UNORM ||
+        empty_layout.Footprint.Width != 1 || empty_layout.Footprint.Height != 1 || empty_layout.Footprint.Depth != 1 ||
+        empty_layout.Footprint.RowPitch != 1 || empty_num_rows != 1 || empty_row_size != 1 || empty_total_bytes != 0) {
+      std::cerr << "ID3D12Device8::GetCopyableFootprints1 mishandled an empty query\n";
+      passed = false;
+    }
+
+    UINT optional_num_rows = 0;
+    UINT64 optional_row_size = 0;
+    UINT64 optional_total_bytes = 0;
+    device8->GetCopyableFootprints1(
+        &allocation_desc, 0, 1, 0, nullptr, &optional_num_rows, &optional_row_size, &optional_total_bytes
+    );
+    if (optional_num_rows != expected_num_rows || optional_row_size != expected_row_size ||
+        optional_total_bytes != expected_total_bytes) {
+      std::cerr << "ID3D12Device8::GetCopyableFootprints1 mishandled a null layouts array\n";
+      passed = false;
+    }
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT optional_layout = {};
+    optional_row_size = 0;
+    optional_total_bytes = 0;
+    device8->GetCopyableFootprints1(
+        &allocation_desc, 0, 1, 0, &optional_layout, nullptr, &optional_row_size, &optional_total_bytes
+    );
+    if (!footprints_match(optional_layout, expected_layout) || optional_row_size != expected_row_size ||
+        optional_total_bytes != expected_total_bytes) {
+      std::cerr << "ID3D12Device8::GetCopyableFootprints1 mishandled a null row-count array\n";
+      passed = false;
+    }
+
+    optional_layout = {};
+    optional_num_rows = 0;
+    optional_total_bytes = 0;
+    device8->GetCopyableFootprints1(
+        &allocation_desc, 0, 1, 0, &optional_layout, &optional_num_rows, nullptr, &optional_total_bytes
+    );
+    if (!footprints_match(optional_layout, expected_layout) || optional_num_rows != expected_num_rows ||
+        optional_total_bytes != expected_total_bytes) {
+      std::cerr << "ID3D12Device8::GetCopyableFootprints1 mishandled a null row-size array\n";
+      passed = false;
+    }
+
+    optional_layout = {};
+    optional_num_rows = 0;
+    optional_row_size = 0;
+    device8->GetCopyableFootprints1(
+        &allocation_desc, 0, 1, 0, &optional_layout, &optional_num_rows, &optional_row_size, nullptr
+    );
+    if (!footprints_match(optional_layout, expected_layout) || optional_num_rows != expected_num_rows ||
+        optional_row_size != expected_row_size) {
+      std::cerr << "ID3D12Device8::GetCopyableFootprints1 mishandled a null total-size output\n";
+      passed = false;
+    }
+
+    D3D12_RESOURCE_DESC1 sampler_feedback_desc = allocation_desc;
+    sampler_feedback_desc.SamplerFeedbackMipRegion.Width = 1;
+    D3D12_RESOURCE_ALLOCATION_INFO1 sampler_feedback_info = {1, 1, 1};
+    const D3D12_RESOURCE_ALLOCATION_INFO sampler_feedback_allocation = device8->GetResourceAllocationInfo2(
+        1, 1, &sampler_feedback_desc, &sampler_feedback_info
+    );
+    if (sampler_feedback_allocation.SizeInBytes != UINT64_MAX ||
+        sampler_feedback_allocation.Alignment != UINT64_MAX || sampler_feedback_info.Offset ||
+        sampler_feedback_info.Alignment || sampler_feedback_info.SizeInBytes) {
+      std::cerr << "ID3D12Device8 accepted sampler-feedback allocation details\n";
+      passed = false;
+    }
+
+    ID3D12Resource *const sampler_feedback_resource_sentinel =
+        reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+    ID3D12Resource *sampler_feedback_resource = sampler_feedback_resource_sentinel;
+    const HRESULT sampler_feedback_resource_hr = device8->CreateCommittedResource2(
+        &heap_properties, D3D12_HEAP_FLAG_NONE, &sampler_feedback_desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+        nullptr, IID_PPV_ARGS(&sampler_feedback_resource)
+    );
+    if (sampler_feedback_resource_hr != E_NOTIMPL || sampler_feedback_resource != nullptr) {
+      std::cerr << "ID3D12Device8 accepted sampler-feedback resource creation\n";
+      passed = false;
+    }
+    if (sampler_feedback_resource != sampler_feedback_resource_sentinel)
+      Release(sampler_feedback_resource);
+
+    ID3D12Heap *sampler_feedback_heap = nullptr;
+    if (device->CreateHeap(&heap_desc, IID_PPV_ARGS(&sampler_feedback_heap)) != S_OK || !sampler_feedback_heap) {
+      std::cerr << "CreateHeap for sampler-feedback rejection failed\n";
+      passed = false;
+    } else {
+      ID3D12Resource *const sampler_feedback_placed_resource_sentinel =
+          reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+      ID3D12Resource *sampler_feedback_placed_resource = sampler_feedback_placed_resource_sentinel;
+      const HRESULT sampler_feedback_placed_hr = device8->CreatePlacedResource1(
+          sampler_feedback_heap, 0, &sampler_feedback_desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+          __uuidof(ID3D12Resource), reinterpret_cast<void **>(&sampler_feedback_placed_resource)
+      );
+      if (sampler_feedback_placed_hr != E_NOTIMPL || sampler_feedback_placed_resource != nullptr) {
+        std::cerr << "ID3D12Device8 accepted sampler-feedback placed resource creation\n";
+        passed = false;
+      }
+      if (sampler_feedback_placed_resource != sampler_feedback_placed_resource_sentinel)
+        Release(sampler_feedback_placed_resource);
+    }
+    Release(sampler_feedback_heap);
+
+    layout = {};
+    layout.Offset = 1;
+    layout.Footprint.Format = DXGI_FORMAT_R8_UNORM;
+    layout.Footprint.Width = 1;
+    layout.Footprint.Height = 1;
+    layout.Footprint.Depth = 1;
+    layout.Footprint.RowPitch = 1;
+    num_rows = 1;
+    row_size = 1;
+    total_bytes = 1;
+    device8->GetCopyableFootprints1(
+        &sampler_feedback_desc, 0, 1, 0, &layout, &num_rows, &row_size, &total_bytes
+    );
+    if (layout.Offset != UINT64_MAX || layout.Footprint.Format != static_cast<DXGI_FORMAT>(~0u) ||
+        layout.Footprint.Width != UINT_MAX || layout.Footprint.Height != UINT_MAX ||
+        layout.Footprint.Depth != UINT_MAX || layout.Footprint.RowPitch != UINT_MAX ||
+        num_rows != UINT_MAX || row_size != UINT64_MAX || total_bytes != UINT64_MAX) {
+      std::cerr << "ID3D12Device8 accepted sampler-feedback footprint details\n";
       passed = false;
     }
   }
