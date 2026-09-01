@@ -1206,7 +1206,7 @@ public:
       const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **resource
   ) {
     InitReturnPtr(resource);
-    return E_NOTIMPL;
+    return CreateReservedBuffer(this, pDesc, InitialState, OptimizedClearValue, riid, resource);
   };
 
   HRESULT STDMETHODCALLTYPE
@@ -1275,7 +1275,9 @@ public:
       void **ppResource
   ) {
     InitReturnPtr(ppResource);
-    return E_NOTIMPL;
+    if (pSession)
+      return E_NOTIMPL;
+    return CreateReservedResource(pDesc, InitialState, OptimizedClearValue, riid, ppResource);
   }
 
   D3D12_RESOURCE_ALLOCATION_INFO *STDMETHODCALLTYPE
@@ -1615,15 +1617,22 @@ public:
       D3D12_TILE_SHAPE *StandardTileShape, UINT *SubresourceTilingCount, UINT FirstSubresourceTiling,
       D3D12_SUBRESOURCE_TILING *SubresourceTilings
   ) {
-    WARN("D3D12 GetResourceTiling is not implemented");
-    if (TotalTileCount)
-      *TotalTileCount = 0;
-    if (PackedMipInfo)
-      *PackedMipInfo = {};
-    if (StandardTileShape)
-      *StandardTileShape = {};
-    if (SubresourceTilingCount)
-      *SubresourceTilingCount = 0;
+    if (!pResource || !IsSameDevice(this, pResource)) {
+      if (TotalTileCount)
+        *TotalTileCount = 0;
+      if (PackedMipInfo)
+        *PackedMipInfo = {};
+      if (StandardTileShape)
+        *StandardTileShape = {};
+      if (SubresourceTilingCount)
+        *SubresourceTilingCount = 0;
+      return;
+    }
+
+    static_cast<MTLD3D12Resource *>(pResource)->GetResourceTiling(
+        TotalTileCount, PackedMipInfo, StandardTileShape, SubresourceTilingCount, FirstSubresourceTiling,
+        SubresourceTilings
+    );
   };
 
   LUID *STDMETHODCALLTYPE
@@ -2042,7 +2051,17 @@ public:
       UINT32 CastableFormatsCount, DXGI_FORMAT *pCastableFormats, REFIID riid, void **ppvResource
   ) {
     InitReturnPtr(ppvResource);
-    return E_NOTIMPL;
+    if (pProtectedSession || CastableFormatsCount)
+      return E_NOTIMPL;
+    if (!pDesc)
+      return E_INVALIDARG;
+
+    D3D12_RESOURCE_STATES initial_state = D3D12_RESOURCE_STATE_COMMON;
+    if (!ConvertBarrierLayout(pDesc->Dimension, InitialLayout, &initial_state))
+      return E_NOTIMPL;
+    return CreateReservedResource(
+        pDesc, initial_state, pOptimizedClearValue, riid, ppvResource
+    );
   }
 };
 

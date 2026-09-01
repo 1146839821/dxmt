@@ -144,6 +144,30 @@ public:
       UINT *TotalTileCount, D3D12_PACKED_MIP_INFO *PackedMipInfo, D3D12_TILE_SHAPE *StandardTileShape,
       UINT *SubresourceTilingCount, UINT FirstSubresourceTiling, D3D12_SUBRESOURCE_TILING *SubresourceTilings
   ) = 0;
+
+  virtual bool
+  IsReservedResource() const {
+    return false;
+  }
+
+  virtual HRESULT
+  UpdateTileMappings(
+      UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
+      const D3D12_TILE_REGION_SIZE *pResourceRegionSizes, ID3D12Heap *pHeap, UINT NumRanges,
+      const D3D12_TILE_RANGE_FLAGS *pRangeFlags, const UINT *pHeapRangeStartOffsets, const UINT *pRangeTileCounts,
+      D3D12_TILE_MAPPING_FLAGS Flags
+  ) {
+    return E_NOTIMPL;
+  }
+
+  virtual HRESULT
+  CopyTileMappingsFrom(
+      MTLD3D12Resource *pSourceResource, const D3D12_TILED_RESOURCE_COORDINATE *pDstRegionStartCoordinate,
+      const D3D12_TILED_RESOURCE_COORDINATE *pSrcRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
+      D3D12_TILE_MAPPING_FLAGS Flags
+  ) {
+    return E_NOTIMPL;
+  }
 };
 
 class MTLD3D12Heap : public ID3D12Heap {
@@ -321,6 +345,12 @@ HRESULT
 CreatePlacedBuffer(
     MTLD3D12Device *pDevice, MTLD3D12Heap *pHeap, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
     UINT64 HeapOffset, const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
+);
+
+HRESULT
+CreateReservedBuffer(
+    MTLD3D12Device *pDevice, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
+    const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
 );
 
 HRESULT

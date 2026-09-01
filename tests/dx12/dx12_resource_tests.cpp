@@ -42,6 +42,7 @@ int main() {
   ID3D12Heap *unaligned_heap = nullptr;
   ID3D12Heap *texture_heap = nullptr;
   ID3D12Heap *alias_heap = nullptr;
+  ID3D12Heap *reserved_heap = nullptr;
   ID3D12Resource *source_zero = nullptr;
   ID3D12Resource *source_placed = nullptr;
   ID3D12Resource *invalid_placed = nullptr;
@@ -69,6 +70,8 @@ int main() {
   ID3D12Device1 *device1 = nullptr;
   ID3D12Device4 *device4 = nullptr;
   ID3D12Resource *committed1_resource = nullptr;
+  ID3D12Resource *reserved_resource = nullptr;
+  ID3D12Resource *reserved_resource_copy = nullptr;
   ID3D12GraphicsCommandList2 *list2 = nullptr;
   HANDLE event = nullptr;
   HANDLE multiple_event = nullptr;
@@ -88,6 +91,10 @@ int main() {
       list2->Release();
     if (committed1_resource)
       committed1_resource->Release();
+    if (reserved_resource_copy)
+      reserved_resource_copy->Release();
+    if (reserved_resource)
+      reserved_resource->Release();
     if (list)
       list->Release();
     if (destination)
@@ -152,6 +159,8 @@ int main() {
       texture_heap->Release();
     if (alias_heap)
       alias_heap->Release();
+    if (reserved_heap)
+      reserved_heap->Release();
     if (upload_heap)
       upload_heap->Release();
     if (allocator)
@@ -291,24 +300,52 @@ int main() {
     return 1;
   }
 
-  void *reserved_resource = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
-  if (device->CreateReservedResource(
-          &committed1_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource), &reserved_resource
-      ) != E_NOTIMPL ||
-      reserved_resource != nullptr) {
-    std::cerr << "CreateReservedResource did not clear its failed output\n";
+  if (!CheckHR(
+          "CreateReservedResource",
+          device->CreateReservedResource(
+              &committed1_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource),
+              reinterpret_cast<void **>(&reserved_resource)
+          )
+      ) ||
+      !reserved_resource) {
+    std::cerr << "CreateReservedResource did not create a reserved buffer\n";
     cleanup();
     return 1;
   }
-  void *reserved_resource1 = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
-  if (device4->CreateReservedResource1(
-          &committed1_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, nullptr, __uuidof(ID3D12Resource), &reserved_resource1
-      ) != E_NOTIMPL ||
-      reserved_resource1 != nullptr) {
-    std::cerr << "CreateReservedResource1 did not clear its failed output\n";
+  if (!CheckHR(
+          "CreateReservedResource1",
+          device4->CreateReservedResource1(
+              &committed1_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, nullptr, __uuidof(ID3D12Resource),
+              reinterpret_cast<void **>(&reserved_resource_copy)
+          )
+      ) ||
+      !reserved_resource_copy) {
+    std::cerr << "CreateReservedResource1 did not create a reserved buffer\n";
     cleanup();
     return 1;
   }
+  D3D12_RESOURCE_DESC reserved_desc = {};
+  reserved_resource->GetDesc(&reserved_desc);
+  D3D12_HEAP_PROPERTIES reserved_heap_properties = {};
+  if (reserved_resource->GetHeapProperties(&reserved_heap_properties, nullptr) != E_INVALIDARG ||
+      reserved_desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || reserved_desc.Width != committed1_desc.Width) {
+    std::cerr << "reserved buffer resource contract mismatch\n";
+    cleanup();
+    return 1;
+  }
+
+  D3D12_HEAP_DESC reserved_heap_desc = {};
+  reserved_heap_desc.SizeInBytes = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+  reserved_heap_desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+  reserved_heap_desc.Properties.CreationNodeMask = 1;
+  reserved_heap_desc.Properties.VisibleNodeMask = 1;
+  reserved_heap_desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+  reserved_heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+  if (!CheckHR("CreateReservedHeap", device->CreateHeap(&reserved_heap_desc, IID_PPV_ARGS(&reserved_heap)))) {
+    cleanup();
+    return 1;
+  }
+
   UINT total_tile_count = ~static_cast<UINT>(0);
   D3D12_PACKED_MIP_INFO packed_mip_info = {
       static_cast<UINT8>(~static_cast<UINT>(0)), static_cast<UINT8>(~static_cast<UINT>(0)), ~static_cast<UINT>(0),
@@ -325,6 +362,26 @@ int main() {
       standard_tile_shape.WidthInTexels || standard_tile_shape.HeightInTexels || standard_tile_shape.DepthInTexels ||
       subresource_tiling_count) {
     std::cerr << "unsupported GetResourceTiling did not clear its outputs\n";
+    cleanup();
+    return 1;
+  }
+
+  UINT reserved_total_tile_count = 0;
+  D3D12_PACKED_MIP_INFO reserved_packed_mip_info = {};
+  D3D12_TILE_SHAPE reserved_tile_shape = {};
+  UINT reserved_subresource_tiling_count = 1;
+  D3D12_SUBRESOURCE_TILING reserved_subresource_tiling = {};
+  device->GetResourceTiling(
+      reserved_resource, &reserved_total_tile_count, &reserved_packed_mip_info, &reserved_tile_shape,
+      &reserved_subresource_tiling_count, 0, &reserved_subresource_tiling
+  );
+  const UINT expected_reserved_tile_count =
+      static_cast<UINT>((committed1_desc.Width - 1) / D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT + 1);
+  if (reserved_total_tile_count != expected_reserved_tile_count || reserved_subresource_tiling_count != 1 ||
+      reserved_subresource_tiling.WidthInTiles != expected_reserved_tile_count ||
+      reserved_subresource_tiling.HeightInTiles != 1 || reserved_subresource_tiling.DepthInTiles != 1 ||
+      reserved_subresource_tiling.StartTileIndexInOverallResource != 0) {
+    std::cerr << "reserved buffer tiling contract mismatch\n";
     cleanup();
     return 1;
   }
@@ -1123,6 +1180,28 @@ int main() {
     cleanup();
     return 1;
   }
+
+  D3D12_TILE_RANGE_FLAGS null_range_flags = D3D12_TILE_RANGE_FLAG_NULL;
+  queue->UpdateTileMappings(
+      reserved_resource, 1, nullptr, nullptr, nullptr, 1, &null_range_flags, nullptr, nullptr,
+      D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  D3D12_TILED_RESOURCE_COORDINATE tile_coordinate = {};
+  D3D12_TILE_REGION_SIZE tile_region = {};
+  tile_region.NumTiles = 1;
+  UINT heap_tile_offset = 0;
+  queue->UpdateTileMappings(
+      reserved_resource, 1, &tile_coordinate, &tile_region, reserved_heap, 1, nullptr, &heap_tile_offset, nullptr,
+      D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  D3D12_TILE_RANGE_FLAGS skip_range_flags = D3D12_TILE_RANGE_FLAG_SKIP;
+  queue->UpdateTileMappings(
+      reserved_resource, 1, &tile_coordinate, &tile_region, nullptr, 1, &skip_range_flags, nullptr, nullptr,
+      D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  queue->CopyTileMappings(
+      reserved_resource_copy, nullptr, reserved_resource, nullptr, &tile_region, D3D12_TILE_MAPPING_FLAG_NONE
+  );
 
   const FLOAT texture3d_clear_color[] = {1.0f, 0.0f, 0.0f, 1.0f};
   list->OMSetRenderTargets(1, &texture3d_rtv_handle, FALSE, nullptr);

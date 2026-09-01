@@ -172,7 +172,17 @@ public:
       const D3D12_TILE_RANGE_FLAGS *range_flags, const UINT *heap_range_offsets, const UINT *range_tile_counts,
       D3D12_TILE_MAPPING_FLAGS flags
   ) {
-    IMPLEMENT_ME
+    if (!resource || !IsSameDevice(device_, resource)) {
+      WARN("D3D12 UpdateTileMappings received a resource from another device");
+      return;
+    }
+
+    auto hr = static_cast<MTLD3D12Resource *>(resource)->UpdateTileMappings(
+        region_count, region_start_coordinates, region_sizes, heap, range_count, range_flags, heap_range_offsets,
+        range_tile_counts, flags
+    );
+    if (FAILED(hr))
+      WARN("D3D12 UpdateTileMappings failed with HRESULT 0x", std::hex, hr, std::dec);
   };
 
   void STDMETHODCALLTYPE CopyTileMappings(
@@ -180,7 +190,17 @@ public:
       ID3D12Resource *src_resource, const D3D12_TILED_RESOURCE_COORDINATE *src_region_start_coordinate,
       const D3D12_TILE_REGION_SIZE *region_size, D3D12_TILE_MAPPING_FLAGS flags
   ) {
-    IMPLEMENT_ME
+    if (!dst_resource || !src_resource || !IsSameDevice(device_, dst_resource) || !IsSameDevice(device_, src_resource)) {
+      WARN("D3D12 CopyTileMappings received a resource from another device");
+      return;
+    }
+
+    auto hr = static_cast<MTLD3D12Resource *>(dst_resource)->CopyTileMappingsFrom(
+        static_cast<MTLD3D12Resource *>(src_resource), dst_region_start_coordinate, src_region_start_coordinate,
+        region_size, flags
+    );
+    if (FAILED(hr))
+      WARN("D3D12 CopyTileMappings failed with HRESULT 0x", std::hex, hr, std::dec);
   };
 
   void STDMETHODCALLTYPE

@@ -899,7 +899,7 @@ int main() {
         nullptr, D3D12_BARRIER_LAYOUT_COMMON, nullptr, nullptr, 0, nullptr,
         __uuidof(ID3D12Resource), &reserved_resource
     );
-    if (reserved_resource_hr != E_NOTIMPL || reserved_resource != nullptr) {
+    if (reserved_resource_hr != E_INVALIDARG || reserved_resource != nullptr) {
       std::cerr << "ID3D12Device10::CreateReservedResource2 returned 0x" << std::hex
                 << static_cast<unsigned long>(reserved_resource_hr) << std::dec << "\n";
       passed = false;
