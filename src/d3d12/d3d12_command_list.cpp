@@ -2572,8 +2572,105 @@ public:
   ) {
     if (!ValidateCommand(SupportsCopy(), "CopyTiles"))
       return;
-    WARN("CopyTiles is not implemented");
-    recording_failed_ = true;
+
+    if (!tiled_resource || !buffer || !tile_region_size || !IsSameDevice(device_, tiled_resource) ||
+        !IsSameDevice(device_, buffer)) {
+      recording_failed_ = true;
+      return;
+    }
+
+    auto *tiled = static_cast<MTLD3D12Resource *>(tiled_resource);
+    auto *linear = static_cast<MTLD3D12Resource *>(buffer);
+    constexpr UINT supported_flags = D3D12_TILE_COPY_FLAG_NO_HAZARD |
+                                      D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE |
+                                      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER;
+    const UINT copy_flags = static_cast<UINT>(flags);
+    const UINT direction_flags = copy_flags &
+                                 (D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE |
+                                  D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
+    if (!tiled->IsReservedBuffer() || !linear->buffer || !linear->buffer->current() ||
+        (copy_flags & ~supported_flags) || direction_flags == (
+            D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE |
+            D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+        ) ||
+        buffer_offset % (64ull * 1024)) {
+      WARN("D3D12 CopyTiles currently supports only raw reserved-buffer tile copies");
+      recording_failed_ = true;
+      return;
+    }
+
+    std::vector<UINT> tile_indices;
+    if (FAILED(tiled->GetTileIndices(tile_region_start_coordinate, tile_region_size, tile_indices)) ||
+        tile_indices.empty()) {
+      recording_failed_ = true;
+      return;
+    }
+    const uint64_t copy_size = uint64_t(tile_indices.size()) * 64ull * 1024;
+    if (copy_size > std::numeric_limits<UINT64>::max() - buffer_offset ||
+        !buffer_range_in_bounds(linear, buffer_offset, copy_size)) {
+      recording_failed_ = true;
+      return;
+    }
+
+    bool buffer_to_tiled = direction_flags == D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE;
+    bool tiled_to_buffer = direction_flags == D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER;
+    if (!direction_flags) {
+      const auto tiled_state = tiled->GetSubresourceState(0);
+      const auto linear_state = linear->GetSubresourceState(0);
+      buffer_to_tiled = (tiled_state & D3D12_RESOURCE_STATE_COPY_DEST) &&
+                        (linear_state & D3D12_RESOURCE_STATE_COPY_SOURCE);
+      tiled_to_buffer = (tiled_state & D3D12_RESOURCE_STATE_COPY_SOURCE) &&
+                        (linear_state & D3D12_RESOURCE_STATE_COPY_DEST);
+      if (buffer_to_tiled == tiled_to_buffer) {
+        recording_failed_ = true;
+        return;
+      }
+    }
+
+    if (!PreBlit())
+      return;
+    for (size_t index = 0; index < tile_indices.size(); index++) {
+      WMT::Buffer tile_buffer;
+      UINT64 tile_offset = 0;
+      if (FAILED(tiled->GetTileMapping(tile_indices[index], tile_buffer, tile_offset))) {
+        recording_failed_ = true;
+        return;
+      }
+
+      const UINT64 linear_offset = buffer_offset + index * 64ull * 1024;
+      if (buffer_to_tiled) {
+        if (!tile_buffer)
+          continue;
+        auto &copy = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
+        copy.type = WMTBlitCommandCopyFromBufferToBuffer;
+        copy.src = linear->buffer->current()->buffer();
+        copy.src_offset = linear_offset;
+        copy.dst = tile_buffer;
+        copy.dst_offset = tile_offset;
+        copy.copy_length = 64ull * 1024;
+        continue;
+      }
+
+      if (!tiled_to_buffer)
+        return;
+      if (!tile_buffer) {
+        auto &fill = allocator_->EncodeBlitCommand<wmtcmd_blit_fillbuffer>();
+        fill.type = WMTBlitCommandFillBuffer;
+        fill.buffer = linear->buffer->current()->buffer();
+        fill.offset = linear_offset;
+        fill.length = 64ull * 1024;
+        fill.value = 0;
+        continue;
+      }
+
+      auto &copy = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
+      copy.type = WMTBlitCommandCopyFromBufferToBuffer;
+      copy.src = tile_buffer;
+      copy.src_offset = tile_offset;
+      copy.dst = linear->buffer->current()->buffer();
+      copy.dst_offset = linear_offset;
+      copy.copy_length = 64ull * 1024;
+    }
   };
 
   void STDMETHODCALLTYPE ResolveSubresource(

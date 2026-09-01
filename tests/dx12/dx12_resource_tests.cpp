@@ -77,6 +77,8 @@ int main() {
   ID3D12Resource *reserved_texture = nullptr;
   ID3D12Resource *reserved_texture_copy = nullptr;
   ID3D12Resource *reserved_texture_v2 = nullptr;
+  ID3D12Resource *copy_tiles_upload = nullptr;
+  ID3D12Resource *copy_tiles_readback = nullptr;
   ID3D12GraphicsCommandList2 *list2 = nullptr;
   HANDLE event = nullptr;
   HANDLE multiple_event = nullptr;
@@ -106,6 +108,10 @@ int main() {
       reserved_texture->Release();
     if (reserved_texture_v2)
       reserved_texture_v2->Release();
+    if (copy_tiles_readback)
+      copy_tiles_readback->Release();
+    if (copy_tiles_upload)
+      copy_tiles_upload->Release();
     if (list)
       list->Release();
     if (destination)
@@ -831,6 +837,37 @@ int main() {
     return 1;
   }
 
+  D3D12_RESOURCE_DESC copy_tiles_buffer_desc = buffer_desc;
+  copy_tiles_buffer_desc.Width = 2ull * D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+  if (!CheckHR(
+          "CreateCopyTilesUpload",
+          device->CreateCommittedResource(
+              &upload_properties, D3D12_HEAP_FLAG_NONE, &copy_tiles_buffer_desc,
+              D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&copy_tiles_upload)
+          )
+      ) ||
+      !CheckHR(
+          "CreateCopyTilesReadback",
+          device->CreateCommittedResource(
+              &readback_properties, D3D12_HEAP_FLAG_NONE, &copy_tiles_buffer_desc,
+              D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&copy_tiles_readback)
+          )
+      )) {
+    cleanup();
+    return 1;
+  }
+  BYTE *mapped_copy_tiles_upload = nullptr;
+  if (!CheckHR(
+          "MapCopyTilesUpload",
+          copy_tiles_upload->Map(0, nullptr, reinterpret_cast<void **>(&mapped_copy_tiles_upload))
+      )) {
+    cleanup();
+    return 1;
+  }
+  for (UINT i = 0; i < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; i++)
+    mapped_copy_tiles_upload[i] = static_cast<BYTE>(i ^ 0x5a);
+  copy_tiles_upload->Unmap(0, nullptr);
+
   D3D12_HEAP_DESC unaligned_heap_desc = upload_desc;
   --unaligned_heap_desc.SizeInBytes;
   if (!CheckHR("CreateUnalignedHeap", device->CreateHeap(&unaligned_heap_desc, IID_PPV_ARGS(&unaligned_heap))) ||
@@ -1323,6 +1360,33 @@ int main() {
       reserved_resource_copy, nullptr, reserved_resource, nullptr, &tile_region, D3D12_TILE_MAPPING_FLAG_NONE
   );
 
+  D3D12_RESOURCE_BARRIER reserved_copy_barrier = {};
+  reserved_copy_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  reserved_copy_barrier.Transition.pResource = reserved_resource;
+  reserved_copy_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+  reserved_copy_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+  reserved_copy_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &reserved_copy_barrier);
+  list->CopyTiles(
+      reserved_resource, &tile_coordinate, &tile_region, copy_tiles_upload, 0,
+      D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE
+  );
+  reserved_copy_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  reserved_copy_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  list->ResourceBarrier(1, &reserved_copy_barrier);
+  list->CopyTiles(
+      reserved_resource, &tile_coordinate, &tile_region, copy_tiles_readback, 0,
+      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+  queue->UpdateTileMappings(
+      reserved_resource, 1, &tile_coordinate, &tile_region, nullptr, 1, &null_range_flags, nullptr, nullptr,
+      D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  list->CopyTiles(
+      reserved_resource, &tile_coordinate, &tile_region, copy_tiles_readback,
+      D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+
   D3D12_TILED_RESOURCE_COORDINATE texture_tile_coordinate = {};
   D3D12_TILE_REGION_SIZE texture_tile_region = {};
   texture_tile_region.NumTiles = 2;
@@ -1714,6 +1778,30 @@ int main() {
     cleanup();
     return 1;
   }
+
+  BYTE *mapped_copy_tiles_readback = nullptr;
+  if (!CheckHR(
+          "MapCopyTilesReadback",
+          copy_tiles_readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped_copy_tiles_readback))
+      )) {
+    cleanup();
+    return 1;
+  }
+  bool copy_tiles_matches = true;
+  for (UINT i = 0; i < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; i++) {
+    if (mapped_copy_tiles_readback[i] != static_cast<BYTE>(i ^ 0x5a) ||
+        mapped_copy_tiles_readback[D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT + i] != 0) {
+      copy_tiles_matches = false;
+      break;
+    }
+  }
+  copy_tiles_readback->Unmap(0, nullptr);
+  if (!copy_tiles_matches) {
+    std::cerr << "reserved buffer CopyTiles mismatch\n";
+    cleanup();
+    return 1;
+  }
+
   auto result = *static_cast<UINT32 *>(mapped);
   destination->Unmap(0, nullptr);
   cleanup();

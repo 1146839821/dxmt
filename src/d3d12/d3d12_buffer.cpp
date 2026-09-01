@@ -410,6 +410,49 @@ public:
     return reserved_;
   }
 
+  bool
+  IsReservedBuffer() const override {
+    return reserved_;
+  }
+
+  HRESULT
+  GetTileIndices(
+      const D3D12_TILED_RESOURCE_COORDINATE *pRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
+      std::vector<UINT> &tile_indices
+  ) const override {
+    const auto coordinate = pRegionStartCoordinate ? *pRegionStartCoordinate : D3D12_TILED_RESOURCE_COORDINATE{};
+    if (!reserved_ || coordinate.X > tile_count_ || coordinate.Y || coordinate.Z || coordinate.Subresource)
+      return E_INVALIDARG;
+
+    const UINT tile_count = pRegionSize ? pRegionSize->NumTiles : (pRegionStartCoordinate ? 1 : tile_count_);
+    if (!tile_count || (pRegionSize && pRegionSize->UseBox) || tile_count > tile_count_ - coordinate.X)
+      return E_INVALIDARG;
+    tile_indices.reserve(tile_indices.size() + tile_count);
+    for (UINT tile = 0; tile < tile_count; tile++)
+      tile_indices.push_back(coordinate.X + tile);
+    return S_OK;
+  }
+
+  HRESULT
+  GetTileMapping(UINT tile_index, WMT::Buffer &backing_buffer, UINT64 &backing_offset) const override {
+    backing_buffer = {};
+    backing_offset = 0;
+    if (!reserved_ || tile_index >= tile_mappings_.size())
+      return E_INVALIDARG;
+
+    std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
+    const auto &mapping = tile_mappings_[tile_index];
+    if (!mapping.heap)
+      return S_OK;
+
+    auto *heap = static_cast<MTLD3D12Heap *>(mapping.heap.ptr());
+    backing_buffer = heap->GetTileBackingBuffer();
+    if (!backing_buffer)
+      return E_OUTOFMEMORY;
+    backing_offset = uint64_t(mapping.heap_tile) * kD3D12TileSize;
+    return S_OK;
+  }
+
   HRESULT
   UpdateTileMappings(
       UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
@@ -475,6 +518,8 @@ public:
       if (needs_heap) {
         auto *heap = static_cast<MTLD3D12Heap *>(pHeap);
         const auto heap_desc = heap->GetDesc();
+        if (heap_desc.Flags & D3D12_HEAP_FLAG_DENY_BUFFERS)
+          return E_INVALIDARG;
         const uint64_t heap_tile_count = (heap_desc.SizeInBytes - 1) / kD3D12TileSize + 1;
         if (range_flag == D3D12_TILE_RANGE_FLAG_REUSE_SINGLE_TILE) {
           if (heap_tile >= heap_tile_count)
@@ -512,6 +557,7 @@ public:
       D3D12_TILE_MAPPING_FLAGS Flags
   ) override {
     if (!reserved_ || !pSourceResource || !pSourceResource->IsReservedResource() ||
+        !IsSameDevice(device_, pSourceResource) ||
         pSourceResource->IsReservedTexture() || (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD))
       return E_INVALIDARG;
 

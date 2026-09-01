@@ -155,6 +155,24 @@ public:
     return false;
   }
 
+  virtual bool
+  IsReservedBuffer() const {
+    return false;
+  }
+
+  virtual HRESULT
+  GetTileIndices(
+      const D3D12_TILED_RESOURCE_COORDINATE *pRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
+      std::vector<UINT> &tile_indices
+  ) const {
+    return E_NOTIMPL;
+  }
+
+  virtual HRESULT
+  GetTileMapping(UINT tile_index, WMT::Buffer &backing_buffer, UINT64 &backing_offset) const {
+    return E_NOTIMPL;
+  }
+
   virtual HRESULT
   UpdateTileMappings(
       UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
@@ -178,6 +196,7 @@ public:
 class MTLD3D12Heap : public ID3D12Heap {
 public:
   virtual WMT::Heap GetMetalHeap() = 0;
+  virtual WMT::Buffer GetTileBackingBuffer() = 0;
 };
 
 class MTLD3D12Fence : public ID3D12Fence1 {

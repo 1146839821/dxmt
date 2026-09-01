@@ -22,10 +22,15 @@
 
 namespace dxmt {
 
+constexpr uint64_t kD3D12TileSize = 64ull * 1024;
+
 class MTLD3D12HeapImpl : public MTLD3D12Pageable<MTLD3D12Heap> {
 
   D3D12_HEAP_DESC desc_;
   WMT::Reference<WMT::Heap> heap_;
+  WMTResourceOptions resource_options_ = WMTResourceHazardTrackingModeUntracked;
+  WMT::Reference<WMT::Buffer> tile_backing_buffer_;
+  mutable dxmt::mutex tile_backing_mutex_;
 
   static WMTResourceOptions
   GetResourceOptions(const D3D12_HEAP_PROPERTIES &properties) {
@@ -53,6 +58,8 @@ public:
   MTLD3D12HeapImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12Heap>(pDevice) {}
 
   ~MTLD3D12HeapImpl() {
+    if (tile_backing_buffer_)
+      device_->UnregisterResidency(tile_backing_buffer_);
     if (heap_)
       device_->UnregisterResidency(heap_);
   }
@@ -113,9 +120,10 @@ public:
       return E_INVALIDARG;
     }
 
+    resource_options_ = GetResourceOptions(desc_.Properties);
     WMTHeapInfo info = {};
     info.size = desc_.SizeInBytes;
-    info.options = GetResourceOptions(desc_.Properties);
+    info.options = resource_options_;
     info.type = WMTHeapTypePlacement;
     info.sparse_page_size = WMTSparsePageSize64;
     heap_ = device_->GetMTLDevice().newHeap(info);
@@ -128,6 +136,21 @@ public:
   WMT::Heap
   GetMetalHeap() override {
     return heap_;
+  }
+
+  WMT::Buffer
+  GetTileBackingBuffer() override {
+    std::unique_lock<dxmt::mutex> lock(tile_backing_mutex_);
+    if (!tile_backing_buffer_) {
+      WMTBufferInfo info = {};
+      info.length = (desc_.SizeInBytes - 1) / kD3D12TileSize * kD3D12TileSize + kD3D12TileSize;
+      info.options = resource_options_;
+      tile_backing_buffer_ = device_->GetMTLDevice().newBuffer(info);
+      if (!tile_backing_buffer_)
+        return {};
+      device_->RegisterResidency(tile_backing_buffer_);
+    }
+    return tile_backing_buffer_;
   }
 
   virtual D3D12_HEAP_DESC *STDMETHODCALLTYPE
