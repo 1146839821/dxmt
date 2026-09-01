@@ -77,8 +77,10 @@ int main() {
   ID3D12Resource *reserved_texture = nullptr;
   ID3D12Resource *reserved_texture_copy = nullptr;
   ID3D12Resource *reserved_texture_v2 = nullptr;
+  ID3D12Resource *reserved_texture_mips = nullptr;
   ID3D12Resource *copy_tiles_upload = nullptr;
   ID3D12Resource *copy_tiles_readback = nullptr;
+  ID3D12Resource *copy_tiles_mips_readback = nullptr;
   ID3D12Resource *copy_tiles_texture_upload = nullptr;
   ID3D12Resource *copy_tiles_texture_readback = nullptr;
   ID3D12GraphicsCommandList2 *list2 = nullptr;
@@ -110,10 +112,14 @@ int main() {
       reserved_texture->Release();
     if (reserved_texture_v2)
       reserved_texture_v2->Release();
+    if (reserved_texture_mips)
+      reserved_texture_mips->Release();
     if (copy_tiles_readback)
       copy_tiles_readback->Release();
     if (copy_tiles_upload)
       copy_tiles_upload->Release();
+    if (copy_tiles_mips_readback)
+      copy_tiles_mips_readback->Release();
     if (copy_tiles_texture_readback)
       copy_tiles_texture_readback->Release();
     if (copy_tiles_texture_upload)
@@ -490,7 +496,74 @@ int main() {
       &unsupported_reserved_texture
   );
   if (unsupported_reserved_texture_hr != E_NOTIMPL || unsupported_reserved_texture != nullptr) {
-    std::cerr << "unsupported reserved texture descriptor was accepted\n";
+    std::cerr << "packed reserved texture descriptor was accepted\n";
+    cleanup();
+    return 1;
+  }
+
+  D3D12_RESOURCE_DESC reserved_texture_mip_desc = reserved_texture_desc;
+  reserved_texture_mip_desc.Width = 512;
+  reserved_texture_mip_desc.Height = 512;
+  reserved_texture_mip_desc.MipLevels = 3;
+  if (!CheckHR(
+          "CreateReservedTextureStandardMips",
+          device->CreateReservedResource(
+              &reserved_texture_mip_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource),
+              reinterpret_cast<void **>(&reserved_texture_mips)
+          )
+      ) ||
+      !reserved_texture_mips) {
+    cleanup();
+    return 1;
+  }
+
+  UINT reserved_texture_mip_total_tile_count = 0;
+  D3D12_PACKED_MIP_INFO reserved_texture_mip_packed_mip_info = {};
+  D3D12_TILE_SHAPE reserved_texture_mip_tile_shape = {};
+  UINT reserved_texture_mip_subresource_count = 6;
+  D3D12_SUBRESOURCE_TILING reserved_texture_mip_tilings[6] = {};
+  device->GetResourceTiling(
+      reserved_texture_mips, &reserved_texture_mip_total_tile_count, &reserved_texture_mip_packed_mip_info,
+      &reserved_texture_mip_tile_shape, &reserved_texture_mip_subresource_count, 0,
+      reserved_texture_mip_tilings
+  );
+  if (reserved_texture_mip_total_tile_count != 42 || reserved_texture_mip_packed_mip_info.NumStandardMips != 3 ||
+      reserved_texture_mip_packed_mip_info.NumPackedMips ||
+      reserved_texture_mip_packed_mip_info.NumTilesForPackedMips ||
+      reserved_texture_mip_packed_mip_info.StartTileIndexInOverallResource ||
+      reserved_texture_mip_tile_shape.WidthInTexels != 128 ||
+      reserved_texture_mip_tile_shape.HeightInTexels != 128 || reserved_texture_mip_tile_shape.DepthInTexels != 1 ||
+      reserved_texture_mip_subresource_count != 6 || reserved_texture_mip_tilings[0].WidthInTiles != 4 ||
+      reserved_texture_mip_tilings[0].HeightInTiles != 4 ||
+      reserved_texture_mip_tilings[0].StartTileIndexInOverallResource != 0 ||
+      reserved_texture_mip_tilings[1].WidthInTiles != 2 || reserved_texture_mip_tilings[1].HeightInTiles != 2 ||
+      reserved_texture_mip_tilings[1].StartTileIndexInOverallResource != 16 ||
+      reserved_texture_mip_tilings[2].WidthInTiles != 1 || reserved_texture_mip_tilings[2].HeightInTiles != 1 ||
+      reserved_texture_mip_tilings[2].StartTileIndexInOverallResource != 20 ||
+      reserved_texture_mip_tilings[3].WidthInTiles != 4 || reserved_texture_mip_tilings[3].HeightInTiles != 4 ||
+      reserved_texture_mip_tilings[3].StartTileIndexInOverallResource != 21 ||
+      reserved_texture_mip_tilings[4].WidthInTiles != 2 || reserved_texture_mip_tilings[4].HeightInTiles != 2 ||
+      reserved_texture_mip_tilings[4].StartTileIndexInOverallResource != 37 ||
+      reserved_texture_mip_tilings[5].WidthInTiles != 1 || reserved_texture_mip_tilings[5].HeightInTiles != 1 ||
+      reserved_texture_mip_tilings[5].StartTileIndexInOverallResource != 41 ||
+      reserved_texture_mip_tilings[0].DepthInTiles != 1 || reserved_texture_mip_tilings[1].DepthInTiles != 1 ||
+      reserved_texture_mip_tilings[2].DepthInTiles != 1 || reserved_texture_mip_tilings[3].DepthInTiles != 1 ||
+      reserved_texture_mip_tilings[4].DepthInTiles != 1 || reserved_texture_mip_tilings[5].DepthInTiles != 1) {
+    std::cerr << "reserved texture standard mip tiling contract mismatch\n";
+    cleanup();
+    return 1;
+  }
+
+  UINT reserved_texture_mip_partial_count = 2;
+  D3D12_SUBRESOURCE_TILING reserved_texture_mip_partial_tilings[2] = {};
+  device->GetResourceTiling(
+      reserved_texture_mips, nullptr, nullptr, nullptr, &reserved_texture_mip_partial_count, 1,
+      reserved_texture_mip_partial_tilings
+  );
+  if (reserved_texture_mip_partial_count != 2 ||
+      reserved_texture_mip_partial_tilings[0].StartTileIndexInOverallResource != 16 ||
+      reserved_texture_mip_partial_tilings[1].StartTileIndexInOverallResource != 20) {
+    std::cerr << "reserved texture partial mip tiling contract mismatch\n";
     cleanup();
     return 1;
   }
@@ -504,7 +577,7 @@ int main() {
       reserved_texture, &reserved_texture_total_tile_count, &reserved_texture_packed_mip_info,
       &reserved_texture_tile_shape, &reserved_texture_subresource_count, 0, reserved_texture_tilings
   );
-  if (reserved_texture_total_tile_count != 4 || reserved_texture_packed_mip_info.NumStandardMips ||
+  if (reserved_texture_total_tile_count != 4 || reserved_texture_packed_mip_info.NumStandardMips != 1 ||
       reserved_texture_packed_mip_info.NumPackedMips || reserved_texture_packed_mip_info.NumTilesForPackedMips ||
       reserved_texture_packed_mip_info.StartTileIndexInOverallResource ||
       reserved_texture_tile_shape.WidthInTexels != 128 || reserved_texture_tile_shape.HeightInTexels != 128 ||
@@ -858,6 +931,13 @@ int main() {
               &readback_properties, D3D12_HEAP_FLAG_NONE, &copy_tiles_buffer_desc,
               D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&copy_tiles_readback)
           )
+      ) ||
+      !CheckHR(
+          "CreateCopyTilesMipsReadback",
+          device->CreateCommittedResource(
+              &readback_properties, D3D12_HEAP_FLAG_NONE, &copy_tiles_buffer_desc,
+              D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&copy_tiles_mips_readback)
+          )
       )) {
     cleanup();
     return 1;
@@ -870,8 +950,10 @@ int main() {
     cleanup();
     return 1;
   }
-  for (UINT i = 0; i < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; i++)
+  for (UINT i = 0; i < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; i++) {
     mapped_copy_tiles_upload[i] = static_cast<BYTE>(i ^ 0x5a);
+    mapped_copy_tiles_upload[D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT + i] = 0;
+  }
   copy_tiles_upload->Unmap(0, nullptr);
 
   D3D12_RESOURCE_DESC copy_tiles_texture_buffer_desc = copy_tiles_buffer_desc;
@@ -1424,6 +1506,35 @@ int main() {
       D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
   );
 
+  D3D12_TILED_RESOURCE_COORDINATE mip_tile_coordinate = {};
+  mip_tile_coordinate.Subresource = 2;
+  D3D12_TILE_REGION_SIZE mip_tile_region = {};
+  mip_tile_region.NumTiles = 2;
+  UINT mip_heap_tile_offset = 2;
+  UINT mip_range_tile_count = 2;
+  queue->UpdateTileMappings(
+      reserved_texture_mips, 1, &mip_tile_coordinate, &mip_tile_region, reserved_texture_heap, 1, nullptr,
+      &mip_heap_tile_offset, &mip_range_tile_count, D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  D3D12_RESOURCE_BARRIER reserved_texture_mips_copy_barrier = {};
+  reserved_texture_mips_copy_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  reserved_texture_mips_copy_barrier.Transition.pResource = reserved_texture_mips;
+  reserved_texture_mips_copy_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+  reserved_texture_mips_copy_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+  reserved_texture_mips_copy_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &reserved_texture_mips_copy_barrier);
+  list->CopyTiles(
+      reserved_texture_mips, &mip_tile_coordinate, &mip_tile_region, copy_tiles_upload, 0,
+      D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE
+  );
+  reserved_texture_mips_copy_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  reserved_texture_mips_copy_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  list->ResourceBarrier(1, &reserved_texture_mips_copy_barrier);
+  list->CopyTiles(
+      reserved_texture_mips, &mip_tile_coordinate, &mip_tile_region, copy_tiles_mips_readback, 0,
+      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+
   D3D12_TILED_RESOURCE_COORDINATE texture_tile_coordinate = {};
   D3D12_TILE_REGION_SIZE texture_tile_region = {};
   texture_tile_region.NumTiles = 2;
@@ -1877,6 +1988,29 @@ int main() {
   copy_tiles_texture_readback->Unmap(0, nullptr);
   if (!copy_tiles_texture_matches) {
     std::cerr << "reserved texture CopyTiles mismatch\n";
+    cleanup();
+    return 1;
+  }
+
+  BYTE *mapped_copy_tiles_mips_readback = nullptr;
+  if (!CheckHR(
+          "MapCopyTilesMipsReadback",
+          copy_tiles_mips_readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped_copy_tiles_mips_readback))
+      )) {
+    cleanup();
+    return 1;
+  }
+  bool copy_tiles_mips_matches = true;
+  for (UINT i = 0; i < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; i++) {
+    if (mapped_copy_tiles_mips_readback[i] != static_cast<BYTE>(i ^ 0x5a) ||
+        mapped_copy_tiles_mips_readback[D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT + i] != 0) {
+      copy_tiles_mips_matches = false;
+      break;
+    }
+  }
+  copy_tiles_mips_readback->Unmap(0, nullptr);
+  if (!copy_tiles_mips_matches) {
+    std::cerr << "reserved texture multi-mip CopyTiles mismatch\n";
     cleanup();
     return 1;
   }

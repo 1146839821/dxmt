@@ -360,8 +360,8 @@ public:
       return E_NOTIMPL;
     if (!pDesc->Width || !pDesc->Height || !pDesc->DepthOrArraySize)
       return E_INVALIDARG;
-    if (pDesc->Width > std::numeric_limits<UINT>::max() || pDesc->MipLevels != 1 || pDesc->SampleDesc.Count != 1 ||
-        pDesc->SampleDesc.Quality != 0)
+    if (pDesc->Width > std::numeric_limits<UINT>::max() || !pDesc->MipLevels || pDesc->MipLevels > 31 ||
+        pDesc->SampleDesc.Count != 1 || pDesc->SampleDesc.Quality != 0)
       return E_NOTIMPL;
     if (pDesc->Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN)
       return E_INVALIDARG;
@@ -388,15 +388,40 @@ public:
     if (!GetReservedTextureTileShape(format, tile_shape_))
       return E_NOTIMPL;
 
-    const UINT width_in_tiles = static_cast<UINT>((pDesc->Width - 1) / tile_shape_.WidthInTexels + 1);
-    const UINT height_in_tiles = (pDesc->Height - 1) / tile_shape_.HeightInTexels + 1;
-    if (height_in_tiles > std::numeric_limits<UINT16>::max())
+    const uint64_t subresource_count = uint64_t(pDesc->MipLevels) * pDesc->DepthOrArraySize;
+    if (!subresource_count || subresource_count > std::numeric_limits<UINT>::max())
       return E_NOTIMPL;
 
-    const uint64_t tiles_per_subresource = uint64_t(width_in_tiles) * height_in_tiles;
-    const uint64_t total_tiles = tiles_per_subresource * pDesc->DepthOrArraySize;
-    if (!tiles_per_subresource || total_tiles > std::numeric_limits<UINT>::max())
-      return E_NOTIMPL;
+    std::vector<D3D12_SUBRESOURCE_TILING> subresource_tilings(subresource_count);
+    uint64_t total_tiles = 0;
+    for (UINT array_slice = 0; array_slice < pDesc->DepthOrArraySize; array_slice++) {
+      for (UINT mip_slice = 0; mip_slice < pDesc->MipLevels; mip_slice++) {
+        const D3D12_BOX extent = GetResourceExtent(*pDesc, mip_slice);
+        // Packed mip tails are not represented by the logical tile mapping yet.
+        if (extent.right < tile_shape_.WidthInTexels || extent.bottom < tile_shape_.HeightInTexels)
+          return E_NOTIMPL;
+
+        const UINT width_in_tiles = static_cast<UINT>(
+            (uint64_t(extent.right) - 1) / tile_shape_.WidthInTexels + 1
+        );
+        const UINT height_in_tiles = static_cast<UINT>(
+            (uint64_t(extent.bottom) - 1) / tile_shape_.HeightInTexels + 1
+        );
+        if (height_in_tiles > std::numeric_limits<UINT16>::max())
+          return E_NOTIMPL;
+
+        const uint64_t tiles_per_subresource = uint64_t(width_in_tiles) * height_in_tiles;
+        if (!tiles_per_subresource || tiles_per_subresource > std::numeric_limits<UINT>::max() - total_tiles)
+          return E_NOTIMPL;
+
+        auto &tiling = subresource_tilings[size_t(array_slice) * pDesc->MipLevels + mip_slice];
+        tiling.WidthInTiles = width_in_tiles;
+        tiling.HeightInTiles = static_cast<UINT16>(height_in_tiles);
+        tiling.DepthInTiles = 1;
+        tiling.StartTileIndexInOverallResource = static_cast<UINT>(total_tiles);
+        total_tiles += tiles_per_subresource;
+      }
+    }
 
     desc_ = *pDesc;
     heap_props_ = default_heap;
@@ -405,15 +430,8 @@ public:
     InitializeStateTracking(desc_, device_->GetMTLDevice());
     reserved_ = true;
     total_tile_count_ = static_cast<UINT>(total_tiles);
-    subresource_tilings_.resize(pDesc->DepthOrArraySize);
+    subresource_tilings_ = std::move(subresource_tilings);
     tile_mappings_.resize(total_tile_count_);
-    for (UINT subresource = 0; subresource < subresource_tilings_.size(); subresource++) {
-      auto &tiling = subresource_tilings_[subresource];
-      tiling.WidthInTiles = width_in_tiles;
-      tiling.HeightInTiles = static_cast<UINT16>(height_in_tiles);
-      tiling.DepthInTiles = 1;
-      tiling.StartTileIndexInOverallResource = static_cast<UINT>(subresource * tiles_per_subresource);
-    }
     return S_OK;
   };
 
@@ -433,6 +451,27 @@ public:
         resource_tiles.push_back(tile);
       return S_OK;
     }
+
+    const auto append_linear_tiles = [&](UINT subresource, uint64_t offset, UINT tile_count) -> HRESULT {
+      uint64_t remaining = tile_count;
+      while (remaining) {
+        if (subresource >= subresource_tilings_.size())
+          return E_INVALIDARG;
+
+        const auto &tiling = subresource_tilings_[subresource];
+        const uint64_t subresource_tile_count = uint64_t(tiling.WidthInTiles) * tiling.HeightInTiles;
+        if (offset >= subresource_tile_count)
+          return E_INVALIDARG;
+        const uint64_t available = subresource_tile_count - offset;
+        const uint64_t count = std::min(remaining, available);
+        for (uint64_t tile = 0; tile < count; tile++)
+          resource_tiles.push_back(tiling.StartTileIndexInOverallResource + static_cast<UINT>(offset + tile));
+        remaining -= count;
+        subresource++;
+        offset = 0;
+      }
+      return S_OK;
+    };
 
     for (UINT region = 0; region < NumResourceRegions; region++) {
       const auto coordinate = pResourceRegionStartCoordinates ? pResourceRegionStartCoordinates[region]
@@ -457,23 +496,35 @@ public:
         return E_INVALIDARG;
 
       if (!region_size->UseBox) {
-        if (region_size->NumTiles > subresource_tile_count - region_start)
+        if (FAILED(append_linear_tiles(coordinate.Subresource, region_start, region_size->NumTiles)))
           return E_INVALIDARG;
-        for (UINT tile = 0; tile < region_size->NumTiles; tile++)
-          resource_tiles.push_back(tiling.StartTileIndexInOverallResource + static_cast<UINT>(region_start + tile));
         continue;
       }
 
       const uint64_t box_tile_count = uint64_t(region_size->Width) * region_size->Height * region_size->Depth;
-      if (!region_size->Width || !region_size->Height || region_size->Depth != 1 ||
-          box_tile_count != region_size->NumTiles || region_size->Width > tiling.WidthInTiles - coordinate.X ||
-          region_size->Height > tiling.HeightInTiles - coordinate.Y)
+      if (!region_size->Width || !region_size->Height || !region_size->Depth || box_tile_count != region_size->NumTiles ||
+          region_size->Width > tiling.WidthInTiles - coordinate.X || region_size->Height > tiling.HeightInTiles - coordinate.Y)
         return E_INVALIDARG;
-      for (UINT y = 0; y < region_size->Height; y++) {
-        for (UINT x = 0; x < region_size->Width; x++) {
-          resource_tiles.push_back(
-              tiling.StartTileIndexInOverallResource + (coordinate.Y + y) * tiling.WidthInTiles + coordinate.X + x
-          );
+
+      const UINT mip_levels = desc_.MipLevels;
+      if (!mip_levels)
+        return E_INVALIDARG;
+      const UINT array_slice = coordinate.Subresource / mip_levels;
+      const UINT mip_slice = coordinate.Subresource % mip_levels;
+      if (array_slice >= desc_.DepthOrArraySize || region_size->Depth > desc_.DepthOrArraySize - array_slice)
+        return E_INVALIDARG;
+      for (UINT depth = 0; depth < region_size->Depth; depth++) {
+        const size_t subresource = size_t(array_slice + depth) * mip_levels + mip_slice;
+        if (subresource >= subresource_tilings_.size())
+          return E_INVALIDARG;
+        const auto &depth_tiling = subresource_tilings_[subresource];
+        for (UINT y = 0; y < region_size->Height; y++) {
+          for (UINT x = 0; x < region_size->Width; x++) {
+            resource_tiles.push_back(
+                depth_tiling.StartTileIndexInOverallResource + (coordinate.Y + y) * depth_tiling.WidthInTiles +
+                coordinate.X + x
+            );
+          }
         }
       }
     }
@@ -1167,8 +1218,10 @@ public:
 
     if (TotalTileCount)
       *TotalTileCount = total_tile_count_;
-    if (PackedMipInfo)
+    if (PackedMipInfo) {
       *PackedMipInfo = {};
+      PackedMipInfo->NumStandardMips = static_cast<UINT8>(desc_.MipLevels);
+    }
     if (StandardTitleShape)
       *StandardTitleShape = tile_shape_;
     if (!SubresourceTilingCount)
