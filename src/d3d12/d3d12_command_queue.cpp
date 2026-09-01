@@ -22,7 +22,8 @@
 #include "d3d12_pageable.hpp"
 #include "dxgi_interfaces.h"
 #include "log/log.hpp"
-#include <deque>
+#include <array>
+#include <cassert>
 #include <limits>
 
 namespace dxmt {
@@ -41,11 +42,17 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     uint64_t serial = 0;
     WMT::Reference<WMT::CommandBuffer> command_buffer;
     std::vector<Com<MTLD3D12CommandAllocator, false>> allocators;
+    HANDLE latency_waitable = nullptr;
   };
 
+  dxmt::mutex commit_mutex_;
   dxmt::mutex submission_mutex_;
   dxmt::condition_variable submission_condition_;
-  std::deque<Submission> submissions_;
+  dxmt::condition_variable submission_space_condition_;
+  std::array<Submission, kCommandQueueSize> submissions_;
+  size_t submission_head_ = 0;
+  size_t submission_tail_ = 0;
+  size_t submission_count_ = 0;
   dxmt::thread completion_thread_;
   bool stopping_ = false;
   uint64_t next_submission_serial_ = 1;
@@ -55,16 +62,17 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   CompletionThread() {
     for (;;) {
       Submission submission;
+      size_t submission_slot = 0;
       {
         std::unique_lock<dxmt::mutex> lock(submission_mutex_);
-        submission_condition_.wait(lock, [this] { return stopping_ || !submissions_.empty(); });
-        if (submissions_.empty()) {
+        submission_condition_.wait(lock, [this] { return stopping_ || submission_count_ != 0; });
+        if (!submission_count_) {
           if (stopping_)
             return;
           continue;
         }
-        submission = std::move(submissions_.front());
-        submissions_.pop_front();
+        submission_slot = submission_head_;
+        submission = std::move(submissions_[submission_slot]);
       }
 
       auto pool = WMT::MakeAutoreleasePool();
@@ -75,21 +83,58 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       for (auto &allocator : submission.allocators)
         allocator->MarkSubmissionCompleted();
 
+      if (submission.latency_waitable)
+        ReleaseSemaphore(submission.latency_waitable, 1, nullptr);
+
       if (submission.serial != completed_submission_serial_ + 1)
         WARN("D3D12 command buffer completion serial gap: expected ", completed_submission_serial_ + 1,
              ", got ", submission.serial);
       completed_submission_serial_ = submission.serial;
+
+      {
+        std::lock_guard<dxmt::mutex> lock(submission_mutex_);
+        assert(submission_slot == submission_head_);
+        submission_head_ = (submission_head_ + 1) % kCommandQueueSize;
+        submission_count_--;
+      }
+      submission_space_condition_.notify_all();
     }
   }
 
+  bool
+  CommitSubmission(Submission &submission) {
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    std::unique_lock<dxmt::mutex> submission_lock(submission_mutex_);
+    submission_space_condition_.wait(submission_lock, [this] {
+      return stopping_ || submission_count_ < kCommandQueueSize;
+    });
+    if (stopping_)
+      return false;
+
+    submission.serial = next_submission_serial_++;
+    submission.command_buffer.commit();
+    submissions_[submission_tail_] = std::move(submission);
+    submission_tail_ = (submission_tail_ + 1) % kCommandQueueSize;
+    submission_count_++;
+    submission_lock.unlock();
+    submission_condition_.notify_one();
+    return true;
+  }
+
   void
-  EnqueueSubmission(Submission &&submission) {
+  AbortSubmission(Submission &submission) {
+    for (auto &allocator : submission.allocators)
+      allocator->MarkSubmissionCompleted();
+  }
+
+  void
+  StopCompletionThread() {
     {
       std::lock_guard<dxmt::mutex> lock(submission_mutex_);
-      submission.serial = next_submission_serial_++;
-      submissions_.push_back(std::move(submission));
+      stopping_ = true;
     }
-    submission_condition_.notify_one();
+    submission_condition_.notify_all();
+    submission_space_condition_.notify_all();
   }
 
 public:
@@ -98,11 +143,7 @@ public:
       completion_thread_([this] { CompletionThread(); }) {}
 
   ~MTLD3D12CommandQueueImpl() {
-    {
-      std::lock_guard<dxmt::mutex> lock(submission_mutex_);
-      stopping_ = true;
-    }
-    submission_condition_.notify_one();
+    StopCompletionThread();
     if (completion_thread_.joinable())
       completion_thread_.join();
   }
@@ -440,8 +481,8 @@ public:
       }
       pCommandList->CommitResourceStates();
     }
-    cmdbuf.commit();
-    EnqueueSubmission(std::move(submission));
+    if (!CommitSubmission(submission))
+      AbortSubmission(submission);
   };
 
   void STDMETHODCALLTYPE SetMarker(UINT metadata, const void *data, UINT size) {};
@@ -457,7 +498,10 @@ public:
     auto pool = WMT::MakeAutoreleasePool();
     auto cmdbuf = queue_.commandBuffer();
     static_cast<MTLD3D12Fence *>(pFence)->fence->signal(cmdbuf, Value);
-    cmdbuf.commit();
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    if (!CommitSubmission(submission))
+      return E_FAIL;
     return S_OK;
   };
 
@@ -468,7 +512,10 @@ public:
     auto pool = WMT::MakeAutoreleasePool();
     auto cmdbuf = queue_.commandBuffer();
     static_cast<MTLD3D12Fence *>(pFence)->fence->wait(cmdbuf, Value);
-    cmdbuf.commit();
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    if (!CommitSubmission(submission))
+      return E_FAIL;
     return S_OK;
   };
 
@@ -570,13 +617,11 @@ public:
     }
 
     cmdbuf.presentDrawable(drawable);
-    cmdbuf.commit();
-
-    {
-      // temporary workaround
-      cmdbuf.waitUntilCompleted();
-      ReleaseSemaphore(hLantecyWaitable, 1, nullptr);
-    }
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    submission.latency_waitable = hLantecyWaitable;
+    if (!CommitSubmission(submission))
+      return E_FAIL;
 
     return S_OK;
   }

@@ -21,9 +21,23 @@ struct ExecuteContext {
   LONG returned;
 };
 
+struct FenceWaitContext {
+  ID3D12CommandQueue *queue;
+  ID3D12Fence *fence;
+  HRESULT result;
+  LONG returned;
+};
+
 DWORD WINAPI ExecuteCommandListsThread(void *arg) {
   auto *context = static_cast<ExecuteContext *>(arg);
   context->queue->ExecuteCommandLists(1, &context->command_list);
+  InterlockedExchange(&context->returned, 1);
+  return 0;
+}
+
+DWORD WINAPI QueueWaitThread(void *arg) {
+  auto *context = static_cast<FenceWaitContext *>(arg);
+  context->result = context->queue->Wait(context->fence, 1);
   InterlockedExchange(&context->returned, 1);
   return 0;
 }
@@ -185,6 +199,7 @@ int main() {
     ID3D12GraphicsCommandList *async_list = nullptr;
     ID3D12Fence *async_fence = nullptr;
     HANDLE execute_thread = nullptr;
+    HANDLE backpressure_thread = nullptr;
     if (!CheckHR(
             "CreateAsyncAllocator",
             device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&async_allocator))
@@ -211,8 +226,37 @@ int main() {
           std::cerr << "ExecuteCommandLists waited for GPU completion\n";
           result = 1;
         }
+        if (!CheckHR("ResetAsyncListWhileAllocatorIsInFlight", async_list->Reset(async_allocator, nullptr)) ||
+            !CheckHR("CloseResetAsyncList", async_list->Close()))
+          result = 1;
+        for (unsigned i = 0; i < 30; i++) {
+          if (!CheckHR("FillSubmissionQueue", queue->Wait(async_fence, 1))) {
+            result = 1;
+            break;
+          }
+        }
+        FenceWaitContext backpressure = {queue, async_fence, E_FAIL, 0};
+        backpressure_thread = CreateThread(nullptr, 0, QueueWaitThread, &backpressure, 0, nullptr);
+        if (!backpressure_thread) {
+          std::cerr << "CreateThread failed while testing submission backpressure\n";
+          result = 1;
+        } else {
+          Sleep(50);
+          if (InterlockedCompareExchange(&backpressure.returned, 0, 0) != 0) {
+            std::cerr << "submission queue accepted more than 32 in-flight submissions\n";
+            result = 1;
+          }
+        }
         if (!CheckHR("SignalAsyncFence", async_fence->Signal(1)))
           result = 1;
+        if (backpressure_thread) {
+          if (WaitForSingleObject(backpressure_thread, 5000) != WAIT_OBJECT_0) {
+            std::cerr << "submission backpressure thread did not finish\n";
+            result = 1;
+          } else if (!CheckHR("BackpressureWait", backpressure.result)) {
+            result = 1;
+          }
+        }
         if (WaitForSingleObject(execute_thread, INFINITE) != WAIT_OBJECT_0) {
           std::cerr << "ExecuteCommandLists thread did not finish\n";
           result = 1;
@@ -224,6 +268,8 @@ int main() {
     }
     if (execute_thread)
       CloseHandle(execute_thread);
+    if (backpressure_thread)
+      CloseHandle(backpressure_thread);
     if (async_fence)
       async_fence->Signal(1);
     if (async_list)

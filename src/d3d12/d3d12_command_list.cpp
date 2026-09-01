@@ -575,8 +575,6 @@ public:
 
     if (allocator->GetType() != type_)
       return E_INVALIDARG;
-    if (allocator->IsInFlight())
-      return E_FAIL;
 
     if (allocator_ != allocator)
       allocator_ = allocator;
