@@ -381,6 +381,10 @@ int main() {
   if (!expect_invalid_buffer_desc("buffer with non-row-major layout", invalid_buffer_desc))
     return 1;
   invalid_buffer_desc = committed1_desc;
+  invalid_buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_UNKNOWN;
+  if (!expect_invalid_buffer_desc("resource with unknown dimension", invalid_buffer_desc))
+    return 1;
+  invalid_buffer_desc = committed1_desc;
   invalid_buffer_desc.SampleDesc.Quality = 1;
   if (!expect_invalid_buffer_desc("buffer with non-zero sample quality", invalid_buffer_desc))
     return 1;

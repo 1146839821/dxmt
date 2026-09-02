@@ -442,7 +442,7 @@ ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERT
     break;
   }
   default:
-    break;
+    return E_INVALIDARG;
   }
 
   return S_OK;

@@ -52,4 +52,7 @@ that the selected heap had `D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER`.
 
 Cross-adapter heap creation and cross-adapter resource execution remain
 unsupported; do not advertise those capabilities without a separate
-implementation and validation slice.
+implementation and validation slice. When shared-cross-adapter heap support is
+introduced, make resource/heap compatibility bidirectional and implement the
+remaining shared-heap restrictions, including the required shared flag,
+resource-type flags, heap-property restrictions, and protected-session rules.
