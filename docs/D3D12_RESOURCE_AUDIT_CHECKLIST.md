@@ -107,8 +107,9 @@ without first documenting a changed contract or a regression.
 
 - [ ] Audit remaining resource helper and `CopyTiles` contract paths.
   Record each contract separately.
-- [ ] Complete the x64 validation matrix for private and no-private builds,
-  including API/shader validation where the fixture supports it.
+- [x] Complete the x64 validation matrix for private and no-private builds,
+  including API/shader validation where the fixture supports it. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_VALIDATION_MATRIX.md`.
 - [~] Real Metal sparse residency remains unavailable through the current
   Metal 3 wrapper. Shadow backing is the supported bounded emulation; do not
   raise the advertised D3D12 tiled-resource tier as part of this audit.
