@@ -2884,15 +2884,16 @@ int main() {
   auto expect_copy_tile_mappings_no_mutation = [&](const char *name,
                                                     const D3D12_TILED_RESOURCE_COORDINATE *dst_coordinate,
                                                     const D3D12_TILED_RESOURCE_COORDINATE *src_coordinate,
-                                                    const D3D12_TILE_REGION_SIZE *region_size) {
+                                                    const D3D12_TILE_REGION_SIZE *region_size,
+                                                    D3D12_TILE_MAPPING_FLAGS flags) {
     queue->UpdateTileMappings(
         reserved_resource, 1, &tile_coordinate, &tile_region, nullptr, 1, &null_range_flags, nullptr, nullptr,
         D3D12_TILE_MAPPING_FLAG_NONE
     );
     queue->CopyTileMappings(
-        reserved_resource, dst_coordinate, reserved_resource_copy, src_coordinate, region_size,
-        D3D12_TILE_MAPPING_FLAG_NONE
-    );
+         reserved_resource, dst_coordinate, reserved_resource_copy, src_coordinate, region_size,
+         flags
+     );
     if (!CheckHR(name, list->Reset(allocator, nullptr))) {
       cleanup();
       return false;
@@ -2936,12 +2937,34 @@ int main() {
     }
     return true;
   };
+  D3D12_TILED_RESOURCE_COORDINATE invalid_copy_tile_coordinate = tile_coordinate;
+  invalid_copy_tile_coordinate.X = reserved_total_tile_count;
+  D3D12_TILED_RESOURCE_COORDINATE last_copy_tile_coordinate = tile_coordinate;
+  last_copy_tile_coordinate.X = reserved_total_tile_count - 1;
+  D3D12_TILE_REGION_SIZE invalid_copy_tile_region = tile_region;
+  invalid_copy_tile_region.NumTiles = 2;
+  const auto invalid_copy_tile_flags = static_cast<D3D12_TILE_MAPPING_FLAGS>(1u << 1);
   if (!expect_copy_tile_mappings_no_mutation("null CopyTileMappings destination coordinate", nullptr, &tile_coordinate,
-                                             &tile_region) ||
+                                             &tile_region, D3D12_TILE_MAPPING_FLAG_NONE) ||
       !expect_copy_tile_mappings_no_mutation("null CopyTileMappings source coordinate", &tile_coordinate, nullptr,
-                                             &tile_region) ||
+                                             &tile_region, D3D12_TILE_MAPPING_FLAG_NONE) ||
       !expect_copy_tile_mappings_no_mutation("null CopyTileMappings region size", &tile_coordinate, &tile_coordinate,
-                                             nullptr))
+                                             nullptr, D3D12_TILE_MAPPING_FLAG_NONE) ||
+      !expect_copy_tile_mappings_no_mutation(
+          "out-of-bounds CopyTileMappings destination", &invalid_copy_tile_coordinate, &tile_coordinate, &tile_region,
+          D3D12_TILE_MAPPING_FLAG_NONE
+      ) ||
+      !expect_copy_tile_mappings_no_mutation(
+          "out-of-bounds CopyTileMappings source", &tile_coordinate, &invalid_copy_tile_coordinate, &tile_region,
+          D3D12_TILE_MAPPING_FLAG_NONE
+      ) ||
+      !expect_copy_tile_mappings_no_mutation(
+          "out-of-bounds CopyTileMappings region", &last_copy_tile_coordinate, &last_copy_tile_coordinate,
+          &invalid_copy_tile_region, D3D12_TILE_MAPPING_FLAG_NONE
+      ) ||
+      !expect_copy_tile_mappings_no_mutation(
+          "invalid CopyTileMappings flags", &tile_coordinate, &tile_coordinate, &tile_region, invalid_copy_tile_flags
+      ))
     return 1;
 
   if (!CheckHR("MapDepthReadback", depth_readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped_depth)))) {

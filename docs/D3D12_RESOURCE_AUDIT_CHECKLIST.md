@@ -83,6 +83,9 @@ without first documenting a changed contract or a regression.
   calculating layouts, preserves empty-query semantics, and uses independent
   256-byte row-pitch alignment for each depth/stencil plane. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_COPYABLE_FOOTPRINTS.md`.
+- [x] `CopyTileMappings` rejects missing or invalid region arguments and
+  unsupported flags without mutating destination mappings. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_COPY_TILE_MAPPINGS.md`.
 
 ## Next Slices
 
