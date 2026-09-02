@@ -19,6 +19,8 @@
 #include "d3d12_device.hpp"
 #include "util_bit.hpp"
 
+#include <limits>
+
 namespace dxmt {
 
 template <>
@@ -321,6 +323,45 @@ IsValidBufferResourceDesc(const D3D12_RESOURCE_DESC &Desc) {
 }
 
 HRESULT
+ValidateTextureResourceDesc(const D3D12_RESOURCE_DESC &Desc) {
+  if (!Desc.Width || Desc.Width > std::numeric_limits<UINT>::max() || !Desc.Height || !Desc.DepthOrArraySize ||
+      !Desc.SampleDesc.Count)
+    return E_INVALIDARG;
+
+  switch (Desc.Dimension) {
+  case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+    if (Desc.Height != 1 || Desc.SampleDesc.Count != 1 || Desc.SampleDesc.Quality != 0)
+      return E_INVALIDARG;
+    break;
+  case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+    if (Desc.SampleDesc.Count == 1 && Desc.SampleDesc.Quality != 0)
+      return E_INVALIDARG;
+    if (Desc.SampleDesc.Count > 1 && Desc.MipLevels != 1)
+      return E_INVALIDARG;
+    break;
+  case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
+    if (Desc.SampleDesc.Count != 1 || Desc.SampleDesc.Quality != 0)
+      return E_INVALIDARG;
+    break;
+  default:
+    return E_INVALIDARG;
+  }
+
+  UINT64 max_dimension = Desc.Width;
+  if (Desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE1D)
+    max_dimension = std::max(max_dimension, UINT64(Desc.Height));
+  if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D)
+    max_dimension = std::max(max_dimension, UINT64(Desc.DepthOrArraySize));
+
+  UINT max_mip_levels = 1;
+  while (max_dimension > 1) {
+    max_dimension >>= 1;
+    ++max_mip_levels;
+  }
+  return Desc.MipLevels && Desc.MipLevels > max_mip_levels ? E_INVALIDARG : S_OK;
+}
+
+HRESULT
 ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERTIES *pHeapProps) {
   if (!pDesc || !pHeapProps)
     return E_INVALIDARG;
@@ -361,6 +402,8 @@ ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERT
   case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
   case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
   case D3D12_RESOURCE_DIMENSION_TEXTURE3D: {
+    if (FAILED(ValidateTextureResourceDesc(*pDesc)))
+      return E_INVALIDARG;
     if (pDesc->Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR)
       break;
     if (pDesc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {

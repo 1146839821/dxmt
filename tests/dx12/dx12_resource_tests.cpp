@@ -923,11 +923,63 @@ int main() {
   texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   texture_desc.SampleDesc.Count = 1;
   texture_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+  auto expect_invalid_texture_desc = [&](const char *name, const D3D12_RESOURCE_DESC &desc) {
+    invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+    const HRESULT hr = device->CreateCommittedResource(
+        &committed1_properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+        IID_PPV_ARGS(&invalid_committed)
+    );
+    if (hr != E_INVALIDARG || invalid_committed != nullptr) {
+      std::cerr << name << " was accepted: 0x" << std::hex << static_cast<unsigned long>(hr) << std::dec << "\n";
+      cleanup();
+      return false;
+    }
+    return true;
+  };
+  D3D12_RESOURCE_DESC invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Width = 0;
+  if (!expect_invalid_texture_desc("zero-width texture", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+  invalid_texture_desc.Height = 2;
+  if (!expect_invalid_texture_desc("1D texture with non-unit height", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.MipLevels = 8;
+  if (!expect_invalid_texture_desc("texture with excessive mip levels", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.SampleDesc.Quality = 1;
+  if (!expect_invalid_texture_desc("single-sample texture with quality", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.SampleDesc.Count = 4;
+  invalid_texture_desc.MipLevels = 2;
+  if (!expect_invalid_texture_desc("MSAA texture with multiple mips", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+  invalid_texture_desc.DepthOrArraySize = 2;
+  invalid_texture_desc.SampleDesc.Count = 2;
+  if (!expect_invalid_texture_desc("3D multisample texture", invalid_texture_desc))
+    return 1;
+
   D3D12_RESOURCE_ALLOCATION_INFO texture_info = device->GetResourceAllocationInfo(0, 1, &texture_desc);
   if (!texture_info.SizeInBytes || texture_info.SizeInBytes == UINT64_MAX ||
       texture_info.Alignment < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) {
     std::cerr << "invalid texture allocation info: size=" << texture_info.SizeInBytes
               << " alignment=" << texture_info.Alignment << "\n";
+    cleanup();
+    return 1;
+  }
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.MipLevels = 8;
+  D3D12_RESOURCE_ALLOCATION_INFO invalid_texture_info =
+      device->GetResourceAllocationInfo(0, 1, &invalid_texture_desc);
+  if (invalid_texture_info.SizeInBytes != UINT64_MAX) {
+    std::cerr << "allocation info accepted excessive texture mip levels\n";
     cleanup();
     return 1;
   }

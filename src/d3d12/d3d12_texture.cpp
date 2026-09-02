@@ -33,6 +33,9 @@ static std::atomic<unsigned> texture_srv_debug_count = 0;
 HRESULT
 PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_RESOURCE_DESC &Desc) {
   InfoOut = {};
+  if (FAILED(ValidateTextureResourceDesc(Desc)))
+    return E_INVALIDARG;
+
   MTL_DXGI_FORMAT_DESC Format;
   HRESULT hr = MTLQueryDXGIFormat(Device, Desc.Format, Format);
   if (FAILED(hr))
