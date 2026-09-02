@@ -35,6 +35,8 @@ PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_
   InfoOut = {};
   if (FAILED(ValidateTextureResourceDesc(Desc)))
     return E_INVALIDARG;
+  if (FAILED(ValidateTextureResourceLayout(Desc)))
+    return E_INVALIDARG;
   if (FAILED(ValidateTextureResourceFlags(Desc)))
     return E_INVALIDARG;
 

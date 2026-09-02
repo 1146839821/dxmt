@@ -511,6 +511,8 @@ bool IsValidBufferResourceDesc(const D3D12_RESOURCE_DESC &Desc);
 
 HRESULT ValidateTextureResourceDesc(const D3D12_RESOURCE_DESC &Desc);
 
+HRESULT ValidateTextureResourceLayout(const D3D12_RESOURCE_DESC &Desc);
+
 HRESULT ValidateTextureResourceFlags(const D3D12_RESOURCE_DESC &Desc);
 
 bool IsD3D12BoxInBounds(D3D12_BOX &box, D3D12_BOX &bounds);

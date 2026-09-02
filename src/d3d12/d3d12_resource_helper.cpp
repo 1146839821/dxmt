@@ -362,6 +362,12 @@ ValidateTextureResourceDesc(const D3D12_RESOURCE_DESC &Desc) {
 }
 
 HRESULT
+ValidateTextureResourceLayout(const D3D12_RESOURCE_DESC &Desc) {
+  // DXMT does not advertise cross-adapter row-major, standard-swizzle, or tiled resources.
+  return Desc.Layout == D3D12_TEXTURE_LAYOUT_UNKNOWN ? S_OK : E_INVALIDARG;
+}
+
+HRESULT
 ValidateTextureResourceFlags(const D3D12_RESOURCE_DESC &Desc) {
   const auto flags = Desc.Flags;
   const bool allow_render_target = flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
@@ -426,20 +432,10 @@ ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERT
   case D3D12_RESOURCE_DIMENSION_TEXTURE3D: {
     if (FAILED(ValidateTextureResourceDesc(*pDesc)))
       return E_INVALIDARG;
+    if (FAILED(ValidateTextureResourceLayout(*pDesc)))
+      return E_INVALIDARG;
     if (FAILED(ValidateTextureResourceFlags(*pDesc)))
       return E_INVALIDARG;
-    if (pDesc->Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR)
-      break;
-    if (pDesc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
-      if (!(pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER))
-        return E_INVALIDARG;
-      if (pDesc->MipLevels != 1 || pDesc->DepthOrArraySize != 1)
-        return E_INVALIDARG;
-      if (IsCpuVisibleHeap(pHeapProps))
-        return E_INVALIDARG;
-    } else {
-      return E_INVALIDARG;
-    }
     break;
   }
   default:

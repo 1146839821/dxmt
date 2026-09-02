@@ -992,6 +992,18 @@ int main() {
   invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER;
   if (!expect_invalid_texture_desc("row-major texture with UAV flag", invalid_texture_desc))
     return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  if (!expect_invalid_texture_desc("unsupported row-major texture", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+  if (!expect_invalid_texture_desc("unsupported undefined-swizzle texture", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_STANDARD_SWIZZLE;
+  if (!expect_invalid_texture_desc("unsupported standard-swizzle texture", invalid_texture_desc))
+    return 1;
 
   D3D12_RESOURCE_ALLOCATION_INFO texture_info = device->GetResourceAllocationInfo(0, 1, &texture_desc);
   if (!texture_info.SizeInBytes || texture_info.SizeInBytes == UINT64_MAX ||
@@ -1007,6 +1019,14 @@ int main() {
       device->GetResourceAllocationInfo(0, 1, &invalid_texture_desc);
   if (invalid_texture_info.SizeInBytes != UINT64_MAX) {
     std::cerr << "allocation info accepted excessive texture mip levels\n";
+    cleanup();
+    return 1;
+  }
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_STANDARD_SWIZZLE;
+  invalid_texture_info = device->GetResourceAllocationInfo(0, 1, &invalid_texture_desc);
+  if (invalid_texture_info.SizeInBytes != UINT64_MAX) {
+    std::cerr << "allocation info accepted unsupported texture layout\n";
     cleanup();
     return 1;
   }
