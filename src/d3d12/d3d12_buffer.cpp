@@ -45,14 +45,6 @@ ClearResourceTiling(
 }
 
 bool
-IsValidReservedBufferDesc(const D3D12_RESOURCE_DESC &desc) {
-  return desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && desc.Width && desc.Height == 1 &&
-         desc.DepthOrArraySize == 1 && desc.MipLevels == 1 && desc.Format == DXGI_FORMAT_UNKNOWN &&
-         desc.SampleDesc.Count == 1 && desc.SampleDesc.Quality == 0 && desc.Layout == D3D12_TEXTURE_LAYOUT_ROW_MAJOR &&
-         (!desc.Alignment || desc.Alignment == D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
-}
-
-bool
 MakeBufferSlice(UINT first_element, UINT element_count, uint64_t element_stride, uint64_t buffer_size,
                 BufferSlice &slice) {
   if (!element_stride || first_element > UINT64_MAX / element_stride ||
@@ -158,7 +150,7 @@ public:
   InitializeReserved(const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState) {
     if (!pDesc || pDesc->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
       return pDesc ? E_NOTIMPL : E_INVALIDARG;
-    if (!IsValidReservedBufferDesc(*pDesc))
+    if (!IsValidBufferResourceDesc(*pDesc))
       return E_INVALIDARG;
 
     D3D12_HEAP_PROPERTIES default_heap = {};

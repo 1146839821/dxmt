@@ -42,11 +42,13 @@ without first documenting a changed contract or a regression.
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_INITIAL_STATES.md`.
 - [x] Single-node heap node-mask validation. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_NODE_MASKS.md`.
+- [x] Buffer resource descriptor shape and alignment validation. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_BUFFER_DESC.md`.
 
 ## Next Slices
 
 - [ ] Audit remaining resource helper validation paths for null, range, and
-  alignment behavior. Record each contract separately.
+  texture alignment behavior. Record each contract separately.
 - [ ] Complete the x64 validation matrix for private and no-private builds,
   including API/shader validation where the fixture supports it.
 - [~] Real Metal sparse residency remains unavailable through the current

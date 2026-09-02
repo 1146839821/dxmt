@@ -1315,10 +1315,7 @@ public:
       }
 
       if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
-        if (desc.Alignment && desc.Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)
-          goto invalid;
-        if (!desc.Width || desc.Height != 1 || desc.DepthOrArraySize != 1 || desc.MipLevels != 1 ||
-            desc.SampleDesc.Count != 1 || desc.Format != DXGI_FORMAT_UNKNOWN)
+        if (!IsValidBufferResourceDesc(desc))
           goto invalid;
         resource_info.Alignment = default_alignment;
         size_and_align = GetMTLDevice().heapBufferSizeAndAlign(

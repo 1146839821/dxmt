@@ -358,6 +358,32 @@ int main() {
     return 1;
   }
 
+  auto expect_invalid_buffer_desc = [&](const char *name, const D3D12_RESOURCE_DESC &desc) {
+    invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+    const HRESULT hr = device->CreateCommittedResource(
+        &committed1_properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+        IID_PPV_ARGS(&invalid_committed)
+    );
+    if (hr != E_INVALIDARG || invalid_committed != nullptr) {
+      std::cerr << name << " was accepted: 0x" << std::hex << static_cast<unsigned long>(hr) << std::dec << "\n";
+      cleanup();
+      return false;
+    }
+    return true;
+  };
+  D3D12_RESOURCE_DESC invalid_buffer_desc = committed1_desc;
+  invalid_buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  if (!expect_invalid_buffer_desc("buffer with non-row-major layout", invalid_buffer_desc))
+    return 1;
+  invalid_buffer_desc = committed1_desc;
+  invalid_buffer_desc.SampleDesc.Quality = 1;
+  if (!expect_invalid_buffer_desc("buffer with non-zero sample quality", invalid_buffer_desc))
+    return 1;
+  invalid_buffer_desc = committed1_desc;
+  invalid_buffer_desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+  if (!expect_invalid_buffer_desc("buffer with small-resource alignment", invalid_buffer_desc))
+    return 1;
+
   if (!CheckHR(
           "CreateReservedResource",
           device->CreateReservedResource(
@@ -1011,6 +1037,15 @@ int main() {
   readback_desc.Properties = readback_properties;
   readback_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
   if (!CheckHR("CreateReadbackHeap", device->CreateHeap(&readback_desc, IID_PPV_ARGS(&readback_heap)))) {
+    cleanup();
+    return 1;
+  }
+
+  invalid_buffer_desc = buffer_desc;
+  invalid_buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  D3D12_RESOURCE_ALLOCATION_INFO invalid_buffer_info = device->GetResourceAllocationInfo(0, 1, &invalid_buffer_desc);
+  if (invalid_buffer_info.SizeInBytes != UINT64_MAX) {
+    std::cerr << "allocation info accepted a non-row-major buffer\n";
     cleanup();
     return 1;
   }

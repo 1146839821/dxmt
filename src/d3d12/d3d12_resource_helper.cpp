@@ -312,6 +312,14 @@ IsCpuVisibleHeap(const D3D12_HEAP_PROPERTIES *pHeapProps) {
   }
 }
 
+bool
+IsValidBufferResourceDesc(const D3D12_RESOURCE_DESC &Desc) {
+  return Desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && Desc.Width && Desc.Height == 1 &&
+         Desc.DepthOrArraySize == 1 && Desc.MipLevels == 1 && Desc.Format == DXGI_FORMAT_UNKNOWN &&
+         Desc.SampleDesc.Count == 1 && Desc.SampleDesc.Quality == 0 && Desc.Layout == D3D12_TEXTURE_LAYOUT_ROW_MAJOR &&
+         (!Desc.Alignment || Desc.Alignment == D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
+}
+
 HRESULT
 ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERTIES *pHeapProps) {
   if (!pDesc || !pHeapProps)
@@ -346,7 +354,7 @@ ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERT
 
   switch (pDesc->Dimension) {
   case D3D12_RESOURCE_DIMENSION_BUFFER: {
-    if (pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)
+    if (!IsValidBufferResourceDesc(*pDesc) || (pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS))
       return E_INVALIDARG;
     break;
   }
