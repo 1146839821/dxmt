@@ -1213,6 +1213,47 @@ int main() {
     return 1;
   }
 
+  auto expect_invalid_footprint_desc = [&](const char *name, const D3D12_RESOURCE_DESC &desc) {
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT invalid_layout = {};
+    invalid_layout.Offset = 1;
+    invalid_layout.Footprint.Format = DXGI_FORMAT_R8_UNORM;
+    invalid_layout.Footprint.Width = 1;
+    invalid_layout.Footprint.Height = 1;
+    invalid_layout.Footprint.Depth = 1;
+    invalid_layout.Footprint.RowPitch = 1;
+    UINT invalid_rows = 1;
+    UINT64 invalid_row_size = 1;
+    UINT64 invalid_total = 1;
+    device->GetCopyableFootprints(
+        &desc, 0, 1, 0, &invalid_layout, &invalid_rows, &invalid_row_size, &invalid_total
+    );
+    if (invalid_layout.Offset != UINT64_MAX || invalid_layout.Footprint.Format != static_cast<DXGI_FORMAT>(~0u) ||
+        invalid_layout.Footprint.Width != UINT_MAX || invalid_layout.Footprint.Height != UINT_MAX ||
+        invalid_layout.Footprint.Depth != UINT_MAX || invalid_layout.Footprint.RowPitch != UINT_MAX ||
+        invalid_rows != UINT_MAX || invalid_row_size != UINT64_MAX || invalid_total != UINT64_MAX) {
+      std::cerr << name << " produced a footprint for an invalid resource description\n";
+      cleanup();
+      return false;
+    }
+    return true;
+  };
+  D3D12_RESOURCE_DESC invalid_footprint_desc = footprint_desc;
+  invalid_footprint_desc.MipLevels = 8;
+  if (!expect_invalid_footprint_desc("excessive footprint mip levels", invalid_footprint_desc))
+    return 1;
+  invalid_footprint_desc = footprint_desc;
+  invalid_footprint_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  if (!expect_invalid_footprint_desc("row-major texture footprint", invalid_footprint_desc))
+    return 1;
+  invalid_footprint_desc = footprint_desc;
+  invalid_footprint_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+  if (!expect_invalid_footprint_desc("conflicting texture footprint flags", invalid_footprint_desc))
+    return 1;
+  invalid_footprint_desc = buffer_desc;
+  invalid_footprint_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  if (!expect_invalid_footprint_desc("non-row-major buffer footprint", invalid_footprint_desc))
+    return 1;
+
   footprint_desc.Width = 5;
   footprint_desc.Height = 5;
   footprint_desc.DepthOrArraySize = 1;
@@ -1510,7 +1551,9 @@ int main() {
   device->GetCopyableFootprints(
       &depth_desc, 0, 2, 0, depth_footprints, depth_rows, depth_row_sizes, &depth_total
   );
-  if (!depth_total || !depth_footprints[1].Offset || !depth_row_sizes[0] || !depth_row_sizes[1]) {
+  if (depth_total != 2048 || depth_footprints[0].Offset != 0 || depth_footprints[1].Offset != 1024 ||
+      depth_footprints[0].Footprint.RowPitch != 256 || depth_footprints[1].Footprint.RowPitch != 256 ||
+      depth_rows[0] != 4 || depth_rows[1] != 4 || depth_row_sizes[0] != 16 || depth_row_sizes[1] != 4) {
     std::cerr << "invalid depth/stencil footprints: total=" << depth_total
               << " depth_offset=" << depth_footprints[0].Offset << " stencil_offset=" << depth_footprints[1].Offset
               << "\n";

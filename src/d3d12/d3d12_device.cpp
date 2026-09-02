@@ -1444,18 +1444,20 @@ public:
     UINT mip_levels = 0;
     bool valid = true;
 
-    if (pDesc && pDesc->DepthOrArraySize &&
-        pDesc->Dimension != D3D12_RESOURCE_DIMENSION_UNKNOWN) {
-      if (pDesc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
-        if (pDesc->Format == DXGI_FORMAT_UNKNOWN && pDesc->Height == 1 && pDesc->DepthOrArraySize == 1 &&
-            pDesc->MipLevels == 1 && pDesc->SampleDesc.Count == 1) {
-          PlaneFormats[0] = DXGI_FORMAT_UNKNOWN;
-          PlaneBytesPerTexel[0] = 1;
-          mip_levels = 1;
-          TotalSubresources = 1;
-        }
-      } else if (SUCCEEDED(MTLQueryDXGIFormat(GetMTLDevice(), pDesc->Format, FormatDesc)) &&
-                 pDesc->SampleDesc.Count == 1) {
+    if (pDesc && pDesc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+      if (IsValidBufferResourceDesc(*pDesc)) {
+        PlaneFormats[0] = DXGI_FORMAT_UNKNOWN;
+        PlaneBytesPerTexel[0] = 1;
+        mip_levels = 1;
+        TotalSubresources = 1;
+      }
+    } else if (pDesc && pDesc->DepthOrArraySize &&
+               pDesc->Dimension != D3D12_RESOURCE_DIMENSION_UNKNOWN &&
+               SUCCEEDED(ValidateTextureResourceDesc(*pDesc)) &&
+               SUCCEEDED(ValidateTextureResourceLayout(*pDesc)) &&
+               SUCCEEDED(ValidateTextureResourceFlags(*pDesc))) {
+      if (SUCCEEDED(MTLQueryDXGIFormat(GetMTLDevice(), pDesc->Format, FormatDesc)) &&
+          pDesc->SampleDesc.Count == 1) {
         mip_levels = pDesc->MipLevels;
         if (!mip_levels) {
           UINT64 max_dimension = pDesc->Width;
@@ -1499,88 +1501,87 @@ public:
           TotalSubresources = uint64_t(mip_levels) * array_size * PlaneCount;
         }
       }
+    }
 
-      if (PlaneBytesPerTexel[0] && FirstSubresource <= TotalSubresources &&
-          SubresourceCount <= TotalSubresources - FirstSubresource) {
-        for (UINT i = 0; i < SubresourceCount; i++) {
-          auto subresource = uint64_t(FirstSubresource) + i;
-          UINT mip_level = 0;
-          UINT plane = 0;
-          DecomposeSubresource(*pDesc, static_cast<UINT>(subresource), &mip_level, nullptr, &plane);
-          if (plane >= PlaneCount) {
-            valid = false;
-            break;
-          }
+    if (PlaneBytesPerTexel[0] && FirstSubresource <= TotalSubresources &&
+        SubresourceCount <= TotalSubresources - FirstSubresource) {
+      for (UINT i = 0; i < SubresourceCount; i++) {
+        auto subresource = uint64_t(FirstSubresource) + i;
+        UINT mip_level = 0;
+        UINT plane = 0;
+        DecomposeSubresource(*pDesc, static_cast<UINT>(subresource), &mip_level, nullptr, &plane);
+        if (plane >= PlaneCount) {
+          valid = false;
+          break;
+        }
 
-          auto extent = GetResourceExtent(*pDesc, mip_level);
-          auto width = UINT64(extent.right);
-          auto height = UINT64(extent.bottom);
-          auto aligned_width = align(width, BlockWidth);
-          auto aligned_height = align(height, BlockHeight);
-          auto depth = UINT64(extent.back);
-          auto row_count = aligned_height / BlockHeight;
-          if (aligned_width / BlockWidth > UINT64_MAX / PlaneBytesPerTexel[plane]) {
-            valid = false;
-            break;
-          }
-          auto row_size = (aligned_width / BlockWidth) * PlaneBytesPerTexel[plane];
-          constexpr UINT64 pitch_alignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
-          if (PlaneCount > UINT64_MAX / pitch_alignment ||
-              row_size > UINT64_MAX - (pitch_alignment * PlaneCount - 1)) {
-            valid = false;
-            break;
-          }
-          auto row_pitch = align(row_size, pitch_alignment * PlaneCount);
-          if (row_count && row_pitch > UINT64_MAX / row_count) {
-            valid = false;
-            break;
-          }
-          auto slice_pitch = row_pitch * row_count;
-          if (depth && slice_pitch > UINT64_MAX / depth) {
-            valid = false;
-            break;
-          }
-          auto subresource_size = slice_pitch * depth;
-          if (row_pitch > UINT_MAX || subresource_size > UINT64_MAX - Offset) {
-            valid = false;
-            break;
-          }
+        auto extent = GetResourceExtent(*pDesc, mip_level);
+        auto width = UINT64(extent.right);
+        auto height = UINT64(extent.bottom);
+        auto aligned_width = align(width, BlockWidth);
+        auto aligned_height = align(height, BlockHeight);
+        auto depth = UINT64(extent.back);
+        auto row_count = aligned_height / BlockHeight;
+        if (aligned_width / BlockWidth > UINT64_MAX / PlaneBytesPerTexel[plane]) {
+          valid = false;
+          break;
+        }
+        auto row_size = (aligned_width / BlockWidth) * PlaneBytesPerTexel[plane];
+        constexpr UINT64 pitch_alignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+        if (row_size > UINT64_MAX - (pitch_alignment - 1)) {
+          valid = false;
+          break;
+        }
+        auto row_pitch = align(row_size, pitch_alignment);
+        if (row_count && row_pitch > UINT64_MAX / row_count) {
+          valid = false;
+          break;
+        }
+        auto slice_pitch = row_pitch * row_count;
+        if (depth && slice_pitch > UINT64_MAX / depth) {
+          valid = false;
+          break;
+        }
+        auto subresource_size = slice_pitch * depth;
+        if (row_pitch > UINT_MAX || subresource_size > UINT64_MAX - Offset) {
+          valid = false;
+          break;
+        }
 
-          if (pLayouts) {
-            if (BaseOffset > UINT64_MAX - Offset) {
-              valid = false;
-              break;
-            }
-            pLayouts[i].Offset = BaseOffset + Offset;
-            pLayouts[i].Footprint.Format = PlaneFormats[plane];
-            pLayouts[i].Footprint.Width = static_cast<UINT>(width);
-            pLayouts[i].Footprint.Height = static_cast<UINT>(height);
-            pLayouts[i].Footprint.Depth = static_cast<UINT>(depth);
-            pLayouts[i].Footprint.RowPitch = static_cast<UINT>(row_pitch);
+        if (pLayouts) {
+          if (BaseOffset > UINT64_MAX - Offset) {
+            valid = false;
+            break;
           }
-          if (pNumRows)
-            pNumRows[i] = static_cast<UINT>(row_count);
-          if (pRowSizeInBytes)
-            pRowSizeInBytes[i] = row_size;
+          pLayouts[i].Offset = BaseOffset + Offset;
+          pLayouts[i].Footprint.Format = PlaneFormats[plane];
+          pLayouts[i].Footprint.Width = static_cast<UINT>(width);
+          pLayouts[i].Footprint.Height = static_cast<UINT>(height);
+          pLayouts[i].Footprint.Depth = static_cast<UINT>(depth);
+          pLayouts[i].Footprint.RowPitch = static_cast<UINT>(row_pitch);
+        }
+        if (pNumRows)
+          pNumRows[i] = static_cast<UINT>(row_count);
+        if (pRowSizeInBytes)
+          pRowSizeInBytes[i] = row_size;
 
-          TotalBytes = Offset + subresource_size;
-          if (i + 1 < SubresourceCount) {
-            if (TotalBytes > UINT64_MAX - (D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1)) {
-              valid = false;
-              break;
-            }
-            Offset = align(TotalBytes, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
-            if (Offset < TotalBytes) {
-              valid = false;
-              break;
-            }
+        TotalBytes = Offset + subresource_size;
+        if (i + 1 < SubresourceCount) {
+          if (TotalBytes > UINT64_MAX - (D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1)) {
+            valid = false;
+            break;
+          }
+          Offset = align(TotalBytes, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+          if (Offset < TotalBytes) {
+            valid = false;
+            break;
           }
         }
-        if (valid) {
-          if (pTotalBytes)
-            *pTotalBytes = TotalBytes;
-          return;
-        }
+      }
+      if (valid) {
+        if (pTotalBytes)
+          *pTotalBytes = TotalBytes;
+        return;
       }
     }
 

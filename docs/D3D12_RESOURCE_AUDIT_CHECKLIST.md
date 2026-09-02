@@ -79,6 +79,10 @@ without first documenting a changed contract or a regression.
   cross-adapter resource flags are checked against heap flags at resource
   creation boundaries. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_HEAP_COMPATIBILITY.md`.
+- [x] `GetCopyableFootprints` validates resource descriptor shapes before
+  calculating layouts, preserves empty-query semantics, and uses independent
+  256-byte row-pitch alignment for each depth/stencil plane. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_COPYABLE_FOOTPRINTS.md`.
 
 ## Next Slices
 
