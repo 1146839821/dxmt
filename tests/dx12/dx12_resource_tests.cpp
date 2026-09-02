@@ -1493,6 +1493,14 @@ int main() {
     cleanup();
     return 1;
   }
+  D3D12_BOX bc_transfer_box = {0, 0, 0, 4, 4, 1};
+  BYTE bc_transfer_data[8] = {};
+  if (bc_texture->WriteToSubresource(0, &bc_transfer_box, bc_transfer_data, 7, 0) != E_INVALIDARG ||
+      bc_texture->ReadFromSubresource(bc_transfer_data, 7, 0, 0, &bc_transfer_box) != E_INVALIDARG) {
+    std::cerr << "BC texture accepted an undersized row pitch\n";
+    cleanup();
+    return 1;
+  }
   device->GetCopyableFootprints(&bc_desc, 0, 1, 0, &bc_footprint, &bc_rows, &bc_row_size, &bc_total);
   if (bc_total != 512 || bc_rows != 2 || bc_row_size != 16 || bc_footprint.Footprint.RowPitch != 256) {
     std::cerr << "unexpected BC1 copy footprint: total=" << bc_total << " rows=" << bc_rows
@@ -1541,6 +1549,16 @@ int main() {
                    &depth_properties, D3D12_HEAP_FLAG_NONE, &texture3d_desc,
                    D3D12_RESOURCE_STATE_RENDER_TARGET, &texture3d_clear,
                    IID_PPV_ARGS(&texture3d)))) {
+    cleanup();
+    return 1;
+  }
+  D3D12_BOX texture3d_transfer_box = {0, 0, 0, 1, 1, 2};
+  BYTE texture3d_transfer_data[8] = {};
+  if (texture3d->WriteToSubresource(0, &texture3d_transfer_box, texture3d_transfer_data, 3, 4) != E_INVALIDARG ||
+      texture3d->WriteToSubresource(0, &texture3d_transfer_box, texture3d_transfer_data, 4, 3) != E_INVALIDARG ||
+      texture3d->ReadFromSubresource(texture3d_transfer_data, 3, 4, 0, &texture3d_transfer_box) != E_INVALIDARG ||
+      texture3d->ReadFromSubresource(texture3d_transfer_data, 4, 3, 0, &texture3d_transfer_box) != E_INVALIDARG) {
+    std::cerr << "3D texture accepted an undersized row or slice pitch\n";
     cleanup();
     return 1;
   }
@@ -1694,13 +1712,16 @@ int main() {
     return 1;
   }
   BYTE texture_subresource_data[4] = {};
+  D3D12_BOX texture_transfer_box = {0, 0, 0, 4, 4, 1};
   if (placed_texture->WriteToSubresource(1, nullptr, texture_subresource_data, sizeof(texture_subresource_data), 0) !=
           E_INVALIDARG ||
       placed_texture->ReadFromSubresource(texture_subresource_data, sizeof(texture_subresource_data), 0, 1, nullptr) !=
           E_INVALIDARG ||
       placed_texture->WriteToSubresource(0, nullptr, nullptr, 0, 0) != E_INVALIDARG ||
-      placed_texture->ReadFromSubresource(nullptr, 0, 0, 0, nullptr) != E_INVALIDARG) {
-    std::cerr << "texture subresource range or null data was accepted\n";
+      placed_texture->ReadFromSubresource(nullptr, 0, 0, 0, nullptr) != E_INVALIDARG ||
+      placed_texture->WriteToSubresource(0, &texture_transfer_box, texture_subresource_data, 15, 0) != E_INVALIDARG ||
+      placed_texture->ReadFromSubresource(texture_subresource_data, 15, 0, 0, &texture_transfer_box) != E_INVALIDARG) {
+    std::cerr << "texture subresource range, null data, or row pitch was accepted\n";
     cleanup();
     return 1;
   }

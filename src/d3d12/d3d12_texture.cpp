@@ -30,6 +30,55 @@ namespace dxmt {
 static std::atomic<unsigned> texture_debug_count = 0;
 static std::atomic<unsigned> texture_srv_debug_count = 0;
 
+struct TextureTransferLayout {
+  uint64_t row_size;
+  uint64_t row_count;
+  uint64_t slice_size;
+};
+
+static bool
+GetTextureTransferLayout(
+    const MTL_DXGI_FORMAT_DESC &Format, const D3D12_BOX &Box, const D3D12_BOX &FullBox,
+    TextureTransferLayout &Layout
+) {
+  constexpr uint64_t block_extent = 4;
+  const bool block_compressed = Format.Flag & MTL_DXGI_FORMAT_BC;
+  const uint64_t block_width = block_compressed ? block_extent : 1;
+  const uint64_t block_height = block_compressed ? block_extent : 1;
+  const uint64_t bytes_per_block = block_compressed ? Format.BlockSize : Format.BytesPerTexel;
+
+  if (!bytes_per_block)
+    return false;
+  if (block_compressed &&
+      (Box.left % block_extent || Box.top % block_extent ||
+       (Box.right % block_extent && Box.right != FullBox.right) ||
+       (Box.bottom % block_extent && Box.bottom != FullBox.bottom)))
+    return false;
+
+  const uint64_t width = (uint64_t(Box.right) - Box.left + block_width - 1) / block_width;
+  const uint64_t height = (uint64_t(Box.bottom) - Box.top + block_height - 1) / block_height;
+  if (!width || !height || width > UINT64_MAX / bytes_per_block)
+    return false;
+
+  Layout.row_size = width * bytes_per_block;
+  Layout.row_count = height;
+  if (Layout.row_size > UINT64_MAX / Layout.row_count)
+    return false;
+  Layout.slice_size = Layout.row_size * Layout.row_count;
+  return true;
+}
+
+static bool
+ValidateTextureTransferPitch(
+    const MTL_DXGI_FORMAT_DESC &Format, const D3D12_BOX &Box, const D3D12_BOX &FullBox,
+    UINT RowPitch, UINT SlicePitch, bool Is3D
+) {
+  TextureTransferLayout Layout = {};
+  if (!GetTextureTransferLayout(Format, Box, FullBox, Layout) || RowPitch < Layout.row_size)
+    return false;
+  return !Is3D || SlicePitch >= Layout.slice_size;
+}
+
 HRESULT
 PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_RESOURCE_DESC &Desc) {
   InfoOut = {};
@@ -632,10 +681,10 @@ public:
     if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc_.Format, Format)))
       return E_INVALIDARG;
 
-    if (Format.Flag & MTL_DXGI_FORMAT_BC) {
-      if ((box.left | box.right | box.top | box.bottom) & (Format.BlockSize - 1))
-        return E_INVALIDARG;
-    }
+    if (!ValidateTextureTransferPitch(
+            Format, box, full_box, SrcRowPitch, SrcSlicePitch,
+            desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D))
+      return E_INVALIDARG;
 
     texture->current()->texture().replaceRegion(
         {box.left, box.top, box.front}, {box.right - box.left, box.bottom - box.top, box.back - box.front}, Level,
@@ -675,10 +724,10 @@ public:
     if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc_.Format, Format)))
       return E_INVALIDARG;
 
-    if (Format.Flag & MTL_DXGI_FORMAT_BC) {
-      if ((box.left | box.right | box.top | box.bottom) & (Format.BlockSize - 1))
-        return E_INVALIDARG;
-    }
+    if (!ValidateTextureTransferPitch(
+            Format, box, full_box, DstRowPitch, DstSlicePitch,
+            desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D))
+      return E_INVALIDARG;
 
     texture->current()->texture().getBytes(
         {box.left, box.top, box.front}, {box.right - box.left, box.bottom - box.top, box.back - box.front}, Level,
