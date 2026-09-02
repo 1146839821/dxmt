@@ -105,6 +105,9 @@ without first documenting a changed contract or a regression.
 - [x] Buffer resource descriptors reject texture-only flags consistently in
   creation and allocation-info paths. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_BUFFER_FLAGS.md`.
+- [x] Reserved textures accept optional optimized clear values while buffers
+  continue to reject them. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_CLEAR_VALUES.md`.
 
 ## Next Slices
 

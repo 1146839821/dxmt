@@ -1614,8 +1614,8 @@ CreateReservedTexture(
     const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
 ) {
   InitReturnPtr(ppResource);
-  if (OptimizedClearValue)
-    return E_INVALIDARG;
+  // The optimized value is creation metadata; explicit clear commands carry the actual value.
+  (void)OptimizedClearValue;
 
   auto texture = Com(new MTLD3D12Texture(pDevice));
   HRESULT hr = texture->InitializeReserved(pDesc, InitialState);

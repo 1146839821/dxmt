@@ -618,11 +618,14 @@ int main() {
 
   D3D12_RESOURCE_DESC reserved_rt_texture_desc = reserved_texture_desc;
   reserved_rt_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  D3D12_CLEAR_VALUE reserved_rt_texture_clear = {};
+  reserved_rt_texture_clear.Format = reserved_rt_texture_desc.Format;
+  reserved_rt_texture_clear.Color[3] = 1.0f;
   if (!CheckHR(
           "CreateReservedRenderTargetTexture",
           device->CreateReservedResource(
-              &reserved_rt_texture_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource),
-              reinterpret_cast<void **>(&reserved_rt_texture)
+              &reserved_rt_texture_desc, D3D12_RESOURCE_STATE_COMMON, &reserved_rt_texture_clear,
+              __uuidof(ID3D12Resource), reinterpret_cast<void **>(&reserved_rt_texture)
           )
       ) ||
       !reserved_rt_texture) {
