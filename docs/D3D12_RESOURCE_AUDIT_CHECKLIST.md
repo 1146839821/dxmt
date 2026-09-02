@@ -93,6 +93,9 @@ without first documenting a changed contract or a regression.
   resource creation while preserving the existing exclusive-write and heap
   compatibility rules. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_RESOURCE_STATES.md`.
+- [x] Resource descriptor validation rejects unknown resource flag bits across
+  creation and allocation-info paths. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_RESOURCE_FLAGS.md`.
 
 ## Next Slices
 

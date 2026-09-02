@@ -276,6 +276,11 @@ constexpr D3D12_RESOURCE_STATES kExclusiveWrite =
     D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE | D3D12_RESOURCE_STATE_VIDEO_PROCESS_WRITE |
     D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE;
 
+constexpr D3D12_RESOURCE_FLAGS kKnownResourceFlags =
+    D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
+    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE |
+    D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+
 constexpr D3D12_RESOURCE_STATES kKnownResourceStates =
     D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER |
     D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_DEPTH_WRITE |
@@ -334,6 +339,7 @@ IsValidBufferResourceDesc(const D3D12_RESOURCE_DESC &Desc) {
          Desc.DepthOrArraySize == 1 && Desc.MipLevels == 1 && Desc.Format == DXGI_FORMAT_UNKNOWN &&
          Desc.SampleDesc.Count == 1 && Desc.SampleDesc.Quality == 0 && Desc.Layout == D3D12_TEXTURE_LAYOUT_ROW_MAJOR &&
          (!Desc.Alignment || Desc.Alignment == D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) &&
+         !(Desc.Flags & ~kKnownResourceFlags) &&
          !(Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS);
 }
 
@@ -385,6 +391,8 @@ ValidateTextureResourceLayout(const D3D12_RESOURCE_DESC &Desc) {
 HRESULT
 ValidateTextureResourceFlags(const D3D12_RESOURCE_DESC &Desc) {
   const auto flags = Desc.Flags;
+  if (flags & ~kKnownResourceFlags)
+    return E_INVALIDARG;
   const bool allow_render_target = flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
   const bool allow_depth_stencil = flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
   const bool allow_unordered_access = flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;

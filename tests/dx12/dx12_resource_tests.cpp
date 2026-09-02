@@ -392,6 +392,10 @@ int main() {
   if (!expect_invalid_buffer_desc("buffer with non-zero sample quality", invalid_buffer_desc))
     return 1;
   invalid_buffer_desc = committed1_desc;
+  invalid_buffer_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(0x40u);
+  if (!expect_invalid_buffer_desc("buffer with unknown resource flag", invalid_buffer_desc))
+    return 1;
+  invalid_buffer_desc = committed1_desc;
   invalid_buffer_desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
   if (!expect_invalid_buffer_desc("buffer with small-resource alignment", invalid_buffer_desc))
     return 1;
@@ -402,6 +406,16 @@ int main() {
   if (invalid_buffer_allocation_info.SizeInBytes != UINT64_MAX || invalid_buffer_info1.Offset ||
       invalid_buffer_info1.SizeInBytes || invalid_buffer_info1.Alignment) {
     std::cerr << "invalid allocation info leaked per-resource output\n";
+    cleanup();
+    return 1;
+  }
+  invalid_buffer_desc = committed1_desc;
+  invalid_buffer_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(0x40u);
+  invalid_buffer_info1 = {1, 1, 1};
+  invalid_buffer_allocation_info = device4->GetResourceAllocationInfo1(0, 1, &invalid_buffer_desc, &invalid_buffer_info1);
+  if (invalid_buffer_allocation_info.SizeInBytes != UINT64_MAX || invalid_buffer_info1.Offset ||
+      invalid_buffer_info1.SizeInBytes || invalid_buffer_info1.Alignment) {
+    std::cerr << "unknown buffer flag produced allocation info\n";
     cleanup();
     return 1;
   }
@@ -1064,6 +1078,10 @@ int main() {
   if (!expect_invalid_texture_desc("texture with depth-stencil and UAV flags", invalid_texture_desc))
     return 1;
   invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(0x40u);
+  if (!expect_invalid_texture_desc("texture with unknown resource flag", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
   invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
   if (!expect_invalid_texture_desc("texture denying shader access without depth-stencil", invalid_texture_desc))
     return 1;
@@ -1176,6 +1194,14 @@ int main() {
   invalid_texture_info = device->GetResourceAllocationInfo(0, 1, &invalid_texture_desc);
   if (invalid_texture_info.SizeInBytes != UINT64_MAX) {
     std::cerr << "allocation info accepted unsupported texture format\n";
+    cleanup();
+    return 1;
+  }
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(0x40u);
+  invalid_texture_info = device->GetResourceAllocationInfo(0, 1, &invalid_texture_desc);
+  if (invalid_texture_info.SizeInBytes != UINT64_MAX) {
+    std::cerr << "allocation info accepted unknown texture flag\n";
     cleanup();
     return 1;
   }
