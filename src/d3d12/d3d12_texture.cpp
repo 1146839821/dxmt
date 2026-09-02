@@ -43,7 +43,7 @@ PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_
   MTL_DXGI_FORMAT_DESC Format;
   HRESULT hr = MTLQueryDXGIFormat(Device, Desc.Format, Format);
   if (FAILED(hr))
-    return hr;
+    return E_INVALIDARG;
 
   InfoOut.pixel_format = Format.PixelFormat;
 

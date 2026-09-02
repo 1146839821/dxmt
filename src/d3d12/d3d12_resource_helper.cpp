@@ -324,8 +324,8 @@ IsValidBufferResourceDesc(const D3D12_RESOURCE_DESC &Desc) {
 
 HRESULT
 ValidateTextureResourceDesc(const D3D12_RESOURCE_DESC &Desc) {
-  if (!Desc.Width || Desc.Width > std::numeric_limits<UINT>::max() || !Desc.Height || !Desc.DepthOrArraySize ||
-      !Desc.SampleDesc.Count)
+  if (Desc.Format == DXGI_FORMAT_UNKNOWN || !Desc.Width || Desc.Width > std::numeric_limits<UINT>::max() ||
+      !Desc.Height || !Desc.DepthOrArraySize || !Desc.SampleDesc.Count)
     return E_INVALIDARG;
 
   switch (Desc.Dimension) {

@@ -1004,6 +1004,14 @@ int main() {
   invalid_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_STANDARD_SWIZZLE;
   if (!expect_invalid_texture_desc("unsupported standard-swizzle texture", invalid_texture_desc))
     return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Format = DXGI_FORMAT_UNKNOWN;
+  if (!expect_invalid_texture_desc("texture with unknown format", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Format = DXGI_FORMAT_AYUV;
+  if (!expect_invalid_texture_desc("texture with unsupported format", invalid_texture_desc))
+    return 1;
 
   D3D12_RESOURCE_ALLOCATION_INFO texture_info = device->GetResourceAllocationInfo(0, 1, &texture_desc);
   if (!texture_info.SizeInBytes || texture_info.SizeInBytes == UINT64_MAX ||
@@ -1027,6 +1035,14 @@ int main() {
   invalid_texture_info = device->GetResourceAllocationInfo(0, 1, &invalid_texture_desc);
   if (invalid_texture_info.SizeInBytes != UINT64_MAX) {
     std::cerr << "allocation info accepted unsupported texture layout\n";
+    cleanup();
+    return 1;
+  }
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Format = DXGI_FORMAT_AYUV;
+  invalid_texture_info = device->GetResourceAllocationInfo(0, 1, &invalid_texture_desc);
+  if (invalid_texture_info.SizeInBytes != UINT64_MAX) {
+    std::cerr << "allocation info accepted unsupported texture format\n";
     cleanup();
     return 1;
   }

@@ -50,11 +50,13 @@ without first documenting a changed contract or a regression.
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_TEXTURE_FLAGS.md`.
 - [x] Unsupported texture layout validation. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_TEXTURE_LAYOUT.md`.
+- [x] Texture format validity validation. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_TEXTURE_FORMAT.md`.
 
 ## Next Slices
 
-- [ ] Audit remaining resource helper validation paths for null, texture format,
-  range, and alignment behavior. Record each contract separately.
+- [ ] Audit remaining resource helper validation paths for null, range, and
+  alignment behavior. Record each contract separately.
 - [ ] Complete the x64 validation matrix for private and no-private builds,
   including API/shader validation where the fixture supports it.
 - [~] Real Metal sparse residency remains unavailable through the current
