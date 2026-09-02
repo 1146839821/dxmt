@@ -883,6 +883,17 @@ int main() {
     cleanup();
     return 1;
   }
+  D3D12_RESOURCE_DESC simultaneous_buffer_desc = buffer_desc;
+  simultaneous_buffer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+  D3D12_RESOURCE_ALLOCATION_INFO1 simultaneous_buffer_info1 = {};
+  D3D12_RESOURCE_ALLOCATION_INFO simultaneous_buffer_info4 =
+      device4->GetResourceAllocationInfo1(0, 1, &simultaneous_buffer_desc, &simultaneous_buffer_info1);
+  if (simultaneous_buffer_info4.SizeInBytes != UINT64_MAX || simultaneous_buffer_info1.SizeInBytes ||
+      simultaneous_buffer_info1.Offset || simultaneous_buffer_info1.Alignment) {
+    std::cerr << "allocation info accepted invalid buffer flags\n";
+    cleanup();
+    return 1;
+  }
 
   D3D12_RESOURCE_DESC texture_desc = {};
   D3D12_RESOURCE_DESC depth_desc = {};

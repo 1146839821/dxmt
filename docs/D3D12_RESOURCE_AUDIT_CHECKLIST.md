@@ -61,6 +61,9 @@ without first documenting a changed contract or a regression.
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_RESOURCE_ALIGNMENT.md`.
 - [x] Texture transfer row-pitch, slice-pitch, and BC box-alignment validation.
   See `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_RESOURCE_PITCHES.md`.
+- [x] Buffer flag validation is consistent between resource creation and
+  allocation-info queries. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_BUFFER_ALLOCATION_FLAGS.md`.
 
 ## Next Slices
 
