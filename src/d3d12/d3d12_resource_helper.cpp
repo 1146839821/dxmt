@@ -400,6 +400,13 @@ ValidateResourceHeapFlags(const D3D12_RESOURCE_DESC *pDesc, D3D12_HEAP_FLAGS Fla
 
 HRESULT
 ValidateHeapProperties(const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS Flags, bool AdapterIsNUMA) {
+  if (!pHeapProps)
+    return E_INVALIDARG;
+
+  // DXMT exposes a single adapter node. D3D12 treats zero as node 1 for single-node devices.
+  if ((pHeapProps->CreationNodeMask & ~1u) || (pHeapProps->VisibleNodeMask & ~1u))
+    return E_INVALIDARG;
+
   const auto resource_type_flags = Flags &
       (D3D12_HEAP_FLAG_DENY_BUFFERS | D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES |
        D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES);
@@ -448,7 +455,6 @@ ValidateHeapProperties(const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS
       return E_INVALIDARG;
   }
 
-  // TODO(d3d12): check NodeMask
   return S_OK;
 }
 

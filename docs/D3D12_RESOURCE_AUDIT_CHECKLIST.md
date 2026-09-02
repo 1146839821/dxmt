@@ -40,11 +40,13 @@ without first documenting a changed contract or a regression.
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_COMMITTED_HEAP_FLAGS.md`.
 - [x] Upload/readback initial-state compatibility. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_INITIAL_STATES.md`.
+- [x] Single-node heap node-mask validation. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_NODE_MASKS.md`.
 
 ## Next Slices
 
-- [ ] Audit remaining resource helper validation paths for null, range, alignment,
-  and node-mask behavior. Record each contract separately.
+- [ ] Audit remaining resource helper validation paths for null, range, and
+  alignment behavior. Record each contract separately.
 - [ ] Complete the x64 validation matrix for private and no-private builds,
   including API/shader validation where the fixture supports it.
 - [~] Real Metal sparse residency remains unavailable through the current

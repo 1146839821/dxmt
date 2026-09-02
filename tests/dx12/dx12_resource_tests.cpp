@@ -971,6 +971,37 @@ int main() {
     return 1;
   }
 
+  D3D12_HEAP_DESC zero_node_mask_desc = upload_desc;
+  zero_node_mask_desc.Properties.CreationNodeMask = 0;
+  zero_node_mask_desc.Properties.VisibleNodeMask = 0;
+  ID3D12Heap *zero_node_mask_heap = nullptr;
+  if (!CheckHR("CreateZeroNodeMaskHeap", device->CreateHeap(&zero_node_mask_desc, IID_PPV_ARGS(&zero_node_mask_heap))) ||
+      !zero_node_mask_heap) {
+    std::cerr << "zero node masks were not treated as the single device node\n";
+    cleanup();
+    return 1;
+  }
+  zero_node_mask_heap->Release();
+
+  D3D12_HEAP_DESC invalid_node_mask_desc = upload_desc;
+  void *invalid_heap_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+  invalid_node_mask_desc.Properties.CreationNodeMask = 2;
+  if (device->CreateHeap(&invalid_node_mask_desc, __uuidof(ID3D12Heap), &invalid_heap_output) != E_INVALIDARG ||
+      invalid_heap_output != nullptr) {
+    std::cerr << "unsupported creation node mask was accepted\n";
+    cleanup();
+    return 1;
+  }
+  invalid_node_mask_desc = upload_desc;
+  invalid_node_mask_desc.Properties.VisibleNodeMask = 2;
+  invalid_heap_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+  if (device->CreateHeap(&invalid_node_mask_desc, __uuidof(ID3D12Heap), &invalid_heap_output) != E_INVALIDARG ||
+      invalid_heap_output != nullptr) {
+    std::cerr << "unsupported visible node mask was accepted\n";
+    cleanup();
+    return 1;
+  }
+
   D3D12_HEAP_PROPERTIES readback_properties = {};
   readback_properties.Type = D3D12_HEAP_TYPE_READBACK;
   readback_properties.CreationNodeMask = 1;
