@@ -284,11 +284,14 @@ ValidateResourceStates(D3D12_RESOURCE_STATES State, const D3D12_HEAP_PROPERTIES 
   }
 
   switch (pHeapProps->Type) {
-  case D3D12_HEAP_TYPE_READBACK: {
-    if (State != D3D12_RESOURCE_STATE_COPY_DEST && State != D3D12_RESOURCE_STATE_COMMON)
+  case D3D12_HEAP_TYPE_UPLOAD:
+    if (State != D3D12_RESOURCE_STATE_GENERIC_READ)
       return E_INVALIDARG;
     break;
-  }
+  case D3D12_HEAP_TYPE_READBACK:
+    if (State != D3D12_RESOURCE_STATE_COPY_DEST)
+      return E_INVALIDARG;
+    break;
   default:
     break;
   }

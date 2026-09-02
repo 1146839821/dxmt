@@ -984,6 +984,27 @@ int main() {
     return 1;
   }
 
+  invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreateCommittedResource(
+          &upload_properties, D3D12_HEAP_FLAG_NONE, &committed1_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+          IID_PPV_ARGS(&invalid_committed)
+      ) != E_INVALIDARG ||
+      invalid_committed != nullptr) {
+    std::cerr << "upload resource accepted a non-GENERIC_READ initial state\n";
+    cleanup();
+    return 1;
+  }
+  invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreateCommittedResource(
+          &readback_properties, D3D12_HEAP_FLAG_NONE, &committed1_desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+          IID_PPV_ARGS(&invalid_committed)
+      ) != E_INVALIDARG ||
+      invalid_committed != nullptr) {
+    std::cerr << "readback resource accepted a non-COPY_DEST initial state\n";
+    cleanup();
+    return 1;
+  }
+
   D3D12_RESOURCE_DESC copy_tiles_buffer_desc = buffer_desc;
   copy_tiles_buffer_desc.Width = 2ull * D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
   if (!CheckHR(
@@ -1505,6 +1526,23 @@ int main() {
     std::cerr << "allocation size=" << buffer_info.SizeInBytes << " alignment=" << buffer_info.Alignment
               << " upload heap size=" << upload_desc.SizeInBytes << " readback heap size=" << readback_desc.SizeInBytes
               << "\n";
+    cleanup();
+    return 1;
+  }
+
+  invalid_placed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreatePlacedResource(upload_heap, 0, &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                   IID_PPV_ARGS(&invalid_placed)) != E_INVALIDARG ||
+      invalid_placed != nullptr) {
+    std::cerr << "placed upload resource accepted a non-GENERIC_READ initial state\n";
+    cleanup();
+    return 1;
+  }
+  invalid_placed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreatePlacedResource(readback_heap, 0, &buffer_desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                   IID_PPV_ARGS(&invalid_placed)) != E_INVALIDARG ||
+      invalid_placed != nullptr) {
+    std::cerr << "placed readback resource accepted a non-COPY_DEST initial state\n";
     cleanup();
     return 1;
   }
