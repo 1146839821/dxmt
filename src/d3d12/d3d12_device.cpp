@@ -1087,6 +1087,9 @@ public:
     hr = ValidateHeapProperties(pHeapProps, HeapFlags, advertise_numa_);
     if (FAILED(hr))
       return hr;
+    hr = ValidateResourceHeapFlags(pDesc, HeapFlags);
+    if (FAILED(hr))
+      return hr;
     hr = ValidateResourceDescs(pDesc, pHeapProps);
     if (FAILED(hr))
       return hr;
@@ -1135,24 +1138,8 @@ public:
     auto d3d12heap = static_cast<MTLD3D12Heap *>(pHeap);
     auto heap_desc = d3d12heap->GetDesc();
 
-    const bool is_buffer = pDesc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
-    const bool is_render_target_or_depth =
-        pDesc->Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
-    const auto resource_type_flags = heap_desc.Flags &
-        (D3D12_HEAP_FLAG_DENY_BUFFERS | D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES |
-         D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES);
-    if (resource_type_flags == D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS && !is_buffer) {
-      ERR("CreatePlacedResource: heap only allows buffers");
-      return E_INVALIDARG;
-    }
-    if (resource_type_flags == D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES &&
-        (is_buffer || is_render_target_or_depth)) {
-      ERR("CreatePlacedResource: heap only allows non-RT/DS textures");
-      return E_INVALIDARG;
-    }
-    if (resource_type_flags == D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES &&
-        (is_buffer || !is_render_target_or_depth)) {
-      ERR("CreatePlacedResource: heap only allows RT/DS textures");
+    if (FAILED(ValidateResourceHeapFlags(pDesc, heap_desc.Flags))) {
+      ERR("CreatePlacedResource: heap/resource type mismatch");
       return E_INVALIDARG;
     }
 

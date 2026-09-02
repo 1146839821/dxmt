@@ -372,6 +372,30 @@ ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERT
 }
 
 HRESULT
+ValidateResourceHeapFlags(const D3D12_RESOURCE_DESC *pDesc, D3D12_HEAP_FLAGS Flags) {
+  if (!pDesc)
+    return E_INVALIDARG;
+
+  const auto resource_type_flags = Flags &
+      (D3D12_HEAP_FLAG_DENY_BUFFERS | D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES |
+       D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES);
+  const bool is_buffer = pDesc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
+  const bool is_render_target_or_depth =
+      pDesc->Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+
+  switch (resource_type_flags) {
+  case D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS:
+    return is_buffer ? S_OK : E_INVALIDARG;
+  case D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES:
+    return !is_buffer && !is_render_target_or_depth ? S_OK : E_INVALIDARG;
+  case D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES:
+    return !is_buffer && is_render_target_or_depth ? S_OK : E_INVALIDARG;
+  default:
+    return S_OK;
+  }
+}
+
+HRESULT
 ValidateHeapProperties(const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS Flags, bool AdapterIsNUMA) {
   const auto resource_type_flags = Flags &
       (D3D12_HEAP_FLAG_DENY_BUFFERS | D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES |

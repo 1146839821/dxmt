@@ -36,12 +36,11 @@ without first documenting a changed contract or a regression.
   `src/d3d12/d3d12_device.cpp` and is covered by the resource runner.
 - [x] Reserved RT/DS texture mapping compatibility. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_HEAP_MAPPING.md`.
+- [x] Committed-resource heap flag compatibility. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_COMMITTED_HEAP_FLAGS.md`.
 
 ## Next Slices
 
-- [ ] Audit committed-resource heap flags against resource dimension and RT/DS
-  usage. Keep the validation in one shared resource/heap seam and add negative
-  tests before changing allocation code.
 - [ ] Audit remaining resource helper validation paths for null, range, state,
   alignment, and node-mask behavior. Record each contract separately.
 - [ ] Complete the x64 validation matrix for private and no-private builds,

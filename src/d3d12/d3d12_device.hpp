@@ -494,6 +494,8 @@ HRESULT ValidateResourceStates(D3D12_RESOURCE_STATES State, const D3D12_HEAP_PRO
 
 HRESULT ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERTIES *pHeapProps);
 
+HRESULT ValidateResourceHeapFlags(const D3D12_RESOURCE_DESC *pDesc, D3D12_HEAP_FLAGS Flags);
+
 HRESULT ValidateHeapProperties(const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS Flags, bool AdapterIsNUMA);
 
 D3D12_BOX GetResourceExtent(const D3D12_RESOURCE_DESC &Desc, UINT MipSlice);

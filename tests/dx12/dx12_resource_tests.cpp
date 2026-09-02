@@ -48,6 +48,7 @@ int main() {
   ID3D12Heap *reserved_rt_texture_heap = nullptr;
   ID3D12Resource *source_zero = nullptr;
   ID3D12Resource *source_placed = nullptr;
+  ID3D12Resource *invalid_committed = nullptr;
   ID3D12Resource *invalid_placed = nullptr;
   ID3D12Resource *destination = nullptr;
   ID3D12Resource *alias_before = nullptr;
@@ -192,6 +193,8 @@ int main() {
       info_queue->Release();
     if (source_placed)
       source_placed->Release();
+    if (invalid_committed)
+      invalid_committed->Release();
     if (invalid_placed)
       invalid_placed->Release();
     if (source_zero)
@@ -502,6 +505,27 @@ int main() {
           "CreateReservedTextureHeap",
           device->CreateHeap(&reserved_texture_heap_desc, IID_PPV_ARGS(&reserved_texture_heap))
       )) {
+    cleanup();
+    return 1;
+  }
+
+  invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreateCommittedResource(
+          &reserved_texture_heap_desc.Properties, D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES, &committed1_desc,
+          D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&invalid_committed)
+      ) != E_INVALIDARG ||
+      invalid_committed != nullptr) {
+    std::cerr << "buffer was accepted by an RT/DS-only committed heap\n";
+    cleanup();
+    return 1;
+  }
+  invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreateCommittedResource(
+          &reserved_texture_heap_desc.Properties, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS, &reserved_texture_desc,
+          D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&invalid_committed)
+      ) != E_INVALIDARG ||
+      invalid_committed != nullptr) {
+    std::cerr << "texture was accepted by a buffer-only committed heap\n";
     cleanup();
     return 1;
   }
