@@ -1437,6 +1437,17 @@ int main() {
     cleanup();
     return 1;
   }
+  invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  const auto invalid_resource_state = static_cast<D3D12_RESOURCE_STATES>(0x80000000u);
+  if (device->CreateCommittedResource(
+          &committed1_properties, D3D12_HEAP_FLAG_NONE, &committed1_desc, invalid_resource_state, nullptr,
+          IID_PPV_ARGS(&invalid_committed)
+      ) != E_INVALIDARG ||
+      invalid_committed != nullptr) {
+    std::cerr << "resource creation accepted an unknown initial state bit\n";
+    cleanup();
+    return 1;
+  }
 
   D3D12_RESOURCE_DESC copy_tiles_buffer_desc = buffer_desc;
   copy_tiles_buffer_desc.Width = 2ull * D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;

@@ -89,6 +89,10 @@ without first documenting a changed contract or a regression.
 - [x] `CopyTiles` rejects missing resources, unsupported or conflicting
   direction flags, and unaligned buffer offsets while recording. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_COPY_TILES_INPUTS.md`.
+- [x] Resource initial-state validation rejects unknown state bits before
+  resource creation while preserving the existing exclusive-write and heap
+  compatibility rules. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_RESOURCE_STATES.md`.
 
 ## Next Slices
 
