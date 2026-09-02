@@ -2089,6 +2089,68 @@ int main() {
     return 1;
   }
 
+  if (!CheckHR("MapCopyTilesDefaultDirectionReadback", copy_tiles_remap_readback->Map(
+                                                           0, nullptr,
+                                                           reinterpret_cast<void **>(&mapped_copy_tiles_remap_readback)))) {
+    cleanup();
+    return 1;
+  }
+  std::memset(mapped_copy_tiles_remap_readback, 0xcd, static_cast<size_t>(copy_tiles_buffer_desc.Width));
+  copy_tiles_remap_readback->Unmap(0, nullptr);
+
+  UINT default_direction_tile_count = 1;
+  queue->UpdateTileMappings(
+      reserved_texture_copy, 1, &boxed_coordinate, &valid_copy_region, reserved_texture_heap, 1, nullptr,
+      &boxed_heap_offset, &default_direction_tile_count, D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  if (!CheckHR("ResetForCopyTilesDefaultDirection", list->Reset(allocator, nullptr))) {
+    cleanup();
+    return 1;
+  }
+  D3D12_RESOURCE_BARRIER default_direction_barrier = {};
+  default_direction_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  default_direction_barrier.Transition.pResource = reserved_texture_copy;
+  default_direction_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+  default_direction_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  default_direction_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &default_direction_barrier);
+  list->CopyTiles(
+      reserved_texture_copy, &boxed_coordinate, &valid_copy_region, copy_tiles_remap_readback, 0,
+      D3D12_TILE_COPY_FLAG_NONE
+  );
+  if (!CheckHR("CloseCopyTilesDefaultDirection", list->Close())) {
+    cleanup();
+    return 1;
+  }
+  ID3D12CommandList *default_direction_lists[] = {list};
+  queue->ExecuteCommandLists(1, default_direction_lists);
+  if (!CheckHR("SignalCopyTilesDefaultDirection", queue->Signal(fence, 6)) ||
+      !CheckHR("SetEventOnCopyTilesDefaultDirection", fence->SetEventOnCompletion(6, event))) {
+    cleanup();
+    return 1;
+  }
+  WaitForSingleObject(event, INFINITE);
+
+  if (!CheckHR("MapCopyTilesDefaultDirectionResult", copy_tiles_remap_readback->Map(
+                                                            0, nullptr,
+                                                            reinterpret_cast<void **>(&mapped_copy_tiles_remap_readback)))) {
+    cleanup();
+    return 1;
+  }
+  bool copy_tiles_default_direction_matches = true;
+  for (UINT i = 0; i < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; i++) {
+    if (mapped_copy_tiles_remap_readback[i] != static_cast<BYTE>(i ^ 0x5a)) {
+      copy_tiles_default_direction_matches = false;
+      break;
+    }
+  }
+  copy_tiles_remap_readback->Unmap(0, nullptr);
+  if (!copy_tiles_default_direction_matches) {
+    std::cerr << "CopyTiles FLAG_NONE did not copy tiled resource data to the buffer\n";
+    cleanup();
+    return 1;
+  }
+
   if (!CheckHR("MapDepthReadback", depth_readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped_depth)))) {
     cleanup();
     return 1;

@@ -2602,20 +2602,8 @@ public:
       return;
     }
 
-    bool buffer_to_tiled = direction_flags == D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE;
-    bool tiled_to_buffer = direction_flags == D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER;
-    if (!direction_flags) {
-      const auto tiled_state = tiled->GetSubresourceState(0);
-      const auto linear_state = linear->GetSubresourceState(0);
-      buffer_to_tiled = (tiled_state & D3D12_RESOURCE_STATE_COPY_DEST) &&
-                        (linear_state & D3D12_RESOURCE_STATE_COPY_SOURCE);
-      tiled_to_buffer = (tiled_state & D3D12_RESOURCE_STATE_COPY_SOURCE) &&
-                        (linear_state & D3D12_RESOURCE_STATE_COPY_DEST);
-      if (buffer_to_tiled == tiled_to_buffer) {
-        recording_failed_ = true;
-        return;
-      }
-    }
+    const bool buffer_to_tiled = direction_flags == D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE;
+    const bool tiled_to_buffer = !buffer_to_tiled;
 
     allocator_->InvalidateCurrentPass();
     auto copy_tiles = allocator_->AllocatePass<CopyTilesEncoderData>();
