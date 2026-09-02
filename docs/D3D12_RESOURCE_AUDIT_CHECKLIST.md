@@ -96,6 +96,9 @@ without first documenting a changed contract or a regression.
 - [x] Resource descriptor validation rejects unknown resource flag bits across
   creation and allocation-info paths. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_RESOURCE_FLAGS.md`.
+- [x] Texture sample descriptors reject non-zero MSAA quality and sample counts
+  unsupported by the Metal device in creation and allocation-info paths. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_SAMPLE_DESC.md`.
 
 ## Next Slices
 

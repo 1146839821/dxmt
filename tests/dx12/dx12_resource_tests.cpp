@@ -1070,6 +1070,17 @@ int main() {
   if (!expect_invalid_texture_desc("3D multisample texture", invalid_texture_desc))
     return 1;
   invalid_texture_desc = texture_desc;
+  invalid_texture_desc.SampleDesc.Count = 4;
+  invalid_texture_desc.SampleDesc.Quality = 1;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  if (!expect_invalid_texture_desc("MSAA texture with non-zero quality", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.SampleDesc.Count = 3;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  if (!expect_invalid_texture_desc("texture with unsupported sample count", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
   invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
   if (!expect_invalid_texture_desc("texture with render-target and depth-stencil flags", invalid_texture_desc))
     return 1;
@@ -1194,6 +1205,25 @@ int main() {
   invalid_texture_info = device->GetResourceAllocationInfo(0, 1, &invalid_texture_desc);
   if (invalid_texture_info.SizeInBytes != UINT64_MAX) {
     std::cerr << "allocation info accepted unsupported texture format\n";
+    cleanup();
+    return 1;
+  }
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.SampleDesc.Count = 4;
+  invalid_texture_desc.SampleDesc.Quality = 1;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  invalid_texture_info = device->GetResourceAllocationInfo(0, 1, &invalid_texture_desc);
+  if (invalid_texture_info.SizeInBytes != UINT64_MAX) {
+    std::cerr << "allocation info accepted non-zero MSAA quality\n";
+    cleanup();
+    return 1;
+  }
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.SampleDesc.Count = 3;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  invalid_texture_info = device->GetResourceAllocationInfo(0, 1, &invalid_texture_desc);
+  if (invalid_texture_info.SizeInBytes != UINT64_MAX) {
+    std::cerr << "allocation info accepted unsupported sample count\n";
     cleanup();
     return 1;
   }

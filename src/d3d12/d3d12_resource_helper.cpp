@@ -357,7 +357,7 @@ ValidateTextureResourceDesc(const D3D12_RESOURCE_DESC &Desc) {
   case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
     if (Desc.SampleDesc.Count == 1 && Desc.SampleDesc.Quality != 0)
       return E_INVALIDARG;
-    if (Desc.SampleDesc.Count > 1 && Desc.MipLevels != 1)
+    if (Desc.SampleDesc.Count > 1 && (Desc.MipLevels != 1 || Desc.SampleDesc.Quality != 0))
       return E_INVALIDARG;
     break;
   case D3D12_RESOURCE_DIMENSION_TEXTURE3D:

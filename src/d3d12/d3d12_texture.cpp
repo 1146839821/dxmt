@@ -99,6 +99,9 @@ PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_
   HRESULT hr = MTLQueryDXGIFormat(Device, Desc.Format, Format);
   if (FAILED(hr))
     return E_INVALIDARG;
+  if (Desc.SampleDesc.Count > 1 &&
+      (Desc.SampleDesc.Quality || !Device.supportsTextureSampleCount(Desc.SampleDesc.Count)))
+    return E_INVALIDARG;
 
   InfoOut.pixel_format = Format.PixelFormat;
 
