@@ -1317,7 +1317,11 @@ public:
       if (needs_heap) {
         D3D12_HEAP_DESC heap_desc = {};
         pHeap->GetDesc(&heap_desc);
-        if (heap_desc.Flags & D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES)
+        const auto incompatible_heap_flag =
+            (desc_.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
+                ? D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES
+                : D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES;
+        if (heap_desc.Flags & incompatible_heap_flag)
           return E_INVALIDARG;
         if (!heap_desc.SizeInBytes)
           return E_INVALIDARG;

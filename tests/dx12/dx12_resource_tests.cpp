@@ -41,9 +41,11 @@ int main() {
   ID3D12Heap *readback_heap = nullptr;
   ID3D12Heap *unaligned_heap = nullptr;
   ID3D12Heap *texture_heap = nullptr;
+  ID3D12Heap *rt_texture_heap = nullptr;
   ID3D12Heap *alias_heap = nullptr;
   ID3D12Heap *reserved_heap = nullptr;
   ID3D12Heap *reserved_texture_heap = nullptr;
+  ID3D12Heap *reserved_rt_texture_heap = nullptr;
   ID3D12Resource *source_zero = nullptr;
   ID3D12Resource *source_placed = nullptr;
   ID3D12Resource *invalid_placed = nullptr;
@@ -51,6 +53,7 @@ int main() {
   ID3D12Resource *alias_before = nullptr;
   ID3D12Resource *alias_after = nullptr;
   ID3D12Resource *placed_texture = nullptr;
+  ID3D12Resource *rt_placed_texture = nullptr;
   ID3D12Resource *bc_texture = nullptr;
   ID3D12Resource *bc_upload = nullptr;
   ID3D12Resource *bc_readback = nullptr;
@@ -78,12 +81,14 @@ int main() {
   ID3D12Resource *reserved_texture_copy = nullptr;
   ID3D12Resource *reserved_texture_v2 = nullptr;
   ID3D12Resource *reserved_texture_mips = nullptr;
+  ID3D12Resource *reserved_rt_texture = nullptr;
   ID3D12Resource *copy_tiles_upload = nullptr;
   ID3D12Resource *copy_tiles_readback = nullptr;
   ID3D12Resource *copy_tiles_mips_readback = nullptr;
   ID3D12Resource *copy_tiles_remap_readback = nullptr;
   ID3D12Resource *copy_tiles_texture_upload = nullptr;
   ID3D12Resource *copy_tiles_texture_readback = nullptr;
+  ID3D12Resource *copy_tiles_rt_texture_readback = nullptr;
   ID3D12GraphicsCommandList2 *list2 = nullptr;
   HANDLE event = nullptr;
   HANDLE multiple_event = nullptr;
@@ -115,6 +120,8 @@ int main() {
       reserved_texture_v2->Release();
     if (reserved_texture_mips)
       reserved_texture_mips->Release();
+    if (reserved_rt_texture)
+      reserved_rt_texture->Release();
     if (copy_tiles_readback)
       copy_tiles_readback->Release();
     if (copy_tiles_upload)
@@ -127,6 +134,8 @@ int main() {
       copy_tiles_texture_readback->Release();
     if (copy_tiles_texture_upload)
       copy_tiles_texture_upload->Release();
+    if (copy_tiles_rt_texture_readback)
+      copy_tiles_rt_texture_readback->Release();
     if (list)
       list->Release();
     if (destination)
@@ -137,6 +146,8 @@ int main() {
       alias_before->Release();
     if (placed_texture)
       placed_texture->Release();
+    if (rt_placed_texture)
+      rt_placed_texture->Release();
     if (bc_readback)
       bc_readback->Release();
     if (bc_upload)
@@ -191,12 +202,16 @@ int main() {
       unaligned_heap->Release();
     if (texture_heap)
       texture_heap->Release();
+    if (rt_texture_heap)
+      rt_texture_heap->Release();
     if (alias_heap)
       alias_heap->Release();
     if (reserved_heap)
       reserved_heap->Release();
     if (reserved_texture_heap)
       reserved_texture_heap->Release();
+    if (reserved_rt_texture_heap)
+      reserved_rt_texture_heap->Release();
     if (upload_heap)
       upload_heap->Release();
     if (allocator)
@@ -486,6 +501,32 @@ int main() {
   if (!CheckHR(
           "CreateReservedTextureHeap",
           device->CreateHeap(&reserved_texture_heap_desc, IID_PPV_ARGS(&reserved_texture_heap))
+      )) {
+    cleanup();
+    return 1;
+  }
+
+  D3D12_RESOURCE_DESC reserved_rt_texture_desc = reserved_texture_desc;
+  reserved_rt_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  if (!CheckHR(
+          "CreateReservedRenderTargetTexture",
+          device->CreateReservedResource(
+              &reserved_rt_texture_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource),
+              reinterpret_cast<void **>(&reserved_rt_texture)
+          )
+      ) ||
+      !reserved_rt_texture) {
+    std::cerr << "CreateReservedRenderTargetTexture did not create a reserved texture\n";
+    cleanup();
+    return 1;
+  }
+
+  D3D12_HEAP_DESC reserved_rt_texture_heap_desc = reserved_texture_heap_desc;
+  reserved_rt_texture_heap_desc.SizeInBytes = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+  reserved_rt_texture_heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES;
+  if (!CheckHR(
+          "CreateReservedRenderTargetTextureHeap",
+          device->CreateHeap(&reserved_rt_texture_heap_desc, IID_PPV_ARGS(&reserved_rt_texture_heap))
       )) {
     cleanup();
     return 1;
@@ -985,6 +1026,16 @@ int main() {
     cleanup();
     return 1;
   }
+  if (!CheckHR(
+          "CreateCopyTilesRenderTargetTextureReadback",
+          device->CreateCommittedResource(
+              &readback_properties, D3D12_HEAP_FLAG_NONE, &copy_tiles_texture_buffer_desc,
+              D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&copy_tiles_rt_texture_readback)
+          )
+      )) {
+    cleanup();
+    return 1;
+  }
   BYTE *mapped_copy_tiles_texture_upload = nullptr;
   if (!CheckHR(
           "MapCopyTilesTextureUpload",
@@ -1361,6 +1412,36 @@ int main() {
     return 1;
   }
 
+  D3D12_HEAP_DESC rt_texture_heap_desc = texture_heap_desc;
+  rt_texture_heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES;
+  if (!CheckHR("CreateRTTextureHeap", device->CreateHeap(&rt_texture_heap_desc, IID_PPV_ARGS(&rt_texture_heap)))) {
+    cleanup();
+    return 1;
+  }
+  D3D12_RESOURCE_DESC rt_texture_desc = texture_desc;
+  rt_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  if (!CheckHR("CreatePlacedRenderTargetTexture",
+               device->CreatePlacedResource(rt_texture_heap, 0, &rt_texture_desc,
+                                             D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                                             IID_PPV_ARGS(&rt_placed_texture)))) {
+    cleanup();
+    return 1;
+  }
+  if (device->CreatePlacedResource(rt_texture_heap, 0, &texture_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                   IID_PPV_ARGS(&invalid_placed)) != E_INVALIDARG ||
+      invalid_placed != nullptr) {
+    std::cerr << "non-RT texture was accepted on an RT/DS-only heap\n";
+    cleanup();
+    return 1;
+  }
+  if (device->CreatePlacedResource(texture_heap, 0, &rt_texture_desc, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                                   IID_PPV_ARGS(&invalid_placed)) != E_INVALIDARG ||
+      invalid_placed != nullptr) {
+    std::cerr << "RT texture was accepted on a non-RT/DS-only heap\n";
+    cleanup();
+    return 1;
+  }
+
   D3D12_HEAP_DESC alias_heap_desc = {};
   alias_heap_desc.SizeInBytes = AlignUp(buffer_info.SizeInBytes, buffer_info.Alignment);
   alias_heap_desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -1506,10 +1587,6 @@ int main() {
   list->CopyTiles(
       reserved_resource, &tile_coordinate, &tile_region, copy_tiles_readback, 0,
       D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
-  );
-  queue->UpdateTileMappings(
-      reserved_resource, 1, &tile_coordinate, &tile_region, nullptr, 1, &null_range_flags, nullptr, nullptr,
-      D3D12_TILE_MAPPING_FLAG_NONE
   );
   D3D12_TILED_RESOURCE_COORDINATE unmapped_tile_coordinate = tile_coordinate;
   unmapped_tile_coordinate.X = 1;
@@ -2147,6 +2224,70 @@ int main() {
   copy_tiles_remap_readback->Unmap(0, nullptr);
   if (!copy_tiles_default_direction_matches) {
     std::cerr << "CopyTiles FLAG_NONE did not copy tiled resource data to the buffer\n";
+    cleanup();
+    return 1;
+  }
+
+  UINT reserved_rt_heap_tile_offset = 0;
+  queue->UpdateTileMappings(
+      reserved_rt_texture, 1, &tile_coordinate, &tile_region, reserved_rt_texture_heap, 1, nullptr,
+      &reserved_rt_heap_tile_offset, nullptr, D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  if (!CheckHR("ResetForReservedRenderTargetCopyTiles", list->Reset(allocator, nullptr))) {
+    cleanup();
+    return 1;
+  }
+  D3D12_RESOURCE_BARRIER reserved_rt_texture_barrier = {};
+  reserved_rt_texture_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  reserved_rt_texture_barrier.Transition.pResource = reserved_rt_texture;
+  reserved_rt_texture_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+  reserved_rt_texture_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+  reserved_rt_texture_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &reserved_rt_texture_barrier);
+  list->CopyTiles(
+      reserved_rt_texture, &tile_coordinate, &tile_region, copy_tiles_upload, 0,
+      D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE
+  );
+  reserved_rt_texture_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  reserved_rt_texture_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  list->ResourceBarrier(1, &reserved_rt_texture_barrier);
+  list->CopyTiles(
+      reserved_rt_texture, &tile_coordinate, &tile_region, copy_tiles_rt_texture_readback, 0,
+      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+  if (!CheckHR("CloseReservedRenderTargetCopyTiles", list->Close())) {
+    cleanup();
+    return 1;
+  }
+  ID3D12CommandList *reserved_rt_lists[] = {list};
+  queue->ExecuteCommandLists(1, reserved_rt_lists);
+  if (!CheckHR("SignalReservedRenderTargetCopyTiles", queue->Signal(fence, 7)) ||
+      !CheckHR("SetEventOnReservedRenderTargetCopyTiles", fence->SetEventOnCompletion(7, event))) {
+    cleanup();
+    return 1;
+  }
+  WaitForSingleObject(event, INFINITE);
+
+  BYTE *mapped_copy_tiles_rt_texture_readback = nullptr;
+  if (!CheckHR(
+          "MapReservedRenderTargetCopyTiles",
+          copy_tiles_rt_texture_readback->Map(
+              0, nullptr, reinterpret_cast<void **>(&mapped_copy_tiles_rt_texture_readback)
+          )
+      )) {
+    cleanup();
+    return 1;
+  }
+  bool copy_tiles_rt_texture_matches = true;
+  for (UINT i = 0; i < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; i++) {
+    if (mapped_copy_tiles_rt_texture_readback[i] != static_cast<BYTE>(i ^ 0x5a)) {
+      copy_tiles_rt_texture_matches = false;
+      break;
+    }
+  }
+  copy_tiles_rt_texture_readback->Unmap(0, nullptr);
+  if (!copy_tiles_rt_texture_matches) {
+    std::cerr << "reserved RT texture CopyTiles mapping mismatch\n";
     cleanup();
     return 1;
   }
