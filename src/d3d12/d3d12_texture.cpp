@@ -35,6 +35,8 @@ PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_
   InfoOut = {};
   if (FAILED(ValidateTextureResourceDesc(Desc)))
     return E_INVALIDARG;
+  if (FAILED(ValidateTextureResourceFlags(Desc)))
+    return E_INVALIDARG;
 
   MTL_DXGI_FORMAT_DESC Format;
   HRESULT hr = MTLQueryDXGIFormat(Device, Desc.Format, Format);

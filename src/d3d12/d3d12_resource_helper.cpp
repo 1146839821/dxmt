@@ -362,6 +362,28 @@ ValidateTextureResourceDesc(const D3D12_RESOURCE_DESC &Desc) {
 }
 
 HRESULT
+ValidateTextureResourceFlags(const D3D12_RESOURCE_DESC &Desc) {
+  const auto flags = Desc.Flags;
+  const bool allow_render_target = flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  const bool allow_depth_stencil = flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+  const bool allow_unordered_access = flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  const bool allow_simultaneous_access = flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+
+  if (allow_render_target && allow_depth_stencil)
+    return E_INVALIDARG;
+  if (allow_depth_stencil && (allow_unordered_access || allow_simultaneous_access))
+    return E_INVALIDARG;
+  if ((flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) && !allow_depth_stencil)
+    return E_INVALIDARG;
+  if (Desc.SampleDesc.Count > 1 && (allow_unordered_access || allow_simultaneous_access))
+    return E_INVALIDARG;
+  if (Desc.Layout == D3D12_TEXTURE_LAYOUT_ROW_MAJOR &&
+      (allow_render_target || allow_depth_stencil || allow_unordered_access))
+    return E_INVALIDARG;
+  return S_OK;
+}
+
+HRESULT
 ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERTIES *pHeapProps) {
   if (!pDesc || !pHeapProps)
     return E_INVALIDARG;
@@ -403,6 +425,8 @@ ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERT
   case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
   case D3D12_RESOURCE_DIMENSION_TEXTURE3D: {
     if (FAILED(ValidateTextureResourceDesc(*pDesc)))
+      return E_INVALIDARG;
+    if (FAILED(ValidateTextureResourceFlags(*pDesc)))
       return E_INVALIDARG;
     if (pDesc->Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR)
       break;

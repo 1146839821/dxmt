@@ -46,10 +46,12 @@ without first documenting a changed contract or a regression.
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_BUFFER_DESC.md`.
 - [x] Texture dimension, mip, sample, and zero-size validation. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_TEXTURE_DESC.md`.
+- [x] Texture resource-flag combination validation. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_TEXTURE_FLAGS.md`.
 
 ## Next Slices
 
-- [ ] Audit remaining resource helper validation paths for null, texture flags,
+- [ ] Audit remaining resource helper validation paths for null, texture format,
   layout, range, and alignment behavior. Record each contract separately.
 - [ ] Complete the x64 validation matrix for private and no-private builds,
   including API/shader validation where the fixture supports it.

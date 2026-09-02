@@ -965,6 +965,33 @@ int main() {
   invalid_texture_desc.SampleDesc.Count = 2;
   if (!expect_invalid_texture_desc("3D multisample texture", invalid_texture_desc))
     return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+  if (!expect_invalid_texture_desc("texture with render-target and depth-stencil flags", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  if (!expect_invalid_texture_desc("texture with depth-stencil and UAV flags", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+  if (!expect_invalid_texture_desc("texture denying shader access without depth-stencil", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.SampleDesc.Count = 4;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  if (!expect_invalid_texture_desc("MSAA texture with UAV flag", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.SampleDesc.Count = 4;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+  if (!expect_invalid_texture_desc("MSAA texture with simultaneous-access flag", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER;
+  if (!expect_invalid_texture_desc("row-major texture with UAV flag", invalid_texture_desc))
+    return 1;
 
   D3D12_RESOURCE_ALLOCATION_INFO texture_info = device->GetResourceAllocationInfo(0, 1, &texture_desc);
   if (!texture_info.SizeInBytes || texture_info.SizeInBytes == UINT64_MAX ||
