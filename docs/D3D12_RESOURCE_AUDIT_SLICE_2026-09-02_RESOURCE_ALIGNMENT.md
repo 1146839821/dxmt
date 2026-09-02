@@ -1,6 +1,6 @@
 # Resource Audit Slice: Resource Alignment
 
-Status: Complete
+Status: Partial
 Date: 2026-09-02
 Branch: `feat/d3d12`
 Checklist: `D3D12_RESOURCE_AUDIT_CHECKLIST.md`
@@ -19,13 +19,19 @@ render-target or depth-stencil capability flag.
 - Texture alignment accepts only zero, 4 KiB, 64 KiB, or 4 MiB in the valid
   dimension/sample combinations.
 - A 4 KiB texture must use UNKNOWN layout, be non-MSAA, lack render-target and
-  depth-stencil flags, and have its most-detailed mip allocation no larger than
-  64 KiB.
-- An MSAA texture may use 64 KiB alignment only when its most-detailed mip
-  allocation is no larger than 4 MiB.
+  depth-stencil flags, and pass the current small-resource size check.
+- An MSAA texture may use 64 KiB alignment only when it passes the current
+  small-resource size check.
 - MSAA textures must carry either the render-target or depth-stencil flag.
 - Invalid alignment descriptions return `E_INVALIDARG`; allocation queries
   return the existing invalid allocation sentinel.
+
+The current size check calls Metal's `heapTextureSizeAndAlign` for a
+single-slice, single-mip texture. That is a backend-dependent approximation;
+it is not the architecture-independent D3D12 estimate required by the small
+resource contract. This slice must not be treated as complete D3D12 alignment
+compatibility until that estimator is implemented or the limitation is
+explicitly accepted by the feature boundary.
 
 ## Changed Files
 
@@ -47,4 +53,6 @@ render-target or depth-stencil capability flag.
 
 ## Follow-Up
 
-Continue with row-pitch and slice-pitch contracts for texture transfer APIs.
+Replace the Metal-dependent small-resource size check with an
+architecture-independent D3D12-compatible estimator, or keep this item
+partial with the limitation visible in the audit ledger.

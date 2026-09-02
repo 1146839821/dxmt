@@ -423,6 +423,18 @@ int main() {
     cleanup();
     return 1;
   }
+  D3D12_RESOURCE_DESC cross_reserved_desc = committed1_desc;
+  cross_reserved_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER;
+  void *cross_reserved_output = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+  if (device->CreateReservedResource(
+          &cross_reserved_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource),
+          &cross_reserved_output
+      ) != E_INVALIDARG ||
+      cross_reserved_output != nullptr) {
+    std::cerr << "reserved cross-adapter resource was accepted\n";
+    cleanup();
+    return 1;
+  }
   D3D12_RESOURCE_DESC reserved_desc = {};
   reserved_resource->GetDesc(&reserved_desc);
   D3D12_HEAP_PROPERTIES reserved_heap_properties = {};
@@ -1061,6 +1073,27 @@ int main() {
   if (!expect_invalid_texture_desc("oversized MSAA texture with default alignment", invalid_texture_desc))
     return 1;
 
+  D3D12_RESOURCE_DESC cross_buffer_desc = buffer_desc;
+  cross_buffer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER;
+  D3D12_RESOURCE_DESC cross_texture_desc = texture_desc;
+  cross_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER;
+  auto expect_invalid_cross_adapter_committed = [&](const char *name, const D3D12_RESOURCE_DESC &desc) {
+    invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+    const HRESULT hr = device->CreateCommittedResource(
+        &committed1_properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+        IID_PPV_ARGS(&invalid_committed)
+    );
+    if (hr != E_INVALIDARG || invalid_committed != nullptr) {
+      std::cerr << name << " was accepted: 0x" << std::hex << static_cast<unsigned long>(hr) << std::dec << "\n";
+      cleanup();
+      return false;
+    }
+    return true;
+  };
+  if (!expect_invalid_cross_adapter_committed("committed cross-adapter buffer", cross_buffer_desc) ||
+      !expect_invalid_cross_adapter_committed("committed cross-adapter texture", cross_texture_desc))
+    return 1;
+
   D3D12_RESOURCE_ALLOCATION_INFO texture_info = device->GetResourceAllocationInfo(0, 1, &texture_desc);
   if (!texture_info.SizeInBytes || texture_info.SizeInBytes == UINT64_MAX ||
       texture_info.Alignment < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) {
@@ -1169,7 +1202,71 @@ int main() {
   upload_desc.SizeInBytes = AlignUp(buffer_info.Alignment + buffer_info.SizeInBytes, buffer_info.Alignment);
   upload_desc.Properties = upload_properties;
   upload_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+  auto expect_heap_parity = [&](const char *name, const D3D12_HEAP_DESC &desc, HRESULT expected) {
+    constexpr uintptr_t sentinel_value = 1;
+    void *create_heap_output = reinterpret_cast<void *>(sentinel_value);
+    const HRESULT create_heap_hr = device->CreateHeap(&desc, __uuidof(ID3D12Heap), &create_heap_output);
+    const bool create_heap_created = create_heap_output && create_heap_output != reinterpret_cast<void *>(sentinel_value);
+    if (create_heap_created)
+      reinterpret_cast<ID3D12Heap *>(create_heap_output)->Release();
+
+    void *create_heap1_output = reinterpret_cast<void *>(sentinel_value);
+    const HRESULT create_heap1_hr =
+        device4->CreateHeap1(&desc, nullptr, __uuidof(ID3D12Heap), &create_heap1_output);
+    const bool create_heap1_created =
+        create_heap1_output && create_heap1_output != reinterpret_cast<void *>(sentinel_value);
+    if (create_heap1_created)
+      reinterpret_cast<ID3D12Heap *>(create_heap1_output)->Release();
+
+    if (create_heap_hr != expected || create_heap1_hr != create_heap_hr || create_heap_output != nullptr ||
+        create_heap1_output != nullptr || create_heap_created || create_heap1_created) {
+      std::cerr << name << " CreateHeap/CreateHeap1 parity mismatch: CreateHeap=0x" << std::hex
+                << static_cast<unsigned long>(create_heap_hr) << " CreateHeap1=0x"
+                << static_cast<unsigned long>(create_heap1_hr) << std::dec << "\n";
+      cleanup();
+      return false;
+    }
+    return true;
+  };
+
+  D3D12_HEAP_DESC heap_parity_desc = upload_desc;
+  heap_parity_desc.Properties.CreationNodeMask = 2;
+  if (!expect_heap_parity("invalid creation node mask", heap_parity_desc, E_INVALIDARG))
+    return 1;
+  heap_parity_desc = upload_desc;
+  heap_parity_desc.Properties.VisibleNodeMask = 2;
+  if (!expect_heap_parity("invalid visible node mask", heap_parity_desc, E_INVALIDARG))
+    return 1;
+  heap_parity_desc = upload_desc;
+  heap_parity_desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+  heap_parity_desc.Properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
+  if (!expect_heap_parity("invalid CPU page property", heap_parity_desc, E_INVALIDARG))
+    return 1;
+  heap_parity_desc = upload_desc;
+  heap_parity_desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+  heap_parity_desc.Properties.MemoryPoolPreference = D3D12_MEMORY_POOL_L1;
+  if (!expect_heap_parity("invalid memory pool", heap_parity_desc, E_INVALIDARG))
+    return 1;
+  heap_parity_desc = upload_desc;
+  heap_parity_desc.Flags = D3D12_HEAP_FLAG_SHARED;
+  if (!expect_heap_parity("unsupported shared heap", heap_parity_desc, E_NOTIMPL))
+    return 1;
+  heap_parity_desc = upload_desc;
+  heap_parity_desc.Flags = D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER;
+  if (!expect_heap_parity("unsupported cross-adapter heap", heap_parity_desc, E_NOTIMPL))
+    return 1;
+
   if (!CheckHR("CreateUploadHeap", device->CreateHeap(&upload_desc, IID_PPV_ARGS(&upload_heap)))) {
+    cleanup();
+    return 1;
+  }
+  invalid_placed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreatePlacedResource(
+          upload_heap, 0, &cross_buffer_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+          IID_PPV_ARGS(&invalid_placed)
+      ) != E_INVALIDARG ||
+      invalid_placed != nullptr) {
+    std::cerr << "placed cross-adapter buffer was accepted\n";
     cleanup();
     return 1;
   }
@@ -1545,7 +1642,7 @@ int main() {
 
   texture3d_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
   texture3d_desc.Width = 1;
-  texture3d_desc.Height = 1;
+  texture3d_desc.Height = 2;
   texture3d_desc.DepthOrArraySize = 2;
   texture3d_desc.MipLevels = 1;
   texture3d_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -1563,12 +1660,14 @@ int main() {
     cleanup();
     return 1;
   }
-  D3D12_BOX texture3d_transfer_box = {0, 0, 0, 1, 1, 2};
-  BYTE texture3d_transfer_data[8] = {};
+  D3D12_BOX texture3d_transfer_box = {0, 0, 0, 1, 2, 2};
+  BYTE texture3d_transfer_data[32] = {};
   if (texture3d->WriteToSubresource(0, &texture3d_transfer_box, texture3d_transfer_data, 3, 4) != E_INVALIDARG ||
       texture3d->WriteToSubresource(0, &texture3d_transfer_box, texture3d_transfer_data, 4, 3) != E_INVALIDARG ||
+      texture3d->WriteToSubresource(0, &texture3d_transfer_box, texture3d_transfer_data, 8, 15) != E_INVALIDARG ||
       texture3d->ReadFromSubresource(texture3d_transfer_data, 3, 4, 0, &texture3d_transfer_box) != E_INVALIDARG ||
-      texture3d->ReadFromSubresource(texture3d_transfer_data, 4, 3, 0, &texture3d_transfer_box) != E_INVALIDARG) {
+      texture3d->ReadFromSubresource(texture3d_transfer_data, 4, 3, 0, &texture3d_transfer_box) != E_INVALIDARG ||
+      texture3d->ReadFromSubresource(texture3d_transfer_data, 8, 15, 0, &texture3d_transfer_box) != E_INVALIDARG) {
     std::cerr << "3D texture accepted an undersized row or slice pitch\n";
     cleanup();
     return 1;
@@ -1708,6 +1807,16 @@ int main() {
   texture_heap_desc.Properties.VisibleNodeMask = 1;
   texture_heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
   if (!CheckHR("CreateTextureHeap", device->CreateHeap(&texture_heap_desc, IID_PPV_ARGS(&texture_heap)))) {
+    cleanup();
+    return 1;
+  }
+  invalid_placed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreatePlacedResource(
+          texture_heap, 0, &cross_texture_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+          IID_PPV_ARGS(&invalid_placed)
+      ) != E_INVALIDARG ||
+      invalid_placed != nullptr) {
+    std::cerr << "placed cross-adapter texture was accepted\n";
     cleanup();
     return 1;
   }
@@ -1916,12 +2025,6 @@ int main() {
       reserved_resource, 1, &reserved_resource_second_tile, &tile_region, reserved_heap, 1,
       &reserved_resource_reuse_range_flag, &heap_tile_offset, &reserved_resource_reuse_tile_count,
       D3D12_TILE_MAPPING_FLAG_NONE
-  );
-  queue->CopyTileMappings(
-      reserved_resource_copy, nullptr, reserved_resource, nullptr, nullptr, D3D12_TILE_MAPPING_FLAG_NONE
-  );
-  queue->CopyTileMappings(
-      reserved_resource_copy, nullptr, reserved_resource, nullptr, &tile_region, D3D12_TILE_MAPPING_FLAG_NONE
   );
 
   D3D12_RESOURCE_BARRIER reserved_copy_barrier = {};
@@ -2670,6 +2773,74 @@ int main() {
     cleanup();
     return 1;
   }
+
+  queue->UpdateTileMappings(
+      reserved_resource_copy, 1, &tile_coordinate, &tile_region, reserved_heap, 1, nullptr, &heap_tile_offset,
+      nullptr, D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  UINT copy_tile_mappings_test_fence = 8;
+  auto expect_copy_tile_mappings_no_mutation = [&](const char *name,
+                                                    const D3D12_TILED_RESOURCE_COORDINATE *dst_coordinate,
+                                                    const D3D12_TILED_RESOURCE_COORDINATE *src_coordinate,
+                                                    const D3D12_TILE_REGION_SIZE *region_size) {
+    queue->UpdateTileMappings(
+        reserved_resource, 1, &tile_coordinate, &tile_region, nullptr, 1, &null_range_flags, nullptr, nullptr,
+        D3D12_TILE_MAPPING_FLAG_NONE
+    );
+    queue->CopyTileMappings(
+        reserved_resource, dst_coordinate, reserved_resource_copy, src_coordinate, region_size,
+        D3D12_TILE_MAPPING_FLAG_NONE
+    );
+    if (!CheckHR(name, list->Reset(allocator, nullptr))) {
+      cleanup();
+      return false;
+    }
+    list->CopyTiles(
+        reserved_resource, &tile_coordinate, &tile_region, copy_tiles_readback,
+        D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+        D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+    );
+    if (!CheckHR(name, list->Close())) {
+      cleanup();
+      return false;
+    }
+    ID3D12CommandList *copy_tile_mappings_lists[] = {list};
+    queue->ExecuteCommandLists(1, copy_tile_mappings_lists);
+    if (!CheckHR(name, queue->Signal(fence, copy_tile_mappings_test_fence)) ||
+        !CheckHR(name, fence->SetEventOnCompletion(copy_tile_mappings_test_fence, event))) {
+      cleanup();
+      return false;
+    }
+    WaitForSingleObject(event, INFINITE);
+    ++copy_tile_mappings_test_fence;
+
+    BYTE *mapping_readback = nullptr;
+    if (!CheckHR(name, copy_tiles_readback->Map(0, nullptr, reinterpret_cast<void **>(&mapping_readback)))) {
+      cleanup();
+      return false;
+    }
+    bool unchanged = true;
+    for (UINT i = 0; i < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; i++) {
+      if (mapping_readback[D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT + i] != 0) {
+        unchanged = false;
+        break;
+      }
+    }
+    copy_tiles_readback->Unmap(0, nullptr);
+    if (!unchanged) {
+      std::cerr << name << " modified a resource mapping\n";
+      cleanup();
+      return false;
+    }
+    return true;
+  };
+  if (!expect_copy_tile_mappings_no_mutation("null CopyTileMappings destination coordinate", nullptr, &tile_coordinate,
+                                             &tile_region) ||
+      !expect_copy_tile_mappings_no_mutation("null CopyTileMappings source coordinate", &tile_coordinate, nullptr,
+                                             &tile_region) ||
+      !expect_copy_tile_mappings_no_mutation("null CopyTileMappings region size", &tile_coordinate, &tile_coordinate,
+                                             nullptr))
+    return 1;
 
   if (!CheckHR("MapDepthReadback", depth_readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped_depth)))) {
     cleanup();

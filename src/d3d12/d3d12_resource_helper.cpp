@@ -473,6 +473,18 @@ ValidateResourceHeapFlags(const D3D12_RESOURCE_DESC *pDesc, D3D12_HEAP_FLAGS Fla
 }
 
 HRESULT
+ValidateResourceHeapCompatibility(const D3D12_RESOURCE_DESC *pDesc, D3D12_HEAP_FLAGS Flags) {
+  if (!pDesc)
+    return E_INVALIDARG;
+
+  if ((pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER) &&
+      !(Flags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER))
+    return E_INVALIDARG;
+
+  return S_OK;
+}
+
+HRESULT
 ValidateHeapProperties(const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS Flags, bool AdapterIsNUMA) {
   if (!pHeapProps)
     return E_INVALIDARG;

@@ -270,6 +270,10 @@ public:
       WARN("D3D12 CopyTileMappings received a resource from another device");
       return;
     }
+    if (!dst_region_start_coordinate || !src_region_start_coordinate || !region_size) {
+      WARN("D3D12 CopyTileMappings received a null required tile-region parameter");
+      return;
+    }
 
     std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
     auto hr = static_cast<MTLD3D12Resource *>(dst_resource)->CopyTileMappingsFrom(

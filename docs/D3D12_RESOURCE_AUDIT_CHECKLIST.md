@@ -56,17 +56,23 @@ without first documenting a changed contract or a regression.
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_NULL_OUTPUTS.md`.
 - [x] Texture subresource and data-pointer range validation. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_RESOURCE_RANGES.md`.
-- [x] Texture resource alignment validation, including 4 KiB small resources
-  and 64 KiB-aligned small MSAA resources. See
+- [~] Texture resource alignment form and eligibility validation, including 4 KiB
+  small resources and 64 KiB-aligned small MSAA resources. Small-resource size
+  eligibility is currently a Metal-dependent approximation, not the
+  architecture-independent D3D12 estimate. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_RESOURCE_ALIGNMENT.md`.
-- [x] Texture transfer row-pitch, slice-pitch, and BC box-alignment validation.
-  See `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_RESOURCE_PITCHES.md`.
+- [x] Texture transfer row-pitch, depth-slice-pitch, and BC box-alignment
+  validation. See `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_RESOURCE_PITCHES.md`.
 - [x] Buffer flag validation is consistent between resource creation and
   allocation-info queries. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_BUFFER_ALLOCATION_FLAGS.md`.
-- [x] Tiled copy parameter validation covers required `CopyTileMappings` region
-  sizes and `CopyTiles` start coordinates. See
+- [x] Tiled copy parameter validation covers all required `CopyTileMappings`
+  coordinates and region sizes plus `CopyTiles` start coordinates. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_TILED_COPY_CONTRACTS.md`.
+- [x] Heap validation is shared by `CreateHeap` and `CreateHeap1`, and
+  cross-adapter resource flags are checked against heap flags at resource
+  creation boundaries. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_HEAP_COMPATIBILITY.md`.
 
 ## Next Slices
 

@@ -7,14 +7,15 @@ Checklist: `D3D12_RESOURCE_AUDIT_CHECKLIST.md`
 
 ## Problem
 
-`CopyTileMappings` treated a missing `pRegionSize` as a request to copy the
-whole resource even though the D3D12 API requires that parameter. `CopyTiles`
-also accepted a missing tile-region start coordinate and substituted zeroes.
+`CopyTileMappings` accepted missing source or destination coordinates and a
+missing `pRegionSize`, while `CopyTiles` accepted a missing tile-region start
+coordinate and substituted zeroes.
 
 ## Implemented Contract
 
-- `CopyTileMappings` rejects a null `pRegionSize` for both reserved buffer and
-  reserved texture resources.
+- `CopyTileMappings` rejects null source coordinates, destination coordinates,
+  or `pRegionSize` at the command-queue entry point and in both reserved
+  resource helpers.
 - `CopyTiles` rejects a null `pTileRegionStartCoordinate` while retaining the
   existing deferred tile-resolution behavior for valid recorded commands.
 - Invalid tiled-copy calls do not mutate tile mappings or produce a copy.
@@ -22,13 +23,16 @@ also accepted a missing tile-region start coordinate and substituted zeroes.
 ## Changed Files
 
 - `src/d3d12/d3d12_buffer.cpp`
-  - Rejects missing `CopyTileMappings` region sizes.
+  - Rejects missing `CopyTileMappings` coordinates and region sizes.
 - `src/d3d12/d3d12_texture.cpp`
-  - Rejects missing `CopyTileMappings` region sizes.
+  - Rejects missing `CopyTileMappings` coordinates and region sizes.
+- `src/d3d12/d3d12_command_queue.cpp`
+  - Rejects missing required `CopyTileMappings` parameters before dispatch.
 - `src/d3d12/d3d12_command_list.cpp`
   - Rejects missing `CopyTiles` start coordinates.
 - `tests/dx12/dx12_resource_tests.cpp`
-  - Covers null mapping regions and null `CopyTiles` coordinates.
+  - Covers null mapping coordinates and regions with no-mutation checks, plus
+    null `CopyTiles` coordinates.
 - `docs/D3D12_RESOURCE_AUDIT_CHECKLIST.md`
   - Recorded this completed tiled-copy contract slice.
 

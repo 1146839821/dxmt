@@ -1087,6 +1087,9 @@ public:
     hr = ValidateHeapProperties(pHeapProps, HeapFlags, advertise_numa_);
     if (FAILED(hr))
       return hr;
+    hr = ValidateResourceHeapCompatibility(pDesc, HeapFlags);
+    if (FAILED(hr))
+      return hr;
     hr = ValidateResourceHeapFlags(pDesc, HeapFlags);
     if (FAILED(hr))
       return hr;
@@ -1138,6 +1141,10 @@ public:
     auto d3d12heap = static_cast<MTLD3D12Heap *>(pHeap);
     auto heap_desc = d3d12heap->GetDesc();
 
+    if (FAILED(ValidateResourceHeapCompatibility(pDesc, heap_desc.Flags))) {
+      ERR("CreatePlacedResource: resource/heap compatibility mismatch");
+      return E_INVALIDARG;
+    }
     if (FAILED(ValidateResourceHeapFlags(pDesc, heap_desc.Flags))) {
       ERR("CreatePlacedResource: heap/resource type mismatch");
       return E_INVALIDARG;
@@ -1194,6 +1201,8 @@ public:
   ) {
     InitReturnPtr(resource);
     if (!pDesc)
+      return E_INVALIDARG;
+    if (FAILED(ValidateResourceHeapCompatibility(pDesc, D3D12_HEAP_FLAG_NONE)))
       return E_INVALIDARG;
     switch (pDesc->Dimension) {
     case D3D12_RESOURCE_DIMENSION_BUFFER:
@@ -1263,7 +1272,7 @@ public:
     InitReturnPtr(ppHeap);
     if (pSession)
       return E_NOTIMPL;
-    return dxmt::CreateHeap(this, pDesc, riid, ppHeap);
+    return CreateHeap(pDesc, riid, ppHeap);
   }
 
   HRESULT STDMETHODCALLTYPE

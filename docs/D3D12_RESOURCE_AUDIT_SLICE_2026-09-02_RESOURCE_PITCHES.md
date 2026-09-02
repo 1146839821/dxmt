@@ -15,7 +15,8 @@ the texel block extent when validating box alignment.
 ## Implemented Contract
 
 - Row pitch must contain the requested row's source or destination data.
-- 3D slice pitch must contain all rows in one requested depth slice.
+- 3D slice pitch must be at least the supplied row pitch multiplied by the
+  number of rows in one requested depth slice, including row padding.
 - Non-3D slice pitch remains ignored, matching the single-slice API use.
 - BC formats use 4x4 texel blocks and their format-specific bytes-per-block
   value for pitch calculation.
@@ -27,9 +28,11 @@ the texel block extent when validating box alignment.
 
 - `src/d3d12/d3d12_texture.cpp`
   - Added shared transfer-layout and pitch validation.
+  - Relates 3D slice-pitch validation to the caller-supplied row pitch.
   - Corrected BC block alignment and row-size calculation.
 - `tests/dx12/dx12_resource_tests.cpp`
-  - Added 2D, BC, and 3D undersized-pitch regression cases.
+  - Added 2D, BC, and 3D undersized-pitch regression cases, including a padded
+    row pitch with an insufficient depth pitch.
 - `docs/D3D12_RESOURCE_AUDIT_CHECKLIST.md`
   - Recorded this completed pitch slice.
 

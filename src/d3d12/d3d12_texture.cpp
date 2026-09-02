@@ -76,7 +76,11 @@ ValidateTextureTransferPitch(
   TextureTransferLayout Layout = {};
   if (!GetTextureTransferLayout(Format, Box, FullBox, Layout) || RowPitch < Layout.row_size)
     return false;
-  return !Is3D || SlicePitch >= Layout.slice_size;
+  if (!Is3D)
+    return true;
+  if (Layout.row_count > UINT64_MAX / RowPitch)
+    return false;
+  return SlicePitch >= RowPitch * Layout.row_count;
 }
 
 HRESULT
@@ -1434,7 +1438,8 @@ public:
       const D3D12_TILED_RESOURCE_COORDINATE *pSrcRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
       D3D12_TILE_MAPPING_FLAGS Flags
   ) override {
-    if (!reserved_ || !pSourceResource || !pRegionSize || !pSourceResource->IsReservedTexture() ||
+    if (!reserved_ || !pSourceResource || !pDstRegionStartCoordinate || !pSrcRegionStartCoordinate || !pRegionSize ||
+        !pSourceResource->IsReservedTexture() ||
         !IsSameDevice(device_, pSourceResource) || (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD))
       return E_INVALIDARG;
 
