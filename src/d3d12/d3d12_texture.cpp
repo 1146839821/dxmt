@@ -600,6 +600,10 @@ public:
   ) {
     if (reserved_ || !texture)
       return E_INVALIDARG;
+    if (!pSrcData || !desc_.MipLevels ||
+        DstSubresource / desc_.MipLevels >=
+            (desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1u : desc_.DepthOrArraySize))
+      return E_INVALIDARG;
     if (desc_.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D)
       SrcSlicePitch = 0;
     if (desc_.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
@@ -638,6 +642,10 @@ public:
       void *pDstData, UINT DstRowPitch, UINT DstSlicePitch, UINT SrcSubresource, const D3D12_BOX *pSrcBox
   ) {
     if (reserved_ || !texture)
+      return E_INVALIDARG;
+    if (!pDstData || !desc_.MipLevels ||
+        SrcSubresource / desc_.MipLevels >=
+            (desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1u : desc_.DepthOrArraySize))
       return E_INVALIDARG;
     if (desc_.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D)
       DstSlicePitch = 0;

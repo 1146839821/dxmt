@@ -1657,6 +1657,17 @@ int main() {
     cleanup();
     return 1;
   }
+  BYTE texture_subresource_data[4] = {};
+  if (placed_texture->WriteToSubresource(1, nullptr, texture_subresource_data, sizeof(texture_subresource_data), 0) !=
+          E_INVALIDARG ||
+      placed_texture->ReadFromSubresource(texture_subresource_data, sizeof(texture_subresource_data), 0, 1, nullptr) !=
+          E_INVALIDARG ||
+      placed_texture->WriteToSubresource(0, nullptr, nullptr, 0, 0) != E_INVALIDARG ||
+      placed_texture->ReadFromSubresource(nullptr, 0, 0, 0, nullptr) != E_INVALIDARG) {
+    std::cerr << "texture subresource range or null data was accepted\n";
+    cleanup();
+    return 1;
+  }
 
   D3D12_HEAP_DESC rt_texture_heap_desc = texture_heap_desc;
   rt_texture_heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES;
