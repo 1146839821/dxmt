@@ -583,6 +583,8 @@ public:
 
   virtual D3D12_RESOURCE_DESC *STDMETHODCALLTYPE
   GetDesc(D3D12_RESOURCE_DESC *__ret) {
+    if (!__ret)
+      return nullptr;
     *__ret = desc_;
     return __ret;
   };

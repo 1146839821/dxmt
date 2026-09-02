@@ -1289,6 +1289,10 @@ public:
     constexpr UINT64 default_alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
     constexpr UINT64 msaa_alignment = D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;
     *__ret = {0, default_alignment};
+    if (pAllocationInfos) {
+      for (UINT i = 0; i < ResourceDestCount; i++)
+        pAllocationInfos[i] = {};
+    }
     if ((VisibleMask & ~1u) || (ResourceDestCount && !pDescs)) {
       *__ret = {UINT64_MAX, UINT64_MAX};
       return __ret;

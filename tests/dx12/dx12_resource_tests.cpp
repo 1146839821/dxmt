@@ -357,6 +357,11 @@ int main() {
     cleanup();
     return 1;
   }
+  if (committed1_resource->GetDesc(nullptr) != nullptr) {
+    std::cerr << "buffer GetDesc accepted a null output\n";
+    cleanup();
+    return 1;
+  }
 
   auto expect_invalid_buffer_desc = [&](const char *name, const D3D12_RESOURCE_DESC &desc) {
     invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
@@ -383,6 +388,16 @@ int main() {
   invalid_buffer_desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
   if (!expect_invalid_buffer_desc("buffer with small-resource alignment", invalid_buffer_desc))
     return 1;
+  D3D12_RESOURCE_ALLOCATION_INFO1 invalid_buffer_info1 = {1, 1, 1};
+  D3D12_RESOURCE_ALLOCATION_INFO invalid_buffer_allocation_info = device4->GetResourceAllocationInfo1(
+      0, 1, &invalid_buffer_desc, &invalid_buffer_info1
+  );
+  if (invalid_buffer_allocation_info.SizeInBytes != UINT64_MAX || invalid_buffer_info1.Offset ||
+      invalid_buffer_info1.SizeInBytes || invalid_buffer_info1.Alignment) {
+    std::cerr << "invalid allocation info leaked per-resource output\n";
+    cleanup();
+    return 1;
+  }
 
   if (!CheckHR(
           "CreateReservedResource",
@@ -1634,6 +1649,11 @@ int main() {
   if (!CheckHR("CreatePlacedTexture",
                 device->CreatePlacedResource(texture_heap, 0, &texture_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                               IID_PPV_ARGS(&placed_texture)))) {
+    cleanup();
+    return 1;
+  }
+  if (placed_texture->GetDesc(nullptr) != nullptr) {
+    std::cerr << "texture GetDesc accepted a null output\n";
     cleanup();
     return 1;
   }
