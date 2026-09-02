@@ -345,6 +345,8 @@ IsValidBufferResourceDesc(const D3D12_RESOURCE_DESC &Desc) {
          Desc.SampleDesc.Count == 1 && Desc.SampleDesc.Quality == 0 && Desc.Layout == D3D12_TEXTURE_LAYOUT_ROW_MAJOR &&
          (!Desc.Alignment || Desc.Alignment == D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) &&
          !(Desc.Flags & ~kKnownResourceFlags) &&
+         !(Desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
+                         D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) &&
          !(Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS);
 }
 

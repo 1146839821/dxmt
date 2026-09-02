@@ -102,6 +102,9 @@ without first documenting a changed contract or a regression.
 - [x] Heap creation rejects unknown heap flag bits consistently through
   `CreateHeap` and `CreateHeap1`. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_HEAP_FLAGS.md`.
+- [x] Buffer resource descriptors reject texture-only flags consistently in
+  creation and allocation-info paths. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_BUFFER_FLAGS.md`.
 
 ## Next Slices
 

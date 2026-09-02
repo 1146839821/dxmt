@@ -396,6 +396,18 @@ int main() {
   if (!expect_invalid_buffer_desc("buffer with unknown resource flag", invalid_buffer_desc))
     return 1;
   invalid_buffer_desc = committed1_desc;
+  invalid_buffer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  if (!expect_invalid_buffer_desc("buffer with render-target flag", invalid_buffer_desc))
+    return 1;
+  invalid_buffer_desc = committed1_desc;
+  invalid_buffer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+  if (!expect_invalid_buffer_desc("buffer with depth-stencil flag", invalid_buffer_desc))
+    return 1;
+  invalid_buffer_desc = committed1_desc;
+  invalid_buffer_desc.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+  if (!expect_invalid_buffer_desc("buffer with deny-shader-resource flag", invalid_buffer_desc))
+    return 1;
+  invalid_buffer_desc = committed1_desc;
   invalid_buffer_desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
   if (!expect_invalid_buffer_desc("buffer with small-resource alignment", invalid_buffer_desc))
     return 1;
@@ -969,6 +981,18 @@ int main() {
   if (simultaneous_buffer_info4.SizeInBytes != UINT64_MAX || simultaneous_buffer_info1.SizeInBytes ||
       simultaneous_buffer_info1.Offset || simultaneous_buffer_info1.Alignment) {
     std::cerr << "allocation info accepted invalid buffer flags\n";
+    cleanup();
+    return 1;
+  }
+  D3D12_RESOURCE_DESC texture_only_buffer_desc = buffer_desc;
+  texture_only_buffer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  D3D12_RESOURCE_ALLOCATION_INFO1 texture_only_buffer_info1 = {1, 1, 1};
+  D3D12_RESOURCE_ALLOCATION_INFO texture_only_buffer_info4 = device4->GetResourceAllocationInfo1(
+      0, 1, &texture_only_buffer_desc, &texture_only_buffer_info1
+  );
+  if (texture_only_buffer_info4.SizeInBytes != UINT64_MAX || texture_only_buffer_info1.SizeInBytes ||
+      texture_only_buffer_info1.Offset || texture_only_buffer_info1.Alignment) {
+    std::cerr << "allocation info accepted a texture-only buffer flag\n";
     cleanup();
     return 1;
   }
