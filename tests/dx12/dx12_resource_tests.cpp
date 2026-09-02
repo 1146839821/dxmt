@@ -1404,6 +1404,10 @@ int main() {
   heap_parity_desc.Flags = D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER;
   if (!expect_heap_parity("unsupported cross-adapter heap", heap_parity_desc, E_NOTIMPL))
     return 1;
+  heap_parity_desc = upload_desc;
+  heap_parity_desc.Flags = static_cast<D3D12_HEAP_FLAGS>(0x2u);
+  if (!expect_heap_parity("unknown heap flag", heap_parity_desc, E_INVALIDARG))
+    return 1;
 
   if (!CheckHR("CreateUploadHeap", device->CreateHeap(&upload_desc, IID_PPV_ARGS(&upload_heap)))) {
     cleanup();

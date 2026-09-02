@@ -99,6 +99,9 @@ without first documenting a changed contract or a regression.
 - [x] Texture sample descriptors reject non-zero MSAA quality and sample counts
   unsupported by the Metal device in creation and allocation-info paths. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_SAMPLE_DESC.md`.
+- [x] Heap creation rejects unknown heap flag bits consistently through
+  `CreateHeap` and `CreateHeap1`. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_HEAP_FLAGS.md`.
 
 ## Next Slices
 
