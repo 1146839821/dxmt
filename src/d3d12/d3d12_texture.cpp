@@ -140,19 +140,26 @@ PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_
         (Desc.SampleDesc.Count == 1 || Desc.Alignment != D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT))
       return E_INVALIDARG;
 
-    if (Desc.Alignment == D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) {
-      // Small alignment is only valid for a single non-RT/DS, unknown-layout mip.
-      if (Desc.Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN ||
-          Desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) ||
-          Desc.SampleDesc.Count > 1)
-        return E_INVALIDARG;
-
+    if (Desc.Alignment == D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT ||
+        (Desc.SampleDesc.Count > 1 && Desc.Alignment == D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)) {
       WMTTextureInfo info_one_slice = InfoOut;
       info_one_slice.mipmap_level_count = 1;
       info_one_slice.array_length = 1;
       auto size_and_align = Device.heapTextureSizeAndAlign(info_one_slice);
-      if (size_and_align.size > D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)
+
+      if (Desc.Alignment == D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) {
+        // 4 KiB alignment is only valid for a single non-RT/DS, unknown-layout mip.
+        if (Desc.Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN ||
+            Desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) ||
+            Desc.SampleDesc.Count > 1)
+          return E_INVALIDARG;
+        if (!size_and_align.size || size_and_align.size > D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)
+          return E_INVALIDARG;
+      } else if (!size_and_align.size ||
+                 size_and_align.size > D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT) {
+        // MSAA may use 64 KiB alignment only when its most-detailed mip fits in 4 MiB.
         return E_INVALIDARG;
+      }
     }
   }
 

@@ -383,6 +383,8 @@ ValidateTextureResourceFlags(const D3D12_RESOURCE_DESC &Desc) {
     return E_INVALIDARG;
   if (Desc.SampleDesc.Count > 1 && (allow_unordered_access || allow_simultaneous_access))
     return E_INVALIDARG;
+  if (Desc.SampleDesc.Count > 1 && !(allow_render_target || allow_depth_stencil))
+    return E_INVALIDARG;
   if (Desc.Layout == D3D12_TEXTURE_LAYOUT_ROW_MAJOR &&
       (allow_render_target || allow_depth_stencil || allow_unordered_access))
     return E_INVALIDARG;

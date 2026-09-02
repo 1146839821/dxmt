@@ -1027,6 +1027,28 @@ int main() {
   invalid_texture_desc.Format = DXGI_FORMAT_AYUV;
   if (!expect_invalid_texture_desc("texture with unsupported format", invalid_texture_desc))
     return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Alignment = 1;
+  if (!expect_invalid_texture_desc("texture with invalid alignment", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Alignment = D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;
+  if (!expect_invalid_texture_desc("single-sample texture with MSAA alignment", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Width = 256;
+  invalid_texture_desc.Height = 256;
+  invalid_texture_desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+  if (!expect_invalid_texture_desc("oversized texture with small alignment", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Width = 1024;
+  invalid_texture_desc.Height = 1024;
+  invalid_texture_desc.SampleDesc.Count = 4;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  invalid_texture_desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+  if (!expect_invalid_texture_desc("oversized MSAA texture with default alignment", invalid_texture_desc))
+    return 1;
 
   D3D12_RESOURCE_ALLOCATION_INFO texture_info = device->GetResourceAllocationInfo(0, 1, &texture_desc);
   if (!texture_info.SizeInBytes || texture_info.SizeInBytes == UINT64_MAX ||
@@ -1058,6 +1080,17 @@ int main() {
   invalid_texture_info = device->GetResourceAllocationInfo(0, 1, &invalid_texture_desc);
   if (invalid_texture_info.SizeInBytes != UINT64_MAX) {
     std::cerr << "allocation info accepted unsupported texture format\n";
+    cleanup();
+    return 1;
+  }
+  D3D12_RESOURCE_DESC small_texture_desc = texture_desc;
+  small_texture_desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+  D3D12_RESOURCE_ALLOCATION_INFO small_texture_info =
+      device->GetResourceAllocationInfo(0, 1, &small_texture_desc);
+  if (!small_texture_info.SizeInBytes || small_texture_info.SizeInBytes == UINT64_MAX ||
+      small_texture_info.Alignment < D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) {
+    std::cerr << "invalid small texture allocation info: size=" << small_texture_info.SizeInBytes
+              << " alignment=" << small_texture_info.Alignment << "\n";
     cleanup();
     return 1;
   }
@@ -1105,6 +1138,7 @@ int main() {
   }
 
   texture_desc.SampleDesc.Count = 4;
+  texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
   D3D12_RESOURCE_ALLOCATION_INFO msaa_info = device->GetResourceAllocationInfo(0, 1, &texture_desc);
   if (!msaa_info.SizeInBytes || msaa_info.SizeInBytes == UINT64_MAX ||
       msaa_info.Alignment < D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT) {
@@ -1113,6 +1147,8 @@ int main() {
     cleanup();
     return 1;
   }
+  texture_desc.SampleDesc.Count = 1;
+  texture_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
   D3D12_HEAP_PROPERTIES upload_properties = {};
   upload_properties.Type = D3D12_HEAP_TYPE_UPLOAD;
