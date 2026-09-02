@@ -1908,6 +1908,18 @@ int main() {
       reserved_resource, 1, &tile_coordinate, &tile_region, nullptr, 1, &skip_range_flags, nullptr, nullptr,
       D3D12_TILE_MAPPING_FLAG_NONE
   );
+  D3D12_TILED_RESOURCE_COORDINATE reserved_resource_second_tile = tile_coordinate;
+  reserved_resource_second_tile.X = 1;
+  D3D12_TILE_RANGE_FLAGS reserved_resource_reuse_range_flag = D3D12_TILE_RANGE_FLAG_REUSE_SINGLE_TILE;
+  UINT reserved_resource_reuse_tile_count = 1;
+  queue->UpdateTileMappings(
+      reserved_resource, 1, &reserved_resource_second_tile, &tile_region, reserved_heap, 1,
+      &reserved_resource_reuse_range_flag, &heap_tile_offset, &reserved_resource_reuse_tile_count,
+      D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  queue->CopyTileMappings(
+      reserved_resource_copy, nullptr, reserved_resource, nullptr, nullptr, D3D12_TILE_MAPPING_FLAG_NONE
+  );
   queue->CopyTileMappings(
       reserved_resource_copy, nullptr, reserved_resource, nullptr, &tile_region, D3D12_TILE_MAPPING_FLAG_NONE
   );
@@ -1934,6 +1946,17 @@ int main() {
   unmapped_tile_coordinate.X = 1;
   list->CopyTiles(
       reserved_resource, &unmapped_tile_coordinate, &tile_region, copy_tiles_readback,
+      D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+  D3D12_RESOURCE_BARRIER reserved_resource_copy_barrier = {};
+  reserved_resource_copy_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  reserved_resource_copy_barrier.Transition.pResource = reserved_resource_copy;
+  reserved_resource_copy_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+  reserved_resource_copy_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  reserved_resource_copy_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &reserved_resource_copy_barrier);
+  list->CopyTiles(
+      reserved_resource_copy, &reserved_resource_second_tile, &tile_region, copy_tiles_readback,
       D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
   );
 
@@ -2504,6 +2527,20 @@ int main() {
   copy_tiles_remap_readback->Unmap(0, nullptr);
   if (!copy_tiles_invalid_z_preserved) {
     std::cerr << "non-zero Z boxed Texture2D CopyTiles modified the buffer\n";
+    cleanup();
+    return 1;
+  }
+
+  if (!CheckHR("ResetForCopyTilesNullCoordinate", list->Reset(allocator, nullptr))) {
+    cleanup();
+    return 1;
+  }
+  list->CopyTiles(
+      reserved_texture_mips, nullptr, &valid_copy_region, copy_tiles_remap_readback, 0,
+      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+  if (list->Close() != E_FAIL) {
+    std::cerr << "CopyTiles accepted a null tile-region start coordinate\n";
     cleanup();
     return 1;
   }

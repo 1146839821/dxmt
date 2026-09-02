@@ -2576,7 +2576,8 @@ public:
     if (!ValidateCommand(SupportsCopy(), "CopyTiles"))
       return;
 
-    if (!tiled_resource || !buffer || !tile_region_size || !IsSameDevice(device_, tiled_resource) ||
+    if (!tiled_resource || !tile_region_start_coordinate || !buffer || !tile_region_size ||
+        !IsSameDevice(device_, tiled_resource) ||
         !IsSameDevice(device_, buffer)) {
       recording_failed_ = true;
       return;

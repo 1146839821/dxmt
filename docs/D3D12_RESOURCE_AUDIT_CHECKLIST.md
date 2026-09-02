@@ -64,6 +64,9 @@ without first documenting a changed contract or a regression.
 - [x] Buffer flag validation is consistent between resource creation and
   allocation-info queries. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_BUFFER_ALLOCATION_FLAGS.md`.
+- [x] Tiled copy parameter validation covers required `CopyTileMappings` region
+  sizes and `CopyTiles` start coordinates. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_TILED_COPY_CONTRACTS.md`.
 
 ## Next Slices
 

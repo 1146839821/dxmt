@@ -550,7 +550,7 @@ public:
       const D3D12_TILED_RESOURCE_COORDINATE *pSrcRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
       D3D12_TILE_MAPPING_FLAGS Flags
   ) override {
-    if (!reserved_ || !pSourceResource || !pSourceResource->IsReservedResource() ||
+    if (!reserved_ || !pSourceResource || !pRegionSize || !pSourceResource->IsReservedResource() ||
         !IsSameDevice(device_, pSourceResource) ||
         pSourceResource->IsReservedTexture() || (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD))
       return E_INVALIDARG;
