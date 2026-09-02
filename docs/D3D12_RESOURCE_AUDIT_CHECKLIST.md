@@ -86,6 +86,9 @@ without first documenting a changed contract or a regression.
 - [x] `CopyTileMappings` rejects missing or invalid region arguments and
   unsupported flags without mutating destination mappings. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_COPY_TILE_MAPPINGS.md`.
+- [x] `CopyTiles` rejects missing resources, unsupported or conflicting
+  direction flags, and unaligned buffer offsets while recording. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_COPY_TILES_INPUTS.md`.
 
 ## Next Slices
 

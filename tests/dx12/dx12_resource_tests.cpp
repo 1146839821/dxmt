@@ -2722,6 +2722,57 @@ int main() {
     return 1;
   }
 
+  auto expect_copy_tiles_recording_failure = [&](const char *name, ID3D12Resource *tiled_resource,
+                                                  const D3D12_TILED_RESOURCE_COORDINATE *coordinate,
+                                                  const D3D12_TILE_REGION_SIZE *region_size, ID3D12Resource *buffer,
+                                                  UINT64 buffer_offset, D3D12_TILE_COPY_FLAGS flags) {
+    if (!CheckHR(name, list->Reset(allocator, nullptr))) {
+      cleanup();
+      return false;
+    }
+    list->CopyTiles(tiled_resource, coordinate, region_size, buffer, buffer_offset, flags);
+    if (list->Close() != E_FAIL) {
+      std::cerr << name << " was accepted at recording\n";
+      cleanup();
+      return false;
+    }
+    return true;
+  };
+  const auto invalid_copy_tiles_flags = static_cast<D3D12_TILE_COPY_FLAGS>(1u << 3);
+  const auto conflicting_copy_tiles_flags = static_cast<D3D12_TILE_COPY_FLAGS>(
+      D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE |
+      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+  if (!expect_copy_tiles_recording_failure(
+          "null CopyTiles tiled resource", nullptr, &boxed_coordinate, &valid_copy_region, copy_tiles_remap_readback, 0,
+          D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+      ) ||
+      !expect_copy_tiles_recording_failure(
+          "null CopyTiles tile region", reserved_texture_mips, &boxed_coordinate, nullptr, copy_tiles_remap_readback,
+          0, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+      ) ||
+      !expect_copy_tiles_recording_failure(
+          "null CopyTiles buffer", reserved_texture_mips, &boxed_coordinate, &valid_copy_region, nullptr, 0,
+          D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+      ) ||
+      !expect_copy_tiles_recording_failure(
+          "unsupported CopyTiles flags", reserved_texture_mips, &boxed_coordinate, &valid_copy_region,
+          copy_tiles_remap_readback, 0, invalid_copy_tiles_flags
+      ) ||
+      !expect_copy_tiles_recording_failure(
+          "conflicting CopyTiles directions", reserved_texture_mips, &boxed_coordinate, &valid_copy_region,
+          copy_tiles_remap_readback, 0, conflicting_copy_tiles_flags
+      ) ||
+      !expect_copy_tiles_recording_failure(
+          "unaligned CopyTiles buffer offset", reserved_texture_mips, &boxed_coordinate, &valid_copy_region,
+          copy_tiles_remap_readback, 1, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+      ) ||
+      !expect_copy_tiles_recording_failure(
+          "non-reserved CopyTiles tiled resource", depth_texture, &boxed_coordinate, &valid_copy_region,
+          copy_tiles_remap_readback, 0, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+      ))
+    return 1;
+
   if (!CheckHR("ResetForCopyTilesNullCoordinate", list->Reset(allocator, nullptr))) {
     cleanup();
     return 1;
