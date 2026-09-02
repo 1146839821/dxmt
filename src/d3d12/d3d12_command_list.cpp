@@ -2603,6 +2603,35 @@ public:
       return;
     }
 
+    std::vector<UINT> tile_indices;
+    if (FAILED(tiled->GetTileIndices(tile_region_start_coordinate, tile_region_size, tile_indices)) ||
+        tile_indices.empty()) {
+      WARN("D3D12 CopyTiles received an invalid tile region");
+      recording_failed_ = true;
+      return;
+    }
+    for (UINT tile_index : tile_indices) {
+      if (tiled->IsPackedTile(tile_index)) {
+        WARN("D3D12 CopyTiles cannot access packed mip tiles");
+        recording_failed_ = true;
+        return;
+      }
+    }
+
+    constexpr UINT64 tile_size = 64ull * 1024;
+    if (tile_indices.size() > std::numeric_limits<UINT64>::max() / tile_size) {
+      WARN("D3D12 CopyTiles tile range overflowed");
+      recording_failed_ = true;
+      return;
+    }
+    const UINT64 copy_size = static_cast<UINT64>(tile_indices.size()) * tile_size;
+    const auto linear_desc = linear->GetDesc();
+    if (buffer_offset > linear_desc.Width || copy_size > linear_desc.Width - buffer_offset) {
+      WARN("D3D12 CopyTiles received an out-of-bounds buffer range");
+      recording_failed_ = true;
+      return;
+    }
+
     const bool buffer_to_tiled = direction_flags == D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE;
     const bool tiled_to_buffer = !buffer_to_tiled;
 

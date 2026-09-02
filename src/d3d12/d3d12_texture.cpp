@@ -29,6 +29,8 @@ namespace dxmt {
 
 static std::atomic<unsigned> texture_debug_count = 0;
 static std::atomic<unsigned> texture_srv_debug_count = 0;
+static constexpr uint64_t kD3D12TileSize = 64ull * 1024;
+static constexpr UINT kD3D12PackedTile = ~static_cast<UINT>(0);
 
 struct TextureTransferLayout {
   uint64_t row_size;
@@ -334,6 +336,11 @@ class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
   bool reserved_ = false;
   D3D12_TILE_SHAPE tile_shape_ = {};
   UINT total_tile_count_ = 0;
+  UINT standard_mip_count_ = 0;
+  UINT packed_mip_count_ = 0;
+  UINT standard_tile_count_per_array_ = 0;
+  UINT packed_tile_count_per_array_ = 0;
+  UINT tiles_per_array_ = 0;
   std::vector<D3D12_SUBRESOURCE_TILING> subresource_tilings_;
 
   struct TileMapping {
@@ -452,22 +459,27 @@ public:
     hr = MTLQueryDXGIFormat(device_->GetMTLDevice(), pDesc->Format, format);
     if (FAILED(hr))
       return hr;
-    if (!GetReservedTextureTileShape(format, tile_shape_))
+    if (!format.BytesPerTexel || !GetReservedTextureTileShape(format, tile_shape_))
       return E_NOTIMPL;
 
     const uint64_t subresource_count = uint64_t(pDesc->MipLevels) * pDesc->DepthOrArraySize;
     if (!subresource_count || subresource_count > std::numeric_limits<UINT>::max())
       return E_NOTIMPL;
 
-    std::vector<D3D12_SUBRESOURCE_TILING> subresource_tilings(subresource_count);
-    uint64_t total_tiles = 0;
-    for (UINT array_slice = 0; array_slice < pDesc->DepthOrArraySize; array_slice++) {
-      for (UINT mip_slice = 0; mip_slice < pDesc->MipLevels; mip_slice++) {
-        const D3D12_BOX extent = GetResourceExtent(*pDesc, mip_slice);
-        // Packed mip tails are not represented by the logical tile mapping yet.
-        if (extent.right < tile_shape_.WidthInTexels || extent.bottom < tile_shape_.HeightInTexels)
-          return E_NOTIMPL;
+    UINT standard_mip_count = 0;
+    while (standard_mip_count < pDesc->MipLevels) {
+      const D3D12_BOX extent = GetResourceExtent(*pDesc, standard_mip_count);
+      if (extent.right < tile_shape_.WidthInTexels || extent.bottom < tile_shape_.HeightInTexels)
+        break;
+      standard_mip_count++;
+    }
+    const UINT packed_mip_count = pDesc->MipLevels - standard_mip_count;
 
+    uint64_t standard_tiles_per_array = 0;
+    uint64_t packed_mip_bytes = 0;
+    for (UINT mip_slice = 0; mip_slice < pDesc->MipLevels; mip_slice++) {
+      const D3D12_BOX extent = GetResourceExtent(*pDesc, mip_slice);
+      if (mip_slice < standard_mip_count) {
         const UINT width_in_tiles = static_cast<UINT>(
             (uint64_t(extent.right) - 1) / tile_shape_.WidthInTexels + 1
         );
@@ -478,15 +490,52 @@ public:
           return E_NOTIMPL;
 
         const uint64_t tiles_per_subresource = uint64_t(width_in_tiles) * height_in_tiles;
-        if (!tiles_per_subresource || tiles_per_subresource > std::numeric_limits<UINT>::max() - total_tiles)
+        if (!tiles_per_subresource || tiles_per_subresource > std::numeric_limits<UINT>::max() - standard_tiles_per_array)
           return E_NOTIMPL;
+        standard_tiles_per_array += tiles_per_subresource;
+        continue;
+      }
 
+      const uint64_t texel_count = uint64_t(extent.right) * extent.bottom;
+      if (!texel_count || texel_count > std::numeric_limits<uint64_t>::max() / format.BytesPerTexel)
+        return E_NOTIMPL;
+      const uint64_t mip_bytes = texel_count * format.BytesPerTexel;
+      if (mip_bytes > std::numeric_limits<uint64_t>::max() - packed_mip_bytes)
+        return E_NOTIMPL;
+      packed_mip_bytes += mip_bytes;
+    }
+
+    uint64_t packed_tiles_per_array = 0;
+    if (packed_mip_count)
+      packed_tiles_per_array = (packed_mip_bytes - 1) / kD3D12TileSize + 1;
+    if (standard_tiles_per_array > std::numeric_limits<UINT>::max() - packed_tiles_per_array)
+      return E_NOTIMPL;
+    const uint64_t tiles_per_array = standard_tiles_per_array + packed_tiles_per_array;
+    const uint64_t total_tiles = tiles_per_array * pDesc->DepthOrArraySize;
+    if (!tiles_per_array || total_tiles > std::numeric_limits<UINT>::max())
+      return E_NOTIMPL;
+
+    std::vector<D3D12_SUBRESOURCE_TILING> subresource_tilings(subresource_count);
+    for (UINT array_slice = 0; array_slice < pDesc->DepthOrArraySize; array_slice++) {
+      const uint64_t array_tile_start = uint64_t(array_slice) * tiles_per_array;
+      uint64_t standard_tile_offset = 0;
+      for (UINT mip_slice = 0; mip_slice < pDesc->MipLevels; mip_slice++) {
         auto &tiling = subresource_tilings[size_t(array_slice) * pDesc->MipLevels + mip_slice];
-        tiling.WidthInTiles = width_in_tiles;
-        tiling.HeightInTiles = static_cast<UINT16>(height_in_tiles);
+        if (mip_slice >= standard_mip_count) {
+          tiling.StartTileIndexInOverallResource = kD3D12PackedTile;
+          continue;
+        }
+
+        const D3D12_BOX extent = GetResourceExtent(*pDesc, mip_slice);
+        tiling.WidthInTiles = static_cast<UINT>(
+            (uint64_t(extent.right) - 1) / tile_shape_.WidthInTexels + 1
+        );
+        tiling.HeightInTiles = static_cast<UINT16>(
+            (uint64_t(extent.bottom) - 1) / tile_shape_.HeightInTexels + 1
+        );
         tiling.DepthInTiles = 1;
-        tiling.StartTileIndexInOverallResource = static_cast<UINT>(total_tiles);
-        total_tiles += tiles_per_subresource;
+        tiling.StartTileIndexInOverallResource = static_cast<UINT>(array_tile_start + standard_tile_offset);
+        standard_tile_offset += uint64_t(tiling.WidthInTiles) * tiling.HeightInTiles;
       }
     }
 
@@ -497,6 +546,11 @@ public:
     InitializeStateTracking(desc_, device_->GetMTLDevice());
     reserved_ = true;
     total_tile_count_ = static_cast<UINT>(total_tiles);
+    standard_mip_count_ = standard_mip_count;
+    packed_mip_count_ = packed_mip_count;
+    standard_tile_count_per_array_ = static_cast<UINT>(standard_tiles_per_array);
+    packed_tile_count_per_array_ = static_cast<UINT>(packed_tiles_per_array);
+    tiles_per_array_ = static_cast<UINT>(tiles_per_array);
     subresource_tilings_ = std::move(subresource_tilings);
     tile_mappings_.resize(total_tile_count_);
     return S_OK;
@@ -525,6 +579,26 @@ public:
         if (subresource >= subresource_tilings_.size())
           return E_INVALIDARG;
 
+        const UINT mip_levels = desc_.MipLevels;
+        const UINT array_slice = subresource / mip_levels;
+        const UINT mip_slice = subresource % mip_levels;
+        if (mip_slice >= standard_mip_count_) {
+          if (offset >= packed_tile_count_per_array_)
+            return E_INVALIDARG;
+          const uint64_t available = packed_tile_count_per_array_ - offset;
+          const uint64_t count = std::min(remaining, available);
+          const uint64_t packed_tile_start = uint64_t(array_slice) * tiles_per_array_ +
+                                             standard_tile_count_per_array_ + offset;
+          for (uint64_t tile = 0; tile < count; tile++)
+            resource_tiles.push_back(static_cast<UINT>(packed_tile_start + tile));
+          remaining -= count;
+          if (remaining) {
+            subresource = (array_slice + 1) * mip_levels;
+            offset = 0;
+          }
+          continue;
+        }
+
         const auto &tiling = subresource_tilings_[subresource];
         const uint64_t subresource_tile_count = uint64_t(tiling.WidthInTiles) * tiling.HeightInTiles;
         if (offset >= subresource_tile_count)
@@ -546,9 +620,27 @@ public:
       if (coordinate.Subresource >= subresource_tilings_.size() || coordinate.Z)
         return E_INVALIDARG;
 
+      const auto *region_size = pResourceRegionSizes ? &pResourceRegionSizes[region] : nullptr;
+      const UINT mip_levels = desc_.MipLevels;
+      const UINT array_slice = coordinate.Subresource / mip_levels;
+      const UINT mip_slice = coordinate.Subresource % mip_levels;
+      if (packed_mip_count_ && mip_slice >= standard_mip_count_) {
+        if (coordinate.X >= packed_tile_count_per_array_ || coordinate.Y || coordinate.Z)
+          return E_INVALIDARG;
+        if (!region_size) {
+          resource_tiles.push_back(
+              array_slice * tiles_per_array_ + standard_tile_count_per_array_ + coordinate.X
+          );
+          continue;
+        }
+        if (region_size->UseBox || !region_size->NumTiles ||
+            FAILED(append_linear_tiles(coordinate.Subresource, coordinate.X, region_size->NumTiles)))
+          return E_INVALIDARG;
+        continue;
+      }
+
       const auto &tiling = subresource_tilings_[coordinate.Subresource];
       const uint64_t subresource_tile_count = uint64_t(tiling.WidthInTiles) * tiling.HeightInTiles;
-      const auto *region_size = pResourceRegionSizes ? &pResourceRegionSizes[region] : nullptr;
       if (!region_size) {
         if (coordinate.X >= tiling.WidthInTiles || coordinate.Y >= tiling.HeightInTiles)
           return E_INVALIDARG;
@@ -573,11 +665,8 @@ public:
           region_size->Width > tiling.WidthInTiles - coordinate.X || region_size->Height > tiling.HeightInTiles - coordinate.Y)
         return E_INVALIDARG;
 
-      const UINT mip_levels = desc_.MipLevels;
       if (!mip_levels)
         return E_INVALIDARG;
-      const UINT array_slice = coordinate.Subresource / mip_levels;
-      const UINT mip_slice = coordinate.Subresource % mip_levels;
       if (array_slice >= desc_.DepthOrArraySize || region_size->Depth > desc_.DepthOrArraySize - array_slice)
         return E_INVALIDARG;
       for (UINT depth = 0; depth < region_size->Depth; depth++) {
@@ -1297,10 +1386,13 @@ public:
       *TotalTileCount = total_tile_count_;
     if (PackedMipInfo) {
       *PackedMipInfo = {};
-      PackedMipInfo->NumStandardMips = static_cast<UINT8>(desc_.MipLevels);
+      PackedMipInfo->NumStandardMips = static_cast<UINT8>(standard_mip_count_);
+      PackedMipInfo->NumPackedMips = static_cast<UINT8>(packed_mip_count_);
+      PackedMipInfo->NumTilesForPackedMips = packed_tile_count_per_array_;
+      PackedMipInfo->StartTileIndexInOverallResource = packed_mip_count_ ? standard_tile_count_per_array_ : 0;
     }
     if (StandardTitleShape)
-      *StandardTitleShape = tile_shape_;
+      *StandardTitleShape = standard_mip_count_ ? tile_shape_ : D3D12_TILE_SHAPE{};
     if (!SubresourceTilingCount)
       return;
 
@@ -1322,6 +1414,13 @@ public:
   bool
   IsReservedTexture() const override {
     return reserved_;
+  }
+
+  bool
+  IsPackedTile(UINT tile_index) const override {
+    if (!packed_tile_count_per_array_ || !tiles_per_array_ || tile_index >= total_tile_count_)
+      return false;
+    return tile_index % tiles_per_array_ >= standard_tile_count_per_array_;
   }
 
   HRESULT

@@ -25,6 +25,9 @@ without first documenting a changed contract or a regression.
   Existing commits: `fad8f7d`, `9503ae0`.
 - [x] Reserved texture bookkeeping, standard-mip tiling, partial tiling, and
   texture mapping. Existing commits: `9469816`, `17d86aa`.
+- [x] Reserved texture packed-mip metadata, logical tile mapping, and explicit
+  `CopyTiles` rejection for packed tiles. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_PACKED_MIPS.md`.
 - [x] Command-queue ordering and complete-submission serialization for tiled
   resource operations. Existing commits: `d756051`, `e487a63`, `8af503c`.
 - [x] Deferred tile resolution for recorded `CopyTiles` operations. Existing
@@ -69,6 +72,9 @@ without first documenting a changed contract or a regression.
 - [x] Tiled copy parameter validation covers all required `CopyTileMappings`
   coordinates and region sizes plus `CopyTiles` start coordinates. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_TILED_COPY_CONTRACTS.md`.
+- [x] `CopyTiles` validates the logical tile region and linear-buffer footprint
+  while recording, before allocating a copy encoder. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_COPY_TILES_RANGES.md`.
 - [x] Heap validation is shared by `CreateHeap` and `CreateHeap1`, and
   cross-adapter resource flags are checked against heap flags at resource
   creation boundaries. See

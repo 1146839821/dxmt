@@ -176,6 +176,11 @@ public:
     return E_NOTIMPL;
   }
 
+  virtual bool
+  IsPackedTile(UINT tile_index) const {
+    return false;
+  }
+
   virtual HRESULT
   UpdateTileMappings(
       UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,

@@ -82,6 +82,7 @@ int main() {
   ID3D12Resource *reserved_texture_copy = nullptr;
   ID3D12Resource *reserved_texture_v2 = nullptr;
   ID3D12Resource *reserved_texture_mips = nullptr;
+  ID3D12Resource *reserved_texture_packed_mips = nullptr;
   ID3D12Resource *reserved_rt_texture = nullptr;
   ID3D12Resource *copy_tiles_upload = nullptr;
   ID3D12Resource *copy_tiles_readback = nullptr;
@@ -121,6 +122,8 @@ int main() {
       reserved_texture_v2->Release();
     if (reserved_texture_mips)
       reserved_texture_mips->Release();
+    if (reserved_texture_packed_mips)
+      reserved_texture_packed_mips->Release();
     if (reserved_rt_texture)
       reserved_rt_texture->Release();
     if (copy_tiles_readback)
@@ -613,18 +616,63 @@ int main() {
     return 1;
   }
 
-  D3D12_RESOURCE_DESC unsupported_reserved_texture_desc = reserved_texture_desc;
-  unsupported_reserved_texture_desc.MipLevels = 2;
-  void *unsupported_reserved_texture = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
-  const HRESULT unsupported_reserved_texture_hr = device->CreateReservedResource(
-      &unsupported_reserved_texture_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource),
-      &unsupported_reserved_texture
-  );
-  if (unsupported_reserved_texture_hr != E_NOTIMPL || unsupported_reserved_texture != nullptr) {
-    std::cerr << "packed reserved texture descriptor was accepted\n";
+  D3D12_RESOURCE_DESC reserved_texture_packed_mip_desc = reserved_texture_desc;
+  reserved_texture_packed_mip_desc.Width = 192;
+  reserved_texture_packed_mip_desc.MipLevels = 2;
+  if (!CheckHR(
+          "CreateReservedTexturePackedMips",
+          device->CreateReservedResource(
+              &reserved_texture_packed_mip_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource),
+              reinterpret_cast<void **>(&reserved_texture_packed_mips)
+          )
+      ) ||
+      !reserved_texture_packed_mips) {
+    std::cerr << "packed reserved texture creation failed\n";
     cleanup();
     return 1;
   }
+
+  constexpr UINT packed_tile = ~static_cast<UINT>(0);
+  UINT reserved_texture_packed_total_tile_count = 0;
+  D3D12_PACKED_MIP_INFO reserved_texture_packed_info = {};
+  D3D12_TILE_SHAPE reserved_texture_packed_shape = {};
+  UINT reserved_texture_packed_subresource_count = 4;
+  D3D12_SUBRESOURCE_TILING reserved_texture_packed_tilings[4] = {};
+  device->GetResourceTiling(
+      reserved_texture_packed_mips, &reserved_texture_packed_total_tile_count, &reserved_texture_packed_info,
+      &reserved_texture_packed_shape, &reserved_texture_packed_subresource_count, 0,
+      reserved_texture_packed_tilings
+  );
+  if (reserved_texture_packed_total_tile_count != 6 || reserved_texture_packed_info.NumStandardMips != 1 ||
+      reserved_texture_packed_info.NumPackedMips != 1 || reserved_texture_packed_info.NumTilesForPackedMips != 1 ||
+      reserved_texture_packed_info.StartTileIndexInOverallResource != 2 ||
+      reserved_texture_packed_shape.WidthInTexels != 128 || reserved_texture_packed_shape.HeightInTexels != 128 ||
+      reserved_texture_packed_shape.DepthInTexels != 1 || reserved_texture_packed_subresource_count != 4 ||
+      reserved_texture_packed_tilings[0].WidthInTiles != 2 ||
+      reserved_texture_packed_tilings[0].HeightInTiles != 1 ||
+      reserved_texture_packed_tilings[0].DepthInTiles != 1 ||
+      reserved_texture_packed_tilings[0].StartTileIndexInOverallResource != 0 ||
+      reserved_texture_packed_tilings[1].WidthInTiles || reserved_texture_packed_tilings[1].HeightInTiles ||
+      reserved_texture_packed_tilings[1].DepthInTiles ||
+      reserved_texture_packed_tilings[1].StartTileIndexInOverallResource != packed_tile ||
+      reserved_texture_packed_tilings[2].WidthInTiles != 2 ||
+      reserved_texture_packed_tilings[2].HeightInTiles != 1 ||
+      reserved_texture_packed_tilings[2].DepthInTiles != 1 ||
+      reserved_texture_packed_tilings[2].StartTileIndexInOverallResource != 3 ||
+      reserved_texture_packed_tilings[3].WidthInTiles || reserved_texture_packed_tilings[3].HeightInTiles ||
+      reserved_texture_packed_tilings[3].DepthInTiles ||
+      reserved_texture_packed_tilings[3].StartTileIndexInOverallResource != packed_tile) {
+    std::cerr << "reserved texture packed mip tiling contract mismatch\n";
+    cleanup();
+    return 1;
+  }
+
+  D3D12_TILED_RESOURCE_COORDINATE packed_mip_coordinate = {};
+  packed_mip_coordinate.Subresource = 1;
+  D3D12_TILE_REGION_SIZE packed_mip_region = {};
+  packed_mip_region.NumTiles = 1;
+  UINT packed_mip_heap_tile_offset = 0;
+  UINT packed_mip_range_tile_count = 1;
 
   D3D12_RESOURCE_DESC reserved_texture_mip_desc = reserved_texture_desc;
   reserved_texture_mip_desc.Width = 512;
@@ -2002,7 +2050,10 @@ int main() {
     cleanup();
     return 1;
   }
-
+  queue->UpdateTileMappings(
+      reserved_texture_packed_mips, 1, &packed_mip_coordinate, &packed_mip_region, reserved_texture_heap, 1, nullptr,
+      &packed_mip_heap_tile_offset, &packed_mip_range_tile_count, D3D12_TILE_MAPPING_FLAG_NONE
+  );
   D3D12_TILE_RANGE_FLAGS null_range_flags = D3D12_TILE_RANGE_FLAG_NULL;
   queue->UpdateTileMappings(
       reserved_resource, 1, nullptr, nullptr, nullptr, 1, &null_range_flags, nullptr, nullptr,
@@ -2537,13 +2588,6 @@ int main() {
     cleanup();
     return 1;
   }
-  D3D12_TILE_REGION_SIZE valid_copy_region = {};
-  valid_copy_region.NumTiles = 1;
-  list->CopyTiles(
-      reserved_texture_mips, &boxed_coordinate, &valid_copy_region, copy_tiles_remap_readback,
-      D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
-  );
   D3D12_TILED_RESOURCE_COORDINATE invalid_box_coordinate = {};
   invalid_box_coordinate.Subresource = 3;
   D3D12_TILE_REGION_SIZE invalid_box_region = boxed_region;
@@ -2551,22 +2595,15 @@ int main() {
       reserved_texture_mips, &invalid_box_coordinate, &invalid_box_region, copy_tiles_remap_readback, 0,
       D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
   );
-  if (!CheckHR("CloseCopyTilesInvalidBox", list->Close())) {
+  if (list->Close() != E_FAIL) {
+    std::cerr << "invalid boxed Texture2D array CopyTiles was not rejected at recording\n";
     cleanup();
     return 1;
   }
-  ID3D12CommandList *invalid_box_lists[] = {list};
-  queue->ExecuteCommandLists(1, invalid_box_lists);
-  if (!CheckHR("SignalCopyTilesInvalidBox", queue->Signal(fence, 4)) ||
-      !CheckHR("SetEventOnCopyTilesInvalidBox", fence->SetEventOnCompletion(4, event))) {
-    cleanup();
-    return 1;
-  }
-  WaitForSingleObject(event, INFINITE);
 
   if (!CheckHR("MapCopyTilesInvalidBoxResult", copy_tiles_remap_readback->Map(
-                                                         0, nullptr,
-                                                         reinterpret_cast<void **>(&mapped_copy_tiles_remap_readback)))) {
+                                                       0, nullptr,
+                                                       reinterpret_cast<void **>(&mapped_copy_tiles_remap_readback)))) {
     cleanup();
     return 1;
   }
@@ -2588,11 +2625,6 @@ int main() {
     cleanup();
     return 1;
   }
-  list->CopyTiles(
-      reserved_texture_mips, &boxed_coordinate, &valid_copy_region, copy_tiles_remap_readback,
-      D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
-  );
   D3D12_TILED_RESOURCE_COORDINATE invalid_z_coordinate = boxed_coordinate;
   invalid_z_coordinate.Z = 1;
   D3D12_TILE_REGION_SIZE single_tile_region = {};
@@ -2605,18 +2637,11 @@ int main() {
       reserved_texture_mips, &invalid_z_coordinate, &single_tile_region, copy_tiles_remap_readback, 0,
       D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
   );
-  if (!CheckHR("CloseCopyTilesInvalidZ", list->Close())) {
+  if (list->Close() != E_FAIL) {
+    std::cerr << "non-zero Z boxed Texture2D CopyTiles was not rejected at recording\n";
     cleanup();
     return 1;
   }
-  ID3D12CommandList *invalid_z_lists[] = {list};
-  queue->ExecuteCommandLists(1, invalid_z_lists);
-  if (!CheckHR("SignalCopyTilesInvalidZ", queue->Signal(fence, 5)) ||
-      !CheckHR("SetEventOnCopyTilesInvalidZ", fence->SetEventOnCompletion(5, event))) {
-    cleanup();
-    return 1;
-  }
-  WaitForSingleObject(event, INFINITE);
 
   if (!CheckHR("MapCopyTilesInvalidZResult", copy_tiles_remap_readback->Map(
                                                      0, nullptr,
@@ -2638,6 +2663,22 @@ int main() {
     return 1;
   }
 
+  if (!CheckHR("ResetForCopyTilesOutOfBounds", list->Reset(allocator, nullptr))) {
+    cleanup();
+    return 1;
+  }
+  D3D12_TILE_REGION_SIZE valid_copy_region = {};
+  valid_copy_region.NumTiles = 1;
+  list->CopyTiles(
+      reserved_texture_mips, &boxed_coordinate, &valid_copy_region, copy_tiles_remap_readback,
+      copy_tiles_buffer_desc.Width, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+  if (list->Close() != E_FAIL) {
+    std::cerr << "out-of-bounds CopyTiles buffer range was not rejected at recording\n";
+    cleanup();
+    return 1;
+  }
+
   if (!CheckHR("ResetForCopyTilesNullCoordinate", list->Reset(allocator, nullptr))) {
     cleanup();
     return 1;
@@ -2648,6 +2689,20 @@ int main() {
   );
   if (list->Close() != E_FAIL) {
     std::cerr << "CopyTiles accepted a null tile-region start coordinate\n";
+    cleanup();
+    return 1;
+  }
+
+  if (!CheckHR("ResetForCopyTilesPackedMip", list->Reset(allocator, nullptr))) {
+    cleanup();
+    return 1;
+  }
+  list->CopyTiles(
+      reserved_texture_packed_mips, &packed_mip_coordinate, &packed_mip_region, copy_tiles_remap_readback, 0,
+      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+  if (list->Close() != E_FAIL) {
+    std::cerr << "CopyTiles accepted a packed mip tile\n";
     cleanup();
     return 1;
   }

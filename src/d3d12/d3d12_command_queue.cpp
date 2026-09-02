@@ -362,6 +362,15 @@ public:
             translation_failed = true;
             break;
           }
+          for (UINT tile_index : tile_indices) {
+            if (tiled->IsPackedTile(tile_index)) {
+              WARN("D3D12 CopyTiles translation cannot access packed mip tiles");
+              translation_failed = true;
+              break;
+            }
+          }
+          if (translation_failed)
+            break;
 
           constexpr UINT64 tile_size = 64ull * 1024;
           if (tile_indices.size() > std::numeric_limits<UINT64>::max() / tile_size) {
