@@ -41,6 +41,6 @@ Scope: Format capabilities required by texture resource flags.
 
 ## Follow-Up
 
-Per-format multisample capability and remaining resource-helper range and
-alignment contracts remain separate. Do not raise the advertised tiled-resource
-tier or typed-UAV capability to make a test pass.
+Remaining resource-helper range and alignment contracts remain separate. Do not
+raise the advertised tiled-resource tier or typed-UAV capability to make a test
+pass.

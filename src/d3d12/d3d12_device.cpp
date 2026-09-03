@@ -483,7 +483,11 @@ public:
       HRESULT hr = MTLQueryDXGIFormat(metal, out->Format, format_desc);
       if (SUCCEEDED(hr) && out->SampleCount) {
         out->Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
-        out->NumQualityLevels = metal.supportsTextureSampleCount(out->SampleCount) ? 1 : 0;
+        const auto capabilities = GetMTLPixelFormatCapability(format_desc.PixelFormat);
+        const bool format_supports_msaa =
+            (static_cast<int>(capabilities) & static_cast<int>(FormatCapability::MSAA)) != 0;
+        out->NumQualityLevels =
+            metal.supportsTextureSampleCount(out->SampleCount) && format_supports_msaa ? 1 : 0;
       } else {
         out->Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
         out->NumQualityLevels = 0;

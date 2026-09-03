@@ -130,6 +130,9 @@ without first documenting a changed contract or a regression.
 - [x] Texture resource flags require matching mapped Metal format capabilities
    for render-target, depth-stencil, and UAV usage. See
    `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_FORMAT_CAPABILITIES.md`.
+- [x] Multisample texture creation and quality queries require the mapped format
+   `MSAA` capability in addition to device-level sample-count support. See
+   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_MSAA_CAPABILITIES.md`.
 
 ## Next Slices
 

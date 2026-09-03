@@ -33,4 +33,6 @@ creation and allocation-info queries.
 
 ## Follow-up
 
-Continue auditing the remaining resource helper and `CopyTiles` output paths.
+Per-format multisample capability is covered by
+`D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_MSAA_CAPABILITIES.md`; continue auditing
+the remaining resource helper and `CopyTiles` output paths.

@@ -1315,6 +1315,37 @@ int main() {
   invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   if (!expect_invalid_texture_desc("depth format with UAV flag", invalid_texture_desc))
     return 1;
+  D3D12_FEATURE_DATA_FORMAT_SUPPORT msaa_format_support = {};
+  msaa_format_support.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+  if (!CheckFeature(
+          device, D3D12_FEATURE_FORMAT_SUPPORT, &msaa_format_support, "CheckFormatSupportMSAA"
+      )) {
+    cleanup();
+    return 1;
+  }
+  const bool format_supports_msaa =
+      msaa_format_support.Support1 & D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RENDERTARGET;
+  D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS msaa_quality = {};
+  msaa_quality.Format = msaa_format_support.Format;
+  msaa_quality.SampleCount = 4;
+  if (!CheckFeature(
+          device, D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &msaa_quality, "CheckMSAAQuality"
+      ) ||
+      (!format_supports_msaa && msaa_quality.NumQualityLevels)) {
+    std::cerr << "format MSAA capability and quality query disagree\n";
+    cleanup();
+    return 1;
+  }
+  if (!format_supports_msaa) {
+    invalid_texture_desc = texture_desc;
+    invalid_texture_desc.Format = msaa_format_support.Format;
+    invalid_texture_desc.SampleDesc.Count = 4;
+    invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    if (!expect_invalid_texture_desc(
+            "render target with unsupported format MSAA", invalid_texture_desc
+        ))
+      return 1;
+  }
   invalid_texture_desc = texture_desc;
   invalid_texture_desc.Alignment = 1;
   if (!expect_invalid_texture_desc("texture with invalid alignment", invalid_texture_desc))

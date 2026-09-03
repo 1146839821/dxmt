@@ -443,6 +443,8 @@ ValidateTextureResourceCapabilities(const D3D12_RESOURCE_DESC &Desc, FormatCapab
   if ((Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) &&
       !any_bit_set(Capabilities & FormatCapability::Write))
     return E_INVALIDARG;
+  if (Desc.SampleDesc.Count > 1 && !any_bit_set(Capabilities & FormatCapability::MSAA))
+    return E_INVALIDARG;
   return S_OK;
 }
 
