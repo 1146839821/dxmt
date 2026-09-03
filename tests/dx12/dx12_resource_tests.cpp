@@ -464,6 +464,15 @@ int main() {
   if (!expect_invalid_texture_allocation("texture with unknown resource flag", allocation_invalid_texture_desc))
     return 1;
 
+  invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreateReservedResource(
+          &committed1_desc, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, __uuidof(ID3D12Resource),
+          reinterpret_cast<void **>(&invalid_committed)
+      ) != E_INVALIDARG || invalid_committed != nullptr) {
+    std::cerr << "reserved buffer accepted a render-target initial state without a render-target flag\n";
+    cleanup();
+    return 1;
+  }
   if (!CheckHR(
           "CreateReservedResource",
           device->CreateReservedResource(
@@ -570,7 +579,7 @@ int main() {
   reserved_texture_desc.MipLevels = 1;
   reserved_texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   reserved_texture_desc.SampleDesc.Count = 1;
-  reserved_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  reserved_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
 
   D3D12_HEAP_PROPERTIES invalid_display_heap_properties = committed1_properties;
   invalid_display_heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -626,6 +635,36 @@ int main() {
     return 1;
   }
 
+  auto expect_invalid_reserved_texture_desc = [&](const char *name, const D3D12_RESOURCE_DESC &desc) {
+    invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+    const HRESULT hr = device->CreateReservedResource(
+        &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource),
+        reinterpret_cast<void **>(&invalid_committed)
+    );
+    if (hr != E_INVALIDARG || invalid_committed != nullptr) {
+      std::cerr << name << " was accepted: 0x" << std::hex << static_cast<unsigned long>(hr) << std::dec << "\n";
+      cleanup();
+      return false;
+    }
+    return true;
+  };
+  D3D12_RESOURCE_DESC invalid_reserved_texture_desc = reserved_texture_desc;
+  invalid_reserved_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  if (!expect_invalid_reserved_texture_desc("reserved texture with unknown layout", invalid_reserved_texture_desc))
+    return 1;
+  invalid_reserved_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_STANDARD_SWIZZLE;
+  if (!expect_invalid_reserved_texture_desc("reserved texture with standard-swizzle layout", invalid_reserved_texture_desc))
+    return 1;
+
+  invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreateReservedResource(
+          &reserved_texture_desc, D3D12_RESOURCE_STATE_DEPTH_WRITE, nullptr, __uuidof(ID3D12Resource),
+          reinterpret_cast<void **>(&invalid_committed)
+      ) != E_INVALIDARG || invalid_committed != nullptr) {
+    std::cerr << "reserved texture accepted a depth-write initial state without a depth-stencil flag\n";
+    cleanup();
+    return 1;
+  }
   if (!CheckHR(
           "CreateReservedTexture",
           device->CreateReservedResource(
@@ -661,7 +700,8 @@ int main() {
       reserved_texture->GetGPUVirtualAddress() != 0 || reserved_texture_result.Dimension != reserved_texture_desc.Dimension ||
       reserved_texture_result.Width != reserved_texture_desc.Width ||
       reserved_texture_result.Height != reserved_texture_desc.Height ||
-      reserved_texture_result.DepthOrArraySize != reserved_texture_desc.DepthOrArraySize) {
+      reserved_texture_result.DepthOrArraySize != reserved_texture_desc.DepthOrArraySize ||
+      reserved_texture_result.Layout != reserved_texture_desc.Layout) {
     std::cerr << "reserved texture resource contract mismatch\n";
     cleanup();
     return 1;
@@ -1142,10 +1182,11 @@ int main() {
   texture_desc.SampleDesc.Count = 1;
   texture_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 
-  auto expect_invalid_texture_desc = [&](const char *name, const D3D12_RESOURCE_DESC &desc) {
+  auto expect_invalid_texture_desc = [&](const char *name, const D3D12_RESOURCE_DESC &desc,
+                                         D3D12_RESOURCE_STATES initial_state = D3D12_RESOURCE_STATE_COMMON) {
     invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
     const HRESULT hr = device->CreateCommittedResource(
-        &committed1_properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+        &committed1_properties, D3D12_HEAP_FLAG_NONE, &desc, initial_state, nullptr,
         IID_PPV_ARGS(&invalid_committed)
     );
     if (hr != E_INVALIDARG || invalid_committed != nullptr) {
@@ -1209,6 +1250,14 @@ int main() {
   invalid_texture_desc = texture_desc;
   invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
   if (!expect_invalid_texture_desc("texture denying shader access without depth-stencil", invalid_texture_desc))
+    return 1;
+  if (!expect_invalid_texture_desc(
+          "texture with depth-write state without depth-stencil flag", texture_desc, D3D12_RESOURCE_STATE_DEPTH_WRITE
+      ))
+    return 1;
+  if (!expect_invalid_texture_desc(
+          "texture with depth-read state without depth-stencil flag", texture_desc, D3D12_RESOURCE_STATE_DEPTH_READ
+      ))
     return 1;
   invalid_texture_desc = texture_desc;
   invalid_texture_desc.SampleDesc.Count = 4;
@@ -1631,6 +1680,15 @@ int main() {
       ) != E_INVALIDARG ||
       invalid_committed != nullptr) {
     std::cerr << "resource creation accepted an unknown initial state bit\n";
+    cleanup();
+    return 1;
+  }
+  invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreateCommittedResource(
+          &committed1_properties, D3D12_HEAP_FLAG_NONE, &committed1_desc,
+          D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(&invalid_committed)
+      ) != E_INVALIDARG || invalid_committed != nullptr) {
+    std::cerr << "buffer accepted a render-target initial state without a render-target flag\n";
     cleanup();
     return 1;
   }
@@ -2099,6 +2157,15 @@ int main() {
   texture_heap_desc.Properties.VisibleNodeMask = 1;
   texture_heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
   if (!CheckHR("CreateTextureHeap", device->CreateHeap(&texture_heap_desc, IID_PPV_ARGS(&texture_heap)))) {
+    cleanup();
+    return 1;
+  }
+  invalid_placed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreatePlacedResource(
+          texture_heap, 0, &texture_desc, D3D12_RESOURCE_STATE_DEPTH_WRITE, nullptr,
+          IID_PPV_ARGS(&invalid_placed)
+      ) != E_INVALIDARG || invalid_placed != nullptr) {
+    std::cerr << "placed texture accepted a depth-write initial state without a depth-stencil flag\n";
     cleanup();
     return 1;
   }

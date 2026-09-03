@@ -440,7 +440,7 @@ public:
     if (pDesc->Width > std::numeric_limits<UINT>::max() || !pDesc->MipLevels || pDesc->MipLevels > 31 ||
         pDesc->SampleDesc.Count != 1 || pDesc->SampleDesc.Quality != 0)
       return E_NOTIMPL;
-    if (pDesc->Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN)
+    if (pDesc->Layout != D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE)
       return E_INVALIDARG;
     if (pDesc->Alignment && pDesc->Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)
       return E_INVALIDARG;
@@ -449,12 +449,14 @@ public:
     default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
     default_heap.CreationNodeMask = 1;
     default_heap.VisibleNodeMask = 1;
-    if (FAILED(ValidateResourceDescs(pDesc, &default_heap)) ||
-        FAILED(ValidateResourceStates(InitialState, &default_heap)))
+    if (FAILED(ValidateReservedTextureResourceDesc(pDesc, &default_heap)) ||
+        FAILED(ValidateResourceStates(InitialState, &default_heap, pDesc)))
       return E_INVALIDARG;
 
+    D3D12_RESOURCE_DESC metal_desc = *pDesc;
+    metal_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     WMTTextureInfo texture_info = {};
-    HRESULT hr = PopulateWMTTextureInfo(device_->GetMTLDevice(), texture_info, *pDesc);
+    HRESULT hr = PopulateWMTTextureInfo(device_->GetMTLDevice(), texture_info, metal_desc);
     if (FAILED(hr))
       return hr;
 

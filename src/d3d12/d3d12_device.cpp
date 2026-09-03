@@ -1103,7 +1103,7 @@ public:
     hr = ValidateResourceDescs(pDesc, pHeapProps);
     if (FAILED(hr))
       return hr;
-    hr = ValidateResourceStates(InitialState, pHeapProps);
+    hr = ValidateResourceStates(InitialState, pHeapProps, pDesc);
     if (FAILED(hr))
       return hr;
     if (!ppResource)
@@ -1181,7 +1181,7 @@ public:
       ERR("CreatePlacedResource: invalid resource description");
       return hr;
     }
-    hr = ValidateResourceStates(InitialState, &heap_desc.Properties);
+    hr = ValidateResourceStates(InitialState, &heap_desc.Properties, pDesc);
     if (FAILED(hr)) {
       ERR("CreatePlacedResource: invalid initial state");
       return hr;

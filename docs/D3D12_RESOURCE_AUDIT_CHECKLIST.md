@@ -25,9 +25,10 @@ without first documenting a changed contract or a regression.
   Existing commits: `fad8f7d`, `9503ae0`.
 - [x] Reserved texture bookkeeping, standard-mip tiling, partial tiling, and
   texture mapping. Existing commits: `9469816`, `17d86aa`.
-- [x] Reserved texture packed-mip metadata, logical tile mapping, and explicit
-  `CopyTiles` rejection for packed tiles. See
-  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_PACKED_MIPS.md`.
+- [~] Reserved texture packed-mip metadata, logical tile mapping, and explicit
+   `CopyTiles` rejection for packed tiles are implemented as a bounded logical
+   model. The arrayed packed-tail case is not a claimed Tier 2/3 capability. See
+   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_PACKED_MIPS.md`.
 - [x] Command-queue ordering and complete-submission serialization for tiled
   resource operations. Existing commits: `d756051`, `e487a63`, `8af503c`.
 - [x] Deferred tile resolution for recorded `CopyTiles` operations. Existing
@@ -51,8 +52,11 @@ without first documenting a changed contract or a regression.
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_TEXTURE_DESC.md`.
 - [x] Texture resource-flag combination validation. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_TEXTURE_FLAGS.md`.
-- [x] Unsupported texture layout validation. See
-  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_TEXTURE_LAYOUT.md`.
+- [x] Ordinary committed/placed/allocation-info texture layout validation. See
+   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_TEXTURE_LAYOUT.md`.
+- [x] Reserved texture creation accepts only `64KB_UNDEFINED_SWIZZLE` at the
+   D3D12 boundary while retaining the internal `UNKNOWN` representation. See
+   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_RESERVED_TEXTURE_LAYOUT.md`.
 - [x] Texture format validity validation. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_TEXTURE_FORMAT.md`.
 - [x] Resource null-output and failed allocation-info output handling. See
@@ -120,6 +124,9 @@ without first documenting a changed contract or a regression.
 - [x] Reserved buffers accept valid `UseBox` tile regions consistently across
    tile mapping and `CopyTiles` paths. See
    `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_BUFFER_TILING_BOXES.md`.
+- [x] Resource initial states require matching render-target and depth-stencil
+   resource flags across committed, placed, and reserved resource creation. See
+   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_INITIAL_STATE_FLAGS.md`.
 
 ## Next Slices
 

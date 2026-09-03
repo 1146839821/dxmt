@@ -298,8 +298,19 @@ constexpr D3D12_RESOURCE_STATES kKnownResourceStates =
     D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ | D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE;
 
 HRESULT
-ValidateResourceStates(D3D12_RESOURCE_STATES State, const D3D12_HEAP_PROPERTIES *pHeapProps) {
+ValidateResourceStates(
+    D3D12_RESOURCE_STATES State, const D3D12_HEAP_PROPERTIES *pHeapProps, const D3D12_RESOURCE_DESC *pResourceDesc
+) {
+  if (!pHeapProps || !pResourceDesc)
+    return E_INVALIDARG;
   if (State & ~kKnownResourceStates)
+    return E_INVALIDARG;
+
+  if ((State & D3D12_RESOURCE_STATE_RENDER_TARGET) &&
+      !(pResourceDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET))
+    return E_INVALIDARG;
+  if ((State & (D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE)) &&
+      !(pResourceDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
     return E_INVALIDARG;
 
   if (State & kExclusiveWrite) {
@@ -475,6 +486,16 @@ ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERT
   }
 
   return S_OK;
+}
+
+HRESULT
+ValidateReservedTextureResourceDesc(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERTIES *pHeapProps) {
+  if (!pDesc || !pHeapProps || pDesc->Layout != D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE)
+    return E_INVALIDARG;
+
+  D3D12_RESOURCE_DESC validation_desc = *pDesc;
+  validation_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  return ValidateResourceDescs(&validation_desc, pHeapProps);
 }
 
 HRESULT

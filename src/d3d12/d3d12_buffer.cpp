@@ -158,7 +158,7 @@ public:
     default_heap.CreationNodeMask = 1;
     default_heap.VisibleNodeMask = 1;
     if (FAILED(ValidateResourceDescs(pDesc, &default_heap)) ||
-        FAILED(ValidateResourceStates(InitialState, &default_heap)))
+        FAILED(ValidateResourceStates(InitialState, &default_heap, pDesc)))
       return E_INVALIDARG;
 
     const uint64_t tile_count = (pDesc->Width - 1) / kD3D12TileSize + 1;

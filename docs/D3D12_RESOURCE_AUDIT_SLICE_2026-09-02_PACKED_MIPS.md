@@ -1,6 +1,6 @@
 # Resource Audit Slice: Reserved Texture Packed Mips
 
-Status: Complete
+Status: Partial
 Date: 2026-09-02
 Branch: `feat/d3d12`
 Checklist: `D3D12_RESOURCE_AUDIT_CHECKLIST.md`
@@ -27,6 +27,20 @@ did not model the packed tail used by the D3D12 tile address contract.
   D3D12 contract that packed mip data must use non-tile-specific copy APIs.
 - Capability reporting and the Metal 3 shadow-backing model remain unchanged.
 
+## D3D12-Facing Boundary
+
+- This slice covers logical packed-mip bookkeeping only; it is not a complete
+  D3D12 tiled-resource capability claim.
+- Reserved texture callers must use
+  `D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE`. The Metal allocation path may
+  normalize that layout to `D3D12_TEXTURE_LAYOUT_UNKNOWN` internally while the
+  resource-facing descriptor retains the tiled layout.
+- The regression uses two array slices with packed tails. That combination is a
+  Tier 4 semantic and must not be treated as Tier 2 or Tier 3 support.
+- DXMT continues to report `TiledResourcesTier` as
+  `D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED`; no tiled-resource tier is claimed
+  by this logical model.
+
 ## Changed Files
 
 - `src/d3d12/d3d12_device.hpp`
@@ -52,4 +66,5 @@ did not model the packed tail used by the D3D12 tile address contract.
 - The packed pixel layout remains opaque by design; this slice only exposes the
   logical tile/mapping contract. Reserved texture rendering and generic texture
   copy paths remain separate work.
-- Do not raise `TiledResourcesTier` as part of this slice.
+- Do not raise `TiledResourcesTier` or present this arrayed packed-mip model as
+  a D3D12-facing Tier 2, Tier 3, or Tier 4 implementation.
