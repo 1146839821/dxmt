@@ -418,8 +418,14 @@ public:
     if (!reserved_ || coordinate.X > tile_count_ || coordinate.Y || coordinate.Z || coordinate.Subresource)
       return E_INVALIDARG;
 
-    const UINT tile_count = pRegionSize ? pRegionSize->NumTiles : (pRegionStartCoordinate ? 1 : tile_count_);
-    if (!tile_count || (pRegionSize && pRegionSize->UseBox) || tile_count > tile_count_ - coordinate.X)
+    UINT tile_count = pRegionSize ? pRegionSize->NumTiles : (pRegionStartCoordinate ? 1 : tile_count_);
+    if (pRegionSize && pRegionSize->UseBox) {
+      if (!pRegionSize->Width || pRegionSize->Height != 1 || pRegionSize->Depth != 1 ||
+          pRegionSize->NumTiles != pRegionSize->Width)
+        return E_INVALIDARG;
+      tile_count = pRegionSize->Width;
+    }
+    if (!tile_count || tile_count > tile_count_ - coordinate.X)
       return E_INVALIDARG;
     tile_indices.reserve(tile_indices.size() + tile_count);
     for (UINT tile = 0; tile < tile_count; tile++)
@@ -464,24 +470,11 @@ public:
     std::vector<UINT> resource_tiles;
     resource_tiles.reserve(tile_count_);
     for (UINT region = 0; region < NumResourceRegions; region++) {
-      const D3D12_TILED_RESOURCE_COORDINATE coordinate =
-          pResourceRegionStartCoordinates ? pResourceRegionStartCoordinates[region] : D3D12_TILED_RESOURCE_COORDINATE{};
-      if (coordinate.Y || coordinate.Z || coordinate.Subresource >= 1)
+      if (FAILED(GetTileIndices(
+              pResourceRegionStartCoordinates ? &pResourceRegionStartCoordinates[region] : nullptr,
+              pResourceRegionSizes ? &pResourceRegionSizes[region] : nullptr, resource_tiles
+          )))
         return E_INVALIDARG;
-
-      UINT tile_count = 0;
-      if (pResourceRegionSizes) {
-        const auto &region_size = pResourceRegionSizes[region];
-        if (region_size.UseBox || !region_size.NumTiles)
-          return E_INVALIDARG;
-        tile_count = region_size.NumTiles;
-      } else {
-        tile_count = pResourceRegionStartCoordinates ? 1 : tile_count_;
-      }
-      if (coordinate.X > tile_count_ || tile_count > tile_count_ - coordinate.X)
-        return E_INVALIDARG;
-      for (UINT tile = 0; tile < tile_count; tile++)
-        resource_tiles.push_back(coordinate.X + tile);
     }
 
     if (resource_tiles.empty())
@@ -565,10 +558,16 @@ public:
         src_coordinate.Subresource >= 1)
       return E_INVALIDARG;
 
-    const UINT tile_count = pRegionSize ? pRegionSize->NumTiles : tile_count_;
+    UINT tile_count = pRegionSize ? pRegionSize->NumTiles : tile_count_;
+    if (pRegionSize && pRegionSize->UseBox) {
+      if (!pRegionSize->Width || pRegionSize->Height != 1 || pRegionSize->Depth != 1 ||
+          pRegionSize->NumTiles != pRegionSize->Width)
+        return E_INVALIDARG;
+      tile_count = pRegionSize->Width;
+    }
     if (!tile_count || dst_coordinate.X > tile_count_ || tile_count > tile_count_ - dst_coordinate.X ||
         src_coordinate.X > source->tile_count_ || tile_count > source->tile_count_ - src_coordinate.X ||
-        (pRegionSize && pRegionSize->UseBox))
+        !pRegionSize)
       return E_INVALIDARG;
 
     std::vector<TileMapping> copied;

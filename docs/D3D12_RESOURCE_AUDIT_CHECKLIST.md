@@ -117,6 +117,9 @@ without first documenting a changed contract or a regression.
 - [x] Allocation-info texture queries share resource descriptor, layout, and
    flag validation with creation. See
    `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_ALLOCATION_INFO.md`.
+- [x] Reserved buffers accept valid `UseBox` tile regions consistently across
+   tile mapping and `CopyTiles` paths. See
+   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_BUFFER_TILING_BOXES.md`.
 
 ## Next Slices
 

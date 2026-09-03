@@ -2302,9 +2302,15 @@ int main() {
   D3D12_TILED_RESOURCE_COORDINATE tile_coordinate = {};
   D3D12_TILE_REGION_SIZE tile_region = {};
   tile_region.NumTiles = 1;
+  D3D12_TILE_REGION_SIZE buffer_box_tile_region = {};
+  buffer_box_tile_region.NumTiles = 1;
+  buffer_box_tile_region.UseBox = TRUE;
+  buffer_box_tile_region.Width = 1;
+  buffer_box_tile_region.Height = 1;
+  buffer_box_tile_region.Depth = 1;
   UINT heap_tile_offset = 0;
   queue->UpdateTileMappings(
-      reserved_resource, 1, &tile_coordinate, &tile_region, reserved_heap, 1, nullptr, &heap_tile_offset, nullptr,
+      reserved_resource, 1, &tile_coordinate, &buffer_box_tile_region, reserved_heap, 1, nullptr, &heap_tile_offset, nullptr,
       D3D12_TILE_MAPPING_FLAG_NONE
   );
   D3D12_TILE_RANGE_FLAGS skip_range_flags = D3D12_TILE_RANGE_FLAG_SKIP;
@@ -2330,7 +2336,7 @@ int main() {
   reserved_copy_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
   list->ResourceBarrier(1, &reserved_copy_barrier);
   list->CopyTiles(
-      reserved_resource, &tile_coordinate, &tile_region, copy_tiles_upload, 0,
+      reserved_resource, &tile_coordinate, &buffer_box_tile_region, copy_tiles_upload, 0,
       D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE
   );
   reserved_copy_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
