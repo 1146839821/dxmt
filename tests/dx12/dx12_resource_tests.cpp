@@ -582,6 +582,17 @@ int main() {
     cleanup();
     return 1;
   }
+  invalid_display_texture_desc = reserved_texture_desc;
+  invalid_display_texture_desc.Format = DXGI_FORMAT_R32_FLOAT;
+  invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreateCommittedResource(
+          &committed1_properties, D3D12_HEAP_FLAG_ALLOW_DISPLAY, &invalid_display_texture_desc,
+          D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&invalid_committed)
+      ) != E_INVALIDARG || invalid_committed != nullptr) {
+    std::cerr << "display heap flag was accepted for a non-display format\n";
+    cleanup();
+    return 1;
+  }
 
   if (!CheckHR(
           "CreateReservedTexture",

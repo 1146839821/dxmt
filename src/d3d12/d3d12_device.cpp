@@ -1090,6 +1090,13 @@ public:
     hr = ValidateResourceHeapCompatibility(pDesc, HeapFlags);
     if (FAILED(hr))
       return hr;
+    if (HeapFlags & D3D12_HEAP_FLAG_ALLOW_DISPLAY) {
+      D3D12_FEATURE_DATA_FORMAT_SUPPORT format_support = {};
+      format_support.Format = pDesc->Format;
+      if (FAILED(CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &format_support, sizeof(format_support))) ||
+          !(format_support.Support1 & D3D12_FORMAT_SUPPORT1_DISPLAY))
+        return E_INVALIDARG;
+    }
     hr = ValidateResourceHeapFlags(pDesc, HeapFlags);
     if (FAILED(hr))
       return hr;
