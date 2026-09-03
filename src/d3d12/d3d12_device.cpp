@@ -1346,7 +1346,7 @@ public:
             FAILED(ValidateTextureResourceFlags(desc)))
           goto invalid;
         WMTTextureInfo texture_info = {};
-        if (FAILED(PopulateWMTTextureInfo(GetMTLDevice(), texture_info, desc)))
+        if (FAILED(PopulateWMTTextureInfo(this, texture_info, desc)))
           goto invalid;
         size_and_align = GetMTLDevice().heapTextureSizeAndAlign(texture_info);
         resource_info.Alignment = size_and_align.align;

@@ -36,5 +36,5 @@ resource allocation-info queries.
 ## Follow-up
 
 Format capability combinations for render-target, depth-stencil, and UAV usage
-remain a separate audit. Do not change the advertised typed-UAV capability as
-part of this slice.
+are covered by `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_FORMAT_CAPABILITIES.md`.
+Do not change the advertised typed-UAV capability as part of either slice.

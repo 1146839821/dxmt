@@ -433,6 +433,20 @@ ValidateTextureResourceFlags(const D3D12_RESOURCE_DESC &Desc) {
 }
 
 HRESULT
+ValidateTextureResourceCapabilities(const D3D12_RESOURCE_DESC &Desc, FormatCapability Capabilities) {
+  if ((Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) &&
+      !any_bit_set(Capabilities & FormatCapability::Color))
+    return E_INVALIDARG;
+  if ((Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) &&
+      !any_bit_set(Capabilities & FormatCapability::DepthStencil))
+    return E_INVALIDARG;
+  if ((Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) &&
+      !any_bit_set(Capabilities & FormatCapability::Write))
+    return E_INVALIDARG;
+  return S_OK;
+}
+
+HRESULT
 ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERTIES *pHeapProps) {
   if (!pDesc || !pHeapProps)
     return E_INVALIDARG;

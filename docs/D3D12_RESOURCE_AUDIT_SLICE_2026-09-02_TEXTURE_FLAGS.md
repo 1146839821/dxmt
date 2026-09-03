@@ -50,11 +50,10 @@ creation without a deterministic validation result.
   allocation-info paths.
 - Do not claim row-major RT/UAV support while the feature query reports it as
   unavailable.
-- Do not treat format capability validation as complete; it is a separate
-  follow-up.
+- Keep format capability checks in the shared texture-info path rather than
+  duplicating them in individual resource creation paths.
 
 ## Follow-Up
 
-Continue with texture format capability, unsupported layout, range, and
-alignment contracts, separating invalid D3D12 combinations from bounded Metal
-feature gaps.
+Continue with unsupported layout, range, and alignment contracts, separating
+invalid D3D12 combinations from bounded Metal feature gaps.

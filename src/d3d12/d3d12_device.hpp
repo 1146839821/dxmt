@@ -430,7 +430,7 @@ void PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_S
 
 void PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_SAMPLER_DESC const &Desc);
 
-HRESULT PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_RESOURCE_DESC &Desc);
+HRESULT PopulateWMTTextureInfo(MTLD3D12Device *Device, WMTTextureInfo &InfoOut, const D3D12_RESOURCE_DESC &Desc);
 
 inline std::tuple<MTLD3D12RenderTargetDescriptorHeap *, UINT>
 GetRenderTargetHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
@@ -527,6 +527,8 @@ HRESULT ValidateTextureResourceDesc(const D3D12_RESOURCE_DESC &Desc);
 HRESULT ValidateTextureResourceLayout(const D3D12_RESOURCE_DESC &Desc);
 
 HRESULT ValidateTextureResourceFlags(const D3D12_RESOURCE_DESC &Desc);
+
+HRESULT ValidateTextureResourceCapabilities(const D3D12_RESOURCE_DESC &Desc, FormatCapability Capabilities);
 
 bool IsD3D12BoxInBounds(D3D12_BOX &box, D3D12_BOX &bounds);
 

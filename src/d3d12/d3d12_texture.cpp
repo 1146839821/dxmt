@@ -86,8 +86,11 @@ ValidateTextureTransferPitch(
 }
 
 HRESULT
-PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_RESOURCE_DESC &Desc) {
+PopulateWMTTextureInfo(MTLD3D12Device *Device, WMTTextureInfo &InfoOut, const D3D12_RESOURCE_DESC &Desc) {
   InfoOut = {};
+  if (!Device)
+    return E_INVALIDARG;
+  auto metal_device = Device->GetMTLDevice();
   if (FAILED(ValidateTextureResourceDesc(Desc)))
     return E_INVALIDARG;
   if (FAILED(ValidateTextureResourceLayout(Desc)))
@@ -96,11 +99,11 @@ PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_
     return E_INVALIDARG;
 
   MTL_DXGI_FORMAT_DESC Format;
-  HRESULT hr = MTLQueryDXGIFormat(Device, Desc.Format, Format);
+  HRESULT hr = MTLQueryDXGIFormat(metal_device, Desc.Format, Format);
   if (FAILED(hr))
     return E_INVALIDARG;
   if (Desc.SampleDesc.Count > 1 &&
-      (Desc.SampleDesc.Quality || !Device.supportsTextureSampleCount(Desc.SampleDesc.Count)))
+      (Desc.SampleDesc.Quality || !metal_device.supportsTextureSampleCount(Desc.SampleDesc.Count)))
     return E_INVALIDARG;
 
   InfoOut.pixel_format = Format.PixelFormat;
@@ -123,6 +126,9 @@ PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_
       break;
     }
   }
+
+  if (FAILED(ValidateTextureResourceCapabilities(Desc, Device->GetMTLPixelFormatCapability(InfoOut.pixel_format))))
+    return E_INVALIDARG;
 
   switch (Desc.Dimension) {
   default:
@@ -203,7 +209,7 @@ PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_
       WMTTextureInfo info_one_slice = InfoOut;
       info_one_slice.mipmap_level_count = 1;
       info_one_slice.array_length = 1;
-      auto size_and_align = Device.heapTextureSizeAndAlign(info_one_slice);
+      auto size_and_align = metal_device.heapTextureSizeAndAlign(info_one_slice);
 
       if (Desc.Alignment == D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) {
         // 4 KiB alignment is only valid for a single non-RT/DS, unknown-layout mip.
@@ -385,7 +391,7 @@ public:
     }
 
     WMTTextureInfo texture_info;
-    HRESULT hr = PopulateWMTTextureInfo(device_->GetMTLDevice(), texture_info, desc_);
+    HRESULT hr = PopulateWMTTextureInfo(device_, texture_info, desc_);
     if (FAILED(hr))
       return hr;
 
@@ -456,7 +462,7 @@ public:
     D3D12_RESOURCE_DESC metal_desc = *pDesc;
     metal_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     WMTTextureInfo texture_info = {};
-    HRESULT hr = PopulateWMTTextureInfo(device_->GetMTLDevice(), texture_info, metal_desc);
+    HRESULT hr = PopulateWMTTextureInfo(device_, texture_info, metal_desc);
     if (FAILED(hr))
       return hr;
 

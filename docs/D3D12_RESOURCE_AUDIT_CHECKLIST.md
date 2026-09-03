@@ -127,6 +127,9 @@ without first documenting a changed contract or a regression.
 - [x] Resource initial states require matching render-target and depth-stencil
    resource flags across committed, placed, and reserved resource creation. See
    `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_INITIAL_STATE_FLAGS.md`.
+- [x] Texture resource flags require matching mapped Metal format capabilities
+   for render-target, depth-stencil, and UAV usage. See
+   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_FORMAT_CAPABILITIES.md`.
 
 ## Next Slices
 

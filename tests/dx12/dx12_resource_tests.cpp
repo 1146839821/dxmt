@@ -655,6 +655,13 @@ int main() {
   invalid_reserved_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_STANDARD_SWIZZLE;
   if (!expect_invalid_reserved_texture_desc("reserved texture with standard-swizzle layout", invalid_reserved_texture_desc))
     return 1;
+  invalid_reserved_texture_desc = reserved_texture_desc;
+  invalid_reserved_texture_desc.Format = DXGI_FORMAT_D32_FLOAT;
+  invalid_reserved_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  if (!expect_invalid_reserved_texture_desc(
+          "reserved depth format with render-target flag", invalid_reserved_texture_desc
+      ))
+    return 1;
 
   invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
   if (device->CreateReservedResource(
@@ -1295,6 +1302,20 @@ int main() {
   if (!expect_invalid_texture_desc("texture with unsupported format", invalid_texture_desc))
     return 1;
   invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Format = DXGI_FORMAT_D32_FLOAT;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  if (!expect_invalid_texture_desc("depth format with render-target flag", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+  if (!expect_invalid_texture_desc("color format with depth-stencil flag", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Format = DXGI_FORMAT_D32_FLOAT;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  if (!expect_invalid_texture_desc("depth format with UAV flag", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
   invalid_texture_desc.Alignment = 1;
   if (!expect_invalid_texture_desc("texture with invalid alignment", invalid_texture_desc))
     return 1;
@@ -1398,6 +1419,20 @@ int main() {
     cleanup();
     return 1;
   }
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Format = DXGI_FORMAT_D32_FLOAT;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  if (!expect_invalid_texture_allocation("allocation info accepted a depth format as a render target", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+  if (!expect_invalid_texture_allocation("allocation info accepted a color format as depth-stencil", invalid_texture_desc))
+    return 1;
+  invalid_texture_desc = texture_desc;
+  invalid_texture_desc.Format = DXGI_FORMAT_D32_FLOAT;
+  invalid_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  if (!expect_invalid_texture_allocation("allocation info accepted a depth format as UAV", invalid_texture_desc))
+    return 1;
   D3D12_RESOURCE_DESC small_texture_desc = texture_desc;
   small_texture_desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
   D3D12_RESOURCE_ALLOCATION_INFO small_texture_info =
