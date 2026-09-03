@@ -232,6 +232,26 @@ Texture::allocate(WMT::Heap heap, uint64_t offset, Flags<TextureAllocationFlag> 
 }
 
 Rc<TextureAllocation>
+Texture::allocatePlacementSparse(Flags<TextureAllocationFlag> flags) {
+  if (bytes_per_image_)
+    return {};
+
+  WMTResourceOptions options = WMTResourceHazardTrackingModeUntracked;
+  WMTTextureInfo info = info_;
+  info.mach_port = 0;
+  if (flags.test(TextureAllocationFlag::CpuWriteCombined))
+    options |= WMTResourceOptionCPUCacheModeWriteCombined;
+  if (flags.test(TextureAllocationFlag::CpuInvisible))
+    options |= WMTResourceStorageModePrivate;
+  if (flags.test(TextureAllocationFlag::GpuManaged))
+    options |= WMTResourceStorageModeManaged;
+  info.options = options;
+
+  auto texture = device_.newPlacementSparseTexture(info, WMTSparsePageSize64);
+  return new TextureAllocation(this, std::move(texture), info, flags);
+}
+
+Rc<TextureAllocation>
 Texture::import(mach_port_t mach_port) {
   Flags<TextureAllocationFlag> flags;
   WMTTextureInfo info;

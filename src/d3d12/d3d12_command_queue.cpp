@@ -37,6 +37,9 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   WMT::Reference<WMT::CommandQueue> queue_;
   WMT::Reference<WMT::Fence> fence_;
   WMT::Reference<WMT::Buffer> timestamp_dummy_buffer_;
+  WMT::Reference<WMT::SparseMappingQueue> sparse_mapping_queue_;
+  WMT::Reference<WMT::SharedEvent> sparse_event_;
+  uint64_t sparse_event_value_ = 0;
 
   struct Submission {
     uint64_t serial = 0;
@@ -171,6 +174,37 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     submission_space_condition_.notify_all();
   }
 
+  bool
+  BeginSparseMapping(uint64_t &main_queue_signal) {
+    if (!sparse_mapping_queue_)
+      return true;
+    if (!WaitForSubmissionSpaceLocked())
+      return false;
+
+    auto pool = WMT::MakeAutoreleasePool();
+    auto cmdbuf = queue_.commandBuffer();
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
+    main_queue_signal = sparse_event_value_ + 1;
+    cmdbuf.encodeSignalEvent(sparse_event_, main_queue_signal);
+
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    if (!CommitSubmissionLocked(submission))
+      return false;
+    sparse_event_value_ = main_queue_signal;
+    sparse_mapping_queue_.waitForEvent(sparse_event_, main_queue_signal);
+    sparse_mapping_queue_.barrierBeforeResourceState();
+    return true;
+  }
+
+  void
+  EndSparseMapping(uint64_t main_queue_signal) {
+    const uint64_t mapping_signal = main_queue_signal + 1;
+    sparse_mapping_queue_.signalEvent(sparse_event_, mapping_signal);
+    sparse_event_value_ = mapping_signal;
+  }
+
 public:
   MTLD3D12CommandQueueImpl(MTLD3D12Device *pDevice) :
       MTLD3D12Pageable<MTLD3D12CommandQueue, IMTLSwapChainFactory>(pDevice),
@@ -193,6 +227,17 @@ public:
     if (!queue_)
       return E_FAIL;
     queue_.addResidencySet(device_->GetGlobalResidencySet());
+
+    if (metal_device.supportsPlacementSparse()) {
+      sparse_mapping_queue_ = metal_device.newSparseMappingQueue();
+      sparse_event_ = metal_device.newSharedEvent();
+      if (sparse_mapping_queue_ && sparse_event_)
+        sparse_mapping_queue_.addResidencySet(device_->GetGlobalResidencySet());
+      else {
+        sparse_mapping_queue_ = {};
+        sparse_event_ = {};
+      }
+    }
 
     fence_ = metal_device.newFence();
 
@@ -253,10 +298,15 @@ public:
     }
 
     std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    uint64_t main_queue_signal = 0;
+    if (!BeginSparseMapping(main_queue_signal))
+      return;
     auto hr = static_cast<MTLD3D12Resource *>(resource)->UpdateTileMappings(
         region_count, region_start_coordinates, region_sizes, heap, range_count, range_flags, heap_range_offsets,
-        range_tile_counts, flags
+        range_tile_counts, flags, sparse_mapping_queue_
     );
+    if (sparse_mapping_queue_ && SUCCEEDED(hr))
+      EndSparseMapping(main_queue_signal);
     if (FAILED(hr))
       WARN("D3D12 UpdateTileMappings failed with HRESULT 0x", std::hex, hr, std::dec);
   };
@@ -276,10 +326,15 @@ public:
     }
 
     std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    uint64_t main_queue_signal = 0;
+    if (!BeginSparseMapping(main_queue_signal))
+      return;
     auto hr = static_cast<MTLD3D12Resource *>(dst_resource)->CopyTileMappingsFrom(
         static_cast<MTLD3D12Resource *>(src_resource), dst_region_start_coordinate, src_region_start_coordinate,
-        region_size, flags
+        region_size, flags, sparse_mapping_queue_
     );
+    if (sparse_mapping_queue_ && SUCCEEDED(hr))
+      EndSparseMapping(main_queue_signal);
     if (FAILED(hr))
       WARN("D3D12 CopyTileMappings failed with HRESULT 0x", std::hex, hr, std::dec);
   };
@@ -325,6 +380,8 @@ public:
     auto pool = WMT::MakeAutoreleasePool();
 
     auto cmdbuf = queue_.commandBuffer();
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     Submission submission;
     submission.command_buffer = cmdbuf;
     submission.allocators.reserve(Count);
@@ -383,6 +440,137 @@ public:
           if (data->buffer_offset > linear_desc.Width || copy_size > linear_desc.Width - data->buffer_offset) {
             WARN("D3D12 CopyTiles translation received an out-of-bounds buffer range");
             translation_failed = true;
+            break;
+          }
+
+          const auto sparse_buffer = tiled->GetMetalBuffer();
+          if (sparse_mapping_queue_ && sparse_buffer) {
+            const auto linear_buffer = linear->buffer->current()->buffer();
+            auto encoder = cmdbuf.blitCommandEncoder();
+            encoder.waitForFence(fence_);
+            for (size_t index = 0; index < tile_indices.size(); index++) {
+              const UINT tile_index = tile_indices[index];
+              const UINT64 linear_offset = data->buffer_offset + index * tile_size;
+              const UINT64 sparse_offset = uint64_t(tile_index) * tile_size;
+              const bool mapped = tiled->IsTileMapped(tile_index);
+              if (data->buffer_to_tiled) {
+                if (!mapped)
+                  continue;
+                wmtcmd_blit_copy_from_buffer_to_buffer copy = {};
+                copy.type = WMTBlitCommandCopyFromBufferToBuffer;
+                copy.src = linear_buffer;
+                copy.src_offset = linear_offset;
+                copy.dst = sparse_buffer;
+                copy.dst_offset = sparse_offset;
+                copy.copy_length = tile_size;
+                MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+                continue;
+              }
+
+              if (!data->tiled_to_buffer)
+                continue;
+              if (!mapped) {
+                wmtcmd_blit_fillbuffer fill = {};
+                fill.type = WMTBlitCommandFillBuffer;
+                fill.buffer = linear_buffer;
+                fill.offset = linear_offset;
+                fill.length = tile_size;
+                fill.value = 0;
+                MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
+                continue;
+              }
+
+              wmtcmd_blit_copy_from_buffer_to_buffer copy = {};
+              copy.type = WMTBlitCommandCopyFromBufferToBuffer;
+              copy.src = sparse_buffer;
+              copy.src_offset = sparse_offset;
+              copy.dst = linear_buffer;
+              copy.dst_offset = linear_offset;
+              copy.copy_length = tile_size;
+              MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+            }
+            encoder.updateFence(fence_);
+            encoder.endEncoding();
+            break;
+          }
+
+          const auto sparse_texture = tiled->GetMetalTexture();
+          if (sparse_mapping_queue_ && sparse_texture) {
+            struct TextureTileCopyInfo {
+              WMTOrigin origin;
+              WMTSize size;
+              uint64_t level;
+              uint64_t slice;
+              uint32_t bytes_per_row;
+              uint32_t bytes_per_image;
+            };
+            std::vector<TextureTileCopyInfo> copy_infos;
+            copy_infos.reserve(tile_indices.size());
+            for (UINT tile_index : tile_indices) {
+              auto &copy_info = copy_infos.emplace_back();
+              if (FAILED(tiled->GetTileTextureCopyInfo(
+                      tile_index, copy_info.origin, copy_info.level, copy_info.slice, copy_info.size,
+                      copy_info.bytes_per_row, copy_info.bytes_per_image
+                  ))) {
+                WARN("D3D12 CopyTiles translation failed to resolve a sparse texture tile");
+                translation_failed = true;
+                break;
+              }
+            }
+            if (translation_failed)
+              break;
+
+            const auto linear_buffer = linear->buffer->current()->buffer();
+            auto encoder = cmdbuf.blitCommandEncoder();
+            encoder.waitForFence(fence_);
+            for (size_t index = 0; index < tile_indices.size(); index++) {
+              const UINT tile_index = tile_indices[index];
+              const UINT64 linear_offset = data->buffer_offset + index * tile_size;
+              const auto &copy_info = copy_infos[index];
+              if (!tiled->IsTileMapped(tile_index)) {
+                if (data->tiled_to_buffer) {
+                  wmtcmd_blit_fillbuffer fill = {};
+                  fill.type = WMTBlitCommandFillBuffer;
+                  fill.buffer = linear_buffer;
+                  fill.offset = linear_offset;
+                  fill.length = tile_size;
+                  fill.value = 0;
+                  MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
+                }
+                continue;
+              }
+
+              if (data->buffer_to_tiled) {
+                wmtcmd_blit_copy_from_buffer_to_texture copy = {};
+                copy.type = WMTBlitCommandCopyFromBufferToTexture;
+                copy.src = linear_buffer;
+                copy.src_offset = linear_offset;
+                copy.bytes_per_row = copy_info.bytes_per_row;
+                copy.bytes_per_image = copy_info.bytes_per_image;
+                copy.size = copy_info.size;
+                copy.dst = sparse_texture;
+                copy.slice = static_cast<uint32_t>(copy_info.slice);
+                copy.level = static_cast<uint32_t>(copy_info.level);
+                copy.origin = copy_info.origin;
+                MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+                continue;
+              }
+
+              wmtcmd_blit_copy_from_texture_to_buffer copy = {};
+              copy.type = WMTBlitCommandCopyFromTextureToBuffer;
+              copy.src = sparse_texture;
+              copy.slice = static_cast<uint32_t>(copy_info.slice);
+              copy.level = static_cast<uint32_t>(copy_info.level);
+              copy.origin = copy_info.origin;
+              copy.size = copy_info.size;
+              copy.dst = linear_buffer;
+              copy.offset = linear_offset;
+              copy.bytes_per_row = copy_info.bytes_per_row;
+              copy.bytes_per_image = copy_info.bytes_per_image;
+              MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+            }
+            encoder.updateFence(fence_);
+            encoder.endEncoding();
             break;
           }
 
@@ -662,6 +850,8 @@ public:
 
     auto pool = WMT::MakeAutoreleasePool();
     auto cmdbuf = queue_.commandBuffer();
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     static_cast<MTLD3D12Fence *>(pFence)->fence->signal(cmdbuf, Value);
     Submission submission;
     submission.command_buffer = cmdbuf;
@@ -680,6 +870,8 @@ public:
 
     auto pool = WMT::MakeAutoreleasePool();
     auto cmdbuf = queue_.commandBuffer();
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     static_cast<MTLD3D12Fence *>(pFence)->fence->wait(cmdbuf, Value);
     Submission submission;
     submission.command_buffer = cmdbuf;
@@ -721,6 +913,8 @@ public:
     attachment.end_of_encoder_sample_index = ~0ull;
 
     auto cmdbuf = queue_.commandBuffer();
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&attachment, 1);
     encoder.waitForFence(fence_);
 
@@ -781,6 +975,8 @@ public:
 
     auto pool = WMT::MakeAutoreleasePool();
     auto cmdbuf = queue_.commandBuffer();
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
 
     auto g = reinterpret_cast<MTLD3D12Resource *>(backbuffer);
     auto &view = g->texture->view(g->texture->fullView);

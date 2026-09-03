@@ -153,7 +153,7 @@ public:
 private:
   BufferAllocation(
       WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags, WMT::Heap heap = {},
-      uint64_t offset = ~0ull
+      uint64_t offset = ~0ull, bool placement_sparse = false
   );
   void free();
 
@@ -191,6 +191,8 @@ public:
   Rc<BufferAllocation> allocate(Flags<BufferAllocationFlag> flags);
 
   Rc<BufferAllocation> allocate(WMT::Heap heap, uint64_t offset, Flags<BufferAllocationFlag> flags);
+
+  Rc<BufferAllocation> allocatePlacementSparse(Flags<BufferAllocationFlag> flags);
 
   Rc<BufferAllocation> rename(Rc<BufferAllocation> &&newAllocation);
 

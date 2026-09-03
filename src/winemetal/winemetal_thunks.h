@@ -13,6 +13,19 @@ enum winemetal_unixcall {
   unix_mtldevice_newmsctessellatortables = 151,
   unix_mtlvalidate_msctessellationpipeline = 152,
   unix_mtldevice_newmscgeometrypso = 153,
+  unix_mtldevice_newsparsemappingqueue = 154,
+  unix_mtldevice_supportsplacementsparse = 155,
+  unix_sparsemappingqueue_signalevent = 156,
+  unix_sparsemappingqueue_waitforevent = 157,
+  unix_sparsemappingqueue_updatebuffermappings = 158,
+  unix_sparsemappingqueue_updatetexturemappings = 159,
+  unix_sparsemappingqueue_copybuffermappings = 160,
+  unix_sparsemappingqueue_copytexturemappings = 161,
+  unix_mtldevice_newplacementsparsebuffer = 162,
+  unix_mtldevice_newplacementsparsetexture = 163,
+  unix_sparsemappingqueue_addresidencyset = 164,
+  unix_mtltexture_firstmipmapintail = 165,
+  unix_sparsemappingqueue_barrierbeforeresourcestate = 166,
 };
 
 struct unixcall_mtldevice_newmscgeometrypso {
@@ -474,6 +487,36 @@ struct unixcall_mtldevice_newicb {
   struct WMTMemoryPointer info;
   uint64_t max_count;
   uint64_t options;
+  obj_handle_t ret;
+};
+
+struct unixcall_sparsemappingqueue_mappings {
+  obj_handle_t queue;
+  obj_handle_t resource;
+  obj_handle_t heap;
+  struct WMTConstMemoryPointer operations;
+  uint64_t count;
+};
+
+struct unixcall_sparsemappingqueue_copy_mappings {
+  obj_handle_t queue;
+  obj_handle_t source;
+  obj_handle_t destination;
+  struct WMTConstMemoryPointer operations;
+  uint64_t count;
+};
+
+struct unixcall_mtldevice_newplacementsparsebuffer {
+  obj_handle_t device;
+  struct WMTMemoryPointer info;
+  enum WMTSparsePageSize sparse_page_size;
+  obj_handle_t ret;
+};
+
+struct unixcall_mtldevice_newplacementsparsetexture {
+  obj_handle_t device;
+  struct WMTMemoryPointer info;
+  enum WMTSparsePageSize sparse_page_size;
   obj_handle_t ret;
 };
 

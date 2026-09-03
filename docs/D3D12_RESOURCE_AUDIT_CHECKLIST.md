@@ -27,7 +27,8 @@ without first documenting a changed contract or a regression.
   texture mapping. Existing commits: `9469816`, `17d86aa`.
 - [~] Reserved texture packed-mip metadata, logical tile mapping, and explicit
    `CopyTiles` rejection for packed tiles are implemented as a bounded logical
-   model. The arrayed packed-tail case is not a claimed Tier 2/3 capability. See
+   model. Arrayed packed tails are rejected at the reserved-resource boundary
+   and are not a claimed Tier 2/3 capability. See
    `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_PACKED_MIPS.md`.
 - [x] Command-queue ordering and complete-submission serialization for tiled
   resource operations. Existing commits: `d756051`, `e487a63`, `8af503c`.

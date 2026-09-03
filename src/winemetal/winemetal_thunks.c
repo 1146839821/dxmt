@@ -107,6 +107,15 @@ MTLDevice_newCommandQueue(obj_handle_t device, uint64_t maxCommandBufferCount) {
 }
 
 WINEMETAL_API obj_handle_t
+MTLDevice_newSparseMappingQueue(obj_handle_t device) {
+  struct unixcall_generic_obj_obj_ret params;
+  params.handle = device;
+  params.ret = 0;
+  UNIX_CALL(unix_mtldevice_newsparsemappingqueue, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
 NSAutoreleasePool_alloc_init() {
   struct unixcall_generic_obj_ret params;
   params.ret = 0;
@@ -186,6 +195,19 @@ MTLDevice_newBuffer(obj_handle_t device, struct WMTBufferInfo *info) {
 }
 
 WINEMETAL_API obj_handle_t
+MTLDevice_newPlacementSparseBuffer(
+    obj_handle_t device, struct WMTBufferInfo *info, enum WMTSparsePageSize sparse_page_size
+) {
+  struct unixcall_mtldevice_newplacementsparsebuffer params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  params.sparse_page_size = sparse_page_size;
+  params.ret = 0;
+  UNIX_CALL(unix_mtldevice_newplacementsparsebuffer, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
 MTLDevice_newSamplerState(obj_handle_t device, struct WMTSamplerInfo *info) {
   struct unixcall_mtldevice_newsamplerstate params;
   params.device = device;
@@ -209,6 +231,19 @@ MTLDevice_newTexture(obj_handle_t device, struct WMTTextureInfo *info) {
   params.device = device;
   WMT_MEMPTR_SET(params.info, info);
   UNIX_CALL(21, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newPlacementSparseTexture(
+    obj_handle_t device, struct WMTTextureInfo *info, enum WMTSparsePageSize sparse_page_size
+) {
+  struct unixcall_mtldevice_newplacementsparsetexture params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  params.sparse_page_size = sparse_page_size;
+  params.ret = 0;
+  UNIX_CALL(unix_mtldevice_newplacementsparsetexture, &params);
   return params.ret;
 }
 
@@ -558,6 +593,15 @@ MTLDevice_supportsFamily(obj_handle_t device, enum WMTGPUFamily gpu_family) {
   params.arg = gpu_family;
   params.ret = 0;
   UNIX_CALL(49, &params);
+  return params.ret;
+}
+
+WINEMETAL_API bool
+MTLDevice_supportsPlacementSparse(obj_handle_t device) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = device;
+  params.ret = 0;
+  UNIX_CALL(unix_mtldevice_supportsplacementsparse, &params);
   return params.ret;
 }
 
@@ -1355,6 +1399,104 @@ MTLHeap_newTexture(obj_handle_t heap, struct WMTTextureInfo *info, uint64_t offs
   params.offset = offset;
   UNIX_CALL(142, &params);
   return params.ret;
+}
+
+WINEMETAL_API uint64_t
+MTLTexture_firstMipmapInTail(obj_handle_t texture) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = texture;
+  params.ret = 0;
+  UNIX_CALL(unix_mtltexture_firstmipmapintail, &params);
+  return params.ret;
+}
+
+WINEMETAL_API void
+SparseMappingQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = queue;
+  params.arg = residency_set;
+  UNIX_CALL(unix_sparsemappingqueue_addresidencyset, &params);
+}
+
+WINEMETAL_API void
+SparseMappingQueue_signalEvent(obj_handle_t queue, obj_handle_t event, uint64_t value) {
+  struct unixcall_generic_obj_obj_uint64_noret params;
+  params.handle = queue;
+  params.arg0 = event;
+  params.arg1 = value;
+  UNIX_CALL(unix_sparsemappingqueue_signalevent, &params);
+}
+
+WINEMETAL_API void
+SparseMappingQueue_waitForEvent(obj_handle_t queue, obj_handle_t event, uint64_t value) {
+  struct unixcall_generic_obj_obj_uint64_noret params;
+  params.handle = queue;
+  params.arg0 = event;
+  params.arg1 = value;
+  UNIX_CALL(unix_sparsemappingqueue_waitforevent, &params);
+}
+
+WINEMETAL_API void
+SparseMappingQueue_barrierBeforeResourceState(obj_handle_t queue) {
+  struct unixcall_generic_obj_noret params;
+  params.handle = queue;
+  UNIX_CALL(unix_sparsemappingqueue_barrierbeforeresourcestate, &params);
+}
+
+WINEMETAL_API void
+SparseMappingQueue_updateBufferMappings(
+    obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap,
+    const struct WMTUpdateSparseBufferMappingOperation *operations, uint64_t count
+) {
+  struct unixcall_sparsemappingqueue_mappings params;
+  params.queue = queue;
+  params.resource = buffer;
+  params.heap = heap;
+  WMT_MEMPTR_SET(params.operations, operations);
+  params.count = count;
+  UNIX_CALL(unix_sparsemappingqueue_updatebuffermappings, &params);
+}
+
+WINEMETAL_API void
+SparseMappingQueue_updateTextureMappings(
+    obj_handle_t queue, obj_handle_t texture, obj_handle_t heap,
+    const struct WMTUpdateSparseTextureMappingOperation *operations, uint64_t count
+) {
+  struct unixcall_sparsemappingqueue_mappings params;
+  params.queue = queue;
+  params.resource = texture;
+  params.heap = heap;
+  WMT_MEMPTR_SET(params.operations, operations);
+  params.count = count;
+  UNIX_CALL(unix_sparsemappingqueue_updatetexturemappings, &params);
+}
+
+WINEMETAL_API void
+SparseMappingQueue_copyBufferMappings(
+    obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
+    const struct WMTCopySparseBufferMappingOperation *operations, uint64_t count
+) {
+  struct unixcall_sparsemappingqueue_copy_mappings params;
+  params.queue = queue;
+  params.source = source;
+  params.destination = destination;
+  WMT_MEMPTR_SET(params.operations, operations);
+  params.count = count;
+  UNIX_CALL(unix_sparsemappingqueue_copybuffermappings, &params);
+}
+
+WINEMETAL_API void
+SparseMappingQueue_copyTextureMappings(
+    obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
+    const struct WMTCopySparseTextureMappingOperation *operations, uint64_t count
+) {
+  struct unixcall_sparsemappingqueue_copy_mappings params;
+  params.queue = queue;
+  params.source = source;
+  params.destination = destination;
+  WMT_MEMPTR_SET(params.operations, operations);
+  params.count = count;
+  UNIX_CALL(unix_sparsemappingqueue_copytexturemappings, &params);
 }
 
 WINEMETAL_API obj_handle_t

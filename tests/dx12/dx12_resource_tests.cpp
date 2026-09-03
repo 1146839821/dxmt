@@ -671,6 +671,10 @@ int main() {
   if (!expect_invalid_reserved_texture_desc("reserved texture with standard-swizzle layout", invalid_reserved_texture_desc))
     return 1;
   invalid_reserved_texture_desc = reserved_texture_desc;
+  invalid_reserved_texture_desc.MipLevels = 2;
+  if (!expect_invalid_reserved_texture_desc("reserved array texture with packed mips", invalid_reserved_texture_desc))
+    return 1;
+  invalid_reserved_texture_desc = reserved_texture_desc;
   invalid_reserved_texture_desc.Format = DXGI_FORMAT_D32_FLOAT;
   invalid_reserved_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
   if (!expect_invalid_reserved_texture_desc(
@@ -796,6 +800,7 @@ int main() {
 
   D3D12_RESOURCE_DESC reserved_texture_packed_mip_desc = reserved_texture_desc;
   reserved_texture_packed_mip_desc.Width = 192;
+  reserved_texture_packed_mip_desc.DepthOrArraySize = 1;
   reserved_texture_packed_mip_desc.MipLevels = 2;
   if (!CheckHR(
           "CreateReservedTexturePackedMips",
@@ -814,32 +819,25 @@ int main() {
   UINT reserved_texture_packed_total_tile_count = 0;
   D3D12_PACKED_MIP_INFO reserved_texture_packed_info = {};
   D3D12_TILE_SHAPE reserved_texture_packed_shape = {};
-  UINT reserved_texture_packed_subresource_count = 4;
-  D3D12_SUBRESOURCE_TILING reserved_texture_packed_tilings[4] = {};
+  UINT reserved_texture_packed_subresource_count = 2;
+  D3D12_SUBRESOURCE_TILING reserved_texture_packed_tilings[2] = {};
   device->GetResourceTiling(
       reserved_texture_packed_mips, &reserved_texture_packed_total_tile_count, &reserved_texture_packed_info,
       &reserved_texture_packed_shape, &reserved_texture_packed_subresource_count, 0,
       reserved_texture_packed_tilings
   );
-  if (reserved_texture_packed_total_tile_count != 6 || reserved_texture_packed_info.NumStandardMips != 1 ||
+  if (reserved_texture_packed_total_tile_count != 3 || reserved_texture_packed_info.NumStandardMips != 1 ||
       reserved_texture_packed_info.NumPackedMips != 1 || reserved_texture_packed_info.NumTilesForPackedMips != 1 ||
       reserved_texture_packed_info.StartTileIndexInOverallResource != 2 ||
       reserved_texture_packed_shape.WidthInTexels != 128 || reserved_texture_packed_shape.HeightInTexels != 128 ||
-      reserved_texture_packed_shape.DepthInTexels != 1 || reserved_texture_packed_subresource_count != 4 ||
+      reserved_texture_packed_shape.DepthInTexels != 1 || reserved_texture_packed_subresource_count != 2 ||
       reserved_texture_packed_tilings[0].WidthInTiles != 2 ||
       reserved_texture_packed_tilings[0].HeightInTiles != 1 ||
       reserved_texture_packed_tilings[0].DepthInTiles != 1 ||
       reserved_texture_packed_tilings[0].StartTileIndexInOverallResource != 0 ||
       reserved_texture_packed_tilings[1].WidthInTiles || reserved_texture_packed_tilings[1].HeightInTiles ||
       reserved_texture_packed_tilings[1].DepthInTiles ||
-      reserved_texture_packed_tilings[1].StartTileIndexInOverallResource != packed_tile ||
-      reserved_texture_packed_tilings[2].WidthInTiles != 2 ||
-      reserved_texture_packed_tilings[2].HeightInTiles != 1 ||
-      reserved_texture_packed_tilings[2].DepthInTiles != 1 ||
-      reserved_texture_packed_tilings[2].StartTileIndexInOverallResource != 3 ||
-      reserved_texture_packed_tilings[3].WidthInTiles || reserved_texture_packed_tilings[3].HeightInTiles ||
-      reserved_texture_packed_tilings[3].DepthInTiles ||
-      reserved_texture_packed_tilings[3].StartTileIndexInOverallResource != packed_tile) {
+      reserved_texture_packed_tilings[1].StartTileIndexInOverallResource != packed_tile) {
     std::cerr << "reserved texture packed mip tiling contract mismatch\n";
     cleanup();
     return 1;

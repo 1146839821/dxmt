@@ -272,6 +272,11 @@ public:
     return MTLTexture_mipmapLevelCount(handle);
   }
 
+  uint64_t
+  firstMipmapInTail() {
+    return MTLTexture_firstMipmapInTail(handle);
+  }
+
   void
   replaceRegion(
       WMTOrigin origin, WMTSize size, uint64_t level, uint64_t slice, const void *pixelBytes, uint64_t bytesPerRow,
@@ -745,6 +750,57 @@ public:
   }
 };
 
+class SparseMappingQueue : public Object {
+public:
+  void
+  addResidencySet(ResidencySet residency_set) {
+    SparseMappingQueue_addResidencySet(handle, residency_set.handle);
+  }
+
+  void
+  signalEvent(Event event, uint64_t value) {
+    SparseMappingQueue_signalEvent(handle, event.handle, value);
+  }
+
+  void
+  waitForEvent(Event event, uint64_t value) {
+    SparseMappingQueue_waitForEvent(handle, event.handle, value);
+  }
+
+  void
+  barrierBeforeResourceState() {
+    SparseMappingQueue_barrierBeforeResourceState(handle);
+  }
+
+  void
+  updateBufferMappings(
+      Buffer buffer, Heap heap, const WMTUpdateSparseBufferMappingOperation *operations, uint64_t count
+  ) {
+    SparseMappingQueue_updateBufferMappings(handle, buffer.handle, heap.handle, operations, count);
+  }
+
+  void
+  updateTextureMappings(
+      Texture texture, Heap heap, const WMTUpdateSparseTextureMappingOperation *operations, uint64_t count
+  ) {
+    SparseMappingQueue_updateTextureMappings(handle, texture.handle, heap.handle, operations, count);
+  }
+
+  void
+  copyBufferMappings(
+      Buffer source, Buffer destination, const WMTCopySparseBufferMappingOperation *operations, uint64_t count
+  ) {
+    SparseMappingQueue_copyBufferMappings(handle, source.handle, destination.handle, operations, count);
+  }
+
+  void
+  copyTextureMappings(
+      Texture source, Texture destination, const WMTCopySparseTextureMappingOperation *operations, uint64_t count
+  ) {
+    SparseMappingQueue_copyTextureMappings(handle, source.handle, destination.handle, operations, count);
+  }
+};
+
 class Function : public Object {};
 
 class Library : public Object {
@@ -818,6 +874,11 @@ public:
     return Reference<Buffer>(MTLDevice_newBuffer(handle, &info));
   }
 
+  Reference<Buffer>
+  newPlacementSparseBuffer(WMTBufferInfo &info, WMTSparsePageSize sparse_page_size) {
+    return Reference<Buffer>(MTLDevice_newPlacementSparseBuffer(handle, &info, sparse_page_size));
+  }
+
   Reference<SamplerState>
   newSamplerState(WMTSamplerInfo &info) {
     return Reference<SamplerState>(MTLDevice_newSamplerState(handle, &info));
@@ -831,6 +892,11 @@ public:
   Reference<Texture>
   newTexture(WMTTextureInfo &info) {
     return Reference<Texture>(MTLDevice_newTexture(handle, &info));
+  }
+
+  Reference<Texture>
+  newPlacementSparseTexture(WMTTextureInfo &info, WMTSparsePageSize sparse_page_size) {
+    return Reference<Texture>(MTLDevice_newPlacementSparseTexture(handle, &info, sparse_page_size));
   }
 
   Reference<Library>
@@ -962,6 +1028,16 @@ public:
   bool
   supportsFamily(WMTGPUFamily gpu_family) {
     return MTLDevice_supportsFamily(handle, gpu_family);
+  }
+
+  bool
+  supportsPlacementSparse() {
+    return supportsFamily(WMTGPUFamilyApple8) && MTLDevice_supportsPlacementSparse(handle);
+  }
+
+  Reference<SparseMappingQueue>
+  newSparseMappingQueue() {
+    return Reference<SparseMappingQueue>(MTLDevice_newSparseMappingQueue(handle));
   }
 
   bool

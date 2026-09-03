@@ -176,6 +176,29 @@ public:
     return E_NOTIMPL;
   }
 
+  virtual WMT::Buffer
+  GetMetalBuffer() const {
+    return {};
+  }
+
+  virtual WMT::Texture
+  GetMetalTexture() const {
+    return {};
+  }
+
+  virtual HRESULT
+  GetTileTextureCopyInfo(
+      UINT tile_index, WMTOrigin &origin, uint64_t &level, uint64_t &slice, WMTSize &size, uint32_t &bytes_per_row,
+      uint32_t &bytes_per_image
+  ) const {
+    return E_NOTIMPL;
+  }
+
+  virtual bool
+  IsTileMapped(UINT tile_index) const {
+    return false;
+  }
+
   virtual bool
   IsPackedTile(UINT tile_index) const {
     return false;
@@ -186,7 +209,7 @@ public:
       UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
       const D3D12_TILE_REGION_SIZE *pResourceRegionSizes, ID3D12Heap *pHeap, UINT NumRanges,
       const D3D12_TILE_RANGE_FLAGS *pRangeFlags, const UINT *pHeapRangeStartOffsets, const UINT *pRangeTileCounts,
-      D3D12_TILE_MAPPING_FLAGS Flags
+      D3D12_TILE_MAPPING_FLAGS Flags, WMT::SparseMappingQueue sparse_mapping_queue = {}
   ) {
     return E_NOTIMPL;
   }
@@ -195,7 +218,7 @@ public:
   CopyTileMappingsFrom(
       MTLD3D12Resource *pSourceResource, const D3D12_TILED_RESOURCE_COORDINATE *pDstRegionStartCoordinate,
       const D3D12_TILED_RESOURCE_COORDINATE *pSrcRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
-      D3D12_TILE_MAPPING_FLAGS Flags
+      D3D12_TILE_MAPPING_FLAGS Flags, WMT::SparseMappingQueue sparse_mapping_queue = {}
   ) {
     return E_NOTIMPL;
   }

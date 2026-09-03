@@ -277,6 +277,7 @@ public:
 
   Rc<TextureAllocation> allocate(Flags<TextureAllocationFlag> flags);
   Rc<TextureAllocation> allocate(WMT::Heap heap, uint64_t offset, Flags<TextureAllocationFlag> flags);
+  Rc<TextureAllocation> allocatePlacementSparse(Flags<TextureAllocationFlag> flags);
   Rc<TextureAllocation> import(mach_port_t mach_port);
 
   TextureView &view(TextureViewKey key);

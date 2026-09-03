@@ -334,6 +334,8 @@ class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
   UINT standard_tile_count_per_array_ = 0;
   UINT packed_tile_count_per_array_ = 0;
   UINT tiles_per_array_ = 0;
+  UINT sparse_first_mipmap_in_tail_ = 0;
+  UINT bytes_per_texel_ = 0;
   std::vector<D3D12_SUBRESOURCE_TILING> subresource_tilings_;
 
   struct TileMapping {
@@ -349,6 +351,39 @@ class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
 
   std::vector<TileMapping> tile_mappings_;
   mutable dxmt::mutex tile_mapping_mutex_;
+
+  bool
+  GetStandardTileRegion(UINT tile_index, WMTRegion &region, uint64_t &level, uint64_t &slice) const {
+    if (!reserved_ || !texture || !texture->current() || !standard_mip_count_ || IsPackedTile(tile_index) ||
+        tile_index >= total_tile_count_)
+      return false;
+
+    const UINT array_slice = tile_index / tiles_per_array_;
+    const UINT tile_in_array = tile_index % tiles_per_array_;
+    if (array_slice >= desc_.DepthOrArraySize)
+      return false;
+
+    const uint64_t array_tile_start = uint64_t(array_slice) * tiles_per_array_;
+    for (UINT mip_slice = 0; mip_slice < standard_mip_count_; mip_slice++) {
+      if (mip_slice >= sparse_first_mipmap_in_tail_)
+        return false;
+      const auto &tiling = subresource_tilings_[size_t(array_slice) * desc_.MipLevels + mip_slice];
+      const UINT tile_start = static_cast<UINT>(tiling.StartTileIndexInOverallResource - array_tile_start);
+      const UINT tile_count = tiling.WidthInTiles * tiling.HeightInTiles;
+      if (tile_in_array < tile_start || tile_in_array - tile_start >= tile_count)
+        continue;
+
+      const UINT tile_offset = tile_in_array - tile_start;
+      const UINT tile_x = tile_offset % tiling.WidthInTiles;
+      const UINT tile_y = tile_offset / tiling.WidthInTiles;
+      region.origin = {tile_x, tile_y, 0};
+      region.size = {1, 1, 1};
+      level = mip_slice;
+      slice = array_slice;
+      return true;
+    }
+    return false;
+  }
 
 public:
   MTLD3D12Texture(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12Resource>(pDevice) {}
@@ -456,6 +491,7 @@ public:
       return hr;
     if (!format.BytesPerTexel || !GetReservedTextureTileShape(format, tile_shape_))
       return E_NOTIMPL;
+    bytes_per_texel_ = format.BytesPerTexel;
 
     const uint64_t subresource_count = uint64_t(pDesc->MipLevels) * pDesc->DepthOrArraySize;
     if (!subresource_count || subresource_count > std::numeric_limits<UINT>::max())
@@ -469,6 +505,8 @@ public:
       standard_mip_count++;
     }
     const UINT packed_mip_count = pDesc->MipLevels - standard_mip_count;
+    if (pDesc->DepthOrArraySize > 1 && packed_mip_count)
+      return E_INVALIDARG;
 
     uint64_t standard_tiles_per_array = 0;
     uint64_t packed_mip_bytes = 0;
@@ -547,6 +585,19 @@ public:
     packed_tile_count_per_array_ = static_cast<UINT>(packed_tiles_per_array);
     tiles_per_array_ = static_cast<UINT>(tiles_per_array);
     subresource_tilings_ = std::move(subresource_tilings);
+
+    if (device_->GetMTLDevice().supportsPlacementSparse()) {
+      texture = new Texture(texture_info, device_->GetMTLDevice());
+      Flags<TextureAllocationFlag> flags;
+      flags.set(TextureAllocationFlag::CpuInvisible);
+      auto allocation = texture->allocatePlacementSparse(flags);
+      if (!allocation || !allocation->texture())
+        return E_OUTOFMEMORY;
+      texture->rename(std::move(allocation));
+      sparse_first_mipmap_in_tail_ = static_cast<UINT>(texture->current()->texture().firstMipmapInTail());
+      device_->RegisterResidency(texture->current()->texture());
+    }
+
     tile_mappings_.resize(total_tile_count_);
     return S_OK;
   };
@@ -1446,12 +1497,56 @@ public:
     return S_OK;
   }
 
+  WMT::Texture
+  GetMetalTexture() const override {
+    return texture && texture->current() ? texture->current()->texture() : WMT::Texture{};
+  }
+
+  HRESULT
+  GetTileTextureCopyInfo(
+      UINT tile_index, WMTOrigin &origin, uint64_t &level, uint64_t &slice, WMTSize &size, uint32_t &bytes_per_row,
+      uint32_t &bytes_per_image
+  ) const override {
+    WMTRegion tile_region = {};
+    if (!GetStandardTileRegion(tile_index, tile_region, level, slice))
+      return E_NOTIMPL;
+
+    const uint64_t level_width = std::max<uint64_t>(1, uint64_t(desc_.Width) >> level);
+    const uint64_t level_height = std::max<uint64_t>(1, uint64_t(desc_.Height) >> level);
+    const uint64_t origin_x = tile_region.origin.x * tile_shape_.WidthInTexels;
+    const uint64_t origin_y = tile_region.origin.y * tile_shape_.HeightInTexels;
+    if (origin_x >= level_width || origin_y >= level_height)
+      return E_INVALIDARG;
+
+    const uint64_t row_bytes = uint64_t(tile_shape_.WidthInTexels) * bytes_per_texel_;
+    if (!row_bytes || row_bytes > std::numeric_limits<uint32_t>::max())
+      return E_NOTIMPL;
+
+    origin = {origin_x, origin_y, 0};
+    size = {
+        std::min<uint64_t>(tile_shape_.WidthInTexels, level_width - origin_x),
+        std::min<uint64_t>(tile_shape_.HeightInTexels, level_height - origin_y),
+        1,
+    };
+    bytes_per_row = static_cast<uint32_t>(row_bytes);
+    bytes_per_image = static_cast<uint32_t>(kD3D12TileSize);
+    return S_OK;
+  }
+
+  bool
+  IsTileMapped(UINT tile_index) const override {
+    if (!reserved_ || tile_index >= tile_mappings_.size())
+      return false;
+    std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
+    return tile_mappings_[tile_index].heap != nullptr;
+  }
+
   HRESULT
   UpdateTileMappings(
       UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
       const D3D12_TILE_REGION_SIZE *pResourceRegionSizes, ID3D12Heap *pHeap, UINT NumRanges,
       const D3D12_TILE_RANGE_FLAGS *pRangeFlags, const UINT *pHeapRangeStartOffsets, const UINT *pRangeTileCounts,
-      D3D12_TILE_MAPPING_FLAGS Flags
+      D3D12_TILE_MAPPING_FLAGS Flags, WMT::SparseMappingQueue sparse_mapping_queue
   ) override {
     if (!reserved_ || (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD) || !NumRanges)
       return E_INVALIDARG;
@@ -1520,6 +1615,24 @@ public:
     if (resource_tile != resource_tiles.size())
       return E_INVALIDARG;
 
+    if (sparse_mapping_queue) {
+      if (!texture || !texture->current())
+        return E_OUTOFMEMORY;
+      std::vector<WMTUpdateSparseTextureMappingOperation> mapping_operations;
+      mapping_operations.reserve(updates.size());
+      for (const auto &update : updates) {
+        auto &operation = mapping_operations.emplace_back();
+        operation.mode = update.heap ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
+        if (!GetStandardTileRegion(update.resource_tile, operation.texture_region, operation.texture_level, operation.texture_slice))
+          return E_NOTIMPL;
+        operation.heap_offset = update.heap_tile;
+      }
+      sparse_mapping_queue.updateTextureMappings(
+          texture->current()->texture(), pHeap ? static_cast<MTLD3D12Heap *>(pHeap)->GetMetalHeap() : WMT::Heap{},
+          mapping_operations.data(), mapping_operations.size()
+      );
+    }
+
     std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
     for (const auto &update : updates)
       tile_mappings_[update.resource_tile] = {update.heap, update.heap_tile};
@@ -1530,7 +1643,7 @@ public:
   CopyTileMappingsFrom(
       MTLD3D12Resource *pSourceResource, const D3D12_TILED_RESOURCE_COORDINATE *pDstRegionStartCoordinate,
       const D3D12_TILED_RESOURCE_COORDINATE *pSrcRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
-      D3D12_TILE_MAPPING_FLAGS Flags
+      D3D12_TILE_MAPPING_FLAGS Flags, WMT::SparseMappingQueue sparse_mapping_queue
   ) override {
     if (!reserved_ || !pSourceResource || !pDstRegionStartCoordinate || !pSrcRegionStartCoordinate || !pRegionSize ||
         !pSourceResource->IsReservedTexture() ||
@@ -1547,6 +1660,29 @@ public:
     if (FAILED(destination_hr) || FAILED(source_hr) || destination_tiles.size() != source_tiles.size())
       return E_INVALIDARG;
 
+    std::vector<WMTCopySparseTextureMappingOperation> mapping_operations;
+    if (sparse_mapping_queue) {
+      if (!texture || !texture->current() || !source->texture || !source->texture->current())
+        return E_OUTOFMEMORY;
+      mapping_operations.reserve(destination_tiles.size());
+      for (size_t i = 0; i < destination_tiles.size(); i++) {
+        auto &operation = mapping_operations.emplace_back();
+        uint64_t source_level = 0;
+        uint64_t source_slice = 0;
+        WMTRegion destination_region = {};
+        if (!source->GetStandardTileRegion(source_tiles[i], operation.source_region, source_level, source_slice) ||
+            !GetStandardTileRegion(destination_tiles[i], destination_region, operation.destination_level,
+                                    operation.destination_slice) ||
+            operation.source_region.size.width != destination_region.size.width ||
+            operation.source_region.size.height != destination_region.size.height ||
+            operation.source_region.size.depth != destination_region.size.depth)
+          return E_NOTIMPL;
+        operation.source_level = source_level;
+        operation.source_slice = source_slice;
+        operation.destination_origin = destination_region.origin;
+      }
+    }
+
     std::vector<TileMapping> copied;
     {
       std::unique_lock<dxmt::mutex> source_lock(source->tile_mapping_mutex_);
@@ -1559,6 +1695,11 @@ public:
       for (size_t i = 0; i < destination_tiles.size(); i++)
         tile_mappings_[destination_tiles[i]] = copied[i];
     }
+    if (sparse_mapping_queue)
+      sparse_mapping_queue.copyTextureMappings(
+          source->texture->current()->texture(), texture->current()->texture(), mapping_operations.data(),
+          mapping_operations.size()
+      );
     return S_OK;
   }
 };

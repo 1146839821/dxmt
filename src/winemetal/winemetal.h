@@ -966,6 +966,16 @@ struct WMTOrigin {
   uint64_t z;
 };
 
+struct WMTRegion {
+  struct WMTOrigin origin;
+  struct WMTSize size;
+};
+
+struct WMTRange {
+  uint64_t location;
+  uint64_t length;
+};
+
 enum WMTBlitCommandType : uint16_t {
   WMTBlitCommandNop,
   WMTBlitCommandCopyFromBufferToBuffer,
@@ -1770,6 +1780,7 @@ WINEMETAL_API uint64_t MTLTexture_height(obj_handle_t texture);
 WINEMETAL_API uint64_t MTLTexture_depth(obj_handle_t texture);
 WINEMETAL_API uint64_t MTLTexture_arrayLength(obj_handle_t texture);
 WINEMETAL_API uint64_t MTLTexture_mipmapLevelCount(obj_handle_t texture);
+WINEMETAL_API uint64_t MTLTexture_firstMipmapInTail(obj_handle_t texture);
 WINEMETAL_API void MTLTexture_replaceRegion(
     obj_handle_t texture, struct WMTOrigin origin, struct WMTSize size, uint64_t level, uint64_t slice,
     struct WMTMemoryPointer data, uint64_t bytes_per_row, uint64_t bytes_per_image
@@ -1805,9 +1816,12 @@ enum WMTGPUFamily {
   WMTGPUFamilyMacCatalyst1 = 4001,
   WMTGPUFamilyMacCatalyst2 = 4002,
   WMTGPUFamilyMetal3 = 5001,
+  WMTGPUFamilyMetal4 = 5002,
 };
 
 WINEMETAL_API bool MTLDevice_supportsFamily(obj_handle_t device, enum WMTGPUFamily gpu_family);
+
+WINEMETAL_API bool MTLDevice_supportsPlacementSparse(obj_handle_t device);
 
 WINEMETAL_API bool MTLDevice_supportsBCTextureCompression(obj_handle_t device);
 
@@ -2223,6 +2237,77 @@ struct WMTHeapInfo {
 STATIC_ASSERT(sizeof(WMTHeapInfo) == 24);
 
 WINEMETAL_API obj_handle_t MTLDevice_newHeap(obj_handle_t device, const struct WMTHeapInfo *info);
+
+enum WMTSparseTextureMappingMode : uint32_t {
+  WMTSparseTextureMappingModeMap = 0,
+  WMTSparseTextureMappingModeUnmap = 1,
+};
+
+struct WMTUpdateSparseTextureMappingOperation {
+  enum WMTSparseTextureMappingMode mode;
+  struct WMTRegion texture_region;
+  uint64_t texture_level;
+  uint64_t texture_slice;
+  uint64_t heap_offset;
+};
+
+struct WMTCopySparseTextureMappingOperation {
+  struct WMTRegion source_region;
+  uint64_t source_level;
+  uint64_t source_slice;
+  struct WMTOrigin destination_origin;
+  uint64_t destination_level;
+  uint64_t destination_slice;
+};
+
+struct WMTUpdateSparseBufferMappingOperation {
+  enum WMTSparseTextureMappingMode mode;
+  struct WMTRange buffer_range;
+  uint64_t heap_offset;
+};
+
+struct WMTCopySparseBufferMappingOperation {
+  struct WMTRange source_range;
+  uint64_t destination_offset;
+};
+
+WINEMETAL_API obj_handle_t MTLDevice_newPlacementSparseBuffer(
+    obj_handle_t device, struct WMTBufferInfo *info, enum WMTSparsePageSize sparse_page_size
+);
+
+WINEMETAL_API obj_handle_t MTLDevice_newPlacementSparseTexture(
+    obj_handle_t device, struct WMTTextureInfo *info, enum WMTSparsePageSize sparse_page_size
+);
+
+WINEMETAL_API obj_handle_t MTLDevice_newSparseMappingQueue(obj_handle_t device);
+
+WINEMETAL_API void SparseMappingQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set);
+
+WINEMETAL_API void SparseMappingQueue_signalEvent(obj_handle_t queue, obj_handle_t event, uint64_t value);
+
+WINEMETAL_API void SparseMappingQueue_waitForEvent(obj_handle_t queue, obj_handle_t event, uint64_t value);
+
+WINEMETAL_API void SparseMappingQueue_barrierBeforeResourceState(obj_handle_t queue);
+
+WINEMETAL_API void SparseMappingQueue_updateBufferMappings(
+    obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap,
+    const struct WMTUpdateSparseBufferMappingOperation *operations, uint64_t count
+);
+
+WINEMETAL_API void SparseMappingQueue_updateTextureMappings(
+    obj_handle_t queue, obj_handle_t texture, obj_handle_t heap,
+    const struct WMTUpdateSparseTextureMappingOperation *operations, uint64_t count
+);
+
+WINEMETAL_API void SparseMappingQueue_copyBufferMappings(
+    obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
+    const struct WMTCopySparseBufferMappingOperation *operations, uint64_t count
+);
+
+WINEMETAL_API void SparseMappingQueue_copyTextureMappings(
+    obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
+    const struct WMTCopySparseTextureMappingOperation *operations, uint64_t count
+);
 
 struct WMTSizeAndAlign {
   // 32-bit is sufficient

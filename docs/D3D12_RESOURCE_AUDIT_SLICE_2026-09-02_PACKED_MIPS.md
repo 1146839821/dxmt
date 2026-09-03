@@ -35,8 +35,9 @@ did not model the packed tail used by the D3D12 tile address contract.
   `D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE`. The Metal allocation path may
   normalize that layout to `D3D12_TEXTURE_LAYOUT_UNKNOWN` internally while the
   resource-facing descriptor retains the tiled layout.
-- The regression uses two array slices with packed tails. That combination is a
-  Tier 4 semantic and must not be treated as Tier 2 or Tier 3 support.
+- Packed tails are accepted only for a single array slice. Arrayed packed tails
+  are rejected at the reserved-resource boundary and must not be treated as
+  Tier 2 or Tier 3 support.
 - DXMT continues to report `TiledResourcesTier` as
   `D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED`; no tiled-resource tier is claimed
   by this logical model.
@@ -53,7 +54,8 @@ did not model the packed tail used by the D3D12 tile address contract.
 - `src/d3d12/d3d12_command_queue.cpp`
   - Retains the same rejection as a translation-time defensive check.
 - `tests/dx12/dx12_resource_tests.cpp`
-  - Covers packed-tail `GetResourceTiling`, mapping, and `CopyTiles` rejection.
+  - Covers single-array packed-tail `GetResourceTiling`, mapping, and `CopyTiles`
+    rejection, plus arrayed packed-tail rejection.
 
 ## Validation
 

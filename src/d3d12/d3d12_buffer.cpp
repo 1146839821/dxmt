@@ -172,6 +172,19 @@ public:
     InitializeStateTracking(desc_, device_->GetMTLDevice());
     reserved_ = true;
     tile_count_ = static_cast<UINT>(tile_count);
+
+    if (device_->GetMTLDevice().supportsPlacementSparse()) {
+      const uint64_t sparse_length = tile_count * uint64_t(kD3D12TileSize);
+      buffer = new Buffer(sparse_length, device_->GetMTLDevice());
+      Flags<BufferAllocationFlag> flags;
+      flags.set(BufferAllocationFlag::CpuInvisible);
+      auto allocation = buffer->allocatePlacementSparse(flags);
+      if (!allocation || !allocation->buffer())
+        return E_OUTOFMEMORY;
+      buffer->rename(std::move(allocation));
+      device_->RegisterResidencyAndVA(buffer->current());
+    }
+
     tile_mappings_.resize(tile_count_);
     return S_OK;
   }
@@ -453,12 +466,25 @@ public:
     return S_OK;
   }
 
+  WMT::Buffer
+  GetMetalBuffer() const override {
+    return buffer && buffer->current() ? buffer->current()->buffer() : WMT::Buffer{};
+  }
+
+  bool
+  IsTileMapped(UINT tile_index) const override {
+    if (!reserved_ || tile_index >= tile_mappings_.size())
+      return false;
+    std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
+    return tile_mappings_[tile_index].heap != nullptr;
+  }
+
   HRESULT
   UpdateTileMappings(
       UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
       const D3D12_TILE_REGION_SIZE *pResourceRegionSizes, ID3D12Heap *pHeap, UINT NumRanges,
       const D3D12_TILE_RANGE_FLAGS *pRangeFlags, const UINT *pHeapRangeStartOffsets, const UINT *pRangeTileCounts,
-      D3D12_TILE_MAPPING_FLAGS Flags
+      D3D12_TILE_MAPPING_FLAGS Flags, WMT::SparseMappingQueue sparse_mapping_queue
   ) override {
     if (!reserved_ || (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD))
       return E_INVALIDARG;
@@ -531,6 +557,24 @@ public:
     if (resource_tile != resource_tiles.size())
       return E_INVALIDARG;
 
+    if (sparse_mapping_queue) {
+      if (!buffer || !buffer->current())
+        return E_OUTOFMEMORY;
+      std::vector<WMTUpdateSparseBufferMappingOperation> mapping_operations;
+      mapping_operations.reserve(updates.size());
+      for (const auto &update : updates) {
+        auto &operation = mapping_operations.emplace_back();
+        operation.mode = update.heap ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
+        operation.buffer_range.location = update.resource_tile;
+        operation.buffer_range.length = 1;
+        operation.heap_offset = update.heap_tile;
+      }
+      sparse_mapping_queue.updateBufferMappings(
+          buffer->current()->buffer(), pHeap ? static_cast<MTLD3D12Heap *>(pHeap)->GetMetalHeap() : WMT::Heap{},
+          mapping_operations.data(), mapping_operations.size()
+      );
+    }
+
     std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
     for (const auto &update : updates)
       tile_mappings_[update.resource_tile] = {update.heap, update.heap_tile};
@@ -541,7 +585,7 @@ public:
   CopyTileMappingsFrom(
       MTLD3D12Resource *pSourceResource, const D3D12_TILED_RESOURCE_COORDINATE *pDstRegionStartCoordinate,
       const D3D12_TILED_RESOURCE_COORDINATE *pSrcRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
-      D3D12_TILE_MAPPING_FLAGS Flags
+      D3D12_TILE_MAPPING_FLAGS Flags, WMT::SparseMappingQueue sparse_mapping_queue
   ) override {
     if (!reserved_ || !pSourceResource || !pDstRegionStartCoordinate || !pSrcRegionStartCoordinate || !pRegionSize ||
         !pSourceResource->IsReservedResource() ||
@@ -569,6 +613,9 @@ public:
         src_coordinate.X > source->tile_count_ || tile_count > source->tile_count_ - src_coordinate.X ||
         !pRegionSize)
       return E_INVALIDARG;
+    if (sparse_mapping_queue &&
+        (!buffer || !buffer->current() || !source->buffer || !source->buffer->current()))
+      return E_OUTOFMEMORY;
 
     std::vector<TileMapping> copied;
     {
@@ -581,6 +628,21 @@ public:
     {
       std::unique_lock<dxmt::mutex> destination_lock(tile_mapping_mutex_);
       std::copy(copied.begin(), copied.end(), tile_mappings_.begin() + dst_coordinate.X);
+    }
+
+    if (sparse_mapping_queue) {
+      std::vector<WMTCopySparseBufferMappingOperation> mapping_operations;
+      mapping_operations.reserve(tile_count);
+      for (UINT tile = 0; tile < tile_count; tile++) {
+        auto &operation = mapping_operations.emplace_back();
+        operation.source_range.location = src_coordinate.X + tile;
+        operation.source_range.length = 1;
+        operation.destination_offset = dst_coordinate.X + tile;
+      }
+      sparse_mapping_queue.copyBufferMappings(
+          source->buffer->current()->buffer(), buffer->current()->buffer(), mapping_operations.data(),
+          mapping_operations.size()
+      );
     }
     return S_OK;
   }
