@@ -111,6 +111,9 @@ without first documenting a changed contract or a regression.
 - [x] Heap properties reject unknown CPU page-property and memory-pool enum
    values while preserving custom/non-custom field rules. See
    `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_HEAP_PROPERTIES.md`.
+- [x] Display heap flags enforce committed default-heap and displayable
+   Texture2D description compatibility. See
+   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_DISPLAY_HEAPS.md`.
 
 ## Next Slices
 

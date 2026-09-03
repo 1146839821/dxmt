@@ -506,6 +506,15 @@ ValidateResourceHeapCompatibility(const D3D12_RESOURCE_DESC *pDesc, D3D12_HEAP_F
   if (!pDesc)
     return E_INVALIDARG;
 
+  if (Flags & D3D12_HEAP_FLAG_ALLOW_DISPLAY) {
+    if (pDesc->Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || pDesc->Alignment ||
+        (pDesc->DepthOrArraySize != 1 && pDesc->DepthOrArraySize != 2) || pDesc->MipLevels != 1 ||
+        pDesc->SampleDesc.Count != 1 || pDesc->SampleDesc.Quality != 0 ||
+        pDesc->Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN ||
+        (pDesc->Flags & (D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER)))
+      return E_INVALIDARG;
+  }
+
   if ((pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER) &&
       !(Flags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER))
     return E_INVALIDARG;
@@ -537,6 +546,9 @@ ValidateHeapProperties(const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS
   default:
     return E_INVALIDARG;
   }
+
+  if ((Flags & D3D12_HEAP_FLAG_ALLOW_DISPLAY) && pHeapProps->Type != D3D12_HEAP_TYPE_DEFAULT)
+    return E_INVALIDARG;
 
   // DXMT exposes a single adapter node. D3D12 treats zero as node 1 for single-node devices.
   if ((pHeapProps->CreationNodeMask & ~1u) || (pHeapProps->VisibleNodeMask & ~1u))

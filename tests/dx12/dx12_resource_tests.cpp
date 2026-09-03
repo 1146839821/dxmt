@@ -539,6 +539,50 @@ int main() {
   reserved_texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   reserved_texture_desc.SampleDesc.Count = 1;
   reserved_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+  D3D12_HEAP_PROPERTIES invalid_display_heap_properties = committed1_properties;
+  invalid_display_heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+  invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreateCommittedResource(
+          &invalid_display_heap_properties, D3D12_HEAP_FLAG_ALLOW_DISPLAY, &committed1_desc,
+          D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&invalid_committed)
+      ) != E_INVALIDARG || invalid_committed != nullptr) {
+    std::cerr << "display heap flag was accepted on a non-default heap\n";
+    cleanup();
+    return 1;
+  }
+  invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreateCommittedResource(
+          &committed1_properties, D3D12_HEAP_FLAG_ALLOW_DISPLAY, &committed1_desc,
+          D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&invalid_committed)
+      ) != E_INVALIDARG || invalid_committed != nullptr) {
+    std::cerr << "display heap flag was accepted for a buffer\n";
+    cleanup();
+    return 1;
+  }
+  D3D12_RESOURCE_DESC invalid_display_texture_desc = reserved_texture_desc;
+  invalid_display_texture_desc.DepthOrArraySize = 3;
+  invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreateCommittedResource(
+          &committed1_properties, D3D12_HEAP_FLAG_ALLOW_DISPLAY, &invalid_display_texture_desc,
+          D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&invalid_committed)
+      ) != E_INVALIDARG || invalid_committed != nullptr) {
+    std::cerr << "display heap flag was accepted for an oversized texture array\n";
+    cleanup();
+    return 1;
+  }
+  invalid_display_texture_desc = reserved_texture_desc;
+  invalid_display_texture_desc.MipLevels = 2;
+  invalid_committed = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(1));
+  if (device->CreateCommittedResource(
+          &committed1_properties, D3D12_HEAP_FLAG_ALLOW_DISPLAY, &invalid_display_texture_desc,
+          D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&invalid_committed)
+      ) != E_INVALIDARG || invalid_committed != nullptr) {
+    std::cerr << "display heap flag was accepted for a multi-mip texture\n";
+    cleanup();
+    return 1;
+  }
+
   if (!CheckHR(
           "CreateReservedTexture",
           device->CreateReservedResource(
