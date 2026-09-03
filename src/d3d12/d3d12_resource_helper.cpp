@@ -520,6 +520,24 @@ ValidateHeapProperties(const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS
   if (Flags & ~kKnownHeapFlags)
     return E_INVALIDARG;
 
+  switch (pHeapProps->CPUPageProperty) {
+  case D3D12_CPU_PAGE_PROPERTY_UNKNOWN:
+  case D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE:
+  case D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE:
+  case D3D12_CPU_PAGE_PROPERTY_WRITE_BACK:
+    break;
+  default:
+    return E_INVALIDARG;
+  }
+  switch (pHeapProps->MemoryPoolPreference) {
+  case D3D12_MEMORY_POOL_UNKNOWN:
+  case D3D12_MEMORY_POOL_L0:
+  case D3D12_MEMORY_POOL_L1:
+    break;
+  default:
+    return E_INVALIDARG;
+  }
+
   // DXMT exposes a single adapter node. D3D12 treats zero as node 1 for single-node devices.
   if ((pHeapProps->CreationNodeMask & ~1u) || (pHeapProps->VisibleNodeMask & ~1u))
     return E_INVALIDARG;

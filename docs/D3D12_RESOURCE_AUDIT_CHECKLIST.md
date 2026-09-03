@@ -108,6 +108,9 @@ without first documenting a changed contract or a regression.
 - [x] Reserved textures accept optional optimized clear values while buffers
   continue to reject them. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_CLEAR_VALUES.md`.
+- [x] Heap properties reject unknown CPU page-property and memory-pool enum
+   values while preserving custom/non-custom field rules. See
+   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_HEAP_PROPERTIES.md`.
 
 ## Next Slices
 

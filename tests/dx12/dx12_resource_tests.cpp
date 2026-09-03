@@ -1424,6 +1424,18 @@ int main() {
   if (!expect_heap_parity("invalid memory pool", heap_parity_desc, E_INVALIDARG))
     return 1;
   heap_parity_desc = upload_desc;
+  heap_parity_desc.Properties.Type = D3D12_HEAP_TYPE_CUSTOM;
+  heap_parity_desc.Properties.CPUPageProperty = static_cast<D3D12_CPU_PAGE_PROPERTY>(0x4u);
+  heap_parity_desc.Properties.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+  if (!expect_heap_parity("unknown custom CPU page property", heap_parity_desc, E_INVALIDARG))
+    return 1;
+  heap_parity_desc = upload_desc;
+  heap_parity_desc.Properties.Type = D3D12_HEAP_TYPE_CUSTOM;
+  heap_parity_desc.Properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE;
+  heap_parity_desc.Properties.MemoryPoolPreference = static_cast<D3D12_MEMORY_POOL>(0x3u);
+  if (!expect_heap_parity("unknown custom memory pool", heap_parity_desc, E_INVALIDARG))
+    return 1;
+  heap_parity_desc = upload_desc;
   heap_parity_desc.Flags = D3D12_HEAP_FLAG_SHARED;
   if (!expect_heap_parity("unsupported shared heap", heap_parity_desc, E_NOTIMPL))
     return 1;
