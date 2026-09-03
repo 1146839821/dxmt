@@ -530,6 +530,10 @@ HRESULT ValidateTextureResourceFlags(const D3D12_RESOURCE_DESC &Desc);
 
 HRESULT ValidateTextureResourceCapabilities(const D3D12_RESOURCE_DESC &Desc, FormatCapability Capabilities);
 
+bool CanUseSmallTextureAlignment(
+    const D3D12_RESOURCE_DESC &Desc, const MTL_DXGI_FORMAT_DESC &Format, UINT64 Alignment
+);
+
 bool IsD3D12BoxInBounds(D3D12_BOX &box, D3D12_BOX &bounds);
 
 } // namespace dxmt

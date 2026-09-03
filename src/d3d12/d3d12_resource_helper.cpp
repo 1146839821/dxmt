@@ -351,14 +351,204 @@ IsCpuVisibleHeap(const D3D12_HEAP_PROPERTIES *pHeapProps) {
 
 bool
 IsValidBufferResourceDesc(const D3D12_RESOURCE_DESC &Desc) {
+  // Accept DENY_SHADER_RESOURCE as a compatibility no-op for buffers.
   return Desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && Desc.Width && Desc.Height == 1 &&
          Desc.DepthOrArraySize == 1 && Desc.MipLevels == 1 && Desc.Format == DXGI_FORMAT_UNKNOWN &&
          Desc.SampleDesc.Count == 1 && Desc.SampleDesc.Quality == 0 && Desc.Layout == D3D12_TEXTURE_LAYOUT_ROW_MAJOR &&
          (!Desc.Alignment || Desc.Alignment == D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) &&
          !(Desc.Flags & ~kKnownResourceFlags) &&
-         !(Desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
-                         D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) &&
+         !(Desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) &&
          !(Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS);
+}
+
+struct SmallResourceTileShape {
+  UINT width;
+  UINT height;
+  UINT depth;
+};
+
+static bool
+GetSmallResourceTileShape(
+    D3D12_RESOURCE_DIMENSION dimension, bool is_msaa, UINT64 bits_per_unit, SmallResourceTileShape &shape
+) {
+  if (is_msaa) {
+    if (dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+      return false;
+
+    switch (bits_per_unit) {
+    case 8:
+      shape = {256, 256, 1};
+      return true;
+    case 16:
+      shape = {256, 128, 1};
+      return true;
+    case 32:
+      shape = {128, 128, 1};
+      return true;
+    case 64:
+      shape = {128, 64, 1};
+      return true;
+    case 128:
+      shape = {64, 64, 1};
+      return true;
+    case 256:
+      shape = {64, 32, 1};
+      return true;
+    case 512:
+      shape = {32, 32, 1};
+      return true;
+    case 1024:
+      shape = {32, 16, 1};
+      return true;
+    case 2048:
+      shape = {16, 16, 1};
+      return true;
+    default:
+      return false;
+    }
+  }
+
+  switch (dimension) {
+  case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+    switch (bits_per_unit) {
+    case 8:
+      shape = {4096, 1, 1};
+      return true;
+    case 16:
+      shape = {2048, 1, 1};
+      return true;
+    case 32:
+      shape = {1024, 1, 1};
+      return true;
+    case 64:
+      shape = {512, 1, 1};
+      return true;
+    case 128:
+      shape = {256, 1, 1};
+      return true;
+    default:
+      return false;
+    }
+
+  case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+    switch (bits_per_unit) {
+    case 8:
+      shape = {64, 64, 1};
+      return true;
+    case 16:
+      shape = {64, 32, 1};
+      return true;
+    case 32:
+      shape = {32, 32, 1};
+      return true;
+    case 64:
+      shape = {32, 16, 1};
+      return true;
+    case 128:
+      shape = {16, 16, 1};
+      return true;
+    default:
+      return false;
+    }
+
+  case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
+    switch (bits_per_unit) {
+    case 8:
+      shape = {16, 16, 16};
+      return true;
+    case 16:
+      shape = {16, 16, 8};
+      return true;
+    case 32:
+      shape = {16, 8, 8};
+      return true;
+    case 64:
+      shape = {8, 8, 8};
+      return true;
+    case 128:
+      shape = {8, 8, 4};
+      return true;
+    default:
+      return false;
+    }
+
+  default:
+    return false;
+  }
+}
+
+bool
+CanUseSmallTextureAlignment(const D3D12_RESOURCE_DESC &Desc, const MTL_DXGI_FORMAT_DESC &Format, UINT64 Alignment) {
+  if (!Desc.SampleDesc.Count || Desc.Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN || Desc.Width > UINT_MAX)
+    return false;
+
+  const bool is_msaa = Desc.SampleDesc.Count > 1;
+  const bool is_rt_ds =
+      Desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  if (Alignment == D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) {
+    if (is_msaa || is_rt_ds)
+      return false;
+  } else if (Alignment == D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) {
+    if (!is_msaa || !is_rt_ds)
+      return false;
+  } else {
+    return false;
+  }
+
+  UINT64 size_x = Desc.Width;
+  UINT64 size_y = 1;
+  UINT64 size_z = 1;
+  UINT64 bits_per_unit;
+  if (Format.Flag & MTL_DXGI_FORMAT_BC) {
+    if (is_msaa || Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D || !Format.BlockSize)
+      return false;
+    size_x = size_x / 4 + (size_x % 4 != 0);
+    bits_per_unit = UINT64(Format.BlockSize) * 8;
+  } else {
+    if (!Format.BytesPerTexel)
+      return false;
+    bits_per_unit = UINT64(Format.BytesPerTexel) * 8;
+  }
+
+  switch (Desc.Dimension) {
+  case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+    break;
+  case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+    size_y = Desc.Height;
+    if (Format.Flag & MTL_DXGI_FORMAT_BC)
+      size_y = size_y / 4 + (size_y % 4 != 0);
+    break;
+  case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
+    size_y = Desc.Height;
+    size_z = Desc.DepthOrArraySize;
+    if (Format.Flag & MTL_DXGI_FORMAT_BC)
+      size_y = size_y / 4 + (size_y % 4 != 0);
+    break;
+  default:
+    return false;
+  }
+
+  if (bits_per_unit > UINT64_MAX / Desc.SampleDesc.Count)
+    return false;
+  bits_per_unit *= Desc.SampleDesc.Count;
+
+  SmallResourceTileShape tile_shape = {};
+  if (!GetSmallResourceTileShape(Desc.Dimension, is_msaa, bits_per_unit, tile_shape))
+    return false;
+
+  const UINT64 max_tile_count = is_msaa ? 64 : 16;
+  const UINT64 tile_counts[] = {
+      size_x / tile_shape.width + (size_x % tile_shape.width != 0),
+      size_y / tile_shape.height + (size_y % tile_shape.height != 0),
+      size_z / tile_shape.depth + (size_z % tile_shape.depth != 0),
+  };
+  UINT64 tile_count = 1;
+  for (UINT64 count : tile_counts) {
+    if (!count || count > max_tile_count / tile_count)
+      return false;
+    tile_count *= count;
+  }
+  return true;
 }
 
 HRESULT

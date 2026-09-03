@@ -7,15 +7,19 @@ Scope: Buffer resource descriptor flags at creation and allocation-info boundari
 ## Contract
 
 Buffer descriptors retain support for buffer-relevant flags such as unordered
-access and cross-adapter compatibility checks. They reject flags whose resource
-semantics are texture-only or require depth-stencil resources:
+access and cross-adapter compatibility checks. They reject render-target and
+depth-stencil flags, while accepting `D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE`
+as a compatibility no-op. Some applications send that flag on buffers even
+though the Windows documentation specifies it for depth-stencil resources; the
+DXMT buffer implementation has no separate shader-resource restriction to
+preserve.
 
 - `D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET`
 - `D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL`
-- `D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE`
 
 The shared `IsValidBufferResourceDesc` validator now enforces this for both
-resource creation and `GetResourceAllocationInfo1`.
+resource creation and `GetResourceAllocationInfo1`, including the compatibility
+acceptance for the deny-shader-resource flag.
 
 ## Changed Files
 

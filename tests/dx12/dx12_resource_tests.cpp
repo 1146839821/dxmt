@@ -379,6 +379,21 @@ int main() {
     }
     return true;
   };
+  auto expect_valid_buffer_desc = [&](const char *name, const D3D12_RESOURCE_DESC &desc) {
+    invalid_committed = nullptr;
+    const HRESULT hr = device->CreateCommittedResource(
+        &committed1_properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+        IID_PPV_ARGS(&invalid_committed)
+    );
+    if (FAILED(hr) || !invalid_committed) {
+      std::cerr << name << " was rejected: 0x" << std::hex << static_cast<unsigned long>(hr) << std::dec << "\n";
+      cleanup();
+      return false;
+    }
+    invalid_committed->Release();
+    invalid_committed = nullptr;
+    return true;
+  };
   D3D12_RESOURCE_DESC invalid_buffer_desc = committed1_desc;
   invalid_buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
   if (!expect_invalid_buffer_desc("buffer with non-row-major layout", invalid_buffer_desc))
@@ -405,7 +420,7 @@ int main() {
     return 1;
   invalid_buffer_desc = committed1_desc;
   invalid_buffer_desc.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
-  if (!expect_invalid_buffer_desc("buffer with deny-shader-resource flag", invalid_buffer_desc))
+  if (!expect_valid_buffer_desc("buffer with deny-shader-resource flag", invalid_buffer_desc))
     return 1;
   invalid_buffer_desc = committed1_desc;
   invalid_buffer_desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
@@ -1098,6 +1113,17 @@ int main() {
     cleanup();
     return 1;
   }
+  D3D12_RESOURCE_DESC deny_shader_resource_buffer_desc = buffer_desc;
+  deny_shader_resource_buffer_desc.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+  D3D12_RESOURCE_ALLOCATION_INFO deny_shader_resource_info = device->GetResourceAllocationInfo(
+      0, 1, &deny_shader_resource_buffer_desc
+  );
+  if (!deny_shader_resource_info.SizeInBytes || deny_shader_resource_info.SizeInBytes == UINT64_MAX ||
+      deny_shader_resource_info.Alignment < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) {
+    std::cerr << "deny-shader-resource buffer produced invalid allocation info\n";
+    cleanup();
+    return 1;
+  }
   D3D12_RESOURCE_ALLOCATION_INFO1 buffer_info1 = {};
   D3D12_RESOURCE_ALLOCATION_INFO buffer_info4 =
       device4->GetResourceAllocationInfo1(0, 1, &buffer_desc, &buffer_info1);
@@ -1130,6 +1156,18 @@ int main() {
   if (texture_only_buffer_info4.SizeInBytes != UINT64_MAX || texture_only_buffer_info1.SizeInBytes ||
       texture_only_buffer_info1.Offset || texture_only_buffer_info1.Alignment) {
     std::cerr << "allocation info accepted a texture-only buffer flag\n";
+    cleanup();
+    return 1;
+  }
+  D3D12_RESOURCE_ALLOCATION_INFO1 deny_shader_resource_info1 = {};
+  D3D12_RESOURCE_ALLOCATION_INFO deny_shader_resource_info4 = device4->GetResourceAllocationInfo1(
+      0, 1, &deny_shader_resource_buffer_desc, &deny_shader_resource_info1
+  );
+  if (!deny_shader_resource_info4.SizeInBytes || deny_shader_resource_info4.SizeInBytes == UINT64_MAX ||
+      !deny_shader_resource_info1.SizeInBytes || deny_shader_resource_info1.SizeInBytes == UINT64_MAX ||
+      deny_shader_resource_info1.Offset ||
+      deny_shader_resource_info1.Alignment < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) {
+    std::cerr << "deny-shader-resource buffer produced invalid Device4 allocation info\n";
     cleanup();
     return 1;
   }
@@ -1475,6 +1513,70 @@ int main() {
     cleanup();
     return 1;
   }
+  auto expect_valid_small_allocation = [&](const char *name,
+                                           const D3D12_RESOURCE_DESC &desc) {
+    const auto info = device->GetResourceAllocationInfo(0, 1, &desc);
+    if (!info.SizeInBytes || info.SizeInBytes == UINT64_MAX ||
+        info.Alignment < D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) {
+      std::cerr << name
+                << " produced invalid small-resource allocation info: size="
+                << info.SizeInBytes << " alignment=" << info.Alignment << "\n";
+      cleanup();
+      return false;
+    }
+    return true;
+  };
+
+  D3D12_RESOURCE_DESC small_boundary_desc = texture_desc;
+  small_boundary_desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+  small_boundary_desc.Width = 128;
+  small_boundary_desc.Height = 128;
+  if (!expect_valid_small_allocation("128x128 RGBA8 small texture",
+                                     small_boundary_desc))
+    return 1;
+  small_boundary_desc.Width = 129;
+  if (!expect_invalid_texture_allocation("129x128 RGBA8 small texture",
+                                         small_boundary_desc) ||
+      !expect_invalid_texture_desc("129x128 RGBA8 small texture",
+                                   small_boundary_desc))
+    return 1;
+
+  D3D12_RESOURCE_DESC small_array_desc = texture_desc;
+  small_array_desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+  small_array_desc.Width = 128;
+  small_array_desc.Height = 128;
+  small_array_desc.DepthOrArraySize = 64;
+  small_array_desc.MipLevels = 7;
+  if (!expect_valid_small_allocation("arrayed mipped RGBA8 small texture",
+                                     small_array_desc))
+    return 1;
+
+  D3D12_RESOURCE_DESC small_bc_desc = texture_desc;
+  small_bc_desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+  small_bc_desc.Format = DXGI_FORMAT_BC1_UNORM;
+  small_bc_desc.Width = 512;
+  small_bc_desc.Height = 256;
+  if (!expect_valid_small_allocation("512x256 BC1 small texture",
+                                     small_bc_desc))
+    return 1;
+  small_bc_desc.Width = 513;
+  if (!expect_invalid_texture_allocation("513x256 BC1 small texture",
+                                         small_bc_desc))
+    return 1;
+
+  D3D12_RESOURCE_DESC small_3d_desc = texture_desc;
+  small_3d_desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+  small_3d_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+  small_3d_desc.Format = DXGI_FORMAT_R8_UNORM;
+  small_3d_desc.Width = 64;
+  small_3d_desc.Height = 64;
+  small_3d_desc.DepthOrArraySize = 4;
+  if (!expect_valid_small_allocation("64x64x4 R8 small texture", small_3d_desc))
+    return 1;
+  small_3d_desc.DepthOrArraySize = 17;
+  if (!expect_invalid_texture_allocation("64x64x17 R8 small texture",
+                                         small_3d_desc))
+    return 1;
 
   D3D12_RESOURCE_DESC footprint_desc = texture_desc;
   footprint_desc.Width = 5;
@@ -1569,6 +1671,17 @@ int main() {
     cleanup();
     return 1;
   }
+  D3D12_RESOURCE_DESC small_msaa_desc = texture_desc;
+  small_msaa_desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+  small_msaa_desc.Width = 512;
+  small_msaa_desc.Height = 512;
+  if (!expect_valid_small_allocation("512x512 RGBA8 MSAA small texture",
+                                     small_msaa_desc))
+    return 1;
+  small_msaa_desc.Width = 513;
+  if (!expect_invalid_texture_allocation("513x512 RGBA8 MSAA small texture",
+                                         small_msaa_desc))
+    return 1;
   texture_desc.SampleDesc.Count = 1;
   texture_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
 

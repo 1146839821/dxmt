@@ -63,10 +63,11 @@ without first documenting a changed contract or a regression.
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_NULL_OUTPUTS.md`.
 - [x] Texture subresource and data-pointer range validation. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_RESOURCE_RANGES.md`.
-- [~] Texture resource alignment form and eligibility validation, including 4 KiB
+- [x] Texture resource alignment form and eligibility validation, including 4 KiB
   small resources and 64 KiB-aligned small MSAA resources. Small-resource size
-  eligibility is currently a Metal-dependent approximation, not the
-  architecture-independent D3D12 estimate. See
+  eligibility uses an architecture-independent D3D12 tile estimate. See
+  `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_SMALL_RESOURCE_ESTIMATOR.md` and the
+  earlier form-validation record in
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_RESOURCE_ALIGNMENT.md`.
 - [x] Texture transfer row-pitch, depth-slice-pitch, and BC box-alignment
   validation. See `D3D12_RESOURCE_AUDIT_SLICE_2026-09-02_RESOURCE_PITCHES.md`.
@@ -106,8 +107,9 @@ without first documenting a changed contract or a regression.
 - [x] Heap creation rejects unknown heap flag bits consistently through
   `CreateHeap` and `CreateHeap1`. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_HEAP_FLAGS.md`.
-- [x] Buffer resource descriptors reject texture-only flags consistently in
-  creation and allocation-info paths. See
+- [x] Buffer resource descriptors reject incompatible render-target and
+  depth-stencil flags while accepting the observed deny-shader-resource
+  compatibility flag consistently in creation and allocation-info paths. See
   `D3D12_RESOURCE_AUDIT_SLICE_2026-09-03_BUFFER_FLAGS.md`.
 - [x] Reserved textures accept optional optimized clear values while buffers
   continue to reject them. See
