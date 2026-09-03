@@ -18,7 +18,8 @@ subresource and one-dimensional tile range.
     `CopyTileMappingsFrom`.
   - Reuses `GetTileIndices` from update-mapping region traversal.
 - `tests/dx12/dx12_resource_tests.cpp`
-  - Exercises a boxed reserved-buffer mapping and `CopyTiles` upload.
+  - Exercises boxed reserved-buffer mapping, `CopyTiles` upload, and valid
+    `CopyTileMappings` copying; invalid box shapes preserve the destination.
 - `docs/D3D12_RESOURCE_AUDIT_CHECKLIST.md`
   - Records this completed contract slice.
 

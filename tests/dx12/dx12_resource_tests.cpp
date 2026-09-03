@@ -3197,6 +3197,8 @@ int main() {
   last_copy_tile_coordinate.X = reserved_total_tile_count - 1;
   D3D12_TILE_REGION_SIZE invalid_copy_tile_region = tile_region;
   invalid_copy_tile_region.NumTiles = 2;
+  D3D12_TILE_REGION_SIZE invalid_buffer_box_region = buffer_box_tile_region;
+  invalid_buffer_box_region.Height = 2;
   const auto invalid_copy_tile_flags = static_cast<D3D12_TILE_MAPPING_FLAGS>(1u << 1);
   if (!expect_copy_tile_mappings_no_mutation("null CopyTileMappings destination coordinate", nullptr, &tile_coordinate,
                                              &tile_region, D3D12_TILE_MAPPING_FLAG_NONE) ||
@@ -3218,8 +3220,67 @@ int main() {
       ) ||
       !expect_copy_tile_mappings_no_mutation(
           "invalid CopyTileMappings flags", &tile_coordinate, &tile_coordinate, &tile_region, invalid_copy_tile_flags
+      ) ||
+      !expect_copy_tile_mappings_no_mutation(
+          "invalid buffer box CopyTileMappings region", &tile_coordinate, &tile_coordinate,
+          &invalid_buffer_box_region, D3D12_TILE_MAPPING_FLAG_NONE
       ))
     return 1;
+
+  if (!CheckHR("MapCopyTileMappingsBoxReadback", copy_tiles_remap_readback->Map(
+                                                      0, nullptr,
+                                                      reinterpret_cast<void **>(&mapped_copy_tiles_remap_readback)))) {
+    cleanup();
+    return 1;
+  }
+  std::memset(mapped_copy_tiles_remap_readback, 0xcd, static_cast<size_t>(copy_tiles_buffer_desc.Width));
+  copy_tiles_remap_readback->Unmap(0, nullptr);
+
+  queue->CopyTileMappings(
+      reserved_resource, &tile_coordinate, reserved_resource_copy, &tile_coordinate, &buffer_box_tile_region,
+      D3D12_TILE_MAPPING_FLAG_NONE
+  );
+  if (!CheckHR("ResetForCopyTileMappingsBox", list->Reset(allocator, nullptr))) {
+    cleanup();
+    return 1;
+  }
+  list->CopyTiles(
+      reserved_resource, &tile_coordinate, &tile_region, copy_tiles_remap_readback, 0,
+      D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER
+  );
+  if (!CheckHR("CloseCopyTileMappingsBox", list->Close())) {
+    cleanup();
+    return 1;
+  }
+  ID3D12CommandList *valid_copy_tile_mappings_lists[] = {list};
+  queue->ExecuteCommandLists(1, valid_copy_tile_mappings_lists);
+  if (!CheckHR("SignalCopyTileMappingsBox", queue->Signal(fence, copy_tile_mappings_test_fence)) ||
+      !CheckHR("SetEventOnCopyTileMappingsBox", fence->SetEventOnCompletion(copy_tile_mappings_test_fence, event))) {
+    cleanup();
+    return 1;
+  }
+  WaitForSingleObject(event, INFINITE);
+  ++copy_tile_mappings_test_fence;
+
+  if (!CheckHR("MapCopyTileMappingsBoxResult", copy_tiles_remap_readback->Map(
+                                                    0, nullptr,
+                                                    reinterpret_cast<void **>(&mapped_copy_tiles_remap_readback)))) {
+    cleanup();
+    return 1;
+  }
+  bool copy_tile_mappings_box_matches = true;
+  for (UINT i = 0; i < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; i++) {
+    if (mapped_copy_tiles_remap_readback[i] != static_cast<BYTE>(i ^ 0x5a)) {
+      copy_tile_mappings_box_matches = false;
+      break;
+    }
+  }
+  copy_tiles_remap_readback->Unmap(0, nullptr);
+  if (!copy_tile_mappings_box_matches) {
+    std::cerr << "buffer box CopyTileMappings did not copy the source mapping\n";
+    cleanup();
+    return 1;
+  }
 
   if (!CheckHR("MapDepthReadback", depth_readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped_depth)))) {
     cleanup();
