@@ -432,6 +432,38 @@ int main() {
     return 1;
   }
 
+  D3D12_RESOURCE_DESC allocation_texture_desc = {};
+  allocation_texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  allocation_texture_desc.Width = 64;
+  allocation_texture_desc.Height = 64;
+  allocation_texture_desc.DepthOrArraySize = 1;
+  allocation_texture_desc.MipLevels = 1;
+  allocation_texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  allocation_texture_desc.SampleDesc.Count = 1;
+  allocation_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  auto expect_invalid_texture_allocation = [&](const char *name, const D3D12_RESOURCE_DESC &desc) {
+    D3D12_RESOURCE_ALLOCATION_INFO1 info1 = {1, 1, 1};
+    const auto info = device4->GetResourceAllocationInfo1(0, 1, &desc, &info1);
+    if (info.SizeInBytes != UINT64_MAX || info1.Offset || info1.SizeInBytes || info1.Alignment) {
+      std::cerr << name << " produced allocation info\n";
+      cleanup();
+      return false;
+    }
+    return true;
+  };
+  D3D12_RESOURCE_DESC allocation_invalid_texture_desc = allocation_texture_desc;
+  allocation_invalid_texture_desc.Width = UINT64_MAX;
+  if (!expect_invalid_texture_allocation("oversized texture width", allocation_invalid_texture_desc))
+    return 1;
+  allocation_invalid_texture_desc = allocation_texture_desc;
+  allocation_invalid_texture_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  if (!expect_invalid_texture_allocation("texture with row-major layout", allocation_invalid_texture_desc))
+    return 1;
+  allocation_invalid_texture_desc = allocation_texture_desc;
+  allocation_invalid_texture_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(0x40u);
+  if (!expect_invalid_texture_allocation("texture with unknown resource flag", allocation_invalid_texture_desc))
+    return 1;
+
   if (!CheckHR(
           "CreateReservedResource",
           device->CreateReservedResource(

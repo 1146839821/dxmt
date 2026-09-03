@@ -1342,7 +1342,8 @@ public:
             desc.Width, WMTResourceHazardTrackingModeUntracked | WMTResourceStorageModePrivate
         );
       } else {
-        if (!desc.Width || !desc.Height || !desc.DepthOrArraySize || !desc.SampleDesc.Count)
+        if (FAILED(ValidateTextureResourceDesc(desc)) || FAILED(ValidateTextureResourceLayout(desc)) ||
+            FAILED(ValidateTextureResourceFlags(desc)))
           goto invalid;
         WMTTextureInfo texture_info = {};
         if (FAILED(PopulateWMTTextureInfo(GetMTLDevice(), texture_info, desc)))
