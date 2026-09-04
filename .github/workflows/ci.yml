@@ -28,7 +28,7 @@ env:
 
 jobs:
   setup-wine:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - name: Cache Wine
         id: cache-wine
@@ -57,7 +57,7 @@ jobs:
           path: ./toolchains/wine
 
   setup-wine-arm64ec:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - name: Cache Wine (ARM64EC)
         id: cache-wine-arm64ec
@@ -86,7 +86,7 @@ jobs:
           path: ./toolchains/wine
 
   setup-llvm-mingw:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - name: Cache LLVM-MinGW
         id: cache-llvm-mingw
@@ -114,7 +114,7 @@ jobs:
           path: ./toolchains/${{ env.LLVM_MINGW_DIR }}
 
   setup-llvm-project:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - name: Cache LLVM Project
         id: cache-llvm-project
@@ -139,7 +139,7 @@ jobs:
           path: ./toolchains/llvm-project
 
   setup-llvm-darwin:
-    runs-on: macos-15
+    runs-on: macos-26
     needs: setup-llvm-project
     steps:
       - name: Cache LLVM Darwin Build
@@ -187,7 +187,7 @@ jobs:
           path: ./toolchains/llvm-darwin
 
   setup-llvm-win:
-    runs-on: macos-15
+    runs-on: macos-26
     needs: [setup-llvm-project, setup-llvm-mingw]
     steps:
       - name: Cache LLVM Windows Build
@@ -243,7 +243,7 @@ jobs:
           path: ./toolchains/llvm
 
   setup-llvm-darwin-arm64:
-    runs-on: macos-15
+    runs-on: macos-26
     needs: setup-llvm-project
     steps:
       - name: Cache LLVM Darwin Build (ARM64)
@@ -291,7 +291,7 @@ jobs:
           path: ./toolchains/llvm-darwin-arm64
 
   build-gcc-release-x86_64-windows-cross:
-    runs-on: macos-15
+    runs-on: macos-26
     needs: [setup-wine, setup-llvm-darwin]
     steps:
       - name: Checkout
@@ -317,7 +317,7 @@ jobs:
           path: ./toolchains/llvm-darwin
 
       - name: Select Xcode Version
-        run: sudo xcode-select -s /Applications/Xcode_16.1.app
+        run: sudo xcode-select -s /Applications/Xcode_26.0.app
 
       - name: Install Meson
         run: pip3 install meson==1.10.0 --break-system-packages
@@ -335,7 +335,7 @@ jobs:
           path: install
 
   build-gcc-release-x86-windows-cross:
-    runs-on: macos-15
+    runs-on: macos-26
     needs: [setup-wine]
     steps:
       - name: Checkout
@@ -355,7 +355,7 @@ jobs:
           tools: mingw-w64
 
       - name: Select Xcode Version
-        run: sudo xcode-select -s /Applications/Xcode_16.1.app
+        run: sudo xcode-select -s /Applications/Xcode_26.0.app
 
       - name: Install Meson
         run: pip3 install meson==1.10.0 --break-system-packages
@@ -373,7 +373,7 @@ jobs:
           path: install
 
   build-clang-debugoptimized-x86_64-windows-cross:
-    runs-on: macos-15
+    runs-on: macos-26
     needs: [setup-wine, setup-llvm-mingw, setup-llvm-darwin, setup-llvm-win]
     steps:
       - name: Checkout
@@ -406,7 +406,7 @@ jobs:
           path: ./toolchains/llvm
 
       - name: Select Xcode Version
-        run: sudo xcode-select -s /Applications/Xcode_16.1.app
+        run: sudo xcode-select -s /Applications/Xcode_26.0.app
 
       - name: Install Meson
         run: pip3 install meson==1.10.0 --break-system-packages
@@ -425,7 +425,7 @@ jobs:
           path: install
 
   build-clang-release-x86_64-windows-cross:
-    runs-on: macos-15
+    runs-on: macos-26
     needs: [setup-wine, setup-llvm-mingw, setup-llvm-darwin]
     steps:
       - name: Checkout
@@ -452,7 +452,7 @@ jobs:
           path: ./toolchains/llvm-darwin
 
       - name: Select Xcode Version
-        run: sudo xcode-select -s /Applications/Xcode_16.1.app
+        run: sudo xcode-select -s /Applications/Xcode_26.0.app
 
       - name: Install Meson
         run: pip3 install meson==1.10.0 --break-system-packages
@@ -471,7 +471,7 @@ jobs:
           path: install
 
   build-clang-release-x86-windows-cross:
-    runs-on: macos-15
+    runs-on: macos-26
     needs: [setup-wine, setup-llvm-mingw]
     steps:
       - name: Checkout
@@ -492,7 +492,7 @@ jobs:
           path: ./toolchains/${{ env.LLVM_MINGW_DIR }}
 
       - name: Select Xcode Version
-        run: sudo xcode-select -s /Applications/Xcode_16.1.app
+        run: sudo xcode-select -s /Applications/Xcode_26.0.app
 
       - name: Install Meson
         run: pip3 install meson==1.10.0 --break-system-packages
@@ -511,7 +511,7 @@ jobs:
           path: install
 
   build-clang-debugoptimized-arm64ec-windows-cross:
-    runs-on: macos-15
+    runs-on: macos-26
     needs: [setup-wine-arm64ec, setup-llvm-mingw, setup-llvm-darwin-arm64]
     steps:
       - name: Checkout
@@ -538,7 +538,7 @@ jobs:
           path: ./toolchains/llvm-darwin-arm64
 
       - name: Select Xcode Version
-        run: sudo xcode-select -s /Applications/Xcode_16.1.app
+        run: sudo xcode-select -s /Applications/Xcode_26.0.app
 
       - name: Install Meson
         run: pip3 install meson==1.10.0 --break-system-packages
@@ -557,7 +557,7 @@ jobs:
           path: install
 
   build-clang-release-arm64ec-windows-cross:
-    runs-on: macos-15
+    runs-on: macos-26
     needs: [setup-wine-arm64ec, setup-llvm-mingw, setup-llvm-darwin-arm64]
     steps:
       - name: Checkout
@@ -584,7 +584,7 @@ jobs:
           path: ./toolchains/llvm-darwin-arm64
 
       - name: Select Xcode Version
-        run: sudo xcode-select -s /Applications/Xcode_16.1.app
+        run: sudo xcode-select -s /Applications/Xcode_26.0.app
 
       - name: Install Meson
         run: pip3 install meson==1.10.0 --break-system-packages
@@ -603,7 +603,7 @@ jobs:
           path: install
 
   build-clang-release-arm64-macos:
-    runs-on: macos-15
+    runs-on: macos-26
     needs: setup-llvm-darwin-arm64
     steps:
       - name: Checkout
@@ -618,7 +618,7 @@ jobs:
           path: ./toolchains/llvm-darwin-arm64
 
       - name: Select Xcode Version
-        run: sudo xcode-select -s /Applications/Xcode_16.1.app
+        run: sudo xcode-select -s /Applications/Xcode_26.0.app
 
       - name: Install Meson
         run: pip3 install meson==1.10.0 --break-system-packages
@@ -636,7 +636,7 @@ jobs:
           path: install
 
   package:
-    runs-on: macos-15
+    runs-on: macos-26
     needs: [build-gcc-release-x86_64-windows-cross, build-gcc-release-x86-windows-cross, build-clang-release-arm64ec-windows-cross]
     env:
       PACKAGE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || github.sha }}
