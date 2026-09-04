@@ -171,6 +171,15 @@ public:
 
 class DispatchData : public Object {
 public:
+  uint64_t
+  size() const {
+    return DispatchData_copy(handle, nullptr, 0);
+  }
+
+  uint64_t
+  copy(void *destination, uint64_t capacity) const {
+    return DispatchData_copy(handle, destination, capacity);
+  }
 };
 
 class Event : public Object {
@@ -263,6 +272,11 @@ public:
     return MTLTexture_mipmapLevelCount(handle);
   }
 
+  uint64_t
+  firstMipmapInTail() {
+    return MTLTexture_firstMipmapInTail(handle);
+  }
+
   void
   replaceRegion(
       WMTOrigin origin, WMTSize size, uint64_t level, uint64_t slice, const void *pixelBytes, uint64_t bytesPerRow,
@@ -271,6 +285,16 @@ public:
     WMTMemoryPointer data;
     data.set((void *)pixelBytes);
     return MTLTexture_replaceRegion(handle, origin, size, level, slice, data, bytesPerRow, bytesPerImage);
+  }
+
+  void
+  getBytes(
+      WMTOrigin origin, WMTSize size, uint64_t level, uint64_t slice, void *pixelBytes, uint64_t bytesPerRow,
+      uint64_t bytesPerImage
+  ) {
+    WMTMemoryPointer data;
+    data.set(pixelBytes);
+    return MTLTexture_getBytes(handle, origin, size, level, slice, data, bytesPerRow, bytesPerImage);
   }
 };
 
@@ -726,6 +750,57 @@ public:
   }
 };
 
+class SparseMappingQueue : public Object {
+public:
+  void
+  addResidencySet(ResidencySet residency_set) {
+    SparseMappingQueue_addResidencySet(handle, residency_set.handle);
+  }
+
+  void
+  signalEvent(Event event, uint64_t value) {
+    SparseMappingQueue_signalEvent(handle, event.handle, value);
+  }
+
+  void
+  waitForEvent(Event event, uint64_t value) {
+    SparseMappingQueue_waitForEvent(handle, event.handle, value);
+  }
+
+  void
+  barrierBeforeResourceState() {
+    SparseMappingQueue_barrierBeforeResourceState(handle);
+  }
+
+  void
+  updateBufferMappings(
+      Buffer buffer, Heap heap, const WMTUpdateSparseBufferMappingOperation *operations, uint64_t count
+  ) {
+    SparseMappingQueue_updateBufferMappings(handle, buffer.handle, heap.handle, operations, count);
+  }
+
+  void
+  updateTextureMappings(
+      Texture texture, Heap heap, const WMTUpdateSparseTextureMappingOperation *operations, uint64_t count
+  ) {
+    SparseMappingQueue_updateTextureMappings(handle, texture.handle, heap.handle, operations, count);
+  }
+
+  void
+  copyBufferMappings(
+      Buffer source, Buffer destination, const WMTCopySparseBufferMappingOperation *operations, uint64_t count
+  ) {
+    SparseMappingQueue_copyBufferMappings(handle, source.handle, destination.handle, operations, count);
+  }
+
+  void
+  copyTextureMappings(
+      Texture source, Texture destination, const WMTCopySparseTextureMappingOperation *operations, uint64_t count
+  ) {
+    SparseMappingQueue_copyTextureMappings(handle, source.handle, destination.handle, operations, count);
+  }
+};
+
 class Function : public Object {};
 
 class Library : public Object {
@@ -799,6 +874,11 @@ public:
     return Reference<Buffer>(MTLDevice_newBuffer(handle, &info));
   }
 
+  Reference<Buffer>
+  newPlacementSparseBuffer(WMTBufferInfo &info, WMTSparsePageSize sparse_page_size) {
+    return Reference<Buffer>(MTLDevice_newPlacementSparseBuffer(handle, &info, sparse_page_size));
+  }
+
   Reference<SamplerState>
   newSamplerState(WMTSamplerInfo &info) {
     return Reference<SamplerState>(MTLDevice_newSamplerState(handle, &info));
@@ -812,6 +892,11 @@ public:
   Reference<Texture>
   newTexture(WMTTextureInfo &info) {
     return Reference<Texture>(MTLDevice_newTexture(handle, &info));
+  }
+
+  Reference<Texture>
+  newPlacementSparseTexture(WMTTextureInfo &info, WMTSparsePageSize sparse_page_size) {
+    return Reference<Texture>(MTLDevice_newPlacementSparseTexture(handle, &info, sparse_page_size));
   }
 
   Reference<Library>
@@ -884,6 +969,23 @@ public:
   }
 
   Reference<RenderPipelineState>
+  newMSCTessellationPipelineState(const WMTMSCTessellationPipelineInfo &info, Error &error) {
+    return Reference<RenderPipelineState>(
+        MTLDevice_newMSCTessellationPipelineState(handle, &info, &error.handle)
+    );
+  }
+
+  Reference<RenderPipelineState>
+  newMSCGeometryPipelineState(const WMTMSCGeometryPipelineInfo &info, Error &error) {
+    return Reference<RenderPipelineState>(MTLDevice_newMSCGeometryPipelineState(handle, &info, &error.handle));
+  }
+
+  Reference<Buffer>
+  newMSCTessellatorTables() {
+    return Reference<Buffer>(MTLDevice_newMSCTessellatorTables(handle));
+  }
+
+  Reference<RenderPipelineState>
   newRenderPipelineState(const WMTTileRenderPipelineInfo &info, Error &error) {
     return Reference<RenderPipelineState>(MTLDevice_newTileRenderPipelineState(handle, &info, &error.handle));
   }
@@ -926,6 +1028,16 @@ public:
   bool
   supportsFamily(WMTGPUFamily gpu_family) {
     return MTLDevice_supportsFamily(handle, gpu_family);
+  }
+
+  bool
+  supportsPlacementSparse() {
+    return supportsFamily(WMTGPUFamilyApple8) && MTLDevice_supportsPlacementSparse(handle);
+  }
+
+  Reference<SparseMappingQueue>
+  newSparseMappingQueue() {
+    return Reference<SparseMappingQueue>(MTLDevice_newSparseMappingQueue(handle));
   }
 
   bool
@@ -1151,6 +1263,8 @@ InitializeRenderPipelineInfo(WMTRenderPipelineInfo &info) {
   info.num_binary_archives_for_lookup = 0;
   info.fail_on_binary_archive_miss = false;
   info.support_indirect_command_buffers = false;
+  info.vertex_attribute_count = 0;
+  info.vertex_buffer_layout_count = 0;
 }
 
 inline void
@@ -1200,6 +1314,18 @@ InitializeMeshRenderPipelineInfo(WMTMeshRenderPipelineInfo &info) {
   info.num_binary_archives_for_lookup = 0;
   info.fail_on_binary_archive_miss = false;
   info.support_indirect_command_buffers = false;
+}
+
+inline void
+InitializeMSCTessellationPipelineInfo(WMTMSCTessellationPipelineInfo &info) {
+  std::memset(&info, 0, sizeof(info));
+  InitializeMeshRenderPipelineInfo(info.base);
+}
+
+inline void
+InitializeMSCGeometryPipelineInfo(WMTMSCGeometryPipelineInfo &info) {
+  std::memset(&info, 0, sizeof(info));
+  InitializeMeshRenderPipelineInfo(info.base);
 }
 
 inline void

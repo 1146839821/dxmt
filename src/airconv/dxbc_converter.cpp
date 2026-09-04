@@ -19,17 +19,13 @@
 #include <vector>
 
 #include "metallib_writer.hpp"
+#include "compiled_bitcode.hpp"
 #include "nt/air_builder.hpp"
 #include "shader_common.hpp"
 
 #include "airconv_context.hpp"
 
 #include "ftl.hpp"
-
-class SM50CompiledBitcodeInternal {
-public:
-  llvm::SmallVector<char, 0> vec;
-};
 
 class SM50ErrorInternal {
 public:
@@ -234,6 +230,87 @@ void setup_metal_version(llvm::Module &module, SM50_SHADER_METAL_VERSION metal_v
   }
 }
 
+RegisterComponentType
+component_type_from_pixel_format(air::MTLPixelFormat format) {
+  switch (format) {
+  case air::MTLPixelFormat::R8Sint:
+  case air::MTLPixelFormat::R16Sint:
+  case air::MTLPixelFormat::RG8Sint:
+  case air::MTLPixelFormat::R32Sint:
+  case air::MTLPixelFormat::RG16Sint:
+  case air::MTLPixelFormat::RGBA8Sint:
+  case air::MTLPixelFormat::RG32Sint:
+  case air::MTLPixelFormat::RGBA16Sint:
+  case air::MTLPixelFormat::RGBA32Sint:
+    return RegisterComponentType::Int;
+  case air::MTLPixelFormat::R8Uint:
+  case air::MTLPixelFormat::R16Uint:
+  case air::MTLPixelFormat::RG8Uint:
+  case air::MTLPixelFormat::R32Uint:
+  case air::MTLPixelFormat::RG16Uint:
+  case air::MTLPixelFormat::RGBA8Uint:
+  case air::MTLPixelFormat::RGB10A2Uint:
+  case air::MTLPixelFormat::RG32Uint:
+  case air::MTLPixelFormat::RGBA16Uint:
+  case air::MTLPixelFormat::RGBA32Uint:
+    return RegisterComponentType::Uint;
+  case air::MTLPixelFormat::A8Unorm:
+  case air::MTLPixelFormat::R8Unorm:
+  case air::MTLPixelFormat::R8Unorm_sRGB:
+  case air::MTLPixelFormat::R8Snorm:
+  case air::MTLPixelFormat::R16Unorm:
+  case air::MTLPixelFormat::R16Snorm:
+  case air::MTLPixelFormat::R16Float:
+  case air::MTLPixelFormat::RG8Unorm:
+  case air::MTLPixelFormat::RG8Unorm_sRGB:
+  case air::MTLPixelFormat::RG8Snorm:
+  case air::MTLPixelFormat::B5G6R5Unorm:
+  case air::MTLPixelFormat::A1BGR5Unorm:
+  case air::MTLPixelFormat::ABGR4Unorm:
+  case air::MTLPixelFormat::BGR5A1Unorm:
+  case air::MTLPixelFormat::R32Float:
+  case air::MTLPixelFormat::RG16Unorm:
+  case air::MTLPixelFormat::RG16Snorm:
+  case air::MTLPixelFormat::RG16Float:
+  case air::MTLPixelFormat::RGBA8Unorm:
+  case air::MTLPixelFormat::RGBA8Unorm_sRGB:
+  case air::MTLPixelFormat::RGBA8Snorm:
+  case air::MTLPixelFormat::BGRA8Unorm:
+  case air::MTLPixelFormat::BGRA8Unorm_sRGB:
+  case air::MTLPixelFormat::RGB10A2Unorm:
+  case air::MTLPixelFormat::RG11B10Float:
+  case air::MTLPixelFormat::RGB9E5Float:
+  case air::MTLPixelFormat::BGR10A2Unorm:
+  case air::MTLPixelFormat::BGR10_XR:
+  case air::MTLPixelFormat::BGR10_XR_sRGB:
+  case air::MTLPixelFormat::RG32Float:
+  case air::MTLPixelFormat::RGBA16Unorm:
+  case air::MTLPixelFormat::RGBA16Snorm:
+  case air::MTLPixelFormat::RGBA16Float:
+  case air::MTLPixelFormat::BGRA10_XR:
+  case air::MTLPixelFormat::BGRA10_XR_sRGB:
+  case air::MTLPixelFormat::RGBA32Float:
+  case air::MTLPixelFormat::BC1_RGBA:
+  case air::MTLPixelFormat::BC1_RGBA_sRGB:
+  case air::MTLPixelFormat::BC2_RGBA:
+  case air::MTLPixelFormat::BC2_RGBA_sRGB:
+  case air::MTLPixelFormat::BC3_RGBA:
+  case air::MTLPixelFormat::BC3_RGBA_sRGB:
+  case air::MTLPixelFormat::BC4_RUnorm:
+  case air::MTLPixelFormat::BC4_RSnorm:
+  case air::MTLPixelFormat::BC5_RGUnorm:
+  case air::MTLPixelFormat::BC5_RGSnorm:
+  case air::MTLPixelFormat::BC6H_RGBFloat:
+  case air::MTLPixelFormat::BC6H_RGBUfloat:
+  case air::MTLPixelFormat::BC7_RGBAUnorm:
+  case air::MTLPixelFormat::BC7_RGBAUnorm_sRGB:
+    return RegisterComponentType::Float;
+  default:
+    break;
+  }
+  return RegisterComponentType::Unknown;
+}
+
 llvm::Error convert_dxbc_pixel_shader(
   SM50ShaderInternal *pShaderInternal, const char *name,
   llvm::LLVMContext &context, llvm::Module &module,
@@ -285,6 +362,8 @@ llvm::Error convert_dxbc_pixel_shader(
     sig_ctx.disable_depth_output = pso_disable_depth_output;
     sig_ctx.pull_mode_reg_mask = shader_info->pull_mode_reg_mask;
     sig_ctx.unorm_output_reg_mask = pso_unorm_output_reg_mask;
+    if (pso_data)
+      memcpy(sig_ctx.pixel_formats, pso_data->pixel_formats, sizeof(sig_ctx.pixel_formats));
     for (auto &p : pShaderInternal->signature_handlers) {
       p(sig_ctx);
     }
@@ -576,10 +655,54 @@ llvm::Error convert_dxbc_vertex_shader(
       auto slot0_entry =
           builder.CreateLoad(so_entries_type, builder.CreateConstInBoundsGEP1_32(so_entries_type, so_entries, 0));
       auto slot0 = builder.CreateExtractValue(slot0_entry, {0});
+      auto slot0_counter = builder.CreateExtractValue(slot0_entry, {1});
+      auto slot0_size = builder.CreateExtractValue(slot0_entry, {2});
       auto adjusted_vertex_id = builder.CreateSub(vertex_id, base_vertex);
       auto output_regs = builder.CreateBitOrPointerCast(
         ctx.resource.output.ptr_int4, llvm::PointerType::get(ctx.types._int, 0)
       );
+
+      auto vertex_offset = builder.CreateMul(adjusted_vertex_id, builder.getInt32(vertex_so->strides[0]));
+      auto *write_block = llvm::BasicBlock::Create(ctx.llvm, "so.write", ctx.function);
+      auto *done_block = llvm::BasicBlock::Create(ctx.llvm, "so.done", ctx.function);
+      auto has_buffer = builder.CreateICmpNE(
+          slot0, llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(slot0->getType()))
+      );
+      builder.CreateCondBr(has_buffer, write_block, done_block);
+      builder.SetInsertPoint(write_block);
+
+      auto *counter_block = llvm::BasicBlock::Create(ctx.llvm, "so.counter", ctx.function);
+      auto *offset_block = llvm::BasicBlock::Create(ctx.llvm, "so.offset", ctx.function);
+      auto has_counter = builder.CreateICmpNE(
+          slot0_counter,
+          llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(slot0_counter->getType()))
+      );
+      builder.CreateCondBr(has_counter, counter_block, offset_block);
+
+      builder.SetInsertPoint(counter_block);
+      auto counter_offset = ctx.air.CreateAtomicRMW(
+          llvm::AtomicRMWInst::Add, slot0_counter, builder.getInt32(vertex_so->strides[0])
+      );
+      if (!counter_offset)
+        return nullptr;
+      builder.CreateBr(offset_block);
+
+      builder.SetInsertPoint(offset_block);
+      auto output_offset = builder.CreatePHI(ctx.types._int, 2);
+      output_offset->addIncoming(vertex_offset, write_block);
+      output_offset->addIncoming(counter_offset, counter_block);
+      auto output_offset_64 = builder.CreateZExt(output_offset, ctx.types._long);
+      uint32_t output_end = 0;
+      for (unsigned i = 0; i < vertex_so->num_elements; i++) {
+        auto &element = vertex_so->elements[i];
+        output_end = std::max(output_end, element.offset + static_cast<uint32_t>(sizeof(uint32_t)));
+      }
+      auto output_end_64 = builder.CreateAdd(output_offset_64, builder.getInt64(output_end));
+      auto output_in_bounds = builder.CreateICmpULE(output_end_64, slot0_size);
+      auto *store_block = llvm::BasicBlock::Create(ctx.llvm, "so.store", ctx.function);
+      builder.CreateCondBr(output_in_bounds, store_block, done_block);
+
+      builder.SetInsertPoint(store_block);
       for (unsigned i = 0; i < vertex_so->num_elements; i++) {
         auto &element = vertex_so->elements[i];
         if (element.reg_id == 0xffffffff)
@@ -588,13 +711,7 @@ llvm::Error convert_dxbc_vertex_shader(
           ctx.types._int, output_regs,
           (unsigned)(element.reg_id * 4 + element.component)
         );
-        auto target_offset = ctx.builder.CreateAdd(
-          ctx.builder.CreateMul(
-            adjusted_vertex_id,
-            ctx.builder.getInt32(vertex_so->strides[element.output_slot /* expected to be 0 */])
-          ),
-          ctx.builder.getInt32(element.offset)
-        );
+        auto target_offset = ctx.builder.CreateAdd(output_offset_64, ctx.builder.getInt64(element.offset));
         auto target_ptr = ctx.builder.CreateGEP(
           ctx.types._int, slot0, {ctx.builder.CreateLShr(target_offset, 2)}
         );
@@ -602,6 +719,8 @@ llvm::Error convert_dxbc_vertex_shader(
           ctx.builder.CreateLoad(ctx.types._int, ptr), target_ptr, true
         );
       }
+      builder.CreateBr(done_block);
+      builder.SetInsertPoint(done_block);
       return nullptr;
     });
   }

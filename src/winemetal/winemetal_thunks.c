@@ -107,6 +107,15 @@ MTLDevice_newCommandQueue(obj_handle_t device, uint64_t maxCommandBufferCount) {
 }
 
 WINEMETAL_API obj_handle_t
+MTLDevice_newSparseMappingQueue(obj_handle_t device) {
+  struct unixcall_generic_obj_obj_ret params;
+  params.handle = device;
+  params.ret = 0;
+  UNIX_CALL(unix_mtldevice_newsparsemappingqueue, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
 NSAutoreleasePool_alloc_init() {
   struct unixcall_generic_obj_ret params;
   params.ret = 0;
@@ -186,6 +195,19 @@ MTLDevice_newBuffer(obj_handle_t device, struct WMTBufferInfo *info) {
 }
 
 WINEMETAL_API obj_handle_t
+MTLDevice_newPlacementSparseBuffer(
+    obj_handle_t device, struct WMTBufferInfo *info, enum WMTSparsePageSize sparse_page_size
+) {
+  struct unixcall_mtldevice_newplacementsparsebuffer params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  params.sparse_page_size = sparse_page_size;
+  params.ret = 0;
+  UNIX_CALL(unix_mtldevice_newplacementsparsebuffer, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
 MTLDevice_newSamplerState(obj_handle_t device, struct WMTSamplerInfo *info) {
   struct unixcall_mtldevice_newsamplerstate params;
   params.device = device;
@@ -209,6 +231,19 @@ MTLDevice_newTexture(obj_handle_t device, struct WMTTextureInfo *info) {
   params.device = device;
   WMT_MEMPTR_SET(params.info, info);
   UNIX_CALL(21, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newPlacementSparseTexture(
+    obj_handle_t device, struct WMTTextureInfo *info, enum WMTSparsePageSize sparse_page_size
+) {
+  struct unixcall_mtldevice_newplacementsparsetexture params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  params.sparse_page_size = sparse_page_size;
+  params.ret = 0;
+  UNIX_CALL(unix_mtldevice_newplacementsparsetexture, &params);
   return params.ret;
 }
 
@@ -376,6 +411,65 @@ MTLDevice_newMeshRenderPipelineState(
   return params.ret_pso;
 }
 
+WINEMETAL_API obj_handle_t
+MTLDevice_newMSCTessellationPipelineState(
+    obj_handle_t device, const struct WMTMSCTessellationPipelineInfo *info, obj_handle_t *err_out
+) {
+  struct unixcall_mtldevice_newmsctessellationpso params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  params.ret_error = 0;
+  params.ret_pso = 0;
+  UNIX_CALL(unix_mtldevice_newmsctessellationpso, &params);
+  if (err_out)
+    *err_out = params.ret_error;
+  return params.ret_pso;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newMSCGeometryPipelineState(
+    obj_handle_t device, const struct WMTMSCGeometryPipelineInfo *info, obj_handle_t *err_out
+) {
+  struct unixcall_mtldevice_newmscgeometrypso params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  params.ret_error = 0;
+  params.ret_pso = 0;
+  UNIX_CALL(unix_mtldevice_newmscgeometrypso, &params);
+  if (err_out)
+    *err_out = params.ret_error;
+  return params.ret_pso;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newMSCTessellatorTables(obj_handle_t device) {
+  struct unixcall_generic_obj_obj_ret params;
+  params.handle = device;
+  params.ret = 0;
+  UNIX_CALL(unix_mtldevice_newmsctessellatortables, &params);
+  return params.ret;
+}
+
+WINEMETAL_API bool
+MTLValidateMSCTessellationPipeline(
+    uint32_t hs_output_primitive, uint32_t gs_input_primitive, uint32_t hs_output_control_point_size,
+    uint32_t ds_input_control_point_size, uint32_t hs_patch_constants_size, uint32_t ds_patch_constants_size,
+    uint32_t hs_output_control_point_count, uint32_t ds_input_control_point_count
+) {
+  struct unixcall_mtlvalidate_msctessellationpipeline params;
+  params.hs_output_primitive = hs_output_primitive;
+  params.gs_input_primitive = gs_input_primitive;
+  params.hs_output_control_point_size = hs_output_control_point_size;
+  params.ds_input_control_point_size = ds_input_control_point_size;
+  params.hs_patch_constants_size = hs_patch_constants_size;
+  params.ds_patch_constants_size = ds_patch_constants_size;
+  params.hs_output_control_point_count = hs_output_control_point_count;
+  params.ds_input_control_point_count = ds_input_control_point_count;
+  params.ret = false;
+  UNIX_CALL(unix_mtlvalidate_msctessellationpipeline, &params);
+  return params.ret;
+}
+
 WINEMETAL_API void
 MTLBlitCommandEncoder_encodeCommands(obj_handle_t encoder, const struct wmtcmd_base *cmd_head) {
   struct unixcall_generic_obj_cmd_noret params;
@@ -499,6 +593,15 @@ MTLDevice_supportsFamily(obj_handle_t device, enum WMTGPUFamily gpu_family) {
   params.arg = gpu_family;
   params.ret = 0;
   UNIX_CALL(49, &params);
+  return params.ret;
+}
+
+WINEMETAL_API bool
+MTLDevice_supportsPlacementSparse(obj_handle_t device) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = device;
+  params.ret = 0;
+  UNIX_CALL(unix_mtldevice_supportsplacementsparse, &params);
   return params.ret;
 }
 
@@ -1001,6 +1104,17 @@ DispatchData_alloc_init(uint64_t native_ptr, uint64_t length) {
   return params.ret;
 }
 
+WINEMETAL_API uint64_t
+DispatchData_copy(obj_handle_t data, void *destination, uint64_t capacity) {
+  struct unixcall_dispatchdata_copy params;
+  params.data = data;
+  params.destination = (uint64_t)(uintptr_t)destination;
+  params.capacity = capacity;
+  params.ret_size = 0;
+  UNIX_CALL(unix_dispatchdata_copy, &params);
+  return params.ret_size;
+}
+
 WINEMETAL_API obj_handle_t
 CacheReader_alloc_init(const char *path, uint64_t version) {
   struct unixcall_cache_alloc_init params;
@@ -1287,6 +1401,104 @@ MTLHeap_newTexture(obj_handle_t heap, struct WMTTextureInfo *info, uint64_t offs
   return params.ret;
 }
 
+WINEMETAL_API uint64_t
+MTLTexture_firstMipmapInTail(obj_handle_t texture) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = texture;
+  params.ret = 0;
+  UNIX_CALL(unix_mtltexture_firstmipmapintail, &params);
+  return params.ret;
+}
+
+WINEMETAL_API void
+SparseMappingQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = queue;
+  params.arg = residency_set;
+  UNIX_CALL(unix_sparsemappingqueue_addresidencyset, &params);
+}
+
+WINEMETAL_API void
+SparseMappingQueue_signalEvent(obj_handle_t queue, obj_handle_t event, uint64_t value) {
+  struct unixcall_generic_obj_obj_uint64_noret params;
+  params.handle = queue;
+  params.arg0 = event;
+  params.arg1 = value;
+  UNIX_CALL(unix_sparsemappingqueue_signalevent, &params);
+}
+
+WINEMETAL_API void
+SparseMappingQueue_waitForEvent(obj_handle_t queue, obj_handle_t event, uint64_t value) {
+  struct unixcall_generic_obj_obj_uint64_noret params;
+  params.handle = queue;
+  params.arg0 = event;
+  params.arg1 = value;
+  UNIX_CALL(unix_sparsemappingqueue_waitforevent, &params);
+}
+
+WINEMETAL_API void
+SparseMappingQueue_barrierBeforeResourceState(obj_handle_t queue) {
+  struct unixcall_generic_obj_noret params;
+  params.handle = queue;
+  UNIX_CALL(unix_sparsemappingqueue_barrierbeforeresourcestate, &params);
+}
+
+WINEMETAL_API void
+SparseMappingQueue_updateBufferMappings(
+    obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap,
+    const struct WMTUpdateSparseBufferMappingOperation *operations, uint64_t count
+) {
+  struct unixcall_sparsemappingqueue_mappings params;
+  params.queue = queue;
+  params.resource = buffer;
+  params.heap = heap;
+  WMT_MEMPTR_SET(params.operations, operations);
+  params.count = count;
+  UNIX_CALL(unix_sparsemappingqueue_updatebuffermappings, &params);
+}
+
+WINEMETAL_API void
+SparseMappingQueue_updateTextureMappings(
+    obj_handle_t queue, obj_handle_t texture, obj_handle_t heap,
+    const struct WMTUpdateSparseTextureMappingOperation *operations, uint64_t count
+) {
+  struct unixcall_sparsemappingqueue_mappings params;
+  params.queue = queue;
+  params.resource = texture;
+  params.heap = heap;
+  WMT_MEMPTR_SET(params.operations, operations);
+  params.count = count;
+  UNIX_CALL(unix_sparsemappingqueue_updatetexturemappings, &params);
+}
+
+WINEMETAL_API void
+SparseMappingQueue_copyBufferMappings(
+    obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
+    const struct WMTCopySparseBufferMappingOperation *operations, uint64_t count
+) {
+  struct unixcall_sparsemappingqueue_copy_mappings params;
+  params.queue = queue;
+  params.source = source;
+  params.destination = destination;
+  WMT_MEMPTR_SET(params.operations, operations);
+  params.count = count;
+  UNIX_CALL(unix_sparsemappingqueue_copybuffermappings, &params);
+}
+
+WINEMETAL_API void
+SparseMappingQueue_copyTextureMappings(
+    obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
+    const struct WMTCopySparseTextureMappingOperation *operations, uint64_t count
+) {
+  struct unixcall_sparsemappingqueue_copy_mappings params;
+  params.queue = queue;
+  params.source = source;
+  params.destination = destination;
+  WMT_MEMPTR_SET(params.operations, operations);
+  params.count = count;
+  UNIX_CALL(unix_sparsemappingqueue_copytexturemappings, &params);
+}
+
 WINEMETAL_API obj_handle_t
 MTLDevice_newIndirectCommandBuffer(
     obj_handle_t device, struct WMTIndirectCommandBufferInfo *info, uint64_t max_count, enum WMTResourceOptions options
@@ -1312,4 +1524,22 @@ MTLDevice_newLibraryWithSource(obj_handle_t device, const char *source, uint64_t
   if (err_out)
     *err_out = params.ret_error;
   return params.ret_library;
+}
+
+WINEMETAL_API void
+MTLTexture_getBytes(
+    obj_handle_t texture, struct WMTOrigin origin, struct WMTSize size, uint64_t level, uint64_t slice,
+    struct WMTMemoryPointer data, uint64_t bytes_per_row, uint64_t bytes_per_image
+) {
+  // use compatible struct
+  struct unixcall_mtltexture_replaceregion params;
+  params.texture = texture;
+  params.origin = origin;
+  params.size = size;
+  params.level = level;
+  params.slice = slice;
+  params.data = data;
+  params.bytes_per_row = bytes_per_row;
+  params.bytes_per_image = bytes_per_image;
+  UNIX_CALL(unix_mtltexture_getbytes, &params);
 }

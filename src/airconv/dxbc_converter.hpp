@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <optional>
 #include <string>
@@ -331,14 +332,19 @@ struct SignatureContext {
   bool skip_vertex_output;
   uint32_t pull_mode_reg_mask;
   uint32_t unorm_output_reg_mask;
+  air::MTLPixelFormat pixel_formats[8];
 
   SignatureContext(
     IREffect &prologue, IRValue &epilogue, air::FunctionSignatureBuilder &func_signature, io_binding_map &resource
   )
       : prologue(prologue), epilogue(epilogue), func_signature(func_signature), resource(resource), ia_layout(nullptr),
         dual_source_blending(false), disable_depth_output(false), skip_vertex_output(false), pull_mode_reg_mask(0),
-        unorm_output_reg_mask(0){};
+        unorm_output_reg_mask(0) {
+    memset(pixel_formats, 0, sizeof(pixel_formats));
+  };
 };
+
+RegisterComponentType component_type_from_pixel_format(air::MTLPixelFormat format);
 
 struct MeshOutputContext {
   llvm::Value *vertex_id;

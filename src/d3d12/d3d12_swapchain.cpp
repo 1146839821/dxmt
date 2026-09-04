@@ -84,7 +84,7 @@ class MTLD3D12SwapChain final : public MTLDXGISubObject<IDXGISwapChain4, MTLD3D1
   DXGI_SWAP_CHAIN_DESC1 desc_;
   D3D12_RESOURCE_DESC backbuffer_desc_;
   DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreen_desc_;
-  HANDLE present_semaphore_;
+  HANDLE present_semaphore_ = nullptr;
   std::unique_ptr<CpuFence> frame_latency_fence_;
   WMT::Object native_view_;
   WMT::MetalLayer layer_weak_;
@@ -123,7 +123,7 @@ public:
 
     if (!native_view_) {
       ERR("Failed to create metal view, it seems like your Wine has no exported symbols needed by DXMT.");
-      abort();
+      return;
     }
 
     presenter = Rc(new Presenter(pDevice->GetMTLDevice(), layer_weak_, lib, scale_factor, desc_.SampleDesc.Count));
@@ -149,7 +149,7 @@ public:
 
     backbuffer_desc_ = D3D12_RESOURCE_DESC{
         .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-        .Alignment = 1,
+        .Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
         .Width = desc_.Width,
         .Height = desc_.Height,
         .DepthOrArraySize = 1,
@@ -160,17 +160,23 @@ public:
                 .Count = 1,
                 .Quality = 0,
             },
-        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
         .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
     };
     if (desc_.BufferUsage & DXGI_USAGE_UNORDERED_ACCESS)
       backbuffer_desc_.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   }
 
+  bool
+  IsInitialized() const {
+    return native_view_ && presenter && present_semaphore_;
+  }
+
   ~MTLD3D12SwapChain() {
     WMT::ReleaseMetalView(native_view_);
     native_view_ = {};
-    CloseHandle(present_semaphore_);
+    if (present_semaphore_)
+      CloseHandle(present_semaphore_);
   };
 
   HRESULT
@@ -243,13 +249,35 @@ public:
 
   HRESULT
   EnterFullscreenMode(IDXGIOutput1 *pTarget) {
-    IMPLEMENT_ME
+    if (!wsi::isWindow(hWnd))
+      return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+
+    HMONITOR monitor = wsi::getWindowMonitor(hWnd);
+    if (pTarget) {
+      DXGI_OUTPUT_DESC output_desc = {};
+      if (FAILED(pTarget->GetDesc(&output_desc)))
+        return DXGI_ERROR_NOT_FOUND;
+      monitor = output_desc.Monitor;
+    }
+
+    const bool mode_switch = (desc_.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH) != 0;
+    if (!wsi::enterFullscreenMode(monitor, hWnd, &window_state_, mode_switch))
+      return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+
+    monitor_ = monitor;
+    target_ = pTarget;
+    fullscreen_desc_.Windowed = FALSE;
     return S_OK;
   }
 
   HRESULT
   LeaveFullscreenMode() {
-    IMPLEMENT_ME
+    if (wsi::isWindow(hWnd) && !wsi::leaveFullscreenMode(hWnd, &window_state_, true))
+      return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+
+    fullscreen_desc_.Windowed = TRUE;
+    target_ = nullptr;
+    monitor_ = wsi::getWindowMonitor(hWnd);
     return S_OK;
   }
 
@@ -292,6 +320,7 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   ResizeBuffers(UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format, UINT flags) final {
+    static uint32_t trace_resize_count = 0;
     if (Width == 0 || Height == 0) {
       wsi::getWindowSize(hWnd, &desc_.Width, &desc_.Height);
     } else {
@@ -335,22 +364,40 @@ public:
       backbuffers_.push_back(reinterpret_cast<MTLD3D12Resource *>(backbuffer.ptr()));
     }
 
+    if (trace_resize_count++ < 16)
+      DEBUG("D3D12 ResizeBuffers: ", desc_.Width, "x", desc_.Height, " format=", desc_.Format,
+            " buffers=", backbuffers_.size(), " layer=", layer_weak_.handle);
+
     return S_OK;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   ResizeTarget(const DXGI_MODE_DESC *pDesc) final {
-    IMPLEMENT_ME
-    return S_OK;
+    if (!pDesc || !wsi::isWindow(hWnd))
+      return DXGI_ERROR_INVALID_CALL;
+
+    if (pDesc->RefreshRate.Numerator)
+      fullscreen_desc_.RefreshRate = pDesc->RefreshRate;
+    fullscreen_desc_.ScanlineOrdering = pDesc->ScanlineOrdering;
+    fullscreen_desc_.Scaling = pDesc->Scaling;
+
+    if (pDesc->Width && pDesc->Height) {
+      if (fullscreen_desc_.Windowed)
+        wsi::resizeWindow(hWnd, &window_state_, pDesc->Width, pDesc->Height);
+      desc_.Width = pDesc->Width;
+      desc_.Height = pDesc->Height;
+    }
+
+    if (pDesc->Format != DXGI_FORMAT_UNKNOWN && ConvertSwapChainFormat(pDesc->Format) != WMTPixelFormatInvalid)
+      desc_.Format = pDesc->Format;
+
+    return ResizeBuffers(0, desc_.Width, desc_.Height, DXGI_FORMAT_UNKNOWN, 0);
   };
 
   void
   ApplyLayerProps() {
-    auto target_color_space = ConvertColorSpace(
-        desc_.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : colorspace_,
-        LayerSupportEDR()
-    );
+    auto target_color_space = ConvertColorSpace(colorspace_, LayerSupportEDR());
     if (presenter->changeLayerProperties(
             ConvertSwapChainFormat(desc_.Format), target_color_space, desc_.Width * scale_factor,
             desc_.Height * scale_factor, desc_.SampleDesc.Count
@@ -362,8 +409,30 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   GetContainingOutput(IDXGIOutput **ppOutput) final {
-    IMPLEMENT_ME
-    return S_OK;
+    if (!ppOutput)
+      return E_POINTER;
+    *ppOutput = nullptr;
+    if (!wsi::isWindow(hWnd))
+      return DXGI_ERROR_INVALID_CALL;
+
+    HMONITOR monitor = wsi::getWindowMonitor(hWnd);
+    for (UINT adapter_index = 0;; adapter_index++) {
+      Com<IDXGIAdapter> adapter;
+      if (FAILED(factory_->EnumAdapters(adapter_index, &adapter)))
+        break;
+
+      for (UINT output_index = 0;; output_index++) {
+        Com<IDXGIOutput> output;
+        if (FAILED(adapter->EnumOutputs(output_index, &output)))
+          break;
+
+        DXGI_OUTPUT_DESC output_desc = {};
+        if (SUCCEEDED(output->GetDesc(&output_desc)) && output_desc.Monitor == monitor)
+          return output->QueryInterface(IID_PPV_ARGS(ppOutput));
+      }
+    }
+
+    return DXGI_ERROR_NOT_FOUND;
   };
 
   HRESULT
@@ -428,13 +497,19 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   Present1(UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS *pPresentParameters) final {
+    static uint32_t trace_present_count = 0;
     HRESULT hr = S_OK;
     if (desc_.Width == 0 || desc_.Height == 0)
       hr = DXGI_STATUS_OCCLUDED;
     if (PresentFlags & DXGI_PRESENT_TEST)
       return hr;
 
-    auto &backbuffer = backbuffers_[presentation_count_ % backbuffers_.size()];
+    auto backbuffer_index = presentation_count_ % backbuffers_.size();
+    auto &backbuffer = backbuffers_[backbuffer_index];
+    if (trace_present_count++ < 32)
+      DEBUG("D3D12 Present1: frame=", presentation_count_, " index=", backbuffer_index,
+            " backbuffer size=", backbuffer->texture->width(),
+            "x", backbuffer->texture->height(), " flags=", PresentFlags);
     // TODO(d3d12): flush command queue and present
     hr = queue_->Present(this->presenter.ptr(), backbuffer.ptr(), present_semaphore_);
 
@@ -451,43 +526,50 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   GetRestrictToOutput(IDXGIOutput **ppRestrictToOutput) final {
-    IMPLEMENT_ME;
+    if (!ppRestrictToOutput)
+      return E_POINTER;
+    *ppRestrictToOutput = nullptr;
+    return E_NOTIMPL;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   SetBackgroundColor(const DXGI_RGBA *pColor) final {
-    IMPLEMENT_ME;
+    return E_NOTIMPL;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   GetBackgroundColor(DXGI_RGBA *pColor) final {
-    IMPLEMENT_ME;
+    if (!pColor)
+      return E_POINTER;
+    return E_NOTIMPL;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   SetRotation(DXGI_MODE_ROTATION Rotation) final {
-    IMPLEMENT_ME;
+    return E_NOTIMPL;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   GetRotation(DXGI_MODE_ROTATION *pRotation) final {
-    IMPLEMENT_ME;
+    if (!pRotation)
+      return E_POINTER;
+    return E_NOTIMPL;
   };
 
   HRESULT STDMETHODCALLTYPE
   SetSourceSize(UINT width, UINT height) override {
-    IMPLEMENT_ME
-    return S_OK;
+    return E_NOTIMPL;
   };
 
   HRESULT STDMETHODCALLTYPE
   GetSourceSize(UINT *width, UINT *height) override {
-    IMPLEMENT_ME
-    return S_OK;
+    if (!width || !height)
+      return E_POINTER;
+    return E_NOTIMPL;
   };
 
   HRESULT STDMETHODCALLTYPE
@@ -541,7 +623,7 @@ public:
   CheckColorSpaceSupport(DXGI_COLOR_SPACE_TYPE ColorSpace, UINT *pColorSpaceSupport) override {
     if (!pColorSpaceSupport)
       return E_INVALIDARG;
-    *pColorSpaceSupport = CGColorSpace_checkColorSpaceSupported(ConvertColorSpace(ColorSpace, false))
+    *pColorSpaceSupport = CGColorSpace_checkColorSpaceSupported(ConvertColorSpace(ColorSpace, LayerSupportEDR()))
                               ? DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT
                               : 0;
     return S_OK;
@@ -573,13 +655,12 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type, UINT Size, void *pMetaData) override {
-    return S_OK;
     if (Type == DXGI_HDR_METADATA_TYPE_NONE) {
       presenter->changeHDRMetadata(nullptr);
       return S_OK;
     }
     if (Type == DXGI_HDR_METADATA_TYPE_HDR10) {
-      if (Size != sizeof(WMTHDRMetadata))
+      if (Size != sizeof(WMTHDRMetadata) || !pMetaData)
         return E_INVALIDARG;
       presenter->changeHDRMetadata(reinterpret_cast<const WMTHDRMetadata *>(pMetaData));
       return S_OK;
@@ -595,6 +676,8 @@ CreateSwapChain(
     IDXGISwapChain1 **ppSwapChain
 ) {
   auto swapchain = Com(new MTLD3D12SwapChain(pFactory, pDevice, pQueue, hWnd, pDesc, pFullscreenDesc));
+  if (!swapchain->IsInitialized())
+    return E_FAIL;
   HRESULT hr = swapchain->ResizeBuffers(0, pDesc->Width, pDesc->Height, DXGI_FORMAT_UNKNOWN, 0);
   if (FAILED(hr))
     return hr;

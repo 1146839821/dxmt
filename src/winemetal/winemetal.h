@@ -602,6 +602,33 @@ enum WMTAttributeFormat : uint32_t {
   WMTAttributeFormatFloatRGB9E5 = 55,
 };
 
+enum WMTVertexStepFunction : uint32_t {
+  WMTVertexStepFunctionConstant = 0,
+  WMTVertexStepFunctionPerVertex = 1,
+  WMTVertexStepFunctionPerInstance = 2,
+  WMTVertexStepFunctionPerPatch = 3,
+  WMTVertexStepFunctionPerPatchControlPoint = 4,
+};
+
+enum {
+  WMT_MAX_VERTEX_ATTRIBUTES = 31,
+  WMT_MAX_VERTEX_BUFFER_LAYOUTS = 31,
+};
+
+struct WMTVertexAttribute {
+  uint32_t attribute_index;
+  enum WMTAttributeFormat format;
+  uint32_t offset;
+  uint32_t buffer_index;
+};
+
+struct WMTVertexBufferLayout {
+  uint32_t buffer_index;
+  uint32_t stride;
+  enum WMTVertexStepFunction step_function;
+  uint32_t step_rate;
+};
+
 WINEMETAL_API obj_handle_t MTLDevice_newLibrary(obj_handle_t device, obj_handle_t data, obj_handle_t *err_out);
 
 WINEMETAL_API obj_handle_t MTLLibrary_newFunction(obj_handle_t library, const char *name);
@@ -828,9 +855,11 @@ struct WMTRenderPipelineInfo {
   uint8_t num_binary_archives_for_lookup;
   bool fail_on_binary_archive_miss;
   bool support_indirect_command_buffers;
-  uint8_t padding[5];
+  uint32_t vertex_attribute_count;
+  uint32_t vertex_buffer_layout_count;
+  struct WMTVertexAttribute vertex_attributes[WMT_MAX_VERTEX_ATTRIBUTES];
+  struct WMTVertexBufferLayout vertex_buffer_layouts[WMT_MAX_VERTEX_BUFFER_LAYOUTS];
 };
-
 struct WMTMeshRenderPipelineInfo {
   struct WMTColorAttachmentBlendInfo colors[8];
   bool alpha_to_coverage_enabled;
@@ -857,11 +886,72 @@ struct WMTMeshRenderPipelineInfo {
   uint8_t padding[5];
 };
 
+#define WMT_MSC_FUNCTION_NAME_CAPACITY 128
+
+struct WMTMSCTessellationPipelineConfig {
+  uint32_t output_primitive_type;
+  uint32_t vs_output_size_in_bytes;
+  uint32_t gs_max_input_primitives_per_mesh_threadgroup;
+  uint32_t hs_max_patches_per_object_threadgroup;
+  uint32_t hs_input_control_point_count;
+  uint32_t hs_max_object_threads_per_threadgroup;
+  float hs_max_tessellation_factor;
+  uint32_t gs_instance_count;
+};
+
+struct WMTMSCTessellationPipelineInfo {
+  struct WMTMeshRenderPipelineInfo base;
+  obj_handle_t stage_in_library;
+  obj_handle_t vertex_library;
+  obj_handle_t hull_library;
+  obj_handle_t domain_library;
+  obj_handle_t fragment_library;
+  char vertex_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
+  char hull_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
+  char domain_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
+  char fragment_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
+  struct WMTMSCTessellationPipelineConfig config;
+};
+
+struct WMTMSCGeometryPipelineConfig {
+  uint32_t gs_vertex_size_in_bytes;
+  uint32_t gs_max_input_primitives_per_mesh_threadgroup;
+  uint32_t gs_instance_count;
+};
+
+struct WMTMSCGeometryPipelineInfo {
+  struct WMTMeshRenderPipelineInfo base;
+  obj_handle_t stage_in_library;
+  obj_handle_t vertex_library;
+  obj_handle_t geometry_library;
+  obj_handle_t fragment_library;
+  char vertex_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
+  char geometry_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
+  char fragment_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
+  struct WMTMSCGeometryPipelineConfig config;
+};
+
 WINEMETAL_API obj_handle_t
 MTLDevice_newRenderPipelineState(obj_handle_t device, const struct WMTRenderPipelineInfo *info, obj_handle_t *err_out);
 
 WINEMETAL_API obj_handle_t MTLDevice_newMeshRenderPipelineState(
     obj_handle_t device, const struct WMTMeshRenderPipelineInfo *info, obj_handle_t *err_out
+);
+
+WINEMETAL_API obj_handle_t MTLDevice_newMSCTessellationPipelineState(
+    obj_handle_t device, const struct WMTMSCTessellationPipelineInfo *info, obj_handle_t *err_out
+);
+
+WINEMETAL_API obj_handle_t MTLDevice_newMSCGeometryPipelineState(
+    obj_handle_t device, const struct WMTMSCGeometryPipelineInfo *info, obj_handle_t *err_out
+);
+
+WINEMETAL_API obj_handle_t MTLDevice_newMSCTessellatorTables(obj_handle_t device);
+
+WINEMETAL_API bool MTLValidateMSCTessellationPipeline(
+    uint32_t hs_output_primitive, uint32_t gs_input_primitive, uint32_t hs_output_control_point_size,
+    uint32_t ds_input_control_point_size, uint32_t hs_patch_constants_size, uint32_t ds_patch_constants_size,
+    uint32_t hs_output_control_point_count, uint32_t ds_input_control_point_count
 );
 
 struct WMTSize {
@@ -874,6 +964,16 @@ struct WMTOrigin {
   uint64_t x;
   uint64_t y;
   uint64_t z;
+};
+
+struct WMTRegion {
+  struct WMTOrigin origin;
+  struct WMTSize size;
+};
+
+struct WMTRange {
+  uint64_t location;
+  uint64_t length;
 };
 
 enum WMTBlitCommandType : uint16_t {
@@ -1216,6 +1316,10 @@ enum WMTRenderCommandType : uint16_t {
   WMTRenderCommandExecuteCommandsInBuffer,
   WMTRenderCommandSetBlendFactor,
   WMTRenderCommandSetStencilRef,
+  WMTRenderCommandMSCTessellationDraw,
+  WMTRenderCommandMSCTessellationDrawIndexed,
+  WMTRenderCommandMSCGeometryDraw,
+  WMTRenderCommandMSCGeometryDrawIndexed,
 };
 
 struct wmtcmd_render_nop {
@@ -1337,6 +1441,9 @@ enum WMTPrimitiveType : uint8_t {
   WMTPrimitiveTypeLineStrip = 2,
   WMTPrimitiveTypeTriangle = 3,
   WMTPrimitiveTypeTriangleStrip = 4,
+  WMTPrimitiveTypeLineWithAdj = 5,
+  WMTPrimitiveTypeTriangleWithAdj = 6,
+  WMTPrimitiveTypeLineStripWithAdj = 7,
 };
 
 struct wmtcmd_render_draw {
@@ -1592,6 +1699,62 @@ struct wmtcmd_render_dxmt_tessellation_mesh_draw_indexed_indirect {
   uint32_t patch_per_group;
 };
 
+struct wmtcmd_render_msc_tessellation_draw {
+  enum WMTRenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint32_t primitive_topology;
+  uint32_t instance_count;
+  uint32_t vertex_count_per_instance;
+  uint32_t base_instance;
+  uint32_t base_vertex;
+  struct WMTMSCTessellationPipelineConfig config;
+};
+
+struct wmtcmd_render_msc_tessellation_draw_indexed {
+  enum WMTRenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint32_t primitive_topology;
+  uint32_t index_type;
+  obj_handle_t index_buffer;
+  uint64_t index_buffer_offset;
+  uint32_t instance_count;
+  uint32_t index_count_per_instance;
+  uint32_t base_instance;
+  int32_t base_vertex;
+  uint32_t start_index;
+  struct WMTMSCTessellationPipelineConfig config;
+};
+
+struct wmtcmd_render_msc_geometry_draw {
+  enum WMTRenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint32_t primitive_topology;
+  uint32_t instance_count;
+  uint32_t vertex_count_per_instance;
+  uint32_t base_instance;
+  uint32_t base_vertex;
+  struct WMTMSCGeometryPipelineConfig config;
+};
+
+struct wmtcmd_render_msc_geometry_draw_indexed {
+  enum WMTRenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint32_t primitive_topology;
+  uint32_t index_type;
+  obj_handle_t index_buffer;
+  uint64_t index_buffer_offset;
+  uint32_t instance_count;
+  uint32_t index_count_per_instance;
+  uint32_t base_instance;
+  int32_t base_vertex;
+  uint32_t start_index;
+  struct WMTMSCGeometryPipelineConfig config;
+};
+
 struct wmtcmd_render_dispatch_threads_per_tile {
   enum WMTRenderCommandType type;
   uint16_t reserved[3];
@@ -1617,7 +1780,13 @@ WINEMETAL_API uint64_t MTLTexture_height(obj_handle_t texture);
 WINEMETAL_API uint64_t MTLTexture_depth(obj_handle_t texture);
 WINEMETAL_API uint64_t MTLTexture_arrayLength(obj_handle_t texture);
 WINEMETAL_API uint64_t MTLTexture_mipmapLevelCount(obj_handle_t texture);
+WINEMETAL_API uint64_t MTLTexture_firstMipmapInTail(obj_handle_t texture);
 WINEMETAL_API void MTLTexture_replaceRegion(
+    obj_handle_t texture, struct WMTOrigin origin, struct WMTSize size, uint64_t level, uint64_t slice,
+    struct WMTMemoryPointer data, uint64_t bytes_per_row, uint64_t bytes_per_image
+);
+
+WINEMETAL_API void MTLTexture_getBytes(
     obj_handle_t texture, struct WMTOrigin origin, struct WMTSize size, uint64_t level, uint64_t slice,
     struct WMTMemoryPointer data, uint64_t bytes_per_row, uint64_t bytes_per_image
 );
@@ -1647,9 +1816,12 @@ enum WMTGPUFamily {
   WMTGPUFamilyMacCatalyst1 = 4001,
   WMTGPUFamilyMacCatalyst2 = 4002,
   WMTGPUFamilyMetal3 = 5001,
+  WMTGPUFamilyMetal4 = 5002,
 };
 
 WINEMETAL_API bool MTLDevice_supportsFamily(obj_handle_t device, enum WMTGPUFamily gpu_family);
+
+WINEMETAL_API bool MTLDevice_supportsPlacementSparse(obj_handle_t device);
 
 WINEMETAL_API bool MTLDevice_supportsBCTextureCompression(obj_handle_t device);
 
@@ -1960,6 +2132,8 @@ WINEMETAL_API void MTLBinaryArchive_serialize(obj_handle_t archive, const char *
 
 WINEMETAL_API obj_handle_t DispatchData_alloc_init(uint64_t native_ptr, uint64_t length);
 
+WINEMETAL_API uint64_t DispatchData_copy(obj_handle_t data, void *destination, uint64_t capacity);
+
 WINEMETAL_API obj_handle_t CacheReader_alloc_init(const char *path, uint64_t version);
 
 WINEMETAL_API obj_handle_t CacheReader_get(obj_handle_t reader, const void *key, uint64_t length);
@@ -2063,6 +2237,77 @@ struct WMTHeapInfo {
 STATIC_ASSERT(sizeof(WMTHeapInfo) == 24);
 
 WINEMETAL_API obj_handle_t MTLDevice_newHeap(obj_handle_t device, const struct WMTHeapInfo *info);
+
+enum WMTSparseTextureMappingMode : uint32_t {
+  WMTSparseTextureMappingModeMap = 0,
+  WMTSparseTextureMappingModeUnmap = 1,
+};
+
+struct WMTUpdateSparseTextureMappingOperation {
+  enum WMTSparseTextureMappingMode mode;
+  struct WMTRegion texture_region;
+  uint64_t texture_level;
+  uint64_t texture_slice;
+  uint64_t heap_offset;
+};
+
+struct WMTCopySparseTextureMappingOperation {
+  struct WMTRegion source_region;
+  uint64_t source_level;
+  uint64_t source_slice;
+  struct WMTOrigin destination_origin;
+  uint64_t destination_level;
+  uint64_t destination_slice;
+};
+
+struct WMTUpdateSparseBufferMappingOperation {
+  enum WMTSparseTextureMappingMode mode;
+  struct WMTRange buffer_range;
+  uint64_t heap_offset;
+};
+
+struct WMTCopySparseBufferMappingOperation {
+  struct WMTRange source_range;
+  uint64_t destination_offset;
+};
+
+WINEMETAL_API obj_handle_t MTLDevice_newPlacementSparseBuffer(
+    obj_handle_t device, struct WMTBufferInfo *info, enum WMTSparsePageSize sparse_page_size
+);
+
+WINEMETAL_API obj_handle_t MTLDevice_newPlacementSparseTexture(
+    obj_handle_t device, struct WMTTextureInfo *info, enum WMTSparsePageSize sparse_page_size
+);
+
+WINEMETAL_API obj_handle_t MTLDevice_newSparseMappingQueue(obj_handle_t device);
+
+WINEMETAL_API void SparseMappingQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set);
+
+WINEMETAL_API void SparseMappingQueue_signalEvent(obj_handle_t queue, obj_handle_t event, uint64_t value);
+
+WINEMETAL_API void SparseMappingQueue_waitForEvent(obj_handle_t queue, obj_handle_t event, uint64_t value);
+
+WINEMETAL_API void SparseMappingQueue_barrierBeforeResourceState(obj_handle_t queue);
+
+WINEMETAL_API void SparseMappingQueue_updateBufferMappings(
+    obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap,
+    const struct WMTUpdateSparseBufferMappingOperation *operations, uint64_t count
+);
+
+WINEMETAL_API void SparseMappingQueue_updateTextureMappings(
+    obj_handle_t queue, obj_handle_t texture, obj_handle_t heap,
+    const struct WMTUpdateSparseTextureMappingOperation *operations, uint64_t count
+);
+
+WINEMETAL_API void SparseMappingQueue_copyBufferMappings(
+    obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
+    const struct WMTCopySparseBufferMappingOperation *operations, uint64_t count
+);
+
+WINEMETAL_API void SparseMappingQueue_copyTextureMappings(
+    obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
+    const struct WMTCopySparseTextureMappingOperation *operations, uint64_t count
+);
 
 struct WMTSizeAndAlign {
   // 32-bit is sufficient

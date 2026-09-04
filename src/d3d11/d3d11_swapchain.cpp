@@ -1032,13 +1032,12 @@ public:
   HRESULT STDMETHODCALLTYPE SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type,
                                            UINT Size,
                                            void *pMetaData) override {
-                                            return S_OK;
     if (Type == DXGI_HDR_METADATA_TYPE_NONE) {
       presenter->changeHDRMetadata(nullptr);
       return S_OK;
     }
     if (Type == DXGI_HDR_METADATA_TYPE_HDR10) {
-      if (Size != sizeof(WMTHDRMetadata))
+      if (Size != sizeof(WMTHDRMetadata) || !pMetaData)
         return E_INVALIDARG;
       presenter->changeHDRMetadata(reinterpret_cast<const WMTHDRMetadata *>(pMetaData));
       return S_OK;

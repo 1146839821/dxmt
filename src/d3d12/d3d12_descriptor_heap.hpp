@@ -20,37 +20,38 @@
 #include "d3d12.h"
 #include "dxmt_buffer.hpp"
 #include "dxmt_texture.hpp"
+#include "metalirconverter_thunks.h"
 #include <cstdint>
-
-#if UINTPTR_MAX == 0xffffffffffffffffULL
-#define DXMT_USE_EMBEDDED_HEAP_POINTER
-#endif
 
 namespace dxmt {
 
-struct EMBEDDED_DESCRIPTOR_HANDLE {
-#ifndef DXMT_USE_EMBEDDED_HEAP_POINTER
-  SIZE_T Tag        : 5;
-  SIZE_T Descriptor : 20;
-  SIZE_T Heap       : 7;
-#else
-  SIZE_T Tag        : 5;
-  SIZE_T Descriptor : 20;
-  SIZE_T Heap       : 39;
+SIZE_T RegisterDescriptorHeap(const void *heap);
+void UnregisterDescriptorHeap(const void *heap);
+const void *LookupDescriptorHeap(SIZE_T index);
 
-  // assume pointer is 8-byte aligned, providing 3 free bits
+constexpr SIZE_T kDescriptorHeapTag = 0x1f;
+
+struct EMBEDDED_DESCRIPTOR_HANDLE {
+  SIZE_T Tag        : 5;
+  SIZE_T Descriptor : 20;
+  SIZE_T Heap       : sizeof(SIZE_T) == 4 ? 7 : 39;
+
+  const void *
+  getHeap() const {
+    return Tag == kDescriptorHeapTag ? LookupDescriptorHeap(Heap) : nullptr;
+  }
+
   template <typename T>
   T *
   extract() {
-    return reinterpret_cast<T *>((Heap << 8) | (Tag << 3));
+    return reinterpret_cast<T *>(const_cast<void *>(getHeap()));
   }
 
   EMBEDDED_DESCRIPTOR_HANDLE(const void *heap, SIZE_T index) {
-    Heap = (SIZE_T)heap >> 8;
-    Tag = (SIZE_T)heap >> 3;
+    Heap = RegisterDescriptorHeap(heap);
+    Tag = kDescriptorHeapTag;
     Descriptor = index;
   }
-#endif
 
   EMBEDDED_DESCRIPTOR_HANDLE(D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
     union {
@@ -130,6 +131,9 @@ struct ShaderVisibleDescriptorCPUStorage {
 
 class MTLD3D12DescriptorHeap : public ID3D12DescriptorHeap {
 public:
+  virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
+  virtual WMT::Buffer GetMSCDescriptorHeapBuffer() = 0;
+
   virtual HRESULT
   AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp) = 0;
 
@@ -158,6 +162,9 @@ public:
 
 class MTLD3D12SamplerDescriptorHeap : public ID3D12DescriptorHeap {
 public:
+  virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
+  virtual WMT::Buffer GetMSCDescriptorHeapBuffer() = 0;
+
   virtual HRESULT AddSampler(UINT Index, const D3D12_SAMPLER_DESC *Desc) = 0;
 
   virtual void CopyDescriptors(UINT From, MTLD3D12SamplerDescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;

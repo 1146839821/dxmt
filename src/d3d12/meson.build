@@ -1,3 +1,20 @@
+d3d12_pipeline_persistence_abi = cpp.compiles('''
+#include <d3d12.h>
+
+static void probe_d3d12_pipeline_persistence_abi() {
+  D3D12_PIPELINE_STATE_STREAM_DESC stream = {};
+  ID3D12PipelineLibrary1 *library = nullptr;
+  ID3D12Device2 *device = nullptr;
+  (void) stream;
+  (void) library;
+  (void) device;
+}
+''', name : 'D3D12 pipeline persistence ABI declarations', include_directories : dxmt_include_path)
+
+if not d3d12_pipeline_persistence_abi
+  error('D3D12 pipeline persistence requires compiler-provided stream and pipeline-library declarations')
+endif
+
 d3d12_src = [
   'd3d12.cpp',
   'd3d12_buffer.cpp',
@@ -11,6 +28,8 @@ d3d12_src = [
   'd3d12_heap.cpp',
   'd3d12_pipeline_compute.cpp',
   'd3d12_pipeline_graphics.cpp',
+  'd3d12_pipeline_persistence.cpp',
+  'd3d12_shader_converter.cpp',
   'd3d12_query_heap.cpp',
   'd3d12_resource_helper.cpp',
   'd3d12_root_signature.cpp',

@@ -20,11 +20,12 @@
 
 #include "d3d12_pageable.hpp"
 #include "dxmt_command_clear.hpp"
+#include <atomic>
 
 namespace dxmt {
 
 constexpr auto kCPUHeapSize = 0x400000u;
-constexpr auto kGPUHeapSize = 0x400000u;
+constexpr auto kGPUHeapSize = 0x2000000u;
 
 inline std::size_t
 align_forward_adjustment(const void *const ptr, const std::size_t &alignment) noexcept {
@@ -83,6 +84,7 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
   EncoderData *encoder_last;
   EncoderData *encoder_current;
   size_t encoder_count_;
+  std::atomic_uint32_t in_flight_submissions_ = {0u};
 
   small_vector<EncoderData, 64> encoder_lists_;
 
@@ -90,10 +92,20 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
 
   ClearUAV<MTLD3D12CommandAllocatorImpl> clear_uav_;
 
+  void
+  DestroyEncoder(EncoderData *encoder);
+
+  void
+  DestroyEncoders();
+
+  void
+  DiscardRecord();
+
 public:
   MTLD3D12CommandAllocatorImpl(MTLD3D12Device *pDevice, D3D12_COMMAND_LIST_TYPE Type);
 
   ~MTLD3D12CommandAllocatorImpl() {
+    DestroyEncoders();
     free(cpu_heap_);
     cpu_heap_ = nullptr;
     gpu_heap_buffer_ = {};
@@ -109,6 +121,28 @@ public:
   QueryInterface(REFIID riid, void **ppvObject);
 
   HRESULT STDMETHODCALLTYPE Reset();
+
+  D3D12_COMMAND_LIST_TYPE
+  GetType() const override {
+    return type_;
+  }
+
+  void
+  MarkSubmissionSubmitted() final {
+    in_flight_submissions_.fetch_add(1u, std::memory_order_relaxed);
+  }
+
+  void
+  MarkSubmissionCompleted() final {
+    auto previous = in_flight_submissions_.fetch_sub(1u, std::memory_order_release);
+    assert(previous > 0);
+    (void)previous;
+  }
+
+  bool
+  IsInFlight() const final {
+    return in_flight_submissions_.load(std::memory_order_acquire) != 0;
+  }
 
   HRESULT STDMETHODCALLTYPE CreateCommandList(
       UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, ID3D12PipelineState *pInitialPipelineState, REFIID riid,
@@ -207,12 +241,17 @@ public:
 
   std::tuple<void *, size_t>
   AllocateGPUHeap(size_t Length, size_t Alignment) {
+    if (gpu_heap_offset_ > kGPUHeapSize)
+      return {nullptr, 0};
     if (!Length)
       return {nullptr, 0};
     std::size_t adjustment = align_forward_adjustment((void *)gpu_heap_offset_, Alignment);
+    if (adjustment > kGPUHeapSize - gpu_heap_offset_ ||
+        Length > kGPUHeapSize - gpu_heap_offset_ - adjustment)
+      return {nullptr, 0};
     auto aligned = gpu_heap_offset_ + adjustment;
     gpu_heap_offset_ = aligned + Length;
-    assert(gpu_heap_offset_ < kGPUHeapSize);
+    assert(gpu_heap_offset_ <= kGPUHeapSize);
     return {ptr_add(gpu_heap_, aligned), aligned};
   }
 

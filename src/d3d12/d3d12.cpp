@@ -26,6 +26,31 @@ namespace dxmt {
 
 Logger Logger::s_instance("d3d12.log");
 
+static bool
+is_supported_feature_level(D3D_FEATURE_LEVEL level) {
+  switch (level) {
+  case D3D_FEATURE_LEVEL_11_0:
+  case D3D_FEATURE_LEVEL_11_1:
+  case D3D_FEATURE_LEVEL_12_0:
+  case D3D_FEATURE_LEVEL_12_1:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static D3D_FEATURE_LEVEL
+get_max_supported_feature_level(WMT::Device device) {
+#ifdef DXMT_NO_PRIVATE_API
+  return D3D_FEATURE_LEVEL_11_0;
+#else
+  // FL12_0 and FL12_1 require Tier 2 tiled resources, which DXMT does not
+  // expose yet. Keep the hardware-dependent FL11_1 cutoff consistent with
+  // the D3D11 device creation path.
+  return device.supportsFamily(WMTGPUFamilyApple7) ? D3D_FEATURE_LEVEL_11_1 : D3D_FEATURE_LEVEL_11_0;
+#endif
+}
+
 extern "C" HRESULT WINAPI
 D3D12CreateDevice(IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REFIID riid, void **ppDevice) {
 
@@ -33,8 +58,10 @@ D3D12CreateDevice(IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REF
   Com<IDXGIFactory> dxgi_factory = nullptr;
   Com<IMTLDXGIAdapter> dxgi_adapter_mtl = nullptr;
 
-  if (MinimumFeatureLevel < D3D_FEATURE_LEVEL_11_0)
+  if (!is_supported_feature_level(MinimumFeatureLevel)) {
+    WARN("D3D12CreateDevice: unsupported minimum feature level ", static_cast<unsigned>(MinimumFeatureLevel));
     return E_INVALIDARG;
+  }
 
   HRESULT hr;
 
@@ -59,10 +86,17 @@ D3D12CreateDevice(IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REF
     return hr;
   }
 
+  const auto max_feature_level = get_max_supported_feature_level(dxgi_adapter_mtl->GetMTLDevice());
+  if (MinimumFeatureLevel > max_feature_level) {
+    WARN("D3D12CreateDevice: requested feature level ", static_cast<unsigned>(MinimumFeatureLevel),
+         " exceeds maximum supported feature level ", static_cast<unsigned>(max_feature_level));
+    return E_INVALIDARG;
+  }
+
   if (!ppDevice)
     return S_FALSE;
 
-  return dxmt::CreateD3D12Device(dxgi_adapter_mtl.ptr(), riid, ppDevice);
+  return dxmt::CreateD3D12Device(dxgi_adapter_mtl.ptr(), max_feature_level, riid, ppDevice);
 }
 
 extern "C" HRESULT WINAPI

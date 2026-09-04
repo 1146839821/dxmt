@@ -103,38 +103,75 @@ MTLD3D12CommandAllocatorImpl::QueryInterface(REFIID riid, void **ppvObject) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D12CommandAllocatorImpl::Reset() {
-  if (encoder_last)
+  if (encoder_last || IsInFlight())
     return E_FAIL;
+
+  DestroyEncoders();
+
+  return Initialize();
+};
+
+void
+MTLD3D12CommandAllocatorImpl::DestroyEncoder(EncoderData *encoder) {
+  switch (encoder->type) {
+  case EncoderType::Null:
+    break;
+  case EncoderType::Clear:
+    reinterpret_cast<ClearEncoderData *>(encoder)->~ClearEncoderData();
+    break;
+  case EncoderType::Render:
+    reinterpret_cast<RenderEncoderData *>(encoder)->~RenderEncoderData();
+    break;
+  case EncoderType::Blit:
+    reinterpret_cast<BlitEncoderData *>(encoder)->~BlitEncoderData();
+    break;
+  case EncoderType::CopyTiles:
+    reinterpret_cast<CopyTilesEncoderData *>(encoder)->~CopyTilesEncoderData();
+    break;
+  case EncoderType::Compute:
+    reinterpret_cast<ComputeEncoderData *>(encoder)->~ComputeEncoderData();
+    break;
+  case EncoderType::Resolve:
+    reinterpret_cast<ResolveEncoderData *>(encoder)->~ResolveEncoderData();
+    break;
+  case EncoderType::TemporalUpscale:
+    reinterpret_cast<TemporalUpscaleData *>(encoder)->~TemporalUpscaleData();
+    break;
+  case EncoderType::SampleTimestamp:
+    reinterpret_cast<SampleTimestampData *>(encoder)->~SampleTimestampData();
+    break;
+  }
+}
+
+void
+MTLD3D12CommandAllocatorImpl::DestroyEncoders() {
+  if (encoder_current) {
+    DestroyEncoder(encoder_current);
+    encoder_current = nullptr;
+  }
 
   for (auto &encoder_list : encoder_lists_) {
     EncoderData *next = encoder_list.next;
     while (next) {
-      switch (next->type) {
-      case EncoderType::Null:
-        break;
-      case EncoderType::Clear:
-        reinterpret_cast<ClearEncoderData *>(next)->~ClearEncoderData();
-        break;
-      case EncoderType::Render:
-        reinterpret_cast<RenderEncoderData *>(next)->~RenderEncoderData();
-        break;
-      case EncoderType::Blit:
-        reinterpret_cast<BlitEncoderData *>(next)->~BlitEncoderData();
-        break;
-      case EncoderType::Compute:
-        reinterpret_cast<ComputeEncoderData *>(next)->~ComputeEncoderData();
-        break;
-      case EncoderType::Resolve:
-        reinterpret_cast<ResolveEncoderData *>(next)->~ResolveEncoderData();
-        break;
-      }
-      next = next->next;
+      EncoderData *encoder = next;
+      next = encoder->next;
+      DestroyEncoder(encoder);
     }
   }
   encoder_lists_.clear();
+  encoder_last = nullptr;
+  encoder_count_ = 0;
+}
 
-  return Initialize();
-};
+void
+MTLD3D12CommandAllocatorImpl::DiscardRecord() {
+  if (encoder_current) {
+    DestroyEncoder(encoder_current);
+    encoder_current = nullptr;
+  }
+  encoder_last = nullptr;
+  encoder_count_ = 0;
+}
 
 IndirectComputeCommandData *
 MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount) {
