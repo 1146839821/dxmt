@@ -20,11 +20,15 @@
 #include "com/com_pointer.hpp"
 #include "d3d12_device.hpp"
 #include "d3d12_pageable.hpp"
+#include "dxmt_command_constants.hpp"
+#include "dxmt_format.hpp"
 #include "dxgi_interfaces.h"
 #include "log/log.hpp"
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <limits>
+#include <unordered_map>
 
 namespace dxmt {
 
@@ -60,6 +64,68 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   bool stopping_ = false;
   uint64_t next_submission_serial_ = 1;
   uint64_t completed_submission_serial_ = 0;
+  std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_psos_;
+  std::array<WMT::Reference<WMT::DepthStencilState>, 4> clear_dssos_;
+
+  WMT::RenderPipelineState
+  GetClearPSO(WMTPixelFormat format, uint8_t sample_count) {
+    if (format == WMTPixelFormatInvalid || !sample_count)
+      return {};
+
+    const uint64_t key = (uint64_t(format) << 8) | sample_count;
+    if (auto it = clear_psos_.find(key); it != clear_psos_.end())
+      return it->second;
+
+    auto library = device_->GetLib().getLibrary();
+    auto vertex_function = library.newFunction("vs_clear_rt");
+    auto fragment_function = library.newFunction("fs_clear_rt_depth");
+    if (!vertex_function || !fragment_function)
+      return {};
+
+    WMTRenderPipelineInfo info;
+    WMT::InitializeRenderPipelineInfo(info);
+    info.raster_sample_count = sample_count;
+    info.vertex_function = vertex_function;
+    info.fragment_function = fragment_function;
+    const auto dsv_flags = DepthStencilPlanarFlags(format);
+    if (dsv_flags & 1)
+      info.depth_pixel_format = format;
+    if (dsv_flags & 2)
+      info.stencil_pixel_format = format;
+    info.input_primitive_topology = WMTPrimitiveTopologyClassTriangle;
+
+    WMT::Reference<WMT::Error> error;
+    auto pso = device_->GetMTLDevice().newRenderPipelineState(info, error);
+    if (!pso) {
+      ERR("Failed to create D3D12 partial depth clear PSO: ",
+          error ? error.description().getUTF8String() : "unknown error");
+      return {};
+    }
+    return clear_psos_.emplace(key, std::move(pso)).first->second;
+  }
+
+  WMT::DepthStencilState
+  GetClearDSSO(unsigned clear_flags) {
+    if (!clear_flags || clear_flags >= clear_dssos_.size())
+      return {};
+    if (clear_dssos_[clear_flags])
+      return clear_dssos_[clear_flags];
+
+    WMTDepthStencilInfo info = {};
+    info.depth_compare_function = WMTCompareFunctionAlways;
+    info.depth_write_enabled = clear_flags & 1;
+    for (auto *stencil : {&info.front_stencil, &info.back_stencil}) {
+      stencil->enabled = clear_flags & 2;
+      stencil->depth_stencil_pass_op = (clear_flags & 2) ? WMTStencilOperationReplace : WMTStencilOperationKeep;
+      stencil->stencil_fail_op = WMTStencilOperationKeep;
+      stencil->depth_fail_op = WMTStencilOperationKeep;
+      stencil->stencil_compare_function = WMTCompareFunctionAlways;
+      stencil->write_mask = (clear_flags & 2) ? 0xff : 0;
+      stencil->read_mask = 0xff;
+    }
+    clear_dssos_[clear_flags] = device_->GetMTLDevice().newDepthStencilState(info);
+    return clear_dssos_[clear_flags];
+  }
 
   void
   CompletionThread() {
@@ -80,8 +146,11 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
 
       auto pool = WMT::MakeAutoreleasePool();
       submission.command_buffer.waitUntilCompleted();
-      if (submission.command_buffer.status() == WMTCommandBufferStatusError)
-        ERR("D3D12 command buffer submission ", submission.serial, " failed");
+      if (submission.command_buffer.status() == WMTCommandBufferStatusError) {
+        auto error = submission.command_buffer.error();
+        ERR("D3D12 command buffer submission ", submission.serial, " failed: ",
+            error ? error.description().getUTF8String() : "unknown error");
+      }
 
       for (auto &allocator : submission.allocators)
         allocator->MarkSubmissionCompleted();
@@ -642,6 +711,99 @@ public:
         }
         case EncoderType::Clear: {
           auto data = static_cast<ClearEncoderData *>(current);
+          if (data->rect_count) {
+            if (!data->attachment || !data->rects) {
+              translation_failed = true;
+              break;
+            }
+            auto pso = GetClearPSO(data->format, data->raster_sample_count);
+            auto dsso = GetClearDSSO(data->clear_dsv);
+            if (!pso || !dsso) {
+              translation_failed = true;
+              break;
+            }
+
+            WMTRenderPassInfo info;
+            WMT::InitializeRenderPassInfo(info);
+            const auto attachment = data->attachment.ptr();
+            const auto dsv_planar_flags = DepthStencilPlanarFlags(data->format);
+            if (dsv_planar_flags & 1) {
+              info.depth.texture = data->attachment.texture();
+              info.depth.level = attachment->key.mip_start;
+              info.depth.slice = attachment->key.array_start;
+              info.depth.depth_plane = data->depth_plane;
+              info.depth.load_action = WMTLoadActionLoad;
+              info.depth.store_action = WMTStoreActionStore;
+            }
+            if (dsv_planar_flags & 2) {
+              info.stencil.texture = data->attachment.texture();
+              info.stencil.level = attachment->key.mip_start;
+              info.stencil.slice = attachment->key.array_start;
+              info.stencil.depth_plane = data->depth_plane;
+              info.stencil.load_action = WMTLoadActionLoad;
+              info.stencil.store_action = WMTStoreActionStore;
+            }
+            info.default_raster_sample_count = data->raster_sample_count;
+            const auto array_length = std::max(data->array_length, 1u);
+            info.render_target_array_length = array_length;
+            info.render_target_width = data->width;
+            info.render_target_height = data->height;
+
+            auto encoder = cmdbuf.renderCommandEncoder(info);
+            encoder.setLabel(WMT::String::string("PartialClearPass", WMTUTF8StringEncoding));
+            encoder.waitForFence(fence_, WMTRenderStageFragment);
+
+            wmtcmd_render_setpso set_pso = {};
+            set_pso.type = WMTRenderCommandSetPSO;
+            set_pso.pso = pso;
+            encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_pso));
+
+            wmtcmd_render_setviewport set_viewport = {};
+            set_viewport.type = WMTRenderCommandSetViewport;
+            set_viewport.viewport = {0.0, 0.0, (double)data->width, (double)data->height, 0.0, 1.0};
+            encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_viewport));
+
+            wmtcmd_render_setdsso set_dsso = {};
+            set_dsso.type = WMTRenderCommandSetDSSO;
+            set_dsso.dsso = dsso;
+            set_dsso.stencil_ref = data->depth_stencil.second;
+            encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_dsso));
+
+            float clear_value[4] = {data->depth_stencil.first, 0.0f, 0.0f, 0.0f};
+            wmtcmd_render_setbytes set_value = {};
+            set_value.type = WMTRenderCommandSetFragmentBytes;
+            set_value.bytes.set(clear_value);
+            set_value.length = sizeof(clear_value);
+            set_value.index = kCustomBufferArgumentIndex0;
+            encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_value));
+
+            for (UINT i = 0; i < data->rect_count; i++) {
+              const auto &rect = data->rects[i];
+              const LONG left = std::max<LONG>(0, rect.left);
+              const LONG top = std::max<LONG>(0, rect.top);
+              const LONG right = std::min<LONG>((LONG)data->width, rect.right);
+              const LONG bottom = std::min<LONG>((LONG)data->height, rect.bottom);
+              if (left >= right || top >= bottom)
+                continue;
+
+              wmtcmd_render_setscissorrect set_scissor = {};
+              set_scissor.type = WMTRenderCommandSetScissorRect;
+              set_scissor.scissor_rect = {
+                  (uint64_t)left, (uint64_t)top, (uint64_t)(right - left), (uint64_t)(bottom - top)
+              };
+              encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_scissor));
+
+              wmtcmd_render_draw draw = {};
+              draw.type = WMTRenderCommandDraw;
+              draw.primitive_type = WMTPrimitiveTypeTriangle;
+              draw.vertex_count = 3;
+              draw.instance_count = array_length;
+              encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&draw));
+            }
+            encoder.updateFence(fence_, WMTRenderStageFragment);
+            encoder.endEncoding();
+            break;
+          }
           {
             WMTRenderPassInfo info;
             WMT::InitializeRenderPassInfo(info);

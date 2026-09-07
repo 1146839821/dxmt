@@ -351,15 +351,26 @@ CopyRenderPipelineInfoToMesh(const WMTRenderPipelineInfo &source, WMTMeshRenderP
 
 class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12GraphicsPipelineState> {
 
-  sm50_shader_t shader_vs;
-  sm50_shader_t shader_ps;
-  MTL_SHADER_REFLECTION ref_vs;
-  MTL_SHADER_REFLECTION ref_ps;
+  sm50_shader_t shader_vs = {};
+  sm50_shader_t shader_ps = {};
+  sm50_shader_t shader_gs = {};
+  MTL_SHADER_REFLECTION ref_vs = {};
+  MTL_SHADER_REFLECTION ref_ps = {};
+  MTL_SHADER_REFLECTION ref_gs = {};
 
 public:
   MTLD3D12GraphicsPipelineStateImpl(MTLD3D12Device *pDevice) :
       MTLD3D12Pageable<MTLD3D12GraphicsPipelineState>(pDevice) {
     IsComputePipelineState = FALSE;
+  }
+
+  ~MTLD3D12GraphicsPipelineStateImpl() {
+    if (shader_vs)
+      SM50Destroy(shader_vs);
+    if (shader_ps)
+      SM50Destroy(shader_ps);
+    if (shader_gs)
+      SM50Destroy(shader_gs);
   }
 
   bool
@@ -472,6 +483,176 @@ public:
   }
 
   HRESULT
+  InitializeAirconvGeometryPipeline(
+      const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, const WMTRenderPipelineInfo &render_info, WMT::Device metal,
+      WMT::Reference<WMT::Function> &fragment_function, sm50_error_t &sm50_err
+  ) {
+    constexpr unsigned kStripVariants = 2;
+    constexpr unsigned kIndexVariants = 3;
+
+    SM50_SHADER_COMMON_DATA common = {};
+    common.type = SM50_SHADER_COMMON;
+    common.metal_version = SM50_SHADER_METAL_310;
+
+    const void *root_signature = nullptr;
+    size_t root_signature_size = 0;
+    if (pDesc->pRootSignature) {
+      root_signature_size = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&root_signature);
+    }
+
+    WMTPrimitiveType geometry_input_primitive;
+    if (!MapMSCGeometryInputPrimitive(ref_gs.GeometryShader.Primitive, geometry_input_primitive))
+      return E_INVALIDARG;
+    switch (geometry_input_primitive) {
+    case WMTPrimitiveTypePoint:
+      if (pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT)
+        return E_INVALIDARG;
+      break;
+    case WMTPrimitiveTypeLine:
+    case WMTPrimitiveTypeLineWithAdj:
+      if (pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE)
+        return E_INVALIDARG;
+      break;
+    case WMTPrimitiveTypeTriangle:
+    case WMTPrimitiveTypeTriangleWithAdj:
+      if (pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE)
+        return E_INVALIDARG;
+      break;
+    default:
+      return E_INVALIDARG;
+    }
+
+    auto make_function = [&](sm50_bitcode_t bitcode, const std::string &name,
+                             WMT::Reference<WMT::Function> &function) -> HRESULT {
+      SM50_COMPILED_BITCODE compiled = {};
+      SM50GetCompiledBitcode(bitcode, &compiled);
+      auto data = WMT::MakeDispatchData(compiled.Data, compiled.Size);
+      WMT::Reference<WMT::Error> err;
+      auto library = metal.newLibrary(data, err);
+      SM50DestroyBitcode(bitcode);
+      if (!library) {
+        ERR("Failed to create AIRCONV geometry library: ", err ? err.description().getUTF8String() : "unknown error");
+        return E_FAIL;
+      }
+      function = library.newFunction(name.c_str());
+      if (!function) {
+        ERR("Failed to create AIRCONV geometry function ", name);
+        return E_FAIL;
+      }
+      return S_OK;
+    };
+
+    auto compile_error = [&](const char *stage) -> HRESULT {
+      ERR(
+          "Failed to compile AIRCONV geometry ", stage, ": ",
+          sm50_err ? SM50GetErrorMessageString(sm50_err) : "unknown error"
+      );
+      if (sm50_err)
+        SM50FreeError(sm50_err);
+      sm50_err = nullptr;
+      return E_FAIL;
+    };
+
+    for (unsigned strip = 0; strip < kStripVariants; strip++) {
+      SM50_SHADER_PSO_GEOMETRY_SHADER_DATA geometry = {};
+      geometry.type = SM50_SHADER_PSO_GEOMETRY_SHADER;
+      geometry.next = &common;
+      geometry.strip_topology = strip != 0;
+
+      SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
+      SM50_SHADER_COMPILATION_ARGUMENT_DATA *geometry_args =
+          reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&geometry);
+      if (root_signature) {
+        rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
+        rootsig.bytecode = root_signature;
+        rootsig.bytecode_length = root_signature_size;
+        rootsig.next = &geometry;
+        geometry_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
+      }
+
+      sm50_bitcode_t geometry_bitcode = nullptr;
+      std::string geometry_name = "airconv_gs_" + std::to_string(strip);
+      if (SM50CompileGeometryPipelineGeometry(
+              shader_vs, shader_gs, geometry_args, geometry_name.c_str(), &geometry_bitcode, &sm50_err
+          ))
+        return compile_error("mesh stage");
+
+      WMT::Reference<WMT::Function> mesh_function;
+      if (FAILED(make_function(geometry_bitcode, geometry_name, mesh_function)))
+        return E_FAIL;
+
+      for (unsigned index = 0; index < kIndexVariants; index++) {
+        SM50_SHADER_IA_INPUT_LAYOUT_DATA ia_layout = {};
+        ia_layout.type = SM50_SHADER_IA_INPUT_LAYOUT;
+        ia_layout.index_buffer_format = static_cast<SM50_INDEX_BUFFER_FORMAT>(index);
+        ia_layout.slot_mask = slot_mask;
+        ia_layout.num_elements = 0;
+        ia_layout.elements = nullptr;
+
+        std::vector<SM50_IA_INPUT_ELEMENT> elements(pDesc->InputLayout.NumElements);
+        HRESULT hr = ExtractMTLInputLayoutElements(
+            device_, pDesc->VS.pShaderBytecode, pDesc->InputLayout.pInputElementDescs,
+            pDesc->InputLayout.NumElements, elements.data(), &ia_layout.num_elements
+        );
+        if (FAILED(hr))
+          return hr;
+        elements.resize(ia_layout.num_elements);
+        ia_layout.elements = elements.data();
+        ia_layout.next = &common;
+        geometry.next = &ia_layout;
+
+        SM50_SHADER_COMPILATION_ARGUMENT_DATA *vertex_args =
+            reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&geometry);
+        if (root_signature) {
+          rootsig.next = &geometry;
+          vertex_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
+        }
+
+        sm50_bitcode_t vertex_bitcode = nullptr;
+        std::string vertex_name =
+            "airconv_vs_" + std::to_string(strip) + "_" + std::to_string(index);
+        if (SM50CompileGeometryPipelineVertex(
+                shader_vs, shader_gs, vertex_args, vertex_name.c_str(), &vertex_bitcode, &sm50_err
+            ))
+          return compile_error("object stage");
+
+        WMT::Reference<WMT::Function> object_function;
+        if (FAILED(make_function(vertex_bitcode, vertex_name, object_function)))
+          return E_FAIL;
+
+        WMTMeshRenderPipelineInfo geometry_info;
+        CopyRenderPipelineInfoToMesh(render_info, geometry_info);
+        geometry_info.object_function = object_function.handle;
+        geometry_info.mesh_function = mesh_function.handle;
+        geometry_info.fragment_function = fragment_function.handle;
+        geometry_info.payload_memory_length = 16256;
+        geometry_info.immutable_object_buffers =
+            (1u << SM50_BINDING_INDEX_ROOT_ARGUMENTS) | (1u << SM50_BINDING_INDEX_STATIC_SAMPLERS) |
+            (1u << 16) | (1u << 21);
+        geometry_info.immutable_mesh_buffers =
+            (1u << SM50_BINDING_INDEX_ROOT_ARGUMENTS) | (1u << SM50_BINDING_INDEX_STATIC_SAMPLERS);
+        geometry_info.immutable_fragment_buffers =
+            (1u << SM50_BINDING_INDEX_ROOT_ARGUMENTS) | (1u << SM50_BINDING_INDEX_STATIC_SAMPLERS);
+
+        WMT::Reference<WMT::Error> err;
+        airconv_geometry_psos[strip][index] = metal.newRenderPipelineState(geometry_info, err);
+        if (!airconv_geometry_psos[strip][index]) {
+          ERR(
+              "Failed to create AIRCONV geometry PSO: ",
+              err ? err.description().getUTF8String() : "unknown error"
+          );
+          return E_FAIL;
+        }
+      }
+    }
+
+    airconv_geometry = true;
+    airconv_geometry_input_primitive = geometry_input_primitive;
+    pso = airconv_geometry_psos[0][SM50_INDEX_BUFFER_FORMAT_NONE];
+    return S_OK;
+  }
+
+  HRESULT
   Initialize(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) {
     const bool has_stream_output = pDesc->StreamOutput.NumEntries != 0;
     const bool has_hull = pDesc->HS.pShaderBytecode != nullptr;
@@ -483,7 +664,7 @@ public:
     }
 
     HRESULT hr;
-    sm50_error_t sm50_err;
+    sm50_error_t sm50_err = nullptr;
     auto metal = device_->GetMTLDevice();
     WMT::Reference<WMT::Error> err;
     WMT::Reference<WMT::Function> vs_func, ps_func;
@@ -494,6 +675,7 @@ public:
     const bool use_msc = vs_backend == D3D12ShaderBackend::MetalShaderConverter;
     const bool use_msc_tessellation = use_msc && has_hull && has_domain;
     const bool use_msc_geometry = use_msc && has_geometry;
+    const bool use_airconv_geometry = !use_msc && has_geometry;
     if (has_stream_output && (use_msc || has_geometry || has_hull || has_domain)) {
       ERR("CreatePipelineState: Stream Output requires an ordinary VS without GS or tessellation");
       return E_NOTIMPL;
@@ -505,16 +687,12 @@ public:
       return E_FAIL;
     if (has_geometry && gs_backend == D3D12ShaderBackend::Unsupported)
       return E_FAIL;
-    if (has_geometry && !use_msc_geometry) {
-      ERR("CreatePipelineState: GS requires Metal Shader Converter");
-      return E_NOTIMPL;
-    }
     if (has_geometry && (has_hull || has_domain)) {
       ERR("CreatePipelineState: geometry and tessellation emulation are not combined");
       return E_NOTIMPL;
     }
-    if (has_geometry && gs_backend != D3D12ShaderBackend::MetalShaderConverter) {
-      ERR("CreatePipelineState: GS bytecode is not DXIL");
+    if (has_geometry && gs_backend != vs_backend) {
+      ERR("CreatePipelineState: mixed shader backends across VS and GS are not supported");
       return E_NOTIMPL;
     }
     if ((ps_backend == D3D12ShaderBackend::MetalShaderConverter) != use_msc)
@@ -658,71 +836,92 @@ public:
           ERR("Failed to parse vs shader");
           return E_FAIL;
         }
-        SM50_SHADER_IA_INPUT_LAYOUT_DATA data_ia_layout;
-        data_ia_layout.type = SM50_SHADER_IA_INPUT_LAYOUT;
-        data_ia_layout.index_buffer_format = SM50_INDEX_BUFFER_FORMAT_NONE;
-        std::vector<SM50_IA_INPUT_ELEMENT> elements(pDesc->InputLayout.NumElements);
-        hr = ExtractMTLInputLayoutElements(
-            device_, pDesc->VS.pShaderBytecode, pDesc->InputLayout.pInputElementDescs, pDesc->InputLayout.NumElements,
-            elements.data(), &data_ia_layout.num_elements
-        );
-        elements.resize(data_ia_layout.num_elements);
-        data_ia_layout.elements = elements.data();
-        if (FAILED(hr)) {
-          return hr;
-        }
-        slot_mask = 0;
-        for (auto &element : elements) {
-          slot_mask |= (1u << element.slot);
-        }
-        data_ia_layout.slot_mask = slot_mask;
-        data_ia_layout.next = &common;
-
-        SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA data_so = {};
-        if (has_stream_output) {
-          data_so.type = SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT;
-          data_so.num_output_slots = 1;
-          data_so.num_elements = static_cast<uint32_t>(stream_output_elements.size());
-          memcpy(data_so.strides, stream_output_strides, sizeof(data_so.strides));
-          data_so.elements = stream_output_elements.data();
-          data_so.next = &data_ia_layout;
-        }
-
-        SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
-        SM50_SHADER_COMPILATION_ARGUMENT_DATA *shader_args =
-            reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(
-                has_stream_output ? static_cast<void *>(&data_so) : static_cast<void *>(&data_ia_layout)
-            );
-        if (pDesc->pRootSignature) {
-          rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
-          rootsig.bytecode_length =
-              static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&rootsig.bytecode);
-          rootsig.next = has_stream_output ? static_cast<void *>(&data_so) : static_cast<void *>(&data_ia_layout);
-          shader_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
-        } else {
+        if (!use_airconv_geometry) {
+          SM50_SHADER_IA_INPUT_LAYOUT_DATA data_ia_layout = {};
+          data_ia_layout.type = SM50_SHADER_IA_INPUT_LAYOUT;
+          data_ia_layout.index_buffer_format = SM50_INDEX_BUFFER_FORMAT_NONE;
+          std::vector<SM50_IA_INPUT_ELEMENT> elements(pDesc->InputLayout.NumElements);
+          hr = ExtractMTLInputLayoutElements(
+              device_, pDesc->VS.pShaderBytecode, pDesc->InputLayout.pInputElementDescs,
+              pDesc->InputLayout.NumElements, elements.data(), &data_ia_layout.num_elements
+          );
+          elements.resize(data_ia_layout.num_elements);
+          data_ia_layout.elements = elements.data();
+          if (FAILED(hr)) {
+            return hr;
+          }
+          slot_mask = 0;
+          for (auto &element : elements) {
+            slot_mask |= (1u << element.slot);
+          }
+          data_ia_layout.slot_mask = slot_mask;
           data_ia_layout.next = &common;
-          if (has_stream_output)
+
+          SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA data_so = {};
+          if (has_stream_output) {
+            data_so.type = SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT;
+            data_so.num_output_slots = 1;
+            data_so.num_elements = static_cast<uint32_t>(stream_output_elements.size());
+            memcpy(data_so.strides, stream_output_strides, sizeof(data_so.strides));
+            data_so.elements = stream_output_elements.data();
             data_so.next = &data_ia_layout;
+          }
+
+          SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
+          SM50_SHADER_COMPILATION_ARGUMENT_DATA *shader_args =
+              reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(
+                  has_stream_output ? static_cast<void *>(&data_so) : static_cast<void *>(&data_ia_layout)
+              );
+          if (pDesc->pRootSignature) {
+            rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
+            rootsig.bytecode_length =
+                static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&rootsig.bytecode);
+            rootsig.next = has_stream_output ? static_cast<void *>(&data_so) : static_cast<void *>(&data_ia_layout);
+            shader_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
+          } else {
+            data_ia_layout.next = &common;
+            if (has_stream_output)
+              data_so.next = &data_ia_layout;
+          }
+
+          sm50_bitcode_t vs_bitcode;
+
+          if (SM50Compile(
+                  shader_vs, shader_args, "vs_main", &vs_bitcode, &sm50_err
+              )) {
+            ERR("Failed to compile vs shader");
+            return E_FAIL;
+          }
+
+          SM50_COMPILED_BITCODE vs_bitcode_compiled;
+          SM50GetCompiledBitcode(vs_bitcode, &vs_bitcode_compiled);
+          auto vs_data = WMT::MakeDispatchData(vs_bitcode_compiled.Data, vs_bitcode_compiled.Size);
+          auto vs_lib = metal.newLibrary(vs_data, err);
+          vs_func = vs_lib.newFunction("vs_main");
         }
-
-        sm50_bitcode_t vs_bitcode;
-
-        if (SM50Compile(
-                shader_vs, shader_args, "vs_main", &vs_bitcode, &sm50_err
-            )) {
-          ERR("Failed to compile vs shader");
-          return E_FAIL;
-        }
-
-        SM50_COMPILED_BITCODE vs_bitcode_compiled;
-        SM50GetCompiledBitcode(vs_bitcode, &vs_bitcode_compiled);
-        auto vs_data = WMT::MakeDispatchData(vs_bitcode_compiled.Data, vs_bitcode_compiled.Size);
-        auto vs_lib = metal.newLibrary(vs_data, err);
-        vs_func = vs_lib.newFunction("vs_main");
       } else {
         ERR("no vertex shader");
         return E_INVALIDARG;
       }
+    }
+
+    if (use_airconv_geometry) {
+      if (SM50Initialize(pDesc->GS.pShaderBytecode, pDesc->GS.BytecodeLength, &shader_gs, &ref_gs, &sm50_err)) {
+        ERR("Failed to parse gs shader");
+        return E_FAIL;
+      }
+
+      std::vector<SM50_IA_INPUT_ELEMENT> elements(pDesc->InputLayout.NumElements);
+      uint32_t element_count = 0;
+      hr = ExtractMTLInputLayoutElements(
+          device_, pDesc->VS.pShaderBytecode, pDesc->InputLayout.pInputElementDescs,
+          pDesc->InputLayout.NumElements, elements.data(), &element_count
+      );
+      if (FAILED(hr))
+        return hr;
+      slot_mask = 0;
+      for (uint32_t i = 0; i < element_count; i++)
+        slot_mask |= 1u << elements[i].slot;
     }
 
     WMTRenderPipelineInfo info;
@@ -1010,6 +1209,12 @@ public:
         msc_geometry = true;
         msc_geometry_config = geometry_info.config;
         msc_geometry_input_primitive = geometry_input_primitive;
+      } else if (use_airconv_geometry) {
+        if (pDesc->PrimitiveTopologyType == D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH)
+          return E_INVALIDARG;
+        hr = InitializeAirconvGeometryPipeline(pDesc, info, metal, ps_func, sm50_err);
+        if (FAILED(hr))
+          return hr;
       } else {
         pso = metal.newRenderPipelineState(info, err);
       }

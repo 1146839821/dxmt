@@ -2829,6 +2829,7 @@ int main() {
                               D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                               0.25f, 0x5a, 0, nullptr);
   list->OMSetRenderTargets(0, nullptr, FALSE, &dsv_handle);
+  list->DiscardResource(depth_texture, nullptr);
   D3D12_CPU_DESCRIPTOR_HANDLE invalid_dsv = dsv_handle;
   invalid_dsv.ptr += 2 * device->GetDescriptorHandleIncrementSize(
                              D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
@@ -2838,6 +2839,14 @@ int main() {
   list->ClearDepthStencilView(
       dsv_handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 0.25f, 0x5a, 0, nullptr
   );
+  D3D12_RECT partial_depth_rect = {1, 1, 3, 3};
+  list->ClearDepthStencilView(
+      dsv_handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 0.75f, 0xa5, 1, &partial_depth_rect
+  );
+  D3D12_RECT depth_only_rect = {0, 0, 1, 1};
+  list->ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_DEPTH, 0.5f, 0, 1, &depth_only_rect);
+  D3D12_RECT stencil_only_rect = {3, 3, 4, 4};
+  list->ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_STENCIL, 0, 0x3c, 1, &stencil_only_rect);
   depth_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
   depth_barrier.Transition.pResource = depth_texture;
   depth_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_DEPTH_WRITE;
@@ -3530,13 +3539,35 @@ int main() {
     cleanup();
     return 1;
   }
-  UINT32 depth_bits = 0;
-  std::memcpy(&depth_bits, mapped_depth + depth_footprints[0].Offset, sizeof(depth_bits));
-  UINT8 stencil_value = *(mapped_depth + depth_footprints[1].Offset);
+  constexpr UINT32 partial_depth_bits = 0x3f400000u;
+  constexpr UINT32 full_depth_bits = 0x3e800000u;
+  bool depth_matches = true;
+  bool stencil_matches = true;
+  for (UINT y = 0; y < depth_desc.Height; y++) {
+    for (UINT x = 0; x < depth_desc.Width; x++) {
+      UINT32 depth_bits = 0;
+      std::memcpy(
+          &depth_bits,
+          mapped_depth + depth_footprints[0].Offset + y * depth_footprints[0].Footprint.RowPitch + x * sizeof(UINT32),
+          sizeof(depth_bits)
+      );
+      const bool in_partial_rect = x >= 1 && x < 3 && y >= 1 && y < 3;
+      const bool in_depth_only_rect = x == 0 && y == 0;
+      const bool in_stencil_only_rect = x == 3 && y == 3;
+      const UINT32 expected_depth = in_depth_only_rect ? 0x3f000000u :
+                                    (in_partial_rect ? partial_depth_bits : full_depth_bits);
+      if (depth_bits != expected_depth)
+        depth_matches = false;
+      const UINT8 stencil_value =
+          *(mapped_depth + depth_footprints[1].Offset + y * depth_footprints[1].Footprint.RowPitch + x);
+      const UINT8 expected_stencil = in_stencil_only_rect ? 0x3c : (in_partial_rect ? 0xa5 : 0x5a);
+      if (stencil_value != expected_stencil)
+        stencil_matches = false;
+    }
+  }
   depth_readback->Unmap(0, nullptr);
-  if (depth_bits != 0x3e800000u || stencil_value != 0x5a) {
-    std::cerr << "depth/stencil copy mismatch: depth=0x" << std::hex << depth_bits
-              << " stencil=0x" << static_cast<unsigned>(stencil_value) << std::dec << "\n";
+  if (!depth_matches || !stencil_matches) {
+    std::cerr << "partial depth/stencil clear copy mismatch\n";
     cleanup();
     return 1;
   }

@@ -10,6 +10,10 @@ dx12_graphics_sm6 = executable('dx12_graphics_sm6', 'dx12_graphics_sm6.cpp',
   dependencies: [ d3d12_dep ],
 )
 
+dx12_graphics_sm5 = executable('dx12_graphics_sm5', 'dx12_graphics_sm5.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dx12_stream_output = executable('dx12_stream_output', 'dx12_stream_output.cpp',
   dependencies: [ d3d12_dep ],
 )

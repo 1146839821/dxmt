@@ -52,10 +52,14 @@ struct ClearEncoderData : EncoderData {
     std::pair<float, uint8_t> depth_stencil;
   };
   TextureViewRef attachment;
+  D3D12_RECT *rects = nullptr;
+  WMTPixelFormat format = WMTPixelFormatInvalid;
   unsigned clear_dsv;
   unsigned array_length;
   unsigned width;
   unsigned height;
+  unsigned rect_count = 0;
+  uint8_t raster_sample_count = 1;
   unsigned depth_plane = 0;
 
   ClearEncoderData() {}

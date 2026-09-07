@@ -19,6 +19,7 @@
 #include "d3d12_command_allocator.hpp"
 #include "com/com_pointer.hpp"
 #include "dxmt_command_context.hpp"
+#include "dxmt_command_constants.hpp"
 #include "dxmt_format.hpp"
 #include <atomic>
 #include <unordered_set>
@@ -70,6 +71,7 @@ enum class DrawCallStatus {
   Ordinary,
   MSCTessellation,
   MSCGeometry,
+  AirconvGeometry,
 };
 
 inline bool
@@ -144,6 +146,41 @@ to_metal_primitive_type(D3D12_PRIMITIVE_TOPOLOGY topo, WMTPrimitiveType &primiti
 }
 
 inline bool
+to_airconv_geometry_primitive_type(D3D12_PRIMITIVE_TOPOLOGY topo, WMTPrimitiveType &primitive) {
+  switch (topo) {
+  case D3D_PRIMITIVE_TOPOLOGY_POINTLIST:
+    primitive = WMTPrimitiveTypePoint;
+    return true;
+  case D3D_PRIMITIVE_TOPOLOGY_LINELIST:
+    primitive = WMTPrimitiveTypeLine;
+    return true;
+  case D3D_PRIMITIVE_TOPOLOGY_LINESTRIP:
+    primitive = WMTPrimitiveTypeLineStrip;
+    return true;
+  case D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST:
+    primitive = WMTPrimitiveTypeTriangle;
+    return true;
+  case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP:
+    primitive = WMTPrimitiveTypeTriangleStrip;
+    return true;
+  case D3D_PRIMITIVE_TOPOLOGY_LINELIST_ADJ:
+    primitive = WMTPrimitiveTypeLineWithAdj;
+    return true;
+  case D3D_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ:
+    primitive = WMTPrimitiveTypeLineStripWithAdj;
+    return true;
+  case D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ:
+    primitive = WMTPrimitiveTypeTriangleWithAdj;
+    return true;
+  case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ:
+    primitive = WMTPrimitiveTypeTriangleWithAdj;
+    return true;
+  default:
+    return false;
+  }
+}
+
+inline bool
 geometry_primitive_matches(WMTPrimitiveType primitive, WMTPrimitiveType input_primitive) {
   switch (input_primitive) {
   case WMTPrimitiveTypePoint:
@@ -160,6 +197,79 @@ geometry_primitive_matches(WMTPrimitiveType primitive, WMTPrimitiveType input_pr
     return false;
   }
 }
+
+inline bool
+is_strip_topology(D3D12_PRIMITIVE_TOPOLOGY topology) {
+  switch (topology) {
+  case D3D_PRIMITIVE_TOPOLOGY_LINESTRIP:
+  case D3D_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ:
+  case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP:
+  case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ:
+    return true;
+  default:
+    return false;
+  }
+}
+
+inline std::pair<uint32_t, uint32_t>
+get_airconv_geometry_vertex_count(D3D12_PRIMITIVE_TOPOLOGY topology) {
+  switch (topology) {
+  case D3D_PRIMITIVE_TOPOLOGY_POINTLIST:
+    return {32, 32};
+  case D3D_PRIMITIVE_TOPOLOGY_LINELIST:
+    return {32, 32};
+  case D3D_PRIMITIVE_TOPOLOGY_LINESTRIP:
+    return {32, 31};
+  case D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST:
+    return {30, 30};
+  case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP:
+    return {32, 30};
+  case D3D_PRIMITIVE_TOPOLOGY_LINELIST_ADJ:
+    return {32, 32};
+  case D3D_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ:
+    return {32, 29};
+  case D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ:
+    return {30, 30};
+  case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ:
+    return {32, 28};
+  default:
+    return {0, 0};
+  }
+}
+
+inline SM50_INDEX_BUFFER_FORMAT
+to_airconv_index_format(WMTIndexType index_type) {
+  return index_type == WMTIndexTypeUInt32 ? SM50_INDEX_BUFFER_FORMAT_UINT32 : SM50_INDEX_BUFFER_FORMAT_UINT16;
+}
+
+struct DXMT_DRAW_ARGUMENTS {
+  uint32_t VertexCount;
+  uint32_t InstanceCount;
+  uint32_t StartVertex;
+  uint32_t StartInstance;
+};
+
+struct DXMT_DRAW_INDEXED_ARGUMENTS {
+  uint32_t IndexCount;
+  uint32_t InstanceCount;
+  uint32_t StartIndex;
+  int32_t BaseVertex;
+  uint32_t StartInstance;
+};
+
+struct DXMT_DISPATCH_ARGUMENTS {
+  uint32_t X;
+  uint32_t Y;
+  uint32_t Z;
+};
+
+struct DXMT_GS_DISPATCH_MARSHAL {
+  uint64_t draw_arguments;
+  uint64_t dispatch_arguments_out;
+  uint64_t max_object_threadgroups;
+  uint32_t vertex_count_per_warp;
+  uint32_t end_of_command;
+};
 
 /* FIXME: it's not *public* */
 unsigned getPlanarCount(WMTPixelFormat format);
@@ -338,14 +448,14 @@ render_stages_for_state(D3D12_RESOURCE_STATES state) {
   WMTRenderStages stages = (WMTRenderStages)0;
   if (state & (D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER |
                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT))
-    stages = (WMTRenderStages)(stages | WMTRenderStageVertex);
+    stages = (WMTRenderStages)(stages | WMTRenderStagePreRaster);
   if (state & (D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_RENDER_TARGET |
                D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE))
     stages = (WMTRenderStages)(stages | WMTRenderStageFragment);
   if (state & D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-    stages = (WMTRenderStages)(stages | WMTRenderStageVertex | WMTRenderStageFragment);
+    stages = (WMTRenderStages)(stages | WMTRenderStagePreRaster | WMTRenderStageFragment);
   if (!stages)
-    stages = WMTRenderStageVertex | WMTRenderStageFragment;
+    stages = WMTRenderStagePreRaster | WMTRenderStageFragment;
   return stages;
 }
 
@@ -471,6 +581,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   std::array<D3D12_VERTEX_BUFFER_VIEW, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vertex_buffers_;
   std::array<D3D12_STREAM_OUTPUT_BUFFER_VIEW, D3D12_SO_BUFFER_SLOT_COUNT> stream_output_views_;
 
+  WMT::Reference<WMT::RenderPipelineState> airconv_geometry_marshal_pso_;
   uint64_t index_buffer_address;
   WMT::Buffer index_buffer;
   WMTIndexType index_type;
@@ -491,6 +602,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   scissors[D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {{}};
 
   Com<MTLD3D12GraphicsPipelineState, false> pso_graphics_;
+  uint32_t airconv_geometry_pso_variant_ = UINT_MAX;
   Com<MTLD3D12RootSignature, false> rootsig_graphics_;
   uint64_t rootarg_graphics_staging_[64];
   struct MSCResourceUseTable {
@@ -527,6 +639,26 @@ public:
   ~MTLD3D12GraphicsCommandListImpl() {
     if (allocator_ && encoder_count == std::numeric_limits<size_t>::max())
       allocator_->DiscardRecord();
+  }
+
+  WMT::RenderPipelineState
+  GetAirconvGeometryMarshalPSO() {
+    if (airconv_geometry_marshal_pso_)
+      return airconv_geometry_marshal_pso_;
+
+    auto function = device_->GetLib().getLibrary().newFunction("gs_draw_arguments_marshal");
+    if (!function)
+      return {};
+
+    WMTRenderPipelineInfo info;
+    WMT::InitializeRenderPipelineInfo(info);
+    info.vertex_function = function;
+    info.rasterization_enabled = false;
+    WMT::Reference<WMT::Error> error;
+    airconv_geometry_marshal_pso_ = device_->GetMTLDevice().newRenderPipelineState(info, error);
+    if (!airconv_geometry_marshal_pso_ && error)
+      ERR("Failed to create AIRCONV geometry indirect marshal PSO: ", error.description().getUTF8String());
+    return airconv_geometry_marshal_pso_;
   }
 
   WMT::Reference<WMT::ComputePipelineState>
@@ -583,6 +715,7 @@ public:
       allocator_ = allocator;
 
     pso_graphics_ = nullptr;
+    airconv_geometry_pso_variant_ = UINT_MAX;
     pso_compute_ = nullptr;
     msc_resource_use_root_signature_ = nullptr;
     msc_resource_use_tables_.clear();
@@ -884,7 +1017,7 @@ public:
       auto *resource = transition.resource;
       const auto state_matches = [&, resource](D3D12_RESOURCE_STATES current) {
         return current == transition.before ||
-               (transition.split_end && current == transition.after) ||
+               current == transition.after ||
                current == D3D12_RESOURCE_STATE_COMMON ||
                transition.before == D3D12_RESOURCE_STATE_COMMON;
       };
@@ -927,6 +1060,7 @@ public:
     allocator_->InvalidateCurrentPass();
 
     pso_graphics_ = nullptr;
+    airconv_geometry_pso_variant_ = UINT_MAX;
     pso_compute_ = nullptr;
     rootsig_graphics_ = nullptr;
     rootsig_compute_ = nullptr;
@@ -1174,6 +1308,24 @@ public:
 
   void
   EncodeVertexBuffers() {
+    if (pso_graphics_ && pso_graphics_->airconv_geometry) {
+      auto [offset, stride] = PopulateVertexBufferTable(1);
+      if (!stride)
+        return;
+
+      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+      cmd.type = WMTRenderCommandSetObjectBuffer;
+      cmd.buffer = allocator_->gpu_heap_buffer_;
+      cmd.offset = offset;
+      cmd.index = SM50_BINDING_INDEX_VERTEX_BUFFER;
+      auto &draw_arguments = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+      draw_arguments.type = WMTRenderCommandSetObjectBuffer;
+      draw_arguments.buffer = allocator_->gpu_heap_buffer_;
+      draw_arguments.offset = 0;
+      draw_arguments.index = SM50_BINDING_INDEX_DRAW_ARGUMENTS;
+      return;
+    }
+
     if (pso_graphics_ && pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter) {
       auto slot_mask = pso_graphics_->slot_mask;
       const bool emulation = pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry;
@@ -1298,13 +1450,17 @@ public:
   }
 
   DrawCallStatus
-  PreDraw(bool SkipResourceBinding = false) {
+  PreDraw(
+      bool SkipResourceBinding = false,
+      SM50_INDEX_BUFFER_FORMAT airconv_index_format = SM50_INDEX_BUFFER_FORMAT_NONE
+  ) {
     if (!pso_graphics_)
       return DrawCallStatus::Invalid;
 
     const bool use_msc = pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
     const bool use_msc_tessellation = pso_graphics_->msc_tessellation;
     const bool use_msc_geometry = pso_graphics_->msc_geometry;
+    const bool use_airconv_geometry = pso_graphics_->airconv_geometry;
     const bool use_msc_emulation = use_msc_tessellation || use_msc_geometry;
     auto encode_msc_buffer = [&](obj_handle_t buffer, uint64_t offset, uint8_t index, bool fragment = true) {
       auto encode = [&](WMTRenderCommandType type) {
@@ -1346,6 +1502,7 @@ public:
       render->dsv_planar_flags = 0;
       render->dsv_readonly_flags = 0;
       render->render_target_count = num_rtvs;
+      render->use_geometry = use_msc_geometry || use_airconv_geometry;
 
       unsigned render_target_width = 16384, render_target_height = 16384, render_target_array_length = 0;
 
@@ -1422,8 +1579,17 @@ public:
     }
 
     if (dirty_state_.test(DirtyState::GraphicsPipelineState)) {
-      UpdateGraphicsPSO(pso_graphics_.ptr());
+      UpdateGraphicsPSO(pso_graphics_.ptr(), airconv_index_format);
+      airconv_geometry_pso_variant_ = use_airconv_geometry
+                                          ? (is_strip_topology(topology_) ? 3u : 0u) + airconv_index_format
+                                          : UINT_MAX;
       dirty_state_.clr(DirtyState::GraphicsPipelineState);
+    } else if (use_airconv_geometry) {
+      const auto variant = (is_strip_topology(topology_) ? 3u : 0u) + airconv_index_format;
+      if (variant != airconv_geometry_pso_variant_) {
+        UpdateGraphicsPSO(pso_graphics_.ptr(), airconv_index_format);
+        airconv_geometry_pso_variant_ = variant;
+      }
     }
 
     const bool encode_msc_resource_uses =
@@ -1480,7 +1646,17 @@ public:
           encode_msc_buffer(buffer, offset, DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT, false);
       } else if (rootsig_graphics_) {
         auto Offset = EncodeRootArgument(rootsig_graphics_.ptr(), rootarg_graphics_staging_);
-        {
+        auto encode_root_argument = [&](WMTRenderCommandType type) {
+          auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+          cmd.type = type;
+          cmd.buffer = allocator_->gpu_heap_buffer_;
+          cmd.offset = Offset;
+          cmd.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
+        };
+        if (use_airconv_geometry) {
+          encode_root_argument(WMTRenderCommandSetObjectBuffer);
+          encode_root_argument(WMTRenderCommandSetMeshBuffer);
+        } else {
           auto &cmd_vsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
           cmd_vsargbuf.type = WMTRenderCommandSetVertexBuffer;
           cmd_vsargbuf.buffer = allocator_->gpu_heap_buffer_;
@@ -1492,6 +1668,8 @@ public:
           cmd_fsargbuf.offset = Offset;
           cmd_fsargbuf.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
         }
+        if (use_airconv_geometry)
+          encode_root_argument(WMTRenderCommandSetFragmentBuffer);
       }
       dirty_state_.clr(DirtyState::GraphicsRootArguments);
     }
@@ -1502,16 +1680,20 @@ public:
     if (dirty_state_.test(DirtyState::GraphicsRootSignature) && !SkipResourceBinding) {
       if (rootsig_graphics_ && !use_msc) {
         auto Offset = EncodeStaticSamplers(rootsig_graphics_.ptr());
-        auto &cmd_vsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-        cmd_vsargbuf.type = WMTRenderCommandSetVertexBuffer;
-        cmd_vsargbuf.buffer = allocator_->gpu_heap_buffer_;
-        cmd_vsargbuf.offset = Offset;
-        cmd_vsargbuf.index = SM50_BINDING_INDEX_STATIC_SAMPLERS;
-        auto &cmd_fsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-        cmd_fsargbuf.type = WMTRenderCommandSetFragmentBuffer;
-        cmd_fsargbuf.buffer = allocator_->gpu_heap_buffer_;
-        cmd_fsargbuf.offset = Offset;
-        cmd_fsargbuf.index = SM50_BINDING_INDEX_STATIC_SAMPLERS;
+        auto encode_static_samplers = [&](WMTRenderCommandType type) {
+          auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+          cmd.type = type;
+          cmd.buffer = allocator_->gpu_heap_buffer_;
+          cmd.offset = Offset;
+          cmd.index = SM50_BINDING_INDEX_STATIC_SAMPLERS;
+        };
+        if (use_airconv_geometry) {
+          encode_static_samplers(WMTRenderCommandSetObjectBuffer);
+          encode_static_samplers(WMTRenderCommandSetMeshBuffer);
+        } else {
+          encode_static_samplers(WMTRenderCommandSetVertexBuffer);
+        }
+        encode_static_samplers(WMTRenderCommandSetFragmentBuffer);
       }
       dirty_state_.clr(DirtyState::GraphicsRootSignature);
     }
@@ -1577,6 +1759,8 @@ public:
       return DrawCallStatus::MSCTessellation;
     if (use_msc_geometry)
       return DrawCallStatus::MSCGeometry;
+    if (use_airconv_geometry)
+      return DrawCallStatus::AirconvGeometry;
     return DrawCallStatus::Ordinary;
   }
 
@@ -1592,8 +1776,10 @@ public:
     if (!ValidateStreamOutputDraw(VertexCountPerInstance, InstanceCount))
       return;
     WMTPrimitiveType primitive_type;
-    uint32_t cp_count;
-    if (!to_metal_primitive_type(topology_, primitive_type, cp_count))
+    uint32_t cp_count = 0;
+    if (pso_graphics_ && pso_graphics_->airconv_geometry
+            ? !to_airconv_geometry_primitive_type(topology_, primitive_type)
+            : !to_metal_primitive_type(topology_, primitive_type, cp_count))
       return;
     DrawCallStatus status = PreDraw();
     if (status == DrawCallStatus::Invalid) {
@@ -1630,6 +1816,31 @@ public:
       cmd_draw.config = pso_graphics_->msc_geometry_config;
       return;
     }
+    if (status == DrawCallStatus::AirconvGeometry) {
+      if (!geometry_primitive_matches(primitive_type, pso_graphics_->airconv_geometry_input_primitive))
+        return;
+      auto [vertex_per_warp, vertex_increment_per_warp] = get_airconv_geometry_vertex_count(topology_);
+      if (!vertex_increment_per_warp)
+        return;
+      if (!VertexCountPerInstance || !InstanceCount)
+        return;
+      auto [mapped, draw_arguments_offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_DRAW_ARGUMENTS), 32);
+      if (!mapped)
+        return;
+      auto *draw_arguments = static_cast<DXMT_DRAW_ARGUMENTS *>(mapped);
+      draw_arguments->VertexCount = VertexCountPerInstance;
+      draw_arguments->InstanceCount = InstanceCount;
+      draw_arguments->StartVertex = StartVertexLocation;
+      draw_arguments->StartInstance = StartInstanceLocation;
+
+      auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_dxmt_geometry_draw>();
+      cmd_draw.type = WMTRenderCommandDXMTGeometryDraw;
+      cmd_draw.draw_arguments_offset = draw_arguments_offset;
+      cmd_draw.instance_count = InstanceCount;
+      cmd_draw.warp_count = (VertexCountPerInstance - 1) / vertex_increment_per_warp + 1;
+      cmd_draw.vertex_per_warp = vertex_per_warp;
+      return;
+    }
 
     auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw>();
     cmd_draw.type = WMTRenderCommandDraw;
@@ -1658,10 +1869,12 @@ public:
     if (!ValidateStreamOutputDraw(IndexCountPerInstance, InstanceCount))
       return;
     WMTPrimitiveType primitive_type;
-    uint32_t cp_count;
-    if (!to_metal_primitive_type(topology_, primitive_type, cp_count))
+    uint32_t cp_count = 0;
+    if (pso_graphics_ && pso_graphics_->airconv_geometry
+            ? !to_airconv_geometry_primitive_type(topology_, primitive_type)
+            : !to_metal_primitive_type(topology_, primitive_type, cp_count))
       return;
-    DrawCallStatus status = PreDraw();
+    DrawCallStatus status = PreDraw(false, to_airconv_index_format(index_type));
     if (status == DrawCallStatus::Invalid) {
       if (trace_draw_indexed_id < 32)
         DEBUG("[DEBUG-DRAW] DrawIndexedInstanced rejected by PreDraw");
@@ -1701,6 +1914,34 @@ public:
       cmd_draw.base_vertex = BaseVertexLocation;
       cmd_draw.start_index = StartIndexLocation;
       cmd_draw.config = pso_graphics_->msc_geometry_config;
+      return;
+    }
+    if (status == DrawCallStatus::AirconvGeometry) {
+      if (!index_buffer || !geometry_primitive_matches(primitive_type, pso_graphics_->airconv_geometry_input_primitive))
+        return;
+      auto [vertex_per_warp, vertex_increment_per_warp] = get_airconv_geometry_vertex_count(topology_);
+      if (!vertex_increment_per_warp)
+        return;
+      if (!IndexCountPerInstance || !InstanceCount)
+        return;
+      auto [mapped, draw_arguments_offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_DRAW_INDEXED_ARGUMENTS), 32);
+      if (!mapped)
+        return;
+      auto *draw_arguments = static_cast<DXMT_DRAW_INDEXED_ARGUMENTS *>(mapped);
+      draw_arguments->IndexCount = IndexCountPerInstance;
+      draw_arguments->InstanceCount = InstanceCount;
+      draw_arguments->StartIndex = StartIndexLocation;
+      draw_arguments->BaseVertex = BaseVertexLocation;
+      draw_arguments->StartInstance = StartInstanceLocation;
+
+      auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_dxmt_geometry_draw_indexed>();
+      cmd_draw.type = WMTRenderCommandDXMTGeometryDrawIndexed;
+      cmd_draw.draw_arguments_offset = draw_arguments_offset;
+      cmd_draw.index_buffer = index_buffer;
+      cmd_draw.index_buffer_offset = index_offset;
+      cmd_draw.instance_count = InstanceCount;
+      cmd_draw.warp_count = (IndexCountPerInstance - 1) / vertex_increment_per_warp + 1;
+      cmd_draw.vertex_per_warp = vertex_per_warp;
       return;
     }
     auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw_indexed>();
@@ -2761,10 +3002,23 @@ public:
   };
 
   void
-  UpdateGraphicsPSO(MTLD3D12GraphicsPipelineState *pso_graphics) {
+  UpdateGraphicsPSO(
+      MTLD3D12GraphicsPipelineState *pso_graphics,
+      SM50_INDEX_BUFFER_FORMAT airconv_index_format = SM50_INDEX_BUFFER_FORMAT_NONE
+  ) {
     auto &cmd_setpso = allocator_->EncodeRenderCommand<wmtcmd_render_setpso>();
     cmd_setpso.type = WMTRenderCommandSetPSO;
-    cmd_setpso.pso = pso_graphics->pso;
+    if (pso_graphics->airconv_geometry) {
+      const auto strip = is_strip_topology(topology_) ? 1u : 0u;
+      const auto index = static_cast<unsigned>(airconv_index_format);
+      if (index >= 3) {
+        recording_failed_ = true;
+        return;
+      }
+      cmd_setpso.pso = pso_graphics->airconv_geometry_psos[strip][index];
+    } else {
+      cmd_setpso.pso = pso_graphics->pso;
+    }
 
     auto &cmd_setdsso = allocator_->EncodeRenderCommand<wmtcmd_render_setdsso>();
     cmd_setdsso.type = WMTRenderCommandSetDSSO;
@@ -3197,29 +3451,46 @@ public:
   ) {
     if ((Flags & 3) == 0)
       return;
+    if (RectCount && !Rects) {
+      recording_failed_ = true;
+      return;
+    }
     auto [Heap, Index] = GetRenderTargetHeap(device_, DSV);
     if (!Heap)
       return;
     auto AttachmentDesc = Heap->GetRenderTarget(Index);
     if (!AttachmentDesc.Texture)
       return;
-    if (RectCount > 1 ||
-        (Rects && RectCount &&
-         (Rects[0].left > 0 || Rects[0].top > 0 || Rects[0].right < (LONG)AttachmentDesc.Width ||
-          Rects[0].bottom < (LONG)AttachmentDesc.Height))) {
-      ERR("ClearDepthStencilView: partial rect clear is unsupported RectCount=", RectCount);
+    if (RectCount > kCPUHeapSize / sizeof(D3D12_RECT)) {
+      recording_failed_ = true;
       return;
     }
+    const auto format = AttachmentDesc.Texture->pixelFormat(AttachmentDesc.View);
+    const auto clear_dsv = (Flags & 3) & DepthStencilPlanarFlags(format);
+    if (!clear_dsv)
+      return;
     allocator_->InvalidateCurrentPass();
     auto encoder_info = allocator_->AllocatePass<ClearEncoderData>();
     encoder_info->type = EncoderType::Clear;
-    encoder_info->clear_dsv = Flags & 3;
+    encoder_info->format = format;
+    encoder_info->clear_dsv = clear_dsv;
     encoder_info->depth_stencil = {Depth, Stencil};
     encoder_info->attachment = AttachmentDesc.Texture->view(AttachmentDesc.View);
     encoder_info->array_length = AttachmentDesc.RenderTargetArrayLength;
     encoder_info->depth_plane = AttachmentDesc.DepthPlane;
     encoder_info->width = AttachmentDesc.Width;
     encoder_info->height = AttachmentDesc.Height;
+    encoder_info->raster_sample_count = AttachmentDesc.Texture->sampleCount();
+
+    const bool full_rect = RectCount == 0 ||
+                           (RectCount == 1 && Rects[0].left == 0 && Rects[0].top == 0 &&
+                            Rects[0].right == (LONG)AttachmentDesc.Width &&
+                            Rects[0].bottom == (LONG)AttachmentDesc.Height);
+    if (!full_rect) {
+      encoder_info->rects = allocator_->AllocateCommandData<D3D12_RECT>(RectCount);
+      memcpy(encoder_info->rects, Rects, sizeof(D3D12_RECT) * RectCount);
+      encoder_info->rect_count = RectCount;
+    }
 
     allocator_->InvalidateCurrentPass();
   };
@@ -3371,7 +3642,10 @@ public:
   };
 
   void STDMETHODCALLTYPE DiscardResource(ID3D12Resource *pResource, const D3D12_DISCARD_REGION *pRegion) {
-    MarkUnsupportedCommand("DiscardResource");
+    if (!pResource || !IsSameDevice(device_, pResource))
+      recording_failed_ = true;
+    // DiscardResource is an optimization hint. Metal manages resource contents
+    // itself, so a valid discard can be safely represented as a no-op.
   };
 
   void STDMETHODCALLTYPE
@@ -3517,6 +3791,104 @@ public:
 
   void STDMETHODCALLTYPE EndEvent() { IMPLEMENT_ME };
 
+  bool
+  EncodeAirconvGeometryIndirect(
+      bool indexed, SM50_INDEX_BUFFER_FORMAT index_format, WMT::Buffer indirect_args_buffer,
+      uint64_t indirect_args_offset, uint64_t draw_arguments_address, uint32_t vertex_per_warp,
+      uint32_t vertex_increment_per_warp
+  ) {
+    const auto strip = is_strip_topology(topology_) ? 1u : 0u;
+    const auto index = static_cast<unsigned>(index_format);
+    if (!pso_graphics_ || !indirect_args_buffer || index >= 3 || !vertex_per_warp || !vertex_increment_per_warp)
+      return false;
+
+    auto marshal_pso = GetAirconvGeometryMarshalPSO();
+    if (!marshal_pso)
+      return false;
+
+    auto [task_mapping, task_offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_GS_DISPATCH_MARSHAL), 16);
+    auto [dispatch_mapping, dispatch_offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_DISPATCH_ARGUMENTS), 4);
+    if (!task_mapping || !dispatch_mapping)
+      return false;
+
+    auto *task = static_cast<DXMT_GS_DISPATCH_MARSHAL *>(task_mapping);
+    task->draw_arguments = draw_arguments_address;
+    task->dispatch_arguments_out = allocator_->gpu_heap_buffer_address_ + dispatch_offset;
+    task->max_object_threadgroups =
+        device_->GetMTLDevice().supportsFamily(WMTGPUFamilyApple7) ? UINT64_MAX : 1024;
+    task->vertex_count_per_warp = vertex_increment_per_warp;
+    task->end_of_command = 1;
+
+    auto &draw_args_use = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
+    draw_args_use.type = WMTRenderCommandUseResource;
+    draw_args_use.resource = indirect_args_buffer;
+    draw_args_use.usage = WMTResourceUsageRead;
+    draw_args_use.stages = WMTRenderStagePreRaster;
+
+    auto &dispatch_args_use = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
+    dispatch_args_use.type = WMTRenderCommandUseResource;
+    dispatch_args_use.resource = allocator_->gpu_heap_buffer_;
+    dispatch_args_use.usage = WMTResourceUsageWrite;
+    dispatch_args_use.stages = WMTRenderStagePreRaster;
+
+    auto &marshal_setpso = allocator_->EncodeRenderCommand<wmtcmd_render_setpso>();
+    marshal_setpso.type = WMTRenderCommandSetPSO;
+    marshal_setpso.pso = marshal_pso;
+
+    auto &marshal_setbuffer = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+    marshal_setbuffer.type = WMTRenderCommandSetVertexBuffer;
+    marshal_setbuffer.buffer = allocator_->gpu_heap_buffer_;
+    marshal_setbuffer.offset = task_offset;
+    marshal_setbuffer.index = kCustomBufferArgumentIndex0;
+
+    auto &marshal_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw>();
+    marshal_draw.type = WMTRenderCommandDraw;
+    marshal_draw.primitive_type = WMTPrimitiveTypePoint;
+    marshal_draw.vertex_start = 0;
+    marshal_draw.vertex_count = 1;
+    marshal_draw.instance_count = 1;
+    marshal_draw.base_instance = 0;
+
+    auto &marshal_clearbuffer = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+    marshal_clearbuffer.type = WMTRenderCommandSetVertexBuffer;
+    marshal_clearbuffer.buffer = {};
+    marshal_clearbuffer.offset = 0;
+    marshal_clearbuffer.index = kCustomBufferArgumentIndex0;
+
+    auto &marshal_barrier = allocator_->EncodeRenderCommand<wmtcmd_render_memory_barrier>();
+    marshal_barrier.type = WMTRenderCommandMemoryBarrier;
+    marshal_barrier.scope = WMTBarrierScopeBuffers;
+    marshal_barrier.stages_after = WMTRenderStageVertex;
+    marshal_barrier.stages_before = WMTRenderStagePreRaster;
+
+    auto &restore_pso = allocator_->EncodeRenderCommand<wmtcmd_render_setpso>();
+    restore_pso.type = WMTRenderCommandSetPSO;
+    restore_pso.pso = pso_graphics_->airconv_geometry_psos[strip][index];
+
+    if (indexed) {
+      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_dxmt_geometry_draw_indexed_indirect>();
+      cmd.type = WMTRenderCommandDXMTGeometryDrawIndexedIndirect;
+      cmd.index_buffer = index_buffer;
+      cmd.index_buffer_offset = index_offset;
+      cmd.imm_draw_arguments = allocator_->gpu_heap_buffer_;
+      cmd.indirect_args_buffer = indirect_args_buffer;
+      cmd.indirect_args_offset = indirect_args_offset;
+      cmd.dispatch_args_buffer = allocator_->gpu_heap_buffer_;
+      cmd.dispatch_args_offset = dispatch_offset;
+      cmd.vertex_per_warp = vertex_per_warp;
+    } else {
+      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_dxmt_geometry_draw_indirect>();
+      cmd.type = WMTRenderCommandDXMTGeometryDrawIndirect;
+      cmd.imm_draw_arguments = allocator_->gpu_heap_buffer_;
+      cmd.indirect_args_buffer = indirect_args_buffer;
+      cmd.indirect_args_offset = indirect_args_offset;
+      cmd.dispatch_args_buffer = allocator_->gpu_heap_buffer_;
+      cmd.dispatch_args_offset = dispatch_offset;
+      cmd.vertex_per_warp = vertex_per_warp;
+    }
+    return true;
+  }
+
   void STDMETHODCALLTYPE ExecuteIndirect(
       ID3D12CommandSignature *pCommandSignature, UINT MaxCommandCount, ID3D12Resource *pArgBuffer,
       UINT64 ArgBufferOffset, ID3D12Resource *pCountBuffer, UINT64 CountBufferOffset
@@ -3582,6 +3954,42 @@ public:
 
       return;
     }
+
+    if (pso_graphics_ && pso_graphics_->airconv_geometry) {
+      if (!MaxCommandCount)
+        return;
+      if ((sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW &&
+           sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED) ||
+          MaxCommandCount != 1 || pCountBuffer || sig->UpdateRootArguments || sig->UpdateVertexBuffers ||
+          sig->UpdateIndexBuffer) {
+        WARN("D3D12 ExecuteIndirect with AIRCONV geometry requires one non-updating draw command");
+        recording_failed_ = true;
+        return;
+      }
+
+      WMTPrimitiveType primitive_type;
+      if (!to_airconv_geometry_primitive_type(topology_, primitive_type))
+        return;
+      const bool indexed = sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+      const auto index_format = indexed ? to_airconv_index_format(index_type) : SM50_INDEX_BUFFER_FORMAT_NONE;
+      const auto status = PreDraw(false, index_format);
+      if (status != DrawCallStatus::AirconvGeometry ||
+          !geometry_primitive_matches(primitive_type, pso_graphics_->airconv_geometry_input_primitive))
+        return;
+      if (indexed && !index_buffer)
+        return;
+      auto [vertex_per_warp, vertex_increment_per_warp] = get_airconv_geometry_vertex_count(topology_);
+      if (!vertex_increment_per_warp)
+        return;
+      if (!EncodeAirconvGeometryIndirect(
+              indexed, index_format, arg_buffer->buffer->current()->buffer(), ArgBufferOffset,
+              ArgBufferAddress, vertex_per_warp, vertex_increment_per_warp
+          )) {
+        recording_failed_ = true;
+      }
+      return;
+    }
+
     WMTPrimitiveType primitive_type;
     uint32_t cp_count;
     if (!to_metal_primitive_type(topology_, primitive_type, cp_count))
