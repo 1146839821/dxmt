@@ -620,6 +620,9 @@ jobs:
       - name: Select Xcode Version
         run: sudo xcode-select -s /Applications/Xcode_26.0.app
 
+      - name: Install Metal Toolchain
+        run: sudo xcodebuild -downloadComponent MetalToolchain
+
       - name: Install Meson
         run: pip3 install meson==1.10.0 --break-system-packages
 
