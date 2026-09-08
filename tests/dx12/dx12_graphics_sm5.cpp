@@ -82,8 +82,10 @@ bool CompileShader(pD3DCompile compile_shader, const char *source, const char *s
 
 struct ShaderSet {
   std::vector<uint8_t> vertex;
+  std::vector<uint8_t> no_input_vertex;
   std::vector<uint8_t> root_vertex;
   std::vector<uint8_t> geometry;
+  std::vector<uint8_t> geometry_root_cbv;
   std::vector<uint8_t> adjacency_geometry;
   std::vector<uint8_t> pixel;
 };
@@ -107,6 +109,24 @@ VSOutput vs_main(VSInput input) {
   return output;
 }
 )";
+  static constexpr char no_input_vertex_source[] = R"(
+struct VSOutput {
+  float4 position : SV_Position;
+  float4 color : COLOR;
+};
+
+VSOutput vs_main(uint vertex_id : SV_VertexID) {
+  VSOutput output;
+  if (vertex_id == 0)
+    output.position = float4(-1.0, -1.0, 0.0, 1.0);
+  else if (vertex_id == 1)
+    output.position = float4(3.0, -1.0, 0.0, 1.0);
+  else
+    output.position = float4(-1.0, 3.0, 0.0, 1.0);
+  output.color = float4(1.0, 1.0, 1.0, 1.0);
+  return output;
+}
+)";
   static constexpr char root_vertex_source[] = R"(
 cbuffer RootData : register(b0) {
   float4 root_color;
@@ -127,6 +147,25 @@ VSOutput vs_main(VSInput input) {
   output.position = float4(input.position, 0.0, 1.0);
   output.color = root_color;
   return output;
+}
+)";
+  static constexpr char geometry_root_cbv_source[] = R"(
+cbuffer RootData : register(b0) {
+  float4 root_color;
+};
+
+struct VSOutput {
+  float4 position : SV_Position;
+  float4 color : COLOR;
+};
+
+[maxvertexcount(3)]
+void gs_main(triangle VSOutput input[3], inout TriangleStream<VSOutput> output) {
+  for (uint i = 0; i < 3; ++i) {
+    VSOutput vertex = input[i];
+    vertex.color = root_color;
+    output.Append(vertex);
+  }
 }
 )";
   static constexpr char geometry_source[] = R"(
@@ -170,10 +209,14 @@ float4 ps_main(PSInput input) : SV_Target {
 
   return CompileShader(compile_shader, vertex_source, "dx12_graphics_sm5_vs.hlsl", "vs_main", "vs_5_0",
                        shaders.vertex) &&
+         CompileShader(compile_shader, no_input_vertex_source, "dx12_graphics_sm5_no_input_vs.hlsl", "vs_main",
+                       "vs_5_0", shaders.no_input_vertex) &&
          CompileShader(compile_shader, root_vertex_source, "dx12_graphics_sm5_root_vs.hlsl", "vs_main", "vs_5_0",
                        shaders.root_vertex) &&
          CompileShader(compile_shader, geometry_source, "dx12_graphics_sm5_gs.hlsl", "gs_main", "gs_5_0",
                        shaders.geometry) &&
+         CompileShader(compile_shader, geometry_root_cbv_source, "dx12_graphics_sm5_geometry_root_cbv_gs.hlsl", "gs_main",
+                       "gs_5_0", shaders.geometry_root_cbv) &&
          CompileShader(compile_shader, adjacency_geometry_source, "dx12_graphics_sm5_adj_gs.hlsl", "gs_main",
                        "gs_5_0", shaders.adjacency_geometry) &&
          CompileShader(compile_shader, pixel_source, "dx12_graphics_sm5_ps.hlsl", "ps_main", "ps_5_0", shaders.pixel);
@@ -188,6 +231,9 @@ struct TestCase {
   bool root_cbv;
   bool indirect;
   uint32_t expected_rgb;
+  bool no_input = false;
+  bool geometry_root_cbv = false;
+  bool zero_index_view = false;
 };
 
 bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &test) {
@@ -293,10 +339,11 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
   D3D12_ROOT_PARAMETER root_parameter = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
-  if (test.root_cbv) {
+  if (test.root_cbv || test.geometry_root_cbv) {
     root_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     root_parameter.Descriptor.ShaderRegister = 0;
-    root_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    root_parameter.ShaderVisibility = test.geometry_root_cbv ? D3D12_SHADER_VISIBILITY_GEOMETRY
+                                                              : D3D12_SHADER_VISIBILITY_VERTEX;
     root_desc.NumParameters = 1;
     root_desc.pParameters = &root_parameter;
     if (!CheckHR("D3D12SerializeRootSignature",
@@ -311,8 +358,13 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
       return fail("root signature creation failed");
   }
 
-  const auto &vertex_shader = test.root_cbv ? shaders.root_vertex : shaders.vertex;
-  const auto &geometry_shader = test.adjacency ? shaders.adjacency_geometry : shaders.geometry;
+  const auto &vertex_shader = test.geometry_root_cbv ? shaders.vertex
+                             : test.root_cbv           ? shaders.root_vertex
+                             : test.no_input            ? shaders.no_input_vertex
+                                                        : shaders.vertex;
+  const auto &geometry_shader = test.geometry_root_cbv ? shaders.geometry_root_cbv
+                              : test.adjacency          ? shaders.adjacency_geometry
+                                                        : shaders.geometry;
   D3D12_INPUT_ELEMENT_DESC input_layout[] = {
       {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
       {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -322,7 +374,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   pso_desc.VS = {vertex_shader.data(), vertex_shader.size()};
   pso_desc.GS = {geometry_shader.data(), geometry_shader.size()};
   pso_desc.PS = {shaders.pixel.data(), shaders.pixel.size()};
-  pso_desc.InputLayout = {input_layout, 2};
+  pso_desc.InputLayout = test.no_input ? D3D12_INPUT_LAYOUT_DESC{} : D3D12_INPUT_LAYOUT_DESC{input_layout, 2};
   pso_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   pso_desc.NumRenderTargets = 1;
   pso_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -392,7 +444,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     index_view.Format = test.index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
   }
 
-  if (test.root_cbv) {
+  if (test.root_cbv || test.geometry_root_cbv) {
     auto root_desc_buffer = BufferDescription(256);
     if (!CheckHR("CreateRootData",
                  device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &root_desc_buffer,
@@ -455,8 +507,9 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     list->SetGraphicsRootConstantBufferView(0, root_data->GetGPUVirtualAddress());
   }
   list->IASetPrimitiveTopology(test.topology);
-  list->IASetVertexBuffers(0, 1, &vertex_view);
-  if (test.indexed)
+  if (!test.no_input)
+    list->IASetVertexBuffers(0, 1, &vertex_view);
+  if (test.indexed || test.zero_index_view)
     list->IASetIndexBuffer(&index_view);
   list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
   list->ClearRenderTargetView(rtv, clear_value.Color, 0, nullptr);
@@ -545,6 +598,12 @@ int main(int argc, char **argv) {
       {"root-cbv", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, true, false, 0x0000ff00u},
       {"indirect", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, true, 0x00ffffffu},
       {"indirect-indexed32", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, true, true, false, false, true, 0x00ffffffu},
+      {"zero-index-view", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false, 0x00ffffffu,
+       false, false, true},
+      {"no-input-gs", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false, 0x00ffffffu, true,
+       false},
+      {"geometry-root-cbv", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false, 0x0000ff00u,
+       false, true},
   };
 
   std::vector<const TestCase *> selected;

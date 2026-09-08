@@ -57,6 +57,7 @@ public:
   size_t encoder_count = 0;
 
   virtual MTLD3D12CommandAllocator *GetAllocator() = 0;
+  virtual uint64_t GetRecordingId() const = 0;
   virtual void CommitResourceStates() = 0;
 };
 

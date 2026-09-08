@@ -132,6 +132,7 @@ struct ShaderVisibleDescriptorCPUStorage {
 class MTLD3D12DescriptorHeap : public ID3D12DescriptorHeap {
 public:
   virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
+  virtual WMT::Buffer GetDescriptorHeapBuffer() = 0;
   virtual WMT::Buffer GetMSCDescriptorHeapBuffer() = 0;
 
   virtual HRESULT
@@ -163,6 +164,7 @@ public:
 class MTLD3D12SamplerDescriptorHeap : public ID3D12DescriptorHeap {
 public:
   virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
+  virtual WMT::Buffer GetDescriptorHeapBuffer() = 0;
   virtual WMT::Buffer GetMSCDescriptorHeapBuffer() = 0;
 
   virtual HRESULT AddSampler(UINT Index, const D3D12_SAMPLER_DESC *Desc) = 0;

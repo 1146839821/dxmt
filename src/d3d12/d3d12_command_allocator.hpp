@@ -193,6 +193,7 @@ public:
   T *
   AllocatePass() {
     auto p = (new (AllocateCPUHeap(sizeof(T), alignof(T))) T());
+    p->id = encoder_count_;
     encoder_current = p;
     return p;
   };

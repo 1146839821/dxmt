@@ -87,6 +87,8 @@ WINEMETAL_API obj_handle_t NSAutoreleasePool_alloc_init();
 
 WINEMETAL_API obj_handle_t MTLCommandQueue_commandBuffer(obj_handle_t queue);
 
+WINEMETAL_API obj_handle_t MTLCommandQueue_commandBufferWithErrorOptions(obj_handle_t queue, uint64_t error_options);
+
 WINEMETAL_API void MTLCommandBuffer_commit(obj_handle_t cmdbuf);
 
 WINEMETAL_API void MTLCommandBuffer_waitUntilCompleted(obj_handle_t cmdbuf);
@@ -98,6 +100,11 @@ enum WMTCommandBufferStatus : uint64_t {
   WMTCommandBufferStatusScheduled = 3,
   WMTCommandBufferStatusCompleted = 4,
   WMTCommandBufferStatusError = 5,
+};
+
+enum WMTCommandBufferErrorOption : uint64_t {
+  WMTCommandBufferErrorOptionNone = 0,
+  WMTCommandBufferErrorOptionEncoderExecutionStatus = 1,
 };
 
 WINEMETAL_API enum WMTCommandBufferStatus MTLCommandBuffer_status(obj_handle_t cmdbuf);

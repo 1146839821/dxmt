@@ -26,6 +26,7 @@ enum winemetal_unixcall {
   unix_sparsemappingqueue_addresidencyset = 164,
   unix_mtltexture_firstmipmapintail = 165,
   unix_sparsemappingqueue_barrierbeforeresourcestate = 166,
+  unix_mtlcommandqueue_commandbuffer_with_error_options = 167,
 };
 
 struct unixcall_mtldevice_newmscgeometrypso {

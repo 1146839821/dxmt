@@ -118,6 +118,16 @@ _MTLCommandQueue_commandBuffer(void *obj) {
 }
 
 static NTSTATUS
+_MTLCommandQueue_commandBufferWithErrorOptions(void *obj) {
+  struct unixcall_generic_obj_uint64_obj_ret *params = obj;
+  MTLCommandBufferDescriptor *descriptor = [[MTLCommandBufferDescriptor alloc] init];
+  [descriptor setErrorOptions:(MTLCommandBufferErrorOption)params->arg];
+  params->ret = (obj_handle_t)[(id<MTLCommandQueue>)params->handle commandBufferWithDescriptor:descriptor];
+  [descriptor release];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 _MTLCommandBuffer_commit(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
   [(id<MTLCommandBuffer>)params->handle commit];
@@ -3870,6 +3880,7 @@ const void *__wine_unix_call_funcs[] = {
     &_SparseMappingQueue_addResidencySet,
     &_MTLTexture_firstMipmapInTail,
     &_SparseMappingQueue_barrierBeforeResourceState,
+    &_MTLCommandQueue_commandBufferWithErrorOptions,
 };
 
 #ifndef DXMT_NATIVE
@@ -4041,5 +4052,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_SparseMappingQueue_addResidencySet,
     &_MTLTexture_firstMipmapInTail,
     &_SparseMappingQueue_barrierBeforeResourceState,
+    &_MTLCommandQueue_commandBufferWithErrorOptions,
 };
 #endif

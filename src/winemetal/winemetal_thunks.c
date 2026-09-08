@@ -107,6 +107,16 @@ MTLDevice_newCommandQueue(obj_handle_t device, uint64_t maxCommandBufferCount) {
 }
 
 WINEMETAL_API obj_handle_t
+MTLCommandQueue_commandBufferWithErrorOptions(obj_handle_t queue, uint64_t error_options) {
+  struct unixcall_generic_obj_uint64_obj_ret params;
+  params.handle = queue;
+  params.arg = error_options;
+  params.ret = 0;
+  UNIX_CALL(unix_mtlcommandqueue_commandbuffer_with_error_options, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
 MTLDevice_newSparseMappingQueue(obj_handle_t device) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = device;

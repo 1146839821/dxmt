@@ -744,6 +744,11 @@ public:
     return CommandBuffer{MTLCommandQueue_commandBuffer(handle)};
   }
 
+  CommandBuffer
+  commandBufferWithErrorOptions(uint64_t error_options) {
+    return CommandBuffer{MTLCommandQueue_commandBufferWithErrorOptions(handle, error_options)};
+  }
+
   void
   addResidencySet(ResidencySet residency_set) {
     MTLCommandQueue_addResidencySet(handle, residency_set.handle);

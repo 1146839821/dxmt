@@ -23,6 +23,7 @@
 #include "dxmt_format.hpp"
 #include <atomic>
 #include <unordered_set>
+#include <utility>
 
 namespace dxmt {
 
@@ -554,6 +555,12 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   Com<MTLD3D12CommandAllocatorImpl, false> allocator_;
   D3D12_COMMAND_LIST_TYPE type_;
   bool recording_failed_;
+  uint64_t recording_id_ = 0;
+  bool airconv_render_residency_ = false;
+  bool msc_compute_residency_ = false;
+  bool indirect_residency_ = false;
+  bool compute_trace_ = false;
+  uint32_t compute_trace_id_ = UINT_MAX;
   WMT::Reference<WMT::ComputePipelineState> mv_scale_pso_;
   struct CachedTemporalScaler {
     WMTPixelFormat color_pixel_format;
@@ -611,7 +618,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   };
   MTLD3D12RootSignature *msc_resource_use_root_signature_ = nullptr;
   std::vector<MSCResourceUseTable> msc_resource_use_tables_;
-  std::unordered_set<obj_handle_t> msc_resources_used_;
+  std::unordered_set<obj_handle_t> indirect_resources_used_;
 
   Com<MTLD3D12ComputePipelineState, false> pso_compute_;
   Com<MTLD3D12RootSignature, false> rootsig_compute_;
@@ -619,6 +626,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   Com<MTLD3D12SamplerDescriptorHeap, true> sampler_heap_;
   WMT::Reference<WMT::Buffer> msc_dummy_buffer_;
   uint64_t rootarg_compute_staging_[64];
+  bool airconv_compute_residency_ = false;
 
   struct ResourceStateTransition {
     MTLD3D12Resource *resource;
@@ -719,7 +727,7 @@ public:
     pso_compute_ = nullptr;
     msc_resource_use_root_signature_ = nullptr;
     msc_resource_use_tables_.clear();
-    msc_resources_used_.clear();
+    indirect_resources_used_.clear();
     if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState)) {
       if (!pso->IsComputePipelineState)
         pso_graphics_ = static_cast<MTLD3D12GraphicsPipelineState *>(pInitialPipelineState);
@@ -773,6 +781,23 @@ public:
     index_offset = 0;
 
     dirty_state_.clrAll();
+    static std::atomic<uint64_t> next_recording_id{1};
+    recording_id_ = next_recording_id.fetch_add(1, std::memory_order_relaxed);
+    char enabled[2] = {};
+    msc_compute_residency_ =
+        GetEnvironmentVariableA("DXMT_MSC_COMPUTE_RESIDENCY", enabled, sizeof(enabled)) && enabled[0] != '0';
+    memset(enabled, 0, sizeof(enabled));
+    indirect_residency_ =
+        GetEnvironmentVariableA("DXMT_INDIRECT_RESIDENCY", enabled, sizeof(enabled)) && enabled[0] != '0';
+    memset(enabled, 0, sizeof(enabled));
+    compute_trace_ = GetEnvironmentVariableA("DXMT_COMPUTE_TRACE", enabled, sizeof(enabled)) && enabled[0] != '0';
+    memset(enabled, 0, sizeof(enabled));
+    airconv_compute_residency_ =
+        GetEnvironmentVariableA("DXMT_AIRCONV_COMPUTE_RESIDENCY", enabled, sizeof(enabled)) && enabled[0] != '0';
+    memset(enabled, 0, sizeof(enabled));
+    airconv_render_residency_ = true;
+    if (GetEnvironmentVariableA("DXMT_AIRCONV_RENDER_RESIDENCY", enabled, sizeof(enabled)))
+      airconv_render_residency_ = enabled[0] != '0';
     recording_failed_ = false;
     pending_barrier_scope_ = (WMTBarrierScope)0;
     pending_barrier_stages_after_ = (WMTRenderStages)0;
@@ -788,7 +813,7 @@ public:
   void
   MarkUnsupportedCommand(const char *name) {
     WARN("D3D12 ", name, " is not implemented");
-    recording_failed_ = true;
+    FailRecording(name, "command is not implemented");
   }
 
   HRESULT
@@ -995,6 +1020,10 @@ public:
     return allocator_.ptr();
   }
 
+  uint64_t GetRecordingId() const final {
+    return recording_id_;
+  }
+
   HRESULT STDMETHODCALLTYPE
   Close() {
     if (encoder_count < std::numeric_limits<size_t>::max())
@@ -1104,7 +1133,7 @@ public:
     if (valid)
       return true;
     WARN("D3D12 command list type ", type_, " cannot execute ", name);
-    recording_failed_ = true;
+    FailRecording(name, "unsupported command list type=", type_);
     return false;
   }
 
@@ -1140,14 +1169,16 @@ public:
     if (slot > staging_qwords || dword_offset > (staging_qwords - slot) * 2 ||
         dword_count > (staging_qwords - slot) * 2 - dword_offset) {
       WARN("D3D12 ", name, " root argument is outside the 64-qword staging area");
-      recording_failed_ = true;
+      FailRecording(name, "root argument is outside the 64-qword staging area index=", index,
+                    " dword_offset=", dword_offset, " dword_count=", dword_count);
       return false;
     }
 
     const auto required_qwords = (dword_offset + dword_count + 1) / 2;
     if (slot > root_signature->UploadQwords || required_qwords > root_signature->UploadQwords - slot) {
       WARN("D3D12 ", name, " root argument exceeds the root signature payload");
-      recording_failed_ = true;
+      FailRecording(name, "root argument exceeds root signature payload index=", index,
+                    " dword_offset=", dword_offset, " dword_count=", dword_count);
       return false;
     }
     return true;
@@ -1157,25 +1188,62 @@ public:
   ValidateIndirectPipeline(MTLD3D12PipelineState *pipeline, MTLD3D12CommandSignature *signature, const char *name) {
     if (!pipeline) {
       WARN("D3D12 ", name, " has no bound pipeline state");
-      recording_failed_ = true;
+      FailRecording(name, "no bound pipeline state");
       return false;
     }
 
     if (pipeline->shader_backend == D3D12ShaderBackend::MetalShaderConverter &&
         (signature->UpdateRootArguments || signature->UpdateVertexBuffers || signature->UpdateIndexBuffer)) {
       WARN("D3D12 ", name, " with MSC PSO and resource-updating command signature is unsupported");
-      recording_failed_ = true;
+      FailRecording(name, "MSC PSO with resource-updating command signature");
       return false;
     }
     if (!pipeline->IsComputePipelineState && pipeline->shader_backend == D3D12ShaderBackend::MetalShaderConverter) {
       auto graphics = static_cast<MTLD3D12GraphicsPipelineState *>(pipeline);
       if (graphics->msc_tessellation || graphics->msc_geometry) {
         WARN("D3D12 ", name, " with MSC emulation PSO is unsupported");
-        recording_failed_ = true;
+        FailRecording(name, "MSC emulation PSO");
         return false;
       }
     }
     return true;
+  }
+
+  template <typename... Args>
+  void
+  FailRecording(const char *where, Args &&...args) {
+    if (!recording_failed_) {
+      auto *pso = pso_graphics_.ptr();
+      ERR(
+          "[D3D12-RECORD-FAIL] command_list=", recording_id_, " type=", type_, " where=", where,
+          " pso=", pso ? pso->pso.handle : 0, " use_msc=",
+          pso && pso->shader_backend == D3D12ShaderBackend::MetalShaderConverter,
+          " airconv_geometry=", pso && pso->airconv_geometry, " topology=", topology_, " ",
+          std::forward<Args>(args)...
+      );
+    }
+    recording_failed_ = true;
+  }
+
+  void
+  EncodeRenderResourceUse(obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages stages) {
+    if (!resource || !indirect_resources_used_.insert(resource).second)
+      return;
+    auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
+    cmd.type = WMTRenderCommandUseResource;
+    cmd.resource = resource;
+    cmd.usage = usage;
+    cmd.stages = stages;
+  }
+
+  void
+  EncodeComputeResourceUse(obj_handle_t resource, WMTResourceUsage usage) {
+    if (!resource || !indirect_resources_used_.insert(resource).second)
+      return;
+    auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_useresource>();
+    cmd.type = WMTComputeCommandUseResource;
+    cmd.resource = resource;
+    cmd.usage = usage;
   }
 
   void
@@ -1244,25 +1312,43 @@ public:
     auto stride = align(sizeof(VERTEX_BUFFER_ENTRY) * max_slot, 16);
 
     if (!Count || stride > kGPUHeapSize / Count) {
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid table size count=", Count, " stride=", stride);
       return {0, 0};
     }
 
     auto [mapped, offset] = allocator_->AllocateGPUHeap(stride * Count, 16);
     if (!mapped) {
-      recording_failed_ = true;
+      FailRecording(__func__, "GPU heap allocation failed size=", stride * Count);
       return {0, 0};
     }
 
+    const auto resource_stages = pso_graphics_ && pso_graphics_->airconv_geometry
+                                     ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh)
+                                     : WMTRenderStageVertex;
     for (unsigned i = 0; i < Count; i++) {
       VERTEX_BUFFER_ENTRY *entries = (VERTEX_BUFFER_ENTRY *)(reinterpret_cast<char *>(mapped) + i * stride);
       for (unsigned slot = 0, index = 0; slot < max_slot; slot++) {
         if (!(slot_mask & (1u << slot)))
           continue;
         auto &state = vertex_buffers_[slot];
-        entries[index].buffer_handle = state.BufferLocation;
+        uint64_t buffer_offset = 0;
+        auto allocation = state.BufferLocation ? device_->LookupBufferByVA(state.BufferLocation, &buffer_offset) : nullptr;
+        if (state.BufferLocation &&
+            (!allocation || buffer_offset > allocation->length() ||
+             state.SizeInBytes > allocation->length() - buffer_offset)) {
+          FailRecording(
+              __func__, "invalid vertex buffer slot=", slot, " location=0x", std::hex, state.BufferLocation,
+              std::dec, " size=", state.SizeInBytes, " offset=", buffer_offset,
+              " allocation_length=", allocation ? allocation->length() : 0
+          );
+          return {0, 0};
+        }
+        entries[index].buffer_handle = allocation ? allocation->gpuAddress() + buffer_offset : 0;
         entries[index].stride = state.StrideInBytes;
         entries[index++].length = state.SizeInBytes;
+
+        if (allocation)
+          EncodeRenderResourceUse(allocation->buffer().handle, WMTResourceUsageRead, resource_stages);
       };
     }
 
@@ -1279,7 +1365,7 @@ public:
     constexpr uint32_t count = 31;
     auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(MSC_VERTEX_BUFFER_ENTRY) * count, 16);
     if (!mapped) {
-      recording_failed_ = true;
+      FailRecording(__func__, "GPU heap allocation failed");
       return 0;
     }
     std::memset(mapped, 0, sizeof(MSC_VERTEX_BUFFER_ENTRY) * count);
@@ -1289,19 +1375,28 @@ public:
       auto &state = vertex_buffers_[slot];
       uint64_t buffer_offset = 0;
       auto allocation = state.BufferLocation ? device_->LookupBufferByVA(state.BufferLocation, &buffer_offset) : nullptr;
-      if (!allocation)
+      if (!allocation) {
+        if (state.BufferLocation)
+          FailRecording(__func__, "invalid MSC vertex buffer slot=", slot, " location=0x", std::hex,
+                        state.BufferLocation, std::dec);
         continue;
+      }
+      if (buffer_offset > allocation->length() || state.SizeInBytes > allocation->length() - buffer_offset) {
+        FailRecording(
+            __func__, "invalid MSC vertex buffer slot=", slot, " location=0x", std::hex, state.BufferLocation,
+            std::dec, " size=", state.SizeInBytes, " offset=", buffer_offset,
+            " allocation_length=", allocation->length()
+        );
+        return 0;
+      }
       entries[slot].address = allocation->gpuAddress() + buffer_offset;
       entries[slot].length = state.SizeInBytes;
       entries[slot].stride = state.StrideInBytes;
 
-      if (msc_resources_used_.insert(allocation->buffer().handle).second) {
-        auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
-        cmd.type = WMTRenderCommandUseResource;
-        cmd.resource = allocation->buffer().handle;
-        cmd.usage = WMTResourceUsageRead;
-        cmd.stages = (WMTRenderStages)(WMTRenderStageObject | WMTRenderStageMesh);
-      }
+      EncodeRenderResourceUse(
+          allocation->buffer().handle, WMTResourceUsageRead,
+          (WMTRenderStages)(WMTRenderStageObject | WMTRenderStageMesh)
+      );
     }
     return offset;
   }
@@ -1310,14 +1405,16 @@ public:
   EncodeVertexBuffers() {
     if (pso_graphics_ && pso_graphics_->airconv_geometry) {
       auto [offset, stride] = PopulateVertexBufferTable(1);
-      if (!stride)
+      if (recording_failed_)
         return;
 
-      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-      cmd.type = WMTRenderCommandSetObjectBuffer;
-      cmd.buffer = allocator_->gpu_heap_buffer_;
-      cmd.offset = offset;
-      cmd.index = SM50_BINDING_INDEX_VERTEX_BUFFER;
+      if (stride) {
+        auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+        cmd.type = WMTRenderCommandSetObjectBuffer;
+        cmd.buffer = allocator_->gpu_heap_buffer_;
+        cmd.offset = offset;
+        cmd.index = SM50_BINDING_INDEX_VERTEX_BUFFER;
+      }
       auto &draw_arguments = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
       draw_arguments.type = WMTRenderCommandSetObjectBuffer;
       draw_arguments.buffer = allocator_->gpu_heap_buffer_;
@@ -1373,13 +1470,14 @@ public:
 
     uint64_t output_count = vertex_count;
     if (instance_count && output_count > std::numeric_limits<uint64_t>::max() / instance_count) {
-      recording_failed_ = true;
+      FailRecording(__func__, "vertex count overflow vertices=", vertex_count, " instances=", instance_count);
       return false;
     }
     output_count *= instance_count;
     if (pso_graphics_->stream_output_stride &&
         output_count > std::numeric_limits<uint64_t>::max() / pso_graphics_->stream_output_stride) {
-      recording_failed_ = true;
+      FailRecording(__func__, "stream output size overflow count=", output_count,
+                    " stride=", pso_graphics_->stream_output_stride);
       return false;
     }
     return true;
@@ -1397,7 +1495,7 @@ public:
     };
     auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(SO_BUFFER_ENTRY) * D3D12_SO_BUFFER_SLOT_COUNT, 16);
     if (!mapped) {
-      recording_failed_ = true;
+      FailRecording(__func__, "GPU heap allocation failed");
       return;
     }
     auto *entries = static_cast<SO_BUFFER_ENTRY *>(mapped);
@@ -1412,14 +1510,16 @@ public:
       auto buffer = device_->LookupBufferByVA(view.BufferLocation, &buffer_offset);
       if (!buffer || buffer_offset > buffer->length() || view.SizeInBytes > buffer->length() - buffer_offset ||
           !view.BufferFilledSizeLocation) {
-        recording_failed_ = true;
+        FailRecording(__func__, "invalid stream-output buffer slot=", slot, " location=0x", std::hex,
+                      view.BufferLocation, std::dec, " size=", view.SizeInBytes, " offset=", buffer_offset);
         return;
       }
 
       uint64_t counter_offset = 0;
       auto counter = device_->LookupBufferByVA(view.BufferFilledSizeLocation, &counter_offset);
       if (!counter || counter_offset > counter->length() || sizeof(uint32_t) > counter->length() - counter_offset) {
-        recording_failed_ = true;
+        FailRecording(__func__, "invalid stream-output counter slot=", slot, " location=0x", std::hex,
+                      view.BufferFilledSizeLocation, std::dec, " offset=", counter_offset);
         return;
       }
 
@@ -1455,6 +1555,8 @@ public:
       SM50_INDEX_BUFFER_FORMAT airconv_index_format = SM50_INDEX_BUFFER_FORMAT_NONE
   ) {
     if (!pso_graphics_)
+      return DrawCallStatus::Invalid;
+    if (recording_failed_)
       return DrawCallStatus::Invalid;
 
     const bool use_msc = pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
@@ -1493,7 +1595,7 @@ public:
 
       allocator_->InvalidateCurrentPass();
       auto render = allocator_->AllocatePass<RenderEncoderData>();
-      msc_resources_used_.clear();
+      indirect_resources_used_.clear();
       render->type = EncoderType::Render;
       render->cmd_head.type = WMTRenderCommandNop;
       render->cmd_head.next.set(0);
@@ -1676,6 +1778,30 @@ public:
 
     if (encode_msc_resource_uses)
       EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
+
+    if (airconv_render_residency_ && !use_msc && !SkipResourceBinding) {
+      if (descriptor_heap_)
+        EncodeRenderResourceUse(
+            descriptor_heap_->GetDescriptorHeapBuffer().handle,
+            WMTResourceUsageRead,
+            static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment)
+        );
+      if (sampler_heap_)
+        EncodeRenderResourceUse(
+            sampler_heap_->GetDescriptorHeapBuffer().handle,
+            WMTResourceUsageRead,
+            static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment)
+        );
+      EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
+      DEBUG(
+          "[DEBUG-AIRCONV-RENDER] recording=", recording_id_, " encoder=",
+          allocator_->encoder_current ? allocator_->encoder_current->id : UINT64_MAX, " pso=",
+          pso_graphics_->pso.handle, " root_qwords=", rootsig_graphics_ ? rootsig_graphics_->UploadQwords : 0,
+          " root0=0x", std::hex, rootarg_graphics_staging_[0], " root1=0x", rootarg_graphics_staging_[1],
+          " root2=0x", rootarg_graphics_staging_[2], " root3=0x", rootarg_graphics_staging_[3], std::dec,
+          " resource_uses=", indirect_resources_used_.size()
+      );
+    }
 
     if (dirty_state_.test(DirtyState::GraphicsRootSignature) && !SkipResourceBinding) {
       if (rootsig_graphics_ && !use_msc) {
@@ -1961,17 +2087,18 @@ public:
   uint64_t
   EncodeRootArgument(MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], UINT Count = 1) {
     if (!pRootSig || !pStaging || !Count || pRootSig->UploadQwords > 64) {
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid root argument state count=", Count);
       return 0;
     }
     const auto qword_bytes = sizeof(uint64_t) * size_t(pRootSig->UploadQwords);
     if (!qword_bytes || Count > std::numeric_limits<size_t>::max() / qword_bytes) {
-      recording_failed_ = true;
+      FailRecording(__func__, "root argument allocation overflow count=", Count,
+                    " qword_bytes=", qword_bytes);
       return 0;
     }
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(qword_bytes * Count, 64);
     if (!Ptr) {
-      recording_failed_ = true;
+      FailRecording(__func__, "GPU heap allocation failed size=", qword_bytes * Count);
       return 0;
     }
     for (unsigned i = 0; i < Count; i++)
@@ -1982,6 +2109,60 @@ public:
     return Offset;
   }
 
+  void
+  EncodeAirconvComputeRootResourceUses(MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64]) {
+    if (!pRootSig || !pStaging || !pRootSig->ParameterSlots || !pRootSig->SlotQwordOffsets)
+      return;
+
+    const void *blob = nullptr;
+    const auto blob_size = pRootSig->GetBlob(&blob);
+    Com<ID3D12VersionedRootSignatureDeserializer> deserializer = nullptr;
+    if (!blob || !blob_size ||
+        FAILED(D3D12CreateVersionedRootSignatureDeserializer(blob, blob_size, IID_PPV_ARGS(&deserializer))))
+      return;
+
+    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *versioned_desc = nullptr;
+    if (FAILED(deserializer->GetRootSignatureDescAtVersion(D3D_ROOT_SIGNATURE_VERSION_1_1, &versioned_desc)) ||
+        !versioned_desc)
+      return;
+
+    const auto &root_desc = versioned_desc->Desc_1_1;
+    static std::atomic<uint32_t> trace_count{0};
+    const auto trace_id = trace_count.fetch_add(1, std::memory_order_relaxed);
+    auto encode_root_resource = [&](UINT parameter_index, D3D12_ROOT_PARAMETER_TYPE type, uint64_t va) {
+      if (!va)
+        return;
+      uint64_t buffer_offset = 0;
+      auto allocation = device_->LookupBufferByVA(va, &buffer_offset);
+      if (allocation) {
+        EncodeComputeResourceUse(
+            allocation->buffer().handle,
+            type == D3D12_ROOT_PARAMETER_TYPE_UAV
+                ? static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite)
+                : WMTResourceUsageRead
+        );
+      }
+      if (trace_id < 128)
+        DEBUG(
+            "[DEBUG-AIRCONV] root resource id=", trace_id, " parameter=", parameter_index, " type=", type,
+            " va=0x", std::hex, va, std::dec, " lookup=", allocation ? 1 : 0, " offset=", buffer_offset
+        );
+    };
+
+    for (UINT parameter_index = 0;
+         parameter_index < root_desc.NumParameters && parameter_index < pRootSig->ParameterSlots; parameter_index++) {
+      const auto &parameter = root_desc.pParameters[parameter_index];
+      if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_CBV &&
+          parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_SRV &&
+          parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_UAV)
+        continue;
+      const auto source_qword = pRootSig->SlotQwordOffsets[parameter_index];
+      if (source_qword >= pRootSig->UploadQwords || source_qword >= 64)
+        continue;
+      encode_root_resource(parameter_index, parameter.ParameterType, pStaging[source_qword]);
+    }
+  }
+
   uint64_t
   EncodeMSCStaticSamplers(MTLD3D12RootSignature *pRootSig) {
     if (!pRootSig->NumStaticSamplers || !pRootSig->EncodedStaticSamplers)
@@ -1990,7 +2171,7 @@ public:
     auto table_size = sizeof(dxmt_msc_descriptor_entry) * pRootSig->NumStaticSamplers;
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(table_size, 16);
     if (!Ptr) {
-      recording_failed_ = true;
+      FailRecording(__func__, "static sampler GPU heap allocation failed size=", table_size);
       return 0;
     }
     auto *entries = reinterpret_cast<dxmt_msc_descriptor_entry *>(Ptr);
@@ -2011,7 +2192,7 @@ public:
 
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(pRootSig->MSCArgumentBufferSize, 16);
     if (!Ptr) {
-      recording_failed_ = true;
+      FailRecording(__func__, "MSC argument GPU heap allocation failed size=", pRootSig->MSCArgumentBufferSize);
       return 0;
     }
     memset(Ptr, 0, pRootSig->MSCArgumentBufferSize);
@@ -2073,7 +2254,7 @@ public:
       return 0;
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(static_sampler_encode_size, 64);
     if (!Ptr) {
-      recording_failed_ = true;
+      FailRecording(__func__, "GPU heap allocation failed size=", static_sampler_encode_size);
       return 0;
     }
     memcpy(Ptr, pRootSig->EncodedStaticSamplers, static_sampler_encode_size);
@@ -2082,7 +2263,8 @@ public:
 
   void
   EncodeMSCResourceUses(
-      MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap
+      MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
+      bool compute = false
   ) {
     if (!pRootSig || !pStaging || !descriptor_heap || !pRootSig->ParameterSlots || !pRootSig->SlotQwordOffsets)
       return;
@@ -2136,13 +2318,20 @@ public:
     const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
 
     auto encode_resource = [&](obj_handle_t resource, WMTResourceUsage usage) {
-      if (!resource || !msc_resources_used_.insert(resource).second)
+      if (!resource || !indirect_resources_used_.insert(resource).second)
         return;
-      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
-      cmd.type = WMTRenderCommandUseResource;
-      cmd.resource = resource;
-      cmd.usage = usage;
-      cmd.stages = stages;
+      if (compute) {
+        auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_useresource>();
+        cmd.type = WMTComputeCommandUseResource;
+        cmd.resource = resource;
+        cmd.usage = usage;
+      } else {
+        auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
+        cmd.type = WMTRenderCommandUseResource;
+        cmd.resource = resource;
+        cmd.usage = usage;
+        cmd.stages = stages;
+      }
     };
 
     auto encode_descriptor = [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type) {
@@ -2246,6 +2435,7 @@ public:
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Compute) {
       allocator_->InvalidateCurrentPass();
       auto compute = allocator_->AllocatePass<ComputeEncoderData>();
+      indirect_resources_used_.clear();
       compute->type = EncoderType::Compute;
       compute->cmd_head.type = WMTComputeCommandNop;
       compute->cmd_head.next.set(0);
@@ -2261,6 +2451,23 @@ public:
       return false;
 
     const bool use_msc = pso_compute_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
+    static std::atomic<uint32_t> compute_trace_count{0};
+    compute_trace_id_ = compute_trace_ ? compute_trace_count.fetch_add(1, std::memory_order_relaxed) : UINT_MAX;
+    if (compute_trace_id_ < 4096) {
+      DEBUG(
+          "[DEBUG-COMPUTE] PreDispatch trace=", compute_trace_id_, " recording=", recording_id_, " encoder=",
+          allocator_->encoder_current ? allocator_->encoder_current->id : UINT64_MAX, " pso=", pso_compute_->pso.handle,
+           " use_msc=", use_msc, " skip_binding=", SkipResourceBinding, " rootsig=", rootsig_compute_.ptr(),
+           " descriptor_heap=", descriptor_heap_.ptr(), " sampler_heap=", sampler_heap_.ptr(),
+          " root_qwords=", rootsig_compute_ ? rootsig_compute_->UploadQwords : 0,
+          " root0=0x", std::hex, rootarg_compute_staging_[0], " root1=0x", rootarg_compute_staging_[1],
+          " root2=0x", rootarg_compute_staging_[2], " root3=0x", rootarg_compute_staging_[3], std::dec,
+          " airconv_residency=", airconv_compute_residency_
+      );
+    }
+    const bool encode_msc_resource_uses =
+        msc_compute_residency_ && use_msc && !SkipResourceBinding &&
+        (dirty_state_.test(DirtyState::DescriptorHeaps) || dirty_state_.test(DirtyState::ComputeRootArguments));
     if (use_msc && rootsig_compute_) {
       if (FAILED(rootsig_compute_->InitializeMSCLayout()))
         return false;
@@ -2331,6 +2538,25 @@ public:
       dirty_state_.clr(DirtyState::ComputeRootSignature);
     }
 
+    if (encode_msc_resource_uses)
+      EncodeMSCResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true);
+
+    if (airconv_compute_residency_ && !use_msc && !SkipResourceBinding) {
+      if (descriptor_heap_)
+        EncodeComputeResourceUse(descriptor_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
+      if (sampler_heap_)
+        EncodeComputeResourceUse(sampler_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
+      EncodeAirconvComputeRootResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_);
+      EncodeMSCResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true);
+    }
+
+    if (compute_trace_id_ < 4096)
+      DEBUG(
+          "[DEBUG-COMPUTE] Bound trace=", compute_trace_id_, " recording=", recording_id_, " encoder=",
+          allocator_->encoder_current ? allocator_->encoder_current->id : UINT64_MAX,
+          " resource_uses=", indirect_resources_used_.size(), " encode_msc_uses=", encode_msc_resource_uses
+      );
+
     return !recording_failed_;
   }
 
@@ -2340,6 +2566,12 @@ public:
       return;
     if (!PreDispatch())
       return;
+
+    if (compute_trace_id_ < 4096)
+      DEBUG(
+          "[DEBUG-COMPUTE-DISPATCH] trace=", compute_trace_id_, " recording=", recording_id_, " encoder=",
+          allocator_->encoder_current ? allocator_->encoder_current->id : UINT64_MAX, " size=", X, "x", Y, "x", Z
+      );
 
     auto &cmd_dispatch = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch>();
     cmd_dispatch.type = WMTComputeCommandDispatch;
@@ -2366,7 +2598,7 @@ public:
     if (!ValidateCommand(SupportsCopy(), "CopyBufferRegion"))
       return;
     if (!IsSameDevice(device_, pDstBuffer) || !IsSameDevice(device_, pSrcBuffer)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "source or destination belongs to another device");
       return;
     }
     auto *dst = static_cast<MTLD3D12Resource *>(pDstBuffer);
@@ -2393,7 +2625,7 @@ public:
     if (!ValidateCommand(SupportsCopy(), "CopyTextureRegion"))
       return;
     if (!pDst || !pSrc || !IsSameDevice(device_, pDst->pResource) || !IsSameDevice(device_, pSrc->pResource)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "source or destination texture is invalid");
       return;
     }
     if (!PreBlit())
@@ -2538,9 +2770,9 @@ public:
                    " row_pitch=", row_pitch, " bytes=", staging_size,
                    " heap_offset=", allocator_->gpu_heap_offset_, " heap_size=", kGPUHeapSize,
                    " allocated=", mapped ? 1 : 0);
-           if (!mapped) {
-            recording_failed_ = true;
-            return;
+            if (!mapped) {
+             FailRecording(__func__, "depth-stencil staging allocation failed size=", staging_size);
+             return;
           }
 
           auto &to_buffer = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer_withblitoption>();
@@ -2745,7 +2977,7 @@ public:
     if (!ValidateCommand(SupportsCopy(), "CopyResource"))
       return;
     if (!IsSameDevice(device_, pDstResource) || !IsSameDevice(device_, pSrcResource)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "source or destination belongs to another device");
       return;
     }
     auto *pDst = static_cast<MTLD3D12Resource *>(pDstResource);
@@ -2820,7 +3052,7 @@ public:
     if (!tiled_resource || !tile_region_start_coordinate || !buffer || !tile_region_size ||
         !IsSameDevice(device_, tiled_resource) ||
         !IsSameDevice(device_, buffer)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid or foreign tiled-resource arguments");
       return;
     }
 
@@ -2840,7 +3072,7 @@ public:
         ) ||
         buffer_offset % (64ull * 1024)) {
       WARN("D3D12 CopyTiles currently supports only logical raw reserved-resource tile copies");
-      recording_failed_ = true;
+      FailRecording(__func__, "unsupported tile copy flags or resource type");
       return;
     }
 
@@ -2848,13 +3080,13 @@ public:
     if (FAILED(tiled->GetTileIndices(tile_region_start_coordinate, tile_region_size, tile_indices)) ||
         tile_indices.empty()) {
       WARN("D3D12 CopyTiles received an invalid tile region");
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid tile region");
       return;
     }
     for (UINT tile_index : tile_indices) {
       if (tiled->IsPackedTile(tile_index)) {
         WARN("D3D12 CopyTiles cannot access packed mip tiles");
-        recording_failed_ = true;
+        FailRecording(__func__, "packed mip tile");
         return;
       }
     }
@@ -2862,14 +3094,15 @@ public:
     constexpr UINT64 tile_size = 64ull * 1024;
     if (tile_indices.size() > std::numeric_limits<UINT64>::max() / tile_size) {
       WARN("D3D12 CopyTiles tile range overflowed");
-      recording_failed_ = true;
+      FailRecording(__func__, "tile range overflow");
       return;
     }
     const UINT64 copy_size = static_cast<UINT64>(tile_indices.size()) * tile_size;
     const auto linear_desc = linear->GetDesc();
     if (buffer_offset > linear_desc.Width || copy_size > linear_desc.Width - buffer_offset) {
       WARN("D3D12 CopyTiles received an out-of-bounds buffer range");
-      recording_failed_ = true;
+      FailRecording(__func__, "out-of-bounds buffer range offset=", buffer_offset, " size=", copy_size,
+                    " resource_size=", linear_desc.Width);
       return;
     }
 
@@ -2899,7 +3132,7 @@ public:
     if (!ValidateCommand(SupportsCopy(), "ResolveSubresource"))
       return;
     if (!IsSameDevice(device_, pDstResource) || !IsSameDevice(device_, pSrcResource)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "source or destination belongs to another device");
       return;
     }
     auto *pDst = static_cast<MTLD3D12Resource *>(pDstResource);
@@ -2959,7 +3192,7 @@ public:
   RSSetViewports(UINT NumViewports, const D3D12_VIEWPORT *pViewports) {
     if (NumViewports > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE ||
         (NumViewports && !pViewports)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid viewport list count=", NumViewports);
       return;
     }
     num_viewports = NumViewports;
@@ -2972,7 +3205,7 @@ public:
   void STDMETHODCALLTYPE
   RSSetScissorRects(UINT NumRects, const D3D12_RECT *rects) {
     if (NumRects > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE || (NumRects && !rects)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid scissor list count=", NumRects);
       return;
     }
     num_scissors = NumRects;
@@ -3012,7 +3245,7 @@ public:
       const auto strip = is_strip_topology(topology_) ? 1u : 0u;
       const auto index = static_cast<unsigned>(airconv_index_format);
       if (index >= 3) {
-        recording_failed_ = true;
+        FailRecording(__func__, "invalid AIRCONV index format=", index);
         return;
       }
       cmd_setpso.pso = pso_graphics->airconv_geometry_psos[strip][index];
@@ -3060,7 +3293,7 @@ public:
     }
 
     if (!IsSameDevice(device_, pPSO)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "pipeline state belongs to another device");
       return;
     }
     auto pso = static_cast<MTLD3D12PipelineState *>(pPSO);
@@ -3102,12 +3335,12 @@ public:
       switch (barrier.Type) {
       case D3D12_RESOURCE_BARRIER_TYPE_TRANSITION: {
         if (!IsSameDevice(device_, barrier.Transition.pResource)) {
-          recording_failed_ = true;
+          FailRecording(__func__, "transition resource belongs to another device");
           continue;
         }
         auto resource = static_cast<MTLD3D12Resource *>(barrier.Transition.pResource);
         if (!resource) {
-          recording_failed_ = true;
+          FailRecording(__func__, "transition resource is invalid");
           continue;
         }
         const bool split_end = barrier.Flags & D3D12_RESOURCE_BARRIER_FLAG_END_ONLY;
@@ -3131,7 +3364,7 @@ public:
       }
       case D3D12_RESOURCE_BARRIER_TYPE_UAV:
         if (barrier.UAV.pResource && !IsSameDevice(device_, barrier.UAV.pResource)) {
-          recording_failed_ = true;
+          FailRecording(__func__, "UAV resource belongs to another device");
           break;
         }
         EncodeMemoryBarrier(resource_barrier_scope(static_cast<MTLD3D12Resource *>(barrier.UAV.pResource)),
@@ -3141,14 +3374,14 @@ public:
         if ((barrier.Aliasing.pResourceBefore &&
              !IsSameDevice(device_, barrier.Aliasing.pResourceBefore)) ||
             (barrier.Aliasing.pResourceAfter && !IsSameDevice(device_, barrier.Aliasing.pResourceAfter))) {
-          recording_failed_ = true;
+          FailRecording(__func__, "aliasing resource belongs to another device");
           break;
         }
         // Metal serializes the encoder boundary, which is the visibility point needed for alias reuse.
         allocator_->InvalidateCurrentPass();
         break;
       default:
-        recording_failed_ = true;
+        FailRecording(__func__, "unsupported resource barrier type=", barrier.Type);
         break;
       }
     }
@@ -3161,7 +3394,7 @@ public:
     } else {
       WARN("D3D12 ExecuteBundle is not implemented");
     }
-    recording_failed_ = true;
+    FailRecording(__func__, "ExecuteBundle is unsupported");
   };
 
   void STDMETHODCALLTYPE SetDescriptorHeaps(UINT HeapCount, ID3D12DescriptorHeap *const *Heaps) {
@@ -3169,43 +3402,43 @@ public:
     sampler_heap_ = nullptr;
     if (HeapCount > 2 || (HeapCount && !Heaps)) {
       WARN("D3D12 SetDescriptorHeaps received an invalid heap list");
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid heap list count=", HeapCount);
       return;
     }
     for (UINT i = 0; i < HeapCount; i++) {
       if (!Heaps[i]) {
         WARN("D3D12 SetDescriptorHeaps received a null heap");
-        recording_failed_ = true;
+        FailRecording(__func__, "null heap index=", i);
         return;
       }
       if (!IsSameDevice(device_, Heaps[i])) {
         WARN("D3D12 SetDescriptorHeaps received a heap from another device");
-        recording_failed_ = true;
+        FailRecording(__func__, "heap belongs to another device index=", i);
         return;
       }
       auto desc = Heaps[i]->GetDesc();
       if (!(desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)) {
         WARN("D3D12 SetDescriptorHeaps requires shader-visible heaps");
-        recording_failed_ = true;
+        FailRecording(__func__, "heap is not shader-visible index=", i);
         return;
       }
       if (desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
         if (descriptor_heap_) {
           WARN("D3D12 SetDescriptorHeaps received multiple CBV/SRV/UAV heaps");
-          recording_failed_ = true;
+          FailRecording(__func__, "multiple CBV/SRV/UAV heaps");
           return;
         }
         descriptor_heap_ = static_cast<MTLD3D12DescriptorHeap *>(Heaps[i]);
       } else if (desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) {
         if (sampler_heap_) {
           WARN("D3D12 SetDescriptorHeaps received multiple sampler heaps");
-          recording_failed_ = true;
+          FailRecording(__func__, "multiple sampler heaps");
           return;
         }
         sampler_heap_ = static_cast<MTLD3D12SamplerDescriptorHeap *>(Heaps[i]);
       } else {
         WARN("D3D12 SetDescriptorHeaps received an unsupported heap type");
-        recording_failed_ = true;
+        FailRecording(__func__, "unsupported descriptor heap type=", desc.Type);
         return;
       }
     }
@@ -3218,7 +3451,7 @@ public:
       return;
     if (pRootSignature) {
       if (!IsSameDevice(device_, pRootSignature)) {
-        recording_failed_ = true;
+        FailRecording(__func__, "compute root signature belongs to another device");
         return;
       }
       rootsig_compute_ = static_cast<MTLD3D12RootSignature *>(pRootSignature);
@@ -3235,7 +3468,7 @@ public:
       return;
     if (pRootSignature) {
       if (!IsSameDevice(device_, pRootSignature)) {
-        recording_failed_ = true;
+        FailRecording(__func__, "graphics root signature belongs to another device");
         return;
       }
       rootsig_graphics_ = static_cast<MTLD3D12RootSignature *>(pRootSignature);
@@ -3351,24 +3584,35 @@ public:
 
   void STDMETHODCALLTYPE
   IASetIndexBuffer(const D3D12_INDEX_BUFFER_VIEW *pView) {
-    if (!pView) {
+    auto clear_index_binding = [&] {
       index_buffer_address = 0;
       index_buffer = {};
       index_type = {};
-      index_offset = {};
+      index_offset = 0;
+    };
+
+    if (!pView) {
+      clear_index_binding();
+      return;
+    }
+
+    if (!pView->BufferLocation && !pView->SizeInBytes && pView->Format == DXGI_FORMAT_UNKNOWN) {
+      clear_index_binding();
       return;
     }
 
     if (pView->Format != DXGI_FORMAT_R16_UINT && pView->Format != DXGI_FORMAT_R32_UINT) {
-      recording_failed_ = true;
+      FailRecording(__func__, "unsupported index format=", pView->Format);
       return;
     }
 
     auto allocation = device_->LookupBufferByVA(pView->BufferLocation, &index_offset);
     const uint64_t index_element_size = pView->Format == DXGI_FORMAT_R32_UINT ? sizeof(uint32_t) : sizeof(uint16_t);
-    if (!allocation || pView->SizeInBytes > allocation->length() - index_offset ||
+    if (!allocation || index_offset > allocation->length() || pView->SizeInBytes > allocation->length() - index_offset ||
         (pView->SizeInBytes % index_element_size)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid index buffer location=0x", std::hex, pView->BufferLocation, std::dec,
+                    " size=", pView->SizeInBytes, " offset=", index_offset,
+                    " allocation_length=", allocation ? allocation->length() : 0);
       index_buffer_address = 0;
       index_buffer = {};
       index_type = {};
@@ -3385,7 +3629,7 @@ public:
   IASetVertexBuffers(UINT StartSlot, UINT Count, const D3D12_VERTEX_BUFFER_VIEW *Views) {
     if (StartSlot > D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT ||
         Count > D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT - StartSlot || (Count && !Views)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid vertex buffer range start=", StartSlot, " count=", Count);
       return;
     }
 
@@ -3393,7 +3637,8 @@ public:
       const auto &view = Views[Slot - StartSlot];
       if (!view.BufferLocation) {
         if (view.SizeInBytes) {
-          recording_failed_ = true;
+          FailRecording(__func__, "vertex buffer has size without GPU address slot=", Slot,
+                        " size=", view.SizeInBytes);
           return;
         }
         vertex_buffers_[Slot] = {};
@@ -3401,8 +3646,10 @@ public:
       }
       uint64_t buffer_offset = 0;
       auto allocation = device_->LookupBufferByVA(view.BufferLocation, &buffer_offset);
-      if (!allocation || view.SizeInBytes > allocation->length() - buffer_offset) {
-        recording_failed_ = true;
+      if (!allocation || buffer_offset > allocation->length() || view.SizeInBytes > allocation->length() - buffer_offset) {
+        FailRecording(__func__, "invalid vertex buffer slot=", Slot, " location=0x", std::hex,
+                      view.BufferLocation, std::dec, " size=", view.SizeInBytes, " offset=", buffer_offset,
+                      " allocation_length=", allocation ? allocation->length() : 0);
         return;
       }
     }
@@ -3416,7 +3663,7 @@ public:
   void STDMETHODCALLTYPE SOSetTargets(UINT StartSlot, UINT Count, const D3D12_STREAM_OUTPUT_BUFFER_VIEW *Views) {
     if (StartSlot > D3D12_SO_BUFFER_SLOT_COUNT || Count > D3D12_SO_BUFFER_SLOT_COUNT - StartSlot ||
         (Count && !Views)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid stream-output range start=", StartSlot, " count=", Count);
       return;
     }
     for (UINT slot = StartSlot; slot < StartSlot + Count; slot++)
@@ -3430,7 +3677,7 @@ public:
       const D3D12_CPU_DESCRIPTOR_HANDLE *DSV
   ) {
     if (NumRTV > std::size(rtvs) || (NumRTV && !RTVs)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid render-target list count=", NumRTV);
       return;
     }
     allocator_->InvalidateCurrentPass();
@@ -3452,7 +3699,7 @@ public:
     if ((Flags & 3) == 0)
       return;
     if (RectCount && !Rects) {
-      recording_failed_ = true;
+      FailRecording(__func__, "rect count without rect data count=", RectCount);
       return;
     }
     auto [Heap, Index] = GetRenderTargetHeap(device_, DSV);
@@ -3462,7 +3709,7 @@ public:
     if (!AttachmentDesc.Texture)
       return;
     if (RectCount > kCPUHeapSize / sizeof(D3D12_RECT)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "too many depth-stencil clear rects count=", RectCount);
       return;
     }
     const auto format = AttachmentDesc.Texture->pixelFormat(AttachmentDesc.View);
@@ -3643,7 +3890,7 @@ public:
 
   void STDMETHODCALLTYPE DiscardResource(ID3D12Resource *pResource, const D3D12_DISCARD_REGION *pRegion) {
     if (!pResource || !IsSameDevice(device_, pResource))
-      recording_failed_ = true;
+      FailRecording(__func__, "resource is null or belongs to another device");
     // DiscardResource is an optimization hint. Metal manages resource contents
     // itself, so a valid discard can be safely represented as a no-op.
   };
@@ -3651,19 +3898,19 @@ public:
   void STDMETHODCALLTYPE
   BeginQuery(ID3D12QueryHeap *pHeap, D3D12_QUERY_TYPE Type, UINT Index) {
     if (Type == D3D12_QUERY_TYPE_TIMESTAMP) {
-      recording_failed_ = true;
+      FailRecording(__func__, "timestamp queries are unsupported in BeginQuery");
       return;
     }
     if (!ValidateCommand(SupportsGraphics(), "BeginQuery"))
       return;
     if (!IsSameDevice(device_, pHeap)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "query heap belongs to another device");
       return;
     }
     auto query = static_cast<MTLD3D12QueryHeap *>(pHeap);
     if (!query || query->type != D3D12_QUERY_HEAP_TYPE_OCCLUSION || Index >= query->count ||
         (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid occlusion query heap or index=", Index);
       return;
     }
     if (PreDraw() == DrawCallStatus::Invalid)
@@ -3684,12 +3931,12 @@ public:
       if (!ValidateCommand(SupportsTimestamp(), "EndQuery(Timestamp)"))
         return;
       if (!IsSameDevice(device_, pHeap)) {
-        recording_failed_ = true;
+        FailRecording(__func__, "query heap belongs to another device");
         return;
       }
       auto query = static_cast<MTLD3D12QueryHeap *>(pHeap);
       if (!query || query->type != D3D12_QUERY_HEAP_TYPE_TIMESTAMP || Index >= query->count || !query->timestamp_buffer) {
-        recording_failed_ = true;
+        FailRecording(__func__, "invalid timestamp query heap or index=", Index);
         return;
       }
 
@@ -3703,14 +3950,14 @@ public:
     if (!ValidateCommand(SupportsGraphics(), "EndQuery"))
       return;
     if (!IsSameDevice(device_, pHeap)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "query heap belongs to another device");
       return;
     }
     auto query = static_cast<MTLD3D12QueryHeap *>(pHeap);
     if (!query || query->type != D3D12_QUERY_HEAP_TYPE_OCCLUSION || Index >= query->count ||
         (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION) ||
         !allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render) {
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid occlusion query state index=", Index);
       return;
     }
     auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setvisibilitymode>();
@@ -3727,24 +3974,25 @@ public:
     if (!ValidateCommand(SupportsCopy(), "ResolveQueryData"))
       return;
     if (!IsSameDevice(device_, pHeap) || !IsSameDevice(device_, pDstBuffer)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "query heap or destination belongs to another device");
       return;
     }
     auto query = static_cast<MTLD3D12QueryHeap *>(pHeap);
     auto destination = static_cast<MTLD3D12Resource *>(pDstBuffer);
     if (!query || !destination || !destination->buffer || StartIndex > query->count ||
         QueryCount > query->count - StartIndex) {
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid query range start=", StartIndex, " count=", QueryCount);
       return;
     }
     if (Type != D3D12_QUERY_TYPE_TIMESTAMP && Type != D3D12_QUERY_TYPE_OCCLUSION &&
         Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION) {
-      recording_failed_ = true;
+      FailRecording(__func__, "unsupported query type=", Type);
       return;
     }
     if ((AlignedDstBufferOffset & (sizeof(UINT64) - 1)) ||
         !buffer_range_in_bounds(destination, AlignedDstBufferOffset, uint64_t(QueryCount) * sizeof(UINT64))) {
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid query destination range offset=", AlignedDstBufferOffset,
+                    " count=", QueryCount);
       return;
     }
     if (!PreBlit())
@@ -3752,7 +4000,7 @@ public:
 
     if (Type == D3D12_QUERY_TYPE_TIMESTAMP) {
       if (query->type != D3D12_QUERY_HEAP_TYPE_TIMESTAMP || !query->timestamp_buffer) {
-        recording_failed_ = true;
+        FailRecording(__func__, "timestamp query heap is invalid");
         return;
       }
       auto &cmd = allocator_->EncodeBlitCommand<wmtcmd_blit_resolvecounters>();
@@ -3767,7 +4015,7 @@ public:
 
     if (query->type != D3D12_QUERY_HEAP_TYPE_OCCLUSION ||
         (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "occlusion query heap is invalid");
       return;
     }
     auto &cmd = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
@@ -3895,7 +4143,7 @@ public:
   ) {
     if (!IsSameDevice(device_, pCommandSignature) || !IsSameDevice(device_, pArgBuffer) ||
         (pCountBuffer && !IsSameDevice(device_, pCountBuffer))) {
-      recording_failed_ = true;
+      FailRecording(__func__, "command signature or argument buffer belongs to another device");
       return;
     }
     auto sig = static_cast<MTLD3D12CommandSignature *>(pCommandSignature);
@@ -3924,14 +4172,16 @@ public:
     if (arg_desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || (ArgBufferOffset & 3) ||
         ArgBufferOffset > arg_desc.Width ||
         (MaxCommandCount && sig->ByteStride > (arg_desc.Width - ArgBufferOffset) / MaxCommandCount)) {
-      recording_failed_ = true;
+      FailRecording(__func__, "invalid indirect argument range offset=", ArgBufferOffset,
+                    " max_count=", MaxCommandCount, " stride=", sig->ByteStride,
+                    " buffer_size=", arg_desc.Width);
       return;
     }
     auto ArgBufferAddress = arg_buffer->buffer->current()->gpuAddress() + ArgBufferOffset;
     uint64_t CountBufferAddress = 0;
     if (auto count_buffer = static_cast<MTLD3D12Resource *>(pCountBuffer)) {
       if (!buffer_range_in_bounds(count_buffer, CountBufferOffset, sizeof(UINT)) || (CountBufferOffset & 3)) {
-        recording_failed_ = true;
+        FailRecording(__func__, "invalid count buffer range offset=", CountBufferOffset);
         return;
       }
       CountBufferAddress = count_buffer->buffer->current()->gpuAddress() + CountBufferOffset;
@@ -3939,6 +4189,12 @@ public:
     if (sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH) {
       if (!PreDispatch(sig->UpdateRootArguments))
         return;
+
+      if (indirect_residency_) {
+        EncodeComputeResourceUse(arg_buffer->buffer->current()->buffer().handle, WMTResourceUsageRead);
+        if (auto count_buffer = static_cast<MTLD3D12Resource *>(pCountBuffer))
+          EncodeComputeResourceUse(count_buffer->buffer->current()->buffer().handle, WMTResourceUsageRead);
+      }
 
       auto cmd = allocator_->EncodeIndirectComputeCommand(sig, pso_compute_.ptr(), MaxCommandCount);
       cmd->max_count_buffer = CountBufferAddress;
@@ -3960,10 +4216,10 @@ public:
         return;
       if ((sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW &&
            sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED) ||
-          MaxCommandCount != 1 || pCountBuffer || sig->UpdateRootArguments || sig->UpdateVertexBuffers ||
-          sig->UpdateIndexBuffer) {
+           MaxCommandCount != 1 || pCountBuffer || sig->UpdateRootArguments || sig->UpdateVertexBuffers ||
+           sig->UpdateIndexBuffer) {
         WARN("D3D12 ExecuteIndirect with AIRCONV geometry requires one non-updating draw command");
-        recording_failed_ = true;
+        FailRecording(__func__, "AIRCONV geometry indirect signature is unsupported");
         return;
       }
 
@@ -3985,7 +4241,7 @@ public:
               indexed, index_format, arg_buffer->buffer->current()->buffer(), ArgBufferOffset,
               ArgBufferAddress, vertex_per_warp, vertex_increment_per_warp
           )) {
-        recording_failed_ = true;
+        FailRecording(__func__, "AIRCONV geometry indirect encoding failed");
       }
       return;
     }
@@ -4000,6 +4256,14 @@ public:
       return;
     if (status != DrawCallStatus::Ordinary)
       return;
+
+    if (indirect_residency_) {
+      EncodeRenderResourceUse(arg_buffer->buffer->current()->buffer().handle, WMTResourceUsageRead,
+                              WMTRenderStageVertex);
+      if (auto count_buffer = static_cast<MTLD3D12Resource *>(pCountBuffer))
+        EncodeRenderResourceUse(count_buffer->buffer->current()->buffer().handle, WMTResourceUsageRead,
+                                WMTRenderStageVertex);
+    }
 
     auto cmd = allocator_->EncodeIndirectRenderCommand(sig, pso_graphics_.ptr(), MaxCommandCount);
     cmd->max_count_buffer = CountBufferAddress;
@@ -4144,13 +4408,13 @@ public:
     if (!NumBarrierGroups)
       return;
     if (!pBarrierGroups) {
-      recording_failed_ = true;
+      FailRecording(__func__, "barrier group pointer is null");
       return;
     }
 
     auto invalid_barrier = [&]() {
       WARN("D3D12 Barrier received an unsupported or invalid barrier");
-      recording_failed_ = true;
+      FailRecording(__func__, "unsupported or invalid barrier");
     };
 
     auto emit_memory_barrier = [&](MTLD3D12Resource *resource, D3D12_RESOURCE_STATES before,

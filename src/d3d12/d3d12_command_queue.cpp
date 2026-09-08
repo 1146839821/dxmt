@@ -28,6 +28,7 @@
 #include <array>
 #include <cassert>
 #include <limits>
+#include <string>
 #include <unordered_map>
 
 namespace dxmt {
@@ -48,6 +49,15 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   struct Submission {
     uint64_t serial = 0;
     WMT::Reference<WMT::CommandBuffer> command_buffer;
+    struct CommandList {
+      uint64_t recording_id = 0;
+      struct Encoder {
+        EncoderType type;
+        uint64_t id;
+      };
+      std::vector<Encoder> encoders;
+    };
+    std::vector<CommandList> command_lists;
     std::vector<Com<MTLD3D12CommandAllocator, false>> allocators;
     HANDLE latency_waitable = nullptr;
   };
@@ -64,8 +74,76 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   bool stopping_ = false;
   uint64_t next_submission_serial_ = 1;
   uint64_t completed_submission_serial_ = 0;
+  bool encoder_execution_status_ = false;
   std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_psos_;
   std::array<WMT::Reference<WMT::DepthStencilState>, 4> clear_dssos_;
+
+  static const char *EncoderTypeName(EncoderType type) {
+    switch (type) {
+    case EncoderType::Null:
+      return "Null";
+    case EncoderType::Clear:
+      return "Clear";
+    case EncoderType::Render:
+      return "Render";
+    case EncoderType::Blit:
+      return "Blit";
+    case EncoderType::CopyTiles:
+      return "CopyTiles";
+    case EncoderType::Compute:
+      return "Compute";
+    case EncoderType::Resolve:
+      return "Resolve";
+    case EncoderType::TemporalUpscale:
+      return "TemporalUpscale";
+    case EncoderType::SampleTimestamp:
+      return "SampleTimestamp";
+    }
+    return "Unknown";
+  }
+
+  static std::string DescribeSubmission(const Submission &submission) {
+    std::string description = " command_lists=[";
+    for (size_t i = 0; i < submission.command_lists.size(); i++) {
+      if (i)
+        description += ",";
+      const auto &command_list = submission.command_lists[i];
+      description += "{id=" + std::to_string(command_list.recording_id) + ",encoders=[";
+      bool first_encoder = true;
+      for (const auto &encoder : command_list.encoders) {
+        if (encoder.type == EncoderType::Null)
+          continue;
+        if (!first_encoder)
+          description += ",";
+        description += EncoderTypeName(encoder.type);
+        description += "#" + std::to_string(encoder.id);
+        first_encoder = false;
+      }
+      if (first_encoder)
+        description += "None";
+      description += "]}";
+    }
+    description += "]";
+    return description;
+  }
+
+  template <typename Encoder>
+  void LabelEncoder(Encoder &encoder, uint64_t recording_id, uint64_t encoder_id, const char *phase = nullptr) {
+    if (!encoder_execution_status_)
+      return;
+    std::string label = "DXMT recording=" + std::to_string(recording_id) + " encoder=" + std::to_string(encoder_id);
+    if (phase) {
+      label += " ";
+      label += phase;
+    }
+    encoder.setLabel(WMT::String::string(label.c_str(), WMTUTF8StringEncoding));
+  }
+
+  WMT::CommandBuffer NewCommandBuffer() {
+    if (encoder_execution_status_)
+      return queue_.commandBufferWithErrorOptions(WMTCommandBufferErrorOptionEncoderExecutionStatus);
+    return queue_.commandBuffer();
+  }
 
   WMT::RenderPipelineState
   GetClearPSO(WMTPixelFormat format, uint8_t sample_count) {
@@ -149,7 +227,12 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       if (submission.command_buffer.status() == WMTCommandBufferStatusError) {
         auto error = submission.command_buffer.error();
         ERR("D3D12 command buffer submission ", submission.serial, " failed: ",
-            error ? error.description().getUTF8String() : "unknown error");
+            error ? error.description().getUTF8String() : "unknown error", DescribeSubmission(submission));
+        if (encoder_execution_status_) {
+          for (auto &log : submission.command_buffer.logs().elements())
+            ERR("[DEBUG-METAL-ENCODER] submission ", submission.serial, ": ",
+                log.description().getUTF8String());
+        }
       }
 
       for (auto &allocator : submission.allocators)
@@ -251,7 +334,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       return false;
 
     auto pool = WMT::MakeAutoreleasePool();
-    auto cmdbuf = queue_.commandBuffer();
+    auto cmdbuf = NewCommandBuffer();
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     main_queue_signal = sparse_event_value_ + 1;
@@ -290,6 +373,11 @@ public:
     // TODO: validate and normalize
     desc_ = *pDesc;
     desc_.NodeMask = 1; // typically 1 GPU only
+
+    char encoder_status[2] = {};
+    encoder_execution_status_ =
+        GetEnvironmentVariableA("DXMT_METAL_ENCODER_EXECUTION_STATUS", encoder_status, sizeof(encoder_status)) &&
+        encoder_status[0] != '0';
 
     auto metal_device = device_->GetMTLDevice();
     queue_ = metal_device.newCommandQueue(kCommandQueueSize);
@@ -448,14 +536,19 @@ public:
 
     auto pool = WMT::MakeAutoreleasePool();
 
-    auto cmdbuf = queue_.commandBuffer();
+    auto cmdbuf = NewCommandBuffer();
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     Submission submission;
     submission.command_buffer = cmdbuf;
     submission.allocators.reserve(Count);
+    submission.command_lists.reserve(Count);
     for (unsigned i = 0; i < Count; i++) {
       auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i]);
+      auto &command_list = submission.command_lists.emplace_back();
+      command_list.recording_id = pCommandList->GetRecordingId();
+      for (auto *encoder = pCommandList->entry; encoder; encoder = encoder->next)
+        command_list.encoders.push_back({encoder->type, encoder->id});
       submission.allocators.emplace_back(pCommandList->GetAllocator());
     }
     for (auto &allocator : submission.allocators)
@@ -468,6 +561,7 @@ public:
       auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i]);
       EncoderData *current = pCommandList->entry;
       while (current) {
+        const auto recording_id = pCommandList->GetRecordingId();
         switch (current->type) {
         case EncoderType::Null:
           break;
@@ -750,7 +844,7 @@ public:
             info.render_target_height = data->height;
 
             auto encoder = cmdbuf.renderCommandEncoder(info);
-            encoder.setLabel(WMT::String::string("PartialClearPass", WMTUTF8StringEncoding));
+            LabelEncoder(encoder, recording_id, data->id, "ClearPartial");
             encoder.waitForFence(fence_, WMTRenderStageFragment);
 
             wmtcmd_render_setpso set_pso = {};
@@ -833,7 +927,7 @@ public:
             }
             info.render_target_array_length = data->array_length;
             auto encoder = cmdbuf.renderCommandEncoder(info);
-            encoder.setLabel(WMT::String::string("ClearPass", WMTUTF8StringEncoding));
+            LabelEncoder(encoder, recording_id, data->id, "Clear");
             encoder.waitForFence(fence_, WMTRenderStageFragment);
             encoder.updateFence(fence_, WMTRenderStageFragment);
             encoder.endEncoding();
@@ -890,27 +984,30 @@ public:
             render_pass_info.render_target_height = data->render_target_height;
             if (data->use_visibility_result)
               render_pass_info.visibility_buffer = data->visibility_buffer.handle;
-          }
-          auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
-          encoder.waitForFence(fence_, WMTRenderStageVertex);
+           }
+           auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
+           LabelEncoder(encoder, recording_id, data->id, "Render");
+           encoder.waitForFence(fence_, WMTRenderStageVertex);
           encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_, WMTRenderStageFragment);
           encoder.endEncoding();
           break;
         }
-        case EncoderType::Blit: {
-          auto data = static_cast<BlitEncoderData *>(current);
-          auto encoder = cmdbuf.blitCommandEncoder();
-          encoder.waitForFence(fence_);
+         case EncoderType::Blit: {
+           auto data = static_cast<BlitEncoderData *>(current);
+           auto encoder = cmdbuf.blitCommandEncoder();
+           LabelEncoder(encoder, recording_id, data->id, "Blit");
+           encoder.waitForFence(fence_);
           encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_);
           encoder.endEncoding();
           break;
         }
-        case EncoderType::Compute: {
-          auto data = static_cast<ComputeEncoderData *>(current);
-          auto encoder = cmdbuf.computeCommandEncoder(false);
-          encoder.waitForFence(fence_);
+         case EncoderType::Compute: {
+           auto data = static_cast<ComputeEncoderData *>(current);
+           auto encoder = cmdbuf.computeCommandEncoder(false);
+           LabelEncoder(encoder, recording_id, data->id, "Compute");
+           encoder.waitForFence(fence_);
           encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_);
           encoder.endEncoding();
@@ -926,19 +1023,19 @@ public:
           info.colors[0].store_action = WMTStoreActionStoreAndMultisampleResolve;
           info.colors[0].resolve_texture = data->dst.texture();
 
-          auto encoder = cmdbuf.renderCommandEncoder(info);
-          encoder.waitForFence(fence_, WMTRenderStageFragment);
-          encoder.setLabel(WMT::String::string("ResolvePass", WMTUTF8StringEncoding));
+           auto encoder = cmdbuf.renderCommandEncoder(info);
+           LabelEncoder(encoder, recording_id, data->id, "Resolve");
+           encoder.waitForFence(fence_, WMTRenderStageFragment);
           encoder.updateFence(fence_, WMTRenderStageFragment);
           encoder.endEncoding();
 
           break;
         }
         case EncoderType::TemporalUpscale: {
-          auto data = static_cast<TemporalUpscaleData *>(current);
+           auto data = static_cast<TemporalUpscaleData *>(current);
 
-          auto begin_scaler = cmdbuf.blitCommandEncoder();
-          begin_scaler.setLabel(WMT::String::string("BeginScaler", WMTUTF8StringEncoding));
+           auto begin_scaler = cmdbuf.blitCommandEncoder();
+           LabelEncoder(begin_scaler, recording_id, data->id, "TemporalBegin");
           begin_scaler.waitForFence(fence_);
           begin_scaler.updateFence(data->scaler->fence());
           begin_scaler.endEncoding();
@@ -948,9 +1045,9 @@ public:
               data->scaler->fence(), data->props
           );
 
-          auto end_scaler = cmdbuf.blitCommandEncoder();
-          end_scaler.waitForFence(data->scaler->fence());
-          end_scaler.setLabel(WMT::String::string("EndScaler", WMTUTF8StringEncoding));
+           auto end_scaler = cmdbuf.blitCommandEncoder();
+           end_scaler.waitForFence(data->scaler->fence());
+           LabelEncoder(end_scaler, recording_id, data->id, "TemporalEnd");
           end_scaler.updateFence(fence_);
           end_scaler.endEncoding();
           break;
@@ -963,9 +1060,10 @@ public:
           WMTSampleBufferAttachmentInfo attachment = {};
           attachment.sample_buffer = data->sample_buffer.handle;
           attachment.start_of_encoder_sample_index = data->sample_index;
-          attachment.end_of_encoder_sample_index = ~0ull;
-          auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&attachment, 1);
-          encoder.waitForFence(fence_);
+           attachment.end_of_encoder_sample_index = ~0ull;
+           auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&attachment, 1);
+           LabelEncoder(encoder, recording_id, data->id, "SampleTimestamp");
+           encoder.waitForFence(fence_);
 
           wmtcmd_blit_fillbuffer fill = {};
           fill.type = WMTBlitCommandFillBuffer;
@@ -1011,7 +1109,7 @@ public:
       return E_FAIL;
 
     auto pool = WMT::MakeAutoreleasePool();
-    auto cmdbuf = queue_.commandBuffer();
+    auto cmdbuf = NewCommandBuffer();
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     static_cast<MTLD3D12Fence *>(pFence)->fence->signal(cmdbuf, Value);
@@ -1031,7 +1129,7 @@ public:
       return E_FAIL;
 
     auto pool = WMT::MakeAutoreleasePool();
-    auto cmdbuf = queue_.commandBuffer();
+    auto cmdbuf = NewCommandBuffer();
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     static_cast<MTLD3D12Fence *>(pFence)->fence->wait(cmdbuf, Value);
@@ -1074,7 +1172,7 @@ public:
     attachment.start_of_encoder_sample_index = 0;
     attachment.end_of_encoder_sample_index = ~0ull;
 
-    auto cmdbuf = queue_.commandBuffer();
+    auto cmdbuf = NewCommandBuffer();
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&attachment, 1);
@@ -1136,7 +1234,7 @@ public:
       return E_FAIL;
 
     auto pool = WMT::MakeAutoreleasePool();
-    auto cmdbuf = queue_.commandBuffer();
+    auto cmdbuf = NewCommandBuffer();
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
 

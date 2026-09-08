@@ -268,6 +268,11 @@ public:
   }
 
   WMT::Buffer
+  GetDescriptorHeapBuffer() override {
+    return buffer_ && buffer_->current() ? buffer_->current()->buffer() : WMT::Buffer{};
+  }
+
+  WMT::Buffer
   GetMSCDescriptorHeapBuffer() override {
     return msc_buffer_ ? msc_buffer_->current()->buffer() : WMT::Buffer{};
   }
@@ -746,6 +751,11 @@ public:
     if (index >= samplers_.size())
       return 0;
     return msc_argument_buffer_gpu_address_ + index * sizeof(dxmt_msc_descriptor_entry);
+  }
+
+  WMT::Buffer
+  GetDescriptorHeapBuffer() override {
+    return buffer_ && buffer_->current() ? buffer_->current()->buffer() : WMT::Buffer{};
   }
 
   WMT::Buffer
