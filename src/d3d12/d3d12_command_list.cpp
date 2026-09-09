@@ -1941,7 +1941,11 @@ public:
       render->dsv_planar_flags = 0;
       render->dsv_readonly_flags = 0;
       render->render_target_count = num_rtvs;
-      render->use_geometry = use_msc_geometry || use_airconv_geometry;
+      // MSC tessellation consumes its argument, descriptor, vertex and index
+      // tables from the object/mesh stages just like geometry emulation.  Mark
+      // the pass as pre-raster work so the queue waits at Object/Mesh before
+      // encoding the render commands.
+      render->use_geometry = use_msc_tessellation || use_msc_geometry || use_airconv_geometry;
 
       unsigned render_target_width = 16384, render_target_height = 16384, render_target_array_length = 0;
 
