@@ -2039,6 +2039,17 @@ public:
       dirty_state_.clr(DirtyState::VertexBuffer);
     }
 
+    // Index buffers are consumed by the pre-raster stages for the emulated
+    // geometry paths. They are untracked Metal resources just like vertex
+    // buffers, so make the residency/hazard declaration explicit for every
+    // indexed draw (including ExecuteIndirect) before encoding the draw.
+    if (index_buffer) {
+      const auto index_stages = use_msc_emulation || use_airconv_geometry
+                                    ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh)
+                                    : WMTRenderStageVertex;
+      EncodeRenderResourceUse(index_buffer.handle, WMTResourceUsageRead, index_stages);
+    }
+
     if (dirty_state_.test(DirtyState::StreamOutput)) {
       EncodeStreamOutputBuffers();
       dirty_state_.clr(DirtyState::StreamOutput);
