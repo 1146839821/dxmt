@@ -304,3 +304,43 @@ if dxc_command.length() > 0
     build_by_default: true,
   )
 endif
+
+if dxc_command.length() > 0
+  foreach entry : ['main', 'probe_read', 'probe_write']
+    custom_target('dx12_reserved_buffer_' + entry + '_fixture',
+      input: 'reserved_buffer.hlsl',
+      output: 'reserved_buffer.' + entry + '.cs.cso',
+      command: dxc_command + [ '-E', entry, '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_reserved_texture_read_fixture',
+    input: 'reserved_texture.hlsl',
+    output: 'reserved_texture.read.cs.cso',
+    command: dxc_command + [ '-E', 'read_phase', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_reserved_texture_write_fixture',
+    input: 'reserved_texture.hlsl',
+    output: 'reserved_texture.write.cs.cso',
+    command: dxc_command + [ '-E', 'write_phase', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_reserved_texture_mip_array_fixture',
+    input: 'reserved_texture_mip_array.hlsl',
+    output: 'reserved_texture.mip_array.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_reserved_buffer_copy_mapping_fixture',
+    input: 'reserved_buffer_copy_mapping.hlsl',
+    output: 'reserved_buffer.copy_mapping.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+endif
+
+dx12_reserved_buffer = executable('dx12_reserved_buffer', 'dx12_reserved_buffer.cpp', dependencies: [ d3d12_dep ])
+dx12_reserved_texture = executable('dx12_reserved_texture', 'dx12_reserved_texture.cpp', dependencies: [ d3d12_dep ])
+dx12_reserved_texture_mip_array = executable('dx12_reserved_texture_mip_array', 'dx12_reserved_texture_mip_array.cpp', dependencies: [ d3d12_dep ])
+dx12_reserved_buffer_copy_mapping = executable('dx12_reserved_buffer_copy_mapping', 'dx12_reserved_buffer_copy_mapping.cpp', dependencies: [ d3d12_dep ])

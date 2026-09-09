@@ -269,8 +269,6 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   CreateShaderResourceView(const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) {
-    if (reserved_)
-      return E_NOTIMPL;
     HRESULT hr;
     D3D12_SHADER_RESOURCE_VIEW_DESC ViewDesc;
     if (!pDesc) {
@@ -284,6 +282,10 @@ public:
     if (ViewDesc.ViewDimension != D3D12_SRV_DIMENSION_BUFFER)
       return E_INVALIDARG;
 
+    // Reserved buffers are shader-visible only when the native placement-sparse backing exists.
+    // Keep the unsupported fallback explicit rather than passing a null Metal buffer to the descriptor heap.
+    if (reserved_ && (!buffer || !buffer->current()))
+      return E_NOTIMPL;
     auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, Descriptor);
     if (!Heap)
       return E_INVALIDARG;
@@ -315,8 +317,6 @@ public:
   CreateUnorderedAccessView(
       ID3D12Resource *pCounter, const D3D12_UNORDERED_ACCESS_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor
   ) {
-    if (reserved_)
-      return E_NOTIMPL;
     HRESULT hr;
     D3D12_UNORDERED_ACCESS_VIEW_DESC ViewDesc;
     if (!pDesc) {
@@ -330,6 +330,10 @@ public:
     if (ViewDesc.ViewDimension != D3D12_UAV_DIMENSION_BUFFER)
       return E_INVALIDARG;
 
+    // Reserved buffers are shader-visible only when the native placement-sparse backing exists.
+    // Keep the unsupported fallback explicit rather than passing a null Metal buffer to the descriptor heap.
+    if (reserved_ && (!buffer || !buffer->current()))
+      return E_NOTIMPL;
     auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, Descriptor);
     if (!Heap)
       return E_INVALIDARG;

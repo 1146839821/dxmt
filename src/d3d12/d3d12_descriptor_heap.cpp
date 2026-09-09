@@ -26,12 +26,17 @@
 #include <array>
 #include <atomic>
 #include <mutex>
+#include <vector>
 
 namespace dxmt {
 
 namespace {
 std::mutex descriptor_heap_registry_lock;
-std::array<const void *, 1u << 7> descriptor_heap_registry = {};
+// Index 0 is reserved as the invalid-handle sentinel. On 64-bit builds,
+// allocate indices monotonically so a stale handle cannot be rebound to a
+// later heap. The 32-bit encoding has no room to grow beyond seven bits, so
+// preserve slot reuse there for compatibility with the existing limit.
+std::vector<const void *> descriptor_heap_registry(sizeof(SIZE_T) == 4 ? (1u << 7) : 1, nullptr);
 std::atomic<unsigned> descriptor_texture_debug_count = 0;
 std::atomic<unsigned> descriptor_table_debug_count = 0;
 }
@@ -43,14 +48,22 @@ RegisterDescriptorHeap(const void *heap) {
     if (descriptor_heap_registry[i] == heap)
       return i;
   }
-  for (SIZE_T i = 1; i < descriptor_heap_registry.size(); i++) {
-    if (!descriptor_heap_registry[i]) {
-      descriptor_heap_registry[i] = heap;
-      return i;
+  if constexpr (sizeof(SIZE_T) == 4) {
+    for (SIZE_T i = 1; i < descriptor_heap_registry.size(); i++) {
+      if (!descriptor_heap_registry[i]) {
+        descriptor_heap_registry[i] = heap;
+        return i;
+      }
     }
   }
-  WARN("D3D12 descriptor heap registry is full");
-  return 0;
+  // Keep indices stable and stay within the bit-field encoded handle range.
+  constexpr SIZE_T kMaxHeapIndex = (SIZE_T(1) << (sizeof(SIZE_T) == 4 ? 7 : 39)) - 1;
+  if (descriptor_heap_registry.size() > kMaxHeapIndex) {
+    WARN("D3D12 descriptor heap registry is full");
+    return 0;
+  }
+  descriptor_heap_registry.push_back(heap);
+  return descriptor_heap_registry.size() - 1;
 }
 
 void

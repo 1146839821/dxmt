@@ -888,7 +888,11 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   CreateShaderResourceView(const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) {
-    if (reserved_)
+    // Reserved textures are shader-visible only when the native placement-sparse
+    // allocation exists. Metal's sparse tail packing is not the same as the
+    // D3D12 packed-mip layout, so keep packed-mip shader views unsupported until
+    // an explicit tail-layout translation exists.
+    if (reserved_ && (packed_mip_count_ || !texture || !texture->current()))
       return E_NOTIMPL;
     HRESULT hr;
     D3D12_SHADER_RESOURCE_VIEW_DESC ViewDesc;
@@ -1078,7 +1082,9 @@ public:
   CreateUnorderedAccessView(
       ID3D12Resource *pCounter, const D3D12_UNORDERED_ACCESS_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor
   ) {
-    if (reserved_)
+    // See CreateShaderResourceView: a reserved UAV requires a native sparse
+    // texture and a layout that the Metal sparse mapping path can represent.
+    if (reserved_ && (packed_mip_count_ || !texture || !texture->current()))
       return E_NOTIMPL;
     HRESULT hr;
     D3D12_UNORDERED_ACCESS_VIEW_DESC ViewDesc;

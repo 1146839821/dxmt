@@ -1037,7 +1037,9 @@ public:
 
   bool
   supportsPlacementSparse() {
-    return supportsFamily(WMTGPUFamilyApple8) && MTLDevice_supportsPlacementSparse(handle);
+    // This is the authoritative Metal4 placement-sparse capability. Do not
+    // require Apple8 here: M1 devices are Apple7 and can expose this feature.
+    return MTLDevice_supportsPlacementSparse(handle);
   }
 
   Reference<SparseMappingQueue>

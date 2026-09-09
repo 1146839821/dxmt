@@ -24,13 +24,15 @@ bool CheckHR(const char *name, HRESULT hr) {
 int main(int argc, char **argv) {
   if (argc < 2 || argc > 3) {
     std::cerr << "usage: dx12_compute_sm6 <shader.cso> "
-                 "[--root-uav|--descriptor-uav|--descriptor-resources|--"
+                 "[--root-uav|--reserved-uav|--reserved-srv|--descriptor-uav|--descriptor-resources|--"
                  "descriptor-resources-space|--root-cbv|--root-constants|--"
                  "descriptor-resources-1-1|--direct-indexed|--root-srv|--"
                  "cache-probe]\n";
     return 2;
   }
-  const bool root_uav = argc == 3 && strcmp(argv[2], "--root-uav") == 0;
+  const bool root_uav = argc == 3 && (strcmp(argv[2], "--root-uav") == 0 || strcmp(argv[2], "--reserved-uav") == 0);
+  const bool reserved_uav = argc == 3 && strcmp(argv[2], "--reserved-uav") == 0;
+  const bool reserved_srv = argc == 3 && strcmp(argv[2], "--reserved-srv") == 0;
   const bool descriptor_uav =
       argc == 3 && strcmp(argv[2], "--descriptor-uav") == 0;
   const bool descriptor_resources =
@@ -49,14 +51,14 @@ int main(int argc, char **argv) {
       argc == 3 && strcmp(argv[2], "--root-constants") == 0;
   const bool root_srv = argc == 3 && strcmp(argv[2], "--root-srv") == 0;
   const bool cache_probe = argc == 3 && strcmp(argv[2], "--cache-probe") == 0;
-  if (argc == 3 && !root_uav && !descriptor_uav && !descriptor_resources &&
+  if (argc == 3 && !root_uav && !reserved_uav && !reserved_srv && !descriptor_uav && !descriptor_resources &&
       !descriptor_resources_space && !descriptor_resources_1_1 && !root_cbv &&
       !root_constants && !root_srv && !direct_indexed && !cache_probe) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
   const bool needs_root_signature =
-      root_uav || descriptor_uav || descriptor_table_resources ||
+      root_uav || reserved_uav || reserved_srv || descriptor_uav || descriptor_table_resources ||
       direct_indexed || root_cbv || root_constants || root_srv;
   const bool needs_output = needs_root_signature;
 
@@ -81,6 +83,11 @@ int main(int argc, char **argv) {
   ID3D12Resource *input_buffer = nullptr;
   ID3D12Resource *output_buffer = nullptr;
   ID3D12Resource *readback_buffer = nullptr;
+  ID3D12Heap *reserved_heap = nullptr;
+  ID3D12Resource *reserved_buffer = nullptr;
+  ID3D12Heap *reserved_input_heap = nullptr;
+  ID3D12Resource *reserved_input = nullptr;
+  ID3D12Resource *reserved_upload = nullptr;
   ID3D12PipelineState *pso = nullptr;
   ID3D12PipelineState *cache_probe_pso = nullptr;
   ID3D12GraphicsCommandList *list = nullptr;
@@ -127,12 +134,12 @@ int main(int argc, char **argv) {
     goto cleanup;
 
   if (needs_root_signature) {
-    if (root_cbv || root_constants || root_srv) {
+    if (root_cbv || root_constants || root_srv || reserved_srv) {
       if (root_cbv) {
         root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
         root_parameters[0].Descriptor.ShaderRegister = 0;
         root_parameters[0].Descriptor.RegisterSpace = 0;
-      } else if (root_srv) {
+      } else if (root_srv || reserved_srv) {
         root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
         root_parameters[0].Descriptor.ShaderRegister = 0;
         root_parameters[0].Descriptor.RegisterSpace = 0;
@@ -235,7 +242,7 @@ int main(int argc, char **argv) {
           D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     }
 
-    if (root_cbv || root_constants || root_srv || descriptor_table_resources) {
+    if (root_cbv || root_constants || root_srv || reserved_srv || descriptor_table_resources) {
       upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
       upload_heap.CreationNodeMask = 1;
       upload_heap.VisibleNodeMask = 1;
@@ -275,6 +282,46 @@ int main(int argc, char **argv) {
                                          descriptor_cpu);
       }
     }
+    if (reserved_srv) {
+      if (input_buffer) {
+        input_buffer->Release();
+        input_buffer = nullptr;
+      }
+      D3D12_RESOURCE_DESC rd = input_desc;
+      rd.Width = 65536;
+      D3D12_HEAP_DESC hd = {};
+      hd.SizeInBytes = 65536;
+      hd.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+      hd.Properties.CreationNodeMask = 1;
+      hd.Properties.VisibleNodeMask = 1;
+      if (!CheckHR("CreateReservedInputHeap", device->CreateHeap(&hd, IID_PPV_ARGS(&reserved_input_heap))) ||
+          !CheckHR("CreateReservedInput", device->CreateReservedResource(&rd, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&reserved_input))))
+        goto cleanup;
+      if (!reserved_input->GetGPUVirtualAddress()) {
+        std::cout << "SKIP: reserved SRV has no shader-visible backing\n";
+        result = 77;
+        goto cleanup;
+      }
+      D3D12_TILED_RESOURCE_COORDINATE tc = {};
+      D3D12_TILE_REGION_SIZE tr = {}; tr.NumTiles = 1;
+      UINT ht = 0;
+      queue->UpdateTileMappings(reserved_input, 1, &tc, &tr, reserved_input_heap, 1, nullptr, &ht, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+      input_buffer = reserved_input;
+      input_desc = rd;
+      D3D12_HEAP_PROPERTIES uh = {};
+      uh.Type = D3D12_HEAP_TYPE_UPLOAD; uh.CreationNodeMask = 1; uh.VisibleNodeMask = 1;
+      D3D12_RESOURCE_DESC ud = rd; ud.Flags = D3D12_RESOURCE_FLAG_NONE;
+      if (!CheckHR("CreateReservedUpload", device->CreateCommittedResource(
+              &uh, D3D12_HEAP_FLAG_NONE, &ud, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+              IID_PPV_ARGS(&reserved_upload))))
+        goto cleanup;
+      void *up = nullptr;
+      if (!CheckHR("MapReservedUpload", reserved_upload->Map(0, nullptr, &up)))
+        goto cleanup;
+      std::memset(up, 0, 65536);
+      *reinterpret_cast<UINT *>(up) = 0x12345678;
+      reserved_upload->Unmap(0, nullptr);
+    }
 
     default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
     default_heap.CreationNodeMask = 1;
@@ -287,11 +334,40 @@ int main(int argc, char **argv) {
     output_desc.SampleDesc.Count = 1;
     output_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     output_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    if (!CheckHR("CreateOutputBuffer",
-                 device->CreateCommittedResource(
-                     &default_heap, D3D12_HEAP_FLAG_NONE, &output_desc,
-                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
-                     IID_PPV_ARGS(&output_buffer))))
+    if (reserved_uav) {
+      D3D12_RESOURCE_DESC reserved_desc = output_desc;
+      reserved_desc.Width = 65536;
+      reserved_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      D3D12_HEAP_DESC reserved_heap_desc = {};
+      reserved_heap_desc.SizeInBytes = 131072;
+      reserved_heap_desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+      reserved_heap_desc.Properties.CreationNodeMask = 1;
+      reserved_heap_desc.Properties.VisibleNodeMask = 1;
+      if (!CheckHR("CreateReservedHeap", device->CreateHeap(&reserved_heap_desc, IID_PPV_ARGS(&reserved_heap))) ||
+          !CheckHR("CreateReservedBuffer", device->CreateReservedResource(
+              &reserved_desc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&reserved_buffer))))
+        goto cleanup;
+      if (!reserved_buffer->GetGPUVirtualAddress()) {
+        std::cout << "SKIP: reserved UAV has no shader-visible backing\n";
+        result = 77;
+        goto cleanup;
+      }
+      D3D12_TILED_RESOURCE_COORDINATE coord = {};
+      D3D12_TILE_REGION_SIZE region = {};
+      region.NumTiles = 1;
+      UINT heap_tile = 1;
+      queue->UpdateTileMappings(reserved_buffer, 1, &coord, &region, reserved_heap, 1, nullptr, &heap_tile, nullptr,
+                                D3D12_TILE_MAPPING_FLAG_NONE);
+      // Exercise a remap before shader execution; descriptors keep the same GPU VA.
+      heap_tile = 0;
+      queue->UpdateTileMappings(reserved_buffer, 1, &coord, &region, reserved_heap, 1, nullptr, &heap_tile, nullptr,
+                                D3D12_TILE_MAPPING_FLAG_NONE);
+      output_buffer = reserved_buffer;
+    } else if (!CheckHR("CreateOutputBuffer",
+                        device->CreateCommittedResource(
+                            &default_heap, D3D12_HEAP_FLAG_NONE, &output_desc,
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                            IID_PPV_ARGS(&output_buffer))))
       goto cleanup;
 
     if (descriptor_uav || descriptor_table_resources || direct_indexed) {
@@ -308,6 +384,8 @@ int main(int argc, char **argv) {
 
     readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
     readback_heap.CreationNodeMask = 1;
+    if (reserved_uav)
+      output_desc.Width = 65536;
     readback_heap.VisibleNodeMask = 1;
     output_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
     if (!CheckHR("CreateReadbackBuffer",
@@ -346,7 +424,7 @@ int main(int argc, char **argv) {
       list->SetComputeRoot32BitConstants(0, 1, &input_value, 0);
       list->SetComputeRootUnorderedAccessView(
           1, output_buffer->GetGPUVirtualAddress());
-    } else if (root_srv) {
+    } else if (root_srv || reserved_srv) {
       list->SetComputeRootShaderResourceView(
           0, input_buffer->GetGPUVirtualAddress());
       list->SetComputeRootUnorderedAccessView(
@@ -369,12 +447,33 @@ int main(int argc, char **argv) {
           0, descriptor_heap->GetGPUDescriptorHandleForHeapStart());
     }
   }
+  if (reserved_srv) {
+    D3D12_RESOURCE_BARRIER rb = {};
+    rb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    rb.Transition.pResource = reserved_input;
+    rb.Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    rb.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    rb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list->ResourceBarrier(1, &rb);
+    D3D12_TILED_RESOURCE_COORDINATE tc = {};
+    D3D12_TILE_REGION_SIZE tr = {}; tr.NumTiles = 1;
+    list->CopyTiles(reserved_input, &tc, &tr, reserved_upload, 0, D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
+    rb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    rb.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    list->ResourceBarrier(1, &rb);
+  }
   list->Dispatch(1, 1, 1);
   if (needs_output) {
     uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     uav_barrier.UAV.pResource = output_buffer;
     list->ResourceBarrier(1, &uav_barrier);
-    list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0, sizeof(UINT));
+    if (reserved_uav) {
+      D3D12_TILED_RESOURCE_COORDINATE coord = {};
+      D3D12_TILE_REGION_SIZE region = {}; region.NumTiles = 1;
+      list->CopyTiles(output_buffer, &coord, &region, readback_buffer, 0, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
+    } else {
+      list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0, sizeof(UINT));
+    }
   }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
@@ -392,6 +491,12 @@ int main(int argc, char **argv) {
     goto cleanup;
   WaitForSingleObject(event, INFINITE);
 
+  if (reserved_uav) {
+    D3D12_TILED_RESOURCE_COORDINATE coord = {};
+    D3D12_TILE_REGION_SIZE region = {}; region.NumTiles = 1;
+    D3D12_TILE_RANGE_FLAGS null_flags = D3D12_TILE_RANGE_FLAG_NULL;
+    queue->UpdateTileMappings(output_buffer, 1, &coord, &region, nullptr, 1, &null_flags, nullptr, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+  }
   if (needs_output) {
     if (!CheckHR("MapReadback",
                  readback_buffer->Map(0, nullptr,
@@ -399,22 +504,26 @@ int main(int argc, char **argv) {
       goto cleanup;
     output_value = *mapped;
     readback_buffer->Unmap(0, nullptr);
-    const UINT expected_value = direct_indexed               ? 4321
-                                : descriptor_table_resources ? input_value * 2
-                                : root_cbv || root_constants || root_srv
-                                    ? input_value
-                                    : 1234;
+    UINT expected_value = 1234;
+    if (reserved_srv)
+      expected_value = 0x12345678;
+    else if (direct_indexed)
+      expected_value = 4321;
+    else if (descriptor_table_resources)
+      expected_value = input_value * 2;
+    else if (root_cbv || root_constants || root_srv)
+      expected_value = input_value;
     if (output_value != expected_value) {
       std::cerr << "root parameter readback mismatch: " << output_value << "\n";
       goto cleanup;
     }
     std::cout << (is_dxbc ? "DXBC" : "DXIL") << " cs_6_0 "
               << (root_cbv                     ? "root CBV"
-                  : root_constants             ? "root constants"
-                  : root_srv                   ? "root SRV"
-                  : direct_indexed             ? "direct indexed"
-                  : descriptor_table_resources ? "descriptor resources"
-                                               : "root UAV")
+                  : root_constants              ? "root constants"
+                  : (root_srv || reserved_srv) ? "root SRV"
+                  : direct_indexed              ? "direct indexed"
+                  : descriptor_table_resources  ? "descriptor resources"
+                                                : "root UAV")
               << " readback passed: " << output_value << "\n";
   } else {
     std::cout << (is_dxbc ? "DXBC" : "DXIL") << " cs_6_0 no-resource Dispatch passed\n";
@@ -434,10 +543,20 @@ cleanup:
     cache_probe_pso->Release();
   if (readback_buffer)
     readback_buffer->Release();
-  if (input_buffer)
+  if (input_buffer && input_buffer != reserved_input)
     input_buffer->Release();
-  if (output_buffer)
+  if (output_buffer && output_buffer != reserved_buffer)
     output_buffer->Release();
+  if (reserved_buffer)
+    reserved_buffer->Release();
+  if (reserved_heap)
+    reserved_heap->Release();
+  if (reserved_input)
+    reserved_input->Release();
+  if (reserved_upload)
+    reserved_upload->Release();
+  if (reserved_input_heap)
+    reserved_input_heap->Release();
   if (descriptor_heap)
     descriptor_heap->Release();
   if (root_signature)

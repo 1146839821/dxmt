@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <vector>
 
 namespace {
 
@@ -2274,7 +2275,7 @@ int main() {
 
   D3D12_DESCRIPTOR_HEAP_DESC shader_heap_desc = {};
   shader_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-  shader_heap_desc.NumDescriptors = 3;
+  shader_heap_desc.NumDescriptors = 4;
   D3D12_CPU_DESCRIPTOR_HANDLE shader_handle = {};
   if (!CheckHR("CreateShaderHeap",
                device->CreateDescriptorHeap(&shader_heap_desc,
@@ -2282,6 +2283,30 @@ int main() {
     cleanup();
     return 1;
   }
+  // Exercise embedded CPU descriptor-handle registration beyond the historical
+  // 128-heap limit. Handles must remain decodable while all heaps are alive.
+  std::vector<ID3D12DescriptorHeap *> registry_stress_heaps;
+  registry_stress_heaps.reserve(256);
+  for (UINT i = 0; i < 256; i++) {
+    ID3D12DescriptorHeap *stress_heap = nullptr;
+    if (FAILED(device->CreateDescriptorHeap(&shader_heap_desc, IID_PPV_ARGS(&stress_heap)))) {
+      for (auto *heap : registry_stress_heaps)
+        heap->Release();
+      cleanup();
+      return 1;
+    }
+    registry_stress_heaps.push_back(stress_heap);
+    auto stress_handle = stress_heap->GetCPUDescriptorHandleForHeapStart();
+    if (!stress_handle.ptr) {
+      std::cerr << "descriptor heap registry stress handle lookup failed\n";
+      for (auto *heap : registry_stress_heaps)
+        heap->Release();
+      cleanup();
+      return 1;
+    }
+  }
+  for (auto *heap : registry_stress_heaps)
+    heap->Release();
   shader_handle = shader_heap->GetCPUDescriptorHandleForHeapStart();
   D3D12_SHADER_RESOURCE_VIEW_DESC null_srv = {};
   null_srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -2302,6 +2327,19 @@ int main() {
   depth_srv.Format = DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
   depth_srv.Texture2D.PlaneSlice = 1;
   device->CreateShaderResourceView(depth_texture, &depth_srv, depth_srv_handle);
+  // Reserved buffer SRV must be accepted when native sparse backing exists and must
+  // fail explicitly (without dereferencing a null backing) on unsupported runtimes.
+  D3D12_CPU_DESCRIPTOR_HANDLE reserved_srv_handle = shader_handle;
+  reserved_srv_handle.ptr += 3 * device->GetDescriptorHandleIncrementSize(
+      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+  D3D12_SHADER_RESOURCE_VIEW_DESC reserved_srv = {};
+  reserved_srv.Format = DXGI_FORMAT_R32_TYPELESS;
+  reserved_srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+  reserved_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  reserved_srv.Buffer.FirstElement = 0;
+  reserved_srv.Buffer.NumElements = static_cast<UINT>(committed1_desc.Width / sizeof(UINT));
+  reserved_srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+  device->CreateShaderResourceView(reserved_resource, &reserved_srv, reserved_srv_handle);
   depth_srv.Texture2D.PlaneSlice = 2;
   device->CreateShaderResourceView(depth_texture, &depth_srv, depth_srv_handle);
   texture3d_uav_handle = shader_handle;
