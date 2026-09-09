@@ -622,6 +622,29 @@ int main() {
       IUnknown *queue1 = reinterpret_cast<IUnknown *>(command_queue1);
       Release(queue1);
     }
+
+    auto expect_invalid_queue1 = [&](const char *name, const D3D12_COMMAND_QUEUE_DESC &desc) {
+      void *invalid_queue = output_sentinel;
+      const HRESULT hr = device9->CreateCommandQueue1(
+          &desc, __uuidof(IUnknown), __uuidof(ID3D12CommandQueue), &invalid_queue
+      );
+      if (hr != E_INVALIDARG || invalid_queue != nullptr) {
+        std::cerr << name << " accepted invalid descriptor: hr=0x" << std::hex
+                  << static_cast<unsigned long>(hr) << " output=" << invalid_queue << std::dec << "\n";
+        if (invalid_queue != output_sentinel && invalid_queue)
+          reinterpret_cast<IUnknown *>(invalid_queue)->Release();
+        passed = false;
+      }
+    };
+    D3D12_COMMAND_QUEUE_DESC invalid_queue1 = queue1_desc;
+    invalid_queue1.Type = D3D12_COMMAND_LIST_TYPE_BUNDLE;
+    expect_invalid_queue1("CreateCommandQueue1(bundle)", invalid_queue1);
+    invalid_queue1 = queue1_desc;
+    invalid_queue1.NodeMask = 2;
+    expect_invalid_queue1("CreateCommandQueue1(node mask)", invalid_queue1);
+    invalid_queue1 = queue1_desc;
+    invalid_queue1.Flags = static_cast<D3D12_COMMAND_QUEUE_FLAGS>(0x8000);
+    expect_invalid_queue1("CreateCommandQueue1(flags)", invalid_queue1);
   }
   if (device->QueryInterface(IID_PPV_ARGS(&device10)) != S_OK || !device10) {
     std::cerr << "ID3D12Device10 vtable query failed\n";

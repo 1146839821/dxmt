@@ -79,6 +79,23 @@ EnhancedSplitMatches(const EnhancedSplitBarrierState &pending, const EnhancedSpl
          a.FirstPlane == b.FirstPlane && a.NumPlanes == b.NumPlanes;
 }
 
+HRESULT
+ValidateCommandQueueDesc(const D3D12_COMMAND_QUEUE_DESC *desc) {
+  if (!desc || (desc->NodeMask & ~1u))
+    return E_INVALIDARG;
+  switch (desc->Type) {
+  case D3D12_COMMAND_LIST_TYPE_DIRECT:
+  case D3D12_COMMAND_LIST_TYPE_COMPUTE:
+  case D3D12_COMMAND_LIST_TYPE_COPY:
+    break;
+  default:
+    return E_INVALIDARG;
+  }
+  if (static_cast<UINT>(desc->Flags) & ~static_cast<UINT>(D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT))
+    return E_INVALIDARG;
+  return S_OK;
+}
+
 } // namespace
 
 bool
@@ -486,19 +503,9 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   CreateCommandQueue(const D3D12_COMMAND_QUEUE_DESC *pDesc, REFIID riid, void **ppCommandQueue) {
-    if (!pDesc)
+    if (FAILED(ValidateCommandQueueDesc(pDesc)))
       return E_INVALIDARG;
-    if (pDesc->NodeMask & ~1u)
-      return E_INVALIDARG;
-    switch (pDesc->Type) {
-    case D3D12_COMMAND_LIST_TYPE_DIRECT:
-    case D3D12_COMMAND_LIST_TYPE_COMPUTE:
-    case D3D12_COMMAND_LIST_TYPE_COPY:
-      break;
-    default:
-      return E_INVALIDARG;
-    }
-    if (pDesc->Flags)
+    if (pDesc->Flags & D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT)
       WARN("CreateCommandQueue: flags ignored: ", pDesc->Flags);
     return dxmt::CreateCommandQueue(this, pDesc, riid, ppCommandQueue);
   };
@@ -2117,8 +2124,10 @@ public:
       const D3D12_COMMAND_QUEUE_DESC *pDesc, REFIID CreatorID, REFIID riid, void **ppCommandQueue
   ) {
     InitReturnPtr(ppCommandQueue);
-    if (!pDesc)
+    if (FAILED(ValidateCommandQueueDesc(pDesc)))
       return E_INVALIDARG;
+    if (pDesc->Flags & D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT)
+      WARN("CreateCommandQueue1: flags ignored: ", pDesc->Flags);
     return dxmt::CreateCommandQueue(this, pDesc, riid, ppCommandQueue);
   }
 
