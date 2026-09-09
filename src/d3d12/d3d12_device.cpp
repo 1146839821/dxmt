@@ -503,6 +503,7 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   CreateCommandQueue(const D3D12_COMMAND_QUEUE_DESC *pDesc, REFIID riid, void **ppCommandQueue) {
+    InitReturnPtr(ppCommandQueue);
     if (FAILED(ValidateCommandQueueDesc(pDesc)))
       return E_INVALIDARG;
     if (pDesc->Flags & D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT)

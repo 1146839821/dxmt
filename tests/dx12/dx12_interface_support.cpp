@@ -102,6 +102,20 @@ int main() {
     return 1;
   }
 
+  D3D12_COMMAND_QUEUE_DESC invalid_queue_desc = {};
+  invalid_queue_desc.Type = D3D12_COMMAND_LIST_TYPE_BUNDLE;
+  void *invalid_queue = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+  const HRESULT invalid_queue_hr = device->CreateCommandQueue(
+      &invalid_queue_desc, __uuidof(ID3D12CommandQueue), &invalid_queue
+  );
+  if (invalid_queue_hr != E_INVALIDARG || invalid_queue != nullptr) {
+    std::cerr << "CreateCommandQueue did not clear output for an invalid descriptor: hr=0x" << std::hex
+              << static_cast<unsigned long>(invalid_queue_hr) << " output=" << invalid_queue << std::dec << "\n";
+    if (invalid_queue && invalid_queue != reinterpret_cast<void *>(static_cast<uintptr_t>(1)))
+      reinterpret_cast<IUnknown *>(invalid_queue)->Release();
+    passed = false;
+  }
+
   passed &= ExpectQuery<ID3D12Device1>(device, "ID3D12Device1", S_OK);
   passed &= ExpectQuery<ID3D12Device2>(device, "ID3D12Device2", S_OK);
   passed &= ExpectQuery<ID3D12Device3>(device, "ID3D12Device3", S_OK);
