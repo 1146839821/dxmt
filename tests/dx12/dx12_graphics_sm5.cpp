@@ -86,6 +86,7 @@ struct ShaderSet {
   std::vector<uint8_t> root_vertex;
   std::vector<uint8_t> geometry;
   std::vector<uint8_t> geometry_root_cbv;
+  std::vector<uint8_t> geometry_root_srv_uav;
   std::vector<uint8_t> adjacency_geometry;
   std::vector<uint8_t> pixel;
 };
@@ -168,6 +169,26 @@ void gs_main(triangle VSOutput input[3], inout TriangleStream<VSOutput> output) 
   }
 }
 )";
+  static constexpr char geometry_root_srv_uav_source[] = R"(
+StructuredBuffer<float4> root_input : register(t0);
+RWStructuredBuffer<float4> root_output : register(u0);
+
+struct VSOutput {
+  float4 position : SV_Position;
+  float4 color : COLOR;
+};
+
+[maxvertexcount(3)]
+void gs_main(triangle VSOutput input[3], inout TriangleStream<VSOutput> output) {
+  const float4 root_color = root_input[0];
+  root_output[0] = root_color;
+  for (uint i = 0; i < 3; ++i) {
+    VSOutput vertex = input[i];
+    vertex.color = root_color;
+    output.Append(vertex);
+  }
+}
+)";
   static constexpr char geometry_source[] = R"(
 struct VSOutput {
   float4 position : SV_Position;
@@ -217,6 +238,9 @@ float4 ps_main(PSInput input) : SV_Target {
                        shaders.geometry) &&
          CompileShader(compile_shader, geometry_root_cbv_source, "dx12_graphics_sm5_geometry_root_cbv_gs.hlsl", "gs_main",
                        "gs_5_0", shaders.geometry_root_cbv) &&
+         CompileShader(compile_shader, geometry_root_srv_uav_source,
+                       "dx12_graphics_sm5_geometry_root_srv_uav_gs.hlsl", "gs_main", "gs_5_0",
+                       shaders.geometry_root_srv_uav) &&
          CompileShader(compile_shader, adjacency_geometry_source, "dx12_graphics_sm5_adj_gs.hlsl", "gs_main",
                        "gs_5_0", shaders.adjacency_geometry) &&
          CompileShader(compile_shader, pixel_source, "dx12_graphics_sm5_ps.hlsl", "ps_main", "ps_5_0", shaders.pixel);
@@ -234,6 +258,7 @@ struct TestCase {
   bool no_input = false;
   bool geometry_root_cbv = false;
   bool zero_index_view = false;
+  bool geometry_root_srv_uav = false;
 };
 
 bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &test) {
@@ -283,6 +308,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   ID3D12Resource *vertex_buffer = nullptr;
   ID3D12Resource *index_buffer = nullptr;
   ID3D12Resource *root_data = nullptr;
+  ID3D12Resource *root_uav_data = nullptr;
   ID3D12Resource *indirect_args = nullptr;
   ID3D12CommandSignature *command_signature = nullptr;
   ID3D12Resource *readback = nullptr;
@@ -293,6 +319,8 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   void *mapped_root = nullptr;
   void *mapped_indirect = nullptr;
   BYTE *mapped_readback = nullptr;
+  ID3D12Resource *uav_readback = nullptr;
+  void *mapped_uav_readback = nullptr;
 
   auto cleanup = [&] {
     if (mapped_readback)
@@ -301,6 +329,8 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
       indirect_args->Unmap(0, nullptr);
     if (mapped_root)
       root_data->Unmap(0, nullptr);
+    if (mapped_uav_readback)
+      uav_readback->Unmap(0, nullptr);
     if (mapped_index)
       index_buffer->Unmap(0, nullptr);
     if (mapped_vertex)
@@ -311,6 +341,8 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     Release(readback);
     Release(command_signature);
     Release(indirect_args);
+    Release(uav_readback);
+    Release(root_uav_data);
     Release(root_data);
     Release(index_buffer);
     Release(vertex_buffer);
@@ -337,15 +369,26 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
                device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))))
     return fail("queue setup failed");
 
-  D3D12_ROOT_PARAMETER root_parameter = {};
+  D3D12_ROOT_PARAMETER root_parameters[2] = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
   if (test.root_cbv || test.geometry_root_cbv) {
-    root_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    root_parameter.Descriptor.ShaderRegister = 0;
-    root_parameter.ShaderVisibility = test.geometry_root_cbv ? D3D12_SHADER_VISIBILITY_GEOMETRY
-                                                              : D3D12_SHADER_VISIBILITY_VERTEX;
+    root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    root_parameters[0].Descriptor.ShaderRegister = 0;
+    root_parameters[0].ShaderVisibility = test.geometry_root_cbv ? D3D12_SHADER_VISIBILITY_GEOMETRY
+                                                                   : D3D12_SHADER_VISIBILITY_VERTEX;
     root_desc.NumParameters = 1;
-    root_desc.pParameters = &root_parameter;
+    root_desc.pParameters = root_parameters;
+  } else if (test.geometry_root_srv_uav) {
+    root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    root_parameters[0].Descriptor.ShaderRegister = 0;
+    root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_GEOMETRY;
+    root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    root_parameters[1].Descriptor.ShaderRegister = 0;
+    root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_GEOMETRY;
+    root_desc.NumParameters = 2;
+    root_desc.pParameters = root_parameters;
+  }
+  if (root_desc.NumParameters) {
     if (!CheckHR("D3D12SerializeRootSignature",
                  D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob, &root_error))) {
       if (root_error)
@@ -358,13 +401,14 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
       return fail("root signature creation failed");
   }
 
-  const auto &vertex_shader = test.geometry_root_cbv ? shaders.vertex
+  const auto &vertex_shader = test.geometry_root_cbv || test.geometry_root_srv_uav ? shaders.vertex
                              : test.root_cbv           ? shaders.root_vertex
                              : test.no_input            ? shaders.no_input_vertex
                                                         : shaders.vertex;
-  const auto &geometry_shader = test.geometry_root_cbv ? shaders.geometry_root_cbv
-                              : test.adjacency          ? shaders.adjacency_geometry
-                                                        : shaders.geometry;
+  const auto &geometry_shader = test.geometry_root_cbv       ? shaders.geometry_root_cbv
+                              : test.geometry_root_srv_uav ? shaders.geometry_root_srv_uav
+                              : test.adjacency             ? shaders.adjacency_geometry
+                                                           : shaders.geometry;
   D3D12_INPUT_ELEMENT_DESC input_layout[] = {
       {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
       {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -444,7 +488,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     index_view.Format = test.index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
   }
 
-  if (test.root_cbv || test.geometry_root_cbv) {
+  if (test.root_cbv || test.geometry_root_cbv || test.geometry_root_srv_uav) {
     auto root_desc_buffer = BufferDescription(256);
     if (!CheckHR("CreateRootData",
                  device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &root_desc_buffer,
@@ -456,6 +500,16 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     std::memcpy(mapped_root, root_color, sizeof(root_color));
     root_data->Unmap(0, nullptr);
     mapped_root = nullptr;
+  }
+
+  if (test.geometry_root_srv_uav) {
+    auto root_uav_desc = BufferDescription(256);
+    root_uav_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (!CheckHR("CreateRootUAVData",
+                 device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &root_uav_desc,
+                                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                 IID_PPV_ARGS(&root_uav_data))))
+      return fail("root UAV setup failed");
   }
 
   if (test.indirect) {
@@ -504,7 +558,12 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   list->SetPipelineState(pso);
   if (root_signature) {
     list->SetGraphicsRootSignature(root_signature);
-    list->SetGraphicsRootConstantBufferView(0, root_data->GetGPUVirtualAddress());
+    if (test.geometry_root_srv_uav) {
+      list->SetGraphicsRootShaderResourceView(0, root_data->GetGPUVirtualAddress());
+      list->SetGraphicsRootUnorderedAccessView(1, root_uav_data->GetGPUVirtualAddress());
+    } else {
+      list->SetGraphicsRootConstantBufferView(0, root_data->GetGPUVirtualAddress());
+    }
   }
   list->IASetPrimitiveTopology(test.topology);
   if (!test.no_input)
@@ -536,6 +595,23 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                IID_PPV_ARGS(&readback))))
     return fail("readback creation failed");
+
+  if (test.geometry_root_srv_uav) {
+    auto uav_readback_desc = BufferDescription(256);
+    if (!CheckHR("CreateRootUAVReadback",
+                 device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &uav_readback_desc,
+                                                 D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                 IID_PPV_ARGS(&uav_readback))))
+      return fail("root UAV readback setup failed");
+    D3D12_RESOURCE_BARRIER uav_barrier = {};
+    uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    uav_barrier.Transition.pResource = root_uav_data;
+    uav_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    uav_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    uav_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list->ResourceBarrier(1, &uav_barrier);
+    list->CopyBufferRegion(uav_readback, 0, root_uav_data, 0, sizeof(float) * 4);
+  }
 
   D3D12_RESOURCE_BARRIER barrier = {};
   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -571,6 +647,18 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   const UINT pixel = *reinterpret_cast<const UINT *>(mapped_readback);
   readback->Unmap(0, nullptr);
   mapped_readback = nullptr;
+  if (test.geometry_root_srv_uav) {
+    if (!CheckHR("MapRootUAVReadback", uav_readback->Map(0, nullptr, &mapped_uav_readback)))
+      return fail("root UAV readback mapping failed");
+    static constexpr uint32_t expected_root_uav[] = {0x00000000u, 0x3f800000u, 0x00000000u, 0x3f800000u};
+    if (std::memcmp(mapped_uav_readback, expected_root_uav, sizeof(expected_root_uav)) != 0) {
+      uav_readback->Unmap(0, nullptr);
+      mapped_uav_readback = nullptr;
+      return fail("root UAV data mismatch");
+    }
+    uav_readback->Unmap(0, nullptr);
+    mapped_uav_readback = nullptr;
+  }
   if ((pixel & 0x00ffffffu) != test.expected_rgb) {
     std::cerr << "DXBC SM5 " << test.name << ": readback mismatch: 0x" << std::hex << pixel
               << " (expected 0x" << test.expected_rgb << ")" << std::dec << "\n";
@@ -604,6 +692,8 @@ int main(int argc, char **argv) {
        false},
       {"geometry-root-cbv", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false, 0x0000ff00u,
        false, true},
+      {"geometry-root-srv-uav", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x0000ff00u, false, false, false, true},
   };
 
   std::vector<const TestCase *> selected;
