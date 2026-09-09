@@ -22,6 +22,7 @@
 #include "dxmt_command_constants.hpp"
 #include "dxmt_format.hpp"
 #include <atomic>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -643,6 +644,11 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   MTLD3D12RootSignature *msc_resource_use_root_signature_ = nullptr;
   std::vector<MSCResourceUseTable> msc_resource_use_tables_;
   std::unordered_set<obj_handle_t> indirect_resources_used_;
+  struct ResourceUseMask {
+    WMTResourceUsage usage = static_cast<WMTResourceUsage>(0);
+    WMTRenderStages stages = static_cast<WMTRenderStages>(0);
+  };
+  std::unordered_map<obj_handle_t, ResourceUseMask> resource_use_masks_;
 
   Com<MTLD3D12ComputePipelineState, false> pso_compute_;
   Com<MTLD3D12RootSignature, false> rootsig_compute_;
@@ -661,26 +667,9 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   };
   std::vector<ResourceStateTransition> resource_state_transitions_;
 
-  enum class EnhancedSplitBarrierType : uint8_t {
-    Global,
-    Buffer,
-    Texture,
-  };
-
-  struct EnhancedSplitBarrier {
-    EnhancedSplitBarrierType type;
-    MTLD3D12Resource *resource;
-    D3D12_BARRIER_ACCESS access_before;
-    D3D12_BARRIER_ACCESS access_after;
-    D3D12_BARRIER_LAYOUT layout_before;
-    D3D12_BARRIER_LAYOUT layout_after;
-    D3D12_BARRIER_SUBRESOURCE_RANGE subresources;
-    UINT64 offset;
-    UINT64 size;
-    D3D12_RESOURCE_STATES before_state;
-    D3D12_RESOURCE_STATES after_state;
-  };
-  std::vector<EnhancedSplitBarrier> enhanced_split_barriers_;
+  using EnhancedSplitBarrier = EnhancedSplitBarrierState;
+  std::vector<EnhancedSplitBarrier> enhanced_split_begins_;
+  bool enhanced_split_submitted_ = false;
 
   FLOAT blend_factor_[4];
   UINT8 stencil_ref_;
@@ -690,6 +679,8 @@ public:
       MTLD3D12DeviceChild<MTLD3D12GraphicsCommandList>(pDevice), type_(type), recording_failed_(false) {}
 
   ~MTLD3D12GraphicsCommandListImpl() {
+    if (!enhanced_split_submitted_)
+      CancelEnhancedSplitBegins();
     if (allocator_ && encoder_count == std::numeric_limits<size_t>::max())
       allocator_->DiscardRecord();
   }
@@ -785,6 +776,16 @@ public:
     if (allocator_ != allocator)
       allocator_ = allocator;
 
+    // A closed list that was submitted may still own a split begin which is
+    // waiting for an end recorded on a different list. Keep that device-level
+    // state across Reset; discard only begins from a list that never reached
+    // queue submission.
+    if (!enhanced_split_submitted_)
+      CancelEnhancedSplitBegins();
+    else
+      enhanced_split_begins_.clear();
+    enhanced_split_submitted_ = false;
+
     pso_graphics_ = nullptr;
     airconv_geometry_pso_variant_ = UINT_MAX;
     pso_compute_ = nullptr;
@@ -794,6 +795,7 @@ public:
     msc_resource_use_root_signature_ = nullptr;
     msc_resource_use_tables_.clear();
     indirect_resources_used_.clear();
+    resource_use_masks_.clear();
     if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState)) {
       if (!pso->IsComputePipelineState)
         pso_graphics_ = static_cast<MTLD3D12GraphicsPipelineState *>(pInitialPipelineState);
@@ -869,7 +871,6 @@ public:
     pending_barrier_stages_after_ = (WMTRenderStages)0;
     pending_barrier_stages_before_ = (WMTRenderStages)0;
     resource_state_transitions_.clear();
-    enhanced_split_barriers_.clear();
 
     HRESULT hr = allocator_->StartRecord(&entry);
     if (SUCCEEDED(hr))
@@ -1091,12 +1092,16 @@ public:
     return recording_id_;
   }
 
+  void MarkSubmitted() final {
+    enhanced_split_submitted_ = true;
+  }
+
   HRESULT STDMETHODCALLTYPE
   Close() {
     if (encoder_count < std::numeric_limits<size_t>::max())
       return E_FAIL;
-    if (!enhanced_split_barriers_.empty())
-      FailRecording(__func__, "unmatched enhanced split barrier begin");
+    if (recording_failed_)
+      CancelEnhancedSplitBegins();
     HRESULT hr = allocator_->EndRecord(&encoder_count);
     if (FAILED(hr))
       return hr;
@@ -1155,8 +1160,10 @@ public:
 
   void STDMETHODCALLTYPE
   ClearState(ID3D12PipelineState *pPipelineState) {
-    if (!enhanced_split_barriers_.empty())
+    if (!enhanced_split_begins_.empty()) {
       FailRecording(__func__, "ClearState discarded an unmatched enhanced split barrier");
+      CancelEnhancedSplitBegins();
+    }
     allocator_->InvalidateCurrentPass();
 
     pso_graphics_ = nullptr;
@@ -1165,7 +1172,6 @@ public:
     predication_buffer_ = nullptr;
     predication_offset_ = 0;
     predication_op_ = D3D12_PREDICATION_OP_EQUAL_ZERO;
-    enhanced_split_barriers_.clear();
     rootsig_graphics_ = nullptr;
     rootsig_compute_ = nullptr;
     descriptor_heap_ = nullptr;
@@ -1302,23 +1308,37 @@ public:
 
   void
   EncodeRenderResourceUse(obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages stages) {
-    if (!resource || !indirect_resources_used_.insert(resource).second)
+    if (!resource)
       return;
+    auto &mask = resource_use_masks_[resource];
+    const auto merged_usage = static_cast<WMTResourceUsage>(mask.usage | usage);
+    const auto merged_stages = static_cast<WMTRenderStages>(mask.stages | stages);
+    if (merged_usage == mask.usage && merged_stages == mask.stages)
+      return;
+    mask.usage = merged_usage;
+    mask.stages = merged_stages;
+    indirect_resources_used_.insert(resource);
     auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
     cmd.type = WMTRenderCommandUseResource;
     cmd.resource = resource;
-    cmd.usage = usage;
-    cmd.stages = stages;
+    cmd.usage = merged_usage;
+    cmd.stages = merged_stages;
   }
 
   void
   EncodeComputeResourceUse(obj_handle_t resource, WMTResourceUsage usage) {
-    if (!resource || !indirect_resources_used_.insert(resource).second)
+    if (!resource)
       return;
+    auto &mask = resource_use_masks_[resource];
+    const auto merged_usage = static_cast<WMTResourceUsage>(mask.usage | usage);
+    if (merged_usage == mask.usage)
+      return;
+    mask.usage = merged_usage;
+    indirect_resources_used_.insert(resource);
     auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_useresource>();
     cmd.type = WMTComputeCommandUseResource;
     cmd.resource = resource;
-    cmd.usage = usage;
+    cmd.usage = merged_usage;
   }
 
   bool
@@ -1345,6 +1365,8 @@ public:
 
     allocator_->InvalidateCurrentPass();
     auto compute = allocator_->AllocatePass<ComputeEncoderData>();
+    indirect_resources_used_.clear();
+    resource_use_masks_.clear();
     compute->type = EncoderType::Compute;
     compute->cmd_head.type = WMTComputeCommandNop;
     compute->cmd_head.next.set(0);
@@ -1534,46 +1556,46 @@ public:
   EnhancedSplitTouchesResource(MTLD3D12Resource *resource) const {
     if (!resource)
       return false;
-    for (const auto &pending : enhanced_split_barriers_)
-      if (pending.type != EnhancedSplitBarrierType::Global && pending.resource == resource)
-        return true;
-    return false;
+    return device_->HasEnhancedSplitBarrier(resource);
+  }
+
+  void
+  CancelEnhancedSplitBegins() {
+    for (const auto &state : enhanced_split_begins_)
+      device_->CancelEnhancedSplitBarrier(state);
+    enhanced_split_begins_.clear();
   }
 
   bool
   BeginEnhancedSplit(const EnhancedSplitBarrier &state, WMTBarrierScope scope) {
-    for (const auto &pending : enhanced_split_barriers_) {
-      const bool same_scope = state.type == EnhancedSplitBarrierType::Global
-                                  ? pending.type == EnhancedSplitBarrierType::Global
-                                  : pending.resource == state.resource;
-      if (same_scope) {
-        FailRecording(__func__, "overlapping split barrier on the same resource scope");
-        return false;
-      }
+    if (!device_->BeginEnhancedSplitBarrier(state)) {
+      FailRecording(__func__, "overlapping split barrier on the same resource scope");
+      return false;
     }
 
     // End the producer encoder now. Metal's encoder boundary is the closest
     // equivalent to the begin half of a D3D12 split transition on this path.
     EncodeMemoryBarrier(scope, state.before_state, state.after_state);
     allocator_->InvalidateCurrentPass();
-    enhanced_split_barriers_.push_back(state);
+    enhanced_split_begins_.push_back(state);
     return true;
   }
 
   bool
   EndEnhancedSplit(const EnhancedSplitBarrier &candidate, WMTBarrierScope scope) {
-    auto it = std::find_if(
-        enhanced_split_barriers_.begin(), enhanced_split_barriers_.end(), [&](const auto &pending) {
-          return EnhancedSplitMatches(pending, candidate);
-        }
-    );
-    if (it == enhanced_split_barriers_.end()) {
+    EnhancedSplitBarrier state;
+    if (!device_->EndEnhancedSplitBarrier(candidate, state)) {
       FailRecording(__func__, "split barrier end has no matching begin");
       return false;
     }
 
-    const auto state = *it;
-    enhanced_split_barriers_.erase(it);
+    auto local = std::find_if(
+        enhanced_split_begins_.begin(), enhanced_split_begins_.end(), [&](const auto &pending) {
+          return EnhancedSplitMatches(pending, state);
+        }
+    );
+    if (local != enhanced_split_begins_.end())
+      enhanced_split_begins_.erase(local);
 
     // Make the consumer see the completed transition before starting its
     // encoder. Resource state bookkeeping is committed after GPU completion.
@@ -1910,6 +1932,7 @@ public:
       allocator_->InvalidateCurrentPass();
       auto render = allocator_->AllocatePass<RenderEncoderData>();
       indirect_resources_used_.clear();
+      resource_use_masks_.clear();
       render->type = EncoderType::Render;
       render->cmd_head.type = WMTRenderCommandNop;
       render->cmd_head.next.set(0);
@@ -2094,18 +2117,23 @@ public:
       EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
 
     if (airconv_render_residency_ && !use_msc && !SkipResourceBinding) {
+      const auto resource_stages = use_airconv_geometry
+                                       ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh |
+                                                                      WMTRenderStageFragment)
+                                       : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
       if (descriptor_heap_)
         EncodeRenderResourceUse(
             descriptor_heap_->GetDescriptorHeapBuffer().handle,
             WMTResourceUsageRead,
-            static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment)
+            resource_stages
         );
       if (sampler_heap_)
         EncodeRenderResourceUse(
             sampler_heap_->GetDescriptorHeapBuffer().handle,
             WMTResourceUsageRead,
-            static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment)
+            resource_stages
         );
+      EncodeAirconvRootResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, resource_stages, false);
       EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
       DEBUG(
           "[DEBUG-AIRCONV-RENDER] recording=", recording_id_, " encoder=",
@@ -2496,7 +2524,9 @@ public:
   }
 
   void
-  EncodeAirconvComputeRootResourceUses(MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64]) {
+  EncodeAirconvRootResourceUses(
+      MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], WMTRenderStages render_stages, bool compute
+  ) {
     if (!pRootSig || !pStaging || !pRootSig->ParameterSlots || !pRootSig->SlotQwordOffsets)
       return;
 
@@ -2521,12 +2551,14 @@ public:
       uint64_t buffer_offset = 0;
       auto allocation = device_->LookupBufferByVA(va, &buffer_offset);
       if (allocation) {
-        EncodeComputeResourceUse(
-            allocation->buffer().handle,
-            type == D3D12_ROOT_PARAMETER_TYPE_UAV
-                ? static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite)
-                : WMTResourceUsageRead
-        );
+        const auto usage = type == D3D12_ROOT_PARAMETER_TYPE_UAV
+                               ? static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite)
+                               : WMTResourceUsageRead;
+        if (compute) {
+          EncodeComputeResourceUse(allocation->buffer().handle, usage);
+        } else {
+          EncodeRenderResourceUse(allocation->buffer().handle, usage, render_stages);
+        }
       }
       if (trace_id < 128)
         DEBUG(
@@ -2697,26 +2729,18 @@ public:
       return;
 
     const auto stages =
-        pso_graphics_ && (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry)
+        pso_graphics_ &&
+        (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry || pso_graphics_->airconv_geometry)
             ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment)
             : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
     const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
     const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
 
     auto encode_resource = [&](obj_handle_t resource, WMTResourceUsage usage) {
-      if (!resource || !indirect_resources_used_.insert(resource).second)
-        return;
       if (compute) {
-        auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_useresource>();
-        cmd.type = WMTComputeCommandUseResource;
-        cmd.resource = resource;
-        cmd.usage = usage;
+        EncodeComputeResourceUse(resource, usage);
       } else {
-        auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
-        cmd.type = WMTRenderCommandUseResource;
-        cmd.resource = resource;
-        cmd.usage = usage;
-        cmd.stages = stages;
+        EncodeRenderResourceUse(resource, usage, stages);
       }
     };
 
@@ -2822,6 +2846,7 @@ public:
       allocator_->InvalidateCurrentPass();
       auto compute = allocator_->AllocatePass<ComputeEncoderData>();
       indirect_resources_used_.clear();
+      resource_use_masks_.clear();
       compute->type = EncoderType::Compute;
       compute->cmd_head.type = WMTComputeCommandNop;
       compute->cmd_head.next.set(0);
@@ -2932,7 +2957,7 @@ public:
         EncodeComputeResourceUse(descriptor_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
       if (sampler_heap_)
         EncodeComputeResourceUse(sampler_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
-      EncodeAirconvComputeRootResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_);
+      EncodeAirconvRootResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, (WMTRenderStages)0, true);
       EncodeMSCResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true);
     }
 

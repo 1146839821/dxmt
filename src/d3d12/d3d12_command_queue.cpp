@@ -987,7 +987,7 @@ public:
            }
            auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
            LabelEncoder(encoder, recording_id, data->id, "Render");
-           encoder.waitForFence(fence_, WMTRenderStageVertex);
+           encoder.waitForFence(fence_, data->use_geometry ? WMTRenderStagePreRaster : WMTRenderStageVertex);
           encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_, WMTRenderStageFragment);
           encoder.endEncoding();
@@ -1090,8 +1090,10 @@ public:
       AbortSubmission(submission);
       return;
     }
-    for (unsigned i = 0; i < Count; i++)
+    for (unsigned i = 0; i < Count; i++) {
+      static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->MarkSubmitted();
       static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->CommitResourceStates();
+    }
   };
 
   void STDMETHODCALLTYPE SetMarker(UINT metadata, const void *data, UINT size) {};

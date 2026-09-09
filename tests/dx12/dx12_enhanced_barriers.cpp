@@ -247,6 +247,68 @@ bool TestValidSplitBarriers(ID3D12Device *device, ID3D12Resource *buffer, ID3D12
   return split_passed && discard_passed;
 }
 
+bool TestCrossCommandListSplitBarriers(ID3D12Device *device, ID3D12Resource *buffer) {
+  Owned<ID3D12CommandQueue> queue;
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+  queue_desc.NodeMask = 1;
+  if (!CheckHR("CreateCommandQueue", device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue.ptr))))
+    return false;
+
+  Owned<ID3D12Fence> fence;
+  if (!CheckHR("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.ptr))))
+    return false;
+
+  Owned<ID3D12CommandAllocator> begin_allocator;
+  Owned<ID3D12GraphicsCommandList> begin_list;
+  Owned<ID3D12GraphicsCommandList7> begin_list7;
+  if (!CreateCommandList(device, begin_allocator, begin_list, begin_list7))
+    return false;
+
+  D3D12_BUFFER_BARRIER begin = {};
+  SetBuffer(
+      begin, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_SPLIT, D3D12_BARRIER_ACCESS_COPY_DEST,
+      D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, buffer, 0, UINT64_MAX
+  );
+  SubmitBarrier(begin_list7.ptr, D3D12_BARRIER_TYPE_BUFFER, &begin);
+  if (!CheckHR("cross-list begin Close", begin_list->Close()))
+    return false;
+
+  ID3D12CommandList *begin_submission = begin_list.ptr;
+  queue->ExecuteCommandLists(1, &begin_submission);
+  if (!CheckHR("cross-list Signal", queue->Signal(fence.ptr, 1)))
+    return false;
+  HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+  if (!event || !CheckHR("cross-list SetEventOnCompletion", fence->SetEventOnCompletion(1, event))) {
+    if (event)
+      CloseHandle(event);
+    return false;
+  }
+  const bool completed = WaitForSingleObject(event, 30000) == WAIT_OBJECT_0;
+  CloseHandle(event);
+  if (!completed) {
+    std::cerr << "cross-list begin submission did not complete\n";
+    return false;
+  }
+  if (!CheckHR("cross-list allocator Reset", begin_allocator->Reset()) ||
+      !CheckHR("cross-list begin list Reset", begin_list->Reset(begin_allocator.ptr, nullptr)))
+    return false;
+
+  Owned<ID3D12CommandAllocator> end_allocator;
+  Owned<ID3D12GraphicsCommandList> end_list;
+  Owned<ID3D12GraphicsCommandList7> end_list7;
+  if (!CreateCommandList(device, end_allocator, end_list, end_list7))
+    return false;
+
+  D3D12_BUFFER_BARRIER end = {};
+  SetBuffer(
+      end, D3D12_BARRIER_SYNC_SPLIT, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_COPY_DEST,
+      D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, buffer, 0, UINT64_MAX
+  );
+  SubmitBarrier(end_list7.ptr, D3D12_BARRIER_TYPE_BUFFER, &end);
+  return CheckHR("cross-list end Close", end_list->Close());
+}
+
 bool TestInvalidSplitBarriers(ID3D12Device *device, ID3D12Resource *buffer, ID3D12Resource *texture) {
   bool passed = true;
   passed &= ExpectClose(device, "unmatched split end", E_FAIL, [](auto *list) {
@@ -354,6 +416,7 @@ int main() {
     return 1;
 
   bool passed = TestValidSplitBarriers(device.ptr, buffer.ptr, texture.ptr);
+  passed &= TestCrossCommandListSplitBarriers(device.ptr, buffer.ptr);
   passed &= TestInvalidSplitBarriers(device.ptr, buffer.ptr, texture.ptr);
   if (!passed)
     return 1;

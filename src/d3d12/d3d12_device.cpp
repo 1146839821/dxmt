@@ -25,6 +25,7 @@
 #include "dxgi_interfaces.h"
 #include "dxmt_format.hpp"
 #include "log/log.hpp"
+#include <algorithm>
 #include <chrono>
 #include <map>
 #include <thread>
@@ -59,6 +60,23 @@ ConvertResourceDesc1WithLayout(
     D3D12_RESOURCE_STATES *initial_state
 ) {
   return ConvertResourceDesc1(source, destination) && ConvertBarrierLayout(source->Dimension, layout, initial_state);
+}
+
+bool
+EnhancedSplitMatches(const EnhancedSplitBarrierState &pending, const EnhancedSplitBarrierState &candidate) {
+  if (pending.type != candidate.type || pending.resource != candidate.resource ||
+      pending.access_before != candidate.access_before || pending.access_after != candidate.access_after ||
+      pending.layout_before != candidate.layout_before || pending.layout_after != candidate.layout_after)
+    return false;
+  if (pending.type == EnhancedSplitBarrierType::Buffer)
+    return pending.offset == candidate.offset && pending.size == candidate.size;
+  if (pending.type != EnhancedSplitBarrierType::Texture)
+    return true;
+  const auto &a = pending.subresources;
+  const auto &b = candidate.subresources;
+  return a.IndexOrFirstMipLevel == b.IndexOrFirstMipLevel && a.NumMipLevels == b.NumMipLevels &&
+         a.FirstArraySlice == b.FirstArraySlice && a.NumArraySlices == b.NumArraySlices &&
+         a.FirstPlane == b.FirstPlane && a.NumPlanes == b.NumPlanes;
 }
 
 } // namespace
@@ -273,13 +291,21 @@ class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
   std::map<uint64_t, BufferAllocation *> interval_map_;
   FormatCapabilityInspector format_capabilities_;
 
+  std::mutex enhanced_split_lock_;
+  std::vector<EnhancedSplitBarrierState> enhanced_split_barriers_;
+
   InternalCommandLibrary command_library;
 
 public:
   MTLD3D12DeviceImpl(IMTLDXGIAdapter *adapter, D3D_FEATURE_LEVEL feature_level)
       : adapter_(adapter), feature_level_(feature_level), command_library(adapter_->GetMTLDevice()) {}
 
-  ~MTLD3D12DeviceImpl() {}
+  ~MTLD3D12DeviceImpl() {
+    std::lock_guard<std::mutex> lock(enhanced_split_lock_);
+    for (const auto &state : enhanced_split_barriers_)
+      if (state.resource)
+        state.resource->ReleasePrivate();
+  }
 
   HRESULT
   Initialize() {
@@ -302,6 +328,79 @@ public:
   GetFeatureLevel() {
     return feature_level_;
   };
+
+  bool
+  BeginEnhancedSplitBarrier(const EnhancedSplitBarrierState &state) override {
+    if (state.type != EnhancedSplitBarrierType::Global && !state.resource)
+      return false;
+
+    std::lock_guard<std::mutex> lock(enhanced_split_lock_);
+    for (const auto &pending : enhanced_split_barriers_) {
+      const bool same_scope = state.type == EnhancedSplitBarrierType::Global
+                                  ? pending.type == EnhancedSplitBarrierType::Global
+                                  : pending.resource == state.resource;
+      if (same_scope)
+        return false;
+    }
+
+    if (state.resource)
+      state.resource->AddRefPrivate();
+    enhanced_split_barriers_.push_back(state);
+    return true;
+  }
+
+  bool
+  EndEnhancedSplitBarrier(
+      const EnhancedSplitBarrierState &candidate, EnhancedSplitBarrierState &matched
+  ) override {
+    {
+      std::lock_guard<std::mutex> lock(enhanced_split_lock_);
+      auto it = std::find_if(
+          enhanced_split_barriers_.begin(), enhanced_split_barriers_.end(), [&](const auto &pending) {
+            return EnhancedSplitMatches(pending, candidate);
+          }
+      );
+      if (it == enhanced_split_barriers_.end())
+        return false;
+      matched = *it;
+      enhanced_split_barriers_.erase(it);
+    }
+    if (matched.resource)
+      matched.resource->ReleasePrivate();
+    return true;
+  }
+
+  bool
+  CancelEnhancedSplitBarrier(const EnhancedSplitBarrierState &candidate) override {
+    EnhancedSplitBarrierState removed;
+    {
+      std::lock_guard<std::mutex> lock(enhanced_split_lock_);
+      auto it = std::find_if(
+          enhanced_split_barriers_.begin(), enhanced_split_barriers_.end(), [&](const auto &pending) {
+            return EnhancedSplitMatches(pending, candidate);
+          }
+      );
+      if (it == enhanced_split_barriers_.end())
+        return false;
+      removed = *it;
+      enhanced_split_barriers_.erase(it);
+    }
+    if (removed.resource)
+      removed.resource->ReleasePrivate();
+    return true;
+  }
+
+  bool
+  HasEnhancedSplitBarrier(MTLD3D12Resource *resource) override {
+    if (!resource)
+      return false;
+    std::lock_guard<std::mutex> lock(enhanced_split_lock_);
+    return std::any_of(
+        enhanced_split_barriers_.begin(), enhanced_split_barriers_.end(), [&](const auto &pending) {
+          return pending.type != EnhancedSplitBarrierType::Global && pending.resource == resource;
+        }
+    );
+  }
 
   HRESULT
   GetAdapter(REFIID riid, void **ppAdapter) {

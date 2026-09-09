@@ -32,6 +32,8 @@
 #include "d3d12_shader_converter.hpp"
 #include "d3d12_pipeline_persistence.hpp"
 #include "dxmt_texture.hpp"
+#include <cstdint>
+#include <mutex>
 #include "log/log.hpp"
 #include <vector>
 
@@ -58,6 +60,7 @@ public:
 
   virtual MTLD3D12CommandAllocator *GetAllocator() = 0;
   virtual uint64_t GetRecordingId() const = 0;
+  virtual void MarkSubmitted() = 0;
   virtual void CommitResourceStates() = 0;
 };
 
@@ -225,6 +228,26 @@ public:
   }
 };
 
+enum class EnhancedSplitBarrierType : uint8_t {
+  Global,
+  Buffer,
+  Texture,
+};
+
+struct EnhancedSplitBarrierState {
+  EnhancedSplitBarrierType type = EnhancedSplitBarrierType::Global;
+  MTLD3D12Resource *resource = nullptr;
+  D3D12_BARRIER_ACCESS access_before = D3D12_BARRIER_ACCESS_NO_ACCESS;
+  D3D12_BARRIER_ACCESS access_after = D3D12_BARRIER_ACCESS_NO_ACCESS;
+  D3D12_BARRIER_LAYOUT layout_before = D3D12_BARRIER_LAYOUT_COMMON;
+  D3D12_BARRIER_LAYOUT layout_after = D3D12_BARRIER_LAYOUT_COMMON;
+  D3D12_BARRIER_SUBRESOURCE_RANGE subresources = {};
+  UINT64 offset = 0;
+  UINT64 size = 0;
+  D3D12_RESOURCE_STATES before_state = D3D12_RESOURCE_STATE_COMMON;
+  D3D12_RESOURCE_STATES after_state = D3D12_RESOURCE_STATE_COMMON;
+};
+
 class MTLD3D12Heap : public ID3D12Heap {
 public:
   virtual WMT::Heap GetMetalHeap() = 0;
@@ -346,6 +369,13 @@ public:
   virtual HRESULT UnregisterResidencyAndVA(BufferAllocation *allocation) = 0;
 
   virtual BufferAllocation *LookupBufferByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) = 0;
+
+  virtual bool BeginEnhancedSplitBarrier(const EnhancedSplitBarrierState &state) = 0;
+  virtual bool EndEnhancedSplitBarrier(
+      const EnhancedSplitBarrierState &candidate, EnhancedSplitBarrierState &matched
+  ) = 0;
+  virtual bool CancelEnhancedSplitBarrier(const EnhancedSplitBarrierState &candidate) = 0;
+  virtual bool HasEnhancedSplitBarrier(MTLD3D12Resource *resource) = 0;
 
   virtual InternalCommandLibrary& GetLib() = 0;
 
