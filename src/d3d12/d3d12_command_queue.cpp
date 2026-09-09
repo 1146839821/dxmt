@@ -462,7 +462,11 @@ public:
         region_count, region_start_coordinates, region_sizes, heap, range_count, range_flags, heap_range_offsets,
         range_tile_counts, flags, sparse_mapping_queue_
     );
-    if (sparse_mapping_queue_ && SUCCEEDED(hr))
+    // BeginSparseMapping has already queued the main-queue handoff and the
+    // mapping queue wait. Always close that event pair, including when the
+    // resource-side validation rejects the update, so a failed API call cannot
+    // leave an unsignaled sparse-queue wait behind.
+    if (sparse_mapping_queue_)
       EndSparseMapping(main_queue_signal);
     if (FAILED(hr))
       WARN("D3D12 UpdateTileMappings failed with HRESULT 0x", std::hex, hr, std::dec);
@@ -490,7 +494,9 @@ public:
         static_cast<MTLD3D12Resource *>(src_resource), dst_region_start_coordinate, src_region_start_coordinate,
         region_size, flags, sparse_mapping_queue_
     );
-    if (sparse_mapping_queue_ && SUCCEEDED(hr))
+    // See UpdateTileMappings above: a rejected copy must still release the
+    // sparse queue handoff established by BeginSparseMapping.
+    if (sparse_mapping_queue_)
       EndSparseMapping(main_queue_signal);
     if (FAILED(hr))
       WARN("D3D12 CopyTileMappings failed with HRESULT 0x", std::hex, hr, std::dec);
