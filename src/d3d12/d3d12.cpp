@@ -101,6 +101,9 @@ D3D12CreateDevice(IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REF
 
 extern "C" HRESULT WINAPI
 D3D12GetInterface(REFCLSID rcslid, REFIID iid, void **debug) {
+  if (!debug)
+    return E_POINTER;
+  *debug = nullptr;
   return E_NOINTERFACE;
 }
 

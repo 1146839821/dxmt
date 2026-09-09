@@ -1106,7 +1106,7 @@ int main() {
     passed &= ExpectQuery<IDXGIFactory7>(factory, "IDXGIFactory7", S_OK);
   }
 
-  IUnknown *device_factory = nullptr;
+  IUnknown *device_factory = reinterpret_cast<IUnknown *>(static_cast<uintptr_t>(1));
   const HRESULT device_factory_hr = D3D12GetInterface(
       clsid_d3d12_sdk_configuration, __uuidof(ID3D12DeviceFactory), reinterpret_cast<void **>(&device_factory)
   );
