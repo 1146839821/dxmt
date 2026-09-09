@@ -657,6 +657,9 @@ int main() {
     invalid_queue1.NodeMask = 2;
     expect_invalid_queue1("CreateCommandQueue1(node mask)", invalid_queue1);
     invalid_queue1 = queue1_desc;
+    invalid_queue1.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+    expect_invalid_queue1("CreateCommandQueue1(priority)", invalid_queue1);
+    invalid_queue1 = queue1_desc;
     invalid_queue1.Flags = static_cast<D3D12_COMMAND_QUEUE_FLAGS>(0x8000);
     expect_invalid_queue1("CreateCommandQueue1(flags)", invalid_queue1);
   }

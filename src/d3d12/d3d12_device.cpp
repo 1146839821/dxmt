@@ -91,6 +91,8 @@ ValidateCommandQueueDesc(const D3D12_COMMAND_QUEUE_DESC *desc) {
   default:
     return E_INVALIDARG;
   }
+  if (desc->Priority != D3D12_COMMAND_QUEUE_PRIORITY_NORMAL)
+    return E_INVALIDARG;
   if (static_cast<UINT>(desc->Flags) & ~static_cast<UINT>(D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT))
     return E_INVALIDARG;
   return S_OK;
