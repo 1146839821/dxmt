@@ -61,7 +61,7 @@ CreateTarget(ID3D12Device *device, Owned<ID3D12Resource> &target) {
 bool
 TestDescriptorHandleRegistry(ID3D12Device *device, ID3D12Resource *target) {
   constexpr UINT kDescriptorCount = 4;
-  constexpr UINT kHeapCount = 256;
+  constexpr UINT kHeapCount = 1024;
   const UINT descriptor_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
   if (!descriptor_stride) {
     std::cerr << "RTV descriptor stride is zero\n";
@@ -121,6 +121,89 @@ TestDescriptorHandleRegistry(ID3D12Device *device, ID3D12Resource *target) {
     device->CreateRenderTargetView(target, nullptr, handle);
   }
 
+  // Exercise large shader-visible heaps, null descriptors, descriptor copies,
+  // and switching the heap on a command list while the registry is populated.
+  ID3D12DescriptorHeap *shader_source = nullptr;
+  ID3D12DescriptorHeap *shader_destination = nullptr;
+  D3D12_DESCRIPTOR_HEAP_DESC shader_desc = {};
+  shader_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  shader_desc.NumDescriptors = 16384;
+  shader_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  if (!CheckHR("CreateDescriptorHeap(shader source)",
+               device->CreateDescriptorHeap(&shader_desc, IID_PPV_ARGS(&shader_source))) ||
+      !CheckHR("CreateDescriptorHeap(shader destination)",
+               device->CreateDescriptorHeap(&shader_desc, IID_PPV_ARGS(&shader_destination)))) {
+    if (shader_source)
+      shader_source->Release();
+    cleanup();
+    return false;
+  }
+  heaps.push_back(shader_source);
+  heaps.push_back(shader_destination);
+
+  const auto shader_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+  const auto shader_source_cpu = shader_source->GetCPUDescriptorHandleForHeapStart();
+  const auto shader_destination_cpu = shader_destination->GetCPUDescriptorHandleForHeapStart();
+  D3D12_GPU_DESCRIPTOR_HANDLE shader_gpu = {};
+  shader_destination->GetGPUDescriptorHandleForHeapStart(&shader_gpu);
+  if (!shader_stride || !shader_source_cpu.ptr || !shader_destination_cpu.ptr || !shader_gpu.ptr)
+    return fail("large shader-visible heap returned an invalid handle");
+
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+  srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+  srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  srv.Texture2D.MipLevels = 1;
+  for (UINT i = 0; i < 16; i++) {
+    auto handle = shader_source_cpu;
+    handle.ptr += SIZE_T(i) * shader_stride;
+    if (i & 1)
+      device->CreateShaderResourceView(target, &srv, handle);
+    else
+      device->CreateShaderResourceView(nullptr, &srv, handle);
+  }
+  D3D12_UNORDERED_ACCESS_VIEW_DESC null_uav = {};
+  null_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+  null_uav.Format = DXGI_FORMAT_UNKNOWN;
+  device->CreateUnorderedAccessView(nullptr, nullptr, &null_uav, shader_destination_cpu);
+  device->CopyDescriptorsSimple(
+      16, shader_destination_cpu, shader_source_cpu, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV
+  );
+
+  D3D12_CPU_DESCRIPTOR_HANDLE destination_ranges[2] = {shader_destination_cpu, shader_destination_cpu};
+  D3D12_CPU_DESCRIPTOR_HANDLE source_ranges[2] = {shader_source_cpu, shader_source_cpu};
+  destination_ranges[0].ptr += SIZE_T(32) * shader_stride;
+  destination_ranges[1].ptr += SIZE_T(96) * shader_stride;
+  source_ranges[0].ptr += SIZE_T(128) * shader_stride;
+  source_ranges[1].ptr += SIZE_T(256) * shader_stride;
+  const UINT destination_sizes[2] = {32, 32};
+  const UINT source_sizes[2] = {16, 48};
+  device->CopyDescriptors(
+      2, destination_ranges, destination_sizes, 2, source_ranges, source_sizes,
+      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV
+  );
+
+  ID3D12CommandAllocator *command_allocator = nullptr;
+  ID3D12GraphicsCommandList *command_list = nullptr;
+  if (!CheckHR("CreateCommandAllocator(shader heap switch)",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&command_allocator))) ||
+      !CheckHR("CreateCommandList(shader heap switch)",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, command_allocator, nullptr,
+                                          IID_PPV_ARGS(&command_list)))) {
+    if (command_list)
+      command_list->Release();
+    if (command_allocator)
+      command_allocator->Release();
+    return fail("failed to create command list for shader heap switch");
+  }
+  ID3D12DescriptorHeap *bound_heaps[] = {shader_destination};
+  command_list->SetDescriptorHeaps(1, bound_heaps);
+  const HRESULT close_hr = command_list->Close();
+  command_list->Release();
+  command_allocator->Release();
+  if (!CheckHR("Close(shader heap switch)", close_hr))
+    return fail("shader heap switch command list failed to close");
+
   // On 64-bit builds indices are monotonic, so destroying a heap must not make
   // an old handle resolve to a newly allocated heap at the same address.
   heaps[0]->Release();
@@ -139,7 +222,8 @@ TestDescriptorHandleRegistry(ID3D12Device *device, ID3D12Resource *target) {
   device->CreateRenderTargetView(target, nullptr, stale);
 
   cleanup();
-  std::cout << "D3D12 descriptor heap registry stress passed: " << kHeapCount << " live heaps\n";
+  std::cout << "D3D12 descriptor heap registry stress passed: " << kHeapCount
+            << " live heaps + 16K shader-visible descriptors\n";
   return true;
 }
 
