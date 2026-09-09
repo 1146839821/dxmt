@@ -368,3 +368,4 @@ endif
 
 dx12_predication = executable('dx12_predication', 'dx12_predication.cpp', dependencies: [ d3d12_dep ])
 dx12_enhanced_barriers = executable('dx12_enhanced_barriers', 'dx12_enhanced_barriers.cpp', dependencies: [ d3d12_dep ])
+dx12_descriptor_stress = executable('dx12_descriptor_stress', 'dx12_descriptor_stress.cpp', dependencies: [ d3d12_dep ])
