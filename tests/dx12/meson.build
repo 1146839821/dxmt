@@ -344,3 +344,26 @@ dx12_reserved_buffer = executable('dx12_reserved_buffer', 'dx12_reserved_buffer.
 dx12_reserved_texture = executable('dx12_reserved_texture', 'dx12_reserved_texture.cpp', dependencies: [ d3d12_dep ])
 dx12_reserved_texture_mip_array = executable('dx12_reserved_texture_mip_array', 'dx12_reserved_texture_mip_array.cpp', dependencies: [ d3d12_dep ])
 dx12_reserved_buffer_copy_mapping = executable('dx12_reserved_buffer_copy_mapping', 'dx12_reserved_buffer_copy_mapping.cpp', dependencies: [ d3d12_dep ])
+
+if dxc_command.length() > 0
+  custom_target('dx12_predication_vs_fixture',
+    input: 'predication.hlsl',
+    output: 'predication.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_predication_ps_fixture',
+    input: 'predication.hlsl',
+    output: 'predication.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_predication_cs_fixture',
+    input: 'predication.hlsl',
+    output: 'predication.cs.cso',
+    command: dxc_command + [ '-E', 'cs_main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+endif
+
+dx12_predication = executable('dx12_predication', 'dx12_predication.cpp', dependencies: [ d3d12_dep ])

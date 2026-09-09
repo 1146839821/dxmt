@@ -577,6 +577,11 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
     Rc<Texture> mv_downscaled;
   };
   std::vector<CachedTemporalScaler> temporal_scaler_cache_;
+  WMT::Reference<WMT::ComputePipelineState> predication_args_pso_;
+  WMT::Reference<WMT::ComputePipelineState> predication_count_pso_;
+  Com<MTLD3D12Resource, false> predication_buffer_;
+  UINT64 predication_offset_ = 0;
+  D3D12_PREDICATION_OP predication_op_ = D3D12_PREDICATION_OP_EQUAL_ZERO;
   WMTBarrierScope pending_barrier_scope_ = (WMTBarrierScope)0;
   WMTRenderStages pending_barrier_stages_after_ = (WMTRenderStages)0;
   WMTRenderStages pending_barrier_stages_before_ = (WMTRenderStages)0;
@@ -684,6 +689,24 @@ public:
     return mv_scale_pso_;
   }
 
+  WMT::Reference<WMT::ComputePipelineState>
+  getPredicationPSO(bool count) {
+    auto &pso = count ? predication_count_pso_ : predication_args_pso_;
+    if (pso)
+      return pso;
+
+    const char *name = count ? "dxmt_predicate_count" : "dxmt_predicate_arguments";
+    auto function = device_->GetLib().getLibrary().newFunction(name);
+    if (!function)
+      return {};
+
+    WMT::Reference<WMT::Error> error;
+    pso = device_->GetMTLDevice().newComputePipelineState(function, error);
+    if (!pso && error)
+      ERR("D3D12 predication: failed to create ", name, " PSO: ", error.description().getUTF8String());
+    return pso;
+  }
+
   HRESULT
   encodeMotionVectorScale(
       const Rc<Texture> &motion, TextureViewKey motion_view, const Rc<Texture> &downscaled, float scale_x, float scale_y
@@ -725,6 +748,9 @@ public:
     pso_graphics_ = nullptr;
     airconv_geometry_pso_variant_ = UINT_MAX;
     pso_compute_ = nullptr;
+    predication_buffer_ = nullptr;
+    predication_offset_ = 0;
+    predication_op_ = D3D12_PREDICATION_OP_EQUAL_ZERO;
     msc_resource_use_root_signature_ = nullptr;
     msc_resource_use_tables_.clear();
     indirect_resources_used_.clear();
@@ -1091,6 +1117,9 @@ public:
     pso_graphics_ = nullptr;
     airconv_geometry_pso_variant_ = UINT_MAX;
     pso_compute_ = nullptr;
+    predication_buffer_ = nullptr;
+    predication_offset_ = 0;
+    predication_op_ = D3D12_PREDICATION_OP_EQUAL_ZERO;
     rootsig_graphics_ = nullptr;
     rootsig_compute_ = nullptr;
     descriptor_heap_ = nullptr;
@@ -1244,6 +1273,146 @@ public:
     cmd.type = WMTComputeCommandUseResource;
     cmd.resource = resource;
     cmd.usage = usage;
+  }
+
+  bool
+  EncodePredicationKernel(bool count, WMT::Buffer source, uint64_t source_offset, WMT::Buffer output,
+                          uint64_t output_offset) {
+    if (!predication_buffer_)
+      return true;
+
+    auto predicate_allocation = predication_buffer_->buffer ? predication_buffer_->buffer->current() : nullptr;
+    if (!predicate_allocation || !output) {
+      FailRecording(__func__, "predication buffer has no native backing");
+      return false;
+    }
+    if (count && !source) {
+      FailRecording(__func__, "predication count source has no native backing");
+      return false;
+    }
+
+    auto pso = getPredicationPSO(count);
+    if (!pso) {
+      FailRecording(__func__, "predication kernel pipeline is unavailable");
+      return false;
+    }
+
+    allocator_->InvalidateCurrentPass();
+    auto compute = allocator_->AllocatePass<ComputeEncoderData>();
+    compute->type = EncoderType::Compute;
+    compute->cmd_head.type = WMTComputeCommandNop;
+    compute->cmd_head.next.set(0);
+    compute->cmd_tail = (wmtcmd_base *)&compute->cmd_head;
+
+    auto &predicate_use = allocator_->EncodeComputeCommand<wmtcmd_compute_useresource>();
+    predicate_use.type = WMTComputeCommandUseResource;
+    predicate_use.resource = predicate_allocation->buffer().handle;
+    predicate_use.usage = WMTResourceUsageRead;
+
+    if (count) {
+      auto &source_use = allocator_->EncodeComputeCommand<wmtcmd_compute_useresource>();
+      source_use.type = WMTComputeCommandUseResource;
+      source_use.resource = source.handle;
+      source_use.usage = WMTResourceUsageRead;
+    }
+
+    auto &output_use = allocator_->EncodeComputeCommand<wmtcmd_compute_useresource>();
+    output_use.type = WMTComputeCommandUseResource;
+    output_use.resource = output.handle;
+    output_use.usage = WMTResourceUsageRead | WMTResourceUsageWrite;
+
+    auto &setpso = allocator_->EncodeComputeCommand<wmtcmd_compute_setpso>();
+    setpso.type = WMTComputeCommandSetPSO;
+    setpso.pso = pso;
+    setpso.threadgroup_size = {1, 1, 1};
+
+    auto &set_predicate = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+    set_predicate.type = WMTComputeCommandSetBuffer;
+    set_predicate.buffer = predicate_allocation->buffer();
+    set_predicate.offset = predication_offset_;
+    set_predicate.index = kPredicationPredicateIndex;
+
+    if (count) {
+      auto &set_source = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+      set_source.type = WMTComputeCommandSetBuffer;
+      set_source.buffer = source;
+      set_source.offset = source_offset;
+      set_source.index = kPredicationSourceIndex;
+    }
+
+    auto &set_output = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+    set_output.type = WMTComputeCommandSetBuffer;
+    set_output.buffer = output;
+    set_output.offset = output_offset;
+    set_output.index = kPredicationOutputIndex;
+
+    struct DXMT_PREDICATION_PARAMS {
+      uint32_t operation;
+      uint32_t reserved;
+    } params{static_cast<uint32_t>(predication_op_), 0};
+    auto &set_params = allocator_->EncodeComputeCommand<wmtcmd_compute_setbytes>();
+    set_params.type = WMTComputeCommandSetBytes;
+    auto *param_data = allocator_->AllocateCommandData<DXMT_PREDICATION_PARAMS>(1);
+    *param_data = params;
+    set_params.bytes.set(param_data);
+    set_params.length = sizeof(params);
+    set_params.index = kPredicationParamsIndex;
+
+    auto &dispatch = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch>();
+    dispatch.type = WMTComputeCommandDispatchThreads;
+    dispatch.size = {1, 1, 1};
+
+    auto &barrier = allocator_->EncodeComputeCommand<wmtcmd_compute_memory_barrier>();
+    barrier.type = WMTComputeCommandMemoryBarrier;
+    barrier.scope = WMTBarrierScopeBuffers;
+
+    // The predicate kernel changes the pipeline and temporary bindings. A new
+    // compute or render pass must restore all normal D3D12 state before the
+    // guarded command is emitted.
+    dirty_state_.set(
+        DirtyState::ComputePipelineState, DirtyState::ComputeRootArguments, DirtyState::ComputeRootSignature,
+        DirtyState::DescriptorHeaps
+    );
+    return true;
+  }
+
+  bool
+  EncodePredicationCount(MTLD3D12Resource *source_resource, UINT64 source_offset, UINT max_count,
+                         uint64_t &count_gpu_address) {
+    if (!predication_buffer_)
+      return false;
+
+    WMT::Buffer source;
+    uint64_t source_buffer_offset = source_offset;
+    if (source_resource) {
+      if (!source_resource->buffer || !source_resource->buffer->current() ||
+          !buffer_range_in_bounds(source_resource, source_offset, sizeof(UINT))) {
+        FailRecording(__func__, "invalid predication count source");
+        return false;
+      }
+      source = source_resource->buffer->current()->buffer();
+    } else {
+      auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(UINT), 16);
+      if (!mapped) {
+        FailRecording(__func__, "predication count source allocation failed");
+        return false;
+      }
+      *static_cast<UINT *>(mapped) = max_count;
+      source = allocator_->gpu_heap_buffer_;
+      source_buffer_offset = offset;
+    }
+
+    auto [mapped, output_offset] = allocator_->AllocateGPUHeap(sizeof(UINT), 16);
+    if (!mapped) {
+      FailRecording(__func__, "predication count output allocation failed");
+      return false;
+    }
+    *static_cast<UINT *>(mapped) = 0;
+    if (!EncodePredicationKernel(true, source, source_buffer_offset, allocator_->gpu_heap_buffer_, output_offset))
+      return false;
+
+    count_gpu_address = allocator_->gpu_heap_buffer_address_ + output_offset;
+    return true;
   }
 
   void
@@ -1907,6 +2076,29 @@ public:
             ? !to_airconv_geometry_primitive_type(topology_, primitive_type)
             : !to_metal_primitive_type(topology_, primitive_type, cp_count))
       return;
+
+    const bool predicated = bool(predication_buffer_);
+    uint64_t predication_args_offset = 0;
+    if (predicated) {
+      if (pso_graphics_ && (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry || pso_graphics_->airconv_geometry)) {
+        FailRecording(__func__, "predication with emulated geometry or tessellation is unsupported");
+        return;
+      }
+      auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_DRAW_ARGUMENTS), 16);
+      if (!mapped) {
+        FailRecording(__func__, "predication draw argument allocation failed");
+        return;
+      }
+      auto *draw_arguments = static_cast<DXMT_DRAW_ARGUMENTS *>(mapped);
+      draw_arguments->VertexCount = VertexCountPerInstance;
+      draw_arguments->InstanceCount = InstanceCount;
+      draw_arguments->StartVertex = StartVertexLocation;
+      draw_arguments->StartInstance = StartInstanceLocation;
+      if (!EncodePredicationKernel(false, {}, 0, allocator_->gpu_heap_buffer_, offset))
+        return;
+      allocator_->InvalidateCurrentPass();
+      predication_args_offset = offset;
+    }
     DrawCallStatus status = PreDraw();
     if (status == DrawCallStatus::Invalid) {
       if (trace_draw_id < 32)
@@ -1968,6 +2160,17 @@ public:
       return;
     }
 
+    if (predicated) {
+      auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw_indirect>();
+      cmd_draw.type = WMTRenderCommandDrawIndirect;
+      cmd_draw.primitive_type = primitive_type;
+      cmd_draw.indirect_args_buffer = allocator_->gpu_heap_buffer_;
+      cmd_draw.indirect_args_offset = predication_args_offset;
+      if (pso_graphics_->stream_output)
+        EmitMemoryBarrier(WMTBarrierScopeBuffers, WMTRenderStageVertex, WMTRenderStageVertex);
+      return;
+    }
+
     auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw>();
     cmd_draw.type = WMTRenderCommandDraw;
     cmd_draw.primitive_type = primitive_type;
@@ -2000,6 +2203,30 @@ public:
             ? !to_airconv_geometry_primitive_type(topology_, primitive_type)
             : !to_metal_primitive_type(topology_, primitive_type, cp_count))
       return;
+
+    const bool predicated = bool(predication_buffer_);
+    uint64_t predication_args_offset = 0;
+    if (predicated) {
+      if (pso_graphics_ && (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry || pso_graphics_->airconv_geometry)) {
+        FailRecording(__func__, "predication with emulated geometry or tessellation is unsupported");
+        return;
+      }
+      auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_DRAW_INDEXED_ARGUMENTS), 16);
+      if (!mapped) {
+        FailRecording(__func__, "predication indexed draw argument allocation failed");
+        return;
+      }
+      auto *draw_arguments = static_cast<DXMT_DRAW_INDEXED_ARGUMENTS *>(mapped);
+      draw_arguments->IndexCount = IndexCountPerInstance;
+      draw_arguments->InstanceCount = InstanceCount;
+      draw_arguments->StartIndex = StartIndexLocation;
+      draw_arguments->BaseVertex = BaseVertexLocation;
+      draw_arguments->StartInstance = StartInstanceLocation;
+      if (!EncodePredicationKernel(false, {}, 0, allocator_->gpu_heap_buffer_, offset))
+        return;
+      allocator_->InvalidateCurrentPass();
+      predication_args_offset = offset;
+    }
     DrawCallStatus status = PreDraw(false, to_airconv_index_format(index_type));
     if (status == DrawCallStatus::Invalid) {
       if (trace_draw_indexed_id < 32)
@@ -2070,6 +2297,20 @@ public:
       cmd_draw.vertex_per_warp = vertex_per_warp;
       return;
     }
+    if (predicated) {
+      auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw_indexed_indirect>();
+      cmd_draw.type = WMTRenderCommandDrawIndexedIndirect;
+      cmd_draw.primitive_type = primitive_type;
+      cmd_draw.index_type = index_type;
+      cmd_draw.index_buffer = index_buffer;
+      cmd_draw.index_buffer_offset = index_offset;
+      cmd_draw.indirect_args_buffer = allocator_->gpu_heap_buffer_;
+      cmd_draw.indirect_args_offset = predication_args_offset;
+      if (pso_graphics_->stream_output)
+        EmitMemoryBarrier(WMTBarrierScopeBuffers, WMTRenderStageVertex, WMTRenderStageVertex);
+      return;
+    }
+
     auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw_indexed>();
     cmd_draw.type = WMTRenderCommandDrawIndexed;
     cmd_draw.primitive_type = primitive_type;
@@ -2564,6 +2805,23 @@ public:
   Dispatch(UINT X, UINT Y, UINT Z) {
     if (!ValidateCommand(SupportsCompute(), "Dispatch"))
       return;
+
+    const bool predicated = bool(predication_buffer_);
+    uint64_t predication_args_offset = 0;
+    if (predicated) {
+      auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_DISPATCH_ARGUMENTS), 16);
+      if (!mapped) {
+        FailRecording(__func__, "predication dispatch argument allocation failed");
+        return;
+      }
+      auto *dispatch_arguments = static_cast<DXMT_DISPATCH_ARGUMENTS *>(mapped);
+      dispatch_arguments->X = X;
+      dispatch_arguments->Y = Y;
+      dispatch_arguments->Z = Z;
+      if (!EncodePredicationKernel(false, {}, 0, allocator_->gpu_heap_buffer_, offset))
+        return;
+      predication_args_offset = offset;
+    }
     if (!PreDispatch())
       return;
 
@@ -2573,9 +2831,16 @@ public:
           allocator_->encoder_current ? allocator_->encoder_current->id : UINT64_MAX, " size=", X, "x", Y, "x", Z
       );
 
-    auto &cmd_dispatch = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch>();
-    cmd_dispatch.type = WMTComputeCommandDispatch;
-    cmd_dispatch.size = {X, Y, Z};
+    if (predicated) {
+      auto &cmd_dispatch = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch_indirect>();
+      cmd_dispatch.type = WMTComputeCommandDispatchIndirect;
+      cmd_dispatch.indirect_args_buffer = allocator_->gpu_heap_buffer_;
+      cmd_dispatch.indirect_args_offset = predication_args_offset;
+    } else {
+      auto &cmd_dispatch = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch>();
+      cmd_dispatch.type = WMTComputeCommandDispatch;
+      cmd_dispatch.size = {X, Y, Z};
+    }
   };
 
   bool
@@ -4028,9 +4293,41 @@ public:
   };
 
   void STDMETHODCALLTYPE SetPredication(ID3D12Resource *pBuffer, UINT64 AlignedBufferOffset, D3D12_PREDICATION_OP Op) {
-    if (!pBuffer)
+    if (!pBuffer) {
+      predication_buffer_ = nullptr;
+      predication_offset_ = 0;
+      predication_op_ = D3D12_PREDICATION_OP_EQUAL_ZERO;
       return;
-    MarkUnsupportedCommand("SetPredication");
+    }
+
+    if (!IsSameDevice(device_, pBuffer)) {
+      FailRecording(__func__, "predication buffer belongs to another device");
+      return;
+    }
+
+    auto buffer = static_cast<MTLD3D12Resource *>(pBuffer);
+    if (!buffer || !buffer->buffer || buffer->GetDesc().Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) {
+      FailRecording(__func__, "predication resource is not a buffer");
+      return;
+    }
+    if (Op != D3D12_PREDICATION_OP_EQUAL_ZERO && Op != D3D12_PREDICATION_OP_NOT_EQUAL_ZERO) {
+      FailRecording(__func__, "invalid predication operation=", Op);
+      return;
+    }
+    if ((AlignedBufferOffset & (sizeof(uint64_t) - 1)) ||
+        !buffer_range_in_bounds(buffer, AlignedBufferOffset, sizeof(uint64_t))) {
+      FailRecording(__func__, "invalid predication buffer range offset=", AlignedBufferOffset,
+                    " buffer_size=", buffer->GetDesc().Width);
+      return;
+    }
+    if (!buffer->buffer->current()) {
+      FailRecording(__func__, "predication buffer has no native backing");
+      return;
+    }
+
+    predication_buffer_ = buffer;
+    predication_offset_ = AlignedBufferOffset;
+    predication_op_ = Op;
   };
 
   void STDMETHODCALLTYPE SetMarker(UINT Metadata, const void *data, UINT size) { IMPLEMENT_ME };
@@ -4179,7 +4476,8 @@ public:
     }
     auto ArgBufferAddress = arg_buffer->buffer->current()->gpuAddress() + ArgBufferOffset;
     uint64_t CountBufferAddress = 0;
-    if (auto count_buffer = static_cast<MTLD3D12Resource *>(pCountBuffer)) {
+    auto count_buffer = static_cast<MTLD3D12Resource *>(pCountBuffer);
+    if (count_buffer) {
       if (!buffer_range_in_bounds(count_buffer, CountBufferOffset, sizeof(UINT)) || (CountBufferOffset & 3)) {
         FailRecording(__func__, "invalid count buffer range offset=", CountBufferOffset);
         return;
@@ -4187,6 +4485,10 @@ public:
       CountBufferAddress = count_buffer->buffer->current()->gpuAddress() + CountBufferOffset;
     }
     if (sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH) {
+      uint64_t filtered_count_buffer_address = CountBufferAddress;
+      if (predication_buffer_ &&
+          !EncodePredicationCount(count_buffer, CountBufferOffset, MaxCommandCount, filtered_count_buffer_address))
+        return;
       if (!PreDispatch(sig->UpdateRootArguments))
         return;
 
@@ -4197,7 +4499,7 @@ public:
       }
 
       auto cmd = allocator_->EncodeIndirectComputeCommand(sig, pso_compute_.ptr(), MaxCommandCount);
-      cmd->max_count_buffer = CountBufferAddress;
+      cmd->max_count_buffer = filtered_count_buffer_address;
       cmd->argument_buffer = ArgBufferAddress;
 
       if (sig->UpdateRootArguments) {
@@ -4212,6 +4514,10 @@ public:
     }
 
     if (pso_graphics_ && pso_graphics_->airconv_geometry) {
+      if (predication_buffer_) {
+        FailRecording(__func__, "predication with AIRCONV geometry is unsupported");
+        return;
+      }
       if (!MaxCommandCount)
         return;
       if ((sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW &&
@@ -4250,6 +4556,12 @@ public:
     uint32_t cp_count;
     if (!to_metal_primitive_type(topology_, primitive_type, cp_count))
       return;
+    uint64_t filtered_count_buffer_address = CountBufferAddress;
+    if (predication_buffer_) {
+      if (!EncodePredicationCount(count_buffer, CountBufferOffset, MaxCommandCount, filtered_count_buffer_address))
+        return;
+      allocator_->InvalidateCurrentPass();
+    }
     bool encode_binding = sig->UpdateRootArguments || sig->UpdateIndexBuffer || sig->UpdateVertexBuffers;
     DrawCallStatus status = PreDraw(encode_binding);
     if (status == DrawCallStatus::Invalid)
@@ -4266,7 +4578,7 @@ public:
     }
 
     auto cmd = allocator_->EncodeIndirectRenderCommand(sig, pso_graphics_.ptr(), MaxCommandCount);
-    cmd->max_count_buffer = CountBufferAddress;
+    cmd->max_count_buffer = filtered_count_buffer_address;
     cmd->argument_buffer = ArgBufferAddress;
     cmd->primitive_type = primitive_type;
     cmd->index_buffer = index_buffer_address;
