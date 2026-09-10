@@ -757,6 +757,8 @@ public:
       float scale_y;
     } scale_data{scale_x, scale_y};
     auto mapped = context.setComputeBytes(0, sizeof(scale_data));
+    if (!mapped)
+      return E_OUTOFMEMORY;
     memcpy(mapped, &scale_data, sizeof(scale_data));
     context.dispatch({downscaled->width(), downscaled->height(), 1});
     context.endPass();

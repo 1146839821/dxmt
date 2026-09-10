@@ -206,6 +206,8 @@ public:
     }
 
     void *temp = ctx_.setComputeBytes(1, sizeof(meta_temp_));
+    if (!temp)
+      return;
     memcpy(temp, &meta_temp_, sizeof(meta_temp_));
 
     ctx_.dispatch({width, height, dispatch_depth_});
