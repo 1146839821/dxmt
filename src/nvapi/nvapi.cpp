@@ -199,6 +199,23 @@ NVAPI_INTERFACE NvAPI_D3D12_IsNvShaderExtnOpCodeSupported(
   return NVAPI_OK;
 }
 
+NVAPI_INTERFACE
+NvAPI_D3D_QueryModifiedWSupport(
+    __in IUnknown *pDev, __inout NV_QUERY_MODIFIED_W_SUPPORT_PARAMS *pQueryModifiedWSupportedParams
+) {
+  if (!pDev || !pQueryModifiedWSupportedParams)
+    return NVAPI_INVALID_ARGUMENT;
+
+  if (pQueryModifiedWSupportedParams->version != NV_QUERY_MODIFIED_W_SUPPORT_PARAMS_VER)
+    return NVAPI_INCOMPATIBLE_STRUCT_VERSION;
+
+  // Modified-W is an NVIDIA-specific raster feature.  DXMT does not expose
+  // it on the Metal backend, but a successful capability query must report
+  // that fact through the output field rather than failing function lookup.
+  pQueryModifiedWSupportedParams->bModifiedWSupported = 0;
+  return NVAPI_OK;
+}
+
 Com<IMTLD3D11DeviceExt> GetD3D11DeviceExt(IUnknown *pDevice) {
   Com<IMTLD3D11DeviceExt> device_ext;
   if (FAILED(pDevice->QueryInterface(IID_PPV_ARGS(&device_ext)))) {
@@ -873,6 +890,8 @@ extern "C" __cdecl void *nvapi_QueryInterface(NvU32 id) {
     return (void *)&NvAPI_D3D_GetObjectHandleForResource;
   case 0x6c0ed98c:
     return (void *)&NvAPI_D3D_SetResourceHint;
+  case 0xcbf9f4f5:
+    return (void *)&NvAPI_D3D_QueryModifiedWSupport;
   case 0xe5ac921f:
     return (void *)&NvAPI_EnumPhysicalGPUs;
   case 0x48b3ea59:

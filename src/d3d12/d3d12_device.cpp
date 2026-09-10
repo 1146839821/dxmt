@@ -19,6 +19,7 @@
 #include "d3d12_device.hpp"
 #include "d3d12_device_child.hpp"
 #include "d3d12sdklayers.h"
+#include "d3d10.h"
 #include "Metal.hpp"
 #include "com/com_pointer.hpp"
 #include "com/com_object.hpp"
@@ -490,6 +491,12 @@ public:
       *ppvObject = ref(static_cast<ID3D12Device *>(this));
       return S_OK;
     }
+
+    // D3D12 devices do not expose the legacy D3D10 or DXGI device
+    // interfaces.  Recognize these probes explicitly so callers receive the
+    // contractually correct E_NOINTERFACE without an unknown-query warning.
+    if (riid == __uuidof(ID3D10Device) || riid == __uuidof(IDXGIDevice))
+      return E_NOINTERFACE;
 
     // Keep newer interfaces explicit until their methods have an implementation.
     if (riid == DXMT_STREAMLINE_D3D12_DEVICE_GUID || riid == DXMT_ID3D11_DEVICE_GUID) {

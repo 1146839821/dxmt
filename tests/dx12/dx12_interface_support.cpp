@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include <windows.h>
+#include <d3d10.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
@@ -160,6 +161,8 @@ int main() {
   passed &= ExpectQuery<ID3D12Device8>(device, "ID3D12Device8", S_OK);
   passed &= ExpectQuery<ID3D12Device9>(device, "ID3D12Device9", S_OK);
   passed &= ExpectQuery<ID3D12Device10>(device, "ID3D12Device10", S_OK);
+  passed &= ExpectQuery<ID3D10Device>(device, "ID3D10Device", E_NOINTERFACE);
+  passed &= ExpectQuery<IDXGIDevice>(device, "IDXGIDevice", E_NOINTERFACE);
   if (device->QueryInterface(IID_PPV_ARGS(&device5)) != S_OK || !device5) {
     std::cerr << "ID3D12Device5 vtable query failed\n";
     passed = false;
