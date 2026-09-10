@@ -1060,6 +1060,10 @@ public:
 
     allocator_->InvalidateCurrentPass();
     auto temporal = allocator_->AllocatePass<TemporalUpscaleData>();
+    if (!temporal) {
+      FailRecording(__func__, "temporal-upscale encoder allocation failed");
+      return E_OUTOFMEMORY;
+    }
     temporal->type = EncoderType::TemporalUpscale;
     temporal->input = std::move(input_texture);
     temporal->output = std::move(output_texture);
@@ -1100,6 +1104,8 @@ public:
   Close() {
     if (encoder_count < std::numeric_limits<size_t>::max())
       return E_FAIL;
+    if (allocator_->CPUAllocationFailed())
+      FailRecording(__func__, "command allocator CPU recording allocation failed");
     if (recording_failed_)
       CancelEnhancedSplitBegins();
     HRESULT hr = allocator_->EndRecord(&encoder_count);
@@ -1365,6 +1371,10 @@ public:
 
     allocator_->InvalidateCurrentPass();
     auto compute = allocator_->AllocatePass<ComputeEncoderData>();
+    if (!compute) {
+      FailRecording(__func__, "predication encoder allocation failed");
+      return false;
+    }
     indirect_resources_used_.clear();
     resource_use_masks_.clear();
     compute->type = EncoderType::Compute;
@@ -1421,6 +1431,10 @@ public:
     auto &set_params = allocator_->EncodeComputeCommand<wmtcmd_compute_setbytes>();
     set_params.type = WMTComputeCommandSetBytes;
     auto *param_data = allocator_->AllocateCommandData<DXMT_PREDICATION_PARAMS>(1);
+    if (!param_data) {
+      FailRecording(__func__, "predication parameter allocation failed");
+      return false;
+    }
     *param_data = params;
     set_params.bytes.set(param_data);
     set_params.length = sizeof(params);
@@ -1931,6 +1945,10 @@ public:
 
       allocator_->InvalidateCurrentPass();
       auto render = allocator_->AllocatePass<RenderEncoderData>();
+      if (!render) {
+        FailRecording(__func__, "render encoder allocation failed");
+        return DrawCallStatus::Invalid;
+      }
       indirect_resources_used_.clear();
       resource_use_masks_.clear();
       render->type = EncoderType::Render;
@@ -2188,6 +2206,10 @@ public:
 
     if (dirty_state_.test(DirtyState::Viewport)) {
       auto metal_viewport = allocator_->AllocateCommandData<WMTViewport>(num_viewports);
+      if (!metal_viewport) {
+        FailRecording(__func__, "viewport command data allocation failed count=", num_viewports);
+        return DrawCallStatus::Invalid;
+      }
       for (auto i = 0u; i < num_viewports; i++) {
         auto &viewport = viewports[i];
         metal_viewport[i] = {viewport.TopLeftX, viewport.TopLeftY, viewport.Width,
@@ -2202,6 +2224,10 @@ public:
 
     if (dirty_state_.test(DirtyState::ScissorRect)) {
       auto metal_scissors = allocator_->AllocateCommandData<WMTScissorRect>(num_viewports /* yes */);
+      if (!metal_scissors) {
+        FailRecording(__func__, "scissor command data allocation failed count=", num_viewports);
+        return DrawCallStatus::Invalid;
+      }
       for (auto i = 0u; i < num_viewports; i++) {
         if (i < num_scissors) {
           auto &d3d_rect = scissors[i];
@@ -2873,6 +2899,10 @@ public:
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Compute) {
       allocator_->InvalidateCurrentPass();
       auto compute = allocator_->AllocatePass<ComputeEncoderData>();
+      if (!compute) {
+        FailRecording(__func__, "compute encoder allocation failed");
+        return false;
+      }
       indirect_resources_used_.clear();
       resource_use_masks_.clear();
       compute->type = EncoderType::Compute;
@@ -3045,6 +3075,10 @@ public:
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Blit) {
       allocator_->InvalidateCurrentPass();
       auto render = allocator_->AllocatePass<BlitEncoderData>();
+      if (!render) {
+        FailRecording(__func__, "blit encoder allocation failed");
+        return false;
+      }
       render->type = EncoderType::Blit;
       render->cmd_head.type = WMTBlitCommandNop;
       render->cmd_head.next.set(0);
@@ -3573,6 +3607,10 @@ public:
 
     allocator_->InvalidateCurrentPass();
     auto copy_tiles = allocator_->AllocatePass<CopyTilesEncoderData>();
+    if (!copy_tiles) {
+      FailRecording(__func__, "copy-tiles encoder allocation failed");
+      return;
+    }
     copy_tiles->type = EncoderType::CopyTiles;
     copy_tiles->tiled_resource = tiled;
     copy_tiles->linear_resource = linear;
@@ -3609,6 +3647,10 @@ public:
 
     allocator_->InvalidateCurrentPass();
     auto resolve = allocator_->AllocatePass<ResolveEncoderData>();
+    if (!resolve) {
+      FailRecording(__func__, "resolve encoder allocation failed");
+      return;
+    }
     resolve->type = EncoderType::Resolve;
 
     MTL_DXGI_FORMAT_DESC format_desc;
@@ -3718,20 +3760,7 @@ public:
     auto &cmd_setdsso = allocator_->EncodeRenderCommand<wmtcmd_render_setdsso>();
     cmd_setdsso.type = WMTRenderCommandSetDSSO;
     auto *render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
-    switch (render->dsv_planar_flags & 3) {
-    case 3:
-      cmd_setdsso.dsso = pso_graphics->dsso;
-      break;
-    case 2:
-      cmd_setdsso.dsso = pso_graphics->dsso_depth_disabled;
-      break;
-    case 1:
-      cmd_setdsso.dsso = pso_graphics->dsso_stencil_disabled;
-      break;
-    default:
-      cmd_setdsso.dsso = pso_graphics->dsso_depth_stencil_disabled;
-      break;
-    }
+    cmd_setdsso.dsso = pso_graphics->GetDepthStencilState(render->dsv_planar_flags, render->dsv_readonly_flags);
     cmd_setdsso.stencil_ref = stencil_ref_;
 
     auto &cmd_setrs = allocator_->EncodeRenderCommand<wmtcmd_render_setrasterizerstate>();
@@ -4182,6 +4211,10 @@ public:
       return;
     allocator_->InvalidateCurrentPass();
     auto encoder_info = allocator_->AllocatePass<ClearEncoderData>();
+    if (!encoder_info) {
+      FailRecording(__func__, "depth-stencil clear encoder allocation failed");
+      return;
+    }
     encoder_info->type = EncoderType::Clear;
     encoder_info->format = format;
     encoder_info->clear_dsv = clear_dsv;
@@ -4199,6 +4232,10 @@ public:
                             Rects[0].bottom == (LONG)AttachmentDesc.Height);
     if (!full_rect) {
       encoder_info->rects = allocator_->AllocateCommandData<D3D12_RECT>(RectCount);
+      if (!encoder_info->rects) {
+        FailRecording(__func__, "depth-stencil clear rect allocation failed count=", RectCount);
+        return;
+      }
       memcpy(encoder_info->rects, Rects, sizeof(D3D12_RECT) * RectCount);
       encoder_info->rect_count = RectCount;
     }
@@ -4212,21 +4249,26 @@ public:
   ) {
     if (!Color)
       return;
+    if (RectCount && !Rects) {
+      FailRecording(__func__, "rect count without rect data count=", RectCount);
+      return;
+    }
     auto [Heap, Index] = GetRenderTargetHeap(device_, RTV);
     if (!Heap)
       return;
     auto AttachmentDesc = Heap->GetRenderTarget(Index);
     if (!AttachmentDesc.Texture)
       return;
-    if (RectCount > 1 ||
-        (Rects && RectCount &&
-         (Rects[0].left > 0 || Rects[0].top > 0 || Rects[0].right < (LONG)AttachmentDesc.Width ||
-          Rects[0].bottom < (LONG)AttachmentDesc.Height))) {
-      ERR("ClearRenderTargetView: partial rect clear is unsupported RectCount=", RectCount);
+    if (RectCount > kCPUHeapSize / sizeof(D3D12_RECT)) {
+      FailRecording(__func__, "too many render-target clear rects count=", RectCount);
       return;
     }
     allocator_->InvalidateCurrentPass();
     auto encoder_info = allocator_->AllocatePass<ClearEncoderData>();
+    if (!encoder_info) {
+      FailRecording(__func__, "render-target clear encoder allocation failed");
+      return;
+    }
     encoder_info->type = EncoderType::Clear;
     encoder_info->clear_dsv = 0;
     encoder_info->color = {Color[0], Color[1], Color[2], Color[3]};
@@ -4236,6 +4278,22 @@ public:
     encoder_info->depth_plane = AttachmentDesc.DepthPlane;
     encoder_info->width = AttachmentDesc.Width;
     encoder_info->height = AttachmentDesc.Height;
+    encoder_info->format = AttachmentDesc.Texture->pixelFormat(AttachmentDesc.View);
+    encoder_info->raster_sample_count = AttachmentDesc.Texture->sampleCount();
+
+    const bool full_rect = RectCount == 0 ||
+                           (RectCount == 1 && Rects[0].left == 0 && Rects[0].top == 0 &&
+                            Rects[0].right == (LONG)AttachmentDesc.Width &&
+                            Rects[0].bottom == (LONG)AttachmentDesc.Height);
+    if (!full_rect) {
+      encoder_info->rects = allocator_->AllocateCommandData<D3D12_RECT>(RectCount);
+      if (!encoder_info->rects) {
+        FailRecording(__func__, "render-target clear rect allocation failed count=", RectCount);
+        return;
+      }
+      memcpy(encoder_info->rects, Rects, sizeof(D3D12_RECT) * RectCount);
+      encoder_info->rect_count = RectCount;
+    }
 
     allocator_->InvalidateCurrentPass();
   };
@@ -4406,6 +4464,10 @@ public:
 
       allocator_->InvalidateCurrentPass();
       auto timestamp = allocator_->AllocatePass<SampleTimestampData>();
+      if (!timestamp) {
+        FailRecording(__func__, "timestamp encoder allocation failed");
+        return;
+      }
       timestamp->type = EncoderType::SampleTimestamp;
       timestamp->sample_buffer = query->timestamp_buffer;
       timestamp->sample_index = Index;
@@ -4698,6 +4760,10 @@ public:
       }
 
       auto cmd = allocator_->EncodeIndirectComputeCommand(sig, pso_compute_.ptr(), MaxCommandCount);
+      if (!cmd) {
+        FailRecording(__func__, "indirect compute command allocation failed");
+        return;
+      }
       cmd->max_count_buffer = filtered_count_buffer_address;
       cmd->argument_buffer = ArgBufferAddress;
 
@@ -4777,6 +4843,10 @@ public:
     }
 
     auto cmd = allocator_->EncodeIndirectRenderCommand(sig, pso_graphics_.ptr(), MaxCommandCount);
+    if (!cmd) {
+      FailRecording(__func__, "indirect render command allocation failed");
+      return;
+    }
     cmd->max_count_buffer = filtered_count_buffer_address;
     cmd->argument_buffer = ArgBufferAddress;
     cmd->primitive_type = primitive_type;

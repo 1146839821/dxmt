@@ -53,6 +53,18 @@ namespace dxmt {
 class MTLD3D12Resource;
 class MTLD3D12CommandAllocator;
 
+// A placed resource owns a private reference to the heap that backs it.  Keep
+// this interface declaration before MTLD3D12Resource so resource
+// implementations can retain the D3D12 heap through their lifetime, matching
+// CreatePlacedResource's ownership contract.
+class MTLD3D12Heap : public ID3D12Heap {
+public:
+  virtual void AddRefPrivate() = 0;
+  virtual void ReleasePrivate() = 0;
+  virtual WMT::Heap GetMetalHeap() = 0;
+  virtual WMT::Buffer GetTileBackingBuffer() = 0;
+};
+
 class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList7, public IMTLD3D12CommandListExt {
 public:
   EncoderData *entry = nullptr;
@@ -248,12 +260,6 @@ struct EnhancedSplitBarrierState {
   D3D12_RESOURCE_STATES after_state = D3D12_RESOURCE_STATE_COMMON;
 };
 
-class MTLD3D12Heap : public ID3D12Heap {
-public:
-  virtual WMT::Heap GetMetalHeap() = 0;
-  virtual WMT::Buffer GetTileBackingBuffer() = 0;
-};
-
 class MTLD3D12Fence : public ID3D12Fence1 {
 public:
   Rc<Fence> fence;
@@ -318,6 +324,12 @@ public:
   WMT::Reference<WMT::DepthStencilState> dsso_stencil_disabled;
   WMT::Reference<WMT::DepthStencilState> dsso_depth_disabled;
   WMT::Reference<WMT::DepthStencilState> dsso_depth_stencil_disabled;
+  WMT::Reference<WMT::DepthStencilState> dsso_depth_readonly;
+  WMT::Reference<WMT::DepthStencilState> dsso_stencil_readonly;
+  WMT::Reference<WMT::DepthStencilState> dsso_readonly;
+  WMT::Reference<WMT::DepthStencilState> dsso_depth_readonly_stencil_disabled;
+  WMT::Reference<WMT::DepthStencilState> dsso_stencil_readonly_depth_disabled;
+  virtual WMT::DepthStencilState GetDepthStencilState(uint8_t planar_flags, uint8_t readonly_flags) const = 0;
   uint32_t slot_mask = 0;
   bool msc_tessellation = false;
   WMT::Reference<WMT::Buffer> msc_tessellator_tables;

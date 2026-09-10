@@ -326,6 +326,7 @@ class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
   D3D12_RESOURCE_DESC desc_;
   D3D12_HEAP_PROPERTIES heap_props_;
   D3D12_HEAP_FLAGS heap_flags_;
+  Com<MTLD3D12Heap, false> heap_;
   bool reserved_ = false;
   D3D12_TILE_SHAPE tile_shape_ = {};
   UINT total_tile_count_ = 0;
@@ -440,6 +441,8 @@ public:
     if (!allocation || !allocation->texture())
       return E_OUTOFMEMORY;
     texture->rename(std::move(allocation));
+    if (pHeap)
+      heap_ = pHeap;
     device_->RegisterResidency(texture->current()->texture());
 
     const auto trace_id = texture_debug_count.fetch_add(1, std::memory_order_relaxed);

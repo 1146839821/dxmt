@@ -76,6 +76,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   uint64_t completed_submission_serial_ = 0;
   bool encoder_execution_status_ = false;
   std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_psos_;
+  std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_rtv_psos_;
   std::array<WMT::Reference<WMT::DepthStencilState>, 4> clear_dssos_;
 
   static const char *EncoderTypeName(EncoderType type) {
@@ -180,6 +181,43 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       return {};
     }
     return clear_psos_.emplace(key, std::move(pso)).first->second;
+  }
+
+  WMT::RenderPipelineState
+  GetClearRTVPSO(WMTPixelFormat format, uint8_t sample_count) {
+    if (format == WMTPixelFormatInvalid || !sample_count)
+      return {};
+
+    const uint64_t key = (uint64_t(format) << 8) | sample_count;
+    if (auto it = clear_rtv_psos_.find(key); it != clear_rtv_psos_.end())
+      return it->second;
+
+    auto library = device_->GetLib().getLibrary();
+    auto vertex_function = library.newFunction("vs_clear_rt");
+    const char *fragment_name = IsIntegerFormat(format)
+                                    ? (MTLGetUnsignedIntegerFormat(format) == format ? "fs_clear_rt_uint"
+                                                                                       : "fs_clear_rt_sint")
+                                    : "fs_clear_rt_float";
+    auto fragment_function = library.newFunction(fragment_name);
+    if (!vertex_function || !fragment_function)
+      return {};
+
+    WMTRenderPipelineInfo info;
+    WMT::InitializeRenderPipelineInfo(info);
+    info.raster_sample_count = sample_count;
+    info.vertex_function = vertex_function;
+    info.fragment_function = fragment_function;
+    info.colors[0].pixel_format = format;
+    info.input_primitive_topology = WMTPrimitiveTopologyClassTriangle;
+
+    WMT::Reference<WMT::Error> error;
+    auto pso = device_->GetMTLDevice().newRenderPipelineState(info, error);
+    if (!pso) {
+      ERR("Failed to create D3D12 partial RTV clear PSO: ",
+          error ? error.description().getUTF8String() : "unknown error");
+      return {};
+    }
+    return clear_rtv_psos_.emplace(key, std::move(pso)).first->second;
   }
 
   WMT::DepthStencilState
@@ -816,32 +854,41 @@ public:
               translation_failed = true;
               break;
             }
-            auto pso = GetClearPSO(data->format, data->raster_sample_count);
-            auto dsso = GetClearDSSO(data->clear_dsv);
-            if (!pso || !dsso) {
+            auto pso = data->clear_dsv ? GetClearPSO(data->format, data->raster_sample_count)
+                                       : GetClearRTVPSO(data->format, data->raster_sample_count);
+            auto dsso = data->clear_dsv ? GetClearDSSO(data->clear_dsv) : WMT::DepthStencilState{};
+            if (!pso || (data->clear_dsv && !dsso)) {
               translation_failed = true;
               break;
             }
 
             WMTRenderPassInfo info;
             WMT::InitializeRenderPassInfo(info);
-            const auto attachment = data->attachment.ptr();
             const auto dsv_planar_flags = DepthStencilPlanarFlags(data->format);
-            if (dsv_planar_flags & 1) {
-              info.depth.texture = data->attachment.texture();
-              info.depth.level = attachment->key.mip_start;
-              info.depth.slice = attachment->key.array_start;
-              info.depth.depth_plane = data->depth_plane;
-              info.depth.load_action = WMTLoadActionLoad;
-              info.depth.store_action = WMTStoreActionStore;
-            }
-            if (dsv_planar_flags & 2) {
-              info.stencil.texture = data->attachment.texture();
-              info.stencil.level = attachment->key.mip_start;
-              info.stencil.slice = attachment->key.array_start;
-              info.stencil.depth_plane = data->depth_plane;
-              info.stencil.load_action = WMTLoadActionLoad;
-              info.stencil.store_action = WMTStoreActionStore;
+            if (data->clear_dsv) {
+              if (dsv_planar_flags & 1) {
+                info.depth.texture = data->attachment.texture();
+                info.depth.level = 0;
+                info.depth.slice = 0;
+                info.depth.depth_plane = data->depth_plane;
+                info.depth.load_action = WMTLoadActionLoad;
+                info.depth.store_action = WMTStoreActionStore;
+              }
+              if (dsv_planar_flags & 2) {
+                info.stencil.texture = data->attachment.texture();
+                info.stencil.level = 0;
+                info.stencil.slice = 0;
+                info.stencil.depth_plane = data->depth_plane;
+                info.stencil.load_action = WMTLoadActionLoad;
+                info.stencil.store_action = WMTStoreActionStore;
+              }
+            } else {
+              info.colors[0].texture = data->attachment.texture();
+              info.colors[0].level = 0;
+              info.colors[0].slice = 0;
+              info.colors[0].depth_plane = data->depth_plane;
+              info.colors[0].load_action = WMTLoadActionLoad;
+              info.colors[0].store_action = WMTStoreActionStore;
             }
             info.default_raster_sample_count = data->raster_sample_count;
             const auto array_length = std::max(data->array_length, 1u);
@@ -863,13 +910,23 @@ public:
             set_viewport.viewport = {0.0, 0.0, (double)data->width, (double)data->height, 0.0, 1.0};
             encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_viewport));
 
-            wmtcmd_render_setdsso set_dsso = {};
-            set_dsso.type = WMTRenderCommandSetDSSO;
-            set_dsso.dsso = dsso;
-            set_dsso.stencil_ref = data->depth_stencil.second;
-            encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_dsso));
+            if (data->clear_dsv) {
+              wmtcmd_render_setdsso set_dsso = {};
+              set_dsso.type = WMTRenderCommandSetDSSO;
+              set_dsso.dsso = dsso;
+              set_dsso.stencil_ref = data->depth_stencil.second;
+              encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_dsso));
+            }
 
-            float clear_value[4] = {data->depth_stencil.first, 0.0f, 0.0f, 0.0f};
+            float clear_value[4] = {};
+            if (data->clear_dsv) {
+              clear_value[0] = data->depth_stencil.first;
+            } else {
+              clear_value[0] = static_cast<float>(data->color.r);
+              clear_value[1] = static_cast<float>(data->color.g);
+              clear_value[2] = static_cast<float>(data->color.b);
+              clear_value[3] = static_cast<float>(data->color.a);
+            }
             wmtcmd_render_setbytes set_value = {};
             set_value.type = WMTRenderCommandSetFragmentBytes;
             set_value.bytes.set(clear_value);

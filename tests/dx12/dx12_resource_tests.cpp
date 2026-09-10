@@ -2450,6 +2450,13 @@ int main() {
     return 1;
   }
 
+  // A placed resource owns its heap. Drop the application references while
+  // keeping the resources alive so their backing residency remains valid.
+  texture_heap->Release();
+  texture_heap = nullptr;
+  rt_texture_heap->Release();
+  rt_texture_heap = nullptr;
+
   D3D12_HEAP_DESC alias_heap_desc = {};
   alias_heap_desc.SizeInBytes = AlignUp(buffer_info.SizeInBytes, buffer_info.Alignment);
   alias_heap_desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -2466,6 +2473,8 @@ int main() {
     cleanup();
     return 1;
   }
+  alias_heap->Release();
+  alias_heap = nullptr;
   D3D12_HEAP_PROPERTIES texture_properties = {};
   D3D12_HEAP_FLAGS texture_flags = D3D12_HEAP_FLAG_NONE;
   if (!CheckHR("GetPlacedTextureHeapProperties",
@@ -2518,6 +2527,11 @@ int main() {
     cleanup();
     return 1;
   }
+
+  upload_heap->Release();
+  upload_heap = nullptr;
+  readback_heap->Release();
+  readback_heap = nullptr;
 
   if (!source_zero->GetGPUVirtualAddress() || !source_placed->GetGPUVirtualAddress() ||
       source_zero->GetGPUVirtualAddress() == source_placed->GetGPUVirtualAddress()) {
@@ -2773,6 +2787,10 @@ int main() {
   const FLOAT array_clear_color[] = {0.0f, 1.0f, 0.0f, 1.0f};
   list->OMSetRenderTargets(1, &array_rtv_handle, FALSE, nullptr);
   list->ClearRenderTargetView(array_rtv_handle, array_clear_color, 0, nullptr);
+  const FLOAT array_partial_clear_color[] = {0.0f, 0.0f, 1.0f, 1.0f};
+  const D3D12_RECT array_partial_clear_rect = {3, 3, 4, 4};
+  list->ClearRenderTargetView(array_rtv_handle, array_partial_clear_color, 1,
+                              &array_partial_clear_rect);
   D3D12_RESOURCE_BARRIER array_barrier = {};
   array_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
   array_barrier.Transition.pResource = array_render_target;
@@ -3623,6 +3641,18 @@ int main() {
   if ((array_pixel & 0x00ffffffu) != 0x0000ff00u) {
     std::cerr << "array RTV readback mismatch: 0x" << std::hex << array_pixel
               << std::dec << "\n";
+    array_readback->Unmap(0, nullptr);
+    cleanup();
+    return 1;
+  }
+  UINT32 array_partial_clear_pixel = 0;
+  std::memcpy(&array_partial_clear_pixel,
+              mapped_array_readback + array_footprint.Offset +
+                  3 * array_footprint.Footprint.RowPitch + 3 * sizeof(UINT32),
+              sizeof(array_partial_clear_pixel));
+  if ((array_partial_clear_pixel & 0x00ffffffu) != 0x00ff0000u) {
+    std::cerr << "partial array RTV clear readback mismatch: 0x" << std::hex
+              << array_partial_clear_pixel << std::dec << "\n";
     array_readback->Unmap(0, nullptr);
     cleanup();
     return 1;

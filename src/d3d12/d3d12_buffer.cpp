@@ -70,6 +70,7 @@ class MTLD3D12Buffer : public MTLD3D12Pageable<MTLD3D12Resource> {
   D3D12_RESOURCE_DESC desc_;
   D3D12_HEAP_PROPERTIES heap_props_;
   D3D12_HEAP_FLAGS heap_flags_;
+  Com<MTLD3D12Heap, false> heap_;
   bool reserved_ = false;
   UINT tile_count_ = 0;
 
@@ -141,6 +142,8 @@ public:
     if (!allocation || !allocation->buffer())
       return E_OUTOFMEMORY;
     buffer->rename(std::move(allocation));
+    if (pHeap)
+      heap_ = pHeap;
     device_->RegisterResidencyAndVA(buffer->current());
 
     return S_OK;

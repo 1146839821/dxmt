@@ -108,7 +108,8 @@ MTLD3D12CommandAllocatorImpl::Reset() {
     return E_FAIL;
 
   DestroyEncoders();
-
+  ReleaseSpilledCPUHeaps();
+  cpu_allocation_failed_ = false;
   return Initialize();
 };
 
@@ -199,8 +200,12 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
   info.gpu_resource_id = 0;
 
   auto icb = device_->GetMTLDevice().newIndirectCommandBuffer(info, MaxCount, WMTResourceStorageModeShared);
+  if (!icb)
+    return nullptr;
 
   auto [Ptr, Offset] = AllocateGPUHeap(sizeof(IndirectComputeCommandData), 16);
+  if (!Ptr)
+    return nullptr;
 
   auto data = reinterpret_cast<IndirectComputeCommandData *>(Ptr);
 
@@ -289,8 +294,12 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
   info.gpu_resource_id = 0;
 
   auto icb = device_->GetMTLDevice().newIndirectCommandBuffer(info, MaxCount, WMTResourceStorageModePrivate);
+  if (!icb)
+    return nullptr;
 
   auto [Ptr, Offset] = AllocateGPUHeap(sizeof(IndirectRenderCommandData), 16);
+  if (!Ptr)
+    return nullptr;
 
   auto data = reinterpret_cast<IndirectRenderCommandData *>(Ptr);
 
@@ -376,6 +385,8 @@ void
 SimpleCommandContext<MTLD3D12CommandAllocatorImpl>::startComputePass() {
   ctx.InvalidateCurrentPass();
   auto compute = ctx.AllocatePass<ComputeEncoderData>();
+  if (!compute)
+    return;
   compute->type = EncoderType::Compute;
   compute->cmd_head.type = WMTComputeCommandNop;
   compute->cmd_head.next.set(0);
