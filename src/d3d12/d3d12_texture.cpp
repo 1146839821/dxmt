@@ -764,17 +764,48 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   Map(UINT Subresource, const D3D12_RANGE *pReadRange, void **ppData) {
-    if (reserved_ || !texture || !IsCpuVisibleHeap(&heap_props_))
+    // UNKNOWN is an opaque layout. D3D12 permits mapping opaque textures only
+    // as a preparation for the CPU transfer helpers, so no CPU pointer may be
+    // returned to the caller. Reserved resources remain unmappable even when
+    // a native sparse backing exists.
+    if (reserved_ || !texture)
       return E_INVALIDARG;
-    UINT subresource_count = desc_.MipLevels;
-    if (desc_.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D)
-      subresource_count *= desc_.DepthOrArraySize;
+
+    if (ppData) {
+      *ppData = nullptr;
+      return E_INVALIDARG;
+    }
+
+    // Opaque layouts do not expose a byte range. A null or empty range is
+    // required by the D3D12 default-texture mapping contract.
+    if (pReadRange && pReadRange->End > pReadRange->Begin)
+      return E_INVALIDARG;
+
+    if (!desc_.MipLevels || desc_.SampleDesc.Count > 1 ||
+        (desc_.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
+      return E_INVALIDARG;
+
+    MTL_DXGI_FORMAT_DESC format = {};
+    if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc_.Format, format)) || format.PlanarCount != 1)
+      return E_INVALIDARG;
+
+    const uint32_t element_size = (format.Flag & MTL_DXGI_FORMAT_BC) ? format.BlockSize : format.BytesPerTexel;
+    if (!element_size || (element_size & (element_size - 1)))
+      return E_INVALIDARG;
+
+    // Strip-mine CPU access has no defined layout for a volume texture with
+    // more than one mip level.
+    if (desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D && desc_.MipLevels > 1)
+      return E_INVALIDARG;
+
+    const uint64_t array_size = desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                                    ? 1u
+                                    : desc_.DepthOrArraySize;
+    const uint64_t subresource_count = uint64_t(desc_.MipLevels) * array_size;
     if (Subresource >= subresource_count)
       return E_INVALIDARG;
-    if (!ppData || (desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D && desc_.MipLevels > 1))
-      return E_INVALIDARG;
-    *ppData = nullptr;
-    return E_NOTIMPL;
+
+    return S_OK;
   };
 
   virtual void STDMETHODCALLTYPE Unmap(UINT Subresource, const D3D12_RANGE *pWrittenRange) {};
