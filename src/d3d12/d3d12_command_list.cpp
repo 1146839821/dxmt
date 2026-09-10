@@ -2021,6 +2021,12 @@ public:
       dirty_state_.set(DirtyState::GraphicsPipelineState);
     }
 
+    // A command list may switch from an ordinary PSO to an emulated geometry
+    // or tessellation PSO without ending the render encoder.  Keep the pass
+    // wait conservative for every draw recorded into it.
+    auto *render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
+    render->use_geometry |= use_msc_tessellation || use_msc_geometry || use_airconv_geometry;
+
     if (dirty_state_.test(DirtyState::GraphicsPipelineState)) {
       UpdateGraphicsPSO(pso_graphics_.ptr(), airconv_index_format);
       airconv_geometry_pso_variant_ = use_airconv_geometry
@@ -2148,7 +2154,6 @@ public:
             WMTResourceUsageRead,
             resource_stages
         );
-      EncodeAirconvRootResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, resource_stages, false);
       EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
       DEBUG(
           "[DEBUG-AIRCONV-RENDER] recording=", recording_id_, " encoder=",
@@ -2539,7 +2544,7 @@ public:
   }
 
   void
-  EncodeAirconvRootResourceUses(
+  EncodeRootResourceUses(
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], WMTRenderStages render_stages, bool compute
   ) {
     if (!pRootSig || !pStaging || !pRootSig->ParameterSlots || !pRootSig->SlotQwordOffsets)
@@ -2699,7 +2704,20 @@ public:
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
       bool compute = false
   ) {
-    if (!pRootSig || !pStaging || !descriptor_heap || !pRootSig->ParameterSlots || !pRootSig->SlotQwordOffsets)
+    if (!pRootSig || !pStaging || !pRootSig->ParameterSlots || !pRootSig->SlotQwordOffsets)
+      return;
+
+    // MSC puts root CBV/SRV/UAV addresses directly in its argument buffer.
+    // Track those resources even when the command list has no descriptor heap;
+    // descriptor-table enumeration below is an independent concern.
+    const auto stages =
+        pso_graphics_ &&
+        (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry || pso_graphics_->airconv_geometry)
+            ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment)
+            : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
+    EncodeRootResourceUses(pRootSig, pStaging, stages, compute);
+
+    if (!descriptor_heap)
       return;
 
     if (pRootSig != msc_resource_use_root_signature_) {
@@ -2743,11 +2761,6 @@ public:
     if (!descriptor_stride)
       return;
 
-    const auto stages =
-        pso_graphics_ &&
-        (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry || pso_graphics_->airconv_geometry)
-            ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment)
-            : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
     const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
     const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
 
@@ -2972,7 +2985,6 @@ public:
         EncodeComputeResourceUse(descriptor_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
       if (sampler_heap_)
         EncodeComputeResourceUse(sampler_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
-      EncodeAirconvRootResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, (WMTRenderStages)0, true);
       EncodeMSCResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true);
     }
 
