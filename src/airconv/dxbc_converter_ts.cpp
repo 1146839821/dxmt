@@ -247,7 +247,7 @@ convert_dxbc_vertex_hull_shader(
   auto binding_map = rootsig
                          ? setup_binding_rootsig(
                                &vertex_shader_info, func_signature, module, D3D10_SB_VERTEX_SHADER, rootsig->bytecode,
-                               rootsig->bytecode_length, SM50_BINDING_INDEX_ROOT_ARGUMENTS + 2, SM50_BINDING_INDEX_STATIC_SAMPLERS + 2
+                               rootsig->bytecode_length, SM50_BINDING_INDEX_ROOT_ARGUMENTS, SM50_BINDING_INDEX_STATIC_SAMPLERS
                            )
                          : setup_binding_table2(
                                &vertex_shader_info, func_signature, module, SM50_BINDING_INDEX_CONSTANT_BUFFER2,
