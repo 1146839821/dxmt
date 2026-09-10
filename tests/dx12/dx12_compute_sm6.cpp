@@ -26,7 +26,7 @@ int main(int argc, char **argv) {
     std::cerr << "usage: dx12_compute_sm6 <shader.cso> "
                  "[--root-uav|--reserved-uav|--reserved-srv|--descriptor-uav|--descriptor-resources|--"
                  "descriptor-resources-space|--root-cbv|--root-constants|--"
-                 "descriptor-resources-1-1|--direct-indexed|--root-srv|--"
+                 "descriptor-resources-1-1|--descriptor-null-cbv|--direct-indexed|--root-srv|--"
                  "cache-probe]\n";
     return 2;
   }
@@ -41,18 +41,21 @@ int main(int argc, char **argv) {
       argc == 3 && strcmp(argv[2], "--descriptor-resources-space") == 0;
   const bool descriptor_resources_1_1 =
       argc == 3 && strcmp(argv[2], "--descriptor-resources-1-1") == 0;
+  const bool descriptor_null_cbv =
+      argc == 3 && strcmp(argv[2], "--descriptor-null-cbv") == 0;
   const bool direct_indexed =
       argc == 3 && strcmp(argv[2], "--direct-indexed") == 0;
   const bool descriptor_table_resources = descriptor_resources ||
                                           descriptor_resources_space ||
-                                          descriptor_resources_1_1;
+                                          descriptor_resources_1_1 ||
+                                          descriptor_null_cbv;
   const bool root_cbv = argc == 3 && strcmp(argv[2], "--root-cbv") == 0;
   const bool root_constants =
       argc == 3 && strcmp(argv[2], "--root-constants") == 0;
   const bool root_srv = argc == 3 && strcmp(argv[2], "--root-srv") == 0;
   const bool cache_probe = argc == 3 && strcmp(argv[2], "--cache-probe") == 0;
   if (argc == 3 && !root_uav && !reserved_uav && !reserved_srv && !descriptor_uav && !descriptor_resources &&
-      !descriptor_resources_space && !descriptor_resources_1_1 && !root_cbv &&
+      !descriptor_resources_space && !descriptor_resources_1_1 && !descriptor_null_cbv && !root_cbv &&
       !root_constants && !root_srv && !direct_indexed && !cache_probe) {
     std::cerr << "unknown test mode\n";
     return 2;
@@ -270,6 +273,8 @@ int main(int argc, char **argv) {
         cbv_desc.BufferLocation = input_buffer->GetGPUVirtualAddress();
         cbv_desc.SizeInBytes = 256;
         device->CreateConstantBufferView(&cbv_desc, descriptor_cpu);
+        if (descriptor_null_cbv)
+          device->CreateConstantBufferView(nullptr, descriptor_cpu);
 
         descriptor_cpu.ptr += descriptor_increment;
         srv_desc.Format = DXGI_FORMAT_UNKNOWN;
@@ -509,6 +514,8 @@ int main(int argc, char **argv) {
       expected_value = 0x12345678;
     else if (direct_indexed)
       expected_value = 4321;
+    else if (descriptor_null_cbv)
+      expected_value = input_value;
     else if (descriptor_table_resources)
       expected_value = input_value * 2;
     else if (root_cbv || root_constants || root_srv)

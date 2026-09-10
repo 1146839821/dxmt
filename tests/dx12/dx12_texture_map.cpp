@@ -76,8 +76,10 @@ void ExpectMap(ID3D12Resource *resource, UINT subresource, const D3D12_RANGE *ra
                const char *name) {
   void *data = reinterpret_cast<void *>(UINT_PTR(0xfeedface));
   void **output = expected == E_INVALIDARG && std::strcmp(name, "map-pointer") == 0 ? &data : nullptr;
-  Expect(name, resource->Map(subresource, range, output), expected);
-  resource->Unmap(subresource, nullptr);
+  const HRESULT actual = resource->Map(subresource, range, output);
+  Expect(name, actual, expected);
+  if (SUCCEEDED(actual))
+    resource->Unmap(subresource, nullptr);
 }
 
 void CheckOpaqueTextureMap(ID3D12Device *device) {
@@ -118,6 +120,25 @@ void CheckOpaqueTextureMap(ID3D12Device *device) {
 
 void CheckSubresourceAndFormatRestrictions(ID3D12Device *device) {
   const auto heap = DefaultHeap();
+  auto upload_heap = DefaultHeap();
+  upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+  auto readback_heap = DefaultHeap();
+  readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
+  const auto heap_texture_desc = Texture2D(4, 4, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM);
+  ID3D12Resource *unsupported_texture = nullptr;
+  Expect("upload-texture-heap", device->CreateCommittedResource(
+                                    &upload_heap, D3D12_HEAP_FLAG_NONE, &heap_texture_desc,
+                                    D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                    IID_PPV_ARGS(&unsupported_texture)), E_INVALIDARG);
+  if (unsupported_texture)
+    unsupported_texture->Release();
+  Expect("readback-texture-heap", device->CreateCommittedResource(
+                                      &readback_heap, D3D12_HEAP_FLAG_NONE, &heap_texture_desc,
+                                      D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                      IID_PPV_ARGS(&unsupported_texture)), E_INVALIDARG);
+  if (unsupported_texture)
+    unsupported_texture->Release();
+
   Owned<ID3D12Resource> array_texture;
   const auto array_desc = Texture2D(4, 4, 2, 2, DXGI_FORMAT_R8G8B8A8_UNORM);
   Check("CreateArrayTexture", device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &array_desc,

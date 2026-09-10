@@ -96,6 +96,11 @@ int main() {
       DXGI_ERROR_INVALID_CALL
   );
 
+  // Exercise the real queue submission path after the deterministic TEST
+  // probes above.  These calls must reach the Metal present scheduling path.
+  passed &= CheckEqual("SyncInterval=0 present", swapchain->Present(0, 0), S_OK);
+  passed &= CheckEqual("SyncInterval=1 present", swapchain->Present(1, 0), S_OK);
+
   desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
   swapchain1 = nullptr;
   if (factory->CreateSwapChainForHwnd(queue, hwnd, &desc, nullptr, nullptr, &swapchain1) != S_OK ||

@@ -584,6 +584,19 @@ int main(int argc, char **argv) {
   if (stencil) {
     auto second_pso_desc = pso_desc;
     second_pso_desc.RasterizerState.DepthClipEnable = FALSE;
+    // With the application reference still at 0x2a, this PSO must reject
+    // the second draw.  If a PSO switch rewrites the reference to zero, the
+    // NOT_EQUAL test would pass and the zero blend state would erase the
+    // first draw, making the regression observable in the readback.
+    second_pso_desc.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_NOT_EQUAL;
+    second_pso_desc.DepthStencilState.BackFace.StencilFunc = D3D12_COMPARISON_FUNC_NOT_EQUAL;
+    second_pso_desc.BlendState.RenderTarget[0].BlendEnable = TRUE;
+    second_pso_desc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ZERO;
+    second_pso_desc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
+    second_pso_desc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    second_pso_desc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ZERO;
+    second_pso_desc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+    second_pso_desc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
     if (!CheckHR("CreateSecondGraphicsPipelineState",
                  device->CreateGraphicsPipelineState(&second_pso_desc,
                                                      IID_PPV_ARGS(&stencil_pso))))
@@ -654,8 +667,10 @@ int main(int argc, char **argv) {
   else
     list->DrawInstanced(draw_count, 1, 0, 0);
   if (stencil) {
-    // Repeating the same value must not dirty the state, and switching PSOs
-    // must leave the application stencil reference untouched.
+    // Exercise both a changed value and a restoration before the PSO switch;
+    // the second draw must still observe the restored application value.
+    list->OMSetStencilRef(0);
+    list->OMSetStencilRef(0x2a);
     list->OMSetStencilRef(0x2a);
     list->SetPipelineState(stencil_pso);
     if (geometry_indexed)
