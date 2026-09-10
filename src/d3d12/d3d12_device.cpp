@@ -997,11 +997,14 @@ public:
 
   void STDMETHODCALLTYPE
   CreateConstantBufferView(const D3D12_CONSTANT_BUFFER_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) {
-    if (!pDesc)
-      return;
     auto [Heap, Index] = GetShaderVisibleDescriptorHeap(this, Descriptor);
-    if (Heap)
-      Heap->AddConstantBufferView(Index, pDesc->BufferLocation, pDesc->SizeInBytes);
+    if (!Heap)
+      return;
+    if (!pDesc) {
+      Heap->ClearDescriptor(Index);
+      return;
+    }
+    Heap->AddConstantBufferView(Index, pDesc->BufferLocation, pDesc->SizeInBytes);
   };
 
   void STDMETHODCALLTYPE

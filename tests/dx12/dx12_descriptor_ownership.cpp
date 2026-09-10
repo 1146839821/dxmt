@@ -67,6 +67,15 @@ bool IsDescriptorType(
   return false;
 }
 
+bool IsDescriptorTypeAt(
+    dxmt::MTLD3D12DescriptorHeap *heap, UINT index, dxmt::ShaderVisibleDescriptorType expected, const char *name
+) {
+  if (heap->GetDescriptor(index).type == expected)
+    return true;
+  std::cerr << name << " descriptor type changed unexpectedly\n";
+  return false;
+}
+
 } // namespace
 
 int main() {
@@ -110,7 +119,7 @@ int main() {
 
   D3D12_DESCRIPTOR_HEAP_DESC shader_desc = {};
   shader_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-  shader_desc.NumDescriptors = 1;
+  shader_desc.NumDescriptors = 2;
   shader_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
   if (!CheckHR("CreateShaderHeap A", device_a->CreateDescriptorHeap(&shader_desc, IID_PPV_ARGS(&shader_heap_a))) ||
       !CheckHR("CreateShaderHeap B", device_b->CreateDescriptorHeap(&shader_desc, IID_PPV_ARGS(&shader_heap_b))))
@@ -191,6 +200,43 @@ int main() {
 
   device_b->CreateUnorderedAccessView(texture_b, counter_b, nullptr, shader_cpu_b);
   passed &= IsDescriptorType(shader_impl_b, dxmt::ShaderVisibleDescriptorType::Null, "texture UAV counter");
+
+  D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_desc = {};
+  cbv_desc.BufferLocation = buffer_a->GetGPUVirtualAddress();
+  cbv_desc.SizeInBytes = 256;
+  device_a->CreateConstantBufferView(&cbv_desc, shader_cpu_a);
+  const auto &valid_cbv = shader_impl_a->GetDescriptor(0);
+  passed &= valid_cbv.type == dxmt::ShaderVisibleDescriptorType::ConstantBuffer;
+  passed &= valid_cbv.ConstantBuffer.address == cbv_desc.BufferLocation;
+  passed &= valid_cbv.ConstantBuffer.size == cbv_desc.SizeInBytes;
+  if (!passed)
+    std::cerr << "valid CBV descriptor was not recorded\n";
+
+  // A null CBV must replace the previous descriptor and clear all payloads.
+  device_a->CreateConstantBufferView(nullptr, shader_cpu_a);
+  const auto &null_cbv = shader_impl_a->GetDescriptor(0);
+  passed &= null_cbv.type == dxmt::ShaderVisibleDescriptorType::Null;
+  passed &= null_cbv.ConstantBuffer.address == 0 && null_cbv.ConstantBuffer.size == 0;
+  if (!passed)
+    std::cerr << "null CBV did not clear the previous descriptor payload\n";
+
+  // Copying a null CBV must preserve the canonical null state.
+  const UINT shader_stride = device_a->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+  D3D12_CPU_DESCRIPTOR_HANDLE copied_cbv = shader_cpu_a;
+  copied_cbv.ptr += shader_stride;
+  const auto &fresh_null_cbv = shader_impl_a->GetDescriptor(1);
+  passed &= fresh_null_cbv.type == dxmt::ShaderVisibleDescriptorType::Null;
+  passed &= fresh_null_cbv.ConstantBuffer.address == 0 && fresh_null_cbv.ConstantBuffer.size == 0;
+  device_a->CreateConstantBufferView(nullptr, copied_cbv);
+  passed &= IsDescriptorTypeAt(shader_impl_a, 1, dxmt::ShaderVisibleDescriptorType::Null, "fresh null CBV");
+  device_a->CopyDescriptorsSimple(1, copied_cbv, shader_cpu_a, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+  passed &= IsDescriptorTypeAt(shader_impl_a, 1, dxmt::ShaderVisibleDescriptorType::Null, "copied null CBV");
+  const auto &copied_null_cbv = shader_impl_a->GetDescriptor(1);
+  passed &= copied_null_cbv.ConstantBuffer.address == 0 && copied_null_cbv.ConstantBuffer.size == 0;
+
+  // Reusing the slot with a valid CBV must work after the null overwrite.
+  device_a->CreateConstantBufferView(&cbv_desc, shader_cpu_a);
+  passed &= IsDescriptorType(shader_impl_a, dxmt::ShaderVisibleDescriptorType::ConstantBuffer, "restored CBV");
 
   device_a->CreateRenderTargetView(texture_a, &rtv_view, rtv_cpu_a);
   passed &= rtv_impl_a->GetRenderTarget(0).Texture != nullptr;

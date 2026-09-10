@@ -126,7 +126,7 @@ struct ShaderVisibleDescriptorCPUStorage {
     SRVBufferCPUStorage SRVBuffer;
   };
 
-  ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null) {}
+  ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null), ConstantBuffer{} {}
 };
 
 class MTLD3D12DescriptorHeap : public ID3D12DescriptorHeap {
@@ -139,6 +139,9 @@ public:
   AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp) = 0;
 
   virtual HRESULT AddConstantBufferView(UINT Index, UINT64 VA, UINT32 SizeInBytes) = 0;
+
+  // Replace a descriptor slot with the canonical null descriptor state.
+  virtual void ClearDescriptor(UINT Index) = 0;
 
   virtual HRESULT AddUnorderedAccessView(UINT Index, Texture *Texture, TextureViewKey View) = 0;
 

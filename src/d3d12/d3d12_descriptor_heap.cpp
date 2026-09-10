@@ -332,6 +332,21 @@ public:
     return S_OK;
   }
 
+  void
+  ClearDescriptor(UINT Index) override {
+    if (Index >= descriptors_.size())
+      return;
+
+    auto &cpu_storage = descriptors_[Index];
+    cpu_storage.type = ShaderVisibleDescriptorType::Null;
+    // Keep the inactive union bytes deterministic so descriptor copies cannot
+    // retain a stale CBV address in CPU-side storage.
+    cpu_storage.ConstantBuffer = {};
+    if (mapped_argument_buffer_)
+      mapped_argument_buffer_[Index].ZeroFilled = {{}};
+    SetMSCDescriptor(Index, {});
+  }
+
   virtual HRESULT
   AddUnorderedAccessView(UINT Index, Texture *Texture, TextureViewKey View) {
     if (Index >= descriptors_.size())
@@ -465,13 +480,7 @@ public:
     /**
      * TODO: support null descriptor properly (respect different view dimensions)
      */
-    auto &cpu_storage = descriptors_[Index];
-    cpu_storage.type = ShaderVisibleDescriptorType::Null;
-    if (mapped_argument_buffer_) {
-      auto &gpu_storage = mapped_argument_buffer_[Index];
-      gpu_storage.ZeroFilled = {{}};
-    }
-    SetMSCDescriptor(Index, {});
+    ClearDescriptor(Index);
     return S_OK;
   }
 
@@ -484,13 +493,7 @@ public:
     /**
      * TODO: support null descriptor properly (respect different view dimensions)
      */
-    auto &cpu_storage = descriptors_[Index];
-    cpu_storage.type = ShaderVisibleDescriptorType::Null;
-    if (mapped_argument_buffer_) {
-      auto &gpu_storage = mapped_argument_buffer_[Index];
-      gpu_storage.ZeroFilled = {{}};
-    }
-    SetMSCDescriptor(Index, {});
+    ClearDescriptor(Index);
     return S_OK;
   }
 
