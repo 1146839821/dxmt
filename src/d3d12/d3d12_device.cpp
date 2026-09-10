@@ -1007,6 +1007,10 @@ public:
         Heap->AddShaderResourceView(Index, pDesc);
       return;
     }
+    if (!IsSameDevice(this, pResource)) {
+      WARN("CreateShaderResourceView received a resource from another device");
+      return;
+    }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
     HRESULT hr = d3d12res->CreateShaderResourceView(pDesc, Descriptor);
     if (FAILED(hr))
@@ -1022,6 +1026,10 @@ public:
       auto [Heap, Index] = GetShaderVisibleDescriptorHeap(this, Descriptor);
       if (Heap)
         Heap->AddUnorderedAccessView(Index, pDesc);
+      return;
+    }
+    if (!IsSameDevice(this, pResource) || (pCounter && !IsSameDevice(this, pCounter))) {
+      WARN("CreateUnorderedAccessView received a resource from another device");
       return;
     }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
@@ -1041,6 +1049,10 @@ public:
         Heap->AddRenderTarget(Index, nullptr);
       return;
     }
+    if (!IsSameDevice(this, pResource)) {
+      WARN("CreateRenderTargetView received a resource from another device");
+      return;
+    }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
     HRESULT hr = d3d12res->CreateRenderTargetView(pDesc, Descriptor);
     if (FAILED(hr))
@@ -1056,6 +1068,10 @@ public:
       auto [Heap, Index] = GetRenderTargetHeap(this, Descriptor);
       if (Heap)
         Heap->AddRenderTarget(Index, nullptr);
+      return;
+    }
+    if (!IsSameDevice(this, pResource)) {
+      WARN("CreateDepthStencilView received a resource from another device");
       return;
     }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);

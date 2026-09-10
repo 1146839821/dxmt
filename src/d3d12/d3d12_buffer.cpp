@@ -317,6 +317,8 @@ public:
   CreateUnorderedAccessView(
       ID3D12Resource *pCounter, const D3D12_UNORDERED_ACCESS_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor
   ) {
+    if (pCounter && !IsSameDevice(device_, pCounter))
+      return E_INVALIDARG;
     HRESULT hr;
     D3D12_UNORDERED_ACCESS_VIEW_DESC ViewDesc;
     if (!pDesc) {

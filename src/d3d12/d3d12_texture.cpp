@@ -1082,6 +1082,8 @@ public:
   CreateUnorderedAccessView(
       ID3D12Resource *pCounter, const D3D12_UNORDERED_ACCESS_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor
   ) {
+    if (pCounter)
+      return E_INVALIDARG;
     // See CreateShaderResourceView: a reserved UAV requires a native sparse
     // texture and a layout that the Metal sparse mapping path can represent.
     if (reserved_ && (packed_mip_count_ || !texture || !texture->current()))

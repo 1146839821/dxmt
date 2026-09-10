@@ -493,7 +493,7 @@ inline std::tuple<MTLD3D12RenderTargetDescriptorHeap *, UINT>
 GetRenderTargetHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
   auto *heap = impl.extract<MTLD3D12RenderTargetDescriptorHeap>();
-  if (!heap)
+  if (!heap || !pDevice || !IsSameDevice(pDevice, heap))
     return {nullptr, 0};
 
   D3D12_DESCRIPTOR_HEAP_DESC desc = {};
@@ -513,7 +513,7 @@ inline std::tuple<MTLD3D12DescriptorHeap *, UINT>
 GetShaderVisibleDescriptorHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
   auto *heap = impl.extract<MTLD3D12DescriptorHeap>();
-  if (!heap)
+  if (!heap || !pDevice || !IsSameDevice(pDevice, heap))
     return {nullptr, 0};
 
   D3D12_DESCRIPTOR_HEAP_DESC desc = {};
@@ -532,7 +532,7 @@ inline std::tuple<MTLD3D12SamplerDescriptorHeap *, UINT>
 GetSamplerDescriptorHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
   auto *heap = impl.extract<MTLD3D12SamplerDescriptorHeap>();
-  if (!heap)
+  if (!heap || !pDevice || !IsSameDevice(pDevice, heap))
     return {nullptr, 0};
 
   D3D12_DESCRIPTOR_HEAP_DESC desc = {};
