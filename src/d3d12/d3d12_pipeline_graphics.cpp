@@ -957,6 +957,10 @@ public:
           return E_INVALIDARG;
 
         rt.write_mask = kColorWriteMaskMap[renderTarget.RenderTargetWriteMask];
+        // RGB9E5 is a packed RGB format with no alpha channel.  Metal treats
+        // its write mask as an all-or-nothing operation.
+        if (rt.pixel_format == WMTPixelFormatRGB9E5Float)
+          rt.write_mask = (rt.write_mask & ~WMTColorWriteMaskAlpha) ? WMTColorWriteMaskAll : 0;
         if (renderTarget.BlendEnable) {
           if (!any_bit_set(device_->GetMTLPixelFormatCapability(rt.pixel_format) & FormatCapability::Blend)) {
             WARN("CreateGraphicsPipelineState: pixel format ", rt.pixel_format, " is not blendable");
@@ -1068,6 +1072,13 @@ public:
 
       info.raster_sample_count = pDesc->SampleDesc.Count;
       info.support_indirect_command_buffers = true;
+      // Hardware alpha-to-coverage must be disabled when an AIRCONV pixel
+      // shader supplies an explicit SV_Coverage value.  MSC shaders do not
+      // expose this reflection, so the fixed-function state is enabled for
+      // that backend and the shader's own coverage semantics remain intact.
+      info.alpha_to_coverage_enabled =
+          pDesc->BlendState.AlphaToCoverageEnable && pDesc->PS.pShaderBytecode &&
+          (use_msc || !ref_ps.PixelShader.HasCoverageOutput);
 
       if (use_msc_tessellation) {
         if (pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH)
@@ -1230,7 +1241,7 @@ public:
 
     // DSSO
     {
-      WMTDepthStencilInfo info;
+      WMTDepthStencilInfo info = {};
       info.depth_compare_function = WMTCompareFunctionAlways;
       info.depth_write_enabled = false;
       info.front_stencil.enabled = false;
@@ -1299,6 +1310,53 @@ public:
         ERR("Failed to create DSSO with depth and stencil disabled");
         return E_FAIL;
       }
+
+      auto depth_readonly_info = info;
+      depth_readonly_info.depth_write_enabled = false;
+      dsso_depth_readonly = metal.newDepthStencilState(depth_readonly_info);
+      if (!dsso_depth_readonly) {
+        ERR("Failed to create DSSO with depth read-only");
+        return E_FAIL;
+      }
+
+      auto stencil_readonly_info = info;
+      for (auto *stencil : {&stencil_readonly_info.front_stencil, &stencil_readonly_info.back_stencil}) {
+        stencil->depth_stencil_pass_op = WMTStencilOperationKeep;
+        stencil->stencil_fail_op = WMTStencilOperationKeep;
+        stencil->depth_fail_op = WMTStencilOperationKeep;
+      }
+      dsso_stencil_readonly = metal.newDepthStencilState(stencil_readonly_info);
+      if (!dsso_stencil_readonly) {
+        ERR("Failed to create DSSO with stencil read-only");
+        return E_FAIL;
+      }
+
+      auto readonly_info = depth_readonly_info;
+      readonly_info.front_stencil = stencil_readonly_info.front_stencil;
+      readonly_info.back_stencil = stencil_readonly_info.back_stencil;
+      dsso_readonly = metal.newDepthStencilState(readonly_info);
+      if (!dsso_readonly) {
+        ERR("Failed to create DSSO with depth and stencil read-only");
+        return E_FAIL;
+      }
+
+      auto depth_readonly_stencil_disabled_info = depth_readonly_info;
+      depth_readonly_stencil_disabled_info.front_stencil.enabled = false;
+      depth_readonly_stencil_disabled_info.back_stencil.enabled = false;
+      dsso_depth_readonly_stencil_disabled = metal.newDepthStencilState(depth_readonly_stencil_disabled_info);
+      if (!dsso_depth_readonly_stencil_disabled) {
+        ERR("Failed to create DSSO with depth read-only and stencil disabled");
+        return E_FAIL;
+      }
+
+      auto stencil_readonly_depth_disabled_info = stencil_readonly_info;
+      stencil_readonly_depth_disabled_info.depth_compare_function = WMTCompareFunctionAlways;
+      stencil_readonly_depth_disabled_info.depth_write_enabled = false;
+      dsso_stencil_readonly_depth_disabled = metal.newDepthStencilState(stencil_readonly_depth_disabled_info);
+      if (!dsso_stencil_readonly_depth_disabled) {
+        ERR("Failed to create DSSO with stencil read-only and depth disabled");
+        return E_FAIL;
+      }
     }
 
     {
@@ -1324,6 +1382,29 @@ public:
     }
 
     return S_OK;
+  }
+
+  WMT::DepthStencilState
+  GetDepthStencilState(uint8_t planar_flags, uint8_t readonly_flags) const override {
+    switch (planar_flags & 3) {
+    case 3:
+      switch (readonly_flags & 3) {
+      case 3:
+        return dsso_readonly;
+      case 2:
+        return dsso_stencil_readonly;
+      case 1:
+        return dsso_depth_readonly;
+      default:
+        return dsso;
+      }
+    case 2:
+      return readonly_flags & 2 ? dsso_stencil_readonly_depth_disabled : dsso_depth_disabled;
+    case 1:
+      return readonly_flags & 1 ? dsso_depth_readonly_stencil_disabled : dsso_stencil_disabled;
+    default:
+      return dsso_depth_stencil_disabled;
+    }
   }
 
   HRESULT

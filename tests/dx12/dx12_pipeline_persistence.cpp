@@ -403,6 +403,7 @@ main(int argc, char **argv) {
   ID3D12PipelineState *stale_token_pso = nullptr;
   ID3D12PipelineState *foreign_token_pso = nullptr;
   ID3D12PipelineState *invalid_descriptor_pso = nullptr;
+  ID3D12PipelineState *alpha_to_coverage_pso = nullptr;
   ID3D12PipelineState *canonical_disabled_pso = nullptr;
   ID3D12PipelineState *inactive_graphics_pso = nullptr;
   ID3D12PipelineState *inactive_graphics_changed_pso = nullptr;
@@ -452,6 +453,7 @@ main(int argc, char **argv) {
     Release(inactive_graphics_changed_pso);
     Release(inactive_graphics_pso);
     Release(canonical_disabled_pso);
+    Release(alpha_to_coverage_pso);
     Release(invalid_descriptor_pso);
     Release(foreign_token_pso);
     Release(stale_token_pso);
@@ -630,16 +632,13 @@ main(int argc, char **argv) {
       ))
     return fail("invalid input format was accepted");
 
-  auto unsupported_alpha_to_coverage_desc = graphics_desc;
-  unsupported_alpha_to_coverage_desc.BlendState.AlphaToCoverageEnable = TRUE;
+  auto alpha_to_coverage_desc = graphics_desc;
+  alpha_to_coverage_desc.BlendState.AlphaToCoverageEnable = TRUE;
   if (!CheckHR(
-          "CreateGraphicsPipelineState with unsupported alpha-to-coverage",
-          device->CreateGraphicsPipelineState(
-              &unsupported_alpha_to_coverage_desc, IID_PPV_ARGS(&invalid_descriptor_pso)
-          ),
-          E_NOTIMPL
+          "CreateGraphicsPipelineState with alpha-to-coverage",
+          device->CreateGraphicsPipelineState(&alpha_to_coverage_desc, IID_PPV_ARGS(&alpha_to_coverage_pso))
       ))
-    return fail("unsupported alpha-to-coverage was accepted");
+    return fail("alpha-to-coverage pipeline creation failed");
 
   auto unsupported_forced_sample_desc = graphics_desc;
   unsupported_forced_sample_desc.RasterizerState.ForcedSampleCount = 1;

@@ -89,6 +89,7 @@ struct ShaderSet {
   std::vector<uint8_t> geometry_root_srv_uav;
   std::vector<uint8_t> adjacency_geometry;
   std::vector<uint8_t> pixel;
+  std::vector<uint8_t> pixel_query;
 };
 
 bool CompileShaders(pD3DCompile compile_shader, ShaderSet &shaders) {
@@ -227,6 +228,21 @@ float4 ps_main(PSInput input) : SV_Target {
   return input.color;
 }
 )";
+  static constexpr char pixel_query_source[] = R"(
+Texture2D<float4> input_texture : register(t0);
+
+struct PSInput {
+  float4 position : SV_Position;
+  float4 color : COLOR;
+};
+
+float4 ps_main(PSInput input) : SV_Target {
+  uint width;
+  uint height;
+  input_texture.GetDimensions(width, height);
+  return width == 0 && height == 0 ? float4(1.0, 1.0, 1.0, 1.0) : float4(1.0, 0.0, 0.0, 1.0);
+}
+)";
 
   return CompileShader(compile_shader, vertex_source, "dx12_graphics_sm5_vs.hlsl", "vs_main", "vs_5_0",
                        shaders.vertex) &&
@@ -243,7 +259,9 @@ float4 ps_main(PSInput input) : SV_Target {
                        shaders.geometry_root_srv_uav) &&
          CompileShader(compile_shader, adjacency_geometry_source, "dx12_graphics_sm5_adj_gs.hlsl", "gs_main",
                        "gs_5_0", shaders.adjacency_geometry) &&
-         CompileShader(compile_shader, pixel_source, "dx12_graphics_sm5_ps.hlsl", "ps_main", "ps_5_0", shaders.pixel);
+         CompileShader(compile_shader, pixel_source, "dx12_graphics_sm5_ps.hlsl", "ps_main", "ps_5_0", shaders.pixel) &&
+         CompileShader(compile_shader, pixel_query_source, "dx12_graphics_sm5_null_query_ps.hlsl", "ps_main", "ps_5_0",
+                       shaders.pixel_query);
 }
 
 struct TestCase {
@@ -259,6 +277,7 @@ struct TestCase {
   bool geometry_root_cbv = false;
   bool zero_index_view = false;
   bool geometry_root_srv_uav = false;
+  bool null_texture_query = false;
 };
 
 bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &test) {
@@ -304,6 +323,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   ID3DBlob *root_blob = nullptr;
   ID3DBlob *root_error = nullptr;
   ID3D12DescriptorHeap *rtv_heap = nullptr;
+  ID3D12DescriptorHeap *shader_heap = nullptr;
   ID3D12Resource *render_target = nullptr;
   ID3D12Resource *vertex_buffer = nullptr;
   ID3D12Resource *index_buffer = nullptr;
@@ -347,6 +367,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     Release(index_buffer);
     Release(vertex_buffer);
     Release(render_target);
+    Release(shader_heap);
     Release(rtv_heap);
     Release(root_error);
     Release(root_blob);
@@ -370,8 +391,21 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     return fail("queue setup failed");
 
   D3D12_ROOT_PARAMETER root_parameters[2] = {};
+  D3D12_DESCRIPTOR_RANGE descriptor_range = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
-  if (test.root_cbv || test.geometry_root_cbv) {
+  if (test.null_texture_query) {
+    descriptor_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    descriptor_range.NumDescriptors = 1;
+    descriptor_range.BaseShaderRegister = 0;
+    descriptor_range.RegisterSpace = 0;
+    descriptor_range.OffsetInDescriptorsFromTableStart = 0;
+    root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    root_parameters[0].DescriptorTable.NumDescriptorRanges = 1;
+    root_parameters[0].DescriptorTable.pDescriptorRanges = &descriptor_range;
+    root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    root_desc.NumParameters = 1;
+    root_desc.pParameters = root_parameters;
+  } else if (test.root_cbv || test.geometry_root_cbv) {
     root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     root_parameters[0].Descriptor.ShaderRegister = 0;
     root_parameters[0].ShaderVisibility = test.geometry_root_cbv ? D3D12_SHADER_VISIBILITY_GEOMETRY
@@ -416,8 +450,10 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc = {};
   pso_desc.pRootSignature = root_signature;
   pso_desc.VS = {vertex_shader.data(), vertex_shader.size()};
-  pso_desc.GS = {geometry_shader.data(), geometry_shader.size()};
-  pso_desc.PS = {shaders.pixel.data(), shaders.pixel.size()};
+  pso_desc.GS = test.null_texture_query ? D3D12_SHADER_BYTECODE{}
+                                         : D3D12_SHADER_BYTECODE{geometry_shader.data(), geometry_shader.size()};
+  const auto &pixel_shader = test.null_texture_query ? shaders.pixel_query : shaders.pixel;
+  pso_desc.PS = {pixel_shader.data(), pixel_shader.size()};
   pso_desc.InputLayout = test.no_input ? D3D12_INPUT_LAYOUT_DESC{} : D3D12_INPUT_LAYOUT_DESC{input_layout, 2};
   pso_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   pso_desc.NumRenderTargets = 1;
@@ -452,6 +488,22 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     return fail("RTV heap creation failed");
   auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateRenderTargetView(render_target, nullptr, rtv);
+
+  if (test.null_texture_query) {
+    D3D12_DESCRIPTOR_HEAP_DESC shader_heap_desc = {};
+    shader_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    shader_heap_desc.NumDescriptors = 1;
+    shader_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (!CheckHR("CreateShaderHeap", device->CreateDescriptorHeap(&shader_heap_desc, IID_PPV_ARGS(&shader_heap))))
+      return fail("shader heap creation failed");
+    D3D12_SHADER_RESOURCE_VIEW_DESC null_srv = {};
+    null_srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    null_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    null_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    null_srv.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(nullptr, &null_srv,
+                                     shader_heap->GetCPUDescriptorHandleForHeapStart());
+  }
 
   auto vertex_desc = BufferDescription(sizeof(Vertex) * vertex_count);
   if (!CheckHR("CreateVertexBuffer",
@@ -558,7 +610,11 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   list->SetPipelineState(pso);
   if (root_signature) {
     list->SetGraphicsRootSignature(root_signature);
-    if (test.geometry_root_srv_uav) {
+    if (test.null_texture_query) {
+      ID3D12DescriptorHeap *heaps[] = {shader_heap};
+      list->SetDescriptorHeaps(1, heaps);
+      list->SetGraphicsRootDescriptorTable(0, shader_heap->GetGPUDescriptorHandleForHeapStart());
+    } else if (test.geometry_root_srv_uav) {
       list->SetGraphicsRootShaderResourceView(0, root_data->GetGPUVirtualAddress());
       list->SetGraphicsRootUnorderedAccessView(1, root_uav_data->GetGPUVirtualAddress());
     } else {
@@ -694,6 +750,8 @@ int main(int argc, char **argv) {
        false, true},
       {"geometry-root-srv-uav", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
        0x0000ff00u, false, false, false, true},
+      {"null-texture-query", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x00ffffffu, false, false, false, false, true},
   };
 
   std::vector<const TestCase *> selected;

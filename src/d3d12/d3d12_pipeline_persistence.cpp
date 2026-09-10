@@ -581,7 +581,7 @@ ValidatePipelineStreamData(const D3D12PipelineStreamData &data) {
   if (data.type == D3D12PipelineType::Graphics && (data.domain_shader.empty() != data.hull_shader.empty()))
     return E_INVALIDARG;
   if (data.type == D3D12PipelineType::Graphics &&
-      (data.blend_state.AlphaToCoverageEnable ||
+      (
 #ifdef DXMT_NO_PRIVATE_API
        HasActiveLogicOp(data.blend_state, data.num_render_targets) ||
 #else
@@ -619,7 +619,7 @@ ValidateGraphicsPipelineDescriptor(MTLD3D12Device *device, const D3D12_GRAPHICS_
     return E_INVALIDARG;
   if ((desc.HS.pShaderBytecode != nullptr) != (desc.DS.pShaderBytecode != nullptr))
     return E_INVALIDARG;
-  if (desc.BlendState.AlphaToCoverageEnable ||
+  if (
 #ifdef DXMT_NO_PRIVATE_API
       HasActiveLogicOp(desc.BlendState, desc.NumRenderTargets) ||
 #else
