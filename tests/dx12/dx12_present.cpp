@@ -58,10 +58,12 @@ int main() {
   IDXGISwapChain4 *tearing_swapchain = nullptr;
   IDXGISwapChain1 *swapchain1 = nullptr;
   DXGI_SWAP_CHAIN_DESC1 desc = {};
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
   bool passed = true;
 
   if (D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)) != S_OK ||
-      device->CreateCommandQueue(nullptr, IID_PPV_ARGS(&queue)) != S_OK ||
+      device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue)) != S_OK ||
       CreateDXGIFactory1(IID_PPV_ARGS(&factory)) != S_OK) {
     std::cerr << "Could not initialize D3D12 present test\n";
     passed = false;
