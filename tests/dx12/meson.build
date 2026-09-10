@@ -42,6 +42,10 @@ dx12_hdr = executable('dx12_hdr', 'dx12_hdr.cpp',
   dependencies: [ d3d12_dep, dxgi_dep ],
 )
 
+dx12_present = executable('dx12_present', 'dx12_present.cpp',
+  dependencies: [ d3d12_dep, dxgi_dep ],
+)
+
 dx12_pipeline_persistence = executable('dx12_pipeline_persistence', 'dx12_pipeline_persistence.cpp',
   dependencies: [ d3d12_dep ],
 )

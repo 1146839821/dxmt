@@ -1292,7 +1292,7 @@ public:
   }
 
   HRESULT
-  Present(Presenter *presenter, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable) {
+  Present(Presenter *presenter, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable, double after) {
     static uint32_t trace_present_count = 0;
     std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
     if (!WaitForSubmissionSpaceLocked())
@@ -1319,7 +1319,10 @@ public:
             " drawable_texture=", drawable_texture.handle);
     }
 
-    cmdbuf.presentDrawable(drawable);
+    if (after > 0)
+      cmdbuf.presentDrawableAfterMinimumDuration(drawable, after);
+    else
+      cmdbuf.presentDrawable(drawable);
     Submission submission;
     submission.command_buffer = cmdbuf;
     submission.latency_waitable = hLantecyWaitable;

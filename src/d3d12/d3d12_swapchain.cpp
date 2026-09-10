@@ -23,8 +23,12 @@
 #include "dxmt_presenter.hpp"
 #include "dxmt_info.hpp"
 #include "com/com_pointer.hpp"
+#include "config/config.hpp"
 #include "log/log.hpp"
+#include "wsi_monitor.hpp"
 #include "wsi_window.hpp"
+#include <algorithm>
+#include <cfloat>
 
 /**
 Ref: https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_3/nf-dxgi1_3-idxgiswapchain2-setmaximumframelatency
@@ -93,6 +97,8 @@ class MTLD3D12SwapChain final : public MTLDXGISubObject<IDXGISwapChain4, MTLD3D1
   DXGI_COLOR_SPACE_TYPE colorspace_ = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
   float scale_factor = 1.0;
   HUDState hud;
+  double init_refresh_rate_ = DBL_MAX;
+  int preferred_max_frame_rate = 0;
 
   std::vector<Com<MTLD3D12Resource>> backbuffers_;
 
@@ -144,6 +150,9 @@ public:
     } else {
       fullscreen_desc_.Windowed = true;
     }
+
+    preferred_max_frame_rate = Config::getInstance().getOption<int>("d3d12.preferredMaxFrameRate", 0);
+    UpdateRefreshRate();
 
     hud.initialize(GetVersionDescriptionText(12, device_->GetFeatureLevel()));
 
@@ -498,11 +507,19 @@ public:
   STDMETHODCALLTYPE
   Present1(UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS *pPresentParameters) final {
     static uint32_t trace_present_count = 0;
+    if (SyncInterval > 4)
+      return DXGI_ERROR_INVALID_CALL;
+    if ((PresentFlags & DXGI_PRESENT_ALLOW_TEARING) &&
+        (!(desc_.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) || SyncInterval != 0))
+      return DXGI_ERROR_INVALID_CALL;
+
     HRESULT hr = S_OK;
     if (desc_.Width == 0 || desc_.Height == 0)
       hr = DXGI_STATUS_OCCLUDED;
     if (PresentFlags & DXGI_PRESENT_TEST)
       return hr;
+
+    const double present_duration = PresentDuration(SyncInterval, PresentFlags);
 
     auto backbuffer_index = presentation_count_ % backbuffers_.size();
     auto &backbuffer = backbuffers_[backbuffer_index];
@@ -511,12 +528,40 @@ public:
             " backbuffer size=", backbuffer->texture->width(),
             "x", backbuffer->texture->height(), " flags=", PresentFlags);
     // TODO(d3d12): flush command queue and present
-    hr = queue_->Present(this->presenter.ptr(), backbuffer.ptr(), present_semaphore_);
+    hr = queue_->Present(this->presenter.ptr(), backbuffer.ptr(), present_semaphore_, present_duration);
 
     presentation_count_ += 1;
 
     return hr;
   };
+
+  void
+  UpdateRefreshRate() {
+    wsi::WsiMode current_mode;
+    if (wsi::getCurrentDisplayMode(monitor_, &current_mode) && current_mode.refreshRate.denominator != 0 &&
+        current_mode.refreshRate.numerator != 0) {
+      init_refresh_rate_ = (double)current_mode.refreshRate.numerator / (double)current_mode.refreshRate.denominator;
+    }
+  }
+
+  double
+  PresentDuration(UINT sync_interval, UINT present_flags) {
+    if (present_flags & DXGI_PRESENT_ALLOW_TEARING)
+      return 0.0;
+
+    UpdateRefreshRate();
+    const double configured_rate = preferred_max_frame_rate > 0 ? (double)preferred_max_frame_rate : 0.0;
+    const double refresh_rate = configured_rate > 0.0 ? configured_rate : init_refresh_rate_;
+    if (sync_interval == 0 && configured_rate == 0.0)
+      return 0.0;
+    if (refresh_rate <= 0.0 || refresh_rate == DBL_MAX)
+      return configured_rate > 0.0 ? 1.0 / configured_rate : 0.0;
+
+    return std::max(
+        sync_interval * 1.0 / refresh_rate,
+        configured_rate > 0.0 ? 1.0 / configured_rate : 0.0
+    );
+  }
 
   BOOL STDMETHODCALLTYPE
   IsTemporaryMonoSupported() final {
