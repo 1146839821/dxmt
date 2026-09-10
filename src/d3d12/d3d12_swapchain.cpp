@@ -22,6 +22,7 @@
 #include "dxmt_hud_state.hpp"
 #include "dxmt_presenter.hpp"
 #include "dxmt_info.hpp"
+#include "dxgi_present_validation.hpp"
 #include "com/com_pointer.hpp"
 #include "config/config.hpp"
 #include "log/log.hpp"
@@ -507,11 +508,9 @@ public:
   STDMETHODCALLTYPE
   Present1(UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS *pPresentParameters) final {
     static uint32_t trace_present_count = 0;
-    if (SyncInterval > 4)
-      return DXGI_ERROR_INVALID_CALL;
-    if ((PresentFlags & DXGI_PRESENT_ALLOW_TEARING) &&
-        (!(desc_.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) || SyncInterval != 0))
-      return DXGI_ERROR_INVALID_CALL;
+    HRESULT validation = ValidatePresentFlags(SyncInterval, PresentFlags, desc_.Flags, fullscreen_desc_.Windowed);
+    if (FAILED(validation))
+      return validation;
 
     HRESULT hr = S_OK;
     if (desc_.Width == 0 || desc_.Height == 0)

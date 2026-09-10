@@ -6,6 +6,7 @@
 #include "log/log.hpp"
 #include "util_string.hpp"
 #include "wsi_window.hpp"
+#include "dxgi_present_validation.hpp"
 #include "Metal.hpp"
 
 namespace dxmt {
@@ -111,6 +112,9 @@ public:
 
     if (!ppSwapChain || !pDesc || !hWnd || !pDevice)
       return DXGI_ERROR_INVALID_CALL;
+    HRESULT validation = ValidateSwapChainDesc(*pDesc);
+    if (FAILED(validation))
+      return validation;
 
     Com<IMTLSwapChainFactory> swapchain_factory;
     if (FAILED(pDevice->QueryInterface(IID_PPV_ARGS(&swapchain_factory)))) {

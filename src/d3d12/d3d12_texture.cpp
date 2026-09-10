@@ -764,17 +764,18 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   Map(UINT Subresource, const D3D12_RANGE *pReadRange, void **ppData) {
+    if (ppData)
+      *ppData = nullptr;
+
     // UNKNOWN is an opaque layout. D3D12 permits mapping opaque textures only
     // as a preparation for the CPU transfer helpers, so no CPU pointer may be
     // returned to the caller. Reserved resources remain unmappable even when
     // a native sparse backing exists.
-    if (reserved_ || !texture)
+    if (reserved_ || !texture || !IsCpuVisibleHeap(&heap_props_))
       return E_INVALIDARG;
 
-    if (ppData) {
-      *ppData = nullptr;
+    if (ppData)
       return E_INVALIDARG;
-    }
 
     // Opaque layouts do not expose a byte range. A null or empty range is
     // required by the D3D12 default-texture mapping contract.
@@ -804,6 +805,8 @@ public:
     const uint64_t subresource_count = uint64_t(desc_.MipLevels) * array_size;
     if (Subresource >= subresource_count)
       return E_INVALIDARG;
+    if (GetSubresourceState(Subresource) != D3D12_RESOURCE_STATE_COMMON)
+      return E_INVALIDARG;
 
     return S_OK;
   };
@@ -827,7 +830,7 @@ public:
   WriteToSubresource(
       UINT DstSubresource, const D3D12_BOX *pDstBox, const void *pSrcData, UINT SrcRowPitch, UINT SrcSlicePitch
   ) {
-    if (reserved_ || !texture)
+    if (reserved_ || !texture || !IsCpuVisibleHeap(&heap_props_))
       return E_INVALIDARG;
     if (!pSrcData || !desc_.MipLevels ||
         DstSubresource / desc_.MipLevels >=
@@ -840,6 +843,8 @@ public:
     uint32_t Level = 0, Slice = 0, Plane = 0;
     DecomposeSubresource(desc_, DstSubresource, &Level, &Slice, &Plane);
     if (Plane)
+      return E_INVALIDARG;
+    if (GetSubresourceState(DstSubresource) != D3D12_RESOURCE_STATE_COMMON)
       return E_INVALIDARG;
     D3D12_BOX full_box = GetResourceExtent(desc_, Level);
     D3D12_BOX box = pDstBox ? *pDstBox : full_box;
@@ -870,7 +875,7 @@ public:
   ReadFromSubresource(
       void *pDstData, UINT DstRowPitch, UINT DstSlicePitch, UINT SrcSubresource, const D3D12_BOX *pSrcBox
   ) {
-    if (reserved_ || !texture)
+    if (reserved_ || !texture || !IsCpuVisibleHeap(&heap_props_))
       return E_INVALIDARG;
     if (!pDstData || !desc_.MipLevels ||
         SrcSubresource / desc_.MipLevels >=
@@ -883,6 +888,8 @@ public:
     uint32_t Level = 0, Slice = 0, Plane = 0;
     DecomposeSubresource(desc_, SrcSubresource, &Level, &Slice, &Plane);
     if (Plane)
+      return E_INVALIDARG;
+    if (GetSubresourceState(SrcSubresource) != D3D12_RESOURCE_STATE_COMMON)
       return E_INVALIDARG;
     D3D12_BOX full_box = GetResourceExtent(desc_, Level);
     D3D12_BOX box = pSrcBox ? *pSrcBox : full_box;

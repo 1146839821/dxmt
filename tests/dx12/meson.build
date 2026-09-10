@@ -43,6 +43,7 @@ dx12_hdr = executable('dx12_hdr', 'dx12_hdr.cpp',
 )
 
 dx12_present = executable('dx12_present', 'dx12_present.cpp',
+  include_directories: [ include_directories('../../src/dxgi') ],
   dependencies: [ d3d12_dep, dxgi_dep ],
 )
 
@@ -374,6 +375,8 @@ dx12_predication = executable('dx12_predication', 'dx12_predication.cpp', depend
 dx12_enhanced_barriers = executable('dx12_enhanced_barriers', 'dx12_enhanced_barriers.cpp', dependencies: [ d3d12_dep ])
 dx12_descriptor_stress = executable('dx12_descriptor_stress', 'dx12_descriptor_stress.cpp', dependencies: [ d3d12_dep ])
 dx12_texture_map = executable('dx12_texture_map', 'dx12_texture_map.cpp', dependencies: [ d3d12_dep ])
+dx12_texture_cpu_oracle = executable('dx12_texture_cpu_oracle', 'dx12_texture_cpu_oracle.cpp', dependencies: [ d3d12_dep ])
+dx12_present_oracle = executable('dx12_present_oracle', 'dx12_present_oracle.cpp', dependencies: [ d3d12_dep, dxgi_dep ])
 dx12_descriptor_ownership = executable(
   'dx12_descriptor_ownership', 'dx12_descriptor_ownership.cpp',
   include_directories: [

@@ -5,6 +5,8 @@
 #include <d3d12.h>
 #include <dxgi1_5.h>
 
+#include "dxgi_present_validation.hpp"
+
 #include <iostream>
 
 namespace {
@@ -59,6 +61,13 @@ int main() {
   IDXGISwapChain1 *swapchain1 = nullptr;
   DXGI_SWAP_CHAIN_DESC1 desc = {};
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  const DXGI_SWAP_EFFECT tearing_effects[] = {
+      DXGI_SWAP_EFFECT_FLIP_DISCARD,
+      DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+      DXGI_SWAP_EFFECT_DISCARD,
+      DXGI_SWAP_EFFECT_SEQUENTIAL,
+  };
+  HRESULT fullscreen_hr = E_FAIL;
   queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
   bool passed = true;
 
@@ -95,11 +104,39 @@ int main() {
       "tearing without swapchain flag", swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING | DXGI_PRESENT_TEST),
       DXGI_ERROR_INVALID_CALL
   );
+  passed &= CheckEqual(
+      "helper tearing in fullscreen", dxmt::ValidatePresentFlags(
+          0, DXGI_PRESENT_ALLOW_TEARING, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, FALSE
+      ), DXGI_ERROR_INVALID_CALL
+  );
+  passed &= CheckEqual(
+      "helper tearing test in windowed mode", dxmt::ValidatePresentFlags(
+          0, DXGI_PRESENT_ALLOW_TEARING | DXGI_PRESENT_TEST, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, TRUE
+      ), DXGI_ERROR_INVALID_CALL
+  );
+  passed &= CheckEqual(
+      "helper tearing in windowed mode", dxmt::ValidatePresentFlags(
+          0, DXGI_PRESENT_ALLOW_TEARING, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, TRUE
+      ), S_OK
+  );
 
   // Exercise the real queue submission path after the deterministic TEST
   // probes above.  These calls must reach the Metal present scheduling path.
   passed &= CheckEqual("SyncInterval=0 present", swapchain->Present(0, 0), S_OK);
   passed &= CheckEqual("SyncInterval=1 present", swapchain->Present(1, 0), S_OK);
+
+  for (const auto effect : tearing_effects) {
+    auto matrix_desc = desc;
+    matrix_desc.SwapEffect = effect;
+    matrix_desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+    IDXGISwapChain1 *matrix_swapchain = nullptr;
+    const HRESULT matrix_hr = factory->CreateSwapChainForHwnd(
+        queue, hwnd, &matrix_desc, nullptr, nullptr, &matrix_swapchain
+    );
+    const HRESULT expected = dxmt::IsFlipModelSwapEffect(effect) ? S_OK : DXGI_ERROR_INVALID_CALL;
+    passed &= CheckEqual("tearing creation matrix", matrix_hr, expected);
+    Release(matrix_swapchain);
+  }
 
   desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
   swapchain1 = nullptr;
@@ -113,12 +150,24 @@ int main() {
   Release(swapchain1);
   passed &= CheckEqual(
       "tearing SyncInterval=0 test", tearing_swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING | DXGI_PRESENT_TEST),
-      S_OK
+      DXGI_ERROR_INVALID_CALL
   );
   passed &= CheckEqual(
       "tearing SyncInterval=1 test", tearing_swapchain->Present(1, DXGI_PRESENT_ALLOW_TEARING | DXGI_PRESENT_TEST),
       DXGI_ERROR_INVALID_CALL
   );
+
+  fullscreen_hr = tearing_swapchain->SetFullscreenState(TRUE, nullptr);
+  if (SUCCEEDED(fullscreen_hr)) {
+    passed &= CheckEqual(
+        "fullscreen tearing test", tearing_swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING | DXGI_PRESENT_TEST),
+        DXGI_ERROR_INVALID_CALL
+    );
+    passed &= CheckEqual("leave fullscreen", tearing_swapchain->SetFullscreenState(FALSE, nullptr), S_OK);
+  } else {
+    std::cout << "fullscreen exclusive unavailable in this environment: 0x" << std::hex
+              << static_cast<unsigned long>(fullscreen_hr) << std::dec << "\n";
+  }
 
 cleanup:
   Release(tearing_swapchain);

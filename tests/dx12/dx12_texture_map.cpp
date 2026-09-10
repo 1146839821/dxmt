@@ -44,6 +44,16 @@ D3D12_HEAP_PROPERTIES DefaultHeap() {
   return properties;
 }
 
+D3D12_HEAP_PROPERTIES CustomHeap(D3D12_CPU_PAGE_PROPERTY cpu_page_property) {
+  D3D12_HEAP_PROPERTIES properties = {};
+  properties.Type = D3D12_HEAP_TYPE_CUSTOM;
+  properties.CPUPageProperty = cpu_page_property;
+  properties.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+  properties.CreationNodeMask = 1;
+  properties.VisibleNodeMask = 1;
+  return properties;
+}
+
 D3D12_RESOURCE_DESC Texture2D(UINT width, UINT height, UINT16 array_size, UINT16 mip_levels, DXGI_FORMAT format,
                               UINT sample_count = 1, D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE) {
   D3D12_RESOURCE_DESC desc = {};
@@ -82,7 +92,7 @@ void ExpectMap(ID3D12Resource *resource, UINT subresource, const D3D12_RANGE *ra
     resource->Unmap(subresource, nullptr);
 }
 
-void CheckOpaqueTextureMap(ID3D12Device *device) {
+void CheckDefaultTextureCpuAccess(ID3D12Device *device) {
   Owned<ID3D12Resource> texture;
   const auto heap = DefaultHeap();
   const auto desc = Texture2D(4, 4, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM);
@@ -90,36 +100,135 @@ void CheckOpaqueTextureMap(ID3D12Device *device) {
                                                            D3D12_RESOURCE_STATE_COMMON, nullptr,
                                                            IID_PPV_ARGS(&texture.ptr)));
 
-  ExpectMap(texture.ptr, 0, nullptr, S_OK, "map-null");
+  ExpectMap(texture.ptr, 0, nullptr, E_INVALIDARG, "default-map-null");
   D3D12_RANGE empty_range = {4, 4};
-  ExpectMap(texture.ptr, 0, &empty_range, S_OK, "map-empty-range");
+  ExpectMap(texture.ptr, 0, &empty_range, E_INVALIDARG, "default-map-empty-range");
   D3D12_RANGE reversed_range = {8, 4};
-  ExpectMap(texture.ptr, 0, &reversed_range, S_OK, "map-reversed-range");
+  ExpectMap(texture.ptr, 0, &reversed_range, E_INVALIDARG, "default-map-reversed-range");
   D3D12_RANGE non_empty_range = {0, 1};
-  ExpectMap(texture.ptr, 0, &non_empty_range, E_INVALIDARG, "map-range");
-  ExpectMap(texture.ptr, 1, nullptr, E_INVALIDARG, "map-subresource");
+  ExpectMap(texture.ptr, 0, &non_empty_range, E_INVALIDARG, "default-map-range");
+  ExpectMap(texture.ptr, 1, nullptr, E_INVALIDARG, "default-map-subresource");
 
   void *data = reinterpret_cast<void *>(UINT_PTR(0xfeedface));
-  Expect("map-pointer", texture.ptr->Map(0, nullptr, &data), E_INVALIDARG);
+  Expect("default-map-pointer", texture.ptr->Map(0, nullptr, &data), E_INVALIDARG);
   if (data) {
     std::cerr << "Map failure did not clear the caller output\n";
-    throw std::runtime_error("map-pointer-output");
+    throw std::runtime_error("default-map-pointer-output");
   }
 
   uint32_t source[16] = {};
   for (uint32_t i = 0; i < 16; i++)
     source[i] = 0x10000000u + i;
-  Check("WriteToSubresource", texture.ptr->WriteToSubresource(0, nullptr, source, 4 * sizeof(uint32_t), 0));
+  Expect("default-WriteToSubresource",
+         texture.ptr->WriteToSubresource(0, nullptr, source, 4 * sizeof(uint32_t), 0), E_INVALIDARG);
   uint32_t destination[16] = {};
-  Check("ReadFromSubresource", texture.ptr->ReadFromSubresource(destination, 4 * sizeof(uint32_t), 0, 0, nullptr));
+  Expect("default-ReadFromSubresource",
+         texture.ptr->ReadFromSubresource(destination, 4 * sizeof(uint32_t), 0, 0, nullptr), E_INVALIDARG);
+}
+
+void CheckCpuVisibleCustomTexture(ID3D12Device *device) {
+  Owned<ID3D12Resource> texture;
+  const auto heap = CustomHeap(D3D12_CPU_PAGE_PROPERTY_WRITE_BACK);
+  const auto desc = Texture2D(4, 4, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM);
+  const HRESULT create_hr = device->CreateCommittedResource(
+      &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&texture.ptr));
+  if (FAILED(create_hr)) {
+    std::cout << "CUSTOM CPU-visible texture unavailable: 0x" << std::hex
+              << static_cast<unsigned long>(create_hr) << std::dec << "\n";
+    return;
+  }
+
+  ExpectMap(texture.ptr, 0, nullptr, S_OK, "custom-visible-map-null");
+  D3D12_RANGE empty_range = {4, 4};
+  ExpectMap(texture.ptr, 0, &empty_range, S_OK, "custom-visible-map-empty-range");
+  D3D12_RANGE non_empty_range = {0, 1};
+  ExpectMap(texture.ptr, 0, &non_empty_range, E_INVALIDARG, "custom-visible-map-range");
+  ExpectMap(texture.ptr, 1, nullptr, E_INVALIDARG, "custom-visible-map-subresource");
+
+  void *data = reinterpret_cast<void *>(UINT_PTR(0xfeedface));
+  Expect("custom-visible-map-pointer", texture.ptr->Map(0, nullptr, &data), E_INVALIDARG);
+  if (data) {
+    std::cerr << "Map failure did not clear the caller output\n";
+    throw std::runtime_error("custom-visible-map-pointer-output");
+  }
+
+  Check("custom-visible-map-for-transfer", texture.ptr->Map(0, nullptr, nullptr));
+  uint32_t source[16] = {};
+  for (uint32_t i = 0; i < 16; i++)
+    source[i] = 0x10000000u + i;
+  Check("custom-visible-WriteToSubresource",
+        texture.ptr->WriteToSubresource(0, nullptr, source, 4 * sizeof(uint32_t), 0));
+  uint32_t destination[16] = {};
+  Check("custom-visible-ReadFromSubresource",
+        texture.ptr->ReadFromSubresource(destination, 4 * sizeof(uint32_t), 0, 0, nullptr));
+  texture.ptr->Unmap(0, nullptr);
   if (std::memcmp(source, destination, sizeof(source)) != 0) {
-    std::cerr << "opaque texture transfer did not round-trip\n";
-    throw std::runtime_error("texture-transfer");
+    std::cerr << "CUSTOM CPU-visible texture transfer did not round-trip\n";
+    throw std::runtime_error("custom-visible-texture-transfer");
   }
 }
 
+void CheckCpuInvisibleCustomTexture(ID3D12Device *device) {
+  Owned<ID3D12Resource> texture;
+  const auto heap = CustomHeap(D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE);
+  const auto desc = Texture2D(4, 4, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM);
+  const HRESULT create_hr = device->CreateCommittedResource(
+      &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&texture.ptr));
+  if (FAILED(create_hr)) {
+    std::cout << "CUSTOM CPU-invisible texture unavailable: 0x" << std::hex
+              << static_cast<unsigned long>(create_hr) << std::dec << "\n";
+    return;
+  }
+
+  ExpectMap(texture.ptr, 0, nullptr, E_INVALIDARG, "custom-invisible-map");
+  uint32_t data[16] = {};
+  Expect("custom-invisible-WriteToSubresource",
+         texture.ptr->WriteToSubresource(0, nullptr, data, 4 * sizeof(uint32_t), 0), E_INVALIDARG);
+  Expect("custom-invisible-ReadFromSubresource",
+         texture.ptr->ReadFromSubresource(data, 4 * sizeof(uint32_t), 0, 0, nullptr), E_INVALIDARG);
+}
+
+void CheckNonCommonCpuVisibleTexture(ID3D12Device *device) {
+  Owned<ID3D12Resource> texture;
+  const auto heap = CustomHeap(D3D12_CPU_PAGE_PROPERTY_WRITE_BACK);
+  const auto desc = Texture2D(4, 4, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM);
+  const HRESULT create_hr = device->CreateCommittedResource(
+      &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&texture.ptr));
+  if (FAILED(create_hr)) {
+    std::cout << "CUSTOM non-COMMON texture unavailable: 0x" << std::hex
+              << static_cast<unsigned long>(create_hr) << std::dec << "\n";
+    return;
+  }
+
+  ExpectMap(texture.ptr, 0, nullptr, E_INVALIDARG, "custom-non-common-map");
+  uint32_t data[16] = {};
+  Expect("custom-non-common-WriteToSubresource",
+         texture.ptr->WriteToSubresource(0, nullptr, data, 4 * sizeof(uint32_t), 0), E_INVALIDARG);
+  Expect("custom-non-common-ReadFromSubresource",
+         texture.ptr->ReadFromSubresource(data, 4 * sizeof(uint32_t), 0, 0, nullptr), E_INVALIDARG);
+}
+
+void CheckReservedTexture(ID3D12Device *device) {
+  Owned<ID3D12Resource> texture;
+  auto desc = Texture2D(64, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM);
+  desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+  const auto hr = device->CreateReservedResource(
+      &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&texture.ptr));
+  if (FAILED(hr)) {
+    std::cout << "Reserved texture unavailable: 0x" << std::hex << static_cast<unsigned long>(hr) << std::dec << "\n";
+    return;
+  }
+
+  ExpectMap(texture.ptr, 0, nullptr, E_INVALIDARG, "reserved-map");
+  uint32_t data[16] = {};
+  Expect("reserved-WriteToSubresource",
+         texture.ptr->WriteToSubresource(0, nullptr, data, 4 * sizeof(uint32_t), 0), E_INVALIDARG);
+  Expect("reserved-ReadFromSubresource",
+         texture.ptr->ReadFromSubresource(data, 4 * sizeof(uint32_t), 0, 0, nullptr), E_INVALIDARG);
+}
+
 void CheckSubresourceAndFormatRestrictions(ID3D12Device *device) {
-  const auto heap = DefaultHeap();
+  const auto heap = CustomHeap(D3D12_CPU_PAGE_PROPERTY_WRITE_BACK);
   auto upload_heap = DefaultHeap();
   upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
   auto readback_heap = DefaultHeap();
@@ -192,12 +301,16 @@ int main() {
   Owned<ID3D12Device> device;
   Check("D3D12CreateDevice", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.ptr)));
   try {
-    CheckOpaqueTextureMap(device.ptr);
+    CheckDefaultTextureCpuAccess(device.ptr);
+    CheckCpuVisibleCustomTexture(device.ptr);
+    CheckCpuInvisibleCustomTexture(device.ptr);
+    CheckNonCommonCpuVisibleTexture(device.ptr);
+    CheckReservedTexture(device.ptr);
     CheckSubresourceAndFormatRestrictions(device.ptr);
   } catch (const std::exception &error) {
     std::cerr << error.what() << "\n";
     return 1;
   }
-  std::cout << "D3D12 opaque texture Map semantics passed\n";
+  std::cout << "D3D12 texture CPU access semantics passed\n";
   return 0;
 }
