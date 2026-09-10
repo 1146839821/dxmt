@@ -5249,6 +5249,7 @@ MTLD3D12CommandAllocatorImpl::CreateCommandList(
     UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, ID3D12PipelineState *pInitialPipelineState, REFIID riid,
     void **ppCommandList
 ) {
+  InitReturnPtr(ppCommandList);
   if (Type != type_)
     return E_INVALIDARG;
 

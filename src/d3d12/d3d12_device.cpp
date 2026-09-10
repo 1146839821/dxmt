@@ -515,6 +515,7 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE Type, REFIID riid, void **ppCommandAllocator) {
+    InitReturnPtr(ppCommandAllocator);
     return dxmt::CreateCommandAllocator(this, Type, riid, ppCommandAllocator);
   };
 
@@ -533,6 +534,7 @@ public:
       UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, ID3D12CommandAllocator *pCommandAllocator,
       ID3D12PipelineState *pInitialPipelineState, REFIID riid, void **ppCommandList
   ) {
+    InitReturnPtr(ppCommandList);
     if ((NodeMask & ~1u) || !pCommandAllocator || !IsSameDevice(this, pCommandAllocator) ||
         (pInitialPipelineState && !IsSameDevice(this, pInitialPipelineState)))
       return E_INVALIDARG;

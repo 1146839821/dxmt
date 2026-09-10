@@ -116,6 +116,40 @@ int main() {
     passed = false;
   }
 
+  void *const output_sentinel = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+  void *invalid_allocator = output_sentinel;
+  const HRESULT invalid_allocator_hr = device->CreateCommandAllocator(
+      static_cast<D3D12_COMMAND_LIST_TYPE>(0x7fffffffu), __uuidof(ID3D12CommandAllocator), &invalid_allocator
+  );
+  if (invalid_allocator_hr != E_INVALIDARG || invalid_allocator != nullptr) {
+    std::cerr << "CreateCommandAllocator did not clear output for an invalid type: hr=0x" << std::hex
+              << static_cast<unsigned long>(invalid_allocator_hr) << " output=" << invalid_allocator << std::dec
+              << "\n";
+    if (invalid_allocator && invalid_allocator != output_sentinel)
+      reinterpret_cast<IUnknown *>(invalid_allocator)->Release();
+    passed = false;
+  }
+
+  ID3D12CommandAllocator *mismatch_allocator = nullptr;
+  if (device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&mismatch_allocator)) != S_OK) {
+    std::cerr << "CreateCommandAllocator could not create a mismatch test allocator\n";
+    passed = false;
+  } else {
+    ID3D12GraphicsCommandList *invalid_list =
+        reinterpret_cast<ID3D12GraphicsCommandList *>(output_sentinel);
+    const HRESULT invalid_list_hr = device->CreateCommandList(
+        0, D3D12_COMMAND_LIST_TYPE_COMPUTE, mismatch_allocator, nullptr, IID_PPV_ARGS(&invalid_list)
+    );
+    if (invalid_list_hr != E_INVALIDARG || invalid_list != nullptr) {
+      std::cerr << "CreateCommandList did not clear output for a type mismatch: hr=0x" << std::hex
+                << static_cast<unsigned long>(invalid_list_hr) << " output=" << invalid_list << std::dec << "\n";
+      if (invalid_list && invalid_list != reinterpret_cast<ID3D12GraphicsCommandList *>(output_sentinel))
+        invalid_list->Release();
+      passed = false;
+    }
+    mismatch_allocator->Release();
+  }
+
   passed &= ExpectQuery<ID3D12Device1>(device, "ID3D12Device1", S_OK);
   passed &= ExpectQuery<ID3D12Device2>(device, "ID3D12Device2", S_OK);
   passed &= ExpectQuery<ID3D12Device3>(device, "ID3D12Device3", S_OK);
