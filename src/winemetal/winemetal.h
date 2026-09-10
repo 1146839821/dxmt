@@ -1327,6 +1327,7 @@ enum WMTRenderCommandType : uint16_t {
   WMTRenderCommandMSCTessellationDrawIndexed,
   WMTRenderCommandMSCGeometryDraw,
   WMTRenderCommandMSCGeometryDrawIndexed,
+  WMTRenderCommandSetDepthStencilState,
 };
 
 struct wmtcmd_render_nop {
@@ -1578,6 +1579,13 @@ struct wmtcmd_render_setdsso {
   struct WMTMemoryPointer next;
   obj_handle_t dsso;
   uint8_t stencil_ref;
+};
+
+struct wmtcmd_render_setdepthstencilstate {
+  enum WMTRenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  obj_handle_t depth_stencil_state;
 };
 
 struct wmtcmd_render_setblendcolor {

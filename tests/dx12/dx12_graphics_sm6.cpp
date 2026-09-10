@@ -48,8 +48,9 @@ int main(int argc, char **argv) {
   const bool root_uav = argc == 4 && strcmp(argv[3], "--root-uav") == 0;
   const bool textured_root_cbv = argc == 4 && strcmp(argv[3], "--texture-root-cbv") == 0;
   const bool logic_op = argc == 4 && strcmp(argv[3], "--logic-op") == 0;
+  const bool stencil = argc == 4 && strcmp(argv[3], "--stencil") == 0;
   if ((argc == 4 && !textured && !root_cbv && !root_constants && !root_srv &&
-       !root_uav && !textured_root_cbv && !logic_op) ||
+       !root_uav && !textured_root_cbv && !logic_op && !stencil) ||
       (argc == 5 && !geometry))
     return 2;
 
@@ -114,13 +115,16 @@ int main(int argc, char **argv) {
   ID3DBlob *root_blob = nullptr;
   ID3DBlob *root_error = nullptr;
   ID3D12PipelineState *pso = nullptr;
+  ID3D12PipelineState *stencil_pso = nullptr;
   ID3D12GraphicsCommandList *list = nullptr;
   ID3D12DescriptorHeap *rtv_heap = nullptr;
+  ID3D12DescriptorHeap *dsv_heap = nullptr;
   ID3D12DescriptorHeap *resource_heap = nullptr;
   ID3D12DescriptorHeap *sampler_heap = nullptr;
   ID3D12QueryHeap *query_heap = nullptr;
   ID3D12QueryHeap *timestamp_heap = nullptr;
   ID3D12Resource *render_target = nullptr;
+  ID3D12Resource *depth_stencil = nullptr;
   ID3D12Resource *vertex_buffer = nullptr;
   ID3D12Resource *index_buffer = nullptr;
   ID3D12Resource *root_data_buffer = nullptr;
@@ -141,13 +145,16 @@ int main(int argc, char **argv) {
   D3D12_HEAP_PROPERTIES texture_upload_heap = {};
   D3D12_HEAP_PROPERTIES readback_heap = {};
   D3D12_RESOURCE_DESC render_target_desc = {};
+  D3D12_RESOURCE_DESC depth_stencil_desc = {};
   D3D12_RESOURCE_DESC buffer_desc = {};
   D3D12_RESOURCE_DESC texture_desc = {};
   D3D12_RESOURCE_DESC readback_desc = {};
   D3D12_RESOURCE_DESC query_readback_desc = {};
   D3D12_QUERY_HEAP_DESC query_heap_desc = {};
   D3D12_CLEAR_VALUE clear_value = {};
+  D3D12_CLEAR_VALUE depth_stencil_clear = {};
   D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc = {};
+  D3D12_DESCRIPTOR_HEAP_DESC dsv_heap_desc = {};
   D3D12_DESCRIPTOR_HEAP_DESC resource_heap_desc = {};
   D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_desc = {};
   D3D12_INPUT_ELEMENT_DESC input_layout[] = {
@@ -160,6 +167,7 @@ int main(int argc, char **argv) {
   D3D12_VERTEX_BUFFER_VIEW vertex_view = {};
   D3D12_INDEX_BUFFER_VIEW index_view = {};
   D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = {};
+  D3D12_CPU_DESCRIPTOR_HANDLE dsv_handle = {};
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
   D3D12_TEXTURE_COPY_LOCATION copy_dst = {};
   D3D12_TEXTURE_COPY_LOCATION copy_src = {};
@@ -340,6 +348,35 @@ int main(int argc, char **argv) {
   rtv_handle = rtv_heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateRenderTargetView(render_target, nullptr, rtv_handle);
 
+  if (stencil) {
+    depth_stencil_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    depth_stencil_desc.Width = 1;
+    depth_stencil_desc.Height = 1;
+    depth_stencil_desc.DepthOrArraySize = 1;
+    depth_stencil_desc.MipLevels = 1;
+    depth_stencil_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    depth_stencil_desc.SampleDesc.Count = 1;
+    depth_stencil_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    depth_stencil_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    depth_stencil_clear.Format = depth_stencil_desc.Format;
+    depth_stencil_clear.DepthStencil.Depth = 1.0f;
+    depth_stencil_clear.DepthStencil.Stencil = 0x2a;
+    if (!CheckHR("CreateDepthStencil",
+                 device->CreateCommittedResource(
+                     &default_heap, D3D12_HEAP_FLAG_NONE, &depth_stencil_desc,
+                     D3D12_RESOURCE_STATE_DEPTH_WRITE, &depth_stencil_clear,
+                     IID_PPV_ARGS(&depth_stencil))))
+      goto cleanup;
+
+    dsv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    dsv_heap_desc.NumDescriptors = 1;
+    if (!CheckHR("CreateDSVHeap", device->CreateDescriptorHeap(
+                                      &dsv_heap_desc, IID_PPV_ARGS(&dsv_heap))))
+      goto cleanup;
+    dsv_handle = dsv_heap->GetCPUDescriptorHandleForHeapStart();
+    device->CreateDepthStencilView(depth_stencil, nullptr, dsv_handle);
+  }
+
   if (textured || textured_root_cbv) {
     resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     resource_heap_desc.NumDescriptors = 1;
@@ -499,6 +536,23 @@ int main(int argc, char **argv) {
   pso_desc.RTVFormats[0] = logic_op ? DXGI_FORMAT_R8G8B8A8_UINT : DXGI_FORMAT_R8G8B8A8_UNORM;
   pso_desc.SampleDesc.Count = 1;
   pso_desc.SampleMask = UINT_MAX;
+  if (stencil) {
+    pso_desc.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    pso_desc.DepthStencilState.DepthEnable = TRUE;
+    pso_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    pso_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    pso_desc.DepthStencilState.StencilEnable = TRUE;
+    pso_desc.DepthStencilState.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
+    pso_desc.DepthStencilState.StencilWriteMask = 0;
+    pso_desc.DepthStencilState.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
+    pso_desc.DepthStencilState.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+    pso_desc.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
+    pso_desc.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_EQUAL;
+    pso_desc.DepthStencilState.BackFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
+    pso_desc.DepthStencilState.BackFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+    pso_desc.DepthStencilState.BackFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
+    pso_desc.DepthStencilState.BackFace.StencilFunc = D3D12_COMPARISON_FUNC_EQUAL;
+  }
   pso_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
   pso_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
   pso_desc.RasterizerState.DepthClipEnable = TRUE;
@@ -526,6 +580,15 @@ int main(int argc, char **argv) {
           "CreateGraphicsPipelineState",
           device->CreateGraphicsPipelineState(&pso_desc, IID_PPV_ARGS(&pso))))
     goto cleanup;
+
+  if (stencil) {
+    auto second_pso_desc = pso_desc;
+    second_pso_desc.RasterizerState.DepthClipEnable = FALSE;
+    if (!CheckHR("CreateSecondGraphicsPipelineState",
+                 device->CreateGraphicsPipelineState(&second_pso_desc,
+                                                     IID_PPV_ARGS(&stencil_pso))))
+      goto cleanup;
+  }
 
   if (!CheckHR("CreateCommandList",
                device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -575,17 +638,31 @@ int main(int argc, char **argv) {
   list->IASetVertexBuffers(0, 1, &vertex_view);
   if (geometry_indexed)
     list->IASetIndexBuffer(&index_view);
-  list->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
-  if (logic_op)
+  list->OMSetRenderTargets(1, &rtv_handle, FALSE, stencil ? &dsv_handle : nullptr);
+  if (logic_op || stencil)
     list->ClearRenderTargetView(rtv_handle, clear_value.Color, 0, nullptr);
+  if (stencil)
+    list->ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0x2a, 0, nullptr);
   list->RSSetViewports(1, &viewport);
   list->RSSetScissorRects(1, &scissor);
   list->EndQuery(timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
   list->BeginQuery(query_heap, D3D12_QUERY_TYPE_OCCLUSION, 0);
+  if (stencil)
+    list->OMSetStencilRef(0x2a);
   if (geometry_indexed)
     list->DrawIndexedInstanced(draw_count, 1, 0, 0, 0);
   else
     list->DrawInstanced(draw_count, 1, 0, 0);
+  if (stencil) {
+    // Repeating the same value must not dirty the state, and switching PSOs
+    // must leave the application stencil reference untouched.
+    list->OMSetStencilRef(0x2a);
+    list->SetPipelineState(stencil_pso);
+    if (geometry_indexed)
+      list->DrawIndexedInstanced(draw_count, 1, 0, 0, 0);
+    else
+      list->DrawInstanced(draw_count, 1, 0, 0);
+  }
   list->EndQuery(query_heap, D3D12_QUERY_TYPE_OCCLUSION, 0);
   list->EndQuery(timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
 
@@ -702,6 +779,7 @@ int main(int argc, char **argv) {
                 : root_srv           ? "root SRV graphics"
                 : root_uav           ? "root UAV graphics"
                 : logic_op           ? "logic op graphics"
+                : stencil            ? "stencil graphics"
                 : textured_root_cbv  ? "root CBV textured graphics"
                 : textured           ? "textured graphics"
                                      : "graphics")
@@ -717,6 +795,8 @@ cleanup:
     list->Release();
   if (pso)
     pso->Release();
+  if (stencil_pso)
+    stencil_pso->Release();
   if (readback)
     readback->Release();
   if (query_readback)
@@ -735,8 +815,12 @@ cleanup:
     vertex_buffer->Release();
   if (render_target)
     render_target->Release();
+  if (depth_stencil)
+    depth_stencil->Release();
   if (rtv_heap)
     rtv_heap->Release();
+  if (dsv_heap)
+    dsv_heap->Release();
   if (sampler_heap)
     sampler_heap->Release();
   if (resource_heap)
