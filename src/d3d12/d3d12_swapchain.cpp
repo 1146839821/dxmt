@@ -330,6 +330,10 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   ResizeBuffers(UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format, UINT flags) final {
+    HRESULT validation = ValidateResizeBuffersFlags(desc_.Flags, flags, desc_.SwapEffect);
+    if (FAILED(validation))
+      return validation;
+
     static uint32_t trace_resize_count = 0;
     if (Width == 0 || Height == 0) {
       wsi::getWindowSize(hWnd, &desc_.Width, &desc_.Height);
@@ -374,6 +378,9 @@ public:
       backbuffers_.push_back(reinterpret_cast<MTLD3D12Resource *>(backbuffer.ptr()));
     }
 
+    desc_.Flags = (desc_.Flags & ~DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) |
+                  (flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+
     if (trace_resize_count++ < 16)
       DEBUG("D3D12 ResizeBuffers: ", desc_.Width, "x", desc_.Height, " format=", desc_.Format,
             " buffers=", backbuffers_.size(), " layer=", layer_weak_.handle);
@@ -402,7 +409,7 @@ public:
     if (pDesc->Format != DXGI_FORMAT_UNKNOWN && ConvertSwapChainFormat(pDesc->Format) != WMTPixelFormatInvalid)
       desc_.Format = pDesc->Format;
 
-    return ResizeBuffers(0, desc_.Width, desc_.Height, DXGI_FORMAT_UNKNOWN, 0);
+    return ResizeBuffers(0, desc_.Width, desc_.Height, DXGI_FORMAT_UNKNOWN, desc_.Flags);
   };
 
   void
@@ -722,7 +729,7 @@ CreateSwapChain(
   auto swapchain = Com(new MTLD3D12SwapChain(pFactory, pDevice, pQueue, hWnd, pDesc, pFullscreenDesc));
   if (!swapchain->IsInitialized())
     return E_FAIL;
-  HRESULT hr = swapchain->ResizeBuffers(0, pDesc->Width, pDesc->Height, DXGI_FORMAT_UNKNOWN, 0);
+  HRESULT hr = swapchain->ResizeBuffers(0, pDesc->Width, pDesc->Height, DXGI_FORMAT_UNKNOWN, pDesc->Flags);
   if (FAILED(hr))
     return hr;
   return swapchain->QueryInterface(IID_PPV_ARGS(ppSwapChain));

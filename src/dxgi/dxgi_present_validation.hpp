@@ -28,4 +28,13 @@ ValidatePresentFlags(UINT sync_interval, UINT present_flags, UINT swap_chain_fla
   return S_OK;
 }
 
+inline HRESULT
+ValidateResizeBuffersFlags(UINT current_flags, UINT requested_flags, DXGI_SWAP_EFFECT swap_effect) {
+  if ((current_flags ^ requested_flags) & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING)
+    return DXGI_ERROR_INVALID_CALL;
+  if ((requested_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) && !IsFlipModelSwapEffect(swap_effect))
+    return DXGI_ERROR_INVALID_CALL;
+  return S_OK;
+}
+
 } // namespace dxmt

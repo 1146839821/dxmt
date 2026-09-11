@@ -119,11 +119,65 @@ int main() {
           0, DXGI_PRESENT_ALLOW_TEARING, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, TRUE
       ), S_OK
   );
+  passed &= CheckEqual(
+      "resize helper preserve tearing", dxmt::ValidateResizeBuffersFlags(
+          DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING,
+          DXGI_SWAP_EFFECT_FLIP_DISCARD
+      ), S_OK
+  );
+  passed &= CheckEqual(
+      "resize helper remove tearing", dxmt::ValidateResizeBuffersFlags(
+          DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, 0, DXGI_SWAP_EFFECT_FLIP_DISCARD
+      ), DXGI_ERROR_INVALID_CALL
+  );
+  passed &= CheckEqual(
+      "resize helper add tearing", dxmt::ValidateResizeBuffersFlags(
+          0, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, DXGI_SWAP_EFFECT_FLIP_DISCARD
+      ), DXGI_ERROR_INVALID_CALL
+  );
+  passed &= CheckEqual(
+      "resize helper reject legacy tearing", dxmt::ValidateResizeBuffersFlags(
+          0, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, DXGI_SWAP_EFFECT_DISCARD
+      ), DXGI_ERROR_INVALID_CALL
+  );
 
   // Exercise the real queue submission path after the deterministic TEST
   // probes above.  These calls must reach the Metal present scheduling path.
   passed &= CheckEqual("SyncInterval=0 present", swapchain->Present(0, 0), S_OK);
   passed &= CheckEqual("SyncInterval=1 present", swapchain->Present(1, 0), S_OK);
+
+  {
+    struct ResizeCase {
+      const char *name;
+      UINT created_flags;
+      UINT resize_flags;
+      HRESULT expected;
+    };
+    const ResizeCase resize_cases[] = {
+        {"resize.preserve-tearing", DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING,
+         DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, S_OK},
+        {"resize.remove-tearing", DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, 0, DXGI_ERROR_INVALID_CALL},
+        {"resize.add-tearing", 0, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, DXGI_ERROR_INVALID_CALL},
+        {"resize.remain-nontearing", 0, 0, S_OK},
+    };
+    for (const auto &resize_case : resize_cases) {
+      auto resize_desc = desc;
+      resize_desc.Flags = resize_case.created_flags;
+      IDXGISwapChain1 *resize_swapchain = nullptr;
+      const HRESULT create_hr = factory->CreateSwapChainForHwnd(
+          queue, hwnd, &resize_desc, nullptr, nullptr, &resize_swapchain
+      );
+      passed &= CheckEqual("resize matrix creation", create_hr, S_OK);
+      if (SUCCEEDED(create_hr)) {
+        passed &= CheckEqual(
+            resize_case.name,
+            resize_swapchain->ResizeBuffers(0, 64, 64, DXGI_FORMAT_UNKNOWN, resize_case.resize_flags),
+            resize_case.expected
+        );
+      }
+      Release(resize_swapchain);
+    }
+  }
 
   for (const auto effect : tearing_effects) {
     auto matrix_desc = desc;
@@ -156,6 +210,17 @@ int main() {
       "tearing SyncInterval=1 test", tearing_swapchain->Present(1, DXGI_PRESENT_ALLOW_TEARING | DXGI_PRESENT_TEST),
       DXGI_ERROR_INVALID_CALL
   );
+  passed &= CheckEqual(
+      "tearing windowed real present", tearing_swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING), S_OK
+  );
+
+  {
+    DXGI_MODE_DESC resize_target = {};
+    resize_target.Width = 64;
+    resize_target.Height = 64;
+    resize_target.Format = DXGI_FORMAT_UNKNOWN;
+    passed &= CheckEqual("tearing ResizeTarget", tearing_swapchain->ResizeTarget(&resize_target), S_OK);
+  }
 
   fullscreen_hr = tearing_swapchain->SetFullscreenState(TRUE, nullptr);
   if (SUCCEEDED(fullscreen_hr)) {

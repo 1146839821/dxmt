@@ -7,6 +7,7 @@
 
 #include <iomanip>
 #include <iostream>
+#include <string>
 
 namespace {
 
@@ -99,6 +100,35 @@ int main() {
     Release(swapchain);
   }
 
+  struct ResizeCase {
+    const char *name;
+    UINT created_flags;
+    UINT resize_flags;
+  };
+  const ResizeCase resize_cases[] = {
+      {"resize.preserve-tearing", DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING,
+       DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING},
+      {"resize.remove-tearing", DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, 0},
+      {"resize.add-tearing", 0, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING},
+      {"resize.remain-nontearing", 0, 0},
+  };
+  desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+  for (const auto &resize_case : resize_cases) {
+    auto resize_desc = desc;
+    resize_desc.Flags = resize_case.created_flags;
+    IDXGISwapChain1 *resize_swapchain = nullptr;
+    const std::string create_name = std::string(resize_case.name) + ".create";
+    const std::string resize_name = std::string(resize_case.name) + ".resize";
+    const HRESULT create_hr = factory->CreateSwapChainForHwnd(
+        queue, hwnd, &resize_desc, nullptr, nullptr, &resize_swapchain
+    );
+    PrintHR(create_name.c_str(), create_hr);
+    if (SUCCEEDED(create_hr))
+      PrintHR(resize_name.c_str(), resize_swapchain->ResizeBuffers(
+                                      0, 64, 64, DXGI_FORMAT_UNKNOWN, resize_case.resize_flags));
+    Release(resize_swapchain);
+  }
+
   desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
   desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
   IDXGISwapChain1 *swapchain1 = nullptr;
@@ -110,6 +140,12 @@ int main() {
   if (SUCCEEDED(hr) && swapchain) {
     PrintHR("present.windowed.0.tearing.test", swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING | DXGI_PRESENT_TEST));
     PrintHR("present.windowed.1.tearing.test", swapchain->Present(1, DXGI_PRESENT_ALLOW_TEARING | DXGI_PRESENT_TEST));
+    PrintHR("present.windowed.0.tearing.real", swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING));
+    DXGI_MODE_DESC resize_target = {};
+    resize_target.Width = 64;
+    resize_target.Height = 64;
+    resize_target.Format = DXGI_FORMAT_UNKNOWN;
+    PrintHR("resize_target.tearing", swapchain->ResizeTarget(&resize_target));
     hr = swapchain->SetFullscreenState(TRUE, nullptr);
     PrintHR("SetFullscreenState.true", hr);
     if (SUCCEEDED(hr)) {
