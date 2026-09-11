@@ -185,7 +185,7 @@ This is an audit and semantic-closure record, not a capability declaration.
 | Shader status feedback | DXBC parsing now accepts feedback forms of `LD`, `LD_MS`, typed UAV load, sample, sample bias/LOD/gradient/compare, gather, and gather compare. Airconv stores the residency result and lowers `CheckAccessFullyMapped`. | Implemented for the texture/sampled paths exercised here. |
 | Raw/structured buffer feedback | The direct buffer read path has no texture residency result to map to the DXBC status operand. | Not implemented; Tier2 blocker. |
 | LOD clamp | Existing metadata and sampler plumbing carries resource/sampler minimum LOD information into Airconv/Metal. | Plumbing exists, but no independent sparse LOD-clamp semantic fixture was added in this slice. |
-| Packed mip tail | D3D12 packed metadata and logical tile ranges are modeled. Native sparse mapping is attempted only when `firstMipmapInTail` equals the D3D standard-mip boundary and Metal `tailSizeInBytes` equals the D3D packed-tail byte count; otherwise shader views and packed mappings stay rejected. The focused fixture is built but the current host reports `d3d_first=0`, `metal_first=1`, and 65536-byte tails on both sides. | `BLOCKED_BY_ARCHITECTURE`; Tier2 blocker. |
+| Packed mip tail | D3D12 packed metadata and logical tile ranges are modeled. Native sparse mapping is attempted only when `firstMipmapInTail` equals the D3D standard-mip boundary and Metal `tailSizeInBytes` equals the D3D packed-tail byte count; otherwise shader views and packed mappings stay rejected. The focused fixture is built but the current host reports `d3d_first=0`, `metal_first=1`, and 65536-byte tails on both sides. A native Windows run on the supplied Parallels Display Adapter reports `TiledResourcesTier=0` and rejects all three packed-resource creates with `0x80070057`, so it cannot provide the required supported-hardware matrix. | `BLOCKED_BY_ARCHITECTURE` plus `BLOCKED_BY_ORACLE_PLATFORM`; Tier2 blocker. |
 | Filtering footprint | The fixture uses point sampling only and does not independently prove fully mapped, fully NULL, or mixed mapped/NULL filter footprints. | Unverified; Tier2 blocker. |
 
 ### Requirements and assumptions
@@ -223,7 +223,11 @@ fixtures exist.
 `tests/dx12/dx12_tiled_tier2_oracle.cpp` is a buildable native-Windows oracle
 target. It prints the adapter, `D3D12CreateDevice`, tiled-resource feature
 level, and exact packed-mip tiling results for single-slice and arrayed
-descriptors. It has not been run in this environment.
+descriptors. The supplied Windows run used `Parallels Display Adapter (WDDM)`;
+factory/device/feature queries succeeded, but `TiledResourcesTier=0` and all
+three packed-resource creates returned `0x80070057 (E_INVALIDARG)`. This is a
+`BLOCKED_BY_ORACLE_PLATFORM` result rather than evidence that supported
+Windows tiled-resource hardware rejects these descriptors.
 
 The focused test is `tests/dx12/dx12_tiled_status_sm5.cpp`.  It compiles a
 `cs_5_0` shader with Microsoft's `d3dcompiler_47.dll`, maps one 64 KiB tile of
@@ -241,8 +245,10 @@ DXBC cs_5_0 tiled Load/Sample feedback and CheckAccessFullyMapped passed
 
 The same test with the Wine builtin compiler is a valid environment result,
 not a semantic pass: that compiler reports the feedback opcode and
-`CheckAccessFullyMapped` as unsupported. A native Windows runtime/debug-layer
-oracle was not available in this environment, so those gates remain open.
+`CheckAccessFullyMapped` as unsupported. The native Windows runtime oracle was
+run, but its Parallels adapter exposes no tiled-resource tier and rejects the
+packed-resource creates; a supported Windows tiled-resource adapter and, where
+available, a debug-layer run are still required.
 
 ### Remaining formal-gate gaps
 
@@ -250,8 +256,9 @@ Tier 2 is not ready to advertise until the following have independent
 evidence: raw/structured feedback semantics (or an explicit contract decision
 that excludes them), sparse LOD-clamp behavior, filtering footprints crossing
 mapped and NULL texels, an exact packed-mip tail mapping on a supported
-runtime, and a native Windows runtime/debug-layer comparison. Multiple heaps
-and application-reference release now have local fixture evidence, but still
-need the native oracle comparison. The formal gate output is
+runtime, and a native Windows runtime/debug-layer comparison from an adapter
+that exposes tiled resources. Multiple heaps and application-reference release
+now have local fixture evidence, but still need the supported native oracle
+comparison. The formal gate output is
 `TIER2_GATE=NOT_SATISFIED`; `NO CAPABILITY BUMP` is the decision for this
 slice.

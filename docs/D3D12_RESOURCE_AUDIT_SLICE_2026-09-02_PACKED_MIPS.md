@@ -88,7 +88,13 @@ did not model the packed tail used by the D3D12 tile address contract.
   `d3d_first=0`, `metal_first=1`, and rejects the packed shader views/mapping.
 - `dx12_tiled_tier2_gate` returns nonzero and prints
   `TIER2_GATE=NOT_SATISFIED` because packed-tail architecture, raw/structured
-  status, filtering/LOD, and native-Windows oracle cases are non-PASS.
+  status, filtering/LOD, and the native-Windows oracle-platform case are
+  non-PASS.
+- The supplied native-Windows oracle was executed on
+  `Parallels Display Adapter (WDDM)`. `D3D12CreateDevice` and feature queries
+  succeeded, but `TiledResourcesTier=0` and all three packed-resource creates
+  returned `0x80070057 (E_INVALIDARG)`. This is a platform-blocked oracle, not
+  a supported-hardware packed-mip result.
 - `git diff --check` passed.
 
 ## Follow-Up
@@ -97,5 +103,8 @@ did not model the packed tail used by the D3D12 tile address contract.
   translation is a verified seam, not a claim that the current Metal 3
   runtime can represent every D3D12 packed layout. Reserved texture rendering
   and generic texture copy paths remain separate work.
+- Repeat `dx12_tiled_tier2_oracle.exe` on a Windows adapter exposing tiled
+  resources before treating packed-mip creation or tiling output as a native
+  semantic oracle.
 - Do not raise `TiledResourcesTier` or present this arrayed packed-mip model as
   a D3D12-facing Tier 2, Tier 3, or Tier 4 implementation.

@@ -24,6 +24,7 @@ FAIL = "FAIL"
 SKIP = "SKIP"
 BLOCKED_BY_ARCHITECTURE = "BLOCKED_BY_ARCHITECTURE"
 NEEDS_WINDOWS_ORACLE = "NEEDS_WINDOWS_ORACLE"
+BLOCKED_BY_ORACLE_PLATFORM = "BLOCKED_BY_ORACLE_PLATFORM"
 
 
 @dataclass(frozen=True)
@@ -117,8 +118,11 @@ CASES = (
     Case(
         "native-windows-runtime-oracle",
         files=("dx12_tiled_tier2_oracle.exe",),
-        fixed_status=NEEDS_WINDOWS_ORACLE,
-        reason="this host has no captured Windows runtime/debug-layer comparison",
+        fixed_status=BLOCKED_BY_ORACLE_PLATFORM,
+        reason=(
+            "captured Windows oracle used a Parallels Display Adapter WDDM "
+            "with TiledResourcesTier=0; packed-resource creation returned E_INVALIDARG"
+        ),
     ),
 )
 
