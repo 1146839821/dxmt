@@ -128,16 +128,16 @@ int main() {
   passed &= CheckEqual(
       "resize helper remove tearing", dxmt::ValidateResizeBuffersFlags(
           DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, 0, DXGI_SWAP_EFFECT_FLIP_DISCARD
-      ), DXGI_ERROR_INVALID_CALL
+      ), E_INVALIDARG
   );
   passed &= CheckEqual(
       "resize helper add tearing", dxmt::ValidateResizeBuffersFlags(
           0, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, DXGI_SWAP_EFFECT_FLIP_DISCARD
-      ), DXGI_ERROR_INVALID_CALL
+      ), E_INVALIDARG
   );
   passed &= CheckEqual(
       "resize helper reject legacy tearing", dxmt::ValidateResizeBuffersFlags(
-          0, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, DXGI_SWAP_EFFECT_DISCARD
+          DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, DXGI_SWAP_EFFECT_DISCARD
       ), DXGI_ERROR_INVALID_CALL
   );
 
@@ -156,8 +156,8 @@ int main() {
     const ResizeCase resize_cases[] = {
         {"resize.preserve-tearing", DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING,
          DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, S_OK},
-        {"resize.remove-tearing", DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, 0, DXGI_ERROR_INVALID_CALL},
-        {"resize.add-tearing", 0, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, DXGI_ERROR_INVALID_CALL},
+        {"resize.remove-tearing", DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, 0, E_INVALIDARG},
+        {"resize.add-tearing", 0, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, E_INVALIDARG},
         {"resize.remain-nontearing", 0, 0, S_OK},
     };
     for (const auto &resize_case : resize_cases) {
