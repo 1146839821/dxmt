@@ -24,7 +24,6 @@ FAIL = "FAIL"
 SKIP = "SKIP"
 BLOCKED_BY_ARCHITECTURE = "BLOCKED_BY_ARCHITECTURE"
 NEEDS_WINDOWS_ORACLE = "NEEDS_WINDOWS_ORACLE"
-BLOCKED_BY_ORACLE_PLATFORM = "BLOCKED_BY_ORACLE_PLATFORM"
 
 
 @dataclass(frozen=True)
@@ -118,10 +117,12 @@ CASES = (
     Case(
         "native-windows-runtime-oracle",
         files=("dx12_tiled_tier2_oracle.exe",),
-        fixed_status=BLOCKED_BY_ORACLE_PLATFORM,
+        fixed_status=NEEDS_WINDOWS_ORACLE,
         reason=(
-            "captured Windows oracle used a Parallels Display Adapter WDDM "
-            "with TiledResourcesTier=0; packed-resource creation returned E_INVALIDARG"
+            "supported metadata and packed-fixture pass captured on NVIDIA "
+            "GeForce GTX 1650 (TiledResourcesTier=3); this Wine-hosted gate "
+            "cannot execute or ingest the out-of-band native Windows "
+            "runtime/debug-layer result"
         ),
     ),
 )

@@ -154,7 +154,7 @@ int Run(const char *read_path, const char *write_a_path, const char *write_b_pat
                             tilings.data());
   if (total_tiles != 1 || packed_info.NumStandardMips != 0 || packed_info.NumPackedMips != 4 ||
       packed_info.NumTilesForPackedMips != PackedTileCount || packed_info.StartTileIndexInOverallResource != 0 ||
-      tile_shape.WidthInTexels || tile_shape.HeightInTexels || tile_shape.DepthInTexels ||
+      tile_shape.WidthInTexels != 128 || tile_shape.HeightInTexels != 128 || tile_shape.DepthInTexels != 1 ||
       subresource_count != texture_desc.MipLevels) {
     throw std::runtime_error("packed texture tiling matrix mismatch");
   }
@@ -312,14 +312,15 @@ int Run(const char *read_path, const char *write_a_path, const char *write_b_pat
   submit("packed tail write on heap A", write_a_pso.ptr, false, ValueA);
   submit("packed tail read on heap A", read_pso.ptr, true, ValueA);
 
-  // The resource keeps the queued mapping alive. Drop the last application
-  // reference to heap B immediately after submitting the remap, before any
-  // command uses the new tail backing.
+  // A reserved resource does not retain one application reference for each
+  // mapped heap. Keep heap B alive until the remap and all GPU work that uses
+  // it have completed; releasing the final heap reference earlier is invalid
+  // D3D12 usage and can remove the device on native hardware.
   map_tail(heap_b.ptr);
+  submit("packed tail write on heap B", write_b_pso.ptr, false, ValueB);
+  submit("packed tail read on heap B", read_pso.ptr, true, ValueB);
   heap_b.ptr->Release();
   heap_b.ptr = nullptr;
-  submit("packed tail write on released heap B", write_b_pso.ptr, false, ValueB);
-  submit("packed tail read on heap B", read_pso.ptr, true, ValueB);
 
   map_tail(heap_a.ptr);
   submit("packed tail remap to heap A preserves data", read_pso.ptr, true, ValueA);

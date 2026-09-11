@@ -1510,7 +1510,7 @@ public:
       PackedMipInfo->StartTileIndexInOverallResource = packed_mip_count_ ? standard_tile_count_per_array_ : 0;
     }
     if (StandardTitleShape)
-      *StandardTitleShape = standard_mip_count_ ? tile_shape_ : D3D12_TILE_SHAPE{};
+      *StandardTitleShape = tile_shape_;
     if (!SubresourceTilingCount)
       return;
 

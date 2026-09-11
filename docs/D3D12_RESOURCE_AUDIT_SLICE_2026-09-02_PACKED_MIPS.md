@@ -72,8 +72,9 @@ did not model the packed tail used by the D3D12 tile address contract.
 - `tests/dx12/dx12_reserved_texture_packed.cpp` and
   `tests/dx12/reserved_texture_packed.hlsl`
   - Provide a buildable shader/remap/lifetime fixture for a complete packed
-    tail; the current host is explicitly blocked by the Metal/D3D tail-boundary
-    mismatch.
+    tail; it holds heap B through the remap and GPU use and releases the final
+    application reference only after the completion fence. The current host is
+    explicitly blocked by the Metal/D3D tail-boundary mismatch.
 - `tests/dx12/dx12_tiled_tier2_oracle.cpp` and
   `tests/dx12/dx12_tiled_tier2_gate`
   - Provide the native-Windows oracle target and formal non-PASS gate.
@@ -88,13 +89,31 @@ did not model the packed tail used by the D3D12 tile address contract.
   `d3d_first=0`, `metal_first=1`, and rejects the packed shader views/mapping.
 - `dx12_tiled_tier2_gate` returns nonzero and prints
   `TIER2_GATE=NOT_SATISFIED` because packed-tail architecture, raw/structured
-  status, filtering/LOD, and the native-Windows oracle-platform case are
+  status, filtering/LOD, and the native Windows runtime/debug-layer case are
   non-PASS.
-- The supplied native-Windows oracle was executed on
-  `Parallels Display Adapter (WDDM)`. `D3D12CreateDevice` and feature queries
-  succeeded, but `TiledResourcesTier=0` and all three packed-resource creates
-  returned `0x80070057 (E_INVALIDARG)`. This is a platform-blocked oracle, not
-  a supported-hardware packed-mip result.
+- The supplied native-Windows oracle was executed on an NVIDIA GeForce GTX
+  1650 (`vendor=0x10de`, `device=0x1f0a`) and reported
+  `TiledResourcesTier=3`. It returned the supported matrices
+  `64x64 R32 mips4 array1: total=1, standard=0, packed=4, packedTiles=1,
+  start=0, shape=128x128x1` and `192x128 R32 mips2 array1: total=3,
+  standard=1, packed=1, packedTiles=1, start=2, shape=128x128x1`, with the
+  latter's standard tiling `2x1x1 start=0` and packed tiling
+  `0x0x0 start=0xffffffff`. The `array2` descriptor returned
+  `0x80070057 (E_INVALIDARG)`. This fixes the earlier test expectation: the
+  standard tile shape is still returned when all mips are packed on this
+  adapter. The current Microsoft `GetResourceTiling` documentation says the
+  shape should be zero when every mip is packed, so this is recorded as an
+  adapter-specific observation pending a second supported runtime or
+  debug-layer comparison. The corrected native packed fixture then reported
+  `packed tail read on heap A passed`, `packed tail read on heap B passed`,
+  `packed tail remap to heap A preserves data passed`, and
+  `Packed mip sparse-tail mapping, remap, and lifetime tests passed` on the
+  same GTX 1650. Native debug-layer output was not supplied.
+- An earlier native packed-fixture revision released the final heap-B reference
+  before the queued remap was consumed and reached
+  `MapReadback: 0x887a0005 (DXGI_ERROR_DEVICE_REMOVED)`. The fixture now keeps
+  heap B alive until its GPU fence completes, matching the D3D12 heap-lifetime
+  contract.
 - `git diff --check` passed.
 
 ## Follow-Up
@@ -103,8 +122,9 @@ did not model the packed tail used by the D3D12 tile address contract.
   translation is a verified seam, not a claim that the current Metal 3
   runtime can represent every D3D12 packed layout. Reserved texture rendering
   and generic texture copy paths remain separate work.
-- Repeat `dx12_tiled_tier2_oracle.exe` on a Windows adapter exposing tiled
-  resources before treating packed-mip creation or tiling output as a native
-  semantic oracle.
+- If available, repeat the corrected packed fixture with the D3D12 debug layer
+  enabled and capture its output; the supported native runtime semantics are
+  otherwise closed by the supplied pass, while the Metal 3 implementation
+  remains architecture-blocked.
 - Do not raise `TiledResourcesTier` or present this arrayed packed-mip model as
   a D3D12-facing Tier 2, Tier 3, or Tier 4 implementation.

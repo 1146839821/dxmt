@@ -305,12 +305,6 @@ int Run(const char *read_path, const char *write_path) {
     direct->UpdateTileMappings(texture.ptr, 1, &coordinate, &one_tile,
                                null_mapping ? nullptr : target_heap, 1, &range_flags,
                                &heap_tile, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
-    if (release_target_heap) {
-      if (target_heap != heap_b.ptr)
-        throw std::runtime_error("unexpected heap release target");
-      heap_b.ptr->Release();
-      heap_b.ptr = nullptr;
-    }
     if (upload_b)
       CreateTextureUpload(device.ptr, direct.ptr, texture.ptr, upload.ptr, 0, TileBytes);
     Check("mapping signal", direct->Signal(mapping_done.ptr, serial + 1));
@@ -355,6 +349,16 @@ int Run(const char *read_path, const char *write_path) {
     if (delayed)
       Check("release mapping queue", gate->Signal(1));
     Wait(compute_done.ptr, serial++);
+
+    if (release_target_heap) {
+      if (target_heap != heap_b.ptr)
+        throw std::runtime_error("unexpected heap release target");
+      // D3D12 requires the final heap reference to remain alive until the
+      // GPU no longer reads or writes the heap. The remap is queued before
+      // this phase, so release only after the compute fence has completed.
+      heap_b.ptr->Release();
+      heap_b.ptr = nullptr;
+    }
 
     UINT *result = nullptr;
     Check("output readback map", output_readback->Map(0, nullptr, reinterpret_cast<void **>(&result)));
