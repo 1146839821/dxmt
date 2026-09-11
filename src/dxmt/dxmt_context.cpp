@@ -30,6 +30,8 @@
 namespace dxmt {
 
 ArgumentEncodingContext::ArgumentEncodingContext(CommandQueue &queue, WMT::Device device, InternalCommandLibrary &lib) :
+    device_(device),
+    queue_(queue),
     lib(lib),
     emulated_cmd(device, lib, *this),
     clear_rt_cmd(device, lib, *this),
@@ -37,9 +39,7 @@ ArgumentEncodingContext::ArgumentEncodingContext(CommandQueue &queue, WMT::Devic
     clear_uav_cmd(device, *this),
     mv_scale_cmd(device, lib, *this),
     tile_barrier_cmd(device, lib, *this),
-    timestamp_state_(device),
-    device_(device),
-    queue_(queue) {
+    timestamp_state_(device) {
   dummy_sampler_info_.support_argument_buffers = true;
   dummy_sampler_info_.border_color = WMTSamplerBorderColorTransparentBlack;
   dummy_sampler_info_.compare_function = WMTCompareFunctionNever;

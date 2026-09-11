@@ -335,6 +335,9 @@ struct AllocatedTempBufferSlice {
 class ArgumentEncodingContext {
   friend struct SimpleCommandContext<ArgumentEncodingContext>;
 private:
+  WMT::Device device_;
+  CommandQueue& queue_;
+
   template <PipelineStage stage> void track(GenericAccessTracker &tracker, int flags);
 
 public:
@@ -921,8 +924,6 @@ private:
 
   uint64_t intrapass_barrier_control_bits_ = 0;
 
-  WMT::Device device_;
-  CommandQueue& queue_;
 };
 
 template <>
