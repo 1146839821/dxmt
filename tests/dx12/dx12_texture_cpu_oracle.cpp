@@ -103,6 +103,39 @@ void ProbeResource(ID3D12Device *device, const char *name, const D3D12_HEAP_PROP
   for (uint32_t i = 0; i < 16; i++)
     source[i] = 0x10000000u + i;
   uint32_t destination[16] = {};
+
+  if (std::strcmp(name, "custom.writeback.common") == 0 ||
+      std::strcmp(name, "custom.writeback.copydest") == 0) {
+    const D3D12_BOX empty_boxes[] = {
+        {1, 0, 0, 1, 4, 1},
+        {0, 1, 0, 4, 1, 1},
+        {0, 0, 0, 4, 4, 0},
+    };
+    const char *empty_names[] = {"Write.empty.x", "Write.empty.y", "Write.empty.z"};
+    for (size_t i = 0; i < sizeof(empty_boxes) / sizeof(empty_boxes[0]); i++) {
+      PrintHR(prefix(empty_names[i]).c_str(), resource.ptr->WriteToSubresource(
+                                                  0, &empty_boxes[i], source, 4 * sizeof(uint32_t), 0));
+      const std::string read_name = std::string("Read.empty.") + (i == 0 ? "x" : i == 1 ? "y" : "z");
+      PrintHR(prefix(read_name.c_str()).c_str(), resource.ptr->ReadFromSubresource(
+                                                    destination, 4 * sizeof(uint32_t), 0, 0, &empty_boxes[i]));
+    }
+
+    const D3D12_BOX reversed_boxes[] = {
+        {3, 0, 0, 1, 4, 1},
+        {0, 3, 0, 4, 1, 1},
+        {0, 0, 1, 4, 4, 0},
+    };
+    const char *reversed_axes[] = {"x", "y", "z"};
+    for (size_t i = 0; i < sizeof(reversed_boxes) / sizeof(reversed_boxes[0]); i++) {
+      const std::string write_name = std::string("Write.reversed.") + reversed_axes[i];
+      const std::string read_name = std::string("Read.reversed.") + reversed_axes[i];
+      PrintHR(prefix(write_name.c_str()).c_str(), resource.ptr->WriteToSubresource(
+                                                     0, &reversed_boxes[i], source, 4 * sizeof(uint32_t), 0));
+      PrintHR(prefix(read_name.c_str()).c_str(), resource.ptr->ReadFromSubresource(
+                                                    destination, 4 * sizeof(uint32_t), 0, 0, &reversed_boxes[i]));
+    }
+  }
+
   hr = resource.ptr->WriteToSubresource(0, nullptr, source, 4 * sizeof(uint32_t), 0);
   PrintHR(prefix("Write.before-map").c_str(), hr);
   hr = resource.ptr->ReadFromSubresource(destination, 4 * sizeof(uint32_t), 0, 0, nullptr);

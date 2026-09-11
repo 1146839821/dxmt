@@ -764,9 +764,6 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   Map(UINT Subresource, const D3D12_RANGE *pReadRange, void **ppData) {
-    if (ppData)
-      *ppData = nullptr;
-
     // UNKNOWN is an opaque layout. D3D12 permits mapping opaque textures only
     // as a preparation for the CPU transfer helpers, so no CPU pointer may be
     // returned to the caller. Reserved resources remain unmappable even when
@@ -805,8 +802,6 @@ public:
     const uint64_t subresource_count = uint64_t(desc_.MipLevels) * array_size;
     if (Subresource >= subresource_count)
       return E_INVALIDARG;
-    if (GetSubresourceState(Subresource) != D3D12_RESOURCE_STATE_COMMON)
-      return E_INVALIDARG;
 
     return S_OK;
   };
@@ -843,8 +838,6 @@ public:
     uint32_t Level = 0, Slice = 0, Plane = 0;
     DecomposeSubresource(desc_, DstSubresource, &Level, &Slice, &Plane);
     if (Plane)
-      return E_INVALIDARG;
-    if (GetSubresourceState(DstSubresource) != D3D12_RESOURCE_STATE_COMMON)
       return E_INVALIDARG;
     D3D12_BOX full_box = GetResourceExtent(desc_, Level);
     D3D12_BOX box = pDstBox ? *pDstBox : full_box;
@@ -888,8 +881,6 @@ public:
     uint32_t Level = 0, Slice = 0, Plane = 0;
     DecomposeSubresource(desc_, SrcSubresource, &Level, &Slice, &Plane);
     if (Plane)
-      return E_INVALIDARG;
-    if (GetSubresourceState(SrcSubresource) != D3D12_RESOURCE_STATE_COMMON)
       return E_INVALIDARG;
     D3D12_BOX full_box = GetResourceExtent(desc_, Level);
     D3D12_BOX box = pSrcBox ? *pSrcBox : full_box;
