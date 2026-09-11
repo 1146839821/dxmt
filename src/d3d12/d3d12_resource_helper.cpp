@@ -886,8 +886,6 @@ DecomposeSubresource(
 
 bool
 IsD3D12BoxInBounds(D3D12_BOX &box, D3D12_BOX &bounds) {
-  if (box.left > box.right || box.top > box.bottom || box.front > box.back)
-    return false;
   if (box.left < bounds.left)
     return false;
   if (box.top < bounds.top)

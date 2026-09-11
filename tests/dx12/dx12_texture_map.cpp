@@ -199,9 +199,9 @@ void CheckTextureTransferBoxes(ID3D12Device *device) {
   };
   for (size_t i = 0; i < sizeof(reversed_boxes) / sizeof(reversed_boxes[0]); i++) {
     Expect("reversed-box-write", texture.ptr->WriteToSubresource(
-                                    0, &reversed_boxes[i], source, 4 * sizeof(uint32_t), 0), E_INVALIDARG);
+                                    0, &reversed_boxes[i], source, 4 * sizeof(uint32_t), 0), S_OK);
     Expect("reversed-box-read", texture.ptr->ReadFromSubresource(
-                                   destination, 4 * sizeof(uint32_t), 0, 0, &reversed_boxes[i]), E_INVALIDARG);
+                                   destination, 4 * sizeof(uint32_t), 0, 0, &reversed_boxes[i]), S_OK);
   }
 }
 

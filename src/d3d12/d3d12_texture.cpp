@@ -842,11 +842,11 @@ public:
     D3D12_BOX full_box = GetResourceExtent(desc_, Level);
     D3D12_BOX box = pDstBox ? *pDstBox : full_box;
 
+    if (box.left >= box.right || box.top >= box.bottom || box.front >= box.back)
+      return S_OK;
+
     if (!IsD3D12BoxInBounds(box, full_box))
       return E_INVALIDARG;
-
-    if (box.left == box.right || box.top == box.bottom || box.front == box.back)
-      return S_OK;
 
     MTL_DXGI_FORMAT_DESC Format;
     if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc_.Format, Format)))
@@ -885,11 +885,11 @@ public:
     D3D12_BOX full_box = GetResourceExtent(desc_, Level);
     D3D12_BOX box = pSrcBox ? *pSrcBox : full_box;
 
+    if (box.left >= box.right || box.top >= box.bottom || box.front >= box.back)
+      return S_OK;
+
     if (!IsD3D12BoxInBounds(box, full_box))
       return E_INVALIDARG;
-
-    if (box.left == box.right || box.top == box.bottom || box.front == box.back)
-      return S_OK;
 
     MTL_DXGI_FORMAT_DESC Format;
     if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc_.Format, Format)))
