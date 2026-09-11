@@ -258,8 +258,8 @@ int Run(const char *read_path, const char *write_path) {
   pipeline_desc.CS = {write_shader.data(), write_shader.size()};
   Check("write PSO", device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&write_pso.ptr)));
 
-  // Map the two standard tiles to distinct heap tiles and initialize them by
-  // CopyTiles. Tile 0 contains A; tile 1 contains B.
+  // Map the two standard tiles to different heap objects and initialize them
+  // by CopyTiles. Tile 0 is heap A/tile 0; tile 1 is heap B/tile 0.
   D3D12_TILED_RESOURCE_COORDINATE coordinate = {};
   D3D12_TILE_REGION_SIZE one_tile = {};
   one_tile.NumTiles = 1;
@@ -267,8 +267,8 @@ int Run(const char *read_path, const char *write_path) {
   direct->UpdateTileMappings(texture.ptr, 1, &coordinate, &one_tile, heap_a.ptr, 1,
                               nullptr, &heap_tile, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
   coordinate.X = 1;
-  heap_tile = 1;
-  direct->UpdateTileMappings(texture.ptr, 1, &coordinate, &one_tile, heap_a.ptr, 1,
+  heap_tile = 0;
+  direct->UpdateTileMappings(texture.ptr, 1, &coordinate, &one_tile, heap_b.ptr, 1,
                               nullptr, &heap_tile, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
 
   Owned<ID3D12CommandAllocator> init_allocator;
@@ -293,7 +293,7 @@ int Run(const char *read_path, const char *write_path) {
   UINT64 serial = 1;
   auto phase = [&](const char *name, ID3D12Heap *target_heap, UINT target_heap_tile,
                    bool null_mapping, bool upload_b, bool write, bool copy_tiles, bool delayed,
-                   UINT expected0, UINT expected1) {
+                   UINT expected0, UINT expected1, bool release_target_heap = false) {
     if (serial > 1)
       Check("direct waits previous compute", direct->Wait(compute_done.ptr, serial - 1));
     if (delayed)
@@ -305,6 +305,12 @@ int Run(const char *read_path, const char *write_path) {
     direct->UpdateTileMappings(texture.ptr, 1, &coordinate, &one_tile,
                                null_mapping ? nullptr : target_heap, 1, &range_flags,
                                &heap_tile, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+    if (release_target_heap) {
+      if (target_heap != heap_b.ptr)
+        throw std::runtime_error("unexpected heap release target");
+      heap_b.ptr->Release();
+      heap_b.ptr = nullptr;
+    }
     if (upload_b)
       CreateTextureUpload(device.ptr, direct.ptr, texture.ptr, upload.ptr, 0, TileBytes);
     Check("mapping signal", direct->Signal(mapping_done.ptr, serial + 1));
@@ -382,7 +388,7 @@ int Run(const char *read_path, const char *write_path) {
   phase("nonzero backing A/B / descriptor before map", heap_a.ptr, 0, false, false, false, false, false, A, B);
   // Map tile 0 to a different heap, initialize that backing with B, and hold
   // the direct queue until after compute submission to prove ordering.
-  phase("remap tile 0 to backing B / cross-queue wait", heap_b.ptr, 0, false, true, false, false, true, B, B);
+  phase("remap tile 0 to backing B / cross-queue wait", heap_b.ptr, 0, false, true, false, false, true, B, B, true);
   phase("NULL sample returns zero", nullptr, 0, true, false, false, false, false, 0, B);
   phase("remap back to backing A preserves contents", heap_a.ptr, 0, false, false, false, false, false, A, B);
   phase("NULL UAV write is harmless", nullptr, 0, true, false, true, false, false, WriteStatus, 0);

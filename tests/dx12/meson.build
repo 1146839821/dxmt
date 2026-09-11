@@ -337,6 +337,14 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach entry : ['read_phase', 'write_phase_a', 'write_phase_b']
+    custom_target('dx12_reserved_texture_packed_' + entry + '_fixture',
+      input: 'reserved_texture_packed.hlsl',
+      output: 'reserved_texture.packed.' + entry + '.cs.cso',
+      command: dxc_command + [ '-E', entry, '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
   custom_target('dx12_reserved_buffer_copy_mapping_fixture',
     input: 'reserved_buffer_copy_mapping.hlsl',
     output: 'reserved_buffer.copy_mapping.cs.cso',
@@ -348,8 +356,10 @@ endif
 dx12_reserved_buffer = executable('dx12_reserved_buffer', 'dx12_reserved_buffer.cpp', dependencies: [ d3d12_dep ])
 dx12_reserved_texture = executable('dx12_reserved_texture', 'dx12_reserved_texture.cpp', dependencies: [ d3d12_dep ])
 dx12_reserved_texture_mip_array = executable('dx12_reserved_texture_mip_array', 'dx12_reserved_texture_mip_array.cpp', dependencies: [ d3d12_dep ])
+dx12_reserved_texture_packed = executable('dx12_reserved_texture_packed', 'dx12_reserved_texture_packed.cpp', dependencies: [ d3d12_dep ])
 dx12_reserved_buffer_copy_mapping = executable('dx12_reserved_buffer_copy_mapping', 'dx12_reserved_buffer_copy_mapping.cpp', dependencies: [ d3d12_dep ])
 dx12_tiled_status_sm5 = executable('dx12_tiled_status_sm5', 'dx12_tiled_status_sm5.cpp', dependencies: [ d3d12_dep ])
+dx12_tiled_tier2_oracle = executable('dx12_tiled_tier2_oracle', 'dx12_tiled_tier2_oracle.cpp', dependencies: [ d3d12_dep, dxgi_dep ])
 
 if dxc_command.length() > 0
   custom_target('dx12_predication_vs_fixture',
@@ -388,3 +398,10 @@ dx12_descriptor_ownership = executable(
   dependencies: [ d3d12_dep ],
 )
 dx12_pipeline_statistics = executable('dx12_pipeline_statistics', 'dx12_pipeline_statistics.cpp', dependencies: [ d3d12_dep ])
+
+python = import('python').find_installation('python3', required: false)
+if python.found()
+  run_target('dx12_tiled_tier2_gate',
+    command: [python, files('dx12_tiled_tier2_gate'), '--build-dir', meson.current_build_dir()],
+  )
+endif

@@ -27,6 +27,7 @@ enum winemetal_unixcall {
   unix_mtltexture_firstmipmapintail = 165,
   unix_sparsemappingqueue_barrierbeforeresourcestate = 166,
   unix_mtlcommandqueue_commandbuffer_with_error_options = 167,
+  unix_mtltexture_tailsizeinbytes = 168,
 };
 
 struct unixcall_mtldevice_newmscgeometrypso {

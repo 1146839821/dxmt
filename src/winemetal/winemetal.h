@@ -1796,6 +1796,7 @@ WINEMETAL_API uint64_t MTLTexture_depth(obj_handle_t texture);
 WINEMETAL_API uint64_t MTLTexture_arrayLength(obj_handle_t texture);
 WINEMETAL_API uint64_t MTLTexture_mipmapLevelCount(obj_handle_t texture);
 WINEMETAL_API uint64_t MTLTexture_firstMipmapInTail(obj_handle_t texture);
+WINEMETAL_API uint64_t MTLTexture_tailSizeInBytes(obj_handle_t texture);
 WINEMETAL_API void MTLTexture_replaceRegion(
     obj_handle_t texture, struct WMTOrigin origin, struct WMTSize size, uint64_t level, uint64_t slice,
     struct WMTMemoryPointer data, uint64_t bytes_per_row, uint64_t bytes_per_image

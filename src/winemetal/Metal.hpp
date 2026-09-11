@@ -277,6 +277,11 @@ public:
     return MTLTexture_firstMipmapInTail(handle);
   }
 
+  uint64_t
+  tailSizeInBytes() {
+    return MTLTexture_tailSizeInBytes(handle);
+  }
+
   void
   replaceRegion(
       WMTOrigin origin, WMTSize size, uint64_t level, uint64_t slice, const void *pixelBytes, uint64_t bytesPerRow,

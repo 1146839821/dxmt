@@ -1443,6 +1443,17 @@ _MTLTexture_firstMipmapInTail(void *obj) {
 }
 
 static NTSTATUS
+_MTLTexture_tailSizeInBytes(void *obj) {
+  struct unixcall_generic_obj_uint64_ret *params = obj;
+  params->ret = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 110000
+  if (@available(macOS 11.0, *))
+    params->ret = [(id<MTLTexture>)params->handle tailSizeInBytes];
+#endif
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 _MTLTexture_replaceRegion(void *obj) {
   struct unixcall_mtltexture_replaceregion *params = obj;
   [(id<MTLTexture>)params->texture replaceRegion:MTLRegionMake3D(
@@ -3887,6 +3898,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLTexture_firstMipmapInTail,
     &_SparseMappingQueue_barrierBeforeResourceState,
     &_MTLCommandQueue_commandBufferWithErrorOptions,
+    &_MTLTexture_tailSizeInBytes,
 };
 
 #ifndef DXMT_NATIVE
@@ -4059,5 +4071,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLTexture_firstMipmapInTail,
     &_SparseMappingQueue_barrierBeforeResourceState,
     &_MTLCommandQueue_commandBufferWithErrorOptions,
+    &_MTLTexture_tailSizeInBytes,
 };
 #endif

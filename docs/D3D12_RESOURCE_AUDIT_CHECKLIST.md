@@ -179,13 +179,13 @@ This is an audit and semantic-closure record, not a capability declaration.
 
 | Area | Current evidence | Gate status |
 | --- | --- | --- |
-| Reserved buffers | Shadow backing, descriptor-table SRV/UAV access, remap, NULL handling, stable GPU VA, `CopyTiles`, and cross-queue cases are covered by the existing x64 resource fixtures. | Partial closure; keep the existing conservative tier. |
-| Reserved 2D textures | Creation, tile mapping, `CopyTiles`, and `Texture.Load` paths are present; the new shader fixture also exercises `Texture.SampleLevel`. | Partial closure. |
-| Mapping ranges and NULL mappings | Existing buffer/texture mapping tests cover range validation, remap, NULL, `CopyTileMappings`, and boxed regions. | Covered by existing tests; multiple-heap and native-Windows evidence remain required. |
+| Reserved buffers | Shadow backing, descriptor-table and independent root SRV/UAV access, remap, NULL handling, stable GPU VA, `CopyTiles`, multiple heaps, and cross-queue cases are covered by the existing x64 resource fixtures. | Partial closure; keep the existing conservative tier. |
+| Reserved 2D textures | Creation, standard tile mapping, `CopyTiles`, two-heap remap/lifetime, and `Texture.Load` paths are present; the status fixture also exercises point `Texture.SampleLevel`. | Partial closure. |
+| Mapping ranges and NULL mappings | Existing buffer/texture mapping tests cover range validation, remap, NULL, `CopyTileMappings`, and boxed regions; `dx12_reserved_texture` releases heap B after a queued remap. | Covered by local fixtures; native-Windows evidence remains required. |
 | Shader status feedback | DXBC parsing now accepts feedback forms of `LD`, `LD_MS`, typed UAV load, sample, sample bias/LOD/gradient/compare, gather, and gather compare. Airconv stores the residency result and lowers `CheckAccessFullyMapped`. | Implemented for the texture/sampled paths exercised here. |
 | Raw/structured buffer feedback | The direct buffer read path has no texture residency result to map to the DXBC status operand. | Not implemented; Tier2 blocker. |
 | LOD clamp | Existing metadata and sampler plumbing carries resource/sampler minimum LOD information into Airconv/Metal. | Plumbing exists, but no independent sparse LOD-clamp semantic fixture was added in this slice. |
-| Packed mip tail | Packed-mip shader/copy access is still rejected in the production path; the D3D12 logical tile index cannot be assumed to equal a Metal sparse-tail index. | `BLOCKED_BY_ARCHITECTURE`; Tier2 blocker. |
+| Packed mip tail | D3D12 packed metadata and logical tile ranges are modeled. Native sparse mapping is attempted only when `firstMipmapInTail` equals the D3D standard-mip boundary and Metal `tailSizeInBytes` equals the D3D packed-tail byte count; otherwise shader views and packed mappings stay rejected. The focused fixture is built but the current host reports `d3d_first=0`, `metal_first=1`, and 65536-byte tails on both sides. | `BLOCKED_BY_ARCHITECTURE`; Tier2 blocker. |
 | Filtering footprint | The fixture uses point sampling only and does not independently prove fully mapped, fully NULL, or mixed mapped/NULL filter footprints. | Unverified; Tier2 blocker. |
 
 ### Requirements and assumptions
@@ -207,6 +207,24 @@ and [Metal feature sets](https://developer.apple.com/metal/feature-sets/).
 
 ### Semantic closure in this slice
 
+The new packed-tail fixture is `tests/dx12/dx12_reserved_texture_packed.cpp`
+with `reserved_texture_packed.hlsl`. It independently checks the D3D12
+packed-mip matrix for a single-array `64x64 R32_UINT` resource with four mips,
+creates SRV/UAV descriptors before mapping, maps the complete logical tail to
+heap A, performs shader write/readback, remaps to heap B, releases the last
+application heap-B reference after the queued remap, and verifies the remap
+back to heap A. Its runtime proof is intentionally not counted on this host:
+the exact D3D/Metal tail boundary does not match, so the production view and
+mapping path remains `E_NOTIMPL`/rejected rather than using an unsafe offset
+assumption. The formal `dx12_tiled_tier2_gate` records this fixture as
+`BLOCKED_BY_ARCHITECTURE` after checking that the executable and all three CSO
+fixtures exist.
+
+`tests/dx12/dx12_tiled_tier2_oracle.cpp` is a buildable native-Windows oracle
+target. It prints the adapter, `D3D12CreateDevice`, tiled-resource feature
+level, and exact packed-mip tiling results for single-slice and arrayed
+descriptors. It has not been run in this environment.
+
 The focused test is `tests/dx12/dx12_tiled_status_sm5.cpp`.  It compiles a
 `cs_5_0` shader with Microsoft's `d3dcompiler_47.dll`, maps one 64 KiB tile of
 a reserved `R32_FLOAT` texture, performs mapped and NULL `Load` and point
@@ -223,7 +241,7 @@ DXBC cs_5_0 tiled Load/Sample feedback and CheckAccessFullyMapped passed
 
 The same test with the Wine builtin compiler is a valid environment result,
 not a semantic pass: that compiler reports the feedback opcode and
-`CheckAccessFullyMapped` as unsupported.  A native Windows runtime/debug-layer
+`CheckAccessFullyMapped` as unsupported. A native Windows runtime/debug-layer
 oracle was not available in this environment, so those gates remain open.
 
 ### Remaining formal-gate gaps
@@ -231,7 +249,9 @@ oracle was not available in this environment, so those gates remain open.
 Tier 2 is not ready to advertise until the following have independent
 evidence: raw/structured feedback semantics (or an explicit contract decision
 that excludes them), sparse LOD-clamp behavior, filtering footprints crossing
-mapped and NULL texels, packed-mip tail mapping, multiple heaps in one
-resource, application-reference release after queued mapping, and a native
-Windows runtime/debug-layer comparison.  `NO CAPABILITY BUMP` is therefore the
-formal decision for this slice.
+mapped and NULL texels, an exact packed-mip tail mapping on a supported
+runtime, and a native Windows runtime/debug-layer comparison. Multiple heaps
+and application-reference release now have local fixture evidence, but still
+need the native oracle comparison. The formal gate output is
+`TIER2_GATE=NOT_SATISFIED`; `NO CAPABILITY BUMP` is the decision for this
+slice.

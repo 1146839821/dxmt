@@ -336,6 +336,7 @@ class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
   UINT packed_tile_count_per_array_ = 0;
   UINT tiles_per_array_ = 0;
   UINT sparse_first_mipmap_in_tail_ = 0;
+  bool packed_tail_mapping_supported_ = false;
   UINT bytes_per_texel_ = 0;
   std::vector<D3D12_SUBRESOURCE_TILING> subresource_tilings_;
 
@@ -384,6 +385,27 @@ class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
       return true;
     }
     return false;
+  }
+
+  bool
+  GetPackedTailRegion(
+      UINT tile_index, WMTRegion &region, uint64_t &level, uint64_t &slice, UINT &tile_offset
+  ) const {
+    if (!packed_tail_mapping_supported_ || !packed_mip_count_ || !tiles_per_array_ ||
+        !IsPackedTile(tile_index) || tile_index >= total_tile_count_)
+      return false;
+
+    const UINT array_slice = tile_index / tiles_per_array_;
+    const UINT tile_in_array = tile_index % tiles_per_array_;
+    if (array_slice >= desc_.DepthOrArraySize || tile_in_array < standard_tile_count_per_array_)
+      return false;
+
+    region.origin = {0, 0, 0};
+    region.size = {1, 1, 1};
+    level = sparse_first_mipmap_in_tail_;
+    slice = array_slice;
+    tile_offset = tile_in_array - standard_tile_count_per_array_;
+    return true;
   }
 
 public:
@@ -598,6 +620,17 @@ public:
         return E_OUTOFMEMORY;
       texture->rename(std::move(allocation));
       sparse_first_mipmap_in_tail_ = static_cast<UINT>(texture->current()->texture().firstMipmapInTail());
+      const uint64_t metal_tail_size = texture->current()->texture().tailSizeInBytes();
+      const uint64_t expected_tail_size = uint64_t(packed_tile_count_per_array_) * kD3D12TileSize;
+      packed_tail_mapping_supported_ =
+          packed_mip_count_ && sparse_first_mipmap_in_tail_ == standard_mip_count_ &&
+          metal_tail_size == expected_tail_size && metal_tail_size % kD3D12TileSize == 0;
+      if (packed_mip_count_ && !packed_tail_mapping_supported_)
+        WARN(
+            "D3D12 reserved texture packed mip tail mismatch: d3d_first=", standard_mip_count_,
+            " metal_first=", sparse_first_mipmap_in_tail_, " d3d_tail_bytes=", expected_tail_size,
+            " metal_tail_bytes=", metal_tail_size
+        );
       device_->RegisterResidency(texture->current()->texture());
     }
 
@@ -921,10 +954,9 @@ public:
   virtual HRESULT STDMETHODCALLTYPE
   CreateShaderResourceView(const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) {
     // Reserved textures are shader-visible only when the native placement-sparse
-    // allocation exists. Metal's sparse tail packing is not the same as the
-    // D3D12 packed-mip layout, so keep packed-mip shader views unsupported until
-    // an explicit tail-layout translation exists.
-    if (reserved_ && (packed_mip_count_ || !texture || !texture->current()))
+    // allocation exists. A packed-mip view also requires an exact Metal sparse
+    // tail match; otherwise the D3D12 logical tile contract cannot be represented.
+    if (reserved_ && (!texture || !texture->current() || (packed_mip_count_ && !packed_tail_mapping_supported_)))
       return E_NOTIMPL;
     HRESULT hr;
     D3D12_SHADER_RESOURCE_VIEW_DESC ViewDesc;
@@ -1117,8 +1149,8 @@ public:
     if (pCounter)
       return E_INVALIDARG;
     // See CreateShaderResourceView: a reserved UAV requires a native sparse
-    // texture and a layout that the Metal sparse mapping path can represent.
-    if (reserved_ && (packed_mip_count_ || !texture || !texture->current()))
+    // texture and an exact packed-tail layout match when packed mips exist.
+    if (reserved_ && (!texture || !texture->current() || (packed_mip_count_ && !packed_tail_mapping_supported_)))
       return E_NOTIMPL;
     HRESULT hr;
     D3D12_UNORDERED_ACCESS_VIEW_DESC ViewDesc;
@@ -1655,17 +1687,63 @@ public:
     if (resource_tile != resource_tiles.size())
       return E_INVALIDARG;
 
+    std::vector<const TileUpdate *> packed_updates;
+    for (const auto &update : updates) {
+      if (IsPackedTile(update.resource_tile))
+        packed_updates.push_back(&update);
+    }
+    if (!packed_updates.empty()) {
+      // Metal maps a sparse texture tail as one operation. D3D12 leaves
+      // partial packed-tail mappings undefined, so only accept a complete,
+      // contiguous tail whose physical tiles are contiguous as well.
+      if (!packed_tail_mapping_supported_ || packed_updates.size() != packed_tile_count_per_array_)
+        return E_NOTIMPL;
+
+      const UINT packed_tile_start = standard_tile_count_per_array_;
+      const bool mapped = packed_updates.front()->heap != nullptr;
+      const UINT heap_tile_start = packed_updates.front()->heap_tile;
+      for (size_t index = 0; index < packed_updates.size(); index++) {
+        const auto *update = packed_updates[index];
+        WMTRegion packed_region = {};
+        uint64_t packed_level = 0;
+        uint64_t packed_slice = 0;
+        UINT packed_tile_offset = 0;
+        if (uint64_t(update->resource_tile) != uint64_t(packed_tile_start) + index ||
+            (update->heap != nullptr) != mapped ||
+            !GetPackedTailRegion(update->resource_tile, packed_region, packed_level, packed_slice, packed_tile_offset) ||
+            packed_tile_offset != index || packed_level != sparse_first_mipmap_in_tail_ || packed_slice != 0)
+          return E_NOTIMPL;
+        if (mapped &&
+            (update->heap.ptr() != pHeap || uint64_t(update->heap_tile) != uint64_t(heap_tile_start) + index))
+          return E_NOTIMPL;
+      }
+    }
+
     if (sparse_mapping_queue) {
       if (!texture || !texture->current())
         return E_OUTOFMEMORY;
       std::vector<WMTUpdateSparseTextureMappingOperation> mapping_operations;
       mapping_operations.reserve(updates.size());
       for (const auto &update : updates) {
+        if (IsPackedTile(update.resource_tile)) {
+          continue;
+        }
         auto &operation = mapping_operations.emplace_back();
         operation.mode = update.heap ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
         if (!GetStandardTileRegion(update.resource_tile, operation.texture_region, operation.texture_level, operation.texture_slice))
           return E_NOTIMPL;
         operation.heap_offset = update.heap_tile;
+      }
+      if (!packed_updates.empty()) {
+        const bool mapped = packed_updates.front()->heap != nullptr;
+        const UINT heap_tile_start = packed_updates.front()->heap_tile;
+        auto &operation = mapping_operations.emplace_back();
+        operation.mode = mapped ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
+        operation.texture_region.origin = {0, 0, 0};
+        operation.texture_region.size = {1, 1, 1};
+        operation.texture_level = sparse_first_mipmap_in_tail_;
+        operation.texture_slice = 0;
+        operation.heap_offset = mapped ? heap_tile_start : 0;
       }
       sparse_mapping_queue.updateTextureMappings(
           texture->current()->texture(), pHeap ? static_cast<MTLD3D12Heap *>(pHeap)->GetMetalHeap() : WMT::Heap{},
@@ -1700,12 +1778,48 @@ public:
     if (FAILED(destination_hr) || FAILED(source_hr) || destination_tiles.size() != source_tiles.size())
       return E_INVALIDARG;
 
+    const auto packed_suffix = [](const MTLD3D12Texture *resource, const std::vector<UINT> &tiles) {
+      size_t first = tiles.size();
+      for (size_t index = 0; index < tiles.size(); index++) {
+        if (resource->IsPackedTile(tiles[index])) {
+          first = index;
+          break;
+        }
+      }
+      if (first == tiles.size())
+        return first;
+      if (tiles.size() - first != resource->packed_tile_count_per_array_)
+        return std::numeric_limits<size_t>::max();
+      for (size_t index = 0; index < first; index++) {
+        if (resource->IsPackedTile(tiles[index]))
+          return std::numeric_limits<size_t>::max();
+      }
+      for (size_t index = first; index < tiles.size(); index++) {
+        if (uint64_t(tiles[index]) != uint64_t(resource->standard_tile_count_per_array_) + index - first)
+          return std::numeric_limits<size_t>::max();
+      }
+      return first;
+    };
+    const size_t destination_packed_start = packed_suffix(this, destination_tiles);
+    const size_t source_packed_start = packed_suffix(source, source_tiles);
+    if (destination_packed_start == std::numeric_limits<size_t>::max() ||
+        source_packed_start == std::numeric_limits<size_t>::max() ||
+        (destination_packed_start != destination_tiles.size()) != (source_packed_start != source_tiles.size()))
+      return E_NOTIMPL;
+    if (destination_packed_start != destination_tiles.size() &&
+        (!packed_tail_mapping_supported_ || !source->packed_tail_mapping_supported_ ||
+         standard_mip_count_ != source->standard_mip_count_ || packed_mip_count_ != source->packed_mip_count_ ||
+         packed_tile_count_per_array_ != source->packed_tile_count_per_array_ ||
+         sparse_first_mipmap_in_tail_ != source->sparse_first_mipmap_in_tail_ ||
+         destination_packed_start != source_packed_start))
+      return E_NOTIMPL;
+
     std::vector<WMTCopySparseTextureMappingOperation> mapping_operations;
     if (sparse_mapping_queue) {
       if (!texture || !texture->current() || !source->texture || !source->texture->current())
         return E_OUTOFMEMORY;
       mapping_operations.reserve(destination_tiles.size());
-      for (size_t i = 0; i < destination_tiles.size(); i++) {
+      for (size_t i = 0; i < destination_packed_start; i++) {
         auto &operation = mapping_operations.emplace_back();
         uint64_t source_level = 0;
         uint64_t source_slice = 0;
@@ -1720,6 +1834,16 @@ public:
         operation.source_level = source_level;
         operation.source_slice = source_slice;
         operation.destination_origin = destination_region.origin;
+      }
+      if (destination_packed_start != destination_tiles.size()) {
+        auto &operation = mapping_operations.emplace_back();
+        operation.source_region.origin = {0, 0, 0};
+        operation.source_region.size = {1, 1, 1};
+        operation.source_level = source->sparse_first_mipmap_in_tail_;
+        operation.source_slice = 0;
+        operation.destination_origin = {0, 0, 0};
+        operation.destination_level = sparse_first_mipmap_in_tail_;
+        operation.destination_slice = 0;
       }
     }
 

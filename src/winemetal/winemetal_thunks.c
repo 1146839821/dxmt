@@ -1420,6 +1420,15 @@ MTLTexture_firstMipmapInTail(obj_handle_t texture) {
   return params.ret;
 }
 
+WINEMETAL_API uint64_t
+MTLTexture_tailSizeInBytes(obj_handle_t texture) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = texture;
+  params.ret = 0;
+  UNIX_CALL(unix_mtltexture_tailsizeinbytes, &params);
+  return params.ret;
+}
+
 WINEMETAL_API void
 SparseMappingQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set) {
   struct unixcall_generic_obj_obj_noret params;
