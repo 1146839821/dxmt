@@ -168,3 +168,70 @@ without first documenting a changed contract or a regression.
 - `git diff --check` is required for each slice. Whole-file clang-format checks
   currently report pre-existing violations in these large test/source files;
   do not reformat unrelated lines while closing a slice.
+
+## Post-GO Tier2 audit — 2026-09-11
+
+This is an audit and semantic-closure record, not a capability declaration.
+`D3D12_FEATURE_D3D12_OPTIONS.TiledResourcesTier` remains
+`D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED`.
+
+### Feature ledger
+
+| Area | Current evidence | Gate status |
+| --- | --- | --- |
+| Reserved buffers | Shadow backing, descriptor-table SRV/UAV access, remap, NULL handling, stable GPU VA, `CopyTiles`, and cross-queue cases are covered by the existing x64 resource fixtures. | Partial closure; keep the existing conservative tier. |
+| Reserved 2D textures | Creation, tile mapping, `CopyTiles`, and `Texture.Load` paths are present; the new shader fixture also exercises `Texture.SampleLevel`. | Partial closure. |
+| Mapping ranges and NULL mappings | Existing buffer/texture mapping tests cover range validation, remap, NULL, `CopyTileMappings`, and boxed regions. | Covered by existing tests; multiple-heap and native-Windows evidence remain required. |
+| Shader status feedback | DXBC parsing now accepts feedback forms of `LD`, `LD_MS`, typed UAV load, sample, sample bias/LOD/gradient/compare, gather, and gather compare. Airconv stores the residency result and lowers `CheckAccessFullyMapped`. | Implemented for the texture/sampled paths exercised here. |
+| Raw/structured buffer feedback | The direct buffer read path has no texture residency result to map to the DXBC status operand. | Not implemented; Tier2 blocker. |
+| LOD clamp | Existing metadata and sampler plumbing carries resource/sampler minimum LOD information into Airconv/Metal. | Plumbing exists, but no independent sparse LOD-clamp semantic fixture was added in this slice. |
+| Packed mip tail | Packed-mip shader/copy access is still rejected in the production path; the D3D12 logical tile index cannot be assumed to equal a Metal sparse-tail index. | `BLOCKED_BY_ARCHITECTURE`; Tier2 blocker. |
+| Filtering footprint | The fixture uses point sampling only and does not independently prove fully mapped, fully NULL, or mixed mapped/NULL filter footprints. | Unverified; Tier2 blocker. |
+
+### Requirements and assumptions
+
+The audit follows Microsoft's tiled-resource exposure and shader-status
+requirements, including the distinction between Tier 2 and higher-tier 3D
+requirements.  The implementation assumes that the Metal sparse texture
+operation's residency byte has bit 0 set for a nonresident access; the helper
+canonicalizes that representation to DXBC's opaque status form (all bits set
+for fully mapped, zero otherwise) before `CheckAccessFullyMapped` consumes it.
+This assumption is not a replacement for a native Windows oracle.
+
+Sources consulted: [Microsoft tiled resources exposure](https://learn.microsoft.com/en-us/windows/win32/direct3d11/hlsl-tiled-resources-exposure),
+[Microsoft tiled-resource texture sampling features](https://learn.microsoft.com/en-us/windows/win32/direct3d11/tiled-resources-texture-sampling-features),
+[DXBC `ld` feedback](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/t2d-load-float-int-uint-),
+[DXBC `samplelevel` feedback](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/samplelevel-s-float-float-int-uint-),
+[Metal sparse textures](https://developer.apple.com/documentation/metal/reading-and-writing-to-sparse-textures),
+and [Metal feature sets](https://developer.apple.com/metal/feature-sets/).
+
+### Semantic closure in this slice
+
+The focused test is `tests/dx12/dx12_tiled_status_sm5.cpp`.  It compiles a
+`cs_5_0` shader with Microsoft's `d3dcompiler_47.dll`, maps one 64 KiB tile of
+a reserved `R32_FLOAT` texture, performs mapped and NULL `Load` and point
+`SampleLevel` operations, and reads back both values and status predicates.
+The shader writes each predicate through an explicit `0xffffffff/0` branch,
+so the assertion is independent of the compiler's internal boolean register
+encoding.
+With the current DXMT DLLs under the matching Wine toolchain and the native
+Microsoft compiler fixture, the exact success line is:
+
+```text
+DXBC cs_5_0 tiled Load/Sample feedback and CheckAccessFullyMapped passed
+```
+
+The same test with the Wine builtin compiler is a valid environment result,
+not a semantic pass: that compiler reports the feedback opcode and
+`CheckAccessFullyMapped` as unsupported.  A native Windows runtime/debug-layer
+oracle was not available in this environment, so those gates remain open.
+
+### Remaining formal-gate gaps
+
+Tier 2 is not ready to advertise until the following have independent
+evidence: raw/structured feedback semantics (or an explicit contract decision
+that excludes them), sparse LOD-clamp behavior, filtering footprints crossing
+mapped and NULL texels, packed-mip tail mapping, multiple heaps in one
+resource, application-reference release after queued mapping, and a native
+Windows runtime/debug-layer comparison.  `NO CAPABILITY BUMP` is therefore the
+formal decision for this slice.

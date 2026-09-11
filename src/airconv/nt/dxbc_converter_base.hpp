@@ -202,6 +202,8 @@ public:
   void StoreOperandHull(const DstOperandOutput &DstOp, llvm::Value *Value);
   void StoreOperandHull(const DstOperandIndexableOutput &DstOp, llvm::Value *Value);
 
+  void StoreFeedback(const std::optional<DstOperand> &DstOp, llvm::Value *Residency);
+
   void
   StoreOperand(const DstOperand &DstOp, llvm::Value *Value, bool Saturate = false) {
     std::visit(
@@ -284,6 +286,7 @@ public:
   void operator()(const InstLoad &);
   void operator()(const InstLoadUAVTyped &);
   void operator()(const InstStoreUAVTyped &);
+  void operator()(const InstCheckAccessFullyMapped &);
 
   void operator()(const InstSample &);
   void operator()(const InstSampleLOD &);

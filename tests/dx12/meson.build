@@ -349,6 +349,7 @@ dx12_reserved_buffer = executable('dx12_reserved_buffer', 'dx12_reserved_buffer.
 dx12_reserved_texture = executable('dx12_reserved_texture', 'dx12_reserved_texture.cpp', dependencies: [ d3d12_dep ])
 dx12_reserved_texture_mip_array = executable('dx12_reserved_texture_mip_array', 'dx12_reserved_texture_mip_array.cpp', dependencies: [ d3d12_dep ])
 dx12_reserved_buffer_copy_mapping = executable('dx12_reserved_buffer_copy_mapping', 'dx12_reserved_buffer_copy_mapping.cpp', dependencies: [ d3d12_dep ])
+dx12_tiled_status_sm5 = executable('dx12_tiled_status_sm5', 'dx12_tiled_status_sm5.cpp', dependencies: [ d3d12_dep ])
 
 if dxc_command.length() > 0
   custom_target('dx12_predication_vs_fixture',
