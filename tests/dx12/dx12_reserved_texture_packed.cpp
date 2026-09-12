@@ -154,7 +154,7 @@ int Run(const char *read_path, const char *write_a_path, const char *write_b_pat
                             tilings.data());
   if (total_tiles != 1 || packed_info.NumStandardMips != 0 || packed_info.NumPackedMips != 4 ||
       packed_info.NumTilesForPackedMips != PackedTileCount || packed_info.StartTileIndexInOverallResource != 0 ||
-      tile_shape.WidthInTexels != 128 || tile_shape.HeightInTexels != 128 || tile_shape.DepthInTexels != 1 ||
+      tile_shape.WidthInTexels || tile_shape.HeightInTexels || tile_shape.DepthInTexels ||
       subresource_count != texture_desc.MipLevels) {
     throw std::runtime_error("packed texture tiling matrix mismatch");
   }
