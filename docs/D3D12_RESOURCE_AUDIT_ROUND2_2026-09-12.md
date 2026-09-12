@@ -17,10 +17,11 @@ Capability policy: no feature exposure changes in this round.
   `e1ef9aae57e8a52d12ada71f4bb20830abc78462`.
 - Final remote HEAD: unchanged at `0c35caab9feda2f8bfeb212dbbe19569a8b8fea7`;
   no push was performed.
-- Committed but unpushed: the local `1ccb544` fix plus the forward commits
-  `289a25a` (private mapping ownership and view-range guards), `e5f26d0`
-  (MSC texture-min-LOD compatibility request), `a3fae81` (new boundary and
-  feedback fixtures), `e1ef9aa` (audit ledger updates), and this report.
+- Committed but unpushed: every local commit after the remote baseline,
+  including `1ccb544`, `289a25a` (private mapping ownership and view-range
+  guards), `e5f26d0` (MSC texture-min-LOD compatibility request), `a3fae81`
+  (new boundary and feedback fixtures), `e1ef9aa` (audit ledger updates), and
+  the report/documentation commits through final HEAD.
 - Staged at delivery: none.
 - Unstaged at delivery: none.
 - Untracked at delivery: `.porting/`, pre-existing local milestone material;
