@@ -75,13 +75,16 @@ class MTLD3D12Buffer : public MTLD3D12Pageable<MTLD3D12Resource> {
   UINT tile_count_ = 0;
 
   struct TileMapping {
-    Com<ID3D12Heap> heap;
+    // Mapping bookkeeping needs the heap object after the application's
+    // public reference is released, but a reserved resource must not add one
+    // public COM reference per mapped tile.
+    Com<MTLD3D12Heap, false> heap;
     UINT heap_tile = 0;
   };
 
   struct TileUpdate {
     UINT resource_tile = 0;
-    Com<ID3D12Heap> heap;
+    Com<MTLD3D12Heap, false> heap;
     UINT heap_tile = 0;
   };
 
@@ -556,7 +559,7 @@ public:
           auto &update = updates.emplace_back();
           update.resource_tile = resource_tiles[resource_tile + tile];
           if (range_flag == D3D12_TILE_RANGE_FLAG_NONE || range_flag == D3D12_TILE_RANGE_FLAG_REUSE_SINGLE_TILE) {
-            update.heap = pHeap;
+            update.heap = static_cast<MTLD3D12Heap *>(pHeap);
             update.heap_tile = range_flag == D3D12_TILE_RANGE_FLAG_REUSE_SINGLE_TILE ? heap_tile : heap_tile + tile;
           }
         }

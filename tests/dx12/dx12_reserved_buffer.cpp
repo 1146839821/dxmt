@@ -83,6 +83,8 @@ int Run(const char *read_path, const char *write_path) {
   hd.SizeInBytes = 2 * TileBytes; hd.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
   hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
   Check("tile heap", device->CreateHeap(&hd, IID_PPV_ARGS(&heap.ptr)));
+  const ULONG heap_public_ref_after_create = heap->AddRef();
+  heap->Release();
   Owned<ID3D12Resource> sparse, upload, output, readback;
   auto d = BufferDesc(2 * TileBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
   Check("reserved buffer", device->CreateReservedResource(&d, D3D12_RESOURCE_STATE_COMMON,
@@ -150,6 +152,15 @@ int Run(const char *read_path, const char *write_path) {
   D3D12_TILE_REGION_SIZE region = {}; region.NumTiles = 2;
   UINT offset = 0;
   direct->UpdateTileMappings(sparse.ptr, 1, &coord, &region, heap.ptr, 1, nullptr, &offset, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+  const ULONG heap_public_ref_after_mapping = heap->AddRef();
+  heap->Release();
+  if (heap_public_ref_after_mapping != heap_public_ref_after_create) {
+    std::cerr << "reserved buffer mapping changed the heap public ref count from "
+              << heap_public_ref_after_create - 1 << " to " << heap_public_ref_after_mapping - 1 << "\n";
+    throw std::runtime_error("reserved buffer mapping retained a public heap reference");
+  }
+  std::cout << "reserved buffer mapping kept heap public ref count at "
+            << heap_public_ref_after_mapping - 1 << "\n";
   Transition(init.ptr, sparse.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
   init->CopyTiles(sparse.ptr, &coord, &region, upload.ptr, 0, D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
   Transition(init.ptr, sparse.ptr, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);

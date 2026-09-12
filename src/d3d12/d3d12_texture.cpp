@@ -341,13 +341,15 @@ class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
   std::vector<D3D12_SUBRESOURCE_TILING> subresource_tilings_;
 
   struct TileMapping {
-    Com<ID3D12Heap> heap;
+    // Keep mapping identity/backing ownership privately; D3D12 does not
+    // expose a public heap reference for each reserved-resource mapping.
+    Com<MTLD3D12Heap, false> heap;
     UINT heap_tile = 0;
   };
 
   struct TileUpdate {
     UINT resource_tile = 0;
-    Com<ID3D12Heap> heap;
+    Com<MTLD3D12Heap, false> heap;
     UINT heap_tile = 0;
   };
 
@@ -405,6 +407,30 @@ class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
     level = sparse_first_mipmap_in_tail_;
     slice = array_slice;
     tile_offset = tile_in_array - standard_tile_count_per_array_;
+    return true;
+  }
+
+  bool
+  IsTextureViewRepresentable(UINT first_mip, UINT mip_count) const {
+    if (!reserved_ || !texture || !texture->current())
+      return false;
+
+    const uint64_t end_mip = uint64_t(first_mip) + mip_count;
+    if (!mip_count || end_mip > desc_.MipLevels)
+      return false;
+
+    // The D3D12 logical mip boundary and Metal's sparse-tail boundary must
+    // agree for every mip referenced by the view. A standard-only view is
+    // therefore safe when both models classify it as pre-tail, even when the
+    // resource also contains a packed tail that DXMT cannot translate.
+    for (UINT mip = first_mip; mip < end_mip; mip++) {
+      const bool d3d_packed = mip >= standard_mip_count_;
+      const bool metal_packed = mip >= sparse_first_mipmap_in_tail_;
+      if (d3d_packed != metal_packed)
+        return false;
+      if (d3d_packed && !packed_tail_mapping_supported_)
+        return false;
+    }
     return true;
   }
 
@@ -953,11 +979,6 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   CreateShaderResourceView(const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) {
-    // Reserved textures are shader-visible only when the native placement-sparse
-    // allocation exists. A packed-mip view also requires an exact Metal sparse
-    // tail match; otherwise the D3D12 logical tile contract cannot be represented.
-    if (reserved_ && (!texture || !texture->current() || (packed_mip_count_ && !packed_tail_mapping_supported_)))
-      return E_NOTIMPL;
     HRESULT hr;
     D3D12_SHADER_RESOURCE_VIEW_DESC ViewDesc;
     if (!pDesc) {
@@ -1125,8 +1146,10 @@ public:
         FAILED(ValidateTextureView(desc_, ViewFirstMipLevel, ViewMipLevelCount, ViewFirstArraySlice, ViewArraySize)) ||
         FAILED(ValidatePlaneSlice(metal_format, PlaneSlice)))
       return E_INVALIDARG;
+    if (reserved_ && !IsTextureViewRepresentable(ViewFirstMipLevel, ViewMipLevelCount))
+      return E_NOTIMPL;
     View = texture->createView(view_descriptor);
-    ResourceMinLODClamp = FLOAT((INT)ResourceMinLODClamp - view_descriptor.firstMiplevel);
+    ResourceMinLODClamp -= FLOAT(view_descriptor.firstMiplevel);
 
     const auto trace_id = texture_srv_debug_count.fetch_add(1, std::memory_order_relaxed);
     if (trace_id < 128) {
@@ -1148,10 +1171,6 @@ public:
   ) {
     if (pCounter)
       return E_INVALIDARG;
-    // See CreateShaderResourceView: a reserved UAV requires a native sparse
-    // texture and an exact packed-tail layout match when packed mips exist.
-    if (reserved_ && (!texture || !texture->current() || (packed_mip_count_ && !packed_tail_mapping_supported_)))
-      return E_NOTIMPL;
     HRESULT hr;
     D3D12_UNORDERED_ACCESS_VIEW_DESC ViewDesc;
     if (!pDesc) {
@@ -1242,6 +1261,8 @@ public:
         FAILED(ValidateTextureView(desc_, ViewFirstMipLevel, ViewMipLevelCount, ViewFirstArraySlice, ViewArraySize)) ||
         FAILED(ValidatePlaneSlice(metal_format, PlaneSlice)))
       return E_INVALIDARG;
+    if (reserved_ && !IsTextureViewRepresentable(ViewFirstMipLevel, ViewMipLevelCount))
+      return E_NOTIMPL;
     View = texture->createView(view_descriptor);
     return Heap->AddUnorderedAccessView(Index, texture.ptr(), View);
   };
@@ -1677,7 +1698,7 @@ public:
           auto &update = updates.emplace_back();
           update.resource_tile = resource_tiles[resource_tile + tile];
           if (needs_heap) {
-            update.heap = pHeap;
+            update.heap = static_cast<MTLD3D12Heap *>(pHeap);
             update.heap_tile = range_flag == D3D12_TILE_RANGE_FLAG_REUSE_SINGLE_TILE ? heap_tile : heap_tile + tile;
           }
         }
@@ -1714,7 +1735,8 @@ public:
             packed_tile_offset != index || packed_level != sparse_first_mipmap_in_tail_ || packed_slice != 0)
           return E_NOTIMPL;
         if (mapped &&
-            (update->heap.ptr() != pHeap || uint64_t(update->heap_tile) != uint64_t(heap_tile_start) + index))
+            (update->heap.ptr() != static_cast<MTLD3D12Heap *>(pHeap) ||
+             uint64_t(update->heap_tile) != uint64_t(heap_tile_start) + index))
           return E_NOTIMPL;
       }
     }

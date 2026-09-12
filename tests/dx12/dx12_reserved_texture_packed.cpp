@@ -242,6 +242,8 @@ int Run(const char *read_path, const char *write_a_path, const char *write_b_pat
   heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
   Check("CreatePackedHeapA", device->CreateHeap(&heap_desc, IID_PPV_ARGS(&heap_a.ptr)));
   Check("CreatePackedHeapB", device->CreateHeap(&heap_desc, IID_PPV_ARGS(&heap_b.ptr)));
+  const ULONG heap_a_public_ref_after_create = heap_a->AddRef();
+  heap_a->Release();
 
   D3D12_TILED_RESOURCE_COORDINATE coordinate = {};
   coordinate.Subresource = 0;
@@ -257,6 +259,15 @@ int Run(const char *read_path, const char *write_a_path, const char *write_b_pat
   // Create both views before the first mapping. The physical mapping must not
   // alter the descriptor's virtual resource identity.
   map_tail(heap_a.ptr);
+  const ULONG heap_a_public_ref_after_mapping = heap_a->AddRef();
+  heap_a->Release();
+  if (heap_a_public_ref_after_mapping != heap_a_public_ref_after_create) {
+    std::cerr << "packed texture mapping changed heap A public ref count from "
+              << heap_a_public_ref_after_create - 1 << " to " << heap_a_public_ref_after_mapping - 1 << "\n";
+    throw std::runtime_error("packed texture mapping retained a public heap reference");
+  }
+  std::cout << "packed texture mapping kept heap A public ref count at "
+            << heap_a_public_ref_after_mapping - 1 << "\n";
 
   auto submit = [&](const char *name, ID3D12PipelineState *pso, bool read, UINT expected) {
     Owned<ID3D12CommandAllocator> allocator;
