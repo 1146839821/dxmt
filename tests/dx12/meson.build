@@ -351,6 +351,18 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_texture_lod_clamp_fixture',
+    input: 'texture_lod_clamp.hlsl',
+    output: 'texture_lod_clamp.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_reserved_texture_view_range_fixture',
+    input: 'reserved_texture_view_range.hlsl',
+    output: 'reserved_texture.view_range.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
 endif
 
 dx12_reserved_buffer = executable('dx12_reserved_buffer', 'dx12_reserved_buffer.cpp', dependencies: [ d3d12_dep ])
@@ -360,6 +372,8 @@ dx12_reserved_texture_packed = executable('dx12_reserved_texture_packed', 'dx12_
 dx12_reserved_buffer_copy_mapping = executable('dx12_reserved_buffer_copy_mapping', 'dx12_reserved_buffer_copy_mapping.cpp', dependencies: [ d3d12_dep ])
 dx12_tiled_status_sm5 = executable('dx12_tiled_status_sm5', 'dx12_tiled_status_sm5.cpp', dependencies: [ d3d12_dep ])
 dx12_tiled_tier2_oracle = executable('dx12_tiled_tier2_oracle', 'dx12_tiled_tier2_oracle.cpp', dependencies: [ d3d12_dep, dxgi_dep ])
+dx12_texture_lod_clamp = executable('dx12_texture_lod_clamp', 'dx12_texture_lod_clamp.cpp', dependencies: [ d3d12_dep ])
+dx12_reserved_texture_view_range = executable('dx12_reserved_texture_view_range', 'dx12_reserved_texture_view_range.cpp', dependencies: [ d3d12_dep ])
 
 if dxc_command.length() > 0
   custom_target('dx12_predication_vs_fixture',
