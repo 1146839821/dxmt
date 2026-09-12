@@ -1,8 +1,8 @@
 # D3D12 Resource Audit — Round 2 Re-audit
 
-Date: 2026-09-12  
-Branch: `feat/d3d12`  
-Scope: post-GO Tiled/Reserved Tier 2 semantic closure only.  
+Date: 2026-09-12
+Branch: `feat/d3d12`
+Scope: post-GO Tiled/Reserved Tier 2 semantic closure only.
 Capability policy: no feature exposure changes in this round.
 
 ## Repository State
