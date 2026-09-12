@@ -18,18 +18,26 @@
 
 #pragma once
 
+#include "d3d12.h"
 #include "dxmt_texture.hpp"
+#include "dxmt_scaler.hpp"
+#include "com/com_pointer.hpp"
 #include <cstdint>
 
 namespace dxmt {
+
+class MTLD3D12Resource;
 
 enum class EncoderType {
   Null,
   Clear,
   Render,
   Blit,
+  CopyTiles,
   Compute,
   Resolve,
+  TemporalUpscale,
+  SampleTimestamp,
 };
 
 struct EncoderData {
@@ -44,10 +52,15 @@ struct ClearEncoderData : EncoderData {
     std::pair<float, uint8_t> depth_stencil;
   };
   TextureViewRef attachment;
+  D3D12_RECT *rects = nullptr;
+  WMTPixelFormat format = WMTPixelFormatInvalid;
   unsigned clear_dsv;
   unsigned array_length;
   unsigned width;
   unsigned height;
+  unsigned rect_count = 0;
+  uint8_t raster_sample_count = 1;
+  unsigned depth_plane = 0;
 
   ClearEncoderData() {}
 };
@@ -100,6 +113,7 @@ struct RenderEncoderData : EncoderData {
   uint8_t dsv_readonly_flags;
   uint8_t render_target_count;
   bool use_visibility_result = 0;
+  WMT::Reference<WMT::Buffer> visibility_buffer;
   bool use_tessellation = 0;
   bool use_geometry = 0;
 };
@@ -109,6 +123,18 @@ struct BlitEncoderData : EncoderData {
   wmtcmd_base *cmd_tail;
 };
 
+struct CopyTilesEncoderData : EncoderData {
+  Com<MTLD3D12Resource, false> tiled_resource;
+  Com<MTLD3D12Resource, false> linear_resource;
+  D3D12_TILED_RESOURCE_COORDINATE region_start_coordinate = {};
+  D3D12_TILE_REGION_SIZE region_size = {};
+  UINT64 buffer_offset = 0;
+  D3D12_TILE_COPY_FLAGS flags = D3D12_TILE_COPY_FLAG_NONE;
+  bool has_region_start_coordinate = false;
+  bool buffer_to_tiled = false;
+  bool tiled_to_buffer = false;
+};
+
 struct ComputeEncoderData : EncoderData {
   wmtcmd_compute_nop cmd_head;
   wmtcmd_base *cmd_tail;
@@ -116,6 +142,21 @@ struct ComputeEncoderData : EncoderData {
 struct ResolveEncoderData : EncoderData {
   TextureViewRef src;
   TextureViewRef dst;
+};
+
+struct TemporalUpscaleData : EncoderData {
+  WMT::Reference<WMT::Texture> input;
+  WMT::Reference<WMT::Texture> output;
+  WMT::Reference<WMT::Texture> depth;
+  WMT::Reference<WMT::Texture> motion_vector;
+  WMT::Reference<WMT::Texture> exposure;
+  Rc<TemporalScaler> scaler;
+  WMTFXTemporalScalerProps props;
+};
+
+struct SampleTimestampData : EncoderData {
+  WMT::Reference<WMT::CounterSampleBuffer> sample_buffer;
+  uint64_t sample_index;
 };
 
 }; // namespace dxmt

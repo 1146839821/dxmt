@@ -5,17 +5,43 @@ struct ID3D12Resource;
 
 #define NVNGX_API extern "C"
 
+#ifdef __GNUC__
+#define NVNGX_CONV
+#else
+#define NVNGX_CONV __cdecl
+#endif
+
 enum NVNGX_RESULT : unsigned int {
   NVNGX_RESULT_OK = 1,
-  NVNGX_RESULT_FAIL = 0xbad0000,
-  NVNGX_RESULT_FEATURE_NOT_SUPPORTED = 0xbad0001,
-  NVNGX_RESULT_INVALID_PARAMETER = 0xbad0005,
+  NVNGX_RESULT_FAIL = 0xBAD00000,
+  NVNGX_RESULT_FEATURE_NOT_SUPPORTED = NVNGX_RESULT_FAIL | 1,
+  NVNGX_RESULT_PLATFORM_ERROR = NVNGX_RESULT_FAIL | 2,
+  NVNGX_RESULT_FEATURE_ALREADY_EXISTS = NVNGX_RESULT_FAIL | 3,
+  NVNGX_RESULT_FEATURE_NOT_FOUND = NVNGX_RESULT_FAIL | 4,
+  NVNGX_RESULT_INVALID_PARAMETER = NVNGX_RESULT_FAIL | 5,
+  NVNGX_RESULT_SCRATCH_BUFFER_TOO_SMALL = NVNGX_RESULT_FAIL | 6,
+  NVNGX_RESULT_NOT_INITIALIZED = NVNGX_RESULT_FAIL | 7,
+  NVNGX_RESULT_UNSUPPORTED_INPUT_FORMAT = NVNGX_RESULT_FAIL | 8,
+  NVNGX_RESULT_RW_FLAG_MISSING = NVNGX_RESULT_FAIL | 9,
+  NVNGX_RESULT_MISSING_INPUT = NVNGX_RESULT_FAIL | 10,
+  NVNGX_RESULT_UNABLE_TO_INITIALIZE_FEATURE = NVNGX_RESULT_FAIL | 11,
+  NVNGX_RESULT_OUT_OF_DATE = NVNGX_RESULT_FAIL | 12,
+  NVNGX_RESULT_OUT_OF_GPU_MEMORY = NVNGX_RESULT_FAIL | 13,
+  NVNGX_RESULT_UNSUPPORTED_FORMAT = NVNGX_RESULT_FAIL | 14,
+  NVNGX_RESULT_UNABLE_TO_WRITE_TO_APP_DATA_PATH = NVNGX_RESULT_FAIL | 15,
+  NVNGX_RESULT_UNSUPPORTED_PARAMETER = NVNGX_RESULT_FAIL | 16,
+  NVNGX_RESULT_DENIED = NVNGX_RESULT_FAIL | 17,
+  NVNGX_RESULT_NOT_IMPLEMENTED = NVNGX_RESULT_FAIL | 18,
 };
 
-#define NVNGX_FAILED(result) (result & NVNGX_RESULT_FAIL) == NVNGX_RESULT_FAIL
+#define NVNGX_FAILED(result) (((result) & 0xFFF00000u) == NVNGX_RESULT_FAIL)
+
+struct NVSDK_NGX_Handle {};
 
 enum NVNGX_FEATURE : unsigned int {
   NVNGX_FEATURE_SUPERSAMPLING = 1,
+  NVNGX_FEATURE_FRAME_GENERATION = 11,
+  NVNGX_FEATURE_RAY_RECONSTRUCTION = 13,
 };
 
 enum NVNGX_DLSS_FLAG: unsigned int {
@@ -34,36 +60,51 @@ enum NVNGX_PERFQUALITY: unsigned int {
   NVNGX_PERFQUALITY_DLAA,
 };
 
-class NVNGXParameter { // vtable seems to be inconsistent?
+class NVNGXParameter {
 public:
-  virtual void Set(const char *name, void *value) = 0;
-  virtual void Set(const char *name, ID3D12Resource *value) = 0;
-  virtual void Set(const char *name, ID3D11Resource *value) = 0;
-  virtual void Set(const char *name, int value) = 0;
-  virtual void Set(const char *name, unsigned int value) = 0;
-  virtual void Set(const char *name, double value) = 0;
-  virtual void Set(const char *name, float value) = 0;
   virtual void Set(const char *name, unsigned long long value) = 0;
+  virtual void Set(const char *name, float value) = 0;
+  virtual void Set(const char *name, double value) = 0;
+  virtual void Set(const char *name, unsigned int value) = 0;
+  virtual void Set(const char *name, int value) = 0;
+  virtual void Set(const char *name, ID3D11Resource *value) = 0;
+  virtual void Set(const char *name, ID3D12Resource *value) = 0;
+  virtual void Set(const char *name, void *value) = 0;
 
-  virtual NVNGX_RESULT Get(const char *name, void **out) const = 0;
-  virtual NVNGX_RESULT Get(const char *name, ID3D12Resource **out) const = 0;
+  virtual NVNGX_RESULT Get(const char *name, unsigned long long *out) const = 0;
+  virtual NVNGX_RESULT Get(const char *name, float *out) const = 0;
   virtual NVNGX_RESULT Get(const char *name, double *out) const = 0;
   virtual NVNGX_RESULT Get(const char *name, unsigned int *out) const = 0;
   virtual NVNGX_RESULT Get(const char *name, int *out) const = 0;
   virtual NVNGX_RESULT Get(const char *name, ID3D11Resource **out) const = 0;
-  virtual NVNGX_RESULT Get(const char *name, float *out) const = 0;
-  virtual NVNGX_RESULT Get(const char *name, unsigned long long *out) const = 0;
+  virtual NVNGX_RESULT Get(const char *name, ID3D12Resource **out) const = 0;
+  virtual NVNGX_RESULT Get(const char *name, void **out) const = 0;
 
   virtual void Reset() = 0;
 };
 
-struct NVNGX_FeatureDiscoveryInfo
-{
-    unsigned int SDKVersion;
-    NVNGX_FEATURE FeatureID;
-    char Identifier[32];
-    const wchar_t* ApplicationDataPath;
-    const void* FeatureInfo;
+using NVSDK_NGX_Parameter = NVNGXParameter;
+
+struct NVNGX_ProjectIdDescription {
+  const char *ProjectId;
+  unsigned int EngineType;
+  const char *EngineVersion;
+};
+
+struct NVNGX_ApplicationIdentifier {
+  unsigned int IdentifierType;
+  union {
+    NVNGX_ProjectIdDescription ProjectDesc;
+    unsigned long long ApplicationId;
+  } v;
+};
+
+struct NVNGX_FeatureDiscoveryInfo {
+  unsigned int SDKVersion;
+  NVNGX_FEATURE FeatureID;
+  NVNGX_ApplicationIdentifier Identifier;
+  const wchar_t *ApplicationDataPath;
+  const void *FeatureInfo;
 };
 
 enum NVNGX_FEATURE_SUPPORT_RESULT: unsigned int {
@@ -91,6 +132,7 @@ struct NVNGX_FeatureRequirement {
 #define NVNGX_Parameter_Reset "Reset"
 #define NVNGX_Parameter_ExposureTexture "ExposureTexture"
 #define NVNGX_Parameter_DLSS_Pre_Exposure "DLSS.Pre.Exposure"
+#define NVNGX_Parameter_DLSSMode "DLSSMode"
 #define NVNGX_Parameter_MV_Scale_X "MV.Scale.X"
 #define NVNGX_Parameter_MV_Scale_Y "MV.Scale.Y"
 #define NVNGX_Parameter_Jitter_Offset_X "Jitter.Offset.X"
@@ -99,6 +141,7 @@ struct NVNGX_FeatureRequirement {
 #define NVNGX_Parameter_SuperSampling_ScaleFactor "SuperSampling.ScaleFactor"
 #define NVNGX_Parameter_Sharpness "Sharpness"
 #define NVNGX_Parameter_Scale "Scale"
+#define NVNGX_Parameter_DLSS_Enable_Output_Subrects "DLSS.Enable.Output.Subrects"
 
 #define NVNGX_Parameter_DLSS_Render_Subrect_Dimensions_Width  "DLSS.Render.Subrect.Dimensions.Width"
 #define NVNGX_Parameter_DLSS_Render_Subrect_Dimensions_Height "DLSS.Render.Subrect.Dimensions.Height"

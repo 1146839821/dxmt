@@ -6,6 +6,7 @@
 #include "log/log.hpp"
 #include "util_string.hpp"
 #include "wsi_window.hpp"
+#include "dxgi_present_validation.hpp"
 #include "Metal.hpp"
 
 namespace dxmt {
@@ -13,7 +14,7 @@ namespace dxmt {
 Com<IMTLDXGIAdapter> CreateAdapter(WMT::Device Device,
                                    IDXGIFactory2 *pFactory, Config &config);
 
-class MTLDXGIFactory : public MTLDXGIObject<IDXGIFactory6> {
+class MTLDXGIFactory : public MTLDXGIObject<IDXGIFactory7> {
 
 public:
   MTLDXGIFactory(UINT Flags) : flags_(Flags) {};
@@ -25,11 +26,17 @@ public:
 
     *ppvObject = nullptr;
 
+    if (riid == DXMT_STREAMLINE_RETRIEVE_BASE_INTERFACE) {
+      *ppvObject = ref(static_cast<IDXGIFactory7 *>(this));
+      return S_OK;
+    }
+
     if (riid == __uuidof(IUnknown) || riid == __uuidof(IDXGIObject) ||
         riid == __uuidof(IDXGIFactory) || riid == __uuidof(IDXGIFactory1) ||
-        riid == __uuidof(IDXGIFactory2) || riid == __uuidof(IDXGIFactory2) ||
+        riid == __uuidof(IDXGIFactory2) ||
         riid == __uuidof(IDXGIFactory3) || riid == __uuidof(IDXGIFactory4) ||
-        riid == __uuidof(IDXGIFactory5) || riid == __uuidof(IDXGIFactory6)) {
+        riid == __uuidof(IDXGIFactory5) || riid == __uuidof(IDXGIFactory6) ||
+        riid == __uuidof(IDXGIFactory7)) {
       *ppvObject = ref(this);
       return S_OK;
     }
@@ -105,6 +112,9 @@ public:
 
     if (!ppSwapChain || !pDesc || !hWnd || !pDevice)
       return DXGI_ERROR_INVALID_CALL;
+    HRESULT validation = ValidateSwapChainDesc(*pDesc);
+    if (FAILED(validation))
+      return validation;
 
     Com<IMTLSwapChainFactory> swapchain_factory;
     if (FAILED(pDevice->QueryInterface(IID_PPV_ARGS(&swapchain_factory)))) {
@@ -212,8 +222,8 @@ public:
 
   HRESULT STDMETHODCALLTYPE MakeWindowAssociation(HWND WindowHandle,
                                                   UINT Flags) final {
-    if (Flags) {
-      WARN("MakeWindowAssociation: Ignoring flags ", Flags);
+    if (Flags & ~DXGI_MWA_VALID) {
+      WARN("MakeWindowAssociation: Ignoring unsupported flags ", Flags & ~DXGI_MWA_VALID);
     }
     associated_window_ = WindowHandle;
     return S_OK;
@@ -313,10 +323,26 @@ public:
     return adapter->QueryInterface(riid, ppvAdapter);
   };
 
+  HRESULT STDMETHODCALLTYPE RegisterAdaptersChangedEvent(HANDLE event,
+                                                          DWORD *cookie) override {
+    if (!event || !cookie)
+      return DXGI_ERROR_INVALID_CALL;
+
+    *cookie = ++next_adapter_event_cookie_;
+    if (!*cookie)
+      *cookie = ++next_adapter_event_cookie_;
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE UnregisterAdaptersChangedEvent(DWORD cookie) override {
+    return cookie ? S_OK : DXGI_ERROR_NOT_FOUND;
+  }
+
 private:
   UINT flags_;
 
   HWND associated_window_ = nullptr;
+  DWORD next_adapter_event_cookie_ = 0;
 };
 
 extern "C" HRESULT __stdcall CreateDXGIFactory2(UINT Flags, REFIID riid,

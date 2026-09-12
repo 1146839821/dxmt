@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""Run the evidence-backed D3D12 tiled-resource Tier 2 gate.
+
+The gate deliberately treats SKIP, UNKNOWN, oracle gaps, and architecture or
+platform blockers as non-passing results.  It is a host-side runner because
+the semantic fixtures are Windows executables that are normally deployed
+through Wine or run on a native Windows machine.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+
+
+PASS = "PASS"
+FAIL = "FAIL"
+SKIP = "SKIP"
+BLOCKED_BY_ARCHITECTURE = "BLOCKED_BY_ARCHITECTURE"
+NEEDS_WINDOWS_ORACLE = "NEEDS_WINDOWS_ORACLE"
+UNVERIFIED = "UNVERIFIED / MISSING_VALIDATION"
+
+
+@dataclass(frozen=True)
+class Case:
+    name: str
+    files: tuple[str, ...] = ()
+    stage_files: tuple[str, ...] = ()
+    args: tuple[str, ...] = ()
+    fixed_status: str | None = None
+    reason: str = ""
+
+
+CASES = (
+    Case(
+        "resource-tiling-and-boundaries",
+        files=("dx12_resource_tests.exe",),
+        reason="GetResourceTiling including zero all-packed shape, mapping validation, CopyTiles boundaries, and packed metadata",
+    ),
+    Case(
+        "reserved-buffer-descriptor-table",
+        files=(
+            "dx12_reserved_buffer.exe",
+            "reserved_buffer.probe_read.cs.cso",
+            "reserved_buffer.probe_write.cs.cso",
+        ),
+        reason="descriptor-table SRV/UAV, remap, NULL, CopyTiles, and cross-queue data",
+    ),
+    Case(
+        "reserved-buffer-copy-mapping",
+        files=("dx12_reserved_buffer_copy_mapping.exe", "reserved_buffer.copy_mapping.cs.cso"),
+        reason="CopyTileMappings visibility through a descriptor created before mapping copy",
+    ),
+    Case(
+        "reserved-buffer-root-srv",
+        files=("dx12_compute_sm6.exe", "compute_sm6_root_srv.cs.cso"),
+        args=("--reserved-srv",),
+        reason="independent root SRV path over a reserved buffer",
+    ),
+    Case(
+        "reserved-buffer-root-uav",
+        files=("dx12_compute_sm6.exe", "compute_sm6_root_uav.cs.cso"),
+        args=("--reserved-uav",),
+        reason="independent root UAV path over a reserved buffer",
+    ),
+    Case(
+        "reserved-texture-standard-multi-heap",
+        files=(
+            "dx12_reserved_texture.exe",
+            "reserved_texture.read.cs.cso",
+            "reserved_texture.write.cs.cso",
+        ),
+        reason="standard texture access, mapped/NULL reads and writes, two heaps, remap, and queue ordering",
+    ),
+    Case(
+        "reserved-texture-array",
+        files=("dx12_reserved_texture_mip_array.exe", "reserved_texture.mip_array.cs.cso"),
+        reason="standard mip/array tile mapping and CopyTileMappings",
+    ),
+    Case(
+        "reserved-texture-packed-tail",
+        files=(
+            "dx12_reserved_texture_packed.exe",
+            "reserved_texture.packed.read_phase.cs.cso",
+            "reserved_texture.packed.write_phase_a.cs.cso",
+            "reserved_texture.packed.write_phase_b.cs.cso",
+        ),
+        fixed_status=BLOCKED_BY_ARCHITECTURE,
+        reason="full packed tail, non-identity D3D/Metal tail translation, remap, and heap lifetime",
+    ),
+    Case(
+        "shader-status-feedback-texture",
+        files=("dx12_tiled_status_sm5.exe",),
+        stage_files=("d3dcompiler_47.dll",),
+        reason=(
+            "DXBC Load, point/linear SampleLevel, and tiled SampleGrad feedback; "
+            "CheckAccessFullyMapped covers mapped, NULL, and mixed accesses"
+        ),
+    ),
+    Case(
+        "raw-structured-buffer-feedback",
+        fixed_status=BLOCKED_BY_ARCHITECTURE,
+        reason=(
+            "D3D/HLSL status contract is SPEC_CLOSED, but the direct raw/structured "
+            "buffer AIR path has no residency/status sideband; DXMT lowering is DESIGN_REQUIRED"
+        ),
+    ),
+    Case(
+        "sparse-filtering-footprint",
+        files=("dx12_tiled_status_sm5.exe",),
+        stage_files=("d3dcompiler_47.dll",),
+        reason=(
+            "true linear filtering fixture covers fully mapped, fully NULL, and "
+            "mapped/NULL mixed footprints with numeric and opaque status checks"
+        ),
+    ),
+    Case(
+        "sparse-lod-clamp",
+        files=("dx12_texture_lod_clamp.exe", "texture_lod_clamp.cs.cso"),
+        fixed_status=UNVERIFIED,
+        reason=(
+            "independent ordinary/reserved fractional ResourceMinLODClamp fixture "
+            "exists, but MSC 4.0.1 on the current M1 host ignores the SRV minLOD "
+            "metadata; semantic closure needs a supporting compiler/runtime oracle"
+        ),
+    ),
+    Case(
+        "native-windows-runtime-oracle",
+        files=("dx12_tiled_tier2_oracle.exe",),
+        fixed_status=NEEDS_WINDOWS_ORACLE,
+        reason=(
+            "supported metadata and packed-fixture pass captured on NVIDIA "
+            "GeForce GTX 1650 (TiledResourcesTier=3); this Wine-hosted gate "
+            "cannot execute or ingest the out-of-band native Windows "
+            "runtime/debug-layer result"
+        ),
+    ),
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--build-dir",
+        type=Path,
+        required=True,
+        help="directory containing the DX12 test executables and shader fixtures",
+    )
+    parser.add_argument(
+        "--wine",
+        type=Path,
+        default=None,
+        help="Wine executable used to run .exe fixtures; defaults to WINE or PATH",
+    )
+    parser.add_argument("--timeout", type=float, default=300.0, help="per-case timeout in seconds")
+    parser.add_argument(
+        "--only",
+        action="append",
+        choices=[case.name for case in CASES],
+        help="run only the named case; may be repeated",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="list cases and exit without running them",
+    )
+    return parser.parse_args()
+
+
+def find_runner(explicit: Path | None) -> str | None:
+    if explicit:
+        return str(explicit)
+    configured = os.environ.get("DXMT_WINE") or os.environ.get("WINE")
+    if configured:
+        return configured
+    runner = shutil.which("wine")
+    if runner:
+        return runner
+    repository_root = Path(__file__).resolve().parents[2]
+    bundled = repository_root / "toolchains" / "wine" / "bin" / "wine"
+    return str(bundled) if bundled.is_file() else None
+
+
+def run_case(case: Case, build_dir: Path, runner: str | None, timeout: float) -> tuple[str, str]:
+    staged_files = case.files + case.stage_files
+    missing = [str(build_dir / filename) for filename in staged_files if not (build_dir / filename).is_file()]
+    if missing:
+        return SKIP, "missing fixture or executable: " + ", ".join(missing)
+    if case.fixed_status:
+        return case.fixed_status, case.reason
+    if not runner:
+        return SKIP, "no Wine runner configured; run this case on Windows or set DXMT_WINE"
+
+    with tempfile.TemporaryDirectory(prefix="dxmt-tiled-tier2-") as staging_name:
+        staging_dir = Path(staging_name)
+        for filename in staged_files:
+            shutil.copy2(build_dir / filename, staging_dir / Path(filename).name)
+        command = [
+            runner,
+            str(staging_dir / Path(case.files[0]).name),
+            *(str(staging_dir / Path(filename).name) for filename in case.files[1:]),
+            *case.args,
+        ]
+        completed = subprocess.run(
+            command,
+            cwd=staging_dir,
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    output = (completed.stdout + completed.stderr).strip()
+    if completed.returncode == 0:
+        status = PASS
+    elif completed.returncode == 77:
+        status = SKIP
+    else:
+        status = FAIL
+    details = f"exit={completed.returncode}"
+    if output:
+        details += "\n" + output
+    return status, details
+
+
+def main() -> int:
+    arguments = parse_args()
+    build_dir = arguments.build_dir.resolve()
+    selected = set(arguments.only or (case.name for case in CASES))
+    runner = find_runner(arguments.wine)
+
+    if arguments.list:
+        for case in CASES:
+            print(f"{case.name}: {case.fixed_status or 'RUNTIME'} - {case.reason}")
+        return 0
+
+    results: list[tuple[Case, str, str]] = []
+    for case in CASES:
+        if case.name not in selected:
+            continue
+        try:
+            status, details = run_case(case, build_dir, runner, arguments.timeout)
+        except subprocess.TimeoutExpired:
+            status, details = FAIL, f"timeout after {arguments.timeout:g}s"
+        except OSError as error:
+            status, details = FAIL, f"could not start runner: {error}"
+        results.append((case, status, details))
+        print(f"[{status}] {case.name}: {case.reason}")
+        if details and status in {FAIL, SKIP}:
+            print(details)
+
+    non_pass = [(case.name, status) for case, status, _ in results if status != PASS]
+    print()
+    if non_pass:
+        print("TIER2_GATE=NOT_SATISFIED")
+        print("TiledResourcesTier remains D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED")
+        print("non-passing mandatory cases:")
+        for name, status in non_pass:
+            print(f"  {status}: {name}")
+        return 1
+
+    print("TIER2_GATE=PASS")
+    print("All selected mandatory cases returned PASS; capability exposure still requires the separate commit gate.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

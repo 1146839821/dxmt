@@ -91,6 +91,20 @@ castable(void *val, unsigned long long *out) {
 
 template <>
 inline bool
+castable(void *val, ID3D11Resource **out) {
+  *out = static_cast<ID3D11Resource *>(val);
+  return true;
+}
+
+template <>
+inline bool
+castable(void *val, ID3D12Resource **out) {
+  *out = static_cast<ID3D12Resource *>(val);
+  return true;
+}
+
+template <>
+inline bool
 castable(unsigned long long val, int *out) {
   *out = (int)val;
   return true;
@@ -205,7 +219,7 @@ private:
 
     auto iter = values_.find(name);
     if (iter == values_.end()) {
-      return NVNGX_RESULT_FAIL;
+      return NVNGX_RESULT_INVALID_PARAMETER;
     };
     auto res = std::visit(
         overloads{
@@ -213,7 +227,9 @@ private:
               *out_value = value;
               return NVNGX_RESULT_OK;
             },
-            [out_value](auto value) { return castable(value, out_value) ? NVNGX_RESULT_OK : NVNGX_RESULT_FAIL; }
+            [out_value](auto value) {
+              return castable(value, out_value) ? NVNGX_RESULT_OK : NVNGX_RESULT_INVALID_PARAMETER;
+            }
         },
         iter->second
     );

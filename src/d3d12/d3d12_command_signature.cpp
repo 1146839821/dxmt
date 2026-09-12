@@ -95,8 +95,15 @@ public:
 
   HRESULT
   Initialize(const D3D12_COMMAND_SIGNATURE_DESC *pDesc, ID3D12RootSignature *pRootSignature) {
+    if (!pDesc || (!pDesc->NumArgumentDescs && pDesc->pArgumentDescs) ||
+        (pDesc->NumArgumentDescs && !pDesc->pArgumentDescs) || !pDesc->ByteStride ||
+        (pDesc->ByteStride & 3) || (pRootSignature && !IsSameDevice(device_, pRootSignature)))
+      return E_INVALIDARG;
+
     std::stringstream source;
     D3D12_INDIRECT_ARGUMENT_TYPE side_effect = ~(D3D12_INDIRECT_ARGUMENT_TYPE){};
+    uint64_t argument_size = 0;
+    ByteStride = pDesc->ByteStride;
     UpdateRootArguments = false;
     UpdateVertexBuffers = false;
     uint32_t ib_index = ~-0u;
@@ -111,21 +118,27 @@ public:
       auto &arg = pDesc->pArgumentDescs[i];
       switch (arg.Type) {
       case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH: {
+        argument_size += sizeof(uint32_t) * 3;
         side_effect = arg.Type;
         source << "packed_uint3 dispatch;\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW: {
+        argument_size += sizeof(uint32_t) * 4;
         side_effect = arg.Type;
         source << "d3d12_draw_arguments draw;\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED: {
+        argument_size += sizeof(uint32_t) * 5;
         side_effect = arg.Type;
         source << "d3d12_draw_indexed_arguments draw_indexed;\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW: {
+        if (arg.VertexBuffer.Slot >= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT)
+          return E_INVALIDARG;
+        argument_size += sizeof(uint64_t) + sizeof(uint32_t) * 2;
         UpdateVertexBuffers = true;
         source << "d3d12_vertex_buffer_view vb_" << i << ";\n";
         break;
@@ -134,10 +147,14 @@ public:
         if (ib_index != ~0u)
           return E_INVALIDARG;
         ib_index = i;
+        argument_size += sizeof(uint64_t) + sizeof(uint32_t) * 2;
         source << "d3d12_index_buffer_view ib;\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT: {
+        if (arg.Constant.Num32BitValuesToSet > (UINT64_MAX - argument_size) / sizeof(uint32_t))
+          return E_INVALIDARG;
+        argument_size += uint64_t(arg.Constant.Num32BitValuesToSet) * sizeof(uint32_t);
         UpdateRootArguments = true;
         for (unsigned j = 0; j < arg.Constant.Num32BitValuesToSet; j++) {
           source << "uint constant_" << i << "_" << j << ";\n";
@@ -145,16 +162,19 @@ public:
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW: {
+        argument_size += sizeof(uint64_t);
         UpdateRootArguments = true;
         source << "ulong cb_" << i << ";\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW: {
+        argument_size += sizeof(uint64_t);
         UpdateRootArguments = true;
         source << "ulong srv_" << i << ";\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW: {
+        argument_size += sizeof(uint64_t);
         UpdateRootArguments = true;
         source << "ulong uav_" << i << ";\n";
         break;
@@ -170,6 +190,8 @@ public:
     source << "};\n\n";
 
     if (~side_effect == 0)
+      return E_INVALIDARG;
+    if (!argument_size || argument_size > pDesc->ByteStride)
       return E_INVALIDARG;
     bool is_compute = side_effect == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
     CommandType = side_effect;

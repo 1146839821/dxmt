@@ -15,5 +15,11 @@ winetricks
 ref.sh
 *.js
 *.test
+.serena
+.codegraph
 releases
 prefixes
+.github/build_dxmt.sh
+install
+build
+build-X86

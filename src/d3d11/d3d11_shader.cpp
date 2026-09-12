@@ -183,6 +183,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
     data.dual_source_blending = variant.dual_source_blending;
     data.disable_depth_output = variant.disable_depth_output;
     data.unorm_output_reg_mask = variant.unorm_output_reg_mask;
+    memset(data.pixel_formats, 0, sizeof(data.pixel_formats));
 
     sm50_bitcode_t compile_result = nullptr;
     sm50_error_t sm50_err = nullptr;
@@ -324,7 +325,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
     SM50_SHADER_IA_INPUT_LAYOUT_DATA data_vertex_pulling;
     data_so.type = SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT;
     data_so.next = common;
-    data_so.num_output_slots = 0;
+    data_so.num_output_slots = 1;
     data_so.num_elements =
         ((IMTLD3D11StreamOutputLayout *)variant.stream_output_layout_handle)
             ->GetStreamOutputElements(
