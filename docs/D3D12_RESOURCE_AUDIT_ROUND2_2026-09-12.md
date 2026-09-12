@@ -313,7 +313,7 @@ non-passing mandatory cases:
   successfully. The observed failure occurred before source compilation and
   is classified as `INFRASTRUCTURE_FAILURE`, not a demonstrated code compile
   failure.
-- The six forward local commits after the baseline were not pushed, so the
+- The forward local commits after the baseline were not pushed, so the
   final local SHA has `HOSTED_CI = NOT_AVAILABLE_FOR_LOCAL_HEAD`; run #118 is
   not claimed as validation of the new code.
 
