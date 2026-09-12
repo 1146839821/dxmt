@@ -13,6 +13,7 @@
 typedef struct dxmt_msc_api {
   IRCompiler *(*IRCompilerCreate)(void);
   void (*IRCompilerDestroy)(IRCompiler *);
+  void (*IRCompilerSetCompatibilityFlags)(IRCompiler *, IRCompatibilityFlags);
   void (*IRCompilerSetGlobalRootSignature)(IRCompiler *, const IRRootSignature *);
   void (*IRCompilerEnableGeometryAndTessellationEmulation)(IRCompiler *, bool);
   void (*IRCompilerSetStageInGenerationMode)(IRCompiler *, IRStageInCodeGenerationMode);
@@ -209,6 +210,9 @@ dxmt_msc_load_symbols(void) {
   dxmt_msc_load_optional_symbol(
       (void **)&g_msc_api.IRCompilerEnableGeometryAndTessellationEmulation,
       "IRCompilerEnableGeometryAndTessellationEmulation"
+  );
+  dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRCompilerSetCompatibilityFlags, "IRCompilerSetCompatibilityFlags"
   );
   dxmt_msc_load_optional_symbol(
       (void **)&g_msc_api.IRCompilerSetStageInGenerationMode, "IRCompilerSetStageInGenerationMode"
@@ -440,6 +444,8 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     goto cleanup;
   }
 
+  if (g_msc_api.IRCompilerSetCompatibilityFlags)
+    g_msc_api.IRCompilerSetCompatibilityFlags(compiler, IRCompatibilityFlagTextureMinLODClamp);
   if (emulation_flags)
     g_msc_api.IRCompilerEnableGeometryAndTessellationEmulation(compiler, true);
   if (params->reserved & DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN)
