@@ -169,7 +169,7 @@ without first documenting a changed contract or a regression.
   currently report pre-existing violations in these large test/source files;
   do not reformat unrelated lines while closing a slice.
 
-## Post-GO Tier2 audit — 2026-09-11
+## Post-GO Tier2 audit — 2026-09-12 (Round 2 re-audit)
 
 This is an audit and semantic-closure record, not a capability declaration.
 `D3D12_FEATURE_D3D12_OPTIONS.TiledResourcesTier` remains
@@ -179,14 +179,14 @@ This is an audit and semantic-closure record, not a capability declaration.
 
 | Area | Current evidence | Gate status |
 | --- | --- | --- |
-| Reserved buffers | Shadow backing, descriptor-table and independent root SRV/UAV access, remap, NULL handling, stable GPU VA, `CopyTiles`, multiple heaps, and cross-queue cases are covered by the existing x64 resource fixtures. | Partial closure; keep the existing conservative tier. |
-| Reserved 2D textures | Creation, standard tile mapping, `CopyTiles`, two-heap remap/lifetime, and `Texture.Load` paths are present; the status fixture also exercises point `Texture.SampleLevel`. | Partial closure. |
-| Mapping ranges and NULL mappings | Existing buffer/texture mapping tests cover range validation, remap, NULL, `CopyTileMappings`, and boxed regions; the texture fixtures hold a mapped heap through the GPU fence and release it only after the last use. | Covered by local fixtures; supported native shader/runtime comparison remains required. |
-| Shader status feedback | DXBC parsing now accepts feedback forms of `LD`, `LD_MS`, typed UAV load, sample, sample bias/LOD/gradient/compare, gather, and gather compare. Airconv stores the residency result and lowers `CheckAccessFullyMapped`. | Implemented for the texture/sampled paths exercised here. |
-| Raw/structured buffer feedback | The direct buffer read path has no texture residency result to map to the DXBC status operand. | Not implemented; Tier2 blocker. |
-| LOD clamp | Existing metadata and sampler plumbing carries resource/sampler minimum LOD information into Airconv/Metal. | Plumbing exists, but no independent sparse LOD-clamp semantic fixture was added in this slice. |
-| Packed mip tail | D3D12 packed metadata and logical tile ranges are modeled. Native sparse mapping is attempted only when `firstMipmapInTail` equals the D3D standard-mip boundary and Metal `tailSizeInBytes` equals the D3D packed-tail byte count; otherwise shader views and packed mappings stay rejected. The focused fixture is built but the current host reports `d3d_first=0`, `metal_first=1`, and 65536-byte tails on both sides. The supplied native Windows oracle on an NVIDIA GeForce GTX 1650 (`0x10de:0x1f0a`, `TiledResourcesTier=3`) reports the supported packed matrices: `64x64 R32 mips4 array1` is `total=1, standard=0, packed=4, packedTiles=1, start=0, shape=128x128x1`; `192x128 R32 mips2 array1` is `total=3, standard=1, packed=1, packedTiles=1, start=2, shape=128x128x1`, with tilings `2x1x1 start=0` and packed `0x0x0 start=0xffffffff`; the array2 create returns `E_INVALIDARG`. The corrected native packed shader/remap/lifetime fixture also passes on that adapter. The current Microsoft `GetResourceTiling` documentation says an entirely packed resource should report a zero standard tile shape, so the nonzero all-packed shape is recorded as an adapter-specific observation pending a second native/debug-layer comparison. | Supplied native supported runtime: PASS as observed; current Metal 3 implementation: `BLOCKED_BY_ARCHITECTURE`; cross-runtime metadata generalization remains open and Tier2 remains blocked. |
-| Filtering footprint | The fixture uses point sampling only and does not independently prove fully mapped, fully NULL, or mixed mapped/NULL filter footprints. | Unverified; Tier2 blocker. |
+| Reserved buffers | Shadow backing, descriptor-table and independent root SRV/UAV access, remap, NULL handling, stable GPU VA, `CopyTiles`, multiple heaps, cross-queue cases, and the mapping heap public-reference check are covered by the x64 resource fixtures. | Partial closure; keep the existing conservative tier. |
+| Reserved 2D textures | Creation, standard tile mapping, `CopyTiles`, two-heap remap/lifetime, `Texture.Load`, point sampling, and a mixed standard+packed view-range case are covered. | Partial closure. |
+| Mapping ranges and NULL mappings | Existing buffer/texture mapping tests cover range validation, remap, NULL, `CopyTileMappings`, and boxed regions; mapping-table heap handles use DXMT private references while the application heap public count remains unchanged. | Local contract coverage; supported native shader/runtime comparison remains required. |
+| Shader status feedback | DXBC parsing accepts feedback forms of `LD`, `LD_MS`, typed UAV load, sample bias/LOD/gradient/compare, gather, and gather compare. The current GPU fixture proves `Load`, point/linear `SampleLevel`, tiled `SampleGrad`, and `CheckAccessFullyMapped` for mapped, NULL, and mixed accesses. | `PARTIAL`: representative texture paths pass; gather/compare/typed-UAV runtime proof and a native debug-layer comparison remain open. |
+| Raw/structured buffer feedback | The D3D/HLSL status-bearing load contract is defined (`SPEC_CLOSED`), but the direct raw/structured AIR load path has no residency/status sideband or shader-visible mapping metadata. | `BLOCKED_BY_ARCHITECTURE / DESIGN_REQUIRED`; do not fake fully-mapped status. |
+| LOD clamp | The common metadata path now preserves fractional `ResourceMinLODClamp`, and the independent ordinary/reserved fixture covers `0.0`, `0.5`, `1.0`, `1.5`, and `MostDetailedMip`. | `UNVERIFIED / MISSING_VALIDATION` for SRV clamp on this host: MSC 4.0.1/M1 ignores the descriptor minLOD in the final linked shader. Tiled per-sample clamp is covered separately by the passing status fixture. |
+| Packed mip tail | D3D12 packed metadata and logical tile ranges are modeled. Native sparse mapping is attempted only when `firstMipmapInTail` equals the D3D standard-mip boundary and Metal `tailSizeInBytes` equals the D3D packed-tail byte count; otherwise packed views/mappings stay rejected. A mixed resource now allows a representable standard-only SRV while rejecting an incompatible packed-intersecting view. The current host reports `d3d_first=0`, `metal_first=1`, and 65536-byte tails on both sides. The supplied native Windows oracle on an NVIDIA GeForce GTX 1650 (`0x10de:0x1f0a`, `TiledResourcesTier=3`) observed `64x64 R32 mips4 array1: total=1, standard=0, packed=4, packedTiles=1, start=0, shape=128x128x1` and `192x128 R32 mips2 array1: total=3, standard=1, packed=1, packedTiles=1, start=2, shape=128x128x1`; the array2 create returned `E_INVALIDARG`. Microsoft documents a zero shape for an entirely packed resource, so the native nonzero shape remains an adapter-specific observation; DXMT returns zero. | Current Metal 3 implementation: `BLOCKED_BY_ARCHITECTURE` for the incompatible packed-tail layout; Tier2 array rejection is a normative boundary, not a missing feature. |
+| Filtering footprint | The GPU fixture now uses a true linear sampler: fully mapped produces `2.0/true`, fully NULL produces `0.0/false`, and a mapped/NULL 50/50 footprint produces `0.5/false`, with exact `CheckAccessFullyMapped` predicates. | `LOCAL_PASS` for this representative footprint; broader format/dimension coverage and native comparison remain open. |
 
 ### Requirements and assumptions
 
@@ -207,76 +207,99 @@ and [Metal feature sets](https://developer.apple.com/metal/feature-sets/).
 
 ### Semantic closure in this slice
 
-The new packed-tail fixture is `tests/dx12/dx12_reserved_texture_packed.cpp`
-with `reserved_texture_packed.hlsl`. It independently checks the D3D12
-packed-mip matrix for a single-array `64x64 R32_UINT` resource with four mips,
-creates SRV/UAV descriptors before mapping, maps the complete logical tail to
-heap A, performs shader write/readback, remaps to heap B, keeps heap B alive
-through the remap and its GPU use, releases the final application heap-B
-reference after the completion fence, and verifies the remap back to heap A.
-Its runtime proof is intentionally not counted on this host:
-the exact D3D/Metal tail boundary does not match, so the production view and
-mapping path remains `E_NOTIMPL`/rejected rather than using an unsafe offset
-assumption. The formal `dx12_tiled_tier2_gate` records this fixture as
-`BLOCKED_BY_ARCHITECTURE` after checking that the executable and all three CSO
-fixtures exist.
+The packed-tail fixture is `tests/dx12/dx12_reserved_texture_packed.cpp` with
+`reserved_texture_packed.hlsl`. It checks the single-array `64x64 R32_UINT`
+four-mip matrix, creates SRV/UAV descriptors before mapping, maps the logical
+tail to heap A, remaps to heap B, and holds heap B through its GPU use. On the
+current M1/Metal 3 host the D3D and Metal tail boundaries are incompatible
+(`d3d_first=0`, `metal_first=1`, both tails 65536 bytes), so the production
+view/mapping path returns `E_NOTIMPL` instead of assuming an offset. The
+fixture exits 1 with the expected packed shader mismatch (`got 0x0/0x0`) and
+is classified `BLOCKED_BY_ARCHITECTURE`, not as a semantic pass.
 
-`tests/dx12/dx12_tiled_tier2_oracle.cpp` is a buildable native-Windows oracle
-target. It prints the adapter, `D3D12CreateDevice`, tiled-resource feature
-level, and exact packed-mip tiling results for single-slice and arrayed
-descriptors. The supplied Windows run used an NVIDIA GeForce GTX 1650
-(`vendor=0x10de`, `device=0x1f0a`); factory/device/feature queries succeeded
-and reported `TiledResourcesTier=3`. It confirmed the `64x64 R32 mips4
-array1` and `192x128 R32 mips2 array1` matrices recorded above, including the
-`128x128x1` standard tile shape even when every mip is packed, and rejected
-the `192x128 R32 mips2 array2` descriptor with `0x80070057 (E_INVALIDARG)`.
-This closes the supplied adapter observation for these descriptors. The
-current Microsoft `GetResourceTiling` documentation says the shape should be
-zero when every mip is packed, so a second supported adapter or debug-layer
-comparison is still needed before generalizing the nonzero all-packed result.
-The corrected
-`dx12_reserved_texture_packed.exe` run on the same adapter also reported
-`packed tail read on heap A passed`, `packed tail read on heap B passed`,
-`packed tail remap to heap A preserves data passed`, and
-`Packed mip sparse-tail mapping, remap, and lifetime tests passed`. No native
-debug-layer output was supplied. The local gate remains non-PASS for this case
-because it is a Wine-hosted aggregator and cannot execute an out-of-band
-native Windows result as part of this local gate.
+`tests/dx12/dx12_tiled_tier2_oracle.cpp` remains a buildable native-Windows
+oracle target. The supplied run used an NVIDIA GeForce GTX 1650
+(`vendor=0x10de`, `device=0x1f0a`) and reported `TiledResourcesTier=3`. It
+observed `64x64 R32 mips4 array1: total=1, standard=0, packed=4,
+packedTiles=1, start=0, shape=128x128x1`, `192x128 R32 mips2 array1:
+total=3, standard=1, packed=1, packedTiles=1, start=2, shape=128x128x1`, and
+`E_INVALIDARG` for the `array2` descriptor. The all-packed nonzero shape is
+retained as `NATIVE_OBSERVED` only: Microsoft's documented contract requires a
+zero `StandardTileShape` when every mip is packed, and DXMT now returns zero.
+No native debug-layer output was supplied. The native packed remap fixture's
+reported heap-A/heap-B/remap passes remain evidence for that adapter only.
 
-The focused test is `tests/dx12/dx12_tiled_status_sm5.cpp`.  It compiles a
-`cs_5_0` shader with Microsoft's `d3dcompiler_47.dll`, maps one 64 KiB tile of
-a reserved `R32_FLOAT` texture, performs mapped and NULL `Load` and point
-`SampleLevel` operations, and reads back both values and status predicates.
-The shader writes each predicate through an explicit `0xffffffff/0` branch,
-so the assertion is independent of the compiler's internal boolean register
-encoding.
-With the current DXMT DLLs under the matching Wine toolchain and the native
-Microsoft compiler fixture, the exact success line is:
+The standard-only mixed-resource fixture is
+`tests/dx12/dx12_reserved_texture_view_range.cpp`. It rejects the Tier2-
+forbidden `192x128 R32_UINT mips2 array2` descriptor with `E_INVALIDARG`,
+reports the valid single-array mixed tiling (`total=3`, one standard mip and
+one packed mip), reads the mapped standard mip successfully, and leaves the
+packed-intersecting descriptor either representable or rejected according to
+the Metal tail boundary. On this host its exact output is:
 
 ```text
-DXBC cs_5_0 tiled Load/Sample feedback and CheckAccessFullyMapped passed
+Tier2 mixed-mip array rejection: E_INVALIDARG
+mixed texture tiling: total=3 standard_mips=1 packed_mips=1 packed_tiles=1 shape=128x128x1
+standard-only view readback: 0x12345678 packed-intersecting descriptor mip0=0x12345678 mip1=0x0
+standard-only mixed-resource view passed; packed-intersecting view was representable
 ```
 
-The same test with the Wine builtin compiler is a valid environment result,
-not a semantic pass: that compiler reports the feedback opcode and
-`CheckAccessFullyMapped` as unsupported. The supplied supported Windows run
-above covers both the metadata oracle and the packed shader/remap/lifetime
-fixture; a native debug-layer comparison is still required.
+The LOD fixture is `tests/dx12/dx12_texture_lod_clamp.cpp` with
+`texture_lod_clamp.hlsl`. It covers ordinary and reserved standard-mip
+textures, pure `ResourceMinLODClamp` values `0.0`, `0.5`, `1.0`, `1.5`, and a
+separate `MostDetailedMip=1` case. The source fix preserves the fractional
+value, but the current MSC 4.0.1/M1 runtime produces mip-0 for all four SRV
+clamp cases. The exact ordinary output is
+`0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x40400000` against the expected
+`0x3f800000 0x40000000 0x40400000 0x40800000 0x40400000`; the reserved output
+has the same first four values and `0x40400000` for the `MostDetailedMip`
+case. This is `UNVERIFIED / MISSING_VALIDATION` for SRV clamp semantics on
+this host, with the compiler/runtime limitation recorded rather than
+misattributed to the D3D12 metadata fix.
+
+The focused test `tests/dx12/dx12_tiled_status_sm5.cpp` now uses separate
+reserved textures for point access, a true linear sampler, and an all-standard
+two-mip chain for per-sample `SampleGrad` LOD clamp. It verifies numeric
+values with an epsilon and tests status only through `CheckAccessFullyMapped`.
+The current run's exact relevant output is:
+
+```text
+status texture tiling: total=2 standard=128x128x1 subresource=2x1 start=0
+feedback outputs: 0x3f800000 0xffffffff 0x3f800000 0xffffffff 0x0 0x0 0x0 0x0 0x40000000 0xffffffff 0x0 0x0 0x3f000000 0x0 0x3f800000 0xffffffff 0x40400000 0xffffffff
+DXBC cs_5_0 tiled Load/Sample/linear-footprint/per-sample-LOD feedback and CheckAccessFullyMapped passed
+```
+
+These outputs prove mapped and NULL `Load`, point `SampleLevel`, fully mapped
+linear filtering (`2.0/true`), fully NULL filtering (`0.0/false`), mixed
+50/50 filtering (`0.5/false`), and tiled per-sample `SampleGrad` clamp
+(`1.0` without clamp and `3.0` with clamp). They do not close parser/runtime
+coverage for gather, comparison sampling, or typed UAV load. The Wine builtin
+compiler result remains an environment limitation, not a semantic pass.
+
+The heap mapping tables now hold `Com<MTLD3D12Heap, false>` private references.
+This keeps the DXMT/WMT heap object and its backing allocation alive without
+adding a public COM `AddRef` per mapped tile. The focused buffer fixture prints
+`reserved buffer mapping kept heap public ref count at 1` and exits 0; the
+packed texture fixture performs the same check before reaching its expected
+Metal tail rejection. This closes the public-ref regression for the narrow
+mapping-table ownership change, while submission lifetime remains governed by
+the WMT sparse-operation/reference path and the application's fence ordering.
 
 ### Remaining formal-gate gaps
 
-Tier 2 is not ready to advertise until the following have independent
-evidence: raw/structured feedback semantics (or an explicit contract decision
-that excludes them), sparse LOD-clamp behavior, filtering footprints crossing
-mapped and NULL texels, and a native Windows debug-layer comparison from an
-adapter that exposes tiled resources. Packed metadata and the corrected native
-packed shader/remap/lifetime run are captured above, while the current Metal 3
-implementation still cannot represent this adapter's packed-tail boundary.
-Multiple heaps and application-reference release now have local fixture
-evidence. The formal gate output is
-`TIER2_GATE=NOT_SATISFIED`; `NO CAPABILITY BUMP` is the decision for this
-slice. The first native packed-fixture attempt released heap B before the GPU
-consumed the queued remap and reached `MapReadback: 0x887a0005`
-(`DXGI_ERROR_DEVICE_REMOVED`). That is an invalid heap-lifetime test ordering,
+The final local gate remains non-PASS. The mandatory blockers are the
+Metal-3/D3D12 packed-tail layout mismatch, raw/structured buffer feedback
+lowering with no residency sideband, SRV `ResourceMinLODClamp` semantics not
+validated by the current MSC host, and the missing native Windows debug-layer
+comparison. Texture status feedback is `PARTIAL`, not blanket PASS: the
+representative Load/sample/filter/per-sample paths pass, while gather/compare/
+typed-UAV runtime cases remain unexecuted. Tier2's array-size restriction is
+kept and is not a blocker. The updated gate script reports filtering as a
+runtime case, raw/structured as `BLOCKED_BY_ARCHITECTURE`, and SRV LOD as
+`UNVERIFIED / MISSING_VALIDATION`.
+
+The first native packed-fixture attempt released heap B before the GPU consumed
+the queued remap and reached `MapReadback: 0x887a0005`
+(`DXGI_ERROR_DEVICE_REMOVED`). That was invalid application lifetime ordering,
 not evidence that a final heap reference may be released while the GPU still
 uses the mapping; the fixture now releases heap B only after its fence.

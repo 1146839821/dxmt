@@ -38,9 +38,10 @@ did not model the packed tail used by the D3D12 tile address contract.
   `D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE`. The Metal allocation path may
   normalize that layout to `D3D12_TEXTURE_LAYOUT_UNKNOWN` internally while the
   resource-facing descriptor retains the tiled layout.
-- Packed tails are accepted only for a single array slice. Arrayed packed tails
-  are rejected at the reserved-resource boundary and must not be treated as
-  Tier 2 or Tier 3 support.
+- Tier 2 explicitly rejects a tiled texture with sub-standard mips when its
+  array size is greater than one. The arrayed mixed-mip rejection is therefore
+  a normative Tier 2 boundary, not a missing packed-tail implementation; this
+  slice does not claim arrayed packed-tail support.
 - `CreateShaderResourceView`, `CreateUnorderedAccessView`, and packed mapping
   translation remain rejected when the Metal sparse texture reports a
   different `firstMipmapInTail` or `tailSizeInBytes` from the D3D12 logical
@@ -88,9 +89,10 @@ did not model the packed tail used by the D3D12 tile address contract.
   probe is not a semantic pass because the current host reports
   `d3d_first=0`, `metal_first=1`, and rejects the packed shader views/mapping.
 - `dx12_tiled_tier2_gate` returns nonzero and prints
-  `TIER2_GATE=NOT_SATISFIED` because packed-tail architecture, raw/structured
-  status, filtering/LOD, and the native Windows runtime/debug-layer case are
-  non-PASS.
+  `TIER2_GATE=NOT_SATISFIED`. The current non-passing cases are the packed-tail
+  architecture mismatch, raw/structured status lowering, SRV LOD validation on
+  the current MSC host, and the native Windows runtime/debug-layer case;
+  filtering now has a passing local fixture.
 - The supplied native-Windows oracle was executed on an NVIDIA GeForce GTX
   1650 (`vendor=0x10de`, `device=0x1f0a`) and reported
   `TiledResourcesTier=3`. It returned the supported matrices
@@ -99,12 +101,11 @@ did not model the packed tail used by the D3D12 tile address contract.
   standard=1, packed=1, packedTiles=1, start=2, shape=128x128x1`, with the
   latter's standard tiling `2x1x1 start=0` and packed tiling
   `0x0x0 start=0xffffffff`. The `array2` descriptor returned
-  `0x80070057 (E_INVALIDARG)`. This fixes the earlier test expectation: the
-  standard tile shape is still returned when all mips are packed on this
-  adapter. The current Microsoft `GetResourceTiling` documentation says the
-  shape should be zero when every mip is packed, so this is recorded as an
-  adapter-specific observation pending a second supported runtime or
-  debug-layer comparison. The corrected native packed fixture then reported
+  `0x80070057 (E_INVALIDARG)`, consistent with the Tier 2 array restriction.
+  The native all-packed nonzero shape is retained as an adapter-specific
+  observation only: Microsoft's `GetResourceTiling` documentation says the
+  shape should be zero when every mip is packed, and DXMT's production behavior
+  follows that normative rule. The corrected native packed fixture then reported
   `packed tail read on heap A passed`, `packed tail read on heap B passed`,
   `packed tail remap to heap A preserves data passed`, and
   `Packed mip sparse-tail mapping, remap, and lifetime tests passed` on the
@@ -115,6 +116,32 @@ did not model the packed tail used by the D3D12 tile address contract.
   heap B alive until its GPU fence completes, matching the D3D12 heap-lifetime
   contract.
 - `git diff --check` passed.
+
+## Round 2 Re-audit Notes — 2026-09-12
+
+- `GetResourceTiling` now returns `D3D12_TILE_SHAPE{0, 0, 0}` for an entirely
+  packed resource. The GTX 1650 `128x128x1` result remains
+  `NATIVE_OBSERVED` adapter behavior and is not used as DXMT's normative
+  expectation.
+- `192x128 R32_UINT mips2 array2` remains rejected with `E_INVALIDARG` because
+  Tier 2 disallows an array when a mip is smaller than the standard tile shape.
+  The new `dx12_reserved_texture_view_range` fixture proves this boundary and
+  separately proves that a standard-only view of the corresponding single-array
+  mixed resource can read its mapped mip. A view intersecting the incompatible
+  packed tail remains rejected or null rather than receiving an invented offset.
+- Mapping tables use `Com<MTLD3D12Heap, false>`. The private reference keeps the
+  DXMT/WMT heap object and backing allocation alive without adding a public COM
+  reference for each mapped tile. The buffer lifetime regression reports
+  `reserved buffer mapping kept heap public ref count at 1` after mapping.
+- The independent `ResourceMinLODClamp` fixture covers ordinary and reserved
+  standard-mip textures, fractional clamps, and `MostDetailedMip`. Its source
+  fix is retained, but MSC 4.0.1 on the current M1 host ignores the SRV minLOD
+  metadata, so SRV clamp semantics remain `UNVERIFIED / MISSING_VALIDATION`.
+- The status fixture now covers a true linear fully-mapped, fully-NULL, and
+  mixed footprint plus a tiled per-sample `SampleGrad` clamp. Its GPU result is
+  `2.0/true`, `0.0/false`, `0.5/false`, and `1.0` versus `3.0` for the LOD
+  samples. This closes the representative filtering validation but does not
+  claim gather/compare/typed-UAV runtime coverage.
 
 ## Follow-Up
 
