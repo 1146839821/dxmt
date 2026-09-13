@@ -422,18 +422,16 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     root_desc.NumParameters = 2;
     root_desc.pParameters = root_parameters;
   }
-  if (root_desc.NumParameters) {
-    if (!CheckHR("D3D12SerializeRootSignature",
-                 D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob, &root_error))) {
-      if (root_error)
-        std::cerr << static_cast<const char *>(root_error->GetBufferPointer()) << "\n";
-      return fail("root signature serialization failed");
-    }
-    if (!CheckHR("CreateRootSignature",
-                 device->CreateRootSignature(0, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
-                                              IID_PPV_ARGS(&root_signature))))
-      return fail("root signature creation failed");
+  if (!CheckHR("D3D12SerializeRootSignature",
+               D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob, &root_error))) {
+    if (root_error)
+      std::cerr << static_cast<const char *>(root_error->GetBufferPointer()) << "\n";
+    return fail("root signature serialization failed");
   }
+  if (!CheckHR("CreateRootSignature",
+               device->CreateRootSignature(0, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
+                                            IID_PPV_ARGS(&root_signature))))
+    return fail("root signature creation failed");
 
   const auto &vertex_shader = test.geometry_root_cbv || test.geometry_root_srv_uav ? shaders.vertex
                              : test.root_cbv           ? shaders.root_vertex
@@ -617,7 +615,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     } else if (test.geometry_root_srv_uav) {
       list->SetGraphicsRootShaderResourceView(0, root_data->GetGPUVirtualAddress());
       list->SetGraphicsRootUnorderedAccessView(1, root_uav_data->GetGPUVirtualAddress());
-    } else {
+    } else if (test.root_cbv || test.geometry_root_cbv) {
       list->SetGraphicsRootConstantBufferView(0, root_data->GetGPUVirtualAddress());
     }
   }

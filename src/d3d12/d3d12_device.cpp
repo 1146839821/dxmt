@@ -675,10 +675,14 @@ public:
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_SHADER_MODEL *>(pFeatureData);
       switch (out->HighestShaderModel) {
       case D3D_SHADER_MODEL_5_1:
+        out->HighestShaderModel = D3D_SHADER_MODEL_5_1;
         return S_OK;
       case D3D_SHADER_MODEL_6_0:
+        out->HighestShaderModel = D3D_SHADER_MODEL_6_0;
         return S_OK;
       default:
+        // The active headers define no later shader-model enum values.  Keep
+        // unknown values invalid instead of manufacturing capability values.
         return E_INVALIDARG;
       }
     }

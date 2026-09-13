@@ -8,6 +8,7 @@
 #include <unordered_map>
 
 #include "DXBCParser/BlobContainer.h"
+#include "DXBCParser/DXBCUtils.h"
 #include "dxmt_shader_cache.hpp"
 #include "log/log.hpp"
 #include "metalirconverter_thunks.h"
@@ -209,16 +210,6 @@ StorePersistentMSCConversion(const Sha1Digest &key, const D3D12ConvertedShader &
     writer->set(key, data);
 }
 
-bool
-HasDXBCHeader(const D3D12_SHADER_BYTECODE &shader) {
-  if (!shader.pShaderBytecode || shader.BytecodeLength < sizeof(uint32_t))
-    return false;
-
-  uint32_t fourcc = 0;
-  memcpy(&fourcc, shader.pShaderBytecode, sizeof(fourcc));
-  return fourcc == MakeFourCC('D', 'X', 'B', 'C');
-}
-
 void
 LogMSCFailure(const dxmt_msc_compile_dxil_params &params, int result) {
   const char *message = params.error_message ? params.error_message : "";
@@ -273,30 +264,211 @@ CompileDXIL(
 
 } // namespace
 
-D3D12ShaderBackend
-DetectD3D12ShaderBackend(const D3D12_SHADER_BYTECODE &shader) {
-  if (!HasDXBCHeader(shader))
-    return D3D12ShaderBackend::Airconv;
-  if (shader.BytecodeLength > std::numeric_limits<uint32_t>::max())
-    return D3D12ShaderBackend::Unsupported;
+D3D12ShaderClassification
+ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
+  D3D12ShaderClassification classification;
+  if (shader.BytecodeLength > std::numeric_limits<uint32_t>::max()) {
+    classification.validation_hr = E_INVALIDARG;
+    return classification;
+  }
 
   microsoft::CDXBCParser parser;
-  if (FAILED(parser.ReadDXBC(shader.pShaderBytecode, static_cast<uint32_t>(shader.BytecodeLength))))
-    return D3D12ShaderBackend::Unsupported;
+  classification.validation_hr =
+      parser.ReadDXBC(shader.pShaderBytecode, static_cast<uint32_t>(shader.BytecodeLength));
+  if (FAILED(classification.validation_hr))
+    return classification;
 
-  for (uint32_t i = 0; i < parser.GetBlobCount(); i++) {
-    if (parser.GetBlobFourCC(i) == kDXILFourCC)
-      return D3D12ShaderBackend::MetalShaderConverter;
+  classification.backend = D3D12ShaderBackend::Airconv;
+  const UINT root_signature_blob = parser.FindNextMatchingBlob(microsoft::DXBC_RootSignature, 0);
+  if (root_signature_blob != DXBC_BLOB_NOT_FOUND) {
+    classification.embedded_root_signature = parser.GetBlob(root_signature_blob);
+    classification.embedded_root_signature_size = parser.GetBlobSize(root_signature_blob);
   }
-  return D3D12ShaderBackend::Airconv;
+  for (uint32_t i = 0; i < parser.GetBlobCount(); i++) {
+    if (parser.GetBlobFourCC(i) == kDXILFourCC) {
+      classification.backend = D3D12ShaderBackend::MetalShaderConverter;
+      break;
+    }
+  }
+  return classification;
+}
+
+D3D12ShaderBackend
+DetectD3D12ShaderBackend(const D3D12_SHADER_BYTECODE &shader) {
+  return ClassifyD3D12Shader(shader).backend;
+}
+
+D3D12AirconvError::~D3D12AirconvError() {
+  reset();
+}
+
+sm50_error_t *
+D3D12AirconvError::out() {
+  reset();
+  return &handle_;
+}
+
+bool
+D3D12AirconvError::has_value() const {
+  return !!handle_;
+}
+
+std::string
+D3D12AirconvError::message() const {
+  return has_value() ? SM50GetErrorMessageString(handle_) : std::string();
+}
+
+void
+D3D12AirconvError::reset() {
+  if (has_value()) {
+    SM50FreeError(handle_);
+    handle_ = {};
+  }
+}
+
+D3D12AirconvShader::~D3D12AirconvShader() {
+  reset();
+}
+
+HRESULT
+D3D12AirconvShader::Initialize(
+    const D3D12_SHADER_BYTECODE &shader, const D3D12ShaderClassification &classification,
+    MTL_SHADER_REFLECTION *reflection, const char *stage_name
+) {
+  return InitializeD3D12AirconvShader(shader, classification, *this, reflection, stage_name);
+}
+
+sm50_shader_t *
+D3D12AirconvShader::out() {
+  reset();
+  return &handle_;
+}
+
+sm50_shader_t
+D3D12AirconvShader::get() const {
+  return handle_;
+}
+
+void
+D3D12AirconvShader::reset() {
+  if (handle_) {
+    SM50Destroy(handle_);
+    handle_ = {};
+  }
+}
+
+D3D12AirconvBitcode::~D3D12AirconvBitcode() {
+  reset();
+}
+
+sm50_bitcode_t *
+D3D12AirconvBitcode::out() {
+  reset();
+  return &handle_;
+}
+
+sm50_bitcode_t
+D3D12AirconvBitcode::get() const {
+  return handle_;
+}
+
+void
+D3D12AirconvBitcode::reset() {
+  if (handle_) {
+    SM50DestroyBitcode(handle_);
+    handle_ = {};
+  }
+}
+
+HRESULT
+GetD3D12EmbeddedRootSignature(
+    const D3D12_SHADER_BYTECODE &shader, const D3D12ShaderClassification &classification,
+    const void **root_signature, size_t *root_signature_size
+) {
+  if (!root_signature || !root_signature_size)
+    return E_POINTER;
+  *root_signature = nullptr;
+  *root_signature_size = 0;
+  if (FAILED(classification.validation_hr))
+    return classification.validation_hr;
+  if (classification.backend != D3D12ShaderBackend::Airconv)
+    return E_INVALIDARG;
+  if (!classification.embedded_root_signature || !classification.embedded_root_signature_size)
+    return E_FAIL;
+  *root_signature = classification.embedded_root_signature;
+  *root_signature_size = classification.embedded_root_signature_size;
+  return S_OK;
+}
+
+HRESULT
+InitializeD3D12AirconvRootSignature(
+    const D3D12_SHADER_BYTECODE &shader, const D3D12ShaderClassification &classification,
+    const void *explicit_root_signature, size_t explicit_root_signature_size,
+    SM50_SHADER_ROOT_SIGNATURE_DATA &root_signature
+) {
+  root_signature = {};
+  root_signature.type = SM50_SHADER_ROOT_SIGNATURE;
+  if (explicit_root_signature || explicit_root_signature_size) {
+    if (!explicit_root_signature || !explicit_root_signature_size)
+      return E_INVALIDARG;
+    root_signature.bytecode = explicit_root_signature;
+    root_signature.bytecode_length = explicit_root_signature_size;
+    return S_OK;
+  }
+
+  const void *embedded_root_signature = nullptr;
+  size_t embedded_root_signature_size = 0;
+  HRESULT hr = GetD3D12EmbeddedRootSignature(
+      shader, classification, &embedded_root_signature, &embedded_root_signature_size
+  );
+  if (FAILED(hr))
+    return hr;
+
+  // AIRCONV's root-signature parser accepts the complete DXBC container and
+  // extracts its embedded RTS0 blob.  Keep the validated container alive for
+  // the duration of compilation rather than passing only the raw blob.
+  root_signature.bytecode = shader.pShaderBytecode;
+  root_signature.bytecode_length = shader.BytecodeLength;
+  return S_OK;
+}
+
+HRESULT
+InitializeD3D12AirconvShader(
+    const D3D12_SHADER_BYTECODE &shader, const D3D12ShaderClassification &classification,
+    D3D12AirconvShader &airconv_shader, MTL_SHADER_REFLECTION *reflection, const char *stage_name
+) {
+  if (FAILED(classification.validation_hr))
+    return classification.validation_hr;
+  if (classification.backend != D3D12ShaderBackend::Airconv)
+    return E_INVALIDARG;
+  if (!stage_name)
+    return E_INVALIDARG;
+
+  D3D12AirconvError error;
+  int result = SM50Initialize(
+      shader.pShaderBytecode, shader.BytecodeLength, airconv_shader.out(), reflection, error.out()
+  );
+  if (!result)
+    return S_OK;
+
+  const auto message = error.message();
+  ERR(
+      "Failed to initialize AIRCONV ", stage_name, " shader: ",
+      message.empty() ? "unknown error" : message
+  );
+  airconv_shader.reset();
+  return E_FAIL;
 }
 
 HRESULT
 ConvertD3D12Shader(
-    const D3D12_SHADER_BYTECODE &shader, uint32_t stage, D3D12ConvertedShader &converted, const void *root_signature,
-    size_t root_signature_size, const dxmt_msc_input_layout *input_layout, uint32_t compile_flags
+    const D3D12ShaderClassification &classification, const D3D12_SHADER_BYTECODE &shader, uint32_t stage,
+    D3D12ConvertedShader &converted, const void *root_signature, size_t root_signature_size,
+    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags
 ) {
-  if (DetectD3D12ShaderBackend(shader) != D3D12ShaderBackend::MetalShaderConverter)
+  if (FAILED(classification.validation_hr))
+    return classification.validation_hr;
+  if (classification.backend != D3D12ShaderBackend::MetalShaderConverter)
     return E_INVALIDARG;
 
   if (DXMTMSCIsAvailable() != 1) {
@@ -375,11 +547,33 @@ ConvertD3D12Shader(
 }
 
 HRESULT
+ConvertD3D12Shader(
+    const D3D12_SHADER_BYTECODE &shader, uint32_t stage, D3D12ConvertedShader &converted, const void *root_signature,
+    size_t root_signature_size, const dxmt_msc_input_layout *input_layout, uint32_t compile_flags
+) {
+  auto classification = ClassifyD3D12Shader(shader);
+  return ConvertD3D12Shader(
+      classification, shader, stage, converted, root_signature, root_signature_size, input_layout, compile_flags
+  );
+}
+
+HRESULT
+ConvertD3D12ComputeShader(
+    const D3D12ShaderClassification &classification, const D3D12_SHADER_BYTECODE &shader,
+    D3D12ConvertedShader &converted, const void *root_signature, size_t root_signature_size
+) {
+  return ConvertD3D12Shader(
+      classification, shader, DXMT_MSC_STAGE_COMPUTE, converted, root_signature, root_signature_size
+  );
+}
+
+HRESULT
 ConvertD3D12ComputeShader(
     const D3D12_SHADER_BYTECODE &shader, D3D12ConvertedShader &converted, const void *root_signature,
     size_t root_signature_size
 ) {
-  return ConvertD3D12Shader(shader, DXMT_MSC_STAGE_COMPUTE, converted, root_signature, root_signature_size);
+  auto classification = ClassifyD3D12Shader(shader);
+  return ConvertD3D12ComputeShader(classification, shader, converted, root_signature, root_signature_size);
 }
 
 } // namespace dxmt

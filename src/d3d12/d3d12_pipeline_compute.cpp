@@ -30,8 +30,8 @@ namespace dxmt {
 
 class MTLD3D12ComputePipelineStateImpl : public MTLD3D12Pageable<MTLD3D12ComputePipelineState> {
 
-  sm50_shader_t shader_cs;
-  MTL_SHADER_REFLECTION ref_cs;
+  D3D12AirconvShader shader_cs;
+  MTL_SHADER_REFLECTION ref_cs = {};
 
 public:
   MTLD3D12ComputePipelineStateImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12ComputePipelineState>(pDevice) {
@@ -57,11 +57,13 @@ public:
       return S_OK;
     };
 
-    auto shader_backend = DetectD3D12ShaderBackend(pDesc->CS);
-    if (shader_backend == D3D12ShaderBackend::Unsupported) {
-      ERR("Unsupported DXBC shader container");
-      return E_FAIL;
+    const auto classification = ClassifyD3D12Shader(pDesc->CS);
+    if (FAILED(classification.validation_hr)) {
+      ERR("Invalid D3D12 shader container, HRESULT=", classification.validation_hr);
+      return classification.validation_hr;
     }
+
+    auto shader_backend = classification.backend;
 
     if (shader_backend == D3D12ShaderBackend::MetalShaderConverter) {
       D3D12ConvertedShader converted;
@@ -77,7 +79,9 @@ public:
         root_signature_size = rootsig->GetBlob(&root_signature);
       }
 
-      HRESULT hr = ConvertD3D12ComputeShader(pDesc->CS, converted, root_signature, root_signature_size);
+      HRESULT hr = ConvertD3D12ComputeShader(
+          classification, pDesc->CS, converted, root_signature, root_signature_size
+      );
       if (FAILED(hr))
         return hr;
 
@@ -102,46 +106,56 @@ public:
       return create_compute_pso(cs_func);
     }
 
-    sm50_error_t sm50_err;
+    D3D12AirconvError sm50_err;
 
     SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
+    const void *explicit_root_signature = nullptr;
+    size_t explicit_root_signature_size = 0;
     if (pDesc->pRootSignature) {
-      rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
-      rootsig.bytecode_length = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&rootsig.bytecode);
-      rootsig.next = nullptr;
-    } else {
-      rootsig.next = nullptr;
+      explicit_root_signature_size =
+          static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&explicit_root_signature);
     }
+    HRESULT hr = InitializeD3D12AirconvRootSignature(
+        pDesc->CS, classification, explicit_root_signature, explicit_root_signature_size, rootsig
+    );
+    if (FAILED(hr)) {
+      ERR("Failed to initialize AIRCONV compute root signature, HRESULT=", hr);
+      return hr;
+    }
+    rootsig.next = nullptr;
 
-    SM50_SHADER_COMMON_DATA common;
+    SM50_SHADER_COMMON_DATA common = {};
     common.flags = {};
     common.type = SM50_SHADER_COMMON;
     common.metal_version = SM50_SHADER_METAL_310;
-    common.next = pDesc->pRootSignature ? &rootsig : nullptr;
+    common.next = &rootsig;
 
-    if (SM50Initialize(pDesc->CS.pShaderBytecode, pDesc->CS.BytecodeLength, &shader_cs, &ref_cs, &sm50_err)) {
-      ERR("Failed to parse cs shader");
-      return E_FAIL;
-    }
+    hr = shader_cs.Initialize(pDesc->CS, classification, &ref_cs, "cs");
+    if (FAILED(hr))
+      return hr;
 
     threadgroup_size = {ref_cs.ThreadgroupSize[0], ref_cs.ThreadgroupSize[1], ref_cs.ThreadgroupSize[2]};
 
-    sm50_bitcode_t cs_bitcode;
+    D3D12AirconvBitcode cs_bitcode;
 
-    if (SM50Compile(shader_cs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&common, "cs_main", &cs_bitcode, &sm50_err)) {
-      ERR("Failed to compile cs shader");
+    if (SM50Compile(
+            shader_cs.get(), reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&common), "cs_main",
+            cs_bitcode.out(), sm50_err.out()
+        )) {
+      const auto message = sm50_err.message();
+      ERR("Failed to compile cs shader: ", message.empty() ? "unknown error" : message);
       return E_FAIL;
     }
 
     SM50_COMPILED_BITCODE cs_bitcode_compiled;
 
-    SM50GetCompiledBitcode(cs_bitcode, &cs_bitcode_compiled);
+    SM50GetCompiledBitcode(cs_bitcode.get(), &cs_bitcode_compiled);
 
     auto cs_data = WMT::MakeDispatchData(cs_bitcode_compiled.Data, cs_bitcode_compiled.Size);
 
     auto cs_lib = metal.newLibrary(cs_data, err);
 
-    auto cs_func = cs_lib.newFunction("cs_main");
+    auto cs_func = cs_lib ? cs_lib.newFunction("cs_main") : WMT::Reference<WMT::Function>();
     if (!cs_lib || !cs_func) {
       ERR("Failed to create airconv compute function");
       return E_FAIL;

@@ -2124,7 +2124,7 @@ public:
         encode_msc_buffer(buffer, offset, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
         if (use_msc_tessellation)
           encode_msc_buffer(buffer, offset, DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT, false);
-      } else if (rootsig_graphics_) {
+      } else if (rootsig_graphics_ && rootsig_graphics_->UploadQwords) {
         auto Offset = EncodeRootArgument(rootsig_graphics_.ptr(), rootarg_graphics_staging_);
         auto encode_root_argument = [&](WMTRenderCommandType type) {
           auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
@@ -2977,12 +2977,12 @@ public:
     }
 
     if (dirty_state_.test(DirtyState::ComputeRootArguments) && !SkipResourceBinding) {
-      if (rootsig_compute_) {
+      if (rootsig_compute_ && (use_msc ? rootsig_compute_->MSCArgumentBufferSize : rootsig_compute_->UploadQwords)) {
         auto Offset = use_msc
                           ? EncodeMSCArgumentBuffer(
                                 rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr()
                             )
-                              : EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_);
+                          : EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_);
         if (!use_msc || rootsig_compute_->MSCArgumentBufferSize) {
           auto &cmd_argbuf = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
           cmd_argbuf.type = WMTComputeCommandSetBuffer;

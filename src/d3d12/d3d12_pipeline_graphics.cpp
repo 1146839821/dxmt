@@ -351,9 +351,9 @@ CopyRenderPipelineInfoToMesh(const WMTRenderPipelineInfo &source, WMTMeshRenderP
 
 class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12GraphicsPipelineState> {
 
-  sm50_shader_t shader_vs = {};
-  sm50_shader_t shader_ps = {};
-  sm50_shader_t shader_gs = {};
+  D3D12AirconvShader shader_vs;
+  D3D12AirconvShader shader_ps;
+  D3D12AirconvShader shader_gs;
   MTL_SHADER_REFLECTION ref_vs = {};
   MTL_SHADER_REFLECTION ref_ps = {};
   MTL_SHADER_REFLECTION ref_gs = {};
@@ -362,15 +362,6 @@ public:
   MTLD3D12GraphicsPipelineStateImpl(MTLD3D12Device *pDevice) :
       MTLD3D12Pageable<MTLD3D12GraphicsPipelineState>(pDevice) {
     IsComputePipelineState = FALSE;
-  }
-
-  ~MTLD3D12GraphicsPipelineStateImpl() {
-    if (shader_vs)
-      SM50Destroy(shader_vs);
-    if (shader_ps)
-      SM50Destroy(shader_ps);
-    if (shader_gs)
-      SM50Destroy(shader_gs);
   }
 
   bool
@@ -485,7 +476,8 @@ public:
   HRESULT
   InitializeAirconvGeometryPipeline(
       const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, const WMTRenderPipelineInfo &render_info, WMT::Device metal,
-      WMT::Reference<WMT::Function> &fragment_function, sm50_error_t &sm50_err
+      WMT::Reference<WMT::Function> &fragment_function, D3D12AirconvError &sm50_err,
+      const D3D12ShaderClassification &vs_classification, const D3D12ShaderClassification &gs_classification
   ) {
     constexpr unsigned kStripVariants = 2;
     constexpr unsigned kIndexVariants = 3;
@@ -498,6 +490,36 @@ public:
     size_t root_signature_size = 0;
     if (pDesc->pRootSignature) {
       root_signature_size = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&root_signature);
+    }
+
+    SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
+    HRESULT hr = InitializeD3D12AirconvRootSignature(
+        pDesc->GS, gs_classification, root_signature, root_signature_size, rootsig
+    );
+    if (FAILED(hr)) {
+      ERR("Failed to initialize AIRCONV geometry root signature, HRESULT=", hr);
+      return hr;
+    }
+    if (!root_signature) {
+      const void *gs_root_signature = nullptr;
+      size_t gs_root_signature_size = 0;
+      hr = GetD3D12EmbeddedRootSignature(
+          pDesc->GS, gs_classification, &gs_root_signature, &gs_root_signature_size
+      );
+      if (FAILED(hr))
+        return hr;
+      const void *vs_root_signature = nullptr;
+      size_t vs_root_signature_size = 0;
+      hr = GetD3D12EmbeddedRootSignature(
+          pDesc->VS, vs_classification, &vs_root_signature, &vs_root_signature_size
+      );
+      if (FAILED(hr))
+        return hr;
+      if (vs_root_signature_size != gs_root_signature_size ||
+          memcmp(vs_root_signature, gs_root_signature, gs_root_signature_size) != 0) {
+        ERR("AIRCONV geometry VS and GS embedded root signatures do not match");
+        return E_INVALIDARG;
+      }
     }
 
     WMTPrimitiveType geometry_input_primitive;
@@ -522,14 +544,13 @@ public:
       return E_INVALIDARG;
     }
 
-    auto make_function = [&](sm50_bitcode_t bitcode, const std::string &name,
+    auto make_function = [&](D3D12AirconvBitcode &bitcode, const std::string &name,
                              WMT::Reference<WMT::Function> &function) -> HRESULT {
       SM50_COMPILED_BITCODE compiled = {};
-      SM50GetCompiledBitcode(bitcode, &compiled);
+      SM50GetCompiledBitcode(bitcode.get(), &compiled);
       auto data = WMT::MakeDispatchData(compiled.Data, compiled.Size);
       WMT::Reference<WMT::Error> err;
       auto library = metal.newLibrary(data, err);
-      SM50DestroyBitcode(bitcode);
       if (!library) {
         ERR("Failed to create AIRCONV geometry library: ", err ? err.description().getUTF8String() : "unknown error");
         return E_FAIL;
@@ -545,11 +566,9 @@ public:
     auto compile_error = [&](const char *stage) -> HRESULT {
       ERR(
           "Failed to compile AIRCONV geometry ", stage, ": ",
-          sm50_err ? SM50GetErrorMessageString(sm50_err) : "unknown error"
+          sm50_err.has_value() ? sm50_err.message() : "unknown error"
       );
-      if (sm50_err)
-        SM50FreeError(sm50_err);
-      sm50_err = nullptr;
+      sm50_err.reset();
       return E_FAIL;
     };
 
@@ -559,21 +578,15 @@ public:
       geometry.next = &common;
       geometry.strip_topology = strip != 0;
 
-      SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
+      rootsig.next = &geometry;
       SM50_SHADER_COMPILATION_ARGUMENT_DATA *geometry_args =
-          reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&geometry);
-      if (root_signature) {
-        rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
-        rootsig.bytecode = root_signature;
-        rootsig.bytecode_length = root_signature_size;
-        rootsig.next = &geometry;
-        geometry_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
-      }
+          reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
 
-      sm50_bitcode_t geometry_bitcode = nullptr;
+      D3D12AirconvBitcode geometry_bitcode;
       std::string geometry_name = "airconv_gs_" + std::to_string(strip);
       if (SM50CompileGeometryPipelineGeometry(
-              shader_vs, shader_gs, geometry_args, geometry_name.c_str(), &geometry_bitcode, &sm50_err
+              shader_vs.get(), shader_gs.get(), geometry_args, geometry_name.c_str(), geometry_bitcode.out(),
+              sm50_err.out()
           ))
         return compile_error("mesh stage");
 
@@ -601,18 +614,16 @@ public:
         ia_layout.next = &common;
         geometry.next = &ia_layout;
 
+        rootsig.next = &geometry;
         SM50_SHADER_COMPILATION_ARGUMENT_DATA *vertex_args =
-            reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&geometry);
-        if (root_signature) {
-          rootsig.next = &geometry;
-          vertex_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
-        }
+            reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
 
-        sm50_bitcode_t vertex_bitcode = nullptr;
+        D3D12AirconvBitcode vertex_bitcode;
         std::string vertex_name =
             "airconv_vs_" + std::to_string(strip) + "_" + std::to_string(index);
         if (SM50CompileGeometryPipelineVertex(
-                shader_vs, shader_gs, vertex_args, vertex_name.c_str(), &vertex_bitcode, &sm50_err
+                shader_vs.get(), shader_gs.get(), vertex_args, vertex_name.c_str(), vertex_bitcode.out(),
+                sm50_err.out()
             ))
           return compile_error("object stage");
 
@@ -663,15 +674,36 @@ public:
       return E_INVALIDARG;
     }
 
+    if (!pDesc->VS.pShaderBytecode)
+      return E_INVALIDARG;
+
+    auto classify_optional_shader = [](const D3D12_SHADER_BYTECODE &shader) {
+      if (!shader.pShaderBytecode && !shader.BytecodeLength)
+        return D3D12ShaderClassification{D3D12ShaderBackend::Airconv, S_OK};
+      return ClassifyD3D12Shader(shader);
+    };
+    const auto vs_classification = ClassifyD3D12Shader(pDesc->VS);
+    const auto ps_classification = classify_optional_shader(pDesc->PS);
+    const auto hs_classification = classify_optional_shader(pDesc->HS);
+    const auto ds_classification = classify_optional_shader(pDesc->DS);
+    const auto gs_classification = classify_optional_shader(pDesc->GS);
+    for (const auto &classification :
+         {vs_classification, ps_classification, hs_classification, ds_classification, gs_classification}) {
+      if (FAILED(classification.validation_hr)) {
+        ERR("Invalid D3D12 shader container, HRESULT=", classification.validation_hr);
+        return classification.validation_hr;
+      }
+    }
+
     HRESULT hr;
-    sm50_error_t sm50_err = nullptr;
+    D3D12AirconvError sm50_err;
     auto metal = device_->GetMTLDevice();
     WMT::Reference<WMT::Error> err;
     WMT::Reference<WMT::Function> vs_func, ps_func;
     WMT::Reference<WMT::Library> vs_lib, ps_lib, gs_lib, hs_lib, ds_lib, stage_in_lib;
-    auto vs_backend = DetectD3D12ShaderBackend(pDesc->VS);
-    auto ps_backend = pDesc->PS.pShaderBytecode ? DetectD3D12ShaderBackend(pDesc->PS) : D3D12ShaderBackend::Airconv;
-    auto gs_backend = has_geometry ? DetectD3D12ShaderBackend(pDesc->GS) : D3D12ShaderBackend::Airconv;
+    auto vs_backend = vs_classification.backend;
+    auto ps_backend = ps_classification.backend;
+    auto gs_backend = gs_classification.backend;
     const bool use_msc = vs_backend == D3D12ShaderBackend::MetalShaderConverter;
     const bool use_msc_tessellation = use_msc && has_hull && has_domain;
     const bool use_msc_geometry = use_msc && has_geometry;
@@ -683,10 +715,6 @@ public:
     const uint32_t msc_emulation_flags = use_msc_tessellation ? DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION
                                          : use_msc_geometry   ? DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION
                                                               : 0;
-    if (vs_backend == D3D12ShaderBackend::Unsupported || ps_backend == D3D12ShaderBackend::Unsupported)
-      return E_FAIL;
-    if (has_geometry && gs_backend == D3D12ShaderBackend::Unsupported)
-      return E_FAIL;
     if (has_geometry && (has_hull || has_domain)) {
       ERR("CreatePipelineState: geometry and tessellation emulation are not combined");
       return E_NOTIMPL;
@@ -704,6 +732,48 @@ public:
     if (use_msc_tessellation && !pDesc->PS.pShaderBytecode) {
       ERR("CreatePipelineState: MSC tessellation requires a pixel shader");
       return E_NOTIMPL;
+    }
+
+    if (!pDesc->pRootSignature && !use_msc) {
+      const void *reference_root_signature = nullptr;
+      size_t reference_root_signature_size = 0;
+      hr = GetD3D12EmbeddedRootSignature(
+          pDesc->VS, vs_classification, &reference_root_signature, &reference_root_signature_size
+      );
+      if (FAILED(hr)) {
+        ERR("CreatePipelineState: AIRCONV VS has no usable embedded root signature, HRESULT=", hr);
+        return hr;
+      }
+
+      auto check_embedded_root_signature = [&](const D3D12_SHADER_BYTECODE &shader,
+                                               const D3D12ShaderClassification &classification,
+                                               const char *stage) -> HRESULT {
+        if (!shader.pShaderBytecode)
+          return S_OK;
+        const void *root_signature = nullptr;
+        size_t root_signature_size = 0;
+        HRESULT root_hr = GetD3D12EmbeddedRootSignature(
+            shader, classification, &root_signature, &root_signature_size
+        );
+        if (FAILED(root_hr)) {
+          ERR("CreatePipelineState: AIRCONV ", stage,
+              " has no usable embedded root signature, HRESULT=", root_hr);
+          return root_hr;
+        }
+        if (root_signature_size != reference_root_signature_size ||
+            std::memcmp(root_signature, reference_root_signature, root_signature_size) != 0) {
+          ERR("CreatePipelineState: AIRCONV ", stage,
+              " embedded root signature does not match VS");
+          return E_INVALIDARG;
+        }
+        return S_OK;
+      };
+
+      if (FAILED(hr = check_embedded_root_signature(pDesc->PS, ps_classification, "PS")) ||
+          FAILED(hr = check_embedded_root_signature(pDesc->HS, hs_classification, "HS")) ||
+          FAILED(hr = check_embedded_root_signature(pDesc->DS, ds_classification, "DS")) ||
+          FAILED(hr = check_embedded_root_signature(pDesc->GS, gs_classification, "GS")))
+        return hr;
     }
 
     D3D12ConvertedShader converted_vs;
@@ -729,7 +799,7 @@ public:
         return hr;
     }
 
-    SM50_SHADER_COMMON_DATA common;
+    SM50_SHADER_COMMON_DATA common = {};
     common.flags = {};
     common.type = SM50_SHADER_COMMON;
     common.metal_version = SM50_SHADER_METAL_310;
@@ -746,8 +816,8 @@ public:
         return E_INVALIDARG;
       if (FAILED(
               hr = ConvertD3D12Shader(
-                  pDesc->VS, DXMT_MSC_STAGE_VERTEX, converted_vs, root_signature, root_signature_size,
-                  msc_emulation_flags ? &msc_stage_in_layout : nullptr, msc_emulation_flags
+                  vs_classification, pDesc->VS, DXMT_MSC_STAGE_VERTEX, converted_vs, root_signature,
+                  root_signature_size, msc_emulation_flags ? &msc_stage_in_layout : nullptr, msc_emulation_flags
               )
           )) {
         return hr;
@@ -763,8 +833,9 @@ public:
 
       if (pDesc->PS.pShaderBytecode) {
         if (FAILED(
-                hr = ConvertD3D12Shader(
-                    pDesc->PS, DXMT_MSC_STAGE_FRAGMENT, converted_ps, root_signature, root_signature_size
+              hr = ConvertD3D12Shader(
+                    ps_classification, pDesc->PS, DXMT_MSC_STAGE_FRAGMENT, converted_ps, root_signature,
+                    root_signature_size
                 )
             ))
         {
@@ -793,8 +864,8 @@ public:
       if (use_msc_tessellation) {
         if (FAILED(
                 hr = ConvertD3D12Shader(
-                    pDesc->HS, DXMT_MSC_STAGE_HULL, converted_hs, root_signature, root_signature_size, nullptr,
-                    DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION
+                    hs_classification, pDesc->HS, DXMT_MSC_STAGE_HULL, converted_hs, root_signature,
+                    root_signature_size, nullptr, DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION
                 )
             ))
         {
@@ -802,8 +873,8 @@ public:
         }
         if (FAILED(
                 hr = ConvertD3D12Shader(
-                    pDesc->DS, DXMT_MSC_STAGE_DOMAIN, converted_ds, root_signature, root_signature_size, nullptr,
-                    DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION
+                    ds_classification, pDesc->DS, DXMT_MSC_STAGE_DOMAIN, converted_ds, root_signature,
+                    root_signature_size, nullptr, DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION
                 )
             ))
         {
@@ -817,8 +888,8 @@ public:
       if (use_msc_geometry) {
         if (FAILED(
                 hr = ConvertD3D12Shader(
-                    pDesc->GS, DXMT_MSC_STAGE_GEOMETRY, converted_gs, root_signature, root_signature_size, nullptr,
-                    DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION
+                    gs_classification, pDesc->GS, DXMT_MSC_STAGE_GEOMETRY, converted_gs, root_signature,
+                    root_signature_size, nullptr, DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION
                 )
             )) {
           return hr;
@@ -831,12 +902,10 @@ public:
     }
 
     if (!use_msc) {
-      if (pDesc->VS.pShaderBytecode) {
-        if (SM50Initialize(pDesc->VS.pShaderBytecode, pDesc->VS.BytecodeLength, &shader_vs, &ref_vs, &sm50_err)) {
-          ERR("Failed to parse vs shader");
-          return E_FAIL;
-        }
-        if (!use_airconv_geometry) {
+      hr = shader_vs.Initialize(pDesc->VS, vs_classification, &ref_vs, "vs");
+      if (FAILED(hr))
+        return hr;
+      if (!use_airconv_geometry) {
           SM50_SHADER_IA_INPUT_LAYOUT_DATA data_ia_layout = {};
           data_ia_layout.type = SM50_SHADER_IA_INPUT_LAYOUT;
           data_ia_layout.index_buffer_format = SM50_INDEX_BUFFER_FORMAT_NONE;
@@ -867,49 +936,47 @@ public:
             data_so.next = &data_ia_layout;
           }
 
-          SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
-          SM50_SHADER_COMPILATION_ARGUMENT_DATA *shader_args =
-              reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(
-                  has_stream_output ? static_cast<void *>(&data_so) : static_cast<void *>(&data_ia_layout)
-              );
+          const void *explicit_root_signature = nullptr;
+          size_t explicit_root_signature_size = 0;
           if (pDesc->pRootSignature) {
-            rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
-            rootsig.bytecode_length =
-                static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&rootsig.bytecode);
-            rootsig.next = has_stream_output ? static_cast<void *>(&data_so) : static_cast<void *>(&data_ia_layout);
-            shader_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
-          } else {
-            data_ia_layout.next = &common;
-            if (has_stream_output)
-              data_so.next = &data_ia_layout;
+            explicit_root_signature_size =
+                static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&explicit_root_signature);
           }
+          SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
+          hr = InitializeD3D12AirconvRootSignature(
+              pDesc->VS, vs_classification, explicit_root_signature, explicit_root_signature_size, rootsig
+          );
+          if (FAILED(hr)) {
+            ERR("Failed to initialize AIRCONV vertex root signature, HRESULT=", hr);
+            return hr;
+          }
+          rootsig.next = has_stream_output ? static_cast<void *>(&data_so) : static_cast<void *>(&data_ia_layout);
+          auto shader_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
 
-          sm50_bitcode_t vs_bitcode;
+          D3D12AirconvBitcode vs_bitcode;
 
           if (SM50Compile(
-                  shader_vs, shader_args, "vs_main", &vs_bitcode, &sm50_err
+                  shader_vs.get(), shader_args, "vs_main", vs_bitcode.out(), sm50_err.out()
               )) {
-            ERR("Failed to compile vs shader");
+            const auto message = sm50_err.message();
+            ERR("Failed to compile vs shader: ", message.empty() ? "unknown error" : message);
             return E_FAIL;
           }
 
           SM50_COMPILED_BITCODE vs_bitcode_compiled;
-          SM50GetCompiledBitcode(vs_bitcode, &vs_bitcode_compiled);
+          SM50GetCompiledBitcode(vs_bitcode.get(), &vs_bitcode_compiled);
           auto vs_data = WMT::MakeDispatchData(vs_bitcode_compiled.Data, vs_bitcode_compiled.Size);
           auto vs_lib = metal.newLibrary(vs_data, err);
-          vs_func = vs_lib.newFunction("vs_main");
-        }
-      } else {
-        ERR("no vertex shader");
-        return E_INVALIDARG;
+          vs_func = vs_lib ? vs_lib.newFunction("vs_main") : WMT::Reference<WMT::Function>();
+          if (!vs_lib || !vs_func)
+            return E_FAIL;
       }
     }
 
     if (use_airconv_geometry) {
-      if (SM50Initialize(pDesc->GS.pShaderBytecode, pDesc->GS.BytecodeLength, &shader_gs, &ref_gs, &sm50_err)) {
-        ERR("Failed to parse gs shader");
-        return E_FAIL;
-      }
+      hr = shader_gs.Initialize(pDesc->GS, gs_classification, &ref_gs, "gs");
+      if (FAILED(hr))
+        return hr;
 
       std::vector<SM50_IA_INPUT_ELEMENT> elements(pDesc->InputLayout.NumElements);
       uint32_t element_count = 0;
@@ -1006,10 +1073,9 @@ public:
 
       std::string ps_name = "ps_main" + sha1.string().substr(0, 8);
 
-      if (SM50Initialize(pDesc->PS.pShaderBytecode, pDesc->PS.BytecodeLength, &shader_ps, &ref_ps, &sm50_err)) {
-        ERR("Failed to parse ps shader");
-        return E_FAIL;
-      }
+      hr = shader_ps.Initialize(pDesc->PS, ps_classification, &ref_ps, "ps");
+      if (FAILED(hr))
+        return hr;
       SM50_SHADER_PSO_PIXEL_SHADER_DATA data_ps;
       data_ps.dual_source_blending = dual_source_blending;
       data_ps.disable_depth_output = false;
@@ -1022,31 +1088,38 @@ public:
       for (unsigned i = 0; i < pDesc->NumRenderTargets; i++)
         data_ps.pixel_formats[i] = ORIGINAL_FORMAT(info.colors[i].pixel_format);
 
-      SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
-      SM50_SHADER_COMPILATION_ARGUMENT_DATA *shader_args =
-          reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&data_ps);
+      const void *explicit_root_signature = nullptr;
+      size_t explicit_root_signature_size = 0;
       if (pDesc->pRootSignature) {
-        rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
-        rootsig.bytecode_length =
-            static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&rootsig.bytecode);
-        rootsig.next = &data_ps;
-        shader_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
-      } else {
-        data_ps.next = &common;
+        explicit_root_signature_size =
+            static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&explicit_root_signature);
       }
+      SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
+      hr = InitializeD3D12AirconvRootSignature(
+          pDesc->PS, ps_classification, explicit_root_signature, explicit_root_signature_size, rootsig
+      );
+      if (FAILED(hr)) {
+        ERR("Failed to initialize AIRCONV pixel root signature, HRESULT=", hr);
+        return hr;
+      }
+      rootsig.next = &data_ps;
+      auto shader_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig);
 
-      sm50_bitcode_t ps_bitcode;
+      D3D12AirconvBitcode ps_bitcode;
       if (SM50Compile(
-              shader_ps, shader_args, ps_name.c_str(), &ps_bitcode, &sm50_err
+              shader_ps.get(), shader_args, ps_name.c_str(), ps_bitcode.out(), sm50_err.out()
           )) {
-        ERR("Failed to compile ps shader");
+        const auto message = sm50_err.message();
+        ERR("Failed to compile ps shader: ", message.empty() ? "unknown error" : message);
         return E_FAIL;
       }
       SM50_COMPILED_BITCODE ps_bitcode_compiled;
-      SM50GetCompiledBitcode(ps_bitcode, &ps_bitcode_compiled);
+      SM50GetCompiledBitcode(ps_bitcode.get(), &ps_bitcode_compiled);
       auto ps_data = WMT::MakeDispatchData(ps_bitcode_compiled.Data, ps_bitcode_compiled.Size);
       auto ps_lib = metal.newLibrary(ps_data, err);
-      ps_func = ps_lib.newFunction(ps_name.c_str());
+      ps_func = ps_lib ? ps_lib.newFunction(ps_name.c_str()) : WMT::Reference<WMT::Function>();
+      if (!ps_lib || !ps_func)
+        return E_FAIL;
     }
 
     // PSO
@@ -1223,7 +1296,9 @@ public:
       } else if (use_airconv_geometry) {
         if (pDesc->PrimitiveTopologyType == D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH)
           return E_INVALIDARG;
-        hr = InitializeAirconvGeometryPipeline(pDesc, info, metal, ps_func, sm50_err);
+        hr = InitializeAirconvGeometryPipeline(
+            pDesc, info, metal, ps_func, sm50_err, vs_classification, gs_classification
+        );
         if (FAILED(hr))
           return hr;
       } else {

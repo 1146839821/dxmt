@@ -2,6 +2,14 @@ dx12_sm6_probe = executable('dx12_compute_sm6', 'dx12_compute_sm6.cpp',
   dependencies: [ d3d12_dep ],
 )
 
+dx12_shader_container = executable('dx12_shader_container', 'dx12_shader_container.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_airconv_firstbit = executable('dx12_airconv_firstbit', 'dx12_airconv_firstbit.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dx12_texture_sampler = executable('dx12_texture_sampler', 'dx12_texture_sampler.cpp',
   dependencies: [ d3d12_dep ],
 )
