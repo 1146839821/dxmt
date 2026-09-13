@@ -2,11 +2,15 @@ dx12_sm6_probe = executable('dx12_compute_sm6', 'dx12_compute_sm6.cpp',
   dependencies: [ d3d12_dep ],
 )
 
-dx12_shader_container = executable('dx12_shader_container', 'dx12_shader_container.cpp',
+dx12_shader_container = executable('dx12_shader_container', 'dx12_shader_container.cpp', '../../src/util/util_md5.cpp',
   dependencies: [ d3d12_dep ],
 )
 
 dx12_airconv_firstbit = executable('dx12_airconv_firstbit', 'dx12_airconv_firstbit.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_shader_runtime = executable('dx12_shader_runtime', 'dx12_shader_runtime.cpp',
   dependencies: [ d3d12_dep ],
 )
 
@@ -80,6 +84,30 @@ if dxc_command.length() > 0
     input: 'compute_sm6.hlsl',
     output: 'compute_sm6.cs.cso',
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_shader_embedded_compute_fixture',
+    input: 'shader_embedded_compute.hlsl',
+    output: 'shader_embedded.compute.cs.cso',
+    command: dxc_command + [ '-E', 'cs_main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_shader_embedded_graphics_vs_fixture',
+    input: 'shader_embedded_graphics.hlsl',
+    output: 'shader_embedded.graphics.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_shader_embedded_graphics_ps_fixture',
+    input: 'shader_embedded_graphics.hlsl',
+    output: 'shader_embedded.graphics.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_shader_embedded_graphics_mismatch_fixture',
+    input: 'shader_embedded_graphics_mismatch.hlsl',
+    output: 'shader_embedded.graphics.mismatch.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
   custom_target('dx12_compute_sm6_root_uav_fixture',
