@@ -31,6 +31,24 @@ IsSupportedFeatureLevel(D3D_FEATURE_LEVEL level) {
   return SUCCEEDED(D3D12CreateDevice(nullptr, level, __uuidof(ID3D12Device), nullptr));
 }
 
+bool
+CheckShaderModelRequest(ID3D12Device *device, UINT requested, HRESULT expected_hr, UINT expected_returned) {
+  D3D12_FEATURE_DATA_SHADER_MODEL data = {
+      static_cast<D3D_SHADER_MODEL>(requested)
+  };
+  const auto actual_hr = device->CheckFeatureSupport(
+      D3D12_FEATURE_SHADER_MODEL, &data, sizeof(data)
+  );
+  std::cout << "shader-model 0x" << std::hex << requested << " -> hr=0x"
+            << static_cast<unsigned long>(actual_hr);
+  if (SUCCEEDED(actual_hr))
+    std::cout << " returned=0x" << static_cast<UINT>(data.HighestShaderModel);
+  std::cout << std::dec << "\n";
+  if (actual_hr != expected_hr)
+    return false;
+  return FAILED(expected_hr) || static_cast<UINT>(data.HighestShaderModel) == expected_returned;
+}
+
 } // namespace
 
 int
@@ -109,12 +127,18 @@ main() {
       ) || !options3.CopyQueueTimestampQueriesSupported || !options3.CastingFullyTypedFormatSupported)
     return fail("D3D12 options3 contract mismatch");
 
-  D3D12_FEATURE_DATA_SHADER_MODEL shader_model = {D3D_SHADER_MODEL_6_0};
-  if (!CheckHR(
-          "CheckFeatureSupport(SHADER_MODEL)",
-          device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shader_model, sizeof(shader_model))
-      ) || shader_model.HighestShaderModel != D3D_SHADER_MODEL_6_0)
-    return fail("shader model query mismatch");
+  constexpr std::array<UINT, 11> known_shader_model_requests = {
+      0x51, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69,
+  };
+  for (const auto requested : known_shader_model_requests) {
+    const auto expected_returned = requested <= 0x60 ? requested : 0x60;
+    if (!CheckShaderModelRequest(device, requested, S_OK, expected_returned))
+      return fail("known shader model query mismatch");
+  }
+  for (const auto requested : {UINT(0x7f), UINT(0x1234)}) {
+    if (!CheckShaderModelRequest(device, requested, E_INVALIDARG, 0))
+      return fail("unknown shader model query mismatch");
+  }
 
   D3D12_FEATURE_DATA_FORMAT_SUPPORT format_support = {DXGI_FORMAT_R32_FLOAT, {}, {}};
   if (!CheckHR(

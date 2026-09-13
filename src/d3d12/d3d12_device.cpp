@@ -673,16 +673,35 @@ public:
       if (DataSize != sizeof(D3D12_FEATURE_DATA_SHADER_MODEL))
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_SHADER_MODEL *>(pFeatureData);
-      switch (out->HighestShaderModel) {
-      case D3D_SHADER_MODEL_5_1:
+      constexpr UINT kD3DShaderModel6_1 = 0x61;
+      constexpr UINT kD3DShaderModel6_2 = 0x62;
+      constexpr UINT kD3DShaderModel6_3 = 0x63;
+      constexpr UINT kD3DShaderModel6_4 = 0x64;
+      constexpr UINT kD3DShaderModel6_5 = 0x65;
+      constexpr UINT kD3DShaderModel6_6 = 0x66;
+      constexpr UINT kD3DShaderModel6_7 = 0x67;
+      constexpr UINT kD3DShaderModel6_8 = 0x68;
+      constexpr UINT kD3DShaderModel6_9 = 0x69;
+      const auto requested = static_cast<UINT>(out->HighestShaderModel);
+      switch (requested) {
+      case static_cast<UINT>(D3D_SHADER_MODEL_5_1):
         out->HighestShaderModel = D3D_SHADER_MODEL_5_1;
         return S_OK;
-      case D3D_SHADER_MODEL_6_0:
+      case static_cast<UINT>(D3D_SHADER_MODEL_6_0):
+        out->HighestShaderModel = D3D_SHADER_MODEL_6_0;
+        return S_OK;
+      case kD3DShaderModel6_1:
+      case kD3DShaderModel6_2:
+      case kD3DShaderModel6_3:
+      case kD3DShaderModel6_4:
+      case kD3DShaderModel6_5:
+      case kD3DShaderModel6_6:
+      case kD3DShaderModel6_7:
+      case kD3DShaderModel6_8:
+      case kD3DShaderModel6_9:
         out->HighestShaderModel = D3D_SHADER_MODEL_6_0;
         return S_OK;
       default:
-        // The active headers define no later shader-model enum values.  Keep
-        // unknown values invalid instead of manufacturing capability values.
         return E_INVALIDARG;
       }
     }
