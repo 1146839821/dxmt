@@ -677,6 +677,7 @@ public:
     if (!pDesc->VS.pShaderBytecode)
       return E_INVALIDARG;
 
+    const bool has_pixel_shader = pDesc->PS.pShaderBytecode != nullptr;
     auto classify_optional_shader = [](const D3D12_SHADER_BYTECODE &shader) {
       if (!shader.pShaderBytecode && !shader.BytecodeLength)
         return D3D12ShaderClassification{D3D12ShaderBackend::Airconv, S_OK};
@@ -723,7 +724,7 @@ public:
       ERR("CreatePipelineState: mixed shader backends across VS and GS are not supported");
       return E_NOTIMPL;
     }
-    if ((ps_backend == D3D12ShaderBackend::MetalShaderConverter) != use_msc)
+    if (has_pixel_shader && (ps_backend == D3D12ShaderBackend::MetalShaderConverter) != use_msc)
       return E_NOTIMPL;
     if ((has_hull || has_domain) && !use_msc_tessellation) {
       ERR("CreatePipelineState: tessellation requires Metal Shader Converter");
