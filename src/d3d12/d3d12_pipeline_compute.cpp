@@ -77,6 +77,12 @@ public:
           return hr;
         }
         root_signature_size = rootsig->GetBlob(&root_signature);
+      } else {
+        HRESULT hr = GetD3D12EmbeddedRootSignature(
+            pDesc->CS, classification, &root_signature, &root_signature_size
+        );
+        if (FAILED(hr) && hr != E_FAIL)
+          return hr;
       }
 
       HRESULT hr = ConvertD3D12ComputeShader(

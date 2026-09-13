@@ -705,6 +705,12 @@ public:
     auto vs_backend = vs_classification.backend;
     auto ps_backend = ps_classification.backend;
     auto gs_backend = gs_classification.backend;
+    const void *root_signature = nullptr;
+    size_t root_signature_size = 0;
+    if (pDesc->pRootSignature) {
+      root_signature_size =
+          static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&root_signature);
+    }
     const bool use_msc = vs_backend == D3D12ShaderBackend::MetalShaderConverter;
     const bool use_msc_tessellation = use_msc && has_hull && has_domain;
     const bool use_msc_geometry = use_msc && has_geometry;
@@ -735,15 +741,20 @@ public:
       return E_NOTIMPL;
     }
 
-    if (!pDesc->pRootSignature && !use_msc) {
+    if (!pDesc->pRootSignature) {
       const void *reference_root_signature = nullptr;
       size_t reference_root_signature_size = 0;
-      hr = GetD3D12EmbeddedRootSignature(
+      const HRESULT reference_hr = GetD3D12EmbeddedRootSignature(
           pDesc->VS, vs_classification, &reference_root_signature, &reference_root_signature_size
       );
-      if (FAILED(hr)) {
-        ERR("CreatePipelineState: AIRCONV VS has no usable embedded root signature, HRESULT=", hr);
-        return hr;
+      const bool has_reference_root = SUCCEEDED(reference_hr);
+      if (FAILED(reference_hr) && (!use_msc || reference_hr != E_FAIL)) {
+        ERR("CreatePipelineState: VS has no usable embedded root signature, HRESULT=", reference_hr);
+        return reference_hr;
+      }
+      if (has_reference_root) {
+        root_signature = reference_root_signature;
+        root_signature_size = reference_root_signature_size;
       }
 
       auto check_embedded_root_signature = [&](const D3D12_SHADER_BYTECODE &shader,
@@ -757,13 +768,15 @@ public:
             shader, classification, &root_signature, &root_signature_size
         );
         if (FAILED(root_hr)) {
-          ERR("CreatePipelineState: AIRCONV ", stage,
+          if (use_msc && !has_reference_root && root_hr == E_FAIL)
+            return S_OK;
+          ERR("CreatePipelineState: ", stage,
               " has no usable embedded root signature, HRESULT=", root_hr);
           return root_hr;
         }
-        if (root_signature_size != reference_root_signature_size ||
+        if (!has_reference_root || root_signature_size != reference_root_signature_size ||
             std::memcmp(root_signature, reference_root_signature, root_signature_size) != 0) {
-          ERR("CreatePipelineState: AIRCONV ", stage,
+          ERR("CreatePipelineState: ", stage,
               " embedded root signature does not match VS");
           return E_INVALIDARG;
         }
@@ -807,12 +820,6 @@ public:
     common.next = nullptr;
 
     if (use_msc) {
-      const void *root_signature = nullptr;
-      size_t root_signature_size = 0;
-      if (pDesc->pRootSignature) {
-        root_signature_size = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&root_signature);
-      }
-
       if (!pDesc->VS.pShaderBytecode)
         return E_INVALIDARG;
       if (FAILED(

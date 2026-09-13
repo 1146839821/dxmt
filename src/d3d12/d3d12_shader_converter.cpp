@@ -391,8 +391,6 @@ GetD3D12EmbeddedRootSignature(
   *root_signature_size = 0;
   if (FAILED(classification.validation_hr))
     return classification.validation_hr;
-  if (classification.backend != D3D12ShaderBackend::Airconv)
-    return E_INVALIDARG;
   if (!classification.embedded_root_signature || !classification.embedded_root_signature_size)
     return E_FAIL;
   *root_signature = classification.embedded_root_signature;
@@ -408,6 +406,8 @@ InitializeD3D12AirconvRootSignature(
 ) {
   root_signature = {};
   root_signature.type = SM50_SHADER_ROOT_SIGNATURE;
+  if (classification.backend != D3D12ShaderBackend::Airconv)
+    return E_INVALIDARG;
   if (explicit_root_signature || explicit_root_signature_size) {
     if (!explicit_root_signature || !explicit_root_signature_size)
       return E_INVALIDARG;
