@@ -39,6 +39,8 @@ constexpr uint32_t kDXILModuleBlockID = 8;
 constexpr uint32_t kDXILConstantsBlockID = 11;
 constexpr uint32_t kDXILFunctionBlockID = 12;
 constexpr uint32_t kDXILValueSymbolTableBlockID = 14;
+constexpr char kDXILChar6Alphabet[] =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._";
 constexpr uint64_t kDXILModuleGlobalVariableRecord = 7;
 constexpr uint64_t kDXILModuleFunctionRecord = 8;
 constexpr uint64_t kDXILModuleAliasRecord = 9;
@@ -416,9 +418,6 @@ private:
     uint64_t unary_function_id = std::numeric_limits<uint64_t>::max();
   };
 
-  static constexpr char kChar6Alphabet[] =
-      "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._";
-
   void Reset() {
     bit_offset_ = 0;
     block_info_.clear();
@@ -566,7 +565,7 @@ private:
       uint64_t encoded = 0;
       if (!ReadBits(6, &encoded) || encoded >= 64)
         return false;
-      *value = static_cast<unsigned char>(kChar6Alphabet[encoded]);
+      *value = static_cast<unsigned char>(kDXILChar6Alphabet[encoded]);
       return true;
     }
     default:
@@ -799,6 +798,71 @@ private:
   std::unordered_map<uint32_t, std::vector<DXILBitcodeAbbrev>> block_info_;
 };
 
+bool
+FindDXILChar6String(
+    const uint8_t *data, size_t size, std::string_view value, size_t first_bit, size_t last_bit
+) {
+  if (!data || value.empty())
+    return false;
+
+  const size_t bit_count = size * 8;
+  last_bit = std::min(last_bit, bit_count);
+  for (size_t candidate = first_bit; candidate < last_bit; candidate++) {
+    size_t bit_offset = candidate;
+    bool matched = true;
+    for (unsigned char character : value) {
+      if (bit_offset > bit_count || 6 > bit_count - bit_offset) {
+        matched = false;
+        break;
+      }
+      uint32_t encoded = 0;
+      for (unsigned bit = 0; bit < 6; bit++)
+        encoded |= ((data[(bit_offset + bit) / 8] >> ((bit_offset + bit) % 8)) & 1u) << bit;
+      bit_offset += 6;
+      if (encoded >= sizeof(kDXILChar6Alphabet) - 1 ||
+          kDXILChar6Alphabet[encoded] != character) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched)
+      return true;
+  }
+  return false;
+}
+
+bool
+FindDXILFixedString(
+    const uint8_t *data, size_t size, std::string_view value, size_t first_bit, size_t last_bit
+) {
+  if (!data || value.empty())
+    return false;
+
+  const size_t bit_count = size * 8;
+  last_bit = std::min(last_bit, bit_count);
+  for (size_t candidate = first_bit; candidate < last_bit; candidate++) {
+    size_t bit_offset = candidate;
+    bool matched = true;
+    for (unsigned char character : value) {
+      if (bit_offset > bit_count || 8 > bit_count - bit_offset) {
+        matched = false;
+        break;
+      }
+      uint8_t decoded = 0;
+      for (unsigned bit = 0; bit < 8; bit++)
+        decoded |= static_cast<uint8_t>(((data[(bit_offset + bit) / 8] >> ((bit_offset + bit) % 8)) & 1u) << bit);
+      bit_offset += 8;
+      if (decoded != character) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched)
+      return true;
+  }
+  return false;
+}
+
 uint64_t
 GetDXILAtomic64FeatureFlags(const D3D12_SHADER_BYTECODE &shader) {
   uint64_t feature_flags = 0;
@@ -842,6 +906,33 @@ HasUnsupportedDXILAppendConsume(const D3D12_SHADER_BYTECODE &shader) {
 
   DXILBitcodeReader reader(bitcode, bitcode_size);
   return reader.HasValueSymbol("dx.op.bufferUpdateCounter");
+}
+
+bool
+HasUnsupportedDXILSamplerFeedback(const D3D12_SHADER_BYTECODE &shader) {
+  const uint8_t *bitcode = nullptr;
+  size_t bitcode_size = 0;
+  if (!GetDXILBitcode(shader, &bitcode, &bitcode_size))
+    return false;
+
+  DXILBitcodeReader reader(bitcode, bitcode_size);
+  return reader.HasValueSymbolPrefix("dx.op.writeSamplerFeedback") ||
+         FindDXILChar6String(bitcode, bitcode_size, "dx.op.writeSamplerFeedback", 0, bitcode_size * 8);
+}
+
+bool
+HasUnsupportedDXILRayPayloadQualifiers(const D3D12_SHADER_BYTECODE &shader) {
+  const uint8_t *bitcode = nullptr;
+  size_t bitcode_size = 0;
+  if (!GetDXILBitcode(shader, &bitcode, &bitcode_size))
+    return false;
+
+  // DXIL records payload access qualifiers in the named metadata key
+  // dxrPayloadAnnotations. Bitcode stores this NAME record as fixed-width
+  // characters; the scan stays inside the validated bitcode payload, so
+  // arbitrary bytes in the DXBC container cannot trigger it.
+  return FindDXILFixedString(
+      bitcode, bitcode_size, "dxrPayloadAnnotations", 0, bitcode_size * 8);
 }
 
 bool
@@ -1228,6 +1319,8 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
     classification.uses_unsupported_denorm_mode = HasUnsupportedDXILDenormMode(shader);
     classification.uses_unsupported_pack_unpack = HasUnsupportedDXILPackUnpack(shader);
     classification.uses_unsupported_append_consume = HasUnsupportedDXILAppendConsume(shader);
+    classification.uses_unsupported_sampler_feedback = HasUnsupportedDXILSamplerFeedback(shader);
+    classification.uses_unsupported_ray_payload_qualifiers = HasUnsupportedDXILRayPayloadQualifiers(shader);
     classification.uses_unsupported_compute_derivative_shape = HasUnsupportedDXILComputeDerivativeShape(shader);
     classification.uses_unsupported_wave_size = HasUnsupportedDXILWaveSize(shader);
     classification.atomic64_feature_flags = GetDXILAtomic64FeatureFlags(shader);
@@ -1440,6 +1533,14 @@ ConvertD3D12Shader(
   }
   if (classification.uses_unsupported_append_consume) {
     ERR("DXIL shader uses unsupported Append/Consume buffer operations");
+    return E_NOTIMPL;
+  }
+  if (classification.uses_unsupported_sampler_feedback) {
+    ERR("DXIL shader uses unsupported sampler feedback");
+    return E_NOTIMPL;
+  }
+  if (classification.uses_unsupported_ray_payload_qualifiers) {
+    ERR("DXIL shader uses unsupported ray payload qualifiers");
     return E_NOTIMPL;
   }
   if (classification.uses_unsupported_compute_derivative_shape) {

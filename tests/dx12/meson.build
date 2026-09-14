@@ -165,6 +165,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_compute_sm6_sampler_feedback_fixture',
+    input: 'compute_sm6_sampler_feedback.hlsl',
+    output: 'compute_sm6_sampler_feedback.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_5', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_compute_sm6_nan_inf_fixture',
     input: 'compute_sm6_nan_inf.hlsl',
     output: 'compute_sm6_nan_inf.cs.cso',
@@ -241,6 +247,12 @@ if dxc_command.length() > 0
     input: 'library_subobjects_sm6.hlsl',
     output: 'library_subobjects_sm6.lib.cso',
     command: dxc_command + [ '-T', 'lib_6_3', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_ray_payload_qualifiers_sm6_fixture',
+    input: 'ray_payload_qualifiers_sm6.hlsl',
+    output: 'ray_payload_qualifiers_sm6.lib.cso',
+    command: dxc_command + [ '-enable-payload-qualifiers', '-T', 'lib_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
   custom_target('dx12_mesh_sm6_ms_fixture',

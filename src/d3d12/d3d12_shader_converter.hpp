@@ -42,6 +42,8 @@ struct D3D12ShaderClassification {
   bool uses_unsupported_denorm_mode = false;
   bool uses_unsupported_pack_unpack = false;
   bool uses_unsupported_append_consume = false;
+  bool uses_unsupported_sampler_feedback = false;
+  bool uses_unsupported_ray_payload_qualifiers = false;
   bool uses_unsupported_compute_derivative_shape = false;
   bool uses_unsupported_wave_size = false;
   uint64_t atomic64_feature_flags = 0;

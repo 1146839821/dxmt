@@ -36,7 +36,8 @@ int main(int argc, char **argv) {
                  "--denorm-preserve-unsupported|--denorm-ftz-unsupported|--packed-dot-ops|"
                  "--pack-unpack-unsupported|--compute-derivatives|"
                  "--compute-derivatives-unsupported|--atomic64-unsupported|"
-                 "--library-subobjects-unsupported]\n";
+                 "--library-subobjects-unsupported|--sampler-feedback-unsupported|"
+                 "--ray-payload-qualifiers-unsupported]\n";
     return 2;
   }
   const bool wave_ops = argc == 3 && strcmp(argv[2], "--wave-ops") == 0;
@@ -54,6 +55,10 @@ int main(int argc, char **argv) {
   const bool atomic64_unsupported = argc == 3 && strcmp(argv[2], "--atomic64-unsupported") == 0;
   const bool library_subobjects_unsupported =
       argc == 3 && strcmp(argv[2], "--library-subobjects-unsupported") == 0;
+  const bool sampler_feedback_unsupported =
+      argc == 3 && strcmp(argv[2], "--sampler-feedback-unsupported") == 0;
+  const bool ray_payload_qualifiers_unsupported =
+      argc == 3 && strcmp(argv[2], "--ray-payload-qualifiers-unsupported") == 0;
   const bool append_consume_unsupported = argc == 3 && strcmp(argv[2], "--append-consume-unsupported") == 0;
   const bool nan_inf_ops = argc == 3 && strcmp(argv[2], "--nan-inf-ops") == 0;
   const bool root_uav = argc == 3 &&
@@ -99,7 +104,8 @@ int main(int argc, char **argv) {
       !root_cbv && !root_constants && !root_srv_mode && !direct_indexed_resource_heap && !cache_probe &&
       !wave_ops && !wave_size_unsupported && !int64_ops && !native16_ops && !denorm_unsupported &&
       !packed_dot_ops && !pack_unpack_unsupported && !compute_derivatives &&
-      !compute_derivatives_unsupported && !atomic64_unsupported && !library_subobjects_unsupported && !nan_inf_ops) {
+      !compute_derivatives_unsupported && !atomic64_unsupported && !library_subobjects_unsupported &&
+      !sampler_feedback_unsupported && !ray_payload_qualifiers_unsupported && !nan_inf_ops) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
@@ -500,7 +506,7 @@ int main(int argc, char **argv) {
   pso_desc.CS.BytecodeLength = shader.size();
   if (wave_size_unsupported || denorm_unsupported || pack_unpack_unsupported ||
       compute_derivatives_unsupported || atomic64_unsupported || library_subobjects_unsupported ||
-      append_consume_unsupported) {
+      append_consume_unsupported || sampler_feedback_unsupported || ray_payload_qualifiers_unsupported) {
     const HRESULT unsupported_hr = device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso));
     if (unsupported_hr != E_NOTIMPL) {
       std::cerr << "unsupported shader feature expected E_NOTIMPL, got 0x" << std::hex
@@ -514,7 +520,9 @@ int main(int argc, char **argv) {
                   : compute_derivatives_unsupported ? "compute derivatives"
                   : atomic64_unsupported ? "64-bit atomics"
                   : append_consume_unsupported ? "Append/Consume buffers"
-                                                : "library subobjects")
+                  : sampler_feedback_unsupported ? "sampler feedback"
+                  : ray_payload_qualifiers_unsupported ? "ray payload qualifiers"
+                                                        : "library subobjects")
               << " rejected: 0x" << std::hex
               << static_cast<unsigned long>(unsupported_hr) << std::dec << "\n";
     result = 0;
