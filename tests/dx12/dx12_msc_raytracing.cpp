@@ -37,8 +37,9 @@ ReadFile(const char *path, std::vector<uint8_t> &data) {
 
 bool
 CompileStage(
-    CompileProc compile, const std::vector<uint8_t> &shader, const D3D12_SHADER_BYTECODE &root_signature,
-    uint32_t stage, const char *entry_point, CompileOutput &output
+    CompileProc compile, const std::vector<uint8_t> &shader, const D3D12_SHADER_BYTECODE &global_root_signature,
+    const D3D12_SHADER_BYTECODE &local_root_signature, uint32_t stage, const char *entry_point,
+    CompileOutput &output
 ) {
   char error_message[1024] = {};
   dxmt_msc_compile_dxil_params params = {};
@@ -47,8 +48,10 @@ CompileStage(
   params.stage = stage;
   params.entry_point = entry_point;
   params.entry_point_length = std::strlen(entry_point);
-  params.root_signature = root_signature.pShaderBytecode;
-  params.root_signature_size = root_signature.BytecodeLength;
+  params.root_signature = global_root_signature.pShaderBytecode;
+  params.root_signature_size = global_root_signature.BytecodeLength;
+  params.local_root_signature = local_root_signature.pShaderBytecode;
+  params.local_root_signature_size = local_root_signature.BytecodeLength;
   params.validation_flags = DXMT_MSC_VALIDATION_FLAG_VALIDATE_DXIL;
   params.error_message = error_message;
   params.error_message_capacity = sizeof(error_message);
@@ -173,20 +176,22 @@ main(int argc, char **argv) {
   CompileOutput intersection;
   CompileOutput callable;
   const bool raygen_compiled = CompileStage(
-      compile, shader, root_signature, DXMT_MSC_STAGE_RAY_GENERATION, "RayGen", raygen
+      compile, shader, root_signature, root_signature, DXMT_MSC_STAGE_RAY_GENERATION, "RayGen", raygen
   );
-  const bool miss_compiled = CompileStage(compile, shader, root_signature, DXMT_MSC_STAGE_MISS, "Miss", miss);
+  const bool miss_compiled = CompileStage(
+      compile, shader, root_signature, root_signature, DXMT_MSC_STAGE_MISS, "Miss", miss
+  );
   const bool closest_hit_compiled = CompileStage(
-      compile, shader, root_signature, DXMT_MSC_STAGE_CLOSEST_HIT, "ClosestHit", closest_hit
+      compile, shader, root_signature, root_signature, DXMT_MSC_STAGE_CLOSEST_HIT, "ClosestHit", closest_hit
   );
   const bool any_hit_compiled = CompileStage(
-      compile, shader, root_signature, DXMT_MSC_STAGE_ANY_HIT, "AnyHit", any_hit
+      compile, shader, root_signature, root_signature, DXMT_MSC_STAGE_ANY_HIT, "AnyHit", any_hit
   );
   const bool intersection_compiled = CompileStage(
-      compile, shader, root_signature, DXMT_MSC_STAGE_INTERSECTION, "Intersection", intersection
+      compile, shader, root_signature, root_signature, DXMT_MSC_STAGE_INTERSECTION, "Intersection", intersection
   );
   const bool callable_compiled = CompileStage(
-      compile, shader, root_signature, DXMT_MSC_STAGE_CALLABLE, "Callable", callable
+      compile, shader, root_signature, root_signature, DXMT_MSC_STAGE_CALLABLE, "Callable", callable
   );
   const bool libraries_loaded =
       raygen_compiled && miss_compiled && closest_hit_compiled && any_hit_compiled && intersection_compiled &&
