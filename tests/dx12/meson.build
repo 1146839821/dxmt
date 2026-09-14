@@ -18,6 +18,10 @@ dx12_texture_sampler = executable('dx12_texture_sampler', 'dx12_texture_sampler.
   dependencies: [ d3d12_dep ],
 )
 
+dx12_texture_dimensions = executable('dx12_texture_dimensions', 'dx12_texture_dimensions.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dx12_graphics_sm6 = executable('dx12_graphics_sm6', 'dx12_graphics_sm6.cpp',
   dependencies: [ d3d12_dep ],
 )
@@ -200,6 +204,12 @@ if dxc_command.length() > 0
   custom_target('dx12_compute_sm6_wave_size_32_fixture',
     input: 'compute_sm6_wave_size_32.hlsl',
     output: 'compute_sm6_wave_size_32.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_texture_dimensions_sm6_fixture',
+    input: 'texture_dimensions_sm6.hlsl',
+    output: 'texture_dimensions_sm6.cs.cso',
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
