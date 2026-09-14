@@ -53,6 +53,10 @@ dx12_metal_acceleration = executable('dx12_metal_acceleration', 'dx12_metal_acce
   dependencies: [ winemetal_dep ],
 )
 
+dx12_raytracing_prebuild = executable('dx12_raytracing_prebuild', 'dx12_raytracing_prebuild.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dx12_msc_function_constants = executable('dx12_msc_function_constants', 'dx12_msc_function_constants.cpp',
   include_directories: [ include_directories('../../src/winemetal') ],
   dependencies: [ d3d12_dep ],
