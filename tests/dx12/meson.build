@@ -269,6 +269,30 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_1', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_graphics_helper_lane_sm6_vs_fixture',
+    input: 'graphics_helper_lane_sm6.hlsl',
+    output: 'graphics_helper_lane_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_helper_lane_sm6_ps_fixture',
+    input: 'graphics_helper_lane_sm6.hlsl',
+    output: 'graphics_helper_lane_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_helper_lane', '-T', 'ps_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_helper_lane_derivative_sm6_ps_fixture',
+    input: 'graphics_helper_lane_sm6.hlsl',
+    output: 'graphics_helper_lane_derivative_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_helper_lane_derivative', '-T', 'ps_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_helper_lane_discard_sm6_ps_fixture',
+    input: 'graphics_helper_lane_sm6.hlsl',
+    output: 'graphics_helper_lane_discard_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_helper_lane_discard', '-T', 'ps_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_graphics_unsupported_semantics_sm6_vs_fixture',
     input: 'graphics_unsupported_semantics_sm6.hlsl',
     output: 'graphics_unsupported_semantics_sm6.vs.cso',
