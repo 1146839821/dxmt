@@ -581,6 +581,18 @@ dxmt_msc_to_ir_stage(uint32_t stage) {
     return IRShaderStageMesh;
   case DXMT_MSC_STAGE_AMPLIFICATION:
     return IRShaderStageAmplification;
+  case DXMT_MSC_STAGE_CLOSEST_HIT:
+    return IRShaderStageClosestHit;
+  case DXMT_MSC_STAGE_INTERSECTION:
+    return IRShaderStageIntersection;
+  case DXMT_MSC_STAGE_ANY_HIT:
+    return IRShaderStageAnyHit;
+  case DXMT_MSC_STAGE_MISS:
+    return IRShaderStageMiss;
+  case DXMT_MSC_STAGE_RAY_GENERATION:
+    return IRShaderStageRayGeneration;
+  case DXMT_MSC_STAGE_CALLABLE:
+    return IRShaderStageCallable;
   default:
     return IRShaderStageInvalid;
   }
@@ -593,6 +605,7 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   IRObject *compiled = NULL;
   IRVersionedRootSignatureDescriptor *root_descriptor = NULL;
   IRRootSignature *root_signature = NULL;
+  IRRayTracingPipelineConfiguration *raytracing_configuration = NULL;
   IRMetalLibBinary *binary = NULL;
   IRMetalLibBinary *stage_in_binary = NULL;
   IRShaderReflection *reflection = NULL;
@@ -646,8 +659,26 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
 
   IRShaderStage ir_stage = dxmt_msc_to_ir_stage(params->stage);
   if (ir_stage == IRShaderStageInvalid) {
-    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_SHADER, "shader stage is not supported by Phase 1");
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_SHADER, "shader stage is not supported by MSC runtime");
     return DXMT_MSC_ERROR_UNSUPPORTED_SHADER;
+  }
+
+  const bool raytracing_stage =
+      ir_stage == IRShaderStageClosestHit || ir_stage == IRShaderStageIntersection ||
+      ir_stage == IRShaderStageAnyHit || ir_stage == IRShaderStageMiss ||
+      ir_stage == IRShaderStageRayGeneration || ir_stage == IRShaderStageCallable;
+  if (raytracing_stage &&
+      (!g_msc_api.IRRayTracingPipelineConfigurationCreate ||
+       !g_msc_api.IRRayTracingPipelineConfigurationDestroy ||
+       !g_msc_api.IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes ||
+       !g_msc_api.IRRayTracingPipelineConfigurationSetPipelineFlags ||
+       !g_msc_api.IRRayTracingPipelineConfigurationSetIntrinsicMasks ||
+       !g_msc_api.IRRayTracingPipelineConfigurationSetMaxRecursiveDepth ||
+       !g_msc_api.IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode ||
+       !g_msc_api.IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode ||
+       !g_msc_api.IRCompilerSetRayTracingPipelineConfiguration)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC ray tracing configuration is unavailable");
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
   }
 
   const uint32_t emulation_flags =
@@ -718,6 +749,41 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     g_msc_api.IRCompilerEnableGeometryAndTessellationEmulation(compiler, true);
   if (params->reserved & DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN)
     g_msc_api.IRCompilerSetStageInGenerationMode(compiler, IRStageInCodeGenerationModeUseSeparateStageInFunction);
+
+  if (raytracing_stage) {
+    raytracing_configuration = g_msc_api.IRRayTracingPipelineConfigurationCreate();
+    if (!raytracing_configuration) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_OUT_OF_MEMORY, "MSC ray tracing configuration allocation failed");
+      result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+      goto cleanup;
+    }
+    g_msc_api.IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes(raytracing_configuration, 16);
+    g_msc_api.IRRayTracingPipelineConfigurationSetPipelineFlags(
+        raytracing_configuration, IRRaytracingPipelineFlagNone
+    );
+    g_msc_api.IRRayTracingPipelineConfigurationSetIntrinsicMasks(
+        raytracing_configuration, IRIntrinsicMaskClosestHitAll, IRIntrinsicMaskMissShaderAll,
+        IRIntrinsicMaskAnyHitShaderAll, IRIntrinsicMaskCallableShaderAll
+    );
+    g_msc_api.IRRayTracingPipelineConfigurationSetMaxRecursiveDepth(
+        raytracing_configuration, IRRayTracingUnlimitedRecursionDepth
+    );
+    g_msc_api.IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode(
+        raytracing_configuration, IRRayGenerationCompilationVisibleFunction
+    );
+    g_msc_api.IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode(
+        raytracing_configuration, IRIntersectionFunctionCompilationVisibleFunction
+    );
+    g_msc_api.IRCompilerSetRayTracingPipelineConfiguration(compiler, raytracing_configuration);
+    if (g_msc_api.IRCompilerSetHitgroupType &&
+        (ir_stage == IRShaderStageClosestHit || ir_stage == IRShaderStageAnyHit ||
+         ir_stage == IRShaderStageIntersection)) {
+      g_msc_api.IRCompilerSetHitgroupType(
+          compiler, ir_stage == IRShaderStageIntersection ? IRHitGroupTypeProceduralPrimitive
+                                                           : IRHitGroupTypeTriangles
+      );
+    }
+  }
 
   if (params->root_signature && params->root_signature_size) {
     if (params->root_signature_size > UINT32_MAX) {
@@ -1095,6 +1161,8 @@ cleanup:
     g_msc_api.IRRootSignatureDestroy(root_signature);
   if (root_descriptor)
     g_msc_api.IRVersionedRootSignatureDescriptorRelease(root_descriptor);
+  if (raytracing_configuration)
+    g_msc_api.IRRayTracingPipelineConfigurationDestroy(raytracing_configuration);
   if (input)
     g_msc_api.IRObjectDestroy(input);
   if (error)
