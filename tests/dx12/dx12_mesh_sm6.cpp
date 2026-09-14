@@ -4,6 +4,7 @@
 #include <d3d12.h>
 
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -114,7 +115,7 @@ cleanup:
 bool
 RunMesh(
     const std::vector<char> &amplification_shader, const std::vector<char> &mesh_shader,
-    const std::vector<char> &pixel_shader
+    const std::vector<char> &pixel_shader, bool cull_primitive
 ) {
   ID3D12Device *device = nullptr;
   ID3D12Device2 *device2 = nullptr;
@@ -150,6 +151,7 @@ RunMesh(
   UINT64 total_size = 0;
   BYTE *mapped = nullptr;
   UINT pixel = 0;
+  const UINT expected_pixel = cull_primitive ? 0u : 0x000000ffu;
   MeshStream stream = {};
   MeshStreamWithAS stream_with_as = {};
   D3D12_PIPELINE_STATE_STREAM_DESC stream_desc = {};
@@ -284,10 +286,12 @@ RunMesh(
     goto cleanup;
   pixel = *reinterpret_cast<const UINT *>(mapped + footprint.Offset);
   readback->Unmap(0, nullptr);
-  if ((pixel & 0x00ffffffu) != 0x000000ffu) {
+  if ((pixel & 0x00ffffffu) != expected_pixel) {
     std::cerr << "mesh readback mismatch: 0x" << std::hex << pixel << std::dec << "\n";
     goto cleanup;
   }
+  std::cout << "DXIL " << (cull_primitive ? "SV_CullPrimitive mesh" : "mesh")
+            << " readback passed: 0x" << std::hex << pixel << std::dec << "\n";
   result = true;
 
 cleanup:
@@ -312,19 +316,21 @@ cleanup:
 int
 main(int argc, char **argv) {
   if (argc != 3 && argc != 4) {
-    std::cerr << "usage: dx12_mesh_sm6 [<amplification.cso>] <mesh.cso> <pixel.cso>\n";
+    std::cerr << "usage: dx12_mesh_sm6 [<amplification.cso>] <mesh.cso> <pixel.cso>\n"
+              << "       dx12_mesh_sm6 --cull-primitive <mesh.cso> <pixel.cso>\n";
     return 2;
   }
 
+  const bool cull_primitive = argc == 4 && std::strcmp(argv[1], "--cull-primitive") == 0;
   std::vector<char> amplification_shader;
   std::vector<char> mesh_shader;
   std::vector<char> pixel_shader;
   const int mesh_index = argc == 4 ? 2 : 1;
   const int pixel_index = argc == 4 ? 3 : 2;
-  if ((argc == 4 && !ReadFile(argv[1], amplification_shader)) ||
+  if ((argc == 4 && !cull_primitive && !ReadFile(argv[1], amplification_shader)) ||
       !ReadFile(argv[mesh_index], mesh_shader) || !ReadFile(argv[pixel_index], pixel_shader)) {
     std::cerr << "failed to read shader fixture\n";
     return 3;
   }
-  return RunMesh(amplification_shader, mesh_shader, pixel_shader) ? 0 : 1;
+  return RunMesh(amplification_shader, mesh_shader, pixel_shader, cull_primitive) ? 0 : 1;
 }

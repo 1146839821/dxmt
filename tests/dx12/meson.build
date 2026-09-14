@@ -233,6 +233,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'ms_6_5', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_mesh_sm6_cull_primitive_fixture',
+    input: 'mesh_sm6_cull_primitive.hlsl',
+    output: 'mesh_sm6_cull_primitive.ms.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'ms_6_5', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_mesh_sm6_as_fixture',
     input: 'mesh_sm6_as.hlsl',
     output: 'mesh_sm6.as.cso',
