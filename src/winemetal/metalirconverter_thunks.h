@@ -102,6 +102,7 @@ enum dxmt_msc_validation_flags {
 #define DXMT_MSC_RUNTIME_SYMBOL_VERTEX_REFLECTION (UINT64_C(1) << 23)
 #define DXMT_MSC_RUNTIME_SYMBOL_GEOMETRY_REFLECTION (UINT64_C(1) << 24)
 #define DXMT_MSC_RUNTIME_SYMBOL_TESSELLATION_REFLECTION (UINT64_C(1) << 25)
+#define DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_REFLECTION (UINT64_C(1) << 26)
 
 #pragma pack(push, 8)
 
@@ -131,6 +132,22 @@ enum dxmt_msc_geometry_input_primitive {
 struct dxmt_msc_shader_reflection {
   uint32_t stage;
   uint32_t vertex_output_size_in_bytes;
+  uint32_t needs_function_constants;
+
+  uint32_t fs_num_render_targets;
+  uint32_t fs_rt_index_int;
+  uint32_t fs_discards;
+
+  uint32_t ms_max_vertex_output_count;
+  uint32_t ms_max_primitive_output_count;
+  uint32_t ms_primitive_topology;
+  uint32_t ms_max_payload_size_in_bytes;
+  uint32_t ms_num_threads[3];
+
+  uint32_t as_num_threads[3];
+  uint32_t as_max_payload_size_in_bytes;
+
+  uint32_t rt_is_indirect_intersection_function;
 
   uint32_t gs_input_primitive;
   uint32_t gs_max_input_primitives_per_mesh_threadgroup;

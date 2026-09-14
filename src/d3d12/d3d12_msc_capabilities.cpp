@@ -83,6 +83,8 @@ QueryDXMTMSCCapabilities(WMT::Device device) {
   capabilities.api_minimum_os_target = Has(symbols, DXMT_MSC_RUNTIME_SYMBOL_MINIMUM_DEPLOYMENT_TARGET);
   capabilities.api_debug_info = Has(symbols, DXMT_MSC_RUNTIME_SYMBOL_IGNORE_DEBUG_INFORMATION);
   capabilities.api_function_constants = Has(symbols, DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_RESOURCE_SPACE);
+  capabilities.api_function_constant_reflection =
+      Has(symbols, DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_REFLECTION);
   capabilities.api_framebuffer_fetch = Has(symbols, DXMT_MSC_RUNTIME_SYMBOL_FRAMEBUFFER_FETCH_RESOURCE_SPACE);
   capabilities.api_input_topology = Has(symbols, DXMT_MSC_RUNTIME_SYMBOL_INPUT_TOPOLOGY);
   capabilities.api_entry_point_name = Has(symbols, DXMT_MSC_RUNTIME_SYMBOL_ENTRY_POINT_NAME);
@@ -157,8 +159,9 @@ LogDXMTMSCCapabilities(const DXMTMSCCapabilities &capabilities) {
   Logger::info(str::format(
       "D3D12 MSC API gates: validation=", capabilities.api_validation_flags, ", minGPU=",
       capabilities.api_minimum_gpu_target, ", minOS=", capabilities.api_minimum_os_target, ", functionConstants=",
-      capabilities.api_function_constants, ", framebufferFetch=", capabilities.api_framebuffer_fetch, ", meshReflection=",
-      capabilities.api_mesh_reflection, ", rayTracingConfiguration=", capabilities.api_raytracing_configuration
+      capabilities.api_function_constants, ", functionConstantReflection=", capabilities.api_function_constant_reflection,
+      ", framebufferFetch=", capabilities.api_framebuffer_fetch, ", meshReflection=", capabilities.api_mesh_reflection,
+      ", rayTracingConfiguration=", capabilities.api_raytracing_configuration
   ));
   Logger::info(str::format(
       "D3D12 MSC compiler target: GPUFamily=", capabilities.compiler_minimum_gpu_family, ", macOS=",

@@ -51,6 +51,7 @@ typedef struct dxmt_msc_api {
   IRShaderReflection *(*IRShaderReflectionCreate)(void);
   void (*IRShaderReflectionDestroy)(IRShaderReflection *);
   const char *(*IRShaderReflectionGetEntryPointFunctionName)(const IRShaderReflection *);
+  bool (*IRShaderReflectionNeedsFunctionConstants)(const IRShaderReflection *);
   bool (*IRShaderReflectionCopyComputeInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedCSInfo *);
   bool (*IRShaderReflectionReleaseComputeInfo)(IRVersionedCSInfo *);
   bool (*IRShaderReflectionCopyVertexInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedVSInfo *);
@@ -287,6 +288,9 @@ dxmt_msc_load_symbols(void) {
   DXMT_MSC_LOAD(IRShaderReflectionCreate);
   DXMT_MSC_LOAD(IRShaderReflectionDestroy);
   DXMT_MSC_LOAD(IRShaderReflectionGetEntryPointFunctionName);
+  DXMT_MSC_LOAD_OPTIONAL(
+      IRShaderReflectionNeedsFunctionConstants, DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_REFLECTION
+  );
   DXMT_MSC_LOAD(IRShaderReflectionCopyComputeInfo);
   DXMT_MSC_LOAD(IRShaderReflectionReleaseComputeInfo);
   DXMT_MSC_LOAD(IRErrorGetCode);
@@ -551,16 +555,24 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   IRMetalLibBinary *stage_in_binary = NULL;
   IRShaderReflection *reflection = NULL;
   IRError *error = NULL;
+  IRVersionedFSInfo fragment_info = {};
   IRVersionedCSInfo compute_info = {};
   IRVersionedVSInfo vertex_info = {};
   IRVersionedGSInfo geometry_info = {};
   IRVersionedHSInfo hull_info = {};
   IRVersionedDSInfo domain_info = {};
+  IRVersionedMSInfo mesh_info = {};
+  IRVersionedASInfo amplification_info = {};
+  IRVersionedRTInfo raytracing_info = {};
+  bool fragment_info_valid = false;
   bool compute_info_valid = false;
   bool vertex_info_valid = false;
   bool geometry_info_valid = false;
   bool hull_info_valid = false;
   bool domain_info_valid = false;
+  bool mesh_info_valid = false;
+  bool amplification_info_valid = false;
+  bool raytracing_info_valid = false;
   sm50_bitcode_t patched_metallib = {0};
   struct SM50_COMPILED_BITCODE patched_data = {0};
   uint8_t *original_metallib = NULL;
@@ -744,6 +756,21 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     goto cleanup;
   }
 
+  if (g_msc_api.IRShaderReflectionNeedsFunctionConstants)
+    params->reflection.needs_function_constants =
+        g_msc_api.IRShaderReflectionNeedsFunctionConstants(reflection) ? 1u : 0u;
+
+  if (ir_stage == IRShaderStageFragment && g_msc_api.IRShaderReflectionCopyFragmentInfo &&
+      g_msc_api.IRShaderReflectionReleaseFragmentInfo) {
+    fragment_info.version = IRReflectionVersion_1_0;
+    if (g_msc_api.IRShaderReflectionCopyFragmentInfo(reflection, IRReflectionVersion_1_0, &fragment_info)) {
+      fragment_info_valid = true;
+      params->reflection.fs_num_render_targets = fragment_info.info_1_0.num_render_targets;
+      params->reflection.fs_rt_index_int = fragment_info.info_1_0.rt_index_int;
+      params->reflection.fs_discards = fragment_info.info_1_0.discards ? 1u : 0u;
+    }
+  }
+
   if (ir_stage == IRShaderStageCompute) {
     compute_info.version = IRReflectionVersion_1_0;
     if (!g_msc_api.IRShaderReflectionCopyComputeInfo(reflection, IRReflectionVersion_1_0, &compute_info)) {
@@ -828,6 +855,45 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     params->reflection.ds_patch_constants_size = domain_info.info_1_0.patch_constants_size;
     params->reflection.ds_tessellation_type_half = domain_info.info_1_0.tessellation_type_half;
   }
+  if (ir_stage == IRShaderStageMesh && g_msc_api.IRShaderReflectionCopyMeshInfo &&
+      g_msc_api.IRShaderReflectionReleaseMeshInfo) {
+    mesh_info.version = IRReflectionVersion_1_0;
+    if (g_msc_api.IRShaderReflectionCopyMeshInfo(reflection, IRReflectionVersion_1_0, &mesh_info)) {
+      mesh_info_valid = true;
+      params->reflection.ms_max_vertex_output_count = mesh_info.info_1_0.max_vertex_output_count;
+      params->reflection.ms_max_primitive_output_count = mesh_info.info_1_0.max_primitive_output_count;
+      params->reflection.ms_primitive_topology = mesh_info.info_1_0.primitive_topology;
+      params->reflection.ms_max_payload_size_in_bytes = mesh_info.info_1_0.max_payload_size_in_bytes;
+      memcpy(params->reflection.ms_num_threads, mesh_info.info_1_0.num_threads, sizeof(params->reflection.ms_num_threads));
+    }
+  }
+  if (ir_stage == IRShaderStageAmplification && g_msc_api.IRShaderReflectionCopyAmplificationInfo &&
+      g_msc_api.IRShaderReflectionReleaseAmplificationInfo) {
+    amplification_info.version = IRReflectionVersion_1_0;
+    if (g_msc_api.IRShaderReflectionCopyAmplificationInfo(
+            reflection, IRReflectionVersion_1_0, &amplification_info
+        )) {
+      amplification_info_valid = true;
+      memcpy(
+          params->reflection.as_num_threads, amplification_info.info_1_0.num_threads,
+          sizeof(params->reflection.as_num_threads)
+      );
+      params->reflection.as_max_payload_size_in_bytes = amplification_info.info_1_0.max_payload_size_in_bytes;
+    }
+  }
+  if ((ir_stage == IRShaderStageRayGeneration || ir_stage == IRShaderStageIntersection ||
+       ir_stage == IRShaderStageAnyHit || ir_stage == IRShaderStageClosestHit ||
+       ir_stage == IRShaderStageMiss || ir_stage == IRShaderStageCallable) &&
+      g_msc_api.IRShaderReflectionCopyRaytracingInfo && g_msc_api.IRShaderReflectionReleaseRaytracingInfo) {
+    raytracing_info.version = IRReflectionVersion_1_0;
+    if (g_msc_api.IRShaderReflectionCopyRaytracingInfo(
+            reflection, IRReflectionVersion_1_0, &raytracing_info
+        )) {
+      raytracing_info_valid = true;
+      params->reflection.rt_is_indirect_intersection_function =
+          raytracing_info.info_1_0.is_indirect_intersection_function ? 1u : 0u;
+    }
+  }
 
   if (params->reserved & DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN) {
     IRVersionedInputLayoutDescriptor layout = {};
@@ -908,6 +974,8 @@ cleanup:
   if (patched_metallib)
     SM50DestroyBitcode(patched_metallib);
   free(original_metallib);
+  if (fragment_info_valid)
+    g_msc_api.IRShaderReflectionReleaseFragmentInfo(&fragment_info);
   if (compute_info_valid)
     g_msc_api.IRShaderReflectionReleaseComputeInfo(&compute_info);
   if (vertex_info_valid)
@@ -918,6 +986,12 @@ cleanup:
     g_msc_api.IRShaderReflectionReleaseHullInfo(&hull_info);
   if (domain_info_valid)
     g_msc_api.IRShaderReflectionReleaseDomainInfo(&domain_info);
+  if (mesh_info_valid)
+    g_msc_api.IRShaderReflectionReleaseMeshInfo(&mesh_info);
+  if (amplification_info_valid)
+    g_msc_api.IRShaderReflectionReleaseAmplificationInfo(&amplification_info);
+  if (raytracing_info_valid)
+    g_msc_api.IRShaderReflectionReleaseRaytracingInfo(&raytracing_info);
   if (stage_in_binary)
     g_msc_api.IRMetalLibBinaryDestroy(stage_in_binary);
   if (reflection)

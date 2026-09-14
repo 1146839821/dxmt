@@ -48,6 +48,7 @@ struct DXMTMSCCapabilities {
   bool api_minimum_os_target = false;
   bool api_debug_info = false;
   bool api_function_constants = false;
+  bool api_function_constant_reflection = false;
   bool api_framebuffer_fetch = false;
   bool api_input_topology = false;
   bool api_entry_point_name = false;
