@@ -55,6 +55,37 @@ struct MeshStream {
   StreamSubobject<DXGI_SAMPLE_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC> sample_desc;
 };
 
+struct MeshStreamWithAS {
+  StreamSubobject<ID3D12RootSignature *, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE> root_signature;
+  StreamSubobject<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS> mesh_shader;
+  StreamSubobject<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS> pixel_shader;
+  StreamSubobject<D3D12_RT_FORMAT_ARRAY, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS> render_targets;
+  StreamSubobject<D3D12_RASTERIZER_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER> rasterizer;
+  StreamSubobject<D3D12_BLEND_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND> blend;
+  StreamSubobject<D3D12_DEPTH_STENCIL_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL> depth_stencil;
+  StreamSubobject<DXGI_SAMPLE_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC> sample_desc;
+  StreamSubobject<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS> amplification_shader;
+};
+
+template <typename Stream> void
+InitializeMeshStream(
+    Stream &target, ID3D12RootSignature *root_signature, const std::vector<char> &mesh_shader,
+    const std::vector<char> &pixel_shader
+) {
+  target.root_signature.value = root_signature;
+  target.mesh_shader.value.pShaderBytecode = mesh_shader.data();
+  target.mesh_shader.value.BytecodeLength = mesh_shader.size();
+  target.pixel_shader.value.pShaderBytecode = pixel_shader.data();
+  target.pixel_shader.value.BytecodeLength = pixel_shader.size();
+  target.render_targets.value.NumRenderTargets = 1;
+  target.render_targets.value.RTFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+  target.rasterizer.value.FillMode = D3D12_FILL_MODE_SOLID;
+  target.rasterizer.value.CullMode = D3D12_CULL_MODE_NONE;
+  target.rasterizer.value.DepthClipEnable = TRUE;
+  target.blend.value.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+  target.sample_desc.value.Count = 1;
+}
+
 bool
 WaitForQueue(ID3D12CommandQueue *queue, ID3D12Device *device, ID3D12CommandList *list) {
   ID3D12Fence *fence = nullptr;
@@ -81,7 +112,10 @@ cleanup:
 }
 
 bool
-RunMesh(const std::vector<char> &mesh_shader, const std::vector<char> &pixel_shader) {
+RunMesh(
+    const std::vector<char> &amplification_shader, const std::vector<char> &mesh_shader,
+    const std::vector<char> &pixel_shader
+) {
   ID3D12Device *device = nullptr;
   ID3D12Device2 *device2 = nullptr;
   ID3D12RootSignature *root_signature = nullptr;
@@ -117,6 +151,7 @@ RunMesh(const std::vector<char> &mesh_shader, const std::vector<char> &pixel_sha
   BYTE *mapped = nullptr;
   UINT pixel = 0;
   MeshStream stream = {};
+  MeshStreamWithAS stream_with_as = {};
   D3D12_PIPELINE_STATE_STREAM_DESC stream_desc = {};
   bool result = false;
 
@@ -142,31 +177,30 @@ RunMesh(const std::vector<char> &mesh_shader, const std::vector<char> &pixel_sha
       ))
     goto cleanup;
 
-  stream.root_signature.value = root_signature;
-  stream.mesh_shader.value.pShaderBytecode = mesh_shader.data();
-  stream.mesh_shader.value.BytecodeLength = mesh_shader.size();
-  stream.pixel_shader.value.pShaderBytecode = pixel_shader.data();
-  stream.pixel_shader.value.BytecodeLength = pixel_shader.size();
-  stream.render_targets.value.NumRenderTargets = 1;
-  stream.render_targets.value.RTFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-  stream.rasterizer.value.FillMode = D3D12_FILL_MODE_SOLID;
-  stream.rasterizer.value.CullMode = D3D12_CULL_MODE_NONE;
-  stream.rasterizer.value.DepthClipEnable = TRUE;
-  stream.blend.value.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-  stream.sample_desc.value.Count = 1;
-  stream_desc.pPipelineStateSubobjectStream = &stream;
-  stream_desc.SizeInBytes = sizeof(stream);
+  InitializeMeshStream(stream, root_signature, mesh_shader, pixel_shader);
+  InitializeMeshStream(stream_with_as, root_signature, mesh_shader, pixel_shader);
+  stream_with_as.amplification_shader.value.pShaderBytecode = amplification_shader.data();
+  stream_with_as.amplification_shader.value.BytecodeLength = amplification_shader.size();
+  stream_desc.pPipelineStateSubobjectStream = amplification_shader.empty() ? static_cast<void *>(&stream)
+                                                                            : static_cast<void *>(&stream_with_as);
+  stream_desc.SizeInBytes = amplification_shader.empty() ? sizeof(stream) : sizeof(stream_with_as);
 
   if (!CheckHR("Create mesh pipeline state", device2->CreatePipelineState(&stream_desc, IID_PPV_ARGS(&pipeline))))
     goto cleanup;
 
-  stream.sample_desc.value.Quality = 1;
+  if (amplification_shader.empty())
+    stream.sample_desc.value.Quality = 1;
+  else
+    stream_with_as.sample_desc.value.Quality = 1;
   if (!CheckHR(
           "Reject invalid mesh sample description",
           device2->CreatePipelineState(&stream_desc, IID_PPV_ARGS(&invalid_pipeline)), E_INVALIDARG
       ))
     goto cleanup;
-  stream.sample_desc.value.Quality = 0;
+  if (amplification_shader.empty())
+    stream.sample_desc.value.Quality = 0;
+  else
+    stream_with_as.sample_desc.value.Quality = 0;
 
   queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
   default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -277,16 +311,20 @@ cleanup:
 
 int
 main(int argc, char **argv) {
-  if (argc != 3) {
-    std::cerr << "usage: dx12_mesh_sm6 <mesh.cso> <pixel.cso>\n";
+  if (argc != 3 && argc != 4) {
+    std::cerr << "usage: dx12_mesh_sm6 [<amplification.cso>] <mesh.cso> <pixel.cso>\n";
     return 2;
   }
 
+  std::vector<char> amplification_shader;
   std::vector<char> mesh_shader;
   std::vector<char> pixel_shader;
-  if (!ReadFile(argv[1], mesh_shader) || !ReadFile(argv[2], pixel_shader)) {
+  const int mesh_index = argc == 4 ? 2 : 1;
+  const int pixel_index = argc == 4 ? 3 : 2;
+  if ((argc == 4 && !ReadFile(argv[1], amplification_shader)) ||
+      !ReadFile(argv[mesh_index], mesh_shader) || !ReadFile(argv[pixel_index], pixel_shader)) {
     std::cerr << "failed to read shader fixture\n";
     return 3;
   }
-  return RunMesh(mesh_shader, pixel_shader) ? 0 : 1;
+  return RunMesh(amplification_shader, mesh_shader, pixel_shader) ? 0 : 1;
 }
