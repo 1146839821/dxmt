@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
                  "--pack-unpack-unsupported|--compute-derivatives|"
                  "--compute-derivatives-unsupported|--atomic64-unsupported|"
                  "--library-subobjects-unsupported|--sampler-feedback-unsupported|"
-                 "--ray-payload-qualifiers-unsupported]\n";
+                 "--ray-payload-qualifiers-unsupported|--global-coherent]\n";
     return 2;
   }
   const bool wave_ops = argc == 3 && strcmp(argv[2], "--wave-ops") == 0;
@@ -61,11 +61,12 @@ int main(int argc, char **argv) {
       argc == 3 && strcmp(argv[2], "--ray-payload-qualifiers-unsupported") == 0;
   const bool append_consume_unsupported = argc == 3 && strcmp(argv[2], "--append-consume-unsupported") == 0;
   const bool nan_inf_ops = argc == 3 && strcmp(argv[2], "--nan-inf-ops") == 0;
+  const bool global_coherent = argc == 3 && strcmp(argv[2], "--global-coherent") == 0;
   const bool root_uav = argc == 3 &&
                         (strcmp(argv[2], "--root-uav") == 0 || strcmp(argv[2], "--reserved-uav") == 0 ||
                          wave_ops || wave_size_unsupported || native16_ops || denorm_unsupported || packed_dot_ops ||
                          pack_unpack_unsupported || compute_derivatives || compute_derivatives_unsupported ||
-                         atomic64_unsupported || nan_inf_ops);
+                         atomic64_unsupported || nan_inf_ops || global_coherent);
   const bool reserved_uav = argc == 3 && strcmp(argv[2], "--reserved-uav") == 0;
   const bool reserved_srv = argc == 3 && strcmp(argv[2], "--reserved-srv") == 0;
   const bool descriptor_uav = argc == 3 &&
@@ -105,7 +106,7 @@ int main(int argc, char **argv) {
       !wave_ops && !wave_size_unsupported && !int64_ops && !native16_ops && !denorm_unsupported &&
       !packed_dot_ops && !pack_unpack_unsupported && !compute_derivatives &&
       !compute_derivatives_unsupported && !atomic64_unsupported && !library_subobjects_unsupported &&
-      !sampler_feedback_unsupported && !ray_payload_qualifiers_unsupported && !nan_inf_ops) {
+      !sampler_feedback_unsupported && !ray_payload_qualifiers_unsupported && !nan_inf_ops && !global_coherent) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
@@ -596,8 +597,16 @@ int main(int argc, char **argv) {
     rb.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     list->ResourceBarrier(1, &rb);
   }
-  list->Dispatch(compute_derivatives ? 8 : direct_indexed_nonuniform ? 2 : 1,
-                 compute_derivatives ? 8 : 1, 1);
+  if (global_coherent) {
+    list->Dispatch(1, 1, 1);
+    uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uav_barrier.UAV.pResource = output_buffer;
+    list->ResourceBarrier(1, &uav_barrier);
+    list->Dispatch(2, 1, 1);
+  } else {
+    list->Dispatch(compute_derivatives ? 8 : direct_indexed_nonuniform ? 2 : 1,
+                   compute_derivatives ? 8 : 1, 1);
+  }
   if (needs_output) {
     uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     uav_barrier.UAV.pResource = output_buffer;
@@ -609,6 +618,8 @@ int main(int argc, char **argv) {
     } else {
       const UINT output_copy_size = wave_ops || packed_dot_ops
                                         ? sizeof(UINT) * 3
+                                    : global_coherent
+                                        ? sizeof(UINT) * 2
                                     : direct_indexed_nonuniform
                                         ? sizeof(UINT) * 2
                                     : compute_derivatives
@@ -659,6 +670,11 @@ int main(int argc, char **argv) {
       int64_high = mapped[1];
     if (packed_dot_ops)
       packed_dot_unsigned = mapped[1];
+    if (global_coherent && mapped[1] != 0x12345678) {
+      std::cerr << "globally coherent readback mismatch: " << mapped[1] << " expected 305419896\n";
+      readback_buffer->Unmap(0, nullptr);
+      goto cleanup;
+    }
     if (direct_indexed_nonuniform && mapped[1] != input_value + 111) {
       std::cerr << "non-uniform descriptor readback mismatch: " << mapped[1] << " expected "
                 << input_value + 111 << "\n";
@@ -689,6 +705,8 @@ int main(int argc, char **argv) {
       expected_value = 0x40800000;
     else if (nan_inf_ops)
       expected_value = 31;
+    else if (global_coherent)
+      expected_value = 0x12345678;
     else if (native16_ops)
       expected_value = 62200;
     else if (root_cbv || root_constants || root_srv_mode)
@@ -740,6 +758,7 @@ int main(int argc, char **argv) {
                   : packed_dot_ops              ? "packed dot ops"
                   : compute_derivatives         ? "compute derivatives"
                   : nan_inf_ops                 ? "nan/inf ops"
+                  : global_coherent              ? "globally coherent"
                                                 : "root UAV")
               << " readback passed: " << output_value << "\n";
   } else {
