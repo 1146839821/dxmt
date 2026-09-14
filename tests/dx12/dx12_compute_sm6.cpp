@@ -30,6 +30,7 @@ int main(int argc, char **argv) {
                  "direct-indexed-resources|--direct-indexed-resources-lifetime|"
                  "--direct-indexed-nonuniform|"
                  "--unbounded-resources|"
+                 "--append-consume-unsupported|"
                  "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops|--native16-ops|"
                  "--denorm-preserve-unsupported|--denorm-ftz-unsupported|--packed-dot-ops|"
                  "--pack-unpack-unsupported|--compute-derivatives|"
@@ -52,6 +53,7 @@ int main(int argc, char **argv) {
   const bool atomic64_unsupported = argc == 3 && strcmp(argv[2], "--atomic64-unsupported") == 0;
   const bool library_subobjects_unsupported =
       argc == 3 && strcmp(argv[2], "--library-subobjects-unsupported") == 0;
+  const bool append_consume_unsupported = argc == 3 && strcmp(argv[2], "--append-consume-unsupported") == 0;
   const bool root_uav = argc == 3 &&
                         (strcmp(argv[2], "--root-uav") == 0 || strcmp(argv[2], "--reserved-uav") == 0 ||
                          wave_ops || wave_size_unsupported || native16_ops || denorm_unsupported || packed_dot_ops ||
@@ -59,8 +61,8 @@ int main(int argc, char **argv) {
                          atomic64_unsupported);
   const bool reserved_uav = argc == 3 && strcmp(argv[2], "--reserved-uav") == 0;
   const bool reserved_srv = argc == 3 && strcmp(argv[2], "--reserved-srv") == 0;
-  const bool descriptor_uav =
-      argc == 3 && strcmp(argv[2], "--descriptor-uav") == 0;
+  const bool descriptor_uav = argc == 3 &&
+                              (strcmp(argv[2], "--descriptor-uav") == 0 || append_consume_unsupported);
   const bool descriptor_resources =
       argc == 3 && strcmp(argv[2], "--descriptor-resources") == 0;
   const bool descriptor_resources_space =
@@ -495,7 +497,8 @@ int main(int argc, char **argv) {
   pso_desc.CS.pShaderBytecode = shader.data();
   pso_desc.CS.BytecodeLength = shader.size();
   if (wave_size_unsupported || denorm_unsupported || pack_unpack_unsupported ||
-      compute_derivatives_unsupported || atomic64_unsupported || library_subobjects_unsupported) {
+      compute_derivatives_unsupported || atomic64_unsupported || library_subobjects_unsupported ||
+      append_consume_unsupported) {
     const HRESULT unsupported_hr = device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso));
     if (unsupported_hr != E_NOTIMPL) {
       std::cerr << "unsupported shader feature expected E_NOTIMPL, got 0x" << std::hex
@@ -507,7 +510,9 @@ int main(int argc, char **argv) {
                   : denorm_unsupported ? "denorm mode"
                   : pack_unpack_unsupported ? "pack/unpack"
                   : compute_derivatives_unsupported ? "compute derivatives"
-                  : atomic64_unsupported ? "64-bit atomics" : "library subobjects")
+                  : atomic64_unsupported ? "64-bit atomics"
+                  : append_consume_unsupported ? "Append/Consume buffers"
+                                                : "library subobjects")
               << " rejected: 0x" << std::hex
               << static_cast<unsigned long>(unsupported_hr) << std::dec << "\n";
     result = 0;

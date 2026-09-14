@@ -155,6 +155,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_compute_sm6_append_buffer_fixture',
+    input: 'compute_sm6_append_buffer.hlsl',
+    output: 'compute_sm6_append_buffer.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_compute_sm6_direct_indexed_fixture',
     input: 'compute_sm6_direct_indexed.hlsl',
     output: 'compute_sm6_direct_indexed.cs.cso',

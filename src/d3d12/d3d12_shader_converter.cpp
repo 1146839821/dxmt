@@ -815,6 +815,17 @@ HasUnsupportedDXILPackUnpack(const D3D12_SHADER_BYTECODE &shader) {
 }
 
 bool
+HasUnsupportedDXILAppendConsume(const D3D12_SHADER_BYTECODE &shader) {
+  const uint8_t *bitcode = nullptr;
+  size_t bitcode_size = 0;
+  if (!GetDXILBitcode(shader, &bitcode, &bitcode_size))
+    return false;
+
+  DXILBitcodeReader reader(bitcode, bitcode_size);
+  return reader.HasValueSymbol("dx.op.bufferUpdateCounter");
+}
+
+bool
 HasUnsupportedDXILComputeDerivativeShape(const D3D12_SHADER_BYTECODE &shader) {
   const uint8_t *bitcode = nullptr;
   size_t bitcode_size = 0;
@@ -1141,6 +1152,7 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
         HasInputSemantic(shader, "SV_ShadingRate") || HasOutputSemantic(shader, "SV_ShadingRate");
     classification.uses_unsupported_denorm_mode = HasUnsupportedDXILDenormMode(shader);
     classification.uses_unsupported_pack_unpack = HasUnsupportedDXILPackUnpack(shader);
+    classification.uses_unsupported_append_consume = HasUnsupportedDXILAppendConsume(shader);
     classification.uses_unsupported_compute_derivative_shape = HasUnsupportedDXILComputeDerivativeShape(shader);
     classification.atomic64_feature_flags = GetDXILAtomic64FeatureFlags(shader);
     classification.is_library_shader = IsDXILLibraryShader(shader);
@@ -1340,6 +1352,10 @@ ConvertD3D12Shader(
   }
   if (classification.uses_unsupported_pack_unpack) {
     ERR("DXIL shader uses unsupported pack/unpack operations");
+    return E_NOTIMPL;
+  }
+  if (classification.uses_unsupported_append_consume) {
+    ERR("DXIL shader uses unsupported Append/Consume buffer operations");
     return E_NOTIMPL;
   }
   if (classification.uses_unsupported_compute_derivative_shape) {
