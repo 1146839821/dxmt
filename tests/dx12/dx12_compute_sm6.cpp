@@ -27,11 +27,12 @@ int main(int argc, char **argv) {
                  "[--root-uav|--reserved-uav|--reserved-srv|--descriptor-uav|--descriptor-resources|--"
                  "descriptor-resources-space|--root-cbv|--root-constants|--"
                  "descriptor-resources-1-1|--descriptor-null-cbv|--direct-indexed|--root-srv|--"
-                 "cache-probe|--wave-ops|--wave-size-unsupported]\n";
+                 "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops]\n";
     return 2;
   }
   const bool wave_ops = argc == 3 && strcmp(argv[2], "--wave-ops") == 0;
   const bool wave_size_unsupported = argc == 3 && strcmp(argv[2], "--wave-size-unsupported") == 0;
+  const bool int64_ops = argc == 3 && strcmp(argv[2], "--int64-ops") == 0;
   const bool root_uav = argc == 3 &&
                         (strcmp(argv[2], "--root-uav") == 0 || strcmp(argv[2], "--reserved-uav") == 0 ||
                          wave_ops || wave_size_unsupported);
@@ -57,16 +58,18 @@ int main(int argc, char **argv) {
   const bool root_constants =
       argc == 3 && strcmp(argv[2], "--root-constants") == 0;
   const bool root_srv = argc == 3 && strcmp(argv[2], "--root-srv") == 0;
+  const bool root_srv_mode = root_srv || int64_ops;
   const bool cache_probe = argc == 3 && strcmp(argv[2], "--cache-probe") == 0;
   if (argc == 3 && !root_uav && !reserved_uav && !reserved_srv && !descriptor_uav && !descriptor_resources &&
       !descriptor_resources_space && !descriptor_resources_1_1 && !descriptor_null_cbv && !root_cbv &&
-      !root_constants && !root_srv && !direct_indexed && !cache_probe && !wave_ops && !wave_size_unsupported) {
+      !root_constants && !root_srv_mode && !direct_indexed && !cache_probe && !wave_ops &&
+      !wave_size_unsupported && !int64_ops) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
   const bool needs_root_signature =
       root_uav || reserved_uav || reserved_srv || descriptor_uav || descriptor_table_resources ||
-      direct_indexed || root_cbv || root_constants || root_srv;
+      direct_indexed || root_cbv || root_constants || root_srv_mode;
   const bool needs_output = needs_root_signature;
 
   std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
@@ -141,12 +144,12 @@ int main(int argc, char **argv) {
     goto cleanup;
 
   if (needs_root_signature) {
-    if (root_cbv || root_constants || root_srv || reserved_srv) {
+    if (root_cbv || root_constants || root_srv_mode || reserved_srv) {
       if (root_cbv) {
         root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
         root_parameters[0].Descriptor.ShaderRegister = 0;
         root_parameters[0].Descriptor.RegisterSpace = 0;
-      } else if (root_srv || reserved_srv) {
+      } else if (root_srv_mode || reserved_srv) {
         root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
         root_parameters[0].Descriptor.ShaderRegister = 0;
         root_parameters[0].Descriptor.RegisterSpace = 0;
@@ -249,7 +252,7 @@ int main(int argc, char **argv) {
           D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     }
 
-    if (root_cbv || root_constants || root_srv || reserved_srv || descriptor_table_resources) {
+    if (root_cbv || root_constants || root_srv_mode || reserved_srv || descriptor_table_resources) {
       upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
       upload_heap.CreationNodeMask = 1;
       upload_heap.VisibleNodeMask = 1;
@@ -269,6 +272,7 @@ int main(int argc, char **argv) {
       if (!CheckHR("MapInputBuffer",
                    input_buffer->Map(0, nullptr, &mapped_input)))
         goto cleanup;
+      memset(mapped_input, 0, static_cast<size_t>(input_desc.Width));
       memcpy(mapped_input, &input_value, sizeof(input_value));
       input_buffer->Unmap(0, nullptr);
 
@@ -445,7 +449,7 @@ int main(int argc, char **argv) {
       list->SetComputeRoot32BitConstants(0, 1, &input_value, 0);
       list->SetComputeRootUnorderedAccessView(
           1, output_buffer->GetGPUVirtualAddress());
-    } else if (root_srv || reserved_srv) {
+    } else if (root_srv_mode || reserved_srv) {
       list->SetComputeRootShaderResourceView(
           0, input_buffer->GetGPUVirtualAddress());
       list->SetComputeRootUnorderedAccessView(
@@ -493,7 +497,8 @@ int main(int argc, char **argv) {
       D3D12_TILE_REGION_SIZE region = {}; region.NumTiles = 1;
       list->CopyTiles(output_buffer, &coord, &region, readback_buffer, 0, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
     } else {
-      list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0, wave_ops ? sizeof(UINT) * 3 : sizeof(UINT));
+      const UINT output_copy_size = wave_ops ? sizeof(UINT) * 3 : int64_ops ? sizeof(UINT) * 2 : sizeof(UINT);
+      list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0, output_copy_size);
     }
   }
   if (!CheckHR("Close", list->Close()))
@@ -526,10 +531,13 @@ int main(int argc, char **argv) {
     output_value = *mapped;
     UINT wave_prefix_product = 0;
     UINT wave_prefix_sum = 0;
+    UINT int64_high = 0;
     if (wave_ops) {
       wave_prefix_product = mapped[1];
       wave_prefix_sum = mapped[2];
     }
+    if (int64_ops)
+      int64_high = mapped[1];
     readback_buffer->Unmap(0, nullptr);
     UINT expected_value = 1234;
     if (reserved_srv)
@@ -540,7 +548,9 @@ int main(int argc, char **argv) {
       expected_value = input_value;
     else if (descriptor_table_resources)
       expected_value = input_value * 2;
-    else if (root_cbv || root_constants || root_srv)
+    else if (int64_ops)
+      expected_value = 782;
+    else if (root_cbv || root_constants || root_srv_mode)
       expected_value = input_value;
     else if (wave_ops)
       expected_value = 0x00C0FFEE;
@@ -562,9 +572,14 @@ int main(int argc, char **argv) {
         goto cleanup;
       }
     }
+    if (int64_ops && int64_high != 1) {
+      std::cerr << "64-bit high-half readback mismatch: " << int64_high << " expected 1\n";
+      goto cleanup;
+    }
     std::cout << (is_dxbc ? "DXBC" : "DXIL") << " cs_6_0 "
               << (root_cbv                     ? "root CBV"
                   : root_constants              ? "root constants"
+                  : int64_ops                   ? "int64 ops"
                   : (root_srv || reserved_srv) ? "root SRV"
                   : direct_indexed              ? "direct indexed"
                   : descriptor_table_resources  ? "descriptor resources"
