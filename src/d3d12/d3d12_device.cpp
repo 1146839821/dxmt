@@ -18,6 +18,7 @@
 
 #include "d3d12_device.hpp"
 #include "d3d12_device_child.hpp"
+#include "d3d12_raytracing.hpp"
 #include "d3d12sdklayers.h"
 #include "d3d10.h"
 #include "Metal.hpp"
@@ -35,6 +36,8 @@
 namespace dxmt {
 
 namespace {
+
+constexpr uint64_t kD3D12AccelerationStructureAlignment = 256;
 
 bool
 ConvertResourceDesc1(const D3D12_RESOURCE_DESC1 *source, D3D12_RESOURCE_DESC *destination) {
@@ -2045,8 +2048,26 @@ public:
       const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS *pDesc,
       D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO *pInfo
   ) {
-    if (pInfo)
-      *pInfo = {};
+    if (!pInfo)
+      return;
+    *pInfo = {};
+    if (!pDesc || !GetMTLDevice().supportsRaytracing())
+      return;
+
+    D3D12RaytracingDescriptor descriptor;
+    if (!ConvertD3D12RaytracingInputs(this, pDesc, descriptor))
+      return;
+
+    const auto sizes = GetMTLDevice().accelerationStructureSizes(descriptor.info);
+    auto align_size = [](uint64_t value) {
+      if (!value || value > UINT64_MAX - (kD3D12AccelerationStructureAlignment - 1))
+        return uint64_t(0);
+      return (value + kD3D12AccelerationStructureAlignment - 1) &
+             ~(kD3D12AccelerationStructureAlignment - 1);
+    };
+    pInfo->ResultDataMaxSizeInBytes = align_size(sizes.acceleration_structure_size);
+    pInfo->ScratchDataSizeInBytes = align_size(sizes.build_scratch_buffer_size);
+    pInfo->UpdateScratchDataSizeInBytes = align_size(sizes.refit_scratch_buffer_size);
   }
 
   D3D12_DRIVER_MATCHING_IDENTIFIER_STATUS STDMETHODCALLTYPE CheckDriverMatchingIdentifier(
