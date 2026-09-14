@@ -909,6 +909,17 @@ HasUnsupportedDXILAppendConsume(const D3D12_SHADER_BYTECODE &shader) {
 }
 
 bool
+HasDXILTextureLoad(const D3D12_SHADER_BYTECODE &shader) {
+  const uint8_t *bitcode = nullptr;
+  size_t bitcode_size = 0;
+  if (!GetDXILBitcode(shader, &bitcode, &bitcode_size))
+    return false;
+
+  DXILBitcodeReader reader(bitcode, bitcode_size);
+  return reader.HasValueSymbolPrefix("dx.op.textureLoad.");
+}
+
+bool
 HasUnsupportedDXILSamplerFeedback(const D3D12_SHADER_BYTECODE &shader) {
   const uint8_t *bitcode = nullptr;
   size_t bitcode_size = 0;
@@ -1323,6 +1334,7 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
     classification.uses_unsupported_ray_payload_qualifiers = HasUnsupportedDXILRayPayloadQualifiers(shader);
     classification.uses_unsupported_compute_derivative_shape = HasUnsupportedDXILComputeDerivativeShape(shader);
     classification.uses_unsupported_wave_size = HasUnsupportedDXILWaveSize(shader);
+    classification.uses_texture_load = HasDXILTextureLoad(shader);
     classification.atomic64_feature_flags = GetDXILAtomic64FeatureFlags(shader);
     classification.is_library_shader = IsDXILLibraryShader(shader);
   }

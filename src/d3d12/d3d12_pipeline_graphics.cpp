@@ -1012,6 +1012,9 @@ public:
           return E_FAIL;
       }
       shader_backend = D3D12ShaderBackend::MetalShaderConverter;
+      msc_uses_texture_load = vs_classification.uses_texture_load || ps_classification.uses_texture_load ||
+                              hs_classification.uses_texture_load || ds_classification.uses_texture_load ||
+                              gs_classification.uses_texture_load;
     }
 
     if (!use_msc) {
@@ -1848,6 +1851,8 @@ MTLD3D12GraphicsPipelineStateImpl::InitializeMesh(const D3D12PipelineStreamData 
   winding = data.rasterizer_state.FrontCounterClockwise ? WMTWindingCounterClockwise : WMTWindingClockwise;
   forced_sample_count = data.rasterizer_state.ForcedSampleCount;
   msc_mesh = true;
+  msc_uses_texture_load = ms_classification.uses_texture_load || as_classification.uses_texture_load ||
+                          ps_classification.uses_texture_load;
   msc_object_threadgroup_size = data.amplification_shader.empty()
                                     ? WMTSize{1, 1, 1}
                                     : WMTSize{converted_as.reflection.as_num_threads[0],

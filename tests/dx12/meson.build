@@ -628,6 +628,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_texture_lod_clamp_read_fixture',
+    input: 'texture_lod_clamp_read.hlsl',
+    output: 'texture_lod_clamp_read.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_reserved_texture_view_range_fixture',
     input: 'reserved_texture_view_range.hlsl',
     output: 'reserved_texture.view_range.cs.cso',

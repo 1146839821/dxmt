@@ -90,6 +90,7 @@ enum class ShaderVisibleDescriptorType {
 struct SRVTextureCPUStorage {
   Texture *texture = nullptr;
   TextureViewKey view{};
+  FLOAT resource_min_lod_clamp = 0.0f;
 };
 
 using UAVTextureCPUStorage = SRVTextureCPUStorage;
@@ -140,6 +141,8 @@ public:
 
   virtual HRESULT
   AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp) = 0;
+
+  virtual bool HasNonZeroResourceMinLODClamp(UINT Index) = 0;
 
   virtual HRESULT AddConstantBufferView(UINT Index, UINT64 VA, UINT32 SizeInBytes) = 0;
 

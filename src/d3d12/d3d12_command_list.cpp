@@ -1961,6 +1961,12 @@ public:
         return DrawCallStatus::Invalid;
       }
     }
+    if (use_msc && pso_graphics_->msc_uses_texture_load && descriptor_heap_ &&
+        HasBoundResourceMinLODClamp(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr())) {
+      ERR("D3D12 graphics Texture.Load with ResourceMinLODClamp is unsupported");
+      FailRecording(__func__, "MSC Texture.Load with non-zero ResourceMinLODClamp");
+      return DrawCallStatus::Invalid;
+    }
 
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render) {
 
@@ -2763,28 +2769,7 @@ public:
   }
 
   void
-  EncodeMSCResourceUses(
-      MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
-      bool compute = false
-  ) {
-    // Direct-indexed root signatures legitimately have no root parameters;
-    // their resource heap still needs a residency walk below.
-    if (!pRootSig || !pStaging)
-      return;
-
-    // MSC puts root CBV/SRV/UAV addresses directly in its argument buffer.
-    // Track those resources even when the command list has no descriptor heap;
-    // descriptor-table enumeration below is an independent concern.
-    const auto stages =
-        pso_graphics_ &&
-        (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry || pso_graphics_->airconv_geometry)
-            ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment)
-            : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
-    EncodeRootResourceUses(pRootSig, pStaging, stages, compute);
-
-    if (!descriptor_heap)
-      return;
-
+  InitializeMSCResourceUseState(MTLD3D12RootSignature *pRootSig) {
     if (pRootSig != msc_resource_use_root_signature_) {
       msc_resource_use_root_signature_ = pRootSig;
       msc_resource_use_tables_.clear();
@@ -2819,14 +2804,113 @@ public:
         }
       }
     }
+  }
+
+  template <typename F>
+  bool
+  VisitMSCResourceDescriptors(
+      MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
+      F &&visit
+  ) {
+    // Direct-indexed root signatures legitimately have no root parameters;
+    // their resource heap still needs a residency walk below.
+    if (!pRootSig || !pStaging || !descriptor_heap)
+      return false;
+
+    InitializeMSCResourceUseState(pRootSig);
     if (msc_resource_use_tables_.empty() && !msc_resource_use_direct_heap_)
-      return;
+      return false;
 
     D3D12_GPU_DESCRIPTOR_HANDLE heap_start = {};
     descriptor_heap->GetGPUDescriptorHandleForHeapStart(&heap_start);
     const auto descriptor_stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     const auto heap_desc = descriptor_heap->GetDesc();
     if (!descriptor_stride)
+      return false;
+
+    for (const auto &table : msc_resource_use_tables_) {
+      const auto parameter_index = table.parameter_index;
+      if (parameter_index >= pRootSig->ParameterSlots)
+        continue;
+      const auto source_qword = pRootSig->SlotQwordOffsets[parameter_index];
+      if (source_qword >= 64 || !pStaging[source_qword])
+        continue;
+
+      const D3D12_GPU_DESCRIPTOR_HANDLE base_handle = {pStaging[source_qword]};
+      if (base_handle.ptr < heap_start.ptr)
+        continue;
+      const auto byte_offset = base_handle.ptr - heap_start.ptr;
+      if (byte_offset % descriptor_stride)
+        continue;
+      const uint64_t base_index = byte_offset / descriptor_stride;
+      if (base_index >= heap_desc.NumDescriptors)
+        continue;
+
+      uint64_t table_offset = 0;
+      for (const auto &range : table.ranges) {
+        const uint64_t range_offset = range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
+                                          ? table_offset
+                                          : range.OffsetInDescriptorsFromTableStart;
+        const auto range_start = base_index + range_offset;
+        if (range_start >= heap_desc.NumDescriptors)
+          break;
+        const auto range_count = range.NumDescriptors == UINT_MAX
+                                     ? heap_desc.NumDescriptors - range_start
+                                     : std::min<uint64_t>(range.NumDescriptors, heap_desc.NumDescriptors - range_start);
+        if (range.RangeType != D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
+          for (uint64_t descriptor_index = 0; descriptor_index < range_count; descriptor_index++)
+            if (visit(static_cast<UINT>(range_start + descriptor_index), range.RangeType, false))
+              return true;
+        table_offset = range_offset + range_count;
+      }
+    }
+
+    // A direct-indexed root signature has no descriptor-table ranges to
+    // enumerate. Since the shader may select any CBV/SRV/UAV slot at runtime,
+    // conservatively visit every populated resource descriptor.
+    if (msc_resource_use_direct_heap_)
+      for (UINT index = 0; index < heap_desc.NumDescriptors; index++)
+        if (visit(index, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, true))
+          return true;
+
+    return false;
+  }
+
+  bool
+  HasBoundResourceMinLODClamp(
+      MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap
+  ) {
+    return VisitMSCResourceDescriptors(
+        pRootSig, pStaging, descriptor_heap,
+        [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
+          if (!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV)
+            return false;
+          return descriptor_heap->HasNonZeroResourceMinLODClamp(index);
+        }
+    );
+  }
+
+  void
+  EncodeMSCResourceUses(
+      MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
+      bool compute = false
+  ) {
+    // Direct-indexed root signatures legitimately have no root parameters;
+    // their resource heap still needs a residency walk below.
+    if (!pRootSig || !pStaging)
+      return;
+
+    // MSC puts root CBV/SRV/UAV addresses directly in its argument buffer.
+    // Track those resources even when the command list has no descriptor heap;
+    // descriptor-table enumeration below is an independent concern.
+    const auto stages =
+        pso_graphics_ &&
+        (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry || pso_graphics_->airconv_geometry)
+            ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment)
+            : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
+    EncodeRootResourceUses(pRootSig, pStaging, stages, compute);
+
+    if (!descriptor_heap)
       return;
 
     const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
@@ -2907,48 +2991,13 @@ public:
       }
     };
 
-    for (const auto &table : msc_resource_use_tables_) {
-      const auto parameter_index = table.parameter_index;
-      if (parameter_index >= pRootSig->ParameterSlots)
-        continue;
-      const auto source_qword = pRootSig->SlotQwordOffsets[parameter_index];
-      if (source_qword >= 64 || !pStaging[source_qword])
-        continue;
-
-      const D3D12_GPU_DESCRIPTOR_HANDLE base_handle = {pStaging[source_qword]};
-      if (base_handle.ptr < heap_start.ptr)
-        continue;
-      const auto byte_offset = base_handle.ptr - heap_start.ptr;
-      if (byte_offset % descriptor_stride)
-        continue;
-      const uint64_t base_index = byte_offset / descriptor_stride;
-      if (base_index >= heap_desc.NumDescriptors)
-        continue;
-
-      uint64_t table_offset = 0;
-      for (const auto &range : table.ranges) {
-        const uint64_t range_offset = range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
-                                          ? table_offset
-                                          : range.OffsetInDescriptorsFromTableStart;
-        const auto range_start = base_index + range_offset;
-        if (range_start >= heap_desc.NumDescriptors)
-          break;
-        const auto range_count = range.NumDescriptors == UINT_MAX
-                                     ? heap_desc.NumDescriptors - range_start
-                                     : std::min<uint64_t>(range.NumDescriptors, heap_desc.NumDescriptors - range_start);
-        if (range.RangeType != D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
-          for (uint64_t descriptor_index = 0; descriptor_index < range_count; descriptor_index++)
-            encode_descriptor(static_cast<UINT>(range_start + descriptor_index), range.RangeType, false);
-        table_offset = range_offset + range_count;
-      }
-    }
-
-    // A direct-indexed root signature has no descriptor-table ranges to
-    // enumerate. Since the shader may select any CBV/SRV/UAV slot at runtime,
-    // conservatively make every populated resource descriptor resident.
-    if (msc_resource_use_direct_heap_)
-      for (UINT index = 0; index < heap_desc.NumDescriptors; index++)
-        encode_descriptor(index, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, true);
+    VisitMSCResourceDescriptors(
+        pRootSig, pStaging, descriptor_heap,
+        [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
+          encode_descriptor(index, range_type, direct_indexed);
+          return false;
+        }
+    );
   }
 
   bool
@@ -2997,6 +3046,12 @@ public:
     if (use_msc && rootsig_compute_) {
       if (FAILED(rootsig_compute_->InitializeMSCLayout()))
         return false;
+    }
+    if (use_msc && pso_compute_->msc_uses_texture_load && descriptor_heap_ &&
+        HasBoundResourceMinLODClamp(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr())) {
+      ERR("D3D12 compute Texture.Load with ResourceMinLODClamp is unsupported");
+      FailRecording(__func__, "MSC Texture.Load with non-zero ResourceMinLODClamp");
+      return false;
     }
 
     if (dirty_state_.test(DirtyState::ComputePipelineState)) {

@@ -320,6 +320,7 @@ public:
     cpu_storage.type = ShaderVisibleDescriptorType::SRVTexture;
     cpu_storage.SRVTexture.texture = Texture;
     cpu_storage.SRVTexture.view = View;
+    cpu_storage.SRVTexture.resource_min_lod_clamp = ResourceMinLODClamp;
     if (mapped_argument_buffer_) {
       auto &texture_view = Texture->view(View);
       auto &gpu_storage = mapped_argument_buffer_[Index];
@@ -337,7 +338,17 @@ public:
     }
     return S_OK;
   }
-    virtual HRESULT
+
+  bool
+  HasNonZeroResourceMinLODClamp(UINT Index) override {
+    if (Index >= descriptors_.size())
+      return false;
+    const auto &descriptor = descriptors_[Index];
+    return descriptor.type == ShaderVisibleDescriptorType::SRVTexture &&
+           descriptor.SRVTexture.resource_min_lod_clamp > 0.0f;
+  }
+
+  virtual HRESULT
   AddConstantBufferView(UINT Index, UINT64 VA, UINT32 SizeInBytes) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
@@ -385,6 +396,7 @@ public:
     cpu_storage.type = ShaderVisibleDescriptorType::UAVTexture;
     cpu_storage.UAVTexture.texture = Texture; // 
     cpu_storage.UAVTexture.view = View;
+    cpu_storage.UAVTexture.resource_min_lod_clamp = 0;
     if (mapped_argument_buffer_) {
       auto &texture_view = Texture->view(View);
       auto &gpu_storage = mapped_argument_buffer_[Index];

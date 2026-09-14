@@ -313,6 +313,7 @@ class MTLD3D12PipelineState : public ID3D12PipelineState {
 public:
   UINT IsComputePipelineState;
   D3D12ShaderBackend shader_backend = D3D12ShaderBackend::Airconv;
+  bool msc_uses_texture_load = false;
   D3D12PipelineCacheData pipeline_cache;
 
   const D3D12PipelineCacheData &GetPipelineCacheData() const { return pipeline_cache; }

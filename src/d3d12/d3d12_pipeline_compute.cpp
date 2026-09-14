@@ -68,6 +68,7 @@ public:
     if (shader_backend == D3D12ShaderBackend::MetalShaderConverter) {
       if (!device_->GetMSCCapabilities().core_converter)
         return E_FAIL;
+      msc_uses_texture_load = classification.uses_texture_load;
       D3D12ConvertedShader converted;
       const void *root_signature = nullptr;
       size_t root_signature_size = 0;
