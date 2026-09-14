@@ -22,6 +22,17 @@ DXMTMSCIsAvailable(void) {
 }
 
 WINEMETAL_API int
+DXMTMSCGetCapabilities(struct dxmt_msc_capabilities *capabilities) {
+  if (!capabilities)
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+
+  NTSTATUS status = WINE_UNIX_CALL(unix_dxmt_msc_get_capabilities, capabilities);
+  if (status)
+    return -1;
+  return capabilities->ret;
+}
+
+WINEMETAL_API int
 DXMTMSCCompileDXIL(struct dxmt_msc_compile_dxil_params *params) {
   if (!params)
     return DXMT_MSC_ERROR_INVALID_ARGUMENT;

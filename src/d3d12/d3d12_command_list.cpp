@@ -4626,7 +4626,7 @@ public:
     task->draw_arguments = draw_arguments_address;
     task->dispatch_arguments_out = allocator_->gpu_heap_buffer_address_ + dispatch_offset;
     task->max_object_threadgroups =
-        device_->GetMTLDevice().supportsFamily(WMTGPUFamilyApple7) ? UINT64_MAX : 1024;
+        device_->GetMSCCapabilities().apple7_or_newer ? UINT64_MAX : 1024;
     task->vertex_count_per_warp = vertex_increment_per_warp;
     task->end_of_command = 1;
 

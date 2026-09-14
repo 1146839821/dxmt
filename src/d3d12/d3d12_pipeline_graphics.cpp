@@ -699,6 +699,7 @@ public:
     HRESULT hr;
     D3D12AirconvError sm50_err;
     auto metal = device_->GetMTLDevice();
+    const auto &msc_capabilities = device_->GetMSCCapabilities();
     WMT::Reference<WMT::Error> err;
     WMT::Reference<WMT::Function> vs_func, ps_func;
     WMT::Reference<WMT::Library> vs_lib, ps_lib, gs_lib, hs_lib, ds_lib, stage_in_lib;
@@ -711,7 +712,12 @@ public:
       root_signature_size =
           static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&root_signature);
     }
-    const bool use_msc = vs_backend == D3D12ShaderBackend::MetalShaderConverter;
+    const bool use_msc = msc_capabilities.core_converter &&
+                         vs_backend == D3D12ShaderBackend::MetalShaderConverter;
+    if (vs_backend == D3D12ShaderBackend::MetalShaderConverter && !msc_capabilities.core_converter) {
+      ERR("CreatePipelineState: DXIL vertex shader requires the MSC core converter");
+      return E_FAIL;
+    }
     const bool use_msc_tessellation = use_msc && has_hull && has_domain;
     const bool use_msc_geometry = use_msc && has_geometry;
     const bool use_airconv_geometry = !use_msc && has_geometry;
@@ -825,7 +831,8 @@ public:
       if (FAILED(
               hr = ConvertD3D12Shader(
                   vs_classification, pDesc->VS, DXMT_MSC_STAGE_VERTEX, converted_vs, root_signature,
-                  root_signature_size, msc_emulation_flags ? &msc_stage_in_layout : nullptr, msc_emulation_flags
+                  root_signature_size, msc_emulation_flags ? &msc_stage_in_layout : nullptr, msc_emulation_flags,
+                  &msc_capabilities
               )
           )) {
         return hr;
@@ -843,7 +850,7 @@ public:
         if (FAILED(
               hr = ConvertD3D12Shader(
                     ps_classification, pDesc->PS, DXMT_MSC_STAGE_FRAGMENT, converted_ps, root_signature,
-                    root_signature_size
+                    root_signature_size, nullptr, 0, &msc_capabilities
                 )
             ))
         {
@@ -873,7 +880,7 @@ public:
         if (FAILED(
                 hr = ConvertD3D12Shader(
                     hs_classification, pDesc->HS, DXMT_MSC_STAGE_HULL, converted_hs, root_signature,
-                    root_signature_size, nullptr, DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION
+                    root_signature_size, nullptr, DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION, &msc_capabilities
                 )
             ))
         {
@@ -882,7 +889,7 @@ public:
         if (FAILED(
                 hr = ConvertD3D12Shader(
                     ds_classification, pDesc->DS, DXMT_MSC_STAGE_DOMAIN, converted_ds, root_signature,
-                    root_signature_size, nullptr, DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION
+                    root_signature_size, nullptr, DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION, &msc_capabilities
                 )
             ))
         {
@@ -897,7 +904,7 @@ public:
         if (FAILED(
                 hr = ConvertD3D12Shader(
                     gs_classification, pDesc->GS, DXMT_MSC_STAGE_GEOMETRY, converted_gs, root_signature,
-                    root_signature_size, nullptr, DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION
+                    root_signature_size, nullptr, DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION, &msc_capabilities
                 )
             )) {
           return hr;

@@ -952,6 +952,7 @@ int main() {
   D3D_FEATURE_LEVEL requested_levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
   D3D12_FEATURE_DATA_FEATURE_LEVELS feature_levels = {2, requested_levels, {}};
   D3D12_FEATURE_DATA_SHADER_MODEL shader_model = {D3D_SHADER_MODEL_6_0};
+  D3D12_FEATURE_DATA_SHADER_MODEL maximum_shader_model = {D3D_SHADER_MODEL_6_0};
   D3D12_FEATURE_DATA_SHADER_MODEL shader_model_5_1 = {D3D_SHADER_MODEL_5_1};
   D3D12_FEATURE_DATA_SHADER_MODEL invalid_shader_model = {};
   D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
@@ -990,6 +991,7 @@ int main() {
   if (!CheckFeature(device, D3D12_FEATURE_ARCHITECTURE, &architecture, "CheckArchitecture") ||
       !CheckFeature(device, D3D12_FEATURE_ARCHITECTURE1, &architecture1, "CheckArchitecture1") ||
       !CheckFeature(device, D3D12_FEATURE_FEATURE_LEVELS, &feature_levels, "CheckFeatureLevels") ||
+      !CheckFeature(device, D3D12_FEATURE_SHADER_MODEL, &maximum_shader_model, "CheckMaximumShaderModel") ||
       !CheckFeature(device, D3D12_FEATURE_SHADER_MODEL, &shader_model, "CheckShaderModel") ||
       !CheckFeature(device, D3D12_FEATURE_SHADER_MODEL, &shader_model_5_1, "CheckShaderModel5_1") ||
       !CheckFeature(device, D3D12_FEATURE_D3D12_OPTIONS, &options, "CheckOptions") ||
@@ -1026,7 +1028,8 @@ int main() {
   }
   if (!architecture.TileBasedRenderer || !architecture.UMA || !architecture1.TileBasedRenderer ||
        !architecture1.UMA || feature_levels.MaxSupportedFeatureLevel != expected_max_feature_level ||
-      shader_model.HighestShaderModel != D3D_SHADER_MODEL_6_0 || options.ResourceBindingTier != D3D12_RESOURCE_BINDING_TIER_2 ||
+      shader_model.HighestShaderModel != maximum_shader_model.HighestShaderModel ||
+      options.ResourceBindingTier != D3D12_RESOURCE_BINDING_TIER_2 ||
        shader_model_5_1.HighestShaderModel != D3D_SHADER_MODEL_5_1 ||
        options.TiledResourcesTier != D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED ||
        options.ResourceHeapTier != D3D12_RESOURCE_HEAP_TIER_2 || options.ROVsSupported || options1.WaveOps ||

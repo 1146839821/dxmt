@@ -2058,6 +2058,13 @@ thunk_DXMTMSCGetRootLayout(void *args) {
   return STATUS_SUCCESS;
 }
 
+static NTSTATUS
+thunk_DXMTMSCGetCapabilities(void *args) {
+  struct dxmt_msc_capabilities *params = args;
+  params->ret = dxmt_msc_get_capabilities(params);
+  return STATUS_SUCCESS;
+}
+
 static inline void *
 UInt32ToPtr(uint32_t v) {
   return (void *)(uint64_t)v;
@@ -2142,6 +2149,13 @@ thunk32_DXMTMSCGetRootLayout(void *args) {
   src->argument_buffer_size = params.argument_buffer_size;
   src->error_message_size = (uint32_t)params.error_message_size;
   src->ret = params.ret;
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk32_DXMTMSCGetCapabilities(void *args) {
+  struct dxmt_msc_capabilities *params = args;
+  params->ret = dxmt_msc_get_capabilities(params);
   return STATUS_SUCCESS;
 }
 
@@ -3899,6 +3913,7 @@ const void *__wine_unix_call_funcs[] = {
     &_SparseMappingQueue_barrierBeforeResourceState,
     &_MTLCommandQueue_commandBufferWithErrorOptions,
     &_MTLTexture_tailSizeInBytes,
+    &thunk_DXMTMSCGetCapabilities,
 };
 
 #ifndef DXMT_NATIVE
@@ -4072,5 +4087,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_SparseMappingQueue_barrierBeforeResourceState,
     &_MTLCommandQueue_commandBufferWithErrorOptions,
     &_MTLTexture_tailSizeInBytes,
+    &thunk32_DXMTMSCGetCapabilities,
 };
 #endif

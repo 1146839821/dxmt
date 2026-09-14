@@ -87,6 +87,16 @@ main() {
       ))
     return fail("device creation failed");
 
+  D3D12_FEATURE_DATA_SHADER_MODEL maximum_shader_model = {D3D_SHADER_MODEL_6_0};
+  if (!CheckHR(
+          "CheckFeatureSupport(SHADER_MODEL)",
+          device->CheckFeatureSupport(
+              D3D12_FEATURE_SHADER_MODEL, &maximum_shader_model, sizeof(maximum_shader_model)
+          )
+      ))
+    return fail("shader model query failed");
+  const auto expected_shader_model = static_cast<UINT>(maximum_shader_model.HighestShaderModel);
+
   D3D12_FEATURE_DATA_FEATURE_LEVELS level_data = {
       static_cast<UINT>(feature_levels.size()), feature_levels.data(), {}
   };
@@ -102,9 +112,17 @@ main() {
           device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options))
       ))
       return fail("D3D12 options query failed");
+  std::cout << "options: tiled=" << static_cast<UINT>(options.TiledResourcesTier)
+            << " binding=" << static_cast<UINT>(options.ResourceBindingTier)
+            << " stencilRef=" << options.PSSpecifiedStencilRefSupported
+            << " logicOp=" << options.OutputMergerLogicOp
+            << " typedUAV=" << options.TypedUAVLoadAdditionalFormats
+            << " ROV=" << options.ROVsSupported
+            << " conservative=" << static_cast<UINT>(options.ConservativeRasterizationTier)
+            << " heap=" << static_cast<UINT>(options.ResourceHeapTier) << "\n";
   if (options.TiledResourcesTier != D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED ||
       options.ResourceBindingTier != D3D12_RESOURCE_BINDING_TIER_2 ||
-      !options.PSSpecifiedStencilRefSupported ||
+      options.PSSpecifiedStencilRefSupported ||
       (expected_maximum >= D3D_FEATURE_LEVEL_11_1 && !options.OutputMergerLogicOp) ||
       options.TypedUAVLoadAdditionalFormats ||
       options.ROVsSupported ||
@@ -131,7 +149,7 @@ main() {
       0x51, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69,
   };
   for (const auto requested : known_shader_model_requests) {
-    const auto expected_returned = requested <= 0x60 ? requested : 0x60;
+    const auto expected_returned = requested <= expected_shader_model ? requested : expected_shader_model;
     if (!CheckShaderModelRequest(device, requested, S_OK, expected_returned))
       return fail("known shader model query mismatch");
   }

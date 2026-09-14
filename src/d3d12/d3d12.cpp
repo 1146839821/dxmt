@@ -47,7 +47,7 @@ get_max_supported_feature_level(WMT::Device device) {
   // FL12_0 and FL12_1 require Tier 2 tiled resources, which DXMT does not
   // expose yet. Keep the hardware-dependent FL11_1 cutoff consistent with
   // the D3D11 device creation path.
-  return device.supportsFamily(WMTGPUFamilyApple7) ? D3D_FEATURE_LEVEL_11_1 : D3D_FEATURE_LEVEL_11_0;
+  return QueryDXMTMSCCapabilities(device).apple7_or_newer ? D3D_FEATURE_LEVEL_11_1 : D3D_FEATURE_LEVEL_11_0;
 #endif
 }
 

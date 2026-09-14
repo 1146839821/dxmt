@@ -30,6 +30,7 @@
 #include "dxmt_fence.hpp"
 #include "dxmt_presenter.hpp"
 #include "d3d12_shader_converter.hpp"
+#include "d3d12_msc_capabilities.hpp"
 #include "d3d12_pipeline_persistence.hpp"
 #include "dxmt_texture.hpp"
 #include <cstdint>
@@ -369,6 +370,8 @@ public:
   virtual WMT::Device GetMTLDevice() = 0;
 
   virtual D3D_FEATURE_LEVEL GetFeatureLevel() = 0;
+
+  virtual const DXMTMSCCapabilities &GetMSCCapabilities() const = 0;
 
   virtual WMT::ResidencySet GetGlobalResidencySet() = 0;
 

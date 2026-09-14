@@ -231,7 +231,7 @@ bool EmbedRootSignature(
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 1 && argc != 2 && argc != 5 && argc != 6)
+  if (argc != 1 && argc != 2 && argc != 5 && argc != 6 && argc != 7)
     return 2;
 
   HMODULE compiler = LoadLibraryA(D3DCOMPILER_DLL_A);
@@ -276,6 +276,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target { return float4(1.0, 1
   std::vector<uint8_t> dxil_vertex;
   std::vector<uint8_t> dxil_pixel;
   std::vector<uint8_t> dxil_mismatched_pixel;
+  std::vector<uint8_t> dxil_stencil_pixel;
   const bool compiled =
       CompileShader(compile_shader, legacy_compute_source, "legacy_cs.hlsl", "cs_main", "cs_5_0", legacy_compute) &&
       CompileShader(compile_shader, legacy_vertex_source, "legacy_vs.hlsl", "vs_main", "vs_5_0", legacy_vertex) &&
@@ -397,14 +398,16 @@ float4 ps_main(float4 position : SV_Position) : SV_Target { return float4(1.0, 1
       ) && passed;
     }
   }
-  if (argc == 5 || argc == 6) {
-    const int vertex_arg = argc == 6 ? 3 : 2;
-    const int pixel_arg = argc == 6 ? 4 : 3;
-    const int mismatched_pixel_arg = argc == 6 ? 5 : 4;
+  if (argc == 5 || argc == 6 || argc == 7) {
+    const bool has_compute_without_root = argc == 6 || argc == 7;
+    const int vertex_arg = has_compute_without_root ? 3 : 2;
+    const int pixel_arg = has_compute_without_root ? 4 : 3;
+    const int mismatched_pixel_arg = has_compute_without_root ? 5 : 4;
     if (!ReadFile(argv[1], dxil_compute) ||
-        (argc == 6 && !ReadFile(argv[2], dxil_compute_without_root)) ||
+        (has_compute_without_root && !ReadFile(argv[2], dxil_compute_without_root)) ||
         !ReadFile(argv[vertex_arg], dxil_vertex) || !ReadFile(argv[pixel_arg], dxil_pixel) ||
-        !ReadFile(argv[mismatched_pixel_arg], dxil_mismatched_pixel)) {
+        !ReadFile(argv[mismatched_pixel_arg], dxil_mismatched_pixel) ||
+        (argc == 7 && !ReadFile(argv[6], dxil_stencil_pixel))) {
       std::cerr << "failed to read one or more embedded DXIL shaders\n";
       passed = false;
     } else {
@@ -417,13 +420,16 @@ float4 ps_main(float4 position : SV_Position) : SV_Target { return float4(1.0, 1
       const D3D12_SHADER_BYTECODE dxil_mismatched_ps = {
           dxil_mismatched_pixel.data(), dxil_mismatched_pixel.size()
       };
+      const D3D12_SHADER_BYTECODE dxil_stencil_ps = {
+          dxil_stencil_pixel.data(), dxil_stencil_pixel.size()
+      };
       passed = ExpectComputePSO(
           device, "dxil-embedded-compute-null-root", dxil_cs, nullptr, true
       ) && passed;
       passed = ExpectComputePSO(
           device, "dxil-embedded-compute-explicit-root", dxil_cs, empty_root_signature, true
       ) && passed;
-      if (argc == 6) {
+      if (has_compute_without_root) {
         passed = ExpectComputePSO(
             device, "dxil-no-embedded-compute-null-root", dxil_cs_without_root, nullptr, true
         ) && passed;
@@ -448,6 +454,12 @@ float4 ps_main(float4 position : SV_Position) : SV_Target { return float4(1.0, 1
       passed = ExpectGraphicsPSO(
           device, "mixed-dxil-vs-dxbc-ps", dxil_vs, legacy_ps, empty_root_signature, false
       ) && passed;
+      if (argc == 7) {
+        passed = ExpectGraphicsPSO(
+            device, "dxil-unsupported-stencil-ref", dxil_vs, dxil_stencil_ps,
+            empty_root_signature, false, false, true
+        ) && passed;
+      }
     }
   }
 

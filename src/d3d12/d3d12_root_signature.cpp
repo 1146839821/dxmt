@@ -467,7 +467,7 @@ public:
   InitializeMSCLayout() override {
     if (msc_layout_initialized_)
       return S_OK;
-    if (DXMTMSCIsAvailable() != 1)
+    if (!device_->GetMSCCapabilities().core_converter)
       return E_FAIL;
 
     const void *blob = nullptr;

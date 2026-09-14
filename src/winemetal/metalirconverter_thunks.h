@@ -62,6 +62,48 @@ enum dxmt_msc_compile_flags {
   DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION = 1u << 2,
 };
 
+/* Optional runtime symbols are reported individually so one missing advanced
+ * API does not make core DXIL conversion unavailable. */
+#define DXMT_MSC_RUNTIME_SYMBOL_COMPATIBILITY_FLAGS (UINT64_C(1) << 0)
+#define DXMT_MSC_RUNTIME_SYMBOL_GEOMETRY_TESSELLATION (UINT64_C(1) << 1)
+#define DXMT_MSC_RUNTIME_SYMBOL_STAGE_IN_GENERATION (UINT64_C(1) << 2)
+#define DXMT_MSC_RUNTIME_SYMBOL_STAGE_IN_SYNTHESIS (UINT64_C(1) << 3)
+#define DXMT_MSC_RUNTIME_SYMBOL_VALIDATION_FLAGS (UINT64_C(1) << 4)
+#define DXMT_MSC_RUNTIME_SYMBOL_MINIMUM_GPU_FAMILY (UINT64_C(1) << 5)
+#define DXMT_MSC_RUNTIME_SYMBOL_MINIMUM_DEPLOYMENT_TARGET (UINT64_C(1) << 6)
+#define DXMT_MSC_RUNTIME_SYMBOL_IGNORE_DEBUG_INFORMATION (UINT64_C(1) << 7)
+#define DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_RESOURCE_SPACE (UINT64_C(1) << 8)
+#define DXMT_MSC_RUNTIME_SYMBOL_FRAMEBUFFER_FETCH_RESOURCE_SPACE (UINT64_C(1) << 9)
+#define DXMT_MSC_RUNTIME_SYMBOL_INPUT_TOPOLOGY (UINT64_C(1) << 10)
+#define DXMT_MSC_RUNTIME_SYMBOL_ENTRY_POINT_NAME (UINT64_C(1) << 11)
+#define DXMT_MSC_RUNTIME_SYMBOL_FRAGMENT_REFLECTION (UINT64_C(1) << 12)
+#define DXMT_MSC_RUNTIME_SYMBOL_MESH_REFLECTION (UINT64_C(1) << 13)
+#define DXMT_MSC_RUNTIME_SYMBOL_AMPLIFICATION_REFLECTION (UINT64_C(1) << 14)
+#define DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_REFLECTION (UINT64_C(1) << 15)
+#define DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_CONFIGURATION (UINT64_C(1) << 16)
+#define DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_LOCAL_ROOT (UINT64_C(1) << 17)
+#define DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_HITGROUP (UINT64_C(1) << 18)
+#define DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_INTRINSICS (UINT64_C(1) << 19)
+#define DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_COMBINE (UINT64_C(1) << 20)
+#define DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_INDIRECT_INTERSECTION (UINT64_C(1) << 21)
+#define DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_INDIRECT_DISPATCH (UINT64_C(1) << 22)
+#define DXMT_MSC_RUNTIME_SYMBOL_VERTEX_REFLECTION (UINT64_C(1) << 23)
+#define DXMT_MSC_RUNTIME_SYMBOL_GEOMETRY_REFLECTION (UINT64_C(1) << 24)
+#define DXMT_MSC_RUNTIME_SYMBOL_TESSELLATION_REFLECTION (UINT64_C(1) << 25)
+
+#pragma pack(push, 8)
+
+struct dxmt_msc_capabilities {
+  uint32_t ir_version_major;
+  uint32_t ir_version_minor;
+  uint32_t ir_version_patch;
+  uint32_t core_converter;
+  uint64_t optional_symbols;
+  int32_t ret;
+};
+
+#pragma pack(pop)
+
 /* Values mirror IRInputPrimitive in metal_irconverter.h. */
 enum dxmt_msc_geometry_input_primitive {
   DXMT_MSC_GEOMETRY_INPUT_POINT = 1,
@@ -130,6 +172,7 @@ enum dxmt_msc_unixcall {
   unix_dxmt_msc_is_available = 145,
   unix_dxmt_msc_compile_dxil,
   unix_dxmt_msc_get_root_layout,
+  unix_dxmt_msc_get_capabilities = 169,
 };
 
 #pragma pack(push, 8)
@@ -253,6 +296,8 @@ struct dxmt_msc_get_root_layout_params32 {
 #pragma pack(pop)
 
 WINEMETAL_API int DXMTMSCIsAvailable(void);
+
+WINEMETAL_API int DXMTMSCGetCapabilities(struct dxmt_msc_capabilities *capabilities);
 
 WINEMETAL_API int DXMTMSCCompileDXIL(struct dxmt_msc_compile_dxil_params *params);
 

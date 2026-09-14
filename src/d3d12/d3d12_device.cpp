@@ -310,6 +310,7 @@ class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
   WMT::Reference<WMT::ResidencySet> residency_set_;
   std::map<uint64_t, BufferAllocation *> interval_map_;
   FormatCapabilityInspector format_capabilities_;
+  DXMTMSCCapabilities msc_capabilities_;
 
   std::mutex enhanced_split_lock_;
   std::vector<EnhancedSplitBarrierState> enhanced_split_barriers_;
@@ -336,6 +337,8 @@ public:
       return E_FAIL;
     }
     format_capabilities_.Inspect(GetMTLDevice());
+    msc_capabilities_ = QueryDXMTMSCCapabilities(GetMTLDevice());
+    LogDXMTMSCCapabilities(msc_capabilities_);
     return S_OK;
   };
 
@@ -347,6 +350,11 @@ public:
   D3D_FEATURE_LEVEL
   GetFeatureLevel() {
     return feature_level_;
+  };
+
+  const DXMTMSCCapabilities &
+  GetMSCCapabilities() const override {
+    return msc_capabilities_;
   };
 
   bool
@@ -557,6 +565,7 @@ public:
       return E_INVALIDARG;
 
     auto metal = GetMTLDevice();
+    const auto &msc = GetMSCCapabilities();
     switch (Feature) {
     case D3D12_FEATURE_ARCHITECTURE: {
       if (DataSize != sizeof(D3D12_FEATURE_DATA_ARCHITECTURE))
@@ -688,8 +697,6 @@ public:
         out->HighestShaderModel = D3D_SHADER_MODEL_5_1;
         return S_OK;
       case static_cast<UINT>(D3D_SHADER_MODEL_6_0):
-        out->HighestShaderModel = D3D_SHADER_MODEL_6_0;
-        return S_OK;
       case kD3DShaderModel6_1:
       case kD3DShaderModel6_2:
       case kD3DShaderModel6_3:
@@ -699,7 +706,9 @@ public:
       case kD3DShaderModel6_7:
       case kD3DShaderModel6_8:
       case kD3DShaderModel6_9:
-        out->HighestShaderModel = D3D_SHADER_MODEL_6_0;
+        out->HighestShaderModel = requested <= static_cast<UINT>(msc.maximum_shader_model)
+                                      ? static_cast<D3D_SHADER_MODEL>(requested)
+                                      : msc.maximum_shader_model;
         return S_OK;
       default:
         return E_INVALIDARG;
@@ -717,10 +726,9 @@ public:
 #endif
       out->MinPrecisionSupport = D3D12_SHADER_MIN_PRECISION_SUPPORT_16_BIT;
       out->TiledResourcesTier = D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED;
-      out->ResourceBindingTier = metal.supportsFamily(WMTGPUFamilyApple6)
-                                     ? D3D12_RESOURCE_BINDING_TIER_2
-                                     : D3D12_RESOURCE_BINDING_TIER_1;
-      out->PSSpecifiedStencilRefSupported = TRUE;
+      out->ResourceBindingTier = msc.argument_buffers_tier2 ? D3D12_RESOURCE_BINDING_TIER_2
+                                                            : D3D12_RESOURCE_BINDING_TIER_1;
+      out->PSSpecifiedStencilRefSupported = msc.ps_specified_stencil_ref ? TRUE : FALSE;
       out->TypedUAVLoadAdditionalFormats = FALSE;
       out->ROVsSupported = FALSE;
       out->ConservativeRasterizationTier = D3D12_CONSERVATIVE_RASTERIZATION_TIER_NOT_SUPPORTED;
@@ -737,6 +745,13 @@ public:
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS1 *>(pFeatureData);
       *out = {};
+      out->WaveOps = msc.wave_ops_validated ? TRUE : FALSE;
+      out->Int64ShaderOps = msc.int64_validated ? TRUE : FALSE;
+      if (msc.wave_ops_validated) {
+        out->WaveLaneCountMin = 32;
+        out->WaveLaneCountMax = 32;
+        out->TotalLaneCount = 1;
+      }
       return S_OK;
     }
     case D3D12_FEATURE_D3D12_OPTIONS2: {
@@ -770,6 +785,7 @@ public:
       *out = {};
       out->CopyQueueTimestampQueriesSupported = TRUE;
       out->CastingFullyTypedFormatSupported = TRUE;
+      out->BarycentricsSupported = msc.barycentrics_validated ? TRUE : FALSE;
       return S_OK;
     }
     case D3D12_FEATURE_EXISTING_HEAPS: {
@@ -784,6 +800,7 @@ public:
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS4 *>(pFeatureData);
       *out = {};
+      out->Native16BitShaderOpsSupported = msc.native16_validated ? TRUE : FALSE;
       return S_OK;
     }
     case D3D12_FEATURE_SERIALIZATION: {
@@ -807,6 +824,8 @@ public:
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS5 *>(pFeatureData);
       *out = {};
+      out->RaytracingTier = msc.raytracing_validated ? D3D12_RAYTRACING_TIER_1_0
+                                                      : D3D12_RAYTRACING_TIER_NOT_SUPPORTED;
       return S_OK;
     }
     case D3D12_FEATURE_PROTECTED_RESOURCE_SESSION_SUPPORT: {

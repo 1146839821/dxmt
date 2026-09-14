@@ -12,6 +12,8 @@
 
 namespace dxmt {
 
+struct DXMTMSCCapabilities;
+
 enum class D3D12ShaderBackend {
   Airconv,
   MetalShaderConverter,
@@ -33,6 +35,7 @@ DetectD3D12ShaderBackend(const D3D12_SHADER_BYTECODE &shader);
 struct D3D12ShaderClassification {
   D3D12ShaderBackend backend = D3D12ShaderBackend::Unsupported;
   HRESULT validation_hr = E_INVALIDARG;
+  bool uses_unsupported_stencil_ref = false;
   const void *embedded_root_signature = nullptr;
   size_t embedded_root_signature_size = 0;
 };
@@ -113,26 +116,29 @@ HRESULT
 ConvertD3D12Shader(
     const D3D12ShaderClassification &classification, const D3D12_SHADER_BYTECODE &shader, uint32_t stage,
     D3D12ConvertedShader &converted, const void *root_signature = nullptr, size_t root_signature_size = 0,
-    const dxmt_msc_input_layout *input_layout = nullptr, uint32_t compile_flags = 0
+    const dxmt_msc_input_layout *input_layout = nullptr, uint32_t compile_flags = 0,
+    const DXMTMSCCapabilities *msc_capabilities = nullptr
 );
 
 HRESULT
 ConvertD3D12Shader(
     const D3D12_SHADER_BYTECODE &shader, uint32_t stage, D3D12ConvertedShader &converted,
     const void *root_signature = nullptr, size_t root_signature_size = 0,
-    const dxmt_msc_input_layout *input_layout = nullptr, uint32_t compile_flags = 0
+    const dxmt_msc_input_layout *input_layout = nullptr, uint32_t compile_flags = 0,
+    const DXMTMSCCapabilities *msc_capabilities = nullptr
 );
 
 HRESULT
 ConvertD3D12ComputeShader(
     const D3D12ShaderClassification &classification, const D3D12_SHADER_BYTECODE &shader,
-    D3D12ConvertedShader &converted, const void *root_signature = nullptr, size_t root_signature_size = 0
+    D3D12ConvertedShader &converted, const void *root_signature = nullptr, size_t root_signature_size = 0,
+    const DXMTMSCCapabilities *msc_capabilities = nullptr
 );
 
 HRESULT
 ConvertD3D12ComputeShader(
     const D3D12_SHADER_BYTECODE &shader, D3D12ConvertedShader &converted, const void *root_signature = nullptr,
-    size_t root_signature_size = 0
+    size_t root_signature_size = 0, const DXMTMSCCapabilities *msc_capabilities = nullptr
 );
 
 } // namespace dxmt

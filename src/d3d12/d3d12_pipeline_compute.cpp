@@ -66,6 +66,8 @@ public:
     auto shader_backend = classification.backend;
 
     if (shader_backend == D3D12ShaderBackend::MetalShaderConverter) {
+      if (!device_->GetMSCCapabilities().core_converter)
+        return E_FAIL;
       D3D12ConvertedShader converted;
       const void *root_signature = nullptr;
       size_t root_signature_size = 0;
@@ -86,7 +88,8 @@ public:
       }
 
       HRESULT hr = ConvertD3D12ComputeShader(
-          classification, pDesc->CS, converted, root_signature, root_signature_size
+          classification, pDesc->CS, converted, root_signature, root_signature_size,
+          &device_->GetMSCCapabilities()
       );
       if (FAILED(hr))
         return hr;

@@ -1,14 +1,17 @@
 #include "d3d12_shader_converter.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <limits>
 #include <mutex>
 #include <shared_mutex>
+#include <strings.h>
 #include <unordered_map>
 
 #include "DXBCParser/BlobContainer.h"
 #include "DXBCParser/DXBCUtils.h"
+#include "d3d12_msc_capabilities.hpp"
 #include "dxmt_shader_cache.hpp"
 #include "log/log.hpp"
 #include "metalirconverter_thunks.h"
@@ -31,7 +34,7 @@ constexpr uint32_t kDXILFourCC = MakeFourCC('D', 'X', 'I', 'L');
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
 // converter defaults change.
-constexpr uint32_t kMSCConversionCacheVersion = 5;
+constexpr uint32_t kMSCConversionCacheVersion = 6;
 constexpr uint32_t kMSCConverterAPIVersion = 0x040001;
 constexpr uint32_t kMSCMetalTargetVersion = 0;
 constexpr uint32_t kMSCCompileFlags = 0;
@@ -65,7 +68,8 @@ GetMSCConversionCache() {
 Sha1Digest
 MakeMSCConversionCacheKey(
     const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const void *root_signature, size_t root_signature_size,
-    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags
+    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
+    const DXMTMSCCapabilities *msc_capabilities
 ) {
   Sha1HashState hash;
   hash.update(kMSCConversionCacheNamespace, sizeof(kMSCConversionCacheNamespace) - 1);
@@ -75,6 +79,24 @@ MakeMSCConversionCacheKey(
   hash.update(kMSCMetalTargetVersion);
   hash.update(kMSCCompileFlags);
   hash.update(kMSCBindingLayoutVersion);
+  const uint32_t has_capability_snapshot = msc_capabilities ? 1u : 0u;
+  hash.update(has_capability_snapshot);
+  if (msc_capabilities) {
+    /* The same DXIL can produce a different metallib when the runtime ABI,
+     * optional symbol set, OS, or Metal GPU target changes. Keep those
+     * dimensions in the persistent key even when the current compiler path
+     * does not yet promote every reported capability. */
+    hash.update(msc_capabilities->ir_version_major);
+    hash.update(msc_capabilities->ir_version_minor);
+    hash.update(msc_capabilities->ir_version_patch);
+    hash.update(msc_capabilities->runtime_symbols);
+    hash.update(msc_capabilities->os_major);
+    hash.update(msc_capabilities->os_minor);
+    hash.update(msc_capabilities->os_patch);
+    hash.update(msc_capabilities->highest_apple_gpu_family);
+    hash.update(static_cast<uint8_t>(msc_capabilities->core_converter));
+    hash.update(static_cast<uint8_t>(msc_capabilities->argument_buffers_tier2));
+  }
   hash.update(stage);
   compile_flags |= input_layout ? DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0;
   hash.update(compile_flags);
@@ -90,6 +112,56 @@ MakeMSCConversionCacheKey(
     root_signature_hash = Sha1HashState::compute(root_signature, root_signature_size);
   hash.update(root_signature_hash);
   return hash.final();
+}
+
+bool
+HasOutputSemantic(const D3D12_SHADER_BYTECODE &shader, const char *semantic_name) {
+  if (!shader.pShaderBytecode || !shader.BytecodeLength || !semantic_name)
+    return false;
+
+  microsoft::CDXBCParser container;
+  if (FAILED(container.ReadDXBC(shader.pShaderBytecode, static_cast<uint32_t>(shader.BytecodeLength)))) {
+    return false;
+  }
+
+  microsoft::CSignatureParser signature_parser;
+  if (SUCCEEDED(microsoft::DXBCGetOutputSignature(shader.pShaderBytecode, &signature_parser))) {
+    const microsoft::D3D11_SIGNATURE_PARAMETER *parameters = nullptr;
+    const UINT parameter_count = signature_parser.GetParameters(&parameters);
+    for (UINT i = 0; i < parameter_count; i++) {
+      if (parameters[i].SemanticName && strcasecmp(parameters[i].SemanticName, semantic_name) == 0)
+        return true;
+    }
+  }
+
+  const size_t semantic_length = std::strlen(semantic_name);
+  for (uint32_t i = 0; i < container.GetBlobCount(); i++) {
+    const auto fourcc = container.GetBlobFourCC(i);
+    if (fourcc != microsoft::DXBC_OutputSignature &&
+        fourcc != microsoft::DXBC_OutputSignature11_1 &&
+        fourcc != microsoft::DXBC_OutputSignature5)
+      continue;
+
+    const auto *data = static_cast<const uint8_t *>(container.GetBlob(i));
+    const size_t data_size = container.GetBlobSize(i);
+    if (!data || semantic_length == 0 || data_size <= semantic_length)
+      continue;
+    for (size_t offset = 0; offset + semantic_length < data_size; offset++) {
+      if (data[offset + semantic_length] != '\0')
+        continue;
+      bool matches = true;
+      for (size_t j = 0; j < semantic_length; j++) {
+        if (std::tolower(static_cast<unsigned char>(data[offset + j])) !=
+            std::tolower(static_cast<unsigned char>(semantic_name[j]))) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches)
+        return true;
+    }
+  }
+  return false;
 }
 
 bool
@@ -290,6 +362,9 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
       break;
     }
   }
+  if (classification.backend == D3D12ShaderBackend::MetalShaderConverter) {
+    classification.uses_unsupported_stencil_ref = HasOutputSemantic(shader, "SV_StencilRef");
+  }
   return classification;
 }
 
@@ -464,21 +539,26 @@ HRESULT
 ConvertD3D12Shader(
     const D3D12ShaderClassification &classification, const D3D12_SHADER_BYTECODE &shader, uint32_t stage,
     D3D12ConvertedShader &converted, const void *root_signature, size_t root_signature_size,
-    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags
+    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
+    const DXMTMSCCapabilities *msc_capabilities
 ) {
   if (FAILED(classification.validation_hr))
     return classification.validation_hr;
   if (classification.backend != D3D12ShaderBackend::MetalShaderConverter)
     return E_INVALIDARG;
+  if (stage == DXMT_MSC_STAGE_FRAGMENT && classification.uses_unsupported_stencil_ref) {
+    ERR("DXIL pixel shader uses unsupported SV_StencilRef output");
+    return E_NOTIMPL;
+  }
 
-  if (DXMTMSCIsAvailable() != 1) {
+  if (msc_capabilities ? !msc_capabilities->core_converter : DXMTMSCIsAvailable() != 1) {
     ERR("DXIL detected but Metal Shader Converter is unavailable");
     return E_FAIL;
   }
 
   compile_flags |= input_layout ? DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0;
   auto cache_key = MakeMSCConversionCacheKey(
-      shader, stage, root_signature, root_signature_size, input_layout, compile_flags
+      shader, stage, root_signature, root_signature_size, input_layout, compile_flags, msc_capabilities
   );
   auto &cache = GetMSCConversionCache();
   {
@@ -549,31 +629,37 @@ ConvertD3D12Shader(
 HRESULT
 ConvertD3D12Shader(
     const D3D12_SHADER_BYTECODE &shader, uint32_t stage, D3D12ConvertedShader &converted, const void *root_signature,
-    size_t root_signature_size, const dxmt_msc_input_layout *input_layout, uint32_t compile_flags
+    size_t root_signature_size, const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
+    const DXMTMSCCapabilities *msc_capabilities
 ) {
   auto classification = ClassifyD3D12Shader(shader);
   return ConvertD3D12Shader(
-      classification, shader, stage, converted, root_signature, root_signature_size, input_layout, compile_flags
+      classification, shader, stage, converted, root_signature, root_signature_size, input_layout, compile_flags,
+      msc_capabilities
   );
 }
 
 HRESULT
 ConvertD3D12ComputeShader(
     const D3D12ShaderClassification &classification, const D3D12_SHADER_BYTECODE &shader,
-    D3D12ConvertedShader &converted, const void *root_signature, size_t root_signature_size
+    D3D12ConvertedShader &converted, const void *root_signature, size_t root_signature_size,
+    const DXMTMSCCapabilities *msc_capabilities
 ) {
   return ConvertD3D12Shader(
-      classification, shader, DXMT_MSC_STAGE_COMPUTE, converted, root_signature, root_signature_size
+      classification, shader, DXMT_MSC_STAGE_COMPUTE, converted, root_signature, root_signature_size, nullptr, 0,
+      msc_capabilities
   );
 }
 
 HRESULT
 ConvertD3D12ComputeShader(
     const D3D12_SHADER_BYTECODE &shader, D3D12ConvertedShader &converted, const void *root_signature,
-    size_t root_signature_size
+    size_t root_signature_size, const DXMTMSCCapabilities *msc_capabilities
 ) {
   auto classification = ClassifyD3D12Shader(shader);
-  return ConvertD3D12ComputeShader(classification, shader, converted, root_signature, root_signature_size);
+  return ConvertD3D12ComputeShader(
+      classification, shader, converted, root_signature, root_signature_size, msc_capabilities
+  );
 }
 
 } // namespace dxmt

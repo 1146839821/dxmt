@@ -11,6 +11,7 @@ extern "C" {
 #endif
 
 int dxmt_msc_is_available(void);
+int dxmt_msc_get_capabilities(struct dxmt_msc_capabilities *capabilities);
 int dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params);
 int dxmt_msc_get_root_layout(struct dxmt_msc_get_root_layout_params *params);
 

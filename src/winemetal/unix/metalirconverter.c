@@ -14,7 +14,17 @@ typedef struct dxmt_msc_api {
   IRCompiler *(*IRCompilerCreate)(void);
   void (*IRCompilerDestroy)(IRCompiler *);
   void (*IRCompilerSetCompatibilityFlags)(IRCompiler *, IRCompatibilityFlags);
+  void (*IRCompilerSetValidationFlags)(IRCompiler *, IRCompilerValidationFlags);
+  void (*IRCompilerSetMinimumGPUFamily)(IRCompiler *, IRGPUFamily);
+  void (*IRCompilerSetMinimumDeploymentTarget)(IRCompiler *, IROperatingSystem, const char *);
+  void (*IRCompilerIgnoreDebugInformation)(IRCompiler *, bool);
+  void (*IRCompilerSetFunctionConstantResourceSpace)(IRCompiler *, uint32_t);
+  void (*IRCompilerSetFramebufferFetchResourceSpace)(IRCompiler *, uint32_t);
+  void (*IRCompilerSetInputTopology)(IRCompiler *, IRInputTopology);
+  void (*IRCompilerSetEntryPointName)(IRCompiler *, const char *);
   void (*IRCompilerSetGlobalRootSignature)(IRCompiler *, const IRRootSignature *);
+  void (*IRCompilerSetLocalRootSignature)(IRCompiler *, const IRRootSignature *);
+  void (*IRCompilerSetHitgroupType)(IRCompiler *, IRHitGroupType);
   void (*IRCompilerEnableGeometryAndTessellationEmulation)(IRCompiler *, bool);
   void (*IRCompilerSetStageInGenerationMode)(IRCompiler *, IRStageInCodeGenerationMode);
   IRObject *(*IRObjectCreateFromDXIL)(const uint8_t *, size_t, IRBytecodeOwnership);
@@ -28,6 +38,10 @@ typedef struct dxmt_msc_api {
   size_t (*IRRootSignatureGetResourceCount)(const IRRootSignature *);
   void (*IRRootSignatureGetResourceLocations)(const IRRootSignature *, IRResourceLocation *);
   IRObject *(*IRCompilerAllocCompileAndLink)(IRCompiler *, const char *, const IRObject *, IRError **);
+  IRObject *(*IRCompilerAllocCombineCompileAndLink)(
+      IRCompiler *, const char *, const IRObject *, const char *, const IRObject *, IRError **
+  );
+  uint64_t (*IRObjectGatherRaytracingIntrinsics)(IRObject *, const char *);
   bool (*IRObjectGetMetalLibBinary)(const IRObject *, IRShaderStage, IRMetalLibBinary *);
   bool (*IRObjectGetReflection)(const IRObject *, IRShaderStage, IRShaderReflection *);
   IRMetalLibBinary *(*IRMetalLibBinaryCreate)(void);
@@ -41,15 +55,44 @@ typedef struct dxmt_msc_api {
   bool (*IRShaderReflectionReleaseComputeInfo)(IRVersionedCSInfo *);
   bool (*IRShaderReflectionCopyVertexInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedVSInfo *);
   bool (*IRShaderReflectionReleaseVertexInfo)(IRVersionedVSInfo *);
+  bool (*IRShaderReflectionCopyFragmentInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedFSInfo *);
+  bool (*IRShaderReflectionReleaseFragmentInfo)(IRVersionedFSInfo *);
   bool (*IRShaderReflectionCopyGeometryInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedGSInfo *);
   bool (*IRShaderReflectionReleaseGeometryInfo)(IRVersionedGSInfo *);
   bool (*IRShaderReflectionCopyHullInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedHSInfo *);
   bool (*IRShaderReflectionReleaseHullInfo)(IRVersionedHSInfo *);
   bool (*IRShaderReflectionCopyDomainInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedDSInfo *);
   bool (*IRShaderReflectionReleaseDomainInfo)(IRVersionedDSInfo *);
+  bool (*IRShaderReflectionCopyMeshInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedMSInfo *);
+  bool (*IRShaderReflectionReleaseMeshInfo)(IRVersionedMSInfo *);
+  bool (*IRShaderReflectionCopyAmplificationInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedASInfo *);
+  bool (*IRShaderReflectionReleaseAmplificationInfo)(IRVersionedASInfo *);
+  bool (*IRShaderReflectionCopyRaytracingInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedRTInfo *);
+  bool (*IRShaderReflectionReleaseRaytracingInfo)(IRVersionedRTInfo *);
   bool (*IRMetalLibSynthesizeStageInFunction)(
       const IRCompiler *, const IRShaderReflection *, const IRVersionedInputLayoutDescriptor *, IRMetalLibBinary *
   );
+  IRRayTracingPipelineConfiguration *(*IRRayTracingPipelineConfigurationCreate)(void);
+  void (*IRRayTracingPipelineConfigurationDestroy)(IRRayTracingPipelineConfiguration *);
+  void (*IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes)(IRRayTracingPipelineConfiguration *, uint32_t);
+  void (*IRRayTracingPipelineConfigurationSetPipelineFlags)(
+      IRRayTracingPipelineConfiguration *, IRRaytracingPipelineFlags
+  );
+  void (*IRRayTracingPipelineConfigurationSetIntrinsicMasks)(
+      IRRayTracingPipelineConfiguration *, uint64_t, uint64_t, uint64_t, uint64_t
+  );
+  void (*IRRayTracingPipelineConfigurationSetMaxRecursiveDepth)(IRRayTracingPipelineConfiguration *, int);
+  void (*IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode)(
+      IRRayTracingPipelineConfiguration *, IRRayGenerationCompilationMode
+  );
+  void (*IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode)(
+      IRRayTracingPipelineConfiguration *, IRIntersectionFunctionCompilationMode
+  );
+  void (*IRRayTracingPipelineConfigurationEnableIntersectionFunctionGroups)(IRRayTracingPipelineConfiguration *, bool);
+  void (*IRRayTracingPipelineConfigurationEnableDirectStateAccess)(IRRayTracingPipelineConfiguration *, bool);
+  void (*IRCompilerSetRayTracingPipelineConfiguration)(IRCompiler *, const IRRayTracingPipelineConfiguration *);
+  bool (*IRMetalLibSynthesizeIndirectIntersectionFunction)(const IRCompiler *, IRMetalLibBinary *);
+  bool (*IRMetalLibSynthesizeIndirectRayDispatchFunction)(const IRCompiler *, IRMetalLibBinary *);
   uint32_t (*IRErrorGetCode)(const IRError *);
   void (*IRErrorDestroy)(IRError *);
 } dxmt_msc_api;
@@ -57,6 +100,7 @@ typedef struct dxmt_msc_api {
 static dxmt_msc_api g_msc_api;
 static void *g_msc_library;
 static int g_msc_available;
+static uint64_t g_msc_optional_symbols;
 static pthread_once_t g_msc_once = PTHREAD_ONCE_INIT;
 
 static void
@@ -180,6 +224,20 @@ dxmt_msc_load_symbols(void) {
     if (!dxmt_msc_load_symbol((void **)&g_msc_api.name, #name))                                                         \
       return false;                                                                                                     \
   } while (0)
+#define DXMT_MSC_LOAD_OPTIONAL(name, capability)                                                                        \
+  do {                                                                                                                   \
+    if (dxmt_msc_load_optional_symbol((void **)&g_msc_api.name, #name))                                                \
+      g_msc_optional_symbols |= capability;                                                                              \
+  } while (0)
+
+  bool fragment_reflection = true;
+  bool mesh_reflection = true;
+  bool amplification_reflection = true;
+  bool raytracing_reflection = true;
+  bool raytracing_configuration = true;
+  bool vertex_reflection = true;
+  bool geometry_reflection = true;
+  bool tessellation_reflection = true;
 
   DXMT_MSC_LOAD(IRCompilerCreate);
   DXMT_MSC_LOAD(IRCompilerDestroy);
@@ -207,45 +265,155 @@ dxmt_msc_load_symbols(void) {
   DXMT_MSC_LOAD(IRErrorGetCode);
   DXMT_MSC_LOAD(IRErrorDestroy);
 
-  dxmt_msc_load_optional_symbol(
-      (void **)&g_msc_api.IRCompilerEnableGeometryAndTessellationEmulation,
-      "IRCompilerEnableGeometryAndTessellationEmulation"
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetCompatibilityFlags, DXMT_MSC_RUNTIME_SYMBOL_COMPATIBILITY_FLAGS);
+  DXMT_MSC_LOAD_OPTIONAL(
+      IRCompilerEnableGeometryAndTessellationEmulation, DXMT_MSC_RUNTIME_SYMBOL_GEOMETRY_TESSELLATION
   );
-  dxmt_msc_load_optional_symbol(
-      (void **)&g_msc_api.IRCompilerSetCompatibilityFlags, "IRCompilerSetCompatibilityFlags"
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetStageInGenerationMode, DXMT_MSC_RUNTIME_SYMBOL_STAGE_IN_GENERATION);
+  DXMT_MSC_LOAD_OPTIONAL(IRMetalLibSynthesizeStageInFunction, DXMT_MSC_RUNTIME_SYMBOL_STAGE_IN_SYNTHESIS);
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetValidationFlags, DXMT_MSC_RUNTIME_SYMBOL_VALIDATION_FLAGS);
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetMinimumGPUFamily, DXMT_MSC_RUNTIME_SYMBOL_MINIMUM_GPU_FAMILY);
+  DXMT_MSC_LOAD_OPTIONAL(
+      IRCompilerSetMinimumDeploymentTarget, DXMT_MSC_RUNTIME_SYMBOL_MINIMUM_DEPLOYMENT_TARGET
   );
-  dxmt_msc_load_optional_symbol(
-      (void **)&g_msc_api.IRCompilerSetStageInGenerationMode, "IRCompilerSetStageInGenerationMode"
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerIgnoreDebugInformation, DXMT_MSC_RUNTIME_SYMBOL_IGNORE_DEBUG_INFORMATION);
+  DXMT_MSC_LOAD_OPTIONAL(
+      IRCompilerSetFunctionConstantResourceSpace, DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_RESOURCE_SPACE
   );
-  dxmt_msc_load_optional_symbol(
-      (void **)&g_msc_api.IRMetalLibSynthesizeStageInFunction, "IRMetalLibSynthesizeStageInFunction"
+  DXMT_MSC_LOAD_OPTIONAL(
+      IRCompilerSetFramebufferFetchResourceSpace, DXMT_MSC_RUNTIME_SYMBOL_FRAMEBUFFER_FETCH_RESOURCE_SPACE
   );
-  dxmt_msc_load_optional_symbol(
-      (void **)&g_msc_api.IRShaderReflectionCopyVertexInfo, "IRShaderReflectionCopyVertexInfo"
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetInputTopology, DXMT_MSC_RUNTIME_SYMBOL_INPUT_TOPOLOGY);
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetEntryPointName, DXMT_MSC_RUNTIME_SYMBOL_ENTRY_POINT_NAME);
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetLocalRootSignature, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_LOCAL_ROOT);
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetHitgroupType, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_HITGROUP);
+  DXMT_MSC_LOAD_OPTIONAL(IRObjectGatherRaytracingIntrinsics, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_INTRINSICS);
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerAllocCombineCompileAndLink, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_COMBINE);
+  DXMT_MSC_LOAD_OPTIONAL(
+      IRMetalLibSynthesizeIndirectIntersectionFunction, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_INDIRECT_INTERSECTION
   );
-  dxmt_msc_load_optional_symbol(
-      (void **)&g_msc_api.IRShaderReflectionReleaseVertexInfo, "IRShaderReflectionReleaseVertexInfo"
-  );
-  dxmt_msc_load_optional_symbol(
-      (void **)&g_msc_api.IRShaderReflectionCopyGeometryInfo, "IRShaderReflectionCopyGeometryInfo"
-  );
-  dxmt_msc_load_optional_symbol(
-      (void **)&g_msc_api.IRShaderReflectionReleaseGeometryInfo, "IRShaderReflectionReleaseGeometryInfo"
-  );
-  dxmt_msc_load_optional_symbol(
-      (void **)&g_msc_api.IRShaderReflectionCopyHullInfo, "IRShaderReflectionCopyHullInfo"
-  );
-  dxmt_msc_load_optional_symbol(
-      (void **)&g_msc_api.IRShaderReflectionReleaseHullInfo, "IRShaderReflectionReleaseHullInfo"
-  );
-  dxmt_msc_load_optional_symbol(
-      (void **)&g_msc_api.IRShaderReflectionCopyDomainInfo, "IRShaderReflectionCopyDomainInfo"
-  );
-  dxmt_msc_load_optional_symbol(
-      (void **)&g_msc_api.IRShaderReflectionReleaseDomainInfo, "IRShaderReflectionReleaseDomainInfo"
+  DXMT_MSC_LOAD_OPTIONAL(
+      IRMetalLibSynthesizeIndirectRayDispatchFunction, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_INDIRECT_DISPATCH
   );
 
+  fragment_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyFragmentInfo, "IRShaderReflectionCopyFragmentInfo"
+  );
+  fragment_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseFragmentInfo, "IRShaderReflectionReleaseFragmentInfo"
+  );
+  if (fragment_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_FRAGMENT_REFLECTION;
+
+  mesh_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyMeshInfo, "IRShaderReflectionCopyMeshInfo"
+  );
+  mesh_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseMeshInfo, "IRShaderReflectionReleaseMeshInfo"
+  );
+  if (mesh_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_MESH_REFLECTION;
+
+  amplification_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyAmplificationInfo, "IRShaderReflectionCopyAmplificationInfo"
+  );
+  amplification_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseAmplificationInfo, "IRShaderReflectionReleaseAmplificationInfo"
+  );
+  if (amplification_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_AMPLIFICATION_REFLECTION;
+
+  raytracing_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyRaytracingInfo, "IRShaderReflectionCopyRaytracingInfo"
+  );
+  raytracing_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseRaytracingInfo, "IRShaderReflectionReleaseRaytracingInfo"
+  );
+  if (raytracing_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_REFLECTION;
+
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationCreate,
+      "IRRayTracingPipelineConfigurationCreate"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationDestroy,
+      "IRRayTracingPipelineConfigurationDestroy"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes,
+      "IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationSetPipelineFlags,
+      "IRRayTracingPipelineConfigurationSetPipelineFlags"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationSetIntrinsicMasks,
+      "IRRayTracingPipelineConfigurationSetIntrinsicMasks"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationSetMaxRecursiveDepth,
+      "IRRayTracingPipelineConfigurationSetMaxRecursiveDepth"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode,
+      "IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode,
+      "IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationEnableIntersectionFunctionGroups,
+      "IRRayTracingPipelineConfigurationEnableIntersectionFunctionGroups"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationEnableDirectStateAccess,
+      "IRRayTracingPipelineConfigurationEnableDirectStateAccess"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRCompilerSetRayTracingPipelineConfiguration,
+      "IRCompilerSetRayTracingPipelineConfiguration"
+  );
+  if (raytracing_configuration)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_CONFIGURATION;
+
+  vertex_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyVertexInfo, "IRShaderReflectionCopyVertexInfo"
+  );
+  vertex_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseVertexInfo, "IRShaderReflectionReleaseVertexInfo"
+  );
+  if (vertex_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_VERTEX_REFLECTION;
+
+  geometry_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyGeometryInfo, "IRShaderReflectionCopyGeometryInfo"
+  );
+  geometry_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseGeometryInfo, "IRShaderReflectionReleaseGeometryInfo"
+  );
+  if (geometry_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_GEOMETRY_REFLECTION;
+
+  tessellation_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyHullInfo, "IRShaderReflectionCopyHullInfo"
+  );
+  tessellation_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseHullInfo, "IRShaderReflectionReleaseHullInfo"
+  );
+  tessellation_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyDomainInfo, "IRShaderReflectionCopyDomainInfo"
+  );
+  tessellation_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseDomainInfo, "IRShaderReflectionReleaseDomainInfo"
+  );
+  if (tessellation_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_TESSELLATION_REFLECTION;
+
 #undef DXMT_MSC_LOAD
+#undef DXMT_MSC_LOAD_OPTIONAL
   return true;
 }
 
@@ -301,6 +469,24 @@ int
 dxmt_msc_is_available(void) {
   pthread_once(&g_msc_once, dxmt_msc_initialize);
   return g_msc_available;
+}
+
+int
+dxmt_msc_get_capabilities(struct dxmt_msc_capabilities *capabilities) {
+  if (!capabilities)
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+
+  memset(capabilities, 0, sizeof(*capabilities));
+  pthread_once(&g_msc_once, dxmt_msc_initialize);
+  capabilities->core_converter = g_msc_available != 0;
+  if (capabilities->core_converter) {
+    capabilities->ir_version_major = IR_VERSION_MAJOR;
+    capabilities->ir_version_minor = IR_VERSION_MINOR;
+    capabilities->ir_version_patch = IR_VERSION_PATCH;
+  }
+  capabilities->optional_symbols = g_msc_available ? g_msc_optional_symbols : 0;
+  capabilities->ret = g_msc_available ? DXMT_MSC_SUCCESS : DXMT_MSC_ERROR_UNAVAILABLE;
+  return capabilities->ret;
 }
 
 static IRShaderStage
