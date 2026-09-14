@@ -55,8 +55,14 @@ main() {
             << ((runtime.optional_symbols & DXMT_MSC_RUNTIME_SYMBOL_MINIMUM_GPU_FAMILY) != 0) << "\n";
   std::cout << "msc.minimum_os_target="
             << ((runtime.optional_symbols & DXMT_MSC_RUNTIME_SYMBOL_MINIMUM_DEPLOYMENT_TARGET) != 0) << "\n";
+  std::cout << "msc.validation_flags="
+            << ((runtime.optional_symbols & DXMT_MSC_RUNTIME_SYMBOL_VALIDATION_FLAGS) != 0) << "\n";
+  std::cout << "msc.debug_info="
+            << ((runtime.optional_symbols & DXMT_MSC_RUNTIME_SYMBOL_IGNORE_DEBUG_INFORMATION) != 0) << "\n";
   std::cout << "msc.function_constants="
             << ((runtime.optional_symbols & DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_RESOURCE_SPACE) != 0) << "\n";
+  std::cout << "msc.function_constant_reflection="
+            << ((runtime.optional_symbols & DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_REFLECTION) != 0) << "\n";
   std::cout << "msc.framebuffer_fetch="
             << ((runtime.optional_symbols & DXMT_MSC_RUNTIME_SYMBOL_FRAMEBUFFER_FETCH_RESOURCE_SPACE) != 0) << "\n";
   std::cout << "msc.mesh_reflection="
