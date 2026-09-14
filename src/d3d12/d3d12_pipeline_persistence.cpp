@@ -562,11 +562,18 @@ IsValidStreamScalarState(const D3D12PipelineStreamData &data) {
     return false;
   if (data.type == D3D12PipelineType::Compute)
     return !data.compute_shader.empty();
-  if (data.type != D3D12PipelineType::Graphics || data.vertex_shader.empty() || data.sample_desc.Count == 0 ||
-      data.sample_desc.Quality ||
-      data.num_render_targets > data.render_target_formats.size() || !IsValidBlendDesc(data.blend_state, data.num_render_targets) ||
-      !IsValidRasterizerDesc(data.rasterizer_state) || !IsValidDepthStencilDesc(data.depth_stencil_state) ||
-      !IsValidStripCutValue(data.ib_strip_cut_value) || !IsValidPrimitiveTopologyType(data.primitive_topology_type))
+  const bool has_mesh_pipeline = !data.mesh_shader.empty() || !data.amplification_shader.empty();
+  if (data.type != D3D12PipelineType::Graphics ||
+      (has_mesh_pipeline ? data.mesh_shader.empty() : data.vertex_shader.empty()) || data.sample_desc.Count == 0 ||
+      data.sample_desc.Quality || data.num_render_targets > data.render_target_formats.size() ||
+      !IsValidBlendDesc(data.blend_state, data.num_render_targets) || !IsValidRasterizerDesc(data.rasterizer_state) ||
+      !IsValidDepthStencilDesc(data.depth_stencil_state) || !IsValidStripCutValue(data.ib_strip_cut_value) ||
+      (!has_mesh_pipeline && !IsValidPrimitiveTopologyType(data.primitive_topology_type)))
+    return false;
+  if (has_mesh_pipeline &&
+      (!data.vertex_shader.empty() || !data.hull_shader.empty() || !data.domain_shader.empty() ||
+       !data.geometry_shader.empty() || !data.input_layout.empty() || !data.stream_output.empty() ||
+       data.stream_output_num_strides || data.primitive_topology_type != D3D12_PRIMITIVE_TOPOLOGY_TYPE_UNDEFINED))
     return false;
   for (const auto &element : data.input_layout)
     if (!IsValidInputElement(element))
@@ -578,6 +585,22 @@ HRESULT
 ValidatePipelineStreamData(const D3D12PipelineStreamData &data) {
   if (!IsValidStreamScalarState(data))
     return E_INVALIDARG;
+  const bool has_mesh_pipeline = !data.mesh_shader.empty() || !data.amplification_shader.empty();
+  if (has_mesh_pipeline) {
+    if (data.type != D3D12PipelineType::Graphics || data.mesh_shader.empty() ||
+        data.stream_output.size() || data.stream_output_num_strides)
+      return E_INVALIDARG;
+    if (data.blend_state.IndependentBlendEnable && HasActiveLogicOp(data.blend_state, data.num_render_targets)) {
+      ERR("CreatePipelineState: mesh pipeline uses unsupported independent logic operation");
+      return E_NOTIMPL;
+    }
+    if (data.rasterizer_state.ForcedSampleCount ||
+        data.rasterizer_state.ConservativeRaster != D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF) {
+      ERR("CreatePipelineState: mesh pipeline uses unsupported rasterizer state");
+      return E_NOTIMPL;
+    }
+    return S_OK;
+  }
   if (data.type == D3D12PipelineType::Graphics && (data.domain_shader.empty() != data.hull_shader.empty()))
     return E_INVALIDARG;
   if (data.type == D3D12PipelineType::Graphics &&
@@ -588,8 +611,10 @@ ValidatePipelineStreamData(const D3D12PipelineStreamData &data) {
        (data.blend_state.IndependentBlendEnable && HasActiveLogicOp(data.blend_state, data.num_render_targets)) ||
 #endif
        data.rasterizer_state.ForcedSampleCount ||
-       data.rasterizer_state.ConservativeRaster != D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF))
+       data.rasterizer_state.ConservativeRaster != D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF)) {
+    ERR("CreatePipelineState: graphics pipeline uses unsupported fixed-function state");
     return E_NOTIMPL;
+  }
   return S_OK;
 }
 
@@ -1535,12 +1560,21 @@ ParseD3D12PipelineStateStream(const D3D12_PIPELINE_STATE_STREAM_DESC *desc, D3D1
           return E_INVALIDARG;
         break;
       }
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS:
+      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS: {
+        D3D12_SHADER_BYTECODE shader;
+        if (!SetStreamType(parsed.type, D3D12PipelineType::Graphics) ||
+            !ReadStreamPayload(stream, stream_size, offset, shader, next_offset) ||
+            !CopyStreamShader(shader, parsed.amplification_shader))
+          return E_INVALIDARG;
+        break;
+      }
       case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS: {
         D3D12_SHADER_BYTECODE shader;
-        if (!ReadStreamPayload(stream, stream_size, offset, shader, next_offset))
+        if (!SetStreamType(parsed.type, D3D12PipelineType::Graphics) ||
+            !ReadStreamPayload(stream, stream_size, offset, shader, next_offset) ||
+            !CopyStreamShader(shader, parsed.mesh_shader))
           return E_INVALIDARG;
-        return E_NOTIMPL;
+        break;
       }
       case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1: {
         D3D12_DEPTH_STENCIL_DESC1 depth_stencil;
@@ -1582,6 +1616,12 @@ CreateD3D12PipelineStateFromStream(
   if (FAILED(hr))
     return hr;
   if (parsed.type == D3D12PipelineType::Graphics) {
+    if (!parsed.mesh_shader.empty()) {
+      hr = CreateMeshPipelineState(device, parsed, riid, pipeline_state);
+      if (FAILED(hr))
+        ERR("CreatePipelineState: mesh pipeline initialization failed, HRESULT=", hr);
+      return hr;
+    }
     D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics;
     std::vector<D3D12_INPUT_ELEMENT_DESC> input_elements;
     std::vector<D3D12_SO_DECLARATION_ENTRY> stream_output_entries;

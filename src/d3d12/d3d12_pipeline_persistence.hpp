@@ -55,6 +55,8 @@ struct D3D12PipelineStreamData {
   Com<ID3D12RootSignature> root_signature;
   std::vector<uint8_t> compute_shader;
   std::vector<uint8_t> vertex_shader;
+  std::vector<uint8_t> amplification_shader;
+  std::vector<uint8_t> mesh_shader;
   std::vector<uint8_t> pixel_shader;
   std::vector<uint8_t> geometry_shader;
   std::vector<uint8_t> domain_shader;

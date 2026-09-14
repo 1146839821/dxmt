@@ -349,6 +349,104 @@ CopyRenderPipelineInfoToMesh(const WMTRenderPipelineInfo &source, WMTMeshRenderP
   destination.stencil_pixel_format = source.stencil_pixel_format;
 }
 
+static HRESULT
+InitializeDepthStencilStates(
+    MTLD3D12GraphicsPipelineState *state, WMT::Device metal, const D3D12_DEPTH_STENCIL_DESC &desc
+) {
+  if (!state)
+    return E_INVALIDARG;
+
+  WMTDepthStencilInfo info = {};
+  info.depth_compare_function = WMTCompareFunctionAlways;
+  info.depth_write_enabled = false;
+  info.front_stencil.enabled = false;
+  info.back_stencil.enabled = false;
+  if (desc.DepthEnable) {
+    info.depth_compare_function = kCompareFunctionMap[desc.DepthFunc];
+    info.depth_write_enabled = desc.DepthWriteMask == D3D12_DEPTH_WRITE_MASK_ALL;
+  }
+
+  if (desc.StencilEnable) {
+    info.front_stencil.enabled = true;
+    info.back_stencil.enabled = true;
+    info.front_stencil.depth_stencil_pass_op = kStencilOperationMap[desc.FrontFace.StencilPassOp];
+    info.front_stencil.stencil_fail_op = kStencilOperationMap[desc.FrontFace.StencilFailOp];
+    info.front_stencil.depth_fail_op = kStencilOperationMap[desc.FrontFace.StencilDepthFailOp];
+    info.front_stencil.stencil_compare_function = kCompareFunctionMap[desc.FrontFace.StencilFunc];
+    info.front_stencil.write_mask = desc.StencilWriteMask;
+    info.front_stencil.read_mask = desc.StencilReadMask;
+    info.back_stencil.depth_stencil_pass_op = kStencilOperationMap[desc.BackFace.StencilPassOp];
+    info.back_stencil.stencil_fail_op = kStencilOperationMap[desc.BackFace.StencilFailOp];
+    info.back_stencil.depth_fail_op = kStencilOperationMap[desc.BackFace.StencilDepthFailOp];
+    info.back_stencil.stencil_compare_function = kCompareFunctionMap[desc.BackFace.StencilFunc];
+    info.back_stencil.write_mask = desc.StencilWriteMask;
+    info.back_stencil.read_mask = desc.StencilReadMask;
+  }
+
+  state->dsso = metal.newDepthStencilState(info);
+  if (!state->dsso)
+    return E_FAIL;
+
+  auto stencil_disabled_info = info;
+  stencil_disabled_info.front_stencil.enabled = false;
+  stencil_disabled_info.back_stencil.enabled = false;
+  state->dsso_stencil_disabled = metal.newDepthStencilState(stencil_disabled_info);
+  if (!state->dsso_stencil_disabled)
+    return E_FAIL;
+
+  auto depth_disabled_info = info;
+  depth_disabled_info.depth_compare_function = WMTCompareFunctionAlways;
+  depth_disabled_info.depth_write_enabled = false;
+  state->dsso_depth_disabled = metal.newDepthStencilState(depth_disabled_info);
+  if (!state->dsso_depth_disabled)
+    return E_FAIL;
+
+  depth_disabled_info.front_stencil.enabled = false;
+  depth_disabled_info.back_stencil.enabled = false;
+  state->dsso_depth_stencil_disabled = metal.newDepthStencilState(depth_disabled_info);
+  if (!state->dsso_depth_stencil_disabled)
+    return E_FAIL;
+
+  auto depth_readonly_info = info;
+  depth_readonly_info.depth_write_enabled = false;
+  state->dsso_depth_readonly = metal.newDepthStencilState(depth_readonly_info);
+  if (!state->dsso_depth_readonly)
+    return E_FAIL;
+
+  auto stencil_readonly_info = info;
+  for (auto *stencil : {&stencil_readonly_info.front_stencil, &stencil_readonly_info.back_stencil}) {
+    stencil->depth_stencil_pass_op = WMTStencilOperationKeep;
+    stencil->stencil_fail_op = WMTStencilOperationKeep;
+    stencil->depth_fail_op = WMTStencilOperationKeep;
+  }
+  state->dsso_stencil_readonly = metal.newDepthStencilState(stencil_readonly_info);
+  if (!state->dsso_stencil_readonly)
+    return E_FAIL;
+
+  auto readonly_info = depth_readonly_info;
+  readonly_info.front_stencil = stencil_readonly_info.front_stencil;
+  readonly_info.back_stencil = stencil_readonly_info.back_stencil;
+  state->dsso_readonly = metal.newDepthStencilState(readonly_info);
+  if (!state->dsso_readonly)
+    return E_FAIL;
+
+  auto depth_readonly_stencil_disabled_info = depth_readonly_info;
+  depth_readonly_stencil_disabled_info.front_stencil.enabled = false;
+  depth_readonly_stencil_disabled_info.back_stencil.enabled = false;
+  state->dsso_depth_readonly_stencil_disabled = metal.newDepthStencilState(depth_readonly_stencil_disabled_info);
+  if (!state->dsso_depth_readonly_stencil_disabled)
+    return E_FAIL;
+
+  auto stencil_readonly_depth_disabled_info = stencil_readonly_info;
+  stencil_readonly_depth_disabled_info.depth_compare_function = WMTCompareFunctionAlways;
+  stencil_readonly_depth_disabled_info.depth_write_enabled = false;
+  state->dsso_stencil_readonly_depth_disabled = metal.newDepthStencilState(stencil_readonly_depth_disabled_info);
+  if (!state->dsso_stencil_readonly_depth_disabled)
+    return E_FAIL;
+
+  return S_OK;
+}
+
 class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12GraphicsPipelineState> {
 
   D3D12AirconvShader shader_vs;
@@ -1474,6 +1572,9 @@ public:
     return S_OK;
   }
 
+  HRESULT
+  InitializeMesh(const D3D12PipelineStreamData &data);
+
   WMT::DepthStencilState
   GetDepthStencilState(uint8_t planar_flags, uint8_t readonly_flags) const override {
     switch (planar_flags & 3) {
@@ -1525,6 +1626,240 @@ public:
 };
 
 HRESULT
+MTLD3D12GraphicsPipelineStateImpl::InitializeMesh(const D3D12PipelineStreamData &data) {
+  if (data.mesh_shader.empty())
+    return E_INVALIDARG;
+
+  const auto &msc_capabilities = device_->GetMSCCapabilities();
+  if (!msc_capabilities.msc_mesh || (data.amplification_shader.size() && !msc_capabilities.api_amplification_reflection)) {
+    ERR("CreatePipelineState: native mesh shaders are unavailable in the active MSC/Metal configuration");
+    return E_NOTIMPL;
+  }
+
+  auto make_bytecode = [](const std::vector<uint8_t> &data) {
+    D3D12_SHADER_BYTECODE result = {};
+    result.pShaderBytecode = data.empty() ? nullptr : data.data();
+    result.BytecodeLength = data.size();
+    return result;
+  };
+  const auto as_bytecode = make_bytecode(data.amplification_shader);
+  const auto ms_bytecode = make_bytecode(data.mesh_shader);
+  const auto ps_bytecode = make_bytecode(data.pixel_shader);
+  const auto ms_classification = ClassifyD3D12Shader(ms_bytecode);
+  const auto as_classification = data.amplification_shader.empty()
+                                     ? D3D12ShaderClassification{D3D12ShaderBackend::Airconv, S_OK}
+                                     : ClassifyD3D12Shader(as_bytecode);
+  const auto ps_classification = data.pixel_shader.empty()
+                                     ? D3D12ShaderClassification{D3D12ShaderBackend::Airconv, S_OK}
+                                     : ClassifyD3D12Shader(ps_bytecode);
+  HRESULT hr;
+  auto validate_native_stage = [](const D3D12ShaderClassification &classification, const char *stage) -> HRESULT {
+    if (FAILED(classification.validation_hr)) {
+      ERR("CreatePipelineState: invalid mesh ", stage, " shader container, HRESULT=", classification.validation_hr);
+      return classification.validation_hr;
+    }
+    if (classification.backend != D3D12ShaderBackend::MetalShaderConverter) {
+      ERR("CreatePipelineState: native mesh ", stage, " shader requires DXIL");
+      return E_NOTIMPL;
+    }
+    return S_OK;
+  };
+  if (FAILED(hr = validate_native_stage(ms_classification, "MS")))
+    return hr;
+  if (!data.amplification_shader.empty() && FAILED(hr = validate_native_stage(as_classification, "AS")))
+    return hr;
+  if (!data.pixel_shader.empty() && FAILED(hr = validate_native_stage(ps_classification, "PS")))
+    return hr;
+
+  const void *root_signature = nullptr;
+  size_t root_signature_size = 0;
+  if (data.root_signature) {
+    root_signature_size = static_cast<MTLD3D12RootSignature *>(data.root_signature.ptr())
+                               ->GetBlob(&root_signature);
+  } else {
+    HRESULT hr = GetD3D12EmbeddedRootSignature(
+        ms_bytecode, ms_classification, &root_signature, &root_signature_size
+    );
+    if (FAILED(hr) && hr != E_FAIL)
+      return hr;
+    const bool has_reference_root = SUCCEEDED(hr);
+    auto check_embedded_root_signature = [&](const D3D12_SHADER_BYTECODE &shader,
+                                             const D3D12ShaderClassification &classification) -> HRESULT {
+      if (!shader.pShaderBytecode)
+        return S_OK;
+      const void *shader_root = nullptr;
+      size_t shader_root_size = 0;
+      HRESULT root_hr = GetD3D12EmbeddedRootSignature(shader, classification, &shader_root, &shader_root_size);
+      if (FAILED(root_hr))
+        return !has_reference_root && root_hr == E_FAIL ? S_OK : root_hr;
+      if (!has_reference_root || shader_root_size != root_signature_size ||
+          std::memcmp(shader_root, root_signature, root_signature_size) != 0)
+        return E_INVALIDARG;
+      return S_OK;
+    };
+    if (FAILED(hr = check_embedded_root_signature(as_bytecode, as_classification)) ||
+        FAILED(hr = check_embedded_root_signature(ps_bytecode, ps_classification)))
+      return hr;
+  }
+
+  D3D12ConvertedShader converted_as;
+  D3D12ConvertedShader converted_ms;
+  D3D12ConvertedShader converted_ps;
+  hr = ConvertD3D12Shader(
+      ms_classification, ms_bytecode, DXMT_MSC_STAGE_MESH, converted_ms, root_signature, root_signature_size,
+      nullptr, 0, &msc_capabilities
+  );
+  if (FAILED(hr))
+    return hr;
+  if (!data.amplification_shader.empty()) {
+    hr = ConvertD3D12Shader(
+        as_classification, as_bytecode, DXMT_MSC_STAGE_AMPLIFICATION, converted_as, root_signature,
+        root_signature_size, nullptr, 0, &msc_capabilities
+    );
+    if (FAILED(hr))
+      return hr;
+  }
+  if (!data.pixel_shader.empty()) {
+    hr = ConvertD3D12Shader(
+        ps_classification, ps_bytecode, DXMT_MSC_STAGE_FRAGMENT, converted_ps, root_signature, root_signature_size,
+        nullptr, 0, &msc_capabilities
+    );
+    if (FAILED(hr))
+      return hr;
+  }
+
+  auto metal = device_->GetMTLDevice();
+  WMT::Reference<WMT::Error> error;
+  auto ms_library = metal.newLibrary(converted_ms.metallib.data(), converted_ms.metallib.size(), error);
+  if (!ms_library)
+    return E_FAIL;
+  auto ms_function = ms_library.newFunction(converted_ms.entry_point.c_str());
+  if (!ms_function)
+    return E_FAIL;
+  WMT::Reference<WMT::Function> as_function;
+  WMT::Reference<WMT::Function> ps_function;
+  if (!data.amplification_shader.empty()) {
+    auto as_library = metal.newLibrary(converted_as.metallib.data(), converted_as.metallib.size(), error);
+    if (!as_library)
+      return E_FAIL;
+    as_function = as_library.newFunction(converted_as.entry_point.c_str());
+    if (!as_function)
+      return E_FAIL;
+  }
+  if (!data.pixel_shader.empty()) {
+    auto ps_library = metal.newLibrary(converted_ps.metallib.data(), converted_ps.metallib.size(), error);
+    if (!ps_library)
+      return E_FAIL;
+    ps_function = ps_library.newFunction(converted_ps.entry_point.c_str());
+    if (!ps_function)
+      return E_FAIL;
+  }
+
+  WMTMeshRenderPipelineInfo info;
+  WMT::InitializeMeshRenderPipelineInfo(info);
+  for (unsigned i = 0; i < data.num_render_targets; i++) {
+    if (data.render_target_formats[i] == DXGI_FORMAT_UNKNOWN)
+      continue;
+    MTL_DXGI_FORMAT_DESC format_desc;
+    if (FAILED(MTLQueryDXGIFormat(metal, data.render_target_formats[i], format_desc)))
+      return E_INVALIDARG;
+    auto &target = info.colors[i];
+    target.pixel_format = format_desc.PixelFormat;
+    const auto &blend = data.blend_state.IndependentBlendEnable ? data.blend_state.RenderTarget[i]
+                                                                 : data.blend_state.RenderTarget[0];
+    target.write_mask = kColorWriteMaskMap[blend.RenderTargetWriteMask];
+    if (blend.BlendEnable) {
+      if (!any_bit_set(device_->GetMTLPixelFormatCapability(target.pixel_format) & FormatCapability::Blend))
+        return E_INVALIDARG;
+      target.blending_enabled = true;
+      target.alpha_blend_operation = kBlendOpMap[blend.BlendOpAlpha];
+      target.rgb_blend_operation = kBlendOpMap[blend.BlendOp];
+      target.src_alpha_blend_factor = kBlendAlphaFactorMap[blend.SrcBlendAlpha];
+      target.src_rgb_blend_factor = kBlendFactorMap[blend.SrcBlend];
+      target.dst_alpha_blend_factor = kBlendAlphaFactorMap[blend.DestBlendAlpha];
+      target.dst_rgb_blend_factor = kBlendFactorMap[blend.DestBlend];
+    }
+  }
+  if (data.depth_stencil_format != DXGI_FORMAT_UNKNOWN) {
+    MTL_DXGI_FORMAT_DESC format_desc;
+    if (FAILED(MTLQueryDXGIFormat(metal, data.depth_stencil_format, format_desc)))
+      return E_INVALIDARG;
+    const auto dsv_flags = DepthStencilPlanarFlags(format_desc.PixelFormat);
+    if (dsv_flags & 1)
+      info.depth_pixel_format = format_desc.PixelFormat;
+    if (dsv_flags & 2)
+      info.stencil_pixel_format = format_desc.PixelFormat;
+  }
+  if (!data.blend_state.IndependentBlendEnable && data.blend_state.RenderTarget[0].LogicOpEnable) {
+    info.logic_operation_enabled = true;
+    info.logic_operation = kLogicOpMap[data.blend_state.RenderTarget[0].LogicOp];
+  }
+
+  const uint32_t payload_size = std::max(
+      converted_ms.reflection.ms_max_payload_size_in_bytes,
+      converted_as.reflection.as_max_payload_size_in_bytes
+  );
+  if (payload_size > UINT16_MAX || !converted_ms.reflection.ms_num_threads[0] ||
+      !converted_ms.reflection.ms_num_threads[1] || !converted_ms.reflection.ms_num_threads[2])
+    return E_INVALIDARG;
+  if (!data.amplification_shader.empty() &&
+      (!converted_as.reflection.as_num_threads[0] || !converted_as.reflection.as_num_threads[1] ||
+       !converted_as.reflection.as_num_threads[2]))
+    return E_INVALIDARG;
+
+  info.object_function = as_function.handle;
+  info.mesh_function = ms_function.handle;
+  info.fragment_function = ps_function.handle;
+  info.immutable_object_buffers = data.amplification_shader.empty() ? 0 : (1u << 0) | (1u << 1) | (1u << 2);
+  info.immutable_mesh_buffers = (1u << 0) | (1u << 1) | (1u << 2);
+  info.immutable_fragment_buffers = data.pixel_shader.empty() ? 0 : (1u << 0) | (1u << 1) | (1u << 2);
+  info.payload_memory_length = static_cast<uint16_t>(payload_size);
+  info.raster_sample_count = data.sample_desc.Count;
+  info.alpha_to_coverage_enabled = data.blend_state.AlphaToCoverageEnable && !data.pixel_shader.empty();
+  info.rasterization_enabled = data.num_render_targets != 0 || data.depth_stencil_format != DXGI_FORMAT_UNKNOWN;
+
+  pso = metal.newRenderPipelineState(info, error);
+  if (!pso) {
+    ERR("Failed to create MSC mesh PSO: ", error ? error.description().getUTF8String() : "unknown error");
+    return E_FAIL;
+  }
+  if (FAILED(hr = InitializeDepthStencilStates(this, metal, data.depth_stencil_state)))
+    return hr;
+
+  fill_mode = data.rasterizer_state.FillMode == D3D12_FILL_MODE_SOLID ? WMTTriangleFillModeFill
+                                                                        : WMTTriangleFillModeLines;
+  switch (data.rasterizer_state.CullMode) {
+  case D3D12_CULL_MODE_BACK:
+    cull_mode = WMTCullModeBack;
+    break;
+  case D3D12_CULL_MODE_FRONT:
+    cull_mode = WMTCullModeFront;
+    break;
+  case D3D12_CULL_MODE_NONE:
+    cull_mode = WMTCullModeNone;
+    break;
+  default:
+    return E_INVALIDARG;
+  }
+  depth_clip_mode = data.rasterizer_state.DepthClipEnable ? WMTDepthClipModeClip : WMTDepthClipModeClamp;
+  depth_bias = data.rasterizer_state.DepthBias;
+  scole_scale = data.rasterizer_state.SlopeScaledDepthBias;
+  depth_bias_clamp = data.rasterizer_state.DepthBiasClamp;
+  winding = data.rasterizer_state.FrontCounterClockwise ? WMTWindingCounterClockwise : WMTWindingClockwise;
+  forced_sample_count = data.rasterizer_state.ForcedSampleCount;
+  msc_mesh = true;
+  msc_object_threadgroup_size = data.amplification_shader.empty()
+                                    ? WMTSize{1, 1, 1}
+                                    : WMTSize{converted_as.reflection.as_num_threads[0],
+                                              converted_as.reflection.as_num_threads[1],
+                                              converted_as.reflection.as_num_threads[2]};
+  msc_mesh_threadgroup_size = {converted_ms.reflection.ms_num_threads[0], converted_ms.reflection.ms_num_threads[1],
+                               converted_ms.reflection.ms_num_threads[2]};
+  shader_backend = D3D12ShaderBackend::MetalShaderConverter;
+  return S_OK;
+}
+
+HRESULT
 CreateGraphicsPipelineState(
     MTLD3D12Device *pDevice, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, REFIID riid, void **ppPipelineState
 ) {
@@ -1548,5 +1883,22 @@ CreateGraphicsPipelineState(
   pso->pipeline_cache = std::move(pipeline_cache);
   return pso->QueryInterface(riid, ppPipelineState);
 };
+
+HRESULT
+CreateMeshPipelineState(
+    MTLD3D12Device *pDevice, const D3D12PipelineStreamData &data, REFIID riid, void **ppPipelineState
+) {
+  if (!pDevice)
+    return E_INVALIDARG;
+  if (!ppPipelineState)
+    return E_POINTER;
+  InitReturnPtr(ppPipelineState);
+
+  auto pso = Com(new MTLD3D12GraphicsPipelineStateImpl(pDevice));
+  HRESULT hr = pso->InitializeMesh(data);
+  if (FAILED(hr))
+    return hr;
+  return pso->QueryInterface(riid, ppPipelineState);
+}
 
 } // namespace dxmt

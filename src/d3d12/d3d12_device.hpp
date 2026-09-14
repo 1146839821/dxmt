@@ -338,6 +338,9 @@ public:
   bool msc_geometry = false;
   WMTMSCGeometryPipelineConfig msc_geometry_config = {};
   WMTPrimitiveType msc_geometry_input_primitive = WMTPrimitiveTypePoint;
+  bool msc_mesh = false;
+  WMTSize msc_object_threadgroup_size = {1, 1, 1};
+  WMTSize msc_mesh_threadgroup_size = {1, 1, 1};
   bool airconv_geometry = false;
   WMT::Reference<WMT::RenderPipelineState> airconv_geometry_psos[2][3];
   WMTPrimitiveType airconv_geometry_input_primitive = WMTPrimitiveTypePoint;
@@ -481,6 +484,11 @@ CreateCommandSignature(
 HRESULT
 CreateGraphicsPipelineState(
     MTLD3D12Device *pDevice, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, REFIID riid, void **ppPipelineState
+);
+
+HRESULT
+CreateMeshPipelineState(
+    MTLD3D12Device *pDevice, const D3D12PipelineStreamData &data, REFIID riid, void **ppPipelineState
 );
 
 HRESULT

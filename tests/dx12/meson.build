@@ -68,6 +68,10 @@ dx12_pipeline_persistence = executable('dx12_pipeline_persistence', 'dx12_pipeli
   dependencies: [ d3d12_dep ],
 )
 
+dx12_mesh_sm6 = executable('dx12_mesh_sm6', 'dx12_mesh_sm6.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dxc_command = []
 dxc = find_program('dxc', required: false)
 if dxc.found()
@@ -191,6 +195,18 @@ if dxc_command.length() > 0
     input: 'library_subobjects_sm6.hlsl',
     output: 'library_subobjects_sm6.lib.cso',
     command: dxc_command + [ '-T', 'lib_6_3', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_mesh_sm6_ms_fixture',
+    input: 'mesh_sm6.hlsl',
+    output: 'mesh_sm6.ms.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'ms_6_5', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_mesh_sm6_ps_fixture',
+    input: 'mesh_sm6.hlsl',
+    output: 'mesh_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
   custom_target('dx12_compute_sm6_packed_dot_fixture',

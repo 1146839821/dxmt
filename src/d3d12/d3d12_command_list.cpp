@@ -73,6 +73,7 @@ enum class DrawCallStatus {
   Ordinary,
   MSCTessellation,
   MSCGeometry,
+  MSCMesh,
   AirconvGeometry,
 };
 
@@ -1290,7 +1291,7 @@ public:
     }
     if (!pipeline->IsComputePipelineState && pipeline->shader_backend == D3D12ShaderBackend::MetalShaderConverter) {
       auto graphics = static_cast<MTLD3D12GraphicsPipelineState *>(pipeline);
-      if (graphics->msc_tessellation || graphics->msc_geometry) {
+      if (graphics->msc_tessellation || graphics->msc_geometry || graphics->msc_mesh) {
         WARN("D3D12 ", name, " with MSC emulation PSO is unsupported");
         FailRecording(name, "MSC emulation PSO");
         return false;
@@ -1925,9 +1926,10 @@ public:
     const bool use_msc = pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
     const bool use_msc_tessellation = pso_graphics_->msc_tessellation;
     const bool use_msc_geometry = pso_graphics_->msc_geometry;
+    const bool use_msc_mesh = pso_graphics_->msc_mesh;
     const bool use_airconv_geometry = pso_graphics_->airconv_geometry;
-    const bool use_msc_emulation = use_msc_tessellation || use_msc_geometry;
-    const auto msc_render_stages = use_msc_emulation
+    const bool use_msc_mesh_stages = use_msc_tessellation || use_msc_geometry || use_msc_mesh;
+    const auto msc_render_stages = use_msc_mesh_stages
                                        ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh |
                                                                       WMTRenderStageFragment)
                                        : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
@@ -1939,7 +1941,7 @@ public:
         cmd.offset = offset;
         cmd.index = index;
       };
-      if (use_msc_emulation) {
+      if (use_msc_mesh_stages) {
         encode(WMTRenderCommandSetObjectBuffer);
         encode(WMTRenderCommandSetMeshBuffer);
         if (fragment)
@@ -1980,7 +1982,7 @@ public:
       // tables from the object/mesh stages just like geometry emulation.  Mark
       // the pass as pre-raster work so the queue waits at Object/Mesh before
       // encoding the render commands.
-      render->use_geometry = use_msc_tessellation || use_msc_geometry || use_airconv_geometry;
+      render->use_geometry = use_msc_mesh_stages || use_airconv_geometry;
 
       unsigned render_target_width = 16384, render_target_height = 16384, render_target_array_length = 0;
 
@@ -2060,7 +2062,7 @@ public:
     // or tessellation PSO without ending the render encoder.  Keep the pass
     // wait conservative for every draw recorded into it.
     auto *render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
-    render->use_geometry |= use_msc_tessellation || use_msc_geometry || use_airconv_geometry;
+    render->use_geometry |= use_msc_mesh_stages || use_airconv_geometry;
 
     if (dirty_state_.test(DirtyState::GraphicsPipelineState)) {
       UpdateGraphicsPSO(pso_graphics_.ptr(), airconv_index_format);
@@ -2089,7 +2091,7 @@ public:
     // buffers, so make the residency/hazard declaration explicit for every
     // indexed draw (including ExecuteIndirect) before encoding the draw.
     if (index_buffer) {
-      const auto index_stages = use_msc_emulation || use_airconv_geometry
+      const auto index_stages = use_msc_mesh_stages || use_airconv_geometry
                                     ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh)
                                     : WMTRenderStageVertex;
       EncodeRenderResourceUse(index_buffer.handle, WMTResourceUsageRead, index_stages);
@@ -2154,6 +2156,9 @@ public:
         if (use_airconv_geometry) {
           encode_root_argument(WMTRenderCommandSetObjectBuffer);
           encode_root_argument(WMTRenderCommandSetMeshBuffer);
+        } else if (use_msc_mesh) {
+          encode_root_argument(WMTRenderCommandSetObjectBuffer);
+          encode_root_argument(WMTRenderCommandSetMeshBuffer);
         } else {
           auto &cmd_vsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
           cmd_vsargbuf.type = WMTRenderCommandSetVertexBuffer;
@@ -2166,7 +2171,7 @@ public:
           cmd_fsargbuf.offset = Offset;
           cmd_fsargbuf.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
         }
-        if (use_airconv_geometry)
+        if (use_airconv_geometry || use_msc_mesh)
           encode_root_argument(WMTRenderCommandSetFragmentBuffer);
       }
       dirty_state_.clr(DirtyState::GraphicsRootArguments);
@@ -2213,7 +2218,7 @@ public:
           cmd.offset = Offset;
           cmd.index = SM50_BINDING_INDEX_STATIC_SAMPLERS;
         };
-        if (use_airconv_geometry) {
+        if (use_airconv_geometry || use_msc_mesh) {
           encode_static_samplers(WMTRenderCommandSetObjectBuffer);
           encode_static_samplers(WMTRenderCommandSetMeshBuffer);
         } else {
@@ -2293,6 +2298,8 @@ public:
       return DrawCallStatus::MSCTessellation;
     if (use_msc_geometry)
       return DrawCallStatus::MSCGeometry;
+    if (use_msc_mesh)
+      return DrawCallStatus::MSCMesh;
     if (use_airconv_geometry)
       return DrawCallStatus::AirconvGeometry;
     return DrawCallStatus::Ordinary;
@@ -2307,6 +2314,10 @@ public:
             " vertex_start=", StartVertexLocation, " instance_start=", StartInstanceLocation);
     if (!ValidateCommand(SupportsGraphics(), "DrawInstanced"))
       return;
+    if (pso_graphics_ && pso_graphics_->msc_mesh) {
+      FailRecording(__func__, "DrawInstanced requires a traditional graphics pipeline");
+      return;
+    }
     if (!ValidateStreamOutputDraw(VertexCountPerInstance, InstanceCount))
       return;
     WMTPrimitiveType primitive_type;
@@ -2434,6 +2445,10 @@ public:
             " instance_start=", StartInstanceLocation);
     if (!ValidateCommand(SupportsGraphics(), "DrawIndexedInstanced"))
       return;
+    if (pso_graphics_ && pso_graphics_->msc_mesh) {
+      FailRecording(__func__, "DrawIndexedInstanced requires a traditional graphics pipeline");
+      return;
+    }
     if (!ValidateStreamOutputDraw(IndexCountPerInstance, InstanceCount))
       return;
     WMTPrimitiveType primitive_type;
@@ -5011,7 +5026,20 @@ public:
   }
 
   void STDMETHODCALLTYPE DispatchMesh(UINT ThreadGroupCountX, UINT ThreadGroupCountY, UINT ThreadGroupCountZ) {
-    MarkUnsupportedCommand("DispatchMesh");
+    if (!ValidateCommand(SupportsGraphics(), "DispatchMesh"))
+      return;
+    if (!pso_graphics_ || !pso_graphics_->msc_mesh) {
+      FailRecording(__func__, "DispatchMesh requires a native mesh shader pipeline");
+      return;
+    }
+    if (PreDraw() != DrawCallStatus::MSCMesh)
+      return;
+
+    auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_draw_meshthreadgroups>();
+    cmd.type = WMTRenderCommandDrawMeshThreadgroups;
+    cmd.threadgroup_per_grid = {ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ};
+    cmd.object_threadgroup_size = pso_graphics_->msc_object_threadgroup_size;
+    cmd.mesh_threadgroup_size = pso_graphics_->msc_mesh_threadgroup_size;
   }
 
   void STDMETHODCALLTYPE Barrier(UINT32 NumBarrierGroups, const D3D12_BARRIER_GROUP *pBarrierGroups) {
