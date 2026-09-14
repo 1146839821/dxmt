@@ -241,6 +241,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'ps_get_attribute', '-T', 'ps_6_1', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_graphics_vrs_sm6_ps_fixture',
+    input: 'graphics_unsupported_semantics_sm6.hlsl',
+    output: 'graphics_vrs_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_shading_rate', '-T', 'ps_6_4', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_graphics_logic_op_sm6_vs_fixture',
     input: 'graphics_logic_op_sm6.hlsl',
     output: 'graphics_logic_op_sm6.vs.cso',

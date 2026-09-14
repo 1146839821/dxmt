@@ -27,3 +27,8 @@ float4 ps_get_attribute(VSOutput input, float3 barycentrics : SV_Barycentrics) :
 {
     return float4(GetAttributeAtVertex(input.attribute, 0), barycentrics.x, 0.0, 1.0);
 }
+
+float4 ps_shading_rate(float4 position : SV_Position, uint shading_rate : SV_ShadingRate) : SV_Target0
+{
+    return float4(shading_rate / 255.0, 0.0, 0.0, 1.0);
+}

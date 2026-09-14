@@ -192,6 +192,24 @@ HasOutputSemantic(const D3D12_SHADER_BYTECODE &shader, const char *semantic_name
 }
 
 bool
+HasInputSemantic(const D3D12_SHADER_BYTECODE &shader, const char *semantic_name) {
+  if (!shader.pShaderBytecode || !shader.BytecodeLength || !semantic_name)
+    return false;
+
+  microsoft::CSignatureParser signature_parser;
+  if (FAILED(microsoft::DXBCGetInputSignature(shader.pShaderBytecode, &signature_parser)))
+    return false;
+
+  const microsoft::D3D11_SIGNATURE_PARAMETER *parameters = nullptr;
+  const UINT parameter_count = signature_parser.GetParameters(&parameters);
+  for (UINT i = 0; i < parameter_count; i++) {
+    if (parameters[i].SemanticName && strcasecmp(parameters[i].SemanticName, semantic_name) == 0)
+      return true;
+  }
+  return false;
+}
+
+bool
 DeserializeMSCConversionCache(const uint8_t *data, size_t data_size, D3D12ConvertedShader &converted) {
   if (!data || data_size < sizeof(MSCSerializedCacheHeader))
     return false;
@@ -422,6 +440,8 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
   }
   if (classification.backend == D3D12ShaderBackend::MetalShaderConverter) {
     classification.uses_unsupported_stencil_ref = HasOutputSemantic(shader, "SV_StencilRef");
+    classification.uses_unsupported_shading_rate =
+        HasInputSemantic(shader, "SV_ShadingRate") || HasOutputSemantic(shader, "SV_ShadingRate");
   }
   return classification;
 }
@@ -606,6 +626,10 @@ ConvertD3D12Shader(
     return E_INVALIDARG;
   if (stage == DXMT_MSC_STAGE_FRAGMENT && classification.uses_unsupported_stencil_ref) {
     ERR("DXIL pixel shader uses unsupported SV_StencilRef output");
+    return E_NOTIMPL;
+  }
+  if (classification.uses_unsupported_shading_rate) {
+    ERR("DXIL shader uses unsupported SV_ShadingRate semantic");
     return E_NOTIMPL;
   }
 

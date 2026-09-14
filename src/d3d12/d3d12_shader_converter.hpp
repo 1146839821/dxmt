@@ -36,6 +36,7 @@ struct D3D12ShaderClassification {
   D3D12ShaderBackend backend = D3D12ShaderBackend::Unsupported;
   HRESULT validation_hr = E_INVALIDARG;
   bool uses_unsupported_stencil_ref = false;
+  bool uses_unsupported_shading_rate = false;
   const void *embedded_root_signature = nullptr;
   size_t embedded_root_signature_size = 0;
 };
