@@ -2119,6 +2119,8 @@ thunk32_DXMTMSCCompileDXIL(void *args) {
   params.compatibility_flags = src->compatibility_flags;
   params.validation_flags = src->validation_flags;
   params.ignore_debug_information = src->ignore_debug_information;
+  params.function_constant_resource_space = src->function_constant_resource_space;
+  params.framebuffer_fetch_resource_space = src->framebuffer_fetch_resource_space;
 
   params.ret = dxmt_msc_compile(&params);
 

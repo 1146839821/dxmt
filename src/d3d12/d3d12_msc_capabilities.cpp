@@ -168,7 +168,9 @@ LogDXMTMSCCapabilities(const DXMTMSCCapabilities &capabilities) {
       capabilities.compiler_minimum_os_major, ".", capabilities.compiler_minimum_os_minor, ".",
       capabilities.compiler_minimum_os_patch, ", compatibility=", capabilities.compiler_compatibility_flags,
       ", validation=", capabilities.compiler_validation_flags, ", ignoreDebug=",
-      capabilities.compiler_ignore_debug_information
+      capabilities.compiler_ignore_debug_information, ", functionConstantSpace=",
+      capabilities.compiler_function_constant_resource_space, ", framebufferFetchSpace=",
+      capabilities.compiler_framebuffer_fetch_resource_space
   ));
   Logger::info(str::format(
       "D3D12 MSC documented capabilities: waveOps=", capabilities.msc_wave_ops, ", int64=", capabilities.msc_int64,

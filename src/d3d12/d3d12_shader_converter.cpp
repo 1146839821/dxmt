@@ -34,7 +34,7 @@ constexpr uint32_t kDXILFourCC = MakeFourCC('D', 'X', 'I', 'L');
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
 // converter defaults change.
-constexpr uint32_t kMSCConversionCacheVersion = 8;
+constexpr uint32_t kMSCConversionCacheVersion = 9;
 constexpr uint32_t kMSCConverterAPIVersion = 0x040001;
 constexpr uint32_t kMSCMetalTargetVersion = 0;
 constexpr uint32_t kMSCCompileFlags = 0;
@@ -88,6 +88,8 @@ MakeMSCConversionCacheKey(
   uint32_t compiler_compatibility_flags = DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
   uint32_t compiler_validation_flags = 0;
   uint8_t compiler_ignore_debug_information = 0;
+  uint32_t compiler_function_constant_resource_space = DXMT_MSC_RESOURCE_SPACE_DISABLED;
+  uint32_t compiler_framebuffer_fetch_resource_space = DXMT_MSC_RESOURCE_SPACE_DISABLED;
   if (msc_capabilities) {
     /* The same DXIL can produce a different metallib when the runtime ABI,
      * optional symbol set, OS, or Metal GPU target changes. Keep those
@@ -110,6 +112,8 @@ MakeMSCConversionCacheKey(
     compiler_compatibility_flags = msc_capabilities->compiler_compatibility_flags;
     compiler_validation_flags = msc_capabilities->compiler_validation_flags;
     compiler_ignore_debug_information = msc_capabilities->compiler_ignore_debug_information;
+    compiler_function_constant_resource_space = msc_capabilities->compiler_function_constant_resource_space;
+    compiler_framebuffer_fetch_resource_space = msc_capabilities->compiler_framebuffer_fetch_resource_space;
   }
   hash.update(compiler_minimum_gpu_family);
   hash.update(compiler_minimum_os_major);
@@ -118,6 +122,8 @@ MakeMSCConversionCacheKey(
   hash.update(compiler_compatibility_flags);
   hash.update(compiler_validation_flags);
   hash.update(compiler_ignore_debug_information);
+  hash.update(compiler_function_constant_resource_space);
+  hash.update(compiler_framebuffer_fetch_resource_space);
   hash.update(stage);
   compile_flags |= input_layout ? DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0;
   hash.update(compile_flags);
@@ -336,6 +342,8 @@ CompileDXIL(
   params.error_message = error_message;
   params.error_message_capacity = error_message_capacity;
   params.compatibility_flags = DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
+  params.function_constant_resource_space = DXMT_MSC_RESOURCE_SPACE_DISABLED;
+  params.framebuffer_fetch_resource_space = DXMT_MSC_RESOURCE_SPACE_DISABLED;
   if (msc_capabilities) {
     params.minimum_gpu_family = msc_capabilities->compiler_minimum_gpu_family;
     params.minimum_os_major = msc_capabilities->compiler_minimum_os_major;
@@ -344,6 +352,8 @@ CompileDXIL(
     params.compatibility_flags = msc_capabilities->compiler_compatibility_flags;
     params.validation_flags = msc_capabilities->compiler_validation_flags;
     params.ignore_debug_information = msc_capabilities->compiler_ignore_debug_information;
+    params.function_constant_resource_space = msc_capabilities->compiler_function_constant_resource_space;
+    params.framebuffer_fetch_resource_space = msc_capabilities->compiler_framebuffer_fetch_resource_space;
   }
 
   int result = DXMTMSCCompileDXIL(&params);

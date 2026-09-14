@@ -211,6 +211,12 @@ dxmt_msc_set_compiler_configuration(IRCompiler *compiler, const struct dxmt_msc_
 
   if (g_msc_api.IRCompilerIgnoreDebugInformation)
     g_msc_api.IRCompilerIgnoreDebugInformation(compiler, params->ignore_debug_information != 0);
+
+  if (g_msc_api.IRCompilerSetFunctionConstantResourceSpace)
+    g_msc_api.IRCompilerSetFunctionConstantResourceSpace(compiler, params->function_constant_resource_space);
+
+  if (g_msc_api.IRCompilerSetFramebufferFetchResourceSpace)
+    g_msc_api.IRCompilerSetFramebufferFetchResourceSpace(compiler, params->framebuffer_fetch_resource_space);
 }
 
 static void

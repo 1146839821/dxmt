@@ -62,6 +62,9 @@ enum dxmt_msc_compile_flags {
   DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION = 1u << 2,
 };
 
+/* MSC uses UINT32_MAX to disable extension resource-space interpretation. */
+#define DXMT_MSC_RESOURCE_SPACE_DISABLED UINT32_MAX
+
 enum dxmt_msc_compatibility_flags {
   /* Values mirror IRCompatibilityFlags in metal_irconverter.h. */
   DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP = 1u << 2,
@@ -249,6 +252,8 @@ struct dxmt_msc_compile_dxil_params {
   uint32_t compatibility_flags;
   uint32_t validation_flags;
   uint32_t ignore_debug_information;
+  uint32_t function_constant_resource_space;
+  uint32_t framebuffer_fetch_resource_space;
 };
 
 /* The native side receives this layout for a 32-bit PE caller. */
@@ -295,6 +300,8 @@ struct dxmt_msc_compile_dxil_params32 {
   uint32_t compatibility_flags;
   uint32_t validation_flags;
   uint32_t ignore_debug_information;
+  uint32_t function_constant_resource_space;
+  uint32_t framebuffer_fetch_resource_space;
 };
 
 struct dxmt_msc_root_parameter_layout {
