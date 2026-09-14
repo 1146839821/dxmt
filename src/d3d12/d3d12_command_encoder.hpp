@@ -170,7 +170,7 @@ enum class AccelerationStructureCommandType {
 };
 
 struct AccelerationStructureCommand {
-  AccelerationStructureCommandType type;
+  AccelerationStructureCommandType type = AccelerationStructureCommandType::Build;
   WMT::Reference<WMT::AccelerationStructure> destination;
   WMT::Reference<WMT::AccelerationStructure> source;
   WMT::Reference<WMT::AccelerationStructure> acceleration_structure;
@@ -178,6 +178,7 @@ struct AccelerationStructureCommand {
   WMT::Reference<WMT::Buffer> buffer;
   WMTAccelerationStructureDescriptorInfo descriptor = {};
   std::vector<WMT::Reference<WMT::Buffer>> referenced_buffers;
+  std::vector<WMT::Reference<WMT::AccelerationStructure>> referenced_acceleration_structures;
   uint64_t scratch_offset = 0;
   uint64_t buffer_offset = 0;
   uint32_t size_data_type = WMTAccelerationStructureSizeDataTypeUInt64;

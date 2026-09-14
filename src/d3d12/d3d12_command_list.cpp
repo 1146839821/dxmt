@@ -5163,7 +5163,7 @@ public:
     }
 
     D3D12RaytracingDescriptor descriptor;
-    if (!ConvertD3D12RaytracingInputs(device_, &pDesc->Inputs, descriptor)) {
+    if (!ConvertD3D12RaytracingInputs(device_, &pDesc->Inputs, descriptor, true)) {
       FailRecording(__func__, "unsupported or invalid acceleration-structure inputs");
       return;
     }
@@ -5237,6 +5237,7 @@ public:
     build.scratch = std::move(scratch);
     build.descriptor = descriptor.info;
     build.referenced_buffers = std::move(descriptor.buffers);
+    build.referenced_acceleration_structures = std::move(descriptor.acceleration_structures);
     build.scratch_offset = scratch_offset;
 
     WMT::Reference<WMT::AccelerationStructure> postbuild_acceleration_structure = build.destination;

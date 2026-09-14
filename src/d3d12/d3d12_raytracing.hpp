@@ -29,11 +29,12 @@ class MTLD3D12Device;
 struct D3D12RaytracingDescriptor {
   WMTAccelerationStructureDescriptorInfo info = {};
   std::vector<WMT::Reference<WMT::Buffer>> buffers;
+  std::vector<WMT::Reference<WMT::AccelerationStructure>> acceleration_structures;
 };
 
 bool ConvertD3D12RaytracingInputs(
     MTLD3D12Device *device, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS *inputs,
-    D3D12RaytracingDescriptor &descriptor
+    D3D12RaytracingDescriptor &descriptor, bool for_execution = false
 );
 
 } // namespace dxmt

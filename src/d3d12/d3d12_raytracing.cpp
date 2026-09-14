@@ -19,6 +19,7 @@
 #include "d3d12_raytracing.hpp"
 
 #include "d3d12_device.hpp"
+#include <cstdint>
 #include <limits>
 
 namespace dxmt {
@@ -28,6 +29,16 @@ namespace {
 constexpr uint64_t kD3D12AccelerationStructureAlignment = 256;
 constexpr uint64_t kD3D12RaytracingInstanceDescriptorSize = 64;
 constexpr uint64_t kD3D12RaytracingAABBSize = 24;
+
+struct MetalUserIDInstanceDescriptor {
+  float transformation[4][3];
+  uint32_t options;
+  uint32_t mask;
+  uint32_t intersection_function_table_offset;
+  uint32_t acceleration_structure_index;
+  uint32_t user_id;
+};
+static_assert(sizeof(MetalUserIDInstanceDescriptor) == 68);
 
 bool
 MultiplyWithin(uint64_t left, uint64_t right, uint64_t &result) {
@@ -155,12 +166,109 @@ ConvertGeometry(
   }
 }
 
+bool
+ConvertInstanceDescriptors(
+    MTLD3D12Device *device, D3D12_GPU_VIRTUAL_ADDRESS address, UINT count,
+    D3D12RaytracingDescriptor &descriptor
+) {
+  uint64_t instance_offset = 0;
+  auto *instance_resource = device->LookupResourceByVA(address, &instance_offset);
+  if (!instance_resource)
+    return false;
+
+  uint64_t instance_length = 0;
+  if (!MultiplyWithin(sizeof(D3D12_RAYTRACING_INSTANCE_DESC), count, instance_length))
+    return false;
+  const auto instance_resource_desc = instance_resource->GetDesc();
+  if (instance_offset > instance_resource_desc.Width ||
+      instance_length > instance_resource_desc.Width - instance_offset)
+    return false;
+
+  D3D12_RANGE read_range = {instance_offset, instance_offset + instance_length};
+  void *mapped = nullptr;
+  if (FAILED(instance_resource->Map(0, &read_range, &mapped)) || !mapped)
+    return false;
+
+  std::vector<MetalUserIDInstanceDescriptor> converted(count);
+  bool valid = true;
+  const auto *source = reinterpret_cast<const D3D12_RAYTRACING_INSTANCE_DESC *>(
+      static_cast<const uint8_t *>(mapped) + instance_offset
+  );
+  for (UINT i = 0; i < count; i++) {
+    const auto &source_instance = source[i];
+    auto &destination = converted[i];
+    for (uint32_t row = 0; row < 3; row++)
+      for (uint32_t column = 0; column < 4; column++)
+        destination.transformation[column][row] = source_instance.Transform[row][column];
+
+    const uint32_t flags = source_instance.Flags;
+    if ((flags & ~0xfu) || (flags & D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE &&
+                             flags & D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE)) {
+      valid = false;
+      break;
+    }
+
+    uint64_t acceleration_structure_offset = 0;
+    auto *acceleration_structure_resource =
+        device->LookupResourceByVA(source_instance.AccelerationStructure, &acceleration_structure_offset);
+    if (!acceleration_structure_resource || acceleration_structure_offset ||
+        !acceleration_structure_resource->acceleration_structure) {
+      valid = false;
+      break;
+    }
+
+    uint32_t acceleration_structure_index = 0;
+    for (; acceleration_structure_index < descriptor.acceleration_structures.size(); acceleration_structure_index++) {
+      if (descriptor.acceleration_structures[acceleration_structure_index].handle ==
+          acceleration_structure_resource->acceleration_structure.handle)
+        break;
+    }
+    if (acceleration_structure_index == descriptor.acceleration_structures.size()) {
+      if (descriptor.acceleration_structures.size() >= WMT_MAX_ACCELERATION_STRUCTURE_INSTANCES) {
+        valid = false;
+        break;
+      }
+      descriptor.acceleration_structures.push_back(acceleration_structure_resource->acceleration_structure);
+    }
+
+    destination.options = flags;
+    destination.mask = source_instance.InstanceMask;
+    destination.intersection_function_table_offset = source_instance.InstanceContributionToHitGroupIndex;
+    destination.acceleration_structure_index = acceleration_structure_index;
+    destination.user_id = source_instance.InstanceID;
+  }
+  instance_resource->Unmap(0, nullptr);
+  if (!valid)
+    return false;
+
+  WMTBufferInfo buffer_info = {};
+  buffer_info.length = uint64_t(sizeof(MetalUserIDInstanceDescriptor)) * count;
+  buffer_info.options = WMTResourceStorageModeShared | WMTResourceHazardTrackingModeUntracked;
+  buffer_info.memory.set(nullptr);
+  auto instance_descriptor_buffer = device->GetMTLDevice().newBuffer(buffer_info);
+  if (!instance_descriptor_buffer)
+    return false;
+  instance_descriptor_buffer.updateContents(0, converted.data(), buffer_info.length);
+
+  auto &instance = descriptor.info.data.instance;
+  instance.instance_descriptor_buffer = instance_descriptor_buffer.handle;
+  instance.instance_descriptor_buffer_offset = 0;
+  instance.instance_descriptor_stride = sizeof(MetalUserIDInstanceDescriptor);
+  instance.instance_count = count;
+  instance.instance_descriptor_type = WMTAccelerationStructureInstanceDescriptorUserID;
+  instance.instanced_acceleration_structure_count = descriptor.acceleration_structures.size();
+  for (uint32_t i = 0; i < instance.instanced_acceleration_structure_count; i++)
+    instance.instanced_acceleration_structures[i] = descriptor.acceleration_structures[i].handle;
+  descriptor.buffers.push_back(std::move(instance_descriptor_buffer));
+  return true;
+}
+
 } // namespace
 
 bool
 ConvertD3D12RaytracingInputs(
     MTLD3D12Device *device, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS *inputs,
-    D3D12RaytracingDescriptor &descriptor
+    D3D12RaytracingDescriptor &descriptor, bool for_execution
 ) {
   descriptor = {};
   if (!device || !inputs || !inputs->NumDescs)
@@ -188,6 +296,9 @@ ConvertD3D12RaytracingInputs(
       return false;
     descriptor.info.type = WMTAccelerationStructureDescriptorInstance;
     auto &instance = descriptor.info.data.instance;
+    instance.usage = ConvertBuildFlags(inputs->Flags);
+    if (for_execution)
+      return ConvertInstanceDescriptors(device, inputs->InstanceDescs, inputs->NumDescs, descriptor);
     if (!ResolveBuffer(
             device, inputs->InstanceDescs, instance_length, descriptor.buffers,
             instance.instance_descriptor_buffer, instance.instance_descriptor_buffer_offset
@@ -196,7 +307,6 @@ ConvertD3D12RaytracingInputs(
     instance.instance_descriptor_stride = kD3D12RaytracingInstanceDescriptorSize;
     instance.instance_count = inputs->NumDescs;
     instance.instance_descriptor_type = WMTAccelerationStructureInstanceDescriptorDefault;
-    instance.usage = ConvertBuildFlags(inputs->Flags);
     return true;
   }
   default:
