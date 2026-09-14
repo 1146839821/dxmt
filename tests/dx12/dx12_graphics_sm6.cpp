@@ -50,6 +50,9 @@ int main(int argc, char **argv) {
   const bool logic_op = argc == 4 && strcmp(argv[3], "--logic-op") == 0;
   const bool stencil = argc == 4 && strcmp(argv[3], "--stencil") == 0;
   const bool barycentrics = argc == 4 && strcmp(argv[3], "--barycentrics") == 0;
+  const bool wave_quad_ops = argc == 4 && strcmp(argv[3], "--wave-quad-ops") == 0;
+  const bool int64_ops = argc == 4 && strcmp(argv[3], "--int64-ops") == 0;
+  const bool native16_ops = argc == 4 && strcmp(argv[3], "--native16-ops") == 0;
   const bool helper_lane = argc == 4 && strcmp(argv[3], "--helper-lane") == 0;
   const bool helper_lane_derivative = argc == 4 && strcmp(argv[3], "--helper-lane-derivative") == 0;
   const bool helper_lane_discard = argc == 4 && strcmp(argv[3], "--helper-lane-discard") == 0;
@@ -59,7 +62,8 @@ int main(int argc, char **argv) {
   const bool stencil_ref_unsupported = argc == 4 && strcmp(argv[3], "--stencil-ref-unsupported") == 0;
   if ((argc == 4 && !textured && !root_cbv && !root_constants && !root_srv &&
        !root_uav && !textured_root_cbv && !logic_op && !stencil && !barycentrics &&
-       !helper_lane && !helper_lane_derivative && !helper_lane_discard && !view_id_unsupported &&
+       !wave_quad_ops && !int64_ops && !native16_ops && !helper_lane && !helper_lane_derivative &&
+       !helper_lane_discard && !view_id_unsupported &&
        !get_attribute_unsupported && !vrs_unsupported && !stencil_ref_unsupported) ||
       (argc == 5 && !geometry))
     return 2;
@@ -815,7 +819,7 @@ int main(int argc, char **argv) {
     std::cerr << "timestamp query did not advance: " << timestamp_begin << " -> " << timestamp_end << "\n";
     goto cleanup;
   }
-  expected_pixel = (helper_lane || helper_lane_derivative || helper_lane_discard)
+  expected_pixel = (wave_quad_ops || int64_ops || native16_ops || helper_lane || helper_lane_derivative || helper_lane_discard)
                        ? 0xff00ff00u
                    : logic_op
                        ? 0xffffffffu
@@ -843,6 +847,9 @@ int main(int argc, char **argv) {
                 : logic_op           ? "logic op graphics"
                 : stencil            ? "stencil graphics"
                 : barycentrics       ? "barycentrics graphics"
+                : wave_quad_ops      ? "wave quad graphics"
+                : int64_ops          ? "int64 graphics"
+                : native16_ops       ? "native16 graphics"
                 : helper_lane_discard ? "helper lane discard graphics"
                 : helper_lane_derivative ? "helper lane derivative graphics"
                 : helper_lane ? "helper lane graphics"

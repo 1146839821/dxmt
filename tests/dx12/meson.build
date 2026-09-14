@@ -237,7 +237,7 @@ if dxc_command.length() > 0
   custom_target('dx12_compute_sm6_wave_ops_fixture',
     input: 'compute_sm6_wave_ops.hlsl',
     output: 'compute_sm6_wave_ops.cs.cso',
-    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_5', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
   custom_target('dx12_compute_sm6_wave_size_unsupported_fixture',
@@ -376,6 +376,42 @@ if dxc_command.length() > 0
     input: 'graphics_sm6.hlsl',
     output: 'graphics_sm6.ps.cso',
     command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_wave_ops_sm6_vs_fixture',
+    input: 'graphics_wave_ops_sm6.hlsl',
+    output: 'graphics_wave_ops_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_wave_ops_sm6_ps_fixture',
+    input: 'graphics_wave_ops_sm6.hlsl',
+    output: 'graphics_wave_ops_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_wave_quad', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_shader_ops_sm6_int64_vs_fixture',
+    input: 'graphics_shader_ops_sm6.hlsl',
+    output: 'graphics_shader_ops_sm6_int64.vs.cso',
+    command: dxc_command + [ '-E', 'vs_int64', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_shader_ops_sm6_int64_ps_fixture',
+    input: 'graphics_shader_ops_sm6.hlsl',
+    output: 'graphics_shader_ops_sm6_int64.ps.cso',
+    command: dxc_command + [ '-E', 'ps_int64', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_shader_ops_sm6_native16_vs_fixture',
+    input: 'graphics_shader_ops_sm6.hlsl',
+    output: 'graphics_shader_ops_sm6_native16.vs.cso',
+    command: dxc_command + [ '-enable-16bit-types', '-DDXMT_NATIVE16', '-E', 'vs_native16', '-T', 'vs_6_2', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_shader_ops_sm6_native16_ps_fixture',
+    input: 'graphics_shader_ops_sm6.hlsl',
+    output: 'graphics_shader_ops_sm6_native16.ps.cso',
+    command: dxc_command + [ '-enable-16bit-types', '-DDXMT_NATIVE16', '-E', 'ps_native16', '-T', 'ps_6_2', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
   custom_target('dx12_graphics_stencil_ref_sm6_fixture',

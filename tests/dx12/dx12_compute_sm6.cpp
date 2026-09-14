@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d12.h>
 
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -32,7 +33,8 @@ int main(int argc, char **argv) {
                  "--unbounded-resources|"
                  "--append-consume-unsupported|"
                  "--nan-inf-ops|"
-                 "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops|--native16-ops|"
+                 "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops|--int64-descriptor-ops|"
+                 "--native16-ops|--native16-descriptor-ops|"
                  "--denorm-preserve-unsupported|--denorm-ftz-unsupported|--packed-dot-ops|"
                  "--pack-unpack-unsupported|--compute-derivatives|"
                  "--compute-derivatives-unsupported|--atomic64-unsupported|"
@@ -43,7 +45,11 @@ int main(int argc, char **argv) {
   const bool wave_ops = argc == 3 && strcmp(argv[2], "--wave-ops") == 0;
   const bool wave_size_unsupported = argc == 3 && strcmp(argv[2], "--wave-size-unsupported") == 0;
   const bool int64_ops = argc == 3 && strcmp(argv[2], "--int64-ops") == 0;
+  const bool int64_descriptor_ops = argc == 3 && strcmp(argv[2], "--int64-descriptor-ops") == 0;
   const bool native16_ops = argc == 3 && strcmp(argv[2], "--native16-ops") == 0;
+  const bool native16_descriptor_ops = argc == 3 && strcmp(argv[2], "--native16-descriptor-ops") == 0;
+  const bool int64_mode = int64_ops || int64_descriptor_ops;
+  const bool native16_mode = native16_ops || native16_descriptor_ops;
   const bool denorm_preserve_unsupported = argc == 3 && strcmp(argv[2], "--denorm-preserve-unsupported") == 0;
   const bool denorm_ftz_unsupported = argc == 3 && strcmp(argv[2], "--denorm-ftz-unsupported") == 0;
   const bool denorm_unsupported = denorm_preserve_unsupported || denorm_ftz_unsupported;
@@ -72,7 +78,8 @@ int main(int argc, char **argv) {
   const bool descriptor_uav = argc == 3 &&
                               (strcmp(argv[2], "--descriptor-uav") == 0 || append_consume_unsupported);
   const bool descriptor_resources =
-      argc == 3 && strcmp(argv[2], "--descriptor-resources") == 0;
+      argc == 3 && (strcmp(argv[2], "--descriptor-resources") == 0 || int64_descriptor_ops ||
+                    native16_descriptor_ops);
   const bool descriptor_resources_space =
       argc == 3 && strcmp(argv[2], "--descriptor-resources-space") == 0;
   const bool descriptor_resources_1_1 =
@@ -98,12 +105,12 @@ int main(int argc, char **argv) {
   const bool root_constants =
       argc == 3 && strcmp(argv[2], "--root-constants") == 0;
   const bool root_srv = argc == 3 && strcmp(argv[2], "--root-srv") == 0;
-  const bool root_srv_mode = root_srv || int64_ops;
+  const bool root_srv_mode = root_srv || int64_ops || native16_ops;
   const bool cache_probe = argc == 3 && strcmp(argv[2], "--cache-probe") == 0;
   if (argc == 3 && !root_uav && !reserved_uav && !reserved_srv && !descriptor_uav && !descriptor_resources &&
       !descriptor_resources_space && !descriptor_resources_1_1 && !descriptor_null_cbv && !unbounded_resources &&
       !root_cbv && !root_constants && !root_srv_mode && !direct_indexed_resource_heap && !cache_probe &&
-      !wave_ops && !wave_size_unsupported && !int64_ops && !native16_ops && !denorm_unsupported &&
+      !wave_ops && !wave_size_unsupported && !int64_mode && !native16_mode && !denorm_unsupported &&
       !packed_dot_ops && !pack_unpack_unsupported && !compute_derivatives &&
       !compute_derivatives_unsupported && !atomic64_unsupported && !library_subobjects_unsupported &&
       !sampler_feedback_unsupported && !ray_payload_qualifiers_unsupported && !nan_inf_ops && !global_coherent) {
@@ -345,7 +352,7 @@ int main(int argc, char **argv) {
         srv_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
         srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv_desc.Buffer.NumElements = 1;
-        srv_desc.Buffer.StructureByteStride = sizeof(UINT);
+        srv_desc.Buffer.StructureByteStride = native16_mode ? sizeof(uint16_t) : sizeof(UINT);
         srv_desc.Buffer.FirstElement = 0;
         device->CreateShaderResourceView(input_buffer, &srv_desc, descriptor_cpu);
         descriptor_cpu.ptr += descriptor_increment;
@@ -369,7 +376,7 @@ int main(int argc, char **argv) {
         srv_desc.Shader4ComponentMapping =
             D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv_desc.Buffer.NumElements = direct_indexed_nonuniform ? 1 : 64;
-        srv_desc.Buffer.StructureByteStride = sizeof(UINT);
+        srv_desc.Buffer.StructureByteStride = native16_mode ? sizeof(uint16_t) : sizeof(UINT);
         srv_desc.Buffer.FirstElement = 0;
         device->CreateShaderResourceView(input_buffer, &srv_desc,
                                          descriptor_cpu);
@@ -472,7 +479,7 @@ int main(int argc, char **argv) {
       uav_desc.Format = DXGI_FORMAT_UNKNOWN;
       uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
       uav_desc.Buffer.NumElements = 64;
-      uav_desc.Buffer.StructureByteStride = sizeof(UINT);
+      uav_desc.Buffer.StructureByteStride = native16_mode ? sizeof(uint16_t) : sizeof(UINT);
       descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
       if (descriptor_table_resources || direct_indexed_resources || direct_indexed_resources_lifetime ||
           direct_indexed_nonuniform)
@@ -616,7 +623,9 @@ int main(int argc, char **argv) {
       D3D12_TILE_REGION_SIZE region = {}; region.NumTiles = 1;
       list->CopyTiles(output_buffer, &coord, &region, readback_buffer, 0, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
     } else {
-      const UINT output_copy_size = wave_ops || packed_dot_ops
+      const UINT output_copy_size = wave_ops
+                                        ? sizeof(UINT) * 6
+                                    : packed_dot_ops
                                         ? sizeof(UINT) * 3
                                     : global_coherent
                                         ? sizeof(UINT) * 2
@@ -624,7 +633,7 @@ int main(int argc, char **argv) {
                                         ? sizeof(UINT) * 2
                                     : compute_derivatives
                                         ? sizeof(UINT) * 64
-                                    : int64_ops
+                                    : int64_mode
                                         ? sizeof(UINT) * 2
                                         : sizeof(UINT);
       list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0, output_copy_size);
@@ -660,13 +669,17 @@ int main(int argc, char **argv) {
     output_value = *mapped;
     UINT wave_prefix_product = 0;
     UINT wave_prefix_sum = 0;
+    UINT wave_match = 0;
+    UINT wave_match_y = 0;
     UINT int64_high = 0;
     UINT packed_dot_unsigned = 0;
     if (wave_ops) {
       wave_prefix_product = mapped[1];
       wave_prefix_sum = mapped[2];
+      wave_match = mapped[3];
+      wave_match_y = mapped[4];
     }
-    if (int64_ops)
+    if (int64_mode)
       int64_high = mapped[1];
     if (packed_dot_ops)
       packed_dot_unsigned = mapped[1];
@@ -695,10 +708,12 @@ int main(int argc, char **argv) {
       expected_value = input_value;
     else if (unbounded_resources)
       expected_value = input_value + 111;
+    else if (int64_mode)
+      expected_value = 782;
+    else if (native16_mode)
+      expected_value = 62200;
     else if (descriptor_table_resources)
       expected_value = input_value * 2;
-    else if (int64_ops)
-      expected_value = 782;
     else if (packed_dot_ops)
       expected_value = static_cast<UINT>(-117);
     else if (compute_derivatives)
@@ -707,8 +722,6 @@ int main(int argc, char **argv) {
       expected_value = 31;
     else if (global_coherent)
       expected_value = 0x12345678;
-    else if (native16_ops)
-      expected_value = 62200;
     else if (root_cbv || root_constants || root_srv_mode)
       expected_value = input_value;
     else if (wave_ops)
@@ -730,8 +743,13 @@ int main(int argc, char **argv) {
         std::cerr << "WavePrefixSum readback mismatch: " << wave_prefix_sum << " expected 496\n";
         goto cleanup;
       }
+      if (wave_match != 0xAAAAAAAA || wave_match_y != 0 || mapped[5] != 0x00C0FFEE) {
+        std::cerr << "WaveMatch readback mismatch: " << wave_match << ", " << wave_match_y << ", " << mapped[5]
+                  << " expected 2863311530, 0, 12648430\n";
+        goto cleanup;
+      }
     }
-    if (int64_ops && int64_high != 1) {
+    if (int64_mode && int64_high != 1) {
       std::cerr << "64-bit high-half readback mismatch: " << int64_high << " expected 1\n";
       goto cleanup;
     }
@@ -742,19 +760,23 @@ int main(int argc, char **argv) {
     std::cout << (is_dxbc ? "DXBC" : "DXIL")
               << (packed_dot_ops || compute_derivatives || nan_inf_ops || direct_indexed_resource_heap || unbounded_resources
                       ? " cs_6_6 "
+                  : wave_ops
+                      ? " cs_6_5 "
+                  : native16_mode
+                      ? " cs_6_2 "
                       : " cs_6_0 ")
               << (root_cbv                     ? "root CBV"
                   : root_constants              ? "root constants"
-                  : int64_ops                   ? "int64 ops"
+                  : int64_mode                  ? (int64_descriptor_ops ? "int64 descriptor ops" : "int64 ops")
                   : (root_srv || reserved_srv) ? "root SRV"
                   : direct_indexed_resources || direct_indexed_resources_lifetime
                                                   ? "direct indexed resources"
                   : direct_indexed_nonuniform    ? "direct indexed non-uniform"
                   : direct_indexed               ? "direct indexed"
                   : unbounded_resources          ? "unbounded resources"
-                  : descriptor_table_resources  ? "descriptor resources"
                   : wave_ops                    ? "wave ops"
-                  : native16_ops                ? "native16 ops"
+                  : native16_mode               ? (native16_descriptor_ops ? "native16 descriptor ops" : "native16 ops")
+                  : descriptor_table_resources  ? "descriptor resources"
                   : packed_dot_ops              ? "packed dot ops"
                   : compute_derivatives         ? "compute derivatives"
                   : nan_inf_ops                 ? "nan/inf ops"
