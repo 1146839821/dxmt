@@ -293,6 +293,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-T', 'lib_6_3', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_ray_stages_sm6_fixture',
+    input: 'ray_stages_sm6.hlsl',
+    output: 'ray_stages_sm6.lib.cso',
+    command: dxc_command + [ '-T', 'lib_6_3', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_ray_payload_qualifiers_sm6_fixture',
     input: 'ray_payload_qualifiers_sm6.hlsl',
     output: 'ray_payload_qualifiers_sm6.lib.cso',

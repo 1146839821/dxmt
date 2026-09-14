@@ -168,12 +168,31 @@ main(int argc, char **argv) {
 
   CompileOutput raygen;
   CompileOutput miss;
+  CompileOutput closest_hit;
+  CompileOutput any_hit;
+  CompileOutput intersection;
+  CompileOutput callable;
   const bool raygen_compiled = CompileStage(
       compile, shader, root_signature, DXMT_MSC_STAGE_RAY_GENERATION, "RayGen", raygen
   );
   const bool miss_compiled = CompileStage(compile, shader, root_signature, DXMT_MSC_STAGE_MISS, "Miss", miss);
-  const bool libraries_loaded = raygen_compiled && miss_compiled && LoadMetalLibrary(device, raygen, "RayGen") &&
-                                LoadMetalLibrary(device, miss, "Miss");
+  const bool closest_hit_compiled = CompileStage(
+      compile, shader, root_signature, DXMT_MSC_STAGE_CLOSEST_HIT, "ClosestHit", closest_hit
+  );
+  const bool any_hit_compiled = CompileStage(
+      compile, shader, root_signature, DXMT_MSC_STAGE_ANY_HIT, "AnyHit", any_hit
+  );
+  const bool intersection_compiled = CompileStage(
+      compile, shader, root_signature, DXMT_MSC_STAGE_INTERSECTION, "Intersection", intersection
+  );
+  const bool callable_compiled = CompileStage(
+      compile, shader, root_signature, DXMT_MSC_STAGE_CALLABLE, "Callable", callable
+  );
+  const bool libraries_loaded =
+      raygen_compiled && miss_compiled && closest_hit_compiled && any_hit_compiled && intersection_compiled &&
+      callable_compiled && LoadMetalLibrary(device, raygen, "RayGen") && LoadMetalLibrary(device, miss, "Miss") &&
+      LoadMetalLibrary(device, closest_hit, "ClosestHit") && LoadMetalLibrary(device, any_hit, "AnyHit") &&
+      LoadMetalLibrary(device, intersection, "Intersection") && LoadMetalLibrary(device, callable, "Callable");
 
   root_blob->Release();
   NSObject_release(devices);
@@ -182,6 +201,7 @@ main(int argc, char **argv) {
     return 7;
 
   std::cout << "MSC ray tracing stages passed: raygen=" << raygen.entry_point << ",miss=" << miss.entry_point
-            << "\n";
+            << ",closest_hit=" << closest_hit.entry_point << ",any_hit=" << any_hit.entry_point
+            << ",intersection=" << intersection.entry_point << ",callable=" << callable.entry_point << "\n";
   return 0;
 }
