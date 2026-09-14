@@ -1562,3 +1562,134 @@ MTLTexture_getBytes(
   params.bytes_per_image = bytes_per_image;
   UNIX_CALL(unix_mtltexture_getbytes, &params);
 }
+
+WINEMETAL_API bool
+MTLDevice_supportsRaytracing(obj_handle_t device) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = device;
+  params.ret = 0;
+  UNIX_CALL(unix_mtldevice_supportsraytracing, &params);
+  return params.ret != 0;
+}
+
+WINEMETAL_API struct WMTAccelerationStructureSizes
+MTLDevice_accelerationStructureSizes(
+    obj_handle_t device, const struct WMTAccelerationStructureDescriptorInfo *info
+) {
+  struct unixcall_mtldevice_accelerationstructuresizes params = {};
+  struct WMTAccelerationStructureSizes ret = {};
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  UNIX_CALL(unix_mtldevice_accelerationstructuresizes, &params);
+  ret.acceleration_structure_size = params.ret_acceleration_structure_size;
+  ret.build_scratch_buffer_size = params.ret_build_scratch_buffer_size;
+  ret.refit_scratch_buffer_size = params.ret_refit_scratch_buffer_size;
+  return ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newAccelerationStructure(obj_handle_t device, uint64_t size, uint64_t *gpu_resource_id) {
+  struct unixcall_mtldevice_newaccelerationstructure params = {};
+  params.device = device;
+  params.size = size;
+  UNIX_CALL(unix_mtldevice_newaccelerationstructure, &params);
+  if (gpu_resource_id)
+    *gpu_resource_id = params.gpu_resource_id;
+  return params.ret;
+}
+
+WINEMETAL_API uint64_t
+MTLAccelerationStructure_gpuResourceID(obj_handle_t acceleration_structure) {
+  struct unixcall_mtlaccelerationstructure_gpuresourceid params = {};
+  params.acceleration_structure = acceleration_structure;
+  UNIX_CALL(unix_mtlaccelerationstructure_gpuresourceid, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLCommandBuffer_accelerationStructureCommandEncoder(obj_handle_t cmdbuf) {
+  struct unixcall_generic_obj_obj_ret params = {};
+  params.handle = cmdbuf;
+  UNIX_CALL(unix_mtlcommandbuffer_accelerationstructurecommandencoder, &params);
+  return params.ret;
+}
+
+WINEMETAL_API bool
+MTLAccelerationStructureCommandEncoder_build(
+    obj_handle_t encoder, obj_handle_t destination, const struct WMTAccelerationStructureDescriptorInfo *info,
+    obj_handle_t scratch, uint64_t scratch_offset
+) {
+  struct unixcall_mtlaccelerationstructurecommandencoder_build params = {};
+  params.encoder = encoder;
+  params.destination = destination;
+  WMT_MEMPTR_SET(params.info, info);
+  params.scratch = scratch;
+  params.scratch_offset = scratch_offset;
+  UNIX_CALL(unix_mtlaccelerationstructurecommandencoder_build, &params);
+  return params.ret;
+}
+
+WINEMETAL_API bool
+MTLAccelerationStructureCommandEncoder_refit(
+    obj_handle_t encoder, obj_handle_t source, obj_handle_t destination,
+    const struct WMTAccelerationStructureDescriptorInfo *info, obj_handle_t scratch, uint64_t scratch_offset
+) {
+  struct unixcall_mtlaccelerationstructurecommandencoder_refit params = {};
+  params.encoder = encoder;
+  params.source = source;
+  params.destination = destination;
+  WMT_MEMPTR_SET(params.info, info);
+  params.scratch = scratch;
+  params.scratch_offset = scratch_offset;
+  UNIX_CALL(unix_mtlaccelerationstructurecommandencoder_refit, &params);
+  return params.ret;
+}
+
+WINEMETAL_API bool
+MTLAccelerationStructureCommandEncoder_copy(obj_handle_t encoder, obj_handle_t source, obj_handle_t destination) {
+  struct unixcall_mtlaccelerationstructurecommandencoder_copy params = {};
+  params.encoder = encoder;
+  params.source = source;
+  params.destination = destination;
+  UNIX_CALL(unix_mtlaccelerationstructurecommandencoder_copy, &params);
+  return params.ret;
+}
+
+WINEMETAL_API bool
+MTLAccelerationStructureCommandEncoder_copyAndCompact(
+    obj_handle_t encoder, obj_handle_t source, obj_handle_t destination
+) {
+  struct unixcall_mtlaccelerationstructurecommandencoder_copy params = {};
+  params.encoder = encoder;
+  params.source = source;
+  params.destination = destination;
+  UNIX_CALL(unix_mtlaccelerationstructurecommandencoder_copyandcompact, &params);
+  return params.ret;
+}
+
+WINEMETAL_API bool
+MTLAccelerationStructureCommandEncoder_writeCompactedSize(
+    obj_handle_t encoder, obj_handle_t acceleration_structure, obj_handle_t buffer, uint64_t offset,
+    uint32_t size_data_type
+) {
+  struct unixcall_mtlaccelerationstructurecommandencoder_writecompactedsize params = {};
+  params.encoder = encoder;
+  params.acceleration_structure = acceleration_structure;
+  params.buffer = buffer;
+  params.offset = offset;
+  params.size_data_type = size_data_type;
+  UNIX_CALL(unix_mtlaccelerationstructurecommandencoder_writecompactedsize, &params);
+  return params.ret;
+}
+
+WINEMETAL_API bool
+MTLAccelerationStructureCommandEncoder_useResource(
+    obj_handle_t encoder, obj_handle_t resource, enum WMTResourceUsage usage
+) {
+  struct unixcall_mtlaccelerationstructurecommandencoder_useresource params = {};
+  params.encoder = encoder;
+  params.resource = resource;
+  params.usage = usage;
+  UNIX_CALL(unix_mtlaccelerationstructurecommandencoder_useresource, &params);
+  return params.ret;
+}

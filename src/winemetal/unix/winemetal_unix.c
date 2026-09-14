@@ -1497,6 +1497,337 @@ _MTLDevice_supportsFamily(void *obj) {
   return STATUS_SUCCESS;
 }
 
+static MTLAccelerationStructureGeometryDescriptor *
+make_acceleration_structure_geometry(const struct WMTAccelerationStructureGeometryInfo *info) {
+  if (!info)
+    return nil;
+
+  MTLAccelerationStructureGeometryDescriptor *geometry = nil;
+  switch (info->type) {
+  case WMTAccelerationStructureGeometryTriangle: {
+    if (info->vertex_format != WMTAccelerationStructureVertexFormatFloat3 || !info->vertex_buffer ||
+        !info->vertex_stride || !info->triangle_count || info->triangle_count > NSUIntegerMax)
+      return nil;
+    if (info->index_type != WMTAccelerationStructureIndexTypeNone && !info->index_buffer)
+      return nil;
+    if (info->index_type != WMTAccelerationStructureIndexTypeNone &&
+        info->index_type != WMTAccelerationStructureIndexTypeUInt16 &&
+        info->index_type != WMTAccelerationStructureIndexTypeUInt32)
+      return nil;
+
+    MTLAccelerationStructureTriangleGeometryDescriptor *triangle =
+        [[MTLAccelerationStructureTriangleGeometryDescriptor alloc] init];
+    triangle.vertexBuffer = (id<MTLBuffer>)info->vertex_buffer;
+    triangle.vertexBufferOffset = (NSUInteger)info->vertex_buffer_offset;
+    triangle.vertexStride = (NSUInteger)info->vertex_stride;
+    triangle.triangleCount = (NSUInteger)info->triangle_count;
+    if (info->index_buffer) {
+      triangle.indexBuffer = (id<MTLBuffer>)info->index_buffer;
+      triangle.indexBufferOffset = (NSUInteger)info->index_buffer_offset;
+      triangle.indexType = info->index_type == WMTAccelerationStructureIndexTypeUInt16
+                               ? MTLIndexTypeUInt16
+                               : MTLIndexTypeUInt32;
+    }
+    geometry = triangle;
+    break;
+  }
+  case WMTAccelerationStructureGeometryBoundingBox: {
+    if (!info->bounding_box_buffer || !info->bounding_box_count || !info->bounding_box_stride ||
+        info->bounding_box_count > NSUIntegerMax)
+      return nil;
+
+    MTLAccelerationStructureBoundingBoxGeometryDescriptor *bounding_box =
+        [[MTLAccelerationStructureBoundingBoxGeometryDescriptor alloc] init];
+    bounding_box.boundingBoxBuffer = (id<MTLBuffer>)info->bounding_box_buffer;
+    bounding_box.boundingBoxBufferOffset = (NSUInteger)info->bounding_box_buffer_offset;
+    bounding_box.boundingBoxStride = (NSUInteger)info->bounding_box_stride;
+    bounding_box.boundingBoxCount = (NSUInteger)info->bounding_box_count;
+    geometry = bounding_box;
+    break;
+  }
+  default:
+    return nil;
+  }
+
+  geometry.intersectionFunctionTableOffset = (NSUInteger)info->intersection_function_table_offset;
+  geometry.opaque = info->opaque;
+  geometry.allowDuplicateIntersectionFunctionInvocation = info->allow_duplicate_intersection_function_invocation;
+  return geometry;
+}
+
+static MTLAccelerationStructureDescriptor *
+make_acceleration_structure_descriptor(const struct WMTAccelerationStructureDescriptorInfo *info) {
+  if (!info)
+    return nil;
+
+  switch (info->type) {
+  case WMTAccelerationStructureDescriptorPrimitive: {
+    const struct WMTPrimitiveAccelerationStructureInfo *source = &info->data.primitive;
+    if (!source->geometry_count || source->geometry_count > WMT_MAX_ACCELERATION_STRUCTURE_GEOMETRIES)
+      return nil;
+
+    MTLPrimitiveAccelerationStructureDescriptor *descriptor =
+        [[MTLPrimitiveAccelerationStructureDescriptor alloc] init];
+    NSMutableArray *geometries = [[NSMutableArray alloc] initWithCapacity:source->geometry_count];
+    for (uint32_t i = 0; i < source->geometry_count; i++) {
+      MTLAccelerationStructureGeometryDescriptor *geometry =
+          make_acceleration_structure_geometry(&source->geometries[i]);
+      if (!geometry) {
+        [geometries release];
+        [descriptor release];
+        return nil;
+      }
+      [geometries addObject:geometry];
+      [geometry release];
+    }
+    descriptor.geometryDescriptors = geometries;
+    descriptor.usage = (MTLAccelerationStructureUsage)source->usage;
+    [geometries release];
+    return descriptor;
+  }
+  case WMTAccelerationStructureDescriptorInstance: {
+    const struct WMTInstanceAccelerationStructureInfo *source = &info->data.instance;
+    if (source->instanced_acceleration_structure_count > WMT_MAX_ACCELERATION_STRUCTURE_INSTANCES ||
+        source->instance_count > NSUIntegerMax || source->instance_descriptor_buffer_offset > NSUIntegerMax ||
+        source->instance_descriptor_stride > NSUIntegerMax)
+      return nil;
+    if (source->instance_count && !source->instance_descriptor_buffer)
+      return nil;
+
+    MTLInstanceAccelerationStructureDescriptor *descriptor =
+        [[MTLInstanceAccelerationStructureDescriptor alloc] init];
+    descriptor.instanceDescriptorBuffer = (id<MTLBuffer>)source->instance_descriptor_buffer;
+    descriptor.instanceDescriptorBufferOffset = (NSUInteger)source->instance_descriptor_buffer_offset;
+    descriptor.instanceDescriptorStride = (NSUInteger)source->instance_descriptor_stride;
+    descriptor.instanceCount = (NSUInteger)source->instance_count;
+    if (source->instance_descriptor_type != WMTAccelerationStructureInstanceDescriptorDefault) {
+      if (@available(macOS 12.0, *))
+        descriptor.instanceDescriptorType = (MTLAccelerationStructureInstanceDescriptorType)source->instance_descriptor_type;
+      else {
+        [descriptor release];
+        return nil;
+      }
+    }
+
+    if (source->instanced_acceleration_structure_count) {
+      NSMutableArray *acceleration_structures =
+          [[NSMutableArray alloc] initWithCapacity:source->instanced_acceleration_structure_count];
+      for (uint32_t i = 0; i < source->instanced_acceleration_structure_count; i++) {
+        if (!source->instanced_acceleration_structures[i]) {
+          [acceleration_structures release];
+          [descriptor release];
+          return nil;
+        }
+        [acceleration_structures addObject:(id<MTLAccelerationStructure>)source->instanced_acceleration_structures[i]];
+      }
+      descriptor.instancedAccelerationStructures = acceleration_structures;
+      [acceleration_structures release];
+    }
+    descriptor.usage = (MTLAccelerationStructureUsage)source->usage;
+    return descriptor;
+  }
+  default:
+    return nil;
+  }
+}
+
+static NTSTATUS
+_MTLDevice_supportsRaytracing(void *obj) {
+  struct unixcall_generic_obj_uint64_ret *params = obj;
+  params->ret = 0;
+  if (@available(macOS 11.0, *))
+    params->ret = [(id<MTLDevice>)params->handle supportsRaytracing];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLDevice_accelerationStructureSizes(void *obj) {
+  struct unixcall_mtldevice_accelerationstructuresizes *params = obj;
+  params->ret_acceleration_structure_size = 0;
+  params->ret_build_scratch_buffer_size = 0;
+  params->ret_refit_scratch_buffer_size = 0;
+  if (!params->info.ptr)
+    return STATUS_SUCCESS;
+  if (!@available(macOS 11.0, *))
+    return STATUS_SUCCESS;
+
+  MTLAccelerationStructureDescriptor *descriptor =
+      make_acceleration_structure_descriptor(params->info.ptr);
+  if (!descriptor)
+    return STATUS_SUCCESS;
+  MTLAccelerationStructureSizes sizes =
+      [(id<MTLDevice>)params->device accelerationStructureSizesWithDescriptor:descriptor];
+  params->ret_acceleration_structure_size = sizes.accelerationStructureSize;
+  params->ret_build_scratch_buffer_size = sizes.buildScratchBufferSize;
+  params->ret_refit_scratch_buffer_size = sizes.refitScratchBufferSize;
+  [descriptor release];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLDevice_newAccelerationStructure(void *obj) {
+  struct unixcall_mtldevice_newaccelerationstructure *params = obj;
+  params->ret = 0;
+  params->gpu_resource_id = 0;
+  if (!params->size)
+    return STATUS_SUCCESS;
+  if (!@available(macOS 11.0, *))
+    return STATUS_SUCCESS;
+
+  id<MTLAccelerationStructure> acceleration_structure =
+      [(id<MTLDevice>)params->device newAccelerationStructureWithSize:(NSUInteger)params->size];
+  params->ret = (obj_handle_t)acceleration_structure;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 130000
+  if (acceleration_structure) {
+    if (@available(macOS 13.0, *))
+      params->gpu_resource_id = [acceleration_structure gpuResourceID]._impl;
+  }
+#endif
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLAccelerationStructure_gpuResourceID(void *obj) {
+  struct unixcall_mtlaccelerationstructure_gpuresourceid *params = obj;
+  params->ret = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 130000
+  if (params->acceleration_structure) {
+    if (@available(macOS 13.0, *))
+      params->ret = [(id<MTLAccelerationStructure>)params->acceleration_structure gpuResourceID]._impl;
+  }
+#endif
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLCommandBuffer_accelerationStructureCommandEncoder(void *obj) {
+  struct unixcall_generic_obj_obj_ret *params = obj;
+  params->ret = 0;
+  if (@available(macOS 11.0, *))
+    params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle accelerationStructureCommandEncoder];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLAccelerationStructureCommandEncoder_build(void *obj) {
+  struct unixcall_mtlaccelerationstructurecommandencoder_build *params = obj;
+  params->ret = false;
+  if (!params->encoder || !params->destination || !params->scratch || !params->info.ptr)
+    return STATUS_SUCCESS;
+  if (!@available(macOS 11.0, *))
+    return STATUS_SUCCESS;
+
+  MTLAccelerationStructureDescriptor *descriptor =
+      make_acceleration_structure_descriptor(params->info.ptr);
+  if (!descriptor)
+    return STATUS_SUCCESS;
+  [(id<MTLAccelerationStructureCommandEncoder>)params->encoder
+      buildAccelerationStructure:(id<MTLAccelerationStructure>)params->destination
+      descriptor:descriptor
+      scratchBuffer:(id<MTLBuffer>)params->scratch
+      scratchBufferOffset:(NSUInteger)params->scratch_offset];
+  [descriptor release];
+  params->ret = true;
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLAccelerationStructureCommandEncoder_refit(void *obj) {
+  struct unixcall_mtlaccelerationstructurecommandencoder_refit *params = obj;
+  params->ret = false;
+  if (!params->encoder || !params->source || !params->scratch || !params->info.ptr)
+    return STATUS_SUCCESS;
+  if (!@available(macOS 11.0, *))
+    return STATUS_SUCCESS;
+
+  MTLAccelerationStructureDescriptor *descriptor =
+      make_acceleration_structure_descriptor(params->info.ptr);
+  if (!descriptor)
+    return STATUS_SUCCESS;
+  [(id<MTLAccelerationStructureCommandEncoder>)params->encoder
+      refitAccelerationStructure:(id<MTLAccelerationStructure>)params->source
+      descriptor:descriptor
+      destination:(id<MTLAccelerationStructure>)params->destination
+      scratchBuffer:(id<MTLBuffer>)params->scratch
+      scratchBufferOffset:(NSUInteger)params->scratch_offset];
+  [descriptor release];
+  params->ret = true;
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLAccelerationStructureCommandEncoder_copy(void *obj) {
+  struct unixcall_mtlaccelerationstructurecommandencoder_copy *params = obj;
+  params->ret = false;
+  if (!params->encoder || !params->source || !params->destination)
+    return STATUS_SUCCESS;
+  if (@available(macOS 11.0, *)) {
+    [(id<MTLAccelerationStructureCommandEncoder>)params->encoder
+        copyAccelerationStructure:(id<MTLAccelerationStructure>)params->source
+        toAccelerationStructure:(id<MTLAccelerationStructure>)params->destination];
+    params->ret = true;
+  }
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLAccelerationStructureCommandEncoder_copyAndCompact(void *obj) {
+  struct unixcall_mtlaccelerationstructurecommandencoder_copy *params = obj;
+  params->ret = false;
+  if (!params->encoder || !params->source || !params->destination)
+    return STATUS_SUCCESS;
+  if (@available(macOS 11.0, *)) {
+    [(id<MTLAccelerationStructureCommandEncoder>)params->encoder
+        copyAndCompactAccelerationStructure:(id<MTLAccelerationStructure>)params->source
+        toAccelerationStructure:(id<MTLAccelerationStructure>)params->destination];
+    params->ret = true;
+  }
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLAccelerationStructureCommandEncoder_writeCompactedSize(void *obj) {
+  struct unixcall_mtlaccelerationstructurecommandencoder_writecompactedsize *params = obj;
+  params->ret = false;
+  if (!params->encoder || !params->acceleration_structure || !params->buffer)
+    return STATUS_SUCCESS;
+  if (!@available(macOS 11.0, *))
+    return STATUS_SUCCESS;
+
+  id<MTLAccelerationStructureCommandEncoder> encoder =
+      (id<MTLAccelerationStructureCommandEncoder>)params->encoder;
+  if (params->size_data_type == WMTAccelerationStructureSizeDataTypeUInt32) {
+    [encoder writeCompactedAccelerationStructureSize:(id<MTLAccelerationStructure>)params->acceleration_structure
+                                            toBuffer:(id<MTLBuffer>)params->buffer
+                                              offset:(NSUInteger)params->offset];
+    params->ret = true;
+  } else if (params->size_data_type == WMTAccelerationStructureSizeDataTypeUInt64) {
+    if (@available(macOS 12.0, *)) {
+      [encoder writeCompactedAccelerationStructureSize:(id<MTLAccelerationStructure>)params->acceleration_structure
+                                              toBuffer:(id<MTLBuffer>)params->buffer
+                                                offset:(NSUInteger)params->offset
+                                          sizeDataType:MTLDataTypeULong];
+      params->ret = true;
+    }
+  }
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLAccelerationStructureCommandEncoder_useResource(void *obj) {
+  struct unixcall_mtlaccelerationstructurecommandencoder_useresource *params = obj;
+  params->ret = false;
+  if (!params->encoder || !params->resource)
+    return STATUS_SUCCESS;
+  if (@available(macOS 11.0, *)) {
+    [(id<MTLAccelerationStructureCommandEncoder>)params->encoder
+        useResource:(id<MTLResource>)params->resource
+        usage:(MTLResourceUsage)params->usage];
+    params->ret = true;
+  }
+  return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 _MTLDevice_supportsPlacementSparse(void *obj) {
   struct unixcall_generic_obj_uint64_ret *params = obj;
@@ -3925,6 +4256,17 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLCommandQueue_commandBufferWithErrorOptions,
     &_MTLTexture_tailSizeInBytes,
     &thunk_DXMTMSCGetCapabilities,
+    &_MTLDevice_supportsRaytracing,
+    &_MTLDevice_accelerationStructureSizes,
+    &_MTLDevice_newAccelerationStructure,
+    &_MTLAccelerationStructure_gpuResourceID,
+    &_MTLCommandBuffer_accelerationStructureCommandEncoder,
+    &_MTLAccelerationStructureCommandEncoder_build,
+    &_MTLAccelerationStructureCommandEncoder_refit,
+    &_MTLAccelerationStructureCommandEncoder_copy,
+    &_MTLAccelerationStructureCommandEncoder_copyAndCompact,
+    &_MTLAccelerationStructureCommandEncoder_writeCompactedSize,
+    &_MTLAccelerationStructureCommandEncoder_useResource,
 };
 
 #ifndef DXMT_NATIVE
@@ -4099,5 +4441,16 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLCommandQueue_commandBufferWithErrorOptions,
     &_MTLTexture_tailSizeInBytes,
     &thunk32_DXMTMSCGetCapabilities,
+    &_MTLDevice_supportsRaytracing,
+    &_MTLDevice_accelerationStructureSizes,
+    &_MTLDevice_newAccelerationStructure,
+    &_MTLAccelerationStructure_gpuResourceID,
+    &_MTLCommandBuffer_accelerationStructureCommandEncoder,
+    &_MTLAccelerationStructureCommandEncoder_build,
+    &_MTLAccelerationStructureCommandEncoder_refit,
+    &_MTLAccelerationStructureCommandEncoder_copy,
+    &_MTLAccelerationStructureCommandEncoder_copyAndCompact,
+    &_MTLAccelerationStructureCommandEncoder_writeCompactedSize,
+    &_MTLAccelerationStructureCommandEncoder_useResource,
 };
 #endif

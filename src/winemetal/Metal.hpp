@@ -229,6 +229,14 @@ class Resource : public Allocation {
 public:
 };
 
+class AccelerationStructure : public Resource {
+public:
+  uint64_t
+  gpuResourceID() const {
+    return MTLAccelerationStructure_gpuResourceID(handle);
+  }
+};
+
 class Texture : public Resource {
 public:
   Reference<Texture>
@@ -363,6 +371,62 @@ public:
 
 class RenderPipelineState : public Object {
 public:
+};
+
+class AccelerationStructureCommandEncoder : public CommandEncoder {
+public:
+  bool
+  build(
+      AccelerationStructure destination, const WMTAccelerationStructureDescriptorInfo &info, Buffer scratch,
+      uint64_t scratch_offset
+  ) {
+    return MTLAccelerationStructureCommandEncoder_build(
+        handle, destination.handle, &info, scratch.handle, scratch_offset
+    );
+  }
+
+  bool
+  refit(
+      AccelerationStructure source, AccelerationStructure destination,
+      const WMTAccelerationStructureDescriptorInfo &info, Buffer scratch, uint64_t scratch_offset
+  ) {
+    return MTLAccelerationStructureCommandEncoder_refit(
+        handle, source.handle, destination.handle, &info, scratch.handle, scratch_offset
+    );
+  }
+
+  bool
+  refit(
+      AccelerationStructure source, const WMTAccelerationStructureDescriptorInfo &info, Buffer scratch,
+      uint64_t scratch_offset
+  ) {
+    return MTLAccelerationStructureCommandEncoder_refit(handle, source.handle, NULL_OBJECT_HANDLE, &info, scratch.handle,
+                                                        scratch_offset);
+  }
+
+  bool
+  copy(AccelerationStructure source, AccelerationStructure destination) {
+    return MTLAccelerationStructureCommandEncoder_copy(handle, source.handle, destination.handle);
+  }
+
+  bool
+  copyAndCompact(AccelerationStructure source, AccelerationStructure destination) {
+    return MTLAccelerationStructureCommandEncoder_copyAndCompact(handle, source.handle, destination.handle);
+  }
+
+  bool
+  writeCompactedSize(
+      AccelerationStructure acceleration_structure, Buffer buffer, uint64_t offset, uint32_t size_data_type
+  ) {
+    return MTLAccelerationStructureCommandEncoder_writeCompactedSize(
+        handle, acceleration_structure.handle, buffer.handle, offset, size_data_type
+    );
+  }
+
+  bool
+  useResource(Resource resource, WMTResourceUsage usage) {
+    return MTLAccelerationStructureCommandEncoder_useResource(handle, resource.handle, usage);
+  }
 };
 
 class RenderCommandEncoder : public CommandEncoder {
@@ -718,6 +782,11 @@ public:
     return ComputeCommandEncoder{MTLCommandBuffer_computeCommandEncoder(handle, concurrent)};
   }
 
+  AccelerationStructureCommandEncoder
+  accelerationStructureCommandEncoder() {
+    return AccelerationStructureCommandEncoder{MTLCommandBuffer_accelerationStructureCommandEncoder(handle)};
+  }
+
   void
   presentDrawable(MetalDrawable drawable) {
     MTLCommandBuffer_presentDrawable(handle, drawable);
@@ -882,6 +951,21 @@ public:
   Reference<Buffer>
   newBuffer(WMTBufferInfo &info) {
     return Reference<Buffer>(MTLDevice_newBuffer(handle, &info));
+  }
+
+  bool
+  supportsRaytracing() const {
+    return MTLDevice_supportsRaytracing(handle);
+  }
+
+  WMTAccelerationStructureSizes
+  accelerationStructureSizes(const WMTAccelerationStructureDescriptorInfo &info) const {
+    return MTLDevice_accelerationStructureSizes(handle, &info);
+  }
+
+  Reference<AccelerationStructure>
+  newAccelerationStructure(uint64_t size, uint64_t *gpu_resource_id = nullptr) const {
+    return Reference<AccelerationStructure>(MTLDevice_newAccelerationStructure(handle, size, gpu_resource_id));
   }
 
   Reference<Buffer>

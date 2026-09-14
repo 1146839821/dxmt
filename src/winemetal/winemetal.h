@@ -1837,6 +1837,145 @@ enum WMTGPUFamily {
 
 WINEMETAL_API bool MTLDevice_supportsFamily(obj_handle_t device, enum WMTGPUFamily gpu_family);
 
+enum WMTAccelerationStructureDescriptorType {
+  WMTAccelerationStructureDescriptorPrimitive = 0,
+  WMTAccelerationStructureDescriptorInstance = 1,
+};
+
+enum WMTAccelerationStructureGeometryType {
+  WMTAccelerationStructureGeometryTriangle = 0,
+  WMTAccelerationStructureGeometryBoundingBox = 1,
+};
+
+enum WMTAccelerationStructureVertexFormat {
+  WMTAccelerationStructureVertexFormatFloat3 = 0,
+};
+
+enum WMTAccelerationStructureIndexType {
+  WMTAccelerationStructureIndexTypeNone = 0,
+  WMTAccelerationStructureIndexTypeUInt16 = 1,
+  WMTAccelerationStructureIndexTypeUInt32 = 2,
+};
+
+enum WMTAccelerationStructureUsage {
+  WMTAccelerationStructureUsageNone = 0,
+  WMTAccelerationStructureUsageRefit = 1,
+  WMTAccelerationStructureUsagePreferFastBuild = 1 << 1,
+  WMTAccelerationStructureUsageExtendedLimits = 1 << 2,
+  WMTAccelerationStructureUsagePreferFastIntersection = 1 << 4,
+  WMTAccelerationStructureUsageMinimizeMemory = 1 << 5,
+};
+
+enum WMTAccelerationStructureInstanceDescriptorType {
+  WMTAccelerationStructureInstanceDescriptorDefault = 0,
+  WMTAccelerationStructureInstanceDescriptorUserID = 1,
+  WMTAccelerationStructureInstanceDescriptorMotion = 2,
+  WMTAccelerationStructureInstanceDescriptorIndirect = 3,
+  WMTAccelerationStructureInstanceDescriptorIndirectMotion = 4,
+};
+
+enum WMTAccelerationStructureSizeDataType {
+  WMTAccelerationStructureSizeDataTypeUInt32 = 0,
+  WMTAccelerationStructureSizeDataTypeUInt64 = 1,
+};
+
+#define WMT_MAX_ACCELERATION_STRUCTURE_GEOMETRIES 8
+#define WMT_MAX_ACCELERATION_STRUCTURE_INSTANCES 8
+
+struct WMTAccelerationStructureGeometryInfo {
+  enum WMTAccelerationStructureGeometryType type;
+  enum WMTAccelerationStructureVertexFormat vertex_format;
+  enum WMTAccelerationStructureIndexType index_type;
+  uint32_t reserved;
+  obj_handle_t vertex_buffer;
+  uint64_t vertex_buffer_offset;
+  uint64_t vertex_stride;
+  uint64_t triangle_count;
+  obj_handle_t index_buffer;
+  uint64_t index_buffer_offset;
+  obj_handle_t bounding_box_buffer;
+  uint64_t bounding_box_buffer_offset;
+  uint64_t bounding_box_stride;
+  uint64_t bounding_box_count;
+  uint64_t intersection_function_table_offset;
+  bool opaque;
+  bool allow_duplicate_intersection_function_invocation;
+  uint8_t padding[6];
+};
+
+struct WMTPrimitiveAccelerationStructureInfo {
+  uint32_t geometry_count;
+  uint32_t usage;
+  struct WMTAccelerationStructureGeometryInfo geometries[WMT_MAX_ACCELERATION_STRUCTURE_GEOMETRIES];
+};
+
+struct WMTInstanceAccelerationStructureInfo {
+  obj_handle_t instance_descriptor_buffer;
+  uint64_t instance_descriptor_buffer_offset;
+  uint64_t instance_descriptor_stride;
+  uint64_t instance_count;
+  enum WMTAccelerationStructureInstanceDescriptorType instance_descriptor_type;
+  uint32_t instanced_acceleration_structure_count;
+  uint32_t usage;
+  obj_handle_t instanced_acceleration_structures[WMT_MAX_ACCELERATION_STRUCTURE_INSTANCES];
+};
+
+struct WMTAccelerationStructureDescriptorInfo {
+  enum WMTAccelerationStructureDescriptorType type;
+  uint32_t reserved;
+  union {
+    struct WMTPrimitiveAccelerationStructureInfo primitive;
+    struct WMTInstanceAccelerationStructureInfo instance;
+  } data;
+};
+
+struct WMTAccelerationStructureSizes {
+  uint64_t acceleration_structure_size;
+  uint64_t build_scratch_buffer_size;
+  uint64_t refit_scratch_buffer_size;
+};
+
+WINEMETAL_API bool MTLDevice_supportsRaytracing(obj_handle_t device);
+
+WINEMETAL_API struct WMTAccelerationStructureSizes MTLDevice_accelerationStructureSizes(
+    obj_handle_t device, const struct WMTAccelerationStructureDescriptorInfo *info
+);
+
+WINEMETAL_API obj_handle_t MTLDevice_newAccelerationStructure(
+    obj_handle_t device, uint64_t size, uint64_t *gpu_resource_id
+);
+
+WINEMETAL_API uint64_t MTLAccelerationStructure_gpuResourceID(obj_handle_t acceleration_structure);
+
+WINEMETAL_API obj_handle_t MTLCommandBuffer_accelerationStructureCommandEncoder(obj_handle_t cmdbuf);
+
+WINEMETAL_API bool MTLAccelerationStructureCommandEncoder_build(
+    obj_handle_t encoder, obj_handle_t destination, const struct WMTAccelerationStructureDescriptorInfo *info,
+    obj_handle_t scratch, uint64_t scratch_offset
+);
+
+WINEMETAL_API bool MTLAccelerationStructureCommandEncoder_refit(
+    obj_handle_t encoder, obj_handle_t source, obj_handle_t destination,
+    const struct WMTAccelerationStructureDescriptorInfo *info, obj_handle_t scratch, uint64_t scratch_offset
+);
+
+WINEMETAL_API bool MTLAccelerationStructureCommandEncoder_copy(
+    obj_handle_t encoder, obj_handle_t source, obj_handle_t destination
+);
+
+WINEMETAL_API bool MTLAccelerationStructureCommandEncoder_copyAndCompact(
+    obj_handle_t encoder, obj_handle_t source, obj_handle_t destination
+);
+
+WINEMETAL_API bool MTLAccelerationStructureCommandEncoder_writeCompactedSize(
+    obj_handle_t encoder, obj_handle_t acceleration_structure, obj_handle_t buffer, uint64_t offset,
+    uint32_t size_data_type
+);
+
+WINEMETAL_API bool MTLAccelerationStructureCommandEncoder_useResource(
+    obj_handle_t encoder, obj_handle_t resource, enum WMTResourceUsage usage
+);
+
 WINEMETAL_API bool MTLDevice_supportsPlacementSparse(obj_handle_t device);
 
 WINEMETAL_API bool MTLDevice_supportsBCTextureCompression(obj_handle_t device);

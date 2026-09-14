@@ -28,6 +28,17 @@ enum winemetal_unixcall {
   unix_sparsemappingqueue_barrierbeforeresourcestate = 166,
   unix_mtlcommandqueue_commandbuffer_with_error_options = 167,
   unix_mtltexture_tailsizeinbytes = 168,
+  unix_mtldevice_supportsraytracing = 170,
+  unix_mtldevice_accelerationstructuresizes,
+  unix_mtldevice_newaccelerationstructure,
+  unix_mtlaccelerationstructure_gpuresourceid,
+  unix_mtlcommandbuffer_accelerationstructurecommandencoder,
+  unix_mtlaccelerationstructurecommandencoder_build,
+  unix_mtlaccelerationstructurecommandencoder_refit,
+  unix_mtlaccelerationstructurecommandencoder_copy,
+  unix_mtlaccelerationstructurecommandencoder_copyandcompact,
+  unix_mtlaccelerationstructurecommandencoder_writecompactedsize,
+  unix_mtlaccelerationstructurecommandencoder_useresource,
 };
 
 struct unixcall_mtldevice_newmscgeometrypso {
@@ -520,6 +531,68 @@ struct unixcall_mtldevice_newplacementsparsetexture {
   struct WMTMemoryPointer info;
   enum WMTSparsePageSize sparse_page_size;
   obj_handle_t ret;
+};
+
+struct unixcall_mtldevice_accelerationstructuresizes {
+  obj_handle_t device;
+  struct WMTConstMemoryPointer info;
+  uint64_t ret_acceleration_structure_size;
+  uint64_t ret_build_scratch_buffer_size;
+  uint64_t ret_refit_scratch_buffer_size;
+};
+
+struct unixcall_mtldevice_newaccelerationstructure {
+  obj_handle_t device;
+  uint64_t size;
+  obj_handle_t ret;
+  uint64_t gpu_resource_id;
+};
+
+struct unixcall_mtlaccelerationstructure_gpuresourceid {
+  obj_handle_t acceleration_structure;
+  uint64_t ret;
+};
+
+struct unixcall_mtlaccelerationstructurecommandencoder_build {
+  obj_handle_t encoder;
+  obj_handle_t destination;
+  struct WMTConstMemoryPointer info;
+  obj_handle_t scratch;
+  uint64_t scratch_offset;
+  bool ret;
+};
+
+struct unixcall_mtlaccelerationstructurecommandencoder_refit {
+  obj_handle_t encoder;
+  obj_handle_t source;
+  obj_handle_t destination;
+  struct WMTConstMemoryPointer info;
+  obj_handle_t scratch;
+  uint64_t scratch_offset;
+  bool ret;
+};
+
+struct unixcall_mtlaccelerationstructurecommandencoder_copy {
+  obj_handle_t encoder;
+  obj_handle_t source;
+  obj_handle_t destination;
+  bool ret;
+};
+
+struct unixcall_mtlaccelerationstructurecommandencoder_writecompactedsize {
+  obj_handle_t encoder;
+  obj_handle_t acceleration_structure;
+  obj_handle_t buffer;
+  uint64_t offset;
+  uint32_t size_data_type;
+  bool ret;
+};
+
+struct unixcall_mtlaccelerationstructurecommandencoder_useresource {
+  obj_handle_t encoder;
+  obj_handle_t resource;
+  enum WMTResourceUsage usage;
+  bool ret;
 };
 
 #pragma pack(pop)
