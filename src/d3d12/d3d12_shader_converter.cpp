@@ -31,6 +31,7 @@ MakeFourCC(char a, char b, char c, char d) {
 }
 
 constexpr uint32_t kDXILFourCC = MakeFourCC('D', 'X', 'I', 'L');
+constexpr uint32_t kDXILLibraryShaderKind = 6;
 
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
@@ -302,6 +303,27 @@ HasUnsupportedDXILDenormMode(const D3D12_SHADER_BYTECODE &shader) {
 }
 
 bool
+IsDXILLibraryShader(const D3D12_SHADER_BYTECODE &shader) {
+  if (!shader.pShaderBytecode || !shader.BytecodeLength)
+    return false;
+
+  microsoft::CDXBCParser parser;
+  if (FAILED(parser.ReadDXBC(shader.pShaderBytecode, static_cast<uint32_t>(shader.BytecodeLength))))
+    return false;
+  const UINT dxil_blob = parser.FindNextMatchingBlob(static_cast<microsoft::DXBCFourCC>(kDXILFourCC), 0);
+  if (dxil_blob == DXBC_BLOB_NOT_FOUND || parser.GetBlobSize(dxil_blob) < 24)
+    return false;
+
+  const auto *blob = static_cast<const uint8_t *>(parser.GetBlob(dxil_blob));
+  if (!blob || std::memcmp(blob + 8, "DXIL", 4) != 0)
+    return false;
+
+  uint32_t program_version = 0;
+  std::memcpy(&program_version, blob, sizeof(program_version));
+  return (program_version >> 16) == kDXILLibraryShaderKind;
+}
+
+bool
 DeserializeMSCConversionCache(const uint8_t *data, size_t data_size, D3D12ConvertedShader &converted) {
   if (!data || data_size < sizeof(MSCSerializedCacheHeader))
     return false;
@@ -535,6 +557,7 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
     classification.uses_unsupported_shading_rate =
         HasInputSemantic(shader, "SV_ShadingRate") || HasOutputSemantic(shader, "SV_ShadingRate");
     classification.uses_unsupported_denorm_mode = HasUnsupportedDXILDenormMode(shader);
+    classification.is_library_shader = IsDXILLibraryShader(shader);
   }
   return classification;
 }
@@ -727,6 +750,10 @@ ConvertD3D12Shader(
   }
   if (classification.uses_unsupported_denorm_mode) {
     ERR("DXIL shader requires unsupported fp32 denorm mode");
+    return E_NOTIMPL;
+  }
+  if (classification.is_library_shader) {
+    ERR("DXIL library shaders are unsupported");
     return E_NOTIMPL;
   }
 

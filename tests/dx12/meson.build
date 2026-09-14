@@ -187,6 +187,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-enable-16bit-types', '-denorm', 'ftz', '-E', 'main', '-T', 'cs_6_2', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_library_subobjects_sm6_fixture',
+    input: 'library_subobjects_sm6.hlsl',
+    output: 'library_subobjects_sm6.lib.cso',
+    command: dxc_command + [ '-T', 'lib_6_3', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_compute_sm6_packed_dot_fixture',
     input: 'compute_sm6_packed_dot.hlsl',
     output: 'compute_sm6_packed_dot.cs.cso',
