@@ -56,10 +56,11 @@ int main(int argc, char **argv) {
   const bool view_id_unsupported = argc == 4 && strcmp(argv[3], "--view-id-unsupported") == 0;
   const bool get_attribute_unsupported = argc == 4 && strcmp(argv[3], "--get-attribute-unsupported") == 0;
   const bool vrs_unsupported = argc == 4 && strcmp(argv[3], "--vrs-unsupported") == 0;
+  const bool stencil_ref_unsupported = argc == 4 && strcmp(argv[3], "--stencil-ref-unsupported") == 0;
   if ((argc == 4 && !textured && !root_cbv && !root_constants && !root_srv &&
        !root_uav && !textured_root_cbv && !logic_op && !stencil && !barycentrics &&
        !helper_lane && !helper_lane_derivative && !helper_lane_discard && !view_id_unsupported &&
-       !get_attribute_unsupported && !vrs_unsupported) ||
+       !get_attribute_unsupported && !vrs_unsupported && !stencil_ref_unsupported) ||
       (argc == 5 && !geometry))
     return 2;
 
@@ -595,14 +596,15 @@ int main(int argc, char **argv) {
     result = 0;
     goto cleanup;
   }
-  if (view_id_unsupported || get_attribute_unsupported || vrs_unsupported) {
+  if (view_id_unsupported || get_attribute_unsupported || vrs_unsupported || stencil_ref_unsupported) {
     const HRESULT unsupported_hr =
         device->CreateGraphicsPipelineState(&pso_desc, IID_PPV_ARGS(&pso));
     if (unsupported_hr != E_NOTIMPL || pso) {
       std::cerr << "unsupported shader semantic was not rejected: "
                 << (view_id_unsupported ? "SV_ViewID"
                     : get_attribute_unsupported ? "GetAttributeAtVertex"
-                                                 : "SV_ShadingRate")
+                    : vrs_unsupported ? "SV_ShadingRate"
+                                       : "SV_StencilRef")
                 << " returned 0x" << std::hex
                 << static_cast<unsigned long>(unsupported_hr) << std::dec << "\n";
       goto cleanup;
@@ -610,7 +612,8 @@ int main(int argc, char **argv) {
     std::cout << "DXIL unsupported "
               << (view_id_unsupported ? "SV_ViewID"
                   : get_attribute_unsupported ? "GetAttributeAtVertex"
-                                               : "SV_ShadingRate")
+                  : vrs_unsupported ? "SV_ShadingRate"
+                                     : "SV_StencilRef")
               << " rejected: 0x" << std::hex
               << static_cast<unsigned long>(unsupported_hr) << std::dec << "\n";
     result = 0;
