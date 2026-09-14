@@ -27,16 +27,17 @@ int main(int argc, char **argv) {
                  "[--root-uav|--reserved-uav|--reserved-srv|--descriptor-uav|--descriptor-resources|--"
                  "descriptor-resources-space|--root-cbv|--root-constants|--"
                  "descriptor-resources-1-1|--descriptor-null-cbv|--direct-indexed|--root-srv|--"
-                 "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops|--native16-ops]\n";
+                 "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops|--native16-ops|--packed-dot-ops]\n";
     return 2;
   }
   const bool wave_ops = argc == 3 && strcmp(argv[2], "--wave-ops") == 0;
   const bool wave_size_unsupported = argc == 3 && strcmp(argv[2], "--wave-size-unsupported") == 0;
   const bool int64_ops = argc == 3 && strcmp(argv[2], "--int64-ops") == 0;
   const bool native16_ops = argc == 3 && strcmp(argv[2], "--native16-ops") == 0;
+  const bool packed_dot_ops = argc == 3 && strcmp(argv[2], "--packed-dot-ops") == 0;
   const bool root_uav = argc == 3 &&
                         (strcmp(argv[2], "--root-uav") == 0 || strcmp(argv[2], "--reserved-uav") == 0 ||
-                         wave_ops || wave_size_unsupported || native16_ops);
+                         wave_ops || wave_size_unsupported || native16_ops || packed_dot_ops);
   const bool reserved_uav = argc == 3 && strcmp(argv[2], "--reserved-uav") == 0;
   const bool reserved_srv = argc == 3 && strcmp(argv[2], "--reserved-srv") == 0;
   const bool descriptor_uav =
@@ -64,7 +65,7 @@ int main(int argc, char **argv) {
   if (argc == 3 && !root_uav && !reserved_uav && !reserved_srv && !descriptor_uav && !descriptor_resources &&
       !descriptor_resources_space && !descriptor_resources_1_1 && !descriptor_null_cbv && !root_cbv &&
       !root_constants && !root_srv_mode && !direct_indexed && !cache_probe && !wave_ops &&
-      !wave_size_unsupported && !int64_ops && !native16_ops) {
+      !wave_size_unsupported && !int64_ops && !native16_ops && !packed_dot_ops) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
@@ -498,7 +499,11 @@ int main(int argc, char **argv) {
       D3D12_TILE_REGION_SIZE region = {}; region.NumTiles = 1;
       list->CopyTiles(output_buffer, &coord, &region, readback_buffer, 0, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
     } else {
-      const UINT output_copy_size = wave_ops ? sizeof(UINT) * 3 : int64_ops ? sizeof(UINT) * 2 : sizeof(UINT);
+      const UINT output_copy_size = wave_ops || packed_dot_ops
+                                        ? sizeof(UINT) * 3
+                                    : int64_ops
+                                        ? sizeof(UINT) * 2
+                                        : sizeof(UINT);
       list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0, output_copy_size);
     }
   }
@@ -533,12 +538,15 @@ int main(int argc, char **argv) {
     UINT wave_prefix_product = 0;
     UINT wave_prefix_sum = 0;
     UINT int64_high = 0;
+    UINT packed_dot_unsigned = 0;
     if (wave_ops) {
       wave_prefix_product = mapped[1];
       wave_prefix_sum = mapped[2];
     }
     if (int64_ops)
       int64_high = mapped[1];
+    if (packed_dot_ops)
+      packed_dot_unsigned = mapped[1];
     readback_buffer->Unmap(0, nullptr);
     UINT expected_value = 1234;
     if (reserved_srv)
@@ -551,6 +559,8 @@ int main(int argc, char **argv) {
       expected_value = input_value * 2;
     else if (int64_ops)
       expected_value = 782;
+    else if (packed_dot_ops)
+      expected_value = static_cast<UINT>(-117);
     else if (native16_ops)
       expected_value = 62200;
     else if (root_cbv || root_constants || root_srv_mode)
@@ -579,7 +589,12 @@ int main(int argc, char **argv) {
       std::cerr << "64-bit high-half readback mismatch: " << int64_high << " expected 1\n";
       goto cleanup;
     }
-    std::cout << (is_dxbc ? "DXBC" : "DXIL") << " cs_6_0 "
+    if (packed_dot_ops && packed_dot_unsigned != 139) {
+      std::cerr << "packed unsigned dot readback mismatch: " << packed_dot_unsigned << " expected 139\n";
+      goto cleanup;
+    }
+    std::cout << (is_dxbc ? "DXBC" : "DXIL")
+              << (packed_dot_ops ? " cs_6_4 " : " cs_6_0 ")
               << (root_cbv                     ? "root CBV"
                   : root_constants              ? "root constants"
                   : int64_ops                   ? "int64 ops"
@@ -588,6 +603,7 @@ int main(int argc, char **argv) {
                   : descriptor_table_resources  ? "descriptor resources"
                   : wave_ops                    ? "wave ops"
                   : native16_ops                ? "native16 ops"
+                  : packed_dot_ops              ? "packed dot ops"
                                                 : "root UAV")
               << " readback passed: " << output_value << "\n";
   } else {
