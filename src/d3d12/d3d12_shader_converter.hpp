@@ -38,6 +38,7 @@ struct D3D12ShaderClassification {
   bool uses_unsupported_stencil_ref = false;
   bool uses_unsupported_shading_rate = false;
   bool uses_unsupported_denorm_mode = false;
+  bool uses_unsupported_pack_unpack = false;
   bool is_library_shader = false;
   const void *embedded_root_signature = nullptr;
   size_t embedded_root_signature_size = 0;

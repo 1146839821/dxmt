@@ -32,6 +32,7 @@ MakeFourCC(char a, char b, char c, char d) {
 
 constexpr uint32_t kDXILFourCC = MakeFourCC('D', 'X', 'I', 'L');
 constexpr uint32_t kDXILLibraryShaderKind = 6;
+constexpr uint32_t kDXILValueSymbolTableBlockID = 14;
 
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
@@ -258,9 +259,12 @@ FindDXILVBR6String(
 }
 
 bool
-HasUnsupportedDXILDenormMode(const D3D12_SHADER_BYTECODE &shader) {
-  if (!shader.pShaderBytecode || !shader.BytecodeLength)
+GetDXILBitcode(const D3D12_SHADER_BYTECODE &shader, const uint8_t **bitcode, size_t *bitcode_size) {
+  if (!bitcode || !bitcode_size || !shader.pShaderBytecode || !shader.BytecodeLength)
     return false;
+
+  *bitcode = nullptr;
+  *bitcode_size = 0;
 
   microsoft::CDXBCParser parser;
   if (FAILED(parser.ReadDXBC(shader.pShaderBytecode, static_cast<uint32_t>(shader.BytecodeLength))))
@@ -271,20 +275,392 @@ HasUnsupportedDXILDenormMode(const D3D12_SHADER_BYTECODE &shader) {
     return false;
 
   const auto *blob = static_cast<const uint8_t *>(parser.GetBlob(dxil_blob));
-  if (!blob)
-    return false;
-  if (std::memcmp(blob + 8, "DXIL", 4) != 0)
+  if (!blob || std::memcmp(blob + 8, "DXIL", 4) != 0)
     return false;
   uint32_t bitcode_offset = 0;
-  uint32_t bitcode_size = 0;
+  uint32_t bitcode_length = 0;
   std::memcpy(&bitcode_offset, blob + 16, sizeof(bitcode_offset));
-  std::memcpy(&bitcode_size, blob + 20, sizeof(bitcode_size));
-  const size_t bitcode_base = 8;
-  if (bitcode_offset > dxil_blob_size - bitcode_base ||
-      bitcode_size > dxil_blob_size - bitcode_base - bitcode_offset)
+  std::memcpy(&bitcode_length, blob + 20, sizeof(bitcode_length));
+  constexpr size_t kBitcodeBase = 8;
+  if (bitcode_offset > dxil_blob_size - kBitcodeBase ||
+      bitcode_length > dxil_blob_size - kBitcodeBase - bitcode_offset)
     return false;
-  const auto *bitcode = blob + bitcode_base + bitcode_offset;
-  if (bitcode_size < 4 || std::memcmp(bitcode, "BC\xc0\xde", 4) != 0)
+
+  const auto *candidate = blob + kBitcodeBase + bitcode_offset;
+  if (bitcode_length < 4 || std::memcmp(candidate, "BC\xc0\xde", 4) != 0)
+    return false;
+
+  *bitcode = candidate;
+  *bitcode_size = bitcode_length;
+  return true;
+}
+
+struct DXILBitcodeAbbrevOp {
+  enum class Kind {
+    Literal,
+    Fixed,
+    VBR,
+    Array,
+    Char6,
+    Blob,
+  };
+
+  Kind kind;
+  uint64_t value;
+};
+
+using DXILBitcodeAbbrev = std::vector<DXILBitcodeAbbrevOp>;
+
+class DXILBitcodeReader {
+public:
+  DXILBitcodeReader(const uint8_t *data, size_t size) : data_(data), size_(size) {}
+
+  bool HasValueSymbol(std::string_view symbol) {
+    if (!data_ || size_ < 4 || std::memcmp(data_, "BC\xc0\xde", 4) != 0)
+      return false;
+
+    uint64_t magic = 0;
+    uint64_t enter_subblock = 0;
+    if (!ReadBits(32, &magic) || !ReadBits(2, &enter_subblock) || enter_subblock != 1)
+      return false;
+
+    uint32_t module_block_id = 0;
+    unsigned module_code_width = 0;
+    size_t module_end_bit = 0;
+    if (!ReadSubBlockHeader(&module_block_id, &module_code_width, &module_end_bit))
+      return false;
+
+    bool found = false;
+    if (!ParseBlock(module_block_id, module_code_width, module_end_bit, symbol, &found))
+      return false;
+    return found;
+  }
+
+private:
+  static constexpr char kChar6Alphabet[] =
+      "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._";
+
+  bool ReadBits(unsigned bit_count, uint64_t *value) {
+    if (!value || bit_count > 64 || bit_offset_ > size_ * 8 || bit_count > size_ * 8 - bit_offset_)
+      return false;
+
+    uint64_t result = 0;
+    for (unsigned bit = 0; bit < bit_count; bit++)
+      result |= static_cast<uint64_t>((data_[(bit_offset_ + bit) / 8] >> ((bit_offset_ + bit) % 8)) & 1u) << bit;
+    bit_offset_ += bit_count;
+    *value = result;
+    return true;
+  }
+
+  bool ReadVBR(unsigned bit_width, uint64_t *value) {
+    if (!value || bit_width == 0 || bit_width > 32)
+      return false;
+
+    const uint64_t continuation_bit = uint64_t(1) << (bit_width - 1);
+    const uint64_t payload_mask = continuation_bit - 1;
+    uint64_t result = 0;
+    unsigned shift = 0;
+    while (true) {
+      uint64_t piece = 0;
+      if (!ReadBits(bit_width, &piece))
+        return false;
+      const uint64_t payload = piece & payload_mask;
+      if (shift >= 64 || (payload && payload > (std::numeric_limits<uint64_t>::max() >> shift)))
+        return false;
+      result |= payload << shift;
+      if (!(piece & continuation_bit)) {
+        *value = result;
+        return true;
+      }
+      if (shift > 64 - (bit_width - 1))
+        return false;
+      shift += bit_width - 1;
+    }
+  }
+
+  bool AlignToWord() {
+    if (bit_offset_ > size_ * 8)
+      return false;
+    const size_t aligned = (bit_offset_ + 31) & ~size_t(31);
+    if (aligned > size_ * 8)
+      return false;
+    bit_offset_ = aligned;
+    return true;
+  }
+
+  bool ReadSubBlockHeader(uint32_t *block_id, unsigned *code_width, size_t *end_bit) {
+    uint64_t encoded_block_id = 0;
+    uint64_t encoded_code_width = 0;
+    uint64_t block_words = 0;
+    if (!ReadVBR(8, &encoded_block_id) || !ReadVBR(4, &encoded_code_width) || !AlignToWord() ||
+        !ReadBits(32, &block_words) || encoded_block_id > std::numeric_limits<uint32_t>::max() ||
+        encoded_code_width == 0 || encoded_code_width > 32 || block_words > (size_ * 8 - bit_offset_) / 32)
+      return false;
+
+    *block_id = static_cast<uint32_t>(encoded_block_id);
+    *code_width = static_cast<unsigned>(encoded_code_width);
+    *end_bit = bit_offset_ + static_cast<size_t>(block_words) * 32;
+    return true;
+  }
+
+  bool ReadAbbrev(DXILBitcodeAbbrev *abbrev) {
+    if (!abbrev)
+      return false;
+    abbrev->clear();
+
+    uint64_t operand_count = 0;
+    if (!ReadVBR(5, &operand_count) || operand_count > 64)
+      return false;
+    for (uint64_t i = 0; i < operand_count; i++) {
+      uint64_t is_literal = 0;
+      if (!ReadBits(1, &is_literal))
+        return false;
+      if (is_literal) {
+        uint64_t literal = 0;
+        if (!ReadVBR(8, &literal))
+          return false;
+        abbrev->push_back({DXILBitcodeAbbrevOp::Kind::Literal, literal});
+        continue;
+      }
+
+      uint64_t encoding = 0;
+      if (!ReadBits(3, &encoding) || encoding < 1 || encoding > 5)
+        return false;
+      DXILBitcodeAbbrevOp::Kind kind;
+      uint64_t encoding_value = 0;
+      switch (encoding) {
+      case 1:
+        kind = DXILBitcodeAbbrevOp::Kind::Fixed;
+        if (!ReadVBR(5, &encoding_value))
+          return false;
+        break;
+      case 2:
+        kind = DXILBitcodeAbbrevOp::Kind::VBR;
+        if (!ReadVBR(5, &encoding_value))
+          return false;
+        break;
+      case 3:
+        kind = DXILBitcodeAbbrevOp::Kind::Array;
+        break;
+      case 4:
+        kind = DXILBitcodeAbbrevOp::Kind::Char6;
+        break;
+      case 5:
+        kind = DXILBitcodeAbbrevOp::Kind::Blob;
+        break;
+      default:
+        return false;
+      }
+      abbrev->push_back({kind, encoding_value});
+    }
+    return true;
+  }
+
+  bool ReadAbbrevField(const DXILBitcodeAbbrevOp &op, uint64_t *value) {
+    if (!value)
+      return false;
+    switch (op.kind) {
+    case DXILBitcodeAbbrevOp::Kind::Fixed:
+      return ReadBits(static_cast<unsigned>(op.value), value);
+    case DXILBitcodeAbbrevOp::Kind::VBR:
+      return ReadVBR(static_cast<unsigned>(op.value), value);
+    case DXILBitcodeAbbrevOp::Kind::Char6: {
+      uint64_t encoded = 0;
+      if (!ReadBits(6, &encoded) || encoded >= 64)
+        return false;
+      *value = static_cast<unsigned char>(kChar6Alphabet[encoded]);
+      return true;
+    }
+    default:
+      return false;
+    }
+  }
+
+  bool DecodeRecord(
+      uint32_t block_id, unsigned abbrev_id, const std::vector<DXILBitcodeAbbrev> &abbrevs,
+      uint64_t *record_code, std::vector<uint64_t> *values
+  ) {
+    if (!record_code || !values)
+      return false;
+    *record_code = 0;
+    values->clear();
+
+    if (abbrev_id == 3) {
+      uint64_t operand_count = 0;
+      if (!ReadVBR(6, record_code) || !ReadVBR(6, &operand_count) || operand_count > 1024)
+        return false;
+      values->resize(static_cast<size_t>(operand_count));
+      for (auto &value : *values) {
+        if (!ReadVBR(6, &value))
+          return false;
+      }
+      return true;
+    }
+    if (abbrev_id < 4 || abbrev_id - 4 >= abbrevs.size())
+      return false;
+
+    const auto &abbrev = abbrevs[abbrev_id - 4];
+    bool reading_record_code = true;
+    for (size_t i = 0; i < abbrev.size(); i++) {
+      const auto &op = abbrev[i];
+      if (op.kind == DXILBitcodeAbbrevOp::Kind::Literal) {
+        if (reading_record_code) {
+          *record_code = op.value;
+          reading_record_code = false;
+        }
+        continue;
+      }
+
+      if (op.kind == DXILBitcodeAbbrevOp::Kind::Array) {
+        if (i + 1 >= abbrev.size())
+          return false;
+        uint64_t element_count = 0;
+        if (!ReadVBR(6, &element_count) || element_count > 4096)
+          return false;
+        const auto &element_op = abbrev[++i];
+        for (uint64_t element = 0; element < element_count; element++) {
+          uint64_t value = 0;
+          if (!ReadAbbrevField(element_op, &value))
+            return false;
+          if (reading_record_code) {
+            *record_code = value;
+            reading_record_code = false;
+          } else {
+            values->push_back(value);
+          }
+        }
+        continue;
+      }
+
+      if (op.kind == DXILBitcodeAbbrevOp::Kind::Blob) {
+        uint64_t byte_count = 0;
+        if (!ReadVBR(6, &byte_count) || byte_count > size_ || !AlignToWord())
+          return false;
+        for (uint64_t byte = 0; byte < byte_count; byte++) {
+          uint64_t value = 0;
+          if (!ReadBits(8, &value))
+            return false;
+          if (reading_record_code) {
+            *record_code = value;
+            reading_record_code = false;
+          } else {
+            values->push_back(value);
+          }
+        }
+        if (!AlignToWord())
+          return false;
+        continue;
+      }
+
+      uint64_t value = 0;
+      if (!ReadAbbrevField(op, &value))
+        return false;
+      if (reading_record_code) {
+        *record_code = value;
+        reading_record_code = false;
+      } else {
+        values->push_back(value);
+      }
+    }
+    return !reading_record_code && block_id != 0;
+  }
+
+  bool MatchesValueSymbol(const std::vector<uint64_t> &values, std::string_view symbol) const {
+    if (values.size() != symbol.size() + 1)
+      return false;
+    for (size_t i = 0; i < symbol.size(); i++) {
+      if (values[i + 1] != static_cast<unsigned char>(symbol[i]))
+        return false;
+    }
+    return true;
+  }
+
+  bool ParseBlock(
+      uint32_t block_id, unsigned code_width, size_t end_bit, std::string_view symbol, bool *found
+  ) {
+    if (!found || end_bit > size_ * 8 || code_width == 0 || code_width > 32)
+      return false;
+
+    std::vector<DXILBitcodeAbbrev> abbrevs;
+    if (const auto info = block_info_.find(block_id); info != block_info_.end())
+      abbrevs = info->second;
+    bool has_block_info_target = false;
+    uint32_t block_info_target = 0;
+
+    while (bit_offset_ < end_bit) {
+      uint64_t code = 0;
+      if (!ReadBits(code_width, &code))
+        return false;
+      if (code == 0) {
+        if (!AlignToWord() || bit_offset_ > end_bit)
+          return false;
+        return true;
+      }
+      if (code == 1) {
+        uint32_t child_block_id = 0;
+        unsigned child_code_width = 0;
+        size_t child_end_bit = 0;
+        if (!ReadSubBlockHeader(&child_block_id, &child_code_width, &child_end_bit) ||
+            !ParseBlock(child_block_id, child_code_width, child_end_bit, symbol, found))
+          return false;
+        if (*found)
+          return true;
+        continue;
+      }
+      if (code == 2) {
+        DXILBitcodeAbbrev abbrev;
+        if (!ReadAbbrev(&abbrev))
+          return false;
+        if (block_id == 0) {
+          if (has_block_info_target)
+            block_info_[block_info_target].push_back(std::move(abbrev));
+        } else {
+          abbrevs.push_back(std::move(abbrev));
+        }
+        continue;
+      }
+
+      uint64_t record_code = 0;
+      std::vector<uint64_t> values;
+      if (!DecodeRecord(block_id, static_cast<unsigned>(code), abbrevs, &record_code, &values))
+        return false;
+      if (block_id == 0 && record_code == 1 && !values.empty()) {
+        if (values[0] > std::numeric_limits<uint32_t>::max())
+          return false;
+        block_info_target = static_cast<uint32_t>(values[0]);
+        has_block_info_target = true;
+      } else if (block_id == kDXILValueSymbolTableBlockID && record_code == 1 &&
+                 MatchesValueSymbol(values, symbol)) {
+        *found = true;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  const uint8_t *data_ = nullptr;
+  size_t size_ = 0;
+  size_t bit_offset_ = 0;
+  std::unordered_map<uint32_t, std::vector<DXILBitcodeAbbrev>> block_info_;
+};
+
+bool
+HasUnsupportedDXILPackUnpack(const D3D12_SHADER_BYTECODE &shader) {
+  const uint8_t *bitcode = nullptr;
+  size_t bitcode_size = 0;
+  if (!GetDXILBitcode(shader, &bitcode, &bitcode_size))
+    return false;
+
+  DXILBitcodeReader reader(bitcode, bitcode_size);
+  return reader.HasValueSymbol("dx.op.pack4x8.i32") || reader.HasValueSymbol("dx.op.unpack4x8.i32");
+}
+
+bool
+HasUnsupportedDXILDenormMode(const D3D12_SHADER_BYTECODE &shader) {
+  const uint8_t *bitcode = nullptr;
+  size_t bitcode_size = 0;
+  if (!GetDXILBitcode(shader, &bitcode, &bitcode_size))
     return false;
 
   constexpr std::string_view kDenormAttribute = "fp32-denorm-mode";
@@ -557,6 +933,7 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
     classification.uses_unsupported_shading_rate =
         HasInputSemantic(shader, "SV_ShadingRate") || HasOutputSemantic(shader, "SV_ShadingRate");
     classification.uses_unsupported_denorm_mode = HasUnsupportedDXILDenormMode(shader);
+    classification.uses_unsupported_pack_unpack = HasUnsupportedDXILPackUnpack(shader);
     classification.is_library_shader = IsDXILLibraryShader(shader);
   }
   return classification;
@@ -750,6 +1127,10 @@ ConvertD3D12Shader(
   }
   if (classification.uses_unsupported_denorm_mode) {
     ERR("DXIL shader requires unsupported fp32 denorm mode");
+    return E_NOTIMPL;
+  }
+  if (classification.uses_unsupported_pack_unpack) {
+    ERR("DXIL shader uses unsupported pack/unpack operations");
     return E_NOTIMPL;
   }
   if (classification.is_library_shader) {
