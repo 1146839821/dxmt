@@ -916,6 +916,37 @@ HasUnsupportedDXILComputeDerivativeShape(const D3D12_SHADER_BYTECODE &shader) {
 }
 
 bool
+HasUnsupportedDXILWaveSize(const D3D12_SHADER_BYTECODE &shader) {
+  if (!shader.pShaderBytecode || !shader.BytecodeLength)
+    return false;
+
+  microsoft::CDXBCParser parser;
+  if (FAILED(parser.ReadDXBC(shader.pShaderBytecode, static_cast<uint32_t>(shader.BytecodeLength))))
+    return false;
+  const UINT psv_blob = parser.FindNextMatchingBlob(static_cast<microsoft::DXBCFourCC>(kPSVFourCC), 0);
+  if (psv_blob == DXBC_BLOB_NOT_FOUND || parser.GetBlobSize(psv_blob) < 28)
+    return false;
+  const auto *psv = static_cast<const uint8_t *>(parser.GetBlob(psv_blob));
+  if (!psv)
+    return false;
+
+  // PSV 0x34 stores the minimum and maximum expected wave lane counts at
+  // byte offsets 20 and 24. The 0/UINT32_MAX pair is the unconstrained
+  // default; every constrained path must resolve to the 32-lane ABI.
+  uint32_t psv_version = 0;
+  uint32_t minimum_wave_size = 0;
+  uint32_t maximum_wave_size = 0;
+  std::memcpy(&psv_version, psv, sizeof(psv_version));
+  if (psv_version != 0x34)
+    return false;
+  std::memcpy(&minimum_wave_size, psv + 20, sizeof(minimum_wave_size));
+  std::memcpy(&maximum_wave_size, psv + 24, sizeof(maximum_wave_size));
+  if (minimum_wave_size == 0 && maximum_wave_size == UINT32_MAX)
+    return false;
+  return minimum_wave_size != 32 || maximum_wave_size != 32;
+}
+
+bool
 HasUnsupportedDXILDenormMode(const D3D12_SHADER_BYTECODE &shader) {
   const uint8_t *bitcode = nullptr;
   size_t bitcode_size = 0;
@@ -1198,6 +1229,7 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
     classification.uses_unsupported_pack_unpack = HasUnsupportedDXILPackUnpack(shader);
     classification.uses_unsupported_append_consume = HasUnsupportedDXILAppendConsume(shader);
     classification.uses_unsupported_compute_derivative_shape = HasUnsupportedDXILComputeDerivativeShape(shader);
+    classification.uses_unsupported_wave_size = HasUnsupportedDXILWaveSize(shader);
     classification.atomic64_feature_flags = GetDXILAtomic64FeatureFlags(shader);
     classification.is_library_shader = IsDXILLibraryShader(shader);
   }
@@ -1412,6 +1444,10 @@ ConvertD3D12Shader(
   }
   if (classification.uses_unsupported_compute_derivative_shape) {
     ERR("DXIL compute shader uses unsupported derivative threadgroup shape");
+    return E_NOTIMPL;
+  }
+  if (classification.uses_unsupported_wave_size) {
+    ERR("DXIL shader requires unsupported non-32 WaveSize");
     return E_NOTIMPL;
   }
   if (classification.atomic64_feature_flags != 0) {

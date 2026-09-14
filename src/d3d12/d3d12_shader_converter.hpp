@@ -43,6 +43,7 @@ struct D3D12ShaderClassification {
   bool uses_unsupported_pack_unpack = false;
   bool uses_unsupported_append_consume = false;
   bool uses_unsupported_compute_derivative_shape = false;
+  bool uses_unsupported_wave_size = false;
   uint64_t atomic64_feature_flags = 0;
   bool is_library_shader = false;
   const void *embedded_root_signature = nullptr;
