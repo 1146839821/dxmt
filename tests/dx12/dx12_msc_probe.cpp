@@ -109,6 +109,7 @@ main() {
   std::cout << "d3d.wave_ops=" << options1.WaveOps << "\n";
   std::cout << "d3d.wave_lane_min=" << options1.WaveLaneCountMin << "\n";
   std::cout << "d3d.wave_lane_max=" << options1.WaveLaneCountMax << "\n";
+  std::cout << "d3d.wave_lane_total=" << options1.TotalLaneCount << "\n";
   std::cout << "d3d.int64=" << options1.Int64ShaderOps << "\n";
   std::cout << "d3d.barycentrics=" << options3.BarycentricsSupported << "\n";
   std::cout << "d3d.native16=" << options4.Native16BitShaderOpsSupported << "\n";

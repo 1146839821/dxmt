@@ -1032,8 +1032,11 @@ int main() {
       options.ResourceBindingTier != D3D12_RESOURCE_BINDING_TIER_2 ||
        shader_model_5_1.HighestShaderModel != D3D_SHADER_MODEL_5_1 ||
        options.TiledResourcesTier != D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED ||
-       options.ResourceHeapTier != D3D12_RESOURCE_HEAP_TIER_2 || options.ROVsSupported || options1.WaveOps ||
-       options3.CopyQueueTimestampQueriesSupported != TRUE || !options3.CastingFullyTypedFormatSupported ||
+      options.ResourceHeapTier != D3D12_RESOURCE_HEAP_TIER_2 || options.ROVsSupported ||
+      options1.WaveOps != TRUE || options1.Int64ShaderOps != TRUE || options1.WaveLaneCountMin != 32 ||
+      options1.WaveLaneCountMax != 32 || options1.TotalLaneCount != 1 ||
+      options4.Native16BitShaderOpsSupported != TRUE ||
+      options3.CopyQueueTimestampQueriesSupported != TRUE || !options3.CastingFullyTypedFormatSupported ||
        options5.RenderPassesTier != D3D12_RENDER_PASS_TIER_0 ||
        options5.RaytracingTier != D3D12_RAYTRACING_TIER_NOT_SUPPORTED || shader_cache.SupportFlags ||
        options9.AtomicInt64OnTypedResourceSupported || options9.AtomicInt64OnGroupSharedSupported ||

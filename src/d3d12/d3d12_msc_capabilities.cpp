@@ -138,6 +138,15 @@ QueryDXMTMSCCapabilities(WMT::Device device) {
   capabilities.barycentrics_validated =
       capabilities.msc_barycentrics && capabilities.metal_barycentrics;
 
+  /* The WaveOps, Int64, and Native16 matrices cover compute plus graphics
+   * stages, root and descriptor-table resources, and the Apple7 runtime floor.
+   * Keep the promotion device-aware so older GPU families retain the
+   * conservative query result. */
+  const bool apple7_shader_ops = msc4 && capabilities.apple7_or_newer;
+  capabilities.wave_ops_validated = apple7_shader_ops;
+  capabilities.int64_validated = apple7_shader_ops;
+  capabilities.native16_validated = apple7_shader_ops;
+
   /* Keep unsupported and unproven D3D12 capabilities conservative. */
   capabilities.maximum_shader_model = GetMaximumD3D12ShaderModel(capabilities);
   capabilities.ps_specified_stencil_ref = false;
