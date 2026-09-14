@@ -77,6 +77,8 @@ main() {
   D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3 = {};
   D3D12_FEATURE_DATA_D3D12_OPTIONS4 options4 = {};
   D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5 = {};
+  D3D12_FEATURE_DATA_D3D12_OPTIONS6 options6 = {};
+  D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7 = {};
   D3D12_FEATURE_DATA_D3D12_OPTIONS9 options9 = {};
   D3D12_FEATURE_DATA_D3D12_OPTIONS11 options11 = {};
   if (!QueryFeature(device, D3D12_FEATURE_SHADER_MODEL, shader_model, "SHADER_MODEL") ||
@@ -85,6 +87,8 @@ main() {
       !QueryFeature(device, D3D12_FEATURE_D3D12_OPTIONS3, options3, "OPTIONS3") ||
       !QueryFeature(device, D3D12_FEATURE_D3D12_OPTIONS4, options4, "OPTIONS4") ||
       !QueryFeature(device, D3D12_FEATURE_D3D12_OPTIONS5, options5, "OPTIONS5") ||
+      !QueryFeature(device, D3D12_FEATURE_D3D12_OPTIONS6, options6, "OPTIONS6") ||
+      !QueryFeature(device, D3D12_FEATURE_D3D12_OPTIONS7, options7, "OPTIONS7") ||
       !QueryFeature(device, D3D12_FEATURE_D3D12_OPTIONS9, options9, "OPTIONS9") ||
       !QueryFeature(device, D3D12_FEATURE_D3D12_OPTIONS11, options11, "OPTIONS11")) {
     device->Release();
@@ -103,6 +107,9 @@ main() {
   std::cout << "d3d.barycentrics=" << options3.BarycentricsSupported << "\n";
   std::cout << "d3d.native16=" << options4.Native16BitShaderOpsSupported << "\n";
   std::cout << "d3d.raytracing_tier=" << static_cast<UINT>(options5.RaytracingTier) << "\n";
+  std::cout << "d3d.vrs_tier=" << static_cast<UINT>(options6.VariableShadingRateTier) << "\n";
+  std::cout << "d3d.mesh_shader_tier=" << static_cast<UINT>(options7.MeshShaderTier) << "\n";
+  std::cout << "d3d.sampler_feedback_tier=" << static_cast<UINT>(options7.SamplerFeedbackTier) << "\n";
   std::cout << "d3d.atomic64.typed=" << options9.AtomicInt64OnTypedResourceSupported << "\n";
   std::cout << "d3d.atomic64.groupshared=" << options9.AtomicInt64OnGroupSharedSupported << "\n";
   std::cout << "d3d.atomic64.descriptor_heap=" << options11.AtomicInt64OnDescriptorHeapResourceSupported << "\n";
