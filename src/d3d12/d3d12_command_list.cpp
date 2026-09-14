@@ -854,8 +854,9 @@ public:
     static std::atomic<uint64_t> next_recording_id{1};
     recording_id_ = next_recording_id.fetch_add(1, std::memory_order_relaxed);
     char enabled[2] = {};
-    msc_compute_residency_ =
-        GetEnvironmentVariableA("DXMT_MSC_COMPUTE_RESIDENCY", enabled, sizeof(enabled)) && enabled[0] != '0';
+    msc_compute_residency_ = true;
+    if (GetEnvironmentVariableA("DXMT_MSC_COMPUTE_RESIDENCY", enabled, sizeof(enabled)))
+      msc_compute_residency_ = enabled[0] != '0';
     memset(enabled, 0, sizeof(enabled));
     indirect_residency_ =
         GetEnvironmentVariableA("DXMT_INDIRECT_RESIDENCY", enabled, sizeof(enabled)) && enabled[0] != '0';
@@ -1347,6 +1348,16 @@ public:
     cmd.type = WMTComputeCommandUseResource;
     cmd.resource = resource;
     cmd.usage = merged_usage;
+  }
+
+  void
+  EncodeMSCBufferResourceUse(
+      obj_handle_t resource, bool compute, WMTRenderStages render_stages = static_cast<WMTRenderStages>(0)
+  ) {
+    if (compute)
+      EncodeComputeResourceUse(resource, WMTResourceUsageRead);
+    else
+      EncodeRenderResourceUse(resource, WMTResourceUsageRead, render_stages);
   }
 
   bool
@@ -1916,6 +1927,10 @@ public:
     const bool use_msc_geometry = pso_graphics_->msc_geometry;
     const bool use_airconv_geometry = pso_graphics_->airconv_geometry;
     const bool use_msc_emulation = use_msc_tessellation || use_msc_geometry;
+    const auto msc_render_stages = use_msc_emulation
+                                       ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh |
+                                                                      WMTRenderStageFragment)
+                                       : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
     auto encode_msc_buffer = [&](obj_handle_t buffer, uint64_t offset, uint8_t index, bool fragment = true) {
       auto encode = [&](WMTRenderCommandType type) {
         auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
@@ -2090,12 +2105,14 @@ public:
       if (!descriptor_buffer)
         descriptor_buffer = msc_dummy_buffer_;
       if (descriptor_buffer) {
+        EncodeMSCBufferResourceUse(descriptor_buffer.handle, false, msc_render_stages);
         encode_msc_buffer(descriptor_buffer.handle, 0, DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT);
       }
       auto sampler_buffer = sampler_heap_ ? sampler_heap_->GetMSCDescriptorHeapBuffer() : WMT::Buffer{};
       if (!sampler_buffer)
         sampler_buffer = msc_dummy_buffer_;
       if (sampler_buffer) {
+        EncodeMSCBufferResourceUse(sampler_buffer.handle, false, msc_render_stages);
         encode_msc_buffer(sampler_buffer.handle, 0, DXMT_MSC_SAMPLER_HEAP_BIND_POINT);
       }
       if (use_msc_tessellation && pso_graphics_->msc_tessellator_tables) {
@@ -2121,6 +2138,7 @@ public:
         auto buffer = rootsig_graphics_ && rootsig_graphics_->MSCArgumentBufferSize
                           ? allocator_->gpu_heap_buffer_.handle
                           : msc_dummy_buffer_.handle;
+        EncodeMSCBufferResourceUse(buffer, false, msc_render_stages);
         encode_msc_buffer(buffer, offset, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
         if (use_msc_tessellation)
           encode_msc_buffer(buffer, offset, DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT, false);
@@ -2956,6 +2974,8 @@ public:
       if (descriptor_heap_) {
         auto buffer = descriptor_heap_->GetMSCDescriptorHeapBuffer();
         if (buffer) {
+          if (msc_compute_residency_ && !SkipResourceBinding)
+            EncodeMSCBufferResourceUse(buffer.handle, true);
           auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
           cmd.type = WMTComputeCommandSetBuffer;
           cmd.buffer = buffer.handle;
@@ -2966,6 +2986,8 @@ public:
       if (sampler_heap_) {
         auto buffer = sampler_heap_->GetMSCDescriptorHeapBuffer();
         if (buffer) {
+          if (msc_compute_residency_ && !SkipResourceBinding)
+            EncodeMSCBufferResourceUse(buffer.handle, true);
           auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
           cmd.type = WMTComputeCommandSetBuffer;
           cmd.buffer = buffer.handle;
@@ -2984,6 +3006,8 @@ public:
                             )
                           : EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_);
         if (!use_msc || rootsig_compute_->MSCArgumentBufferSize) {
+          if (use_msc && msc_compute_residency_)
+            EncodeMSCBufferResourceUse(allocator_->gpu_heap_buffer_.handle, true);
           auto &cmd_argbuf = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
           cmd_argbuf.type = WMTComputeCommandSetBuffer;
           cmd_argbuf.buffer = allocator_->gpu_heap_buffer_;
