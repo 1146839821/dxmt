@@ -315,6 +315,23 @@ LogMSCFailure(const dxmt_msc_compile_dxil_params &params, int result) {
   ERR("DXIL conversion failed, result=", result, " code=", params.error_code, " message=", message);
 }
 
+HRESULT
+MSCResultToHRESULT(int result) {
+  switch (result) {
+  case DXMT_MSC_ERROR_INVALID_ARGUMENT:
+  case DXMT_MSC_ERROR_INVALID_DXIL:
+  case DXMT_MSC_ERROR_ROOT_SIGNATURE:
+    return E_INVALIDARG;
+  case DXMT_MSC_ERROR_UNSUPPORTED_SHADER:
+  case DXMT_MSC_ERROR_UNSUPPORTED_FEATURE:
+    return E_NOTIMPL;
+  case DXMT_MSC_ERROR_OUT_OF_MEMORY:
+    return E_OUTOFMEMORY;
+  default:
+    return E_FAIL;
+  }
+}
+
 int
 CompileDXIL(
   const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const void *root_signature, size_t root_signature_size,
@@ -631,7 +648,7 @@ ConvertD3D12Shader(
       error_message, sizeof(error_message), msc_capabilities
   );
   if (result != DXMT_MSC_SUCCESS)
-    return E_FAIL;
+    return MSCResultToHRESULT(result);
   if (!metallib_size || !entry_point_size)
     return E_FAIL;
 
@@ -647,7 +664,7 @@ ConvertD3D12Shader(
       &stage_in_metallib_size, &reflection, error_message, sizeof(error_message), msc_capabilities
   );
   if (result != DXMT_MSC_SUCCESS)
-    return E_FAIL;
+    return MSCResultToHRESULT(result);
 
   if (entry_point_size == 0 || entry_point[entry_point_size - 1] != '\0') {
     ERR("DXIL conversion returned an invalid entry point");

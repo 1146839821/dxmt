@@ -148,10 +148,23 @@ dxmt_msc_error_name(uint32_t code) {
   case IRErrorCodeUnrecognizedDXILHeader:
   case IRErrorCodeUnableToVerifyModule:
     return "invalid DXIL";
+  case IRErrorCodeShaderIncompatibleWithDualSourceBlending:
+    return "unsupported shader feature";
   case IRErrorCodeUnsupportedWaveSize:
   case IRErrorCodeUnsupportedInstruction:
   case IRErrorCodeFP64Usage:
     return "unsupported shader feature";
+  case IRErrorCodeFailedToSynthesizeStageInFunction:
+    return "stage-in synthesis error";
+  case IRErrorCodeFailedToSynthesizeStreamOutFunction:
+    return "stream-out synthesis error";
+  case IRErrorCodeFailedToSynthesizeIndirectIntersectionFunction:
+    return "indirect intersection synthesis error";
+  case IRErrorCodeInvalidRaytracingAttribute:
+  case IRErrorCodeNullHullShaderInputOutputMismatch:
+  case IRErrorCodeInvalidRaytracingUserAttributeSize:
+  case IRErrorCodeIncorrectHitgroupType:
+    return "invalid shader";
   case IRErrorCodeUnableToLinkModule:
     return "linking error";
   case IRErrorCodeCompilationError:
@@ -169,7 +182,12 @@ dxmt_msc_result_from_error(const IRError *error) {
   switch (g_msc_api.IRErrorGetCode(error)) {
   case IRErrorCodeUnrecognizedDXILHeader:
   case IRErrorCodeUnableToVerifyModule:
+  case IRErrorCodeInvalidRaytracingAttribute:
+  case IRErrorCodeNullHullShaderInputOutputMismatch:
+  case IRErrorCodeInvalidRaytracingUserAttributeSize:
+  case IRErrorCodeIncorrectHitgroupType:
     return DXMT_MSC_ERROR_INVALID_DXIL;
+  case IRErrorCodeShaderIncompatibleWithDualSourceBlending:
   case IRErrorCodeUnsupportedWaveSize:
   case IRErrorCodeUnsupportedInstruction:
   case IRErrorCodeFP64Usage:
