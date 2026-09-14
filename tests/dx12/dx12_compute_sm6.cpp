@@ -31,6 +31,7 @@ int main(int argc, char **argv) {
                  "--direct-indexed-nonuniform|"
                  "--unbounded-resources|"
                  "--append-consume-unsupported|"
+                 "--nan-inf-ops|"
                  "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops|--native16-ops|"
                  "--denorm-preserve-unsupported|--denorm-ftz-unsupported|--packed-dot-ops|"
                  "--pack-unpack-unsupported|--compute-derivatives|"
@@ -54,11 +55,12 @@ int main(int argc, char **argv) {
   const bool library_subobjects_unsupported =
       argc == 3 && strcmp(argv[2], "--library-subobjects-unsupported") == 0;
   const bool append_consume_unsupported = argc == 3 && strcmp(argv[2], "--append-consume-unsupported") == 0;
+  const bool nan_inf_ops = argc == 3 && strcmp(argv[2], "--nan-inf-ops") == 0;
   const bool root_uav = argc == 3 &&
                         (strcmp(argv[2], "--root-uav") == 0 || strcmp(argv[2], "--reserved-uav") == 0 ||
                          wave_ops || wave_size_unsupported || native16_ops || denorm_unsupported || packed_dot_ops ||
                          pack_unpack_unsupported || compute_derivatives || compute_derivatives_unsupported ||
-                         atomic64_unsupported);
+                         atomic64_unsupported || nan_inf_ops);
   const bool reserved_uav = argc == 3 && strcmp(argv[2], "--reserved-uav") == 0;
   const bool reserved_srv = argc == 3 && strcmp(argv[2], "--reserved-srv") == 0;
   const bool descriptor_uav = argc == 3 &&
@@ -97,7 +99,7 @@ int main(int argc, char **argv) {
       !root_cbv && !root_constants && !root_srv_mode && !direct_indexed_resource_heap && !cache_probe &&
       !wave_ops && !wave_size_unsupported && !int64_ops && !native16_ops && !denorm_unsupported &&
       !packed_dot_ops && !pack_unpack_unsupported && !compute_derivatives &&
-      !compute_derivatives_unsupported && !atomic64_unsupported && !library_subobjects_unsupported) {
+      !compute_derivatives_unsupported && !atomic64_unsupported && !library_subobjects_unsupported && !nan_inf_ops) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
@@ -677,6 +679,8 @@ int main(int argc, char **argv) {
       expected_value = static_cast<UINT>(-117);
     else if (compute_derivatives)
       expected_value = 0x40800000;
+    else if (nan_inf_ops)
+      expected_value = 31;
     else if (native16_ops)
       expected_value = 62200;
     else if (root_cbv || root_constants || root_srv_mode)
@@ -710,7 +714,7 @@ int main(int argc, char **argv) {
       goto cleanup;
     }
     std::cout << (is_dxbc ? "DXBC" : "DXIL")
-              << (packed_dot_ops || compute_derivatives || direct_indexed_resource_heap || unbounded_resources
+              << (packed_dot_ops || compute_derivatives || nan_inf_ops || direct_indexed_resource_heap || unbounded_resources
                       ? " cs_6_6 "
                       : " cs_6_0 ")
               << (root_cbv                     ? "root CBV"
@@ -727,6 +731,7 @@ int main(int argc, char **argv) {
                   : native16_ops                ? "native16 ops"
                   : packed_dot_ops              ? "packed dot ops"
                   : compute_derivatives         ? "compute derivatives"
+                  : nan_inf_ops                 ? "nan/inf ops"
                                                 : "root UAV")
               << " readback passed: " << output_value << "\n";
   } else {
