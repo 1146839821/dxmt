@@ -2121,6 +2121,8 @@ thunk32_DXMTMSCCompileDXIL(void *args) {
   params.ignore_debug_information = src->ignore_debug_information;
   params.function_constant_resource_space = src->function_constant_resource_space;
   params.framebuffer_fetch_resource_space = src->framebuffer_fetch_resource_space;
+  params.local_root_signature = UInt32ToPtr(src->local_root_signature);
+  params.local_root_signature_size = src->local_root_signature_size;
 
   params.ret = dxmt_msc_compile(&params);
 

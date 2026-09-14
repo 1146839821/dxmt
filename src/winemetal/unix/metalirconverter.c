@@ -605,6 +605,8 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   IRObject *compiled = NULL;
   IRVersionedRootSignatureDescriptor *root_descriptor = NULL;
   IRRootSignature *root_signature = NULL;
+  IRVersionedRootSignatureDescriptor *local_root_descriptor = NULL;
+  IRRootSignature *local_root_signature = NULL;
   IRRayTracingPipelineConfiguration *raytracing_configuration = NULL;
   IRMetalLibBinary *binary = NULL;
   IRMetalLibBinary *stage_in_binary = NULL;
@@ -808,6 +810,36 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
       goto cleanup;
     }
     g_msc_api.IRCompilerSetGlobalRootSignature(compiler, root_signature);
+  }
+
+  if (params->local_root_signature && params->local_root_signature_size) {
+    if (!g_msc_api.IRCompilerSetLocalRootSignature) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC local root signatures are unavailable");
+      result = DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+      goto cleanup;
+    }
+    if (params->local_root_signature_size > UINT32_MAX) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_ROOT_SIGNATURE, "local root signature is too large");
+      result = DXMT_MSC_ERROR_ROOT_SIGNATURE;
+      goto cleanup;
+    }
+
+    local_root_descriptor = g_msc_api.IRVersionedRootSignatureDescriptorCreateFromBlob(
+        (const uint8_t *)params->local_root_signature, (uint32_t)params->local_root_signature_size, &error
+    );
+    if (!local_root_descriptor) {
+      dxmt_msc_set_ire_error(params, error);
+      result = DXMT_MSC_ERROR_ROOT_SIGNATURE;
+      goto cleanup;
+    }
+
+    local_root_signature = g_msc_api.IRRootSignatureCreateFromDescriptor(local_root_descriptor, &error);
+    if (!local_root_signature) {
+      dxmt_msc_set_ire_error(params, error);
+      result = DXMT_MSC_ERROR_ROOT_SIGNATURE;
+      goto cleanup;
+    }
+    g_msc_api.IRCompilerSetLocalRootSignature(compiler, local_root_signature);
   }
 
   compiled = g_msc_api.IRCompilerAllocCompileAndLink(compiler, entry_point, input, &error);
@@ -1161,6 +1193,10 @@ cleanup:
     g_msc_api.IRRootSignatureDestroy(root_signature);
   if (root_descriptor)
     g_msc_api.IRVersionedRootSignatureDescriptorRelease(root_descriptor);
+  if (local_root_signature)
+    g_msc_api.IRRootSignatureDestroy(local_root_signature);
+  if (local_root_descriptor)
+    g_msc_api.IRVersionedRootSignatureDescriptorRelease(local_root_descriptor);
   if (raytracing_configuration)
     g_msc_api.IRRayTracingPipelineConfigurationDestroy(raytracing_configuration);
   if (input)

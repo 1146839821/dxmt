@@ -270,6 +270,8 @@ struct dxmt_msc_compile_dxil_params {
   uint32_t ignore_debug_information;
   uint32_t function_constant_resource_space;
   uint32_t framebuffer_fetch_resource_space;
+  const void *local_root_signature;
+  size_t local_root_signature_size;
 };
 
 /* The native side receives this layout for a 32-bit PE caller. */
@@ -318,6 +320,8 @@ struct dxmt_msc_compile_dxil_params32 {
   uint32_t ignore_debug_information;
   uint32_t function_constant_resource_space;
   uint32_t framebuffer_fetch_resource_space;
+  uint32_t local_root_signature;
+  uint32_t local_root_signature_size;
 };
 
 struct dxmt_msc_root_parameter_layout {
