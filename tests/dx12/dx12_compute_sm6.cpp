@@ -29,6 +29,7 @@ int main(int argc, char **argv) {
                  "descriptor-resources-1-1|--descriptor-null-cbv|--direct-indexed|--root-srv|--"
                  "direct-indexed-resources|--direct-indexed-resources-lifetime|"
                  "--direct-indexed-nonuniform|"
+                 "--unbounded-resources|"
                  "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops|--native16-ops|"
                  "--denorm-preserve-unsupported|--denorm-ftz-unsupported|--packed-dot-ops|"
                  "--pack-unpack-unsupported|--compute-derivatives|"
@@ -76,12 +77,13 @@ int main(int argc, char **argv) {
       argc == 3 && strcmp(argv[2], "--direct-indexed-resources-lifetime") == 0;
   const bool direct_indexed_nonuniform =
       argc == 3 && strcmp(argv[2], "--direct-indexed-nonuniform") == 0;
+  const bool unbounded_resources = argc == 3 && strcmp(argv[2], "--unbounded-resources") == 0;
   const bool direct_indexed_resource_heap = direct_indexed || direct_indexed_resources ||
                                             direct_indexed_resources_lifetime || direct_indexed_nonuniform;
   const bool descriptor_table_resources = descriptor_resources ||
                                           descriptor_resources_space ||
                                           descriptor_resources_1_1 ||
-                                          descriptor_null_cbv;
+                                          descriptor_null_cbv || unbounded_resources;
   const bool root_cbv = argc == 3 && strcmp(argv[2], "--root-cbv") == 0;
   const bool root_constants =
       argc == 3 && strcmp(argv[2], "--root-constants") == 0;
@@ -89,11 +91,11 @@ int main(int argc, char **argv) {
   const bool root_srv_mode = root_srv || int64_ops;
   const bool cache_probe = argc == 3 && strcmp(argv[2], "--cache-probe") == 0;
   if (argc == 3 && !root_uav && !reserved_uav && !reserved_srv && !descriptor_uav && !descriptor_resources &&
-      !descriptor_resources_space && !descriptor_resources_1_1 && !descriptor_null_cbv && !root_cbv &&
-      !root_constants && !root_srv_mode && !direct_indexed_resource_heap && !cache_probe && !wave_ops &&
-      !wave_size_unsupported && !int64_ops && !native16_ops && !denorm_unsupported && !packed_dot_ops &&
-      !pack_unpack_unsupported && !compute_derivatives && !compute_derivatives_unsupported &&
-      !atomic64_unsupported && !library_subobjects_unsupported) {
+      !descriptor_resources_space && !descriptor_resources_1_1 && !descriptor_null_cbv && !unbounded_resources &&
+      !root_cbv && !root_constants && !root_srv_mode && !direct_indexed_resource_heap && !cache_probe &&
+      !wave_ops && !wave_size_unsupported && !int64_ops && !native16_ops && !denorm_unsupported &&
+      !packed_dot_ops && !pack_unpack_unsupported && !compute_derivatives &&
+      !compute_derivatives_unsupported && !atomic64_unsupported && !library_subobjects_unsupported) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
@@ -199,6 +201,17 @@ int main(int argc, char **argv) {
       versioned_root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
       versioned_root_desc.Desc_1_1.Flags =
           D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
+    } else if (unbounded_resources) {
+      descriptor_ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, 0, 0};
+      descriptor_ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
+      root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      root_parameters[0].DescriptorTable.NumDescriptorRanges = 1;
+      root_parameters[0].DescriptorTable.pDescriptorRanges = &descriptor_ranges[0];
+      root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      root_parameters[1].DescriptorTable.NumDescriptorRanges = 1;
+      root_parameters[1].DescriptorTable.pDescriptorRanges = &descriptor_ranges[1];
+      root_desc.NumParameters = 2;
+      root_desc.pParameters = root_parameters;
     } else if (descriptor_table_resources) {
       const UINT resource_space = descriptor_resources_space ? 1 : 0;
       if (descriptor_resources_1_1) {
@@ -307,7 +320,7 @@ int main(int argc, char **argv) {
                    input_buffer->Map(0, nullptr, &mapped_input)))
         goto cleanup;
       memset(mapped_input, 0, static_cast<size_t>(input_desc.Width));
-      if (direct_indexed_nonuniform) {
+      if (direct_indexed_nonuniform || unbounded_resources) {
         const UINT input_values[2] = {input_value, input_value + 111};
         memcpy(mapped_input, input_values, sizeof(input_values));
       } else {
@@ -315,7 +328,19 @@ int main(int argc, char **argv) {
       }
       input_buffer->Unmap(0, nullptr);
 
-      if (descriptor_table_resources || direct_indexed_resources || direct_indexed_resources_lifetime ||
+      if (unbounded_resources) {
+        descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        srv_desc.Format = DXGI_FORMAT_UNKNOWN;
+        srv_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv_desc.Buffer.NumElements = 1;
+        srv_desc.Buffer.StructureByteStride = sizeof(UINT);
+        srv_desc.Buffer.FirstElement = 0;
+        device->CreateShaderResourceView(input_buffer, &srv_desc, descriptor_cpu);
+        descriptor_cpu.ptr += descriptor_increment;
+        srv_desc.Buffer.FirstElement = 1;
+        device->CreateShaderResourceView(input_buffer, &srv_desc, descriptor_cpu);
+      } else if (descriptor_table_resources || direct_indexed_resources || direct_indexed_resources_lifetime ||
           direct_indexed_nonuniform) {
         descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
         if (!direct_indexed_nonuniform) {
@@ -526,6 +551,11 @@ int main(int argc, char **argv) {
       list->SetDescriptorHeaps(1, heaps);
       list->SetComputeRootDescriptorTable(
           0, descriptor_heap->GetGPUDescriptorHandleForHeapStart());
+      if (unbounded_resources) {
+        auto output_table = descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+        output_table.ptr += descriptor_increment * 2;
+        list->SetComputeRootDescriptorTable(1, output_table);
+      }
     } else if (root_uav) {
       list->SetComputeRootUnorderedAccessView(
           0, output_buffer->GetGPUVirtualAddress());
@@ -632,6 +662,8 @@ int main(int argc, char **argv) {
       expected_value = 4321;
     else if (descriptor_null_cbv)
       expected_value = input_value;
+    else if (unbounded_resources)
+      expected_value = input_value + 111;
     else if (descriptor_table_resources)
       expected_value = input_value * 2;
     else if (int64_ops)
@@ -673,7 +705,9 @@ int main(int argc, char **argv) {
       goto cleanup;
     }
     std::cout << (is_dxbc ? "DXBC" : "DXIL")
-              << (packed_dot_ops || compute_derivatives || direct_indexed_resource_heap ? " cs_6_6 " : " cs_6_0 ")
+              << (packed_dot_ops || compute_derivatives || direct_indexed_resource_heap || unbounded_resources
+                      ? " cs_6_6 "
+                      : " cs_6_0 ")
               << (root_cbv                     ? "root CBV"
                   : root_constants              ? "root constants"
                   : int64_ops                   ? "int64 ops"
@@ -682,6 +716,7 @@ int main(int argc, char **argv) {
                                                   ? "direct indexed resources"
                   : direct_indexed_nonuniform    ? "direct indexed non-uniform"
                   : direct_indexed               ? "direct indexed"
+                  : unbounded_resources          ? "unbounded resources"
                   : descriptor_table_resources  ? "descriptor resources"
                   : wave_ops                    ? "wave ops"
                   : native16_ops                ? "native16 ops"
