@@ -53,6 +53,11 @@ dx12_msc_debug_validation = executable('dx12_msc_debug_validation', 'dx12_msc_de
   dependencies: [ d3d12_dep ],
 )
 
+dx12_msc_framebuffer_fetch = executable('dx12_msc_framebuffer_fetch', 'dx12_msc_framebuffer_fetch.cpp',
+  include_directories: [ include_directories('../../src/winemetal') ],
+  dependencies: [ d3d12_dep ],
+)
+
 dx12_interface_support = executable('dx12_interface_support', 'dx12_interface_support.cpp',
   dependencies: [ d3d12_dep, dxgi_dep ],
 )
@@ -119,6 +124,12 @@ if dxc_command.length() > 0
     input: 'debug_validation_sm6.hlsl',
     output: 'debug_validation_sm6.ps.cso',
     command: dxc_command + [ '-Zi', '-Qembed_debug', '-E', 'main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_framebuffer_fetch_sm6_fixture',
+    input: 'framebuffer_fetch_sm6.hlsl',
+    output: 'framebuffer_fetch_sm6.ps.cso',
+    command: dxc_command + [ '-enable-16bit-types', '-E', 'main', '-T', 'ps_6_2', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
   custom_target('dx12_shader_embedded_compute_fixture',
