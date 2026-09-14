@@ -7,6 +7,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <strings.h>
+#include <string_view>
 #include <unordered_map>
 
 #include "DXBCParser/BlobContainer.h"
@@ -207,6 +208,97 @@ HasInputSemantic(const D3D12_SHADER_BYTECODE &shader, const char *semantic_name)
       return true;
   }
   return false;
+}
+
+bool
+ReadDXILVBR6(const uint8_t *data, size_t size, size_t &bit_offset, uint64_t &value) {
+  value = 0;
+  unsigned shift = 0;
+  const size_t bit_count = size * 8;
+  while (bit_offset + 6 <= bit_count) {
+    uint32_t group = 0;
+    for (unsigned bit = 0; bit < 6; bit++)
+      group |= ((data[(bit_offset + bit) / 8] >> ((bit_offset + bit) % 8)) & 1u) << bit;
+    bit_offset += 6;
+    value |= static_cast<uint64_t>(group & 0x1fu) << shift;
+    if (!(group & 0x20u))
+      return true;
+    shift += 5;
+    if (shift >= 64)
+      return false;
+  }
+  return false;
+}
+
+bool
+FindDXILVBR6String(
+    const uint8_t *data, size_t size, std::string_view value, size_t first_bit, size_t last_bit,
+    size_t *end_bit
+) {
+  const size_t bit_count = size * 8;
+  last_bit = std::min(last_bit, bit_count);
+  for (size_t candidate = first_bit; candidate < last_bit; candidate++) {
+    size_t bit_offset = candidate;
+    bool matched = true;
+    for (unsigned char character : value) {
+      uint64_t decoded = 0;
+      if (!ReadDXILVBR6(data, size, bit_offset, decoded) || decoded != character) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) {
+      if (end_bit)
+        *end_bit = bit_offset;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool
+HasUnsupportedDXILDenormMode(const D3D12_SHADER_BYTECODE &shader) {
+  if (!shader.pShaderBytecode || !shader.BytecodeLength)
+    return false;
+
+  microsoft::CDXBCParser parser;
+  if (FAILED(parser.ReadDXBC(shader.pShaderBytecode, static_cast<uint32_t>(shader.BytecodeLength))))
+    return false;
+  const UINT dxil_blob = parser.FindNextMatchingBlob(static_cast<microsoft::DXBCFourCC>(kDXILFourCC), 0);
+  const UINT dxil_blob_size = dxil_blob == DXBC_BLOB_NOT_FOUND ? 0 : parser.GetBlobSize(dxil_blob);
+  if (dxil_blob == DXBC_BLOB_NOT_FOUND || dxil_blob_size < 32)
+    return false;
+
+  const auto *blob = static_cast<const uint8_t *>(parser.GetBlob(dxil_blob));
+  if (!blob)
+    return false;
+  if (std::memcmp(blob + 8, "DXIL", 4) != 0)
+    return false;
+  uint32_t bitcode_offset = 0;
+  uint32_t bitcode_size = 0;
+  std::memcpy(&bitcode_offset, blob + 16, sizeof(bitcode_offset));
+  std::memcpy(&bitcode_size, blob + 20, sizeof(bitcode_size));
+  const size_t bitcode_base = 8;
+  if (bitcode_offset > dxil_blob_size - bitcode_base ||
+      bitcode_size > dxil_blob_size - bitcode_base - bitcode_offset)
+    return false;
+  const auto *bitcode = blob + bitcode_base + bitcode_offset;
+  if (bitcode_size < 4 || std::memcmp(bitcode, "BC\xc0\xde", 4) != 0)
+    return false;
+
+  constexpr std::string_view kDenormAttribute = "fp32-denorm-mode";
+  size_t attribute_end = 0;
+  const size_t bitcode_bit_count = static_cast<size_t>(bitcode_size) * 8;
+  if (!FindDXILVBR6String(bitcode, bitcode_size, kDenormAttribute, 0, bitcode_bit_count, &attribute_end))
+    return false;
+
+  // LLVM bitcode stores the attribute key and value in the same parameter
+  // attribute record. Keep the value search local to that record so unrelated
+  // shader metadata cannot turn into a denorm requirement.
+  constexpr size_t kAttributeValueSearchBits = 512;
+  const size_t value_end = std::min(bitcode_bit_count, attribute_end + kAttributeValueSearchBits);
+  return FindDXILVBR6String(bitcode, bitcode_size, "preserve", attribute_end, value_end, nullptr) ||
+         FindDXILVBR6String(bitcode, bitcode_size, "ftz", attribute_end, value_end, nullptr);
 }
 
 bool
@@ -442,6 +534,7 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
     classification.uses_unsupported_stencil_ref = HasOutputSemantic(shader, "SV_StencilRef");
     classification.uses_unsupported_shading_rate =
         HasInputSemantic(shader, "SV_ShadingRate") || HasOutputSemantic(shader, "SV_ShadingRate");
+    classification.uses_unsupported_denorm_mode = HasUnsupportedDXILDenormMode(shader);
   }
   return classification;
 }
@@ -630,6 +723,10 @@ ConvertD3D12Shader(
   }
   if (classification.uses_unsupported_shading_rate) {
     ERR("DXIL shader uses unsupported SV_ShadingRate semantic");
+    return E_NOTIMPL;
+  }
+  if (classification.uses_unsupported_denorm_mode) {
+    ERR("DXIL shader requires unsupported fp32 denorm mode");
     return E_NOTIMPL;
   }
 

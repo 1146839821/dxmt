@@ -27,17 +27,21 @@ int main(int argc, char **argv) {
                  "[--root-uav|--reserved-uav|--reserved-srv|--descriptor-uav|--descriptor-resources|--"
                  "descriptor-resources-space|--root-cbv|--root-constants|--"
                  "descriptor-resources-1-1|--descriptor-null-cbv|--direct-indexed|--root-srv|--"
-                 "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops|--native16-ops|--packed-dot-ops]\n";
+                 "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops|--native16-ops|"
+                 "--denorm-preserve-unsupported|--denorm-ftz-unsupported|--packed-dot-ops]\n";
     return 2;
   }
   const bool wave_ops = argc == 3 && strcmp(argv[2], "--wave-ops") == 0;
   const bool wave_size_unsupported = argc == 3 && strcmp(argv[2], "--wave-size-unsupported") == 0;
   const bool int64_ops = argc == 3 && strcmp(argv[2], "--int64-ops") == 0;
   const bool native16_ops = argc == 3 && strcmp(argv[2], "--native16-ops") == 0;
+  const bool denorm_preserve_unsupported = argc == 3 && strcmp(argv[2], "--denorm-preserve-unsupported") == 0;
+  const bool denorm_ftz_unsupported = argc == 3 && strcmp(argv[2], "--denorm-ftz-unsupported") == 0;
+  const bool denorm_unsupported = denorm_preserve_unsupported || denorm_ftz_unsupported;
   const bool packed_dot_ops = argc == 3 && strcmp(argv[2], "--packed-dot-ops") == 0;
   const bool root_uav = argc == 3 &&
                         (strcmp(argv[2], "--root-uav") == 0 || strcmp(argv[2], "--reserved-uav") == 0 ||
-                         wave_ops || wave_size_unsupported || native16_ops || packed_dot_ops);
+                         wave_ops || wave_size_unsupported || native16_ops || denorm_unsupported || packed_dot_ops);
   const bool reserved_uav = argc == 3 && strcmp(argv[2], "--reserved-uav") == 0;
   const bool reserved_srv = argc == 3 && strcmp(argv[2], "--reserved-srv") == 0;
   const bool descriptor_uav =
@@ -65,7 +69,7 @@ int main(int argc, char **argv) {
   if (argc == 3 && !root_uav && !reserved_uav && !reserved_srv && !descriptor_uav && !descriptor_resources &&
       !descriptor_resources_space && !descriptor_resources_1_1 && !descriptor_null_cbv && !root_cbv &&
       !root_constants && !root_srv_mode && !direct_indexed && !cache_probe && !wave_ops &&
-      !wave_size_unsupported && !int64_ops && !native16_ops && !packed_dot_ops) {
+      !wave_size_unsupported && !int64_ops && !native16_ops && !denorm_unsupported && !packed_dot_ops) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
@@ -414,15 +418,16 @@ int main(int argc, char **argv) {
   pso_desc.pRootSignature = root_signature;
   pso_desc.CS.pShaderBytecode = shader.data();
   pso_desc.CS.BytecodeLength = shader.size();
-  if (wave_size_unsupported) {
-    const HRESULT wave_size_hr = device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso));
-    if (wave_size_hr != E_NOTIMPL) {
-      std::cerr << "unsupported WaveSize expected E_NOTIMPL, got 0x" << std::hex
-                << static_cast<unsigned long>(wave_size_hr) << std::dec << "\n";
+  if (wave_size_unsupported || denorm_unsupported) {
+    const HRESULT unsupported_hr = device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso));
+    if (unsupported_hr != E_NOTIMPL) {
+      std::cerr << "unsupported shader feature expected E_NOTIMPL, got 0x" << std::hex
+                << static_cast<unsigned long>(unsupported_hr) << std::dec << "\n";
       goto cleanup;
     }
-    std::cout << "DXIL unsupported WaveSize rejected: 0x" << std::hex
-              << static_cast<unsigned long>(wave_size_hr) << std::dec << "\n";
+    std::cout << "DXIL unsupported "
+              << (wave_size_unsupported ? "WaveSize" : "denorm mode") << " rejected: 0x" << std::hex
+              << static_cast<unsigned long>(unsupported_hr) << std::dec << "\n";
     result = 0;
     goto cleanup;
   }
