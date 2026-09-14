@@ -644,6 +644,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   };
   MTLD3D12RootSignature *msc_resource_use_root_signature_ = nullptr;
   std::vector<MSCResourceUseTable> msc_resource_use_tables_;
+  bool msc_resource_use_direct_heap_ = false;
   std::unordered_set<obj_handle_t> indirect_resources_used_;
   struct ResourceUseMask {
     WMTResourceUsage usage = static_cast<WMTResourceUsage>(0);
@@ -797,6 +798,7 @@ public:
     predication_op_ = D3D12_PREDICATION_OP_EQUAL_ZERO;
     msc_resource_use_root_signature_ = nullptr;
     msc_resource_use_tables_.clear();
+    msc_resource_use_direct_heap_ = false;
     indirect_resources_used_.clear();
     resource_use_masks_.clear();
     if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState)) {
@@ -2765,7 +2767,9 @@ public:
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
       bool compute = false
   ) {
-    if (!pRootSig || !pStaging || !pRootSig->ParameterSlots || !pRootSig->SlotQwordOffsets)
+    // Direct-indexed root signatures legitimately have no root parameters;
+    // their resource heap still needs a residency walk below.
+    if (!pRootSig || !pStaging)
       return;
 
     // MSC puts root CBV/SRV/UAV addresses directly in its argument buffer.
@@ -2784,6 +2788,7 @@ public:
     if (pRootSig != msc_resource_use_root_signature_) {
       msc_resource_use_root_signature_ = pRootSig;
       msc_resource_use_tables_.clear();
+      msc_resource_use_direct_heap_ = false;
 
       const void *blob = nullptr;
       const auto blob_size = pRootSig->GetBlob(&blob);
@@ -2796,6 +2801,8 @@ public:
               )) &&
               versioned_desc) {
             const auto &root_desc = versioned_desc->Desc_1_1;
+            msc_resource_use_direct_heap_ =
+                (root_desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED) != 0;
             for (UINT parameter_index = 0; parameter_index < root_desc.NumParameters; parameter_index++) {
               const auto &parameter = root_desc.pParameters[parameter_index];
               if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
@@ -2812,7 +2819,7 @@ public:
         }
       }
     }
-    if (msc_resource_use_tables_.empty())
+    if (msc_resource_use_tables_.empty() && !msc_resource_use_direct_heap_)
       return;
 
     D3D12_GPU_DESCRIPTOR_HANDLE heap_start = {};
@@ -2833,55 +2840,63 @@ public:
       }
     };
 
-    auto encode_descriptor = [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type) {
+    auto encode_descriptor = [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
       const auto &descriptor = descriptor_heap->GetDescriptor(index);
       switch (descriptor.type) {
       case ShaderVisibleDescriptorType::SRVTexture: {
-        if (range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV || !descriptor.SRVTexture.texture)
+        if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) ||
+            !descriptor.SRVTexture.texture)
           return;
         auto &view = descriptor.SRVTexture.texture->view(descriptor.SRVTexture.view);
         encode_resource(view.texture.handle, sampled_read);
         break;
       }
       case ShaderVisibleDescriptorType::UAVTexture: {
-        if (range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV || !descriptor.UAVTexture.texture)
+        if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV) ||
+            !descriptor.UAVTexture.texture)
           return;
         auto &view = descriptor.UAVTexture.texture->view(descriptor.UAVTexture.view);
         encode_resource(view.texture.handle, read_write);
         break;
       }
       case ShaderVisibleDescriptorType::ConstantBuffer: {
-        if (range_type != D3D12_DESCRIPTOR_RANGE_TYPE_CBV)
+        if (!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_CBV)
           return;
+        auto *allocation = descriptor.allocation;
         uint64_t buffer_offset = 0;
-        auto allocation = device_->LookupBufferByVA(descriptor.ConstantBuffer.address, &buffer_offset);
+        if (!allocation)
+          allocation = device_->LookupBufferByVA(descriptor.ConstantBuffer.address, &buffer_offset);
         if (allocation)
           encode_resource(allocation->buffer().handle, WMTResourceUsageRead);
         break;
       }
       case ShaderVisibleDescriptorType::SRVTexelBuffer: {
-        if (range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV || !descriptor.SRVTexelBuffer.buffer ||
+        if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) ||
+            !descriptor.SRVTexelBuffer.buffer ||
             !descriptor.SRVTexelBuffer.buffer->current())
           return;
         encode_resource(descriptor.SRVTexelBuffer.buffer->current()->buffer().handle, WMTResourceUsageRead);
         break;
       }
       case ShaderVisibleDescriptorType::UAVTexelBuffer: {
-        if (range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV || !descriptor.UAVTexelBuffer.buffer ||
+        if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV) ||
+            !descriptor.UAVTexelBuffer.buffer ||
             !descriptor.UAVTexelBuffer.buffer->current())
           return;
         encode_resource(descriptor.UAVTexelBuffer.buffer->current()->buffer().handle, read_write);
         break;
       }
       case ShaderVisibleDescriptorType::SRVBuffer: {
-        if (range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV || !descriptor.SRVBuffer.buffer ||
+        if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) ||
+            !descriptor.SRVBuffer.buffer ||
             !descriptor.SRVBuffer.buffer->current())
           return;
         encode_resource(descriptor.SRVBuffer.buffer->current()->buffer().handle, WMTResourceUsageRead);
         break;
       }
       case ShaderVisibleDescriptorType::UAVBuffer: {
-        if (range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV || !descriptor.UAVBuffer.buffer ||
+        if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV) ||
+            !descriptor.UAVBuffer.buffer ||
             !descriptor.UAVBuffer.buffer->current())
           return;
         encode_resource(descriptor.UAVBuffer.buffer->current()->buffer().handle, read_write);
@@ -2923,10 +2938,17 @@ public:
                                      : std::min<uint64_t>(range.NumDescriptors, heap_desc.NumDescriptors - range_start);
         if (range.RangeType != D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
           for (uint64_t descriptor_index = 0; descriptor_index < range_count; descriptor_index++)
-            encode_descriptor(static_cast<UINT>(range_start + descriptor_index), range.RangeType);
+            encode_descriptor(static_cast<UINT>(range_start + descriptor_index), range.RangeType, false);
         table_offset = range_offset + range_count;
       }
     }
+
+    // A direct-indexed root signature has no descriptor-table ranges to
+    // enumerate. Since the shader may select any CBV/SRV/UAV slot at runtime,
+    // conservatively make every populated resource descriptor resident.
+    if (msc_resource_use_direct_heap_)
+      for (UINT index = 0; index < heap_desc.NumDescriptors; index++)
+        encode_descriptor(index, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, true);
   }
 
   bool

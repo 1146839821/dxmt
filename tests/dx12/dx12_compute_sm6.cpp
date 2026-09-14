@@ -27,6 +27,8 @@ int main(int argc, char **argv) {
                  "[--root-uav|--reserved-uav|--reserved-srv|--descriptor-uav|--descriptor-resources|--"
                  "descriptor-resources-space|--root-cbv|--root-constants|--"
                  "descriptor-resources-1-1|--descriptor-null-cbv|--direct-indexed|--root-srv|--"
+                 "direct-indexed-resources|--direct-indexed-resources-lifetime|"
+                 "--direct-indexed-nonuniform|"
                  "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops|--native16-ops|"
                  "--denorm-preserve-unsupported|--denorm-ftz-unsupported|--packed-dot-ops|"
                  "--pack-unpack-unsupported|--compute-derivatives|"
@@ -68,6 +70,14 @@ int main(int argc, char **argv) {
       argc == 3 && strcmp(argv[2], "--descriptor-null-cbv") == 0;
   const bool direct_indexed =
       argc == 3 && strcmp(argv[2], "--direct-indexed") == 0;
+  const bool direct_indexed_resources =
+      argc == 3 && strcmp(argv[2], "--direct-indexed-resources") == 0;
+  const bool direct_indexed_resources_lifetime =
+      argc == 3 && strcmp(argv[2], "--direct-indexed-resources-lifetime") == 0;
+  const bool direct_indexed_nonuniform =
+      argc == 3 && strcmp(argv[2], "--direct-indexed-nonuniform") == 0;
+  const bool direct_indexed_resource_heap = direct_indexed || direct_indexed_resources ||
+                                            direct_indexed_resources_lifetime || direct_indexed_nonuniform;
   const bool descriptor_table_resources = descriptor_resources ||
                                           descriptor_resources_space ||
                                           descriptor_resources_1_1 ||
@@ -80,7 +90,7 @@ int main(int argc, char **argv) {
   const bool cache_probe = argc == 3 && strcmp(argv[2], "--cache-probe") == 0;
   if (argc == 3 && !root_uav && !reserved_uav && !reserved_srv && !descriptor_uav && !descriptor_resources &&
       !descriptor_resources_space && !descriptor_resources_1_1 && !descriptor_null_cbv && !root_cbv &&
-      !root_constants && !root_srv_mode && !direct_indexed && !cache_probe && !wave_ops &&
+      !root_constants && !root_srv_mode && !direct_indexed_resource_heap && !cache_probe && !wave_ops &&
       !wave_size_unsupported && !int64_ops && !native16_ops && !denorm_unsupported && !packed_dot_ops &&
       !pack_unpack_unsupported && !compute_derivatives && !compute_derivatives_unsupported &&
       !atomic64_unsupported && !library_subobjects_unsupported) {
@@ -89,7 +99,7 @@ int main(int argc, char **argv) {
   }
   const bool needs_root_signature =
       root_uav || reserved_uav || reserved_srv || descriptor_uav || descriptor_table_resources ||
-      direct_indexed || root_cbv || root_constants || root_srv_mode;
+      direct_indexed_resource_heap || root_cbv || root_constants || root_srv_mode;
   const bool needs_output = needs_root_signature;
 
   std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
@@ -185,7 +195,7 @@ int main(int argc, char **argv) {
       root_parameters[1].Descriptor.RegisterSpace = 0;
       root_desc.NumParameters = 2;
       root_desc.pParameters = root_parameters;
-    } else if (direct_indexed) {
+    } else if (direct_indexed_resource_heap) {
       versioned_root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
       versioned_root_desc.Desc_1_1.Flags =
           D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
@@ -245,7 +255,7 @@ int main(int argc, char **argv) {
       root_desc.pParameters = root_parameters;
     }
     HRESULT serialize_hr =
-        descriptor_resources_1_1 || direct_indexed
+        descriptor_resources_1_1 || direct_indexed_resource_heap
             ? D3D12SerializeVersionedRootSignature(&versioned_root_desc,
                                                    &root_blob, &root_error)
             : D3D12SerializeRootSignature(&root_desc,
@@ -259,10 +269,13 @@ int main(int argc, char **argv) {
                                              IID_PPV_ARGS(&root_signature))))
       goto cleanup;
 
-    if (descriptor_uav || descriptor_table_resources || direct_indexed) {
+    if (descriptor_uav || descriptor_table_resources || direct_indexed_resource_heap) {
       D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
       heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-      heap_desc.NumDescriptors = descriptor_table_resources ? 3 : 1;
+      heap_desc.NumDescriptors = descriptor_table_resources || direct_indexed_resources ||
+                                         direct_indexed_resources_lifetime || direct_indexed_nonuniform
+                                     ? 3
+                                     : 1;
       heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
       if (!CheckHR("CreateDescriptorHeap",
                    device->CreateDescriptorHeap(
@@ -272,7 +285,8 @@ int main(int argc, char **argv) {
           D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     }
 
-    if (root_cbv || root_constants || root_srv_mode || reserved_srv || descriptor_table_resources) {
+    if (root_cbv || root_constants || root_srv_mode || reserved_srv || descriptor_table_resources ||
+        direct_indexed_resources || direct_indexed_resources_lifetime || direct_indexed_nonuniform) {
       upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
       upload_heap.CreationNodeMask = 1;
       upload_heap.VisibleNodeMask = 1;
@@ -293,26 +307,41 @@ int main(int argc, char **argv) {
                    input_buffer->Map(0, nullptr, &mapped_input)))
         goto cleanup;
       memset(mapped_input, 0, static_cast<size_t>(input_desc.Width));
-      memcpy(mapped_input, &input_value, sizeof(input_value));
+      if (direct_indexed_nonuniform) {
+        const UINT input_values[2] = {input_value, input_value + 111};
+        memcpy(mapped_input, input_values, sizeof(input_values));
+      } else {
+        memcpy(mapped_input, &input_value, sizeof(input_value));
+      }
       input_buffer->Unmap(0, nullptr);
 
-      if (descriptor_table_resources) {
+      if (descriptor_table_resources || direct_indexed_resources || direct_indexed_resources_lifetime ||
+          direct_indexed_nonuniform) {
         descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
-        cbv_desc.BufferLocation = input_buffer->GetGPUVirtualAddress();
-        cbv_desc.SizeInBytes = 256;
-        device->CreateConstantBufferView(&cbv_desc, descriptor_cpu);
-        if (descriptor_null_cbv)
-          device->CreateConstantBufferView(nullptr, descriptor_cpu);
+        if (!direct_indexed_nonuniform) {
+          cbv_desc.BufferLocation = input_buffer->GetGPUVirtualAddress();
+          cbv_desc.SizeInBytes = 256;
+          device->CreateConstantBufferView(&cbv_desc, descriptor_cpu);
+          if (descriptor_null_cbv)
+            device->CreateConstantBufferView(nullptr, descriptor_cpu);
+        }
 
-        descriptor_cpu.ptr += descriptor_increment;
+        if (!direct_indexed_nonuniform)
+          descriptor_cpu.ptr += descriptor_increment;
         srv_desc.Format = DXGI_FORMAT_UNKNOWN;
         srv_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
         srv_desc.Shader4ComponentMapping =
             D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srv_desc.Buffer.NumElements = 64;
+        srv_desc.Buffer.NumElements = direct_indexed_nonuniform ? 1 : 64;
         srv_desc.Buffer.StructureByteStride = sizeof(UINT);
+        srv_desc.Buffer.FirstElement = 0;
         device->CreateShaderResourceView(input_buffer, &srv_desc,
                                          descriptor_cpu);
+        if (direct_indexed_nonuniform) {
+          descriptor_cpu.ptr += descriptor_increment;
+          srv_desc.Buffer.FirstElement = 1;
+          device->CreateShaderResourceView(input_buffer, &srv_desc, descriptor_cpu);
+        }
       }
     }
     if (reserved_srv) {
@@ -403,16 +432,24 @@ int main(int argc, char **argv) {
                             IID_PPV_ARGS(&output_buffer))))
       goto cleanup;
 
-    if (descriptor_uav || descriptor_table_resources || direct_indexed) {
+    if (descriptor_uav || descriptor_table_resources || direct_indexed_resource_heap) {
       uav_desc.Format = DXGI_FORMAT_UNKNOWN;
       uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
       uav_desc.Buffer.NumElements = 64;
       uav_desc.Buffer.StructureByteStride = sizeof(UINT);
       descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
-      if (descriptor_table_resources)
+      if (descriptor_table_resources || direct_indexed_resources || direct_indexed_resources_lifetime ||
+          direct_indexed_nonuniform)
         descriptor_cpu.ptr += descriptor_increment * 2;
       device->CreateUnorderedAccessView(output_buffer, nullptr, &uav_desc,
                                         descriptor_cpu);
+    }
+
+    if (direct_indexed_resources_lifetime) {
+      // The descriptor must keep the SRV resource usable through submission;
+      // no later command in this test needs the D3D12 wrapper itself.
+      input_buffer->Release();
+      input_buffer = nullptr;
     }
 
     readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
@@ -481,7 +518,7 @@ int main(int argc, char **argv) {
           0, input_buffer->GetGPUVirtualAddress());
       list->SetComputeRootUnorderedAccessView(
           1, output_buffer->GetGPUVirtualAddress());
-    } else if (direct_indexed) {
+    } else if (direct_indexed_resource_heap) {
       ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
       list->SetDescriptorHeaps(1, heaps);
     } else if (descriptor_table_resources) {
@@ -514,7 +551,8 @@ int main(int argc, char **argv) {
     rb.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     list->ResourceBarrier(1, &rb);
   }
-  list->Dispatch(compute_derivatives ? 8 : 1, compute_derivatives ? 8 : 1, 1);
+  list->Dispatch(compute_derivatives ? 8 : direct_indexed_nonuniform ? 2 : 1,
+                 compute_derivatives ? 8 : 1, 1);
   if (needs_output) {
     uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     uav_barrier.UAV.pResource = output_buffer;
@@ -526,6 +564,8 @@ int main(int argc, char **argv) {
     } else {
       const UINT output_copy_size = wave_ops || packed_dot_ops
                                         ? sizeof(UINT) * 3
+                                    : direct_indexed_nonuniform
+                                        ? sizeof(UINT) * 2
                                     : compute_derivatives
                                         ? sizeof(UINT) * 64
                                     : int64_ops
@@ -574,10 +614,20 @@ int main(int argc, char **argv) {
       int64_high = mapped[1];
     if (packed_dot_ops)
       packed_dot_unsigned = mapped[1];
+    if (direct_indexed_nonuniform && mapped[1] != input_value + 111) {
+      std::cerr << "non-uniform descriptor readback mismatch: " << mapped[1] << " expected "
+                << input_value + 111 << "\n";
+      readback_buffer->Unmap(0, nullptr);
+      goto cleanup;
+    }
     readback_buffer->Unmap(0, nullptr);
     UINT expected_value = 1234;
     if (reserved_srv)
       expected_value = 0x12345678;
+    else if (direct_indexed_resources || direct_indexed_resources_lifetime)
+      expected_value = input_value * 2;
+    else if (direct_indexed_nonuniform)
+      expected_value = input_value;
     else if (direct_indexed)
       expected_value = 4321;
     else if (descriptor_null_cbv)
@@ -623,12 +673,15 @@ int main(int argc, char **argv) {
       goto cleanup;
     }
     std::cout << (is_dxbc ? "DXBC" : "DXIL")
-              << (packed_dot_ops || compute_derivatives ? " cs_6_6 " : " cs_6_0 ")
+              << (packed_dot_ops || compute_derivatives || direct_indexed_resource_heap ? " cs_6_6 " : " cs_6_0 ")
               << (root_cbv                     ? "root CBV"
                   : root_constants              ? "root constants"
                   : int64_ops                   ? "int64 ops"
                   : (root_srv || reserved_srv) ? "root SRV"
-                  : direct_indexed              ? "direct indexed"
+                  : direct_indexed_resources || direct_indexed_resources_lifetime
+                                                  ? "direct indexed resources"
+                  : direct_indexed_nonuniform    ? "direct indexed non-uniform"
+                  : direct_indexed               ? "direct indexed"
                   : descriptor_table_resources  ? "descriptor resources"
                   : wave_ops                    ? "wave ops"
                   : native16_ops                ? "native16 ops"

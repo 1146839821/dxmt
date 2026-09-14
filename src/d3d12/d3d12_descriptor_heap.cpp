@@ -136,6 +136,14 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
   D3D12_DESCRIPTOR_HEAP_DESC desc_;
 
   std::vector<ShaderVisibleDescriptorCPUStorage> descriptors_;
+  // A descriptor may outlive the ID3D12Resource that created it. Keep the
+  // native resource objects alive until the descriptor is overwritten or the
+  // heap is destroyed, while the CPU descriptor storage retains lookup
+  // pointers for residency tracking.
+  std::vector<Rc<Texture>> texture_resources_;
+  std::vector<Rc<Buffer>> buffer_resources_;
+  std::vector<Rc<Buffer>> counter_resources_;
+  std::vector<Rc<BufferAllocation>> cbv_allocations_;
   Rc<Buffer> buffer_;
   ShaderVisibleDescriptorGPUStorage *mapped_argument_buffer_ = nullptr;
   uint64_t argument_buffer_gpu_address_ = 0;
@@ -147,6 +155,14 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
   SetMSCDescriptor(UINT Index, dxmt_msc_descriptor_entry Entry) {
     if (mapped_msc_argument_buffer_)
       mapped_msc_argument_buffer_[Index] = Entry;
+  }
+
+  void
+  ReleaseDescriptorResources(UINT Index) {
+    texture_resources_[Index] = nullptr;
+    buffer_resources_[Index] = nullptr;
+    counter_resources_[Index] = nullptr;
+    cbv_allocations_[Index] = nullptr;
   }
 
 public:
@@ -165,6 +181,10 @@ public:
       return E_INVALIDARG;
     }
     descriptors_.resize(pDesc->NumDescriptors);
+    texture_resources_.resize(pDesc->NumDescriptors);
+    buffer_resources_.resize(pDesc->NumDescriptors);
+    counter_resources_.resize(pDesc->NumDescriptors);
+    cbv_allocations_.resize(pDesc->NumDescriptors);
 
     if (pDesc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
       buffer_ = new Buffer(descriptors_.size() * sizeof(ShaderVisibleDescriptorGPUStorage), device_->GetMTLDevice());
@@ -294,6 +314,8 @@ public:
   AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    ReleaseDescriptorResources(Index);
+    texture_resources_[Index] = Texture;
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::SRVTexture;
     cpu_storage.SRVTexture.texture = Texture;
@@ -319,10 +341,14 @@ public:
   AddConstantBufferView(UINT Index, UINT64 VA, UINT32 SizeInBytes) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    ReleaseDescriptorResources(Index);
+    uint64_t buffer_offset = 0;
+    cbv_allocations_[Index] = device_->LookupBufferByVA(VA, &buffer_offset);
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::ConstantBuffer;
     cpu_storage.ConstantBuffer.address = VA;
     cpu_storage.ConstantBuffer.size = SizeInBytes;
+    cpu_storage.allocation = cbv_allocations_[Index].ptr();
     if (mapped_argument_buffer_) {
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.ConstantBuffer.address = VA;
@@ -342,6 +368,8 @@ public:
     // Keep the inactive union bytes deterministic so descriptor copies cannot
     // retain a stale CBV address in CPU-side storage.
     cpu_storage.ConstantBuffer = {};
+    cpu_storage.allocation = nullptr;
+    ReleaseDescriptorResources(Index);
     if (mapped_argument_buffer_)
       mapped_argument_buffer_[Index].ZeroFilled = {{}};
     SetMSCDescriptor(Index, {});
@@ -351,6 +379,8 @@ public:
   AddUnorderedAccessView(UINT Index, Texture *Texture, TextureViewKey View) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    ReleaseDescriptorResources(Index);
+    texture_resources_[Index] = Texture;
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::UAVTexture;
     cpu_storage.UAVTexture.texture = Texture; // 
@@ -369,6 +399,8 @@ public:
   AddUnorderedAccessView(UINT Index, Buffer *UAVBuffer, BufferViewKey View, BufferSlice Slice) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    ReleaseDescriptorResources(Index);
+    buffer_resources_[Index] = UAVBuffer;
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::UAVTexelBuffer;
     cpu_storage.UAVTexelBuffer.buffer = UAVBuffer;
@@ -400,6 +432,9 @@ public:
   AddUnorderedAccessView(UINT Index, Buffer *UAVBuffer, BufferSlice Slice, Buffer *Counter, UINT CounterOffsetInBytes) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    ReleaseDescriptorResources(Index);
+    buffer_resources_[Index] = UAVBuffer;
+    counter_resources_[Index] = Counter;
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::UAVBuffer;
     cpu_storage.UAVBuffer.buffer = UAVBuffer;
@@ -424,6 +459,8 @@ public:
   virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferViewKey View, BufferSlice Slice) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    ReleaseDescriptorResources(Index);
+    buffer_resources_[Index] = Buffer;
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::SRVTexelBuffer;
     cpu_storage.SRVTexelBuffer.buffer = Buffer;
@@ -452,6 +489,8 @@ public:
   virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferSlice Slice) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    ReleaseDescriptorResources(Index);
+    buffer_resources_[Index] = Buffer;
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::SRVBuffer;
     cpu_storage.SRVBuffer.buffer = Buffer;
@@ -513,6 +552,10 @@ public:
       return;
     for (unsigned i = 0; i < CopyCount; i++) {
       heap_to->descriptors_[DescriptorTo + i] = descriptors_[From + i];
+      heap_to->texture_resources_[DescriptorTo + i] = texture_resources_[From + i];
+      heap_to->buffer_resources_[DescriptorTo + i] = buffer_resources_[From + i];
+      heap_to->counter_resources_[DescriptorTo + i] = counter_resources_[From + i];
+      heap_to->cbv_allocations_[DescriptorTo + i] = cbv_allocations_[From + i];
       if (mapped_argument_buffer_ && heap_to->mapped_argument_buffer_)
         heap_to->mapped_argument_buffer_[DescriptorTo + i] = mapped_argument_buffer_[From + i];
       if (mapped_msc_argument_buffer_ && heap_to->mapped_msc_argument_buffer_)

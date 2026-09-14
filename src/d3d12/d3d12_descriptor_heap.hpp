@@ -125,8 +125,11 @@ struct ShaderVisibleDescriptorCPUStorage {
     SRVTexelBufferCPUStorage SRVTexelBuffer;
     SRVBufferCPUStorage SRVBuffer;
   };
+  // Keep the allocation identity available after the owning D3D12 resource
+  // is released. The descriptor heap owns the matching Rc separately.
+  BufferAllocation *allocation = nullptr;
 
-  ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null), ConstantBuffer{} {}
+  ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null), ConstantBuffer{}, allocation(nullptr) {}
 };
 
 class MTLD3D12DescriptorHeap : public ID3D12DescriptorHeap {

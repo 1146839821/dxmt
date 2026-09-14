@@ -22,7 +22,10 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 3)
     return 2;
   const bool static_sampler = argc == 3 && strcmp(argv[2], "--static-sampler") == 0;
-  const bool direct_indexed = argc == 3 && strcmp(argv[2], "--direct-indexed") == 0;
+  const bool direct_indexed_uav_texture =
+      argc == 3 && strcmp(argv[2], "--direct-indexed-uav-texture") == 0;
+  const bool direct_indexed =
+      argc == 3 && (strcmp(argv[2], "--direct-indexed") == 0 || direct_indexed_uav_texture);
   if (argc == 3 && !static_sampler && !direct_indexed)
     return 2;
 
@@ -45,6 +48,7 @@ main(int argc, char **argv) {
   ID3D12Resource *texture = nullptr;
   ID3D12Resource *upload = nullptr;
   ID3D12Resource *output = nullptr;
+  ID3D12Resource *output_texture = nullptr;
   ID3D12Resource *readback = nullptr;
   ID3D12PipelineState *pso = nullptr;
   ID3D12GraphicsCommandList *list = nullptr;
@@ -53,6 +57,7 @@ main(int argc, char **argv) {
   ID3D12CommandList *lists[1] = {};
   UINT *mapped = nullptr;
   UINT value = 0;
+  UINT texture_value = 0;
   UINT descriptor_increment = 0;
   unsigned root_parameter_count = 0;
   HRESULT serialize_hr = E_FAIL;
@@ -70,8 +75,10 @@ main(int argc, char **argv) {
   D3D12_HEAP_PROPERTIES upload_heap = {};
   D3D12_HEAP_PROPERTIES readback_heap = {};
   D3D12_RESOURCE_DESC texture_desc = {};
+  D3D12_RESOURCE_DESC output_texture_desc = {};
   D3D12_RESOURCE_DESC buffer_desc = {};
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT output_texture_footprint = {};
   UINT row_count = 0;
   UINT64 row_size = 0;
   UINT64 total_size = 0;
@@ -144,7 +151,7 @@ main(int argc, char **argv) {
     goto cleanup;
 
   resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-  resource_heap_desc.NumDescriptors = 2;
+  resource_heap_desc.NumDescriptors = direct_indexed_uav_texture ? 3 : 2;
   resource_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
   sampler_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
   sampler_heap_desc.NumDescriptors = 1;
@@ -214,6 +221,26 @@ main(int argc, char **argv) {
                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&output))))
     goto cleanup;
   device->CreateUnorderedAccessView(output, nullptr, &uav_desc, uav_cpu);
+  if (direct_indexed_uav_texture) {
+    output_texture_desc = texture_desc;
+    output_texture_desc.Format = DXGI_FORMAT_R32_UINT;
+    output_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (!CheckHR(
+            "CreateOutputTexture",
+            device->CreateCommittedResource(
+                &default_heap, D3D12_HEAP_FLAG_NONE, &output_texture_desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&output_texture))))
+      goto cleanup;
+    D3D12_UNORDERED_ACCESS_VIEW_DESC texture_uav_desc = {};
+    texture_uav_desc.Format = DXGI_FORMAT_R32_UINT;
+    texture_uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    auto texture_uav_cpu = resource_cpu;
+    texture_uav_cpu.ptr += descriptor_increment * 2;
+    device->CreateUnorderedAccessView(output_texture, nullptr, &texture_uav_desc, texture_uav_cpu);
+    device->GetCopyableFootprints(
+        &output_texture_desc, 0, 1, 0, &output_texture_footprint, &row_count, &row_size, &total_size
+    );
+  }
 
   if (!static_sampler) {
     sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -269,6 +296,23 @@ main(int argc, char **argv) {
   }
   list->Dispatch(1, 1, 1);
   list->CopyBufferRegion(readback, 0, output, 0, sizeof(UINT));
+  if (direct_indexed_uav_texture) {
+    D3D12_RESOURCE_BARRIER texture_barrier = {};
+    texture_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    texture_barrier.Transition.pResource = output_texture;
+    texture_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    texture_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    texture_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list->ResourceBarrier(1, &texture_barrier);
+    D3D12_TEXTURE_COPY_LOCATION texture_readback = {};
+    texture_readback.pResource = readback;
+    texture_readback.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    texture_readback.PlacedFootprint = output_texture_footprint;
+    D3D12_TEXTURE_COPY_LOCATION texture_source = {};
+    texture_source.pResource = output_texture;
+    texture_source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    list->CopyTextureRegion(&texture_readback, 0, 0, 0, &texture_source, nullptr);
+  }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
   lists[0] = list;
@@ -284,12 +328,16 @@ main(int argc, char **argv) {
   if (!CheckHR("MapReadback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
     goto cleanup;
   value = *mapped;
+  texture_value = direct_indexed_uav_texture
+                      ? *reinterpret_cast<UINT *>(reinterpret_cast<char *>(mapped) + output_texture_footprint.Offset)
+                      : value;
   readback->Unmap(0, nullptr);
-  if (value != 255) {
-    std::cerr << "texture sampler readback mismatch: " << value << "\n";
+  if (value != 255 || texture_value != 255) {
+    std::cerr << "texture sampler readback mismatch: buffer=" << value << " texture=" << texture_value << "\n";
     goto cleanup;
   }
-  std::cout << "DXIL " << (direct_indexed ? "direct indexed" : static_sampler ? "static" : "dynamic")
+  std::cout << "DXIL " << (direct_indexed_uav_texture ? "direct indexed UAV texture"
+                         : direct_indexed ? "direct indexed" : static_sampler ? "static" : "dynamic")
             << " texture sampler readback passed: " << value << "\n";
   result = 0;
 
@@ -306,6 +354,8 @@ cleanup:
     readback->Release();
   if (output)
     output->Release();
+  if (output_texture)
+    output_texture->Release();
   if (upload)
     upload->Release();
   if (texture)
