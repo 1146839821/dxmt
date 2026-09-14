@@ -31,6 +31,7 @@ MakeFourCC(char a, char b, char c, char d) {
 }
 
 constexpr uint32_t kDXILFourCC = MakeFourCC('D', 'X', 'I', 'L');
+constexpr uint32_t kSFI0FourCC = MakeFourCC('S', 'F', 'I', '0');
 constexpr uint32_t kPSVFourCC = MakeFourCC('P', 'S', 'V', '0');
 constexpr uint32_t kDXILComputeShaderKind = 5;
 constexpr uint32_t kDXILLibraryShaderKind = 6;
@@ -46,6 +47,9 @@ constexpr uint64_t kDXILModuleIFuncRecord = 18;
 constexpr uint64_t kDXILConstantsSetTypeRecord = 1;
 constexpr uint64_t kDXILConstantsIntegerRecord = 4;
 constexpr uint64_t kDXILFunctionCallRecord = 34;
+constexpr uint64_t kDXILAtomic64OnTypedResource = 0x400000;
+constexpr uint64_t kDXILAtomic64OnGroupShared = 0x800000;
+constexpr uint64_t kDXILAtomic64OnHeapResource = 0x10000000;
 
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
@@ -305,6 +309,25 @@ GetDXILBitcode(const D3D12_SHADER_BYTECODE &shader, const uint8_t **bitcode, siz
 
   *bitcode = candidate;
   *bitcode_size = bitcode_length;
+  return true;
+}
+
+bool
+GetDXILFeatureFlags(const D3D12_SHADER_BYTECODE &shader, uint64_t *feature_flags) {
+  if (!feature_flags)
+    return false;
+  *feature_flags = 0;
+
+  microsoft::CDXBCParser parser;
+  if (FAILED(parser.ReadDXBC(shader.pShaderBytecode, static_cast<uint32_t>(shader.BytecodeLength))))
+    return false;
+  const UINT feature_blob = parser.FindNextMatchingBlob(static_cast<microsoft::DXBCFourCC>(kSFI0FourCC), 0);
+  if (feature_blob == DXBC_BLOB_NOT_FOUND || parser.GetBlobSize(feature_blob) < sizeof(uint64_t))
+    return false;
+  const auto *blob = static_cast<const uint8_t *>(parser.GetBlob(feature_blob));
+  if (!blob)
+    return false;
+  std::memcpy(feature_flags, blob, sizeof(*feature_flags));
   return true;
 }
 
@@ -757,6 +780,29 @@ private:
   std::unordered_map<uint32_t, std::vector<DXILBitcodeAbbrev>> block_info_;
 };
 
+uint64_t
+GetDXILAtomic64FeatureFlags(const D3D12_SHADER_BYTECODE &shader) {
+  uint64_t feature_flags = 0;
+  GetDXILFeatureFlags(shader, &feature_flags);
+  const uint64_t atomic64_flags =
+      feature_flags & (kDXILAtomic64OnTypedResource | kDXILAtomic64OnGroupShared | kDXILAtomic64OnHeapResource);
+
+  const uint8_t *bitcode = nullptr;
+  size_t bitcode_size = 0;
+  if (!GetDXILBitcode(shader, &bitcode, &bitcode_size))
+    return atomic64_flags;
+  DXILBitcodeReader reader(bitcode, bitcode_size);
+  if (reader.HasValueSymbol("dx.op.atomicBinOp.i64") ||
+      reader.HasValueSymbol("dx.op.atomicCompareExchange.i64")) {
+    // SFI0 does not split structured/raw resource atomics into separate D3D12
+    // query fields; keep those paths behind the typed-resource gate.
+    return atomic64_flags | (atomic64_flags & kDXILAtomic64OnHeapResource
+                                 ? 0
+                                 : kDXILAtomic64OnTypedResource);
+  }
+  return atomic64_flags;
+}
+
 bool
 HasUnsupportedDXILPackUnpack(const D3D12_SHADER_BYTECODE &shader) {
   const uint8_t *bitcode = nullptr;
@@ -1096,6 +1142,7 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
     classification.uses_unsupported_denorm_mode = HasUnsupportedDXILDenormMode(shader);
     classification.uses_unsupported_pack_unpack = HasUnsupportedDXILPackUnpack(shader);
     classification.uses_unsupported_compute_derivative_shape = HasUnsupportedDXILComputeDerivativeShape(shader);
+    classification.atomic64_feature_flags = GetDXILAtomic64FeatureFlags(shader);
     classification.is_library_shader = IsDXILLibraryShader(shader);
   }
   return classification;
@@ -1298,6 +1345,21 @@ ConvertD3D12Shader(
   if (classification.uses_unsupported_compute_derivative_shape) {
     ERR("DXIL compute shader uses unsupported derivative threadgroup shape");
     return E_NOTIMPL;
+  }
+  if (classification.atomic64_feature_flags != 0) {
+    const uint64_t atomic64_flags = classification.atomic64_feature_flags;
+    const bool typed_supported =
+        msc_capabilities && msc_capabilities->atomic64_typed_resource_validated;
+    const bool group_shared_supported =
+        msc_capabilities && msc_capabilities->atomic64_group_shared_validated;
+    const bool descriptor_heap_supported =
+        msc_capabilities && msc_capabilities->atomic64_descriptor_heap_validated;
+    if ((atomic64_flags & kDXILAtomic64OnTypedResource && !typed_supported) ||
+        (atomic64_flags & kDXILAtomic64OnGroupShared && !group_shared_supported) ||
+        (atomic64_flags & kDXILAtomic64OnHeapResource && !descriptor_heap_supported)) {
+      ERR("DXIL shader uses unsupported 64-bit atomic operations");
+      return E_NOTIMPL;
+    }
   }
   if (classification.is_library_shader) {
     ERR("DXIL library shaders are unsupported");

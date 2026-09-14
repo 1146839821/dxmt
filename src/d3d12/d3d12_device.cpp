@@ -870,6 +870,8 @@ public:
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS9 *>(pFeatureData);
       *out = {};
+      out->AtomicInt64OnTypedResourceSupported = msc.atomic64_typed_resource_validated ? TRUE : FALSE;
+      out->AtomicInt64OnGroupSharedSupported = msc.atomic64_group_shared_validated ? TRUE : FALSE;
       return S_OK;
     }
     case D3D12_FEATURE_D3D12_OPTIONS10: {
@@ -884,6 +886,7 @@ public:
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS11 *>(pFeatureData);
       *out = {};
+      out->AtomicInt64OnDescriptorHeapResourceSupported = msc.atomic64_descriptor_heap_validated ? TRUE : FALSE;
       return S_OK;
     }
     case D3D12_FEATURE_D3D12_OPTIONS12: {

@@ -239,6 +239,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-Vd', '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_compute_sm6_atomic64_fixture',
+    input: 'compute_sm6_atomic64.hlsl',
+    output: 'compute_sm6_atomic64.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_texture_sampler_fixture',
     input: 'texture_sampler.hlsl',
     output: 'texture_sampler.cs.cso',

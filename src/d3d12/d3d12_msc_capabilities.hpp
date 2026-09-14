@@ -85,6 +85,9 @@ struct DXMTMSCCapabilities {
   bool msc_helper_lane = false;
   bool msc_compute_derivatives = false;
   bool msc_atomic64 = false;
+  bool msc_atomic64_typed_resource = false;
+  bool msc_atomic64_group_shared = false;
+  bool msc_atomic64_descriptor_heap = false;
   bool msc_function_constants = false;
   bool msc_framebuffer_fetch = false;
   bool msc_global_coherent = false;
@@ -112,6 +115,9 @@ struct DXMTMSCCapabilities {
   bool raytracing_validated = false;
   bool mesh_validated = false;
   bool atomic64_validated = false;
+  bool atomic64_typed_resource_validated = false;
+  bool atomic64_group_shared_validated = false;
+  bool atomic64_descriptor_heap_validated = false;
 
   bool ps_specified_stencil_ref = false;
   D3D_SHADER_MODEL maximum_shader_model = D3D_SHADER_MODEL_5_1;

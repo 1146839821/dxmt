@@ -1035,7 +1035,9 @@ int main() {
        options.ResourceHeapTier != D3D12_RESOURCE_HEAP_TIER_2 || options.ROVsSupported || options1.WaveOps ||
        options3.CopyQueueTimestampQueriesSupported != TRUE || !options3.CastingFullyTypedFormatSupported ||
        options5.RenderPassesTier != D3D12_RENDER_PASS_TIER_0 ||
-      options5.RaytracingTier != D3D12_RAYTRACING_TIER_NOT_SUPPORTED || shader_cache.SupportFlags ||
+       options5.RaytracingTier != D3D12_RAYTRACING_TIER_NOT_SUPPORTED || shader_cache.SupportFlags ||
+       options9.AtomicInt64OnTypedResourceSupported || options9.AtomicInt64OnGroupSharedSupported ||
+       options11.AtomicInt64OnDescriptorHeapResourceSupported ||
       !queue_priority.PriorityForTypeIsSupported || existing_heaps.Supported ||
       serialization.HeapSerializationTier != D3D12_HEAP_SERIALIZATION_TIER_0 || cross_node.SharingTier != D3D12_CROSS_NODE_SHARING_TIER_NOT_SUPPORTED ||
       protected_support.Support != D3D12_PROTECTED_RESOURCE_SESSION_SUPPORT_FLAG_NONE || displayable.DisplayableTexture ||

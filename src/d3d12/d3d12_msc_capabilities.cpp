@@ -118,6 +118,9 @@ QueryDXMTMSCCapabilities(WMT::Device device) {
   capabilities.msc_helper_lane = msc4;
   capabilities.msc_compute_derivatives = msc4;
   capabilities.msc_atomic64 = msc4 && capabilities.metal_atomic64;
+  capabilities.msc_atomic64_typed_resource = capabilities.msc_atomic64;
+  capabilities.msc_atomic64_group_shared = capabilities.msc_atomic64;
+  capabilities.msc_atomic64_descriptor_heap = capabilities.msc_atomic64;
   capabilities.msc_function_constants = msc4 && capabilities.api_function_constants;
   capabilities.msc_framebuffer_fetch = msc4 && capabilities.api_framebuffer_fetch;
   capabilities.msc_global_coherent = msc4 && capabilities.metal_memory_coherence;
@@ -186,6 +189,12 @@ LogDXMTMSCCapabilities(const DXMTMSCCapabilities &capabilities) {
       capabilities.wave_ops_validated, "/", capabilities.int64_validated, "/", capabilities.native16_validated, "/",
       capabilities.mesh_validated, "/", capabilities.raytracing_validated, ", barycentrics=",
       capabilities.barycentrics_validated
+  ));
+  Logger::info(str::format(
+      "D3D12 MSC atomic64 matrix: typed=", capabilities.msc_atomic64_typed_resource, "/",
+      capabilities.atomic64_typed_resource_validated, ", groupshared=", capabilities.msc_atomic64_group_shared,
+      "/", capabilities.atomic64_group_shared_validated, ", descriptorHeap=",
+      capabilities.msc_atomic64_descriptor_heap, "/", capabilities.atomic64_descriptor_heap_validated
   ));
 }
 
