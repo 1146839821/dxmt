@@ -31,8 +31,21 @@ MakeFourCC(char a, char b, char c, char d) {
 }
 
 constexpr uint32_t kDXILFourCC = MakeFourCC('D', 'X', 'I', 'L');
+constexpr uint32_t kPSVFourCC = MakeFourCC('P', 'S', 'V', '0');
+constexpr uint32_t kDXILComputeShaderKind = 5;
 constexpr uint32_t kDXILLibraryShaderKind = 6;
+constexpr uint32_t kDXILModuleBlockID = 8;
+constexpr uint32_t kDXILConstantsBlockID = 11;
+constexpr uint32_t kDXILFunctionBlockID = 12;
 constexpr uint32_t kDXILValueSymbolTableBlockID = 14;
+constexpr uint64_t kDXILModuleGlobalVariableRecord = 7;
+constexpr uint64_t kDXILModuleFunctionRecord = 8;
+constexpr uint64_t kDXILModuleAliasRecord = 9;
+constexpr uint64_t kDXILModuleAliasRecordNew = 14;
+constexpr uint64_t kDXILModuleIFuncRecord = 18;
+constexpr uint64_t kDXILConstantsSetTypeRecord = 1;
+constexpr uint64_t kDXILConstantsIntegerRecord = 4;
+constexpr uint64_t kDXILFunctionCallRecord = 34;
 
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
@@ -319,6 +332,8 @@ public:
     if (!data_ || size_ < 4 || std::memcmp(data_, "BC\xc0\xde", 4) != 0)
       return false;
 
+    Reset();
+
     uint64_t magic = 0;
     uint64_t enter_subblock = 0;
     if (!ReadBits(32, &magic) || !ReadBits(2, &enter_subblock) || enter_subblock != 1)
@@ -331,14 +346,67 @@ public:
       return false;
 
     bool found = false;
-    if (!ParseBlock(module_block_id, module_code_width, module_end_bit, symbol, &found))
+    if (!ParseBlock(module_block_id, module_code_width, module_end_bit, symbol, &found, nullptr, nullptr))
+      return false;
+    return found;
+  }
+
+  bool HasDXILDerivativeOperations() {
+    if (!data_ || size_ < 4 || std::memcmp(data_, "BC\xc0\xde", 4) != 0)
+      return false;
+
+    Reset();
+
+    uint64_t magic = 0;
+    uint64_t enter_subblock = 0;
+    if (!ReadBits(32, &magic) || !ReadBits(2, &enter_subblock) || enter_subblock != 1)
+      return false;
+
+    uint32_t module_block_id = 0;
+    unsigned module_code_width = 0;
+    size_t module_end_bit = 0;
+    if (!ReadSubBlockHeader(&module_block_id, &module_code_width, &module_end_bit))
+      return false;
+
+    DerivativeScan scan;
+    bool found = false;
+    if (!ParseBlock(module_block_id, module_code_width, module_end_bit, {}, &found, &scan, nullptr))
       return false;
     return found;
   }
 
 private:
+  struct DerivativeFunctionScan {
+    uint64_t global_value_base = 0;
+    std::vector<int64_t> constants;
+  };
+
+  struct DerivativeScan {
+    uint64_t module_value_count = 0;
+    uint64_t unary_function_id = std::numeric_limits<uint64_t>::max();
+  };
+
   static constexpr char kChar6Alphabet[] =
       "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._";
+
+  void Reset() {
+    bit_offset_ = 0;
+    block_info_.clear();
+  }
+
+  static int64_t DecodeSignedConstant(uint64_t encoded) {
+    const uint64_t magnitude = encoded >> 1;
+    if (magnitude > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+      return std::numeric_limits<int64_t>::min();
+    const int64_t value = static_cast<int64_t>(magnitude);
+    return (encoded & 1) ? -value - 1 : value;
+  }
+
+  static bool IsModuleGlobalValueRecord(uint64_t record_code) {
+    return record_code == kDXILModuleGlobalVariableRecord || record_code == kDXILModuleFunctionRecord ||
+           record_code == kDXILModuleAliasRecord || record_code == kDXILModuleAliasRecordNew ||
+           record_code == kDXILModuleIFuncRecord;
+  }
 
   bool ReadBits(unsigned bit_count, uint64_t *value) {
     if (!value || bit_count > 64 || bit_offset_ > size_ * 8 || bit_count > size_ * 8 - bit_offset_)
@@ -576,7 +644,8 @@ private:
   }
 
   bool ParseBlock(
-      uint32_t block_id, unsigned code_width, size_t end_bit, std::string_view symbol, bool *found
+      uint32_t block_id, unsigned code_width, size_t end_bit, std::string_view symbol, bool *found,
+      DerivativeScan *derivative, DerivativeFunctionScan *function
   ) {
     if (!found || end_bit > size_ * 8 || code_width == 0 || code_width > 32)
       return false;
@@ -601,7 +670,15 @@ private:
         unsigned child_code_width = 0;
         size_t child_end_bit = 0;
         if (!ReadSubBlockHeader(&child_block_id, &child_code_width, &child_end_bit) ||
-            !ParseBlock(child_block_id, child_code_width, child_end_bit, symbol, found))
+            !(derivative && block_id == kDXILModuleBlockID && child_block_id == kDXILFunctionBlockID
+                  ? [&] {
+                      DerivativeFunctionScan child_function;
+                      child_function.global_value_base = derivative->module_value_count;
+                      return ParseBlock(
+                          child_block_id, child_code_width, child_end_bit, symbol, found, derivative, &child_function
+                      );
+                    }()
+                  : ParseBlock(child_block_id, child_code_width, child_end_bit, symbol, found, derivative, function)))
           return false;
         if (*found)
           return true;
@@ -624,6 +701,41 @@ private:
       std::vector<uint64_t> values;
       if (!DecodeRecord(block_id, static_cast<unsigned>(code), abbrevs, &record_code, &values))
         return false;
+
+      if (derivative) {
+        if (block_id == kDXILModuleBlockID && IsModuleGlobalValueRecord(record_code)) {
+          derivative->module_value_count++;
+        } else if (block_id == kDXILConstantsBlockID && record_code != kDXILConstantsSetTypeRecord) {
+          if (function) {
+            int64_t value = std::numeric_limits<int64_t>::min();
+            if (record_code == kDXILConstantsIntegerRecord && values.size() == 1)
+              value = DecodeSignedConstant(values[0]);
+            function->constants.push_back(value);
+          } else {
+            derivative->module_value_count++;
+          }
+        } else if (block_id == kDXILValueSymbolTableBlockID && record_code == 1 &&
+                   MatchesValueSymbol(values, "dx.op.unary.f32") && !values.empty()) {
+          derivative->unary_function_id = values[0];
+        } else if (block_id == kDXILFunctionBlockID && function && record_code == kDXILFunctionCallRecord &&
+                   values.size() >= 5 &&
+                   derivative->unary_function_id != std::numeric_limits<uint64_t>::max()) {
+          const int64_t relative_operation =
+              static_cast<int64_t>(values[3]) - static_cast<int64_t>(values[4]);
+          const int64_t operation_value_id =
+              static_cast<int64_t>(derivative->unary_function_id) + relative_operation;
+          const int64_t first_local_value = static_cast<int64_t>(function->global_value_base);
+          const int64_t last_local_value = first_local_value + static_cast<int64_t>(function->constants.size());
+          if (operation_value_id >= first_local_value && operation_value_id < last_local_value) {
+            const auto operation = function->constants[static_cast<size_t>(operation_value_id - first_local_value)];
+            if (operation == 83 || operation == 84 || operation == 85) {
+              *found = true;
+              return true;
+            }
+          }
+        }
+      }
+
       if (block_id == 0 && record_code == 1 && !values.empty()) {
         if (values[0] > std::numeric_limits<uint32_t>::max())
           return false;
@@ -654,6 +766,55 @@ HasUnsupportedDXILPackUnpack(const D3D12_SHADER_BYTECODE &shader) {
 
   DXILBitcodeReader reader(bitcode, bitcode_size);
   return reader.HasValueSymbol("dx.op.pack4x8.i32") || reader.HasValueSymbol("dx.op.unpack4x8.i32");
+}
+
+bool
+HasUnsupportedDXILComputeDerivativeShape(const D3D12_SHADER_BYTECODE &shader) {
+  const uint8_t *bitcode = nullptr;
+  size_t bitcode_size = 0;
+  if (!GetDXILBitcode(shader, &bitcode, &bitcode_size))
+    return false;
+
+  microsoft::CDXBCParser parser;
+  if (FAILED(parser.ReadDXBC(shader.pShaderBytecode, static_cast<uint32_t>(shader.BytecodeLength))))
+    return false;
+  const UINT dxil_blob = parser.FindNextMatchingBlob(static_cast<microsoft::DXBCFourCC>(kDXILFourCC), 0);
+  if (dxil_blob == DXBC_BLOB_NOT_FOUND || parser.GetBlobSize(dxil_blob) < 4)
+    return false;
+  const auto *dxil = static_cast<const uint8_t *>(parser.GetBlob(dxil_blob));
+  if (!dxil)
+    return false;
+  uint32_t program_version = 0;
+  std::memcpy(&program_version, dxil, sizeof(program_version));
+  if ((program_version >> 16) != kDXILComputeShaderKind)
+    return false;
+
+  DXILBitcodeReader reader(bitcode, bitcode_size);
+  if (!reader.HasDXILDerivativeOperations())
+    return false;
+
+  const UINT psv_blob = parser.FindNextMatchingBlob(static_cast<microsoft::DXBCFourCC>(kPSVFourCC), 0);
+  if (psv_blob == DXBC_BLOB_NOT_FOUND || parser.GetBlobSize(psv_blob) < 52)
+    return false;
+  const auto *psv = static_cast<const uint8_t *>(parser.GetBlob(psv_blob));
+  if (!psv)
+    return false;
+
+  // PSV version 0x34 stores the compute NumThreads triplet at byte 40. Keep
+  // unknown layouts permissive so this check cannot reject unrelated DXIL.
+  uint32_t psv_version = 0;
+  std::memcpy(&psv_version, psv, sizeof(psv_version));
+  if (psv_version != 0x34)
+    return false;
+  uint32_t threadgroup_size[3] = {};
+  std::memcpy(threadgroup_size, psv + 40, sizeof(threadgroup_size));
+
+  const bool supported_shape =
+      threadgroup_size[1] == 1 && threadgroup_size[2] == 1
+          ? threadgroup_size[0] != 0 && threadgroup_size[0] % 4 == 0
+          : threadgroup_size[0] != 0 && threadgroup_size[1] != 0 && threadgroup_size[0] % 2 == 0 &&
+                threadgroup_size[1] % 2 == 0;
+  return !supported_shape;
 }
 
 bool
@@ -934,6 +1095,7 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
         HasInputSemantic(shader, "SV_ShadingRate") || HasOutputSemantic(shader, "SV_ShadingRate");
     classification.uses_unsupported_denorm_mode = HasUnsupportedDXILDenormMode(shader);
     classification.uses_unsupported_pack_unpack = HasUnsupportedDXILPackUnpack(shader);
+    classification.uses_unsupported_compute_derivative_shape = HasUnsupportedDXILComputeDerivativeShape(shader);
     classification.is_library_shader = IsDXILLibraryShader(shader);
   }
   return classification;
@@ -1131,6 +1293,10 @@ ConvertD3D12Shader(
   }
   if (classification.uses_unsupported_pack_unpack) {
     ERR("DXIL shader uses unsupported pack/unpack operations");
+    return E_NOTIMPL;
+  }
+  if (classification.uses_unsupported_compute_derivative_shape) {
+    ERR("DXIL compute shader uses unsupported derivative threadgroup shape");
     return E_NOTIMPL;
   }
   if (classification.is_library_shader) {

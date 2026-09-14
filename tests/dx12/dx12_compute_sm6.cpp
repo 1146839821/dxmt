@@ -29,7 +29,8 @@ int main(int argc, char **argv) {
                  "descriptor-resources-1-1|--descriptor-null-cbv|--direct-indexed|--root-srv|--"
                  "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops|--native16-ops|"
                  "--denorm-preserve-unsupported|--denorm-ftz-unsupported|--packed-dot-ops|"
-                 "--pack-unpack-unsupported|--library-subobjects-unsupported]\n";
+                 "--pack-unpack-unsupported|--compute-derivatives|"
+                 "--compute-derivatives-unsupported|--library-subobjects-unsupported]\n";
     return 2;
   }
   const bool wave_ops = argc == 3 && strcmp(argv[2], "--wave-ops") == 0;
@@ -41,12 +42,15 @@ int main(int argc, char **argv) {
   const bool denorm_unsupported = denorm_preserve_unsupported || denorm_ftz_unsupported;
   const bool packed_dot_ops = argc == 3 && strcmp(argv[2], "--packed-dot-ops") == 0;
   const bool pack_unpack_unsupported = argc == 3 && strcmp(argv[2], "--pack-unpack-unsupported") == 0;
+  const bool compute_derivatives = argc == 3 && strcmp(argv[2], "--compute-derivatives") == 0;
+  const bool compute_derivatives_unsupported =
+      argc == 3 && strcmp(argv[2], "--compute-derivatives-unsupported") == 0;
   const bool library_subobjects_unsupported =
       argc == 3 && strcmp(argv[2], "--library-subobjects-unsupported") == 0;
   const bool root_uav = argc == 3 &&
                         (strcmp(argv[2], "--root-uav") == 0 || strcmp(argv[2], "--reserved-uav") == 0 ||
                          wave_ops || wave_size_unsupported || native16_ops || denorm_unsupported || packed_dot_ops ||
-                         pack_unpack_unsupported);
+                         pack_unpack_unsupported || compute_derivatives || compute_derivatives_unsupported);
   const bool reserved_uav = argc == 3 && strcmp(argv[2], "--reserved-uav") == 0;
   const bool reserved_srv = argc == 3 && strcmp(argv[2], "--reserved-srv") == 0;
   const bool descriptor_uav =
@@ -75,7 +79,8 @@ int main(int argc, char **argv) {
       !descriptor_resources_space && !descriptor_resources_1_1 && !descriptor_null_cbv && !root_cbv &&
       !root_constants && !root_srv_mode && !direct_indexed && !cache_probe && !wave_ops &&
       !wave_size_unsupported && !int64_ops && !native16_ops && !denorm_unsupported && !packed_dot_ops &&
-      !pack_unpack_unsupported && !library_subobjects_unsupported) {
+      !pack_unpack_unsupported && !compute_derivatives && !compute_derivatives_unsupported &&
+      !library_subobjects_unsupported) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
@@ -424,7 +429,8 @@ int main(int argc, char **argv) {
   pso_desc.pRootSignature = root_signature;
   pso_desc.CS.pShaderBytecode = shader.data();
   pso_desc.CS.BytecodeLength = shader.size();
-  if (wave_size_unsupported || denorm_unsupported || pack_unpack_unsupported || library_subobjects_unsupported) {
+  if (wave_size_unsupported || denorm_unsupported || pack_unpack_unsupported ||
+      compute_derivatives_unsupported || library_subobjects_unsupported) {
     const HRESULT unsupported_hr = device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso));
     if (unsupported_hr != E_NOTIMPL) {
       std::cerr << "unsupported shader feature expected E_NOTIMPL, got 0x" << std::hex
@@ -434,7 +440,8 @@ int main(int argc, char **argv) {
     std::cout << "DXIL unsupported "
               << (wave_size_unsupported ? "WaveSize"
                   : denorm_unsupported ? "denorm mode"
-                  : pack_unpack_unsupported ? "pack/unpack" : "library subobjects")
+                  : pack_unpack_unsupported ? "pack/unpack"
+                  : compute_derivatives_unsupported ? "compute derivatives" : "library subobjects")
               << " rejected: 0x" << std::hex
               << static_cast<unsigned long>(unsupported_hr) << std::dec << "\n";
     result = 0;
@@ -503,7 +510,7 @@ int main(int argc, char **argv) {
     rb.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     list->ResourceBarrier(1, &rb);
   }
-  list->Dispatch(1, 1, 1);
+  list->Dispatch(compute_derivatives ? 8 : 1, compute_derivatives ? 8 : 1, 1);
   if (needs_output) {
     uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     uav_barrier.UAV.pResource = output_buffer;
@@ -515,6 +522,8 @@ int main(int argc, char **argv) {
     } else {
       const UINT output_copy_size = wave_ops || packed_dot_ops
                                         ? sizeof(UINT) * 3
+                                    : compute_derivatives
+                                        ? sizeof(UINT) * 64
                                     : int64_ops
                                         ? sizeof(UINT) * 2
                                         : sizeof(UINT);
@@ -575,6 +584,8 @@ int main(int argc, char **argv) {
       expected_value = 782;
     else if (packed_dot_ops)
       expected_value = static_cast<UINT>(-117);
+    else if (compute_derivatives)
+      expected_value = 0x40800000;
     else if (native16_ops)
       expected_value = 62200;
     else if (root_cbv || root_constants || root_srv_mode)
@@ -608,7 +619,7 @@ int main(int argc, char **argv) {
       goto cleanup;
     }
     std::cout << (is_dxbc ? "DXBC" : "DXIL")
-              << (packed_dot_ops ? " cs_6_4 " : " cs_6_0 ")
+              << (packed_dot_ops || compute_derivatives ? " cs_6_6 " : " cs_6_0 ")
               << (root_cbv                     ? "root CBV"
                   : root_constants              ? "root constants"
                   : int64_ops                   ? "int64 ops"
@@ -618,6 +629,7 @@ int main(int argc, char **argv) {
                   : wave_ops                    ? "wave ops"
                   : native16_ops                ? "native16 ops"
                   : packed_dot_ops              ? "packed dot ops"
+                  : compute_derivatives         ? "compute derivatives"
                                                 : "root UAV")
               << " readback passed: " << output_value << "\n";
   } else {
