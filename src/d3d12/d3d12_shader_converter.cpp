@@ -352,26 +352,11 @@ public:
   DXILBitcodeReader(const uint8_t *data, size_t size) : data_(data), size_(size) {}
 
   bool HasValueSymbol(std::string_view symbol) {
-    if (!data_ || size_ < 4 || std::memcmp(data_, "BC\xc0\xde", 4) != 0)
-      return false;
+    return HasValueSymbolInternal(symbol, false);
+  }
 
-    Reset();
-
-    uint64_t magic = 0;
-    uint64_t enter_subblock = 0;
-    if (!ReadBits(32, &magic) || !ReadBits(2, &enter_subblock) || enter_subblock != 1)
-      return false;
-
-    uint32_t module_block_id = 0;
-    unsigned module_code_width = 0;
-    size_t module_end_bit = 0;
-    if (!ReadSubBlockHeader(&module_block_id, &module_code_width, &module_end_bit))
-      return false;
-
-    bool found = false;
-    if (!ParseBlock(module_block_id, module_code_width, module_end_bit, symbol, &found, nullptr, nullptr))
-      return false;
-    return found;
+  bool HasValueSymbolPrefix(std::string_view prefix) {
+    return HasValueSymbolInternal(prefix, true);
   }
 
   bool HasDXILDerivativeOperations() {
@@ -393,12 +378,34 @@ public:
 
     DerivativeScan scan;
     bool found = false;
-    if (!ParseBlock(module_block_id, module_code_width, module_end_bit, {}, &found, &scan, nullptr))
+    if (!ParseBlock(module_block_id, module_code_width, module_end_bit, {}, false, &found, &scan, nullptr))
       return false;
     return found;
   }
 
 private:
+  bool HasValueSymbolInternal(std::string_view symbol, bool prefix) {
+    if (!data_ || size_ < 4 || std::memcmp(data_, "BC\xc0\xde", 4) != 0)
+      return false;
+
+    Reset();
+
+    uint64_t magic = 0;
+    uint64_t enter_subblock = 0;
+    if (!ReadBits(32, &magic) || !ReadBits(2, &enter_subblock) || enter_subblock != 1)
+      return false;
+
+    uint32_t module_block_id = 0;
+    unsigned module_code_width = 0;
+    size_t module_end_bit = 0;
+    if (!ReadSubBlockHeader(&module_block_id, &module_code_width, &module_end_bit))
+      return false;
+
+    bool found = false;
+    if (!ParseBlock(module_block_id, module_code_width, module_end_bit, symbol, prefix, &found, nullptr, nullptr))
+      return false;
+    return found;
+  }
   struct DerivativeFunctionScan {
     uint64_t global_value_base = 0;
     std::vector<int64_t> constants;
@@ -666,8 +673,18 @@ private:
     return true;
   }
 
+  bool MatchesValueSymbolPrefix(const std::vector<uint64_t> &values, std::string_view prefix) const {
+    if (values.size() < prefix.size() + 1)
+      return false;
+    for (size_t i = 0; i < prefix.size(); i++) {
+      if (values[i + 1] != static_cast<unsigned char>(prefix[i]))
+        return false;
+    }
+    return true;
+  }
+
   bool ParseBlock(
-      uint32_t block_id, unsigned code_width, size_t end_bit, std::string_view symbol, bool *found,
+      uint32_t block_id, unsigned code_width, size_t end_bit, std::string_view symbol, bool symbol_prefix, bool *found,
       DerivativeScan *derivative, DerivativeFunctionScan *function
   ) {
     if (!found || end_bit > size_ * 8 || code_width == 0 || code_width > 32)
@@ -698,10 +715,12 @@ private:
                       DerivativeFunctionScan child_function;
                       child_function.global_value_base = derivative->module_value_count;
                       return ParseBlock(
-                          child_block_id, child_code_width, child_end_bit, symbol, found, derivative, &child_function
+                          child_block_id, child_code_width, child_end_bit, symbol, symbol_prefix, found, derivative,
+                          &child_function
                       );
                     }()
-                  : ParseBlock(child_block_id, child_code_width, child_end_bit, symbol, found, derivative, function)))
+                  : ParseBlock(child_block_id, child_code_width, child_end_bit, symbol, symbol_prefix, found,
+                                derivative, function)))
           return false;
         if (*found)
           return true;
@@ -765,7 +784,7 @@ private:
         block_info_target = static_cast<uint32_t>(values[0]);
         has_block_info_target = true;
       } else if (block_id == kDXILValueSymbolTableBlockID && record_code == 1 &&
-                 MatchesValueSymbol(values, symbol)) {
+                 (symbol_prefix ? MatchesValueSymbolPrefix(values, symbol) : MatchesValueSymbol(values, symbol))) {
         *found = true;
         return true;
       }
@@ -823,6 +842,28 @@ HasUnsupportedDXILAppendConsume(const D3D12_SHADER_BYTECODE &shader) {
 
   DXILBitcodeReader reader(bitcode, bitcode_size);
   return reader.HasValueSymbol("dx.op.bufferUpdateCounter");
+}
+
+bool
+HasUnsupportedDXILAttributeAtVertex(const D3D12_SHADER_BYTECODE &shader) {
+  const uint8_t *bitcode = nullptr;
+  size_t bitcode_size = 0;
+  if (!GetDXILBitcode(shader, &bitcode, &bitcode_size))
+    return false;
+
+  DXILBitcodeReader reader(bitcode, bitcode_size);
+  return reader.HasValueSymbolPrefix("dx.op.attributeAtVertex.");
+}
+
+bool
+HasUnsupportedDXILViewID(const D3D12_SHADER_BYTECODE &shader) {
+  const uint8_t *bitcode = nullptr;
+  size_t bitcode_size = 0;
+  if (!GetDXILBitcode(shader, &bitcode, &bitcode_size))
+    return false;
+
+  DXILBitcodeReader reader(bitcode, bitcode_size);
+  return reader.HasValueSymbolPrefix("dx.op.viewID.");
 }
 
 bool
@@ -1147,6 +1188,9 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
     }
   }
   if (classification.backend == D3D12ShaderBackend::MetalShaderConverter) {
+    classification.uses_unsupported_view_id =
+        HasInputSemantic(shader, "SV_ViewID") || HasOutputSemantic(shader, "SV_ViewID") || HasUnsupportedDXILViewID(shader);
+    classification.uses_unsupported_attribute_at_vertex = HasUnsupportedDXILAttributeAtVertex(shader);
     classification.uses_unsupported_stencil_ref = HasOutputSemantic(shader, "SV_StencilRef");
     classification.uses_unsupported_shading_rate =
         HasInputSemantic(shader, "SV_ShadingRate") || HasOutputSemantic(shader, "SV_ShadingRate");
@@ -1338,6 +1382,14 @@ ConvertD3D12Shader(
     return classification.validation_hr;
   if (classification.backend != D3D12ShaderBackend::MetalShaderConverter)
     return E_INVALIDARG;
+  if (classification.uses_unsupported_view_id) {
+    ERR("DXIL shader uses unsupported SV_ViewID semantic");
+    return E_NOTIMPL;
+  }
+  if (classification.uses_unsupported_attribute_at_vertex) {
+    ERR("DXIL shader uses unsupported GetAttributeAtVertex");
+    return E_NOTIMPL;
+  }
   if (stage == DXMT_MSC_STAGE_FRAGMENT && classification.uses_unsupported_stencil_ref) {
     ERR("DXIL pixel shader uses unsupported SV_StencilRef output");
     return E_NOTIMPL;
