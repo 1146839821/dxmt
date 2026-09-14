@@ -50,8 +50,11 @@ int main(int argc, char **argv) {
   const bool logic_op = argc == 4 && strcmp(argv[3], "--logic-op") == 0;
   const bool stencil = argc == 4 && strcmp(argv[3], "--stencil") == 0;
   const bool barycentrics = argc == 4 && strcmp(argv[3], "--barycentrics") == 0;
+  const bool view_id_unsupported = argc == 4 && strcmp(argv[3], "--view-id-unsupported") == 0;
+  const bool get_attribute_unsupported = argc == 4 && strcmp(argv[3], "--get-attribute-unsupported") == 0;
   if ((argc == 4 && !textured && !root_cbv && !root_constants && !root_srv &&
-       !root_uav && !textured_root_cbv && !logic_op && !stencil && !barycentrics) ||
+       !root_uav && !textured_root_cbv && !logic_op && !stencil && !barycentrics &&
+       !view_id_unsupported && !get_attribute_unsupported) ||
       (argc == 5 && !geometry))
     return 2;
 
@@ -584,6 +587,23 @@ int main(int argc, char **argv) {
       goto cleanup;
     }
     std::cout << "DXIL instanced geometry rejection passed\n";
+    result = 0;
+    goto cleanup;
+  }
+  if (view_id_unsupported || get_attribute_unsupported) {
+    const HRESULT unsupported_hr =
+        device->CreateGraphicsPipelineState(&pso_desc, IID_PPV_ARGS(&pso));
+    if (unsupported_hr != E_NOTIMPL || pso) {
+      std::cerr << "unsupported shader semantic was not rejected: "
+                << (view_id_unsupported ? "SV_ViewID" : "GetAttributeAtVertex")
+                << " returned 0x" << std::hex
+                << static_cast<unsigned long>(unsupported_hr) << std::dec << "\n";
+      goto cleanup;
+    }
+    std::cout << "DXIL unsupported "
+              << (view_id_unsupported ? "SV_ViewID" : "GetAttributeAtVertex")
+              << " rejected: 0x" << std::hex
+              << static_cast<unsigned long>(unsupported_hr) << std::dec << "\n";
     result = 0;
     goto cleanup;
   }

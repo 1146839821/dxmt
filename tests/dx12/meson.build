@@ -217,6 +217,24 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_1', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_graphics_unsupported_semantics_sm6_vs_fixture',
+    input: 'graphics_unsupported_semantics_sm6.hlsl',
+    output: 'graphics_unsupported_semantics_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_view_id_sm6_ps_fixture',
+    input: 'graphics_unsupported_semantics_sm6.hlsl',
+    output: 'graphics_view_id_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_view_id', '-T', 'ps_6_1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_get_attribute_sm6_ps_fixture',
+    input: 'graphics_unsupported_semantics_sm6.hlsl',
+    output: 'graphics_get_attribute_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_get_attribute', '-T', 'ps_6_1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_graphics_logic_op_sm6_vs_fixture',
     input: 'graphics_logic_op_sm6.hlsl',
     output: 'graphics_logic_op_sm6.vs.cso',
