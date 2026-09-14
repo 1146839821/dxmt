@@ -129,6 +129,12 @@ QueryDXMTMSCCapabilities(WMT::Device device) {
   capabilities.rt_intersection_function_buffer_path =
       capabilities.msc_raytracing && capabilities.api_raytracing_indirect_dispatch;
 
+  /* MSC's barycentric support is linear-only. Keep the D3D12 bit device-aware
+   * at the Apple7 floor; ViewID and GetAttributeAtVertex remain separate
+   * unsupported semantics. */
+  capabilities.barycentrics_validated =
+      capabilities.msc_barycentrics && capabilities.metal_barycentrics;
+
   /* Keep unsupported and unproven D3D12 capabilities conservative. */
   capabilities.maximum_shader_model = GetMaximumD3D12ShaderModel(capabilities);
   capabilities.ps_specified_stencil_ref = false;
@@ -174,10 +180,12 @@ LogDXMTMSCCapabilities(const DXMTMSCCapabilities &capabilities) {
   ));
   Logger::info(str::format(
       "D3D12 MSC documented capabilities: waveOps=", capabilities.msc_wave_ops, ", int64=", capabilities.msc_int64,
-      ", native16=", capabilities.msc_native16, ", packedDot=", capabilities.msc_packed_dot, ", mesh=",
-      capabilities.msc_mesh, ", rayTracing=", capabilities.msc_raytracing, ", validated(wave/int64/native16/mesh/rt)=",
+      ", barycentrics=", capabilities.msc_barycentrics, ", native16=", capabilities.msc_native16,
+      ", packedDot=", capabilities.msc_packed_dot, ", mesh=", capabilities.msc_mesh,
+      ", rayTracing=", capabilities.msc_raytracing, ", validated(wave/int64/native16/mesh/rt)=",
       capabilities.wave_ops_validated, "/", capabilities.int64_validated, "/", capabilities.native16_validated, "/",
-      capabilities.mesh_validated, "/", capabilities.raytracing_validated
+      capabilities.mesh_validated, "/", capabilities.raytracing_validated, ", barycentrics=",
+      capabilities.barycentrics_validated
   ));
 }
 

@@ -208,6 +208,16 @@ int main(int argc, char **argv) {
                D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                  IID_PPV_ARGS(&device))))
     goto cleanup;
+  if (barycentrics) {
+    D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3 = {};
+    if (!CheckHR("CheckFeatureSupport(OPTIONS3)",
+                 device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3,
+                                             &options3, sizeof(options3))) ||
+        !options3.BarycentricsSupported) {
+      std::cerr << "barycentrics feature query was not advertised\n";
+      goto cleanup;
+    }
+  }
 
   queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
   if (!CheckHR("CreateCommandQueue",
