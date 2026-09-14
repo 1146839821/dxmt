@@ -48,6 +48,11 @@ dx12_msc_function_constants = executable('dx12_msc_function_constants', 'dx12_ms
   dependencies: [ d3d12_dep ],
 )
 
+dx12_msc_debug_validation = executable('dx12_msc_debug_validation', 'dx12_msc_debug_validation.cpp',
+  include_directories: [ include_directories('../../src/winemetal') ],
+  dependencies: [ d3d12_dep ],
+)
+
 dx12_interface_support = executable('dx12_interface_support', 'dx12_interface_support.cpp',
   dependencies: [ d3d12_dep, dxgi_dep ],
 )
@@ -108,6 +113,12 @@ if dxc_command.length() > 0
     input: 'function_constants_sm6.hlsl',
     output: 'function_constants_sm6.ps.cso',
     command: dxc_command + [ '-E', 'main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_debug_validation_sm6_fixture',
+    input: 'debug_validation_sm6.hlsl',
+    output: 'debug_validation_sm6.ps.cso',
+    command: dxc_command + [ '-Zi', '-Qembed_debug', '-E', 'main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
   custom_target('dx12_shader_embedded_compute_fixture',
