@@ -49,8 +49,9 @@ int main(int argc, char **argv) {
   const bool textured_root_cbv = argc == 4 && strcmp(argv[3], "--texture-root-cbv") == 0;
   const bool logic_op = argc == 4 && strcmp(argv[3], "--logic-op") == 0;
   const bool stencil = argc == 4 && strcmp(argv[3], "--stencil") == 0;
+  const bool barycentrics = argc == 4 && strcmp(argv[3], "--barycentrics") == 0;
   if ((argc == 4 && !textured && !root_cbv && !root_constants && !root_srv &&
-       !root_uav && !textured_root_cbv && !logic_op && !stencil) ||
+       !root_uav && !textured_root_cbv && !logic_op && !stencil && !barycentrics) ||
       (argc == 5 && !geometry))
     return 2;
 
@@ -774,6 +775,8 @@ int main(int argc, char **argv) {
   }
   expected_pixel = logic_op
                        ? 0xffffffffu
+                       : barycentrics
+                           ? 0xff404080u
                        : (geometry || root_cbv || root_constants || root_srv || root_uav || textured_root_cbv)
                            ? 0xff00ff00u
                            : 0xff0000ffu;
@@ -795,6 +798,7 @@ int main(int argc, char **argv) {
                 : root_uav           ? "root UAV graphics"
                 : logic_op           ? "logic op graphics"
                 : stencil            ? "stencil graphics"
+                : barycentrics       ? "barycentrics graphics"
                 : textured_root_cbv  ? "root CBV textured graphics"
                 : textured           ? "textured graphics"
                                      : "graphics")
