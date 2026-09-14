@@ -147,7 +147,7 @@ public:
     buffer->rename(std::move(allocation));
     if (pHeap)
       heap_ = pHeap;
-    device_->RegisterResidencyAndVA(buffer->current());
+    device_->RegisterResidencyAndVA(buffer->current(), this);
 
     return S_OK;
   };
@@ -188,7 +188,7 @@ public:
       if (!allocation || !allocation->buffer())
         return E_OUTOFMEMORY;
       buffer->rename(std::move(allocation));
-      device_->RegisterResidencyAndVA(buffer->current());
+      device_->RegisterResidencyAndVA(buffer->current(), this);
     }
 
     tile_mappings_.resize(tile_count_);
@@ -197,7 +197,7 @@ public:
 
   ~MTLD3D12Buffer() {
     if (buffer && buffer->current())
-      device_->UnregisterResidencyAndVA(buffer->current());
+      device_->UnregisterResidencyAndVA(buffer->current(), this);
   }
 
   HRESULT

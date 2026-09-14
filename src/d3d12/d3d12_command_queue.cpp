@@ -99,6 +99,8 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       return "TemporalUpscale";
     case EncoderType::SampleTimestamp:
       return "SampleTimestamp";
+    case EncoderType::AccelerationStructure:
+      return "AccelerationStructure";
     }
     return "Unknown";
   }
@@ -1066,13 +1068,106 @@ public:
           encoder.endEncoding();
           break;
         }
-         case EncoderType::Compute: {
-           auto data = static_cast<ComputeEncoderData *>(current);
-           auto encoder = cmdbuf.computeCommandEncoder(false);
+        case EncoderType::Compute: {
+          auto data = static_cast<ComputeEncoderData *>(current);
+          auto encoder = cmdbuf.computeCommandEncoder(false);
            LabelEncoder(encoder, recording_id, data->id, "Compute");
            encoder.waitForFence(fence_);
           encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_);
+          encoder.endEncoding();
+          break;
+        }
+        case EncoderType::AccelerationStructure: {
+          auto data = static_cast<AccelerationStructureEncoderData *>(current);
+          auto encoder = cmdbuf.accelerationStructureCommandEncoder();
+          LabelEncoder(encoder, recording_id, data->id, "AccelerationStructure");
+          if (!encoder) {
+            WARN("D3D12 acceleration-structure translation could not create an encoder");
+            translation_failed = true;
+            break;
+          }
+
+          const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
+          auto use_resource = [&](obj_handle_t resource, WMTResourceUsage usage) {
+            if (!resource)
+              return true;
+            WMT::Resource resource_object;
+            resource_object.handle = resource;
+            return encoder.useResource(resource_object, usage);
+          };
+          auto use_descriptor_resources = [&](const WMTAccelerationStructureDescriptorInfo &descriptor) {
+            if (descriptor.type == WMTAccelerationStructureDescriptorPrimitive) {
+              for (uint32_t i = 0; i < descriptor.data.primitive.geometry_count; i++) {
+                const auto &geometry = descriptor.data.primitive.geometries[i];
+                if (!use_resource(geometry.vertex_buffer, WMTResourceUsageRead) ||
+                    !use_resource(geometry.index_buffer, WMTResourceUsageRead) ||
+                    !use_resource(geometry.bounding_box_buffer, WMTResourceUsageRead))
+                  return false;
+              }
+            } else if (descriptor.type == WMTAccelerationStructureDescriptorInstance) {
+              if (!use_resource(
+                      descriptor.data.instance.instance_descriptor_buffer, WMTResourceUsageRead
+                  ))
+                return false;
+              for (uint32_t i = 0; i < descriptor.data.instance.instanced_acceleration_structure_count; i++) {
+                if (!use_resource(
+                        descriptor.data.instance.instanced_acceleration_structures[i], WMTResourceUsageRead
+                    ))
+                  return false;
+              }
+            } else {
+              return false;
+            }
+            return true;
+          };
+
+          for (const auto &command : data->commands) {
+            bool command_ok = false;
+            switch (command.type) {
+            case AccelerationStructureCommandType::Build:
+              command_ok = use_descriptor_resources(command.descriptor) &&
+                           use_resource(command.scratch.handle, read_write) &&
+                           use_resource(command.destination.handle, read_write) &&
+                           encoder.build(
+                               command.destination, command.descriptor, command.scratch, command.scratch_offset
+                           );
+              break;
+            case AccelerationStructureCommandType::Refit:
+              command_ok = use_descriptor_resources(command.descriptor) &&
+                           use_resource(command.scratch.handle, read_write) &&
+                           use_resource(command.source.handle, read_write) &&
+                           use_resource(command.destination.handle, read_write) &&
+                           encoder.refit(
+                               command.source, command.destination, command.descriptor, command.scratch,
+                               command.scratch_offset
+                           );
+              break;
+            case AccelerationStructureCommandType::Copy:
+              command_ok = use_resource(command.source.handle, WMTResourceUsageRead) &&
+                           use_resource(command.destination.handle, WMTResourceUsageWrite) &&
+                           encoder.copy(command.source, command.destination);
+              break;
+            case AccelerationStructureCommandType::CopyAndCompact:
+              command_ok = use_resource(command.source.handle, WMTResourceUsageRead) &&
+                           use_resource(command.destination.handle, WMTResourceUsageWrite) &&
+                           encoder.copyAndCompact(command.source, command.destination);
+              break;
+            case AccelerationStructureCommandType::WriteCompactedSize:
+              command_ok = use_resource(command.acceleration_structure.handle, WMTResourceUsageRead) &&
+                           use_resource(command.buffer.handle, WMTResourceUsageWrite) &&
+                           encoder.writeCompactedSize(
+                               command.acceleration_structure, command.buffer, command.buffer_offset,
+                               command.size_data_type
+                           );
+              break;
+            }
+            if (!command_ok) {
+              WARN("D3D12 acceleration-structure translation failed to encode a command");
+              translation_failed = true;
+              break;
+            }
+          }
           encoder.endEncoding();
           break;
         }

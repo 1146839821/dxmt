@@ -17,6 +17,7 @@
  */
 
 #include "d3d12_command_allocator.hpp"
+#include "d3d12_raytracing.hpp"
 #include "com/com_pointer.hpp"
 #include "dxmt_command_context.hpp"
 #include "dxmt_command_constants.hpp"
@@ -444,6 +445,64 @@ buffer_range_in_bounds(MTLD3D12Resource *resource, UINT64 offset, UINT64 length)
   auto desc = resource->GetDesc();
   return desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && offset <= desc.Width &&
          length <= desc.Width - offset;
+}
+
+inline bool
+resolve_buffer_range(
+    MTLD3D12Device *device, D3D12_GPU_VIRTUAL_ADDRESS address, uint64_t length,
+    WMT::Reference<WMT::Buffer> &buffer, uint64_t &offset
+) {
+  buffer = nullptr;
+  offset = 0;
+  if (!device || !address)
+    return false;
+
+  auto *allocation = device->LookupBufferByVA(address, &offset);
+  if (!allocation || offset > allocation->length() || length > allocation->length() - offset)
+    return false;
+
+  buffer = WMT::Reference<WMT::Buffer>(allocation->buffer());
+  return static_cast<bool>(buffer);
+}
+
+inline MTLD3D12Resource *
+resolve_resource(MTLD3D12Device *device, D3D12_GPU_VIRTUAL_ADDRESS address, uint64_t &offset) {
+  offset = 0;
+  return device && address ? device->LookupResourceByVA(address, &offset) : nullptr;
+}
+
+inline bool
+ensure_acceleration_structure(
+    MTLD3D12Device *device, MTLD3D12Resource *resource, uint64_t resource_offset, uint64_t size,
+    WMT::Reference<WMT::AccelerationStructure> &acceleration_structure
+) {
+  acceleration_structure = nullptr;
+  if (!device || !resource || resource_offset || !size || !buffer_range_in_bounds(resource, 0, size))
+    return false;
+
+  if (!resource->acceleration_structure || resource->acceleration_structure_size < size) {
+    auto new_acceleration_structure = device->GetMTLDevice().newAccelerationStructure(size);
+    if (!new_acceleration_structure)
+      return false;
+    resource->acceleration_structure = std::move(new_acceleration_structure);
+    resource->acceleration_structure_size = size;
+  }
+
+  acceleration_structure = resource->acceleration_structure;
+  return static_cast<bool>(acceleration_structure);
+}
+
+inline bool
+resolve_acceleration_structure(
+    MTLD3D12Device *device, D3D12_GPU_VIRTUAL_ADDRESS address,
+    WMT::Reference<WMT::AccelerationStructure> &acceleration_structure
+) {
+  uint64_t offset = 0;
+  auto *resource = resolve_resource(device, address, offset);
+  if (!resource || offset || !resource->acceleration_structure)
+    return false;
+  acceleration_structure = resource->acceleration_structure;
+  return true;
 }
 
 inline WMTRenderStages
@@ -3205,6 +3264,20 @@ public:
     return true;
   }
 
+  AccelerationStructureEncoderData *
+  PreAccelerationStructure() {
+    if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::AccelerationStructure) {
+      allocator_->InvalidateCurrentPass();
+      auto acceleration_structure = allocator_->AllocatePass<AccelerationStructureEncoderData>();
+      if (!acceleration_structure) {
+        FailRecording(__func__, "acceleration-structure encoder allocation failed");
+        return nullptr;
+      }
+      acceleration_structure->type = EncoderType::AccelerationStructure;
+    }
+    return static_cast<AccelerationStructureEncoderData *>(allocator_->encoder_current);
+  }
+
   void STDMETHODCALLTYPE
   CopyBufferRegion(
       ID3D12Resource *pDstBuffer, UINT64 DstOffset, ID3D12Resource *pSrcBuffer, UINT64 SrcOffset, UINT64 ByteCount
@@ -5066,14 +5139,168 @@ public:
       const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC *pDesc, UINT NumPostbuildInfoDescs,
       const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC *pPostbuildInfoDescs
   ) {
-    MarkUnsupportedCommand("BuildRaytracingAccelerationStructure");
+    if (!ValidateCommand(SupportsCopy(), "BuildRaytracingAccelerationStructure"))
+      return;
+    if (!pDesc || (NumPostbuildInfoDescs && !pPostbuildInfoDescs)) {
+      FailRecording(__func__, "invalid build or postbuild descriptor");
+      return;
+    }
+    if (!device_->GetMTLDevice().supportsRaytracing()) {
+      FailRecording(__func__, "Metal ray tracing is unavailable");
+      return;
+    }
+
+    constexpr UINT64 acceleration_structure_alignment =
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT;
+    const bool perform_update =
+        (pDesc->Inputs.Flags & D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE) != 0;
+    if (!pDesc->DestAccelerationStructureData || !pDesc->ScratchAccelerationStructureData ||
+        pDesc->DestAccelerationStructureData % acceleration_structure_alignment ||
+        pDesc->ScratchAccelerationStructureData % acceleration_structure_alignment ||
+        (!perform_update && pDesc->SourceAccelerationStructureData)) {
+      FailRecording(__func__, "invalid acceleration-structure addresses");
+      return;
+    }
+
+    D3D12RaytracingDescriptor descriptor;
+    if (!ConvertD3D12RaytracingInputs(device_, &pDesc->Inputs, descriptor)) {
+      FailRecording(__func__, "unsupported or invalid acceleration-structure inputs");
+      return;
+    }
+    const auto sizes = device_->GetMTLDevice().accelerationStructureSizes(descriptor.info);
+    const uint64_t scratch_size = perform_update ? sizes.refit_scratch_buffer_size : sizes.build_scratch_buffer_size;
+    if (!sizes.acceleration_structure_size || !scratch_size) {
+      FailRecording(__func__, "acceleration-structure size query returned zero");
+      return;
+    }
+
+    uint64_t destination_offset = 0;
+    auto *destination_resource =
+        resolve_resource(device_, pDesc->DestAccelerationStructureData, destination_offset);
+    WMT::Reference<WMT::AccelerationStructure> destination;
+    if (!destination_resource || destination_offset ||
+        !ensure_acceleration_structure(
+            device_, destination_resource, destination_offset, sizes.acceleration_structure_size, destination
+        )) {
+      FailRecording(__func__, "invalid acceleration-structure destination");
+      return;
+    }
+
+    WMT::Reference<WMT::Buffer> scratch;
+    uint64_t scratch_offset = 0;
+    if (!resolve_buffer_range(
+            device_, pDesc->ScratchAccelerationStructureData, scratch_size, scratch, scratch_offset
+        ) || scratch_offset % acceleration_structure_alignment) {
+      FailRecording(__func__, "invalid acceleration-structure scratch buffer");
+      return;
+    }
+
+    WMT::Reference<WMT::AccelerationStructure> source;
+    if (perform_update &&
+        (!pDesc->SourceAccelerationStructureData ||
+         !resolve_acceleration_structure(device_, pDesc->SourceAccelerationStructureData, source))) {
+      FailRecording(__func__, "invalid acceleration-structure update source");
+      return;
+    }
+
+    struct PostbuildTarget {
+      WMT::Reference<WMT::Buffer> buffer;
+      uint64_t offset = 0;
+    };
+    std::vector<PostbuildTarget> postbuild_targets;
+    postbuild_targets.reserve(NumPostbuildInfoDescs);
+    for (UINT i = 0; i < NumPostbuildInfoDescs; i++) {
+      if (pPostbuildInfoDescs[i].InfoType != D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE ||
+          !pPostbuildInfoDescs[i].DestBuffer ||
+          pPostbuildInfoDescs[i].DestBuffer % sizeof(uint64_t)) {
+        FailRecording(__func__, "unsupported or invalid postbuild info");
+        return;
+      }
+
+      PostbuildTarget target;
+      if (!resolve_buffer_range(
+              device_, pPostbuildInfoDescs[i].DestBuffer, sizeof(uint64_t), target.buffer, target.offset
+          )) {
+        FailRecording(__func__, "invalid postbuild destination buffer");
+        return;
+      }
+      postbuild_targets.push_back(std::move(target));
+    }
+
+    auto *encoder = PreAccelerationStructure();
+    if (!encoder)
+      return;
+    auto &build = encoder->commands.emplace_back();
+    build.type = perform_update ? AccelerationStructureCommandType::Refit : AccelerationStructureCommandType::Build;
+    build.destination = std::move(destination);
+    build.source = std::move(source);
+    build.scratch = std::move(scratch);
+    build.descriptor = descriptor.info;
+    build.referenced_buffers = std::move(descriptor.buffers);
+    build.scratch_offset = scratch_offset;
+
+    WMT::Reference<WMT::AccelerationStructure> postbuild_acceleration_structure = build.destination;
+    for (auto &target : postbuild_targets) {
+      auto &postbuild = encoder->commands.emplace_back();
+      postbuild.type = AccelerationStructureCommandType::WriteCompactedSize;
+      postbuild.acceleration_structure = postbuild_acceleration_structure;
+      postbuild.buffer = std::move(target.buffer);
+      postbuild.buffer_offset = target.offset;
+      postbuild.size_data_type = WMTAccelerationStructureSizeDataTypeUInt64;
+    }
   }
 
   void STDMETHODCALLTYPE EmitRaytracingAccelerationStructurePostbuildInfo(
       const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC *pDesc,
       UINT NumSourceAccelerationStructureData, const D3D12_GPU_VIRTUAL_ADDRESS *pSourceAccelerationStructureData
   ) {
-    MarkUnsupportedCommand("EmitRaytracingAccelerationStructurePostbuildInfo");
+    if (!ValidateCommand(SupportsCopy(), "EmitRaytracingAccelerationStructurePostbuildInfo"))
+      return;
+    if (!pDesc || !NumSourceAccelerationStructureData || !pSourceAccelerationStructureData ||
+        pDesc->InfoType != D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE ||
+        !pDesc->DestBuffer || pDesc->DestBuffer % sizeof(uint64_t)) {
+      FailRecording(__func__, "unsupported or invalid postbuild info");
+      return;
+    }
+    if (!device_->GetMTLDevice().supportsRaytracing()) {
+      FailRecording(__func__, "Metal ray tracing is unavailable");
+      return;
+    }
+    if (NumSourceAccelerationStructureData > std::numeric_limits<uint64_t>::max() / sizeof(uint64_t)) {
+      FailRecording(__func__, "postbuild info count overflow");
+      return;
+    }
+
+    const uint64_t output_size = uint64_t(NumSourceAccelerationStructureData) * sizeof(uint64_t);
+    WMT::Reference<WMT::Buffer> output;
+    uint64_t output_offset = 0;
+    if (!resolve_buffer_range(device_, pDesc->DestBuffer, output_size, output, output_offset)) {
+      FailRecording(__func__, "invalid postbuild destination buffer");
+      return;
+    }
+
+    std::vector<WMT::Reference<WMT::AccelerationStructure>> sources;
+    sources.reserve(NumSourceAccelerationStructureData);
+    for (UINT i = 0; i < NumSourceAccelerationStructureData; i++) {
+      WMT::Reference<WMT::AccelerationStructure> source;
+      if (!resolve_acceleration_structure(device_, pSourceAccelerationStructureData[i], source)) {
+        FailRecording(__func__, "invalid postbuild source acceleration structure");
+        return;
+      }
+      sources.push_back(std::move(source));
+    }
+
+    auto *encoder = PreAccelerationStructure();
+    if (!encoder)
+      return;
+    for (UINT i = 0; i < NumSourceAccelerationStructureData; i++) {
+      auto &command = encoder->commands.emplace_back();
+      command.type = AccelerationStructureCommandType::WriteCompactedSize;
+      command.acceleration_structure = std::move(sources[i]);
+      command.buffer = output;
+      command.buffer_offset = output_offset + uint64_t(i) * sizeof(uint64_t);
+      command.size_data_type = WMTAccelerationStructureSizeDataTypeUInt64;
+    }
   }
 
   void STDMETHODCALLTYPE CopyRaytracingAccelerationStructure(
@@ -5081,7 +5308,58 @@ public:
       D3D12_GPU_VIRTUAL_ADDRESS SrcAccelerationStructureData,
       D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE Mode
   ) {
-    MarkUnsupportedCommand("CopyRaytracingAccelerationStructure");
+    if (!ValidateCommand(SupportsCopy(), "CopyRaytracingAccelerationStructure"))
+      return;
+    if (!device_->GetMTLDevice().supportsRaytracing()) {
+      FailRecording(__func__, "Metal ray tracing is unavailable");
+      return;
+    }
+    if (!DstAccelerationStructureData || !SrcAccelerationStructureData ||
+        DstAccelerationStructureData % D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT ||
+        SrcAccelerationStructureData % D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT ||
+        (Mode != D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_CLONE &&
+         Mode != D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT)) {
+      FailRecording(__func__, "unsupported or invalid acceleration-structure copy");
+      return;
+    }
+
+    uint64_t source_offset = 0;
+    auto *source_resource = resolve_resource(device_, SrcAccelerationStructureData, source_offset);
+    uint64_t destination_offset = 0;
+    auto *destination_resource = resolve_resource(device_, DstAccelerationStructureData, destination_offset);
+    if (!source_resource || source_offset || !source_resource->acceleration_structure ||
+        !destination_resource || destination_offset || !destination_resource->buffer) {
+      FailRecording(__func__, "invalid acceleration-structure copy resources");
+      return;
+    }
+
+    const auto destination_desc = destination_resource->GetDesc();
+    const uint64_t destination_size =
+        Mode == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_CLONE
+            ? source_resource->acceleration_structure_size
+            : destination_desc.Width;
+    if (!destination_size || !buffer_range_in_bounds(destination_resource, 0, destination_size)) {
+      FailRecording(__func__, "invalid acceleration-structure copy destination size");
+      return;
+    }
+
+    WMT::Reference<WMT::AccelerationStructure> destination;
+    if (!ensure_acceleration_structure(
+            device_, destination_resource, destination_offset, destination_size, destination
+        )) {
+      FailRecording(__func__, "failed to allocate acceleration-structure copy destination");
+      return;
+    }
+
+    auto *encoder = PreAccelerationStructure();
+    if (!encoder)
+      return;
+    auto &command = encoder->commands.emplace_back();
+    command.type = Mode == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_CLONE
+                       ? AccelerationStructureCommandType::Copy
+                       : AccelerationStructureCommandType::CopyAndCompact;
+    command.source = source_resource->acceleration_structure;
+    command.destination = std::move(destination);
   }
 
   void STDMETHODCALLTYPE SetPipelineState1(ID3D12StateObject *pStateObject) {

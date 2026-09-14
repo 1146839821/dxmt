@@ -23,6 +23,7 @@
 #include "dxmt_scaler.hpp"
 #include "com/com_pointer.hpp"
 #include <cstdint>
+#include <vector>
 
 namespace dxmt {
 
@@ -38,6 +39,7 @@ enum class EncoderType {
   Resolve,
   TemporalUpscale,
   SampleTimestamp,
+  AccelerationStructure,
 };
 
 struct EncoderData {
@@ -157,6 +159,32 @@ struct TemporalUpscaleData : EncoderData {
 struct SampleTimestampData : EncoderData {
   WMT::Reference<WMT::CounterSampleBuffer> sample_buffer;
   uint64_t sample_index;
+};
+
+enum class AccelerationStructureCommandType {
+  Build,
+  Refit,
+  Copy,
+  CopyAndCompact,
+  WriteCompactedSize,
+};
+
+struct AccelerationStructureCommand {
+  AccelerationStructureCommandType type;
+  WMT::Reference<WMT::AccelerationStructure> destination;
+  WMT::Reference<WMT::AccelerationStructure> source;
+  WMT::Reference<WMT::AccelerationStructure> acceleration_structure;
+  WMT::Reference<WMT::Buffer> scratch;
+  WMT::Reference<WMT::Buffer> buffer;
+  WMTAccelerationStructureDescriptorInfo descriptor = {};
+  std::vector<WMT::Reference<WMT::Buffer>> referenced_buffers;
+  uint64_t scratch_offset = 0;
+  uint64_t buffer_offset = 0;
+  uint32_t size_data_type = WMTAccelerationStructureSizeDataTypeUInt64;
+};
+
+struct AccelerationStructureEncoderData : EncoderData {
+  std::vector<AccelerationStructureCommand> commands;
 };
 
 }; // namespace dxmt

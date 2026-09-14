@@ -106,6 +106,8 @@ public:
 
   Rc<Texture> texture;
   Rc<Buffer> buffer;
+  WMT::Reference<WMT::AccelerationStructure> acceleration_structure;
+  uint64_t acceleration_structure_size = 0;
   D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
   std::vector<D3D12_RESOURCE_STATES> subresource_states;
 
@@ -383,11 +385,13 @@ public:
 
   virtual HRESULT UnregisterResidency(WMT::Allocation allocation) = 0;
 
-  virtual HRESULT RegisterResidencyAndVA(BufferAllocation *allocation) = 0;
+  virtual HRESULT RegisterResidencyAndVA(BufferAllocation *allocation, MTLD3D12Resource *resource = nullptr) = 0;
 
-  virtual HRESULT UnregisterResidencyAndVA(BufferAllocation *allocation) = 0;
+  virtual HRESULT UnregisterResidencyAndVA(BufferAllocation *allocation, MTLD3D12Resource *resource = nullptr) = 0;
 
   virtual BufferAllocation *LookupBufferByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) = 0;
+
+  virtual MTLD3D12Resource *LookupResourceByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) = 0;
 
   virtual bool BeginEnhancedSplitBarrier(const EnhancedSplitBarrierState &state) = 0;
   virtual bool EndEnhancedSplitBarrier(

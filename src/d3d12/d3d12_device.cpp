@@ -312,6 +312,7 @@ class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
   dxmt::mutex residency_lock_;
   WMT::Reference<WMT::ResidencySet> residency_set_;
   std::map<uint64_t, BufferAllocation *> interval_map_;
+  std::map<uint64_t, MTLD3D12Resource *> resource_interval_map_;
   FormatCapabilityInspector format_capabilities_;
   DXMTMSCCapabilities msc_capabilities_;
 
@@ -1949,9 +1950,11 @@ public:
   }
 
   HRESULT
-  RegisterResidencyAndVA(BufferAllocation *allocation) {
+  RegisterResidencyAndVA(BufferAllocation *allocation, MTLD3D12Resource *resource) {
     std::unique_lock<dxmt::mutex> lock(residency_lock_);
     interval_map_.emplace(allocation->gpuAddress(), allocation);
+    if (resource)
+      resource_interval_map_[allocation->gpuAddress()] = resource;
     auto buffer = allocation->buffer();
     residency_set_.addAllocations(&buffer, 1);
     residency_set_.commit();
@@ -1959,9 +1962,14 @@ public:
   }
 
   HRESULT
-  UnregisterResidencyAndVA(BufferAllocation *allocation) {
+  UnregisterResidencyAndVA(BufferAllocation *allocation, MTLD3D12Resource *resource) {
     std::unique_lock<dxmt::mutex> lock(residency_lock_);
     interval_map_.erase(allocation->gpuAddress());
+    if (resource) {
+      auto resource_iter = resource_interval_map_.find(allocation->gpuAddress());
+      if (resource_iter != resource_interval_map_.end() && resource_iter->second == resource)
+        resource_interval_map_.erase(resource_iter);
+    }
     auto buffer = allocation->buffer();
     residency_set_.removeAllocations(&buffer, 1);
     residency_set_.commit();
@@ -1987,6 +1995,31 @@ public:
     }
     *pOffset = offset;
     return allocation;
+  }
+
+  MTLD3D12Resource *
+  LookupResourceByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) {
+    if (!pOffset)
+      return {};
+    std::unique_lock<dxmt::mutex> lock(residency_lock_);
+    auto iter = interval_map_.upper_bound(VA);
+    if (iter == interval_map_.begin()) {
+      *pOffset = 0;
+      return {};
+    }
+    --iter;
+    auto offset = VA - iter->first;
+    if (offset >= iter->second->length()) {
+      *pOffset = 0;
+      return {};
+    }
+    auto resource_iter = resource_interval_map_.find(iter->first);
+    if (resource_iter == resource_interval_map_.end()) {
+      *pOffset = 0;
+      return {};
+    }
+    *pOffset = offset;
+    return resource_iter->second;
   }
 
   InternalCommandLibrary &
