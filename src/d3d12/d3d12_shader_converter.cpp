@@ -56,7 +56,7 @@ constexpr uint64_t kDXILAtomic64OnHeapResource = 0x10000000;
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
 // converter defaults change.
-constexpr uint32_t kMSCConversionCacheVersion = 9;
+constexpr uint32_t kMSCConversionCacheVersion = 10;
 constexpr uint32_t kMSCConverterAPIVersion = 0x040001;
 constexpr uint32_t kMSCMetalTargetVersion = 0;
 constexpr uint32_t kMSCCompileFlags = 0;

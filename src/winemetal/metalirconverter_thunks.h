@@ -131,11 +131,21 @@ enum dxmt_msc_geometry_input_primitive {
 
 #define DXMT_MSC_SEMANTIC_NAME_CAPACITY 64
 #define DXMT_MSC_PATCH_CONSTANT_NAME_CAPACITY 128
+#define DXMT_MSC_FUNCTION_CONSTANT_NAME_CAPACITY 128
+#define DXMT_MSC_FUNCTION_CONSTANT_CAPACITY 64
+
+struct dxmt_msc_function_constant {
+  char name[DXMT_MSC_FUNCTION_CONSTANT_NAME_CAPACITY];
+  uint32_t type;
+  uint32_t index;
+};
 
 struct dxmt_msc_shader_reflection {
   uint32_t stage;
   uint32_t vertex_output_size_in_bytes;
   uint32_t needs_function_constants;
+  uint32_t function_constant_count;
+  struct dxmt_msc_function_constant function_constants[DXMT_MSC_FUNCTION_CONSTANT_CAPACITY];
 
   uint32_t fs_num_render_targets;
   uint32_t fs_rt_index_int;

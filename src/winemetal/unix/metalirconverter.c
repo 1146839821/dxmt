@@ -52,6 +52,9 @@ typedef struct dxmt_msc_api {
   void (*IRShaderReflectionDestroy)(IRShaderReflection *);
   const char *(*IRShaderReflectionGetEntryPointFunctionName)(const IRShaderReflection *);
   bool (*IRShaderReflectionNeedsFunctionConstants)(const IRShaderReflection *);
+  size_t (*IRShaderReflectionGetFunctionConstantCount)(const IRShaderReflection *);
+  void (*IRShaderReflectionCopyFunctionConstants)(const IRShaderReflection *, IRFunctionConstant *);
+  void (*IRShaderReflectionReleaseFunctionConstants)(IRFunctionConstant *, size_t);
   bool (*IRShaderReflectionCopyComputeInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedCSInfo *);
   bool (*IRShaderReflectionReleaseComputeInfo)(IRVersionedCSInfo *);
   bool (*IRShaderReflectionCopyVertexInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedVSInfo *);
@@ -290,6 +293,7 @@ dxmt_msc_load_symbols(void) {
   bool vertex_reflection = true;
   bool geometry_reflection = true;
   bool tessellation_reflection = true;
+  bool function_constant_reflection = true;
 
   DXMT_MSC_LOAD(IRCompilerCreate);
   DXMT_MSC_LOAD(IRCompilerDestroy);
@@ -312,9 +316,23 @@ dxmt_msc_load_symbols(void) {
   DXMT_MSC_LOAD(IRShaderReflectionCreate);
   DXMT_MSC_LOAD(IRShaderReflectionDestroy);
   DXMT_MSC_LOAD(IRShaderReflectionGetEntryPointFunctionName);
-  DXMT_MSC_LOAD_OPTIONAL(
-      IRShaderReflectionNeedsFunctionConstants, DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_REFLECTION
+  function_constant_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionNeedsFunctionConstants, "IRShaderReflectionNeedsFunctionConstants"
   );
+  function_constant_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionGetFunctionConstantCount,
+      "IRShaderReflectionGetFunctionConstantCount"
+  );
+  function_constant_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyFunctionConstants,
+      "IRShaderReflectionCopyFunctionConstants"
+  );
+  function_constant_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseFunctionConstants,
+      "IRShaderReflectionReleaseFunctionConstants"
+  );
+  if (function_constant_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_REFLECTION;
   DXMT_MSC_LOAD(IRShaderReflectionCopyComputeInfo);
   DXMT_MSC_LOAD(IRShaderReflectionReleaseComputeInfo);
   DXMT_MSC_LOAD(IRErrorGetCode);
@@ -588,6 +606,8 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   IRVersionedMSInfo mesh_info = {};
   IRVersionedASInfo amplification_info = {};
   IRVersionedRTInfo raytracing_info = {};
+  IRFunctionConstant *function_constants = NULL;
+  size_t function_constant_count = 0;
   bool fragment_info_valid = false;
   bool compute_info_valid = false;
   bool vertex_info_valid = false;
@@ -783,6 +803,47 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   if (g_msc_api.IRShaderReflectionNeedsFunctionConstants)
     params->reflection.needs_function_constants =
         g_msc_api.IRShaderReflectionNeedsFunctionConstants(reflection) ? 1u : 0u;
+
+  if (g_msc_api.IRShaderReflectionGetFunctionConstantCount && g_msc_api.IRShaderReflectionCopyFunctionConstants &&
+      g_msc_api.IRShaderReflectionReleaseFunctionConstants) {
+    function_constant_count = g_msc_api.IRShaderReflectionGetFunctionConstantCount(reflection);
+    if (function_constant_count > DXMT_MSC_FUNCTION_CONSTANT_CAPACITY) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "too many MSC function constants");
+      result = DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+      goto cleanup;
+    }
+    if (function_constant_count > SIZE_MAX / sizeof(*function_constants)) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_OUT_OF_MEMORY, "MSC function constant reflection overflow");
+      result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+      goto cleanup;
+    }
+    if (function_constant_count) {
+      function_constants = calloc(function_constant_count, sizeof(*function_constants));
+      if (!function_constants) {
+        dxmt_msc_set_error(params, DXMT_MSC_ERROR_OUT_OF_MEMORY, "MSC function constant reflection allocation failed");
+        result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+        goto cleanup;
+      }
+      g_msc_api.IRShaderReflectionCopyFunctionConstants(reflection, function_constants);
+      for (size_t i = 0; i < function_constant_count; i++) {
+        if (!function_constants[i].name ||
+            strlen(function_constants[i].name) >= DXMT_MSC_FUNCTION_CONSTANT_NAME_CAPACITY) {
+          dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "invalid MSC function constant name");
+          result = DXMT_MSC_ERROR_COMPILATION;
+          goto cleanup;
+        }
+        snprintf(
+            params->reflection.function_constants[i].name,
+            sizeof(params->reflection.function_constants[i].name), "%s", function_constants[i].name
+        );
+        params->reflection.function_constants[i].type = (uint32_t)function_constants[i].type;
+        /* The reflection API exposes an ordered array rather than an explicit
+         * index. Preserve that ordinal for the Metal constant-value API. */
+        params->reflection.function_constants[i].index = (uint32_t)i;
+      }
+      params->reflection.function_constant_count = (uint32_t)function_constant_count;
+    }
+  }
 
   if (ir_stage == IRShaderStageFragment && g_msc_api.IRShaderReflectionCopyFragmentInfo &&
       g_msc_api.IRShaderReflectionReleaseFragmentInfo) {
@@ -1016,6 +1077,10 @@ cleanup:
     g_msc_api.IRShaderReflectionReleaseAmplificationInfo(&amplification_info);
   if (raytracing_info_valid)
     g_msc_api.IRShaderReflectionReleaseRaytracingInfo(&raytracing_info);
+  if (function_constants) {
+    g_msc_api.IRShaderReflectionReleaseFunctionConstants(function_constants, function_constant_count);
+    free(function_constants);
+  }
   if (stage_in_binary)
     g_msc_api.IRMetalLibBinaryDestroy(stage_in_binary);
   if (reflection)
