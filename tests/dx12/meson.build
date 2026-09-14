@@ -169,6 +169,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_compute_sm6_native16_fixture',
+    input: 'compute_sm6_native16.hlsl',
+    output: 'compute_sm6_native16.cs.cso',
+    command: dxc_command + [ '-enable-16bit-types', '-E', 'main', '-T', 'cs_6_2', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_texture_sampler_fixture',
     input: 'texture_sampler.hlsl',
     output: 'texture_sampler.cs.cso',

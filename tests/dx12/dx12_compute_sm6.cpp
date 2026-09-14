@@ -27,15 +27,16 @@ int main(int argc, char **argv) {
                  "[--root-uav|--reserved-uav|--reserved-srv|--descriptor-uav|--descriptor-resources|--"
                  "descriptor-resources-space|--root-cbv|--root-constants|--"
                  "descriptor-resources-1-1|--descriptor-null-cbv|--direct-indexed|--root-srv|--"
-                 "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops]\n";
+                 "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops|--native16-ops]\n";
     return 2;
   }
   const bool wave_ops = argc == 3 && strcmp(argv[2], "--wave-ops") == 0;
   const bool wave_size_unsupported = argc == 3 && strcmp(argv[2], "--wave-size-unsupported") == 0;
   const bool int64_ops = argc == 3 && strcmp(argv[2], "--int64-ops") == 0;
+  const bool native16_ops = argc == 3 && strcmp(argv[2], "--native16-ops") == 0;
   const bool root_uav = argc == 3 &&
                         (strcmp(argv[2], "--root-uav") == 0 || strcmp(argv[2], "--reserved-uav") == 0 ||
-                         wave_ops || wave_size_unsupported);
+                         wave_ops || wave_size_unsupported || native16_ops);
   const bool reserved_uav = argc == 3 && strcmp(argv[2], "--reserved-uav") == 0;
   const bool reserved_srv = argc == 3 && strcmp(argv[2], "--reserved-srv") == 0;
   const bool descriptor_uav =
@@ -63,7 +64,7 @@ int main(int argc, char **argv) {
   if (argc == 3 && !root_uav && !reserved_uav && !reserved_srv && !descriptor_uav && !descriptor_resources &&
       !descriptor_resources_space && !descriptor_resources_1_1 && !descriptor_null_cbv && !root_cbv &&
       !root_constants && !root_srv_mode && !direct_indexed && !cache_probe && !wave_ops &&
-      !wave_size_unsupported && !int64_ops) {
+      !wave_size_unsupported && !int64_ops && !native16_ops) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
@@ -550,6 +551,8 @@ int main(int argc, char **argv) {
       expected_value = input_value * 2;
     else if (int64_ops)
       expected_value = 782;
+    else if (native16_ops)
+      expected_value = 62200;
     else if (root_cbv || root_constants || root_srv_mode)
       expected_value = input_value;
     else if (wave_ops)
@@ -584,6 +587,7 @@ int main(int argc, char **argv) {
                   : direct_indexed              ? "direct indexed"
                   : descriptor_table_resources  ? "descriptor resources"
                   : wave_ops                    ? "wave ops"
+                  : native16_ops                ? "native16 ops"
                                                 : "root UAV")
               << " readback passed: " << output_value << "\n";
   } else {
