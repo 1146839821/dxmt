@@ -2112,6 +2112,13 @@ thunk32_DXMTMSCCompileDXIL(void *args) {
   params.error_message = UInt32ToPtr(src->error_message);
   params.error_message_capacity = src->error_message_capacity;
   params.error_message_size = src->error_message_size;
+  params.minimum_gpu_family = src->minimum_gpu_family;
+  params.minimum_os_major = src->minimum_os_major;
+  params.minimum_os_minor = src->minimum_os_minor;
+  params.minimum_os_patch = src->minimum_os_patch;
+  params.compatibility_flags = src->compatibility_flags;
+  params.validation_flags = src->validation_flags;
+  params.ignore_debug_information = src->ignore_debug_information;
 
   params.ret = dxmt_msc_compile(&params);
 

@@ -34,7 +34,7 @@ constexpr uint32_t kDXILFourCC = MakeFourCC('D', 'X', 'I', 'L');
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
 // converter defaults change.
-constexpr uint32_t kMSCConversionCacheVersion = 6;
+constexpr uint32_t kMSCConversionCacheVersion = 7;
 constexpr uint32_t kMSCConverterAPIVersion = 0x040001;
 constexpr uint32_t kMSCMetalTargetVersion = 0;
 constexpr uint32_t kMSCCompileFlags = 0;
@@ -81,6 +81,13 @@ MakeMSCConversionCacheKey(
   hash.update(kMSCBindingLayoutVersion);
   const uint32_t has_capability_snapshot = msc_capabilities ? 1u : 0u;
   hash.update(has_capability_snapshot);
+  uint32_t compiler_minimum_gpu_family = 0;
+  uint32_t compiler_minimum_os_major = 0;
+  uint32_t compiler_minimum_os_minor = 0;
+  uint32_t compiler_minimum_os_patch = 0;
+  uint32_t compiler_compatibility_flags = DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
+  uint32_t compiler_validation_flags = 0;
+  uint8_t compiler_ignore_debug_information = 0;
   if (msc_capabilities) {
     /* The same DXIL can produce a different metallib when the runtime ABI,
      * optional symbol set, OS, or Metal GPU target changes. Keep those
@@ -96,7 +103,21 @@ MakeMSCConversionCacheKey(
     hash.update(msc_capabilities->highest_apple_gpu_family);
     hash.update(static_cast<uint8_t>(msc_capabilities->core_converter));
     hash.update(static_cast<uint8_t>(msc_capabilities->argument_buffers_tier2));
+    compiler_minimum_gpu_family = msc_capabilities->compiler_minimum_gpu_family;
+    compiler_minimum_os_major = msc_capabilities->compiler_minimum_os_major;
+    compiler_minimum_os_minor = msc_capabilities->compiler_minimum_os_minor;
+    compiler_minimum_os_patch = msc_capabilities->compiler_minimum_os_patch;
+    compiler_compatibility_flags = msc_capabilities->compiler_compatibility_flags;
+    compiler_validation_flags = msc_capabilities->compiler_validation_flags;
+    compiler_ignore_debug_information = msc_capabilities->compiler_ignore_debug_information;
   }
+  hash.update(compiler_minimum_gpu_family);
+  hash.update(compiler_minimum_os_major);
+  hash.update(compiler_minimum_os_minor);
+  hash.update(compiler_minimum_os_patch);
+  hash.update(compiler_compatibility_flags);
+  hash.update(compiler_validation_flags);
+  hash.update(compiler_ignore_debug_information);
   hash.update(stage);
   compile_flags |= input_layout ? DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0;
   hash.update(compile_flags);
@@ -295,7 +316,7 @@ CompileDXIL(
   void *metallib, size_t metallib_capacity, char *entry_point, size_t entry_point_capacity, size_t *metallib_size,
   size_t *entry_point_size, std::array<uint32_t, 3> *threadgroup_size, void *stage_in_metallib,
   size_t stage_in_metallib_capacity, size_t *stage_in_metallib_size, dxmt_msc_shader_reflection *reflection,
-  char *error_message, size_t error_message_capacity
+  char *error_message, size_t error_message_capacity, const DXMTMSCCapabilities *msc_capabilities
 ) {
   dxmt_msc_compile_dxil_params params = {};
   params.dxil = shader.pShaderBytecode;
@@ -314,6 +335,16 @@ CompileDXIL(
   params.entry_point_capacity = entry_point_capacity;
   params.error_message = error_message;
   params.error_message_capacity = error_message_capacity;
+  params.compatibility_flags = DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
+  if (msc_capabilities) {
+    params.minimum_gpu_family = msc_capabilities->compiler_minimum_gpu_family;
+    params.minimum_os_major = msc_capabilities->compiler_minimum_os_major;
+    params.minimum_os_minor = msc_capabilities->compiler_minimum_os_minor;
+    params.minimum_os_patch = msc_capabilities->compiler_minimum_os_patch;
+    params.compatibility_flags = msc_capabilities->compiler_compatibility_flags;
+    params.validation_flags = msc_capabilities->compiler_validation_flags;
+    params.ignore_debug_information = msc_capabilities->compiler_ignore_debug_information;
+  }
 
   int result = DXMTMSCCompileDXIL(&params);
   if (metallib_size)
@@ -587,7 +618,7 @@ ConvertD3D12Shader(
   int result = CompileDXIL(
       shader, stage, root_signature, root_signature_size, input_layout, compile_flags, nullptr, 0, nullptr, 0,
       &metallib_size, &entry_point_size, &threadgroup_size, nullptr, 0, &stage_in_metallib_size, &reflection,
-      error_message, sizeof(error_message)
+      error_message, sizeof(error_message), msc_capabilities
   );
   if (result != DXMT_MSC_SUCCESS)
     return E_FAIL;
@@ -603,7 +634,7 @@ ConvertD3D12Shader(
       shader, stage, root_signature, root_signature_size, input_layout, compile_flags, converted.metallib.data(),
       converted.metallib.size(), entry_point.data(), entry_point.size(), &metallib_size, &entry_point_size,
       &threadgroup_size, converted.stage_in_metallib.data(), converted.stage_in_metallib.size(),
-      &stage_in_metallib_size, &reflection, error_message, sizeof(error_message)
+      &stage_in_metallib_size, &reflection, error_message, sizeof(error_message), msc_capabilities
   );
   if (result != DXMT_MSC_SUCCESS)
     return E_FAIL;

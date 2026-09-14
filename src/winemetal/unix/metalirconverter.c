@@ -186,6 +186,33 @@ dxmt_msc_result_from_error(const IRError *error) {
 }
 
 static void
+dxmt_msc_set_compiler_configuration(IRCompiler *compiler, const struct dxmt_msc_compile_dxil_params *params) {
+  const uint32_t compatibility_flags = params->compatibility_flags
+                                           ? params->compatibility_flags
+                                           : DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
+  if (g_msc_api.IRCompilerSetCompatibilityFlags)
+    g_msc_api.IRCompilerSetCompatibilityFlags(compiler, (IRCompatibilityFlags)compatibility_flags);
+
+  if (g_msc_api.IRCompilerSetValidationFlags)
+    g_msc_api.IRCompilerSetValidationFlags(compiler, (IRCompilerValidationFlags)params->validation_flags);
+
+  if (g_msc_api.IRCompilerSetMinimumGPUFamily && params->minimum_gpu_family)
+    g_msc_api.IRCompilerSetMinimumGPUFamily(compiler, (IRGPUFamily)params->minimum_gpu_family);
+
+  if (g_msc_api.IRCompilerSetMinimumDeploymentTarget && params->minimum_os_major) {
+    char version[32];
+    snprintf(
+        version, sizeof(version), "%u.%u.%u", params->minimum_os_major, params->minimum_os_minor,
+        params->minimum_os_patch
+    );
+    g_msc_api.IRCompilerSetMinimumDeploymentTarget(compiler, IROperatingSystem_macOS, version);
+  }
+
+  if (g_msc_api.IRCompilerIgnoreDebugInformation)
+    g_msc_api.IRCompilerIgnoreDebugInformation(compiler, params->ignore_debug_information != 0);
+}
+
+static void
 dxmt_msc_set_ire_error(struct dxmt_msc_compile_dxil_params *params, const IRError *error) {
   uint32_t error_code = error ? g_msc_api.IRErrorGetCode(error) : 0;
   char message[128];
@@ -630,8 +657,7 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     goto cleanup;
   }
 
-  if (g_msc_api.IRCompilerSetCompatibilityFlags)
-    g_msc_api.IRCompilerSetCompatibilityFlags(compiler, IRCompatibilityFlagTextureMinLODClamp);
+  dxmt_msc_set_compiler_configuration(compiler, params);
   if (emulation_flags)
     g_msc_api.IRCompilerEnableGeometryAndTessellationEmulation(compiler, true);
   if (params->reserved & DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN)

@@ -62,6 +62,18 @@ enum dxmt_msc_compile_flags {
   DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION = 1u << 2,
 };
 
+enum dxmt_msc_compatibility_flags {
+  /* Values mirror IRCompatibilityFlags in metal_irconverter.h. */
+  DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP = 1u << 2,
+};
+
+enum dxmt_msc_validation_flags {
+  /* Values mirror IRCompilerValidationFlags in metal_irconverter.h. */
+  DXMT_MSC_VALIDATION_FLAG_VALIDATE_RAW_ROOT_RESOURCES = 1u << 0,
+  DXMT_MSC_VALIDATION_FLAG_VALIDATE_ALL_RESOURCES_BOUND = 1u << 1,
+  DXMT_MSC_VALIDATION_FLAG_VALIDATE_DXIL = 1u << 2,
+};
+
 /* Optional runtime symbols are reported individually so one missing advanced
  * API does not make core DXIL conversion unavailable. */
 #define DXMT_MSC_RUNTIME_SYMBOL_COMPATIBILITY_FLAGS (UINT64_C(1) << 0)
@@ -212,6 +224,14 @@ struct dxmt_msc_compile_dxil_params {
   size_t error_message_size;
 
   int32_t ret;
+
+  uint32_t minimum_gpu_family;
+  uint32_t minimum_os_major;
+  uint32_t minimum_os_minor;
+  uint32_t minimum_os_patch;
+  uint32_t compatibility_flags;
+  uint32_t validation_flags;
+  uint32_t ignore_debug_information;
 };
 
 /* The native side receives this layout for a 32-bit PE caller. */
@@ -250,6 +270,14 @@ struct dxmt_msc_compile_dxil_params32 {
   uint32_t error_message_size;
 
   int32_t ret;
+
+  uint32_t minimum_gpu_family;
+  uint32_t minimum_os_major;
+  uint32_t minimum_os_minor;
+  uint32_t minimum_os_patch;
+  uint32_t compatibility_flags;
+  uint32_t validation_flags;
+  uint32_t ignore_debug_information;
 };
 
 struct dxmt_msc_root_parameter_layout {

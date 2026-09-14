@@ -42,6 +42,9 @@ QueryDXMTMSCCapabilities(WMT::Device device) {
   capabilities.os_major = static_cast<uint32_t>(os_major);
   capabilities.os_minor = static_cast<uint32_t>(os_minor);
   capabilities.os_patch = static_cast<uint32_t>(os_patch);
+  capabilities.compiler_minimum_os_major = capabilities.os_major;
+  capabilities.compiler_minimum_os_minor = capabilities.os_minor;
+  capabilities.compiler_minimum_os_patch = capabilities.os_patch;
 
   capabilities.apple6_or_newer = device.supportsFamily(WMTGPUFamilyApple6);
   capabilities.apple7_or_newer = device.supportsFamily(WMTGPUFamilyApple7);
@@ -51,6 +54,7 @@ QueryDXMTMSCCapabilities(WMT::Device device) {
                                               : capabilities.apple7_or_newer
                                                   ? 1007
                                                   : capabilities.apple6_or_newer ? 1006 : 0;
+  capabilities.compiler_minimum_gpu_family = capabilities.highest_apple_gpu_family;
 
   /* These are hardware/OS observations only. They do not promote D3D12
    * feature bits until a runtime proof exists for the corresponding path. */
@@ -155,6 +159,13 @@ LogDXMTMSCCapabilities(const DXMTMSCCapabilities &capabilities) {
       capabilities.api_minimum_gpu_target, ", minOS=", capabilities.api_minimum_os_target, ", functionConstants=",
       capabilities.api_function_constants, ", framebufferFetch=", capabilities.api_framebuffer_fetch, ", meshReflection=",
       capabilities.api_mesh_reflection, ", rayTracingConfiguration=", capabilities.api_raytracing_configuration
+  ));
+  Logger::info(str::format(
+      "D3D12 MSC compiler target: GPUFamily=", capabilities.compiler_minimum_gpu_family, ", macOS=",
+      capabilities.compiler_minimum_os_major, ".", capabilities.compiler_minimum_os_minor, ".",
+      capabilities.compiler_minimum_os_patch, ", compatibility=", capabilities.compiler_compatibility_flags,
+      ", validation=", capabilities.compiler_validation_flags, ", ignoreDebug=",
+      capabilities.compiler_ignore_debug_information
   ));
   Logger::info(str::format(
       "D3D12 MSC documented capabilities: waveOps=", capabilities.msc_wave_ops, ", int64=", capabilities.msc_int64,

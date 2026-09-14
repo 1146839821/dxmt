@@ -63,6 +63,14 @@ struct DXMTMSCCapabilities {
   bool api_raytracing_indirect_intersection = false;
   bool api_raytracing_indirect_dispatch = false;
 
+  uint32_t compiler_minimum_gpu_family = 0;
+  uint32_t compiler_minimum_os_major = 0;
+  uint32_t compiler_minimum_os_minor = 0;
+  uint32_t compiler_minimum_os_patch = 0;
+  uint32_t compiler_compatibility_flags = DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
+  uint32_t compiler_validation_flags = DXMT_MSC_VALIDATION_FLAG_VALIDATE_DXIL;
+  bool compiler_ignore_debug_information = false;
+
   bool msc_wave_ops = false;
   bool msc_int64 = false;
   bool msc_barycentrics = false;
