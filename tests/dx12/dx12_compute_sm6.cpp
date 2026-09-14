@@ -27,10 +27,14 @@ int main(int argc, char **argv) {
                  "[--root-uav|--reserved-uav|--reserved-srv|--descriptor-uav|--descriptor-resources|--"
                  "descriptor-resources-space|--root-cbv|--root-constants|--"
                  "descriptor-resources-1-1|--descriptor-null-cbv|--direct-indexed|--root-srv|--"
-                 "cache-probe]\n";
+                 "cache-probe|--wave-ops|--wave-size-unsupported]\n";
     return 2;
   }
-  const bool root_uav = argc == 3 && (strcmp(argv[2], "--root-uav") == 0 || strcmp(argv[2], "--reserved-uav") == 0);
+  const bool wave_ops = argc == 3 && strcmp(argv[2], "--wave-ops") == 0;
+  const bool wave_size_unsupported = argc == 3 && strcmp(argv[2], "--wave-size-unsupported") == 0;
+  const bool root_uav = argc == 3 &&
+                        (strcmp(argv[2], "--root-uav") == 0 || strcmp(argv[2], "--reserved-uav") == 0 ||
+                         wave_ops || wave_size_unsupported);
   const bool reserved_uav = argc == 3 && strcmp(argv[2], "--reserved-uav") == 0;
   const bool reserved_srv = argc == 3 && strcmp(argv[2], "--reserved-srv") == 0;
   const bool descriptor_uav =
@@ -56,7 +60,7 @@ int main(int argc, char **argv) {
   const bool cache_probe = argc == 3 && strcmp(argv[2], "--cache-probe") == 0;
   if (argc == 3 && !root_uav && !reserved_uav && !reserved_srv && !descriptor_uav && !descriptor_resources &&
       !descriptor_resources_space && !descriptor_resources_1_1 && !descriptor_null_cbv && !root_cbv &&
-      !root_constants && !root_srv && !direct_indexed && !cache_probe) {
+      !root_constants && !root_srv && !direct_indexed && !cache_probe && !wave_ops && !wave_size_unsupported) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
@@ -404,6 +408,18 @@ int main(int argc, char **argv) {
   pso_desc.pRootSignature = root_signature;
   pso_desc.CS.pShaderBytecode = shader.data();
   pso_desc.CS.BytecodeLength = shader.size();
+  if (wave_size_unsupported) {
+    const HRESULT wave_size_hr = device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso));
+    if (wave_size_hr != E_NOTIMPL) {
+      std::cerr << "unsupported WaveSize expected E_NOTIMPL, got 0x" << std::hex
+                << static_cast<unsigned long>(wave_size_hr) << std::dec << "\n";
+      goto cleanup;
+    }
+    std::cout << "DXIL unsupported WaveSize rejected: 0x" << std::hex
+              << static_cast<unsigned long>(wave_size_hr) << std::dec << "\n";
+    result = 0;
+    goto cleanup;
+  }
   if (!CheckHR(
           "CreateComputePipelineState",
           device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso))))
@@ -477,7 +493,7 @@ int main(int argc, char **argv) {
       D3D12_TILE_REGION_SIZE region = {}; region.NumTiles = 1;
       list->CopyTiles(output_buffer, &coord, &region, readback_buffer, 0, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
     } else {
-      list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0, sizeof(UINT));
+      list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0, wave_ops ? sizeof(UINT) * 3 : sizeof(UINT));
     }
   }
   if (!CheckHR("Close", list->Close()))
@@ -508,6 +524,12 @@ int main(int argc, char **argv) {
                                       reinterpret_cast<void **>(&mapped))))
       goto cleanup;
     output_value = *mapped;
+    UINT wave_prefix_product = 0;
+    UINT wave_prefix_sum = 0;
+    if (wave_ops) {
+      wave_prefix_product = mapped[1];
+      wave_prefix_sum = mapped[2];
+    }
     readback_buffer->Unmap(0, nullptr);
     UINT expected_value = 1234;
     if (reserved_srv)
@@ -520,9 +542,25 @@ int main(int argc, char **argv) {
       expected_value = input_value * 2;
     else if (root_cbv || root_constants || root_srv)
       expected_value = input_value;
+    else if (wave_ops)
+      expected_value = 0x00C0FFEE;
     if (output_value != expected_value) {
       std::cerr << "root parameter readback mismatch: " << output_value << "\n";
       goto cleanup;
+    }
+    if (wave_ops) {
+      UINT expected_prefix_product = 1;
+      for (UINT lane = 1; lane < 32; lane++)
+        expected_prefix_product *= lane;
+      if (wave_prefix_product != expected_prefix_product) {
+        std::cerr << "WavePrefixProduct readback mismatch: " << wave_prefix_product << " expected "
+                  << expected_prefix_product << "\n";
+        goto cleanup;
+      }
+      if (wave_prefix_sum != 496) {
+        std::cerr << "WavePrefixSum readback mismatch: " << wave_prefix_sum << " expected 496\n";
+        goto cleanup;
+      }
     }
     std::cout << (is_dxbc ? "DXBC" : "DXIL") << " cs_6_0 "
               << (root_cbv                     ? "root CBV"
@@ -530,6 +568,7 @@ int main(int argc, char **argv) {
                   : (root_srv || reserved_srv) ? "root SRV"
                   : direct_indexed              ? "direct indexed"
                   : descriptor_table_resources  ? "descriptor resources"
+                  : wave_ops                    ? "wave ops"
                                                 : "root UAV")
               << " readback passed: " << output_value << "\n";
   } else {
