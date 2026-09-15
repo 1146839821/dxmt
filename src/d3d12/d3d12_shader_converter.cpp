@@ -1606,8 +1606,8 @@ ConvertD3D12ShaderInternal(
   if (requested_entry_point && !requested_entry_point[0])
     return E_INVALIDARG;
 
-  if (msc_capabilities ? !msc_capabilities->core_converter : DXMTMSCIsAvailable() != 1) {
-    ERR("DXIL detected but Metal Shader Converter is unavailable");
+  if (!msc_capabilities || !msc_capabilities->CoreShaderPathUsable()) {
+    ERR("DXIL detected but the MSC core shader path is unavailable");
     return E_FAIL;
   }
 

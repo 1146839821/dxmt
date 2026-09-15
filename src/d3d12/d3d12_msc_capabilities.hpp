@@ -122,6 +122,13 @@ struct DXMTMSCCapabilities {
 
   bool ps_specified_stencil_ref = false;
   D3D_SHADER_MODEL maximum_shader_model = D3D_SHADER_MODEL_5_1;
+
+  /* The common DXIL-to-MSC path requires the converter, its binding ABI, and
+   * the API/version baseline. Stage-specific features are separate gates. */
+  bool
+  CoreShaderPathUsable() const {
+    return core_converter && argument_buffers_tier2 && ir_version_major >= 4;
+  }
 };
 
 DXMTMSCCapabilities QueryDXMTMSCCapabilities(WMT::Device device);

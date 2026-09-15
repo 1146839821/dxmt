@@ -347,6 +347,12 @@ public:
     if (desc->Type != D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE)
       return E_NOTIMPL;
 
+    const auto &msc_capabilities = device_->GetMSCCapabilities();
+    if (!msc_capabilities.CoreShaderPathUsable() || !msc_capabilities.msc_raytracing) {
+      ERR("CreateStateObject: ray tracing requires the MSC core shader path and ray tracing runtime path");
+      return E_NOTIMPL;
+    }
+
     const bool is_addition = parent != nullptr;
     if (is_addition) {
       if (!parent->allow_state_object_additions_)

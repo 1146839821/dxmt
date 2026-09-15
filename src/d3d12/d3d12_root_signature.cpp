@@ -467,7 +467,7 @@ public:
   InitializeMSCLayout() override {
     if (msc_layout_initialized_)
       return S_OK;
-    if (!device_->GetMSCCapabilities().core_converter)
+    if (!device_->GetMSCCapabilities().CoreShaderPathUsable())
       return E_FAIL;
 
     const void *blob = nullptr;

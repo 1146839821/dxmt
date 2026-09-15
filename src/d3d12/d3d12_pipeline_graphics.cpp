@@ -810,10 +810,10 @@ public:
       root_signature_size =
           static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&root_signature);
     }
-    const bool use_msc = msc_capabilities.core_converter &&
+    const bool use_msc = msc_capabilities.CoreShaderPathUsable() &&
                          vs_backend == D3D12ShaderBackend::MetalShaderConverter;
-    if (vs_backend == D3D12ShaderBackend::MetalShaderConverter && !msc_capabilities.core_converter) {
-      ERR("CreatePipelineState: DXIL vertex shader requires the MSC core converter");
+    if (vs_backend == D3D12ShaderBackend::MetalShaderConverter && !msc_capabilities.CoreShaderPathUsable()) {
+      ERR("CreatePipelineState: DXIL vertex shader requires a usable MSC core shader path");
       return E_FAIL;
     }
     const bool use_msc_tessellation = use_msc && has_hull && has_domain;
@@ -1634,7 +1634,8 @@ MTLD3D12GraphicsPipelineStateImpl::InitializeMesh(const D3D12PipelineStreamData 
     return E_INVALIDARG;
 
   const auto &msc_capabilities = device_->GetMSCCapabilities();
-  if (!msc_capabilities.msc_mesh || (data.amplification_shader.size() && !msc_capabilities.api_amplification_reflection)) {
+  if (!msc_capabilities.CoreShaderPathUsable() || !msc_capabilities.msc_mesh ||
+      (data.amplification_shader.size() && !msc_capabilities.api_amplification_reflection)) {
     ERR("CreatePipelineState: native mesh shaders are unavailable in the active MSC/Metal configuration");
     return E_NOTIMPL;
   }

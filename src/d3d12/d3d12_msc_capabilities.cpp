@@ -104,8 +104,7 @@ QueryDXMTMSCCapabilities(WMT::Device device) {
       Has(symbols, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_INDIRECT_INTERSECTION);
   capabilities.api_raytracing_indirect_dispatch = Has(symbols, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_INDIRECT_DISPATCH);
 
-  const bool msc4 = capabilities.core_converter && capabilities.argument_buffers_tier2 &&
-                    capabilities.ir_version_major >= 4;
+  const bool msc4 = capabilities.CoreShaderPathUsable();
   capabilities.msc_wave_ops = msc4;
   capabilities.msc_int64 = msc4;
   capabilities.msc_barycentrics = msc4;
@@ -157,9 +156,7 @@ GetMaximumD3D12ShaderModel(const DXMTMSCCapabilities &capabilities) {
    * independent from the converter's own 4.0.1 version and from D3D shader
    * model numbering.  Higher shader models remain unclaimed until fixtures
    * prove their complete runtime path. */
-  return capabilities.core_converter && capabilities.argument_buffers_tier2 && capabilities.ir_version_major >= 4
-             ? D3D_SHADER_MODEL_6_0
-             : D3D_SHADER_MODEL_5_1;
+  return capabilities.CoreShaderPathUsable() ? D3D_SHADER_MODEL_6_0 : D3D_SHADER_MODEL_5_1;
 }
 
 void
