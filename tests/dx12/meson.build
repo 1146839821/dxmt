@@ -61,6 +61,10 @@ dx12_raytracing_build = executable('dx12_raytracing_build', 'dx12_raytracing_bui
   dependencies: [ d3d12_dep ],
 )
 
+dx12_raytracing_state_object = executable('dx12_raytracing_state_object', 'dx12_raytracing_state_object.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dx12_msc_function_constants = executable('dx12_msc_function_constants', 'dx12_msc_function_constants.cpp',
   include_directories: [ include_directories('../../src/winemetal') ],
   dependencies: [ d3d12_dep ],

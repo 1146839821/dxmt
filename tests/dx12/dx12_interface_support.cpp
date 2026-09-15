@@ -177,7 +177,7 @@ int main() {
     const HRESULT state_object_hr = device5->CreateStateObject(
         nullptr, __uuidof(ID3D12StateObject), reinterpret_cast<void **>(&state_object)
     );
-    if (state_object_hr != E_NOTIMPL || state_object != nullptr) {
+    if (state_object_hr != E_INVALIDARG || state_object != nullptr) {
       std::cerr << "ID3D12Device5::CreateStateObject returned 0x" << std::hex
                 << static_cast<unsigned long>(state_object_hr) << std::dec << "\n";
       passed = false;
