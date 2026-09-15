@@ -1062,6 +1062,26 @@ public:
       ID3D12Resource *pResource, const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor
   ) {
     if (!pResource) {
+      if (pDesc && pDesc->ViewDimension == D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE) {
+        uint64_t resource_offset = 0;
+        auto *resource = LookupResourceByVA(pDesc->RaytracingAccelerationStructure.Location, &resource_offset);
+        auto [Heap, Index] = GetShaderVisibleDescriptorHeap(this, Descriptor);
+        if (!Heap || !resource || resource_offset || !resource->acceleration_structure) {
+          WARN("CreateShaderResourceView received an invalid raytracing acceleration structure");
+          return;
+        }
+        if (!resource->acceleration_structure_header || !resource->acceleration_structure_header_gpu_address) {
+          WARN("CreateShaderResourceView received an acceleration structure without an MSC runtime header");
+          return;
+        }
+        HRESULT hr = Heap->AddRaytracingAccelerationStructureView(
+            Index, resource->acceleration_structure, resource->acceleration_structure_header,
+            resource->acceleration_structure_header_gpu_address
+        );
+        if (FAILED(hr))
+          WARN("CreateShaderResourceView failed for raytracing acceleration structure: ", hr);
+        return;
+      }
       auto [Heap, Index] = GetShaderVisibleDescriptorHeap(this, Descriptor);
       if (Heap)
         Heap->AddShaderResourceView(Index, pDesc);

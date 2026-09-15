@@ -40,6 +40,47 @@ struct MetalUserIDInstanceDescriptor {
 };
 static_assert(sizeof(MetalUserIDInstanceDescriptor) == 68);
 
+struct RaytracingAccelerationStructureGPUHeader {
+  uint64_t acceleration_structure_id;
+  uint64_t address_of_instance_contributions;
+  uint64_t padding[4];
+  uint32_t dispatch_threads[3];
+  uint32_t padding_tail;
+};
+static_assert(sizeof(RaytracingAccelerationStructureGPUHeader) == 64);
+
+bool
+CreateRaytracingAccelerationStructureHeader(
+    WMT::Device device, const WMT::Reference<WMT::AccelerationStructure> &acceleration_structure,
+    const std::vector<uint32_t> &instance_contributions, WMT::Reference<WMT::Buffer> &header,
+    uint64_t &header_gpu_address
+) {
+  if (!device || !acceleration_structure || instance_contributions.empty())
+    return false;
+
+  const uint64_t contributions_offset = sizeof(RaytracingAccelerationStructureGPUHeader);
+  const uint64_t contributions_size = uint64_t(instance_contributions.size()) * sizeof(uint32_t);
+  if (contributions_size > UINT64_MAX - contributions_offset)
+    return false;
+
+  WMTBufferInfo buffer_info = {};
+  buffer_info.length = contributions_offset + contributions_size;
+  buffer_info.options = WMTResourceStorageModeShared | WMTResourceHazardTrackingModeUntracked;
+  buffer_info.memory.set(nullptr);
+  auto new_header = device.newBuffer(buffer_info);
+  if (!new_header || !buffer_info.gpu_address)
+    return false;
+
+  RaytracingAccelerationStructureGPUHeader gpu_header = {};
+  gpu_header.acceleration_structure_id = acceleration_structure.gpuResourceID();
+  gpu_header.address_of_instance_contributions = buffer_info.gpu_address + contributions_offset;
+  new_header.updateContents(0, &gpu_header, sizeof(gpu_header));
+  new_header.updateContents(contributions_offset, instance_contributions.data(), contributions_size);
+  header = std::move(new_header);
+  header_gpu_address = buffer_info.gpu_address;
+  return true;
+}
+
 bool
 MultiplyWithin(uint64_t left, uint64_t right, uint64_t &result) {
   if (right && left > std::numeric_limits<uint64_t>::max() / right)
@@ -231,11 +272,22 @@ ConvertInstanceDescriptors(
       descriptor.acceleration_structures.push_back(acceleration_structure_resource->acceleration_structure);
     }
 
-    destination.options = flags;
+    uint32_t metal_options = 0;
+    if (flags & D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE)
+      metal_options |= 1u << 0;
+    if (flags & D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_FRONT_COUNTERCLOCKWISE)
+      metal_options |= 1u << 1;
+    if (flags & D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE)
+      metal_options |= 1u << 2;
+    if (flags & D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE)
+      metal_options |= 1u << 3;
+
+    destination.options = metal_options;
     destination.mask = source_instance.InstanceMask;
     destination.intersection_function_table_offset = source_instance.InstanceContributionToHitGroupIndex;
     destination.acceleration_structure_index = acceleration_structure_index;
     destination.user_id = source_instance.InstanceID;
+    descriptor.instance_contributions.push_back(source_instance.InstanceContributionToHitGroupIndex);
   }
   instance_resource->Unmap(0, nullptr);
   if (!valid)
@@ -264,6 +316,18 @@ ConvertInstanceDescriptors(
 }
 
 } // namespace
+
+bool
+CreateD3D12RaytracingAccelerationStructureHeader(
+    MTLD3D12Device *device, const WMT::Reference<WMT::AccelerationStructure> &acceleration_structure,
+    const std::vector<uint32_t> &instance_contributions, WMT::Reference<WMT::Buffer> &header,
+    uint64_t &header_gpu_address
+) {
+  return device && CreateRaytracingAccelerationStructureHeader(
+                       device->GetMTLDevice(), acceleration_structure, instance_contributions, header,
+                       header_gpu_address
+                   );
+}
 
 bool
 ConvertD3D12RaytracingInputs(

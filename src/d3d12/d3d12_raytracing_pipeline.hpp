@@ -8,6 +8,7 @@ struct D3D12RaytracingDispatchState {
   WMT::Reference<WMT::ComputePipelineState> compute_pipeline;
   WMT::Reference<WMT::VisibleFunctionTable> visible_function_table;
   WMT::Reference<WMT::IntersectionFunctionTable> intersection_function_table;
+  MTLD3D12RootSignature *global_root_signature = nullptr;
 };
 
 class D3D12RaytracingStateObjectExt {

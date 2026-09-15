@@ -113,9 +113,69 @@ class MTLD3D12RaytracingStateObjectImpl final
   bool allow_state_object_additions_ = false;
   WMT::Reference<WMT::Library> dispatcher_library_;
   WMT::Reference<WMT::Function> dispatcher_function_;
+  WMT::Reference<WMT::Library> indirect_intersection_library_;
+  WMT::Reference<WMT::Function> indirect_intersection_function_;
   WMT::Reference<WMT::ComputePipelineState> dispatcher_pso_;
   WMT::Reference<WMT::VisibleFunctionTable> visible_function_table_;
   WMT::Reference<WMT::IntersectionFunctionTable> intersection_function_table_;
+  Com<MTLD3D12RootSignature, false> global_root_signature_;
+
+  HRESULT
+  InitializeIndirectIntersectionFunction() {
+    const bool has_triangle_hit_group = std::any_of(shader_records_.begin(), shader_records_.end(), [](const auto &record) {
+      return record.is_hit_group;
+    });
+    if (!has_triangle_hit_group)
+      return S_OK;
+
+    dxmt_msc_synthesize_ray_intersection_params params = {};
+    const auto &capabilities = device_->GetMSCCapabilities();
+    params.max_attribute_size = max_attribute_size_;
+    params.max_recursive_depth = max_trace_recursion_depth_;
+    params.hit_group_type = 0;
+    params.minimum_gpu_family = capabilities.compiler_minimum_gpu_family;
+    params.minimum_os_major = capabilities.compiler_minimum_os_major;
+    params.minimum_os_minor = capabilities.compiler_minimum_os_minor;
+    params.minimum_os_patch = capabilities.compiler_minimum_os_patch;
+    params.compatibility_flags = capabilities.compiler_compatibility_flags;
+    params.validation_flags = capabilities.compiler_validation_flags;
+    params.ignore_debug_information = capabilities.compiler_ignore_debug_information;
+
+    char error_message[256] = {};
+    params.error_message = error_message;
+    params.error_message_capacity = sizeof(error_message);
+    int result = DXMTMSCSynthesizeRayIntersection(&params);
+    if (result != DXMT_MSC_SUCCESS || !params.metallib_size) {
+      ERR("D3D12 indirect ray intersection synthesis failed: result=", result, " message=", error_message);
+      return result == DXMT_MSC_ERROR_UNSUPPORTED_FEATURE || result == DXMT_MSC_ERROR_UNAVAILABLE
+                 ? E_NOTIMPL
+                 : E_FAIL;
+    }
+
+    std::vector<uint8_t> metallib(params.metallib_size);
+    params.metallib = metallib.data();
+    params.metallib_capacity = metallib.size();
+    params.metallib_size = 0;
+    params.error_message_size = 0;
+    result = DXMTMSCSynthesizeRayIntersection(&params);
+    if (result != DXMT_MSC_SUCCESS || !params.metallib_size) {
+      ERR("D3D12 indirect ray intersection metallib extraction failed: result=", result,
+          " message=", error_message);
+      return result == DXMT_MSC_ERROR_UNSUPPORTED_FEATURE || result == DXMT_MSC_ERROR_UNAVAILABLE
+                 ? E_NOTIMPL
+                 : E_FAIL;
+    }
+
+    WMT::Error error;
+    indirect_intersection_library_ = device_->GetMTLDevice().newLibrary(metallib.data(), params.metallib_size, error);
+    if (!indirect_intersection_library_) {
+      ERR("D3D12 indirect ray intersection metallib load failed: ", error.description().getUTF8String());
+      return E_FAIL;
+    }
+    indirect_intersection_function_ =
+        indirect_intersection_library_.newFunction("irconverter.wrapper.intersection.function.triangle");
+    return indirect_intersection_function_ ? S_OK : E_FAIL;
+  }
 
   HRESULT
   InitializeDispatchState() {
@@ -168,12 +228,18 @@ class MTLD3D12RaytracingStateObjectImpl final
     if (!dispatcher_function_)
       return E_FAIL;
 
+    HRESULT hr = InitializeIndirectIntersectionFunction();
+    if (FAILED(hr))
+      return hr;
+
     std::vector<obj_handle_t> linked_functions;
     linked_functions.reserve(shader_records_.size());
     for (const auto &record : shader_records_) {
       if (!record.is_hit_group && record.function)
         linked_functions.push_back(record.function.handle);
     }
+    if (indirect_intersection_function_)
+      linked_functions.push_back(indirect_intersection_function_.handle);
     WMTComputePipelineInfo pipeline_info;
     WMT::InitializeComputePipelineInfo(pipeline_info);
     pipeline_info.compute_function = dispatcher_function_;
@@ -200,7 +266,13 @@ class MTLD3D12RaytracingStateObjectImpl final
         return E_FAIL;
       visible_function_table_.setFunction(function_handle, record.visible_function_index);
     }
-    intersection_function_table_.setVisibleFunctionTable(visible_function_table_, 0);
+    if (indirect_intersection_function_) {
+      auto function_handle = dispatcher_pso_.functionHandle(indirect_intersection_function_);
+      if (!function_handle)
+        return E_FAIL;
+      intersection_function_table_.setFunction(function_handle, 0);
+      intersection_function_table_.setVisibleFunctionTable(visible_function_table_, 0);
+    }
     return S_OK;
   }
 
@@ -286,6 +358,7 @@ public:
       max_trace_recursion_depth_ = parent->max_trace_recursion_depth_;
       next_visible_function_index_ = parent->next_visible_function_index_;
       allow_state_object_additions_ = parent->allow_state_object_additions_;
+      global_root_signature_ = parent->global_root_signature_;
     }
 
     const D3D12_DXIL_LIBRARY_DESC *library_desc = nullptr;
@@ -407,6 +480,7 @@ public:
       HRESULT hr = root->InitializeMSCLayout();
       if (FAILED(hr))
         return hr;
+      global_root_signature_ = root;
       root_signature_size = root->GetBlob(&root_signature);
     }
 
@@ -580,6 +654,7 @@ public:
     state.compute_pipeline = dispatcher_pso_;
     state.visible_function_table = visible_function_table_;
     state.intersection_function_table = intersection_function_table_;
+    state.global_root_signature = global_root_signature_.ptr();
     return S_OK;
   }
 

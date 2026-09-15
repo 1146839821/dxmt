@@ -2999,6 +2999,13 @@ public:
         encode_resource(view.texture.handle, sampled_read);
         break;
       }
+      case ShaderVisibleDescriptorType::SRVAccelerationStructure:
+        if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) ||
+            !descriptor.SRVAccelerationStructure.acceleration_structure)
+          return;
+        encode_resource(descriptor.SRVAccelerationStructure.acceleration_structure, WMTResourceUsageRead);
+        encode_resource(descriptor.SRVAccelerationStructure.acceleration_structure_header, WMTResourceUsageRead);
+        break;
       case ShaderVisibleDescriptorType::UAVTexture: {
         if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV) ||
             !descriptor.UAVTexture.texture)
@@ -3098,6 +3105,8 @@ public:
     set_pso.threadgroup_size = {1, 1, 1};
     EncodeComputeResourceUse(state.visible_function_table.handle, WMTResourceUsageRead);
     EncodeComputeResourceUse(state.intersection_function_table.handle, WMTResourceUsageRead);
+    if (state.global_root_signature)
+      EncodeMSCResourceUses(state.global_root_signature, rootarg_compute_staging_, descriptor_heap_.ptr(), true);
     return !recording_failed_;
   }
 
@@ -5228,6 +5237,16 @@ public:
       return;
     }
 
+    if (pDesc->Inputs.Type == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL &&
+        !CreateD3D12RaytracingAccelerationStructureHeader(
+            device_, destination, descriptor.instance_contributions,
+            destination_resource->acceleration_structure_header,
+            destination_resource->acceleration_structure_header_gpu_address
+        )) {
+      FailRecording(__func__, "failed to create acceleration-structure runtime header");
+      return;
+    }
+
     WMT::Reference<WMT::Buffer> scratch;
     uint64_t scratch_offset = 0;
     if (!resolve_buffer_range(
@@ -5513,8 +5532,44 @@ public:
     argument.visible_function_table = state.visible_function_table.gpuResourceID();
     argument.intersection_function_table = state.intersection_function_table.gpuResourceID();
 
+    /* MSC indexes the synthesized intersection table through an argument
+     * buffer whose entries are Metal intersection-function-table resource IDs.
+     * Keep the first entry populated for the single ray type supported here;
+     * the remaining entries preserve the fixed ray-type addressing layout. */
+    constexpr size_t intersection_function_table_slots = 16;
+    auto [intersection_function_tables, intersection_function_tables_offset] =
+        allocator_->AllocateGPUHeap(sizeof(uint64_t) * intersection_function_table_slots, 16);
+    if (!intersection_function_tables) {
+      FailRecording(__func__, "ray dispatch intersection-function-table allocation failed");
+      return;
+    }
+    std::fill_n(
+        static_cast<uint64_t *>(intersection_function_tables), intersection_function_table_slots,
+        uint64_t(0)
+    );
+    static_cast<uint64_t *>(intersection_function_tables)[0] = argument.intersection_function_table;
+    argument.intersection_function_tables = allocator_->gpu_heap_buffer_address_ + intersection_function_tables_offset;
+
+    if (state.global_root_signature) {
+      if (FAILED(state.global_root_signature->InitializeMSCLayout())) {
+        FailRecording(__func__, "ray dispatch global root signature initialization failed");
+        return;
+      }
+      const auto root_offset = EncodeMSCArgumentBuffer(
+          state.global_root_signature, rootarg_compute_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr()
+      );
+      if (state.global_root_signature->MSCArgumentBufferSize && !root_offset) {
+        FailRecording(__func__, "ray dispatch global root argument allocation failed");
+        return;
+      }
+      if (root_offset)
+        argument.global_root_signature = allocator_->gpu_heap_buffer_address_ + root_offset;
+    }
+
     if (!PreRayDispatch(state))
       return;
+
+    EncodeMSCBufferResourceUse(allocator_->gpu_heap_buffer_.handle, true);
 
     auto encode_heap_address = [&](auto *heap, uint64_t &address) {
       if (!heap)

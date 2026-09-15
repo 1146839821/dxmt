@@ -79,6 +79,7 @@ static_assert(sizeof(EMBEDDED_DESCRIPTOR_HANDLE) == sizeof(D3D12_CPU_DESCRIPTOR_
 enum class ShaderVisibleDescriptorType {
   Null,
   SRVTexture,
+  SRVAccelerationStructure,
   ConstantBuffer,
   UAVTexture,
   UAVTexelBuffer,
@@ -94,6 +95,12 @@ struct SRVTextureCPUStorage {
 };
 
 using UAVTextureCPUStorage = SRVTextureCPUStorage;
+
+struct SRVAccelerationStructureCPUStorage {
+  obj_handle_t acceleration_structure = NULL_OBJECT_HANDLE;
+  obj_handle_t acceleration_structure_header = NULL_OBJECT_HANDLE;
+  D3D12_GPU_VIRTUAL_ADDRESS header_gpu_virtual_address = 0;
+};
 
 struct UAVTexelBufferCPUStorage {
   Buffer *buffer = nullptr;
@@ -119,6 +126,7 @@ struct ShaderVisibleDescriptorCPUStorage {
   ShaderVisibleDescriptorType type;
   union {
     SRVTextureCPUStorage SRVTexture;
+    SRVAccelerationStructureCPUStorage SRVAccelerationStructure;
     CBVCommonStorage ConstantBuffer;
     UAVTextureCPUStorage UAVTexture;
     UAVTexelBufferCPUStorage UAVTexelBuffer;
@@ -141,6 +149,12 @@ public:
 
   virtual HRESULT
   AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp) = 0;
+
+  virtual HRESULT AddRaytracingAccelerationStructureView(
+      UINT Index, const WMT::Reference<WMT::AccelerationStructure> &AccelerationStructure,
+      const WMT::Reference<WMT::Buffer> &AccelerationStructureHeader,
+      D3D12_GPU_VIRTUAL_ADDRESS HeaderLocation
+  ) = 0;
 
   virtual bool HasNonZeroResourceMinLODClamp(UINT Index) = 0;
 

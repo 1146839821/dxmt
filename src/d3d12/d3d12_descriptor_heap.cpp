@@ -144,6 +144,8 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
   std::vector<Rc<Buffer>> buffer_resources_;
   std::vector<Rc<Buffer>> counter_resources_;
   std::vector<Rc<BufferAllocation>> cbv_allocations_;
+  std::vector<WMT::Reference<WMT::AccelerationStructure>> acceleration_structure_resources_;
+  std::vector<WMT::Reference<WMT::Buffer>> acceleration_structure_headers_;
   Rc<Buffer> buffer_;
   ShaderVisibleDescriptorGPUStorage *mapped_argument_buffer_ = nullptr;
   uint64_t argument_buffer_gpu_address_ = 0;
@@ -163,6 +165,8 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
     buffer_resources_[Index] = nullptr;
     counter_resources_[Index] = nullptr;
     cbv_allocations_[Index] = nullptr;
+    acceleration_structure_resources_[Index] = nullptr;
+    acceleration_structure_headers_[Index] = nullptr;
   }
 
 public:
@@ -185,6 +189,8 @@ public:
     buffer_resources_.resize(pDesc->NumDescriptors);
     counter_resources_.resize(pDesc->NumDescriptors);
     cbv_allocations_.resize(pDesc->NumDescriptors);
+    acceleration_structure_resources_.resize(pDesc->NumDescriptors);
+    acceleration_structure_headers_.resize(pDesc->NumDescriptors);
 
     if (pDesc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
       buffer_ = new Buffer(descriptors_.size() * sizeof(ShaderVisibleDescriptorGPUStorage), device_->GetMTLDevice());
@@ -336,6 +342,28 @@ public:
             " msc_metadata=", std::bit_cast<uint32_t>(ResourceMinLODClamp)
         );
     }
+    return S_OK;
+  }
+
+  virtual HRESULT
+  AddRaytracingAccelerationStructureView(
+      UINT Index, const WMT::Reference<WMT::AccelerationStructure> &AccelerationStructure,
+      const WMT::Reference<WMT::Buffer> &AccelerationStructureHeader,
+      D3D12_GPU_VIRTUAL_ADDRESS HeaderLocation
+  ) {
+    if (Index >= descriptors_.size() || !AccelerationStructure || !AccelerationStructureHeader || !HeaderLocation)
+      return E_INVALIDARG;
+    ReleaseDescriptorResources(Index);
+    acceleration_structure_resources_[Index] = AccelerationStructure;
+    acceleration_structure_headers_[Index] = AccelerationStructureHeader;
+    auto &cpu_storage = descriptors_[Index];
+    cpu_storage.type = ShaderVisibleDescriptorType::SRVAccelerationStructure;
+    cpu_storage.SRVAccelerationStructure.acceleration_structure = AccelerationStructure.handle;
+    cpu_storage.SRVAccelerationStructure.acceleration_structure_header = AccelerationStructureHeader.handle;
+    cpu_storage.SRVAccelerationStructure.header_gpu_virtual_address = HeaderLocation;
+    if (mapped_argument_buffer_)
+      mapped_argument_buffer_[Index].ZeroFilled = {};
+    SetMSCDescriptor(Index, {HeaderLocation, 0, 0});
     return S_OK;
   }
 
@@ -568,6 +596,8 @@ public:
       heap_to->buffer_resources_[DescriptorTo + i] = buffer_resources_[From + i];
       heap_to->counter_resources_[DescriptorTo + i] = counter_resources_[From + i];
       heap_to->cbv_allocations_[DescriptorTo + i] = cbv_allocations_[From + i];
+      heap_to->acceleration_structure_resources_[DescriptorTo + i] = acceleration_structure_resources_[From + i];
+      heap_to->acceleration_structure_headers_[DescriptorTo + i] = acceleration_structure_headers_[From + i];
       if (mapped_argument_buffer_ && heap_to->mapped_argument_buffer_)
         heap_to->mapped_argument_buffer_[DescriptorTo + i] = mapped_argument_buffer_[From + i];
       if (mapped_msc_argument_buffer_ && heap_to->mapped_msc_argument_buffer_)

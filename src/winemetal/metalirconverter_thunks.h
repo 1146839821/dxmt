@@ -222,6 +222,7 @@ enum dxmt_msc_unixcall {
   unix_dxmt_msc_get_root_layout,
   unix_dxmt_msc_get_capabilities = 169,
   unix_dxmt_msc_synthesize_ray_dispatch = 192,
+  unix_dxmt_msc_synthesize_ray_intersection,
 };
 
 #pragma pack(push, 8)
@@ -371,6 +372,54 @@ struct dxmt_msc_synthesize_ray_dispatch_params32 {
   int32_t ret;
 };
 
+struct dxmt_msc_synthesize_ray_intersection_params {
+  uint32_t max_attribute_size;
+  int32_t max_recursive_depth;
+  uint32_t hit_group_type;
+
+  uint32_t minimum_gpu_family;
+  uint32_t minimum_os_major;
+  uint32_t minimum_os_minor;
+  uint32_t minimum_os_patch;
+  uint32_t compatibility_flags;
+  uint32_t validation_flags;
+  uint32_t ignore_debug_information;
+
+  void *metallib;
+  size_t metallib_capacity;
+  size_t metallib_size;
+
+  char *error_message;
+  size_t error_message_capacity;
+  size_t error_message_size;
+
+  int32_t ret;
+};
+
+struct dxmt_msc_synthesize_ray_intersection_params32 {
+  uint32_t max_attribute_size;
+  int32_t max_recursive_depth;
+  uint32_t hit_group_type;
+
+  uint32_t minimum_gpu_family;
+  uint32_t minimum_os_major;
+  uint32_t minimum_os_minor;
+  uint32_t minimum_os_patch;
+  uint32_t compatibility_flags;
+  uint32_t validation_flags;
+  uint32_t ignore_debug_information;
+
+  uint32_t metallib;
+  uint32_t metallib_capacity;
+  uint32_t metallib_size;
+
+  uint32_t error_message;
+  uint32_t error_message_capacity;
+  uint32_t error_message_size;
+
+  int32_t ret;
+};
+
 struct dxmt_msc_root_parameter_layout {
   uint32_t parameter_index;
   uint32_t resource_type;
@@ -421,6 +470,10 @@ WINEMETAL_API int DXMTMSCGetCapabilities(struct dxmt_msc_capabilities *capabilit
 WINEMETAL_API int DXMTMSCCompileDXIL(struct dxmt_msc_compile_dxil_params *params);
 
 WINEMETAL_API int DXMTMSCSynthesizeRayDispatch(struct dxmt_msc_synthesize_ray_dispatch_params *params);
+
+WINEMETAL_API int DXMTMSCSynthesizeRayIntersection(
+    struct dxmt_msc_synthesize_ray_intersection_params *params
+);
 
 WINEMETAL_API int DXMTMSCGetRootSignatureLayout(struct dxmt_msc_get_root_layout_params *params);
 

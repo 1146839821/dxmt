@@ -2489,6 +2489,13 @@ thunk_DXMTMSCSynthesizeRayDispatch(void *args) {
 }
 
 static NTSTATUS
+thunk_DXMTMSCSynthesizeRayIntersection(void *args) {
+  struct dxmt_msc_synthesize_ray_intersection_params *params = args;
+  params->ret = dxmt_msc_synthesize_ray_intersection(params);
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 thunk_DXMTMSCGetRootLayout(void *args) {
   struct dxmt_msc_get_root_layout_params *params = args;
   params->ret = dxmt_msc_get_root_layout(params);
@@ -2596,6 +2603,34 @@ thunk32_DXMTMSCSynthesizeRayDispatch(void *args) {
   params.error_message_capacity = src->error_message_capacity;
 
   params.ret = dxmt_msc_synthesize_ray_dispatch(&params);
+
+  src->metallib_size = (uint32_t)params.metallib_size;
+  src->error_message_size = (uint32_t)params.error_message_size;
+  src->ret = params.ret;
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk32_DXMTMSCSynthesizeRayIntersection(void *args) {
+  struct dxmt_msc_synthesize_ray_intersection_params32 *src = args;
+  struct dxmt_msc_synthesize_ray_intersection_params params = {};
+
+  params.max_attribute_size = src->max_attribute_size;
+  params.max_recursive_depth = src->max_recursive_depth;
+  params.hit_group_type = src->hit_group_type;
+  params.minimum_gpu_family = src->minimum_gpu_family;
+  params.minimum_os_major = src->minimum_os_major;
+  params.minimum_os_minor = src->minimum_os_minor;
+  params.minimum_os_patch = src->minimum_os_patch;
+  params.compatibility_flags = src->compatibility_flags;
+  params.validation_flags = src->validation_flags;
+  params.ignore_debug_information = src->ignore_debug_information;
+  params.metallib = UInt32ToPtr(src->metallib);
+  params.metallib_capacity = src->metallib_capacity;
+  params.error_message = UInt32ToPtr(src->error_message);
+  params.error_message_capacity = src->error_message_capacity;
+
+  params.ret = dxmt_msc_synthesize_ray_intersection(&params);
 
   src->metallib_size = (uint32_t)params.metallib_size;
   src->error_message_size = (uint32_t)params.error_message_size;
@@ -4412,6 +4447,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLComputeCommandEncoder_setVisibleFunctionTable,
     &_MTLComputeCommandEncoder_setIntersectionFunctionTable,
     &thunk_DXMTMSCSynthesizeRayDispatch,
+    &thunk_DXMTMSCSynthesizeRayIntersection,
 };
 
 #ifndef DXMT_NATIVE
@@ -4609,5 +4645,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLComputeCommandEncoder_setVisibleFunctionTable,
     &_MTLComputeCommandEncoder_setIntersectionFunctionTable,
     &thunk32_DXMTMSCSynthesizeRayDispatch,
+    &thunk32_DXMTMSCSynthesizeRayIntersection,
 };
 #endif

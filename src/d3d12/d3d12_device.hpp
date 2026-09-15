@@ -108,6 +108,8 @@ public:
   Rc<Buffer> buffer;
   WMT::Reference<WMT::AccelerationStructure> acceleration_structure;
   uint64_t acceleration_structure_size = 0;
+  WMT::Reference<WMT::Buffer> acceleration_structure_header;
+  uint64_t acceleration_structure_header_gpu_address = 0;
   D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
   std::vector<D3D12_RESOURCE_STATES> subresource_states;
 

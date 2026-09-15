@@ -55,6 +55,17 @@ DXMTMSCSynthesizeRayDispatch(struct dxmt_msc_synthesize_ray_dispatch_params *par
 }
 
 WINEMETAL_API int
+DXMTMSCSynthesizeRayIntersection(struct dxmt_msc_synthesize_ray_intersection_params *params) {
+  if (!params)
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+
+  NTSTATUS status = WINE_UNIX_CALL(unix_dxmt_msc_synthesize_ray_intersection, params);
+  if (status)
+    return -1;
+  return params->ret;
+}
+
+WINEMETAL_API int
 DXMTMSCGetRootSignatureLayout(struct dxmt_msc_get_root_layout_params *params) {
   if (!params)
     return DXMT_MSC_ERROR_INVALID_ARGUMENT;
