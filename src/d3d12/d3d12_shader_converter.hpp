@@ -134,6 +134,14 @@ ConvertD3D12Shader(
 );
 
 HRESULT
+ConvertD3D12LibraryShader(
+    const D3D12ShaderClassification &classification, const D3D12_SHADER_BYTECODE &shader, uint32_t stage,
+    const char *entry_point, D3D12ConvertedShader &converted, const void *root_signature = nullptr,
+    size_t root_signature_size = 0, const void *local_root_signature = nullptr,
+    size_t local_root_signature_size = 0, const DXMTMSCCapabilities *msc_capabilities = nullptr
+);
+
+HRESULT
 ConvertD3D12Shader(
     const D3D12_SHADER_BYTECODE &shader, uint32_t stage, D3D12ConvertedShader &converted,
     const void *root_signature = nullptr, size_t root_signature_size = 0,

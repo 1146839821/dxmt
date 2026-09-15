@@ -56,13 +56,13 @@ constexpr uint64_t kDXILAtomic64OnHeapResource = 0x10000000;
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
 // converter defaults change.
-constexpr uint32_t kMSCConversionCacheVersion = 10;
+constexpr uint32_t kMSCConversionCacheVersion = 11;
 constexpr uint32_t kMSCConverterAPIVersion = 0x040001;
 constexpr uint32_t kMSCMetalTargetVersion = 0;
 constexpr uint32_t kMSCCompileFlags = 0;
 constexpr uint32_t kMSCBindingLayoutVersion = 1;
 constexpr char kMSCConversionCacheNamespace[] = "dxmt-msc-conversion";
-constexpr char kMSCEntryPointPolicy[] = "auto-from-dxil";
+constexpr char kMSCEntryPointPolicy[] = "auto-or-explicit-from-dxil";
 constexpr uint32_t kMSCSerializedCacheMagic = MakeFourCC('M', 'S', 'C', 'C');
 constexpr uint64_t kMSCSerializedCacheLimit = 256ull * 1024ull * 1024ull;
 
@@ -89,9 +89,9 @@ GetMSCConversionCache() {
 
 Sha1Digest
 MakeMSCConversionCacheKey(
-    const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const void *root_signature, size_t root_signature_size,
-    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
-    const DXMTMSCCapabilities *msc_capabilities
+    const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const char *entry_point, const void *root_signature,
+    size_t root_signature_size, const void *local_root_signature, size_t local_root_signature_size,
+    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags, const DXMTMSCCapabilities *msc_capabilities
 ) {
   Sha1HashState hash;
   hash.update(kMSCConversionCacheNamespace, sizeof(kMSCConversionCacheNamespace) - 1);
@@ -147,6 +147,12 @@ MakeMSCConversionCacheKey(
   hash.update(compiler_function_constant_resource_space);
   hash.update(compiler_framebuffer_fetch_resource_space);
   hash.update(stage);
+  const uint8_t has_entry_point = entry_point ? 1u : 0u;
+  hash.update(has_entry_point);
+  const uint64_t entry_point_size = entry_point ? std::strlen(entry_point) : 0;
+  hash.update(entry_point_size);
+  if (entry_point_size)
+    hash.update(entry_point, entry_point_size);
   compile_flags |= input_layout ? DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0;
   hash.update(compile_flags);
   if (input_layout)
@@ -160,6 +166,12 @@ MakeMSCConversionCacheKey(
   if (root_size)
     root_signature_hash = Sha1HashState::compute(root_signature, root_signature_size);
   hash.update(root_signature_hash);
+  const uint64_t local_root_size = local_root_signature ? local_root_signature_size : 0;
+  hash.update(local_root_size);
+  Sha1Digest local_root_signature_hash = {};
+  if (local_root_size)
+    local_root_signature_hash = Sha1HashState::compute(local_root_signature, local_root_size);
+  hash.update(local_root_signature_hash);
   return hash.final();
 }
 
@@ -1234,10 +1246,12 @@ MSCResultToHRESULT(int result) {
 
 int
 CompileDXIL(
-  const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const void *root_signature, size_t root_signature_size,
+  const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const char *requested_entry_point, const void *root_signature,
+  size_t root_signature_size, const void *local_root_signature, size_t local_root_signature_size,
   const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
-  void *metallib, size_t metallib_capacity, char *entry_point, size_t entry_point_capacity, size_t *metallib_size,
-  size_t *entry_point_size, std::array<uint32_t, 3> *threadgroup_size, void *stage_in_metallib,
+  void *metallib, size_t metallib_capacity, char *entry_point_output, size_t entry_point_capacity,
+  size_t *metallib_size, size_t *entry_point_size, std::array<uint32_t, 3> *threadgroup_size,
+  void *stage_in_metallib,
   size_t stage_in_metallib_capacity, size_t *stage_in_metallib_size, dxmt_msc_shader_reflection *reflection,
   char *error_message, size_t error_message_capacity, const DXMTMSCCapabilities *msc_capabilities
 ) {
@@ -1250,11 +1264,15 @@ CompileDXIL(
     params.input_layout = *input_layout;
   params.root_signature = root_signature;
   params.root_signature_size = root_signature_size;
+  params.local_root_signature = local_root_signature;
+  params.local_root_signature_size = local_root_signature_size;
+  params.entry_point = requested_entry_point;
+  params.entry_point_length = requested_entry_point ? std::strlen(requested_entry_point) : 0;
   params.metallib = metallib;
   params.metallib_capacity = metallib_capacity;
   params.stage_in_metallib = stage_in_metallib;
   params.stage_in_metallib_capacity = stage_in_metallib_capacity;
-  params.entry_point_out = entry_point;
+  params.entry_point_out = entry_point_output;
   params.entry_point_capacity = entry_point_capacity;
   params.error_message = error_message;
   params.error_message_capacity = error_message_capacity;
@@ -1509,10 +1527,11 @@ InitializeD3D12AirconvShader(
 }
 
 HRESULT
-ConvertD3D12Shader(
+ConvertD3D12ShaderInternal(
     const D3D12ShaderClassification &classification, const D3D12_SHADER_BYTECODE &shader, uint32_t stage,
-    D3D12ConvertedShader &converted, const void *root_signature, size_t root_signature_size,
-    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
+    const char *requested_entry_point, bool allow_library_shader, D3D12ConvertedShader &converted,
+    const void *root_signature, size_t root_signature_size, const void *local_root_signature,
+    size_t local_root_signature_size, const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
     const DXMTMSCCapabilities *msc_capabilities
 ) {
   if (FAILED(classification.validation_hr))
@@ -1578,10 +1597,14 @@ ConvertD3D12Shader(
       return E_NOTIMPL;
     }
   }
-  if (classification.is_library_shader) {
+  if (classification.is_library_shader && !allow_library_shader) {
     ERR("DXIL library shaders are unsupported");
     return E_NOTIMPL;
   }
+  if (allow_library_shader && !classification.is_library_shader)
+    return E_INVALIDARG;
+  if (requested_entry_point && !requested_entry_point[0])
+    return E_INVALIDARG;
 
   if (msc_capabilities ? !msc_capabilities->core_converter : DXMTMSCIsAvailable() != 1) {
     ERR("DXIL detected but Metal Shader Converter is unavailable");
@@ -1590,7 +1613,8 @@ ConvertD3D12Shader(
 
   compile_flags |= input_layout ? DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0;
   auto cache_key = MakeMSCConversionCacheKey(
-      shader, stage, root_signature, root_signature_size, input_layout, compile_flags, msc_capabilities
+      shader, stage, requested_entry_point, root_signature, root_signature_size, local_root_signature,
+      local_root_signature_size, input_layout, compile_flags, msc_capabilities
   );
   auto &cache = GetMSCConversionCache();
   {
@@ -1617,9 +1641,10 @@ ConvertD3D12Shader(
   dxmt_msc_shader_reflection reflection = {};
 
   int result = CompileDXIL(
-      shader, stage, root_signature, root_signature_size, input_layout, compile_flags, nullptr, 0, nullptr, 0,
-      &metallib_size, &entry_point_size, &threadgroup_size, nullptr, 0, &stage_in_metallib_size, &reflection,
-      error_message, sizeof(error_message), msc_capabilities
+      shader, stage, requested_entry_point, root_signature, root_signature_size, local_root_signature,
+      local_root_signature_size, input_layout, compile_flags, nullptr, 0, nullptr, 0, &metallib_size,
+      &entry_point_size, &threadgroup_size, nullptr, 0, &stage_in_metallib_size, &reflection, error_message,
+      sizeof(error_message), msc_capabilities
   );
   if (result != DXMT_MSC_SUCCESS)
     return MSCResultToHRESULT(result);
@@ -1632,10 +1657,11 @@ ConvertD3D12Shader(
   error_message[0] = '\0';
 
   result = CompileDXIL(
-      shader, stage, root_signature, root_signature_size, input_layout, compile_flags, converted.metallib.data(),
-      converted.metallib.size(), entry_point.data(), entry_point.size(), &metallib_size, &entry_point_size,
-      &threadgroup_size, converted.stage_in_metallib.data(), converted.stage_in_metallib.size(),
-      &stage_in_metallib_size, &reflection, error_message, sizeof(error_message), msc_capabilities
+      shader, stage, requested_entry_point, root_signature, root_signature_size, local_root_signature,
+      local_root_signature_size, input_layout, compile_flags, converted.metallib.data(), converted.metallib.size(),
+      entry_point.data(), entry_point.size(), &metallib_size, &entry_point_size, &threadgroup_size,
+      converted.stage_in_metallib.data(), converted.stage_in_metallib.size(), &stage_in_metallib_size, &reflection,
+      error_message, sizeof(error_message), msc_capabilities
   );
   if (result != DXMT_MSC_SUCCESS)
     return MSCResultToHRESULT(result);
@@ -1656,6 +1682,31 @@ ConvertD3D12Shader(
   }
   StorePersistentMSCConversion(cache_key, converted);
   return S_OK;
+}
+
+HRESULT
+ConvertD3D12Shader(
+    const D3D12ShaderClassification &classification, const D3D12_SHADER_BYTECODE &shader, uint32_t stage,
+    D3D12ConvertedShader &converted, const void *root_signature, size_t root_signature_size,
+    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
+    const DXMTMSCCapabilities *msc_capabilities
+) {
+  return ConvertD3D12ShaderInternal(
+      classification, shader, stage, nullptr, false, converted, root_signature, root_signature_size, nullptr, 0,
+      input_layout, compile_flags, msc_capabilities
+  );
+}
+
+HRESULT
+ConvertD3D12LibraryShader(
+    const D3D12ShaderClassification &classification, const D3D12_SHADER_BYTECODE &shader, uint32_t stage,
+    const char *entry_point, D3D12ConvertedShader &converted, const void *root_signature, size_t root_signature_size,
+    const void *local_root_signature, size_t local_root_signature_size, const DXMTMSCCapabilities *msc_capabilities
+) {
+  return ConvertD3D12ShaderInternal(
+      classification, shader, stage, entry_point, true, converted, root_signature, root_signature_size,
+      local_root_signature, local_root_signature_size, nullptr, 0, msc_capabilities
+  );
 }
 
 HRESULT

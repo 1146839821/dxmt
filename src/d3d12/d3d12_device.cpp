@@ -19,6 +19,7 @@
 #include "d3d12_device.hpp"
 #include "d3d12_device_child.hpp"
 #include "d3d12_raytracing.hpp"
+#include "d3d12_raytracing_pipeline.hpp"
 #include "d3d12sdklayers.h"
 #include "d3d10.h"
 #include "Metal.hpp"
@@ -2073,8 +2074,7 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   CreateStateObject(const D3D12_STATE_OBJECT_DESC *pDesc, REFIID riid, void **ppStateObject) {
-    InitReturnPtr(ppStateObject);
-    return E_NOTIMPL;
+    return dxmt::CreateD3D12RaytracingStateObject(this, pDesc, riid, ppStateObject);
   }
 
   void STDMETHODCALLTYPE GetRaytracingAccelerationStructurePrebuildInfo(

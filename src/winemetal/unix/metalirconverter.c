@@ -35,6 +35,7 @@ typedef struct dxmt_msc_api {
   void (*IRVersionedRootSignatureDescriptorRelease)(IRVersionedRootSignatureDescriptor *);
   IRRootSignature *(*IRRootSignatureCreateFromDescriptor)(const IRVersionedRootSignatureDescriptor *, IRError **);
   void (*IRRootSignatureDestroy)(IRRootSignature *);
+  IRShaderStage (*IRObjectGetMetalIRShaderStage)(const IRObject *);
   size_t (*IRRootSignatureGetResourceCount)(const IRRootSignature *);
   void (*IRRootSignatureGetResourceLocations)(const IRRootSignature *, IRResourceLocation *);
   IRObject *(*IRCompilerAllocCompileAndLink)(IRCompiler *, const char *, const IRObject *, IRError **);
@@ -300,6 +301,7 @@ dxmt_msc_load_symbols(void) {
   DXMT_MSC_LOAD(IRCompilerSetGlobalRootSignature);
   DXMT_MSC_LOAD(IRObjectCreateFromDXIL);
   DXMT_MSC_LOAD(IRObjectDestroy);
+  DXMT_MSC_LOAD(IRObjectGetMetalIRShaderStage);
   DXMT_MSC_LOAD(IRVersionedRootSignatureDescriptorCreateFromBlob);
   DXMT_MSC_LOAD(IRVersionedRootSignatureDescriptorRelease);
   DXMT_MSC_LOAD(IRRootSignatureCreateFromDescriptor);
@@ -846,6 +848,18 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   if (!compiled) {
     dxmt_msc_set_ire_error(params, error);
     result = params->error_code;
+    goto cleanup;
+  }
+
+  const IRShaderStage compiled_stage = g_msc_api.IRObjectGetMetalIRShaderStage(compiled);
+  if (compiled_stage != ir_stage) {
+    char message[128];
+    snprintf(
+        message, sizeof(message), "compiled shader stage %u does not match requested stage %u",
+        (unsigned)compiled_stage, (unsigned)ir_stage
+    );
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_METALLIB, message);
+    result = DXMT_MSC_ERROR_METALLIB;
     goto cleanup;
   }
 

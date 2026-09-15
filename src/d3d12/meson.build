@@ -33,6 +33,7 @@ d3d12_src = [
   'd3d12_shader_converter.cpp',
   'd3d12_query_heap.cpp',
   'd3d12_raytracing.cpp',
+  'd3d12_raytracing_pipeline.cpp',
   'd3d12_resource_helper.cpp',
   'd3d12_root_signature.cpp',
   'd3d12_sampler.cpp',
