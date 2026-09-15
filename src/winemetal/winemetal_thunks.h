@@ -39,6 +39,17 @@ enum winemetal_unixcall {
   unix_mtlaccelerationstructurecommandencoder_copyandcompact,
   unix_mtlaccelerationstructurecommandencoder_writecompactedsize,
   unix_mtlaccelerationstructurecommandencoder_useresource,
+  unix_mtlcomputepipelinestate_functionhandle,
+  unix_mtlfunctionhandle_gpuresourceid,
+  unix_mtlcomputepipelinestate_newvisiblefunctiontable,
+  unix_mtlcomputepipelinestate_newintersectionfunctiontable,
+  unix_mtlvisiblefunctiontable_setfunction,
+  unix_mtlvisiblefunctiontable_gpuresourceid,
+  unix_mtlintersectionfunctiontable_setfunction,
+  unix_mtlintersectionfunctiontable_setvisiblefunctiontable,
+  unix_mtlintersectionfunctiontable_gpuresourceid,
+  unix_mtlcomputecommandencoder_setvisiblefunctiontable,
+  unix_mtlcomputecommandencoder_setintersectionfunctiontable,
 };
 
 struct unixcall_mtldevice_newmscgeometrypso {
@@ -58,6 +69,12 @@ struct unixcall_generic_obj_noret {
 
 struct unixcall_generic_obj_obj_ret {
   obj_handle_t handle;
+  obj_handle_t ret;
+};
+
+struct unixcall_generic_obj_obj_obj_ret {
+  obj_handle_t handle;
+  obj_handle_t arg;
   obj_handle_t ret;
 };
 

@@ -357,6 +357,92 @@ MTLDevice_newComputePipelineState(
 }
 
 WINEMETAL_API obj_handle_t
+MTLComputePipelineState_functionHandle(obj_handle_t pipeline, obj_handle_t function) {
+  struct unixcall_generic_obj_obj_obj_ret params;
+  params.handle = pipeline;
+  params.arg = function;
+  params.ret = NULL_OBJECT_HANDLE;
+  UNIX_CALL(unix_mtlcomputepipelinestate_functionhandle, &params);
+  return params.ret;
+}
+
+WINEMETAL_API uint64_t
+MTLFunctionHandle_gpuResourceID(obj_handle_t function_handle) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = function_handle;
+  params.ret = 0;
+  UNIX_CALL(unix_mtlfunctionhandle_gpuresourceid, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLComputePipelineState_newVisibleFunctionTable(obj_handle_t pipeline, uint64_t count) {
+  struct unixcall_generic_obj_uint64_obj_ret params;
+  params.handle = pipeline;
+  params.arg = count;
+  params.ret = NULL_OBJECT_HANDLE;
+  UNIX_CALL(unix_mtlcomputepipelinestate_newvisiblefunctiontable, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLComputePipelineState_newIntersectionFunctionTable(obj_handle_t pipeline, uint64_t count) {
+  struct unixcall_generic_obj_uint64_obj_ret params;
+  params.handle = pipeline;
+  params.arg = count;
+  params.ret = NULL_OBJECT_HANDLE;
+  UNIX_CALL(unix_mtlcomputepipelinestate_newintersectionfunctiontable, &params);
+  return params.ret;
+}
+
+WINEMETAL_API void
+MTLVisibleFunctionTable_setFunction(obj_handle_t table, obj_handle_t function, uint64_t index) {
+  struct unixcall_generic_obj_obj_uint64_noret params;
+  params.handle = table;
+  params.arg0 = function;
+  params.arg1 = index;
+  UNIX_CALL(unix_mtlvisiblefunctiontable_setfunction, &params);
+}
+
+WINEMETAL_API uint64_t
+MTLVisibleFunctionTable_gpuResourceID(obj_handle_t table) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = table;
+  params.ret = 0;
+  UNIX_CALL(unix_mtlvisiblefunctiontable_gpuresourceid, &params);
+  return params.ret;
+}
+
+WINEMETAL_API void
+MTLIntersectionFunctionTable_setFunction(obj_handle_t table, obj_handle_t function, uint64_t index) {
+  struct unixcall_generic_obj_obj_uint64_noret params;
+  params.handle = table;
+  params.arg0 = function;
+  params.arg1 = index;
+  UNIX_CALL(unix_mtlintersectionfunctiontable_setfunction, &params);
+}
+
+WINEMETAL_API void
+MTLIntersectionFunctionTable_setVisibleFunctionTable(
+    obj_handle_t table, obj_handle_t visible_table, uint64_t buffer_index
+) {
+  struct unixcall_generic_obj_obj_uint64_noret params;
+  params.handle = table;
+  params.arg0 = visible_table;
+  params.arg1 = buffer_index;
+  UNIX_CALL(unix_mtlintersectionfunctiontable_setvisiblefunctiontable, &params);
+}
+
+WINEMETAL_API uint64_t
+MTLIntersectionFunctionTable_gpuResourceID(obj_handle_t table) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = table;
+  params.ret = 0;
+  UNIX_CALL(unix_mtlintersectionfunctiontable_gpuresourceid, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
 MTLCommandBuffer_blitCommandEncoder(obj_handle_t cmdbuf) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = cmdbuf;
@@ -373,6 +459,26 @@ MTLCommandBuffer_computeCommandEncoder(obj_handle_t cmdbuf, bool concurrent) {
   params.ret = 0;
   UNIX_CALL(31, &params);
   return params.ret;
+}
+
+WINEMETAL_API void
+MTLComputeCommandEncoder_setVisibleFunctionTable(obj_handle_t encoder, obj_handle_t table, uint64_t buffer_index) {
+  struct unixcall_generic_obj_obj_uint64_noret params;
+  params.handle = encoder;
+  params.arg0 = table;
+  params.arg1 = buffer_index;
+  UNIX_CALL(unix_mtlcomputecommandencoder_setvisiblefunctiontable, &params);
+}
+
+WINEMETAL_API void
+MTLComputeCommandEncoder_setIntersectionFunctionTable(
+    obj_handle_t encoder, obj_handle_t table, uint64_t buffer_index
+) {
+  struct unixcall_generic_obj_obj_uint64_noret params;
+  params.handle = encoder;
+  params.arg0 = table;
+  params.arg1 = buffer_index;
+  UNIX_CALL(unix_mtlcomputecommandencoder_setintersectionfunctiontable, &params);
 }
 
 WINEMETAL_API obj_handle_t

@@ -659,9 +659,28 @@ WINEMETAL_API obj_handle_t MTLDevice_newComputePipelineState(
     obj_handle_t device, const struct WMTComputePipelineInfo *info, obj_handle_t *err_out
 );
 
+WINEMETAL_API obj_handle_t MTLComputePipelineState_functionHandle(obj_handle_t pipeline, obj_handle_t function);
+WINEMETAL_API uint64_t MTLFunctionHandle_gpuResourceID(obj_handle_t function_handle);
+WINEMETAL_API obj_handle_t MTLComputePipelineState_newVisibleFunctionTable(obj_handle_t pipeline, uint64_t count);
+WINEMETAL_API obj_handle_t MTLComputePipelineState_newIntersectionFunctionTable(obj_handle_t pipeline, uint64_t count);
+WINEMETAL_API void MTLVisibleFunctionTable_setFunction(obj_handle_t table, obj_handle_t function, uint64_t index);
+WINEMETAL_API uint64_t MTLVisibleFunctionTable_gpuResourceID(obj_handle_t table);
+WINEMETAL_API void MTLIntersectionFunctionTable_setFunction(obj_handle_t table, obj_handle_t function, uint64_t index);
+WINEMETAL_API void MTLIntersectionFunctionTable_setVisibleFunctionTable(
+    obj_handle_t table, obj_handle_t visible_table, uint64_t buffer_index
+);
+WINEMETAL_API uint64_t MTLIntersectionFunctionTable_gpuResourceID(obj_handle_t table);
+
 WINEMETAL_API obj_handle_t MTLCommandBuffer_blitCommandEncoder(obj_handle_t cmdbuf);
 
 WINEMETAL_API obj_handle_t MTLCommandBuffer_computeCommandEncoder(obj_handle_t cmdbuf, bool concurrent);
+
+WINEMETAL_API void MTLComputeCommandEncoder_setVisibleFunctionTable(
+    obj_handle_t encoder, obj_handle_t table, uint64_t buffer_index
+);
+WINEMETAL_API void MTLComputeCommandEncoder_setIntersectionFunctionTable(
+    obj_handle_t encoder, obj_handle_t table, uint64_t buffer_index
+);
 
 enum WMTLoadAction {
   WMTLoadActionDontCare = 0,

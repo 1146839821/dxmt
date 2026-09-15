@@ -456,6 +456,98 @@ _MTLDevice_newComputePipelineState(void *obj) {
 }
 
 static NTSTATUS
+_MTLComputePipelineState_functionHandle(void *obj) {
+  struct unixcall_generic_obj_obj_obj_ret *params = obj;
+  params->ret = (obj_handle_t)[(id<MTLComputePipelineState>)params->handle
+      functionHandleWithFunction:(id<MTLFunction>)params->arg];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLFunctionHandle_gpuResourceID(void *obj) {
+  struct unixcall_generic_obj_uint64_ret *params = obj;
+  params->ret = [(id<MTLFunctionHandle>)params->handle gpuResourceID]._impl;
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLComputePipelineState_newVisibleFunctionTable(void *obj) {
+  struct unixcall_generic_obj_uint64_obj_ret *params = obj;
+  MTLVisibleFunctionTableDescriptor *descriptor = [MTLVisibleFunctionTableDescriptor visibleFunctionTableDescriptor];
+  descriptor.functionCount = params->arg;
+  params->ret = (obj_handle_t)[(id<MTLComputePipelineState>)params->handle
+      newVisibleFunctionTableWithDescriptor:descriptor];
+  [descriptor release];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLComputePipelineState_newIntersectionFunctionTable(void *obj) {
+  struct unixcall_generic_obj_uint64_obj_ret *params = obj;
+  MTLIntersectionFunctionTableDescriptor *descriptor =
+      [MTLIntersectionFunctionTableDescriptor intersectionFunctionTableDescriptor];
+  descriptor.functionCount = params->arg;
+  params->ret = (obj_handle_t)[(id<MTLComputePipelineState>)params->handle
+      newIntersectionFunctionTableWithDescriptor:descriptor];
+  [descriptor release];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLVisibleFunctionTable_setFunction(void *obj) {
+  struct unixcall_generic_obj_obj_uint64_noret *params = obj;
+  [(id<MTLVisibleFunctionTable>)params->handle
+      setFunction:(id<MTLFunctionHandle>)params->arg0 atIndex:params->arg1];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLVisibleFunctionTable_gpuResourceID(void *obj) {
+  struct unixcall_generic_obj_uint64_ret *params = obj;
+  params->ret = [(id<MTLVisibleFunctionTable>)params->handle gpuResourceID]._impl;
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLIntersectionFunctionTable_setFunction(void *obj) {
+  struct unixcall_generic_obj_obj_uint64_noret *params = obj;
+  [(id<MTLIntersectionFunctionTable>)params->handle
+      setFunction:(id<MTLFunctionHandle>)params->arg0 atIndex:params->arg1];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLIntersectionFunctionTable_setVisibleFunctionTable(void *obj) {
+  struct unixcall_generic_obj_obj_uint64_noret *params = obj;
+  [(id<MTLIntersectionFunctionTable>)params->handle
+      setVisibleFunctionTable:(id<MTLVisibleFunctionTable>)params->arg0 atBufferIndex:params->arg1];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLIntersectionFunctionTable_gpuResourceID(void *obj) {
+  struct unixcall_generic_obj_uint64_ret *params = obj;
+  params->ret = [(id<MTLIntersectionFunctionTable>)params->handle gpuResourceID]._impl;
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLComputeCommandEncoder_setVisibleFunctionTable(void *obj) {
+  struct unixcall_generic_obj_obj_uint64_noret *params = obj;
+  [(id<MTLComputeCommandEncoder>)params->handle
+      setVisibleFunctionTable:(id<MTLVisibleFunctionTable>)params->arg0 atBufferIndex:params->arg1];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLComputeCommandEncoder_setIntersectionFunctionTable(void *obj) {
+  struct unixcall_generic_obj_obj_uint64_noret *params = obj;
+  [(id<MTLComputeCommandEncoder>)params->handle
+      setIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)params->arg0 atBufferIndex:params->arg1];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 _MTLCommandBuffer_blitCommandEncoder(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle blitCommandEncoder];
@@ -4267,6 +4359,17 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLAccelerationStructureCommandEncoder_copyAndCompact,
     &_MTLAccelerationStructureCommandEncoder_writeCompactedSize,
     &_MTLAccelerationStructureCommandEncoder_useResource,
+    &_MTLComputePipelineState_functionHandle,
+    &_MTLFunctionHandle_gpuResourceID,
+    &_MTLComputePipelineState_newVisibleFunctionTable,
+    &_MTLComputePipelineState_newIntersectionFunctionTable,
+    &_MTLVisibleFunctionTable_setFunction,
+    &_MTLVisibleFunctionTable_gpuResourceID,
+    &_MTLIntersectionFunctionTable_setFunction,
+    &_MTLIntersectionFunctionTable_setVisibleFunctionTable,
+    &_MTLIntersectionFunctionTable_gpuResourceID,
+    &_MTLComputeCommandEncoder_setVisibleFunctionTable,
+    &_MTLComputeCommandEncoder_setIntersectionFunctionTable,
 };
 
 #ifndef DXMT_NATIVE
@@ -4452,5 +4555,16 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLAccelerationStructureCommandEncoder_copyAndCompact,
     &_MTLAccelerationStructureCommandEncoder_writeCompactedSize,
     &_MTLAccelerationStructureCommandEncoder_useResource,
+    &_MTLComputePipelineState_functionHandle,
+    &_MTLFunctionHandle_gpuResourceID,
+    &_MTLComputePipelineState_newVisibleFunctionTable,
+    &_MTLComputePipelineState_newIntersectionFunctionTable,
+    &_MTLVisibleFunctionTable_setFunction,
+    &_MTLVisibleFunctionTable_gpuResourceID,
+    &_MTLIntersectionFunctionTable_setFunction,
+    &_MTLIntersectionFunctionTable_setVisibleFunctionTable,
+    &_MTLIntersectionFunctionTable_gpuResourceID,
+    &_MTLComputeCommandEncoder_setVisibleFunctionTable,
+    &_MTLComputeCommandEncoder_setIntersectionFunctionTable,
 };
 #endif

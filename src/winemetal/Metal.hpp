@@ -365,8 +365,65 @@ public:
   }
 };
 
+class Function : public Object {};
+
+class FunctionHandle : public Object {
+public:
+  uint64_t
+  gpuResourceID() const {
+    return MTLFunctionHandle_gpuResourceID(handle);
+  }
+};
+
+class VisibleFunctionTable : public Resource {
+public:
+  void
+  setFunction(FunctionHandle function, uint64_t index) {
+    MTLVisibleFunctionTable_setFunction(handle, function.handle, index);
+  }
+
+  uint64_t
+  gpuResourceID() const {
+    return MTLVisibleFunctionTable_gpuResourceID(handle);
+  }
+};
+
+class IntersectionFunctionTable : public Resource {
+public:
+  void
+  setFunction(FunctionHandle function, uint64_t index) {
+    MTLIntersectionFunctionTable_setFunction(handle, function.handle, index);
+  }
+
+  void
+  setVisibleFunctionTable(VisibleFunctionTable table, uint64_t buffer_index) {
+    MTLIntersectionFunctionTable_setVisibleFunctionTable(handle, table.handle, buffer_index);
+  }
+
+  uint64_t
+  gpuResourceID() const {
+    return MTLIntersectionFunctionTable_gpuResourceID(handle);
+  }
+};
+
 class ComputePipelineState : public Object {
 public:
+  Reference<FunctionHandle>
+  functionHandle(Function function) {
+    return Reference<FunctionHandle>(MTLComputePipelineState_functionHandle(handle, function.handle));
+  }
+
+  Reference<VisibleFunctionTable>
+  newVisibleFunctionTable(uint64_t count) {
+    return Reference<VisibleFunctionTable>(MTLComputePipelineState_newVisibleFunctionTable(handle, count));
+  }
+
+  Reference<IntersectionFunctionTable>
+  newIntersectionFunctionTable(uint64_t count) {
+    return Reference<IntersectionFunctionTable>(
+        MTLComputePipelineState_newIntersectionFunctionTable(handle, count)
+    );
+  }
 };
 
 class RenderPipelineState : public Object {
@@ -620,6 +677,16 @@ public:
   void
   encodeCommands(const wmtcmd_compute_nop *cmd_head) {
     MTLComputeCommandEncoder_encodeCommands(handle, (const wmtcmd_base *)cmd_head);
+  }
+
+  void
+  setVisibleFunctionTable(VisibleFunctionTable table, uint64_t buffer_index) {
+    MTLComputeCommandEncoder_setVisibleFunctionTable(handle, table.handle, buffer_index);
+  }
+
+  void
+  setIntersectionFunctionTable(IntersectionFunctionTable table, uint64_t buffer_index) {
+    MTLComputeCommandEncoder_setIntersectionFunctionTable(handle, table.handle, buffer_index);
   }
 
   void
@@ -879,8 +946,6 @@ public:
     SparseMappingQueue_copyTextureMappings(handle, source.handle, destination.handle, operations, count);
   }
 };
-
-class Function : public Object {};
 
 class Library : public Object {
 public:
