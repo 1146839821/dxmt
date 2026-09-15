@@ -17,6 +17,8 @@
  */
 
 #include "d3d12_command_allocator.hpp"
+#include "d3d12_raytracing_dispatch.hpp"
+#include "d3d12_raytracing_pipeline.hpp"
 #include "d3d12_raytracing.hpp"
 #include "com/com_pointer.hpp"
 #include "dxmt_command_context.hpp"
@@ -713,6 +715,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
 
   Com<MTLD3D12ComputePipelineState, false> pso_compute_;
   Com<MTLD3D12RootSignature, false> rootsig_compute_;
+  Com<ID3D12StateObject> raytracing_state_object_;
   Com<MTLD3D12DescriptorHeap, true> descriptor_heap_;
   Com<MTLD3D12SamplerDescriptorHeap, true> sampler_heap_;
   WMT::Reference<WMT::Buffer> msc_dummy_buffer_;
@@ -852,6 +855,7 @@ public:
     pso_graphics_ = nullptr;
     airconv_geometry_pso_variant_ = UINT_MAX;
     pso_compute_ = nullptr;
+    raytracing_state_object_ = nullptr;
     predication_buffer_ = nullptr;
     predication_offset_ = 0;
     predication_op_ = D3D12_PREDICATION_OP_EQUAL_ZERO;
@@ -1240,6 +1244,7 @@ public:
     pso_graphics_ = nullptr;
     airconv_geometry_pso_variant_ = UINT_MAX;
     pso_compute_ = nullptr;
+    raytracing_state_object_ = nullptr;
     predication_buffer_ = nullptr;
     predication_offset_ = 0;
     predication_op_ = D3D12_PREDICATION_OP_EQUAL_ZERO;
@@ -3057,6 +3062,43 @@ public:
           return false;
         }
     );
+  }
+
+  bool
+  PreRayDispatch(const D3D12RaytracingDispatchState &state) {
+    if (!state.compute_pipeline || !state.visible_function_table || !state.intersection_function_table) {
+      FailRecording(__func__, "ray dispatch state is incomplete");
+      return false;
+    }
+
+    if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Compute) {
+      allocator_->InvalidateCurrentPass();
+      auto compute = allocator_->AllocatePass<ComputeEncoderData>();
+      if (!compute) {
+        FailRecording(__func__, "ray dispatch compute encoder allocation failed");
+        return false;
+      }
+      indirect_resources_used_.clear();
+      resource_use_masks_.clear();
+      compute->type = EncoderType::Compute;
+      compute->cmd_head.type = WMTComputeCommandNop;
+      compute->cmd_head.next.set(0);
+      compute->cmd_tail = (wmtcmd_base *)&compute->cmd_head;
+      FlushPendingMemoryBarrier();
+    }
+
+    auto *compute = static_cast<ComputeEncoderData *>(allocator_->encoder_current);
+    compute->ray_dispatch_pso = state.compute_pipeline;
+    compute->ray_dispatch_visible_function_table = state.visible_function_table;
+    compute->ray_dispatch_intersection_function_table = state.intersection_function_table;
+
+    auto &set_pso = allocator_->EncodeComputeCommand<wmtcmd_compute_setpso>();
+    set_pso.type = WMTComputeCommandSetPSO;
+    set_pso.pso = state.compute_pipeline;
+    set_pso.threadgroup_size = {1, 1, 1};
+    EncodeComputeResourceUse(state.visible_function_table.handle, WMTResourceUsageRead);
+    EncodeComputeResourceUse(state.intersection_function_table.handle, WMTResourceUsageRead);
+    return !recording_failed_;
   }
 
   bool
@@ -5364,11 +5406,154 @@ public:
   }
 
   void STDMETHODCALLTYPE SetPipelineState1(ID3D12StateObject *pStateObject) {
-    MarkUnsupportedCommand("SetPipelineState1");
+    if (!ValidateCommand(SupportsCompute(), "SetPipelineState1"))
+      return;
+    if (!pStateObject) {
+      raytracing_state_object_ = nullptr;
+      dirty_state_.set(DirtyState::ComputePipelineState);
+      return;
+    }
+    if (!IsSameDevice(device_, pStateObject)) {
+      FailRecording(__func__, "state object belongs to another device");
+      return;
+    }
+    if (!dynamic_cast<D3D12RaytracingStateObjectExt *>(pStateObject)) {
+      FailRecording(__func__, "state object does not contain a ray dispatch implementation");
+      return;
+    }
+    raytracing_state_object_ = pStateObject;
+    dirty_state_.set(DirtyState::ComputePipelineState);
   }
 
   void STDMETHODCALLTYPE DispatchRays(const D3D12_DISPATCH_RAYS_DESC *pDesc) {
-    MarkUnsupportedCommand("DispatchRays");
+    if (!ValidateCommand(SupportsCompute(), "DispatchRays"))
+      return;
+    if (!pDesc) {
+      FailRecording(__func__, "dispatch description is null");
+      return;
+    }
+    if (!raytracing_state_object_) {
+      FailRecording(__func__, "no raytracing state object is bound");
+      return;
+    }
+
+    const uint64_t max_shader_record_size = D3D12_RAYTRACING_MAX_SHADER_RECORD_STRIDE;
+    auto valid_address_range = [&](const D3D12_GPU_VIRTUAL_ADDRESS_RANGE &range,
+                                   WMT::Reference<WMT::Buffer> &buffer) {
+      uint64_t buffer_offset = 0;
+      if (!range.StartAddress || !range.SizeInBytes || range.StartAddress > UINT64_MAX - range.SizeInBytes ||
+          range.StartAddress % D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT ||
+          range.SizeInBytes % D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT ||
+          range.SizeInBytes > max_shader_record_size ||
+          !resolve_buffer_range(device_, range.StartAddress, range.SizeInBytes, buffer, buffer_offset)) {
+        return false;
+      }
+      return true;
+    };
+
+    auto valid_table_range = [&](const D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE &range,
+                                 WMT::Reference<WMT::Buffer> &buffer) {
+      if (!range.SizeInBytes)
+        return range.StartAddress == 0 && range.StrideInBytes == 0;
+      uint64_t buffer_offset = 0;
+      if (!range.StartAddress || !range.StrideInBytes || range.StartAddress > UINT64_MAX - range.SizeInBytes ||
+          range.StartAddress % D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT ||
+          range.StrideInBytes < D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT ||
+          range.StrideInBytes > max_shader_record_size ||
+          range.StrideInBytes % D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT ||
+          range.SizeInBytes % range.StrideInBytes ||
+          !resolve_buffer_range(device_, range.StartAddress, range.SizeInBytes, buffer, buffer_offset)) {
+        return false;
+      }
+      return true;
+    };
+
+    WMT::Reference<WMT::Buffer> ray_generation_buffer;
+    WMT::Reference<WMT::Buffer> miss_buffer;
+    WMT::Reference<WMT::Buffer> hit_group_buffer;
+    WMT::Reference<WMT::Buffer> callable_buffer;
+    if (!valid_address_range(pDesc->RayGenerationShaderRecord, ray_generation_buffer) ||
+        !valid_table_range(pDesc->MissShaderTable, miss_buffer) ||
+        !valid_table_range(pDesc->HitGroupTable, hit_group_buffer) ||
+        !valid_table_range(pDesc->CallableShaderTable, callable_buffer)) {
+      FailRecording(__func__, "invalid shader binding table range");
+      return;
+    }
+    const uint64_t ray_count = uint64_t(pDesc->Width) * uint64_t(pDesc->Height) * uint64_t(pDesc->Depth);
+    if (!pDesc->Width || !pDesc->Height || !pDesc->Depth ||
+        ray_count > D3D12_RAYTRACING_MAX_RAY_GENERATION_SHADER_THREADS) {
+      FailRecording(__func__, "invalid ray dispatch dimensions");
+      return;
+    }
+
+    D3D12RaytracingDispatchState state;
+    HRESULT hr = GetD3D12RaytracingDispatchState(raytracing_state_object_.ptr(), state);
+    if (FAILED(hr)) {
+      FailRecording(__func__, "ray dispatch state initialization failed hr=", hr);
+      return;
+    }
+
+    D3D12RayDispatchArgument argument = {};
+    argument.dispatch_rays_desc.ray_generation_shader_record.start_address =
+        pDesc->RayGenerationShaderRecord.StartAddress;
+    argument.dispatch_rays_desc.ray_generation_shader_record.size_in_bytes =
+        pDesc->RayGenerationShaderRecord.SizeInBytes;
+    argument.dispatch_rays_desc.miss_shader_table.start_address = pDesc->MissShaderTable.StartAddress;
+    argument.dispatch_rays_desc.miss_shader_table.size_in_bytes = pDesc->MissShaderTable.SizeInBytes;
+    argument.dispatch_rays_desc.miss_shader_table.stride_in_bytes = pDesc->MissShaderTable.StrideInBytes;
+    argument.dispatch_rays_desc.hit_group_table.start_address = pDesc->HitGroupTable.StartAddress;
+    argument.dispatch_rays_desc.hit_group_table.size_in_bytes = pDesc->HitGroupTable.SizeInBytes;
+    argument.dispatch_rays_desc.hit_group_table.stride_in_bytes = pDesc->HitGroupTable.StrideInBytes;
+    argument.dispatch_rays_desc.callable_shader_table.start_address = pDesc->CallableShaderTable.StartAddress;
+    argument.dispatch_rays_desc.callable_shader_table.size_in_bytes = pDesc->CallableShaderTable.SizeInBytes;
+    argument.dispatch_rays_desc.callable_shader_table.stride_in_bytes = pDesc->CallableShaderTable.StrideInBytes;
+    argument.dispatch_rays_desc.width = pDesc->Width;
+    argument.dispatch_rays_desc.height = pDesc->Height;
+    argument.dispatch_rays_desc.depth = pDesc->Depth;
+    argument.visible_function_table = state.visible_function_table.gpuResourceID();
+    argument.intersection_function_table = state.intersection_function_table.gpuResourceID();
+
+    if (!PreRayDispatch(state))
+      return;
+
+    auto encode_heap_address = [&](auto *heap, uint64_t &address) {
+      if (!heap)
+        return;
+      D3D12_GPU_DESCRIPTOR_HANDLE heap_start = {};
+      heap->GetGPUDescriptorHandleForHeapStart(&heap_start);
+      address = heap->GetMSCDescriptorTableAddress(heap_start);
+      auto heap_buffer = heap->GetMSCDescriptorHeapBuffer();
+      if (heap_buffer)
+        EncodeComputeResourceUse(heap_buffer.handle, WMTResourceUsageRead);
+    };
+    encode_heap_address(descriptor_heap_.ptr(), argument.resource_descriptor_heap);
+    encode_heap_address(sampler_heap_.ptr(), argument.sampler_descriptor_heap);
+
+    if (ray_generation_buffer)
+      EncodeComputeResourceUse(ray_generation_buffer.handle, WMTResourceUsageRead);
+    if (miss_buffer)
+      EncodeComputeResourceUse(miss_buffer.handle, WMTResourceUsageRead);
+    if (hit_group_buffer)
+      EncodeComputeResourceUse(hit_group_buffer.handle, WMTResourceUsageRead);
+    if (callable_buffer)
+      EncodeComputeResourceUse(callable_buffer.handle, WMTResourceUsageRead);
+
+    auto *argument_data = allocator_->AllocateCommandData<D3D12RayDispatchArgument>(1);
+    if (!argument_data) {
+      FailRecording(__func__, "ray dispatch argument allocation failed");
+      return;
+    }
+    *argument_data = argument;
+
+    auto &set_arguments = allocator_->EncodeComputeCommand<wmtcmd_compute_setbytes>();
+    set_arguments.type = WMTComputeCommandSetBytes;
+    set_arguments.bytes.set(argument_data);
+    set_arguments.length = sizeof(*argument_data);
+    set_arguments.index = 3;
+
+    auto &dispatch = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch>();
+    dispatch.type = WMTComputeCommandDispatchThreads;
+    dispatch.size = {pDesc->Width, pDesc->Height, pDesc->Depth};
   }
 
   void STDMETHODCALLTYPE RSSetShadingRate(

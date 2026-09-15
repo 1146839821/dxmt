@@ -1095,6 +1095,8 @@ public:
     info.num_binary_archives_for_lookup = 0;
     info.fail_on_binary_archive_miss = false;
     info.support_indirect_command_buffers = false;
+    info.linked_functions.set(nullptr);
+    info.num_linked_functions = 0;
     return Reference<ComputePipelineState>(MTLDevice_newComputePipelineState(handle, &info, &error.handle));
   }
 
@@ -1109,6 +1111,8 @@ public:
     info.num_binary_archives_for_lookup = 0;
     info.fail_on_binary_archive_miss = false;
     info.support_indirect_command_buffers = false;
+    info.linked_functions.set(nullptr);
+    info.num_linked_functions = 0;
     return Reference<ComputePipelineState>(MTLDevice_newComputePipelineState(handle, &info, &error.handle));
   }
 
@@ -1438,6 +1442,8 @@ InitializeComputePipelineInfo(WMTComputePipelineInfo &info) {
   info.tgsize_is_multiple_of_sgwidth = false;
   info.immutable_buffers = 0;
   info.support_indirect_command_buffers = false;
+  info.linked_functions.set(nullptr);
+  info.num_linked_functions = 0;
 }
 
 inline void

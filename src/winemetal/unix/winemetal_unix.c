@@ -435,6 +435,13 @@ _MTLDevice_newComputePipelineState(void *obj) {
   descriptor.computeFunction = (id<MTLFunction>)info->compute_function;
   descriptor.threadGroupSizeIsMultipleOfThreadExecutionWidth = info->tgsize_is_multiple_of_sgwidth;
   descriptor.supportIndirectCommandBuffers = info->support_indirect_command_buffers;
+  if (info->num_linked_functions && info->linked_functions.ptr) {
+    MTLLinkedFunctions *linked_functions = [[MTLLinkedFunctions alloc] init];
+    linked_functions.functions = [NSArray arrayWithObjects:(id<MTLFunction> *)info->linked_functions.ptr
+                                                       count:info->num_linked_functions];
+    descriptor.linkedFunctions = linked_functions;
+    [linked_functions release];
+  }
   for (unsigned i = 0; i < 31; i++) {
     if (info->immutable_buffers & (1 << i))
       descriptor.buffers[i].mutability = MTLMutabilityImmutable;
@@ -2475,6 +2482,13 @@ thunk_DXMTMSCCompileDXIL(void *args) {
 }
 
 static NTSTATUS
+thunk_DXMTMSCSynthesizeRayDispatch(void *args) {
+  struct dxmt_msc_synthesize_ray_dispatch_params *params = args;
+  params->ret = dxmt_msc_synthesize_ray_dispatch(params);
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 thunk_DXMTMSCGetRootLayout(void *args) {
   struct dxmt_msc_get_root_layout_params *params = args;
   params->ret = dxmt_msc_get_root_layout(params);
@@ -2557,6 +2571,33 @@ thunk32_DXMTMSCCompileDXIL(void *args) {
   src->threadgroup_size[2] = params.threadgroup_size[2];
   src->error_code = params.error_code;
   src->reflection = params.reflection;
+  src->error_message_size = (uint32_t)params.error_message_size;
+  src->ret = params.ret;
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk32_DXMTMSCSynthesizeRayDispatch(void *args) {
+  struct dxmt_msc_synthesize_ray_dispatch_params32 *src = args;
+  struct dxmt_msc_synthesize_ray_dispatch_params params = {};
+
+  params.max_attribute_size = src->max_attribute_size;
+  params.max_recursive_depth = src->max_recursive_depth;
+  params.minimum_gpu_family = src->minimum_gpu_family;
+  params.minimum_os_major = src->minimum_os_major;
+  params.minimum_os_minor = src->minimum_os_minor;
+  params.minimum_os_patch = src->minimum_os_patch;
+  params.compatibility_flags = src->compatibility_flags;
+  params.validation_flags = src->validation_flags;
+  params.ignore_debug_information = src->ignore_debug_information;
+  params.metallib = UInt32ToPtr(src->metallib);
+  params.metallib_capacity = src->metallib_capacity;
+  params.error_message = UInt32ToPtr(src->error_message);
+  params.error_message_capacity = src->error_message_capacity;
+
+  params.ret = dxmt_msc_synthesize_ray_dispatch(&params);
+
+  src->metallib_size = (uint32_t)params.metallib_size;
   src->error_message_size = (uint32_t)params.error_message_size;
   src->ret = params.ret;
   return STATUS_SUCCESS;
@@ -4370,6 +4411,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLIntersectionFunctionTable_gpuResourceID,
     &_MTLComputeCommandEncoder_setVisibleFunctionTable,
     &_MTLComputeCommandEncoder_setIntersectionFunctionTable,
+    &thunk_DXMTMSCSynthesizeRayDispatch,
 };
 
 #ifndef DXMT_NATIVE
@@ -4566,5 +4608,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLIntersectionFunctionTable_gpuResourceID,
     &_MTLComputeCommandEncoder_setVisibleFunctionTable,
     &_MTLComputeCommandEncoder_setIntersectionFunctionTable,
+    &thunk32_DXMTMSCSynthesizeRayDispatch,
 };
 #endif

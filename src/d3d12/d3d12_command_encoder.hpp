@@ -140,6 +140,9 @@ struct CopyTilesEncoderData : EncoderData {
 struct ComputeEncoderData : EncoderData {
   wmtcmd_compute_nop cmd_head;
   wmtcmd_base *cmd_tail;
+  WMT::Reference<WMT::ComputePipelineState> ray_dispatch_pso;
+  WMT::Reference<WMT::VisibleFunctionTable> ray_dispatch_visible_function_table;
+  WMT::Reference<WMT::IntersectionFunctionTable> ray_dispatch_intersection_function_table;
 };
 struct ResolveEncoderData : EncoderData {
   TextureViewRef src;

@@ -65,6 +65,10 @@ dx12_raytracing_state_object = executable('dx12_raytracing_state_object', 'dx12_
   dependencies: [ d3d12_dep ],
 )
 
+dx12_raytracing_dispatch = executable('dx12_raytracing_dispatch', 'dx12_raytracing_dispatch.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dx12_msc_function_constants = executable('dx12_msc_function_constants', 'dx12_msc_function_constants.cpp',
   include_directories: [ include_directories('../../src/winemetal') ],
   dependencies: [ d3d12_dep ],
@@ -314,6 +318,12 @@ if dxc_command.length() > 0
     input: 'ray_stages_sm6.hlsl',
     output: 'ray_stages_sm6.lib.cso',
     command: dxc_command + [ '-T', 'lib_6_3', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_ray_dispatch_sm6_fixture',
+    input: 'ray_dispatch_sm6.hlsl',
+    output: 'ray_dispatch_sm6.lib.cso',
+    command: dxc_command + [ '-T', 'lib_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
   custom_target('dx12_ray_payload_qualifiers_sm6_fixture',

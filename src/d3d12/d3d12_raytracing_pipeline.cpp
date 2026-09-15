@@ -1,33 +1,15 @@
-/*
- * Copyright 2026 Feifan He for CodeWeavers
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- */
-
 #include "d3d12_raytracing_pipeline.hpp"
 
 #include "com/com_object.hpp"
 #include "com/com_pointer.hpp"
 #include "d3d12_pageable.hpp"
 #include "d3d12_shader_converter.hpp"
-#include "sha1/sha1_util.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cwchar>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <string>
 #include <string_view>
@@ -41,9 +23,14 @@ struct StateObjectShaderRecord {
   std::wstring export_name;
   std::array<uint8_t, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES> identifier = {};
   uint64_t stack_size = 0;
+  uint64_t shader_handle = 0;
+  uint64_t intersection_shader_handle = 0;
+  uint32_t visible_function_index = UINT32_MAX;
   WMT::Reference<WMT::Library> library;
   WMT::Reference<WMT::Function> function;
   std::string source_name;
+  std::wstring any_hit_export;
+  std::wstring closest_hit_export;
   uint32_t stage = UINT32_MAX;
   bool is_hit_group = false;
 };
@@ -93,42 +80,11 @@ ContainsName(const std::vector<LibraryExport> &exports, const std::wstring &name
 }
 
 void
-HashWideString(Sha1HashState &hash, const std::wstring &value) {
-  const uint64_t size = value.size();
-  hash.update(size);
-  if (size)
-    hash.update(value.data(), size * sizeof(value[0]));
-}
-
-std::array<uint8_t, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES>
-MakeShaderIdentifier(
-    const std::wstring &export_name, std::string_view source_name, uint32_t stage,
-    const std::vector<uint8_t> &metallib
-) {
-  Sha1HashState first_hash;
-  constexpr char first_tag[] = "dxmt-d3d12-raytracing-shader-identifier";
-  first_hash.update(first_tag, sizeof(first_tag) - 1);
-  HashWideString(first_hash, export_name);
-  first_hash.update(source_name.data(), source_name.size());
-  first_hash.update(stage);
-  const uint64_t metallib_size = metallib.size();
-  first_hash.update(metallib_size);
-  if (!metallib.empty())
-    first_hash.update(metallib.data(), metallib.size());
-  const Sha1Digest first = first_hash.final();
-
-  Sha1HashState second_hash;
-  constexpr char second_tag[] = "dxmt-d3d12-raytracing-shader-identifier-tail";
-  second_hash.update(second_tag, sizeof(second_tag) - 1);
-  second_hash.update(first);
-  second_hash.update(stage);
-  const Sha1Digest second = second_hash.final();
-
-  std::array<uint8_t, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES> identifier = {};
-  std::memcpy(identifier.data(), first.data, sizeof(first.data));
-  std::memcpy(identifier.data() + sizeof(first.data), second.data,
-              identifier.size() - sizeof(first.data));
-  return identifier;
+SetShaderIdentifier(StateObjectShaderRecord &record) {
+  record.identifier.fill(0);
+  std::memcpy(record.identifier.data(), &record.intersection_shader_handle, sizeof(record.intersection_shader_handle));
+  std::memcpy(record.identifier.data() + sizeof(record.intersection_shader_handle), &record.shader_handle,
+              sizeof(record.shader_handle));
 }
 
 uint32_t
@@ -145,13 +101,140 @@ StageForRaytracingShader(unsigned index) {
 }
 
 class MTLD3D12RaytracingStateObjectImpl final
-    : public MTLD3D12Pageable<ID3D12StateObject>, public ID3D12StateObjectProperties {
+    : public MTLD3D12Pageable<ID3D12StateObject>,
+      public ID3D12StateObjectProperties,
+      public D3D12RaytracingStateObjectExt {
   std::vector<StateObjectShaderRecord> shader_records_;
   uint64_t pipeline_stack_size_ = 0;
   UINT max_payload_size_ = 0;
   UINT max_attribute_size_ = 0;
   UINT max_trace_recursion_depth_ = 0;
+  uint32_t next_visible_function_index_ = 1;
   bool allow_state_object_additions_ = false;
+  WMT::Reference<WMT::Library> dispatcher_library_;
+  WMT::Reference<WMT::Function> dispatcher_function_;
+  WMT::Reference<WMT::ComputePipelineState> dispatcher_pso_;
+  WMT::Reference<WMT::VisibleFunctionTable> visible_function_table_;
+  WMT::Reference<WMT::IntersectionFunctionTable> intersection_function_table_;
+
+  HRESULT
+  InitializeDispatchState() {
+    if (dispatcher_pso_)
+      return S_OK;
+
+    dxmt_msc_synthesize_ray_dispatch_params params = {};
+    const auto &capabilities = device_->GetMSCCapabilities();
+    params.max_attribute_size = max_attribute_size_;
+    params.max_recursive_depth = max_trace_recursion_depth_;
+    params.minimum_gpu_family = capabilities.compiler_minimum_gpu_family;
+    params.minimum_os_major = capabilities.compiler_minimum_os_major;
+    params.minimum_os_minor = capabilities.compiler_minimum_os_minor;
+    params.minimum_os_patch = capabilities.compiler_minimum_os_patch;
+    params.compatibility_flags = capabilities.compiler_compatibility_flags;
+    params.validation_flags = capabilities.compiler_validation_flags;
+    params.ignore_debug_information = capabilities.compiler_ignore_debug_information;
+
+    char error_message[256] = {};
+    params.error_message = error_message;
+    params.error_message_capacity = sizeof(error_message);
+    int result = DXMTMSCSynthesizeRayDispatch(&params);
+    if (result != DXMT_MSC_SUCCESS || !params.metallib_size) {
+      ERR("D3D12 ray dispatch synthesis failed: result=", result, " message=", error_message);
+      return result == DXMT_MSC_ERROR_UNSUPPORTED_FEATURE || result == DXMT_MSC_ERROR_UNAVAILABLE
+                 ? E_NOTIMPL
+                 : E_FAIL;
+    }
+
+    std::vector<uint8_t> metallib(params.metallib_size);
+    params.metallib = metallib.data();
+    params.metallib_capacity = metallib.size();
+    params.metallib_size = 0;
+    params.error_message_size = 0;
+    result = DXMTMSCSynthesizeRayDispatch(&params);
+    if (result != DXMT_MSC_SUCCESS || !params.metallib_size) {
+      ERR("D3D12 ray dispatch metallib extraction failed: result=", result, " message=", error_message);
+      return result == DXMT_MSC_ERROR_UNSUPPORTED_FEATURE || result == DXMT_MSC_ERROR_UNAVAILABLE
+                 ? E_NOTIMPL
+                 : E_FAIL;
+    }
+
+    WMT::Error error;
+    dispatcher_library_ = device_->GetMTLDevice().newLibrary(metallib.data(), params.metallib_size, error);
+    if (!dispatcher_library_) {
+      ERR("D3D12 ray dispatch metallib load failed: ", error.description().getUTF8String());
+      return E_FAIL;
+    }
+    dispatcher_function_ = dispatcher_library_.newFunction("RaygenIndirection");
+    if (!dispatcher_function_)
+      return E_FAIL;
+
+    std::vector<obj_handle_t> linked_functions;
+    linked_functions.reserve(shader_records_.size());
+    for (const auto &record : shader_records_) {
+      if (!record.is_hit_group && record.function)
+        linked_functions.push_back(record.function.handle);
+    }
+    WMTComputePipelineInfo pipeline_info;
+    WMT::InitializeComputePipelineInfo(pipeline_info);
+    pipeline_info.compute_function = dispatcher_function_;
+    pipeline_info.linked_functions.set(linked_functions.data());
+    pipeline_info.num_linked_functions = static_cast<uint32_t>(linked_functions.size());
+    dispatcher_pso_ = device_->GetMTLDevice().newComputePipelineState(pipeline_info, error);
+    if (!dispatcher_pso_) {
+      ERR("D3D12 ray dispatch PSO creation failed: ", error.description().getUTF8String());
+      return E_FAIL;
+    }
+
+    if (!next_visible_function_index_)
+      return E_INVALIDARG;
+    visible_function_table_ = dispatcher_pso_.newVisibleFunctionTable(next_visible_function_index_);
+    intersection_function_table_ = dispatcher_pso_.newIntersectionFunctionTable(1);
+    if (!visible_function_table_ || !intersection_function_table_)
+      return E_FAIL;
+
+    for (const auto &record : shader_records_) {
+      if (record.is_hit_group || !record.function || record.visible_function_index == UINT32_MAX)
+        continue;
+      auto function_handle = dispatcher_pso_.functionHandle(record.function);
+      if (!function_handle)
+        return E_FAIL;
+      visible_function_table_.setFunction(function_handle, record.visible_function_index);
+    }
+    intersection_function_table_.setVisibleFunctionTable(visible_function_table_, 0);
+    return S_OK;
+  }
+
+  void
+  RebuildShaderIdentifiers() {
+    for (auto &record : shader_records_) {
+      if (!record.is_hit_group) {
+        record.shader_handle = record.visible_function_index == UINT32_MAX ? 0 : record.visible_function_index;
+        record.intersection_shader_handle = 0;
+        SetShaderIdentifier(record);
+        continue;
+      }
+
+      record.shader_handle = 0;
+      record.intersection_shader_handle = 0;
+      if (!record.closest_hit_export.empty()) {
+        for (const auto &shader : shader_records_) {
+          if (!shader.is_hit_group && shader.export_name == record.closest_hit_export) {
+            record.shader_handle = shader.visible_function_index;
+            break;
+          }
+        }
+      }
+      if (!record.any_hit_export.empty()) {
+        for (const auto &shader : shader_records_) {
+          if (!shader.is_hit_group && shader.export_name == record.any_hit_export) {
+            record.intersection_shader_handle = shader.visible_function_index;
+            break;
+          }
+        }
+      }
+      SetShaderIdentifier(record);
+    }
+  }
 
 public:
   explicit MTLD3D12RaytracingStateObjectImpl(MTLD3D12Device *device)
@@ -201,6 +284,7 @@ public:
       max_payload_size_ = parent->max_payload_size_;
       max_attribute_size_ = parent->max_attribute_size_;
       max_trace_recursion_depth_ = parent->max_trace_recursion_depth_;
+      next_visible_function_index_ = parent->next_visible_function_index_;
       allow_state_object_additions_ = parent->allow_state_object_additions_;
     }
 
@@ -446,9 +530,7 @@ public:
         return E_NOTIMPL;
 
       record.stage = selected_stage;
-      record.identifier = MakeShaderIdentifier(
-          record.export_name, export_entry.source_name, selected_stage, converted.metallib
-      );
+      record.visible_function_index = next_visible_function_index_++;
       shader_records_.push_back(std::move(record));
     }
 
@@ -476,11 +558,28 @@ public:
       StateObjectShaderRecord record;
       record.export_name = name;
       record.source_name = any_hit + closest_hit;
+      record.any_hit_export = hit_group->AnyHitShaderImport ? MakeWideName(hit_group->AnyHitShaderImport)
+                                                            : std::wstring();
+      record.closest_hit_export = hit_group->ClosestHitShaderImport
+                                      ? MakeWideName(hit_group->ClosestHitShaderImport)
+                                      : std::wstring();
       record.is_hit_group = true;
-      record.identifier = MakeShaderIdentifier(record.export_name, any_hit + closest_hit, UINT32_MAX, {});
       shader_records_.push_back(std::move(record));
     }
 
+    RebuildShaderIdentifiers();
+
+    return S_OK;
+  }
+
+  HRESULT
+  GetDispatchState(D3D12RaytracingDispatchState &state) override {
+    HRESULT hr = InitializeDispatchState();
+    if (FAILED(hr))
+      return hr;
+    state.compute_pipeline = dispatcher_pso_;
+    state.visible_function_table = visible_function_table_;
+    state.intersection_function_table = intersection_function_table_;
     return S_OK;
   }
 
@@ -550,6 +649,15 @@ AddD3D12RaytracingStateObject(
   if (FAILED(hr))
     return hr;
   return object->QueryInterface(riid, state_object);
+}
+
+HRESULT
+GetD3D12RaytracingDispatchState(ID3D12StateObject *state_object, D3D12RaytracingDispatchState &state) {
+  state = {};
+  if (!state_object)
+    return E_INVALIDARG;
+  auto *extended = dynamic_cast<D3D12RaytracingStateObjectExt *>(state_object);
+  return extended ? extended->GetDispatchState(state) : E_NOINTERFACE;
 }
 
 } // namespace dxmt

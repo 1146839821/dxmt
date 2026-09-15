@@ -653,6 +653,8 @@ struct WMTComputePipelineInfo {
   bool support_indirect_command_buffers;
   bool tgsize_is_multiple_of_sgwidth;
   uint32_t immutable_buffers;
+  struct WMTConstMemoryPointer linked_functions;
+  uint32_t num_linked_functions;
 };
 
 WINEMETAL_API obj_handle_t MTLDevice_newComputePipelineState(

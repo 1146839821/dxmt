@@ -141,6 +141,23 @@ dxmt_msc_set_root_error(struct dxmt_msc_get_root_layout_params *params, const ch
   params->error_message[copy_size - 1] = '\0';
 }
 
+static void
+dxmt_msc_set_ray_dispatch_error(
+    struct dxmt_msc_synthesize_ray_dispatch_params *params, const char *message
+) {
+  params->error_message_size = message ? strlen(message) + 1 : 0;
+  if (!params->error_message || !params->error_message_capacity)
+    return;
+  if (!message)
+    message = "Metal Shader Converter ray dispatch synthesis failed";
+
+  size_t copy_size = strlen(message) + 1;
+  if (copy_size > params->error_message_capacity)
+    copy_size = params->error_message_capacity;
+  memcpy(params->error_message, message, copy_size);
+  params->error_message[copy_size - 1] = '\0';
+}
+
 static const char *
 dxmt_msc_error_name(uint32_t code) {
   switch (code) {
@@ -1218,6 +1235,132 @@ cleanup:
   if (error)
     g_msc_api.IRErrorDestroy(error);
   free(entry_point);
+  return result;
+}
+
+int
+dxmt_msc_synthesize_ray_dispatch(struct dxmt_msc_synthesize_ray_dispatch_params *params) {
+  IRCompiler *compiler = NULL;
+  IRRayTracingPipelineConfiguration *raytracing_configuration = NULL;
+  IRMetalLibBinary *binary = NULL;
+  int result = DXMT_MSC_SUCCESS;
+
+  if (!params)
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+
+  params->metallib_size = 0;
+  params->error_message_size = 0;
+  params->ret = DXMT_MSC_SUCCESS;
+
+  if (!dxmt_msc_is_available()) {
+    dxmt_msc_set_ray_dispatch_error(params, "Metal Shader Converter runtime is unavailable");
+    result = DXMT_MSC_ERROR_UNAVAILABLE;
+    goto cleanup;
+  }
+
+  if (!g_msc_api.IRMetalLibSynthesizeIndirectRayDispatchFunction ||
+      !g_msc_api.IRRayTracingPipelineConfigurationCreate ||
+      !g_msc_api.IRRayTracingPipelineConfigurationDestroy ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetPipelineFlags ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetIntrinsicMasks ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetMaxRecursiveDepth ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode ||
+      !g_msc_api.IRCompilerSetRayTracingPipelineConfiguration) {
+    dxmt_msc_set_ray_dispatch_error(params, "MSC indirect ray dispatch synthesis is unavailable");
+    result = DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+    goto cleanup;
+  }
+
+  compiler = g_msc_api.IRCompilerCreate();
+  if (!compiler) {
+    dxmt_msc_set_ray_dispatch_error(params, "IRCompilerCreate failed");
+    result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+    goto cleanup;
+  }
+
+  struct dxmt_msc_compile_dxil_params compiler_params = {};
+  compiler_params.minimum_gpu_family = params->minimum_gpu_family;
+  compiler_params.minimum_os_major = params->minimum_os_major;
+  compiler_params.minimum_os_minor = params->minimum_os_minor;
+  compiler_params.minimum_os_patch = params->minimum_os_patch;
+  compiler_params.compatibility_flags = params->compatibility_flags;
+  compiler_params.validation_flags = params->validation_flags;
+  compiler_params.ignore_debug_information = params->ignore_debug_information;
+  dxmt_msc_set_compiler_configuration(compiler, &compiler_params);
+
+  raytracing_configuration = g_msc_api.IRRayTracingPipelineConfigurationCreate();
+  if (!raytracing_configuration) {
+    dxmt_msc_set_ray_dispatch_error(params, "MSC ray tracing configuration allocation failed");
+    result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+    goto cleanup;
+  }
+
+  g_msc_api.IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes(
+      raytracing_configuration, params->max_attribute_size ? params->max_attribute_size : 16
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetPipelineFlags(
+      raytracing_configuration, IRRaytracingPipelineFlagNone
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetIntrinsicMasks(
+      raytracing_configuration, IRIntrinsicMaskClosestHitAll, IRIntrinsicMaskMissShaderAll,
+      IRIntrinsicMaskAnyHitShaderAll, IRIntrinsicMaskCallableShaderAll
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetMaxRecursiveDepth(
+      raytracing_configuration,
+      params->max_recursive_depth ? params->max_recursive_depth : IRRayTracingUnlimitedRecursionDepth
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode(
+      raytracing_configuration, IRRayGenerationCompilationVisibleFunction
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode(
+      raytracing_configuration, IRIntersectionFunctionCompilationVisibleFunction
+  );
+  g_msc_api.IRCompilerSetRayTracingPipelineConfiguration(compiler, raytracing_configuration);
+
+  binary = g_msc_api.IRMetalLibBinaryCreate();
+  if (!binary) {
+    dxmt_msc_set_ray_dispatch_error(params, "IRMetalLibBinaryCreate failed");
+    result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+    goto cleanup;
+  }
+
+  if (!g_msc_api.IRMetalLibSynthesizeIndirectRayDispatchFunction(compiler, binary)) {
+    dxmt_msc_set_ray_dispatch_error(params, "failed to synthesize MSC indirect ray dispatch function");
+    result = DXMT_MSC_ERROR_COMPILATION;
+    goto cleanup;
+  }
+
+  params->metallib_size = g_msc_api.IRMetalLibGetBytecodeSize(binary);
+  if (!params->metallib_size) {
+    dxmt_msc_set_ray_dispatch_error(params, "synthesized ray dispatch metallib is empty");
+    result = DXMT_MSC_ERROR_METALLIB;
+    goto cleanup;
+  }
+
+  if ((!params->metallib && params->metallib_capacity) ||
+      (params->metallib && params->metallib_capacity < params->metallib_size)) {
+    dxmt_msc_set_ray_dispatch_error(params, "MSC ray dispatch output buffer is too small");
+    result = DXMT_MSC_ERROR_OUTPUT_TOO_SMALL;
+    goto cleanup;
+  }
+
+  if (params->metallib &&
+      g_msc_api.IRMetalLibGetBytecode(binary, (uint8_t *)params->metallib) != params->metallib_size) {
+    dxmt_msc_set_ray_dispatch_error(params, "failed to extract synthesized ray dispatch metallib");
+    result = DXMT_MSC_ERROR_METALLIB;
+    goto cleanup;
+  }
+
+cleanup:
+  if (binary)
+    g_msc_api.IRMetalLibBinaryDestroy(binary);
+  if (raytracing_configuration)
+    g_msc_api.IRRayTracingPipelineConfigurationDestroy(raytracing_configuration);
+  if (compiler)
+    g_msc_api.IRCompilerDestroy(compiler);
+  params->ret = result;
   return result;
 }
 
