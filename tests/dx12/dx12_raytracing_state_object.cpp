@@ -79,12 +79,14 @@ main(int argc, char **argv) {
 
   Owned<ID3D12Device> device;
   Owned<ID3D12Device5> device5;
+  Owned<ID3D12Device7> device7;
   Owned<ID3D12RootSignature> root_signature;
   if (!CheckHR(
           "D3D12CreateDevice",
           D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.ptr))
       ) ||
-      !CheckHR("QueryInterface(ID3D12Device5)", device->QueryInterface(IID_PPV_ARGS(&device5.ptr))))
+      !CheckHR("QueryInterface(ID3D12Device5)", device->QueryInterface(IID_PPV_ARGS(&device5.ptr))) ||
+      !CheckHR("QueryInterface(ID3D12Device7)", device->QueryInterface(IID_PPV_ARGS(&device7.ptr))))
     return 1;
 
   const D3D12_ROOT_SIGNATURE_DESC empty_root_signature = {};
@@ -121,7 +123,11 @@ main(int argc, char **argv) {
   };
   const D3D12_RAYTRACING_SHADER_CONFIG shader_config = {4, 16};
   const D3D12_RAYTRACING_PIPELINE_CONFIG pipeline_config = {1};
+  const D3D12_STATE_OBJECT_CONFIG state_object_config = {
+      D3D12_STATE_OBJECT_FLAG_ALLOW_STATE_OBJECT_ADDITIONS
+  };
   const D3D12_STATE_SUBOBJECT subobjects[] = {
+      {D3D12_STATE_SUBOBJECT_TYPE_STATE_OBJECT_CONFIG, &state_object_config},
       {D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY, &library},
       {D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE, &global_root_signature},
       {D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG, &shader_config},
@@ -129,7 +135,7 @@ main(int argc, char **argv) {
       {D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP, &hit_group},
   };
   const D3D12_STATE_OBJECT_DESC state_desc = {
-      D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE, 5, subobjects,
+      D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE, 6, subobjects,
   };
 
   Owned<ID3D12StateObject> state_object;
@@ -177,6 +183,67 @@ main(int argc, char **argv) {
       ))
     return 1;
 
-  std::cout << "D3D12 raytracing state object passed: exports=6,hit_group=HitGroup\n";
+  const D3D12_EXPORT_DESC addition_exports[] = {
+      {L"RayGenAlias", L"RayGen", D3D12_EXPORT_FLAG_NONE},
+  };
+  const D3D12_DXIL_LIBRARY_DESC addition_library = {
+      {shader.data(), shader.size()}, 1, const_cast<D3D12_EXPORT_DESC *>(addition_exports)
+  };
+  const D3D12_STATE_SUBOBJECT addition_subobjects[] = {
+      {D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY, &addition_library},
+  };
+  const D3D12_STATE_OBJECT_DESC addition_desc = {
+      D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE, 1, addition_subobjects,
+  };
+  Owned<ID3D12StateObject> expanded_state_object;
+  if (!CheckHR(
+          "AddToStateObject(DXIL library)",
+          device7->AddToStateObject(
+              &addition_desc, state_object.ptr, IID_PPV_ARGS(&expanded_state_object.ptr)
+          )
+      ))
+    return 1;
+
+  Owned<ID3D12StateObjectProperties> expanded_properties;
+  if (!CheckHR(
+          "QueryInterface(expanded ID3D12StateObjectProperties)",
+          expanded_state_object->QueryInterface(IID_PPV_ARGS(&expanded_properties.ptr))
+      ) ||
+      !expanded_properties->GetShaderIdentifier(L"RayGenAlias") ||
+      !expanded_properties->GetShaderIdentifier(L"HitGroup")) {
+    std::cerr << "state object additions did not preserve or add shader identifiers\n";
+    return 1;
+  }
+
+  const D3D12_HIT_GROUP_DESC added_hit_group = {
+      L"AddedHitGroup", D3D12_HIT_GROUP_TYPE_TRIANGLES, L"AnyHit", L"ClosestHit", nullptr
+  };
+  const D3D12_STATE_SUBOBJECT hit_group_addition_subobjects[] = {
+      {D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP, &added_hit_group},
+  };
+  const D3D12_STATE_OBJECT_DESC hit_group_addition_desc = {
+      D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE, 1, hit_group_addition_subobjects,
+  };
+  Owned<ID3D12StateObject> hit_group_state_object;
+  if (!CheckHR(
+          "AddToStateObject(hit group)",
+          device7->AddToStateObject(
+              &hit_group_addition_desc, expanded_state_object.ptr, IID_PPV_ARGS(&hit_group_state_object.ptr)
+          )
+      ))
+    return 1;
+
+  Owned<ID3D12StateObjectProperties> hit_group_properties;
+  if (!CheckHR(
+          "QueryInterface(hit group state object properties)",
+          hit_group_state_object->QueryInterface(IID_PPV_ARGS(&hit_group_properties.ptr))
+      ) ||
+      !hit_group_properties->GetShaderIdentifier(L"AddedHitGroup") ||
+      !hit_group_properties->GetShaderIdentifier(L"RayGenAlias")) {
+    std::cerr << "hit group addition did not preserve or add shader identifiers\n";
+    return 1;
+  }
+
+  std::cout << "D3D12 raytracing state object passed: exports=7,hit_group=AddedHitGroup\n";
   return 0;
 }
