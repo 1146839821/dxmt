@@ -27,4 +27,10 @@ CreateD3D12RaytracingStateObject(
     MTLD3D12Device *device, const D3D12_STATE_OBJECT_DESC *desc, REFIID riid, void **state_object
 );
 
+HRESULT
+AddD3D12RaytracingStateObject(
+    MTLD3D12Device *device, const D3D12_STATE_OBJECT_DESC *addition, ID3D12StateObject *state_object_to_grow_from,
+    REFIID riid, void **state_object
+);
+
 } // namespace dxmt

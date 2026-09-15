@@ -43,6 +43,9 @@ struct StateObjectShaderRecord {
   uint64_t stack_size = 0;
   WMT::Reference<WMT::Library> library;
   WMT::Reference<WMT::Function> function;
+  std::string source_name;
+  uint32_t stage = UINT32_MAX;
+  bool is_hit_group = false;
 };
 
 struct LibraryExport {
@@ -145,6 +148,10 @@ class MTLD3D12RaytracingStateObjectImpl final
     : public MTLD3D12Pageable<ID3D12StateObject>, public ID3D12StateObjectProperties {
   std::vector<StateObjectShaderRecord> shader_records_;
   uint64_t pipeline_stack_size_ = 0;
+  UINT max_payload_size_ = 0;
+  UINT max_attribute_size_ = 0;
+  UINT max_trace_recursion_depth_ = 0;
+  bool allow_state_object_additions_ = false;
 
 public:
   explicit MTLD3D12RaytracingStateObjectImpl(MTLD3D12Device *device)
@@ -177,11 +184,25 @@ public:
   }
 
   HRESULT
-  Initialize(const D3D12_STATE_OBJECT_DESC *desc) {
+  Initialize(
+      const D3D12_STATE_OBJECT_DESC *desc, const MTLD3D12RaytracingStateObjectImpl *parent = nullptr
+  ) {
     if (!desc || !desc->pSubobjects || !desc->NumSubobjects)
       return E_INVALIDARG;
     if (desc->Type != D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE)
       return E_NOTIMPL;
+
+    const bool is_addition = parent != nullptr;
+    if (is_addition) {
+      if (!parent->allow_state_object_additions_)
+        return E_INVALIDARG;
+      shader_records_ = parent->shader_records_;
+      pipeline_stack_size_ = parent->pipeline_stack_size_;
+      max_payload_size_ = parent->max_payload_size_;
+      max_attribute_size_ = parent->max_attribute_size_;
+      max_trace_recursion_depth_ = parent->max_trace_recursion_depth_;
+      allow_state_object_additions_ = parent->allow_state_object_additions_;
+    }
 
     const D3D12_DXIL_LIBRARY_DESC *library_desc = nullptr;
     const D3D12_GLOBAL_ROOT_SIGNATURE *global_root_signature = nullptr;
@@ -196,8 +217,16 @@ public:
       switch (subobject.Type) {
       case D3D12_STATE_SUBOBJECT_TYPE_STATE_OBJECT_CONFIG: {
         const auto *config = static_cast<const D3D12_STATE_OBJECT_CONFIG *>(subobject.pDesc);
-        if (config->Flags != D3D12_STATE_OBJECT_FLAG_NONE)
+        constexpr D3D12_STATE_OBJECT_FLAGS supported_flags =
+            D3D12_STATE_OBJECT_FLAG_NONE | D3D12_STATE_OBJECT_FLAG_ALLOW_STATE_OBJECT_ADDITIONS;
+        if (config->Flags & ~supported_flags)
           return E_NOTIMPL;
+        if (is_addition && (config->Flags & D3D12_STATE_OBJECT_FLAG_ALLOW_STATE_OBJECT_ADDITIONS) !=
+                               (allow_state_object_additions_ ? D3D12_STATE_OBJECT_FLAG_ALLOW_STATE_OBJECT_ADDITIONS
+                                                               : D3D12_STATE_OBJECT_FLAG_NONE))
+          return E_INVALIDARG;
+        allow_state_object_additions_ =
+            (config->Flags & D3D12_STATE_OBJECT_FLAG_ALLOW_STATE_OBJECT_ADDITIONS) != 0;
         break;
       }
       case D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE:
@@ -209,7 +238,7 @@ public:
         break;
       case D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY:
         if (library_desc)
-          return E_NOTIMPL;
+          return E_INVALIDARG;
         library_desc = static_cast<const D3D12_DXIL_LIBRARY_DESC *>(subobject.pDesc);
         if (!library_desc->DXILLibrary.pShaderBytecode || !library_desc->DXILLibrary.BytecodeLength ||
             !library_desc->NumExports || !library_desc->pExports)
@@ -221,6 +250,10 @@ public:
         shader_config = static_cast<const D3D12_RAYTRACING_SHADER_CONFIG *>(subobject.pDesc);
         if (shader_config->MaxAttributeSizeInBytes > 16)
           return E_NOTIMPL;
+        if (is_addition &&
+            (shader_config->MaxPayloadSizeInBytes != max_payload_size_ ||
+             shader_config->MaxAttributeSizeInBytes != max_attribute_size_))
+          return E_INVALIDARG;
         break;
       case D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG:
         if (pipeline_config)
@@ -228,6 +261,8 @@ public:
         pipeline_config = static_cast<const D3D12_RAYTRACING_PIPELINE_CONFIG *>(subobject.pDesc);
         if (!pipeline_config->MaxTraceRecursionDepth ||
             pipeline_config->MaxTraceRecursionDepth > D3D12_RAYTRACING_MAX_DECLARABLE_TRACE_RECURSION_DEPTH)
+          return E_INVALIDARG;
+        if (is_addition && pipeline_config->MaxTraceRecursionDepth != max_trace_recursion_depth_)
           return E_INVALIDARG;
         break;
       case D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP: {
@@ -251,16 +286,33 @@ public:
       }
     }
 
-    if (!library_desc || !shader_config || !pipeline_config)
+    if ((!is_addition && (!library_desc || !shader_config || !pipeline_config)) ||
+        (is_addition && !library_desc && hit_groups.empty()))
       return E_INVALIDARG;
 
-    const D3D12_SHADER_BYTECODE shader = library_desc->DXILLibrary;
-    const auto classification = ClassifyD3D12Shader(shader);
-    if (FAILED(classification.validation_hr))
-      return classification.validation_hr;
-    if (classification.backend != D3D12ShaderBackend::MetalShaderConverter ||
-        !classification.is_library_shader)
-      return E_NOTIMPL;
+    if (shader_config) {
+      max_payload_size_ = shader_config->MaxPayloadSizeInBytes;
+      max_attribute_size_ = shader_config->MaxAttributeSizeInBytes;
+    } else if (!is_addition) {
+      return E_INVALIDARG;
+    }
+    if (pipeline_config)
+      max_trace_recursion_depth_ = pipeline_config->MaxTraceRecursionDepth;
+    else if (!is_addition) {
+      return E_INVALIDARG;
+    }
+
+    D3D12_SHADER_BYTECODE shader = {};
+    D3D12ShaderClassification classification;
+    if (library_desc) {
+      shader = library_desc->DXILLibrary;
+      classification = ClassifyD3D12Shader(shader);
+      if (FAILED(classification.validation_hr))
+        return classification.validation_hr;
+      if (classification.backend != D3D12ShaderBackend::MetalShaderConverter ||
+          !classification.is_library_shader)
+        return E_NOTIMPL;
+    }
 
     const void *root_signature = nullptr;
     size_t root_signature_size = 0;
@@ -292,29 +344,40 @@ public:
     const size_t local_root_signature_size = local_root_blob->GetBufferSize();
 
     std::vector<LibraryExport> exports;
-    exports.reserve(library_desc->NumExports);
+    if (library_desc)
+      exports.reserve(library_desc->NumExports);
     std::map<std::string, uint32_t> stage_hints;
-    for (UINT i = 0; i < library_desc->NumExports; i++) {
-      const D3D12_EXPORT_DESC &export_desc = library_desc->pExports[i];
-      if (!IsValidName(export_desc.Name) || export_desc.Flags != D3D12_EXPORT_FLAG_NONE)
-        return E_INVALIDARG;
-      const WCHAR *source_name_wide = export_desc.ExportToRename ? export_desc.ExportToRename : export_desc.Name;
-      if (!IsValidName(source_name_wide))
-        return E_INVALIDARG;
+    if (library_desc) {
+      for (UINT i = 0; i < library_desc->NumExports; i++) {
+        const D3D12_EXPORT_DESC &export_desc = library_desc->pExports[i];
+        if (!IsValidName(export_desc.Name) || export_desc.Flags != D3D12_EXPORT_FLAG_NONE)
+          return E_INVALIDARG;
+        const WCHAR *source_name_wide = export_desc.ExportToRename ? export_desc.ExportToRename : export_desc.Name;
+        if (!IsValidName(source_name_wide))
+          return E_INVALIDARG;
 
-      LibraryExport export_entry;
-      export_entry.public_name = MakeWideName(export_desc.Name);
-      if (!MakeNarrowName(source_name_wide, export_entry.source_name))
-        return E_NOTIMPL;
-      if (ContainsName(exports, export_entry.public_name))
-        return E_INVALIDARG;
-      exports.push_back(std::move(export_entry));
+        LibraryExport export_entry;
+        export_entry.public_name = MakeWideName(export_desc.Name);
+        if (!MakeNarrowName(source_name_wide, export_entry.source_name))
+          return E_NOTIMPL;
+        if (ContainsName(exports, export_entry.public_name) || ContainsName(shader_records_, export_entry.public_name))
+          return E_INVALIDARG;
+        exports.push_back(std::move(export_entry));
+      }
     }
 
+    auto find_export_record = [&](const std::wstring &public_name) -> const StateObjectShaderRecord * {
+      for (const auto &record : shader_records_)
+        if (record.export_name == public_name && !record.is_hit_group)
+          return &record;
+      return nullptr;
+    };
     auto find_export_source = [&](const std::wstring &public_name) -> const std::string * {
       for (const auto &entry : exports)
         if (entry.public_name == public_name)
           return &entry.source_name;
+      if (const auto *record = find_export_record(public_name))
+        return &record->source_name;
       return nullptr;
     };
     auto add_stage_hint = [&](const WCHAR *public_name, uint32_t stage) -> HRESULT {
@@ -341,6 +404,7 @@ public:
     for (const auto &export_entry : exports) {
       StateObjectShaderRecord record;
       record.export_name = export_entry.public_name;
+      record.source_name = export_entry.source_name;
 
       std::vector<uint32_t> candidate_stages;
       auto hint = stage_hints.find(export_entry.source_name);
@@ -381,6 +445,7 @@ public:
       if (!found)
         return E_NOTIMPL;
 
+      record.stage = selected_stage;
       record.identifier = MakeShaderIdentifier(
           record.export_name, export_entry.source_name, selected_stage, converted.metallib
       );
@@ -392,10 +457,10 @@ public:
       if (ContainsName(shader_records_, name))
         return E_INVALIDARG;
       if (hit_group->AnyHitShaderImport &&
-          !ContainsName(exports, MakeWideName(hit_group->AnyHitShaderImport)))
+          !find_export_source(MakeWideName(hit_group->AnyHitShaderImport)))
         return E_INVALIDARG;
       if (hit_group->ClosestHitShaderImport &&
-          !ContainsName(exports, MakeWideName(hit_group->ClosestHitShaderImport)))
+          !find_export_source(MakeWideName(hit_group->ClosestHitShaderImport)))
         return E_INVALIDARG;
 
       std::string any_hit;
@@ -410,6 +475,8 @@ public:
       }
       StateObjectShaderRecord record;
       record.export_name = name;
+      record.source_name = any_hit + closest_hit;
+      record.is_hit_group = true;
       record.identifier = MakeShaderIdentifier(record.export_name, any_hit + closest_hit, UINT32_MAX, {});
       shader_records_.push_back(std::move(record));
     }
@@ -458,6 +525,28 @@ CreateD3D12RaytracingStateObject(
 
   auto object = Com(new MTLD3D12RaytracingStateObjectImpl(device));
   HRESULT hr = object->Initialize(desc);
+  if (FAILED(hr))
+    return hr;
+  return object->QueryInterface(riid, state_object);
+}
+
+HRESULT
+AddD3D12RaytracingStateObject(
+    MTLD3D12Device *device, const D3D12_STATE_OBJECT_DESC *addition, ID3D12StateObject *state_object_to_grow_from,
+    REFIID riid, void **state_object
+) {
+  InitReturnPtr(state_object);
+  if (!device || !addition || !state_object_to_grow_from || !state_object)
+    return E_INVALIDARG;
+  if (!IsSameDevice(device, state_object_to_grow_from))
+    return E_INVALIDARG;
+
+  auto *parent = dynamic_cast<MTLD3D12RaytracingStateObjectImpl *>(state_object_to_grow_from);
+  if (!parent)
+    return E_INVALIDARG;
+
+  auto object = Com(new MTLD3D12RaytracingStateObjectImpl(device));
+  HRESULT hr = object->Initialize(addition, parent);
   if (FAILED(hr))
     return hr;
   return object->QueryInterface(riid, state_object);

@@ -2123,8 +2123,9 @@ public:
       const D3D12_STATE_OBJECT_DESC *pAddition, ID3D12StateObject *pStateObjectToGrowFrom, REFIID riid,
       void **ppNewStateObject
   ) {
-    InitReturnPtr(ppNewStateObject);
-    return E_NOTIMPL;
+    return dxmt::AddD3D12RaytracingStateObject(
+        this, pAddition, pStateObjectToGrowFrom, riid, ppNewStateObject
+    );
   }
 
   HRESULT STDMETHODCALLTYPE CreateProtectedResourceSession1(
