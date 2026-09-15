@@ -1857,6 +1857,7 @@ enum WMTGPUFamily {
 };
 
 WINEMETAL_API bool MTLDevice_supportsFamily(obj_handle_t device, enum WMTGPUFamily gpu_family);
+WINEMETAL_API bool MTLDevice_supportsArgumentBuffersTier2(obj_handle_t device);
 
 enum WMTAccelerationStructureDescriptorType {
   WMTAccelerationStructureDescriptorPrimitive = 0,

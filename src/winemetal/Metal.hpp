@@ -1194,6 +1194,11 @@ public:
   }
 
   bool
+  supportsArgumentBuffersTier2() {
+    return MTLDevice_supportsArgumentBuffersTier2(handle);
+  }
+
+  bool
   supportsPlacementSparse() {
     // This is the authoritative Metal4 placement-sparse capability. Do not
     // require Apple8 here: M1 devices are Apple7 and can expose this feature.

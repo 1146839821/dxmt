@@ -50,6 +50,7 @@ enum winemetal_unixcall {
   unix_mtlintersectionfunctiontable_gpuresourceid,
   unix_mtlcomputecommandencoder_setvisiblefunctiontable,
   unix_mtlcomputecommandencoder_setintersectionfunctiontable,
+  unix_mtldevice_supportsargumentbufferstier2 = 194,
 };
 
 struct unixcall_mtldevice_newmscgeometrypso {

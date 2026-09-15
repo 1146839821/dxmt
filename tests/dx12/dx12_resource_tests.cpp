@@ -1033,12 +1033,15 @@ int main() {
        shader_model_5_1.HighestShaderModel != D3D_SHADER_MODEL_5_1 ||
        options.TiledResourcesTier != D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED ||
       options.ResourceHeapTier != D3D12_RESOURCE_HEAP_TIER_2 || options.ROVsSupported ||
-      options1.WaveOps != TRUE || options1.Int64ShaderOps != TRUE || options1.WaveLaneCountMin != 32 ||
-      options1.WaveLaneCountMax != 32 || options1.TotalLaneCount != 1 ||
-      options4.Native16BitShaderOpsSupported != TRUE ||
+      options1.ExpandedComputeResourceStates != TRUE || options1.WaveOps != FALSE ||
+      options1.Int64ShaderOps != FALSE || options1.WaveLaneCountMin != 0 || options1.WaveLaneCountMax != 0 ||
+      options1.TotalLaneCount != 0 || options3.BarycentricsSupported != FALSE ||
+      options4.Native16BitShaderOpsSupported != FALSE ||
       options3.CopyQueueTimestampQueriesSupported != TRUE || !options3.CastingFullyTypedFormatSupported ||
        options5.RenderPassesTier != D3D12_RENDER_PASS_TIER_0 ||
-       options5.RaytracingTier != D3D12_RAYTRACING_TIER_NOT_SUPPORTED || shader_cache.SupportFlags ||
+       options5.RaytracingTier != D3D12_RAYTRACING_TIER_NOT_SUPPORTED ||
+       options7.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED ||
+       options7.SamplerFeedbackTier != D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED || shader_cache.SupportFlags ||
        options9.AtomicInt64OnTypedResourceSupported || options9.AtomicInt64OnGroupSharedSupported ||
        options11.AtomicInt64OnDescriptorHeapResourceSupported ||
       !queue_priority.PriorityForTypeIsSupported || existing_heaps.Supported ||

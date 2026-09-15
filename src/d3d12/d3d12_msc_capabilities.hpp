@@ -29,6 +29,7 @@ struct DXMTMSCCapabilities {
   bool argument_buffers_tier2 = false;
   bool apple6_or_newer = false;
   bool apple7_or_newer = false;
+  bool apple8_or_newer = false;
   bool apple9_or_newer = false;
 
   bool metal_raytracing = false;

@@ -750,13 +750,9 @@ public:
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS1 *>(pFeatureData);
       *out = {};
+      out->ExpandedComputeResourceStates = TRUE;
       out->WaveOps = msc.wave_ops_validated ? TRUE : FALSE;
       out->Int64ShaderOps = msc.int64_validated ? TRUE : FALSE;
-      if (msc.wave_ops_validated) {
-        out->WaveLaneCountMin = 32;
-        out->WaveLaneCountMax = 32;
-        out->TotalLaneCount = 1;
-      }
       return S_OK;
     }
     case D3D12_FEATURE_D3D12_OPTIONS2: {

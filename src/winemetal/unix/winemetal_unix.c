@@ -1596,6 +1596,13 @@ _MTLDevice_supportsFamily(void *obj) {
   return STATUS_SUCCESS;
 }
 
+static NTSTATUS
+_MTLDevice_supportsArgumentBuffersTier2(void *obj) {
+  struct unixcall_generic_obj_uint64_ret *params = obj;
+  params->ret = [(id<MTLDevice>)params->handle argumentBuffersSupport] >= MTLArgumentBuffersTier2;
+  return STATUS_SUCCESS;
+}
+
 static MTLAccelerationStructureGeometryDescriptor *
 make_acceleration_structure_geometry(const struct WMTAccelerationStructureGeometryInfo *info) {
   if (!info)
@@ -4448,6 +4455,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLComputeCommandEncoder_setIntersectionFunctionTable,
     &thunk_DXMTMSCSynthesizeRayDispatch,
     &thunk_DXMTMSCSynthesizeRayIntersection,
+    &_MTLDevice_supportsArgumentBuffersTier2,
 };
 
 #ifndef DXMT_NATIVE
@@ -4646,5 +4654,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLComputeCommandEncoder_setIntersectionFunctionTable,
     &thunk32_DXMTMSCSynthesizeRayDispatch,
     &thunk32_DXMTMSCSynthesizeRayIntersection,
+    &_MTLDevice_supportsArgumentBuffersTier2,
 };
 #endif

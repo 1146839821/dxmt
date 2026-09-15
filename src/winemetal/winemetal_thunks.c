@@ -713,6 +713,15 @@ MTLDevice_supportsFamily(obj_handle_t device, enum WMTGPUFamily gpu_family) {
 }
 
 WINEMETAL_API bool
+MTLDevice_supportsArgumentBuffersTier2(obj_handle_t device) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = device;
+  params.ret = 0;
+  UNIX_CALL(unix_mtldevice_supportsargumentbufferstier2, &params);
+  return params.ret;
+}
+
+WINEMETAL_API bool
 MTLDevice_supportsPlacementSparse(obj_handle_t device) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = device;

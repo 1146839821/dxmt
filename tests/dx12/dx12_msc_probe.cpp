@@ -107,6 +107,7 @@ main() {
   std::cout << "d3d.resource_binding_tier=" << static_cast<UINT>(options.ResourceBindingTier) << "\n";
   std::cout << "d3d.stencil_ref=" << options.PSSpecifiedStencilRefSupported << "\n";
   std::cout << "d3d.wave_ops=" << options1.WaveOps << "\n";
+  std::cout << "d3d.expanded_compute_resource_states=" << options1.ExpandedComputeResourceStates << "\n";
   std::cout << "d3d.wave_lane_min=" << options1.WaveLaneCountMin << "\n";
   std::cout << "d3d.wave_lane_max=" << options1.WaveLaneCountMax << "\n";
   std::cout << "d3d.wave_lane_total=" << options1.TotalLaneCount << "\n";

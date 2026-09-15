@@ -48,17 +48,20 @@ QueryDXMTMSCCapabilities(WMT::Device device) {
 
   capabilities.apple6_or_newer = device.supportsFamily(WMTGPUFamilyApple6);
   capabilities.apple7_or_newer = device.supportsFamily(WMTGPUFamilyApple7);
+  capabilities.apple8_or_newer = device.supportsFamily(WMTGPUFamilyApple8);
   capabilities.apple9_or_newer = device.supportsFamily(WMTGPUFamilyApple9);
   capabilities.highest_apple_gpu_family = capabilities.apple9_or_newer
                                               ? 1009
-                                              : capabilities.apple7_or_newer
-                                                  ? 1007
-                                                  : capabilities.apple6_or_newer ? 1006 : 0;
+                                              : capabilities.apple8_or_newer
+                                                  ? 1008
+                                                  : capabilities.apple7_or_newer
+                                                      ? 1007
+                                                      : capabilities.apple6_or_newer ? 1006 : 0;
   capabilities.compiler_minimum_gpu_family = capabilities.highest_apple_gpu_family;
 
   /* These are hardware/OS observations only. They do not promote D3D12
    * feature bits until a runtime proof exists for the corresponding path. */
-  capabilities.argument_buffers_tier2 = capabilities.apple6_or_newer;
+  capabilities.argument_buffers_tier2 = device.supportsArgumentBuffersTier2();
   capabilities.metal_memory_coherence = capabilities.apple6_or_newer;
   capabilities.metal_texture_atomics = capabilities.apple6_or_newer;
   capabilities.metal_barycentrics = capabilities.apple7_or_newer;
@@ -101,7 +104,8 @@ QueryDXMTMSCCapabilities(WMT::Device device) {
       Has(symbols, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_INDIRECT_INTERSECTION);
   capabilities.api_raytracing_indirect_dispatch = Has(symbols, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_INDIRECT_DISPATCH);
 
-  const bool msc4 = capabilities.core_converter && capabilities.ir_version_major >= 4;
+  const bool msc4 = capabilities.core_converter && capabilities.argument_buffers_tier2 &&
+                    capabilities.ir_version_major >= 4;
   capabilities.msc_wave_ops = msc4;
   capabilities.msc_int64 = msc4;
   capabilities.msc_barycentrics = msc4;
@@ -132,20 +136,14 @@ QueryDXMTMSCCapabilities(WMT::Device device) {
   capabilities.rt_intersection_function_buffer_path =
       capabilities.msc_raytracing && capabilities.api_raytracing_indirect_dispatch;
 
-  /* MSC's barycentric support is linear-only. Keep the D3D12 bit device-aware
-   * at the Apple7 floor; ViewID and GetAttributeAtVertex remain separate
-   * unsupported semantics. */
-  capabilities.barycentrics_validated =
-      capabilities.msc_barycentrics && capabilities.metal_barycentrics;
-
-  /* The WaveOps, Int64, and Native16 matrices cover compute plus graphics
-   * stages, root and descriptor-table resources, and the Apple7 runtime floor.
-   * Keep the promotion device-aware so older GPU families retain the
-   * conservative query result. */
-  const bool apple7_shader_ops = msc4 && capabilities.apple7_or_newer;
-  capabilities.wave_ops_validated = apple7_shader_ops;
-  capabilities.int64_validated = apple7_shader_ops;
-  capabilities.native16_validated = apple7_shader_ops;
+  /* Candidate support is not a runtime proof. These promotions require an
+   * exact compatibility matrix covering the MSC version, OS, GPU family,
+   * optional symbols, and DXMT ABI. Do not manufacture that matrix from an
+   * Apple family predicate or run hidden startup self-tests. */
+  capabilities.wave_ops_validated = false;
+  capabilities.int64_validated = false;
+  capabilities.barycentrics_validated = false;
+  capabilities.native16_validated = false;
 
   /* Keep unsupported and unproven D3D12 capabilities conservative. */
   capabilities.maximum_shader_model = GetMaximumD3D12ShaderModel(capabilities);
@@ -159,7 +157,7 @@ GetMaximumD3D12ShaderModel(const DXMTMSCCapabilities &capabilities) {
    * independent from the converter's own 4.0.1 version and from D3D shader
    * model numbering.  Higher shader models remain unclaimed until fixtures
    * prove their complete runtime path. */
-  return capabilities.core_converter && capabilities.ir_version_major >= 4
+  return capabilities.core_converter && capabilities.argument_buffers_tier2 && capabilities.ir_version_major >= 4
              ? D3D_SHADER_MODEL_6_0
              : D3D_SHADER_MODEL_5_1;
 }
