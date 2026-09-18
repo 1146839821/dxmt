@@ -4,6 +4,7 @@
 #include "dxgi_object.hpp"
 #include "com/com_guid.hpp"
 #include "log/log.hpp"
+#include "util_hotpatch.h"
 #include "util_string.hpp"
 #include "wsi_window.hpp"
 #include "dxgi_present_validation.hpp"
@@ -70,7 +71,7 @@ public:
     ERR("Software adapters not supported");
     return DXGI_ERROR_UNSUPPORTED;
   }
-
+  DXMT_HOTPATCHABLE
   HRESULT STDMETHODCALLTYPE
   CreateSwapChain(IUnknown *pDevice, DXGI_SWAP_CHAIN_DESC *pDesc,
                   IDXGISwapChain **ppSwapChain) final {
@@ -103,7 +104,7 @@ public:
     *ppSwapChain = swapChain;
     return hr;
   }
-
+  DXMT_HOTPATCHABLE
   HRESULT STDMETHODCALLTYPE CreateSwapChainForHwnd(
       IUnknown *pDevice, HWND hWnd, const DXGI_SWAP_CHAIN_DESC1 *pDesc,
       const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *pFullscreenDesc,
@@ -144,7 +145,7 @@ public:
     return swapchain_factory->CreateSwapChain(this, hWnd, &desc, &fsDesc,
                                               ppSwapChain);
   }
-
+  DXMT_HOTPATCHABLE
   HRESULT STDMETHODCALLTYPE CreateSwapChainForCoreWindow(
       IUnknown *pDevice, IUnknown *pWindow, const DXGI_SWAP_CHAIN_DESC1 *pDesc,
       IDXGIOutput *pRestrictToOutput, IDXGISwapChain1 **ppSwapChain) final {
@@ -153,7 +154,7 @@ public:
     ERR("Not implemented");
     return E_NOTIMPL;
   }
-
+  DXMT_HOTPATCHABLE
   HRESULT STDMETHODCALLTYPE CreateSwapChainForComposition(
       IUnknown *pDevice, const DXGI_SWAP_CHAIN_DESC1 *pDesc,
       IDXGIOutput *pRestrictToOutput, IDXGISwapChain1 **ppSwapChain) final {

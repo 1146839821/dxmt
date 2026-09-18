@@ -28,6 +28,7 @@
 #include "log/log.hpp"
 #include "wsi_monitor.hpp"
 #include "wsi_window.hpp"
+#include "util_hotpatch.h"
 #include <algorithm>
 #include <cfloat>
 
@@ -216,7 +217,7 @@ public:
   GetParent(REFIID riid, void **parent) final {
     return factory_->QueryInterface(riid, parent);
   };
-
+  DXMT_HOTPATCHABLE
   HRESULT
   STDMETHODCALLTYPE
   Present(UINT sync_interval, UINT flags) final {
@@ -230,7 +231,7 @@ public:
       return DXGI_ERROR_NOT_FOUND;
     return backbuffers_[Buffer]->QueryInterface(riid, ppSurface);
   };
-
+  DXMT_HOTPATCHABLE
   HRESULT
   STDMETHODCALLTYPE
   SetFullscreenState(BOOL Fullscreen, IDXGIOutput *pTarget) final {
@@ -326,7 +327,7 @@ public:
     pDesc->Flags = desc_.Flags;
     return S_OK;
   };
-
+  DXMT_HOTPATCHABLE
   HRESULT
   STDMETHODCALLTYPE
   ResizeBuffers(UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format, UINT flags) final {
@@ -387,7 +388,7 @@ public:
 
     return S_OK;
   };
-
+  DXMT_HOTPATCHABLE
   HRESULT
   STDMETHODCALLTYPE
   ResizeTarget(const DXGI_MODE_DESC *pDesc) final {
@@ -510,7 +511,7 @@ public:
     ERR("Not implemented");
     return E_NOTIMPL;
   };
-
+  DXMT_HOTPATCHABLE
   HRESULT
   STDMETHODCALLTYPE
   Present1(UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS *pPresentParameters) final {
@@ -684,7 +685,7 @@ public:
   GetCurrentBackBufferIndex() override {
     return presentation_count_ % backbuffers_.size();
   }
-
+  DXMT_HOTPATCHABLE
   HRESULT STDMETHODCALLTYPE
   ResizeBuffers1(
       UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format, UINT SwapChainFlags, const UINT *pCreationNodeMask,
