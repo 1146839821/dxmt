@@ -1581,6 +1581,10 @@ public:
   EmitMemoryBarrier(WMTBarrierScope scope, WMTRenderStages stages_after, WMTRenderStages stages_before) {
     switch (allocator_->encoder_current->type) {
     case EncoderType::Compute: {
+      // Render-target state is a texture dependency in a compute encoder.
+      // Metal only accepts Buffers and Textures here, not RenderTargets.
+      if (scope & WMTBarrierScopeRenderTargets)
+        scope = static_cast<WMTBarrierScope>((scope & ~WMTBarrierScopeRenderTargets) | WMTBarrierScopeTextures);
       auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_memory_barrier>();
       cmd.type = WMTComputeCommandMemoryBarrier;
       cmd.scope = scope;
@@ -2328,13 +2332,13 @@ public:
       for (auto i = 0u; i < num_viewports; i++) {
         if (i < num_scissors) {
           auto &d3d_rect = scissors[i];
-          LONG left = std::clamp(d3d_rect.left, (LONG)0, (LONG)16384);
-          LONG top = std::clamp(d3d_rect.top, (LONG)0, (LONG)16384);
-          LONG right = std::clamp(d3d_rect.right, left, (LONG)16384);
-          LONG bottom = std::clamp(d3d_rect.bottom, top, (LONG)16384);
+          LONG left = std::clamp(d3d_rect.left, (LONG)0, (LONG)render->render_target_width);
+          LONG top = std::clamp(d3d_rect.top, (LONG)0, (LONG)render->render_target_height);
+          LONG right = std::clamp(d3d_rect.right, left, (LONG)render->render_target_width);
+          LONG bottom = std::clamp(d3d_rect.bottom, top, (LONG)render->render_target_height);
           metal_scissors[i] = {uint32_t(left), uint32_t(top), uint32_t(right - left), uint32_t(bottom - top)};
         } else {
-          metal_scissors[i] = {0, 0, 16384, 16384};
+          metal_scissors[i] = {0, 0, render->render_target_width, render->render_target_height};
         }
       }
       auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setscissorrects>();
@@ -2989,7 +2993,8 @@ public:
     };
 
     auto encode_descriptor = [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
-      const auto &descriptor = descriptor_heap->GetDescriptor(index);
+      auto descriptor_read = descriptor_heap->ReadDescriptor(index);
+      const auto &descriptor = descriptor_read.get();
       switch (descriptor.type) {
       case ShaderVisibleDescriptorType::SRVTexture: {
         if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) ||
@@ -4551,7 +4556,8 @@ public:
     auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, CpuHandle);
     if (!Heap || !Values || (RectCount && !pRects))
       return;
-    auto &Descriptor = Heap->GetDescriptor(Index);
+    auto descriptor_read = Heap->ReadDescriptor(Index);
+    const auto &Descriptor = descriptor_read.get();
     auto color = std::array<uint32_t, 4>({Values[0], Values[1], Values[2], Values[3]});
     D3D12_RECT full_rect;
     switch (Descriptor.type) {
@@ -4607,7 +4613,8 @@ public:
     auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, CpuHandle);
     if (!Heap || !Values || (RectCount && !pRects))
       return;
-    auto &Descriptor = Heap->GetDescriptor(Index);
+    auto descriptor_read = Heap->ReadDescriptor(Index);
+    const auto &Descriptor = descriptor_read.get();
     auto color = std::array<float, 4>({Values[0], Values[1], Values[2], Values[3]});
     D3D12_RECT full_rect;
     switch (Descriptor.type) {

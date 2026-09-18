@@ -22,6 +22,7 @@
 #include "dxmt_texture.hpp"
 #include "metalirconverter_thunks.h"
 #include <cstdint>
+#include <mutex>
 
 namespace dxmt {
 
@@ -141,6 +142,20 @@ struct ShaderVisibleDescriptorCPUStorage {
   ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null), ConstantBuffer{}, allocation(nullptr) {}
 };
 
+// Keep the type, union payload and heap-owned resources stable for the whole
+// CPU read. Residency walks may visit slots that the application is updating
+// concurrently because those slots are not used by the current shader.
+class ShaderVisibleDescriptorRead {
+  std::unique_lock<dxmt::mutex> lock_;
+  const ShaderVisibleDescriptorCPUStorage &descriptor_;
+
+public:
+  ShaderVisibleDescriptorRead(dxmt::mutex &mutex, const ShaderVisibleDescriptorCPUStorage &descriptor) :
+      lock_(mutex), descriptor_(descriptor) {}
+
+  const ShaderVisibleDescriptorCPUStorage &get() const { return descriptor_; }
+};
+
 class MTLD3D12DescriptorHeap : public ID3D12DescriptorHeap {
 public:
   virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
@@ -179,7 +194,7 @@ public:
 
   virtual HRESULT AddUnorderedAccessView(UINT Index, D3D12_UNORDERED_ACCESS_VIEW_DESC const *pDesc) = 0;
 
-  virtual ShaderVisibleDescriptorCPUStorage const &GetDescriptor(UINT Index) = 0;
+  virtual ShaderVisibleDescriptorRead ReadDescriptor(UINT Index) = 0;
 
   virtual void CopyDescriptors(UINT From, MTLD3D12DescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;
 };

@@ -1588,6 +1588,25 @@ int main() {
                                          small_3d_desc))
     return 1;
 
+  // Upload helpers allocate an intermediate buffer with exactly the buffer
+  // width. Final-row pitch padding must not inflate the required byte count,
+  // otherwise UpdateSubresources rejects the upload before mapping it.
+  for (UINT64 width : {UINT64(33), UINT64(256), UINT64(257), UINT64(4097)}) {
+    auto unaligned_buffer_desc = buffer_desc;
+    unaligned_buffer_desc.Width = width;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout = {};
+    UINT rows = 0;
+    UINT64 row_bytes = 0, required_bytes = 0;
+    device->GetCopyableFootprints(&unaligned_buffer_desc, 0, 1, 0, &layout, &rows, &row_bytes, &required_bytes);
+    if (required_bytes != width || row_bytes != width || rows != 1 || layout.Offset != 0 ||
+        layout.Footprint.RowPitch < width || layout.Footprint.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT) {
+      std::cerr << "buffer upload footprint exceeds its matching intermediate buffer: width=" << width
+                << " required=" << required_bytes << " row_bytes=" << row_bytes << "\n";
+      cleanup();
+      return 1;
+    }
+  }
+
   D3D12_RESOURCE_DESC footprint_desc = texture_desc;
   footprint_desc.Width = 5;
   footprint_desc.Height = 5;
@@ -1600,7 +1619,7 @@ int main() {
   device->GetCopyableFootprints(
       &footprint_desc, 0, 6, 0, footprint_layouts, footprint_rows, footprint_row_sizes, &footprint_total
   );
-  if (footprint_total != 4864 || footprint_layouts[1].Offset != 1536 || footprint_layouts[3].Offset != 2560 ||
+  if (footprint_total != 4612 || footprint_layouts[1].Offset != 1536 || footprint_layouts[3].Offset != 2560 ||
       footprint_layouts[0].Footprint.Width != 5 || footprint_layouts[0].Footprint.Height != 5 ||
       footprint_rows[0] != 5 || footprint_row_sizes[0] != 20) {
     std::cerr << "unexpected RGBA8 footprint: total=" << footprint_total << " first_offset="
@@ -1663,7 +1682,7 @@ int main() {
   device->GetCopyableFootprints(
       &footprint_desc, 0, 1, 0, footprint_layouts, footprint_rows, footprint_row_sizes, &footprint_total
   );
-  if (footprint_total != 512 || footprint_layouts[0].Footprint.Width != 5 ||
+  if (footprint_total != 272 || footprint_layouts[0].Footprint.Width != 5 ||
       footprint_layouts[0].Footprint.Height != 5 || footprint_rows[0] != 2 || footprint_row_sizes[0] != 16) {
     std::cerr << "unexpected BC1 footprint: total=" << footprint_total << " rows=" << footprint_rows[0]
               << " row_size=" << footprint_row_sizes[0] << "\n";
@@ -1995,7 +2014,7 @@ int main() {
   device->GetCopyableFootprints(
       &depth_desc, 0, 2, 0, depth_footprints, depth_rows, depth_row_sizes, &depth_total
   );
-  if (depth_total != 2048 || depth_footprints[0].Offset != 0 || depth_footprints[1].Offset != 1024 ||
+  if (depth_total != 1796 || depth_footprints[0].Offset != 0 || depth_footprints[1].Offset != 1024 ||
       depth_footprints[0].Footprint.RowPitch != 256 || depth_footprints[1].Footprint.RowPitch != 256 ||
       depth_rows[0] != 4 || depth_rows[1] != 4 || depth_row_sizes[0] != 16 || depth_row_sizes[1] != 4) {
     std::cerr << "invalid depth/stencil footprints: total=" << depth_total
@@ -2149,7 +2168,7 @@ int main() {
     return 1;
   }
   device->GetCopyableFootprints(&bc_desc, 0, 1, 0, &bc_footprint, &bc_rows, &bc_row_size, &bc_total);
-  if (bc_total != 512 || bc_rows != 2 || bc_row_size != 16 || bc_footprint.Footprint.RowPitch != 256) {
+  if (bc_total != 272 || bc_rows != 2 || bc_row_size != 16 || bc_footprint.Footprint.RowPitch != 256) {
     std::cerr << "unexpected BC1 copy footprint: total=" << bc_total << " rows=" << bc_rows
               << " row_size=" << bc_row_size << " row_pitch=" << bc_footprint.Footprint.RowPitch << "\n";
     cleanup();

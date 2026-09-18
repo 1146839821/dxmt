@@ -135,6 +135,7 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
 
   D3D12_DESCRIPTOR_HEAP_DESC desc_;
 
+  dxmt::mutex descriptor_mutex_;
   std::vector<ShaderVisibleDescriptorCPUStorage> descriptors_;
   // A descriptor may outlive the ID3D12Resource that created it. Keep the
   // native resource objects alive until the descriptor is overwritten or the
@@ -320,6 +321,7 @@ public:
   AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
     ReleaseDescriptorResources(Index);
     texture_resources_[Index] = Texture;
     auto &cpu_storage = descriptors_[Index];
@@ -353,6 +355,7 @@ public:
   ) {
     if (Index >= descriptors_.size() || !AccelerationStructure || !AccelerationStructureHeader || !HeaderLocation)
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
     ReleaseDescriptorResources(Index);
     acceleration_structure_resources_[Index] = AccelerationStructure;
     acceleration_structure_headers_[Index] = AccelerationStructureHeader;
@@ -371,6 +374,7 @@ public:
   HasNonZeroResourceMinLODClamp(UINT Index) override {
     if (Index >= descriptors_.size())
       return false;
+    std::lock_guard lock(descriptor_mutex_);
     const auto &descriptor = descriptors_[Index];
     return descriptor.type == ShaderVisibleDescriptorType::SRVTexture &&
            descriptor.SRVTexture.resource_min_lod_clamp > 0.0f;
@@ -380,6 +384,7 @@ public:
   AddConstantBufferView(UINT Index, UINT64 VA, UINT32 SizeInBytes) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
     ReleaseDescriptorResources(Index);
     uint64_t buffer_offset = 0;
     cbv_allocations_[Index] = device_->LookupBufferByVA(VA, &buffer_offset);
@@ -402,6 +407,7 @@ public:
     if (Index >= descriptors_.size())
       return;
 
+    std::lock_guard lock(descriptor_mutex_);
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::Null;
     // Keep the inactive union bytes deterministic so descriptor copies cannot
@@ -418,6 +424,7 @@ public:
   AddUnorderedAccessView(UINT Index, Texture *Texture, TextureViewKey View) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
     ReleaseDescriptorResources(Index);
     texture_resources_[Index] = Texture;
     auto &cpu_storage = descriptors_[Index];
@@ -439,6 +446,7 @@ public:
   AddUnorderedAccessView(UINT Index, Buffer *UAVBuffer, BufferViewKey View, BufferSlice Slice) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
     ReleaseDescriptorResources(Index);
     buffer_resources_[Index] = UAVBuffer;
     auto &cpu_storage = descriptors_[Index];
@@ -472,6 +480,7 @@ public:
   AddUnorderedAccessView(UINT Index, Buffer *UAVBuffer, BufferSlice Slice, Buffer *Counter, UINT CounterOffsetInBytes) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
     ReleaseDescriptorResources(Index);
     buffer_resources_[Index] = UAVBuffer;
     counter_resources_[Index] = Counter;
@@ -499,6 +508,7 @@ public:
   virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferViewKey View, BufferSlice Slice) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
     ReleaseDescriptorResources(Index);
     buffer_resources_[Index] = Buffer;
     auto &cpu_storage = descriptors_[Index];
@@ -529,6 +539,7 @@ public:
   virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferSlice Slice) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
     ReleaseDescriptorResources(Index);
     buffer_resources_[Index] = Buffer;
     auto &cpu_storage = descriptors_[Index];
@@ -576,12 +587,10 @@ public:
     return S_OK;
   }
 
-  virtual ShaderVisibleDescriptorCPUStorage const &
-  GetDescriptor(UINT Index) {
+  ShaderVisibleDescriptorRead
+  ReadDescriptor(UINT Index) override {
     static const ShaderVisibleDescriptorCPUStorage null_descriptor{};
-    if (Index >= descriptors_.size())
-      return null_descriptor;
-    return descriptors_[Index];
+    return {descriptor_mutex_, Index < descriptors_.size() ? descriptors_[Index] : null_descriptor};
   }
 
   virtual void
@@ -590,6 +599,12 @@ public:
     if (!heap_to || From > descriptors_.size() || CopyCount > descriptors_.size() - From ||
         DescriptorTo > heap_to->descriptors_.size() || CopyCount > heap_to->descriptors_.size() - DescriptorTo)
       return;
+    std::unique_lock source_lock(descriptor_mutex_, std::defer_lock);
+    std::unique_lock destination_lock(heap_to->descriptor_mutex_, std::defer_lock);
+    if (heap_to == this)
+      source_lock.lock();
+    else
+      std::lock(source_lock, destination_lock);
     for (unsigned i = 0; i < CopyCount; i++) {
       heap_to->descriptors_[DescriptorTo + i] = descriptors_[From + i];
       heap_to->texture_resources_[DescriptorTo + i] = texture_resources_[From + i];

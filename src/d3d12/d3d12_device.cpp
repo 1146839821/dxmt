@@ -1170,8 +1170,9 @@ public:
       const D3D12_CPU_DESCRIPTOR_HANDLE *SrcDescriptorRangeOffsets, const UINT *SrcDescriptorRangeSizes,
       D3D12_DESCRIPTOR_HEAP_TYPE DescriptorHeapType
   ) {
+    // A null size array means one descriptor per range.
     if (!DstDescriptorRangeCount || !SrcDescriptorRangeCount || !DstDescriptorRangeOffsets ||
-        !DstDescriptorRangeSizes || !SrcDescriptorRangeOffsets || !SrcDescriptorRangeSizes)
+        !SrcDescriptorRangeOffsets)
       return;
 
     unsigned int dst_range_idx, dst_idx, src_range_idx, src_idx;
@@ -1757,7 +1758,10 @@ public:
           valid = false;
           break;
         }
-        auto subresource_size = slice_pitch * depth;
+        // Pitches include padding between rows/slices, but the required size
+        // ends at the last byte of the final row. Upload helpers rely on this
+        // for intermediate buffers whose width exactly matches the payload.
+        auto subresource_size = slice_pitch * depth - (row_pitch - row_size);
         if (row_pitch > UINT_MAX || subresource_size > UINT64_MAX - Offset) {
           valid = false;
           break;

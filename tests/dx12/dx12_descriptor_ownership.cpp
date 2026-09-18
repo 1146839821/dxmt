@@ -6,6 +6,7 @@
 #include "d3d12_descriptor_heap.hpp"
 
 #include <iostream>
+#include <thread>
 
 namespace {
 
@@ -58,10 +59,15 @@ D3D12_RESOURCE_DESC RenderTargetDescription() {
   return desc;
 }
 
+dxmt::ShaderVisibleDescriptorCPUStorage ReadDescriptorFields(dxmt::MTLD3D12DescriptorHeap *heap, UINT index) {
+  auto read = heap->ReadDescriptor(index);
+  return read.get();
+}
+
 bool IsDescriptorType(
     dxmt::MTLD3D12DescriptorHeap *heap, dxmt::ShaderVisibleDescriptorType expected, const char *name
 ) {
-  if (heap->GetDescriptor(0).type == expected)
+  if (ReadDescriptorFields(heap, 0).type == expected)
     return true;
   std::cerr << name << " descriptor type changed unexpectedly\n";
   return false;
@@ -70,7 +76,7 @@ bool IsDescriptorType(
 bool IsDescriptorTypeAt(
     dxmt::MTLD3D12DescriptorHeap *heap, UINT index, dxmt::ShaderVisibleDescriptorType expected, const char *name
 ) {
-  if (heap->GetDescriptor(index).type == expected)
+  if (ReadDescriptorFields(heap, index).type == expected)
     return true;
   std::cerr << name << " descriptor type changed unexpectedly\n";
   return false;
@@ -205,7 +211,7 @@ int main() {
   cbv_desc.BufferLocation = buffer_a->GetGPUVirtualAddress();
   cbv_desc.SizeInBytes = 256;
   device_a->CreateConstantBufferView(&cbv_desc, shader_cpu_a);
-  const auto &valid_cbv = shader_impl_a->GetDescriptor(0);
+  const auto &valid_cbv = ReadDescriptorFields(shader_impl_a, 0);
   passed &= valid_cbv.type == dxmt::ShaderVisibleDescriptorType::ConstantBuffer;
   passed &= valid_cbv.ConstantBuffer.address == cbv_desc.BufferLocation;
   passed &= valid_cbv.ConstantBuffer.size == cbv_desc.SizeInBytes;
@@ -214,7 +220,7 @@ int main() {
 
   // A null CBV must replace the previous descriptor and clear all payloads.
   device_a->CreateConstantBufferView(nullptr, shader_cpu_a);
-  const auto &null_cbv = shader_impl_a->GetDescriptor(0);
+  const auto &null_cbv = ReadDescriptorFields(shader_impl_a, 0);
   passed &= null_cbv.type == dxmt::ShaderVisibleDescriptorType::Null;
   passed &= null_cbv.ConstantBuffer.address == 0 && null_cbv.ConstantBuffer.size == 0;
   if (!passed)
@@ -224,19 +230,87 @@ int main() {
   const UINT shader_stride = device_a->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
   D3D12_CPU_DESCRIPTOR_HANDLE copied_cbv = shader_cpu_a;
   copied_cbv.ptr += shader_stride;
-  const auto &fresh_null_cbv = shader_impl_a->GetDescriptor(1);
+  const auto &fresh_null_cbv = ReadDescriptorFields(shader_impl_a, 1);
   passed &= fresh_null_cbv.type == dxmt::ShaderVisibleDescriptorType::Null;
   passed &= fresh_null_cbv.ConstantBuffer.address == 0 && fresh_null_cbv.ConstantBuffer.size == 0;
   device_a->CreateConstantBufferView(nullptr, copied_cbv);
   passed &= IsDescriptorTypeAt(shader_impl_a, 1, dxmt::ShaderVisibleDescriptorType::Null, "fresh null CBV");
   device_a->CopyDescriptorsSimple(1, copied_cbv, shader_cpu_a, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
   passed &= IsDescriptorTypeAt(shader_impl_a, 1, dxmt::ShaderVisibleDescriptorType::Null, "copied null CBV");
-  const auto &copied_null_cbv = shader_impl_a->GetDescriptor(1);
+  const auto &copied_null_cbv = ReadDescriptorFields(shader_impl_a, 1);
   passed &= copied_null_cbv.ConstantBuffer.address == 0 && copied_null_cbv.ConstantBuffer.size == 0;
 
   // Reusing the slot with a valid CBV must work after the null overwrite.
   device_a->CreateConstantBufferView(&cbv_desc, shader_cpu_a);
   passed &= IsDescriptorType(shader_impl_a, dxmt::ShaderVisibleDescriptorType::ConstantBuffer, "restored CBV");
+
+  // Residency enumeration can inspect an unused slot while the application
+  // replaces it. Type, payload, and resource lifetime must form one read.
+  D3D12_DESCRIPTOR_HEAP_DESC source_desc = shader_desc;
+  source_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+  ID3D12DescriptorHeap *source_heap = nullptr;
+  if (!CheckHR("Create descriptor race source", device_a->CreateDescriptorHeap(&source_desc, IID_PPV_ARGS(&source_heap))))
+    return abort();
+  const auto source_cpu = source_heap->GetCPUDescriptorHandleForHeapStart();
+  auto source_cbv = source_cpu;
+  source_cbv.ptr += shader_stride;
+  device_a->CreateShaderResourceView(texture_a, nullptr, source_cpu);
+  device_a->CreateConstantBufferView(&cbv_desc, source_cbv);
+  // Null range-size arrays mean one descriptor in each range, independently
+  // for source and destination. They are optional, not invalid arguments.
+  const UINT one_descriptor = 1;
+  for (unsigned omitted = 1; omitted < 4; ++omitted) {
+    device_a->CreateConstantBufferView(nullptr, shader_cpu_a);
+    device_a->CopyDescriptors(
+        1, &shader_cpu_a, omitted & 1 ? nullptr : &one_descriptor,
+        1, &source_cpu, omitted & 2 ? nullptr : &one_descriptor,
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV
+    );
+    const auto descriptor = ReadDescriptorFields(shader_impl_a, 0);
+    const bool copied = descriptor.type == dxmt::ShaderVisibleDescriptorType::SRVTexture &&
+                        descriptor.SRVTexture.texture != nullptr;
+    if (!copied)
+      std::cerr << "FAIL: CopyDescriptors ignored optional range sizes (omitted=" << omitted << ")\n";
+    passed &= copied;
+  }
+  for (bool copy : {false, true}) {
+    device_a->CopyDescriptorsSimple(1, shader_cpu_a, source_cpu, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    HANDLE start = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::thread writer([&] {
+      WaitForSingleObject(start, INFINITE);
+      SetEvent(entered);
+      if (copy)
+        device_a->CopyDescriptorsSimple(1, shader_cpu_a, source_cbv, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+      else
+        device_a->CreateConstantBufferView(&cbv_desc, shader_cpu_a);
+      SetEvent(done);
+    });
+    {
+      auto descriptor_read = shader_impl_a->ReadDescriptor(0);
+      const auto &descriptor = descriptor_read.get();
+      const auto type = descriptor.type;
+      const auto texture = descriptor.SRVTexture.texture;
+      const auto view = descriptor.SRVTexture.view;
+      SetEvent(start);
+      WaitForSingleObject(entered, INFINITE);
+      // Allow the writer to finish if the read does not protect its payload.
+      WaitForSingleObject(done, 50);
+      const bool stable = type == dxmt::ShaderVisibleDescriptorType::SRVTexture &&
+                          descriptor.type == type && descriptor.SRVTexture.texture == texture &&
+                          descriptor.SRVTexture.view.index == view.index;
+      if (!stable)
+        std::cerr << "FAIL: descriptor changed from SRV to CBV during residency read (copy=" << copy << ")\n";
+      passed &= stable;
+    }
+    writer.join();
+    CloseHandle(done);
+    CloseHandle(entered);
+    CloseHandle(start);
+    passed &= IsDescriptorType(shader_impl_a, dxmt::ShaderVisibleDescriptorType::ConstantBuffer, "concurrent CBV update");
+  }
+  Release(source_heap);
 
   device_a->CreateRenderTargetView(texture_a, &rtv_view, rtv_cpu_a);
   passed &= rtv_impl_a->GetRenderTarget(0).Texture != nullptr;
