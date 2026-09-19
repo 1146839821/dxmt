@@ -25,8 +25,62 @@ env:
   WINE_ARM64EC_URL: https://github.com/3Shain/wine/releases/download/wine-11.2/wine-11.2.tar.gz
   LLVM_MINGW_VERSION: "20260908"
   LLVM_MINGW_DIR: llvm-mingw-20260908-ucrt-macos-universal
+  METAL_TOOLCHAIN_VERSION: "17A324"
 
 jobs:
+
+  setup-metal-toolchain:
+    runs-on: macos-26
+    steps:
+      - name: Cache Metal Toolchain
+        id: cache-metal-toolchain
+        uses: actions/cache@v5
+        with:
+          key: metal-toolchain-17A324-arm64-macos
+          restore-keys: |
+            metal-toolchain-17A324-
+          lookup-only: true
+          path: ./toolchains/metal-toolchain
+
+      - name: Install Metal Toolchain
+        if: steps.cache-metal-toolchain.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+
+          sudo xcode-select -s /Applications/Xcode_26.0.app
+          sudo xcodebuild -downloadComponent MetalToolchain
+
+          METAL_MOUNT="$(
+            find /var/run/com.apple.security.cryptexd/mnt \
+              -maxdepth 1 \
+              -type d \
+              -name 'com.apple.MobileAsset.MetalToolchain-*' \
+              -print \
+              -quit
+          )"
+
+          if [ -z "$METAL_MOUNT" ]; then
+            echo "Metal Toolchain mount not found"
+            exit 1
+          fi
+
+          echo "Metal Toolchain mount: $METAL_MOUNT"
+
+          mkdir -p ./toolchains/metal-toolchain
+
+          ditto \
+            "$METAL_MOUNT" \
+            ./toolchains/metal-toolchain
+
+          find ./toolchains/metal-toolchain -maxdepth 3 -print
+
+      - name: Save Cache
+        if: steps.cache-metal-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          key: metal-toolchain-17A324-arm64-macos
+          path: ./toolchains/metal-toolchain
+
   setup-wine:
     runs-on: macos-26
     steps:
@@ -619,9 +673,6 @@ jobs:
 
       - name: Select Xcode Version
         run: sudo xcode-select -s /Applications/Xcode_26.0.app
-
-      - name: Install Metal Toolchain
-        run: sudo xcodebuild -downloadComponent MetalToolchain
 
       - name: Install Meson
         run: pip3 install meson==1.10.0 --break-system-packages
