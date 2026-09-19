@@ -20,10 +20,66 @@
 #include "d3d12_descriptor_heap.hpp"
 #include "d3d12_pageable.hpp"
 #include "com/com_pointer.hpp"
+#include "dxmt_format.hpp"
 #include "dxmt_sampler.hpp"
 #include "log/log.hpp"
+#include <array>
+#include <atomic>
+#include <mutex>
+#include <vector>
 
 namespace dxmt {
+
+namespace {
+std::mutex descriptor_heap_registry_lock;
+// Index 0 is reserved as the invalid-handle sentinel. On 64-bit builds,
+// allocate indices monotonically so a stale handle cannot be rebound to a
+// later heap. The 32-bit encoding has no room to grow beyond seven bits, so
+// preserve slot reuse there for compatibility with the existing limit.
+std::vector<const void *> descriptor_heap_registry(sizeof(SIZE_T) == 4 ? (1u << 7) : 1, nullptr);
+std::atomic<unsigned> descriptor_texture_debug_count = 0;
+std::atomic<unsigned> descriptor_table_debug_count = 0;
+}
+
+SIZE_T
+RegisterDescriptorHeap(const void *heap) {
+  std::lock_guard<std::mutex> lock(descriptor_heap_registry_lock);
+  for (SIZE_T i = 1; i < descriptor_heap_registry.size(); i++) {
+    if (descriptor_heap_registry[i] == heap)
+      return i;
+  }
+  if constexpr (sizeof(SIZE_T) == 4) {
+    for (SIZE_T i = 1; i < descriptor_heap_registry.size(); i++) {
+      if (!descriptor_heap_registry[i]) {
+        descriptor_heap_registry[i] = heap;
+        return i;
+      }
+    }
+  }
+  // Keep indices stable and stay within the bit-field encoded handle range.
+  constexpr SIZE_T kMaxHeapIndex = (SIZE_T(1) << (sizeof(SIZE_T) == 4 ? 7 : 39)) - 1;
+  if (descriptor_heap_registry.size() > kMaxHeapIndex) {
+    WARN("D3D12 descriptor heap registry is full");
+    return 0;
+  }
+  descriptor_heap_registry.push_back(heap);
+  return descriptor_heap_registry.size() - 1;
+}
+
+void
+UnregisterDescriptorHeap(const void *heap) {
+  std::lock_guard<std::mutex> lock(descriptor_heap_registry_lock);
+  for (auto &entry : descriptor_heap_registry) {
+    if (entry == heap)
+      entry = nullptr;
+  }
+}
+
+const void *
+LookupDescriptorHeap(SIZE_T index) {
+  std::lock_guard<std::mutex> lock(descriptor_heap_registry_lock);
+  return index < descriptor_heap_registry.size() ? descriptor_heap_registry[index] : nullptr;
+}
 
 struct SRVTextureGPUStorage {
   uint64_t resource_id;
@@ -65,7 +121,10 @@ struct ShaderVisibleDescriptorGPUStorage {
   ShaderVisibleDescriptorGPUStorage();
 };
 
+ShaderVisibleDescriptorGPUStorage::ShaderVisibleDescriptorGPUStorage() : ZeroFilled{} {}
+
 static_assert(sizeof(ShaderVisibleDescriptorGPUStorage) == 32);
+static_assert(sizeof(dxmt_msc_descriptor_entry) == 24);
 
 inline uint64_t
 TextureMetadata(uint32_t array_length, float min_lod) {
@@ -76,10 +135,40 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
 
   D3D12_DESCRIPTOR_HEAP_DESC desc_;
 
+  dxmt::mutex descriptor_mutex_;
   std::vector<ShaderVisibleDescriptorCPUStorage> descriptors_;
+  // A descriptor may outlive the ID3D12Resource that created it. Keep the
+  // native resource objects alive until the descriptor is overwritten or the
+  // heap is destroyed, while the CPU descriptor storage retains lookup
+  // pointers for residency tracking.
+  std::vector<Rc<Texture>> texture_resources_;
+  std::vector<Rc<Buffer>> buffer_resources_;
+  std::vector<Rc<Buffer>> counter_resources_;
+  std::vector<Rc<BufferAllocation>> cbv_allocations_;
+  std::vector<WMT::Reference<WMT::AccelerationStructure>> acceleration_structure_resources_;
+  std::vector<WMT::Reference<WMT::Buffer>> acceleration_structure_headers_;
   Rc<Buffer> buffer_;
   ShaderVisibleDescriptorGPUStorage *mapped_argument_buffer_ = nullptr;
   uint64_t argument_buffer_gpu_address_ = 0;
+  Rc<Buffer> msc_buffer_;
+  dxmt_msc_descriptor_entry *mapped_msc_argument_buffer_ = nullptr;
+  uint64_t msc_argument_buffer_gpu_address_ = 0;
+
+  void
+  SetMSCDescriptor(UINT Index, dxmt_msc_descriptor_entry Entry) {
+    if (mapped_msc_argument_buffer_)
+      mapped_msc_argument_buffer_[Index] = Entry;
+  }
+
+  void
+  ReleaseDescriptorResources(UINT Index) {
+    texture_resources_[Index] = nullptr;
+    buffer_resources_[Index] = nullptr;
+    counter_resources_[Index] = nullptr;
+    cbv_allocations_[Index] = nullptr;
+    acceleration_structure_resources_[Index] = nullptr;
+    acceleration_structure_headers_[Index] = nullptr;
+  }
 
 public:
   MTLD3D12DescriptorHeapImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12DescriptorHeap>(pDevice) {}
@@ -97,22 +186,45 @@ public:
       return E_INVALIDARG;
     }
     descriptors_.resize(pDesc->NumDescriptors);
+    texture_resources_.resize(pDesc->NumDescriptors);
+    buffer_resources_.resize(pDesc->NumDescriptors);
+    counter_resources_.resize(pDesc->NumDescriptors);
+    cbv_allocations_.resize(pDesc->NumDescriptors);
+    acceleration_structure_resources_.resize(pDesc->NumDescriptors);
+    acceleration_structure_headers_.resize(pDesc->NumDescriptors);
 
     if (pDesc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
       buffer_ = new Buffer(descriptors_.size() * sizeof(ShaderVisibleDescriptorGPUStorage), device_->GetMTLDevice());
 
       Flags<BufferAllocationFlag> flags;
 #ifdef __i386__
-      IMPLEMENT_ME
+      flags.set(BufferAllocationFlag::CpuPlaced);
 #endif
       buffer_->rename(buffer_->allocate(flags));
+      if (!buffer_->current())
+        return E_OUTOFMEMORY;
       mapped_argument_buffer_ =
           reinterpret_cast<ShaderVisibleDescriptorGPUStorage *>(buffer_->current()->mappedMemory(0));
       argument_buffer_gpu_address_ = buffer_->current()->gpuAddress();
       device_->RegisterResidencyAndVA(buffer_->current());
+
+      msc_buffer_ = new Buffer(descriptors_.size() * sizeof(dxmt_msc_descriptor_entry), device_->GetMTLDevice());
+      msc_buffer_->rename(msc_buffer_->allocate(flags));
+      if (!msc_buffer_->current())
+        return E_OUTOFMEMORY;
+      mapped_msc_argument_buffer_ =
+          reinterpret_cast<dxmt_msc_descriptor_entry *>(msc_buffer_->current()->mappedMemory(0));
+      msc_argument_buffer_gpu_address_ = msc_buffer_->current()->gpuAddress();
+      device_->RegisterResidencyAndVA(msc_buffer_->current());
+      for (size_t i = 0; i < descriptors_.size(); i++)
+        mapped_argument_buffer_[i] = {};
+      memset(mapped_msc_argument_buffer_, 0, descriptors_.size() * sizeof(dxmt_msc_descriptor_entry));
     } else {
       mapped_argument_buffer_ = reinterpret_cast<ShaderVisibleDescriptorGPUStorage *>(
           malloc(descriptors_.size() * sizeof(ShaderVisibleDescriptorGPUStorage))
+      );
+      mapped_msc_argument_buffer_ = reinterpret_cast<dxmt_msc_descriptor_entry *>(
+          calloc(descriptors_.size(), sizeof(dxmt_msc_descriptor_entry))
       );
     }
 
@@ -120,10 +232,15 @@ public:
   };
 
   ~MTLD3D12DescriptorHeapImpl() {
+    UnregisterDescriptorHeap(this);
     if (buffer_) {
-      device_->UnregisterResidencyAndVA(buffer_->current());
+      if (buffer_->current())
+        device_->UnregisterResidencyAndVA(buffer_->current());
+      if (msc_buffer_ && msc_buffer_->current())
+        device_->UnregisterResidencyAndVA(msc_buffer_->current());
     } else {
       free(mapped_argument_buffer_);
+      free(mapped_msc_argument_buffer_);
     }
   }
 
@@ -166,51 +283,161 @@ public:
     return __ret;
   }
 
+  uint64_t
+  GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) override {
+    if (!msc_buffer_ || Handle.ptr < argument_buffer_gpu_address_)
+      return 0;
+    uint64_t byte_offset = Handle.ptr - argument_buffer_gpu_address_;
+    if (byte_offset % sizeof(ShaderVisibleDescriptorGPUStorage))
+      return 0;
+    uint64_t index = byte_offset / sizeof(ShaderVisibleDescriptorGPUStorage);
+    if (index >= descriptors_.size())
+      return 0;
+    const auto trace_id = descriptor_table_debug_count.fetch_add(1, std::memory_order_relaxed);
+    if (trace_id < 128) {
+      for (uint64_t entry_index = index; entry_index < std::min<uint64_t>(index + 4, descriptors_.size());
+           entry_index++) {
+        const auto &entry = mapped_msc_argument_buffer_[entry_index];
+        DEBUG(
+            "[DEBUG-MSC-TABLE] id=", trace_id, " index=", entry_index, " handle=", Handle.ptr,
+            " gpu_va=", entry.gpu_va, " texture_view=", entry.texture_view_id, " metadata=", entry.metadata
+        );
+      }
+    }
+    return msc_argument_buffer_gpu_address_ + index * sizeof(dxmt_msc_descriptor_entry);
+  }
+
+  WMT::Buffer
+  GetDescriptorHeapBuffer() override {
+    return buffer_ && buffer_->current() ? buffer_->current()->buffer() : WMT::Buffer{};
+  }
+
+  WMT::Buffer
+  GetMSCDescriptorHeapBuffer() override {
+    return msc_buffer_ ? msc_buffer_->current()->buffer() : WMT::Buffer{};
+  }
+
   virtual HRESULT
   AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
+    ReleaseDescriptorResources(Index);
+    texture_resources_[Index] = Texture;
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::SRVTexture;
     cpu_storage.SRVTexture.texture = Texture;
     cpu_storage.SRVTexture.view = View;
+    cpu_storage.SRVTexture.resource_min_lod_clamp = ResourceMinLODClamp;
     if (mapped_argument_buffer_) {
       auto &texture_view = Texture->view(View);
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.SRVTexture.resource_id = texture_view.gpuResourceID;
       gpu_storage.SRVTexture.metadata = TextureMetadata(Texture->arrayLength(View), ResourceMinLODClamp);
+      SetMSCDescriptor(Index, {0, texture_view.gpuResourceID, std::bit_cast<uint32_t>(ResourceMinLODClamp)});
+
+      const auto trace_id = descriptor_texture_debug_count.fetch_add(1, std::memory_order_relaxed);
+      if (trace_id < 128)
+        DEBUG(
+            "[DEBUG-TEX] descriptor id=", trace_id, " slot=", Index, " gpu=", texture_view.gpuResourceID,
+            " array=", Texture->arrayLength(View), " minlod=", ResourceMinLODClamp,
+            " msc_metadata=", std::bit_cast<uint32_t>(ResourceMinLODClamp)
+        );
     }
     return S_OK;
   }
-    virtual HRESULT
+
+  virtual HRESULT
+  AddRaytracingAccelerationStructureView(
+      UINT Index, const WMT::Reference<WMT::AccelerationStructure> &AccelerationStructure,
+      const WMT::Reference<WMT::Buffer> &AccelerationStructureHeader,
+      D3D12_GPU_VIRTUAL_ADDRESS HeaderLocation
+  ) {
+    if (Index >= descriptors_.size() || !AccelerationStructure || !AccelerationStructureHeader || !HeaderLocation)
+      return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
+    ReleaseDescriptorResources(Index);
+    acceleration_structure_resources_[Index] = AccelerationStructure;
+    acceleration_structure_headers_[Index] = AccelerationStructureHeader;
+    auto &cpu_storage = descriptors_[Index];
+    cpu_storage.type = ShaderVisibleDescriptorType::SRVAccelerationStructure;
+    cpu_storage.SRVAccelerationStructure.acceleration_structure = AccelerationStructure.handle;
+    cpu_storage.SRVAccelerationStructure.acceleration_structure_header = AccelerationStructureHeader.handle;
+    cpu_storage.SRVAccelerationStructure.header_gpu_virtual_address = HeaderLocation;
+    if (mapped_argument_buffer_)
+      mapped_argument_buffer_[Index].ZeroFilled = {};
+    SetMSCDescriptor(Index, {HeaderLocation, 0, 0});
+    return S_OK;
+  }
+
+  bool
+  HasNonZeroResourceMinLODClamp(UINT Index) override {
+    if (Index >= descriptors_.size())
+      return false;
+    std::lock_guard lock(descriptor_mutex_);
+    const auto &descriptor = descriptors_[Index];
+    return descriptor.type == ShaderVisibleDescriptorType::SRVTexture &&
+           descriptor.SRVTexture.resource_min_lod_clamp > 0.0f;
+  }
+
+  virtual HRESULT
   AddConstantBufferView(UINT Index, UINT64 VA, UINT32 SizeInBytes) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
+    ReleaseDescriptorResources(Index);
+    uint64_t buffer_offset = 0;
+    cbv_allocations_[Index] = device_->LookupBufferByVA(VA, &buffer_offset);
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::ConstantBuffer;
     cpu_storage.ConstantBuffer.address = VA;
     cpu_storage.ConstantBuffer.size = SizeInBytes;
+    cpu_storage.allocation = cbv_allocations_[Index].ptr();
     if (mapped_argument_buffer_) {
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.ConstantBuffer.address = VA;
       gpu_storage.ConstantBuffer.size = SizeInBytes;
     }
+    SetMSCDescriptor(Index, {VA, 0, SizeInBytes});
     return S_OK;
+  }
+
+  void
+  ClearDescriptor(UINT Index) override {
+    if (Index >= descriptors_.size())
+      return;
+
+    std::lock_guard lock(descriptor_mutex_);
+    auto &cpu_storage = descriptors_[Index];
+    cpu_storage.type = ShaderVisibleDescriptorType::Null;
+    // Keep the inactive union bytes deterministic so descriptor copies cannot
+    // retain a stale CBV address in CPU-side storage.
+    cpu_storage.ConstantBuffer = {};
+    cpu_storage.allocation = nullptr;
+    ReleaseDescriptorResources(Index);
+    if (mapped_argument_buffer_)
+      mapped_argument_buffer_[Index].ZeroFilled = {{}};
+    SetMSCDescriptor(Index, {});
   }
 
   virtual HRESULT
   AddUnorderedAccessView(UINT Index, Texture *Texture, TextureViewKey View) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
+    ReleaseDescriptorResources(Index);
+    texture_resources_[Index] = Texture;
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::UAVTexture;
     cpu_storage.UAVTexture.texture = Texture; // 
     cpu_storage.UAVTexture.view = View;
+    cpu_storage.UAVTexture.resource_min_lod_clamp = 0;
     if (mapped_argument_buffer_) {
       auto &texture_view = Texture->view(View);
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.UAVTexture.resource_id = texture_view.gpuResourceID;
       gpu_storage.UAVTexture.metadata = TextureMetadata(Texture->arrayLength(View), 0);
+      SetMSCDescriptor(Index, {0, texture_view.gpuResourceID, 0});
     }
     return S_OK;
   }
@@ -219,6 +446,9 @@ public:
   AddUnorderedAccessView(UINT Index, Buffer *UAVBuffer, BufferViewKey View, BufferSlice Slice) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
+    ReleaseDescriptorResources(Index);
+    buffer_resources_[Index] = UAVBuffer;
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::UAVTexelBuffer;
     cpu_storage.UAVTexelBuffer.buffer = UAVBuffer;
@@ -230,9 +460,17 @@ public:
         auto &buffer_view = UAVBuffer->view_(View);
         gpu_storage.UAVTexelBuffer.resource_id = buffer_view.gpu_resource_id;
         gpu_storage.UAVTexelBuffer.metadata = ((uint64_t)Slice.elementCount << 32) | (uint64_t)(Slice.firstElement);
+        auto texel_size = MTLGetTexelSize(UAVBuffer->pixelFormat(View));
+        uint64_t metadata = Slice.byteLength;
+        metadata |= ((uint64_t)(Slice.byteOffset / texel_size) & 0xff) << 32;
+        metadata |= 1ull << 63;
+        SetMSCDescriptor(
+            Index, {UAVBuffer->current()->gpuAddress() + Slice.byteOffset, buffer_view.gpu_resource_id, metadata}
+        );
       } else {
         gpu_storage.UAVTexelBuffer.resource_id = 0;
         gpu_storage.UAVTexelBuffer.metadata = 0;
+        SetMSCDescriptor(Index, {});
       }
     }
     return S_OK;
@@ -242,6 +480,10 @@ public:
   AddUnorderedAccessView(UINT Index, Buffer *UAVBuffer, BufferSlice Slice, Buffer *Counter, UINT CounterOffsetInBytes) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
+    ReleaseDescriptorResources(Index);
+    buffer_resources_[Index] = UAVBuffer;
+    counter_resources_[Index] = Counter;
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::UAVBuffer;
     cpu_storage.UAVBuffer.buffer = UAVBuffer;
@@ -252,10 +494,12 @@ public:
         gpu_storage.UAVBuffer.pointer = UAVBuffer->current()->gpuAddress() + Slice.byteOffset;
         gpu_storage.UAVBuffer.metadata = Slice.byteLength;
         gpu_storage.UAVBuffer.counter_pointer = Counter ? Counter->current()->gpuAddress() + CounterOffsetInBytes : 0;
+        SetMSCDescriptor(Index, {gpu_storage.UAVBuffer.pointer, 0, Slice.byteLength});
       } else {
         gpu_storage.UAVBuffer.pointer = 0;
         gpu_storage.UAVBuffer.metadata = 0;
         gpu_storage.UAVBuffer.counter_pointer = 0;
+        SetMSCDescriptor(Index, {});
       }
     }
     return S_OK;
@@ -264,6 +508,9 @@ public:
   virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferViewKey View, BufferSlice Slice) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
+    ReleaseDescriptorResources(Index);
+    buffer_resources_[Index] = Buffer;
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::SRVTexelBuffer;
     cpu_storage.SRVTexelBuffer.buffer = Buffer;
@@ -275,9 +522,15 @@ public:
         auto &buffer_view = Buffer->view_(View);
         gpu_storage.UAVTexelBuffer.resource_id = buffer_view.gpu_resource_id;
         gpu_storage.UAVTexelBuffer.metadata = ((uint64_t)Slice.elementCount << 32) | (uint64_t)(Slice.firstElement);
+        auto texel_size = MTLGetTexelSize(Buffer->pixelFormat(View));
+        uint64_t metadata = Slice.byteLength;
+        metadata |= ((uint64_t)(Slice.byteOffset / texel_size) & 0xff) << 32;
+        metadata |= 1ull << 63;
+        SetMSCDescriptor(Index, {Buffer->current()->gpuAddress() + Slice.byteOffset, buffer_view.gpu_resource_id, metadata});
       } else {
         gpu_storage.UAVTexelBuffer.resource_id = 0;
         gpu_storage.UAVTexelBuffer.metadata = 0;
+        SetMSCDescriptor(Index, {});
       }
     }
     return S_OK;
@@ -286,6 +539,9 @@ public:
   virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferSlice Slice) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    std::lock_guard lock(descriptor_mutex_);
+    ReleaseDescriptorResources(Index);
+    buffer_resources_[Index] = Buffer;
     auto &cpu_storage = descriptors_[Index];
     cpu_storage.type = ShaderVisibleDescriptorType::SRVBuffer;
     cpu_storage.SRVBuffer.buffer = Buffer;
@@ -295,9 +551,11 @@ public:
       if (Buffer) {
         gpu_storage.SRVBuffer.pointer = Buffer->current()->gpuAddress() + Slice.byteOffset;
         gpu_storage.SRVBuffer.metadata = Slice.byteLength;
+        SetMSCDescriptor(Index, {gpu_storage.SRVBuffer.pointer, 0, Slice.byteLength});
       } else {
         gpu_storage.SRVBuffer.pointer = 0;
         gpu_storage.SRVBuffer.metadata = 0;
+        SetMSCDescriptor(Index, {});
       }
     }
     return S_OK;
@@ -312,12 +570,7 @@ public:
     /**
      * TODO: support null descriptor properly (respect different view dimensions)
      */
-    auto &cpu_storage = descriptors_[Index];
-    cpu_storage.type = ShaderVisibleDescriptorType::Null;
-    if (mapped_argument_buffer_) {
-      auto &gpu_storage = mapped_argument_buffer_[Index];
-      gpu_storage.ZeroFilled = {{}};
-    }
+    ClearDescriptor(Index);
     return S_OK;
   }
 
@@ -330,26 +583,40 @@ public:
     /**
      * TODO: support null descriptor properly (respect different view dimensions)
      */
-    auto &cpu_storage = descriptors_[Index];
-    cpu_storage.type = ShaderVisibleDescriptorType::Null;
-    if (mapped_argument_buffer_) {
-      auto &gpu_storage = mapped_argument_buffer_[Index];
-      gpu_storage.ZeroFilled = {{}};
-    }
+    ClearDescriptor(Index);
     return S_OK;
   }
 
-  virtual ShaderVisibleDescriptorCPUStorage const &
-  GetDescriptor(UINT Index) {
-    return descriptors_[Index];
+  ShaderVisibleDescriptorRead
+  ReadDescriptor(UINT Index) override {
+    static const ShaderVisibleDescriptorCPUStorage null_descriptor{};
+    return {descriptor_mutex_, Index < descriptors_.size() ? descriptors_[Index] : null_descriptor};
   }
 
   virtual void
   CopyDescriptors(UINT From, MTLD3D12DescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) {
+    auto *heap_to = static_cast<MTLD3D12DescriptorHeapImpl *>(pHeapTo);
+    if (!heap_to || From > descriptors_.size() || CopyCount > descriptors_.size() - From ||
+        DescriptorTo > heap_to->descriptors_.size() || CopyCount > heap_to->descriptors_.size() - DescriptorTo)
+      return;
+    std::unique_lock source_lock(descriptor_mutex_, std::defer_lock);
+    std::unique_lock destination_lock(heap_to->descriptor_mutex_, std::defer_lock);
+    if (heap_to == this)
+      source_lock.lock();
+    else
+      std::lock(source_lock, destination_lock);
     for (unsigned i = 0; i < CopyCount; i++) {
-      static_cast<MTLD3D12DescriptorHeapImpl *>(pHeapTo)->descriptors_[DescriptorTo + i] = descriptors_[From + i];
-      static_cast<MTLD3D12DescriptorHeapImpl *>(pHeapTo)->mapped_argument_buffer_[DescriptorTo + i] =
-          mapped_argument_buffer_[From + i];
+      heap_to->descriptors_[DescriptorTo + i] = descriptors_[From + i];
+      heap_to->texture_resources_[DescriptorTo + i] = texture_resources_[From + i];
+      heap_to->buffer_resources_[DescriptorTo + i] = buffer_resources_[From + i];
+      heap_to->counter_resources_[DescriptorTo + i] = counter_resources_[From + i];
+      heap_to->cbv_allocations_[DescriptorTo + i] = cbv_allocations_[From + i];
+      heap_to->acceleration_structure_resources_[DescriptorTo + i] = acceleration_structure_resources_[From + i];
+      heap_to->acceleration_structure_headers_[DescriptorTo + i] = acceleration_structure_headers_[From + i];
+      if (mapped_argument_buffer_ && heap_to->mapped_argument_buffer_)
+        heap_to->mapped_argument_buffer_[DescriptorTo + i] = mapped_argument_buffer_[From + i];
+      if (mapped_msc_argument_buffer_ && heap_to->mapped_msc_argument_buffer_)
+        heap_to->mapped_msc_argument_buffer_[DescriptorTo + i] = mapped_msc_argument_buffer_[From + i];
     }
   }
 };
@@ -363,6 +630,10 @@ class MTLD3D12RenderTargetDescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12R
 public:
   MTLD3D12RenderTargetDescriptorHeapImpl(MTLD3D12Device *pDevice) :
       MTLD3D12Pageable<MTLD3D12RenderTargetDescriptorHeap>(pDevice) {}
+
+  ~MTLD3D12RenderTargetDescriptorHeapImpl() {
+    UnregisterDescriptorHeap(this);
+  }
 
   HRESULT
   Initialize(const D3D12_DESCRIPTOR_HEAP_DESC *pDesc) {
@@ -435,14 +706,20 @@ public:
 
   virtual MTL_RENDER_TARGET_DESC
   GetRenderTarget(UINT Index) {
+    static MTL_RENDER_TARGET_DESC null_render_target = {};
+    if (Index >= render_targets_.size())
+      return null_render_target;
     return render_targets_[Index];
   }
 
   virtual void
   CopyDescriptors(UINT From, MTLD3D12RenderTargetDescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) {
+    auto *heap_to = static_cast<MTLD3D12RenderTargetDescriptorHeapImpl *>(pHeapTo);
+    if (!heap_to || From > render_targets_.size() || CopyCount > render_targets_.size() - From ||
+        DescriptorTo > heap_to->render_targets_.size() || CopyCount > heap_to->render_targets_.size() - DescriptorTo)
+      return;
     for (unsigned i = 0; i < CopyCount; i++) {
-      static_cast<MTLD3D12RenderTargetDescriptorHeapImpl *>(pHeapTo)->render_targets_[DescriptorTo + i] =
-          render_targets_[From + i];
+      heap_to->render_targets_[DescriptorTo + i] = render_targets_[From + i];
     }
   }
 };
@@ -463,6 +740,15 @@ class MTLD3D12SamplerDescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12Sample
   Rc<Buffer> buffer_;
   SamplerGPUStorage *mapped_argument_buffer_ = nullptr;
   uint64_t argument_buffer_gpu_address_ = 0;
+  Rc<Buffer> msc_buffer_;
+  dxmt_msc_descriptor_entry *mapped_msc_argument_buffer_ = nullptr;
+  uint64_t msc_argument_buffer_gpu_address_ = 0;
+
+  void
+  SetMSCDescriptor(UINT Index, dxmt_msc_descriptor_entry Entry) {
+    if (mapped_msc_argument_buffer_)
+      mapped_msc_argument_buffer_[Index] = Entry;
+  }
 
 public:
   MTLD3D12SamplerDescriptorHeapImpl(MTLD3D12Device *pDevice) :
@@ -487,26 +773,47 @@ public:
 
       Flags<BufferAllocationFlag> flags;
 #ifdef __i386__
-      IMPLEMENT_ME
+      flags.set(BufferAllocationFlag::CpuPlaced);
 #endif
       buffer_->rename(buffer_->allocate(flags));
+      if (!buffer_->current())
+        return E_OUTOFMEMORY;
       mapped_argument_buffer_ = reinterpret_cast<SamplerGPUStorage *>(buffer_->current()->mappedMemory(0));
       argument_buffer_gpu_address_ = buffer_->current()->gpuAddress();
       // FIXME: is residency required for descriptor heap? Should be the case for Metal 4
       device_->RegisterResidencyAndVA(buffer_->current());
+
+      msc_buffer_ = new Buffer(samplers_.size() * sizeof(dxmt_msc_descriptor_entry), device_->GetMTLDevice());
+      msc_buffer_->rename(msc_buffer_->allocate(flags));
+      if (!msc_buffer_->current())
+        return E_OUTOFMEMORY;
+      mapped_msc_argument_buffer_ =
+          reinterpret_cast<dxmt_msc_descriptor_entry *>(msc_buffer_->current()->mappedMemory(0));
+      msc_argument_buffer_gpu_address_ = msc_buffer_->current()->gpuAddress();
+      device_->RegisterResidencyAndVA(msc_buffer_->current());
+      memset(mapped_argument_buffer_, 0, samplers_.size() * sizeof(SamplerGPUStorage));
+      memset(mapped_msc_argument_buffer_, 0, samplers_.size() * sizeof(dxmt_msc_descriptor_entry));
     } else {
       mapped_argument_buffer_ =
           reinterpret_cast<SamplerGPUStorage *>(malloc(samplers_.size() * sizeof(SamplerGPUStorage)));
+      mapped_msc_argument_buffer_ = reinterpret_cast<dxmt_msc_descriptor_entry *>(
+          calloc(samplers_.size(), sizeof(dxmt_msc_descriptor_entry))
+      );
     }
 
     return S_OK;
   };
 
   ~MTLD3D12SamplerDescriptorHeapImpl() {
-     if (buffer_) {
-      device_->UnregisterResidencyAndVA(buffer_->current());
+    UnregisterDescriptorHeap(this);
+    if (buffer_) {
+      if (buffer_->current())
+        device_->UnregisterResidencyAndVA(buffer_->current());
+      if (msc_buffer_ && msc_buffer_->current())
+        device_->UnregisterResidencyAndVA(msc_buffer_->current());
     } else {
       free(mapped_argument_buffer_);
+      free(mapped_msc_argument_buffer_);
     }
   }
 
@@ -549,6 +856,29 @@ public:
     return __ret;
   }
 
+  uint64_t
+  GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) override {
+    if (!msc_buffer_ || Handle.ptr < argument_buffer_gpu_address_)
+      return 0;
+    uint64_t byte_offset = Handle.ptr - argument_buffer_gpu_address_;
+    if (byte_offset % sizeof(SamplerGPUStorage))
+      return 0;
+    uint64_t index = byte_offset / sizeof(SamplerGPUStorage);
+    if (index >= samplers_.size())
+      return 0;
+    return msc_argument_buffer_gpu_address_ + index * sizeof(dxmt_msc_descriptor_entry);
+  }
+
+  WMT::Buffer
+  GetDescriptorHeapBuffer() override {
+    return buffer_ && buffer_->current() ? buffer_->current()->buffer() : WMT::Buffer{};
+  }
+
+  WMT::Buffer
+  GetMSCDescriptorHeapBuffer() override {
+    return msc_buffer_ ? msc_buffer_->current()->buffer() : WMT::Buffer{};
+  }
+
 
   virtual HRESULT
   AddSampler(UINT Index, const D3D12_SAMPLER_DESC *pDesc) {
@@ -568,16 +898,23 @@ public:
       gpu_storage.cube_sampler = sampler->sampler_state_cube_handle;
       gpu_storage.metadata = (uint64_t)std::bit_cast<uint32_t>(sampler->lod_bias);
     }
+    SetMSCDescriptor(Index, {sampler->sampler_state_handle, 0, std::bit_cast<uint32_t>(sampler->lod_bias)});
 
     return S_OK;
   }
 
   virtual void
   CopyDescriptors(UINT From, MTLD3D12SamplerDescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) {
+    auto *heap_to = static_cast<MTLD3D12SamplerDescriptorHeapImpl *>(pHeapTo);
+    if (!heap_to || From > samplers_.size() || CopyCount > samplers_.size() - From ||
+        DescriptorTo > heap_to->samplers_.size() || CopyCount > heap_to->samplers_.size() - DescriptorTo)
+      return;
     for (unsigned i = 0; i < CopyCount; i++) {
-      static_cast<MTLD3D12SamplerDescriptorHeapImpl *>(pHeapTo)->samplers_[DescriptorTo + i] = samplers_[From + i];
-      static_cast<MTLD3D12SamplerDescriptorHeapImpl *>(pHeapTo)->mapped_argument_buffer_[DescriptorTo + i] =
-          mapped_argument_buffer_[From + i];
+      heap_to->samplers_[DescriptorTo + i] = samplers_[From + i];
+      if (mapped_argument_buffer_ && heap_to->mapped_argument_buffer_)
+        heap_to->mapped_argument_buffer_[DescriptorTo + i] = mapped_argument_buffer_[From + i];
+      if (mapped_msc_argument_buffer_ && heap_to->mapped_msc_argument_buffer_)
+        heap_to->mapped_msc_argument_buffer_[DescriptorTo + i] = mapped_msc_argument_buffer_[From + i];
     }
   }
 };

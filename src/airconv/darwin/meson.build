@@ -43,3 +43,15 @@ executable('airconv', airconv_src + airconv_cli_src,
   link_args           : [ llvm_ld_flags_darwin, llvm_deps ],
   native              : dxmt_crossbuild
 )
+
+if get_option('enable_tests')
+  lower_unsupported_double_test = executable('lower-unsupported-double-test',
+    files('../tests/lower_unsupported_double.cpp', '../transforms/lower_unsupported_double.cpp'),
+    include_directories : [ include_directories('..'), llvm_include_path_darwin ],
+    cpp_args            : [ airconv_args ],
+    link_args           : [ llvm_ld_flags_darwin, llvm_deps ],
+    native              : dxmt_crossbuild
+  )
+
+  test('airconv lower unsupported double', lower_unsupported_double_test)
+endif

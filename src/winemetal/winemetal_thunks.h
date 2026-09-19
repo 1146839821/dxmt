@@ -6,6 +6,60 @@
 
 #pragma pack(push, 8)
 
+enum winemetal_unixcall {
+  unix_dispatchdata_copy = 148,
+  unix_mtltexture_getbytes = 149,
+  unix_mtldevice_newmsctessellationpso = 150,
+  unix_mtldevice_newmsctessellatortables = 151,
+  unix_mtlvalidate_msctessellationpipeline = 152,
+  unix_mtldevice_newmscgeometrypso = 153,
+  unix_mtldevice_newsparsemappingqueue = 154,
+  unix_mtldevice_supportsplacementsparse = 155,
+  unix_sparsemappingqueue_signalevent = 156,
+  unix_sparsemappingqueue_waitforevent = 157,
+  unix_sparsemappingqueue_updatebuffermappings = 158,
+  unix_sparsemappingqueue_updatetexturemappings = 159,
+  unix_sparsemappingqueue_copybuffermappings = 160,
+  unix_sparsemappingqueue_copytexturemappings = 161,
+  unix_mtldevice_newplacementsparsebuffer = 162,
+  unix_mtldevice_newplacementsparsetexture = 163,
+  unix_sparsemappingqueue_addresidencyset = 164,
+  unix_mtltexture_firstmipmapintail = 165,
+  unix_sparsemappingqueue_barrierbeforeresourcestate = 166,
+  unix_mtlcommandqueue_commandbuffer_with_error_options = 167,
+  unix_mtltexture_tailsizeinbytes = 168,
+  unix_mtldevice_supportsraytracing = 170,
+  unix_mtldevice_accelerationstructuresizes,
+  unix_mtldevice_newaccelerationstructure,
+  unix_mtlaccelerationstructure_gpuresourceid,
+  unix_mtlcommandbuffer_accelerationstructurecommandencoder,
+  unix_mtlaccelerationstructurecommandencoder_build,
+  unix_mtlaccelerationstructurecommandencoder_refit,
+  unix_mtlaccelerationstructurecommandencoder_copy,
+  unix_mtlaccelerationstructurecommandencoder_copyandcompact,
+  unix_mtlaccelerationstructurecommandencoder_writecompactedsize,
+  unix_mtlaccelerationstructurecommandencoder_useresource,
+  unix_mtlcomputepipelinestate_functionhandle,
+  unix_mtlfunctionhandle_gpuresourceid,
+  unix_mtlcomputepipelinestate_newvisiblefunctiontable,
+  unix_mtlcomputepipelinestate_newintersectionfunctiontable,
+  unix_mtlvisiblefunctiontable_setfunction,
+  unix_mtlvisiblefunctiontable_gpuresourceid,
+  unix_mtlintersectionfunctiontable_setfunction,
+  unix_mtlintersectionfunctiontable_setvisiblefunctiontable,
+  unix_mtlintersectionfunctiontable_gpuresourceid,
+  unix_mtlcomputecommandencoder_setvisiblefunctiontable,
+  unix_mtlcomputecommandencoder_setintersectionfunctiontable,
+  unix_mtldevice_supportsargumentbufferstier2 = 194,
+};
+
+struct unixcall_mtldevice_newmscgeometrypso {
+  obj_handle_t device;
+  struct WMTConstMemoryPointer info;
+  obj_handle_t ret_error;
+  obj_handle_t ret_pso;
+};
+
 struct unixcall_generic_obj_ret {
   obj_handle_t ret;
 };
@@ -16,6 +70,12 @@ struct unixcall_generic_obj_noret {
 
 struct unixcall_generic_obj_obj_ret {
   obj_handle_t handle;
+  obj_handle_t ret;
+};
+
+struct unixcall_generic_obj_obj_obj_ret {
+  obj_handle_t handle;
+  obj_handle_t arg;
   obj_handle_t ret;
 };
 
@@ -55,6 +115,13 @@ struct unixcall_generic_obj_uint64_uint64_ret {
   obj_handle_t handle;
   uint64_t arg;
   uint64_t ret;
+};
+
+struct unixcall_dispatchdata_copy {
+  obj_handle_t data;
+  uint64_t destination;
+  uint64_t capacity;
+  uint64_t ret_size;
 };
 
 struct unixcall_nsstring_getcstring {
@@ -144,6 +211,25 @@ struct unixcall_mtldevice_newmeshrenderpso {
   struct WMTConstMemoryPointer info;
   obj_handle_t ret_error;
   obj_handle_t ret_pso;
+};
+
+struct unixcall_mtldevice_newmsctessellationpso {
+  obj_handle_t device;
+  struct WMTConstMemoryPointer info;
+  obj_handle_t ret_error;
+  obj_handle_t ret_pso;
+};
+
+struct unixcall_mtlvalidate_msctessellationpipeline {
+  uint32_t hs_output_primitive;
+  uint32_t gs_input_primitive;
+  uint32_t hs_output_control_point_size;
+  uint32_t ds_input_control_point_size;
+  uint32_t hs_patch_constants_size;
+  uint32_t ds_patch_constants_size;
+  uint32_t hs_output_control_point_count;
+  uint32_t ds_input_control_point_count;
+  bool ret;
 };
 
 struct unixcall_generic_obj_cmd_noret {
@@ -433,6 +519,98 @@ struct unixcall_mtldevice_newicb {
   uint64_t max_count;
   uint64_t options;
   obj_handle_t ret;
+};
+
+struct unixcall_sparsemappingqueue_mappings {
+  obj_handle_t queue;
+  obj_handle_t resource;
+  obj_handle_t heap;
+  struct WMTConstMemoryPointer operations;
+  uint64_t count;
+};
+
+struct unixcall_sparsemappingqueue_copy_mappings {
+  obj_handle_t queue;
+  obj_handle_t source;
+  obj_handle_t destination;
+  struct WMTConstMemoryPointer operations;
+  uint64_t count;
+};
+
+struct unixcall_mtldevice_newplacementsparsebuffer {
+  obj_handle_t device;
+  struct WMTMemoryPointer info;
+  enum WMTSparsePageSize sparse_page_size;
+  obj_handle_t ret;
+};
+
+struct unixcall_mtldevice_newplacementsparsetexture {
+  obj_handle_t device;
+  struct WMTMemoryPointer info;
+  enum WMTSparsePageSize sparse_page_size;
+  obj_handle_t ret;
+};
+
+struct unixcall_mtldevice_accelerationstructuresizes {
+  obj_handle_t device;
+  struct WMTConstMemoryPointer info;
+  uint64_t ret_acceleration_structure_size;
+  uint64_t ret_build_scratch_buffer_size;
+  uint64_t ret_refit_scratch_buffer_size;
+};
+
+struct unixcall_mtldevice_newaccelerationstructure {
+  obj_handle_t device;
+  uint64_t size;
+  obj_handle_t ret;
+  uint64_t gpu_resource_id;
+};
+
+struct unixcall_mtlaccelerationstructure_gpuresourceid {
+  obj_handle_t acceleration_structure;
+  uint64_t ret;
+};
+
+struct unixcall_mtlaccelerationstructurecommandencoder_build {
+  obj_handle_t encoder;
+  obj_handle_t destination;
+  struct WMTConstMemoryPointer info;
+  obj_handle_t scratch;
+  uint64_t scratch_offset;
+  bool ret;
+};
+
+struct unixcall_mtlaccelerationstructurecommandencoder_refit {
+  obj_handle_t encoder;
+  obj_handle_t source;
+  obj_handle_t destination;
+  struct WMTConstMemoryPointer info;
+  obj_handle_t scratch;
+  uint64_t scratch_offset;
+  bool ret;
+};
+
+struct unixcall_mtlaccelerationstructurecommandencoder_copy {
+  obj_handle_t encoder;
+  obj_handle_t source;
+  obj_handle_t destination;
+  bool ret;
+};
+
+struct unixcall_mtlaccelerationstructurecommandencoder_writecompactedsize {
+  obj_handle_t encoder;
+  obj_handle_t acceleration_structure;
+  obj_handle_t buffer;
+  uint64_t offset;
+  uint32_t size_data_type;
+  bool ret;
+};
+
+struct unixcall_mtlaccelerationstructurecommandencoder_useresource {
+  obj_handle_t encoder;
+  obj_handle_t resource;
+  enum WMTResourceUsage usage;
+  bool ret;
 };
 
 #pragma pack(pop)

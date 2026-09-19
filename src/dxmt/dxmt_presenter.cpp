@@ -4,6 +4,7 @@
 #include "dxmt_format.hpp"
 #include "dxmt_presenter.hpp"
 #include "util_likely.hpp"
+#include "log/log.hpp"
 
 
 namespace dxmt {
@@ -156,13 +157,21 @@ Presenter::encodeCommands(
     std::function<void(WMT::RenderCommandEncoder)> &&wait_fences,
     std::function<void(WMT::RenderCommandEncoder)> &&update_fences
 ) {
+  static uint32_t trace_encode_count = 0;
   auto drawable = layer_.nextDrawable();
+  auto drawable_texture = drawable.texture();
+
+  if (trace_encode_count++ < 32)
+    DEBUG("Presenter encode: backbuffer=", backbuffer.handle, " size=", backbuffer.width(), "x", backbuffer.height(),
+          " drawable=", drawable.handle, " texture=", drawable_texture.handle,
+          " size=", drawable_texture.width(), "x", drawable_texture.height(),
+          " pso=", present_blit_.handle, "/", present_scale_.handle);
 
   WMTRenderPassInfo info;
   WMT::InitializeRenderPassInfo(info);
   info.colors[0].load_action = WMTLoadActionDontCare;
   info.colors[0].store_action = WMTStoreActionStore;
-  info.colors[0].texture = drawable.texture();
+    info.colors[0].texture = drawable_texture;
   auto encoder = cmdbuf.renderCommandEncoder(info);
   wait_fences(encoder);
   encoder.setFragmentTexture(backbuffer, 0);
@@ -229,6 +238,11 @@ Presenter::buildRenderPipelineState(bool is_pq, bool with_hdr_metadata, bool is_
     present_pipeline.fragment_function = fs_present_quad_scaled;
     present_scale_ = device_.newRenderPipelineState(present_pipeline, error);
   }
+
+  if (error)
+    ERR("Presenter: failed to build present pipeline: ", error.description().getUTF8String());
+  if (!present_blit_ || !present_scale_)
+    ERR("Presenter: present pipeline is incomplete: ", present_blit_.handle, "/", present_scale_.handle);
 }
 
 } // namespace dxmt

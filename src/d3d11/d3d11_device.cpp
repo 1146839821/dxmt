@@ -1198,7 +1198,8 @@ public:
       return S_OK;
     }
 
-    if (riid == __uuidof(ID3D11Debug) || riid == __uuidof(ID3D11InfoQueue) || riid == __uuidof(IMTLD3D11ContextExt))
+    if (riid == __uuidof(ID3D11Debug) || riid == __uuidof(ID3D11InfoQueue) ||
+        riid == DXMT_ID3D11_VIDEO_DEVICE_GUID || riid == __uuidof(IMTLD3D11ContextExt))
       return E_NOINTERFACE;
 
     if (riid == kRenderdocUUID || riid == kPixUUID || riid == kGpaUUID)
