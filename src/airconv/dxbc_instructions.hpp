@@ -22,6 +22,7 @@
 #include <array>
 #include <map>
 #include <string_view>
+#include <string>
 #include <variant>
 #include "packed_variant_list.hpp"
 
