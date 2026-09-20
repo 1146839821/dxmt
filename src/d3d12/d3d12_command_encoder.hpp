@@ -46,6 +46,11 @@ struct EncoderData {
   EncoderType type;
   EncoderData *next = nullptr;
   uint64_t id;
+  // Commands store native resource handles for compact translation. Keep a
+  // strong reference alongside each encoder so a D3D12 resource released
+  // after Close() cannot invalidate the handle before ExecuteCommandLists
+  // translates or completes the Metal command buffer.
+  std::vector<WMT::Reference<WMT::Resource>> resource_refs;
 };
 
 struct ClearEncoderData : EncoderData {

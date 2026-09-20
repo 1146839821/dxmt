@@ -723,7 +723,10 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   bool airconv_compute_residency_ = false;
 
   struct ResourceStateTransition {
-    MTLD3D12Resource *resource;
+    // State commits run from ExecuteCommandLists after the application may
+    // have released its last public ID3D12Resource reference. Keep the
+    // private resource object alive until the queued transition is committed.
+    Com<MTLD3D12Resource, false> resource;
     UINT subresource;
     D3D12_RESOURCE_STATES before;
     D3D12_RESOURCE_STATES after;
@@ -1192,7 +1195,7 @@ public:
 
   void CommitResourceStates() final {
     for (const auto &transition : resource_state_transitions_) {
-      auto *resource = transition.resource;
+      auto *resource = transition.resource.ptr();
       const auto state_matches = [&, resource](D3D12_RESOURCE_STATES current) {
         return current == transition.before ||
                current == transition.after ||
@@ -1383,6 +1386,20 @@ public:
   }
 
   void
+  RetainResourceForCurrentEncoder(obj_handle_t resource) {
+    if (!resource || !allocator_->encoder_current)
+      return;
+
+    WMT::Resource native_resource;
+    native_resource.handle = resource;
+    try {
+      allocator_->encoder_current->resource_refs.emplace_back(native_resource);
+    } catch (...) {
+      FailRecording(__func__, "resource lifetime retention allocation failed");
+    }
+  }
+
+  void
   EncodeRenderResourceUse(obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages stages) {
     if (!resource)
       return;
@@ -1393,7 +1410,8 @@ public:
       return;
     mask.usage = merged_usage;
     mask.stages = merged_stages;
-    indirect_resources_used_.insert(resource);
+    if (indirect_resources_used_.insert(resource).second)
+      RetainResourceForCurrentEncoder(resource);
     auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
     cmd.type = WMTRenderCommandUseResource;
     cmd.resource = resource;
@@ -1410,7 +1428,8 @@ public:
     if (merged_usage == mask.usage)
       return;
     mask.usage = merged_usage;
-    indirect_resources_used_.insert(resource);
+    if (indirect_resources_used_.insert(resource).second)
+      RetainResourceForCurrentEncoder(resource);
     auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_useresource>();
     cmd.type = WMTComputeCommandUseResource;
     cmd.resource = resource;
@@ -3353,8 +3372,8 @@ public:
 
     auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
     cmd_cp.type = WMTBlitCommandCopyFromBufferToBuffer;
-    cmd_cp.src = src->buffer->current()->buffer();
-    cmd_cp.dst = dst->buffer->current()->buffer();
+    cmd_cp.src = static_cast<MTLD3D12Resource *>(pSrcBuffer)->buffer->current()->buffer();
+    cmd_cp.dst = static_cast<MTLD3D12Resource *>(pDstBuffer)->buffer->current()->buffer();
     cmd_cp.src_offset = SrcOffset;
     cmd_cp.dst_offset = DstOffset;
     cmd_cp.copy_length = ByteCount;

@@ -278,6 +278,7 @@ struct TestCase {
   bool zero_index_view = false;
   bool geometry_root_srv_uav = false;
   bool null_texture_query = false;
+  bool release_resources_before_execute = false;
 };
 
 bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &test) {
@@ -685,6 +686,17 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   if (!CheckHR("Close", list->Close()))
     return fail("command list close failed");
 
+  if (test.release_resources_before_execute) {
+    // D3D12 command recording must retain resources referenced by root
+    // descriptors until the queue has finished translating and executing the
+    // command list.  This deliberately releases the application references
+    // after Close and before ExecuteCommandLists.
+    Release(root_uav_data);
+    root_uav_data = nullptr;
+    Release(root_data);
+    root_data = nullptr;
+  }
+
   ID3D12CommandList *command_lists[] = {list};
   queue->ExecuteCommandLists(1, command_lists);
   if (!CheckHR("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))) ||
@@ -748,6 +760,8 @@ int main(int argc, char **argv) {
        false, true},
       {"geometry-root-srv-uav", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
        0x0000ff00u, false, false, false, true},
+      {"geometry-root-srv-uav-lifetime", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x0000ff00u, false, false, false, true, false, true},
       {"null-texture-query", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
        0x00ffffffu, false, false, false, false, true},
   };
