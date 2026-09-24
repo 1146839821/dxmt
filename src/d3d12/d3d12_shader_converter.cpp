@@ -34,7 +34,6 @@ constexpr uint32_t kDXILFourCC = MakeFourCC('D', 'X', 'I', 'L');
 constexpr uint32_t kSFI0FourCC = MakeFourCC('S', 'F', 'I', '0');
 constexpr uint32_t kPSVFourCC = MakeFourCC('P', 'S', 'V', '0');
 constexpr uint32_t kDXILComputeShaderKind = 5;
-constexpr uint32_t kDXILLibraryShaderKind = 6;
 constexpr uint32_t kDXILModuleBlockID = 8;
 constexpr uint32_t kDXILConstantsBlockID = 11;
 constexpr uint32_t kDXILFunctionBlockID = 12;
@@ -52,6 +51,46 @@ constexpr uint64_t kDXILFunctionCallRecord = 34;
 constexpr uint64_t kDXILAtomic64OnTypedResource = 0x400000;
 constexpr uint64_t kDXILAtomic64OnGroupShared = 0x800000;
 constexpr uint64_t kDXILAtomic64OnHeapResource = 0x10000000;
+
+D3D12ShaderKind
+DecodeShaderKind(uint32_t program_version) {
+  switch (program_version >> 16) {
+  case 0:
+    return D3D12ShaderKind::Pixel;
+  case 1:
+    return D3D12ShaderKind::Vertex;
+  case 2:
+    return D3D12ShaderKind::Geometry;
+  case 3:
+    return D3D12ShaderKind::Hull;
+  case 4:
+    return D3D12ShaderKind::Domain;
+  case 5:
+    return D3D12ShaderKind::Compute;
+  case 6:
+    return D3D12ShaderKind::Library;
+  case 7:
+    return D3D12ShaderKind::RayGeneration;
+  case 8:
+    return D3D12ShaderKind::Intersection;
+  case 9:
+    return D3D12ShaderKind::AnyHit;
+  case 10:
+    return D3D12ShaderKind::ClosestHit;
+  case 11:
+    return D3D12ShaderKind::Miss;
+  case 12:
+    return D3D12ShaderKind::Callable;
+  case 13:
+    return D3D12ShaderKind::Mesh;
+  case 14:
+    return D3D12ShaderKind::Amplification;
+  case 15:
+    return D3D12ShaderKind::Node;
+  default:
+    return D3D12ShaderKind::Unknown;
+  }
+}
 
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
@@ -1083,27 +1122,6 @@ HasUnsupportedDXILDenormMode(const D3D12_SHADER_BYTECODE &shader) {
 }
 
 bool
-IsDXILLibraryShader(const D3D12_SHADER_BYTECODE &shader) {
-  if (!shader.pShaderBytecode || !shader.BytecodeLength)
-    return false;
-
-  microsoft::CDXBCParser parser;
-  if (FAILED(parser.ReadDXBC(shader.pShaderBytecode, static_cast<uint32_t>(shader.BytecodeLength))))
-    return false;
-  const UINT dxil_blob = parser.FindNextMatchingBlob(static_cast<microsoft::DXBCFourCC>(kDXILFourCC), 0);
-  if (dxil_blob == DXBC_BLOB_NOT_FOUND || parser.GetBlobSize(dxil_blob) < 24)
-    return false;
-
-  const auto *blob = static_cast<const uint8_t *>(parser.GetBlob(dxil_blob));
-  if (!blob || std::memcmp(blob + 8, "DXIL", 4) != 0)
-    return false;
-
-  uint32_t program_version = 0;
-  std::memcpy(&program_version, blob, sizeof(program_version));
-  return (program_version >> 16) == kDXILLibraryShaderKind;
-}
-
-bool
 DeserializeMSCConversionCache(const uint8_t *data, size_t data_size, D3D12ConvertedShader &converted) {
   if (!data || data_size < sizeof(MSCSerializedCacheHeader))
     return false;
@@ -1326,18 +1344,84 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
   if (FAILED(classification.validation_hr))
     return classification;
 
-  classification.backend = D3D12ShaderBackend::Airconv;
+  classification.validation_hr = S_OK;
   const UINT root_signature_blob = parser.FindNextMatchingBlob(microsoft::DXBC_RootSignature, 0);
   if (root_signature_blob != DXBC_BLOB_NOT_FOUND) {
     classification.embedded_root_signature = parser.GetBlob(root_signature_blob);
     classification.embedded_root_signature_size = parser.GetBlobSize(root_signature_blob);
   }
+
+  uint32_t legacy_shdr_count = 0;
+  uint32_t legacy_shex_count = 0;
+  uint32_t dxil_count = 0;
+  const void *executable = nullptr;
+  size_t executable_size = 0;
   for (uint32_t i = 0; i < parser.GetBlobCount(); i++) {
-    if (parser.GetBlobFourCC(i) == kDXILFourCC) {
-      classification.backend = D3D12ShaderBackend::MetalShaderConverter;
-      break;
+    const uint32_t fourcc = parser.GetBlobFourCC(i);
+    if (fourcc == static_cast<uint32_t>(microsoft::DXBC_GenericShader)) {
+      legacy_shdr_count++;
+      executable = parser.GetBlob(i);
+      executable_size = parser.GetBlobSize(i);
+    } else if (fourcc == static_cast<uint32_t>(microsoft::DXBC_GenericShaderEx)) {
+      legacy_shex_count++;
+      executable = parser.GetBlob(i);
+      executable_size = parser.GetBlobSize(i);
+    } else if (fourcc == kDXILFourCC) {
+      dxil_count++;
+      executable = parser.GetBlob(i);
+      executable_size = parser.GetBlobSize(i);
     }
   }
+
+  classification.has_legacy_shdr = legacy_shdr_count != 0;
+  classification.has_legacy_shex = legacy_shex_count != 0;
+  classification.has_dxil = dxil_count != 0;
+
+  const bool has_legacy = classification.has_legacy_shdr || classification.has_legacy_shex;
+  if ((has_legacy && classification.has_dxil) || legacy_shdr_count > 1 || legacy_shex_count > 1 || dxil_count > 1 ||
+      (classification.has_legacy_shdr && classification.has_legacy_shex)) {
+    classification.executable_family = D3D12ShaderExecutableFamily::Ambiguous;
+    classification.backend = D3D12ShaderBackend::Unsupported;
+    classification.validation_hr = E_INVALIDARG;
+    return classification;
+  }
+
+  if (!has_legacy && !classification.has_dxil) {
+    classification.executable_family = D3D12ShaderExecutableFamily::None;
+    classification.backend = D3D12ShaderBackend::Unsupported;
+    classification.validation_hr = E_INVALIDARG;
+    return classification;
+  }
+
+  if (classification.has_dxil) {
+    const uint8_t *bitcode = nullptr;
+    size_t bitcode_size = 0;
+    if (!GetDXILBitcode(shader, &bitcode, &bitcode_size) || !executable || executable_size < 4) {
+      classification.executable_family = D3D12ShaderExecutableFamily::Unsupported;
+      classification.backend = D3D12ShaderBackend::Unsupported;
+      classification.validation_hr = E_INVALIDARG;
+      return classification;
+    }
+    uint32_t program_version = 0;
+    std::memcpy(&program_version, executable, sizeof(program_version));
+    classification.shader_kind = DecodeShaderKind(program_version);
+    classification.executable_family = D3D12ShaderExecutableFamily::DXIL;
+    classification.backend = D3D12ShaderBackend::MetalShaderConverter;
+    classification.is_library_shader = classification.shader_kind == D3D12ShaderKind::Library;
+  } else {
+    if (!executable || executable_size < sizeof(uint32_t)) {
+      classification.executable_family = D3D12ShaderExecutableFamily::Unsupported;
+      classification.backend = D3D12ShaderBackend::Unsupported;
+      classification.validation_hr = E_INVALIDARG;
+      return classification;
+    }
+    uint32_t program_version = 0;
+    std::memcpy(&program_version, executable, sizeof(program_version));
+    classification.shader_kind = DecodeShaderKind(program_version);
+    classification.executable_family = D3D12ShaderExecutableFamily::LegacyTokenized;
+    classification.backend = D3D12ShaderBackend::Airconv;
+  }
+
   if (classification.backend == D3D12ShaderBackend::MetalShaderConverter) {
     classification.uses_unsupported_view_id =
         HasInputSemantic(shader, "SV_ViewID") || HasOutputSemantic(shader, "SV_ViewID") || HasUnsupportedDXILViewID(shader);
@@ -1354,7 +1438,6 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
     classification.uses_unsupported_wave_size = HasUnsupportedDXILWaveSize(shader);
     classification.uses_texture_load = HasDXILTextureLoad(shader);
     classification.atomic64_feature_flags = GetDXILAtomic64FeatureFlags(shader);
-    classification.is_library_shader = IsDXILLibraryShader(shader);
   }
   return classification;
 }

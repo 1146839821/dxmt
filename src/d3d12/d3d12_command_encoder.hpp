@@ -53,6 +53,13 @@ struct EncoderData {
   std::vector<WMT::Reference<WMT::Resource>> resource_refs;
 };
 
+struct SubmissionResourceUse {
+  EncoderData *encoder;
+  WMT::Resource resource;
+  WMTResourceUsage usage;
+  WMTRenderStages stages;
+};
+
 struct ClearEncoderData : EncoderData {
   union {
     WMTClearColor color;

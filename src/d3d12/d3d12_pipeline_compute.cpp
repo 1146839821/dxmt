@@ -62,6 +62,11 @@ public:
       ERR("Invalid D3D12 shader container, HRESULT=", classification.validation_hr);
       return classification.validation_hr;
     }
+    if (classification.shader_kind != D3D12ShaderKind::Unknown &&
+        classification.shader_kind != D3D12ShaderKind::Compute) {
+      ERR("CreateComputePipelineState: CS bytecode declares a different shader stage");
+      return E_INVALIDARG;
+    }
 
     auto shader_backend = classification.backend;
 
@@ -95,8 +100,6 @@ public:
       if (FAILED(hr))
         return hr;
 
-      this->shader_backend = D3D12ShaderBackend::MetalShaderConverter;
-
       threadgroup_size = {
           converted.threadgroup_size[0], converted.threadgroup_size[1], converted.threadgroup_size[2]
       };
@@ -113,7 +116,11 @@ public:
         return E_FAIL;
       }
 
-      return create_compute_pso(cs_func);
+      hr = create_compute_pso(cs_func);
+      if (FAILED(hr))
+        return hr;
+      this->shader_backend = D3D12ShaderBackend::MetalShaderConverter;
+      return S_OK;
     }
 
     D3D12AirconvError sm50_err;
@@ -171,7 +178,11 @@ public:
       return E_FAIL;
     }
 
-    return create_compute_pso(cs_func);
+    hr = create_compute_pso(cs_func);
+    if (FAILED(hr))
+      return hr;
+    this->shader_backend = D3D12ShaderBackend::Airconv;
+    return S_OK;
   }
 
   HRESULT

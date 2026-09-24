@@ -15,9 +15,38 @@ namespace dxmt {
 struct DXMTMSCCapabilities;
 
 enum class D3D12ShaderBackend {
+  None,
   Airconv,
   MetalShaderConverter,
   Unsupported,
+};
+
+enum class D3D12ShaderExecutableFamily {
+  None,
+  LegacyTokenized,
+  DXIL,
+  Ambiguous,
+  Unsupported,
+};
+
+enum class D3D12ShaderKind {
+  Unknown,
+  Pixel,
+  Vertex,
+  Geometry,
+  Hull,
+  Domain,
+  Compute,
+  Library,
+  RayGeneration,
+  Intersection,
+  AnyHit,
+  ClosestHit,
+  Miss,
+  Callable,
+  Mesh,
+  Amplification,
+  Node,
 };
 
 struct D3D12ConvertedShader {
@@ -26,15 +55,20 @@ struct D3D12ConvertedShader {
   std::string entry_point;
   std::array<uint32_t, 3> threadgroup_size = {};
   dxmt_msc_shader_reflection reflection = {};
-  D3D12ShaderBackend backend = D3D12ShaderBackend::Airconv;
+  D3D12ShaderBackend backend = D3D12ShaderBackend::None;
 };
 
 D3D12ShaderBackend
 DetectD3D12ShaderBackend(const D3D12_SHADER_BYTECODE &shader);
 
 struct D3D12ShaderClassification {
-  D3D12ShaderBackend backend = D3D12ShaderBackend::Unsupported;
+  D3D12ShaderBackend backend = D3D12ShaderBackend::None;
+  D3D12ShaderExecutableFamily executable_family = D3D12ShaderExecutableFamily::Unsupported;
+  D3D12ShaderKind shader_kind = D3D12ShaderKind::Unknown;
   HRESULT validation_hr = E_INVALIDARG;
+  bool has_legacy_shdr = false;
+  bool has_legacy_shex = false;
+  bool has_dxil = false;
   bool uses_unsupported_view_id = false;
   bool uses_unsupported_attribute_at_vertex = false;
   bool uses_unsupported_stencil_ref = false;
@@ -52,6 +86,15 @@ struct D3D12ShaderClassification {
   const void *embedded_root_signature = nullptr;
   size_t embedded_root_signature_size = 0;
 };
+
+inline D3D12ShaderClassification
+AbsentD3D12ShaderClassification() {
+  D3D12ShaderClassification classification;
+  classification.backend = D3D12ShaderBackend::None;
+  classification.executable_family = D3D12ShaderExecutableFamily::None;
+  classification.validation_hr = S_OK;
+  return classification;
+}
 
 D3D12ShaderClassification
 ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader);

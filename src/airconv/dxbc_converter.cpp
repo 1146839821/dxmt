@@ -32,6 +32,11 @@ public:
   llvm::SmallVector<char, 0> buf;
 };
 
+static void TransferErrorToCaller(std::unique_ptr<SM50ErrorInternal> &error, sm50_error_t *ppError) {
+  if (ppError)
+    *ppError = static_cast<sm50_error_t>(error.release());
+}
+
 namespace dxmt::dxbc {
 
 inline dxmt::shader::common::ResourceType
@@ -1026,29 +1031,48 @@ AIRCONV_API int SM50Initialize(
   if (ppError) {
     *ppError = nullptr;
   }
-  auto errorObj = new SM50ErrorInternal();
+  auto errorObj = std::make_unique<SM50ErrorInternal>();
   llvm::raw_svector_ostream errorOut(errorObj->buf);
 
   if (ppShader == nullptr) {
     errorOut << "ppShader can not be null\0";
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
 
   CDXBCParser DXBCParser;
   if (DXBCParser.ReadDXBC(pBytecode, BytecodeSize) != S_OK) {
     errorOut << "Invalid DXBC bytecode\0";
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
 
-  UINT codeBlobIdx = DXBCParser.FindNextMatchingBlob(DXBC_GenericShaderEx);
-  if (codeBlobIdx == DXBC_BLOB_NOT_FOUND) {
-    codeBlobIdx = DXBCParser.FindNextMatchingBlob(DXBC_GenericShader);
+  constexpr UINT dxil_fourcc =
+      static_cast<UINT>('D') | (static_cast<UINT>('X') << 8) | (static_cast<UINT>('I') << 16) |
+      (static_cast<UINT>('L') << 24);
+  UINT shdr_count = 0;
+  UINT shex_count = 0;
+  UINT dxil_count = 0;
+  for (UINT i = 0; i < DXBCParser.GetBlobCount(); i++) {
+    const UINT fourcc = DXBCParser.GetBlobFourCC(i);
+    shdr_count += fourcc == DXBC_GenericShader;
+    shex_count += fourcc == DXBC_GenericShaderEx;
+    dxil_count += fourcc == dxil_fourcc;
   }
+
+  const bool has_shdr = shdr_count != 0;
+  const bool has_shex = shex_count != 0;
+  const bool ambiguous = (has_shdr && has_shex) || shdr_count > 1 || shex_count > 1 || dxil_count > 1 || dxil_count;
+  if (ambiguous || (!has_shdr && !has_shex)) {
+    errorOut << "AIRCONV requires exactly one legacy SHDR or SHEX executable\0";
+    TransferErrorToCaller(errorObj, ppError);
+    return 1;
+  }
+
+  const UINT codeBlobIdx = DXBCParser.FindNextMatchingBlob(has_shex ? DXBC_GenericShaderEx : DXBC_GenericShader);
   if (codeBlobIdx == DXBC_BLOB_NOT_FOUND) {
     errorOut << "Invalid DXBC bytecode: shader blob not found\0";
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
   const void *codeBlob = DXBCParser.GetBlob(codeBlobIdx);
@@ -1059,17 +1083,17 @@ AIRCONV_API int SM50Initialize(
   CSignatureParser inputParser;
   if (DXBCGetInputSignature(pBytecode, &inputParser) != S_OK) {
     errorOut << "Invalid DXBC bytecode: input signature not found\0";
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
   CSignatureParser5 outputParser;
   if (DXBCGetOutputSignature(pBytecode, &outputParser) != S_OK) {
     errorOut << "Invalid DXBC bytecode: output signature not found\0";
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
 
-  auto sm50_shader = new SM50ShaderInternal();
+  auto sm50_shader = std::make_unique<SM50ShaderInternal>();
   sm50_shader->shader_type = CodeParser.ShaderType();
   auto shader_info = &(sm50_shader->shader_info);
 
@@ -1081,7 +1105,7 @@ AIRCONV_API int SM50Initialize(
     }
   }
 
-  sm50_shader->bbs = read_control_flow(CodeParser, sm50_shader, inputParser, outputParser);
+  sm50_shader->bbs = read_control_flow(CodeParser, sm50_shader.get(), inputParser, outputParser);
 
   auto &binding_table = shader_info->binding_table;
   auto &binding_table_cbuffer = shader_info->binding_table_cbuffer;
@@ -1286,19 +1310,19 @@ AIRCONV_API int SM50Initialize(
       auto threads_per_patch = next_pow2(sm50_shader->hull_maximum_threads_per_patch);
       if (threads_per_patch > 32) {
         errorOut << "Threadgroup size of tessellation pipeline is too large.";
-        *ppError = (sm50_error_t)errorObj;
+        TransferErrorToCaller(errorObj, ppError);
         return 1;
       }
       auto patch_per_group = 32 / threads_per_patch;
       float max_tesselation_factor = sm50_shader->max_tesselation_factor;
 
-      while (estimate_payload_size(sm50_shader, max_tesselation_factor, patch_per_group) > 16384) {
+      while (estimate_payload_size(sm50_shader.get(), max_tesselation_factor, patch_per_group) > 16384) {
         if (patch_per_group == 1) {
           if (max_tesselation_factor > 1.0f) {
             max_tesselation_factor = std::max(max_tesselation_factor - 2.0f, 1.0f);
           } else {
             errorOut << "Payload size of tessellation pipeline is too large.";
-            *ppError = (sm50_error_t)errorObj;
+            TransferErrorToCaller(errorObj, ppError);
             return 1;
           }
         } else {
@@ -1320,7 +1344,7 @@ AIRCONV_API int SM50Initialize(
       uint32_t max_potential_tess_factor = 1;
 
       for (int tess_factor = 1; tess_factor <= 64; tess_factor++) {
-        auto x = estimate_mesh_size(sm50_shader, tess_factor);
+        auto x = estimate_mesh_size(sm50_shader.get(), tess_factor);
         if (x > 32768)
           break;
         max_potential_tess_factor = tess_factor;
@@ -1348,7 +1372,7 @@ AIRCONV_API int SM50Initialize(
     pRefl->ArgumentTableQwords = binding_table.Size();
   }
 
-  *ppShader = sm50_shader;
+  *ppShader = static_cast<sm50_shader_t>(sm50_shader.release());
   return 0;
 };
 
@@ -1385,11 +1409,11 @@ AIRCONV_API int SM50Compile(
   if (ppError) {
     *ppError = nullptr;
   }
-  auto errorObj = new SM50ErrorInternal();
+  auto errorObj = std::make_unique<SM50ErrorInternal>();
   llvm::raw_svector_ostream errorOut(errorObj->buf);
   if (ppBitcode == nullptr) {
     errorOut << "ppBitcode can not be null\0";
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
 
@@ -1409,7 +1433,7 @@ AIRCONV_API int SM50Compile(
     llvm::handleAllErrors(std::move(err), [&](const UnsupportedFeature &u) {
       errorOut << u.msg;
     });
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
 
@@ -1446,11 +1470,11 @@ AIRCONV_API int SM50CompileTessellationPipelineHull(
   if (ppError) {
     *ppError = nullptr;
   }
-  auto errorObj = new SM50ErrorInternal();
+  auto errorObj = std::make_unique<SM50ErrorInternal>();
   llvm::raw_svector_ostream errorOut(errorObj->buf);
   if (ppBitcode == nullptr) {
     errorOut << "ppBitcode can not be null\0";
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
 
@@ -1472,7 +1496,7 @@ AIRCONV_API int SM50CompileTessellationPipelineHull(
     llvm::handleAllErrors(std::move(err), [&](const UnsupportedFeature &u) {
       errorOut << u.msg;
     });
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
 
@@ -1510,11 +1534,11 @@ AIRCONV_API int SM50CompileTessellationPipelineDomain(
   if (ppError) {
     *ppError = nullptr;
   }
-  auto errorObj = new SM50ErrorInternal();
+  auto errorObj = std::make_unique<SM50ErrorInternal>();
   llvm::raw_svector_ostream errorOut(errorObj->buf);
   if (ppBitcode == nullptr) {
     errorOut << "ppBitcode can not be null\0";
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
 
@@ -1537,7 +1561,7 @@ AIRCONV_API int SM50CompileTessellationPipelineDomain(
     llvm::handleAllErrors(std::move(err), [&](const UnsupportedFeature &u) {
       errorOut << u.msg;
     });
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
 
@@ -1575,11 +1599,11 @@ AIRCONV_API int SM50CompileGeometryPipelineVertex(
   if (ppError) {
     *ppError = nullptr;
   }
-  auto errorObj = new SM50ErrorInternal();
+  auto errorObj = std::make_unique<SM50ErrorInternal>();
   llvm::raw_svector_ostream errorOut(errorObj->buf);
   if (ppBitcode == nullptr) {
     errorOut << "ppBitcode can not be null\0";
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
 
@@ -1601,7 +1625,7 @@ AIRCONV_API int SM50CompileGeometryPipelineVertex(
     llvm::handleAllErrors(std::move(err), [&](const UnsupportedFeature &u) {
       errorOut << u.msg;
     });
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
 
@@ -1638,11 +1662,11 @@ AIRCONV_API int SM50CompileGeometryPipelineGeometry(
   if (ppError) {
     *ppError = nullptr;
   }
-  auto errorObj = new SM50ErrorInternal();
+  auto errorObj = std::make_unique<SM50ErrorInternal>();
   llvm::raw_svector_ostream errorOut(errorObj->buf);
   if (ppBitcode == nullptr) {
     errorOut << "ppBitcode can not be null\0";
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
 
@@ -1665,7 +1689,7 @@ AIRCONV_API int SM50CompileGeometryPipelineGeometry(
     llvm::handleAllErrors(std::move(err), [&](const UnsupportedFeature &u) {
       errorOut << u.msg;
     });
-    *ppError = (sm50_error_t)errorObj;
+    TransferErrorToCaller(errorObj, ppError);
     return 1;
   }
 

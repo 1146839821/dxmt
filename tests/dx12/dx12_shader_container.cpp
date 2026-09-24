@@ -4,11 +4,13 @@
 #include <d3d12.h>
 #include <d3dcompiler.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <vector>
 
 #include "../../src/util/util_md5.hpp"
@@ -49,14 +51,14 @@ bool CompileShader(
 
 bool ExpectComputePSO(
     ID3D12Device *device, const char *name, const D3D12_SHADER_BYTECODE &shader,
-    ID3D12RootSignature *root_signature, bool expect_success
+    ID3D12RootSignature *root_signature, bool expect_success, std::optional<HRESULT> expected_hr = std::nullopt
 ) {
   D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
   desc.pRootSignature = root_signature;
   desc.CS = shader;
   ID3D12PipelineState *pso = nullptr;
   const HRESULT hr = device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pso));
-  const bool passed = expect_success ? SUCCEEDED(hr) : FAILED(hr);
+  const bool passed = expected_hr ? hr == *expected_hr : (expect_success ? SUCCEEDED(hr) : FAILED(hr));
   std::cout << "container " << name << (passed ? " passed" : " FAILED")
             << ": 0x" << std::hex << static_cast<unsigned long>(hr) << std::dec << "\n";
   Release(pso);
@@ -66,7 +68,9 @@ bool ExpectComputePSO(
 bool ExpectGraphicsPSO(
     ID3D12Device *device, const char *name, const D3D12_SHADER_BYTECODE &vertex_shader,
     const D3D12_SHADER_BYTECODE &pixel_shader, ID3D12RootSignature *root_signature, bool expect_success,
-    bool depth_only = false, bool vertex_input = false
+    bool depth_only = false, bool vertex_input = false,
+    D3D12_SHADER_BYTECODE hull_shader = {}, D3D12_SHADER_BYTECODE domain_shader = {},
+    D3D12_SHADER_BYTECODE geometry_shader = {}, std::optional<HRESULT> expected_hr = std::nullopt
 ) {
   static const D3D12_INPUT_ELEMENT_DESC input_layout[] = {
       {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0,
@@ -78,7 +82,12 @@ bool ExpectGraphicsPSO(
   desc.pRootSignature = root_signature;
   desc.VS = vertex_shader;
   desc.PS = pixel_shader;
-  desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  desc.HS = hull_shader;
+  desc.DS = domain_shader;
+  desc.GS = geometry_shader;
+  desc.PrimitiveTopologyType = hull_shader.pShaderBytecode || domain_shader.pShaderBytecode
+                                   ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH
+                                   : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   desc.NumRenderTargets = depth_only ? 0 : 1;
   desc.RTVFormats[0] = depth_only ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R8G8B8A8_UNORM;
   desc.DSVFormat = depth_only ? DXGI_FORMAT_D24_UNORM_S8_UINT : DXGI_FORMAT_UNKNOWN;
@@ -100,7 +109,7 @@ bool ExpectGraphicsPSO(
 
   ID3D12PipelineState *pso = nullptr;
   const HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso));
-  const bool passed = expect_success ? SUCCEEDED(hr) : FAILED(hr);
+  const bool passed = expected_hr ? hr == *expected_hr : (expect_success ? SUCCEEDED(hr) : FAILED(hr));
   std::cout << "container " << name << (passed ? " passed" : " FAILED")
             << ": 0x" << std::hex << static_cast<unsigned long>(hr) << std::dec << "\n";
   Release(pso);
@@ -228,10 +237,139 @@ bool EmbedRootSignature(
   return !embedded_shader.empty();
 }
 
+struct ContainerPart {
+  uint32_t fourcc;
+  std::vector<uint8_t> payload;
+};
+
+constexpr uint32_t MakeFourCC(char a, char b, char c, char d) {
+  return static_cast<uint32_t>(static_cast<uint8_t>(a)) |
+         (static_cast<uint32_t>(static_cast<uint8_t>(b)) << 8) |
+         (static_cast<uint32_t>(static_cast<uint8_t>(c)) << 16) |
+         (static_cast<uint32_t>(static_cast<uint8_t>(d)) << 24);
+}
+
+constexpr uint32_t kShdrFourCC = MakeFourCC('S', 'H', 'D', 'R');
+constexpr uint32_t kShexFourCC = MakeFourCC('S', 'H', 'E', 'X');
+constexpr uint32_t kDxilFourCC = MakeFourCC('D', 'X', 'I', 'L');
+
+bool ReadContainerParts(const std::vector<uint8_t> &container, std::vector<ContainerPart> &parts) {
+  if (container.size() < 32 || std::memcmp(container.data(), "DXBC", 4) != 0)
+    return false;
+  const auto read_u32 = [](const uint8_t *data) {
+    uint32_t value = 0;
+    std::memcpy(&value, data, sizeof(value));
+    return value;
+  };
+  const uint32_t declared_size = read_u32(container.data() + 24);
+  const uint32_t part_count = read_u32(container.data() + 28);
+  const size_t index_end = 32ull + static_cast<size_t>(part_count) * sizeof(uint32_t);
+  if (declared_size != container.size() || index_end > container.size())
+    return false;
+
+  parts.clear();
+  parts.reserve(part_count);
+  for (uint32_t i = 0; i < part_count; i++) {
+    const size_t index_offset = 32ull + static_cast<size_t>(i) * sizeof(uint32_t);
+    const size_t part_offset = read_u32(container.data() + index_offset);
+    if (part_offset < index_end || part_offset > container.size() - 8)
+      return false;
+    const uint32_t fourcc = read_u32(container.data() + part_offset);
+    const uint32_t payload_size = read_u32(container.data() + part_offset + 4);
+    if (payload_size > container.size() - part_offset - 8)
+      return false;
+    ContainerPart part = {};
+    part.fourcc = fourcc;
+    part.payload.assign(
+        container.begin() + part_offset + 8, container.begin() + part_offset + 8 + payload_size
+    );
+    parts.emplace_back(std::move(part));
+  }
+  return true;
+}
+
+bool BuildContainer(
+    const std::vector<uint8_t> &header_source, const std::vector<ContainerPart> &parts,
+    std::vector<uint8_t> &container
+) {
+  if (header_source.size() < 32 || parts.size() > UINT32_MAX)
+    return false;
+  size_t total_size = 32 + parts.size() * sizeof(uint32_t);
+  for (const auto &part : parts) {
+    if (part.payload.size() > UINT32_MAX || part.payload.size() > SIZE_MAX - total_size - 8)
+      return false;
+    total_size += 8 + part.payload.size();
+  }
+  if (total_size > UINT32_MAX)
+    return false;
+
+  container.assign(total_size, 0);
+  std::memcpy(container.data(), header_source.data(), 32);
+  std::memset(container.data() + 4, 0, 16);
+  const auto write_u32 = [](uint8_t *data, uint32_t value) { std::memcpy(data, &value, sizeof(value)); };
+  write_u32(container.data() + 24, static_cast<uint32_t>(total_size));
+  write_u32(container.data() + 28, static_cast<uint32_t>(parts.size()));
+
+  size_t output_offset = 32 + parts.size() * sizeof(uint32_t);
+  for (size_t i = 0; i < parts.size(); i++) {
+    write_u32(container.data() + 32 + i * sizeof(uint32_t), static_cast<uint32_t>(output_offset));
+    write_u32(container.data() + output_offset, parts[i].fourcc);
+    write_u32(container.data() + output_offset + 4, static_cast<uint32_t>(parts[i].payload.size()));
+    std::memcpy(container.data() + output_offset + 8, parts[i].payload.data(), parts[i].payload.size());
+    output_offset += 8 + parts[i].payload.size();
+  }
+  const auto hash = dxmt::md5::hashDxbcBinary(container.data(), container.size());
+  std::memcpy(container.data() + 4, hash.data.data(), hash.data.size());
+  return true;
+}
+
+bool RemoveExecutableParts(const std::vector<uint8_t> &source, std::vector<uint8_t> &result) {
+  std::vector<ContainerPart> parts;
+  if (!ReadContainerParts(source, parts))
+    return false;
+  parts.erase(
+      std::remove_if(parts.begin(), parts.end(), [](const ContainerPart &part) {
+        return part.fourcc == kShdrFourCC || part.fourcc == kShexFourCC || part.fourcc == kDxilFourCC;
+      }),
+      parts.end()
+  );
+  return BuildContainer(source, parts, result);
+}
+
+bool DuplicateLegacyExecutable(const std::vector<uint8_t> &source, std::vector<uint8_t> &result) {
+  std::vector<ContainerPart> parts;
+  if (!ReadContainerParts(source, parts))
+    return false;
+  const auto executable = std::find_if(parts.begin(), parts.end(), [](const ContainerPart &part) {
+    return part.fourcc == kShdrFourCC || part.fourcc == kShexFourCC;
+  });
+  if (executable == parts.end())
+    return false;
+  parts.emplace_back(*executable);
+  return BuildContainer(source, parts, result);
+}
+
+bool AddDXILExecutable(
+    const std::vector<uint8_t> &legacy_source, const std::vector<uint8_t> &dxil_source,
+    std::vector<uint8_t> &result
+) {
+  std::vector<ContainerPart> legacy_parts;
+  std::vector<ContainerPart> dxil_parts;
+  if (!ReadContainerParts(legacy_source, legacy_parts) || !ReadContainerParts(dxil_source, dxil_parts))
+    return false;
+  const auto executable = std::find_if(dxil_parts.begin(), dxil_parts.end(), [](const ContainerPart &part) {
+    return part.fourcc == kDxilFourCC;
+  });
+  if (executable == dxil_parts.end())
+    return false;
+  legacy_parts.emplace_back(*executable);
+  return BuildContainer(legacy_source, legacy_parts, result);
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 1 && argc != 2 && argc != 5 && argc != 6 && argc != 7)
+  if (argc != 1 && argc != 2 && argc != 5 && argc != 6 && argc != 7 && argc != 9)
     return 2;
 
   HMODULE compiler = LoadLibraryA(D3DCOMPILER_DLL_A);
@@ -263,6 +401,33 @@ VSOutput vs_main(uint vertex_id : SV_VertexID) {
   static constexpr char legacy_pixel_source[] = R"HLSL(
 float4 ps_main(float4 position : SV_Position) : SV_Target { return float4(1.0, 1.0, 1.0, 1.0); }
  )HLSL";
+  static constexpr char legacy_geometry_source[] = R"HLSL(
+struct VSOutput { float4 position : SV_Position; };
+[maxvertexcount(3)]
+void gs_main(triangle VSOutput input[3], inout TriangleStream<VSOutput> output_stream) {
+  [unroll] for (uint i = 0; i < 3; i++) output_stream.Append(input[i]);
+}
+ )HLSL";
+  static constexpr char legacy_tessellation_source[] = R"HLSL(
+struct VSOutput { float4 position : SV_Position; };
+struct TessFactors { float edge[3] : SV_TessFactor; float inside : SV_InsideTessFactor; };
+TessFactors hs_constants(InputPatch<VSOutput, 3> patch, uint patch_id : SV_PrimitiveID) {
+  TessFactors factors = { { 1.0, 1.0, 1.0 }, 1.0 };
+  return factors;
+}
+[domain("tri")]
+[partitioning("integer")]
+[outputtopology("triangle_cw")]
+[outputcontrolpoints(3)]
+[patchconstantfunc("hs_constants")]
+VSOutput hs_main(InputPatch<VSOutput, 3> patch, uint id : SV_OutputControlPointID) { return patch[id]; }
+[domain("tri")]
+VSOutput ds_main(TessFactors factors, const OutputPatch<VSOutput, 3> patch, float3 coord : SV_DomainLocation) {
+  VSOutput output;
+  output.position = patch[0].position * coord.x + patch[1].position * coord.y + patch[2].position * coord.z;
+  return output;
+}
+ )HLSL";
 
   std::vector<uint8_t> legacy_compute;
   std::vector<uint8_t> embedded_compute;
@@ -271,6 +436,9 @@ float4 ps_main(float4 position : SV_Position) : SV_Target { return float4(1.0, 1
   std::vector<uint8_t> legacy_pixel;
   std::vector<uint8_t> embedded_pixel;
   std::vector<uint8_t> mismatched_pixel;
+  std::vector<uint8_t> legacy_geometry;
+  std::vector<uint8_t> legacy_hull;
+  std::vector<uint8_t> legacy_domain;
   std::vector<uint8_t> dxil_compute;
   std::vector<uint8_t> dxil_compute_without_root;
   std::vector<uint8_t> dxil_vertex;
@@ -280,7 +448,10 @@ float4 ps_main(float4 position : SV_Position) : SV_Target { return float4(1.0, 1
   const bool compiled =
       CompileShader(compile_shader, legacy_compute_source, "legacy_cs.hlsl", "cs_main", "cs_5_0", legacy_compute) &&
       CompileShader(compile_shader, legacy_vertex_source, "legacy_vs.hlsl", "vs_main", "vs_5_0", legacy_vertex) &&
-      CompileShader(compile_shader, legacy_pixel_source, "legacy_ps.hlsl", "ps_main", "ps_5_0", legacy_pixel);
+      CompileShader(compile_shader, legacy_pixel_source, "legacy_ps.hlsl", "ps_main", "ps_5_0", legacy_pixel) &&
+      CompileShader(compile_shader, legacy_geometry_source, "legacy_gs.hlsl", "gs_main", "gs_5_0", legacy_geometry) &&
+      CompileShader(compile_shader, legacy_tessellation_source, "legacy_hs.hlsl", "hs_main", "hs_5_0", legacy_hull) &&
+      CompileShader(compile_shader, legacy_tessellation_source, "legacy_ds.hlsl", "ds_main", "ds_5_0", legacy_domain);
   if (!compiled) {
     FreeLibrary(compiler);
     return 1;
@@ -372,6 +543,33 @@ float4 ps_main(float4 position : SV_Position) : SV_Target { return float4(1.0, 1
   passed = ExpectComputePSO(device, "truncated-header", zero_header_shader, nullptr, false) && passed;
   passed = ExpectComputePSO(device, "random-bytes", random_shader, nullptr, false) && passed;
   passed = ExpectComputePSO(device, "malformed-chunk-table", malformed_shader, nullptr, false) && passed;
+  std::vector<uint8_t> no_executable_container;
+  std::vector<uint8_t> duplicate_executable_container;
+  if (!RemoveExecutableParts(embedded_vertex, no_executable_container) ||
+      !DuplicateLegacyExecutable(legacy_compute, duplicate_executable_container)) {
+    std::cerr << "failed to assemble no-executable or duplicate-executable DXBC containers\n";
+    passed = false;
+  } else {
+    const D3D12_SHADER_BYTECODE no_executable_shader = {
+        no_executable_container.data(), no_executable_container.size()
+    };
+    const D3D12_SHADER_BYTECODE duplicate_executable_shader = {
+        duplicate_executable_container.data(), duplicate_executable_container.size()
+    };
+    passed = ExpectComputePSO(
+        device, "valid-container-no-executable", no_executable_shader, empty_root_signature, false, E_INVALIDARG
+    ) && passed;
+    passed = ExpectComputePSO(
+        device, "duplicate-legacy-executable", duplicate_executable_shader, empty_root_signature, false, E_INVALIDARG
+    ) && passed;
+  }
+  passed = ExpectComputePSO(
+      device, "vertex-bytecode-in-cs-slot", legacy_vs, empty_root_signature, false, E_INVALIDARG
+  ) && passed;
+  passed = ExpectGraphicsPSO(
+      device, "pixel-bytecode-in-vs-slot", legacy_ps, no_pixel_shader, empty_root_signature, false,
+      true, false, {}, {}, {}, E_INVALIDARG
+  ) && passed;
   passed = ExpectGraphicsPSO(
       device, "graphics-invalid-vs", three_byte_shader, legacy_ps, empty_root_signature, false
   ) && passed;
@@ -449,10 +647,12 @@ float4 ps_main(float4 position : SV_Position) : SV_Target { return float4(1.0, 1
           empty_root_signature, true, false, true
       ) && passed;
       passed = ExpectGraphicsPSO(
-          device, "mixed-dxbc-vs-dxil-ps", legacy_vs, dxil_ps, empty_root_signature, false
+          device, "mixed-dxbc-vs-dxil-ps", legacy_vs, dxil_ps, empty_root_signature, false,
+          false, false, {}, {}, {}, E_NOTIMPL
       ) && passed;
       passed = ExpectGraphicsPSO(
-          device, "mixed-dxil-vs-dxbc-ps", dxil_vs, legacy_ps, empty_root_signature, false
+          device, "mixed-dxil-vs-dxbc-ps", dxil_vs, legacy_ps, empty_root_signature, false,
+          false, true, {}, {}, {}, E_NOTIMPL
       ) && passed;
       if (argc == 7) {
         passed = ExpectGraphicsPSO(
@@ -461,6 +661,86 @@ float4 ps_main(float4 position : SV_Position) : SV_Target { return float4(1.0, 1
         ) && passed;
       }
     }
+  }
+
+  if (argc == 9) {
+    std::vector<uint8_t> dxil_library;
+    std::vector<uint8_t> dxil_geometry;
+    std::vector<uint8_t> dxil_hull;
+    std::vector<uint8_t> dxil_domain;
+    if (!ReadFile(argv[1], dxil_compute) || !ReadFile(argv[2], dxil_vertex) ||
+        !ReadFile(argv[3], dxil_pixel) || !ReadFile(argv[4], dxil_mismatched_pixel) ||
+        !ReadFile(argv[5], dxil_geometry) || !ReadFile(argv[6], dxil_hull) ||
+        !ReadFile(argv[7], dxil_domain) || !ReadFile(argv[8], dxil_library)) {
+      std::cerr << "failed to read shader-family matrix fixtures\n";
+      passed = false;
+    } else {
+      const D3D12_SHADER_BYTECODE dxil_cs = {dxil_compute.data(), dxil_compute.size()};
+      const D3D12_SHADER_BYTECODE dxil_vs = {dxil_vertex.data(), dxil_vertex.size()};
+      const D3D12_SHADER_BYTECODE dxil_ps = {dxil_pixel.data(), dxil_pixel.size()};
+      const D3D12_SHADER_BYTECODE dxil_gs = {dxil_geometry.data(), dxil_geometry.size()};
+      const D3D12_SHADER_BYTECODE dxil_hs = {dxil_hull.data(), dxil_hull.size()};
+      const D3D12_SHADER_BYTECODE dxil_ds = {dxil_domain.data(), dxil_domain.size()};
+      const D3D12_SHADER_BYTECODE dxil_lib = {dxil_library.data(), dxil_library.size()};
+      const D3D12_SHADER_BYTECODE legacy_gs = {legacy_geometry.data(), legacy_geometry.size()};
+      const D3D12_SHADER_BYTECODE legacy_hs = {legacy_hull.data(), legacy_hull.size()};
+      const D3D12_SHADER_BYTECODE legacy_ds = {legacy_domain.data(), legacy_domain.size()};
+
+      passed = ExpectComputePSO(
+          device, "dxil-only-executable-compute", dxil_cs, empty_root_signature, true
+      ) && passed;
+      passed = ExpectGraphicsPSO(
+          device, "mixed-legacy-vs-dxil-gs", legacy_vs, legacy_ps, empty_root_signature, false,
+          false, false, {}, {}, dxil_gs, E_NOTIMPL
+      ) && passed;
+      passed = ExpectGraphicsPSO(
+          device, "mixed-dxil-vs-legacy-gs", dxil_vs, dxil_ps, empty_root_signature, false,
+          false, true, {}, {}, legacy_gs, E_NOTIMPL
+      ) && passed;
+      passed = ExpectGraphicsPSO(
+          device, "mixed-legacy-vs-dxil-hs-ds", legacy_vs, legacy_ps, empty_root_signature, false,
+          false, false, dxil_hs, legacy_ds, {}, E_NOTIMPL
+      ) && passed;
+      passed = ExpectGraphicsPSO(
+          device, "mixed-dxil-vs-legacy-hs-ds", dxil_vs, dxil_ps, empty_root_signature, false,
+          false, true, legacy_hs, dxil_ds, {}, E_NOTIMPL
+      ) && passed;
+      passed = ExpectGraphicsPSO(
+          device, "mixed-dxil-hs-legacy-ds", dxil_vs, dxil_ps, empty_root_signature, false,
+          false, true, dxil_hs, legacy_ds, {}, E_NOTIMPL
+      ) && passed;
+      passed = ExpectGraphicsPSO(
+          device, "mixed-legacy-hs-dxil-ds", dxil_vs, dxil_ps, empty_root_signature, false,
+          false, true, legacy_hs, dxil_ds, {}, E_NOTIMPL
+      ) && passed;
+      passed = ExpectGraphicsPSO(
+          device, "dxil-library-in-ordinary-graphics-slot", dxil_lib, no_pixel_shader,
+          empty_root_signature, false, true, false, {}, {}, {}, E_INVALIDARG
+      ) && passed;
+      passed = ExpectComputePSO(
+          device, "dxil-vertex-bytecode-in-cs-slot-stage-matrix", dxil_vs, empty_root_signature,
+          false, E_INVALIDARG
+      ) && passed;
+    }
+  }
+
+  if (!dxil_vertex.empty()) {
+    std::vector<uint8_t> hybrid_container;
+    const D3D12_SHADER_BYTECODE dxil_vs = {dxil_vertex.data(), dxil_vertex.size()};
+    if (!AddDXILExecutable(legacy_vertex, dxil_vertex, hybrid_container)) {
+      std::cerr << "failed to assemble synthetic legacy plus DXIL container\n";
+      passed = false;
+    } else {
+      // NEEDS_WINDOWS_ORACLE: this synthetic hybrid is intentionally rejected fail-closed.
+      const D3D12_SHADER_BYTECODE hybrid_shader = {hybrid_container.data(), hybrid_container.size()};
+      passed = ExpectGraphicsPSO(
+          device, "synthetic-legacy-plus-dxil-hybrid", hybrid_shader, no_pixel_shader,
+          empty_root_signature, false, true, false, {}, {}, {}, E_INVALIDARG
+      ) && passed;
+    }
+    passed = ExpectComputePSO(
+        device, "dxil-vertex-bytecode-in-cs-slot", dxil_vs, empty_root_signature, false, E_INVALIDARG
+    ) && passed;
   }
 
   Release(empty_root_signature);

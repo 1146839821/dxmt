@@ -703,15 +703,50 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
     UINT parameter_index;
     std::vector<D3D12_DESCRIPTOR_RANGE1> ranges;
   };
-  MTLD3D12RootSignature *msc_resource_use_root_signature_ = nullptr;
-  std::vector<MSCResourceUseTable> msc_resource_use_tables_;
-  bool msc_resource_use_direct_heap_ = false;
+  MTLD3D12RootSignature *resource_use_root_signature_ = nullptr;
+  std::vector<MSCResourceUseTable> resource_use_tables_;
+  bool resource_use_direct_heap_ = false;
   std::unordered_set<obj_handle_t> indirect_resources_used_;
   struct ResourceUseMask {
     WMTResourceUsage usage = static_cast<WMTResourceUsage>(0);
     WMTRenderStages stages = static_cast<WMTRenderStages>(0);
   };
   std::unordered_map<obj_handle_t, ResourceUseMask> resource_use_masks_;
+  std::unordered_map<EncoderData *, std::unordered_map<obj_handle_t, ResourceUseMask>> encoded_resource_use_masks_;
+  struct PendingDescriptorUseKey {
+    EncoderData *encoder;
+    MTLD3D12DescriptorHeap *heap;
+    UINT index;
+    D3D12_DESCRIPTOR_RANGE_TYPE range_type;
+    bool direct_indexed;
+    bool compute;
+    WMTRenderStages stages;
+
+    bool operator==(const PendingDescriptorUseKey &other) const {
+      return encoder == other.encoder && heap == other.heap && index == other.index &&
+             range_type == other.range_type && direct_indexed == other.direct_indexed &&
+             compute == other.compute && stages == other.stages;
+    }
+  };
+  struct PendingDescriptorUseKeyHash {
+    size_t operator()(const PendingDescriptorUseKey &key) const {
+      size_t value = std::hash<void *>{}(key.encoder);
+      auto combine = [&](size_t next) { value ^= next + 0x9e3779b9 + (value << 6) + (value >> 2); };
+      combine(std::hash<void *>{}(key.heap));
+      combine(std::hash<UINT>{}(key.index));
+      combine(std::hash<unsigned>{}(static_cast<unsigned>(key.range_type)));
+      combine(std::hash<unsigned>{}(key.direct_indexed));
+      combine(std::hash<unsigned>{}(key.compute));
+      combine(std::hash<unsigned>{}(static_cast<unsigned>(key.stages)));
+      return value;
+    }
+  };
+  struct PendingDescriptorUse {
+    PendingDescriptorUseKey key;
+    Com<MTLD3D12DescriptorHeap, true> heap;
+  };
+  std::vector<PendingDescriptorUse> pending_descriptor_uses_;
+  std::unordered_set<PendingDescriptorUseKey, PendingDescriptorUseKeyHash> pending_descriptor_use_keys_;
 
   Com<MTLD3D12ComputePipelineState, false> pso_compute_;
   Com<MTLD3D12RootSignature, false> rootsig_compute_;
@@ -862,11 +897,14 @@ public:
     predication_buffer_ = nullptr;
     predication_offset_ = 0;
     predication_op_ = D3D12_PREDICATION_OP_EQUAL_ZERO;
-    msc_resource_use_root_signature_ = nullptr;
-    msc_resource_use_tables_.clear();
-    msc_resource_use_direct_heap_ = false;
+    resource_use_root_signature_ = nullptr;
+    resource_use_tables_.clear();
+    resource_use_direct_heap_ = false;
     indirect_resources_used_.clear();
     resource_use_masks_.clear();
+    encoded_resource_use_masks_.clear();
+    pending_descriptor_uses_.clear();
+    pending_descriptor_use_keys_.clear();
     if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState)) {
       if (!pso->IsComputePipelineState)
         pso_graphics_ = static_cast<MTLD3D12GraphicsPipelineState *>(pInitialPipelineState);
@@ -932,8 +970,9 @@ public:
     memset(enabled, 0, sizeof(enabled));
     compute_trace_ = GetEnvironmentVariableA("DXMT_COMPUTE_TRACE", enabled, sizeof(enabled)) && enabled[0] != '0';
     memset(enabled, 0, sizeof(enabled));
-    airconv_compute_residency_ =
-        GetEnvironmentVariableA("DXMT_AIRCONV_COMPUTE_RESIDENCY", enabled, sizeof(enabled)) && enabled[0] != '0';
+    airconv_compute_residency_ = true;
+    if (GetEnvironmentVariableA("DXMT_AIRCONV_COMPUTE_RESIDENCY", enabled, sizeof(enabled)))
+      airconv_compute_residency_ = enabled[0] != '0';
     memset(enabled, 0, sizeof(enabled));
     airconv_render_residency_ = true;
     if (GetEnvironmentVariableA("DXMT_AIRCONV_RENDER_RESIDENCY", enabled, sizeof(enabled)))
@@ -1170,6 +1209,12 @@ public:
 
   void MarkSubmitted() final {
     enhanced_split_submitted_ = true;
+  }
+
+  HRESULT CollectResourceUsesForSubmission(
+      std::vector<SubmissionResourceUse> &uses, std::vector<WMT::Reference<WMT::Resource>> &resources
+  ) final {
+    return ResolveVolatileDescriptorUses(uses, resources);
   }
 
   HRESULT STDMETHODCALLTYPE
@@ -1410,6 +1455,9 @@ public:
       return;
     mask.usage = merged_usage;
     mask.stages = merged_stages;
+    auto &encoded_mask = encoded_resource_use_masks_[allocator_->encoder_current][resource];
+    encoded_mask.usage = merged_usage;
+    encoded_mask.stages = merged_stages;
     if (indirect_resources_used_.insert(resource).second)
       RetainResourceForCurrentEncoder(resource);
     auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
@@ -1428,6 +1476,8 @@ public:
     if (merged_usage == mask.usage)
       return;
     mask.usage = merged_usage;
+    auto &encoded_mask = encoded_resource_use_masks_[allocator_->encoder_current][resource];
+    encoded_mask.usage = merged_usage;
     if (indirect_resources_used_.insert(resource).second)
       RetainResourceForCurrentEncoder(resource);
     auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_useresource>();
@@ -2175,7 +2225,8 @@ public:
 
     const bool encode_msc_resource_uses =
         use_msc && !SkipResourceBinding &&
-        (dirty_state_.test(DirtyState::DescriptorHeaps) || dirty_state_.test(DirtyState::GraphicsRootArguments));
+        (dirty_state_.test(DirtyState::DescriptorHeaps) || dirty_state_.test(DirtyState::GraphicsRootArguments) ||
+         dirty_state_.test(DirtyState::GraphicsRootSignature));
     if (dirty_state_.test(DirtyState::VertexBuffer)) {
       EncodeVertexBuffers();
       dirty_state_.clr(DirtyState::VertexBuffer);
@@ -2273,7 +2324,7 @@ public:
     }
 
     if (encode_msc_resource_uses)
-      EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
+      EncodeIndirectResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
 
     if (airconv_render_residency_ && !use_msc && !SkipResourceBinding) {
       const auto resource_stages = use_airconv_geometry
@@ -2292,7 +2343,7 @@ public:
             WMTResourceUsageRead,
             resource_stages
         );
-      EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
+      EncodeIndirectResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
       DEBUG(
           "[DEBUG-AIRCONV-RENDER] recording=", recording_id_, " encoder=",
           allocator_->encoder_current ? allocator_->encoder_current->id : UINT64_MAX, " pso=",
@@ -2856,11 +2907,11 @@ public:
   }
 
   void
-  InitializeMSCResourceUseState(MTLD3D12RootSignature *pRootSig) {
-    if (pRootSig != msc_resource_use_root_signature_) {
-      msc_resource_use_root_signature_ = pRootSig;
-      msc_resource_use_tables_.clear();
-      msc_resource_use_direct_heap_ = false;
+  InitializeResourceUseState(MTLD3D12RootSignature *pRootSig) {
+    if (pRootSig != resource_use_root_signature_) {
+      resource_use_root_signature_ = pRootSig;
+      resource_use_tables_.clear();
+      resource_use_direct_heap_ = false;
 
       const void *blob = nullptr;
       const auto blob_size = pRootSig->GetBlob(&blob);
@@ -2873,13 +2924,13 @@ public:
               )) &&
               versioned_desc) {
             const auto &root_desc = versioned_desc->Desc_1_1;
-            msc_resource_use_direct_heap_ =
+            resource_use_direct_heap_ =
                 (root_desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED) != 0;
             for (UINT parameter_index = 0; parameter_index < root_desc.NumParameters; parameter_index++) {
               const auto &parameter = root_desc.pParameters[parameter_index];
               if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
                 continue;
-              auto &table = msc_resource_use_tables_.emplace_back();
+              auto &table = resource_use_tables_.emplace_back();
               table.parameter_index = parameter_index;
               if (parameter.DescriptorTable.NumDescriptorRanges)
                 table.ranges.assign(
@@ -2895,7 +2946,7 @@ public:
 
   template <typename F>
   bool
-  VisitMSCResourceDescriptors(
+  VisitIndirectResourceDescriptors(
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
       F &&visit
   ) {
@@ -2904,8 +2955,8 @@ public:
     if (!pRootSig || !pStaging || !descriptor_heap)
       return false;
 
-    InitializeMSCResourceUseState(pRootSig);
-    if (msc_resource_use_tables_.empty() && !msc_resource_use_direct_heap_)
+    InitializeResourceUseState(pRootSig);
+    if (resource_use_tables_.empty() && !resource_use_direct_heap_)
       return false;
 
     D3D12_GPU_DESCRIPTOR_HANDLE heap_start = {};
@@ -2915,7 +2966,7 @@ public:
     if (!descriptor_stride)
       return false;
 
-    for (const auto &table : msc_resource_use_tables_) {
+    for (const auto &table : resource_use_tables_) {
       const auto parameter_index = table.parameter_index;
       if (parameter_index >= pRootSig->ParameterSlots)
         continue;
@@ -2955,7 +3006,7 @@ public:
     // A direct-indexed root signature has no descriptor-table ranges to
     // enumerate. Since the shader may select any CBV/SRV/UAV slot at runtime,
     // conservatively visit every populated resource descriptor.
-    if (msc_resource_use_direct_heap_)
+    if (resource_use_direct_heap_)
       for (UINT index = 0; index < heap_desc.NumDescriptors; index++)
         if (visit(index, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, true))
           return true;
@@ -2963,11 +3014,150 @@ public:
     return false;
   }
 
+  void
+  CaptureVolatileDescriptorUse(
+      EncoderData *encoder, MTLD3D12DescriptorHeap *descriptor_heap, UINT index,
+      D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed, bool compute, WMTRenderStages stages
+  ) {
+    if (!encoder || !descriptor_heap)
+      return;
+    PendingDescriptorUseKey key{encoder, descriptor_heap, index, range_type, direct_indexed, compute, stages};
+    if (!pending_descriptor_use_keys_.insert(key).second)
+      return;
+    PendingDescriptorUse pending{};
+    pending.key = key;
+    pending.heap = descriptor_heap;
+    pending_descriptor_uses_.emplace_back(std::move(pending));
+  }
+
+  bool
+  AddSubmissionResourceUse(
+      EncoderData *encoder, obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages stages,
+      std::vector<SubmissionResourceUse> &uses,
+      std::vector<WMT::Reference<WMT::Resource>> &resources,
+      std::unordered_map<EncoderData *, std::unordered_map<obj_handle_t, size_t>> &positions
+  ) {
+    if (!encoder || !resource)
+      return true;
+    auto encoded_encoder = encoded_resource_use_masks_.find(encoder);
+    if (encoded_encoder != encoded_resource_use_masks_.end()) {
+      auto encoded_resource = encoded_encoder->second.find(resource);
+      if (encoded_resource != encoded_encoder->second.end()) {
+        const auto missing_usage = static_cast<WMTResourceUsage>(usage & ~encoded_resource->second.usage);
+        const auto missing_stages = static_cast<WMTRenderStages>(stages & ~encoded_resource->second.stages);
+        if (!missing_usage && !missing_stages)
+          return true;
+        usage = missing_usage ? missing_usage : usage;
+        stages = missing_stages ? missing_stages : stages;
+      }
+    }
+    WMT::Resource native_resource;
+    native_resource.handle = resource;
+    try {
+      auto &encoder_positions = positions[encoder];
+      auto existing = encoder_positions.find(resource);
+      if (existing != encoder_positions.end()) {
+        auto &use = uses[existing->second];
+        use.usage = static_cast<WMTResourceUsage>(use.usage | usage);
+        use.stages = static_cast<WMTRenderStages>(use.stages | stages);
+        return true;
+      }
+      resources.emplace_back(native_resource);
+      encoder_positions.emplace(resource, uses.size());
+      uses.push_back({encoder, native_resource, usage, stages});
+    } catch (...) {
+      return false;
+    }
+    return true;
+  }
+
+  HRESULT
+  ResolveVolatileDescriptorUses(
+      std::vector<SubmissionResourceUse> &uses, std::vector<WMT::Reference<WMT::Resource>> &resources
+  ) {
+    std::unordered_map<EncoderData *, std::unordered_map<obj_handle_t, size_t>> positions;
+    const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
+    const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
+    for (const auto &pending : pending_descriptor_uses_) {
+      auto *heap = pending.heap.ptr();
+      if (!heap)
+        continue;
+      auto descriptor_read = heap->ReadDescriptor(pending.key.index);
+      const auto &descriptor = descriptor_read.get();
+      const auto &key = pending.key;
+      auto accepts = [&](D3D12_DESCRIPTOR_RANGE_TYPE expected) {
+        return key.direct_indexed || key.range_type == expected;
+      };
+      auto add = [&](obj_handle_t resource, WMTResourceUsage usage) {
+        return AddSubmissionResourceUse(key.encoder, resource, usage, key.stages, uses, resources, positions);
+      };
+
+      bool success = true;
+      switch (descriptor.type) {
+      case ShaderVisibleDescriptorType::SRVTexture:
+        if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_SRV) && descriptor.SRVTexture.texture) {
+          auto &view = descriptor.SRVTexture.texture->view(descriptor.SRVTexture.view);
+          success = add(view.texture.handle, sampled_read);
+        }
+        break;
+      case ShaderVisibleDescriptorType::SRVAccelerationStructure:
+        if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_SRV) && descriptor.SRVAccelerationStructure.acceleration_structure)
+          success = add(descriptor.SRVAccelerationStructure.acceleration_structure, WMTResourceUsageRead) &&
+                    add(descriptor.SRVAccelerationStructure.acceleration_structure_header, WMTResourceUsageRead);
+        break;
+      case ShaderVisibleDescriptorType::ConstantBuffer:
+        if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_CBV)) {
+          auto *allocation = descriptor.allocation;
+          if (!allocation) {
+            uint64_t buffer_offset = 0;
+            allocation = device_->LookupBufferByVA(descriptor.ConstantBuffer.address, &buffer_offset);
+          }
+          if (allocation)
+            success = add(allocation->buffer().handle, WMTResourceUsageRead);
+        }
+        break;
+      case ShaderVisibleDescriptorType::UAVTexture:
+        if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_UAV) && descriptor.UAVTexture.texture) {
+          auto &view = descriptor.UAVTexture.texture->view(descriptor.UAVTexture.view);
+          success = add(view.texture.handle, read_write);
+        }
+        break;
+      case ShaderVisibleDescriptorType::SRVTexelBuffer:
+        if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_SRV) && descriptor.SRVTexelBuffer.buffer &&
+            descriptor.SRVTexelBuffer.buffer->current())
+          success = add(descriptor.SRVTexelBuffer.buffer->current()->buffer().handle, WMTResourceUsageRead);
+        break;
+      case ShaderVisibleDescriptorType::UAVTexelBuffer:
+        if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_UAV) && descriptor.UAVTexelBuffer.buffer &&
+            descriptor.UAVTexelBuffer.buffer->current())
+          success = add(descriptor.UAVTexelBuffer.buffer->current()->buffer().handle, read_write);
+        break;
+      case ShaderVisibleDescriptorType::SRVBuffer:
+        if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_SRV) && descriptor.SRVBuffer.buffer &&
+            descriptor.SRVBuffer.buffer->current())
+          success = add(descriptor.SRVBuffer.buffer->current()->buffer().handle, WMTResourceUsageRead);
+        break;
+      case ShaderVisibleDescriptorType::UAVBuffer:
+        if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_UAV) && descriptor.UAVBuffer.buffer &&
+            descriptor.UAVBuffer.buffer->current())
+          success = add(descriptor.UAVBuffer.buffer->current()->buffer().handle, read_write);
+        break;
+      case ShaderVisibleDescriptorType::Null:
+        break;
+      }
+      if (!success) {
+        ERR("D3D12 failed to retain a volatile descriptor resource before command submission");
+        return E_OUTOFMEMORY;
+      }
+    }
+    return S_OK;
+  }
+
   bool
   HasBoundResourceMinLODClamp(
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap
   ) {
-    return VisitMSCResourceDescriptors(
+    return VisitIndirectResourceDescriptors(
         pRootSig, pStaging, descriptor_heap,
         [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
           if (!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV)
@@ -2978,7 +3168,7 @@ public:
   }
 
   void
-  EncodeMSCResourceUses(
+  EncodeIndirectResourceUses(
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
       bool compute = false
   ) {
@@ -2987,12 +3177,12 @@ public:
     if (!pRootSig || !pStaging)
       return;
 
-    // MSC puts root CBV/SRV/UAV addresses directly in its argument buffer.
-    // Track those resources even when the command list has no descriptor heap;
-    // descriptor-table enumeration below is an independent concern.
+    // Root CBV/SRV/UAV addresses and descriptor-table entries can reference
+    // resources indirectly. Track both categories, including when no
+    // descriptor heap is bound.
     const auto stages =
-        pso_graphics_ &&
-        (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry || pso_graphics_->airconv_geometry)
+        pso_graphics_ && (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry ||
+                          pso_graphics_->msc_mesh || pso_graphics_->airconv_geometry)
             ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment)
             : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
     EncodeRootResourceUses(pRootSig, pStaging, stages, compute);
@@ -3012,6 +3202,9 @@ public:
     };
 
     auto encode_descriptor = [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
+      CaptureVolatileDescriptorUse(
+          allocator_->encoder_current, descriptor_heap, index, range_type, direct_indexed, compute, stages
+      );
       auto descriptor_read = descriptor_heap->ReadDescriptor(index);
       const auto &descriptor = descriptor_read.get();
       switch (descriptor.type) {
@@ -3086,7 +3279,7 @@ public:
       }
     };
 
-    VisitMSCResourceDescriptors(
+    VisitIndirectResourceDescriptors(
         pRootSig, pStaging, descriptor_heap,
         [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
           encode_descriptor(index, range_type, direct_indexed);
@@ -3130,7 +3323,7 @@ public:
     EncodeComputeResourceUse(state.visible_function_table.handle, WMTResourceUsageRead);
     EncodeComputeResourceUse(state.intersection_function_table.handle, WMTResourceUsageRead);
     if (state.global_root_signature)
-      EncodeMSCResourceUses(state.global_root_signature, rootarg_compute_staging_, descriptor_heap_.ptr(), true);
+      EncodeIndirectResourceUses(state.global_root_signature, rootarg_compute_staging_, descriptor_heap_.ptr(), true);
     return !recording_failed_;
   }
 
@@ -3176,7 +3369,8 @@ public:
     }
     const bool encode_msc_resource_uses =
         msc_compute_residency_ && use_msc && !SkipResourceBinding &&
-        (dirty_state_.test(DirtyState::DescriptorHeaps) || dirty_state_.test(DirtyState::ComputeRootArguments));
+        (dirty_state_.test(DirtyState::DescriptorHeaps) || dirty_state_.test(DirtyState::ComputeRootArguments) ||
+         dirty_state_.test(DirtyState::ComputeRootSignature));
     if (use_msc && rootsig_compute_) {
       if (FAILED(rootsig_compute_->InitializeMSCLayout()))
         return false;
@@ -3260,14 +3454,14 @@ public:
     }
 
     if (encode_msc_resource_uses)
-      EncodeMSCResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true);
+      EncodeIndirectResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true);
 
     if (airconv_compute_residency_ && !use_msc && !SkipResourceBinding) {
       if (descriptor_heap_)
         EncodeComputeResourceUse(descriptor_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
       if (sampler_heap_)
         EncodeComputeResourceUse(sampler_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
-      EncodeMSCResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true);
+      EncodeIndirectResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true);
     }
 
     if (compute_trace_id_ < 4096)

@@ -778,7 +778,7 @@ public:
     const bool has_pixel_shader = pDesc->PS.pShaderBytecode != nullptr;
     auto classify_optional_shader = [](const D3D12_SHADER_BYTECODE &shader) {
       if (!shader.pShaderBytecode && !shader.BytecodeLength)
-        return D3D12ShaderClassification{D3D12ShaderBackend::Airconv, S_OK};
+        return AbsentD3D12ShaderClassification();
       return ClassifyD3D12Shader(shader);
     };
     const auto vs_classification = ClassifyD3D12Shader(pDesc->VS);
@@ -794,6 +794,37 @@ public:
       }
     }
 
+    auto validate_shader_kind = [](const D3D12ShaderClassification &classification,
+                                   D3D12ShaderKind expected_kind, const char *stage) -> HRESULT {
+      if (classification.executable_family == D3D12ShaderExecutableFamily::None)
+        return S_OK;
+      if (classification.shader_kind != D3D12ShaderKind::Unknown && classification.shader_kind != expected_kind) {
+        ERR("CreatePipelineState: ", stage, " bytecode declares a different shader stage");
+        return E_INVALIDARG;
+      }
+      return S_OK;
+    };
+    if (FAILED(validate_shader_kind(vs_classification, D3D12ShaderKind::Vertex, "VS")) ||
+        FAILED(validate_shader_kind(ps_classification, D3D12ShaderKind::Pixel, "PS")) ||
+        FAILED(validate_shader_kind(hs_classification, D3D12ShaderKind::Hull, "HS")) ||
+        FAILED(validate_shader_kind(ds_classification, D3D12ShaderKind::Domain, "DS")) ||
+        FAILED(validate_shader_kind(gs_classification, D3D12ShaderKind::Geometry, "GS")))
+      return E_INVALIDARG;
+
+    const auto validate_family = [&](bool present, const D3D12ShaderClassification &classification,
+                                     const char *stage) -> HRESULT {
+      if (present && classification.backend != vs_classification.backend) {
+        ERR("CreatePipelineState: mixed shader executable families across VS and ", stage);
+        return E_NOTIMPL;
+      }
+      return S_OK;
+    };
+    if (FAILED(validate_family(has_pixel_shader, ps_classification, "PS")) ||
+        FAILED(validate_family(has_hull, hs_classification, "HS")) ||
+        FAILED(validate_family(has_domain, ds_classification, "DS")) ||
+        FAILED(validate_family(has_geometry, gs_classification, "GS")))
+      return E_NOTIMPL;
+
     HRESULT hr;
     D3D12AirconvError sm50_err;
     auto metal = device_->GetMTLDevice();
@@ -802,17 +833,14 @@ public:
     WMT::Reference<WMT::Function> vs_func, ps_func;
     WMT::Reference<WMT::Library> vs_lib, ps_lib, gs_lib, hs_lib, ds_lib, stage_in_lib;
     auto vs_backend = vs_classification.backend;
-    auto ps_backend = ps_classification.backend;
-    auto gs_backend = gs_classification.backend;
     const void *root_signature = nullptr;
     size_t root_signature_size = 0;
     if (pDesc->pRootSignature) {
       root_signature_size =
           static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&root_signature);
     }
-    const bool use_msc = msc_capabilities.CoreShaderPathUsable() &&
-                         vs_backend == D3D12ShaderBackend::MetalShaderConverter;
-    if (vs_backend == D3D12ShaderBackend::MetalShaderConverter && !msc_capabilities.CoreShaderPathUsable()) {
+    const bool use_msc = vs_backend == D3D12ShaderBackend::MetalShaderConverter;
+    if (use_msc && !msc_capabilities.CoreShaderPathUsable()) {
       ERR("CreatePipelineState: DXIL vertex shader requires a usable MSC core shader path");
       return E_FAIL;
     }
@@ -830,14 +858,8 @@ public:
       ERR("CreatePipelineState: geometry and tessellation emulation are not combined");
       return E_NOTIMPL;
     }
-    if (has_geometry && gs_backend != vs_backend) {
-      ERR("CreatePipelineState: mixed shader backends across VS and GS are not supported");
-      return E_NOTIMPL;
-    }
-    if (has_pixel_shader && (ps_backend == D3D12ShaderBackend::MetalShaderConverter) != use_msc)
-      return E_NOTIMPL;
     if ((has_hull || has_domain) && !use_msc_tessellation) {
-      ERR("CreatePipelineState: tessellation requires Metal Shader Converter");
+      ERR("CreatePipelineState: legacy DXBC tessellation is not implemented in the D3D12 AIRCONV path");
       return E_NOTIMPL;
     }
     if (use_msc_tessellation && !pDesc->PS.pShaderBytecode) {
@@ -1011,7 +1033,6 @@ public:
         if (!gs_lib)
           return E_FAIL;
       }
-      shader_backend = D3D12ShaderBackend::MetalShaderConverter;
       msc_uses_texture_load = vs_classification.uses_texture_load || ps_classification.uses_texture_load ||
                               hs_classification.uses_texture_load || ds_classification.uses_texture_load ||
                               gs_classification.uses_texture_load;
@@ -1572,6 +1593,7 @@ public:
       forced_sample_count = pDesc->RasterizerState.ForcedSampleCount;
     }
 
+    shader_backend = use_msc ? D3D12ShaderBackend::MetalShaderConverter : D3D12ShaderBackend::Airconv;
     return S_OK;
   }
 
@@ -1651,13 +1673,14 @@ MTLD3D12GraphicsPipelineStateImpl::InitializeMesh(const D3D12PipelineStreamData 
   const auto ps_bytecode = make_bytecode(data.pixel_shader);
   const auto ms_classification = ClassifyD3D12Shader(ms_bytecode);
   const auto as_classification = data.amplification_shader.empty()
-                                     ? D3D12ShaderClassification{D3D12ShaderBackend::Airconv, S_OK}
+                                     ? AbsentD3D12ShaderClassification()
                                      : ClassifyD3D12Shader(as_bytecode);
   const auto ps_classification = data.pixel_shader.empty()
-                                     ? D3D12ShaderClassification{D3D12ShaderBackend::Airconv, S_OK}
+                                     ? AbsentD3D12ShaderClassification()
                                      : ClassifyD3D12Shader(ps_bytecode);
   HRESULT hr;
-  auto validate_native_stage = [](const D3D12ShaderClassification &classification, const char *stage) -> HRESULT {
+  auto validate_native_stage = [](const D3D12ShaderClassification &classification, D3D12ShaderKind expected_kind,
+                                  const char *stage) -> HRESULT {
     if (FAILED(classification.validation_hr)) {
       ERR("CreatePipelineState: invalid mesh ", stage, " shader container, HRESULT=", classification.validation_hr);
       return classification.validation_hr;
@@ -1666,13 +1689,19 @@ MTLD3D12GraphicsPipelineStateImpl::InitializeMesh(const D3D12PipelineStreamData 
       ERR("CreatePipelineState: native mesh ", stage, " shader requires DXIL");
       return E_NOTIMPL;
     }
+    if (classification.shader_kind != D3D12ShaderKind::Unknown && classification.shader_kind != expected_kind) {
+      ERR("CreatePipelineState: native mesh ", stage, " bytecode declares a different shader stage");
+      return E_INVALIDARG;
+    }
     return S_OK;
   };
-  if (FAILED(hr = validate_native_stage(ms_classification, "MS")))
+  if (FAILED(hr = validate_native_stage(ms_classification, D3D12ShaderKind::Mesh, "MS")))
     return hr;
-  if (!data.amplification_shader.empty() && FAILED(hr = validate_native_stage(as_classification, "AS")))
+  if (!data.amplification_shader.empty() &&
+      FAILED(hr = validate_native_stage(as_classification, D3D12ShaderKind::Amplification, "AS")))
     return hr;
-  if (!data.pixel_shader.empty() && FAILED(hr = validate_native_stage(ps_classification, "PS")))
+  if (!data.pixel_shader.empty() &&
+      FAILED(hr = validate_native_stage(ps_classification, D3D12ShaderKind::Pixel, "PS")))
     return hr;
 
   const void *root_signature = nullptr;

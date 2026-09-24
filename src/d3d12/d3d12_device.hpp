@@ -74,6 +74,9 @@ public:
   virtual MTLD3D12CommandAllocator *GetAllocator() = 0;
   virtual uint64_t GetRecordingId() const = 0;
   virtual void MarkSubmitted() = 0;
+  virtual HRESULT CollectResourceUsesForSubmission(
+      std::vector<SubmissionResourceUse> &uses, std::vector<WMT::Reference<WMT::Resource>> &resources
+  ) = 0;
   virtual void CommitResourceStates() = 0;
 };
 
@@ -316,7 +319,7 @@ public:
 class MTLD3D12PipelineState : public ID3D12PipelineState {
 public:
   UINT IsComputePipelineState;
-  D3D12ShaderBackend shader_backend = D3D12ShaderBackend::Airconv;
+  D3D12ShaderBackend shader_backend = D3D12ShaderBackend::None;
   bool msc_uses_texture_load = false;
   D3D12PipelineCacheData pipeline_cache;
 

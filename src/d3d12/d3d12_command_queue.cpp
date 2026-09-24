@@ -59,6 +59,8 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     };
     std::vector<CommandList> command_lists;
     std::vector<Com<MTLD3D12CommandAllocator, false>> allocators;
+    std::unordered_map<EncoderData *, std::vector<SubmissionResourceUse>> descriptor_resource_uses;
+    std::vector<WMT::Reference<WMT::Resource>> descriptor_resource_refs;
     HANDLE latency_waitable = nullptr;
   };
 
@@ -580,6 +582,19 @@ public:
     if (!WaitForSubmissionSpaceLocked())
       return;
 
+    std::vector<SubmissionResourceUse> descriptor_resource_uses;
+    std::vector<WMT::Reference<WMT::Resource>> descriptor_resource_refs;
+    for (UINT i = 0; i < Count; i++) {
+      auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i]);
+      const auto hr = pCommandList->CollectResourceUsesForSubmission(
+          descriptor_resource_uses, descriptor_resource_refs
+      );
+      if (FAILED(hr)) {
+        WARN("D3D12 ExecuteCommandLists failed to resolve live descriptor resources: 0x", std::hex, hr, std::dec);
+        return;
+      }
+    }
+
     auto pool = WMT::MakeAutoreleasePool();
 
     auto cmdbuf = NewCommandBuffer();
@@ -587,6 +602,9 @@ public:
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     Submission submission;
     submission.command_buffer = cmdbuf;
+    for (auto &use : descriptor_resource_uses)
+      submission.descriptor_resource_uses[use.encoder].push_back(std::move(use));
+    submission.descriptor_resource_refs = std::move(descriptor_resource_refs);
     submission.allocators.reserve(Count);
     submission.command_lists.reserve(Count);
     for (unsigned i = 0; i < Count; i++) {
@@ -1050,9 +1068,13 @@ public:
             if (data->use_visibility_result)
               render_pass_info.visibility_buffer = data->visibility_buffer.handle;
            }
-           auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
-           LabelEncoder(encoder, recording_id, data->id, "Render");
-           encoder.waitForFence(fence_, data->use_geometry ? WMTRenderStagePreRaster : WMTRenderStageVertex);
+          auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
+          LabelEncoder(encoder, recording_id, data->id, "Render");
+          encoder.waitForFence(fence_, data->use_geometry ? WMTRenderStagePreRaster : WMTRenderStageVertex);
+          if (auto uses = submission.descriptor_resource_uses.find(current);
+              uses != submission.descriptor_resource_uses.end())
+            for (const auto &use : uses->second)
+              encoder.useResource(use.resource, use.usage, use.stages);
           encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_, WMTRenderStageFragment);
           encoder.endEncoding();
@@ -1070,9 +1092,13 @@ public:
         }
         case EncoderType::Compute: {
           auto data = static_cast<ComputeEncoderData *>(current);
-          auto encoder = cmdbuf.computeCommandEncoder(false);
+           auto encoder = cmdbuf.computeCommandEncoder(false);
            LabelEncoder(encoder, recording_id, data->id, "Compute");
            encoder.waitForFence(fence_);
+          if (auto uses = submission.descriptor_resource_uses.find(current);
+              uses != submission.descriptor_resource_uses.end())
+            for (const auto &use : uses->second)
+              encoder.useResource(use.resource, use.usage);
           encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_);
           encoder.endEncoding();

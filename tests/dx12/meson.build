@@ -6,6 +6,10 @@ dx12_shader_container = executable('dx12_shader_container', 'dx12_shader_contain
   dependencies: [ d3d12_dep ],
 )
 
+dx12_airconv_compute_residency = executable('dx12_airconv_compute_residency', 'dx12_airconv_compute_residency.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dx12_airconv_firstbit = executable('dx12_airconv_firstbit', 'dx12_airconv_firstbit.cpp',
   dependencies: [ d3d12_dep ],
 )
@@ -189,6 +193,30 @@ if dxc_command.length() > 0
     input: 'shader_embedded_graphics_mismatch.hlsl',
     output: 'shader_embedded.graphics.mismatch.ps.cso',
     command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_shader_backend_geometry_fixture',
+    input: 'shader_backend_stages.hlsl',
+    output: 'shader_backend.geometry.gs.cso',
+    command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_shader_backend_hull_fixture',
+    input: 'shader_backend_stages.hlsl',
+    output: 'shader_backend.tessellation.hs.cso',
+    command: dxc_command + [ '-E', 'hs_main', '-T', 'hs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_shader_backend_domain_fixture',
+    input: 'shader_backend_stages.hlsl',
+    output: 'shader_backend.tessellation.ds.cso',
+    command: dxc_command + [ '-E', 'ds_main', '-T', 'ds_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_shader_backend_library_fixture',
+    input: 'shader_backend_library.hlsl',
+    output: 'shader_backend.library.lib.cso',
+    command: dxc_command + [ '-T', 'lib_6_3', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
   custom_target('dx12_compute_sm6_root_uav_fixture',
