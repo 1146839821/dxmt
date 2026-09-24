@@ -721,6 +721,10 @@ VSOutput ds_main(TessFactors factors, const OutputPatch<VSOutput, 3> patch, floa
           device, "dxil-vertex-bytecode-in-cs-slot-stage-matrix", dxil_vs, empty_root_signature,
           false, E_INVALIDARG
       ) && passed;
+      passed = ExpectGraphicsPSO(
+          device, "dxil-compute-bytecode-in-vs-slot", dxil_cs, no_pixel_shader,
+          empty_root_signature, false, false, false, {}, {}, {}, E_INVALIDARG
+      ) && passed;
     }
   }
 

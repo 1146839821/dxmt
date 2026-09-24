@@ -66,8 +66,9 @@ CheckUniqueIdentifiers(const std::array<const void *, 6> &identifiers) {
 
 int
 main(int argc, char **argv) {
-  if (argc != 2) {
-    std::cerr << "usage: dx12_raytracing_state_object <library.lib.cso>\n";
+  const bool reject_non_library = argc == 3 && std::strcmp(argv[2], "--reject-nonlibrary") == 0;
+  if (argc != 2 && !reject_non_library) {
+    std::cerr << "usage: dx12_raytracing_state_object <library.lib.cso> [--reject-nonlibrary]\n";
     return 2;
   }
 
@@ -137,6 +138,28 @@ main(int argc, char **argv) {
   const D3D12_STATE_OBJECT_DESC state_desc = {
       D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE, 6, subobjects,
   };
+
+  if (reject_non_library) {
+    D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5 = {};
+    if (!CheckHR(
+            "CheckFeatureSupport(D3D12_OPTIONS5)",
+            device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5))
+        ))
+      return 1;
+    if (options5.RaytracingTier < D3D12_RAYTRACING_TIER_1_0) {
+      std::cout << "ordinary-DXIL-as-library rejection skipped: ray tracing tier unavailable\n";
+      return 0;
+    }
+    Owned<ID3D12StateObject> rejected_state_object;
+    const HRESULT hr = device5->CreateStateObject(&state_desc, IID_PPV_ARGS(&rejected_state_object.ptr));
+    if (hr != E_NOTIMPL) {
+      std::cerr << "ordinary DXIL shader used as a ray tracing library was not rejected: 0x" << std::hex
+                << static_cast<unsigned long>(hr) << std::dec << "\n";
+      return 1;
+    }
+    std::cout << "ordinary-DXIL-as-library rejection passed\n";
+    return 0;
+  }
 
   Owned<ID3D12StateObject> state_object;
   if (!CheckHR(
