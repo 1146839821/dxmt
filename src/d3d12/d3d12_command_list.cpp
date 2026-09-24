@@ -699,12 +699,12 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   uint32_t airconv_geometry_pso_variant_ = UINT_MAX;
   Com<MTLD3D12RootSignature, false> rootsig_graphics_;
   uint64_t rootarg_graphics_staging_[64];
-  struct MSCResourceUseTable {
+  struct ResourceUseTable {
     UINT parameter_index;
     std::vector<D3D12_DESCRIPTOR_RANGE1> ranges;
   };
   MTLD3D12RootSignature *resource_use_root_signature_ = nullptr;
-  std::vector<MSCResourceUseTable> resource_use_tables_;
+  std::vector<ResourceUseTable> resource_use_tables_;
   bool resource_use_direct_heap_ = false;
   std::unordered_set<obj_handle_t> indirect_resources_used_;
   struct ResourceUseMask {
