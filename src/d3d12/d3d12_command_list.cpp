@@ -711,6 +711,10 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
     WMTResourceUsage usage = static_cast<WMTResourceUsage>(0);
     WMTRenderStages stages = static_cast<WMTRenderStages>(0);
   };
+  // This aggregate mask is reset at the start of every render/compute encoder
+  // that uses Encode*ResourceUse. Submission-time descriptor coverage remains
+  // encoder-scoped in encoded_resource_use_masks_ because older encoders must
+  // stay addressable until their pending descriptors are resolved.
   std::unordered_map<obj_handle_t, ResourceUseMask> resource_use_masks_;
   std::unordered_map<EncoderData *, std::unordered_map<obj_handle_t, ResourceUseMask>> encoded_resource_use_masks_;
   struct PendingDescriptorUseKey {
@@ -743,10 +747,12 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   };
   struct PendingDescriptorUse {
     PendingDescriptorUseKey key;
-    Com<MTLD3D12DescriptorHeap, true> heap;
   };
   std::vector<PendingDescriptorUse> pending_descriptor_uses_;
   std::unordered_set<PendingDescriptorUseKey, PendingDescriptorUseKeyHash> pending_descriptor_use_keys_;
+  // One strong reference per unique heap keeps every raw heap pointer in the
+  // pending records valid through submission-time descriptor resolution.
+  std::unordered_map<MTLD3D12DescriptorHeap *, Com<MTLD3D12DescriptorHeap, true>> pending_descriptor_heaps_;
 
   Com<MTLD3D12ComputePipelineState, false> pso_compute_;
   Com<MTLD3D12RootSignature, false> rootsig_compute_;
@@ -900,11 +906,11 @@ public:
     resource_use_root_signature_ = nullptr;
     resource_use_tables_.clear();
     resource_use_direct_heap_ = false;
-    indirect_resources_used_.clear();
-    resource_use_masks_.clear();
+    ResetCurrentEncoderResourceUseState();
     encoded_resource_use_masks_.clear();
     pending_descriptor_uses_.clear();
     pending_descriptor_use_keys_.clear();
+    pending_descriptor_heaps_.clear();
     if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState)) {
       if (!pso->IsComputePipelineState)
         pso_graphics_ = static_cast<MTLD3D12GraphicsPipelineState *>(pInitialPipelineState);
@@ -1445,6 +1451,12 @@ public:
   }
 
   void
+  ResetCurrentEncoderResourceUseState() {
+    indirect_resources_used_.clear();
+    resource_use_masks_.clear();
+  }
+
+  void
   EncodeRenderResourceUse(obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages stages) {
     if (!resource)
       return;
@@ -1524,8 +1536,7 @@ public:
       FailRecording(__func__, "predication encoder allocation failed");
       return false;
     }
-    indirect_resources_used_.clear();
-    resource_use_masks_.clear();
+    ResetCurrentEncoderResourceUseState();
     compute->type = EncoderType::Compute;
     compute->cmd_head.type = WMTComputeCommandNop;
     compute->cmd_head.next.set(0);
@@ -2113,8 +2124,7 @@ public:
         FailRecording(__func__, "render encoder allocation failed");
         return DrawCallStatus::Invalid;
       }
-      indirect_resources_used_.clear();
-      resource_use_masks_.clear();
+      ResetCurrentEncoderResourceUseState();
       render->type = EncoderType::Render;
       render->cmd_head.type = WMTRenderCommandNop;
       render->cmd_head.next.set(0);
@@ -3022,12 +3032,17 @@ public:
     if (!encoder || !descriptor_heap)
       return;
     PendingDescriptorUseKey key{encoder, descriptor_heap, index, range_type, direct_indexed, compute, stages};
-    if (!pending_descriptor_use_keys_.insert(key).second)
-      return;
-    PendingDescriptorUse pending{};
-    pending.key = key;
-    pending.heap = descriptor_heap;
-    pending_descriptor_uses_.emplace_back(std::move(pending));
+    try {
+      auto [retained_heap, inserted_heap] = pending_descriptor_heaps_.try_emplace(descriptor_heap);
+      if (inserted_heap)
+        retained_heap->second = descriptor_heap;
+      if (!pending_descriptor_use_keys_.insert(key).second)
+        return;
+      pending_descriptor_uses_.push_back({key});
+    } catch (...) {
+      pending_descriptor_use_keys_.erase(key);
+      FailRecording(__func__, "volatile descriptor retention allocation failed");
+    }
   }
 
   bool
@@ -3079,9 +3094,12 @@ public:
     const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
     const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
     for (const auto &pending : pending_descriptor_uses_) {
-      auto *heap = pending.heap.ptr();
-      if (!heap)
-        continue;
+      const auto retained_heap = pending_descriptor_heaps_.find(pending.key.heap);
+      if (retained_heap == pending_descriptor_heaps_.end() || !retained_heap->second.ptr()) {
+        ERR("D3D12 pending volatile descriptor lost its retained descriptor heap");
+        return E_FAIL;
+      }
+      auto *heap = retained_heap->second.ptr();
       auto descriptor_read = heap->ReadDescriptor(pending.key.index);
       const auto &descriptor = descriptor_read.get();
       const auto &key = pending.key;
@@ -3302,8 +3320,7 @@ public:
         FailRecording(__func__, "ray dispatch compute encoder allocation failed");
         return false;
       }
-      indirect_resources_used_.clear();
-      resource_use_masks_.clear();
+      ResetCurrentEncoderResourceUseState();
       compute->type = EncoderType::Compute;
       compute->cmd_head.type = WMTComputeCommandNop;
       compute->cmd_head.next.set(0);
@@ -3336,8 +3353,7 @@ public:
         FailRecording(__func__, "compute encoder allocation failed");
         return false;
       }
-      indirect_resources_used_.clear();
-      resource_use_masks_.clear();
+      ResetCurrentEncoderResourceUseState();
       compute->type = EncoderType::Compute;
       compute->cmd_head.type = WMTComputeCommandNop;
       compute->cmd_head.next.set(0);

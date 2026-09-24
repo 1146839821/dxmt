@@ -492,8 +492,12 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
       replacement_input.get(), &srv, descriptor_heap.get()->GetCPUDescriptorHandleForHeapStart()
   );
 
-  // The closed command lists and descriptor heap still refer to these resources.
-  // Drop application references before either list reaches the queue.
+  // The closed command lists still refer to the descriptor heap, whose current
+  // contents are resolved when the lists reach the queue. Drop the application's
+  // heap reference to exercise the command list's unique-heap retention.
+  descriptor_heap.reset();
+
+  // Drop application references to the descriptor resources before submission.
   input.reset();
   replacement_input.reset();
   output.reset();
