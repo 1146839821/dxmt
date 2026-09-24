@@ -33,7 +33,6 @@ MakeFourCC(char a, char b, char c, char d) {
 constexpr uint32_t kDXILFourCC = MakeFourCC('D', 'X', 'I', 'L');
 constexpr uint32_t kSFI0FourCC = MakeFourCC('S', 'F', 'I', '0');
 constexpr uint32_t kPSVFourCC = MakeFourCC('P', 'S', 'V', '0');
-constexpr uint32_t kDXILComputeShaderKind = 5;
 constexpr uint32_t kDXILModuleBlockID = 8;
 constexpr uint32_t kDXILConstantsBlockID = 11;
 constexpr uint32_t kDXILFunctionBlockID = 12;
@@ -51,46 +50,6 @@ constexpr uint64_t kDXILFunctionCallRecord = 34;
 constexpr uint64_t kDXILAtomic64OnTypedResource = 0x400000;
 constexpr uint64_t kDXILAtomic64OnGroupShared = 0x800000;
 constexpr uint64_t kDXILAtomic64OnHeapResource = 0x10000000;
-
-D3D12ShaderKind
-DecodeShaderKind(uint32_t program_version) {
-  switch (program_version >> 16) {
-  case 0:
-    return D3D12ShaderKind::Pixel;
-  case 1:
-    return D3D12ShaderKind::Vertex;
-  case 2:
-    return D3D12ShaderKind::Geometry;
-  case 3:
-    return D3D12ShaderKind::Hull;
-  case 4:
-    return D3D12ShaderKind::Domain;
-  case 5:
-    return D3D12ShaderKind::Compute;
-  case 6:
-    return D3D12ShaderKind::Library;
-  case 7:
-    return D3D12ShaderKind::RayGeneration;
-  case 8:
-    return D3D12ShaderKind::Intersection;
-  case 9:
-    return D3D12ShaderKind::AnyHit;
-  case 10:
-    return D3D12ShaderKind::ClosestHit;
-  case 11:
-    return D3D12ShaderKind::Miss;
-  case 12:
-    return D3D12ShaderKind::Callable;
-  case 13:
-    return D3D12ShaderKind::Mesh;
-  case 14:
-    return D3D12ShaderKind::Amplification;
-  case 15:
-    return D3D12ShaderKind::Node;
-  default:
-    return D3D12ShaderKind::Unknown;
-  }
-}
 
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
@@ -1037,7 +996,7 @@ HasUnsupportedDXILComputeDerivativeShape(const D3D12_SHADER_BYTECODE &shader) {
     return false;
   uint32_t program_version = 0;
   std::memcpy(&program_version, dxil, sizeof(program_version));
-  if ((program_version >> 16) != kDXILComputeShaderKind)
+  if (DecodeD3D12ShaderKind(program_version) != D3D12ShaderKind::Compute)
     return false;
 
   DXILBitcodeReader reader(bitcode, bitcode_size);
@@ -1404,10 +1363,9 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
     }
     uint32_t program_version = 0;
     std::memcpy(&program_version, executable, sizeof(program_version));
-    classification.shader_kind = DecodeShaderKind(program_version);
     classification.executable_family = D3D12ShaderExecutableFamily::DXIL;
-    classification.backend = D3D12ShaderBackend::MetalShaderConverter;
-    classification.is_library_shader = classification.shader_kind == D3D12ShaderKind::Library;
+    if (FAILED(ClassifyD3D12ShaderProgramVersion(classification, program_version)))
+      return classification;
   } else {
     if (!executable || executable_size < sizeof(uint32_t)) {
       classification.executable_family = D3D12ShaderExecutableFamily::Unsupported;
@@ -1417,9 +1375,9 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
     }
     uint32_t program_version = 0;
     std::memcpy(&program_version, executable, sizeof(program_version));
-    classification.shader_kind = DecodeShaderKind(program_version);
     classification.executable_family = D3D12ShaderExecutableFamily::LegacyTokenized;
-    classification.backend = D3D12ShaderBackend::Airconv;
+    if (FAILED(ClassifyD3D12ShaderProgramVersion(classification, program_version)))
+      return classification;
   }
 
   if (classification.backend == D3D12ShaderBackend::MetalShaderConverter) {
@@ -1482,9 +1440,9 @@ D3D12AirconvShader::~D3D12AirconvShader() {
 HRESULT
 D3D12AirconvShader::Initialize(
     const D3D12_SHADER_BYTECODE &shader, const D3D12ShaderClassification &classification,
-    MTL_SHADER_REFLECTION *reflection, const char *stage_name
+    D3D12ShaderKind expected_kind, MTL_SHADER_REFLECTION *reflection, const char *stage_name
 ) {
-  return InitializeD3D12AirconvShader(shader, classification, *this, reflection, stage_name);
+  return InitializeD3D12AirconvShader(shader, classification, *this, expected_kind, reflection, stage_name);
 }
 
 sm50_shader_t *
@@ -1584,10 +1542,12 @@ InitializeD3D12AirconvRootSignature(
 HRESULT
 InitializeD3D12AirconvShader(
     const D3D12_SHADER_BYTECODE &shader, const D3D12ShaderClassification &classification,
-    D3D12AirconvShader &airconv_shader, MTL_SHADER_REFLECTION *reflection, const char *stage_name
+    D3D12AirconvShader &airconv_shader, D3D12ShaderKind expected_kind, MTL_SHADER_REFLECTION *reflection,
+    const char *stage_name
 ) {
-  if (FAILED(classification.validation_hr))
-    return classification.validation_hr;
+  const HRESULT stage_hr = ValidateD3D12ShaderKind(classification, expected_kind);
+  if (FAILED(stage_hr))
+    return stage_hr;
   if (classification.backend != D3D12ShaderBackend::Airconv)
     return E_INVALIDARG;
   if (!stage_name)
@@ -1617,10 +1577,11 @@ ConvertD3D12ShaderInternal(
     size_t local_root_signature_size, const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
     const DXMTMSCCapabilities *msc_capabilities
 ) {
-  if (FAILED(classification.validation_hr))
-    return classification.validation_hr;
-  if (classification.backend != D3D12ShaderBackend::MetalShaderConverter)
-    return E_INVALIDARG;
+  const HRESULT stage_hr = ValidateD3D12MSCShaderConversion(classification, stage, allow_library_shader);
+  if (FAILED(stage_hr)) {
+    ERR("DXIL shader kind does not match the requested MSC conversion path");
+    return stage_hr;
+  }
   if (classification.uses_unsupported_view_id) {
     ERR("DXIL shader uses unsupported SV_ViewID semantic");
     return E_NOTIMPL;

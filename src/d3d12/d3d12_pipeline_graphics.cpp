@@ -794,21 +794,22 @@ public:
       }
     }
 
-    auto validate_shader_kind = [](const D3D12ShaderClassification &classification,
+    auto validate_shader_kind = [](bool present, const D3D12ShaderClassification &classification,
                                    D3D12ShaderKind expected_kind, const char *stage) -> HRESULT {
-      if (classification.executable_family == D3D12ShaderExecutableFamily::None)
+      if (!present)
         return S_OK;
-      if (classification.shader_kind != D3D12ShaderKind::Unknown && classification.shader_kind != expected_kind) {
-        ERR("CreatePipelineState: ", stage, " bytecode declares a different shader stage");
-        return E_INVALIDARG;
+      const HRESULT hr = ValidateD3D12ShaderKind(classification, expected_kind);
+      if (FAILED(hr)) {
+        ERR("CreatePipelineState: ", stage, " bytecode has an invalid or mismatched shader kind");
+        return hr;
       }
       return S_OK;
     };
-    if (FAILED(validate_shader_kind(vs_classification, D3D12ShaderKind::Vertex, "VS")) ||
-        FAILED(validate_shader_kind(ps_classification, D3D12ShaderKind::Pixel, "PS")) ||
-        FAILED(validate_shader_kind(hs_classification, D3D12ShaderKind::Hull, "HS")) ||
-        FAILED(validate_shader_kind(ds_classification, D3D12ShaderKind::Domain, "DS")) ||
-        FAILED(validate_shader_kind(gs_classification, D3D12ShaderKind::Geometry, "GS")))
+    if (FAILED(validate_shader_kind(true, vs_classification, D3D12ShaderKind::Vertex, "VS")) ||
+        FAILED(validate_shader_kind(has_pixel_shader, ps_classification, D3D12ShaderKind::Pixel, "PS")) ||
+        FAILED(validate_shader_kind(has_hull, hs_classification, D3D12ShaderKind::Hull, "HS")) ||
+        FAILED(validate_shader_kind(has_domain, ds_classification, D3D12ShaderKind::Domain, "DS")) ||
+        FAILED(validate_shader_kind(has_geometry, gs_classification, D3D12ShaderKind::Geometry, "GS")))
       return E_INVALIDARG;
 
     const auto validate_family = [&](bool present, const D3D12ShaderClassification &classification,
@@ -1039,7 +1040,7 @@ public:
     }
 
     if (!use_msc) {
-      hr = shader_vs.Initialize(pDesc->VS, vs_classification, &ref_vs, "vs");
+      hr = shader_vs.Initialize(pDesc->VS, vs_classification, D3D12ShaderKind::Vertex, &ref_vs, "vs");
       if (FAILED(hr))
         return hr;
       if (!use_airconv_geometry) {
@@ -1111,7 +1112,7 @@ public:
     }
 
     if (use_airconv_geometry) {
-      hr = shader_gs.Initialize(pDesc->GS, gs_classification, &ref_gs, "gs");
+      hr = shader_gs.Initialize(pDesc->GS, gs_classification, D3D12ShaderKind::Geometry, &ref_gs, "gs");
       if (FAILED(hr))
         return hr;
 
@@ -1210,7 +1211,7 @@ public:
 
       std::string ps_name = "ps_main" + sha1.string().substr(0, 8);
 
-      hr = shader_ps.Initialize(pDesc->PS, ps_classification, &ref_ps, "ps");
+      hr = shader_ps.Initialize(pDesc->PS, ps_classification, D3D12ShaderKind::Pixel, &ref_ps, "ps");
       if (FAILED(hr))
         return hr;
       SM50_SHADER_PSO_PIXEL_SHADER_DATA data_ps;
@@ -1689,11 +1690,10 @@ MTLD3D12GraphicsPipelineStateImpl::InitializeMesh(const D3D12PipelineStreamData 
       ERR("CreatePipelineState: native mesh ", stage, " shader requires DXIL");
       return E_NOTIMPL;
     }
-    if (classification.shader_kind != D3D12ShaderKind::Unknown && classification.shader_kind != expected_kind) {
-      ERR("CreatePipelineState: native mesh ", stage, " bytecode declares a different shader stage");
-      return E_INVALIDARG;
-    }
-    return S_OK;
+    const HRESULT hr = ValidateD3D12ShaderKind(classification, expected_kind);
+    if (FAILED(hr))
+      ERR("CreatePipelineState: native mesh ", stage, " bytecode has an invalid or mismatched shader kind");
+    return hr;
   };
   if (FAILED(hr = validate_native_stage(ms_classification, D3D12ShaderKind::Mesh, "MS")))
     return hr;

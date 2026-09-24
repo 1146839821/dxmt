@@ -62,10 +62,10 @@ public:
       ERR("Invalid D3D12 shader container, HRESULT=", classification.validation_hr);
       return classification.validation_hr;
     }
-    if (classification.shader_kind != D3D12ShaderKind::Unknown &&
-        classification.shader_kind != D3D12ShaderKind::Compute) {
-      ERR("CreateComputePipelineState: CS bytecode declares a different shader stage");
-      return E_INVALIDARG;
+    const HRESULT stage_hr = ValidateD3D12ShaderKind(classification, D3D12ShaderKind::Compute);
+    if (FAILED(stage_hr)) {
+      ERR("CreateComputePipelineState: CS bytecode has an invalid or mismatched shader kind");
+      return stage_hr;
     }
 
     auto shader_backend = classification.backend;
@@ -147,7 +147,7 @@ public:
     common.metal_version = SM50_SHADER_METAL_310;
     common.next = &rootsig;
 
-    hr = shader_cs.Initialize(pDesc->CS, classification, &ref_cs, "cs");
+    hr = shader_cs.Initialize(pDesc->CS, classification, D3D12ShaderKind::Compute, &ref_cs, "cs");
     if (FAILED(hr))
       return hr;
 

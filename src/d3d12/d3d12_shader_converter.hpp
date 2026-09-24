@@ -87,6 +87,136 @@ struct D3D12ShaderClassification {
   size_t embedded_root_signature_size = 0;
 };
 
+inline D3D12ShaderKind
+DecodeD3D12ShaderKind(uint32_t program_version) {
+  switch (program_version >> 16) {
+  case 0:
+    return D3D12ShaderKind::Pixel;
+  case 1:
+    return D3D12ShaderKind::Vertex;
+  case 2:
+    return D3D12ShaderKind::Geometry;
+  case 3:
+    return D3D12ShaderKind::Hull;
+  case 4:
+    return D3D12ShaderKind::Domain;
+  case 5:
+    return D3D12ShaderKind::Compute;
+  case 6:
+    return D3D12ShaderKind::Library;
+  case 7:
+    return D3D12ShaderKind::RayGeneration;
+  case 8:
+    return D3D12ShaderKind::Intersection;
+  case 9:
+    return D3D12ShaderKind::AnyHit;
+  case 10:
+    return D3D12ShaderKind::ClosestHit;
+  case 11:
+    return D3D12ShaderKind::Miss;
+  case 12:
+    return D3D12ShaderKind::Callable;
+  case 13:
+    return D3D12ShaderKind::Mesh;
+  case 14:
+    return D3D12ShaderKind::Amplification;
+  case 15:
+    return D3D12ShaderKind::Node;
+  default:
+    return D3D12ShaderKind::Unknown;
+  }
+}
+
+inline HRESULT
+ClassifyD3D12ShaderProgramVersion(D3D12ShaderClassification &classification, uint32_t program_version) {
+  if (FAILED(classification.validation_hr))
+    return classification.validation_hr;
+
+  classification.shader_kind = DecodeD3D12ShaderKind(program_version);
+  if (classification.shader_kind == D3D12ShaderKind::Unknown) {
+    classification.backend = D3D12ShaderBackend::Unsupported;
+    classification.validation_hr = E_INVALIDARG;
+    return classification.validation_hr;
+  }
+
+  if (classification.executable_family == D3D12ShaderExecutableFamily::DXIL) {
+    classification.backend = D3D12ShaderBackend::MetalShaderConverter;
+    classification.is_library_shader = classification.shader_kind == D3D12ShaderKind::Library;
+  } else if (classification.executable_family == D3D12ShaderExecutableFamily::LegacyTokenized) {
+    classification.backend = D3D12ShaderBackend::Airconv;
+    classification.is_library_shader = false;
+  } else {
+    classification.backend = D3D12ShaderBackend::Unsupported;
+    classification.validation_hr = E_INVALIDARG;
+    return classification.validation_hr;
+  }
+
+  return S_OK;
+}
+
+inline HRESULT
+ValidateD3D12ShaderKind(const D3D12ShaderClassification &classification, D3D12ShaderKind expected_kind) {
+  if (FAILED(classification.validation_hr))
+    return classification.validation_hr;
+
+  const bool valid_backend_family =
+      (classification.backend == D3D12ShaderBackend::Airconv &&
+       classification.executable_family == D3D12ShaderExecutableFamily::LegacyTokenized) ||
+      (classification.backend == D3D12ShaderBackend::MetalShaderConverter &&
+       classification.executable_family == D3D12ShaderExecutableFamily::DXIL);
+  if (!valid_backend_family || expected_kind == D3D12ShaderKind::Unknown ||
+      classification.shader_kind == D3D12ShaderKind::Unknown || classification.shader_kind != expected_kind)
+    return E_INVALIDARG;
+  return S_OK;
+}
+
+inline D3D12ShaderKind
+D3D12ShaderKindForMSCStage(uint32_t stage) {
+  switch (stage) {
+  case DXMT_MSC_STAGE_VERTEX:
+    return D3D12ShaderKind::Vertex;
+  case DXMT_MSC_STAGE_FRAGMENT:
+    return D3D12ShaderKind::Pixel;
+  case DXMT_MSC_STAGE_COMPUTE:
+    return D3D12ShaderKind::Compute;
+  case DXMT_MSC_STAGE_HULL:
+    return D3D12ShaderKind::Hull;
+  case DXMT_MSC_STAGE_DOMAIN:
+    return D3D12ShaderKind::Domain;
+  case DXMT_MSC_STAGE_GEOMETRY:
+    return D3D12ShaderKind::Geometry;
+  case DXMT_MSC_STAGE_MESH:
+    return D3D12ShaderKind::Mesh;
+  case DXMT_MSC_STAGE_AMPLIFICATION:
+    return D3D12ShaderKind::Amplification;
+  default:
+    return D3D12ShaderKind::Unknown;
+  }
+}
+
+inline HRESULT
+ValidateD3D12MSCShaderConversion(
+    const D3D12ShaderClassification &classification, uint32_t stage, bool allow_library_shader
+) {
+  if (FAILED(classification.validation_hr))
+    return classification.validation_hr;
+  if (classification.backend != D3D12ShaderBackend::MetalShaderConverter ||
+      classification.executable_family != D3D12ShaderExecutableFamily::DXIL)
+    return E_INVALIDARG;
+
+  if (allow_library_shader)
+    return classification.shader_kind == D3D12ShaderKind::Library && classification.is_library_shader
+               ? S_OK
+               : E_INVALIDARG;
+
+  if (classification.shader_kind == D3D12ShaderKind::Library || classification.is_library_shader)
+    return E_INVALIDARG;
+  const auto expected_kind = D3D12ShaderKindForMSCStage(stage);
+  if (expected_kind == D3D12ShaderKind::Unknown)
+    return E_INVALIDARG;
+  return ValidateD3D12ShaderKind(classification, expected_kind);
+}
+
 inline D3D12ShaderClassification
 AbsentD3D12ShaderClassification() {
   D3D12ShaderClassification classification;
@@ -124,7 +254,7 @@ public:
 
   HRESULT Initialize(
       const D3D12_SHADER_BYTECODE &shader, const D3D12ShaderClassification &classification,
-      MTL_SHADER_REFLECTION *reflection, const char *stage_name
+      D3D12ShaderKind expected_kind, MTL_SHADER_REFLECTION *reflection, const char *stage_name
   );
   sm50_shader_t *out();
   sm50_shader_t get() const;
@@ -165,7 +295,8 @@ GetD3D12EmbeddedRootSignature(
 HRESULT
 InitializeD3D12AirconvShader(
     const D3D12_SHADER_BYTECODE &shader, const D3D12ShaderClassification &classification,
-    D3D12AirconvShader &airconv_shader, MTL_SHADER_REFLECTION *reflection, const char *stage_name
+    D3D12AirconvShader &airconv_shader, D3D12ShaderKind expected_kind, MTL_SHADER_REFLECTION *reflection,
+    const char *stage_name
 );
 
 HRESULT

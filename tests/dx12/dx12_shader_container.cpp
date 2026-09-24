@@ -349,6 +349,24 @@ bool DuplicateLegacyExecutable(const std::vector<uint8_t> &source, std::vector<u
   return BuildContainer(source, parts, result);
 }
 
+bool RewriteProgramVersionKind(
+    const std::vector<uint8_t> &source, bool dxil, uint16_t shader_kind, std::vector<uint8_t> &result
+) {
+  std::vector<ContainerPart> parts;
+  if (!ReadContainerParts(source, parts))
+    return false;
+  auto executable = std::find_if(parts.begin(), parts.end(), [&](const ContainerPart &part) {
+    return dxil ? part.fourcc == kDxilFourCC : (part.fourcc == kShdrFourCC || part.fourcc == kShexFourCC);
+  });
+  if (executable == parts.end() || executable->payload.size() < sizeof(uint32_t))
+    return false;
+  uint32_t program_version = 0;
+  std::memcpy(&program_version, executable->payload.data(), sizeof(program_version));
+  program_version = (program_version & 0x0000ffffu) | (static_cast<uint32_t>(shader_kind) << 16);
+  std::memcpy(executable->payload.data(), &program_version, sizeof(program_version));
+  return BuildContainer(source, parts, result);
+}
+
 bool AddDXILExecutable(
     const std::vector<uint8_t> &legacy_source, const std::vector<uint8_t> &dxil_source,
     std::vector<uint8_t> &result
@@ -580,6 +598,24 @@ VSOutput ds_main(TessFactors factors, const OutputPatch<VSOutput, 3> patch, floa
       device, "graphics-valid-vs-invalid-ps", legacy_vs, malformed_shader, empty_root_signature, false
   ) && passed;
 
+  std::vector<uint8_t> unknown_legacy_compute;
+  std::vector<uint8_t> unknown_legacy_vertex;
+  if (!RewriteProgramVersionKind(legacy_compute, false, 0x10, unknown_legacy_compute) ||
+      !RewriteProgramVersionKind(legacy_vertex, false, 0x10, unknown_legacy_vertex)) {
+    std::cerr << "failed to assemble unknown-kind legacy shaders\n";
+    passed = false;
+  } else {
+    const D3D12_SHADER_BYTECODE unknown_cs = {unknown_legacy_compute.data(), unknown_legacy_compute.size()};
+    const D3D12_SHADER_BYTECODE unknown_vs = {unknown_legacy_vertex.data(), unknown_legacy_vertex.size()};
+    passed = ExpectComputePSO(
+        device, "legacy-unknown-shader-kind", unknown_cs, empty_root_signature, false, E_INVALIDARG
+    ) && passed;
+    passed = ExpectGraphicsPSO(
+        device, "legacy-unknown-vertex-kind", unknown_vs, no_pixel_shader, empty_root_signature, false,
+        true, false, {}, {}, {}, E_INVALIDARG
+    ) && passed;
+  }
+
   if (argc == 2) {
     if (!ReadFile(argv[1], dxil_vertex)) {
       std::cerr << "failed to read DXIL vertex shader: " << argv[1] << "\n";
@@ -731,6 +767,29 @@ VSOutput ds_main(TessFactors factors, const OutputPatch<VSOutput, 3> patch, floa
   if (!dxil_vertex.empty()) {
     std::vector<uint8_t> hybrid_container;
     const D3D12_SHADER_BYTECODE dxil_vs = {dxil_vertex.data(), dxil_vertex.size()};
+    std::vector<uint8_t> unknown_dxil_vertex;
+    if (!RewriteProgramVersionKind(dxil_vertex, true, 0x10, unknown_dxil_vertex)) {
+      std::cerr << "failed to assemble unknown-kind DXIL vertex shader\n";
+      passed = false;
+    } else {
+      const D3D12_SHADER_BYTECODE unknown_vs = {unknown_dxil_vertex.data(), unknown_dxil_vertex.size()};
+      passed = ExpectGraphicsPSO(
+          device, "dxil-unknown-vertex-kind", unknown_vs, no_pixel_shader, empty_root_signature, false,
+          true, false, {}, {}, {}, E_INVALIDARG
+      ) && passed;
+    }
+    if (!dxil_compute.empty()) {
+      std::vector<uint8_t> unknown_dxil_compute;
+      if (!RewriteProgramVersionKind(dxil_compute, true, 0x10, unknown_dxil_compute)) {
+        std::cerr << "failed to assemble unknown-kind DXIL compute shader\n";
+        passed = false;
+      } else {
+        const D3D12_SHADER_BYTECODE unknown_cs = {unknown_dxil_compute.data(), unknown_dxil_compute.size()};
+        passed = ExpectComputePSO(
+            device, "dxil-unknown-compute-kind", unknown_cs, empty_root_signature, false, E_INVALIDARG
+        ) && passed;
+      }
+    }
     if (!AddDXILExecutable(legacy_vertex, dxil_vertex, hybrid_container)) {
       std::cerr << "failed to assemble synthetic legacy plus DXIL container\n";
       passed = false;
