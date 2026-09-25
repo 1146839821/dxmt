@@ -24,7 +24,9 @@
 #include "dxmt_command_context.hpp"
 #include "dxmt_command_constants.hpp"
 #include "dxmt_format.hpp"
+#include <array>
 #include <atomic>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -699,13 +701,33 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   uint32_t airconv_geometry_pso_variant_ = UINT_MAX;
   Com<MTLD3D12RootSignature, false> rootsig_graphics_;
   uint64_t rootarg_graphics_staging_[64];
-  struct ResourceUseTable {
-    UINT parameter_index;
-    std::vector<D3D12_DESCRIPTOR_RANGE1> ranges;
+  static constexpr size_t kRootResidencyCacheSlots = 64;
+  struct RootResourceResidencyCache {
+    bool valid = false;
+    EncoderData *encoder = nullptr;
+    MTLD3D12RootSignature *root_signature = nullptr;
+    bool compute = false;
+    WMTRenderStages stages = static_cast<WMTRenderStages>(0);
+    std::array<uint64_t, kRootResidencyCacheSlots> virtual_addresses{};
+  } root_resource_residency_cache_;
+  struct CachedDescriptorTableHandle {
+    UINT parameter_index = 0;
+    uint64_t handle = 0;
   };
-  MTLD3D12RootSignature *resource_use_root_signature_ = nullptr;
-  std::vector<ResourceUseTable> resource_use_tables_;
-  bool resource_use_direct_heap_ = false;
+  struct DescriptorResidencyCache {
+    bool valid = false;
+    EncoderData *encoder = nullptr;
+    MTLD3D12RootSignature *root_signature = nullptr;
+    MTLD3D12DescriptorHeap *heap = nullptr;
+    uint64_t heap_generation = 0;
+    bool compute = false;
+    WMTRenderStages stages = static_cast<WMTRenderStages>(0);
+    UINT table_count = 0;
+    std::array<CachedDescriptorTableHandle, kRootResidencyCacheSlots> table_handles{};
+  } descriptor_residency_cache_;
+  EncoderData *last_residency_encoder_ = nullptr;
+  AirconvResidencyCounters airconv_residency_counters_;
+
   std::unordered_set<obj_handle_t> indirect_resources_used_;
   struct ResourceUseMask {
     WMTResourceUsage usage = static_cast<WMTResourceUsage>(0);
@@ -747,9 +769,11 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   };
   struct PendingDescriptorUse {
     PendingDescriptorUseKey key;
+    uint64_t covered_generation = 0;
+    bool covered = false;
   };
   std::vector<PendingDescriptorUse> pending_descriptor_uses_;
-  std::unordered_set<PendingDescriptorUseKey, PendingDescriptorUseKeyHash> pending_descriptor_use_keys_;
+  std::unordered_map<PendingDescriptorUseKey, size_t, PendingDescriptorUseKeyHash> pending_descriptor_use_indices_;
   // One strong reference per unique heap keeps every raw heap pointer in the
   // pending records valid through submission-time descriptor resolution.
   std::unordered_map<MTLD3D12DescriptorHeap *, Com<MTLD3D12DescriptorHeap, true>> pending_descriptor_heaps_;
@@ -903,13 +927,14 @@ public:
     predication_buffer_ = nullptr;
     predication_offset_ = 0;
     predication_op_ = D3D12_PREDICATION_OP_EQUAL_ZERO;
-    resource_use_root_signature_ = nullptr;
-    resource_use_tables_.clear();
-    resource_use_direct_heap_ = false;
+    root_resource_residency_cache_.valid = false;
+    descriptor_residency_cache_.valid = false;
+    last_residency_encoder_ = nullptr;
+    airconv_residency_counters_ = {};
     ResetCurrentEncoderResourceUseState();
     encoded_resource_use_masks_.clear();
     pending_descriptor_uses_.clear();
-    pending_descriptor_use_keys_.clear();
+    pending_descriptor_use_indices_.clear();
     pending_descriptor_heaps_.clear();
     if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState)) {
       if (!pso->IsComputePipelineState)
@@ -1214,6 +1239,10 @@ public:
     return recording_id_;
   }
 
+  AirconvResidencyCounters GetAirconvResidencyCounters() const final {
+    return airconv_residency_counters_;
+  }
+
   void MarkSubmitted() final {
     enhanced_split_submitted_ = true;
   }
@@ -1455,6 +1484,8 @@ public:
   ResetCurrentEncoderResourceUseState() {
     indirect_resources_used_.clear();
     resource_use_masks_.clear();
+    root_resource_residency_cache_.valid = false;
+    descriptor_residency_cache_.valid = false;
   }
 
   void
@@ -2354,15 +2385,7 @@ public:
             WMTResourceUsageRead,
             resource_stages
         );
-      EncodeIndirectResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
-      DEBUG(
-          "[DEBUG-AIRCONV-RENDER] recording=", recording_id_, " encoder=",
-          allocator_->encoder_current ? allocator_->encoder_current->id : UINT64_MAX, " pso=",
-          pso_graphics_->pso.handle, " root_qwords=", rootsig_graphics_ ? rootsig_graphics_->UploadQwords : 0,
-          " root0=0x", std::hex, rootarg_graphics_staging_[0], " root1=0x", rootarg_graphics_staging_[1],
-          " root2=0x", rootarg_graphics_staging_[2], " root3=0x", rootarg_graphics_staging_[3], std::dec,
-          " resource_uses=", indirect_resources_used_.size()
-      );
+      EncodeIndirectResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr(), false, true);
     }
 
     if (dirty_state_.test(DirtyState::GraphicsRootSignature) && !SkipResourceBinding) {
@@ -2763,36 +2786,61 @@ public:
 
   void
   EncodeRootResourceUses(
-      MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], WMTRenderStages render_stages, bool compute
+      MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], WMTRenderStages render_stages, bool compute,
+      bool unchanged_state_fast_path
   ) {
-    if (!pRootSig || !pStaging || !pRootSig->ParameterSlots || !pRootSig->SlotQwordOffsets)
+    airconv_residency_counters_.root_scan_requests++;
+    if (!pRootSig || !pStaging || !allocator_->encoder_current) {
+      airconv_residency_counters_.root_scan_skips++;
       return;
-
-    const void *blob = nullptr;
-    const auto blob_size = pRootSig->GetBlob(&blob);
-    Com<ID3D12VersionedRootSignatureDeserializer> deserializer = nullptr;
-    if (!blob || !blob_size ||
-        FAILED(D3D12CreateVersionedRootSignatureDeserializer(blob, blob_size, IID_PPV_ARGS(&deserializer))))
-      return;
-
-    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *versioned_desc = nullptr;
-    if (FAILED(deserializer->GetRootSignatureDescAtVersion(D3D_ROOT_SIGNATURE_VERSION_1_1, &versioned_desc)) ||
-        !versioned_desc)
-      return;
-
-    const auto &root_desc = versioned_desc->Desc_1_1;
-    uint32_t trace_id = UINT32_MAX;
-    if (Logger::logLevel() <= LogLevel::Debug) {
-      static std::atomic<uint32_t> trace_count{0};
-      trace_id = trace_count.fetch_add(1, std::memory_order_relaxed);
     }
-    auto encode_root_resource = [&](UINT parameter_index, D3D12_ROOT_PARAMETER_TYPE type, uint64_t va) {
+
+    auto *encoder = allocator_->encoder_current;
+    if (last_residency_encoder_ && last_residency_encoder_ != encoder)
+      airconv_residency_counters_.encoder_invalidations++;
+    last_residency_encoder_ = encoder;
+
+    auto &cache = root_resource_residency_cache_;
+    const bool context_matches = unchanged_state_fast_path && cache.valid && cache.encoder == encoder &&
+                                 cache.root_signature == pRootSig && cache.compute == compute &&
+                                 cache.stages == render_stages;
+    bool any_changed = !context_matches;
+    for (UINT i = 0; i < pRootSig->RootResourceBindingCount; i++) {
+      const auto &binding = pRootSig->RootResourceBindings[i];
+      if (binding.parameter_index >= kRootResidencyCacheSlots || binding.source_qword >= pRootSig->UploadQwords ||
+          binding.source_qword >= 64)
+        continue;
+      const auto va = pStaging[binding.source_qword];
+      if (!context_matches || cache.virtual_addresses[binding.parameter_index] != va)
+        any_changed = true;
+    }
+
+    if (!any_changed) {
+      airconv_residency_counters_.root_scan_skips++;
+      return;
+    }
+    if (pRootSig->RootResourceBindingCount)
+      airconv_residency_counters_.root_scans_executed++;
+    else
+      airconv_residency_counters_.root_scan_skips++;
+
+    for (UINT i = 0; i < pRootSig->RootResourceBindingCount; i++) {
+      const auto &binding = pRootSig->RootResourceBindings[i];
+      if (binding.parameter_index >= kRootResidencyCacheSlots || binding.source_qword >= pRootSig->UploadQwords ||
+          binding.source_qword >= 64)
+        continue;
+      const auto va = pStaging[binding.source_qword];
+      const bool changed = !context_matches || cache.virtual_addresses[binding.parameter_index] != va;
+      if (!changed)
+        continue;
+      cache.virtual_addresses[binding.parameter_index] = va;
       if (!va)
-        return;
+        continue;
       uint64_t buffer_offset = 0;
+      airconv_residency_counters_.root_va_lookups++;
       auto allocation = device_->LookupBufferByVA(va, &buffer_offset);
       if (allocation) {
-        const auto usage = type == D3D12_ROOT_PARAMETER_TYPE_UAV
+        const auto usage = binding.type == D3D12_ROOT_PARAMETER_TYPE_UAV
                                ? static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite)
                                : WMTResourceUsageRead;
         if (compute) {
@@ -2801,25 +2849,13 @@ public:
           EncodeRenderResourceUse(allocation->buffer().handle, usage, render_stages);
         }
       }
-      if (trace_id < 128)
-        DEBUG(
-            "[DEBUG-AIRCONV] root resource id=", trace_id, " parameter=", parameter_index, " type=", type,
-            " va=0x", std::hex, va, std::dec, " lookup=", allocation ? 1 : 0, " offset=", buffer_offset
-        );
-    };
-
-    for (UINT parameter_index = 0;
-         parameter_index < root_desc.NumParameters && parameter_index < pRootSig->ParameterSlots; parameter_index++) {
-      const auto &parameter = root_desc.pParameters[parameter_index];
-      if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_CBV &&
-          parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_SRV &&
-          parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_UAV)
-        continue;
-      const auto source_qword = pRootSig->SlotQwordOffsets[parameter_index];
-      if (source_qword >= pRootSig->UploadQwords || source_qword >= 64)
-        continue;
-      encode_root_resource(parameter_index, parameter.ParameterType, pStaging[source_qword]);
     }
+
+    cache.encoder = encoder;
+    cache.root_signature = pRootSig;
+    cache.compute = compute;
+    cache.stages = render_stages;
+    cache.valid = true;
   }
 
   uint64_t
@@ -2920,44 +2956,6 @@ public:
     return Offset;
   }
 
-  void
-  InitializeResourceUseState(MTLD3D12RootSignature *pRootSig) {
-    if (pRootSig != resource_use_root_signature_) {
-      resource_use_root_signature_ = pRootSig;
-      resource_use_tables_.clear();
-      resource_use_direct_heap_ = false;
-
-      const void *blob = nullptr;
-      const auto blob_size = pRootSig->GetBlob(&blob);
-      if (blob && blob_size) {
-        Com<ID3D12VersionedRootSignatureDeserializer> deserializer = nullptr;
-        if (SUCCEEDED(D3D12CreateVersionedRootSignatureDeserializer(blob, blob_size, IID_PPV_ARGS(&deserializer)))) {
-          const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *versioned_desc = nullptr;
-          if (SUCCEEDED(deserializer->GetRootSignatureDescAtVersion(
-                  D3D_ROOT_SIGNATURE_VERSION_1_1, &versioned_desc
-              )) &&
-              versioned_desc) {
-            const auto &root_desc = versioned_desc->Desc_1_1;
-            resource_use_direct_heap_ =
-                (root_desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED) != 0;
-            for (UINT parameter_index = 0; parameter_index < root_desc.NumParameters; parameter_index++) {
-              const auto &parameter = root_desc.pParameters[parameter_index];
-              if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
-                continue;
-              auto &table = resource_use_tables_.emplace_back();
-              table.parameter_index = parameter_index;
-              if (parameter.DescriptorTable.NumDescriptorRanges)
-                table.ranges.assign(
-                    parameter.DescriptorTable.pDescriptorRanges,
-                    parameter.DescriptorTable.pDescriptorRanges + parameter.DescriptorTable.NumDescriptorRanges
-                );
-            }
-          }
-        }
-      }
-    }
-  }
-
   template <typename F>
   bool
   VisitIndirectResourceDescriptors(
@@ -2969,8 +2967,7 @@ public:
     if (!pRootSig || !pStaging || !descriptor_heap)
       return false;
 
-    InitializeResourceUseState(pRootSig);
-    if (resource_use_tables_.empty() && !resource_use_direct_heap_)
+    if (!pRootSig->RootDescriptorTableCount && !pRootSig->ResourceHeapDirectlyIndexed)
       return false;
 
     D3D12_GPU_DESCRIPTOR_HANDLE heap_start = {};
@@ -2980,15 +2977,24 @@ public:
     if (!descriptor_stride)
       return false;
 
-    for (const auto &table : resource_use_tables_) {
-      const auto parameter_index = table.parameter_index;
-      if (parameter_index >= pRootSig->ParameterSlots)
-        continue;
-      const auto source_qword = pRootSig->SlotQwordOffsets[parameter_index];
-      if (source_qword >= 64 || !pStaging[source_qword])
+    std::optional<ShaderVisibleDescriptorReadBatch> batch;
+    auto visit_index = [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
+      if (!batch) {
+        batch.emplace(descriptor_heap->ReadDescriptorBatch());
+        airconv_residency_counters_.descriptor_batch_locks++;
+      }
+      if (direct_indexed)
+        airconv_residency_counters_.direct_indexed_descriptors++;
+      return visit(*batch, index, range_type, direct_indexed);
+    };
+
+    for (UINT table_index = 0; table_index < pRootSig->RootDescriptorTableCount; table_index++) {
+      const auto &table = pRootSig->RootDescriptorTables[table_index];
+      if (table.parameter_index >= kRootResidencyCacheSlots || table.source_qword >= pRootSig->UploadQwords ||
+          table.source_qword >= 64 || !pStaging[table.source_qword])
         continue;
 
-      const D3D12_GPU_DESCRIPTOR_HANDLE base_handle = {pStaging[source_qword]};
+      const D3D12_GPU_DESCRIPTOR_HANDLE base_handle = {pStaging[table.source_qword]};
       if (base_handle.ptr < heap_start.ptr)
         continue;
       const auto byte_offset = base_handle.ptr - heap_start.ptr;
@@ -2998,54 +3004,70 @@ public:
       if (base_index >= heap_desc.NumDescriptors)
         continue;
 
-      uint64_t table_offset = 0;
-      for (const auto &range : table.ranges) {
-        const uint64_t range_offset = range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
-                                          ? table_offset
-                                          : range.OffsetInDescriptorsFromTableStart;
+      if (table.first_range > pRootSig->RootDescriptorRangeCount ||
+          table.range_count > pRootSig->RootDescriptorRangeCount - table.first_range)
+        continue;
+      for (UINT range_index = 0; range_index < table.range_count; range_index++) {
+        const auto &range = pRootSig->RootDescriptorRanges[table.first_range + range_index];
+        const uint64_t range_offset = range.offset == UINT64_MAX ? heap_desc.NumDescriptors - base_index : range.offset;
+        if (base_index > UINT64_MAX - range_offset)
+          continue;
         const auto range_start = base_index + range_offset;
-        if (range_start >= heap_desc.NumDescriptors)
-          break;
-        const auto range_count = range.NumDescriptors == UINT_MAX
+        if (range_start >= heap_desc.NumDescriptors || range.type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
+          continue;
+        const auto range_count = range.num_descriptors == UINT_MAX
                                      ? heap_desc.NumDescriptors - range_start
-                                     : std::min<uint64_t>(range.NumDescriptors, heap_desc.NumDescriptors - range_start);
-        if (range.RangeType != D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
-          for (uint64_t descriptor_index = 0; descriptor_index < range_count; descriptor_index++)
-            if (visit(static_cast<UINT>(range_start + descriptor_index), range.RangeType, false))
-              return true;
-        table_offset = range_offset + range_count;
+                                     : std::min<uint64_t>(range.num_descriptors, heap_desc.NumDescriptors - range_start);
+        for (uint64_t descriptor_index = 0; descriptor_index < range_count; descriptor_index++)
+          if (visit_index(static_cast<UINT>(range_start + descriptor_index), range.type, false))
+            return true;
       }
     }
 
     // A direct-indexed root signature has no descriptor-table ranges to
     // enumerate. Since the shader may select any CBV/SRV/UAV slot at runtime,
     // conservatively visit every populated resource descriptor.
-    if (resource_use_direct_heap_)
+    if (pRootSig->ResourceHeapDirectlyIndexed)
       for (UINT index = 0; index < heap_desc.NumDescriptors; index++)
-        if (visit(index, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, true))
+        if (visit_index(index, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, true))
           return true;
 
     return false;
   }
 
-  void
+  bool
   CaptureVolatileDescriptorUse(
       EncoderData *encoder, MTLD3D12DescriptorHeap *descriptor_heap, UINT index,
-      D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed, bool compute, WMTRenderStages stages
+      D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed, bool compute, WMTRenderStages stages,
+      uint64_t generation, size_t &pending_index
   ) {
     if (!encoder || !descriptor_heap)
-      return;
+      return false;
     PendingDescriptorUseKey key{encoder, descriptor_heap, index, range_type, direct_indexed, compute, stages};
     try {
       auto [retained_heap, inserted_heap] = pending_descriptor_heaps_.try_emplace(descriptor_heap);
       if (inserted_heap)
         retained_heap->second = descriptor_heap;
-      if (!pending_descriptor_use_keys_.insert(key).second)
-        return;
+      auto existing = pending_descriptor_use_indices_.find(key);
+      if (existing != pending_descriptor_use_indices_.end()) {
+        pending_index = existing->second;
+        airconv_residency_counters_.pending_descriptor_duplicates++;
+        const auto &pending = pending_descriptor_uses_[pending_index];
+        return !pending.covered || pending.covered_generation != generation;
+      }
+      pending_index = pending_descriptor_uses_.size();
       pending_descriptor_uses_.push_back({key});
+      try {
+        pending_descriptor_use_indices_.emplace(key, pending_index);
+      } catch (...) {
+        pending_descriptor_uses_.pop_back();
+        throw;
+      }
+      airconv_residency_counters_.pending_descriptors_inserted++;
+      return true;
     } catch (...) {
-      pending_descriptor_use_keys_.erase(key);
       FailRecording(__func__, "volatile descriptor retention allocation failed");
+      return false;
     }
   }
 
@@ -3104,7 +3126,11 @@ public:
         return E_FAIL;
       }
       auto *heap = retained_heap->second.ptr();
+      // Submission must always resolve the current descriptor value. The
+      // recording-time generation cache is deliberately not consulted here.
       auto descriptor_read = heap->ReadDescriptor(pending.key.index);
+      airconv_residency_counters_.single_descriptor_reads++;
+      airconv_residency_counters_.submission_live_descriptor_reads++;
       const auto &descriptor = descriptor_read.get();
       const auto &key = pending.key;
       auto accepts = [&](D3D12_DESCRIPTOR_RANGE_TYPE expected) {
@@ -3181,10 +3207,14 @@ public:
   ) {
     return VisitIndirectResourceDescriptors(
         pRootSig, pStaging, descriptor_heap,
-        [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
+        [&](const ShaderVisibleDescriptorReadBatch &batch, UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type,
+            bool direct_indexed) {
           if (!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV)
             return false;
-          return descriptor_heap->HasNonZeroResourceMinLODClamp(index);
+          airconv_residency_counters_.descriptor_slots_visited++;
+          const auto &descriptor = batch.get(index);
+          return descriptor.type == ShaderVisibleDescriptorType::SRVTexture &&
+                 descriptor.SRVTexture.resource_min_lod_clamp > 0.0f;
         }
     );
   }
@@ -3192,25 +3222,91 @@ public:
   void
   EncodeIndirectResourceUses(
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
-      bool compute = false
+      bool compute = false, bool unchanged_state_fast_path = false
   ) {
     // Direct-indexed root signatures legitimately have no root parameters;
     // their resource heap still needs a residency walk below.
     if (!pRootSig || !pStaging)
       return;
 
+    if (!allocator_->encoder_current)
+      return;
+
     // Root CBV/SRV/UAV addresses and descriptor-table entries can reference
     // resources indirectly. Track both categories, including when no
     // descriptor heap is bound.
-    const auto stages =
+    const auto render_stages =
         pso_graphics_ && (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry ||
                           pso_graphics_->msc_mesh || pso_graphics_->airconv_geometry)
             ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment)
             : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
-    EncodeRootResourceUses(pRootSig, pStaging, stages, compute);
+    const auto stages = compute ? static_cast<WMTRenderStages>(0) : render_stages;
+    EncodeRootResourceUses(pRootSig, pStaging, stages, compute, unchanged_state_fast_path);
 
     if (!descriptor_heap)
       return;
+
+    airconv_residency_counters_.descriptor_requests++;
+    if (pRootSig->ResourceHeapDirectlyIndexed)
+      airconv_residency_counters_.direct_indexed_root_requests++;
+
+    auto &cache = descriptor_residency_cache_;
+    const auto heap_generation = descriptor_heap->GetMutationGeneration();
+    const auto current_table_count = pRootSig->RootDescriptorTableCount;
+    if (current_table_count > kRootResidencyCacheSlots) {
+      FailRecording(__func__, "root signature descriptor table count exceeds residency cache capacity count=",
+                    current_table_count);
+      return;
+    }
+    std::array<CachedDescriptorTableHandle, kRootResidencyCacheSlots> current_table_handles{};
+    for (UINT table_index = 0; table_index < current_table_count; table_index++) {
+      const auto &table = pRootSig->RootDescriptorTables[table_index];
+      auto &current = current_table_handles[table_index];
+      current.parameter_index = table.parameter_index;
+      if (table.parameter_index < kRootResidencyCacheSlots && table.source_qword < pRootSig->UploadQwords &&
+          table.source_qword < 64)
+        current.handle = pStaging[table.source_qword];
+    }
+
+    const bool same_context = cache.valid && cache.encoder == allocator_->encoder_current &&
+                              cache.root_signature == pRootSig && cache.heap == descriptor_heap &&
+                              cache.compute == compute && cache.stages == stages;
+    bool same_table_handles = same_context && cache.table_count == current_table_count;
+    for (UINT i = 0; same_table_handles && i < current_table_count; i++)
+      same_table_handles = cache.table_handles[i].parameter_index == current_table_handles[i].parameter_index &&
+                           cache.table_handles[i].handle == current_table_handles[i].handle;
+    const bool same_generation = same_context && cache.heap_generation == heap_generation;
+    if (unchanged_state_fast_path && same_table_handles && same_generation) {
+      airconv_residency_counters_.descriptor_scan_skips++;
+      return;
+    }
+
+    if (cache.valid) {
+      const bool generation_changed = cache.heap == descriptor_heap && cache.heap_generation != heap_generation;
+      const bool tables_changed = cache.root_signature != pRootSig || cache.heap != descriptor_heap ||
+                                  cache.compute != compute || cache.stages != stages || !same_table_handles;
+      if (generation_changed)
+        airconv_residency_counters_.heap_generation_invalidations++;
+      if (generation_changed || tables_changed)
+        airconv_residency_counters_.table_invalidations++;
+    }
+
+    if (!current_table_count && !pRootSig->ResourceHeapDirectlyIndexed) {
+      airconv_residency_counters_.descriptor_scan_skips++;
+      cache.encoder = allocator_->encoder_current;
+      cache.root_signature = pRootSig;
+      cache.heap = descriptor_heap;
+      cache.heap_generation = heap_generation;
+      cache.compute = compute;
+      cache.stages = stages;
+      cache.table_count = 0;
+      cache.valid = true;
+      return;
+    }
+
+    airconv_residency_counters_.descriptor_scans_executed++;
+    if (pRootSig->ResourceHeapDirectlyIndexed)
+      airconv_residency_counters_.direct_indexed_scans++;
 
     const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
     const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
@@ -3223,12 +3319,20 @@ public:
       }
     };
 
-    auto encode_descriptor = [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
-      CaptureVolatileDescriptorUse(
-          allocator_->encoder_current, descriptor_heap, index, range_type, direct_indexed, compute, stages
-      );
-      auto descriptor_read = descriptor_heap->ReadDescriptor(index);
-      const auto &descriptor = descriptor_read.get();
+    auto encode_descriptor = [&](const ShaderVisibleDescriptorReadBatch &batch, UINT index,
+                                 D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
+      size_t pending_index = 0;
+      const bool needs_read = CaptureVolatileDescriptorUse(
+              allocator_->encoder_current, descriptor_heap, index, range_type, direct_indexed, compute, stages,
+              heap_generation, pending_index
+          );
+      if (!needs_read && unchanged_state_fast_path)
+        return;
+      airconv_residency_counters_.descriptor_slots_visited++;
+      const auto &descriptor = batch.get(index);
+      auto &pending = pending_descriptor_uses_[pending_index];
+      pending.covered_generation = heap_generation;
+      pending.covered = true;
       switch (descriptor.type) {
       case ShaderVisibleDescriptorType::SRVTexture: {
         if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) ||
@@ -3258,8 +3362,10 @@ public:
           return;
         auto *allocation = descriptor.allocation;
         uint64_t buffer_offset = 0;
-        if (!allocation)
+        if (!allocation) {
+          airconv_residency_counters_.descriptor_va_lookups++;
           allocation = device_->LookupBufferByVA(descriptor.ConstantBuffer.address, &buffer_offset);
+        }
         if (allocation)
           encode_resource(allocation->buffer().handle, WMTResourceUsageRead);
         break;
@@ -3303,11 +3409,22 @@ public:
 
     VisitIndirectResourceDescriptors(
         pRootSig, pStaging, descriptor_heap,
-        [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
-          encode_descriptor(index, range_type, direct_indexed);
+        [&](const ShaderVisibleDescriptorReadBatch &batch, UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type,
+            bool direct_indexed) {
+          encode_descriptor(batch, index, range_type, direct_indexed);
           return false;
         }
     );
+
+    cache.encoder = allocator_->encoder_current;
+    cache.root_signature = pRootSig;
+    cache.heap = descriptor_heap;
+    cache.heap_generation = heap_generation;
+    cache.compute = compute;
+    cache.stages = stages;
+    cache.table_count = current_table_count;
+    std::copy_n(current_table_handles.begin(), current_table_count, cache.table_handles.begin());
+    cache.valid = true;
   }
 
   bool
@@ -3481,7 +3598,7 @@ public:
         EncodeComputeResourceUse(descriptor_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
       if (sampler_heap_)
         EncodeComputeResourceUse(sampler_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
-      EncodeIndirectResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true);
+      EncodeIndirectResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true, true);
     }
 
     if (compute_trace_id_ < 4096)
@@ -4374,6 +4491,7 @@ public:
   };
 
   void STDMETHODCALLTYPE SetDescriptorHeaps(UINT HeapCount, ID3D12DescriptorHeap *const *Heaps) {
+    descriptor_residency_cache_.valid = false;
     descriptor_heap_ = nullptr;
     sampler_heap_ = nullptr;
     if (HeapCount > 2 || (HeapCount && !Heaps)) {
@@ -4425,6 +4543,8 @@ public:
   SetComputeRootSignature(ID3D12RootSignature *pRootSignature) {
     if (rootsig_compute_.ptr() == pRootSignature)
       return;
+    root_resource_residency_cache_.valid = false;
+    descriptor_residency_cache_.valid = false;
     if (pRootSignature) {
       if (!IsSameDevice(device_, pRootSignature)) {
         FailRecording(__func__, "compute root signature belongs to another device");
@@ -4442,6 +4562,8 @@ public:
   SetGraphicsRootSignature(ID3D12RootSignature *pRootSignature) {
     if (rootsig_graphics_.ptr() == pRootSignature)
       return;
+    root_resource_residency_cache_.valid = false;
+    descriptor_residency_cache_.valid = false;
     if (pRootSignature) {
       if (!IsSameDevice(device_, pRootSignature)) {
         FailRecording(__func__, "graphics root signature belongs to another device");

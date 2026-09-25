@@ -370,6 +370,9 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
 
   std::vector<uint8_t> blob_;
   std::vector<uint32_t> qword_offsets_;
+  std::vector<RootResourceBindingMetadata> root_resource_bindings_;
+  std::vector<RootDescriptorTableMetadata> root_descriptor_tables_;
+  std::vector<RootDescriptorRangeMetadata> root_descriptor_ranges_;
 
   std::vector<Rc<Sampler>> static_samplers_; // which is not really "static"
   /**
@@ -459,6 +462,50 @@ public:
     UploadQwords = total_qwords;
     ParameterSlots = qword_offsets_.size();
     SlotQwordOffsets = qword_offsets_.data();
+
+    ResourceHeapDirectlyIndexed =
+        (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED) != 0;
+    for (UINT parameter_index = 0; parameter_index < desc.NumParameters; parameter_index++) {
+      const auto &parameter = desc.pParameters[parameter_index];
+      const auto source_qword = qword_offsets_[parameter_index];
+      switch (parameter.ParameterType) {
+      case D3D12_ROOT_PARAMETER_TYPE_CBV:
+      case D3D12_ROOT_PARAMETER_TYPE_SRV:
+      case D3D12_ROOT_PARAMETER_TYPE_UAV:
+        root_resource_bindings_.push_back(
+            {parameter_index, parameter.ParameterType, source_qword, parameter.ShaderVisibility}
+        );
+        break;
+      case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE: {
+        const auto first_range = static_cast<UINT>(root_descriptor_ranges_.size());
+        uint64_t append_offset = 0;
+        for (UINT range_index = 0; range_index < parameter.DescriptorTable.NumDescriptorRanges; range_index++) {
+          const auto &range = parameter.DescriptorTable.pDescriptorRanges[range_index];
+          const uint64_t offset = range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
+                                      ? append_offset
+                                      : range.OffsetInDescriptorsFromTableStart;
+          root_descriptor_ranges_.push_back({range.RangeType, range.NumDescriptors, offset});
+          if (range.NumDescriptors == UINT_MAX || offset > UINT64_MAX - range.NumDescriptors)
+            append_offset = UINT64_MAX;
+          else
+            append_offset = offset + range.NumDescriptors;
+        }
+        root_descriptor_tables_.push_back(
+            {parameter_index, source_qword, first_range, parameter.DescriptorTable.NumDescriptorRanges,
+             parameter.ShaderVisibility}
+        );
+        break;
+      }
+      default:
+        break;
+      }
+    }
+    RootResourceBindingCount = static_cast<UINT>(root_resource_bindings_.size());
+    RootResourceBindings = root_resource_bindings_.data();
+    RootDescriptorTableCount = static_cast<UINT>(root_descriptor_tables_.size());
+    RootDescriptorTables = root_descriptor_tables_.data();
+    RootDescriptorRangeCount = static_cast<UINT>(root_descriptor_ranges_.size());
+    RootDescriptorRanges = root_descriptor_ranges_.data();
 
     return S_OK;
   }

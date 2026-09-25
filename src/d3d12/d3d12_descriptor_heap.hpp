@@ -21,6 +21,7 @@
 #include "dxmt_buffer.hpp"
 #include "dxmt_texture.hpp"
 #include "metalirconverter_thunks.h"
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 
@@ -156,6 +157,22 @@ public:
   const ShaderVisibleDescriptorCPUStorage &get() const { return descriptor_; }
 };
 
+class ShaderVisibleDescriptorReadBatch {
+  std::unique_lock<dxmt::mutex> lock_;
+  const ShaderVisibleDescriptorCPUStorage *descriptors_;
+  size_t count_;
+
+public:
+  ShaderVisibleDescriptorReadBatch(
+      dxmt::mutex &mutex, const ShaderVisibleDescriptorCPUStorage *descriptors, size_t count
+  ) : lock_(mutex), descriptors_(descriptors), count_(count) {}
+
+  const ShaderVisibleDescriptorCPUStorage &get(UINT index) const {
+    static const ShaderVisibleDescriptorCPUStorage null_descriptor{};
+    return index < count_ ? descriptors_[index] : null_descriptor;
+  }
+};
+
 class MTLD3D12DescriptorHeap : public ID3D12DescriptorHeap {
 public:
   virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
@@ -195,6 +212,8 @@ public:
   virtual HRESULT AddUnorderedAccessView(UINT Index, D3D12_UNORDERED_ACCESS_VIEW_DESC const *pDesc) = 0;
 
   virtual ShaderVisibleDescriptorRead ReadDescriptor(UINT Index) = 0;
+  virtual ShaderVisibleDescriptorReadBatch ReadDescriptorBatch() = 0;
+  virtual uint64_t GetMutationGeneration() const = 0;
 
   virtual void CopyDescriptors(UINT From, MTLD3D12DescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;
 };

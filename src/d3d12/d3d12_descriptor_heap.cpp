@@ -37,8 +37,6 @@ std::mutex descriptor_heap_registry_lock;
 // later heap. The 32-bit encoding has no room to grow beyond seven bits, so
 // preserve slot reuse there for compatibility with the existing limit.
 std::vector<const void *> descriptor_heap_registry(sizeof(SIZE_T) == 4 ? (1u << 7) : 1, nullptr);
-std::atomic<unsigned> descriptor_texture_debug_count = 0;
-std::atomic<unsigned> descriptor_table_debug_count = 0;
 }
 
 SIZE_T
@@ -136,6 +134,7 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
   D3D12_DESCRIPTOR_HEAP_DESC desc_;
 
   dxmt::mutex descriptor_mutex_;
+  std::atomic<uint64_t> mutation_generation_{0};
   std::vector<ShaderVisibleDescriptorCPUStorage> descriptors_;
   // A descriptor may outlive the ID3D12Resource that created it. Keep the
   // native resource objects alive until the descriptor is overwritten or the
@@ -168,6 +167,11 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
     cbv_allocations_[Index] = nullptr;
     acceleration_structure_resources_[Index] = nullptr;
     acceleration_structure_headers_[Index] = nullptr;
+  }
+
+  void
+  MarkDescriptorMutation() {
+    mutation_generation_.fetch_add(1, std::memory_order_release);
   }
 
 public:
@@ -293,17 +297,6 @@ public:
     uint64_t index = byte_offset / sizeof(ShaderVisibleDescriptorGPUStorage);
     if (index >= descriptors_.size())
       return 0;
-    const auto trace_id = descriptor_table_debug_count.fetch_add(1, std::memory_order_relaxed);
-    if (trace_id < 128) {
-      for (uint64_t entry_index = index; entry_index < std::min<uint64_t>(index + 4, descriptors_.size());
-           entry_index++) {
-        const auto &entry = mapped_msc_argument_buffer_[entry_index];
-        DEBUG(
-            "[DEBUG-MSC-TABLE] id=", trace_id, " index=", entry_index, " handle=", Handle.ptr,
-            " gpu_va=", entry.gpu_va, " texture_view=", entry.texture_view_id, " metadata=", entry.metadata
-        );
-      }
-    }
     return msc_argument_buffer_gpu_address_ + index * sizeof(dxmt_msc_descriptor_entry);
   }
 
@@ -336,14 +329,8 @@ public:
       gpu_storage.SRVTexture.metadata = TextureMetadata(Texture->arrayLength(View), ResourceMinLODClamp);
       SetMSCDescriptor(Index, {0, texture_view.gpuResourceID, std::bit_cast<uint32_t>(ResourceMinLODClamp)});
 
-      const auto trace_id = descriptor_texture_debug_count.fetch_add(1, std::memory_order_relaxed);
-      if (trace_id < 128)
-        DEBUG(
-            "[DEBUG-TEX] descriptor id=", trace_id, " slot=", Index, " gpu=", texture_view.gpuResourceID,
-            " array=", Texture->arrayLength(View), " minlod=", ResourceMinLODClamp,
-            " msc_metadata=", std::bit_cast<uint32_t>(ResourceMinLODClamp)
-        );
     }
+    MarkDescriptorMutation();
     return S_OK;
   }
 
@@ -367,6 +354,7 @@ public:
     if (mapped_argument_buffer_)
       mapped_argument_buffer_[Index].ZeroFilled = {};
     SetMSCDescriptor(Index, {HeaderLocation, 0, 0});
+    MarkDescriptorMutation();
     return S_OK;
   }
 
@@ -399,6 +387,7 @@ public:
       gpu_storage.ConstantBuffer.size = SizeInBytes;
     }
     SetMSCDescriptor(Index, {VA, 0, SizeInBytes});
+    MarkDescriptorMutation();
     return S_OK;
   }
 
@@ -418,6 +407,7 @@ public:
     if (mapped_argument_buffer_)
       mapped_argument_buffer_[Index].ZeroFilled = {{}};
     SetMSCDescriptor(Index, {});
+    MarkDescriptorMutation();
   }
 
   virtual HRESULT
@@ -439,6 +429,7 @@ public:
       gpu_storage.UAVTexture.metadata = TextureMetadata(Texture->arrayLength(View), 0);
       SetMSCDescriptor(Index, {0, texture_view.gpuResourceID, 0});
     }
+    MarkDescriptorMutation();
     return S_OK;
   }
 
@@ -473,6 +464,7 @@ public:
         SetMSCDescriptor(Index, {});
       }
     }
+    MarkDescriptorMutation();
     return S_OK;
   }
 
@@ -502,6 +494,7 @@ public:
         SetMSCDescriptor(Index, {});
       }
     }
+    MarkDescriptorMutation();
     return S_OK;
   }
 
@@ -533,6 +526,7 @@ public:
         SetMSCDescriptor(Index, {});
       }
     }
+    MarkDescriptorMutation();
     return S_OK;
   }
 
@@ -558,6 +552,7 @@ public:
         SetMSCDescriptor(Index, {});
       }
     }
+    MarkDescriptorMutation();
     return S_OK;
   }
 
@@ -593,6 +588,16 @@ public:
     return {descriptor_mutex_, Index < descriptors_.size() ? descriptors_[Index] : null_descriptor};
   }
 
+  ShaderVisibleDescriptorReadBatch
+  ReadDescriptorBatch() override {
+    return {descriptor_mutex_, descriptors_.data(), descriptors_.size()};
+  }
+
+  uint64_t
+  GetMutationGeneration() const override {
+    return mutation_generation_.load(std::memory_order_acquire);
+  }
+
   virtual void
   CopyDescriptors(UINT From, MTLD3D12DescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) {
     auto *heap_to = static_cast<MTLD3D12DescriptorHeapImpl *>(pHeapTo);
@@ -618,6 +623,8 @@ public:
       if (mapped_msc_argument_buffer_ && heap_to->mapped_msc_argument_buffer_)
         heap_to->mapped_msc_argument_buffer_[DescriptorTo + i] = mapped_msc_argument_buffer_[From + i];
     }
+    if (CopyCount)
+      heap_to->MarkDescriptorMutation();
   }
 };
 

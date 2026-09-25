@@ -66,6 +66,30 @@ public:
   virtual WMT::Buffer GetTileBackingBuffer() = 0;
 };
 
+struct AirconvResidencyCounters {
+  uint64_t root_scan_requests = 0;
+  uint64_t root_scans_executed = 0;
+  uint64_t root_scan_skips = 0;
+  uint64_t root_deserializer_creates = 0;
+  uint64_t descriptor_requests = 0;
+  uint64_t descriptor_scans_executed = 0;
+  uint64_t descriptor_scan_skips = 0;
+  uint64_t descriptor_slots_visited = 0;
+  uint64_t descriptor_batch_locks = 0;
+  uint64_t single_descriptor_reads = 0;
+  uint64_t submission_live_descriptor_reads = 0;
+  uint64_t heap_generation_invalidations = 0;
+  uint64_t table_invalidations = 0;
+  uint64_t encoder_invalidations = 0;
+  uint64_t root_va_lookups = 0;
+  uint64_t descriptor_va_lookups = 0;
+  uint64_t pending_descriptors_inserted = 0;
+  uint64_t pending_descriptor_duplicates = 0;
+  uint64_t direct_indexed_root_requests = 0;
+  uint64_t direct_indexed_scans = 0;
+  uint64_t direct_indexed_descriptors = 0;
+};
+
 class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList7, public IMTLD3D12CommandListExt {
 public:
   EncoderData *entry = nullptr;
@@ -73,6 +97,7 @@ public:
 
   virtual MTLD3D12CommandAllocator *GetAllocator() = 0;
   virtual uint64_t GetRecordingId() const = 0;
+  virtual AirconvResidencyCounters GetAirconvResidencyCounters() const = 0;
   virtual void MarkSubmitted() = 0;
   virtual HRESULT CollectResourceUsesForSubmission(
       std::vector<SubmissionResourceUse> &uses, std::vector<WMT::Reference<WMT::Resource>> &resources
@@ -275,6 +300,27 @@ public:
 
 class MTLD3D12RootSignature : public ID3D12RootSignature {
 public:
+  struct RootResourceBindingMetadata {
+    UINT parameter_index;
+    D3D12_ROOT_PARAMETER_TYPE type;
+    UINT source_qword;
+    D3D12_SHADER_VISIBILITY visibility;
+  };
+
+  struct RootDescriptorRangeMetadata {
+    D3D12_DESCRIPTOR_RANGE_TYPE type;
+    UINT num_descriptors;
+    uint64_t offset;
+  };
+
+  struct RootDescriptorTableMetadata {
+    UINT parameter_index;
+    UINT source_qword;
+    UINT first_range;
+    UINT range_count;
+    D3D12_SHADER_VISIBILITY visibility;
+  };
+
   virtual UINT GetBlob(const void **ppBlob) = 0;
   virtual HRESULT InitializeMSCLayout() = 0;
 
@@ -284,6 +330,14 @@ public:
   uint32_t UploadQwords;
   uint32_t ParameterSlots;
   uint32_t const *SlotQwordOffsets;
+
+  UINT RootResourceBindingCount = 0;
+  RootResourceBindingMetadata const *RootResourceBindings = nullptr;
+  UINT RootDescriptorTableCount = 0;
+  RootDescriptorTableMetadata const *RootDescriptorTables = nullptr;
+  UINT RootDescriptorRangeCount = 0;
+  RootDescriptorRangeMetadata const *RootDescriptorRanges = nullptr;
+  bool ResourceHeapDirectlyIndexed = false;
 
   size_t NumStaticSamplers;
   uint64_t const *EncodedStaticSamplers;
