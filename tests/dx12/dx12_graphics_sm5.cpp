@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
+#include "d3d12_device.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -57,6 +58,19 @@ D3D12_RESOURCE_DESC RenderTargetDescription() {
   description.SampleDesc.Count = 1;
   description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
   description.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  return description;
+}
+
+D3D12_RESOURCE_DESC QueryTextureDescription(UINT width) {
+  D3D12_RESOURCE_DESC description = {};
+  description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  description.Width = width;
+  description.Height = 1;
+  description.DepthOrArraySize = 1;
+  description.MipLevels = 1;
+  description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  description.SampleDesc.Count = 1;
+  description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
   return description;
 }
 
@@ -240,7 +254,9 @@ float4 ps_main(PSInput input) : SV_Target {
   uint width;
   uint height;
   input_texture.GetDimensions(width, height);
-  return width == 0 && height == 0 ? float4(1.0, 1.0, 1.0, 1.0) : float4(1.0, 0.0, 0.0, 1.0);
+  if (width == 0 && height == 0)
+    return float4(1.0, 1.0, 1.0, 1.0);
+  return width == 1 ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 1.0, 0.0, 1.0);
 }
 )";
 
@@ -279,6 +295,12 @@ struct TestCase {
   bool geometry_root_srv_uav = false;
   bool null_texture_query = false;
   bool release_resources_before_execute = false;
+  bool descriptor_mutation = false;
+  bool root_cbv_mutation = false;
+  bool root_srv_mutation = false;
+  bool root_uav_mutation = false;
+  bool descriptor_encoder_break = false;
+  bool direct_indexed_heap_scan = false;
 };
 
 bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &test) {
@@ -329,7 +351,11 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   ID3D12Resource *vertex_buffer = nullptr;
   ID3D12Resource *index_buffer = nullptr;
   ID3D12Resource *root_data = nullptr;
+  ID3D12Resource *root_data_b = nullptr;
   ID3D12Resource *root_uav_data = nullptr;
+  ID3D12Resource *root_uav_data_b = nullptr;
+  ID3D12Resource *query_texture_a = nullptr;
+  ID3D12Resource *query_texture_b = nullptr;
   ID3D12Resource *indirect_args = nullptr;
   ID3D12CommandSignature *command_signature = nullptr;
   ID3D12Resource *readback = nullptr;
@@ -338,10 +364,12 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   void *mapped_vertex = nullptr;
   void *mapped_index = nullptr;
   void *mapped_root = nullptr;
+  void *mapped_root_b = nullptr;
   void *mapped_indirect = nullptr;
   BYTE *mapped_readback = nullptr;
   ID3D12Resource *uav_readback = nullptr;
   void *mapped_uav_readback = nullptr;
+  D3D12_CPU_DESCRIPTOR_HANDLE query_descriptor = {};
 
   auto cleanup = [&] {
     if (mapped_readback)
@@ -350,6 +378,8 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
       indirect_args->Unmap(0, nullptr);
     if (mapped_root)
       root_data->Unmap(0, nullptr);
+    if (mapped_root_b)
+      root_data_b->Unmap(0, nullptr);
     if (mapped_uav_readback)
       uav_readback->Unmap(0, nullptr);
     if (mapped_index)
@@ -364,7 +394,11 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     Release(indirect_args);
     Release(uav_readback);
     Release(root_uav_data);
+    Release(root_uav_data_b);
     Release(root_data);
+    Release(root_data_b);
+    Release(query_texture_b);
+    Release(query_texture_a);
     Release(index_buffer);
     Release(vertex_buffer);
     Release(render_target);
@@ -423,8 +457,20 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     root_desc.NumParameters = 2;
     root_desc.pParameters = root_parameters;
   }
-  if (!CheckHR("D3D12SerializeRootSignature",
-               D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob, &root_error))) {
+  HRESULT root_signature_hr = E_FAIL;
+  if (test.direct_indexed_heap_scan) {
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC direct_indexed_desc = {};
+    direct_indexed_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    direct_indexed_desc.Desc_1_1.NumParameters = root_desc.NumParameters;
+    direct_indexed_desc.Desc_1_1.pParameters = nullptr;
+    direct_indexed_desc.Desc_1_1.NumStaticSamplers = root_desc.NumStaticSamplers;
+    direct_indexed_desc.Desc_1_1.pStaticSamplers = root_desc.pStaticSamplers;
+    direct_indexed_desc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
+    root_signature_hr = D3D12SerializeVersionedRootSignature(&direct_indexed_desc, &root_blob, &root_error);
+  } else {
+    root_signature_hr = D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob, &root_error);
+  }
+  if (!CheckHR("D3D12SerializeRootSignature", root_signature_hr)) {
     if (root_error)
       std::cerr << static_cast<const char *>(root_error->GetBufferPointer()) << "\n";
     return fail("root signature serialization failed");
@@ -433,6 +479,20 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
                device->CreateRootSignature(0, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
                                             IID_PPV_ARGS(&root_signature))))
     return fail("root signature creation failed");
+  if (test.null_texture_query) {
+    const auto *metadata = static_cast<const dxmt::MTLD3D12RootSignature *>(root_signature);
+    if (metadata->RootDescriptorTableCount != 1 || !metadata->RootDescriptorTables ||
+        metadata->RootDescriptorRangeCount != 1 || !metadata->RootDescriptorRanges ||
+        metadata->RootDescriptorTables[0].parameter_index != 0 ||
+        metadata->RootDescriptorTables[0].range_count != 1 ||
+        metadata->RootDescriptorRanges[0].type != descriptor_range.RangeType ||
+        metadata->RootDescriptorRanges[0].num_descriptors != descriptor_range.NumDescriptors ||
+        metadata->RootDescriptorRanges[0].offset != descriptor_range.OffsetInDescriptorsFromTableStart) {
+      std::cerr << "DXBC SM5 " << test.name << ": single-range root table metadata mismatch\n";
+      cleanup();
+      return false;
+    }
+  }
 
   const auto &vertex_shader = test.geometry_root_cbv || test.geometry_root_srv_uav ? shaders.vertex
                              : test.root_cbv           ? shaders.root_vertex
@@ -488,20 +548,42 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateRenderTargetView(render_target, nullptr, rtv);
 
-  if (test.null_texture_query) {
+  if (test.null_texture_query || test.descriptor_encoder_break || test.direct_indexed_heap_scan) {
     D3D12_DESCRIPTOR_HEAP_DESC shader_heap_desc = {};
     shader_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    shader_heap_desc.NumDescriptors = 1;
+    shader_heap_desc.NumDescriptors = test.direct_indexed_heap_scan ? 4 : 1;
     shader_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (!CheckHR("CreateShaderHeap", device->CreateDescriptorHeap(&shader_heap_desc, IID_PPV_ARGS(&shader_heap))))
       return fail("shader heap creation failed");
-    D3D12_SHADER_RESOURCE_VIEW_DESC null_srv = {};
-    null_srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    null_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    null_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    null_srv.Texture2D.MipLevels = 1;
-    device->CreateShaderResourceView(nullptr, &null_srv,
-                                     shader_heap->GetCPUDescriptorHandleForHeapStart());
+    query_descriptor = shader_heap->GetCPUDescriptorHandleForHeapStart();
+    if (test.null_texture_query) {
+      D3D12_SHADER_RESOURCE_VIEW_DESC null_srv = {};
+      null_srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      null_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+      null_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+      null_srv.Texture2D.MipLevels = 1;
+      device->CreateShaderResourceView(nullptr, &null_srv, query_descriptor);
+    }
+    if (test.descriptor_mutation || test.descriptor_encoder_break || test.direct_indexed_heap_scan) {
+      const auto query_desc_a = QueryTextureDescription(1);
+      if (!CheckHR("CreateQueryTexture A", device->CreateCommittedResource(
+                                              &default_heap, D3D12_HEAP_FLAG_NONE, &query_desc_a,
+                                              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+                                              IID_PPV_ARGS(&query_texture_a)
+                                          )))
+        return fail("query texture setup failed");
+      if (test.descriptor_mutation) {
+        const auto query_desc_b = QueryTextureDescription(2);
+        if (!CheckHR("CreateQueryTexture B", device->CreateCommittedResource(
+                                                &default_heap, D3D12_HEAP_FLAG_NONE, &query_desc_b,
+                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+                                                IID_PPV_ARGS(&query_texture_b)
+                                            )))
+          return fail("second query texture setup failed");
+      }
+      if (test.descriptor_encoder_break || test.direct_indexed_heap_scan)
+        device->CreateShaderResourceView(query_texture_a, nullptr, query_descriptor);
+    }
   }
 
   auto vertex_desc = BufferDescription(sizeof(Vertex) * vertex_count);
@@ -553,6 +635,20 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     mapped_root = nullptr;
   }
 
+  if (test.root_cbv_mutation || test.root_srv_mutation) {
+    auto root_desc_buffer = BufferDescription(256);
+    if (!CheckHR("CreateRootDataB",
+                 device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &root_desc_buffer,
+                                                 D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                 IID_PPV_ARGS(&root_data_b))) ||
+        !CheckHR("MapRootDataB", root_data_b->Map(0, nullptr, &mapped_root_b)))
+      return fail("second root data setup failed");
+    static constexpr float root_color_b[] = {1.0f, 0.0f, 0.0f, 1.0f};
+    std::memcpy(mapped_root_b, root_color_b, sizeof(root_color_b));
+    root_data_b->Unmap(0, nullptr);
+    mapped_root_b = nullptr;
+  }
+
   if (test.geometry_root_srv_uav) {
     auto root_uav_desc = BufferDescription(256);
     root_uav_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -561,6 +657,16 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
                                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
                                                  IID_PPV_ARGS(&root_uav_data))))
       return fail("root UAV setup failed");
+  }
+
+  if (test.root_uav_mutation) {
+    auto root_uav_desc = BufferDescription(256);
+    root_uav_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (!CheckHR("CreateRootUAVDataB",
+                 device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &root_uav_desc,
+                                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                 IID_PPV_ARGS(&root_uav_data_b))))
+      return fail("second root UAV setup failed");
   }
 
   if (test.indirect) {
@@ -609,10 +715,11 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   list->SetPipelineState(pso);
   if (root_signature) {
     list->SetGraphicsRootSignature(root_signature);
-    if (test.null_texture_query) {
+    if (test.null_texture_query || test.direct_indexed_heap_scan) {
       ID3D12DescriptorHeap *heaps[] = {shader_heap};
       list->SetDescriptorHeaps(1, heaps);
-      list->SetGraphicsRootDescriptorTable(0, shader_heap->GetGPUDescriptorHandleForHeapStart());
+      if (test.null_texture_query)
+        list->SetGraphicsRootDescriptorTable(0, shader_heap->GetGPUDescriptorHandleForHeapStart());
     } else if (test.geometry_root_srv_uav) {
       list->SetGraphicsRootShaderResourceView(0, root_data->GetGPUVirtualAddress());
       list->SetGraphicsRootUnorderedAccessView(1, root_uav_data->GetGPUVirtualAddress());
@@ -631,12 +738,46 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   D3D12_RECT scissor = {0, 0, 1, 1};
   list->RSSetViewports(1, &viewport);
   list->RSSetScissorRects(1, &scissor);
-  if (test.indirect) {
-    list->ExecuteIndirect(command_signature, 1, indirect_args, 0, nullptr, 0);
-  } else if (test.indexed) {
-    list->DrawIndexedInstanced(index_count, 1, 1, 1, 0);
-  } else {
-    list->DrawInstanced(vertex_count, 1, 0, 0);
+  auto draw = [&] {
+    if (test.indirect) {
+      list->ExecuteIndirect(command_signature, 1, indirect_args, 0, nullptr, 0);
+    } else if (test.indexed) {
+      list->DrawIndexedInstanced(index_count, 1, 1, 1, 0);
+    } else {
+      list->DrawInstanced(vertex_count, 1, 0, 0);
+    }
+  };
+  draw();
+  if (test.direct_indexed_heap_scan)
+    draw();
+  if (test.descriptor_encoder_break) {
+    D3D12_RESOURCE_BARRIER alias_barrier = {};
+    alias_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+    list->ResourceBarrier(1, &alias_barrier);
+    draw();
+  }
+  if (test.descriptor_mutation) {
+    draw();
+    device->CreateShaderResourceView(query_texture_a, nullptr, query_descriptor);
+    draw();
+  }
+  if (test.root_cbv_mutation || test.root_srv_mutation || test.root_uav_mutation) {
+    draw();
+    if (test.root_srv_mutation && !test.root_uav_mutation) {
+      D3D12_RESOURCE_BARRIER uav_barrier = {};
+      uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+      uav_barrier.UAV.pResource = root_uav_data;
+      list->ResourceBarrier(1, &uav_barrier);
+    }
+    if (test.root_cbv_mutation) {
+      list->SetGraphicsRootConstantBufferView(0, root_data_b->GetGPUVirtualAddress());
+    } else {
+      if (test.root_srv_mutation)
+        list->SetGraphicsRootShaderResourceView(0, root_data_b->GetGPUVirtualAddress());
+      if (test.root_uav_mutation)
+        list->SetGraphicsRootUnorderedAccessView(1, root_uav_data_b->GetGPUVirtualAddress());
+    }
+    draw();
   }
 
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
@@ -651,6 +792,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
                                                IID_PPV_ARGS(&readback))))
     return fail("readback creation failed");
 
+  ID3D12Resource *root_uav_output = test.root_uav_mutation ? root_uav_data_b : root_uav_data;
   if (test.geometry_root_srv_uav) {
     auto uav_readback_desc = BufferDescription(256);
     if (!CheckHR("CreateRootUAVReadback",
@@ -660,12 +802,12 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
       return fail("root UAV readback setup failed");
     D3D12_RESOURCE_BARRIER uav_barrier = {};
     uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    uav_barrier.Transition.pResource = root_uav_data;
+    uav_barrier.Transition.pResource = root_uav_output;
     uav_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     uav_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
     uav_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     list->ResourceBarrier(1, &uav_barrier);
-    list->CopyBufferRegion(uav_readback, 0, root_uav_data, 0, sizeof(float) * 4);
+    list->CopyBufferRegion(uav_readback, 0, root_uav_output, 0, sizeof(float) * 4);
   }
 
   D3D12_RESOURCE_BARRIER barrier = {};
@@ -685,6 +827,64 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   list->CopyTextureRegion(&copy_dst, 0, 0, 0, &copy_src, nullptr);
   if (!CheckHR("Close", list->Close()))
     return fail("command list close failed");
+
+  if (test.descriptor_mutation) {
+    auto *internal_list = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list);
+    const auto counters = internal_list->GetAirconvResidencyCounters();
+    if (counters.root_scan_requests != 3 || counters.root_scans_executed != 0 ||
+        counters.root_scan_skips != 3 || counters.root_deserializer_creates != 0 ||
+        counters.descriptor_requests != 3 || counters.descriptor_scans_executed != 2 ||
+        counters.descriptor_scan_skips != 1 || counters.descriptor_slots_visited != 2 ||
+        counters.descriptor_batch_locks != 2 || counters.heap_generation_invalidations != 1 ||
+        counters.table_invalidations != 1 || counters.pending_descriptors_inserted != 1 ||
+        counters.pending_descriptor_duplicates != 1 || counters.single_descriptor_reads != 0) {
+      std::cerr << "DXBC SM5 " << test.name << ": unexpected AIRCONV residency counters before submission\n";
+      cleanup();
+      return false;
+    }
+    device->CreateShaderResourceView(query_texture_b, nullptr, query_descriptor);
+  }
+
+  if (test.descriptor_encoder_break) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    if (counters.root_scan_requests != 2 || counters.root_scan_skips != 2 ||
+        counters.descriptor_requests != 2 || counters.descriptor_scans_executed != 2 ||
+        counters.descriptor_scan_skips != 0 || counters.descriptor_slots_visited != 2 ||
+        counters.descriptor_batch_locks != 2 || counters.encoder_invalidations != 1 ||
+        counters.pending_descriptors_inserted != 2 || counters.pending_descriptor_duplicates != 0) {
+      std::cerr << "DXBC SM5 " << test.name << ": new encoder did not receive an independent descriptor scan\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.direct_indexed_heap_scan) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    if (counters.root_scan_requests != 2 || counters.root_scan_skips != 2 ||
+        counters.descriptor_requests != 2 || counters.descriptor_scans_executed != 1 ||
+        counters.descriptor_scan_skips != 1 || counters.descriptor_slots_visited != 4 ||
+        counters.descriptor_batch_locks != 1 || counters.direct_indexed_root_requests != 2 ||
+        counters.direct_indexed_scans != 1 || counters.direct_indexed_descriptors != 4 ||
+        counters.pending_descriptors_inserted != 4 || counters.pending_descriptor_duplicates != 0) {
+      std::cerr << "DXBC SM5 " << test.name << ": direct-indexed scan did not conservatively cover the full heap\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.root_cbv_mutation || test.root_srv_mutation || test.root_uav_mutation) {
+    auto *internal_list = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list);
+    const auto counters = internal_list->GetAirconvResidencyCounters();
+    const uint64_t expected_va_lookups = test.root_cbv_mutation ? 2 :
+                                         test.root_srv_mutation && test.root_uav_mutation ? 4 : 3;
+    if (counters.root_scan_requests != 3 || counters.root_scans_executed != 2 ||
+        counters.root_scan_skips != 1 || counters.root_deserializer_creates != 0 ||
+        counters.root_va_lookups != expected_va_lookups) {
+      std::cerr << "DXBC SM5 " << test.name << ": root-address mutation did not invalidate residency exactly once\n";
+      cleanup();
+      return false;
+    }
+  }
 
   if (test.release_resources_before_execute) {
     // D3D12 command recording must retain resources referenced by root
@@ -708,6 +908,33 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   if (WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0)
     return fail("queue wait failed");
 
+  if (test.descriptor_mutation) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    if (counters.single_descriptor_reads != 1 || counters.submission_live_descriptor_reads != 1) {
+      std::cerr << "DXBC SM5 " << test.name << ": submission did not perform one live descriptor reread\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.descriptor_encoder_break) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    if (counters.single_descriptor_reads != 2 || counters.submission_live_descriptor_reads != 2) {
+      std::cerr << "DXBC SM5 " << test.name << ": submission did not resolve both encoder descriptor uses\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.direct_indexed_heap_scan) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    if (counters.single_descriptor_reads != 4 || counters.submission_live_descriptor_reads != 4) {
+      std::cerr << "DXBC SM5 " << test.name << ": submission did not resolve the full direct-indexed heap\n";
+      cleanup();
+      return false;
+    }
+  }
+
   if (!CheckHR("MapReadback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped_readback))))
     return fail("readback mapping failed");
   const UINT pixel = *reinterpret_cast<const UINT *>(mapped_readback);
@@ -716,8 +943,14 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   if (test.geometry_root_srv_uav) {
     if (!CheckHR("MapRootUAVReadback", uav_readback->Map(0, nullptr, &mapped_uav_readback)))
       return fail("root UAV readback mapping failed");
-    static constexpr uint32_t expected_root_uav[] = {0x00000000u, 0x3f800000u, 0x00000000u, 0x3f800000u};
-    if (std::memcmp(mapped_uav_readback, expected_root_uav, sizeof(expected_root_uav)) != 0) {
+    static constexpr uint32_t expected_root_uav_green[] = {0x00000000u, 0x3f800000u, 0x00000000u, 0x3f800000u};
+    static constexpr uint32_t expected_root_uav_red[] = {0x3f800000u, 0x00000000u, 0x00000000u, 0x3f800000u};
+    const auto *expected_root_uav = test.root_srv_mutation ? expected_root_uav_red : expected_root_uav_green;
+    if (std::memcmp(mapped_uav_readback, expected_root_uav, sizeof(expected_root_uav_green)) != 0) {
+      const auto *actual_root_uav = static_cast<const uint32_t *>(mapped_uav_readback);
+      std::cerr << "DXBC SM5 " << test.name << ": root UAV data mismatch: 0x" << std::hex
+                << actual_root_uav[0] << ",0x" << actual_root_uav[1] << ",0x" << actual_root_uav[2] << ",0x"
+                << actual_root_uav[3] << std::dec << "\n";
       uav_readback->Unmap(0, nullptr);
       mapped_uav_readback = nullptr;
       return fail("root UAV data mismatch");
@@ -750,6 +983,8 @@ int main(int argc, char **argv) {
       {"adj", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ, true, false, true, false, false, 0x00ffffffu},
       {"adj-strip", D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ, true, true, true, false, false, 0x00ffffffu},
       {"root-cbv", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, true, false, 0x0000ff00u},
+      {"root-cbv-address-mutation", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, true, false,
+       0x000000ffu, false, false, false, false, false, false, false, true},
       {"indirect", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, true, 0x00ffffffu},
       {"indirect-indexed32", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, true, true, false, false, true, 0x00ffffffu},
       {"zero-index-view", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false, 0x00ffffffu,
@@ -760,10 +995,22 @@ int main(int argc, char **argv) {
        false, true},
       {"geometry-root-srv-uav", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
        0x0000ff00u, false, false, false, true},
+      {"root-srv-address-mutation", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x000000ffu, false, false, false, true, false, false, false, false, true, false},
+      {"root-uav-address-mutation", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x0000ff00u, false, false, false, true, false, false, false, false, false, true},
+      {"root-srv-uav-address-mutation", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x000000ffu, false, false, false, true, false, false, false, false, true, true},
       {"geometry-root-srv-uav-lifetime", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
        0x0000ff00u, false, false, false, true, false, true},
       {"null-texture-query", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
        0x00ffffffu, false, false, false, false, true},
+      {"descriptor-residency-generation", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x0000ff00u, false, false, false, false, true, false, true},
+      {"descriptor-new-encoder", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x000000ffu, false, false, false, false, true, false, false, false, false, false, true},
+      {"descriptor-direct-indexed", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x00ffffffu, false, false, false, false, false, false, false, false, false, false, false, true},
   };
 
   std::vector<const TestCase *> selected;

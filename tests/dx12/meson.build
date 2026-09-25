@@ -39,6 +39,13 @@ dx12_graphics_sm6 = executable('dx12_graphics_sm6', 'dx12_graphics_sm6.cpp',
 )
 
 dx12_graphics_sm5 = executable('dx12_graphics_sm5', 'dx12_graphics_sm5.cpp',
+  include_directories: [
+    include_directories('../../src/airconv'),
+    include_directories('../../src/dxgi'),
+    include_directories('../../src/dxmt'),
+    include_directories('../../src/winemetal'),
+    include_directories('../../src/util'),
+  ],
   dependencies: [ d3d12_dep ],
 )
 
@@ -850,6 +857,8 @@ dx12_present_oracle = executable('dx12_present_oracle', 'dx12_present_oracle.cpp
 dx12_descriptor_ownership = executable(
   'dx12_descriptor_ownership', 'dx12_descriptor_ownership.cpp',
   include_directories: [
+    include_directories('../../src/airconv'),
+    include_directories('../../src/dxgi'),
     include_directories('../../src/dxmt'),
     include_directories('../../src/winemetal'),
     include_directories('../../src/util'),
