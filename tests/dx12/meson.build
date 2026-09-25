@@ -134,6 +134,10 @@ dx12_pipeline_persistence = executable('dx12_pipeline_persistence', 'dx12_pipeli
   dependencies: [ d3d12_dep ],
 )
 
+dx12_debug_logging = executable('dx12_debug_logging', 'dx12_debug_logging.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dx12_mesh_sm6 = executable('dx12_mesh_sm6', 'dx12_mesh_sm6.cpp',
   dependencies: [ d3d12_dep ],
 )

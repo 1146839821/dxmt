@@ -974,7 +974,8 @@ public:
     indirect_residency_ =
         GetEnvironmentVariableA("DXMT_INDIRECT_RESIDENCY", enabled, sizeof(enabled)) && enabled[0] != '0';
     memset(enabled, 0, sizeof(enabled));
-    compute_trace_ = GetEnvironmentVariableA("DXMT_COMPUTE_TRACE", enabled, sizeof(enabled)) && enabled[0] != '0';
+    compute_trace_ = Logger::logLevel() <= LogLevel::Debug &&
+                     GetEnvironmentVariableA("DXMT_COMPUTE_TRACE", enabled, sizeof(enabled)) && enabled[0] != '0';
     memset(enabled, 0, sizeof(enabled));
     airconv_compute_residency_ = true;
     if (GetEnvironmentVariableA("DXMT_AIRCONV_COMPUTE_RESIDENCY", enabled, sizeof(enabled)))
@@ -2780,8 +2781,11 @@ public:
       return;
 
     const auto &root_desc = versioned_desc->Desc_1_1;
-    static std::atomic<uint32_t> trace_count{0};
-    const auto trace_id = trace_count.fetch_add(1, std::memory_order_relaxed);
+    uint32_t trace_id = UINT32_MAX;
+    if (Logger::logLevel() <= LogLevel::Debug) {
+      static std::atomic<uint32_t> trace_count{0};
+      trace_id = trace_count.fetch_add(1, std::memory_order_relaxed);
+    }
     auto encode_root_resource = [&](UINT parameter_index, D3D12_ROOT_PARAMETER_TYPE type, uint64_t va) {
       if (!va)
         return;
