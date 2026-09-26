@@ -773,6 +773,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
     bool covered = false;
   };
   std::vector<PendingDescriptorUse> pending_descriptor_uses_;
+  std::vector<size_t> pending_submission_order_;
   std::unordered_map<PendingDescriptorUseKey, size_t, PendingDescriptorUseKeyHash> pending_descriptor_use_indices_;
   // One strong reference per unique heap keeps every raw heap pointer in the
   // pending records valid through submission-time descriptor resolution.
@@ -934,6 +935,7 @@ public:
     ResetCurrentEncoderResourceUseState();
     encoded_resource_use_masks_.clear();
     pending_descriptor_uses_.clear();
+    pending_submission_order_.clear();
     pending_descriptor_use_indices_.clear();
     pending_descriptor_heaps_.clear();
     if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState)) {
@@ -3119,39 +3121,47 @@ public:
     std::unordered_map<EncoderData *, std::unordered_map<obj_handle_t, size_t>> positions;
     const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
     const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
-    for (const auto &pending : pending_descriptor_uses_) {
-      const auto retained_heap = pending_descriptor_heaps_.find(pending.key.heap);
-      if (retained_heap == pending_descriptor_heaps_.end() || !retained_heap->second.ptr()) {
-        ERR("D3D12 pending volatile descriptor lost its retained descriptor heap");
-        return E_FAIL;
-      }
-      auto *heap = retained_heap->second.ptr();
-      // Submission must always resolve the current descriptor value. The
-      // recording-time generation cache is deliberately not consulted here.
-      auto descriptor_read = heap->ReadDescriptor(pending.key.index);
-      airconv_residency_counters_.single_descriptor_reads++;
-      airconv_residency_counters_.submission_live_descriptor_reads++;
-      const auto &descriptor = descriptor_read.get();
-      const auto &key = pending.key;
-      auto accepts = [&](D3D12_DESCRIPTOR_RANGE_TYPE expected) {
+    const auto pending_count = pending_descriptor_uses_.size();
+    airconv_residency_counters_.submission_pending_uses += pending_count;
+    try {
+      pending_submission_order_.resize(pending_count);
+      for (size_t i = 0; i < pending_count; i++)
+        pending_submission_order_[i] = i;
+      std::sort(pending_submission_order_.begin(), pending_submission_order_.end(), [&](size_t left, size_t right) {
+        const auto &left_key = pending_descriptor_uses_[left].key;
+        const auto &right_key = pending_descriptor_uses_[right].key;
+        if (left_key.heap != right_key.heap)
+          return std::less<MTLD3D12DescriptorHeap *>{}(left_key.heap, right_key.heap);
+        if (left_key.index != right_key.index)
+          return left_key.index < right_key.index;
+        return left < right;
+      });
+    } catch (...) {
+      pending_submission_order_.clear();
+      ERR("D3D12 failed to order volatile descriptor uses before command submission");
+      return E_OUTOFMEMORY;
+    }
+
+    auto resolve_descriptor_for_use = [&](const ShaderVisibleDescriptorCPUStorage &descriptor,
+                                          const PendingDescriptorUseKey &key) {
+      const auto accepts = [&](D3D12_DESCRIPTOR_RANGE_TYPE expected) {
         return key.direct_indexed || key.range_type == expected;
       };
-      auto add = [&](obj_handle_t resource, WMTResourceUsage usage) {
+      const auto add = [&](obj_handle_t resource, WMTResourceUsage usage) {
         return AddSubmissionResourceUse(key.encoder, resource, usage, key.stages, uses, resources, positions);
       };
 
-      bool success = true;
       switch (descriptor.type) {
       case ShaderVisibleDescriptorType::SRVTexture:
         if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_SRV) && descriptor.SRVTexture.texture) {
           auto &view = descriptor.SRVTexture.texture->view(descriptor.SRVTexture.view);
-          success = add(view.texture.handle, sampled_read);
+          return add(view.texture.handle, sampled_read);
         }
         break;
       case ShaderVisibleDescriptorType::SRVAccelerationStructure:
         if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_SRV) && descriptor.SRVAccelerationStructure.acceleration_structure)
-          success = add(descriptor.SRVAccelerationStructure.acceleration_structure, WMTResourceUsageRead) &&
-                    add(descriptor.SRVAccelerationStructure.acceleration_structure_header, WMTResourceUsageRead);
+          return add(descriptor.SRVAccelerationStructure.acceleration_structure, WMTResourceUsageRead) &&
+                 add(descriptor.SRVAccelerationStructure.acceleration_structure_header, WMTResourceUsageRead);
         break;
       case ShaderVisibleDescriptorType::ConstantBuffer:
         if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_CBV)) {
@@ -3161,43 +3171,90 @@ public:
             allocation = device_->LookupBufferByVA(descriptor.ConstantBuffer.address, &buffer_offset);
           }
           if (allocation)
-            success = add(allocation->buffer().handle, WMTResourceUsageRead);
+            return add(allocation->buffer().handle, WMTResourceUsageRead);
         }
         break;
       case ShaderVisibleDescriptorType::UAVTexture:
         if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_UAV) && descriptor.UAVTexture.texture) {
           auto &view = descriptor.UAVTexture.texture->view(descriptor.UAVTexture.view);
-          success = add(view.texture.handle, read_write);
+          return add(view.texture.handle, read_write);
         }
         break;
       case ShaderVisibleDescriptorType::SRVTexelBuffer:
         if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_SRV) && descriptor.SRVTexelBuffer.buffer &&
             descriptor.SRVTexelBuffer.buffer->current())
-          success = add(descriptor.SRVTexelBuffer.buffer->current()->buffer().handle, WMTResourceUsageRead);
+          return add(descriptor.SRVTexelBuffer.buffer->current()->buffer().handle, WMTResourceUsageRead);
         break;
       case ShaderVisibleDescriptorType::UAVTexelBuffer:
         if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_UAV) && descriptor.UAVTexelBuffer.buffer &&
             descriptor.UAVTexelBuffer.buffer->current())
-          success = add(descriptor.UAVTexelBuffer.buffer->current()->buffer().handle, read_write);
+          return add(descriptor.UAVTexelBuffer.buffer->current()->buffer().handle, read_write);
         break;
       case ShaderVisibleDescriptorType::SRVBuffer:
         if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_SRV) && descriptor.SRVBuffer.buffer &&
             descriptor.SRVBuffer.buffer->current())
-          success = add(descriptor.SRVBuffer.buffer->current()->buffer().handle, WMTResourceUsageRead);
+          return add(descriptor.SRVBuffer.buffer->current()->buffer().handle, WMTResourceUsageRead);
         break;
       case ShaderVisibleDescriptorType::UAVBuffer:
         if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_UAV) && descriptor.UAVBuffer.buffer &&
             descriptor.UAVBuffer.buffer->current())
-          success = add(descriptor.UAVBuffer.buffer->current()->buffer().handle, read_write);
+          return add(descriptor.UAVBuffer.buffer->current()->buffer().handle, read_write);
         break;
       case ShaderVisibleDescriptorType::Null:
         break;
       }
-      if (!success) {
-        ERR("D3D12 failed to retain a volatile descriptor resource before command submission");
-        return E_OUTOFMEMORY;
+      return true;
+    };
+
+    size_t heap_begin = 0;
+    size_t unique_slots = 0;
+    while (heap_begin < pending_count) {
+      auto *heap = pending_descriptor_uses_[pending_submission_order_[heap_begin]].key.heap;
+      const auto retained_heap = pending_descriptor_heaps_.find(heap);
+      if (retained_heap == pending_descriptor_heaps_.end() || !retained_heap->second.ptr()) {
+        pending_submission_order_.clear();
+        ERR("D3D12 pending volatile descriptor lost its retained descriptor heap");
+        return E_FAIL;
       }
+
+      auto *live_heap = retained_heap->second.ptr();
+      auto descriptor_batch = live_heap->ReadDescriptorBatch();
+      airconv_residency_counters_.submission_unique_heaps++;
+      airconv_residency_counters_.submission_batch_locks++;
+
+      size_t heap_end = heap_begin + 1;
+      while (heap_end < pending_count &&
+             pending_descriptor_uses_[pending_submission_order_[heap_end]].key.heap == heap)
+        heap_end++;
+
+      size_t slot_begin = heap_begin;
+      while (slot_begin < heap_end) {
+        const auto slot_index = pending_descriptor_uses_[pending_submission_order_[slot_begin]].key.index;
+        size_t slot_end = slot_begin + 1;
+        while (slot_end < heap_end &&
+               pending_descriptor_uses_[pending_submission_order_[slot_end]].key.index == slot_index)
+          slot_end++;
+
+        const auto &descriptor = descriptor_batch.get(slot_index);
+        unique_slots++;
+        airconv_residency_counters_.submission_unique_slots++;
+        airconv_residency_counters_.submission_live_slot_resolutions++;
+        for (size_t use_index = slot_begin; use_index < slot_end; use_index++) {
+          const auto &pending = pending_descriptor_uses_[pending_submission_order_[use_index]];
+          airconv_residency_counters_.submission_fanout_uses++;
+          if (!resolve_descriptor_for_use(descriptor, pending.key)) {
+            pending_submission_order_.clear();
+            ERR("D3D12 failed to retain a volatile descriptor resource before command submission");
+            return E_OUTOFMEMORY;
+          }
+        }
+        slot_begin = slot_end;
+      }
+      heap_begin = heap_end;
     }
+
+    airconv_residency_counters_.submission_slot_reuse_hits += pending_count - unique_slots;
+    pending_submission_order_.clear();
     return S_OK;
   }
 
@@ -3281,8 +3338,13 @@ public:
       return;
     }
 
+    const bool same_root_heap = cache.valid && cache.root_signature == pRootSig && cache.heap == descriptor_heap;
+    bool table_handles_changed = same_root_heap && cache.table_count != current_table_count;
+    for (UINT i = 0; same_root_heap && !table_handles_changed && i < current_table_count; i++)
+      table_handles_changed = cache.table_handles[i].parameter_index != current_table_handles[i].parameter_index ||
+                             cache.table_handles[i].handle != current_table_handles[i].handle;
+    const bool generation_changed = cache.heap == descriptor_heap && cache.heap_generation != heap_generation;
     if (cache.valid) {
-      const bool generation_changed = cache.heap == descriptor_heap && cache.heap_generation != heap_generation;
       const bool tables_changed = cache.root_signature != pRootSig || cache.heap != descriptor_heap ||
                                   cache.compute != compute || cache.stages != stages || !same_table_handles;
       if (generation_changed)
@@ -3290,16 +3352,17 @@ public:
       if (generation_changed || tables_changed)
         airconv_residency_counters_.table_invalidations++;
     }
+    if (generation_changed)
+      airconv_residency_counters_.heap_global_generation_changes_seen++;
+    if (table_handles_changed)
+      airconv_residency_counters_.table_handle_invalidations++;
 
     if (!current_table_count && !pRootSig->ResourceHeapDirectlyIndexed) {
       airconv_residency_counters_.descriptor_scan_skips++;
       cache.encoder = allocator_->encoder_current;
-      cache.root_signature = pRootSig;
-      cache.heap = descriptor_heap;
       cache.heap_generation = heap_generation;
       cache.compute = compute;
       cache.stages = stages;
-      cache.table_count = 0;
       cache.valid = true;
       return;
     }
