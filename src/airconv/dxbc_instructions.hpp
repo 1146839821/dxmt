@@ -22,6 +22,7 @@
 #include <array>
 #include <map>
 #include <string_view>
+#include <string>
 #include <variant>
 #include "packed_variant_list.hpp"
 
@@ -413,6 +414,11 @@ struct InstGatherCompare {
   std::optional<DstOperand> feedback;
 };
 
+struct InstCheckAccessFullyMapped {
+  DstOperand dst;
+  SrcOperand src;
+};
+
 struct InstBufferInfo {
   DstOperand dst;
   std::variant<SrcOperandResource, SrcOperandUAV> src;
@@ -444,6 +450,7 @@ struct InstLoad {
   SrcOperandResource src_resource;
   std::optional<SrcOperand> src_sample_index;
   int32_t offsets[3];
+  std::optional<DstOperand> feedback;
 };
 
 struct InstLoadRaw {
@@ -467,6 +474,7 @@ struct InstLoadUAVTyped {
   DstOperand dst;
   SrcOperand src_address;
   SrcOperandUAV src_uav;
+  std::optional<DstOperand> feedback;
 };
 
 struct InstStoreUAVTyped {
@@ -771,6 +779,7 @@ using InstructionList = PackedVariantList<
   InstExtractBits, InstBitFiledInsert,                                   //
   InstSample, InstSampleCompare, InstGather, InstGatherCompare,          //
   InstSampleBias, InstSampleDerivative, InstSampleLOD,                   //
+  InstCheckAccessFullyMapped,                                            //
   InstSamplePos, InstSampleInfo, InstBufferInfo, InstResourceInfo,       //
   InstLoad, InstLoadUAVTyped, InstStoreUAVTyped,                         //
   InstLoadRaw, InstLoadStructured, InstStoreRaw, InstStoreStructured,    //

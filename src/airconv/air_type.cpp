@@ -65,6 +65,7 @@ AirType::AirType(LLVMContext &context) : context(context) {
     {
       _int->getPointerTo((uint32_t)AddressSpace::device),
       _int->getPointerTo((uint32_t)AddressSpace::device),
+      _long, // buffer size
     },
     "dxmt_stream_output_buffer_entry"
   );

@@ -720,6 +720,24 @@ Converter::StoreOperand(const DstOperandIndexableTemp &DstOp, llvm::Value *Value
   }
 }
 
+void
+Converter::StoreFeedback(const std::optional<DstOperand> &DstOp, llvm::Value *Residency) {
+  if (!DstOp || IsNull(*DstOp))
+    return;
+
+  // AIR's sparse access byte is the inverse of the Metal resident() result:
+  // bit 0 is set when any accessed texel is nonresident. DXBC exposes an
+  // opaque uint status whose only legal consumer is CheckAccessFullyMapped,
+  // so canonicalize the flag to the D3D form rather than leaking the AIR ABI
+  // representation into a shader register.
+  auto NonResident = ir.CreateAnd(Residency, llvm::ConstantInt::get(Residency->getType(), 1));
+  auto Resident = ir.CreateICmpEQ(NonResident, llvm::Constant::getNullValue(Residency->getType()));
+  auto Status = ir.CreateSelect(
+      Resident, llvm::ConstantInt::getAllOnesValue(ir.getInt32Ty()), ir.getInt32(0)
+  );
+  StoreOperand(*DstOp, Status);
+}
+
 llvm::Value *
 Converter::BitcastToFloat(llvm::Value *Value) {
   auto Ty = Value->getType();
@@ -1011,7 +1029,10 @@ Converter::operator()(const InstIntegerUnaryOp &unary) {
   case IntegerUnaryOp::FirstHiBitSigned:
     Value = ir.CreateSelect(
         ir.CreateIsNotNeg(Value), air.CreateCountZero(Value, false),
-        ir.CreateAdd(air.CreateCountZero(ir.CreateShl(ir.CreateNot(Value), ir.getInt32(1)), false), ir.getInt32(1))
+        ir.CreateAdd(
+            air.CreateCountZero(ir.CreateShl(ir.CreateNot(Value), 1ull), false),
+            llvm::ConstantInt::get(Value->getType(), 1)
+        )
     );
     Value = MaxIfInMask(~((uint32_t)0x1f), Value);
     break;
@@ -1418,6 +1439,7 @@ Converter::operator()(const InstLoad &load) {
       air.CreateRead(Tex->Texture, Tex->Handle, Address, ArrayIndex, SampleIndex, LOD, Tex->GlobalCoherent);
 
   StoreOperand(load.dst, MaskSwizzle(Value, GetMask(load.dst), Tex->Swizzle));
+  StoreFeedback(load.feedback, Residency);
 }
 void
 Converter::operator()(const InstLoadUAVTyped &load) {
@@ -1472,6 +1494,15 @@ Converter::operator()(const InstLoadUAVTyped &load) {
       air.CreateRead(Tex->Texture, Tex->Handle, Address, ArrayIndex, SampleIndex, air.getInt(0), Tex->GlobalCoherent);
 
   StoreOperand(load.dst, MaskSwizzle(Value, GetMask(load.dst), Tex->Swizzle));
+  StoreFeedback(load.feedback, Residency);
+}
+
+void
+Converter::operator()(const InstCheckAccessFullyMapped &check) {
+  auto Status = LoadOperand(check.src, kMaskComponentX);
+  auto FullyMapped = ir.CreateICmpNE(Status, ir.getInt32(0));
+  auto Result = ir.CreateSub(ir.getInt32(0), ir.CreateZExt(FullyMapped, ir.getInt32Ty()));
+  StoreOperand(check.dst, Result);
 }
 
 void
@@ -1596,6 +1627,7 @@ Converter::operator()(const InstSample &sample) {
   );
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  StoreFeedback(sample.feedback, Residency);
 }
 
 void
@@ -1661,6 +1693,7 @@ Converter::operator()(const InstSampleLOD &sample) {
       air.CreateSample(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets, sample_level{LOD});
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  StoreFeedback(sample.feedback, Residency);
 }
 
 void
@@ -1734,6 +1767,7 @@ Converter::operator()(const InstSampleBias &sample) {
   );
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  StoreFeedback(sample.feedback, Residency);
 }
 
 void
@@ -1824,6 +1858,7 @@ Converter::operator()(const InstSampleDerivative &sample) {
   );
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  StoreFeedback(sample.feedback, Residency);
 }
 
 void
@@ -1889,6 +1924,7 @@ Converter::operator()(const InstSampleCompare &sample) {
             );
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  StoreFeedback(sample.feedback, Residency);
 }
 
 void
@@ -1946,6 +1982,7 @@ Converter::operator()(const InstGather &sample) {
       air.CreateGather(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, Offset, Component);
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  StoreFeedback(sample.feedback, Residency);
 }
 
 void
@@ -1999,6 +2036,7 @@ Converter::operator()(const InstGatherCompare &sample) {
       air.CreateGatherCompare(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, Reference, Offset);
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  StoreFeedback(sample.feedback, Residency);
 }
 
 void

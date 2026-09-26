@@ -23,7 +23,7 @@ public:
 private:
   WMT::Reference<WMT::FXSpatialScaler> scaler_;
   WMT::Reference<WMT::Fence> fence_;
-  std::atomic<uint32_t> refcount_;
+  std::atomic<uint32_t> refcount_ = {0u};
 };
 
 class TemporalScaler {
@@ -44,7 +44,7 @@ public:
 private:
   WMT::Reference<WMT::FXTemporalScaler> scaler_;
   WMT::Reference<WMT::Fence> fence_;
-  std::atomic<uint32_t> refcount_;
+  std::atomic<uint32_t> refcount_ = {0u};
 };
 
 } // namespace dxmt

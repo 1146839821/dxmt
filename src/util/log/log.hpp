@@ -72,9 +72,17 @@ private:
 } // namespace dxmt
 
 
-#define TRACE(...) Logger::trace(str::format(__VA_ARGS__))
+#define TRACE(...)                                                              \
+  do {                                                                          \
+    if (Logger::logLevel() <= LogLevel::Trace)                                  \
+      Logger::trace(str::format(__VA_ARGS__));                                  \
+  } while (0)
 
-#define DEBUG(...) Logger::debug(str::format(__VA_ARGS__))
+#define DEBUG(...)                                                              \
+  do {                                                                          \
+    if (Logger::logLevel() <= LogLevel::Debug)                                  \
+      Logger::debug(str::format(__VA_ARGS__));                                  \
+  } while (0)
 
 #define WARN(...) Logger::warn(str::format(__VA_ARGS__))
 

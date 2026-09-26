@@ -25,6 +25,39 @@
 using namespace metal;
 using namespace dxmt;
 
+struct DXMTPredicationParams {
+  uint operation;
+  uint reserved;
+};
+
+[[kernel]] void dxmt_predicate_arguments(
+    device const ulong* predicate [[buffer(kPredicationPredicateIndex)]],
+    device uint* arguments [[buffer(kPredicationOutputIndex)]],
+    constant DXMTPredicationParams& params [[buffer(kPredicationParamsIndex)]],
+    uint position [[thread_position_in_grid]]
+) {
+  if (position != 0)
+    return;
+
+  const bool execute = params.operation ? predicate[0] != 0 : predicate[0] == 0;
+  if (!execute)
+    arguments[0] = 0;
+}
+
+[[kernel]] void dxmt_predicate_count(
+    device const ulong* predicate [[buffer(kPredicationPredicateIndex)]],
+    device const uint* source_count [[buffer(kPredicationSourceIndex)]],
+    device uint* output_count [[buffer(kPredicationOutputIndex)]],
+    constant DXMTPredicationParams& params [[buffer(kPredicationParamsIndex)]],
+    uint position [[thread_position_in_grid]]
+) {
+  if (position != 0)
+    return;
+
+  const bool execute = params.operation ? predicate[0] != 0 : predicate[0] == 0;
+  output_count[0] = execute ? source_count[0] : 0;
+}
+
 [[kernel]] void clear_texture_1d_uint(
     texture1d<uint, access::read_write> tex [[texture(0)]],
     constant uint4& value [[buffer(1)]],

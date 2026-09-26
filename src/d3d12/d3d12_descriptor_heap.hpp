@@ -20,37 +20,40 @@
 #include "d3d12.h"
 #include "dxmt_buffer.hpp"
 #include "dxmt_texture.hpp"
+#include "metalirconverter_thunks.h"
+#include <atomic>
 #include <cstdint>
-
-#if UINTPTR_MAX == 0xffffffffffffffffULL
-#define DXMT_USE_EMBEDDED_HEAP_POINTER
-#endif
+#include <mutex>
 
 namespace dxmt {
 
-struct EMBEDDED_DESCRIPTOR_HANDLE {
-#ifndef DXMT_USE_EMBEDDED_HEAP_POINTER
-  SIZE_T Tag        : 5;
-  SIZE_T Descriptor : 20;
-  SIZE_T Heap       : 7;
-#else
-  SIZE_T Tag        : 5;
-  SIZE_T Descriptor : 20;
-  SIZE_T Heap       : 39;
+SIZE_T RegisterDescriptorHeap(const void *heap);
+void UnregisterDescriptorHeap(const void *heap);
+const void *LookupDescriptorHeap(SIZE_T index);
 
-  // assume pointer is 8-byte aligned, providing 3 free bits
+constexpr SIZE_T kDescriptorHeapTag = 0x1f;
+
+struct EMBEDDED_DESCRIPTOR_HANDLE {
+  SIZE_T Tag        : 5;
+  SIZE_T Descriptor : 20;
+  SIZE_T Heap       : sizeof(SIZE_T) == 4 ? 7 : 39;
+
+  const void *
+  getHeap() const {
+    return Tag == kDescriptorHeapTag ? LookupDescriptorHeap(Heap) : nullptr;
+  }
+
   template <typename T>
   T *
   extract() {
-    return reinterpret_cast<T *>((Heap << 8) | (Tag << 3));
+    return reinterpret_cast<T *>(const_cast<void *>(getHeap()));
   }
 
   EMBEDDED_DESCRIPTOR_HANDLE(const void *heap, SIZE_T index) {
-    Heap = (SIZE_T)heap >> 8;
-    Tag = (SIZE_T)heap >> 3;
+    Heap = RegisterDescriptorHeap(heap);
+    Tag = kDescriptorHeapTag;
     Descriptor = index;
   }
-#endif
 
   EMBEDDED_DESCRIPTOR_HANDLE(D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
     union {
@@ -78,6 +81,7 @@ static_assert(sizeof(EMBEDDED_DESCRIPTOR_HANDLE) == sizeof(D3D12_CPU_DESCRIPTOR_
 enum class ShaderVisibleDescriptorType {
   Null,
   SRVTexture,
+  SRVAccelerationStructure,
   ConstantBuffer,
   UAVTexture,
   UAVTexelBuffer,
@@ -89,9 +93,16 @@ enum class ShaderVisibleDescriptorType {
 struct SRVTextureCPUStorage {
   Texture *texture = nullptr;
   TextureViewKey view{};
+  FLOAT resource_min_lod_clamp = 0.0f;
 };
 
 using UAVTextureCPUStorage = SRVTextureCPUStorage;
+
+struct SRVAccelerationStructureCPUStorage {
+  obj_handle_t acceleration_structure = NULL_OBJECT_HANDLE;
+  obj_handle_t acceleration_structure_header = NULL_OBJECT_HANDLE;
+  D3D12_GPU_VIRTUAL_ADDRESS header_gpu_virtual_address = 0;
+};
 
 struct UAVTexelBufferCPUStorage {
   Buffer *buffer = nullptr;
@@ -117,6 +128,7 @@ struct ShaderVisibleDescriptorCPUStorage {
   ShaderVisibleDescriptorType type;
   union {
     SRVTextureCPUStorage SRVTexture;
+    SRVAccelerationStructureCPUStorage SRVAccelerationStructure;
     CBVCommonStorage ConstantBuffer;
     UAVTextureCPUStorage UAVTexture;
     UAVTexelBufferCPUStorage UAVTexelBuffer;
@@ -124,16 +136,64 @@ struct ShaderVisibleDescriptorCPUStorage {
     SRVTexelBufferCPUStorage SRVTexelBuffer;
     SRVBufferCPUStorage SRVBuffer;
   };
+  // Keep the allocation identity available after the owning D3D12 resource
+  // is released. The descriptor heap owns the matching Rc separately.
+  BufferAllocation *allocation = nullptr;
 
-  ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null) {}
+  ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null), ConstantBuffer{}, allocation(nullptr) {}
+};
+
+// Keep the type, union payload and heap-owned resources stable for the whole
+// CPU read. Residency walks may visit slots that the application is updating
+// concurrently because those slots are not used by the current shader.
+class ShaderVisibleDescriptorRead {
+  std::unique_lock<dxmt::mutex> lock_;
+  const ShaderVisibleDescriptorCPUStorage &descriptor_;
+
+public:
+  ShaderVisibleDescriptorRead(dxmt::mutex &mutex, const ShaderVisibleDescriptorCPUStorage &descriptor) :
+      lock_(mutex), descriptor_(descriptor) {}
+
+  const ShaderVisibleDescriptorCPUStorage &get() const { return descriptor_; }
+};
+
+class ShaderVisibleDescriptorReadBatch {
+  std::unique_lock<dxmt::mutex> lock_;
+  const ShaderVisibleDescriptorCPUStorage *descriptors_;
+  size_t count_;
+
+public:
+  ShaderVisibleDescriptorReadBatch(
+      dxmt::mutex &mutex, const ShaderVisibleDescriptorCPUStorage *descriptors, size_t count
+  ) : lock_(mutex), descriptors_(descriptors), count_(count) {}
+
+  const ShaderVisibleDescriptorCPUStorage &get(UINT index) const {
+    static const ShaderVisibleDescriptorCPUStorage null_descriptor{};
+    return index < count_ ? descriptors_[index] : null_descriptor;
+  }
 };
 
 class MTLD3D12DescriptorHeap : public ID3D12DescriptorHeap {
 public:
+  virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
+  virtual WMT::Buffer GetDescriptorHeapBuffer() = 0;
+  virtual WMT::Buffer GetMSCDescriptorHeapBuffer() = 0;
+
   virtual HRESULT
   AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp) = 0;
 
+  virtual HRESULT AddRaytracingAccelerationStructureView(
+      UINT Index, const WMT::Reference<WMT::AccelerationStructure> &AccelerationStructure,
+      const WMT::Reference<WMT::Buffer> &AccelerationStructureHeader,
+      D3D12_GPU_VIRTUAL_ADDRESS HeaderLocation
+  ) = 0;
+
+  virtual bool HasNonZeroResourceMinLODClamp(UINT Index) = 0;
+
   virtual HRESULT AddConstantBufferView(UINT Index, UINT64 VA, UINT32 SizeInBytes) = 0;
+
+  // Replace a descriptor slot with the canonical null descriptor state.
+  virtual void ClearDescriptor(UINT Index) = 0;
 
   virtual HRESULT AddUnorderedAccessView(UINT Index, Texture *Texture, TextureViewKey View) = 0;
 
@@ -151,13 +211,19 @@ public:
 
   virtual HRESULT AddUnorderedAccessView(UINT Index, D3D12_UNORDERED_ACCESS_VIEW_DESC const *pDesc) = 0;
 
-  virtual ShaderVisibleDescriptorCPUStorage const &GetDescriptor(UINT Index) = 0;
+  virtual ShaderVisibleDescriptorRead ReadDescriptor(UINT Index) = 0;
+  virtual ShaderVisibleDescriptorReadBatch ReadDescriptorBatch() = 0;
+  virtual uint64_t GetMutationGeneration() const = 0;
 
   virtual void CopyDescriptors(UINT From, MTLD3D12DescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;
 };
 
 class MTLD3D12SamplerDescriptorHeap : public ID3D12DescriptorHeap {
 public:
+  virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
+  virtual WMT::Buffer GetDescriptorHeapBuffer() = 0;
+  virtual WMT::Buffer GetMSCDescriptorHeapBuffer() = 0;
+
   virtual HRESULT AddSampler(UINT Index, const D3D12_SAMPLER_DESC *Desc) = 0;
 
   virtual void CopyDescriptors(UINT From, MTLD3D12SamplerDescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;

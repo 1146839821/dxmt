@@ -370,6 +370,9 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
 
   std::vector<uint8_t> blob_;
   std::vector<uint32_t> qword_offsets_;
+  std::vector<RootResourceBindingMetadata> root_resource_bindings_;
+  std::vector<RootDescriptorTableMetadata> root_descriptor_tables_;
+  std::vector<RootDescriptorRangeMetadata> root_descriptor_ranges_;
 
   std::vector<Rc<Sampler>> static_samplers_; // which is not really "static"
   /**
@@ -379,6 +382,8 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
   Let's do it in the simple way
   */
   std::vector<uint64_t> static_samplers_encoded_;
+  std::vector<dxmt_msc_root_parameter_layout> msc_layout_;
+  bool msc_layout_initialized_ = false;
 
 public:
   MTLD3D12RootSignatureImpl(MTLD3D12Device *pDevice, const void *pBytecode, SIZE_T BytecodeLength) :
@@ -458,6 +463,104 @@ public:
     ParameterSlots = qword_offsets_.size();
     SlotQwordOffsets = qword_offsets_.data();
 
+    ResourceHeapDirectlyIndexed =
+        (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED) != 0;
+    for (UINT parameter_index = 0; parameter_index < desc.NumParameters; parameter_index++) {
+      const auto &parameter = desc.pParameters[parameter_index];
+      const auto source_qword = qword_offsets_[parameter_index];
+      switch (parameter.ParameterType) {
+      case D3D12_ROOT_PARAMETER_TYPE_CBV:
+      case D3D12_ROOT_PARAMETER_TYPE_SRV:
+      case D3D12_ROOT_PARAMETER_TYPE_UAV:
+        root_resource_bindings_.push_back(
+            {parameter_index, parameter.ParameterType, source_qword, parameter.ShaderVisibility}
+        );
+        break;
+      case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE: {
+        const auto first_range = static_cast<UINT>(root_descriptor_ranges_.size());
+        uint64_t append_offset = 0;
+        for (UINT range_index = 0; range_index < parameter.DescriptorTable.NumDescriptorRanges; range_index++) {
+          const auto &range = parameter.DescriptorTable.pDescriptorRanges[range_index];
+          const uint64_t offset = range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
+                                      ? append_offset
+                                      : range.OffsetInDescriptorsFromTableStart;
+          root_descriptor_ranges_.push_back({range.RangeType, range.NumDescriptors, offset});
+          if (range.NumDescriptors == UINT_MAX || offset > UINT64_MAX - range.NumDescriptors)
+            append_offset = UINT64_MAX;
+          else
+            append_offset = offset + range.NumDescriptors;
+        }
+        root_descriptor_tables_.push_back(
+            {parameter_index, source_qword, first_range, parameter.DescriptorTable.NumDescriptorRanges,
+             parameter.ShaderVisibility}
+        );
+        break;
+      }
+      default:
+        break;
+      }
+    }
+    RootResourceBindingCount = static_cast<UINT>(root_resource_bindings_.size());
+    RootResourceBindings = root_resource_bindings_.data();
+    RootDescriptorTableCount = static_cast<UINT>(root_descriptor_tables_.size());
+    RootDescriptorTables = root_descriptor_tables_.data();
+    RootDescriptorRangeCount = static_cast<UINT>(root_descriptor_ranges_.size());
+    RootDescriptorRanges = root_descriptor_ranges_.data();
+
+    return S_OK;
+  }
+
+  HRESULT
+  InitializeMSCLayout() override {
+    if (msc_layout_initialized_)
+      return S_OK;
+    if (!device_->GetMSCCapabilities().CoreShaderPathUsable())
+      return E_FAIL;
+
+    const void *blob = nullptr;
+    size_t blob_size = GetBlob(&blob);
+    char error_message[1024] = {};
+
+    dxmt_msc_get_root_layout_params params = {};
+    params.root_signature = blob;
+    params.root_signature_size = blob_size;
+    params.error_message = error_message;
+    params.error_message_capacity = sizeof(error_message);
+
+    int result = DXMTMSCGetRootSignatureLayout(&params);
+    if (result != DXMT_MSC_SUCCESS) {
+      ERR("Failed to query MSC root signature layout, result=", result, " message=", error_message);
+      return E_FAIL;
+    }
+
+    msc_layout_.resize(params.layout_count);
+    if (!msc_layout_.empty()) {
+      params.layouts = msc_layout_.data();
+      params.layout_capacity = msc_layout_.size();
+      params.layout_count = 0;
+      params.argument_buffer_size = 0;
+      error_message[0] = '\0';
+      result = DXMTMSCGetRootSignatureLayout(&params);
+      if (result != DXMT_MSC_SUCCESS) {
+        ERR("Failed to retrieve MSC root signature layout, result=", result, " message=", error_message);
+        msc_layout_.clear();
+        return E_FAIL;
+      }
+    }
+
+    MSCArgumentBufferSize = params.argument_buffer_size;
+    MSCParameterCount = msc_layout_.size();
+    MSCParameterLayouts = msc_layout_.data();
+    msc_layout_initialized_ = true;
+
+    DEBUG("MSC root layout size=", MSCArgumentBufferSize, " resources=", MSCParameterCount);
+    for (auto &layout : msc_layout_) {
+      DEBUG(
+          "MSC root parameter ", layout.parameter_index, " type=", layout.resource_type,
+          " register=", layout.shader_register, " space=", layout.register_space,
+          " offset=", layout.top_level_offset, " size=", layout.size_bytes
+      );
+    }
     return S_OK;
   }
 
