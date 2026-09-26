@@ -24,9 +24,11 @@
 #include "dxmt_format.hpp"
 #include "dxgi_interfaces.h"
 #include "log/log.hpp"
+#include "util_env.hpp"
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -80,6 +82,105 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_psos_;
   std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_rtv_psos_;
   std::array<WMT::Reference<WMT::DepthStencilState>, 4> clear_dssos_;
+  dxmt::mutex residency_stats_mutex_;
+  AirconvResidencyCounters residency_stats_counters_;
+  uint64_t residency_stats_command_lists_ = 0;
+  std::chrono::steady_clock::time_point residency_stats_window_start_{};
+
+  static bool ResidencyStatsEnabled() {
+    static const bool enabled = dxmt::env::getEnvVar("DXMT_D3D12_RESIDENCY_STATS") == "1";
+    return enabled;
+  }
+
+  static void AddResidencyCounters(AirconvResidencyCounters &target, const AirconvResidencyCounters &source) {
+#define DXMT_ADD_RESIDENCY_COUNTER(field) target.field += source.field
+    DXMT_ADD_RESIDENCY_COUNTER(root_scan_requests);
+    DXMT_ADD_RESIDENCY_COUNTER(root_scans_executed);
+    DXMT_ADD_RESIDENCY_COUNTER(root_scan_skips);
+    DXMT_ADD_RESIDENCY_COUNTER(root_deserializer_creates);
+    DXMT_ADD_RESIDENCY_COUNTER(descriptor_requests);
+    DXMT_ADD_RESIDENCY_COUNTER(descriptor_scans_executed);
+    DXMT_ADD_RESIDENCY_COUNTER(descriptor_scan_skips);
+    DXMT_ADD_RESIDENCY_COUNTER(descriptor_slots_visited);
+    DXMT_ADD_RESIDENCY_COUNTER(descriptor_batch_locks);
+    DXMT_ADD_RESIDENCY_COUNTER(heap_generation_invalidations);
+    DXMT_ADD_RESIDENCY_COUNTER(heap_global_generation_changes_seen);
+    DXMT_ADD_RESIDENCY_COUNTER(table_handle_invalidations);
+    DXMT_ADD_RESIDENCY_COUNTER(table_invalidations);
+    DXMT_ADD_RESIDENCY_COUNTER(encoder_invalidations);
+    DXMT_ADD_RESIDENCY_COUNTER(root_va_lookups);
+    DXMT_ADD_RESIDENCY_COUNTER(descriptor_va_lookups);
+    DXMT_ADD_RESIDENCY_COUNTER(pending_descriptors_inserted);
+    DXMT_ADD_RESIDENCY_COUNTER(pending_descriptor_duplicates);
+    DXMT_ADD_RESIDENCY_COUNTER(submission_pending_uses);
+    DXMT_ADD_RESIDENCY_COUNTER(submission_unique_heaps);
+    DXMT_ADD_RESIDENCY_COUNTER(submission_unique_slots);
+    DXMT_ADD_RESIDENCY_COUNTER(submission_batch_locks);
+    DXMT_ADD_RESIDENCY_COUNTER(submission_live_slot_resolutions);
+    DXMT_ADD_RESIDENCY_COUNTER(submission_slot_reuse_hits);
+    DXMT_ADD_RESIDENCY_COUNTER(submission_fanout_uses);
+    DXMT_ADD_RESIDENCY_COUNTER(direct_indexed_root_requests);
+    DXMT_ADD_RESIDENCY_COUNTER(direct_indexed_scans);
+    DXMT_ADD_RESIDENCY_COUNTER(direct_indexed_descriptors);
+#undef DXMT_ADD_RESIDENCY_COUNTER
+  }
+
+  void AggregateResidencyCounters(const AirconvResidencyCounters &counters) {
+    AirconvResidencyCounters dump_counters;
+    uint64_t dump_command_lists = 0;
+    bool should_dump = false;
+    const auto now = std::chrono::steady_clock::now();
+    {
+      std::lock_guard lock(residency_stats_mutex_);
+      if (residency_stats_window_start_ == std::chrono::steady_clock::time_point{})
+        residency_stats_window_start_ = now;
+      AddResidencyCounters(residency_stats_counters_, counters);
+      residency_stats_command_lists_++;
+      if (now - residency_stats_window_start_ >= std::chrono::seconds(10)) {
+        dump_counters = residency_stats_counters_;
+        dump_command_lists = residency_stats_command_lists_;
+        residency_stats_counters_ = {};
+        residency_stats_command_lists_ = 0;
+        residency_stats_window_start_ = now;
+        should_dump = true;
+      }
+    }
+    if (!should_dump)
+      return;
+
+    const auto scan_requests = dump_counters.descriptor_requests;
+    const auto scan_skips = dump_counters.descriptor_scan_skips;
+    const auto executed_scans = dump_counters.descriptor_scans_executed;
+    const auto skip_rate = scan_requests ? double(scan_skips) / double(scan_requests) : 0.0;
+    const auto slots_per_scan = executed_scans ? double(dump_counters.descriptor_slots_visited) / double(executed_scans)
+                                                : 0.0;
+    const auto reuse_ratio = dump_counters.submission_pending_uses
+                                 ? 1.0 - double(dump_counters.submission_unique_slots) /
+                                             double(dump_counters.submission_pending_uses)
+                                 : 0.0;
+    if (Logger::logLevel() <= LogLevel::Info)
+      Logger::info(str::format(
+          "DXMT_D3D12_RESIDENCY_STATS window=10s command_lists=", dump_command_lists,
+          " root_scan_requests=", dump_counters.root_scan_requests, " root_scans=", dump_counters.root_scans_executed,
+          " root_scan_skips=", dump_counters.root_scan_skips, " root_va_lookups=", dump_counters.root_va_lookups,
+          " descriptor_scan_requests=", scan_requests, " descriptor_scans=", executed_scans,
+          " descriptor_scan_skips=", scan_skips, " descriptor_scan_skip_rate=", skip_rate,
+          " descriptor_slots_visited=", dump_counters.descriptor_slots_visited,
+          " average_slots_per_executed_scan=", slots_per_scan,
+          " recording_batch_locks=", dump_counters.descriptor_batch_locks,
+          " heap_global_generation_changes_seen=", dump_counters.heap_global_generation_changes_seen,
+          " new_encoder_invalidations=", dump_counters.encoder_invalidations,
+          " table_handle_invalidations=", dump_counters.table_handle_invalidations,
+          " pending_descriptor_uses=", dump_counters.submission_pending_uses,
+          " pending_descriptor_duplicates=", dump_counters.pending_descriptor_duplicates,
+          " submission_unique_heaps=", dump_counters.submission_unique_heaps,
+          " submission_unique_slots=", dump_counters.submission_unique_slots,
+          " submission_batch_locks=", dump_counters.submission_batch_locks,
+          " submission_live_slot_resolutions=", dump_counters.submission_live_slot_resolutions,
+          " submission_slot_reuse_hits=", dump_counters.submission_slot_reuse_hits,
+          " submission_slot_reuse_ratio=", reuse_ratio, " submission_fanout_uses=", dump_counters.submission_fanout_uses
+      ));
+  }
 
   static const char *EncoderTypeName(EncoderType type) {
     switch (type) {
@@ -584,6 +685,7 @@ public:
 
     std::vector<SubmissionResourceUse> descriptor_resource_uses;
     std::vector<WMT::Reference<WMT::Resource>> descriptor_resource_refs;
+    const bool residency_stats_enabled = ResidencyStatsEnabled();
     for (UINT i = 0; i < Count; i++) {
       auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i]);
       const auto hr = pCommandList->CollectResourceUsesForSubmission(
@@ -593,6 +695,8 @@ public:
         WARN("D3D12 ExecuteCommandLists failed to resolve live descriptor resources: 0x", std::hex, hr, std::dec);
         return;
       }
+      if (residency_stats_enabled)
+        AggregateResidencyCounters(pCommandList->GetAirconvResidencyCounters());
     }
 
     auto pool = WMT::MakeAutoreleasePool();
