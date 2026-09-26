@@ -301,6 +301,9 @@ struct TestCase {
   bool root_uav_mutation = false;
   bool descriptor_encoder_break = false;
   bool direct_indexed_heap_scan = false;
+  bool descriptor_incompatible_range = false;
+  bool descriptor_unbounded_range = false;
+  bool descriptor_two_slot_encoder_break = false;
 };
 
 bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &test) {
@@ -426,20 +429,35 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     return fail("queue setup failed");
 
   D3D12_ROOT_PARAMETER root_parameters[2] = {};
-  D3D12_DESCRIPTOR_RANGE descriptor_range = {};
+  D3D12_DESCRIPTOR_RANGE descriptor_ranges[2] = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
   if (test.null_texture_query) {
-    descriptor_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    descriptor_range.NumDescriptors = 1;
-    descriptor_range.BaseShaderRegister = 0;
-    descriptor_range.RegisterSpace = 0;
-    descriptor_range.OffsetInDescriptorsFromTableStart = 0;
+    auto &srv_range = descriptor_ranges[0];
+    srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srv_range.NumDescriptors = test.descriptor_two_slot_encoder_break ? 2
+                               : test.descriptor_unbounded_range ? UINT_MAX
+                                                                 : 1;
+    srv_range.BaseShaderRegister = 0;
+    srv_range.RegisterSpace = 0;
+    srv_range.OffsetInDescriptorsFromTableStart = 0;
     root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     root_parameters[0].DescriptorTable.NumDescriptorRanges = 1;
-    root_parameters[0].DescriptorTable.pDescriptorRanges = &descriptor_range;
+    root_parameters[0].DescriptorTable.pDescriptorRanges = &srv_range;
     root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    root_desc.NumParameters = 1;
+    root_desc.NumParameters = test.descriptor_incompatible_range ? 2 : 1;
     root_desc.pParameters = root_parameters;
+    if (test.descriptor_incompatible_range) {
+      auto &uav_range = descriptor_ranges[1];
+      uav_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+      uav_range.NumDescriptors = 1;
+      uav_range.BaseShaderRegister = 0;
+      uav_range.RegisterSpace = 0;
+      uav_range.OffsetInDescriptorsFromTableStart = 0;
+      root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      root_parameters[1].DescriptorTable.NumDescriptorRanges = 1;
+      root_parameters[1].DescriptorTable.pDescriptorRanges = &uav_range;
+      root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
   } else if (test.root_cbv || test.geometry_root_cbv) {
     root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     root_parameters[0].Descriptor.ShaderRegister = 0;
@@ -481,14 +499,20 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     return fail("root signature creation failed");
   if (test.null_texture_query) {
     const auto *metadata = static_cast<const dxmt::MTLD3D12RootSignature *>(root_signature);
-    if (metadata->RootDescriptorTableCount != 1 || !metadata->RootDescriptorTables ||
-        metadata->RootDescriptorRangeCount != 1 || !metadata->RootDescriptorRanges ||
+    const UINT expected_table_count = test.descriptor_incompatible_range ? 2 : 1;
+    const UINT expected_range_count = test.descriptor_incompatible_range ? 2 : 1;
+    if (metadata->RootDescriptorTableCount != expected_table_count || !metadata->RootDescriptorTables ||
+        metadata->RootDescriptorRangeCount != expected_range_count || !metadata->RootDescriptorRanges ||
         metadata->RootDescriptorTables[0].parameter_index != 0 ||
         metadata->RootDescriptorTables[0].range_count != 1 ||
-        metadata->RootDescriptorRanges[0].type != descriptor_range.RangeType ||
-        metadata->RootDescriptorRanges[0].num_descriptors != descriptor_range.NumDescriptors ||
-        metadata->RootDescriptorRanges[0].offset != descriptor_range.OffsetInDescriptorsFromTableStart) {
-      std::cerr << "DXBC SM5 " << test.name << ": single-range root table metadata mismatch\n";
+        metadata->RootDescriptorRanges[0].type != descriptor_ranges[0].RangeType ||
+        metadata->RootDescriptorRanges[0].num_descriptors != descriptor_ranges[0].NumDescriptors ||
+        metadata->RootDescriptorRanges[0].offset != descriptor_ranges[0].OffsetInDescriptorsFromTableStart ||
+        (test.descriptor_incompatible_range &&
+         (metadata->RootDescriptorTables[1].parameter_index != 1 ||
+          metadata->RootDescriptorTables[1].range_count != 1 ||
+          metadata->RootDescriptorRanges[1].type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV))) {
+      std::cerr << "DXBC SM5 " << test.name << ": descriptor-table metadata mismatch\n";
       cleanup();
       return false;
     }
@@ -548,15 +572,23 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateRenderTargetView(render_target, nullptr, rtv);
 
-  if (test.null_texture_query || test.descriptor_encoder_break || test.direct_indexed_heap_scan) {
+  if (test.null_texture_query || test.descriptor_encoder_break || test.direct_indexed_heap_scan ||
+      test.descriptor_incompatible_range) {
     D3D12_DESCRIPTOR_HEAP_DESC shader_heap_desc = {};
     shader_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    shader_heap_desc.NumDescriptors = test.direct_indexed_heap_scan ? 4 : 1;
+    shader_heap_desc.NumDescriptors = test.descriptor_unbounded_range ? 192
+                                      : test.direct_indexed_heap_scan ? 4
+                                      : test.descriptor_two_slot_encoder_break ? 2
+                                                                                : 1;
     shader_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (!CheckHR("CreateShaderHeap", device->CreateDescriptorHeap(&shader_heap_desc, IID_PPV_ARGS(&shader_heap))))
       return fail("shader heap creation failed");
     query_descriptor = shader_heap->GetCPUDescriptorHandleForHeapStart();
-    if (test.null_texture_query) {
+    const auto descriptor_stride =
+        device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    if (test.descriptor_unbounded_range)
+      query_descriptor.ptr += uint64_t(descriptor_stride) * 63;
+    if (test.null_texture_query && !test.descriptor_incompatible_range) {
       D3D12_SHADER_RESOURCE_VIEW_DESC null_srv = {};
       null_srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
       null_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -564,7 +596,8 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
       null_srv.Texture2D.MipLevels = 1;
       device->CreateShaderResourceView(nullptr, &null_srv, query_descriptor);
     }
-    if (test.descriptor_mutation || test.descriptor_encoder_break || test.direct_indexed_heap_scan) {
+    if (test.descriptor_mutation || test.descriptor_encoder_break || test.direct_indexed_heap_scan ||
+        test.descriptor_incompatible_range || test.descriptor_unbounded_range) {
       const auto query_desc_a = QueryTextureDescription(1);
       if (!CheckHR("CreateQueryTexture A", device->CreateCommittedResource(
                                               &default_heap, D3D12_HEAP_FLAG_NONE, &query_desc_a,
@@ -572,7 +605,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
                                               IID_PPV_ARGS(&query_texture_a)
                                           )))
         return fail("query texture setup failed");
-      if (test.descriptor_mutation) {
+      if (test.descriptor_mutation || test.descriptor_encoder_break) {
         const auto query_desc_b = QueryTextureDescription(2);
         if (!CheckHR("CreateQueryTexture B", device->CreateCommittedResource(
                                                 &default_heap, D3D12_HEAP_FLAG_NONE, &query_desc_b,
@@ -581,8 +614,14 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
                                             )))
           return fail("second query texture setup failed");
       }
-      if (test.descriptor_encoder_break || test.direct_indexed_heap_scan)
+      if (test.descriptor_encoder_break || test.direct_indexed_heap_scan || test.descriptor_incompatible_range ||
+          test.descriptor_unbounded_range)
         device->CreateShaderResourceView(query_texture_a, nullptr, query_descriptor);
+      if (test.descriptor_two_slot_encoder_break) {
+        auto second_descriptor = query_descriptor;
+        second_descriptor.ptr += descriptor_stride;
+        device->CreateShaderResourceView(query_texture_a, nullptr, second_descriptor);
+      }
     }
   }
 
@@ -718,8 +757,14 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     if (test.null_texture_query || test.direct_indexed_heap_scan) {
       ID3D12DescriptorHeap *heaps[] = {shader_heap};
       list->SetDescriptorHeaps(1, heaps);
-      if (test.null_texture_query)
-        list->SetGraphicsRootDescriptorTable(0, shader_heap->GetGPUDescriptorHandleForHeapStart());
+      if (test.null_texture_query) {
+        auto table = shader_heap->GetGPUDescriptorHandleForHeapStart();
+        if (test.descriptor_unbounded_range)
+          table.ptr += uint64_t(device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)) * 63;
+        list->SetGraphicsRootDescriptorTable(0, table);
+        if (test.descriptor_incompatible_range)
+          list->SetGraphicsRootDescriptorTable(1, table);
+      }
     } else if (test.geometry_root_srv_uav) {
       list->SetGraphicsRootShaderResourceView(0, root_data->GetGPUVirtualAddress());
       list->SetGraphicsRootUnorderedAccessView(1, root_uav_data->GetGPUVirtualAddress());
@@ -748,12 +793,29 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     }
   };
   draw();
-  if (test.direct_indexed_heap_scan)
+  if (test.direct_indexed_heap_scan) {
     draw();
+    auto unrelated_descriptor = shader_heap->GetCPUDescriptorHandleForHeapStart();
+    unrelated_descriptor.ptr += uint64_t(device->GetDescriptorHandleIncrementSize(
+                                  D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)) * 3;
+    device->CreateShaderResourceView(query_texture_a, nullptr, unrelated_descriptor);
+    draw();
+  }
   if (test.descriptor_encoder_break) {
-    D3D12_RESOURCE_BARRIER alias_barrier = {};
-    alias_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
-    list->ResourceBarrier(1, &alias_barrier);
+    for (unsigned encoder_break = 0; encoder_break < 2; encoder_break++) {
+      D3D12_RESOURCE_BARRIER alias_barrier = {};
+      alias_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+      list->ResourceBarrier(1, &alias_barrier);
+      draw();
+    }
+  }
+  if (test.descriptor_unbounded_range) {
+    draw();
+    const auto descriptor_stride =
+        device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    auto relevant_descriptor = shader_heap->GetCPUDescriptorHandleForHeapStart();
+    relevant_descriptor.ptr += uint64_t(descriptor_stride) * 130;
+    device->CreateShaderResourceView(query_texture_a, nullptr, relevant_descriptor);
     draw();
   }
   if (test.descriptor_mutation) {
@@ -837,22 +899,51 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
         counters.descriptor_scan_skips != 1 || counters.descriptor_slots_visited != 2 ||
         counters.descriptor_batch_locks != 2 || counters.heap_generation_invalidations != 1 ||
         counters.table_invalidations != 1 || counters.pending_descriptors_inserted != 1 ||
-        counters.pending_descriptor_duplicates != 1 || counters.single_descriptor_reads != 0) {
+        counters.pending_descriptor_duplicates != 1 || counters.submission_live_slot_resolutions != 0) {
       std::cerr << "DXBC SM5 " << test.name << ": unexpected AIRCONV residency counters before submission\n";
       cleanup();
       return false;
     }
     device->CreateShaderResourceView(query_texture_b, nullptr, query_descriptor);
   }
+  if (test.descriptor_encoder_break)
+    device->CreateShaderResourceView(query_texture_b, nullptr, query_descriptor);
 
   if (test.descriptor_encoder_break) {
     const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
-    if (counters.root_scan_requests != 2 || counters.root_scan_skips != 2 ||
-        counters.descriptor_requests != 2 || counters.descriptor_scans_executed != 2 ||
-        counters.descriptor_scan_skips != 0 || counters.descriptor_slots_visited != 2 ||
-        counters.descriptor_batch_locks != 2 || counters.encoder_invalidations != 1 ||
-        counters.pending_descriptors_inserted != 2 || counters.pending_descriptor_duplicates != 0) {
+    const auto expected_slots = test.descriptor_two_slot_encoder_break ? 2u : 1u;
+    const auto expected_uses = expected_slots * 3u;
+    if (counters.root_scan_requests != 3 || counters.root_scan_skips != 3 ||
+        counters.descriptor_requests != 3 || counters.descriptor_scans_executed != 3 ||
+        counters.descriptor_scan_skips != 0 || counters.descriptor_slots_visited != expected_uses ||
+        counters.descriptor_batch_locks != 3 || counters.encoder_invalidations != 2 ||
+        counters.pending_descriptors_inserted != expected_uses || counters.pending_descriptor_duplicates != 0) {
       std::cerr << "DXBC SM5 " << test.name << ": new encoder did not receive an independent descriptor scan\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.descriptor_incompatible_range) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    if (counters.descriptor_scans_executed != 1 || counters.descriptor_slots_visited != 2 ||
+        counters.descriptor_batch_locks != 1 || counters.pending_descriptors_inserted != 2) {
+      std::cerr << "DXBC SM5 " << test.name << ": overlapping SRV/UAV table slot was not recorded independently\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.descriptor_unbounded_range) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    if (counters.descriptor_requests != 3 || counters.descriptor_scans_executed != 2 ||
+        counters.descriptor_scan_skips != 1 || counters.descriptor_slots_visited != 258 ||
+        counters.descriptor_batch_locks != 2 || counters.heap_global_generation_changes_seen != 1) {
+      std::cerr << "DXBC SM5 " << test.name << ": unbounded table did not cover pages through heap end (requests="
+                << counters.descriptor_requests << ", scans=" << counters.descriptor_scans_executed
+                << ", skips=" << counters.descriptor_scan_skips << ", slots=" << counters.descriptor_slots_visited
+                << ", locks=" << counters.descriptor_batch_locks
+                << ", global=" << counters.heap_global_generation_changes_seen << ")\n";
       cleanup();
       return false;
     }
@@ -860,12 +951,13 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
   if (test.direct_indexed_heap_scan) {
     const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
-    if (counters.root_scan_requests != 2 || counters.root_scan_skips != 2 ||
-        counters.descriptor_requests != 2 || counters.descriptor_scans_executed != 1 ||
-        counters.descriptor_scan_skips != 1 || counters.descriptor_slots_visited != 4 ||
-        counters.descriptor_batch_locks != 1 || counters.direct_indexed_root_requests != 2 ||
-        counters.direct_indexed_scans != 1 || counters.direct_indexed_descriptors != 4 ||
-        counters.pending_descriptors_inserted != 4 || counters.pending_descriptor_duplicates != 0) {
+    if (counters.root_scan_requests != 3 || counters.root_scan_skips != 3 ||
+        counters.descriptor_requests != 3 || counters.descriptor_scans_executed != 2 ||
+        counters.descriptor_scan_skips != 1 || counters.descriptor_slots_visited != 8 ||
+        counters.descriptor_batch_locks != 2 || counters.direct_indexed_root_requests != 3 ||
+        counters.direct_indexed_scans != 2 || counters.direct_indexed_descriptors != 8 ||
+        counters.pending_descriptors_inserted != 4 || counters.pending_descriptor_duplicates != 4 ||
+        counters.heap_generation_invalidations != 1) {
       std::cerr << "DXBC SM5 " << test.name << ": direct-indexed scan did not conservatively cover the full heap\n";
       cleanup();
       return false;
@@ -910,8 +1002,11 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
   if (test.descriptor_mutation) {
     const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
-    if (counters.single_descriptor_reads != 1 || counters.submission_live_descriptor_reads != 1) {
-      std::cerr << "DXBC SM5 " << test.name << ": submission did not perform one live descriptor reread\n";
+    if (counters.submission_pending_uses != 1 || counters.submission_unique_heaps != 1 ||
+        counters.submission_unique_slots != 1 || counters.submission_batch_locks != 1 ||
+        counters.submission_live_slot_resolutions != 1 || counters.submission_slot_reuse_hits != 0 ||
+        counters.submission_fanout_uses != 1) {
+      std::cerr << "DXBC SM5 " << test.name << ": submission did not resolve the post-Close descriptor value once\n";
       cleanup();
       return false;
     }
@@ -919,8 +1014,14 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
   if (test.descriptor_encoder_break) {
     const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
-    if (counters.single_descriptor_reads != 2 || counters.submission_live_descriptor_reads != 2) {
-      std::cerr << "DXBC SM5 " << test.name << ": submission did not resolve both encoder descriptor uses\n";
+    const auto expected_slots = test.descriptor_two_slot_encoder_break ? 2u : 1u;
+    const auto expected_uses = expected_slots * 3u;
+    if (counters.submission_pending_uses != expected_uses || counters.submission_unique_heaps != 1 ||
+        counters.submission_unique_slots != expected_slots || counters.submission_batch_locks != 1 ||
+        counters.submission_live_slot_resolutions != expected_slots ||
+        counters.submission_slot_reuse_hits != expected_uses - expected_slots ||
+        counters.submission_fanout_uses != expected_uses) {
+      std::cerr << "DXBC SM5 " << test.name << ": same-slot resolution was not deduplicated across encoders\n";
       cleanup();
       return false;
     }
@@ -928,8 +1029,23 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
   if (test.direct_indexed_heap_scan) {
     const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
-    if (counters.single_descriptor_reads != 4 || counters.submission_live_descriptor_reads != 4) {
+    if (counters.submission_pending_uses != 4 || counters.submission_unique_heaps != 1 ||
+        counters.submission_unique_slots != 4 || counters.submission_batch_locks != 1 ||
+        counters.submission_live_slot_resolutions != 4 || counters.submission_slot_reuse_hits != 0 ||
+        counters.submission_fanout_uses != 4) {
       std::cerr << "DXBC SM5 " << test.name << ": submission did not resolve the full direct-indexed heap\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.descriptor_incompatible_range) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    if (counters.submission_pending_uses != 2 || counters.submission_unique_heaps != 1 ||
+        counters.submission_unique_slots != 1 || counters.submission_batch_locks != 1 ||
+        counters.submission_live_slot_resolutions != 1 || counters.submission_slot_reuse_hits != 1 ||
+        counters.submission_fanout_uses != 2) {
+      std::cerr << "DXBC SM5 " << test.name << ": slot resolution did not preserve per-range acceptance\n";
       cleanup();
       return false;
     }
@@ -1008,9 +1124,17 @@ int main(int argc, char **argv) {
       {"descriptor-residency-generation", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
        0x0000ff00u, false, false, false, false, true, false, true},
       {"descriptor-new-encoder", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
-       0x000000ffu, false, false, false, false, true, false, false, false, false, false, true},
+       0x0000ff00u, false, false, false, false, true, false, false, false, false, false, true},
       {"descriptor-direct-indexed", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
        0x00ffffffu, false, false, false, false, false, false, false, false, false, false, false, true},
+      {"descriptor-incompatible-range", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x000000ffu, false, false, false, false, true, false, false, false, false, false, false, false, false, true},
+      {"descriptor-two-slots-new-encoder", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x0000ff00u, false, false, false, false, true, false, false, false, false, false, true, false, false, false,
+       true},
+      {"descriptor-unbounded-range", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x000000ffu, false, false, false, false, true, false, false, false, false, false, false, false, false, true,
+       false},
   };
 
   std::vector<const TestCase *> selected;

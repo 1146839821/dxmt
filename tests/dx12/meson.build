@@ -15,6 +15,13 @@ dx12_shader_validation = executable('dx12_shader_validation', 'dx12_shader_valid
 )
 
 dx12_airconv_compute_residency = executable('dx12_airconv_compute_residency', 'dx12_airconv_compute_residency.cpp',
+  include_directories: [
+    include_directories('../../src/airconv'),
+    include_directories('../../src/dxgi'),
+    include_directories('../../src/dxmt'),
+    include_directories('../../src/winemetal'),
+    include_directories('../../src/util'),
+  ],
   dependencies: [ d3d12_dep ],
 )
 

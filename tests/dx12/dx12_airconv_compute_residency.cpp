@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
+#include "d3d12_device.hpp"
 
 #include <algorithm>
 #include <array>
@@ -411,7 +412,7 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
 
   D3D12_DESCRIPTOR_HEAP_DESC descriptor_heap_description = {};
   descriptor_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-  descriptor_heap_description.NumDescriptors = 2;
+  descriptor_heap_description.NumDescriptors = 130;
   descriptor_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
   ComPtr<ID3D12DescriptorHeap> descriptor_heap;
   if (!CheckHR(
@@ -468,6 +469,14 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
 
   SetRootBindings(list_a.get(), pipeline.get(), root_signature.get(), descriptor_heap.get(), descriptor_stride, config.get());
   list_a.get()->Dispatch(kElementCount, 1, 1);
+  auto unrelated_descriptor = descriptor_heap.get()->GetCPUDescriptorHandleForHeapStart();
+  unrelated_descriptor.ptr += uint64_t(descriptor_stride) * 64;
+  device->CreateShaderResourceView(input.get(), &srv, unrelated_descriptor);
+  list_a.get()->Dispatch(kElementCount, 1, 1);
+  device->CreateShaderResourceView(
+      replacement_input.get(), &srv, descriptor_heap.get()->GetCPUDescriptorHandleForHeapStart()
+  );
+  list_a.get()->Dispatch(kElementCount, 1, 1);
   Transition(list_a.get(), output.get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
   list_a.get()->CopyBufferRegion(scratch.get(), 0, output.get(), 0, kBufferSize);
   Transition(list_a.get(), output.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -485,6 +494,19 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
   list_b.get()->CopyBufferRegion(readback.get(), 0, output.get(), 0, kBufferSize);
   if (!CheckHR("Close command list B", list_b.get()->Close()))
     return false;
+
+  auto *internal_list_a = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list_a.get());
+  const auto recording_counters = internal_list_a->GetAirconvResidencyCounters();
+  if (recording_counters.descriptor_requests != 4 || recording_counters.descriptor_scans_executed != 4 ||
+      recording_counters.descriptor_scan_skips != 0 || recording_counters.heap_global_generation_changes_seen != 2 ||
+      recording_counters.heap_generation_invalidations != 2) {
+    std::cerr << "AIRCONV compute descriptor-generation recording coverage mismatch: requests="
+              << recording_counters.descriptor_requests << ", scans=" << recording_counters.descriptor_scans_executed
+              << ", skips=" << recording_counters.descriptor_scan_skips
+              << ", global=" << recording_counters.heap_global_generation_changes_seen
+              << ", invalidations=" << recording_counters.heap_generation_invalidations << "\n";
+    return false;
+  }
 
   // Root Signature 1.0 makes descriptor-table entries volatile. Rewriting the
   // SRV after both lists close but before ExecuteCommandLists changes what they use.
@@ -507,6 +529,15 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
   queue.get()->ExecuteCommandLists(2, lists);
   if (!WaitForQueue(device, queue.get()))
     return false;
+
+  const auto submission_counters = internal_list_a->GetAirconvResidencyCounters();
+  if (submission_counters.submission_pending_uses != 4 || submission_counters.submission_unique_heaps != 1 ||
+      submission_counters.submission_unique_slots != 2 || submission_counters.submission_batch_locks != 1 ||
+      submission_counters.submission_live_slot_resolutions != 2 ||
+      submission_counters.submission_slot_reuse_hits != 2 || submission_counters.submission_fanout_uses != 4) {
+    std::cerr << "AIRCONV compute submission batching/fan-out mismatch\n";
+    return false;
+  }
 
   void *readback_mapped = nullptr;
   D3D12_RANGE read_range = {0, static_cast<SIZE_T>(kBufferSize)};
