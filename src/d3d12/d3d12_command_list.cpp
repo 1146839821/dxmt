@@ -75,6 +75,7 @@ enum class DrawCallStatus {
   Invalid,
   Ordinary,
   MSCTessellation,
+  AirconvTessellation,
   MSCGeometry,
   MSCMesh,
   AirconvGeometry,
@@ -697,6 +698,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
 
   Com<MTLD3D12GraphicsPipelineState, false> pso_graphics_;
   uint32_t airconv_geometry_pso_variant_ = UINT_MAX;
+  uint32_t airconv_tessellation_pso_variant_ = UINT_MAX;
   Com<MTLD3D12RootSignature, false> rootsig_graphics_;
   uint64_t rootarg_graphics_staging_[64];
   struct MSCResourceUseTable {
@@ -741,6 +743,8 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   FLOAT blend_factor_[4];
   UINT8 stencil_ref_;
 
+  WMT::Reference<WMT::RenderPipelineState> airconv_tessellation_marshal_pso_;
+
 public:
   MTLD3D12GraphicsCommandListImpl(MTLD3D12Device *pDevice, D3D12_COMMAND_LIST_TYPE type) :
       MTLD3D12DeviceChild<MTLD3D12GraphicsCommandList>(pDevice), type_(type), recording_failed_(false) {}
@@ -770,6 +774,26 @@ public:
     if (!airconv_geometry_marshal_pso_ && error)
       ERR("Failed to create AIRCONV geometry indirect marshal PSO: ", error.description().getUTF8String());
     return airconv_geometry_marshal_pso_;
+  }
+
+  WMT::RenderPipelineState
+  GetAirconvTessellationMarshalPSO() {
+    if (airconv_tessellation_marshal_pso_)
+      return airconv_tessellation_marshal_pso_;
+
+    auto function = device_->GetLib().getLibrary().newFunction("ts_draw_arguments_marshal");
+    if (!function)
+      return {};
+
+    WMTRenderPipelineInfo info;
+    WMT::InitializeRenderPipelineInfo(info);
+    info.vertex_function = function;
+    info.rasterization_enabled = false;
+    WMT::Reference<WMT::Error> error;
+    airconv_tessellation_marshal_pso_ = device_->GetMTLDevice().newRenderPipelineState(info, error);
+    if (!airconv_tessellation_marshal_pso_ && error)
+      ERR("Failed to create AIRCONV tessellation indirect marshal PSO: ", error.description().getUTF8String());
+    return airconv_tessellation_marshal_pso_;
   }
 
   WMT::Reference<WMT::ComputePipelineState>
@@ -1856,7 +1880,7 @@ public:
 
   void
   EncodeVertexBuffers() {
-    if (pso_graphics_ && pso_graphics_->airconv_geometry) {
+    if (pso_graphics_ && (pso_graphics_->airconv_geometry || pso_graphics_->airconv_tessellation)) {
       auto [offset, stride] = PopulateVertexBufferTable(1);
       if (recording_failed_)
         return;
@@ -2017,6 +2041,7 @@ public:
     const bool use_msc_geometry = pso_graphics_->msc_geometry;
     const bool use_msc_mesh = pso_graphics_->msc_mesh;
     const bool use_airconv_geometry = pso_graphics_->airconv_geometry;
+    const bool use_airconv_tessellation = pso_graphics_->airconv_tessellation;
     const bool use_msc_mesh_stages = use_msc_tessellation || use_msc_geometry || use_msc_mesh;
     const auto msc_render_stages = use_msc_mesh_stages
                                        ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh |
@@ -2073,11 +2098,10 @@ public:
       render->dsv_planar_flags = 0;
       render->dsv_readonly_flags = 0;
       render->render_target_count = num_rtvs;
-      // MSC tessellation consumes its argument, descriptor, vertex and index
-      // tables from the object/mesh stages just like geometry emulation.  Mark
-      // the pass as pre-raster work so the queue waits at Object/Mesh before
-      // encoding the render commands.
-      render->use_geometry = use_msc_mesh_stages || use_airconv_geometry;
+      // Emulated geometry and tessellation consume their input and resource
+      // tables in the object/mesh stages. Mark the pass as pre-raster work so
+      // the queue waits at Object/Mesh before encoding the render commands.
+      render->use_geometry = use_msc_mesh_stages || use_airconv_geometry || use_airconv_tessellation;
 
       unsigned render_target_width = 16384, render_target_height = 16384, render_target_array_length = 0;
 
@@ -2157,13 +2181,16 @@ public:
     // or tessellation PSO without ending the render encoder.  Keep the pass
     // wait conservative for every draw recorded into it.
     auto *render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
-    render->use_geometry |= use_msc_mesh_stages || use_airconv_geometry;
+    render->use_geometry |= use_msc_mesh_stages || use_airconv_geometry || use_airconv_tessellation;
 
     if (dirty_state_.test(DirtyState::GraphicsPipelineState)) {
       UpdateGraphicsPSO(pso_graphics_.ptr(), airconv_index_format);
       airconv_geometry_pso_variant_ = use_airconv_geometry
                                           ? (is_strip_topology(topology_) ? 3u : 0u) + airconv_index_format
                                           : UINT_MAX;
+      airconv_tessellation_pso_variant_ = use_airconv_tessellation
+                                              ? static_cast<uint32_t>(airconv_index_format)
+                                              : UINT_MAX;
       dirty_state_.clr(DirtyState::GraphicsPipelineState);
     } else if (use_airconv_geometry) {
       const auto variant = (is_strip_topology(topology_) ? 3u : 0u) + airconv_index_format;
@@ -2171,6 +2198,9 @@ public:
         UpdateGraphicsPSO(pso_graphics_.ptr(), airconv_index_format);
         airconv_geometry_pso_variant_ = variant;
       }
+    } else if (use_airconv_tessellation && airconv_index_format != airconv_tessellation_pso_variant_) {
+      UpdateGraphicsPSO(pso_graphics_.ptr(), airconv_index_format);
+      airconv_tessellation_pso_variant_ = airconv_index_format;
     }
 
     const bool encode_msc_resource_uses =
@@ -2186,7 +2216,7 @@ public:
     // buffers, so make the residency/hazard declaration explicit for every
     // indexed draw (including ExecuteIndirect) before encoding the draw.
     if (index_buffer) {
-      const auto index_stages = use_msc_mesh_stages || use_airconv_geometry
+      const auto index_stages = use_msc_mesh_stages || use_airconv_geometry || use_airconv_tessellation
                                     ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh)
                                     : WMTRenderStageVertex;
       EncodeRenderResourceUse(index_buffer.handle, WMTResourceUsageRead, index_stages);
@@ -2248,7 +2278,7 @@ public:
           cmd.offset = Offset;
           cmd.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
         };
-        if (use_airconv_geometry) {
+        if (use_airconv_geometry || use_airconv_tessellation) {
           encode_root_argument(WMTRenderCommandSetObjectBuffer);
           encode_root_argument(WMTRenderCommandSetMeshBuffer);
         } else if (use_msc_mesh) {
@@ -2266,7 +2296,7 @@ public:
           cmd_fsargbuf.offset = Offset;
           cmd_fsargbuf.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
         }
-        if (use_airconv_geometry || use_msc_mesh)
+        if (use_airconv_geometry || use_airconv_tessellation || use_msc_mesh)
           encode_root_argument(WMTRenderCommandSetFragmentBuffer);
       }
       dirty_state_.clr(DirtyState::GraphicsRootArguments);
@@ -2276,7 +2306,7 @@ public:
       EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
 
     if (airconv_render_residency_ && !use_msc && !SkipResourceBinding) {
-      const auto resource_stages = use_airconv_geometry
+      const auto resource_stages = use_airconv_geometry || use_airconv_tessellation
                                        ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh |
                                                                       WMTRenderStageFragment)
                                        : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
@@ -2313,7 +2343,7 @@ public:
           cmd.offset = Offset;
           cmd.index = SM50_BINDING_INDEX_STATIC_SAMPLERS;
         };
-        if (use_airconv_geometry || use_msc_mesh) {
+        if (use_airconv_geometry || use_airconv_tessellation || use_msc_mesh) {
           encode_static_samplers(WMTRenderCommandSetObjectBuffer);
           encode_static_samplers(WMTRenderCommandSetMeshBuffer);
         } else {
@@ -2391,6 +2421,8 @@ public:
       return DrawCallStatus::Invalid;
     if (use_msc_tessellation)
       return DrawCallStatus::MSCTessellation;
+    if (use_airconv_tessellation)
+      return DrawCallStatus::AirconvTessellation;
     if (use_msc_geometry)
       return DrawCallStatus::MSCGeometry;
     if (use_msc_mesh)
@@ -2425,7 +2457,8 @@ public:
     const bool predicated = bool(predication_buffer_);
     uint64_t predication_args_offset = 0;
     if (predicated) {
-      if (pso_graphics_ && (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry || pso_graphics_->airconv_geometry)) {
+      if (pso_graphics_ && (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry ||
+                            pso_graphics_->airconv_geometry || pso_graphics_->airconv_tessellation)) {
         FailRecording(__func__, "predication with emulated geometry or tessellation is unsupported");
         return;
       }
@@ -2464,6 +2497,12 @@ public:
       cmd_draw.base_instance = StartInstanceLocation;
       cmd_draw.base_vertex = StartVertexLocation;
       cmd_draw.config = pso_graphics_->msc_tessellation_config;
+      return;
+    }
+    if (status == DrawCallStatus::AirconvTessellation) {
+      EncodeAirconvTessellationDraw(
+          false, VertexCountPerInstance, InstanceCount, StartVertexLocation, 0, StartInstanceLocation, cp_count
+      );
       return;
     }
     if (status == DrawCallStatus::MSCGeometry) {
@@ -2556,7 +2595,8 @@ public:
     const bool predicated = bool(predication_buffer_);
     uint64_t predication_args_offset = 0;
     if (predicated) {
-      if (pso_graphics_ && (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry || pso_graphics_->airconv_geometry)) {
+      if (pso_graphics_ && (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry ||
+                            pso_graphics_->airconv_geometry || pso_graphics_->airconv_tessellation)) {
         FailRecording(__func__, "predication with emulated geometry or tessellation is unsupported");
         return;
       }
@@ -2599,6 +2639,13 @@ public:
       cmd_draw.base_vertex = BaseVertexLocation;
       cmd_draw.start_index = StartIndexLocation;
       cmd_draw.config = pso_graphics_->msc_tessellation_config;
+      return;
+    }
+    if (status == DrawCallStatus::AirconvTessellation) {
+      EncodeAirconvTessellationDraw(
+          true, IndexCountPerInstance, InstanceCount, 0, StartIndexLocation, StartInstanceLocation, cp_count,
+          BaseVertexLocation
+      );
       return;
     }
     if (status == DrawCallStatus::MSCGeometry) {
@@ -3078,7 +3125,8 @@ public:
     // descriptor-table enumeration below is an independent concern.
     const auto stages =
         pso_graphics_ &&
-        (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry || pso_graphics_->airconv_geometry)
+        (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry || pso_graphics_->airconv_geometry ||
+         pso_graphics_->airconv_tessellation)
             ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment)
             : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
     EncodeRootResourceUses(pRootSig, pStaging, stages, compute);
@@ -4152,6 +4200,13 @@ public:
         return;
       }
       cmd_setpso.pso = pso_graphics->airconv_geometry_psos[strip][index];
+    } else if (pso_graphics->airconv_tessellation) {
+      const auto index = static_cast<unsigned>(airconv_index_format);
+      if (index >= std::size(pso_graphics->airconv_tessellation_psos)) {
+        FailRecording(__func__, "invalid AIRCONV tessellation index format=", index);
+        return;
+      }
+      cmd_setpso.pso = pso_graphics->airconv_tessellation_psos[index];
     } else {
       cmd_setpso.pso = pso_graphics->pso;
     }
@@ -5096,6 +5151,196 @@ public:
     return true;
   }
 
+  void
+  EncodeAirconvTessellationDraw(
+      bool indexed, UINT element_count, UINT instance_count, UINT start_vertex, UINT start_index, UINT start_instance,
+      uint32_t control_point_count, INT base_vertex = 0
+  ) {
+    if (!control_point_count || !element_count || !instance_count)
+      return;
+
+    const uint32_t threads_per_patch = pso_graphics_->airconv_tessellation_threads_per_patch;
+    if (!threads_per_patch || threads_per_patch > 32 || 32 % threads_per_patch) {
+      FailRecording(__func__, "invalid AIRCONV tessellation thread count=", threads_per_patch);
+      return;
+    }
+    if (indexed && !index_buffer) {
+      FailRecording(__func__, "indexed AIRCONV tessellation draw has no index buffer");
+      return;
+    }
+
+    const uint32_t patch_per_group = 32 / threads_per_patch;
+    const uint64_t patch_count = element_count / control_point_count;
+    if (!patch_count)
+      return;
+    const uint64_t patch_per_mesh_instance = (patch_count - 1) / patch_per_group + 1;
+    const uint64_t max_object_threadgroups = device_->GetMTLDevice().supportsFamily(WMTGPUFamilyApple7)
+                                                 ? UINT64_MAX
+                                                 : 1024;
+    if (patch_per_mesh_instance > UINT32_MAX ||
+        patch_per_mesh_instance > max_object_threadgroups / instance_count) {
+      WARN(
+          "Omitted mesh draw (TS) because of too many object threadgroups (", patch_per_mesh_instance, "x",
+          instance_count, ")"
+      );
+      return;
+    }
+
+    if (indexed) {
+      auto [mapped, draw_arguments_offset] =
+          allocator_->AllocateGPUHeap(sizeof(DXMT_DRAW_INDEXED_ARGUMENTS), 32);
+      if (!mapped) {
+        FailRecording(__func__, "AIRCONV tessellation indexed draw argument allocation failed");
+        return;
+      }
+      auto *draw_arguments = static_cast<DXMT_DRAW_INDEXED_ARGUMENTS *>(mapped);
+      draw_arguments->IndexCount = element_count;
+      draw_arguments->InstanceCount = instance_count;
+      draw_arguments->StartIndex = start_index;
+      draw_arguments->BaseVertex = base_vertex;
+      draw_arguments->StartInstance = start_instance;
+
+      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_dxmt_tessellation_mesh_draw_indexed>();
+      cmd.type = WMTRenderCommandDXMTTessellationMeshDrawIndexed;
+      cmd.draw_arguments_offset = draw_arguments_offset;
+      cmd.index_buffer = index_buffer.handle;
+      cmd.index_buffer_offset = index_offset;
+      cmd.instance_count = instance_count;
+      cmd.threads_per_patch = threads_per_patch;
+      cmd.patch_per_group = patch_per_group;
+      cmd.patch_per_mesh_instance = static_cast<uint32_t>(patch_per_mesh_instance);
+      return;
+    }
+
+    auto [mapped, draw_arguments_offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_DRAW_ARGUMENTS), 32);
+    if (!mapped) {
+      FailRecording(__func__, "AIRCONV tessellation draw argument allocation failed");
+      return;
+    }
+    auto *draw_arguments = static_cast<DXMT_DRAW_ARGUMENTS *>(mapped);
+    draw_arguments->VertexCount = element_count;
+    draw_arguments->InstanceCount = instance_count;
+    draw_arguments->StartVertex = start_vertex;
+    draw_arguments->StartInstance = start_instance;
+
+    auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_dxmt_tessellation_mesh_draw>();
+    cmd.type = WMTRenderCommandDXMTTessellationMeshDraw;
+    cmd.draw_arguments_offset = draw_arguments_offset;
+    cmd.instance_count = instance_count;
+    cmd.threads_per_patch = threads_per_patch;
+    cmd.patch_per_group = patch_per_group;
+    cmd.patch_per_mesh_instance = static_cast<uint32_t>(patch_per_mesh_instance);
+  }
+
+  bool
+  EncodeAirconvTessellationIndirect(
+      bool indexed, SM50_INDEX_BUFFER_FORMAT index_format, WMT::Buffer indirect_args_buffer,
+      uint64_t indirect_args_offset, uint64_t draw_arguments_address, uint32_t control_point_count,
+      uint32_t threads_per_patch
+  ) {
+    if (!indirect_args_buffer || !control_point_count || !threads_per_patch || threads_per_patch > 32 ||
+        32 % threads_per_patch || (indexed && !index_buffer))
+      return false;
+
+    const auto index = static_cast<unsigned>(index_format);
+    if (!pso_graphics_ || index >= std::size(pso_graphics_->airconv_tessellation_psos) ||
+        !pso_graphics_->airconv_tessellation_psos[index])
+      return false;
+
+    auto marshal_pso = GetAirconvTessellationMarshalPSO();
+    if (!marshal_pso)
+      return false;
+
+    struct TS_DISPATCH_MARSHAL {
+      uint64_t draw_arguments;
+      uint64_t dispatch_arguments_out;
+      uint64_t max_object_threadgroups;
+      uint16_t control_point_count;
+      uint16_t patch_per_group;
+      uint32_t end_of_command;
+    };
+    static_assert(sizeof(TS_DISPATCH_MARSHAL) == 32);
+
+    const uint32_t patch_per_group = 32 / threads_per_patch;
+    const uint64_t max_object_threadgroups = device_->GetMTLDevice().supportsFamily(WMTGPUFamilyApple7)
+                                                 ? UINT64_MAX
+                                                 : 1024;
+    auto [task_mapping, task_offset] = allocator_->AllocateGPUHeap(sizeof(TS_DISPATCH_MARSHAL), 16);
+    auto [dispatch_mapping, dispatch_offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_DISPATCH_ARGUMENTS), 4);
+    if (!task_mapping || !dispatch_mapping)
+      return false;
+
+    auto *task = static_cast<TS_DISPATCH_MARSHAL *>(task_mapping);
+    task->draw_arguments = draw_arguments_address;
+    task->dispatch_arguments_out = allocator_->gpu_heap_buffer_address_ + dispatch_offset;
+    task->max_object_threadgroups = max_object_threadgroups;
+    task->control_point_count = static_cast<uint16_t>(control_point_count);
+    task->patch_per_group = static_cast<uint16_t>(patch_per_group);
+    task->end_of_command = 1;
+
+    EncodeRenderResourceUse(indirect_args_buffer.handle, WMTResourceUsageRead, WMTRenderStagePreRaster);
+    EncodeRenderResourceUse(allocator_->gpu_heap_buffer_.handle, WMTResourceUsageWrite, WMTRenderStagePreRaster);
+
+    auto &marshal_setpso = allocator_->EncodeRenderCommand<wmtcmd_render_setpso>();
+    marshal_setpso.type = WMTRenderCommandSetPSO;
+    marshal_setpso.pso = marshal_pso;
+
+    auto &marshal_setbuffer = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+    marshal_setbuffer.type = WMTRenderCommandSetVertexBuffer;
+    marshal_setbuffer.buffer = allocator_->gpu_heap_buffer_;
+    marshal_setbuffer.offset = task_offset;
+    marshal_setbuffer.index = kCustomBufferArgumentIndex0;
+
+    auto &marshal_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw>();
+    marshal_draw.type = WMTRenderCommandDraw;
+    marshal_draw.primitive_type = WMTPrimitiveTypePoint;
+    marshal_draw.vertex_start = 0;
+    marshal_draw.vertex_count = 1;
+    marshal_draw.instance_count = 1;
+    marshal_draw.base_instance = 0;
+
+    auto &marshal_clearbuffer = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+    marshal_clearbuffer.type = WMTRenderCommandSetVertexBuffer;
+    marshal_clearbuffer.buffer = {};
+    marshal_clearbuffer.offset = 0;
+    marshal_clearbuffer.index = kCustomBufferArgumentIndex0;
+
+    auto &marshal_barrier = allocator_->EncodeRenderCommand<wmtcmd_render_memory_barrier>();
+    marshal_barrier.type = WMTRenderCommandMemoryBarrier;
+    marshal_barrier.scope = WMTBarrierScopeBuffers;
+    marshal_barrier.stages_after = WMTRenderStageVertex;
+    marshal_barrier.stages_before = WMTRenderStagePreRaster;
+
+    auto &restore_pso = allocator_->EncodeRenderCommand<wmtcmd_render_setpso>();
+    restore_pso.type = WMTRenderCommandSetPSO;
+    restore_pso.pso = pso_graphics_->airconv_tessellation_psos[index];
+
+    if (indexed) {
+      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_dxmt_tessellation_mesh_draw_indexed_indirect>();
+      cmd.type = WMTRenderCommandDXMTTessellationMeshDrawIndexedIndirect;
+      cmd.imm_draw_arguments = allocator_->gpu_heap_buffer_;
+      cmd.indirect_args_buffer = indirect_args_buffer;
+      cmd.indirect_args_offset = indirect_args_offset;
+      cmd.dispatch_args_buffer = allocator_->gpu_heap_buffer_;
+      cmd.dispatch_args_offset = dispatch_offset;
+      cmd.index_buffer = index_buffer.handle;
+      cmd.index_buffer_offset = index_offset;
+      cmd.threads_per_patch = threads_per_patch;
+      cmd.patch_per_group = patch_per_group;
+    } else {
+      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_dxmt_tessellation_mesh_draw_indirect>();
+      cmd.type = WMTRenderCommandDXMTTessellationMeshDrawIndirect;
+      cmd.imm_draw_arguments = allocator_->gpu_heap_buffer_;
+      cmd.indirect_args_buffer = indirect_args_buffer;
+      cmd.indirect_args_offset = indirect_args_offset;
+      cmd.dispatch_args_buffer = allocator_->gpu_heap_buffer_;
+      cmd.dispatch_args_offset = dispatch_offset;
+      cmd.threads_per_patch = threads_per_patch;
+      cmd.patch_per_group = patch_per_group;
+    }
+    return true;
+  }
+
   void STDMETHODCALLTYPE ExecuteIndirect(
       ID3D12CommandSignature *pCommandSignature, UINT MaxCommandCount, ID3D12Resource *pArgBuffer,
       UINT64 ArgBufferOffset, ID3D12Resource *pCountBuffer, UINT64 CountBufferOffset
@@ -5176,6 +5421,45 @@ public:
         cmd->static_samplers += allocator_->gpu_heap_buffer_address_;
       }
 
+      return;
+    }
+
+    if (pso_graphics_ && pso_graphics_->airconv_tessellation) {
+      if (predication_buffer_) {
+        FailRecording(__func__, "predication with AIRCONV tessellation is unsupported");
+        return;
+      }
+      if (!MaxCommandCount)
+        return;
+      if ((sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW &&
+           sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED) ||
+          MaxCommandCount != 1 || pCountBuffer || sig->UpdateRootArguments || sig->UpdateVertexBuffers ||
+          sig->UpdateIndexBuffer) {
+        WARN("D3D12 ExecuteIndirect with AIRCONV tessellation requires one non-updating draw command");
+        FailRecording(__func__, "AIRCONV tessellation indirect signature is unsupported");
+        return;
+      }
+
+      WMTPrimitiveType primitive_type;
+      uint32_t control_point_count = 0;
+      if (!to_metal_primitive_type(topology_, primitive_type, control_point_count) || !control_point_count)
+        return;
+      const bool indexed = sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+      if (indexed && !index_buffer) {
+        FailRecording(__func__, "indexed AIRCONV tessellation indirect draw has no index buffer");
+        return;
+      }
+      const auto index_format = indexed ? to_airconv_index_format(index_type) : SM50_INDEX_BUFFER_FORMAT_NONE;
+      if (PreDraw(false, index_format) != DrawCallStatus::AirconvTessellation)
+        return;
+
+      const uint32_t threads_per_patch = pso_graphics_->airconv_tessellation_threads_per_patch;
+      if (!EncodeAirconvTessellationIndirect(
+              indexed, index_format, arg_buffer->buffer->current()->buffer(), ArgBufferOffset,
+              ArgBufferAddress, control_point_count, threads_per_patch
+          )) {
+        FailRecording(__func__, "AIRCONV tessellation indirect encoding failed");
+      }
       return;
     }
 

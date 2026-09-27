@@ -452,9 +452,13 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
   D3D12AirconvShader shader_vs;
   D3D12AirconvShader shader_ps;
   D3D12AirconvShader shader_gs;
+  D3D12AirconvShader shader_hs;
+  D3D12AirconvShader shader_ds;
   MTL_SHADER_REFLECTION ref_vs = {};
   MTL_SHADER_REFLECTION ref_ps = {};
   MTL_SHADER_REFLECTION ref_gs = {};
+  MTL_SHADER_REFLECTION ref_hs = {};
+  MTL_SHADER_REFLECTION ref_ds = {};
 
 public:
   MTLD3D12GraphicsPipelineStateImpl(MTLD3D12Device *pDevice) :
@@ -762,6 +766,189 @@ public:
   }
 
   HRESULT
+  InitializeAirconvTessellationPipeline(
+      const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, const WMTRenderPipelineInfo &render_info, WMT::Device metal,
+      WMT::Reference<WMT::Function> &fragment_function, D3D12AirconvError &sm50_err,
+      const D3D12ShaderClassification &vs_classification, const D3D12ShaderClassification &hs_classification,
+      const D3D12ShaderClassification &ds_classification
+  ) {
+    if (pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH)
+      return E_INVALIDARG;
+
+    if (ref_hs.Tessellator.OutputPrimitive == MTL_TESSELLATOR_OUTPUT_LINE ||
+        ref_hs.Tessellator.OutputPrimitive == MTL_TESSELLATOR_OUTPUT_POINT) {
+      ERR("CreatePipelineState: AIRCONV tessellation supports triangle output only");
+      return E_NOTIMPL;
+    }
+
+    auto max_potential_factor = ref_ds.PostTessellator.MaxPotentialTessFactor;
+    if (!metal.supportsFamily(WMTGPUFamilyApple9))
+      max_potential_factor = std::min(8u, max_potential_factor);
+    if (!max_potential_factor || !ref_hs.ThreadsPerPatch || ref_hs.ThreadsPerPatch > 32 ||
+        32 % ref_hs.ThreadsPerPatch != 0 || ref_hs.Tessellator.MaxFactor < 1.0f) {
+      ERR("CreatePipelineState: invalid AIRCONV tessellation reflection");
+      return E_INVALIDARG;
+    }
+
+    SM50_SHADER_COMMON_DATA common = {};
+    common.type = SM50_SHADER_COMMON;
+    common.metal_version = SM50_SHADER_METAL_310;
+
+    const void *root_signature = nullptr;
+    size_t root_signature_size = 0;
+    if (pDesc->pRootSignature) {
+      root_signature_size = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&root_signature);
+    }
+
+    SM50_SHADER_ROOT_SIGNATURE_DATA rootsig_vs = {};
+    SM50_SHADER_ROOT_SIGNATURE_DATA rootsig_hs = {};
+    SM50_SHADER_ROOT_SIGNATURE_DATA rootsig_ds = {};
+    HRESULT hr = InitializeD3D12AirconvRootSignature(
+        pDesc->VS, vs_classification, root_signature, root_signature_size, rootsig_vs
+    );
+    if (FAILED(hr))
+      return hr;
+    rootsig_vs.type = SM50_SHADER_ROOT_SIGNATURE2;
+    hr = InitializeD3D12AirconvRootSignature(
+        pDesc->HS, hs_classification, root_signature, root_signature_size, rootsig_hs
+    );
+    if (FAILED(hr))
+      return hr;
+    hr = InitializeD3D12AirconvRootSignature(
+        pDesc->DS, ds_classification, root_signature, root_signature_size, rootsig_ds
+    );
+    if (FAILED(hr))
+      return hr;
+
+    SM50_SHADER_PSO_TESSELLATOR_DATA tessellator = {};
+    tessellator.type = SM50_SHADER_PSO_TESSELLATOR;
+    tessellator.max_potential_tess_factor = max_potential_factor;
+    tessellator.next = &common;
+
+    SM50_SHADER_GS_PASS_THROUGH_DATA pass_through = {};
+    pass_through.type = SM50_SHADER_GS_PASS_THROUGH;
+    pass_through.DataEncoded = 0xffffffffu;
+    pass_through.RasterizationDisabled = false;
+    pass_through.next = &tessellator;
+    rootsig_ds.next = &pass_through;
+    auto domain_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig_ds);
+
+    D3D12AirconvBitcode domain_bitcode;
+    constexpr char domain_name[] = "airconv_ds";
+    if (SM50CompileTessellationPipelineDomain(
+            shader_hs.get(), shader_ds.get(), domain_args, domain_name, domain_bitcode.out(), sm50_err.out()
+        )) {
+      ERR(
+          "Failed to compile AIRCONV tessellation domain stage: ",
+          sm50_err.has_value() ? sm50_err.message() : "unknown error"
+      );
+      sm50_err.reset();
+      return E_FAIL;
+    }
+
+    auto make_function = [&](D3D12AirconvBitcode &bitcode, const char *name,
+                             WMT::Reference<WMT::Function> &function) -> HRESULT {
+      SM50_COMPILED_BITCODE compiled = {};
+      SM50GetCompiledBitcode(bitcode.get(), &compiled);
+      auto data = WMT::MakeDispatchData(compiled.Data, compiled.Size);
+      WMT::Reference<WMT::Error> error;
+      auto library = metal.newLibrary(data, error);
+      if (!library) {
+        ERR(
+            "Failed to create AIRCONV tessellation library: ",
+            error ? error.description().getUTF8String() : "unknown error"
+        );
+        return E_FAIL;
+      }
+      function = library.newFunction(name);
+      if (!function) {
+        ERR("Failed to create AIRCONV tessellation function ", name);
+        return E_FAIL;
+      }
+      return S_OK;
+    };
+
+    WMT::Reference<WMT::Function> domain_function;
+    if (FAILED(hr = make_function(domain_bitcode, domain_name, domain_function)))
+      return hr;
+
+    std::vector<SM50_IA_INPUT_ELEMENT> elements(pDesc->InputLayout.NumElements);
+    uint32_t element_count = 0;
+    hr = ExtractMTLInputLayoutElements(
+        device_, pDesc->VS.pShaderBytecode, pDesc->InputLayout.pInputElementDescs,
+        pDesc->InputLayout.NumElements, elements.data(), &element_count
+    );
+    if (FAILED(hr))
+      return hr;
+    elements.resize(element_count);
+    slot_mask = 0;
+    for (const auto &element : elements)
+      slot_mask |= 1u << element.slot;
+
+    for (unsigned index = 0; index < std::size(airconv_tessellation_psos); index++) {
+      SM50_SHADER_IA_INPUT_LAYOUT_DATA ia_layout = {};
+      ia_layout.type = SM50_SHADER_IA_INPUT_LAYOUT;
+      ia_layout.index_buffer_format = static_cast<SM50_INDEX_BUFFER_FORMAT>(index);
+      ia_layout.slot_mask = slot_mask;
+      ia_layout.num_elements = element_count;
+      ia_layout.elements = elements.data();
+      ia_layout.next = &tessellator;
+
+      rootsig_hs.next = &rootsig_vs;
+      rootsig_vs.next = &ia_layout;
+      auto hull_args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&rootsig_hs);
+
+      D3D12AirconvBitcode hull_bitcode;
+      auto hull_name = "airconv_vshs_" + std::to_string(index);
+      if (SM50CompileTessellationPipelineHull(
+              shader_vs.get(), shader_hs.get(), hull_args, hull_name.c_str(), hull_bitcode.out(), sm50_err.out()
+          )) {
+        ERR(
+            "Failed to compile AIRCONV tessellation object stage: ",
+            sm50_err.has_value() ? sm50_err.message() : "unknown error"
+        );
+        sm50_err.reset();
+        return E_FAIL;
+      }
+
+      WMT::Reference<WMT::Function> object_function;
+      if (FAILED(hr = make_function(hull_bitcode, hull_name.c_str(), object_function)))
+        return hr;
+
+      WMTMeshRenderPipelineInfo tessellation_info;
+      CopyRenderPipelineInfoToMesh(render_info, tessellation_info);
+      tessellation_info.object_function = object_function.handle;
+      tessellation_info.mesh_function = domain_function.handle;
+      tessellation_info.fragment_function = fragment_function.handle;
+      tessellation_info.payload_memory_length = metal.supportsFamily(WMTGPUFamilyApple7) ? 0 : 16384;
+      tessellation_info.immutable_object_buffers =
+          (1u << SM50_BINDING_INDEX_ROOT_ARGUMENTS) | (1u << SM50_BINDING_INDEX_STATIC_SAMPLERS) | (1u << 16) |
+          (1u << 21);
+      tessellation_info.immutable_mesh_buffers =
+          (1u << SM50_BINDING_INDEX_ROOT_ARGUMENTS) | (1u << SM50_BINDING_INDEX_STATIC_SAMPLERS);
+      tessellation_info.immutable_fragment_buffers =
+          (1u << SM50_BINDING_INDEX_ROOT_ARGUMENTS) | (1u << SM50_BINDING_INDEX_STATIC_SAMPLERS);
+      tessellation_info.object_tgsize_is_multiple_of_sgwidth = true;
+      tessellation_info.mesh_tgsize_is_multiple_of_sgwidth = true;
+
+      WMT::Reference<WMT::Error> error;
+      airconv_tessellation_psos[index] = metal.newRenderPipelineState(tessellation_info, error);
+      if (!airconv_tessellation_psos[index]) {
+        ERR(
+            "Failed to create AIRCONV tessellation PSO: ",
+            error ? error.description().getUTF8String() : "unknown error"
+        );
+        return E_FAIL;
+      }
+    }
+
+    airconv_tessellation = true;
+    airconv_tessellation_threads_per_patch = ref_hs.ThreadsPerPatch;
+    pso = airconv_tessellation_psos[SM50_INDEX_BUFFER_FORMAT_NONE];
+    return S_OK;
+  }
+
+  HRESULT
   Initialize(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) {
     const bool has_stream_output = pDesc->StreamOutput.NumEntries != 0;
     const bool has_hull = pDesc->HS.pShaderBytecode != nullptr;
@@ -804,6 +991,8 @@ public:
     auto vs_backend = vs_classification.backend;
     auto ps_backend = ps_classification.backend;
     auto gs_backend = gs_classification.backend;
+    auto hs_backend = hs_classification.backend;
+    auto ds_backend = ds_classification.backend;
     const void *root_signature = nullptr;
     size_t root_signature_size = 0;
     if (pDesc->pRootSignature) {
@@ -819,6 +1008,7 @@ public:
     const bool use_msc_tessellation = use_msc && has_hull && has_domain;
     const bool use_msc_geometry = use_msc && has_geometry;
     const bool use_airconv_geometry = !use_msc && has_geometry;
+    const bool use_airconv_tessellation = !use_msc && has_hull && has_domain;
     if (has_stream_output && (use_msc || has_geometry || has_hull || has_domain)) {
       ERR("CreatePipelineState: Stream Output requires an ordinary VS without GS or tessellation");
       return E_NOTIMPL;
@@ -834,10 +1024,14 @@ public:
       ERR("CreatePipelineState: mixed shader backends across VS and GS are not supported");
       return E_NOTIMPL;
     }
+    if ((has_hull || has_domain) && (hs_backend != vs_backend || ds_backend != vs_backend)) {
+      ERR("CreatePipelineState: mixed shader backends across VS, HS, and DS are not supported");
+      return E_NOTIMPL;
+    }
     if (has_pixel_shader && (ps_backend == D3D12ShaderBackend::MetalShaderConverter) != use_msc)
       return E_NOTIMPL;
-    if ((has_hull || has_domain) && !use_msc_tessellation) {
-      ERR("CreatePipelineState: tessellation requires Metal Shader Converter");
+    if ((has_hull || has_domain) && !use_msc_tessellation && !use_airconv_tessellation) {
+      ERR("CreatePipelineState: tessellation requires a supported shader backend");
       return E_NOTIMPL;
     }
     if (use_msc_tessellation && !pDesc->PS.pShaderBytecode) {
@@ -1021,7 +1215,7 @@ public:
       hr = shader_vs.Initialize(pDesc->VS, vs_classification, &ref_vs, "vs");
       if (FAILED(hr))
         return hr;
-      if (!use_airconv_geometry) {
+      if (!use_airconv_geometry && !use_airconv_tessellation) {
           SM50_SHADER_IA_INPUT_LAYOUT_DATA data_ia_layout = {};
           data_ia_layout.type = SM50_SHADER_IA_INPUT_LAYOUT;
           data_ia_layout.index_buffer_format = SM50_INDEX_BUFFER_FORMAT_NONE;
@@ -1105,6 +1299,15 @@ public:
       slot_mask = 0;
       for (uint32_t i = 0; i < element_count; i++)
         slot_mask |= 1u << elements[i].slot;
+    }
+
+    if (use_airconv_tessellation) {
+      hr = shader_hs.Initialize(pDesc->HS, hs_classification, &ref_hs, "hs");
+      if (FAILED(hr))
+        return hr;
+      hr = shader_ds.Initialize(pDesc->DS, ds_classification, &ref_ds, "ds");
+      if (FAILED(hr))
+        return hr;
     }
 
     WMTRenderPipelineInfo info;
@@ -1414,6 +1617,12 @@ public:
           return E_INVALIDARG;
         hr = InitializeAirconvGeometryPipeline(
             pDesc, info, metal, ps_func, sm50_err, vs_classification, gs_classification
+        );
+        if (FAILED(hr))
+          return hr;
+      } else if (use_airconv_tessellation) {
+        hr = InitializeAirconvTessellationPipeline(
+            pDesc, info, metal, ps_func, sm50_err, vs_classification, hs_classification, ds_classification
         );
         if (FAILED(hr))
           return hr;

@@ -354,6 +354,9 @@ public:
   bool airconv_geometry = false;
   WMT::Reference<WMT::RenderPipelineState> airconv_geometry_psos[2][3];
   WMTPrimitiveType airconv_geometry_input_primitive = WMTPrimitiveTypePoint;
+  bool airconv_tessellation = false;
+  WMT::Reference<WMT::RenderPipelineState> airconv_tessellation_psos[3];
+  uint32_t airconv_tessellation_threads_per_patch = 0;
   bool stream_output = false;
   uint32_t stream_output_stride = 0;
   enum WMTTriangleFillMode fill_mode;
