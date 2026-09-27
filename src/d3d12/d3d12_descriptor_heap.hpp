@@ -23,6 +23,7 @@
 #include "metalirconverter_thunks.h"
 #include <cstdint>
 #include <mutex>
+#include <vector>
 
 namespace dxmt {
 
@@ -142,6 +143,51 @@ struct ShaderVisibleDescriptorCPUStorage {
   ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null), ConstantBuffer{}, allocation(nullptr) {}
 };
 
+// A descriptor snapshot owns the native objects that back the CPU-side
+// descriptor payload.  The owning references are copied while the heap lock
+// is held, so callers can fan out resource-use declarations after releasing
+// the lock without observing a half-overwritten descriptor.
+struct ShaderVisibleDescriptorSnapshot {
+  UINT index = 0;
+  ShaderVisibleDescriptorCPUStorage descriptor{};
+  Rc<Texture> texture;
+  Rc<Buffer> buffer;
+  Rc<BufferAllocation> buffer_allocation;
+  Rc<BufferAllocation> allocation;
+  WMT::Reference<WMT::AccelerationStructure> acceleration_structure;
+  WMT::Reference<WMT::Buffer> acceleration_structure_header;
+
+  void
+  Rebind() {
+    switch (descriptor.type) {
+    case ShaderVisibleDescriptorType::SRVTexture:
+      descriptor.SRVTexture.texture = texture.ptr();
+      break;
+    case ShaderVisibleDescriptorType::UAVTexture:
+      descriptor.UAVTexture.texture = texture.ptr();
+      break;
+    case ShaderVisibleDescriptorType::ConstantBuffer:
+      descriptor.allocation = allocation.ptr();
+      break;
+    case ShaderVisibleDescriptorType::UAVTexelBuffer:
+      descriptor.UAVTexelBuffer.buffer = buffer.ptr();
+      break;
+    case ShaderVisibleDescriptorType::SRVTexelBuffer:
+      descriptor.SRVTexelBuffer.buffer = buffer.ptr();
+      break;
+    case ShaderVisibleDescriptorType::UAVBuffer:
+      descriptor.UAVBuffer.buffer = buffer.ptr();
+      break;
+    case ShaderVisibleDescriptorType::SRVBuffer:
+      descriptor.SRVBuffer.buffer = buffer.ptr();
+      break;
+    case ShaderVisibleDescriptorType::SRVAccelerationStructure:
+    case ShaderVisibleDescriptorType::Null:
+      break;
+    }
+  }
+};
+
 // Keep the type, union payload and heap-owned resources stable for the whole
 // CPU read. Residency walks may visit slots that the application is updating
 // concurrently because those slots are not used by the current shader.
@@ -172,6 +218,10 @@ public:
   ) = 0;
 
   virtual bool HasNonZeroResourceMinLODClamp(UINT Index) = 0;
+
+  virtual void ResolveDescriptors(
+      const std::vector<UINT> &Indices, std::vector<ShaderVisibleDescriptorSnapshot> &Snapshots
+  ) = 0;
 
   virtual HRESULT AddConstantBufferView(UINT Index, UINT64 VA, UINT32 SizeInBytes) = 0;
 

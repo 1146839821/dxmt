@@ -34,6 +34,7 @@
 #include "d3d12_pipeline_persistence.hpp"
 #include "dxmt_texture.hpp"
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include "log/log.hpp"
 #include <vector>
@@ -75,6 +76,10 @@ public:
   virtual uint64_t GetRecordingId() const = 0;
   virtual void MarkSubmitted() = 0;
   virtual void CommitResourceStates() = 0;
+  virtual bool ResolvePendingDescriptorUses(
+      EncoderData *encoder,
+      const std::function<void(obj_handle_t, WMTResourceUsage, WMTRenderStages)> &use_resource
+  ) = 0;
 };
 
 class MTLD3D12CommandAllocator : public ID3D12CommandAllocator {

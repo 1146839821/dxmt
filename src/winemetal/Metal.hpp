@@ -680,6 +680,16 @@ public:
   }
 
   void
+  useResource(Resource resource, WMTResourceUsage usage) {
+    struct wmtcmd_compute_useresource cmd;
+    cmd.type = WMTComputeCommandUseResource;
+    cmd.next.set(nullptr);
+    cmd.resource = resource.handle;
+    cmd.usage = usage;
+    MTLComputeCommandEncoder_encodeCommands(handle, (const wmtcmd_base *)&cmd);
+  }
+
+  void
   setVisibleFunctionTable(VisibleFunctionTable table, uint64_t buffer_index) {
     MTLComputeCommandEncoder_setVisibleFunctionTable(handle, table.handle, buffer_index);
   }

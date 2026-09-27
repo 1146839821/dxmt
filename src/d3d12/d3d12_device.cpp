@@ -1973,9 +1973,15 @@ public:
   HRESULT
   RegisterResidencyAndVA(BufferAllocation *allocation, MTLD3D12Resource *resource) {
     std::unique_lock<dxmt::mutex> lock(residency_lock_);
-    interval_map_.emplace(allocation->gpuAddress(), allocation);
+    const auto gpu_address = allocation->gpuAddress();
+    // A renamed or recycled allocation may legitimately reuse a GPU virtual
+    // address. Replace the lookup entry instead of silently retaining the
+    // previous allocation returned by emplace().
+    interval_map_[gpu_address] = allocation;
     if (resource)
-      resource_interval_map_[allocation->gpuAddress()] = resource;
+      resource_interval_map_[gpu_address] = resource;
+    else
+      resource_interval_map_.erase(gpu_address);
     auto buffer = allocation->buffer();
     residency_set_.addAllocations(&buffer, 1);
     residency_set_.commit();
@@ -1985,10 +1991,13 @@ public:
   HRESULT
   UnregisterResidencyAndVA(BufferAllocation *allocation, MTLD3D12Resource *resource) {
     std::unique_lock<dxmt::mutex> lock(residency_lock_);
-    interval_map_.erase(allocation->gpuAddress());
-    if (resource) {
-      auto resource_iter = resource_interval_map_.find(allocation->gpuAddress());
-      if (resource_iter != resource_interval_map_.end() && resource_iter->second == resource)
+    const auto gpu_address = allocation->gpuAddress();
+    auto interval_iter = interval_map_.find(gpu_address);
+    if (interval_iter != interval_map_.end() && interval_iter->second == allocation) {
+      interval_map_.erase(interval_iter);
+      auto resource_iter = resource_interval_map_.find(gpu_address);
+      if (resource_iter != resource_interval_map_.end() &&
+          (!resource || resource_iter->second == resource))
         resource_interval_map_.erase(resource_iter);
     }
     auto buffer = allocation->buffer();

@@ -380,6 +380,36 @@ public:
            descriptor.SRVTexture.resource_min_lod_clamp > 0.0f;
   }
 
+  void
+  ResolveDescriptors(
+      const std::vector<UINT> &Indices, std::vector<ShaderVisibleDescriptorSnapshot> &Snapshots
+  ) override {
+    // Reserve before taking descriptor_mutex_: the lock must only protect the
+    // coherent payload/reference copy, not vector growth or later fan-out.
+    Snapshots.clear();
+    Snapshots.reserve(Indices.size());
+    {
+      std::lock_guard lock(descriptor_mutex_);
+      for (auto index : Indices) {
+        auto &snapshot = Snapshots.emplace_back();
+        snapshot.index = index;
+        if (index >= descriptors_.size())
+          continue;
+
+        snapshot.descriptor = descriptors_[index];
+        snapshot.texture = texture_resources_[index];
+        snapshot.buffer = buffer_resources_[index];
+        snapshot.buffer_allocation = snapshot.buffer ? snapshot.buffer->current() : nullptr;
+        snapshot.allocation = cbv_allocations_[index];
+        snapshot.acceleration_structure = acceleration_structure_resources_[index];
+        snapshot.acceleration_structure_header = acceleration_structure_headers_[index];
+      }
+    }
+
+    for (auto &snapshot : Snapshots)
+      snapshot.Rebind();
+  }
+
   virtual HRESULT
   AddConstantBufferView(UINT Index, UINT64 VA, UINT32 SizeInBytes) {
     if (Index >= descriptors_.size())

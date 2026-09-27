@@ -28,6 +28,16 @@
 namespace dxmt {
 
 class MTLD3D12Resource;
+class MTLD3D12DescriptorHeap;
+
+struct PendingDescriptorUse {
+  MTLD3D12DescriptorHeap *heap = nullptr;
+  UINT index = 0;
+  D3D12_DESCRIPTOR_RANGE_TYPE range_type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+  bool direct_indexed = false;
+  bool compute = false;
+  WMTRenderStages render_stages = static_cast<WMTRenderStages>(0);
+};
 
 enum class EncoderType {
   Null,
@@ -51,6 +61,24 @@ struct EncoderData {
   // after Close() cannot invalidate the handle before ExecuteCommandLists
   // translates or completes the Metal command buffer.
   std::vector<WMT::Reference<WMT::Resource>> resource_refs;
+  // Keep every heap used by a volatile descriptor range alive until the
+  // allocator is reset. PendingDescriptorUse stores the fast raw lookup
+  // pointer, while this vector owns the corresponding COM objects.
+  std::vector<Com<IUnknown>> descriptor_heap_refs;
+  // DESCRIPTORS_VOLATILE ranges are resolved immediately before the native
+  // encoder is replayed. Static ranges deliberately never use this list.
+  std::vector<PendingDescriptorUse> pending_descriptor_uses;
+
+  void
+  RetainDescriptorHeap(IUnknown *heap) {
+    if (!heap)
+      return;
+    for (const auto &reference : descriptor_heap_refs) {
+      if (reference.ptr() == heap)
+        return;
+    }
+    descriptor_heap_refs.emplace_back(heap);
+  }
 };
 
 struct ClearEncoderData : EncoderData {

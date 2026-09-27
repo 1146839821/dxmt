@@ -2946,7 +2946,9 @@ public:
                                      : std::min<uint64_t>(range.NumDescriptors, heap_desc.NumDescriptors - range_start);
         if (range.RangeType != D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
           for (uint64_t descriptor_index = 0; descriptor_index < range_count; descriptor_index++)
-            if (visit(static_cast<UINT>(range_start + descriptor_index), range.RangeType, false))
+            if (visit(
+                    static_cast<UINT>(range_start + descriptor_index), range.RangeType, range.Flags, false
+                ))
               return true;
         table_offset = range_offset + range_count;
       }
@@ -2957,7 +2959,7 @@ public:
     // conservatively visit every populated resource descriptor.
     if (msc_resource_use_direct_heap_)
       for (UINT index = 0; index < heap_desc.NumDescriptors; index++)
-        if (visit(index, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, true))
+        if (visit(index, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE, true))
           return true;
 
     return false;
@@ -2969,12 +2971,96 @@ public:
   ) {
     return VisitMSCResourceDescriptors(
         pRootSig, pStaging, descriptor_heap,
-        [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
+        [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, D3D12_DESCRIPTOR_RANGE_FLAGS, bool direct_indexed) {
           if (!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV)
             return false;
           return descriptor_heap->HasNonZeroResourceMinLODClamp(index);
         }
     );
+  }
+
+  template <typename F>
+  void
+  VisitDescriptorResourceUses(
+      const ShaderVisibleDescriptorSnapshot &snapshot, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed,
+      bool compute, WMTRenderStages stages, F &&use_resource
+  ) {
+    const auto &descriptor = snapshot.descriptor;
+    const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
+    const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
+    auto emit = [&](obj_handle_t resource, WMTResourceUsage usage) {
+      if (resource)
+        use_resource(resource, usage, compute ? static_cast<WMTRenderStages>(0) : stages);
+    };
+
+    switch (descriptor.type) {
+    case ShaderVisibleDescriptorType::SRVTexture: {
+      if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) || !snapshot.texture)
+        return;
+      auto &view = snapshot.texture->view(descriptor.SRVTexture.view);
+      emit(view.texture.handle, sampled_read);
+      break;
+    }
+    case ShaderVisibleDescriptorType::SRVAccelerationStructure:
+      if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) ||
+          !descriptor.SRVAccelerationStructure.acceleration_structure)
+        return;
+      emit(descriptor.SRVAccelerationStructure.acceleration_structure, WMTResourceUsageRead);
+      emit(descriptor.SRVAccelerationStructure.acceleration_structure_header, WMTResourceUsageRead);
+      break;
+    case ShaderVisibleDescriptorType::UAVTexture: {
+      if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV) || !snapshot.texture)
+        return;
+      auto &view = snapshot.texture->view(descriptor.UAVTexture.view);
+      emit(view.texture.handle, read_write);
+      break;
+    }
+    case ShaderVisibleDescriptorType::ConstantBuffer: {
+      if (!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_CBV)
+        return;
+      auto *allocation = descriptor.allocation;
+      uint64_t buffer_offset = 0;
+      if (!allocation)
+        allocation = device_->LookupBufferByVA(descriptor.ConstantBuffer.address, &buffer_offset);
+      if (allocation)
+        emit(allocation->buffer().handle, WMTResourceUsageRead);
+      break;
+    }
+    case ShaderVisibleDescriptorType::SRVTexelBuffer: {
+      if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) || !snapshot.buffer)
+        return;
+      auto *allocation = snapshot.buffer_allocation ? snapshot.buffer_allocation.ptr() : snapshot.buffer->current();
+      if (allocation)
+        emit(allocation->buffer().handle, WMTResourceUsageRead);
+      break;
+    }
+    case ShaderVisibleDescriptorType::UAVTexelBuffer: {
+      if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV) || !snapshot.buffer)
+        return;
+      auto *allocation = snapshot.buffer_allocation ? snapshot.buffer_allocation.ptr() : snapshot.buffer->current();
+      if (allocation)
+        emit(allocation->buffer().handle, read_write);
+      break;
+    }
+    case ShaderVisibleDescriptorType::SRVBuffer: {
+      if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) || !snapshot.buffer)
+        return;
+      auto *allocation = snapshot.buffer_allocation ? snapshot.buffer_allocation.ptr() : snapshot.buffer->current();
+      if (allocation)
+        emit(allocation->buffer().handle, WMTResourceUsageRead);
+      break;
+    }
+    case ShaderVisibleDescriptorType::UAVBuffer: {
+      if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV) || !snapshot.buffer)
+        return;
+      auto *allocation = snapshot.buffer_allocation ? snapshot.buffer_allocation.ptr() : snapshot.buffer->current();
+      if (allocation)
+        emit(allocation->buffer().handle, read_write);
+      break;
+    }
+    case ShaderVisibleDescriptorType::Null:
+      break;
+    }
   }
 
   void
@@ -3000,99 +3086,143 @@ public:
     if (!descriptor_heap)
       return;
 
-    const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
-    const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
-
-    auto encode_resource = [&](obj_handle_t resource, WMTResourceUsage usage) {
-      if (compute) {
-        EncodeComputeResourceUse(resource, usage);
-      } else {
-        EncodeRenderResourceUse(resource, usage, stages);
-      }
-    };
-
-    auto encode_descriptor = [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
-      auto descriptor_read = descriptor_heap->ReadDescriptor(index);
-      const auto &descriptor = descriptor_read.get();
-      switch (descriptor.type) {
-      case ShaderVisibleDescriptorType::SRVTexture: {
-        if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) ||
-            !descriptor.SRVTexture.texture)
-          return;
-        auto &view = descriptor.SRVTexture.texture->view(descriptor.SRVTexture.view);
-        encode_resource(view.texture.handle, sampled_read);
-        break;
-      }
-      case ShaderVisibleDescriptorType::SRVAccelerationStructure:
-        if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) ||
-            !descriptor.SRVAccelerationStructure.acceleration_structure)
-          return;
-        encode_resource(descriptor.SRVAccelerationStructure.acceleration_structure, WMTResourceUsageRead);
-        encode_resource(descriptor.SRVAccelerationStructure.acceleration_structure_header, WMTResourceUsageRead);
-        break;
-      case ShaderVisibleDescriptorType::UAVTexture: {
-        if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV) ||
-            !descriptor.UAVTexture.texture)
-          return;
-        auto &view = descriptor.UAVTexture.texture->view(descriptor.UAVTexture.view);
-        encode_resource(view.texture.handle, read_write);
-        break;
-      }
-      case ShaderVisibleDescriptorType::ConstantBuffer: {
-        if (!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_CBV)
-          return;
-        auto *allocation = descriptor.allocation;
-        uint64_t buffer_offset = 0;
-        if (!allocation)
-          allocation = device_->LookupBufferByVA(descriptor.ConstantBuffer.address, &buffer_offset);
-        if (allocation)
-          encode_resource(allocation->buffer().handle, WMTResourceUsageRead);
-        break;
-      }
-      case ShaderVisibleDescriptorType::SRVTexelBuffer: {
-        if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) ||
-            !descriptor.SRVTexelBuffer.buffer ||
-            !descriptor.SRVTexelBuffer.buffer->current())
-          return;
-        encode_resource(descriptor.SRVTexelBuffer.buffer->current()->buffer().handle, WMTResourceUsageRead);
-        break;
-      }
-      case ShaderVisibleDescriptorType::UAVTexelBuffer: {
-        if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV) ||
-            !descriptor.UAVTexelBuffer.buffer ||
-            !descriptor.UAVTexelBuffer.buffer->current())
-          return;
-        encode_resource(descriptor.UAVTexelBuffer.buffer->current()->buffer().handle, read_write);
-        break;
-      }
-      case ShaderVisibleDescriptorType::SRVBuffer: {
-        if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) ||
-            !descriptor.SRVBuffer.buffer ||
-            !descriptor.SRVBuffer.buffer->current())
-          return;
-        encode_resource(descriptor.SRVBuffer.buffer->current()->buffer().handle, WMTResourceUsageRead);
-        break;
-      }
-      case ShaderVisibleDescriptorType::UAVBuffer: {
-        if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV) ||
-            !descriptor.UAVBuffer.buffer ||
-            !descriptor.UAVBuffer.buffer->current())
-          return;
-        encode_resource(descriptor.UAVBuffer.buffer->current()->buffer().handle, read_write);
-        break;
-      }
-      case ShaderVisibleDescriptorType::Null:
-        break;
-      }
-    };
-
-    VisitMSCResourceDescriptors(
+    std::vector<PendingDescriptorUse> current_uses;
+    bool descriptor_residency_failed = false;
+    const auto descriptor_visit_aborted = VisitMSCResourceDescriptors(
         pRootSig, pStaging, descriptor_heap,
-        [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
-          encode_descriptor(index, range_type, direct_indexed);
+        [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, D3D12_DESCRIPTOR_RANGE_FLAGS flags,
+            bool direct_indexed) {
+          PendingDescriptorUse use{descriptor_heap, index, range_type, direct_indexed, compute, stages};
+          try {
+            current_uses.push_back(use);
+            if (direct_indexed || (flags & D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE)) {
+              allocator_->encoder_current->RetainDescriptorHeap(
+                  static_cast<IUnknown *>(static_cast<ID3D12DescriptorHeap *>(descriptor_heap))
+              );
+              allocator_->encoder_current->pending_descriptor_uses.push_back(use);
+            }
+          } catch (...) {
+            descriptor_residency_failed = true;
+            FailRecording(__func__, "pending descriptor use allocation failed");
+            return true;
+          }
           return false;
         }
     );
+    if (descriptor_visit_aborted || descriptor_residency_failed)
+      return;
+
+    // Resolve the recording-time view for both static and volatile ranges in
+    // one locked snapshot. Volatile ranges also enter the submission-time
+    // list above so updates made after Close() remain visible.
+    try {
+      std::unordered_map<UINT, size_t> slot_positions;
+      std::vector<UINT> indices;
+      std::vector<std::vector<PendingDescriptorUse>> slot_uses;
+      indices.reserve(current_uses.size());
+      slot_uses.reserve(current_uses.size());
+      for (const auto &use : current_uses) {
+        auto [iter, inserted] = slot_positions.emplace(use.index, slot_uses.size());
+        if (inserted) {
+          indices.push_back(use.index);
+          slot_uses.emplace_back();
+        }
+        slot_uses[iter->second].push_back(use);
+      }
+
+      std::vector<ShaderVisibleDescriptorSnapshot> snapshots;
+      descriptor_heap->ResolveDescriptors(indices, snapshots);
+      for (size_t i = 0; i < snapshots.size() && i < slot_uses.size(); i++) {
+        for (const auto &use : slot_uses[i]) {
+          VisitDescriptorResourceUses(
+              snapshots[i], use.range_type, use.direct_indexed, use.compute, use.render_stages,
+              [&](obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages render_stages) {
+                if (use.compute)
+                  EncodeComputeResourceUse(resource, usage);
+                else
+                  EncodeRenderResourceUse(resource, usage, render_stages);
+              }
+          );
+        }
+      }
+    } catch (...) {
+      FailRecording(__func__, "descriptor residency snapshot allocation failed");
+    }
+  }
+
+  bool
+  ResolvePendingDescriptorUses(
+      EncoderData *encoder,
+      const std::function<void(obj_handle_t, WMTResourceUsage, WMTRenderStages)> &use_resource
+  ) final {
+    if (!encoder || encoder->pending_descriptor_uses.empty())
+      return true;
+
+    struct HeapGroup {
+      MTLD3D12DescriptorHeap *heap = nullptr;
+      std::vector<PendingDescriptorUse> uses;
+    };
+
+    try {
+      std::unordered_map<MTLD3D12DescriptorHeap *, size_t> group_positions;
+      std::vector<HeapGroup> groups;
+      groups.reserve(encoder->pending_descriptor_uses.size());
+      for (const auto &use : encoder->pending_descriptor_uses) {
+        if (!use.heap)
+          continue;
+        auto [iter, inserted] = group_positions.emplace(use.heap, groups.size());
+        if (inserted) {
+          groups.push_back({use.heap, {}});
+          groups.back().uses.reserve(encoder->pending_descriptor_uses.size());
+        }
+        groups[iter->second].uses.push_back(use);
+      }
+
+      std::unordered_set<obj_handle_t> retained_resources;
+      for (auto &group : groups) {
+        std::unordered_map<UINT, size_t> slot_positions;
+        std::vector<UINT> indices;
+        std::vector<std::vector<PendingDescriptorUse>> slot_uses;
+        indices.reserve(group.uses.size());
+        slot_uses.reserve(group.uses.size());
+        for (const auto &use : group.uses) {
+          auto [iter, inserted] = slot_positions.emplace(use.index, slot_uses.size());
+          if (inserted) {
+            indices.push_back(use.index);
+            slot_uses.emplace_back();
+          }
+          slot_uses[iter->second].push_back(use);
+        }
+
+        std::vector<ShaderVisibleDescriptorSnapshot> snapshots;
+        // ResolveDescriptors retains all objects before releasing the heap
+        // lock. No encoder call occurs in this section.
+        group.heap->ResolveDescriptors(indices, snapshots);
+        for (size_t i = 0; i < snapshots.size() && i < slot_uses.size(); i++) {
+          for (const auto &use : slot_uses[i]) {
+            VisitDescriptorResourceUses(
+                snapshots[i], use.range_type, use.direct_indexed, use.compute, use.render_stages,
+                [&](obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages render_stages) {
+                  if (retained_resources.insert(resource).second) {
+                    WMT::Resource native_resource;
+                    native_resource.handle = resource;
+                    encoder->resource_refs.emplace_back(native_resource);
+                  }
+                  use_resource(resource, usage, render_stages);
+                }
+            );
+          }
+        }
+      }
+    } catch (...) {
+      ERR("D3D12 submission descriptor residency resolution failed");
+      return false;
+    }
+
+    // Keep the descriptors and owning heap references for repeated execution
+    // of the same closed command list. Reset destroys the encoder data after
+    // the allocator is no longer in flight.
+    return true;
   }
 
   bool
