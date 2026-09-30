@@ -240,7 +240,7 @@ _WMTSetMetalShaderCachePath(void *obj) {
 #else
 
 int
-WMTSetMetalShaderCachePath(void *obj) {
+_WMTSetMetalShaderCachePath(void *obj) {
   struct unixcall_setmetalcachepath *params = obj;
   params->ret_success = 0;
   return 0;

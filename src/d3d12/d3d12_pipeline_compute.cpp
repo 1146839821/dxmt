@@ -64,6 +64,9 @@ public:
     }
 
     auto shader_backend = classification.backend;
+    const HRESULT stage_hr = ValidateD3D12ShaderKind(classification, D3D12ShaderKind::Compute);
+    if (FAILED(stage_hr))
+      return stage_hr;
 
     if (shader_backend == D3D12ShaderBackend::MetalShaderConverter) {
       if (!device_->GetMSCCapabilities().CoreShaderPathUsable())
@@ -140,7 +143,7 @@ public:
     common.metal_version = SM50_SHADER_METAL_310;
     common.next = &rootsig;
 
-    hr = shader_cs.Initialize(pDesc->CS, classification, &ref_cs, "cs");
+    hr = shader_cs.Initialize(pDesc->CS, classification, D3D12ShaderKind::Compute, &ref_cs, "cs");
     if (FAILED(hr))
       return hr;
 

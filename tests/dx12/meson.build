@@ -6,6 +6,15 @@ dx12_shader_container = executable('dx12_shader_container', 'dx12_shader_contain
   dependencies: [ d3d12_dep ],
 )
 
+dx12_shader_validation = executable('dx12_shader_validation', 'dx12_shader_validation.cpp',
+  include_directories: [include_directories('../../src/airconv'), include_directories('../../src/winemetal')],
+  dependencies: [d3d12_dep],
+)
+
+test('dx12-fl12-gate-unit', find_program('python3', native: true),
+  args: [files('test_dx12_fl12_gate.py')],
+)
+
 dx12_airconv_firstbit = executable('dx12_airconv_firstbit', 'dx12_airconv_firstbit.cpp',
   dependencies: [ d3d12_dep ],
 )
@@ -143,6 +152,19 @@ else
 endif
 
 if dxc_command.length() > 0
+  foreach stage : [['geometry', 'gs', 'gs_main'], ['tessellation', 'hs', 'hs_main'], ['tessellation', 'ds', 'ds_main']]
+    custom_target('dx12_shader_backend_' + stage[1] + '_fixture',
+      input: 'shader_backend_stages.hlsl',
+      output: 'shader_backend.' + stage[0] + '.' + stage[1] + '.cso',
+      command: dxc_command + ['-E', stage[2], '-T', stage[1] + '_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_shader_backend_library_fixture',
+    input: 'shader_backend_library.hlsl', output: 'shader_backend.library.lib.cso',
+    command: dxc_command + ['-T', 'lib_6_3', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
   custom_target('dx12_compute_sm6_fixture',
     input: 'compute_sm6.hlsl',
     output: 'compute_sm6.cs.cso',

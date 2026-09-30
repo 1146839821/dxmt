@@ -965,7 +965,7 @@ public:
     const bool has_pixel_shader = pDesc->PS.pShaderBytecode != nullptr;
     auto classify_optional_shader = [](const D3D12_SHADER_BYTECODE &shader) {
       if (!shader.pShaderBytecode && !shader.BytecodeLength)
-        return D3D12ShaderClassification{D3D12ShaderBackend::Airconv, S_OK};
+        return AbsentD3D12ShaderClassification();
       return ClassifyD3D12Shader(shader);
     };
     const auto vs_classification = ClassifyD3D12Shader(pDesc->VS);
@@ -982,6 +982,17 @@ public:
     }
 
     HRESULT hr;
+    const auto validate_stage = [](const D3D12ShaderClassification &classification, D3D12ShaderKind kind) {
+      return classification.executable_family == D3D12ShaderExecutableFamily::None
+                 ? S_OK
+                 : ValidateD3D12ShaderKind(classification, kind);
+    };
+    if (FAILED(hr = ValidateD3D12ShaderKind(vs_classification, D3D12ShaderKind::Vertex)) ||
+        FAILED(hr = validate_stage(ps_classification, D3D12ShaderKind::Pixel)) ||
+        FAILED(hr = validate_stage(hs_classification, D3D12ShaderKind::Hull)) ||
+        FAILED(hr = validate_stage(ds_classification, D3D12ShaderKind::Domain)) ||
+        FAILED(hr = validate_stage(gs_classification, D3D12ShaderKind::Geometry)))
+      return hr;
     D3D12AirconvError sm50_err;
     auto metal = device_->GetMTLDevice();
     const auto &msc_capabilities = device_->GetMSCCapabilities();
@@ -1212,7 +1223,7 @@ public:
     }
 
     if (!use_msc) {
-      hr = shader_vs.Initialize(pDesc->VS, vs_classification, &ref_vs, "vs");
+      hr = shader_vs.Initialize(pDesc->VS, vs_classification, D3D12ShaderKind::Vertex, &ref_vs, "vs");
       if (FAILED(hr))
         return hr;
       if (!use_airconv_geometry && !use_airconv_tessellation) {
@@ -1284,7 +1295,7 @@ public:
     }
 
     if (use_airconv_geometry) {
-      hr = shader_gs.Initialize(pDesc->GS, gs_classification, &ref_gs, "gs");
+      hr = shader_gs.Initialize(pDesc->GS, gs_classification, D3D12ShaderKind::Geometry, &ref_gs, "gs");
       if (FAILED(hr))
         return hr;
 
@@ -1302,10 +1313,10 @@ public:
     }
 
     if (use_airconv_tessellation) {
-      hr = shader_hs.Initialize(pDesc->HS, hs_classification, &ref_hs, "hs");
+      hr = shader_hs.Initialize(pDesc->HS, hs_classification, D3D12ShaderKind::Hull, &ref_hs, "hs");
       if (FAILED(hr))
         return hr;
-      hr = shader_ds.Initialize(pDesc->DS, ds_classification, &ref_ds, "ds");
+      hr = shader_ds.Initialize(pDesc->DS, ds_classification, D3D12ShaderKind::Domain, &ref_ds, "ds");
       if (FAILED(hr))
         return hr;
     }
@@ -1392,7 +1403,7 @@ public:
 
       std::string ps_name = "ps_main" + sha1.string().substr(0, 8);
 
-      hr = shader_ps.Initialize(pDesc->PS, ps_classification, &ref_ps, "ps");
+      hr = shader_ps.Initialize(pDesc->PS, ps_classification, D3D12ShaderKind::Pixel, &ref_ps, "ps");
       if (FAILED(hr))
         return hr;
       SM50_SHADER_PSO_PIXEL_SHADER_DATA data_ps;
@@ -1860,13 +1871,14 @@ MTLD3D12GraphicsPipelineStateImpl::InitializeMesh(const D3D12PipelineStreamData 
   const auto ps_bytecode = make_bytecode(data.pixel_shader);
   const auto ms_classification = ClassifyD3D12Shader(ms_bytecode);
   const auto as_classification = data.amplification_shader.empty()
-                                     ? D3D12ShaderClassification{D3D12ShaderBackend::Airconv, S_OK}
+                                     ? AbsentD3D12ShaderClassification()
                                      : ClassifyD3D12Shader(as_bytecode);
   const auto ps_classification = data.pixel_shader.empty()
-                                     ? D3D12ShaderClassification{D3D12ShaderBackend::Airconv, S_OK}
+                                     ? AbsentD3D12ShaderClassification()
                                      : ClassifyD3D12Shader(ps_bytecode);
   HRESULT hr;
-  auto validate_native_stage = [](const D3D12ShaderClassification &classification, const char *stage) -> HRESULT {
+  auto validate_native_stage = [](const D3D12ShaderClassification &classification, const char *stage,
+                                 D3D12ShaderKind kind) -> HRESULT {
     if (FAILED(classification.validation_hr)) {
       ERR("CreatePipelineState: invalid mesh ", stage, " shader container, HRESULT=", classification.validation_hr);
       return classification.validation_hr;
@@ -1875,13 +1887,15 @@ MTLD3D12GraphicsPipelineStateImpl::InitializeMesh(const D3D12PipelineStreamData 
       ERR("CreatePipelineState: native mesh ", stage, " shader requires DXIL");
       return E_NOTIMPL;
     }
-    return S_OK;
+    return ValidateD3D12ShaderKind(classification, kind);
   };
-  if (FAILED(hr = validate_native_stage(ms_classification, "MS")))
+  if (FAILED(hr = validate_native_stage(ms_classification, "MS", D3D12ShaderKind::Mesh)))
     return hr;
-  if (!data.amplification_shader.empty() && FAILED(hr = validate_native_stage(as_classification, "AS")))
+  if (!data.amplification_shader.empty() &&
+      FAILED(hr = validate_native_stage(as_classification, "AS", D3D12ShaderKind::Amplification)))
     return hr;
-  if (!data.pixel_shader.empty() && FAILED(hr = validate_native_stage(ps_classification, "PS")))
+  if (!data.pixel_shader.empty() &&
+      FAILED(hr = validate_native_stage(ps_classification, "PS", D3D12ShaderKind::Pixel)))
     return hr;
 
   const void *root_signature = nullptr;
