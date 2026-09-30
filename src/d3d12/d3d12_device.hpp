@@ -75,6 +75,10 @@ struct AirconvResidencyCounters {
   uint64_t descriptor_scans_executed = 0;
   uint64_t descriptor_scan_skips = 0;
   uint64_t descriptor_slots_visited = 0;
+  uint64_t conservative_descriptor_slots = 0;
+  uint64_t shader_reachable_descriptor_slots = 0;
+  uint64_t conservative_descriptor_ranges = 0;
+  uint64_t shader_reachable_descriptor_ranges = 0;
   uint64_t descriptor_batch_locks = 0;
   uint64_t heap_generation_invalidations = 0;
   uint64_t heap_global_generation_changes_seen = 0;
@@ -318,6 +322,9 @@ public:
     D3D12_DESCRIPTOR_RANGE_TYPE type;
     UINT num_descriptors;
     uint64_t offset;
+    UINT base_shader_register;
+    UINT register_space;
+    D3D12_DESCRIPTOR_RANGE_FLAGS flags;
   };
 
   struct RootDescriptorTableMetadata {
@@ -377,12 +384,35 @@ public:
   UINT count = 0;
 };
 
+struct AirconvFootprintBuildCounters {
+  uint64_t psos, exact, fallback, direct_indexed;
+};
+
+AirconvFootprintBuildCounters GetAirconvFootprintBuildCounters();
+
 class MTLD3D12PipelineState : public ID3D12PipelineState {
 public:
   UINT IsComputePipelineState;
   D3D12ShaderBackend shader_backend = D3D12ShaderBackend::None;
   bool msc_uses_texture_load = false;
   D3D12PipelineCacheData pipeline_cache;
+
+  struct DescriptorFootprintRange {
+    UINT parameter_index;
+    D3D12_DESCRIPTOR_RANGE_TYPE type;
+    uint64_t offset;
+    uint64_t count;
+    WMTRenderStages stages;
+  };
+  struct ShaderFootprintInput {
+    sm50_shader_t shader;
+    D3D12_SHADER_VISIBILITY visibility;
+    WMTRenderStages stages;
+  };
+  bool descriptor_footprint_exact = false;
+  Com<MTLD3D12RootSignature> descriptor_footprint_root;
+  std::vector<DescriptorFootprintRange> descriptor_footprint;
+  void BuildDescriptorFootprint(MTLD3D12RootSignature *root, std::initializer_list<ShaderFootprintInput> shaders);
 
   const D3D12PipelineCacheData &GetPipelineCacheData() const { return pipeline_cache; }
 };

@@ -484,7 +484,7 @@ public:
           const uint64_t offset = range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
                                       ? append_offset
                                       : range.OffsetInDescriptorsFromTableStart;
-          root_descriptor_ranges_.push_back({range.RangeType, range.NumDescriptors, offset});
+          root_descriptor_ranges_.push_back({range.RangeType, range.NumDescriptors, offset, range.BaseShaderRegister, range.RegisterSpace, range.Flags});
           if (range.NumDescriptors == UINT_MAX || offset > UINT64_MAX - range.NumDescriptors)
             append_offset = UINT64_MAX;
           else

@@ -1594,6 +1594,11 @@ public:
       forced_sample_count = pDesc->RasterizerState.ForcedSampleCount;
     }
 
+    if (!use_msc)
+      BuildDescriptorFootprint(static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature), {
+          {shader_vs.get(), D3D12_SHADER_VISIBILITY_VERTEX, airconv_geometry ? WMTRenderStageObject : WMTRenderStageVertex},
+          {shader_gs.get(), D3D12_SHADER_VISIBILITY_GEOMETRY, WMTRenderStageMesh},
+          {shader_ps.get(), D3D12_SHADER_VISIBILITY_PIXEL, WMTRenderStageFragment}});
     shader_backend = use_msc ? D3D12ShaderBackend::MetalShaderConverter : D3D12ShaderBackend::Airconv;
     return S_OK;
   }

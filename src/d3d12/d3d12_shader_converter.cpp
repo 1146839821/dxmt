@@ -1,4 +1,6 @@
 #include "d3d12_shader_converter.hpp"
+#include "d3d12_device.hpp"
+#include "../airconv/dxbc_root_signature.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -19,6 +21,146 @@
 #include "sha1/sha1_util.hpp"
 
 namespace dxmt {
+
+namespace {
+std::atomic_uint64_t footprint_build_psos{0}, footprint_exact_psos{0}, footprint_fallback_psos{0},
+    footprint_direct_indexed{0};
+}
+
+AirconvFootprintBuildCounters GetAirconvFootprintBuildCounters() {
+  return {footprint_build_psos.load(std::memory_order_relaxed), footprint_exact_psos.load(std::memory_order_relaxed),
+          footprint_fallback_psos.load(std::memory_order_relaxed), footprint_direct_indexed.load(std::memory_order_relaxed)};
+}
+
+void MTLD3D12PipelineState::BuildDescriptorFootprint(
+    MTLD3D12RootSignature *root, std::initializer_list<ShaderFootprintInput> shaders
+) {
+  descriptor_footprint_exact = false;
+  descriptor_footprint.clear();
+  descriptor_footprint_root = nullptr;
+  struct BuildCounter {
+    const bool &exact;
+    ~BuildCounter() {
+      footprint_build_psos.fetch_add(1, std::memory_order_relaxed);
+      (exact ? footprint_exact_psos : footprint_fallback_psos).fetch_add(1, std::memory_order_relaxed);
+    }
+  } counter{descriptor_footprint_exact};
+  if (root && root->ResourceHeapDirectlyIndexed)
+    footprint_direct_indexed.fetch_add(1, std::memory_order_relaxed);
+  if (!root || root->ResourceHeapDirectlyIndexed)
+    return;
+  const void *blob = nullptr;
+  const auto size = root->GetBlob(&blob);
+  RootSignatureDeserializer deserializer;
+  const void *raw = nullptr;
+  UINT raw_size = 0;
+  if (!blob || !size || FAILED(microsoft::DXBCGetRootSignature(blob, &raw, &raw_size)) ||
+      FAILED(deserializer.Deserialize(raw, raw_size)))
+    return;
+  const auto &desc = deserializer.desc_1_1_.Desc_1_1;
+  std::vector<DescriptorFootprintRange> result;
+  for (const auto &input : shaders) {
+    if (!input.shader)
+      continue;
+    const auto required = SM50GetResourceRanges(input.shader, nullptr, 0);
+    if (required == UINT32_MAX || required > 65536)
+      return;
+    std::vector<SM50_RESOURCE_RANGE> declarations(required);
+    if (SM50GetResourceRanges(input.shader, declarations.data(), required) != required)
+      return;
+    for (const auto &resource : declarations) {
+      if (resource.type == static_cast<uint32_t>(SM50BindingType::Sampler))
+        continue;
+      D3D12_DESCRIPTOR_RANGE_TYPE type;
+      if (resource.type == static_cast<uint32_t>(SM50BindingType::ConstantBuffer))
+        type = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+      else if (resource.type == static_cast<uint32_t>(SM50BindingType::SRV))
+        type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+      else if (resource.type == static_cast<uint32_t>(SM50BindingType::UAV))
+        type = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+      else
+        return;
+      if (!resource.count || resource.count == UINT32_MAX ||
+          uint64_t(resource.lower_bound) + resource.count > uint64_t(UINT32_MAX) + 1)
+        return;
+      unsigned matches = 0;
+      DescriptorFootprintRange match{};
+      bool table_match = false;
+      for (UINT i = 0; i < desc.NumParameters; i++) {
+        const auto &parameter = desc.pParameters[i];
+        if (parameter.ShaderVisibility != D3D12_SHADER_VISIBILITY_ALL && parameter.ShaderVisibility != input.visibility)
+          continue;
+        if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+          uint64_t append = 0;
+          for (UINT r = 0; r < parameter.DescriptorTable.NumDescriptorRanges; r++) {
+            const auto &range = parameter.DescriptorTable.pDescriptorRanges[r];
+            const uint64_t offset = range.OffsetInDescriptorsFromTableStart == UINT32_MAX
+                                        ? append : range.OffsetInDescriptorsFromTableStart;
+            append = range.NumDescriptors == UINT32_MAX || offset > UINT64_MAX - range.NumDescriptors
+                         ? UINT64_MAX : offset + range.NumDescriptors;
+            if (range.RangeType != type || range.RegisterSpace != resource.space ||
+                resource.lower_bound < range.BaseShaderRegister)
+              continue;
+            const uint64_t relative = uint64_t(resource.lower_bound) - range.BaseShaderRegister;
+            if (range.NumDescriptors != UINT32_MAX && relative + resource.count > range.NumDescriptors)
+              continue;
+            // Reject mappings whose arithmetic differs from the converter's 32-bit table offsets.
+            if (offset == UINT64_MAX || offset + relative + resource.count > UINT32_MAX)
+              return;
+            matches++;
+            table_match = true;
+            match = {i, type, offset + relative, resource.count, input.stages};
+          }
+        } else if (resource.count == 1) {
+          if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+            if (type == D3D12_DESCRIPTOR_RANGE_TYPE_CBV &&
+                parameter.Constants.ShaderRegister == resource.lower_bound && parameter.Constants.RegisterSpace == resource.space)
+              matches++;
+          } else {
+            const bool compatible = (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV && type == D3D12_DESCRIPTOR_RANGE_TYPE_CBV) ||
+                (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV && type == D3D12_DESCRIPTOR_RANGE_TYPE_SRV) ||
+                (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_UAV && type == D3D12_DESCRIPTOR_RANGE_TYPE_UAV);
+            if (compatible && parameter.Descriptor.ShaderRegister == resource.lower_bound && parameter.Descriptor.RegisterSpace == resource.space)
+              matches++;
+          }
+        }
+      }
+      if (matches != 1)
+        return;
+      if (table_match)
+        result.push_back(match);
+    }
+  }
+  // Normalize overlaps into disjoint intervals and union their render stages.
+  std::vector<DescriptorFootprintRange> normalized;
+  for (UINT parameter = 0; parameter < desc.NumParameters; parameter++) {
+    for (auto type : {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, D3D12_DESCRIPTOR_RANGE_TYPE_SRV, D3D12_DESCRIPTOR_RANGE_TYPE_UAV}) {
+      std::vector<uint64_t> boundaries;
+      for (const auto &range : result)
+        if (range.parameter_index == parameter && range.type == type) {
+          boundaries.push_back(range.offset);
+          boundaries.push_back(range.offset + range.count);
+        }
+      std::sort(boundaries.begin(), boundaries.end());
+      boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
+      for (size_t i = 1; i < boundaries.size(); i++) {
+        WMTRenderStages stages = static_cast<WMTRenderStages>(0);
+        bool covered = false;
+        for (const auto &range : result)
+          if (range.parameter_index == parameter && range.type == type && range.offset <= boundaries[i-1] &&
+              range.offset + range.count >= boundaries[i]) {
+            covered = true;
+            stages = static_cast<WMTRenderStages>(stages | range.stages);
+          }
+        if (covered)
+          normalized.push_back({parameter, type, boundaries[i-1], boundaries[i] - boundaries[i-1], stages});
+      }
+    }
+  }
+  descriptor_footprint_root = root;
+  descriptor_footprint = std::move(normalized);
+  descriptor_footprint_exact = true;
+}
 
 namespace {
 

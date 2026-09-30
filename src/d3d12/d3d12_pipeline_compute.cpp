@@ -181,6 +181,8 @@ public:
     hr = create_compute_pso(cs_func);
     if (FAILED(hr))
       return hr;
+    BuildDescriptorFootprint(static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature), {
+        {shader_cs.get(), D3D12_SHADER_VISIBILITY_ALL, static_cast<WMTRenderStages>(0)}});
     this->shader_backend = D3D12ShaderBackend::Airconv;
     return S_OK;
   }

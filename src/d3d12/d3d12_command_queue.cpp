@@ -102,6 +102,11 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     DXMT_ADD_RESIDENCY_COUNTER(descriptor_scans_executed);
     DXMT_ADD_RESIDENCY_COUNTER(descriptor_scan_skips);
     DXMT_ADD_RESIDENCY_COUNTER(descriptor_slots_visited);
+    DXMT_ADD_RESIDENCY_COUNTER(conservative_descriptor_slots);
+    DXMT_ADD_RESIDENCY_COUNTER(shader_reachable_descriptor_slots);
+    DXMT_ADD_RESIDENCY_COUNTER(conservative_descriptor_ranges);
+    DXMT_ADD_RESIDENCY_COUNTER(shader_reachable_descriptor_ranges);
+
     DXMT_ADD_RESIDENCY_COUNTER(descriptor_batch_locks);
     DXMT_ADD_RESIDENCY_COUNTER(heap_generation_invalidations);
     DXMT_ADD_RESIDENCY_COUNTER(heap_global_generation_changes_seen);
@@ -154,13 +159,30 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     const auto skip_rate = scan_requests ? double(scan_skips) / double(scan_requests) : 0.0;
     const auto slots_per_scan = executed_scans ? double(dump_counters.descriptor_slots_visited) / double(executed_scans)
                                                 : 0.0;
+    const auto conservative_slots_per_scan = executed_scans
+        ? double(dump_counters.conservative_descriptor_slots) / double(executed_scans) : 0.0;
+    const auto prune_ratio = dump_counters.conservative_descriptor_slots
+        ? 1.0 - double(dump_counters.shader_reachable_descriptor_slots) /
+                    double(dump_counters.conservative_descriptor_slots) : 0.0;
+    const auto footprint_builds = GetAirconvFootprintBuildCounters();
     const auto reuse_ratio = dump_counters.submission_pending_uses
                                  ? 1.0 - double(dump_counters.submission_unique_slots) /
                                              double(dump_counters.submission_pending_uses)
                                  : 0.0;
     if (Logger::logLevel() <= LogLevel::Info)
       Logger::info(str::format(
-          "DXMT_D3D12_RESIDENCY_STATS window=10s command_lists=", dump_command_lists,
+          "DXMT_D3D12_RESIDENCY_STATS conservative_slots=", dump_counters.conservative_descriptor_slots,
+          " reachable_slots=", dump_counters.shader_reachable_descriptor_slots,
+          " pruned_slots=", dump_counters.conservative_descriptor_slots - dump_counters.shader_reachable_descriptor_slots,
+          "\nDXMT_D3D12_RESIDENCY_STATS conservative_ranges=", dump_counters.conservative_descriptor_ranges,
+          " reachable_ranges=", dump_counters.shader_reachable_descriptor_ranges,
+          "\nDXMT_D3D12_RESIDENCY_STATS slot_prune_ratio=", prune_ratio,
+          " average_conservative_slots_per_scan=", conservative_slots_per_scan,
+          "\nDXMT_D3D12_RESIDENCY_STATS footprint_build_psos_total=", footprint_builds.psos,
+          " footprint_exact_psos_total=", footprint_builds.exact,
+          " footprint_fallback_psos_total=", footprint_builds.fallback,
+          " footprint_direct_indexed_fallbacks_total=", footprint_builds.direct_indexed,
+          "\nDXMT_D3D12_RESIDENCY_STATS window=10s command_lists=", dump_command_lists,
           " root_scan_requests=", dump_counters.root_scan_requests, " root_scans=", dump_counters.root_scans_executed,
           " root_scan_skips=", dump_counters.root_scan_skips, " root_va_lookups=", dump_counters.root_va_lookups,
           "\nDXMT_D3D12_RESIDENCY_STATS descriptor_scan_requests=", scan_requests, " descriptor_scans=", executed_scans,

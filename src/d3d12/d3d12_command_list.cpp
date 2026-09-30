@@ -715,6 +715,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
     uint64_t handle = 0;
   };
   struct DescriptorResidencyCache {
+    Com<MTLD3D12PipelineState> pipeline;
     bool valid = false;
     EncoderData *encoder = nullptr;
     MTLD3D12RootSignature *root_signature = nullptr;
@@ -2962,7 +2963,7 @@ public:
   bool
   VisitIndirectResourceDescriptors(
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
-      F &&visit
+      F &&visit, const MTLD3D12PipelineState *footprint = nullptr, WMTRenderStages *descriptor_stages = nullptr
   ) {
     // Direct-indexed root signatures legitimately have no root parameters;
     // their resource heap still needs a residency walk below.
@@ -3020,19 +3021,50 @@ public:
         const auto range_count = range.num_descriptors == UINT_MAX
                                      ? heap_desc.NumDescriptors - range_start
                                      : std::min<uint64_t>(range.num_descriptors, heap_desc.NumDescriptors - range_start);
-        for (uint64_t descriptor_index = 0; descriptor_index < range_count; descriptor_index++)
-          if (visit_index(static_cast<UINT>(range_start + descriptor_index), range.type, false))
-            return true;
+        if (descriptor_stages) {
+          airconv_residency_counters_.conservative_descriptor_slots += range_count;
+          airconv_residency_counters_.conservative_descriptor_ranges++;
+        }
+        if (footprint) {
+          for (const auto &reachable : footprint->descriptor_footprint) {
+            if (reachable.parameter_index != table.parameter_index || reachable.type != range.type ||
+                reachable.offset < range_offset || reachable.offset >= range_offset + range_count)
+              continue;
+            const auto count = std::min<uint64_t>(reachable.count, range_offset + range_count - reachable.offset);
+            if (descriptor_stages) {
+              airconv_residency_counters_.shader_reachable_descriptor_slots += count;
+              airconv_residency_counters_.shader_reachable_descriptor_ranges++;
+            }
+            if (descriptor_stages)
+              *descriptor_stages = reachable.stages;
+            for (uint64_t index = 0; index < count; index++)
+              if (visit_index(static_cast<UINT>(base_index + reachable.offset + index), range.type, false))
+                return true;
+          }
+        } else {
+          if (descriptor_stages) {
+            airconv_residency_counters_.shader_reachable_descriptor_slots += range_count;
+            airconv_residency_counters_.shader_reachable_descriptor_ranges++;
+          }
+          for (uint64_t descriptor_index = 0; descriptor_index < range_count; descriptor_index++)
+            if (visit_index(static_cast<UINT>(range_start + descriptor_index), range.type, false))
+              return true;
+        }
       }
     }
 
     // A direct-indexed root signature has no descriptor-table ranges to
     // enumerate. Since the shader may select any CBV/SRV/UAV slot at runtime,
     // conservatively visit every populated resource descriptor.
-    if (pRootSig->ResourceHeapDirectlyIndexed)
+    if (pRootSig->ResourceHeapDirectlyIndexed) {
+      if (descriptor_stages) {
+        airconv_residency_counters_.conservative_descriptor_slots += heap_desc.NumDescriptors;
+        airconv_residency_counters_.shader_reachable_descriptor_slots += heap_desc.NumDescriptors;
+      }
       for (UINT index = 0; index < heap_desc.NumDescriptors; index++)
         if (visit_index(index, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, true))
           return true;
+    }
 
     return false;
   }
@@ -3307,6 +3339,11 @@ public:
     if (pRootSig->ResourceHeapDirectlyIndexed)
       airconv_residency_counters_.direct_indexed_root_requests++;
 
+    auto *pipeline = compute ? static_cast<MTLD3D12PipelineState *>(pso_compute_.ptr())
+                             : static_cast<MTLD3D12PipelineState *>(pso_graphics_.ptr());
+    const auto *footprint = pipeline && pipeline->shader_backend == D3D12ShaderBackend::Airconv &&
+                                   pipeline->descriptor_footprint_exact && pipeline->descriptor_footprint_root.ptr() == pRootSig
+                               ? pipeline : nullptr;
     auto &cache = descriptor_residency_cache_;
     const auto heap_generation = descriptor_heap->GetMutationGeneration();
     const auto current_table_count = pRootSig->RootDescriptorTableCount;
@@ -3326,7 +3363,7 @@ public:
     }
 
     const bool same_context = cache.valid && cache.encoder == allocator_->encoder_current &&
-                              cache.root_signature == pRootSig && cache.heap == descriptor_heap &&
+                              cache.root_signature == pRootSig && cache.heap == descriptor_heap && cache.pipeline.ptr() == pipeline &&
                               cache.compute == compute && cache.stages == stages;
     bool same_table_handles = same_context && cache.table_count == current_table_count;
     for (UINT i = 0; same_table_handles && i < current_table_count; i++)
@@ -3374,11 +3411,12 @@ public:
     const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
     const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
 
+    auto descriptor_stages = stages;
     auto encode_resource = [&](obj_handle_t resource, WMTResourceUsage usage) {
       if (compute) {
         EncodeComputeResourceUse(resource, usage);
       } else {
-        EncodeRenderResourceUse(resource, usage, stages);
+        EncodeRenderResourceUse(resource, usage, descriptor_stages);
       }
     };
 
@@ -3386,7 +3424,7 @@ public:
                                  D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
       size_t pending_index = 0;
       const bool needs_read = CaptureVolatileDescriptorUse(
-              allocator_->encoder_current, descriptor_heap, index, range_type, direct_indexed, compute, stages,
+              allocator_->encoder_current, descriptor_heap, index, range_type, direct_indexed, compute, descriptor_stages,
               heap_generation, pending_index
           );
       if (!needs_read && unchanged_state_fast_path)
@@ -3476,9 +3514,11 @@ public:
             bool direct_indexed) {
           encode_descriptor(batch, index, range_type, direct_indexed);
           return false;
-        }
+        }, footprint, &descriptor_stages
     );
 
+    if (cache.pipeline.ptr() != pipeline)
+      cache.pipeline = pipeline;
     cache.encoder = allocator_->encoder_current;
     cache.root_signature = pRootSig;
     cache.heap = descriptor_heap;
