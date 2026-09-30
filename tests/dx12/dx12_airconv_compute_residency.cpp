@@ -120,6 +120,15 @@ void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
     ranges_valid = ranges_valid && SM50GetResourceRanges(parsed, ranges.data(), 3) == 3;
     for (const auto &range : ranges)
       ranges_valid = ranges_valid && range.lower_bound == 0 && range.count == 1 && range.space == 0;
+    std::array<SM50_RESOURCE_RANGE, 5> oversized{};
+    oversized[3].lower_bound = 0x123456;
+    oversized[4].lower_bound = 0x654321;
+    bounded[0].lower_bound = 0xfedcba;
+    ranges_valid = ranges_valid && SM50GetResourceRanges(parsed, bounded.data(), 0) == 3 &&
+                   bounded[0].lower_bound == 0xfedcba &&
+                   SM50GetResourceRanges(parsed, oversized.data(), oversized.size()) == 3 &&
+                   oversized[3].lower_bound == 0x123456 && oversized[4].lower_bound == 0x654321 &&
+                   SM50GetResourceRanges({}, nullptr, 0) == UINT32_MAX;
     SM50Destroy(parsed);
   }
   if (parse_error)
@@ -206,7 +215,10 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
   return !bytecode.empty();
 }
 
-bool CreateRootSignature(ID3D12Device *device, ID3D12RootSignature **root_signature, bool extended) {
+bool CreateRootSignature(
+    ID3D12Device *device, ID3D12RootSignature **root_signature, bool extended,
+    bool directly_indexed = false, bool ambiguous = false
+) {
   D3D12_DESCRIPTOR_RANGE ranges[3] = {};
   ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
   ranges[0].NumDescriptors = 1;
@@ -224,10 +236,10 @@ bool CreateRootSignature(ID3D12Device *device, ID3D12RootSignature **root_signat
     ranges[2].RegisterSpace = 1;
     ranges[2].OffsetInDescriptorsFromTableStart = 128;
   }
-  const D3D12_DESCRIPTOR_RANGE srv_ranges[] = {ranges[0], ranges[2]};
+  const D3D12_DESCRIPTOR_RANGE srv_ranges[] = {ranges[0], ambiguous ? ranges[0] : ranges[2]};
   D3D12_ROOT_PARAMETER parameters[3] = {};
   parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-  parameters[0].DescriptorTable.NumDescriptorRanges = extended ? 2 : 1;
+  parameters[0].DescriptorTable.NumDescriptorRanges = (extended || ambiguous) ? 2 : 1;
   parameters[0].DescriptorTable.pDescriptorRanges = srv_ranges;
   parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
   parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -240,6 +252,8 @@ bool CreateRootSignature(ID3D12Device *device, ID3D12RootSignature **root_signat
 
   D3D12_ROOT_SIGNATURE_DESC description = {};
   description.NumParameters = 3;
+  if (directly_indexed)
+    description.Flags = D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
   description.pParameters = parameters;
   ID3DBlob *root_blob = nullptr;
   ID3DBlob *errors = nullptr;
@@ -718,7 +732,27 @@ int main(int argc, char **argv) {
   if (!CheckHR("D3D12CreateDevice", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))))
     return 1;
   const D3D12_SHADER_BYTECODE shader = {shader_bytecode.data(), shader_bytecode.size()};
-  bool passed = RunTest(device, shader);
+  bool automatic_fallback = true;
+  for (bool directly_indexed : {true, false}) {
+    ComPtr<ID3D12RootSignature> fallback_root;
+    ComPtr<ID3D12PipelineState> fallback_pipeline;
+    D3D12_COMPUTE_PIPELINE_STATE_DESC fallback_desc = {};
+    const char *name = directly_indexed ? "direct-indexed" : "ambiguous";
+    bool valid = CreateRootSignature(device, fallback_root.put(), false, directly_indexed, !directly_indexed);
+    fallback_desc.pRootSignature = fallback_root.get();
+    fallback_desc.CS = shader;
+    valid = valid && SUCCEEDED(device->CreateComputePipelineState(&fallback_desc, IID_PPV_ARGS(fallback_pipeline.put())));
+    if (valid) {
+      auto *state = static_cast<dxmt::MTLD3D12PipelineState *>(fallback_pipeline.get());
+      valid = !state->descriptor_footprint_exact && state->descriptor_footprint.empty();
+    }
+    if (!valid)
+      std::cerr << "automatic " << name << " footprint fallback failed\n";
+    else
+      std::cout << "automatic " << name << " footprint fallback passed\n";
+    automatic_fallback = automatic_fallback && valid;
+  }
+  bool passed = automatic_fallback && RunTest(device, shader);
   if (passed && !array_bytecode.empty()) {
     const D3D12_SHADER_BYTECODE array_shader = {array_bytecode.data(), array_bytecode.size()};
     passed = RunTest(device, array_shader, true) && RunTest(device, array_shader, true, true);
