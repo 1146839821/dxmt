@@ -64,8 +64,8 @@ def verify_build(build, variant, wine):
         return {"status": UNVERIFIED, "reason": str(error)}
 
 
-def run_fixture(directory, wine, name, args, required, timeout, runtime=None):
-    files = (name,) + tuple(args)
+def run_fixture(directory, wine, name, args, required, timeout, runtime=None, stage_files=None):
+    files = (name,) + (tuple(args) if stage_files is None else tuple(stage_files))
     missing = [file for file in files if not (directory / file).is_file()]
     if missing:
         return {"status": UNVERIFIED, "reason": "missing: " + ", ".join(missing)}
@@ -105,6 +105,32 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None):
                 "reason": "fresh execution; required markers checked", "runtime_sha256": staged_hashes}
 
 
+def run_minmax_contract(directory, wine, timeout, runtime):
+    cases = {
+        "filter_matrix": run_fixture(directory, wine, "dx12_sampler_filter.exe", (),
+                                    ("D3D12 sampler filter contracts passed: 72",), timeout, runtime),
+    }
+    for backend, shader, files in (("dxbc", "--dxbc", ()),
+                                  ("dxil", "texture_sampler.cs.cso", ("texture_sampler.cs.cso",))):
+        for mode in ("dynamic", "static"):
+            control_args = (shader,) if mode == "dynamic" else (shader, "--static-sampler")
+            cases[backend + "_" + mode + "_control"] = run_fixture(
+                directory, wine, "dx12_texture_sampler.exe", control_args,
+                ("texture sampler readback passed: 255",), timeout, runtime, files)
+            for reduction in ("minimum", "maximum"):
+                flag = "--" + ("static-" if mode == "static" else "") + reduction
+                name = backend + "_" + mode + "_" + reduction
+                cases[name] = run_fixture(
+                    directory, wine, "dx12_texture_sampler.exe", (shader, flag, "--expect-unsupported"),
+                    ("minmax " + mode + " rejected without fallback",), timeout, runtime, files)
+    hashes = [case.get("runtime_sha256") for case in cases.values() if case.get("runtime_sha256")]
+    status = aggregate([row(name, case["status"], "") for name, case in cases.items()])
+    if hashes and any(digest != hashes[0] for digest in hashes):
+        status = UNVERIFIED
+    return {"status": status, "reason": "rejection contracts and ordinary GPU controls; not min/max GPU acceptance",
+            "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
+
+
 def build_report(probes, variant, provenance=None):
     feature = probes["feature_support"]
     options = None
@@ -134,12 +160,18 @@ def build_report(probes, variant, provenance=None):
     ]
     if provenance is not None:
         fl0.append(row("build_runtime_provenance", provenance["status"], provenance["reason"]))
-    for name in ("min_max_reduction_filtering", "mandatory_raster_matrix", "mandatory_format_matrix",
+    minmax = probes.get("minmax_sampler_contract")
+    fl0.append(row("min_max_reduction_filtering",
+                   BLOCKED if minmax and minmax["status"] == PASS else
+                   minmax["status"] if minmax else UNVERIFIED,
+                   "rejection contract only; full min/max shader implementation absent"))
+    for name in ("mandatory_raster_matrix", "mandatory_format_matrix",
                  "dxbc_mandatory_shader_paths", "dxil_mandatory_shader_paths",
                  "dxbc_tessellation", "dxil_tessellation", "geometry_shader_stream_output"):
         fl0.append(row(name, UNVERIFIED, "complete mandatory GPU readback matrix not registered"))
-    isolation = aggregate([row(name, probe["status"], "") for name, probe in probes.items()
-                           if name != "feature_support"])
+    isolation = aggregate([row(name, probes[name]["status"], "")
+                           for name in ("shader_validation", "shader_container", "shader_stage_matrix")
+                           if name in probes])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
                    "PSO family/stage rejection covered; compiler-failure invocation/fallback oracle missing"))
     fl1 = [
@@ -194,6 +226,7 @@ def main():
              "container mixed-legacy-vs-dxil-hs-ds passed", "container mixed-dxil-vs-legacy-hs-ds passed",
              "container dxil-library-in-ordinary-graphics-slot passed"), args.timeout, runtime),
     }
+    probes["minmax_sampler_contract"] = run_minmax_contract(directory, args.wine, args.timeout, runtime)
     if verify_build(args.build_dir.resolve(), args.variant, args.wine) != provenance:
         provenance = {"status": UNVERIFIED, "reason": "build/runtime provenance changed during probes"}
     expected_hashes = provenance.get("runtime_sha256")

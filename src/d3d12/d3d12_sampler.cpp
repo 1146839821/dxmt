@@ -17,7 +17,10 @@
  */
 
 #include "Metal.hpp"
-#include "d3d12_device.hpp"
+#include "d3d12_sampler.hpp"
+#include "log/log.hpp"
+
+#include <algorithm>
 
 namespace dxmt {
 
@@ -66,9 +69,19 @@ constexpr WMTSamplerAddressMode kAddressModeMap[] = {
     WMTSamplerAddressModeMirrorClampToEdge // 5 - 1
 };
 
-void
-PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_STATIC_SAMPLER_DESC const &Desc) {
+static bool
+IsMinMaxReductionFilter(D3D12_FILTER filter) {
+  const auto reduction = D3D12_DECODE_FILTER_REDUCTION(filter);
+  return reduction == D3D12_FILTER_REDUCTION_TYPE_MINIMUM || reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM;
+}
 
+HRESULT
+PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_STATIC_SAMPLER_DESC const &Desc) {
+  InfoOut = {};
+  // Native reduction is Apple10-only and cannot cover D3D's mixed filter modes.
+  // Do not silently create an ordinary sampler while shader emulation is absent.
+  if (IsMinMaxReductionFilter(Desc.Filter))
+    return E_NOTIMPL;
   InfoOut.lod_average = false;
   InfoOut.mip_filter = WMTSamplerMipFilterNotMipmapped;
   // filter
@@ -131,11 +144,14 @@ PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_STATIC
   }
   InfoOut.support_argument_buffers = true;
   InfoOut.normalized_coords = true;
+  return S_OK;
 }
 
-void
+HRESULT
 PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_SAMPLER_DESC const &Desc) {
-
+  InfoOut = {};
+  if (IsMinMaxReductionFilter(Desc.Filter))
+    return E_NOTIMPL;
   InfoOut.lod_average = false;
   InfoOut.mip_filter = WMTSamplerMipFilterNotMipmapped;
   // filter
@@ -209,6 +225,7 @@ PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_SAMPLE
 
   InfoOut.support_argument_buffers = true;
   InfoOut.normalized_coords = true;
+  return S_OK;
 }
 
 } // namespace dxmt

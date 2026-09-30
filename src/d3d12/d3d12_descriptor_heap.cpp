@@ -917,10 +917,23 @@ public:
     if (Index >= samplers_.size())
       return E_INVALIDARG;
   
+    auto invalidate = [&] {
+      samplers_[Index] = nullptr;
+      if (mapped_argument_buffer_)
+        mapped_argument_buffer_[Index] = {};
+      SetMSCDescriptor(Index, {});
+    };
     WMTSamplerInfo info;
-    PopulateWMTSamplerInfo(device_->GetMTLDevice(), info, *pDesc);
+    const HRESULT hr = PopulateWMTSamplerInfo(device_->GetMTLDevice(), info, *pDesc);
+    if (FAILED(hr)) {
+      invalidate();
+      return hr;
+    }
     auto sampler = Sampler::createSampler(device_->GetMTLDevice(), info, pDesc->MipLODBias);
-
+    if (!sampler) {
+      invalidate();
+      return E_OUTOFMEMORY;
+    }
     samplers_[Index] = sampler;
     if (mapped_argument_buffer_) {
       auto &gpu_storage = mapped_argument_buffer_[Index];

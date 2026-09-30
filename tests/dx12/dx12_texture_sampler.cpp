@@ -2,11 +2,75 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include <d3dcompiler.h>
+#include "d3d12_device.hpp"
 
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <vector>
+
+static bool CheckSamplerStorage(WMT::Device device, dxmt::MTLD3D12SamplerDescriptorHeap *heap, bool cleared) {
+  WMTBufferInfo info = {};
+  info.length = 56; // AIR descriptor (32) followed by MSC descriptor (24).
+  info.options = WMTResourceStorageModeShared;
+  auto readback = device.newBuffer(info);
+  auto queue = device.newCommandQueue(1);
+  if (!readback || !queue || !info.memory.ptr)
+    return false;
+  wmtcmd_blit_copy_from_buffer_to_buffer air = {}, msc = {};
+  air.type = msc.type = WMTBlitCommandCopyFromBufferToBuffer;
+  air.src = heap->GetDescriptorHeapBuffer().handle;
+  msc.src = heap->GetMSCDescriptorHeapBuffer().handle;
+  air.dst = msc.dst = readback.handle;
+  air.copy_length = 32;
+  msc.copy_length = 24;
+  msc.dst_offset = 32;
+  air.next.set(&msc);
+  auto command = queue.commandBuffer();
+  auto encoder = command.blitCommandEncoder();
+  encoder.encodeCommands(reinterpret_cast<const wmtcmd_blit_nop *>(&air));
+  encoder.endEncoding();
+  command.commit();
+  command.waitUntilCompleted();
+  if (command.status() != WMTCommandBufferStatusCompleted)
+    return false;
+  uint64_t words[7];
+  std::memcpy(words, info.memory.ptr, sizeof(words));
+  if (!cleared)
+    return words[0] && words[1] && words[4];
+  for (auto word : words)
+    if (word)
+      return false;
+  return true;
+}
+
+static bool CompileDXBC(std::vector<char> &shader) {
+  HMODULE compiler = LoadLibraryA(D3DCOMPILER_DLL_A);
+  if (!compiler)
+    return false;
+  auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(compiler, "D3DCompile"));
+  static const char source[] =
+      "Texture2D<float4> t:register(t0); SamplerState s:register(s0);"
+      "RWBuffer<uint> o:register(u0);"
+      "[numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){"
+      "o[0]=(uint)(t.SampleLevel(s,float2(0.5,0.5),0).x*255+0.5);}";
+  ID3DBlob *blob = nullptr, *error = nullptr;
+  HRESULT hr = compile ? compile(source, sizeof(source) - 1, nullptr, nullptr, nullptr, "main", "cs_5_0",
+                                0, 0, &blob, &error) : E_FAIL;
+  if (SUCCEEDED(hr))
+    shader.assign(static_cast<char *>(blob->GetBufferPointer()),
+                  static_cast<char *>(blob->GetBufferPointer()) + blob->GetBufferSize());
+  if (error) {
+    if (FAILED(hr))
+      std::cerr << static_cast<const char *>(error->GetBufferPointer());
+    error->Release();
+  }
+  if (blob)
+    blob->Release();
+  FreeLibrary(compiler);
+  return SUCCEEDED(hr);
+}
 
 static bool
 CheckHR(const char *name, HRESULT hr) {
@@ -19,23 +83,47 @@ CheckHR(const char *name, HRESULT hr) {
 
 int
 main(int argc, char **argv) {
-  if (argc < 2 || argc > 3)
+  if (argc < 2 || argc > 4)
     return 2;
-  const bool static_sampler = argc == 3 && strcmp(argv[2], "--static-sampler") == 0;
+  const bool expect_unsupported = argc == 4 && strcmp(argv[3], "--expect-unsupported") == 0;
+  if (argc == 4 && !expect_unsupported)
+    return 2;
+  const bool minimum = argc >= 3 &&
+      (strcmp(argv[2], "--minimum") == 0 || strcmp(argv[2], "--static-minimum") == 0);
+  const bool maximum = argc >= 3 &&
+      (strcmp(argv[2], "--maximum") == 0 || strcmp(argv[2], "--static-maximum") == 0);
+  const bool reduction = minimum || maximum;
+  const bool static_sampler = argc >= 3 &&
+      (strcmp(argv[2], "--static-sampler") == 0 ||
+       strcmp(argv[2], "--static-minimum") == 0 || strcmp(argv[2], "--static-maximum") == 0);
+  const D3D12_FILTER filter = minimum ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR :
+                              maximum ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR :
+                                        D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+  const UINT expected = minimum ? 16 : maximum ? 240 : 255;
   const bool direct_indexed_uav_texture =
       argc == 3 && strcmp(argv[2], "--direct-indexed-uav-texture") == 0;
   const bool direct_indexed =
       argc == 3 && (strcmp(argv[2], "--direct-indexed") == 0 || direct_indexed_uav_texture);
-  if (argc == 3 && !static_sampler && !direct_indexed)
+  if (argc >= 3 && !static_sampler && !direct_indexed && !reduction)
+    return 2;
+  if (expect_unsupported && !reduction)
     return 2;
 
-  std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
-  if (!shader_file)
-    return 3;
-  auto shader_size = shader_file.tellg();
-  shader_file.seekg(0);
-  std::vector<char> shader(static_cast<size_t>(shader_size));
-  shader_file.read(shader.data(), shader.size());
+  const bool dxbc = strcmp(argv[1], "--dxbc") == 0;
+  std::vector<char> shader;
+  if (dxbc) {
+    if (!CompileDXBC(shader))
+      return 3;
+  } else {
+    std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
+    if (!shader_file)
+      return 3;
+    auto shader_size = shader_file.tellg();
+    shader_file.seekg(0);
+    shader.resize(static_cast<size_t>(shader_size));
+    if (!shader_file.read(shader.data(), shader.size()))
+      return 3;
+  }
 
   ID3D12Device *device = nullptr;
   ID3D12CommandQueue *queue = nullptr;
@@ -124,7 +212,7 @@ main(int argc, char **argv) {
     root_desc.pParameters = root_parameters;
   }
   if (static_sampler) {
-    static_sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    static_sampler_desc.Filter = filter;
     static_sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     static_sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     static_sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -144,11 +232,22 @@ main(int argc, char **argv) {
                      : D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob, &root_error);
   if (!CheckHR("D3D12SerializeRootSignature", serialize_hr))
     goto cleanup;
-  if (!CheckHR(
-          "CreateRootSignature",
-          device->CreateRootSignature(0, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
-                                       IID_PPV_ARGS(&root_signature))))
-    goto cleanup;
+  {
+    HRESULT hr =
+        device->CreateRootSignature(0, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
+                                   IID_PPV_ARGS(&root_signature));
+    if (static_sampler && reduction && hr == E_NOTIMPL) {
+      std::cout << "minmax static rejected without fallback\n";
+      result = expect_unsupported ? 0 : 77;
+      goto cleanup;
+    }
+    if (expect_unsupported && static_sampler && SUCCEEDED(hr)) {
+      std::cerr << "minmax static silently accepted\n";
+      goto cleanup;
+    }
+    if (!CheckHR("CreateRootSignature", hr))
+      goto cleanup;
+  }
 
   resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
   resource_heap_desc.NumDescriptors = direct_indexed_uav_texture ? 3 : 2;
@@ -167,8 +266,8 @@ main(int argc, char **argv) {
   default_heap.CreationNodeMask = 1;
   default_heap.VisibleNodeMask = 1;
   texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-  texture_desc.Width = 1;
-  texture_desc.Height = 1;
+  texture_desc.Width = reduction ? 2 : 1;
+  texture_desc.Height = reduction ? 2 : 1;
   texture_desc.DepthOrArraySize = 1;
   texture_desc.MipLevels = 1;
   texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -183,7 +282,7 @@ main(int argc, char **argv) {
   upload_heap.CreationNodeMask = 1;
   upload_heap.VisibleNodeMask = 1;
   buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  buffer_desc.Width = 256;
+  buffer_desc.Width = reduction ? 512 : 256;
   buffer_desc.Height = 1;
   buffer_desc.DepthOrArraySize = 1;
   buffer_desc.MipLevels = 1;
@@ -199,6 +298,11 @@ main(int argc, char **argv) {
     goto cleanup;
   static const UINT pixel = 0xff0000ff;
   memcpy(upload_data, &pixel, sizeof(pixel));
+  if (reduction) {
+    const UINT pixels[4] = {0xff000010, 0xff000040, 0xff0000c0, 0xff0000f0};
+    memcpy(upload_data, pixels, 2 * sizeof(UINT));
+    memcpy(static_cast<char *>(upload_data) + footprint.Footprint.RowPitch, pixels + 2, 2 * sizeof(UINT));
+  }
   upload->Unmap(0, nullptr);
 
   srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -208,10 +312,10 @@ main(int argc, char **argv) {
   resource_cpu = resource_heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateShaderResourceView(texture, &srv_desc, resource_cpu);
 
-  uav_desc.Format = DXGI_FORMAT_UNKNOWN;
+  uav_desc.Format = dxbc ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_UNKNOWN;
   uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
   uav_desc.Buffer.NumElements = 64;
-  uav_desc.Buffer.StructureByteStride = sizeof(UINT);
+  uav_desc.Buffer.StructureByteStride = dxbc ? 0 : sizeof(UINT);
   uav_cpu = resource_cpu;
   uav_cpu.ptr += descriptor_increment;
   buffer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -243,13 +347,44 @@ main(int argc, char **argv) {
   }
 
   if (!static_sampler) {
-    sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler_desc.Filter = filter;
     sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     sampler_desc.MinLOD = 0;
     sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
-    device->CreateSampler(&sampler_desc, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+    if (reduction) {
+      auto heap = static_cast<dxmt::MTLD3D12SamplerDescriptorHeap *>(sampler_heap);
+      D3D12_SAMPLER_DESC control = sampler_desc;
+      control.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+      device->CreateSampler(&control, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+      HRESULT hr = heap->AddSampler(0, &sampler_desc);
+      if (hr == E_NOTIMPL) {
+        // The public void API must also clear the previous ordinary descriptor.
+        auto metal = static_cast<dxmt::MTLD3D12Device *>(device)->GetMTLDevice();
+        if (!CheckSamplerStorage(metal, heap, true))
+          goto cleanup;
+        device->CreateSampler(&control, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+        if (!CheckSamplerStorage(metal, heap, false))
+          goto cleanup;
+        device->CreateSampler(&sampler_desc, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+        if (!CheckSamplerStorage(metal, heap, true)) {
+          std::cerr << "minmax rejection retained a stale AIR/MSC descriptor\n";
+          goto cleanup;
+        }
+        std::cout << "minmax dynamic rejected without fallback\n";
+        result = expect_unsupported ? 0 : 77;
+        goto cleanup;
+      }
+      if (expect_unsupported && SUCCEEDED(hr)) {
+        std::cerr << "minmax dynamic silently accepted\n";
+        goto cleanup;
+      }
+      if (!CheckHR("AddSampler", hr))
+        goto cleanup;
+    } else {
+      device->CreateSampler(&sampler_desc, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+    }
   }
 
   readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
@@ -278,6 +413,15 @@ main(int argc, char **argv) {
   texture_src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
   texture_src.PlacedFootprint = footprint;
   list->CopyTextureRegion(&texture_dst, 0, 0, 0, &texture_src, nullptr);
+  {
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = texture;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list->ResourceBarrier(1, &barrier);
+  }
   heaps[0] = resource_heap;
   if (!static_sampler)
     heaps[1] = sampler_heap;
@@ -295,6 +439,15 @@ main(int argc, char **argv) {
     }
   }
   list->Dispatch(1, 1, 1);
+  {
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = output;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list->ResourceBarrier(1, &barrier);
+  }
   list->CopyBufferRegion(readback, 0, output, 0, sizeof(UINT));
   if (direct_indexed_uav_texture) {
     D3D12_RESOURCE_BARRIER texture_barrier = {};
@@ -332,11 +485,11 @@ main(int argc, char **argv) {
                       ? *reinterpret_cast<UINT *>(reinterpret_cast<char *>(mapped) + output_texture_footprint.Offset)
                       : value;
   readback->Unmap(0, nullptr);
-  if (value != 255 || texture_value != 255) {
+  if (value != expected || texture_value != expected) {
     std::cerr << "texture sampler readback mismatch: buffer=" << value << " texture=" << texture_value << "\n";
     goto cleanup;
   }
-  std::cout << "DXIL " << (direct_indexed_uav_texture ? "direct indexed UAV texture"
+  std::cout << (dxbc ? "DXBC " : "DXIL ") << (direct_indexed_uav_texture ? "direct indexed UAV texture"
                          : direct_indexed ? "direct indexed" : static_sampler ? "static" : "dynamic")
             << " texture sampler readback passed: " << value << "\n";
   result = 0;

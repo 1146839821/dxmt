@@ -38,6 +38,21 @@ class GateTests(unittest.TestCase):
         self.assertEqual(report["FL12_0_GATE"]["status"], gate.FAIL)
         self.assertEqual(report["FL12_1_GATE"]["status"], gate.FAIL)
 
+    def test_minmax_rejection_is_not_gpu_acceptance(self):
+        probes = self.probes()
+        probes["minmax_sampler_contract"] = {"status": gate.PASS}
+        requirements = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
+        self.assertEqual(next(row["status"] for row in requirements
+                              if row["name"] == "min_max_reduction_filtering"), gate.BLOCKED)
+
+    def test_minmax_missing_or_failed_contract_cannot_pass(self):
+        for status in (gate.FAIL, gate.UNVERIFIED):
+            probes = self.probes()
+            probes["minmax_sampler_contract"] = {"status": status}
+            requirements = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
+            self.assertEqual(next(row["status"] for row in requirements
+                                  if row["name"] == "min_max_reduction_filtering"), status)
+
     def test_isolated_feature_failure_is_not_lost(self):
         probes = self.probes()
         probes["feature_support"]["status"] = gate.FAIL

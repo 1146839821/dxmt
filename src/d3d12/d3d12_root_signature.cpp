@@ -441,9 +441,13 @@ public:
     if (NumStaticSamplers) {
       for (unsigned i = 0; i < desc.NumStaticSamplers; i++) {
         WMTSamplerInfo info;
-        PopulateWMTSamplerInfo(device_->GetMTLDevice(), info, desc.pStaticSamplers[i]);
+        hr = PopulateWMTSamplerInfo(device_->GetMTLDevice(), info, desc.pStaticSamplers[i]);
+        if (FAILED(hr))
+          return hr;
 
         auto sampler = Sampler::createSampler(device_->GetMTLDevice(), info, desc.pStaticSamplers[i].MipLODBias);
+        if (!sampler)
+          return E_OUTOFMEMORY;
         static_samplers_encoded_.push_back(sampler->sampler_state_handle);
         static_samplers_encoded_.push_back(sampler->sampler_state_cube_handle);
         static_samplers_encoded_.push_back((uint64_t)std::bit_cast<uint32_t>(sampler->lod_bias));

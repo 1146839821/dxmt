@@ -24,7 +24,12 @@ dx12_shader_runtime = executable('dx12_shader_runtime', 'dx12_shader_runtime.cpp
 )
 
 dx12_texture_sampler = executable('dx12_texture_sampler', 'dx12_texture_sampler.cpp',
-  dependencies: [ d3d12_dep ],
+  dependencies: [ d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep ],
+)
+
+dx12_sampler_filter = executable('dx12_sampler_filter', 'dx12_sampler_filter.cpp',
+  '../../src/d3d12/d3d12_sampler.cpp',
+  dependencies: [d3d12_dep, winemetal_dep, util_dep],
 )
 
 dx12_texture_dimensions = executable('dx12_texture_dimensions', 'dx12_texture_dimensions.cpp',

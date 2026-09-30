@@ -1159,8 +1159,11 @@ public:
   void STDMETHODCALLTYPE
   CreateSampler(const D3D12_SAMPLER_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) {
     auto [Heap, Index] = GetSamplerDescriptorHeap(this, Descriptor);
-    if (Heap)
-      Heap->AddSampler(Index, pDesc);
+    if (Heap) {
+      const HRESULT hr = Heap->AddSampler(Index, pDesc);
+      if (FAILED(hr))
+        WARN("CreateSampler failed: ", hr);
+    }
   };
 
   void STDMETHODCALLTYPE
