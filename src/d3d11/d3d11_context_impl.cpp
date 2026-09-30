@@ -4362,8 +4362,9 @@ public:
     auto &props = pRenderTargetView->description();
 
     EmitOP([texture = pRenderTargetView->texture(), view = pRenderTargetView->viewId(),
-          clear_color = std::move(clear_color), array_length = props.RenderTargetArrayLength](ArgumentEncodingContext &enc) mutable {
-      enc.clearColor(forward_rc(texture), view, array_length, clear_color);
+            clear_color = std::move(clear_color), array_length = props.RenderTargetArrayLength,
+            depth_plane = props.DepthPlane](ArgumentEncodingContext &enc) mutable {
+      enc.clearColor(forward_rc(texture), view, array_length, depth_plane, clear_color);
     });
   }
 
@@ -4375,12 +4376,13 @@ public:
     auto &props = pDepthStencilView->description();
 
     EmitOP([texture = pDepthStencilView->texture(), view = pDepthStencilView->viewId(),
-          renamable = pDepthStencilView->renamable(), array_length = props.RenderTargetArrayLength,
-          ClearFlags = ClearFlags & 0b11, Depth, Stencil](ArgumentEncodingContext &enc) mutable {
+            renamable = pDepthStencilView->renamable(), array_length = props.RenderTargetArrayLength,
+            depth_plane = props.DepthPlane, ClearFlags = ClearFlags & 0b11, Depth,
+            Stencil](ArgumentEncodingContext &enc) mutable {
       if (renamable.ptr() && ClearFlags == DepthStencilPlanarFlags(texture->pixelFormat())) {
         texture->rename(renamable->getNext(enc.currentSeqId()));
       }
-      enc.clearDepthStencil(forward_rc(texture), view, array_length, ClearFlags, Depth, Stencil);
+      enc.clearDepthStencil(forward_rc(texture), view, array_length, depth_plane, ClearFlags, Depth, Stencil);
     });
   }
 

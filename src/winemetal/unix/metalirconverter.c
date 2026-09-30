@@ -1,0 +1,1606 @@
+#include "metalirconverter_native.h"
+#include "airconv_public.h"
+
+#include <dlfcn.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "metal_shader_converter/metal_irconverter.h"
+
+typedef struct dxmt_msc_api {
+  IRCompiler *(*IRCompilerCreate)(void);
+  void (*IRCompilerDestroy)(IRCompiler *);
+  void (*IRCompilerSetCompatibilityFlags)(IRCompiler *, IRCompatibilityFlags);
+  void (*IRCompilerSetValidationFlags)(IRCompiler *, IRCompilerValidationFlags);
+  void (*IRCompilerSetMinimumGPUFamily)(IRCompiler *, IRGPUFamily);
+  void (*IRCompilerSetMinimumDeploymentTarget)(IRCompiler *, IROperatingSystem, const char *);
+  void (*IRCompilerIgnoreDebugInformation)(IRCompiler *, bool);
+  void (*IRCompilerSetFunctionConstantResourceSpace)(IRCompiler *, uint32_t);
+  void (*IRCompilerSetFramebufferFetchResourceSpace)(IRCompiler *, uint32_t);
+  void (*IRCompilerSetInputTopology)(IRCompiler *, IRInputTopology);
+  void (*IRCompilerSetEntryPointName)(IRCompiler *, const char *);
+  void (*IRCompilerSetGlobalRootSignature)(IRCompiler *, const IRRootSignature *);
+  void (*IRCompilerSetLocalRootSignature)(IRCompiler *, const IRRootSignature *);
+  void (*IRCompilerSetHitgroupType)(IRCompiler *, IRHitGroupType);
+  void (*IRCompilerEnableGeometryAndTessellationEmulation)(IRCompiler *, bool);
+  void (*IRCompilerSetStageInGenerationMode)(IRCompiler *, IRStageInCodeGenerationMode);
+  IRObject *(*IRObjectCreateFromDXIL)(const uint8_t *, size_t, IRBytecodeOwnership);
+  void (*IRObjectDestroy)(IRObject *);
+  IRVersionedRootSignatureDescriptor *(*IRVersionedRootSignatureDescriptorCreateFromBlob)(
+      const uint8_t *, uint32_t, IRError **
+  );
+  void (*IRVersionedRootSignatureDescriptorRelease)(IRVersionedRootSignatureDescriptor *);
+  IRRootSignature *(*IRRootSignatureCreateFromDescriptor)(const IRVersionedRootSignatureDescriptor *, IRError **);
+  void (*IRRootSignatureDestroy)(IRRootSignature *);
+  IRShaderStage (*IRObjectGetMetalIRShaderStage)(const IRObject *);
+  size_t (*IRRootSignatureGetResourceCount)(const IRRootSignature *);
+  void (*IRRootSignatureGetResourceLocations)(const IRRootSignature *, IRResourceLocation *);
+  IRObject *(*IRCompilerAllocCompileAndLink)(IRCompiler *, const char *, const IRObject *, IRError **);
+  IRObject *(*IRCompilerAllocCombineCompileAndLink)(
+      IRCompiler *, const char *, const IRObject *, const char *, const IRObject *, IRError **
+  );
+  uint64_t (*IRObjectGatherRaytracingIntrinsics)(IRObject *, const char *);
+  bool (*IRObjectGetMetalLibBinary)(const IRObject *, IRShaderStage, IRMetalLibBinary *);
+  bool (*IRObjectGetReflection)(const IRObject *, IRShaderStage, IRShaderReflection *);
+  IRMetalLibBinary *(*IRMetalLibBinaryCreate)(void);
+  void (*IRMetalLibBinaryDestroy)(IRMetalLibBinary *);
+  size_t (*IRMetalLibGetBytecode)(const IRMetalLibBinary *, uint8_t *);
+  size_t (*IRMetalLibGetBytecodeSize)(const IRMetalLibBinary *);
+  IRShaderReflection *(*IRShaderReflectionCreate)(void);
+  void (*IRShaderReflectionDestroy)(IRShaderReflection *);
+  const char *(*IRShaderReflectionGetEntryPointFunctionName)(const IRShaderReflection *);
+  bool (*IRShaderReflectionNeedsFunctionConstants)(const IRShaderReflection *);
+  size_t (*IRShaderReflectionGetFunctionConstantCount)(const IRShaderReflection *);
+  void (*IRShaderReflectionCopyFunctionConstants)(const IRShaderReflection *, IRFunctionConstant *);
+  void (*IRShaderReflectionReleaseFunctionConstants)(IRFunctionConstant *, size_t);
+  bool (*IRShaderReflectionCopyComputeInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedCSInfo *);
+  bool (*IRShaderReflectionReleaseComputeInfo)(IRVersionedCSInfo *);
+  bool (*IRShaderReflectionCopyVertexInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedVSInfo *);
+  bool (*IRShaderReflectionReleaseVertexInfo)(IRVersionedVSInfo *);
+  bool (*IRShaderReflectionCopyFragmentInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedFSInfo *);
+  bool (*IRShaderReflectionReleaseFragmentInfo)(IRVersionedFSInfo *);
+  bool (*IRShaderReflectionCopyGeometryInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedGSInfo *);
+  bool (*IRShaderReflectionReleaseGeometryInfo)(IRVersionedGSInfo *);
+  bool (*IRShaderReflectionCopyHullInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedHSInfo *);
+  bool (*IRShaderReflectionReleaseHullInfo)(IRVersionedHSInfo *);
+  bool (*IRShaderReflectionCopyDomainInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedDSInfo *);
+  bool (*IRShaderReflectionReleaseDomainInfo)(IRVersionedDSInfo *);
+  bool (*IRShaderReflectionCopyMeshInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedMSInfo *);
+  bool (*IRShaderReflectionReleaseMeshInfo)(IRVersionedMSInfo *);
+  bool (*IRShaderReflectionCopyAmplificationInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedASInfo *);
+  bool (*IRShaderReflectionReleaseAmplificationInfo)(IRVersionedASInfo *);
+  bool (*IRShaderReflectionCopyRaytracingInfo)(const IRShaderReflection *, IRReflectionVersion, IRVersionedRTInfo *);
+  bool (*IRShaderReflectionReleaseRaytracingInfo)(IRVersionedRTInfo *);
+  bool (*IRMetalLibSynthesizeStageInFunction)(
+      const IRCompiler *, const IRShaderReflection *, const IRVersionedInputLayoutDescriptor *, IRMetalLibBinary *
+  );
+  IRRayTracingPipelineConfiguration *(*IRRayTracingPipelineConfigurationCreate)(void);
+  void (*IRRayTracingPipelineConfigurationDestroy)(IRRayTracingPipelineConfiguration *);
+  void (*IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes)(IRRayTracingPipelineConfiguration *, uint32_t);
+  void (*IRRayTracingPipelineConfigurationSetPipelineFlags)(
+      IRRayTracingPipelineConfiguration *, IRRaytracingPipelineFlags
+  );
+  void (*IRRayTracingPipelineConfigurationSetIntrinsicMasks)(
+      IRRayTracingPipelineConfiguration *, uint64_t, uint64_t, uint64_t, uint64_t
+  );
+  void (*IRRayTracingPipelineConfigurationSetMaxRecursiveDepth)(IRRayTracingPipelineConfiguration *, int);
+  void (*IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode)(
+      IRRayTracingPipelineConfiguration *, IRRayGenerationCompilationMode
+  );
+  void (*IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode)(
+      IRRayTracingPipelineConfiguration *, IRIntersectionFunctionCompilationMode
+  );
+  void (*IRRayTracingPipelineConfigurationEnableIntersectionFunctionGroups)(IRRayTracingPipelineConfiguration *, bool);
+  void (*IRRayTracingPipelineConfigurationEnableDirectStateAccess)(IRRayTracingPipelineConfiguration *, bool);
+  void (*IRCompilerSetRayTracingPipelineConfiguration)(IRCompiler *, const IRRayTracingPipelineConfiguration *);
+  bool (*IRMetalLibSynthesizeIndirectIntersectionFunction)(const IRCompiler *, IRMetalLibBinary *);
+  bool (*IRMetalLibSynthesizeIndirectRayDispatchFunction)(const IRCompiler *, IRMetalLibBinary *);
+  uint32_t (*IRErrorGetCode)(const IRError *);
+  void (*IRErrorDestroy)(IRError *);
+} dxmt_msc_api;
+
+static dxmt_msc_api g_msc_api;
+static void *g_msc_library;
+static int g_msc_available;
+static uint64_t g_msc_optional_symbols;
+static pthread_once_t g_msc_once = PTHREAD_ONCE_INIT;
+
+static void
+dxmt_msc_set_error(struct dxmt_msc_compile_dxil_params *params, uint32_t code, const char *message) {
+  params->error_code = code;
+  params->error_message_size = message ? strlen(message) + 1 : 0;
+
+  if (!params->error_message || !params->error_message_capacity)
+    return;
+
+  if (!message)
+    message = "Metal Shader Converter failed";
+
+  size_t copy_size = strlen(message) + 1;
+  if (copy_size > params->error_message_capacity)
+    copy_size = params->error_message_capacity;
+  memcpy(params->error_message, message, copy_size);
+  params->error_message[copy_size - 1] = '\0';
+}
+
+static void
+dxmt_msc_set_root_error(struct dxmt_msc_get_root_layout_params *params, const char *message) {
+  params->error_message_size = message ? strlen(message) + 1 : 0;
+  if (!params->error_message || !params->error_message_capacity)
+    return;
+  if (!message)
+    message = "Metal Shader Converter root layout failed";
+
+  size_t copy_size = strlen(message) + 1;
+  if (copy_size > params->error_message_capacity)
+    copy_size = params->error_message_capacity;
+  memcpy(params->error_message, message, copy_size);
+  params->error_message[copy_size - 1] = '\0';
+}
+
+static void
+dxmt_msc_set_ray_dispatch_error(
+    struct dxmt_msc_synthesize_ray_dispatch_params *params, const char *message
+) {
+  params->error_message_size = message ? strlen(message) + 1 : 0;
+  if (!params->error_message || !params->error_message_capacity)
+    return;
+  if (!message)
+    message = "Metal Shader Converter ray dispatch synthesis failed";
+
+  size_t copy_size = strlen(message) + 1;
+  if (copy_size > params->error_message_capacity)
+    copy_size = params->error_message_capacity;
+  memcpy(params->error_message, message, copy_size);
+  params->error_message[copy_size - 1] = '\0';
+}
+
+static void
+dxmt_msc_set_ray_intersection_error(
+    struct dxmt_msc_synthesize_ray_intersection_params *params, const char *message
+) {
+  params->error_message_size = message ? strlen(message) + 1 : 0;
+  if (!params->error_message || !params->error_message_capacity)
+    return;
+  if (!message)
+    message = "Metal Shader Converter intersection synthesis failed";
+
+  size_t copy_size = strlen(message) + 1;
+  if (copy_size > params->error_message_capacity)
+    copy_size = params->error_message_capacity;
+  memcpy(params->error_message, message, copy_size);
+  params->error_message[copy_size - 1] = '\0';
+}
+
+static const char *
+dxmt_msc_error_name(uint32_t code) {
+  switch (code) {
+  case IRErrorCodeShaderRequiresRootSignature:
+  case IRErrorCodeUnrecognizedRootSignatureDescriptor:
+  case IRErrorCodeUnrecognizedParameterTypeInRootSignature:
+  case IRErrorCodeResourceNotReferencedByRootSignature:
+    return "root signature error";
+  case IRErrorCodeUnrecognizedDXILHeader:
+  case IRErrorCodeUnableToVerifyModule:
+    return "invalid DXIL";
+  case IRErrorCodeShaderIncompatibleWithDualSourceBlending:
+    return "unsupported shader feature";
+  case IRErrorCodeUnsupportedWaveSize:
+  case IRErrorCodeUnsupportedInstruction:
+  case IRErrorCodeFP64Usage:
+    return "unsupported shader feature";
+  case IRErrorCodeFailedToSynthesizeStageInFunction:
+    return "stage-in synthesis error";
+  case IRErrorCodeFailedToSynthesizeStreamOutFunction:
+    return "stream-out synthesis error";
+  case IRErrorCodeFailedToSynthesizeIndirectIntersectionFunction:
+    return "indirect intersection synthesis error";
+  case IRErrorCodeInvalidRaytracingAttribute:
+  case IRErrorCodeNullHullShaderInputOutputMismatch:
+  case IRErrorCodeInvalidRaytracingUserAttributeSize:
+  case IRErrorCodeIncorrectHitgroupType:
+    return "invalid shader";
+  case IRErrorCodeUnableToLinkModule:
+    return "linking error";
+  case IRErrorCodeCompilationError:
+    return "compilation error";
+  default:
+    return "Metal Shader Converter error";
+  }
+}
+
+static int
+dxmt_msc_result_from_error(const IRError *error) {
+  if (!error)
+    return DXMT_MSC_ERROR_COMPILATION;
+
+  switch (g_msc_api.IRErrorGetCode(error)) {
+  case IRErrorCodeUnrecognizedDXILHeader:
+  case IRErrorCodeUnableToVerifyModule:
+  case IRErrorCodeInvalidRaytracingAttribute:
+  case IRErrorCodeNullHullShaderInputOutputMismatch:
+  case IRErrorCodeInvalidRaytracingUserAttributeSize:
+  case IRErrorCodeIncorrectHitgroupType:
+    return DXMT_MSC_ERROR_INVALID_DXIL;
+  case IRErrorCodeShaderIncompatibleWithDualSourceBlending:
+  case IRErrorCodeUnsupportedWaveSize:
+  case IRErrorCodeUnsupportedInstruction:
+  case IRErrorCodeFP64Usage:
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  case IRErrorCodeShaderRequiresRootSignature:
+  case IRErrorCodeUnrecognizedRootSignatureDescriptor:
+  case IRErrorCodeUnrecognizedParameterTypeInRootSignature:
+  case IRErrorCodeResourceNotReferencedByRootSignature:
+    return DXMT_MSC_ERROR_ROOT_SIGNATURE;
+  case IRErrorCodeUnableToLinkModule:
+    return DXMT_MSC_ERROR_LINKING;
+  default:
+    return DXMT_MSC_ERROR_COMPILATION;
+  }
+}
+
+static void
+dxmt_msc_set_compiler_configuration(IRCompiler *compiler, const struct dxmt_msc_compile_dxil_params *params) {
+  const uint32_t compatibility_flags = params->compatibility_flags
+                                           ? params->compatibility_flags
+                                           : DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
+  if (g_msc_api.IRCompilerSetCompatibilityFlags)
+    g_msc_api.IRCompilerSetCompatibilityFlags(compiler, (IRCompatibilityFlags)compatibility_flags);
+
+  if (g_msc_api.IRCompilerSetValidationFlags)
+    g_msc_api.IRCompilerSetValidationFlags(compiler, (IRCompilerValidationFlags)params->validation_flags);
+
+  if (g_msc_api.IRCompilerSetMinimumGPUFamily && params->minimum_gpu_family)
+    g_msc_api.IRCompilerSetMinimumGPUFamily(compiler, (IRGPUFamily)params->minimum_gpu_family);
+
+  if (g_msc_api.IRCompilerSetMinimumDeploymentTarget && params->minimum_os_major) {
+    char version[32];
+    snprintf(
+        version, sizeof(version), "%u.%u.%u", params->minimum_os_major, params->minimum_os_minor,
+        params->minimum_os_patch
+    );
+    g_msc_api.IRCompilerSetMinimumDeploymentTarget(compiler, IROperatingSystem_macOS, version);
+  }
+
+  if (g_msc_api.IRCompilerIgnoreDebugInformation)
+    g_msc_api.IRCompilerIgnoreDebugInformation(compiler, params->ignore_debug_information != 0);
+
+  if (g_msc_api.IRCompilerSetFunctionConstantResourceSpace)
+    g_msc_api.IRCompilerSetFunctionConstantResourceSpace(compiler, params->function_constant_resource_space);
+
+  if (g_msc_api.IRCompilerSetFramebufferFetchResourceSpace)
+    g_msc_api.IRCompilerSetFramebufferFetchResourceSpace(compiler, params->framebuffer_fetch_resource_space);
+}
+
+static void
+dxmt_msc_set_ire_error(struct dxmt_msc_compile_dxil_params *params, const IRError *error) {
+  uint32_t error_code = error ? g_msc_api.IRErrorGetCode(error) : 0;
+  char message[128];
+  snprintf(message, sizeof(message), "%s (IRErrorCode=%u)", dxmt_msc_error_name(error_code), error_code);
+  dxmt_msc_set_error(params, dxmt_msc_result_from_error(error), message);
+}
+
+static void
+dxmt_msc_set_root_ire_error(struct dxmt_msc_get_root_layout_params *params, const IRError *error) {
+  uint32_t error_code = error ? g_msc_api.IRErrorGetCode(error) : 0;
+  char message[128];
+  snprintf(message, sizeof(message), "%s (IRErrorCode=%u)", dxmt_msc_error_name(error_code), error_code);
+  dxmt_msc_set_root_error(params, message);
+}
+
+static bool
+dxmt_msc_load_symbol(void **destination, const char *name) {
+  *destination = dlsym(g_msc_library, name);
+  if (*destination)
+    return true;
+
+  fprintf(stderr, "[WARN] DXMT: Metal Shader Converter is missing symbol %s\n", name);
+  return false;
+}
+
+static bool
+dxmt_msc_load_optional_symbol(void **destination, const char *name) {
+  *destination = dlsym(g_msc_library, name);
+  return *destination != NULL;
+}
+
+static bool
+dxmt_msc_load_symbols(void) {
+#define DXMT_MSC_LOAD(name)                                                                                             \
+  do {                                                                                                                   \
+    if (!dxmt_msc_load_symbol((void **)&g_msc_api.name, #name))                                                         \
+      return false;                                                                                                     \
+  } while (0)
+#define DXMT_MSC_LOAD_OPTIONAL(name, capability)                                                                        \
+  do {                                                                                                                   \
+    if (dxmt_msc_load_optional_symbol((void **)&g_msc_api.name, #name))                                                \
+      g_msc_optional_symbols |= capability;                                                                              \
+  } while (0)
+
+  bool fragment_reflection = true;
+  bool mesh_reflection = true;
+  bool amplification_reflection = true;
+  bool raytracing_reflection = true;
+  bool raytracing_configuration = true;
+  bool vertex_reflection = true;
+  bool geometry_reflection = true;
+  bool tessellation_reflection = true;
+  bool function_constant_reflection = true;
+
+  DXMT_MSC_LOAD(IRCompilerCreate);
+  DXMT_MSC_LOAD(IRCompilerDestroy);
+  DXMT_MSC_LOAD(IRCompilerSetGlobalRootSignature);
+  DXMT_MSC_LOAD(IRObjectCreateFromDXIL);
+  DXMT_MSC_LOAD(IRObjectDestroy);
+  DXMT_MSC_LOAD(IRObjectGetMetalIRShaderStage);
+  DXMT_MSC_LOAD(IRVersionedRootSignatureDescriptorCreateFromBlob);
+  DXMT_MSC_LOAD(IRVersionedRootSignatureDescriptorRelease);
+  DXMT_MSC_LOAD(IRRootSignatureCreateFromDescriptor);
+  DXMT_MSC_LOAD(IRRootSignatureDestroy);
+  DXMT_MSC_LOAD(IRRootSignatureGetResourceCount);
+  DXMT_MSC_LOAD(IRRootSignatureGetResourceLocations);
+  DXMT_MSC_LOAD(IRCompilerAllocCompileAndLink);
+  DXMT_MSC_LOAD(IRObjectGetMetalLibBinary);
+  DXMT_MSC_LOAD(IRObjectGetReflection);
+  DXMT_MSC_LOAD(IRMetalLibBinaryCreate);
+  DXMT_MSC_LOAD(IRMetalLibBinaryDestroy);
+  DXMT_MSC_LOAD(IRMetalLibGetBytecode);
+  DXMT_MSC_LOAD(IRMetalLibGetBytecodeSize);
+  DXMT_MSC_LOAD(IRShaderReflectionCreate);
+  DXMT_MSC_LOAD(IRShaderReflectionDestroy);
+  DXMT_MSC_LOAD(IRShaderReflectionGetEntryPointFunctionName);
+  function_constant_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionNeedsFunctionConstants, "IRShaderReflectionNeedsFunctionConstants"
+  );
+  function_constant_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionGetFunctionConstantCount,
+      "IRShaderReflectionGetFunctionConstantCount"
+  );
+  function_constant_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyFunctionConstants,
+      "IRShaderReflectionCopyFunctionConstants"
+  );
+  function_constant_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseFunctionConstants,
+      "IRShaderReflectionReleaseFunctionConstants"
+  );
+  if (function_constant_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_REFLECTION;
+  DXMT_MSC_LOAD(IRShaderReflectionCopyComputeInfo);
+  DXMT_MSC_LOAD(IRShaderReflectionReleaseComputeInfo);
+  DXMT_MSC_LOAD(IRErrorGetCode);
+  DXMT_MSC_LOAD(IRErrorDestroy);
+
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetCompatibilityFlags, DXMT_MSC_RUNTIME_SYMBOL_COMPATIBILITY_FLAGS);
+  DXMT_MSC_LOAD_OPTIONAL(
+      IRCompilerEnableGeometryAndTessellationEmulation, DXMT_MSC_RUNTIME_SYMBOL_GEOMETRY_TESSELLATION
+  );
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetStageInGenerationMode, DXMT_MSC_RUNTIME_SYMBOL_STAGE_IN_GENERATION);
+  DXMT_MSC_LOAD_OPTIONAL(IRMetalLibSynthesizeStageInFunction, DXMT_MSC_RUNTIME_SYMBOL_STAGE_IN_SYNTHESIS);
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetValidationFlags, DXMT_MSC_RUNTIME_SYMBOL_VALIDATION_FLAGS);
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetMinimumGPUFamily, DXMT_MSC_RUNTIME_SYMBOL_MINIMUM_GPU_FAMILY);
+  DXMT_MSC_LOAD_OPTIONAL(
+      IRCompilerSetMinimumDeploymentTarget, DXMT_MSC_RUNTIME_SYMBOL_MINIMUM_DEPLOYMENT_TARGET
+  );
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerIgnoreDebugInformation, DXMT_MSC_RUNTIME_SYMBOL_IGNORE_DEBUG_INFORMATION);
+  DXMT_MSC_LOAD_OPTIONAL(
+      IRCompilerSetFunctionConstantResourceSpace, DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_RESOURCE_SPACE
+  );
+  DXMT_MSC_LOAD_OPTIONAL(
+      IRCompilerSetFramebufferFetchResourceSpace, DXMT_MSC_RUNTIME_SYMBOL_FRAMEBUFFER_FETCH_RESOURCE_SPACE
+  );
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetInputTopology, DXMT_MSC_RUNTIME_SYMBOL_INPUT_TOPOLOGY);
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetEntryPointName, DXMT_MSC_RUNTIME_SYMBOL_ENTRY_POINT_NAME);
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetLocalRootSignature, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_LOCAL_ROOT);
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetHitgroupType, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_HITGROUP);
+  DXMT_MSC_LOAD_OPTIONAL(IRObjectGatherRaytracingIntrinsics, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_INTRINSICS);
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerAllocCombineCompileAndLink, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_COMBINE);
+  DXMT_MSC_LOAD_OPTIONAL(
+      IRMetalLibSynthesizeIndirectIntersectionFunction, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_INDIRECT_INTERSECTION
+  );
+  DXMT_MSC_LOAD_OPTIONAL(
+      IRMetalLibSynthesizeIndirectRayDispatchFunction, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_INDIRECT_DISPATCH
+  );
+
+  fragment_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyFragmentInfo, "IRShaderReflectionCopyFragmentInfo"
+  );
+  fragment_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseFragmentInfo, "IRShaderReflectionReleaseFragmentInfo"
+  );
+  if (fragment_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_FRAGMENT_REFLECTION;
+
+  mesh_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyMeshInfo, "IRShaderReflectionCopyMeshInfo"
+  );
+  mesh_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseMeshInfo, "IRShaderReflectionReleaseMeshInfo"
+  );
+  if (mesh_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_MESH_REFLECTION;
+
+  amplification_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyAmplificationInfo, "IRShaderReflectionCopyAmplificationInfo"
+  );
+  amplification_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseAmplificationInfo, "IRShaderReflectionReleaseAmplificationInfo"
+  );
+  if (amplification_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_AMPLIFICATION_REFLECTION;
+
+  raytracing_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyRaytracingInfo, "IRShaderReflectionCopyRaytracingInfo"
+  );
+  raytracing_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseRaytracingInfo, "IRShaderReflectionReleaseRaytracingInfo"
+  );
+  if (raytracing_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_REFLECTION;
+
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationCreate,
+      "IRRayTracingPipelineConfigurationCreate"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationDestroy,
+      "IRRayTracingPipelineConfigurationDestroy"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes,
+      "IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationSetPipelineFlags,
+      "IRRayTracingPipelineConfigurationSetPipelineFlags"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationSetIntrinsicMasks,
+      "IRRayTracingPipelineConfigurationSetIntrinsicMasks"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationSetMaxRecursiveDepth,
+      "IRRayTracingPipelineConfigurationSetMaxRecursiveDepth"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode,
+      "IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode,
+      "IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationEnableIntersectionFunctionGroups,
+      "IRRayTracingPipelineConfigurationEnableIntersectionFunctionGroups"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRRayTracingPipelineConfigurationEnableDirectStateAccess,
+      "IRRayTracingPipelineConfigurationEnableDirectStateAccess"
+  );
+  raytracing_configuration &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRCompilerSetRayTracingPipelineConfiguration,
+      "IRCompilerSetRayTracingPipelineConfiguration"
+  );
+  if (raytracing_configuration)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_CONFIGURATION;
+
+  vertex_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyVertexInfo, "IRShaderReflectionCopyVertexInfo"
+  );
+  vertex_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseVertexInfo, "IRShaderReflectionReleaseVertexInfo"
+  );
+  if (vertex_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_VERTEX_REFLECTION;
+
+  geometry_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyGeometryInfo, "IRShaderReflectionCopyGeometryInfo"
+  );
+  geometry_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseGeometryInfo, "IRShaderReflectionReleaseGeometryInfo"
+  );
+  if (geometry_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_GEOMETRY_REFLECTION;
+
+  tessellation_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyHullInfo, "IRShaderReflectionCopyHullInfo"
+  );
+  tessellation_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseHullInfo, "IRShaderReflectionReleaseHullInfo"
+  );
+  tessellation_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionCopyDomainInfo, "IRShaderReflectionCopyDomainInfo"
+  );
+  tessellation_reflection &= dxmt_msc_load_optional_symbol(
+      (void **)&g_msc_api.IRShaderReflectionReleaseDomainInfo, "IRShaderReflectionReleaseDomainInfo"
+  );
+  if (tessellation_reflection)
+    g_msc_optional_symbols |= DXMT_MSC_RUNTIME_SYMBOL_TESSELLATION_REFLECTION;
+
+#undef DXMT_MSC_LOAD
+#undef DXMT_MSC_LOAD_OPTIONAL
+  return true;
+}
+
+static void
+dxmt_msc_initialize(void) {
+  const char *environment_path = getenv("DXMT_METALIRCONVERTER_PATH");
+  const char *default_paths[] = {
+      "@loader_path/../../libmetalirconverter.dylib",
+      "libmetalirconverter.dylib",
+      "/usr/local/lib/libmetalirconverter.dylib",
+      "/opt/homebrew/lib/libmetalirconverter.dylib",
+  };
+
+  const char *loaded_path = NULL;
+  if (environment_path && environment_path[0]) {
+    g_msc_library = dlopen(environment_path, RTLD_NOW | RTLD_LOCAL);
+    if (g_msc_library)
+      loaded_path = environment_path;
+    else
+      fprintf(stderr, "[WARN] DXMT: failed to load DXMT_METALIRCONVERTER_PATH=%s: %s\n", environment_path, dlerror());
+  }
+
+  if (!g_msc_library) {
+    for (size_t i = 0; i < sizeof(default_paths) / sizeof(default_paths[0]); i++) {
+      g_msc_library = dlopen(default_paths[i], RTLD_NOW | RTLD_LOCAL);
+      if (g_msc_library) {
+        loaded_path = default_paths[i];
+        break;
+      }
+    }
+  }
+
+  if (!g_msc_library) {
+    fprintf(stderr, "[WARN] DXMT: Metal Shader Converter unavailable; DXIL/SM6 disabled\n");
+    return;
+  }
+
+  if (!dxmt_msc_load_symbols()) {
+    dlclose(g_msc_library);
+    g_msc_library = NULL;
+    fprintf(stderr, "[WARN] DXMT: Metal Shader Converter has an incompatible runtime\n");
+    return;
+  }
+
+  g_msc_available = 1;
+  fprintf(
+      stderr, "[INFO] DXMT: Metal Shader Converter runtime loaded: %s (API %d.%d.%d)\n", loaded_path,
+      IR_VERSION_MAJOR, IR_VERSION_MINOR, IR_VERSION_PATCH
+  );
+}
+
+int
+dxmt_msc_is_available(void) {
+  pthread_once(&g_msc_once, dxmt_msc_initialize);
+  return g_msc_available;
+}
+
+int
+dxmt_msc_get_capabilities(struct dxmt_msc_capabilities *capabilities) {
+  if (!capabilities)
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+
+  memset(capabilities, 0, sizeof(*capabilities));
+  pthread_once(&g_msc_once, dxmt_msc_initialize);
+  capabilities->core_converter = g_msc_available != 0;
+  if (capabilities->core_converter) {
+    capabilities->ir_version_major = IR_VERSION_MAJOR;
+    capabilities->ir_version_minor = IR_VERSION_MINOR;
+    capabilities->ir_version_patch = IR_VERSION_PATCH;
+  }
+  capabilities->optional_symbols = g_msc_available ? g_msc_optional_symbols : 0;
+  capabilities->ret = g_msc_available ? DXMT_MSC_SUCCESS : DXMT_MSC_ERROR_UNAVAILABLE;
+  return capabilities->ret;
+}
+
+static IRShaderStage
+dxmt_msc_to_ir_stage(uint32_t stage) {
+  switch (stage) {
+  case DXMT_MSC_STAGE_COMPUTE:
+    return IRShaderStageCompute;
+  case DXMT_MSC_STAGE_VERTEX:
+    return IRShaderStageVertex;
+  case DXMT_MSC_STAGE_FRAGMENT:
+    return IRShaderStageFragment;
+  case DXMT_MSC_STAGE_HULL:
+    return IRShaderStageHull;
+  case DXMT_MSC_STAGE_DOMAIN:
+    return IRShaderStageDomain;
+  case DXMT_MSC_STAGE_GEOMETRY:
+    return IRShaderStageGeometry;
+  case DXMT_MSC_STAGE_MESH:
+    return IRShaderStageMesh;
+  case DXMT_MSC_STAGE_AMPLIFICATION:
+    return IRShaderStageAmplification;
+  case DXMT_MSC_STAGE_CLOSEST_HIT:
+    return IRShaderStageClosestHit;
+  case DXMT_MSC_STAGE_INTERSECTION:
+    return IRShaderStageIntersection;
+  case DXMT_MSC_STAGE_ANY_HIT:
+    return IRShaderStageAnyHit;
+  case DXMT_MSC_STAGE_MISS:
+    return IRShaderStageMiss;
+  case DXMT_MSC_STAGE_RAY_GENERATION:
+    return IRShaderStageRayGeneration;
+  case DXMT_MSC_STAGE_CALLABLE:
+    return IRShaderStageCallable;
+  default:
+    return IRShaderStageInvalid;
+  }
+}
+
+int
+dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
+  IRObject *input = NULL;
+  IRCompiler *compiler = NULL;
+  IRObject *compiled = NULL;
+  IRVersionedRootSignatureDescriptor *root_descriptor = NULL;
+  IRRootSignature *root_signature = NULL;
+  IRVersionedRootSignatureDescriptor *local_root_descriptor = NULL;
+  IRRootSignature *local_root_signature = NULL;
+  IRRayTracingPipelineConfiguration *raytracing_configuration = NULL;
+  IRMetalLibBinary *binary = NULL;
+  IRMetalLibBinary *stage_in_binary = NULL;
+  IRShaderReflection *reflection = NULL;
+  IRError *error = NULL;
+  IRVersionedFSInfo fragment_info = {};
+  IRVersionedCSInfo compute_info = {};
+  IRVersionedVSInfo vertex_info = {};
+  IRVersionedGSInfo geometry_info = {};
+  IRVersionedHSInfo hull_info = {};
+  IRVersionedDSInfo domain_info = {};
+  IRVersionedMSInfo mesh_info = {};
+  IRVersionedASInfo amplification_info = {};
+  IRVersionedRTInfo raytracing_info = {};
+  IRFunctionConstant *function_constants = NULL;
+  size_t function_constant_count = 0;
+  bool fragment_info_valid = false;
+  bool compute_info_valid = false;
+  bool vertex_info_valid = false;
+  bool geometry_info_valid = false;
+  bool hull_info_valid = false;
+  bool domain_info_valid = false;
+  bool mesh_info_valid = false;
+  bool amplification_info_valid = false;
+  bool raytracing_info_valid = false;
+  sm50_bitcode_t patched_metallib = {0};
+  struct SM50_COMPILED_BITCODE patched_data = {0};
+  uint8_t *original_metallib = NULL;
+  char *entry_point = NULL;
+  int result = DXMT_MSC_SUCCESS;
+
+  if (!params || !params->dxil || !params->dxil_size) {
+    if (params)
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_INVALID_ARGUMENT, "DXIL input is empty");
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  }
+
+  params->metallib_size = 0;
+  params->entry_point_size = 0;
+  params->stage_in_metallib_size = 0;
+  params->error_message_size = 0;
+  params->error_code = DXMT_MSC_SUCCESS;
+  memset(&params->reflection, 0, sizeof(params->reflection));
+  params->threadgroup_size[0] = 0;
+  params->threadgroup_size[1] = 0;
+  params->threadgroup_size[2] = 0;
+
+  if (!dxmt_msc_is_available()) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNAVAILABLE, "Metal Shader Converter runtime is unavailable");
+    return DXMT_MSC_ERROR_UNAVAILABLE;
+  }
+
+  IRShaderStage ir_stage = dxmt_msc_to_ir_stage(params->stage);
+  if (ir_stage == IRShaderStageInvalid) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_SHADER, "shader stage is not supported by MSC runtime");
+    return DXMT_MSC_ERROR_UNSUPPORTED_SHADER;
+  }
+
+  const bool raytracing_stage =
+      ir_stage == IRShaderStageClosestHit || ir_stage == IRShaderStageIntersection ||
+      ir_stage == IRShaderStageAnyHit || ir_stage == IRShaderStageMiss ||
+      ir_stage == IRShaderStageRayGeneration || ir_stage == IRShaderStageCallable;
+  if (raytracing_stage &&
+      (!g_msc_api.IRRayTracingPipelineConfigurationCreate ||
+       !g_msc_api.IRRayTracingPipelineConfigurationDestroy ||
+       !g_msc_api.IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes ||
+       !g_msc_api.IRRayTracingPipelineConfigurationSetPipelineFlags ||
+       !g_msc_api.IRRayTracingPipelineConfigurationSetIntrinsicMasks ||
+       !g_msc_api.IRRayTracingPipelineConfigurationSetMaxRecursiveDepth ||
+       !g_msc_api.IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode ||
+       !g_msc_api.IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode ||
+       !g_msc_api.IRCompilerSetRayTracingPipelineConfiguration)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC ray tracing configuration is unavailable");
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  }
+
+  const uint32_t emulation_flags =
+      params->reserved & (DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION | DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION);
+  if (emulation_flags && !g_msc_api.IRCompilerEnableGeometryAndTessellationEmulation) {
+    dxmt_msc_set_error(
+        params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC geometry/tessellation emulation is unavailable"
+    );
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  }
+  if (ir_stage == IRShaderStageGeometry &&
+      (!g_msc_api.IRShaderReflectionCopyGeometryInfo || !g_msc_api.IRShaderReflectionReleaseGeometryInfo)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC geometry reflection is unavailable");
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  }
+  if ((params->reserved & DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION) && ir_stage == IRShaderStageHull &&
+      (!g_msc_api.IRShaderReflectionCopyHullInfo || !g_msc_api.IRShaderReflectionReleaseHullInfo)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC hull reflection is unavailable");
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  }
+  if ((params->reserved & DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION) && ir_stage == IRShaderStageDomain &&
+      (!g_msc_api.IRShaderReflectionCopyDomainInfo || !g_msc_api.IRShaderReflectionReleaseDomainInfo)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC domain reflection is unavailable");
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  }
+  if ((params->reserved & DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN) &&
+      (ir_stage != IRShaderStageVertex || !g_msc_api.IRCompilerSetStageInGenerationMode ||
+       !g_msc_api.IRMetalLibSynthesizeStageInFunction || !g_msc_api.IRShaderReflectionCopyVertexInfo ||
+       !g_msc_api.IRShaderReflectionReleaseVertexInfo)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC stage-in synthesis is unavailable");
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  }
+
+  if (params->entry_point && params->entry_point_length) {
+    entry_point = malloc(params->entry_point_length + 1);
+    if (!entry_point) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_OUT_OF_MEMORY, "entry point allocation failed");
+      return DXMT_MSC_ERROR_OUT_OF_MEMORY;
+    }
+    memcpy(entry_point, params->entry_point, params->entry_point_length);
+    entry_point[params->entry_point_length] = '\0';
+  } else if (params->entry_point) {
+    entry_point = strdup(params->entry_point);
+    if (!entry_point) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_OUT_OF_MEMORY, "entry point allocation failed");
+      return DXMT_MSC_ERROR_OUT_OF_MEMORY;
+    }
+  }
+
+  input = g_msc_api.IRObjectCreateFromDXIL(
+      (const uint8_t *)params->dxil, params->dxil_size, IRBytecodeOwnershipCopy
+  );
+  if (!input) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_INVALID_DXIL, "IRObjectCreateFromDXIL rejected the shader");
+    result = DXMT_MSC_ERROR_INVALID_DXIL;
+    goto cleanup;
+  }
+
+  compiler = g_msc_api.IRCompilerCreate();
+  if (!compiler) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_OUT_OF_MEMORY, "IRCompilerCreate failed");
+    result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+    goto cleanup;
+  }
+
+  dxmt_msc_set_compiler_configuration(compiler, params);
+  if (emulation_flags)
+    g_msc_api.IRCompilerEnableGeometryAndTessellationEmulation(compiler, true);
+  if (params->reserved & DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN)
+    g_msc_api.IRCompilerSetStageInGenerationMode(compiler, IRStageInCodeGenerationModeUseSeparateStageInFunction);
+
+  if (raytracing_stage) {
+    raytracing_configuration = g_msc_api.IRRayTracingPipelineConfigurationCreate();
+    if (!raytracing_configuration) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_OUT_OF_MEMORY, "MSC ray tracing configuration allocation failed");
+      result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+      goto cleanup;
+    }
+    g_msc_api.IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes(raytracing_configuration, 16);
+    g_msc_api.IRRayTracingPipelineConfigurationSetPipelineFlags(
+        raytracing_configuration, IRRaytracingPipelineFlagNone
+    );
+    g_msc_api.IRRayTracingPipelineConfigurationSetIntrinsicMasks(
+        raytracing_configuration, IRIntrinsicMaskClosestHitAll, IRIntrinsicMaskMissShaderAll,
+        IRIntrinsicMaskAnyHitShaderAll, IRIntrinsicMaskCallableShaderAll
+    );
+    g_msc_api.IRRayTracingPipelineConfigurationSetMaxRecursiveDepth(
+        raytracing_configuration, IRRayTracingUnlimitedRecursionDepth
+    );
+    g_msc_api.IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode(
+        raytracing_configuration, IRRayGenerationCompilationVisibleFunction
+    );
+    g_msc_api.IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode(
+        raytracing_configuration, IRIntersectionFunctionCompilationVisibleFunction
+    );
+    g_msc_api.IRCompilerSetRayTracingPipelineConfiguration(compiler, raytracing_configuration);
+    if (g_msc_api.IRCompilerSetHitgroupType &&
+        (ir_stage == IRShaderStageClosestHit || ir_stage == IRShaderStageAnyHit ||
+         ir_stage == IRShaderStageIntersection)) {
+      g_msc_api.IRCompilerSetHitgroupType(
+          compiler, ir_stage == IRShaderStageIntersection ? IRHitGroupTypeProceduralPrimitive
+                                                           : IRHitGroupTypeTriangles
+      );
+    }
+  }
+
+  if (params->root_signature && params->root_signature_size) {
+    if (params->root_signature_size > UINT32_MAX) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_ROOT_SIGNATURE, "root signature is too large");
+      result = DXMT_MSC_ERROR_ROOT_SIGNATURE;
+      goto cleanup;
+    }
+
+    root_descriptor = g_msc_api.IRVersionedRootSignatureDescriptorCreateFromBlob(
+        (const uint8_t *)params->root_signature, (uint32_t)params->root_signature_size, &error
+    );
+    if (!root_descriptor) {
+      dxmt_msc_set_ire_error(params, error);
+      result = DXMT_MSC_ERROR_ROOT_SIGNATURE;
+      goto cleanup;
+    }
+
+    root_signature = g_msc_api.IRRootSignatureCreateFromDescriptor(root_descriptor, &error);
+    if (!root_signature) {
+      dxmt_msc_set_ire_error(params, error);
+      result = DXMT_MSC_ERROR_ROOT_SIGNATURE;
+      goto cleanup;
+    }
+    g_msc_api.IRCompilerSetGlobalRootSignature(compiler, root_signature);
+  }
+
+  if (params->local_root_signature && params->local_root_signature_size) {
+    if (!g_msc_api.IRCompilerSetLocalRootSignature) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC local root signatures are unavailable");
+      result = DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+      goto cleanup;
+    }
+    if (params->local_root_signature_size > UINT32_MAX) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_ROOT_SIGNATURE, "local root signature is too large");
+      result = DXMT_MSC_ERROR_ROOT_SIGNATURE;
+      goto cleanup;
+    }
+
+    local_root_descriptor = g_msc_api.IRVersionedRootSignatureDescriptorCreateFromBlob(
+        (const uint8_t *)params->local_root_signature, (uint32_t)params->local_root_signature_size, &error
+    );
+    if (!local_root_descriptor) {
+      dxmt_msc_set_ire_error(params, error);
+      result = DXMT_MSC_ERROR_ROOT_SIGNATURE;
+      goto cleanup;
+    }
+
+    local_root_signature = g_msc_api.IRRootSignatureCreateFromDescriptor(local_root_descriptor, &error);
+    if (!local_root_signature) {
+      dxmt_msc_set_ire_error(params, error);
+      result = DXMT_MSC_ERROR_ROOT_SIGNATURE;
+      goto cleanup;
+    }
+    g_msc_api.IRCompilerSetLocalRootSignature(compiler, local_root_signature);
+  }
+
+  compiled = g_msc_api.IRCompilerAllocCompileAndLink(compiler, entry_point, input, &error);
+  if (!compiled) {
+    dxmt_msc_set_ire_error(params, error);
+    result = params->error_code;
+    goto cleanup;
+  }
+
+  const IRShaderStage compiled_stage = g_msc_api.IRObjectGetMetalIRShaderStage(compiled);
+  if (compiled_stage != ir_stage) {
+    char message[128];
+    snprintf(
+        message, sizeof(message), "compiled shader stage %u does not match requested stage %u",
+        (unsigned)compiled_stage, (unsigned)ir_stage
+    );
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_METALLIB, message);
+    result = DXMT_MSC_ERROR_METALLIB;
+    goto cleanup;
+  }
+
+  binary = g_msc_api.IRMetalLibBinaryCreate();
+  if (!binary) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_OUT_OF_MEMORY, "IRMetalLibBinaryCreate failed");
+    result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+    goto cleanup;
+  }
+
+  if (!g_msc_api.IRObjectGetMetalLibBinary(compiled, ir_stage, binary)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_METALLIB, "compiled object has no requested metallib stage");
+    result = DXMT_MSC_ERROR_METALLIB;
+    goto cleanup;
+  }
+
+  size_t original_metallib_size = g_msc_api.IRMetalLibGetBytecodeSize(binary);
+  if (!original_metallib_size) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_METALLIB, "compiled metallib is empty");
+    result = DXMT_MSC_ERROR_METALLIB;
+    goto cleanup;
+  }
+  original_metallib = malloc(original_metallib_size);
+  if (!original_metallib ||
+      g_msc_api.IRMetalLibGetBytecode(binary, original_metallib) != original_metallib_size) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_METALLIB, "failed to extract metallib bytecode");
+    result = DXMT_MSC_ERROR_METALLIB;
+    goto cleanup;
+  }
+  if (SM50PatchMetalLibUnsupportedDouble(
+          original_metallib, original_metallib_size, &patched_metallib
+      )) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_METALLIB, "failed to patch unsupported double precision AIR");
+    result = DXMT_MSC_ERROR_METALLIB;
+    goto cleanup;
+  }
+  SM50GetCompiledBitcode(patched_metallib, &patched_data);
+  params->metallib_size = patched_data.Size;
+
+  reflection = g_msc_api.IRShaderReflectionCreate();
+  if (!reflection) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_OUT_OF_MEMORY, "IRShaderReflectionCreate failed");
+    result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+    goto cleanup;
+  }
+
+  if (!g_msc_api.IRObjectGetReflection(compiled, ir_stage, reflection)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "shader reflection is unavailable");
+    result = DXMT_MSC_ERROR_COMPILATION;
+    goto cleanup;
+  }
+
+  if (g_msc_api.IRShaderReflectionNeedsFunctionConstants)
+    params->reflection.needs_function_constants =
+        g_msc_api.IRShaderReflectionNeedsFunctionConstants(reflection) ? 1u : 0u;
+
+  if (g_msc_api.IRShaderReflectionGetFunctionConstantCount && g_msc_api.IRShaderReflectionCopyFunctionConstants &&
+      g_msc_api.IRShaderReflectionReleaseFunctionConstants) {
+    function_constant_count = g_msc_api.IRShaderReflectionGetFunctionConstantCount(reflection);
+    if (function_constant_count > DXMT_MSC_FUNCTION_CONSTANT_CAPACITY) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "too many MSC function constants");
+      result = DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+      goto cleanup;
+    }
+    if (function_constant_count > SIZE_MAX / sizeof(*function_constants)) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_OUT_OF_MEMORY, "MSC function constant reflection overflow");
+      result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+      goto cleanup;
+    }
+    if (function_constant_count) {
+      function_constants = calloc(function_constant_count, sizeof(*function_constants));
+      if (!function_constants) {
+        dxmt_msc_set_error(params, DXMT_MSC_ERROR_OUT_OF_MEMORY, "MSC function constant reflection allocation failed");
+        result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+        goto cleanup;
+      }
+      g_msc_api.IRShaderReflectionCopyFunctionConstants(reflection, function_constants);
+      for (size_t i = 0; i < function_constant_count; i++) {
+        if (!function_constants[i].name ||
+            strlen(function_constants[i].name) >= DXMT_MSC_FUNCTION_CONSTANT_NAME_CAPACITY) {
+          dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "invalid MSC function constant name");
+          result = DXMT_MSC_ERROR_COMPILATION;
+          goto cleanup;
+        }
+        snprintf(
+            params->reflection.function_constants[i].name,
+            sizeof(params->reflection.function_constants[i].name), "%s", function_constants[i].name
+        );
+        params->reflection.function_constants[i].type = (uint32_t)function_constants[i].type;
+        /* The reflection API exposes an ordered array rather than an explicit
+         * index. Preserve that ordinal for the Metal constant-value API. */
+        params->reflection.function_constants[i].index = (uint32_t)i;
+      }
+      params->reflection.function_constant_count = (uint32_t)function_constant_count;
+    }
+  }
+
+  if (ir_stage == IRShaderStageFragment && g_msc_api.IRShaderReflectionCopyFragmentInfo &&
+      g_msc_api.IRShaderReflectionReleaseFragmentInfo) {
+    fragment_info.version = IRReflectionVersion_1_0;
+    if (g_msc_api.IRShaderReflectionCopyFragmentInfo(reflection, IRReflectionVersion_1_0, &fragment_info)) {
+      fragment_info_valid = true;
+      params->reflection.fs_num_render_targets = fragment_info.info_1_0.num_render_targets;
+      params->reflection.fs_rt_index_int = fragment_info.info_1_0.rt_index_int;
+      params->reflection.fs_discards = fragment_info.info_1_0.discards ? 1u : 0u;
+    }
+  }
+
+  if (ir_stage == IRShaderStageCompute) {
+    compute_info.version = IRReflectionVersion_1_0;
+    if (!g_msc_api.IRShaderReflectionCopyComputeInfo(reflection, IRReflectionVersion_1_0, &compute_info)) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "compute shader reflection is unavailable");
+      result = DXMT_MSC_ERROR_COMPILATION;
+      goto cleanup;
+    }
+    compute_info_valid = true;
+    params->threadgroup_size[0] = compute_info.info_1_0.tg_size[0];
+    params->threadgroup_size[1] = compute_info.info_1_0.tg_size[1];
+    params->threadgroup_size[2] = compute_info.info_1_0.tg_size[2];
+  }
+
+  params->reflection.stage = params->stage;
+  if (ir_stage == IRShaderStageVertex && g_msc_api.IRShaderReflectionCopyVertexInfo) {
+    vertex_info.version = IRReflectionVersion_1_0;
+    if (!g_msc_api.IRShaderReflectionCopyVertexInfo(reflection, IRReflectionVersion_1_0, &vertex_info)) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "vertex shader reflection is unavailable");
+      result = DXMT_MSC_ERROR_COMPILATION;
+      goto cleanup;
+    }
+    vertex_info_valid = true;
+    params->reflection.vertex_output_size_in_bytes = vertex_info.info_1_0.vertex_output_size_in_bytes;
+  }
+  if (ir_stage == IRShaderStageGeometry) {
+    geometry_info.version = IRReflectionVersion_1_0;
+    if (!g_msc_api.IRShaderReflectionCopyGeometryInfo(reflection, IRReflectionVersion_1_0, &geometry_info)) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "geometry shader reflection is unavailable");
+      result = DXMT_MSC_ERROR_COMPILATION;
+      goto cleanup;
+    }
+    geometry_info_valid = true;
+    params->reflection.gs_input_primitive = geometry_info.info_1_0.input_primitive;
+    params->reflection.gs_max_input_primitives_per_mesh_threadgroup =
+        geometry_info.info_1_0.max_input_primitives_per_mesh_threadgroup;
+    params->reflection.gs_instance_count = geometry_info.info_1_0.instance_count;
+  }
+  if (ir_stage == IRShaderStageHull) {
+    hull_info.version = IRReflectionVersion_1_0;
+    if (!g_msc_api.IRShaderReflectionCopyHullInfo(reflection, IRReflectionVersion_1_0, &hull_info)) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "hull shader reflection is unavailable");
+      result = DXMT_MSC_ERROR_COMPILATION;
+      goto cleanup;
+    }
+    hull_info_valid = true;
+    params->reflection.hs_max_patches_per_object_threadgroup =
+        hull_info.info_1_0.max_patches_per_object_threadgroup;
+    params->reflection.hs_max_object_threads_per_patch = hull_info.info_1_0.max_object_threads_per_patch;
+    params->reflection.hs_patch_constants_size = hull_info.info_1_0.patch_constants_size;
+    params->reflection.hs_static_payload_size = hull_info.info_1_0.static_payload_size;
+    params->reflection.hs_payload_size_per_patch = hull_info.info_1_0.payload_size_per_patch;
+    params->reflection.hs_input_control_point_count = hull_info.info_1_0.input_control_point_count;
+    params->reflection.hs_output_control_point_count = hull_info.info_1_0.output_control_point_count;
+    params->reflection.hs_output_control_point_size = hull_info.info_1_0.output_control_point_size;
+    params->reflection.hs_tessellator_domain = hull_info.info_1_0.tessellator_domain;
+    params->reflection.hs_tessellator_partitioning = hull_info.info_1_0.tessellator_partitioning;
+    params->reflection.hs_tessellator_output_primitive = hull_info.info_1_0.tessellator_output_primitive;
+    params->reflection.hs_tessellation_type_half = hull_info.info_1_0.tessellation_type_half;
+    params->reflection.hs_max_tessellation_factor = hull_info.info_1_0.max_tessellation_factor;
+    if (hull_info.info_1_0.patch_constant_function) {
+      snprintf(
+          params->reflection.hs_patch_constant_function,
+          sizeof(params->reflection.hs_patch_constant_function),
+          "%s",
+          hull_info.info_1_0.patch_constant_function
+      );
+    }
+  }
+  if (ir_stage == IRShaderStageDomain) {
+    domain_info.version = IRReflectionVersion_1_0;
+    if (!g_msc_api.IRShaderReflectionCopyDomainInfo(reflection, IRReflectionVersion_1_0, &domain_info)) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "domain shader reflection is unavailable");
+      result = DXMT_MSC_ERROR_COMPILATION;
+      goto cleanup;
+    }
+    domain_info_valid = true;
+    params->reflection.ds_tessellator_domain = domain_info.info_1_0.tessellator_domain;
+    params->reflection.ds_max_input_prims_per_mesh_threadgroup =
+        domain_info.info_1_0.max_input_prims_per_mesh_threadgroup;
+    params->reflection.ds_input_control_point_count = domain_info.info_1_0.input_control_point_count;
+    params->reflection.ds_input_control_point_size = domain_info.info_1_0.input_control_point_size;
+    params->reflection.ds_patch_constants_size = domain_info.info_1_0.patch_constants_size;
+    params->reflection.ds_tessellation_type_half = domain_info.info_1_0.tessellation_type_half;
+  }
+  if (ir_stage == IRShaderStageMesh && g_msc_api.IRShaderReflectionCopyMeshInfo &&
+      g_msc_api.IRShaderReflectionReleaseMeshInfo) {
+    mesh_info.version = IRReflectionVersion_1_0;
+    if (g_msc_api.IRShaderReflectionCopyMeshInfo(reflection, IRReflectionVersion_1_0, &mesh_info)) {
+      mesh_info_valid = true;
+      params->reflection.ms_max_vertex_output_count = mesh_info.info_1_0.max_vertex_output_count;
+      params->reflection.ms_max_primitive_output_count = mesh_info.info_1_0.max_primitive_output_count;
+      params->reflection.ms_primitive_topology = mesh_info.info_1_0.primitive_topology;
+      params->reflection.ms_max_payload_size_in_bytes = mesh_info.info_1_0.max_payload_size_in_bytes;
+      memcpy(params->reflection.ms_num_threads, mesh_info.info_1_0.num_threads, sizeof(params->reflection.ms_num_threads));
+    }
+  }
+  if (ir_stage == IRShaderStageAmplification && g_msc_api.IRShaderReflectionCopyAmplificationInfo &&
+      g_msc_api.IRShaderReflectionReleaseAmplificationInfo) {
+    amplification_info.version = IRReflectionVersion_1_0;
+    if (g_msc_api.IRShaderReflectionCopyAmplificationInfo(
+            reflection, IRReflectionVersion_1_0, &amplification_info
+        )) {
+      amplification_info_valid = true;
+      memcpy(
+          params->reflection.as_num_threads, amplification_info.info_1_0.num_threads,
+          sizeof(params->reflection.as_num_threads)
+      );
+      params->reflection.as_max_payload_size_in_bytes = amplification_info.info_1_0.max_payload_size_in_bytes;
+    }
+  }
+  if ((ir_stage == IRShaderStageRayGeneration || ir_stage == IRShaderStageIntersection ||
+       ir_stage == IRShaderStageAnyHit || ir_stage == IRShaderStageClosestHit ||
+       ir_stage == IRShaderStageMiss || ir_stage == IRShaderStageCallable) &&
+      g_msc_api.IRShaderReflectionCopyRaytracingInfo && g_msc_api.IRShaderReflectionReleaseRaytracingInfo) {
+    raytracing_info.version = IRReflectionVersion_1_0;
+    if (g_msc_api.IRShaderReflectionCopyRaytracingInfo(
+            reflection, IRReflectionVersion_1_0, &raytracing_info
+        )) {
+      raytracing_info_valid = true;
+      params->reflection.rt_is_indirect_intersection_function =
+          raytracing_info.info_1_0.is_indirect_intersection_function ? 1u : 0u;
+    }
+  }
+
+  if (params->reserved & DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN) {
+    IRVersionedInputLayoutDescriptor layout = {};
+    const char *semantic_names[31] = {};
+    layout.version = IRInputLayoutDescriptorVersion_1;
+    layout.desc_1_0.numElements = params->input_layout.num_elements;
+    if (layout.desc_1_0.numElements > 31) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_INVALID_ARGUMENT, "MSC input layout has too many elements");
+      result = DXMT_MSC_ERROR_INVALID_ARGUMENT;
+      goto cleanup;
+    }
+    for (uint32_t i = 0; i < layout.desc_1_0.numElements; i++) {
+      const struct dxmt_msc_input_element *src = &params->input_layout.elements[i];
+      semantic_names[i] = src->semantic_name;
+      layout.desc_1_0.semanticNames[i] = semantic_names[i];
+      layout.desc_1_0.inputElementDescs[i].semanticIndex = src->semantic_index;
+      layout.desc_1_0.inputElementDescs[i].format = (IRFormat)src->format;
+      layout.desc_1_0.inputElementDescs[i].inputSlot = src->input_slot;
+      layout.desc_1_0.inputElementDescs[i].alignedByteOffset = src->aligned_byte_offset;
+      layout.desc_1_0.inputElementDescs[i].instanceDataStepRate = src->instance_data_step_rate;
+      layout.desc_1_0.inputElementDescs[i].inputSlotClass = (IRInputClassification)src->input_slot_class;
+    }
+    stage_in_binary = g_msc_api.IRMetalLibBinaryCreate();
+    if (!stage_in_binary || !g_msc_api.IRMetalLibSynthesizeStageInFunction(
+                                compiler, reflection, &layout, stage_in_binary
+                            )) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "failed to synthesize MSC stage-in function");
+      result = DXMT_MSC_ERROR_COMPILATION;
+      goto cleanup;
+    }
+  }
+
+  const char *compiled_entry_point = g_msc_api.IRShaderReflectionGetEntryPointFunctionName(reflection);
+  if (!compiled_entry_point || !compiled_entry_point[0]) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_COMPILATION, "compiled shader entry point is unavailable");
+    result = DXMT_MSC_ERROR_COMPILATION;
+    goto cleanup;
+  }
+
+  params->entry_point_size = strlen(compiled_entry_point) + 1;
+  if ((params->metallib && params->metallib_capacity < params->metallib_size) ||
+      (!params->metallib && params->metallib_capacity) ||
+      (params->entry_point_out && params->entry_point_capacity < params->entry_point_size) ||
+      (!params->entry_point_out && params->entry_point_capacity)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_OUTPUT_TOO_SMALL, "MSC output buffer is too small");
+    result = DXMT_MSC_ERROR_OUTPUT_TOO_SMALL;
+    goto cleanup;
+  }
+
+  if (params->metallib) {
+    memcpy(params->metallib, patched_data.Data, params->metallib_size);
+  }
+
+  if (stage_in_binary) {
+    params->stage_in_metallib_size = g_msc_api.IRMetalLibGetBytecodeSize(stage_in_binary);
+    if ((params->stage_in_metallib && params->stage_in_metallib_capacity < params->stage_in_metallib_size) ||
+        (!params->stage_in_metallib && params->stage_in_metallib_capacity)) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_OUTPUT_TOO_SMALL, "MSC stage-in output buffer is too small");
+      result = DXMT_MSC_ERROR_OUTPUT_TOO_SMALL;
+      goto cleanup;
+    }
+    if (params->stage_in_metallib_size && params->stage_in_metallib) {
+      if (g_msc_api.IRMetalLibGetBytecode(
+              stage_in_binary, (uint8_t *)params->stage_in_metallib
+          ) != params->stage_in_metallib_size) {
+        dxmt_msc_set_error(params, DXMT_MSC_ERROR_METALLIB, "failed to extract MSC stage-in metallib");
+        result = DXMT_MSC_ERROR_METALLIB;
+        goto cleanup;
+      }
+    }
+  }
+
+  if (params->entry_point_out) {
+    memcpy(params->entry_point_out, compiled_entry_point, params->entry_point_size);
+  }
+
+cleanup:
+  if (patched_metallib)
+    SM50DestroyBitcode(patched_metallib);
+  free(original_metallib);
+  if (fragment_info_valid)
+    g_msc_api.IRShaderReflectionReleaseFragmentInfo(&fragment_info);
+  if (compute_info_valid)
+    g_msc_api.IRShaderReflectionReleaseComputeInfo(&compute_info);
+  if (vertex_info_valid)
+    g_msc_api.IRShaderReflectionReleaseVertexInfo(&vertex_info);
+  if (geometry_info_valid)
+    g_msc_api.IRShaderReflectionReleaseGeometryInfo(&geometry_info);
+  if (hull_info_valid)
+    g_msc_api.IRShaderReflectionReleaseHullInfo(&hull_info);
+  if (domain_info_valid)
+    g_msc_api.IRShaderReflectionReleaseDomainInfo(&domain_info);
+  if (mesh_info_valid)
+    g_msc_api.IRShaderReflectionReleaseMeshInfo(&mesh_info);
+  if (amplification_info_valid)
+    g_msc_api.IRShaderReflectionReleaseAmplificationInfo(&amplification_info);
+  if (raytracing_info_valid)
+    g_msc_api.IRShaderReflectionReleaseRaytracingInfo(&raytracing_info);
+  if (function_constants) {
+    g_msc_api.IRShaderReflectionReleaseFunctionConstants(function_constants, function_constant_count);
+    free(function_constants);
+  }
+  if (stage_in_binary)
+    g_msc_api.IRMetalLibBinaryDestroy(stage_in_binary);
+  if (reflection)
+    g_msc_api.IRShaderReflectionDestroy(reflection);
+  if (binary)
+    g_msc_api.IRMetalLibBinaryDestroy(binary);
+  if (compiled)
+    g_msc_api.IRObjectDestroy(compiled);
+  if (compiler)
+    g_msc_api.IRCompilerDestroy(compiler);
+  if (root_signature)
+    g_msc_api.IRRootSignatureDestroy(root_signature);
+  if (root_descriptor)
+    g_msc_api.IRVersionedRootSignatureDescriptorRelease(root_descriptor);
+  if (local_root_signature)
+    g_msc_api.IRRootSignatureDestroy(local_root_signature);
+  if (local_root_descriptor)
+    g_msc_api.IRVersionedRootSignatureDescriptorRelease(local_root_descriptor);
+  if (raytracing_configuration)
+    g_msc_api.IRRayTracingPipelineConfigurationDestroy(raytracing_configuration);
+  if (input)
+    g_msc_api.IRObjectDestroy(input);
+  if (error)
+    g_msc_api.IRErrorDestroy(error);
+  free(entry_point);
+  return result;
+}
+
+int
+dxmt_msc_synthesize_ray_dispatch(struct dxmt_msc_synthesize_ray_dispatch_params *params) {
+  IRCompiler *compiler = NULL;
+  IRRayTracingPipelineConfiguration *raytracing_configuration = NULL;
+  IRMetalLibBinary *binary = NULL;
+  int result = DXMT_MSC_SUCCESS;
+
+  if (!params)
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+
+  params->metallib_size = 0;
+  params->error_message_size = 0;
+  params->ret = DXMT_MSC_SUCCESS;
+
+  if (!dxmt_msc_is_available()) {
+    dxmt_msc_set_ray_dispatch_error(params, "Metal Shader Converter runtime is unavailable");
+    result = DXMT_MSC_ERROR_UNAVAILABLE;
+    goto cleanup;
+  }
+
+  if (!g_msc_api.IRMetalLibSynthesizeIndirectRayDispatchFunction ||
+      !g_msc_api.IRRayTracingPipelineConfigurationCreate ||
+      !g_msc_api.IRRayTracingPipelineConfigurationDestroy ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetPipelineFlags ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetIntrinsicMasks ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetMaxRecursiveDepth ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode ||
+      !g_msc_api.IRCompilerSetRayTracingPipelineConfiguration) {
+    dxmt_msc_set_ray_dispatch_error(params, "MSC indirect ray dispatch synthesis is unavailable");
+    result = DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+    goto cleanup;
+  }
+
+  compiler = g_msc_api.IRCompilerCreate();
+  if (!compiler) {
+    dxmt_msc_set_ray_dispatch_error(params, "IRCompilerCreate failed");
+    result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+    goto cleanup;
+  }
+
+  struct dxmt_msc_compile_dxil_params compiler_params = {};
+  compiler_params.minimum_gpu_family = params->minimum_gpu_family;
+  compiler_params.minimum_os_major = params->minimum_os_major;
+  compiler_params.minimum_os_minor = params->minimum_os_minor;
+  compiler_params.minimum_os_patch = params->minimum_os_patch;
+  compiler_params.compatibility_flags = params->compatibility_flags;
+  compiler_params.validation_flags = params->validation_flags;
+  compiler_params.ignore_debug_information = params->ignore_debug_information;
+  dxmt_msc_set_compiler_configuration(compiler, &compiler_params);
+
+  raytracing_configuration = g_msc_api.IRRayTracingPipelineConfigurationCreate();
+  if (!raytracing_configuration) {
+    dxmt_msc_set_ray_dispatch_error(params, "MSC ray tracing configuration allocation failed");
+    result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+    goto cleanup;
+  }
+
+  g_msc_api.IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes(
+      raytracing_configuration, params->max_attribute_size ? params->max_attribute_size : 16
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetPipelineFlags(
+      raytracing_configuration, IRRaytracingPipelineFlagNone
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetIntrinsicMasks(
+      raytracing_configuration, IRIntrinsicMaskClosestHitAll, IRIntrinsicMaskMissShaderAll,
+      IRIntrinsicMaskAnyHitShaderAll, IRIntrinsicMaskCallableShaderAll
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetMaxRecursiveDepth(
+      raytracing_configuration,
+      params->max_recursive_depth ? params->max_recursive_depth : IRRayTracingUnlimitedRecursionDepth
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode(
+      raytracing_configuration, IRRayGenerationCompilationVisibleFunction
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode(
+      raytracing_configuration, IRIntersectionFunctionCompilationVisibleFunction
+  );
+  g_msc_api.IRCompilerSetRayTracingPipelineConfiguration(compiler, raytracing_configuration);
+
+  binary = g_msc_api.IRMetalLibBinaryCreate();
+  if (!binary) {
+    dxmt_msc_set_ray_dispatch_error(params, "IRMetalLibBinaryCreate failed");
+    result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+    goto cleanup;
+  }
+
+  if (!g_msc_api.IRMetalLibSynthesizeIndirectRayDispatchFunction(compiler, binary)) {
+    dxmt_msc_set_ray_dispatch_error(params, "failed to synthesize MSC indirect ray dispatch function");
+    result = DXMT_MSC_ERROR_COMPILATION;
+    goto cleanup;
+  }
+
+  params->metallib_size = g_msc_api.IRMetalLibGetBytecodeSize(binary);
+  if (!params->metallib_size) {
+    dxmt_msc_set_ray_dispatch_error(params, "synthesized ray dispatch metallib is empty");
+    result = DXMT_MSC_ERROR_METALLIB;
+    goto cleanup;
+  }
+
+  if ((!params->metallib && params->metallib_capacity) ||
+      (params->metallib && params->metallib_capacity < params->metallib_size)) {
+    dxmt_msc_set_ray_dispatch_error(params, "MSC ray dispatch output buffer is too small");
+    result = DXMT_MSC_ERROR_OUTPUT_TOO_SMALL;
+    goto cleanup;
+  }
+
+  if (params->metallib &&
+      g_msc_api.IRMetalLibGetBytecode(binary, (uint8_t *)params->metallib) != params->metallib_size) {
+    dxmt_msc_set_ray_dispatch_error(params, "failed to extract synthesized ray dispatch metallib");
+    result = DXMT_MSC_ERROR_METALLIB;
+    goto cleanup;
+  }
+
+cleanup:
+  if (binary)
+    g_msc_api.IRMetalLibBinaryDestroy(binary);
+  if (raytracing_configuration)
+    g_msc_api.IRRayTracingPipelineConfigurationDestroy(raytracing_configuration);
+  if (compiler)
+    g_msc_api.IRCompilerDestroy(compiler);
+  params->ret = result;
+  return result;
+}
+
+int
+dxmt_msc_synthesize_ray_intersection(struct dxmt_msc_synthesize_ray_intersection_params *params) {
+  IRCompiler *compiler = NULL;
+  IRRayTracingPipelineConfiguration *raytracing_configuration = NULL;
+  IRMetalLibBinary *binary = NULL;
+  int result = DXMT_MSC_SUCCESS;
+
+  if (!params)
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+
+  params->metallib_size = 0;
+  params->error_message_size = 0;
+  params->ret = DXMT_MSC_SUCCESS;
+
+  if (!dxmt_msc_is_available()) {
+    dxmt_msc_set_ray_intersection_error(params, "Metal Shader Converter runtime is unavailable");
+    result = DXMT_MSC_ERROR_UNAVAILABLE;
+    goto cleanup;
+  }
+
+  if (!g_msc_api.IRMetalLibSynthesizeIndirectIntersectionFunction ||
+      !g_msc_api.IRCompilerSetHitgroupType ||
+      !g_msc_api.IRRayTracingPipelineConfigurationCreate ||
+      !g_msc_api.IRRayTracingPipelineConfigurationDestroy ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetPipelineFlags ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetIntrinsicMasks ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetMaxRecursiveDepth ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode ||
+      !g_msc_api.IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode ||
+      !g_msc_api.IRCompilerSetRayTracingPipelineConfiguration) {
+    dxmt_msc_set_ray_intersection_error(params, "MSC indirect intersection synthesis is unavailable");
+    result = DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+    goto cleanup;
+  }
+
+  compiler = g_msc_api.IRCompilerCreate();
+  if (!compiler) {
+    dxmt_msc_set_ray_intersection_error(params, "IRCompilerCreate failed");
+    result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+    goto cleanup;
+  }
+
+  struct dxmt_msc_compile_dxil_params compiler_params = {};
+  compiler_params.minimum_gpu_family = params->minimum_gpu_family;
+  compiler_params.minimum_os_major = params->minimum_os_major;
+  compiler_params.minimum_os_minor = params->minimum_os_minor;
+  compiler_params.minimum_os_patch = params->minimum_os_patch;
+  compiler_params.compatibility_flags = params->compatibility_flags;
+  compiler_params.validation_flags = params->validation_flags;
+  compiler_params.ignore_debug_information = params->ignore_debug_information;
+  dxmt_msc_set_compiler_configuration(compiler, &compiler_params);
+
+  raytracing_configuration = g_msc_api.IRRayTracingPipelineConfigurationCreate();
+  if (!raytracing_configuration) {
+    dxmt_msc_set_ray_intersection_error(params, "MSC ray tracing configuration allocation failed");
+    result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+    goto cleanup;
+  }
+
+  g_msc_api.IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes(
+      raytracing_configuration, params->max_attribute_size ? params->max_attribute_size : 16
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetPipelineFlags(
+      raytracing_configuration, IRRaytracingPipelineFlagNone
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetIntrinsicMasks(
+      raytracing_configuration, IRIntrinsicMaskClosestHitAll, IRIntrinsicMaskMissShaderAll,
+      IRIntrinsicMaskAnyHitShaderAll, IRIntrinsicMaskCallableShaderAll
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetMaxRecursiveDepth(
+      raytracing_configuration,
+      params->max_recursive_depth ? params->max_recursive_depth : IRRayTracingUnlimitedRecursionDepth
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetRayGenerationCompilationMode(
+      raytracing_configuration, IRRayGenerationCompilationVisibleFunction
+  );
+  g_msc_api.IRRayTracingPipelineConfigurationSetIntersectionFunctionCompilationMode(
+      raytracing_configuration, IRIntersectionFunctionCompilationVisibleFunction
+  );
+  g_msc_api.IRCompilerSetRayTracingPipelineConfiguration(compiler, raytracing_configuration);
+  g_msc_api.IRCompilerSetHitgroupType(compiler, (IRHitGroupType)params->hit_group_type);
+
+  binary = g_msc_api.IRMetalLibBinaryCreate();
+  if (!binary) {
+    dxmt_msc_set_ray_intersection_error(params, "IRMetalLibBinaryCreate failed");
+    result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+    goto cleanup;
+  }
+
+  if (!g_msc_api.IRMetalLibSynthesizeIndirectIntersectionFunction(compiler, binary)) {
+    dxmt_msc_set_ray_intersection_error(params, "failed to synthesize MSC indirect intersection function");
+    result = DXMT_MSC_ERROR_COMPILATION;
+    goto cleanup;
+  }
+
+  params->metallib_size = g_msc_api.IRMetalLibGetBytecodeSize(binary);
+  if (!params->metallib_size) {
+    dxmt_msc_set_ray_intersection_error(params, "synthesized intersection metallib is empty");
+    result = DXMT_MSC_ERROR_METALLIB;
+    goto cleanup;
+  }
+
+  if ((!params->metallib && params->metallib_capacity) ||
+      (params->metallib && params->metallib_capacity < params->metallib_size)) {
+    dxmt_msc_set_ray_intersection_error(params, "MSC intersection output buffer is too small");
+    result = DXMT_MSC_ERROR_OUTPUT_TOO_SMALL;
+    goto cleanup;
+  }
+
+  if (params->metallib &&
+      g_msc_api.IRMetalLibGetBytecode(binary, (uint8_t *)params->metallib) != params->metallib_size) {
+    dxmt_msc_set_ray_intersection_error(params, "failed to extract synthesized intersection metallib");
+    result = DXMT_MSC_ERROR_METALLIB;
+    goto cleanup;
+  }
+
+cleanup:
+  if (binary)
+    g_msc_api.IRMetalLibBinaryDestroy(binary);
+  if (raytracing_configuration)
+    g_msc_api.IRRayTracingPipelineConfigurationDestroy(raytracing_configuration);
+  if (compiler)
+    g_msc_api.IRCompilerDestroy(compiler);
+  params->ret = result;
+  return result;
+}
+
+int
+dxmt_msc_get_root_layout(struct dxmt_msc_get_root_layout_params *params) {
+  IRVersionedRootSignatureDescriptor *root_descriptor = NULL;
+  IRRootSignature *root_signature = NULL;
+  IRResourceLocation *locations = NULL;
+  IRError *error = NULL;
+  int result = DXMT_MSC_SUCCESS;
+
+  if (!params || !params->root_signature || !params->root_signature_size) {
+    if (params)
+      dxmt_msc_set_root_error(params, "root signature input is empty");
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  }
+
+  params->layout_count = 0;
+  params->argument_buffer_size = 0;
+  params->error_message_size = 0;
+
+  if (!dxmt_msc_is_available()) {
+    dxmt_msc_set_root_error(params, "Metal Shader Converter runtime is unavailable");
+    return DXMT_MSC_ERROR_UNAVAILABLE;
+  }
+
+  if (params->root_signature_size > UINT32_MAX) {
+    dxmt_msc_set_root_error(params, "root signature is too large");
+    return DXMT_MSC_ERROR_ROOT_SIGNATURE;
+  }
+
+  root_descriptor = g_msc_api.IRVersionedRootSignatureDescriptorCreateFromBlob(
+      (const uint8_t *)params->root_signature, (uint32_t)params->root_signature_size, &error
+  );
+  if (!root_descriptor) {
+    dxmt_msc_set_root_ire_error(params, error);
+    result = DXMT_MSC_ERROR_ROOT_SIGNATURE;
+    goto cleanup;
+  }
+
+  root_signature = g_msc_api.IRRootSignatureCreateFromDescriptor(root_descriptor, &error);
+  if (!root_signature) {
+    dxmt_msc_set_root_ire_error(params, error);
+    result = DXMT_MSC_ERROR_ROOT_SIGNATURE;
+    goto cleanup;
+  }
+
+  params->layout_count = g_msc_api.IRRootSignatureGetResourceCount(root_signature);
+  if ((params->layouts && params->layout_capacity < params->layout_count) ||
+      (!params->layouts && params->layout_capacity)) {
+    dxmt_msc_set_root_error(params, "root layout output buffer is too small");
+    result = DXMT_MSC_ERROR_OUTPUT_TOO_SMALL;
+    goto cleanup;
+  }
+
+  if (params->layout_count) {
+    uint32_t num_parameters = root_descriptor->version == IRRootSignatureVersion_1_1
+                                   ? root_descriptor->desc_1_1.NumParameters
+                                   : root_descriptor->desc_1_0.NumParameters;
+    locations = calloc(params->layout_count, sizeof(*locations));
+    if (!locations) {
+      dxmt_msc_set_root_error(params, "root layout allocation failed");
+      result = DXMT_MSC_ERROR_OUT_OF_MEMORY;
+      goto cleanup;
+    }
+    g_msc_api.IRRootSignatureGetResourceLocations(root_signature, locations);
+
+    for (size_t i = 0; i < params->layout_count; i++) {
+      uint64_t end = locations[i].topLevelOffset + locations[i].sizeBytes;
+      if (end < locations[i].topLevelOffset) {
+        dxmt_msc_set_root_error(params, "root layout offset overflow");
+        result = DXMT_MSC_ERROR_ROOT_SIGNATURE;
+        goto cleanup;
+      }
+      params->argument_buffer_size =
+          params->argument_buffer_size > end ? params->argument_buffer_size : end;
+
+      if (params->layouts) {
+        params->layouts[i].parameter_index = i < num_parameters ? (uint32_t)i : UINT32_MAX;
+        params->layouts[i].resource_type = locations[i].resourceType;
+        params->layouts[i].shader_register = locations[i].slot;
+        params->layouts[i].register_space = locations[i].space;
+        params->layouts[i].top_level_offset = locations[i].topLevelOffset;
+        params->layouts[i].size_bytes = locations[i].sizeBytes;
+      }
+    }
+  }
+
+cleanup:
+  free(locations);
+  if (root_signature)
+    g_msc_api.IRRootSignatureDestroy(root_signature);
+  if (root_descriptor)
+    g_msc_api.IRVersionedRootSignatureDescriptorRelease(root_descriptor);
+  if (error)
+    g_msc_api.IRErrorDestroy(error);
+  return result;
+}

@@ -973,7 +973,9 @@ AIRBuilder::CreateTextureQuery(const Texture &Texture, Value *Handle, Texture::Q
 
   auto Fn = getModule()->getOrInsertFunction(FnName, FunctionType::get(getIntTy(), Tys, false), Attrs);
 
-  return builder.CreateCall(Fn, Ops);
+  // D3D12 permits NULL SRV descriptors.  AIR's texture query intrinsics
+  // produce an undefined result for a null handle; HLSL requires zero.
+  return builder.CreateSelect(builder.CreateIsNull(Handle), builder.getInt32(0), builder.CreateCall(Fn, Ops));
 }
 
 std::pair<Value *, Value *>

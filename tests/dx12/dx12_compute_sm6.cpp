@@ -1,0 +1,833 @@
+#define WIN32_LEAN_AND_MEAN
+
+#include <windows.h>
+#include <d3d12.h>
+
+#include <cstdint>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <vector>
+
+namespace {
+
+bool CheckHR(const char *name, HRESULT hr) {
+  if (FAILED(hr)) {
+    std::cerr << name << " failed: 0x" << std::hex
+              << static_cast<unsigned long>(hr) << std::dec << "\n";
+    return false;
+  }
+  return true;
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+  if (argc < 2 || argc > 3) {
+    std::cerr << "usage: dx12_compute_sm6 <shader.cso> "
+                 "[--root-uav|--reserved-uav|--reserved-srv|--descriptor-uav|--descriptor-resources|--"
+                 "descriptor-resources-space|--root-cbv|--root-constants|--"
+                 "descriptor-resources-1-1|--descriptor-null-cbv|--direct-indexed|--root-srv|--"
+                 "direct-indexed-resources|--direct-indexed-resources-lifetime|"
+                 "--direct-indexed-nonuniform|"
+                 "--unbounded-resources|"
+                 "--append-consume-unsupported|"
+                 "--nan-inf-ops|"
+                 "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops|--int64-descriptor-ops|"
+                 "--native16-ops|--native16-descriptor-ops|"
+                 "--denorm-preserve-unsupported|--denorm-ftz-unsupported|--packed-dot-ops|"
+                 "--pack-unpack-unsupported|--compute-derivatives|"
+                 "--compute-derivatives-unsupported|--atomic64-unsupported|"
+                 "--library-subobjects-unsupported|--sampler-feedback-unsupported|"
+                 "--ray-payload-qualifiers-unsupported|--global-coherent]\n";
+    return 2;
+  }
+  const bool wave_ops = argc == 3 && strcmp(argv[2], "--wave-ops") == 0;
+  const bool wave_size_unsupported = argc == 3 && strcmp(argv[2], "--wave-size-unsupported") == 0;
+  const bool int64_ops = argc == 3 && strcmp(argv[2], "--int64-ops") == 0;
+  const bool int64_descriptor_ops = argc == 3 && strcmp(argv[2], "--int64-descriptor-ops") == 0;
+  const bool native16_ops = argc == 3 && strcmp(argv[2], "--native16-ops") == 0;
+  const bool native16_descriptor_ops = argc == 3 && strcmp(argv[2], "--native16-descriptor-ops") == 0;
+  const bool int64_mode = int64_ops || int64_descriptor_ops;
+  const bool native16_mode = native16_ops || native16_descriptor_ops;
+  const bool denorm_preserve_unsupported = argc == 3 && strcmp(argv[2], "--denorm-preserve-unsupported") == 0;
+  const bool denorm_ftz_unsupported = argc == 3 && strcmp(argv[2], "--denorm-ftz-unsupported") == 0;
+  const bool denorm_unsupported = denorm_preserve_unsupported || denorm_ftz_unsupported;
+  const bool packed_dot_ops = argc == 3 && strcmp(argv[2], "--packed-dot-ops") == 0;
+  const bool pack_unpack_unsupported = argc == 3 && strcmp(argv[2], "--pack-unpack-unsupported") == 0;
+  const bool compute_derivatives = argc == 3 && strcmp(argv[2], "--compute-derivatives") == 0;
+  const bool compute_derivatives_unsupported =
+      argc == 3 && strcmp(argv[2], "--compute-derivatives-unsupported") == 0;
+  const bool atomic64_unsupported = argc == 3 && strcmp(argv[2], "--atomic64-unsupported") == 0;
+  const bool library_subobjects_unsupported =
+      argc == 3 && strcmp(argv[2], "--library-subobjects-unsupported") == 0;
+  const bool sampler_feedback_unsupported =
+      argc == 3 && strcmp(argv[2], "--sampler-feedback-unsupported") == 0;
+  const bool ray_payload_qualifiers_unsupported =
+      argc == 3 && strcmp(argv[2], "--ray-payload-qualifiers-unsupported") == 0;
+  const bool append_consume_unsupported = argc == 3 && strcmp(argv[2], "--append-consume-unsupported") == 0;
+  const bool nan_inf_ops = argc == 3 && strcmp(argv[2], "--nan-inf-ops") == 0;
+  const bool global_coherent = argc == 3 && strcmp(argv[2], "--global-coherent") == 0;
+  const bool root_uav = argc == 3 &&
+                        (strcmp(argv[2], "--root-uav") == 0 || strcmp(argv[2], "--reserved-uav") == 0 ||
+                         wave_ops || wave_size_unsupported || native16_ops || denorm_unsupported || packed_dot_ops ||
+                         pack_unpack_unsupported || compute_derivatives || compute_derivatives_unsupported ||
+                         atomic64_unsupported || nan_inf_ops || global_coherent);
+  const bool reserved_uav = argc == 3 && strcmp(argv[2], "--reserved-uav") == 0;
+  const bool reserved_srv = argc == 3 && strcmp(argv[2], "--reserved-srv") == 0;
+  const bool descriptor_uav = argc == 3 &&
+                              (strcmp(argv[2], "--descriptor-uav") == 0 || append_consume_unsupported);
+  const bool descriptor_resources =
+      argc == 3 && (strcmp(argv[2], "--descriptor-resources") == 0 || int64_descriptor_ops ||
+                    native16_descriptor_ops);
+  const bool descriptor_resources_space =
+      argc == 3 && strcmp(argv[2], "--descriptor-resources-space") == 0;
+  const bool descriptor_resources_1_1 =
+      argc == 3 && strcmp(argv[2], "--descriptor-resources-1-1") == 0;
+  const bool descriptor_null_cbv =
+      argc == 3 && strcmp(argv[2], "--descriptor-null-cbv") == 0;
+  const bool direct_indexed =
+      argc == 3 && strcmp(argv[2], "--direct-indexed") == 0;
+  const bool direct_indexed_resources =
+      argc == 3 && strcmp(argv[2], "--direct-indexed-resources") == 0;
+  const bool direct_indexed_resources_lifetime =
+      argc == 3 && strcmp(argv[2], "--direct-indexed-resources-lifetime") == 0;
+  const bool direct_indexed_nonuniform =
+      argc == 3 && strcmp(argv[2], "--direct-indexed-nonuniform") == 0;
+  const bool unbounded_resources = argc == 3 && strcmp(argv[2], "--unbounded-resources") == 0;
+  const bool direct_indexed_resource_heap = direct_indexed || direct_indexed_resources ||
+                                            direct_indexed_resources_lifetime || direct_indexed_nonuniform;
+  const bool descriptor_table_resources = descriptor_resources ||
+                                          descriptor_resources_space ||
+                                          descriptor_resources_1_1 ||
+                                          descriptor_null_cbv || unbounded_resources;
+  const bool root_cbv = argc == 3 && strcmp(argv[2], "--root-cbv") == 0;
+  const bool root_constants =
+      argc == 3 && strcmp(argv[2], "--root-constants") == 0;
+  const bool root_srv = argc == 3 && strcmp(argv[2], "--root-srv") == 0;
+  const bool root_srv_mode = root_srv || int64_ops || native16_ops;
+  const bool cache_probe = argc == 3 && strcmp(argv[2], "--cache-probe") == 0;
+  if (argc == 3 && !root_uav && !reserved_uav && !reserved_srv && !descriptor_uav && !descriptor_resources &&
+      !descriptor_resources_space && !descriptor_resources_1_1 && !descriptor_null_cbv && !unbounded_resources &&
+      !root_cbv && !root_constants && !root_srv_mode && !direct_indexed_resource_heap && !cache_probe &&
+      !wave_ops && !wave_size_unsupported && !int64_mode && !native16_mode && !denorm_unsupported &&
+      !packed_dot_ops && !pack_unpack_unsupported && !compute_derivatives &&
+      !compute_derivatives_unsupported && !atomic64_unsupported && !library_subobjects_unsupported &&
+      !sampler_feedback_unsupported && !ray_payload_qualifiers_unsupported && !nan_inf_ops && !global_coherent) {
+    std::cerr << "unknown test mode\n";
+    return 2;
+  }
+  const bool needs_root_signature =
+      root_uav || reserved_uav || reserved_srv || descriptor_uav || descriptor_table_resources ||
+      direct_indexed_resource_heap || root_cbv || root_constants || root_srv_mode;
+  const bool needs_output = needs_root_signature;
+
+  std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
+  if (!shader_file) {
+    std::cerr << "failed to open shader\n";
+    return 3;
+  }
+  auto shader_size = shader_file.tellg();
+  shader_file.seekg(0);
+  std::vector<char> shader(static_cast<size_t>(shader_size));
+  shader_file.read(shader.data(), shader.size());
+  const bool is_dxbc = shader.size() >= 4 && memcmp(shader.data(), "DXBC", 4) == 0;
+
+  ID3D12Device *device = nullptr;
+  ID3D12CommandQueue *queue = nullptr;
+  ID3D12CommandAllocator *allocator = nullptr;
+  ID3D12RootSignature *root_signature = nullptr;
+  ID3DBlob *root_blob = nullptr;
+  ID3DBlob *root_error = nullptr;
+  ID3D12DescriptorHeap *descriptor_heap = nullptr;
+  ID3D12Resource *input_buffer = nullptr;
+  ID3D12Resource *output_buffer = nullptr;
+  ID3D12Resource *readback_buffer = nullptr;
+  ID3D12Heap *reserved_heap = nullptr;
+  ID3D12Resource *reserved_buffer = nullptr;
+  ID3D12Heap *reserved_input_heap = nullptr;
+  ID3D12Resource *reserved_input = nullptr;
+  ID3D12Resource *reserved_upload = nullptr;
+  ID3D12PipelineState *pso = nullptr;
+  ID3D12PipelineState *cache_probe_pso = nullptr;
+  ID3D12GraphicsCommandList *list = nullptr;
+  ID3D12Fence *fence = nullptr;
+  HANDLE event = nullptr;
+  ID3D12CommandList *lists[1] = {};
+  UINT *mapped = nullptr;
+  UINT output_value = 0;
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  D3D12_ROOT_PARAMETER root_parameters[2] = {};
+  D3D12_DESCRIPTOR_RANGE descriptor_ranges[3] = {};
+  D3D12_ROOT_PARAMETER1 root_parameters_1[1] = {};
+  D3D12_DESCRIPTOR_RANGE1 descriptor_ranges_1[3] = {};
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+  D3D12_VERSIONED_ROOT_SIGNATURE_DESC versioned_root_desc = {};
+  D3D12_HEAP_PROPERTIES default_heap = {};
+  D3D12_HEAP_PROPERTIES upload_heap = {};
+  D3D12_HEAP_PROPERTIES readback_heap = {};
+  D3D12_RESOURCE_DESC output_desc = {};
+  D3D12_RESOURCE_DESC input_desc = {};
+  D3D12_COMPUTE_PIPELINE_STATE_DESC pso_desc = {};
+  D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_desc = {};
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+  D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+  D3D12_RESOURCE_BARRIER uav_barrier = {};
+  D3D12_CPU_DESCRIPTOR_HANDLE descriptor_cpu = {};
+  UINT descriptor_increment = 0;
+  UINT input_value = 777;
+  void *mapped_input = nullptr;
+  int result = 1;
+
+  if (!CheckHR("D3D12CreateDevice",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&device))))
+    goto cleanup;
+
+  queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+  if (!CheckHR("CreateCommandQueue",
+               device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue))))
+    goto cleanup;
+  if (!CheckHR("CreateCommandAllocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                              IID_PPV_ARGS(&allocator))))
+    goto cleanup;
+
+  if (needs_root_signature) {
+    if (root_cbv || root_constants || root_srv_mode || reserved_srv) {
+      if (root_cbv) {
+        root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        root_parameters[0].Descriptor.ShaderRegister = 0;
+        root_parameters[0].Descriptor.RegisterSpace = 0;
+      } else if (root_srv_mode || reserved_srv) {
+        root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        root_parameters[0].Descriptor.ShaderRegister = 0;
+        root_parameters[0].Descriptor.RegisterSpace = 0;
+      } else {
+        root_parameters[0].ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        root_parameters[0].Constants.ShaderRegister = 0;
+        root_parameters[0].Constants.RegisterSpace = 0;
+        root_parameters[0].Constants.Num32BitValues = 1;
+      }
+      root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+      root_parameters[1].Descriptor.ShaderRegister = 0;
+      root_parameters[1].Descriptor.RegisterSpace = 0;
+      root_desc.NumParameters = 2;
+      root_desc.pParameters = root_parameters;
+    } else if (direct_indexed_resource_heap) {
+      versioned_root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+      versioned_root_desc.Desc_1_1.Flags =
+          D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
+    } else if (unbounded_resources) {
+      descriptor_ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, 0, 0};
+      descriptor_ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
+      root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      root_parameters[0].DescriptorTable.NumDescriptorRanges = 1;
+      root_parameters[0].DescriptorTable.pDescriptorRanges = &descriptor_ranges[0];
+      root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      root_parameters[1].DescriptorTable.NumDescriptorRanges = 1;
+      root_parameters[1].DescriptorTable.pDescriptorRanges = &descriptor_ranges[1];
+      root_desc.NumParameters = 2;
+      root_desc.pParameters = root_parameters;
+    } else if (descriptor_table_resources) {
+      const UINT resource_space = descriptor_resources_space ? 1 : 0;
+      if (descriptor_resources_1_1) {
+        const auto flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
+                           D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+        descriptor_ranges_1[0] = {
+            D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, resource_space, flags, 0};
+        descriptor_ranges_1[1] = {
+            D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, resource_space, flags, 1};
+        descriptor_ranges_1[2] = {
+            D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, resource_space, flags, 2};
+        root_parameters_1[0].ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        root_parameters_1[0].DescriptorTable.NumDescriptorRanges = 3;
+        root_parameters_1[0].DescriptorTable.pDescriptorRanges =
+            descriptor_ranges_1;
+        root_parameters_1[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        versioned_root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+        versioned_root_desc.Desc_1_1.NumParameters = 1;
+        versioned_root_desc.Desc_1_1.pParameters = root_parameters_1;
+      } else {
+        descriptor_ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0,
+                                resource_space, 0};
+        descriptor_ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0,
+                                resource_space, 1};
+        descriptor_ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0,
+                                resource_space, 2};
+        root_parameters[0].ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        root_parameters[0].DescriptorTable.NumDescriptorRanges = 3;
+        root_parameters[0].DescriptorTable.pDescriptorRanges =
+            descriptor_ranges;
+        root_desc.NumParameters = 1;
+        root_desc.pParameters = root_parameters;
+      }
+    } else {
+      if (root_uav) {
+        root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        root_parameters[0].Descriptor.ShaderRegister = 0;
+        root_parameters[0].Descriptor.RegisterSpace = 0;
+      } else {
+        descriptor_ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        descriptor_ranges[0].NumDescriptors = 1;
+        descriptor_ranges[0].BaseShaderRegister = 0;
+        descriptor_ranges[0].RegisterSpace = 0;
+        descriptor_ranges[0].OffsetInDescriptorsFromTableStart = 0;
+        root_parameters[0].ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        root_parameters[0].DescriptorTable.NumDescriptorRanges = 1;
+        root_parameters[0].DescriptorTable.pDescriptorRanges =
+            descriptor_ranges;
+      }
+      root_desc.NumParameters = 1;
+      root_desc.pParameters = root_parameters;
+    }
+    HRESULT serialize_hr =
+        descriptor_resources_1_1 || direct_indexed_resource_heap
+            ? D3D12SerializeVersionedRootSignature(&versioned_root_desc,
+                                                   &root_blob, &root_error)
+            : D3D12SerializeRootSignature(&root_desc,
+                                          D3D_ROOT_SIGNATURE_VERSION_1,
+                                          &root_blob, &root_error);
+    if (!CheckHR("D3D12SerializeRootSignature", serialize_hr))
+      goto cleanup;
+    if (!CheckHR("CreateRootSignature",
+                 device->CreateRootSignature(0, root_blob->GetBufferPointer(),
+                                             root_blob->GetBufferSize(),
+                                             IID_PPV_ARGS(&root_signature))))
+      goto cleanup;
+
+    if (descriptor_uav || descriptor_table_resources || direct_indexed_resource_heap) {
+      D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
+      heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+      heap_desc.NumDescriptors = descriptor_table_resources || direct_indexed_resources ||
+                                         direct_indexed_resources_lifetime || direct_indexed_nonuniform
+                                     ? 3
+                                     : 1;
+      heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+      if (!CheckHR("CreateDescriptorHeap",
+                   device->CreateDescriptorHeap(
+                       &heap_desc, IID_PPV_ARGS(&descriptor_heap))))
+        goto cleanup;
+      descriptor_increment = device->GetDescriptorHandleIncrementSize(
+          D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    }
+
+    if (root_cbv || root_constants || root_srv_mode || reserved_srv || descriptor_table_resources ||
+        direct_indexed_resources || direct_indexed_resources_lifetime || direct_indexed_nonuniform) {
+      upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+      upload_heap.CreationNodeMask = 1;
+      upload_heap.VisibleNodeMask = 1;
+      input_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+      input_desc.Width = 256;
+      input_desc.Height = 1;
+      input_desc.DepthOrArraySize = 1;
+      input_desc.MipLevels = 1;
+      input_desc.SampleDesc.Count = 1;
+      input_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      if (!CheckHR("CreateInputBuffer",
+                   device->CreateCommittedResource(
+                       &upload_heap, D3D12_HEAP_FLAG_NONE, &input_desc,
+                       D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                       IID_PPV_ARGS(&input_buffer))))
+        goto cleanup;
+      if (!CheckHR("MapInputBuffer",
+                   input_buffer->Map(0, nullptr, &mapped_input)))
+        goto cleanup;
+      memset(mapped_input, 0, static_cast<size_t>(input_desc.Width));
+      if (direct_indexed_nonuniform || unbounded_resources) {
+        const UINT input_values[2] = {input_value, input_value + 111};
+        memcpy(mapped_input, input_values, sizeof(input_values));
+      } else {
+        memcpy(mapped_input, &input_value, sizeof(input_value));
+      }
+      input_buffer->Unmap(0, nullptr);
+
+      if (unbounded_resources) {
+        descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        srv_desc.Format = DXGI_FORMAT_UNKNOWN;
+        srv_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv_desc.Buffer.NumElements = 1;
+        srv_desc.Buffer.StructureByteStride = native16_mode ? sizeof(uint16_t) : sizeof(UINT);
+        srv_desc.Buffer.FirstElement = 0;
+        device->CreateShaderResourceView(input_buffer, &srv_desc, descriptor_cpu);
+        descriptor_cpu.ptr += descriptor_increment;
+        srv_desc.Buffer.FirstElement = 1;
+        device->CreateShaderResourceView(input_buffer, &srv_desc, descriptor_cpu);
+      } else if (descriptor_table_resources || direct_indexed_resources || direct_indexed_resources_lifetime ||
+          direct_indexed_nonuniform) {
+        descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        if (!direct_indexed_nonuniform) {
+          cbv_desc.BufferLocation = input_buffer->GetGPUVirtualAddress();
+          cbv_desc.SizeInBytes = 256;
+          device->CreateConstantBufferView(&cbv_desc, descriptor_cpu);
+          if (descriptor_null_cbv)
+            device->CreateConstantBufferView(nullptr, descriptor_cpu);
+        }
+
+        if (!direct_indexed_nonuniform)
+          descriptor_cpu.ptr += descriptor_increment;
+        srv_desc.Format = DXGI_FORMAT_UNKNOWN;
+        srv_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv_desc.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv_desc.Buffer.NumElements = direct_indexed_nonuniform ? 1 : 64;
+        srv_desc.Buffer.StructureByteStride = native16_mode ? sizeof(uint16_t) : sizeof(UINT);
+        srv_desc.Buffer.FirstElement = 0;
+        device->CreateShaderResourceView(input_buffer, &srv_desc,
+                                         descriptor_cpu);
+        if (direct_indexed_nonuniform) {
+          descriptor_cpu.ptr += descriptor_increment;
+          srv_desc.Buffer.FirstElement = 1;
+          device->CreateShaderResourceView(input_buffer, &srv_desc, descriptor_cpu);
+        }
+      }
+    }
+    if (reserved_srv) {
+      if (input_buffer) {
+        input_buffer->Release();
+        input_buffer = nullptr;
+      }
+      D3D12_RESOURCE_DESC rd = input_desc;
+      rd.Width = 65536;
+      D3D12_HEAP_DESC hd = {};
+      hd.SizeInBytes = 65536;
+      hd.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+      hd.Properties.CreationNodeMask = 1;
+      hd.Properties.VisibleNodeMask = 1;
+      if (!CheckHR("CreateReservedInputHeap", device->CreateHeap(&hd, IID_PPV_ARGS(&reserved_input_heap))) ||
+          !CheckHR("CreateReservedInput", device->CreateReservedResource(&rd, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&reserved_input))))
+        goto cleanup;
+      if (!reserved_input->GetGPUVirtualAddress()) {
+        std::cout << "SKIP: reserved SRV has no shader-visible backing\n";
+        result = 77;
+        goto cleanup;
+      }
+      D3D12_TILED_RESOURCE_COORDINATE tc = {};
+      D3D12_TILE_REGION_SIZE tr = {}; tr.NumTiles = 1;
+      UINT ht = 0;
+      queue->UpdateTileMappings(reserved_input, 1, &tc, &tr, reserved_input_heap, 1, nullptr, &ht, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+      input_buffer = reserved_input;
+      input_desc = rd;
+      D3D12_HEAP_PROPERTIES uh = {};
+      uh.Type = D3D12_HEAP_TYPE_UPLOAD; uh.CreationNodeMask = 1; uh.VisibleNodeMask = 1;
+      D3D12_RESOURCE_DESC ud = rd; ud.Flags = D3D12_RESOURCE_FLAG_NONE;
+      if (!CheckHR("CreateReservedUpload", device->CreateCommittedResource(
+              &uh, D3D12_HEAP_FLAG_NONE, &ud, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+              IID_PPV_ARGS(&reserved_upload))))
+        goto cleanup;
+      void *up = nullptr;
+      if (!CheckHR("MapReservedUpload", reserved_upload->Map(0, nullptr, &up)))
+        goto cleanup;
+      std::memset(up, 0, 65536);
+      *reinterpret_cast<UINT *>(up) = 0x12345678;
+      reserved_upload->Unmap(0, nullptr);
+    }
+
+    default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    default_heap.CreationNodeMask = 1;
+    default_heap.VisibleNodeMask = 1;
+    output_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    output_desc.Width = 256;
+    output_desc.Height = 1;
+    output_desc.DepthOrArraySize = 1;
+    output_desc.MipLevels = 1;
+    output_desc.SampleDesc.Count = 1;
+    output_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    output_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (reserved_uav) {
+      D3D12_RESOURCE_DESC reserved_desc = output_desc;
+      reserved_desc.Width = 65536;
+      reserved_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      D3D12_HEAP_DESC reserved_heap_desc = {};
+      reserved_heap_desc.SizeInBytes = 131072;
+      reserved_heap_desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+      reserved_heap_desc.Properties.CreationNodeMask = 1;
+      reserved_heap_desc.Properties.VisibleNodeMask = 1;
+      if (!CheckHR("CreateReservedHeap", device->CreateHeap(&reserved_heap_desc, IID_PPV_ARGS(&reserved_heap))) ||
+          !CheckHR("CreateReservedBuffer", device->CreateReservedResource(
+              &reserved_desc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&reserved_buffer))))
+        goto cleanup;
+      if (!reserved_buffer->GetGPUVirtualAddress()) {
+        std::cout << "SKIP: reserved UAV has no shader-visible backing\n";
+        result = 77;
+        goto cleanup;
+      }
+      D3D12_TILED_RESOURCE_COORDINATE coord = {};
+      D3D12_TILE_REGION_SIZE region = {};
+      region.NumTiles = 1;
+      UINT heap_tile = 1;
+      queue->UpdateTileMappings(reserved_buffer, 1, &coord, &region, reserved_heap, 1, nullptr, &heap_tile, nullptr,
+                                D3D12_TILE_MAPPING_FLAG_NONE);
+      // Exercise a remap before shader execution; descriptors keep the same GPU VA.
+      heap_tile = 0;
+      queue->UpdateTileMappings(reserved_buffer, 1, &coord, &region, reserved_heap, 1, nullptr, &heap_tile, nullptr,
+                                D3D12_TILE_MAPPING_FLAG_NONE);
+      output_buffer = reserved_buffer;
+    } else if (!CheckHR("CreateOutputBuffer",
+                        device->CreateCommittedResource(
+                            &default_heap, D3D12_HEAP_FLAG_NONE, &output_desc,
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                            IID_PPV_ARGS(&output_buffer))))
+      goto cleanup;
+
+    if (descriptor_uav || descriptor_table_resources || direct_indexed_resource_heap) {
+      uav_desc.Format = DXGI_FORMAT_UNKNOWN;
+      uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+      uav_desc.Buffer.NumElements = 64;
+      uav_desc.Buffer.StructureByteStride = native16_mode ? sizeof(uint16_t) : sizeof(UINT);
+      descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+      if (descriptor_table_resources || direct_indexed_resources || direct_indexed_resources_lifetime ||
+          direct_indexed_nonuniform)
+        descriptor_cpu.ptr += descriptor_increment * 2;
+      device->CreateUnorderedAccessView(output_buffer, nullptr, &uav_desc,
+                                        descriptor_cpu);
+    }
+
+    if (direct_indexed_resources_lifetime) {
+      // The descriptor must keep the SRV resource usable through submission;
+      // no later command in this test needs the D3D12 wrapper itself.
+      input_buffer->Release();
+      input_buffer = nullptr;
+    }
+
+    readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
+    readback_heap.CreationNodeMask = 1;
+    if (reserved_uav)
+      output_desc.Width = 65536;
+    readback_heap.VisibleNodeMask = 1;
+    output_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    if (!CheckHR("CreateReadbackBuffer",
+                 device->CreateCommittedResource(
+                     &readback_heap, D3D12_HEAP_FLAG_NONE, &output_desc,
+                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                     IID_PPV_ARGS(&readback_buffer))))
+      goto cleanup;
+  }
+
+  pso_desc.pRootSignature = root_signature;
+  pso_desc.CS.pShaderBytecode = shader.data();
+  pso_desc.CS.BytecodeLength = shader.size();
+  if (wave_size_unsupported || denorm_unsupported || pack_unpack_unsupported ||
+      compute_derivatives_unsupported || atomic64_unsupported || library_subobjects_unsupported ||
+      append_consume_unsupported || sampler_feedback_unsupported || ray_payload_qualifiers_unsupported) {
+    const HRESULT unsupported_hr = device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso));
+    if (unsupported_hr != E_NOTIMPL) {
+      std::cerr << "unsupported shader feature expected E_NOTIMPL, got 0x" << std::hex
+                << static_cast<unsigned long>(unsupported_hr) << std::dec << "\n";
+      goto cleanup;
+    }
+    std::cout << "DXIL unsupported "
+              << (wave_size_unsupported ? "WaveSize"
+                  : denorm_unsupported ? "denorm mode"
+                  : pack_unpack_unsupported ? "pack/unpack"
+                  : compute_derivatives_unsupported ? "compute derivatives"
+                  : atomic64_unsupported ? "64-bit atomics"
+                  : append_consume_unsupported ? "Append/Consume buffers"
+                  : sampler_feedback_unsupported ? "sampler feedback"
+                  : ray_payload_qualifiers_unsupported ? "ray payload qualifiers"
+                                                        : "library subobjects")
+              << " rejected: 0x" << std::hex
+              << static_cast<unsigned long>(unsupported_hr) << std::dec << "\n";
+    result = 0;
+    goto cleanup;
+  }
+  if (!CheckHR(
+          "CreateComputePipelineState",
+          device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso))))
+    goto cleanup;
+  if (cache_probe &&
+      !CheckHR("CreateCachedComputePipelineState",
+               device->CreateComputePipelineState(&pso_desc,
+                                                  IID_PPV_ARGS(&cache_probe_pso))))
+    goto cleanup;
+  if (!CheckHR("CreateCommandList",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                         allocator, pso, IID_PPV_ARGS(&list))))
+    goto cleanup;
+
+  if (needs_root_signature) {
+    list->SetComputeRootSignature(root_signature);
+    if (root_cbv) {
+      list->SetComputeRootConstantBufferView(
+          0, input_buffer->GetGPUVirtualAddress());
+      list->SetComputeRootUnorderedAccessView(
+          1, output_buffer->GetGPUVirtualAddress());
+    } else if (root_constants) {
+      list->SetComputeRoot32BitConstants(0, 1, &input_value, 0);
+      list->SetComputeRootUnorderedAccessView(
+          1, output_buffer->GetGPUVirtualAddress());
+    } else if (root_srv_mode || reserved_srv) {
+      list->SetComputeRootShaderResourceView(
+          0, input_buffer->GetGPUVirtualAddress());
+      list->SetComputeRootUnorderedAccessView(
+          1, output_buffer->GetGPUVirtualAddress());
+    } else if (direct_indexed_resource_heap) {
+      ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
+      list->SetDescriptorHeaps(1, heaps);
+    } else if (descriptor_table_resources) {
+      ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
+      list->SetDescriptorHeaps(1, heaps);
+      list->SetComputeRootDescriptorTable(
+          0, descriptor_heap->GetGPUDescriptorHandleForHeapStart());
+      if (unbounded_resources) {
+        auto output_table = descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+        output_table.ptr += descriptor_increment * 2;
+        list->SetComputeRootDescriptorTable(1, output_table);
+      }
+    } else if (root_uav) {
+      list->SetComputeRootUnorderedAccessView(
+          0, output_buffer->GetGPUVirtualAddress());
+    } else {
+      ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
+      list->SetDescriptorHeaps(1, heaps);
+      list->SetComputeRootDescriptorTable(
+          0, descriptor_heap->GetGPUDescriptorHandleForHeapStart());
+    }
+  }
+  if (reserved_srv) {
+    D3D12_RESOURCE_BARRIER rb = {};
+    rb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    rb.Transition.pResource = reserved_input;
+    rb.Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    rb.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    rb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list->ResourceBarrier(1, &rb);
+    D3D12_TILED_RESOURCE_COORDINATE tc = {};
+    D3D12_TILE_REGION_SIZE tr = {}; tr.NumTiles = 1;
+    list->CopyTiles(reserved_input, &tc, &tr, reserved_upload, 0, D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
+    rb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    rb.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    list->ResourceBarrier(1, &rb);
+  }
+  if (global_coherent) {
+    list->Dispatch(1, 1, 1);
+    uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uav_barrier.UAV.pResource = output_buffer;
+    list->ResourceBarrier(1, &uav_barrier);
+    list->Dispatch(2, 1, 1);
+  } else {
+    list->Dispatch(compute_derivatives ? 8 : direct_indexed_nonuniform ? 2 : 1,
+                   compute_derivatives ? 8 : 1, 1);
+  }
+  if (needs_output) {
+    uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uav_barrier.UAV.pResource = output_buffer;
+    list->ResourceBarrier(1, &uav_barrier);
+    if (reserved_uav) {
+      D3D12_TILED_RESOURCE_COORDINATE coord = {};
+      D3D12_TILE_REGION_SIZE region = {}; region.NumTiles = 1;
+      list->CopyTiles(output_buffer, &coord, &region, readback_buffer, 0, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
+    } else {
+      const UINT output_copy_size = wave_ops
+                                        ? sizeof(UINT) * 6
+                                    : packed_dot_ops
+                                        ? sizeof(UINT) * 3
+                                    : global_coherent
+                                        ? sizeof(UINT) * 2
+                                    : direct_indexed_nonuniform
+                                        ? sizeof(UINT) * 2
+                                    : compute_derivatives
+                                        ? sizeof(UINT) * 64
+                                    : int64_mode
+                                        ? sizeof(UINT) * 2
+                                        : sizeof(UINT);
+      list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0, output_copy_size);
+    }
+  }
+  if (!CheckHR("Close", list->Close()))
+    goto cleanup;
+
+  lists[0] = list;
+  queue->ExecuteCommandLists(1, lists);
+  if (!CheckHR("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                  IID_PPV_ARGS(&fence))))
+    goto cleanup;
+  if (!CheckHR("Signal", queue->Signal(fence, 1)))
+    goto cleanup;
+  event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+  if (!event ||
+      !CheckHR("SetEventOnCompletion", fence->SetEventOnCompletion(1, event)))
+    goto cleanup;
+  WaitForSingleObject(event, INFINITE);
+
+  if (reserved_uav) {
+    D3D12_TILED_RESOURCE_COORDINATE coord = {};
+    D3D12_TILE_REGION_SIZE region = {}; region.NumTiles = 1;
+    D3D12_TILE_RANGE_FLAGS null_flags = D3D12_TILE_RANGE_FLAG_NULL;
+    queue->UpdateTileMappings(output_buffer, 1, &coord, &region, nullptr, 1, &null_flags, nullptr, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+  }
+  if (needs_output) {
+    if (!CheckHR("MapReadback",
+                 readback_buffer->Map(0, nullptr,
+                                      reinterpret_cast<void **>(&mapped))))
+      goto cleanup;
+    output_value = *mapped;
+    UINT wave_prefix_product = 0;
+    UINT wave_prefix_sum = 0;
+    UINT wave_match = 0;
+    UINT wave_match_y = 0;
+    UINT int64_high = 0;
+    UINT packed_dot_unsigned = 0;
+    if (wave_ops) {
+      wave_prefix_product = mapped[1];
+      wave_prefix_sum = mapped[2];
+      wave_match = mapped[3];
+      wave_match_y = mapped[4];
+    }
+    if (int64_mode)
+      int64_high = mapped[1];
+    if (packed_dot_ops)
+      packed_dot_unsigned = mapped[1];
+    if (global_coherent && mapped[1] != 0x12345678) {
+      std::cerr << "globally coherent readback mismatch: " << mapped[1] << " expected 305419896\n";
+      readback_buffer->Unmap(0, nullptr);
+      goto cleanup;
+    }
+    if (direct_indexed_nonuniform && mapped[1] != input_value + 111) {
+      std::cerr << "non-uniform descriptor readback mismatch: " << mapped[1] << " expected "
+                << input_value + 111 << "\n";
+      readback_buffer->Unmap(0, nullptr);
+      goto cleanup;
+    }
+    readback_buffer->Unmap(0, nullptr);
+    UINT expected_value = 1234;
+    if (reserved_srv)
+      expected_value = 0x12345678;
+    else if (direct_indexed_resources || direct_indexed_resources_lifetime)
+      expected_value = input_value * 2;
+    else if (direct_indexed_nonuniform)
+      expected_value = input_value;
+    else if (direct_indexed)
+      expected_value = 4321;
+    else if (descriptor_null_cbv)
+      expected_value = input_value;
+    else if (unbounded_resources)
+      expected_value = input_value + 111;
+    else if (int64_mode)
+      expected_value = 782;
+    else if (native16_mode)
+      expected_value = 62200;
+    else if (descriptor_table_resources)
+      expected_value = input_value * 2;
+    else if (packed_dot_ops)
+      expected_value = static_cast<UINT>(-117);
+    else if (compute_derivatives)
+      expected_value = 0x40800000;
+    else if (nan_inf_ops)
+      expected_value = 31;
+    else if (global_coherent)
+      expected_value = 0x12345678;
+    else if (root_cbv || root_constants || root_srv_mode)
+      expected_value = input_value;
+    else if (wave_ops)
+      expected_value = 0x00C0FFEE;
+    if (output_value != expected_value) {
+      std::cerr << "root parameter readback mismatch: " << output_value << "\n";
+      goto cleanup;
+    }
+    if (wave_ops) {
+      UINT expected_prefix_product = 1;
+      for (UINT lane = 1; lane < 32; lane++)
+        expected_prefix_product *= lane;
+      if (wave_prefix_product != expected_prefix_product) {
+        std::cerr << "WavePrefixProduct readback mismatch: " << wave_prefix_product << " expected "
+                  << expected_prefix_product << "\n";
+        goto cleanup;
+      }
+      if (wave_prefix_sum != 496) {
+        std::cerr << "WavePrefixSum readback mismatch: " << wave_prefix_sum << " expected 496\n";
+        goto cleanup;
+      }
+      if (wave_match != 0xAAAAAAAA || wave_match_y != 0 || mapped[5] != 0x00C0FFEE) {
+        std::cerr << "WaveMatch readback mismatch: " << wave_match << ", " << wave_match_y << ", " << mapped[5]
+                  << " expected 2863311530, 0, 12648430\n";
+        goto cleanup;
+      }
+    }
+    if (int64_mode && int64_high != 1) {
+      std::cerr << "64-bit high-half readback mismatch: " << int64_high << " expected 1\n";
+      goto cleanup;
+    }
+    if (packed_dot_ops && packed_dot_unsigned != 139) {
+      std::cerr << "packed unsigned dot readback mismatch: " << packed_dot_unsigned << " expected 139\n";
+      goto cleanup;
+    }
+    std::cout << (is_dxbc ? "DXBC" : "DXIL")
+              << (packed_dot_ops || compute_derivatives || nan_inf_ops || direct_indexed_resource_heap || unbounded_resources
+                      ? " cs_6_6 "
+                  : wave_ops
+                      ? " cs_6_5 "
+                  : native16_mode
+                      ? " cs_6_2 "
+                      : " cs_6_0 ")
+              << (root_cbv                     ? "root CBV"
+                  : root_constants              ? "root constants"
+                  : int64_mode                  ? (int64_descriptor_ops ? "int64 descriptor ops" : "int64 ops")
+                  : (root_srv || reserved_srv) ? "root SRV"
+                  : direct_indexed_resources || direct_indexed_resources_lifetime
+                                                  ? "direct indexed resources"
+                  : direct_indexed_nonuniform    ? "direct indexed non-uniform"
+                  : direct_indexed               ? "direct indexed"
+                  : unbounded_resources          ? "unbounded resources"
+                  : wave_ops                    ? "wave ops"
+                  : native16_mode               ? (native16_descriptor_ops ? "native16 descriptor ops" : "native16 ops")
+                  : descriptor_table_resources  ? "descriptor resources"
+                  : packed_dot_ops              ? "packed dot ops"
+                  : compute_derivatives         ? "compute derivatives"
+                  : nan_inf_ops                 ? "nan/inf ops"
+                  : global_coherent              ? "globally coherent"
+                                                : "root UAV")
+              << " readback passed: " << output_value << "\n";
+  } else {
+    std::cout << (is_dxbc ? "DXBC" : "DXIL") << " cs_6_0 no-resource Dispatch passed\n";
+  }
+  result = 0;
+
+cleanup:
+  if (event)
+    CloseHandle(event);
+  if (fence)
+    fence->Release();
+  if (list)
+    list->Release();
+  if (pso)
+    pso->Release();
+  if (cache_probe_pso)
+    cache_probe_pso->Release();
+  if (readback_buffer)
+    readback_buffer->Release();
+  if (input_buffer && input_buffer != reserved_input)
+    input_buffer->Release();
+  if (output_buffer && output_buffer != reserved_buffer)
+    output_buffer->Release();
+  if (reserved_buffer)
+    reserved_buffer->Release();
+  if (reserved_heap)
+    reserved_heap->Release();
+  if (reserved_input)
+    reserved_input->Release();
+  if (reserved_upload)
+    reserved_upload->Release();
+  if (reserved_input_heap)
+    reserved_input_heap->Release();
+  if (descriptor_heap)
+    descriptor_heap->Release();
+  if (root_signature)
+    root_signature->Release();
+  if (root_blob)
+    root_blob->Release();
+  if (root_error)
+    root_error->Release();
+  if (allocator)
+    allocator->Release();
+  if (queue)
+    queue->Release();
+  if (device)
+    device->Release();
+  return result;
+}

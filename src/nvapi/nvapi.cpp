@@ -1,4 +1,5 @@
 #include "../d3d11/d3d11_interfaces.hpp"
+#include "../d3d12/d3d12_interfaces.hpp"
 #include "../dxgi/dxgi_interfaces.h"
 #include "com/com_pointer.hpp"
 #include "log/log.hpp"
@@ -161,6 +162,9 @@ NVAPI_INTERFACE NvAPI_D3D11_SetDepthBoundsTest(IUnknown *pDeviceOrContext,
 
 NVAPI_INTERFACE NvAPI_D3D11_IsNvShaderExtnOpCodeSupported(
     __in IUnknown *pDev, __in NvU32 opCode, __out bool *pSupported) {
+  if (!pDev || !pSupported)
+    return NVAPI_INVALID_ARGUMENT;
+
   switch (opCode) {
   /*
    * UnrealEngine queries it for checking if Nanite capability
@@ -181,6 +185,34 @@ NVAPI_INTERFACE NvAPI_D3D11_IsNvShaderExtnOpCodeSupported(
     *pSupported = false;
     break;
   }
+  return NVAPI_OK;
+}
+
+NVAPI_INTERFACE NvAPI_D3D12_IsNvShaderExtnOpCodeSupported(
+    __in ID3D12Device *pDevice, __in NvU32 opCode, __out bool *pSupported) {
+  if (!pDevice || !pSupported)
+    return NVAPI_INVALID_ARGUMENT;
+
+  // DXMT does not expose NVIDIA's private shader-extension instructions.
+  *pSupported = false;
+  WARN("nvapi: unsupported D3D12 shader extension opcode ", opCode);
+  return NVAPI_OK;
+}
+
+NVAPI_INTERFACE
+NvAPI_D3D_QueryModifiedWSupport(
+    __in IUnknown *pDev, __inout NV_QUERY_MODIFIED_W_SUPPORT_PARAMS *pQueryModifiedWSupportedParams
+) {
+  if (!pDev || !pQueryModifiedWSupportedParams)
+    return NVAPI_INVALID_ARGUMENT;
+
+  if (pQueryModifiedWSupportedParams->version != NV_QUERY_MODIFIED_W_SUPPORT_PARAMS_VER)
+    return NVAPI_INCOMPATIBLE_STRUCT_VERSION;
+
+  // Modified-W is an NVIDIA-specific raster feature.  DXMT does not expose
+  // it on the Metal backend, but a successful capability query must report
+  // that fact through the output field rather than failing function lookup.
+  pQueryModifiedWSupportedParams->bModifiedWSupported = 0;
   return NVAPI_OK;
 }
 
@@ -295,6 +327,25 @@ NvAPI_EnumLogicalGPUs(NvLogicalGpuHandle nvGPUHandle[NVAPI_MAX_LOGICAL_GPUS], Nv
   }
 
   return NVAPI_OK;
+}
+
+NVAPI_INTERFACE
+NvAPI_GetLogicalGPUFromPhysicalGPU(NvPhysicalGpuHandle hPhysicalGPU,
+                                   NvLogicalGpuHandle *pLogicalGPU) {
+  if (!hPhysicalGPU || !pLogicalGPU)
+    return NVAPI_INVALID_ARGUMENT;
+
+  auto registry_id = uint64_t(hPhysicalGPU);
+  auto devices = WMT::CopyAllDevices();
+  for (unsigned i = 0; i < devices.count(); i++) {
+    if (registry_id == devices.object(i).registryID()) {
+      // DXMT exposes one logical GPU per physical Metal device.
+      *pLogicalGPU = (NvLogicalGpuHandle)registry_id;
+      return NVAPI_OK;
+    }
+  }
+
+  return NVAPI_NVIDIA_DEVICE_NOT_FOUND;
 }
 
 NVAPI_INTERFACE
@@ -829,6 +880,8 @@ extern "C" __cdecl void *nvapi_QueryInterface(NvU32 id) {
     return (void *)&NvAPI_D3D11_SetDepthBoundsTest;
   case 0x5f68da40:
     return (void *)&NvAPI_D3D11_IsNvShaderExtnOpCodeSupported;
+  case 0x3dfacec8:
+    return (void *)&NvAPI_D3D12_IsNvShaderExtnOpCodeSupported;
   case 0x8e90bb9f:
     return (void *)&NvAPI_D3D11_SetNvShaderExtnSlot;
   case 0xae457190:
@@ -837,10 +890,14 @@ extern "C" __cdecl void *nvapi_QueryInterface(NvU32 id) {
     return (void *)&NvAPI_D3D_GetObjectHandleForResource;
   case 0x6c0ed98c:
     return (void *)&NvAPI_D3D_SetResourceHint;
+  case 0xcbf9f4f5:
+    return (void *)&NvAPI_D3D_QueryModifiedWSupport;
   case 0xe5ac921f:
     return (void *)&NvAPI_EnumPhysicalGPUs;
   case 0x48b3ea59:
     return (void *)&NvAPI_EnumLogicalGPUs;
+  case 0xadd604d1:
+    return (void *)&NvAPI_GetLogicalGPUFromPhysicalGPU;
   case 0x34ef9506:
     return (void *)&NvAPI_GetPhysicalGPUsFromDisplay;
   case 0x351da224:
