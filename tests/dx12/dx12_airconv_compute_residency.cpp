@@ -64,7 +64,7 @@ D3D12_RESOURCE_DESC BufferDescription(UINT64 size, D3D12_RESOURCE_FLAGS flags = 
   return description;
 }
 
-bool CompileComputeShader(std::vector<uint8_t> &bytecode) {
+bool CompileComputeShader(std::vector<uint8_t> &bytecode, std::vector<uint8_t> &array_bytecode) {
   static constexpr char source[] = R"HLSL(
 StructuredBuffer<uint> input_data : register(t0);
 RWStructuredBuffer<uint> output_data : register(u0);
@@ -105,6 +105,98 @@ void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
     return false;
   }
 
+  static_assert(sizeof(MTL_SM50_SHADER_ARGUMENT) == 16);
+  sm50_shader_t parsed = {};
+  sm50_error_t parse_error = {};
+  MTL_SHADER_REFLECTION reflection = {};
+  bool ranges_valid = !SM50Initialize(shader->GetBufferPointer(), shader->GetBufferSize(), &parsed,
+                                     &reflection, &parse_error);
+  if (ranges_valid) {
+    std::array<SM50_RESOURCE_RANGE, 2> bounded{};
+    bounded[1].lower_bound = 0xabcdef;
+    ranges_valid = SM50GetResourceRanges(parsed, nullptr, 0) == 3 &&
+                   SM50GetResourceRanges(parsed, bounded.data(), 1) == 3 && bounded[1].lower_bound == 0xabcdef;
+    std::array<SM50_RESOURCE_RANGE, 3> ranges{};
+    ranges_valid = ranges_valid && SM50GetResourceRanges(parsed, ranges.data(), 3) == 3;
+    for (const auto &range : ranges)
+      ranges_valid = ranges_valid && range.lower_bound == 0 && range.count == 1 && range.space == 0;
+    SM50Destroy(parsed);
+  }
+  if (parse_error)
+    SM50FreeError(parse_error);
+  if (!ranges_valid) {
+    std::cerr << "AIRCONV declared resource range introspection mismatch\n";
+    if (errors)
+      errors->Release();
+    shader->Release();
+    FreeLibrary(compiler);
+    return false;
+  }
+
+  static constexpr char array_source[] = R"HLSL(
+StructuredBuffer<uint> first : register(t0, space0);
+StructuredBuffer<uint> seventh : register(t7);
+StructuredBuffer<uint> sixty_third : register(t63);
+StructuredBuffer<uint> second : register(t0, space1);
+StructuredBuffer<uint> textures[16] : register(t8, space1);
+RWStructuredBuffer<uint> output_data : register(u2);
+cbuffer Params : register(b1) { uint index; };
+[numthreads(1, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+  output_data[id.x] = first[id.x] + seventh[id.x] + sixty_third[id.x] + second[id.x] + textures[(index + id.x) & 15][id.x] + 5;
+}
+)HLSL";
+  ID3DBlob *array_shader = nullptr;
+  ID3DBlob *array_errors = nullptr;
+  bool array_valid = SUCCEEDED(compile(array_source, sizeof(array_source)-1, "resource_ranges.hlsl", nullptr,
+      nullptr, "cs_main", "cs_5_1", D3DCOMPILE_ENABLE_STRICTNESS, 0, &array_shader, &array_errors));
+  const bool array_compiler_unavailable = !array_valid && array_errors &&
+      std::strstr(static_cast<const char *>(array_errors->GetBufferPointer()), "unrecognized compiler target") != nullptr;
+  parsed = {};
+  parse_error = {};
+  if (array_valid)
+    array_valid = !SM50Initialize(array_shader->GetBufferPointer(), array_shader->GetBufferSize(), &parsed,
+                                 &reflection, &parse_error);
+  if (array_valid) {
+    std::array<SM50_RESOURCE_RANGE, 7> ranges{};
+    array_valid = SM50GetResourceRanges(parsed, ranges.data(), ranges.size()) == ranges.size();
+    bool found_array = false, found_space0 = false, found_space1 = false;
+    for (const auto &range : ranges) {
+      if (range.type != static_cast<uint32_t>(SM50BindingType::SRV))
+        continue;
+      found_array |= range.lower_bound == 8 && range.count == 16 && range.space == 1;
+      found_space0 |= range.lower_bound == 0 && range.count == 1 && range.space == 0;
+      found_space1 |= range.lower_bound == 0 && range.count == 1 && range.space == 1;
+    }
+    array_valid = array_valid && found_array && found_space0 && found_space1;
+  }
+  if (parsed)
+    SM50Destroy(parsed);
+  if (!array_valid && !array_compiler_unavailable && array_errors)
+    std::cerr << static_cast<const char *>(array_errors->GetBufferPointer()) << "\n";
+  if (!array_valid && parse_error)
+    std::cerr << SM50GetErrorMessageString(parse_error) << "\n";
+  if (array_errors)
+    array_errors->Release();
+  if (parse_error)
+    SM50FreeError(parse_error);
+  if (array_valid) {
+    const auto *data = static_cast<const uint8_t *>(array_shader->GetBufferPointer());
+    array_bytecode.assign(data, data + array_shader->GetBufferSize());
+  }
+  if (array_shader)
+    array_shader->Release();
+  if (array_compiler_unavailable)
+    std::cout << "SKIP SM5.1 array/space introspection: compiler target unavailable\n";
+  if (!array_valid && !array_compiler_unavailable) {
+    std::cerr << "AIRCONV dynamic array and register space declarations mismatch\n";
+    if (errors)
+      errors->Release();
+    shader->Release();
+    FreeLibrary(compiler);
+    return false;
+  }
+
   const auto *data = static_cast<const uint8_t *>(shader->GetBufferPointer());
   bytecode.assign(data, data + shader->GetBufferSize());
   if (errors)
@@ -114,8 +206,8 @@ void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
   return !bytecode.empty();
 }
 
-bool CreateRootSignature(ID3D12Device *device, ID3D12RootSignature **root_signature) {
-  D3D12_DESCRIPTOR_RANGE ranges[2] = {};
+bool CreateRootSignature(ID3D12Device *device, ID3D12RootSignature **root_signature, bool extended) {
+  D3D12_DESCRIPTOR_RANGE ranges[3] = {};
   ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
   ranges[0].NumDescriptors = 1;
   ranges[0].BaseShaderRegister = 0;
@@ -125,17 +217,25 @@ bool CreateRootSignature(ID3D12Device *device, ID3D12RootSignature **root_signat
   ranges[1].BaseShaderRegister = 0;
   ranges[1].OffsetInDescriptorsFromTableStart = 0;
 
+  if (extended) {
+    ranges[0].NumDescriptors = 128;
+    ranges[1].BaseShaderRegister = 2;
+    ranges[2] = ranges[0];
+    ranges[2].RegisterSpace = 1;
+    ranges[2].OffsetInDescriptorsFromTableStart = 128;
+  }
+  const D3D12_DESCRIPTOR_RANGE srv_ranges[] = {ranges[0], ranges[2]};
   D3D12_ROOT_PARAMETER parameters[3] = {};
   parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-  parameters[0].DescriptorTable.NumDescriptorRanges = 1;
-  parameters[0].DescriptorTable.pDescriptorRanges = &ranges[0];
+  parameters[0].DescriptorTable.NumDescriptorRanges = extended ? 2 : 1;
+  parameters[0].DescriptorTable.pDescriptorRanges = srv_ranges;
   parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
   parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
   parameters[1].DescriptorTable.NumDescriptorRanges = 1;
   parameters[1].DescriptorTable.pDescriptorRanges = &ranges[1];
   parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
   parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-  parameters[2].Descriptor.ShaderRegister = 0;
+  parameters[2].Descriptor.ShaderRegister = extended ? 1 : 0;
   parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
   D3D12_ROOT_SIGNATURE_DESC description = {};
@@ -180,7 +280,7 @@ bool CreateBuffer(
 
 void SetRootBindings(
     ID3D12GraphicsCommandList *list, ID3D12PipelineState *pipeline, ID3D12RootSignature *root_signature,
-    ID3D12DescriptorHeap *descriptor_heap, UINT descriptor_stride, ID3D12Resource *config
+    ID3D12DescriptorHeap *descriptor_heap, UINT descriptor_stride, ID3D12Resource *config, bool extended
 ) {
   ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
   list->SetDescriptorHeaps(1, heaps);
@@ -188,7 +288,7 @@ void SetRootBindings(
   list->SetComputeRootSignature(root_signature);
   auto srv_table = descriptor_heap->GetGPUDescriptorHandleForHeapStart();
   auto uav_table = srv_table;
-  uav_table.ptr += descriptor_stride;
+  uav_table.ptr += uint64_t(descriptor_stride) * (extended ? 256 : 1);
   list->SetComputeRootDescriptorTable(0, srv_table);
   list->SetComputeRootDescriptorTable(1, uav_table);
   list->SetComputeRootConstantBufferView(2, config->GetGPUVirtualAddress());
@@ -332,12 +432,14 @@ bool TestAirconvErrorOwnership(const std::vector<uint8_t> &shader_bytecode) {
   return true;
 }
 
-bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
+bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader, bool extended = false, bool force_fallback = false) {
   constexpr UINT kElementCount = 4;
   constexpr UINT64 kBufferSize = kElementCount * sizeof(uint32_t);
   static constexpr std::array<uint32_t, kElementCount> input_values = {11, 22, 33, 44};
   static constexpr std::array<uint32_t, kElementCount> replacement_input_values = {101, 202, 303, 404};
-  static constexpr std::array<uint32_t, kElementCount> expected_values = {106, 207, 308, 409};
+  const std::array<uint32_t, kElementCount> expected_values = extended
+      ? std::array<uint32_t, kElementCount>{510, 1015, 1520, 2025}
+      : std::array<uint32_t, kElementCount>{106, 207, 308, 409};
   struct Config {
     uint32_t base_index;
     uint32_t addend;
@@ -350,7 +452,7 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
     return false;
 
   ComPtr<ID3D12RootSignature> root_signature;
-  if (!CreateRootSignature(device, root_signature.put()))
+  if (!CreateRootSignature(device, root_signature.put(), extended))
     return false;
   D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_description = {};
   pipeline_description.pRootSignature = root_signature.get();
@@ -361,6 +463,26 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
           device->CreateComputePipelineState(&pipeline_description, IID_PPV_ARGS(pipeline.put()))
       ))
     return false;
+
+  auto *internal_pipeline = static_cast<dxmt::MTLD3D12PipelineState *>(pipeline.get());
+  const auto &footprint = internal_pipeline->descriptor_footprint;
+  bool footprint_valid = internal_pipeline->descriptor_footprint_exact && footprint.size() == (extended ? 6 : 2);
+  if (footprint_valid && extended)
+    footprint_valid = footprint[0].parameter_index == 0 && footprint[0].offset == 0 && footprint[0].count == 1 &&
+        footprint[1].parameter_index == 0 && footprint[1].offset == 7 && footprint[1].count == 1 &&
+        footprint[2].parameter_index == 0 && footprint[2].offset == 63 && footprint[2].count == 1 &&
+        footprint[3].parameter_index == 0 && footprint[3].offset == 128 && footprint[3].count == 1 &&
+        footprint[4].parameter_index == 0 && footprint[4].offset == 136 && footprint[4].count == 16 &&
+        footprint[5].parameter_index == 1 && footprint[5].offset == 0 && footprint[5].count == 1;
+  if (footprint_valid && !extended)
+    footprint_valid = footprint[0].count == 1 && footprint[1].count == 1;
+  if (!footprint_valid) {
+    std::cerr << "AIRCONV compute static descriptor footprint mismatch\n";
+    return false;
+  }
+
+  if (force_fallback)
+    internal_pipeline->descriptor_footprint_exact = false;
 
   ComPtr<ID3D12Resource> input;
   ComPtr<ID3D12Resource> replacement_input;
@@ -412,7 +534,7 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
 
   D3D12_DESCRIPTOR_HEAP_DESC descriptor_heap_description = {};
   descriptor_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-  descriptor_heap_description.NumDescriptors = 130;
+  descriptor_heap_description.NumDescriptors = extended ? 258 : 130;
   descriptor_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
   ComPtr<ID3D12DescriptorHeap> descriptor_heap;
   if (!CheckHR(
@@ -429,14 +551,30 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
   srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
   srv.Buffer.NumElements = kElementCount;
   srv.Buffer.StructureByteStride = sizeof(uint32_t);
-  device->CreateShaderResourceView(input.get(), &srv, descriptor_heap.get()->GetCPUDescriptorHandleForHeapStart());
+  auto write_inputs = [&](ID3D12Resource *resource) {
+    auto handle = descriptor_heap.get()->GetCPUDescriptorHandleForHeapStart();
+    device->CreateShaderResourceView(resource, &srv, handle);
+    if (extended) {
+      for (UINT index : {7u, 63u}) {
+        auto disjoint = handle;
+        disjoint.ptr += uint64_t(descriptor_stride) * index;
+        device->CreateShaderResourceView(resource, &srv, disjoint);
+      }
+      handle.ptr += uint64_t(descriptor_stride) * 128;
+      device->CreateShaderResourceView(resource, &srv, handle);
+      handle.ptr += uint64_t(descriptor_stride) * 8;
+      for (UINT i = 0; i < 16; i++, handle.ptr += descriptor_stride)
+        device->CreateShaderResourceView(resource, &srv, handle);
+    }
+  };
+  write_inputs(input.get());
 
   D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
   uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
   uav.Buffer.NumElements = kElementCount;
   uav.Buffer.StructureByteStride = sizeof(uint32_t);
   auto uav_handle = descriptor_heap.get()->GetCPUDescriptorHandleForHeapStart();
-  uav_handle.ptr += descriptor_stride;
+  uav_handle.ptr += uint64_t(descriptor_stride) * (extended ? 256 : 1);
   device->CreateUnorderedAccessView(output.get(), nullptr, &uav, uav_handle);
 
   ComPtr<ID3D12CommandAllocator> allocator_a;
@@ -467,15 +605,13 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
       ))
     return false;
 
-  SetRootBindings(list_a.get(), pipeline.get(), root_signature.get(), descriptor_heap.get(), descriptor_stride, config.get());
+  SetRootBindings(list_a.get(), pipeline.get(), root_signature.get(), descriptor_heap.get(), descriptor_stride, config.get(), extended);
   list_a.get()->Dispatch(kElementCount, 1, 1);
   auto unrelated_descriptor = descriptor_heap.get()->GetCPUDescriptorHandleForHeapStart();
   unrelated_descriptor.ptr += uint64_t(descriptor_stride) * 64;
   device->CreateShaderResourceView(input.get(), &srv, unrelated_descriptor);
   list_a.get()->Dispatch(kElementCount, 1, 1);
-  device->CreateShaderResourceView(
-      replacement_input.get(), &srv, descriptor_heap.get()->GetCPUDescriptorHandleForHeapStart()
-  );
+  write_inputs(replacement_input.get());
   list_a.get()->Dispatch(kElementCount, 1, 1);
   Transition(list_a.get(), output.get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
   list_a.get()->CopyBufferRegion(scratch.get(), 0, output.get(), 0, kBufferSize);
@@ -484,7 +620,7 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
   if (!CheckHR("Close command list A", list_a.get()->Close()))
     return false;
 
-  SetRootBindings(list_b.get(), pipeline.get(), root_signature.get(), descriptor_heap.get(), descriptor_stride, config.get());
+  SetRootBindings(list_b.get(), pipeline.get(), root_signature.get(), descriptor_heap.get(), descriptor_stride, config.get(), extended);
   D3D12_RESOURCE_BARRIER uav_barrier = {};
   uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
   uav_barrier.UAV.pResource = output.get();
@@ -499,7 +635,10 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
   const auto recording_counters = internal_list_a->GetAirconvResidencyCounters();
   if (recording_counters.descriptor_requests != 4 || recording_counters.descriptor_scans_executed != 4 ||
       recording_counters.descriptor_scan_skips != 0 || recording_counters.heap_global_generation_changes_seen != 2 ||
-      recording_counters.heap_generation_invalidations != 2) {
+      recording_counters.heap_generation_invalidations != 2 ||
+      recording_counters.conservative_descriptor_slots != (extended ? 1028 : 8) ||
+      recording_counters.shader_reachable_descriptor_slots != (extended ? (force_fallback ? 1028 : 84) : 8) ||
+      recording_counters.descriptor_slots_visited != (extended ? (force_fallback ? 1028 : 84) : 8)) {
     std::cerr << "AIRCONV compute descriptor-generation recording coverage mismatch: requests="
               << recording_counters.descriptor_requests << ", scans=" << recording_counters.descriptor_scans_executed
               << ", skips=" << recording_counters.descriptor_scan_skips
@@ -510,9 +649,7 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
 
   // Root Signature 1.0 makes descriptor-table entries volatile. Rewriting the
   // SRV after both lists close but before ExecuteCommandLists changes what they use.
-  device->CreateShaderResourceView(
-      replacement_input.get(), &srv, descriptor_heap.get()->GetCPUDescriptorHandleForHeapStart()
-  );
+  write_inputs(replacement_input.get());
 
   // The closed command lists still refer to the descriptor heap, whose current
   // contents are resolved when the lists reach the queue. Drop the application's
@@ -531,11 +668,15 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
     return false;
 
   const auto submission_counters = internal_list_a->GetAirconvResidencyCounters();
-  if (submission_counters.submission_pending_uses != 4 || submission_counters.submission_unique_heaps != 1 ||
-      submission_counters.submission_unique_slots != 2 || submission_counters.submission_batch_locks != 1 ||
-      submission_counters.submission_live_slot_resolutions != 2 ||
-      submission_counters.submission_slot_reuse_hits != 2 || submission_counters.submission_fanout_uses != 4) {
-    std::cerr << "AIRCONV compute submission batching/fan-out mismatch\n";
+  if (submission_counters.submission_pending_uses != (extended ? (force_fallback ? 514 : 42) : 4) || submission_counters.submission_unique_heaps != 1 ||
+      submission_counters.submission_unique_slots != (extended ? (force_fallback ? 257 : 21) : 2) || submission_counters.submission_batch_locks != 1 ||
+      submission_counters.submission_live_slot_resolutions != (extended ? (force_fallback ? 257 : 21) : 2) ||
+      submission_counters.submission_slot_reuse_hits != (extended ? (force_fallback ? 257 : 21) : 2) || submission_counters.submission_fanout_uses != (extended ? (force_fallback ? 514 : 42) : 4)) {
+    std::cerr << "AIRCONV compute submission batching/fan-out mismatch: pending="
+              << submission_counters.submission_pending_uses << ", unique=" << submission_counters.submission_unique_slots
+              << ", live=" << submission_counters.submission_live_slot_resolutions
+              << ", reuse=" << submission_counters.submission_slot_reuse_hits
+              << ", fanout=" << submission_counters.submission_fanout_uses << "\n";
     return false;
   }
 
@@ -554,7 +695,9 @@ bool RunTest(ID3D12Device *device, const D3D12_SHADER_BYTECODE &shader) {
   readback.get()->Unmap(0, &written_range);
   if (!passed)
     return false;
-  std::cout << "AIRCONV compute residency dispatch/readback passed\n";
+  std::cout << (extended ? (force_fallback ? "AIRCONV array/space conservative fallback passed\n"
+                                         : "AIRCONV array/space filtered dispatch/readback passed\n")
+                         : "AIRCONV compute residency dispatch/readback passed\n");
   return true;
 }
 
@@ -566,8 +709,8 @@ int main(int argc, char **argv) {
   if (argc == 2)
     SetEnvironmentVariableA("DXMT_AIRCONV_COMPUTE_RESIDENCY", nullptr);
 
-  std::vector<uint8_t> shader_bytecode;
-  if (!CompileComputeShader(shader_bytecode))
+  std::vector<uint8_t> shader_bytecode, array_bytecode;
+  if (!CompileComputeShader(shader_bytecode, array_bytecode))
     return 1;
   if (!TestAirconvErrorOwnership(shader_bytecode))
     return 1;
@@ -575,7 +718,11 @@ int main(int argc, char **argv) {
   if (!CheckHR("D3D12CreateDevice", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))))
     return 1;
   const D3D12_SHADER_BYTECODE shader = {shader_bytecode.data(), shader_bytecode.size()};
-  const bool passed = RunTest(device, shader);
+  bool passed = RunTest(device, shader);
+  if (passed && !array_bytecode.empty()) {
+    const D3D12_SHADER_BYTECODE array_shader = {array_bytecode.data(), array_bytecode.size()};
+    passed = RunTest(device, array_shader, true) && RunTest(device, array_shader, true, true);
+  }
   device->Release();
   return passed ? 0 : 1;
 }

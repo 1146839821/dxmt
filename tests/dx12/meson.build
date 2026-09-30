@@ -22,7 +22,7 @@ dx12_airconv_compute_residency = executable('dx12_airconv_compute_residency', 'd
     include_directories('../../src/winemetal'),
     include_directories('../../src/util'),
   ],
-  dependencies: [ d3d12_dep ],
+  dependencies: [ d3d12_dep, winemetal_dep ],
 )
 
 dx12_airconv_firstbit = executable('dx12_airconv_firstbit', 'dx12_airconv_firstbit.cpp',

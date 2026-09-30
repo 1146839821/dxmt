@@ -104,6 +104,7 @@ struct ShaderSet {
   std::vector<uint8_t> adjacency_geometry;
   std::vector<uint8_t> pixel;
   std::vector<uint8_t> pixel_query;
+  std::vector<uint8_t> pixel_query_t5;
 };
 
 bool CompileShaders(pD3DCompile compile_shader, ShaderSet &shaders) {
@@ -260,6 +261,11 @@ float4 ps_main(PSInput input) : SV_Target {
 }
 )";
 
+  std::string pixel_t5 = pixel_query_source;
+  pixel_t5.replace(pixel_t5.find("register(t0)"), 12, "register(t5)");
+  if (!CompileShader(compile_shader, pixel_t5.c_str(), "dx12_graphics_sm5_t5.hlsl", "ps_main", "ps_5_0", shaders.pixel_query_t5))
+    return false;
+
   return CompileShader(compile_shader, vertex_source, "dx12_graphics_sm5_vs.hlsl", "vs_main", "vs_5_0",
                        shaders.vertex) &&
          CompileShader(compile_shader, no_input_vertex_source, "dx12_graphics_sm5_no_input_vs.hlsl", "vs_main",
@@ -278,6 +284,97 @@ float4 ps_main(PSInput input) : SV_Target {
          CompileShader(compile_shader, pixel_source, "dx12_graphics_sm5_ps.hlsl", "ps_main", "ps_5_0", shaders.pixel) &&
          CompileShader(compile_shader, pixel_query_source, "dx12_graphics_sm5_null_query_ps.hlsl", "ps_main", "ps_5_0",
                        shaders.pixel_query);
+}
+
+bool TestFootprintStages(ID3D12Device *device, pD3DCompile compile_shader) {
+  static constexpr char source[] = R"HLSL(
+Texture2D<float4> texture_data : register(t0);
+struct Vertex { float4 position : SV_Position; float4 color : COLOR; };
+Vertex vs_main(uint id : SV_VertexID) {
+  Vertex value;
+  value.position = float4(float(id & 1), float(id >> 1), 0, 1);
+  value.color = texture_data.Load(int3(0, 0, 0));
+  return value;
+}
+[maxvertexcount(3)]
+void gs_main(triangle Vertex input[3], inout TriangleStream<Vertex> output) {
+  for (uint i = 0; i < 3; i++) {
+    Vertex value = input[i];
+    value.color += texture_data.Load(int3(0, 0, 0));
+    output.Append(value);
+  }
+}
+float4 ps_main(Vertex input) : SV_Target { return input.color + texture_data.Load(int3(0, 0, 0)); }
+)HLSL";
+  std::vector<uint8_t> vs, gs, ps;
+  if (!CompileShader(compile_shader, source, "footprint_stages.hlsl", "vs_main", "vs_5_0", vs) ||
+      !CompileShader(compile_shader, source, "footprint_stages.hlsl", "gs_main", "gs_5_0", gs) ||
+      !CompileShader(compile_shader, source, "footprint_stages.hlsl", "ps_main", "ps_5_0", ps))
+    return false;
+  for (unsigned mode = 0; mode < 3; mode++) {
+    D3D12_DESCRIPTOR_RANGE ranges[2] = {};
+    D3D12_ROOT_PARAMETER parameters[2] = {};
+    for (unsigned i = 0; i < 2; i++) {
+      ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+      ranges[i].NumDescriptors = 128;
+      ranges[i].OffsetInDescriptorsFromTableStart = i * 32;
+      parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      parameters[i].DescriptorTable = {1, &ranges[i]};
+      parameters[i].ShaderVisibility = mode == 1
+          ? (i ? D3D12_SHADER_VISIBILITY_PIXEL : D3D12_SHADER_VISIBILITY_VERTEX)
+          : D3D12_SHADER_VISIBILITY_ALL;
+    }
+    D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+    root_desc.NumParameters = mode == 1 ? 2 : 1;
+    root_desc.pParameters = parameters;
+    ID3DBlob *blob = nullptr, *error = nullptr;
+    ID3D12RootSignature *root = nullptr;
+    ID3D12PipelineState *pipeline = nullptr;
+    bool valid = CheckHR("Serialize footprint root", D3D12SerializeRootSignature(
+        &root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error));
+    if (valid)
+      valid = CheckHR("Create footprint root", device->CreateRootSignature(
+          0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&root)));
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+    desc.pRootSignature = root;
+    desc.VS = {vs.data(), vs.size()};
+    desc.PS = {ps.data(), ps.size()};
+    if (mode == 2)
+      desc.GS = {gs.data(), gs.size()};
+    desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    desc.NumRenderTargets = 1;
+    desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.SampleMask = UINT_MAX;
+    desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (valid)
+      valid = CheckHR("Create footprint graphics PSO", device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline)));
+    if (valid) {
+      const auto *internal = static_cast<dxmt::MTLD3D12PipelineState *>(pipeline);
+      const auto &footprint = internal->descriptor_footprint;
+      valid = internal->descriptor_footprint_exact && footprint.size() == (mode == 1 ? 2 : 1);
+      if (valid && mode == 1)
+        valid = footprint[0].parameter_index == 0 && footprint[0].offset == 0 && footprint[0].count == 1 &&
+            footprint[0].stages == WMTRenderStageVertex && footprint[1].parameter_index == 1 &&
+            footprint[1].offset == 32 && footprint[1].count == 1 && footprint[1].stages == WMTRenderStageFragment;
+      else if (valid)
+        valid = footprint[0].parameter_index == 0 && footprint[0].offset == 0 && footprint[0].count == 1 &&
+            footprint[0].stages == (mode == 2 ? (WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment)
+                                            : (WMTRenderStageVertex | WMTRenderStageFragment));
+    }
+    Release(pipeline);
+    Release(root);
+    Release(error);
+    Release(blob);
+    if (!valid) {
+      std::cerr << "AIRCONV graphics footprint stage/visibility mismatch: mode=" << mode << "\n";
+      return false;
+    }
+  }
+  std::cout << "AIRCONV graphics footprint visibility, shared stages, and geometry passed\n";
+  return true;
 }
 
 struct TestCase {
@@ -304,6 +401,7 @@ struct TestCase {
   bool descriptor_incompatible_range = false;
   bool descriptor_unbounded_range = false;
   bool descriptor_two_slot_encoder_break = false;
+  bool descriptor_wide_footprint = false;
 };
 
 bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &test) {
@@ -434,7 +532,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   if (test.null_texture_query) {
     auto &srv_range = descriptor_ranges[0];
     srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srv_range.NumDescriptors = test.descriptor_two_slot_encoder_break ? 2
+    srv_range.NumDescriptors = test.descriptor_wide_footprint ? 128 : test.descriptor_two_slot_encoder_break ? 2
                                : test.descriptor_unbounded_range ? UINT_MAX
                                                                  : 1;
     srv_range.BaseShaderRegister = 0;
@@ -535,7 +633,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   pso_desc.VS = {vertex_shader.data(), vertex_shader.size()};
   pso_desc.GS = test.null_texture_query ? D3D12_SHADER_BYTECODE{}
                                          : D3D12_SHADER_BYTECODE{geometry_shader.data(), geometry_shader.size()};
-  const auto &pixel_shader = test.null_texture_query ? shaders.pixel_query : shaders.pixel;
+  const auto &pixel_shader = test.descriptor_wide_footprint ? shaders.pixel_query_t5 : test.null_texture_query ? shaders.pixel_query : shaders.pixel;
   pso_desc.PS = {pixel_shader.data(), pixel_shader.size()};
   pso_desc.InputLayout = test.no_input ? D3D12_INPUT_LAYOUT_DESC{} : D3D12_INPUT_LAYOUT_DESC{input_layout, 2};
   pso_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -576,7 +674,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
       test.descriptor_incompatible_range) {
     D3D12_DESCRIPTOR_HEAP_DESC shader_heap_desc = {};
     shader_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    shader_heap_desc.NumDescriptors = test.descriptor_unbounded_range ? 192
+    shader_heap_desc.NumDescriptors = test.descriptor_wide_footprint ? 128 : test.descriptor_unbounded_range ? 192
                                       : test.direct_indexed_heap_scan ? 4
                                       : test.descriptor_two_slot_encoder_break ? 2
                                                                                 : 1;
@@ -586,6 +684,8 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     query_descriptor = shader_heap->GetCPUDescriptorHandleForHeapStart();
     const auto descriptor_stride =
         device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    if (test.descriptor_wide_footprint)
+      query_descriptor.ptr += uint64_t(descriptor_stride) * 5;
     if (test.descriptor_unbounded_range)
       query_descriptor.ptr += uint64_t(descriptor_stride) * 63;
     if (test.null_texture_query && !test.descriptor_incompatible_range) {
@@ -820,7 +920,8 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   }
   if (test.descriptor_mutation) {
     draw();
-    device->CreateShaderResourceView(query_texture_a, nullptr, query_descriptor);
+    auto mutation_descriptor = test.descriptor_wide_footprint ? shader_heap->GetCPUDescriptorHandleForHeapStart() : query_descriptor;
+    device->CreateShaderResourceView(query_texture_a, nullptr, mutation_descriptor);
     draw();
   }
   if (test.root_cbv_mutation || test.root_srv_mutation || test.root_uav_mutation) {
@@ -904,6 +1005,9 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
       cleanup();
       return false;
     }
+    if (test.descriptor_wide_footprint &&
+        (counters.conservative_descriptor_slots != 256 || counters.shader_reachable_descriptor_slots != 2))
+      return fail("wide table did not narrow to t5 across an unrelated heap mutation");
     device->CreateShaderResourceView(query_texture_b, nullptr, query_descriptor);
   }
   if (test.descriptor_encoder_break)
@@ -911,7 +1015,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
   if (test.descriptor_encoder_break) {
     const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
-    const auto expected_slots = test.descriptor_two_slot_encoder_break ? 2u : 1u;
+    const auto expected_slots = 1u;
     const auto expected_uses = expected_slots * 3u;
     if (counters.root_scan_requests != 3 || counters.root_scan_skips != 3 ||
         counters.descriptor_requests != 3 || counters.descriptor_scans_executed != 3 ||
@@ -926,9 +1030,10 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
   if (test.descriptor_incompatible_range) {
     const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
-    if (counters.descriptor_scans_executed != 1 || counters.descriptor_slots_visited != 2 ||
-        counters.descriptor_batch_locks != 1 || counters.pending_descriptors_inserted != 2) {
-      std::cerr << "DXBC SM5 " << test.name << ": overlapping SRV/UAV table slot was not recorded independently\n";
+    if (counters.descriptor_scans_executed != 1 || counters.descriptor_slots_visited != 1 ||
+        counters.conservative_descriptor_slots != 2 || counters.shader_reachable_descriptor_slots != 1 ||
+        counters.descriptor_batch_locks != 1 || counters.pending_descriptors_inserted != 1) {
+      std::cerr << "DXBC SM5 " << test.name << ": unused UAV range was not excluded from the static footprint\n";
       cleanup();
       return false;
     }
@@ -937,9 +1042,10 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   if (test.descriptor_unbounded_range) {
     const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
     if (counters.descriptor_requests != 3 || counters.descriptor_scans_executed != 2 ||
-        counters.descriptor_scan_skips != 1 || counters.descriptor_slots_visited != 258 ||
+        counters.descriptor_scan_skips != 1 || counters.descriptor_slots_visited != 2 ||
+        counters.conservative_descriptor_slots != 258 || counters.shader_reachable_descriptor_slots != 2 ||
         counters.descriptor_batch_locks != 2 || counters.heap_global_generation_changes_seen != 1) {
-      std::cerr << "DXBC SM5 " << test.name << ": unbounded table did not cover pages through heap end (requests="
+      std::cerr << "DXBC SM5 " << test.name << ": unbounded table static shader footprint mismatch (requests="
                 << counters.descriptor_requests << ", scans=" << counters.descriptor_scans_executed
                 << ", skips=" << counters.descriptor_scan_skips << ", slots=" << counters.descriptor_slots_visited
                 << ", locks=" << counters.descriptor_batch_locks
@@ -1014,7 +1120,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
   if (test.descriptor_encoder_break) {
     const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
-    const auto expected_slots = test.descriptor_two_slot_encoder_break ? 2u : 1u;
+    const auto expected_slots = 1u;
     const auto expected_uses = expected_slots * 3u;
     if (counters.submission_pending_uses != expected_uses || counters.submission_unique_heaps != 1 ||
         counters.submission_unique_slots != expected_slots || counters.submission_batch_locks != 1 ||
@@ -1089,7 +1195,18 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 } // namespace
 
 int main(int argc, char **argv) {
+  static constexpr TestCase wide_case = [] {
+    TestCase test{};
+    test.name = "descriptor-wide-footprint";
+    test.topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    test.expected_rgb = 0x0000ff00u;
+    test.null_texture_query = true;
+    test.descriptor_mutation = true;
+    test.descriptor_wide_footprint = true;
+    return test;
+  }();
   static constexpr TestCase all_cases[] = {
+      wide_case,
       {"list", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false, 0x00ffffffu},
       {"strip", D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, false, false, false, false, false, 0x00ffffffu},
       {"indexed16", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, true, false, false, false, false, 0x00ffffffu},
@@ -1181,14 +1298,13 @@ int main(int argc, char **argv) {
     std::cerr << "SM5 shader compilation failed\n";
     return 1;
   }
-  FreeLibrary(compiler);
-
   ID3D12Device *device = nullptr;
   if (!CheckHR("D3D12CreateDevice",
                D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))))
     return 1;
 
-  bool result = true;
+  bool result = TestFootprintStages(device, compile_shader);
+  FreeLibrary(compiler);
   for (const auto *test : selected)
     result = RunCase(device, shaders, *test) && result;
   Release(device);
