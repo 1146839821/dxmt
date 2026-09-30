@@ -1376,6 +1376,28 @@ AIRCONV_API int SM50Initialize(
   return 0;
 };
 
+AIRCONV_API uint32_t SM50GetResourceRanges(
+  sm50_shader_t shader, struct SM50_RESOURCE_RANGE *ranges, uint32_t capacity
+) {
+  if (!shader)
+    return UINT32_MAX;
+  const auto &info = static_cast<dxmt::dxbc::SM50ShaderInternal *>(shader)->shader_info;
+  uint32_t count = 0;
+  auto append = [&](const auto &map, SM50BindingType type) {
+    for (const auto &[id, resource] : map) {
+      const auto &range = resource.range;
+      if (ranges && count < capacity)
+        ranges[count] = {static_cast<uint32_t>(type), id, range.lower_bound, range.size, range.space};
+      count++;
+    }
+  };
+  append(info.cbufferMap, SM50BindingType::ConstantBuffer);
+  append(info.srvMap, SM50BindingType::SRV);
+  append(info.uavMap, SM50BindingType::UAV);
+  append(info.samplerMap, SM50BindingType::Sampler);
+  return count;
+}
+
 AIRCONV_API void SM50GetArgumentsInfo(
   sm50_shader_t pShader, struct MTL_SM50_SHADER_ARGUMENT *pConstantBuffers,
   struct MTL_SM50_SHADER_ARGUMENT *pArguments

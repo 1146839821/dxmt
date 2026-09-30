@@ -351,6 +351,20 @@ AIRCONV_API int SM50CompileGeometryPipelineGeometry(
   const char *FunctionName, sm50_bitcode_t *ppBitcode, sm50_error_t *ppError
 );
 
+/* Declared register extents. UINT32_MAX count denotes an unbounded range. */
+struct SM50_RESOURCE_RANGE {
+  uint32_t type;
+  uint32_t range_id;
+  uint32_t lower_bound;
+  uint32_t count;
+  uint32_t space;
+};
+
+/* Returns the required element count; never writes past capacity. */
+AIRCONV_API uint32_t SM50GetResourceRanges(
+  sm50_shader_t shader, struct SM50_RESOURCE_RANGE *ranges, uint32_t capacity
+);
+
 AIRCONV_API void SM50GetArgumentsInfo(
   sm50_shader_t pShader, struct MTL_SM50_SHADER_ARGUMENT *pConstantBuffers,
   struct MTL_SM50_SHADER_ARGUMENT *pArguments

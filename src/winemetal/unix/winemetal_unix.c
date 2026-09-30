@@ -2496,6 +2496,13 @@ _MTLDevice_setShouldMaximizeConcurrentCompilation(void *args) {
 }
 
 static NTSTATUS
+thunk_SM50GetResourceRanges(void *args) {
+  struct sm50_get_resource_ranges_params *params = args;
+  params->ret = SM50GetResourceRanges(params->shader, params->ranges, params->capacity);
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 thunk_SM50GetArgumentsInfo(void *args) {
   struct sm50_get_arguments_info_params *params = args;
   SM50GetArgumentsInfo(params->shader, params->constant_buffers, params->arguments);
@@ -3013,6 +3020,13 @@ thunk32_SM50CompileGeometryPipelineGeometry(void *args) {
 
   sm50_compilation_argument32_free(&first_arg);
 
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk32_SM50GetResourceRanges(void *args) {
+  struct sm50_get_resource_ranges_params32 *params = args;
+  params->ret = SM50GetResourceRanges(params->shader, UInt32ToPtr(params->ranges), params->capacity);
   return STATUS_SUCCESS;
 }
 
@@ -4487,6 +4501,7 @@ const void *__wine_unix_call_funcs[] = {
     &thunk_DXMTMSCSynthesizeRayDispatch,
     &thunk_DXMTMSCSynthesizeRayIntersection,
     &_MTLDevice_supportsArgumentBuffersTier2,
+    &thunk_SM50GetResourceRanges,
 };
 
 #ifndef DXMT_NATIVE
@@ -4686,5 +4701,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &thunk32_DXMTMSCSynthesizeRayDispatch,
     &thunk32_DXMTMSCSynthesizeRayIntersection,
     &_MTLDevice_supportsArgumentBuffersTier2,
+    &thunk32_SM50GetResourceRanges,
 };
 #endif

@@ -168,3 +168,13 @@ AIRCONV_API void SM50GetArgumentsInfo(
   params.arguments = pArguments;
   UNIX_CALL(sm50_get_arguments_info, &params);
 };
+
+AIRCONV_API uint32_t SM50GetResourceRanges(
+  sm50_shader_t shader, struct SM50_RESOURCE_RANGE *ranges, uint32_t capacity
+) {
+  struct sm50_get_resource_ranges_params params = {shader, ranges, capacity, UINT32_MAX};
+  NTSTATUS status = UNIX_CALL(sm50_get_resource_ranges, &params);
+  if (status)
+    return UINT32_MAX;
+  return params.ret;
+}
