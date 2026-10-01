@@ -328,9 +328,11 @@ def run_state_object_failure_oracle(directory, wine, timeout, runtime):
     modes = ["state-" + stage + "-" + operation for stage in stages
              for operation in ("control", "invalid", "unsupported", "memory", "second-pass")]
     modes += ["state-" + rejection for rejection in ("legacy", "ordinary", "qualifiers", "missing-export")]
+    modes += ["state-load-" + stage + "-" + operation for stage in stages
+              for operation in ("control", "library", "function")]
     files = ("ray_stages_sm6.lib.cso", "compute_sm6.cs.cso", "ray_payload_qualifiers_sm6.lib.cso")
     return run_invocation_modes(directory, wine, timeout, runtime, [(mode, files) for mode in modes],
-                                "state-object stage probing/hints/retry/cache; not dispatch synthesis or GPU tracing acceptance")
+                                "state-object compiler/load probing/hints/retry/cache; not GPU tracing acceptance")
 
 
 def run_state_object_addition_failure_oracle(directory, wine, timeout, runtime):
@@ -472,7 +474,7 @@ def build_report(probes, variant, provenance=None):
                            row("ray_synthesis_invocations", synthesis["status"], ""),
                            row("ray_metal_invocations", metal["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "compiler/state-object/synthesis/Metal load/allocation probes; creation-time export loads and multi-export progress remain unverified"))
+                   "compiler/state-object/export-load/synthesis/Metal probes; addition export loads and multi-export progress remain unverified"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),

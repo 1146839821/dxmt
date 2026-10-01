@@ -31,6 +31,8 @@ unsigned metal_handle_calls = 0;
 bool observe_load = false;
 unsigned library_load_calls = 0, failed_library_load = 0;
 std::string failed_function_load;
+bool observe_export_load = false;
+unsigned function_load_calls = 0, failed_function_call = 0;
 
 const char *StageName(dxmt::D3D12ShaderKind stage) {
   switch (stage) {
@@ -226,7 +228,11 @@ static obj_handle_t TestLibraryLoad(obj_handle_t device, obj_handle_t data, obj_
   return __real___imp_MTLDevice_newLibrary(device, data, error);
 }
 static obj_handle_t TestFunctionLoad(obj_handle_t library, const char *name) {
-  if (observe_load) {
+  if (observe_export_load) {
+    trace.push_back("metal.export.function." + std::to_string(++function_load_calls));
+    if (function_load_calls == failed_function_call) return NULL_OBJECT_HANDLE;
+  }
+  else if (observe_load) {
     trace.push_back(std::string("metal.function.") + name);
     if (failed_function_load == name) return NULL_OBJECT_HANDLE;
   }
@@ -799,7 +805,9 @@ static int RunShaderLibrary(const std::string &mode, const char *library_path, c
 static int RunStateObject(const std::string &request_mode, const char *library_path, const char *ordinary_path,
     const char *qualifiers_path) {
   const bool addition = request_mode.rfind("state-add-", 0) == 0;
-  const std::string mode = addition ? "state-" + request_mode.substr(10) : request_mode;
+  const bool load = request_mode.rfind("state-load-", 0) == 0;
+  const std::string mode = load ? "state-" + request_mode.substr(11) :
+      addition ? "state-" + request_mode.substr(10) : request_mode;
   struct Export { const char *name; const char *entry; const WCHAR *wide; dxmt::D3D12ShaderKind kind; };
   const Export exports[] = {
     {"raygen", "RayGen", L"RayGen", dxmt::D3D12ShaderKind::RayGeneration},
@@ -823,12 +831,16 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
   if (hinted && target->kind != dxmt::D3D12ShaderKind::AnyHit &&
       target->kind != dxmt::D3D12ShaderKind::ClosestHit) return 2;
   fault_stage = target->kind;
-  if (operation == "invalid") fault = Fault::MSCInvalid;
+  if (load) {
+    if (operation == "library") failed_library_load = 1;
+    else if (operation == "function") failed_function_call = 1;
+    else if (operation != "control") return 2;
+  } else if (operation == "invalid") fault = Fault::MSCInvalid;
   else if (operation == "unsupported") fault = Fault::MSCUnsupported;
   else if (operation == "memory") fault = Fault::MSCMemory;
   else if (operation == "second-pass") fault = Fault::MSCSecondPass;
   else if (!reject && operation != "control") return 2;
-  const bool injected = fault != Fault::None;
+  const bool injected = fault != Fault::None || (load && operation != "control");
   std::vector<uint8_t> bytes;
   if (mode == "state-legacy") {
     if (!CompileLegacy("[numthreads(8,8,1)] void main() {}", "cs_5_0", bytes)) return 2;
@@ -941,15 +953,24 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
     for (const auto &item : exports) {
       if (hinted && &item != target) continue;
       const bool selected = &item == target && !reject;
-      if (selected && cached) continue;
+      if (selected && cached) {
+        if (load) result.insert(result.end(), {"metal.library.1", "metal.export.function.1"});
+        continue;
+      }
       const std::string prefix = std::string("msc.") + item.name + "." +
           (mode == "state-missing-export" ? "MissingExport" : target->entry);
       result.push_back(prefix + ".query");
-      if (selected && (!fail || operation == "second-pass")) result.push_back(prefix + ".materialize");
+      if (selected && (!fail || operation == "second-pass" || load)) result.push_back(prefix + ".materialize");
+      if (selected && load) {
+        result.push_back("metal.library.1");
+        if (!fail || operation != "library") result.push_back("metal.export.function.1");
+      }
     }
     return result;
   };
   ID3D12StateObject *raw = reinterpret_cast<ID3D12StateObject *>(uintptr_t(1));
+  observe_load = load;
+  observe_export_load = load;
   const size_t begin = trace.size();
   HRESULT hr = create(&raw);
   if (raw == reinterpret_cast<ID3D12StateObject *>(uintptr_t(1))) {
@@ -965,16 +986,20 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
   PrintResult(request_mode + (addition ? ".add" : ".create"), hr, passed);
   if (injected) {
     fault = Fault::None;
+    failed_library_load = 0;
+    failed_function_call = 0;
+    library_load_calls = function_load_calls = 0;
     const size_t begin = trace.size();
     raw = nullptr;
     hr = create(&raw);
     object = dxmt::Com<ID3D12StateObject>::transfer(raw);
     passed = passed && hr == S_OK && usable(object.ptr()) && parent_unchanged() &&
-        std::vector<std::string>(trace.begin() + begin, trace.end()) == expected_trace(false, false);
+        std::vector<std::string>(trace.begin() + begin, trace.end()) == expected_trace(false, load);
     PrintResult(request_mode + ".retry", hr, passed);
   }
   if (!reject) {
     fault = Fault::MSCUnsupported;
+    library_load_calls = function_load_calls = 0;
     const size_t begin = trace.size();
     raw = nullptr;
     hr = create(&raw);

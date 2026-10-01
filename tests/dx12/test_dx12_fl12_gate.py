@@ -323,8 +323,26 @@ class GateTests(unittest.TestCase):
         with patch.object(gate, "run_fixture", side_effect=fixture):
             result = gate.run_state_object_failure_oracle(Path("."), None, 1, None)
             self.assertEqual(result["status"], gate.FAIL)
-            self.assertEqual(len(result["cases"]), 44)
-            self.assertEqual(len(set(seen)), 44)
+            self.assertEqual(len(result["cases"]), 68)
+            self.assertEqual(len(set(seen)), 68)
+            expected_loads = {"state-load-" + stage + "-" + operation
+                              for stage in ("raygen", "miss", "closesthit", "anyhit", "intersection", "callable",
+                                            "hint-anyhit", "hint-closesthit")
+                              for operation in ("control", "library", "function")}
+            self.assertEqual({mode for mode in seen if mode.startswith("state-load-")}, expected_loads)
+
+    def test_state_object_each_load_failure_is_required(self):
+        for stage in ("raygen", "miss", "closesthit", "anyhit", "intersection", "callable",
+                      "hint-anyhit", "hint-closesthit"):
+            for operation in ("library", "function"):
+                failed = "state-load-" + stage + "-" + operation
+                with self.subTest(mode=failed):
+                    def fixture(*args):
+                        return {"status": gate.FAIL if args[3][0] == failed else gate.PASS}
+                    with patch.object(gate, "run_fixture", side_effect=fixture):
+                        result = gate.run_state_object_failure_oracle(Path("."), None, 1, None)
+                        self.assertEqual(result["cases"][failed]["status"], gate.FAIL)
+                        self.assertEqual(result["status"], gate.FAIL)
 
     def test_state_object_addition_missing_or_failed_is_required(self):
         for status in (None, gate.PASS, gate.FAIL, gate.UNVERIFIED):
