@@ -274,6 +274,18 @@ def run_pipeline_library_failure_oracle(directory, wine, timeout, runtime):
                                 "compute retained hits, metadata reload, failure/retry compiler traces; not native binary cache or GPU acceptance")
 
 
+def run_graphics_library_failure_oracle(directory, wine, timeout, runtime):
+    modes = []
+    for backend, failures in (("air", ("init", "compile")),
+                              ("msc", ("invalid", "unsupported", "memory", "second-pass"))):
+        prefix = "library-graphics-" + backend + "-"
+        modes += [prefix + operation for operation in ("retained", "reload", "missing", "mismatch")]
+        modes += [prefix + stage + "-" + failure for stage in ("vs", "ps") for failure in failures]
+    return run_invocation_modes(directory, wine, timeout, runtime,
+                                [(mode, ("backend_failure.vs.cso", "backend_failure.ps.cso")) for mode in modes],
+                                "ordinary graphics library hit/reload/failure/retry traces; not HS/DS/GS library or GPU acceptance")
+
+
 def build_report(probes, variant, provenance=None):
     feature = probes["feature_support"]
     options = None
@@ -343,13 +355,17 @@ def build_report(probes, variant, provenance=None):
     library = probes.get("pipeline_library_failure_oracle", {"status": UNVERIFIED})
     fl0.append(row("compute_pipeline_library_failure_invocations", library["status"],
                    "compute retained hits, metadata reload, backend failure and same-library retry"))
+    graphics_library = probes.get("graphics_library_failure_oracle", {"status": UNVERIFIED})
+    fl0.append(row("ordinary_graphics_pipeline_library_failure_invocations", graphics_library["status"],
+                   "ordinary VS/PS retained hits, metadata reload, selected failures and same-library retry"))
     isolation = aggregate([row("PSO_contracts", isolation, ""), row("compute_invocations", invocation["status"], ""),
                            row("graphics_invocations", graphics["status"], ""),
                            row("tessellation_invocations", tessellation["status"], ""),
                            row("geometry_invocations", geometry["status"], ""), row("mesh_invocations", mesh["status"], ""),
-                           row("compute_library_invocations", library["status"], "")])
+                           row("compute_library_invocations", library["status"], ""),
+                           row("ordinary_graphics_library_invocations", graphics_library["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "ordinary, tessellation, geometry, mesh and compute-library probes; graphics-library and shader-library/raytracing invocations missing"))
+                   "stage and compute/ordinary-graphics library probes; HS/DS/GS library and shader-library/raytracing invocations missing"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),
@@ -409,6 +425,7 @@ def main():
     probes["geometry_failure_oracle"] = run_geometry_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["mesh_failure_oracle"] = run_mesh_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["pipeline_library_failure_oracle"] = run_pipeline_library_failure_oracle(directory, args.wine, args.timeout, runtime)
+    probes["graphics_library_failure_oracle"] = run_graphics_library_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["typed_uav_matrix"] = run_typed_uav_matrix(directory, args.wine, args.timeout, runtime)
     if verify_build(args.build_dir.resolve(), args.variant, args.wine) != provenance:
         provenance = {"status": UNVERIFIED, "reason": "build/runtime provenance changed during probes"}
