@@ -106,7 +106,9 @@ combined AIRCONV compile and MSC per-stage/pass failure traces.
 `D3D12_GEOMETRY_FAILURE_ORACLE.md` adds GS initialization, combined VS/GS
 mesh/object compile and MSC per-stage/pass failures.
 `D3D12_MESH_FAILURE_ORACLE.md` adds native MS/AS/PS ordered conversion failures
-and DXBC/wrong-stage rejection. Pipeline-library failure
+and DXBC/wrong-stage rejection. `D3D12_PIPELINE_LIBRARY_FAILURE_ORACLE.md`
+adds compute retained hits, metadata reload and failed-rebuild/retry traces.
+Graphics pipeline-library and shader-library/raytracing failure
 invocation coverage remains needed before
 claiming the entire isolation contract validated.
 
@@ -130,8 +132,9 @@ clumps and duplicated program-version decoding. Neither alters behavior.
 ### Spec
 
 One remaining partial requirement: forced compiler-failure invocation evidence
-must prove no attempt by the other backend for pipeline-library paths.
-The follow-up oracles close bounded ordinary/emulated and native mesh cases.
+must prove no attempt by the other backend for graphics pipeline-library
+and shader-library/raytracing paths. The follow-up oracles close bounded
+ordinary/emulated, native mesh and compute pipeline-library cases.
 The gate keeps the entire isolation requirement PARTIAL.
 
 Review summary: Standards 0 hard findings (2 heuristic smells); Spec 1 partial

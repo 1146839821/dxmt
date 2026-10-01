@@ -415,6 +415,90 @@ static int RunMesh(const std::string &mode, const char *ms_path, const char *as_
   return passed ? 0 : 1;
 }
 
+static int RunLibrary(const std::string &mode, const char *path) {
+  const bool dxil = mode.rfind("library-msc-", 0) == 0;
+  const std::string prefix = dxil ? "library-msc-" : "library-air-";
+  if (mode.rfind(prefix, 0) != 0) return 2;
+  const std::string operation = mode.substr(prefix.size());
+  Fault selected = Fault::None;
+  HRESULT expected = S_OK;
+  if (operation == "init") { selected = Fault::AirInitialize; expected = E_FAIL; }
+  else if (operation == "compile") { selected = Fault::AirCompile; expected = E_FAIL; }
+  else if (operation == "invalid") { selected = Fault::MSCInvalid; expected = E_INVALIDARG; }
+  else if (operation == "unsupported") { selected = Fault::MSCUnsupported; expected = E_NOTIMPL; }
+  else if (operation == "memory") { selected = Fault::MSCMemory; expected = E_OUTOFMEMORY; }
+  else if (operation == "second-pass") { selected = Fault::MSCSecondPass; expected = E_NOTIMPL; }
+  else if (operation != "retained" && operation != "reload" && operation != "missing" && operation != "mismatch") return 2;
+  std::vector<uint8_t> bytes;
+  if (dxil ? !LoadShader(path, bytes) : !CompileLegacy("[numthreads(8,8,1)] void main() {}", "cs_5_0", bytes)) return 2;
+  dxmt::Com<ID3D12Device> device;
+  ID3D12Device *raw_device = nullptr;
+  if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&raw_device)))) return 1;
+  device = dxmt::Com<ID3D12Device>::transfer(raw_device);
+  ID3D12RootSignature *raw_root = nullptr;
+  if (FAILED(CreateProbeRoot(device.ptr(), &raw_root))) return 1;
+  auto root = dxmt::Com<ID3D12RootSignature>::transfer(raw_root);
+  D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+  desc.pRootSignature = root.ptr(); desc.CS = {bytes.data(), bytes.size()};
+  // Seed in the real DLL: its converter cache is separate from the wrapped,
+  // source-linked cold rebuild. The seed is a real PSO with real cached metadata.
+  ID3D12PipelineState *raw_seed = nullptr;
+  HRESULT hr = device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&raw_seed));
+  auto seed = dxmt::Com<ID3D12PipelineState>::transfer(raw_seed);
+  bool passed = hr == S_OK && seed && trace.empty();
+  auto *impl = static_cast<dxmt::MTLD3D12Device *>(device.ptr());
+  ID3D12PipelineLibrary *raw_library = nullptr;
+  hr = dxmt::CreateD3D12PipelineLibrary(impl, nullptr, 0, IID_PPV_ARGS(&raw_library));
+  auto library = dxmt::Com<ID3D12PipelineLibrary>::transfer(raw_library);
+  if (!passed || FAILED(hr) || !library || FAILED(library->StorePipeline(L"compute", seed.ptr()))) {
+    PrintResult(mode, hr, false); return 1;
+  }
+  if (operation != "retained") {
+    std::vector<uint8_t> serialized(library->GetSerializedSize());
+    hr = library->Serialize(serialized.data(), serialized.size());
+    if (FAILED(hr)) { PrintResult(mode, hr, false); return 1; }
+    library = nullptr; seed = nullptr;
+    raw_library = nullptr;
+    hr = dxmt::CreateD3D12PipelineLibrary(impl, serialized.data(), serialized.size(), IID_PPV_ARGS(&raw_library));
+    library = dxmt::Com<ID3D12PipelineLibrary>::transfer(raw_library);
+    if (FAILED(hr) || !library) { PrintResult(mode, hr, false); return 1; }
+  }
+  passed = passed && trace.empty();
+  const std::vector<std::string> full = dxil ? std::vector<std::string>{"msc.cs.query", "msc.cs.materialize"} :
+      std::vector<std::string>{"air.init.cs", "air.compile.cs"};
+  auto wanted = full;
+  fault = selected;
+  if (operation == "retained") { fault = dxil ? Fault::MSCUnsupported : Fault::AirInitialize; wanted.clear(); }
+  if (operation == "missing" || operation == "mismatch") { expected = E_INVALIDARG; wanted.clear(); }
+  if (operation == "mismatch") desc.NodeMask = 1;
+  if (selected != Fault::None && selected != Fault::AirCompile && selected != Fault::MSCSecondPass) wanted.resize(1);
+  ID3D12PipelineState *raw_pso = nullptr;
+  hr = library->LoadComputePipeline(operation == "missing" ? L"absent" : L"compute", &desc, IID_PPV_ARGS(&raw_pso));
+  auto pso = dxmt::Com<ID3D12PipelineState>::transfer(raw_pso);
+  passed = passed && hr == expected && bool(pso) == SUCCEEDED(expected) && trace == wanted;
+  if (operation == "retained") passed = passed && pso.ptr() == seed.ptr();
+  PrintResult(mode + ".load", hr, passed);
+  if (selected != Fault::None) {
+    fault = Fault::None;
+    const size_t begin = trace.size();
+    raw_pso = nullptr;
+    hr = library->LoadComputePipeline(L"compute", &desc, IID_PPV_ARGS(&raw_pso));
+    pso = dxmt::Com<ID3D12PipelineState>::transfer(raw_pso);
+    passed = passed && hr == S_OK && pso && std::vector<std::string>(trace.begin() + begin, trace.end()) == full;
+    PrintResult(mode + ".retry", hr, passed);
+  }
+  if (pso) {
+    const size_t begin = trace.size();
+    fault = dxil ? Fault::MSCUnsupported : Fault::AirInitialize;
+    ID3D12PipelineState *hit = nullptr;
+    hr = library->LoadComputePipeline(L"compute", &desc, IID_PPV_ARGS(&hit));
+    passed = passed && hr == S_OK && hit == pso.ptr() && trace.size() == begin;
+    if (hit) hit->Release();
+  }
+  PrintResult(mode, hr, passed);
+  return passed ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
   SetEnvironmentVariableA("DXMT_SHADER_CACHE", "0");
   if (argc == 5) return RunMesh(argv[1], argv[2], argv[3], argv[4]);
@@ -423,6 +507,7 @@ int main(int argc, char **argv) {
   if (argc == 4) return RunGraphics(argv[1], argv[2], argv[3]);
   if (argc != 3) { std::cerr << "usage: probe COMPUTE_MODE DXIL.cso | GRAPHICS_MODE VS.cso PS.cso\n"; return 2; }
   const std::string mode = argv[1];
+  if (mode.rfind("library-", 0) == 0) return RunLibrary(mode, argv[2]);
   bool dxil = false, wrong_stage = false, empty = false;
   HRESULT expected_hr = S_OK;
   unsigned expected_init = 1, expected_compile = 1, expected_msc = 0;

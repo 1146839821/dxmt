@@ -44,7 +44,7 @@ def verify_build(build, variant, wine):
         commands = json.loads((build / "compile_commands.json").read_text())
         suffixes = ["d3d12_device.cpp", "cache.c"]
         if (build / "tests/dx12/dx12_backend_failure.exe").is_file():
-            suffixes += ["dx12_backend_failure.cpp", "d3d12_pipeline_compute.cpp", "d3d12_pipeline_graphics.cpp", "d3d12_shader_converter.cpp"]
+            suffixes += ["dx12_backend_failure.cpp", "d3d12_pipeline_compute.cpp", "d3d12_pipeline_graphics.cpp", "d3d12_shader_converter.cpp", "d3d12_pipeline_persistence.cpp"]
         for suffix in suffixes:
             matches = [entry for entry in commands if entry["file"].endswith("/" + suffix)]
             if not matches:
@@ -263,6 +263,17 @@ def run_mesh_failure_oracle(directory, wine, timeout, runtime):
                                 "test-linked native MS/AS/PS compiler traces; not GPU mesh draw acceptance")
 
 
+def run_pipeline_library_failure_oracle(directory, wine, timeout, runtime):
+    modes = []
+    for backend, failures in (("air", ("init", "compile")),
+                              ("msc", ("invalid", "unsupported", "memory", "second-pass"))):
+        modes += ["library-" + backend + "-" + operation
+                  for operation in ("retained", "reload", "missing", "mismatch") + failures]
+    return run_invocation_modes(directory, wine, timeout, runtime,
+                                [(mode, ("compute_sm6.cs.cso",)) for mode in modes],
+                                "compute retained hits, metadata reload, failure/retry compiler traces; not native binary cache or GPU acceptance")
+
+
 def build_report(probes, variant, provenance=None):
     feature = probes["feature_support"]
     options = None
@@ -329,12 +340,16 @@ def build_report(probes, variant, provenance=None):
     mesh = probes.get("mesh_failure_oracle", {"status": UNVERIFIED})
     fl0.append(row("mesh_backend_failure_invocations", mesh["status"],
                    "native MS/AS/PS compiler traces; DXBC/wrong-stage precompiler rejection"))
+    library = probes.get("pipeline_library_failure_oracle", {"status": UNVERIFIED})
+    fl0.append(row("compute_pipeline_library_failure_invocations", library["status"],
+                   "compute retained hits, metadata reload, backend failure and same-library retry"))
     isolation = aggregate([row("PSO_contracts", isolation, ""), row("compute_invocations", invocation["status"], ""),
                            row("graphics_invocations", graphics["status"], ""),
                            row("tessellation_invocations", tessellation["status"], ""),
-                           row("geometry_invocations", geometry["status"], ""), row("mesh_invocations", mesh["status"], "")])
+                           row("geometry_invocations", geometry["status"], ""), row("mesh_invocations", mesh["status"], ""),
+                           row("compute_library_invocations", library["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "ordinary, tessellation, geometry and native mesh invocation probes; library failure invocations missing"))
+                   "ordinary, tessellation, geometry, mesh and compute-library probes; graphics-library and shader-library/raytracing invocations missing"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),
@@ -393,6 +408,7 @@ def main():
     probes["tessellation_failure_oracle"] = run_tessellation_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["geometry_failure_oracle"] = run_geometry_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["mesh_failure_oracle"] = run_mesh_failure_oracle(directory, args.wine, args.timeout, runtime)
+    probes["pipeline_library_failure_oracle"] = run_pipeline_library_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["typed_uav_matrix"] = run_typed_uav_matrix(directory, args.wine, args.timeout, runtime)
     if verify_build(args.build_dir.resolve(), args.variant, args.wine) != provenance:
         provenance = {"status": UNVERIFIED, "reason": "build/runtime provenance changed during probes"}
