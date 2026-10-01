@@ -226,6 +226,21 @@ def run_graphics_failure_oracle(directory, wine, timeout, runtime):
                                 "test-linked ordinary VS/PS ordered compiler traces; not GPU draw acceptance")
 
 
+def run_tessellation_failure_oracle(directory, wine, timeout, runtime):
+    modes = []
+    for backend in ("air", "msc"):
+        modes.append("tess-" + backend + "-control")
+        for stage in ("hs", "ds"):
+            modes += ["tess-" + backend + "-mixed-" + stage, "tess-" + backend + "-wrong-" + stage]
+            for failure in (("init", "compile") if backend == "air" else ("invalid", "unsupported", "memory", "second-pass")):
+                modes.append("tess-" + backend + "-" + stage + "-" + failure)
+    specifications = [(mode, ("backend_failure.vs.cso", "backend_failure.ps.cso",
+                              "shader_backend.tessellation.hs.cso", "shader_backend.tessellation.ds.cso",
+                              "shader_backend_stages.hlsl")) for mode in modes]
+    return run_invocation_modes(directory, wine, timeout, runtime, specifications,
+                                "test-linked HS/DS and combined AIRCONV compiler traces; not GPU tessellation acceptance")
+
+
 def build_report(probes, variant, provenance=None):
     feature = probes["feature_support"]
     options = None
@@ -283,10 +298,14 @@ def build_report(probes, variant, provenance=None):
     graphics = probes.get("graphics_failure_oracle", {"status": UNVERIFIED})
     fl0.append(row("graphics_backend_failure_invocations", graphics["status"],
                    "ordinary VS/PS ordered compiler traces and mixed/wrong-stage precompiler rejection"))
+    tessellation = probes.get("tessellation_failure_oracle", {"status": UNVERIFIED})
+    fl0.append(row("tessellation_backend_failure_invocations", tessellation["status"],
+                   "HS/DS ordered compiler traces and mixed/wrong-stage precompiler rejection"))
     isolation = aggregate([row("PSO_contracts", isolation, ""), row("compute_invocations", invocation["status"], ""),
-                           row("graphics_invocations", graphics["status"], "")])
+                           row("graphics_invocations", graphics["status"], ""),
+                           row("tessellation_invocations", tessellation["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "ordinary VS/PS/CS invocation probes; HS/DS/GS, mesh/library failure invocations missing"))
+                   "VS/PS/CS and HS/DS invocation probes; GS, mesh/library failure invocations missing"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),
@@ -342,6 +361,7 @@ def main():
     probes["minmax_sampler_contract"] = run_minmax_contract(directory, args.wine, args.timeout, runtime)
     probes["backend_failure_oracle"] = run_backend_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["graphics_failure_oracle"] = run_graphics_failure_oracle(directory, args.wine, args.timeout, runtime)
+    probes["tessellation_failure_oracle"] = run_tessellation_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["typed_uav_matrix"] = run_typed_uav_matrix(directory, args.wine, args.timeout, runtime)
     if verify_build(args.build_dir.resolve(), args.variant, args.wine) != provenance:
         provenance = {"status": UNVERIFIED, "reason": "build/runtime provenance changed during probes"}

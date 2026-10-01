@@ -23,13 +23,16 @@ dx12_shader_validation = executable('dx12_shader_validation', 'dx12_shader_valid
 # Observe the actual production compute/graphics routing without shipping fault hooks.
 # Import wrapping is the x64 MinGW test ABI; other targets retain existing tests.
 if cpu_family == 'x86_64'
+  configure_file(input: 'shader_backend_stages.hlsl', output: 'shader_backend_stages.hlsl', copy: true)
   executable('dx12_backend_failure', 'dx12_backend_failure.cpp',
     '../../src/d3d12/d3d12_pipeline_compute.cpp', '../../src/d3d12/d3d12_shader_converter.cpp',
     '../../src/d3d12/d3d12_pipeline_graphics.cpp',
     '../../src/d3d12/d3d12_pipeline_persistence.cpp', '../../src/d3d10/d3d10_blob.cpp',
     dependencies: [d3d12_dep, dxgi_dep, dxmt_dep, airconv_forward_dep, util_dep, winemetal_dep, dxbc_parser_dep],
     cpp_args: ['-ffunction-sections', '-fdata-sections'],
-    link_args: ['-Wl,--gc-sections', '-Wl,--wrap=__imp_SM50Initialize', '-Wl,--wrap=__imp_SM50Compile', '-Wl,--wrap=__imp_DXMTMSCCompileDXIL'],
+    link_args: ['-Wl,--gc-sections', '-Wl,--wrap=__imp_SM50Initialize', '-Wl,--wrap=__imp_SM50Compile',
+      '-Wl,--wrap=__imp_SM50CompileTessellationPipelineHull', '-Wl,--wrap=__imp_SM50CompileTessellationPipelineDomain',
+      '-Wl,--wrap=__imp_DXMTMSCCompileDXIL'],
   )
 endif
 

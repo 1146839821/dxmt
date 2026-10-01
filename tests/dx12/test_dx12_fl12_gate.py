@@ -33,6 +33,7 @@ class GateTests(unittest.TestCase):
             probes = self.probes()
             probes["backend_failure_oracle"] = {"status": status}
             probes["graphics_failure_oracle"] = {"status": gate.PASS}
+            probes["tessellation_failure_oracle"] = {"status": gate.PASS}
             rows = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
             self.assertEqual(next(r["status"] for r in rows if r["name"] == "compute_backend_failure_invocations"), status)
             self.assertEqual(next(r["status"] for r in rows if r["name"] == "backend_isolation"),
@@ -42,6 +43,7 @@ class GateTests(unittest.TestCase):
         for status in (None, gate.PASS, gate.FAIL, gate.UNVERIFIED):
             probes = self.probes()
             probes["backend_failure_oracle"] = {"status": gate.PASS}
+            probes["tessellation_failure_oracle"] = {"status": gate.PASS}
             if status is not None: probes["graphics_failure_oracle"] = {"status": status}
             rows = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
             expected = gate.UNVERIFIED if status is None else status
@@ -59,6 +61,28 @@ class GateTests(unittest.TestCase):
             result = gate.run_graphics_failure_oracle(Path("."), None, 1, None)
             self.assertEqual(result["status"], gate.FAIL)
             self.assertEqual(len(result["cases"]), 20)
+
+    def test_tessellation_missing_or_failed_is_required(self):
+        for status in (None, gate.PASS, gate.FAIL, gate.UNVERIFIED):
+            probes = self.probes()
+            probes["backend_failure_oracle"] = probes["graphics_failure_oracle"] = {"status": gate.PASS}
+            if status is not None: probes["tessellation_failure_oracle"] = {"status": status}
+            rows = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
+            expected = gate.UNVERIFIED if status is None else status
+            self.assertEqual(next(r["status"] for r in rows if r["name"] == "tessellation_backend_failure_invocations"), expected)
+            self.assertEqual(next(r["status"] for r in rows if r["name"] == "backend_isolation"),
+                             gate.PARTIAL if expected == gate.PASS else expected)
+
+    def test_tessellation_every_failure_mode_is_required(self):
+        def fixture(*args):
+            failed = args[3][0] == "tess-msc-ds-second-pass"
+            self.assertEqual(args[3][1:], ("backend_failure.vs.cso", "backend_failure.ps.cso",
+                "shader_backend.tessellation.hs.cso", "shader_backend.tessellation.ds.cso", "shader_backend_stages.hlsl"))
+            return {"status": gate.FAIL if failed else gate.PASS, "runtime_sha256": {"d3d12": "same"}}
+        with patch.object(gate, "run_fixture", side_effect=fixture):
+            result = gate.run_tessellation_failure_oracle(Path("."), None, 1, None)
+            self.assertEqual(result["status"], gate.FAIL)
+            self.assertEqual(len(result["cases"]), 22)
 
     def test_invocation_failure_is_not_hidden_by_hash_gap(self):
         def fixture(*args):
@@ -80,7 +104,8 @@ class GateTests(unittest.TestCase):
                 with patch.object(gate, "run_fixture", return_value={
                         "status": gate.PASS, "executable_sha256": executable_hash,
                         "runtime_sha256": {"d3d12": "same"}}):
-                    for oracle in (gate.run_backend_failure_oracle, gate.run_graphics_failure_oracle):
+                    for oracle in (gate.run_backend_failure_oracle, gate.run_graphics_failure_oracle,
+                                   gate.run_tessellation_failure_oracle):
                         result = oracle(root, None, 1, None)
                         self.assertEqual(result["status"], gate.PASS if executable_hash == digest else gate.UNVERIFIED)
 
