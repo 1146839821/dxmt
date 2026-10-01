@@ -33,6 +33,7 @@ unsigned library_load_calls = 0, failed_library_load = 0;
 std::string failed_function_load;
 bool observe_export_load = false;
 unsigned function_load_calls = 0, failed_function_call = 0;
+std::string fault_export;
 
 const char *StageName(dxmt::D3D12ShaderKind stage) {
   switch (stage) {
@@ -176,12 +177,15 @@ static int TestMSC(dxmt_msc_compile_dxil_params *params) {
   trace.push_back(std::string("msc.") + StageName(shader_stage) +
       (ray_stage == dxmt::D3D12ShaderKind::Unknown ? "" : "." + std::string(params->entry_point ? params->entry_point : "", params->entry_point ? params->entry_point_length : 0)) +
       (params->metallib ? ".materialize" : ".query"));
-  switch (SelectedStage(shader_stage) ? fault : Fault::None) {
+  const bool selected_export = fault_export.empty() || (params->entry_point &&
+      fault_export == std::string(params->entry_point, params->entry_point_length));
+  switch (SelectedStage(shader_stage) && selected_export ? fault : Fault::None) {
   case Fault::MSCInvalid: return DXMT_MSC_ERROR_INVALID_DXIL;
   case Fault::MSCUnsupported: return DXMT_MSC_ERROR_UNSUPPORTED_SHADER;
   case Fault::MSCMemory: return DXMT_MSC_ERROR_OUT_OF_MEMORY;
   case Fault::MSCSecondPass:
-    if (stage_call == 2) return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+    if (fault_export.empty() ? stage_call == 2 : params->metallib != nullptr)
+      return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
     break;
   default: break;
   }
@@ -806,8 +810,10 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
     const char *qualifiers_path) {
   const bool addition = request_mode.rfind("state-add-", 0) == 0;
   const bool addition_load = request_mode.rfind("state-add-load-", 0) == 0;
-  const bool load = addition_load || request_mode.rfind("state-load-", 0) == 0;
-  const std::string mode = addition_load ? "state-" + request_mode.substr(15) :
+  const bool multi = request_mode.rfind("state-multi-", 0) == 0;
+  const bool load = multi || addition_load || request_mode.rfind("state-load-", 0) == 0;
+  const std::string mode = multi ? "state-" + request_mode.substr(12) :
+      addition_load ? "state-" + request_mode.substr(15) :
       load ? "state-" + request_mode.substr(11) :
       addition ? "state-" + request_mode.substr(10) : request_mode;
   struct Export { const char *name; const char *entry; const WCHAR *wide; dxmt::D3D12ShaderKind kind; };
@@ -833,10 +839,10 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
   if (hinted && target->kind != dxmt::D3D12ShaderKind::AnyHit &&
       target->kind != dxmt::D3D12ShaderKind::ClosestHit) return 2;
   fault_stage = target->kind;
-  if (load) {
-    if (operation == "library") failed_library_load = 1;
-    else if (operation == "function") failed_function_call = 1;
-    else if (operation != "control") return 2;
+  if (multi) fault_export = target->entry;
+  if (load && (operation == "control" || operation == "library" || operation == "function")) {
+    if (operation == "library") failed_library_load = multi ? 2 : 1;
+    else if (operation == "function") failed_function_call = multi ? 2 : 1;
   } else if (operation == "invalid") fault = Fault::MSCInvalid;
   else if (operation == "unsupported") fault = Fault::MSCUnsupported;
   else if (operation == "memory") fault = Fault::MSCMemory;
@@ -862,7 +868,10 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
   D3D12_EXPORT_DESC export_desc = {
     mode == "state-duplicate" ? L"ParentExport" : L"PublicExport",
     mode == "state-missing-export" ? L"MissingExport" : target->wide, D3D12_EXPORT_FLAG_NONE};
-  const D3D12_DXIL_LIBRARY_DESC library = {{bytes.data(), bytes.size()}, 1, &export_desc};
+  const Export *first = target == &exports[5] ? &exports[0] : &exports[5];
+  D3D12_EXPORT_DESC multi_exports[] = {{L"FirstExport", first->wide, D3D12_EXPORT_FLAG_NONE}, export_desc};
+  const D3D12_DXIL_LIBRARY_DESC library = {{bytes.data(), bytes.size()}, multi ? 2u : 1u,
+      multi ? multi_exports : &export_desc};
   const D3D12_GLOBAL_ROOT_SIGNATURE global = {root.ptr()};
   const D3D12_RAYTRACING_SHADER_CONFIG config = {4, 16};
   const D3D12_RAYTRACING_PIPELINE_CONFIG pipeline = {1};
@@ -947,25 +956,40 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
     if (FAILED(object->QueryInterface(IID_PPV_ARGS(&raw)))) return false;
     auto properties = dxmt::Com<ID3D12StateObjectProperties>::transfer(raw);
     return properties->GetShaderIdentifier(L"PublicExport") && !properties->GetShaderIdentifier(target->wide) &&
+        (!multi || (properties->GetShaderIdentifier(L"FirstExport") && !properties->GetShaderIdentifier(first->wide))) &&
         (!hinted || properties->GetShaderIdentifier(L"HitGroup")) && (!addition || inherited(properties.ptr()));
   };
-  auto expected_trace = [&](bool fail, bool cached) {
+  auto expected_trace = [&](bool fail, bool cached, bool first_cached = false) {
     std::vector<std::string> result;
     if (reject && mode != "state-missing-export") return result;
+    if (multi) {
+      for (const auto &item : exports) {
+        const bool selected = &item == first;
+        const std::string prefix = std::string("msc.") + item.name + "." + first->entry;
+        if (!selected || !first_cached) {
+          result.push_back(prefix + ".query");
+          if (selected) result.push_back(prefix + ".materialize");
+        }
+        if (selected) result.insert(result.end(), {"metal.library.1", "metal.export.function.1"});
+      }
+    }
+    const std::string library_event = multi ? "metal.library.2" : "metal.library.1";
+    const std::string function_event = multi ? "metal.export.function.2" : "metal.export.function.1";
     for (const auto &item : exports) {
       if (hinted && &item != target) continue;
       const bool selected = &item == target && !reject;
       if (selected && cached) {
-        if (load) result.insert(result.end(), {"metal.library.1", "metal.export.function.1"});
+        if (load) result.insert(result.end(), {library_event, function_event});
         continue;
       }
       const std::string prefix = std::string("msc.") + item.name + "." +
           (mode == "state-missing-export" ? "MissingExport" : target->entry);
       result.push_back(prefix + ".query");
-      if (selected && (!fail || operation == "second-pass" || load)) result.push_back(prefix + ".materialize");
-      if (selected && load) {
-        result.push_back("metal.library.1");
-        if (!fail || operation != "library") result.push_back("metal.export.function.1");
+      if (selected && (!fail || operation == "second-pass" || (load && operation != "unsupported")))
+        result.push_back(prefix + ".materialize");
+      if (selected && load && (!fail || operation == "library" || operation == "function")) {
+        result.push_back(library_event);
+        if (!fail || operation != "library") result.push_back(function_event);
       }
     }
     return result;
@@ -996,7 +1020,8 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
     hr = create(&raw);
     object = dxmt::Com<ID3D12StateObject>::transfer(raw);
     passed = passed && hr == S_OK && usable(object.ptr()) && parent_unchanged() &&
-        std::vector<std::string>(trace.begin() + begin, trace.end()) == expected_trace(false, load);
+        std::vector<std::string>(trace.begin() + begin, trace.end()) ==
+            expected_trace(false, load && (!multi || operation == "library" || operation == "function"), multi);
     PrintResult(request_mode + ".retry", hr, passed);
   }
   if (!reject) {
@@ -1007,7 +1032,7 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
     hr = create(&raw);
     auto hit = dxmt::Com<ID3D12StateObject>::transfer(raw);
     passed = passed && hr == S_OK && usable(hit.ptr()) && parent_unchanged() &&
-        std::vector<std::string>(trace.begin() + begin, trace.end()) == expected_trace(false, true);
+        std::vector<std::string>(trace.begin() + begin, trace.end()) == expected_trace(false, true, multi);
   }
   PrintResult(request_mode, hr, passed);
   return passed ? 0 : 1;
