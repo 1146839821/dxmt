@@ -42,6 +42,20 @@ dx12_typed_uav_formats = executable('dx12_typed_uav_formats', 'dx12_typed_uav_fo
 dx12_typed_buffer_residency = executable('dx12_typed_buffer_residency', 'dx12_typed_buffer_residency.cpp',
   dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep],
 )
+# Opt-in native diagnostic. Never register expected-unsupported execution as a
+# D3D12 GPU acceptance test or require the optional MSC SDK to build DXMT.
+if build_machine.system() == 'darwin'
+  msc_probe_library = clang.find_library('metalirconverter', dirs: ['/usr/local/lib'], required: false)
+  msc_probe_includes = ['-I/usr/local/include']
+  if msc_probe_library.found() and clang.has_header('metal_irconverter/metal_irconverter.h', args: msc_probe_includes) and clang.has_header('metal_irconverter_runtime/metal_irconverter_runtime.h', args: msc_probe_includes)
+    executable('msc_typed_buffer_padding_probe', 'msc_typed_buffer_padding_probe.c',
+      native: true, build_by_default: false,
+      c_args: ['-ObjC', '-fobjc-arc'] + msc_probe_includes,
+      dependencies: [msc_probe_library],
+      link_args: ['-arch', native_compiler_arch, '-framework', 'Foundation', '-framework', 'Metal'],
+    )
+  endif
+endif
 configure_file(input: 'typed_uav_formats.hlsl', output: 'typed_uav_formats.hlsl', copy: true)
 dx12_typed_uav_policy = executable('dx12_typed_uav_policy', 'dx12_typed_uav_policy.cpp',
   dependencies: [d3d12_dep],
@@ -168,6 +182,11 @@ else
 endif
 
 if dxc_command.length() > 0
+  custom_target('msc_typed_buffer_padding_fixture',
+    input: 'msc_typed_buffer_padding.hlsl', output: 'msc_typed_buffer_padding.cso',
+    command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
   typed_uav_types = ['float', 'uint', 'int', 'float4', 'uint4', 'int4', 'unorm float', 'unorm float4']
   foreach type_index : range(8)
     custom_target('dx12_typed_uav_srv_@0@_fixture'.format(type_index),
