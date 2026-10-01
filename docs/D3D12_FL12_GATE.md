@@ -125,7 +125,9 @@ and a transactional publication repair. `D3D12_RAY_LOAD_FAILURE_ORACLE.md` adds
 lazy dispatch/intersection library/function-load failures and same-object retry.
 `D3D12_STATE_OBJECT_LOAD_FAILURE_ORACLE.md` adds six-stage creation-time export
 library/function-load failure, AH/CH hints, null publication and factory retry.
-Addition export loads and multi-export progress coverage remains needed before
+`D3D12_STATE_OBJECT_ADDITION_LOAD_ORACLE.md` adds addition export load failures,
+same-parent factory retry and inherited identifier/stack immutability.
+Multi-export progress coverage remains needed before
 claiming the entire isolation contract validated.
 
 ## Self-review
@@ -148,7 +150,7 @@ clumps and duplicated program-version decoding. Neither alters behavior.
 ### Spec
 
 One remaining partial requirement: forced compiler-failure invocation evidence
-must cover addition export loads and multi-export partial progress.
+must cover multi-export partial progress.
 The follow-up oracles close bounded ordinary/emulated,
 native mesh, compute, ordinary VS/PS, HS/DS and GS pipeline-library cases,
 plus the six ray-stage shader-library converter entry paths and state-object

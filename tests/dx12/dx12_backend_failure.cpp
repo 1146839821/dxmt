@@ -805,8 +805,10 @@ static int RunShaderLibrary(const std::string &mode, const char *library_path, c
 static int RunStateObject(const std::string &request_mode, const char *library_path, const char *ordinary_path,
     const char *qualifiers_path) {
   const bool addition = request_mode.rfind("state-add-", 0) == 0;
-  const bool load = request_mode.rfind("state-load-", 0) == 0;
-  const std::string mode = load ? "state-" + request_mode.substr(11) :
+  const bool addition_load = request_mode.rfind("state-add-load-", 0) == 0;
+  const bool load = addition_load || request_mode.rfind("state-load-", 0) == 0;
+  const std::string mode = addition_load ? "state-" + request_mode.substr(15) :
+      load ? "state-" + request_mode.substr(11) :
       addition ? "state-" + request_mode.substr(10) : request_mode;
   struct Export { const char *name; const char *entry; const WCHAR *wide; dxmt::D3D12ShaderKind kind; };
   const Export exports[] = {
