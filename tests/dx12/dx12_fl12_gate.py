@@ -52,11 +52,22 @@ def verify_build(build, variant, wine):
                     return {"status": FAIL, "reason": "build variant mismatch: " + suffix}
         if wine:
             expected = build / "src/winemetal/unix/winemetal.so"
-            installed = Path(wine).resolve().parent.parent / "lib/wine/x86_64-unix/winemetal.so"
+            wine_root = Path(wine).resolve().parent.parent
+            installed = wine_root / "lib/wine/x86_64-unix/winemetal.so"
             digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
             if digest(expected) != digest(installed):
                 return {"status": UNVERIFIED, "reason": "installed winemetal.so does not match build"}
-            return {"status": PASS, "reason": "compile flags and installed Unix runtime matched",
+            prefix = os.environ.get("WINEPREFIX")
+            if not prefix:
+                return {"status": UNVERIFIED, "reason": "explicit WINEPREFIX required for installed DLL provenance"}
+            hashes = runtime_hashes(build / "src")
+            # Wine builtin-marked DLLs can resolve through the installed runtime,
+            # even when a matching DLL was copied beside the fixture executable.
+            for root in (wine_root / "lib/wine/x86_64-windows", Path(prefix) / "drive_c/windows/system32"):
+                for dll, expected_hash in hashes.items():
+                    if digest(root / (dll + ".dll")) != expected_hash:
+                        return {"status": UNVERIFIED, "reason": "installed DLL does not match build: " + str(root / (dll + ".dll"))}
+            return {"status": PASS, "reason": "compile flags, installed PE DLLs and Unix runtime matched",
                     "unix_sha256": digest(expected), "runtime_sha256": runtime_hashes(build / "src")}
         return {"status": PASS, "reason": "compile flags matched; native Windows, no Unix runtime",
                 "runtime_sha256": runtime_hashes(build / "src")}
@@ -126,8 +137,28 @@ def run_minmax_contract(directory, wine, timeout, runtime):
     hashes = [case.get("runtime_sha256") for case in cases.values() if case.get("runtime_sha256")]
     status = aggregate([row(name, case["status"], "") for name, case in cases.items()])
     if hashes and any(digest != hashes[0] for digest in hashes):
-        status = UNVERIFIED
+        status = aggregate([row("execution", status, ""), row("hash_consistency", UNVERIFIED, "")])
     return {"status": status, "reason": "rejection contracts and ordinary GPU controls; not min/max GPU acceptance",
+            "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
+
+
+def run_typed_uav_matrix(directory, wine, timeout, runtime):
+    cases = {
+        "policy": run_fixture(directory, wine, "dx12_typed_uav_policy.exe", (),
+                              ("typed UAV policy contracts passed",), timeout, runtime),
+        "api": run_fixture(directory, wine, "dx12_typed_uav_formats.exe", ("--api-policy",),
+                           ("typed UAV API contracts passed",), timeout, runtime, ()),
+    }
+    for backend in ("dxbc", "dxil"):
+        files = ("typed_uav_formats.hlsl",) if backend == "dxbc" else tuple(
+            "typed_uav_%d_%d.cso" % (type_index, shape) for type_index in range(8) for shape in range(6))
+        cases[backend] = run_fixture(directory, wine, "dx12_typed_uav_formats.exe", ("--" + backend,),
+                                     ("typed UAV matrix: passed=144 failed=0",), timeout, runtime, files)
+    status = aggregate([row(name, case["status"], "") for name, case in cases.items()])
+    hashes = [case.get("runtime_sha256") for case in cases.values() if case.get("runtime_sha256")]
+    if hashes and any(digest != hashes[0] for digest in hashes):
+        status = aggregate([row("execution", status, ""), row("hash_consistency", UNVERIFIED, "")])
+    return {"status": status, "reason": "18 formats, six UAV shapes and three buffer offsets; both backends required",
             "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
 
 
@@ -160,6 +191,16 @@ def build_report(probes, variant, provenance=None):
     ]
     if provenance is not None:
         fl0.append(row("build_runtime_provenance", provenance["status"], provenance["reason"]))
+    typed = probes.get("typed_uav_matrix")
+    typed_api = options is not None and options["typed"] == 1
+    if typed and typed["status"] == PASS and typed_api:
+        for requirement in fl0:
+            if requirement["name"] == "typed_uav_additional_formats":
+                requirement.update(status=PASS, reason="API and complete typed UAV GPU matrix passed")
+    fl0.append(row("typed_uav_mandatory_gpu_matrix",
+                   typed["status"] if typed and typed["status"] != PASS else
+                   PASS if typed and typed_api else FAIL if typed else UNVERIFIED,
+                   "requires complete GPU matrix and advertised additional-format support"))
     minmax = probes.get("minmax_sampler_contract")
     fl0.append(row("min_max_reduction_filtering",
                    BLOCKED if minmax and minmax["status"] == PASS else
@@ -227,6 +268,7 @@ def main():
              "container dxil-library-in-ordinary-graphics-slot passed"), args.timeout, runtime),
     }
     probes["minmax_sampler_contract"] = run_minmax_contract(directory, args.wine, args.timeout, runtime)
+    probes["typed_uav_matrix"] = run_typed_uav_matrix(directory, args.wine, args.timeout, runtime)
     if verify_build(args.build_dir.resolve(), args.variant, args.wine) != provenance:
         provenance = {"status": UNVERIFIED, "reason": "build/runtime provenance changed during probes"}
     expected_hashes = provenance.get("runtime_sha256")

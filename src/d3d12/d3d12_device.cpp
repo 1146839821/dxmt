@@ -18,6 +18,7 @@
 
 #include "d3d12_device.hpp"
 #include "d3d12_device_child.hpp"
+#include "d3d12_format_support.hpp"
 #include "d3d12_raytracing.hpp"
 #include "d3d12_raytracing_pipeline.hpp"
 #include "d3d12sdklayers.h"
@@ -995,11 +996,17 @@ public:
         out->Support1 |= D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RESOLVE;
       if (has_capability(FormatCapability::MSAA))
         out->Support1 |= D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RENDERTARGET | D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD;
-      if (has_capability(FormatCapability::TextureBufferRead) || has_capability(FormatCapability::TextureBufferReadWrite))
+      D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
+      CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options));
+      const bool typed_uav = IsD3D12TypedUAVFormat(out->Format);
+      // Native read-only textures are not equivalent to a read/write typed UAV.
+      // Additional/optional loads require the complete shared backend contract.
+      if (SupportsD3D12TypedUAVLoad(out->Format, options.TypedUAVLoadAdditionalFormats,
+                                  has_capability(FormatCapability::TextureBufferReadWrite)))
         out->Support2 |= D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD;
-      if (has_capability(FormatCapability::TextureBufferWrite) || has_capability(FormatCapability::TextureBufferReadWrite))
+      if (typed_uav && (has_capability(FormatCapability::TextureBufferWrite) || has_capability(FormatCapability::TextureBufferReadWrite)))
         out->Support1 |= D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW;
-      if (has_capability(FormatCapability::TextureBufferWrite) || has_capability(FormatCapability::TextureBufferReadWrite))
+      if (typed_uav && (has_capability(FormatCapability::TextureBufferWrite) || has_capability(FormatCapability::TextureBufferReadWrite)))
         out->Support2 |= D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE;
       if (has_capability(FormatCapability::Atomic))
         out->Support2 |= D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_ADD | D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_BITWISE_OPS |

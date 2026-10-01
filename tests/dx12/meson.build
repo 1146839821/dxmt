@@ -36,6 +36,14 @@ dx12_texture_dimensions = executable('dx12_texture_dimensions', 'dx12_texture_di
   dependencies: [ d3d12_dep ],
 )
 
+dx12_typed_uav_formats = executable('dx12_typed_uav_formats', 'dx12_typed_uav_formats.cpp',
+  dependencies: [d3d12_dep],
+)
+configure_file(input: 'typed_uav_formats.hlsl', output: 'typed_uav_formats.hlsl', copy: true)
+dx12_typed_uav_policy = executable('dx12_typed_uav_policy', 'dx12_typed_uav_policy.cpp',
+  dependencies: [d3d12_dep],
+)
+
 dx12_graphics_sm6 = executable('dx12_graphics_sm6', 'dx12_graphics_sm6.cpp',
   dependencies: [ d3d12_dep ],
 )
@@ -157,6 +165,20 @@ else
 endif
 
 if dxc_command.length() > 0
+  typed_uav_types = ['float', 'uint', 'int', 'float4', 'uint4', 'int4', 'unorm float', 'unorm float4']
+  foreach type_index : range(8)
+    foreach shape : range(6)
+      channels = type_index in [3, 4, 5, 7] ? '4' : '1'
+      custom_target('dx12_typed_uav_@0@_@1@_fixture'.format(type_index, shape),
+        input: 'typed_uav_formats.hlsl',
+        output: 'typed_uav_@0@_@1@.cso'.format(type_index, shape),
+        command: dxc_command + ['-E', 'main', '-T', 'cs_6_0',
+          '-D', 'TYPE=' + typed_uav_types[type_index], '-D', 'SHAPE=@0@'.format(shape),
+          '-D', 'CHANNELS=' + channels, '@INPUT@', '-Fo', '@OUTPUT@'],
+        build_by_default: false,
+      )
+    endforeach
+  endforeach
   foreach stage : [['geometry', 'gs', 'gs_main'], ['tessellation', 'hs', 'hs_main'], ['tessellation', 'ds', 'ds_main']]
     custom_target('dx12_shader_backend_' + stage[1] + '_fixture',
       input: 'shader_backend_stages.hlsl',

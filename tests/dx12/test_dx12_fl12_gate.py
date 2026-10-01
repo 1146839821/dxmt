@@ -58,6 +58,27 @@ class GateTests(unittest.TestCase):
         probes["feature_support"]["status"] = gate.FAIL
         self.assertEqual(gate.build_report(probes, "normal")["FL12_0_GATE"]["status"], gate.FAIL)
 
+    def test_typed_uav_requires_both_api_and_gpu_matrix(self):
+        for advertised in (0, 1):
+            for status in (gate.PASS, gate.FAIL, gate.UNVERIFIED):
+                output = f"options: tiled=0 binding=2 stencilRef=0 logicOp=1 typedUAV={advertised} ROV=0 conservative=0 heap=2"
+                probes = self.probes(output)
+                probes["typed_uav_matrix"] = {"status": status}
+                rows = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
+                combined = next(r for r in rows if r["name"] == "typed_uav_mandatory_gpu_matrix")
+                self.assertEqual(combined["status"] == gate.PASS, bool(advertised and status == gate.PASS))
+                api = next(r for r in rows if r["name"] == "typed_uav_additional_formats")
+                self.assertEqual(api["status"] == gate.PASS, bool(advertised and status == gate.PASS))
+
+    def test_typed_uav_failed_backend_is_not_hidden_by_hash_gap(self):
+        def fixture(*args):
+            backend = args[3]
+            failed = backend == ("--dxil",)
+            return {"status": gate.FAIL if failed else gate.PASS,
+                    "runtime_sha256": {"d3d12": "other" if failed else "same"}}
+        with patch.object(gate, "run_fixture", side_effect=fixture):
+            self.assertEqual(gate.run_typed_uav_matrix(Path("."), None, 1, None)["status"], gate.FAIL)
+
     def test_provenance_gap_does_not_erase_execution_failure(self):
         probes = self.probes()
         probes["feature_support"]["status"] = gate.FAIL
@@ -102,6 +123,31 @@ class GateTests(unittest.TestCase):
     def test_missing_compile_evidence_is_unverified(self):
         with TemporaryDirectory() as directory:
             self.assertEqual(gate.verify_build(Path(directory), "normal", None)["status"], gate.UNVERIFIED)
+
+    def test_installed_builtin_dlls_must_match(self):
+        import json
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            build, wine, prefix = root / "build", root / "wine/bin/wine", root / "prefix"
+            build.mkdir(); wine.parent.mkdir(parents=True); wine.write_bytes(b"wine")
+            commands = [{"file": "/src/d3d12_device.cpp", "command": "c++"},
+                        {"file": "/src/cache.c", "command": "cc"}]
+            (build / "compile_commands.json").write_text(json.dumps(commands))
+            unix = root / "wine/lib/wine/x86_64-unix/winemetal.so"
+            expected_unix = build / "src/winemetal/unix/winemetal.so"
+            for path in (unix, expected_unix):
+                path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b"unix")
+            pe_roots = (root / "wine/lib/wine/x86_64-windows", prefix / "drive_c/windows/system32")
+            for dll in ("d3d12", "dxgi", "winemetal"):
+                for path in (build / "src" / dll / (dll + ".dll"), *(r / (dll + ".dll") for r in pe_roots)):
+                    path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(dll.encode())
+            with patch.dict(gate.os.environ, {"WINEPREFIX": str(prefix)}):
+                self.assertEqual(gate.verify_build(build, "normal", str(wine))["status"], gate.PASS)
+                for pe_root in pe_roots:
+                    target = pe_root / "d3d12.dll"
+                    target.write_bytes(b"stale")
+                    self.assertEqual(gate.verify_build(build, "normal", str(wine))["status"], gate.UNVERIFIED)
+                    target.write_bytes(b"d3d12")
 
 
 if __name__ == "__main__":
