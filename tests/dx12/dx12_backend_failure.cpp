@@ -415,13 +415,19 @@ static int RunMesh(const std::string &mode, const char *ms_path, const char *as_
   return passed ? 0 : 1;
 }
 
-static int RunLibrary(const std::string &mode, const char *path, const char *ps_path = nullptr) {
+static int RunLibrary(const std::string &mode, const char *path, const char *ps_path = nullptr,
+    const char *hs_path = nullptr, const char *ds_path = nullptr, const char *stages_path = nullptr) {
   const bool graphics = ps_path != nullptr;
-  const std::string family = graphics ? "library-graphics-" : "library-";
+  const bool tessellation = hs_path && ds_path && stages_path;
+  const std::string family = tessellation ? "library-tess-" : graphics ? "library-graphics-" : "library-";
   const bool dxil = mode.rfind(family + "msc-", 0) == 0;
   const std::string prefix = family + (dxil ? "msc-" : "air-");
   if (mode.rfind(prefix, 0) != 0) return 2;
   std::string operation = mode.substr(prefix.size());
+  if (tessellation && (operation.rfind("hs-", 0) == 0 || operation.rfind("ds-", 0) == 0)) {
+    fault_stage = operation.rfind("hs-", 0) == 0 ? dxmt::D3D12ShaderKind::Hull : dxmt::D3D12ShaderKind::Domain;
+    operation = operation.substr(3);
+  }
   if (graphics && (operation.rfind("vs-", 0) == 0 || operation.rfind("ps-", 0) == 0)) {
     fault_stage = operation.rfind("vs-", 0) == 0 ? dxmt::D3D12ShaderKind::Vertex : dxmt::D3D12ShaderKind::Pixel;
     operation = operation.substr(3);
@@ -441,6 +447,14 @@ static int RunLibrary(const std::string &mode, const char *path, const char *ps_
       "[numthreads(8,8,1)] void main() {}", graphics ? "vs_5_0" : "cs_5_0", bytes)) return 2;
   if (graphics && (dxil ? !LoadShader(ps_path, ps) : !CompileLegacy(
       "float4 main() : SV_Target { return float4(1,0,0,1); }", "ps_5_0", ps))) return 2;
+  std::vector<uint8_t> hs, ds;
+  if (tessellation) {
+    std::vector<uint8_t> source;
+    if (!LoadShader(stages_path, source)) return 2;
+    source.push_back(0);
+    if (!(dxil ? LoadShader(hs_path, hs) : CompileLegacy(reinterpret_cast<const char *>(source.data()), "hs_5_0", hs, "hs_main")) ||
+        !(dxil ? LoadShader(ds_path, ds) : CompileLegacy(reinterpret_cast<const char *>(source.data()), "ds_5_0", ds, "ds_main"))) return 2;
+  }
   dxmt::Com<ID3D12Device> device;
   ID3D12Device *raw_device = nullptr;
   if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&raw_device)))) return 1;
@@ -461,6 +475,10 @@ static int RunLibrary(const std::string &mode, const char *path, const char *ps_
     graphics_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     graphics_desc.RasterizerState.DepthClipEnable = TRUE;
     graphics_desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (tessellation) {
+      graphics_desc.HS = {hs.data(), hs.size()}; graphics_desc.DS = {ds.data(), ds.size()};
+      graphics_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+    }
   }
   // Seed in the real DLL: its converter cache is separate from the wrapped,
   // source-linked cold rebuild. The seed is a real PSO with real cached metadata.
@@ -488,7 +506,11 @@ static int RunLibrary(const std::string &mode, const char *path, const char *ps_
     if (FAILED(hr) || !library) { PrintResult(mode, hr, false); return 1; }
   }
   passed = passed && trace.empty();
-  const std::vector<std::string> full = graphics ? (dxil ?
+  const std::vector<std::string> full = tessellation ? (dxil ?
+      std::vector<std::string>{"msc.vs.query", "msc.vs.materialize", "msc.ps.query", "msc.ps.materialize",
+          "msc.hs.query", "msc.hs.materialize", "msc.ds.query", "msc.ds.materialize"} :
+      std::vector<std::string>{"air.init.vs", "air.init.hs", "air.init.ds", "air.init.ps", "air.compile.ps",
+          "air.tess.ds.hs+ds", "air.tess.hs.vs+hs", "air.tess.hs.vs+hs", "air.tess.hs.vs+hs"}) : graphics ? (dxil ?
       std::vector<std::string>{"msc.vs.query", "msc.vs.materialize", "msc.ps.query", "msc.ps.materialize"} :
       std::vector<std::string>{"air.init.vs", "air.compile.vs", "air.init.ps", "air.compile.ps"}) :
       (dxil ? std::vector<std::string>{"msc.cs.query", "msc.cs.materialize"} :
@@ -499,8 +521,14 @@ static int RunLibrary(const std::string &mode, const char *path, const char *ps_
   if (operation == "missing" || operation == "mismatch") { expected = E_INVALIDARG; wanted.clear(); }
   if (operation == "mismatch") { desc.NodeMask = 1; graphics_desc.NodeMask = 1; }
   if (selected != Fault::None) {
-    const unsigned prior = graphics && fault_stage == dxmt::D3D12ShaderKind::Pixel ? 2 : 0;
-    wanted.resize(prior + (selected == Fault::AirCompile || selected == Fault::MSCSecondPass ? 2 : 1));
+    if (tessellation) {
+      const bool hull = fault_stage == dxmt::D3D12ShaderKind::Hull;
+      if (dxil) wanted.resize((hull ? 4 : 6) + (selected == Fault::MSCSecondPass ? 2 : 1));
+      else wanted.resize(selected == Fault::AirInitialize ? (hull ? 2 : 3) : (hull ? 7 : 6));
+    } else {
+      const unsigned prior = graphics && fault_stage == dxmt::D3D12ShaderKind::Pixel ? 2 : 0;
+      wanted.resize(prior + (selected == Fault::AirCompile || selected == Fault::MSCSecondPass ? 2 : 1));
+    }
   }
   auto load = [&](const WCHAR *entry, ID3D12PipelineState **output) {
     return graphics ? library->LoadGraphicsPipeline(entry, &graphics_desc, IID_PPV_ARGS(output)) :
@@ -518,10 +546,12 @@ static int RunLibrary(const std::string &mode, const char *path, const char *ps_
     raw_pso = nullptr;
     hr = load(name, &raw_pso);
     pso = dxmt::Com<ID3D12PipelineState>::transfer(raw_pso);
-    // A successful VS survives in the process-local MSC conversion cache
-    // after PS fails, even though the library has not retained a PSO yet.
+    // Earlier successful MSC stages survive in the conversion cache even
+    // though the failed library rebuild has not retained a PSO yet.
     auto retry = full;
-    if (graphics && dxil && fault_stage == dxmt::D3D12ShaderKind::Pixel) retry.erase(retry.begin(), retry.begin() + 2);
+    if (dxil && tessellation) retry.erase(retry.begin(), retry.begin() +
+        (fault_stage == dxmt::D3D12ShaderKind::Hull ? 4 : 6));
+    else if (graphics && dxil && fault_stage == dxmt::D3D12ShaderKind::Pixel) retry.erase(retry.begin(), retry.begin() + 2);
     passed = passed && hr == S_OK && pso && std::vector<std::string>(trace.begin() + begin, trace.end()) == retry;
     PrintResult(mode + ".retry", hr, passed);
   }
@@ -541,7 +571,9 @@ int main(int argc, char **argv) {
   SetEnvironmentVariableA("DXMT_SHADER_CACHE", "0");
   if (argc == 5) return RunMesh(argv[1], argv[2], argv[3], argv[4]);
   if (argc == 6) return RunGraphics(argv[1], argv[2], argv[3], nullptr, nullptr, argv[5], argv[4]);
-  if (argc == 7) return RunGraphics(argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]);
+  if (argc == 7) return std::string(argv[1]).rfind("library-tess-", 0) == 0 ?
+      RunLibrary(argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]) :
+      RunGraphics(argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]);
   if (argc == 4) return std::string(argv[1]).rfind("library-graphics-", 0) == 0 ?
       RunLibrary(argv[1], argv[2], argv[3]) : RunGraphics(argv[1], argv[2], argv[3]);
   if (argc != 3) { std::cerr << "usage: probe COMPUTE_MODE DXIL.cso | GRAPHICS_MODE VS.cso PS.cso\n"; return 2; }
