@@ -691,8 +691,10 @@ static int RunShaderLibrary(const std::string &mode, const char *library_path, c
   return passed ? 0 : 1;
 }
 
-static int RunStateObject(const std::string &mode, const char *library_path, const char *ordinary_path,
+static int RunStateObject(const std::string &request_mode, const char *library_path, const char *ordinary_path,
     const char *qualifiers_path) {
+  const bool addition = request_mode.rfind("state-add-", 0) == 0;
+  const std::string mode = addition ? "state-" + request_mode.substr(10) : request_mode;
   struct Export { const char *name; const char *entry; const WCHAR *wide; dxmt::D3D12ShaderKind kind; };
   const Export exports[] = {
     {"raygen", "RayGen", L"RayGen", dxmt::D3D12ShaderKind::RayGeneration},
@@ -710,7 +712,8 @@ static int RunStateObject(const std::string &mode, const char *library_path, con
     if (mode.rfind(prefix, 0) == 0) { target = &item; operation = mode.substr(prefix.size()); break; }
   }
   const bool reject = mode == "state-legacy" || mode == "state-ordinary" ||
-      mode == "state-qualifiers" || mode == "state-missing-export";
+      mode == "state-qualifiers" || mode == "state-missing-export" ||
+      (addition && (mode == "state-duplicate" || mode == "state-disallowed"));
   if (mode == "state-qualifiers") target = &exports[1];
   if (hinted && target->kind != dxmt::D3D12ShaderKind::AnyHit &&
       target->kind != dxmt::D3D12ShaderKind::ClosestHit) return 2;
@@ -738,11 +741,68 @@ static int RunStateObject(const std::string &mode, const char *library_path, con
       IID_PPV_ARGS(&raw_signature)))) return 1;
   auto root = dxmt::Com<ID3D12RootSignature>::transfer(raw_signature);
   D3D12_EXPORT_DESC export_desc = {
-    L"PublicExport", mode == "state-missing-export" ? L"MissingExport" : target->wide, D3D12_EXPORT_FLAG_NONE};
+    mode == "state-duplicate" ? L"ParentExport" : L"PublicExport",
+    mode == "state-missing-export" ? L"MissingExport" : target->wide, D3D12_EXPORT_FLAG_NONE};
   const D3D12_DXIL_LIBRARY_DESC library = {{bytes.data(), bytes.size()}, 1, &export_desc};
   const D3D12_GLOBAL_ROOT_SIGNATURE global = {root.ptr()};
   const D3D12_RAYTRACING_SHADER_CONFIG config = {4, 16};
   const D3D12_RAYTRACING_PIPELINE_CONFIG pipeline = {1};
+  dxmt::Com<ID3D12StateObject> parent;
+  dxmt::Com<ID3D12StateObjectProperties> parent_properties;
+  std::vector<uint8_t> parent_identifier(D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+  constexpr UINT64 parent_stack_size = 4096;
+  if (addition) {
+    const Export *seed = target == &exports[1] ? &exports[5] : &exports[1];
+    std::vector<uint8_t> seed_bytes;
+    if (!LoadShader(library_path, seed_bytes)) return 2;
+    D3D12_EXPORT_DESC seed_export = {L"ParentExport", seed->wide, D3D12_EXPORT_FLAG_NONE};
+    const D3D12_DXIL_LIBRARY_DESC seed_library = {{seed_bytes.data(), seed_bytes.size()}, 1, &seed_export};
+    const D3D12_STATE_OBJECT_CONFIG seed_config = {mode == "state-disallowed" ?
+      D3D12_STATE_OBJECT_FLAG_NONE : D3D12_STATE_OBJECT_FLAG_ALLOW_STATE_OBJECT_ADDITIONS};
+    const D3D12_STATE_SUBOBJECT seed_subobjects[] = {
+      {D3D12_STATE_SUBOBJECT_TYPE_STATE_OBJECT_CONFIG, &seed_config},
+      {D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY, &seed_library},
+      {D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE, &global},
+      {D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG, &config},
+      {D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG, &pipeline},
+    };
+    const D3D12_STATE_OBJECT_DESC seed_desc = {D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE, 5, seed_subobjects};
+    const Fault saved = fault;
+    fault = Fault::None;
+    ID3D12StateObject *raw_parent = nullptr;
+    HRESULT hr = dxmt::CreateD3D12RaytracingStateObject(static_cast<dxmt::MTLD3D12Device *>(device.ptr()),
+        &seed_desc, __uuidof(ID3D12StateObject), reinterpret_cast<void **>(&raw_parent));
+    parent = dxmt::Com<ID3D12StateObject>::transfer(raw_parent);
+    std::vector<std::string> wanted;
+    for (const auto &item : exports) {
+      const std::string prefix = std::string("msc.") + item.name + "." + seed->entry;
+      wanted.push_back(prefix + ".query");
+      if (&item == seed) wanted.push_back(prefix + ".materialize");
+    }
+    ID3D12StateObjectProperties *raw_properties = nullptr;
+    bool valid = hr == S_OK && parent && trace == wanted &&
+        SUCCEEDED(parent->QueryInterface(IID_PPV_ARGS(&raw_properties)));
+    parent_properties = dxmt::Com<ID3D12StateObjectProperties>::transfer(raw_properties);
+    const void *identifier = parent_properties ? parent_properties->GetShaderIdentifier(L"ParentExport") : nullptr;
+    valid = valid && identifier && !parent_properties->GetShaderIdentifier(L"PublicExport");
+    if (valid) {
+      std::memcpy(parent_identifier.data(), identifier, parent_identifier.size());
+      parent_properties->SetPipelineStackSize(parent_stack_size);
+    }
+    PrintResult(request_mode + ".parent", hr, valid);
+    if (!valid) return 1;
+    fault = saved;
+    msc_stage_calls.clear();
+  }
+  auto inherited = [&](ID3D12StateObjectProperties *properties) {
+    const void *identifier = properties->GetShaderIdentifier(L"ParentExport");
+    return identifier && std::memcmp(identifier, parent_identifier.data(), parent_identifier.size()) == 0 &&
+        properties->GetPipelineStackSize() == parent_stack_size;
+  };
+  auto parent_unchanged = [&]() {
+    return !addition || (inherited(parent_properties.ptr()) &&
+        !parent_properties->GetShaderIdentifier(L"PublicExport") && !parent_properties->GetShaderIdentifier(L"HitGroup"));
+  };
   const D3D12_HIT_GROUP_DESC hit_group = {L"HitGroup", D3D12_HIT_GROUP_TYPE_TRIANGLES,
     target->kind == dxmt::D3D12ShaderKind::AnyHit ? L"PublicExport" : nullptr,
     target->kind == dxmt::D3D12ShaderKind::ClosestHit ? L"PublicExport" : nullptr, nullptr};
@@ -756,6 +816,9 @@ static int RunStateObject(const std::string &mode, const char *library_path, con
   const D3D12_STATE_OBJECT_DESC desc = {D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE,
     hinted ? 5u : 4u, subobjects};
   auto create = [&](ID3D12StateObject **output) {
+    if (addition)
+      return dxmt::AddD3D12RaytracingStateObject(static_cast<dxmt::MTLD3D12Device *>(device.ptr()),
+          &desc, parent.ptr(), __uuidof(ID3D12StateObject), reinterpret_cast<void **>(output));
     return dxmt::CreateD3D12RaytracingStateObject(static_cast<dxmt::MTLD3D12Device *>(device.ptr()),
         &desc, __uuidof(ID3D12StateObject), reinterpret_cast<void **>(output));
   };
@@ -765,7 +828,7 @@ static int RunStateObject(const std::string &mode, const char *library_path, con
     if (FAILED(object->QueryInterface(IID_PPV_ARGS(&raw)))) return false;
     auto properties = dxmt::Com<ID3D12StateObjectProperties>::transfer(raw);
     return properties->GetShaderIdentifier(L"PublicExport") && !properties->GetShaderIdentifier(target->wide) &&
-        (!hinted || properties->GetShaderIdentifier(L"HitGroup"));
+        (!hinted || properties->GetShaderIdentifier(L"HitGroup")) && (!addition || inherited(properties.ptr()));
   };
   auto expected_trace = [&](bool fail, bool cached) {
     std::vector<std::string> result;
@@ -782,24 +845,28 @@ static int RunStateObject(const std::string &mode, const char *library_path, con
     return result;
   };
   ID3D12StateObject *raw = reinterpret_cast<ID3D12StateObject *>(uintptr_t(1));
+  const size_t begin = trace.size();
   HRESULT hr = create(&raw);
   if (raw == reinterpret_cast<ID3D12StateObject *>(uintptr_t(1))) {
-    PrintResult(mode, hr, false);
+    PrintResult(request_mode, hr, false);
     return 1;
   }
   auto object = dxmt::Com<ID3D12StateObject>::transfer(raw);
-  bool passed = hr == (injected || reject ? E_NOTIMPL : S_OK) &&
-      trace == expected_trace(injected, false) && (FAILED(hr) ? !object : usable(object.ptr()));
-  PrintResult(mode + ".create", hr, passed);
+  const HRESULT expected = mode == "state-duplicate" || mode == "state-disallowed" ? E_INVALIDARG :
+      injected || reject ? E_NOTIMPL : S_OK;
+  bool passed = hr == expected && parent_unchanged() &&
+      std::vector<std::string>(trace.begin() + begin, trace.end()) == expected_trace(injected, false) &&
+      (FAILED(hr) ? !object : usable(object.ptr()));
+  PrintResult(request_mode + (addition ? ".add" : ".create"), hr, passed);
   if (injected) {
     fault = Fault::None;
     const size_t begin = trace.size();
     raw = nullptr;
     hr = create(&raw);
     object = dxmt::Com<ID3D12StateObject>::transfer(raw);
-    passed = passed && hr == S_OK && usable(object.ptr()) &&
+    passed = passed && hr == S_OK && usable(object.ptr()) && parent_unchanged() &&
         std::vector<std::string>(trace.begin() + begin, trace.end()) == expected_trace(false, false);
-    PrintResult(mode + ".retry", hr, passed);
+    PrintResult(request_mode + ".retry", hr, passed);
   }
   if (!reject) {
     fault = Fault::MSCUnsupported;
@@ -807,10 +874,10 @@ static int RunStateObject(const std::string &mode, const char *library_path, con
     raw = nullptr;
     hr = create(&raw);
     auto hit = dxmt::Com<ID3D12StateObject>::transfer(raw);
-    passed = passed && hr == S_OK && usable(hit.ptr()) &&
+    passed = passed && hr == S_OK && usable(hit.ptr()) && parent_unchanged() &&
         std::vector<std::string>(trace.begin() + begin, trace.end()) == expected_trace(false, true);
   }
-  PrintResult(mode, hr, passed);
+  PrintResult(request_mode, hr, passed);
   return passed ? 0 : 1;
 }
 

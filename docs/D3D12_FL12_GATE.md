@@ -117,7 +117,9 @@ and MSC failure/retry traces. `D3D12_SHADER_LIBRARY_FAILURE_ORACLE.md` adds
 six ray-stage library converter export/pass failures and retry/cache traces.
 `D3D12_STATE_OBJECT_FAILURE_ORACLE.md` adds six-stage candidate probing,
 AH/CH stage hints and failed-publication/retry/cache traces. State-object
-addition and dispatch/intersection-synthesis failure coverage remains needed before
+`D3D12_STATE_OBJECT_ADDITION_FAILURE_ORACLE.md` adds same-parent failure/retry/cache
+and immutable/inherited identifier/stack checks. Dispatch/intersection-synthesis
+failure coverage remains needed before
 claiming the entire isolation contract validated.
 
 ## Self-review
@@ -140,11 +142,11 @@ clumps and duplicated program-version decoding. Neither alters behavior.
 ### Spec
 
 One remaining partial requirement: forced compiler-failure invocation evidence
-must prove no attempt by the other backend through state-object additions and
-dispatch/intersection synthesis. The follow-up oracles close bounded ordinary/emulated,
+must prove no attempt by the other backend through dispatch/intersection synthesis.
+The follow-up oracles close bounded ordinary/emulated,
 native mesh, compute, ordinary VS/PS, HS/DS and GS pipeline-library cases,
 plus the six ray-stage shader-library converter entry paths and state-object
-candidate probing/failed publication.
+candidate probing/failed publication and same-parent additions.
 The gate keeps the entire isolation requirement PARTIAL.
 
 Review summary: Standards 0 hard findings (2 heuristic smells); Spec 1 partial
