@@ -101,8 +101,10 @@ in `D3D12_BACKEND_FAILURE_ORACLE.md` now observes test-linked production compute
 call sites. The follow-up `D3D12_GRAPHICS_FAILURE_ORACLE.md` adds ordinary
 VS/PS ordered invocation traces and mixed/wrong-stage precompiler rejection.
 The next `D3D12_TESSELLATION_FAILURE_ORACLE.md` adds HS/DS initialization,
-combined AIRCONV compile and MSC per-stage/pass failure traces. GS,
-mesh/library failure invocation coverage remains needed before
+combined AIRCONV compile and MSC per-stage/pass failure traces.
+`D3D12_GEOMETRY_FAILURE_ORACLE.md` adds GS initialization, combined VS/GS
+mesh/object compile and MSC per-stage/pass failures. Mesh/library failure
+invocation coverage remains needed before
 claiming the entire isolation contract validated.
 
 ## Self-review
@@ -125,8 +127,8 @@ clumps and duplicated program-version decoding. Neither alters behavior.
 ### Spec
 
 One remaining partial requirement: forced compiler-failure invocation evidence
-must prove no attempt by the other backend for GS, mesh/library paths.
-The follow-up oracles close bounded VS/PS/CS and HS/DS cases only.
+must prove no attempt by the other backend for mesh/library paths.
+The follow-up oracles close bounded VS/PS/CS/HS/DS/GS cases only.
 The gate keeps the entire isolation requirement PARTIAL.
 
 Review summary: Standards 0 hard findings (2 heuristic smells); Spec 1 partial

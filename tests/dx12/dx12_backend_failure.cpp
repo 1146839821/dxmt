@@ -12,7 +12,7 @@
 dxmt::Logger dxmt::Logger::s_instance("dx12_backend_failure");
 
 namespace {
-enum class Fault { None, AirInitialize, AirCompile, MSCInvalid, MSCUnsupported, MSCMemory, MSCSecondPass };
+enum class Fault { None, AirInitialize, AirCompile, AirObjectCompile, MSCInvalid, MSCUnsupported, MSCMemory, MSCSecondPass };
 Fault fault = Fault::None;
 unsigned air_initializations = 0, air_compiles = 0, msc_calls = 0;
 dxmt::D3D12ShaderKind fault_stage = dxmt::D3D12ShaderKind::Unknown;
@@ -27,11 +27,16 @@ const char *StageName(dxmt::D3D12ShaderKind stage) {
   case dxmt::D3D12ShaderKind::Compute: return "cs";
   case dxmt::D3D12ShaderKind::Hull: return "hs";
   case dxmt::D3D12ShaderKind::Domain: return "ds";
+  case dxmt::D3D12ShaderKind::Geometry: return "gs";
   default: return "other";
   }
 }
 bool SelectedStage(dxmt::D3D12ShaderKind stage) {
   return fault_stage == dxmt::D3D12ShaderKind::Unknown || fault_stage == stage;
+}
+const char *HandleStageName(sm50_shader_t handle) {
+  const auto found = initialized_stages.find(handle);
+  return StageName(found == initialized_stages.end() ? dxmt::D3D12ShaderKind::Unknown : found->second);
 }
 }
 
@@ -57,6 +62,8 @@ extern decltype(&SM50Initialize) __real___imp_SM50Initialize;
 extern decltype(&SM50Compile) __real___imp_SM50Compile;
 extern decltype(&SM50CompileTessellationPipelineHull) __real___imp_SM50CompileTessellationPipelineHull;
 extern decltype(&SM50CompileTessellationPipelineDomain) __real___imp_SM50CompileTessellationPipelineDomain;
+extern decltype(&SM50CompileGeometryPipelineVertex) __real___imp_SM50CompileGeometryPipelineVertex;
+extern decltype(&SM50CompileGeometryPipelineGeometry) __real___imp_SM50CompileGeometryPipelineGeometry;
 extern decltype(&DXMTMSCCompileDXIL) __real___imp_DXMTMSCCompileDXIL;
 }
 
@@ -83,11 +90,7 @@ static int TestAirTessellation(sm50_shader_t first, sm50_shader_t second,
     SM50_SHADER_COMPILATION_ARGUMENT_DATA *args, const char *name, sm50_bitcode_t *bitcode,
     sm50_error_t *error, dxmt::D3D12ShaderKind stage) {
   ++air_compiles;
-  const auto identify = [](sm50_shader_t handle) {
-    const auto found = initialized_stages.find(handle);
-    return StageName(found == initialized_stages.end() ? dxmt::D3D12ShaderKind::Unknown : found->second);
-  };
-  trace.push_back(std::string("air.tess.") + StageName(stage) + "." + identify(first) + "+" + identify(second));
+  trace.push_back(std::string("air.tess.") + StageName(stage) + "." + HandleStageName(first) + "+" + HandleStageName(second));
   if (fault == Fault::AirCompile && SelectedStage(stage)) { *bitcode = {}; *error = {}; return 1; }
   if (stage == dxmt::D3D12ShaderKind::Hull)
     return __real___imp_SM50CompileTessellationPipelineHull(first, second, args, name, bitcode, error);
@@ -101,6 +104,24 @@ static int TestAirDomain(sm50_shader_t hs, sm50_shader_t ds, SM50_SHADER_COMPILA
     const char *name, sm50_bitcode_t *bitcode, sm50_error_t *error) {
   return TestAirTessellation(hs, ds, args, name, bitcode, error, dxmt::D3D12ShaderKind::Domain);
 }
+static int TestAirGeometry(sm50_shader_t vs, sm50_shader_t gs, SM50_SHADER_COMPILATION_ARGUMENT_DATA *args,
+    const char *name, sm50_bitcode_t *bitcode, sm50_error_t *error, bool object) {
+  ++air_compiles;
+  trace.push_back(std::string(object ? "air.geom.object." : "air.geom.mesh.") + HandleStageName(vs) + "+" + HandleStageName(gs));
+  if (fault == (object ? Fault::AirObjectCompile : Fault::AirCompile) && SelectedStage(dxmt::D3D12ShaderKind::Geometry)) {
+    *bitcode = {}; *error = {}; return 1;
+  }
+  if (object) return __real___imp_SM50CompileGeometryPipelineVertex(vs, gs, args, name, bitcode, error);
+  return __real___imp_SM50CompileGeometryPipelineGeometry(vs, gs, args, name, bitcode, error);
+}
+static int TestAirGeometryVertex(sm50_shader_t vs, sm50_shader_t gs, SM50_SHADER_COMPILATION_ARGUMENT_DATA *args,
+    const char *name, sm50_bitcode_t *bitcode, sm50_error_t *error) {
+  return TestAirGeometry(vs, gs, args, name, bitcode, error, true);
+}
+static int TestAirGeometryMesh(sm50_shader_t vs, sm50_shader_t gs, SM50_SHADER_COMPILATION_ARGUMENT_DATA *args,
+    const char *name, sm50_bitcode_t *bitcode, sm50_error_t *error) {
+  return TestAirGeometry(vs, gs, args, name, bitcode, error, false);
+}
 static int TestMSC(dxmt_msc_compile_dxil_params *params) {
   ++msc_calls;
   const unsigned stage_call = ++msc_stage_calls[params->stage];
@@ -108,6 +129,7 @@ static int TestMSC(dxmt_msc_compile_dxil_params *params) {
       params->stage == DXMT_MSC_STAGE_FRAGMENT ? dxmt::D3D12ShaderKind::Pixel :
       params->stage == DXMT_MSC_STAGE_HULL ? dxmt::D3D12ShaderKind::Hull :
       params->stage == DXMT_MSC_STAGE_DOMAIN ? dxmt::D3D12ShaderKind::Domain :
+      params->stage == DXMT_MSC_STAGE_GEOMETRY ? dxmt::D3D12ShaderKind::Geometry :
       params->stage == DXMT_MSC_STAGE_COMPUTE ? dxmt::D3D12ShaderKind::Compute : dxmt::D3D12ShaderKind::Unknown;
   trace.push_back(std::string("msc.") + StageName(stage) + (params->metallib ? ".materialize" : ".query"));
   switch (SelectedStage(stage) ? fault : Fault::None) {
@@ -126,6 +148,8 @@ decltype(&SM50Initialize) __wrap___imp_SM50Initialize = TestAirInitialize;
 decltype(&SM50Compile) __wrap___imp_SM50Compile = TestAirCompile;
 decltype(&SM50CompileTessellationPipelineHull) __wrap___imp_SM50CompileTessellationPipelineHull = TestAirHull;
 decltype(&SM50CompileTessellationPipelineDomain) __wrap___imp_SM50CompileTessellationPipelineDomain = TestAirDomain;
+decltype(&SM50CompileGeometryPipelineVertex) __wrap___imp_SM50CompileGeometryPipelineVertex = TestAirGeometryVertex;
+decltype(&SM50CompileGeometryPipelineGeometry) __wrap___imp_SM50CompileGeometryPipelineGeometry = TestAirGeometryMesh;
 decltype(&DXMTMSCCompileDXIL) __wrap___imp_DXMTMSCCompileDXIL = TestMSC;
 }
 
@@ -168,14 +192,17 @@ static void PrintResult(const std::string &mode, HRESULT hr, bool passed) {
 }
 
 static int RunGraphics(const std::string &mode, const char *vs_path, const char *ps_path,
-    const char *hs_path = nullptr, const char *ds_path = nullptr, const char *stages_path = nullptr) {
+    const char *hs_path = nullptr, const char *ds_path = nullptr, const char *stages_path = nullptr,
+    const char *gs_path = nullptr) {
   using dxmt::D3D12ShaderKind;
   const bool tessellation = hs_path && ds_path && stages_path;
+  const bool geometry = gs_path && stages_path;
   bool vertex_dxil = false, pixel_dxil = false, wrong_vs = false, wrong_ps = false, reject = false;
   bool wrong_hs = false, wrong_ds = false;
+  bool wrong_gs = false;
   std::string mixed_stage;
   HRESULT expected_hr = S_OK;
-  const std::string prefix = tessellation ? "tess-" : "graphics-";
+  const std::string prefix = geometry ? "geom-" : tessellation ? "tess-" : "graphics-";
   const std::string air_prefix = prefix + "air-", msc_prefix = prefix + "msc-";
   std::string operation;
   if (mode == "graphics-mixed-air-vs") { pixel_dxil = true; reject = true; expected_hr = E_NOTIMPL; }
@@ -185,7 +212,11 @@ static int RunGraphics(const std::string &mode, const char *vs_path, const char 
     else if (mode.rfind(msc_prefix, 0) == 0) {
       operation = mode.substr(msc_prefix.size()); vertex_dxil = pixel_dxil = true;
     } else return 2;
-    if (tessellation && (operation == "mixed-hs" || operation == "mixed-ds")) {
+    if (geometry && operation == "mixed-gs") {
+      mixed_stage = "gs"; reject = true; expected_hr = E_NOTIMPL;
+    } else if (geometry && operation == "wrong-gs") {
+      wrong_gs = true; reject = true; expected_hr = E_INVALIDARG;
+    } else if (tessellation && (operation == "mixed-hs" || operation == "mixed-ds")) {
       mixed_stage = operation.substr(6); reject = true; expected_hr = E_NOTIMPL;
     } else if (tessellation && (operation == "wrong-hs" || operation == "wrong-ds")) {
       wrong_hs = operation == "wrong-hs"; wrong_ds = !wrong_hs;
@@ -198,11 +229,13 @@ static int RunGraphics(const std::string &mode, const char *vs_path, const char 
       else if (operation.rfind("ps-", 0) == 0) fault_stage = D3D12ShaderKind::Pixel;
       else if (tessellation && operation.rfind("hs-", 0) == 0) fault_stage = D3D12ShaderKind::Hull;
       else if (tessellation && operation.rfind("ds-", 0) == 0) fault_stage = D3D12ShaderKind::Domain;
+      else if (geometry && operation.rfind("gs-", 0) == 0) fault_stage = D3D12ShaderKind::Geometry;
       else return 2;
       const auto failure = operation.substr(3);
       if (!vertex_dxil) {
         if (failure == "init") fault = Fault::AirInitialize;
         else if (failure == "compile") fault = Fault::AirCompile;
+        else if (geometry && failure == "object-compile") fault = Fault::AirObjectCompile;
         else return 2;
         expected_hr = E_FAIL;
       } else {
@@ -216,7 +249,21 @@ static int RunGraphics(const std::string &mode, const char *vs_path, const char 
   }
   std::vector<std::string> expected_trace;
   if (!reject) {
-    if (tessellation) {
+    if (geometry) {
+      expected_trace = vertex_dxil ? std::vector<std::string>{"msc.vs.query", "msc.vs.materialize",
+          "msc.ps.query", "msc.ps.materialize", "msc.gs.query", "msc.gs.materialize"} :
+          std::vector<std::string>{"air.init.vs", "air.init.gs", "air.init.ps", "air.compile.ps"};
+      if (!vertex_dxil) {
+        for (unsigned strip = 0; strip < 2; ++strip) {
+          expected_trace.push_back("air.geom.mesh.vs+gs");
+          for (unsigned index = 0; index < 3; ++index) expected_trace.push_back("air.geom.object.vs+gs");
+        }
+      }
+      if (fault != Fault::None) {
+        if (vertex_dxil) expected_trace.resize(fault == Fault::MSCSecondPass ? 6 : 5);
+        else expected_trace.resize(fault == Fault::AirInitialize ? 2 : fault == Fault::AirObjectCompile ? 6 : 5);
+      }
+    } else if (tessellation) {
       expected_trace = vertex_dxil ? std::vector<std::string>{
           "msc.vs.query", "msc.vs.materialize", "msc.ps.query", "msc.ps.materialize",
           "msc.hs.query", "msc.hs.materialize", "msc.ds.query", "msc.ds.materialize"} :
@@ -242,7 +289,15 @@ static int RunGraphics(const std::string &mode, const char *vs_path, const char 
           "float4 main(uint vertex : SV_VertexID) : SV_Position { return float4(float(vertex),0,0,1); }", "vs_5_0", vs)) ||
       !(pixel_dxil ? LoadShader(ps_path, ps) : CompileLegacy(
           "float4 main() : SV_Target { return float4(1,0,0,1); }", "ps_5_0", ps))) return 2;
-  std::vector<uint8_t> hs, ds;
+  std::vector<uint8_t> hs, ds, gs;
+  if (geometry) {
+    std::vector<uint8_t> source;
+    if (!LoadShader(stages_path, source)) return 2;
+    source.push_back(0);
+    const bool geometry_dxil = mixed_stage == "gs" ? !vertex_dxil : vertex_dxil;
+    if (!(geometry_dxil ? LoadShader(gs_path, gs) : CompileLegacy(
+        reinterpret_cast<const char *>(source.data()), "gs_5_0", gs, "gs_main"))) return 2;
+  }
   if (tessellation) {
     std::vector<uint8_t> source;
     if (!LoadShader(stages_path, source)) return 2;
@@ -261,6 +316,7 @@ static int RunGraphics(const std::string &mode, const char *vs_path, const char 
   desc.VS = wrong_vs ? D3D12_SHADER_BYTECODE{ps.data(), ps.size()} : D3D12_SHADER_BYTECODE{vs.data(), vs.size()};
   desc.PS = wrong_ps ? D3D12_SHADER_BYTECODE{vs.data(), vs.size()} : D3D12_SHADER_BYTECODE{ps.data(), ps.size()};
   desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  if (geometry) desc.GS = wrong_gs ? D3D12_SHADER_BYTECODE{vs.data(), vs.size()} : D3D12_SHADER_BYTECODE{gs.data(), gs.size()};
   if (tessellation) {
     desc.HS = wrong_hs ? D3D12_SHADER_BYTECODE{ds.data(), ds.size()} : D3D12_SHADER_BYTECODE{hs.data(), hs.size()};
     desc.DS = wrong_ds ? D3D12_SHADER_BYTECODE{hs.data(), hs.size()} : D3D12_SHADER_BYTECODE{ds.data(), ds.size()};
@@ -283,6 +339,7 @@ static int RunGraphics(const std::string &mode, const char *vs_path, const char 
 
 int main(int argc, char **argv) {
   SetEnvironmentVariableA("DXMT_SHADER_CACHE", "0");
+  if (argc == 6) return RunGraphics(argv[1], argv[2], argv[3], nullptr, nullptr, argv[5], argv[4]);
   if (argc == 7) return RunGraphics(argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]);
   if (argc == 4) return RunGraphics(argv[1], argv[2], argv[3]);
   if (argc != 3) { std::cerr << "usage: probe COMPUTE_MODE DXIL.cso | GRAPHICS_MODE VS.cso PS.cso\n"; return 2; }
