@@ -810,9 +810,11 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
     const char *qualifiers_path) {
   const bool addition = request_mode.rfind("state-add-", 0) == 0;
   const bool addition_load = request_mode.rfind("state-add-load-", 0) == 0;
-  const bool multi = request_mode.rfind("state-multi-", 0) == 0;
+  const bool addition_multi = request_mode.rfind("state-add-multi-", 0) == 0;
+  const bool multi = addition_multi || request_mode.rfind("state-multi-", 0) == 0;
   const bool load = multi || addition_load || request_mode.rfind("state-load-", 0) == 0;
-  const std::string mode = multi ? "state-" + request_mode.substr(12) :
+  const std::string mode = addition_multi ? "state-" + request_mode.substr(16) :
+      multi ? "state-" + request_mode.substr(12) :
       addition_load ? "state-" + request_mode.substr(15) :
       load ? "state-" + request_mode.substr(11) :
       addition ? "state-" + request_mode.substr(10) : request_mode;
@@ -881,6 +883,11 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
   constexpr UINT64 parent_stack_size = 4096;
   if (addition) {
     const Export *seed = target == &exports[1] ? &exports[5] : &exports[1];
+    if (multi) {
+      for (const auto &candidate : exports) {
+        if (&candidate != target && &candidate != first) { seed = &candidate; break; }
+      }
+    }
     std::vector<uint8_t> seed_bytes;
     if (!LoadShader(library_path, seed_bytes)) return 2;
     D3D12_EXPORT_DESC seed_export = {L"ParentExport", seed->wide, D3D12_EXPORT_FLAG_NONE};
@@ -929,7 +936,8 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
   };
   auto parent_unchanged = [&]() {
     return !addition || (inherited(parent_properties.ptr()) &&
-        !parent_properties->GetShaderIdentifier(L"PublicExport") && !parent_properties->GetShaderIdentifier(L"HitGroup"));
+        !parent_properties->GetShaderIdentifier(L"PublicExport") && !parent_properties->GetShaderIdentifier(L"HitGroup") &&
+        (!multi || !parent_properties->GetShaderIdentifier(L"FirstExport")));
   };
   const D3D12_HIT_GROUP_DESC hit_group = {L"HitGroup", D3D12_HIT_GROUP_TYPE_TRIANGLES,
     target->kind == dxmt::D3D12ShaderKind::AnyHit ? L"PublicExport" : nullptr,

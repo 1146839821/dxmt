@@ -129,8 +129,9 @@ library/function-load failure, AH/CH hints, null publication and factory retry.
 same-parent factory retry and inherited identifier/stack immutability.
 `D3D12_STATE_OBJECT_MULTI_EXPORT_ORACLE.md` adds creation-time second-export
 failure after first-export success, null publication and layer-specific cache retry.
-Addition multi-export progress coverage remains needed before
-claiming the entire isolation contract validated.
+`D3D12_STATE_OBJECT_ADDITION_MULTI_ORACLE.md` adds same-parent two-export
+partial progress, failure publication and cache retry. Larger/order-varied export
+sets and a full isolation-contract audit remain unverified.
 
 ## Self-review
 
@@ -151,8 +152,8 @@ clumps and duplicated program-version decoding. Neither alters behavior.
 
 ### Spec
 
-One remaining partial requirement: forced compiler-failure invocation evidence
-must cover addition multi-export partial progress.
+One remaining partial requirement: a full isolation-contract audit beyond the
+bounded two-export creation/addition fixtures.
 The follow-up oracles close bounded ordinary/emulated,
 native mesh, compute, ordinary VS/PS, HS/DS and GS pipeline-library cases,
 plus the six ray-stage shader-library converter entry paths and state-object

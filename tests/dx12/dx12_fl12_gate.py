@@ -346,6 +346,8 @@ def run_state_object_addition_failure_oracle(directory, wine, timeout, runtime):
               ("legacy", "ordinary", "qualifiers", "missing-export", "duplicate", "disallowed")]
     modes += ["state-add-load-" + stage + "-" + operation for stage in stages
               for operation in ("control", "library", "function")]
+    modes += ["state-add-multi-" + stage + "-" + operation for stage in stages
+              for operation in ("control", "library", "function", "unsupported", "second-pass")]
     files = ("ray_stages_sm6.lib.cso", "compute_sm6.cs.cso", "ray_payload_qualifiers_sm6.lib.cso")
     return run_invocation_modes(directory, wine, timeout, runtime, [(mode, files) for mode in modes],
                                 "addition failures/parent immutability/retry/cache; not dispatch synthesis or GPU tracing acceptance")
@@ -478,7 +480,7 @@ def build_report(probes, variant, provenance=None):
                            row("ray_synthesis_invocations", synthesis["status"], ""),
                            row("ray_metal_invocations", metal["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "compiler/state-object/addition/export-load/synthesis/Metal probes; addition multi-export progress remains unverified"))
+                   "bounded compiler/state-object/addition/export-load/synthesis/Metal probes; full isolation contract remains unverified"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),
