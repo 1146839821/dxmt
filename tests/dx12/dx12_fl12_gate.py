@@ -42,7 +42,10 @@ def verify_build(build, variant, wine):
     """Bind the variant label and Unix runtime to this build, not ambient DLLs."""
     try:
         commands = json.loads((build / "compile_commands.json").read_text())
-        for suffix in ("d3d12_device.cpp", "cache.c"):
+        suffixes = ["d3d12_device.cpp", "cache.c"]
+        if (build / "tests/dx12/dx12_backend_failure.exe").is_file():
+            suffixes += ["dx12_backend_failure.cpp", "d3d12_pipeline_compute.cpp", "d3d12_shader_converter.cpp"]
+        for suffix in suffixes:
             matches = [entry for entry in commands if entry["file"].endswith("/" + suffix)]
             if not matches:
                 return {"status": UNVERIFIED, "reason": "compile command missing: " + suffix}
@@ -91,6 +94,7 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
         staged_hashes = {}
         for file in files:
             shutil.copy2(directory / file, stage / file)
+        executable_hash = hashlib.sha256((stage / name).read_bytes()).hexdigest()
         if runtime is not None:
             for dll in dlls:
                 shutil.copy2(runtime / dll / (dll + ".dll"), stage / (dll + ".dll"))
@@ -100,20 +104,25 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
             shutil.copy2(compiler, stage / compiler.name)
         command = ([wine] if wine else []) + [str(stage / name)] + list(args)
         try:
-            result = subprocess.run(
-                command, cwd=stage, capture_output=True, text=True,
-                errors="replace", timeout=timeout,
-                env={**os.environ, "DXMT_SHADER_CACHE": "0",
-                     "WINEDLLOVERRIDES": os.environ.get("WINEDLLOVERRIDES", "") + ";d3d12,dxgi,winemetal=n,b"},
-            )
+            # Wine helpers may inherit output handles after the probe exits.
+            # A file records output without waiting for pipe EOF from helpers.
+            with tempfile.TemporaryFile(mode="w+t", errors="replace") as log:
+                result = subprocess.run(
+                    command, cwd=stage, stdout=log, stderr=subprocess.STDOUT,
+                    timeout=timeout,
+                    env={**os.environ, "DXMT_SHADER_CACHE": "0",
+                         "WINEDLLOVERRIDES": os.environ.get("WINEDLLOVERRIDES", "") + ";d3d12,dxgi,winemetal=n,b"},
+                )
+                log.seek(0)
+                output = log.read()
         except (OSError, subprocess.TimeoutExpired) as error:
             return {"status": FAIL, "reason": str(error)}
-        output = result.stdout + result.stderr
         status = PASS if result.returncode == 0 and all(marker in output for marker in required) else FAIL
         if result.returncode == 77:
             status = UNVERIFIED
         return {"status": status, "returncode": result.returncode, "output": output,
-                "reason": "fresh execution; required markers checked", "runtime_sha256": staged_hashes}
+                "reason": "fresh execution; required markers checked", "runtime_sha256": staged_hashes,
+                "executable_sha256": executable_hash}
 
 
 def run_minmax_contract(directory, wine, timeout, runtime):
@@ -174,6 +183,31 @@ def run_typed_uav_matrix(directory, wine, timeout, runtime):
             "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
 
 
+def run_backend_failure_oracle(directory, wine, timeout, runtime):
+    cases = {}
+    def probe_digest():
+        try:
+            return hashlib.sha256((directory / "dx12_backend_failure.exe").read_bytes()).hexdigest()
+        except OSError:
+            return None
+    probe_hash = probe_digest()
+    modes = ("air-control", "air-init-failure", "air-compile-failure", "air-wrong-stage", "empty",
+             "msc-control", "msc-invalid", "msc-unsupported", "msc-memory", "msc-second-pass", "msc-wrong-stage")
+    for mode in modes:
+        shader = "shader_embedded.graphics.vs.cso" if mode == "msc-wrong-stage" else "compute_sm6.cs.cso"
+        cases[mode] = run_fixture(directory, wine, "dx12_backend_failure.exe", (mode, shader),
+                                  ("backend failure " + mode + ":", "status=PASS"), timeout, runtime, (shader,))
+    status = aggregate([row(name, case["status"], "") for name, case in cases.items()])
+    hashes = [case.get("runtime_sha256") for case in cases.values() if case.get("runtime_sha256")]
+    if hashes and any(digest != hashes[0] for digest in hashes):
+        status = aggregate([row("execution", status, ""), row("hash_consistency", UNVERIFIED, "")])
+    if not probe_hash or probe_digest() != probe_hash or any(
+            case.get("executable_sha256") != probe_hash for case in cases.values()):
+        status = aggregate([row("execution", status, ""), row("probe_provenance", UNVERIFIED, "")])
+    return {"status": status, "reason": "test-linked production compute routing; graphics invocation coverage remains missing",
+            "probe_sha256": probe_hash, "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
+
+
 def build_report(probes, variant, provenance=None):
     feature = probes["feature_support"]
     options = None
@@ -225,8 +259,12 @@ def build_report(probes, variant, provenance=None):
     isolation = aggregate([row(name, probes[name]["status"], "")
                            for name in ("shader_validation", "shader_container", "shader_stage_matrix")
                            if name in probes])
+    invocation = probes.get("backend_failure_oracle", {"status": UNVERIFIED})
+    fl0.append(row("compute_backend_failure_invocations", invocation["status"],
+                   "test-linked production factory: exact AIRCONV/MSC failure call counts; no GPU dispatch"))
+    isolation = aggregate([row("PSO_contracts", isolation, ""), row("compute_invocations", invocation["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "PSO family/stage rejection covered; compiler-failure invocation/fallback oracle missing"))
+                   "PSO family/stage rejection and compute invocation probe; graphics/library failure invocations missing"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),
@@ -280,6 +318,7 @@ def main():
              "container dxil-library-in-ordinary-graphics-slot passed"), args.timeout, runtime),
     }
     probes["minmax_sampler_contract"] = run_minmax_contract(directory, args.wine, args.timeout, runtime)
+    probes["backend_failure_oracle"] = run_backend_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["typed_uav_matrix"] = run_typed_uav_matrix(directory, args.wine, args.timeout, runtime)
     if verify_build(args.build_dir.resolve(), args.variant, args.wine) != provenance:
         provenance = {"status": UNVERIFIED, "reason": "build/runtime provenance changed during probes"}

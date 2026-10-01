@@ -95,8 +95,10 @@ kinds, wrong VS/CS slots, ordinary/library isolation and mixed VS/PS/GS/HS/DS.
 Successful PSO creation is **not** proof of GPU shader correctness.
 Classification helpers are synthetic contract tests, not compiler invocation
 instrumentation. The isolation requirement therefore remains PARTIAL even
-when these regression probes pass: a compiler-failure/no-fallback invocation
-oracle is still needed before claiming the entire isolation contract validated.
+when these regression probes pass. The compute failure/invocation oracle added
+in `D3D12_BACKEND_FAILURE_ORACLE.md` now observes test-linked production compute
+call sites; graphics/tessellation/library failure invocation coverage remains
+needed before claiming the entire isolation contract validated.
 
 ## Self-review
 
@@ -118,8 +120,9 @@ clumps and duplicated program-version decoding. Neither alters behavior.
 ### Spec
 
 One remaining partial requirement: forced compiler-failure invocation evidence
-must prove no attempt by the other backend. PSO/classification regressions do
-not guarantee this. The gate keeps the entire isolation requirement PARTIAL.
+must prove no attempt by the other backend for graphics/tessellation/library
+paths. The follow-up compute oracle closes only the bounded compute case.
+The gate keeps the entire isolation requirement PARTIAL.
 
 Review summary: Standards 0 hard findings (2 heuristic smells); Spec 1 partial
 validation requirement, compiler-failure/no-fallback invocation oracle.

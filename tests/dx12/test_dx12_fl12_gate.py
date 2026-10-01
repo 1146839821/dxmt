@@ -28,6 +28,38 @@ class GateTests(unittest.TestCase):
             self.assertNotEqual(report[name]["status"], gate.PASS)
         self.assertFalse(report["capability_changes"])
 
+    def test_compute_invocations_do_not_close_graphics_isolation(self):
+        for status in (gate.PASS, gate.FAIL, gate.UNVERIFIED):
+            probes = self.probes()
+            probes["backend_failure_oracle"] = {"status": status}
+            rows = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
+            self.assertEqual(next(r["status"] for r in rows if r["name"] == "compute_backend_failure_invocations"), status)
+            self.assertEqual(next(r["status"] for r in rows if r["name"] == "backend_isolation"),
+                             gate.PARTIAL if status == gate.PASS else status)
+
+    def test_invocation_failure_is_not_hidden_by_hash_gap(self):
+        def fixture(*args):
+            failed = args[3][0] == "msc-second-pass"
+            return {"status": gate.FAIL if failed else gate.PASS,
+                    "runtime_sha256": {"d3d12": "other" if failed else "same"}}
+        with patch.object(gate, "run_fixture", side_effect=fixture):
+            result = gate.run_backend_failure_oracle(Path("."), None, 1, None)
+            self.assertEqual(result["status"], gate.FAIL)
+            self.assertEqual(len(result["cases"]), 11)
+
+    def test_invocation_executable_provenance_is_required(self):
+        import hashlib
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "dx12_backend_failure.exe").write_bytes(b"probe")
+            digest = hashlib.sha256(b"probe").hexdigest()
+            for executable_hash in (digest, "stale", None):
+                with patch.object(gate, "run_fixture", return_value={
+                        "status": gate.PASS, "executable_sha256": executable_hash,
+                        "runtime_sha256": {"d3d12": "same"}}):
+                    result = gate.run_backend_failure_oracle(root, None, 1, None)
+                    self.assertEqual(result["status"], gate.PASS if executable_hash == digest else gate.UNVERIFIED)
+
     def test_missing_query_and_failed_query(self):
         self.assertEqual(gate.build_report(self.probes(), "no-private")["FL12_0_GATE"]["status"], gate.UNVERIFIED)
         self.assertEqual(gate.build_report(self.probes("options: tiled=2", gate.FAIL), "no-private")["FL12_0_GATE"]["status"], gate.FAIL)
@@ -113,6 +145,43 @@ class GateTests(unittest.TestCase):
                 run.return_value.stderr = ""
                 result = gate.run_fixture(Path(directory), None, "probe.exe", (), ("passed",), 1)
                 self.assertEqual(result["status"], gate.FAIL)
+
+    def test_file_capture_requires_exit_and_marker(self):
+        import shutil
+        from types import SimpleNamespace
+        with TemporaryDirectory() as directory:
+            shutil.copy2(__file__, Path(directory) / "probe.exe")
+            for code, marker in ((0, "passed"), (1, "passed"), (0, ""), (77, "passed")):
+                def execute(*args, **kwargs):
+                    self.assertNotIn("capture_output", kwargs)
+                    self.assertEqual(kwargs["stderr"], gate.subprocess.STDOUT)
+                    kwargs["stdout"].write(marker)
+                    return SimpleNamespace(returncode=code)
+                with patch.object(gate.subprocess, "run", side_effect=execute):
+                    result = gate.run_fixture(Path(directory), None, "probe.exe", (), ("passed",), 1)
+                    expected = gate.UNVERIFIED if code == 77 else gate.PASS if code == 0 and marker else gate.FAIL
+                    self.assertEqual(result["status"], expected)
+                    self.assertEqual(result["output"], marker)
+
+    def test_helper_output_handle_does_not_delay_probe_completion(self):
+        import time
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root / "release-helper"
+            helper = ("import pathlib,time; p=pathlib.Path(" + repr(str(release)) + "); "
+                      "deadline=time.monotonic()+5\n"
+                      "while not p.exists() and time.monotonic()<deadline: time.sleep(.01)")
+            (root / "probe.exe").write_text(
+                "import subprocess,sys\nsubprocess.Popen([sys.executable,'-c'," + repr(helper) +
+                "],stdout=sys.stdout,stderr=sys.stderr)\nprint('passed',file=sys.stderr,flush=True)\n")
+            try:
+                started = time.monotonic()
+                result = gate.run_fixture(root, sys.executable, "probe.exe", (), ("passed",), 1)
+                self.assertEqual(result["status"], gate.PASS)
+                self.assertLess(time.monotonic() - started, 2)
+                self.assertTrue(result["executable_sha256"])
+            finally:
+                release.touch()
 
     def test_build_variant_is_verified(self):
         import json

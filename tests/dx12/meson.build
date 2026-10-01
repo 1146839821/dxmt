@@ -20,6 +20,18 @@ dx12_shader_validation = executable('dx12_shader_validation', 'dx12_shader_valid
   dependencies: [d3d12_dep],
 )
 
+# Observe the actual production compute routing without shipping fault hooks.
+# Import wrapping is the x64 MinGW test ABI; other targets retain existing tests.
+if cpu_family == 'x86_64'
+  executable('dx12_backend_failure', 'dx12_backend_failure.cpp',
+    '../../src/d3d12/d3d12_pipeline_compute.cpp', '../../src/d3d12/d3d12_shader_converter.cpp',
+    '../../src/d3d12/d3d12_pipeline_persistence.cpp', '../../src/d3d10/d3d10_blob.cpp',
+    dependencies: [d3d12_dep, dxgi_dep, dxmt_dep, airconv_forward_dep, util_dep, winemetal_dep, dxbc_parser_dep],
+    cpp_args: ['-ffunction-sections', '-fdata-sections'],
+    link_args: ['-Wl,--gc-sections', '-Wl,--wrap=__imp_SM50Initialize', '-Wl,--wrap=__imp_SM50Compile', '-Wl,--wrap=__imp_DXMTMSCCompileDXIL'],
+  )
+endif
+
 test('dx12-fl12-gate-unit', find_program('python3', native: true),
   args: [files('test_dx12_fl12_gate.py')],
 )
