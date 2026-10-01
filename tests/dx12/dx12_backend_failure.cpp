@@ -31,6 +31,12 @@ const char *StageName(dxmt::D3D12ShaderKind stage) {
   case dxmt::D3D12ShaderKind::Geometry: return "gs";
   case dxmt::D3D12ShaderKind::Mesh: return "ms";
   case dxmt::D3D12ShaderKind::Amplification: return "as";
+  case dxmt::D3D12ShaderKind::RayGeneration: return "raygen";
+  case dxmt::D3D12ShaderKind::Miss: return "miss";
+  case dxmt::D3D12ShaderKind::ClosestHit: return "closesthit";
+  case dxmt::D3D12ShaderKind::AnyHit: return "anyhit";
+  case dxmt::D3D12ShaderKind::Intersection: return "intersection";
+  case dxmt::D3D12ShaderKind::Callable: return "callable";
   default: return "other";
   }
 }
@@ -136,8 +142,17 @@ static int TestMSC(dxmt_msc_compile_dxil_params *params) {
       params->stage == DXMT_MSC_STAGE_MESH ? dxmt::D3D12ShaderKind::Mesh :
       params->stage == DXMT_MSC_STAGE_AMPLIFICATION ? dxmt::D3D12ShaderKind::Amplification :
       params->stage == DXMT_MSC_STAGE_COMPUTE ? dxmt::D3D12ShaderKind::Compute : dxmt::D3D12ShaderKind::Unknown;
-  trace.push_back(std::string("msc.") + StageName(stage) + (params->metallib ? ".materialize" : ".query"));
-  switch (SelectedStage(stage) ? fault : Fault::None) {
+  const auto ray_stage = params->stage == DXMT_MSC_STAGE_RAY_GENERATION ? dxmt::D3D12ShaderKind::RayGeneration :
+      params->stage == DXMT_MSC_STAGE_MISS ? dxmt::D3D12ShaderKind::Miss :
+      params->stage == DXMT_MSC_STAGE_CLOSEST_HIT ? dxmt::D3D12ShaderKind::ClosestHit :
+      params->stage == DXMT_MSC_STAGE_ANY_HIT ? dxmt::D3D12ShaderKind::AnyHit :
+      params->stage == DXMT_MSC_STAGE_INTERSECTION ? dxmt::D3D12ShaderKind::Intersection :
+      params->stage == DXMT_MSC_STAGE_CALLABLE ? dxmt::D3D12ShaderKind::Callable : dxmt::D3D12ShaderKind::Unknown;
+  const auto shader_stage = ray_stage == dxmt::D3D12ShaderKind::Unknown ? stage : ray_stage;
+  trace.push_back(std::string("msc.") + StageName(shader_stage) +
+      (ray_stage == dxmt::D3D12ShaderKind::Unknown ? "" : "." + std::string(params->entry_point ? params->entry_point : "", params->entry_point ? params->entry_point_length : 0)) +
+      (params->metallib ? ".materialize" : ".query"));
+  switch (SelectedStage(shader_stage) ? fault : Fault::None) {
   case Fault::MSCInvalid: return DXMT_MSC_ERROR_INVALID_DXIL;
   case Fault::MSCUnsupported: return DXMT_MSC_ERROR_UNSUPPORTED_SHADER;
   case Fault::MSCMemory: return DXMT_MSC_ERROR_OUT_OF_MEMORY;
@@ -593,9 +608,92 @@ static int RunLibrary(const std::string &mode, const char *path, const char *ps_
   return passed ? 0 : 1;
 }
 
+static int RunShaderLibrary(const std::string &mode, const char *library_path, const char *ordinary_path,
+    const char *qualifiers_path) {
+  struct RayExport { const char *name; const char *entry; uint32_t stage; };
+  const RayExport exports[] = {
+    {"raygen", "RayGen", DXMT_MSC_STAGE_RAY_GENERATION}, {"miss", "Miss", DXMT_MSC_STAGE_MISS},
+    {"closesthit", "ClosestHit", DXMT_MSC_STAGE_CLOSEST_HIT}, {"anyhit", "AnyHit", DXMT_MSC_STAGE_ANY_HIT},
+    {"intersection", "Intersection", DXMT_MSC_STAGE_INTERSECTION}, {"callable", "Callable", DXMT_MSC_STAGE_CALLABLE},
+  };
+  const RayExport *target = &exports[0];
+  std::string operation;
+  for (const auto &item : exports) {
+    const std::string prefix = std::string("shaderlib-") + item.name + "-";
+    if (mode.rfind(prefix, 0) == 0) { target = &item; operation = mode.substr(prefix.size()); break; }
+  }
+  const bool reject = mode == "shaderlib-legacy" || mode == "shaderlib-ordinary" ||
+      mode == "shaderlib-empty-entry" || mode == "shaderlib-qualifiers";
+  if (mode == "shaderlib-qualifiers") target = &exports[1];
+  HRESULT expected = S_OK;
+  if (operation == "invalid") { fault = Fault::MSCInvalid; expected = E_INVALIDARG; }
+  else if (operation == "unsupported") { fault = Fault::MSCUnsupported; expected = E_NOTIMPL; }
+  else if (operation == "memory") { fault = Fault::MSCMemory; expected = E_OUTOFMEMORY; }
+  else if (operation == "second-pass") { fault = Fault::MSCSecondPass; expected = E_NOTIMPL; }
+  else if (!reject && operation != "control") return 2;
+  std::vector<uint8_t> bytes;
+  if (mode == "shaderlib-legacy") {
+    if (!CompileLegacy("[numthreads(8,8,1)] void main() {}", "cs_5_0", bytes)) return 2;
+  } else if (!LoadShader(mode == "shaderlib-ordinary" ? ordinary_path :
+      mode == "shaderlib-qualifiers" ? qualifiers_path : library_path, bytes)) return 2;
+  ID3D12Device *raw_device = nullptr;
+  if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&raw_device)))) return 1;
+  auto device = dxmt::Com<ID3D12Device>::transfer(raw_device);
+  ID3DBlob *raw_root = nullptr;
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+  if (FAILED(D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &raw_root, nullptr))) return 1;
+  auto root = dxmt::Com<ID3DBlob>::transfer(raw_root);
+  const D3D12_SHADER_BYTECODE shader = {bytes.data(), bytes.size()};
+  const auto classification = dxmt::ClassifyD3D12Shader(shader);
+  auto *impl = static_cast<dxmt::MTLD3D12Device *>(device.ptr());
+  auto convert = [&](dxmt::D3D12ConvertedShader &output) {
+    return dxmt::ConvertD3D12LibraryShader(classification, shader, target->stage,
+        mode == "shaderlib-empty-entry" ? "" : target->entry, output,
+        root->GetBufferPointer(), root->GetBufferSize(), root->GetBufferPointer(), root->GetBufferSize(),
+        &impl->GetMSCCapabilities());
+  };
+  const std::string prefix = std::string("msc.") + target->name + "." + target->entry;
+  const std::vector<std::string> full = {prefix + ".query", prefix + ".materialize"};
+  auto wanted = full;
+  if (reject) { wanted.clear(); expected = mode == "shaderlib-qualifiers" ? E_NOTIMPL : E_INVALIDARG; }
+  else if (fault != Fault::None && fault != Fault::MSCSecondPass) wanted.resize(1);
+  auto usable = [&](const dxmt::D3D12ConvertedShader &output) {
+    if (output.backend != dxmt::D3D12ShaderBackend::MetalShaderConverter || output.metallib.empty() ||
+        output.entry_point.empty() || output.reflection.stage != target->stage) return false;
+    WMT::Error error;
+    auto library = impl->GetMTLDevice().newLibrary(output.metallib.data(), output.metallib.size(), error);
+    return library && bool(library.newFunction(output.entry_point.c_str()));
+  };
+  dxmt::D3D12ConvertedShader output;
+  HRESULT hr = convert(output);
+  bool passed = hr == expected && trace == wanted && (SUCCEEDED(hr) ? usable(output) :
+      output.backend == dxmt::D3D12ShaderBackend::None && output.entry_point.empty());
+  PrintResult(mode + ".convert", hr, passed);
+  if (!reject && fault != Fault::None) {
+    fault = Fault::None;
+    const size_t begin = trace.size();
+    dxmt::D3D12ConvertedShader retry;
+    hr = convert(retry);
+    passed = passed && hr == S_OK && usable(retry) && std::vector<std::string>(trace.begin() + begin, trace.end()) == full;
+    output = std::move(retry);
+    PrintResult(mode + ".retry", hr, passed);
+  }
+  if (!reject) {
+    fault = Fault::MSCUnsupported;
+    const size_t begin = trace.size();
+    dxmt::D3D12ConvertedShader hit;
+    hr = convert(hit);
+    passed = passed && hr == S_OK && trace.size() == begin && usable(hit) &&
+        hit.metallib == output.metallib && hit.entry_point == output.entry_point;
+  }
+  PrintResult(mode, hr, passed);
+  return passed ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
   SetEnvironmentVariableA("DXMT_SHADER_CACHE", "0");
-  if (argc == 5) return RunMesh(argv[1], argv[2], argv[3], argv[4]);
+  if (argc == 5) return std::string(argv[1]).rfind("shaderlib-", 0) == 0 ?
+      RunShaderLibrary(argv[1], argv[2], argv[3], argv[4]) : RunMesh(argv[1], argv[2], argv[3], argv[4]);
   if (argc == 6) return std::string(argv[1]).rfind("library-geom-", 0) == 0 ?
       RunLibrary(argv[1], argv[2], argv[3], nullptr, nullptr, argv[5], argv[4]) :
       RunGraphics(argv[1], argv[2], argv[3], nullptr, nullptr, argv[5], argv[4]);
