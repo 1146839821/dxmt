@@ -21,6 +21,8 @@ dxmt::D3D12ShaderKind fault_stage = dxmt::D3D12ShaderKind::Unknown;
 std::map<sm50_shader_t, dxmt::D3D12ShaderKind> initialized_stages;
 std::map<uint32_t, unsigned> msc_stage_calls;
 std::vector<std::string> trace;
+int synthesis_error = DXMT_MSC_SUCCESS;
+bool synthesis_intersection = false, synthesis_materialization_only = false;
 
 const char *StageName(dxmt::D3D12ShaderKind stage) {
   switch (stage) {
@@ -75,6 +77,8 @@ extern decltype(&SM50CompileTessellationPipelineDomain) __real___imp_SM50Compile
 extern decltype(&SM50CompileGeometryPipelineVertex) __real___imp_SM50CompileGeometryPipelineVertex;
 extern decltype(&SM50CompileGeometryPipelineGeometry) __real___imp_SM50CompileGeometryPipelineGeometry;
 extern decltype(&DXMTMSCCompileDXIL) __real___imp_DXMTMSCCompileDXIL;
+extern decltype(&DXMTMSCSynthesizeRayDispatch) __real___imp_DXMTMSCSynthesizeRayDispatch;
+extern decltype(&DXMTMSCSynthesizeRayIntersection) __real___imp_DXMTMSCSynthesizeRayIntersection;
 }
 
 static int TestAirInitialize(const void *bytes, size_t size, sm50_shader_t *shader,
@@ -172,6 +176,26 @@ decltype(&SM50CompileTessellationPipelineDomain) __wrap___imp_SM50CompileTessell
 decltype(&SM50CompileGeometryPipelineVertex) __wrap___imp_SM50CompileGeometryPipelineVertex = TestAirGeometryVertex;
 decltype(&SM50CompileGeometryPipelineGeometry) __wrap___imp_SM50CompileGeometryPipelineGeometry = TestAirGeometryMesh;
 decltype(&DXMTMSCCompileDXIL) __wrap___imp_DXMTMSCCompileDXIL = TestMSC;
+}
+
+template <typename Params, typename Compiler>
+static int TestSynthesis(Params *params, bool intersection, Compiler compiler) {
+  ++msc_calls;
+  trace.push_back(std::string("msc.synth.") + (intersection ? "intersection" : "dispatch") +
+      (params->metallib ? ".materialize" : ".query"));
+  if (intersection == synthesis_intersection && synthesis_error != DXMT_MSC_SUCCESS &&
+      (!synthesis_materialization_only || params->metallib)) return synthesis_error;
+  return compiler(params);
+}
+static int TestRayDispatch(dxmt_msc_synthesize_ray_dispatch_params *params) {
+  return TestSynthesis(params, false, __real___imp_DXMTMSCSynthesizeRayDispatch);
+}
+static int TestRayIntersection(dxmt_msc_synthesize_ray_intersection_params *params) {
+  return TestSynthesis(params, true, __real___imp_DXMTMSCSynthesizeRayIntersection);
+}
+extern "C" {
+decltype(&DXMTMSCSynthesizeRayDispatch) __wrap___imp_DXMTMSCSynthesizeRayDispatch = TestRayDispatch;
+decltype(&DXMTMSCSynthesizeRayIntersection) __wrap___imp_DXMTMSCSynthesizeRayIntersection = TestRayIntersection;
 }
 
 static bool LoadShader(const char *path, std::vector<uint8_t> &bytes) {
@@ -881,8 +905,98 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
   return passed ? 0 : 1;
 }
 
+static int RunSynthesis(const std::string &mode, const char *library_path) {
+  const bool intersection = mode.rfind("synth-intersection-", 0) == 0;
+  const std::string prefix = intersection ? "synth-intersection-" : "synth-dispatch-";
+  if (mode.rfind(prefix, 0) != 0) return 2;
+  const std::string operation = mode.substr(prefix.size());
+  HRESULT expected = E_NOTIMPL;
+  int error = DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  if (operation == "control") { expected = S_OK; error = DXMT_MSC_SUCCESS; }
+  else if (operation == "unavailable") error = DXMT_MSC_ERROR_UNAVAILABLE;
+  else if (operation == "memory") { expected = E_FAIL; error = DXMT_MSC_ERROR_OUT_OF_MEMORY; }
+  else if (operation == "invalid") { expected = E_FAIL; error = DXMT_MSC_ERROR_INVALID_DXIL; }
+  else if (operation != "unsupported" && operation != "second-pass") return 2;
+  std::vector<uint8_t> bytes;
+  if (!LoadShader(library_path, bytes)) return 2;
+  ID3D12Device *raw_device = nullptr;
+  if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&raw_device)))) return 1;
+  auto device = dxmt::Com<ID3D12Device>::transfer(raw_device);
+  ID3D12RootSignature *raw_root = nullptr;
+  if (FAILED(CreateProbeRoot(device.ptr(), &raw_root))) return 1;
+  auto root = dxmt::Com<ID3D12RootSignature>::transfer(raw_root);
+  D3D12_EXPORT_DESC exports[] = {{L"RayGen", nullptr, D3D12_EXPORT_FLAG_NONE},
+      {L"ClosestHit", nullptr, D3D12_EXPORT_FLAG_NONE}};
+  const D3D12_DXIL_LIBRARY_DESC library = {{bytes.data(), bytes.size()}, intersection ? 2u : 1u, exports};
+  const D3D12_GLOBAL_ROOT_SIGNATURE global = {root.ptr()};
+  const D3D12_RAYTRACING_SHADER_CONFIG config = {4, 16};
+  const D3D12_RAYTRACING_PIPELINE_CONFIG pipeline = {1};
+  const D3D12_HIT_GROUP_DESC hit_group = {L"HitGroup", D3D12_HIT_GROUP_TYPE_TRIANGLES,
+      nullptr, L"ClosestHit", nullptr};
+  const D3D12_STATE_SUBOBJECT subobjects[] = {
+    {D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY, &library},
+    {D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE, &global},
+    {D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG, &config},
+    {D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG, &pipeline},
+    {D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP, &hit_group},
+  };
+  const D3D12_STATE_OBJECT_DESC desc = {D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE,
+      intersection ? 5u : 4u, subobjects};
+  ID3D12StateObject *raw_object = nullptr;
+  HRESULT hr = dxmt::CreateD3D12RaytracingStateObject(static_cast<dxmt::MTLD3D12Device *>(device.ptr()),
+      &desc, __uuidof(ID3D12StateObject), reinterpret_cast<void **>(&raw_object));
+  auto object = dxmt::Com<ID3D12StateObject>::transfer(raw_object);
+  std::vector<std::string> seed = {"msc.raygen.RayGen.query", "msc.raygen.RayGen.materialize",
+    "msc.miss.RayGen.query", "msc.closesthit.RayGen.query", "msc.anyhit.RayGen.query",
+    "msc.intersection.RayGen.query", "msc.callable.RayGen.query"};
+  if (intersection) { seed.push_back("msc.closesthit.ClosestHit.query"); seed.push_back("msc.closesthit.ClosestHit.materialize"); }
+  bool passed = hr == S_OK && object && trace == seed;
+  PrintResult(mode + ".create", hr, passed);
+  if (!passed) return 1;
+  synthesis_intersection = intersection;
+  synthesis_materialization_only = operation == "second-pass";
+  synthesis_error = error;
+  const std::vector<std::string> dispatch = {"msc.synth.dispatch.query", "msc.synth.dispatch.materialize"};
+  std::vector<std::string> full = dispatch;
+  if (intersection) { full.push_back("msc.synth.intersection.query"); full.push_back("msc.synth.intersection.materialize"); }
+  auto wanted = full;
+  if (FAILED(expected) && !synthesis_materialization_only) wanted.pop_back();
+  dxmt::D3D12RaytracingDispatchState state;
+  // A failure must clear preexisting output, not merely leave an empty default.
+  state.global_root_signature = static_cast<dxmt::MTLD3D12RootSignature *>(root.ptr());
+  const size_t begin = trace.size();
+  hr = dxmt::GetD3D12RaytracingDispatchState(object.ptr(), state);
+  auto usable = [&](const dxmt::D3D12RaytracingDispatchState &value) {
+    return value.compute_pipeline && value.visible_function_table && value.intersection_function_table &&
+        value.global_root_signature == static_cast<dxmt::MTLD3D12RootSignature *>(root.ptr());
+  };
+  passed = hr == expected && std::vector<std::string>(trace.begin() + begin, trace.end()) == wanted &&
+      (SUCCEEDED(hr) ? usable(state) : !state.compute_pipeline && !state.visible_function_table &&
+          !state.intersection_function_table && !state.global_root_signature);
+  PrintResult(mode + ".initialize", hr, passed);
+  if (FAILED(expected)) {
+    synthesis_error = DXMT_MSC_SUCCESS;
+    const size_t retry_begin = trace.size();
+    hr = dxmt::GetD3D12RaytracingDispatchState(object.ptr(), state);
+    passed = passed && hr == S_OK && usable(state) &&
+        std::vector<std::string>(trace.begin() + retry_begin, trace.end()) == full;
+    PrintResult(mode + ".retry", hr, passed);
+  }
+  synthesis_error = DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  const size_t hit_begin = trace.size();
+  dxmt::D3D12RaytracingDispatchState hit;
+  hr = dxmt::GetD3D12RaytracingDispatchState(object.ptr(), hit);
+  passed = passed && hr == S_OK && usable(hit) && trace.size() == hit_begin &&
+      hit.compute_pipeline.handle == state.compute_pipeline.handle &&
+      hit.visible_function_table.handle == state.visible_function_table.handle &&
+      hit.intersection_function_table.handle == state.intersection_function_table.handle;
+  PrintResult(mode, hr, passed);
+  return passed ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
   SetEnvironmentVariableA("DXMT_SHADER_CACHE", "0");
+  if (argc == 3 && std::string(argv[1]).rfind("synth-", 0) == 0) return RunSynthesis(argv[1], argv[2]);
   if (argc == 5 && std::string(argv[1]).rfind("state-", 0) == 0)
     return RunStateObject(argv[1], argv[2], argv[3], argv[4]);
   if (argc == 5) return std::string(argv[1]).rfind("shaderlib-", 0) == 0 ?

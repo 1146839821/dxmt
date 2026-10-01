@@ -34,7 +34,8 @@ if cpu_family == 'x86_64'
     link_args: ['-Wl,--gc-sections', '-Wl,--wrap=__imp_SM50Initialize', '-Wl,--wrap=__imp_SM50Compile',
       '-Wl,--wrap=__imp_SM50CompileTessellationPipelineHull', '-Wl,--wrap=__imp_SM50CompileTessellationPipelineDomain',
       '-Wl,--wrap=__imp_SM50CompileGeometryPipelineVertex', '-Wl,--wrap=__imp_SM50CompileGeometryPipelineGeometry',
-      '-Wl,--wrap=__imp_DXMTMSCCompileDXIL'],
+      '-Wl,--wrap=__imp_DXMTMSCCompileDXIL', '-Wl,--wrap=__imp_DXMTMSCSynthesizeRayDispatch',
+      '-Wl,--wrap=__imp_DXMTMSCSynthesizeRayIntersection'],
   )
 endif
 

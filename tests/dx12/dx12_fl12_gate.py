@@ -345,6 +345,14 @@ def run_state_object_addition_failure_oracle(directory, wine, timeout, runtime):
                                 "addition failures/parent immutability/retry/cache; not dispatch synthesis or GPU tracing acceptance")
 
 
+def run_ray_synthesis_failure_oracle(directory, wine, timeout, runtime):
+    modes = ["synth-" + path + "-" + operation for path in ("dispatch", "intersection")
+             for operation in ("control", "unsupported", "unavailable", "memory", "invalid", "second-pass")]
+    return run_invocation_modes(directory, wine, timeout, runtime,
+                                [(mode, ("ray_stages_sm6.lib.cso",)) for mode in modes],
+                                "lazy synthesis failure/retry/retained-state traces; not GPU raytracing acceptance")
+
+
 def build_report(probes, variant, provenance=None):
     feature = probes["feature_support"]
     options = None
@@ -432,6 +440,9 @@ def build_report(probes, variant, provenance=None):
     addition = probes.get("state_object_addition_failure_oracle", {"status": UNVERIFIED})
     fl0.append(row("state_object_addition_failure_invocations", addition["status"],
                    "same-parent addition failure/retry/cache, inherited identifiers and parent immutability"))
+    synthesis = probes.get("ray_synthesis_failure_oracle", {"status": UNVERIFIED})
+    fl0.append(row("ray_synthesis_failure_invocations", synthesis["status"],
+                   "dispatch/intersection query/materialization failures, same-object retry and retained state"))
     isolation = aggregate([row("PSO_contracts", isolation, ""), row("compute_invocations", invocation["status"], ""),
                            row("graphics_invocations", graphics["status"], ""),
                            row("tessellation_invocations", tessellation["status"], ""),
@@ -442,9 +453,10 @@ def build_report(probes, variant, provenance=None):
                            row("geometry_library_invocations", geom_library["status"], ""),
                            row("shader_library_converter_invocations", shader_library["status"], ""),
                            row("state_object_invocations", state_object["status"], ""),
-                           row("state_object_addition_invocations", addition["status"], "")])
+                           row("state_object_addition_invocations", addition["status"], ""),
+                           row("ray_synthesis_invocations", synthesis["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "stage, PSO/library and state-object creation/addition probes; dispatch/intersection-synthesis failure paths remain unverified"))
+                   "compiler/state-object/synthesis probes; Metal library/PSO/table failures and multi-export progress remain unverified"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),
@@ -510,6 +522,7 @@ def main():
     probes["shader_library_failure_oracle"] = run_shader_library_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["state_object_failure_oracle"] = run_state_object_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["state_object_addition_failure_oracle"] = run_state_object_addition_failure_oracle(directory, args.wine, args.timeout, runtime)
+    probes["ray_synthesis_failure_oracle"] = run_ray_synthesis_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["typed_uav_matrix"] = run_typed_uav_matrix(directory, args.wine, args.timeout, runtime)
     if verify_build(args.build_dir.resolve(), args.variant, args.wine) != provenance:
         provenance = {"status": UNVERIFIED, "reason": "build/runtime provenance changed during probes"}
