@@ -13,7 +13,7 @@ class GateTests(unittest.TestCase):
         return {name: {"status": status, "output": output}
                 for name in ("feature_support", "shader_validation", "shader_container",
                              "pipeline_library_failure_oracle", "graphics_library_failure_oracle",
-                             "tessellation_library_failure_oracle")}
+                             "tessellation_library_failure_oracle", "geometry_library_failure_oracle")}
 
     def test_all_statuses(self):
         for status in gate.STATUSES:
@@ -139,7 +139,8 @@ class GateTests(unittest.TestCase):
                     for oracle in (gate.run_backend_failure_oracle, gate.run_graphics_failure_oracle,
                                    gate.run_tessellation_failure_oracle, gate.run_geometry_failure_oracle,
                                    gate.run_mesh_failure_oracle, gate.run_pipeline_library_failure_oracle,
-                                   gate.run_graphics_library_failure_oracle, gate.run_tessellation_library_failure_oracle):
+                                   gate.run_graphics_library_failure_oracle, gate.run_tessellation_library_failure_oracle,
+                                   gate.run_geometry_library_failure_oracle):
                         result = oracle(root, None, 1, None)
                         self.assertEqual(result["status"], gate.PASS if executable_hash == digest else gate.UNVERIFIED)
 
@@ -240,6 +241,32 @@ class GateTests(unittest.TestCase):
             result = gate.run_tessellation_library_failure_oracle(Path("."), None, 1, None)
             self.assertEqual(result["status"], gate.FAIL)
             self.assertEqual(len(result["cases"]), 20)
+
+    def test_geometry_library_missing_or_failed_is_required(self):
+        for status in (None, gate.PASS, gate.FAIL, gate.UNVERIFIED):
+            probes = self.probes()
+            probes.pop("geometry_library_failure_oracle")
+            for name in ("backend_failure_oracle", "graphics_failure_oracle", "tessellation_failure_oracle",
+                         "geometry_failure_oracle", "mesh_failure_oracle"):
+                probes[name] = {"status": gate.PASS}
+            if status is not None: probes["geometry_library_failure_oracle"] = {"status": status}
+            rows = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
+            expected = gate.UNVERIFIED if status is None else status
+            self.assertEqual(next(r["status"] for r in rows if r["name"] == "geometry_pipeline_library_failure_invocations"), expected)
+            self.assertEqual(next(r["status"] for r in rows if r["name"] == "backend_isolation"),
+                             gate.PARTIAL if expected == gate.PASS else expected)
+
+    def test_geometry_library_every_failure_mode_is_required(self):
+        def fixture(*args):
+            failed = args[3][0] == "library-geom-air-gs-object-compile"
+            self.assertEqual(args[3][1:], ("backend_failure.vs.cso", "backend_failure.ps.cso",
+                "shader_backend.geometry.gs.cso", "shader_backend_stages.hlsl"))
+            return {"status": gate.FAIL if failed else gate.PASS,
+                    "runtime_sha256": {"d3d12": "other" if failed else "same"}}
+        with patch.object(gate, "run_fixture", side_effect=fixture):
+            result = gate.run_geometry_library_failure_oracle(Path("."), None, 1, None)
+            self.assertEqual(result["status"], gate.FAIL)
+            self.assertEqual(len(result["cases"]), 15)
 
     def test_missing_query_and_failed_query(self):
         self.assertEqual(gate.build_report(self.probes(), "no-private")["FL12_0_GATE"]["status"], gate.UNVERIFIED)

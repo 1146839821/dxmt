@@ -299,6 +299,19 @@ def run_tessellation_library_failure_oracle(directory, wine, timeout, runtime):
                                 "HS/DS library hit/reload/failure/retry traces; not GPU tessellation acceptance")
 
 
+def run_geometry_library_failure_oracle(directory, wine, timeout, runtime):
+    modes = []
+    for backend, failures in (("air", ("init", "compile", "object-compile")),
+                              ("msc", ("invalid", "unsupported", "memory", "second-pass"))):
+        prefix = "library-geom-" + backend + "-"
+        modes += [prefix + operation for operation in ("retained", "reload", "missing", "mismatch")]
+        modes += [prefix + "gs-" + failure for failure in failures]
+    files = ("backend_failure.vs.cso", "backend_failure.ps.cso",
+             "shader_backend.geometry.gs.cso", "shader_backend_stages.hlsl")
+    return run_invocation_modes(directory, wine, timeout, runtime, [(mode, files) for mode in modes],
+                                "GS library hit/reload/mesh-object failure/retry traces; not GPU geometry acceptance")
+
+
 def build_report(probes, variant, provenance=None):
     feature = probes["feature_support"]
     options = None
@@ -374,15 +387,19 @@ def build_report(probes, variant, provenance=None):
     tess_library = probes.get("tessellation_library_failure_oracle", {"status": UNVERIFIED})
     fl0.append(row("tessellation_pipeline_library_failure_invocations", tess_library["status"],
                    "HS/DS retained hits, metadata reload, selected failures and same-library retry"))
+    geom_library = probes.get("geometry_library_failure_oracle", {"status": UNVERIFIED})
+    fl0.append(row("geometry_pipeline_library_failure_invocations", geom_library["status"],
+                   "GS retained hits, metadata reload, combined failures and same-library retry"))
     isolation = aggregate([row("PSO_contracts", isolation, ""), row("compute_invocations", invocation["status"], ""),
                            row("graphics_invocations", graphics["status"], ""),
                            row("tessellation_invocations", tessellation["status"], ""),
                            row("geometry_invocations", geometry["status"], ""), row("mesh_invocations", mesh["status"], ""),
                            row("compute_library_invocations", library["status"], ""),
                            row("ordinary_graphics_library_invocations", graphics_library["status"], ""),
-                           row("tessellation_library_invocations", tess_library["status"], "")])
+                           row("tessellation_library_invocations", tess_library["status"], ""),
+                           row("geometry_library_invocations", geom_library["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "stage and compute/ordinary/tessellation library probes; GS library and shader-library/raytracing invocations missing"))
+                   "stage and compute/ordinary/tessellation/geometry library probes; shader-library/raytracing invocations missing"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),
@@ -444,6 +461,7 @@ def main():
     probes["pipeline_library_failure_oracle"] = run_pipeline_library_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["graphics_library_failure_oracle"] = run_graphics_library_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["tessellation_library_failure_oracle"] = run_tessellation_library_failure_oracle(directory, args.wine, args.timeout, runtime)
+    probes["geometry_library_failure_oracle"] = run_geometry_library_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["typed_uav_matrix"] = run_typed_uav_matrix(directory, args.wine, args.timeout, runtime)
     if verify_build(args.build_dir.resolve(), args.variant, args.wine) != provenance:
         provenance = {"status": UNVERIFIED, "reason": "build/runtime provenance changed during probes"}

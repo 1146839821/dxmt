@@ -416,14 +416,19 @@ static int RunMesh(const std::string &mode, const char *ms_path, const char *as_
 }
 
 static int RunLibrary(const std::string &mode, const char *path, const char *ps_path = nullptr,
-    const char *hs_path = nullptr, const char *ds_path = nullptr, const char *stages_path = nullptr) {
+    const char *hs_path = nullptr, const char *ds_path = nullptr, const char *stages_path = nullptr,
+    const char *gs_path = nullptr) {
   const bool graphics = ps_path != nullptr;
   const bool tessellation = hs_path && ds_path && stages_path;
-  const std::string family = tessellation ? "library-tess-" : graphics ? "library-graphics-" : "library-";
+  const bool geometry = gs_path && stages_path;
+  const std::string family = geometry ? "library-geom-" : tessellation ? "library-tess-" : graphics ? "library-graphics-" : "library-";
   const bool dxil = mode.rfind(family + "msc-", 0) == 0;
   const std::string prefix = family + (dxil ? "msc-" : "air-");
   if (mode.rfind(prefix, 0) != 0) return 2;
   std::string operation = mode.substr(prefix.size());
+  if (geometry && operation.rfind("gs-", 0) == 0) {
+    fault_stage = dxmt::D3D12ShaderKind::Geometry; operation = operation.substr(3);
+  }
   if (tessellation && (operation.rfind("hs-", 0) == 0 || operation.rfind("ds-", 0) == 0)) {
     fault_stage = operation.rfind("hs-", 0) == 0 ? dxmt::D3D12ShaderKind::Hull : dxmt::D3D12ShaderKind::Domain;
     operation = operation.substr(3);
@@ -436,6 +441,7 @@ static int RunLibrary(const std::string &mode, const char *path, const char *ps_
   HRESULT expected = S_OK;
   if (operation == "init") { selected = Fault::AirInitialize; expected = E_FAIL; }
   else if (operation == "compile") { selected = Fault::AirCompile; expected = E_FAIL; }
+  else if (geometry && operation == "object-compile") { selected = Fault::AirObjectCompile; expected = E_FAIL; }
   else if (operation == "invalid") { selected = Fault::MSCInvalid; expected = E_INVALIDARG; }
   else if (operation == "unsupported") { selected = Fault::MSCUnsupported; expected = E_NOTIMPL; }
   else if (operation == "memory") { selected = Fault::MSCMemory; expected = E_OUTOFMEMORY; }
@@ -447,7 +453,13 @@ static int RunLibrary(const std::string &mode, const char *path, const char *ps_
       "[numthreads(8,8,1)] void main() {}", graphics ? "vs_5_0" : "cs_5_0", bytes)) return 2;
   if (graphics && (dxil ? !LoadShader(ps_path, ps) : !CompileLegacy(
       "float4 main() : SV_Target { return float4(1,0,0,1); }", "ps_5_0", ps))) return 2;
-  std::vector<uint8_t> hs, ds;
+  std::vector<uint8_t> hs, ds, gs;
+  if (geometry) {
+    std::vector<uint8_t> source;
+    if (!LoadShader(stages_path, source)) return 2;
+    source.push_back(0);
+    if (!(dxil ? LoadShader(gs_path, gs) : CompileLegacy(reinterpret_cast<const char *>(source.data()), "gs_5_0", gs, "gs_main"))) return 2;
+  }
   if (tessellation) {
     std::vector<uint8_t> source;
     if (!LoadShader(stages_path, source)) return 2;
@@ -475,6 +487,7 @@ static int RunLibrary(const std::string &mode, const char *path, const char *ps_
     graphics_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     graphics_desc.RasterizerState.DepthClipEnable = TRUE;
     graphics_desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (geometry) graphics_desc.GS = {gs.data(), gs.size()};
     if (tessellation) {
       graphics_desc.HS = {hs.data(), hs.size()}; graphics_desc.DS = {ds.data(), ds.size()};
       graphics_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
@@ -506,7 +519,10 @@ static int RunLibrary(const std::string &mode, const char *path, const char *ps_
     if (FAILED(hr) || !library) { PrintResult(mode, hr, false); return 1; }
   }
   passed = passed && trace.empty();
-  const std::vector<std::string> full = tessellation ? (dxil ?
+  std::vector<std::string> full = geometry ? (dxil ?
+      std::vector<std::string>{"msc.vs.query", "msc.vs.materialize", "msc.ps.query", "msc.ps.materialize",
+          "msc.gs.query", "msc.gs.materialize"} :
+      std::vector<std::string>{"air.init.vs", "air.init.gs", "air.init.ps", "air.compile.ps"}) : tessellation ? (dxil ?
       std::vector<std::string>{"msc.vs.query", "msc.vs.materialize", "msc.ps.query", "msc.ps.materialize",
           "msc.hs.query", "msc.hs.materialize", "msc.ds.query", "msc.ds.materialize"} :
       std::vector<std::string>{"air.init.vs", "air.init.hs", "air.init.ds", "air.init.ps", "air.compile.ps",
@@ -515,13 +531,22 @@ static int RunLibrary(const std::string &mode, const char *path, const char *ps_
       std::vector<std::string>{"air.init.vs", "air.compile.vs", "air.init.ps", "air.compile.ps"}) :
       (dxil ? std::vector<std::string>{"msc.cs.query", "msc.cs.materialize"} :
       std::vector<std::string>{"air.init.cs", "air.compile.cs"});
+  if (geometry && !dxil) {
+    for (unsigned strip = 0; strip < 2; ++strip) {
+      full.push_back("air.geom.mesh.vs+gs");
+      for (unsigned index = 0; index < 3; ++index) full.push_back("air.geom.object.vs+gs");
+    }
+  }
   auto wanted = full;
   fault = selected;
   if (operation == "retained") { fault = dxil ? Fault::MSCUnsupported : Fault::AirInitialize; wanted.clear(); }
   if (operation == "missing" || operation == "mismatch") { expected = E_INVALIDARG; wanted.clear(); }
   if (operation == "mismatch") { desc.NodeMask = 1; graphics_desc.NodeMask = 1; }
   if (selected != Fault::None) {
-    if (tessellation) {
+    if (geometry) {
+      if (dxil) wanted.resize(selected == Fault::MSCSecondPass ? 6 : 5);
+      else wanted.resize(selected == Fault::AirInitialize ? 2 : selected == Fault::AirObjectCompile ? 6 : 5);
+    } else if (tessellation) {
       const bool hull = fault_stage == dxmt::D3D12ShaderKind::Hull;
       if (dxil) wanted.resize((hull ? 4 : 6) + (selected == Fault::MSCSecondPass ? 2 : 1));
       else wanted.resize(selected == Fault::AirInitialize ? (hull ? 2 : 3) : (hull ? 7 : 6));
@@ -549,7 +574,8 @@ static int RunLibrary(const std::string &mode, const char *path, const char *ps_
     // Earlier successful MSC stages survive in the conversion cache even
     // though the failed library rebuild has not retained a PSO yet.
     auto retry = full;
-    if (dxil && tessellation) retry.erase(retry.begin(), retry.begin() +
+    if (dxil && geometry) retry.erase(retry.begin(), retry.begin() + 4);
+    else if (dxil && tessellation) retry.erase(retry.begin(), retry.begin() +
         (fault_stage == dxmt::D3D12ShaderKind::Hull ? 4 : 6));
     else if (graphics && dxil && fault_stage == dxmt::D3D12ShaderKind::Pixel) retry.erase(retry.begin(), retry.begin() + 2);
     passed = passed && hr == S_OK && pso && std::vector<std::string>(trace.begin() + begin, trace.end()) == retry;
@@ -570,7 +596,9 @@ static int RunLibrary(const std::string &mode, const char *path, const char *ps_
 int main(int argc, char **argv) {
   SetEnvironmentVariableA("DXMT_SHADER_CACHE", "0");
   if (argc == 5) return RunMesh(argv[1], argv[2], argv[3], argv[4]);
-  if (argc == 6) return RunGraphics(argv[1], argv[2], argv[3], nullptr, nullptr, argv[5], argv[4]);
+  if (argc == 6) return std::string(argv[1]).rfind("library-geom-", 0) == 0 ?
+      RunLibrary(argv[1], argv[2], argv[3], nullptr, nullptr, argv[5], argv[4]) :
+      RunGraphics(argv[1], argv[2], argv[3], nullptr, nullptr, argv[5], argv[4]);
   if (argc == 7) return std::string(argv[1]).rfind("library-tess-", 0) == 0 ?
       RunLibrary(argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]) :
       RunGraphics(argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]);
