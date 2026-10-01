@@ -47,7 +47,8 @@ meson compile -C build dx12_compute_sm6_fixture \
   dx12_shader_embedded_graphics_ps_fixture dx12_shader_embedded_graphics_mismatch_fixture \
   dx12_shader_backend_gs_fixture dx12_shader_backend_hs_fixture \
   dx12_shader_backend_ds_fixture dx12_shader_backend_library_fixture \
-  dx12_backend_failure_vs_fixture dx12_backend_failure_ps_fixture
+  dx12_backend_failure_vs_fixture dx12_backend_failure_ps_fixture \
+  dx12_mesh_sm6_ms_fixture dx12_mesh_sm6_as_fixture dx12_mesh_sm6_ps_fixture
 ```
 
 Use a consistent Wine loader/server for fixture compilation and execution;
@@ -103,7 +104,9 @@ VS/PS ordered invocation traces and mixed/wrong-stage precompiler rejection.
 The next `D3D12_TESSELLATION_FAILURE_ORACLE.md` adds HS/DS initialization,
 combined AIRCONV compile and MSC per-stage/pass failure traces.
 `D3D12_GEOMETRY_FAILURE_ORACLE.md` adds GS initialization, combined VS/GS
-mesh/object compile and MSC per-stage/pass failures. Mesh/library failure
+mesh/object compile and MSC per-stage/pass failures.
+`D3D12_MESH_FAILURE_ORACLE.md` adds native MS/AS/PS ordered conversion failures
+and DXBC/wrong-stage rejection. Pipeline-library failure
 invocation coverage remains needed before
 claiming the entire isolation contract validated.
 
@@ -127,8 +130,8 @@ clumps and duplicated program-version decoding. Neither alters behavior.
 ### Spec
 
 One remaining partial requirement: forced compiler-failure invocation evidence
-must prove no attempt by the other backend for mesh/library paths.
-The follow-up oracles close bounded VS/PS/CS/HS/DS/GS cases only.
+must prove no attempt by the other backend for pipeline-library paths.
+The follow-up oracles close bounded ordinary/emulated and native mesh cases.
 The gate keeps the entire isolation requirement PARTIAL.
 
 Review summary: Standards 0 hard findings (2 heuristic smells); Spec 1 partial

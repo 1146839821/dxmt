@@ -1,6 +1,7 @@
 // Test-linked production compute/graphics/converter sources, never production fault hooks.
 #include "../../src/d3d12/d3d12_device.hpp"
 #include "../../src/d3d12/d3d12_shader_converter.hpp"
+#include "../../src/d3d12/d3d12_pipeline_persistence.hpp"
 #include <d3dcompiler.h>
 #include <cstring>
 #include <fstream>
@@ -28,6 +29,8 @@ const char *StageName(dxmt::D3D12ShaderKind stage) {
   case dxmt::D3D12ShaderKind::Hull: return "hs";
   case dxmt::D3D12ShaderKind::Domain: return "ds";
   case dxmt::D3D12ShaderKind::Geometry: return "gs";
+  case dxmt::D3D12ShaderKind::Mesh: return "ms";
+  case dxmt::D3D12ShaderKind::Amplification: return "as";
   default: return "other";
   }
 }
@@ -130,6 +133,8 @@ static int TestMSC(dxmt_msc_compile_dxil_params *params) {
       params->stage == DXMT_MSC_STAGE_HULL ? dxmt::D3D12ShaderKind::Hull :
       params->stage == DXMT_MSC_STAGE_DOMAIN ? dxmt::D3D12ShaderKind::Domain :
       params->stage == DXMT_MSC_STAGE_GEOMETRY ? dxmt::D3D12ShaderKind::Geometry :
+      params->stage == DXMT_MSC_STAGE_MESH ? dxmt::D3D12ShaderKind::Mesh :
+      params->stage == DXMT_MSC_STAGE_AMPLIFICATION ? dxmt::D3D12ShaderKind::Amplification :
       params->stage == DXMT_MSC_STAGE_COMPUTE ? dxmt::D3D12ShaderKind::Compute : dxmt::D3D12ShaderKind::Unknown;
   trace.push_back(std::string("msc.") + StageName(stage) + (params->metallib ? ".materialize" : ".query"));
   switch (SelectedStage(stage) ? fault : Fault::None) {
@@ -337,8 +342,82 @@ static int RunGraphics(const std::string &mode, const char *vs_path, const char 
   return passed ? 0 : 1;
 }
 
+static int RunMesh(const std::string &mode, const char *ms_path, const char *as_path, const char *ps_path) {
+  using dxmt::D3D12ShaderKind;
+  if (mode.rfind("mesh-", 0) != 0) return 2;
+  const auto operation = mode.substr(5);
+  HRESULT expected_hr = S_OK;
+  bool reject = false;
+  if (operation == "empty-ms" || operation == "wrong-ms" || operation == "wrong-as" || operation == "wrong-ps") {
+    reject = true; expected_hr = E_INVALIDARG;
+  } else if (operation == "dxbc-ms" || operation == "dxbc-as" || operation == "dxbc-ps") {
+    reject = true; expected_hr = E_NOTIMPL;
+  } else if (operation != "control-no-as" && operation != "control-as") {
+    if (operation.rfind("ms-", 0) == 0) fault_stage = D3D12ShaderKind::Mesh;
+    else if (operation.rfind("as-", 0) == 0) fault_stage = D3D12ShaderKind::Amplification;
+    else if (operation.rfind("ps-", 0) == 0) fault_stage = D3D12ShaderKind::Pixel;
+    else return 2;
+    const auto failure = operation.substr(3);
+    if (failure == "invalid") { fault = Fault::MSCInvalid; expected_hr = E_INVALIDARG; }
+    else if (failure == "unsupported") { fault = Fault::MSCUnsupported; expected_hr = E_NOTIMPL; }
+    else if (failure == "memory") { fault = Fault::MSCMemory; expected_hr = E_OUTOFMEMORY; }
+    else if (failure == "second-pass") { fault = Fault::MSCSecondPass; expected_hr = E_NOTIMPL; }
+    else return 2;
+  }
+  std::vector<std::string> expected_trace;
+  if (!reject) {
+    expected_trace = {"msc.ms.query", "msc.ms.materialize"};
+    if (operation != "control-no-as") {
+      expected_trace.push_back("msc.as.query"); expected_trace.push_back("msc.as.materialize");
+    }
+    expected_trace.push_back("msc.ps.query"); expected_trace.push_back("msc.ps.materialize");
+    if (fault != Fault::None) {
+      const unsigned prior = fault_stage == D3D12ShaderKind::Mesh ? 0 : fault_stage == D3D12ShaderKind::Amplification ? 2 : 4;
+      expected_trace.resize(prior + (fault == Fault::MSCSecondPass ? 2 : 1));
+    }
+  }
+  dxmt::D3D12PipelineStreamData data;
+  data.type = dxmt::D3D12PipelineType::Graphics;
+  if (!LoadShader(ms_path, data.mesh_shader) || !LoadShader(as_path, data.amplification_shader) ||
+      !LoadShader(ps_path, data.pixel_shader)) return 2;
+  if (operation == "control-no-as") data.amplification_shader.clear();
+  else if (operation == "empty-ms") data.mesh_shader.clear();
+  else if (operation == "wrong-ms") data.mesh_shader = data.pixel_shader;
+  else if (operation == "wrong-as") data.amplification_shader = data.mesh_shader;
+  else if (operation == "wrong-ps") data.pixel_shader = data.mesh_shader;
+  else if (operation.rfind("dxbc-", 0) == 0) {
+    std::vector<uint8_t> legacy;
+    const bool pixel = operation == "dxbc-ps";
+    if (!CompileLegacy(pixel ? "float4 main() : SV_Target { return 0; }" :
+        "float4 main() : SV_Position { return 0; }", pixel ? "ps_5_0" : "vs_5_0", legacy)) return 2;
+    if (operation == "dxbc-ms") data.mesh_shader = legacy;
+    else if (operation == "dxbc-as") data.amplification_shader = legacy;
+    else data.pixel_shader = legacy;
+  }
+  ID3D12Device *device = nullptr;
+  if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) return 1;
+  ID3D12RootSignature *root = nullptr;
+  if (FAILED(CreateProbeRoot(device, &root))) { device->Release(); return 1; }
+  data.root_signature = root;
+  data.num_render_targets = 1; data.render_target_formats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+  data.sample_desc.Count = 1;
+  data.rasterizer_state.FillMode = D3D12_FILL_MODE_SOLID;
+  data.rasterizer_state.CullMode = D3D12_CULL_MODE_NONE;
+  data.rasterizer_state.DepthClipEnable = TRUE;
+  data.blend_state.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+  ID3D12PipelineState *pso = nullptr;
+  const HRESULT hr = dxmt::CreateMeshPipelineState(static_cast<dxmt::MTLD3D12Device *>(device), data, IID_PPV_ARGS(&pso));
+  const bool passed = hr == expected_hr && bool(pso) == SUCCEEDED(expected_hr) && trace == expected_trace;
+  PrintResult(mode, hr, passed);
+  if (pso) pso->Release();
+  data.root_signature = nullptr;
+  root->Release(); device->Release();
+  return passed ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
   SetEnvironmentVariableA("DXMT_SHADER_CACHE", "0");
+  if (argc == 5) return RunMesh(argv[1], argv[2], argv[3], argv[4]);
   if (argc == 6) return RunGraphics(argv[1], argv[2], argv[3], nullptr, nullptr, argv[5], argv[4]);
   if (argc == 7) return RunGraphics(argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]);
   if (argc == 4) return RunGraphics(argv[1], argv[2], argv[3]);

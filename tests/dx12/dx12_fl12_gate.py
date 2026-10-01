@@ -253,6 +253,16 @@ def run_geometry_failure_oracle(directory, wine, timeout, runtime):
                                 "test-linked GS and combined VS/GS compiler traces; not GPU geometry acceptance")
 
 
+def run_mesh_failure_oracle(directory, wine, timeout, runtime):
+    modes = ["mesh-control-no-as", "mesh-control-as", "mesh-empty-ms"]
+    for stage in ("ms", "as", "ps"):
+        modes += ["mesh-wrong-" + stage, "mesh-dxbc-" + stage]
+        modes += ["mesh-" + stage + "-" + failure for failure in ("invalid", "unsupported", "memory", "second-pass")]
+    specifications = [(mode, ("mesh_sm6.ms.cso", "mesh_sm6.as.cso", "mesh_sm6.ps.cso")) for mode in modes]
+    return run_invocation_modes(directory, wine, timeout, runtime, specifications,
+                                "test-linked native MS/AS/PS compiler traces; not GPU mesh draw acceptance")
+
+
 def build_report(probes, variant, provenance=None):
     feature = probes["feature_support"]
     options = None
@@ -316,12 +326,15 @@ def build_report(probes, variant, provenance=None):
     geometry = probes.get("geometry_failure_oracle", {"status": UNVERIFIED})
     fl0.append(row("geometry_backend_failure_invocations", geometry["status"],
                    "GS and combined VS/GS ordered compiler traces; mixed/wrong-stage precompiler rejection"))
+    mesh = probes.get("mesh_failure_oracle", {"status": UNVERIFIED})
+    fl0.append(row("mesh_backend_failure_invocations", mesh["status"],
+                   "native MS/AS/PS compiler traces; DXBC/wrong-stage precompiler rejection"))
     isolation = aggregate([row("PSO_contracts", isolation, ""), row("compute_invocations", invocation["status"], ""),
                            row("graphics_invocations", graphics["status"], ""),
                            row("tessellation_invocations", tessellation["status"], ""),
-                           row("geometry_invocations", geometry["status"], "")])
+                           row("geometry_invocations", geometry["status"], ""), row("mesh_invocations", mesh["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "VS/PS/CS/HS/DS/GS invocation probes; mesh/library failure invocations missing"))
+                   "ordinary, tessellation, geometry and native mesh invocation probes; library failure invocations missing"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),
@@ -379,6 +392,7 @@ def main():
     probes["graphics_failure_oracle"] = run_graphics_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["tessellation_failure_oracle"] = run_tessellation_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["geometry_failure_oracle"] = run_geometry_failure_oracle(directory, args.wine, args.timeout, runtime)
+    probes["mesh_failure_oracle"] = run_mesh_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["typed_uav_matrix"] = run_typed_uav_matrix(directory, args.wine, args.timeout, runtime)
     if verify_build(args.build_dir.resolve(), args.variant, args.wine) != provenance:
         provenance = {"status": UNVERIFIED, "reason": "build/runtime provenance changed during probes"}
