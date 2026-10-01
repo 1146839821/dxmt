@@ -2,6 +2,7 @@
 #include "../../src/d3d12/d3d12_device.hpp"
 #include "../../src/d3d12/d3d12_shader_converter.hpp"
 #include "../../src/d3d12/d3d12_pipeline_persistence.hpp"
+#include "../../src/d3d12/d3d12_raytracing_pipeline.hpp"
 #include <d3dcompiler.h>
 #include <cstring>
 #include <fstream>
@@ -690,8 +691,133 @@ static int RunShaderLibrary(const std::string &mode, const char *library_path, c
   return passed ? 0 : 1;
 }
 
+static int RunStateObject(const std::string &mode, const char *library_path, const char *ordinary_path,
+    const char *qualifiers_path) {
+  struct Export { const char *name; const char *entry; const WCHAR *wide; dxmt::D3D12ShaderKind kind; };
+  const Export exports[] = {
+    {"raygen", "RayGen", L"RayGen", dxmt::D3D12ShaderKind::RayGeneration},
+    {"miss", "Miss", L"Miss", dxmt::D3D12ShaderKind::Miss},
+    {"closesthit", "ClosestHit", L"ClosestHit", dxmt::D3D12ShaderKind::ClosestHit},
+    {"anyhit", "AnyHit", L"AnyHit", dxmt::D3D12ShaderKind::AnyHit},
+    {"intersection", "Intersection", L"Intersection", dxmt::D3D12ShaderKind::Intersection},
+    {"callable", "Callable", L"Callable", dxmt::D3D12ShaderKind::Callable},
+  };
+  const bool hinted = mode.rfind("state-hint-", 0) == 0;
+  const Export *target = &exports[0];
+  std::string operation;
+  for (const auto &item : exports) {
+    const std::string prefix = std::string(hinted ? "state-hint-" : "state-") + item.name + "-";
+    if (mode.rfind(prefix, 0) == 0) { target = &item; operation = mode.substr(prefix.size()); break; }
+  }
+  const bool reject = mode == "state-legacy" || mode == "state-ordinary" ||
+      mode == "state-qualifiers" || mode == "state-missing-export";
+  if (mode == "state-qualifiers") target = &exports[1];
+  if (hinted && target->kind != dxmt::D3D12ShaderKind::AnyHit &&
+      target->kind != dxmt::D3D12ShaderKind::ClosestHit) return 2;
+  fault_stage = target->kind;
+  if (operation == "invalid") fault = Fault::MSCInvalid;
+  else if (operation == "unsupported") fault = Fault::MSCUnsupported;
+  else if (operation == "memory") fault = Fault::MSCMemory;
+  else if (operation == "second-pass") fault = Fault::MSCSecondPass;
+  else if (!reject && operation != "control") return 2;
+  const bool injected = fault != Fault::None;
+  std::vector<uint8_t> bytes;
+  if (mode == "state-legacy") {
+    if (!CompileLegacy("[numthreads(8,8,1)] void main() {}", "cs_5_0", bytes)) return 2;
+  } else if (!LoadShader(mode == "state-ordinary" ? ordinary_path :
+      mode == "state-qualifiers" ? qualifiers_path : library_path, bytes)) return 2;
+  ID3D12Device *raw_device = nullptr;
+  if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&raw_device)))) return 1;
+  auto device = dxmt::Com<ID3D12Device>::transfer(raw_device);
+  ID3DBlob *raw_root = nullptr;
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+  if (FAILED(D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &raw_root, nullptr))) return 1;
+  auto root_blob = dxmt::Com<ID3DBlob>::transfer(raw_root);
+  ID3D12RootSignature *raw_signature = nullptr;
+  if (FAILED(device->CreateRootSignature(0, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
+      IID_PPV_ARGS(&raw_signature)))) return 1;
+  auto root = dxmt::Com<ID3D12RootSignature>::transfer(raw_signature);
+  D3D12_EXPORT_DESC export_desc = {
+    L"PublicExport", mode == "state-missing-export" ? L"MissingExport" : target->wide, D3D12_EXPORT_FLAG_NONE};
+  const D3D12_DXIL_LIBRARY_DESC library = {{bytes.data(), bytes.size()}, 1, &export_desc};
+  const D3D12_GLOBAL_ROOT_SIGNATURE global = {root.ptr()};
+  const D3D12_RAYTRACING_SHADER_CONFIG config = {4, 16};
+  const D3D12_RAYTRACING_PIPELINE_CONFIG pipeline = {1};
+  const D3D12_HIT_GROUP_DESC hit_group = {L"HitGroup", D3D12_HIT_GROUP_TYPE_TRIANGLES,
+    target->kind == dxmt::D3D12ShaderKind::AnyHit ? L"PublicExport" : nullptr,
+    target->kind == dxmt::D3D12ShaderKind::ClosestHit ? L"PublicExport" : nullptr, nullptr};
+  const D3D12_STATE_SUBOBJECT subobjects[] = {
+    {D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY, &library},
+    {D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE, &global},
+    {D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG, &config},
+    {D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG, &pipeline},
+    {D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP, &hit_group},
+  };
+  const D3D12_STATE_OBJECT_DESC desc = {D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE,
+    hinted ? 5u : 4u, subobjects};
+  auto create = [&](ID3D12StateObject **output) {
+    return dxmt::CreateD3D12RaytracingStateObject(static_cast<dxmt::MTLD3D12Device *>(device.ptr()),
+        &desc, __uuidof(ID3D12StateObject), reinterpret_cast<void **>(output));
+  };
+  auto usable = [&](ID3D12StateObject *object) {
+    if (!object) return false;
+    ID3D12StateObjectProperties *raw = nullptr;
+    if (FAILED(object->QueryInterface(IID_PPV_ARGS(&raw)))) return false;
+    auto properties = dxmt::Com<ID3D12StateObjectProperties>::transfer(raw);
+    return properties->GetShaderIdentifier(L"PublicExport") && !properties->GetShaderIdentifier(target->wide) &&
+        (!hinted || properties->GetShaderIdentifier(L"HitGroup"));
+  };
+  auto expected_trace = [&](bool fail, bool cached) {
+    std::vector<std::string> result;
+    if (reject && mode != "state-missing-export") return result;
+    for (const auto &item : exports) {
+      if (hinted && &item != target) continue;
+      const bool selected = &item == target && !reject;
+      if (selected && cached) continue;
+      const std::string prefix = std::string("msc.") + item.name + "." +
+          (mode == "state-missing-export" ? "MissingExport" : target->entry);
+      result.push_back(prefix + ".query");
+      if (selected && (!fail || operation == "second-pass")) result.push_back(prefix + ".materialize");
+    }
+    return result;
+  };
+  ID3D12StateObject *raw = reinterpret_cast<ID3D12StateObject *>(uintptr_t(1));
+  HRESULT hr = create(&raw);
+  if (raw == reinterpret_cast<ID3D12StateObject *>(uintptr_t(1))) {
+    PrintResult(mode, hr, false);
+    return 1;
+  }
+  auto object = dxmt::Com<ID3D12StateObject>::transfer(raw);
+  bool passed = hr == (injected || reject ? E_NOTIMPL : S_OK) &&
+      trace == expected_trace(injected, false) && (FAILED(hr) ? !object : usable(object.ptr()));
+  PrintResult(mode + ".create", hr, passed);
+  if (injected) {
+    fault = Fault::None;
+    const size_t begin = trace.size();
+    raw = nullptr;
+    hr = create(&raw);
+    object = dxmt::Com<ID3D12StateObject>::transfer(raw);
+    passed = passed && hr == S_OK && usable(object.ptr()) &&
+        std::vector<std::string>(trace.begin() + begin, trace.end()) == expected_trace(false, false);
+    PrintResult(mode + ".retry", hr, passed);
+  }
+  if (!reject) {
+    fault = Fault::MSCUnsupported;
+    const size_t begin = trace.size();
+    raw = nullptr;
+    hr = create(&raw);
+    auto hit = dxmt::Com<ID3D12StateObject>::transfer(raw);
+    passed = passed && hr == S_OK && usable(hit.ptr()) &&
+        std::vector<std::string>(trace.begin() + begin, trace.end()) == expected_trace(false, true);
+  }
+  PrintResult(mode, hr, passed);
+  return passed ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
   SetEnvironmentVariableA("DXMT_SHADER_CACHE", "0");
+  if (argc == 5 && std::string(argv[1]).rfind("state-", 0) == 0)
+    return RunStateObject(argv[1], argv[2], argv[3], argv[4]);
   if (argc == 5) return std::string(argv[1]).rfind("shaderlib-", 0) == 0 ?
       RunShaderLibrary(argv[1], argv[2], argv[3], argv[4]) : RunMesh(argv[1], argv[2], argv[3], argv[4]);
   if (argc == 6) return std::string(argv[1]).rfind("library-geom-", 0) == 0 ?

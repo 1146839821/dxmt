@@ -27,6 +27,7 @@ if cpu_family == 'x86_64'
   executable('dx12_backend_failure', 'dx12_backend_failure.cpp',
     '../../src/d3d12/d3d12_pipeline_compute.cpp', '../../src/d3d12/d3d12_shader_converter.cpp',
     '../../src/d3d12/d3d12_pipeline_graphics.cpp',
+    '../../src/d3d12/d3d12_raytracing_pipeline.cpp',
     '../../src/d3d12/d3d12_pipeline_persistence.cpp', '../../src/d3d10/d3d10_blob.cpp',
     dependencies: [d3d12_dep, dxgi_dep, dxmt_dep, airconv_forward_dep, util_dep, winemetal_dep, dxbc_parser_dep],
     cpp_args: ['-ffunction-sections', '-fdata-sections'],

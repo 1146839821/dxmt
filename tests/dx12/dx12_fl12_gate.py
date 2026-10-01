@@ -322,6 +322,17 @@ def run_shader_library_failure_oracle(directory, wine, timeout, runtime):
                                 "six ray-stage library converter traces/retry/cache; not state-object or GPU tracing acceptance")
 
 
+def run_state_object_failure_oracle(directory, wine, timeout, runtime):
+    stages = ("raygen", "miss", "closesthit", "anyhit", "intersection", "callable",
+              "hint-anyhit", "hint-closesthit")
+    modes = ["state-" + stage + "-" + operation for stage in stages
+             for operation in ("control", "invalid", "unsupported", "memory", "second-pass")]
+    modes += ["state-" + rejection for rejection in ("legacy", "ordinary", "qualifiers", "missing-export")]
+    files = ("ray_stages_sm6.lib.cso", "compute_sm6.cs.cso", "ray_payload_qualifiers_sm6.lib.cso")
+    return run_invocation_modes(directory, wine, timeout, runtime, [(mode, files) for mode in modes],
+                                "state-object stage probing/hints/retry/cache; not dispatch synthesis or GPU tracing acceptance")
+
+
 def build_report(probes, variant, provenance=None):
     feature = probes["feature_support"]
     options = None
@@ -403,6 +414,9 @@ def build_report(probes, variant, provenance=None):
     shader_library = probes.get("shader_library_failure_oracle", {"status": UNVERIFIED})
     fl0.append(row("shader_library_converter_failure_invocations", shader_library["status"],
                    "six ray stages, selected-pass errors, converter retry/cache and precompiler rejection"))
+    state_object = probes.get("state_object_failure_oracle", {"status": UNVERIFIED})
+    fl0.append(row("state_object_failure_invocations", state_object["status"],
+                   "six-stage candidate probing, AH/CH hints, failed publication and retry/cache"))
     isolation = aggregate([row("PSO_contracts", isolation, ""), row("compute_invocations", invocation["status"], ""),
                            row("graphics_invocations", graphics["status"], ""),
                            row("tessellation_invocations", tessellation["status"], ""),
@@ -411,9 +425,10 @@ def build_report(probes, variant, provenance=None):
                            row("ordinary_graphics_library_invocations", graphics_library["status"], ""),
                            row("tessellation_library_invocations", tess_library["status"], ""),
                            row("geometry_library_invocations", geom_library["status"], ""),
-                           row("shader_library_converter_invocations", shader_library["status"], "")])
+                           row("shader_library_converter_invocations", shader_library["status"], ""),
+                           row("state_object_invocations", state_object["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "stage, PSO library and ray shader-library converter probes; state-object probing/error propagation remains unverified"))
+                   "stage, PSO/library and state-object probing probes; addition and dispatch-synthesis failure paths remain unverified"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),
@@ -477,6 +492,7 @@ def main():
     probes["tessellation_library_failure_oracle"] = run_tessellation_library_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["geometry_library_failure_oracle"] = run_geometry_library_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["shader_library_failure_oracle"] = run_shader_library_failure_oracle(directory, args.wine, args.timeout, runtime)
+    probes["state_object_failure_oracle"] = run_state_object_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["typed_uav_matrix"] = run_typed_uav_matrix(directory, args.wine, args.timeout, runtime)
     if verify_build(args.build_dir.resolve(), args.variant, args.wine) != provenance:
         provenance = {"status": UNVERIFIED, "reason": "build/runtime provenance changed during probes"}
