@@ -28,6 +28,9 @@ enum class MetalFault { None, PSO, VisibleTable, IntersectionTable, VisibleHandl
 MetalFault metal_fault = MetalFault::None;
 bool observe_metal = false;
 unsigned metal_handle_calls = 0;
+bool observe_load = false;
+unsigned library_load_calls = 0, failed_library_load = 0;
+std::string failed_function_load;
 
 const char *StageName(dxmt::D3D12ShaderKind stage) {
   switch (stage) {
@@ -85,6 +88,8 @@ extern decltype(&DXMTMSCCompileDXIL) __real___imp_DXMTMSCCompileDXIL;
 extern decltype(&DXMTMSCSynthesizeRayDispatch) __real___imp_DXMTMSCSynthesizeRayDispatch;
 extern decltype(&DXMTMSCSynthesizeRayIntersection) __real___imp_DXMTMSCSynthesizeRayIntersection;
 extern decltype(&MTLDevice_newComputePipelineState) __real___imp_MTLDevice_newComputePipelineState;
+extern decltype(&MTLDevice_newLibrary) __real___imp_MTLDevice_newLibrary;
+extern decltype(&MTLLibrary_newFunction) __real___imp_MTLLibrary_newFunction;
 extern decltype(&MTLComputePipelineState_newVisibleFunctionTable) __real___imp_MTLComputePipelineState_newVisibleFunctionTable;
 extern decltype(&MTLComputePipelineState_newIntersectionFunctionTable) __real___imp_MTLComputePipelineState_newIntersectionFunctionTable;
 extern decltype(&MTLComputePipelineState_functionHandle) __real___imp_MTLComputePipelineState_functionHandle;
@@ -210,6 +215,23 @@ decltype(&DXMTMSCSynthesizeRayDispatch) __wrap___imp_DXMTMSCSynthesizeRayDispatc
 decltype(&DXMTMSCSynthesizeRayIntersection) __wrap___imp_DXMTMSCSynthesizeRayIntersection = TestRayIntersection;
 }
 
+static obj_handle_t TestLibraryLoad(obj_handle_t device, obj_handle_t data, obj_handle_t *error) {
+  if (observe_load) {
+    trace.push_back("metal.library." + std::to_string(++library_load_calls));
+    if (library_load_calls == failed_library_load) {
+      *error = NULL_OBJECT_HANDLE;
+      return NULL_OBJECT_HANDLE;
+    }
+  }
+  return __real___imp_MTLDevice_newLibrary(device, data, error);
+}
+static obj_handle_t TestFunctionLoad(obj_handle_t library, const char *name) {
+  if (observe_load) {
+    trace.push_back(std::string("metal.function.") + name);
+    if (failed_function_load == name) return NULL_OBJECT_HANDLE;
+  }
+  return __real___imp_MTLLibrary_newFunction(library, name);
+}
 static obj_handle_t TestMetalPSO(obj_handle_t device, const WMTComputePipelineInfo *info, obj_handle_t *error) {
   if (observe_metal) trace.push_back("metal.pso");
   if (observe_metal && metal_fault == MetalFault::PSO) { *error = NULL_OBJECT_HANDLE; return NULL_OBJECT_HANDLE; }
@@ -246,6 +268,8 @@ static void TestIntersectionVisible(obj_handle_t table, obj_handle_t visible, ui
   __real___imp_MTLIntersectionFunctionTable_setVisibleFunctionTable(table, visible, index);
 }
 extern "C" {
+decltype(&MTLDevice_newLibrary) __wrap___imp_MTLDevice_newLibrary = TestLibraryLoad;
+decltype(&MTLLibrary_newFunction) __wrap___imp_MTLLibrary_newFunction = TestFunctionLoad;
 decltype(&MTLDevice_newComputePipelineState) __wrap___imp_MTLDevice_newComputePipelineState = TestMetalPSO;
 decltype(&MTLComputePipelineState_newVisibleFunctionTable) __wrap___imp_MTLComputePipelineState_newVisibleFunctionTable = TestVisibleTable;
 decltype(&MTLComputePipelineState_newIntersectionFunctionTable) __wrap___imp_MTLComputePipelineState_newIntersectionFunctionTable = TestIntersectionTable;
@@ -963,15 +987,31 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
 }
 
 static int RunSynthesis(const std::string &request_mode, const char *library_path) {
-  const bool metal = request_mode.rfind("metal-", 0) == 0;
-  const std::string mode = metal ? "synth-" + request_mode.substr(6) : request_mode;
+  const bool load = request_mode.rfind("load-", 0) == 0;
+  const bool metal = load || request_mode.rfind("metal-", 0) == 0;
+  const std::string mode = load ? "synth-" + request_mode.substr(5) :
+      metal ? "synth-" + request_mode.substr(6) : request_mode;
   const bool intersection = mode.rfind("synth-intersection-", 0) == 0;
   const std::string prefix = intersection ? "synth-intersection-" : "synth-dispatch-";
   if (mode.rfind(prefix, 0) != 0) return 2;
   const std::string operation = mode.substr(prefix.size());
   HRESULT expected = E_NOTIMPL;
   int error = DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
-  if (metal) {
+  std::string load_terminal;
+  constexpr const char *intersection_name = "irconverter.wrapper.intersection.function.triangle";
+  if (load) {
+    expected = operation == "control" ? S_OK : E_FAIL;
+    error = DXMT_MSC_SUCCESS;
+    if (operation == "control") {}
+    else if (operation == "dispatch-library") { failed_library_load = 1; load_terminal = "metal.library.1"; }
+    else if (operation == "dispatch-function") {
+      failed_function_load = "RaygenIndirection"; load_terminal = "metal.function." + failed_function_load;
+    } else if (operation == "intersection-library" && intersection) {
+      failed_library_load = 2; load_terminal = "metal.library.2";
+    } else if (operation == "intersection-function" && intersection) {
+      failed_function_load = intersection_name; load_terminal = "metal.function." + failed_function_load;
+    } else return 2;
+  } else if (metal) {
     expected = operation == "control" ? S_OK : E_FAIL;
     error = DXMT_MSC_SUCCESS;
     if (operation == "control") {}
@@ -1027,9 +1067,12 @@ static int RunSynthesis(const std::string &request_mode, const char *library_pat
   synthesis_materialization_only = operation == "second-pass";
   synthesis_error = error;
   observe_metal = metal;
+  observe_load = load;
   const std::vector<std::string> dispatch = {"msc.synth.dispatch.query", "msc.synth.dispatch.materialize"};
   std::vector<std::string> full = dispatch;
+  if (load) full.insert(full.end(), {"metal.library.1", "metal.function.RaygenIndirection"});
   if (intersection) { full.push_back("msc.synth.intersection.query"); full.push_back("msc.synth.intersection.materialize"); }
+  if (load && intersection) full.insert(full.end(), {"metal.library.2", std::string("metal.function.") + intersection_name});
   if (metal) {
     full.insert(full.end(), {"metal.pso", "metal.vft", "metal.ift", "metal.handle.1", "metal.vft.set.1"});
     if (intersection) full.insert(full.end(), {"metal.handle.2", "metal.vft.set.2", "metal.handle.3",
@@ -1037,7 +1080,7 @@ static int RunSynthesis(const std::string &request_mode, const char *library_pat
   }
   auto wanted = full;
   if (metal && FAILED(expected)) {
-    const std::string last = operation == "pso" ? "metal.pso" :
+    const std::string last = load ? load_terminal : operation == "pso" ? "metal.pso" :
         operation == "vft" || operation == "ift" ? "metal.ift" :
         operation == "visible-handle" ? "metal.handle.1" : "metal.handle.3";
     wanted.resize(std::find(wanted.begin(), wanted.end(), last) - wanted.begin() + 1);
@@ -1059,6 +1102,9 @@ static int RunSynthesis(const std::string &request_mode, const char *library_pat
     synthesis_error = DXMT_MSC_SUCCESS;
     metal_fault = MetalFault::None;
     metal_handle_calls = 0;
+    library_load_calls = 0;
+    failed_library_load = 0;
+    failed_function_load.clear();
     const size_t retry_begin = trace.size();
     hr = dxmt::GetD3D12RaytracingDispatchState(object.ptr(), state);
     passed = passed && hr == S_OK && usable(state) &&
@@ -1067,6 +1113,8 @@ static int RunSynthesis(const std::string &request_mode, const char *library_pat
   }
   synthesis_error = DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
   metal_fault = MetalFault::PSO;
+  failed_library_load = library_load_calls + 1;
+  failed_function_load = "RaygenIndirection";
   const size_t hit_begin = trace.size();
   dxmt::D3D12RaytracingDispatchState hit;
   hr = dxmt::GetD3D12RaytracingDispatchState(object.ptr(), hit);
@@ -1080,7 +1128,8 @@ static int RunSynthesis(const std::string &request_mode, const char *library_pat
 
 int main(int argc, char **argv) {
   SetEnvironmentVariableA("DXMT_SHADER_CACHE", "0");
-  if (argc == 3 && (std::string(argv[1]).rfind("synth-", 0) == 0 || std::string(argv[1]).rfind("metal-", 0) == 0))
+  if (argc == 3 && (std::string(argv[1]).rfind("synth-", 0) == 0 || std::string(argv[1]).rfind("metal-", 0) == 0 ||
+      std::string(argv[1]).rfind("load-", 0) == 0))
     return RunSynthesis(argv[1], argv[2]);
   if (argc == 5 && std::string(argv[1]).rfind("state-", 0) == 0)
     return RunStateObject(argv[1], argv[2], argv[3], argv[4]);

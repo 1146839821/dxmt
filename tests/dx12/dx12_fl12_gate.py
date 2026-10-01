@@ -357,9 +357,12 @@ def run_ray_metal_failure_oracle(directory, wine, timeout, runtime):
     modes = ["metal-" + path + "-" + operation for path in ("dispatch", "intersection")
              for operation in ("control", "pso", "vft", "ift", "visible-handle")]
     modes.append("metal-intersection-intersection-handle")
+    modes.extend("load-" + path + "-" + operation for path in ("dispatch", "intersection")
+                 for operation in ("control", "dispatch-library", "dispatch-function"))
+    modes.extend(("load-intersection-intersection-library", "load-intersection-intersection-function"))
     return run_invocation_modes(directory, wine, timeout, runtime,
                                 [(mode, ("ray_stages_sm6.lib.cso",)) for mode in modes],
-                                "Metal PSO/table/handle failure and transactional retry; not GPU tracing acceptance")
+                                "Metal library/function/PSO/table/handle failure and retry; not GPU tracing acceptance")
 
 
 def build_report(probes, variant, provenance=None):
@@ -454,7 +457,7 @@ def build_report(probes, variant, provenance=None):
                    "dispatch/intersection query/materialization failures, same-object retry and retained state"))
     metal = probes.get("ray_metal_failure_oracle", {"status": UNVERIFIED})
     fl0.append(row("ray_metal_failure_invocations", metal["status"],
-                   "PSO/table/function-handle failures, complete-state publication and same-object retry"))
+                   "lazy library/function-load and PSO/table/handle failures, complete-state publication and retry"))
     isolation = aggregate([row("PSO_contracts", isolation, ""), row("compute_invocations", invocation["status"], ""),
                            row("graphics_invocations", graphics["status"], ""),
                            row("tessellation_invocations", tessellation["status"], ""),
@@ -469,7 +472,7 @@ def build_report(probes, variant, provenance=None):
                            row("ray_synthesis_invocations", synthesis["status"], ""),
                            row("ray_metal_invocations", metal["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "compiler/state-object/synthesis/Metal allocation probes; library/function-load failures and multi-export progress remain unverified"))
+                   "compiler/state-object/synthesis/Metal load/allocation probes; creation-time export loads and multi-export progress remain unverified"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),

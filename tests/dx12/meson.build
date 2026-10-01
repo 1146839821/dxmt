@@ -37,6 +37,7 @@ if cpu_family == 'x86_64'
       '-Wl,--wrap=__imp_DXMTMSCCompileDXIL', '-Wl,--wrap=__imp_DXMTMSCSynthesizeRayDispatch',
       '-Wl,--wrap=__imp_DXMTMSCSynthesizeRayIntersection',
       '-Wl,--wrap=__imp_MTLDevice_newComputePipelineState',
+      '-Wl,--wrap=__imp_MTLDevice_newLibrary', '-Wl,--wrap=__imp_MTLLibrary_newFunction',
       '-Wl,--wrap=__imp_MTLComputePipelineState_newVisibleFunctionTable',
       '-Wl,--wrap=__imp_MTLComputePipelineState_newIntersectionFunctionTable',
       '-Wl,--wrap=__imp_MTLComputePipelineState_functionHandle',

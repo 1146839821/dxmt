@@ -409,8 +409,31 @@ class GateTests(unittest.TestCase):
         with patch.object(gate, "run_fixture", side_effect=fixture):
             result = gate.run_ray_metal_failure_oracle(Path("."), None, 1, None)
             self.assertEqual(result["status"], gate.FAIL)
-            self.assertEqual(len(result["cases"]), 11)
-            self.assertEqual(len(set(seen)), 11)
+            self.assertEqual(len(result["cases"]), 19)
+            self.assertEqual(len(set(seen)), 19)
+            self.assertIn("load-dispatch-dispatch-library", seen)
+            self.assertIn("load-dispatch-dispatch-function", seen)
+            self.assertIn("load-intersection-intersection-library", seen)
+            expected = {"metal-" + path + "-" + operation for path in ("dispatch", "intersection")
+                        for operation in ("control", "pso", "vft", "ift", "visible-handle")}
+            expected.add("metal-intersection-intersection-handle")
+            expected.update("load-" + path + "-" + operation for path in ("dispatch", "intersection")
+                            for operation in ("control", "dispatch-library", "dispatch-function"))
+            expected.update(("load-intersection-intersection-library", "load-intersection-intersection-function"))
+            self.assertEqual(set(seen), expected)
+
+    def test_ray_load_each_failure_is_required(self):
+        failures = ["load-" + path + "-" + operation for path in ("dispatch", "intersection")
+                    for operation in ("dispatch-library", "dispatch-function")]
+        failures.extend(("load-intersection-intersection-library", "load-intersection-intersection-function"))
+        for failed in failures:
+            with self.subTest(mode=failed):
+                def fixture(*args):
+                    return {"status": gate.FAIL if args[3][0] == failed else gate.PASS}
+                with patch.object(gate, "run_fixture", side_effect=fixture):
+                    result = gate.run_ray_metal_failure_oracle(Path("."), None, 1, None)
+                    self.assertEqual(result["cases"][failed]["status"], gate.FAIL)
+                    self.assertEqual(result["status"], gate.FAIL)
 
     def test_missing_query_and_failed_query(self):
         self.assertEqual(gate.build_report(self.probes(), "no-private")["FL12_0_GATE"]["status"], gate.UNVERIFIED)

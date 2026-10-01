@@ -121,8 +121,9 @@ AH/CH stage hints and failed-publication/retry/cache traces.
 and immutable/inherited identifier/stack checks. `D3D12_RAY_SYNTHESIS_FAILURE_ORACLE.md`
 adds lazy dispatch/intersection synthesis failures and same-object retry/retained
 state. `D3D12_RAY_METAL_FAILURE_ORACLE.md` adds PSO/table/function-handle failures
-and a transactional publication repair. Metal library/function-load failure and
-multi-export progress coverage remains needed before
+and a transactional publication repair. `D3D12_RAY_LOAD_FAILURE_ORACLE.md` adds
+lazy dispatch/intersection library/function-load failures and same-object retry.
+Creation-time export loads and multi-export progress coverage remains needed before
 claiming the entire isolation contract validated.
 
 ## Self-review
@@ -145,12 +146,12 @@ clumps and duplicated program-version decoding. Neither alters behavior.
 ### Spec
 
 One remaining partial requirement: forced compiler-failure invocation evidence
-must cover Metal library/function-load failures and multi-export partial progress.
+must cover creation-time export loads and multi-export partial progress.
 The follow-up oracles close bounded ordinary/emulated,
 native mesh, compute, ordinary VS/PS, HS/DS and GS pipeline-library cases,
 plus the six ray-stage shader-library converter entry paths and state-object
 candidate probing/failed publication, same-parent additions, lazy synthesis and
-Metal PSO/table/function-handle failure/retry.
+Metal lazy library/function-load and PSO/table/function-handle failure/retry.
 The gate keeps the entire isolation requirement PARTIAL.
 
 Review summary: Standards 0 hard findings (2 heuristic smells); Spec 1 partial
