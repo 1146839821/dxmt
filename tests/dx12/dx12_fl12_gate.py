@@ -44,7 +44,7 @@ def verify_build(build, variant, wine):
         commands = json.loads((build / "compile_commands.json").read_text())
         suffixes = ["d3d12_device.cpp", "cache.c"]
         if (build / "tests/dx12/dx12_backend_failure.exe").is_file():
-            suffixes += ["dx12_backend_failure.cpp", "d3d12_pipeline_compute.cpp", "d3d12_shader_converter.cpp"]
+            suffixes += ["dx12_backend_failure.cpp", "d3d12_pipeline_compute.cpp", "d3d12_pipeline_graphics.cpp", "d3d12_shader_converter.cpp"]
         for suffix in suffixes:
             matches = [entry for entry in commands if entry["file"].endswith("/" + suffix)]
             if not matches:
@@ -183,7 +183,7 @@ def run_typed_uav_matrix(directory, wine, timeout, runtime):
             "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
 
 
-def run_backend_failure_oracle(directory, wine, timeout, runtime):
+def run_invocation_modes(directory, wine, timeout, runtime, specifications, reason):
     cases = {}
     def probe_digest():
         try:
@@ -191,12 +191,9 @@ def run_backend_failure_oracle(directory, wine, timeout, runtime):
         except OSError:
             return None
     probe_hash = probe_digest()
-    modes = ("air-control", "air-init-failure", "air-compile-failure", "air-wrong-stage", "empty",
-             "msc-control", "msc-invalid", "msc-unsupported", "msc-memory", "msc-second-pass", "msc-wrong-stage")
-    for mode in modes:
-        shader = "shader_embedded.graphics.vs.cso" if mode == "msc-wrong-stage" else "compute_sm6.cs.cso"
-        cases[mode] = run_fixture(directory, wine, "dx12_backend_failure.exe", (mode, shader),
-                                  ("backend failure " + mode + ":", "status=PASS"), timeout, runtime, (shader,))
+    for mode, shaders in specifications:
+        cases[mode] = run_fixture(directory, wine, "dx12_backend_failure.exe", (mode,) + shaders,
+                                  ("backend failure " + mode + ":", "status=PASS"), timeout, runtime, shaders)
     status = aggregate([row(name, case["status"], "") for name, case in cases.items()])
     hashes = [case.get("runtime_sha256") for case in cases.values() if case.get("runtime_sha256")]
     if hashes and any(digest != hashes[0] for digest in hashes):
@@ -204,8 +201,29 @@ def run_backend_failure_oracle(directory, wine, timeout, runtime):
     if not probe_hash or probe_digest() != probe_hash or any(
             case.get("executable_sha256") != probe_hash for case in cases.values()):
         status = aggregate([row("execution", status, ""), row("probe_provenance", UNVERIFIED, "")])
-    return {"status": status, "reason": "test-linked production compute routing; graphics invocation coverage remains missing",
+    return {"status": status, "reason": reason,
             "probe_sha256": probe_hash, "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
+
+
+def run_backend_failure_oracle(directory, wine, timeout, runtime):
+    modes = ("air-control", "air-init-failure", "air-compile-failure", "air-wrong-stage", "empty",
+             "msc-control", "msc-invalid", "msc-unsupported", "msc-memory", "msc-second-pass", "msc-wrong-stage")
+    specifications = [(mode, ("shader_embedded.graphics.vs.cso" if mode == "msc-wrong-stage" else "compute_sm6.cs.cso",))
+                      for mode in modes]
+    return run_invocation_modes(directory, wine, timeout, runtime, specifications,
+                                "test-linked production compute routing; not GPU dispatch acceptance")
+
+
+def run_graphics_failure_oracle(directory, wine, timeout, runtime):
+    modes = ["graphics-air-control", "graphics-msc-control", "graphics-mixed-air-vs", "graphics-mixed-msc-vs"]
+    for backend in ("air", "msc"):
+        for stage in ("vs", "ps"):
+            modes.append("graphics-" + backend + "-wrong-" + stage)
+            for failure in (("init", "compile") if backend == "air" else ("invalid", "unsupported", "memory", "second-pass")):
+                modes.append("graphics-" + backend + "-" + stage + "-" + failure)
+    specifications = [(mode, ("backend_failure.vs.cso", "backend_failure.ps.cso")) for mode in modes]
+    return run_invocation_modes(directory, wine, timeout, runtime, specifications,
+                                "test-linked ordinary VS/PS ordered compiler traces; not GPU draw acceptance")
 
 
 def build_report(probes, variant, provenance=None):
@@ -262,9 +280,13 @@ def build_report(probes, variant, provenance=None):
     invocation = probes.get("backend_failure_oracle", {"status": UNVERIFIED})
     fl0.append(row("compute_backend_failure_invocations", invocation["status"],
                    "test-linked production factory: exact AIRCONV/MSC failure call counts; no GPU dispatch"))
-    isolation = aggregate([row("PSO_contracts", isolation, ""), row("compute_invocations", invocation["status"], "")])
+    graphics = probes.get("graphics_failure_oracle", {"status": UNVERIFIED})
+    fl0.append(row("graphics_backend_failure_invocations", graphics["status"],
+                   "ordinary VS/PS ordered compiler traces and mixed/wrong-stage precompiler rejection"))
+    isolation = aggregate([row("PSO_contracts", isolation, ""), row("compute_invocations", invocation["status"], ""),
+                           row("graphics_invocations", graphics["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "PSO family/stage rejection and compute invocation probe; graphics/library failure invocations missing"))
+                   "ordinary VS/PS/CS invocation probes; HS/DS/GS, mesh/library failure invocations missing"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),
@@ -319,6 +341,7 @@ def main():
     }
     probes["minmax_sampler_contract"] = run_minmax_contract(directory, args.wine, args.timeout, runtime)
     probes["backend_failure_oracle"] = run_backend_failure_oracle(directory, args.wine, args.timeout, runtime)
+    probes["graphics_failure_oracle"] = run_graphics_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["typed_uav_matrix"] = run_typed_uav_matrix(directory, args.wine, args.timeout, runtime)
     if verify_build(args.build_dir.resolve(), args.variant, args.wine) != provenance:
         provenance = {"status": UNVERIFIED, "reason": "build/runtime provenance changed during probes"}

@@ -1,4 +1,4 @@
-// Test-linked production compute/converter sources, never production fault hooks.
+// Test-linked production compute/graphics/converter sources, never production fault hooks.
 #include "../../src/d3d12/d3d12_device.hpp"
 #include "../../src/d3d12/d3d12_shader_converter.hpp"
 #include <d3dcompiler.h>
@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+#include <map>
 #include "log/log.hpp"
 
 dxmt::Logger dxmt::Logger::s_instance("dx12_backend_failure");
@@ -14,19 +15,27 @@ namespace {
 enum class Fault { None, AirInitialize, AirCompile, MSCInvalid, MSCUnsupported, MSCMemory, MSCSecondPass };
 Fault fault = Fault::None;
 unsigned air_initializations = 0, air_compiles = 0, msc_calls = 0;
-unsigned unrelated_host_calls = 0;
+dxmt::D3D12ShaderKind fault_stage = dxmt::D3D12ShaderKind::Unknown;
+std::map<sm50_shader_t, dxmt::D3D12ShaderKind> initialized_stages;
+std::map<uint32_t, unsigned> msc_stage_calls;
+std::vector<std::string> trace;
+
+const char *StageName(dxmt::D3D12ShaderKind stage) {
+  switch (stage) {
+  case dxmt::D3D12ShaderKind::Vertex: return "vs";
+  case dxmt::D3D12ShaderKind::Pixel: return "ps";
+  case dxmt::D3D12ShaderKind::Compute: return "cs";
+  default: return "other";
+  }
+}
+bool SelectedStage(dxmt::D3D12ShaderKind stage) {
+  return fault_stage == dxmt::D3D12ShaderKind::Unknown || fault_stage == stage;
+}
 }
 
-// Persistence also references non-compute factories/device-child validation.
-// Graphics factories must never run. Device identity validation is kept real
-// for the explicit empty root signature required by the AIRCONV path.
+// Test-local host dependency: real canonical device identity checking. Actual
+// compute/graphics/mesh factory definitions come from production source files.
 namespace dxmt {
-HRESULT CreateGraphicsPipelineState(MTLD3D12Device *, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *, REFIID, void **) {
-  ++unrelated_host_calls; return E_FAIL;
-}
-HRESULT CreateMeshPipelineState(MTLD3D12Device *, const D3D12PipelineStreamData &, REFIID, void **) {
-  ++unrelated_host_calls; return E_FAIL;
-}
 bool IsSameDevice(MTLD3D12Device *device, ID3D12DeviceChild *child) {
   if (!device || !child) return false;
   IUnknown *child_identity = nullptr, *device_identity = nullptr;
@@ -50,23 +59,35 @@ extern decltype(&DXMTMSCCompileDXIL) __real___imp_DXMTMSCCompileDXIL;
 static int TestAirInitialize(const void *bytes, size_t size, sm50_shader_t *shader,
                             MTL_SHADER_REFLECTION *reflection, sm50_error_t *error) {
   ++air_initializations;
-  if (fault == Fault::AirInitialize) { *shader = {}; *error = {}; return 1; }
-  return __real___imp_SM50Initialize(bytes, size, shader, reflection, error);
+  const auto stage = dxmt::ClassifyD3D12Shader({bytes, size}).shader_kind;
+  trace.push_back(std::string("air.init.") + StageName(stage));
+  if (fault == Fault::AirInitialize && SelectedStage(stage)) { *shader = {}; *error = {}; return 1; }
+  const int result = __real___imp_SM50Initialize(bytes, size, shader, reflection, error);
+  if (!result && *shader) initialized_stages[*shader] = stage;
+  return result;
 }
 static int TestAirCompile(sm50_shader_t shader, SM50_SHADER_COMPILATION_ARGUMENT_DATA *args,
                           const char *name, sm50_bitcode_t *bitcode, sm50_error_t *error) {
   ++air_compiles;
-  if (fault == Fault::AirCompile) { *bitcode = {}; *error = {}; return 1; }
+  const auto found = initialized_stages.find(shader);
+  const auto stage = found == initialized_stages.end() ? dxmt::D3D12ShaderKind::Unknown : found->second;
+  trace.push_back(std::string("air.compile.") + StageName(stage));
+  if (fault == Fault::AirCompile && SelectedStage(stage)) { *bitcode = {}; *error = {}; return 1; }
   return __real___imp_SM50Compile(shader, args, name, bitcode, error);
 }
 static int TestMSC(dxmt_msc_compile_dxil_params *params) {
   ++msc_calls;
-  switch (fault) {
+  const unsigned stage_call = ++msc_stage_calls[params->stage];
+  const auto stage = params->stage == DXMT_MSC_STAGE_VERTEX ? dxmt::D3D12ShaderKind::Vertex :
+      params->stage == DXMT_MSC_STAGE_FRAGMENT ? dxmt::D3D12ShaderKind::Pixel :
+      params->stage == DXMT_MSC_STAGE_COMPUTE ? dxmt::D3D12ShaderKind::Compute : dxmt::D3D12ShaderKind::Unknown;
+  trace.push_back(std::string("msc.") + StageName(stage) + (params->metallib ? ".materialize" : ".query"));
+  switch (SelectedStage(stage) ? fault : Fault::None) {
   case Fault::MSCInvalid: return DXMT_MSC_ERROR_INVALID_DXIL;
   case Fault::MSCUnsupported: return DXMT_MSC_ERROR_UNSUPPORTED_SHADER;
   case Fault::MSCMemory: return DXMT_MSC_ERROR_OUT_OF_MEMORY;
   case Fault::MSCSecondPass:
-    if (msc_calls == 2) return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+    if (stage_call == 2) return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
     break;
   default: break;
   }
@@ -78,8 +99,121 @@ decltype(&SM50Compile) __wrap___imp_SM50Compile = TestAirCompile;
 decltype(&DXMTMSCCompileDXIL) __wrap___imp_DXMTMSCCompileDXIL = TestMSC;
 }
 
+static bool LoadShader(const char *path, std::vector<uint8_t> &bytes) {
+  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  if (!file || file.tellg() <= 0) return false;
+  bytes.resize(static_cast<size_t>(file.tellg())); file.seekg(0);
+  return bool(file.read(reinterpret_cast<char *>(bytes.data()), bytes.size()));
+}
+
+static bool CompileLegacy(const char *source, const char *target, std::vector<uint8_t> &bytes) {
+  HMODULE compiler = LoadLibraryA("d3dcompiler_47.dll");
+  auto compile = compiler ? reinterpret_cast<pD3DCompile>(GetProcAddress(compiler, "D3DCompile")) : nullptr;
+  if (!compile) return false;
+  ID3DBlob *blob = nullptr, *errors = nullptr;
+  const HRESULT hr = compile(source, std::strlen(source), "backend_failure", nullptr, nullptr,
+      "main", target, 0, 0, &blob, &errors);
+  if (errors) { std::cerr << static_cast<const char *>(errors->GetBufferPointer()); errors->Release(); }
+  if (FAILED(hr) || !blob) { if (blob) blob->Release(); return false; }
+  const auto *begin = static_cast<const uint8_t *>(blob->GetBufferPointer());
+  bytes.assign(begin, begin + blob->GetBufferSize()); blob->Release();
+  return true;
+}
+
+static HRESULT CreateProbeRoot(ID3D12Device *device, ID3D12RootSignature **root) {
+  D3D12_ROOT_SIGNATURE_DESC desc = {};
+  ID3DBlob *blob = nullptr;
+  HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, nullptr);
+  if (SUCCEEDED(hr)) hr = device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(root));
+  if (blob) blob->Release();
+  return hr;
+}
+
+static void PrintResult(const std::string &mode, HRESULT hr, bool passed) {
+  std::cout << "backend failure " << mode << ": hr=0x" << std::hex << static_cast<uint32_t>(hr)
+      << std::dec << " air_init=" << air_initializations << " air_compile=" << air_compiles
+      << " msc=" << msc_calls << " trace=";
+  for (const auto &event : trace) std::cout << event << ";";
+  std::cout << " status=" << (passed ? "PASS" : "FAIL") << "\n";
+}
+
+static int RunGraphics(const std::string &mode, const char *vs_path, const char *ps_path) {
+  using dxmt::D3D12ShaderKind;
+  bool vertex_dxil = false, pixel_dxil = false, wrong_vs = false, wrong_ps = false, reject = false;
+  HRESULT expected_hr = S_OK;
+  const std::string air_prefix = "graphics-air-", msc_prefix = "graphics-msc-";
+  std::string operation;
+  if (mode == "graphics-mixed-air-vs") { pixel_dxil = true; reject = true; expected_hr = E_NOTIMPL; }
+  else if (mode == "graphics-mixed-msc-vs") { vertex_dxil = true; reject = true; expected_hr = E_NOTIMPL; }
+  else {
+    if (mode.rfind(air_prefix, 0) == 0) operation = mode.substr(air_prefix.size());
+    else if (mode.rfind(msc_prefix, 0) == 0) {
+      operation = mode.substr(msc_prefix.size()); vertex_dxil = pixel_dxil = true;
+    } else return 2;
+    if (operation == "wrong-vs" || operation == "wrong-ps") {
+      wrong_vs = operation == "wrong-vs"; wrong_ps = !wrong_vs;
+      reject = true; expected_hr = E_INVALIDARG;
+    } else if (operation != "control") {
+      if (operation.rfind("vs-", 0) == 0) fault_stage = D3D12ShaderKind::Vertex;
+      else if (operation.rfind("ps-", 0) == 0) fault_stage = D3D12ShaderKind::Pixel;
+      else return 2;
+      const auto failure = operation.substr(3);
+      if (!vertex_dxil) {
+        if (failure == "init") fault = Fault::AirInitialize;
+        else if (failure == "compile") fault = Fault::AirCompile;
+        else return 2;
+        expected_hr = E_FAIL;
+      } else {
+        if (failure == "invalid") { fault = Fault::MSCInvalid; expected_hr = E_INVALIDARG; }
+        else if (failure == "unsupported") { fault = Fault::MSCUnsupported; expected_hr = E_NOTIMPL; }
+        else if (failure == "memory") { fault = Fault::MSCMemory; expected_hr = E_OUTOFMEMORY; }
+        else if (failure == "second-pass") { fault = Fault::MSCSecondPass; expected_hr = E_NOTIMPL; }
+        else return 2;
+      }
+    }
+  }
+  std::vector<std::string> expected_trace;
+  if (!reject) {
+    expected_trace = vertex_dxil ? std::vector<std::string>{"msc.vs.query", "msc.vs.materialize", "msc.ps.query", "msc.ps.materialize"} :
+        std::vector<std::string>{"air.init.vs", "air.compile.vs", "air.init.ps", "air.compile.ps"};
+    if (fault != Fault::None) {
+      const unsigned prior = fault_stage == D3D12ShaderKind::Vertex ? 0 : 2;
+      expected_trace.resize(prior + (fault == Fault::AirCompile || fault == Fault::MSCSecondPass ? 2 : 1));
+    }
+  }
+  std::vector<uint8_t> vs, ps;
+  if (!(vertex_dxil ? LoadShader(vs_path, vs) : CompileLegacy(
+          "float4 main(uint vertex : SV_VertexID) : SV_Position { return float4(float(vertex),0,0,1); }", "vs_5_0", vs)) ||
+      !(pixel_dxil ? LoadShader(ps_path, ps) : CompileLegacy(
+          "float4 main() : SV_Target { return float4(1,0,0,1); }", "ps_5_0", ps))) return 2;
+  ID3D12Device *device = nullptr;
+  if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) return 1;
+  ID3D12RootSignature *root = nullptr;
+  if (FAILED(CreateProbeRoot(device, &root))) { device->Release(); return 1; }
+  D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+  desc.pRootSignature = root;
+  desc.VS = wrong_vs ? D3D12_SHADER_BYTECODE{ps.data(), ps.size()} : D3D12_SHADER_BYTECODE{vs.data(), vs.size()};
+  desc.PS = wrong_ps ? D3D12_SHADER_BYTECODE{vs.data(), vs.size()} : D3D12_SHADER_BYTECODE{ps.data(), ps.size()};
+  desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  desc.NumRenderTargets = 1; desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+  desc.SampleDesc.Count = 1; desc.SampleMask = UINT_MAX;
+  desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+  desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+  desc.RasterizerState.DepthClipEnable = TRUE;
+  desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+  ID3D12PipelineState *pso = nullptr;
+  const HRESULT hr = dxmt::CreateGraphicsPipelineState(static_cast<dxmt::MTLD3D12Device *>(device), &desc, IID_PPV_ARGS(&pso));
+  const bool passed = hr == expected_hr && bool(pso) == SUCCEEDED(expected_hr) && trace == expected_trace;
+  PrintResult(mode, hr, passed);
+  if (pso) pso->Release();
+  root->Release(); device->Release();
+  return passed ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
-  if (argc != 3) { std::cerr << "usage: probe MODE DXIL.cso\n"; return 2; }
+  SetEnvironmentVariableA("DXMT_SHADER_CACHE", "0");
+  if (argc == 4) return RunGraphics(argv[1], argv[2], argv[3]);
+  if (argc != 3) { std::cerr << "usage: probe COMPUTE_MODE DXIL.cso | GRAPHICS_MODE VS.cso PS.cso\n"; return 2; }
   const std::string mode = argv[1];
   bool dxil = false, wrong_stage = false, empty = false;
   HRESULT expected_hr = S_OK;
@@ -99,35 +233,17 @@ int main(int argc, char **argv) {
     else if (mode == "msc-wrong-stage") { expected_hr = E_INVALIDARG; expected_msc = 0; }
     else return 2;
   }
-  SetEnvironmentVariableA("DXMT_SHADER_CACHE", "0");
   std::vector<uint8_t> bytes;
-  ID3DBlob *blob = nullptr, *errors = nullptr;
   if (dxil) {
-    std::ifstream file(argv[2], std::ios::binary | std::ios::ate);
-    if (!file || file.tellg() <= 0) return 2;
-    bytes.resize(static_cast<size_t>(file.tellg())); file.seekg(0);
-    if (!file.read(reinterpret_cast<char *>(bytes.data()), bytes.size())) return 2;
+    if (!LoadShader(argv[2], bytes)) return 2;
   } else if (!empty) {
-    HMODULE compiler = LoadLibraryA("d3dcompiler_47.dll");
-    auto compile = compiler ? reinterpret_cast<pD3DCompile>(GetProcAddress(compiler, "D3DCompile")) : nullptr;
     const char *source = wrong_stage ? "float4 main() : SV_Position { return 0; }" : "[numthreads(8,8,1)] void main() {}";
-    if (!compile) return 2;
-    const HRESULT hr = compile(source, std::strlen(source), "backend_failure", nullptr, nullptr,
-        "main", wrong_stage ? "vs_5_0" : "cs_5_0", 0, 0, &blob, &errors);
-    if (errors) { std::cerr << static_cast<const char *>(errors->GetBufferPointer()); errors->Release(); }
-    if (FAILED(hr) || !blob) return 2;
-    const auto *begin = static_cast<const uint8_t *>(blob->GetBufferPointer());
-    bytes.assign(begin, begin + blob->GetBufferSize()); blob->Release();
+    if (!CompileLegacy(source, wrong_stage ? "vs_5_0" : "cs_5_0", bytes)) return 2;
   }
   ID3D12Device *device = nullptr;
   if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) return 1;
-  D3D12_ROOT_SIGNATURE_DESC root_desc = {};
-  ID3DBlob *root_blob = nullptr;
   ID3D12RootSignature *root = nullptr;
-  HRESULT root_hr = D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob, nullptr);
-  if (SUCCEEDED(root_hr)) root_hr = device->CreateRootSignature(0, root_blob->GetBufferPointer(),
-      root_blob->GetBufferSize(), IID_PPV_ARGS(&root));
-  if (root_blob) root_blob->Release();
+  const HRESULT root_hr = CreateProbeRoot(device, &root);
   if (FAILED(root_hr)) { device->Release(); return 1; }
   D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
   desc.pRootSignature = root;
@@ -138,10 +254,8 @@ int main(int argc, char **argv) {
   const HRESULT hr = dxmt::CreateComputePipelineState(static_cast<dxmt::MTLD3D12Device *>(device),
       &desc, IID_PPV_ARGS(&pso));
   const bool passed = hr == expected_hr && bool(pso) == SUCCEEDED(expected_hr) &&
-      air_initializations == expected_init && air_compiles == expected_compile && msc_calls == expected_msc && !unrelated_host_calls;
-  std::cout << "backend failure " << mode << ": hr=0x" << std::hex << static_cast<uint32_t>(hr)
-      << std::dec << " air_init=" << air_initializations << " air_compile=" << air_compiles
-      << " msc=" << msc_calls << " status=" << (passed ? "PASS" : "FAIL") << "\n";
+      air_initializations == expected_init && air_compiles == expected_compile && msc_calls == expected_msc;
+  PrintResult(mode, hr, passed);
   if (pso) pso->Release();
   root->Release();
   device->Release();

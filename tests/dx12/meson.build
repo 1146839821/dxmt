@@ -20,11 +20,12 @@ dx12_shader_validation = executable('dx12_shader_validation', 'dx12_shader_valid
   dependencies: [d3d12_dep],
 )
 
-# Observe the actual production compute routing without shipping fault hooks.
+# Observe the actual production compute/graphics routing without shipping fault hooks.
 # Import wrapping is the x64 MinGW test ABI; other targets retain existing tests.
 if cpu_family == 'x86_64'
   executable('dx12_backend_failure', 'dx12_backend_failure.cpp',
     '../../src/d3d12/d3d12_pipeline_compute.cpp', '../../src/d3d12/d3d12_shader_converter.cpp',
+    '../../src/d3d12/d3d12_pipeline_graphics.cpp',
     '../../src/d3d12/d3d12_pipeline_persistence.cpp', '../../src/d3d10/d3d10_blob.cpp',
     dependencies: [d3d12_dep, dxgi_dep, dxmt_dep, airconv_forward_dep, util_dep, winemetal_dep, dxbc_parser_dep],
     cpp_args: ['-ffunction-sections', '-fdata-sections'],
@@ -209,6 +210,13 @@ else
 endif
 
 if dxc_command.length() > 0
+  foreach stage : ['vs', 'ps']
+    custom_target('dx12_backend_failure_@0@_fixture'.format(stage),
+      input: 'backend_failure_graphics.hlsl', output: 'backend_failure.@0@.cso'.format(stage),
+      command: dxc_command + ['-E', '@0@_main'.format(stage), '-T', '@0@_6_0'.format(stage), '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+  endforeach
   foreach phase : range(3)
     custom_target('dxil_static_alias_@0@'.format(phase),
       input: 'dxil_static_alias.hlsl', output: 'dxil_static_alias_@0@.cso'.format(phase),
