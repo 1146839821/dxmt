@@ -2,6 +2,13 @@ dx12_sm6_probe = executable('dx12_compute_sm6', 'dx12_compute_sm6.cpp',
   dependencies: [ d3d12_dep ],
 )
 
+# Offline experiment; dynamically loads the explicitly selected DXC SDK only.
+executable('dxil_roundtrip', 'dxil_roundtrip.cpp',
+  build_by_default: false,
+  link_args: ['-municode'],
+  dependencies: [cpp.find_library('ole32')],
+)
+
 dx12_shader_container = executable('dx12_shader_container', 'dx12_shader_container.cpp', '../../src/util/util_md5.cpp',
   dependencies: [ d3d12_dep ],
 )
