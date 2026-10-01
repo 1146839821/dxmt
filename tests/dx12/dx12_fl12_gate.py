@@ -148,12 +148,24 @@ def run_typed_uav_matrix(directory, wine, timeout, runtime):
                               ("typed UAV policy contracts passed",), timeout, runtime),
         "api": run_fixture(directory, wine, "dx12_typed_uav_formats.exe", ("--api-policy",),
                            ("typed UAV API contracts passed",), timeout, runtime, ()),
+        "submission_residency": run_fixture(directory, wine, "dx12_typed_buffer_residency.exe", (),
+                                             ("typed buffer submission residency contracts passed",), timeout, runtime),
     }
     for backend in ("dxbc", "dxil"):
         files = ("typed_uav_formats.hlsl",) if backend == "dxbc" else tuple(
             "typed_uav_%d_%d.cso" % (type_index, shape) for type_index in range(8) for shape in range(6))
         cases[backend] = run_fixture(directory, wine, "dx12_typed_uav_formats.exe", ("--" + backend,),
                                      ("typed UAV matrix: passed=144 failed=0",), timeout, runtime, files)
+        view_files = ("typed_uav_formats.hlsl",) if backend == "dxbc" else tuple(
+            "typed_uav_%d_0.cso" % type_index for type_index in range(8))
+        cases[backend + "_views"] = run_fixture(
+            directory, wine, "dx12_typed_uav_formats.exe", ("--" + backend, "--view-contract"),
+            ("typed UAV view contracts: passed=126 failed=0",), timeout, runtime, view_files)
+        srv_files = ("typed_uav_formats.hlsl",) if backend == "dxbc" else tuple(
+            "typed_uav_srv_%d.cso" % type_index for type_index in range(8))
+        cases[backend + "_srv_views"] = run_fixture(
+            directory, wine, "dx12_typed_uav_formats.exe", ("--" + backend, "--srv-view-contract"),
+            ("typed SRV view contracts: passed=126 failed=0",), timeout, runtime, srv_files)
     status = aggregate([row(name, case["status"], "") for name, case in cases.items()])
     hashes = [case.get("runtime_sha256") for case in cases.values() if case.get("runtime_sha256")]
     if hashes and any(digest != hashes[0] for digest in hashes):

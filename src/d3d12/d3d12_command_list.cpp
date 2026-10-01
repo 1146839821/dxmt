@@ -2322,7 +2322,7 @@ public:
             WMTResourceUsageRead,
             resource_stages
         );
-      EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
+      EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr(), false, false);
       DEBUG(
           "[DEBUG-AIRCONV-RENDER] recording=", recording_id_, " encoder=",
           allocator_->encoder_current ? allocator_->encoder_current->id : UINT64_MAX, " pso=",
@@ -3030,7 +3030,7 @@ public:
   void
   VisitDescriptorResourceUses(
       const ShaderVisibleDescriptorSnapshot &snapshot, D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed,
-      bool compute, WMTRenderStages stages, F &&use_resource
+      bool compute, WMTRenderStages stages, bool use_msc, F &&use_resource
   ) {
     const auto &descriptor = snapshot.descriptor;
     const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
@@ -3079,6 +3079,10 @@ public:
       auto *allocation = snapshot.buffer_allocation ? snapshot.buffer_allocation.ptr() : snapshot.buffer->current();
       if (allocation)
         emit(allocation->buffer().handle, WMTResourceUsageRead);
+      if (use_msc)
+        emit(snapshot.msc_typed_buffer_view.handle, WMTResourceUsageRead);
+      else if (allocation)
+        emit(snapshot.buffer->view(descriptor.SRVTexelBuffer.view, allocation).handle, WMTResourceUsageRead);
       break;
     }
     case ShaderVisibleDescriptorType::UAVTexelBuffer: {
@@ -3087,6 +3091,10 @@ public:
       auto *allocation = snapshot.buffer_allocation ? snapshot.buffer_allocation.ptr() : snapshot.buffer->current();
       if (allocation)
         emit(allocation->buffer().handle, read_write);
+      if (use_msc)
+        emit(snapshot.msc_typed_buffer_view.handle, read_write);
+      else if (allocation)
+        emit(snapshot.buffer->view(descriptor.UAVTexelBuffer.view, allocation).handle, read_write);
       break;
     }
     case ShaderVisibleDescriptorType::SRVBuffer: {
@@ -3113,7 +3121,7 @@ public:
   void
   EncodeMSCResourceUses(
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
-      bool compute = false
+      bool compute = false, bool use_msc = true
   ) {
     // Direct-indexed root signatures legitimately have no root parameters;
     // their resource heap still needs a residency walk below.
@@ -3140,10 +3148,11 @@ public:
         pRootSig, pStaging, descriptor_heap,
         [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type, D3D12_DESCRIPTOR_RANGE_FLAGS flags,
             bool direct_indexed) {
-          PendingDescriptorUse use{descriptor_heap, index, range_type, direct_indexed, compute, stages};
+          const bool is_volatile = direct_indexed || (flags & D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
+          PendingDescriptorUse use{descriptor_heap, index, range_type, direct_indexed, compute, stages, use_msc, is_volatile};
           try {
             current_uses.push_back(use);
-            if (direct_indexed || (flags & D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE)) {
+            if (is_volatile) {
               allocator_->encoder_current->RetainDescriptorHeap(
                   static_cast<IUnknown *>(static_cast<ID3D12DescriptorHeap *>(descriptor_heap))
               );
@@ -3181,9 +3190,17 @@ public:
       std::vector<ShaderVisibleDescriptorSnapshot> snapshots;
       descriptor_heap->ResolveDescriptors(indices, snapshots);
       for (size_t i = 0; i < snapshots.size() && i < slot_uses.size(); i++) {
+        const auto missing_msc_view = snapshots[i].buffer &&
+            (snapshots[i].descriptor.type == ShaderVisibleDescriptorType::SRVTexelBuffer ||
+             snapshots[i].descriptor.type == ShaderVisibleDescriptorType::UAVTexelBuffer) &&
+            !snapshots[i].msc_typed_buffer_view;
         for (const auto &use : slot_uses[i]) {
+          if (use.use_msc && !use.volatile_descriptors && missing_msc_view) {
+            FailRecording(__func__, "MSC typed-buffer view unavailable (unaligned offset or native view creation failure)");
+            return;
+          }
           VisitDescriptorResourceUses(
-              snapshots[i], use.range_type, use.direct_indexed, use.compute, use.render_stages,
+              snapshots[i], use.range_type, use.direct_indexed, use.compute, use.render_stages, use.use_msc,
               [&](obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages render_stages) {
                 if (use.compute)
                   EncodeComputeResourceUse(resource, usage);
@@ -3247,9 +3264,17 @@ public:
         // lock. No encoder call occurs in this section.
         group.heap->ResolveDescriptors(indices, snapshots);
         for (size_t i = 0; i < snapshots.size() && i < slot_uses.size(); i++) {
+          const auto missing_msc_view = snapshots[i].buffer &&
+              (snapshots[i].descriptor.type == ShaderVisibleDescriptorType::SRVTexelBuffer ||
+               snapshots[i].descriptor.type == ShaderVisibleDescriptorType::UAVTexelBuffer) &&
+              !snapshots[i].msc_typed_buffer_view;
           for (const auto &use : slot_uses[i]) {
+            if (use.use_msc && missing_msc_view) {
+              ERR("D3D12 submission rejected: MSC typed-buffer view unavailable");
+              return false;
+            }
             VisitDescriptorResourceUses(
-                snapshots[i], use.range_type, use.direct_indexed, use.compute, use.render_stages,
+                snapshots[i], use.range_type, use.direct_indexed, use.compute, use.render_stages, use.use_msc,
                 [&](obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages render_stages) {
                   if (retained_resources.insert(resource).second) {
                     WMT::Resource native_resource;
@@ -3445,7 +3470,7 @@ public:
         EncodeComputeResourceUse(descriptor_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
       if (sampler_heap_)
         EncodeComputeResourceUse(sampler_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
-      EncodeMSCResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true);
+      EncodeMSCResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true, false);
     }
 
     if (compute_trace_id_ < 4096)

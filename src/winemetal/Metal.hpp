@@ -1198,6 +1198,11 @@ public:
     return MTLDevice_minimumLinearTextureAlignmentForPixelFormat(handle, format);
   }
 
+  uint64_t
+  minimumTextureBufferAlignmentForPixelFormat(WMTPixelFormat format) {
+    return MTLDevice_minimumTextureBufferAlignmentForPixelFormat(handle, format);
+  }
+
   bool
   supportsFamily(WMTGPUFamily gpu_family) {
     return MTLDevice_supportsFamily(handle, gpu_family);

@@ -1,6 +1,10 @@
 // TYPE, SHAPE and CHANNELS are supplied by the fixture build.
 #if SHAPE == 0
+#if READ_ONLY
+Buffer<TYPE> input : register(t0);
+#else
 RWBuffer<TYPE> input : register(u0);
+#endif
 #define SRC(i) (i)
 #define DST(i) ((i) + 4)
 #elif SHAPE == 1
@@ -28,7 +32,9 @@ RWBuffer<uint> output : register(u1);
 [numthreads(4, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
   TYPE value = input[SRC(tid.x)];
+#if !READ_ONLY
   input[DST(tid.x)] = value;
+#endif
 #if CHANNELS == 4
   uint4 bits = asuint(value);
   output[tid.x * 4] = bits.x;

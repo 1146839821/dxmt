@@ -552,6 +552,9 @@ WINEMETAL_API obj_handle_t MTLTexture_newTextureView(
 WINEMETAL_API uint64_t
 MTLDevice_minimumLinearTextureAlignmentForPixelFormat(obj_handle_t device, enum WMTPixelFormat format);
 
+WINEMETAL_API uint64_t
+MTLDevice_minimumTextureBufferAlignmentForPixelFormat(obj_handle_t device, enum WMTPixelFormat format);
+
 enum WMTAttributeFormat : uint32_t {
   WMTAttributeFormatInvalid = 0,
   WMTAttributeFormatUChar2 = 1,

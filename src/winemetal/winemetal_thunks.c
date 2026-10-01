@@ -298,6 +298,16 @@ MTLDevice_minimumLinearTextureAlignmentForPixelFormat(obj_handle_t device, enum 
   return params.ret;
 }
 
+WINEMETAL_API uint64_t
+MTLDevice_minimumTextureBufferAlignmentForPixelFormat(obj_handle_t device, enum WMTPixelFormat format) {
+  struct unixcall_generic_obj_uint64_uint64_ret params;
+  params.handle = device;
+  params.arg = (uint64_t)format;
+  params.ret = 0;
+  UNIX_CALL(unix_mtldevice_minimumtexturebufferalignment, &params);
+  return params.ret;
+}
+
 WINEMETAL_API obj_handle_t
 MTLDevice_newLibrary(
     obj_handle_t device, obj_handle_t data, obj_handle_t *err_out

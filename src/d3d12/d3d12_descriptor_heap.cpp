@@ -144,6 +144,7 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
   std::vector<Rc<Texture>> texture_resources_;
   std::vector<Rc<Buffer>> buffer_resources_;
   std::vector<Rc<Buffer>> counter_resources_;
+  std::vector<WMT::Reference<WMT::Texture>> msc_typed_buffer_views_;
   std::vector<Rc<BufferAllocation>> cbv_allocations_;
   std::vector<WMT::Reference<WMT::AccelerationStructure>> acceleration_structure_resources_;
   std::vector<WMT::Reference<WMT::Buffer>> acceleration_structure_headers_;
@@ -165,9 +166,48 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
     texture_resources_[Index] = nullptr;
     buffer_resources_[Index] = nullptr;
     counter_resources_[Index] = nullptr;
+    msc_typed_buffer_views_[Index] = {};
     cbv_allocations_[Index] = nullptr;
     acceleration_structure_resources_[Index] = nullptr;
     acceleration_structure_headers_[Index] = nullptr;
+  }
+
+  void
+  SetMSCTypedBufferView(UINT Index, Buffer *buffer, BufferViewKey view, BufferSlice slice) {
+    SetMSCDescriptor(Index, {});
+    if (!buffer || !slice.elementCount)
+      return;
+    const auto format = buffer->pixelFormat(view);
+    const auto alignment = device_->GetMTLDevice().minimumTextureBufferAlignmentForPixelFormat(format);
+    // MSC's typed texture access does not apply the descriptor padding offset.
+    // Never issue a misaligned native view or silently substitute a rounded origin.
+    if (!alignment || slice.byteOffset % alignment)
+      return;
+
+    auto *allocation = buffer->current();
+    WMTTextureInfo info = {};
+    info.type = WMTTextureTypeTextureBuffer;
+    info.pixel_format = format;
+    info.width = slice.elementCount;
+    info.height = info.depth = info.array_length = info.mipmap_level_count = info.sample_count = 1;
+    info.options = WMTResourceHazardTrackingModeUntracked;
+    if (allocation->flags().test(BufferAllocationFlag::GpuPrivate))
+      info.options |= WMTResourceStorageModePrivate;
+    else if (allocation->flags().test(BufferAllocationFlag::GpuManaged))
+      info.options |= WMTResourceStorageModeManaged;
+    auto usage = WMTTextureUsageShaderRead;
+    if (!allocation->flags().test(BufferAllocationFlag::GpuReadonly) &&
+        (allocation->flags().test(BufferAllocationFlag::GpuManaged) || allocation->flags().test(BufferAllocationFlag::GpuPrivate))) {
+      usage |= WMTTextureUsageShaderWrite;
+      if (format == WMTPixelFormatR32Uint || format == WMTPixelFormatR32Sint ||
+          (format == WMTPixelFormatRG32Uint && device_->GetMTLDevice().supportsFamily(WMTGPUFamilyApple8)))
+        usage |= WMTTextureUsageShaderAtomic;
+    }
+    info.usage = usage;
+    msc_typed_buffer_views_[Index] = allocation->buffer().newTexture(info, slice.byteOffset, slice.byteLength);
+    if (msc_typed_buffer_views_[Index])
+      SetMSCDescriptor(Index, {allocation->gpuAddress() + slice.byteOffset, info.gpu_resource_id,
+                               uint64_t(slice.byteLength) | (1ull << 63)});
   }
 
 public:
@@ -189,6 +229,7 @@ public:
     texture_resources_.resize(pDesc->NumDescriptors);
     buffer_resources_.resize(pDesc->NumDescriptors);
     counter_resources_.resize(pDesc->NumDescriptors);
+    msc_typed_buffer_views_.resize(pDesc->NumDescriptors);
     cbv_allocations_.resize(pDesc->NumDescriptors);
     acceleration_structure_resources_.resize(pDesc->NumDescriptors);
     acceleration_structure_headers_.resize(pDesc->NumDescriptors);
@@ -400,6 +441,7 @@ public:
         snapshot.texture = texture_resources_[index];
         snapshot.buffer = buffer_resources_[index];
         snapshot.buffer_allocation = snapshot.buffer ? snapshot.buffer->current() : nullptr;
+        snapshot.msc_typed_buffer_view = msc_typed_buffer_views_[index];
         snapshot.allocation = cbv_allocations_[index];
         snapshot.acceleration_structure = acceleration_structure_resources_[index];
         snapshot.acceleration_structure_header = acceleration_structure_headers_[index];
@@ -490,13 +532,7 @@ public:
         auto &buffer_view = UAVBuffer->view_(View);
         gpu_storage.UAVTexelBuffer.resource_id = buffer_view.gpu_resource_id;
         gpu_storage.UAVTexelBuffer.metadata = ((uint64_t)Slice.elementCount << 32) | (uint64_t)(Slice.firstElement);
-        auto texel_size = MTLGetTexelSize(UAVBuffer->pixelFormat(View));
-        uint64_t metadata = Slice.byteLength;
-        metadata |= ((uint64_t)(Slice.byteOffset / texel_size) & 0xff) << 32;
-        metadata |= 1ull << 63;
-        SetMSCDescriptor(
-            Index, {UAVBuffer->current()->gpuAddress() + Slice.byteOffset, buffer_view.gpu_resource_id, metadata}
-        );
+        SetMSCTypedBufferView(Index, UAVBuffer, View, Slice);
       } else {
         gpu_storage.UAVTexelBuffer.resource_id = 0;
         gpu_storage.UAVTexelBuffer.metadata = 0;
@@ -552,11 +588,7 @@ public:
         auto &buffer_view = Buffer->view_(View);
         gpu_storage.UAVTexelBuffer.resource_id = buffer_view.gpu_resource_id;
         gpu_storage.UAVTexelBuffer.metadata = ((uint64_t)Slice.elementCount << 32) | (uint64_t)(Slice.firstElement);
-        auto texel_size = MTLGetTexelSize(Buffer->pixelFormat(View));
-        uint64_t metadata = Slice.byteLength;
-        metadata |= ((uint64_t)(Slice.byteOffset / texel_size) & 0xff) << 32;
-        metadata |= 1ull << 63;
-        SetMSCDescriptor(Index, {Buffer->current()->gpuAddress() + Slice.byteOffset, buffer_view.gpu_resource_id, metadata});
+        SetMSCTypedBufferView(Index, Buffer, View, Slice);
       } else {
         gpu_storage.UAVTexelBuffer.resource_id = 0;
         gpu_storage.UAVTexelBuffer.metadata = 0;
@@ -640,6 +672,8 @@ public:
       heap_to->texture_resources_[DescriptorTo + i] = texture_resources_[From + i];
       heap_to->buffer_resources_[DescriptorTo + i] = buffer_resources_[From + i];
       heap_to->counter_resources_[DescriptorTo + i] = counter_resources_[From + i];
+      if (heap_to != this || DescriptorTo + i != From + i)
+        heap_to->msc_typed_buffer_views_[DescriptorTo + i] = msc_typed_buffer_views_[From + i];
       heap_to->cbv_allocations_[DescriptorTo + i] = cbv_allocations_[From + i];
       heap_to->acceleration_structure_resources_[DescriptorTo + i] = acceleration_structure_resources_[From + i];
       heap_to->acceleration_structure_headers_[DescriptorTo + i] = acceleration_structure_headers_[From + i];

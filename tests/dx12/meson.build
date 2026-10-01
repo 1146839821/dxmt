@@ -39,6 +39,9 @@ dx12_texture_dimensions = executable('dx12_texture_dimensions', 'dx12_texture_di
 dx12_typed_uav_formats = executable('dx12_typed_uav_formats', 'dx12_typed_uav_formats.cpp',
   dependencies: [d3d12_dep],
 )
+dx12_typed_buffer_residency = executable('dx12_typed_buffer_residency', 'dx12_typed_buffer_residency.cpp',
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep],
+)
 configure_file(input: 'typed_uav_formats.hlsl', output: 'typed_uav_formats.hlsl', copy: true)
 dx12_typed_uav_policy = executable('dx12_typed_uav_policy', 'dx12_typed_uav_policy.cpp',
   dependencies: [d3d12_dep],
@@ -167,6 +170,13 @@ endif
 if dxc_command.length() > 0
   typed_uav_types = ['float', 'uint', 'int', 'float4', 'uint4', 'int4', 'unorm float', 'unorm float4']
   foreach type_index : range(8)
+    custom_target('dx12_typed_uav_srv_@0@_fixture'.format(type_index),
+      input: 'typed_uav_formats.hlsl', output: 'typed_uav_srv_@0@.cso'.format(type_index),
+      command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '-D', 'TYPE=' + typed_uav_types[type_index],
+        '-D', 'SHAPE=0', '-D', 'READ_ONLY=1', '-D', 'CHANNELS=' + (type_index in [3, 4, 5, 7] ? '4' : '1'),
+        '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
     foreach shape : range(6)
       channels = type_index in [3, 4, 5, 7] ? '4' : '1'
       custom_target('dx12_typed_uav_@0@_@1@_fixture'.format(type_index, shape),

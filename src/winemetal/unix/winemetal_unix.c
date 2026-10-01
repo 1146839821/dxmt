@@ -392,6 +392,13 @@ _MTLDevice_minimumLinearTextureAlignmentForPixelFormat(void *obj) {
 }
 
 static NTSTATUS
+_MTLDevice_minimumTextureBufferAlignmentForPixelFormat(void *obj) {
+  struct unixcall_generic_obj_uint64_uint64_ret *params = obj;
+  params->ret = [(id<MTLDevice>)params->handle minimumTextureBufferAlignmentForPixelFormat:to_metal_pixel_format(params->arg)];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 _MTLDevice_newLibrary(void *obj) {
   struct unixcall_mtldevice_newlibrary *params = obj;
   id<MTLDevice> device = (id<MTLDevice>)params->device;
@@ -4487,6 +4494,7 @@ const void *__wine_unix_call_funcs[] = {
     &thunk_DXMTMSCSynthesizeRayDispatch,
     &thunk_DXMTMSCSynthesizeRayIntersection,
     &_MTLDevice_supportsArgumentBuffersTier2,
+    &_MTLDevice_minimumTextureBufferAlignmentForPixelFormat,
 };
 
 #ifndef DXMT_NATIVE
@@ -4686,5 +4694,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &thunk32_DXMTMSCSynthesizeRayDispatch,
     &thunk32_DXMTMSCSynthesizeRayIntersection,
     &_MTLDevice_supportsArgumentBuffersTier2,
+    &_MTLDevice_minimumTextureBufferAlignmentForPixelFormat,
 };
 #endif

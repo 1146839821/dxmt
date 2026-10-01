@@ -79,6 +79,16 @@ class GateTests(unittest.TestCase):
         with patch.object(gate, "run_fixture", side_effect=fixture):
             self.assertEqual(gate.run_typed_uav_matrix(Path("."), None, 1, None)["status"], gate.FAIL)
 
+    def test_typed_view_contract_failure_is_required_even_if_matrix_passes(self):
+        for backend in ("dxbc", "dxil"):
+            for mode in ("--view-contract", "--srv-view-contract"):
+                def fixture(*args):
+                    failed = args[3] == ("--" + backend, mode)
+                    return {"status": gate.FAIL if failed else gate.PASS,
+                            "runtime_sha256": {"d3d12": "same"}}
+                with patch.object(gate, "run_fixture", side_effect=fixture):
+                    self.assertEqual(gate.run_typed_uav_matrix(Path("."), None, 1, None)["status"], gate.FAIL)
+
     def test_provenance_gap_does_not_erase_execution_failure(self):
         probes = self.probes()
         probes["feature_support"]["status"] = gate.FAIL

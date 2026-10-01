@@ -37,6 +37,8 @@ struct PendingDescriptorUse {
   bool direct_indexed = false;
   bool compute = false;
   WMTRenderStages render_stages = static_cast<WMTRenderStages>(0);
+  bool use_msc = false;
+  bool volatile_descriptors = true;
 };
 
 enum class EncoderType {
