@@ -4,6 +4,7 @@
 #include "../../src/d3d12/d3d12_pipeline_persistence.hpp"
 #include "../../src/d3d12/d3d12_raytracing_pipeline.hpp"
 #include <d3dcompiler.h>
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -23,6 +24,10 @@ std::map<uint32_t, unsigned> msc_stage_calls;
 std::vector<std::string> trace;
 int synthesis_error = DXMT_MSC_SUCCESS;
 bool synthesis_intersection = false, synthesis_materialization_only = false;
+enum class MetalFault { None, PSO, VisibleTable, IntersectionTable, VisibleHandle, IntersectionHandle };
+MetalFault metal_fault = MetalFault::None;
+bool observe_metal = false;
+unsigned metal_handle_calls = 0;
 
 const char *StageName(dxmt::D3D12ShaderKind stage) {
   switch (stage) {
@@ -79,6 +84,13 @@ extern decltype(&SM50CompileGeometryPipelineGeometry) __real___imp_SM50CompileGe
 extern decltype(&DXMTMSCCompileDXIL) __real___imp_DXMTMSCCompileDXIL;
 extern decltype(&DXMTMSCSynthesizeRayDispatch) __real___imp_DXMTMSCSynthesizeRayDispatch;
 extern decltype(&DXMTMSCSynthesizeRayIntersection) __real___imp_DXMTMSCSynthesizeRayIntersection;
+extern decltype(&MTLDevice_newComputePipelineState) __real___imp_MTLDevice_newComputePipelineState;
+extern decltype(&MTLComputePipelineState_newVisibleFunctionTable) __real___imp_MTLComputePipelineState_newVisibleFunctionTable;
+extern decltype(&MTLComputePipelineState_newIntersectionFunctionTable) __real___imp_MTLComputePipelineState_newIntersectionFunctionTable;
+extern decltype(&MTLComputePipelineState_functionHandle) __real___imp_MTLComputePipelineState_functionHandle;
+extern decltype(&MTLVisibleFunctionTable_setFunction) __real___imp_MTLVisibleFunctionTable_setFunction;
+extern decltype(&MTLIntersectionFunctionTable_setFunction) __real___imp_MTLIntersectionFunctionTable_setFunction;
+extern decltype(&MTLIntersectionFunctionTable_setVisibleFunctionTable) __real___imp_MTLIntersectionFunctionTable_setVisibleFunctionTable;
 }
 
 static int TestAirInitialize(const void *bytes, size_t size, sm50_shader_t *shader,
@@ -196,6 +208,51 @@ static int TestRayIntersection(dxmt_msc_synthesize_ray_intersection_params *para
 extern "C" {
 decltype(&DXMTMSCSynthesizeRayDispatch) __wrap___imp_DXMTMSCSynthesizeRayDispatch = TestRayDispatch;
 decltype(&DXMTMSCSynthesizeRayIntersection) __wrap___imp_DXMTMSCSynthesizeRayIntersection = TestRayIntersection;
+}
+
+static obj_handle_t TestMetalPSO(obj_handle_t device, const WMTComputePipelineInfo *info, obj_handle_t *error) {
+  if (observe_metal) trace.push_back("metal.pso");
+  if (observe_metal && metal_fault == MetalFault::PSO) { *error = NULL_OBJECT_HANDLE; return NULL_OBJECT_HANDLE; }
+  return __real___imp_MTLDevice_newComputePipelineState(device, info, error);
+}
+static obj_handle_t TestVisibleTable(obj_handle_t pipeline, uint64_t count) {
+  if (observe_metal) trace.push_back("metal.vft");
+  if (observe_metal && metal_fault == MetalFault::VisibleTable) return NULL_OBJECT_HANDLE;
+  return __real___imp_MTLComputePipelineState_newVisibleFunctionTable(pipeline, count);
+}
+static obj_handle_t TestIntersectionTable(obj_handle_t pipeline, uint64_t count) {
+  if (observe_metal) trace.push_back("metal.ift");
+  if (observe_metal && metal_fault == MetalFault::IntersectionTable) return NULL_OBJECT_HANDLE;
+  return __real___imp_MTLComputePipelineState_newIntersectionFunctionTable(pipeline, count);
+}
+static obj_handle_t TestFunctionHandle(obj_handle_t pipeline, obj_handle_t function) {
+  if (observe_metal) {
+    trace.push_back("metal.handle." + std::to_string(++metal_handle_calls));
+    if ((metal_fault == MetalFault::VisibleHandle && metal_handle_calls == 1) ||
+        (metal_fault == MetalFault::IntersectionHandle && metal_handle_calls == 3)) return NULL_OBJECT_HANDLE;
+  }
+  return __real___imp_MTLComputePipelineState_functionHandle(pipeline, function);
+}
+static void TestVisibleSet(obj_handle_t table, obj_handle_t function, uint64_t index) {
+  if (observe_metal) trace.push_back("metal.vft.set." + std::to_string(index));
+  __real___imp_MTLVisibleFunctionTable_setFunction(table, function, index);
+}
+static void TestIntersectionSet(obj_handle_t table, obj_handle_t function, uint64_t index) {
+  if (observe_metal) trace.push_back("metal.ift.set." + std::to_string(index));
+  __real___imp_MTLIntersectionFunctionTable_setFunction(table, function, index);
+}
+static void TestIntersectionVisible(obj_handle_t table, obj_handle_t visible, uint64_t index) {
+  if (observe_metal) trace.push_back("metal.ift.visible." + std::to_string(index));
+  __real___imp_MTLIntersectionFunctionTable_setVisibleFunctionTable(table, visible, index);
+}
+extern "C" {
+decltype(&MTLDevice_newComputePipelineState) __wrap___imp_MTLDevice_newComputePipelineState = TestMetalPSO;
+decltype(&MTLComputePipelineState_newVisibleFunctionTable) __wrap___imp_MTLComputePipelineState_newVisibleFunctionTable = TestVisibleTable;
+decltype(&MTLComputePipelineState_newIntersectionFunctionTable) __wrap___imp_MTLComputePipelineState_newIntersectionFunctionTable = TestIntersectionTable;
+decltype(&MTLComputePipelineState_functionHandle) __wrap___imp_MTLComputePipelineState_functionHandle = TestFunctionHandle;
+decltype(&MTLVisibleFunctionTable_setFunction) __wrap___imp_MTLVisibleFunctionTable_setFunction = TestVisibleSet;
+decltype(&MTLIntersectionFunctionTable_setFunction) __wrap___imp_MTLIntersectionFunctionTable_setFunction = TestIntersectionSet;
+decltype(&MTLIntersectionFunctionTable_setVisibleFunctionTable) __wrap___imp_MTLIntersectionFunctionTable_setVisibleFunctionTable = TestIntersectionVisible;
 }
 
 static bool LoadShader(const char *path, std::vector<uint8_t> &bytes) {
@@ -905,14 +962,27 @@ static int RunStateObject(const std::string &request_mode, const char *library_p
   return passed ? 0 : 1;
 }
 
-static int RunSynthesis(const std::string &mode, const char *library_path) {
+static int RunSynthesis(const std::string &request_mode, const char *library_path) {
+  const bool metal = request_mode.rfind("metal-", 0) == 0;
+  const std::string mode = metal ? "synth-" + request_mode.substr(6) : request_mode;
   const bool intersection = mode.rfind("synth-intersection-", 0) == 0;
   const std::string prefix = intersection ? "synth-intersection-" : "synth-dispatch-";
   if (mode.rfind(prefix, 0) != 0) return 2;
   const std::string operation = mode.substr(prefix.size());
   HRESULT expected = E_NOTIMPL;
   int error = DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
-  if (operation == "control") { expected = S_OK; error = DXMT_MSC_SUCCESS; }
+  if (metal) {
+    expected = operation == "control" ? S_OK : E_FAIL;
+    error = DXMT_MSC_SUCCESS;
+    if (operation == "control") {}
+    else if (operation == "pso") metal_fault = MetalFault::PSO;
+    else if (operation == "vft") metal_fault = MetalFault::VisibleTable;
+    else if (operation == "ift") metal_fault = MetalFault::IntersectionTable;
+    else if (operation == "visible-handle") metal_fault = MetalFault::VisibleHandle;
+    else if (operation == "intersection-handle" && intersection) metal_fault = MetalFault::IntersectionHandle;
+    else return 2;
+  }
+  else if (operation == "control") { expected = S_OK; error = DXMT_MSC_SUCCESS; }
   else if (operation == "unavailable") error = DXMT_MSC_ERROR_UNAVAILABLE;
   else if (operation == "memory") { expected = E_FAIL; error = DXMT_MSC_ERROR_OUT_OF_MEMORY; }
   else if (operation == "invalid") { expected = E_FAIL; error = DXMT_MSC_ERROR_INVALID_DXIL; }
@@ -951,16 +1021,27 @@ static int RunSynthesis(const std::string &mode, const char *library_path) {
     "msc.intersection.RayGen.query", "msc.callable.RayGen.query"};
   if (intersection) { seed.push_back("msc.closesthit.ClosestHit.query"); seed.push_back("msc.closesthit.ClosestHit.materialize"); }
   bool passed = hr == S_OK && object && trace == seed;
-  PrintResult(mode + ".create", hr, passed);
+  PrintResult(request_mode + ".create", hr, passed);
   if (!passed) return 1;
   synthesis_intersection = intersection;
   synthesis_materialization_only = operation == "second-pass";
   synthesis_error = error;
+  observe_metal = metal;
   const std::vector<std::string> dispatch = {"msc.synth.dispatch.query", "msc.synth.dispatch.materialize"};
   std::vector<std::string> full = dispatch;
   if (intersection) { full.push_back("msc.synth.intersection.query"); full.push_back("msc.synth.intersection.materialize"); }
+  if (metal) {
+    full.insert(full.end(), {"metal.pso", "metal.vft", "metal.ift", "metal.handle.1", "metal.vft.set.1"});
+    if (intersection) full.insert(full.end(), {"metal.handle.2", "metal.vft.set.2", "metal.handle.3",
+        "metal.ift.set.0", "metal.ift.visible.0"});
+  }
   auto wanted = full;
-  if (FAILED(expected) && !synthesis_materialization_only) wanted.pop_back();
+  if (metal && FAILED(expected)) {
+    const std::string last = operation == "pso" ? "metal.pso" :
+        operation == "vft" || operation == "ift" ? "metal.ift" :
+        operation == "visible-handle" ? "metal.handle.1" : "metal.handle.3";
+    wanted.resize(std::find(wanted.begin(), wanted.end(), last) - wanted.begin() + 1);
+  } else if (FAILED(expected) && !synthesis_materialization_only) wanted.pop_back();
   dxmt::D3D12RaytracingDispatchState state;
   // A failure must clear preexisting output, not merely leave an empty default.
   state.global_root_signature = static_cast<dxmt::MTLD3D12RootSignature *>(root.ptr());
@@ -973,16 +1054,19 @@ static int RunSynthesis(const std::string &mode, const char *library_path) {
   passed = hr == expected && std::vector<std::string>(trace.begin() + begin, trace.end()) == wanted &&
       (SUCCEEDED(hr) ? usable(state) : !state.compute_pipeline && !state.visible_function_table &&
           !state.intersection_function_table && !state.global_root_signature);
-  PrintResult(mode + ".initialize", hr, passed);
+  PrintResult(request_mode + ".initialize", hr, passed);
   if (FAILED(expected)) {
     synthesis_error = DXMT_MSC_SUCCESS;
+    metal_fault = MetalFault::None;
+    metal_handle_calls = 0;
     const size_t retry_begin = trace.size();
     hr = dxmt::GetD3D12RaytracingDispatchState(object.ptr(), state);
     passed = passed && hr == S_OK && usable(state) &&
         std::vector<std::string>(trace.begin() + retry_begin, trace.end()) == full;
-    PrintResult(mode + ".retry", hr, passed);
+    PrintResult(request_mode + ".retry", hr, passed);
   }
   synthesis_error = DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  metal_fault = MetalFault::PSO;
   const size_t hit_begin = trace.size();
   dxmt::D3D12RaytracingDispatchState hit;
   hr = dxmt::GetD3D12RaytracingDispatchState(object.ptr(), hit);
@@ -990,13 +1074,14 @@ static int RunSynthesis(const std::string &mode, const char *library_path) {
       hit.compute_pipeline.handle == state.compute_pipeline.handle &&
       hit.visible_function_table.handle == state.visible_function_table.handle &&
       hit.intersection_function_table.handle == state.intersection_function_table.handle;
-  PrintResult(mode, hr, passed);
+  PrintResult(request_mode, hr, passed);
   return passed ? 0 : 1;
 }
 
 int main(int argc, char **argv) {
   SetEnvironmentVariableA("DXMT_SHADER_CACHE", "0");
-  if (argc == 3 && std::string(argv[1]).rfind("synth-", 0) == 0) return RunSynthesis(argv[1], argv[2]);
+  if (argc == 3 && (std::string(argv[1]).rfind("synth-", 0) == 0 || std::string(argv[1]).rfind("metal-", 0) == 0))
+    return RunSynthesis(argv[1], argv[2]);
   if (argc == 5 && std::string(argv[1]).rfind("state-", 0) == 0)
     return RunStateObject(argv[1], argv[2], argv[3], argv[4]);
   if (argc == 5) return std::string(argv[1]).rfind("shaderlib-", 0) == 0 ?

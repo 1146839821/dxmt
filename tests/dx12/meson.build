@@ -35,7 +35,14 @@ if cpu_family == 'x86_64'
       '-Wl,--wrap=__imp_SM50CompileTessellationPipelineHull', '-Wl,--wrap=__imp_SM50CompileTessellationPipelineDomain',
       '-Wl,--wrap=__imp_SM50CompileGeometryPipelineVertex', '-Wl,--wrap=__imp_SM50CompileGeometryPipelineGeometry',
       '-Wl,--wrap=__imp_DXMTMSCCompileDXIL', '-Wl,--wrap=__imp_DXMTMSCSynthesizeRayDispatch',
-      '-Wl,--wrap=__imp_DXMTMSCSynthesizeRayIntersection'],
+      '-Wl,--wrap=__imp_DXMTMSCSynthesizeRayIntersection',
+      '-Wl,--wrap=__imp_MTLDevice_newComputePipelineState',
+      '-Wl,--wrap=__imp_MTLComputePipelineState_newVisibleFunctionTable',
+      '-Wl,--wrap=__imp_MTLComputePipelineState_newIntersectionFunctionTable',
+      '-Wl,--wrap=__imp_MTLComputePipelineState_functionHandle',
+      '-Wl,--wrap=__imp_MTLVisibleFunctionTable_setFunction',
+      '-Wl,--wrap=__imp_MTLIntersectionFunctionTable_setFunction',
+      '-Wl,--wrap=__imp_MTLIntersectionFunctionTable_setVisibleFunctionTable'],
   )
 endif
 

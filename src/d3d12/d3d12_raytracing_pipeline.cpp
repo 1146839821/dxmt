@@ -245,34 +245,39 @@ class MTLD3D12RaytracingStateObjectImpl final
     pipeline_info.compute_function = dispatcher_function_;
     pipeline_info.linked_functions.set(linked_functions.data());
     pipeline_info.num_linked_functions = static_cast<uint32_t>(linked_functions.size());
-    dispatcher_pso_ = device_->GetMTLDevice().newComputePipelineState(pipeline_info, error);
-    if (!dispatcher_pso_) {
+    auto dispatcher_pso = device_->GetMTLDevice().newComputePipelineState(pipeline_info, error);
+    if (!dispatcher_pso) {
       ERR("D3D12 ray dispatch PSO creation failed: ", error.description().getUTF8String());
       return E_FAIL;
     }
 
     if (!next_visible_function_index_)
       return E_INVALIDARG;
-    visible_function_table_ = dispatcher_pso_.newVisibleFunctionTable(next_visible_function_index_);
-    intersection_function_table_ = dispatcher_pso_.newIntersectionFunctionTable(1);
-    if (!visible_function_table_ || !intersection_function_table_)
+    auto visible_function_table = dispatcher_pso.newVisibleFunctionTable(next_visible_function_index_);
+    auto intersection_function_table = dispatcher_pso.newIntersectionFunctionTable(1);
+    if (!visible_function_table || !intersection_function_table)
       return E_FAIL;
 
     for (const auto &record : shader_records_) {
       if (record.is_hit_group || !record.function || record.visible_function_index == UINT32_MAX)
         continue;
-      auto function_handle = dispatcher_pso_.functionHandle(record.function);
+      auto function_handle = dispatcher_pso.functionHandle(record.function);
       if (!function_handle)
         return E_FAIL;
-      visible_function_table_.setFunction(function_handle, record.visible_function_index);
+      visible_function_table.setFunction(function_handle, record.visible_function_index);
     }
     if (indirect_intersection_function_) {
-      auto function_handle = dispatcher_pso_.functionHandle(indirect_intersection_function_);
+      auto function_handle = dispatcher_pso.functionHandle(indirect_intersection_function_);
       if (!function_handle)
         return E_FAIL;
-      intersection_function_table_.setFunction(function_handle, 0);
-      intersection_function_table_.setVisibleFunctionTable(visible_function_table_, 0);
+      intersection_function_table.setFunction(function_handle, 0);
+      intersection_function_table.setVisibleFunctionTable(visible_function_table, 0);
     }
+    // The retained PSO is the initialization-success marker. Publish it only
+    // after both tables and every function binding are complete.
+    visible_function_table_ = std::move(visible_function_table);
+    intersection_function_table_ = std::move(intersection_function_table);
+    dispatcher_pso_ = std::move(dispatcher_pso);
     return S_OK;
   }
 
