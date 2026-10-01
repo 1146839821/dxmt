@@ -63,6 +63,12 @@ if build_machine.system() == 'darwin'
       dependencies: [msc_probe_library],
       link_args: ['-arch', native_compiler_arch, '-framework', 'Foundation', '-framework', 'Metal'],
     )
+    executable('msc_static_alias_probe', 'msc_static_alias_probe.c',
+      native: true, build_by_default: false,
+      c_args: ['-ObjC', '-fobjc-arc'] + msc_probe_includes,
+      dependencies: [msc_probe_library],
+      link_args: ['-arch', native_compiler_arch, '-framework', 'Foundation', '-framework', 'Metal'],
+    )
   endif
 endif
 configure_file(input: 'typed_uav_formats.hlsl', output: 'typed_uav_formats.hlsl', copy: true)
@@ -191,6 +197,13 @@ else
 endif
 
 if dxc_command.length() > 0
+  foreach phase : range(3)
+    custom_target('dxil_static_alias_@0@'.format(phase),
+      input: 'dxil_static_alias.hlsl', output: 'dxil_static_alias_@0@.cso'.format(phase),
+      command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '-D', 'PHASE=@0@'.format(phase), '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+  endforeach
   foreach kind : range(3)
     custom_target('dxil_typed_buffer_transform_wrap_@0@'.format(kind),
       input: 'dxil_typed_buffer_transform_input.hlsl', output: 'dxil_typed_buffer_transform_wrap_@0@.cso'.format(kind),

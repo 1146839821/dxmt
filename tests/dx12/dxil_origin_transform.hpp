@@ -63,21 +63,32 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
     return ids;
   };
   auto srvs = group(groups[1]), uavs = group(groups[2]);
-  const bool srv_input = groups[1] != "null";
-  if ((srv_input && (srvs.size() != 1 || uavs.size() != 1)) ||
-      (!srv_input && uavs.size() != 2)) return reject("expected input t0/u0 and output u1 only");
-  auto resource = [&](const std::string &id, bool srv, unsigned range, unsigned reg) {
+  if ((groups[1] != "null" && srvs.empty()) || uavs.empty() || srvs.size() + uavs.size() > 3)
+    return reject("expected one/two finite typed inputs and output u1");
+  struct Binding { unsigned resource_class, range, reg, slot; bool output; };
+  std::map<std::pair<unsigned, unsigned>, Binding> bindings;
+  bool slots[2] = {}, found_output = false;
+  unsigned record_count = 0;
+  auto resource = [&](const std::string &id, bool srv) {
     std::smatch value;
-    const std::string pattern = "!\\{i32 " + std::to_string(range) +
-        ", %\\\"class." + (srv ? "Buffer" : "RWBuffer") +
-        "<unsigned int>\\\"\\* undef, !\\\"\\\", i32 0, i32 " + std::to_string(reg) +
-        ", i32 1, i32 10, " + (srv ? "i32 0" : "i1 false, i1 false, i1 false") + ", !([0-9]+)\\}";
-    return std::regex_match(metadata[id], value, std::regex(pattern)) &&
-        metadata[value[1]] == "!{i32 0, i32 5}";
+    const std::string pattern = "!\\{i32 ([0-9]{1,5}), %\\\"class." + std::string(srv ? "Buffer" : "RWBuffer") +
+        "<unsigned int>\\\"\\* undef, !\\\"\\\", i32 0, i32 ([012]), i32 1, i32 10, " +
+        (srv ? "i32 0" : "i1 false, i1 false, i1 false") + ", !([0-9]+)\\}";
+    if (!std::regex_match(metadata[id], value, std::regex(pattern)) || metadata[value[3]] != "!{i32 0, i32 5}") return false;
+    const unsigned range = std::stoul(value[1]), reg = std::stoul(value[2]);
+    const bool out = !srv && reg == 1;
+    if (reg == 1 && !out) return false;
+    const unsigned slot = reg == 2 ? 1 : 0;
+    if (out ? found_output : slots[slot]) return false;
+    if (!bindings.emplace(std::make_pair(srv ? 0u : 1u, range), Binding{srv ? 0u : 1u, range, reg, slot, out}).second)
+      return false;
+    if (out) found_output = true;
+    else { slots[slot] = true; record_count = std::max(record_count, slot + 1); }
+    return true;
   };
-  if (!(srv_input ? resource(srvs[0], true, 0, 0) && resource(uavs[0], false, 0, 1) :
-      resource(uavs[0], false, 0, 0) && resource(uavs[1], false, 1, 1)))
-    return reject("resource kind/format/range/coherence outside scalar UINT contract");
+  for (const auto &id : srvs) if (!resource(id, true)) return reject("unsupported or ambiguous SRV binding");
+  for (const auto &id : uavs) if (!resource(id, false)) return reject("unsupported or ambiguous UAV binding");
+  if (!found_output || !record_count) return reject("missing input/output binding");
   const std::string start = "define void @main() {\n";
   const size_t begin = text.find(start), finish = text.find("\n}", begin);
   if (begin == std::string::npos || finish == std::string::npos ||
@@ -108,14 +119,20 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
     return reject("module declaration/type/metadata outside bounded envelope");
   }
   std::string body = text.substr(begin + start.size(), finish - begin - start.size());
-  std::string input_handle, output_handle, rewritten;
+  std::map<std::string, Binding> handle_bindings;
+  std::map<std::pair<unsigned, unsigned>, bool> seen_bindings;
+  std::string rewritten;
   unsigned handles = 0, accesses = 0, output_stores = 0, returns = 0;
   std::string predecessor = "dxmt.entry";
   rewritten = "dxmt.entry:\n"
-      "  %dxmt.cb = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 2, i32 0, i32 0, i1 false)\n"
-      "  %dxmt.data = call %dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32 59, %dx.types.Handle %dxmt.cb, i32 0)\n"
-      "  %dxmt.origin = extractvalue %dx.types.CBufRet.i32 %dxmt.data, 0\n"
-      "  %dxmt.count = extractvalue %dx.types.CBufRet.i32 %dxmt.data, 1\n";
+      "  %dxmt.cb = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 2, i32 0, i32 0, i1 false)\n";
+  for (unsigned slot = 0; slot < record_count; ++slot) {
+    if (!slots[slot]) continue;
+    const std::string suffix = std::to_string(slot);
+    rewritten += "  %dxmt.data" + suffix + " = call %dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32 59, %dx.types.Handle %dxmt.cb, i32 " + suffix + ")\n";
+    rewritten += "  %dxmt.origin" + suffix + " = extractvalue %dx.types.CBufRet.i32 %dxmt.data" + suffix + ", 0\n";
+    rewritten += "  %dxmt.count" + suffix + " = extractvalue %dx.types.CBufRet.i32 %dxmt.data" + suffix + ", 1\n";
+  }
   std::istringstream instructions(body);
   const std::string operand = R"((%v[0-9]+|-?[0-9]+))";
   while (std::getline(instructions, line)) {
@@ -123,12 +140,12 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
     if (comment != std::string::npos) line.resize(comment);
     while (!line.empty() && (line.back() == ' ' || line.back() == '\r')) line.pop_back();
     std::smatch m;
-    if (std::regex_match(line, m, std::regex(R"(  (%v[0-9]+) = call %dx.types.Handle @dx.op.createHandle\(i32 57, i8 ([01]), i32 ([01]), i32 ([01]), i1 false\))"))) {
-      const bool out = m[2] == "1" && m[3] == (srv_input ? "0" : "1") && m[4] == "1";
-      const bool in = m[2] == (srv_input ? "0" : "1") && m[3] == "0" && m[4] == "0";
-      if ((!out && !in) || (out ? !output_handle.empty() : !input_handle.empty()))
-        return reject("unrecognised or duplicate handle");
-      (out ? output_handle : input_handle) = m[1]; ++handles;
+    if (std::regex_match(line, m, std::regex(R"(  (%v[0-9]+) = call %dx.types.Handle @dx.op.createHandle\(i32 57, i8 ([01]), i32 ([0-9]{1,5}), i32 ([012]), i1 false\))"))) {
+      const auto key = std::make_pair(static_cast<unsigned>(std::stoul(m[2])), static_cast<unsigned>(std::stoul(m[3])));
+      auto binding = bindings.find(key);
+      if (binding == bindings.end() || binding->second.reg != std::stoul(m[4]) || seen_bindings[key] ||
+          !handle_bindings.emplace(m[1], binding->second).second) return reject("unrecognised or duplicate handle");
+      seen_bindings[key] = true; ++handles;
       rewritten += line + "\n"; continue;
     }
     std::string result, type, handle, index, call;
@@ -137,20 +154,22 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
       result = m[1]; handle = m[2]; index = m[3]; type = "%dx.types.ResRet.i32";
     } else if (std::regex_match(line, m, std::regex("  (%v[0-9]+) = call i32 @dx.op.atomicBinOp.i32\\(i32 78, %dx.types.Handle (%v[0-9]+), i32 0, i32 " + operand + ", i32 undef, i32 undef, i32 " + operand + "\\)"))) {
       result = m[1]; handle = m[2]; index = m[3]; type = "i32";
-      if (srv_input) return reject("SRV atomic");
     } else if (std::regex_match(line, m, std::regex("  call void @dx.op.bufferStore.i32\\(i32 69, %dx.types.Handle (%v[0-9]+), i32 " + operand + ", i32 undef, i32 " + operand + ", i32 " + operand + ", i32 " + operand + ", i32 " + operand + ", i8 15\\)"))) {
       handle = m[1]; index = m[2]; store = true;
-      if (!output_handle.empty() && handle == output_handle) {
+      auto binding = handle_bindings.find(handle);
+      if (binding != handle_bindings.end() && binding->second.output) {
         ++output_stores; rewritten += line + "\n"; continue;
       }
-      if (srv_input) return reject("SRV store");
     }
     if (!handle.empty()) {
-      if (input_handle.empty() || handle != input_handle) return reject("unknown input handle flow");
+      auto binding = handle_bindings.find(handle);
+      if (binding == handle_bindings.end() || binding->second.output) return reject("unknown input handle flow");
+      if ((store || type == "i32") && binding->second.resource_class == 0) return reject("SRV write/atomic");
+      const std::string suffix = std::to_string(binding->second.slot);
       const std::string tag = "dxmt.a" + std::to_string(accesses++);
       // Test logical bounds before padding. Also reject unsigned addition wrap.
-      rewritten += "  %" + tag + ".logical = icmp ult i32 " + index + ", %dxmt.count\n";
-      rewritten += "  %" + tag + ".index = add i32 " + index + ", %dxmt.origin\n";
+      rewritten += "  %" + tag + ".logical = icmp ult i32 " + index + ", %dxmt.count" + suffix + "\n";
+      rewritten += "  %" + tag + ".index = add i32 " + index + ", %dxmt.origin" + suffix + "\n";
       rewritten += "  %" + tag + ".nowrap = icmp uge i32 %" + tag + ".index, " + index + "\n";
       rewritten += "  %" + tag + ".valid = and i1 %" + tag + ".logical, %" + tag + ".nowrap\n";
       rewritten += "  br i1 %" + tag + ".valid, label %" + tag + ".do, label %" + tag + ".end\n" + tag + ".do:\n";
@@ -175,7 +194,7 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
     if (line == "  ret void" && !returns++) { rewritten += line + "\n"; continue; }
     return reject("instruction/control flow outside bounded grammar");
   }
-  if (handles != 2 || !accesses || !output_stores || returns != 1)
+  if (handles != bindings.size() || !accesses || !output_stores || returns != 1)
     return reject("incomplete accepted program");
   text.replace(begin + start.size(), finish - begin - start.size(), rewritten);
   const std::string cb_list = std::to_string(next++), cb_record = std::to_string(next++);
@@ -192,10 +211,10 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
   const size_t type_anchor = text.find(start);
   if (type_anchor == std::string::npos || text.find(start, type_anchor + start.size()) != std::string::npos)
     return reject("missing or ambiguous main insertion anchor");
-  text.insert(type_anchor, "%dx.types.CBufRet.i32 = type { i32, i32, i32, i32 }\n%dxmt.Origin = type { i32, i32 }\n"
+  text.insert(type_anchor, "%dx.types.CBufRet.i32 = type { i32, i32, i32, i32 }\n%dxmt.Origin = type { [" + std::to_string(record_count) + " x <4 x i32>] }\n"
       "declare %dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32, %dx.types.Handle, i32)\n\n");
   text += "\n!" + cb_list + " = !{!" + cb_record + "}\n!" + cb_record +
-      " = !{i32 0, %dxmt.Origin* undef, !\"\", i32 1, i32 0, i32 1, i32 8, null}\n";
+      " = !{i32 0, %dxmt.Origin* undef, !\"\", i32 1, i32 0, i32 1, i32 " + std::to_string(record_count * 16) + ", null}\n";
   output = std::move(text);
   return true;
 }

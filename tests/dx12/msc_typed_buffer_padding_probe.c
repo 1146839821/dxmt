@@ -7,6 +7,7 @@
 #include <metal_irconverter_runtime/metal_irconverter_runtime.h>
 #include <stdio.h>
 #include <string.h>
+#include "msc_probe_compile.h"
 
 enum ProbeKind { ProbeUAV, ProbeSRV, ProbeAtomic };
 enum ProbeBinding { BindingOriginal, BindingRawR32, BindingOriginCBV };
@@ -133,8 +134,6 @@ run_shader(id<MTLDevice> device, id<MTLCommandQueue> queue, const char *path, en
            enum ProbeBinding binding, MTLPixelFormat format,
            bool logical_bounds, bool wrap_index,
            bool bounds, unsigned *aligned_failures, unsigned *padding_failures, unsigned *padding_cases) {
-  NSData *bytes = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:path]];
-  if (!bytes) return false;
   IRError *error = NULL;
   IRDescriptorRange1 ranges[] = {
       {.RangeType = kind == ProbeSRV ? IRDescriptorRangeTypeSRV : IRDescriptorRangeTypeUAV,
@@ -150,35 +149,15 @@ run_shader(id<MTLDevice> device, id<MTLCommandQueue> queue, const char *path, en
   IRVersionedRootSignatureDescriptor descriptor = {.version = IRRootSignatureVersion_1_1,
       .desc_1_1 = {.NumParameters = parameter_count, .pParameters = parameters}};
   IRRootSignature *root = IRRootSignatureCreateFromDescriptor(&descriptor, &error);
-  IRCompiler *compiler = IRCompilerCreate();
-  IRObject *dxil = IRObjectCreateFromDXIL(bytes.bytes, bytes.length, IRBytecodeOwnershipNone);
-  IRObject *converted = NULL;
-  IRMetalLibBinary *binary = IRMetalLibBinaryCreate();
-  IRShaderReflection *reflection = IRShaderReflectionCreate();
   bool success = false;
-  if (!root || !compiler || !dxil || !binary || !reflection) goto cleanup;
-  IRCompilerSetGlobalRootSignature(compiler, root);
-  IRCompilerSetCompatibilityFlags(compiler, IRCompatibilityFlagTextureMinLODClamp |
-      (bounds ? IRCompatibilityFlagBoundsCheck : 0));
-  IRCompilerSetMinimumGPUFamily(compiler, IRGPUFamilyApple9);
-  IRCompilerSetMinimumDeploymentTarget(compiler, IROperatingSystem_macOS, "16.0.0");
-  converted = IRCompilerAllocCompileAndLink(compiler, NULL, dxil, &error);
-  if (!converted || !IRObjectGetMetalLibBinary(converted, IRShaderStageCompute, binary) ||
-      !IRObjectGetReflection(converted, IRShaderStageCompute, reflection)) goto cleanup;
+  if (!root) goto cleanup;
   {
-    IRVersionedCSInfo cs = {.version = IRReflectionVersion_1_0};
-    if (!IRShaderReflectionCopyComputeInfo(reflection, IRReflectionVersion_1_0, &cs)) goto cleanup;
-    MTLSize threads = MTLSizeMake(cs.info_1_0.tg_size[0], cs.info_1_0.tg_size[1], cs.info_1_0.tg_size[2]);
-    IRShaderReflectionReleaseComputeInfo(&cs);
-    if (!threads.width || !threads.height || !threads.depth) goto cleanup;
+    id<MTLComputePipelineState> pipeline = nil;
+    MTLSize threads;
+    if (!CompileMSCProbe(device, path, root, bounds, &pipeline, &threads)) goto cleanup;
     IRResourceLocation locations[2] = {};
     if (IRRootSignatureGetResourceCount(root) != parameter_count) goto cleanup;
     IRRootSignatureGetResourceLocations(root, locations);
-    NSError *metal_error = nil;
-    id<MTLLibrary> library = [device newLibraryWithData:IRMetalLibGetBytecodeData(binary) error:&metal_error];
-    id<MTLFunction> function = [library newFunctionWithName:@"main"];
-    id<MTLComputePipelineState> pipeline = function ? [device newComputePipelineStateWithFunction:function error:&metal_error] : nil;
-    if (!pipeline) { fprintf(stderr, "Metal pipeline error: %s\n", metal_error.description.UTF8String); goto cleanup; }
     printf("shader=%s bounds=%u\n", path, bounds);
     const unsigned offsets[] = {0, 1, 4, 257, 260};
     const unsigned counts[] = {8, 0, 1, 3, 4, 5, 7};
@@ -201,11 +180,6 @@ run_shader(id<MTLDevice> device, id<MTLCommandQueue> queue, const char *path, en
   success = true;
 cleanup:
   if (error) { fprintf(stderr, "MSC error: %u\n", IRErrorGetCode(error)); IRErrorDestroy(error); }
-  if (reflection) IRShaderReflectionDestroy(reflection);
-  if (binary) IRMetalLibBinaryDestroy(binary);
-  if (converted) IRObjectDestroy(converted);
-  if (dxil) IRObjectDestroy(dxil);
-  if (compiler) IRCompilerDestroy(compiler);
   if (root) IRRootSignatureDestroy(root);
   return success;
 }

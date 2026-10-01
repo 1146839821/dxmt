@@ -192,6 +192,6 @@ int wmain(int argc, wchar_t **argv) {
   saved = CloseHandle(file) && saved;
   if (!saved) { std::fprintf(stderr, "output write failed; partial output may remain\n"); return 1; }
   std::printf("%s input_bytes=%zu output_bytes=%zu %s\n", lower ? "LOWERING_VALIDATED" : "ROUNDTRIP_VALIDATED",
-      input->GetBufferSize(), output->GetBufferSize(), lower ? "private_CBV=b0/space1 origin,count" : "IR/metadata_text=identical");
+      input->GetBufferSize(), output->GetBufferSize(), lower ? "private_CBV=b0/space1 static_slots=register0:record0,register2:record1 stride=16" : "IR/metadata_text=identical");
   return 0;
 }
