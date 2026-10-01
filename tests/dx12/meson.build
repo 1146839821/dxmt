@@ -182,6 +182,16 @@ else
 endif
 
 if dxc_command.length() > 0
+  foreach raw : [0, 1]
+    foreach kind : range(3)
+      custom_target('dxil_typed_buffer_lowering_@0@_@1@'.format(raw, kind),
+        input: 'dxil_typed_buffer_lowering.hlsl', output: 'dxil_typed_buffer_lowering_@0@_@1@.cso'.format(raw, kind),
+        command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '-D', 'RAW_R32=@0@'.format(raw),
+          '-D', 'KIND=@0@'.format(kind), '@INPUT@', '-Fo', '@OUTPUT@'],
+        build_by_default: false,
+      )
+    endforeach
+  endforeach
   custom_target('msc_typed_buffer_padding_fixture',
     input: 'msc_typed_buffer_padding.hlsl', output: 'msc_typed_buffer_padding.cso',
     command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],

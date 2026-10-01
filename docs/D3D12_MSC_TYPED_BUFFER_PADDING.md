@@ -208,7 +208,7 @@ build/tests/dx12/msc_typed_buffer_padding_probe \
 
 Exit 77 and `status=UNSUPPORTED` mean padding semantics are incomplete, not a
 passing GPU capability. Opt-in `--expect-unsupported` returns zero only after
-valid aligned controls and at least one observed padded mismatch; that mode
+valid aligned controls and mismatches in every observed padded case; that mode
 checks reproducibility of the known limitation, not correctness. Compile,
 pipeline, allocation, GPU completion and aligned-control failures return 1.
 Do not register that mode as a feature acceptance test.
