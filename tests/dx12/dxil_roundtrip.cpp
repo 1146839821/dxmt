@@ -1,4 +1,4 @@
-// Offline DXC dialect experiment. No shader transformation or DXMT runtime use.
+// Offline DXC dialect/lowering experiment. No DXMT runtime use.
 #include <windows.h>
 // Interface IDs are parsed explicitly; GCC does not implement uuid attributes.
 #if defined(__GNUC__) && !defined(__clang__)
@@ -10,6 +10,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include "dxil_origin_transform.hpp"
 
 namespace {
 
@@ -131,8 +132,9 @@ bool Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob) {
 } // namespace
 
 int wmain(int argc, wchar_t **argv) {
-  if (argc != 4) {
-    std::fprintf(stderr, "usage: dxil_roundtrip INPUT.cso NEW_OUTPUT.cso ABSOLUTE_DXC_DIRECTORY\n");
+  const bool lower = argc == 5 && !wcscmp(argv[4], L"--lower-typed-origin");
+  if (argc != 4 && !lower) {
+    std::fprintf(stderr, "usage: dxil_roundtrip INPUT.cso NEW_OUTPUT.cso ABSOLUTE_DXC_DIRECTORY [--lower-typed-origin]\n");
     return 1;
   }
   std::wstring directory(argv[3]);
@@ -160,14 +162,25 @@ int wmain(int argc, wchar_t **argv) {
   if (!validated_input) return 1;
   auto before = Disassemble(compiler.get(), input.get());
   if (!before) return 1;
+  OwnedCOM<IDxcBlobEncoding> lowered_blob;
+  std::string lowered_text, lowering_error;
+  if (lower) {
+    if (!LowerTypedOrigin(IRText(before.get()), lowered_text, lowering_error)) {
+      std::fprintf(stderr, "lowering rejected: %s\n", lowering_error.c_str()); return 1;
+    }
+    IDxcBlobEncoding *raw = nullptr;
+    HRESULT blob_hr = utils->CreateBlob(lowered_text.data(), static_cast<UINT32>(lowered_text.size()), DXC_CP_UTF8, &raw);
+    lowered_blob.reset(raw);
+    if (!Check("create lowered IR blob", blob_hr) || !lowered_blob) return 1;
+  }
   IDxcOperationResult *operation = nullptr;
-  HRESULT hr = assembler->AssembleToContainer(before.get(), &operation);
-  auto assembled = Result("assemble unchanged DXIL text", hr, operation);
+  HRESULT hr = assembler->AssembleToContainer(lower ? lowered_blob.get() : before.get(), &operation);
+  auto assembled = Result("assemble DXIL text", hr, operation);
   if (!assembled) return 1;
   auto output = Validate(validator.get(), assembled.get());
   if (!output || !Inspect(reflection.get(), output.get())) return 1;
   auto after = Disassemble(compiler.get(), output.get());
-  if (!after || IRText(before.get()) != IRText(after.get())) {
+  if (!after || (!lower && IRText(before.get()) != IRText(after.get()))) {
     std::fprintf(stderr, "DXIL IR/metadata text changed during round trip\n"); return 1;
   }
   HANDLE file = CreateFileW(argv[2], GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -178,7 +191,7 @@ int wmain(int argc, wchar_t **argv) {
       written == output->GetBufferSize();
   saved = CloseHandle(file) && saved;
   if (!saved) { std::fprintf(stderr, "output write failed; partial output may remain\n"); return 1; }
-  std::printf("ROUNDTRIP_VALIDATED input_bytes=%zu output_bytes=%zu IR/metadata_text=identical\n",
-      input->GetBufferSize(), output->GetBufferSize());
+  std::printf("%s input_bytes=%zu output_bytes=%zu %s\n", lower ? "LOWERING_VALIDATED" : "ROUNDTRIP_VALIDATED",
+      input->GetBufferSize(), output->GetBufferSize(), lower ? "private_CBV=b0/space1 origin,count" : "IR/metadata_text=identical");
   return 0;
 }

@@ -3,6 +3,8 @@ dx12_sm6_probe = executable('dx12_compute_sm6', 'dx12_compute_sm6.cpp',
 )
 
 # Offline experiment; dynamically loads the explicitly selected DXC SDK only.
+dxil_origin_parser_test = executable('dxil_origin_transform_test', 'dxil_origin_transform_test.cpp', native: true)
+test('dxil-origin-parser-unit', dxil_origin_parser_test)
 executable('dxil_roundtrip', 'dxil_roundtrip.cpp',
   build_by_default: false,
   link_args: ['-municode'],
@@ -189,6 +191,14 @@ else
 endif
 
 if dxc_command.length() > 0
+  foreach kind : range(3)
+    custom_target('dxil_typed_buffer_transform_wrap_@0@'.format(kind),
+      input: 'dxil_typed_buffer_transform_input.hlsl', output: 'dxil_typed_buffer_transform_wrap_@0@.cso'.format(kind),
+      command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '-D', 'KIND=@0@'.format(kind),
+        '-D', 'INDEX_BIAS=4294967294u', '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+  endforeach
   foreach raw : [0, 1]
     foreach kind : range(3)
       custom_target('dxil_typed_buffer_lowering_@0@_@1@'.format(raw, kind),

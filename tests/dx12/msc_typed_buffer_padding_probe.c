@@ -15,6 +15,7 @@ static bool
 run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineState> pipeline,
          NSUInteger root_offset, NSUInteger origin_offset, MTLSize threads, enum ProbeKind kind,
          enum ProbeBinding binding, MTLPixelFormat format, unsigned first,
+         unsigned logical_count, uint32_t index_bias,
          bool *matches) {
   const unsigned texel_size = format == MTLPixelFormatR8Uint ? 1 : format == MTLPixelFormatR16Uint ? 2 : 4;
   const NSUInteger alignment = [device minimumTextureBufferAlignmentForPixelFormat:format];
@@ -50,11 +51,13 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
   }
   memcpy(expected, bytes, input.length);
   for (unsigned i = 0; i < 4; ++i) {
-    if (kind == ProbeUAV)
-      memcpy(expected + (first + 4 + i) * texel_size, expected + (first + i) * texel_size, texel_size);
-    if (kind == ProbeAtomic) {
-      const uint32_t value = values[i] + 13;
-      memcpy(expected + (first + i) * texel_size, &value, texel_size);
+    const uint32_t source = i + index_bias, destination = source + 4;
+    const uint32_t loaded = source < logical_count ? values[source] : 0;
+    if (kind == ProbeUAV && destination < logical_count)
+      memcpy(expected + (first + destination) * texel_size, &loaded, texel_size);
+    if (kind == ProbeAtomic && source < logical_count) {
+      const uint32_t value = loaded + 13;
+      memcpy(expected + (first + source) * texel_size, &value, texel_size);
     }
   }
   memset(output.contents, 0xa5, output.length);
@@ -71,7 +74,7 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
   info.pixelFormat = MTLPixelFormatR32Uint;
   id<MTLTexture> output_view = [output newTextureWithDescriptor:info offset:0 bytesPerRow:16];
   if (!input_view || !output_view) { free(expected); return false; }
-  IRBufferView input_binding = {.buffer = input, .bufferOffset = byte_offset, .bufferSize = 8 * texel_size,
+  IRBufferView input_binding = {.buffer = input, .bufferOffset = byte_offset, .bufferSize = logical_count * texel_size,
       .textureBufferView = input_view, .textureViewOffsetInElements = padding, .typedBuffer = true};
   IRBufferView output_binding = {.buffer = output, .bufferSize = 16,
       .textureBufferView = output_view, .typedBuffer = true};
@@ -84,7 +87,7 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
   const uint64_t table_address = table.gpuAddress;
   memcpy((char *)root.contents + root_offset, &table_address, sizeof(table_address));
   if (origin) {
-    const uint32_t data[4] = {padding, 8, 0, 0};
+    const uint32_t data[4] = {padding, logical_count, 0, 0};
     memcpy(origin.contents, data, sizeof(data));
     const uint64_t origin_address = origin.gpuAddress;
     memcpy((char *)root.contents + origin_offset, &origin_address, sizeof(origin_address));
@@ -111,11 +114,15 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
     free(expected); return false;
   }
   bool output_matches = true;
-  for (unsigned i = 0; i < 4; ++i)
-    output_matches &= ((uint32_t *)output.contents)[i] == values[i];
+  for (unsigned i = 0; i < 4; ++i) {
+    const uint32_t source = i + index_bias;
+    // OOB immediate atomic return is undefined; only memory non-write is required.
+    if (kind == ProbeAtomic && source >= logical_count) continue;
+    output_matches &= ((uint32_t *)output.contents)[i] == (source < logical_count ? values[source] : 0);
+  }
   const bool buffer_matches = !memcmp(bytes, expected, input.length);
   *matches = output_matches && buffer_matches;
-  printf("kind=%u first=%u padding=%u output=%s buffer=%s\n", kind, first, padding,
+  printf("kind=%u first=%u padding=%u count=%u bias=%u output=%s buffer=%s\n", kind, first, padding, logical_count, index_bias,
          output_matches ? "MATCH" : "MISMATCH", buffer_matches ? "MATCH" : "MISMATCH");
   free(expected);
   return true;
@@ -124,6 +131,7 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
 static bool
 run_shader(id<MTLDevice> device, id<MTLCommandQueue> queue, const char *path, enum ProbeKind kind,
            enum ProbeBinding binding, MTLPixelFormat format,
+           bool logical_bounds, bool wrap_index,
            bool bounds, unsigned *aligned_failures, unsigned *padding_failures, unsigned *padding_cases) {
   NSData *bytes = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:path]];
   if (!bytes) return false;
@@ -173,17 +181,20 @@ run_shader(id<MTLDevice> device, id<MTLCommandQueue> queue, const char *path, en
     if (!pipeline) { fprintf(stderr, "Metal pipeline error: %s\n", metal_error.description.UTF8String); goto cleanup; }
     printf("shader=%s bounds=%u\n", path, bounds);
     const unsigned offsets[] = {0, 1, 4, 257, 260};
+    const unsigned counts[] = {8, 0, 1, 3, 4, 5, 7};
     const NSUInteger alignment = [device minimumTextureBufferAlignmentForPixelFormat:format];
     const unsigned texel_size = format == MTLPixelFormatR8Uint ? 1 : format == MTLPixelFormatR16Uint ? 2 : 4;
     for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); ++i) {
-      bool matches = false;
-      if (!run_case(device, queue, pipeline, locations[0].topLevelOffset, locations[1].topLevelOffset,
-                    threads, kind, binding, format, offsets[i], &matches)) goto cleanup;
-      if (offsets[i] * texel_size % alignment) {
-        ++*padding_cases;
-        *padding_failures += !matches;
-      } else {
-        *aligned_failures += !matches;
+      for (unsigned c = 0; c < (logical_bounds ? 7u : 1u); ++c) {
+        bool matches = false;
+        if (!run_case(device, queue, pipeline, locations[0].topLevelOffset, locations[1].topLevelOffset,
+                      threads, kind, binding, format, offsets[i], counts[c], wrap_index ? UINT32_MAX - 1 : 0, &matches)) goto cleanup;
+        if (offsets[i] * texel_size % alignment) {
+          ++*padding_cases;
+          *padding_failures += !matches;
+        } else {
+          *aligned_failures += !matches;
+        }
       }
     }
   }
@@ -201,13 +212,15 @@ cleanup:
 
 int main(int argc, const char **argv) {
   if (argc != 4 && argc != 5) {
-    fprintf(stderr, "usage: %s UAV.cso SRV.cso atomic.cso [--expect-unsupported|--raw-r32|--origin-cbv|--origin-cbv-r8uint|--origin-cbv-r16uint]\n", argv[0]); return 1;
+    fprintf(stderr, "usage: %s UAV.cso SRV.cso atomic.cso [--expect-unsupported|--raw-r32|--origin-cbv|--origin-cbv-r8uint|--origin-cbv-r16uint|--origin-cbv-oob|--origin-cbv-wrap]\n", argv[0]); return 1;
   }
   const bool expect_unsupported = argc == 5 && !strcmp(argv[4], "--expect-unsupported");
+  const bool wrap_index = argc == 5 && !strcmp(argv[4], "--origin-cbv-wrap");
+  const bool logical_bounds = wrap_index || (argc == 5 && !strcmp(argv[4], "--origin-cbv-oob"));
   const MTLPixelFormat format = argc == 5 && !strcmp(argv[4], "--origin-cbv-r8uint") ? MTLPixelFormatR8Uint :
       argc == 5 && !strcmp(argv[4], "--origin-cbv-r16uint") ? MTLPixelFormatR16Uint : MTLPixelFormatR32Uint;
   const enum ProbeBinding binding = argc == 5 && !strcmp(argv[4], "--raw-r32") ? BindingRawR32 :
-      (format != MTLPixelFormatR32Uint || (argc == 5 && !strcmp(argv[4], "--origin-cbv"))) ? BindingOriginCBV : BindingOriginal;
+      (logical_bounds || format != MTLPixelFormatR32Uint || (argc == 5 && !strcmp(argv[4], "--origin-cbv"))) ? BindingOriginCBV : BindingOriginal;
   if (argc == 5 && !expect_unsupported && binding == BindingOriginal) return 1;
   @autoreleasepool {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -220,7 +233,7 @@ int main(int argc, const char **argv) {
     // R8/R16 UINT are format-conversion probes, not unsupported typed atomics.
     for (unsigned kind = 0; kind < (format == MTLPixelFormatR32Uint ? 3u : 2u); ++kind)
       for (unsigned bounds = 0; bounds < 2; ++bounds)
-        if (!run_shader(device, queue, argv[kind + 1], kind, binding, format, bounds,
+        if (!run_shader(device, queue, argv[kind + 1], kind, binding, format, logical_bounds, wrap_index, bounds,
                         &aligned_failures, &padding_failures, &padding_cases)) return 1;
     const bool valid_controls = !aligned_failures && padding_cases;
     const char *status = !valid_controls ? "INCONCLUSIVE" : binding != BindingOriginal ?
