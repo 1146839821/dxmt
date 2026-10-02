@@ -23,6 +23,11 @@ executable('dx12_minmax_pipeline', 'dx12_minmax_pipeline.cpp',
   dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
 )
 
+executable('dx12_sampler_snapshot', 'dx12_sampler_snapshot.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
 executable('dx12_typed_origin_prepare', 'dx12_typed_origin_prepare.cpp',
   '../../src/d3d12/d3d12_typed_origin.cpp',
   build_by_default: false, link_args: ['-municode'],
@@ -85,10 +90,12 @@ if cpu_family == 'x86_64'
   configure_file(input: 'shader_backend_stages.hlsl', output: 'shader_backend_stages.hlsl', copy: true)
   executable('dx12_backend_failure', 'dx12_backend_failure.cpp',
     '../../src/d3d12/d3d12_pipeline_compute.cpp', '../../src/d3d12/d3d12_shader_converter.cpp',
+    '../../src/d3d12/d3d12_typed_origin.cpp', '../../src/d3d12/d3d12_typed_origin_root.cpp',
     '../../src/d3d12/d3d12_pipeline_graphics.cpp',
     '../../src/d3d12/d3d12_raytracing_pipeline.cpp',
     '../../src/d3d12/d3d12_pipeline_persistence.cpp', '../../src/d3d10/d3d10_blob.cpp',
-    dependencies: [d3d12_dep, dxgi_dep, dxmt_dep, airconv_forward_dep, util_dep, winemetal_dep, dxbc_parser_dep],
+    dependencies: [d3d12_dep, dxgi_dep, dxmt_dep, airconv_forward_dep, util_dep, winemetal_dep, dxbc_parser_dep,
+      cpp.find_library('ole32')],
     cpp_args: ['-ffunction-sections', '-fdata-sections'],
     link_args: ['-Wl,--gc-sections', '-Wl,--wrap=__imp_SM50Initialize', '-Wl,--wrap=__imp_SM50Compile',
       '-Wl,--wrap=__imp_SM50CompileTessellationPipelineHull', '-Wl,--wrap=__imp_SM50CompileTessellationPipelineDomain',
@@ -124,6 +131,7 @@ dx12_texture_sampler = executable('dx12_texture_sampler', 'dx12_texture_sampler.
 
 dx12_sampler_filter = executable('dx12_sampler_filter', 'dx12_sampler_filter.cpp',
   '../../src/d3d12/d3d12_sampler.cpp',
+  include_directories: [include_directories('../../src/airconv')],
   dependencies: [d3d12_dep, winemetal_dep, util_dep],
 )
 

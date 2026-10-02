@@ -22,6 +22,7 @@
 #include "log/log.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace dxmt {
 
@@ -238,6 +239,48 @@ PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_SAMPLE
 
   InfoOut.support_argument_buffers = true;
   InfoOut.normalized_coords = true;
+  return S_OK;
+}
+
+HRESULT PrepareD3D12MinMaxSamplerInfo(WMT::Device device, const D3D12_SAMPLER_DESC &desc,
+    WMTSamplerInfo &point, WMTSamplerInfo &ordinary, dxmt_msc_minmax_state &state) {
+  const uint32_t filter = static_cast<uint32_t>(desc.Filter);
+  constexpr uint32_t basic_filter_mask = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+  constexpr uint32_t reduction_mask = D3D12_FILTER_REDUCTION_TYPE_MASK << D3D12_FILTER_REDUCTION_TYPE_SHIFT;
+  if ((filter & ~(basic_filter_mask | reduction_mask)) || D3D12_DECODE_IS_ANISOTROPIC_FILTER(desc.Filter) ||
+      D3D12_DECODE_IS_COMPARISON_FILTER(desc.Filter)) return E_NOTIMPL;
+  if (!std::isfinite(desc.MinLOD) || !std::isfinite(desc.MaxLOD) ||
+      desc.AddressU < 1 || desc.AddressU > 5 || desc.AddressV < 1 || desc.AddressV > 5 ||
+      desc.AddressW < 1 || desc.AddressW > 5) return E_INVALIDARG;
+  if (desc.AddressU == D3D12_TEXTURE_ADDRESS_MODE_BORDER || desc.AddressV == D3D12_TEXTURE_ADDRESS_MODE_BORDER ||
+      desc.AddressW == D3D12_TEXTURE_ADDRESS_MODE_BORDER) {
+    const auto *b = desc.BorderColor;
+    if (!((b[0] == 0 && b[1] == 0 && b[2] == 0 && (b[3] == 0 || b[3] == 1)) ||
+          (b[0] == 1 && b[1] == 1 && b[2] == 1 && b[3] == 1))) return E_NOTIMPL;
+  }
+  D3D12_SAMPLER_DESC native = desc;
+  native.Filter = static_cast<D3D12_FILTER>(filter & basic_filter_mask);
+  native.MinLOD = 0;
+  native.MaxLOD = D3D12_FLOAT32_MAX;
+  native.MipLODBias = 0;
+  WMTSamplerInfo ordinary_candidate = {}, point_candidate = {};
+  HRESULT hr = PopulateWMTSamplerInfo(device, ordinary_candidate, native);
+  if (FAILED(hr)) return hr;
+  native.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+  hr = PopulateWMTSamplerInfo(device, point_candidate, native);
+  if (FAILED(hr)) return hr;
+  dxmt_msc_minmax_state candidate = {};
+  candidate.flags = GetAIRSamplerReductionFlags(desc.Filter);
+  if (D3D12_DECODE_MIN_FILTER(desc.Filter)) candidate.flags |= 1u;
+  if (D3D12_DECODE_MAG_FILTER(desc.Filter)) candidate.flags |= 2u;
+  if (D3D12_DECODE_MIP_FILTER(desc.Filter)) candidate.flags |= 4u;
+  candidate.min_lod = desc.MinLOD;
+  candidate.max_lod = desc.MaxLOD;
+  candidate.address_u = desc.AddressU;
+  candidate.address_v = desc.AddressV;
+  point = point_candidate;
+  ordinary = ordinary_candidate;
+  state = candidate;
   return S_OK;
 }
 

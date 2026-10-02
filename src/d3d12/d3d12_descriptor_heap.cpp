@@ -843,6 +843,7 @@ class MTLD3D12SamplerDescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12Sample
   D3D12_DESCRIPTOR_HEAP_DESC desc_;
 
   std::vector<Rc<Sampler>> samplers_;
+  std::vector<D3D12_SAMPLER_DESC> sampler_descriptors_;
   std::mutex sampler_mutex_;
 
   Rc<Buffer> buffer_;
@@ -875,6 +876,7 @@ public:
       return E_INVALIDARG;
     }
     samplers_.resize(pDesc->NumDescriptors);
+    sampler_descriptors_.resize(pDesc->NumDescriptors);
 
     if (pDesc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
       buffer_ = new Buffer(samplers_.size() * sizeof(SamplerGPUStorage), device_->GetMTLDevice());
@@ -1000,6 +1002,7 @@ public:
     auto invalidate = [&] {
       std::lock_guard lock(sampler_mutex_);
       samplers_[Index] = nullptr;
+      sampler_descriptors_[Index] = {};
       if (mapped_argument_buffer_)
         mapped_argument_buffer_[Index] = {};
       SetMSCDescriptor(Index, {});
@@ -1037,6 +1040,7 @@ public:
     }
     std::lock_guard lock(sampler_mutex_);
     samplers_[Index] = sampler;
+    sampler_descriptors_[Index] = *pDesc;
     if (mapped_argument_buffer_) {
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.sampler = sampler->sampler_state_handle;
@@ -1061,6 +1065,7 @@ public:
       const auto index = Indices[i];
       if (index >= samplers_.size()) continue;
       Snapshots[i].sampler = samplers_[index];
+      Snapshots[i].descriptor = sampler_descriptors_[index];
       Snapshots[i].air = mapped_argument_buffer_[index];
       Snapshots[i].msc = mapped_msc_argument_buffer_[index];
     }
@@ -1075,6 +1080,7 @@ public:
     auto copy = [&] {
       for (unsigned i = 0; i < CopyCount; i++) {
         heap_to->samplers_[DescriptorTo + i] = samplers_[From + i];
+        heap_to->sampler_descriptors_[DescriptorTo + i] = sampler_descriptors_[From + i];
         if (mapped_argument_buffer_ && heap_to->mapped_argument_buffer_)
           heap_to->mapped_argument_buffer_[DescriptorTo + i] = mapped_argument_buffer_[From + i];
         if (mapped_msc_argument_buffer_ && heap_to->mapped_msc_argument_buffer_)

@@ -272,6 +272,9 @@ public:
 
 struct SamplerDescriptorSnapshot {
   Rc<Sampler> sampler;
+  // Original API descriptor, not the native point surrogate for AIR reduction.
+  // Valid only when sampler is populated; copied under the same heap lock.
+  D3D12_SAMPLER_DESC descriptor = {};
   air::SamplerGPUStorage air = {};
   dxmt_msc_descriptor_entry msc = {};
 };
