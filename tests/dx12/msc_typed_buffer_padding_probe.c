@@ -50,6 +50,8 @@ probe_format(MTLPixelFormat format) {
       {MTLPixelFormatR32Float, 4, floating, floating, 0x3eaaaaabu, false, 1},
       {MTLPixelFormatR8Unorm, 1, n8, n8_loaded, 0x5au, false, 1},
       {MTLPixelFormatR16Unorm, 2, n16, n16_loaded, 0x5555u, false, 1},
+      {MTLPixelFormatRGBA8Unorm, 4, n8, n8_loaded, 0x5au, false, 4},
+      {MTLPixelFormatRGBA16Unorm, 8, n16, n16_loaded, 0x5555u, false, 4},
       {MTLPixelFormatRGBA8Uint, 4, u8, u8, 0x5au, true, 4},
       {MTLPixelFormatRGBA16Uint, 8, u16, u16, 0x5555u, true, 4},
       {MTLPixelFormatRGBA8Sint, 4, s8, s8, 0x5au, true, 4},
@@ -249,6 +251,7 @@ cleanup:
 int main(int argc, const char **argv) {
   if (argc != 4 && argc != 5) {
     fprintf(stderr, "FLOAT4 modes: --origin-cbv-rgba16float[-oob], --origin-cbv-rgba32float[-oob]\n");
+    fprintf(stderr, "UNORM4 modes: --origin-cbv-rgba8unorm[-oob], --origin-cbv-rgba16unorm[-oob]\n");
     fprintf(stderr, "usage: %s UAV.cso SRV.cso atomic.cso [--expect-unsupported|--raw-r32|--origin-cbv|--origin-cbv-r8uint|--origin-cbv-r16uint|--origin-cbv-oob|--origin-cbv-wrap|--origin-cbv-r16float[-oob]|--origin-cbv-r32float[-oob]|--origin-cbv-r8sint[-oob]|--origin-cbv-r16sint[-oob]|--origin-cbv-r32sint[-oob]|--origin-cbv-r8unorm[-oob]|--origin-cbv-r16unorm[-oob]|--origin-cbv-rgba8uint[-oob]|--origin-cbv-rgba16uint[-oob]|--origin-cbv-rgba8sint[-oob]|--origin-cbv-rgba16sint[-oob]]\n", argv[0]); return 1;
   }
   const struct ProbeMode {
@@ -287,6 +290,10 @@ int main(int argc, const char **argv) {
       {"--origin-cbv-rgba8sint-oob", MTLPixelFormatRGBA8Sint, BindingOriginCBV, true, false, false},
       {"--origin-cbv-rgba16sint", MTLPixelFormatRGBA16Sint, BindingOriginCBV, false, false, false},
       {"--origin-cbv-rgba16sint-oob", MTLPixelFormatRGBA16Sint, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-rgba8unorm", MTLPixelFormatRGBA8Unorm, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-rgba8unorm-oob", MTLPixelFormatRGBA8Unorm, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-rgba16unorm", MTLPixelFormatRGBA16Unorm, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-rgba16unorm-oob", MTLPixelFormatRGBA16Unorm, BindingOriginCBV, true, false, false},
       {"--origin-cbv-rgba16float", MTLPixelFormatRGBA16Float, BindingOriginCBV, false, false, false},
       {"--origin-cbv-rgba16float-oob", MTLPixelFormatRGBA16Float, BindingOriginCBV, true, false, false},
       {"--origin-cbv-rgba32float", MTLPixelFormatRGBA32Float, BindingOriginCBV, false, false, false},

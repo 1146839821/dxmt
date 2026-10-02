@@ -65,9 +65,10 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
   auto srvs = group(groups[1]), uavs = group(groups[2]);
   if ((groups[1] != "null" && srvs.empty()) || uavs.empty() || srvs.size() + uavs.size() > 3)
     return reject("expected one/two finite typed inputs and output u1");
-  enum class Component { Uint, Sint, Float, Unorm, Uint4, Sint4, Float4 };
+  enum class Component { Uint, Sint, Float, Unorm, Uint4, Sint4, Float4, Unorm4 };
   auto is_vector = [](Component component) {
-    return component == Component::Uint4 || component == Component::Sint4 || component == Component::Float4;
+    return component == Component::Uint4 || component == Component::Sint4 ||
+        component == Component::Float4 || component == Component::Unorm4;
   };
   struct Binding { unsigned resource_class, range, reg, slot; bool output; Component component; };
   std::map<std::pair<unsigned, unsigned>, Binding> bindings;
@@ -84,8 +85,9 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
         value[2] == "int" ? Component::Sint :
         value[2] == "vector<unsigned int, 4> " ? Component::Uint4 :
         value[2] == "vector<int, 4> " ? Component::Sint4 :
-        value[2] == "vector<float, 4> " ? Component::Float4 : Component::Uint;
-    const std::string component_metadata = component == Component::Unorm ? "!{i32 0, i32 14}" :
+        value[2] == "vector<float, 4> " ?
+        (metadata[value[4]] == "!{i32 0, i32 14}" ? Component::Unorm4 : Component::Float4) : Component::Uint;
+    const std::string component_metadata = (component == Component::Unorm || component == Component::Unorm4) ? "!{i32 0, i32 14}" :
         (component == Component::Float || component == Component::Float4) ? "!{i32 0, i32 9}" :
         (component == Component::Sint || component == Component::Sint4) ? "!{i32 0, i32 4}" : "!{i32 0, i32 5}";
     if (metadata[value[4]] != component_metadata) return false;
@@ -200,7 +202,8 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
       auto binding = handle_bindings.find(handle);
       if (binding == handle_bindings.end() || binding->second.output) return reject("unknown input handle flow");
       const bool expects_float = binding->second.component == Component::Float ||
-          binding->second.component == Component::Float4 || binding->second.component == Component::Unorm;
+          binding->second.component == Component::Float4 || binding->second.component == Component::Unorm ||
+          binding->second.component == Component::Unorm4;
       if (expects_float != floating) return reject("typed operation/component mismatch");
       if (atomic && binding->second.component == Component::Sint) return reject("signed atomic outside bounded grammar");
       if (atomic && is_vector(binding->second.component)) return reject("vector atomic outside bounded grammar");

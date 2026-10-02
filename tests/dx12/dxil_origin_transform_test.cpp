@@ -348,8 +348,8 @@ declare void @dx.op.bufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i
         "!6 = !{i32 0, %\"class.RWBuffer<" + name + ">\"");
     edit(vector_bad, "i1 false, i1 false, i1 false, !7}", "i1 false, i1 false, i1 false, !9}");
     vector_bad += "!9 = !{i32 0, i32 " + std::to_string(component) + "}\n";
-    reject(component == 14 ? "UNORM4 resource" : "SNORM4 resource",
-        vector_bad, "unsupported or ambiguous UAV binding");
+    reject(component == 14 ? "UNORM4 integer load" : "SNORM4 resource",
+        vector_bad, component == 14 ? "typed operation/component mismatch" : "unsupported or ambiguous UAV binding");
   }
   auto as_signed_vector = [&](std::string text) {
     for (const auto &kind : {"Buffer", "RWBuffer"}) {
@@ -429,10 +429,10 @@ declare void @dx.op.bufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i
   vector_bad = float_vector;
   edit(vector_bad, "float %8, float %9, i8 15", "float %8, float %9, i8 3");
   reject("FLOAT4 partial store", vector_bad);
-  for (const auto &component : {5, 14, 13}) {
+  for (const auto &component : {5, 13}) {
     vector_bad = float_vector;
     edit(vector_bad, "!9 = !{i32 0, i32 9}", "!9 = !{i32 0, i32 " + std::to_string(component) + "}");
-    reject("FLOAT4 wrong/normalized component", vector_bad, "unsupported or ambiguous UAV binding");
+    reject("FLOAT4 wrong/SNORM component", vector_bad, "unsupported or ambiguous UAV binding");
   }
   vector_bad = float_vector;
   edit(vector_bad, "  ret void", "  %14 = call i32 @dx.op.atomicBinOp.i32(i32 78, %dx.types.Handle %2, i32 0, i32 %3, i32 undef, i32 undef, i32 13)\n  ret void");
@@ -454,6 +454,38 @@ declare void @dx.op.bufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i
   reject("FLOAT4 SRV write", float_vector_srv, "SRV write/atomic");
   edit(float_vector_srv, "  call void @dx.op.bufferStore.f32(i32 69, %dx.types.Handle %2, i32 %3, i32 undef, float %5, float %7, float %8, float %9, i8 15)\n", "");
   check("FLOAT4 SRV load", LowerTypedOrigin(float_vector_srv, vector_output, error));
+  std::string unorm_vector = float_vector;
+  edit(unorm_vector, "!9 = !{i32 0, i32 9}", "!9 = !{i32 0, i32 14}");
+  check("UNORM4 UAV preserves normalized metadata", LowerTypedOrigin(unorm_vector, vector_output, error) &&
+      vector_output.find("!9 = !{i32 0, i32 14}") != std::string::npos &&
+      vector_output.find("phi %dx.types.ResRet.f32") != std::string::npos);
+  std::string unorm_vector_srv = float_vector_srv;
+  edit(unorm_vector_srv, "!9 = !{i32 0, i32 9}", "!9 = !{i32 0, i32 14}");
+  check("UNORM4 SRV four lanes", LowerTypedOrigin(unorm_vector_srv, vector_output, error));
+  vector_bad = unorm_vector;
+  edit(vector_bad, "%4, 3", "%4, 4");
+  reject("UNORM4 status lane", vector_bad);
+  vector_bad = unorm_vector;
+  edit(vector_bad, "float %8, float %9, i8 15", "float %8, float %9, i8 3");
+  reject("UNORM4 partial store", vector_bad);
+  vector_bad = unorm_vector;
+  edit(vector_bad, "!9 = !{i32 0, i32 14}", "!9 = !{i32 0, i32 13}");
+  reject("UNORM4 SNORM metadata", vector_bad, "unsupported or ambiguous UAV binding");
+  vector_bad = unorm_vector;
+  edit(vector_bad, "!6 = !{i32 0, %\"class.RWBuffer<vector<float, 4> >\"", "!6 = !{i32 0, %\"class.RWBuffer<float>\"");
+  vector_bad += "%\"class.RWBuffer<float>\" = type { float }\n";
+  reject("UNORM4 width follows handle", vector_bad, "instruction/control flow outside bounded grammar");
+  vector_bad = unorm_vector;
+  edit(vector_bad, "  ret void", "  %14 = call i32 @dx.op.atomicBinOp.i32(i32 78, %dx.types.Handle %2, i32 0, i32 %3, i32 undef, i32 undef, i32 13)\n  ret void");
+  vector_bad += "declare i32 @dx.op.atomicBinOp.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32)\n";
+  reject("UNORM4 integer atomic", vector_bad, "typed operation/component mismatch");
+  vector_bad = unorm_vector;
+  edit(vector_bad, "!8 = !{i32 1, %\"class.RWBuffer<unsigned int>\"", "!8 = !{i32 1, %\"class.RWBuffer<vector<float, 4> >\"");
+  edit(vector_bad, "i1 false, i1 false, i1 false, !7}", "i1 false, i1 false, i1 false, !9}");
+  reject("UNORM4 output rejected", vector_bad, "unsupported or ambiguous UAV binding");
+  vector_bad = unorm_vector_srv;
+  edit(vector_bad, "  ret void", "  call void @dx.op.bufferStore.f32(i32 69, %dx.types.Handle %2, i32 %3, i32 undef, float %5, float %7, float %8, float %9, i8 15)\n  ret void");
+  reject("UNORM4 SRV write", vector_bad, "SRV write/atomic");
   vector_bad = sint_vector;
   edit(vector_bad, "%\"class.RWBuffer<vector<int, 4> >\" = type { <4 x i32> }",
       "%\"class.RWBuffer<vector<float, 4> >\" = type { <4 x float> }");
