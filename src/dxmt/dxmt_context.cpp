@@ -484,8 +484,8 @@ ArgumentEncodingContext::clearColor(
   SanitizeRTVClearColor(texture->pixelFormat(viewId), encoder_info->color);
   encoder_info->array_length = arrayLength;
   encoder_info->depth_plane = depthPlane;
-  encoder_info->width = texture->width();
-  encoder_info->height = texture->height();
+  encoder_info->width = texture->width(viewId);
+  encoder_info->height = texture->height(viewId);
   encoder_current = encoder_info;
 
   encoder_info->attachment = access(texture, viewId, ResourceAccess::Write);
@@ -510,8 +510,8 @@ ArgumentEncodingContext::clearDepthStencil(
   encoder_info->depth_stencil = {depth, stencil};
   encoder_info->array_length = arrayLength;
   encoder_info->depth_plane = depthPlane;
-  encoder_info->width = texture->width();
-  encoder_info->height = texture->height();
+  encoder_info->width = texture->width(viewId);
+  encoder_info->height = texture->height(viewId);
   encoder_current = encoder_info;
 
   encoder_info->attachment = access(texture, viewId, ResourceAccess::Write);
