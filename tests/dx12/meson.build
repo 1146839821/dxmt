@@ -256,6 +256,12 @@ if dxc_command.length() > 0
       )
     endforeach
   endforeach
+  custom_target('dxil_typed_buffer_snorm_fixture',
+    input: 'typed_uav_formats.hlsl', output: 'typed_uav_snorm_0.cso',
+    command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '-D', 'TYPE=snorm float',
+      '-D', 'SHAPE=0', '-D', 'CHANNELS=1', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
   custom_target('msc_typed_buffer_padding_sint_fixture',
     input: 'msc_typed_buffer_padding.hlsl', output: 'msc_typed_buffer_padding_sint.cso',
     command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '-D', 'TYPE=int', '@INPUT@', '-Fo', '@OUTPUT@'],

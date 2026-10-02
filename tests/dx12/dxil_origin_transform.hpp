@@ -65,7 +65,7 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
   auto srvs = group(groups[1]), uavs = group(groups[2]);
   if ((groups[1] != "null" && srvs.empty()) || uavs.empty() || srvs.size() + uavs.size() > 3)
     return reject("expected one/two finite typed inputs and output u1");
-  enum class Component { Uint, Sint, Float };
+  enum class Component { Uint, Sint, Float, Unorm };
   struct Binding { unsigned resource_class, range, reg, slot; bool output; Component component; };
   std::map<std::pair<unsigned, unsigned>, Binding> bindings;
   bool slots[2] = {}, found_output = false;
@@ -76,9 +76,11 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
         "<(unsigned int|int|float)>\\\"\\* undef, !\\\"\\\", i32 0, i32 ([012]), i32 1, i32 10, " +
         (srv ? "i32 0" : "i1 false, i1 false, i1 false") + ", !([0-9]+)\\}";
     if (!std::regex_match(metadata[id], value, std::regex(pattern))) return false;
-    const Component component = value[2] == "float" ? Component::Float :
+    const Component component = value[2] == "float" ?
+        (metadata[value[4]] == "!{i32 0, i32 14}" ? Component::Unorm : Component::Float) :
         value[2] == "int" ? Component::Sint : Component::Uint;
-    const std::string component_metadata = component == Component::Float ? "!{i32 0, i32 9}" :
+    const std::string component_metadata = component == Component::Unorm ? "!{i32 0, i32 14}" :
+        component == Component::Float ? "!{i32 0, i32 9}" :
         component == Component::Sint ? "!{i32 0, i32 4}" : "!{i32 0, i32 5}";
     if (metadata[value[4]] != component_metadata) return false;
     const unsigned range = std::stoul(value[1]), reg = std::stoul(value[3]);
@@ -181,7 +183,8 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
     if (!handle.empty()) {
       auto binding = handle_bindings.find(handle);
       if (binding == handle_bindings.end() || binding->second.output) return reject("unknown input handle flow");
-      if ((binding->second.component == Component::Float) != floating) return reject("typed operation/component mismatch");
+      const bool expects_float = binding->second.component == Component::Float || binding->second.component == Component::Unorm;
+      if (expects_float != floating) return reject("typed operation/component mismatch");
       if (atomic && binding->second.component == Component::Sint) return reject("signed atomic outside bounded grammar");
       if ((store || atomic) && binding->second.resource_class == 0) return reject("SRV write/atomic");
       const std::string suffix = std::to_string(binding->second.slot);

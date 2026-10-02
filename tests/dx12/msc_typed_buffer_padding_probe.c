@@ -33,6 +33,11 @@ probe_format(MTLPixelFormat format) {
   // retain half bits, while asuint(float) output must have float32 bits.
   static const uint32_t half[] = {0x3800, 0xc000, 0x3e00, 0x5000};
   static const uint32_t floating[] = {0x3f000000, 0xc0000000, 0x3fc00000, 0x42000000};
+  // Independent nearest-float32 oracle for raw/(2^n-1), not observed GPU bits.
+  static const uint32_t n8[] = {0, 1, 128, 255};
+  static const uint32_t n8_loaded[] = {0, 0x3b808081u, 0x3f008081u, 0x3f800000u};
+  static const uint32_t n16[] = {0, 1, 32768, 65535};
+  static const uint32_t n16_loaded[] = {0, 0x37800080u, 0x3f000080u, 0x3f800000u};
   static const struct ProbeFormat formats[] = {
       {MTLPixelFormatR8Uint, 1, u8, u8, 0xcdf00080u, true},
       {MTLPixelFormatR16Uint, 2, u16, u16, 0xcdf00080u, true},
@@ -41,7 +46,9 @@ probe_format(MTLPixelFormat format) {
       {MTLPixelFormatR16Sint, 2, s16, s16, 0xcdf00080u, true},
       {MTLPixelFormatR32Sint, 4, s32, s32, 0xcdf00080u, true},
       {MTLPixelFormatR16Float, 2, half, floating, 0x3555u, false},
-      {MTLPixelFormatR32Float, 4, floating, floating, 0x3eaaaaabu, false}};
+      {MTLPixelFormatR32Float, 4, floating, floating, 0x3eaaaaabu, false},
+      {MTLPixelFormatR8Unorm, 1, n8, n8_loaded, 0x5au, false},
+      {MTLPixelFormatR16Unorm, 2, n16, n16_loaded, 0x5555u, false}};
   for (unsigned i = 0; i < sizeof(formats) / sizeof(formats[0]); ++i)
     if (formats[i].format == format) return &formats[i];
   return NULL;
@@ -222,7 +229,7 @@ cleanup:
 
 int main(int argc, const char **argv) {
   if (argc != 4 && argc != 5) {
-    fprintf(stderr, "usage: %s UAV.cso SRV.cso atomic.cso [--expect-unsupported|--raw-r32|--origin-cbv|--origin-cbv-r8uint|--origin-cbv-r16uint|--origin-cbv-oob|--origin-cbv-wrap|--origin-cbv-r16float[-oob]|--origin-cbv-r32float[-oob]|--origin-cbv-r8sint[-oob]|--origin-cbv-r16sint[-oob]|--origin-cbv-r32sint[-oob]]\n", argv[0]); return 1;
+    fprintf(stderr, "usage: %s UAV.cso SRV.cso atomic.cso [--expect-unsupported|--raw-r32|--origin-cbv|--origin-cbv-r8uint|--origin-cbv-r16uint|--origin-cbv-oob|--origin-cbv-wrap|--origin-cbv-r16float[-oob]|--origin-cbv-r32float[-oob]|--origin-cbv-r8sint[-oob]|--origin-cbv-r16sint[-oob]|--origin-cbv-r32sint[-oob]|--origin-cbv-r8unorm[-oob]|--origin-cbv-r16unorm[-oob]]\n", argv[0]); return 1;
   }
   const struct ProbeMode {
     const char *name;
@@ -247,7 +254,11 @@ int main(int argc, const char **argv) {
       {"--origin-cbv-r16sint", MTLPixelFormatR16Sint, BindingOriginCBV, false, false, false},
       {"--origin-cbv-r16sint-oob", MTLPixelFormatR16Sint, BindingOriginCBV, true, false, false},
       {"--origin-cbv-r32sint", MTLPixelFormatR32Sint, BindingOriginCBV, false, false, false},
-      {"--origin-cbv-r32sint-oob", MTLPixelFormatR32Sint, BindingOriginCBV, true, false, false}};
+      {"--origin-cbv-r32sint-oob", MTLPixelFormatR32Sint, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-r8unorm", MTLPixelFormatR8Unorm, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-r8unorm-oob", MTLPixelFormatR8Unorm, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-r16unorm", MTLPixelFormatR16Unorm, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-r16unorm-oob", MTLPixelFormatR16Unorm, BindingOriginCBV, true, false, false}};
   const struct ProbeMode *mode = NULL;
   for (unsigned i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i)
     if (!strcmp(argc == 5 ? argv[4] : "", modes[i].name)) { mode = &modes[i]; break; }

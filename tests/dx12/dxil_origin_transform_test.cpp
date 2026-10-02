@@ -200,6 +200,46 @@ declare void @dx.op.bufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i
   check("scalar FLOAT SRV", LowerTypedOrigin(float_srv, float_output, error));
   float_bad = with_float_store(float_srv);
   reject("FLOAT SRV write", float_bad);
+  std::string unorm = floating;
+  edit(unorm, "!9 = !{i32 0, i32 9}", "!9 = !{i32 0, i32 14}");
+  check("scalar UNORM load", LowerTypedOrigin(unorm, float_output, error) &&
+      float_output.find("phi %dx.types.ResRet.f32") != std::string::npos);
+  check("scalar UNORM store", LowerTypedOrigin(with_float_store(unorm), float_output, error));
+  std::string unorm_srv = float_srv;
+  edit(unorm_srv, "!9 = !{i32 0, i32 9}", "!9 = !{i32 0, i32 14}");
+  check("scalar UNORM SRV", LowerTypedOrigin(unorm_srv, float_output, error));
+  reject("UNORM SRV write", with_float_store(unorm_srv), "SRV write/atomic");
+  std::string unorm_bad = unorm;
+  edit(unorm_bad, "!9 = !{i32 0, i32 14}", "!9 = !{i32 0, i32 5}");
+  reject("UNORM class/component mismatch", unorm_bad, "unsupported or ambiguous UAV binding");
+  unorm_bad = unorm;
+  edit(unorm_bad, "!9 = !{i32 0, i32 14}", "!9 = !{i32 0, i32 13}");
+  reject("other normalized component", unorm_bad, "unsupported or ambiguous UAV binding");
+  // Keep the i32 declarations/SSA internally consistent; only the resource
+  // component contract disagrees with the operation (still a parser fixture).
+  unorm_bad = input;
+  edit(unorm_bad, "%\"class.RWBuffer<unsigned int>\" = type { i32 }",
+      "%\"class.RWBuffer<unsigned int>\" = type { i32 }\n%\"class.RWBuffer<float>\" = type { float }");
+  edit(unorm_bad, "!6 = !{i32 0, %\"class.RWBuffer<unsigned int>\"", "!6 = !{i32 0, %\"class.RWBuffer<float>\"");
+  edit(unorm_bad, "false, !7}\n!7", "false, !9}\n!7");
+  unorm_bad += "!9 = !{i32 0, i32 14}\n";
+  reject("integer operation on UNORM", unorm_bad, "typed operation/component mismatch");
+  unorm_bad = unorm;
+  edit(unorm_bad, "  ret void", "  %7 = call i32 @dx.op.atomicBinOp.i32(i32 78, %dx.types.Handle %2, i32 0, i32 %3, i32 undef, i32 undef, i32 13)\n  ret void");
+  unorm_bad += "declare i32 @dx.op.atomicBinOp.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32)\n";
+  reject("integer atomic on UNORM", unorm_bad, "typed operation/component mismatch");
+  unorm_bad = with_float_store(unorm);
+  edit(unorm_bad, "float %5, i8 15)", "float %5, i8 1)");
+  reject("UNORM input partial mask", unorm_bad, "instruction/control flow outside bounded grammar");
+  unorm_bad = unorm;
+  edit(unorm_bad, "ResRet.f32 %4, 0", "ResRet.f32 %4, 4");
+  reject("UNORM status lane", unorm_bad, "instruction/control flow outside bounded grammar");
+  reject("UINT class with UNORM metadata", replace("!7 = !{i32 0, i32 5}", "!7 = !{i32 0, i32 14}"),
+      "unsupported or ambiguous UAV binding");
+  unorm_bad = unorm;
+  edit(unorm_bad, "!8 = !{i32 1, %\"class.RWBuffer<unsigned int>\"", "!8 = !{i32 1, %\"class.RWBuffer<float>\"");
+  edit(unorm_bad, "false, !7}", "false, !9}");
+  reject("UNORM output resource", unorm_bad, "unsupported or ambiguous UAV binding");
   edit(two, "  %3 = call", "  %9 = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 9, i32 2, i1 false)\n  %3 = call");
   edit(two, "  ret void", "  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %9, i32 %3, i32 undef, i32 %5, i32 %5, i32 %5, i32 %5, i8 15)\n  ret void");
   edit(two, "!5 = !{!6, !8}", "!5 = !{!10, !8, !6}");
