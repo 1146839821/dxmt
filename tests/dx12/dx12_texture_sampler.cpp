@@ -280,18 +280,20 @@ main(int argc, char **argv) {
   const bool gradient_probe = argc >= 3 && (strcmp(argv[2], "--minimum-grad") == 0 ||
       strcmp(argv[2], "--maximum-grad") == 0 || strcmp(argv[2], "--static-minimum-grad") == 0 ||
       strcmp(argv[2], "--static-maximum-grad") == 0 || grad_lod || line_grad);
+  const bool descriptor_array = argc == 3 && (strcmp(argv[2], "--minimum-descriptor-array") == 0 ||
+      strcmp(argv[2], "--maximum-descriptor-array") == 0);
   const bool minimum = argc >= 3 &&
       (strcmp(argv[2], "--minimum") == 0 || strcmp(argv[2], "--static-minimum") == 0 ||
        strcmp(argv[2], "--static-minimum-state") == 0 || dynamic_switch ||
        strcmp(argv[2], "--minimum-static-observation") == 0 ||
        strcmp(argv[2], "--minimum-live-observation") == 0 || strcmp(argv[2], "--minimum-grad") == 0 ||
        strcmp(argv[2], "--static-minimum-grad") == 0 || grad_lod || clamp_probe ||
-       ((line || array_2d || volume) && strstr(argv[2], "minimum")));
+       ((line || array_2d || volume || descriptor_array) && strstr(argv[2], "minimum")));
   const bool state_probe = argc >= 3 && strcmp(argv[2], "--static-minimum-state") == 0;
   const bool maximum = argc >= 3 &&
       (strcmp(argv[2], "--maximum") == 0 || strcmp(argv[2], "--static-maximum") == 0 ||
        strcmp(argv[2], "--maximum-grad") == 0 || strcmp(argv[2], "--static-maximum-grad") == 0 ||
-       ((line || array_2d || volume) && strstr(argv[2], "maximum")));
+       ((line || array_2d || volume || descriptor_array) && strstr(argv[2], "maximum")));
   const bool reduction = minimum || maximum;
   const bool static_observation = argc >= 3 && (strcmp(argv[2], "--sampler-static-observation") == 0 ||
       strcmp(argv[2], "--minimum-static-observation") == 0);
@@ -437,8 +439,9 @@ main(int argc, char **argv) {
         D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
         D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED;
   } else {
-    ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
-    ranges[1] = {static_sampler ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV : D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
+    ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, descriptor_array ? 2u : 1u, 0, 0, 0};
+    ranges[1] = {static_sampler ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV : D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+        descriptor_array ? 2u : 1u, 0, 0, 0};
     if (!static_sampler)
       ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
     root_parameter_count = static_sampler ? 2 : 3;
@@ -509,10 +512,10 @@ main(int argc, char **argv) {
   }
 
   resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-  resource_heap_desc.NumDescriptors = direct_indexed_uav_texture ? 3 : 2;
+  resource_heap_desc.NumDescriptors = direct_indexed_uav_texture || descriptor_array ? 3 : 2;
   resource_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
   sampler_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
-  sampler_heap_desc.NumDescriptors = 1;
+  sampler_heap_desc.NumDescriptors = descriptor_array ? 2 : 1;
   sampler_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
   if (!CheckHR("CreateResourceHeap", device->CreateDescriptorHeap(&resource_heap_desc, IID_PPV_ARGS(&resource_heap))))
     goto cleanup;
@@ -649,6 +652,16 @@ main(int argc, char **argv) {
   }
   resource_cpu = resource_heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateShaderResourceView(clamp_probe && clamp_probe->null_static_resource ? nullptr : texture, &srv_desc, resource_cpu);
+  if (descriptor_array) {
+    auto second = resource_cpu;
+    second.ptr += descriptor_increment;
+    device->CreateShaderResourceView(texture, &srv_desc, second);
+    auto decoy = srv_desc;
+    decoy.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+        D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0,
+        D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0);
+    device->CreateShaderResourceView(texture, &decoy, resource_cpu);
+  }
   if (defaults_probe || (clamp_probe && clamp_probe->copy_resource)) {
     auto heap = static_cast<dxmt::MTLD3D12DescriptorHeap *>(resource_heap);
     auto metal = static_cast<dxmt::MTLD3D12Device *>(device)->GetMTLDevice();
@@ -678,7 +691,7 @@ main(int argc, char **argv) {
   uav_desc.Buffer.NumElements = 64;
   uav_desc.Buffer.StructureByteStride = dxbc ? 0 : sizeof(UINT);
   uav_cpu = resource_cpu;
-  uav_cpu.ptr += descriptor_increment;
+  uav_cpu.ptr += descriptor_increment * (descriptor_array ? 2 : 1);
   buffer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   if (!CheckHR(
           "CreateOutputBuffer",
@@ -793,6 +806,15 @@ main(int argc, char **argv) {
   }
 
   readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
+  if (descriptor_array) {
+    auto first = sampler_heap->GetCPUDescriptorHandleForHeapStart();
+    auto second = first;
+    second.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    device->CreateSampler(&sampler_desc, second);
+    auto decoy = sampler_desc;
+    decoy.Filter = minimum ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;
+    device->CreateSampler(&decoy, first);
+  }
   readback_heap.CreationNodeMask = 1;
   readback_heap.VisibleNodeMask = 1;
   buffer_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
@@ -874,7 +896,7 @@ main(int argc, char **argv) {
   if (!direct_indexed) {
     list->SetComputeRootDescriptorTable(0, resource_heap->GetGPUDescriptorHandleForHeapStart());
     resource_gpu = resource_heap->GetGPUDescriptorHandleForHeapStart();
-    resource_gpu.ptr += descriptor_increment;
+    resource_gpu.ptr += descriptor_increment * (descriptor_array ? 2 : 1);
     if (static_sampler) {
       list->SetComputeRootDescriptorTable(1, resource_gpu);
     } else {
