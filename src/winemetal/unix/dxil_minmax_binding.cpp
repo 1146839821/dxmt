@@ -104,7 +104,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
   if (!handle || !create || create->getFunctionType() != FunctionType::get(handle,
       {i32, types.getInt8Ty(), i32, i32, types.getInt1Ty()}, false))
     return reject("legacy createHandle required");
-  auto resolve = [&](Value *value, unsigned kind) -> const Resource * {
+  auto resolve = [&](Value *value, unsigned kind, uint32_t &resolved_register) -> const Resource * {
     auto *call = dyn_cast<CallInst>(value);
     if (!call || call->getCalledFunction() != create || call->arg_size() != 5) return nullptr;
     auto *resource_class = dyn_cast<ConstantInt>(call->getArgOperand(1));
@@ -114,7 +114,11 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
         !Word(call->getArgOperand(0), opcode) || opcode != CreateHandle || !Word(call->getArgOperand(2), range) ||
         !Word(call->getArgOperand(3), reg)) return nullptr;
     auto found = records[kind].find(range);
-    return found != records[kind].end() && found->second.count == 1 && found->second.reg == reg ? &found->second : nullptr;
+    if (found == records[kind].end() || found->second.count == UINT32_MAX ||
+        reg < found->second.reg || uint64_t(reg) >= uint64_t(found->second.reg) + found->second.count)
+      return nullptr;
+    resolved_register = reg;
+    return &found->second;
   };
   std::vector<Sample> samples;
   std::vector<Pair> pairs;
@@ -157,8 +161,9 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     for (unsigned i = 7; i < call->arg_size(); ++i)
       if (call->getArgOperand(i)->getType() != (i < 10 ? i32 : types.getFloatTy()))
         return reject("invalid sampling offset/LOD/gradient operand");
-    const auto *texture = resolve(call->getArgOperand(1), 0);
-    const auto *sampler = resolve(call->getArgOperand(2), 3);
+    uint32_t texture_register, sampler_register;
+    const auto *texture = resolve(call->getArgOperand(1), 0, texture_register);
+    const auto *sampler = resolve(call->getArgOperand(2), 3, sampler_register);
     uint32_t texture_kind, sampler_kind, component_tag, component_type;
     if (!texture || !sampler || texture->metadata->getNumOperands() != 9 ||
         sampler->metadata->getNumOperands() != 8 || !Word(texture->metadata->getOperand(6), texture_kind) ||
@@ -174,11 +179,11 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
       if (!extract || extract->getNumIndices() != 1 || *extract->idx_begin() >= 4)
         return reject("feedback/status or aggregate flow requires further lowering");
     }
-    auto key = std::make_tuple(texture->space, texture->reg, sampler->space, sampler->reg);
+    auto key = std::make_tuple(texture->space, texture_register, sampler->space, sampler_register);
     auto [index, inserted] = pair_indices.emplace(key, pairs.size());
     if (inserted) {
       if (pairs.size() >= 64) return reject("too many sampled pairs");
-      pairs.push_back({{texture->space, texture->reg, sampler->space, sampler->reg}, texture, sampler});
+      pairs.push_back({{texture->space, texture_register, sampler->space, sampler_register}, texture, sampler});
     }
     samples.push_back({call, index->second, texture_kind == 4 ? 3u : texture_kind == 1 || texture_kind == 6 ? 1u : 2u});
   }
@@ -240,6 +245,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
       operands[0] = word(next_id[kind] + slot);
       operands[3] = word(DXMT_MSC_MINMAX_SPACE);
       operands[4] = word(slot);
+      operands[5] = word(1); // Each private pair is one descriptor, not the application array.
       additional.push_back(MDNode::get(context, operands));
     }
     append(kind, additional);
