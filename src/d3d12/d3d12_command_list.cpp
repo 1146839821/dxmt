@@ -3080,7 +3080,7 @@ public:
       if (allocation)
         emit(allocation->buffer().handle, WMTResourceUsageRead);
       if (use_msc)
-        emit(snapshot.msc_typed_buffer_view.handle, WMTResourceUsageRead);
+        emit(snapshot.msc_typed_buffer.view.handle, WMTResourceUsageRead);
       else if (allocation)
         emit(snapshot.buffer->view(descriptor.SRVTexelBuffer.view, allocation).handle, WMTResourceUsageRead);
       break;
@@ -3092,7 +3092,7 @@ public:
       if (allocation)
         emit(allocation->buffer().handle, read_write);
       if (use_msc)
-        emit(snapshot.msc_typed_buffer_view.handle, read_write);
+        emit(snapshot.msc_typed_buffer.view.handle, read_write);
       else if (allocation)
         emit(snapshot.buffer->view(descriptor.UAVTexelBuffer.view, allocation).handle, read_write);
       break;
@@ -3193,7 +3193,7 @@ public:
         const auto missing_msc_view = snapshots[i].buffer &&
             (snapshots[i].descriptor.type == ShaderVisibleDescriptorType::SRVTexelBuffer ||
              snapshots[i].descriptor.type == ShaderVisibleDescriptorType::UAVTexelBuffer) &&
-            !snapshots[i].msc_typed_buffer_view;
+            !snapshots[i].msc_typed_buffer.view;
         for (const auto &use : slot_uses[i]) {
           if (use.use_msc && !use.volatile_descriptors && missing_msc_view) {
             FailRecording(__func__, "MSC typed-buffer view unavailable (unaligned offset or native view creation failure)");
@@ -3267,7 +3267,7 @@ public:
           const auto missing_msc_view = snapshots[i].buffer &&
               (snapshots[i].descriptor.type == ShaderVisibleDescriptorType::SRVTexelBuffer ||
                snapshots[i].descriptor.type == ShaderVisibleDescriptorType::UAVTexelBuffer) &&
-              !snapshots[i].msc_typed_buffer_view;
+              !snapshots[i].msc_typed_buffer.view;
           for (const auto &use : slot_uses[i]) {
             if (use.use_msc && missing_msc_view) {
               ERR("D3D12 submission rejected: MSC typed-buffer view unavailable");

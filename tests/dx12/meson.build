@@ -983,7 +983,7 @@ dx12_descriptor_ownership = executable(
     include_directories('../../src/winemetal'),
     include_directories('../../src/util'),
   ],
-  dependencies: [ d3d12_dep ],
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep],
 )
 dx12_pipeline_statistics = executable('dx12_pipeline_statistics', 'dx12_pipeline_statistics.cpp', dependencies: [ d3d12_dep ])
 

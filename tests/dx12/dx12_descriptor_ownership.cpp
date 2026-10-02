@@ -310,6 +310,51 @@ int main() {
     CloseHandle(start);
     passed &= IsDescriptorType(shader_impl_a, dxmt::ShaderVisibleDescriptorType::ConstantBuffer, "concurrent CBV update");
   }
+  // Typed metadata follows descriptor copies and survives destination overwrite
+  // in an already-resolved snapshot. Unaligned views remain fail-closed.
+  for (UINT first_element : {0u, 1u}) {
+    D3D12_SHADER_RESOURCE_VIEW_DESC typed = {};
+    typed.Format = DXGI_FORMAT_R32_UINT;
+    typed.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    typed.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    typed.Buffer.FirstElement = first_element;
+    typed.Buffer.NumElements = 8;
+    device_a->CreateShaderResourceView(buffer_a, &typed, source_cpu);
+    device_a->CopyDescriptorsSimple(1, shader_cpu_a, source_cpu, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    std::vector<dxmt::ShaderVisibleDescriptorSnapshot> snapshots;
+    shader_impl_a->ResolveDescriptors({0}, snapshots);
+    const auto &snapshot = snapshots[0];
+    auto *allocation = snapshot.buffer_allocation.ptr();
+    const auto view_handle = snapshot.msc_typed_buffer.view.handle;
+    const bool metadata = allocation && snapshot.msc_typed_buffer.byte_offset == first_element * 4 &&
+        snapshot.msc_typed_buffer.element_count == 8 && snapshot.msc_typed_buffer.element_stride == 4;
+    const bool availability = bool(snapshot.msc_typed_buffer.view) == (first_element == 0);
+    bool generation = false;
+    if (allocation) {
+      auto replacement = snapshot.buffer->allocate(allocation->flags());
+      if (replacement) {
+        auto original = snapshot.buffer->rename(std::move(replacement));
+        std::vector<dxmt::ShaderVisibleDescriptorSnapshot> renamed;
+        shader_impl_a->ResolveDescriptors({0}, renamed);
+        generation = snapshot.buffer->current() != allocation &&
+            renamed[0].buffer_allocation.ptr() == allocation &&
+            renamed[0].msc_typed_buffer.allocation.ptr() == allocation &&
+            renamed[0].msc_typed_buffer.view.handle == view_handle;
+        snapshot.buffer->rename(std::move(original));
+      }
+    }
+    device_a->CreateConstantBufferView(&cbv_desc, shader_cpu_a);
+    std::vector<dxmt::ShaderVisibleDescriptorSnapshot> overwritten;
+    shader_impl_a->ResolveDescriptors({0}, overwritten);
+    const bool reset = !overwritten[0].msc_typed_buffer.view && !overwritten[0].msc_typed_buffer.allocation &&
+        !overwritten[0].msc_typed_buffer.element_count && !overwritten[0].msc_typed_buffer.element_stride &&
+        !overwritten[0].msc_typed_buffer.byte_offset;
+    const bool retained = snapshot.buffer_allocation.ptr() == allocation &&
+        snapshot.msc_typed_buffer.view.handle == view_handle && snapshot.msc_typed_buffer.element_count == 8;
+    if (!metadata || !availability || !generation || !reset || !retained)
+      std::cerr << "FAIL: typed binding snapshot/copy/overwrite firstElement=" << first_element << "\n";
+    passed &= metadata && availability && generation && reset && retained;
+  }
   Release(source_heap);
 
   device_a->CreateRenderTargetView(texture_a, &rtv_view, rtv_cpu_a);

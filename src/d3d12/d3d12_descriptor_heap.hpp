@@ -143,6 +143,16 @@ struct ShaderVisibleDescriptorCPUStorage {
   ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null), ConstantBuffer{}, allocation(nullptr) {}
 };
 
+// Logical typed-view metadata belongs to the allocation used to create the
+// native view, not to Buffer::current() at a later observation point.
+struct MSCTypedBufferBinding {
+  Rc<BufferAllocation> allocation;
+  WMT::Reference<WMT::Texture> view;
+  uint64_t byte_offset = 0;
+  uint32_t element_count = 0;
+  uint32_t element_stride = 0;
+};
+
 // A descriptor snapshot owns the native objects that back the CPU-side
 // descriptor payload.  The owning references are copied while the heap lock
 // is held, so callers can fan out resource-use declarations after releasing
@@ -153,7 +163,7 @@ struct ShaderVisibleDescriptorSnapshot {
   Rc<Texture> texture;
   Rc<Buffer> buffer;
   Rc<BufferAllocation> buffer_allocation;
-  WMT::Reference<WMT::Texture> msc_typed_buffer_view;
+  MSCTypedBufferBinding msc_typed_buffer;
   Rc<BufferAllocation> allocation;
   WMT::Reference<WMT::AccelerationStructure> acceleration_structure;
   WMT::Reference<WMT::Buffer> acceleration_structure_header;

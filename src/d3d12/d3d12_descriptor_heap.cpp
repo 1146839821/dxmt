@@ -144,7 +144,7 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
   std::vector<Rc<Texture>> texture_resources_;
   std::vector<Rc<Buffer>> buffer_resources_;
   std::vector<Rc<Buffer>> counter_resources_;
-  std::vector<WMT::Reference<WMT::Texture>> msc_typed_buffer_views_;
+  std::vector<MSCTypedBufferBinding> msc_typed_buffer_bindings_;
   std::vector<Rc<BufferAllocation>> cbv_allocations_;
   std::vector<WMT::Reference<WMT::AccelerationStructure>> acceleration_structure_resources_;
   std::vector<WMT::Reference<WMT::Buffer>> acceleration_structure_headers_;
@@ -166,7 +166,7 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
     texture_resources_[Index] = nullptr;
     buffer_resources_[Index] = nullptr;
     counter_resources_[Index] = nullptr;
-    msc_typed_buffer_views_[Index] = {};
+    msc_typed_buffer_bindings_[Index] = {};
     cbv_allocations_[Index] = nullptr;
     acceleration_structure_resources_[Index] = nullptr;
     acceleration_structure_headers_[Index] = nullptr;
@@ -177,6 +177,13 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
     SetMSCDescriptor(Index, {});
     if (!buffer || !slice.elementCount)
       return;
+    auto &binding = msc_typed_buffer_bindings_[Index];
+    binding.allocation = buffer->current();
+    binding.byte_offset = slice.byteOffset;
+    binding.element_count = slice.elementCount;
+    binding.element_stride = slice.byteLength / slice.elementCount;
+    if (!binding.allocation || !binding.element_stride || slice.byteLength % slice.elementCount)
+      return;
     const auto format = buffer->pixelFormat(view);
     const auto alignment = device_->GetMTLDevice().minimumTextureBufferAlignmentForPixelFormat(format);
     // MSC's typed texture access does not apply the descriptor padding offset.
@@ -184,7 +191,7 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
     if (!alignment || slice.byteOffset % alignment)
       return;
 
-    auto *allocation = buffer->current();
+    auto *allocation = binding.allocation.ptr();
     WMTTextureInfo info = {};
     info.type = WMTTextureTypeTextureBuffer;
     info.pixel_format = format;
@@ -204,8 +211,8 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
         usage |= WMTTextureUsageShaderAtomic;
     }
     info.usage = usage;
-    msc_typed_buffer_views_[Index] = allocation->buffer().newTexture(info, slice.byteOffset, slice.byteLength);
-    if (msc_typed_buffer_views_[Index])
+    binding.view = allocation->buffer().newTexture(info, slice.byteOffset, slice.byteLength);
+    if (binding.view)
       SetMSCDescriptor(Index, {allocation->gpuAddress() + slice.byteOffset, info.gpu_resource_id,
                                uint64_t(slice.byteLength) | (1ull << 63)});
   }
@@ -229,7 +236,7 @@ public:
     texture_resources_.resize(pDesc->NumDescriptors);
     buffer_resources_.resize(pDesc->NumDescriptors);
     counter_resources_.resize(pDesc->NumDescriptors);
-    msc_typed_buffer_views_.resize(pDesc->NumDescriptors);
+    msc_typed_buffer_bindings_.resize(pDesc->NumDescriptors);
     cbv_allocations_.resize(pDesc->NumDescriptors);
     acceleration_structure_resources_.resize(pDesc->NumDescriptors);
     acceleration_structure_headers_.resize(pDesc->NumDescriptors);
@@ -440,8 +447,10 @@ public:
         snapshot.descriptor = descriptors_[index];
         snapshot.texture = texture_resources_[index];
         snapshot.buffer = buffer_resources_[index];
-        snapshot.buffer_allocation = snapshot.buffer ? snapshot.buffer->current() : nullptr;
-        snapshot.msc_typed_buffer_view = msc_typed_buffer_views_[index];
+        const auto &typed_binding = msc_typed_buffer_bindings_[index];
+        snapshot.buffer_allocation = typed_binding.allocation ? typed_binding.allocation :
+            snapshot.buffer ? snapshot.buffer->current() : nullptr;
+        snapshot.msc_typed_buffer = typed_binding;
         snapshot.allocation = cbv_allocations_[index];
         snapshot.acceleration_structure = acceleration_structure_resources_[index];
         snapshot.acceleration_structure_header = acceleration_structure_headers_[index];
@@ -673,7 +682,7 @@ public:
       heap_to->buffer_resources_[DescriptorTo + i] = buffer_resources_[From + i];
       heap_to->counter_resources_[DescriptorTo + i] = counter_resources_[From + i];
       if (heap_to != this || DescriptorTo + i != From + i)
-        heap_to->msc_typed_buffer_views_[DescriptorTo + i] = msc_typed_buffer_views_[From + i];
+        heap_to->msc_typed_buffer_bindings_[DescriptorTo + i] = msc_typed_buffer_bindings_[From + i];
       heap_to->cbv_allocations_[DescriptorTo + i] = cbv_allocations_[From + i];
       heap_to->acceleration_structure_resources_[DescriptorTo + i] = acceleration_structure_resources_[From + i];
       heap_to->acceleration_structure_headers_[DescriptorTo + i] = acceleration_structure_headers_[From + i];
