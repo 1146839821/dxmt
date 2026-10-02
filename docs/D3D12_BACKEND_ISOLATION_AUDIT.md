@@ -1,5 +1,9 @@
 # Backend isolation coverage audit
 
+Follow-up: `D3D12_COMPUTE_CONTAINER_REJECTION_ORACLE.md` covers five compute
+rejection modes with instrumented zero backend calls. The audit below records
+the preceding baseline; graphics malformed/ambiguous traces remain open.
+
 ## Task Analysis
 
 ### Current Branch / Baseline / Local Commits

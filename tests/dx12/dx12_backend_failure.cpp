@@ -327,6 +327,63 @@ static void PrintResult(const std::string &mode, HRESULT hr, bool passed) {
   std::cout << " status=" << (passed ? "PASS" : "FAIL") << "\n";
 }
 
+// Inputs are freshly compiled/loaded fixtures, not arbitrary untrusted containers.
+static bool FindExecutableChunk(const std::vector<uint8_t> &bytes, const char *fourcc,
+    std::vector<uint8_t> &chunk) {
+  if (bytes.size() < 32) return false;
+  uint32_t count = 0;
+  std::memcpy(&count, bytes.data() + 28, 4);
+  if (count > (bytes.size() - 32) / 4) return false;
+  for (uint32_t i = 0; i < count; ++i) {
+    uint32_t offset = 0, size = 0;
+    std::memcpy(&offset, bytes.data() + 32 + i * 4, 4);
+    if (offset > bytes.size() - 8) return false;
+    std::memcpy(&size, bytes.data() + offset + 4, 4);
+    if (size > bytes.size() - offset - 8) return false;
+    if (std::memcmp(bytes.data() + offset, fourcc, 4) == 0) {
+      chunk.assign(bytes.begin() + offset, bytes.begin() + offset + 8 + size);
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool MakeRejectedComputeContainer(const std::string &mode, const char *path,
+    std::vector<uint8_t> &bytes) {
+  if (!LoadShader(path, bytes)) return false;
+  if (mode == "container-truncated") { bytes.resize(3); return true; }
+  if (mode == "container-offset") {
+    if (bytes.size() < 36) return false;
+    const uint32_t offset = UINT32_MAX;
+    std::memcpy(bytes.data() + 32, &offset, 4);
+    return true;
+  }
+  std::vector<uint8_t> first, second;
+  if (!FindExecutableChunk(bytes, "DXIL", first)) return false;
+  if (mode == "container-hybrid") {
+    std::vector<uint8_t> legacy;
+    if (!CompileLegacy("[numthreads(8,8,1)] void main() {}", "cs_5_0", legacy) ||
+        (!FindExecutableChunk(legacy, "SHEX", second) && !FindExecutableChunk(legacy, "SHDR", second))) return false;
+  } else if (mode == "container-duplicate") second = first;
+  else if (mode != "container-no-executable") return false;
+  const uint32_t count = second.empty() ? 0 : 2;
+  bytes.resize(32);
+  std::memset(bytes.data() + 4, 0, 16);
+  bytes.resize(32 + count * 4);
+  if (count) {
+    const uint32_t first_offset = static_cast<uint32_t>(bytes.size());
+    bytes.insert(bytes.end(), first.begin(), first.end());
+    const uint32_t second_offset = static_cast<uint32_t>(bytes.size());
+    bytes.insert(bytes.end(), second.begin(), second.end());
+    std::memcpy(bytes.data() + 32, &first_offset, 4);
+    std::memcpy(bytes.data() + 36, &second_offset, 4);
+  }
+  const uint32_t size = static_cast<uint32_t>(bytes.size());
+  std::memcpy(bytes.data() + 24, &size, 4);
+  std::memcpy(bytes.data() + 28, &count, 4);
+  return true;
+}
+
 static int RunGraphics(const std::string &mode, const char *vs_path, const char *ps_path,
     const char *hs_path = nullptr, const char *ds_path = nullptr, const char *stages_path = nullptr,
     const char *gs_path = nullptr) {
@@ -1206,10 +1263,17 @@ int main(int argc, char **argv) {
   if (argc != 3) { std::cerr << "usage: probe COMPUTE_MODE DXIL.cso | GRAPHICS_MODE VS.cso PS.cso\n"; return 2; }
   const std::string mode = argv[1];
   if (mode.rfind("library-", 0) == 0) return RunLibrary(mode, argv[2]);
+  const bool container_rejection = mode.rfind("container-", 0) == 0;
   bool dxil = false, wrong_stage = false, empty = false;
   HRESULT expected_hr = S_OK;
   unsigned expected_init = 1, expected_compile = 1, expected_msc = 0;
-  if (mode == "air-init-failure") { fault = Fault::AirInitialize; expected_hr = E_FAIL; expected_compile = 0; }
+  if (container_rejection) {
+    // Preserve the parser's malformed-container HRESULT; classification rejects
+    // well-formed missing/ambiguous executable families with E_INVALIDARG.
+    expected_hr = mode == "container-truncated" || mode == "container-offset" ? E_FAIL : E_INVALIDARG;
+    expected_init = expected_compile = 0;
+  }
+  else if (mode == "air-init-failure") { fault = Fault::AirInitialize; expected_hr = E_FAIL; expected_compile = 0; }
   else if (mode == "air-compile-failure") { fault = Fault::AirCompile; expected_hr = E_FAIL; }
   else if (mode == "air-control") {}
   else if (mode == "air-wrong-stage") { wrong_stage = true; expected_hr = E_INVALIDARG; expected_init = expected_compile = 0; }
@@ -1225,7 +1289,13 @@ int main(int argc, char **argv) {
     else return 2;
   }
   std::vector<uint8_t> bytes;
-  if (dxil) {
+  if (container_rejection) {
+    if (!MakeRejectedComputeContainer(mode, argv[2], bytes)) return 2;
+    if (mode == "container-duplicate" || mode == "container-hybrid") {
+      if (dxmt::ClassifyD3D12Shader({bytes.data(), bytes.size()}).executable_family !=
+          dxmt::D3D12ShaderExecutableFamily::Ambiguous) return 2;
+    }
+  } else if (dxil) {
     if (!LoadShader(argv[2], bytes)) return 2;
   } else if (!empty) {
     const char *source = wrong_stage ? "float4 main() : SV_Position { return 0; }" : "[numthreads(8,8,1)] void main() {}";
@@ -1239,13 +1309,19 @@ int main(int argc, char **argv) {
   D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
   desc.pRootSignature = root;
   desc.CS = {bytes.empty() ? nullptr : bytes.data(), bytes.size()};
-  ID3D12PipelineState *pso = nullptr;
+  auto *sentinel = reinterpret_cast<ID3D12PipelineState *>(uintptr_t(1));
+  ID3D12PipelineState *pso = container_rejection ? sentinel : nullptr;
   // This is the exact production factory linked into the probe, not the DLL's
   // uninstrumented public entry. Public PSO regressions run separately.
   const HRESULT hr = dxmt::CreateComputePipelineState(static_cast<dxmt::MTLD3D12Device *>(device),
       &desc, IID_PPV_ARGS(&pso));
+  if (pso == sentinel) {
+    PrintResult(mode, hr, false);
+    root->Release(); device->Release(); return 1;
+  }
   const bool passed = hr == expected_hr && bool(pso) == SUCCEEDED(expected_hr) &&
-      air_initializations == expected_init && air_compiles == expected_compile && msc_calls == expected_msc;
+      air_initializations == expected_init && air_compiles == expected_compile && msc_calls == expected_msc &&
+      (!container_rejection || trace.empty());
   PrintResult(mode, hr, passed);
   if (pso) pso->Release();
   root->Release();

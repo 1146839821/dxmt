@@ -207,7 +207,8 @@ def run_invocation_modes(directory, wine, timeout, runtime, specifications, reas
 
 def run_backend_failure_oracle(directory, wine, timeout, runtime):
     modes = ("air-control", "air-init-failure", "air-compile-failure", "air-wrong-stage", "empty",
-             "msc-control", "msc-invalid", "msc-unsupported", "msc-memory", "msc-second-pass", "msc-wrong-stage")
+             "msc-control", "msc-invalid", "msc-unsupported", "msc-memory", "msc-second-pass", "msc-wrong-stage",
+             "container-truncated", "container-offset", "container-no-executable", "container-duplicate", "container-hybrid")
     specifications = [(mode, ("shader_embedded.graphics.vs.cso" if mode == "msc-wrong-stage" else "compute_sm6.cs.cso",))
                       for mode in modes]
     return run_invocation_modes(directory, wine, timeout, runtime, specifications,
@@ -479,7 +480,7 @@ def build_report(probes, variant, provenance=None):
                            row("ray_synthesis_invocations", synthesis["status"], ""),
                            row("ray_metal_invocations", metal["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "bounded invocation probes; malformed/ambiguous precompiler rejection traces remain unverified"))
+                   "bounded invocation probes including compute container rejection; graphics malformed/ambiguous traces remain unverified"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),

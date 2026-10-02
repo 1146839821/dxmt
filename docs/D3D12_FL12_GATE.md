@@ -98,8 +98,11 @@ Successful PSO creation is **not** proof of GPU shader correctness.
 Classification helpers are synthetic contract tests, not compiler invocation
 instrumentation. All validation/container/stage probes are mandatory evidence;
 missing probes become UNVERIFIED. The isolation requirement remains PARTIAL
-pending instrumented malformed/ambiguous precompiler rejection traces; see
+pending graphics malformed/ambiguous precompiler rejection traces; see
 `D3D12_BACKEND_ISOLATION_AUDIT.md`. The compute failure/invocation oracle added
+in `D3D12_COMPUTE_CONTAINER_REJECTION_ORACLE.md` now observes five compute
+container rejection cases with zero compiler calls and cleared output.
+The original compiler failure oracle
 in `D3D12_BACKEND_FAILURE_ORACLE.md` now observes test-linked production compute
 call sites. The follow-up `D3D12_GRAPHICS_FAILURE_ORACLE.md` adds ordinary
 VS/PS ordered invocation traces and mixed/wrong-stage precompiler rejection.
@@ -154,8 +157,8 @@ clumps and duplicated program-version decoding. Neither alters behavior.
 
 ### Spec
 
-One remaining partial requirement: instrumented malformed/ambiguous input
-rejection before either compiler. The coverage audit separates this from GPU
+One remaining partial requirement: instrumented graphics malformed/ambiguous
+input rejection before either compiler. The coverage audit separates this from GPU
 semantic requirements and optional larger-export tests.
 The follow-up oracles close bounded ordinary/emulated,
 native mesh, compute, ordinary VS/PS, HS/DS and GS pipeline-library cases,
@@ -166,7 +169,7 @@ PSO/table/function-handle failure/retry.
 The gate keeps the entire isolation requirement PARTIAL.
 
 Review summary: Standards 0 hard findings (2 heuristic smells); Spec 1 partial
-validation requirement, malformed/ambiguous precompiler rejection traces.
+validation requirement, graphics malformed/ambiguous precompiler rejection traces.
 
 No Feature Level, Shader Model, WaveOps, Atomic64, ROV, tiled-resource,
 conservative-raster or typed-UAV capability is promoted.
