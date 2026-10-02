@@ -421,9 +421,8 @@ def build_report(probes, variant, provenance=None):
                  "dxbc_mandatory_shader_paths", "dxil_mandatory_shader_paths",
                  "dxbc_tessellation", "dxil_tessellation", "geometry_shader_stream_output"):
         fl0.append(row(name, UNVERIFIED, "complete mandatory GPU readback matrix not registered"))
-    isolation = aggregate([row(name, probes[name]["status"], "")
-                           for name in ("shader_validation", "shader_container", "shader_stage_matrix")
-                           if name in probes])
+    isolation = aggregate([row(name, probes.get(name, {"status": UNVERIFIED})["status"], "")
+                           for name in ("shader_validation", "shader_container", "shader_stage_matrix")])
     invocation = probes.get("backend_failure_oracle", {"status": UNVERIFIED})
     fl0.append(row("compute_backend_failure_invocations", invocation["status"],
                    "test-linked production factory: exact AIRCONV/MSC failure call counts; no GPU dispatch"))
@@ -480,7 +479,7 @@ def build_report(probes, variant, provenance=None):
                            row("ray_synthesis_invocations", synthesis["status"], ""),
                            row("ray_metal_invocations", metal["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "bounded compiler/state-object/addition/export-load/synthesis/Metal probes; full isolation contract remains unverified"))
+                   "bounded invocation probes; malformed/ambiguous precompiler rejection traces remain unverified"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),

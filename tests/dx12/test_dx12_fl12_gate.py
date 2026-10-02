@@ -11,7 +11,7 @@ import dx12_fl12_gate as gate
 class GateTests(unittest.TestCase):
     def probes(self, output="", status=gate.PASS):
         return {name: {"status": status, "output": output}
-                for name in ("feature_support", "shader_validation", "shader_container",
+                for name in ("feature_support", "shader_validation", "shader_container", "shader_stage_matrix",
                              "pipeline_library_failure_oracle", "graphics_library_failure_oracle",
                              "tessellation_library_failure_oracle", "geometry_library_failure_oracle",
                              "shader_library_failure_oracle", "state_object_failure_oracle",
@@ -32,6 +32,34 @@ class GateTests(unittest.TestCase):
         for name in ("FL12_0_GATE", "FL12_1_GATE"):
             self.assertNotEqual(report[name]["status"], gate.PASS)
         self.assertFalse(report["capability_changes"])
+
+    def test_each_isolation_contract_probe_is_required(self):
+        invocations = ("backend_failure_oracle", "graphics_failure_oracle", "tessellation_failure_oracle",
+                       "geometry_failure_oracle", "mesh_failure_oracle")
+        for name in ("shader_validation", "shader_container", "shader_stage_matrix"):
+            for status in (None, *gate.STATUSES):
+                with self.subTest(probe=name, status=status):
+                    probes = self.probes()
+                    probes.update({key: {"status": gate.PASS} for key in invocations})
+                    if status is None:
+                        probes.pop(name)
+                    else:
+                        probes[name] = {"status": status}
+                    rows = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
+                    isolation = next(row for row in rows if row["name"] == "backend_isolation")
+                    expected = gate.UNVERIFIED if status is None else gate.PARTIAL if status == gate.PASS else status
+                    self.assertEqual(isolation["status"], expected)
+        probes = self.probes()
+        probes.update({key: {"status": gate.PASS} for key in invocations})
+        for name in ("shader_validation", "shader_container", "shader_stage_matrix"):
+            probes.pop(name)
+        for failed in (False, True):
+            with self.subTest(all_contracts_missing=True, failed_invocation=failed):
+                if failed:
+                    probes["backend_failure_oracle"] = {"status": gate.FAIL}
+                rows = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
+                isolation = next(row for row in rows if row["name"] == "backend_isolation")
+                self.assertEqual(isolation["status"], gate.FAIL if failed else gate.UNVERIFIED)
 
     def test_ordinary_invocations_do_not_close_emulation_isolation(self):
         for status in (gate.PASS, gate.FAIL, gate.UNVERIFIED):

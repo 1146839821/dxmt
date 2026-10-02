@@ -96,8 +96,10 @@ Backend regression covers missing/duplicate/hybrid executable chunks, unknown
 kinds, wrong VS/CS slots, ordinary/library isolation and mixed VS/PS/GS/HS/DS.
 Successful PSO creation is **not** proof of GPU shader correctness.
 Classification helpers are synthetic contract tests, not compiler invocation
-instrumentation. The isolation requirement therefore remains PARTIAL even
-when these regression probes pass. The compute failure/invocation oracle added
+instrumentation. All validation/container/stage probes are mandatory evidence;
+missing probes become UNVERIFIED. The isolation requirement remains PARTIAL
+pending instrumented malformed/ambiguous precompiler rejection traces; see
+`D3D12_BACKEND_ISOLATION_AUDIT.md`. The compute failure/invocation oracle added
 in `D3D12_BACKEND_FAILURE_ORACLE.md` now observes test-linked production compute
 call sites. The follow-up `D3D12_GRAPHICS_FAILURE_ORACLE.md` adds ordinary
 VS/PS ordered invocation traces and mixed/wrong-stage precompiler rejection.
@@ -131,7 +133,7 @@ same-parent factory retry and inherited identifier/stack immutability.
 failure after first-export success, null publication and layer-specific cache retry.
 `D3D12_STATE_OBJECT_ADDITION_MULTI_ORACLE.md` adds same-parent two-export
 partial progress, failure publication and cache retry. Larger/order-varied export
-sets and a full isolation-contract audit remain unverified.
+sets are outside the bounded coverage, not an unbounded promotion prerequisite.
 
 ## Self-review
 
@@ -152,8 +154,9 @@ clumps and duplicated program-version decoding. Neither alters behavior.
 
 ### Spec
 
-One remaining partial requirement: a full isolation-contract audit beyond the
-bounded two-export creation/addition fixtures.
+One remaining partial requirement: instrumented malformed/ambiguous input
+rejection before either compiler. The coverage audit separates this from GPU
+semantic requirements and optional larger-export tests.
 The follow-up oracles close bounded ordinary/emulated,
 native mesh, compute, ordinary VS/PS, HS/DS and GS pipeline-library cases,
 plus the six ray-stage shader-library converter entry paths and state-object
@@ -163,7 +166,7 @@ PSO/table/function-handle failure/retry.
 The gate keeps the entire isolation requirement PARTIAL.
 
 Review summary: Standards 0 hard findings (2 heuristic smells); Spec 1 partial
-validation requirement, compiler-failure/no-fallback invocation oracle.
+validation requirement, malformed/ambiguous precompiler rejection traces.
 
 No Feature Level, Shader Model, WaveOps, Atomic64, ROV, tiled-resource,
 conservative-raster or typed-UAV capability is promoted.
