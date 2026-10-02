@@ -28,6 +28,12 @@ executable('dx12_sampler_snapshot', 'dx12_sampler_snapshot.cpp',
   dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
 )
 
+executable('dx12_minmax_pair', 'dx12_minmax_pair.cpp',
+  '../../src/d3d12/d3d12_minmax_binding.cpp', '../../src/d3d12/d3d12_sampler.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
 executable('dx12_typed_origin_prepare', 'dx12_typed_origin_prepare.cpp',
   '../../src/d3d12/d3d12_typed_origin.cpp',
   build_by_default: false, link_args: ['-municode'],
