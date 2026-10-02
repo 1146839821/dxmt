@@ -2527,6 +2527,13 @@ thunk_DXMTMSCCompileDXIL(void *args) {
 }
 
 static NTSTATUS
+thunk_DXMTMSCLowerTypedBufferOrigins(void *args) {
+  struct dxmt_msc_lower_typed_origins_params *params = args;
+  params->ret = dxmt_msc_lower_typed_origins(params);
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 thunk_DXMTMSCSynthesizeRayDispatch(void *args) {
   struct dxmt_msc_synthesize_ray_dispatch_params *params = args;
   params->ret = dxmt_msc_synthesize_ray_dispatch(params);
@@ -4495,6 +4502,7 @@ const void *__wine_unix_call_funcs[] = {
     &thunk_DXMTMSCSynthesizeRayIntersection,
     &_MTLDevice_supportsArgumentBuffersTier2,
     &_MTLDevice_minimumTextureBufferAlignmentForPixelFormat,
+    &thunk_DXMTMSCLowerTypedBufferOrigins,
 };
 
 #ifndef DXMT_NATIVE
@@ -4695,5 +4703,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &thunk32_DXMTMSCSynthesizeRayIntersection,
     &_MTLDevice_supportsArgumentBuffersTier2,
     &_MTLDevice_minimumTextureBufferAlignmentForPixelFormat,
+    &thunk_DXMTMSCLowerTypedBufferOrigins,
 };
 #endif

@@ -1,4 +1,8 @@
 #include "dxil_typed_origin.hpp"
+#include "metalirconverter_native.h"
+#include <llvm/Bitcode/BitcodeReader.h>
+#include <llvm/Support/MemoryBuffer.h>
+#include <cstring>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
@@ -8,6 +12,68 @@
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <algorithm>
 #include <map>
+
+static_assert(sizeof(dxmt_msc_lower_typed_origins_params) == 64);
+static_assert(offsetof(dxmt_msc_lower_typed_origins_params, bindings) == 40);
+static_assert(sizeof(dxmt_msc_typed_origin_binding) == 12);
+
+extern "C" int dxmt_msc_lower_typed_origins(dxmt_msc_lower_typed_origins_params *params) {
+  if (!params) return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  params->ir_size = 0;
+  params->binding_count = 0;
+  constexpr uint64_t max_input_size = 16 * 1024 * 1024;
+  auto valid_address = [](uint64_t address, uint64_t size) {
+    return address <= UINTPTR_MAX && size <= UINTPTR_MAX - address;
+  };
+  if (params->reserved || !params->bitcode || !params->bitcode_size ||
+      params->bitcode_size > max_input_size || !valid_address(params->bitcode, params->bitcode_size) ||
+      (!params->ir && params->ir_capacity) || (!params->bindings && params->binding_capacity) ||
+      !valid_address(params->ir, params->ir_capacity) ||
+      !valid_address(params->bindings, uint64_t(params->binding_capacity) * sizeof(dxmt_msc_typed_origin_binding)))
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  auto overlaps = [](uint64_t a, uint64_t a_size, uint64_t b, uint64_t b_size) {
+    return a_size && b_size && a < b + b_size && b < a + a_size;
+  };
+  const uint64_t binding_bytes = uint64_t(params->binding_capacity) * sizeof(dxmt_msc_typed_origin_binding);
+  const uint64_t parameter_address = uintptr_t(params);
+  if (overlaps(params->ir, params->ir_capacity, params->bindings, binding_bytes) ||
+      overlaps(params->ir, params->ir_capacity, params->bitcode, params->bitcode_size) ||
+      overlaps(params->bindings, binding_bytes, params->bitcode, params->bitcode_size) ||
+      overlaps(params->ir, params->ir_capacity, parameter_address, sizeof(*params)) ||
+      overlaps(params->bindings, binding_bytes, parameter_address, sizeof(*params)))
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  llvm::LLVMContext context;
+  context.setOpaquePointers(false);
+  llvm::StringRef input(reinterpret_cast<const char *>(uintptr_t(params->bitcode)), params->bitcode_size);
+  auto module = llvm::parseBitcodeFile(llvm::MemoryBufferRef(input, "typed-origin"), context);
+  if (!module) {
+    llvm::consumeError(module.takeError());
+    return DXMT_MSC_ERROR_INVALID_DXIL;
+  }
+  std::vector<dxmt::dxil::TypedOriginBinding> records;
+  std::string error;
+  if (!dxmt::dxil::LowerTypedBufferOrigins(**module, records, error))
+    return DXMT_MSC_ERROR_UNSUPPORTED_SHADER;
+  (*module)->setSourceFileName("");
+  (*module)->setModuleIdentifier("");
+  std::string ir;
+  llvm::raw_string_ostream output(ir);
+  (*module)->print(output, nullptr);
+  output.flush();
+  params->ir_size = ir.size();
+  params->binding_count = records.size();
+  // Size-only query; IR is an explicit-length byte string, not NUL terminated.
+  if (!params->ir && !params->bindings) return DXMT_MSC_SUCCESS;
+  if (!params->ir || params->ir_capacity < ir.size() ||
+      (!records.empty() && !params->bindings) || params->binding_capacity < records.size())
+    return DXMT_MSC_ERROR_OUTPUT_TOO_SMALL;
+  // Publish both outputs only after all capacities have passed validation.
+  std::memcpy(reinterpret_cast<void *>(uintptr_t(params->ir)), ir.data(), ir.size());
+  auto *bindings = reinterpret_cast<dxmt_msc_typed_origin_binding *>(uintptr_t(params->bindings));
+  for (size_t i = 0; i < records.size(); ++i)
+    bindings[i] = {records[i].resource_class, records[i].register_space, records[i].shader_register};
+  return DXMT_MSC_SUCCESS;
+}
 
 namespace dxmt::dxil {
 namespace {

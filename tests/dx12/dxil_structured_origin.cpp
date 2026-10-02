@@ -1,4 +1,5 @@
 #include "dxil_typed_origin.hpp"
+#include "metalirconverter_native.h"
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -34,6 +35,40 @@ int main(int argc, char **argv) {
     bitcode = llvm::StringRef(reinterpret_cast<const char *>(program + 8 + start), size);
   }
   if (bitcode.empty()) return 1;
+  dxmt_msc_lower_typed_origins_params params = {};
+  params.bitcode = uintptr_t(bitcode.data());
+  params.bitcode_size = bitcode.size();
+  if (dxmt_msc_lower_typed_origins(&params) != DXMT_MSC_SUCCESS) return 1;
+  std::vector<char> abi_ir(params.ir_size, '?');
+  std::vector<dxmt_msc_typed_origin_binding> abi_bindings(params.binding_count, {UINT32_MAX, UINT32_MAX, UINT32_MAX});
+  params.ir = uintptr_t(abi_ir.data());
+  params.ir_capacity = abi_ir.size() - 1;
+  params.bindings = uintptr_t(abi_bindings.data());
+  params.binding_capacity = abi_bindings.size();
+  if (dxmt_msc_lower_typed_origins(&params) != DXMT_MSC_ERROR_OUTPUT_TOO_SMALL ||
+      abi_ir != std::vector<char>(abi_ir.size(), '?')) return 1;
+  for (const auto &binding : abi_bindings)
+    if (binding.resource_class != UINT32_MAX || binding.register_space != UINT32_MAX ||
+        binding.shader_register != UINT32_MAX) return 1;
+  params.ir_capacity = abi_ir.size();
+  if (!abi_bindings.empty()) {
+    params.binding_capacity = abi_bindings.size() - 1;
+    if (dxmt_msc_lower_typed_origins(&params) != DXMT_MSC_ERROR_OUTPUT_TOO_SMALL ||
+        abi_ir != std::vector<char>(abi_ir.size(), '?')) return 1;
+    params.binding_capacity = abi_bindings.size();
+    const uint64_t saved_bindings = params.bindings;
+    params.bindings = params.ir;
+    if (dxmt_msc_lower_typed_origins(&params) != DXMT_MSC_ERROR_INVALID_ARGUMENT ||
+        params.ir_size || params.binding_count || abi_ir != std::vector<char>(abi_ir.size(), '?')) return 1;
+    params.bindings = saved_bindings;
+  }
+  params.reserved = 1;
+  params.ir_size = 123;
+  params.binding_count = 123;
+  if (dxmt_msc_lower_typed_origins(&params) != DXMT_MSC_ERROR_INVALID_ARGUMENT ||
+      params.ir_size || params.binding_count) return 1;
+  params.reserved = 0;
+  if (dxmt_msc_lower_typed_origins(&params) != DXMT_MSC_SUCCESS) return 1;
   llvm::LLVMContext context;
   context.setOpaquePointers(false);
   auto parsed = llvm::parseBitcodeFile(llvm::MemoryBufferRef(bitcode, argv[1]), context);
@@ -48,6 +83,16 @@ int main(int argc, char **argv) {
     llvm::errs() << "record=" << i << " class=" << bindings[i].resource_class << " space=" <<
         bindings[i].register_space << " register=" << bindings[i].shader_register << '\n';
   (*parsed)->setSourceFileName("");
+  (*parsed)->setModuleIdentifier("");
+  std::string expected;
+  llvm::raw_string_ostream expected_stream(expected);
+  (*parsed)->print(expected_stream, nullptr);
+  expected_stream.flush();
+  if (expected != std::string(abi_ir.begin(), abi_ir.end()) || bindings.size() != abi_bindings.size()) return 1;
+  for (size_t i = 0; i < bindings.size(); ++i)
+    if (bindings[i].resource_class != abi_bindings[i].resource_class ||
+        bindings[i].register_space != abi_bindings[i].register_space ||
+        bindings[i].shader_register != abi_bindings[i].shader_register) return 1;
   (*parsed)->print(llvm::outs(), nullptr);
   return 0;
 }

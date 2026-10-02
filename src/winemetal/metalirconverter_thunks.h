@@ -223,9 +223,37 @@ enum dxmt_msc_unixcall {
   unix_dxmt_msc_get_capabilities = 169,
   unix_dxmt_msc_synthesize_ray_dispatch = 192,
   unix_dxmt_msc_synthesize_ray_intersection,
+  unix_dxmt_msc_lower_typed_origins = 196,
 };
 
 #pragma pack(push, 8)
+
+/* Fixed-width addresses keep the same ABI for PE32, PE64 and Unix. Input is
+ * bitcode, not a DXIL container. A successful result still requires DXC
+ * container validation, compiler-root augmentation and matching bindings. */
+struct dxmt_msc_typed_origin_binding {
+  uint32_t resource_class;
+  uint32_t register_space;
+  uint32_t shader_register;
+};
+
+struct dxmt_msc_lower_typed_origins_params {
+  uint64_t bitcode;
+  uint64_t bitcode_size;
+  uint64_t ir;
+  uint64_t ir_capacity;
+  uint64_t ir_size;
+  uint64_t bindings;
+  uint32_t binding_capacity;
+  uint32_t binding_count;
+  int32_t ret;
+  uint32_t reserved;
+};
+
+typedef char dxmt_msc_lower_typed_origins_size_check[
+    sizeof(struct dxmt_msc_lower_typed_origins_params) == 64 ? 1 : -1];
+typedef char dxmt_msc_lower_typed_origins_offset_check[
+    offsetof(struct dxmt_msc_lower_typed_origins_params, bindings) == 40 ? 1 : -1];
 
 struct dxmt_msc_compile_dxil_params {
   const void *dxil;
@@ -464,6 +492,7 @@ struct dxmt_msc_get_root_layout_params32 {
 #pragma pack(pop)
 
 WINEMETAL_API int DXMTMSCIsAvailable(void);
+WINEMETAL_API int DXMTMSCLowerTypedBufferOrigins(struct dxmt_msc_lower_typed_origins_params *params);
 
 WINEMETAL_API int DXMTMSCGetCapabilities(struct dxmt_msc_capabilities *capabilities);
 
