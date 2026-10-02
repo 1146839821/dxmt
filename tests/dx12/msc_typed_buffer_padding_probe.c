@@ -53,7 +53,9 @@ probe_format(MTLPixelFormat format) {
       {MTLPixelFormatRGBA8Uint, 4, u8, u8, 0x5au, true, 4},
       {MTLPixelFormatRGBA16Uint, 8, u16, u16, 0x5555u, true, 4},
       {MTLPixelFormatRGBA8Sint, 4, s8, s8, 0x5au, true, 4},
-      {MTLPixelFormatRGBA16Sint, 8, s16, s16, 0x5555u, true, 4}};
+      {MTLPixelFormatRGBA16Sint, 8, s16, s16, 0x5555u, true, 4},
+      {MTLPixelFormatRGBA16Float, 8, half, floating, 0x3555u, false, 4},
+      {MTLPixelFormatRGBA32Float, 16, floating, floating, 0x3eaaaaabu, false, 4}};
   for (unsigned i = 0; i < sizeof(formats) / sizeof(formats[0]); ++i)
     if (formats[i].format == format) return &formats[i];
   return NULL;
@@ -71,7 +73,8 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
   const unsigned channels = format_info->channels;
   const unsigned channel_size = element_size / channels;
   const NSUInteger alignment = [device minimumTextureBufferAlignmentForPixelFormat:format];
-  if (!alignment || alignment % element_size) return false;
+  // Alignment can divide a wide texel as well as be a multiple of a narrow one.
+  if (!alignment || (alignment % element_size && element_size % alignment)) return false;
   const NSUInteger byte_offset = first * element_size;
   const NSUInteger native_offset = byte_offset - byte_offset % alignment;
   const unsigned padding = (unsigned)((byte_offset - native_offset) / element_size);
@@ -245,6 +248,7 @@ cleanup:
 
 int main(int argc, const char **argv) {
   if (argc != 4 && argc != 5) {
+    fprintf(stderr, "FLOAT4 modes: --origin-cbv-rgba16float[-oob], --origin-cbv-rgba32float[-oob]\n");
     fprintf(stderr, "usage: %s UAV.cso SRV.cso atomic.cso [--expect-unsupported|--raw-r32|--origin-cbv|--origin-cbv-r8uint|--origin-cbv-r16uint|--origin-cbv-oob|--origin-cbv-wrap|--origin-cbv-r16float[-oob]|--origin-cbv-r32float[-oob]|--origin-cbv-r8sint[-oob]|--origin-cbv-r16sint[-oob]|--origin-cbv-r32sint[-oob]|--origin-cbv-r8unorm[-oob]|--origin-cbv-r16unorm[-oob]|--origin-cbv-rgba8uint[-oob]|--origin-cbv-rgba16uint[-oob]|--origin-cbv-rgba8sint[-oob]|--origin-cbv-rgba16sint[-oob]]\n", argv[0]); return 1;
   }
   const struct ProbeMode {
@@ -282,7 +286,11 @@ int main(int argc, const char **argv) {
       {"--origin-cbv-rgba8sint", MTLPixelFormatRGBA8Sint, BindingOriginCBV, false, false, false},
       {"--origin-cbv-rgba8sint-oob", MTLPixelFormatRGBA8Sint, BindingOriginCBV, true, false, false},
       {"--origin-cbv-rgba16sint", MTLPixelFormatRGBA16Sint, BindingOriginCBV, false, false, false},
-      {"--origin-cbv-rgba16sint-oob", MTLPixelFormatRGBA16Sint, BindingOriginCBV, true, false, false}};
+      {"--origin-cbv-rgba16sint-oob", MTLPixelFormatRGBA16Sint, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-rgba16float", MTLPixelFormatRGBA16Float, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-rgba16float-oob", MTLPixelFormatRGBA16Float, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-rgba32float", MTLPixelFormatRGBA32Float, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-rgba32float-oob", MTLPixelFormatRGBA32Float, BindingOriginCBV, true, false, false}};
   const struct ProbeMode *mode = NULL;
   for (unsigned i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i)
     if (!strcmp(argc == 5 ? argv[4] : "", modes[i].name)) { mode = &modes[i]; break; }
@@ -305,9 +313,14 @@ int main(int argc, const char **argv) {
       for (unsigned bounds = 0; bounds < 2; ++bounds)
         if (!run_shader(device, queue, argv[kind + 1], kind, binding, format, logical_bounds, wrap_index, bounds,
                         &aligned_failures, &padding_failures, &padding_cases)) return 1;
-    const bool valid_controls = !aligned_failures && padding_cases;
+    // A queried alignment dividing a 16-byte RGBA32_FLOAT texel cannot produce
+    // padding at any integral FirstElement. Report aligned-only evidence, never
+    // pretend it proves the padding-ignored negative signature.
+    const NSUInteger alignment = [device minimumTextureBufferAlignmentForPixelFormat:format];
+    const bool aligned_only = format == MTLPixelFormatRGBA32Float && alignment && 16 % alignment == 0;
+    const bool valid_controls = !aligned_failures && (padding_cases || aligned_only);
     const char *status = !valid_controls ? "INCONCLUSIVE" : binding != BindingOriginal ?
-        (padding_failures ? "PROTOTYPE_MISMATCH" : "PROTOTYPE_MATCHED") :
+        (padding_failures ? "PROTOTYPE_MISMATCH" : !padding_cases ? "PROTOTYPE_ALIGNED_MATCHED" : "PROTOTYPE_MATCHED") :
         (padding_failures ? "UNSUPPORTED" : "SUPPORTED");
     printf("MSC typed padding: binding=%u aligned_failures=%u padding_failures=%u padding_cases=%u status=%s\n",
         binding, aligned_failures, padding_failures, padding_cases, status);

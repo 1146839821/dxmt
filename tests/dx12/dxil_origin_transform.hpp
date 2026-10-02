@@ -65,8 +65,10 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
   auto srvs = group(groups[1]), uavs = group(groups[2]);
   if ((groups[1] != "null" && srvs.empty()) || uavs.empty() || srvs.size() + uavs.size() > 3)
     return reject("expected one/two finite typed inputs and output u1");
-  enum class Component { Uint, Sint, Float, Unorm, Uint4, Sint4 };
-  auto is_vector = [](Component component) { return component == Component::Uint4 || component == Component::Sint4; };
+  enum class Component { Uint, Sint, Float, Unorm, Uint4, Sint4, Float4 };
+  auto is_vector = [](Component component) {
+    return component == Component::Uint4 || component == Component::Sint4 || component == Component::Float4;
+  };
   struct Binding { unsigned resource_class, range, reg, slot; bool output; Component component; };
   std::map<std::pair<unsigned, unsigned>, Binding> bindings;
   bool slots[2] = {}, found_output = false;
@@ -74,16 +76,17 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
   auto resource = [&](const std::string &id, bool srv) {
     std::smatch value;
     const std::string pattern = "!\\{i32 ([0-9]{1,5}), %\\\"class." + std::string(srv ? "Buffer" : "RWBuffer") +
-        "<(unsigned int|int|float|vector<unsigned int, 4> |vector<int, 4> )>\\\"\\* undef, !\\\"\\\", i32 0, i32 ([012]), i32 1, i32 10, " +
+        "<(unsigned int|int|float|vector<unsigned int, 4> |vector<int, 4> |vector<float, 4> )>\\\"\\* undef, !\\\"\\\", i32 0, i32 ([012]), i32 1, i32 10, " +
         (srv ? "i32 0" : "i1 false, i1 false, i1 false") + ", !([0-9]+)\\}";
     if (!std::regex_match(metadata[id], value, std::regex(pattern))) return false;
     const Component component = value[2] == "float" ?
         (metadata[value[4]] == "!{i32 0, i32 14}" ? Component::Unorm : Component::Float) :
         value[2] == "int" ? Component::Sint :
         value[2] == "vector<unsigned int, 4> " ? Component::Uint4 :
-        value[2] == "vector<int, 4> " ? Component::Sint4 : Component::Uint;
+        value[2] == "vector<int, 4> " ? Component::Sint4 :
+        value[2] == "vector<float, 4> " ? Component::Float4 : Component::Uint;
     const std::string component_metadata = component == Component::Unorm ? "!{i32 0, i32 14}" :
-        component == Component::Float ? "!{i32 0, i32 9}" :
+        (component == Component::Float || component == Component::Float4) ? "!{i32 0, i32 9}" :
         (component == Component::Sint || component == Component::Sint4) ? "!{i32 0, i32 4}" : "!{i32 0, i32 5}";
     if (metadata[value[4]] != component_metadata) return false;
     const unsigned range = std::stoul(value[1]), reg = std::stoul(value[3]);
@@ -131,6 +134,8 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
         line == "%\"class.RWBuffer<vector<unsigned int, 4> >\" = type { <4 x i32> }" ||
         line == "%\"class.Buffer<vector<int, 4> >\" = type { <4 x i32> }" ||
         line == "%\"class.RWBuffer<vector<int, 4> >\" = type { <4 x i32> }" ||
+        line == "%\"class.Buffer<vector<float, 4> >\" = type { <4 x float> }" ||
+        line == "%\"class.RWBuffer<vector<float, 4> >\" = type { <4 x float> }" ||
         line == "target triple = \"dxil-ms-dx\"" ||
         std::regex_match(line, std::regex(R"(target datalayout = "[^"]+")")) ||
         std::regex_match(line, std::regex(R"(attributes #[0-9]+ = \{ nounwind( readnone| readonly)? \})")) ||
@@ -194,7 +199,8 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
     if (!handle.empty()) {
       auto binding = handle_bindings.find(handle);
       if (binding == handle_bindings.end() || binding->second.output) return reject("unknown input handle flow");
-      const bool expects_float = binding->second.component == Component::Float || binding->second.component == Component::Unorm;
+      const bool expects_float = binding->second.component == Component::Float ||
+          binding->second.component == Component::Float4 || binding->second.component == Component::Unorm;
       if (expects_float != floating) return reject("typed operation/component mismatch");
       if (atomic && binding->second.component == Component::Sint) return reject("signed atomic outside bounded grammar");
       if (atomic && is_vector(binding->second.component)) return reject("vector atomic outside bounded grammar");
