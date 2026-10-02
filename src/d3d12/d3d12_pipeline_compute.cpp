@@ -21,10 +21,13 @@
 #include "d3d12_device.hpp"
 #include "d3d12_pageable.hpp"
 #include "d3d12_shader_converter.hpp"
+#include "d3d12_typed_origin_pipeline.hpp"
 #include "log/log.hpp"
 #include "airconv_public.h"
 
 #include <utility>
+#include <mutex>
+#include <memory>
 
 namespace dxmt {
 
@@ -32,6 +35,26 @@ class MTLD3D12ComputePipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Compute
 
   D3D12AirconvShader shader_cs;
   MTL_SHADER_REFLECTION ref_cs = {};
+  std::vector<uint8_t> original_cs_;
+  Com<MTLD3D12RootSignature> application_root_;
+  std::mutex origin_mutex_;
+  std::unique_ptr<D3D12TypedOriginComputeVariant> origin_variant_;
+  std::wstring origin_dxc_directory_;
+
+  HRESULT CreateNativeComputePSO(
+      const WMT::Function &function, WMT::Reference<WMT::ComputePipelineState> &pipeline) {
+    WMTComputePipelineInfo info;
+    WMT::InitializeComputePipelineInfo(info);
+    info.compute_function = function;
+    info.support_indirect_command_buffers = true;
+    WMT::Reference<WMT::Error> error;
+    pipeline = device_->GetMTLDevice().newComputePipelineState(info, error);
+    if (!pipeline) {
+      ERR("Failed to create compute PSO: ", error ? error.description().getUTF8String() : "unknown error");
+      return E_FAIL;
+    }
+    return S_OK;
+  }
 
 public:
   MTLD3D12ComputePipelineStateImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12ComputePipelineState>(pDevice) {
@@ -42,20 +65,6 @@ public:
   Initialize(const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc) {
     auto metal = device_->GetMTLDevice();
     WMT::Reference<WMT::Error> err;
-
-    auto create_compute_pso = [&](const WMT::Function &function) -> HRESULT {
-      WMTComputePipelineInfo info;
-      WMT::InitializeComputePipelineInfo(info);
-      info.compute_function = function;
-      info.support_indirect_command_buffers = true;
-
-      pso = metal.newComputePipelineState(info, err);
-      if (!pso) {
-        ERR("Failed to create compute PSO: ", err ? err.description().getUTF8String() : "unknown error");
-        return E_FAIL;
-      }
-      return S_OK;
-    };
 
     const auto classification = ClassifyD3D12Shader(pDesc->CS);
     if (FAILED(classification.validation_hr)) {
@@ -99,6 +108,14 @@ public:
         return hr;
 
       this->shader_backend = D3D12ShaderBackend::MetalShaderConverter;
+      // Retain the caller's shader/root for lazy private-variant compilation;
+      // the application may release its bytecode immediately after creation.
+      try {
+        const auto *bytes = static_cast<const uint8_t *>(pDesc->CS.pShaderBytecode);
+        original_cs_.assign(bytes, bytes + pDesc->CS.BytecodeLength);
+        if (pDesc->pRootSignature)
+          application_root_ = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+      } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
 
       threadgroup_size = {
           converted.threadgroup_size[0], converted.threadgroup_size[1], converted.threadgroup_size[2]
@@ -116,7 +133,7 @@ public:
         return E_FAIL;
       }
 
-      return create_compute_pso(cs_func);
+      return CreateNativeComputePSO(cs_func, pso);
     }
 
     D3D12AirconvError sm50_err;
@@ -174,7 +191,57 @@ public:
       return E_FAIL;
     }
 
-    return create_compute_pso(cs_func);
+    return CreateNativeComputePSO(cs_func, pso);
+  }
+
+  HRESULT GetTypedOriginVariant(
+      const wchar_t *dxc_directory, const D3D12TypedOriginComputeVariant **variant) override {
+    if (!variant) return E_POINTER;
+    *variant = nullptr;
+    if (!dxc_directory) return E_INVALIDARG;
+    std::lock_guard<std::mutex> lock(origin_mutex_);
+    try {
+      if (origin_variant_) {
+        if (origin_dxc_directory_ != dxc_directory) return E_INVALIDARG;
+        *variant = origin_variant_.get();
+        return S_OK;
+      }
+      if (shader_backend != D3D12ShaderBackend::MetalShaderConverter || !application_root_)
+        return E_NOTIMPL;
+      D3D12TypedOriginShader shader;
+      std::string diagnostics;
+      HRESULT hr = PrepareD3D12TypedOriginShader(
+          {original_cs_.data(), original_cs_.size()}, dxc_directory, shader, diagnostics);
+      if (FAILED(hr)) { ERR("Typed-origin shader preparation failed HRESULT=", hr, ": ", diagnostics); return hr; }
+      const D3D12TypedOriginRoot *root = nullptr;
+      hr = application_root_->GetTypedOriginCompilerRoot(&root);
+      if (FAILED(hr)) return hr;
+      auto candidate = std::make_unique<D3D12TypedOriginComputeVariant>();
+      candidate->root = *root;
+      candidate->bindings = shader.bindings;
+      hr = ResolveD3D12TypedOriginBindings(candidate->root, shader.bindings, candidate->locations, diagnostics);
+      if (FAILED(hr)) { ERR("Typed-origin binding preparation failed: ", diagnostics); return hr; }
+      D3D12ConvertedShader converted;
+      hr = ConvertD3D12TypedOriginComputeShader(shader, candidate->root, converted, &device_->GetMSCCapabilities());
+      if (FAILED(hr)) return hr;
+      WMT::Reference<WMT::Error> error;
+      auto metal = device_->GetMTLDevice();
+      auto library = metal.newLibrary(converted.metallib.data(), converted.metallib.size(), error);
+      if (!library) {
+        ERR("Failed to load typed-origin metallib: ", error ? error.description().getUTF8String() : "unknown error");
+        return E_FAIL;
+      }
+      auto function = library.newFunction(converted.entry_point.c_str());
+      if (!function) { ERR("Failed to find typed-origin entry point: ", converted.entry_point); return E_FAIL; }
+      hr = CreateNativeComputePSO(function, candidate->pso);
+      if (FAILED(hr)) return hr;
+      candidate->threadgroup_size = {converted.threadgroup_size[0], converted.threadgroup_size[1],
+          converted.threadgroup_size[2]};
+      origin_dxc_directory_ = dxc_directory;
+      origin_variant_ = std::move(candidate);
+      *variant = origin_variant_.get();
+      return S_OK;
+    } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
   }
 
   HRESULT

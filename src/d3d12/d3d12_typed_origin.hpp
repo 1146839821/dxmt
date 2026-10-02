@@ -29,6 +29,19 @@ struct D3D12TypedOriginRoot {
   uint32_t hidden_parameter_index = 0;
 };
 
+struct D3D12TypedOriginBindingLocation {
+  uint32_t parameter_index = 0;
+  uint32_t table_offset = 0;
+  D3D12_DESCRIPTOR_RANGE_FLAGS flags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
+};
+
+// Resolve shader resource identities to application descriptor-table slots.
+// No GPU heap handle is resolved here; static/volatile observation stays with
+// command recording/submission. Failure leaves locations unchanged.
+HRESULT ResolveD3D12TypedOriginBindings(
+    const D3D12TypedOriginRoot &root, const std::vector<dxmt_msc_typed_origin_binding> &bindings,
+    std::vector<D3D12TypedOriginBindingLocation> &locations, std::string &diagnostics);
+
 // Accepts a trusted, decoded RS1.1 descriptor (including the existing RS1.0
 // deserializer's volatile conversion). Owns serialized bytes and reflected
 // layout; never retains input pointers. Failure leaves output unchanged.

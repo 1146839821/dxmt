@@ -13,6 +13,8 @@
 namespace dxmt {
 
 struct DXMTMSCCapabilities;
+struct D3D12TypedOriginShader;
+struct D3D12TypedOriginRoot;
 
 enum class D3D12ShaderBackend {
   None,
@@ -335,5 +337,9 @@ ConvertD3D12ComputeShader(
     const D3D12_SHADER_BYTECODE &shader, D3D12ConvertedShader &converted, const void *root_signature = nullptr,
     size_t root_signature_size = 0, const DXMTMSCCapabilities *msc_capabilities = nullptr
 );
+
+HRESULT ConvertD3D12TypedOriginComputeShader(
+    const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
+    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities);
 
 } // namespace dxmt

@@ -277,6 +277,7 @@ public:
 };
 
 struct D3D12TypedOriginRoot;
+struct D3D12TypedOriginComputeVariant;
 
 class MTLD3D12RootSignature : public ID3D12RootSignature {
 public:
@@ -382,6 +383,10 @@ class MTLD3D12ComputePipelineState : public MTLD3D12PipelineState {
 public:
   WMT::Reference<WMT::ComputePipelineState> pso;
   WMTSize threadgroup_size;
+  // Internal preparation only. Encoder selection requires coherent origin
+  // descriptors/records and a submission-owned lifetime before dispatch.
+  virtual HRESULT GetTypedOriginVariant(
+      const wchar_t *dxc_directory, const D3D12TypedOriginComputeVariant **variant) = 0;
 
   virtual void AddRefPrivate() = 0;
   virtual void ReleasePrivate() = 0;

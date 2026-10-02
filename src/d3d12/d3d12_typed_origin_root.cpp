@@ -172,6 +172,66 @@ HRESULT PrepareRootInternal(
 }
 } // namespace
 
+HRESULT ResolveD3D12TypedOriginBindings(
+    const D3D12TypedOriginRoot &root, const std::vector<dxmt_msc_typed_origin_binding> &bindings,
+    std::vector<D3D12TypedOriginBindingLocation> &locations, std::string &diagnostics) {
+  diagnostics.clear();
+  struct ReleaseDeserializer {
+    void operator()(ID3D12VersionedRootSignatureDeserializer *value) const { if (value) value->Release(); }
+  };
+  try {
+    if (root.bytecode.empty() || bindings.empty() || bindings.size() > 64) return E_INVALIDARG;
+    ID3D12VersionedRootSignatureDeserializer *raw = nullptr;
+    HRESULT hr = D3D12CreateVersionedRootSignatureDeserializer(
+        root.bytecode.data(), root.bytecode.size(), IID_PPV_ARGS(&raw));
+    std::unique_ptr<ID3D12VersionedRootSignatureDeserializer, ReleaseDeserializer> decoded(raw);
+    if (FAILED(hr)) return hr;
+    const auto *versioned = decoded->GetUnconvertedRootSignatureDesc();
+    if (!versioned || versioned->Version != D3D_ROOT_SIGNATURE_VERSION_1_1) return E_INVALIDARG;
+    const auto &desc = versioned->Desc_1_1;
+    if (desc.NumParameters != root.application_parameter_count + 1) return E_INVALIDARG;
+    std::vector<D3D12TypedOriginBindingLocation> candidate;
+    candidate.reserve(bindings.size());
+    for (const auto &binding : bindings) {
+      if (binding.resource_class > 1) return E_INVALIDARG;
+      const auto type = binding.resource_class ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV : D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+      bool found = false;
+      D3D12TypedOriginBindingLocation location;
+      for (uint32_t i = 0; i < root.application_parameter_count; ++i) {
+        const auto &parameter = desc.pParameters[i];
+        if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE ||
+            parameter.ShaderVisibility != D3D12_SHADER_VISIBILITY_ALL) continue;
+        uint64_t next = 0;
+        for (uint32_t j = 0; j < parameter.DescriptorTable.NumDescriptorRanges; ++j) {
+          const auto &range = parameter.DescriptorTable.pDescriptorRanges[j];
+          const uint64_t offset = range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
+              ? next : range.OffsetInDescriptorsFromTableStart;
+          if (range.RangeType == type && range.RegisterSpace == binding.register_space &&
+              binding.shader_register >= range.BaseShaderRegister &&
+              (range.NumDescriptors == UINT32_MAX ||
+               uint64_t(binding.shader_register) - range.BaseShaderRegister < range.NumDescriptors)) {
+            const uint64_t slot = offset + uint64_t(binding.shader_register) - range.BaseShaderRegister;
+            if (found || slot >= UINT32_MAX) {
+              diagnostics = "ambiguous or overflowing typed-origin descriptor table location";
+              return E_NOTIMPL;
+            }
+            location = {i, static_cast<uint32_t>(slot), range.Flags};
+            found = true;
+          }
+          next = range.NumDescriptors == UINT32_MAX ? uint64_t(UINT32_MAX) + 1 : offset + range.NumDescriptors;
+        }
+      }
+      if (!found) {
+        diagnostics = "typed-origin resource has no compute-visible application descriptor table location";
+        return E_NOTIMPL;
+      }
+      candidate.push_back(location);
+    }
+    locations = std::move(candidate);
+    return S_OK;
+  } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+}
+
 HRESULT PrepareD3D12TypedOriginRoot(
     const D3D12_ROOT_SIGNATURE_DESC1 &application, D3D12TypedOriginRoot &prepared,
     std::string &diagnostics) {
