@@ -18,6 +18,7 @@ struct ProbeFormat {
   const uint32_t *stored, *loaded;
   uint32_t poison;
   bool varying_poison;
+  unsigned channels;
 };
 
 static const struct ProbeFormat *
@@ -39,16 +40,18 @@ probe_format(MTLPixelFormat format) {
   static const uint32_t n16[] = {0, 1, 32768, 65535};
   static const uint32_t n16_loaded[] = {0, 0x37800080u, 0x3f000080u, 0x3f800000u};
   static const struct ProbeFormat formats[] = {
-      {MTLPixelFormatR8Uint, 1, u8, u8, 0xcdf00080u, true},
-      {MTLPixelFormatR16Uint, 2, u16, u16, 0xcdf00080u, true},
-      {MTLPixelFormatR32Uint, 4, u32, u32, 0xcdf00080u, true},
-      {MTLPixelFormatR8Sint, 1, s8, s8, 0xcdf00080u, true},
-      {MTLPixelFormatR16Sint, 2, s16, s16, 0xcdf00080u, true},
-      {MTLPixelFormatR32Sint, 4, s32, s32, 0xcdf00080u, true},
-      {MTLPixelFormatR16Float, 2, half, floating, 0x3555u, false},
-      {MTLPixelFormatR32Float, 4, floating, floating, 0x3eaaaaabu, false},
-      {MTLPixelFormatR8Unorm, 1, n8, n8_loaded, 0x5au, false},
-      {MTLPixelFormatR16Unorm, 2, n16, n16_loaded, 0x5555u, false}};
+      {MTLPixelFormatR8Uint, 1, u8, u8, 0xcdf00080u, true, 1},
+      {MTLPixelFormatR16Uint, 2, u16, u16, 0xcdf00080u, true, 1},
+      {MTLPixelFormatR32Uint, 4, u32, u32, 0xcdf00080u, true, 1},
+      {MTLPixelFormatR8Sint, 1, s8, s8, 0xcdf00080u, true, 1},
+      {MTLPixelFormatR16Sint, 2, s16, s16, 0xcdf00080u, true, 1},
+      {MTLPixelFormatR32Sint, 4, s32, s32, 0xcdf00080u, true, 1},
+      {MTLPixelFormatR16Float, 2, half, floating, 0x3555u, false, 1},
+      {MTLPixelFormatR32Float, 4, floating, floating, 0x3eaaaaabu, false, 1},
+      {MTLPixelFormatR8Unorm, 1, n8, n8_loaded, 0x5au, false, 1},
+      {MTLPixelFormatR16Unorm, 2, n16, n16_loaded, 0x5555u, false, 1},
+      {MTLPixelFormatRGBA8Uint, 4, u8, u8, 0x5au, true, 4},
+      {MTLPixelFormatRGBA16Uint, 8, u16, u16, 0x5555u, true, 4}};
   for (unsigned i = 0; i < sizeof(formats) / sizeof(formats[0]); ++i)
     if (formats[i].format == format) return &formats[i];
   return NULL;
@@ -63,6 +66,8 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
   const struct ProbeFormat *format_info = probe_format(format);
   if (!format_info) return false;
   const unsigned element_size = format_info->element_size;
+  const unsigned channels = format_info->channels;
+  const unsigned channel_size = element_size / channels;
   const NSUInteger alignment = [device minimumTextureBufferAlignmentForPixelFormat:format];
   if (!alignment || alignment % element_size) return false;
   const NSUInteger byte_offset = first * element_size;
@@ -71,7 +76,8 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
   if (padding > kIRTexViewMask) return false;
   const size_t element_count = first + 12;
   id<MTLBuffer> input = [device newBufferWithLength:element_count * element_size options:MTLResourceStorageModeShared];
-  id<MTLBuffer> output = [device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+  const unsigned output_size = 16 * channels;
+  id<MTLBuffer> output = [device newBufferWithLength:output_size options:MTLResourceStorageModeShared];
   id<MTLBuffer> table = [device newBufferWithLength:2 * sizeof(IRDescriptorTableEntry) options:MTLResourceStorageModeShared];
   const NSUInteger root_size = (binding == BindingOriginCBV ? MAX(root_offset, origin_offset) : root_offset) + 8;
   id<MTLBuffer> root = [device newBufferWithLength:root_size options:MTLResourceStorageModeShared];
@@ -85,18 +91,24 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
   const uint32_t *stored_values = format_info->stored, *values = format_info->loaded;
   for (size_t i = 0; i < element_count; ++i) {
     const uint32_t poison = format_info->poison + (format_info->varying_poison ? (uint32_t)i : 0);
-    memcpy(bytes + i * element_size, &poison, element_size);
+    for (unsigned lane = 0; lane < channels; ++lane)
+      memcpy(bytes + i * element_size + lane * channel_size, &poison, channel_size);
   }
   for (unsigned i = 0; i < 4; ++i) {
-    const uint32_t value = stored_values[i];
-    memcpy(bytes + (first + i) * element_size, &value, element_size);
+    for (unsigned lane = 0; lane < channels; ++lane) {
+      const uint32_t value = stored_values[(i + lane) % 4];
+      memcpy(bytes + (first + i) * element_size + lane * channel_size, &value, channel_size);
+    }
   }
   memcpy(expected, bytes, input.length);
   for (unsigned i = 0; i < 4; ++i) {
     const uint32_t source = i + index_bias, destination = source + 4;
     const uint32_t loaded = source < logical_count ? stored_values[source] : 0;
     if (kind == ProbeUAV && destination < logical_count)
-      memcpy(expected + (first + destination) * element_size, &loaded, element_size);
+      for (unsigned lane = 0; lane < channels; ++lane) {
+        const uint32_t value = source < logical_count ? stored_values[(source + lane) % 4] : 0;
+        memcpy(expected + (first + destination) * element_size + lane * channel_size, &value, channel_size);
+      }
     if (kind == ProbeAtomic && source < logical_count) {
       const uint32_t value = loaded + 13;
       memcpy(expected + (first + source) * element_size, &value, element_size);
@@ -112,13 +124,13 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
   info.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
   if (format == MTLPixelFormatR32Uint) info.usage |= MTLTextureUsageShaderAtomic;
   id<MTLTexture> input_view = [input newTextureWithDescriptor:info offset:native_offset bytesPerRow:info.width * element_size];
-  info.width = 4;
+  info.width = 4 * channels;
   info.pixelFormat = MTLPixelFormatR32Uint;
-  id<MTLTexture> output_view = [output newTextureWithDescriptor:info offset:0 bytesPerRow:16];
+  id<MTLTexture> output_view = [output newTextureWithDescriptor:info offset:0 bytesPerRow:output_size];
   if (!input_view || !output_view) { free(expected); return false; }
   IRBufferView input_binding = {.buffer = input, .bufferOffset = byte_offset, .bufferSize = logical_count * element_size,
       .textureBufferView = input_view, .textureViewOffsetInElements = padding, .typedBuffer = true};
-  IRBufferView output_binding = {.buffer = output, .bufferSize = 16,
+  IRBufferView output_binding = {.buffer = output, .bufferSize = output_size,
       .textureBufferView = output_view, .typedBuffer = true};
   IRDescriptorTableEntry *entries = table.contents;
   IRDescriptorTableSetBufferView(&entries[0], &input_binding);
@@ -160,7 +172,9 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
     const uint32_t source = i + index_bias;
     // OOB immediate atomic return is undefined; only memory non-write is required.
     if (kind == ProbeAtomic && source >= logical_count) continue;
-    output_matches &= ((uint32_t *)output.contents)[i] == (source < logical_count ? values[source] : 0);
+    for (unsigned lane = 0; lane < channels; ++lane)
+      output_matches &= ((uint32_t *)output.contents)[i * channels + lane] ==
+          (source < logical_count ? values[(source + lane) % 4] : 0);
   }
   const bool buffer_matches = !memcmp(bytes, expected, input.length);
   *matches = output_matches && buffer_matches;
@@ -229,7 +243,7 @@ cleanup:
 
 int main(int argc, const char **argv) {
   if (argc != 4 && argc != 5) {
-    fprintf(stderr, "usage: %s UAV.cso SRV.cso atomic.cso [--expect-unsupported|--raw-r32|--origin-cbv|--origin-cbv-r8uint|--origin-cbv-r16uint|--origin-cbv-oob|--origin-cbv-wrap|--origin-cbv-r16float[-oob]|--origin-cbv-r32float[-oob]|--origin-cbv-r8sint[-oob]|--origin-cbv-r16sint[-oob]|--origin-cbv-r32sint[-oob]|--origin-cbv-r8unorm[-oob]|--origin-cbv-r16unorm[-oob]]\n", argv[0]); return 1;
+    fprintf(stderr, "usage: %s UAV.cso SRV.cso atomic.cso [--expect-unsupported|--raw-r32|--origin-cbv|--origin-cbv-r8uint|--origin-cbv-r16uint|--origin-cbv-oob|--origin-cbv-wrap|--origin-cbv-r16float[-oob]|--origin-cbv-r32float[-oob]|--origin-cbv-r8sint[-oob]|--origin-cbv-r16sint[-oob]|--origin-cbv-r32sint[-oob]|--origin-cbv-r8unorm[-oob]|--origin-cbv-r16unorm[-oob]|--origin-cbv-rgba8uint[-oob]|--origin-cbv-rgba16uint[-oob]]\n", argv[0]); return 1;
   }
   const struct ProbeMode {
     const char *name;
@@ -258,7 +272,11 @@ int main(int argc, const char **argv) {
       {"--origin-cbv-r8unorm", MTLPixelFormatR8Unorm, BindingOriginCBV, false, false, false},
       {"--origin-cbv-r8unorm-oob", MTLPixelFormatR8Unorm, BindingOriginCBV, true, false, false},
       {"--origin-cbv-r16unorm", MTLPixelFormatR16Unorm, BindingOriginCBV, false, false, false},
-      {"--origin-cbv-r16unorm-oob", MTLPixelFormatR16Unorm, BindingOriginCBV, true, false, false}};
+      {"--origin-cbv-r16unorm-oob", MTLPixelFormatR16Unorm, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-rgba8uint", MTLPixelFormatRGBA8Uint, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-rgba8uint-oob", MTLPixelFormatRGBA8Uint, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-rgba16uint", MTLPixelFormatRGBA16Uint, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-rgba16uint-oob", MTLPixelFormatRGBA16Uint, BindingOriginCBV, true, false, false}};
   const struct ProbeMode *mode = NULL;
   for (unsigned i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i)
     if (!strcmp(argc == 5 ? argv[4] : "", modes[i].name)) { mode = &modes[i]; break; }

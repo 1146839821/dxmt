@@ -65,7 +65,7 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
   auto srvs = group(groups[1]), uavs = group(groups[2]);
   if ((groups[1] != "null" && srvs.empty()) || uavs.empty() || srvs.size() + uavs.size() > 3)
     return reject("expected one/two finite typed inputs and output u1");
-  enum class Component { Uint, Sint, Float, Unorm };
+  enum class Component { Uint, Sint, Float, Unorm, Uint4 };
   struct Binding { unsigned resource_class, range, reg, slot; bool output; Component component; };
   std::map<std::pair<unsigned, unsigned>, Binding> bindings;
   bool slots[2] = {}, found_output = false;
@@ -73,12 +73,13 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
   auto resource = [&](const std::string &id, bool srv) {
     std::smatch value;
     const std::string pattern = "!\\{i32 ([0-9]{1,5}), %\\\"class." + std::string(srv ? "Buffer" : "RWBuffer") +
-        "<(unsigned int|int|float)>\\\"\\* undef, !\\\"\\\", i32 0, i32 ([012]), i32 1, i32 10, " +
+        "<(unsigned int|int|float|vector<unsigned int, 4> )>\\\"\\* undef, !\\\"\\\", i32 0, i32 ([012]), i32 1, i32 10, " +
         (srv ? "i32 0" : "i1 false, i1 false, i1 false") + ", !([0-9]+)\\}";
     if (!std::regex_match(metadata[id], value, std::regex(pattern))) return false;
     const Component component = value[2] == "float" ?
         (metadata[value[4]] == "!{i32 0, i32 14}" ? Component::Unorm : Component::Float) :
-        value[2] == "int" ? Component::Sint : Component::Uint;
+        value[2] == "int" ? Component::Sint :
+        value[2] == "vector<unsigned int, 4> " ? Component::Uint4 : Component::Uint;
     const std::string component_metadata = component == Component::Unorm ? "!{i32 0, i32 14}" :
         component == Component::Float ? "!{i32 0, i32 9}" :
         component == Component::Sint ? "!{i32 0, i32 4}" : "!{i32 0, i32 5}";
@@ -124,6 +125,8 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
         line == "%\"class.RWBuffer<int>\" = type { i32 }" ||
         line == "%\"class.Buffer<unsigned int>\" = type { i32 }" ||
         line == "%\"class.RWBuffer<unsigned int>\" = type { i32 }" ||
+        line == "%\"class.Buffer<vector<unsigned int, 4> >\" = type { <4 x i32> }" ||
+        line == "%\"class.RWBuffer<vector<unsigned int, 4> >\" = type { <4 x i32> }" ||
         line == "target triple = \"dxil-ms-dx\"" ||
         std::regex_match(line, std::regex(R"(target datalayout = "[^"]+")")) ||
         std::regex_match(line, std::regex(R"(attributes #[0-9]+ = \{ nounwind( readnone| readonly)? \})")) ||
@@ -136,6 +139,10 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
   std::string body = text.substr(begin + start.size(), finish - begin - start.size());
   std::map<std::string, Binding> handle_bindings;
   std::map<std::pair<unsigned, unsigned>, bool> seen_bindings;
+  std::map<std::string, unsigned> load_widths;
+  const bool vector_input = std::any_of(bindings.begin(), bindings.end(), [](const auto &entry) {
+    return !entry.second.output && entry.second.component == Component::Uint4;
+  });
   std::string rewritten;
   unsigned handles = 0, accesses = 0, output_stores = 0, returns = 0;
   std::string predecessor = "dxmt.entry";
@@ -186,7 +193,9 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
       const bool expects_float = binding->second.component == Component::Float || binding->second.component == Component::Unorm;
       if (expects_float != floating) return reject("typed operation/component mismatch");
       if (atomic && binding->second.component == Component::Sint) return reject("signed atomic outside bounded grammar");
+      if (atomic && binding->second.component == Component::Uint4) return reject("vector atomic outside bounded grammar");
       if ((store || atomic) && binding->second.resource_class == 0) return reject("SRV write/atomic");
+      if (!store && !atomic) load_widths[result] = binding->second.component == Component::Uint4 ? 4 : 1;
       const std::string suffix = std::to_string(binding->second.slot);
       const std::string tag = "dxmt.a" + std::to_string(accesses++);
       // Test logical bounds before padding. Also reject unsigned addition wrap.
@@ -208,9 +217,15 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
           ".value, %" + tag + ".do ], [ " + (atomic ? "0" : "zeroinitializer") + ", %" + predecessor + " ]\n";
       predecessor = tag + ".end"; continue;
     }
+    if (std::regex_match(line, m, std::regex(R"(  %v[0-9]+ = extractvalue %dx.types.ResRet.(i32|f32) (%v[0-9]+), ([0-4]))"))) {
+      auto load = load_widths.find(m[2]);
+      if (load == load_widths.end() || std::stoul(m[3]) >= load->second)
+        return reject("instruction/control flow outside bounded grammar");
+      rewritten += line + "\n"; continue;
+    }
     if (std::regex_match(line, std::regex(R"(  %v[0-9]+ = call i32 @dx.op.threadId.i32\(i32 93, i32 0\))")) ||
         std::regex_match(line, std::regex("  %v[0-9]+ = add i32 " + operand + ", " + operand)) ||
-        std::regex_match(line, std::regex(R"(  %v[0-9]+ = extractvalue %dx.types.ResRet.(i32|f32) %v[0-9]+, 0)")) ||
+        (vector_input && std::regex_match(line, std::regex(R"(  %v[0-9]+ = (shl i32 %v[0-9]+, 2|or i32 %v[0-9]+, [123]))"))) ||
         std::regex_match(line, std::regex(R"(  %v[0-9]+ = bitcast float %v[0-9]+ to i32)"))) {
       rewritten += line + "\n"; continue;
     }
