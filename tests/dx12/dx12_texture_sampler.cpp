@@ -253,6 +253,11 @@ main(int argc, char **argv) {
       strcmp(argv[2], "--maximum-1d-array-grad") == 0 || strcmp(argv[2], "--minimum-1d-grad-lod") == 0 ||
       strcmp(argv[2], "--minimum-1d-grad-axis") == 0);
   const bool line_array = line && strstr(argv[2], "array");
+  const bool volume = argc == 3 && (strcmp(argv[2], "--minimum-3d") == 0 ||
+      strcmp(argv[2], "--maximum-3d") == 0 || strcmp(argv[2], "--minimum-3d-grad") == 0 ||
+      strcmp(argv[2], "--minimum-3d-wrap") == 0 || strcmp(argv[2], "--minimum-3d-clamp") == 0);
+  const bool volume_wrap = volume && strcmp(argv[2], "--minimum-3d-wrap") == 0;
+  const bool volume_clamp = volume && strcmp(argv[2], "--minimum-3d-clamp") == 0;
   const bool array_2d = argc == 3 && (strcmp(argv[2], "--minimum-2d-array") == 0 ||
       strcmp(argv[2], "--maximum-2d-array") == 0 || strcmp(argv[2], "--minimum-2d-array-grad") == 0);
   const bool line_grad = line && strstr(argv[2], "grad");
@@ -261,6 +266,7 @@ main(int argc, char **argv) {
   const bool dxil_gradient_clamp = argc == 3 && strcmp(argv[2], "--minimum-grad-instruction") == 0;
   const bool grad_lod = argc == 3 && (strcmp(argv[2], "--minimum-grad-lod") == 0 || dxil_gradient_clamp ||
       (array_2d && strstr(argv[2], "grad")) ||
+      (volume && strstr(argv[2], "grad")) ||
       strcmp(argv[2], "--minimum-grad-bias") == 0 || strcmp(argv[2], "--minimum-grad-parallel") == 0 ||
       strcmp(argv[2], "--minimum-grad-perpendicular") == 0 || strcmp(argv[2], "--minimum-grad-zero") == 0 ||
       strcmp(argv[2], "--minimum-grad-minlod") == 0 || strcmp(argv[2], "--minimum-grad-maxlod") == 0 || line_lod ||
@@ -280,12 +286,12 @@ main(int argc, char **argv) {
        strcmp(argv[2], "--minimum-static-observation") == 0 ||
        strcmp(argv[2], "--minimum-live-observation") == 0 || strcmp(argv[2], "--minimum-grad") == 0 ||
        strcmp(argv[2], "--static-minimum-grad") == 0 || grad_lod || clamp_probe ||
-       ((line || array_2d) && strstr(argv[2], "minimum")));
+       ((line || array_2d || volume) && strstr(argv[2], "minimum")));
   const bool state_probe = argc >= 3 && strcmp(argv[2], "--static-minimum-state") == 0;
   const bool maximum = argc >= 3 &&
       (strcmp(argv[2], "--maximum") == 0 || strcmp(argv[2], "--static-maximum") == 0 ||
        strcmp(argv[2], "--maximum-grad") == 0 || strcmp(argv[2], "--static-maximum-grad") == 0 ||
-       ((line || array_2d) && strstr(argv[2], "maximum")));
+       ((line || array_2d || volume) && strstr(argv[2], "maximum")));
   const bool reduction = minimum || maximum;
   const bool static_observation = argc >= 3 && (strcmp(argv[2], "--sampler-static-observation") == 0 ||
       strcmp(argv[2], "--minimum-static-observation") == 0);
@@ -306,7 +312,8 @@ main(int argc, char **argv) {
                                         D3D12_FILTER_MIN_MAG_MIP_LINEAR;
   // The nonorthogonal footprint's major axis is 8*.23*golden_ratio:
   // LOD ~1.574 -> point mip 2; max raw derivative length wrongly picks mip 1.
-  const UINT expected = clamp_probe ? clamp_probe->expected : line_axis ? 32 : line_lod ? 224 : line ? (minimum ? (line_array ? 192 : 16) : (line_array ? 240 : 64)) :
+  const UINT expected = clamp_probe ? clamp_probe->expected : volume_clamp ? 64 : volume && grad_lod ? 160 :
+      line_axis ? 32 : line_lod ? 224 : line ? (minimum ? (line_array ? 192 : 16) : (line_array ? 240 : 64)) :
       grad_lod ? (dxil_gradient_clamp ? 160 : grad_bias || grad_case == 2 || grad_case == 3 ? 224 :
       grad_case == 4 || grad_maxlod ? 32 : 96) : minimum ? 16 : maximum ? 240 : 255;
   const bool direct_indexed_uav_texture =
@@ -319,7 +326,7 @@ main(int argc, char **argv) {
     return 2;
 
   const bool dxbc = strcmp(argv[1], "--dxbc") == 0;
-  if ((dxil_gradient_clamp || array_2d || line_axis) && dxbc) return 2;
+  if ((dxil_gradient_clamp || array_2d || line_axis || volume) && dxbc) return 2;
   if (expect_static_consumer_unsupported && (!dxbc || !static_sampler || !reduction)) return 2;
   if ((expect_consumer_unsupported || expect_null_unsupported) && (!reduction || static_sampler)) return 2;
   if ((expect_null_unsupported || clamp_probe) && !dxbc) return 2;
@@ -390,6 +397,7 @@ main(int argc, char **argv) {
   D3D12_HEAP_PROPERTIES upload_heap = {};
   D3D12_HEAP_PROPERTIES readback_heap = {};
   D3D12_RESOURCE_DESC texture_desc = {};
+  UINT texture_subresources = 0;
   D3D12_RESOURCE_DESC output_texture_desc = {};
   D3D12_RESOURCE_DESC buffer_desc = {};
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
@@ -516,11 +524,13 @@ main(int argc, char **argv) {
   default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
   default_heap.CreationNodeMask = 1;
   default_heap.VisibleNodeMask = 1;
-  texture_desc.Dimension = line ? D3D12_RESOURCE_DIMENSION_TEXTURE1D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  texture_desc.Dimension = volume ? D3D12_RESOURCE_DIMENSION_TEXTURE3D :
+      line ? D3D12_RESOURCE_DIMENSION_TEXTURE1D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
   texture_desc.Width = grad_lod ? 8 : reduction ? 2 : 1;
   texture_desc.Height = line ? 1 : grad_lod ? 8 : reduction ? 2 : 1;
-  texture_desc.DepthOrArraySize = line_array || array_2d ? 2 : 1;
+  texture_desc.DepthOrArraySize = volume ? (grad_lod ? 8 : 2) : line_array || array_2d ? 2 : 1;
   texture_desc.MipLevels = grad_lod ? 4 : 1;
+  texture_subresources = texture_desc.MipLevels * (volume ? 1 : texture_desc.DepthOrArraySize);
   texture_desc.Format = defaults_r ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
   texture_desc.SampleDesc.Count = 1;
   if (!CheckHR(
@@ -533,10 +543,10 @@ main(int argc, char **argv) {
   upload_heap.CreationNodeMask = 1;
   upload_heap.VisibleNodeMask = 1;
   buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  if (grad_lod || line_array || array_2d)
-    device->GetCopyableFootprints(&texture_desc, 0, texture_desc.MipLevels * texture_desc.DepthOrArraySize,
+  if (grad_lod || line_array || array_2d || volume)
+    device->GetCopyableFootprints(&texture_desc, 0, texture_subresources,
         0, mip_footprints, mip_rows, mip_row_sizes, &total_size);
-  buffer_desc.Width = grad_lod || line_array || array_2d ? total_size : reduction ? 512 : 256;
+  buffer_desc.Width = grad_lod || line_array || array_2d || volume ? total_size : reduction ? 512 : 256;
   if (clamp_probe) {
     sentinel_offset = buffer_desc.Width;
     buffer_desc.Width += sizeof(UINT);
@@ -551,7 +561,7 @@ main(int argc, char **argv) {
           device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
                                            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload))))
     goto cleanup;
-  if (grad_lod || line_array || array_2d)
+  if (grad_lod || line_array || array_2d || volume)
     footprint = mip_footprints[0];
   else
     device->GetCopyableFootprints(&texture_desc, 0, 1, 0, &footprint, &row_count, &row_size, &total_size);
@@ -562,12 +572,24 @@ main(int argc, char **argv) {
   if (grad_lod) {
     const UINT mip_red[4] = {32, 224, 96, 160};
     memset(upload_data, 0, static_cast<size_t>(total_size));
-    for (unsigned mip = 0; mip < texture_desc.MipLevels * texture_desc.DepthOrArraySize; ++mip)
-      for (UINT y = 0; y < mip_rows[mip]; ++y)
-        for (UINT x = 0; x < mip_footprints[mip].Footprint.Width; ++x) {
-          const UINT texel = 0xff000000 | (array_2d && mip < 4 ? 7 : mip_red[mip % 4]);
-          memcpy(static_cast<char *>(upload_data) + mip_footprints[mip].Offset +
-                     y * mip_footprints[mip].Footprint.RowPitch + x * sizeof(UINT), &texel, sizeof(texel));
+    for (unsigned mip = 0; mip < texture_subresources; ++mip)
+      for (UINT z = 0; z < mip_footprints[mip].Footprint.Depth; ++z)
+        for (UINT y = 0; y < mip_rows[mip]; ++y)
+          for (UINT x = 0; x < mip_footprints[mip].Footprint.Width; ++x) {
+            const UINT texel = 0xff000000 | (array_2d && mip < 4 ? 7 : mip_red[mip % 4]);
+            memcpy(static_cast<char *>(upload_data) + mip_footprints[mip].Offset +
+                       z * mip_rows[mip] * mip_footprints[mip].Footprint.RowPitch +
+                       y * mip_footprints[mip].Footprint.RowPitch + x * sizeof(UINT), &texel, sizeof(texel));
+          }
+  } else if (volume) {
+    const UINT pixels[8] = {64, 80, 96, 112, 16, 192, 224, 240};
+    memset(upload_data, 0, static_cast<size_t>(total_size));
+    for (unsigned z = 0; z < 2; ++z)
+      for (unsigned y = 0; y < 2; ++y)
+        for (unsigned x = 0; x < 2; ++x) {
+          const UINT texel = 0xff000000 | pixels[z * 4 + y * 2 + x];
+          memcpy(static_cast<char *>(upload_data) + footprint.Offset +
+              (z * mip_rows[0] + y) * footprint.Footprint.RowPitch + x * sizeof(UINT), &texel, sizeof(texel));
         }
   } else if (array_2d) {
     const UINT pixels[4] = {0xff000010, 0xff000040, 0xff0000c0, 0xff0000f0};
@@ -606,7 +628,11 @@ main(int argc, char **argv) {
     srv_desc.Texture2D.MostDetailedMip = clamp_probe->first_mip;
     if (clamp_probe->view_mips) srv_desc.Texture2D.MipLevels = clamp_probe->view_mips;
   }
-  if (array_2d) {
+  if (volume) {
+    srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+    srv_desc.Texture3D = {};
+    srv_desc.Texture3D.MipLevels = texture_desc.MipLevels;
+  } else if (array_2d) {
     srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
     srv_desc.Texture2DArray = {};
     srv_desc.Texture2DArray.MipLevels = texture_desc.MipLevels;
@@ -686,7 +712,7 @@ main(int argc, char **argv) {
     sampler_desc.Filter = filter;
     sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler_desc.AddressW = volume_wrap ? D3D12_TEXTURE_ADDRESS_MODE_WRAP : D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     sampler_desc.MinLOD = 0;
     sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
     if (grad_lod) {
@@ -818,9 +844,9 @@ main(int argc, char **argv) {
   texture_src.pResource = upload;
   texture_src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
   texture_src.PlacedFootprint = footprint;
-  for (unsigned mip = 0; mip < texture_desc.MipLevels * texture_desc.DepthOrArraySize; ++mip) {
+  for (unsigned mip = 0; mip < texture_subresources; ++mip) {
     texture_dst.SubresourceIndex = mip;
-    texture_src.PlacedFootprint = grad_lod || line_array || array_2d ? mip_footprints[mip] : footprint;
+    texture_src.PlacedFootprint = grad_lod || line_array || array_2d || volume ? mip_footprints[mip] : footprint;
     list->CopyTextureRegion(&texture_dst, 0, 0, 0, &texture_src, nullptr);
   }
   {

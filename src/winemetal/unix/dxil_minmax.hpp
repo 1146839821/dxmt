@@ -17,10 +17,11 @@ struct ReductionSampleState {
   llvm::Value *point_texture;
   llvm::Value *address_u;
   llvm::Value *address_v;
+  llvm::Value *address_w = nullptr;
 };
 
-// Private-module transformation. Caller must prove a float Texture1D/Texture2D
-// or corresponding array handle, matching spatial_dimensions (1 or 2),
+// Private-module transformation. Caller must prove a float Texture1D/Texture2D/Texture3D
+// or corresponding array handle, matching spatial_dimensions (1..3),
 // finite coordinates and a point, unbiased/unclamped sampler with the original
 // address/border modes. Only component extracts (no residency/status) are
 // accepted. LLVM verification does not replace regenerated DXIL validation.
@@ -37,7 +38,7 @@ bool LowerReductionSampleLevel(llvm::CallInst &sample,
 // This helper does not rewrite or admit the sampling operation itself.
 llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &error, unsigned spatial_dimensions = 2);
 
-// Qualify legacy float 1D/2D (or array) SampleLevel/SampleGrad pairs, append private tN/sN and
+// Qualify legacy float 1D/2D/3D (or array) SampleLevel/SampleGrad pairs, append private tN/sN and
 // b0 in DXMT_MSC_MINMAX_SPACE, and guard reduction with the runtime enabled bit.
 // Returned pair ordinal N selects its point texture/sampler and 32-byte CBV
 // state; sampler N+pair_count is an unclamped ordinary-filter sampler. Both

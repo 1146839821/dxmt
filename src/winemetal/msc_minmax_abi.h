@@ -3,7 +3,9 @@
 
 // Private compiler/submission contract. Not an MSC descriptor layout.
 #define DXMT_MSC_MINMAX_SPACE 2u
-#define DXMT_MSC_MINMAX_VERSION 4u
+#define DXMT_MSC_MINMAX_VERSION 5u
+#define DXMT_MSC_MINMAX_ADDRESS_MASK 255u
+#define DXMT_MSC_MINMAX_ADDRESS_W_SHIFT 8u
 #define DXMT_MSC_MINMAX_ENABLED 32u
 struct dxmt_msc_minmax_state {
   uint32_t flags;
@@ -12,7 +14,7 @@ struct dxmt_msc_minmax_state {
   float resource_clamp;
   uint32_t default_components;
   uint32_t address_u;
-  uint32_t address_v;
+  uint32_t address_vw; // AddressV in bits 0..7, AddressW in bits 8..15.
   float mip_lod_bias;
 };
 struct dxmt_msc_minmax_binding {

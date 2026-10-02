@@ -278,7 +278,7 @@ HRESULT PrepareD3D12MinMaxSamplerInfo(WMT::Device device, const D3D12_SAMPLER_DE
   candidate.max_lod = desc.MaxLOD;
   candidate.mip_lod_bias = desc.MipLODBias;
   candidate.address_u = desc.AddressU;
-  candidate.address_v = desc.AddressV;
+  candidate.address_vw = desc.AddressV | (uint32_t(desc.AddressW) << DXMT_MSC_MINMAX_ADDRESS_W_SHIFT);
   point = point_candidate;
   ordinary = ordinary_candidate;
   state = candidate;

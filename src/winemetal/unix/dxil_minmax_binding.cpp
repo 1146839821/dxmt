@@ -162,9 +162,9 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     uint32_t texture_kind, sampler_kind, component_tag, component_type;
     if (!texture || !sampler || texture->metadata->getNumOperands() != 9 ||
         sampler->metadata->getNumOperands() != 8 || !Word(texture->metadata->getOperand(6), texture_kind) ||
-        (texture_kind != 1 && texture_kind != 2 && texture_kind != 6 && texture_kind != 7) ||
+        (texture_kind != 1 && texture_kind != 2 && texture_kind != 4 && texture_kind != 6 && texture_kind != 7) ||
         !Word(sampler->metadata->getOperand(6), sampler_kind) || sampler_kind != 0)
-      return reject("finite one/two-dimensional texture and SamplerState pair required");
+      return reject("finite one/two/three-dimensional texture and SamplerState pair required");
     auto *component = dyn_cast_or_null<MDNode>(texture->metadata->getOperand(8));
     if (!component || component->getNumOperands() != 2 || !Word(component->getOperand(0), component_tag) || component_tag != 0 ||
         !Word(component->getOperand(1), component_type) || component_type != 9)
@@ -180,7 +180,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
       if (pairs.size() >= 64) return reject("too many sampled pairs");
       pairs.push_back({{texture->space, texture->reg, sampler->space, sampler->reg}, texture, sampler});
     }
-    samples.push_back({call, index->second, texture_kind == 1 || texture_kind == 6 ? 1u : 2u});
+    samples.push_back({call, index->second, texture_kind == 4 ? 3u : texture_kind == 1 || texture_kind == 6 ? 1u : 2u});
   }
   if (samples.empty()) return reject("no qualified sampling pairs");
   if (uint64_t(next_id[0]) + pairs.size() > UINT32_MAX || uint64_t(next_id[3]) + pairs.size() * 2 > UINT32_MAX)
@@ -345,7 +345,10 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     auto *point_sampler = make_handle(b, 3, next_id[3] + pair, pair);
     ReductionSampleState state{flags, as_float(b.CreateExtractValue(first, 1)), as_float(b.CreateExtractValue(first, 2)),
         merge_clamp(as_float(b.CreateExtractValue(first, 3))), b.CreateExtractValue(second, 0), point_texture,
-        b.CreateExtractValue(second, 1), b.CreateExtractValue(second, 2)};
+        b.CreateExtractValue(second, 1),
+        b.CreateAnd(b.CreateExtractValue(second, 2), b.getInt32(DXMT_MSC_MINMAX_ADDRESS_MASK)),
+        b.CreateAnd(b.CreateLShr(b.CreateExtractValue(second, 2), b.getInt32(DXMT_MSC_MINMAX_ADDRESS_W_SHIFT)),
+            b.getInt32(DXMT_MSC_MINMAX_ADDRESS_MASK))};
     SmallVector<Value *, 11> arguments(sample->args());
     arguments[1] = point_texture;
     arguments[2] = point_sampler;

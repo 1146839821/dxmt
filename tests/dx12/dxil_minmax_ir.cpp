@@ -73,7 +73,7 @@ static bool CheckBindingQualification(llvm::Module &module) {
         if (auto *call = dyn_cast<CallInst>(&instruction))
           if (call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32") ++samples;
       const auto texture_kind = mdconst::extract<ConstantInt>(texture->getOperand(6))->getZExtValue();
-      if (samples != (texture_kind == 1 || texture_kind == 6 ? 10 : 18)) return false;
+      if (samples != (texture_kind == 4 ? 34 : texture_kind == 1 || texture_kind == 6 ? 10 : 18)) return false;
       auto *result_resources = clone->getNamedMetadata("dx.resources")->getOperand(0);
       auto *cbvs = cast<MDNode>(result_resources->getOperand(2));
       if (cbvs->getNumOperands() != 1) return false;
@@ -139,7 +139,7 @@ static int TransformContainer(const char *path, const char *mode) {
   auto *resource_groups = (*parsed)->getNamedMetadata("dx.resources")->getOperand(0);
   auto *texture_record = cast<MDNode>(cast<MDNode>(resource_groups->getOperand(0))->getOperand(0));
   const auto texture_kind = mdconst::extract<ConstantInt>(texture_record->getOperand(6))->getZExtValue();
-  const unsigned layer_operand = texture_kind == 6 ? 4 : 5;
+  const unsigned layer_operand = texture_kind == 6 ? 4 : texture_kind == 7 ? 5 : 6;
   auto *array_coordinate = samples[0]->getArgOperand(layer_operand);
   IRBuilder<> builder(context);
   auto number = [&](float value) { return ConstantFP::get(builder.getFloatTy(), value); };
@@ -160,7 +160,7 @@ static int TransformContainer(const char *path, const char *mode) {
   }
   dxmt::dxil::ReductionSampleState state{builder.getInt32(maximum ? 15 : 7), number(sampler_lod ? 1 : 0),
       number(100), number(empty ? 1.1f : fractional ? 0.75f : 0), builder.getInt32(0),
-      samples[0]->getArgOperand(1), builder.getInt32(mirror ? 2 : mirror_once ? 5 : 3), builder.getInt32(3)};
+      samples[0]->getArgOperand(1), builder.getInt32(mirror ? 2 : mirror_once ? 5 : 3), builder.getInt32(3), builder.getInt32(3)};
   std::string error;
   if (binding) {
     if (!binding_two && !CheckBindingQualification(**parsed)) return 1;
@@ -171,7 +171,7 @@ static int TransformContainer(const char *path, const char *mode) {
     if (binding_two && (records[1].texture_space || records[1].texture_register ||
         records[1].sampler_space || records[1].sampler_register != 1)) return 1;
   } else if (!dxmt::dxil::LowerReductionSampleLevel(*samples[0], state, error,
-      texture_kind == 1 || texture_kind == 6 ? 1 : 2)) { errs() << error; return 1; }
+      texture_kind == 4 ? 3 : texture_kind == 1 || texture_kind == 6 ? 1 : 2)) { errs() << error; return 1; }
   for (auto &function : **parsed) for (auto &block : function) for (auto &instruction : block)
     if (auto *call = dyn_cast<CallInst>(&instruction))
       if (!binding_two && call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32" &&
@@ -222,6 +222,8 @@ int main(int argc, char **argv) {
   const auto blocks = function->size(), functions = module.size();
   if (dxmt::dxil::LowerReductionSampleLevel(*call, state, error, 0) || error.empty() ||
       function->size() != blocks || module.size() != functions) return 1;
+  if (dxmt::dxil::LowerReductionSampleLevel(*call, state, error, 3) || error.empty() ||
+      function->size() != blocks || module.size() != functions) return 1; // AddressW is required.
   if (dxmt::dxil::LowerReductionSampleLevel(*call, state, error) || error.empty() ||
       function->size() != blocks || module.size() != functions) return 1;
   status->eraseFromParent();

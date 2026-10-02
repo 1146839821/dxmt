@@ -73,7 +73,8 @@ int main() {
           (reduction ? DXMT_MSC_MINMAX_ENABLED : 0u) | (reduction == 3 ? 8u : 0u);
       if (FAILED(dxmt::PrepareD3D12MinMaxSamplerInfo({}, desc, point, ordinary, state)) ||
           state.flags != flags || state.min_lod != desc.MinLOD || state.max_lod != desc.MaxLOD ||
-          state.address_u != desc.AddressU || state.address_v != desc.AddressV || state.resource_clamp ||
+          state.address_u != desc.AddressU ||
+          state.address_vw != (desc.AddressV | (uint32_t(desc.AddressW) << DXMT_MSC_MINMAX_ADDRESS_W_SHIFT)) || state.resource_clamp ||
           state.default_components || state.mip_lod_bias != desc.MipLODBias || !point.support_argument_buffers ||
           !ordinary.support_argument_buffers || point.lod_min_clamp || ordinary.lod_min_clamp ||
           point.lod_max_clamp != D3D12_FLOAT32_MAX || ordinary.lod_max_clamp != D3D12_FLOAT32_MAX ||

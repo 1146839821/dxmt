@@ -135,7 +135,7 @@ bool LowerReductionSampleLevel(llvm::CallInst &sample,
   using namespace llvm;
   error.clear();
   auto reject = [&](const char *reason) { error = reason; return false; };
-  if (spatial_dimensions != 1 && spatial_dimensions != 2) return reject("expected one or two spatial dimensions");
+  if (spatial_dimensions < 1 || spatial_dimensions > 3) return reject("expected one to three spatial dimensions");
   auto *callee = sample.getCalledFunction();
   if (!callee || callee->getName() != "dx.op.sampleLevel.f32" || sample.arg_size() != 11 ||
       !IsFloat4Status(sample.getType())) return reject("expected float SampleLevel signature");
@@ -158,11 +158,13 @@ bool LowerReductionSampleLevel(llvm::CallInst &sample,
       !state.resource_clamp || !state.resource_clamp->getType()->isFloatTy() ||
       !state.point_texture || state.point_texture->getType() != handle_type ||
       !state.address_u || !state.address_u->getType()->isIntegerTy(32) ||
-      !state.address_v || !state.address_v->getType()->isIntegerTy(32))
+      !state.address_v || !state.address_v->getType()->isIntegerTy(32) ||
+      (spatial_dimensions == 3 && (!state.address_w || !state.address_w->getType()->isIntegerTy(32))))
     return reject("invalid reduction state types");
   DominatorTree dominance(*sample.getFunction());
   for (auto *value : {state.flags, state.default_components, state.min_lod, state.max_lod,
-      state.resource_clamp, state.point_texture, state.address_u, state.address_v})
+      state.resource_clamp, state.point_texture, state.address_u, state.address_v,
+      spatial_dimensions == 3 ? state.address_w : state.address_u})
     if (&value->getContext() != &sample.getContext() ||
         (isa<Argument>(value) && cast<Argument>(value)->getParent() != sample.getFunction()) ||
         (isa<Instruction>(value) && (cast<Instruction>(value)->getFunction() != sample.getFunction() ||
@@ -251,11 +253,11 @@ bool LowerReductionSampleLevel(llvm::CallInst &sample,
   };
   auto level = [&](IRBuilder<> &b, Value *mip) -> Components {
     auto *dims = b.CreateCall(dimensions, {b.getInt32(GetDimensions), state.point_texture, mip});
-    Value *size[2], *base[2], *fraction[2];
+    Value *size[3], *base[3], *fraction[3];
     for (unsigned axis = 0; axis < spatial_dimensions; ++axis) {
       size[axis] = b.CreateUIToFP(b.CreateExtractValue(dims, axis), f32);
       auto *coordinate = sample.getArgOperand(3 + axis);
-      auto *address = axis ? state.address_v : state.address_u;
+      auto *address = axis == 2 ? state.address_w : axis ? state.address_v : state.address_u;
       auto floor_value = [&](Value *value) { return b.CreateCall(unary, {b.getInt32(Floor), value}); };
       auto *wrapped = b.CreateFSub(coordinate, floor_value(coordinate));
       auto *period = b.CreateFSub(coordinate, b.CreateFMul(number(2), floor_value(b.CreateFMul(coordinate, number(0.5f)))));
