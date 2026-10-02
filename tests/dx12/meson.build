@@ -256,6 +256,11 @@ if dxc_command.length() > 0
       )
     endforeach
   endforeach
+  custom_target('msc_typed_buffer_padding_sint_fixture',
+    input: 'msc_typed_buffer_padding.hlsl', output: 'msc_typed_buffer_padding_sint.cso',
+    command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '-D', 'TYPE=int', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
   custom_target('msc_typed_buffer_padding_fixture',
     input: 'msc_typed_buffer_padding.hlsl', output: 'msc_typed_buffer_padding.cso',
     command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],

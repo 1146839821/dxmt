@@ -44,9 +44,10 @@ declare void @dx.op.bufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i
   reordered.insert(reordered.find("define void @main"), resource_root);
   check("metadata before main", LowerTypedOrigin(reordered, reordered_output, error) &&
       reordered_output.find("i32, %dx.types.Handle, i32)\n\ndefine void @main") != std::string::npos);
-  auto reject = [&](const char *name, const std::string &text) {
+  auto reject = [&](const char *name, const std::string &text, const char *expected_reason = nullptr) {
     std::string untouched = "unchanged", reason;
-    check(name, !LowerTypedOrigin(text, untouched, reason) && untouched == "unchanged" && !reason.empty());
+    check(name, !LowerTypedOrigin(text, untouched, reason) && untouched == "unchanged" && !reason.empty() &&
+        (!expected_reason || reason == expected_reason));
   };
   auto replace = [&](const std::string &from, const std::string &to) {
     std::string changed = input;
@@ -83,6 +84,59 @@ declare void @dx.op.bufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i
   auto edit = [&](std::string &text, const std::string &from, const std::string &to) {
     text.replace(text.find(from), from.size(), to);
   };
+  std::string signed_input = input;
+  edit(signed_input, "%\"class.RWBuffer<unsigned int>\" = type { i32 }",
+      "%\"class.RWBuffer<unsigned int>\" = type { i32 }\n%\"class.RWBuffer<int>\" = type { i32 }");
+  edit(signed_input, "!6 = !{i32 0, %\"class.RWBuffer<unsigned int>\"", "!6 = !{i32 0, %\"class.RWBuffer<int>\"");
+  edit(signed_input, "false, !7}\n!7", "false, !9}\n!7");
+  signed_input += "!9 = !{i32 0, i32 4}\n";
+  std::string signed_output;
+  check("scalar SINT load", LowerTypedOrigin(signed_input, signed_output, error) &&
+      signed_output.find("phi %dx.types.ResRet.i32") != std::string::npos);
+  const std::string integer_store = "  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %2, i32 %3, i32 undef, i32 %5, i32 %5, i32 %5, i32 %5, i8 15)";
+  auto with_integer_store = [&](std::string text) {
+    edit(text, "  ret void", integer_store + "\n  ret void");
+    return text;
+  };
+  check("scalar SINT store", LowerTypedOrigin(with_integer_store(signed_input), signed_output, error));
+  std::string signed_bad = signed_input;
+  edit(signed_bad, "!9 = !{i32 0, i32 4}", "!9 = !{i32 0, i32 5}");
+  reject("SINT component metadata mismatch", signed_bad);
+  signed_bad = signed_input;
+  edit(signed_bad, "!8 = !{i32 1, %\"class.RWBuffer<unsigned int>\"", "!8 = !{i32 1, %\"class.RWBuffer<int>\"");
+  edit(signed_bad, "false, !7}", "false, !9}");
+  reject("SINT output resource", signed_bad);
+  signed_bad = signed_input;
+  edit(signed_bad, "%dx.types.ResRet.i32 = type { i32, i32, i32, i32, i32 }",
+      "%dx.types.ResRet.i32 = type { i32, i32, i32, i32, i32 }\n%dx.types.ResRet.f32 = type { float, float, float, float, i32 }");
+  edit(signed_bad, "ResRet.i32 @dx.op.bufferLoad.i32", "ResRet.f32 @dx.op.bufferLoad.f32");
+  edit(signed_bad, "declare %dx.types.ResRet.i32 @dx.op.bufferLoad.i32", "declare %dx.types.ResRet.f32 @dx.op.bufferLoad.f32");
+  edit(signed_bad, "ResRet.i32 %4, 0", "ResRet.f32 %4, 0");
+  edit(signed_bad, "  call void @dx.op.bufferStore.i32", "  %6 = bitcast float %5 to i32\n  call void @dx.op.bufferStore.i32");
+  edit(signed_bad, "i32 %5, i32 %5, i32 %5, i32 %5", "i32 %6, i32 %6, i32 %6, i32 %6");
+  reject("FLOAT operation on SINT resource", signed_bad, "typed operation/component mismatch");
+  signed_bad = signed_input;
+  edit(signed_bad, "  ret void", "  %7 = call i32 @dx.op.atomicBinOp.i32(i32 78, %dx.types.Handle %2, i32 0, i32 %3, i32 undef, i32 undef, i32 13)\n  ret void");
+  signed_bad += "declare i32 @dx.op.atomicBinOp.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32)\n";
+  reject("SINT atomic outside accepted corpus", signed_bad, "signed atomic outside bounded grammar");
+  std::string signed_srv = signed_input;
+  edit(signed_srv, "%\"class.RWBuffer<int>\" = type", "%\"class.Buffer<int>\" = type");
+  edit(signed_srv, "!4 = !{null, !5, null, null}", "!4 = !{!12, !5, null, null}");
+  edit(signed_srv, "!5 = !{!6, !8}", "!5 = !{!8}");
+  edit(signed_srv, "!6 = !{i32 0, %\"class.RWBuffer<int>\"", "!6 = !{i32 0, %\"class.Buffer<int>\"");
+  edit(signed_srv, "i1 false, i1 false, i1 false, !9}", "i32 0, !9}");
+  edit(signed_srv, "i8 1, i32 0, i32 0, i1 false", "i8 0, i32 0, i32 0, i1 false");
+  signed_srv += "!12 = !{!6}\n";
+  check("scalar SINT SRV", LowerTypedOrigin(signed_srv, signed_output, error));
+  reject("SINT SRV write", with_integer_store(signed_srv), "SRV write/atomic");
+  signed_bad = with_integer_store(signed_input);
+  std::string partial_store = integer_store;
+  edit(partial_store, "i8 15)", "i8 1)");
+  edit(signed_bad, integer_store, partial_store);
+  reject("SINT partial store mask", signed_bad, "instruction/control flow outside bounded grammar");
+  signed_bad = signed_input;
+  edit(signed_bad, "%4, 0", "%4, 4");
+  reject("SINT status lane", signed_bad);
   std::string floating = input;
   edit(floating, "%\"class.RWBuffer<unsigned int>\" = type { i32 }",
       "%\"class.RWBuffer<unsigned int>\" = type { i32 }\n%\"class.RWBuffer<float>\" = type { float }");

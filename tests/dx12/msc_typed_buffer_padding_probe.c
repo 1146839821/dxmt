@@ -12,10 +12,39 @@
 enum ProbeKind { ProbeUAV, ProbeSRV, ProbeAtomic };
 enum ProbeBinding { BindingOriginal, BindingRawR32, BindingOriginCBV };
 
-static unsigned
-texel_size(MTLPixelFormat format) {
-  return format == MTLPixelFormatR8Uint ? 1 :
-      (format == MTLPixelFormatR16Uint || format == MTLPixelFormatR16Float) ? 2 : 4;
+struct ProbeFormat {
+  MTLPixelFormat format;
+  unsigned element_size;
+  const uint32_t *stored, *loaded;
+  uint32_t poison;
+  bool varying_poison;
+};
+
+static const struct ProbeFormat *
+probe_format(MTLPixelFormat format) {
+  static const uint32_t u8[] = {0, 127, 128, 255};
+  static const uint32_t u16[] = {0, 255, 256, 65535};
+  static const uint32_t u32[] = {0x11223300u, 0x11223301u, 0x11223302u, 0x11223303u};
+  // Sign-extended output bits; low bytes seed native R8/R16 representations.
+  static const uint32_t s8[] = {0xffffff80u, 0x7fu, 0xffffffffu, 1};
+  static const uint32_t s16[] = {0xffff8000u, 0x7fffu, 0xffffffffu, 0x1234u};
+  static const uint32_t s32[] = {0x80000000u, 0x7fffffffu, 0xffffffffu, 0x12345678u};
+  // Exact half/float representations of 0.5, -2, 1.5, 32. R16 backing writes
+  // retain half bits, while asuint(float) output must have float32 bits.
+  static const uint32_t half[] = {0x3800, 0xc000, 0x3e00, 0x5000};
+  static const uint32_t floating[] = {0x3f000000, 0xc0000000, 0x3fc00000, 0x42000000};
+  static const struct ProbeFormat formats[] = {
+      {MTLPixelFormatR8Uint, 1, u8, u8, 0xcdf00080u, true},
+      {MTLPixelFormatR16Uint, 2, u16, u16, 0xcdf00080u, true},
+      {MTLPixelFormatR32Uint, 4, u32, u32, 0xcdf00080u, true},
+      {MTLPixelFormatR8Sint, 1, s8, s8, 0xcdf00080u, true},
+      {MTLPixelFormatR16Sint, 2, s16, s16, 0xcdf00080u, true},
+      {MTLPixelFormatR32Sint, 4, s32, s32, 0xcdf00080u, true},
+      {MTLPixelFormatR16Float, 2, half, floating, 0x3555u, false},
+      {MTLPixelFormatR32Float, 4, floating, floating, 0x3eaaaaabu, false}};
+  for (unsigned i = 0; i < sizeof(formats) / sizeof(formats[0]); ++i)
+    if (formats[i].format == format) return &formats[i];
+  return NULL;
 }
 
 static bool
@@ -24,7 +53,9 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
          enum ProbeBinding binding, MTLPixelFormat format, unsigned first,
          unsigned logical_count, uint32_t index_bias,
          bool *matches) {
-  const unsigned element_size = texel_size(format);
+  const struct ProbeFormat *format_info = probe_format(format);
+  if (!format_info) return false;
+  const unsigned element_size = format_info->element_size;
   const NSUInteger alignment = [device minimumTextureBufferAlignmentForPixelFormat:format];
   if (!alignment || alignment % element_size) return false;
   const NSUInteger byte_offset = first * element_size;
@@ -44,19 +75,9 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
   unsigned char *bytes = input.contents;
   unsigned char *expected = malloc(input.length);
   if (!expected) return false;
-  const uint32_t values_r8[] = {0, 127, 128, 255};
-  const uint32_t values_r16[] = {0, 255, 256, 65535};
-  const uint32_t values_r32[] = {0x11223300u, 0x11223301u, 0x11223302u, 0x11223303u};
-  // Exact half/float representations of 0.5, -2, 1.5, 32. Output is asuint(float),
-  // while backing-buffer writes retain the native half representation for R16.
-  const uint32_t values_half[] = {0x3800, 0xc000, 0x3e00, 0x5000};
-  const uint32_t values_float[] = {0x3f000000, 0xc0000000, 0x3fc00000, 0x42000000};
-  const bool floating = format == MTLPixelFormatR16Float || format == MTLPixelFormatR32Float;
-  const uint32_t *stored_values = floating ? (element_size == 2 ? values_half : values_float) :
-      element_size == 1 ? values_r8 : element_size == 2 ? values_r16 : values_r32;
-  const uint32_t *values = floating ? values_float : stored_values;
+  const uint32_t *stored_values = format_info->stored, *values = format_info->loaded;
   for (size_t i = 0; i < element_count; ++i) {
-    const uint32_t poison = floating ? (element_size == 2 ? 0x3555u : 0x3eaaaaabu) : 0xcdf00080u + (uint32_t)i;
+    const uint32_t poison = format_info->poison + (format_info->varying_poison ? (uint32_t)i : 0);
     memcpy(bytes + i * element_size, &poison, element_size);
   }
   for (unsigned i = 0; i < 4; ++i) {
@@ -175,7 +196,9 @@ run_shader(id<MTLDevice> device, id<MTLCommandQueue> queue, const char *path, en
     const unsigned offsets[] = {0, 1, 4, 257, 260};
     const unsigned counts[] = {8, 0, 1, 3, 4, 5, 7};
     const NSUInteger alignment = [device minimumTextureBufferAlignmentForPixelFormat:format];
-    const unsigned element_size = texel_size(format);
+    const struct ProbeFormat *format_info = probe_format(format);
+    if (!format_info) goto cleanup;
+    const unsigned element_size = format_info->element_size;
     for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); ++i) {
       for (unsigned c = 0; c < (logical_bounds ? 7u : 1u); ++c) {
         bool matches = false;
@@ -199,7 +222,7 @@ cleanup:
 
 int main(int argc, const char **argv) {
   if (argc != 4 && argc != 5) {
-    fprintf(stderr, "usage: %s UAV.cso SRV.cso atomic.cso [--expect-unsupported|--raw-r32|--origin-cbv|--origin-cbv-r8uint|--origin-cbv-r16uint|--origin-cbv-oob|--origin-cbv-wrap|--origin-cbv-r16float[-oob]|--origin-cbv-r32float[-oob]]\n", argv[0]); return 1;
+    fprintf(stderr, "usage: %s UAV.cso SRV.cso atomic.cso [--expect-unsupported|--raw-r32|--origin-cbv|--origin-cbv-r8uint|--origin-cbv-r16uint|--origin-cbv-oob|--origin-cbv-wrap|--origin-cbv-r16float[-oob]|--origin-cbv-r32float[-oob]|--origin-cbv-r8sint[-oob]|--origin-cbv-r16sint[-oob]|--origin-cbv-r32sint[-oob]]\n", argv[0]); return 1;
   }
   const struct ProbeMode {
     const char *name;
@@ -218,7 +241,13 @@ int main(int argc, const char **argv) {
       {"--origin-cbv-r16float", MTLPixelFormatR16Float, BindingOriginCBV, false, false, false},
       {"--origin-cbv-r16float-oob", MTLPixelFormatR16Float, BindingOriginCBV, true, false, false},
       {"--origin-cbv-r32float", MTLPixelFormatR32Float, BindingOriginCBV, false, false, false},
-      {"--origin-cbv-r32float-oob", MTLPixelFormatR32Float, BindingOriginCBV, true, false, false}};
+      {"--origin-cbv-r32float-oob", MTLPixelFormatR32Float, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-r8sint", MTLPixelFormatR8Sint, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-r8sint-oob", MTLPixelFormatR8Sint, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-r16sint", MTLPixelFormatR16Sint, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-r16sint-oob", MTLPixelFormatR16Sint, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-r32sint", MTLPixelFormatR32Sint, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-r32sint-oob", MTLPixelFormatR32Sint, BindingOriginCBV, true, false, false}};
   const struct ProbeMode *mode = NULL;
   for (unsigned i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i)
     if (!strcmp(argc == 5 ? argv[4] : "", modes[i].name)) { mode = &modes[i]; break; }
@@ -235,7 +264,8 @@ int main(int argc, const char **argv) {
     printf("device=%s format=%lu alignment=%lu\n", device.name.UTF8String, (unsigned long)format,
         (unsigned long)[device minimumTextureBufferAlignmentForPixelFormat:format]);
     unsigned aligned_failures = 0, padding_failures = 0, padding_cases = 0;
-    // R8/R16 UINT are format-conversion probes, not unsupported typed atomics.
+    // Only the existing R32 UINT corpus exercises atomics; other formats are
+    // load/store conversion probes, not evidence for broader typed atomics.
     for (unsigned kind = 0; kind < (format == MTLPixelFormatR32Uint ? 3u : 2u); ++kind)
       for (unsigned bounds = 0; bounds < 2; ++bounds)
         if (!run_shader(device, queue, argv[kind + 1], kind, binding, format, logical_bounds, wrap_index, bounds,
