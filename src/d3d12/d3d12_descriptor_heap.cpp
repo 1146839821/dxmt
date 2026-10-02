@@ -23,6 +23,8 @@
 #include "dxmt_format.hpp"
 #include "dxmt_sampler.hpp"
 #include "air_sampler_abi.hpp"
+#include "air_texture_abi.hpp"
+#include "dxmt_texture_defaults.hpp"
 #include "log/log.hpp"
 #include "util_env.hpp"
 #include <cmath>
@@ -84,11 +86,7 @@ LookupDescriptorHeap(SIZE_T index) {
   return index < descriptor_heap_registry.size() ? descriptor_heap_registry[index] : nullptr;
 }
 
-struct SRVTextureGPUStorage {
-  uint64_t resource_id;
-  uint64_t metadata;
-  uint64_t padding[2];
-};
+using SRVTextureGPUStorage = air::TextureGPUStorage;
 
 using UAVTextureGPUStorage = SRVTextureGPUStorage;
 
@@ -410,8 +408,11 @@ public:
       auto &texture_view = Texture->view(View);
       msc_texture_views_[Index] = texture_view.texture;
       auto &gpu_storage = mapped_argument_buffer_[Index];
+      gpu_storage.SRVTexture = {}; // CPU-only heap storage is not initially zeroed.
       gpu_storage.SRVTexture.resource_id = texture_view.gpuResourceID;
       gpu_storage.SRVTexture.metadata = TextureMetadata(Texture->arrayLength(View), ResourceMinLODClamp);
+      const auto defaults = TextureOutOfBoundsOneMask(Texture->pixelFormat(View));
+      gpu_storage.SRVTexture.default_components = defaults ? air::PackTextureDefaultComponents(*defaults) : 0;
       SetMSCDescriptor(Index, {0, texture_view.gpuResourceID, std::bit_cast<uint32_t>(ResourceMinLODClamp)});
 
       const auto trace_id = descriptor_texture_debug_count.fetch_add(1, std::memory_order_relaxed);
@@ -551,6 +552,8 @@ public:
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.UAVTexture.resource_id = texture_view.gpuResourceID;
       gpu_storage.UAVTexture.metadata = TextureMetadata(Texture->arrayLength(View), 0);
+      gpu_storage.UAVTexture.default_components = 0;
+      gpu_storage.UAVTexture.padding = 0;
       SetMSCDescriptor(Index, {0, texture_view.gpuResourceID, 0});
     }
     return S_OK;

@@ -53,6 +53,7 @@ struct TextureResourceHandle {
   llvm::Value *Metadata;
   Swizzle Swizzle;
   bool GlobalCoherent;
+  llvm::Value *DefaultComponents = nullptr;
 };
 
 struct BufferResourceHandle {

@@ -5,6 +5,7 @@
 #include <d3dcompiler.h>
 #include "d3d12_device.hpp"
 #include "air_sampler_abi.hpp"
+#include "air_texture_abi.hpp"
 
 #include <cstring>
 #include <fstream>
@@ -12,6 +13,32 @@
 #include <vector>
 #include <algorithm>
 #include <string>
+
+static bool CheckTextureDefaults(WMT::Device device, dxmt::MTLD3D12DescriptorHeap *heap, uint32_t ones) {
+  WMTBufferInfo info = {};
+  info.length = 56;
+  info.options = WMTResourceStorageModeShared;
+  auto readback = device.newBuffer(info);
+  auto queue = device.newCommandQueue(1);
+  if (!readback || !queue || !info.memory.ptr) return false;
+  wmtcmd_blit_copy_from_buffer_to_buffer air = {}, msc = {};
+  air.type = msc.type = WMTBlitCommandCopyFromBufferToBuffer;
+  air.src = heap->GetDescriptorHeapBuffer().handle;
+  msc.src = heap->GetMSCDescriptorHeapBuffer().handle;
+  air.dst = msc.dst = readback.handle;
+  air.copy_length = 32; msc.copy_length = 24; msc.dst_offset = 32;
+  air.next.set(&msc);
+  auto command = queue.commandBuffer();
+  auto encoder = command.blitCommandEncoder();
+  encoder.encodeCommands(reinterpret_cast<const wmtcmd_blit_nop *>(&air));
+  encoder.endEncoding(); command.commit(); command.waitUntilCompleted();
+  if (command.status() != WMTCommandBufferStatusCompleted) return false;
+  uint64_t words[7];
+  std::memcpy(words, info.memory.ptr, sizeof(words));
+  return words[0] && words[1] == (uint64_t(1) << 32) &&
+      words[2] == dxmt::air::PackTextureDefaultComponents(ones) && words[3] == 0 &&
+      words[4] == 0 && words[5] == words[0] && words[6] == 0;
+}
 
 static bool CheckSamplerStorage(WMT::Device device, dxmt::MTLD3D12SamplerDescriptorHeap *heap, bool cleared,
                                 const D3D12_SAMPLER_DESC *desc = nullptr, uint64_t *storage = nullptr) {
@@ -128,6 +155,10 @@ main(int argc, char **argv) {
       !expect_consumer_unsupported && !expect_minlod_unsupported)
     return 2;
   const bool dynamic_switch = argc == 3 && strcmp(argv[2], "--dynamic-switch") == 0;
+  const bool defaults_probe = argc == 3 && (strcmp(argv[2], "--texture-default-rgba") == 0 ||
+      strcmp(argv[2], "--texture-default-r") == 0 || strcmp(argv[2], "--texture-default-swizzle") == 0);
+  const bool defaults_r = defaults_probe && strcmp(argv[2], "--texture-default-rgba") != 0;
+  const bool defaults_swizzle = defaults_probe && strcmp(argv[2], "--texture-default-swizzle") == 0;
   const bool line = argc == 3 && (strcmp(argv[2], "--minimum-1d") == 0 ||
       strcmp(argv[2], "--maximum-1d") == 0 || strcmp(argv[2], "--minimum-1d-grad") == 0 ||
       strcmp(argv[2], "--maximum-1d-grad") == 0 || strcmp(argv[2], "--minimum-1d-array") == 0 ||
@@ -185,7 +216,7 @@ main(int argc, char **argv) {
       argc == 3 && strcmp(argv[2], "--direct-indexed-uav-texture") == 0;
   const bool direct_indexed =
       argc == 3 && (strcmp(argv[2], "--direct-indexed") == 0 || direct_indexed_uav_texture);
-  if (argc >= 3 && !static_sampler && !direct_indexed && !reduction && !observation_probe)
+  if (argc >= 3 && !static_sampler && !direct_indexed && !reduction && !observation_probe && !defaults_probe)
     return 2;
   if (expect_unsupported && !reduction)
     return 2;
@@ -387,7 +418,7 @@ main(int argc, char **argv) {
   texture_desc.Height = line ? 1 : grad_lod ? 8 : reduction ? 2 : 1;
   texture_desc.DepthOrArraySize = line_array ? 2 : 1;
   texture_desc.MipLevels = grad_lod ? 4 : 1;
-  texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  texture_desc.Format = defaults_r ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
   texture_desc.SampleDesc.Count = 1;
   if (!CheckHR(
           "CreateTexture",
@@ -440,9 +471,13 @@ main(int argc, char **argv) {
   }
   upload->Unmap(0, nullptr);
 
-  srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  srv_desc.Format = texture_desc.Format;
   srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
   srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  if (defaults_swizzle)
+    srv_desc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+        D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1,
+        D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0);
   srv_desc.Texture2D.MipLevels = texture_desc.MipLevels;
   srv_desc.Texture2D.ResourceMinLODClamp = expect_minlod_unsupported ? 0.5f : 0.0f;
   if (line_array) {
@@ -457,6 +492,29 @@ main(int argc, char **argv) {
   }
   resource_cpu = resource_heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateShaderResourceView(texture, &srv_desc, resource_cpu);
+  if (defaults_probe) {
+    auto heap = static_cast<dxmt::MTLD3D12DescriptorHeap *>(resource_heap);
+    auto metal = static_cast<dxmt::MTLD3D12Device *>(device)->GetMTLDevice();
+    const uint32_t ones = defaults_swizzle ? 3 : defaults_r ? 8 : 0;
+    if (!CheckTextureDefaults(metal, heap, ones)) {
+      std::cerr << "texture defaults GPU descriptor mismatch\n";
+      goto cleanup;
+    }
+    ID3D12DescriptorHeap *source = nullptr;
+    auto desc = resource_heap_desc;
+    desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    desc.NumDescriptors = 1;
+    if (!CheckHR("CreateTextureCopySource", device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&source)))) goto cleanup;
+    device->CreateShaderResourceView(texture, &srv_desc, source->GetCPUDescriptorHandleForHeapStart());
+    device->CopyDescriptorsSimple(1, resource_cpu, source->GetCPUDescriptorHandleForHeapStart(),
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    source->Release();
+    if (!CheckTextureDefaults(metal, heap, ones)) {
+      std::cerr << "texture defaults CPU-source copy mismatch\n";
+      goto cleanup;
+    }
+    std::cout << "texture defaults GPU descriptor/copy passed: " << ones << "\n";
+  }
 
   uav_desc.Format = dxbc ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_UNKNOWN;
   uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;

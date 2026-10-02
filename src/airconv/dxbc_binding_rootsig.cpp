@@ -23,6 +23,7 @@
 #include "shader_common.hpp"
 #include "llvm/IR/DerivedTypes.h"
 #include <cassert>
+#include <tuple>
 
 namespace dxmt::dxbc {
 
@@ -211,7 +212,7 @@ public:
     return result;
   }
 
-  std::pair<llvm::Value *, llvm::Value *>
+  std::tuple<llvm::Value *, llvm::Value *, llvm::Value *>
   GetTextureDescriptor(
       llvm::air::AIRBuilder &AIR, llvm::Value *IntPtr, llvm::Value *Index, Texture::ResourceKind Kind, RangeId RangeId,
       uint32_t DescriptorOffset
@@ -237,7 +238,11 @@ public:
                 TyTextureDescriptor, B.CreatePointerCast(IntPtr, TyTextureDescriptor->getPointerTo(2)),
                 {IdxDescriptor, AIR.getInt(1) /* metadata */}
             )
-        )
+        ),
+        B.CreateLoad(
+            llvm::Type::getInt64Ty(AIR.getContext()),
+            B.CreateGEP(TyTextureDescriptor, B.CreatePointerCast(IntPtr, TyTextureDescriptor->getPointerTo(2)),
+                {IdxDescriptor, AIR.getInt(2) /* OOB default components */}))
     };
   }
 
@@ -266,9 +271,10 @@ public:
     );
     auto MemoryAccess = SRV.sampled ? Texture::MemoryAccess::access_sample : Texture::MemoryAccess::access_read;
 
-    auto [Handle, Metadata] =
+    auto [Handle, Metadata, DefaultComponents] =
         GetTextureDescriptor(Builder, HeapPointer, Index, ResourceKind, SRV.range.lower_bound, DescriptorOffset);
-    return TextureDescirptor{Handle, Metadata, false, ResourceKind, ResourceKindLogical, MemoryAccess, SampleType};
+    return TextureDescirptor{Handle, Metadata, false, ResourceKind, ResourceKindLogical, MemoryAccess, SampleType,
+        DefaultComponents};
   }
 
   virtual llvm::Optional<TextureDescirptor>
@@ -297,7 +303,7 @@ public:
     auto MemoryAccess = UAV.written
                             ? (UAV.read ? Texture::MemoryAccess::acesss_readwrite : Texture::MemoryAccess::access_write)
                             : Texture::MemoryAccess::access_read;
-    auto [Handle, Metadata] =
+    auto [Handle, Metadata, DefaultComponents] =
         GetTextureDescriptor(Builder, HeapPointer, Index, ResourceKind, UAV.range.lower_bound, DescriptorOffset);
     return TextureDescirptor{Handle,       Metadata,  UAV.global_coherent, ResourceKind, ResourceKindLogical,
                              MemoryAccess, SampleType};

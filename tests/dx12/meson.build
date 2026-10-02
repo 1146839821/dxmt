@@ -21,6 +21,9 @@ executable('dx12_typed_origin_prepare', 'dx12_typed_origin_prepare.cpp',
 
 # Offline experiment; dynamically loads the explicitly selected DXC SDK only.
 if build_machine.system() == 'darwin'
+  air_texture_defaults = executable('air_texture_defaults', 'air_texture_defaults.cpp',
+    native: true, include_directories: include_directories('../../src/airconv', '../../src/dxmt', '../../src/winemetal'))
+  test('air-texture-defaults-unit', air_texture_defaults)
   add_languages('objcpp', native: true)
   executable('air_minmax_gpu', 'air_minmax_gpu.mm', native: true, build_by_default: false,
     objcpp_args: ['-fobjc-arc'],

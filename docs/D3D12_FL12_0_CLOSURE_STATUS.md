@@ -114,6 +114,12 @@ pixel readbacks. Ordinary sampling and existing explicit operations regressions
 pass. Cube, anisotropic, clamps/feedback, DXIL and complete matrix closure still
 remain; opt-in gates and feature-level declarations are unchanged.
 
+Clamp groundwork now transports view-mapped OOB default components through
+unused AIR texture descriptor word 2 (`D3D12_MINMAX_CLAMP_DEFAULTS.md`). Both
+variants pass bounded format constants and real AIR/MSC descriptor storage/copy
+regressions. Actual clamp empty-set lowering is not yet connected, so resource
+and instruction clamp admission remains rejected; this is not MinMax closure.
+
 Prioritize the production typed-buffer origin contract, using
 `D3D12_TYPED_ORIGIN_PRODUCTION_AUDIT.md` as the integration gap list. Keep
 unsupported views rejected until real production readback succeeds. Integrate

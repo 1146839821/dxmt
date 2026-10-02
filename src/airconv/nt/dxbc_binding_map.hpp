@@ -36,6 +36,7 @@ struct TextureDescirptor {
   llvm::air::Texture::ResourceKind ResourceKindLogical;
   llvm::air::Texture::MemoryAccess MemoryAccess;
   llvm::air::Texture::SampleType SampleType;
+  llvm::Value *DefaultComponents = nullptr; // D3D12 AIR descriptor word 2; absent in legacy bindings.
 
 };
 

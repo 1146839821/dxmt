@@ -435,7 +435,7 @@ Converter::LoadTexture(const SrcOperandResource &SrcOp) {
 
   return llvm::Optional<TextureResourceHandle>(
       {texture, descriptor->ResourceKindLogical, descriptor->ResourceHandle, descriptor->Metadata, SrcOp.read_swizzle,
-       descriptor->GlobalCoherent && SupportsMemoryCoherency()}
+       descriptor->GlobalCoherent && SupportsMemoryCoherency(), descriptor->DefaultComponents}
   );
 }
 
