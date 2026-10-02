@@ -83,6 +83,14 @@ builds pass 12 gradient and 8 pixel clamp GPU cases, with qualification/sentinel
 checks preventing false-zero acceptance. This closes bounded AIR operation
 admission, not full MinMax, unknown-format/shape matrices or FL12_0. No promotion.
 
+DXIL follow-up (2026-10-03): internal float Texture2D SampleLevel footprint
+lowering emits actual conditional point taps, scalar component extrema and
+scalar PHIs. Eight offline containers pass full DXC validation, MSC compilation
+and focused native GPU red-channel readbacks (`D3D12_MINMAX_DXIL_LOWERING.md`).
+Root/descriptor/submission qualification and point-view state transport are not
+yet connected; production DXIL reduction remains rejected. No ABI/capability or
+FL promotion, and this is not full MinMax acceptance.
+
 ## Task Analysis
 
 Baseline: `e220380`, branch `feat/d3d12-1`. User requests continued work and

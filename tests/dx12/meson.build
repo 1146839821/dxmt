@@ -38,6 +38,11 @@ if build_machine.system() == 'darwin'
     include_directories: [include_directories('../../src/winemetal/unix'), llvm_include_path_darwin],
     cpp_args: airconv_args, dependencies: [typed_origin_native_dep],
   )
+  executable('dxil_minmax_ir', 'dxil_minmax_ir.cpp',
+    native: true, build_by_default: false,
+    include_directories: [include_directories('../../src/winemetal/unix'), llvm_include_path_darwin],
+    cpp_args: airconv_args, dependencies: [typed_origin_native_dep],
+  )
 endif
 dxil_origin_parser_test = executable('dxil_origin_transform_test', 'dxil_origin_transform_test.cpp', native: true)
 test('dxil-origin-parser-unit', dxil_origin_parser_test)
@@ -120,6 +125,12 @@ if build_machine.system() == 'darwin'
   msc_probe_library = clang.find_library('metalirconverter', dirs: ['/usr/local/lib'], required: false)
   msc_probe_includes = ['-I/usr/local/include']
   if msc_probe_library.found() and clang.has_header('metal_irconverter/metal_irconverter.h', args: msc_probe_includes) and clang.has_header('metal_irconverter_runtime/metal_irconverter_runtime.h', args: msc_probe_includes)
+    executable('dxil_minmax_gpu', 'dxil_minmax_gpu.c',
+      native: true, build_by_default: false,
+      c_args: ['-ObjC', '-fobjc-arc'] + msc_probe_includes,
+      dependencies: [msc_probe_library],
+      link_args: ['-arch', native_compiler_arch, '-framework', 'Foundation', '-framework', 'Metal'],
+    )
     executable('msc_typed_buffer_padding_probe', 'msc_typed_buffer_padding_probe.c',
       native: true, build_by_default: false,
       c_args: ['-ObjC', '-fobjc-arc'] + msc_probe_includes,
