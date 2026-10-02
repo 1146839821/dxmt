@@ -60,6 +60,64 @@ int main() {
         binding.state.address_u != 3 || binding.state.address_v != 3 || binding.state.reserved ||
         binding.point_sampler->lod_bias || binding.ordinary_sampler->lod_bias) return 1;
   }
+  {
+    auto sampler_heap_desc = heap_desc;
+    sampler_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+    ID3D12DescriptorHeap *raw_samplers = nullptr;
+    if (FAILED(device->CreateDescriptorHeap(&sampler_heap_desc, IID_PPV_ARGS(&raw_samplers)))) return 1;
+    OwnedCOM<ID3D12DescriptorHeap> sampler_heap(raw_samplers);
+    auto *samplers = static_cast<dxmt::MTLD3D12SamplerDescriptorHeap *>(sampler_heap.get());
+    auto original = sampler; original.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    device->CreateSampler(&original, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+    std::vector<dxmt::D3D12MinMaxPairSlot> slots(5);
+    for (unsigned i = 0; i < 4; ++i) {
+      // DATA_VOLATILE alone must not make a descriptor live.
+      slots[i].texture_flags = static_cast<D3D12_DESCRIPTOR_RANGE_FLAGS>(
+          D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE | ((i & 1) ? D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE : 0));
+      slots[i].sampler_flags = (i & 2) ? D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE :
+          D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
+    }
+    slots[4] = slots[3]; // Duplicate live slots must share one observation.
+    std::vector<dxmt::D3D12MinMaxPairObservation> observations;
+    if (FAILED(dxmt::RecordD3D12MinMaxPairs(implementation, samplers, slots, observations))) return 1;
+    auto replacement = original; replacement.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT; replacement.MinLOD = .5f;
+    device->CreateSampler(&replacement, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+    auto replacement_srv = srv; replacement_srv.Texture2D.ResourceMinLODClamp = .5f;
+    device->CreateShaderResourceView(resource.get(), &replacement_srv, heap->GetCPUDescriptorHandleForHeapStart());
+    std::vector<dxmt::D3D12MinMaxPairBinding> materialized;
+    for (unsigned repeat = 0; repeat < 2; ++repeat) {
+      if (FAILED(dxmt::MaterializeD3D12MinMaxPairs(metal, implementation, samplers, observations, materialized)) ||
+          materialized.size() != 5) return 1;
+      for (unsigned i = 0; i < 5; ++i) {
+        const unsigned mode = i == 4 ? 3 : i;
+        if (materialized[i].state.resource_clamp != ((mode & 1) ? .5f : .75f) ||
+            materialized[i].state.min_lod != ((mode & 2) ? .5f : .25f) ||
+            materialized[i].state.flags != ((mode & 2) ? 0u : 7u)) return 1;
+      }
+    }
+    const auto old_sampler = materialized[0].point_sampler.ptr();
+    auto invalid = observations; invalid[4].slot.sampler_index = 1;
+    if (dxmt::MaterializeD3D12MinMaxPairs(metal, implementation, samplers, invalid, materialized) != E_INVALIDARG ||
+        materialized[0].point_sampler.ptr() != old_sampler) return 1;
+    invalid = observations;
+    invalid[4].slot.static_sampler = true;
+    invalid[4].slot.static_sampler_descriptor = original;
+    invalid[4].slot.static_sampler_descriptor.Filter = D3D12_FILTER_MAXIMUM_ANISOTROPIC;
+    if (dxmt::MaterializeD3D12MinMaxPairs(metal, implementation, samplers, invalid, materialized) != E_NOTIMPL ||
+        materialized[0].point_sampler.ptr() != old_sampler) return 1;
+    auto invalid_slots = slots; invalid_slots[4].texture_index = 1;
+    if (dxmt::RecordD3D12MinMaxPairs(implementation, samplers, invalid_slots, observations) != E_INVALIDARG ||
+        observations.size() != 5 || observations[0].texture.msc_descriptor.texture_view_id !=
+            captured.msc_descriptor.texture_view_id) return 1;
+    // Static root sampler and static texture need no heap at submission.
+    slots.resize(1); slots[0] = {}; slots[0].static_sampler = true;
+    slots[0].static_sampler_descriptor = original;
+    if (FAILED(dxmt::RecordD3D12MinMaxPairs(implementation, nullptr, slots, observations)) ||
+        FAILED(dxmt::MaterializeD3D12MinMaxPairs(metal, nullptr, nullptr, observations, materialized)) ||
+        materialized[0].state.min_lod != .25f || materialized[0].state.resource_clamp != .5f) return 1;
+    device->CreateShaderResourceView(resource.get(), &srv, heap->GetCPUDescriptorHandleForHeapStart());
+    std::puts("MinMax pair observation PASS: four static/live combinations, duplicate, repeat, atomic failure, static root");
+  }
   auto before = binding;
   for (uint32_t bad = 0; bad < 5; ++bad) {
     auto invalid = captured;

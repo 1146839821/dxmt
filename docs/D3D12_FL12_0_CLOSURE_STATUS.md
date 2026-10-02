@@ -120,6 +120,18 @@ compiler-root/location preparation, not PSO/submission integration or static
 reduction admission. Production DXIL MinMax dispatch and complete GPU acceptance
 remain open; no capability promotion or game benchmark.
 
+Current MinMax integration follow-up (2026-10-03): validated DXIL shader
+preparation, reflected compiler roots, cached native compute variants and
+retained native pair bindings are implemented. Pair-level recording/static and
+submission/volatile observations now pass real heap overwrite regressions in
+both builds (`D3D12_MINMAX_PAIR_OBSERVATION.md`). Application root staging,
+private TLAB/table assembly and command-list/queue Dispatch selection/replay
+remain unconnected. This is not production DXIL MinMax admission or GPU numeric
+dispatch acceptance. Cube/aniso/feedback and broad format/operation acceptance
+are still open. The four implementation workstreams and 1,584 typed case
+executions above remain; seven complete mandatory GPU categories remain
+unregistered. No new game/tessellation benchmark or FL promotion.
+
 ## Task Analysis
 
 Baseline: `e220380`, branch `feat/d3d12-1`. User requests continued work and

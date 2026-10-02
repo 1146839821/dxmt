@@ -23,4 +23,27 @@ struct D3D12MinMaxPairBinding {
 HRESULT PrepareD3D12MinMaxPairBinding(WMT::Device device, const ShaderVisibleDescriptorSnapshot &texture,
     const D3D12_SAMPLER_DESC &sampler, D3D12MinMaxPairBinding &binding);
 
+struct D3D12MinMaxPairSlot {
+  UINT texture_index = 0;
+  UINT sampler_index = 0;
+  D3D12_DESCRIPTOR_RANGE_FLAGS texture_flags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
+  D3D12_DESCRIPTOR_RANGE_FLAGS sampler_flags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
+  bool static_sampler = false;
+  D3D12_SAMPLER_DESC static_sampler_descriptor = {};
+};
+
+struct D3D12MinMaxPairObservation {
+  D3D12MinMaxPairSlot slot;
+  ShaderVisibleDescriptorSnapshot texture;
+  SamplerDescriptorSnapshot sampler;
+};
+
+// Indices/flags must come from the resolved application root. Static root
+// samplers never require a sampler heap. Outputs are atomic on failure.
+HRESULT RecordD3D12MinMaxPairs(MTLD3D12DescriptorHeap *textures, MTLD3D12SamplerDescriptorHeap *samplers,
+    const std::vector<D3D12MinMaxPairSlot> &slots, std::vector<D3D12MinMaxPairObservation> &observations);
+HRESULT MaterializeD3D12MinMaxPairs(WMT::Device device, MTLD3D12DescriptorHeap *textures,
+    MTLD3D12SamplerDescriptorHeap *samplers, const std::vector<D3D12MinMaxPairObservation> &observations,
+    std::vector<D3D12MinMaxPairBinding> &bindings);
+
 } // namespace dxmt

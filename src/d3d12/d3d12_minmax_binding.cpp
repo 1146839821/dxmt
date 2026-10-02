@@ -4,6 +4,7 @@
 #include "dxmt_format.hpp"
 #include <cmath>
 #include <new>
+#include <unordered_map>
 
 namespace dxmt {
 
@@ -44,6 +45,88 @@ HRESULT PrepareD3D12MinMaxPairBinding(WMT::Device device, const ShaderVisibleDes
     candidate.state.resource_clamp = srv.resource_min_lod_clamp;
     candidate.state.default_components = srv.default_components & 15u;
     binding = std::move(candidate);
+    return S_OK;
+  } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+}
+
+static bool Live(D3D12_DESCRIPTOR_RANGE_FLAGS flags) {
+  return (flags & D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE) != 0;
+}
+
+HRESULT RecordD3D12MinMaxPairs(MTLD3D12DescriptorHeap *textures, MTLD3D12SamplerDescriptorHeap *samplers,
+    const std::vector<D3D12MinMaxPairSlot> &slots, std::vector<D3D12MinMaxPairObservation> &observations) {
+  try {
+    if (!textures || slots.empty() || slots.size() > 64) return E_INVALIDARG;
+    std::vector<D3D12MinMaxPairObservation> candidate;
+    std::vector<UINT> texture_indices, sampler_indices;
+    for (const auto &slot : slots) {
+      if (slot.texture_index >= textures->GetDesc().NumDescriptors ||
+          (!slot.static_sampler && (!samplers || slot.sampler_index >= samplers->GetDesc().NumDescriptors)))
+        return E_INVALIDARG;
+      candidate.push_back({slot, {}, {}});
+      if (!Live(slot.texture_flags)) texture_indices.push_back(slot.texture_index);
+      if (!slot.static_sampler && !Live(slot.sampler_flags)) sampler_indices.push_back(slot.sampler_index);
+    }
+    std::vector<ShaderVisibleDescriptorSnapshot> captured_textures;
+    std::vector<SamplerDescriptorSnapshot> captured_samplers;
+    if (!texture_indices.empty()) textures->ResolveDescriptors(texture_indices, captured_textures);
+    if (!sampler_indices.empty()) samplers->ResolveSamplers(sampler_indices, captured_samplers);
+    if (captured_textures.size() != texture_indices.size() || captured_samplers.size() != sampler_indices.size())
+      return E_FAIL;
+    size_t t = 0, s = 0;
+    for (auto &pair : candidate) {
+      if (!Live(pair.slot.texture_flags)) pair.texture = std::move(captured_textures[t++]);
+      if (!pair.slot.static_sampler && !Live(pair.slot.sampler_flags)) {
+        pair.sampler = std::move(captured_samplers[s++]);
+        if (!pair.sampler.sampler) return E_NOTIMPL;
+      }
+    }
+    observations = std::move(candidate);
+    return S_OK;
+  } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+}
+
+HRESULT MaterializeD3D12MinMaxPairs(WMT::Device device, MTLD3D12DescriptorHeap *textures,
+    MTLD3D12SamplerDescriptorHeap *samplers, const std::vector<D3D12MinMaxPairObservation> &observations,
+    std::vector<D3D12MinMaxPairBinding> &bindings) {
+  try {
+    if (!device || observations.empty() || observations.size() > 64) return E_INVALIDARG;
+    std::vector<UINT> texture_indices, sampler_indices;
+    std::unordered_map<UINT, size_t> texture_positions, sampler_positions;
+    for (const auto &pair : observations) {
+      if (Live(pair.slot.texture_flags)) {
+        if (!textures || pair.slot.texture_index >= textures->GetDesc().NumDescriptors) return E_INVALIDARG;
+        if (texture_positions.emplace(pair.slot.texture_index, texture_indices.size()).second)
+          texture_indices.push_back(pair.slot.texture_index);
+      }
+      if (!pair.slot.static_sampler && Live(pair.slot.sampler_flags)) {
+        if (!samplers || pair.slot.sampler_index >= samplers->GetDesc().NumDescriptors) return E_INVALIDARG;
+        if (sampler_positions.emplace(pair.slot.sampler_index, sampler_indices.size()).second)
+          sampler_indices.push_back(pair.slot.sampler_index);
+      }
+    }
+    std::vector<ShaderVisibleDescriptorSnapshot> live_textures;
+    std::vector<SamplerDescriptorSnapshot> live_samplers;
+    if (!texture_indices.empty()) textures->ResolveDescriptors(texture_indices, live_textures);
+    if (!sampler_indices.empty()) samplers->ResolveSamplers(sampler_indices, live_samplers);
+    if (live_textures.size() != texture_indices.size() || live_samplers.size() != sampler_indices.size()) return E_FAIL;
+    // Resolve/retain unique live slots under each heap lock, then construct
+    // native samplers outside the locks. Never reread a static component.
+    std::vector<D3D12MinMaxPairBinding> candidate;
+    candidate.reserve(observations.size());
+    for (const auto &pair : observations) {
+      const auto &texture = Live(pair.slot.texture_flags) ?
+          live_textures[texture_positions.at(pair.slot.texture_index)] : pair.texture;
+      const auto &sampler = !pair.slot.static_sampler && Live(pair.slot.sampler_flags) ?
+          live_samplers[sampler_positions.at(pair.slot.sampler_index)] : pair.sampler;
+      if (!pair.slot.static_sampler && !sampler.sampler) return E_NOTIMPL;
+      D3D12MinMaxPairBinding binding;
+      const auto hr = PrepareD3D12MinMaxPairBinding(device, texture,
+          pair.slot.static_sampler ? pair.slot.static_sampler_descriptor : sampler.descriptor, binding);
+      if (FAILED(hr)) return hr;
+      candidate.push_back(std::move(binding));
+    }
+    bindings = std::move(candidate);
     return S_OK;
   } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
 }
