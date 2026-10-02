@@ -572,8 +572,10 @@ class GateTests(unittest.TestCase):
         probes = self.probes()
         probes["minmax_sampler_contract"] = {"status": gate.PASS}
         requirements = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
-        self.assertEqual(next(row["status"] for row in requirements
-                              if row["name"] == "min_max_reduction_filtering"), gate.BLOCKED)
+        reduction = next(row for row in requirements if row["name"] == "min_max_reduction_filtering")
+        self.assertEqual(reduction["status"], gate.BLOCKED)
+        self.assertIn("opt-in AIR subset exists", reduction["reason"])
+        self.assertIn("GPU acceptance incomplete", reduction["reason"])
 
     def test_minmax_missing_or_failed_contract_cannot_pass(self):
         for status in (gate.FAIL, gate.UNVERIFIED):

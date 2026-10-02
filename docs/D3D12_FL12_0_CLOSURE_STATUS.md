@@ -1,5 +1,63 @@
 # FL12_0 closure checkpoint
 
+## Current snapshot (2026-10-02, baseline 89d0180)
+
+This section supersedes the historical checkpoints below. The implementation
+is not yet in a tests-only closure phase. No percentage or completion date can
+be justified while required semantics are still missing.
+
+Task Analysis for this refresh:
+
+- Hypothesis: stale checkpoint wording understates implemented AIR MinMax paths
+  and understates the existing typed-view acceptance workload.
+- Evidence: current OPTIONS still disables additional typed UAV loads and tiled
+  resources; no-private also disables LogicOp. The gate requires 144 base, 126
+  UAV-view and 126 SRV-view cases per backend, and seven unregistered GPU matrices.
+- Expected effect: separate production gaps, existing reruns and undefined new
+  matrix coverage so subsequent tasks target missing behavior first.
+- Risk: required case counts are acceptance targets, not fresh passing results;
+  focused opt-in AIR readbacks do not establish complete MinMax support.
+- Validation: source/gate audit and gate unit regression; no new GPU acceptance.
+
+| Production gap | Current boundary | Next closure work |
+| --- | --- | --- |
+| Typed UAV | Production origin lowering and bounded direct/non-updating-indirect probes exist; additional-format declaration remains FALSE | Default production enablement, remaining indirect/provenance/view/lifetime contracts, then complete matrices |
+| MinMax | Opt-in AIR SampleLevel/SampleGrad and pixel Sample/SampleBias support float non-anisotropic 1D/array, 2D/array and 3D; OOB defaults are transported only | Actual clamp/empty-set lowering, unknown/null descriptor rejection and cache audit; cube, anisotropic, feedback and DXIL implementation remain open |
+| Tiled Tier 2 | Declared NOT_SUPPORTED | Packed mips, mapping, feedback, filtering/LOD, lifetime and synchronization closure |
+| LogicOp (no-private) | OPTIONS reports FALSE in this variant | Implement a compliant path or explicitly exclude this variant from the FL12_0 claim; tests alone cannot close this gap |
+
+Binding and normal-build LogicOp still need full semantic acceptance. ROV and
+conservative rasterization remain later FL12_1 work, not FL12_0 prerequisites.
+
+### Remaining test workload: known versus not yet bounded
+
+- Existing typed matrices: 144 base + 126 UAV-view + 126 SRV-view = 396 cases
+  per backend/variant. Both backends and both builds require **1,584 case
+  executions**, excluding policy/API/residency probes and future contracts.
+  These are reruns of existing cases, not 1,584 new tests or verified passes.
+- Seven complete GPU categories are still unregistered in the closure gate:
+  raster, formats, mandatory DXBC shaders, mandatory DXIL shaders, DXBC
+  tessellation, DXIL tessellation, and geometry/stream output. They need
+  explicit coverage dimensions and independent readback oracles before a
+  defensible total of new cases can be given.
+- MinMax, tiled, binding/LogicOp, synchronization/lifetime and fresh game
+  regressions are additional acceptance work, not included in those 1,584.
+  Compiler-failure tests, host units and a running game process cannot replace
+  these GPU semantics or prove tessellation/performance acceptance.
+
+Execution order remains gaps first: wire actual AIR clamp behavior next,
+including empty-set defaults and static-recording/live-submission validation;
+then close remaining MinMax/backend and typed contracts, resolve tiled Tier 2,
+and run the complete acceptance matrices. Add only focused regressions needed
+to validate each implementation change during this phase. Do not repeat full
+matrices after every descriptor/ABI preparation checkpoint.
+
+Task Result: refreshed current status and corrected the gate's stale MinMax
+diagnostic without changing any gate status or capability. Gate units pass
+55/55. Main-agent Standards/Spec self-review only; independent review remains
+unavailable. No production lowering, runtime deployment or game test in this
+refresh.
+
 ## Task Analysis
 
 Baseline: `e220380`, branch `feat/d3d12-1`. User requests continued work and

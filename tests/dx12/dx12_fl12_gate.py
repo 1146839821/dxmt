@@ -419,7 +419,7 @@ def build_report(probes, variant, provenance=None):
     fl0.append(row("min_max_reduction_filtering",
                    BLOCKED if minmax and minmax["status"] == PASS else
                    minmax["status"] if minmax else UNVERIFIED,
-                   "rejection contract only; full min/max shader implementation absent"))
+                   "rejection contract only; opt-in AIR subset exists, full min/max GPU acceptance incomplete"))
     for name in ("mandatory_raster_matrix", "mandatory_format_matrix",
                  "dxbc_mandatory_shader_paths", "dxil_mandatory_shader_paths",
                  "dxbc_tessellation", "dxil_tessellation", "geometry_shader_stream_output"):
