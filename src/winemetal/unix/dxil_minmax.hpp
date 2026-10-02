@@ -31,7 +31,7 @@ struct ReductionSampleState {
 bool LowerReductionSampleLevel(llvm::CallInst &sample,
     const ReductionSampleState &state, std::string &error, unsigned spatial_dimensions = 2);
 
-// Emit the view-relative isotropic LOD before a qualified float 1D/2D (or array)
+// Emit the view-relative isotropic LOD before a qualified float 1D/2D/3D (or array)
 // SampleGrad. Mirrors AIR's normalized major-axis algorithm. The caller still
 // applies sampler bias/clamps and instruction/resource clamps in API order.
 // This helper does not rewrite or admit the sampling operation itself.

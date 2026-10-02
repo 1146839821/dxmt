@@ -264,7 +264,7 @@ int main(int argc, char **argv) {
   if (dxmt::dxil::CreateReductionGradientLOD(*gradient_call, error) || error.empty() ||
       gradient_function->getEntryBlock().size() != instructions_before || module.size() != declarations_before) return 1;
   gradient_call->setArgOperand(0, builder.getInt32(63));
-  if (dxmt::dxil::CreateReductionGradientLOD(*gradient_call, error, 3) || error.empty() ||
+  if (dxmt::dxil::CreateReductionGradientLOD(*gradient_call, error, 4) || error.empty() ||
       gradient_function->getEntryBlock().size() != instructions_before || module.size() != declarations_before) return 1;
   auto *gradient_lod = dxmt::dxil::CreateReductionGradientLOD(*gradient_call, error);
   if (!gradient_lod || !error.empty()) { errs() << error; return 1; }
@@ -284,6 +284,28 @@ int main(int argc, char **argv) {
     log_calls += opcode == 23;
   }
   if (abs_calls != 4 || sqrt_calls != 1 || log_calls != 2 || dimension_calls != 1 || verifyModule(module, &errs())) return 1;
+  auto *volume = Function::Create(FunctionType::get(f32,
+      {handle, handle, f32, f32, f32, f32, f32, f32}, false), Function::ExternalLinkage, "gradient3d", module);
+  builder.SetInsertPoint(BasicBlock::Create(context, "entry", volume));
+  auto *volume_call = builder.CreateCall(gradient, {builder.getInt32(63), volume->getArg(0), volume->getArg(1),
+      ConstantFP::get(f32, 0.5), ConstantFP::get(f32, 0.5), ConstantFP::get(f32, 0.5), UndefValue::get(f32),
+      builder.getInt32(0), builder.getInt32(0), builder.getInt32(0), volume->getArg(2), volume->getArg(3),
+      volume->getArg(4), volume->getArg(5), volume->getArg(6), volume->getArg(7), UndefValue::get(f32)});
+  auto *volume_return = builder.CreateRet(ConstantFP::get(f32, 0));
+  auto *volume_lod = dxmt::dxil::CreateReductionGradientLOD(*volume_call, error, 3);
+  if (!volume_lod || !error.empty()) { errs() << error; return 1; }
+  volume_return->setOperand(0, volume_lod);
+  unsigned volume_abs = 0, depth_reads = 0;
+  for (auto &instruction : volume->getEntryBlock()) {
+    if (auto *fp = dyn_cast<FPMathOperator>(&instruction)) if (fp->getFastMathFlags().any()) return 1;
+    if (auto *extract = dyn_cast<ExtractValueInst>(&instruction))
+      if (extract->getAggregateOperand()->getType() == StructType::getTypeByName(context, "dx.types.Dimensions") &&
+          extract->getNumIndices() == 1 && *extract->idx_begin() == 2) ++depth_reads;
+    if (auto *operation = dyn_cast<CallInst>(&instruction))
+      if (operation->getCalledFunction() && operation->getCalledFunction()->getName() == "dx.op.unary.f32" &&
+          cast<ConstantInt>(operation->getArgOperand(0))->getZExtValue() == 6) ++volume_abs;
+  }
+  if (volume_abs != 6 || depth_reads != 1 || verifyModule(module, &errs())) return 1;
   module.print(outs(), nullptr);
   return 0;
 }

@@ -53,7 +53,7 @@ llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &err
   using namespace llvm;
   error.clear();
   auto reject = [&](const char *reason) -> Value * { error = reason; return nullptr; };
-  if (spatial_dimensions != 1 && spatial_dimensions != 2) return reject("expected one or two spatial dimensions");
+  if (spatial_dimensions < 1 || spatial_dimensions > 3) return reject("expected one to three spatial dimensions");
   auto *callee = sample.getCalledFunction();
   if (!callee || callee->getName() != "dx.op.sampleGrad.f32" || sample.arg_size() != 17 ||
       !IsFloat4Status(sample.getType())) return reject("expected float SampleGrad signature");
@@ -96,7 +96,7 @@ llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &err
   auto max = [&](Value *x, Value *y) { return b.CreateCall(binary, {b.getInt32(FMax), x, y}); };
   auto fp = [&](float value) { return ConstantFP::get(f32, value); };
   auto *size = b.CreateCall(dimensions, {b.getInt32(GetDimensions), sample.getArgOperand(1), b.getInt32(0)});
-  std::array<Value *, 2> dx, dy;
+  std::array<Value *, 3> dx, dy;
   Value *scale = fp(0);
   for (unsigned axis = 0; axis < spatial_dimensions; ++axis) {
     auto *extent = b.CreateUIToFP(b.CreateExtractValue(size, axis), f32);
