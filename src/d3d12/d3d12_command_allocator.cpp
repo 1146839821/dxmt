@@ -17,6 +17,7 @@
  */
 
 #include "d3d12_command_allocator.hpp"
+#include "d3d12_typed_origin_pipeline.hpp"
 #include "com/com_pointer.hpp"
 
 namespace dxmt {
@@ -179,7 +180,9 @@ MTLD3D12CommandAllocatorImpl::DiscardRecord() {
 }
 
 IndirectComputeCommandData *
-MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount) {
+MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount,
+    const D3D12TypedOriginComputeVariant *variant) {
+  const auto threadgroup_size = variant ? variant->threadgroup_size : pPSO->threadgroup_size;
   WMTIndirectCommandBufferInfo info;
   info.inherit_buffers = !pCmdSig->UpdateRootArguments;
   info.inherit_pso = 1;
@@ -214,9 +217,9 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
 
   data->cmd_buf = info.gpu_resource_id;
   data->max_count = MaxCount;
-  data->tgsize_x = pPSO->threadgroup_size.width;
-  data->tgsize_y = pPSO->threadgroup_size.height;
-  data->tgsize_z = pPSO->threadgroup_size.depth;
+  data->tgsize_x = threadgroup_size.width;
+  data->tgsize_y = threadgroup_size.height;
+  data->tgsize_z = threadgroup_size.depth;
 
   {
     // populated outside
@@ -254,8 +257,8 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
 
     auto &cmd_setpso = EncodeComputeCommand<wmtcmd_compute_setpso>();
     cmd_setpso.type = WMTComputeCommandSetPSO;
-    cmd_setpso.pso = pPSO->pso;
-    cmd_setpso.threadgroup_size = pPSO->threadgroup_size; // not really used
+    cmd_setpso.pso = variant ? variant->pso : pPSO->pso;
+    cmd_setpso.threadgroup_size = threadgroup_size; // not really used
   }
 
   auto &cmd = EncodeComputeCommand<wmtcmd_compute_executecommands>();

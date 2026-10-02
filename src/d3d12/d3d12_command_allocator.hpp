@@ -26,6 +26,8 @@
 
 namespace dxmt {
 
+struct D3D12TypedOriginComputeVariant;
+
 constexpr auto kCPUHeapSize = 0x400000u;
 constexpr auto kGPUHeapSize = 0x2000000u;
 
@@ -361,7 +363,8 @@ public:
     return {ptr_add(gpu_heap_, aligned), aligned};
   }
 
-  IndirectComputeCommandData *EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount);
+  IndirectComputeCommandData *EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount,
+      const D3D12TypedOriginComputeVariant *variant = nullptr);
 
   IndirectRenderCommandData *EncodeIndirectRenderCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12GraphicsPipelineState *pPSO, size_t MaxCount);
 };

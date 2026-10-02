@@ -3342,7 +3342,9 @@ public:
   }
 
   bool
-  PreDispatch(bool SkipResourceBinding = false, bool AllowTypedOrigin = false) {
+  PreDispatch(bool SkipResourceBinding = false, bool AllowTypedOrigin = false,
+      const D3D12TypedOriginComputeVariant **selected_variant = nullptr) {
+    if (selected_variant) *selected_variant = nullptr;
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Compute) {
       allocator_->InvalidateCurrentPass();
       auto compute = allocator_->AllocatePass<ComputeEncoderData>();
@@ -3514,6 +3516,7 @@ public:
           " resource_uses=", indirect_resources_used_.size(), " encode_msc_uses=", encode_msc_resource_uses
       );
 
+    if (!recording_failed_ && selected_variant) *selected_variant = origin_variant;
     return !recording_failed_;
   }
 
@@ -5455,7 +5458,8 @@ public:
       if (predication_buffer_ &&
           !EncodePredicationCount(count_buffer, CountBufferOffset, MaxCommandCount, filtered_count_buffer_address))
         return;
-      if (!PreDispatch(sig->UpdateRootArguments))
+      const D3D12TypedOriginComputeVariant *origin_variant = nullptr;
+      if (!PreDispatch(sig->UpdateRootArguments, !sig->UpdateRootArguments, &origin_variant))
         return;
 
       if (indirect_residency_) {
@@ -5464,7 +5468,7 @@ public:
           EncodeComputeResourceUse(count_buffer->buffer->current()->buffer().handle, WMTResourceUsageRead);
       }
 
-      auto cmd = allocator_->EncodeIndirectComputeCommand(sig, pso_compute_.ptr(), MaxCommandCount);
+      auto cmd = allocator_->EncodeIndirectComputeCommand(sig, pso_compute_.ptr(), MaxCommandCount, origin_variant);
       if (!cmd) {
         FailRecording(__func__, "indirect compute command allocation failed");
         return;

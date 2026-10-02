@@ -113,10 +113,12 @@ static void Transition(ID3D12GraphicsCommandList *list, ID3D12Resource *resource
 }
 
 enum class ViewCase { Normal, Copied, Updated, InitiallyUnavailable, Rejected, StaticUpdated, Repeated, InvalidKind };
+enum class DispatchMode { Direct, Indirect };
 
 static bool RunCase(ID3D12Device *device, ID3D12CommandQueue *queue, ID3D12RootSignature *root,
                     const std::vector<char> &shader, const Format &f, unsigned shape, unsigned first_element,
-                    ViewCase view_case = ViewCase::Normal, bool read_only = false) {
+                    ViewCase view_case = ViewCase::Normal, bool read_only = false,
+                    DispatchMode dispatch_mode = DispatchMode::Direct) {
   Object<ID3D12Resource> input, upload, output, readback;
   Object<ID3D12CommandAllocator> allocator;
   Object<ID3D12GraphicsCommandList> list;
@@ -125,6 +127,8 @@ static bool RunCase(ID3D12Device *device, ID3D12CommandQueue *queue, ID3D12RootS
   Object<ID3D12Fence> fence;
   Object<ID3D12Resource> repeated_output, repeated_readback;
   Object<ID3D12Fence> launch_gate;
+  Object<ID3D12Resource> indirect_arguments;
+  Object<ID3D12CommandSignature> indirect_signature;
   struct ReleaseGate {
     ID3D12Fence *fence = nullptr;
     ~ReleaseGate() { if (fence) fence->Signal(1); }
@@ -261,7 +265,26 @@ static bool RunCase(ID3D12Device *device, ID3D12CommandQueue *queue, ID3D12RootS
   ID3D12DescriptorHeap *heaps[] = {descriptors.p};
   list->SetDescriptorHeaps(1, heaps); list->SetComputeRootSignature(root);
   list->SetComputeRootDescriptorTable(0, descriptors->GetGPUDescriptorHandleForHeapStart());
-  list->Dispatch(1, 1, 1);
+  if (dispatch_mode == DispatchMode::Indirect) {
+    D3D12_INDIRECT_ARGUMENT_DESC argument = {};
+    argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    D3D12_COMMAND_SIGNATURE_DESC signature = {};
+    signature.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
+    signature.NumArgumentDescs = 1;
+    signature.pArgumentDescs = &argument;
+    if (!CheckHR("CreateIndirectSignature", device->CreateCommandSignature(&signature, nullptr,
+            IID_PPV_ARGS(&indirect_signature.p))) ||
+        !CreateResource(device, D3D12_HEAP_TYPE_UPLOAD, BufferDesc(sizeof(D3D12_DISPATCH_ARGUMENTS)),
+            D3D12_RESOURCE_STATE_GENERIC_READ, indirect_arguments)) return false;
+    void *mapped = nullptr;
+    if (!CheckHR("MapIndirectArguments", indirect_arguments->Map(0, nullptr, &mapped))) return false;
+    const D3D12_DISPATCH_ARGUMENTS groups = {1, 1, 1};
+    std::memcpy(mapped, &groups, sizeof(groups));
+    indirect_arguments->Unmap(0, nullptr);
+    list->ExecuteIndirect(indirect_signature.p, 1, indirect_arguments.p, 0, nullptr, 0);
+  } else {
+    list->Dispatch(1, 1, 1);
+  }
   Transition(list.p, output.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
   Transition(list.p, input.p, input_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
   list->CopyBufferRegion(readback.p, 0, output.p, 0, 64);
@@ -453,10 +476,10 @@ int main(int argc, char **argv) {
     if (shader.empty() || format == std::end(formats)) return 1;
     const ViewCase cases[] = {ViewCase::Normal, ViewCase::Copied, ViewCase::StaticUpdated,
         ViewCase::Updated, ViewCase::InitiallyUnavailable, ViewCase::Repeated, ViewCase::InvalidKind};
-    for (const auto mode : cases) {
+    for (const auto dispatch_mode : {DispatchMode::Direct, DispatchMode::Indirect}) for (const auto mode : cases) {
       const bool live = mode == ViewCase::Updated || mode == ViewCase::InitiallyUnavailable || mode == ViewCase::Repeated;
-      const bool ok = RunCase(device.p, queue.p, live ? root.p : static_root.p, shader, *format, 0, 4, mode);
-      std::cout << "origin contract mode=" << static_cast<unsigned>(mode) << " " << (ok ? "PASS" : "FAIL") << "\n";
+      const bool ok = RunCase(device.p, queue.p, live ? root.p : static_root.p, shader, *format, 0, 4, mode, false, dispatch_mode);
+      std::cout << "origin contract indirect=" << (dispatch_mode == DispatchMode::Indirect) << " mode=" << static_cast<unsigned>(mode) << " " << (ok ? "PASS" : "FAIL") << "\n";
       ok ? ++passed : ++failed;
     }
     std::cout << "typed origin focused contracts: passed=" << passed << " failed=" << failed << "\n";

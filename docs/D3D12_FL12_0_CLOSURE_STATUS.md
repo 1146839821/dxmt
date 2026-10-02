@@ -49,8 +49,11 @@ lowering, reflected compiler roots, cached native compute PSOs and opt-in direct
 dispatch submission bindings are now connected. Both build variants pass seven
 focused GPU contracts, including distinguishable repeated in-flight execution.
 See `D3D12_TYPED_ORIGIN_DISPATCH_BINDING.md`. This does not close complete typed
-UAV support: default enablement, indirect integration, shader provenance coverage
-and the full format/view matrices remain outstanding. Min/Max, tiled Tier 2 and
+UAV support: default enablement, full indirect integration, shader provenance coverage
+and the full format/view matrices remain outstanding. Non-updating indirect
+compute is now connected and passes the same seven focused contracts in both
+builds (`D3D12_TYPED_ORIGIN_INDIRECT.md`); broader indirect combinations remain
+unverified. Min/Max, tiled Tier 2 and
 the seven mandatory GPU matrix categories remain closure work; no FL promotion.
 
 Prioritize the production typed-buffer origin contract, using
