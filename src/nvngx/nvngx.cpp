@@ -46,7 +46,7 @@ struct TemporalParameters {
   float motion_vector_scale_y = 1.0f;
   float jitter_offset_x = 0.0f;
   float jitter_offset_y = 0.0f;
-  float pre_exposure = 0.0f;
+  float pre_exposure = 1.0f;
 };
 
 static NVNGX_RESULT NVNGX_DLSS_GetOptimalSettingsCallback(NVNGXParameter *params);
