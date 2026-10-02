@@ -112,12 +112,15 @@ int wmain(int argc, wchar_t **argv) {
   upload_list->ResourceBarrier(2, barriers);
   if (!Check(upload_list->Close(), "upload close") || !complete(upload_list.get(), 1)) return 1;
   UINT64 serial = 1;
-  for (unsigned mode = 0; mode < 6; ++mode) {
+  for (unsigned mode = 0; mode < 11; ++mode) {
     if (typed_rejection && mode != 0 && mode != 4) continue;
-    const bool legacy = mode == 4, use_static = mode == 5;
+    const bool legacy = mode == 4 || mode == 10, use_static = mode >= 5;
+    const bool texture_live = legacy || (!use_static && (mode & 1));
+    const UINT static_first = mode == 5 ? 128 : mode == 7 || mode == 10 ? 240 : 16;
+    const UINT static_second = mode == 5 || mode == 9 ? 128 : mode == 6 || mode == 10 ? 16 : 240;
     D3D12_DESCRIPTOR_RANGE1 ranges[] = {
         {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0,
-            (mode & 1) ? D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE : D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 2},
+            texture_live ? D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE : D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 2},
         {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND},
         {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 2, 0, 0,
             (mode & 2) ? D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE : D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 1}};
@@ -127,8 +130,18 @@ int wmain(int argc, wchar_t **argv) {
     D3D12_STATIC_SAMPLER_DESC statics[2] = {};
     for (unsigned i = 0; i < 2; ++i) {
       statics[i].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+      if (mode >= 6) {
+        const UINT expected = i ? static_second : static_first;
+        statics[i].Filter = expected == 16 ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR :
+            expected == 240 ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+      }
       statics[i].AddressU = statics[i].AddressV = statics[i].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
       statics[i].MaxLOD = D3D12_FLOAT32_MAX; statics[i].ShaderRegister = i;
+      if (mode == 6) {
+        statics[i].MinLOD = -0.5f; statics[i].MaxLOD = 0.25f; statics[i].MipLODBias = -0.5f;
+      } else if (mode == 7) {
+        statics[i].MaxLOD = 0; statics[i].MipLODBias = 0.25f;
+      }
     }
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC rs = {}; rs.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     rs.Desc_1_1 = {use_static ? 1u : 2u, parameters, use_static ? 2u : 0u, use_static ? statics : nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
@@ -139,18 +152,50 @@ int wmain(int argc, wchar_t **argv) {
           ranges[i].BaseShaderRegister, ranges[i].RegisterSpace, ranges[i].OffsetInDescriptorsFromTableStart};
       for (auto &p : old_parameters) p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
       old_parameters[0].DescriptorTable = {2, old_ranges}; old_parameters[1].DescriptorTable = {1, old_ranges + 2};
-      rs.Version = D3D_ROOT_SIGNATURE_VERSION_1_0; rs.Desc_1_0 = {2, old_parameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+      rs.Version = D3D_ROOT_SIGNATURE_VERSION_1_0;
+      rs.Desc_1_0 = {use_static ? 1u : 2u, old_parameters, use_static ? 2u : 0u,
+          use_static ? statics : nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
     }
     ID3DBlob *raw_blob = nullptr;
     if (!Check(D3D12SerializeVersionedRootSignature(&rs, &raw_blob, nullptr), "serialize")) return 1;
     OwnedCOM<ID3DBlob> blob(raw_blob);
+    if (mode >= 6) {
+      SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr);
+      ID3D12RootSignature *rejected = nullptr;
+      const auto hr = device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&rejected));
+      SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", argv[3]);
+      OwnedCOM<ID3D12RootSignature> owned_rejected(rejected);
+      if (hr != E_NOTIMPL || rejected) return 1;
+    }
     ID3D12RootSignature *raw_root = nullptr;
     if (!Check(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&raw_root)), "root")) return 1;
     OwnedCOM<ID3D12RootSignature> root(raw_root);
+    if (mode >= 6) {
+      auto *native = static_cast<dxmt::MTLD3D12RootSignature *>(root.get());
+      const void *original = nullptr;
+      if (native->GetBlob(&original) != blob->GetBufferSize() ||
+          std::memcmp(original, blob->GetBufferPointer(), blob->GetBufferSize()) ||
+          native->InitializeMSCLayout() != E_NOTIMPL) return 1;
+      const dxmt::D3D12TypedOriginRoot *typed = nullptr;
+      if (native->GetTypedOriginCompilerRoot(&typed) != E_NOTIMPL || typed) return 1;
+    }
     D3D12_COMPUTE_PIPELINE_STATE_DESC pso_desc = {}; pso_desc.pRootSignature = root.get(); pso_desc.CS = {shader.data(), shader.size()};
+    if (mode >= 6) {
+      SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr);
+      ID3D12PipelineState *rejected = nullptr;
+      const auto hr = device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&rejected));
+      SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", argv[3]);
+      OwnedCOM<ID3D12PipelineState> owned_rejected(rejected);
+      if (hr != E_NOTIMPL || rejected) return 1;
+    }
     ID3D12PipelineState *raw_pso = nullptr;
     if (!Check(device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&raw_pso)), "pso")) return 1;
     OwnedCOM<ID3D12PipelineState> pso(raw_pso);
+    if (mode >= 6) {
+      auto *native = static_cast<dxmt::MTLD3D12ComputePipelineState *>(pso.get());
+      const dxmt::D3D12TypedOriginComputeVariant *typed = nullptr;
+      if (!native->requires_minmax_variant || native->GetTypedOriginVariant(argv[3], &typed) != E_NOTIMPL || typed) return 1;
+    }
     D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 4, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
     ID3D12DescriptorHeap *raw_resources = nullptr, *raw_samplers = nullptr;
     if (!Check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&raw_resources)), "resources")) return 1;
@@ -200,6 +245,22 @@ int wmain(int argc, wchar_t **argv) {
     list->SetDescriptorHeaps(use_static ? 1 : 2, heaps); list->SetComputeRootSignature(root.get());
     list->SetComputeRootDescriptorTable(0, resources->GetGPUDescriptorHandleForHeapStart());
     if (!use_static) list->SetComputeRootDescriptorTable(1, samplers->GetGPUDescriptorHandleForHeapStart());
+    if (mode >= 6) {
+      ID3D12CommandAllocator *bad_allocator = nullptr;
+      if (!Check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&bad_allocator)), "gate allocator")) return 1;
+      OwnedCOM<ID3D12CommandAllocator> owned_allocator(bad_allocator);
+      ID3D12GraphicsCommandList *bad_list = nullptr;
+      if (!Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, bad_allocator, pso.get(), IID_PPV_ARGS(&bad_list)), "gate list")) return 1;
+      OwnedCOM<ID3D12GraphicsCommandList> owned_list(bad_list);
+      bad_list->SetDescriptorHeaps(1, heaps); bad_list->SetComputeRootSignature(root.get());
+      bad_list->SetComputeRootDescriptorTable(0, resources->GetGPUDescriptorHandleForHeapStart());
+      SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr);
+      bad_list->Dispatch(1, 1, 1);
+      const auto rejected = bad_list->Close();
+      SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", argv[3]);
+      if (rejected != E_FAIL) return 1;
+      std::printf("MINMAX_STATIC_GATE mode=%u root/PSO/layout/typed/recording rejection PASS\n", mode);
+    }
     list->Dispatch(1, 1, 1);
     D3D12_RESOURCE_BARRIER barrier = {}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition = {output.get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE};
@@ -221,6 +282,23 @@ int wmain(int argc, wchar_t **argv) {
         recorded = compute->minmax_dispatches[0].get();
       }
     if (!recorded || recorded->variant->bindings.size() != pairs) return 1;
+    if (use_static) {
+      if (recorded->static_samplers.size() != 2) return 1;
+      for (unsigned i = 0; i < 2; ++i)
+        if (recorded->static_samplers[i].Filter != statics[i].Filter ||
+            recorded->static_samplers[i].MinLOD != statics[i].MinLOD ||
+            recorded->static_samplers[i].MaxLOD != statics[i].MaxLOD ||
+            recorded->static_samplers[i].MipLODBias != statics[i].MipLODBias) return 1;
+      std::shared_ptr<dxmt::D3D12MinMaxSubmissionBinding> prepared;
+      if (!Check(dxmt::MaterializeD3D12MinMaxDispatch(static_cast<dxmt::MTLD3D12Device *>(device.get()), *recorded, prepared), "static state") ||
+          !prepared || prepared->pairs.size() != pairs) return 1;
+      for (unsigned i = 0; i < pairs; ++i)
+        if (prepared->pairs[i].state.min_lod != statics[i].MinLOD ||
+            prepared->pairs[i].state.max_lod != statics[i].MaxLOD) return 1;
+      const void *original = nullptr;
+      if (static_cast<dxmt::MTLD3D12RootSignature *>(root.get())->GetBlob(&original) != blob->GetBufferSize() ||
+          std::memcmp(original, blob->GetBufferPointer(), blob->GetBufferSize())) return 1;
+    }
     if (typed_rejection) {
       std::shared_ptr<dxmt::D3D12MinMaxSubmissionBinding> binding;
       if (dxmt::MaterializeD3D12MinMaxDispatch(static_cast<dxmt::MTLD3D12Device *>(device.get()), *recorded, binding) != E_NOTIMPL || binding) {
@@ -230,13 +308,15 @@ int wmain(int argc, wchar_t **argv) {
     }
     for (const auto &table : recorded->tables)
       for (const auto &slot : table.slots) if (slot.populated) {
-        const bool live = legacy || (table.sampler ? (mode & 2) : (table.slots.size() > 2 && &slot == &table.slots[2] && (mode & 1)));
+        const bool live = legacy || (table.sampler ? (mode & 2) : (table.slots.size() > 2 && &slot == &table.slots[2] && texture_live));
         if (slot.live != live) return 1;
       }
+    if (mode >= 6) {
+      root.reset(); pso.reset(); // Closed commands and the private dispatch own both.
+    }
     for (unsigned iteration = 0; iteration < 3; ++iteration) {
       const D3D12_FILTER filters[] = {D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR, D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR, D3D12_FILTER_MIN_MAG_MIP_LINEAR};
       set_samplers(filters[iteration]);
-      const bool texture_live = legacy || (mode & 1);
       if (texture_live) {
         srv.Texture2D.ResourceMinLODClamp = iteration == 1 ? 1.1f : 0;
         device->CreateShaderResourceView(texture.get(), &srv, cpu);
@@ -245,9 +325,9 @@ int wmain(int argc, wchar_t **argv) {
       if (!Check(readback->Map(0, nullptr, &mapped), "map")) return 1;
       UINT values[4]; std::memcpy(values, mapped, sizeof(values)); readback->Unmap(0, nullptr);
       const bool empty = texture_live && iteration == 1;
-      const UINT first = empty ? 0 : use_static ? 128 : (legacy || (mode & 2)) ?
+      const UINT first = empty ? 0 : use_static ? static_first : (legacy || (mode & 2)) ?
           (iteration == 0 ? 16 : iteration == 1 ? 240 : 128) : 16;
-      const UINT second = empty ? 0 : use_static ? 128u : 240u;
+      const UINT second = empty ? 0 : use_static ? static_second : 240u;
       for (unsigned i = 0; i < (pairs == 2 ? 4u : 1u); ++i)
         if (values[i] != (i & 1 ? second : first)) {
           std::printf("numeric mismatch mode=%u repeat=%u component=%u value=%u expected=%u\n", mode, iteration, i, values[i], i & 1 ? second : first); return 1;
@@ -296,7 +376,8 @@ int wmain(int argc, wchar_t **argv) {
       std::memcpy(values[1], mapped, 16); readback->Unmap(0, nullptr);
       for (unsigned execution = 0; execution < 2; ++execution)
         for (unsigned i = 0; i < (pairs == 2 ? 4u : 1u); ++i) {
-          const UINT expected = use_static ? 128 : (i & 1) || (execution && sampler_live) ? 240 : 16;
+          const UINT expected = use_static ? (i & 1 ? static_second : static_first) :
+              (i & 1) || (execution && sampler_live) ? 240 : 16;
           if (values[execution][i] != expected) {
             std::printf("in-flight mismatch mode=%u execution=%u component=%u actual=%u expected=%u\n",
                 mode, execution, i, values[execution][i], expected); return 1;
@@ -414,6 +495,6 @@ int wmain(int argc, wchar_t **argv) {
     }
   }
   std::puts(typed_rejection ? "MinMax typed guard PASS (rejection only)" :
-      "MinMax D3D12 dispatch PASS: six roots x five executions, including in-flight (focused subset)");
+      "MinMax D3D12 dispatch PASS: eleven roots x five executions, including static reduction (focused subset)");
   return 0;
 }

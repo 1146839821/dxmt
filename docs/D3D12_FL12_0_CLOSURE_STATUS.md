@@ -1,6 +1,6 @@
 # FL12_0 closure checkpoint
 
-## Current snapshot (2026-10-03, MinMax dispatch checkpoint)
+## Current snapshot (2026-10-03, static DXIL MinMax dispatch checkpoint)
 
 This section supersedes the historical checkpoints below. The implementation
 is not yet in a tests-only closure phase. No percentage or completion date can
@@ -22,7 +22,7 @@ Task Analysis for this refresh:
 | Production gap | Current boundary | Next closure work |
 | --- | --- | --- |
 | Typed UAV | Production origin lowering and bounded direct/non-updating-indirect probes exist; additional-format declaration remains FALSE | Default production enablement, remaining indirect/provenance/view/lifetime contracts, then complete matrices |
-| MinMax | Opt-in AIR operations/clamps and DXIL float Texture2D SampleLevel compute dispatch have focused GPU readbacks | Static DXIL reduction roots, broader operations/formats/shapes, cube/aniso/feedback, indirect and production qualification remain open |
+| MinMax | Opt-in AIR operations/clamps and DXIL float Texture2D SampleLevel compute dispatch, including static reduction roots, have focused GPU readbacks | Broader operations/formats/shapes, cube/aniso/feedback, indirect and production qualification remain open |
 | Tiled Tier 2 | Declared NOT_SUPPORTED | Packed mips, mapping, feedback, filtering/LOD, lifetime and synchronization closure |
 | LogicOp (no-private) | OPTIONS reports FALSE in this variant | Implement a compliant path or explicitly exclude this variant from the FL12_0 claim; tests alone cannot close this gap |
 
@@ -134,7 +134,7 @@ unregistered. No new game/tessellation benchmark or FL promotion.
 
 ## Task Analysis
 
-### Static DXIL reduction-root continuation (2026-10-03)
+### Historical static DXIL reduction-root audit (2026-10-03)
 
 - Hypothesis: static reduction-root admission cannot be closed by removing the
   ordinary MSC layout rejection alone.
@@ -162,6 +162,17 @@ focused obligations, not additional completed cases or a full MinMax matrix.
 The remaining 1,584 typed executions and seven complete GPU categories above
 are unchanged. Count implementation workstreams, not commits or accumulated
 focused dispatches, when assessing distance to FL12_0.
+
+Implementation follow-up: qualified explicit static reduction roots now create
+private-only DXIL/MSC MinMax compute PSOs and execute through the private
+reflected layout (`D3D12_MINMAX_STATIC_DXIL.md`). Both builds pass 100 new focused
+static reduction numeric executions, including RS1.0 and mixed pairs, original
+root/state preservation, caller root/PSO release and independent consumer/gate
+rejection. Ordinary MSC layout and typed-origin rejection remain intact. This
+closes the bounded static-root admission gap, not full MinMax: broader
+operations/shapes/formats, feedback, indirect/direct-indexed and default
+production qualification remain. The four implementation workstreams, 1,584
+existing typed reruns and seven complete GPU categories remain outstanding.
 
 Baseline: `e220380`, branch `feat/d3d12-1`. User requests continued work and
 an evidence-based estimate of remaining FL12_0 validation. This checkpoint

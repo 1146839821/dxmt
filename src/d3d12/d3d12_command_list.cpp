@@ -2963,6 +2963,10 @@ public:
                         bool indirect_root_updates) {
     auto *encoder = allocator_->encoder_current;
     if (!root || !encoder) return true;
+    if (!use_msc && root->HasAIRReductionSamplers && env::getEnvVar("DXMT_ENABLE_AIR_MINMAX") != "1") {
+      FailRecording(__func__, "static AIR reduction requires its independent opt-in");
+      return false;
+    }
     // The MSC opt-in may admit descriptors, but does not admit an AIR consumer.
     if (!use_msc && !env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY").empty() &&
         env::getEnvVar("DXMT_ENABLE_AIR_MINMAX_DYNAMIC") != "1") reduction_eligible = false;
@@ -3550,6 +3554,10 @@ public:
     const D3D12MinMaxComputeVariant *minmax_variant = nullptr;
     const auto minmax_directory = use_msc ? env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY") : "";
     const auto origin_directory = AllowTypedOrigin && use_msc ? env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY") : "";
+    if (pso_compute_->requires_minmax_variant && minmax_directory.empty()) {
+      FailRecording(__func__, "static reduction PSO requires the qualified MinMax path");
+      return false;
+    }
     if (!minmax_directory.empty()) {
       // Root-updating indirect commands need per-command state. Do not route
       // them through a recording-time argument template or silently fall back.
@@ -3589,7 +3597,7 @@ public:
     const bool encode_msc_resource_uses =
         msc_compute_residency_ && use_msc && !origin_variant && !minmax_variant && !SkipResourceBinding &&
         (dirty_state_.test(DirtyState::DescriptorHeaps) || dirty_state_.test(DirtyState::ComputeRootArguments));
-    if (use_msc && rootsig_compute_) {
+    if (use_msc && rootsig_compute_ && !minmax_variant) {
       if (FAILED(rootsig_compute_->InitializeMSCLayout())) {
         FailRecording(__func__, "MSC root signature layout is unsupported");
         return false;
@@ -3638,7 +3646,7 @@ public:
       dirty_state_.clr(DirtyState::DescriptorHeaps);
     }
 
-    if (dirty_state_.test(DirtyState::ComputeRootArguments) && !SkipResourceBinding) {
+    if (dirty_state_.test(DirtyState::ComputeRootArguments) && !SkipResourceBinding && !minmax_variant) {
       if (rootsig_compute_ && (use_msc ? rootsig_compute_->MSCArgumentBufferSize : rootsig_compute_->UploadQwords)) {
         auto Offset = use_msc
                           ? EncodeMSCArgumentBuffer(

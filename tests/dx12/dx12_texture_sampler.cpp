@@ -168,8 +168,9 @@ main(int argc, char **argv) {
   const bool expect_air_unsupported = argc == 4 && strcmp(argv[3], "--expect-air-unsupported") == 0;
   const bool expect_consumer_unsupported = argc == 4 && strcmp(argv[3], "--expect-consumer-unsupported") == 0;
   const bool expect_null_unsupported = argc == 4 && strcmp(argv[3], "--expect-null-unsupported") == 0;
+  const bool expect_static_consumer_unsupported = argc == 4 && strcmp(argv[3], "--expect-static-consumer-unsupported") == 0;
   if (argc == 4 && !expect_unsupported && !expect_pso_unsupported && !expect_air_unsupported &&
-      !expect_consumer_unsupported && !expect_null_unsupported)
+      !expect_consumer_unsupported && !expect_null_unsupported && !expect_static_consumer_unsupported)
     return 2;
   struct ClampProbe {
     const char *name;
@@ -311,6 +312,7 @@ main(int argc, char **argv) {
     return 2;
 
   const bool dxbc = strcmp(argv[1], "--dxbc") == 0;
+  if (expect_static_consumer_unsupported && (!dxbc || !static_sampler || !reduction)) return 2;
   if ((expect_consumer_unsupported || expect_null_unsupported) && (!reduction || static_sampler)) return 2;
   if ((expect_null_unsupported || clamp_probe) && !dxbc) return 2;
   if (dynamic_switch && !dxbc) return 2;
@@ -895,6 +897,15 @@ main(int argc, char **argv) {
     texture_source.pResource = output_texture;
     texture_source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     list->CopyTextureRegion(&texture_readback, 0, 0, 0, &texture_source, nullptr);
+  }
+  if (expect_static_consumer_unsupported) {
+    if (list->Close() != E_FAIL) {
+      std::cerr << "static AIR consumer was admitted without its opt-in\n";
+      goto cleanup;
+    }
+    std::cout << "static AIR consumer rejected independently of MSC opt-in\n";
+    result = 0;
+    goto cleanup; // Recording negative only: never submit the invalid dispatch.
   }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;

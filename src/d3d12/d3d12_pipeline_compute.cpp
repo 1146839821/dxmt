@@ -25,6 +25,8 @@
 #include "d3d12_minmax_pipeline.hpp"
 #include "log/log.hpp"
 #include "airconv_public.h"
+#include "util_env.hpp"
+#include "util_string.hpp"
 
 #include <utility>
 #include <mutex>
@@ -90,6 +92,26 @@ public:
       size_t root_signature_size = 0;
       if (pDesc->pRootSignature) {
         auto rootsig = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+        if (rootsig->HasAIRReductionSamplers) {
+          // Compile only the qualified private path. An ordinary MSC pipeline
+          // would consume the native point surrogate with incorrect semantics.
+          const auto directory = env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY");
+          if (directory.empty() || !env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY").empty()) return E_NOTIMPL;
+          try {
+            const auto *bytes = static_cast<const uint8_t *>(pDesc->CS.pShaderBytecode);
+            original_cs_.assign(bytes, bytes + pDesc->CS.BytecodeLength);
+            application_root_ = rootsig;
+            this->shader_backend = D3D12ShaderBackend::MetalShaderConverter;
+            const auto selected = str::tows(directory.c_str());
+            const D3D12MinMaxComputeVariant *variant = nullptr;
+            const HRESULT hr = GetMinMaxVariant(selected.c_str(), &variant);
+            if (FAILED(hr)) return hr;
+            pso = variant->pso;
+            threadgroup_size = variant->threadgroup_size;
+            requires_minmax_variant = true;
+            return S_OK;
+          } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+        }
         HRESULT hr = rootsig->InitializeMSCLayout();
         if (FAILED(hr)) {
           ERR("Failed to initialize MSC root signature layout");
@@ -211,7 +233,7 @@ public:
         *variant = origin_variant_.get();
         return S_OK;
       }
-      if (shader_backend != D3D12ShaderBackend::MetalShaderConverter || !application_root_)
+      if (shader_backend != D3D12ShaderBackend::MetalShaderConverter || !application_root_ || requires_minmax_variant)
         return E_NOTIMPL;
       D3D12TypedOriginShader shader;
       std::string diagnostics;

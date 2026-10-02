@@ -459,7 +459,8 @@ public:
         const bool air_reduction = reduction == D3D12_FILTER_REDUCTION_TYPE_MINIMUM ||
                                    reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM;
         if (air_reduction) {
-          if (env::getEnvVar("DXMT_ENABLE_AIR_MINMAX") != "1" ||
+          if ((env::getEnvVar("DXMT_ENABLE_AIR_MINMAX") != "1" &&
+               env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY").empty()) ||
               D3D12_DECODE_IS_ANISOTROPIC_FILTER(original.Filter)) return E_NOTIMPL;
           if (!std::isfinite(original.MinLOD) || !std::isfinite(original.MaxLOD)) return E_INVALIDARG;
           HasAIRReductionSamplers = true;
@@ -562,6 +563,7 @@ public:
   GetTypedOriginCompilerRoot(const D3D12TypedOriginRoot **root) override {
     if (!root) return E_POINTER;
     *root = nullptr;
+    if (HasAIRReductionSamplers) return E_NOTIMPL;
     std::lock_guard<std::mutex> lock(typed_origin_mutex_);
     if (!typed_origin_initialized_) {
       if (!device_->GetMSCCapabilities().CoreShaderPathUsable()) return E_FAIL;

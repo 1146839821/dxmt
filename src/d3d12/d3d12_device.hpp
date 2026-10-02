@@ -302,6 +302,7 @@ public:
 
   size_t NumStaticSamplers;
   uint64_t const *EncodedStaticSamplers;
+  // Original static reduction state; this flag does not grant AIR admission.
   bool HasAIRReductionSamplers = false;
   virtual void RetainStaticSamplers(std::vector<Rc<Sampler>> &references) = 0;
 
@@ -394,6 +395,8 @@ class MTLD3D12ComputePipelineState : public MTLD3D12PipelineState {
 public:
   WMT::Reference<WMT::ComputePipelineState> pso;
   WMTSize threadgroup_size;
+  // Static reduction roots have no semantically valid ordinary MSC PSO.
+  bool requires_minmax_variant = false;
   // Internal preparation only. Encoder selection requires coherent origin
   // descriptors/records and a submission-owned lifetime before dispatch.
   virtual HRESULT GetTypedOriginVariant(
