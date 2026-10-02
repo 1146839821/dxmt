@@ -36,11 +36,12 @@ bool LowerReductionSampleLevel2D(llvm::CallInst &sample,
 // This helper does not rewrite or admit the sampling operation itself.
 llvm::Value *CreateReductionGradientLOD2D(llvm::CallInst &sample, std::string &error);
 
-// Qualify finite legacy Texture2D/SamplerState pairs, append private tN/sN and
+// Qualify legacy float Texture2D SampleLevel/SampleGrad pairs, append private tN/sN and
 // b0 in DXMT_MSC_MINMAX_SPACE, and guard reduction with the runtime enabled bit.
 // Returned pair ordinal N selects its point texture/sampler and 32-byte CBV
 // state; sampler N+pair_count is an unclamped ordinary-filter sampler. Both
-// branches apply sampler/resource LOD semantics explicitly. Rejecting a private
+// branches apply sampler/resource LOD semantics explicitly; gradients also
+// apply runtime bias and instruction clamp. Rejecting a private
 // module never publishes an artifact.
 // The application root must be augmented/reflected and the regenerated DXIL
 // container fully validated before MSC compilation. No runtime admission here.

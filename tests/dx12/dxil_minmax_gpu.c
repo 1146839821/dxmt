@@ -13,7 +13,9 @@ int main(int argc, char **argv) {
   @autoreleasepool {
     if (argc < 3 || argc > 5) return 2;
     const bool binding_two = argc == 4 && !strcmp(argv[3], "--binding-two");
-    const bool binding = (argc == 4 && !strcmp(argv[3], "--binding")) || binding_two;
+    const bool gradient_clamp = argc == 4 && !strcmp(argv[3], "--binding-grad-clamp");
+    const bool gradient = (argc == 4 && !strcmp(argv[3], "--binding-grad")) || gradient_clamp;
+    const bool binding = (argc == 4 && !strcmp(argv[3], "--binding")) || binding_two || gradient;
     char *end = NULL;
     unsigned long expected = argc >= 4 && !binding ? strtoul(argv[3], &end, 10) : 16;
     if (argc >= 4 && !binding && (!argv[3][0] || *end || expected > 255)) return 2;
@@ -60,7 +62,7 @@ int main(int argc, char **argv) {
     id<MTLComputePipelineState> pipeline = function ? [device newComputePipelineStateWithFunction:function error:&error] : nil;
     if (!pipeline) { fprintf(stderr, "%s\n", error.description.UTF8String); return 1; }
     MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-        width:2 height:2 mipmapped:YES];
+        width:gradient ? 8 : 2 height:gradient ? 8 : 2 mipmapped:YES];
     descriptor.storageMode = MTLStorageModeShared;
     descriptor.usage = MTLTextureUsageShaderRead;
     id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
@@ -68,6 +70,15 @@ int main(int argc, char **argv) {
     [texture replaceRegion:MTLRegionMake2D(0,0,2,2) mipmapLevel:0 withBytes:pixels bytesPerRow:8];
     const uint8_t mip[] = {96,128,160,192};
     [texture replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:1 withBytes:mip bytesPerRow:4];
+    if (gradient) {
+      const uint8_t levels[] = {32, 224, 96, 160};
+      uint8_t uniform[8 * 8 * 4];
+      for (unsigned level = 0; level < 4; ++level) {
+        unsigned size = 8 >> level;
+        memset(uniform, levels[level], sizeof(uniform));
+        [texture replaceRegion:MTLRegionMake2D(0,0,size,size) mipmapLevel:level withBytes:uniform bytesPerRow:size * 4];
+      }
+    }
     MTLSamplerDescriptor *sampler_descriptor = [MTLSamplerDescriptor new];
     sampler_descriptor.minFilter = ordinary_reference ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
     sampler_descriptor.magFilter = ordinary_reference ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
@@ -111,23 +122,42 @@ int main(int argc, char **argv) {
         {0, 0, 0, 0.75f, 0, 104}, {0, 0, 100, 1.1f, 0, 0}, {0, 0, 100, 1.1f, 1, 255},
         {DXMT_MSC_MINMAX_ENABLED | 5, 0, 100, 0.25f, 0, 16},
         {DXMT_MSC_MINMAX_ENABLED | 6, 0, 100, 0.25f, 0, 96}};
+    const struct { uint32_t flags; float minimum, maximum, resource, bias; uint32_t defaults, expected; } gradient_cases[] = {
+        {32, 0, 100, 0, 0, 0, 96},          // Major axis, not max derivative length.
+        {32, 0, 100, 0, -.75f, 0, 224},    // Bias before sampler clamps.
+        {36, 0, 100, 0, 0, 0, 96},        // Positive-weight mip minimum.
+        {44, 0, 100, 0, 0, 0, 224},       // Positive-weight mip maximum.
+        {0, 0, 100, 0, 1.5f, 0, 160},     // Ordinary branch also applies bias.
+        {32, 2.25f, 0, 0, 0, 0, 96},     // MinLOD wins over MaxLOD.
+        {32, 0, .25f, 0, 0, 0, 32},      // MaxLOD before resource/instruction.
+        {32, 0, 0, 2.75f, 0, 0, 160},    // Resource clamp can exceed sampler MaxLOD.
+        {32, 0, 100, 4, 0, 0, 0},        // Empty reduction set.
+        {0, 0, 100, 4, 0, 1, 255}};      // Empty ordinary component default.
     id<MTLCommandQueue> queue = [device newCommandQueue];
     MTLSize group = MTLSizeMake([threads[0] unsignedIntegerValue], [threads[1] unsignedIntegerValue], [threads[2] unsignedIntegerValue]);
     if (!group.width || !group.height || !group.depth || group.width * group.height * group.depth > pipeline.maxTotalThreadsPerThreadgroup)
       return 1;
-    for (unsigned iteration = 0; iteration < (binding ? sizeof(cases) / sizeof(cases[0]) : 1); ++iteration) {
+    const unsigned count = gradient ? sizeof(gradient_cases) / sizeof(gradient_cases[0]) :
+        binding ? sizeof(cases) / sizeof(cases[0]) : 1;
+    for (unsigned iteration = 0; iteration < count; ++iteration) {
     if (binding) {
       struct dxmt_msc_minmax_state state = {cases[iteration].flags, cases[iteration].min_lod, cases[iteration].max_lod,
-          cases[iteration].resource_clamp, cases[iteration].defaults, 3, 3, 0};
+          cases[iteration].resource_clamp, cases[iteration].defaults, 3, 3, 10};
+      if (gradient) {
+        state = (struct dxmt_msc_minmax_state){gradient_cases[iteration].flags, gradient_cases[iteration].minimum,
+            gradient_cases[iteration].maximum, gradient_cases[iteration].resource,
+            gradient_cases[iteration].defaults, 3, 3, gradient_cases[iteration].bias};
+      }
       memcpy(state_buffer.contents, &state, sizeof(state));
       if (binding_two) {
         struct dxmt_msc_minmax_state second = {state.flags ? state.flags ^ 8u : 0, 0, 100,
-            state.resource_clamp, state.default_components, 3, 3, 0};
+            state.resource_clamp, state.default_components, 3, 3, 10};
         memcpy((uint8_t *)state_buffer.contents + sizeof(state), &second, sizeof(second));
       }
       IRDescriptorTableSetTexture((IRDescriptorTableEntry *)((uint8_t *)arguments.contents + offsets[0]), texture,
           state.resource_clamp, 0);
       expected = cases[iteration].expected;
+      if (gradient) expected = gradient_clamp && state.resource_clamp <= 3 ? 160 : gradient_cases[iteration].expected;
     }
     for (unsigned word = 0; word < output_words; ++word) ((uint32_t *)output.contents)[word] = 0x6d5a4b3c;
     id<MTLCommandBuffer> command = [queue commandBuffer];

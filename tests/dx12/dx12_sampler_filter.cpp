@@ -74,7 +74,7 @@ int main() {
       if (FAILED(dxmt::PrepareD3D12MinMaxSamplerInfo({}, desc, point, ordinary, state)) ||
           state.flags != flags || state.min_lod != desc.MinLOD || state.max_lod != desc.MaxLOD ||
           state.address_u != desc.AddressU || state.address_v != desc.AddressV || state.resource_clamp ||
-          state.default_components || state.reserved || !point.support_argument_buffers ||
+          state.default_components || state.mip_lod_bias != desc.MipLODBias || !point.support_argument_buffers ||
           !ordinary.support_argument_buffers || point.lod_min_clamp || ordinary.lod_min_clamp ||
           point.lod_max_clamp != D3D12_FLOAT32_MAX || ordinary.lod_max_clamp != D3D12_FLOAT32_MAX ||
           point.min_filter != WMTSamplerMinMagFilterNearest || point.mag_filter != WMTSamplerMinMagFilterNearest ||
@@ -85,7 +85,7 @@ int main() {
       ++private_cases;
     }
   }
-  for (unsigned bad = 0; bad < 6; ++bad) {
+  for (unsigned bad = 0; bad < 7; ++bad) {
     D3D12_SAMPLER_DESC desc = {};
     desc.Filter = D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;
     desc.AddressU = desc.AddressV = desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -96,15 +96,16 @@ int main() {
     if (bad == 3) desc.AddressV = static_cast<D3D12_TEXTURE_ADDRESS_MODE>(0);
     if (bad == 4) { desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER; desc.BorderColor[0] = .5f; }
     if (bad == 5) desc.Filter = static_cast<D3D12_FILTER>(0x200);
+    if (bad == 6) desc.MipLODBias = std::numeric_limits<float>::quiet_NaN();
     WMTSamplerInfo point = {}, ordinary = {};
     point.gpu_resource_id = 123; ordinary.gpu_resource_id = 456;
-    dxmt_msc_minmax_state state = {}; state.reserved = 789;
+    dxmt_msc_minmax_state state = {}; state.mip_lod_bias = 789;
     const auto before_point = point, before_ordinary = ordinary;
     const auto before_state = state;
     if (SUCCEEDED(dxmt::PrepareD3D12MinMaxSamplerInfo({}, desc, point, ordinary, state)) ||
         std::memcmp(&point, &before_point, sizeof(point)) || std::memcmp(&ordinary, &before_ordinary, sizeof(ordinary)) ||
         std::memcmp(&state, &before_state, sizeof(state))) return 1;
   }
-  std::cout << "D3D12 sampler filter contracts passed: " << cases << "; private MinMax: " << private_cases << " + 6 rejects\n";
+  std::cout << "D3D12 sampler filter contracts passed: " << cases << "; private MinMax: " << private_cases << " + 7 rejects\n";
   return 0;
 }

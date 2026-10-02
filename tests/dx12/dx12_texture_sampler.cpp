@@ -254,7 +254,8 @@ main(int argc, char **argv) {
   const bool line_array = line && strstr(argv[2], "array");
   const bool line_grad = line && strstr(argv[2], "grad");
   const bool line_lod = line && strcmp(argv[2], "--minimum-1d-grad-lod") == 0;
-  const bool grad_lod = argc == 3 && (strcmp(argv[2], "--minimum-grad-lod") == 0 ||
+  const bool dxil_gradient_clamp = argc == 3 && strcmp(argv[2], "--minimum-grad-instruction") == 0;
+  const bool grad_lod = argc == 3 && (strcmp(argv[2], "--minimum-grad-lod") == 0 || dxil_gradient_clamp ||
       strcmp(argv[2], "--minimum-grad-bias") == 0 || strcmp(argv[2], "--minimum-grad-parallel") == 0 ||
       strcmp(argv[2], "--minimum-grad-perpendicular") == 0 || strcmp(argv[2], "--minimum-grad-zero") == 0 ||
       strcmp(argv[2], "--minimum-grad-minlod") == 0 || strcmp(argv[2], "--minimum-grad-maxlod") == 0 || line_lod ||
@@ -300,7 +301,7 @@ main(int argc, char **argv) {
   // The nonorthogonal footprint's major axis is 8*.23*golden_ratio:
   // LOD ~1.574 -> point mip 2; max raw derivative length wrongly picks mip 1.
   const UINT expected = clamp_probe ? clamp_probe->expected : line_lod ? 224 : line ? (minimum ? (line_array ? 192 : 16) : (line_array ? 240 : 64)) :
-      grad_lod ? (grad_bias || grad_case == 2 || grad_case == 3 ? 224 :
+      grad_lod ? (dxil_gradient_clamp ? 160 : grad_bias || grad_case == 2 || grad_case == 3 ? 224 :
       grad_case == 4 || grad_maxlod ? 32 : 96) : minimum ? 16 : maximum ? 240 : 255;
   const bool direct_indexed_uav_texture =
       argc == 3 && strcmp(argv[2], "--direct-indexed-uav-texture") == 0;
@@ -312,11 +313,14 @@ main(int argc, char **argv) {
     return 2;
 
   const bool dxbc = strcmp(argv[1], "--dxbc") == 0;
+  if (dxil_gradient_clamp && dxbc) return 2;
   if (expect_static_consumer_unsupported && (!dxbc || !static_sampler || !reduction)) return 2;
   if ((expect_consumer_unsupported || expect_null_unsupported) && (!reduction || static_sampler)) return 2;
   if ((expect_null_unsupported || clamp_probe) && !dxbc) return 2;
   if (dynamic_switch && !dxbc) return 2;
-  if (grad_lod && !dxbc) return 2;
+  // DXIL uses the external major-axis fixture. Parallel/zero/perpendicular
+  // vectors are generated internally only by the DXBC probe.
+  if (grad_lod && !dxbc && grad_case != 1) return 2;
   if (line && !dxbc) return 2;
   if (expect_pso_unsupported && (dxbc || !static_sampler || !reduction))
     return 2;
@@ -667,7 +671,7 @@ main(int argc, char **argv) {
     if (grad_lod) {
       sampler_desc.MipLODBias = grad_bias ? -0.75f : 0.0f;
       sampler_desc.MinLOD = grad_minlod ? 2.25f : 0.0f;
-      sampler_desc.MaxLOD = grad_minlod ? 0.0f : grad_maxlod ? 0.25f : D3D12_FLOAT32_MAX;
+      sampler_desc.MaxLOD = grad_minlod ? 0.0f : grad_maxlod || dxil_gradient_clamp ? 0.25f : D3D12_FLOAT32_MAX;
     }
     if (clamp_probe && clamp_probe->max_lod_zero) sampler_desc.MaxLOD = 0;
     if (reduction) {

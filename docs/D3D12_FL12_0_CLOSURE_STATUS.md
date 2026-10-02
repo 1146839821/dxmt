@@ -22,7 +22,7 @@ Task Analysis for this refresh:
 | Production gap | Current boundary | Next closure work |
 | --- | --- | --- |
 | Typed UAV | Production origin lowering and bounded direct/non-updating-indirect probes exist; additional-format declaration remains FALSE | Default production enablement, remaining indirect/provenance/view/lifetime contracts, then complete matrices |
-| MinMax | Opt-in AIR operations/clamps and DXIL float Texture2D SampleLevel compute dispatch, including static reduction roots, have focused GPU readbacks | Broader operations/formats/shapes, cube/aniso/feedback, indirect and production qualification remain open |
+| MinMax | Opt-in AIR operations/clamps and DXIL float Texture2D SampleLevel/static roots plus bounded dynamic SampleGrad compute dispatch have focused GPU readbacks | Broader operations/formats/shapes, cube/aniso/feedback, indirect and production qualification remain open |
 | Tiled Tier 2 | Declared NOT_SUPPORTED | Packed mips, mapping, feedback, filtering/LOD, lifetime and synchronization closure |
 | LogicOp (no-private) | OPTIONS reports FALSE in this variant | Implement a compliant path or explicitly exclude this variant from the FL12_0 claim; tests alone cannot close this gap |
 
@@ -54,6 +54,14 @@ matrices after every descriptor/ABI preparation checkpoint.
 Instruction-clamp admission is now connected. Current next actions are the
 remaining MinMax production operations/backends, not another status-only or
 full-matrix rerun.
+
+SampleGrad follow-up: DXIL gradient LOD, bias state and instruction constraints
+now reuse the production SampleLevel footprint (`D3D12_MINMAX_DXIL_GRAD.md`).
+Both builds pass five actual dynamic D3D12 compute readbacks, alongside native
+compiler/state regressions. This closes a bounded operation gap, not full
+MinMax; fresh static-gradient, dynamic-clamp and broader contracts remain open.
+The four production workstreams, 1,584 typed reruns and seven complete GPU
+categories above are unchanged. No feature-level promotion or game benchmark.
 
 Task Result: refreshed current status and corrected the gate's stale MinMax
 diagnostic without changing any gate status or capability. Gate units pass

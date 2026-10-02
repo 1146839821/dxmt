@@ -249,7 +249,7 @@ HRESULT PrepareD3D12MinMaxSamplerInfo(WMT::Device device, const D3D12_SAMPLER_DE
   constexpr uint32_t reduction_mask = D3D12_FILTER_REDUCTION_TYPE_MASK << D3D12_FILTER_REDUCTION_TYPE_SHIFT;
   if ((filter & ~(basic_filter_mask | reduction_mask)) || D3D12_DECODE_IS_ANISOTROPIC_FILTER(desc.Filter) ||
       D3D12_DECODE_IS_COMPARISON_FILTER(desc.Filter)) return E_NOTIMPL;
-  if (!std::isfinite(desc.MinLOD) || !std::isfinite(desc.MaxLOD) ||
+  if (!std::isfinite(desc.MinLOD) || !std::isfinite(desc.MaxLOD) || !std::isfinite(desc.MipLODBias) ||
       desc.AddressU < 1 || desc.AddressU > 5 || desc.AddressV < 1 || desc.AddressV > 5 ||
       desc.AddressW < 1 || desc.AddressW > 5) return E_INVALIDARG;
   if (desc.AddressU == D3D12_TEXTURE_ADDRESS_MODE_BORDER || desc.AddressV == D3D12_TEXTURE_ADDRESS_MODE_BORDER ||
@@ -276,6 +276,7 @@ HRESULT PrepareD3D12MinMaxSamplerInfo(WMT::Device device, const D3D12_SAMPLER_DE
   if (D3D12_DECODE_MIP_FILTER(desc.Filter)) candidate.flags |= 4u;
   candidate.min_lod = desc.MinLOD;
   candidate.max_lod = desc.MaxLOD;
+  candidate.mip_lod_bias = desc.MipLODBias;
   candidate.address_u = desc.AddressU;
   candidate.address_v = desc.AddressV;
   point = point_candidate;

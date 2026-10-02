@@ -32,7 +32,8 @@ static bool CheckBindingQualification(llvm::Module &module) {
     CallInst *sample = nullptr;
     for (auto &function : *clone) for (auto &block : function) for (auto &instruction : block)
       if (auto *call = dyn_cast<CallInst>(&instruction))
-        if (call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32") sample = call;
+        if (call->getCalledFunction() && (call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32" ||
+            call->getCalledFunction()->getName() == "dx.op.sampleGrad.f32")) sample = call;
     if (!sample) return false;
     if (probe == 2) cast<CallInst>(sample->getArgOperand(2))->setArgOperand(4, builder.getTrue());
     if (probe == 3) ExtractValueInst::Create(sample, {4}, "status", sample->getNextNode());
@@ -127,8 +128,10 @@ static int TransformContainer(const char *path, const char *mode) {
   SmallVector<CallInst *, 4> samples;
   for (auto &function : **parsed) for (auto &block : function) for (auto &instruction : block)
     if (auto *call = dyn_cast<CallInst>(&instruction))
-      if (call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32") samples.push_back(call);
+      if (call->getCalledFunction() && (call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32" ||
+          call->getCalledFunction()->getName() == "dx.op.sampleGrad.f32")) samples.push_back(call);
   const bool binding_two = !std::strcmp(mode, "binding-two");
+  const bool binding_grad = !std::strcmp(mode, "binding-grad");
   if (samples.size() != (binding_two ? 2 : 1)) return 1;
   IRBuilder<> builder(context);
   auto number = [&](float value) { return ConstantFP::get(builder.getFloatTy(), value); };
@@ -139,7 +142,7 @@ static int TransformContainer(const char *path, const char *mode) {
   const bool huge_clamp = !std::strcmp(mode, "huge-clamp");
   const bool mirror = !std::strcmp(mode, "mirror-offset");
   const bool mirror_once = !std::strcmp(mode, "mirror-once-offset");
-  const bool binding = !std::strcmp(mode, "binding") || binding_two;
+  const bool binding = !std::strcmp(mode, "binding") || binding_two || binding_grad;
   if (std::strcmp(mode, "minimum") && !maximum && !sampler_lod && !fractional && !empty && !huge_clamp && !mirror && !mirror_once && !binding) return 1;
   if (huge_clamp) samples[0]->setArgOperand(3, number(std::numeric_limits<float>::max()));
   if (mirror || mirror_once) {

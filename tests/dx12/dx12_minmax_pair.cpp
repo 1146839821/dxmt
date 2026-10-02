@@ -57,7 +57,7 @@ int main() {
         binding.state.flags != (7u | (reduction ? 32u : 0u) | (reduction == 3 ? 8u : 0u)) ||
         binding.state.min_lod != .25f || binding.state.max_lod != 1.25f ||
         binding.state.resource_clamp != .75f || binding.state.default_components != 8 ||
-        binding.state.address_u != 3 || binding.state.address_v != 3 || binding.state.reserved ||
+        binding.state.address_u != 3 || binding.state.address_v != 3 || binding.state.mip_lod_bias != 2 ||
         binding.point_sampler->lod_bias || binding.ordinary_sampler->lod_bias) return 1;
   }
   {
