@@ -250,12 +250,14 @@ main(int argc, char **argv) {
       strcmp(argv[2], "--maximum-1d") == 0 || strcmp(argv[2], "--minimum-1d-grad") == 0 ||
       strcmp(argv[2], "--maximum-1d-grad") == 0 || strcmp(argv[2], "--minimum-1d-array") == 0 ||
       strcmp(argv[2], "--maximum-1d-array") == 0 || strcmp(argv[2], "--minimum-1d-array-grad") == 0 ||
-      strcmp(argv[2], "--maximum-1d-array-grad") == 0 || strcmp(argv[2], "--minimum-1d-grad-lod") == 0);
+      strcmp(argv[2], "--maximum-1d-array-grad") == 0 || strcmp(argv[2], "--minimum-1d-grad-lod") == 0 ||
+      strcmp(argv[2], "--minimum-1d-grad-axis") == 0);
   const bool line_array = line && strstr(argv[2], "array");
   const bool array_2d = argc == 3 && (strcmp(argv[2], "--minimum-2d-array") == 0 ||
       strcmp(argv[2], "--maximum-2d-array") == 0 || strcmp(argv[2], "--minimum-2d-array-grad") == 0);
   const bool line_grad = line && strstr(argv[2], "grad");
-  const bool line_lod = line && strcmp(argv[2], "--minimum-1d-grad-lod") == 0;
+  const bool line_axis = line && strcmp(argv[2], "--minimum-1d-grad-axis") == 0;
+  const bool line_lod = line && (strcmp(argv[2], "--minimum-1d-grad-lod") == 0 || line_axis);
   const bool dxil_gradient_clamp = argc == 3 && strcmp(argv[2], "--minimum-grad-instruction") == 0;
   const bool grad_lod = argc == 3 && (strcmp(argv[2], "--minimum-grad-lod") == 0 || dxil_gradient_clamp ||
       (array_2d && strstr(argv[2], "grad")) ||
@@ -304,7 +306,7 @@ main(int argc, char **argv) {
                                         D3D12_FILTER_MIN_MAG_MIP_LINEAR;
   // The nonorthogonal footprint's major axis is 8*.23*golden_ratio:
   // LOD ~1.574 -> point mip 2; max raw derivative length wrongly picks mip 1.
-  const UINT expected = clamp_probe ? clamp_probe->expected : line_lod ? 224 : line ? (minimum ? (line_array ? 192 : 16) : (line_array ? 240 : 64)) :
+  const UINT expected = clamp_probe ? clamp_probe->expected : line_axis ? 32 : line_lod ? 224 : line ? (minimum ? (line_array ? 192 : 16) : (line_array ? 240 : 64)) :
       grad_lod ? (dxil_gradient_clamp ? 160 : grad_bias || grad_case == 2 || grad_case == 3 ? 224 :
       grad_case == 4 || grad_maxlod ? 32 : 96) : minimum ? 16 : maximum ? 240 : 255;
   const bool direct_indexed_uav_texture =
@@ -317,7 +319,7 @@ main(int argc, char **argv) {
     return 2;
 
   const bool dxbc = strcmp(argv[1], "--dxbc") == 0;
-  if ((dxil_gradient_clamp || array_2d) && dxbc) return 2;
+  if ((dxil_gradient_clamp || array_2d || line_axis) && dxbc) return 2;
   if (expect_static_consumer_unsupported && (!dxbc || !static_sampler || !reduction)) return 2;
   if ((expect_consumer_unsupported || expect_null_unsupported) && (!reduction || static_sampler)) return 2;
   if ((expect_null_unsupported || clamp_probe) && !dxbc) return 2;
@@ -325,7 +327,6 @@ main(int argc, char **argv) {
   // DXIL uses the external major-axis fixture. Parallel/zero/perpendicular
   // vectors are generated internally only by the DXBC probe.
   if (grad_lod && !dxbc && grad_case != 1) return 2;
-  if (line && !dxbc) return 2;
   if (expect_pso_unsupported && (dxbc || !static_sampler || !reduction))
     return 2;
   if (expect_air_unsupported && (!dxbc || !static_sampler || !reduction))

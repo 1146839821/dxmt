@@ -49,10 +49,11 @@ Components OptionalTap(llvm::IRBuilder<> &builder, llvm::Value *condition,
 }
 }
 
-llvm::Value *CreateReductionGradientLOD2D(llvm::CallInst &sample, std::string &error) {
+llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &error, unsigned spatial_dimensions) {
   using namespace llvm;
   error.clear();
   auto reject = [&](const char *reason) -> Value * { error = reason; return nullptr; };
+  if (spatial_dimensions != 1 && spatial_dimensions != 2) return reject("expected one or two spatial dimensions");
   auto *callee = sample.getCalledFunction();
   if (!callee || callee->getName() != "dx.op.sampleGrad.f32" || sample.arg_size() != 17 ||
       !IsFloat4Status(sample.getType())) return reject("expected float SampleGrad signature");
@@ -97,18 +98,21 @@ llvm::Value *CreateReductionGradientLOD2D(llvm::CallInst &sample, std::string &e
   auto *size = b.CreateCall(dimensions, {b.getInt32(GetDimensions), sample.getArgOperand(1), b.getInt32(0)});
   std::array<Value *, 2> dx, dy;
   Value *scale = fp(0);
-  for (unsigned axis = 0; axis < 2; ++axis) {
+  for (unsigned axis = 0; axis < spatial_dimensions; ++axis) {
     auto *extent = b.CreateUIToFP(b.CreateExtractValue(size, axis), f32);
     dx[axis] = b.CreateFMul(sample.getArgOperand(10 + axis), extent);
     dy[axis] = b.CreateFMul(sample.getArgOperand(13 + axis), extent);
     scale = max(scale, un(FAbs, dx[axis]));
     scale = max(scale, un(FAbs, dy[axis]));
   }
+  // 1D uses max absolute derivatives, not a numerically rank-one Gram matrix.
+  // Log2 also preserves the zero -> -Inf and infinite footprint rules.
+  if (spatial_dimensions == 1) return un(Log2, scale);
   // Same normalization and degenerate-gradient rules as AIRBuilder's
   // CreateIsotropicGradientLOD; no fast-math flags may erase zero/Inf cases.
   auto *safe_scale = b.CreateSelect(b.CreateFCmpOGT(scale, fp(0)), scale, fp(1));
   Value *a = fp(0), *cross = fp(0), *c = fp(0);
-  for (unsigned axis = 0; axis < 2; ++axis) {
+  for (unsigned axis = 0; axis < spatial_dimensions; ++axis) {
     auto *x = b.CreateFDiv(dx[axis], safe_scale);
     auto *y = b.CreateFDiv(dy[axis], safe_scale);
     a = b.CreateFAdd(a, b.CreateFMul(x, x));
@@ -126,11 +130,12 @@ llvm::Value *CreateReductionGradientLOD2D(llvm::CallInst &sample, std::string &e
   return b.CreateSelect(b.CreateFCmpOEQ(scale, infinity), infinity, lod, "dxmt.gradient.lod");
 }
 
-bool LowerReductionSampleLevel2D(llvm::CallInst &sample,
-    const ReductionSampleState &state, std::string &error) {
+bool LowerReductionSampleLevel(llvm::CallInst &sample,
+    const ReductionSampleState &state, std::string &error, unsigned spatial_dimensions) {
   using namespace llvm;
   error.clear();
   auto reject = [&](const char *reason) { error = reason; return false; };
+  if (spatial_dimensions != 1 && spatial_dimensions != 2) return reject("expected one or two spatial dimensions");
   auto *callee = sample.getCalledFunction();
   if (!callee || callee->getName() != "dx.op.sampleLevel.f32" || sample.arg_size() != 11 ||
       !IsFloat4Status(sample.getType())) return reject("expected float SampleLevel signature");
@@ -163,7 +168,7 @@ bool LowerReductionSampleLevel2D(llvm::CallInst &sample,
         (isa<Instruction>(value) && (cast<Instruction>(value)->getFunction() != sample.getFunction() ||
           value == &sample || !dominance.dominates(value, &sample))))
       return reject("reduction state must dominate sample in the same function");
-  for (unsigned i = 7; i < 9; ++i) {
+  for (unsigned i = 7; i < 7 + spatial_dimensions; ++i) {
     auto *offset = sample.getArgOperand(i);
     auto *constant = dyn_cast<ConstantInt>(offset);
     if (!isa<UndefValue>(offset) && (!constant || constant->getSExtValue() < -8 || constant->getSExtValue() > 7))
@@ -247,7 +252,7 @@ bool LowerReductionSampleLevel2D(llvm::CallInst &sample,
   auto level = [&](IRBuilder<> &b, Value *mip) -> Components {
     auto *dims = b.CreateCall(dimensions, {b.getInt32(GetDimensions), state.point_texture, mip});
     Value *size[2], *base[2], *fraction[2];
-    for (unsigned axis = 0; axis < 2; ++axis) {
+    for (unsigned axis = 0; axis < spatial_dimensions; ++axis) {
       size[axis] = b.CreateUIToFP(b.CreateExtractValue(dims, axis), f32);
       auto *coordinate = sample.getArgOperand(3 + axis);
       auto *address = axis ? state.address_v : state.address_u;
@@ -274,7 +279,7 @@ bool LowerReductionSampleLevel2D(llvm::CallInst &sample,
     auto tap = [&](IRBuilder<> &tap_builder, unsigned corner) -> Components {
       SmallVector<Value *, 11> arguments(sample.args());
       arguments[1] = state.point_texture;
-      for (unsigned axis = 0; axis < 2; ++axis) {
+      for (unsigned axis = 0; axis < spatial_dimensions; ++axis) {
         auto *offset = sample.getArgOperand(7 + axis);
         Value *offset_float = isa<UndefValue>(offset) ? number(0) : tap_builder.CreateSIToFP(offset, f32);
         auto *center = tap_builder.CreateFAdd(tap_builder.CreateFAdd(base[axis], offset_float),
@@ -289,9 +294,9 @@ bool LowerReductionSampleLevel2D(llvm::CallInst &sample,
       return components;
     };
     auto result = tap(b, 0);
-    for (unsigned corner = 1; corner < 4; ++corner) {
+    for (unsigned corner = 1; corner < (1u << spatial_dimensions); ++corner) {
       Value *contributes = linear;
-      for (unsigned axis = 0; axis < 2; ++axis)
+      for (unsigned axis = 0; axis < spatial_dimensions; ++axis)
         if (corner & (1u << axis)) contributes = b.CreateAnd(contributes, b.CreateFCmpOGT(fraction[axis], number(0)));
       auto previous = result;
       result = OptionalTap(b, contributes, previous, [&](IRBuilder<> &tap_builder) {

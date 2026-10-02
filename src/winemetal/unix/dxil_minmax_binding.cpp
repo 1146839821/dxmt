@@ -38,6 +38,7 @@ struct Resource {
 struct Sample {
   llvm::CallInst *call;
   uint32_t pair;
+  unsigned spatial_dimensions;
 };
 struct Pair {
   dxmt_msc_minmax_binding binding;
@@ -161,13 +162,13 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     uint32_t texture_kind, sampler_kind, component_tag, component_type;
     if (!texture || !sampler || texture->metadata->getNumOperands() != 9 ||
         sampler->metadata->getNumOperands() != 8 || !Word(texture->metadata->getOperand(6), texture_kind) ||
-        (texture_kind != 2 && texture_kind != 7) ||
+        (texture_kind != 1 && texture_kind != 2 && texture_kind != 6 && texture_kind != 7) ||
         !Word(sampler->metadata->getOperand(6), sampler_kind) || sampler_kind != 0)
-      return reject("finite Texture2D/Texture2DArray SamplerState pair required");
+      return reject("finite one/two-dimensional texture and SamplerState pair required");
     auto *component = dyn_cast_or_null<MDNode>(texture->metadata->getOperand(8));
     if (!component || component->getNumOperands() != 2 || !Word(component->getOperand(0), component_tag) || component_tag != 0 ||
         !Word(component->getOperand(1), component_type) || component_type != 9)
-      return reject("float two-dimensional texture component metadata required");
+      return reject("float texture component metadata required");
     for (auto *user : call->users()) {
       auto *extract = dyn_cast<ExtractValueInst>(user);
       if (!extract || extract->getNumIndices() != 1 || *extract->idx_begin() >= 4)
@@ -179,7 +180,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
       if (pairs.size() >= 64) return reject("too many sampled pairs");
       pairs.push_back({{texture->space, texture->reg, sampler->space, sampler->reg}, texture, sampler});
     }
-    samples.push_back({call, index->second});
+    samples.push_back({call, index->second, texture_kind == 1 || texture_kind == 6 ? 1u : 2u});
   }
   if (samples.empty()) return reject("no qualified sampling pairs");
   if (uint64_t(next_id[0]) + pairs.size() > UINT32_MAX || uint64_t(next_id[3]) + pairs.size() * 2 > UINT32_MAX)
@@ -251,11 +252,11 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
   if (!dimensions_type) dimensions_type = StructType::create(context, {i32, i32, i32, i32}, "dx.types.Dimensions");
   auto dimensions = module.getOrInsertFunction("dx.op.getDimensions", dimensions_type, i32, handle, i32);
   auto binary = module.getOrInsertFunction("dx.op.binary.f32", types.getFloatTy(), i32, types.getFloatTy(), types.getFloatTy());
-  for (auto [sample, pair] : samples) {
+  for (auto [sample, pair, spatial_dimensions] : samples) {
     const bool gradient = sample->getCalledFunction()->getName() == "dx.op.sampleGrad.f32";
     Value *instruction_clamp = gradient ? sample->getArgOperand(16) : nullptr;
     if (gradient) {
-      auto *gradient_lod = CreateReductionGradientLOD2D(*sample, error);
+      auto *gradient_lod = CreateReductionGradientLOD(*sample, error, spatial_dimensions);
       if (!gradient_lod) return false;
       IRBuilder<> normalize(sample);
       SmallVector<Value *, 11> arguments;
@@ -363,7 +364,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
       extract->replaceAllUsesWith(values[*extract->idx_begin()]);
       extract->eraseFromParent();
     }
-    if (!LowerReductionSampleLevel2D(*lowered, state, error)) return false;
+    if (!LowerReductionSampleLevel(*lowered, state, error, spatial_dimensions)) return false;
     BasicBlock *reduction_end = nullptr;
     for (auto *predecessor : predecessors(merge)) if (predecessor != ordinary_done) {
       if (reduction_end) return reject("invalid reduction branch merge");

@@ -72,6 +72,14 @@ array/view-origin/update coverage and broader MinMax contracts remain open.
 The four production workstreams and full acceptance workload remain unchanged;
 no feature-level promotion or game benchmark.
 
+One-dimensional follow-up: DXIL float Texture1D/Texture1DArray SampleLevel and
+SampleGrad now reuse the dimension-parameterized private compute footprint
+(`D3D12_MINMAX_DXIL_1D.md`). Both builds pass twenty final production 1D
+readbacks total, including distinct array layers, mip selection and the
+two-nonzero-derivative max-axis oracle; eight fresh 2D/array readbacks pass.
+The remaining broader MinMax/default qualification, typed, tiled and LogicOp
+workstreams and full acceptance workload are unchanged. No FL promotion.
+
 Task Result: refreshed current status and corrected the gate's stale MinMax
 diagnostic without changing any gate status or capability. Gate units pass
 55/55. Main-agent Standards/Spec self-review only; independent review remains

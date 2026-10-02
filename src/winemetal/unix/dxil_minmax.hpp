@@ -19,7 +19,8 @@ struct ReductionSampleState {
   llvm::Value *address_v;
 };
 
-// Private-module transformation. Caller must prove a float Texture2D/Texture2DArray handle,
+// Private-module transformation. Caller must prove a float Texture1D/Texture2D
+// or corresponding array handle, matching spatial_dimensions (1 or 2),
 // finite coordinates and a point, unbiased/unclamped sampler with the original
 // address/border modes. Only component extracts (no residency/status) are
 // accepted. LLVM verification does not replace regenerated DXIL validation.
@@ -27,16 +28,16 @@ struct ReductionSampleState {
 // reusing a nonzero-clamp descriptor would re-clamp each generated integer tap.
 // Address values use D3D's 1..5 encoding and must be validated by the caller.
 // No production admission may use this until binding/provenance is connected.
-bool LowerReductionSampleLevel2D(llvm::CallInst &sample,
-    const ReductionSampleState &state, std::string &error);
+bool LowerReductionSampleLevel(llvm::CallInst &sample,
+    const ReductionSampleState &state, std::string &error, unsigned spatial_dimensions = 2);
 
-// Emit the view-relative isotropic LOD before a qualified float Texture2D/Texture2DArray
+// Emit the view-relative isotropic LOD before a qualified float 1D/2D (or array)
 // SampleGrad. Mirrors AIR's normalized major-axis algorithm. The caller still
 // applies sampler bias/clamps and instruction/resource clamps in API order.
 // This helper does not rewrite or admit the sampling operation itself.
-llvm::Value *CreateReductionGradientLOD2D(llvm::CallInst &sample, std::string &error);
+llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &error, unsigned spatial_dimensions = 2);
 
-// Qualify legacy float Texture2D/Texture2DArray SampleLevel/SampleGrad pairs, append private tN/sN and
+// Qualify legacy float 1D/2D (or array) SampleLevel/SampleGrad pairs, append private tN/sN and
 // b0 in DXMT_MSC_MINMAX_SPACE, and guard reduction with the runtime enabled bit.
 // Returned pair ordinal N selects its point texture/sampler and 32-byte CBV
 // state; sampler N+pair_count is an unclamped ordinary-filter sampler. Both

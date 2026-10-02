@@ -72,7 +72,8 @@ static bool CheckBindingQualification(llvm::Module &module) {
       for (auto &function : *clone) for (auto &block : function) for (auto &instruction : block)
         if (auto *call = dyn_cast<CallInst>(&instruction))
           if (call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32") ++samples;
-      if (samples != 18) return false;
+      const auto texture_kind = mdconst::extract<ConstantInt>(texture->getOperand(6))->getZExtValue();
+      if (samples != (texture_kind == 1 || texture_kind == 6 ? 10 : 18)) return false;
       auto *result_resources = clone->getNamedMetadata("dx.resources")->getOperand(0);
       auto *cbvs = cast<MDNode>(result_resources->getOperand(2));
       if (cbvs->getNumOperands() != 1) return false;
@@ -135,7 +136,11 @@ static int TransformContainer(const char *path, const char *mode) {
   const bool binding_grad = !std::strcmp(mode, "binding-grad");
   if (samples.size() != (binding_two ? 2 : 1)) return 1;
   // Keep every generated tap/ordinary branch on the original array layer.
-  auto *array_coordinate = samples[0]->getArgOperand(5);
+  auto *resource_groups = (*parsed)->getNamedMetadata("dx.resources")->getOperand(0);
+  auto *texture_record = cast<MDNode>(cast<MDNode>(resource_groups->getOperand(0))->getOperand(0));
+  const auto texture_kind = mdconst::extract<ConstantInt>(texture_record->getOperand(6))->getZExtValue();
+  const unsigned layer_operand = texture_kind == 6 ? 4 : 5;
+  auto *array_coordinate = samples[0]->getArgOperand(layer_operand);
   IRBuilder<> builder(context);
   auto number = [&](float value) { return ConstantFP::get(builder.getFloatTy(), value); };
   const bool maximum = !std::strcmp(mode, "maximum");
@@ -165,11 +170,12 @@ static int TransformContainer(const char *path, const char *mode) {
         records[0].sampler_space || records[0].sampler_register) return 1;
     if (binding_two && (records[1].texture_space || records[1].texture_register ||
         records[1].sampler_space || records[1].sampler_register != 1)) return 1;
-  } else if (!dxmt::dxil::LowerReductionSampleLevel2D(*samples[0], state, error)) { errs() << error; return 1; }
+  } else if (!dxmt::dxil::LowerReductionSampleLevel(*samples[0], state, error,
+      texture_kind == 1 || texture_kind == 6 ? 1 : 2)) { errs() << error; return 1; }
   for (auto &function : **parsed) for (auto &block : function) for (auto &instruction : block)
     if (auto *call = dyn_cast<CallInst>(&instruction))
       if (!binding_two && call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32" &&
-          call->getArgOperand(5) != array_coordinate) return 1;
+          call->getArgOperand(layer_operand) != array_coordinate) return 1;
   // DXC's older text assembler requires explicit names for the newly inserted
   // unnamed values/blocks, exactly as the typed-origin preparation path does.
   for (auto &function : **parsed) for (auto &block : function) {
@@ -214,16 +220,18 @@ int main(int argc, char **argv) {
   // A status consumer must reject before any CFG/declaration mutation.
   auto *status = ExtractValueInst::Create(call, {4}, "status", call->getNextNode());
   const auto blocks = function->size(), functions = module.size();
-  if (dxmt::dxil::LowerReductionSampleLevel2D(*call, state, error) || error.empty() ||
+  if (dxmt::dxil::LowerReductionSampleLevel(*call, state, error, 0) || error.empty() ||
+      function->size() != blocks || module.size() != functions) return 1;
+  if (dxmt::dxil::LowerReductionSampleLevel(*call, state, error) || error.empty() ||
       function->size() != blocks || module.size() != functions) return 1;
   status->eraseFromParent();
   auto *late = BinaryOperator::CreateAdd(function->getArg(5), builder.getInt32(1), "late", call->getNextNode());
   auto bad_state = state;
   bad_state.flags = late;
-  if (dxmt::dxil::LowerReductionSampleLevel2D(*call, bad_state, error) || error.empty() ||
+  if (dxmt::dxil::LowerReductionSampleLevel(*call, bad_state, error) || error.empty() ||
       function->size() != blocks || module.size() != functions) return 1;
   late->eraseFromParent();
-  if (!dxmt::dxil::LowerReductionSampleLevel2D(*call, state, error) || !error.empty()) {
+  if (!dxmt::dxil::LowerReductionSampleLevel(*call, state, error) || !error.empty()) {
     errs() << error << '\n'; return 1;
   }
   if (verifyModule(module, &errs())) return 1;
@@ -253,10 +261,12 @@ int main(int argc, char **argv) {
   const auto instructions_before = gradient_function->getEntryBlock().size();
   const auto declarations_before = module.size();
   gradient_call->setArgOperand(0, builder.getInt32(62));
-  if (dxmt::dxil::CreateReductionGradientLOD2D(*gradient_call, error) || error.empty() ||
+  if (dxmt::dxil::CreateReductionGradientLOD(*gradient_call, error) || error.empty() ||
       gradient_function->getEntryBlock().size() != instructions_before || module.size() != declarations_before) return 1;
   gradient_call->setArgOperand(0, builder.getInt32(63));
-  auto *gradient_lod = dxmt::dxil::CreateReductionGradientLOD2D(*gradient_call, error);
+  if (dxmt::dxil::CreateReductionGradientLOD(*gradient_call, error, 3) || error.empty() ||
+      gradient_function->getEntryBlock().size() != instructions_before || module.size() != declarations_before) return 1;
+  auto *gradient_lod = dxmt::dxil::CreateReductionGradientLOD(*gradient_call, error);
   if (!gradient_lod || !error.empty()) { errs() << error; return 1; }
   cast<ReturnInst>(gradient_function->getEntryBlock().getTerminator())->setOperand(0, gradient_lod);
   unsigned abs_calls = 0, sqrt_calls = 0, log_calls = 0, dimension_calls = 0;
