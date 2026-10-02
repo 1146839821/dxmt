@@ -128,6 +128,14 @@ public:
       const Texture &Texture, Value *Handle, Value *PointSampler, Value *Coord,
       Value *ArrayIndex, Value *ClampedLOD, Value *Flags, const int32_t Offset[3]);
 
+  // View-space resource/instruction clamp, applied after sampler LOD clamps.
+  // Empty views return the mapped OOB one-mask without calling the tap helper.
+  // Admission must validate the descriptor's defaults before enabling clamps.
+  Optional<Value *> CreateClampedReductionSampleLevel(
+      const Texture &Texture, Value *Handle, Value *PointSampler, Value *Coord,
+      Value *ArrayIndex, Value *SamplerClampedLOD, Value *Flags, const int32_t Offset[3],
+      Value *MinLODClamp, Value *DefaultComponents);
+
   std::pair<Value *, Value *>
   CreateSample(
       const Texture &Texture, Value *Handle, Value *Sampler, Value *Coord, Value *ArrayIndex, const int32_t Offset[3]

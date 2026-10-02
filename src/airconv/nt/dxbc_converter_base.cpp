@@ -1634,7 +1634,7 @@ Converter::operator()(const InstSample &sample) {
     auto result = CreateImplicitReductionSample(*Tex, *Sampler, Coord, ArrayIndex, nullptr, sample.offsets, [&] {
       return air.CreateSample(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets,
           sample_bias{Sampler->Bias}, sample_min_lod_clamp{MinLODClamp}).first;
-    });
+    }, MinLODClamp);
     if (!result) return;
     StoreOperand(sample.dst, MaskSwizzle(*result, GetMask(sample.dst), Tex->Swizzle));
     return;
@@ -1652,7 +1652,7 @@ llvm::Optional<llvm::Value *>
 Converter::CreateImplicitReductionSample(
     const TextureResourceHandle &texture, const SamplerHandle &sampler, llvm::Value *coord,
     llvm::Value *array_index, llvm::Value *instruction_bias, const int32_t offsets[3],
-    const std::function<llvm::Value *()> &ordinary_sample) {
+    const std::function<llvm::Value *()> &ordinary_sample, llvm::Value *min_lod_clamp) {
   using namespace llvm::air;
   if (ctx.shader_type != microsoft::D3D10_SB_PIXEL_SHADER ||
       (texture.Logical != Texture::texture1d && texture.Logical != Texture::texture1d_array &&
@@ -1673,7 +1673,7 @@ Converter::CreateImplicitReductionSample(
         auto *biased_lod = ir.CreateFAdd(*lod, sampler.Bias);
         if (instruction_bias) biased_lod = ir.CreateFAdd(biased_lod, instruction_bias);
         return biased_lod;
-      });
+      }, min_lod_clamp);
 }
 
 llvm::Optional<llvm::Value *>
@@ -1681,7 +1681,7 @@ Converter::CreateReductionSample(
     const TextureResourceHandle &texture, const SamplerHandle &sampler, llvm::Value *coord,
     llvm::Value *array_index, llvm::Value *biased_lod, const int32_t offsets[3],
     const std::function<llvm::Value *()> &ordinary_sample,
-    const std::function<llvm::Value *()> &reduction_lod) {
+    const std::function<llvm::Value *()> &reduction_lod, llvm::Value *min_lod_clamp) {
   using namespace llvm::air;
   const auto &state = *sampler.Reduction;
   llvm::BasicBlock *ordinary_block = nullptr;
@@ -1702,8 +1702,12 @@ Converter::CreateReductionSample(
       ir.CreateSelect(ir.CreateFCmpOGT(lod, air.getFloat(0)), air.getInt(dxmt::air::SamplerMinifying), air.getInt(0)));
   if (texture.Logical == Texture::texture1d || texture.Logical == Texture::texture1d_array)
     flags = ir.CreateOr(flags, air.getInt(dxmt::air::SamplerLogical1D));
-  auto value = air.CreateReductionSampleLevel(texture.Texture, texture.Handle, sampler.Handle,
-      coord, array_index, lod, flags, offsets);
+  auto value = texture.DefaultComponents
+      ? air.CreateClampedReductionSampleLevel(texture.Texture, texture.Handle, sampler.Handle,
+          coord, array_index, lod, flags, offsets,
+          min_lod_clamp ? min_lod_clamp : DecodeTextureMinLODClamp(texture.Metadata), texture.DefaultComponents)
+      : air.CreateReductionSampleLevel(texture.Texture, texture.Handle, sampler.Handle,
+          coord, array_index, lod, flags, offsets);
   if (!value) { failure = "AIR Min/Max helper ABI is unsupported"; return {}; }
   auto *result = *value;
   if (ordinary_block) {
@@ -1878,7 +1882,7 @@ Converter::operator()(const InstSampleBias &sample) {
     auto result = CreateImplicitReductionSample(*Tex, *Sampler, Coord, ArrayIndex, InstructionBias, sample.offsets, [&] {
       return air.CreateSample(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets,
           sample_bias{Bias}, sample_min_lod_clamp{MinLODClamp}).first;
-    });
+    }, MinLODClamp);
     if (!result) return;
     StoreOperand(sample.dst, MaskSwizzle(*result, GetMask(sample.dst), Tex->Swizzle));
     return;
@@ -1990,7 +1994,7 @@ Converter::operator()(const InstSampleDerivative &sample) {
     auto result = CreateReductionSample(*Tex, *Sampler, Coord, ArrayIndex, biased_lod, sample.offsets, [&] {
       return air.CreateSampleGrad(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex,
           DDX, DDY, MinLODClamp, sample.offsets).first;
-    });
+    }, {}, MinLODClamp);
     if (!result) return;
     StoreOperand(sample.dst, MaskSwizzle(*result, GetMask(sample.dst), Tex->Swizzle));
     return;

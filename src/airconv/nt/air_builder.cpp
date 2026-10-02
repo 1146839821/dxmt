@@ -1,5 +1,6 @@
 #include "air_builder.hpp"
 #include "../airconv_context.hpp"
+#include "../air_sampler_abi.hpp"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Instructions.h"
@@ -96,6 +97,60 @@ AIRBuilder::CreateReductionSampleLevel(
     result->eraseFromParent();
     return None;
   }
+  return result;
+}
+
+Optional<Value *>
+AIRBuilder::CreateClampedReductionSampleLevel(
+    const Texture &Texture, Value *Handle, Value *PointSampler, Value *Coord,
+    Value *ArrayIndex, Value *SamplerClampedLOD, Value *Flags, const int32_t Offset[3],
+    Value *MinLODClamp, Value *DefaultComponents) {
+  // Validate before creating blocks or querying a texture. Legacy bindings do
+  // not carry default components and must keep using the unclamped primitive.
+  if (Texture.sample_type != Texture::sample_float || Texture.memory_access != Texture::access_sample ||
+      (Texture.kind != Texture::texture2d && Texture.kind != Texture::texture2d_array &&
+       Texture.kind != Texture::texture3d) ||
+      !Handle || !PointSampler || !Coord || !SamplerClampedLOD || !Flags || !MinLODClamp || !DefaultComponents ||
+      Handle->getType() != getTextureHandleType(Texture) || PointSampler->getType() != getSamplerHandleType() ||
+      Coord->getType() != getTextureSampleCoordType(Texture) || SamplerClampedLOD->getType() != getFloatTy() ||
+      Flags->getType() != getIntTy() || MinLODClamp->getType() != getFloatTy() ||
+      !DefaultComponents->getType()->isIntegerTy(64) ||
+      (Texture.kind == Texture::texture2d_array && (!ArrayIndex || ArrayIndex->getType() != getIntTy())))
+    return None;
+
+  auto *mips = CreateTextureQuery(Texture, Handle, Texture::num_mip_levels, getInt(0));
+  auto *last_mip = builder.CreateFSub(builder.CreateUIToFP(mips, getFloatTy()), getFloat(1));
+  auto *empty = builder.CreateFCmpOGT(MinLODClamp, last_mip, "sample.clamp.empty");
+  auto *function = builder.GetInsertBlock()->getParent();
+  auto *default_block = BasicBlock::Create(builder.getContext(), "sample.clamp.defaults", function);
+  auto *sample_block = BasicBlock::Create(builder.getContext(), "sample.clamp.active", function);
+  auto *merge_block = BasicBlock::Create(builder.getContext(), "sample.clamp.merge", function);
+  builder.CreateCondBr(empty, default_block, sample_block);
+
+  builder.SetInsertPoint(default_block);
+  Value *defaults = Constant::getNullValue(getFloatTy(4));
+  for (unsigned component = 0; component < 4; ++component) {
+    auto *bit = builder.CreateAnd(DefaultComponents, builder.getInt64(uint64_t(1) << component));
+    auto *one = builder.CreateICmpNE(bit, builder.getInt64(0));
+    defaults = builder.CreateInsertElement(defaults, builder.CreateSelect(one, getFloat(1), getFloat(0)), component);
+  }
+  builder.CreateBr(merge_block);
+
+  builder.SetInsertPoint(sample_block);
+  auto *lod = CreateFPBinOp(fmax, SamplerClampedLOD, MinLODClamp, false);
+  // Resource/instruction clamps can move magnification into minification.
+  // Clear the caller's classification and derive it from the final LOD.
+  auto *flags = builder.CreateAnd(Flags, getInt(~dxmt::air::SamplerMinifying));
+  flags = builder.CreateOr(flags, builder.CreateSelect(builder.CreateFCmpOGT(lod, getFloat(0)),
+      getInt(dxmt::air::SamplerMinifying), getInt(0)));
+  auto value = CreateReductionSampleLevel(Texture, Handle, PointSampler, Coord, ArrayIndex, lod, flags, Offset);
+  if (!value) return None;
+  auto *sample_exit = builder.GetInsertBlock();
+  builder.CreateBr(merge_block);
+  builder.SetInsertPoint(merge_block);
+  auto *result = builder.CreatePHI(getFloatTy(4), 2, "sample.clamp.result");
+  result->addIncoming(defaults, default_block);
+  result->addIncoming(*value, sample_exit);
   return result;
 }
 

@@ -58,6 +58,13 @@ diagnostic without changing any gate status or capability. Gate units pass
 unavailable. No production lowering, runtime deployment or game test in this
 refresh.
 
+Follow-up (2026-10-03): actual AIR clamp/empty-set CFG generation is now connected
+to the production reduction helper (`D3D12_MINMAX_CLAMP_LOWERING.md`). This is
+structural lowering plus existing sampling regression evidence, not nonzero-clamp
+GPU admission: instruction and recording/submission rejection remain intact until
+host validity and actual numeric clamp dispatches pass. The snapshot's remaining
+workstreams and full acceptance counts are unchanged.
+
 ## Task Analysis
 
 Baseline: `e220380`, branch `feat/d3d12-1`. User requests continued work and
