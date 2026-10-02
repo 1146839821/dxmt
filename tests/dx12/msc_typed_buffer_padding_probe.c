@@ -51,7 +51,9 @@ probe_format(MTLPixelFormat format) {
       {MTLPixelFormatR8Unorm, 1, n8, n8_loaded, 0x5au, false, 1},
       {MTLPixelFormatR16Unorm, 2, n16, n16_loaded, 0x5555u, false, 1},
       {MTLPixelFormatRGBA8Uint, 4, u8, u8, 0x5au, true, 4},
-      {MTLPixelFormatRGBA16Uint, 8, u16, u16, 0x5555u, true, 4}};
+      {MTLPixelFormatRGBA16Uint, 8, u16, u16, 0x5555u, true, 4},
+      {MTLPixelFormatRGBA8Sint, 4, s8, s8, 0x5au, true, 4},
+      {MTLPixelFormatRGBA16Sint, 8, s16, s16, 0x5555u, true, 4}};
   for (unsigned i = 0; i < sizeof(formats) / sizeof(formats[0]); ++i)
     if (formats[i].format == format) return &formats[i];
   return NULL;
@@ -243,7 +245,7 @@ cleanup:
 
 int main(int argc, const char **argv) {
   if (argc != 4 && argc != 5) {
-    fprintf(stderr, "usage: %s UAV.cso SRV.cso atomic.cso [--expect-unsupported|--raw-r32|--origin-cbv|--origin-cbv-r8uint|--origin-cbv-r16uint|--origin-cbv-oob|--origin-cbv-wrap|--origin-cbv-r16float[-oob]|--origin-cbv-r32float[-oob]|--origin-cbv-r8sint[-oob]|--origin-cbv-r16sint[-oob]|--origin-cbv-r32sint[-oob]|--origin-cbv-r8unorm[-oob]|--origin-cbv-r16unorm[-oob]|--origin-cbv-rgba8uint[-oob]|--origin-cbv-rgba16uint[-oob]]\n", argv[0]); return 1;
+    fprintf(stderr, "usage: %s UAV.cso SRV.cso atomic.cso [--expect-unsupported|--raw-r32|--origin-cbv|--origin-cbv-r8uint|--origin-cbv-r16uint|--origin-cbv-oob|--origin-cbv-wrap|--origin-cbv-r16float[-oob]|--origin-cbv-r32float[-oob]|--origin-cbv-r8sint[-oob]|--origin-cbv-r16sint[-oob]|--origin-cbv-r32sint[-oob]|--origin-cbv-r8unorm[-oob]|--origin-cbv-r16unorm[-oob]|--origin-cbv-rgba8uint[-oob]|--origin-cbv-rgba16uint[-oob]|--origin-cbv-rgba8sint[-oob]|--origin-cbv-rgba16sint[-oob]]\n", argv[0]); return 1;
   }
   const struct ProbeMode {
     const char *name;
@@ -276,7 +278,11 @@ int main(int argc, const char **argv) {
       {"--origin-cbv-rgba8uint", MTLPixelFormatRGBA8Uint, BindingOriginCBV, false, false, false},
       {"--origin-cbv-rgba8uint-oob", MTLPixelFormatRGBA8Uint, BindingOriginCBV, true, false, false},
       {"--origin-cbv-rgba16uint", MTLPixelFormatRGBA16Uint, BindingOriginCBV, false, false, false},
-      {"--origin-cbv-rgba16uint-oob", MTLPixelFormatRGBA16Uint, BindingOriginCBV, true, false, false}};
+      {"--origin-cbv-rgba16uint-oob", MTLPixelFormatRGBA16Uint, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-rgba8sint", MTLPixelFormatRGBA8Sint, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-rgba8sint-oob", MTLPixelFormatRGBA8Sint, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-rgba16sint", MTLPixelFormatRGBA16Sint, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-rgba16sint-oob", MTLPixelFormatRGBA16Sint, BindingOriginCBV, true, false, false}};
   const struct ProbeMode *mode = NULL;
   for (unsigned i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i)
     if (!strcmp(argc == 5 ? argv[4] : "", modes[i].name)) { mode = &modes[i]; break; }

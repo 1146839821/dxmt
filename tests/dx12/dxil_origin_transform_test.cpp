@@ -339,18 +339,69 @@ declare void @dx.op.bufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i
   check("UINT4 SRV four lanes", LowerTypedOrigin(vector_srv, vector_output, error));
   edit(vector_srv, "  ret void", vector_store + "  ret void");
   reject("UINT4 SRV write", vector_srv, "SRV write/atomic");
-  for (const auto &component : {4, 9, 14}) {
+  for (const auto &component : {9, 14, 13}) {
     vector_bad = vector;
-    const std::string name = component == 4 ? "vector<int, 4> " : "vector<float, 4> ";
+    const std::string name = "vector<float, 4> ";
     edit(vector_bad, "%\"class.RWBuffer<vector<unsigned int, 4> >\" = type { <4 x i32> }",
-        "%\"class.RWBuffer<" + name + ">\" = type { <4 x " + (component == 4 ? "i32" : "float") + "> }");
+        "%\"class.RWBuffer<" + name + ">\" = type { <4 x float> }");
     edit(vector_bad, "!6 = !{i32 0, %\"class.RWBuffer<vector<unsigned int, 4> >\"",
         "!6 = !{i32 0, %\"class.RWBuffer<" + name + ">\"");
     edit(vector_bad, "i1 false, i1 false, i1 false, !7}", "i1 false, i1 false, i1 false, !9}");
     vector_bad += "!9 = !{i32 0, i32 " + std::to_string(component) + "}\n";
-    reject(component == 4 ? "SINT4 resource" : component == 9 ? "FLOAT4 resource" : "UNORM4 resource",
+    reject(component == 9 ? "FLOAT4 resource" : component == 14 ? "UNORM4 resource" : "SNORM4 resource",
         vector_bad, "unsupported or ambiguous UAV binding");
   }
+  auto as_signed_vector = [&](std::string text) {
+    for (const auto &kind : {"Buffer", "RWBuffer"}) {
+      const std::string from = std::string("class.") + kind + "<vector<unsigned int, 4> >";
+      const std::string to = std::string("class.") + kind + "<vector<int, 4> >";
+      size_t position = 0;
+      while ((position = text.find(from, position)) != std::string::npos) {
+        text.replace(position, from.size(), to);
+        position += to.size();
+      }
+    }
+    const std::string metadata_tail = text.find("!6 = !{i32 0, %\"class.Buffer<") != std::string::npos ?
+        "i32 0, !7}" : "i1 false, i1 false, i1 false, !7}";
+    edit(text, metadata_tail, metadata_tail.substr(0, metadata_tail.size() - 3) + "!9}");
+    text += "!9 = !{i32 0, i32 4}\n";
+    return text;
+  };
+  const std::string sint_vector = as_signed_vector(vector);
+  check("SINT4 four-lane UAV copy", LowerTypedOrigin(sint_vector, vector_output, error) &&
+      vector_output.find("phi %dx.types.ResRet.i32") != std::string::npos &&
+      vector_output.find("!9 = !{i32 0, i32 4}") != std::string::npos);
+  std::string sint_vector_srv = as_signed_vector(vector_srv);
+  reject("SINT4 SRV write", sint_vector_srv, "SRV write/atomic");
+  edit(sint_vector_srv, vector_store, "");
+  check("SINT4 four-lane SRV", LowerTypedOrigin(sint_vector_srv, vector_output, error));
+  vector_bad = sint_vector;
+  edit(vector_bad, "!9 = !{i32 0, i32 4}", "!9 = !{i32 0, i32 5}");
+  reject("SINT4 UINT metadata", vector_bad, "unsupported or ambiguous UAV binding");
+  vector_bad = sint_vector;
+  edit(vector_bad, "%4, 3", "%4, 4");
+  reject("SINT4 status lane", vector_bad);
+  vector_bad = sint_vector;
+  edit(vector_bad, "i32 %7, i32 %8, i8 15", "i32 %7, i32 %8, i8 3");
+  reject("SINT4 partial store", vector_bad);
+  vector_bad = sint_vector;
+  edit(vector_bad, "  ret void", "  %14 = call i32 @dx.op.atomicBinOp.i32(i32 78, %dx.types.Handle %2, i32 0, i32 %3, i32 undef, i32 undef, i32 13)\n  ret void");
+  vector_bad += "declare i32 @dx.op.atomicBinOp.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32)\n";
+  reject("SINT4 atomic", vector_bad, "vector atomic outside bounded grammar");
+  vector_bad = sint_vector;
+  edit(vector_bad, "!8 = !{i32 1, %\"class.RWBuffer<unsigned int>\"",
+      "!8 = !{i32 1, %\"class.RWBuffer<vector<int, 4> >\"");
+  edit(vector_bad, "i1 false, i1 false, i1 false, !7}", "i1 false, i1 false, i1 false, !9}");
+  reject("SINT4 output rejected", vector_bad);
+  vector_bad = sint_vector;
+  edit(vector_bad, "shl i32 %3, 2", "shl i32 %3, 3");
+  reject("SINT4 unsupported shift", vector_bad);
+  vector_bad = sint_vector;
+  edit(vector_bad, "!6 = !{i32 0, %\"class.RWBuffer<vector<int, 4> >\"",
+      "!6 = !{i32 0, %\"class.RWBuffer<int>\"");
+  edit(vector_bad, "%\"class.RWBuffer<vector<int, 4> >\" = type { <4 x i32> }",
+      "%\"class.RWBuffer<vector<int, 4> >\" = type { <4 x i32> }\n%\"class.RWBuffer<int>\" = type { i32 }");
+  reject("SINT scalar width despite vector declaration", vector_bad);
   // The existing synthetic fixture is parser evidence only; real containers
   // separately validate full four-lane output and SRV copy-load programs.
   std::printf("bounded origin parser: cases=%u failures=%u (not DXIL/GPU validation)\n", cases, failures);
