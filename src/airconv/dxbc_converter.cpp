@@ -1113,7 +1113,7 @@ AIRCONV_API int SM50Initialize(
     // type after an earlier SampleLevel was decoded. Until per-use depth
     // reduction lowering exists, conservatively exclude such shaders.
     for (const auto &[resource_range, resource] : shader_info->srvMap)
-      if (resource.compared) sampler.reduction_sample_level_only = false;
+      if (resource.compared) sampler.reduction_sampling_only = false;
     // TODO: abstract SM 5.0 binding
     auto attr_index = GetArgumentIndex(SM50BindingType::Sampler, range_id);
     sampler.arg_index =
@@ -1126,8 +1126,8 @@ AIRCONV_API int SM50Initialize(
     sm50_shader->args_reflection.push_back({
       .Type = SM50BindingType::Sampler,
       .SM50BindingSlot = range_id,
-      .Flags = sampler.reduction_consumer_seen && sampler.reduction_sample_level_only
-          ? MTL_SM50_SHADER_ARGUMENT_SAMPLER_REDUCTION_SAMPLE_LEVEL
+      .Flags = sampler.reduction_consumer_seen && sampler.reduction_sampling_only
+          ? MTL_SM50_SHADER_ARGUMENT_SAMPLER_REDUCTION_SAMPLING
           : (MTL_SM50_SHADER_ARGUMENT_FLAG)0,
       .StructurePtrOffset = sampler.arg_index,
     });

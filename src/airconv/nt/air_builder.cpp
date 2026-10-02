@@ -8,8 +8,54 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <format>
+#include <limits>
 
 namespace llvm::air {
+
+Optional<Value *>
+AIRBuilder::CreateIsotropicGradientLOD(const Texture &Texture, Value *Handle, Value *DerivX, Value *DerivY) {
+  unsigned axes = 2;
+  if (Texture.kind == Texture::texture3d) axes = 3;
+  else if (Texture.kind != Texture::texture2d && Texture.kind != Texture::texture2d_array) return None;
+  if (!Handle || !DerivX || !DerivY || Handle->getType() != getTextureHandleType(Texture) ||
+      DerivX->getType() != getFloatTy(axes) || DerivY->getType() != getFloatTy(axes)) return None;
+  const Texture::Query queries[] = {Texture::width, Texture::height, Texture::depth};
+  SmallVector<Value *, 3> dx, dy;
+  Value *scale = getFloat(0);
+  for (unsigned axis = 0; axis < axes; ++axis) {
+    auto *size = builder.CreateUIToFP(CreateTextureQuery(Texture, Handle, queries[axis], getInt(0)), getFloatTy());
+    auto *x = builder.CreateFMul(builder.CreateExtractElement(DerivX, axis), size);
+    auto *y = builder.CreateFMul(builder.CreateExtractElement(DerivY, axis), size);
+    dx.push_back(x); dy.push_back(y);
+    scale = CreateFPBinOp(fmax, scale, CreateFPUnOp(fabs, x, false), false);
+    scale = CreateFPBinOp(fmax, scale, CreateFPUnOp(fabs, y, false), false);
+  }
+  // Normalize before forming the Gram matrix, avoiding squared-length overflow
+  // for finite scaled derivatives. Zero gradients retain LOD -infinity.
+  auto *safe_scale = builder.CreateSelect(builder.CreateFCmpOGT(scale, getFloat(0)), scale, getFloat(1));
+  Value *a = getFloat(0), *b = getFloat(0), *c = getFloat(0);
+  for (unsigned axis = 0; axis < axes; ++axis) {
+    auto *x = builder.CreateFDiv(dx[axis], safe_scale);
+    auto *y = builder.CreateFDiv(dy[axis], safe_scale);
+    a = builder.CreateFAdd(a, builder.CreateFMul(x, x));
+    b = builder.CreateFAdd(b, builder.CreateFMul(x, y));
+    c = builder.CreateFAdd(c, builder.CreateFMul(y, y));
+  }
+  auto *difference = builder.CreateFSub(a, c);
+  auto *discriminant = builder.CreateFAdd(builder.CreateFMul(difference, difference),
+      builder.CreateFMul(getFloat(4), builder.CreateFMul(b, b)));
+  auto *major = builder.CreateFMul(getFloat(0.5), builder.CreateFAdd(builder.CreateFAdd(a, c),
+      CreateFPUnOp(sqrt, discriminant, false)));
+  auto *determinant = builder.CreateFSub(builder.CreateFMul(a, c), builder.CreateFMul(b, b));
+  // D3D's zero/parallel-gradient caveat skips ellipse transformation. For
+  // perpendicular vectors the major eigenvalue already equals max(a,c).
+  auto *squared_length = builder.CreateSelect(builder.CreateFCmpOGT(determinant, getFloat(0)),
+      major, CreateFPBinOp(fmax, a, c, false));
+  auto *lod = builder.CreateFAdd(builder.CreateFMul(getFloat(0.5), CreateFPUnOp(log2, squared_length, false)),
+      CreateFPUnOp(log2, safe_scale, false));
+  auto *infinity = getFloat(std::numeric_limits<float>::infinity());
+  return builder.CreateSelect(builder.CreateFCmpOEQ(scale, infinity), infinity, lod);
+}
 
 Optional<Value *>
 AIRBuilder::CreateReductionSampleLevel(

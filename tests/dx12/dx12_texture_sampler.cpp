@@ -11,6 +11,7 @@
 #include <iostream>
 #include <vector>
 #include <algorithm>
+#include <string>
 
 static bool CheckSamplerStorage(WMT::Device device, dxmt::MTLD3D12SamplerDescriptorHeap *heap, bool cleared,
                                 const D3D12_SAMPLER_DESC *desc = nullptr, uint64_t *storage = nullptr) {
@@ -54,7 +55,8 @@ static bool CheckSamplerStorage(WMT::Device device, dxmt::MTLD3D12SamplerDescrip
   return true;
 }
 
-static bool CompileDXBC(std::vector<char> &shader, bool unsupported_reduction = false) {
+static bool CompileDXBC(std::vector<char> &shader, bool unsupported_reduction = false, bool gradient = false,
+                        unsigned gradient_case = 0) {
   HMODULE compiler = LoadLibraryA(D3DCOMPILER_DLL_A);
   if (!compiler)
     return false;
@@ -64,14 +66,24 @@ static bool CompileDXBC(std::vector<char> &shader, bool unsupported_reduction = 
       "RWBuffer<uint> o:register(u0);"
       "[numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){"
       "o[0]=(uint)(t.SampleLevel(s,float2(0.5,0.5),0).x*255+0.5);}";
+  const char *gradient_x[] = {"float2(1,0)", "float2(0.23,0)", "float2(0.23,0.23)",
+                             "float2(0.23,0)", "float2(0,0)"};
+  const char *gradient_y[] = {"float2(0,1)", "float2(0.23,0.23)", "float2(0.23,0.23)",
+                             "float2(0,0.23)", "float2(0,0)"};
+  const std::string gradient_source = std::string(
+      "Texture2D<float4> t:register(t0); SamplerState s:register(s0);"
+      "RWBuffer<uint> o:register(u0);"
+      "[numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){"
+      "o[0]=(uint)(t.SampleGrad(s,float2(0.5,0.5),") + gradient_x[gradient_case] + "," +
+      gradient_y[gradient_case] + ").x*255+0.5);}";
   static const char unsupported_source[] =
       "Texture2D<float4> t:register(t0); SamplerState s:register(s0);"
       "RWBuffer<uint> o:register(u0);"
       "[numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){"
-      "o[0]=(uint)(t.SampleGrad(s,float2(0.5,0.5),float2(1,0),float2(0,1)).x*255+0.5);}";
+      "o[0]=(uint)(t.SampleGrad(s,float2(0.5,0.5),float2(1,0),float2(0,1),int2(0,0),0.5).x*255+0.5);}";
   ID3DBlob *blob = nullptr, *error = nullptr;
-  HRESULT hr = compile ? compile(unsupported_reduction ? unsupported_source : source,
-                                unsupported_reduction ? sizeof(unsupported_source) - 1 : sizeof(source) - 1,
+  const char *selected_source = unsupported_reduction ? unsupported_source : gradient ? gradient_source.c_str() : source;
+  HRESULT hr = compile ? compile(selected_source, std::strlen(selected_source),
                                 nullptr, nullptr, nullptr, "main", "cs_5_0",
                                 0, 0, &blob, &error) : E_FAIL;
   if (SUCCEEDED(hr))
@@ -110,14 +122,29 @@ main(int argc, char **argv) {
       !expect_consumer_unsupported && !expect_minlod_unsupported)
     return 2;
   const bool dynamic_switch = argc == 3 && strcmp(argv[2], "--dynamic-switch") == 0;
+  const bool grad_lod = argc == 3 && (strcmp(argv[2], "--minimum-grad-lod") == 0 ||
+      strcmp(argv[2], "--minimum-grad-bias") == 0 || strcmp(argv[2], "--minimum-grad-parallel") == 0 ||
+      strcmp(argv[2], "--minimum-grad-perpendicular") == 0 || strcmp(argv[2], "--minimum-grad-zero") == 0 ||
+      strcmp(argv[2], "--minimum-grad-minlod") == 0 || strcmp(argv[2], "--minimum-grad-maxlod") == 0);
+  const bool grad_bias = grad_lod && strcmp(argv[2], "--minimum-grad-bias") == 0;
+  const bool grad_minlod = grad_lod && strcmp(argv[2], "--minimum-grad-minlod") == 0;
+  const bool grad_maxlod = grad_lod && strcmp(argv[2], "--minimum-grad-maxlod") == 0;
+  const unsigned grad_case = !grad_lod ? 0 : strcmp(argv[2], "--minimum-grad-parallel") == 0 ? 2 :
+      strcmp(argv[2], "--minimum-grad-perpendicular") == 0 ? 3 :
+      strcmp(argv[2], "--minimum-grad-zero") == 0 ? 4 : 1;
+  const bool gradient_probe = argc >= 3 && (strcmp(argv[2], "--minimum-grad") == 0 ||
+      strcmp(argv[2], "--maximum-grad") == 0 || strcmp(argv[2], "--static-minimum-grad") == 0 ||
+      strcmp(argv[2], "--static-maximum-grad") == 0 || grad_lod);
   const bool minimum = argc >= 3 &&
       (strcmp(argv[2], "--minimum") == 0 || strcmp(argv[2], "--static-minimum") == 0 ||
        strcmp(argv[2], "--static-minimum-state") == 0 || dynamic_switch ||
        strcmp(argv[2], "--minimum-static-observation") == 0 ||
-       strcmp(argv[2], "--minimum-live-observation") == 0);
+       strcmp(argv[2], "--minimum-live-observation") == 0 || strcmp(argv[2], "--minimum-grad") == 0 ||
+       strcmp(argv[2], "--static-minimum-grad") == 0 || grad_lod);
   const bool state_probe = argc >= 3 && strcmp(argv[2], "--static-minimum-state") == 0;
   const bool maximum = argc >= 3 &&
-      (strcmp(argv[2], "--maximum") == 0 || strcmp(argv[2], "--static-maximum") == 0);
+      (strcmp(argv[2], "--maximum") == 0 || strcmp(argv[2], "--static-maximum") == 0 ||
+       strcmp(argv[2], "--maximum-grad") == 0 || strcmp(argv[2], "--static-maximum-grad") == 0);
   const bool reduction = minimum || maximum;
   const bool static_observation = argc >= 3 && (strcmp(argv[2], "--sampler-static-observation") == 0 ||
       strcmp(argv[2], "--minimum-static-observation") == 0);
@@ -126,13 +153,18 @@ main(int argc, char **argv) {
   const bool observation_probe = static_observation || live_observation;
   const bool static_sampler = argc >= 3 &&
       (strcmp(argv[2], "--static-sampler") == 0 || state_probe ||
-       strcmp(argv[2], "--static-minimum") == 0 || strcmp(argv[2], "--static-maximum") == 0);
-  const D3D12_FILTER filter = state_probe ? D3D12_ENCODE_BASIC_FILTER(D3D12_FILTER_TYPE_LINEAR,
+       strcmp(argv[2], "--static-minimum") == 0 || strcmp(argv[2], "--static-maximum") == 0 ||
+       strcmp(argv[2], "--static-minimum-grad") == 0 || strcmp(argv[2], "--static-maximum-grad") == 0);
+  const D3D12_FILTER filter = grad_lod ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_POINT :
+      state_probe ? D3D12_ENCODE_BASIC_FILTER(D3D12_FILTER_TYPE_LINEAR,
       D3D12_FILTER_TYPE_POINT, D3D12_FILTER_TYPE_POINT, D3D12_FILTER_REDUCTION_TYPE_MINIMUM) :
                               minimum ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR :
                               maximum ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR :
                                         D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-  const UINT expected = minimum ? 16 : maximum ? 240 : 255;
+  // The nonorthogonal footprint's major axis is 8*.23*golden_ratio:
+  // LOD ~1.574 -> point mip 2; max raw derivative length wrongly picks mip 1.
+  const UINT expected = grad_lod ? (grad_bias || grad_case == 2 || grad_case == 3 ? 224 :
+      grad_case == 4 || grad_maxlod ? 32 : 96) : minimum ? 16 : maximum ? 240 : 255;
   const bool direct_indexed_uav_texture =
       argc == 3 && strcmp(argv[2], "--direct-indexed-uav-texture") == 0;
   const bool direct_indexed =
@@ -146,13 +178,14 @@ main(int argc, char **argv) {
   if ((expect_consumer_unsupported || expect_minlod_unsupported) && (!reduction || static_sampler)) return 2;
   if (expect_minlod_unsupported && !dxbc) return 2;
   if (dynamic_switch && !dxbc) return 2;
+  if (grad_lod && !dxbc) return 2;
   if (expect_pso_unsupported && (dxbc || !static_sampler || !reduction))
     return 2;
   if (expect_air_unsupported && (!dxbc || !static_sampler || !reduction))
     return 2;
   std::vector<char> shader;
   if (dxbc) {
-    if (!CompileDXBC(shader, expect_air_unsupported || expect_consumer_unsupported))
+    if (!CompileDXBC(shader, expect_air_unsupported || expect_consumer_unsupported, gradient_probe, grad_case))
       return 3;
   } else {
     std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
@@ -211,6 +244,9 @@ main(int argc, char **argv) {
   D3D12_RESOURCE_DESC output_texture_desc = {};
   D3D12_RESOURCE_DESC buffer_desc = {};
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT mip_footprints[4] = {};
+  UINT mip_rows[4] = {};
+  UINT64 mip_row_sizes[4] = {};
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT output_texture_footprint = {};
   UINT row_count = 0;
   UINT64 row_size = 0;
@@ -330,10 +366,10 @@ main(int argc, char **argv) {
   default_heap.CreationNodeMask = 1;
   default_heap.VisibleNodeMask = 1;
   texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-  texture_desc.Width = reduction ? 2 : 1;
-  texture_desc.Height = reduction ? 2 : 1;
+  texture_desc.Width = grad_lod ? 8 : reduction ? 2 : 1;
+  texture_desc.Height = grad_lod ? 8 : reduction ? 2 : 1;
   texture_desc.DepthOrArraySize = 1;
-  texture_desc.MipLevels = 1;
+  texture_desc.MipLevels = grad_lod ? 4 : 1;
   texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   texture_desc.SampleDesc.Count = 1;
   if (!CheckHR(
@@ -346,7 +382,9 @@ main(int argc, char **argv) {
   upload_heap.CreationNodeMask = 1;
   upload_heap.VisibleNodeMask = 1;
   buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  buffer_desc.Width = reduction ? 512 : 256;
+  if (grad_lod)
+    device->GetCopyableFootprints(&texture_desc, 0, 4, 0, mip_footprints, mip_rows, mip_row_sizes, &total_size);
+  buffer_desc.Width = grad_lod ? total_size : reduction ? 512 : 256;
   buffer_desc.Height = 1;
   buffer_desc.DepthOrArraySize = 1;
   buffer_desc.MipLevels = 1;
@@ -357,12 +395,25 @@ main(int argc, char **argv) {
           device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
                                            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload))))
     goto cleanup;
-  device->GetCopyableFootprints(&texture_desc, 0, 1, 0, &footprint, &row_count, &row_size, &total_size);
+  if (grad_lod)
+    footprint = mip_footprints[0];
+  else
+    device->GetCopyableFootprints(&texture_desc, 0, 1, 0, &footprint, &row_count, &row_size, &total_size);
   if (!CheckHR("MapUpload", upload->Map(0, nullptr, &upload_data)))
     goto cleanup;
   static const UINT pixel = 0xff0000ff;
   memcpy(upload_data, &pixel, sizeof(pixel));
-  if (reduction) {
+  if (grad_lod) {
+    const UINT mip_red[4] = {32, 224, 96, 160};
+    memset(upload_data, 0, static_cast<size_t>(total_size));
+    for (unsigned mip = 0; mip < 4; ++mip)
+      for (UINT y = 0; y < mip_rows[mip]; ++y)
+        for (UINT x = 0; x < mip_footprints[mip].Footprint.Width; ++x) {
+          const UINT texel = 0xff000000 | mip_red[mip];
+          memcpy(static_cast<char *>(upload_data) + mip_footprints[mip].Offset +
+                     y * mip_footprints[mip].Footprint.RowPitch + x * sizeof(UINT), &texel, sizeof(texel));
+        }
+  } else if (reduction) {
     const UINT pixels[4] = {0xff000010, 0xff000040, 0xff0000c0, 0xff0000f0};
     memcpy(upload_data, pixels, 2 * sizeof(UINT));
     memcpy(static_cast<char *>(upload_data) + footprint.Footprint.RowPitch, pixels + 2, 2 * sizeof(UINT));
@@ -372,7 +423,7 @@ main(int argc, char **argv) {
   srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
   srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-  srv_desc.Texture2D.MipLevels = 1;
+  srv_desc.Texture2D.MipLevels = texture_desc.MipLevels;
   srv_desc.Texture2D.ResourceMinLODClamp = expect_minlod_unsupported ? 0.5f : 0.0f;
   resource_cpu = resource_heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateShaderResourceView(texture, &srv_desc, resource_cpu);
@@ -418,6 +469,11 @@ main(int argc, char **argv) {
     sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     sampler_desc.MinLOD = 0;
     sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
+    if (grad_lod) {
+      sampler_desc.MipLODBias = grad_bias ? -0.75f : 0.0f;
+      sampler_desc.MinLOD = grad_minlod ? 2.25f : 0.0f;
+      sampler_desc.MaxLOD = grad_minlod ? 0.0f : grad_maxlod ? 0.25f : D3D12_FLOAT32_MAX;
+    }
     if (reduction) {
       auto heap = static_cast<dxmt::MTLD3D12SamplerDescriptorHeap *>(sampler_heap);
       D3D12_SAMPLER_DESC control = sampler_desc;
@@ -506,7 +562,7 @@ main(int argc, char **argv) {
     const HRESULT hr = device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso));
     if (expect_pso_unsupported || expect_air_unsupported) {
       if (hr == (expect_air_unsupported ? E_FAIL : E_NOTIMPL) && !pso) {
-        std::cout << (expect_air_unsupported ? "AIR reduction SampleGrad" : "MSC reduction root")
+        std::cout << (expect_air_unsupported ? "AIR reduction SampleGrad instruction clamp" : "MSC reduction root")
                   << " PSO rejected without fallback\n";
         result = 0;
       } else {
@@ -532,7 +588,11 @@ main(int argc, char **argv) {
   texture_src.pResource = upload;
   texture_src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
   texture_src.PlacedFootprint = footprint;
-  list->CopyTextureRegion(&texture_dst, 0, 0, 0, &texture_src, nullptr);
+  for (unsigned mip = 0; mip < texture_desc.MipLevels; ++mip) {
+    texture_dst.SubresourceIndex = mip;
+    texture_src.PlacedFootprint = grad_lod ? mip_footprints[mip] : footprint;
+    list->CopyTextureRegion(&texture_dst, 0, 0, 0, &texture_src, nullptr);
+  }
   {
     D3D12_RESOURCE_BARRIER barrier = {};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;

@@ -202,7 +202,7 @@ public:
     auto [SamplerH, CubeSampler, Metadata, LODClamps] =
         GetSamplerDescriptor(Builder, HeapPointer, Index, Sampler.range.lower_bound, DescriptorOffset);
     SamplerDescriptor result{SamplerH, CubeSampler, Metadata};
-    if (Sampler.reduction_consumer_seen && Sampler.reduction_sample_level_only) {
+    if (Sampler.reduction_consumer_seen && Sampler.reduction_sampling_only) {
       result.Reduction = DecodeSamplerReductionState(Builder, Metadata, LODClamps, false);
       auto &B = Builder.builder;
       result.Reduction->RuntimePredicate = B.CreateICmpNE(

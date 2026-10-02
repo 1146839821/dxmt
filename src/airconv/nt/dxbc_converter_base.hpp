@@ -26,6 +26,7 @@
 #include "../dxbc_instructions.hpp"
 #include "adt.hpp"
 #include "air_builder.hpp"
+#include <functional>
 #include "dxbc_binding_map.hpp"
 #include "tl/generator.hpp"
 #include "ftl.hpp"
@@ -160,6 +161,10 @@ public:
   }
 
   llvm::Optional<SamplerHandle> LoadSampler(const SrcOperandSampler &SrcOp, bool AllowReduction = false);
+  llvm::Optional<llvm::Value *> CreateReductionSample(
+      const TextureResourceHandle &texture, const SamplerHandle &sampler, llvm::Value *coord,
+      llvm::Value *array_index, llvm::Value *biased_lod, const int32_t offsets[3],
+      const std::function<llvm::Value *()> &ordinary_sample);
 
   llvm::Optional<BufferResourceHandle> LoadBuffer(const SrcOperandResource &SrcOp);
   llvm::Optional<BufferResourceHandle> LoadBuffer(const SrcOperandUAV &SrcOp);

@@ -94,6 +94,13 @@ narrows the dynamic AIR gap; shader-wide qualification is conservative and does
 not close the remaining sample operations, feedback, DXIL, indirect/direct-indexed
 or full format/shape/per-range acceptance requirements. No FL/SM promotion.
 
+Opt-in AIR reduction now also lowers supported explicit-gradient SampleGrad
+through the shared reduction helper (`D3D12_MINMAX_GRAD_INTEGRATION.md`). Both
+variants pass seven multi-mip numeric probes and twelve focused regressions each.
+This closes a bounded AIR operation gap, not Min/Max or FL12_0: implicit sampling,
+clamps/feedback, DXIL and complete GPU matrices remain outstanding. Feature-level
+declarations are unchanged.
+
 Prioritize the production typed-buffer origin contract, using
 `D3D12_TYPED_ORIGIN_PRODUCTION_AUDIT.md` as the integration gap list. Keep
 unsupported views rejected until real production readback succeeds. Integrate

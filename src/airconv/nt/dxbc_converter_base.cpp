@@ -560,7 +560,7 @@ Converter::LoadSampler(const SrcOperandSampler &SrcOp, bool AllowReduction) {
   if (!descriptor)
     return {};
   if (descriptor->Reduction && (!AllowReduction || descriptor->Reduction->Unsupported)) {
-    failure = "AIR Min/Max sampler currently requires SampleLevel without feedback";
+    failure = "AIR Min/Max sampler requires supported SampleLevel or SampleGrad without feedback";
     return {};
   }
 
@@ -1635,6 +1635,47 @@ Converter::operator()(const InstSample &sample) {
   StoreFeedback(sample.feedback, Residency);
 }
 
+llvm::Optional<llvm::Value *>
+Converter::CreateReductionSample(
+    const TextureResourceHandle &texture, const SamplerHandle &sampler, llvm::Value *coord,
+    llvm::Value *array_index, llvm::Value *biased_lod, const int32_t offsets[3],
+    const std::function<llvm::Value *()> &ordinary_sample) {
+  using namespace llvm::air;
+  const auto &state = *sampler.Reduction;
+  llvm::BasicBlock *ordinary_block = nullptr;
+  llvm::BasicBlock *merge_block = nullptr;
+  if (state.RuntimePredicate) {
+    auto *function = ir.GetInsertBlock()->getParent();
+    auto *reduction_block = llvm::BasicBlock::Create(ir.getContext(), "sample.reduction", function);
+    ordinary_block = llvm::BasicBlock::Create(ir.getContext(), "sample.ordinary", function);
+    merge_block = llvm::BasicBlock::Create(ir.getContext(), "sample.merge", function);
+    ir.CreateCondBr(state.RuntimePredicate, reduction_block, ordinary_block);
+    ir.SetInsertPoint(reduction_block);
+  }
+  auto *lod = air.CreateFPBinOp(AIRBuilder::fmin, state.MaxLOD, biased_lod, false);
+  lod = air.CreateFPBinOp(AIRBuilder::fmax, state.MinLOD, lod, false);
+  auto *flags = ir.CreateOr(state.Flags,
+      ir.CreateSelect(ir.CreateFCmpOGT(lod, air.getFloat(0)), air.getInt(dxmt::air::SamplerMinifying), air.getInt(0)));
+  auto value = air.CreateReductionSampleLevel(texture.Texture, texture.Handle, sampler.Handle,
+      coord, array_index, lod, flags, offsets);
+  if (!value) { failure = "AIR Min/Max helper ABI is unsupported"; return {}; }
+  auto *result = *value;
+  if (ordinary_block) {
+    auto *reduction_exit = ir.GetInsertBlock();
+    ir.CreateBr(merge_block);
+    ir.SetInsertPoint(ordinary_block);
+    auto *ordinary_value = ordinary_sample();
+    auto *ordinary_exit = ir.GetInsertBlock();
+    ir.CreateBr(merge_block);
+    ir.SetInsertPoint(merge_block);
+    auto *merged = ir.CreatePHI(result->getType(), 2, "sample.result");
+    merged->addIncoming(result, reduction_exit);
+    merged->addIncoming(ordinary_value, ordinary_exit);
+    result = merged;
+  }
+  return result;
+}
+
 void
 Converter::operator()(const InstSampleLOD &sample) {
   using namespace llvm::air;
@@ -1700,43 +1741,12 @@ Converter::operator()(const InstSampleLOD &sample) {
       failure = "AIR Min/Max SampleLevel texture kind/type or feedback is unsupported";
       return;
     }
-    const auto &state = *Sampler->Reduction;
-    auto *ordinary_lod = LOD;
-    llvm::BasicBlock *ordinary_block = nullptr;
-    llvm::BasicBlock *merge_block = nullptr;
-    if (state.RuntimePredicate) {
-      auto *function = ir.GetInsertBlock()->getParent();
-      auto *reduction_block = llvm::BasicBlock::Create(ir.getContext(), "sample.reduction", function);
-      ordinary_block = llvm::BasicBlock::Create(ir.getContext(), "sample.ordinary", function);
-      merge_block = llvm::BasicBlock::Create(ir.getContext(), "sample.merge", function);
-      ir.CreateCondBr(state.RuntimePredicate, reduction_block, ordinary_block);
-      ir.SetInsertPoint(reduction_block);
-    }
-    LOD = air.CreateFPBinOp(AIRBuilder::fmin, state.MaxLOD, LOD, false);
-    LOD = air.CreateFPBinOp(AIRBuilder::fmax, state.MinLOD, LOD, false);
-    // FL11+ selects minification after sampler LOD clamping. Resource clamp is
-    // rejected by the host observation guard until its view-edge semantics close.
-    auto *flags = ir.CreateOr(state.Flags,
-        ir.CreateSelect(ir.CreateFCmpOGT(LOD, air.getFloat(0)), air.getInt(dxmt::air::SamplerMinifying), air.getInt(0)));
-    auto value = air.CreateReductionSampleLevel(Tex->Texture, Tex->Handle, SamplerHandle,
-        Coord, ArrayIndex, LOD, flags, sample.offsets);
-    if (!value) { failure = "AIR Min/Max helper ABI is unsupported"; return; }
-    auto *result = *value;
-    if (ordinary_block) {
-      auto *reduction_exit = ir.GetInsertBlock();
-      ir.CreateBr(merge_block);
-      ir.SetInsertPoint(ordinary_block);
-      auto [ordinary_value, ordinary_residency] = air.CreateSample(
-          Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets, sample_level{ordinary_lod});
-      auto *ordinary_exit = ir.GetInsertBlock();
-      ir.CreateBr(merge_block);
-      ir.SetInsertPoint(merge_block);
-      auto *merged = ir.CreatePHI(result->getType(), 2, "sample.result");
-      merged->addIncoming(result, reduction_exit);
-      merged->addIncoming(ordinary_value, ordinary_exit);
-      result = merged;
-    }
-    StoreOperand(sample.dst, MaskSwizzle(result, GetMask(sample.dst), Tex->Swizzle));
+    auto result = CreateReductionSample(*Tex, *Sampler, Coord, ArrayIndex, LOD, sample.offsets, [&] {
+      return air.CreateSample(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex,
+          sample.offsets, sample_level{LOD}).first;
+    });
+    if (!result) return;
+    StoreOperand(sample.dst, MaskSwizzle(*result, GetMask(sample.dst), Tex->Swizzle));
     return; // No fabricated residency success; feedback was rejected above.
   }
 
@@ -1829,7 +1839,7 @@ Converter::operator()(const InstSampleDerivative &sample) {
   if (!Tex)
     return;
 
-  auto Sampler = LoadSampler(sample.src_sampler);
+  auto Sampler = LoadSampler(sample.src_sampler, true);
   if (!Sampler)
     return;
 
@@ -1904,6 +1914,24 @@ Converter::operator()(const InstSampleDerivative &sample) {
     return;
   }
 
+  if (Sampler->Reduction) {
+    if (sample.feedback || sample.min_lod_clamp ||
+        (Tex->Logical != Texture::texture2d && Tex->Logical != Texture::texture2d_array &&
+         Tex->Logical != Texture::texture3d) || Tex->Texture.sample_type != Texture::sample_float) {
+      failure = "AIR Min/Max SampleGrad texture kind/type, feedback or instruction clamp is unsupported";
+      return;
+    }
+    auto lod = air.CreateIsotropicGradientLOD(Tex->Texture, Tex->Handle, DDX, DDY);
+    if (!lod) { failure = "AIR Min/Max gradient LOD is unsupported"; return; }
+    auto *biased_lod = ir.CreateFAdd(*lod, Sampler->Bias);
+    auto result = CreateReductionSample(*Tex, *Sampler, Coord, ArrayIndex, biased_lod, sample.offsets, [&] {
+      return air.CreateSampleGrad(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex,
+          DDX, DDY, MinLODClamp, sample.offsets).first;
+    });
+    if (!result) return;
+    StoreOperand(sample.dst, MaskSwizzle(*result, GetMask(sample.dst), Tex->Swizzle));
+    return;
+  }
   auto [Value, Residency] = air.CreateSampleGrad(
       Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, DDX, DDY, MinLODClamp, sample.offsets
   );
