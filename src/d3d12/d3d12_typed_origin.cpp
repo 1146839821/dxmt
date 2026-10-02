@@ -1,4 +1,5 @@
 #include "d3d12_typed_origin.hpp"
+#include "d3d12_minmax.hpp"
 
 #if defined(__GNUC__) && !defined(__clang__)
 #define CROSS_PLATFORM_UUIDOF(interface, spec) struct interface;
@@ -113,9 +114,24 @@ HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<ID
 }
 } // namespace
 
-static HRESULT PrepareTypedOriginShaderInternal(
+struct TypedOriginPreparation {
+  using Params = dxmt_msc_lower_typed_origins_params;
+  using Artifact = D3D12TypedOriginShader;
+  static constexpr const char *ExportName = "DXMTMSCLowerTypedBufferOrigins";
+};
+struct MinMaxPreparation {
+  using Params = dxmt_msc_lower_reduction_samplers_params;
+  using Artifact = D3D12MinMaxShader;
+  static constexpr const char *ExportName = "DXMTMSCLowerReductionSamplers";
+};
+
+template <typename Operation>
+static HRESULT PrepareShaderInternal(
     const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
-    D3D12TypedOriginShader &prepared, std::string &diagnostics) {
+    typename Operation::Artifact &prepared, std::string &diagnostics) {
+  using Params = typename Operation::Params;
+  using Prepared = typename Operation::Artifact;
+  const char *export_name = Operation::ExportName;
   diagnostics.clear();
   if (!shader.pShaderBytecode || !shader.BytecodeLength || shader.BytecodeLength > 32 * 1024 * 1024 ||
       !dxc_directory) return E_INVALIDARG;
@@ -137,9 +153,8 @@ static HRESULT PrepareTypedOriginShaderInternal(
   // Resolve it explicitly instead of invoking Wine's missing-import stub.
   OwnedModule winemetal_module(LoadLibraryW(L"winemetal.dll"));
   if (!winemetal_module) { diagnostics = "winemetal DLL unavailable"; return E_NOTIMPL; }
-  auto lower = reinterpret_cast<decltype(&DXMTMSCLowerTypedBufferOrigins)>(
-      GetProcAddress(winemetal_module.get(), "DXMTMSCLowerTypedBufferOrigins"));
-  if (!lower) { diagnostics = "winemetal typed-origin export unavailable"; return E_NOTIMPL; }
+  auto lower = reinterpret_cast<int (*)(Params *)>(GetProcAddress(winemetal_module.get(), export_name));
+  if (!lower) { diagnostics = std::string(export_name) + " export unavailable"; return E_NOTIMPL; }
   OwnedCOM<IDxcUtils> utils;
   OwnedCOM<IDxcAssembler> assembler;
   OwnedCOM<IDxcValidator> validator;
@@ -165,15 +180,15 @@ static HRESULT PrepareTypedOriginShaderInternal(
   const uint32_t offset = Word(bytes + 16), size = Word(bytes + 20);
   if (std::memcmp(bytes + 8, "DXIL", 4) || offset < 16 || offset > length - 8 || size > length - 8 - offset)
     return E_INVALIDARG;
-  dxmt_msc_lower_typed_origins_params params = {};
+  Params params = {};
   params.bitcode = uintptr_t(bytes + 8 + offset);
   params.bitcode_size = size;
   int result = lower(&params);
   if (result != DXMT_MSC_SUCCESS) {
-    diagnostics += "typed-origin sizing failed: " + std::to_string(result); return LoweringResult(result);
+    diagnostics += std::string(export_name) + " sizing failed: " + std::to_string(result); return LoweringResult(result);
   }
   if (!params.ir_size || params.ir_size > 64 * 1024 * 1024 || params.binding_count > 64) return E_FAIL;
-  D3D12TypedOriginShader candidate;
+  Prepared candidate;
   std::vector<char> ir(params.ir_size);
   candidate.bindings.resize(params.binding_count);
   params.ir = uintptr_t(ir.data());
@@ -209,7 +224,17 @@ HRESULT PrepareD3D12TypedOriginShader(
     const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
     D3D12TypedOriginShader &prepared, std::string &diagnostics) {
   try {
-    return PrepareTypedOriginShaderInternal(shader, dxc_directory, prepared, diagnostics);
+    return PrepareShaderInternal<TypedOriginPreparation>(shader, dxc_directory, prepared, diagnostics);
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
+  }
+}
+
+HRESULT PrepareD3D12MinMaxShader(
+    const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
+    D3D12MinMaxShader &prepared, std::string &diagnostics) {
+  try {
+    return PrepareShaderInternal<MinMaxPreparation>(shader, dxc_directory, prepared, diagnostics);
   } catch (const std::bad_alloc &) {
     return E_OUTOFMEMORY;
   }

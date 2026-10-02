@@ -224,6 +224,7 @@ enum dxmt_msc_unixcall {
   unix_dxmt_msc_synthesize_ray_dispatch = 192,
   unix_dxmt_msc_synthesize_ray_intersection,
   unix_dxmt_msc_lower_typed_origins = 196,
+  unix_dxmt_msc_lower_reduction_samplers = 197,
 };
 
 #pragma pack(push, 8)
@@ -254,6 +255,36 @@ typedef char dxmt_msc_lower_typed_origins_size_check[
     sizeof(struct dxmt_msc_lower_typed_origins_params) == 64 ? 1 : -1];
 typedef char dxmt_msc_lower_typed_origins_offset_check[
     offsetof(struct dxmt_msc_lower_typed_origins_params, bindings) == 40 ? 1 : -1];
+
+/* Same fixed-width transport, distinct operation and binding record ABI. */
+struct dxmt_msc_lower_reduction_samplers_params {
+  uint64_t bitcode;
+  uint64_t bitcode_size;
+  uint64_t ir;
+  uint64_t ir_capacity;
+  uint64_t ir_size;
+  uint64_t bindings;
+  uint32_t binding_capacity;
+  uint32_t binding_count;
+  int32_t ret;
+  uint32_t reserved;
+};
+typedef char dxmt_msc_lower_reduction_samplers_size_check[
+    sizeof(struct dxmt_msc_lower_reduction_samplers_params) == 64 ? 1 : -1];
+typedef char dxmt_msc_lower_reduction_samplers_offset_check[
+    offsetof(struct dxmt_msc_lower_reduction_samplers_params, bindings) == 40 ? 1 : -1];
+
+/* Reject parameter aliases before clearing counts or writing ret. Difference
+ * comparisons do not overflow even for malformed address/length pairs. */
+static inline int dxmt_msc_reduction_params_alias(const struct dxmt_msc_lower_reduction_samplers_params *params) {
+  const uint64_t base = (uintptr_t)params;
+  const uint64_t addresses[] = {params->bitcode, params->ir, params->bindings};
+  const uint64_t lengths[] = {params->bitcode_size, params->ir_capacity, (uint64_t)params->binding_capacity * 16u};
+  for (unsigned i = 0; i < 3; ++i)
+    if (lengths[i] && (addresses[i] <= base ? base - addresses[i] < lengths[i] : addresses[i] - base < sizeof(*params)))
+      return 1;
+  return 0;
+}
 
 struct dxmt_msc_compile_dxil_params {
   const void *dxil;
@@ -493,6 +524,7 @@ struct dxmt_msc_get_root_layout_params32 {
 
 WINEMETAL_API int DXMTMSCIsAvailable(void);
 WINEMETAL_API int DXMTMSCLowerTypedBufferOrigins(struct dxmt_msc_lower_typed_origins_params *params);
+WINEMETAL_API int DXMTMSCLowerReductionSamplers(struct dxmt_msc_lower_reduction_samplers_params *params);
 
 WINEMETAL_API int DXMTMSCGetCapabilities(struct dxmt_msc_capabilities *capabilities);
 

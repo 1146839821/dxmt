@@ -19,6 +19,13 @@ executable('dx12_typed_origin_prepare', 'dx12_typed_origin_prepare.cpp',
   dependencies: [winemetal_dep, cpp.find_library('ole32')],
 )
 
+executable('dx12_minmax_prepare', 'dx12_minmax_prepare.cpp',
+  '../../src/d3d12/d3d12_typed_origin.cpp',
+  build_by_default: false, link_args: ['-municode'],
+  include_directories: [include_directories('../../src/d3d12')],
+  dependencies: [winemetal_dep, cpp.find_library('ole32')],
+)
+
 # Offline experiment; dynamically loads the explicitly selected DXC SDK only.
 if build_machine.system() == 'darwin'
   air_texture_defaults = executable('air_texture_defaults', 'air_texture_defaults.cpp',

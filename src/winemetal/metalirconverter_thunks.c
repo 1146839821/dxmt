@@ -7,6 +7,7 @@
 
 #include "wineunixlib.h"
 #include "metalirconverter_thunks.h"
+#include "msc_minmax_abi.h"
 
 WINEMETAL_API int
 DXMTMSCIsAvailable(void) {
@@ -90,6 +91,27 @@ DXMTMSCLowerTypedBufferOrigins(struct dxmt_msc_lower_typed_origins_params *param
     return DXMT_MSC_ERROR_INVALID_ARGUMENT;
 #endif
   NTSTATUS status = WINE_UNIX_CALL(unix_dxmt_msc_lower_typed_origins, params);
+  if (status)
+    return -1;
+  return params->ret;
+}
+
+WINEMETAL_API int
+DXMTMSCLowerReductionSamplers(struct dxmt_msc_lower_reduction_samplers_params *params) {
+  if (!params)
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  if (dxmt_msc_reduction_params_alias(params))
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  params->ir_size = 0;
+  params->binding_count = 0;
+#if UINTPTR_MAX == UINT32_MAX
+  if (params->bitcode > UINT32_MAX || params->ir > UINT32_MAX || params->bindings > UINT32_MAX ||
+      params->bitcode_size > UINT32_MAX - params->bitcode ||
+      params->ir_capacity > UINT32_MAX - params->ir ||
+      (uint64_t)params->binding_capacity * sizeof(struct dxmt_msc_minmax_binding) > UINT32_MAX - params->bindings)
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+#endif
+  NTSTATUS status = WINE_UNIX_CALL(unix_dxmt_msc_lower_reduction_samplers, params);
   if (status)
     return -1;
   return params->ret;

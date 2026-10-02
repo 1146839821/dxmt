@@ -12,6 +12,7 @@ extern "C" {
 
 int dxmt_msc_is_available(void);
 int dxmt_msc_lower_typed_origins(struct dxmt_msc_lower_typed_origins_params *params);
+int dxmt_msc_lower_reduction_samplers(struct dxmt_msc_lower_reduction_samplers_params *params);
 int dxmt_msc_get_capabilities(struct dxmt_msc_capabilities *capabilities);
 int dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params);
 int dxmt_msc_synthesize_ray_dispatch(struct dxmt_msc_synthesize_ray_dispatch_params *params);

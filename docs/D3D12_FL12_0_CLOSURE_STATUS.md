@@ -102,6 +102,15 @@ compiler preparation, not production DXIL admission. The four production
 workstreams, seven missing full GPU categories and 1,584 existing typed case
 executions above remain the closure workload; no FL promotion or game benchmark.
 
+DXIL preparation follow-up (2026-10-03): an optional Wine/Unix reduction export
+and the actual selected-DXC shader preparation helper now regenerate validated
+one/two-pair compute artifacts in both builds
+(`D3D12_MINMAX_DXIL_PREPARATION.md`). Existing typed-origin float/CFG regressions
+pass in both isolated runtimes; Wine-generated MinMax artifacts pass MSC and
+thirty focused native GPU dispatches. Augmented/reflected roots, PSO selection
+and recording/submission ownership remain open, so production DXIL MinMax still
+is not admitted. No capability, full-matrix or game acceptance change.
+
 ## Task Analysis
 
 Baseline: `e220380`, branch `feat/d3d12-1`. User requests continued work and
