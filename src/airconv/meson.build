@@ -76,6 +76,12 @@ airconv_shaders_ir = metalir_generator.process(
 )
 airconv_shaders_header = hexdump_generator.process(airconv_shaders_ir)
 
+# Precise extrema/zero-weight behavior must not inherit fast-math assumptions.
+airconv_minmax_ir = metalir_generator.process('shaders/air_minmax.metal',
+  extra_args: ['-std=metal3.1', '--target=air64-apple-macos14.0', '-fno-fast-math'],
+)
+airconv_shaders_header = [airconv_shaders_header, hexdump_generator.process(airconv_minmax_ir)]
+
 airconv_src += airconv_shaders_header
 
 build_airconv_for_windows = get_option('build_airconv_for_windows')

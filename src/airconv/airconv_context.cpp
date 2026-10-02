@@ -27,6 +27,7 @@
 #include "airconv_context.hpp"
 
 #include "air_msad.h"
+#include "air_minmax.h"
 #include "air_samplepos.h"
 #include "air_tessellation.h"
 
@@ -188,6 +189,11 @@ void linkShader(llvm::Module &M, const unsigned char (&bitcode)[N]) {
 void
 linkMSAD(llvm::Module &M) {
   linkShader(M, air_msad);
+}
+
+void
+linkMinMax(llvm::Module &M) {
+  linkShader(M, air_minmax);
 }
 
 void

@@ -21,6 +21,15 @@ executable('dx12_typed_origin_prepare', 'dx12_typed_origin_prepare.cpp',
 
 # Offline experiment; dynamically loads the explicitly selected DXC SDK only.
 if build_machine.system() == 'darwin'
+  add_languages('objcpp', native: true)
+  executable('air_minmax_gpu', 'air_minmax_gpu.mm', native: true, build_by_default: false,
+    objcpp_args: ['-fobjc-arc'],
+    dependencies: dependency('appleframeworks', modules: ['Metal', 'Foundation'], native: true),
+  )
+  executable('air_minmax_ir', 'air_minmax_ir.cpp', native: true, build_by_default: false,
+    cpp_args: airconv_args, include_directories: llvm_include_path_darwin,
+    dependencies: airconv_dep_darwin,
+  )
   executable('dxil_structured_origin', 'dxil_structured_origin.cpp',
     native: true, build_by_default: false,
     include_directories: [include_directories('../../src/winemetal/unix'), llvm_include_path_darwin],

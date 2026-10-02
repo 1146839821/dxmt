@@ -120,6 +120,14 @@ public:
 
   /* Texture Operations */
 
+  // Explicit-LOD reduction primitive. PointSampler must have point min/mag/mip,
+  // zero bias and no LOD clamps; address/border modes are retained. Flags use
+  // the private air_minmax.metal contract, not D3D filter enum values. Unsupported
+  // texture kinds/types return None without emitting instructions.
+  Optional<Value *> CreateReductionSampleLevel(
+      const Texture &Texture, Value *Handle, Value *PointSampler, Value *Coord,
+      Value *ArrayIndex, Value *ClampedLOD, Value *Flags, const int32_t Offset[3]);
+
   std::pair<Value *, Value *>
   CreateSample(
       const Texture &Texture, Value *Handle, Value *Sampler, Value *Coord, Value *ArrayIndex, const int32_t Offset[3]

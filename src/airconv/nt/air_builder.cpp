@@ -1,4 +1,5 @@
 #include "air_builder.hpp"
+#include "../airconv_context.hpp"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Instructions.h"
@@ -9,6 +10,45 @@
 #include <format>
 
 namespace llvm::air {
+
+Optional<Value *>
+AIRBuilder::CreateReductionSampleLevel(
+    const Texture &Texture, Value *Handle, Value *PointSampler, Value *Coord,
+    Value *ArrayIndex, Value *ClampedLOD, Value *Flags, const int32_t Offset[3]) {
+  if (Texture.sample_type != Texture::sample_float || Texture.memory_access != Texture::access_sample)
+    return None;
+  const char *symbol = nullptr;
+  unsigned dimensions = 2;
+  switch (Texture.kind) {
+  case Texture::texture2d: symbol = "dxmt.minmax.sample_level.2d"; break;
+  case Texture::texture2d_array:
+    if (!ArrayIndex) return None;
+    symbol = "dxmt.minmax.sample_level.2d_array";
+    break;
+  case Texture::texture3d: symbol = "dxmt.minmax.sample_level.3d"; dimensions = 3; break;
+  default: return None;
+  }
+  if (!Handle || !PointSampler || !Coord || !ClampedLOD || !Flags ||
+      Handle->getType() != getTextureHandleType(Texture) || PointSampler->getType() != getSamplerHandleType() ||
+      Coord->getType() != getTextureSampleCoordType(Texture) || ClampedLOD->getType() != getFloatTy() ||
+      Flags->getType() != getIntTy() ||
+      (Texture.kind == Texture::texture2d_array && ArrayIndex->getType() != getIntTy()))
+    return None;
+  SmallVector<Value *> operands{Handle, PointSampler, Coord};
+  if (Texture.kind == Texture::texture2d_array) operands.push_back(ArrayIndex);
+  operands.push_back(ClampedLOD);
+  operands.push_back(Flags);
+  operands.push_back(dimensions == 2 ? getInt2(Offset[0], Offset[1]) : getInt3(Offset[0], Offset[1], Offset[2]));
+  SmallVector<Type *> types;
+  for (auto *operand : operands) types.push_back(operand->getType());
+  auto function = getModule()->getOrInsertFunction(symbol, FunctionType::get(getFloatTy(4), types, false));
+  auto *callee = dyn_cast<Function>(function.getCallee());
+  if (!callee) return None;
+  const bool needs_link = callee->isDeclaration();
+  auto *result = builder.CreateCall(function, operands);
+  if (needs_link) dxmt::linkMinMax(*getModule());
+  return result;
+}
 
 struct TextureOperationInfo {
   const char *air_symbol_suffix;

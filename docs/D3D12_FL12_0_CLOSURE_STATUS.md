@@ -56,6 +56,12 @@ builds (`D3D12_TYPED_ORIGIN_INDIRECT.md`); broader indirect combinations remain
 unverified. Min/Max, tiled Tier 2 and
 the seven mandatory GPU matrix categories remain closure work; no FL promotion.
 
+Min/Max implementation now has a float non-anisotropic explicit-LOD AIR primitive
+for 2D/array/3D, with native kernel readback and LLVM signature-linkage evidence
+(`D3D12_MINMAX_AIR_PRIMITIVE.md`). This is not yet wired to D3D12 sample instructions
+or sampler state, has no sparse feedback, and does not implement the DXIL path.
+The existing Min/Max rejection and gate status remain unchanged.
+
 Prioritize the production typed-buffer origin contract, using
 `D3D12_TYPED_ORIGIN_PRODUCTION_AUDIT.md` as the integration gap list. Keep
 unsupported views rejected until real production readback succeeds. Integrate
