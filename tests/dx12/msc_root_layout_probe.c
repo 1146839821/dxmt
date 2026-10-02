@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "msc_typed_origin_root_recipe_test.h"
+#include "msc_typed_origin_recipe_identity_test.h"
 
 // Layout/host marshaling evidence only: no shader compilation or GPU dispatch.
 static bool
@@ -129,6 +130,7 @@ run_case(unsigned constants, bool table_first, bool sampler_present) {
 
 int main(void) {
   if (!TestOriginRootRecipe()) return 1;
+  if (!TestOriginRecipeIdentity()) return 1;
   const unsigned widths[] = {1, 3, 4, 7, 16, 59};
   unsigned cases = 0, failed = 0;
   for (unsigned i = 0; i < sizeof(widths) / sizeof(widths[0]); ++i)
