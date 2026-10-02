@@ -16,6 +16,9 @@ struct SamplerReductionState {
   llvm::Value *MinLOD;
   llvm::Value *MaxLOD;
   bool Unsupported = false;
+  // Null for a statically known reduction sampler; otherwise an i1 decoded
+  // from the live descriptor tag. Only one sampling operation may execute.
+  llvm::Value *RuntimePredicate = nullptr;
 };
 
 struct SamplerDescriptor {

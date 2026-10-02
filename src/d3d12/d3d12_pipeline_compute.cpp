@@ -165,6 +165,7 @@ public:
       return hr;
 
     threadgroup_size = {ref_cs.ThreadgroupSize[0], ref_cs.ThreadgroupSize[1], ref_cs.ThreadgroupSize[2]};
+    air_sampler_reduction_eligible = shader_cs.SupportsSamplerReduction(ref_cs);
 
     D3D12AirconvBitcode cs_bitcode;
 

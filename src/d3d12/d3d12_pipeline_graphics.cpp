@@ -1226,6 +1226,7 @@ public:
       hr = shader_vs.Initialize(pDesc->VS, vs_classification, D3D12ShaderKind::Vertex, &ref_vs, "vs");
       if (FAILED(hr))
         return hr;
+      air_sampler_reduction_eligible &= shader_vs.SupportsSamplerReduction(ref_vs);
       if (!use_airconv_geometry && !use_airconv_tessellation) {
           SM50_SHADER_IA_INPUT_LAYOUT_DATA data_ia_layout = {};
           data_ia_layout.type = SM50_SHADER_IA_INPUT_LAYOUT;
@@ -1298,6 +1299,7 @@ public:
       hr = shader_gs.Initialize(pDesc->GS, gs_classification, D3D12ShaderKind::Geometry, &ref_gs, "gs");
       if (FAILED(hr))
         return hr;
+      air_sampler_reduction_eligible &= shader_gs.SupportsSamplerReduction(ref_gs);
 
       std::vector<SM50_IA_INPUT_ELEMENT> elements(pDesc->InputLayout.NumElements);
       uint32_t element_count = 0;
@@ -1316,9 +1318,11 @@ public:
       hr = shader_hs.Initialize(pDesc->HS, hs_classification, D3D12ShaderKind::Hull, &ref_hs, "hs");
       if (FAILED(hr))
         return hr;
+      air_sampler_reduction_eligible &= shader_hs.SupportsSamplerReduction(ref_hs);
       hr = shader_ds.Initialize(pDesc->DS, ds_classification, D3D12ShaderKind::Domain, &ref_ds, "ds");
       if (FAILED(hr))
         return hr;
+      air_sampler_reduction_eligible &= shader_ds.SupportsSamplerReduction(ref_ds);
     }
 
     WMTRenderPipelineInfo info;
@@ -1406,6 +1410,7 @@ public:
       hr = shader_ps.Initialize(pDesc->PS, ps_classification, D3D12ShaderKind::Pixel, &ref_ps, "ps");
       if (FAILED(hr))
         return hr;
+      air_sampler_reduction_eligible &= shader_ps.SupportsSamplerReduction(ref_ps);
       SM50_SHADER_PSO_PIXEL_SHADER_DATA data_ps;
       data_ps.dual_source_blending = dual_source_blending;
       data_ps.disable_depth_output = false;

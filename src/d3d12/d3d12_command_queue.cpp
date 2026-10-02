@@ -1131,14 +1131,15 @@ public:
            auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
            LabelEncoder(encoder, recording_id, data->id, "Render");
            encoder.waitForFence(fence_, data->use_geometry ? WMTRenderStagePreRaster : WMTRenderStageVertex);
-           if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs) ||
+           bool sampler_reduction = false;
+           if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs, &sampler_reduction) ||
                !pCommandList->ResolvePendingDescriptorUses(
                    data,
                    [&](obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages stages) {
                      WMT::Resource native_resource;
                      native_resource.handle = resource;
                      encoder.useResource(native_resource, usage, stages);
-                   }
+                   }, sampler_reduction
                )) {
              translation_failed = true;
              encoder.endEncoding();
@@ -1164,14 +1165,15 @@ public:
           auto encoder = cmdbuf.computeCommandEncoder(false);
            LabelEncoder(encoder, recording_id, data->id, "Compute");
            encoder.waitForFence(fence_);
-          if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs) ||
+          bool sampler_reduction = false;
+          if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs, &sampler_reduction) ||
               !pCommandList->ResolvePendingDescriptorUses(
                   data,
                   [&](obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages) {
                     WMT::Resource native_resource;
                     native_resource.handle = resource;
                     encoder.useResource(native_resource, usage);
-                  }
+                  }, sampler_reduction
               )) {
             translation_failed = true;
             encoder.endEncoding();

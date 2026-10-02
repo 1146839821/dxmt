@@ -651,9 +651,26 @@ read_control_flow(
       bb_current->instructions.push_back(InstCut{});
       break;
     }
-    default:
-      bb_current->instructions.push_back(readInstruction(Inst, shader_info, phase));
+    default: {
+      auto instruction = readInstruction(Inst, shader_info, phase);
+      std::visit([&](const auto &decoded) {
+        if constexpr (requires { decoded.src_sampler; }) {
+          auto &sampler = shader_info.samplerMap.at(decoded.src_sampler.range_id);
+          sampler.reduction_consumer_seen = true;
+          bool eligible = false;
+          if constexpr (std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleLOD>) {
+            const auto &texture = shader_info.srvMap.at(decoded.src_resource.range_id);
+            eligible = !decoded.feedback && texture.scaler_type == ScalerDataType::Float &&
+                (texture.resource_type == ResourceType::Texture2D ||
+                 texture.resource_type == ResourceType::Texture2DArray ||
+                 texture.resource_type == ResourceType::Texture3D);
+          }
+          sampler.reduction_sample_level_only &= eligible;
+        }
+      }, instruction);
+      bb_current->instructions.push_back(instruction);
       break;
+    }
     }
   }
 

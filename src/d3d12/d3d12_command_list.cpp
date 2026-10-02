@@ -2308,13 +2308,14 @@ public:
     }
 
     if (!EncodeSamplerUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, sampler_heap_.ptr(),
-                           use_msc, SkipResourceBinding))
+                           use_msc, pso_graphics_->air_sampler_reduction_eligible, SkipResourceBinding))
       return DrawCallStatus::Invalid;
 
     if (encode_msc_resource_uses)
       EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
 
-    if ((airconv_render_residency_ || (rootsig_graphics_ && rootsig_graphics_->HasAIRReductionSamplers)) &&
+    if ((airconv_render_residency_ || (pso_graphics_->air_sampler_reduction_eligible && sampler_heap_) ||
+         (rootsig_graphics_ && rootsig_graphics_->HasAIRReductionSamplers)) &&
         !use_msc && !SkipResourceBinding) {
       const auto resource_stages = use_airconv_geometry || use_airconv_tessellation
                                        ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh |
@@ -2956,7 +2957,8 @@ public:
   }
 
   bool EncodeSamplerUses(MTLD3D12RootSignature *root, const uint64_t staging[64],
-                        MTLD3D12SamplerDescriptorHeap *heap, bool use_msc, bool indirect_root_updates) {
+                        MTLD3D12SamplerDescriptorHeap *heap, bool use_msc, bool reduction_eligible,
+                        bool indirect_root_updates) {
     auto *encoder = allocator_->encoder_current;
     if (!root || !encoder) return true;
     try {
@@ -2985,8 +2987,14 @@ public:
             pending = &encoder->pending_sampler_uses.back();
           }
         }
-        auto [it, inserted] = pending->slots.emplace(index, use_msc);
-        if (!inserted) it->second = it->second || use_msc;
+        auto [it, inserted] = pending->slots.emplace(index,
+            SamplerConsumerConstraint{use_msc, !use_msc && reduction_eligible && !indirect_root_updates &&
+                                              !msc_sampler_use_direct_heap_});
+        if (!inserted) {
+          it->second.use_msc |= use_msc;
+          it->second.reduction_eligible &= !use_msc && reduction_eligible && !indirect_root_updates &&
+                                           !msc_sampler_use_direct_heap_;
+        }
       };
       for (const auto &table : msc_resource_use_tables_) {
         uint64_t base = 0;
@@ -3021,8 +3029,11 @@ public:
       heap->ResolveSamplers(static_indices, snapshots);
       for (const auto &snapshot : snapshots) {
         if ((snapshot.air.metadata >> 32) & air::SamplerReduction) {
-          FailRecording(__func__, "dynamic sampler reduction consumer is unsupported");
-          return false;
+          if (use_msc || !reduction_eligible || indirect_root_updates) {
+            FailRecording(__func__, "dynamic sampler reduction consumer is unsupported");
+            return false;
+          }
+          encoder->static_sampler_reduction = true;
         }
         if (snapshot.sampler &&
             std::find(encoder->sampler_refs.begin(), encoder->sampler_refs.end(), snapshot.sampler) == encoder->sampler_refs.end())
@@ -3035,7 +3046,13 @@ public:
     return true;
   }
 
-  bool ResolvePendingSamplerUses(EncoderData *encoder, std::vector<Rc<Sampler>> &retained) final {
+  bool ResolvePendingSamplerUses(EncoderData *encoder, std::vector<Rc<Sampler>> &retained,
+                                bool *sampler_reduction) final {
+    if (sampler_reduction) *sampler_reduction = encoder && encoder->static_sampler_reduction;
+    if (encoder && encoder->static_sampler_reduction && encoder->static_resource_min_lod_clamp) {
+      ERR("D3D12 submission rejected: static AIR reduction ResourceMinLODClamp is unsupported");
+      return false;
+    }
     if (!encoder || encoder->pending_sampler_uses.empty()) return true;
     try {
       std::unordered_set<Sampler *> unique;
@@ -3044,7 +3061,7 @@ public:
         if (!group.heap) continue;
         std::vector<UINT> indices;
         indices.reserve(group.slots.size());
-        for (const auto &[index, msc] : group.slots) indices.push_back(index);
+        for (const auto &[index, constraint] : group.slots) indices.push_back(index);
         std::vector<SamplerDescriptorSnapshot> snapshots;
         group.heap->ResolveSamplers(indices, snapshots);
         // Validation and fan-out occur only after ResolveSamplers releases
@@ -3052,9 +3069,16 @@ public:
         for (size_t i = 0; i < snapshots.size(); ++i) {
           const auto &snapshot = snapshots[i];
           if ((snapshot.air.metadata >> 32) & air::SamplerReduction) {
-            ERR(group.slots.at(indices[i]) ? "D3D12 submission rejected: MSC cannot consume AIR sampler reduction"
+            if (!group.slots.at(indices[i]).reduction_eligible) {
+              ERR(group.slots.at(indices[i]).use_msc ? "D3D12 submission rejected: MSC cannot consume AIR sampler reduction"
                                           : "D3D12 submission rejected: AIR dynamic sampler reduction is unsupported");
-            return false;
+              return false;
+            }
+            if (encoder->static_resource_min_lod_clamp) {
+              ERR("D3D12 submission rejected: static AIR reduction ResourceMinLODClamp is unsupported");
+              return false;
+            }
+            if (sampler_reduction) *sampler_reduction = true;
           }
           if (snapshot.sampler && unique.insert(snapshot.sampler.ptr()).second)
             retained.push_back(snapshot.sampler);
@@ -3277,7 +3301,8 @@ public:
             bool direct_indexed) {
           const bool is_volatile = direct_indexed || (flags & D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
           PendingDescriptorUse use{descriptor_heap, index, range_type, direct_indexed, compute, stages, use_msc, is_volatile};
-          use.reject_min_lod_clamp = !use_msc && pRootSig->HasAIRReductionSamplers;
+          use.reject_min_lod_clamp = !use_msc &&
+              (pRootSig->HasAIRReductionSamplers || allocator_->encoder_current->static_sampler_reduction);
           try {
             current_uses.push_back(use);
             if (is_volatile) {
@@ -3323,6 +3348,10 @@ public:
              snapshots[i].descriptor.type == ShaderVisibleDescriptorType::UAVTexelBuffer) &&
             !snapshots[i].msc_typed_buffer.view;
         for (const auto &use : slot_uses[i]) {
+          if (!use.use_msc && !use.volatile_descriptors &&
+              snapshots[i].descriptor.type == ShaderVisibleDescriptorType::SRVTexture &&
+              snapshots[i].descriptor.SRVTexture.resource_min_lod_clamp != 0.0f)
+            allocator_->encoder_current->static_resource_min_lod_clamp = true;
           if (use.reject_min_lod_clamp && !use.volatile_descriptors &&
               snapshots[i].descriptor.type == ShaderVisibleDescriptorType::SRVTexture &&
               snapshots[i].descriptor.SRVTexture.resource_min_lod_clamp != 0.0f) {
@@ -3352,7 +3381,8 @@ public:
   bool
   ResolvePendingDescriptorUses(
       EncoderData *encoder,
-      const std::function<void(obj_handle_t, WMTResourceUsage, WMTRenderStages)> &use_resource
+      const std::function<void(obj_handle_t, WMTResourceUsage, WMTRenderStages)> &use_resource,
+      bool sampler_reduction
   ) final {
     if (!encoder || encoder->pending_descriptor_uses.empty())
       return true;
@@ -3403,7 +3433,8 @@ public:
                snapshots[i].descriptor.type == ShaderVisibleDescriptorType::UAVTexelBuffer) &&
               !snapshots[i].msc_typed_buffer.view;
           for (const auto &use : slot_uses[i]) {
-            if (use.reject_min_lod_clamp && snapshots[i].descriptor.type == ShaderVisibleDescriptorType::SRVTexture &&
+            if ((use.reject_min_lod_clamp || (sampler_reduction && !use.use_msc)) &&
+                snapshots[i].descriptor.type == ShaderVisibleDescriptorType::SRVTexture &&
                 snapshots[i].descriptor.SRVTexture.resource_min_lod_clamp != 0.0f) {
               ERR("D3D12 submission rejected: AIR reduction ResourceMinLODClamp is unsupported");
               return false;
@@ -3639,10 +3670,11 @@ public:
     }
 
     if (!EncodeSamplerUses(rootsig_compute_.ptr(), rootarg_compute_staging_, sampler_heap_.ptr(),
-                           use_msc, SkipResourceBinding))
+                           use_msc, pso_compute_->air_sampler_reduction_eligible, SkipResourceBinding))
       return false;
 
-    if ((airconv_compute_residency_ || (rootsig_compute_ && rootsig_compute_->HasAIRReductionSamplers)) &&
+    if ((airconv_compute_residency_ || (pso_compute_->air_sampler_reduction_eligible && sampler_heap_) ||
+         (rootsig_compute_ && rootsig_compute_->HasAIRReductionSamplers)) &&
         !use_msc && !SkipResourceBinding) {
       if (descriptor_heap_)
         EncodeComputeResourceUse(descriptor_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);

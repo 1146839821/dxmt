@@ -104,17 +104,25 @@ main(int argc, char **argv) {
   const bool expect_unsupported = argc == 4 && strcmp(argv[3], "--expect-unsupported") == 0;
   const bool expect_pso_unsupported = argc == 4 && strcmp(argv[3], "--expect-pso-unsupported") == 0;
   const bool expect_air_unsupported = argc == 4 && strcmp(argv[3], "--expect-air-unsupported") == 0;
-  if (argc == 4 && !expect_unsupported && !expect_pso_unsupported && !expect_air_unsupported)
+  const bool expect_consumer_unsupported = argc == 4 && strcmp(argv[3], "--expect-consumer-unsupported") == 0;
+  const bool expect_minlod_unsupported = argc == 4 && strcmp(argv[3], "--expect-minlod-unsupported") == 0;
+  if (argc == 4 && !expect_unsupported && !expect_pso_unsupported && !expect_air_unsupported &&
+      !expect_consumer_unsupported && !expect_minlod_unsupported)
     return 2;
+  const bool dynamic_switch = argc == 3 && strcmp(argv[2], "--dynamic-switch") == 0;
   const bool minimum = argc >= 3 &&
       (strcmp(argv[2], "--minimum") == 0 || strcmp(argv[2], "--static-minimum") == 0 ||
-       strcmp(argv[2], "--static-minimum-state") == 0);
+       strcmp(argv[2], "--static-minimum-state") == 0 || dynamic_switch ||
+       strcmp(argv[2], "--minimum-static-observation") == 0 ||
+       strcmp(argv[2], "--minimum-live-observation") == 0);
   const bool state_probe = argc >= 3 && strcmp(argv[2], "--static-minimum-state") == 0;
   const bool maximum = argc >= 3 &&
       (strcmp(argv[2], "--maximum") == 0 || strcmp(argv[2], "--static-maximum") == 0);
   const bool reduction = minimum || maximum;
-  const bool static_observation = argc >= 3 && strcmp(argv[2], "--sampler-static-observation") == 0;
-  const bool live_observation = argc >= 3 && strcmp(argv[2], "--sampler-live-observation") == 0;
+  const bool static_observation = argc >= 3 && (strcmp(argv[2], "--sampler-static-observation") == 0 ||
+      strcmp(argv[2], "--minimum-static-observation") == 0);
+  const bool live_observation = argc >= 3 && (strcmp(argv[2], "--sampler-live-observation") == 0 ||
+      strcmp(argv[2], "--minimum-live-observation") == 0);
   const bool observation_probe = static_observation || live_observation;
   const bool static_sampler = argc >= 3 &&
       (strcmp(argv[2], "--static-sampler") == 0 || state_probe ||
@@ -135,13 +143,16 @@ main(int argc, char **argv) {
     return 2;
 
   const bool dxbc = strcmp(argv[1], "--dxbc") == 0;
+  if ((expect_consumer_unsupported || expect_minlod_unsupported) && (!reduction || static_sampler)) return 2;
+  if (expect_minlod_unsupported && !dxbc) return 2;
+  if (dynamic_switch && !dxbc) return 2;
   if (expect_pso_unsupported && (dxbc || !static_sampler || !reduction))
     return 2;
   if (expect_air_unsupported && (!dxbc || !static_sampler || !reduction))
     return 2;
   std::vector<char> shader;
   if (dxbc) {
-    if (!CompileDXBC(shader, expect_air_unsupported))
+    if (!CompileDXBC(shader, expect_air_unsupported || expect_consumer_unsupported))
       return 3;
   } else {
     std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
@@ -362,6 +373,7 @@ main(int argc, char **argv) {
   srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
   srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
   srv_desc.Texture2D.MipLevels = 1;
+  srv_desc.Texture2D.ResourceMinLODClamp = expect_minlod_unsupported ? 0.5f : 0.0f;
   resource_cpu = resource_heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateShaderResourceView(texture, &srv_desc, resource_cpu);
 
@@ -504,6 +516,11 @@ main(int argc, char **argv) {
     }
     if (!CheckHR("CreateComputePipelineState", hr))
       goto cleanup;
+    if (observation_probe && dxbc &&
+        !static_cast<dxmt::MTLD3D12PipelineState *>(pso)->air_sampler_reduction_eligible) {
+      std::cerr << "SampleLevel consumer qualification missing\n";
+      goto cleanup;
+    }
   }
   if (!CheckHR(
           "CreateCommandList",
@@ -583,6 +600,13 @@ main(int argc, char **argv) {
       std::cerr << "volatile sampler observation contract mismatch\n";
       goto cleanup;
     }
+    if (live_observation) {
+      const auto &constraint = observation_encoder->pending_sampler_uses[0].slots.at(0);
+      if (constraint.use_msc == dxbc || constraint.reduction_eligible != dxbc) {
+        std::cerr << "sampler consumer qualification transport mismatch\n";
+        goto cleanup;
+      }
+    }
   }
   if (direct_indexed_uav_texture) {
     D3D12_RESOURCE_BARRIER texture_barrier = {};
@@ -603,6 +627,26 @@ main(int argc, char **argv) {
   }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
+  if (expect_consumer_unsupported || expect_minlod_unsupported) {
+    auto *native_list = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list);
+    dxmt::EncoderData *compute_encoder = nullptr;
+    for (auto *encoder = native_list->entry; encoder; encoder = encoder->next)
+      if (encoder->type == dxmt::EncoderType::Compute) compute_encoder = encoder;
+    if (!compute_encoder) goto cleanup;
+    std::vector<dxmt::Rc<dxmt::Sampler>> retained;
+    bool observed_reduction = false;
+    const bool sampler_accepted = native_list->ResolvePendingSamplerUses(compute_encoder, retained, &observed_reduction);
+    if (expect_consumer_unsupported) {
+      if (sampler_accepted || !compute_encoder->sampler_refs.empty()) goto cleanup;
+      std::cout << "dynamic reduction unsupported consumer rejected without fallback\n";
+    } else {
+      if (!sampler_accepted || !observed_reduction || native_list->ResolvePendingDescriptorUses(
+              compute_encoder, [](obj_handle_t, WMTResourceUsage, WMTRenderStages) {}, observed_reduction)) goto cleanup;
+      std::cout << "dynamic reduction ResourceMinLODClamp rejected\n";
+    }
+    result = 0;
+    goto cleanup;
+  }
   if (live_observation) {
     auto *native_list = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list);
     if (!native_list->ResolvePendingSamplerUses(observation_encoder, first_resolution) ||
@@ -651,6 +695,57 @@ main(int argc, char **argv) {
       goto cleanup;
     device->CopyDescriptorsSimple(1, sampler_heap->GetCPUDescriptorHandleForHeapStart(),
                                   sampler_heap->GetCPUDescriptorHandleForHeapStart(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+  }
+  if (dynamic_switch) {
+    // Keep the PSO/root identical. Record each dispatch with an ordinary
+    // descriptor, then replace that volatile slot only after Close().
+    const D3D12_FILTER next_filters[] = {D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR,
+        D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR};
+    const UINT next_expected[] = {240, 128, 16};
+    for (unsigned iteration = 0; iteration < 3; ++iteration) {
+      list->Release(); list = nullptr;
+      allocator->Release(); allocator = nullptr;
+      if (!CheckHR("CreateSwitchAllocator", device->CreateCommandAllocator(
+              D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))) ||
+          !CheckHR("CreateSwitchList", device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+              allocator, pso, IID_PPV_ARGS(&list)))) goto cleanup;
+      auto next_sampler = sampler_desc;
+      next_sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+      device->CreateSampler(&next_sampler, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+      D3D12_RESOURCE_BARRIER transition = {};
+      transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      transition.Transition.pResource = output;
+      transition.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      transition.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+      transition.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      list->ResourceBarrier(1, &transition);
+      list->SetDescriptorHeaps(2, heaps);
+      list->SetComputeRootSignature(root_signature);
+      list->SetComputeRootDescriptorTable(0, resource_heap->GetGPUDescriptorHandleForHeapStart());
+      list->SetComputeRootDescriptorTable(1, sampler_heap->GetGPUDescriptorHandleForHeapStart());
+      list->SetComputeRootDescriptorTable(2, resource_gpu);
+      list->Dispatch(1, 1, 1);
+      std::swap(transition.Transition.StateBefore, transition.Transition.StateAfter);
+      list->ResourceBarrier(1, &transition);
+      list->CopyBufferRegion(readback, 0, output, 0, sizeof(UINT));
+      if (!CheckHR("CloseSwitchList", list->Close())) goto cleanup;
+      next_sampler.Filter = next_filters[iteration];
+      device->CreateSampler(&next_sampler, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+      lists[0] = list;
+      queue->ExecuteCommandLists(1, lists);
+      const UINT64 fence_value = iteration + 2;
+      if (!CheckHR("SignalSwitch", queue->Signal(fence, fence_value)) ||
+          !CheckHR("SwitchCompletion", fence->SetEventOnCompletion(fence_value, event))) goto cleanup;
+      WaitForSingleObject(event, INFINITE);
+      if (!CheckHR("MapSwitchReadback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped)))) goto cleanup;
+      const UINT actual = *mapped;
+      readback->Unmap(0, nullptr);
+      if (actual != next_expected[iteration]) {
+        std::cerr << "same-PSO sampler switch mismatch at " << iteration << ": " << actual << "\n";
+        goto cleanup;
+      }
+    }
+    std::cout << "same-PSO volatile sampler switch passed: 16/240/128/16\n";
   }
   if (observation_probe)
     std::cout << (static_observation ? "static" : "volatile") << " sampler observation contract passed\n";

@@ -66,6 +66,8 @@ struct SamplerInfo {
   uint32_t arg_index;
   uint32_t arg_cube_index;
   uint32_t arg_metadata_index;
+  bool reduction_consumer_seen = false;
+  bool reduction_sample_level_only = true;
 };
 
 struct ThreadgroupBufferInfo {

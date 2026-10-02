@@ -18,11 +18,24 @@
 
 #include "Metal.hpp"
 #include "d3d12_sampler.hpp"
+#include "air_sampler_abi.hpp"
 #include "log/log.hpp"
 
 #include <algorithm>
 
 namespace dxmt {
+
+uint32_t GetAIRSamplerReductionFlags(D3D12_FILTER filter) {
+  const auto reduction = D3D12_DECODE_FILTER_REDUCTION(filter);
+  if (reduction != D3D12_FILTER_REDUCTION_TYPE_MINIMUM &&
+      reduction != D3D12_FILTER_REDUCTION_TYPE_MAXIMUM) return 0;
+  uint32_t flags = air::SamplerReduction;
+  if (D3D12_DECODE_MIN_FILTER(filter)) flags |= air::SamplerMinLinear;
+  if (D3D12_DECODE_MAG_FILTER(filter)) flags |= air::SamplerMagLinear;
+  if (D3D12_DECODE_MIP_FILTER(filter)) flags |= air::SamplerMipLinear;
+  if (reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM) flags |= air::SamplerMaximum;
+  return flags;
+}
 
 constexpr WMTCompareFunction kCompareFunctionMap[] = {
     WMTCompareFunctionNever, // padding 0

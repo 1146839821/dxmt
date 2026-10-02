@@ -85,6 +85,15 @@ not admit dynamic reduction; its consumer lowering, remaining operations,
 feedback and DXIL implementation are still open. Broad indirect/direct-indexed
 and concurrent mutation matrices remain unverified.
 
+Opt-in dynamic AIR SampleLevel reduction is now integrated
+(`D3D12_MINMAX_DYNAMIC_INTEGRATION.md`). The independent
+`DXMT_ENABLE_AIR_MINMAX_DYNAMIC=1` gate defaults off. Both variants pass dynamic
+minimum/maximum 16/240, same-PSO descriptor switches 16/240/128/16 and focused
+static/live ownership and unsupported-consumer/resource-clamp rejection. This
+narrows the dynamic AIR gap; shader-wide qualification is conservative and does
+not close the remaining sample operations, feedback, DXIL, indirect/direct-indexed
+or full format/shape/per-range acceptance requirements. No FL/SM promotion.
+
 Prioritize the production typed-buffer origin contract, using
 `D3D12_TYPED_ORIGIN_PRODUCTION_AUDIT.md` as the integration gap list. Keep
 unsupported views rejected until real production readback succeeds. Integrate

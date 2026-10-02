@@ -260,6 +260,7 @@ public:
   );
   sm50_shader_t *out();
   sm50_shader_t get() const;
+  bool SupportsSamplerReduction(const MTL_SHADER_REFLECTION &reflection) const;
   void reset();
 
 private:

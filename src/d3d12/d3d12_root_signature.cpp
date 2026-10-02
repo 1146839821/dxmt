@@ -473,14 +473,7 @@ public:
           return E_OUTOFMEMORY;
         static_samplers_encoded_.push_back(sampler->sampler_state_handle);
         static_samplers_encoded_.push_back(sampler->sampler_state_cube_handle);
-        uint32_t flags = 0;
-        if (air_reduction) {
-          flags = air::SamplerReduction;
-          if (D3D12_DECODE_MIN_FILTER(original.Filter)) flags |= air::SamplerMinLinear;
-          if (D3D12_DECODE_MAG_FILTER(original.Filter)) flags |= air::SamplerMagLinear;
-          if (D3D12_DECODE_MIP_FILTER(original.Filter)) flags |= air::SamplerMipLinear;
-          if (reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM) flags |= air::SamplerMaximum;
-        }
+        const uint32_t flags = GetAIRSamplerReductionFlags(original.Filter);
         static_samplers_encoded_.push_back(air::PackSamplerMetadata(sampler->lod_bias, flags));
         static_samplers_encoded_.push_back(air::PackSamplerLODClamps(original.MinLOD, original.MaxLOD));
 

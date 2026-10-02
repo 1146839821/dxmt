@@ -47,11 +47,16 @@ struct PendingDescriptorUse {
   bool reject_min_lod_clamp = false;
 };
 
+struct SamplerConsumerConstraint {
+  bool use_msc = false;
+  bool reduction_eligible = false;
+};
+
 struct PendingSamplerHeapUse {
   MTLD3D12SamplerDescriptorHeap *heap = nullptr;
   // One live observation per slot; a mixed AIR/MSC encoder preserves the
   // stricter MSC consumer constraint rather than dropping duplicate uses.
-  std::unordered_map<UINT, bool> slots;
+  std::unordered_map<UINT, SamplerConsumerConstraint> slots;
 };
 
 enum class EncoderType {
@@ -85,6 +90,8 @@ struct EncoderData {
   std::vector<PendingDescriptorUse> pending_descriptor_uses;
   std::vector<Rc<Sampler>> sampler_refs; // Recording-time static observations.
   std::vector<PendingSamplerHeapUse> pending_sampler_uses; // Volatile only.
+  bool static_sampler_reduction = false;
+  bool static_resource_min_lod_clamp = false;
 
   void
   RetainDescriptorHeap(IUnknown *heap) {

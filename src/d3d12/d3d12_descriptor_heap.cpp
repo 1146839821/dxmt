@@ -24,6 +24,8 @@
 #include "dxmt_sampler.hpp"
 #include "air_sampler_abi.hpp"
 #include "log/log.hpp"
+#include "util_env.hpp"
+#include <cmath>
 #include <array>
 #include <atomic>
 #include <mutex>
@@ -997,8 +999,28 @@ public:
         mapped_argument_buffer_[Index] = {};
       SetMSCDescriptor(Index, {});
     };
+    auto native = *pDesc;
+    const auto reduction = D3D12_DECODE_FILTER_REDUCTION(pDesc->Filter);
+    const bool air_reduction = reduction == D3D12_FILTER_REDUCTION_TYPE_MINIMUM ||
+                               reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM;
+    uint32_t flags = 0;
+    if (air_reduction) {
+      if (env::getEnvVar("DXMT_ENABLE_AIR_MINMAX_DYNAMIC") != "1" ||
+          D3D12_DECODE_IS_ANISOTROPIC_FILTER(pDesc->Filter)) {
+        invalidate();
+        return E_NOTIMPL;
+      }
+      if (!std::isfinite(pDesc->MinLOD) || !std::isfinite(pDesc->MaxLOD)) {
+        invalidate();
+        return E_INVALIDARG;
+      }
+      native.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+      native.MinLOD = 0;
+      native.MaxLOD = D3D12_FLOAT32_MAX;
+      flags = GetAIRSamplerReductionFlags(pDesc->Filter);
+    }
     WMTSamplerInfo info;
-    const HRESULT hr = PopulateWMTSamplerInfo(device_->GetMTLDevice(), info, *pDesc);
+    const HRESULT hr = PopulateWMTSamplerInfo(device_->GetMTLDevice(), info, native);
     if (FAILED(hr)) {
       invalidate();
       return hr;
@@ -1014,10 +1036,11 @@ public:
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.sampler = sampler->sampler_state_handle;
       gpu_storage.cube_sampler = sampler->sampler_state_cube_handle;
-      gpu_storage.metadata = air::PackSamplerMetadata(sampler->lod_bias, 0);
+      gpu_storage.metadata = air::PackSamplerMetadata(sampler->lod_bias, flags);
       gpu_storage.lod_clamps = air::PackSamplerLODClamps(pDesc->MinLOD, pDesc->MaxLOD);
     }
-    SetMSCDescriptor(Index, {sampler->sampler_state_handle, 0, std::bit_cast<uint32_t>(sampler->lod_bias)});
+    SetMSCDescriptor(Index, air_reduction ? dxmt_msc_descriptor_entry{}
+        : dxmt_msc_descriptor_entry{sampler->sampler_state_handle, 0, std::bit_cast<uint32_t>(sampler->lod_bias)});
 
     return S_OK;
   }

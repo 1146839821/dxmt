@@ -1465,6 +1465,18 @@ D3D12AirconvShader::out() {
   return &handle_;
 }
 
+bool
+D3D12AirconvShader::SupportsSamplerReduction(const MTL_SHADER_REFLECTION &reflection) const {
+  if (!handle_) return false;
+  std::vector<MTL_SM50_SHADER_ARGUMENT> arguments(reflection.NumArguments);
+  SM50GetArgumentsInfo(handle_, nullptr, arguments.data());
+  for (const auto &argument : arguments)
+    if (argument.Type == SM50BindingType::Sampler &&
+        !(argument.Flags & MTL_SM50_SHADER_ARGUMENT_SAMPLER_REDUCTION_SAMPLE_LEVEL))
+      return false;
+  return true;
+}
+
 sm50_shader_t
 D3D12AirconvShader::get() const {
   return handle_;

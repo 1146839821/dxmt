@@ -164,6 +164,16 @@ public:
     };
   }
 
+  SamplerReductionState DecodeSamplerReductionState(
+      llvm::air::AIRBuilder &Builder, llvm::Value *Metadata, llvm::Value *LODClamps, bool Unsupported) {
+    auto &B = Builder.builder;
+    return {
+        B.CreateTrunc(B.CreateLShr(Metadata, 32), Builder.getIntTy()),
+        B.CreateBitCast(B.CreateTrunc(LODClamps, Builder.getIntTy()), Builder.getFloatTy()),
+        B.CreateBitCast(B.CreateTrunc(B.CreateLShr(LODClamps, 32), Builder.getIntTy()), Builder.getFloatTy()),
+        Unsupported};
+  }
+
   virtual llvm::Optional<SamplerDescriptor>
   GetSampler(llvm::air::AIRBuilder &Builder, RangeId Range, llvm::Value *Index) {
     auto Iter = Samplers.find(Range);
@@ -181,12 +191,7 @@ public:
       );
       SamplerDescriptor result{SamplerH, CubeSampler, Metadata};
       if (auto reduction = Reductions.find(Range); reduction != Reductions.end()) {
-        auto &B = Builder.builder;
-        result.Reduction = SamplerReductionState{
-            B.CreateTrunc(B.CreateLShr(Metadata, 32), Builder.getIntTy()),
-            B.CreateBitCast(B.CreateTrunc(LODClamps, Builder.getIntTy()), Builder.getFloatTy()),
-            B.CreateBitCast(B.CreateTrunc(B.CreateLShr(LODClamps, 32), Builder.getIntTy()), Builder.getFloatTy()),
-            reduction->second};
+        result.Reduction = DecodeSamplerReductionState(Builder, Metadata, LODClamps, reduction->second);
       }
       return result;
     }
@@ -196,7 +201,14 @@ public:
     auto HeapPointer = GetArgument(Builder, RootSignatureArgumentIndex, Sampler.arg_index);
     auto [SamplerH, CubeSampler, Metadata, LODClamps] =
         GetSamplerDescriptor(Builder, HeapPointer, Index, Sampler.range.lower_bound, DescriptorOffset);
-    return SamplerDescriptor{SamplerH, CubeSampler, Metadata};
+    SamplerDescriptor result{SamplerH, CubeSampler, Metadata};
+    if (Sampler.reduction_consumer_seen && Sampler.reduction_sample_level_only) {
+      result.Reduction = DecodeSamplerReductionState(Builder, Metadata, LODClamps, false);
+      auto &B = Builder.builder;
+      result.Reduction->RuntimePredicate = B.CreateICmpNE(
+          B.CreateAnd(result.Reduction->Flags, Builder.getInt(dxmt::air::SamplerReduction)), Builder.getInt(0));
+    }
+    return result;
   }
 
   std::pair<llvm::Value *, llvm::Value *>

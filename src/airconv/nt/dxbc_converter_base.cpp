@@ -1701,6 +1701,17 @@ Converter::operator()(const InstSampleLOD &sample) {
       return;
     }
     const auto &state = *Sampler->Reduction;
+    auto *ordinary_lod = LOD;
+    llvm::BasicBlock *ordinary_block = nullptr;
+    llvm::BasicBlock *merge_block = nullptr;
+    if (state.RuntimePredicate) {
+      auto *function = ir.GetInsertBlock()->getParent();
+      auto *reduction_block = llvm::BasicBlock::Create(ir.getContext(), "sample.reduction", function);
+      ordinary_block = llvm::BasicBlock::Create(ir.getContext(), "sample.ordinary", function);
+      merge_block = llvm::BasicBlock::Create(ir.getContext(), "sample.merge", function);
+      ir.CreateCondBr(state.RuntimePredicate, reduction_block, ordinary_block);
+      ir.SetInsertPoint(reduction_block);
+    }
     LOD = air.CreateFPBinOp(AIRBuilder::fmin, state.MaxLOD, LOD, false);
     LOD = air.CreateFPBinOp(AIRBuilder::fmax, state.MinLOD, LOD, false);
     // FL11+ selects minification after sampler LOD clamping. Resource clamp is
@@ -1710,7 +1721,22 @@ Converter::operator()(const InstSampleLOD &sample) {
     auto value = air.CreateReductionSampleLevel(Tex->Texture, Tex->Handle, SamplerHandle,
         Coord, ArrayIndex, LOD, flags, sample.offsets);
     if (!value) { failure = "AIR Min/Max helper ABI is unsupported"; return; }
-    StoreOperand(sample.dst, MaskSwizzle(*value, GetMask(sample.dst), Tex->Swizzle));
+    auto *result = *value;
+    if (ordinary_block) {
+      auto *reduction_exit = ir.GetInsertBlock();
+      ir.CreateBr(merge_block);
+      ir.SetInsertPoint(ordinary_block);
+      auto [ordinary_value, ordinary_residency] = air.CreateSample(
+          Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets, sample_level{ordinary_lod});
+      auto *ordinary_exit = ir.GetInsertBlock();
+      ir.CreateBr(merge_block);
+      ir.SetInsertPoint(merge_block);
+      auto *merged = ir.CreatePHI(result->getType(), 2, "sample.result");
+      merged->addIncoming(result, reduction_exit);
+      merged->addIncoming(ordinary_value, ordinary_exit);
+      result = merged;
+    }
+    StoreOperand(sample.dst, MaskSwizzle(result, GetMask(sample.dst), Tex->Swizzle));
     return; // No fabricated residency success; feedback was rejected above.
   }
 

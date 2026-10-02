@@ -79,9 +79,11 @@ public:
   virtual void CommitResourceStates() = 0;
   virtual bool ResolvePendingDescriptorUses(
       EncoderData *encoder,
-      const std::function<void(obj_handle_t, WMTResourceUsage, WMTRenderStages)> &use_resource
+      const std::function<void(obj_handle_t, WMTResourceUsage, WMTRenderStages)> &use_resource,
+      bool sampler_reduction = false
   ) = 0;
-  virtual bool ResolvePendingSamplerUses(EncoderData *encoder, std::vector<Rc<Sampler>> &retained_samplers) = 0;
+  virtual bool ResolvePendingSamplerUses(EncoderData *encoder, std::vector<Rc<Sampler>> &retained_samplers,
+                                        bool *sampler_reduction = nullptr) = 0;
 };
 
 class MTLD3D12CommandAllocator : public ID3D12CommandAllocator {
@@ -333,6 +335,9 @@ public:
   UINT IsComputePipelineState;
   D3D12ShaderBackend shader_backend = D3D12ShaderBackend::Airconv;
   bool msc_uses_texture_load = false;
+  // Conservative shader-wide qualification, intersected over all AIR stages.
+  // Host admission still also requires per-descriptor and resource guards.
+  bool air_sampler_reduction_eligible = true;
   D3D12PipelineCacheData pipeline_cache;
 
   const D3D12PipelineCacheData &GetPipelineCacheData() const { return pipeline_cache; }
