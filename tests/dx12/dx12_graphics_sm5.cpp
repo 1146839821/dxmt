@@ -90,9 +90,21 @@ struct ShaderSet {
   std::vector<uint8_t> adjacency_geometry;
   std::vector<uint8_t> pixel;
   std::vector<uint8_t> pixel_query;
+  std::vector<uint8_t> pixel_sample, pixel_sample_mip, pixel_sample_bias, pixel_sample_combined;
 };
 
 bool CompileShaders(pD3DCompile compile_shader, ShaderSet &shaders) {
+  const char *sample_prefix = "Texture2D<float4> t:register(t0); SamplerState s:register(s0);"
+      "float4 ps_main(float4 p:SV_Position):SV_Target{return t.";
+  const std::string sample_source = std::string(sample_prefix) + "Sample(s,float2(0.5,0.5));}";
+  const std::string sample_mip = std::string(sample_prefix) + "Sample(s,p.xy*0.23);}";
+  const std::string sample_bias = std::string(sample_prefix) + "SampleBias(s,p.xy*0.23,0.75);}";
+  const std::string sample_combined = std::string(sample_prefix) + "SampleBias(s,p.xy*0.23,-0.75);}";
+  if (!CompileShader(compile_shader, sample_source.c_str(), "implicit.hlsl", "ps_main", "ps_5_0", shaders.pixel_sample) ||
+      !CompileShader(compile_shader, sample_mip.c_str(), "implicit-mip.hlsl", "ps_main", "ps_5_0", shaders.pixel_sample_mip) ||
+      !CompileShader(compile_shader, sample_bias.c_str(), "implicit-bias.hlsl", "ps_main", "ps_5_0", shaders.pixel_sample_bias) ||
+      !CompileShader(compile_shader, sample_combined.c_str(), "implicit-combined.hlsl", "ps_main", "ps_5_0", shaders.pixel_sample_combined))
+    return false;
   static constexpr char vertex_source[] = R"(
 struct VSInput {
   float2 position : POSITION;
@@ -279,6 +291,8 @@ struct TestCase {
   bool geometry_root_srv_uav = false;
   bool null_texture_query = false;
   bool release_resources_before_execute = false;
+  unsigned sampling = 0; // 1/2 spatial min/max; 3 mip; 4 bias; 5 combined bias; 6 ordinary.
+  bool sampling_dynamic = false;
 };
 
 bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &test) {
@@ -325,6 +339,9 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   ID3DBlob *root_error = nullptr;
   ID3D12DescriptorHeap *rtv_heap = nullptr;
   ID3D12DescriptorHeap *shader_heap = nullptr;
+  ID3D12DescriptorHeap *sampler_heap = nullptr;
+  ID3D12Resource *sample_texture = nullptr, *sample_upload = nullptr;
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT sample_footprints[4] = {};
   ID3D12Resource *render_target = nullptr;
   ID3D12Resource *vertex_buffer = nullptr;
   ID3D12Resource *index_buffer = nullptr;
@@ -368,6 +385,9 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     Release(index_buffer);
     Release(vertex_buffer);
     Release(render_target);
+    Release(sample_upload);
+    Release(sample_texture);
+    Release(sampler_heap);
     Release(shader_heap);
     Release(rtv_heap);
     Release(root_error);
@@ -394,7 +414,31 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   D3D12_ROOT_PARAMETER root_parameters[2] = {};
   D3D12_DESCRIPTOR_RANGE descriptor_range = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
-  if (test.null_texture_query) {
+  D3D12_STATIC_SAMPLER_DESC sample_static = {};
+  D3D12_SAMPLER_DESC sample_sampler = {};
+  D3D12_DESCRIPTOR_RANGE sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
+  if (test.sampling) {
+    sample_sampler.Filter = test.sampling == 2 ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR :
+        test.sampling == 6 ? D3D12_FILTER_MIN_MAG_MIP_LINEAR : test.sampling >= 3 ?
+        D3D12_FILTER_MINIMUM_MIN_MAG_MIP_POINT : D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;
+    sample_sampler.AddressU = sample_sampler.AddressV = sample_sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sample_sampler.MipLODBias = test.sampling == 5 ? 0.75f : 0.0f;
+    sample_sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sample_sampler.MaxAnisotropy = 1;
+    sample_sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+    sample_static.Filter = sample_sampler.Filter;
+    sample_static.AddressU = sample_static.AddressV = sample_static.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sample_static.MipLODBias = sample_sampler.MipLODBias;
+    sample_static.MaxLOD = sample_sampler.MaxLOD;
+    sample_static.MaxAnisotropy = 1;
+    sample_static.ComparisonFunc = sample_sampler.ComparisonFunc;
+    sample_static.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    if (!test.sampling_dynamic) {
+      root_desc.NumStaticSamplers = 1;
+      root_desc.pStaticSamplers = &sample_static;
+    }
+  }
+  if (test.null_texture_query || test.sampling) {
     descriptor_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     descriptor_range.NumDescriptors = 1;
     descriptor_range.BaseShaderRegister = 0;
@@ -406,6 +450,12 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     root_desc.NumParameters = 1;
     root_desc.pParameters = root_parameters;
+    if (test.sampling_dynamic) {
+      root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      root_parameters[1].DescriptorTable = {1, &sampler_range};
+      root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+      root_desc.NumParameters = 2;
+    }
   } else if (test.root_cbv || test.geometry_root_cbv) {
     root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     root_parameters[0].Descriptor.ShaderRegister = 0;
@@ -449,9 +499,11 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc = {};
   pso_desc.pRootSignature = root_signature;
   pso_desc.VS = {vertex_shader.data(), vertex_shader.size()};
-  pso_desc.GS = test.null_texture_query ? D3D12_SHADER_BYTECODE{}
+  pso_desc.GS = test.null_texture_query || test.sampling ? D3D12_SHADER_BYTECODE{}
                                          : D3D12_SHADER_BYTECODE{geometry_shader.data(), geometry_shader.size()};
-  const auto &pixel_shader = test.null_texture_query ? shaders.pixel_query : shaders.pixel;
+  const auto &pixel_shader = test.sampling == 3 ? shaders.pixel_sample_mip :
+      test.sampling == 4 ? shaders.pixel_sample_bias : test.sampling == 5 ? shaders.pixel_sample_combined :
+      test.sampling ? shaders.pixel_sample : test.null_texture_query ? shaders.pixel_query : shaders.pixel;
   pso_desc.PS = {pixel_shader.data(), pixel_shader.size()};
   pso_desc.InputLayout = test.no_input ? D3D12_INPUT_LAYOUT_DESC{} : D3D12_INPUT_LAYOUT_DESC{input_layout, 2};
   pso_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -488,7 +540,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateRenderTargetView(render_target, nullptr, rtv);
 
-  if (test.null_texture_query) {
+  if (test.null_texture_query || test.sampling) {
     D3D12_DESCRIPTOR_HEAP_DESC shader_heap_desc = {};
     shader_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     shader_heap_desc.NumDescriptors = 1;
@@ -499,8 +551,43 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     null_srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     null_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     null_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    null_srv.Texture2D.MipLevels = 1;
-    device->CreateShaderResourceView(nullptr, &null_srv,
+    null_srv.Texture2D.MipLevels = test.sampling >= 3 && test.sampling <= 5 ? 4 : 1;
+    if (test.sampling) {
+      auto desc = RenderTargetDescription();
+      desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+      desc.Width = desc.Height = null_srv.Texture2D.MipLevels == 4 ? 8 : 2;
+      desc.MipLevels = null_srv.Texture2D.MipLevels;
+      if (!CheckHR("CreateSampleTexture", device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE,
+          &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&sample_texture))))
+        return fail("sample texture creation failed");
+      UINT rows[4] = {}; UINT64 row_sizes[4] = {}, total = 0;
+      device->GetCopyableFootprints(&desc, 0, desc.MipLevels, 0, sample_footprints, rows, row_sizes, &total);
+      auto upload_desc = BufferDescription(total);
+      if (!CheckHR("CreateSampleUpload", device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE,
+          &upload_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&sample_upload))))
+        return fail("sample upload creation failed");
+      void *data = nullptr;
+      if (!CheckHR("MapSampleUpload", sample_upload->Map(0, nullptr, &data))) return fail("sample upload map failed");
+      const uint32_t mip_red[] = {32, 224, 96, 160};
+      const uint32_t spatial_red[] = {16, 64, 192, 240};
+      std::memset(data, 0, static_cast<size_t>(total));
+      for (unsigned mip = 0; mip < desc.MipLevels; ++mip)
+        for (UINT y = 0; y < rows[mip]; ++y)
+          for (UINT x = 0; x < sample_footprints[mip].Footprint.Width; ++x) {
+            const uint32_t pixel = 0xff000000u | (desc.MipLevels == 4 ? mip_red[mip] : spatial_red[y * 2 + x]);
+            std::memcpy(static_cast<char *>(data) + sample_footprints[mip].Offset +
+                y * sample_footprints[mip].Footprint.RowPitch + x * 4, &pixel, 4);
+          }
+      sample_upload->Unmap(0, nullptr);
+      if (test.sampling_dynamic) {
+        auto sampler_desc = shader_heap_desc;
+        sampler_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+        if (!CheckHR("CreateSamplerHeap", device->CreateDescriptorHeap(&sampler_desc, IID_PPV_ARGS(&sampler_heap))))
+          return fail("sample heap creation failed");
+        device->CreateSampler(&sample_sampler, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+      }
+    }
+    device->CreateShaderResourceView(sample_texture, &null_srv,
                                      shader_heap->GetCPUDescriptorHandleForHeapStart());
   }
 
@@ -607,12 +694,29 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     return fail("command list creation failed");
 
   list->SetPipelineState(pso);
+  if (test.sampling) {
+    const unsigned mips = test.sampling >= 3 && test.sampling <= 5 ? 4 : 1;
+    for (unsigned mip = 0; mip < mips; ++mip) {
+      D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
+      dst.pResource = sample_texture; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = mip;
+      src.pResource = sample_upload; src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      src.PlacedFootprint = sample_footprints[mip];
+      list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition = {sample_texture, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+    list->ResourceBarrier(1, &barrier);
+  }
   if (root_signature) {
     list->SetGraphicsRootSignature(root_signature);
-    if (test.null_texture_query) {
-      ID3D12DescriptorHeap *heaps[] = {shader_heap};
-      list->SetDescriptorHeaps(1, heaps);
+    if (test.null_texture_query || test.sampling) {
+      ID3D12DescriptorHeap *heaps[] = {shader_heap, sampler_heap};
+      list->SetDescriptorHeaps(test.sampling_dynamic ? 2 : 1, heaps);
       list->SetGraphicsRootDescriptorTable(0, shader_heap->GetGPUDescriptorHandleForHeapStart());
+      if (test.sampling_dynamic)
+        list->SetGraphicsRootDescriptorTable(1, sampler_heap->GetGPUDescriptorHandleForHeapStart());
     } else if (test.geometry_root_srv_uav) {
       list->SetGraphicsRootShaderResourceView(0, root_data->GetGPUVirtualAddress());
       list->SetGraphicsRootUnorderedAccessView(1, root_uav_data->GetGPUVirtualAddress());
@@ -741,6 +845,24 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
 int main(int argc, char **argv) {
   static constexpr TestCase all_cases[] = {
+      {"implicit-min-static", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       16, true, false, false, false, false, false, 1, false},
+      {"implicit-min-dynamic", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       16, true, false, false, false, false, false, 1, true},
+      {"implicit-max-dynamic", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       240, true, false, false, false, false, false, 2, true},
+      {"implicit-mip-static", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       224, true, false, false, false, false, false, 3, false},
+      {"implicit-mip-dynamic", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       224, true, false, false, false, false, false, 3, true},
+      {"implicit-bias-static", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       96, true, false, false, false, false, false, 4, false},
+      {"implicit-bias-dynamic", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       96, true, false, false, false, false, false, 4, true},
+      {"implicit-combined-dynamic", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       224, true, false, false, false, false, false, 5, true},
+      {"implicit-ordinary-dynamic", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       128, true, false, false, false, false, false, 6, true},
       {"list", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false, 0x00ffffffu},
       {"strip", D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, false, false, false, false, false, 0x00ffffffu},
       {"indexed16", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, true, false, false, false, false, 0x00ffffffu},
@@ -769,7 +891,7 @@ int main(int argc, char **argv) {
   std::vector<const TestCase *> selected;
   if (argc == 1 || (argc == 2 && std::strcmp(argv[1], "--all") == 0)) {
     for (const auto &test : all_cases)
-      selected.push_back(&test);
+      if (!test.sampling) selected.push_back(&test); // Opt-in fixtures are selected explicitly.
   } else if (argc >= 2 && std::strcmp(argv[1], "--help") == 0) {
     std::cout << "usage: dx12_graphics_sm5 [--all|case ...]\n";
     for (const auto &test : all_cases)

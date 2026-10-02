@@ -107,6 +107,13 @@ focused real D3D12 minimum/maximum, distinguishable array-slice and multi-mip
 gradient readbacks. This extends dimensions, not full MinMax closure; remaining
 operations, clamps/feedback, DXIL and complete matrices are still outstanding.
 
+AIR Pixel Shader Sample/SampleBias reduction now also lowers through the shared
+gradient/tap helper (`D3D12_MINMAX_IMPLICIT_INTEGRATION.md`). Both variants pass
+focused static/dynamic spatial extrema, implicit mip selection and additive-bias
+pixel readbacks. Ordinary sampling and existing explicit operations regressions
+pass. Cube, anisotropic, clamps/feedback, DXIL and complete matrix closure still
+remain; opt-in gates and feature-level declarations are unchanged.
+
 Prioritize the production typed-buffer origin contract, using
 `D3D12_TYPED_ORIGIN_PRODUCTION_AUDIT.md` as the integration gap list. Keep
 unsupported views rejected until real production readback succeeds. Integrate

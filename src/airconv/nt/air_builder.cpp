@@ -1184,7 +1184,8 @@ AIRBuilder::CreateDerivative(Value *Val, bool YAxis) {
   }
   auto &Context = getContext();
   auto Attrs = AttributeList::get(
-      Context, {{~0U, Attribute::get(Context, Attribute::AttrKind::NoUnwind)},
+      Context, {{~0U, Attribute::get(Context, Attribute::AttrKind::Convergent)},
+                {~0U, Attribute::get(Context, Attribute::AttrKind::NoUnwind)},
                 {~0U, Attribute::get(Context, Attribute::AttrKind::WillReturn)}}
   );
 

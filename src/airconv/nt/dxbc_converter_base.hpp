@@ -161,10 +161,15 @@ public:
   }
 
   llvm::Optional<SamplerHandle> LoadSampler(const SrcOperandSampler &SrcOp, bool AllowReduction = false);
+  llvm::Optional<llvm::Value *> CreateImplicitReductionSample(
+      const TextureResourceHandle &texture, const SamplerHandle &sampler, llvm::Value *coord,
+      llvm::Value *array_index, llvm::Value *instruction_bias, const int32_t offsets[3],
+      const std::function<llvm::Value *()> &ordinary_sample);
   llvm::Optional<llvm::Value *> CreateReductionSample(
       const TextureResourceHandle &texture, const SamplerHandle &sampler, llvm::Value *coord,
       llvm::Value *array_index, llvm::Value *biased_lod, const int32_t offsets[3],
-      const std::function<llvm::Value *()> &ordinary_sample);
+      const std::function<llvm::Value *()> &ordinary_sample,
+      const std::function<llvm::Value *()> &reduction_lod = {});
 
   llvm::Optional<BufferResourceHandle> LoadBuffer(const SrcOperandResource &SrcOp);
   llvm::Optional<BufferResourceHandle> LoadBuffer(const SrcOperandUAV &SrcOp);

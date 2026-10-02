@@ -560,7 +560,7 @@ Converter::LoadSampler(const SrcOperandSampler &SrcOp, bool AllowReduction) {
   if (!descriptor)
     return {};
   if (descriptor->Reduction && (!AllowReduction || descriptor->Reduction->Unsupported)) {
-    failure = "AIR Min/Max sampler requires supported SampleLevel or SampleGrad without feedback";
+    failure = "AIR Min/Max sampler requires a supported sampling operation without feedback";
     return {};
   }
 
@@ -1571,7 +1571,7 @@ Converter::operator()(const InstSample &sample) {
   if (!Tex)
     return;
 
-  auto Sampler = LoadSampler(sample.src_sampler);
+  auto Sampler = LoadSampler(sample.src_sampler, true);
   if (!Sampler)
     return;
 
@@ -1626,6 +1626,19 @@ Converter::operator()(const InstSample &sample) {
     return;
   }
 
+  if (Sampler->Reduction) {
+    if (sample.feedback || sample.min_lod_clamp) {
+      failure = "AIR Min/Max implicit feedback or instruction clamp is unsupported";
+      return;
+    }
+    auto result = CreateImplicitReductionSample(*Tex, *Sampler, Coord, ArrayIndex, nullptr, sample.offsets, [&] {
+      return air.CreateSample(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets,
+          sample_bias{Sampler->Bias}, sample_min_lod_clamp{MinLODClamp}).first;
+    });
+    if (!result) return;
+    StoreOperand(sample.dst, MaskSwizzle(*result, GetMask(sample.dst), Tex->Swizzle));
+    return;
+  }
   auto [Value, Residency] = air.CreateSample(
       Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets, sample_bias{Sampler->Bias},
       sample_min_lod_clamp{MinLODClamp}
@@ -1636,10 +1649,39 @@ Converter::operator()(const InstSample &sample) {
 }
 
 llvm::Optional<llvm::Value *>
+Converter::CreateImplicitReductionSample(
+    const TextureResourceHandle &texture, const SamplerHandle &sampler, llvm::Value *coord,
+    llvm::Value *array_index, llvm::Value *instruction_bias, const int32_t offsets[3],
+    const std::function<llvm::Value *()> &ordinary_sample) {
+  using namespace llvm::air;
+  if (ctx.shader_type != microsoft::D3D10_SB_PIXEL_SHADER ||
+      (texture.Logical != Texture::texture1d && texture.Logical != Texture::texture1d_array &&
+       texture.Logical != Texture::texture2d && texture.Logical != Texture::texture2d_array &&
+       texture.Logical != Texture::texture3d) || texture.Texture.sample_type != Texture::sample_float) {
+    failure = "AIR Min/Max implicit stage or texture type is unsupported";
+    return {};
+  }
+  // Never evaluate quad derivatives or implicit ordinary sampling in a branch
+  // controlled by per-lane descriptor state. Both precede reduction dispatch.
+  auto *dx = air.CreateDerivative(coord, false);
+  auto *dy = air.CreateDerivative(coord, true);
+  auto *ordinary_value = sampler.Reduction->RuntimePredicate ? ordinary_sample() : nullptr;
+  return CreateReductionSample(texture, sampler, coord, array_index, nullptr, offsets,
+      [ordinary_value] { return ordinary_value; }, [&]() -> llvm::Value * {
+        auto lod = air.CreateIsotropicGradientLOD(texture.Texture, texture.Handle, dx, dy);
+        if (!lod) { failure = "AIR Min/Max implicit LOD is unsupported"; return nullptr; }
+        auto *biased_lod = ir.CreateFAdd(*lod, sampler.Bias);
+        if (instruction_bias) biased_lod = ir.CreateFAdd(biased_lod, instruction_bias);
+        return biased_lod;
+      });
+}
+
+llvm::Optional<llvm::Value *>
 Converter::CreateReductionSample(
     const TextureResourceHandle &texture, const SamplerHandle &sampler, llvm::Value *coord,
     llvm::Value *array_index, llvm::Value *biased_lod, const int32_t offsets[3],
-    const std::function<llvm::Value *()> &ordinary_sample) {
+    const std::function<llvm::Value *()> &ordinary_sample,
+    const std::function<llvm::Value *()> &reduction_lod) {
   using namespace llvm::air;
   const auto &state = *sampler.Reduction;
   llvm::BasicBlock *ordinary_block = nullptr;
@@ -1652,6 +1694,8 @@ Converter::CreateReductionSample(
     ir.CreateCondBr(state.RuntimePredicate, reduction_block, ordinary_block);
     ir.SetInsertPoint(reduction_block);
   }
+  if (!biased_lod && reduction_lod) biased_lod = reduction_lod();
+  if (!biased_lod) { failure = "AIR Min/Max reduction LOD is unavailable"; return {}; }
   auto *lod = air.CreateFPBinOp(AIRBuilder::fmin, state.MaxLOD, biased_lod, false);
   lod = air.CreateFPBinOp(AIRBuilder::fmax, state.MinLOD, lod, false);
   auto *flags = ir.CreateOr(state.Flags,
@@ -1768,7 +1812,7 @@ Converter::operator()(const InstSampleBias &sample) {
   if (!Tex)
     return;
 
-  auto Sampler = LoadSampler(sample.src_sampler);
+  auto Sampler = LoadSampler(sample.src_sampler, true);
   if (!Sampler)
     return;
 
@@ -1823,7 +1867,22 @@ Converter::operator()(const InstSampleBias &sample) {
     return;
   }
 
-  auto Bias = ir.CreateFAdd(Sampler->Bias, LoadOperand(sample.src_bias, kMaskComponentX));
+  auto *InstructionBias = LoadOperand(sample.src_bias, kMaskComponentX);
+  auto Bias = ir.CreateFAdd(Sampler->Bias, InstructionBias);
+
+  if (Sampler->Reduction) {
+    if (sample.feedback || sample.min_lod_clamp) {
+      failure = "AIR Min/Max implicit feedback or instruction clamp is unsupported";
+      return;
+    }
+    auto result = CreateImplicitReductionSample(*Tex, *Sampler, Coord, ArrayIndex, InstructionBias, sample.offsets, [&] {
+      return air.CreateSample(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets,
+          sample_bias{Bias}, sample_min_lod_clamp{MinLODClamp}).first;
+    });
+    if (!result) return;
+    StoreOperand(sample.dst, MaskSwizzle(*result, GetMask(sample.dst), Tex->Swizzle));
+    return;
+  }
 
   auto [Value, Residency] = air.CreateSample(
       Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets, sample_bias{Bias},

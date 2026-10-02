@@ -659,7 +659,9 @@ read_control_flow(
           sampler.reduction_consumer_seen = true;
           bool eligible = false;
           if constexpr (std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleLOD> ||
-                        std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleDerivative>) {
+                        std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleDerivative> ||
+                        std::is_same_v<std::decay_t<decltype(decoded)>, InstSample> ||
+                        std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleBias>) {
             const auto &texture = shader_info.srvMap.at(decoded.src_resource.range_id);
             eligible = !decoded.feedback && texture.scaler_type == ScalerDataType::Float &&
                 (texture.resource_type == ResourceType::Texture1D ||
@@ -667,8 +669,11 @@ read_control_flow(
                  texture.resource_type == ResourceType::Texture2D ||
                  texture.resource_type == ResourceType::Texture2DArray ||
                  texture.resource_type == ResourceType::Texture3D);
-            if constexpr (std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleDerivative>)
+            if constexpr (!std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleLOD>)
               eligible &= !decoded.min_lod_clamp;
+            if constexpr (std::is_same_v<std::decay_t<decltype(decoded)>, InstSample> ||
+                          std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleBias>)
+              eligible &= sm50_shader->shader_type == microsoft::D3D10_SB_PIXEL_SHADER;
           }
           sampler.reduction_sampling_only &= eligible;
         }
