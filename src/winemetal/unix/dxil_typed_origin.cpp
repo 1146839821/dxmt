@@ -12,12 +12,13 @@
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <algorithm>
 #include <map>
+#include <new>
 
 static_assert(sizeof(dxmt_msc_lower_typed_origins_params) == 64);
 static_assert(offsetof(dxmt_msc_lower_typed_origins_params, bindings) == 40);
 static_assert(sizeof(dxmt_msc_typed_origin_binding) == 12);
 
-extern "C" int dxmt_msc_lower_typed_origins(dxmt_msc_lower_typed_origins_params *params) {
+static int LowerTypedOrigins(dxmt_msc_lower_typed_origins_params *params) {
   if (!params) return DXMT_MSC_ERROR_INVALID_ARGUMENT;
   params->ir_size = 0;
   params->binding_count = 0;
@@ -73,6 +74,14 @@ extern "C" int dxmt_msc_lower_typed_origins(dxmt_msc_lower_typed_origins_params 
   for (size_t i = 0; i < records.size(); ++i)
     bindings[i] = {records[i].resource_class, records[i].register_space, records[i].shader_register};
   return DXMT_MSC_SUCCESS;
+}
+
+extern "C" int dxmt_msc_lower_typed_origins(dxmt_msc_lower_typed_origins_params *params) {
+  try {
+    return LowerTypedOrigins(params);
+  } catch (const std::bad_alloc &) {
+    return DXMT_MSC_ERROR_OUT_OF_MEMORY;
+  }
 }
 
 namespace dxmt::dxil {

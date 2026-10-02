@@ -2,13 +2,19 @@ dx12_sm6_probe = executable('dx12_compute_sm6', 'dx12_compute_sm6.cpp',
   dependencies: [ d3d12_dep ],
 )
 
+executable('dx12_typed_origin_prepare', 'dx12_typed_origin_prepare.cpp',
+  '../../src/d3d12/d3d12_typed_origin.cpp',
+  build_by_default: false, link_args: ['-municode'],
+  include_directories: [include_directories('../../src/d3d12')],
+  dependencies: [winemetal_dep, cpp.find_library('ole32')],
+)
+
 # Offline experiment; dynamically loads the explicitly selected DXC SDK only.
 if build_machine.system() == 'darwin'
   executable('dxil_structured_origin', 'dxil_structured_origin.cpp',
-    '../../src/winemetal/unix/dxil_typed_origin.cpp',
     native: true, build_by_default: false,
     include_directories: [include_directories('../../src/winemetal/unix'), llvm_include_path_darwin],
-    cpp_args: airconv_args, dependencies: [airconv_dep_darwin],
+    cpp_args: airconv_args, dependencies: [typed_origin_native_dep],
   )
 endif
 dxil_origin_parser_test = executable('dxil_origin_transform_test', 'dxil_origin_transform_test.cpp', native: true)
