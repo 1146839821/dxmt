@@ -77,6 +77,14 @@ but does not admit dynamic reduction or close consumer/lifetime safety. The
 focused mixed-filter clamp probe and ordinary AIR/MSC regressions pass in both
 variants. Full Min/Max and all remaining closure workstreams stay open.
 
+Sampler lifetime groundwork is now connected (`D3D12_SAMPLER_OBSERVATION.md`):
+recording-time static references, submission-owned volatile observations and
+atomic heap snapshots. Eight focused AIR/MSC observation executions pass across
+both builds without accumulating live generations in closed encoders. This does
+not admit dynamic reduction; its consumer lowering, remaining operations,
+feedback and DXIL implementation are still open. Broad indirect/direct-indexed
+and concurrent mutation matrices remain unverified.
+
 Prioritize the production typed-buffer origin contract, using
 `D3D12_TYPED_ORIGIN_PRODUCTION_AUDIT.md` as the integration gap list. Keep
 unsupported views rejected until real production readback succeeds. Integrate

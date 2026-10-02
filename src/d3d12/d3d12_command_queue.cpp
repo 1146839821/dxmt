@@ -136,6 +136,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     std::vector<CommandList> command_lists;
     std::vector<Com<MTLD3D12CommandAllocator, false>> allocators;
     std::vector<std::shared_ptr<D3D12TypedOriginSubmissionBinding>> typed_origin_bindings;
+    std::vector<Rc<Sampler>> sampler_refs;
     HANDLE latency_waitable = nullptr;
   };
 
@@ -1130,7 +1131,8 @@ public:
            auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
            LabelEncoder(encoder, recording_id, data->id, "Render");
            encoder.waitForFence(fence_, data->use_geometry ? WMTRenderStagePreRaster : WMTRenderStageVertex);
-           if (!pCommandList->ResolvePendingDescriptorUses(
+           if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs) ||
+               !pCommandList->ResolvePendingDescriptorUses(
                    data,
                    [&](obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages stages) {
                      WMT::Resource native_resource;
@@ -1162,7 +1164,8 @@ public:
           auto encoder = cmdbuf.computeCommandEncoder(false);
            LabelEncoder(encoder, recording_id, data->id, "Compute");
            encoder.waitForFence(fence_);
-          if (!pCommandList->ResolvePendingDescriptorUses(
+          if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs) ||
+              !pCommandList->ResolvePendingDescriptorUses(
                   data,
                   [&](obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages) {
                     WMT::Resource native_resource;

@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+#include <algorithm>
 
 static bool CheckSamplerStorage(WMT::Device device, dxmt::MTLD3D12SamplerDescriptorHeap *heap, bool cleared,
                                 const D3D12_SAMPLER_DESC *desc = nullptr, uint64_t *storage = nullptr) {
@@ -112,6 +113,9 @@ main(int argc, char **argv) {
   const bool maximum = argc >= 3 &&
       (strcmp(argv[2], "--maximum") == 0 || strcmp(argv[2], "--static-maximum") == 0);
   const bool reduction = minimum || maximum;
+  const bool static_observation = argc >= 3 && strcmp(argv[2], "--sampler-static-observation") == 0;
+  const bool live_observation = argc >= 3 && strcmp(argv[2], "--sampler-live-observation") == 0;
+  const bool observation_probe = static_observation || live_observation;
   const bool static_sampler = argc >= 3 &&
       (strcmp(argv[2], "--static-sampler") == 0 || state_probe ||
        strcmp(argv[2], "--static-minimum") == 0 || strcmp(argv[2], "--static-maximum") == 0);
@@ -125,7 +129,7 @@ main(int argc, char **argv) {
       argc == 3 && strcmp(argv[2], "--direct-indexed-uav-texture") == 0;
   const bool direct_indexed =
       argc == 3 && (strcmp(argv[2], "--direct-indexed") == 0 || direct_indexed_uav_texture);
-  if (argc >= 3 && !static_sampler && !direct_indexed && !reduction)
+  if (argc >= 3 && !static_sampler && !direct_indexed && !reduction && !observation_probe)
     return 2;
   if (expect_unsupported && !reduction)
     return 2;
@@ -175,9 +179,14 @@ main(int argc, char **argv) {
   unsigned root_parameter_count = 0;
   HRESULT serialize_hr = E_FAIL;
   int result = 1;
+  dxmt::EncoderData *observation_encoder = nullptr;
+  dxmt::Sampler *recorded_sampler = nullptr;
+  std::vector<dxmt::Rc<dxmt::Sampler>> first_resolution, second_resolution;
 
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   D3D12_DESCRIPTOR_RANGE ranges[3] = {};
+  D3D12_DESCRIPTOR_RANGE1 observation_ranges[3] = {};
+  D3D12_ROOT_PARAMETER1 observation_parameters[3] = {};
   D3D12_ROOT_PARAMETER root_parameters[3] = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
   D3D12_VERSIONED_ROOT_SIGNATURE_DESC versioned_root_desc = {};
@@ -257,7 +266,21 @@ main(int argc, char **argv) {
     root_desc.NumStaticSamplers = 1;
     root_desc.pStaticSamplers = &static_sampler_desc;
   }
-  serialize_hr = direct_indexed
+  if (observation_probe) {
+    versioned_root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    versioned_root_desc.Desc_1_1.NumParameters = root_parameter_count;
+    versioned_root_desc.Desc_1_1.pParameters = observation_parameters;
+    for (unsigned i = 0; i < root_parameter_count; ++i) {
+      observation_ranges[i] = {ranges[i].RangeType, ranges[i].NumDescriptors, ranges[i].BaseShaderRegister,
+          ranges[i].RegisterSpace,
+          ranges[i].RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER && static_observation
+              ? D3D12_DESCRIPTOR_RANGE_FLAG_NONE : D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE,
+          ranges[i].OffsetInDescriptorsFromTableStart};
+      observation_parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      observation_parameters[i].DescriptorTable = {1, &observation_ranges[i]};
+    }
+  }
+  serialize_hr = direct_indexed || observation_probe
                      ? D3D12SerializeVersionedRootSignature(&versioned_root_desc, &root_blob, &root_error)
                      : D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob, &root_error);
   if (!CheckHR("D3D12SerializeRootSignature", serialize_hr))
@@ -519,6 +542,16 @@ main(int argc, char **argv) {
     }
   }
   list->Dispatch(1, 1, 1);
+  if (observation_probe) {
+    // The current pass is not linked into entry until a pass boundary.
+    std::vector<dxmt::SamplerDescriptorSnapshot> snapshots;
+    static_cast<dxmt::MTLD3D12SamplerDescriptorHeap *>(sampler_heap)->ResolveSamplers({0}, snapshots);
+    if (snapshots.size() != 1 || !snapshots[0].sampler) {
+      std::cerr << "sampler observation missing compute encoder or slot\n";
+      goto cleanup;
+    }
+    recorded_sampler = snapshots[0].sampler.ptr();
+  }
   {
     D3D12_RESOURCE_BARRIER barrier = {};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -529,6 +562,28 @@ main(int argc, char **argv) {
     list->ResourceBarrier(1, &barrier);
   }
   list->CopyBufferRegion(readback, 0, output, 0, sizeof(UINT));
+  if (observation_probe) {
+    auto *native_list = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list);
+    for (auto *encoder = native_list->entry; encoder; encoder = encoder->next)
+      if (encoder->type == dxmt::EncoderType::Compute) observation_encoder = encoder;
+    if (!observation_encoder) {
+      std::cerr << "sampler observation missing compute encoder\n";
+      goto cleanup;
+    }
+    if (static_observation) {
+      if (!observation_encoder->pending_sampler_uses.empty() ||
+          std::none_of(observation_encoder->sampler_refs.begin(), observation_encoder->sampler_refs.end(),
+                       [&](const auto &sampler) { return sampler.ptr() == recorded_sampler; })) {
+        std::cerr << "static sampler observation retained=" << observation_encoder->sampler_refs.size()
+                  << " pending=" << observation_encoder->pending_sampler_uses.size() << "\n";
+        goto cleanup;
+      }
+    } else if (!observation_encoder->sampler_refs.empty() || observation_encoder->pending_sampler_uses.size() != 1 ||
+               observation_encoder->pending_sampler_uses[0].slots.count(0) != 1) {
+      std::cerr << "volatile sampler observation contract mismatch\n";
+      goto cleanup;
+    }
+  }
   if (direct_indexed_uav_texture) {
     D3D12_RESOURCE_BARRIER texture_barrier = {};
     texture_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -548,6 +603,19 @@ main(int argc, char **argv) {
   }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
+  if (live_observation) {
+    auto *native_list = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list);
+    if (!native_list->ResolvePendingSamplerUses(observation_encoder, first_resolution) ||
+        first_resolution.size() != 1 || first_resolution[0].ptr() != recorded_sampler) goto cleanup;
+    auto changed = sampler_desc;
+    changed.MipLODBias = 1.0f;
+    changed.MaxLOD = 3.0f;
+    device->CreateSampler(&changed, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+    if (!native_list->ResolvePendingSamplerUses(observation_encoder, second_resolution) ||
+        second_resolution.size() != 1 || second_resolution[0].ptr() == recorded_sampler ||
+        first_resolution[0]->lod_bias != 0.0f || second_resolution[0]->lod_bias != 1.0f ||
+        !observation_encoder->sampler_refs.empty()) goto cleanup;
+  }
   lists[0] = list;
   queue->ExecuteCommandLists(1, lists);
   if (!CheckHR("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
@@ -569,6 +637,23 @@ main(int argc, char **argv) {
     std::cerr << "texture sampler readback mismatch: buffer=" << value << " texture=" << texture_value << "\n";
     goto cleanup;
   }
+  if (static_observation) {
+    // The execution has completed: replacing this static slot is now legal.
+    // Its recorded object remains retained, and the resolver must not reread it.
+    auto changed = sampler_desc;
+    changed.MipLODBias = 2.0f;
+    device->CreateSampler(&changed, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+    auto *native_list = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list);
+    if (!native_list->ResolvePendingSamplerUses(observation_encoder, second_resolution) ||
+        !second_resolution.empty() ||
+        std::none_of(observation_encoder->sampler_refs.begin(), observation_encoder->sampler_refs.end(),
+                     [&](const auto &sampler) { return sampler.ptr() == recorded_sampler && sampler->lod_bias == 0.0f; }))
+      goto cleanup;
+    device->CopyDescriptorsSimple(1, sampler_heap->GetCPUDescriptorHandleForHeapStart(),
+                                  sampler_heap->GetCPUDescriptorHandleForHeapStart(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+  }
+  if (observation_probe)
+    std::cout << (static_observation ? "static" : "volatile") << " sampler observation contract passed\n";
   std::cout << (dxbc ? "DXBC " : "DXIL ") << (direct_indexed_uav_texture ? "direct indexed UAV texture"
                          : direct_indexed ? "direct indexed" : static_sampler ? "static" : "dynamic")
             << " texture sampler readback passed: " << value << "\n";

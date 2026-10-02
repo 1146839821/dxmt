@@ -21,15 +21,18 @@
 #include "d3d12.h"
 #include "dxmt_texture.hpp"
 #include "dxmt_scaler.hpp"
+#include "dxmt_sampler.hpp"
 #include "com/com_pointer.hpp"
 #include <cstdint>
 #include <vector>
 #include <memory>
+#include <unordered_map>
 
 namespace dxmt {
 
 class MTLD3D12Resource;
 class MTLD3D12DescriptorHeap;
+class MTLD3D12SamplerDescriptorHeap;
 struct D3D12TypedOriginDispatch;
 
 struct PendingDescriptorUse {
@@ -42,6 +45,13 @@ struct PendingDescriptorUse {
   bool use_msc = false;
   bool volatile_descriptors = true;
   bool reject_min_lod_clamp = false;
+};
+
+struct PendingSamplerHeapUse {
+  MTLD3D12SamplerDescriptorHeap *heap = nullptr;
+  // One live observation per slot; a mixed AIR/MSC encoder preserves the
+  // stricter MSC consumer constraint rather than dropping duplicate uses.
+  std::unordered_map<UINT, bool> slots;
 };
 
 enum class EncoderType {
@@ -73,6 +83,8 @@ struct EncoderData {
   // DESCRIPTORS_VOLATILE ranges are resolved immediately before the native
   // encoder is replayed. Static ranges deliberately never use this list.
   std::vector<PendingDescriptorUse> pending_descriptor_uses;
+  std::vector<Rc<Sampler>> sampler_refs; // Recording-time static observations.
+  std::vector<PendingSamplerHeapUse> pending_sampler_uses; // Volatile only.
 
   void
   RetainDescriptorHeap(IUnknown *heap) {

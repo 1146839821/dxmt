@@ -710,6 +710,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   MTLD3D12RootSignature *msc_resource_use_root_signature_ = nullptr;
   std::vector<MSCResourceUseTable> msc_resource_use_tables_;
   bool msc_resource_use_direct_heap_ = false;
+  bool msc_sampler_use_direct_heap_ = false;
   std::unordered_set<obj_handle_t> indirect_resources_used_;
   struct ResourceUseMask {
     WMTResourceUsage usage = static_cast<WMTResourceUsage>(0);
@@ -891,6 +892,7 @@ public:
     msc_resource_use_root_signature_ = nullptr;
     msc_resource_use_tables_.clear();
     msc_resource_use_direct_heap_ = false;
+    msc_sampler_use_direct_heap_ = false;
     indirect_resources_used_.clear();
     resource_use_masks_.clear();
     if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState)) {
@@ -2305,6 +2307,10 @@ public:
       dirty_state_.clr(DirtyState::GraphicsRootArguments);
     }
 
+    if (!EncodeSamplerUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, sampler_heap_.ptr(),
+                           use_msc, SkipResourceBinding))
+      return DrawCallStatus::Invalid;
+
     if (encode_msc_resource_uses)
       EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
 
@@ -2914,6 +2920,7 @@ public:
       msc_resource_use_root_signature_ = pRootSig;
       msc_resource_use_tables_.clear();
       msc_resource_use_direct_heap_ = false;
+      msc_sampler_use_direct_heap_ = false;
 
       const void *blob = nullptr;
       const auto blob_size = pRootSig->GetBlob(&blob);
@@ -2928,6 +2935,8 @@ public:
             const auto &root_desc = versioned_desc->Desc_1_1;
             msc_resource_use_direct_heap_ =
                 (root_desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED) != 0;
+            msc_sampler_use_direct_heap_ =
+                (root_desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED) != 0;
             for (UINT parameter_index = 0; parameter_index < root_desc.NumParameters; parameter_index++) {
               const auto &parameter = root_desc.pParameters[parameter_index];
               if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
@@ -2944,6 +2953,118 @@ public:
         }
       }
     }
+  }
+
+  bool EncodeSamplerUses(MTLD3D12RootSignature *root, const uint64_t staging[64],
+                        MTLD3D12SamplerDescriptorHeap *heap, bool use_msc, bool indirect_root_updates) {
+    auto *encoder = allocator_->encoder_current;
+    if (!root || !encoder) return true;
+    try {
+      root->RetainStaticSamplers(encoder->sampler_refs);
+      if (!heap) return true;
+      InitializeMSCResourceUseState(root);
+      const auto desc = heap->GetDesc();
+      D3D12_GPU_DESCRIPTOR_HANDLE start = {};
+      heap->GetGPUDescriptorHandleForHeapStart(&start);
+      const auto stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+      if (!stride) return true;
+      std::vector<UINT> static_indices;
+      std::unordered_set<UINT> static_slots;
+      PendingSamplerHeapUse *pending = nullptr;
+      auto observe = [&](UINT index, bool is_volatile) {
+        if (!is_volatile) {
+          if (static_slots.insert(index).second) static_indices.push_back(index);
+          return;
+        }
+        if (!pending) {
+          for (auto &use : encoder->pending_sampler_uses)
+            if (use.heap == heap) { pending = &use; break; }
+          if (!pending) {
+            encoder->RetainDescriptorHeap(heap);
+            encoder->pending_sampler_uses.push_back({heap, {}});
+            pending = &encoder->pending_sampler_uses.back();
+          }
+        }
+        auto [it, inserted] = pending->slots.emplace(index, use_msc);
+        if (!inserted) it->second = it->second || use_msc;
+      };
+      for (const auto &table : msc_resource_use_tables_) {
+        uint64_t base = 0;
+        if (!indirect_root_updates) {
+          if (table.parameter_index >= root->ParameterSlots) continue;
+          const auto qword = root->SlotQwordOffsets[table.parameter_index];
+          if (qword >= 64 || staging[qword] < start.ptr || (staging[qword] - start.ptr) % stride) continue;
+          base = (staging[qword] - start.ptr) / stride;
+          if (base >= desc.NumDescriptors) continue;
+        }
+        uint64_t append_offset = 0;
+        for (const auto &range : table.ranges) {
+          const uint64_t offset = range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
+                                      ? append_offset : range.OffsetInDescriptorsFromTableStart;
+          append_offset = offset + range.NumDescriptors;
+          if (range.RangeType != D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER) continue;
+          // GPU root updates can select any slot. Preserve the range's static
+          // vs volatile timing while conservatively retaining the whole heap.
+          const uint64_t first = indirect_root_updates ? 0 : base + offset;
+          if (first >= desc.NumDescriptors) continue;
+          const uint64_t count = indirect_root_updates || range.NumDescriptors == UINT_MAX
+                                     ? desc.NumDescriptors - first
+                                     : std::min<uint64_t>(range.NumDescriptors, desc.NumDescriptors - first);
+          for (uint64_t i = 0; i < count; ++i)
+            observe(static_cast<UINT>(first + i),
+                    (range.Flags & D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE) != 0);
+        }
+      }
+      if (msc_sampler_use_direct_heap_)
+        for (UINT i = 0; i < desc.NumDescriptors; ++i) observe(i, true);
+      std::vector<SamplerDescriptorSnapshot> snapshots;
+      heap->ResolveSamplers(static_indices, snapshots);
+      for (const auto &snapshot : snapshots) {
+        if ((snapshot.air.metadata >> 32) & air::SamplerReduction) {
+          FailRecording(__func__, "dynamic sampler reduction consumer is unsupported");
+          return false;
+        }
+        if (snapshot.sampler &&
+            std::find(encoder->sampler_refs.begin(), encoder->sampler_refs.end(), snapshot.sampler) == encoder->sampler_refs.end())
+          encoder->sampler_refs.push_back(snapshot.sampler);
+      }
+    } catch (const std::bad_alloc &) {
+      FailRecording(__func__, "sampler observation allocation failed");
+      return false;
+    }
+    return true;
+  }
+
+  bool ResolvePendingSamplerUses(EncoderData *encoder, std::vector<Rc<Sampler>> &retained) final {
+    if (!encoder || encoder->pending_sampler_uses.empty()) return true;
+    try {
+      std::unordered_set<Sampler *> unique;
+      for (const auto &sampler : retained) unique.insert(sampler.ptr());
+      for (const auto &group : encoder->pending_sampler_uses) {
+        if (!group.heap) continue;
+        std::vector<UINT> indices;
+        indices.reserve(group.slots.size());
+        for (const auto &[index, msc] : group.slots) indices.push_back(index);
+        std::vector<SamplerDescriptorSnapshot> snapshots;
+        group.heap->ResolveSamplers(indices, snapshots);
+        // Validation and fan-out occur only after ResolveSamplers releases
+        // the mutex. Never append live generations to a closed encoder.
+        for (size_t i = 0; i < snapshots.size(); ++i) {
+          const auto &snapshot = snapshots[i];
+          if ((snapshot.air.metadata >> 32) & air::SamplerReduction) {
+            ERR(group.slots.at(indices[i]) ? "D3D12 submission rejected: MSC cannot consume AIR sampler reduction"
+                                          : "D3D12 submission rejected: AIR dynamic sampler reduction is unsupported");
+            return false;
+          }
+          if (snapshot.sampler && unique.insert(snapshot.sampler.ptr()).second)
+            retained.push_back(snapshot.sampler);
+        }
+      }
+    } catch (const std::bad_alloc &) {
+      ERR("D3D12 submission sampler observation allocation failed");
+      return false;
+    }
+    return true;
   }
 
   template <typename F>
@@ -3516,6 +3637,10 @@ public:
       // A subsequent ordinary/indirect dispatch must restore its application TLAB.
       dirty_state_.set(DirtyState::ComputeRootArguments, DirtyState::ComputePipelineState);
     }
+
+    if (!EncodeSamplerUses(rootsig_compute_.ptr(), rootarg_compute_staging_, sampler_heap_.ptr(),
+                           use_msc, SkipResourceBinding))
+      return false;
 
     if ((airconv_compute_residency_ || (rootsig_compute_ && rootsig_compute_->HasAIRReductionSamplers)) &&
         !use_msc && !SkipResourceBinding) {

@@ -836,6 +836,7 @@ class MTLD3D12SamplerDescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12Sample
   D3D12_DESCRIPTOR_HEAP_DESC desc_;
 
   std::vector<Rc<Sampler>> samplers_;
+  std::mutex sampler_mutex_;
 
   Rc<Buffer> buffer_;
   SamplerGPUStorage *mapped_argument_buffer_ = nullptr;
@@ -895,10 +896,12 @@ public:
       memset(mapped_msc_argument_buffer_, 0, samplers_.size() * sizeof(dxmt_msc_descriptor_entry));
     } else {
       mapped_argument_buffer_ =
-          reinterpret_cast<SamplerGPUStorage *>(malloc(samplers_.size() * sizeof(SamplerGPUStorage)));
+          reinterpret_cast<SamplerGPUStorage *>(calloc(samplers_.size(), sizeof(SamplerGPUStorage)));
       mapped_msc_argument_buffer_ = reinterpret_cast<dxmt_msc_descriptor_entry *>(
           calloc(samplers_.size(), sizeof(dxmt_msc_descriptor_entry))
       );
+      if (!samplers_.empty() && (!mapped_argument_buffer_ || !mapped_msc_argument_buffer_))
+        return E_OUTOFMEMORY;
     }
 
     return S_OK;
@@ -988,6 +991,7 @@ public:
       return E_INVALIDARG;
   
     auto invalidate = [&] {
+      std::lock_guard lock(sampler_mutex_);
       samplers_[Index] = nullptr;
       if (mapped_argument_buffer_)
         mapped_argument_buffer_[Index] = {};
@@ -1004,6 +1008,7 @@ public:
       invalidate();
       return E_OUTOFMEMORY;
     }
+    std::lock_guard lock(sampler_mutex_);
     samplers_[Index] = sampler;
     if (mapped_argument_buffer_) {
       auto &gpu_storage = mapped_argument_buffer_[Index];
@@ -1017,18 +1022,43 @@ public:
     return S_OK;
   }
 
+  void ResolveSamplers(const std::vector<UINT> &Indices,
+                       std::vector<SamplerDescriptorSnapshot> &Snapshots) override {
+    // Allocate and release previous snapshots outside the heap lock. Rc copies
+    // under lock keep both native sampler objects alive after slot replacement.
+    Snapshots.clear();
+    Snapshots.resize(Indices.size());
+    std::lock_guard lock(sampler_mutex_);
+    for (size_t i = 0; i < Indices.size(); ++i) {
+      const auto index = Indices[i];
+      if (index >= samplers_.size()) continue;
+      Snapshots[i].sampler = samplers_[index];
+      Snapshots[i].air = mapped_argument_buffer_[index];
+      Snapshots[i].msc = mapped_msc_argument_buffer_[index];
+    }
+  }
+
   virtual void
   CopyDescriptors(UINT From, MTLD3D12SamplerDescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) {
     auto *heap_to = static_cast<MTLD3D12SamplerDescriptorHeapImpl *>(pHeapTo);
     if (!heap_to || From > samplers_.size() || CopyCount > samplers_.size() - From ||
         DescriptorTo > heap_to->samplers_.size() || CopyCount > heap_to->samplers_.size() - DescriptorTo)
       return;
-    for (unsigned i = 0; i < CopyCount; i++) {
-      heap_to->samplers_[DescriptorTo + i] = samplers_[From + i];
-      if (mapped_argument_buffer_ && heap_to->mapped_argument_buffer_)
-        heap_to->mapped_argument_buffer_[DescriptorTo + i] = mapped_argument_buffer_[From + i];
-      if (mapped_msc_argument_buffer_ && heap_to->mapped_msc_argument_buffer_)
-        heap_to->mapped_msc_argument_buffer_[DescriptorTo + i] = mapped_msc_argument_buffer_[From + i];
+    auto copy = [&] {
+      for (unsigned i = 0; i < CopyCount; i++) {
+        heap_to->samplers_[DescriptorTo + i] = samplers_[From + i];
+        if (mapped_argument_buffer_ && heap_to->mapped_argument_buffer_)
+          heap_to->mapped_argument_buffer_[DescriptorTo + i] = mapped_argument_buffer_[From + i];
+        if (mapped_msc_argument_buffer_ && heap_to->mapped_msc_argument_buffer_)
+          heap_to->mapped_msc_argument_buffer_[DescriptorTo + i] = mapped_msc_argument_buffer_[From + i];
+      }
+    };
+    if (heap_to == this) {
+      std::lock_guard lock(sampler_mutex_);
+      copy();
+    } else {
+      std::scoped_lock lock(sampler_mutex_, heap_to->sampler_mutex_);
+      copy();
     }
   }
 };

@@ -27,6 +27,7 @@
 #include "util_math.hpp"
 #include "util_md5.hpp"
 #include <cstring>
+#include <algorithm>
 #include <vector>
 #include "../d3d10/d3d10_blob.hpp"
 #include "../airconv/dxbc_root_signature.hpp"
@@ -551,6 +552,13 @@ public:
       );
     }
     return S_OK;
+  }
+
+  void RetainStaticSamplers(std::vector<Rc<Sampler>> &references) override {
+    for (const auto &sampler : static_samplers_) {
+      if (std::find(references.begin(), references.end(), sampler) == references.end())
+        references.push_back(sampler);
+    }
   }
 
   HRESULT

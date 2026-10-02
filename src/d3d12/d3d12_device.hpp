@@ -81,6 +81,7 @@ public:
       EncoderData *encoder,
       const std::function<void(obj_handle_t, WMTResourceUsage, WMTRenderStages)> &use_resource
   ) = 0;
+  virtual bool ResolvePendingSamplerUses(EncoderData *encoder, std::vector<Rc<Sampler>> &retained_samplers) = 0;
 };
 
 class MTLD3D12CommandAllocator : public ID3D12CommandAllocator {
@@ -297,6 +298,7 @@ public:
   size_t NumStaticSamplers;
   uint64_t const *EncodedStaticSamplers;
   bool HasAIRReductionSamplers = false;
+  virtual void RetainStaticSamplers(std::vector<Rc<Sampler>> &references) = 0;
 
   uint64_t MSCArgumentBufferSize = 0;
   uint32_t MSCParameterCount = 0;

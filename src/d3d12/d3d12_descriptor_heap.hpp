@@ -20,6 +20,8 @@
 #include "d3d12.h"
 #include "dxmt_buffer.hpp"
 #include "dxmt_texture.hpp"
+#include "dxmt_sampler.hpp"
+#include "air_sampler_abi.hpp"
 #include "metalirconverter_thunks.h"
 #include <cstdint>
 #include <mutex>
@@ -267,6 +269,12 @@ public:
   virtual void CopyDescriptors(UINT From, MTLD3D12DescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;
 };
 
+struct SamplerDescriptorSnapshot {
+  Rc<Sampler> sampler;
+  air::SamplerGPUStorage air = {};
+  dxmt_msc_descriptor_entry msc = {};
+};
+
 class MTLD3D12SamplerDescriptorHeap : public ID3D12DescriptorHeap {
 public:
   virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
@@ -274,6 +282,8 @@ public:
   virtual WMT::Buffer GetMSCDescriptorHeapBuffer() = 0;
 
   virtual HRESULT AddSampler(UINT Index, const D3D12_SAMPLER_DESC *Desc) = 0;
+  virtual void ResolveSamplers(const std::vector<UINT> &Indices,
+                               std::vector<SamplerDescriptorSnapshot> &Snapshots) = 0;
 
   virtual void CopyDescriptors(UINT From, MTLD3D12SamplerDescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;
 };
