@@ -348,7 +348,7 @@ static bool FindExecutableChunk(const std::vector<uint8_t> &bytes, const char *f
   return false;
 }
 
-static bool MakeRejectedComputeContainer(const std::string &mode, const char *path,
+static bool MakeRejectedShaderContainer(const std::string &mode, const char *path,
     std::vector<uint8_t> &bytes) {
   if (!LoadShader(path, bytes)) return false;
   if (mode == "container-truncated") { bytes.resize(3); return true; }
@@ -390,6 +390,9 @@ static int RunGraphics(const std::string &mode, const char *vs_path, const char 
   using dxmt::D3D12ShaderKind;
   const bool tessellation = hs_path && ds_path && stages_path;
   const bool geometry = gs_path && stages_path;
+  const bool container_rejection = mode.rfind("graphics-container-", 0) == 0;
+  bool container_vertex = false;
+  std::string container_mode;
   bool vertex_dxil = false, pixel_dxil = false, wrong_vs = false, wrong_ps = false, reject = false;
   bool wrong_hs = false, wrong_ds = false;
   bool wrong_gs = false;
@@ -398,7 +401,15 @@ static int RunGraphics(const std::string &mode, const char *vs_path, const char 
   const std::string prefix = geometry ? "geom-" : tessellation ? "tess-" : "graphics-";
   const std::string air_prefix = prefix + "air-", msc_prefix = prefix + "msc-";
   std::string operation;
-  if (mode == "graphics-mixed-air-vs") { pixel_dxil = true; reject = true; expected_hr = E_NOTIMPL; }
+  if (container_rejection) {
+    const auto request = mode.substr(19);
+    if (request.rfind("vs-", 0) == 0) container_vertex = true;
+    else if (request.rfind("ps-", 0) != 0) return 2;
+    container_mode = "container-" + request.substr(3);
+    vertex_dxil = pixel_dxil = true;
+    reject = true;
+    expected_hr = container_mode == "container-truncated" || container_mode == "container-offset" ? E_FAIL : E_INVALIDARG;
+  } else if (mode == "graphics-mixed-air-vs") { pixel_dxil = true; reject = true; expected_hr = E_NOTIMPL; }
   else if (mode == "graphics-mixed-msc-vs") { vertex_dxil = true; reject = true; expected_hr = E_NOTIMPL; }
   else {
     if (mode.rfind(air_prefix, 0) == 0) operation = mode.substr(air_prefix.size());
@@ -482,6 +493,14 @@ static int RunGraphics(const std::string &mode, const char *vs_path, const char 
           "float4 main(uint vertex : SV_VertexID) : SV_Position { return float4(float(vertex),0,0,1); }", "vs_5_0", vs)) ||
       !(pixel_dxil ? LoadShader(ps_path, ps) : CompileLegacy(
           "float4 main() : SV_Target { return float4(1,0,0,1); }", "ps_5_0", ps))) return 2;
+  if (container_rejection) {
+    auto &rejected = container_vertex ? vs : ps;
+    if (!MakeRejectedShaderContainer(container_mode, container_vertex ? vs_path : ps_path, rejected)) return 2;
+    if (container_mode == "container-duplicate" || container_mode == "container-hybrid") {
+      if (dxmt::ClassifyD3D12Shader({rejected.data(), rejected.size()}).executable_family !=
+          dxmt::D3D12ShaderExecutableFamily::Ambiguous) return 2;
+    }
+  }
   std::vector<uint8_t> hs, ds, gs;
   if (geometry) {
     std::vector<uint8_t> source;
@@ -521,9 +540,15 @@ static int RunGraphics(const std::string &mode, const char *vs_path, const char 
   desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
   desc.RasterizerState.DepthClipEnable = TRUE;
   desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-  ID3D12PipelineState *pso = nullptr;
+  auto *sentinel = reinterpret_cast<ID3D12PipelineState *>(uintptr_t(1));
+  ID3D12PipelineState *pso = container_rejection ? sentinel : nullptr;
   const HRESULT hr = dxmt::CreateGraphicsPipelineState(static_cast<dxmt::MTLD3D12Device *>(device), &desc, IID_PPV_ARGS(&pso));
-  const bool passed = hr == expected_hr && bool(pso) == SUCCEEDED(expected_hr) && trace == expected_trace;
+  if (pso == sentinel) {
+    PrintResult(mode, hr, false);
+    root->Release(); device->Release(); return 1;
+  }
+  const bool passed = hr == expected_hr && bool(pso) == SUCCEEDED(expected_hr) && trace == expected_trace &&
+      (!container_rejection || (air_initializations == 0 && air_compiles == 0 && msc_calls == 0));
   PrintResult(mode, hr, passed);
   if (pso) pso->Release();
   root->Release(); device->Release();
@@ -1290,7 +1315,7 @@ int main(int argc, char **argv) {
   }
   std::vector<uint8_t> bytes;
   if (container_rejection) {
-    if (!MakeRejectedComputeContainer(mode, argv[2], bytes)) return 2;
+    if (!MakeRejectedShaderContainer(mode, argv[2], bytes)) return 2;
     if (mode == "container-duplicate" || mode == "container-hybrid") {
       if (dxmt::ClassifyD3D12Shader({bytes.data(), bytes.size()}).executable_family !=
           dxmt::D3D12ShaderExecutableFamily::Ambiguous) return 2;

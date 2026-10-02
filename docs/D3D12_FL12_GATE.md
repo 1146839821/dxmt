@@ -98,10 +98,12 @@ Successful PSO creation is **not** proof of GPU shader correctness.
 Classification helpers are synthetic contract tests, not compiler invocation
 instrumentation. All validation/container/stage probes are mandatory evidence;
 missing probes become UNVERIFIED. The isolation requirement remains PARTIAL
-pending graphics malformed/ambiguous precompiler rejection traces; see
+as bounded invocation coverage, not full backend-contract acceptance; see
 `D3D12_BACKEND_ISOLATION_AUDIT.md`. The compute failure/invocation oracle added
 in `D3D12_COMPUTE_CONTAINER_REJECTION_ORACLE.md` now observes five compute
 container rejection cases with zero compiler calls and cleared output.
+`D3D12_GRAPHICS_CONTAINER_REJECTION_ORACLE.md` adds the corresponding ten
+ordinary VS/PS rejection cases, including a malformed PS with a valid VS.
 The original compiler failure oracle
 in `D3D12_BACKEND_FAILURE_ORACLE.md` now observes test-linked production compute
 call sites. The follow-up `D3D12_GRAPHICS_FAILURE_ORACLE.md` adds ordinary
@@ -157,9 +159,10 @@ clumps and duplicated program-version decoding. Neither alters behavior.
 
 ### Spec
 
-One remaining partial requirement: instrumented graphics malformed/ambiguous
-input rejection before either compiler. The coverage audit separates this from GPU
-semantic requirements and optional larger-export tests.
+Compute and ordinary VS/PS malformed/ambiguous input rejection now have bounded
+instrumented zero-call evidence. Optional graphics-stage malformed inputs and
+arbitrary-input/full backend-contract coverage are not claimed. GPU semantic
+requirements and optional larger-export tests remain separate.
 The follow-up oracles close bounded ordinary/emulated,
 native mesh, compute, ordinary VS/PS, HS/DS and GS pipeline-library cases,
 plus the six ray-stage shader-library converter entry paths and state-object
@@ -169,7 +172,7 @@ PSO/table/function-handle failure/retry.
 The gate keeps the entire isolation requirement PARTIAL.
 
 Review summary: Standards 0 hard findings (2 heuristic smells); Spec 1 partial
-validation requirement, graphics malformed/ambiguous precompiler rejection traces.
+validation requirement, full backend-contract acceptance beyond bounded probes.
 
 No Feature Level, Shader Model, WaveOps, Atomic64, ROV, tiled-resource,
 conservative-raster or typed-UAV capability is promoted.

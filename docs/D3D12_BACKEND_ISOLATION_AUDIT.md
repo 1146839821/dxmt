@@ -2,7 +2,9 @@
 
 Follow-up: `D3D12_COMPUTE_CONTAINER_REJECTION_ORACLE.md` covers five compute
 rejection modes with instrumented zero backend calls. The audit below records
-the preceding baseline; graphics malformed/ambiguous traces remain open.
+the preceding baseline. `D3D12_GRAPHICS_CONTAINER_REJECTION_ORACLE.md` adds ten
+ordinary VS/PS rejection traces. Neither follow-up claims arbitrary input or
+full shader semantic acceptance; return to the mandatory semantic backlog.
 
 ## Task Analysis
 

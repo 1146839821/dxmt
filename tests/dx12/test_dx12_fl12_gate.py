@@ -97,7 +97,19 @@ class GateTests(unittest.TestCase):
         with patch.object(gate, "run_fixture", side_effect=fixture):
             result = gate.run_graphics_failure_oracle(Path("."), None, 1, None)
             self.assertEqual(result["status"], gate.FAIL)
-            self.assertEqual(len(result["cases"]), 20)
+            self.assertEqual(len(result["cases"]), 30)
+
+    def test_graphics_container_rejection_modes_are_required(self):
+        modes = {"graphics-container-" + stage + "-" + rejection for stage in ("vs", "ps")
+                 for rejection in ("truncated", "offset", "no-executable", "duplicate", "hybrid")}
+        for failed in modes:
+            with self.subTest(mode=failed):
+                with patch.object(gate, "run_fixture", side_effect=lambda *args:
+                                  {"status": gate.FAIL if args[3][0] == failed else gate.PASS}):
+                    result = gate.run_graphics_failure_oracle(Path("."), None, 1, None)
+                    self.assertEqual({mode for mode in result["cases"] if mode.startswith("graphics-container-")}, modes)
+                    self.assertEqual(result["cases"][failed]["status"], gate.FAIL)
+                    self.assertEqual(result["status"], gate.FAIL)
 
     def test_tessellation_missing_or_failed_is_required(self):
         for status in (None, gate.PASS, gate.FAIL, gate.UNVERIFIED):

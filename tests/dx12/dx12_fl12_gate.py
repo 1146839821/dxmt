@@ -217,6 +217,8 @@ def run_backend_failure_oracle(directory, wine, timeout, runtime):
 
 def run_graphics_failure_oracle(directory, wine, timeout, runtime):
     modes = ["graphics-air-control", "graphics-msc-control", "graphics-mixed-air-vs", "graphics-mixed-msc-vs"]
+    modes += ["graphics-container-" + stage + "-" + rejection for stage in ("vs", "ps")
+              for rejection in ("truncated", "offset", "no-executable", "duplicate", "hybrid")]
     for backend in ("air", "msc"):
         for stage in ("vs", "ps"):
             modes.append("graphics-" + backend + "-wrong-" + stage)
@@ -480,7 +482,7 @@ def build_report(probes, variant, provenance=None):
                            row("ray_synthesis_invocations", synthesis["status"], ""),
                            row("ray_metal_invocations", metal["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
-                   "bounded invocation probes including compute container rejection; graphics malformed/ambiguous traces remain unverified"))
+                   "bounded invocation probes including compute/VS/PS container rejection; full backend contract remains unverified"))
     fl1 = [
         row("FL12_0_dependency", aggregate(fl0), "all FL12_0 requirements must PASS"),
         api("dxbc_rov", "rov", 1),
