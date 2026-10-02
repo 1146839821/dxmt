@@ -3,6 +3,7 @@ winemetal_unix_src = [
   'cache.c',
   'metalirconverter.c',
   'metalirconverter_runtime.cpp',
+  'dxil_typed_origin.cpp',
 ]
 
 if wine_build_path != ''
@@ -29,7 +30,8 @@ winemetal_unix_link_depends = []
 shared_library('winemetal', winemetal_unix_src,
   name_prefix         : '',
   dependencies        : [ airconv_dep_darwin ],
-  include_directories : dxmt_include_path,
+  include_directories : [dxmt_include_path, llvm_include_path_darwin],
+  cpp_args           : airconv_args,
   c_args              : ['-ObjC'],
   link_args           : winemetal_unix_ld_args,
   native              : true,

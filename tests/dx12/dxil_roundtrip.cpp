@@ -133,8 +133,9 @@ bool Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob) {
 
 int wmain(int argc, wchar_t **argv) {
   const bool lower = argc == 5 && !wcscmp(argv[4], L"--lower-typed-origin");
-  if (argc != 4 && !lower) {
-    std::fprintf(stderr, "usage: dxil_roundtrip INPUT.cso NEW_OUTPUT.cso ABSOLUTE_DXC_DIRECTORY [--lower-typed-origin]\n");
+  const bool structured = argc == 6 && !wcscmp(argv[4], L"--assemble-typed-origin-ir");
+  if (argc != 4 && !lower && !structured) {
+    std::fprintf(stderr, "usage: dxil_roundtrip INPUT.cso NEW_OUTPUT.cso ABSOLUTE_DXC_DIRECTORY [--lower-typed-origin | --assemble-typed-origin-ir INPUT.ll]\n");
     return 1;
   }
   std::wstring directory(argv[3]);
@@ -164,7 +165,12 @@ int wmain(int argc, wchar_t **argv) {
   if (!before) return 1;
   OwnedCOM<IDxcBlobEncoding> lowered_blob;
   std::string lowered_text, lowering_error;
-  if (lower) {
+  if (structured) {
+    IDxcBlobEncoding *raw = nullptr;
+    HRESULT blob_hr = utils->LoadFile(argv[5], nullptr, &raw);
+    lowered_blob.reset(raw);
+    if (!Check("load structured IR", blob_hr) || !lowered_blob) return 1;
+  } else if (lower) {
     if (!LowerTypedOrigin(IRText(before.get()), lowered_text, lowering_error)) {
       std::fprintf(stderr, "lowering rejected: %s\n", lowering_error.c_str()); return 1;
     }
@@ -174,13 +180,13 @@ int wmain(int argc, wchar_t **argv) {
     if (!Check("create lowered IR blob", blob_hr) || !lowered_blob) return 1;
   }
   IDxcOperationResult *operation = nullptr;
-  HRESULT hr = assembler->AssembleToContainer(lower ? lowered_blob.get() : before.get(), &operation);
+  HRESULT hr = assembler->AssembleToContainer(lower || structured ? lowered_blob.get() : before.get(), &operation);
   auto assembled = Result("assemble DXIL text", hr, operation);
   if (!assembled) return 1;
   auto output = Validate(validator.get(), assembled.get());
   if (!output || !Inspect(reflection.get(), output.get())) return 1;
   auto after = Disassemble(compiler.get(), output.get());
-  if (!after || (!lower && IRText(before.get()) != IRText(after.get()))) {
+  if (!after || (!lower && !structured && IRText(before.get()) != IRText(after.get()))) {
     std::fprintf(stderr, "DXIL IR/metadata text changed during round trip\n"); return 1;
   }
   HANDLE file = CreateFileW(argv[2], GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -191,7 +197,8 @@ int wmain(int argc, wchar_t **argv) {
       written == output->GetBufferSize();
   saved = CloseHandle(file) && saved;
   if (!saved) { std::fprintf(stderr, "output write failed; partial output may remain\n"); return 1; }
-  std::printf("%s input_bytes=%zu output_bytes=%zu %s\n", lower ? "LOWERING_VALIDATED" : "ROUNDTRIP_VALIDATED",
-      input->GetBufferSize(), output->GetBufferSize(), lower ? "private_CBV=b0/space1 static_slots=register0:record0,register2:record1 stride=16" : "IR/metadata_text=identical");
+  std::printf("%s input_bytes=%zu output_bytes=%zu %s\n", lower || structured ? "LOWERING_VALIDATED" : "ROUNDTRIP_VALIDATED",
+      input->GetBufferSize(), output->GetBufferSize(), structured ? "structured_IR stride=16" :
+      lower ? "private_CBV=b0/space1 static_slots=register0:record0,register2:record1 stride=16" : "IR/metadata_text=identical");
   return 0;
 }
