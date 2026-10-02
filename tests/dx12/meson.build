@@ -623,6 +623,11 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_minmax_bindings_fixture',
+    input: 'minmax_bindings.hlsl', output: 'minmax_bindings.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_texture_sampler_direct_indexed_fixture',
     input: 'texture_sampler_direct_indexed.hlsl',
     output: 'texture_sampler_direct_indexed.cs.cso',

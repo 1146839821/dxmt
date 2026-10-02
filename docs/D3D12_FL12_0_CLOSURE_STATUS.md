@@ -91,6 +91,17 @@ Root/descriptor/submission qualification and point-view state transport are not
 yet connected; production DXIL reduction remains rejected. No ABI/capability or
 FL promotion, and this is not full MinMax acceptance.
 
+DXIL binding follow-up (2026-10-03): compiler-side pair qualification and private
+runtime state branches now pass two fully DXC-validated/MSC-compiled containers,
+fifteen single-pair and fifteen two-pair loop native dispatch scenarios
+(`D3D12_MINMAX_DXIL_BINDING.md`). Shared texture clamps/defaults are consistent
+across pairs; sampler state remains independently indexed. Both builds produce
+identical IR and pass host suites. D3D12 native export, root augmentation, PSO
+selection and recording/submission ownership are still not connected. This is
+compiler preparation, not production DXIL admission. The four production
+workstreams, seven missing full GPU categories and 1,584 existing typed case
+executions above remain the closure workload; no FL promotion or game benchmark.
+
 ## Task Analysis
 
 Baseline: `e220380`, branch `feat/d3d12-1`. User requests continued work and

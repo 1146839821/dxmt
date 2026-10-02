@@ -1,7 +1,9 @@
 #pragma once
 #include <string>
+#include <vector>
+#include "../msc_minmax_abi.h"
 
-namespace llvm { class CallInst; class Value; }
+namespace llvm { class CallInst; class Value; class Module; }
 namespace dxmt::dxil {
 // Values are supplied by the caller's sampler/resource binding lowering, not
 // read from MSC's 24-byte descriptor. Flags match the private reduction filter
@@ -27,4 +29,15 @@ struct ReductionSampleState {
 // No production admission may use this until binding/provenance is connected.
 bool LowerReductionSampleLevel2D(llvm::CallInst &sample,
     const ReductionSampleState &state, std::string &error);
+
+// Qualify finite legacy Texture2D/SamplerState pairs, append private tN/sN and
+// b0 in DXMT_MSC_MINMAX_SPACE, and guard reduction with the runtime enabled bit.
+// Returned pair ordinal N selects its point texture/sampler and 32-byte CBV
+// state; sampler N+pair_count is an unclamped ordinary-filter sampler. Both
+// branches apply sampler/resource LOD semantics explicitly. Rejecting a private
+// module never publishes an artifact.
+// The application root must be augmented/reflected and the regenerated DXIL
+// container fully validated before MSC compilation. No runtime admission here.
+bool LowerReductionSamplerBindings(llvm::Module &module,
+    std::vector<dxmt_msc_minmax_binding> &bindings, std::string &error);
 }

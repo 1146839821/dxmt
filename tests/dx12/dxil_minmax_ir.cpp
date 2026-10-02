@@ -5,11 +5,96 @@
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Bitcode/BitcodeWriter.h>
 #include <cstring>
 #include <limits>
 
 static uint32_t Word(const unsigned char *bytes) {
   return uint32_t(bytes[0]) | uint32_t(bytes[1]) << 8 | uint32_t(bytes[2]) << 16 | uint32_t(bytes[3]) << 24;
+}
+
+static bool CheckBindingQualification(llvm::Module &module) {
+  using namespace llvm;
+  SmallVector<char, 0> bitcode;
+  raw_svector_ostream serialized(bitcode);
+  WriteBitcodeToFile(module, serialized);
+  for (unsigned probe = 0; probe < 9; ++probe) {
+    LLVMContext context;
+    context.setOpaquePointers(false);
+    auto parsed = parseBitcodeFile(MemoryBufferRef(StringRef(bitcode.data(), bitcode.size()), "probe"), context);
+    if (!parsed) { consumeError(parsed.takeError()); return false; }
+    auto &clone = *parsed;
+    auto *resources = clone->getNamedMetadata("dx.resources")->getOperand(0);
+    auto *texture = cast<MDNode>(cast<MDNode>(resources->getOperand(0))->getOperand(0));
+    IRBuilder<> builder(clone->getContext());
+    if (probe == 0) texture->replaceOperandWith(3, ConstantAsMetadata::get(builder.getInt32(DXMT_MSC_MINMAX_SPACE)));
+    if (probe == 1) texture->replaceOperandWith(5, ConstantAsMetadata::get(builder.getInt32(2)));
+    CallInst *sample = nullptr;
+    for (auto &function : *clone) for (auto &block : function) for (auto &instruction : block)
+      if (auto *call = dyn_cast<CallInst>(&instruction))
+        if (call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32") sample = call;
+    if (!sample) return false;
+    if (probe == 2) cast<CallInst>(sample->getArgOperand(2))->setArgOperand(4, builder.getTrue());
+    if (probe == 3) ExtractValueInst::Create(sample, {4}, "status", sample->getNextNode());
+    if (probe == 4) {
+      auto *duplicate = cast<CallInst>(sample->clone());
+      duplicate->insertBefore(sample);
+      ExtractValueInst::Create(duplicate, {0}, "duplicate.result", sample);
+    }
+    if (probe == 5) {
+      std::vector<Metadata *> operands;
+      for (auto &operand : texture->operands()) operands.push_back(operand.get());
+      operands[0] = ConstantAsMetadata::get(builder.getInt32(1));
+      resources->replaceOperandWith(0, MDNode::get(context, {texture, MDNode::get(context, operands)}));
+    }
+    if (probe == 6 || probe == 7) {
+      std::vector<Metadata *> groups;
+      for (auto &operand : resources->operands()) groups.push_back(operand.get());
+      if (probe == 7) groups[0] = nullptr;
+      auto *entry = clone->getNamedMetadata("dx.entryPoints")->getOperand(0);
+      entry->replaceOperandWith(3, MDNode::getDistinct(context, groups));
+    }
+    if (probe == 8) {
+      auto *later = cast<CallInst>(sample->clone());
+      later->insertBefore(sample->getNextNode());
+      later->setArgOperand(7, builder.getInt32(-9));
+      ExtractValueInst::Create(later, {0}, "later.result", later->getNextNode());
+    }
+    std::vector<dxmt_msc_minmax_binding> output{{11, 22, 33, 44}};
+    std::string error;
+    bool accepted = dxmt::dxil::LowerReductionSamplerBindings(*clone, output, error);
+    if (probe == 4) {
+      if (!accepted || !error.empty() || output.size() != 1 || output[0].texture_space || output[0].texture_register ||
+          output[0].sampler_space || output[0].sampler_register || verifyModule(*clone, &errs())) return false;
+      unsigned samples = 0;
+      for (auto &function : *clone) for (auto &block : function) for (auto &instruction : block)
+        if (auto *call = dyn_cast<CallInst>(&instruction))
+          if (call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32") ++samples;
+      if (samples != 18) return false;
+      auto *result_resources = clone->getNamedMetadata("dx.resources")->getOperand(0);
+      auto *cbvs = cast<MDNode>(result_resources->getOperand(2));
+      if (cbvs->getNumOperands() != 1) return false;
+      auto *cbv = cast<MDNode>(cbvs->getOperand(0));
+      auto metadata_word = [](Metadata *metadata) { return mdconst::extract<ConstantInt>(metadata)->getZExtValue(); };
+      if (metadata_word(cbv->getOperand(3)) != DXMT_MSC_MINMAX_SPACE || metadata_word(cbv->getOperand(4)) ||
+          metadata_word(cbv->getOperand(6)) != sizeof(dxmt_msc_minmax_state)) return false;
+      for (unsigned kind : {0u, 3u}) {
+        auto *list = cast<MDNode>(result_resources->getOperand(kind));
+        if (list->getNumOperands() != (kind == 0 ? 2 : 3)) return false;
+        auto *original = cast<MDNode>(list->getOperand(0));
+        if (metadata_word(original->getOperand(0)) || metadata_word(original->getOperand(3)) ||
+            metadata_word(original->getOperand(4))) return false;
+        for (unsigned ordinal = 1; ordinal < list->getNumOperands(); ++ordinal) {
+          auto *record = cast<MDNode>(list->getOperand(ordinal));
+          if (metadata_word(record->getOperand(0)) != ordinal || metadata_word(record->getOperand(3)) != DXMT_MSC_MINMAX_SPACE ||
+              metadata_word(record->getOperand(4)) != ordinal - 1) return false;
+        }
+      }
+      if (clone->getNamedMetadata("dx.entryPoints")->getOperand(0)->getOperand(3) != result_resources) return false;
+    } else if (accepted || error.empty() || output.size() != 1 || output[0].texture_space != 11 ||
+        output[0].texture_register != 22 || output[0].sampler_space != 33 || output[0].sampler_register != 44) return false;
+  }
+  return true;
 }
 
 static int TransformContainer(const char *path, const char *mode) {
@@ -43,7 +128,8 @@ static int TransformContainer(const char *path, const char *mode) {
   for (auto &function : **parsed) for (auto &block : function) for (auto &instruction : block)
     if (auto *call = dyn_cast<CallInst>(&instruction))
       if (call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32") samples.push_back(call);
-  if (samples.size() != 1) return 1;
+  const bool binding_two = !std::strcmp(mode, "binding-two");
+  if (samples.size() != (binding_two ? 2 : 1)) return 1;
   IRBuilder<> builder(context);
   auto number = [&](float value) { return ConstantFP::get(builder.getFloatTy(), value); };
   const bool maximum = !std::strcmp(mode, "maximum");
@@ -53,7 +139,8 @@ static int TransformContainer(const char *path, const char *mode) {
   const bool huge_clamp = !std::strcmp(mode, "huge-clamp");
   const bool mirror = !std::strcmp(mode, "mirror-offset");
   const bool mirror_once = !std::strcmp(mode, "mirror-once-offset");
-  if (std::strcmp(mode, "minimum") && !maximum && !sampler_lod && !fractional && !empty && !huge_clamp && !mirror && !mirror_once) return 1;
+  const bool binding = !std::strcmp(mode, "binding") || binding_two;
+  if (std::strcmp(mode, "minimum") && !maximum && !sampler_lod && !fractional && !empty && !huge_clamp && !mirror && !mirror_once && !binding) return 1;
   if (huge_clamp) samples[0]->setArgOperand(3, number(std::numeric_limits<float>::max()));
   if (mirror || mirror_once) {
     samples[0]->setArgOperand(3, number(mirror ? 1.25f : -0.25f));
@@ -64,7 +151,15 @@ static int TransformContainer(const char *path, const char *mode) {
       number(100), number(empty ? 1.1f : fractional ? 0.75f : 0), builder.getInt32(0),
       samples[0]->getArgOperand(1), builder.getInt32(mirror ? 2 : mirror_once ? 5 : 3), builder.getInt32(3)};
   std::string error;
-  if (!dxmt::dxil::LowerReductionSampleLevel2D(*samples[0], state, error)) { errs() << error; return 1; }
+  if (binding) {
+    if (!binding_two && !CheckBindingQualification(**parsed)) return 1;
+    std::vector<dxmt_msc_minmax_binding> records;
+    if (!dxmt::dxil::LowerReductionSamplerBindings(**parsed, records, error)) { errs() << error; return 1; }
+    if (records.size() != (binding_two ? 2 : 1) || records[0].texture_space || records[0].texture_register ||
+        records[0].sampler_space || records[0].sampler_register) return 1;
+    if (binding_two && (records[1].texture_space || records[1].texture_register ||
+        records[1].sampler_space || records[1].sampler_register != 1)) return 1;
+  } else if (!dxmt::dxil::LowerReductionSampleLevel2D(*samples[0], state, error)) { errs() << error; return 1; }
   // DXC's older text assembler requires explicit names for the newly inserted
   // unnamed values/blocks, exactly as the typed-origin preparation path does.
   for (auto &function : **parsed) for (auto &block : function) {
