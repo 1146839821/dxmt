@@ -282,6 +282,7 @@ public:
 struct D3D12TypedOriginRoot;
 struct D3D12MinMaxRoot;
 struct D3D12TypedOriginComputeVariant;
+struct D3D12MinMaxComputeVariant;
 
 class MTLD3D12RootSignature : public ID3D12RootSignature {
 public:
@@ -397,6 +398,8 @@ public:
   // descriptors/records and a submission-owned lifetime before dispatch.
   virtual HRESULT GetTypedOriginVariant(
       const wchar_t *dxc_directory, const D3D12TypedOriginComputeVariant **variant) = 0;
+  virtual HRESULT GetMinMaxVariant(
+      const wchar_t *dxc_directory, const D3D12MinMaxComputeVariant **variant) = 0;
 
   virtual void AddRefPrivate() = 0;
   virtual void ReleasePrivate() = 0;

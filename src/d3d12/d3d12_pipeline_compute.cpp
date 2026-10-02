@@ -22,6 +22,7 @@
 #include "d3d12_pageable.hpp"
 #include "d3d12_shader_converter.hpp"
 #include "d3d12_typed_origin_pipeline.hpp"
+#include "d3d12_minmax_pipeline.hpp"
 #include "log/log.hpp"
 #include "airconv_public.h"
 
@@ -40,6 +41,9 @@ class MTLD3D12ComputePipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Compute
   std::mutex origin_mutex_;
   std::unique_ptr<D3D12TypedOriginComputeVariant> origin_variant_;
   std::wstring origin_dxc_directory_;
+  std::mutex minmax_mutex_;
+  std::unique_ptr<D3D12MinMaxComputeVariant> minmax_variant_;
+  std::wstring minmax_dxc_directory_;
 
   HRESULT CreateNativeComputePSO(
       const WMT::Function &function, WMT::Reference<WMT::ComputePipelineState> &pipeline) {
@@ -241,6 +245,55 @@ public:
       origin_dxc_directory_ = dxc_directory;
       origin_variant_ = std::move(candidate);
       *variant = origin_variant_.get();
+      return S_OK;
+    } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+  }
+
+  HRESULT GetMinMaxVariant(
+      const wchar_t *dxc_directory, const D3D12MinMaxComputeVariant **variant) override {
+    if (!variant) return E_POINTER;
+    *variant = nullptr;
+    if (!dxc_directory) return E_INVALIDARG;
+    std::lock_guard<std::mutex> lock(minmax_mutex_);
+    try {
+      if (minmax_variant_) {
+        if (minmax_dxc_directory_ != dxc_directory) return E_INVALIDARG;
+        *variant = minmax_variant_.get();
+        return S_OK;
+      }
+      if (shader_backend != D3D12ShaderBackend::MetalShaderConverter || !application_root_)
+        return E_NOTIMPL;
+      D3D12MinMaxShader shader;
+      std::string diagnostics;
+      HRESULT hr = PrepareD3D12MinMaxShader(
+          {original_cs_.data(), original_cs_.size()}, dxc_directory, shader, diagnostics);
+      if (FAILED(hr)) { ERR("MinMax shader preparation failed HRESULT=", hr, ": ", diagnostics); return hr; }
+      const D3D12MinMaxRoot *root = nullptr;
+      hr = application_root_->GetMinMaxCompilerRoot(shader.bindings.size(), &root);
+      if (FAILED(hr)) return hr;
+      auto candidate = std::make_unique<D3D12MinMaxComputeVariant>();
+      candidate->root = *root;
+      candidate->bindings = shader.bindings;
+      hr = ResolveD3D12MinMaxBindings(candidate->root, shader.bindings, candidate->locations, diagnostics);
+      if (FAILED(hr)) { ERR("MinMax binding preparation failed: ", diagnostics); return hr; }
+      D3D12ConvertedShader converted;
+      hr = ConvertD3D12MinMaxComputeShader(shader, candidate->root, converted, &device_->GetMSCCapabilities());
+      if (FAILED(hr)) return hr;
+      WMT::Reference<WMT::Error> error;
+      auto library = device_->GetMTLDevice().newLibrary(converted.metallib.data(), converted.metallib.size(), error);
+      if (!library) {
+        ERR("Failed to load MinMax metallib: ", error ? error.description().getUTF8String() : "unknown error");
+        return E_FAIL;
+      }
+      auto function = library.newFunction(converted.entry_point.c_str());
+      if (!function) { ERR("Failed to find MinMax entry point: ", converted.entry_point); return E_FAIL; }
+      hr = CreateNativeComputePSO(function, candidate->pso);
+      if (FAILED(hr)) return hr;
+      candidate->threadgroup_size = {converted.threadgroup_size[0], converted.threadgroup_size[1],
+          converted.threadgroup_size[2]};
+      minmax_dxc_directory_ = dxc_directory;
+      minmax_variant_ = std::move(candidate);
+      *variant = minmax_variant_.get();
       return S_OK;
     } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
   }
