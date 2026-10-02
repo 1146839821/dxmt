@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "msc_typed_origin_root_recipe_test.h"
 
 // Layout/host marshaling evidence only: no shader compilation or GPU dispatch.
 static bool
@@ -19,10 +20,6 @@ run_case(unsigned constants, bool table_first, bool sampler_present) {
       .Descriptor = {.ShaderRegister = 4, .RegisterSpace = 0}};
   IRRootParameter1 original[3];
   memcpy(original, app, sizeof(app));
-  IRRootParameter1 internal[4];
-  memcpy(internal, app, sizeof(app));
-  internal[3] = (IRRootParameter1){.ParameterType = IRRootParameterTypeCBV,
-      .Descriptor = {.ShaderRegister = 0, .RegisterSpace = 1}};
   IRStaticSamplerDescriptor sampler = {.Filter = IRFilterMinMagMipPoint,
       .AddressU = IRTextureAddressModeClamp, .AddressV = IRTextureAddressModeClamp,
       .AddressW = IRTextureAddressModeClamp, .MaxAnisotropy = 1,
@@ -32,21 +29,32 @@ run_case(unsigned constants, bool table_first, bool sampler_present) {
   IRStaticSamplerDescriptor original_sampler;
   memcpy(&original_range, &range, sizeof(range));
   memcpy(&original_sampler, &sampler, sizeof(sampler));
+  IRVersionedRootSignatureDescriptor app_desc = {.version = IRRootSignatureVersion_1_1,
+      .desc_1_1 = {.NumParameters = 3, .pParameters = app,
+          .NumStaticSamplers = sampler_present ? 1 : 0, .pStaticSamplers = sampler_present ? &sampler : NULL}};
+  const struct OriginRootRecipe *recipe = NULL;
+  if (BuildOriginRootRecipe(&app_desc, NULL, 0, true, &recipe) != OriginRootOK) return false;
   bool ok = true;
   uint32_t app_sampler_offset = 0;
   // Query app and internal roots independently; never append into the app layout.
   for (unsigned augmented = 0; augmented < 2 && ok; ++augmented) {
     const unsigned parameters = augmented ? 4 : 3;
-    IRVersionedRootSignatureDescriptor desc = {.version = IRRootSignatureVersion_1_1,
-        .desc_1_1 = {.NumParameters = parameters, .pParameters = augmented ? internal : app,
-            .NumStaticSamplers = sampler_present ? 1 : 0, .pStaticSamplers = sampler_present ? &sampler : NULL}};
+    const IRVersionedRootSignatureDescriptor *desc = augmented ? &recipe->descriptor : &app_desc;
     IRError *error = NULL;
-    IRRootSignature *root = IRRootSignatureCreateFromDescriptor(&desc, &error);
+    IRRootSignature *root = IRRootSignatureCreateFromDescriptor(desc, &error);
     if (error) { IRErrorDestroy(error); ok = false; }
-    if (!root) return false;
+    if (!root) { free((void *)recipe); return false; }
     const size_t count = IRRootSignatureGetResourceCount(root);
     IRResourceLocation locations[5] = {0};
     if (count != parameters + (sampler_present ? 1 : 0)) ok = false;
+    if (augmented) {
+      ok &= recipe->mapping_count == count && recipe->app_cost == constants + 3 && recipe->internal_cost == constants + 5;
+      for (unsigned i = 0; i < parameters && ok; ++i)
+        ok &= recipe->mapping[i].source == (i == 3 ? OriginRootHidden : OriginRootApp) &&
+            recipe->mapping[i].app_index == (i == 3 ? UINT32_MAX : i);
+      if (sampler_present) ok &= recipe->mapping[parameters].source == OriginRootStaticSamplers &&
+          recipe->mapping[parameters].app_index == UINT32_MAX;
+    }
     if (ok) IRRootSignatureGetResourceLocations(root, locations);
     size_t size = 0;
     for (size_t i = 0; i < count && ok; ++i) {
@@ -115,10 +123,12 @@ run_case(unsigned constants, bool table_first, bool sampler_present) {
       !memcmp(&sampler, &original_sampler, sizeof(sampler));
   printf("constants=%u table_first=%u sampler=%u layout=%s (not GPU validation)\n",
       constants, table_first, sampler_present, ok ? "MATCH" : "FAIL");
+  free((void *)recipe);
   return ok;
 }
 
 int main(void) {
+  if (!TestOriginRootRecipe()) return 1;
   const unsigned widths[] = {1, 3, 4, 7, 16, 59};
   unsigned cases = 0, failed = 0;
   for (unsigned i = 0; i < sizeof(widths) / sizeof(widths[0]); ++i)
