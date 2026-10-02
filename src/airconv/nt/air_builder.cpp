@@ -46,7 +46,10 @@ AIRBuilder::CreateReductionSampleLevel(
   if (!callee) return None;
   const bool needs_link = callee->isDeclaration();
   auto *result = builder.CreateCall(function, operands);
-  if (needs_link) dxmt::linkMinMax(*getModule());
+  if (needs_link && !dxmt::linkMinMax(*getModule())) {
+    result->eraseFromParent();
+    return None;
+  }
   return result;
 }
 

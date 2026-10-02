@@ -552,16 +552,20 @@ Converter::LoadCounter(const AtomicDstOperandUAV &SrcOp) {
 }
 
 llvm::Optional<SamplerHandle>
-Converter::LoadSampler(const SrcOperandSampler &SrcOp) {
+Converter::LoadSampler(const SrcOperandSampler &SrcOp, bool AllowReduction) {
   using namespace llvm::air;
 
   auto descriptor = ctx.binding.GetSampler(air, SrcOp.range_id, LoadOperandIndex(SrcOp.index));
   if (!descriptor)
     return {};
+  if (descriptor->Reduction && (!AllowReduction || descriptor->Reduction->Unsupported)) {
+    failure = "AIR Min/Max sampler currently requires SampleLevel without feedback";
+    return {};
+  }
 
   auto Bias = ir.CreateBitCast(ir.CreateTrunc(descriptor->Metadata, ctx.types._int), ctx.types._float);
 
-  return llvm::Optional<SamplerHandle>({descriptor->SamplerHandle, descriptor->CubeSamplerHandle, Bias});
+  return llvm::Optional<SamplerHandle>({descriptor->SamplerHandle, descriptor->CubeSamplerHandle, Bias, descriptor->Reduction});
 }
 
 void
@@ -1638,7 +1642,7 @@ Converter::operator()(const InstSampleLOD &sample) {
   if (!Tex)
     return;
 
-  auto Sampler = LoadSampler(sample.src_sampler);
+  auto Sampler = LoadSampler(sample.src_sampler, true);
   if (!Sampler)
     return;
 
@@ -1688,6 +1692,26 @@ Converter::operator()(const InstSampleLOD &sample) {
   }
 
   llvm::Value *LOD = ir.CreateFAdd(LoadOperand(sample.src_lod, kMaskComponentX), Sampler->Bias);
+
+  if (Sampler->Reduction) {
+    if (sample.feedback || (Tex->Logical != Texture::texture2d && Tex->Logical != Texture::texture2d_array &&
+                            Tex->Logical != Texture::texture3d) || Tex->Texture.sample_type != Texture::sample_float) {
+      failure = "AIR Min/Max SampleLevel texture kind/type or feedback is unsupported";
+      return;
+    }
+    const auto &state = *Sampler->Reduction;
+    LOD = air.CreateFPBinOp(AIRBuilder::fmin, air.getFloat(state.MaxLOD), LOD, false);
+    LOD = air.CreateFPBinOp(AIRBuilder::fmax, air.getFloat(state.MinLOD), LOD, false);
+    // FL11+ selects minification after sampler LOD clamping. Resource clamp is
+    // rejected by the host observation guard until its view-edge semantics close.
+    auto *flags = ir.CreateOr(air.getInt(state.Flags),
+        ir.CreateSelect(ir.CreateFCmpOGT(LOD, air.getFloat(0)), air.getInt(16), air.getInt(0)));
+    auto value = air.CreateReductionSampleLevel(Tex->Texture, Tex->Handle, SamplerHandle,
+        Coord, ArrayIndex, LOD, flags, sample.offsets);
+    if (!value) { failure = "AIR Min/Max helper ABI is unsupported"; return; }
+    StoreOperand(sample.dst, MaskSwizzle(*value, GetMask(sample.dst), Tex->Swizzle));
+    return; // No fabricated residency success; feedback was rejected above.
+  }
 
   auto [Value, Residency] =
       air.CreateSample(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets, sample_level{LOD});

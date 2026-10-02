@@ -2,6 +2,7 @@
 
 #include "air_builder.hpp"
 #include "llvm/IR/Value.h"
+#include <optional>
 
 namespace dxmt::dxbc {
 
@@ -10,10 +11,18 @@ struct ConstantBufferDescriptor {
   llvm::Value *Metadata; // may be null
 };
 
+struct SamplerReductionState {
+  uint32_t Flags;
+  float MinLOD;
+  float MaxLOD;
+  bool Unsupported = false;
+};
+
 struct SamplerDescriptor {
   llvm::Value *SamplerHandle;
   llvm::Value *CubeSamplerHandle;
   llvm::Value *Metadata;
+  std::optional<SamplerReductionState> Reduction;
 };
 
 struct TextureDescirptor {

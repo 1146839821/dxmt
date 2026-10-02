@@ -62,6 +62,14 @@ for 2D/array/3D, with native kernel readback and LLVM signature-linkage evidence
 or sampler state, has no sparse feedback, and does not implement the DXIL path.
 The existing Min/Max rejection and gate status remain unchanged.
 
+The next bounded step now connects opt-in static root samplers to real DXBC
+SampleLevel execution (`D3D12_MINMAX_STATIC_INTEGRATION.md`). Both variants
+pass focused Min/Max readbacks and fail-closed defaults/dynamic/MSC/SampleGrad
+probes. This narrows the AIR integration gap, not the full reduction requirement:
+dynamic sampler state, remaining AIR operations, feedback and DXIL still need
+implementation. The gate remains unpromoted; seven complete matrix categories
+are still outstanding. The earlier primitive-only wording above is historical.
+
 Prioritize the production typed-buffer origin contract, using
 `D3D12_TYPED_ORIGIN_PRODUCTION_AUDIT.md` as the integration gap list. Keep
 unsupported views rejected until real production readback succeeds. Integrate

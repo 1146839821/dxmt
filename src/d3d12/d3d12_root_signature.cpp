@@ -31,6 +31,8 @@
 #include "../airconv/dxbc_root_signature.hpp"
 #include "d3d12_typed_origin.hpp"
 #include <mutex>
+#include <cmath>
+#include "util_env.hpp"
 
 namespace dxmt {
 
@@ -445,8 +447,22 @@ public:
     NumStaticSamplers = desc.NumStaticSamplers;
     if (NumStaticSamplers) {
       for (unsigned i = 0; i < desc.NumStaticSamplers; i++) {
+        const auto &original = desc.pStaticSamplers[i];
+        auto native = original;
+        const auto reduction = D3D12_DECODE_FILTER_REDUCTION(original.Filter);
+        const bool air_reduction = reduction == D3D12_FILTER_REDUCTION_TYPE_MINIMUM ||
+                                   reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM;
+        if (air_reduction) {
+          if (env::getEnvVar("DXMT_ENABLE_AIR_MINMAX") != "1" ||
+              D3D12_DECODE_IS_ANISOTROPIC_FILTER(original.Filter)) return E_NOTIMPL;
+          if (!std::isfinite(original.MinLOD) || !std::isfinite(original.MaxLOD)) return E_INVALIDARG;
+          HasAIRReductionSamplers = true;
+          native.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+          native.MinLOD = 0;
+          native.MaxLOD = D3D12_FLOAT32_MAX;
+        }
         WMTSamplerInfo info;
-        hr = PopulateWMTSamplerInfo(device_->GetMTLDevice(), info, desc.pStaticSamplers[i]);
+        hr = PopulateWMTSamplerInfo(device_->GetMTLDevice(), info, native);
         if (FAILED(hr))
           return hr;
 
@@ -474,6 +490,8 @@ public:
 
   HRESULT
   InitializeMSCLayout() override {
+    if (HasAIRReductionSamplers)
+      return E_NOTIMPL;
     if (msc_layout_initialized_)
       return S_OK;
     if (!device_->GetMSCCapabilities().CoreShaderPathUsable())

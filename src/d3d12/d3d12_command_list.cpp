@@ -2072,6 +2072,7 @@ public:
       auto hr = rootsig_graphics_->InitializeMSCLayout();
       if (FAILED(hr)) {
         DEBUG("[DEBUG-DRAW] PreDraw rejected: MSC layout hr=", hr);
+        FailRecording(__func__, "MSC root signature layout unsupported");
         return DrawCallStatus::Invalid;
       }
     }
@@ -2307,7 +2308,8 @@ public:
     if (encode_msc_resource_uses)
       EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
 
-    if (airconv_render_residency_ && !use_msc && !SkipResourceBinding) {
+    if ((airconv_render_residency_ || (rootsig_graphics_ && rootsig_graphics_->HasAIRReductionSamplers)) &&
+        !use_msc && !SkipResourceBinding) {
       const auto resource_stages = use_airconv_geometry || use_airconv_tessellation
                                        ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh |
                                                                       WMTRenderStageFragment)
@@ -3154,6 +3156,7 @@ public:
             bool direct_indexed) {
           const bool is_volatile = direct_indexed || (flags & D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
           PendingDescriptorUse use{descriptor_heap, index, range_type, direct_indexed, compute, stages, use_msc, is_volatile};
+          use.reject_min_lod_clamp = !use_msc && pRootSig->HasAIRReductionSamplers;
           try {
             current_uses.push_back(use);
             if (is_volatile) {
@@ -3199,6 +3202,12 @@ public:
              snapshots[i].descriptor.type == ShaderVisibleDescriptorType::UAVTexelBuffer) &&
             !snapshots[i].msc_typed_buffer.view;
         for (const auto &use : slot_uses[i]) {
+          if (use.reject_min_lod_clamp && !use.volatile_descriptors &&
+              snapshots[i].descriptor.type == ShaderVisibleDescriptorType::SRVTexture &&
+              snapshots[i].descriptor.SRVTexture.resource_min_lod_clamp != 0.0f) {
+            FailRecording(__func__, "AIR reduction ResourceMinLODClamp is unsupported");
+            return;
+          }
           if (use.use_msc && !use.volatile_descriptors && missing_msc_view) {
             FailRecording(__func__, "MSC typed-buffer view unavailable (unaligned offset or native view creation failure)");
             return;
@@ -3273,6 +3282,11 @@ public:
                snapshots[i].descriptor.type == ShaderVisibleDescriptorType::UAVTexelBuffer) &&
               !snapshots[i].msc_typed_buffer.view;
           for (const auto &use : slot_uses[i]) {
+            if (use.reject_min_lod_clamp && snapshots[i].descriptor.type == ShaderVisibleDescriptorType::SRVTexture &&
+                snapshots[i].descriptor.SRVTexture.resource_min_lod_clamp != 0.0f) {
+              ERR("D3D12 submission rejected: AIR reduction ResourceMinLODClamp is unsupported");
+              return false;
+            }
             if (use.use_msc && missing_msc_view) {
               ERR("D3D12 submission rejected: MSC typed-buffer view unavailable");
               return false;
@@ -3397,8 +3411,10 @@ public:
         msc_compute_residency_ && use_msc && !origin_variant && !SkipResourceBinding &&
         (dirty_state_.test(DirtyState::DescriptorHeaps) || dirty_state_.test(DirtyState::ComputeRootArguments));
     if (use_msc && rootsig_compute_) {
-      if (FAILED(rootsig_compute_->InitializeMSCLayout()))
+      if (FAILED(rootsig_compute_->InitializeMSCLayout())) {
+        FailRecording(__func__, "MSC root signature layout is unsupported");
         return false;
+      }
     }
     if (use_msc && !origin_variant && pso_compute_->msc_uses_texture_load && descriptor_heap_ &&
         HasBoundResourceMinLODClamp(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr())) {
@@ -3501,7 +3517,8 @@ public:
       dirty_state_.set(DirtyState::ComputeRootArguments, DirtyState::ComputePipelineState);
     }
 
-    if (airconv_compute_residency_ && !use_msc && !SkipResourceBinding) {
+    if ((airconv_compute_residency_ || (rootsig_compute_ && rootsig_compute_->HasAIRReductionSamplers)) &&
+        !use_msc && !SkipResourceBinding) {
       if (descriptor_heap_)
         EncodeComputeResourceUse(descriptor_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
       if (sampler_heap_)

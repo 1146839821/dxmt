@@ -171,7 +171,10 @@ public:
           Builder, Builder.builder.GetInsertBlock()->getParent()->getArg(StaticSamplerArgumentIndex), Index,
           Sampler.range.lower_bound, Sampler.arg_index
       );
-      return SamplerDescriptor{SamplerH, CubeSampler, Metadata};
+      SamplerDescriptor result{SamplerH, CubeSampler, Metadata};
+      if (auto reduction = Reductions.find(Range); reduction != Reductions.end())
+        result.Reduction = reduction->second;
+      return result;
     }
     if (~RootSignatureArgumentIndex == 0)
       return {};
@@ -344,6 +347,7 @@ public:
 
   std::map<RangeId, std::pair<ConstantBufferInfo, uint64_t>> ConstantBuffers;
   std::map<RangeId, std::pair<SamplerInfo, uint64_t>> Samplers;
+  std::map<RangeId, SamplerReductionState> Reductions;
   std::map<RangeId, std::pair<ShaderResourceViewInfo, uint64_t>> SRVs;
   std::map<RangeId, std::pair<UnorderedAccessViewInfo, uint64_t>> UAVs;
 };
@@ -602,6 +606,15 @@ setup_binding_rootsig(
       auto range_id = sampler.range.range_id;
       binding_map->Samplers[range_id] = {sampler, ~0u};
       binding_map->Samplers[range_id].first.arg_index = i;
+      const auto reduction = D3D12_DECODE_FILTER_REDUCTION(State.Filter);
+      if (reduction == D3D12_FILTER_REDUCTION_TYPE_MINIMUM || reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM) {
+        uint32_t flags = D3D12_DECODE_MIN_FILTER(State.Filter) ? 1u : 0u;
+        flags |= D3D12_DECODE_MAG_FILTER(State.Filter) ? 2u : 0u;
+        flags |= D3D12_DECODE_MIP_FILTER(State.Filter) ? 4u : 0u;
+        flags |= reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM ? 8u : 0u;
+        binding_map->Reductions[range_id] = {flags, State.MinLOD, State.MaxLOD,
+            D3D12_DECODE_IS_ANISOTROPIC_FILTER(State.Filter) || sampler.range.size != 1};
+      }
     }
   }
 

@@ -26,6 +26,7 @@
 #include "../dxbc_instructions.hpp"
 #include "adt.hpp"
 #include "air_builder.hpp"
+#include "dxbc_binding_map.hpp"
 #include "tl/generator.hpp"
 #include "ftl.hpp"
 
@@ -77,6 +78,7 @@ struct SamplerHandle {
   llvm::Value *Handle;
   llvm::Value *HandleCube;
   llvm::Value *Bias;
+  std::optional<SamplerReductionState> Reduction;
 };
 
 struct InterpolantHandle {
@@ -100,6 +102,7 @@ enum class TessellatorOutputPrimitive {
 
 class Converter {
 public:
+  const char *failure = nullptr;
   Converter(llvm::air::AIRBuilder &air, context &ctx_legacy, io_binding_map &res_legacy) :
       air(air),
       ir(air.builder),
@@ -156,7 +159,7 @@ public:
     );
   }
 
-  llvm::Optional<SamplerHandle> LoadSampler(const SrcOperandSampler &SrcOp);
+  llvm::Optional<SamplerHandle> LoadSampler(const SrcOperandSampler &SrcOp, bool AllowReduction = false);
 
   llvm::Optional<BufferResourceHandle> LoadBuffer(const SrcOperandResource &SrcOp);
   llvm::Optional<BufferResourceHandle> LoadBuffer(const SrcOperandUAV &SrcOp);

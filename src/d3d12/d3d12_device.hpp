@@ -296,6 +296,7 @@ public:
 
   size_t NumStaticSamplers;
   uint64_t const *EncodedStaticSamplers;
+  bool HasAIRReductionSamplers = false;
 
   uint64_t MSCArgumentBufferSize = 0;
   uint32_t MSCParameterCount = 0;

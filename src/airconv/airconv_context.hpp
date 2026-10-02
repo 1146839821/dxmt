@@ -10,7 +10,7 @@ void runOptimizationPasses(llvm::Module &M);
 
 void linkMSAD(llvm::Module &M);
 
-void linkMinMax(llvm::Module &M);
+bool linkMinMax(llvm::Module &M);
 
 void linkSamplePos(llvm::Module &M);
 

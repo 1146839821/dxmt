@@ -164,14 +164,15 @@ removeNamedMetadata(llvm::Module &M, StringRef Name) {
 }
 
 template<size_t N>
-void linkShader(llvm::Module &M, const unsigned char (&bitcode)[N]) {
+bool linkShader(llvm::Module &M, const unsigned char (&bitcode)[N]) {
   auto buffer = MemoryBuffer::getMemBufferCopy(StringRef((const char *)bitcode, N));
   Expected<std::unique_ptr<Module>> modOrErr = parseBitcodeFile(buffer->getMemBufferRef(), M.getContext());
 
   if (!modOrErr) {
     // not expected to see this unless something really bad happened in compile time
     errs() << "Failed to parse air bitcode\n";
-    return;
+    consumeError(modOrErr.takeError());
+    return false;
   }
 
   auto module = std::move(modOrErr.get());
@@ -183,7 +184,7 @@ void linkShader(llvm::Module &M, const unsigned char (&bitcode)[N]) {
   removeNamedMetadata(*module, "llvm.ident");
   removeNamedMetadata(*module, "llvm.module.flags");
 
-  llvm::Linker::linkModules(M, std::move(module), Linker::LinkOnlyNeeded);
+  return !llvm::Linker::linkModules(M, std::move(module), Linker::LinkOnlyNeeded);
 };
 
 void
@@ -191,9 +192,9 @@ linkMSAD(llvm::Module &M) {
   linkShader(M, air_msad);
 }
 
-void
+bool
 linkMinMax(llvm::Module &M) {
-  linkShader(M, air_minmax);
+  return linkShader(M, air_minmax);
 }
 
 void

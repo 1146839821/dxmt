@@ -520,6 +520,8 @@ llvm::Expected<llvm::BasicBlock *> convert_basicblocks(
     builder.SetInsertPoint(bb);
 
     current->instructions.for_each(dxbc);
+    if (dxbc.failure)
+      return llvm::make_error<UnsupportedFeature>(dxbc.failure);
 
     if (auto err = std::visit(
           patterns{

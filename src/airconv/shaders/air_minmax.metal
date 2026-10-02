@@ -6,7 +6,7 @@ using namespace metal;
 // unbiased, point-filtered sampler with the application's address/border modes.
 // LOD is already biased and sampler/resource-clamped. Coordinates must be finite.
 // Flags: min-linear, mag-linear, mip-linear, maximum, minifying in bits 0..4.
-// The caller decides minification before LOD clamping; a clamp must not change it.
+// The caller decides minification after sampler LOD clamping (FL11+ contract).
 enum MinMaxFlags : uint {
   MinLinear = 1u, MagLinear = 2u, MipLinear = 4u, Maximum = 8u, Minifying = 16u
 };

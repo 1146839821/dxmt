@@ -45,7 +45,7 @@ static bool CheckSamplerStorage(WMT::Device device, dxmt::MTLD3D12SamplerDescrip
   return true;
 }
 
-static bool CompileDXBC(std::vector<char> &shader) {
+static bool CompileDXBC(std::vector<char> &shader, bool unsupported_reduction = false) {
   HMODULE compiler = LoadLibraryA(D3DCOMPILER_DLL_A);
   if (!compiler)
     return false;
@@ -55,8 +55,15 @@ static bool CompileDXBC(std::vector<char> &shader) {
       "RWBuffer<uint> o:register(u0);"
       "[numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){"
       "o[0]=(uint)(t.SampleLevel(s,float2(0.5,0.5),0).x*255+0.5);}";
+  static const char unsupported_source[] =
+      "Texture2D<float4> t:register(t0); SamplerState s:register(s0);"
+      "RWBuffer<uint> o:register(u0);"
+      "[numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){"
+      "o[0]=(uint)(t.SampleGrad(s,float2(0.5,0.5),float2(1,0),float2(0,1)).x*255+0.5);}";
   ID3DBlob *blob = nullptr, *error = nullptr;
-  HRESULT hr = compile ? compile(source, sizeof(source) - 1, nullptr, nullptr, nullptr, "main", "cs_5_0",
+  HRESULT hr = compile ? compile(unsupported_reduction ? unsupported_source : source,
+                                unsupported_reduction ? sizeof(unsupported_source) - 1 : sizeof(source) - 1,
+                                nullptr, nullptr, nullptr, "main", "cs_5_0",
                                 0, 0, &blob, &error) : E_FAIL;
   if (SUCCEEDED(hr))
     shader.assign(static_cast<char *>(blob->GetBufferPointer()),
@@ -86,7 +93,9 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 4)
     return 2;
   const bool expect_unsupported = argc == 4 && strcmp(argv[3], "--expect-unsupported") == 0;
-  if (argc == 4 && !expect_unsupported)
+  const bool expect_pso_unsupported = argc == 4 && strcmp(argv[3], "--expect-pso-unsupported") == 0;
+  const bool expect_air_unsupported = argc == 4 && strcmp(argv[3], "--expect-air-unsupported") == 0;
+  if (argc == 4 && !expect_unsupported && !expect_pso_unsupported && !expect_air_unsupported)
     return 2;
   const bool minimum = argc >= 3 &&
       (strcmp(argv[2], "--minimum") == 0 || strcmp(argv[2], "--static-minimum") == 0);
@@ -110,9 +119,13 @@ main(int argc, char **argv) {
     return 2;
 
   const bool dxbc = strcmp(argv[1], "--dxbc") == 0;
+  if (expect_pso_unsupported && (dxbc || !static_sampler || !reduction))
+    return 2;
+  if (expect_air_unsupported && (!dxbc || !static_sampler || !reduction))
+    return 2;
   std::vector<char> shader;
   if (dxbc) {
-    if (!CompileDXBC(shader))
+    if (!CompileDXBC(shader, expect_air_unsupported))
       return 3;
   } else {
     std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
@@ -400,8 +413,21 @@ main(int argc, char **argv) {
   pso_desc.pRootSignature = root_signature;
   pso_desc.CS.pShaderBytecode = shader.data();
   pso_desc.CS.BytecodeLength = shader.size();
-  if (!CheckHR("CreateComputePipelineState", device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso))))
-    goto cleanup;
+  {
+    const HRESULT hr = device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso));
+    if (expect_pso_unsupported || expect_air_unsupported) {
+      if (hr == (expect_air_unsupported ? E_FAIL : E_NOTIMPL) && !pso) {
+        std::cout << (expect_air_unsupported ? "AIR reduction SampleGrad" : "MSC reduction root")
+                  << " PSO rejected without fallback\n";
+        result = 0;
+      } else {
+        std::cerr << "reduction PSO did not fail closed: " << std::hex << hr << "\n";
+      }
+      goto cleanup;
+    }
+    if (!CheckHR("CreateComputePipelineState", hr))
+      goto cleanup;
+  }
   if (!CheckHR(
           "CreateCommandList",
           device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, pso, IID_PPV_ARGS(&list))))
