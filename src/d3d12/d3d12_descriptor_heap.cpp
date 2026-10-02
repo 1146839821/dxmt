@@ -22,6 +22,7 @@
 #include "com/com_pointer.hpp"
 #include "dxmt_format.hpp"
 #include "dxmt_sampler.hpp"
+#include "air_sampler_abi.hpp"
 #include "log/log.hpp"
 #include <array>
 #include <atomic>
@@ -828,12 +829,7 @@ public:
   }
 };
 
-struct SamplerGPUStorage {
-  uint64_t sampler;
-  uint64_t cube_sampler;
-  uint64_t metadata;
-  uint64_t padding;
-};
+using air::SamplerGPUStorage;
 
 class MTLD3D12SamplerDescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12SamplerDescriptorHeap> {
 
@@ -1013,7 +1009,8 @@ public:
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.sampler = sampler->sampler_state_handle;
       gpu_storage.cube_sampler = sampler->sampler_state_cube_handle;
-      gpu_storage.metadata = (uint64_t)std::bit_cast<uint32_t>(sampler->lod_bias);
+      gpu_storage.metadata = air::PackSamplerMetadata(sampler->lod_bias, 0);
+      gpu_storage.lod_clamps = air::PackSamplerLODClamps(pDesc->MinLOD, pDesc->MaxLOD);
     }
     SetMSCDescriptor(Index, {sampler->sampler_state_handle, 0, std::bit_cast<uint32_t>(sampler->lod_bias)});
 

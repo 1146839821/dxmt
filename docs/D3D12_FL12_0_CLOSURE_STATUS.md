@@ -70,6 +70,13 @@ dynamic sampler state, remaining AIR operations, feedback and DXIL still need
 implementation. The gate remains unpromoted; seven complete matrix categories
 are still outstanding. The earlier primitive-only wording above is historical.
 
+Static reduction filter/LOD operands now come from the shared 32-byte GPU sampler
+descriptor (`D3D12_MINMAX_SAMPLER_STATE_ABI.md`); ordinary dynamic descriptors
+preserve complete state and copies retain it. This prepares dynamic lowering,
+but does not admit dynamic reduction or close consumer/lifetime safety. The
+focused mixed-filter clamp probe and ordinary AIR/MSC regressions pass in both
+variants. Full Min/Max and all remaining closure workstreams stay open.
+
 Prioritize the production typed-buffer origin contract, using
 `D3D12_TYPED_ORIGIN_PRODUCTION_AUDIT.md` as the integration gap list. Keep
 unsupported views rejected until real production readback succeeds. Integrate

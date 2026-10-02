@@ -17,6 +17,7 @@
  */
 
 #include "air_signature.hpp"
+#include "air_sampler_abi.hpp"
 #include "dxbc_converter.hpp"
 #include "dxbc_root_signature.hpp"
 #include "shader_common.hpp"
@@ -120,7 +121,7 @@ public:
     return ConstantBufferDescriptor{Pointer, Metadata};
   }
 
-  std::tuple<llvm::Value *, llvm::Value *, llvm::Value *>
+  std::tuple<llvm::Value *, llvm::Value *, llvm::Value *, llvm::Value *>
   GetSamplerDescriptor(
       llvm::air::AIRBuilder &AIR, llvm::Value *IntPtr, llvm::Value *Index, RangeId RangeId, uint32_t DescriptorOffset
   ) {
@@ -152,6 +153,13 @@ public:
                 TySamplerDescriptor, B.CreatePointerCast(IntPtr, TySamplerDescriptor->getPointerTo(2)),
                 {IdxDescriptor, AIR.getInt(2) /* metadata*/}
             )
+        ),
+        B.CreateLoad(
+            llvm::Type::getInt64Ty(AIR.getContext()),
+            B.CreateGEP(
+                TySamplerDescriptor, B.CreatePointerCast(IntPtr, TySamplerDescriptor->getPointerTo(2)),
+                {IdxDescriptor, AIR.getInt(3) /* LOD clamps */}
+            )
         )
     };
   }
@@ -167,20 +175,26 @@ public:
     if (DescriptorOffset == ~0u) {
       if (~StaticSamplerArgumentIndex == 0)
         return {};
-      auto [SamplerH, CubeSampler, Metadata] = GetSamplerDescriptor(
+      auto [SamplerH, CubeSampler, Metadata, LODClamps] = GetSamplerDescriptor(
           Builder, Builder.builder.GetInsertBlock()->getParent()->getArg(StaticSamplerArgumentIndex), Index,
           Sampler.range.lower_bound, Sampler.arg_index
       );
       SamplerDescriptor result{SamplerH, CubeSampler, Metadata};
-      if (auto reduction = Reductions.find(Range); reduction != Reductions.end())
-        result.Reduction = reduction->second;
+      if (auto reduction = Reductions.find(Range); reduction != Reductions.end()) {
+        auto &B = Builder.builder;
+        result.Reduction = SamplerReductionState{
+            B.CreateTrunc(B.CreateLShr(Metadata, 32), Builder.getIntTy()),
+            B.CreateBitCast(B.CreateTrunc(LODClamps, Builder.getIntTy()), Builder.getFloatTy()),
+            B.CreateBitCast(B.CreateTrunc(B.CreateLShr(LODClamps, 32), Builder.getIntTy()), Builder.getFloatTy()),
+            reduction->second};
+      }
       return result;
     }
     if (~RootSignatureArgumentIndex == 0)
       return {};
 
     auto HeapPointer = GetArgument(Builder, RootSignatureArgumentIndex, Sampler.arg_index);
-    auto [SamplerH, CubeSampler, Metadata] =
+    auto [SamplerH, CubeSampler, Metadata, LODClamps] =
         GetSamplerDescriptor(Builder, HeapPointer, Index, Sampler.range.lower_bound, DescriptorOffset);
     return SamplerDescriptor{SamplerH, CubeSampler, Metadata};
   }
@@ -347,7 +361,7 @@ public:
 
   std::map<RangeId, std::pair<ConstantBufferInfo, uint64_t>> ConstantBuffers;
   std::map<RangeId, std::pair<SamplerInfo, uint64_t>> Samplers;
-  std::map<RangeId, SamplerReductionState> Reductions;
+  std::map<RangeId, bool> Reductions;
   std::map<RangeId, std::pair<ShaderResourceViewInfo, uint64_t>> SRVs;
   std::map<RangeId, std::pair<UnorderedAccessViewInfo, uint64_t>> UAVs;
 };
@@ -608,12 +622,8 @@ setup_binding_rootsig(
       binding_map->Samplers[range_id].first.arg_index = i;
       const auto reduction = D3D12_DECODE_FILTER_REDUCTION(State.Filter);
       if (reduction == D3D12_FILTER_REDUCTION_TYPE_MINIMUM || reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM) {
-        uint32_t flags = D3D12_DECODE_MIN_FILTER(State.Filter) ? 1u : 0u;
-        flags |= D3D12_DECODE_MAG_FILTER(State.Filter) ? 2u : 0u;
-        flags |= D3D12_DECODE_MIP_FILTER(State.Filter) ? 4u : 0u;
-        flags |= reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM ? 8u : 0u;
-        binding_map->Reductions[range_id] = {flags, State.MinLOD, State.MaxLOD,
-            D3D12_DECODE_IS_ANISOTROPIC_FILTER(State.Filter) || sampler.range.size != 1};
+        binding_map->Reductions[range_id] =
+            D3D12_DECODE_IS_ANISOTROPIC_FILTER(State.Filter) || sampler.range.size != 1;
       }
     }
   }

@@ -2822,7 +2822,7 @@ public:
     auto *entries = reinterpret_cast<dxmt_msc_descriptor_entry *>(Ptr);
     auto *encoded = pRootSig->EncodedStaticSamplers;
     for (size_t i = 0; i < pRootSig->NumStaticSamplers; i++) {
-      entries[i] = {encoded[i * 4], 0, encoded[i * 4 + 2]};
+      entries[i] = {encoded[i * 4], 0, static_cast<uint32_t>(encoded[i * 4 + 2])};
     }
     return allocator_->gpu_heap_buffer_address_ + Offset;
   }

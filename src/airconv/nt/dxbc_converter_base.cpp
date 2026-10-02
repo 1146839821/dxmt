@@ -19,6 +19,7 @@
 #include "dxbc_converter_base.hpp"
 #include "../dxbc_converter.hpp"
 #include "air_builder.hpp"
+#include "../air_sampler_abi.hpp"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Instructions.h"
@@ -1700,12 +1701,12 @@ Converter::operator()(const InstSampleLOD &sample) {
       return;
     }
     const auto &state = *Sampler->Reduction;
-    LOD = air.CreateFPBinOp(AIRBuilder::fmin, air.getFloat(state.MaxLOD), LOD, false);
-    LOD = air.CreateFPBinOp(AIRBuilder::fmax, air.getFloat(state.MinLOD), LOD, false);
+    LOD = air.CreateFPBinOp(AIRBuilder::fmin, state.MaxLOD, LOD, false);
+    LOD = air.CreateFPBinOp(AIRBuilder::fmax, state.MinLOD, LOD, false);
     // FL11+ selects minification after sampler LOD clamping. Resource clamp is
     // rejected by the host observation guard until its view-edge semantics close.
-    auto *flags = ir.CreateOr(air.getInt(state.Flags),
-        ir.CreateSelect(ir.CreateFCmpOGT(LOD, air.getFloat(0)), air.getInt(16), air.getInt(0)));
+    auto *flags = ir.CreateOr(state.Flags,
+        ir.CreateSelect(ir.CreateFCmpOGT(LOD, air.getFloat(0)), air.getInt(dxmt::air::SamplerMinifying), air.getInt(0)));
     auto value = air.CreateReductionSampleLevel(Tex->Texture, Tex->Handle, SamplerHandle,
         Coord, ArrayIndex, LOD, flags, sample.offsets);
     if (!value) { failure = "AIR Min/Max helper ABI is unsupported"; return; }

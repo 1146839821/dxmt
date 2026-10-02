@@ -23,6 +23,7 @@
 #include "d3d12_device.hpp"
 #include "d3d12_device_child.hpp"
 #include "dxmt_sampler.hpp"
+#include "air_sampler_abi.hpp"
 #include "util_math.hpp"
 #include "util_md5.hpp"
 #include <cstring>
@@ -471,8 +472,16 @@ public:
           return E_OUTOFMEMORY;
         static_samplers_encoded_.push_back(sampler->sampler_state_handle);
         static_samplers_encoded_.push_back(sampler->sampler_state_cube_handle);
-        static_samplers_encoded_.push_back((uint64_t)std::bit_cast<uint32_t>(sampler->lod_bias));
-        static_samplers_encoded_.push_back(0 /* padding */);
+        uint32_t flags = 0;
+        if (air_reduction) {
+          flags = air::SamplerReduction;
+          if (D3D12_DECODE_MIN_FILTER(original.Filter)) flags |= air::SamplerMinLinear;
+          if (D3D12_DECODE_MAG_FILTER(original.Filter)) flags |= air::SamplerMagLinear;
+          if (D3D12_DECODE_MIP_FILTER(original.Filter)) flags |= air::SamplerMipLinear;
+          if (reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM) flags |= air::SamplerMaximum;
+        }
+        static_samplers_encoded_.push_back(air::PackSamplerMetadata(sampler->lod_bias, flags));
+        static_samplers_encoded_.push_back(air::PackSamplerLODClamps(original.MinLOD, original.MaxLOD));
 
         static_samplers_.emplace_back(std::move(sampler));
       }

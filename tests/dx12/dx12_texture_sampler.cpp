@@ -4,13 +4,15 @@
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include "d3d12_device.hpp"
+#include "air_sampler_abi.hpp"
 
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <vector>
 
-static bool CheckSamplerStorage(WMT::Device device, dxmt::MTLD3D12SamplerDescriptorHeap *heap, bool cleared) {
+static bool CheckSamplerStorage(WMT::Device device, dxmt::MTLD3D12SamplerDescriptorHeap *heap, bool cleared,
+                                const D3D12_SAMPLER_DESC *desc = nullptr, uint64_t *storage = nullptr) {
   WMTBufferInfo info = {};
   info.length = 56; // AIR descriptor (32) followed by MSC descriptor (24).
   info.options = WMTResourceStorageModeShared;
@@ -37,8 +39,14 @@ static bool CheckSamplerStorage(WMT::Device device, dxmt::MTLD3D12SamplerDescrip
     return false;
   uint64_t words[7];
   std::memcpy(words, info.memory.ptr, sizeof(words));
+  if (storage)
+    std::memcpy(storage, words, sizeof(words));
   if (!cleared)
-    return words[0] && words[1] && words[4];
+    return words[0] && words[1] && words[4] && (!desc ||
+        (uint32_t(words[2]) == std::bit_cast<uint32_t>(desc->MipLODBias) && (words[2] >> 32) == 0 &&
+         uint32_t(words[3]) == std::bit_cast<uint32_t>(desc->MinLOD) &&
+         uint32_t(words[3] >> 32) == std::bit_cast<uint32_t>(desc->MaxLOD) &&
+         words[6] == std::bit_cast<uint32_t>(desc->MipLODBias)));
   for (auto word : words)
     if (word)
       return false;
@@ -98,14 +106,18 @@ main(int argc, char **argv) {
   if (argc == 4 && !expect_unsupported && !expect_pso_unsupported && !expect_air_unsupported)
     return 2;
   const bool minimum = argc >= 3 &&
-      (strcmp(argv[2], "--minimum") == 0 || strcmp(argv[2], "--static-minimum") == 0);
+      (strcmp(argv[2], "--minimum") == 0 || strcmp(argv[2], "--static-minimum") == 0 ||
+       strcmp(argv[2], "--static-minimum-state") == 0);
+  const bool state_probe = argc >= 3 && strcmp(argv[2], "--static-minimum-state") == 0;
   const bool maximum = argc >= 3 &&
       (strcmp(argv[2], "--maximum") == 0 || strcmp(argv[2], "--static-maximum") == 0);
   const bool reduction = minimum || maximum;
   const bool static_sampler = argc >= 3 &&
-      (strcmp(argv[2], "--static-sampler") == 0 ||
+      (strcmp(argv[2], "--static-sampler") == 0 || state_probe ||
        strcmp(argv[2], "--static-minimum") == 0 || strcmp(argv[2], "--static-maximum") == 0);
-  const D3D12_FILTER filter = minimum ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR :
+  const D3D12_FILTER filter = state_probe ? D3D12_ENCODE_BASIC_FILTER(D3D12_FILTER_TYPE_LINEAR,
+      D3D12_FILTER_TYPE_POINT, D3D12_FILTER_TYPE_POINT, D3D12_FILTER_REDUCTION_TYPE_MINIMUM) :
+                              minimum ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR :
                               maximum ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR :
                                         D3D12_FILTER_MIN_MAG_MIP_LINEAR;
   const UINT expected = minimum ? 16 : maximum ? 240 : 255;
@@ -234,6 +246,11 @@ main(int argc, char **argv) {
     static_sampler_desc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
     static_sampler_desc.MinLOD = 0;
     static_sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
+    if (state_probe) {
+      static_sampler_desc.MipLODBias = -0.5f;
+      static_sampler_desc.MinLOD = 0.25f;
+      static_sampler_desc.MaxLOD = 0.0f; // MinLOD wins; select min-linear after clamping.
+    }
     static_sampler_desc.ShaderRegister = 0;
     static_sampler_desc.RegisterSpace = 0;
     static_sampler_desc.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -370,6 +387,9 @@ main(int argc, char **argv) {
       auto heap = static_cast<dxmt::MTLD3D12SamplerDescriptorHeap *>(sampler_heap);
       D3D12_SAMPLER_DESC control = sampler_desc;
       control.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+      control.MipLODBias = -0.75f;
+      control.MinLOD = 0.25f;
+      control.MaxLOD = 1.5f;
       device->CreateSampler(&control, sampler_heap->GetCPUDescriptorHandleForHeapStart());
       HRESULT hr = heap->AddSampler(0, &sampler_desc);
       if (hr == E_NOTIMPL) {
@@ -378,7 +398,41 @@ main(int argc, char **argv) {
         if (!CheckSamplerStorage(metal, heap, true))
           goto cleanup;
         device->CreateSampler(&control, sampler_heap->GetCPUDescriptorHandleForHeapStart());
-        if (!CheckSamplerStorage(metal, heap, false))
+        if (!CheckSamplerStorage(metal, heap, false, &control))
+          goto cleanup;
+        // CPU-only source heaps must preserve the exact AIR state when copied
+        // into the shader-visible heap, without changing the MSC bias entry.
+        ID3D12DescriptorHeap *source_heap = nullptr;
+        auto source_desc = sampler_heap_desc;
+        source_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        if (!CheckHR("CreateSamplerCopySource", device->CreateDescriptorHeap(&source_desc, IID_PPV_ARGS(&source_heap))))
+          goto cleanup;
+        device->CreateSampler(&control, source_heap->GetCPUDescriptorHandleForHeapStart());
+        ID3D12DescriptorHeap *reference_heap = nullptr;
+        if (!CheckHR("CreateSamplerCopyReference", device->CreateDescriptorHeap(&sampler_heap_desc, IID_PPV_ARGS(&reference_heap)))) {
+          source_heap->Release();
+          goto cleanup;
+        }
+        device->CopyDescriptorsSimple(1, reference_heap->GetCPUDescriptorHandleForHeapStart(),
+                                      source_heap->GetCPUDescriptorHandleForHeapStart(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+        uint64_t expected_storage[7] = {}, actual_storage[7] = {};
+        const bool reference_valid = CheckSamplerStorage(metal,
+            static_cast<dxmt::MTLD3D12SamplerDescriptorHeap *>(reference_heap), false, &control, expected_storage);
+        reference_heap->Release();
+        if (!reference_valid) {
+          source_heap->Release();
+          goto cleanup;
+        }
+        auto different = control;
+        different.MipLODBias = 0.5f;
+        different.MinLOD = 0.0f;
+        different.MaxLOD = 2.5f;
+        device->CreateSampler(&different, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+        device->CopyDescriptorsSimple(1, sampler_heap->GetCPUDescriptorHandleForHeapStart(),
+                                      source_heap->GetCPUDescriptorHandleForHeapStart(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+        source_heap->Release();
+        if (!CheckSamplerStorage(metal, heap, false, &control, actual_storage) ||
+            std::memcmp(actual_storage, expected_storage, sizeof(actual_storage)))
           goto cleanup;
         device->CreateSampler(&sampler_desc, sampler_heap->GetCPUDescriptorHandleForHeapStart());
         if (!CheckSamplerStorage(metal, heap, true)) {

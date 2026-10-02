@@ -12,9 +12,9 @@ struct ConstantBufferDescriptor {
 };
 
 struct SamplerReductionState {
-  uint32_t Flags;
-  float MinLOD;
-  float MaxLOD;
+  llvm::Value *Flags;
+  llvm::Value *MinLOD;
+  llvm::Value *MaxLOD;
   bool Unsupported = false;
 };
 
