@@ -329,6 +329,11 @@ int main() {
     const bool metadata = allocation && snapshot.msc_typed_buffer.byte_offset == first_element * 4 &&
         snapshot.msc_typed_buffer.element_count == 8 && snapshot.msc_typed_buffer.element_stride == 4;
     const bool availability = bool(snapshot.msc_typed_buffer.view) == (first_element == 0);
+    const auto &origin_descriptor = snapshot.msc_typed_buffer.origin_descriptor;
+    const bool origin_backing = allocation && snapshot.msc_typed_buffer.origin_view &&
+        snapshot.msc_typed_buffer.texel_origin == first_element &&
+        origin_descriptor.gpu_va == allocation->gpuAddress() && origin_descriptor.texture_view_id &&
+        origin_descriptor.metadata == ((uint64_t(8 + first_element) * 4) | (1ull << 63));
     bool generation = false;
     if (allocation) {
       auto replacement = snapshot.buffer->allocate(allocation->flags());
@@ -339,21 +344,33 @@ int main() {
         generation = snapshot.buffer->current() != allocation &&
             renamed[0].buffer_allocation.ptr() == allocation &&
             renamed[0].msc_typed_buffer.allocation.ptr() == allocation &&
-            renamed[0].msc_typed_buffer.view.handle == view_handle;
+            renamed[0].msc_typed_buffer.view.handle == view_handle &&
+            renamed[0].msc_typed_buffer.origin_view.handle == snapshot.msc_typed_buffer.origin_view.handle &&
+            renamed[0].msc_typed_buffer.texel_origin == first_element;
         snapshot.buffer->rename(std::move(original));
       }
     }
     device_a->CreateConstantBufferView(&cbv_desc, shader_cpu_a);
+    device_a->CreateConstantBufferView(&cbv_desc, source_cpu);
     std::vector<dxmt::ShaderVisibleDescriptorSnapshot> overwritten;
     shader_impl_a->ResolveDescriptors({0}, overwritten);
     const bool reset = !overwritten[0].msc_typed_buffer.view && !overwritten[0].msc_typed_buffer.allocation &&
         !overwritten[0].msc_typed_buffer.element_count && !overwritten[0].msc_typed_buffer.element_stride &&
-        !overwritten[0].msc_typed_buffer.byte_offset;
+        !overwritten[0].msc_typed_buffer.byte_offset && !overwritten[0].msc_typed_buffer.origin_view &&
+        !overwritten[0].msc_typed_buffer.texel_origin && !overwritten[0].msc_typed_buffer.origin_descriptor.gpu_va &&
+        !overwritten[0].msc_typed_buffer.origin_descriptor.texture_view_id &&
+        !overwritten[0].msc_typed_buffer.origin_descriptor.metadata;
+    auto origin_texture = snapshot.msc_typed_buffer.origin_view;
     const bool retained = snapshot.buffer_allocation.ptr() == allocation &&
-        snapshot.msc_typed_buffer.view.handle == view_handle && snapshot.msc_typed_buffer.element_count == 8;
-    if (!metadata || !availability || !generation || !reset || !retained)
+        snapshot.msc_typed_buffer.view.handle == view_handle && snapshot.msc_typed_buffer.element_count == 8 &&
+        snapshot.msc_typed_buffer.origin_view && snapshot.msc_typed_buffer.texel_origin == first_element &&
+        snapshot.msc_typed_buffer.origin_descriptor.gpu_va == allocation->gpuAddress() &&
+        snapshot.msc_typed_buffer.origin_descriptor.texture_view_id == origin_descriptor.texture_view_id &&
+        snapshot.msc_typed_buffer.origin_descriptor.metadata == ((uint64_t(8 + first_element) * 4) | (1ull << 63)) &&
+        origin_texture.width() == 8 + first_element;
+    if (!metadata || !availability || !origin_backing || !generation || !reset || !retained)
       std::cerr << "FAIL: typed binding snapshot/copy/overwrite firstElement=" << first_element << "\n";
-    passed &= metadata && availability && generation && reset && retained;
+    passed &= metadata && availability && origin_backing && generation && reset && retained;
   }
   Release(source_heap);
 

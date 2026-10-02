@@ -151,6 +151,11 @@ struct MSCTypedBufferBinding {
   uint64_t byte_offset = 0;
   uint32_t element_count = 0;
   uint32_t element_stride = 0;
+  // Separate from the exact view: unmodified MSC shaders must never consume
+  // an aligned-down view without applying this origin and logical bound.
+  WMT::Reference<WMT::Texture> origin_view;
+  dxmt_msc_descriptor_entry origin_descriptor = {};
+  uint32_t texel_origin = 0;
 };
 
 // A descriptor snapshot owns the native objects that back the CPU-side

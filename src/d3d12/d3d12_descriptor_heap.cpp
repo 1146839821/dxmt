@@ -186,12 +186,10 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
       return;
     const auto format = buffer->pixelFormat(view);
     const auto alignment = device_->GetMTLDevice().minimumTextureBufferAlignmentForPixelFormat(format);
-    // MSC's typed texture access does not apply the descriptor padding offset.
-    // Never issue a misaligned native view or silently substitute a rounded origin.
-    if (!alignment || slice.byteOffset % alignment)
-      return;
-
     auto *allocation = binding.allocation.ptr();
+    if (!alignment || slice.byteOffset > allocation->length() ||
+        slice.byteLength > allocation->length() - slice.byteOffset)
+      return;
     WMTTextureInfo info = {};
     info.type = WMTTextureTypeTextureBuffer;
     info.pixel_format = format;
@@ -211,10 +209,35 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
         usage |= WMTTextureUsageShaderAtomic;
     }
     info.usage = usage;
-    binding.view = allocation->buffer().newTexture(info, slice.byteOffset, slice.byteLength);
-    if (binding.view)
-      SetMSCDescriptor(Index, {allocation->gpuAddress() + slice.byteOffset, info.gpu_resource_id,
-                               uint64_t(slice.byteLength) | (1ull << 63)});
+    const uint64_t padding = slice.byteOffset % alignment;
+    if (!padding) {
+      binding.view = allocation->buffer().newTexture(info, slice.byteOffset, slice.byteLength);
+      if (binding.view) {
+        binding.origin_descriptor = {allocation->gpuAddress() + slice.byteOffset, info.gpu_resource_id,
+                                     uint64_t(slice.byteLength) | (1ull << 63)};
+        SetMSCDescriptor(Index, binding.origin_descriptor);
+        binding.origin_view = binding.view;
+      }
+      return;
+    }
+
+    // MSC's unmodified typed accesses ignore descriptor padding. Preserve the
+    // empty ordinary descriptor, preparing a DIFFERENT view only for lowering.
+    // Divisibility guarantees an integer texel origin for this native format.
+    if (padding % binding.element_stride)
+      return;
+    const uint64_t origin = padding / binding.element_stride;
+    const uint64_t width = uint64_t(slice.elementCount) + origin;
+    const uint64_t length = uint64_t(slice.byteLength) + padding;
+    if (origin > UINT32_MAX || width > UINT32_MAX || length > UINT32_MAX)
+      return;
+    info.width = width;
+    binding.origin_view = allocation->buffer().newTexture(info, slice.byteOffset - padding, length);
+    if (binding.origin_view) {
+      binding.texel_origin = origin;
+      binding.origin_descriptor = {allocation->gpuAddress() + slice.byteOffset - padding, info.gpu_resource_id,
+                                   length | (1ull << 63)};
+    }
   }
 
 public:
