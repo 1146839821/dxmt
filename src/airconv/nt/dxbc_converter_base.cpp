@@ -1656,6 +1656,8 @@ Converter::CreateReductionSample(
   lod = air.CreateFPBinOp(AIRBuilder::fmax, state.MinLOD, lod, false);
   auto *flags = ir.CreateOr(state.Flags,
       ir.CreateSelect(ir.CreateFCmpOGT(lod, air.getFloat(0)), air.getInt(dxmt::air::SamplerMinifying), air.getInt(0)));
+  if (texture.Logical == Texture::texture1d || texture.Logical == Texture::texture1d_array)
+    flags = ir.CreateOr(flags, air.getInt(dxmt::air::SamplerLogical1D));
   auto value = air.CreateReductionSampleLevel(texture.Texture, texture.Handle, sampler.Handle,
       coord, array_index, lod, flags, offsets);
   if (!value) { failure = "AIR Min/Max helper ABI is unsupported"; return {}; }

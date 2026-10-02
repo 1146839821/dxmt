@@ -5,10 +5,12 @@ using namespace metal;
 // Private AIRCONV contract, not an MSC ABI. The caller supplies an unclamped,
 // unbiased, point-filtered sampler with the application's address/border modes.
 // LOD is already biased and sampler/resource-clamped. Coordinates must be finite.
-// Flags: min-linear, mag-linear, mip-linear, maximum, minifying in bits 0..4.
+// Flags: min-linear, mag-linear, mip-linear, maximum, minifying in bits 0..4;
+// bit 6 preserves logical 1D dimensionality through the 2D storage remap.
 // The caller decides minification after sampler LOD clamping (FL11+ contract).
 enum MinMaxFlags : uint {
-  MinLinear = 1u, MagLinear = 2u, MipLinear = 4u, Maximum = 8u, Minifying = 16u
+  MinLinear = 1u, MagLinear = 2u, MipLinear = 4u, Maximum = 8u, Minifying = 16u,
+  Logical1D = 64u
 };
 static uint3 dimensions(texture2d<float> texture, uint mip) {
   return uint3(texture.get_width(mip), texture.get_height(mip), 1);
@@ -61,6 +63,13 @@ static float4 reduce_level(Texture texture, sampler point, float3 uv, uint array
 template <typename Texture>
 static float4 reduce(Texture texture, sampler point, float3 uv, uint array,
                      float lod, uint flags, int3 offset, uint axes) {
+  if (flags & Logical1D) {
+    // The synthetic Y axis is not part of a D3D 1D footprint. Keep it at the
+    // sole texel center so border addressing cannot create additional taps.
+    axes = 1;
+    uv.y = 0.5f;
+    offset.y = 0;
+  }
   const bool maximum = (flags & Maximum) != 0;
   const bool linear = (flags & ((flags & Minifying) ? MinLinear : MagLinear)) != 0;
   const bool mip_linear = (flags & MipLinear) != 0;

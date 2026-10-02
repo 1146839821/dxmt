@@ -12,6 +12,18 @@ int main(int argc, char **argv) {
         encoding:NSUTF8StringEncoding error:&error];
     if (!source) { std::fprintf(stderr, "%s\n", error.description.UTF8String); return 1; }
     source = [source stringByAppendingString:@R"(
+kernel void logical_1d(texture2d<float> t [[texture(0)]], device float4 *out [[buffer(0)]],
+                       uint id [[thread_position_in_grid]]) {
+  constexpr sampler point(coord::normalized, address::clamp_to_zero, filter::nearest, mip_filter::nearest);
+  out[id] = minmax2d(t, point, float2(0.5f, -10.0f), 0.0f,
+      Logical1D | MagLinear | (id ? Maximum : 0u), int2(0, 17));
+}
+kernel void logical_1d_array(texture2d_array<float> t [[texture(0)]], device float4 *out [[buffer(0)]],
+                             uint id [[thread_position_in_grid]]) {
+  constexpr sampler point(coord::normalized, address::clamp_to_zero, filter::nearest, mip_filter::nearest);
+  out[id] = minmax2d_array(t, point, float2(0.5f, 10.0f), 1u, 0.0f,
+      Logical1D | MagLinear | (id ? Maximum : 0u), int2(0, -17));
+}
 kernel void probe(texture2d<float> t [[texture(0)]], device float4 *out [[buffer(0)]],
                   uint id [[thread_position_in_grid]]) {
   constexpr sampler point(coord::normalized, address::clamp_to_edge, filter::nearest, mip_filter::nearest);
@@ -95,6 +107,14 @@ kernel void nan_centers(texture2d<float> t [[texture(0)]], device float4 *out [[
     const float layer[16] = {24, 4, -2, 1, 32, 3, -1, 2, 48, 2, 0, 3, 96, 1, 1, 4};
     [layers replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0 slice:0 withBytes:pixels bytesPerRow:32 bytesPerImage:64];
     [layers replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0 slice:1 withBytes:layer bytesPerRow:32 bytesPerImage:64];
+    desc.height = 1;
+    id<MTLTexture> line_array = [device newTextureWithDescriptor:desc];
+    [line_array replaceRegion:MTLRegionMake2D(0, 0, 2, 1) mipmapLevel:0 slice:0 withBytes:pixels bytesPerRow:32 bytesPerImage:32];
+    [line_array replaceRegion:MTLRegionMake2D(0, 0, 2, 1) mipmapLevel:0 slice:1 withBytes:layer bytesPerRow:32 bytesPerImage:32];
+    desc.textureType = MTLTextureType2D; desc.arrayLength = 1;
+    id<MTLTexture> line = [device newTextureWithDescriptor:desc];
+    [line replaceRegion:MTLRegionMake2D(0, 0, 2, 1) mipmapLevel:0 withBytes:pixels bytesPerRow:32];
+    desc.height = 2;
     desc.textureType = MTLTextureType3D;
     desc.depth = 2; desc.arrayLength = 1;
     id<MTLTexture> volume = [device newTextureWithDescriptor:desc];
@@ -121,12 +141,13 @@ kernel void nan_centers(texture2d<float> t [[texture(0)]], device float4 *out [[
     [nan_texture replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0 withBytes:nan_pixels bytesPerRow:32];
     id<MTLCommandQueue> queue = [device newCommandQueue];
     unsigned passed = 0;
-    enum class Kind { Probe, Centers, Layers, Volume, Edges, MipBoundary, NanMix, NanCenters };
+    enum class Kind { Probe, Centers, Layers, Volume, Edges, MipBoundary, NanMix, NanCenters, Line, LineArray };
     struct Case { NSString *name; id<MTLTexture> texture; unsigned count; Kind kind; };
     const Case cases[] = {{@"probe", texture, 64, Kind::Probe}, {@"centers", texture, 2, Kind::Centers},
         {@"layers", layers, 2, Kind::Layers}, {@"volume", volume, 2, Kind::Volume},
         {@"edges", texture, 10, Kind::Edges}, {@"mip_boundary", mip_texture, 2, Kind::MipBoundary},
-        {@"nan_mix", nan_texture, 2, Kind::NanMix}, {@"nan_centers", nan_texture, 4, Kind::NanCenters}};
+        {@"nan_mix", nan_texture, 2, Kind::NanMix}, {@"nan_centers", nan_texture, 4, Kind::NanCenters},
+        {@"logical_1d", line, 2, Kind::Line}, {@"logical_1d_array", line_array, 2, Kind::LineArray}};
     for (const auto &test : cases) {
       NSString *name = test.name;
       const unsigned count = test.count;
@@ -146,7 +167,11 @@ kernel void nan_centers(texture2d<float> t [[texture(0)]], device float4 *out [[
       const float *values = static_cast<const float *>(output.contents);
       for (unsigned id = 0; id < count; ++id) {
         float expected[4];
-        if (test.kind == Kind::Layers) {
+        if (test.kind == Kind::Line || test.kind == Kind::LineArray) {
+          const float *texels = test.kind == Kind::Line ? pixels : layer;
+          for (unsigned c = 0; c < 4; ++c)
+            expected[c] = id ? std::fmax(texels[c], texels[4 + c]) : std::fmin(texels[c], texels[4 + c]);
+        } else if (test.kind == Kind::Layers) {
           for (unsigned c = 0; c < 4; ++c) {
             expected[c] = layer[c];
             for (unsigned p = 1; p < 4; ++p)

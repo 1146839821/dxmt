@@ -16,6 +16,8 @@ enum SamplerReductionFlags : uint32_t {
   SamplerMaximum = 8u,
   SamplerMinifying = 16u,
   SamplerReduction = 32u,
+  // Compiler-derived logical shape, never supplied by a sampler descriptor.
+  SamplerLogical1D = 64u,
 };
 
 struct SamplerGPUStorage {
