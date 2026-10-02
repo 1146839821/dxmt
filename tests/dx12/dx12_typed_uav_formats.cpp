@@ -4,6 +4,7 @@
 #include <d3dcompiler.h>
 
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -312,9 +313,25 @@ static bool CheckAPI(ID3D12Device *device) {
 }
 
 int main(int argc, char **argv) {
-  if (argc < 2 || argc > 3 || (std::strcmp(argv[1], "--dxbc") && std::strcmp(argv[1], "--dxil") && std::strcmp(argv[1], "--api-policy")) ||
+  const bool selected_case = argc == 6 && !std::strcmp(argv[2], "--case");
+  if ((argc != 2 && argc != 3 && !selected_case) || (std::strcmp(argv[1], "--dxbc") && std::strcmp(argv[1], "--dxil") && std::strcmp(argv[1], "--api-policy")) ||
       (argc == 3 && std::strcmp(argv[2], "--buffer-only") && std::strcmp(argv[2], "--view-contract") &&
        std::strcmp(argv[2], "--srv-view-contract"))) return 2;
+  const Format *selected_format = nullptr;
+  unsigned selected_shape = 0, selected_first = 0;
+  if (selected_case) {
+    if (!std::strcmp(argv[1], "--api-policy")) return 2;
+    for (const auto &format : formats)
+      if (!std::strcmp(argv[3], format.name)) selected_format = &format;
+    bool found_shape = false;
+    for (unsigned shape = 0; shape < 6; ++shape) {
+      if (!std::strcmp(argv[4], shapes[shape])) { selected_shape = shape; found_shape = true; }
+    }
+    const auto *end = argv[5] + std::strlen(argv[5]);
+    const auto parsed = std::from_chars(argv[5], end, selected_first);
+    if (!selected_format || !found_shape || parsed.ec != std::errc{} || parsed.ptr != end ||
+        selected_first > 4096 || (selected_shape && selected_first)) return 2;
+  }
   const bool dxbc = !std::strcmp(argv[1], "--dxbc");
   const bool read_only = argc == 3 && !std::strcmp(argv[2], "--srv-view-contract");
   const bool view_contract = read_only || (argc == 3 && !std::strcmp(argv[2], "--view-contract"));
@@ -359,6 +376,7 @@ int main(int argc, char **argv) {
   std::map<unsigned, std::vector<char>> shaders;
   unsigned passed = 0, failed = 0;
   for (const auto &format : formats) {
+    if (selected_case && &format != selected_format) continue;
     D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {format.format};
     bool supported = CheckHR("FormatSupport", device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) &&
         (support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) &&
@@ -366,6 +384,7 @@ int main(int argc, char **argv) {
     // Audit GPU semantics independently of the deliberately disabled load claim.
     // This does not turn an unadvertised format into an accepted public feature.
     for (unsigned shape = 0; shape < (argc == 3 ? 1u : 6u); ++shape) {
+      if (selected_case && shape != selected_shape) continue;
       const unsigned key = format.type * 6 + shape;
       auto &shader = shaders[key];
       if (shader.empty()) {
@@ -387,7 +406,8 @@ int main(int argc, char **argv) {
           shader.assign(std::istreambuf_iterator<char>(file), {});
         }
       }
-      const std::array<unsigned, 3> offsets = view_contract ? std::array<unsigned, 3>{1, 16, 272} : std::array<unsigned, 3>{0, 4, 260};
+      const std::vector<unsigned> offsets = selected_case ? std::vector<unsigned>{selected_first} :
+          view_contract ? std::vector<unsigned>{1, 16, 272} : std::vector<unsigned>{0, 4, 260};
       for (unsigned first_element : offsets) {
         if (shape && first_element) continue;
         const auto mode = !view_contract ? ViewCase::Normal :
@@ -412,6 +432,7 @@ int main(int argc, char **argv) {
     }
   }
   if (compiler) FreeLibrary(compiler);
-  std::cout << (read_only ? "typed SRV view contracts: passed=" : view_contract ? "typed UAV view contracts: passed=" : "typed UAV matrix: passed=") << passed << " failed=" << failed << "\n";
+  std::cout << (selected_case ? "typed UAV selected case: passed=" :
+      read_only ? "typed SRV view contracts: passed=" : view_contract ? "typed UAV view contracts: passed=" : "typed UAV matrix: passed=") << passed << " failed=" << failed << "\n";
   return failed ? 1 : 0;
 }
