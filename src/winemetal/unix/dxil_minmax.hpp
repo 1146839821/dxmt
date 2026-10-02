@@ -19,7 +19,7 @@ struct ReductionSampleState {
   llvm::Value *address_v;
 };
 
-// Private-module transformation. Caller must prove a float Texture2D handle,
+// Private-module transformation. Caller must prove a float Texture2D/Texture2DArray handle,
 // finite coordinates and a point, unbiased/unclamped sampler with the original
 // address/border modes. Only component extracts (no residency/status) are
 // accepted. LLVM verification does not replace regenerated DXIL validation.
@@ -30,13 +30,13 @@ struct ReductionSampleState {
 bool LowerReductionSampleLevel2D(llvm::CallInst &sample,
     const ReductionSampleState &state, std::string &error);
 
-// Emit the view-relative isotropic LOD before a qualified float Texture2D
+// Emit the view-relative isotropic LOD before a qualified float Texture2D/Texture2DArray
 // SampleGrad. Mirrors AIR's normalized major-axis algorithm. The caller still
 // applies sampler bias/clamps and instruction/resource clamps in API order.
 // This helper does not rewrite or admit the sampling operation itself.
 llvm::Value *CreateReductionGradientLOD2D(llvm::CallInst &sample, std::string &error);
 
-// Qualify legacy float Texture2D SampleLevel/SampleGrad pairs, append private tN/sN and
+// Qualify legacy float Texture2D/Texture2DArray SampleLevel/SampleGrad pairs, append private tN/sN and
 // b0 in DXMT_MSC_MINMAX_SPACE, and guard reduction with the runtime enabled bit.
 // Returned pair ordinal N selects its point texture/sampler and 32-byte CBV
 // state; sampler N+pair_count is an unclamped ordinary-filter sampler. Both

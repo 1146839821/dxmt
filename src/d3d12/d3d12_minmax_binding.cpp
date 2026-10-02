@@ -15,7 +15,8 @@ HRESULT PrepareD3D12MinMaxPairBinding(WMT::Device device, const ShaderVisibleDes
     if (texture.descriptor.type != ShaderVisibleDescriptorType::SRVTexture || !texture.texture ||
         !texture.msc_texture_view || !texture.msc_descriptor.texture_view_id) return E_NOTIMPL;
     const auto &srv = texture.descriptor.SRVTexture;
-    if (texture.texture->textureType(srv.view) != WMTTextureType2D ||
+    const auto type = texture.texture->textureType(srv.view);
+    if ((type != WMTTextureType2D && type != WMTTextureType2DArray) ||
         texture.texture->sampleCount() != 1) return E_NOTIMPL;
     WMT::Texture captured_view = texture.msc_texture_view;
     const auto format = ORIGINAL_FORMAT(captured_view.pixelFormat());

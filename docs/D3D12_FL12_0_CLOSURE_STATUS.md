@@ -63,6 +63,15 @@ MinMax; fresh static-gradient, dynamic-clamp and broader contracts remain open.
 The four production workstreams, 1,584 typed reruns and seven complete GPU
 categories above are unchanged. No feature-level promotion or game benchmark.
 
+Texture2DArray follow-up: the private DXIL SampleLevel/SampleGrad compute path
+now admits float array textures and reuses X/Y footprint/gradient lowering while
+preserving the layer operand (`D3D12_MINMAX_DXIL_ARRAY.md`). Both builds pass
+50 native array dispatches in total and six actual D3D12 MIN/MAX/gradient
+readbacks with distinct layer contents. This closes a bounded shape gap; static
+array/view-origin/update coverage and broader MinMax contracts remain open.
+The four production workstreams and full acceptance workload remain unchanged;
+no feature-level promotion or game benchmark.
+
 Task Result: refreshed current status and corrected the gate's stale MinMax
 diagnostic without changing any gate status or capability. Gate units pass
 55/55. Main-agent Standards/Spec self-review only; independent review remains

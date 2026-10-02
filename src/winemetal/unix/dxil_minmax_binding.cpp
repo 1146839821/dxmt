@@ -160,13 +160,14 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     const auto *sampler = resolve(call->getArgOperand(2), 3);
     uint32_t texture_kind, sampler_kind, component_tag, component_type;
     if (!texture || !sampler || texture->metadata->getNumOperands() != 9 ||
-        sampler->metadata->getNumOperands() != 8 || !Word(texture->metadata->getOperand(6), texture_kind) || texture_kind != 2 ||
+        sampler->metadata->getNumOperands() != 8 || !Word(texture->metadata->getOperand(6), texture_kind) ||
+        (texture_kind != 2 && texture_kind != 7) ||
         !Word(sampler->metadata->getOperand(6), sampler_kind) || sampler_kind != 0)
-      return reject("finite Texture2D/SamplerState pair required");
+      return reject("finite Texture2D/Texture2DArray SamplerState pair required");
     auto *component = dyn_cast_or_null<MDNode>(texture->metadata->getOperand(8));
     if (!component || component->getNumOperands() != 2 || !Word(component->getOperand(0), component_tag) || component_tag != 0 ||
         !Word(component->getOperand(1), component_type) || component_type != 9)
-      return reject("float Texture2D component metadata required");
+      return reject("float two-dimensional texture component metadata required");
     for (auto *user : call->users()) {
       auto *extract = dyn_cast<ExtractValueInst>(user);
       if (!extract || extract->getNumIndices() != 1 || *extract->idx_begin() >= 4)

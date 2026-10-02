@@ -13,9 +13,10 @@ int main(int argc, char **argv) {
   @autoreleasepool {
     if (argc < 3 || argc > 5) return 2;
     const bool binding_two = argc == 4 && !strcmp(argv[3], "--binding-two");
+    const bool array = argc == 4 && (!strcmp(argv[3], "--binding-array") || !strcmp(argv[3], "--binding-array-grad"));
     const bool gradient_clamp = argc == 4 && !strcmp(argv[3], "--binding-grad-clamp");
-    const bool gradient = (argc == 4 && !strcmp(argv[3], "--binding-grad")) || gradient_clamp;
-    const bool binding = (argc == 4 && !strcmp(argv[3], "--binding")) || binding_two || gradient;
+    const bool gradient = (argc == 4 && (!strcmp(argv[3], "--binding-grad") || !strcmp(argv[3], "--binding-array-grad"))) || gradient_clamp;
+    const bool binding = (argc == 4 && !strcmp(argv[3], "--binding")) || binding_two || gradient || array;
     char *end = NULL;
     unsigned long expected = argc >= 4 && !binding ? strtoul(argv[3], &end, 10) : 16;
     if (argc >= 4 && !binding && (!argv[3][0] || *end || expected > 255)) return 2;
@@ -65,18 +66,33 @@ int main(int argc, char **argv) {
         width:gradient ? 8 : 2 height:gradient ? 8 : 2 mipmapped:YES];
     descriptor.storageMode = MTLStorageModeShared;
     descriptor.usage = MTLTextureUsageShaderRead;
+    if (array) { descriptor.textureType = MTLTextureType2DArray; descriptor.arrayLength = 2; }
     id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
     const uint8_t pixels[] = {16,32,48,64, 240,224,208,192, 64,80,96,112, 192,176,160,144};
-    [texture replaceRegion:MTLRegionMake2D(0,0,2,2) mipmapLevel:0 withBytes:pixels bytesPerRow:8];
     const uint8_t mip[] = {96,128,160,192};
-    [texture replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:1 withBytes:mip bytesPerRow:4];
-    if (gradient) {
+    if (!gradient) {
+      if (array) {
+        uint8_t other[16]; memset(other, 7, sizeof(other));
+        [texture replaceRegion:MTLRegionMake2D(0,0,2,2) mipmapLevel:0 slice:0 withBytes:other bytesPerRow:8 bytesPerImage:16];
+        [texture replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:1 slice:0 withBytes:other bytesPerRow:4 bytesPerImage:4];
+        [texture replaceRegion:MTLRegionMake2D(0,0,2,2) mipmapLevel:0 slice:1 withBytes:pixels bytesPerRow:8 bytesPerImage:16];
+        [texture replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:1 slice:1 withBytes:mip bytesPerRow:4 bytesPerImage:4];
+      } else {
+        [texture replaceRegion:MTLRegionMake2D(0,0,2,2) mipmapLevel:0 withBytes:pixels bytesPerRow:8];
+        [texture replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:1 withBytes:mip bytesPerRow:4];
+      }
+    } else {
       const uint8_t levels[] = {32, 224, 96, 160};
       uint8_t uniform[8 * 8 * 4];
       for (unsigned level = 0; level < 4; ++level) {
         unsigned size = 8 >> level;
         memset(uniform, levels[level], sizeof(uniform));
-        [texture replaceRegion:MTLRegionMake2D(0,0,size,size) mipmapLevel:level withBytes:uniform bytesPerRow:size * 4];
+        if (array) {
+          [texture replaceRegion:MTLRegionMake2D(0,0,size,size) mipmapLevel:level slice:1 withBytes:uniform bytesPerRow:size * 4 bytesPerImage:size * size * 4];
+          memset(uniform, 7, sizeof(uniform));
+          [texture replaceRegion:MTLRegionMake2D(0,0,size,size) mipmapLevel:level slice:0 withBytes:uniform bytesPerRow:size * 4 bytesPerImage:size * size * 4];
+        } else
+          [texture replaceRegion:MTLRegionMake2D(0,0,size,size) mipmapLevel:level withBytes:uniform bytesPerRow:size * 4];
       }
     }
     MTLSamplerDescriptor *sampler_descriptor = [MTLSamplerDescriptor new];

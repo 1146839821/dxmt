@@ -3,7 +3,7 @@
 
 // Private compiler/submission contract. Not an MSC descriptor layout.
 #define DXMT_MSC_MINMAX_SPACE 2u
-#define DXMT_MSC_MINMAX_VERSION 2u
+#define DXMT_MSC_MINMAX_VERSION 3u
 #define DXMT_MSC_MINMAX_ENABLED 32u
 struct dxmt_msc_minmax_state {
   uint32_t flags;

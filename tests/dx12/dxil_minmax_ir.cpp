@@ -18,7 +18,7 @@ static bool CheckBindingQualification(llvm::Module &module) {
   SmallVector<char, 0> bitcode;
   raw_svector_ostream serialized(bitcode);
   WriteBitcodeToFile(module, serialized);
-  for (unsigned probe = 0; probe < 9; ++probe) {
+  for (unsigned probe = 0; probe < 10; ++probe) {
     LLVMContext context;
     context.setOpaquePointers(false);
     auto parsed = parseBitcodeFile(MemoryBufferRef(StringRef(bitcode.data(), bitcode.size()), "probe"), context);
@@ -29,6 +29,7 @@ static bool CheckBindingQualification(llvm::Module &module) {
     IRBuilder<> builder(clone->getContext());
     if (probe == 0) texture->replaceOperandWith(3, ConstantAsMetadata::get(builder.getInt32(DXMT_MSC_MINMAX_SPACE)));
     if (probe == 1) texture->replaceOperandWith(5, ConstantAsMetadata::get(builder.getInt32(2)));
+    if (probe == 9) texture->replaceOperandWith(6, ConstantAsMetadata::get(builder.getInt32(5))); // Cube remains excluded.
     CallInst *sample = nullptr;
     for (auto &function : *clone) for (auto &block : function) for (auto &instruction : block)
       if (auto *call = dyn_cast<CallInst>(&instruction))
@@ -133,6 +134,8 @@ static int TransformContainer(const char *path, const char *mode) {
   const bool binding_two = !std::strcmp(mode, "binding-two");
   const bool binding_grad = !std::strcmp(mode, "binding-grad");
   if (samples.size() != (binding_two ? 2 : 1)) return 1;
+  // Keep every generated tap/ordinary branch on the original array layer.
+  auto *array_coordinate = samples[0]->getArgOperand(5);
   IRBuilder<> builder(context);
   auto number = [&](float value) { return ConstantFP::get(builder.getFloatTy(), value); };
   const bool maximum = !std::strcmp(mode, "maximum");
@@ -163,6 +166,10 @@ static int TransformContainer(const char *path, const char *mode) {
     if (binding_two && (records[1].texture_space || records[1].texture_register ||
         records[1].sampler_space || records[1].sampler_register != 1)) return 1;
   } else if (!dxmt::dxil::LowerReductionSampleLevel2D(*samples[0], state, error)) { errs() << error; return 1; }
+  for (auto &function : **parsed) for (auto &block : function) for (auto &instruction : block)
+    if (auto *call = dyn_cast<CallInst>(&instruction))
+      if (!binding_two && call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32" &&
+          call->getArgOperand(5) != array_coordinate) return 1;
   // DXC's older text assembler requires explicit names for the newly inserted
   // unnamed values/blocks, exactly as the typed-origin preparation path does.
   for (auto &function : **parsed) for (auto &block : function) {
