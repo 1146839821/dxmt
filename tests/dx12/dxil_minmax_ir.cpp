@@ -229,6 +229,41 @@ int main(int argc, char **argv) {
   // Two mip footprints, four tap sites each; six optional spatial taps, one
   // optional upper mip, and a no-sample empty-set branch.
   if (samples != 8 || dimensions != 3 || conditional != 8) return 1;
+  auto *gradient_function = Function::Create(FunctionType::get(f32,
+      {handle, handle, f32, f32, f32, f32}, false), Function::ExternalLinkage, "gradient", module);
+  builder.SetInsertPoint(BasicBlock::Create(context, "entry", gradient_function));
+  auto gradient = module.getOrInsertFunction("dx.op.sampleGrad.f32", result_type,
+      i32, handle, handle, f32, f32, f32, f32, i32, i32, i32, f32, f32, f32, f32, f32, f32, f32);
+  auto *gradient_call = builder.CreateCall(gradient, {builder.getInt32(63), gradient_function->getArg(0),
+      gradient_function->getArg(1), ConstantFP::get(f32, 0.5), ConstantFP::get(f32, 0.5),
+      UndefValue::get(f32), UndefValue::get(f32), builder.getInt32(0), builder.getInt32(0),
+      UndefValue::get(i32), gradient_function->getArg(2), gradient_function->getArg(3), UndefValue::get(f32),
+      gradient_function->getArg(4), gradient_function->getArg(5), UndefValue::get(f32), UndefValue::get(f32)});
+  builder.CreateRet(ConstantFP::get(f32, 0));
+  const auto instructions_before = gradient_function->getEntryBlock().size();
+  const auto declarations_before = module.size();
+  gradient_call->setArgOperand(0, builder.getInt32(62));
+  if (dxmt::dxil::CreateReductionGradientLOD2D(*gradient_call, error) || error.empty() ||
+      gradient_function->getEntryBlock().size() != instructions_before || module.size() != declarations_before) return 1;
+  gradient_call->setArgOperand(0, builder.getInt32(63));
+  auto *gradient_lod = dxmt::dxil::CreateReductionGradientLOD2D(*gradient_call, error);
+  if (!gradient_lod || !error.empty()) { errs() << error; return 1; }
+  cast<ReturnInst>(gradient_function->getEntryBlock().getTerminator())->setOperand(0, gradient_lod);
+  unsigned abs_calls = 0, sqrt_calls = 0, log_calls = 0, dimension_calls = 0;
+  for (auto &instruction : gradient_function->getEntryBlock()) {
+    if (auto *fp_operation = dyn_cast<FPMathOperator>(&instruction))
+      if (fp_operation->getFastMathFlags().any()) return 1;
+    auto *operation = dyn_cast<CallInst>(&instruction);
+    if (!operation || !operation->getCalledFunction()) continue;
+    auto name = operation->getCalledFunction()->getName();
+    dimension_calls += name == "dx.op.getDimensions";
+    if (name != "dx.op.unary.f32") continue;
+    auto opcode = cast<ConstantInt>(operation->getArgOperand(0))->getZExtValue();
+    abs_calls += opcode == 6;
+    sqrt_calls += opcode == 24;
+    log_calls += opcode == 23;
+  }
+  if (abs_calls != 4 || sqrt_calls != 1 || log_calls != 2 || dimension_calls != 1 || verifyModule(module, &errs())) return 1;
   module.print(outs(), nullptr);
   return 0;
 }

@@ -1,6 +1,7 @@
 #include "dxil_minmax.hpp"
 #include <functional>
 #include <array>
+#include <limits>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
@@ -11,6 +12,7 @@
 namespace dxmt::dxil {
 namespace {
 constexpr unsigned SampleLevel = 62, GetDimensions = 72, Floor = 27, FMax = 35, FMin = 36;
+constexpr unsigned SampleGrad = 63, FAbs = 6, Log2 = 23, Sqrt = 24;
 constexpr unsigned MinLinear = 1, MagLinear = 2, MipLinear = 4, Maximum = 8;
 bool IsFloat4Status(llvm::Type *type) {
   auto *structure = llvm::dyn_cast<llvm::StructType>(type);
@@ -45,6 +47,83 @@ Components OptionalTap(llvm::IRBuilder<> &builder, llvm::Value *condition,
   }
   return result;
 }
+}
+
+llvm::Value *CreateReductionGradientLOD2D(llvm::CallInst &sample, std::string &error) {
+  using namespace llvm;
+  error.clear();
+  auto reject = [&](const char *reason) -> Value * { error = reason; return nullptr; };
+  auto *callee = sample.getCalledFunction();
+  if (!callee || callee->getName() != "dx.op.sampleGrad.f32" || sample.arg_size() != 17 ||
+      !IsFloat4Status(sample.getType())) return reject("expected float SampleGrad signature");
+  IRBuilder<> b(&sample);
+  auto *i32 = b.getInt32Ty();
+  auto *f32 = b.getFloatTy();
+  auto &module = *sample.getModule();
+  auto *handle = StructType::getTypeByName(sample.getContext(), "dx.types.Handle");
+  auto *opcode = dyn_cast<ConstantInt>(sample.getArgOperand(0));
+  if (!opcode || opcode->getType() != i32 || opcode->getZExtValue() != SampleGrad || !handle ||
+      sample.getArgOperand(1)->getType() != handle || sample.getArgOperand(2)->getType() != handle)
+    return reject("invalid SampleGrad opcode or handles");
+  for (unsigned i = 3; i < 17; ++i)
+    if (sample.getArgOperand(i)->getType() != (i >= 7 && i < 10 ? i32 : f32))
+      return reject("invalid SampleGrad operand types");
+  auto *dimensions_type = StructType::getTypeByName(sample.getContext(), "dx.types.Dimensions");
+  if (dimensions_type) {
+    if (dimensions_type->isOpaque() || dimensions_type->getNumElements() != 4)
+      return reject("invalid dimensions type");
+    for (auto *element : dimensions_type->elements())
+      if (element != i32) return reject("invalid dimensions components");
+  }
+  auto *dimensions_function = module.getFunction("dx.op.getDimensions");
+  if (dimensions_function && (!dimensions_type || dimensions_function->getFunctionType() !=
+      FunctionType::get(dimensions_type, {i32, handle, i32}, false)))
+    return reject("invalid dimensions signature");
+  for (auto name : {"dx.op.unary.f32", "dx.op.binary.f32"}) {
+    auto *function = module.getFunction(name);
+    auto *type = name == StringRef("dx.op.unary.f32") ?
+        FunctionType::get(f32, {i32, f32}, false) : FunctionType::get(f32, {i32, f32, f32}, false);
+    if (function && function->getFunctionType() != type) return reject("invalid gradient intrinsic signature");
+  }
+  // Validate all shared declarations before mutating the private module.
+  if (!dimensions_type) dimensions_type = StructType::create(sample.getContext(),
+      {i32, i32, i32, i32}, "dx.types.Dimensions");
+  auto dimensions = module.getOrInsertFunction("dx.op.getDimensions", dimensions_type, i32, handle, i32);
+  auto unary = module.getOrInsertFunction("dx.op.unary.f32", f32, i32, f32);
+  auto binary = module.getOrInsertFunction("dx.op.binary.f32", f32, i32, f32, f32);
+  auto un = [&](unsigned op, Value *value) { return b.CreateCall(unary, {b.getInt32(op), value}); };
+  auto max = [&](Value *x, Value *y) { return b.CreateCall(binary, {b.getInt32(FMax), x, y}); };
+  auto fp = [&](float value) { return ConstantFP::get(f32, value); };
+  auto *size = b.CreateCall(dimensions, {b.getInt32(GetDimensions), sample.getArgOperand(1), b.getInt32(0)});
+  std::array<Value *, 2> dx, dy;
+  Value *scale = fp(0);
+  for (unsigned axis = 0; axis < 2; ++axis) {
+    auto *extent = b.CreateUIToFP(b.CreateExtractValue(size, axis), f32);
+    dx[axis] = b.CreateFMul(sample.getArgOperand(10 + axis), extent);
+    dy[axis] = b.CreateFMul(sample.getArgOperand(13 + axis), extent);
+    scale = max(scale, un(FAbs, dx[axis]));
+    scale = max(scale, un(FAbs, dy[axis]));
+  }
+  // Same normalization and degenerate-gradient rules as AIRBuilder's
+  // CreateIsotropicGradientLOD; no fast-math flags may erase zero/Inf cases.
+  auto *safe_scale = b.CreateSelect(b.CreateFCmpOGT(scale, fp(0)), scale, fp(1));
+  Value *a = fp(0), *cross = fp(0), *c = fp(0);
+  for (unsigned axis = 0; axis < 2; ++axis) {
+    auto *x = b.CreateFDiv(dx[axis], safe_scale);
+    auto *y = b.CreateFDiv(dy[axis], safe_scale);
+    a = b.CreateFAdd(a, b.CreateFMul(x, x));
+    cross = b.CreateFAdd(cross, b.CreateFMul(x, y));
+    c = b.CreateFAdd(c, b.CreateFMul(y, y));
+  }
+  auto *difference = b.CreateFSub(a, c);
+  auto *cross_squared = b.CreateFMul(cross, cross);
+  auto *discriminant = b.CreateFAdd(b.CreateFMul(difference, difference), b.CreateFMul(fp(4), cross_squared));
+  auto *major = b.CreateFMul(fp(0.5), b.CreateFAdd(b.CreateFAdd(a, c), un(Sqrt, discriminant)));
+  auto *determinant = b.CreateFSub(b.CreateFMul(a, c), cross_squared);
+  auto *squared = b.CreateSelect(b.CreateFCmpOGT(determinant, fp(0)), major, max(a, c));
+  auto *lod = b.CreateFAdd(b.CreateFMul(fp(0.5), un(Log2, squared)), un(Log2, safe_scale));
+  auto *infinity = fp(std::numeric_limits<float>::infinity());
+  return b.CreateSelect(b.CreateFCmpOEQ(scale, infinity), infinity, lod, "dxmt.gradient.lod");
 }
 
 bool LowerReductionSampleLevel2D(llvm::CallInst &sample,
