@@ -669,8 +669,6 @@ read_control_flow(
                  texture.resource_type == ResourceType::Texture2D ||
                  texture.resource_type == ResourceType::Texture2DArray ||
                  texture.resource_type == ResourceType::Texture3D);
-            if constexpr (!std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleLOD>)
-              eligible &= !decoded.min_lod_clamp;
             if constexpr (std::is_same_v<std::decay_t<decltype(decoded)>, InstSample> ||
                           std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleBias>)
               eligible &= sm50_shader->shader_type == microsoft::D3D10_SB_PIXEL_SHADER;

@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
+#include "d3d12_device.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -91,6 +92,7 @@ struct ShaderSet {
   std::vector<uint8_t> pixel;
   std::vector<uint8_t> pixel_query;
   std::vector<uint8_t> pixel_sample, pixel_sample_mip, pixel_sample_bias, pixel_sample_combined;
+  std::vector<uint8_t> pixel_sample_clamp, pixel_bias_clamp, pixel_sample_empty, pixel_bias_force;
 };
 
 bool CompileShaders(pD3DCompile compile_shader, ShaderSet &shaders) {
@@ -100,10 +102,18 @@ bool CompileShaders(pD3DCompile compile_shader, ShaderSet &shaders) {
   const std::string sample_mip = std::string(sample_prefix) + "Sample(s,p.xy*0.23);}";
   const std::string sample_bias = std::string(sample_prefix) + "SampleBias(s,p.xy*0.23,0.75);}";
   const std::string sample_combined = std::string(sample_prefix) + "SampleBias(s,p.xy*0.23,-0.75);}";
+  const std::string sample_clamp = std::string(sample_prefix) + "Sample(s,p.xy*0.23,int2(0,0),2.25);}";
+  const std::string bias_clamp = std::string(sample_prefix) + "SampleBias(s,p.xy*0.23,0.75,int2(0,0),1.25);}";
+  const std::string sample_empty = std::string(sample_prefix) + "Sample(s,p.xy*0.23,int2(0,0),3.1);}";
+  const std::string bias_force = std::string(sample_prefix) + "SampleBias(s,p.xy*0.23,0.75,int2(0,0),3.0);}";
   if (!CompileShader(compile_shader, sample_source.c_str(), "implicit.hlsl", "ps_main", "ps_5_0", shaders.pixel_sample) ||
       !CompileShader(compile_shader, sample_mip.c_str(), "implicit-mip.hlsl", "ps_main", "ps_5_0", shaders.pixel_sample_mip) ||
       !CompileShader(compile_shader, sample_bias.c_str(), "implicit-bias.hlsl", "ps_main", "ps_5_0", shaders.pixel_sample_bias) ||
-      !CompileShader(compile_shader, sample_combined.c_str(), "implicit-combined.hlsl", "ps_main", "ps_5_0", shaders.pixel_sample_combined))
+      !CompileShader(compile_shader, sample_combined.c_str(), "implicit-combined.hlsl", "ps_main", "ps_5_0", shaders.pixel_sample_combined) ||
+      !CompileShader(compile_shader, sample_clamp.c_str(), "implicit-clamp.hlsl", "ps_main", "ps_5_0", shaders.pixel_sample_clamp) ||
+      !CompileShader(compile_shader, bias_clamp.c_str(), "bias-clamp.hlsl", "ps_main", "ps_5_0", shaders.pixel_bias_clamp) ||
+      !CompileShader(compile_shader, sample_empty.c_str(), "implicit-empty.hlsl", "ps_main", "ps_5_0", shaders.pixel_sample_empty) ||
+      !CompileShader(compile_shader, bias_force.c_str(), "bias-force.hlsl", "ps_main", "ps_5_0", shaders.pixel_bias_force))
     return false;
   static constexpr char vertex_source[] = R"(
 struct VSInput {
@@ -291,8 +301,13 @@ struct TestCase {
   bool geometry_root_srv_uav = false;
   bool null_texture_query = false;
   bool release_resources_before_execute = false;
-  unsigned sampling = 0; // 1/2 spatial min/max; 3 mip; 4 bias; 5 combined bias; 6 ordinary.
+  unsigned sampling = 0; // 1/2 min/max; 3 mip; 4/5 bias; 6 ordinary; 7..10 instruction clamps.
   bool sampling_dynamic = false;
+  float sampling_resource_clamp = 0;
+
+  unsigned SampleMipCount() const {
+    return (sampling >= 3 && sampling <= 5) || sampling >= 7 ? 4 : 1;
+  }
 };
 
 bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &test) {
@@ -501,7 +516,10 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   pso_desc.VS = {vertex_shader.data(), vertex_shader.size()};
   pso_desc.GS = test.null_texture_query || test.sampling ? D3D12_SHADER_BYTECODE{}
                                          : D3D12_SHADER_BYTECODE{geometry_shader.data(), geometry_shader.size()};
-  const auto &pixel_shader = test.sampling == 3 ? shaders.pixel_sample_mip :
+  const auto &pixel_shader = test.sampling == 7 ? shaders.pixel_sample_clamp :
+      test.sampling == 8 ? shaders.pixel_bias_clamp : test.sampling == 9 ? shaders.pixel_sample_empty :
+      test.sampling == 10 ? shaders.pixel_bias_force :
+      test.sampling == 3 ? shaders.pixel_sample_mip :
       test.sampling == 4 ? shaders.pixel_sample_bias : test.sampling == 5 ? shaders.pixel_sample_combined :
       test.sampling ? shaders.pixel_sample : test.null_texture_query ? shaders.pixel_query : shaders.pixel;
   pso_desc.PS = {pixel_shader.data(), pixel_shader.size()};
@@ -518,6 +536,8 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   if (!CheckHR("CreateGraphicsPipelineState",
                device->CreateGraphicsPipelineState(&pso_desc, IID_PPV_ARGS(&pso))))
     return fail("graphics PSO creation failed");
+  if (test.sampling >= 7 && !static_cast<dxmt::MTLD3D12PipelineState *>(pso)->air_sampler_reduction_eligible)
+    return fail("instruction clamp consumer qualification missing");
 
   auto default_heap = HeapProperties(D3D12_HEAP_TYPE_DEFAULT);
   auto upload_heap = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
@@ -551,7 +571,8 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     null_srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     null_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     null_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    null_srv.Texture2D.MipLevels = test.sampling >= 3 && test.sampling <= 5 ? 4 : 1;
+    null_srv.Texture2D.MipLevels = test.SampleMipCount();
+    null_srv.Texture2D.ResourceMinLODClamp = test.sampling_resource_clamp;
     if (test.sampling) {
       auto desc = RenderTargetDescription();
       desc.Flags = D3D12_RESOURCE_FLAG_NONE;
@@ -695,7 +716,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
   list->SetPipelineState(pso);
   if (test.sampling) {
-    const unsigned mips = test.sampling >= 3 && test.sampling <= 5 ? 4 : 1;
+    const unsigned mips = test.SampleMipCount();
     for (unsigned mip = 0; mip < mips; ++mip) {
       D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
       dst.pResource = sample_texture; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = mip;
@@ -829,7 +850,8 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     uav_readback->Unmap(0, nullptr);
     mapped_uav_readback = nullptr;
   }
-  if ((pixel & 0x00ffffffu) != test.expected_rgb) {
+  const UINT expected_pixel = test.expected_rgb | (test.sampling == 9 ? 0 : 0xff000000u);
+  if ((pixel & 0x00ffffffu) != test.expected_rgb || (test.sampling >= 7 && pixel != expected_pixel)) {
     std::cerr << "DXBC SM5 " << test.name << ": readback mismatch: 0x" << std::hex << pixel
               << " (expected 0x" << test.expected_rgb << ")" << std::dec << "\n";
     cleanup();
@@ -845,6 +867,22 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
 int main(int argc, char **argv) {
   static constexpr TestCase all_cases[] = {
+      {.name = "instruction-sample-static", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 96, .no_input = true, .sampling = 7},
+      {.name = "instruction-sample-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 96, .no_input = true, .sampling = 7, .sampling_dynamic = true},
+      {.name = "instruction-bias-static", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 160, .no_input = true, .sampling = 8, .sampling_resource_clamp = 3.0f},
+      {.name = "instruction-bias-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 160, .no_input = true, .sampling = 8, .sampling_dynamic = true, .sampling_resource_clamp = 3.0f},
+      {.name = "instruction-empty-static", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 0, .no_input = true, .sampling = 9},
+      {.name = "instruction-empty-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 0, .no_input = true, .sampling = 9, .sampling_dynamic = true},
+      {.name = "instruction-bias-force-static", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 160, .no_input = true, .sampling = 10, .sampling_resource_clamp = 1.25f},
+      {.name = "instruction-bias-force-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 160, .no_input = true, .sampling = 10, .sampling_dynamic = true, .sampling_resource_clamp = 1.25f},
       {"implicit-min-static", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
        16, true, false, false, false, false, false, 1, false},
       {"implicit-min-dynamic", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,

@@ -22,7 +22,7 @@ Task Analysis for this refresh:
 | Production gap | Current boundary | Next closure work |
 | --- | --- | --- |
 | Typed UAV | Production origin lowering and bounded direct/non-updating-indirect probes exist; additional-format declaration remains FALSE | Default production enablement, remaining indirect/provenance/view/lifetime contracts, then complete matrices |
-| MinMax | Opt-in AIR explicit/gradient/implicit operations and known-format resource-clamp admission exist; focused clamp GPU readbacks now pass | Instruction clamp admission and broader operation/format/shape contracts; cube, anisotropic, feedback and DXIL implementation remain open |
+| MinMax | Opt-in AIR explicit/gradient/implicit operations and known-format resource/instruction clamps exist; focused GPU readbacks pass | Broader operation/format/shape contracts; cube, anisotropic, meaningful feedback and DXIL implementation remain open |
 | Tiled Tier 2 | Declared NOT_SUPPORTED | Packed mips, mapping, feedback, filtering/LOD, lifetime and synchronization closure |
 | LogicOp (no-private) | OPTIONS reports FALSE in this variant | Implement a compliant path or explicitly exclude this variant from the FL12_0 claim; tests alone cannot close this gap |
 
@@ -52,8 +52,9 @@ and run the complete acceptance matrices. Add only focused regressions needed
 to validate each implementation change during this phase. Do not repeat full
 matrices after every descriptor/ABI preparation checkpoint.
 
-Current next action after the resource-clamp checkpoint is instruction-clamp
-admission, not another status-only or full-matrix rerun.
+Instruction-clamp admission is now connected. Current next actions are the
+remaining MinMax production operations/backends, not another status-only or
+full-matrix rerun.
 
 Task Result: refreshed current status and corrected the gate's stale MinMax
 diagnostic without changing any gate status or capability. Gate units pass
@@ -74,6 +75,13 @@ Both builds pass fifteen focused GPU cases and recording/live validity probes,
 including nonzero view origin and CPU-only descriptor copies. Instruction
 clamps/feedback and DXIL reduction remain rejected. Unknown-format GPU admission
 coverage and full MinMax acceptance are still unverified; no FL promotion.
+
+Instruction-clamp follow-up (2026-10-03): supported AIR SampleGrad/pixel
+Sample/SampleBias admit clamps (`D3D12_MINMAX_INSTRUCTION_CLAMP.md`). NULL status
+destinations are normalized to absence; actual feedback stays rejected. Both
+builds pass 12 gradient and 8 pixel clamp GPU cases, with qualification/sentinel
+checks preventing false-zero acceptance. This closes bounded AIR operation
+admission, not full MinMax, unknown-format/shape matrices or FL12_0. No promotion.
 
 ## Task Analysis
 

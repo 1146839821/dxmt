@@ -1627,8 +1627,8 @@ Converter::operator()(const InstSample &sample) {
   }
 
   if (Sampler->Reduction) {
-    if (sample.feedback || sample.min_lod_clamp) {
-      failure = "AIR Min/Max implicit feedback or instruction clamp is unsupported";
+    if (sample.feedback) {
+      failure = "AIR Min/Max implicit feedback is unsupported";
       return;
     }
     auto result = CreateImplicitReductionSample(*Tex, *Sampler, Coord, ArrayIndex, nullptr, sample.offsets, [&] {
@@ -1875,8 +1875,8 @@ Converter::operator()(const InstSampleBias &sample) {
   auto Bias = ir.CreateFAdd(Sampler->Bias, InstructionBias);
 
   if (Sampler->Reduction) {
-    if (sample.feedback || sample.min_lod_clamp) {
-      failure = "AIR Min/Max implicit feedback or instruction clamp is unsupported";
+    if (sample.feedback) {
+      failure = "AIR Min/Max implicit feedback is unsupported";
       return;
     }
     auto result = CreateImplicitReductionSample(*Tex, *Sampler, Coord, ArrayIndex, InstructionBias, sample.offsets, [&] {
@@ -1981,11 +1981,11 @@ Converter::operator()(const InstSampleDerivative &sample) {
   }
 
   if (Sampler->Reduction) {
-    if (sample.feedback || sample.min_lod_clamp ||
+    if (sample.feedback ||
         (Tex->Logical != Texture::texture1d && Tex->Logical != Texture::texture1d_array &&
          Tex->Logical != Texture::texture2d && Tex->Logical != Texture::texture2d_array &&
          Tex->Logical != Texture::texture3d) || Tex->Texture.sample_type != Texture::sample_float) {
-      failure = "AIR Min/Max SampleGrad texture kind/type, feedback or instruction clamp is unsupported";
+      failure = "AIR Min/Max SampleGrad texture kind/type or feedback is unsupported";
       return;
     }
     auto lod = air.CreateIsotropicGradientLOD(Tex->Texture, Tex->Handle, DDX, DDY);

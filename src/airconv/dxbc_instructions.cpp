@@ -610,7 +610,8 @@ Instruction readInstruction(
                                     microsoft::D3D10_SB_OPERAND_TYPE_NULL)
                          ? readSrcOperand(Inst.m_Operands[4 + sparse], phase, OperandDataType::Float)
                          : std::optional<SrcOperand>(),
-      .feedback = sparse ? readDstOperand(Inst.m_Operands[sparse], phase, OperandDataType::Integer)
+      .feedback = (sparse && Inst.m_Operands[sparse].OperandType() != microsoft::D3D10_SB_OPERAND_TYPE_NULL)
+                         ? readDstOperand(Inst.m_Operands[sparse], phase, OperandDataType::Integer)
                          : std::optional<DstOperand>(),
     };
     shader_info.srvMap[inst.src_resource.range_id].sampled = true;
@@ -631,7 +632,8 @@ Instruction readInstruction(
                                     microsoft::D3D10_SB_OPERAND_TYPE_NULL)
                          ? readSrcOperand(Inst.m_Operands[5 + sparse], phase, OperandDataType::Float)
                          : std::optional<SrcOperand>(),
-      .feedback = sparse ? readDstOperand(Inst.m_Operands[sparse], phase, OperandDataType::Integer)
+      .feedback = (sparse && Inst.m_Operands[sparse].OperandType() != microsoft::D3D10_SB_OPERAND_TYPE_NULL)
+                         ? readDstOperand(Inst.m_Operands[sparse], phase, OperandDataType::Integer)
                          : std::optional<DstOperand>(),
     };
     shader_info.srvMap[inst.src_resource.range_id].sampled = true;
@@ -653,7 +655,8 @@ Instruction readInstruction(
                                     microsoft::D3D10_SB_OPERAND_TYPE_NULL)
                          ? readSrcOperand(Inst.m_Operands[6 + sparse], phase, OperandDataType::Float)
                          : std::optional<SrcOperand>(),
-      .feedback = sparse ? readDstOperand(Inst.m_Operands[sparse], phase, OperandDataType::Integer)
+      .feedback = (sparse && Inst.m_Operands[sparse].OperandType() != microsoft::D3D10_SB_OPERAND_TYPE_NULL)
+                         ? readDstOperand(Inst.m_Operands[sparse], phase, OperandDataType::Integer)
                          : std::optional<DstOperand>(),
     };
     shader_info.srvMap[inst.src_resource.range_id].sampled = true;

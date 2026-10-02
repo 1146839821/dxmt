@@ -88,7 +88,8 @@ static bool CheckSamplerStorage(WMT::Device device, dxmt::MTLD3D12SamplerDescrip
 }
 
 static bool CompileDXBC(std::vector<char> &shader, bool unsupported_reduction = false, bool gradient = false,
-                        unsigned gradient_case = 0, bool line = false, bool line_array = false, bool clamp_probe = false) {
+                        unsigned gradient_case = 0, bool line = false, bool line_array = false, bool clamp_probe = false,
+                        float instruction_clamp = -1) {
   HMODULE compiler = LoadLibraryA(D3DCOMPILER_DLL_A);
   if (!compiler)
     return false;
@@ -101,6 +102,11 @@ static bool CompileDXBC(std::vector<char> &shader, bool unsupported_reduction = 
   static const char clamp_source[] =
       "Texture2D<float4> t:register(t0); SamplerState s:register(s0); RWBuffer<uint> o:register(u0);"
       "[numthreads(1,1,1)] void main(){uint4 v=(uint4)(t.SampleLevel(s,float2(0.5,0.5),0)*255+0.5);"
+      "o[0]=v.x|(v.y<<8)|(v.z<<16)|(v.w<<24);}";
+  const std::string instruction_source =
+      "Texture2D<float4> t:register(t0); SamplerState s:register(s0); RWBuffer<uint> o:register(u0);"
+      "[numthreads(1,1,1)] void main(){uint4 v=(uint4)(t.SampleGrad(s,float2(0.5,0.5),"
+      "float2(0,0),float2(0,0),int2(0,0)," + std::to_string(instruction_clamp) + ")*255+0.5);"
       "o[0]=v.x|(v.y<<8)|(v.z<<16)|(v.w<<24);}";
   const char *gradient_x[] = {"float2(1,0)", "float2(0.23,0)", "float2(0.23,0.23)",
                              "float2(0.23,0)", "float2(0,0)"};
@@ -116,14 +122,16 @@ static bool CompileDXBC(std::vector<char> &shader, bool unsupported_reduction = 
       "Texture2D<float4> t:register(t0); SamplerState s:register(s0);"
       "RWBuffer<uint> o:register(u0);"
       "[numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){"
-      "o[0]=(uint)(t.SampleGrad(s,float2(0.5,0.5),float2(1,0),float2(0,1),int2(0,0),0.5).x*255+0.5);}";
+      "uint status; float4 v=t.SampleGrad(s,float2(0.5,0.5),float2(1,0),float2(0,1),int2(0,0),0.5,status);"
+      "o[0]=(uint)(v.x*255+0.5)+status;}";
   ID3DBlob *blob = nullptr, *error = nullptr;
   const std::string line_source = std::string(line_array ? "Texture1DArray<float4>" : "Texture1D<float4>") +
       " t:register(t0); SamplerState s:register(s0); RWBuffer<uint> o:register(u0);"
       "[numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){o[0]=(uint)(t." +
       (gradient ? "SampleGrad" : "SampleLevel") + "(s," + (line_array ? "float2(0.5,1)" : "0.5") +
       (gradient ? (gradient_case ? ",0.23,0.0" : ",1.0,0.0") : ",0.0") + ").x*255+0.5);}";
-  const char *selected_source = clamp_probe ? clamp_source : unsupported_reduction ? unsupported_source : line ? line_source.c_str() :
+  const char *selected_source = instruction_clamp >= 0 ? instruction_source.c_str() : clamp_probe ? clamp_source :
+      unsupported_reduction ? unsupported_source : line ? line_source.c_str() :
       gradient ? gradient_source.c_str() : source;
   HRESULT hr = compile ? compile(selected_source, std::strlen(selected_source),
                                 nullptr, nullptr, nullptr, "main", "cs_5_0",
@@ -179,6 +187,7 @@ main(int argc, char **argv) {
     bool copy_resource = false;
     bool switch_sampler = false;
     bool null_static_resource = false;
+    float instruction_clamp = -1;
   };
   const ClampProbe clamp_probes[] = {
       {.name = "--minimum-clamp-rgba", .clamp = 0.5f, .expected = 0},
@@ -203,6 +212,28 @@ main(int argc, char **argv) {
        .static_resource = true, .switch_sampler = true},
       {.name = "--minimum-clamp-static-null", .clamp = 0.5f, .expected = 0,
        .static_resource = true, .switch_sampler = true, .null_static_resource = true},
+      {.name = "--minimum-instruction-rgba", .clamp = 0, .expected = 0, .instruction_clamp = 0.5f},
+      {.name = "--minimum-instruction-r", .clamp = 0, .expected = 0xff000000, .r8 = true, .instruction_clamp = 0.5f},
+      {.name = "--minimum-instruction-swizzle", .clamp = 0, .expected = 0x0000ffff,
+       .r8 = true, .swizzle = true, .instruction_clamp = 0.5f},
+      {.name = "--minimum-instruction-mip", .clamp = 0, .expected = 0xff000060,
+       .multi_mip = true, .instruction_clamp = 1.25f},
+      {.name = "--minimum-instruction-last", .clamp = 0, .expected = 0xff0000a0,
+       .multi_mip = true, .instruction_clamp = 3.0f},
+      {.name = "--minimum-instruction-past", .clamp = 0, .expected = 0,
+       .multi_mip = true, .instruction_clamp = 3.1f},
+      {.name = "--minimum-instruction-resource-wins", .clamp = 3.0f, .expected = 0xff0000a0,
+       .multi_mip = true, .instruction_clamp = 1.25f},
+      {.name = "--minimum-instruction-shader-wins", .clamp = 1.25f, .expected = 0xff0000a0,
+       .multi_mip = true, .instruction_clamp = 3.0f},
+      {.name = "--minimum-instruction-above-max", .clamp = 0, .expected = 0xff000060,
+       .multi_mip = true, .max_lod_zero = true, .instruction_clamp = 2.25f},
+      {.name = "--minimum-instruction-view", .clamp = 1.0f, .expected = 0xff000060,
+       .multi_mip = true, .first_mip = 1, .view_mips = 2, .instruction_clamp = 1.0f},
+      {.name = "--minimum-instruction-view-past", .clamp = 1.0f, .expected = 0,
+       .multi_mip = true, .first_mip = 1, .view_mips = 2, .instruction_clamp = 1.1f},
+      {.name = "--minimum-instruction-root", .clamp = 0, .expected = 0,
+       .root_sampler = true, .instruction_clamp = 0.5f},
   };
   const ClampProbe *clamp_probe = nullptr;
   if (argc == 3)
@@ -291,7 +322,8 @@ main(int argc, char **argv) {
     return 2;
   std::vector<char> shader;
   if (dxbc) {
-    if (!CompileDXBC(shader, expect_air_unsupported || expect_consumer_unsupported, gradient_probe, grad_case, line, line_array, clamp_probe != nullptr))
+    if (!CompileDXBC(shader, expect_air_unsupported || expect_consumer_unsupported, gradient_probe, grad_case,
+            line, line_array, clamp_probe != nullptr, clamp_probe ? clamp_probe->instruction_clamp : -1))
       return 3;
   } else {
     std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
@@ -357,6 +389,7 @@ main(int argc, char **argv) {
   UINT row_count = 0;
   UINT64 row_size = 0;
   UINT64 total_size = 0;
+  UINT64 sentinel_offset = 0;
   void *upload_data = nullptr;
   D3D12_CPU_DESCRIPTOR_HANDLE resource_cpu = {};
   D3D12_CPU_DESCRIPTOR_HANDLE uav_cpu = {};
@@ -492,6 +525,10 @@ main(int argc, char **argv) {
   if (grad_lod || line_array)
     device->GetCopyableFootprints(&texture_desc, 0, line_array ? 2 : 4, 0, mip_footprints, mip_rows, mip_row_sizes, &total_size);
   buffer_desc.Width = grad_lod || line_array ? total_size : reduction ? 512 : 256;
+  if (clamp_probe) {
+    sentinel_offset = buffer_desc.Width;
+    buffer_desc.Width += sizeof(UINT);
+  }
   buffer_desc.Height = 1;
   buffer_desc.DepthOrArraySize = 1;
   buffer_desc.MipLevels = 1;
@@ -527,6 +564,10 @@ main(int argc, char **argv) {
       memcpy(static_cast<char *>(upload_data) + mip_footprints[1].Offset, pixels + 2, 2 * sizeof(UINT));
     else if (!line)
       memcpy(static_cast<char *>(upload_data) + footprint.Footprint.RowPitch, pixels + 2, 2 * sizeof(UINT));
+  }
+  if (clamp_probe) {
+    const UINT sentinel = 0x6d5a4b3c;
+    memcpy(static_cast<char *>(upload_data) + sentinel_offset, &sentinel, sizeof(sentinel));
   }
   upload->Unmap(0, nullptr);
 
@@ -589,7 +630,8 @@ main(int argc, char **argv) {
   if (!CheckHR(
           "CreateOutputBuffer",
           device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
-                                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&output))))
+                                           clamp_probe ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                           nullptr, IID_PPV_ARGS(&output))))
     goto cleanup;
   device->CreateUnorderedAccessView(output, nullptr, &uav_desc, uav_cpu);
   if (direct_indexed_uav_texture) {
@@ -714,7 +756,7 @@ main(int argc, char **argv) {
     const HRESULT hr = device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso));
     if (expect_pso_unsupported || expect_air_unsupported) {
       if (hr == (expect_air_unsupported ? E_FAIL : E_NOTIMPL) && !pso) {
-        std::cout << (expect_air_unsupported ? "AIR reduction SampleGrad instruction clamp" : "MSC reduction root")
+        std::cout << (expect_air_unsupported ? "AIR reduction feedback consumer" : "MSC reduction root")
                   << " PSO rejected without fallback\n";
         result = 0;
       } else {
@@ -724,6 +766,10 @@ main(int argc, char **argv) {
     }
     if (!CheckHR("CreateComputePipelineState", hr))
       goto cleanup;
+    if (clamp_probe && !static_cast<dxmt::MTLD3D12PipelineState *>(pso)->air_sampler_reduction_eligible) {
+      std::cerr << "instruction/resource clamp consumer qualification missing\n";
+      goto cleanup;
+    }
     if (observation_probe && dxbc &&
         !static_cast<dxmt::MTLD3D12PipelineState *>(pso)->air_sampler_reduction_eligible) {
       std::cerr << "SampleLevel consumer qualification missing\n";
@@ -760,6 +806,14 @@ main(int argc, char **argv) {
     list->ResourceBarrier(1, &barrier);
   }
   heaps[0] = resource_heap;
+  if (clamp_probe) {
+    list->CopyBufferRegion(output, 0, upload, sentinel_offset, sizeof(UINT));
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition = {output, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+    list->ResourceBarrier(1, &barrier);
+  }
   if (!static_sampler)
     heaps[1] = sampler_heap;
   list->SetDescriptorHeaps(static_sampler ? 1 : 2, heaps);
