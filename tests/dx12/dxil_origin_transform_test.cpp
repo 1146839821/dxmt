@@ -83,6 +83,69 @@ declare void @dx.op.bufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i
   auto edit = [&](std::string &text, const std::string &from, const std::string &to) {
     text.replace(text.find(from), from.size(), to);
   };
+  std::string floating = input;
+  edit(floating, "%\"class.RWBuffer<unsigned int>\" = type { i32 }",
+      "%\"class.RWBuffer<unsigned int>\" = type { i32 }\n%\"class.RWBuffer<float>\" = type { float }");
+  for (const auto &from : {"ResRet.i32", "bufferLoad.i32"}) {
+    const std::string token = from;
+    const std::string replacement = token.substr(0, token.size() - 3) + "f32";
+    size_t position = 0;
+    while ((position = floating.find(token, position)) != std::string::npos) {
+      floating.replace(position, token.size(), replacement);
+      position += replacement.size();
+    }
+  }
+  edit(floating, "%dx.types.ResRet.f32 = type { i32, i32, i32, i32, i32 }",
+      "%dx.types.ResRet.f32 = type { float, float, float, float, i32 }");
+  edit(floating, "!6 = !{i32 0, %\"class.RWBuffer<unsigned int>\"", "!6 = !{i32 0, %\"class.RWBuffer<float>\"");
+  edit(floating, "false, !7}\n!7", "false, !9}\n!7");
+  floating += "!9 = !{i32 0, i32 9}\n";
+  edit(floating, "  call void @dx.op.bufferStore.i32", "  %6 = bitcast float %5 to i32\n  call void @dx.op.bufferStore.i32");
+  edit(floating, "i32 %5, i32 %5, i32 %5, i32 %5", "i32 %6, i32 %6, i32 %6, i32 %6");
+  std::string float_output;
+  check("scalar FLOAT load and bitcast", LowerTypedOrigin(floating, float_output, error) &&
+      float_output.find("phi %dx.types.ResRet.f32") != std::string::npos);
+  auto with_float_store = [&](std::string text) {
+    edit(text, "  ret void", "  call void @dx.op.bufferStore.f32(i32 69, %dx.types.Handle %2, i32 %3, i32 undef, float %5, float %5, float %5, float %5, i8 15)\n  ret void");
+    text += "declare void @dx.op.bufferStore.f32(i32, %dx.types.Handle, i32, i32, float, float, float, float, i8)\n";
+    return text;
+  };
+  std::string float_store = with_float_store(floating);
+  check("scalar FLOAT store", LowerTypedOrigin(float_store, float_output, error));
+  std::string float_bad = floating;
+  edit(float_bad, "!9 = !{i32 0, i32 9}", "!9 = !{i32 0, i32 5}");
+  reject("FLOAT component metadata mismatch", float_bad);
+  float_bad = input;
+  edit(float_bad, "ResRet.i32 @dx.op.bufferLoad.i32", "ResRet.f32 @dx.op.bufferLoad.f32");
+  reject("FLOAT operation on UINT resource", float_bad);
+  float_bad = floating;
+  edit(float_bad, "!8 = !{i32 1, %\"class.RWBuffer<unsigned int>\"", "!8 = !{i32 1, %\"class.RWBuffer<float>\"");
+  edit(float_bad, "false, !7}", "false, !9}");
+  reject("FLOAT output resource", float_bad);
+  float_bad = float_store;
+  edit(float_bad, "float %5, i8 15)", "float %5, i8 1)");
+  reject("FLOAT partial store mask", float_bad);
+  float_bad = floating;
+  edit(float_bad, "ResRet.f32 %4, 0", "ResRet.f32 %4, 4");
+  reject("FLOAT status lane", float_bad);
+  float_bad = floating;
+  edit(float_bad, "ResRet.f32 @dx.op.bufferLoad.f32", "ResRet.i32 @dx.op.bufferLoad.i32");
+  reject("UINT operation on FLOAT resource", float_bad);
+  float_bad = floating;
+  edit(float_bad, "  ret void", "  %7 = call i32 @dx.op.atomicBinOp.i32(i32 78, %dx.types.Handle %2, i32 0, i32 %3, i32 undef, i32 undef, i32 13)\n  ret void");
+  float_bad += "declare i32 @dx.op.atomicBinOp.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32)\n";
+  reject("integer atomic on FLOAT resource", float_bad);
+  std::string float_srv = floating;
+  edit(float_srv, "%\"class.RWBuffer<float>\" = type", "%\"class.Buffer<float>\" = type");
+  edit(float_srv, "!4 = !{null, !5, null, null}", "!4 = !{!12, !5, null, null}");
+  edit(float_srv, "!5 = !{!6, !8}", "!5 = !{!8}");
+  edit(float_srv, "!6 = !{i32 0, %\"class.RWBuffer<float>\"", "!6 = !{i32 0, %\"class.Buffer<float>\"");
+  edit(float_srv, "i1 false, i1 false, i1 false, !9}", "i32 0, !9}");
+  edit(float_srv, "i8 1, i32 0, i32 0, i1 false", "i8 0, i32 0, i32 0, i1 false");
+  float_srv += "!12 = !{!6}\n";
+  check("scalar FLOAT SRV", LowerTypedOrigin(float_srv, float_output, error));
+  float_bad = with_float_store(float_srv);
+  reject("FLOAT SRV write", float_bad);
   edit(two, "  %3 = call", "  %9 = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 9, i32 2, i1 false)\n  %3 = call");
   edit(two, "  ret void", "  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %9, i32 %3, i32 undef, i32 %5, i32 %5, i32 %5, i32 %5, i8 15)\n  ret void");
   edit(two, "!5 = !{!6, !8}", "!5 = !{!10, !8, !6}");

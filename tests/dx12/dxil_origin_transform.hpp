@@ -65,22 +65,24 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
   auto srvs = group(groups[1]), uavs = group(groups[2]);
   if ((groups[1] != "null" && srvs.empty()) || uavs.empty() || srvs.size() + uavs.size() > 3)
     return reject("expected one/two finite typed inputs and output u1");
-  struct Binding { unsigned resource_class, range, reg, slot; bool output; };
+  struct Binding { unsigned resource_class, range, reg, slot; bool output, floating; };
   std::map<std::pair<unsigned, unsigned>, Binding> bindings;
   bool slots[2] = {}, found_output = false;
   unsigned record_count = 0;
   auto resource = [&](const std::string &id, bool srv) {
     std::smatch value;
     const std::string pattern = "!\\{i32 ([0-9]{1,5}), %\\\"class." + std::string(srv ? "Buffer" : "RWBuffer") +
-        "<unsigned int>\\\"\\* undef, !\\\"\\\", i32 0, i32 ([012]), i32 1, i32 10, " +
+        "<(unsigned int|float)>\\\"\\* undef, !\\\"\\\", i32 0, i32 ([012]), i32 1, i32 10, " +
         (srv ? "i32 0" : "i1 false, i1 false, i1 false") + ", !([0-9]+)\\}";
-    if (!std::regex_match(metadata[id], value, std::regex(pattern)) || metadata[value[3]] != "!{i32 0, i32 5}") return false;
-    const unsigned range = std::stoul(value[1]), reg = std::stoul(value[2]);
+    if (!std::regex_match(metadata[id], value, std::regex(pattern))) return false;
+    const bool floating = value[2] == "float";
+    if (metadata[value[4]] != (floating ? "!{i32 0, i32 9}" : "!{i32 0, i32 5}")) return false;
+    const unsigned range = std::stoul(value[1]), reg = std::stoul(value[3]);
     const bool out = !srv && reg == 1;
-    if (reg == 1 && !out) return false;
+    if (reg == 1 && (!out || floating)) return false;
     const unsigned slot = reg == 2 ? 1 : 0;
     if (out ? found_output : slots[slot]) return false;
-    if (!bindings.emplace(std::make_pair(srv ? 0u : 1u, range), Binding{srv ? 0u : 1u, range, reg, slot, out}).second)
+    if (!bindings.emplace(std::make_pair(srv ? 0u : 1u, range), Binding{srv ? 0u : 1u, range, reg, slot, out, floating}).second)
       return false;
     if (out) found_output = true;
     else { slots[slot] = true; record_count = std::max(record_count, slot + 1); }
@@ -102,11 +104,16 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
       "declare i32 @dx.op.threadId.i32(i32, i32)",
       "declare %dx.types.Handle @dx.op.createHandle(i32, i8, i32, i32, i1)",
       "declare %dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32, %dx.types.Handle, i32, i32)",
+      "declare %dx.types.ResRet.f32 @dx.op.bufferLoad.f32(i32, %dx.types.Handle, i32, i32)",
+      "declare void @dx.op.bufferStore.f32(i32, %dx.types.Handle, i32, i32, float, float, float, float, i8)",
       "declare void @dx.op.bufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32, i32, i8)",
       "declare i32 @dx.op.atomicBinOp.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32)"};
   while (std::getline(outside, line)) {
     if (line.empty() || line == "%dx.types.Handle = type { i8* }" ||
         line == "%dx.types.ResRet.i32 = type { i32, i32, i32, i32, i32 }" ||
+        line == "%dx.types.ResRet.f32 = type { float, float, float, float, i32 }" ||
+        line == "%\"class.Buffer<float>\" = type { float }" ||
+        line == "%\"class.RWBuffer<float>\" = type { float }" ||
         line == "%\"class.Buffer<unsigned int>\" = type { i32 }" ||
         line == "%\"class.RWBuffer<unsigned int>\" = type { i32 }" ||
         line == "target triple = \"dxil-ms-dx\"" ||
@@ -149,9 +156,13 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
       rewritten += line + "\n"; continue;
     }
     std::string result, type, handle, index, call;
-    bool store = false;
+    bool store = false, floating = false;
     if (std::regex_match(line, m, std::regex("  (%v[0-9]+) = call %dx.types.ResRet.i32 @dx.op.bufferLoad.i32\\(i32 68, %dx.types.Handle (%v[0-9]+), i32 " + operand + ", i32 undef\\)"))) {
       result = m[1]; handle = m[2]; index = m[3]; type = "%dx.types.ResRet.i32";
+    } else if (std::regex_match(line, m, std::regex("  (%v[0-9]+) = call %dx.types.ResRet.f32 @dx.op.bufferLoad.f32\\(i32 68, %dx.types.Handle (%v[0-9]+), i32 " + operand + ", i32 undef\\)"))) {
+      result = m[1]; handle = m[2]; index = m[3]; type = "%dx.types.ResRet.f32"; floating = true;
+    } else if (std::regex_match(line, m, std::regex("  call void @dx.op.bufferStore.f32\\(i32 69, %dx.types.Handle (%v[0-9]+), i32 " + operand + ", i32 undef, float (%v[0-9]+), float (%v[0-9]+), float (%v[0-9]+), float (%v[0-9]+), i8 15\\)"))) {
+      handle = m[1]; index = m[2]; store = true; floating = true;
     } else if (std::regex_match(line, m, std::regex("  (%v[0-9]+) = call i32 @dx.op.atomicBinOp.i32\\(i32 78, %dx.types.Handle (%v[0-9]+), i32 0, i32 " + operand + ", i32 undef, i32 undef, i32 " + operand + "\\)"))) {
       result = m[1]; handle = m[2]; index = m[3]; type = "i32";
     } else if (std::regex_match(line, m, std::regex("  call void @dx.op.bufferStore.i32\\(i32 69, %dx.types.Handle (%v[0-9]+), i32 " + operand + ", i32 undef, i32 " + operand + ", i32 " + operand + ", i32 " + operand + ", i32 " + operand + ", i8 15\\)"))) {
@@ -164,6 +175,7 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
     if (!handle.empty()) {
       auto binding = handle_bindings.find(handle);
       if (binding == handle_bindings.end() || binding->second.output) return reject("unknown input handle flow");
+      if (binding->second.floating != floating) return reject("typed operation/component mismatch");
       if ((store || type == "i32") && binding->second.resource_class == 0) return reject("SRV write/atomic");
       const std::string suffix = std::to_string(binding->second.slot);
       const std::string tag = "dxmt.a" + std::to_string(accesses++);
@@ -188,7 +200,8 @@ LowerTypedOrigin(const std::string &input, std::string &output, std::string &err
     }
     if (std::regex_match(line, std::regex(R"(  %v[0-9]+ = call i32 @dx.op.threadId.i32\(i32 93, i32 0\))")) ||
         std::regex_match(line, std::regex("  %v[0-9]+ = add i32 " + operand + ", " + operand)) ||
-        std::regex_match(line, std::regex(R"(  %v[0-9]+ = extractvalue %dx.types.ResRet.i32 %v[0-9]+, 0)"))) {
+        std::regex_match(line, std::regex(R"(  %v[0-9]+ = extractvalue %dx.types.ResRet.(i32|f32) %v[0-9]+, 0)")) ||
+        std::regex_match(line, std::regex(R"(  %v[0-9]+ = bitcast float %v[0-9]+ to i32)"))) {
       rewritten += line + "\n"; continue;
     }
     if (line == "  ret void" && !returns++) { rewritten += line + "\n"; continue; }

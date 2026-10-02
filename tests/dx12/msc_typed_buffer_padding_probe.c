@@ -12,21 +12,27 @@
 enum ProbeKind { ProbeUAV, ProbeSRV, ProbeAtomic };
 enum ProbeBinding { BindingOriginal, BindingRawR32, BindingOriginCBV };
 
+static unsigned
+texel_size(MTLPixelFormat format) {
+  return format == MTLPixelFormatR8Uint ? 1 :
+      (format == MTLPixelFormatR16Uint || format == MTLPixelFormatR16Float) ? 2 : 4;
+}
+
 static bool
 run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineState> pipeline,
          NSUInteger root_offset, NSUInteger origin_offset, MTLSize threads, enum ProbeKind kind,
          enum ProbeBinding binding, MTLPixelFormat format, unsigned first,
          unsigned logical_count, uint32_t index_bias,
          bool *matches) {
-  const unsigned texel_size = format == MTLPixelFormatR8Uint ? 1 : format == MTLPixelFormatR16Uint ? 2 : 4;
+  const unsigned element_size = texel_size(format);
   const NSUInteger alignment = [device minimumTextureBufferAlignmentForPixelFormat:format];
-  if (!alignment || alignment % texel_size) return false;
-  const NSUInteger byte_offset = first * texel_size;
+  if (!alignment || alignment % element_size) return false;
+  const NSUInteger byte_offset = first * element_size;
   const NSUInteger native_offset = byte_offset - byte_offset % alignment;
-  const unsigned padding = (unsigned)((byte_offset - native_offset) / texel_size);
+  const unsigned padding = (unsigned)((byte_offset - native_offset) / element_size);
   if (padding > kIRTexViewMask) return false;
   const size_t element_count = first + 12;
-  id<MTLBuffer> input = [device newBufferWithLength:element_count * texel_size options:MTLResourceStorageModeShared];
+  id<MTLBuffer> input = [device newBufferWithLength:element_count * element_size options:MTLResourceStorageModeShared];
   id<MTLBuffer> output = [device newBufferWithLength:16 options:MTLResourceStorageModeShared];
   id<MTLBuffer> table = [device newBufferWithLength:2 * sizeof(IRDescriptorTableEntry) options:MTLResourceStorageModeShared];
   const NSUInteger root_size = (binding == BindingOriginCBV ? MAX(root_offset, origin_offset) : root_offset) + 8;
@@ -41,24 +47,31 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
   const uint32_t values_r8[] = {0, 127, 128, 255};
   const uint32_t values_r16[] = {0, 255, 256, 65535};
   const uint32_t values_r32[] = {0x11223300u, 0x11223301u, 0x11223302u, 0x11223303u};
-  const uint32_t *values = texel_size == 1 ? values_r8 : texel_size == 2 ? values_r16 : values_r32;
+  // Exact half/float representations of 0.5, -2, 1.5, 32. Output is asuint(float),
+  // while backing-buffer writes retain the native half representation for R16.
+  const uint32_t values_half[] = {0x3800, 0xc000, 0x3e00, 0x5000};
+  const uint32_t values_float[] = {0x3f000000, 0xc0000000, 0x3fc00000, 0x42000000};
+  const bool floating = format == MTLPixelFormatR16Float || format == MTLPixelFormatR32Float;
+  const uint32_t *stored_values = floating ? (element_size == 2 ? values_half : values_float) :
+      element_size == 1 ? values_r8 : element_size == 2 ? values_r16 : values_r32;
+  const uint32_t *values = floating ? values_float : stored_values;
   for (size_t i = 0; i < element_count; ++i) {
-    const uint32_t poison = 0xcdf00080u + (uint32_t)i;
-    memcpy(bytes + i * texel_size, &poison, texel_size);
+    const uint32_t poison = floating ? (element_size == 2 ? 0x3555u : 0x3eaaaaabu) : 0xcdf00080u + (uint32_t)i;
+    memcpy(bytes + i * element_size, &poison, element_size);
   }
   for (unsigned i = 0; i < 4; ++i) {
-    const uint32_t value = values[i];
-    memcpy(bytes + (first + i) * texel_size, &value, texel_size);
+    const uint32_t value = stored_values[i];
+    memcpy(bytes + (first + i) * element_size, &value, element_size);
   }
   memcpy(expected, bytes, input.length);
   for (unsigned i = 0; i < 4; ++i) {
     const uint32_t source = i + index_bias, destination = source + 4;
-    const uint32_t loaded = source < logical_count ? values[source] : 0;
+    const uint32_t loaded = source < logical_count ? stored_values[source] : 0;
     if (kind == ProbeUAV && destination < logical_count)
-      memcpy(expected + (first + destination) * texel_size, &loaded, texel_size);
+      memcpy(expected + (first + destination) * element_size, &loaded, element_size);
     if (kind == ProbeAtomic && source < logical_count) {
       const uint32_t value = loaded + 13;
-      memcpy(expected + (first + source) * texel_size, &value, texel_size);
+      memcpy(expected + (first + source) * element_size, &value, element_size);
     }
   }
   memset(output.contents, 0xa5, output.length);
@@ -70,12 +83,12 @@ run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLComputePipelineS
   info.storageMode = MTLStorageModeShared;
   info.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
   if (format == MTLPixelFormatR32Uint) info.usage |= MTLTextureUsageShaderAtomic;
-  id<MTLTexture> input_view = [input newTextureWithDescriptor:info offset:native_offset bytesPerRow:info.width * texel_size];
+  id<MTLTexture> input_view = [input newTextureWithDescriptor:info offset:native_offset bytesPerRow:info.width * element_size];
   info.width = 4;
   info.pixelFormat = MTLPixelFormatR32Uint;
   id<MTLTexture> output_view = [output newTextureWithDescriptor:info offset:0 bytesPerRow:16];
   if (!input_view || !output_view) { free(expected); return false; }
-  IRBufferView input_binding = {.buffer = input, .bufferOffset = byte_offset, .bufferSize = logical_count * texel_size,
+  IRBufferView input_binding = {.buffer = input, .bufferOffset = byte_offset, .bufferSize = logical_count * element_size,
       .textureBufferView = input_view, .textureViewOffsetInElements = padding, .typedBuffer = true};
   IRBufferView output_binding = {.buffer = output, .bufferSize = 16,
       .textureBufferView = output_view, .typedBuffer = true};
@@ -162,13 +175,13 @@ run_shader(id<MTLDevice> device, id<MTLCommandQueue> queue, const char *path, en
     const unsigned offsets[] = {0, 1, 4, 257, 260};
     const unsigned counts[] = {8, 0, 1, 3, 4, 5, 7};
     const NSUInteger alignment = [device minimumTextureBufferAlignmentForPixelFormat:format];
-    const unsigned texel_size = format == MTLPixelFormatR8Uint ? 1 : format == MTLPixelFormatR16Uint ? 2 : 4;
+    const unsigned element_size = texel_size(format);
     for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); ++i) {
       for (unsigned c = 0; c < (logical_bounds ? 7u : 1u); ++c) {
         bool matches = false;
         if (!run_case(device, queue, pipeline, locations[0].topLevelOffset, locations[1].topLevelOffset,
                       threads, kind, binding, format, offsets[i], counts[c], wrap_index ? UINT32_MAX - 1 : 0, &matches)) goto cleanup;
-        if (offsets[i] * texel_size % alignment) {
+        if (offsets[i] * element_size % alignment) {
           ++*padding_cases;
           *padding_failures += !matches;
         } else {
@@ -186,16 +199,34 @@ cleanup:
 
 int main(int argc, const char **argv) {
   if (argc != 4 && argc != 5) {
-    fprintf(stderr, "usage: %s UAV.cso SRV.cso atomic.cso [--expect-unsupported|--raw-r32|--origin-cbv|--origin-cbv-r8uint|--origin-cbv-r16uint|--origin-cbv-oob|--origin-cbv-wrap]\n", argv[0]); return 1;
+    fprintf(stderr, "usage: %s UAV.cso SRV.cso atomic.cso [--expect-unsupported|--raw-r32|--origin-cbv|--origin-cbv-r8uint|--origin-cbv-r16uint|--origin-cbv-oob|--origin-cbv-wrap|--origin-cbv-r16float[-oob]|--origin-cbv-r32float[-oob]]\n", argv[0]); return 1;
   }
-  const bool expect_unsupported = argc == 5 && !strcmp(argv[4], "--expect-unsupported");
-  const bool wrap_index = argc == 5 && !strcmp(argv[4], "--origin-cbv-wrap");
-  const bool logical_bounds = wrap_index || (argc == 5 && !strcmp(argv[4], "--origin-cbv-oob"));
-  const MTLPixelFormat format = argc == 5 && !strcmp(argv[4], "--origin-cbv-r8uint") ? MTLPixelFormatR8Uint :
-      argc == 5 && !strcmp(argv[4], "--origin-cbv-r16uint") ? MTLPixelFormatR16Uint : MTLPixelFormatR32Uint;
-  const enum ProbeBinding binding = argc == 5 && !strcmp(argv[4], "--raw-r32") ? BindingRawR32 :
-      (logical_bounds || format != MTLPixelFormatR32Uint || (argc == 5 && !strcmp(argv[4], "--origin-cbv"))) ? BindingOriginCBV : BindingOriginal;
-  if (argc == 5 && !expect_unsupported && binding == BindingOriginal) return 1;
+  const struct ProbeMode {
+    const char *name;
+    MTLPixelFormat format;
+    enum ProbeBinding binding;
+    bool logical_bounds, wrap_index, expect_unsupported;
+  } modes[] = {
+      {"", MTLPixelFormatR32Uint, BindingOriginal, false, false, false},
+      {"--expect-unsupported", MTLPixelFormatR32Uint, BindingOriginal, false, false, true},
+      {"--raw-r32", MTLPixelFormatR32Uint, BindingRawR32, false, false, false},
+      {"--origin-cbv", MTLPixelFormatR32Uint, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-r8uint", MTLPixelFormatR8Uint, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-r16uint", MTLPixelFormatR16Uint, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-oob", MTLPixelFormatR32Uint, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-wrap", MTLPixelFormatR32Uint, BindingOriginCBV, true, true, false},
+      {"--origin-cbv-r16float", MTLPixelFormatR16Float, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-r16float-oob", MTLPixelFormatR16Float, BindingOriginCBV, true, false, false},
+      {"--origin-cbv-r32float", MTLPixelFormatR32Float, BindingOriginCBV, false, false, false},
+      {"--origin-cbv-r32float-oob", MTLPixelFormatR32Float, BindingOriginCBV, true, false, false}};
+  const struct ProbeMode *mode = NULL;
+  for (unsigned i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i)
+    if (!strcmp(argc == 5 ? argv[4] : "", modes[i].name)) { mode = &modes[i]; break; }
+  if (!mode) { fprintf(stderr, "unknown probe mode\n"); return 1; }
+  const MTLPixelFormat format = mode->format;
+  const enum ProbeBinding binding = mode->binding;
+  const bool logical_bounds = mode->logical_bounds, wrap_index = mode->wrap_index;
+  const bool expect_unsupported = mode->expect_unsupported;
   @autoreleasepool {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     if (!device || ![device supportsFamily:MTLGPUFamilyApple9]) return 77;
