@@ -17,6 +17,7 @@
  */
 
 #include "d3d12_command_allocator.hpp"
+#include "d3d12_typed_origin_binding.hpp"
 #include "d3d12_raytracing_dispatch.hpp"
 #include "d3d12_raytracing_pipeline.hpp"
 #include "d3d12_raytracing.hpp"
@@ -24,6 +25,7 @@
 #include "dxmt_command_context.hpp"
 #include "dxmt_command_constants.hpp"
 #include "dxmt_format.hpp"
+#include "util_env.hpp"
 #include <atomic>
 #include <unordered_map>
 #include <unordered_set>
@@ -2826,23 +2828,25 @@ public:
   uint64_t
   EncodeMSCArgumentBuffer(
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
-      MTLD3D12SamplerDescriptorHeap *sampler_heap
+      MTLD3D12SamplerDescriptorHeap *sampler_heap, const D3D12TypedOriginRoot *compiler_root = nullptr
   ) {
-    if (!pRootSig->MSCArgumentBufferSize)
+    const auto argument_size = compiler_root ? compiler_root->argument_buffer_size : pRootSig->MSCArgumentBufferSize;
+    const auto count = compiler_root ? compiler_root->layouts.size() : pRootSig->MSCParameterCount;
+    const auto *layouts = compiler_root ? compiler_root->layouts.data() : pRootSig->MSCParameterLayouts;
+    if (!argument_size)
       return 0;
 
-    auto [Ptr, Offset] = allocator_->AllocateGPUHeap(pRootSig->MSCArgumentBufferSize, 16);
+    auto [Ptr, Offset] = allocator_->AllocateGPUHeap(argument_size, 16);
     if (!Ptr) {
       FailRecording(__func__, "MSC argument GPU heap allocation failed size=", pRootSig->MSCArgumentBufferSize);
       return 0;
     }
-    memset(Ptr, 0, pRootSig->MSCArgumentBufferSize);
+    memset(Ptr, 0, argument_size);
     uint64_t static_sampler_table_address = 0;
 
-    for (uint32_t i = 0; i < pRootSig->MSCParameterCount; i++) {
-      auto &layout = pRootSig->MSCParameterLayouts[i];
-      if (layout.top_level_offset > pRootSig->MSCArgumentBufferSize ||
-          layout.size_bytes > pRootSig->MSCArgumentBufferSize - layout.top_level_offset)
+    for (size_t i = 0; i < count; i++) {
+      const auto &layout = layouts[i];
+      if (layout.top_level_offset > argument_size || layout.size_bytes > argument_size - layout.top_level_offset)
         continue;
 
       auto destination = reinterpret_cast<uint8_t *>(Ptr) + layout.top_level_offset;
@@ -3338,7 +3342,7 @@ public:
   }
 
   bool
-  PreDispatch(bool SkipResourceBinding = false) {
+  PreDispatch(bool SkipResourceBinding = false, bool AllowTypedOrigin = false) {
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Compute) {
       allocator_->InvalidateCurrentPass();
       auto compute = allocator_->AllocatePass<ComputeEncoderData>();
@@ -3363,6 +3367,16 @@ public:
       return false;
 
     const bool use_msc = pso_compute_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
+    const D3D12TypedOriginComputeVariant *origin_variant = nullptr;
+    const auto origin_directory = AllowTypedOrigin && use_msc ? env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY") : "";
+    if (!origin_directory.empty()) {
+      const auto directory = str::tows(origin_directory.c_str());
+      const auto hr = pso_compute_->GetTypedOriginVariant(directory.c_str(), &origin_variant);
+      if (FAILED(hr) || !rootsig_compute_ || !descriptor_heap_) {
+        FailRecording(__func__, "typed-origin dispatch preparation failed HRESULT=", hr);
+        return false;
+      }
+    }
     static std::atomic<uint32_t> compute_trace_count{0};
     compute_trace_id_ = compute_trace_ ? compute_trace_count.fetch_add(1, std::memory_order_relaxed) : UINT_MAX;
     if (compute_trace_id_ < 4096) {
@@ -3378,13 +3392,13 @@ public:
       );
     }
     const bool encode_msc_resource_uses =
-        msc_compute_residency_ && use_msc && !SkipResourceBinding &&
+        msc_compute_residency_ && use_msc && !origin_variant && !SkipResourceBinding &&
         (dirty_state_.test(DirtyState::DescriptorHeaps) || dirty_state_.test(DirtyState::ComputeRootArguments));
     if (use_msc && rootsig_compute_) {
       if (FAILED(rootsig_compute_->InitializeMSCLayout()))
         return false;
     }
-    if (use_msc && pso_compute_->msc_uses_texture_load && descriptor_heap_ &&
+    if (use_msc && !origin_variant && pso_compute_->msc_uses_texture_load && descriptor_heap_ &&
         HasBoundResourceMinLODClamp(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr())) {
       ERR("D3D12 compute Texture.Load with ResourceMinLODClamp is unsupported");
       FailRecording(__func__, "MSC Texture.Load with non-zero ResourceMinLODClamp");
@@ -3465,6 +3479,26 @@ public:
     if (encode_msc_resource_uses)
       EncodeMSCResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true);
 
+    if (origin_variant) {
+      const auto offset = EncodeMSCArgumentBuffer(rootsig_compute_.ptr(), rootarg_compute_staging_,
+          descriptor_heap_.ptr(), sampler_heap_.ptr(), &origin_variant->root);
+      if (recording_failed_) return false;
+      std::shared_ptr<D3D12TypedOriginDispatch> dispatch;
+      const auto hr = RecordD3D12TypedOriginDispatch(pso_compute_.ptr(), origin_variant, rootsig_compute_.ptr(),
+          rootarg_compute_staging_, descriptor_heap_.ptr(), ptr_add(allocator_->gpu_heap_, offset), dispatch);
+      if (FAILED(hr)) { FailRecording(__func__, "typed-origin recording failed HRESULT=", hr); return false; }
+      dispatch->sampler_heap = sampler_heap_;
+      EncodeRootResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, static_cast<WMTRenderStages>(0), true);
+      auto &marker = allocator_->EncodeComputeCommand<wmtcmd_compute_nop>();
+      marker.type = WMTComputeCommandNop;
+      dispatch->marker = &marker;
+      try {
+        static_cast<ComputeEncoderData *>(allocator_->encoder_current)->typed_origin_dispatches.push_back(std::move(dispatch));
+      } catch (const std::bad_alloc &) { FailRecording(__func__, "typed-origin dispatch allocation failed"); return false; }
+      // A subsequent ordinary/indirect dispatch must restore its application TLAB.
+      dirty_state_.set(DirtyState::ComputeRootArguments, DirtyState::ComputePipelineState);
+    }
+
     if (airconv_compute_residency_ && !use_msc && !SkipResourceBinding) {
       if (descriptor_heap_)
         EncodeComputeResourceUse(descriptor_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
@@ -3504,7 +3538,7 @@ public:
         return;
       predication_args_offset = offset;
     }
-    if (!PreDispatch())
+    if (!PreDispatch(false, true))
       return;
 
     if (compute_trace_id_ < 4096)

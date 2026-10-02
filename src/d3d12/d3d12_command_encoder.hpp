@@ -24,11 +24,13 @@
 #include "com/com_pointer.hpp"
 #include <cstdint>
 #include <vector>
+#include <memory>
 
 namespace dxmt {
 
 class MTLD3D12Resource;
 class MTLD3D12DescriptorHeap;
+struct D3D12TypedOriginDispatch;
 
 struct PendingDescriptorUse {
   MTLD3D12DescriptorHeap *heap = nullptr;
@@ -175,6 +177,7 @@ struct CopyTilesEncoderData : EncoderData {
 struct ComputeEncoderData : EncoderData {
   wmtcmd_compute_nop cmd_head;
   wmtcmd_base *cmd_tail;
+  std::vector<std::shared_ptr<D3D12TypedOriginDispatch>> typed_origin_dispatches;
   WMT::Reference<WMT::ComputePipelineState> ray_dispatch_pso;
   WMT::Reference<WMT::VisibleFunctionTable> ray_dispatch_visible_function_table;
   WMT::Reference<WMT::IntersectionFunctionTable> ray_dispatch_intersection_function_table;

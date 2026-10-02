@@ -42,6 +42,17 @@ and does not cover all later view/lifetime contracts. Historical results in
 
 ## Next bounded implementation task
 
+### Current implementation delta (2026-10-02)
+
+The historical typed-origin integration gap above has narrowed: validated DXIL
+lowering, reflected compiler roots, cached native compute PSOs and opt-in direct
+dispatch submission bindings are now connected. Both build variants pass seven
+focused GPU contracts, including distinguishable repeated in-flight execution.
+See `D3D12_TYPED_ORIGIN_DISPATCH_BINDING.md`. This does not close complete typed
+UAV support: default enablement, indirect integration, shader provenance coverage
+and the full format/view matrices remain outstanding. Min/Max, tiled Tier 2 and
+the seven mandatory GPU matrix categories remain closure work; no FL promotion.
+
 Prioritize the production typed-buffer origin contract, using
 `D3D12_TYPED_ORIGIN_PRODUCTION_AUDIT.md` as the integration gap list. Keep
 unsupported views rejected until real production readback succeeds. Integrate

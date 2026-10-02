@@ -4,6 +4,7 @@
 #include <d3dcompiler.h>
 
 #include <array>
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
@@ -111,7 +112,7 @@ static void Transition(ID3D12GraphicsCommandList *list, ID3D12Resource *resource
   list->ResourceBarrier(1, &barrier);
 }
 
-enum class ViewCase { Normal, Copied, Updated, InitiallyUnavailable, Rejected };
+enum class ViewCase { Normal, Copied, Updated, InitiallyUnavailable, Rejected, StaticUpdated, Repeated, InvalidKind };
 
 static bool RunCase(ID3D12Device *device, ID3D12CommandQueue *queue, ID3D12RootSignature *root,
                     const std::vector<char> &shader, const Format &f, unsigned shape, unsigned first_element,
@@ -122,6 +123,12 @@ static bool RunCase(ID3D12Device *device, ID3D12CommandQueue *queue, ID3D12RootS
   Object<ID3D12PipelineState> pso;
   Object<ID3D12DescriptorHeap> descriptors;
   Object<ID3D12Fence> fence;
+  Object<ID3D12Resource> repeated_output, repeated_readback;
+  Object<ID3D12Fence> launch_gate;
+  struct ReleaseGate {
+    ID3D12Fence *fence = nullptr;
+    ~ReleaseGate() { if (fence) fence->Signal(1); }
+  } gate_release;
   const unsigned pixel = f.bytes * f.channels;
   const unsigned height = shape >= 3 ? 2 : 1, depth = shape == 5 ? 2 : 1;
   auto desc = BufferDesc((first_element + 12) * pixel);
@@ -145,6 +152,16 @@ static bool RunCase(ID3D12Device *device, ID3D12CommandQueue *queue, ID3D12RootS
   const unsigned pitch = shape ? footprint.Footprint.RowPitch : (first_element + 8) * pixel;
   std::array<uint32_t, 16> expected = {};
   std::array<uint8_t, 64> raw_expected = {};
+  std::array<uint32_t, 16> repeated_expected = {};
+  std::array<uint8_t, 64> repeated_raw = {};
+  if (view_case == ViewCase::Repeated) {
+    for (unsigned x = 0; x < 4; ++x)
+      for (unsigned c = 0; c < f.channels; ++c) {
+        repeated_expected[x * f.channels + c] = Encode(f, x + 10, c, repeated_raw.data() + x * pixel + c * f.bytes);
+        std::memcpy(static_cast<uint8_t *>(mapped) + x * pixel + c * f.bytes,
+            repeated_raw.data() + x * pixel + c * f.bytes, f.bytes);
+      }
+  }
   std::vector<uint8_t> expected_buffer;
   for (unsigned z = 0; z < depth; ++z)
     for (unsigned y = 0; y < height; ++y)
@@ -160,13 +177,19 @@ static bool RunCase(ID3D12Device *device, ID3D12CommandQueue *queue, ID3D12RootS
   if (!shape) {
     const auto *bytes = static_cast<const uint8_t *>(mapped);
     expected_buffer.assign(bytes, bytes + upload_size);
-    if (!read_only)
+    if (view_case == ViewCase::Repeated)
+      std::memcpy(expected_buffer.data() + 4 * pixel, repeated_raw.data(), 4 * pixel);
+    else if (!read_only)
       std::memcpy(expected_buffer.data() + (first_element + 4) * pixel, raw_expected.data(), 4 * pixel);
   }
   upload->Unmap(0, nullptr);
   auto out_desc = BufferDesc(64); out_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   if (!CreateResource(device, D3D12_HEAP_TYPE_DEFAULT, out_desc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, output) ||
       !CreateResource(device, D3D12_HEAP_TYPE_READBACK, BufferDesc(64 + upload_size), D3D12_RESOURCE_STATE_COPY_DEST, readback)) return false;
+  if (view_case == ViewCase::Repeated &&
+      (!CreateResource(device, D3D12_HEAP_TYPE_DEFAULT, out_desc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, repeated_output) ||
+       !CreateResource(device, D3D12_HEAP_TYPE_READBACK, BufferDesc(64), D3D12_RESOURCE_STATE_COPY_DEST, repeated_readback)))
+    return false;
   D3D12_DESCRIPTOR_HEAP_DESC heap = {};
   heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; heap.NumDescriptors = 2;
   heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
@@ -198,6 +221,13 @@ static bool RunCase(ID3D12Device *device, ID3D12CommandQueue *queue, ID3D12RootS
   };
   write_input_descriptor(cpu, input.p, view_case == ViewCase::Updated ? 0 :
                          view_case == ViewCase::InitiallyUnavailable ? 1 : first_element);
+  if (view_case == ViewCase::InvalidKind) {
+    D3D12_SHADER_RESOURCE_VIEW_DESC wrong = {};
+    wrong.Format = f.format; wrong.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    wrong.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    wrong.Buffer.FirstElement = first_element; wrong.Buffer.NumElements = 8;
+    device->CreateShaderResourceView(input.p, &wrong, cpu);
+  }
   if (view_case == ViewCase::Copied) {
     // Copy from a CPU-only heap, overwrite its slot, and destroy it before execution.
     // The destination descriptor must own the exact-range native view independently.
@@ -246,14 +276,46 @@ static bool RunCase(ID3D12Device *device, ID3D12CommandQueue *queue, ID3D12RootS
     dst.pResource = texture_readback.p;
     list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
   }
+  if (view_case == ViewCase::Repeated) {
+    Transition(list.p, input.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    Transition(list.p, output.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  }
   const auto close_hr = list->Close();
-  if (view_case == ViewCase::Rejected) return close_hr == E_FAIL;
+  if (view_case == ViewCase::Rejected || view_case == ViewCase::InvalidKind) return close_hr == E_FAIL;
   if (!CheckHR("Close", close_hr) || !CheckHR("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.p)))) return false;
   if (view_case == ViewCase::Updated || view_case == ViewCase::InitiallyUnavailable)
     write_input_descriptor(descriptors->GetCPUDescriptorHandleForHeapStart(), input.p, first_element);
+  if (view_case == ViewCase::StaticUpdated)
+    // Deliberate contract violation as a negative oracle: an accidental live
+    // reread would select the wrong range and fail the full-buffer comparison.
+    write_input_descriptor(descriptors->GetCPUDescriptorHandleForHeapStart(), input.p, 0);
   HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
   if (!event) return false;
+  if (view_case == ViewCase::Repeated) {
+    if (!CheckHR("Create launch gate", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&launch_gate.p))))
+      return false;
+    gate_release.fence = launch_gate.p;
+    if (!CheckHR("Hold GPU launch", queue->Wait(launch_gate.p, 1))) return false;
+  }
   ID3D12CommandList *lists[] = {list.p}; queue->ExecuteCommandLists(1, lists);
+  if (view_case == ViewCase::Repeated) {
+    write_input_descriptor(descriptors->GetCPUDescriptorHandleForHeapStart(), input.p, 0);
+    device->CreateUnorderedAccessView(repeated_output.p, nullptr, &view, cpu);
+    queue->ExecuteCommandLists(1, lists);
+    Object<ID3D12CommandAllocator> copy_allocator;
+    Object<ID3D12GraphicsCommandList> copy_list;
+    if (!CheckHR("Create repeated copy allocator", device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(&copy_allocator.p))) ||
+        !CheckHR("Create repeated copy list", device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+            copy_allocator.p, nullptr, IID_PPV_ARGS(&copy_list.p)))) return false;
+    Transition(copy_list.p, repeated_output.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    copy_list->CopyBufferRegion(repeated_readback.p, 0, repeated_output.p, 0, 64);
+    if (!CheckHR("Close repeated copy", copy_list->Close())) return false;
+    ID3D12CommandList *copies[] = {copy_list.p};
+    queue->ExecuteCommandLists(1, copies);
+    if (!CheckHR("Release GPU launch", launch_gate->Signal(1))) return false;
+    gate_release.fence = nullptr;
+  }
   bool complete = CheckHR("Signal", queue->Signal(fence.p, 1)) && CheckHR("SetEvent", fence->SetEventOnCompletion(1, event)) &&
                   WaitForSingleObject(event, 30000) == WAIT_OBJECT_0;
   CloseHandle(event);
@@ -274,6 +336,11 @@ static bool RunCase(ID3D12Device *device, ID3D12CommandQueue *queue, ID3D12RootS
   }
   if (!shape) ok &= !std::memcmp(static_cast<uint8_t *>(mapped) + 64, expected_buffer.data(), expected_buffer.size());
   readback->Unmap(0, nullptr);
+  if (view_case == ViewCase::Repeated) {
+    if (!CheckHR("Map repeated output", repeated_readback->Map(0, nullptr, &mapped))) return false;
+    ok &= !std::memcmp(mapped, repeated_expected.data(), 4 * f.channels * sizeof(uint32_t));
+    repeated_readback->Unmap(0, nullptr);
+  }
   if (shape) {
     if (!CheckHR("Map texture", texture_readback->Map(0, nullptr, &mapped))) return false;
     const auto offset = (depth - 1) * pitch * height + (height - 1) * pitch + 4 * pixel;
@@ -313,10 +380,11 @@ static bool CheckAPI(ID3D12Device *device) {
 }
 
 int main(int argc, char **argv) {
+  const bool origin_contract = argc == 3 && !std::strcmp(argv[2], "--origin-contract");
   const bool selected_case = argc == 6 && !std::strcmp(argv[2], "--case");
   if ((argc != 2 && argc != 3 && !selected_case) || (std::strcmp(argv[1], "--dxbc") && std::strcmp(argv[1], "--dxil") && std::strcmp(argv[1], "--api-policy")) ||
       (argc == 3 && std::strcmp(argv[2], "--buffer-only") && std::strcmp(argv[2], "--view-contract") &&
-       std::strcmp(argv[2], "--srv-view-contract"))) return 2;
+       std::strcmp(argv[2], "--srv-view-contract") && !origin_contract)) return 2;
   const Format *selected_format = nullptr;
   unsigned selected_shape = 0, selected_first = 0;
   if (selected_case) {
@@ -375,6 +443,25 @@ int main(int argc, char **argv) {
   if (dxbc && !compile) return 3;
   std::map<unsigned, std::vector<char>> shaders;
   unsigned passed = 0, failed = 0;
+  if (origin_contract) {
+    if (dxbc) return 2;
+    std::ifstream file("typed_uav_0_0.cso", std::ios::binary);
+    std::vector<char> shader(std::istreambuf_iterator<char>(file), {});
+    const auto format = std::find_if(std::begin(formats), std::end(formats), [](const Format &f) {
+      return f.format == DXGI_FORMAT_R16_FLOAT;
+    });
+    if (shader.empty() || format == std::end(formats)) return 1;
+    const ViewCase cases[] = {ViewCase::Normal, ViewCase::Copied, ViewCase::StaticUpdated,
+        ViewCase::Updated, ViewCase::InitiallyUnavailable, ViewCase::Repeated, ViewCase::InvalidKind};
+    for (const auto mode : cases) {
+      const bool live = mode == ViewCase::Updated || mode == ViewCase::InitiallyUnavailable || mode == ViewCase::Repeated;
+      const bool ok = RunCase(device.p, queue.p, live ? root.p : static_root.p, shader, *format, 0, 4, mode);
+      std::cout << "origin contract mode=" << static_cast<unsigned>(mode) << " " << (ok ? "PASS" : "FAIL") << "\n";
+      ok ? ++passed : ++failed;
+    }
+    std::cout << "typed origin focused contracts: passed=" << passed << " failed=" << failed << "\n";
+    return failed ? 1 : 0;
+  }
   for (const auto &format : formats) {
     if (selected_case && &format != selected_format) continue;
     D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {format.format};

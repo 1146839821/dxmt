@@ -169,6 +169,8 @@ struct ShaderVisibleDescriptorSnapshot {
   Rc<Buffer> buffer;
   Rc<BufferAllocation> buffer_allocation;
   MSCTypedBufferBinding msc_typed_buffer;
+  dxmt_msc_descriptor_entry msc_descriptor = {};
+  WMT::Reference<WMT::Texture> msc_texture_view;
   Rc<BufferAllocation> allocation;
   WMT::Reference<WMT::AccelerationStructure> acceleration_structure;
   WMT::Reference<WMT::Buffer> acceleration_structure_header;

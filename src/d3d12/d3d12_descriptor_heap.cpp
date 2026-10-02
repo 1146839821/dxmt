@@ -142,6 +142,7 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
   // heap is destroyed, while the CPU descriptor storage retains lookup
   // pointers for residency tracking.
   std::vector<Rc<Texture>> texture_resources_;
+  std::vector<WMT::Reference<WMT::Texture>> msc_texture_views_;
   std::vector<Rc<Buffer>> buffer_resources_;
   std::vector<Rc<Buffer>> counter_resources_;
   std::vector<MSCTypedBufferBinding> msc_typed_buffer_bindings_;
@@ -164,6 +165,7 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
   void
   ReleaseDescriptorResources(UINT Index) {
     texture_resources_[Index] = nullptr;
+    msc_texture_views_[Index] = nullptr;
     buffer_resources_[Index] = nullptr;
     counter_resources_[Index] = nullptr;
     msc_typed_buffer_bindings_[Index] = {};
@@ -257,6 +259,7 @@ public:
     }
     descriptors_.resize(pDesc->NumDescriptors);
     texture_resources_.resize(pDesc->NumDescriptors);
+    msc_texture_views_.resize(pDesc->NumDescriptors);
     buffer_resources_.resize(pDesc->NumDescriptors);
     counter_resources_.resize(pDesc->NumDescriptors);
     msc_typed_buffer_bindings_.resize(pDesc->NumDescriptors);
@@ -402,6 +405,7 @@ public:
     cpu_storage.SRVTexture.resource_min_lod_clamp = ResourceMinLODClamp;
     if (mapped_argument_buffer_) {
       auto &texture_view = Texture->view(View);
+      msc_texture_views_[Index] = texture_view.texture;
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.SRVTexture.resource_id = texture_view.gpuResourceID;
       gpu_storage.SRVTexture.metadata = TextureMetadata(Texture->arrayLength(View), ResourceMinLODClamp);
@@ -474,6 +478,8 @@ public:
         snapshot.buffer_allocation = typed_binding.allocation ? typed_binding.allocation :
             snapshot.buffer ? snapshot.buffer->current() : nullptr;
         snapshot.msc_typed_buffer = typed_binding;
+        snapshot.msc_descriptor = mapped_msc_argument_buffer_ ? mapped_msc_argument_buffer_[index] : dxmt_msc_descriptor_entry{};
+        snapshot.msc_texture_view = msc_texture_views_[index];
         snapshot.allocation = cbv_allocations_[index];
         snapshot.acceleration_structure = acceleration_structure_resources_[index];
         snapshot.acceleration_structure_header = acceleration_structure_headers_[index];
@@ -538,6 +544,7 @@ public:
     cpu_storage.UAVTexture.resource_min_lod_clamp = 0;
     if (mapped_argument_buffer_) {
       auto &texture_view = Texture->view(View);
+      msc_texture_views_[Index] = texture_view.texture;
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.UAVTexture.resource_id = texture_view.gpuResourceID;
       gpu_storage.UAVTexture.metadata = TextureMetadata(Texture->arrayLength(View), 0);
@@ -702,6 +709,7 @@ public:
     for (unsigned i = 0; i < CopyCount; i++) {
       heap_to->descriptors_[DescriptorTo + i] = descriptors_[From + i];
       heap_to->texture_resources_[DescriptorTo + i] = texture_resources_[From + i];
+      heap_to->msc_texture_views_[DescriptorTo + i] = msc_texture_views_[From + i];
       heap_to->buffer_resources_[DescriptorTo + i] = buffer_resources_[From + i];
       heap_to->counter_resources_[DescriptorTo + i] = counter_resources_[From + i];
       if (heap_to != this || DescriptorTo + i != From + i)
