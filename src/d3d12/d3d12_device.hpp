@@ -276,10 +276,15 @@ public:
   Rc<Fence> fence;
 };
 
+struct D3D12TypedOriginRoot;
+
 class MTLD3D12RootSignature : public ID3D12RootSignature {
 public:
   virtual UINT GetBlob(const void **ppBlob) = 0;
   virtual HRESULT InitializeMSCLayout() = 0;
+  // Borrowed immutable compiler-root artifact; retain this root object while
+  // using it. Application blob/layout/staging indices remain unchanged.
+  virtual HRESULT GetTypedOriginCompilerRoot(const D3D12TypedOriginRoot **root) = 0;
 
   virtual void AddRefPrivate() = 0;
   virtual void ReleasePrivate() = 0;

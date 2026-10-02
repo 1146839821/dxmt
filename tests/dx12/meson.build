@@ -2,6 +2,11 @@ dx12_sm6_probe = executable('dx12_compute_sm6', 'dx12_compute_sm6.cpp',
   dependencies: [ d3d12_dep ],
 )
 
+executable('dx12_typed_origin_root', 'dx12_typed_origin_root.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
 executable('dx12_typed_origin_prepare', 'dx12_typed_origin_prepare.cpp',
   '../../src/d3d12/d3d12_typed_origin.cpp',
   build_by_default: false, link_args: ['-municode'],

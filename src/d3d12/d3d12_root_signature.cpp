@@ -29,6 +29,8 @@
 #include <vector>
 #include "../d3d10/d3d10_blob.hpp"
 #include "../airconv/dxbc_root_signature.hpp"
+#include "d3d12_typed_origin.hpp"
+#include <mutex>
 
 namespace dxmt {
 
@@ -381,6 +383,10 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
   std::vector<uint64_t> static_samplers_encoded_;
   std::vector<dxmt_msc_root_parameter_layout> msc_layout_;
   bool msc_layout_initialized_ = false;
+  RootSignatureDeserializer decoded_root_;
+  std::mutex typed_origin_mutex_;
+  D3D12TypedOriginRoot typed_origin_root_;
+  bool typed_origin_initialized_ = false;
 
 public:
   MTLD3D12RootSignatureImpl(MTLD3D12Device *pDevice, const void *pBytecode, SIZE_T BytecodeLength) :
@@ -397,12 +403,11 @@ public:
     if (FAILED(hr))
       return hr;
 
-    RootSignatureDeserializer deserializer;
-    hr = deserializer.Deserialize(pRawRootSig, RawRootSigSize);
+    hr = decoded_root_.Deserialize(pRawRootSig, RawRootSigSize);
     if (FAILED(hr))
       return hr;
 
-    auto &desc = deserializer.desc_1_1_.Desc_1_1;
+    auto &desc = decoded_root_.desc_1_1_.Desc_1_1;
 
     if (desc.NumParameters) {
       if (desc.NumParameters > D3D12_MAX_ROOT_COST)
@@ -518,6 +523,25 @@ public:
           " offset=", layout.top_level_offset, " size=", layout.size_bytes
       );
     }
+    return S_OK;
+  }
+
+  HRESULT
+  GetTypedOriginCompilerRoot(const D3D12TypedOriginRoot **root) override {
+    if (!root) return E_POINTER;
+    *root = nullptr;
+    std::lock_guard<std::mutex> lock(typed_origin_mutex_);
+    if (!typed_origin_initialized_) {
+      if (!device_->GetMSCCapabilities().CoreShaderPathUsable()) return E_FAIL;
+      std::string diagnostics;
+      HRESULT hr = PrepareD3D12TypedOriginRoot(decoded_root_.desc_1_1_.Desc_1_1, typed_origin_root_, diagnostics);
+      if (FAILED(hr)) {
+        ERR("Failed to prepare typed-origin compiler root: ", diagnostics);
+        return hr;
+      }
+      typed_origin_initialized_ = true;
+    }
+    *root = &typed_origin_root_;
     return S_OK;
   }
 

@@ -17,6 +17,25 @@ struct D3D12TypedOriginShader {
   std::vector<dxmt_msc_typed_origin_binding> bindings;
 };
 
+struct D3D12TypedOriginRoot {
+  static constexpr uint32_t kBindingVersion = 1;
+  std::vector<uint8_t> bytecode;
+  // Application parameter indices are preserved; the hidden CBV is appended
+  // and a reflected static-sampler entry, if present, remains last.
+  std::vector<dxmt_msc_root_parameter_layout> layouts;
+  uint64_t argument_buffer_size = 0;
+  uint32_t application_parameter_count = 0;
+  uint32_t application_cost = 0;
+  uint32_t hidden_parameter_index = 0;
+};
+
+// Accepts a trusted, decoded RS1.1 descriptor (including the existing RS1.0
+// deserializer's volatile conversion). Owns serialized bytes and reflected
+// layout; never retains input pointers. Failure leaves output unchanged.
+HRESULT PrepareD3D12TypedOriginRoot(
+    const D3D12_ROOT_SIGNATURE_DESC1 &application, D3D12TypedOriginRoot &prepared,
+    std::string &diagnostics);
+
 // The selected DXC directory must be an absolute Windows drive path. Both
 // compiler and validator are loaded from that directory; no backend fallback.
 // Currently accepts the verified SM6.0 compute container envelope. On failure
