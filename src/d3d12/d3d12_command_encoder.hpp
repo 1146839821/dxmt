@@ -44,7 +44,7 @@ struct PendingDescriptorUse {
   WMTRenderStages render_stages = static_cast<WMTRenderStages>(0);
   bool use_msc = false;
   bool volatile_descriptors = true;
-  bool reject_min_lod_clamp = false;
+  bool validate_reduction_defaults = false;
 };
 
 struct SamplerConsumerConstraint {
@@ -91,7 +91,7 @@ struct EncoderData {
   std::vector<Rc<Sampler>> sampler_refs; // Recording-time static observations.
   std::vector<PendingSamplerHeapUse> pending_sampler_uses; // Volatile only.
   bool static_sampler_reduction = false;
-  bool static_resource_min_lod_clamp = false;
+  bool static_reduction_defaults_invalid = false;
 
   void
   RetainDescriptorHeap(IUnknown *heap) {

@@ -22,7 +22,7 @@ Task Analysis for this refresh:
 | Production gap | Current boundary | Next closure work |
 | --- | --- | --- |
 | Typed UAV | Production origin lowering and bounded direct/non-updating-indirect probes exist; additional-format declaration remains FALSE | Default production enablement, remaining indirect/provenance/view/lifetime contracts, then complete matrices |
-| MinMax | Opt-in AIR SampleLevel/SampleGrad and pixel Sample/SampleBias support float non-anisotropic 1D/array, 2D/array and 3D; OOB defaults are transported only | Actual clamp/empty-set lowering, unknown/null descriptor rejection and cache audit; cube, anisotropic, feedback and DXIL implementation remain open |
+| MinMax | Opt-in AIR explicit/gradient/implicit operations and known-format resource-clamp admission exist; focused clamp GPU readbacks now pass | Instruction clamp admission and broader operation/format/shape contracts; cube, anisotropic, feedback and DXIL implementation remain open |
 | Tiled Tier 2 | Declared NOT_SUPPORTED | Packed mips, mapping, feedback, filtering/LOD, lifetime and synchronization closure |
 | LogicOp (no-private) | OPTIONS reports FALSE in this variant | Implement a compliant path or explicitly exclude this variant from the FL12_0 claim; tests alone cannot close this gap |
 
@@ -52,6 +52,9 @@ and run the complete acceptance matrices. Add only focused regressions needed
 to validate each implementation change during this phase. Do not repeat full
 matrices after every descriptor/ABI preparation checkpoint.
 
+Current next action after the resource-clamp checkpoint is instruction-clamp
+admission, not another status-only or full-matrix rerun.
+
 Task Result: refreshed current status and corrected the gate's stale MinMax
 diagnostic without changing any gate status or capability. Gate units pass
 55/55. Main-agent Standards/Spec self-review only; independent review remains
@@ -64,6 +67,13 @@ structural lowering plus existing sampling regression evidence, not nonzero-clam
 GPU admission: instruction and recording/submission rejection remain intact until
 host validity and actual numeric clamp dispatches pass. The snapshot's remaining
 workstreams and full acceptance counts are unchanged.
+
+Resource-clamp follow-up (2026-10-03): known AIR descriptors now pass nonzero
+resource clamps and empty-set dispatches (`D3D12_MINMAX_CLAMP_ADMISSION.md`).
+Both builds pass fifteen focused GPU cases and recording/live validity probes,
+including nonzero view origin and CPU-only descriptor copies. Instruction
+clamps/feedback and DXIL reduction remain rejected. Unknown-format GPU admission
+coverage and full MinMax acceptance are still unverified; no FL promotion.
 
 ## Task Analysis
 

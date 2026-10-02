@@ -15,6 +15,11 @@
 #include <string>
 
 static bool CheckTextureDefaults(WMT::Device device, dxmt::MTLD3D12DescriptorHeap *heap, uint32_t ones) {
+  std::vector<dxmt::ShaderVisibleDescriptorSnapshot> snapshots;
+  heap->ResolveDescriptors(std::vector<UINT>{0}, snapshots);
+  if (snapshots.size() != 1 || snapshots[0].descriptor.type != dxmt::ShaderVisibleDescriptorType::SRVTexture ||
+      snapshots[0].descriptor.SRVTexture.default_components != dxmt::air::PackTextureDefaultComponents(ones))
+    return false;
   WMTBufferInfo info = {};
   info.length = 56;
   info.options = WMTResourceStorageModeShared;
@@ -83,7 +88,7 @@ static bool CheckSamplerStorage(WMT::Device device, dxmt::MTLD3D12SamplerDescrip
 }
 
 static bool CompileDXBC(std::vector<char> &shader, bool unsupported_reduction = false, bool gradient = false,
-                        unsigned gradient_case = 0, bool line = false, bool line_array = false) {
+                        unsigned gradient_case = 0, bool line = false, bool line_array = false, bool clamp_probe = false) {
   HMODULE compiler = LoadLibraryA(D3DCOMPILER_DLL_A);
   if (!compiler)
     return false;
@@ -93,6 +98,10 @@ static bool CompileDXBC(std::vector<char> &shader, bool unsupported_reduction = 
       "RWBuffer<uint> o:register(u0);"
       "[numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){"
       "o[0]=(uint)(t.SampleLevel(s,float2(0.5,0.5),0).x*255+0.5);}";
+  static const char clamp_source[] =
+      "Texture2D<float4> t:register(t0); SamplerState s:register(s0); RWBuffer<uint> o:register(u0);"
+      "[numthreads(1,1,1)] void main(){uint4 v=(uint4)(t.SampleLevel(s,float2(0.5,0.5),0)*255+0.5);"
+      "o[0]=v.x|(v.y<<8)|(v.z<<16)|(v.w<<24);}";
   const char *gradient_x[] = {"float2(1,0)", "float2(0.23,0)", "float2(0.23,0.23)",
                              "float2(0.23,0)", "float2(0,0)"};
   const char *gradient_y[] = {"float2(0,1)", "float2(0.23,0.23)", "float2(0.23,0.23)",
@@ -114,7 +123,7 @@ static bool CompileDXBC(std::vector<char> &shader, bool unsupported_reduction = 
       "[numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){o[0]=(uint)(t." +
       (gradient ? "SampleGrad" : "SampleLevel") + "(s," + (line_array ? "float2(0.5,1)" : "0.5") +
       (gradient ? (gradient_case ? ",0.23,0.0" : ",1.0,0.0") : ",0.0") + ").x*255+0.5);}";
-  const char *selected_source = unsupported_reduction ? unsupported_source : line ? line_source.c_str() :
+  const char *selected_source = clamp_probe ? clamp_source : unsupported_reduction ? unsupported_source : line ? line_source.c_str() :
       gradient ? gradient_source.c_str() : source;
   HRESULT hr = compile ? compile(selected_source, std::strlen(selected_source),
                                 nullptr, nullptr, nullptr, "main", "cs_5_0",
@@ -150,15 +159,61 @@ main(int argc, char **argv) {
   const bool expect_pso_unsupported = argc == 4 && strcmp(argv[3], "--expect-pso-unsupported") == 0;
   const bool expect_air_unsupported = argc == 4 && strcmp(argv[3], "--expect-air-unsupported") == 0;
   const bool expect_consumer_unsupported = argc == 4 && strcmp(argv[3], "--expect-consumer-unsupported") == 0;
-  const bool expect_minlod_unsupported = argc == 4 && strcmp(argv[3], "--expect-minlod-unsupported") == 0;
+  const bool expect_null_unsupported = argc == 4 && strcmp(argv[3], "--expect-null-unsupported") == 0;
   if (argc == 4 && !expect_unsupported && !expect_pso_unsupported && !expect_air_unsupported &&
-      !expect_consumer_unsupported && !expect_minlod_unsupported)
+      !expect_consumer_unsupported && !expect_null_unsupported)
     return 2;
+  struct ClampProbe {
+    const char *name;
+    float clamp;
+    UINT expected;
+    bool multi_mip = false;
+    bool r8 = false;
+    bool swizzle = false;
+    bool static_resource = false;
+    bool live_resource = false;
+    bool root_sampler = false;
+    bool max_lod_zero = false;
+    UINT first_mip = 0;
+    UINT view_mips = 0;
+    bool copy_resource = false;
+    bool switch_sampler = false;
+    bool null_static_resource = false;
+  };
+  const ClampProbe clamp_probes[] = {
+      {.name = "--minimum-clamp-rgba", .clamp = 0.5f, .expected = 0},
+      {.name = "--minimum-clamp-r", .clamp = 0.5f, .expected = 0xff000000, .r8 = true},
+      {.name = "--minimum-clamp-swizzle", .clamp = 0.5f, .expected = 0x0000ffff, .r8 = true, .swizzle = true},
+      {.name = "--minimum-clamp-mip", .clamp = 1.25f, .expected = 0xff000060, .multi_mip = true},
+      {.name = "--minimum-clamp-last", .clamp = 3.0f, .expected = 0xff0000a0, .multi_mip = true},
+      {.name = "--minimum-clamp-past-last", .clamp = 3.1f, .expected = 0, .multi_mip = true},
+      {.name = "--minimum-clamp-static", .clamp = 0.5f, .expected = 0, .static_resource = true},
+      {.name = "--minimum-clamp-live", .clamp = 0.5f, .expected = 0, .live_resource = true},
+      {.name = "--minimum-clamp-root", .clamp = 0.5f, .expected = 0, .root_sampler = true},
+      {.name = "--minimum-clamp-above-max", .clamp = 2.25f, .expected = 0xff000060,
+       .multi_mip = true, .max_lod_zero = true},
+      {.name = "--minimum-clamp-view", .clamp = 1.75f, .expected = 0xff000060,
+       .multi_mip = true, .first_mip = 1, .view_mips = 2},
+      {.name = "--minimum-clamp-view-last", .clamp = 2.0f, .expected = 0xff000060,
+       .multi_mip = true, .first_mip = 1, .view_mips = 2},
+      {.name = "--minimum-clamp-view-past", .clamp = 2.1f, .expected = 0,
+       .multi_mip = true, .first_mip = 1, .view_mips = 2},
+      {.name = "--minimum-clamp-copy", .clamp = 0.5f, .expected = 0xff000000, .r8 = true, .copy_resource = true},
+      {.name = "--minimum-clamp-static-switch", .clamp = 0.5f, .expected = 0,
+       .static_resource = true, .switch_sampler = true},
+      {.name = "--minimum-clamp-static-null", .clamp = 0.5f, .expected = 0,
+       .static_resource = true, .switch_sampler = true, .null_static_resource = true},
+  };
+  const ClampProbe *clamp_probe = nullptr;
+  if (argc == 3)
+    for (const auto &probe : clamp_probes)
+      if (strcmp(argv[2], probe.name) == 0) clamp_probe = &probe;
   const bool dynamic_switch = argc == 3 && strcmp(argv[2], "--dynamic-switch") == 0;
   const bool defaults_probe = argc == 3 && (strcmp(argv[2], "--texture-default-rgba") == 0 ||
       strcmp(argv[2], "--texture-default-r") == 0 || strcmp(argv[2], "--texture-default-swizzle") == 0);
-  const bool defaults_r = defaults_probe && strcmp(argv[2], "--texture-default-rgba") != 0;
-  const bool defaults_swizzle = defaults_probe && strcmp(argv[2], "--texture-default-swizzle") == 0;
+  const bool defaults_r = (defaults_probe && strcmp(argv[2], "--texture-default-rgba") != 0) || (clamp_probe && clamp_probe->r8);
+  const bool defaults_swizzle = (defaults_probe && strcmp(argv[2], "--texture-default-swizzle") == 0) ||
+      (clamp_probe && clamp_probe->swizzle);
   const bool line = argc == 3 && (strcmp(argv[2], "--minimum-1d") == 0 ||
       strcmp(argv[2], "--maximum-1d") == 0 || strcmp(argv[2], "--minimum-1d-grad") == 0 ||
       strcmp(argv[2], "--maximum-1d-grad") == 0 || strcmp(argv[2], "--minimum-1d-array") == 0 ||
@@ -170,7 +225,8 @@ main(int argc, char **argv) {
   const bool grad_lod = argc == 3 && (strcmp(argv[2], "--minimum-grad-lod") == 0 ||
       strcmp(argv[2], "--minimum-grad-bias") == 0 || strcmp(argv[2], "--minimum-grad-parallel") == 0 ||
       strcmp(argv[2], "--minimum-grad-perpendicular") == 0 || strcmp(argv[2], "--minimum-grad-zero") == 0 ||
-      strcmp(argv[2], "--minimum-grad-minlod") == 0 || strcmp(argv[2], "--minimum-grad-maxlod") == 0 || line_lod);
+      strcmp(argv[2], "--minimum-grad-minlod") == 0 || strcmp(argv[2], "--minimum-grad-maxlod") == 0 || line_lod ||
+      (clamp_probe && clamp_probe->multi_mip));
   const bool grad_bias = grad_lod && strcmp(argv[2], "--minimum-grad-bias") == 0;
   const bool grad_minlod = grad_lod && strcmp(argv[2], "--minimum-grad-minlod") == 0;
   const bool grad_maxlod = grad_lod && strcmp(argv[2], "--minimum-grad-maxlod") == 0;
@@ -185,7 +241,7 @@ main(int argc, char **argv) {
        strcmp(argv[2], "--static-minimum-state") == 0 || dynamic_switch ||
        strcmp(argv[2], "--minimum-static-observation") == 0 ||
        strcmp(argv[2], "--minimum-live-observation") == 0 || strcmp(argv[2], "--minimum-grad") == 0 ||
-       strcmp(argv[2], "--static-minimum-grad") == 0 || grad_lod || (line && strstr(argv[2], "minimum")));
+       strcmp(argv[2], "--static-minimum-grad") == 0 || grad_lod || clamp_probe || (line && strstr(argv[2], "minimum")));
   const bool state_probe = argc >= 3 && strcmp(argv[2], "--static-minimum-state") == 0;
   const bool maximum = argc >= 3 &&
       (strcmp(argv[2], "--maximum") == 0 || strcmp(argv[2], "--static-maximum") == 0 ||
@@ -200,8 +256,10 @@ main(int argc, char **argv) {
   const bool static_sampler = argc >= 3 &&
       (strcmp(argv[2], "--static-sampler") == 0 || state_probe ||
        strcmp(argv[2], "--static-minimum") == 0 || strcmp(argv[2], "--static-maximum") == 0 ||
-       strcmp(argv[2], "--static-minimum-grad") == 0 || strcmp(argv[2], "--static-maximum-grad") == 0);
-  const D3D12_FILTER filter = grad_lod ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_POINT :
+       strcmp(argv[2], "--static-minimum-grad") == 0 || strcmp(argv[2], "--static-maximum-grad") == 0 ||
+       (clamp_probe && clamp_probe->root_sampler));
+  const D3D12_FILTER filter = clamp_probe ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR :
+      grad_lod ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_POINT :
       state_probe ? D3D12_ENCODE_BASIC_FILTER(D3D12_FILTER_TYPE_LINEAR,
       D3D12_FILTER_TYPE_POINT, D3D12_FILTER_TYPE_POINT, D3D12_FILTER_REDUCTION_TYPE_MINIMUM) :
                               minimum ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR :
@@ -209,7 +267,7 @@ main(int argc, char **argv) {
                                         D3D12_FILTER_MIN_MAG_MIP_LINEAR;
   // The nonorthogonal footprint's major axis is 8*.23*golden_ratio:
   // LOD ~1.574 -> point mip 2; max raw derivative length wrongly picks mip 1.
-  const UINT expected = line_lod ? 224 : line ? (minimum ? (line_array ? 192 : 16) : (line_array ? 240 : 64)) :
+  const UINT expected = clamp_probe ? clamp_probe->expected : line_lod ? 224 : line ? (minimum ? (line_array ? 192 : 16) : (line_array ? 240 : 64)) :
       grad_lod ? (grad_bias || grad_case == 2 || grad_case == 3 ? 224 :
       grad_case == 4 || grad_maxlod ? 32 : 96) : minimum ? 16 : maximum ? 240 : 255;
   const bool direct_indexed_uav_texture =
@@ -222,8 +280,8 @@ main(int argc, char **argv) {
     return 2;
 
   const bool dxbc = strcmp(argv[1], "--dxbc") == 0;
-  if ((expect_consumer_unsupported || expect_minlod_unsupported) && (!reduction || static_sampler)) return 2;
-  if (expect_minlod_unsupported && !dxbc) return 2;
+  if ((expect_consumer_unsupported || expect_null_unsupported) && (!reduction || static_sampler)) return 2;
+  if ((expect_null_unsupported || clamp_probe) && !dxbc) return 2;
   if (dynamic_switch && !dxbc) return 2;
   if (grad_lod && !dxbc) return 2;
   if (line && !dxbc) return 2;
@@ -233,7 +291,7 @@ main(int argc, char **argv) {
     return 2;
   std::vector<char> shader;
   if (dxbc) {
-    if (!CompileDXBC(shader, expect_air_unsupported || expect_consumer_unsupported, gradient_probe, grad_case, line, line_array))
+    if (!CompileDXBC(shader, expect_air_unsupported || expect_consumer_unsupported, gradient_probe, grad_case, line, line_array, clamp_probe != nullptr))
       return 3;
   } else {
     std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
@@ -361,21 +419,22 @@ main(int argc, char **argv) {
     root_desc.NumStaticSamplers = 1;
     root_desc.pStaticSamplers = &static_sampler_desc;
   }
-  if (observation_probe) {
+  if (observation_probe || (clamp_probe && clamp_probe->static_resource)) {
     versioned_root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     versioned_root_desc.Desc_1_1.NumParameters = root_parameter_count;
     versioned_root_desc.Desc_1_1.pParameters = observation_parameters;
     for (unsigned i = 0; i < root_parameter_count; ++i) {
       observation_ranges[i] = {ranges[i].RangeType, ranges[i].NumDescriptors, ranges[i].BaseShaderRegister,
           ranges[i].RegisterSpace,
-          ranges[i].RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER && static_observation
+          ((ranges[i].RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER && static_observation) ||
+           (ranges[i].RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SRV && clamp_probe && clamp_probe->static_resource))
               ? D3D12_DESCRIPTOR_RANGE_FLAG_NONE : D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE,
           ranges[i].OffsetInDescriptorsFromTableStart};
       observation_parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
       observation_parameters[i].DescriptorTable = {1, &observation_ranges[i]};
     }
   }
-  serialize_hr = direct_indexed || observation_probe
+  serialize_hr = direct_indexed || observation_probe || (clamp_probe && clamp_probe->static_resource)
                      ? D3D12SerializeVersionedRootSignature(&versioned_root_desc, &root_blob, &root_error)
                      : D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob, &root_error);
   if (!CheckHR("D3D12SerializeRootSignature", serialize_hr))
@@ -479,7 +538,11 @@ main(int argc, char **argv) {
         D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1,
         D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0);
   srv_desc.Texture2D.MipLevels = texture_desc.MipLevels;
-  srv_desc.Texture2D.ResourceMinLODClamp = expect_minlod_unsupported ? 0.5f : 0.0f;
+  srv_desc.Texture2D.ResourceMinLODClamp = clamp_probe && !clamp_probe->live_resource ? clamp_probe->clamp : 0.0f;
+  if (clamp_probe) {
+    srv_desc.Texture2D.MostDetailedMip = clamp_probe->first_mip;
+    if (clamp_probe->view_mips) srv_desc.Texture2D.MipLevels = clamp_probe->view_mips;
+  }
   if (line_array) {
     srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
     srv_desc.Texture1DArray = {};
@@ -491,12 +554,12 @@ main(int argc, char **argv) {
     srv_desc.Texture1D.MipLevels = texture_desc.MipLevels;
   }
   resource_cpu = resource_heap->GetCPUDescriptorHandleForHeapStart();
-  device->CreateShaderResourceView(texture, &srv_desc, resource_cpu);
-  if (defaults_probe) {
+  device->CreateShaderResourceView(clamp_probe && clamp_probe->null_static_resource ? nullptr : texture, &srv_desc, resource_cpu);
+  if (defaults_probe || (clamp_probe && clamp_probe->copy_resource)) {
     auto heap = static_cast<dxmt::MTLD3D12DescriptorHeap *>(resource_heap);
     auto metal = static_cast<dxmt::MTLD3D12Device *>(device)->GetMTLDevice();
     const uint32_t ones = defaults_swizzle ? 3 : defaults_r ? 8 : 0;
-    if (!CheckTextureDefaults(metal, heap, ones)) {
+    if (defaults_probe && !CheckTextureDefaults(metal, heap, ones)) {
       std::cerr << "texture defaults GPU descriptor mismatch\n";
       goto cleanup;
     }
@@ -509,7 +572,7 @@ main(int argc, char **argv) {
     device->CopyDescriptorsSimple(1, resource_cpu, source->GetCPUDescriptorHandleForHeapStart(),
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     source->Release();
-    if (!CheckTextureDefaults(metal, heap, ones)) {
+    if (defaults_probe && !CheckTextureDefaults(metal, heap, ones)) {
       std::cerr << "texture defaults CPU-source copy mismatch\n";
       goto cleanup;
     }
@@ -562,6 +625,7 @@ main(int argc, char **argv) {
       sampler_desc.MinLOD = grad_minlod ? 2.25f : 0.0f;
       sampler_desc.MaxLOD = grad_minlod ? 0.0f : grad_maxlod ? 0.25f : D3D12_FLOAT32_MAX;
     }
+    if (clamp_probe && clamp_probe->max_lod_zero) sampler_desc.MaxLOD = 0;
     if (reduction) {
       auto heap = static_cast<dxmt::MTLD3D12SamplerDescriptorHeap *>(sampler_heap);
       D3D12_SAMPLER_DESC control = sampler_desc;
@@ -670,6 +734,11 @@ main(int argc, char **argv) {
           "CreateCommandList",
           device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, pso, IID_PPV_ARGS(&list))))
     goto cleanup;
+  if (clamp_probe && clamp_probe->switch_sampler) {
+    auto ordinary = sampler_desc;
+    ordinary.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    device->CreateSampler(&ordinary, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+  }
 
   texture_dst.pResource = texture;
   texture_dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -775,7 +844,39 @@ main(int argc, char **argv) {
   }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
-  if (expect_consumer_unsupported || expect_minlod_unsupported) {
+  if (clamp_probe && clamp_probe->live_resource) {
+    srv_desc.Texture2D.ResourceMinLODClamp = clamp_probe->clamp;
+    device->CreateShaderResourceView(texture, &srv_desc, resource_cpu);
+  }
+  if (clamp_probe && clamp_probe->static_resource) {
+    auto *native_list = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list);
+    for (auto *encoder = native_list->entry; encoder; encoder = encoder->next)
+      for (const auto &use : encoder->pending_descriptor_uses)
+        if (use.range_type == D3D12_DESCRIPTOR_RANGE_TYPE_SRV) goto cleanup;
+  }
+  if (clamp_probe && clamp_probe->switch_sampler) {
+    auto *native_list = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list);
+    dxmt::EncoderData *compute_encoder = nullptr;
+    for (auto *encoder = native_list->entry; encoder; encoder = encoder->next)
+      if (encoder->type == dxmt::EncoderType::Compute) compute_encoder = encoder;
+    if (!compute_encoder || compute_encoder->static_reduction_defaults_invalid != clamp_probe->null_static_resource)
+      goto cleanup;
+    std::vector<dxmt::Rc<dxmt::Sampler>> retained;
+    bool observed_reduction = false;
+    if (!native_list->ResolvePendingSamplerUses(compute_encoder, retained, &observed_reduction) || observed_reduction)
+      goto cleanup;
+    device->CreateSampler(&sampler_desc, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+    retained.clear();
+    const bool accepted = native_list->ResolvePendingSamplerUses(compute_encoder, retained, &observed_reduction);
+    if (clamp_probe->null_static_resource) {
+      if (accepted) goto cleanup;
+      std::cout << "recorded static null defaults reject live ordinary-to-reduction sampler\n";
+      result = 0;
+      goto cleanup; // Resolver-only negative contract, no invalid native dispatch.
+    }
+    if (!accepted || !observed_reduction) goto cleanup;
+  }
+  if (expect_consumer_unsupported || expect_null_unsupported) {
     auto *native_list = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list);
     dxmt::EncoderData *compute_encoder = nullptr;
     for (auto *encoder = native_list->entry; encoder; encoder = encoder->next)
@@ -788,9 +889,10 @@ main(int argc, char **argv) {
       if (sampler_accepted || !compute_encoder->sampler_refs.empty()) goto cleanup;
       std::cout << "dynamic reduction unsupported consumer rejected without fallback\n";
     } else {
+      device->CreateShaderResourceView(nullptr, &srv_desc, resource_cpu);
       if (!sampler_accepted || !observed_reduction || native_list->ResolvePendingDescriptorUses(
               compute_encoder, [](obj_handle_t, WMTResourceUsage, WMTRenderStages) {}, observed_reduction)) goto cleanup;
-      std::cout << "dynamic reduction ResourceMinLODClamp rejected\n";
+      std::cout << "dynamic reduction null texture defaults rejected\n";
     }
     result = 0;
     goto cleanup;

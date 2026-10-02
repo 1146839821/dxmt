@@ -25,6 +25,7 @@
 #include "dxmt_command_context.hpp"
 #include "dxmt_command_constants.hpp"
 #include "dxmt_format.hpp"
+#include "air_texture_abi.hpp"
 #include "util_env.hpp"
 #include <atomic>
 #include <unordered_map>
@@ -3049,8 +3050,8 @@ public:
   bool ResolvePendingSamplerUses(EncoderData *encoder, std::vector<Rc<Sampler>> &retained,
                                 bool *sampler_reduction) final {
     if (sampler_reduction) *sampler_reduction = encoder && encoder->static_sampler_reduction;
-    if (encoder && encoder->static_sampler_reduction && encoder->static_resource_min_lod_clamp) {
-      ERR("D3D12 submission rejected: static AIR reduction ResourceMinLODClamp is unsupported");
+    if (encoder && encoder->static_sampler_reduction && encoder->static_reduction_defaults_invalid) {
+      ERR("D3D12 submission rejected: static AIR reduction texture defaults are unavailable");
       return false;
     }
     if (!encoder || encoder->pending_sampler_uses.empty()) return true;
@@ -3074,8 +3075,8 @@ public:
                                           : "D3D12 submission rejected: AIR dynamic sampler reduction is unsupported");
               return false;
             }
-            if (encoder->static_resource_min_lod_clamp) {
-              ERR("D3D12 submission rejected: static AIR reduction ResourceMinLODClamp is unsupported");
+            if (encoder->static_reduction_defaults_invalid) {
+              ERR("D3D12 submission rejected: static AIR reduction texture defaults are unavailable");
               return false;
             }
             if (sampler_reduction) *sampler_reduction = true;
@@ -3269,6 +3270,16 @@ public:
     }
   }
 
+  static bool
+  HasInvalidReductionDefaults(const ShaderVisibleDescriptorSnapshot &snapshot, const PendingDescriptorUse &use) {
+    if (use.use_msc || (!use.direct_indexed && use.range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV))
+      return false;
+    if (snapshot.descriptor.type == ShaderVisibleDescriptorType::Null)
+      return true;
+    return snapshot.descriptor.type == ShaderVisibleDescriptorType::SRVTexture &&
+        (!snapshot.texture || !(snapshot.descriptor.SRVTexture.default_components & air::TextureDefaultComponentsValid));
+  }
+
   void
   EncodeMSCResourceUses(
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
@@ -3301,7 +3312,7 @@ public:
             bool direct_indexed) {
           const bool is_volatile = direct_indexed || (flags & D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
           PendingDescriptorUse use{descriptor_heap, index, range_type, direct_indexed, compute, stages, use_msc, is_volatile};
-          use.reject_min_lod_clamp = !use_msc &&
+          use.validate_reduction_defaults = !use_msc &&
               (pRootSig->HasAIRReductionSamplers || allocator_->encoder_current->static_sampler_reduction);
           try {
             current_uses.push_back(use);
@@ -3348,14 +3359,11 @@ public:
              snapshots[i].descriptor.type == ShaderVisibleDescriptorType::UAVTexelBuffer) &&
             !snapshots[i].msc_typed_buffer.view;
         for (const auto &use : slot_uses[i]) {
-          if (!use.use_msc && !use.volatile_descriptors &&
-              snapshots[i].descriptor.type == ShaderVisibleDescriptorType::SRVTexture &&
-              snapshots[i].descriptor.SRVTexture.resource_min_lod_clamp != 0.0f)
-            allocator_->encoder_current->static_resource_min_lod_clamp = true;
-          if (use.reject_min_lod_clamp && !use.volatile_descriptors &&
-              snapshots[i].descriptor.type == ShaderVisibleDescriptorType::SRVTexture &&
-              snapshots[i].descriptor.SRVTexture.resource_min_lod_clamp != 0.0f) {
-            FailRecording(__func__, "AIR reduction ResourceMinLODClamp is unsupported");
+          const bool invalid_defaults = HasInvalidReductionDefaults(snapshots[i], use);
+          if (!use.volatile_descriptors && invalid_defaults)
+            allocator_->encoder_current->static_reduction_defaults_invalid = true;
+          if (use.validate_reduction_defaults && !use.volatile_descriptors && invalid_defaults) {
+            FailRecording(__func__, "AIR reduction texture defaults are unavailable");
             return;
           }
           if (use.use_msc && !use.volatile_descriptors && missing_msc_view) {
@@ -3433,10 +3441,9 @@ public:
                snapshots[i].descriptor.type == ShaderVisibleDescriptorType::UAVTexelBuffer) &&
               !snapshots[i].msc_typed_buffer.view;
           for (const auto &use : slot_uses[i]) {
-            if ((use.reject_min_lod_clamp || (sampler_reduction && !use.use_msc)) &&
-                snapshots[i].descriptor.type == ShaderVisibleDescriptorType::SRVTexture &&
-                snapshots[i].descriptor.SRVTexture.resource_min_lod_clamp != 0.0f) {
-              ERR("D3D12 submission rejected: AIR reduction ResourceMinLODClamp is unsupported");
+            if ((use.validate_reduction_defaults || (sampler_reduction && !use.use_msc)) &&
+                HasInvalidReductionDefaults(snapshots[i], use)) {
+              ERR("D3D12 submission rejected: AIR reduction texture defaults are unavailable");
               return false;
             }
             if (use.use_msc && missing_msc_view) {

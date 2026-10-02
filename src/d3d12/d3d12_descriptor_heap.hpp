@@ -96,6 +96,7 @@ struct SRVTextureCPUStorage {
   Texture *texture = nullptr;
   TextureViewKey view{};
   FLOAT resource_min_lod_clamp = 0.0f;
+  uint64_t default_components = 0; // Same validity/one-mask as AIR texture word 2.
 };
 
 using UAVTextureCPUStorage = SRVTextureCPUStorage;

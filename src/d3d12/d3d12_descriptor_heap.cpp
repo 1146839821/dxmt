@@ -404,6 +404,8 @@ public:
     cpu_storage.SRVTexture.texture = Texture;
     cpu_storage.SRVTexture.view = View;
     cpu_storage.SRVTexture.resource_min_lod_clamp = ResourceMinLODClamp;
+    const auto defaults = TextureOutOfBoundsOneMask(Texture->pixelFormat(View));
+    cpu_storage.SRVTexture.default_components = defaults ? air::PackTextureDefaultComponents(*defaults) : 0;
     if (mapped_argument_buffer_) {
       auto &texture_view = Texture->view(View);
       msc_texture_views_[Index] = texture_view.texture;
@@ -411,8 +413,7 @@ public:
       gpu_storage.SRVTexture = {}; // CPU-only heap storage is not initially zeroed.
       gpu_storage.SRVTexture.resource_id = texture_view.gpuResourceID;
       gpu_storage.SRVTexture.metadata = TextureMetadata(Texture->arrayLength(View), ResourceMinLODClamp);
-      const auto defaults = TextureOutOfBoundsOneMask(Texture->pixelFormat(View));
-      gpu_storage.SRVTexture.default_components = defaults ? air::PackTextureDefaultComponents(*defaults) : 0;
+      gpu_storage.SRVTexture.default_components = cpu_storage.SRVTexture.default_components;
       SetMSCDescriptor(Index, {0, texture_view.gpuResourceID, std::bit_cast<uint32_t>(ResourceMinLODClamp)});
 
       const auto trace_id = descriptor_texture_debug_count.fetch_add(1, std::memory_order_relaxed);
@@ -546,6 +547,7 @@ public:
     cpu_storage.UAVTexture.texture = Texture; // 
     cpu_storage.UAVTexture.view = View;
     cpu_storage.UAVTexture.resource_min_lod_clamp = 0;
+    cpu_storage.UAVTexture.default_components = 0;
     if (mapped_argument_buffer_) {
       auto &texture_view = Texture->view(View);
       msc_texture_views_[Index] = texture_view.texture;
