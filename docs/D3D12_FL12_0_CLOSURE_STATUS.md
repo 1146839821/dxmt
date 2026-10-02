@@ -134,6 +134,35 @@ unregistered. No new game/tessellation benchmark or FL promotion.
 
 ## Task Analysis
 
+### Static DXIL reduction-root continuation (2026-10-03)
+
+- Hypothesis: static reduction-root admission cannot be closed by removing the
+  ordinary MSC layout rejection alone.
+- Evidence: root initialization currently admits static reduction through the
+  AIR-specific opt-in only. `InitializeMSCLayout` then rejects
+  `HasAIRReductionSamplers`; both compute PSO initialization and `PreDispatch`
+  require that ordinary layout before the private dispatch can execute.
+  `PrepareRootInternal` preserves application static sampler descriptors when
+  serializing the augmented root. Its reflection result therefore is not yet
+  evidence of qualified static reduction conversion or execution.
+- Expected effect: implement a qualified private compute route through root,
+  PSO and dispatch admission, preserving original API descriptors and blob
+  identity, instead of broadening ordinary MSC consumer admission.
+- Risk: sharing an ordinary layout or native surrogate with unqualified
+  graphics, raytracing or typed-origin consumers can silently change sampling
+  semantics. Any compiler-only normalization must remain separate from the
+  application's original sampler state and cache identity.
+- Validation: current source/call-path audit only. No new GPU pass, source
+  implementation, capability promotion or game benchmark in this continuation.
+
+Next focused implementation acceptance should cover static MIN, MAX and mixed
+ordinary/reduction pairs, original descriptor/blob preservation, defaults-off
+rejection and unsupported-consumer rejection in both builds. These are new
+focused obligations, not additional completed cases or a full MinMax matrix.
+The remaining 1,584 typed executions and seven complete GPU categories above
+are unchanged. Count implementation workstreams, not commits or accumulated
+focused dispatches, when assessing distance to FL12_0.
+
 Baseline: `e220380`, branch `feat/d3d12-1`. User requests continued work and
 an evidence-based estimate of remaining FL12_0 validation. This checkpoint
 reprioritizes capability closure ahead of another tests-only recipe decoder.
