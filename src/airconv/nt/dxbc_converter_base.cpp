@@ -1738,7 +1738,8 @@ Converter::operator()(const InstSampleLOD &sample) {
   llvm::Value *LOD = ir.CreateFAdd(LoadOperand(sample.src_lod, kMaskComponentX), Sampler->Bias);
 
   if (Sampler->Reduction) {
-    if (sample.feedback || (Tex->Logical != Texture::texture2d && Tex->Logical != Texture::texture2d_array &&
+    if (sample.feedback || (Tex->Logical != Texture::texture1d && Tex->Logical != Texture::texture1d_array &&
+                            Tex->Logical != Texture::texture2d && Tex->Logical != Texture::texture2d_array &&
                             Tex->Logical != Texture::texture3d) || Tex->Texture.sample_type != Texture::sample_float) {
       failure = "AIR Min/Max SampleLevel texture kind/type or feedback is unsupported";
       return;
@@ -1918,7 +1919,8 @@ Converter::operator()(const InstSampleDerivative &sample) {
 
   if (Sampler->Reduction) {
     if (sample.feedback || sample.min_lod_clamp ||
-        (Tex->Logical != Texture::texture2d && Tex->Logical != Texture::texture2d_array &&
+        (Tex->Logical != Texture::texture1d && Tex->Logical != Texture::texture1d_array &&
+         Tex->Logical != Texture::texture2d && Tex->Logical != Texture::texture2d_array &&
          Tex->Logical != Texture::texture3d) || Tex->Texture.sample_type != Texture::sample_float) {
       failure = "AIR Min/Max SampleGrad texture kind/type, feedback or instruction clamp is unsupported";
       return;

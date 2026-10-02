@@ -40,3 +40,32 @@ unchanged admission. git diff --check passes. Independent review unavailable;
 no independent-review claim. No FL/SM promotion, game deployment or full MinMax
 closure. Next: connect 1D SampleLevel/SampleGrad qualification and run isolated
 D3D12 readbacks including real descriptor transport and multi-mip gradients.
+
+## D3D12 integration checkpoint
+
+Baseline 3b6e417. The existing hypothesis/risk/validation above also guides this
+integration: broaden reflection and lowering together, then require actual
+Windows descriptor/PSO/dispatch readback. The earlier rejection statement is
+historical; supported no-feedback SampleLevel and no-instruction-clamp SampleGrad
+now admit float 1D and 1D-array under the existing opt-in gates. The shared helper
+preserves logical dimension independently of native 2D/2D-array storage. Padded
+1D gradient vectors have Y=0, so existing parallel-gradient LOD handling uses
+the largest X derivative scaled by view width.
+
+Both production builds succeed. Isolated host/Unix DLL copies, with dyld path
+confirmation and shader cache disabled, pass nine D3D12 executions per variant:
+SampleLevel and SampleGrad Min/Max return 16/64 on a two-texel 1D resource;
+both operations return 192/240 on slice 1 of a distinguishable two-slice array;
+an 8-wide four-mip resource with derivative 0.23 selects mip 1 and returns 224.
+The analytic expected LOD is log2(8*0.23), about 0.88; point mip selection is 1.
+
+Four focused regressions per variant pass: existing 2D same-PSO switches,
+nonorthogonal multi-mip gradients, static instruction-clamp PSO rejection and
+MSC consumer resolver rejection. These rejection checks are not successful GPU
+dispatches. Meson passes 3/3 per variant; git diff --check passes. Main-agent
+Standards review checked subresource footprints, array unions and unchanged
+ordinary lowering; Spec review checked logical/native shape separation, gradient
+scaling, retained clamp/feedback rejection and no backend fallback. No blocking
+finding; independent review unavailable. No full matrix, game/performance run or
+FL/SM promotion. Static 1D sampler and broad address/filter/lifetime combinations
+remain outside this focused acceptance; complete MinMax and FL12_0 remain open.

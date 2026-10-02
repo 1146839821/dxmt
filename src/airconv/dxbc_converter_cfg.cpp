@@ -662,7 +662,9 @@ read_control_flow(
                         std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleDerivative>) {
             const auto &texture = shader_info.srvMap.at(decoded.src_resource.range_id);
             eligible = !decoded.feedback && texture.scaler_type == ScalerDataType::Float &&
-                (texture.resource_type == ResourceType::Texture2D ||
+                (texture.resource_type == ResourceType::Texture1D ||
+                 texture.resource_type == ResourceType::Texture1DArray ||
+                 texture.resource_type == ResourceType::Texture2D ||
                  texture.resource_type == ResourceType::Texture2DArray ||
                  texture.resource_type == ResourceType::Texture3D);
             if constexpr (std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleDerivative>)

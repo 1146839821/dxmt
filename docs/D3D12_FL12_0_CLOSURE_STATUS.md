@@ -101,6 +101,12 @@ This closes a bounded AIR operation gap, not Min/Max or FL12_0: implicit samplin
 clamps/feedback, DXIL and complete GPU matrices remain outstanding. Feature-level
 declarations are unchanged.
 
+AIR reduction now admits supported float 1D/1D-array SampleLevel and SampleGrad
+under the same opt-in gates (`D3D12_MINMAX_1D_INTEGRATION.md`). Both variants pass
+focused real D3D12 minimum/maximum, distinguishable array-slice and multi-mip
+gradient readbacks. This extends dimensions, not full MinMax closure; remaining
+operations, clamps/feedback, DXIL and complete matrices are still outstanding.
+
 Prioritize the production typed-buffer origin contract, using
 `D3D12_TYPED_ORIGIN_PRODUCTION_AUDIT.md` as the integration gap list. Keep
 unsupported views rejected until real production readback succeeds. Integrate
