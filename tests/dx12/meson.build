@@ -96,6 +96,12 @@ if build_machine.system() == 'darwin'
       dependencies: [msc_probe_library],
       link_args: ['-arch', native_compiler_arch, '-framework', 'Foundation', '-framework', 'Metal'],
     )
+    executable('msc_root_layout_probe', 'msc_root_layout_probe.c',
+      native: true, build_by_default: false,
+      c_args: msc_probe_includes,
+      dependencies: [msc_probe_library],
+      link_args: ['-arch', native_compiler_arch],
+    )
   endif
 endif
 configure_file(input: 'typed_uav_formats.hlsl', output: 'typed_uav_formats.hlsl', copy: true)
