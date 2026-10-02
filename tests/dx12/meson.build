@@ -34,6 +34,13 @@ executable('dx12_minmax_pair', 'dx12_minmax_pair.cpp',
   dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
 )
 
+executable('dx12_minmax_dispatch', 'dx12_minmax_dispatch.cpp',
+  '../../src/d3d12/d3d12_minmax_dispatch.cpp', '../../src/d3d12/d3d12_minmax_binding.cpp',
+  '../../src/d3d12/d3d12_sampler.cpp',
+  build_by_default: false, link_args: ['-municode'],
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
 executable('dx12_typed_origin_prepare', 'dx12_typed_origin_prepare.cpp',
   '../../src/d3d12/d3d12_typed_origin.cpp',
   build_by_default: false, link_args: ['-municode'],
@@ -657,6 +664,11 @@ if dxc_command.length() > 0
   )
   custom_target('dx12_minmax_bindings_fixture',
     input: 'minmax_bindings.hlsl', output: 'minmax_bindings.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_minmax_typed_guard_fixture',
+    input: 'minmax_typed_guard.hlsl', output: 'minmax_typed_guard.cs.cso',
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )

@@ -1013,7 +1013,8 @@ public:
                                reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM;
     uint32_t flags = 0;
     if (air_reduction) {
-      if (env::getEnvVar("DXMT_ENABLE_AIR_MINMAX_DYNAMIC") != "1" ||
+      if ((env::getEnvVar("DXMT_ENABLE_AIR_MINMAX_DYNAMIC") != "1" &&
+           env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY").empty()) ||
           D3D12_DECODE_IS_ANISOTROPIC_FILTER(pDesc->Filter)) {
         invalidate();
         return E_NOTIMPL;

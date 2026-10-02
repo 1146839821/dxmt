@@ -20,6 +20,7 @@
 #include "com/com_pointer.hpp"
 #include "d3d12_device.hpp"
 #include "d3d12_typed_origin_binding.hpp"
+#include "d3d12_minmax_dispatch.hpp"
 #include "d3d12_pageable.hpp"
 #include "dxmt_command_constants.hpp"
 #include "dxmt_format.hpp"
@@ -36,10 +37,10 @@ namespace dxmt {
 
 constexpr auto kCommandQueueSize = 32u;
 
-// Only the explicitly enabled origin path clones a stream. Ordinary compute
+// Only explicitly enabled private variants clone a stream. Ordinary compute
 // retains the existing single-call replay. Never patch allocator-owned nodes:
 // the same closed list can be submitted while a prior execution is in flight.
-union OriginReplayCommand {
+union PrivateComputeReplayCommand {
   wmtcmd_compute_nop nop;
   wmtcmd_compute_dispatch dispatch;
   wmtcmd_compute_dispatch_indirect indirect;
@@ -54,13 +55,29 @@ union OriginReplayCommand {
   wmtcmd_compute_executecommands execute;
 };
 
-static bool ReplayTypedOriginCompute(
+static bool ReplayPrivateCompute(
     MTLD3D12Device *device, WMT::ComputeCommandEncoder encoder, ComputeEncoderData *data,
-    std::vector<std::shared_ptr<D3D12TypedOriginSubmissionBinding>> &bindings) {
+    std::vector<std::shared_ptr<D3D12TypedOriginSubmissionBinding>> &bindings,
+    std::vector<std::shared_ptr<D3D12MinMaxSubmissionBinding>> &minmax_bindings) {
   try {
     std::unordered_map<const void *, const D3D12TypedOriginDispatch *> markers;
     for (const auto &dispatch : data->typed_origin_dispatches) markers.emplace(dispatch->marker, dispatch.get());
-    std::vector<OriginReplayCommand> replay;
+    std::unordered_map<const void *, const D3D12MinMaxDispatch *> minmax_markers;
+    for (const auto &dispatch : data->minmax_dispatches) minmax_markers.emplace(dispatch->marker, dispatch.get());
+    std::vector<PrivateComputeReplayCommand> replay;
+    const auto append_binding = [&](const auto &binding, const auto &variant) {
+      for (const auto &use : binding.resources) encoder.useResource(use.resource, use.usage);
+      PrivateComputeReplayCommand set_pso = {};
+      set_pso.pso.type = WMTComputeCommandSetPSO;
+      set_pso.pso.pso = variant.pso.handle;
+      set_pso.pso.threadgroup_size = variant.threadgroup_size;
+      replay.push_back(set_pso);
+      PrivateComputeReplayCommand set_buffer = {};
+      set_buffer.buffer.type = WMTComputeCommandSetBuffer;
+      set_buffer.buffer.buffer = binding.buffer.handle;
+      set_buffer.buffer.index = DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT;
+      replay.push_back(set_buffer);
+    };
     for (auto *node = reinterpret_cast<wmtcmd_base *>(&data->cmd_head); node;
          node = static_cast<wmtcmd_base *>(node->next.get())) {
       if (auto marker = markers.find(node); marker != markers.end()) {
@@ -68,18 +85,15 @@ static bool ReplayTypedOriginCompute(
         const auto hr = MaterializeD3D12TypedOriginDispatch(device, *marker->second, binding);
         if (FAILED(hr)) { ERR("Typed-origin submission materialization failed HRESULT=", hr); return false; }
         bindings.push_back(binding);
-        for (const auto &use : binding->resources)
-          encoder.useResource(use.resource, use.usage);
-        OriginReplayCommand set_pso = {};
-        set_pso.pso.type = WMTComputeCommandSetPSO;
-        set_pso.pso.pso = marker->second->variant->pso.handle;
-        set_pso.pso.threadgroup_size = marker->second->variant->threadgroup_size;
-        replay.push_back(set_pso);
-        OriginReplayCommand set_buffer = {};
-        set_buffer.buffer.type = WMTComputeCommandSetBuffer;
-        set_buffer.buffer.buffer = binding->buffer.handle;
-        set_buffer.buffer.index = DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT;
-        replay.push_back(set_buffer);
+        append_binding(*binding, *marker->second->variant);
+        continue;
+      }
+      if (auto marker = minmax_markers.find(node); marker != minmax_markers.end()) {
+        std::shared_ptr<D3D12MinMaxSubmissionBinding> binding;
+        const auto hr = MaterializeD3D12MinMaxDispatch(device, *marker->second, binding);
+        if (FAILED(hr)) { ERR("MinMax submission materialization failed HRESULT=", hr); return false; }
+        minmax_bindings.push_back(binding);
+        append_binding(*binding, *marker->second->variant);
         continue;
       }
       size_t size = 0;
@@ -100,7 +114,7 @@ static bool ReplayTypedOriginCompute(
       case WMTComputeCommandExecuteCommandsInBuffer: size = sizeof(wmtcmd_compute_executecommands); break;
       default: return false;
       }
-      OriginReplayCommand command = {};
+      PrivateComputeReplayCommand command = {};
       std::memcpy(&command, node, size);
       replay.push_back(command);
     }
@@ -108,7 +122,7 @@ static bool ReplayTypedOriginCompute(
       replay[i].nop.next.set(i + 1 < replay.size() ? &replay[i + 1] : nullptr);
     if (!replay.empty()) encoder.encodeCommands(&replay[0].nop);
     return true;
-  } catch (const std::bad_alloc &) { ERR("Typed-origin replay allocation failed"); return false; }
+  } catch (const std::bad_alloc &) { ERR("Private compute replay allocation failed"); return false; }
 }
 
 class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, IMTLSwapChainFactory> {
@@ -136,6 +150,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     std::vector<CommandList> command_lists;
     std::vector<Com<MTLD3D12CommandAllocator, false>> allocators;
     std::vector<std::shared_ptr<D3D12TypedOriginSubmissionBinding>> typed_origin_bindings;
+    std::vector<std::shared_ptr<D3D12MinMaxSubmissionBinding>> minmax_bindings;
     std::vector<Rc<Sampler>> sampler_refs;
     HANDLE latency_waitable = nullptr;
   };
@@ -1179,9 +1194,9 @@ public:
             encoder.endEncoding();
             break;
           }
-          if (data->typed_origin_dispatches.empty()) {
+          if (data->typed_origin_dispatches.empty() && data->minmax_dispatches.empty()) {
             encoder.encodeCommands(&data->cmd_head);
-          } else if (!ReplayTypedOriginCompute(device_, encoder, data, submission.typed_origin_bindings)) {
+          } else if (!ReplayPrivateCompute(device_, encoder, data, submission.typed_origin_bindings, submission.minmax_bindings)) {
             translation_failed = true;
             encoder.endEncoding();
             break;

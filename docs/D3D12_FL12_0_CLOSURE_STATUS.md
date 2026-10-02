@@ -1,6 +1,6 @@
 # FL12_0 closure checkpoint
 
-## Current snapshot (2026-10-02, baseline 89d0180)
+## Current snapshot (2026-10-03, MinMax dispatch checkpoint)
 
 This section supersedes the historical checkpoints below. The implementation
 is not yet in a tests-only closure phase. No percentage or completion date can
@@ -22,7 +22,7 @@ Task Analysis for this refresh:
 | Production gap | Current boundary | Next closure work |
 | --- | --- | --- |
 | Typed UAV | Production origin lowering and bounded direct/non-updating-indirect probes exist; additional-format declaration remains FALSE | Default production enablement, remaining indirect/provenance/view/lifetime contracts, then complete matrices |
-| MinMax | Opt-in AIR explicit/gradient/implicit operations and known-format resource/instruction clamps exist; focused GPU readbacks pass | Broader operation/format/shape contracts; cube, anisotropic, meaningful feedback and DXIL implementation remain open |
+| MinMax | Opt-in AIR operations/clamps and DXIL float Texture2D SampleLevel compute dispatch have focused GPU readbacks | Static DXIL reduction roots, broader operations/formats/shapes, cube/aniso/feedback, indirect and production qualification remain open |
 | Tiled Tier 2 | Declared NOT_SUPPORTED | Packed mips, mapping, feedback, filtering/LOD, lifetime and synchronization closure |
 | LogicOp (no-private) | OPTIONS reports FALSE in this variant | Implement a compliant path or explicitly exclude this variant from the FL12_0 claim; tests alone cannot close this gap |
 
@@ -45,9 +45,8 @@ conservative rasterization remain later FL12_1 work, not FL12_0 prerequisites.
   Compiler-failure tests, host units and a running game process cannot replace
   these GPU semantics or prove tessellation/performance acceptance.
 
-Execution order remains gaps first: wire actual AIR clamp behavior next,
-including empty-set defaults and static-recording/live-submission validation;
-then close remaining MinMax/backend and typed contracts, resolve tiled Tier 2,
+Execution order remains gaps first: close remaining production MinMax/backend
+and typed contracts, resolve tiled Tier 2,
 and run the complete acceptance matrices. Add only focused regressions needed
 to validate each implementation change during this phase. Do not repeat full
 matrices after every descriptor/ABI preparation checkpoint.
@@ -120,15 +119,16 @@ compiler-root/location preparation, not PSO/submission integration or static
 reduction admission. Production DXIL MinMax dispatch and complete GPU acceptance
 remain open; no capability promotion or game benchmark.
 
-Current MinMax integration follow-up (2026-10-03): validated DXIL shader
-preparation, reflected compiler roots, cached native compute variants and
-retained native pair bindings are implemented. Pair-level recording/static and
-submission/volatile observations now pass real heap overwrite regressions in
-both builds (`D3D12_MINMAX_PAIR_OBSERVATION.md`). Application root staging,
-private TLAB/table assembly and command-list/queue Dispatch selection/replay
-remain unconnected. This is not production DXIL MinMax admission or GPU numeric
-dispatch acceptance. Cube/aniso/feedback and broad format/operation acceptance
-are still open. The four implementation workstreams and 1,584 typed case
+Current MinMax integration follow-up (2026-10-03): actual opt-in DXIL/MSC direct
+compute dispatch now connects validated shader preparation, reflected compiler
+roots, cached native variants, root staging, coherent static/live tables,
+private pair state, completion-owned residency/lifetime and immutable queue
+replay (`D3D12_MINMAX_DISPATCH_BINDING.md`). Both builds pass focused one/two-pair
+numeric readbacks, fence-controlled overlapping execution, private-to-ordinary
+restoration and exact typed-view rejection. This narrows the DXIL runtime gap;
+it does not establish default production or full MinMax admission. Static
+reduction roots, broader operations/formats/shapes, cube/aniso/feedback, indirect
+and production qualification remain open. The four implementation workstreams and 1,584 typed case
 executions above remain; seven complete mandatory GPU categories remain
 unregistered. No new game/tessellation benchmark or FL promotion.
 

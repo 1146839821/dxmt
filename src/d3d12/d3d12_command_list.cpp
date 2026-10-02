@@ -18,6 +18,7 @@
 
 #include "d3d12_command_allocator.hpp"
 #include "d3d12_typed_origin_binding.hpp"
+#include "d3d12_minmax_dispatch.hpp"
 #include "d3d12_raytracing_dispatch.hpp"
 #include "d3d12_raytracing_pipeline.hpp"
 #include "d3d12_raytracing.hpp"
@@ -2838,7 +2839,7 @@ public:
   uint64_t
   EncodeMSCArgumentBuffer(
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
-      MTLD3D12SamplerDescriptorHeap *sampler_heap, const D3D12TypedOriginRoot *compiler_root = nullptr
+      MTLD3D12SamplerDescriptorHeap *sampler_heap, const D3D12CompilerRoot *compiler_root = nullptr
   ) {
     const auto argument_size = compiler_root ? compiler_root->argument_buffer_size : pRootSig->MSCArgumentBufferSize;
     const auto count = compiler_root ? compiler_root->layouts.size() : pRootSig->MSCParameterCount;
@@ -2962,6 +2963,9 @@ public:
                         bool indirect_root_updates) {
     auto *encoder = allocator_->encoder_current;
     if (!root || !encoder) return true;
+    // The MSC opt-in may admit descriptors, but does not admit an AIR consumer.
+    if (!use_msc && !env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY").empty() &&
+        env::getEnvVar("DXMT_ENABLE_AIR_MINMAX_DYNAMIC") != "1") reduction_eligible = false;
     try {
       root->RetainStaticSamplers(encoder->sampler_refs);
       if (!heap) return true;
@@ -3543,7 +3547,23 @@ public:
 
     const bool use_msc = pso_compute_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
     const D3D12TypedOriginComputeVariant *origin_variant = nullptr;
+    const D3D12MinMaxComputeVariant *minmax_variant = nullptr;
+    const auto minmax_directory = use_msc ? env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY") : "";
     const auto origin_directory = AllowTypedOrigin && use_msc ? env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY") : "";
+    if (!minmax_directory.empty()) {
+      // Root-updating indirect commands need per-command state. Do not route
+      // them through a recording-time argument template or silently fall back.
+      if (SkipResourceBinding || selected_variant || !origin_directory.empty()) {
+        FailRecording(__func__, "MinMax indirect or combined private variants are unsupported");
+        return false;
+      }
+      const auto directory = str::tows(minmax_directory.c_str());
+      const auto hr = pso_compute_->GetMinMaxVariant(directory.c_str(), &minmax_variant);
+      if (FAILED(hr) || !rootsig_compute_ || !descriptor_heap_) {
+        FailRecording(__func__, "MinMax dispatch preparation failed HRESULT=", hr);
+        return false;
+      }
+    }
     if (!origin_directory.empty()) {
       const auto directory = str::tows(origin_directory.c_str());
       const auto hr = pso_compute_->GetTypedOriginVariant(directory.c_str(), &origin_variant);
@@ -3567,7 +3587,7 @@ public:
       );
     }
     const bool encode_msc_resource_uses =
-        msc_compute_residency_ && use_msc && !origin_variant && !SkipResourceBinding &&
+        msc_compute_residency_ && use_msc && !origin_variant && !minmax_variant && !SkipResourceBinding &&
         (dirty_state_.test(DirtyState::DescriptorHeaps) || dirty_state_.test(DirtyState::ComputeRootArguments));
     if (use_msc && rootsig_compute_) {
       if (FAILED(rootsig_compute_->InitializeMSCLayout())) {
@@ -3575,7 +3595,7 @@ public:
         return false;
       }
     }
-    if (use_msc && !origin_variant && pso_compute_->msc_uses_texture_load && descriptor_heap_ &&
+    if (use_msc && !origin_variant && !minmax_variant && pso_compute_->msc_uses_texture_load && descriptor_heap_ &&
         HasBoundResourceMinLODClamp(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr())) {
       ERR("D3D12 compute Texture.Load with ResourceMinLODClamp is unsupported");
       FailRecording(__func__, "MSC Texture.Load with non-zero ResourceMinLODClamp");
@@ -3676,7 +3696,24 @@ public:
       dirty_state_.set(DirtyState::ComputeRootArguments, DirtyState::ComputePipelineState);
     }
 
-    if (!EncodeSamplerUses(rootsig_compute_.ptr(), rootarg_compute_staging_, sampler_heap_.ptr(),
+    if (minmax_variant) {
+      const auto offset = EncodeMSCArgumentBuffer(rootsig_compute_.ptr(), rootarg_compute_staging_,
+          descriptor_heap_.ptr(), sampler_heap_.ptr(), &minmax_variant->root.layout);
+      if (recording_failed_) return false;
+      std::shared_ptr<D3D12MinMaxDispatch> dispatch;
+      const auto hr = RecordD3D12MinMaxDispatch(pso_compute_.ptr(), minmax_variant, rootsig_compute_.ptr(),
+          rootarg_compute_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr(), ptr_add(allocator_->gpu_heap_, offset), dispatch);
+      if (FAILED(hr)) { FailRecording(__func__, "MinMax recording failed HRESULT=", hr); return false; }
+      EncodeRootResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, static_cast<WMTRenderStages>(0), true);
+      auto &marker = allocator_->EncodeComputeCommand<wmtcmd_compute_nop>();
+      marker.type = WMTComputeCommandNop; dispatch->marker = &marker;
+      try {
+        static_cast<ComputeEncoderData *>(allocator_->encoder_current)->minmax_dispatches.push_back(std::move(dispatch));
+      } catch (const std::bad_alloc &) { FailRecording(__func__, "MinMax dispatch allocation failed"); return false; }
+      dirty_state_.set(DirtyState::ComputeRootArguments, DirtyState::ComputePipelineState);
+    }
+
+    if (!minmax_variant && !EncodeSamplerUses(rootsig_compute_.ptr(), rootarg_compute_staging_, sampler_heap_.ptr(),
                            use_msc, pso_compute_->air_sampler_reduction_eligible, SkipResourceBinding))
       return false;
 

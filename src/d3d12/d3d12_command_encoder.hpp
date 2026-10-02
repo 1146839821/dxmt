@@ -34,6 +34,7 @@ class MTLD3D12Resource;
 class MTLD3D12DescriptorHeap;
 class MTLD3D12SamplerDescriptorHeap;
 struct D3D12TypedOriginDispatch;
+struct D3D12MinMaxDispatch;
 
 struct PendingDescriptorUse {
   MTLD3D12DescriptorHeap *heap = nullptr;
@@ -198,6 +199,7 @@ struct ComputeEncoderData : EncoderData {
   wmtcmd_compute_nop cmd_head;
   wmtcmd_base *cmd_tail;
   std::vector<std::shared_ptr<D3D12TypedOriginDispatch>> typed_origin_dispatches;
+  std::vector<std::shared_ptr<D3D12MinMaxDispatch>> minmax_dispatches;
   WMT::Reference<WMT::ComputePipelineState> ray_dispatch_pso;
   WMT::Reference<WMT::VisibleFunctionTable> ray_dispatch_visible_function_table;
   WMT::Reference<WMT::IntersectionFunctionTable> ray_dispatch_intersection_function_table;
