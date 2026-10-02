@@ -1,5 +1,6 @@
 #include "d3d12_shader_converter.hpp"
 #include "d3d12_typed_origin.hpp"
+#include "d3d12_minmax.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -91,7 +92,7 @@ MakeMSCConversionCacheKey(
     const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const char *entry_point, const void *root_signature,
     size_t root_signature_size, const void *local_root_signature, size_t local_root_signature_size,
     const dxmt_msc_input_layout *input_layout, uint32_t compile_flags, const DXMTMSCCapabilities *msc_capabilities,
-    const D3D12TypedOriginShader *typed_origin
+    const D3D12TypedOriginShader *typed_origin, const D3D12MinMaxShader *minmax
 ) {
   Sha1HashState hash;
   hash.update(kMSCConversionCacheNamespace, sizeof(kMSCConversionCacheNamespace) - 1);
@@ -111,6 +112,19 @@ MakeMSCConversionCacheKey(
       hash.update(binding.resource_class);
       hash.update(binding.register_space);
       hash.update(binding.shader_register);
+    }
+  }
+  if (minmax) {
+    constexpr char contract[] = "reduction-sampler-pairs";
+    hash.update(contract, sizeof(contract) - 1);
+    hash.update(D3D12MinMaxShader::kLoweringVersion);
+    hash.update(D3D12CompilerRoot::kBindingVersion);
+    hash.update(static_cast<uint32_t>(minmax->bindings.size()));
+    for (const auto &binding : minmax->bindings) {
+      hash.update(binding.texture_space);
+      hash.update(binding.texture_register);
+      hash.update(binding.sampler_space);
+      hash.update(binding.sampler_register);
     }
   }
   const uint32_t has_capability_snapshot = msc_capabilities ? 1u : 0u;
@@ -1601,7 +1615,8 @@ ConvertD3D12ShaderInternal(
     const char *requested_entry_point, bool allow_library_shader, D3D12ConvertedShader &converted,
     const void *root_signature, size_t root_signature_size, const void *local_root_signature,
     size_t local_root_signature_size, const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
-    const DXMTMSCCapabilities *msc_capabilities, const D3D12TypedOriginShader *typed_origin = nullptr
+    const DXMTMSCCapabilities *msc_capabilities, const D3D12TypedOriginShader *typed_origin = nullptr,
+    const D3D12MinMaxShader *minmax = nullptr
 ) {
   const HRESULT stage_hr = ValidateD3D12MSCShaderConversion(classification, stage, allow_library_shader);
   if (FAILED(stage_hr)) {
@@ -1684,7 +1699,7 @@ ConvertD3D12ShaderInternal(
   compile_flags |= input_layout ? DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0;
   auto cache_key = MakeMSCConversionCacheKey(
       shader, stage, requested_entry_point, root_signature, root_signature_size, local_root_signature,
-      local_root_signature_size, input_layout, compile_flags, msc_capabilities, typed_origin
+      local_root_signature_size, input_layout, compile_flags, msc_capabilities, typed_origin, minmax
   );
   auto &cache = GetMSCConversionCache();
   {
@@ -1826,6 +1841,23 @@ ConvertD3D12ComputeShader(
   return ConvertD3D12ComputeShader(
       classification, shader, converted, root_signature, root_signature_size, msc_capabilities
   );
+}
+
+HRESULT ConvertD3D12MinMaxComputeShader(
+    const D3D12MinMaxShader &shader, const D3D12MinMaxRoot &root,
+    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities) {
+  if (shader.bytecode.empty() || shader.bindings.empty() || shader.bindings.size() > 64 ||
+      root.layout.bytecode.empty() || root.pair_count != shader.bindings.size())
+    return E_INVALIDARG;
+  std::vector<D3D12MinMaxPairLocation> locations;
+  std::string diagnostics;
+  HRESULT hr = ResolveD3D12MinMaxBindings(root, shader.bindings, locations, diagnostics);
+  if (FAILED(hr)) return hr;
+  const D3D12_SHADER_BYTECODE bytecode = {shader.bytecode.data(), shader.bytecode.size()};
+  return ConvertD3D12ShaderInternal(
+      ClassifyD3D12Shader(bytecode), bytecode, DXMT_MSC_STAGE_COMPUTE, nullptr, false, converted,
+      root.layout.bytecode.data(), root.layout.bytecode.size(), nullptr, 0, nullptr, 0,
+      msc_capabilities, nullptr, &shader);
 }
 
 } // namespace dxmt
