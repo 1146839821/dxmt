@@ -61,6 +61,18 @@ declare void @dx.op.bufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i
   reject("nonuniform handle", replace("i32 1, i32 1, i1 false", "i32 1, i32 1, i1 true"));
   reject("dynamic handle", replace("i32 0, i32 0, i1 false", "i32 0, i32 %3, i1 false"));
   reject("unsupported component type", replace("!7 = !{i32 0, i32 5}", "!7 = !{i32 0, i32 3}"));
+  // Resource types must not silently inherit the scalar UINT origin contract.
+  for (const auto &type : {"float", "int", "vector<unsigned int, 4>", "unorm float"}) {
+    std::string changed = input;
+    const std::string from = "class.RWBuffer<unsigned int>";
+    const std::string to = std::string("class.RWBuffer<") + type + ">";
+    size_t position = 0;
+    while ((position = changed.find(from, position)) != std::string::npos) {
+      changed.replace(position, from.size(), to);
+      position += to.size();
+    }
+    reject(type, changed);
+  }
   reject("unknown control flow", replace("  ret void", "  br label %other"));
   reject("load status use", replace("%4, 0", "%4, 4"));
   reject("unsupported store mask", replace("i8 15)", "i8 1)"));
