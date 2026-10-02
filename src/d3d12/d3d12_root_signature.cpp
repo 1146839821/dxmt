@@ -21,6 +21,8 @@
 #include "com/com_object.hpp"
 #include "com/com_pointer.hpp"
 #include "d3d12_device.hpp"
+#include "d3d12_minmax.hpp"
+#include <map>
 #include "d3d12_device_child.hpp"
 #include "dxmt_sampler.hpp"
 #include "air_sampler_abi.hpp"
@@ -391,6 +393,8 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
   std::mutex typed_origin_mutex_;
   D3D12TypedOriginRoot typed_origin_root_;
   bool typed_origin_initialized_ = false;
+  std::mutex minmax_mutex_;
+  std::map<uint32_t, D3D12MinMaxRoot> minmax_roots_;
 
 public:
   MTLD3D12RootSignatureImpl(MTLD3D12Device *pDevice, const void *pBytecode, SIZE_T BytecodeLength) :
@@ -571,6 +575,29 @@ public:
     }
     *root = &typed_origin_root_;
     return S_OK;
+  }
+
+  HRESULT GetMinMaxCompilerRoot(uint32_t pair_count, const D3D12MinMaxRoot **root) override {
+    if (!root) return E_POINTER;
+    *root = nullptr;
+    if (!pair_count || pair_count > 64) return E_INVALIDARG;
+    try {
+      std::lock_guard<std::mutex> lock(minmax_mutex_);
+      auto found = minmax_roots_.find(pair_count);
+      if (found == minmax_roots_.end()) {
+        if (!device_->GetMSCCapabilities().CoreShaderPathUsable()) return E_FAIL;
+        D3D12MinMaxRoot candidate;
+        std::string diagnostics;
+        HRESULT hr = PrepareD3D12MinMaxRoot(decoded_root_.desc_1_1_.Desc_1_1, pair_count, candidate, diagnostics);
+        if (FAILED(hr)) {
+          ERR("Failed to prepare MinMax compiler root: ", diagnostics);
+          return hr;
+        }
+        found = minmax_roots_.emplace(pair_count, std::move(candidate)).first;
+      }
+      *root = &found->second;
+      return S_OK;
+    } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
   }
 
   HRESULT

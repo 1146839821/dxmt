@@ -7,6 +7,12 @@ executable('dx12_typed_origin_root', 'dx12_typed_origin_root.cpp',
   dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
 )
 
+executable('dx12_minmax_root', 'dx12_minmax_root.cpp',
+  '../../src/d3d12/d3d12_typed_origin_root.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
 executable('dx12_typed_origin_pipeline', 'dx12_typed_origin_pipeline.cpp',
   build_by_default: false, link_args: ['-municode'],
   dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],

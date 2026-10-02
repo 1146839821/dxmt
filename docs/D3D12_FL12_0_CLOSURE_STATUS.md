@@ -111,6 +111,15 @@ thirty focused native GPU dispatches. Augmented/reflected roots, PSO selection
 and recording/submission ownership remain open, so production DXIL MinMax still
 is not admitted. No capability, full-matrix or game acceptance change.
 
+MinMax root follow-up (2026-10-03): actual RootSignature objects now cache
+augmented/reflected space2 roots by pair count; application indices and range
+flags survive and pair identities resolve to heap or ordinary static samplers
+(`D3D12_MINMAX_COMPILER_ROOT.md`). Both builds pass five focused Wine
+root/location scenarios and existing typed-origin root regressions. This closes
+compiler-root/location preparation, not PSO/submission integration or static
+reduction admission. Production DXIL MinMax dispatch and complete GPU acceptance
+remain open; no capability promotion or game benchmark.
+
 ## Task Analysis
 
 Baseline: `e220380`, branch `feat/d3d12-1`. User requests continued work and

@@ -280,6 +280,7 @@ public:
 };
 
 struct D3D12TypedOriginRoot;
+struct D3D12MinMaxRoot;
 struct D3D12TypedOriginComputeVariant;
 
 class MTLD3D12RootSignature : public ID3D12RootSignature {
@@ -289,6 +290,7 @@ public:
   // Borrowed immutable compiler-root artifact; retain this root object while
   // using it. Application blob/layout/staging indices remain unchanged.
   virtual HRESULT GetTypedOriginCompilerRoot(const D3D12TypedOriginRoot **root) = 0;
+  virtual HRESULT GetMinMaxCompilerRoot(uint32_t pair_count, const D3D12MinMaxRoot **root) = 0;
 
   virtual void AddRefPrivate() = 0;
   virtual void ReleasePrivate() = 0;

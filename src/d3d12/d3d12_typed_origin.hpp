@@ -2,6 +2,7 @@
 
 #include "d3d12.h"
 #include "metalirconverter_thunks.h"
+#include "d3d12_compiler_root.hpp"
 #include <string>
 #include <vector>
 
@@ -17,17 +18,7 @@ struct D3D12TypedOriginShader {
   std::vector<dxmt_msc_typed_origin_binding> bindings;
 };
 
-struct D3D12TypedOriginRoot {
-  static constexpr uint32_t kBindingVersion = 1;
-  std::vector<uint8_t> bytecode;
-  // Application parameter indices are preserved; the hidden CBV is appended
-  // and a reflected static-sampler entry, if present, remains last.
-  std::vector<dxmt_msc_root_parameter_layout> layouts;
-  uint64_t argument_buffer_size = 0;
-  uint32_t application_parameter_count = 0;
-  uint32_t application_cost = 0;
-  uint32_t hidden_parameter_index = 0;
-};
+struct D3D12TypedOriginRoot : D3D12CompilerRoot {};
 
 struct D3D12TypedOriginBindingLocation {
   uint32_t parameter_index = 0;
