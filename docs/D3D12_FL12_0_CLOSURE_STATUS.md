@@ -444,3 +444,12 @@ updates, zero/clipped CPU-provided counts, immutable closed-list replay and
 ordinary state restoration (`D3D12_MINMAX_GRAPHICS.md`). GPU-produced graphics
 arguments/counts, in-flight overlap, same-address root-VA remap and complete
 MinMax semantics still remain open. No feature-level or capability promotion.
+
+Bounded DXIL pixel MinMax Sample/SampleBias now reuses explicit gradient/LOD
+lowering. Nonzero sampler bias also reaches private SampleLevel and ordinary
+MSC shaders (SamplerLODBias compiler compatibility enabled). Both builds pass
+focused two-mip pixel readbacks for implicit and explicit sampling, direct and
+indirect draws, descriptor snapshots and ordinary state restoration, plus
+root-buffer/compute regressions (`D3D12_MINMAX_GRAPHICS.md`). Pre-raster sampling,
+cube/aniso/feedback, full resource/filter qualification and mandatory matrices
+remain open; this does not promote MinMax declarations or FL12_0/FL12_1.

@@ -74,6 +74,9 @@ enum dxmt_msc_compile_flags {
 enum dxmt_msc_compatibility_flags {
   /* Values mirror IRCompatibilityFlags in metal_irconverter.h. */
   DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP = 1u << 2,
+  DXMT_MSC_COMPATIBILITY_FLAG_SAMPLER_LOD_BIAS = 1u << 3,
+  DXMT_MSC_DEFAULT_COMPATIBILITY_FLAGS = DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP |
+      DXMT_MSC_COMPATIBILITY_FLAG_SAMPLER_LOD_BIAS,
 };
 
 enum dxmt_msc_validation_flags {

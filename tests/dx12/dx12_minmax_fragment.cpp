@@ -7,6 +7,7 @@
 #include "log/log.hpp"
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <memory>
 
 dxmt::Logger dxmt::Logger::s_instance("dx12_minmax_fragment");
@@ -14,6 +15,8 @@ template <typename T> struct ReleaseCOM { void operator()(T *p) const { if (p) p
 template <typename T> using OwnedCOM = std::unique_ptr<T, ReleaseCOM<T>>;
 static bool root_updates_fixture = false;
 static bool root_buffers_fixture = false;
+static bool implicit_fixture = false;
+static bool implicit_bias_fixture = false;
 
 static bool Load(const wchar_t *path, std::vector<uint8_t> &bytes) {
   HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -48,7 +51,8 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     CloseHandle(event); return ok;
   };
   D3D12_RESOURCE_DESC buffer_desc = {}; buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  buffer_desc.Width = 1024; buffer_desc.Height = buffer_desc.DepthOrArraySize = buffer_desc.MipLevels = buffer_desc.SampleDesc.Count = 1;
+  buffer_desc.Width = implicit_fixture ? 2048 : 1024;
+  buffer_desc.Height = buffer_desc.DepthOrArraySize = buffer_desc.MipLevels = buffer_desc.SampleDesc.Count = 1;
   buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
   D3D12_HEAP_PROPERTIES props = {}; props.Type = D3D12_HEAP_TYPE_UPLOAD;
   ID3D12Resource *raw_upload = nullptr;
@@ -57,10 +61,14 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
   OwnedCOM<ID3D12Resource> upload(raw_upload);
   void *mapped = nullptr;
   if (!check(upload->Map(0, nullptr, &mapped), "upload map")) return false;
-  std::memset(mapped, 0, 1024);
+  std::memset(mapped, 0, buffer_desc.Width);
   const UINT pixels[] = {0xff000010, 0xff000040, 0xff0000c0, 0xff0000f0,
       0xff000020, 0xff000050, 0xff0000b0, 0xff0000e0};
   for (unsigned row = 0; row < 4; ++row) std::memcpy(static_cast<uint8_t *>(mapped) + 256 * row, pixels + 2 * row, 8);
+  if (implicit_fixture) {
+    const UINT mips[] = {0xff000060, 0xff000090};
+    for (unsigned i = 0; i < 2; ++i) std::memcpy(static_cast<uint8_t *>(mapped) + 1024 + i * 512, mips + i, 4);
+  }
   upload->Unmap(0, nullptr);
   ID3D12CommandAllocator *raw_allocator = nullptr;
   ID3D12GraphicsCommandList *raw_list = nullptr;
@@ -81,6 +89,11 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     src.pResource = upload.get(); src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     src.PlacedFootprint = {i * 512u, {DXGI_FORMAT_R8G8B8A8_UNORM, 2, 2, 1, 256}};
     upload_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    if (implicit_fixture) {
+      dst.SubresourceIndex = 1;
+      src.PlacedFootprint = {1024 + i * 512u, {DXGI_FORMAT_R8G8B8A8_UNORM, 1, 1, 1, 256}};
+      upload_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
     barrier.Transition.StateAfter = static_cast<D3D12_RESOURCE_STATES>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     upload_list->ResourceBarrier(1, &barrier);
@@ -161,6 +174,7 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     upload->Unmap(0, nullptr);
   }
   auto rt_desc = texture->GetDesc(); rt_desc.Width = rt_desc.Height = 4; rt_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  rt_desc.MipLevels = 1;
   props.Type = D3D12_HEAP_TYPE_DEFAULT;
   ID3D12Resource *raw_rt = nullptr;
   if (!check(device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &rt_desc,
@@ -178,7 +192,7 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
   const auto target = rtv->GetCPUDescriptorHandleForHeapStart(); device->CreateRenderTargetView(rt.get(), nullptr, target);
   D3D12_SHADER_RESOURCE_VIEW_DESC srv = {}; srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-  srv.Texture2D.MipLevels = 1;
+  srv.Texture2D.MipLevels = implicit_fixture ? 2 : 1;
   auto cpu = heap->GetCPUDescriptorHandleForHeapStart(); cpu.ptr += 2 * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
   OwnedCOM<ID3D12DescriptorHeap> ordinary_heap, ordinary_samplers;
   if (!static_sampler) {
@@ -196,6 +210,7 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     const auto stride = device->GetDescriptorHandleIncrementSize(hd.Type);
     D3D12_SAMPLER_DESC sd = {}; sd.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sd.AddressU = sd.AddressV = sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP; sd.MaxLOD = D3D12_FLOAT32_MAX;
+    sd.MipLODBias = implicit_fixture ? 1 : 0;
     for (unsigned i = 0; i < 2; ++i) { handle.ptr += stride; device->CreateSampler(&sd, handle); }
   }
   const auto write = [&](bool changed) {
@@ -205,6 +220,7 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
       const auto stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
       D3D12_SAMPLER_DESC sd = {}; sd.Filter = changed ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;
       sd.AddressU = sd.AddressV = sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP; sd.MaxLOD = D3D12_FLOAT32_MAX;
+      sd.MipLODBias = implicit_fixture ? 1 : 0;
       for (unsigned i = 0; i < 2; ++i) { sampler_cpu.ptr += stride; device->CreateSampler(&sd, sampler_cpu); }
     }
   };
@@ -298,8 +314,34 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     bool ok = true;
     for (unsigned y = 0; y < 4; ++y) for (unsigned x = 0; x < 4; ++x) {
       const auto *pixel = static_cast<const uint8_t *>(mapped) + y * 256 + x * 4;
-      const auto expected_r = !static_sampler && x >= 2 ? 128u : r;
-      const auto expected_g = !static_sampler && x >= 2 ? 128u : g;
+      unsigned expected_r = !static_sampler && x >= 2 ? 128u : r;
+      unsigned expected_g = !static_sampler && x >= 2 ? 128u : g;
+      if (implicit_fixture) {
+        const bool ordinary = !static_sampler && x >= 2;
+        if (implicit_bias_fixture) expected_r = expected_g = ordinary ? 96 : changed ? 144 : 96;
+        else {
+          const unsigned original[] = {16, 64, 192, 240}, replacement[] = {32, 80, 176, 224};
+          const auto *input = ordinary || !changed ? original : replacement;
+          const float u = (float(x) + 0.5f) * 0.5f - 0.5f;
+          const float v = (float(y) + 0.5f) * 0.5f - 0.5f;
+          const int left = int(std::floor(u)), top = int(std::floor(v));
+          const auto tap = [&](int dx, int dy) {
+            const unsigned cx = unsigned(std::max(0, std::min(1, left + dx)));
+            const unsigned cy = unsigned(std::max(0, std::min(1, top + dy)));
+            return input[cx + 2 * cy];
+          };
+          if (ordinary) {
+            const float fx = u - left, fy = v - top;
+            expected_r = expected_g = unsigned(std::lround((1 - fy) * ((1 - fx) * tap(0, 0) + fx * tap(1, 0)) +
+                fy * ((1 - fx) * tap(0, 1) + fx * tap(1, 1))));
+          } else {
+            const unsigned minimum = std::min({tap(0, 0), tap(1, 0), tap(0, 1), tap(1, 1)});
+            const unsigned maximum = std::max({tap(0, 0), tap(1, 0), tap(0, 1), tap(1, 1)});
+            expected_r = static_sampler || !changed ? minimum : maximum;
+            expected_g = static_sampler ? maximum : expected_r;
+          }
+        }
+      }
       const bool untouched = empty && (static_sampler || x < 2);
       unsigned blue = !root_updates_fixture ? 0 : !static_sampler && x >= 2 ? (updates ? 31 : 130) :
           updates ? (submission == 1 ? 38 : 42) : 130;
@@ -387,6 +429,7 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
   texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
   texture_desc.Width = texture_desc.Height = 2;
   texture_desc.DepthOrArraySize = texture_desc.MipLevels = texture_desc.SampleDesc.Count = 1;
+  texture_desc.MipLevels = implicit_fixture ? 2 : 1;
   texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   ID3D12Resource *raw_texture = nullptr;
   if (FAILED(device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &texture_desc,
@@ -402,7 +445,7 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
   OwnedCOM<ID3D12DescriptorHeap> samplers(raw_samplers);
   D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
   srv.Format = texture_desc.Format; srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-  srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; srv.Texture2D.MipLevels = 1;
+  srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; srv.Texture2D.MipLevels = implicit_fixture ? 2 : 1;
   auto cpu = heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateShaderResourceView(texture.get(), &srv, cpu);
   cpu.ptr += 2 * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -466,9 +509,13 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
 int wmain(int argc, wchar_t **argv) {
   if (argc != 4 && argc != 5 && argc != 6) return 1;
   if (argc == 6) {
-    if (!std::wcscmp(argv[5], L"--root-buffers")) root_buffers_fixture = true;
+    if (!std::wcscmp(argv[5], L"--implicit-sample") ||
+        !std::wcscmp(argv[5], L"--grad-bias")) implicit_fixture = true;
+    else if (!std::wcscmp(argv[5], L"--implicit-bias") || !std::wcscmp(argv[5], L"--level-bias"))
+      implicit_fixture = implicit_bias_fixture = true;
+    else if (!std::wcscmp(argv[5], L"--root-buffers")) root_buffers_fixture = true;
     else if (std::wcscmp(argv[5], L"--root-updates")) return 1;
-    root_updates_fixture = true;
+    root_updates_fixture = !implicit_fixture;
   }
   if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", argv[3])) return 1;
   std::vector<uint8_t> ps, vs, sampling_vs;
@@ -535,6 +582,7 @@ int wmain(int argc, wchar_t **argv) {
       samplers[i].Filter = i ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;
       samplers[i].AddressU = samplers[i].AddressV = samplers[i].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
       samplers[i].MaxLOD = D3D12_FLOAT32_MAX; samplers[i].ShaderRegister = i; samplers[i].ShaderVisibility = visibility;
+      samplers[i].MipLODBias = implicit_fixture ? 1 : 0;
     }
     D3D12_ROOT_SIGNATURE_DESC1 application = {(static_sampler ? 4u : 5u) + (root_buffers_fixture ? 3u : 0u), parameters,
         static_sampler ? 2u : 0u, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE};

@@ -525,3 +525,132 @@ no game/prefix DLL writes or process manipulation. Next production gap: DXIL
 pixel MinMax implicit Sample/SampleBias lowering, then remaining pre-raster and
 resource semantics; GPU-produced graphics count evidence and broad matrices
 remain required before final qualification.
+
+## DXIL implicit pixel sampling — Task Analysis
+
+Branch `feat/d3d12-1`, clean baseline `f016a6b`, remote baseline `e147c710`;
+116 local commits. Existing production graphics direct/indirect/private bindings
+support explicit SampleLevel/SampleGrad. Native DXIL binding qualification rejects
+Sample/SampleBias; AIRCONV already has independent derivative/gradient semantics.
+Relevant files: native dxil_minmax binding/lowering, fragment HLSL/C++ probes,
+native IR probe and capability ledger. Do not merge executable families or ABI.
+
+Hypothesis: pixel Sample/SampleBias can normalize to explicit gradients before
+the runtime reduction branch, then reuse existing isotropic LOD and tap lowering.
+Evidence: SampleGrad already applies sampler bias, clamps and ordinary/reduction
+branches. DXIL specifies Sample opcode 60, SampleBias 61, coarse derivatives
+83/84 and separate clamp operands. Bias order is sampler bias, instruction bias,
+then sampler/resource/instruction clamps. Sources:
+[DXIL specification](https://github.com/microsoft/DirectXShaderCompiler/blob/main/docs/DXIL.rst),
+[D3D filtering contract](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm).
+Expected effect: connect actual pixel implicit sampling without duplicating
+LOD/footprint lowering, private-root reflection or submission residency.
+
+Risks: derivatives inside newly divergent branches, array layer derivatives,
+wrong bias/clamp order, unused DXIL operation declarations and stale native
+overlays. Plan: require pixel shader metadata for new operations, emit only
+spatial coarse derivatives before injected branching, normalize to SampleGrad
+and SampleLevel, apply additive instruction bias after runtime sampler bias,
+and remove unused normalized declarations. Existing unsupported handle/feedback/
+cube/aniso paths stay closed. Runtime/backend/capability declarations unchanged.
+
+Validation: fresh DXC assembly/validation and MSC render PSO plus real pixel
+readback for Sample/SampleBias, ordinary and reduction paths, distinguishable
+mips/bias, existing explicit/root-update and compute regressions. Native IR
+negative stage/provenance tests; normal/no-private configure/full builds and new
+matching native overlays before runtime tests. Broad matrices/game acceptance
+remain required later. Main-agent Standards/Spec self-review, no push.
+
+### Ordinary MSC sampler bias follow-up — Task Analysis
+
+The original bias=1 GPU fixture fails only the subsequent ordinary MSC draw:
+it returns mip 0 instead of mip 1. Keeping sampler bias=1 and changing only
+instruction bias to 2 passes. Descriptor metadata matches the bundled MSC
+IRDescriptorTableSetSampler ABI. The compiler enables TextureMinLODClamp but
+omits the documented SamplerLODBias compatibility flag. Hypothesis: enabling
+that flag restores ordinary dynamic sampler bias rather than changing the
+oracle or routing ordinary draws through private lowering. Expected effect:
+ordinary SampleBias observes both biases; explicit SampleLevel and private
+lowering retain their existing behavior. Risk: double bias or stale caches.
+Use one shared default flag mask, retain existing caller override behavior,
+verify cache hashing already includes the mask, and rerun original bias=1 plus
+Sample/explicit/root-update/compute GPU regressions in both configurations.
+
+The added nonzero-bias SampleLevel regression invalidated the initial assumption
+that explicit LOD should ignore sampler bias. The ordinary MSC result correctly
+selects mip 1, while private SampleLevel still selects mip 0. Microsoft explicitly
+states that sample_l honors MIPLODBIAS:
+[sample_l contract](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/sample-l--sm4---asm-).
+Refined implementation: apply runtime sampler bias to every admitted sample,
+including explicit SampleLevel, before clamps. Update the new oracle to the
+specified mip 1 result; existing zero-bias explicit tests remain unchanged.
+Also exercise nonzero-bias SampleGrad to detect omitted or double bias.
+
+## DXIL implicit pixel sampling — Task Result
+
+### Branch / Baseline / Implementation
+
+`feat/d3d12-1`, parent `f016a6b` (116 local commits since read-only baseline
+`e147c710`, merge-base `85bb2dd2`). Native qualification now admits pixel-only
+float Sample/SampleBias for the existing finite 1D/2D/3D and array binding shapes.
+Spatial coarse derivatives are emitted at the original call site, before the
+new runtime sampler branch; array-layer coordinates are not differentiated.
+The existing SampleGrad isotropic LOD and SampleLevel reduction/ordinary tap
+lowering are reused. Runtime sampler bias applies to every admitted operation,
+instruction bias follows for SampleBias, then existing clamps apply. Unused
+normalized DXIL declarations are removed before regeneration/validation.
+
+Ordinary MSC compilation now enables the bundled SamplerLODBias compatibility
+flag alongside TextureMinLODClamp, with one shared default mask used by capability
+configuration, conversion/cache keys and native fallback. Explicit nonzero caller
+masks retain their override behavior. No thunk structure layout or backend ABI
+changed. DXBC remains AIRCONV; DXIL remains MSC. No fallback, mixed-family shader
+pipeline or feature/SM/FL declaration change was introduced.
+
+### Tests / Runtime Evidence
+
+Both configurations were reconfigured; focused optional targets and full default
+builds completed before task-cache staging. Final source/native binaries match
+isolated overlay hashes. Evidence:
+`/Users/zhangbo/.cache/dxmt-minmax-implicit.6V0wqp`, final `accepted-*` logs,
+`level-fix-targets*` and `level-fix-full*`; original failing and bias=2 diagnostic
+logs are retained separately, not counted as acceptance.
+
+Twenty final runtime process runs pass: sixteen graphics (eight per configuration)
+and four compute/typed-origin regressions. Graphics includes new Sample/SampleBias,
+nonzero-bias SampleLevel/SampleGrad, prior zero-bias explicit operations and
+root-buffer indirect updates. These perform 608 draw submissions (excluding
+texture-upload submissions), checking full 4x4 RGBA readback, static/live descriptor
+behavior, immutable closed-list replay, direct/DRAW/DRAW_INDEXED, zero/clipped
+CPU-provided counts and subsequent ordinary PSO/binding restoration. New mip
+fixtures distinguish sampler bias, instruction bias and minimum/maximum results.
+Static-descriptor mutation is a defensive snapshot probe, not a claim of legal
+application mutation under D3D12 static-descriptor promises.
+
+Compute regressions retain GPU-produced counts 0/1/7 and typed-origin multi-command
+full-buffer readback. Four native implicit transforms pass, including sixteen
+negative stage/missing-metadata/opcode/status checks with unpublished output on
+failure, derivative placement and removed intrinsic declarations. Both native
+base IR probes pass; actual production preparation also regenerates/validates DXIL
+and creates MSC render PSOs. Five registered host suites pass per configuration.
+Existing macOS 27 Managed-storage deprecation and libunwind linker warnings remain.
+
+### Review / Limits / Next Work
+
+Main-agent code-review Standards axis against `f016a6b`: shared algorithm/default
+mask, failure publication, sampler descriptor ABI, cache hashing, unchanged
+residency/lifetime and immutable replay checked; no remaining blocking finding.
+Spec axis caught the missing ordinary compiler flag and private explicit-LOD bias;
+both are fixed and covered without reducing the oracle. This is main-agent
+two-axis self-review, not independent-agent review. `git diff --check` passes;
+task files committed locally, no push. No game/prefix DLL deployment or Steam/
+wineserver manipulation occurred.
+
+Qualification remains bounded: GPU fixtures cover 2D float pixel sampling, not
+the complete dimension/view/clamp/address/filter matrix. Cube, anisotropy,
+comparison, gather, residency feedback, dynamic/nonuniform provenance, pre-raster
+sampling and broader graphics emulation remain open. GPU-produced graphics
+arguments/counts, same-address root-VA remap, in-flight overlap, game/performance/
+tessellation acceptance and mandatory FL12_0 matrices are not claimed. Continue
+production pre-raster/resource gaps before broad qualification; MinMax and FL12_0
+remain partial and the overall development goal remains active.

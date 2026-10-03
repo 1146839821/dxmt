@@ -38,7 +38,8 @@ bool LowerReductionSampleLevel(llvm::CallInst &sample,
 // This helper does not rewrite or admit the sampling operation itself.
 llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &error, unsigned spatial_dimensions = 2);
 
-// Qualify legacy float 1D/2D/3D (or array) SampleLevel/SampleGrad pairs, append private tN/sN and
+// Qualify float 1D/2D/3D (or array) SampleLevel/SampleGrad pairs and pixel-only
+// Sample/SampleBias, append private tN/sN and
 // b0 in DXMT_MSC_MINMAX_SPACE, and guard reduction with the runtime enabled bit.
 // Returned pair ordinal N selects its point texture/sampler and 32-byte CBV
 // state; sampler N+pair_count is an unclamped ordinary-filter sampler. Both

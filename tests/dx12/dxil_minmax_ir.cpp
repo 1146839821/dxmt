@@ -13,6 +13,39 @@ static uint32_t Word(const unsigned char *bytes) {
   return uint32_t(bytes[0]) | uint32_t(bytes[1]) << 8 | uint32_t(bytes[2]) << 16 | uint32_t(bytes[3]) << 24;
 }
 
+static bool CheckImplicitQualification(llvm::Module &module) {
+  using namespace llvm;
+  SmallVector<char, 0> bitcode; raw_svector_ostream serialized(bitcode);
+  WriteBitcodeToFile(module, serialized);
+  for (unsigned probe = 0; probe < 4; ++probe) {
+    LLVMContext context; context.setOpaquePointers(false);
+    auto clone = parseBitcodeFile(MemoryBufferRef(StringRef(bitcode.data(), bitcode.size()), "implicit-negative"), context);
+    if (!clone) { consumeError(clone.takeError()); return false; }
+    auto *model = (*clone)->getNamedMetadata("dx.shaderModel");
+    IRBuilder<> builder(context);
+    if (probe == 0) {
+      if (!model || model->getNumOperands() != 1) return false;
+      auto *record = model->getOperand(0);
+      model->setOperand(0, MDNode::get(context, {MDString::get(context, "cs"), record->getOperand(1), record->getOperand(2)}));
+    } else if (probe == 1) (*clone)->eraseNamedMetadata(model);
+    else {
+      CallInst *sample = nullptr;
+      for (auto &function : **clone) for (auto &block : function) for (auto &instruction : block)
+        if (auto *call = dyn_cast<CallInst>(&instruction))
+          if (call->getCalledFunction() && (call->getCalledFunction()->getName() == "dx.op.sample.f32" ||
+              call->getCalledFunction()->getName() == "dx.op.sampleBias.f32")) sample = call;
+      if (!sample) return false;
+      if (probe == 2) sample->setArgOperand(0, builder.getInt32(62));
+      else ExtractValueInst::Create(sample, {4}, "status", sample->getNextNode());
+    }
+    std::vector<dxmt_msc_minmax_binding> output{{11, 22, 33, 44}}; std::string error;
+    if (dxmt::dxil::LowerReductionSamplerBindings(**clone, output, error) || error.empty() || output.size() != 1 ||
+        output[0].texture_space != 11 || output[0].texture_register != 22 ||
+        output[0].sampler_space != 33 || output[0].sampler_register != 44) return false;
+  }
+  return true;
+}
+
 static bool CheckBindingQualification(llvm::Module &module) {
   using namespace llvm;
   SmallVector<char, 0> bitcode;
@@ -183,8 +216,11 @@ static int TransformContainer(const char *path, const char *mode) {
   for (auto &function : **parsed) for (auto &block : function) for (auto &instruction : block)
     if (auto *call = dyn_cast<CallInst>(&instruction))
       if (call->getCalledFunction() && (call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32" ||
-          call->getCalledFunction()->getName() == "dx.op.sampleGrad.f32")) samples.push_back(call);
-  const bool binding_two = !std::strcmp(mode, "binding-two");
+          call->getCalledFunction()->getName() == "dx.op.sampleGrad.f32" ||
+          call->getCalledFunction()->getName() == "dx.op.sample.f32" ||
+          call->getCalledFunction()->getName() == "dx.op.sampleBias.f32")) samples.push_back(call);
+  const bool binding_implicit = !std::strcmp(mode, "binding-implicit");
+  const bool binding_two = !std::strcmp(mode, "binding-two") || binding_implicit;
   const bool binding_grad = !std::strcmp(mode, "binding-grad");
   const bool binding_array = !std::strcmp(mode, "binding-array");
   if (samples.size() != (binding_two ? 2 : 1)) return 1;
@@ -216,6 +252,7 @@ static int TransformContainer(const char *path, const char *mode) {
       samples[0]->getArgOperand(1), builder.getInt32(mirror ? 2 : mirror_once ? 5 : 3), builder.getInt32(3), builder.getInt32(3)};
   std::string error;
   if (binding) {
+    if (binding_implicit && !CheckImplicitQualification(**parsed)) return 1;
     const bool modern = (*parsed)->getFunction("dx.op.createHandleFromBinding") != nullptr;
     if (modern && binding_array && !CheckModernQualification(**parsed)) return 1;
     if (!modern && !binding_two && !binding_array && !CheckBindingQualification(**parsed)) return 1;
@@ -226,6 +263,20 @@ static int TransformContainer(const char *path, const char *mode) {
         records[0].sampler_space || records[0].sampler_register != (binding_array ? 1u : 0u)) return 1;
     if (binding_two && (records[1].texture_space || records[1].texture_register ||
         records[1].sampler_space || records[1].sampler_register != 1)) return 1;
+    if (binding_implicit) {
+      unsigned derivatives = 0;
+      for (auto &function : **parsed) for (auto &block : function) for (auto &instruction : block)
+        if (auto *call = dyn_cast<CallInst>(&instruction))
+          if (call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.unary.f32") {
+            const auto opcode = cast<ConstantInt>(call->getArgOperand(0))->getZExtValue();
+            if (opcode == 83 || opcode == 84) {
+              if (block.getName().startswith("dxmt.reduction.enabled") || block.getName().startswith("dxmt.ordinary")) return 1;
+              ++derivatives;
+            }
+          }
+      if (derivatives != 8 || (*parsed)->getFunction("dx.op.sample.f32") ||
+          (*parsed)->getFunction("dx.op.sampleBias.f32") || (*parsed)->getFunction("dx.op.sampleGrad.f32")) return 1;
+    }
   } else if (!dxmt::dxil::LowerReductionSampleLevel(*samples[0], state, error,
       texture_kind == 4 ? 3 : texture_kind == 1 || texture_kind == 6 ? 1 : 2)) { errs() << error; return 1; }
   for (auto &function : **parsed) for (auto &block : function) for (auto &instruction : block)

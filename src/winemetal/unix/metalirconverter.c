@@ -246,7 +246,7 @@ static void
 dxmt_msc_set_compiler_configuration(IRCompiler *compiler, const struct dxmt_msc_compile_dxil_params *params) {
   const uint32_t compatibility_flags = params->compatibility_flags
                                            ? params->compatibility_flags
-                                           : DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
+                                           : DXMT_MSC_DEFAULT_COMPATIBILITY_FLAGS;
   if (g_msc_api.IRCompilerSetCompatibilityFlags)
     g_msc_api.IRCompilerSetCompatibilityFlags(compiler, (IRCompatibilityFlags)compatibility_flags);
 

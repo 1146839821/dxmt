@@ -133,7 +133,7 @@ MakeMSCConversionCacheKey(
   uint32_t compiler_minimum_os_major = 0;
   uint32_t compiler_minimum_os_minor = 0;
   uint32_t compiler_minimum_os_patch = 0;
-  uint32_t compiler_compatibility_flags = DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
+  uint32_t compiler_compatibility_flags = DXMT_MSC_DEFAULT_COMPATIBILITY_FLAGS;
   uint32_t compiler_validation_flags = 0;
   uint8_t compiler_ignore_debug_information = 0;
   uint32_t compiler_function_constant_resource_space = DXMT_MSC_RESOURCE_SPACE_DISABLED;
@@ -1281,7 +1281,7 @@ CompileDXIL(
   params.entry_point_capacity = entry_point_capacity;
   params.error_message = error_message;
   params.error_message_capacity = error_message_capacity;
-  params.compatibility_flags = DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
+  params.compatibility_flags = DXMT_MSC_DEFAULT_COMPATIBILITY_FLAGS;
   params.function_constant_resource_space = DXMT_MSC_RESOURCE_SPACE_DISABLED;
   params.framebuffer_fetch_resource_space = DXMT_MSC_RESOURCE_SPACE_DISABLED;
   if (msc_capabilities) {

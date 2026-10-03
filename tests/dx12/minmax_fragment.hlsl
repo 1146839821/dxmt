@@ -22,7 +22,22 @@ float4 vertex(uint id : SV_VertexID) : SV_Position
 
 float4 pixel(float4 position : SV_Position) : SV_Target0
 {
-#ifdef USE_GRAD
+#if defined(USE_IMPLICIT)
+    float2 uv = position.xy * 0.25;
+#if defined(USE_LEVEL)
+    float first = input_texture.SampleLevel(first_sampler, uv, 0).x;
+    float second = input_texture.SampleLevel(second_sampler, uv, 0).x;
+#elif defined(USE_EXPLICIT_GRAD)
+    float first = input_texture.SampleGrad(first_sampler, uv, float2(0.25, 0), float2(0, 0.25)).x;
+    float second = input_texture.SampleGrad(second_sampler, uv, float2(0.25, 0), float2(0, 0.25)).x;
+#elif defined(USE_BIAS)
+    float first = input_texture.SampleBias(first_sampler, uv, USE_BIAS).x;
+    float second = input_texture.SampleBias(second_sampler, uv, USE_BIAS).x;
+#else
+    float first = input_texture.Sample(first_sampler, uv).x;
+    float second = input_texture.Sample(second_sampler, uv).x;
+#endif
+#elif defined(USE_GRAD)
     float first = input_texture.SampleGrad(first_sampler, float2(0.5, 0.5), float2(0.25, 0), float2(0, 0.25)).x;
     float second = input_texture.SampleGrad(second_sampler, float2(0.5, 0.5), float2(0.25, 0), float2(0, 0.25)).x;
 #else

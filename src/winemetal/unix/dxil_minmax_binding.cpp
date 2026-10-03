@@ -15,9 +15,20 @@ static_assert(sizeof(dxmt_msc_minmax_binding) == 16);
 namespace dxmt::dxil {
 namespace {
 constexpr unsigned CreateHandle = 57, CBufferLoadLegacy = 59, SampleLevel = 62, GetDimensions = 72, FMax = 35, FMin = 36;
-constexpr unsigned SampleGrad = 63;
+constexpr unsigned Sample = 60, SampleBias = 61, SampleGrad = 63, DerivCoarseX = 83, DerivCoarseY = 84;
+unsigned SampleOpcode(llvm::StringRef name) {
+  if (name == "dx.op.sample.f32") return Sample;
+  if (name == "dx.op.sampleBias.f32") return SampleBias;
+  if (name == "dx.op.sampleLevel.f32") return SampleLevel;
+  if (name == "dx.op.sampleGrad.f32") return SampleGrad;
+  return 0;
+}
+unsigned SampleArgumentCount(llvm::StringRef name) {
+  const auto opcode = SampleOpcode(name);
+  return opcode == SampleGrad ? 17 : opcode == SampleBias ? 12 : opcode ? 11 : 0;
+}
 bool IsQualifiedSampleName(llvm::StringRef name) {
-  return name == "dx.op.sampleLevel.f32" || name == "dx.op.sampleGrad.f32";
+  return SampleOpcode(name) != 0;
 }
 bool Word(llvm::Metadata *metadata, uint32_t &value) {
   auto *constant = llvm::mdconst::dyn_extract_or_null<llvm::ConstantInt>(metadata);
@@ -35,7 +46,7 @@ struct Resource {
   llvm::MDNode *metadata;
   uint32_t space, reg, count;
 };
-struct Sample {
+struct SampleSite {
   llvm::CallInst *call;
   uint32_t pair;
   unsigned spatial_dimensions;
@@ -167,7 +178,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     resolved_register = reg;
     return &found->second;
   };
-  std::vector<Sample> samples;
+  std::vector<SampleSite> samples;
   std::vector<Pair> pairs;
   bool has_gradient = false, has_mapping_check = false;
   std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, uint32_t> pair_indices;
@@ -179,14 +190,14 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     if (name.startswith("dx.op.createHandleFrom") && call->getCalledFunction() != modern_create)
       return reject("modern/dynamic handle provenance requires further lowering");
     if (name.startswith("dx.op.sample") && !IsQualifiedSampleName(name))
-      return reject("only float SampleLevel/SampleGrad are currently qualified");
+      return reject("unsupported float sampling operation");
     // Qualify every sampler consumer, not only the samples being rewritten.
     if (call->getCalledFunction() == create) {
       auto *kind = dyn_cast<ConstantInt>(call->getArgOperand(1));
       if (kind && kind->getZExtValue() == 3) for (auto *user : call->users()) {
         auto *consumer = dyn_cast<CallInst>(user);
         if (!consumer || !consumer->getCalledFunction() || !IsQualifiedSampleName(consumer->getCalledFunction()->getName()) ||
-            consumer->arg_size() != (consumer->getCalledFunction()->getName() == "dx.op.sampleGrad.f32" ? 17 : 11) ||
+            consumer->arg_size() != SampleArgumentCount(consumer->getCalledFunction()->getName()) ||
             consumer->getArgOperand(2) != call)
           return reject("unsupported sampler handle flow or consumer");
       }
@@ -210,15 +221,22 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
       }
     }
     if (!IsQualifiedSampleName(name)) continue;
-    const bool gradient = name == "dx.op.sampleGrad.f32";
-    has_gradient |= gradient;
-    if (call->arg_size() != (gradient ? 17 : 11) || samples.size() >= 1024)
+    const auto sample_opcode = SampleOpcode(name);
+    const bool implicit = sample_opcode == Sample || sample_opcode == SampleBias;
+    if (implicit) {
+      auto *model = module.getNamedMetadata("dx.shaderModel");
+      auto *stage = model && model->getNumOperands() == 1 && model->getOperand(0)->getNumOperands() == 3 ?
+          dyn_cast_or_null<MDString>(model->getOperand(0)->getOperand(0)) : nullptr;
+      if (!stage || stage->getString() != "ps") return reject("implicit reduction sampling requires a pixel shader");
+    }
+    has_gradient |= sample_opcode != SampleLevel;
+    if (call->arg_size() != SampleArgumentCount(name) || samples.size() >= 1024)
       return reject("invalid or oversized sampling module");
     auto *result = dyn_cast<StructType>(call->getType());
     uint32_t opcode;
     if (!result || result->isOpaque() || result->getNumElements() != 5 ||
         !result->getElementType(4)->isIntegerTy(32) || !Word(call->getArgOperand(0), opcode) ||
-        opcode != (gradient ? SampleGrad : SampleLevel))
+        opcode != sample_opcode)
       return reject("invalid float sample result or opcode");
     for (unsigned i = 0; i < 4; ++i)
       if (!result->getElementType(i)->isFloatTy() || !call->getArgOperand(3 + i)->getType()->isFloatTy())
@@ -324,8 +342,42 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
   auto dimensions = module.getOrInsertFunction("dx.op.getDimensions", dimensions_type, i32, handle, i32);
   auto binary = module.getOrInsertFunction("dx.op.binary.f32", types.getFloatTy(), i32, types.getFloatTy(), types.getFloatTy());
   for (auto [sample, pair, spatial_dimensions] : samples) {
-    const bool gradient = sample->getCalledFunction()->getName() == "dx.op.sampleGrad.f32";
-    Value *instruction_clamp = gradient ? sample->getArgOperand(16) : nullptr;
+    const auto opcode = SampleOpcode(sample->getCalledFunction()->getName());
+    const bool implicit = opcode == Sample || opcode == SampleBias;
+    const bool gradient = implicit || opcode == SampleGrad;
+    Value *instruction_clamp = opcode == SampleGrad ? sample->getArgOperand(16) :
+        implicit ? sample->getArgOperand(opcode == Sample ? 10 : 11) : nullptr;
+    Value *instruction_bias = opcode == SampleBias ? sample->getArgOperand(10) : nullptr;
+    if (implicit) {
+      IRBuilder<> normalize(sample);
+      auto *f32 = types.getFloatTy();
+      auto *unary_type = FunctionType::get(f32, {i32, f32}, false);
+      auto *existing_unary = module.getFunction("dx.op.unary.f32");
+      if (existing_unary && existing_unary->getFunctionType() != unary_type)
+        return reject("invalid derivative intrinsic signature");
+      auto unary = module.getOrInsertFunction("dx.op.unary.f32", unary_type);
+      auto *gradient_type = FunctionType::get(sample->getType(),
+          {i32, handle, handle, f32, f32, f32, f32, i32, i32, i32, f32, f32, f32, f32, f32, f32, f32}, false);
+      auto *existing_gradient = module.getFunction("dx.op.sampleGrad.f32");
+      if (existing_gradient && existing_gradient->getFunctionType() != gradient_type)
+        return reject("invalid implicit gradient normalization signature");
+      auto gradient_function = module.getOrInsertFunction("dx.op.sampleGrad.f32", gradient_type);
+      SmallVector<Value *, 17> arguments;
+      for (unsigned i = 0; i < 10; ++i) arguments.push_back(sample->getArgOperand(i));
+      arguments[0] = normalize.getInt32(SampleGrad);
+      // Derive only spatial coordinates, never the array-layer component.
+      // Keep derivatives ahead of the injected sampler-enabled branch.
+      for (const auto derivative : {DerivCoarseX, DerivCoarseY})
+        for (unsigned axis = 0; axis < 3; ++axis) {
+          Value *value = UndefValue::get(f32);
+          if (axis < spatial_dimensions) value = normalize.CreateCall(unary,
+              {normalize.getInt32(derivative), sample->getArgOperand(3 + axis)});
+          arguments.push_back(value);
+        }
+      arguments.push_back(instruction_clamp);
+      auto *normalized = normalize.CreateCall(gradient_function, arguments);
+      sample->replaceAllUsesWith(normalized); sample->eraseFromParent(); sample = normalized;
+    }
     if (gradient) {
       auto *gradient_lod = CreateReductionGradientLOD(*sample, error, spatial_dimensions);
       if (!gradient_lod) return false;
@@ -373,8 +425,9 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     auto *second = b.CreateCall(cb_load, {b.getInt32(CBufferLoadLegacy), cb, b.getInt32(pair * 2 + 1)});
     auto *flags = b.CreateExtractValue(first, 0);
     Value *original_lod = sample->getArgOperand(10);
-    if (gradient) original_lod = b.CreateFAdd(original_lod,
-        b.CreateBitCast(b.CreateExtractValue(second, 3), b.getFloatTy()), "dxmt.gradient.biased.lod");
+    original_lod = b.CreateFAdd(original_lod,
+        b.CreateBitCast(b.CreateExtractValue(second, 3), b.getFloatTy()), "dxmt.sampler.biased.lod");
+    if (instruction_bias) original_lod = b.CreateFAdd(original_lod, instruction_bias, "dxmt.sample.biased.lod");
     b.CreateCondBr(b.CreateICmpNE(b.CreateAnd(flags, b.getInt32(DXMT_MSC_MINMAX_ENABLED)), b.getInt32(0)), reduction, ordinary);
     b.SetInsertPoint(ordinary);
     auto *ordinary_sampler = make_handle(b, 3, next_id[3] + pairs.size() + pair, pairs.size() + pair);
@@ -459,8 +512,9 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
   }
   // DXC rejects unused dx.op declarations even when LLVM verification passes.
   // Remove only the operation whose complete consumer set was normalized.
-  if (auto *gradient = module.getFunction("dx.op.sampleGrad.f32"))
-    if (gradient->isDeclaration() && gradient->use_empty()) gradient->eraseFromParent();
+  for (const auto name : {"dx.op.sampleGrad.f32", "dx.op.sample.f32", "dx.op.sampleBias.f32"})
+    if (auto *normalized = module.getFunction(name))
+      if (normalized->isDeclaration() && normalized->use_empty()) normalized->eraseFromParent();
   // No native clamped sampler operation remains. DXC's TiledResources flag
   // reflects LOD-clamp or CheckAccessFullyMapped use, not arithmetic clamps.
   // Preserve it if a mapping check remains; keep all unrelated shader flags.
