@@ -66,6 +66,29 @@ d3d12_dep = declare_dependency(
   include_directories : [ dxmt_include_path, include_directories('.') ],
 )
 
+dxc_deployment = get_option('typed_origin_dxc_path')
+if dxc_deployment != ''
+  if not dxmt_crossbuild
+    error('Typed origin DXC deployment requires a Windows cross build')
+  endif
+  deployment_python = import('python').find_installation()
+  run_command(deployment_python, meson.project_source_root() / 'tools/check_dxc_deployment.py',
+    dxc_deployment, cpu_family, check : true)
+  install_data(dxc_deployment / 'dxcompiler.dll', dxc_deployment / 'dxil.dll',
+    dxc_deployment / 'LICENSE.txt', install_dir : windows_native_install_dir / 'dxmt-dxc')
+  foreach notice : ['LICENSE-MIT.txt', 'LICENSE-LLVM.txt', 'LICENSE-MS.txt', 'ThirdPartyNotices.txt']
+    if fs.is_file(dxc_deployment / notice)
+      install_data(dxc_deployment / notice, install_dir : windows_native_install_dir / 'dxmt-dxc')
+    endif
+  endforeach
+endif
+
+if get_option('enable_tests')
+  deployment_test_python = import('python').find_installation()
+  test('dxc-deployment-unit', deployment_test_python,
+    args : [meson.project_source_root() / 'tests/dx12/dxc_deployment_test.py'])
+endif
+
 if wine_builtin_dll
 custom_target('postprocess_libd3d12',
   input : d3d12_dll,

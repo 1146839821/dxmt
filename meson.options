@@ -9,3 +9,5 @@ option('enable_tests', type : 'boolean', value : false)
 option('enable_nvapi', type : 'boolean', value : false)
 option('enable_nvngx', type : 'boolean', value : false)
 option('enable_d3d12', type : 'boolean', value : false)
+option('typed_origin_dxc_path', type : 'string', value : '',
+  description : 'Explicitly approved DXC deployment directory containing dxcompiler.dll, dxil.dll and LICENSE.txt')
