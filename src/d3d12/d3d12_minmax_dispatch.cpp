@@ -174,7 +174,10 @@ HRESULT MaterializeD3D12MinMaxDispatch(MTLD3D12Device *device, const D3D12MinMax
     const auto &variant = *dispatch.binding_variant; const auto &root = variant.root.layout;
     if (variant.stage != D3D12MinMaxShaderStage::Compute && variant.stage != D3D12MinMaxShaderStage::Pixel)
       return E_INVALIDARG;
-    if (dispatch.indirect_data && variant.stage != D3D12MinMaxShaderStage::Compute) return E_NOTIMPL;
+    if ((dispatch.indirect_data && variant.stage != D3D12MinMaxShaderStage::Compute) ||
+        (dispatch.indirect_render_data && variant.stage != D3D12MinMaxShaderStage::Pixel)) return E_INVALIDARG;
+    if (bool(dispatch.indirect_data) != bool(dispatch.indirect_data_binding) ||
+        bool(dispatch.indirect_render_data) != bool(dispatch.indirect_render_binding)) return E_INVALIDARG;
     if (dispatch.argument_template.size() != root.argument_buffer_size || variant.locations.size() != variant.bindings.size())
       return E_INVALIDARG;
     std::vector<UINT> resource_indices, sampler_indices;
@@ -233,9 +236,8 @@ HRESULT MaterializeD3D12MinMaxDispatch(MTLD3D12Device *device, const D3D12MinMax
       offsets.push_back(total); total = align(total + table.slots.size() * sizeof(dxmt_msc_descriptor_entry));
     }
     uint64_t indirect_tlabs_offset = 0;
-    if (dispatch.indirect_data) {
-      const auto &payload = *dispatch.indirect_data;
-      if (!dispatch.indirect_data_binding || !payload.max_count || !root.argument_buffer_size ||
+    const auto allocate_indirect = [&](const auto &payload, bool has_binding) -> HRESULT {
+      if (!has_binding || !payload.max_count || !root.argument_buffer_size ||
           payload.msc_template_size != root.argument_buffer_size ||
           payload.msc_tlab_stride < root.argument_buffer_size || (payload.msc_tlab_stride & 15))
         return E_INVALIDARG;
@@ -245,6 +247,14 @@ HRESULT MaterializeD3D12MinMaxDispatch(MTLD3D12Device *device, const D3D12MinMax
       indirect_tlabs_offset = total;
       if (payload.max_count > (UINT64_MAX - total) / payload.msc_tlab_stride) return E_OUTOFMEMORY;
       total += payload.max_count * payload.msc_tlab_stride;
+      return S_OK;
+    };
+    if (dispatch.indirect_data) {
+      const auto hr = allocate_indirect(*dispatch.indirect_data, dispatch.indirect_data_binding != nullptr);
+      if (FAILED(hr)) return hr;
+    } else if (dispatch.indirect_render_data) {
+      const auto hr = allocate_indirect(*dispatch.indirect_render_data, dispatch.indirect_render_binding != nullptr);
+      if (FAILED(hr)) return hr;
     }
     if (!total || total > SIZE_MAX) return E_OUTOFMEMORY;
     WMTBufferInfo info = {}; info.length = total; info.options = WMTResourceStorageModeShared;
@@ -310,13 +320,14 @@ HRESULT MaterializeD3D12MinMaxDispatch(MTLD3D12Device *device, const D3D12MinMax
         candidate->snapshots.push_back(snapshot);
       }
     }
-    if (dispatch.indirect_data) {
-      auto payload = *dispatch.indirect_data;
+    const auto copy_indirect = [&](auto payload) {
       payload.msc_template = info.gpu_address;
       payload.msc_tlab = info.gpu_address + indirect_tlabs_offset;
       std::memcpy(memory + candidate->indirect_data_offset, &payload, sizeof(payload));
-    }
-    retain(candidate->buffer.handle, dispatch.indirect_data ?
+    };
+    if (dispatch.indirect_data) copy_indirect(*dispatch.indirect_data);
+    else if (dispatch.indirect_render_data) copy_indirect(*dispatch.indirect_render_data);
+    retain(candidate->buffer.handle, (dispatch.indirect_data || dispatch.indirect_render_data) ?
         static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite) : WMTResourceUsageRead);
     DEBUG("MinMax submission buffer=", candidate->buffer.handle, " bytes=", total,
         " pairs=", pairs, " unique_live_resources=", resource_indices.size(), " unique_live_samplers=", sampler_indices.size());

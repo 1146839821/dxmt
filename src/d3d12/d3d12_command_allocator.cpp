@@ -291,10 +291,11 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
 IndirectRenderCommandData *
 MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
     MTLD3D12CommandSignature *pCmdSig, MTLD3D12GraphicsPipelineState *pPSO, size_t MaxCount,
-    const D3D12MinMaxGraphicsVariant *minmax_variant
+    const D3D12MinMaxGraphicsVariant *minmax_variant, const wmtcmd_render_setbuffer **resolver_binding
 ) {
+  if (resolver_binding) *resolver_binding = nullptr;
   if (minmax_variant &&
-      (pCmdSig->UpdateRootArguments || pCmdSig->UpdateVertexBuffers || pCmdSig->UpdateIndexBuffer))
+      (pCmdSig->UpdateVertexBuffers || pCmdSig->UpdateIndexBuffer))
     return nullptr;
   WMTIndirectCommandBufferInfo info;
   info.inherit_buffers = !(pCmdSig->UpdateVertexBuffers || pCmdSig->UpdateIndexBuffer || pCmdSig->UpdateRootArguments);
@@ -375,6 +376,7 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
     cmd_argbuf_res.buffer = gpu_heap_buffer_;
     cmd_argbuf_res.offset = Offset;
     cmd_argbuf_res.index = 30;
+    if (resolver_binding) *resolver_binding = &cmd_argbuf_res;
 
     auto &cmd_draw_res = EncodeRenderCommand<wmtcmd_render_draw>();
     cmd_draw_res.type = WMTRenderCommandDraw;
@@ -394,8 +396,7 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
 
     auto &cmd_setpso = EncodeRenderCommand<wmtcmd_render_setpso>();
     cmd_setpso.type = WMTRenderCommandSetPSO;
-    // Non-updating ICBs inherit the submission-private TLAB from PreDraw.
-    // The resolver must restore its matching pipeline, not the application PSO.
+    // Both inherited and root-updating ICB TLABs require the private pipeline.
     cmd_setpso.pso = minmax_variant ? minmax_variant->pso : pPSO->pso;
   }
 

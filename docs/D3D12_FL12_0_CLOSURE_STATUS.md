@@ -436,3 +436,11 @@ focused pixel readbacks for CPU-provided counts 0/1/7, clipping to MaxCommandCou
 updating signatures stay rejected. Graphics root-update private TLABs and
 GPU-produced arguments/counts remain open; this is not full MinMax or mandatory
 graphics matrix closure (`D3D12_MINMAX_GRAPHICS.md`). No capability promotion.
+
+MinMax graphics root-only updating DRAW/DRAW_INDEXED now uses augmented-root
+reflection and submission-private cloned payload/per-command TLABs. Both builds
+pass focused pixel readbacks for partial root constants plus CBV/SRV/UAV address
+updates, zero/clipped CPU-provided counts, immutable closed-list replay and
+ordinary state restoration (`D3D12_MINMAX_GRAPHICS.md`). GPU-produced graphics
+arguments/counts, in-flight overlap, same-address root-VA remap and complete
+MinMax semantics still remain open. No feature-level or capability promotion.

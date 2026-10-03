@@ -5690,11 +5690,14 @@ public:
   bool
   EncodeMSCIndirectArguments(MTLD3D12CommandSignature *signature, Data *data,
       const D3D12TypedOriginComputeVariant *variant = nullptr, const wmtcmd_compute_setbuffer *resolver_binding = nullptr,
-      const D3D12MinMaxComputeVariant *minmax_variant = nullptr) {
+      const D3D12MinMaxComputeVariant *minmax_variant = nullptr,
+      const D3D12MinMaxGraphicsVariant *graphics_variant = nullptr,
+      const wmtcmd_render_setbuffer *render_binding = nullptr) {
     constexpr bool compute = std::is_same_v<Data, IndirectComputeCommandData>;
     auto root = compute ? rootsig_compute_.ptr() : rootsig_graphics_.ptr();
     auto staging = compute ? rootarg_compute_staging_ : rootarg_graphics_staging_;
-    const auto *compiler_root = variant ? &variant->root : minmax_variant ? &minmax_variant->root.layout : nullptr;
+    const auto *compiler_root = variant ? &variant->root : minmax_variant ? &minmax_variant->root.layout :
+        graphics_variant ? &graphics_variant->root.layout : nullptr;
     const auto template_size = compiler_root ? compiler_root->argument_buffer_size : root->MSCArgumentBufferSize;
     if (template_size > UINT64_MAX - 15) { FailRecording(__func__, "indirect TLAB size overflow"); return false; }
     const auto stride = (template_size + 15) & ~uint64_t(15);
@@ -5769,6 +5772,17 @@ public:
         }
         dispatches.back()->indirect_data = data;
         dispatches.back()->indirect_data_binding = resolver_binding;
+        defer_template = true;
+      }
+    }
+    if constexpr (!compute) {
+      if (graphics_variant) {
+        auto &draws = static_cast<RenderEncoderData *>(allocator_->encoder_current)->minmax_draws;
+        if (draws.empty() || draws.back()->graphics_variant != graphics_variant || !render_binding) {
+          FailRecording(__func__, "missing MinMax render indirect marker"); return false;
+        }
+        draws.back()->indirect_render_data = data;
+        draws.back()->indirect_render_binding = render_binding;
         defer_template = true;
       }
     }
@@ -6058,7 +6072,7 @@ public:
     }
     const D3D12MinMaxGraphicsVariant *minmax_variant = nullptr;
     DrawCallStatus status = PreDraw(
-        encode_binding && !msc_updates, SM50_INDEX_BUFFER_FORMAT_NONE, !encode_binding, &minmax_variant
+        encode_binding && !msc_updates, SM50_INDEX_BUFFER_FORMAT_NONE, !encode_binding || msc_updates, &minmax_variant
     );
     if (status == DrawCallStatus::Invalid)
       return;
@@ -6079,7 +6093,8 @@ public:
                                 WMTRenderStageVertex);
     }
 
-    auto cmd = allocator_->EncodeIndirectRenderCommand(sig, pso_graphics_.ptr(), MaxCommandCount, minmax_variant);
+    const wmtcmd_render_setbuffer *resolver_binding = nullptr;
+    auto cmd = allocator_->EncodeIndirectRenderCommand(sig, pso_graphics_.ptr(), MaxCommandCount, minmax_variant, &resolver_binding);
     if (!cmd) {
       FailRecording(__func__, "indirect render command allocation failed");
       return;
@@ -6092,7 +6107,7 @@ public:
     if (!encode_binding)
       return;
     if (msc_updates) {
-      if (!EncodeMSCIndirectArguments(sig, cmd)) return;
+      if (!EncodeMSCIndirectArguments(sig, cmd, nullptr, nullptr, nullptr, minmax_variant, resolver_binding)) return;
       auto [addresses_ptr, addresses_offset] = allocator_->AllocateGPUHeap(32 * sizeof(uint64_t), 16);
       if (!addresses_ptr) { FailRecording(__func__, "indirect vertex addresses allocation failed"); return; }
       auto addresses = static_cast<uint64_t *>(addresses_ptr);

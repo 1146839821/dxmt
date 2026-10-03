@@ -399,3 +399,129 @@ the full capability or mandatory GPU matrices. Independent review unavailable.
 no game/prefix DLL deployment or process manipulation. Next production gap:
 graphics indirect root-update private TLAB reflection/materialization; add focused
 GPU-generated argument/count evidence with that integration before broad matrices.
+
+## Graphics indirect root updates — Task Analysis
+
+Branch `feat/d3d12-1`, clean baseline `92c677b`, remote baseline `e147c710`,
+115 local commits. Existing inherited graphics indirect and compute root-update
+paths pass focused GPU tests. Missing production piece: graphics augmented-root
+reflection, private per-command TLAB storage and resolver payload rebinding.
+
+Hypothesis: the existing GPU graphics resolver can consume the same private
+template scheme as compute. Evidence: it already copies templates and patches
+inline constants / root buffer addresses using supplied reflected offsets, and
+binds both vertex and fragment TLABs. Current materializer clones compute data
+only, render replay does not patch resolver data, and recording rejects updates.
+Expected effect: root-updating DRAW/DRAW_INDEXED uses submission-specific tables
+and state without modifying allocator-owned payloads or rereading descriptors.
+
+Risks: payload ABI differs by stage; accidentally using ordinary reflection,
+shared writable TLABs, losing unchanged constants or restoring the wrong PSO
+would corrupt output. Plan: stage-checked shared payload sizing/copy, record
+render resolver binding, patch cloned render replay node and use augmented root
+offsets; retain existing indirect root-VA residency and root-state reset behavior.
+VB/IB updates and emulation remain rejected. DXBC AIRCONV / DXIL MSC routing,
+static/live descriptor capture, native ABI and capability bits stay unchanged.
+
+Validation: root-constant partial updates with distinct commands and preserved
+constant, DRAW/DRAW_INDEXED pixel readback, count zero/clipping, ordinary-state
+restoration, immutable payload/template/replay nodes, both configurations' full
+builds plus compute/typed-origin regression. Broader root-VA and GPU-produced
+graphics arguments/counts follow focused integration, not broad matrix-first
+work. Main-agent Standards/Spec review; full MinMax and FL12 gates remain open.
+
+Focused validation refinement: include CBV/SRV/UAV root address updates in the
+same production integration, using two distinguishable command payloads and a
+real default-heap UAV buffer. This verifies all admitted root update kinds rather
+than crediting constant-only output as buffer-address evidence.
+
+## Graphics indirect root updates — Task Result
+
+### Branch / Baseline / Implementation / Changed Files
+
+`feat/d3d12-1`, starting at `92c677b`, remote baseline `e147c710`.
+Command list and allocator now admit root-only updating signatures with MinMax,
+return the resolver binding node and encode parameter offsets from the augmented
+compiler-root reflection. Ordinary graphics and compute paths keep their existing
+layouts. The original resolver payload is attached immutably to the private draw
+snapshot. MinMax materialization shares stage-checked payload sizing/copy between
+compute and render, checks payload/binding consistency and multiplication bounds,
+and allocates submission-specific writable per-command TLABs. Render replay
+patches only its copied resolver buffer node to the cloned payload, validates
+that every patch is consumed and restores the matching private graphics PSO.
+Original payloads/templates/command links are not changed.
+
+Runtime files: allocator header/source, command list/queue, MinMax dispatch
+header/source. Test files: fragment C++/HLSL. Documentation: this file and closure
+status ledger. Existing registered-buffer retention/residency for indirect root
+VAs and root-state reset are reused. This does not repair same-address VA remaps
+or change native payload ABI. Static/live descriptor generations are still
+captured once per binding; no additional heap-lock fan-out is introduced.
+
+### DXBC / AIRCONV Impact / DXIL / MSC Impact / Shared Runtime Impact
+
+No shader backend fallback, AIRCONV shader change or mixed-family admission.
+DXIL remains MSC. MSC integration guidance informed inline constants, absolute
+root/table addresses, reflection offsets and submission storage ownership.
+The shared host runtime now connects private graphics root-updating ICBs to
+the existing resolver; VB/IB-updating signatures and emulation remain rejected.
+
+### Tests Added / Tests Run / Runtime Results
+
+New HLSL modes consume a two-DWORD root constant block and root CBV, raw SRV and
+raw UAV buffers. Partial updates change only DWORD 0 (7/11), preserving DWORD 1
+(31). CBV values are 13/17, SRV 19/23, UAV 5/9. Two distinct root-updating
+commands therefore produce blue 75/91 while ordinary following draws observe
+the updated constant reset to zero and preserved 31, with explicitly rebound
+baseline buffers (blue 68). CBVs use 256-byte-aligned upload addresses; UAV uses
+a real default-heap UAV buffer initialized through a separate upload list.
+DRAW and DRAW_INDEXED consume CPU-provided counts 0/1/7 with MaxCommandCount 2,
+nonzero argument/count offsets and repeated closed-list submissions. Every pixel
+and original payload/template/command link is checked. This is UAV root-address
+read evidence, not a new UAV-write/ordering qualification.
+
+The first buffer-probe run stopped on fixture allocator Reset, before root-update
+execution: retained encoders prohibit allocator reset. Use a separate upload
+allocator/list instead; production allocator guards are unchanged. Final runs
+have no resource-state warnings or pixel failures. VB updates still reject at
+recording, while the former root-update rejection probe is replaced by real GPU
+execution. The constants-only fixture also passed an initial normal-build run.
+
+Both configurations were reconfigured and optional plus full default builds
+completed before each task-local staging. Fresh repository-DXC shader fixtures
+and matching native runtime hashes verified. Evidence:
+`/Users/zhangbo/.cache/dxmt-minmax-render-roots.RFSNQ7`, `final-*`, `review-*`,
+`dxc-*` logs; reconfigure/first-build logs under `/tmp/dxmt-minmax-render-roots-*`.
+Eight final fragment processes pass: two operations with root-buffer updates and
+two baseline operations per configuration. They include **32 new root-update
+cases / 96 GPU submissions** plus direct/inherited regressions (352 graphics
+submissions total, including zero-count execution). Counts are execution counts,
+not independent semantic matrix cells. Existing compute GPU-produced count
+and typed-origin multi-command readbacks pass in both configurations: twelve
+final runtime processes pass. Five host suites pass per configuration. Reviewed
+optional targets have no compiler warnings.
+
+### Known Limitations / Capability Status / Feature Level Impact
+
+Bounded DXIL/MSC pixel MinMax root-updating DRAW/DRAW_INDEXED: DXMT_LOCAL_PASS.
+Full MinMax remains PARTIAL. Graphics GPU-produced argument/count evidence,
+overlapping in-flight reuse, same-address root-VA remap, UAV writes/ordering,
+pre-raster sampling, emulation, implicit Sample/Bias and broader views/filter
+coverage remain open. No complete mandatory matrix, Windows oracle, Metal
+API/shader validation, game/performance or fresh tessellation acceptance run.
+FL11_1 reporting is unchanged; FL12_0/FL12_1 gates remain unmet and not promoted.
+No capability or Shader Model declaration changes.
+
+### Review / Git Status / Push Status / Next Recommended Task
+
+Main-agent Standards self-review against `92c677b`: stage/payload consistency,
+size overflow, reflection reuse, strong retention, patch consumption, immutable
+closed-list storage and root-state restoration checked; no blocking finding.
+Main-agent Spec self-review: production supports admitted root update kinds;
+focused GPU evidence is bounded and not full MinMax/FL12 acceptance. Independent
+review unavailable; code-review two-axis methodology used as a main-agent
+fallback. `git diff --check` passes. Task files committed locally, NOT PUSHED;
+no game/prefix DLL writes or process manipulation. Next production gap: DXIL
+pixel MinMax implicit Sample/SampleBias lowering, then remaining pre-raster and
+resource semantics; GPU-produced graphics count evidence and broad matrices
+remain required before final qualification.

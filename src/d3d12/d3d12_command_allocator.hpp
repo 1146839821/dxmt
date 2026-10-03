@@ -389,7 +389,7 @@ public:
       const D3D12MinMaxComputeVariant *minmax_variant = nullptr);
 
   IndirectRenderCommandData *EncodeIndirectRenderCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12GraphicsPipelineState *pPSO, size_t MaxCount,
-      const D3D12MinMaxGraphicsVariant *minmax_variant = nullptr);
+      const D3D12MinMaxGraphicsVariant *minmax_variant = nullptr, const wmtcmd_render_setbuffer **resolver_binding = nullptr);
 };
 
 } // namespace dxmt

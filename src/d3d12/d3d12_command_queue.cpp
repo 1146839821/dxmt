@@ -158,6 +158,8 @@ static bool ReplayMinMaxRender(MTLD3D12Device *device, WMT::RenderCommandEncoder
           !markers.emplace(draw->render_marker, draw.get()).second) return false;
     }
     std::vector<PrivateRenderReplayCommand> replay;
+    struct IndirectBinding { obj_handle_t buffer; uint64_t offset; };
+    std::unordered_map<const void *, IndirectBinding> indirect_bindings;
     for (auto *node = reinterpret_cast<wmtcmd_base *>(&data->cmd_head); node;
          node = static_cast<wmtcmd_base *>(node->next.get())) {
       if (auto marker = markers.find(node); marker != markers.end()) {
@@ -165,6 +167,9 @@ static bool ReplayMinMaxRender(MTLD3D12Device *device, WMT::RenderCommandEncoder
         const auto hr = MaterializeD3D12MinMaxDispatch(device, *marker->second, binding);
         if (FAILED(hr)) { ERR("MinMax render materialization failed HRESULT=", hr); return false; }
         bindings.push_back(binding);
+        if (marker->second->indirect_render_binding &&
+            !indirect_bindings.emplace(marker->second->indirect_render_binding,
+                IndirectBinding{binding->buffer.handle, binding->indirect_data_offset}).second) return false;
         for (const auto &use : binding->resources)
           encoder.useResource(use.resource, use.usage, WMTRenderStageVertex | WMTRenderStageFragment);
         PrivateRenderReplayCommand pso = {};
@@ -233,9 +238,15 @@ static bool ReplayMinMaxRender(MTLD3D12Device *device, WMT::RenderCommandEncoder
       }
 #undef RENDER_SIZE
       PrivateRenderReplayCommand copy = {};
-      std::memcpy(&copy, node, size); replay.push_back(copy);
+      std::memcpy(&copy, node, size);
+      if (auto patch = indirect_bindings.find(node); patch != indirect_bindings.end()) {
+        if (node->type != WMTRenderCommandSetVertexBuffer) return false;
+        copy.buffer.buffer = patch->second.buffer; copy.buffer.offset = patch->second.offset;
+        indirect_bindings.erase(patch);
+      }
+      replay.push_back(copy);
     }
-    if (!markers.empty()) return false;
+    if (!markers.empty() || !indirect_bindings.empty()) return false;
     for (size_t i = 0; i < replay.size(); ++i)
       replay[i].nop.next.set(i + 1 < replay.size() ? &replay[i + 1] : nullptr);
     if (!replay.empty()) encoder.encodeCommands(&replay.front().nop);
