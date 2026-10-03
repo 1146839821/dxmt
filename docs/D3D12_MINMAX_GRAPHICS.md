@@ -93,3 +93,94 @@ binding integration, recording/submission lifetime and descriptor snapshots,
 then real minimum/maximum pixel readback. Implicit LOD/bias, broader operations,
 cube/aniso/feedback and full qualification remain separate open gaps. No feature
 declaration or FL gate was promoted.
+
+## Runtime binding follow-up — Task Analysis
+
+Current branch `feat/d3d12-1`, HEAD `666f684`, baseline `e147c710`; clean before
+this follow-up. Hypothesis: compute's descriptor capture/materialization can be
+shared with standard vertex/pixel graphics without duplicating private state.
+Evidence: the recorder currently retains a concrete compute PSO and filters all
+tables to ALL visibility; materialization reads the compute PSO's Texture.Load
+guard. This prevents a pixel variant from using it and omits vertex-only tables.
+
+Expected effect: stage-aware binding artifacts plus a common recording entry
+point enable graphics snapshots/materialization while existing compute callers
+and replay keep their compute pipeline metadata. Standard graphics captures ALL,
+VERTEX and PIXEL tables; compute keeps ALL only. Risks: borrowed artifact lifetime,
+static/volatile semantics, filtering unrelated stages, accidental graphics
+indirect admission and changed compute behavior. Validate focused pixel binding
+materialization plus existing GPU compute/typed-origin regressions in both builds.
+This is runtime groundwork toward graphics replay, not completed draw support or
+a replacement for production graphics PSO selection and real pixel readback.
+
+## Runtime binding follow-up — Task Result
+
+### Branch / Baseline / Local Commit
+
+`feat/d3d12-1`; read-only baseline `origin/feat/d3d12` (`e147c710`),
+merge-base `85bb2dd2`. Parent `666f684` (112 local commits since baseline).
+This follow-up is the local `feat(d3d12): share MinMax graphics binding snapshots`
+commit; its final hash is reported in the task response.
+
+### Changed Files / Implementation
+
+`d3d12_minmax_pipeline.hpp` separates immutable binding metadata from compute
+pipeline state. `d3d12_minmax_dispatch.hpp/.cpp` share recording/materialization
+with a retained pipeline base and stage-qualified binding artifact. Compute
+retains its wrapper and replay metadata. Pixel captures ALL/VERTEX/PIXEL tables;
+hull-only tables are not dereferenced. Pipeline kind/backend checks reject
+mismatches; mesh/geometry/tessellation/SO and graphics indirect remain unsupported.
+Pixel deny-root flags are rejected. Texture.Load guards come from PSO metadata,
+not a caller-provided override (tightened during self-review).
+
+### DXBC / AIRCONV Impact / DXIL / MSC Impact / Shared Runtime Impact
+
+No DXBC/AIRCONV changes or backend fallback. DXIL/MSC compiler algorithms, native
+ABI and reflection are unchanged. Shared PE recording/materialization preserves
+static recording snapshots, unique volatile submission resolution, private
+submission-owned descriptor/TLAB storage and strong resource/sampler retention.
+Production graphics PSO selection and command replay are not yet connected.
+
+### Tests Added / Tests Run / Runtime Results
+
+`dx12_minmax_fragment.cpp` and its optional Meson target now exercise the real
+shared recorder/materializer with an ordinary application graphics PSO. Tests
+include vertex-only retention, unbound hull-only exclusion, pipeline-stage
+rejection with unchanged output, static vs volatile texture/sampler replacement,
+ordinary static samplers, distinct submission buffers and immutable templates.
+The test-owned artifact stays alive through both synchronous materializations;
+production artifacts must be PSO-owned.
+
+Both builds were reconfigured; optional targets and final full default builds
+completed before staging. Matching native runtime hashes were verified. Final
+evidence: `/Users/zhangbo/.cache/dxmt-minmax-graphics-binding.UcURiV`,
+`review-final-*`, `review-full*`, `review-host*`. Eight final process runs passed:
+two fragment operations, GPU-produced MinMax indirect counts and typed-origin
+multi-command readback in each configuration. Fragment probes cover 16 binding
+cases, 32 submission materializations and 16 explicit private native render PSO
+creations (plus their ordinary application graphics PSOs). **No graphics draw or
+pixel GPU readback.** Existing MinMax count probes pass six actual compute GPU
+submissions with counts 0/1/7; typed-origin GPU readbacks pass. Five host suites
+pass in each configuration. No full mandatory matrix, Windows oracle, Metal
+validation, game, performance or tessellation acceptance was run.
+
+### Known Limitations / Capability Status / Feature Level Impact
+
+Graphics integration: PARTIAL. Graphics GPU semantics: UNVERIFIED. Full MinMax
+and FL12_0 closure remain open. No capability/SM/FL declaration was promoted;
+FL11_1 reporting is unchanged, FL12_0/FL12_1 are not enabled by this work.
+Graphics variant construction, recording selection, render submission replay and
+real reduction pixel readback remain required, followed by the broader operation
+and resource qualification gaps already recorded above.
+
+### Review / Git Status / Push Status / Next Recommended Task
+
+Standards main-agent self-review against parent `666f684`: shared implementation,
+immutable artifact borrowing and output preservation checked; no remaining
+blocking finding. Spec main-agent self-review: the full graphics objective is
+still incomplete and is not replaced by materialization tests. Independent
+review agents are unavailable; these are not independent-review results.
+`git diff --check` passed. Only task-owned files staged; local commit, NOT PUSHED.
+No game/prefix DLL deployment or Steam/process restart. Next: construct the
+graphics PSO variant and connect render replay to this shared binding path, then
+verify actual minimum/maximum pixel output.

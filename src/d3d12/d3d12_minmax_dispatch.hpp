@@ -22,11 +22,13 @@ struct D3D12MinMaxDispatch {
     std::vector<Slot> slots;
   };
   const wmtcmd_compute_nop *marker = nullptr;
-  Com<MTLD3D12ComputePipelineState> application_pso;
+  Com<MTLD3D12PipelineState> application_pso;
   Com<MTLD3D12RootSignature> application_root;
   Com<MTLD3D12DescriptorHeap> heap;
   Com<MTLD3D12SamplerDescriptorHeap> sampler_heap;
   const D3D12MinMaxComputeVariant *variant = nullptr;
+  const D3D12MinMaxBindingVariant *binding_variant = nullptr;
+  bool uses_texture_load = false;
   std::vector<uint8_t> argument_template;
   std::vector<Table> tables;
   std::vector<D3D12_SAMPLER_DESC> static_samplers;
@@ -54,6 +56,12 @@ HRESULT RecordD3D12MinMaxDispatch(MTLD3D12ComputePipelineState *pso, const D3D12
     MTLD3D12RootSignature *root, const uint64_t *staging, MTLD3D12DescriptorHeap *heap,
     MTLD3D12SamplerDescriptorHeap *samplers, const void *argument_template,
     std::shared_ptr<D3D12MinMaxDispatch> &dispatch);
+// The retained PSO must own the borrowed binding variant. Pixel captures the
+// standard graphics stages (vertex + pixel); compute captures ALL visibility.
+HRESULT RecordD3D12MinMaxBinding(MTLD3D12PipelineState *pso, const D3D12MinMaxBindingVariant *variant,
+    MTLD3D12RootSignature *root, const uint64_t *staging,
+    MTLD3D12DescriptorHeap *heap, MTLD3D12SamplerDescriptorHeap *samplers,
+    const void *argument_template, std::shared_ptr<D3D12MinMaxDispatch> &dispatch);
 HRESULT MaterializeD3D12MinMaxDispatch(MTLD3D12Device *device, const D3D12MinMaxDispatch &dispatch,
     std::shared_ptr<D3D12MinMaxSubmissionBinding> &binding);
 

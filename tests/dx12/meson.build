@@ -69,6 +69,8 @@ executable('dx12_minmax_prepare', 'dx12_minmax_prepare.cpp',
 executable('dx12_minmax_fragment', 'dx12_minmax_fragment.cpp',
   '../../src/d3d12/d3d12_typed_origin.cpp', '../../src/d3d12/d3d12_typed_origin_root.cpp',
   '../../src/d3d12/d3d12_shader_converter.cpp',
+  '../../src/d3d12/d3d12_minmax_dispatch.cpp', '../../src/d3d12/d3d12_minmax_binding.cpp',
+  '../../src/d3d12/d3d12_sampler.cpp',
   build_by_default: false, link_args: ['-municode'],
   dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
 )

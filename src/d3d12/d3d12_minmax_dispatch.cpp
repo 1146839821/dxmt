@@ -38,20 +38,31 @@ static HRESULT ValidateApplicationResource(const ShaderVisibleDescriptorSnapshot
   return S_OK;
 }
 
-HRESULT RecordD3D12MinMaxDispatch(MTLD3D12ComputePipelineState *pso, const D3D12MinMaxComputeVariant *variant,
+HRESULT RecordD3D12MinMaxBinding(MTLD3D12PipelineState *pso, const D3D12MinMaxBindingVariant *variant,
     MTLD3D12RootSignature *root, const uint64_t *staging, MTLD3D12DescriptorHeap *heap,
     MTLD3D12SamplerDescriptorHeap *samplers, const void *argument_template,
     std::shared_ptr<D3D12MinMaxDispatch> &dispatch) {
   try {
     if (!pso || !variant || !root || !staging || !heap || !argument_template || variant->bindings.empty() ||
         variant->bindings.size() != variant->locations.size()) return E_INVALIDARG;
+    if (variant->stage != D3D12MinMaxShaderStage::Compute && variant->stage != D3D12MinMaxShaderStage::Pixel)
+      return E_INVALIDARG;
+    if (!!pso->IsComputePipelineState != (variant->stage == D3D12MinMaxShaderStage::Compute)) return E_INVALIDARG;
+    if (pso->shader_backend != D3D12ShaderBackend::MetalShaderConverter) return E_NOTIMPL;
+    const bool uses_texture_load = pso->msc_uses_texture_load;
+    if (variant->stage == D3D12MinMaxShaderStage::Pixel) {
+      const auto *graphics = static_cast<MTLD3D12GraphicsPipelineState *>(pso);
+      if (graphics->msc_mesh || graphics->msc_geometry || graphics->msc_tessellation || graphics->stream_output)
+        return E_NOTIMPL;
+    }
     const D3D12MinMaxRoot *bound = nullptr;
     HRESULT hr = root->GetMinMaxCompilerRoot(variant->bindings.size(), &bound);
     if (FAILED(hr)) return hr;
     if (bound->layout.bytecode != variant->root.layout.bytecode) return E_INVALIDARG;
     auto candidate = std::make_shared<D3D12MinMaxDispatch>();
     candidate->application_pso = pso; candidate->application_root = root;
-    candidate->heap = heap; candidate->sampler_heap = samplers; candidate->variant = variant;
+    candidate->heap = heap; candidate->sampler_heap = samplers; candidate->binding_variant = variant;
+    candidate->uses_texture_load = uses_texture_load;
     const auto &layout = variant->root.layout;
     const auto *bytes = static_cast<const uint8_t *>(argument_template);
     candidate->argument_template.assign(bytes, bytes + layout.argument_buffer_size);
@@ -59,14 +70,20 @@ HRESULT RecordD3D12MinMaxDispatch(MTLD3D12ComputePipelineState *pso, const D3D12
     hr = D3D12CreateVersionedRootSignatureDeserializer(layout.bytecode.data(), layout.bytecode.size(), IID_PPV_ARGS(&decoded));
     if (FAILED(hr)) return hr;
     const auto &desc = decoded->GetUnconvertedRootSignatureDesc()->Desc_1_1;
+    if (variant->stage == D3D12MinMaxShaderStage::Pixel &&
+        (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS)) return E_NOTIMPL;
     if (desc.Flags & (D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
         D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED)) return E_NOTIMPL;
     std::vector<UINT> resource_indices, sampler_indices;
     std::vector<std::pair<size_t, size_t>> resource_destinations, sampler_destinations;
     for (uint32_t p = 0; p < layout.application_parameter_count; ++p) {
       const auto &parameter = desc.pParameters[p];
+      const bool visible = parameter.ShaderVisibility == D3D12_SHADER_VISIBILITY_ALL ||
+          (variant->stage == D3D12MinMaxShaderStage::Pixel &&
+           (parameter.ShaderVisibility == D3D12_SHADER_VISIBILITY_PIXEL ||
+            parameter.ShaderVisibility == D3D12_SHADER_VISIBILITY_VERTEX));
       if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE ||
-          parameter.ShaderVisibility != D3D12_SHADER_VISIBILITY_ALL) continue;
+          !visible) continue;
       const auto &ranges = parameter.DescriptorTable;
       if (!ranges.NumDescriptorRanges) continue;
       const bool sampler = ranges.pDescriptorRanges[0].RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
@@ -116,7 +133,7 @@ HRESULT RecordD3D12MinMaxDispatch(MTLD3D12ComputePipelineState *pso, const D3D12
     for (const auto &table : candidate->tables)
       if (!table.sampler)
         for (const auto &slot : table.slots)
-          if (slot.populated && !slot.live && FAILED(ValidateApplicationResource(slot.resource, pso->msc_uses_texture_load)))
+          if (slot.populated && !slot.live && FAILED(ValidateApplicationResource(slot.resource, uses_texture_load)))
             return E_NOTIMPL;
     for (uint32_t i = 0; i < desc.NumStaticSamplers; ++i) {
       candidate->static_samplers.push_back(DynamicDescription(desc.pStaticSamplers[i]));
@@ -136,11 +153,28 @@ HRESULT RecordD3D12MinMaxDispatch(MTLD3D12ComputePipelineState *pso, const D3D12
   } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
 }
 
+HRESULT RecordD3D12MinMaxDispatch(MTLD3D12ComputePipelineState *pso, const D3D12MinMaxComputeVariant *variant,
+    MTLD3D12RootSignature *root, const uint64_t *staging, MTLD3D12DescriptorHeap *heap,
+    MTLD3D12SamplerDescriptorHeap *samplers, const void *argument_template,
+    std::shared_ptr<D3D12MinMaxDispatch> &dispatch) {
+  if (!pso || !variant || variant->stage != D3D12MinMaxShaderStage::Compute) return E_INVALIDARG;
+  std::shared_ptr<D3D12MinMaxDispatch> candidate;
+  const auto hr = RecordD3D12MinMaxBinding(pso, variant, root, staging,
+      heap, samplers, argument_template, candidate);
+  if (FAILED(hr)) return hr;
+  candidate->variant = variant;
+  dispatch = std::move(candidate);
+  return S_OK;
+}
+
 HRESULT MaterializeD3D12MinMaxDispatch(MTLD3D12Device *device, const D3D12MinMaxDispatch &dispatch,
     std::shared_ptr<D3D12MinMaxSubmissionBinding> &binding) {
   try {
-    if (!device || !dispatch.variant || !dispatch.heap) return E_INVALIDARG;
-    const auto &variant = *dispatch.variant; const auto &root = variant.root.layout;
+    if (!device || !dispatch.binding_variant || !dispatch.heap || !dispatch.application_pso) return E_INVALIDARG;
+    const auto &variant = *dispatch.binding_variant; const auto &root = variant.root.layout;
+    if (variant.stage != D3D12MinMaxShaderStage::Compute && variant.stage != D3D12MinMaxShaderStage::Pixel)
+      return E_INVALIDARG;
+    if (dispatch.indirect_data && variant.stage != D3D12MinMaxShaderStage::Compute) return E_NOTIMPL;
     if (dispatch.argument_template.size() != root.argument_buffer_size || variant.locations.size() != variant.bindings.size())
       return E_INVALIDARG;
     std::vector<UINT> resource_indices, sampler_indices;
@@ -261,7 +295,7 @@ HRESULT MaterializeD3D12MinMaxDispatch(MTLD3D12Device *device, const D3D12MinMax
           continue;
         }
         const auto &snapshot = resource(slot);
-        if (FAILED(ValidateApplicationResource(snapshot, dispatch.application_pso->msc_uses_texture_load))) return E_NOTIMPL;
+        if (FAILED(ValidateApplicationResource(snapshot, dispatch.uses_texture_load))) return E_NOTIMPL;
         entries[s] = snapshot.msc_descriptor;
         const auto usage = slot.type == D3D12_DESCRIPTOR_RANGE_TYPE_UAV ?
             static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite) :

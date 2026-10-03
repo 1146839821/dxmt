@@ -412,3 +412,10 @@ existing compute GPU readbacks. This does not execute a graphics draw: productio
 graphics PSO/private binding/recording/submission and pixel reduction readback
 remain open. Feature declarations and FL12_0 acceptance are unchanged; compiler
 success must not be counted as completion of the mandatory graphics matrix.
+
+The runtime follow-up shares stage-aware MinMax descriptor capture/materialization
+between compute and standard vertex/pixel graphics. Both builds verify static
+vs volatile replacement and vertex-only table retention, with compute GPU
+regressions intact (`D3D12_MINMAX_GRAPHICS.md`). Production graphics variant
+selection/render replay and real pixel readback still remain open; no FL gate or
+capability promotion follows from these binding tests.

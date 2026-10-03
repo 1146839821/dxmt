@@ -7,12 +7,16 @@ namespace dxmt {
 
 // Immutable PSO-owned artifact. Retain the application PSO while borrowing it.
 // Command-list selection additionally requires coherent private descriptors/state.
-struct D3D12MinMaxComputeVariant {
-  WMT::Reference<WMT::ComputePipelineState> pso;
-  WMTSize threadgroup_size = {};
+struct D3D12MinMaxBindingVariant {
+  D3D12MinMaxShaderStage stage = D3D12MinMaxShaderStage::Compute;
   D3D12MinMaxRoot root;
   std::vector<dxmt_msc_minmax_binding> bindings;
   std::vector<D3D12MinMaxPairLocation> locations;
+};
+
+struct D3D12MinMaxComputeVariant : D3D12MinMaxBindingVariant {
+  WMT::Reference<WMT::ComputePipelineState> pso;
+  WMTSize threadgroup_size = {};
 };
 
 } // namespace dxmt
