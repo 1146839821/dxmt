@@ -5987,6 +5987,12 @@ public:
     if (status != DrawCallStatus::Ordinary)
       return;
 
+    for (const auto &update : sig->StateUpdates)
+      if (update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW ||
+          update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW ||
+          update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW)
+        allocator_->encoder_current->indirect_root_va = true;
+
     if (indirect_residency_) {
       EncodeRenderResourceUse(arg_buffer->buffer->current()->buffer().handle, WMTResourceUsageRead,
                               WMTRenderStageVertex);

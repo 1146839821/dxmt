@@ -304,6 +304,7 @@ struct TestCase {
   unsigned sampling = 0; // 1/2 min/max; 3 mip; 4/5 bias; 6 ordinary; 7..10 instruction clamps.
   bool sampling_dynamic = false;
   float sampling_resource_clamp = 0;
+  bool indirect_root_cbv = false;
 
   unsigned SampleMipCount() const {
     return (sampling >= 3 && sampling <= 5) || sampling >= 7 ? 4 : 1;
@@ -366,6 +367,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   ID3D12CommandSignature *command_signature = nullptr;
   ID3D12Resource *readback = nullptr;
   ID3D12Fence *fence = nullptr;
+  ID3D12Fence *gate = nullptr;
   HANDLE event = nullptr;
   void *mapped_vertex = nullptr;
   void *mapped_index = nullptr;
@@ -376,6 +378,9 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   void *mapped_uav_readback = nullptr;
 
   auto cleanup = [&] {
+    // Unblock a submitted wait even if a later setup step fails.
+    if (gate)
+      gate->Signal(1);
     if (mapped_readback)
       readback->Unmap(0, nullptr);
     if (mapped_indirect)
@@ -391,6 +396,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     if (event)
       CloseHandle(event);
     Release(fence);
+    Release(gate);
     Release(readback);
     Release(command_signature);
     Release(indirect_args);
@@ -514,7 +520,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc = {};
   pso_desc.pRootSignature = root_signature;
   pso_desc.VS = {vertex_shader.data(), vertex_shader.size()};
-  pso_desc.GS = test.null_texture_query || test.sampling ? D3D12_SHADER_BYTECODE{}
+  pso_desc.GS = test.null_texture_query || test.sampling || test.indirect_root_cbv ? D3D12_SHADER_BYTECODE{}
                                          : D3D12_SHADER_BYTECODE{geometry_shader.data(), geometry_shader.size()};
   const auto &pixel_shader = test.sampling == 7 ? shaders.pixel_sample_clamp :
       test.sampling == 8 ? shaders.pixel_bias_clamp : test.sampling == 9 ? shaders.pixel_sample_empty :
@@ -647,7 +653,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     index_view.Format = test.index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
   }
 
-  if (test.root_cbv || test.geometry_root_cbv || test.geometry_root_srv_uav) {
+  if ((test.root_cbv && !test.indirect_root_cbv) || test.geometry_root_cbv || test.geometry_root_srv_uav) {
     auto root_desc_buffer = BufferDescription(256);
     if (!CheckHR("CreateRootData",
                  device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &root_desc_buffer,
@@ -672,7 +678,9 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   }
 
   if (test.indirect) {
-    const UINT64 argument_size = test.indexed ? sizeof(D3D12_DRAW_INDEXED_ARGUMENTS) : sizeof(D3D12_DRAW_ARGUMENTS);
+    const UINT root_bytes = test.indirect_root_cbv ? sizeof(UINT64) : 0;
+    const UINT64 argument_size = root_bytes +
+        (test.indexed ? sizeof(D3D12_DRAW_INDEXED_ARGUMENTS) : sizeof(D3D12_DRAW_ARGUMENTS));
     auto indirect_desc = BufferDescription(argument_size);
     if (!CheckHR("CreateIndirectArgs",
                  device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &indirect_desc,
@@ -681,14 +689,16 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
         !CheckHR("MapIndirectArgs", indirect_args->Map(0, nullptr, &mapped_indirect)))
       return fail("indirect argument setup failed");
     if (test.indexed) {
-      auto *arguments = static_cast<D3D12_DRAW_INDEXED_ARGUMENTS *>(mapped_indirect);
+      auto *arguments = reinterpret_cast<D3D12_DRAW_INDEXED_ARGUMENTS *>(
+          static_cast<BYTE *>(mapped_indirect) + root_bytes);
       arguments->IndexCountPerInstance = index_count;
       arguments->InstanceCount = 1;
       arguments->StartIndexLocation = 1;
       arguments->BaseVertexLocation = 1;
       arguments->StartInstanceLocation = 0;
     } else {
-      auto *arguments = static_cast<D3D12_DRAW_ARGUMENTS *>(mapped_indirect);
+      auto *arguments = reinterpret_cast<D3D12_DRAW_ARGUMENTS *>(
+          static_cast<BYTE *>(mapped_indirect) + root_bytes);
       arguments->VertexCountPerInstance = vertex_count;
       arguments->InstanceCount = 1;
       arguments->StartVertexLocation = 0;
@@ -697,15 +707,18 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     indirect_args->Unmap(0, nullptr);
     mapped_indirect = nullptr;
 
-    D3D12_INDIRECT_ARGUMENT_DESC argument_desc = {};
-    argument_desc.Type = test.indexed ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED
+    D3D12_INDIRECT_ARGUMENT_DESC argument_desc[2] = {};
+    argument_desc[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW;
+    argument_desc[0].ConstantBufferView.RootParameterIndex = 0;
+    argument_desc[test.indirect_root_cbv ? 1 : 0].Type = test.indexed ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED
                                       : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
     D3D12_COMMAND_SIGNATURE_DESC signature_desc = {};
     signature_desc.ByteStride = static_cast<UINT>(argument_size);
-    signature_desc.NumArgumentDescs = 1;
-    signature_desc.pArgumentDescs = &argument_desc;
+    signature_desc.NumArgumentDescs = test.indirect_root_cbv ? 2 : 1;
+    signature_desc.pArgumentDescs = argument_desc;
     if (!CheckHR("CreateCommandSignature",
-                 device->CreateCommandSignature(&signature_desc, nullptr, IID_PPV_ARGS(&command_signature))))
+                 device->CreateCommandSignature(&signature_desc, test.indirect_root_cbv ? root_signature : nullptr,
+                                                IID_PPV_ARGS(&command_signature))))
       return fail("command signature creation failed");
   }
 
@@ -742,7 +755,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
       list->SetGraphicsRootShaderResourceView(0, root_data->GetGPUVirtualAddress());
       list->SetGraphicsRootUnorderedAccessView(1, root_uav_data->GetGPUVirtualAddress());
     } else if (test.root_cbv || test.geometry_root_cbv) {
-      list->SetGraphicsRootConstantBufferView(0, root_data->GetGPUVirtualAddress());
+      list->SetGraphicsRootConstantBufferView(0, test.indirect_root_cbv ? 0 : root_data->GetGPUVirtualAddress());
     }
   }
   list->IASetPrimitiveTopology(test.topology);
@@ -811,6 +824,30 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   if (!CheckHR("Close", list->Close()))
     return fail("command list close failed");
 
+  if (test.indirect_root_cbv) {
+    // Register the GPU-selected allocation after recording, then keep execution
+    // gated until translation has acquired its completion-owned allocation refs.
+    auto root_desc_buffer = BufferDescription(256);
+    if (!CheckHR("CreateLateRootData", device->CreateCommittedResource(
+            &upload_heap, D3D12_HEAP_FLAG_NONE, &root_desc_buffer,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&root_data))) ||
+        !CheckHR("MapLateRootData", root_data->Map(0, nullptr, &mapped_root)))
+      return fail("late root allocation failed");
+    static constexpr float color[] = {0, 1, 0, 1};
+    std::memcpy(mapped_root, color, sizeof(color));
+    root_data->Unmap(0, nullptr);
+    mapped_root = nullptr;
+    if (!CheckHR("MapLateArguments", indirect_args->Map(0, nullptr, &mapped_indirect)))
+      return fail("late argument map failed");
+    const UINT64 address = root_data->GetGPUVirtualAddress();
+    std::memcpy(mapped_indirect, &address, sizeof(address));
+    indirect_args->Unmap(0, nullptr);
+    mapped_indirect = nullptr;
+    if (!CheckHR("CreateGate", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))) ||
+        !CheckHR("QueueWaitGate", queue->Wait(gate, 1)))
+      return fail("gate setup failed");
+  }
+
   if (test.release_resources_before_execute) {
     // D3D12 command recording must retain resources referenced by root
     // descriptors until the queue has finished translating and executing the
@@ -827,6 +864,11 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   if (!CheckHR("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))) ||
       !CheckHR("Signal", queue->Signal(fence, 1)))
     return fail("queue submission failed");
+  if (test.indirect_root_cbv) {
+    Release(root_data);
+    if (!CheckHR("ReleaseGate", gate->Signal(1)))
+      return fail("gate release failed");
+  }
   event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
   if (!event || !CheckHR("SetEventOnCompletion", fence->SetEventOnCompletion(1, event)))
     return fail("fence setup failed");
@@ -867,6 +909,11 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
 int main(int argc, char **argv) {
   static constexpr TestCase all_cases[] = {
+      {.name = "indirect-root-cbv", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .root_cbv = true, .indirect = true, .expected_rgb = 0x0000ff00u, .indirect_root_cbv = true},
+      {.name = "indirect-root-cbv-indexed32", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .indexed = true, .index32 = true, .root_cbv = true, .indirect = true,
+       .expected_rgb = 0x0000ff00u, .indirect_root_cbv = true},
       {.name = "instruction-sample-static", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
        .expected_rgb = 96, .no_input = true, .sampling = 7},
       {.name = "instruction-sample-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,

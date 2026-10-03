@@ -368,6 +368,14 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
     cmd_draw_res.base_instance = 0;
     cmd_draw_res.instance_count = 1;
 
+    // The resolver writes per-command root/VB tables before the ICB consumes
+    // them in vertex and fragment shaders in the same render pass.
+    auto &barrier = EncodeRenderCommand<wmtcmd_render_memory_barrier>();
+    barrier.type = WMTRenderCommandMemoryBarrier;
+    barrier.scope = WMTBarrierScopeBuffers;
+    barrier.stages_after = WMTRenderStageVertex;
+    barrier.stages_before = WMTRenderStageVertex | WMTRenderStageFragment;
+
     auto &cmd_setpso = EncodeRenderCommand<wmtcmd_render_setpso>();
     cmd_setpso.type = WMTRenderCommandSetPSO;
     cmd_setpso.pso = pPSO->pso;

@@ -164,6 +164,22 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     HANDLE latency_waitable = nullptr;
   };
 
+  template <typename UseResource>
+  bool RetainIndirectRootBuffers(EncoderData *data, Submission &submission, UseResource use_resource) {
+    if (!data->indirect_root_va)
+      return true;
+    std::vector<Rc<BufferAllocation>> snapshot;
+    if (FAILED(device_->SnapshotRegisteredBuffers(snapshot)))
+      return false;
+    // GPU commands may select any currently registered buffer. Strong references
+    // are acquired under the registry lock; native fan-out is outside it.
+    try { submission.indirect_root_buffers.push_back(std::move(snapshot)); }
+    catch (const std::bad_alloc &) { return false; }
+    for (const auto &allocation : submission.indirect_root_buffers.back())
+      use_resource(allocation->buffer());
+    return true;
+  }
+
   dxmt::mutex commit_mutex_;
   dxmt::mutex submission_mutex_;
   dxmt::condition_variable submission_condition_;
@@ -1155,6 +1171,15 @@ public:
            auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
            LabelEncoder(encoder, recording_id, data->id, "Render");
            encoder.waitForFence(fence_, data->use_geometry ? WMTRenderStagePreRaster : WMTRenderStageVertex);
+           if (!RetainIndirectRootBuffers(data, submission, [&](WMT::Buffer buffer) {
+                 encoder.useResource(buffer,
+                     static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite),
+                     WMTRenderStageVertex | WMTRenderStageFragment);
+               })) {
+             translation_failed = true;
+             encoder.endEncoding();
+             break;
+           }
            bool sampler_reduction = false;
            if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs, &sampler_reduction) ||
                !pCommandList->ResolvePendingDescriptorUses(
@@ -1189,24 +1214,13 @@ public:
           auto encoder = cmdbuf.computeCommandEncoder(false);
            LabelEncoder(encoder, recording_id, data->id, "Compute");
            encoder.waitForFence(fence_);
-          if (data->indirect_root_va) {
-            std::vector<Rc<BufferAllocation>> snapshot;
-            if (FAILED(device_->SnapshotRegisteredBuffers(snapshot))) {
-              translation_failed = true;
-              encoder.endEncoding();
-              break;
-            }
-            // GPU commands may select any currently registered buffer. Resolve
-            // and retain under the registry lock; native fan-out is outside it.
-            try { submission.indirect_root_buffers.push_back(std::move(snapshot)); }
-            catch (const std::bad_alloc &) {
-              translation_failed = true;
-              encoder.endEncoding();
-              break;
-            }
-            for (const auto &allocation : submission.indirect_root_buffers.back())
-              encoder.useResource(allocation->buffer(),
-                  static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite));
+          if (!RetainIndirectRootBuffers(data, submission, [&](WMT::Buffer buffer) {
+                encoder.useResource(buffer,
+                    static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite));
+              })) {
+            translation_failed = true;
+            encoder.endEncoding();
+            break;
           }
           bool sampler_reduction = false;
           if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs, &sampler_reduction) ||

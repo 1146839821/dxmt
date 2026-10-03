@@ -2,6 +2,14 @@
 
 ## Current snapshot (2026-10-03, static DXIL MinMax dispatch checkpoint)
 
+Graphics indirect residency follow-up: ordinary AIR root-updating draws now share
+compute's submission-owned allocation snapshots and have explicit resolver-write
+visibility (`D3D12_GRAPHICS_INDIRECT_RESIDENCY.md`). Both builds pass focused DRAW
+and DRAW_INDEXED late-CBV/gated-lifetime readbacks plus graphics/compute regressions.
+MSC graphics TLAB integration remains open. This does not reduce the four production
+workstreams, 1,584 typed matrix executions or seven missing complete GPU categories;
+no full capability, game, performance or tessellation acceptance is claimed.
+
 Embedded compute root follow-up: Typed origin now retains implicit shader roots
 and preserves explicit-root override precedence
 (`D3D12_TYPED_ORIGIN_EMBEDDED_ROOT.md`). Both builds pass focused embedded,
