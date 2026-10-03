@@ -23,7 +23,7 @@ static bool Load(const wchar_t *path, std::vector<uint8_t> &bytes) {
 
 static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12RootSignature *root,
     ID3D12DescriptorHeap *heap, ID3D12DescriptorHeap *samplers, ID3D12Resource *texture,
-    ID3D12Resource *replacement, bool static_sampler, bool live) {
+    ID3D12Resource *replacement, bool static_sampler, bool live, unsigned indirect_kind) {
   const auto check = [](HRESULT hr, const char *what) {
     if (FAILED(hr)) std::printf("MinMax draw %s failed %08lx\n", what, (unsigned long)hr);
     return SUCCEEDED(hr);
@@ -67,7 +67,8 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
   for (unsigned i = 0; i < 2; ++i) {
     auto *input = i ? replacement : texture;
     D3D12_RESOURCE_BARRIER barrier = {}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition = {input, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+    barrier.Transition = {input, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+        static_cast<D3D12_RESOURCE_STATES>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
         D3D12_RESOURCE_STATE_COPY_DEST};
     upload_list->ResourceBarrier(1, &barrier);
     D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
@@ -80,6 +81,22 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     upload_list->ResourceBarrier(1, &barrier);
   }
   if (!check(upload_list->Close(), "upload close") || !execute(upload_list.get(), 1)) return false;
+  OwnedCOM<ID3D12CommandSignature> signature;
+  if (indirect_kind) {
+    D3D12_INDIRECT_ARGUMENT_DESC argument = {};
+    argument.Type = indirect_kind == 2 ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+    D3D12_COMMAND_SIGNATURE_DESC desc = {indirect_kind == 2 ? 20u : 16u, 1, &argument, 0};
+    ID3D12CommandSignature *raw = nullptr;
+    if (!check(device->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(&raw)), "indirect signature") ||
+        !check(upload->Map(0, nullptr, &mapped), "argument map")) return false;
+    signature.reset(raw);
+    const UINT draw[] = {3, 1, 0, 0, 0};
+    for (unsigned i = 0; i < 2; ++i)
+      std::memcpy(static_cast<uint8_t *>(mapped) + 16 + i * desc.ByteStride, draw, desc.ByteStride);
+    const UINT indices[] = {0, 1, 2};
+    std::memcpy(static_cast<uint8_t *>(mapped) + 128, indices, sizeof(indices));
+    upload->Unmap(0, nullptr);
+  }
   auto rt_desc = texture->GetDesc(); rt_desc.Width = rt_desc.Height = 4; rt_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
   props.Type = D3D12_HEAP_TYPE_DEFAULT;
   ID3D12Resource *raw_rt = nullptr;
@@ -147,7 +164,16 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
   list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
   list->OMSetRenderTargets(1, &target, FALSE, nullptr);
   const float clear[] = {0.25f, 0.25f, 0.25f, 0.25f}; list->ClearRenderTargetView(target, clear, 0, nullptr);
-  list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); list->DrawInstanced(3, 1, 0, 0);
+  list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  if (indirect_kind) {
+    if (indirect_kind == 2) {
+      const D3D12_INDEX_BUFFER_VIEW indices = {upload->GetGPUVirtualAddress() + 128, 12, DXGI_FORMAT_R32_UINT};
+      list->IASetIndexBuffer(&indices);
+    }
+    list->ExecuteIndirect(signature.get(), 2, upload.get(), 16, upload.get(), 112);
+  } else {
+    list->DrawInstanced(3, 1, 0, 0);
+  }
   if (!static_sampler) {
     wchar_t selected[32768];
     const auto length = GetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", selected, 32768);
@@ -184,8 +210,15 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
   }
   if (!private_draw || !private_draw->graphics_variant || !private_draw->render_marker) return false;
   const auto immutable_template = private_draw->argument_template;
-  for (unsigned submission = 0; submission < 2; ++submission) {
+  for (unsigned submission = 0; submission < (indirect_kind ? 3u : 2u); ++submission) {
     if (submission) write(true);
+    const bool empty = indirect_kind && !submission;
+    if (indirect_kind) {
+      if (!check(upload->Map(0, nullptr, &mapped), "count map")) return false;
+      const UINT count = submission == 0 ? 0 : submission == 1 ? 1 : 7;
+      std::memcpy(static_cast<uint8_t *>(mapped) + 112, &count, sizeof(count));
+      upload->Unmap(0, nullptr);
+    }
     if (!execute(list.get(), 2 + submission) || !check(readback->Map(0, nullptr, &mapped), "readback map")) return false;
     const bool changed = submission && live;
     const unsigned r = static_sampler ? (changed ? 32 : 16) : changed ? 224 : 16;
@@ -195,9 +228,11 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
       const auto *pixel = static_cast<const uint8_t *>(mapped) + y * 256 + x * 4;
       const auto expected_r = !static_sampler && x >= 2 ? 128u : r;
       const auto expected_g = !static_sampler && x >= 2 ? 128u : g;
-      if (pixel[0] != expected_r || pixel[1] != expected_g || pixel[2] || pixel[3] != 255) {
-        std::printf("pixel mismatch static=%u live=%u submit=%u at %u,%u got %u/%u/%u/%u expected %u/%u/0/255\n",
-            static_sampler, live, submission, x, y, pixel[0], pixel[1], pixel[2], pixel[3], expected_r, expected_g); ok = false;
+      const bool untouched = empty && (static_sampler || x < 2);
+      if (pixel[0] != (untouched ? 64u : expected_r) || pixel[1] != (untouched ? 64u : expected_g) ||
+          pixel[2] != (untouched ? 64u : 0u) || pixel[3] != (untouched ? 64u : 255u)) {
+        std::printf("pixel mismatch kind=%u static=%u live=%u submit=%u at %u,%u got %u/%u/%u/%u\n",
+            indirect_kind, static_sampler, live, submission, x, y, pixel[0], pixel[1], pixel[2], pixel[3]); ok = false;
       }
     }
     readback->Unmap(0, nullptr); if (!ok) return false;
@@ -208,11 +243,14 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
   const dxmt::D3D12MinMaxGraphicsVariant *mismatched = private_draw->graphics_variant;
   if (static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(pso)->GetMinMaxVariant(L"Z:\\mismatched-dxc", &mismatched) != E_INVALIDARG || mismatched)
     return false;
-  D3D12_INDIRECT_ARGUMENT_DESC argument = {}; argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
-  D3D12_COMMAND_SIGNATURE_DESC signature_desc = {16, 1, &argument, 0};
+  // Updating signatures cannot inherit the submission-private TLAB.
+  D3D12_INDIRECT_ARGUMENT_DESC arguments[2] = {};
+  arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW;
+  arguments[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+  D3D12_COMMAND_SIGNATURE_DESC signature_desc = {32, 2, arguments, 0};
   ID3D12CommandSignature *raw_signature = nullptr;
   if (!check(device->CreateCommandSignature(&signature_desc, nullptr, IID_PPV_ARGS(&raw_signature)), "indirect signature")) return false;
-  OwnedCOM<ID3D12CommandSignature> signature(raw_signature);
+  OwnedCOM<ID3D12CommandSignature> updating_signature(raw_signature);
   if (!check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&raw_allocator)), "negative allocator")) return false;
   OwnedCOM<ID3D12CommandAllocator> negative_allocator(raw_allocator);
   if (!check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, negative_allocator.get(), pso,
@@ -220,9 +258,21 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
   OwnedCOM<ID3D12GraphicsCommandList> negative(raw_list);
   negative->SetGraphicsRootSignature(root); negative->SetDescriptorHeaps(static_sampler ? 1 : 2, heaps);
   negative->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-  negative->ExecuteIndirect(signature.get(), 1, upload.get(), 0, nullptr, 0);
+  negative->ExecuteIndirect(updating_signature.get(), 1, upload.get(), 0, nullptr, 0);
   if (negative->Close() != E_FAIL) return false;
-  std::puts("MINMAX_FRAGMENT real D3D12 pixel readback PASS (two closed-list submissions)");
+  arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+  arguments[0].Constant = {static_sampler ? 3u : 4u, 0, 1};
+  signature_desc.ByteStride = 20;
+  if (!check(device->CreateCommandSignature(&signature_desc, root, IID_PPV_ARGS(&raw_signature)), "root-update signature")) return false;
+  OwnedCOM<ID3D12CommandSignature> root_signature(raw_signature);
+  if (!check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, negative_allocator.get(), pso,
+      IID_PPV_ARGS(&raw_list)), "root-update negative list")) return false;
+  OwnedCOM<ID3D12GraphicsCommandList> root_negative(raw_list);
+  root_negative->SetGraphicsRootSignature(root); root_negative->SetDescriptorHeaps(static_sampler ? 1 : 2, heaps);
+  root_negative->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  root_negative->ExecuteIndirect(root_signature.get(), 1, upload.get(), 0, nullptr, 0);
+  if (root_negative->Close() != E_FAIL) return false;
+  std::printf("MINMAX_FRAGMENT real D3D12 pixel readback PASS kind=%u (direct=2 submits, indirect=counts 0/1/7)\n", indirect_kind);
   return true;
 }
 
@@ -276,7 +326,8 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
   texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   ID3D12Resource *raw_texture = nullptr;
   if (FAILED(device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &texture_desc,
-      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&raw_texture)))) return false;
+      static_cast<D3D12_RESOURCE_STATES>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+      nullptr, IID_PPV_ARGS(&raw_texture)))) return false;
   OwnedCOM<ID3D12Resource> texture(raw_texture);
   D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 3, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
   ID3D12DescriptorHeap *raw_heap = nullptr, *raw_samplers = nullptr;
@@ -326,7 +377,8 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
   set_samplers(D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR);
   ID3D12Resource *raw_replacement = nullptr;
   if (FAILED(device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &texture_desc,
-      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&raw_replacement)))) return false;
+      static_cast<D3D12_RESOURCE_STATES>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+      nullptr, IID_PPV_ARGS(&raw_replacement)))) return false;
   OwnedCOM<ID3D12Resource> replacement(raw_replacement);
   device->CreateShaderResourceView(replacement.get(), &srv, cpu);
   if (FAILED(dxmt::MaterializeD3D12MinMaxDispatch(device, *recorded, second)) || first->pairs.size() != 2 || second->pairs.size() != 2 ||
@@ -341,7 +393,10 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
       first->snapshots.back().msc_descriptor.texture_view_id != second->snapshots.back().msc_descriptor.texture_view_id)
     return false;
   std::puts("MINMAX_FRAGMENT binding capture/materialization PASS (no draw)");
-  return CheckDraw(device, pso.get(), root.get(), heap.get(), samplers.get(), texture.get(), replacement.get(), static_sampler, live);
+  for (unsigned kind = 0; kind < 3; ++kind)
+    if (!CheckDraw(device, pso.get(), root.get(), heap.get(), samplers.get(), texture.get(), replacement.get(), static_sampler, live, kind))
+      return false;
+  return true;
 }
 
 int wmain(int argc, wchar_t **argv) {
@@ -384,7 +439,7 @@ int wmain(int argc, wchar_t **argv) {
         {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 2, 0, 0, flags, 1},
         {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 6, D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 0},
         {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 7, D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 0}};
-    D3D12_ROOT_PARAMETER1 parameters[4] = {};
+    D3D12_ROOT_PARAMETER1 parameters[5] = {};
     for (unsigned i = 0; i < 2; ++i) {
       parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
       parameters[i].DescriptorTable = {1, ranges + i}; parameters[i].ShaderVisibility = visibility;
@@ -395,13 +450,16 @@ int wmain(int argc, wchar_t **argv) {
     parameters[vertex_index].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
     parameters[vertex_index + 1].DescriptorTable = {1, ranges + 3};
     parameters[vertex_index + 1].ShaderVisibility = D3D12_SHADER_VISIBILITY_HULL;
+    parameters[vertex_index + 2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[vertex_index + 2].Constants = {0, 8, 1};
+    parameters[vertex_index + 2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
     for (unsigned i = 0; i < 2; ++i) {
       samplers[i].Filter = i ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;
       samplers[i].AddressU = samplers[i].AddressV = samplers[i].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
       samplers[i].MaxLOD = D3D12_FLOAT32_MAX; samplers[i].ShaderRegister = i; samplers[i].ShaderVisibility = visibility;
     }
-    D3D12_ROOT_SIGNATURE_DESC1 application = {static_sampler ? 3u : 4u, parameters,
+    D3D12_ROOT_SIGNATURE_DESC1 application = {static_sampler ? 4u : 5u, parameters,
         static_sampler ? 2u : 0u, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE};
     dxmt::D3D12MinMaxRoot root;
     if (FAILED(dxmt::PrepareD3D12MinMaxRoot(application, 2, root, error))) return 1;
@@ -465,8 +523,8 @@ int wmain(int argc, wchar_t **argv) {
     if (FAILED(dxmt::PrepareD3D12MinMaxRoot(application, 2, wrong_visibility, error)) ||
         dxmt::ResolveD3D12MinMaxBindings(wrong_visibility, prepared.bindings, locations, error, Stage::Pixel) != E_NOTIMPL ||
         !unchanged_locations()) return 1;
-    std::printf("MINMAX_FRAGMENT mode=%u compiler/binding/direct GPU draw PASS\n", mode);
+    std::printf("MINMAX_FRAGMENT mode=%u compiler/binding/direct/indirect GPU draw PASS\n", mode);
   }
-  std::puts("MinMax pixel compiler/binding/direct draw integration PASS; full graphics qualification remains open");
+  std::puts("MinMax pixel compiler/binding/direct/indirect draw integration PASS; full graphics qualification remains open");
   return 0;
 }

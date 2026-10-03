@@ -302,3 +302,100 @@ Independent review agents are unavailable. `git diff --check` passed. Only task
 files committed locally, NOT PUSHED; no game/prefix DLL deployment or Steam kill.
 Next production gap: MinMax graphics indirect replay, beginning with inherited
 non-updating draw/indexed draw, then GPU-generated counts and root-update TLABs.
+
+## Inherited graphics indirect — Task Analysis
+
+Branch `feat/d3d12-1`, clean baseline `6409b9f`, remote baseline `e147c710`;
+114 local commits. Production gaps remain the priority; this step is not full
+MinMax or FL12_0 closure.
+
+Hypothesis: non-updating DRAW/DRAW_INDEXED can inherit the existing submission
+private vertex/fragment TLAB if the GPU resolver restores the selected private
+PSO. Evidence: allocator ICB construction inherits buffers only without root,
+vertex or index updates, inherits PSO, and currently restores the application
+PSO after a resolver draw using vertex slot 30. Private TLAB uses slot 2.
+Expected effect: connect bounded indirect graphics without duplicating descriptor
+reads, lowering, residency or render replay.
+
+Risk: updating signatures disable inheritance and use ordinary per-command root
+layouts. Keep all such MinMax signatures rejected. Retain PSO-owned artifacts
+through the existing recording snapshot; do not patch allocator nodes. DXBC
+AIRCONV and DXIL MSC routing, static/volatile flags and feature bits stay intact.
+
+Plan: return the selected graphics variant from PreDraw and pass it to allocator
+PSO restoration; enable only non-updating signatures. Validation: real pixel
+readback for DRAW and DRAW_INDEXED, count clipping/zero, repeated closed-list
+submissions, ordinary draw restoration and existing direct/compute regressions;
+normal/no-private reconfigure and full builds before task-local staging.
+Main-agent Standards/Spec self-review; no independent reviewer available.
+GPU-produced counts, root-update TLABs, full matrices, game/performance and
+tessellation acceptance remain subsequent work; no capability promotion.
+
+## Inherited graphics indirect — Task Result
+
+### Implementation / Backend and Runtime Impact
+
+PreDraw returns its selected graphics variant only after successful ordinary
+graphics preparation. ExecuteIndirect admits MinMax only without root/VB/IB
+updates and passes that variant to the allocator. The resolver uses vertex slot
+30, leaving submission-private vertex/fragment TLAB slot 2 inherited by the ICB;
+its restore command now selects the matching private native PSO. The allocator
+also rejects a private variant with an updating signature. Existing private
+draw snapshots retain PSO-owned variants and descriptor generations through
+submission completion; no additional descriptor reads or replay specialization,
+allocator mutation, native ABI change or duplicate lowering is introduced.
+DXBC remains AIRCONV, DXIL remains MSC; mixed-family/emulation restrictions and
+capability/feature-level declarations are unchanged. MSC integration guidance
+informed checking inherited binding slots and matching root/pipeline layout.
+
+### Tests Added / Tests Run / Runtime Results
+
+The existing fragment probe now runs direct, inherited DRAW and DRAW_INDEXED
+with 32-bit indices. SampleLevel/SampleGrad, ALL/PIXEL visibility, static/volatile
+descriptor ranges and static/dynamic reduction samplers run in both variants.
+Indirect arguments start at byte 16, count at byte 112 and indices at byte 128;
+MaxCommandCount is 2 with count values 0/1/7. Counts are CPU-written upload
+data, not GPU-produced evidence. Every target pixel is checked; zero count
+preserves clear pixels. Same closed lists are resubmitted with live descriptor
+replacement; ordinary linear control draws follow private indirect execution
+in the same pass. Original argument templates and render-node links must remain
+unchanged. Root-constant updates and VB-updating signatures are negative recording
+probes (`Close` returns E_FAIL), never submitted. Source fixture transitions were
+corrected to the combined pixel/non-pixel read state used across repeat probes.
+Static descriptor mutation remains defensive snapshot evidence, not legal D3D12
+application mutation semantics.
+
+Both configurations were reconfigured, optional targets and full default builds
+completed before final task-cache staging. All four HLSL fixtures were freshly
+compiled using repository DXC, and matching native runtime hashes verified.
+Evidence: `/Users/zhangbo/.cache/dxmt-minmax-render-indirect.J62a3J`, `final-*`
+and `dxc-*` logs; reconfigure logs under `/tmp/dxmt-minmax-render-indirect-*`.
+Four final fragment processes pass 32 indirect cases / 96 GPU submissions
+(32 zero-count submissions), plus 16 direct cases / 32 submissions. This count
+is not a count of distinct GPU semantics. Existing compute GPU-produced count
+0/1/7 and typed-origin multi-command readbacks pass in both configurations.
+Eight final runtime processes pass; five host suites pass per configuration.
+Reviewed optional builds have no compiler warnings; final fragment logs have
+no resource-state warnings. Expected negative recording failures remain logged.
+
+### Known Limitations / Capability Status / Feature Level Impact
+
+Bounded inherited DXIL/MSC pixel MinMax DRAW/DRAW_INDEXED: DXMT_LOCAL_PASS.
+Root-update graphics private TLABs remain unimplemented and rejected. GPU-produced
+graphics arguments/counts, in-flight overlap, pre-raster sampling, emulation,
+implicit operations and broader resource/view/filter matrices remain open.
+No Metal API/shader validation, native Windows oracle, game/performance or fresh
+tessellation acceptance was performed. Full MinMax remains PARTIAL; FL12_0 and
+FL12_1 promotion gates are not satisfied or changed.
+
+### Review / Git Status / Push Status / Next Recommended Task
+
+Main-agent Standards review against `6409b9f`: successful-only variant output,
+ICB inheritance/restore, artifact retention, independent static/live materialization,
+updating-signature rejection and immutable recording checked; no blocking finding.
+Main-agent Spec review: closes inherited indirect production wiring only, not
+the full capability or mandatory GPU matrices. Independent review unavailable.
+`git diff --check` passes. Only task files are committed locally, NOT PUSHED;
+no game/prefix DLL deployment or process manipulation. Next production gap:
+graphics indirect root-update private TLAB reflection/materialization; add focused
+GPU-generated argument/count evidence with that integration before broad matrices.

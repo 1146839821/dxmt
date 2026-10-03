@@ -28,6 +28,7 @@ namespace dxmt {
 
 struct D3D12TypedOriginComputeVariant;
 struct D3D12MinMaxComputeVariant;
+struct D3D12MinMaxGraphicsVariant;
 
 constexpr auto kCPUHeapSize = 0x400000u;
 constexpr auto kGPUHeapSize = 0x2000000u;
@@ -387,7 +388,8 @@ public:
       const wmtcmd_compute_setbuffer **resolver_binding = nullptr,
       const D3D12MinMaxComputeVariant *minmax_variant = nullptr);
 
-  IndirectRenderCommandData *EncodeIndirectRenderCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12GraphicsPipelineState *pPSO, size_t MaxCount);
+  IndirectRenderCommandData *EncodeIndirectRenderCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12GraphicsPipelineState *pPSO, size_t MaxCount,
+      const D3D12MinMaxGraphicsVariant *minmax_variant = nullptr);
 };
 
 } // namespace dxmt

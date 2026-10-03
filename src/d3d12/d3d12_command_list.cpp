@@ -2047,8 +2047,11 @@ public:
   PreDraw(
       bool SkipResourceBinding = false,
       SM50_INDEX_BUFFER_FORMAT airconv_index_format = SM50_INDEX_BUFFER_FORMAT_NONE,
-      bool AllowMinMax = true
+      bool AllowMinMax = true,
+      const D3D12MinMaxGraphicsVariant **selected_minmax = nullptr
   ) {
+    if (selected_minmax)
+      *selected_minmax = nullptr;
     if (!pso_graphics_)
       return DrawCallStatus::Invalid;
     if (recording_failed_)
@@ -2488,6 +2491,8 @@ public:
       return DrawCallStatus::MSCMesh;
     if (use_airconv_geometry)
       return DrawCallStatus::AirconvGeometry;
+    if (selected_minmax)
+      *selected_minmax = minmax_variant;
     return DrawCallStatus::Ordinary;
   }
 
@@ -6051,7 +6056,10 @@ public:
       FailRecording(__func__, "MSC indirect vertex input exceeds Metal buffer slots");
       return;
     }
-    DrawCallStatus status = PreDraw(encode_binding && !msc_updates, SM50_INDEX_BUFFER_FORMAT_NONE, false);
+    const D3D12MinMaxGraphicsVariant *minmax_variant = nullptr;
+    DrawCallStatus status = PreDraw(
+        encode_binding && !msc_updates, SM50_INDEX_BUFFER_FORMAT_NONE, !encode_binding, &minmax_variant
+    );
     if (status == DrawCallStatus::Invalid)
       return;
     if (status != DrawCallStatus::Ordinary)
@@ -6071,7 +6079,7 @@ public:
                                 WMTRenderStageVertex);
     }
 
-    auto cmd = allocator_->EncodeIndirectRenderCommand(sig, pso_graphics_.ptr(), MaxCommandCount);
+    auto cmd = allocator_->EncodeIndirectRenderCommand(sig, pso_graphics_.ptr(), MaxCommandCount, minmax_variant);
     if (!cmd) {
       FailRecording(__func__, "indirect render command allocation failed");
       return;

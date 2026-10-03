@@ -427,3 +427,12 @@ list submissions and ordinary linear draw restoration. This closes the direct
 runtime wiring gap, not full MinMax qualification: graphics indirect, pre-raster
 sampling, emulation, implicit operations and broader resource/matrix coverage
 remain open. Feature declarations and FL12_0 promotion remain unchanged.
+
+Inherited non-updating DXIL/MSC MinMax graphics ExecuteIndirect DRAW/DRAW_INDEXED
+is now connected: the GPU resolver restores the matching private PSO while the
+ICB inherits submission-private vertex/fragment TLAB bindings. Both variants pass
+focused pixel readbacks for CPU-provided counts 0/1/7, clipping to MaxCommandCount
+2, repeat closed-list submissions and ordinary draw restoration. Root/VB/IB
+updating signatures stay rejected. Graphics root-update private TLABs and
+GPU-produced arguments/counts remain open; this is not full MinMax or mandatory
+graphics matrix closure (`D3D12_MINMAX_GRAPHICS.md`). No capability promotion.
