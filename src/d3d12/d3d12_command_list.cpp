@@ -5634,6 +5634,74 @@ public:
     return true;
   }
 
+  bool
+  ValidateIndirectStateUpdates(MTLD3D12CommandSignature *signature, bool compute) {
+    auto root = compute ? rootsig_compute_.ptr() : rootsig_graphics_.ptr();
+    for (const auto &arg : signature->StateUpdates) {
+      UINT index = 0, offset = 0, count = 2;
+      switch (arg.Type) {
+      case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT:
+        index = arg.Constant.RootParameterIndex;
+        offset = arg.Constant.DestOffsetIn32BitValues;
+        count = arg.Constant.Num32BitValuesToSet;
+        break;
+      case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW:
+        index = arg.ConstantBufferView.RootParameterIndex;
+        break;
+      case D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW:
+        index = arg.ShaderResourceView.RootParameterIndex;
+        break;
+      case D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW:
+        index = arg.UnorderedAccessView.RootParameterIndex;
+        break;
+      default:
+        continue;
+      }
+      if (!ValidateRootArgumentRange(root, index, offset, count, "ExecuteIndirect")) {
+        FailRecording("ExecuteIndirect", "invalid updated root argument index=", index);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void
+  ResetIndirectState(MTLD3D12CommandSignature *signature, bool compute) {
+    // Call only after immutable indirect argument/binding copies are encoded.
+    auto root = compute ? rootsig_compute_.ptr() : rootsig_graphics_.ptr();
+    auto staging = compute ? rootarg_compute_staging_ : rootarg_graphics_staging_;
+    for (const auto &arg : signature->StateUpdates) {
+      switch (arg.Type) {
+      case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT: {
+        auto dst = reinterpret_cast<uint32_t *>(staging + root->SlotQwordOffsets[arg.Constant.RootParameterIndex]);
+        std::fill_n(dst + arg.Constant.DestOffsetIn32BitValues, arg.Constant.Num32BitValuesToSet, 0u);
+        break;
+      }
+      case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW:
+        staging[root->SlotQwordOffsets[arg.ConstantBufferView.RootParameterIndex]] = 0;
+        break;
+      case D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW:
+        staging[root->SlotQwordOffsets[arg.ShaderResourceView.RootParameterIndex]] = 0;
+        break;
+      case D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW:
+        staging[root->SlotQwordOffsets[arg.UnorderedAccessView.RootParameterIndex]] = 0;
+        break;
+      case D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW: {
+        const D3D12_VERTEX_BUFFER_VIEW null_view = {};
+        IASetVertexBuffers(arg.VertexBuffer.Slot, 1, &null_view);
+        break;
+      }
+      case D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW:
+        IASetIndexBuffer(nullptr);
+        break;
+      default:
+        break;
+      }
+    }
+    if (signature->UpdateRootArguments)
+      dirty_state_.set(compute ? DirtyState::ComputeRootArguments : DirtyState::GraphicsRootArguments);
+  }
+
   void STDMETHODCALLTYPE ExecuteIndirect(
       ID3D12CommandSignature *pCommandSignature, UINT MaxCommandCount, ID3D12Resource *pArgBuffer,
       UINT64 ArgBufferOffset, ID3D12Resource *pCountBuffer, UINT64 CountBufferOffset
@@ -5663,6 +5731,8 @@ public:
       return;
     }
     auto arg_buffer = static_cast<MTLD3D12Resource *>(pArgBuffer);
+    if (!ValidateIndirectStateUpdates(sig, sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH))
+      return;
     if (!arg_buffer || !arg_buffer->buffer || sig->ByteStride == 0)
       return;
     auto arg_desc = arg_buffer->GetDesc();
@@ -5683,6 +5753,11 @@ public:
         return;
       }
       CountBufferAddress = count_buffer->buffer->current()->gpuAddress() + CountBufferOffset;
+    }
+    if (!MaxCommandCount) {
+      // No ICB or root copies are needed, but affected bindings still reset.
+      ResetIndirectState(sig, sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH);
+      return;
     }
     if (sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH) {
       uint64_t filtered_count_buffer_address = CountBufferAddress;
@@ -5714,7 +5789,7 @@ public:
         cmd->static_samplers = EncodeStaticSamplers(rootsig_compute_.ptr());
         cmd->static_samplers += allocator_->gpu_heap_buffer_address_;
       }
-
+      ResetIndirectState(sig, true);
       return;
     }
 
@@ -5841,6 +5916,7 @@ public:
     auto [VBOffset, VBStride] = PopulateVertexBufferTable(MaxCommandCount);
     cmd->vertex_buffer = allocator_->gpu_heap_buffer_address_ + VBOffset;
     cmd->vertex_argbuf_stride = VBStride;
+    ResetIndirectState(sig, false);
   };
 
   void STDMETHODCALLTYPE

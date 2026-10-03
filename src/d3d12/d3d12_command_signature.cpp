@@ -196,6 +196,8 @@ public:
     bool is_compute = side_effect == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
     CommandType = side_effect;
     UpdateIndexBuffer = ib_index != ~0u;
+    if (is_compute && (UpdateVertexBuffers || UpdateIndexBuffer))
+      return E_INVALIDARG;
 
     if (is_compute)
       source
@@ -371,6 +373,7 @@ public:
       return E_FAIL;
     }
 
+    StateUpdates.assign(pDesc->pArgumentDescs, pDesc->pArgumentDescs + pDesc->NumArgumentDescs - 1);
     return S_OK;
   };
 

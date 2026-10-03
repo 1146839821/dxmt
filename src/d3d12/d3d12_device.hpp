@@ -319,6 +319,10 @@ public:
   UINT UpdateVertexBuffers : 1;
   UINT UpdateIndexBuffer   : 1;
 
+  // Owned descriptions of state reset after execution; excludes the final
+  // draw/dispatch operation. Constant updates retain their exact subranges.
+  std::vector<D3D12_INDIRECT_ARGUMENT_DESC> StateUpdates;
+
   WMT::Reference<WMT::RenderPipelineState> render_resolver;
   WMT::Reference<WMT::ComputePipelineState> compute_resolver;
 
