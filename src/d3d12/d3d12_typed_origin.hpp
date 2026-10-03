@@ -13,7 +13,7 @@ namespace dxmt {
 // binding before passing this shader to MSC. Application shader/root identity
 // remains separate from this artifact's transformed identity.
 struct D3D12TypedOriginShader {
-  static constexpr uint32_t kLoweringVersion = 2;
+  static constexpr uint32_t kLoweringVersion = 3;
   std::vector<uint8_t> bytecode;
   std::vector<dxmt_msc_typed_origin_binding> bindings;
 };

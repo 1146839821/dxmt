@@ -98,7 +98,18 @@ bool Word(llvm::Value *value, uint32_t &word) {
   word = constant->getZExtValue();
   return true;
 }
-struct Access { llvm::CallInst *call; uint32_t record; unsigned coordinate; };
+struct Handle {
+  llvm::CallInst *call;
+  uint32_t record, count, base_register;
+  llvm::Value *index;
+};
+struct Access {
+  llvm::CallInst *call;
+  uint32_t record;
+  unsigned coordinate;
+  uint32_t range_count, base_register;
+  llvm::Value *index;
+};
 }
 
 bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBinding> &bindings, std::string &error) {
@@ -158,7 +169,7 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
       {Type::getInt32Ty(input_context), Type::getInt8Ty(input_context), Type::getInt32Ty(input_context),
        Type::getInt32Ty(input_context), Type::getInt1Ty(input_context)}, false))
     return reject("legacy createHandle required");
-  std::vector<std::pair<CallInst *, uint32_t>> handles;
+  std::vector<Handle> handles;
   for (auto &function : module) for (auto &block : function) for (auto &instruction : block) {
     auto *base = dyn_cast<CallBase>(&instruction);
     if (!base) continue;
@@ -179,13 +190,16 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
     auto *nonuniform = dyn_cast<ConstantInt>(call->getArgOperand(4));
     const auto [first, count] = match->second;
     const auto base_register = records[first].shader_register;
-    if (!Word(call->getArgOperand(3), reg) || reg < base_register ||
-        uint64_t(reg) >= uint64_t(base_register) + count ||
-        !nonuniform || !nonuniform->isZero()) return reject("dynamic/nonuniform typed handle");
-    handles.emplace_back(call, first + (reg - base_register));
+    if (!nonuniform || !nonuniform->isZero() || !call->getArgOperand(3)->getType()->isIntegerTy(32))
+      return reject("nonuniform or invalid typed handle");
+    if (Word(call->getArgOperand(3), reg)) {
+      if (reg < base_register || uint64_t(reg) >= uint64_t(base_register) + count)
+        return reject("out-of-range typed handle");
+      handles.push_back({call, first + (reg - base_register), 1, base_register, nullptr});
+    } else handles.push_back({call, first, count, base_register, call->getArgOperand(3)});
   }
   std::vector<Access> accesses;
-  for (auto [handle, record] : handles) for (auto *user : handle->users()) {
+  for (auto [handle, record, range_count, base_register, index] : handles) for (auto *user : handle->users()) {
     auto *call = dyn_cast<CallInst>(user);
     uint32_t opcode;
     if (!call || !call->getCalledFunction() || call->arg_size() < 4 || call->getArgOperand(1) != handle ||
@@ -205,14 +219,15 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
       if (!extract || extract->getNumIndices() != 1 || *extract->idx_begin() >= 4)
         return reject("typed load residency/status or aggregate flow requires further lowering");
     }
-    accesses.push_back({call, record, coordinate});
+    accesses.push_back({call, record, coordinate, range_count, base_register, index});
   }
   if (accesses.empty()) return reject("no directly resolved typed accesses");
 
   // Declaring a finite range does not require unused slots to be initialized.
   // Keep only accessed slots in the private state and submission binding list.
   std::vector<bool> used(records.size(), false);
-  for (const auto &access : accesses) used[access.record] = true;
+  for (const auto &access : accesses)
+    for (uint32_t offset = 0; offset < access.range_count; ++offset) used[access.record + offset] = true;
   std::vector<uint32_t> remap(records.size());
   std::vector<TypedOriginBinding> accessed_records;
   for (uint32_t index = 0; index < records.size(); ++index) if (used[index]) {
@@ -238,17 +253,32 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
     return reject("invalid cbuffer load signature");
   if (!cb_ret) cb_ret = StructType::create(context, {i32, i32, i32, i32}, "dx.types.CBufRet.i32");
   auto cb_load = module.getOrInsertFunction("dx.op.cbufferLoadLegacy.i32", cb_ret, i32, handle_type, i32);
+  for (const auto &handle : handles) if (handle.index) {
+    IRBuilder<> builder(handle.call);
+    auto *relative = builder.CreateSub(handle.index, builder.getInt32(handle.base_register));
+    auto *in_range = builder.CreateICmpULT(relative, builder.getInt32(handle.count));
+    handle.call->setArgOperand(3, builder.CreateSelect(in_range, handle.index, builder.getInt32(handle.base_register)));
+  }
   for (auto access : accesses) {
     auto *call = access.call;
     IRBuilder<> builder(call);
     auto *cb = builder.CreateCall(create, {builder.getInt32(57), builder.getInt8(2), builder.getInt32(cbv_id),
                                          builder.getInt32(0), builder.getFalse()}, "dxmt.origin.cb");
-    auto *data = builder.CreateCall(cb_load, {builder.getInt32(59), cb, builder.getInt32(access.record)}, "dxmt.origin.data");
+    Value *state_index = builder.getInt32(access.record);
+    Value *handle_valid = builder.getTrue();
+    if (access.index) {
+      auto *relative = builder.CreateSub(access.index, builder.getInt32(access.base_register));
+      handle_valid = builder.CreateICmpULT(relative, builder.getInt32(access.range_count));
+      state_index = builder.CreateSelect(handle_valid,
+          builder.CreateAdd(relative, state_index), builder.getInt32(0));
+    }
+    auto *data = builder.CreateCall(cb_load, {builder.getInt32(59), cb, state_index}, "dxmt.origin.data");
     auto *origin = builder.CreateExtractValue(data, 0);
     auto *count = builder.CreateExtractValue(data, 1);
     auto *coordinate = call->getArgOperand(access.coordinate);
     auto *adjusted = builder.CreateAdd(coordinate, origin, "dxmt.origin.coordinate");
     auto *valid = builder.CreateAnd(builder.CreateICmpULT(coordinate, count), builder.CreateICmpUGE(adjusted, coordinate));
+    if (access.index) valid = builder.CreateAnd(handle_valid, valid);
     auto *then_end = SplitBlockAndInsertIfThen(valid, call, false);
     auto *skip = then_end->getParent()->getSinglePredecessor();
     auto *merge = call->getParent();
