@@ -7,12 +7,18 @@
 // Standalone macOS diagnostic, deliberately not registered as FL acceptance.
 
 int main(int argc, char **argv) {
-  if (argc > 2 || (argc == 2 && strcmp(argv[1], "tracked") && strcmp(argv[1], "private"))) {
-    fprintf(stderr, "usage: %s [tracked|private]\n", argv[0]);
+  if (argc > 2 || (argc == 2 && strcmp(argv[1], "tracked") && strcmp(argv[1], "private") &&
+                  strcmp(argv[1], "compute"))) {
+    fprintf(stderr, "usage: %s [tracked|private|compute]\n", argv[0]);
     return 2;
   }
   @autoreleasepool {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    printf("sampling stage=%d blit=%d dispatch=%d draw=%d\n",
+        [device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary],
+        [device supportsCounterSampling:MTLCounterSamplingPointAtBlitBoundary],
+        [device supportsCounterSampling:MTLCounterSamplingPointAtDispatchBoundary],
+        [device supportsCounterSampling:MTLCounterSamplingPointAtDrawBoundary]);
     id<MTLCommandQueue> queue = [device newCommandQueue];
     id<MTLFence> fence = [device newFence];
     id<MTLCounterSet> set = nil;
@@ -22,6 +28,18 @@ int main(int argc, char **argv) {
         ![device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) return 2;
     BOOL tracked = argc > 1 && !strcmp(argv[1], "tracked");
     BOOL privateSamples = argc > 1 && !strcmp(argv[1], "private");
+    BOOL computeSamples = argc > 1 && !strcmp(argv[1], "compute");
+    id<MTLComputePipelineState> pipeline = nil;
+    if (computeSamples) {
+      NSError *error = nil;
+      id<MTLLibrary> library = [device newLibraryWithSource:
+          @"#include <metal_stdlib>\nusing namespace metal;\n"
+           "kernel void stamp(device uint* p [[buffer(0)]]) { p[0] = 0; }\n"
+          options:nil error:&error];
+      if (library) pipeline = [device newComputePipelineStateWithFunction:
+          [library newFunctionWithName:@"stamp"] error:&error];
+      if (!pipeline) { NSLog(@"compute setup: %@", error); return 2; }
+    }
     MTLResourceOptions options = MTLResourceStorageModeShared |
         (tracked ? MTLResourceHazardTrackingModeTracked : MTLResourceHazardTrackingModeUntracked);
     unsigned failures = 0;
@@ -39,17 +57,31 @@ int main(int argc, char **argv) {
         memset(result.contents, 0, 24);
         id<MTLCommandBuffer> buffer = [queue commandBuffer];
         for (unsigned index = 0; index < 2; ++index) {
-          MTLBlitPassDescriptor *pass = [MTLBlitPassDescriptor new];
-          pass.sampleBufferAttachments[0].sampleBuffer = samples;
-          pass.sampleBufferAttachments[0].startOfEncoderSampleIndex = index;
-          pass.sampleBufferAttachments[0].endOfEncoderSampleIndex = MTLCounterDontSample;
-          id<MTLBlitCommandEncoder> encoder = [buffer blitCommandEncoderWithDescriptor:pass];
-          if (iteration || index) [encoder waitForFence:fence];
-          [encoder fillBuffer:dummy range:NSMakeRange(0, 4) value:0];
-          [encoder updateFence:fence];
-          [encoder endEncoding];
+          if (computeSamples) {
+            MTLComputePassDescriptor *pass = [MTLComputePassDescriptor new];
+            pass.sampleBufferAttachments[0].sampleBuffer = samples;
+            pass.sampleBufferAttachments[0].startOfEncoderSampleIndex = index;
+            pass.sampleBufferAttachments[0].endOfEncoderSampleIndex = MTLCounterDontSample;
+            id<MTLComputeCommandEncoder> compute = [buffer computeCommandEncoderWithDescriptor:pass];
+            if (iteration || index) [compute waitForFence:fence];
+            [compute setComputePipelineState:pipeline];
+            [compute setBuffer:dummy offset:0 atIndex:0];
+            [compute dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+            [compute updateFence:fence];
+            [compute endEncoding];
+          } else {
+            MTLBlitPassDescriptor *pass = [MTLBlitPassDescriptor new];
+            pass.sampleBufferAttachments[0].sampleBuffer = samples;
+            pass.sampleBufferAttachments[0].startOfEncoderSampleIndex = index;
+            pass.sampleBufferAttachments[0].endOfEncoderSampleIndex = MTLCounterDontSample;
+            id<MTLBlitCommandEncoder> encoder = [buffer blitCommandEncoderWithDescriptor:pass];
+            if (iteration || index) [encoder waitForFence:fence];
+            [encoder fillBuffer:dummy range:NSMakeRange(0, 4) value:0];
+            [encoder updateFence:fence];
+            [encoder endEncoding];
+          }
           if (!index) {
-            encoder = [buffer blitCommandEncoder];
+            id<MTLBlitCommandEncoder> encoder = [buffer blitCommandEncoder];
             [encoder waitForFence:fence];
             [encoder fillBuffer:dummy range:NSMakeRange(0, 4096) value:1];
             [encoder updateFence:fence];
@@ -86,7 +118,7 @@ int main(int argc, char **argv) {
       }
     }
     printf("mode=%s runs=200 failures=%u\n",
-        privateSamples ? "private" : tracked ? "tracked" : "untracked", failures);
+        computeSamples ? "compute" : privateSamples ? "private" : tracked ? "tracked" : "untracked", failures);
     return failures ? 1 : 0;
   }
 }

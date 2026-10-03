@@ -182,3 +182,32 @@ and dummy-copy oracles (`final-{1..3}.log`). Main-agent Standards/Spec review
 found no production changes or weakened assertions; independent review was
 unavailable. Repository diff whitespace check passed. Native diagnostic does
 not join the cross-build graph and is not a passing D3D12 regression claim.
+
+## Sampling-point discrimination
+
+- Hypothesis: command-boundary sampling with a barrier avoids pass-attachment
+  visibility failure; alternatives are pass-attachment placement or resolve.
+- Evidence: standalone counter-only probes fail in all tested storage modes.
+- Expected effect: query actual device stage/blit/dispatch/draw sampling support
+  before attempting any unsupported sampling API.
+- Risk: capability presence is not semantic correctness.
+- Validation: compile native probe and inspect live capabilities; then test only
+  supported sample points, preserving timestamp and ordinary-copy oracles.
+
+Live Apple M4 capabilities: stage=1, blit=0, dispatch=0, draw=0. Direct
+command-boundary sampling is unavailable. Next compare sampled compute passes
+against sampled blit passes, keeping the intervening blit workload, fence chain,
+GPU resolve and readback oracles. Compile a one-thread native zero-store kernel;
+this is a diagnostic pass-type comparison, not a shader backend substitution.
+
+Compute sampling also reproduced 7/200 failures, with valid CPU raw timestamps
+and the ordinary-copy oracle intact (`compute.log`). Thus the problem is not
+specific to blit sampling attachments. Native diagnostic now prints the live
+sampling capability set and admits a `compute` comparison mode. No production
+encoder substitution is justified by these results.
+
+Final native compilation passed strict warnings; a fresh compute run retained
+the red-capable oracle (`compute-final.log`). Main-agent Standards/Spec review
+only, independent reviewer unavailable. No API declaration or GPU acceptance
+status changed; diff whitespace check passed. This is diagnostic evidence, not
+closure of the timestamp or feature-level requirement.
