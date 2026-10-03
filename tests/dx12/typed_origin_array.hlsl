@@ -6,6 +6,7 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
 #ifdef TYPED_ORIGIN_DYNAMIC
   Outputs[1][0] = Inputs[thread_id.x][0] + 17;
 #else
-  Outputs[1][0] = Inputs[1][0] + 17;
+  Outputs[1][0] = Inputs[1][0] + Inputs[1][1] + 17;
+  Outputs[1][1] = 123;
 #endif
 }

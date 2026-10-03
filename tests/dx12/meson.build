@@ -155,6 +155,9 @@ dx12_texture_dimensions = executable('dx12_texture_dimensions', 'dx12_texture_di
 dx12_typed_uav_formats = executable('dx12_typed_uav_formats', 'dx12_typed_uav_formats.cpp',
   dependencies: [d3d12_dep],
 )
+dx12_typed_origin_array = executable('dx12_typed_origin_array', 'dx12_typed_origin_array.cpp',
+  dependencies: [d3d12_dep],
+)
 dx12_typed_buffer_residency = executable('dx12_typed_buffer_residency', 'dx12_typed_buffer_residency.cpp',
   dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep],
 )
