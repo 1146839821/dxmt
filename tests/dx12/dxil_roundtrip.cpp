@@ -120,8 +120,8 @@ bool Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob) {
       UINT32 version = 0;
       if (part->GetBufferSize() < sizeof(version)) return false;
       std::memcpy(&version, part->GetBufferPointer(), sizeof(version));
-      if (version != ((5u << 16) | 0x60u) || found_dxil) {
-        std::fprintf(stderr, "only one SM6.0 compute program is supported\n"); return false;
+      if ((version & ~15u) != ((5u << 16) | 0x60u) || (version & 15u) > 6 || found_dxil) {
+        std::fprintf(stderr, "only one SM6.0 through SM6.6 compute program is supported\n"); return false;
       }
       found_dxil = true;
     }

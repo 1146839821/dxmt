@@ -101,11 +101,58 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
   auto *i32 = types.getInt32Ty();
   auto *handle = StructType::getTypeByName(context, "dx.types.Handle");
   auto *create = module.getFunction("dx.op.createHandle");
-  if (!handle || !create || create->getFunctionType() != FunctionType::get(handle,
-      {i32, types.getInt8Ty(), i32, i32, types.getInt1Ty()}, false))
-    return reject("legacy createHandle required");
+  auto *modern_create = module.getFunction("dx.op.createHandleFromBinding");
+  auto *annotate = module.getFunction("dx.op.annotateHandle");
+  auto *bind_type = StructType::getTypeByName(context, "dx.types.ResBind");
+  auto *properties_type = StructType::getTypeByName(context, "dx.types.ResourceProperties");
+  const bool modern = modern_create != nullptr;
+  if (!handle || (create && modern) || (!create && !modern)) return reject("one handle model required");
+  if (create && create->getFunctionType() != FunctionType::get(handle,
+      {i32, types.getInt8Ty(), i32, i32, types.getInt1Ty()}, false)) return reject("invalid legacy handle signature");
+  if (modern && (!bind_type || bind_type->isOpaque() || bind_type->elements() !=
+      ArrayRef<Type *>({i32, i32, i32, types.getInt8Ty()}) || !properties_type || properties_type->isOpaque() ||
+      properties_type->elements() != ArrayRef<Type *>({i32, i32}) || !annotate ||
+      modern_create->getFunctionType() != FunctionType::get(handle, {i32, bind_type, i32, types.getInt1Ty()}, false) ||
+      annotate->getFunctionType() != FunctionType::get(handle, {i32, handle, properties_type}, false)))
+    return reject("invalid modern handle signatures");
+  auto aggregate_word = [&](Value *value, unsigned index, uint32_t &word) {
+    auto *constant = dyn_cast<Constant>(value);
+    auto *element = constant ? dyn_cast_or_null<ConstantInt>(constant->getAggregateElement(index)) : nullptr;
+    if (!element || element->getBitWidth() > 32) return false;
+    word = element->getZExtValue();
+    return true;
+  };
   auto resolve = [&](Value *value, unsigned kind, uint32_t &resolved_register) -> const Resource * {
     auto *call = dyn_cast<CallInst>(value);
+    if (modern) {
+      uint32_t opcode, lower, upper, space, resource_class, reg, property_kind, component;
+      if (!call || call->getCalledFunction() != annotate || call->arg_size() != 3 ||
+          !Word(call->getArgOperand(0), opcode) || opcode != 216 ||
+          !aggregate_word(call->getArgOperand(2), 0, property_kind) ||
+          !aggregate_word(call->getArgOperand(2), 1, component)) return nullptr;
+      auto *binding = dyn_cast<CallInst>(call->getArgOperand(1));
+      if (!binding || binding->getCalledFunction() != modern_create || binding->arg_size() != 4 ||
+          !Word(binding->getArgOperand(0), opcode) || opcode != 217 ||
+          !aggregate_word(binding->getArgOperand(1), 0, lower) ||
+          !aggregate_word(binding->getArgOperand(1), 1, upper) ||
+          !aggregate_word(binding->getArgOperand(1), 2, space) ||
+          !aggregate_word(binding->getArgOperand(1), 3, resource_class) || resource_class != kind ||
+          !Word(binding->getArgOperand(2), reg) || upper == UINT32_MAX || reg < lower || reg > upper ||
+          !isa<ConstantInt>(binding->getArgOperand(3)) || !cast<ConstantInt>(binding->getArgOperand(3))->isZero())
+        return nullptr;
+      for (auto &[id, resource] : records[kind]) {
+        uint32_t resource_kind;
+        if (resource.space != space || resource.reg != lower || uint64_t(lower) + resource.count != uint64_t(upper) + 1)
+          continue;
+        if (!Word(resource.metadata->getOperand(6), resource_kind) ||
+            property_kind != (kind == 3 ? 14u : resource_kind) ||
+            (kind == 3 ? component != 0 : (component & 255u) != 9u || (component >> 8) < 1 || (component >> 8) > 4))
+          return nullptr;
+        resolved_register = reg;
+        return &resource;
+      }
+      return nullptr;
+    }
     if (!call || call->getCalledFunction() != create || call->arg_size() != 5) return nullptr;
     auto *resource_class = dyn_cast<ConstantInt>(call->getArgOperand(1));
     auto *nonuniform = dyn_cast<ConstantInt>(call->getArgOperand(4));
@@ -129,7 +176,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     if (!call || !call->getCalledFunction()) continue;
     auto name = call->getCalledFunction()->getName();
     has_mapping_check |= name.startswith("dx.op.checkAccessFullyMapped");
-    if (name.startswith("dx.op.createHandleFrom") || name.startswith("dx.op.annotateHandle"))
+    if (name.startswith("dx.op.createHandleFrom") && call->getCalledFunction() != modern_create)
       return reject("modern/dynamic handle provenance requires further lowering");
     if (name.startswith("dx.op.sample") && !IsQualifiedSampleName(name))
       return reject("only float SampleLevel/SampleGrad are currently qualified");
@@ -142,6 +189,24 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
             consumer->arg_size() != (consumer->getCalledFunction()->getName() == "dx.op.sampleGrad.f32" ? 17 : 11) ||
             consumer->getArgOperand(2) != call)
           return reject("unsupported sampler handle flow or consumer");
+      }
+    }
+    if (modern && call->getCalledFunction() == annotate) {
+      uint32_t property;
+      if (!aggregate_word(call->getArgOperand(2), 0, property)) return reject("constant annotation required");
+      if (property == 14) for (auto *user : call->users()) {
+        auto *consumer = dyn_cast<CallInst>(user);
+        if (!consumer || !consumer->getCalledFunction() || !IsQualifiedSampleName(consumer->getCalledFunction()->getName()) ||
+            consumer->arg_size() < 3 || consumer->getArgOperand(2) != call)
+          return reject("unsupported annotated sampler consumer");
+      }
+    }
+    if (modern && call->getCalledFunction() == modern_create) {
+      uint32_t resource_class;
+      if (!aggregate_word(call->getArgOperand(1), 3, resource_class)) return reject("constant binding required");
+      if (resource_class == 3) for (auto *user : call->users()) {
+        uint32_t resolved_register;
+        if (!resolve(user, 3, resolved_register)) return reject("unsupported modern sampler handle flow");
       }
     }
     if (!IsQualifiedSampleName(name)) continue;
@@ -290,6 +355,16 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     auto *reduction = BasicBlock::Create(context, "dxmt.reduction.enabled", function, merge);
     IRBuilder<> b(entry);
     auto make_handle = [&](IRBuilder<> &builder, unsigned kind, unsigned range, unsigned reg) {
+      if (modern) {
+        auto *binding = ConstantStruct::get(bind_type, {builder.getInt32(reg), builder.getInt32(reg),
+            builder.getInt32(DXMT_MSC_MINMAX_SPACE), builder.getInt8(kind)});
+        auto *raw = builder.CreateCall(modern_create, {builder.getInt32(217), binding, builder.getInt32(reg), builder.getFalse()});
+        Constant *properties;
+        if (kind == 0) properties = cast<Constant>(cast<CallInst>(sample->getArgOperand(1))->getArgOperand(2));
+        else properties = ConstantStruct::get(properties_type, {builder.getInt32(kind == 3 ? 14 : 13),
+            builder.getInt32(kind == 3 ? 0 : pairs.size() * sizeof(dxmt_msc_minmax_state))});
+        return builder.CreateCall(annotate, {builder.getInt32(216), raw, properties});
+      }
       return builder.CreateCall(create, {builder.getInt32(CreateHandle), builder.getInt8(kind), builder.getInt32(range),
           builder.getInt32(reg), builder.getFalse()});
     };

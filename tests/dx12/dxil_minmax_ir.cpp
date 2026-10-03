@@ -115,6 +115,43 @@ static bool CheckBindingQualification(llvm::Module &module) {
   return true;
 }
 
+static bool CheckModernQualification(llvm::Module &module) {
+  using namespace llvm;
+  SmallVector<char, 0> bitcode;
+  raw_svector_ostream serialized(bitcode);
+  WriteBitcodeToFile(module, serialized);
+  for (unsigned probe = 0; probe < 4; ++probe) {
+    LLVMContext context;
+    context.setOpaquePointers(false);
+    auto parsed = parseBitcodeFile(MemoryBufferRef(StringRef(bitcode.data(), bitcode.size()), "modern.probe"), context);
+    if (!parsed) { consumeError(parsed.takeError()); return false; }
+    CallInst *sample = nullptr;
+    for (auto &function : **parsed) for (auto &block : function) for (auto &instruction : block)
+      if (auto *call = dyn_cast<CallInst>(&instruction))
+        if (call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32") sample = call;
+    if (!sample) return false;
+    auto *annotation = cast<CallInst>(sample->getArgOperand(2));
+    auto *binding = cast<CallInst>(annotation->getArgOperand(1));
+    IRBuilder<> builder(context);
+    if (probe == 1) binding->setArgOperand(2, builder.getInt32(2)); // Outside [0,1].
+    if (probe == 2) binding->setArgOperand(3, builder.getTrue());
+    if (probe == 3) {
+      auto *properties = cast<StructType>(annotation->getArgOperand(2)->getType());
+      annotation->setArgOperand(2, ConstantStruct::get(properties, {builder.getInt32(14), builder.getInt32(1)}));
+    }
+    std::vector<dxmt_msc_minmax_binding> records{{11, 22, 33, 44}};
+    std::string error;
+    const bool accepted = dxmt::dxil::LowerReductionSamplerBindings(**parsed, records, error);
+    if (probe == 0) {
+      if (!accepted || !error.empty() || records.size() != 1 || records[0].texture_register != 1 ||
+          records[0].sampler_register != 1 || verifyModule(**parsed, &errs())) return false;
+    } else if (accepted || error.empty() || records.size() != 1 || records[0].texture_space != 11 ||
+        records[0].texture_register != 22 || records[0].sampler_space != 33 || records[0].sampler_register != 44)
+      return false;
+  }
+  return true;
+}
+
 static int TransformContainer(const char *path, const char *mode) {
   using namespace llvm;
   auto file = MemoryBuffer::getFile(path);
@@ -179,7 +216,9 @@ static int TransformContainer(const char *path, const char *mode) {
       samples[0]->getArgOperand(1), builder.getInt32(mirror ? 2 : mirror_once ? 5 : 3), builder.getInt32(3), builder.getInt32(3)};
   std::string error;
   if (binding) {
-    if (!binding_two && !binding_array && !CheckBindingQualification(**parsed)) return 1;
+    const bool modern = (*parsed)->getFunction("dx.op.createHandleFromBinding") != nullptr;
+    if (modern && binding_array && !CheckModernQualification(**parsed)) return 1;
+    if (!modern && !binding_two && !binding_array && !CheckBindingQualification(**parsed)) return 1;
     std::vector<dxmt_msc_minmax_binding> records;
     if (!dxmt::dxil::LowerReductionSamplerBindings(**parsed, records, error)) { errs() << error; return 1; }
     if (records.size() != (binding_two ? 2 : 1) || records[0].texture_space ||

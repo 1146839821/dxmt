@@ -35,7 +35,7 @@ HRESULT PrepareD3D12MinMaxRoot(const D3D12_ROOT_SIGNATURE_DESC1 &application, ui
 HRESULT ResolveD3D12MinMaxBindings(const D3D12MinMaxRoot &root,
     const std::vector<dxmt_msc_minmax_binding> &bindings,
     std::vector<D3D12MinMaxPairLocation> &locations, std::string &diagnostics);
-// Selected absolute Windows DXC directory; validated SM6.0 compute envelope.
+// Selected absolute Windows DXC directory; validated SM6.0..6.6 compute envelope.
 // No fallback. Failure leaves the artifact unchanged.
 HRESULT PrepareD3D12MinMaxShader(const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
     D3D12MinMaxShader &prepared, std::string &diagnostics);

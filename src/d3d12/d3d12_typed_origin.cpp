@@ -77,7 +77,8 @@ HRESULT LoweringResult(int result) {
 
 // Assembly rebuilds signatures/PSV/resource metadata from IR. Reject parts
 // whose application-visible semantics would otherwise be silently discarded.
-HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<IDxcBlob> &program) {
+HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<IDxcBlob> &program,
+    uint32_t maximum_minor) {
   HRESULT hr = reflection->Load(blob);
   if (FAILED(hr)) return hr;
   UINT32 count = 0;
@@ -95,8 +96,10 @@ HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<ID
         hr = reflection->GetPartContent(i, &raw);
         program.reset(raw);
         if (FAILED(hr)) return hr;
-        if (!program || program->GetBufferSize() < 24 ||
-            Word(static_cast<const uint8_t *>(program->GetBufferPointer())) != ((5u << 16) | 0x60u))
+        if (!program || program->GetBufferSize() < 24)
+          return E_NOTIMPL;
+        const auto version = Word(static_cast<const uint8_t *>(program->GetBufferPointer()));
+        if ((version & ~15u) != ((5u << 16) | 0x60u) || (version & 15u) > maximum_minor)
           return E_NOTIMPL;
       }
       break;
@@ -115,11 +118,13 @@ HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<ID
 } // namespace
 
 struct TypedOriginPreparation {
+  static constexpr uint32_t MaximumMinor = 0;
   using Params = dxmt_msc_lower_typed_origins_params;
   using Artifact = D3D12TypedOriginShader;
   static constexpr const char *ExportName = "DXMTMSCLowerTypedBufferOrigins";
 };
 struct MinMaxPreparation {
+  static constexpr uint32_t MaximumMinor = 6;
   using Params = dxmt_msc_lower_reduction_samplers_params;
   using Artifact = D3D12MinMaxShader;
   static constexpr const char *ExportName = "DXMTMSCLowerReductionSamplers";
@@ -173,7 +178,7 @@ static HRESULT PrepareShaderInternal(
   hr = Validate(validator.get(), input.get(), validated_input, diagnostics);
   if (FAILED(hr)) return hr;
   OwnedCOM<IDxcBlob> program;
-  hr = Inspect(reflection.get(), validated_input.get(), program);
+  hr = Inspect(reflection.get(), validated_input.get(), program, Operation::MaximumMinor);
   if (FAILED(hr)) { diagnostics += "unsupported input container envelope"; return hr; }
   auto *bytes = static_cast<const uint8_t *>(program->GetBufferPointer());
   const size_t length = program->GetBufferSize();
@@ -212,7 +217,7 @@ static HRESULT PrepareShaderInternal(
   hr = Validate(validator.get(), assembled.get(), output, diagnostics);
   if (FAILED(hr)) return hr;
   program.reset();
-  hr = Inspect(reflection.get(), output.get(), program);
+  hr = Inspect(reflection.get(), output.get(), program, Operation::MaximumMinor);
   if (FAILED(hr)) return hr;
   auto *output_bytes = static_cast<const uint8_t *>(output->GetBufferPointer());
   candidate.bytecode.assign(output_bytes, output_bytes + output->GetBufferSize());
