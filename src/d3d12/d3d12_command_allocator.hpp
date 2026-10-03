@@ -54,7 +54,15 @@ struct IndirectComputeCommandData {
   uint32_t tgsize_x;
   uint32_t tgsize_y;
   uint32_t tgsize_z;
+  uint64_t msc_tlab;
+  uint64_t msc_template;
+  uint64_t msc_layout_offsets;
+  uint64_t msc_heap;
+  uint64_t msc_sampler_heap;
+  uint64_t msc_tlab_stride;
+  uint64_t msc_template_size;
 };
+static_assert(sizeof(IndirectComputeCommandData) == 120);
 
 struct IndirectRenderCommandData {
   uint64_t cmd_buf;
@@ -364,7 +372,8 @@ public:
   }
 
   IndirectComputeCommandData *EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount,
-      const D3D12TypedOriginComputeVariant *variant = nullptr);
+      const D3D12TypedOriginComputeVariant *variant = nullptr,
+      const wmtcmd_compute_setbuffer **resolver_binding = nullptr);
 
   IndirectRenderCommandData *EncodeIndirectRenderCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12GraphicsPipelineState *pPSO, size_t MaxCount);
 };

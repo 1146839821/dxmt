@@ -411,6 +411,11 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_indirect_state_fixture',
+    input: 'indirect_state.hlsl', output: 'indirect_state.cs.cso',
+    command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
   custom_target('dx12_function_constants_sm6_fixture',
     input: 'function_constants_sm6.hlsl',
     output: 'function_constants_sm6.ps.cso',

@@ -1,4 +1,5 @@
 #include "d3d12_typed_origin_binding.hpp"
+#include "d3d12_command_allocator.hpp"
 #include <algorithm>
 #include <cstring>
 #include <unordered_map>
@@ -145,6 +146,21 @@ HRESULT MaterializeD3D12TypedOriginDispatch(
       table_offsets.push_back(total);
       total += table.slots.size() * sizeof(dxmt_msc_descriptor_entry);
     }
+    uint64_t indirect_tlabs_offset = 0;
+    if (dispatch.indirect_data) {
+      if (!dispatch.indirect_data_binding || !dispatch.indirect_data->max_count || !variant.root.argument_buffer_size ||
+          dispatch.indirect_data->msc_template_size != variant.root.argument_buffer_size ||
+          dispatch.indirect_data->msc_tlab_stride < variant.root.argument_buffer_size ||
+          (dispatch.indirect_data->msc_tlab_stride & 15)) return E_INVALIDARG;
+      total = align(total);
+      candidate->indirect_data_offset = total;
+      total += sizeof(IndirectComputeCommandData);
+      total = align(total);
+      indirect_tlabs_offset = total;
+      if (dispatch.indirect_data->max_count > (UINT64_MAX - total) / dispatch.indirect_data->msc_tlab_stride)
+        return E_OUTOFMEMORY;
+      total += dispatch.indirect_data->max_count * dispatch.indirect_data->msc_tlab_stride;
+    }
     if (total > SIZE_MAX || !total) return E_OUTOFMEMORY;
     WMTBufferInfo info = {};
     info.length = total;
@@ -199,7 +215,13 @@ HRESULT MaterializeD3D12TypedOriginDispatch(
         candidate->snapshots.push_back(snapshot);
       }
     }
-    retain(candidate->buffer.handle, WMTResourceUsageRead);
+    if (dispatch.indirect_data) {
+      auto payload = *dispatch.indirect_data;
+      payload.msc_template = info.gpu_address;
+      payload.msc_tlab = info.gpu_address + indirect_tlabs_offset;
+      std::memcpy(memory + candidate->indirect_data_offset, &payload, sizeof(payload));
+    }
+    retain(candidate->buffer.handle, dispatch.indirect_data ? read_write : WMTResourceUsageRead);
     DEBUG("Typed-origin submission buffer=", candidate->buffer.handle, " bytes=", total,
         " records=", variant.bindings.size(), " unique_live_slots=", indices.size());
     binding = std::move(candidate);

@@ -1384,9 +1384,14 @@ public:
 
     if (pipeline->shader_backend == D3D12ShaderBackend::MetalShaderConverter &&
         (signature->UpdateRootArguments || signature->UpdateVertexBuffers || signature->UpdateIndexBuffer)) {
-      WARN("D3D12 ", name, " with MSC PSO and resource-updating command signature is unsupported");
-      FailRecording(name, "MSC PSO with resource-updating command signature");
-      return false;
+      bool constants_only = pipeline->IsComputePipelineState &&
+          signature->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+      for (const auto &update : signature->StateUpdates)
+        constants_only &= update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+      if (!constants_only) {
+        FailRecording(name, "MSC indirect root VA or graphics binding updates are unsupported");
+        return false;
+      }
     }
     if (!pipeline->IsComputePipelineState && pipeline->shader_backend == D3D12ShaderBackend::MetalShaderConverter) {
       auto graphics = static_cast<MTLD3D12GraphicsPipelineState *>(pipeline);
@@ -5635,6 +5640,68 @@ public:
   }
 
   bool
+  EncodeMSCIndirectArguments(MTLD3D12CommandSignature *signature, IndirectComputeCommandData *data,
+      const D3D12TypedOriginComputeVariant *variant, const wmtcmd_compute_setbuffer *resolver_binding) {
+    auto root = rootsig_compute_.ptr();
+    const auto *compiler_root = variant ? &variant->root : nullptr;
+    const auto template_size = compiler_root ? compiler_root->argument_buffer_size : root->MSCArgumentBufferSize;
+    if (template_size > UINT64_MAX - 15) { FailRecording(__func__, "indirect TLAB size overflow"); return false; }
+    const auto stride = (template_size + 15) & ~uint64_t(15);
+    const auto count = compiler_root ? compiler_root->layouts.size() : root->MSCParameterCount;
+    const auto *layouts = compiler_root ? compiler_root->layouts.data() : root->MSCParameterLayouts;
+    if (!stride || !data->max_count || stride > SIZE_MAX || data->max_count > SIZE_MAX / stride) {
+      FailRecording(__func__, "invalid indirect TLAB allocation size");
+      return false;
+    }
+    auto [offsets_ptr, offsets_offset] = allocator_->AllocateGPUHeap(root->ParameterSlots * sizeof(uint32_t), 16);
+    if (!offsets_ptr) { FailRecording(__func__, "indirect layout allocation failed"); return false; }
+    auto offsets = static_cast<uint32_t *>(offsets_ptr);
+    std::fill_n(offsets, root->ParameterSlots, UINT32_MAX);
+    for (const auto &update : signature->StateUpdates) {
+      const auto &constant = update.Constant;
+      bool found = false;
+      for (size_t i = 0; i < count; ++i) {
+        const auto &layout = layouts[i];
+        if (layout.parameter_index != constant.RootParameterIndex) continue;
+        const uint64_t end = uint64_t(constant.DestOffsetIn32BitValues) + constant.Num32BitValuesToSet;
+        if (layout.resource_type != DXMT_MSC_RESOURCE_CONSTANT || layout.top_level_offset > UINT32_MAX ||
+            layout.top_level_offset > template_size || layout.size_bytes > template_size - layout.top_level_offset ||
+            end > layout.size_bytes / sizeof(uint32_t)) break;
+        offsets[constant.RootParameterIndex] = static_cast<uint32_t>(layout.top_level_offset);
+        found = true;
+        break;
+      }
+      if (!found) { FailRecording(__func__, "updated constant has no compatible MSC layout"); return false; }
+    }
+    data->msc_tlab_stride = stride;
+    data->msc_template_size = template_size;
+    data->msc_layout_offsets = allocator_->gpu_heap_buffer_address_ + offsets_offset;
+    if (descriptor_heap_) {
+      data->msc_heap = descriptor_heap_->GetMSCDescriptorTableAddress(descriptor_heap_->GetGPUDescriptorHandleForHeapStart());
+    }
+    if (sampler_heap_) {
+      data->msc_sampler_heap = sampler_heap_->GetMSCDescriptorTableAddress(sampler_heap_->GetGPUDescriptorHandleForHeapStart());
+    }
+    if (variant) {
+      auto &dispatches = static_cast<ComputeEncoderData *>(allocator_->encoder_current)->typed_origin_dispatches;
+      if (dispatches.empty() || dispatches.back()->variant != variant) {
+        FailRecording(__func__, "missing typed-origin indirect marker"); return false;
+      }
+      dispatches.back()->indirect_data = data;
+      dispatches.back()->indirect_data_binding = resolver_binding;
+    } else {
+      const auto source = EncodeMSCArgumentBuffer(root, rootarg_compute_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr());
+      auto [tlabs_ptr, tlabs_offset] = allocator_->AllocateGPUHeap(static_cast<size_t>(data->max_count * stride), 16);
+      if (!tlabs_ptr || recording_failed_) { FailRecording(__func__, "indirect TLAB allocation failed"); return false; }
+      data->msc_template = allocator_->gpu_heap_buffer_address_ + source;
+      data->msc_tlab = allocator_->gpu_heap_buffer_address_ + tlabs_offset;
+    }
+    EncodeComputeResourceUse(allocator_->gpu_heap_buffer_.handle,
+        static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite));
+    return !recording_failed_;
+  }
+
+  bool
   ValidateIndirectStateUpdates(MTLD3D12CommandSignature *signature, bool compute) {
     auto root = compute ? rootsig_compute_.ptr() : rootsig_graphics_.ptr();
     for (const auto &arg : signature->StateUpdates) {
@@ -5765,7 +5832,9 @@ public:
           !EncodePredicationCount(count_buffer, CountBufferOffset, MaxCommandCount, filtered_count_buffer_address))
         return;
       const D3D12TypedOriginComputeVariant *origin_variant = nullptr;
-      if (!PreDispatch(sig->UpdateRootArguments, !sig->UpdateRootArguments, &origin_variant))
+      const bool msc_updates = sig->UpdateRootArguments &&
+          pso_compute_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
+      if (!PreDispatch(sig->UpdateRootArguments && !msc_updates, true, &origin_variant))
         return;
 
       if (indirect_residency_) {
@@ -5774,7 +5843,9 @@ public:
           EncodeComputeResourceUse(count_buffer->buffer->current()->buffer().handle, WMTResourceUsageRead);
       }
 
-      auto cmd = allocator_->EncodeIndirectComputeCommand(sig, pso_compute_.ptr(), MaxCommandCount, origin_variant);
+      const wmtcmd_compute_setbuffer *resolver_binding = nullptr;
+      auto cmd = allocator_->EncodeIndirectComputeCommand(sig, pso_compute_.ptr(), MaxCommandCount, origin_variant,
+          &resolver_binding);
       if (!cmd) {
         FailRecording(__func__, "indirect compute command allocation failed");
         return;
@@ -5782,7 +5853,9 @@ public:
       cmd->max_count_buffer = filtered_count_buffer_address;
       cmd->argument_buffer = ArgBufferAddress;
 
-      if (sig->UpdateRootArguments) {
+      if (msc_updates) {
+        if (!EncodeMSCIndirectArguments(sig, cmd, origin_variant, resolver_binding)) return;
+      } else if (sig->UpdateRootArguments) {
         cmd->rootsig_qwords = EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_, MaxCommandCount);
         cmd->rootsig_qwords += allocator_->gpu_heap_buffer_address_;
         cmd->rootsig_qwords_stride = rootsig_compute_->UploadQwords;

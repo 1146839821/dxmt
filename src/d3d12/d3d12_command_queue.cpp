@@ -65,6 +65,7 @@ static bool ReplayPrivateCompute(
     std::unordered_map<const void *, const D3D12MinMaxDispatch *> minmax_markers;
     for (const auto &dispatch : data->minmax_dispatches) minmax_markers.emplace(dispatch->marker, dispatch.get());
     std::vector<PrivateComputeReplayCommand> replay;
+    std::unordered_map<const void *, std::shared_ptr<D3D12TypedOriginSubmissionBinding>> indirect_bindings;
     const auto append_binding = [&](const auto &binding, const auto &variant) {
       for (const auto &use : binding.resources) encoder.useResource(use.resource, use.usage);
       PrivateComputeReplayCommand set_pso = {};
@@ -85,6 +86,8 @@ static bool ReplayPrivateCompute(
         const auto hr = MaterializeD3D12TypedOriginDispatch(device, *marker->second, binding);
         if (FAILED(hr)) { ERR("Typed-origin submission materialization failed HRESULT=", hr); return false; }
         bindings.push_back(binding);
+        if (marker->second->indirect_data_binding)
+          indirect_bindings.emplace(marker->second->indirect_data_binding, binding);
         append_binding(*binding, *marker->second->variant);
         continue;
       }
@@ -116,6 +119,11 @@ static bool ReplayPrivateCompute(
       }
       PrivateComputeReplayCommand command = {};
       std::memcpy(&command, node, size);
+      if (auto indirect = indirect_bindings.find(node); indirect != indirect_bindings.end()) {
+        if (node->type != WMTComputeCommandSetBuffer) return false;
+        command.buffer.buffer = indirect->second->buffer.handle;
+        command.buffer.offset = indirect->second->indirect_data_offset;
+      }
       replay.push_back(command);
     }
     for (size_t i = 0; i < replay.size(); ++i)

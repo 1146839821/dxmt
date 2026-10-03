@@ -5,6 +5,7 @@
 #include "d3d12_typed_origin_pipeline.hpp"
 
 namespace dxmt {
+struct IndirectComputeCommandData;
 
 struct D3D12TypedOriginDispatch {
   struct Slot {
@@ -26,6 +27,10 @@ struct D3D12TypedOriginDispatch {
   const D3D12TypedOriginComputeVariant *variant = nullptr;
   std::vector<uint8_t> argument_template;
   std::vector<Table> tables;
+  // Borrowed allocator-owned immutable resolver payload/node. Submission replay
+  // clones the payload into its own binding buffer; never patches these objects.
+  const IndirectComputeCommandData *indirect_data = nullptr;
+  const wmtcmd_compute_setbuffer *indirect_data_binding = nullptr;
 };
 
 struct D3D12TypedOriginSubmissionBinding {
@@ -36,6 +41,7 @@ struct D3D12TypedOriginSubmissionBinding {
   WMT::Reference<WMT::Buffer> buffer;
   std::vector<ResourceUse> resources;
   std::vector<ShaderVisibleDescriptorSnapshot> snapshots;
+  uint64_t indirect_data_offset = 0;
 };
 
 HRESULT RecordD3D12TypedOriginDispatch(

@@ -4,7 +4,9 @@
 #include <d3dcompiler.h>
 #include <cstring>
 #include <iostream>
+#include <fstream>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 template <typename T> struct Owned {
@@ -25,14 +27,16 @@ D3D12_RESOURCE_DESC Buffer(UINT64 bytes) {
   d.SampleDesc.Count = 1; d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
   return d;
 }
-void Run(unsigned mode, ID3DBlob *shader) {
+void Run(unsigned mode, const void *shader, size_t shader_size) {
   Owned<ID3D12Device> device;
   Check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.p)));
-  D3D12_ROOT_PARAMETER params[2] = {};
+  D3D12_ROOT_PARAMETER params[3] = {};
   params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
   params[0].Constants = {0, 0, 3};
   params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-  D3D12_ROOT_SIGNATURE_DESC root_desc = {2, params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+  params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+  params[2].Descriptor.ShaderRegister = 1;
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {mode == 4 ? 3u : 2u, params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
   Owned<ID3DBlob> root_blob;
   Check(D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob.p, nullptr));
   Owned<ID3D12RootSignature> root;
@@ -40,14 +44,19 @@ void Run(unsigned mode, ID3DBlob *shader) {
                                     IID_PPV_ARGS(&root.p)));
   D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
   pd.pRootSignature = root.p;
-  pd.CS = {shader->GetBufferPointer(), shader->GetBufferSize()};
+  pd.CS = {shader, shader_size};
   Owned<ID3D12PipelineState> pso;
   Check(device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso.p)));
   D3D12_INDIRECT_ARGUMENT_DESC args[2] = {};
   args[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
   args[0].Constant = {0, 1, 1}; // Reset one odd-offset DWORD, not the whole parameter.
+  if (mode == 3) args[0].Constant = {0, 0, 2};
+  if (mode == 4) {
+    args[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW;
+    args[0].ConstantBufferView.RootParameterIndex = 2;
+  }
   args[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-  D3D12_COMMAND_SIGNATURE_DESC sd = {16, 2, args, 0};
+  D3D12_COMMAND_SIGNATURE_DESC sd = {mode >= 3 ? 20u : 16u, 2, args, 0};
   Owned<ID3D12CommandSignature> signature;
   Check(device->CreateCommandSignature(&sd, root.p, IID_PPV_ARGS(&signature.p)));
   Owned<ID3D12Resource> upload, output, readback;
@@ -59,6 +68,16 @@ void Run(unsigned mode, ID3DBlob *shader) {
   Check(upload->Map(0, nullptr, &mapping));
   const UINT data[] = {99, 1, 1, 1, 0}; // Last DWORD is a zero GPU count.
   std::memcpy(mapping, data, sizeof(data));
+  if (mode == 4) {
+    const UINT64 va = upload->GetGPUVirtualAddress();
+    std::memcpy(mapping, &va, sizeof(va));
+    const UINT dispatch[] = {1, 1, 1};
+    std::memcpy(static_cast<char *>(mapping) + sizeof(va), dispatch, sizeof(dispatch));
+  }
+  if (mode == 3) {
+    const UINT two_commands[] = {0, 99, 1, 1, 1, 1, 100, 1, 1, 1};
+    std::memcpy(mapping, two_commands, sizeof(two_commands));
+  }
   upload->Unmap(0, nullptr);
   hp.Type = D3D12_HEAP_TYPE_DEFAULT;
   auto od = Buffer(256); od.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -82,16 +101,21 @@ void Run(unsigned mode, ID3DBlob *shader) {
   D3D12_RESOURCE_BARRIER barrier = {};
   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; barrier.UAV.pResource = output.p;
   list->ResourceBarrier(1, &barrier);
-  list->ExecuteIndirect(signature.p, mode == 1 ? 0 : 1, upload.p, 0,
+  list->ExecuteIndirect(signature.p, mode == 1 ? 0 : mode == 3 ? 2 : 1, upload.p, 0,
                         mode == 2 ? upload.p : nullptr, mode == 2 ? 16 : 0);
+  if (mode == 4) {
+    if (SUCCEEDED(list->Close())) throw std::runtime_error("MSC root VA update unexpectedly admitted");
+    std::cout << "MSC root VA update rejected at recording PASS\n";
+    return;
+  }
   list->ResourceBarrier(1, &barrier);
-  list->SetComputeRoot32BitConstant(0, 1, 0); // Leave the reset value and preserved keep untouched.
+  list->SetComputeRoot32BitConstant(0, mode == 3 ? 2 : 1, 0); // Leave reset value and preserved keep untouched.
   list->Dispatch(1, 1, 1);
   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
   barrier.Transition = {output.p, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE};
   list->ResourceBarrier(1, &barrier);
-  list->CopyBufferRegion(readback.p, 0, output.p, 0, 8);
+  list->CopyBufferRegion(readback.p, 0, output.p, 0, mode == 3 ? 12 : 8);
   Check(list->Close());
   ID3D12CommandList *submitted[] = {list.p};
   queue->ExecuteCommandLists(1, submitted);
@@ -105,19 +129,31 @@ void Run(unsigned mode, ID3DBlob *shader) {
   CloseHandle(event);
   Check(hr);
   if (wait != WAIT_OBJECT_0) throw std::runtime_error("GPU wait failed");
-  D3D12_RANGE range = {0, 8};
+  D3D12_RANGE range = {0, mode == 3 ? 12u : 8u};
   Check(readback->Map(0, &range, &mapping));
-  UINT result[2]; std::memcpy(result, mapping, sizeof(result));
+  UINT result[3] = {}; std::memcpy(result, mapping, range.End);
   D3D12_RANGE empty = {}; readback->Unmap(0, &empty);
-  if (result[0] != (mode == 0 ? 106u : 62u) || result[1] != 7) {
+  if (result[0] != (mode == 0 || mode == 3 ? 106u : 62u) ||
+      result[1] != (mode == 3 ? 107u : 7u) || (mode == 3 && result[2] != 7)) {
     std::cerr << "mode=" << mode << " readback=" << result[0] << ',' << result[1] << '\n';
     throw std::runtime_error("indirect reset/inheritance mismatch");
   }
-  std::cout << "mode=" << mode << " indirect=" << result[0] << " after=" << result[1] << " PASS\n";
+  std::cout << "mode=" << mode << " indirect=" << result[0];
+  if (mode == 3) std::cout << ',' << result[1];
+  std::cout << " after=" << result[mode == 3 ? 2 : 1] << " PASS\n";
 }
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+  if (argc == 2) {
+    std::ifstream file(argv[1], std::ios::binary);
+    std::vector<char> bytes((std::istreambuf_iterator<char>(file)), {});
+    if (bytes.empty()) return 2;
+    try { for (unsigned mode = 0; mode != 5; ++mode) Run(mode, bytes.data(), bytes.size()); }
+    catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }
+    return 0;
+  }
+  if (argc != 1) return 2;
   HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
   if (!compiler) return 2;
   auto compile = reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler, "D3DCompile"));
@@ -130,7 +166,7 @@ int main() {
     Owned<ID3DBlob> shader, errors;
     Check(compile(source, sizeof(source) - 1, nullptr, nullptr, nullptr, "main", "cs_5_0",
                   D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &shader.p, &errors.p));
-    for (unsigned mode = 0; mode != 3; ++mode) Run(mode, shader.p);
+    for (unsigned mode = 0; mode != 4; ++mode) Run(mode, shader->GetBufferPointer(), shader->GetBufferSize());
     result = 0;
   } catch (const std::exception &error) { std::cerr << error.what() << '\n'; }
   FreeLibrary(compiler);

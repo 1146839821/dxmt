@@ -13,6 +13,9 @@ template <typename T> struct Owned {
 
 int main(int argc, char **argv) {
   bool dynamic = false;
+  const bool indirect = argc == 3 && std::strstr(argv[2], "--indirect") == argv[2];
+  const bool indirect_multi = indirect && std::strstr(argv[2], "multi");
+  const bool indirect_live = indirect && std::strstr(argv[2], "live");
   const bool mismatch = argc == 3 && !std::strcmp(argv[2], "--embedded-mismatch");
   const bool override_root = argc == 3 && !std::strcmp(argv[2], "--embedded-override");
   const bool embedded = argc == 3 && (!std::strcmp(argv[2], "--embedded") ||
@@ -22,7 +25,7 @@ int main(int argc, char **argv) {
   for (const char *mode : {"--dynamic0", "--dynamic1", "--dynamic-static0", "--dynamic-static1",
       "--dynamic-unused", "--dynamic-static-unused"})
     dynamic |= argc == 3 && !std::strcmp(argv[2], mode);
-  dynamic |= nonuniform;
+  dynamic |= nonuniform || indirect;
   const bool partial = dynamic && std::strstr(argv[2], "unused");
   const UINT selected = dynamic && !partial && argv[2][std::strlen(argv[2]) - 1] == '0' ? 0 : 1;
   const bool static_ranges = argc == 3 && (!std::strcmp(argv[2], "--static") ||
@@ -39,6 +42,8 @@ int main(int argc, char **argv) {
   Owned<ID3D12PipelineState> pso;
   Owned<ID3D12DescriptorHeap> heap;
   Owned<ID3D12Resource> upload, output, readback;
+  Owned<ID3D12Resource> indirect_arguments;
+  Owned<ID3D12CommandSignature> signature;
   Owned<ID3D12Fence> fence;
   Owned<ID3DBlob> blob;
   if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.p)))) return 1;
@@ -84,6 +89,24 @@ int main(int argc, char **argv) {
     return SUCCEEDED(device.p->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, state, nullptr,
         IID_PPV_ARGS(resource)));
   };
+  if (indirect) {
+    if (!buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, &indirect_arguments.p)) return 1;
+    void *arguments = nullptr;
+    if (FAILED(indirect_arguments.p->Map(0, nullptr, &arguments))) return 1;
+    const UINT data[] = {selected, 1, 1, 1};
+    std::memcpy(arguments, data, sizeof(data));
+    if (indirect_multi) {
+      const UINT two_commands[] = {0, 1, 1, 1, 1, 1, 1, 1};
+      std::memcpy(arguments, two_commands, sizeof(two_commands));
+    }
+    indirect_arguments.p->Unmap(0, nullptr);
+    D3D12_INDIRECT_ARGUMENT_DESC args[2] = {};
+    args[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+    args[0].Constant = {1, 0, 1};
+    args[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    D3D12_COMMAND_SIGNATURE_DESC desc = {16, 2, args, 0};
+    if (FAILED(device.p->CreateCommandSignature(&desc, root.p, IID_PPV_ARGS(&signature.p)))) return 1;
+  }
   if (!buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, &upload.p) ||
       !buffer(D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, &readback.p)) return 1;
   bd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -127,8 +150,9 @@ int main(int argc, char **argv) {
   list.p->SetDescriptorHeaps(1, &heap.p);
   list.p->SetComputeRootSignature(root.p);
   list.p->SetComputeRootDescriptorTable(0, heap.p->GetGPUDescriptorHandleForHeapStart());
-  if (dynamic) list.p->SetComputeRoot32BitConstant(1, selected, 0);
-  list.p->Dispatch(1, 1, 1);
+  if (dynamic) list.p->SetComputeRoot32BitConstant(1, indirect ? selected ^ 1u : selected, 0);
+  if (indirect) list.p->ExecuteIndirect(signature.p, indirect_multi ? 2 : 1, indirect_arguments.p, 0, nullptr, 0);
+  else list.p->Dispatch(1, 1, 1);
   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
   list.p->ResourceBarrier(1, &barrier);
@@ -140,6 +164,11 @@ int main(int argc, char **argv) {
     return 0;
   }
   if (FAILED(closed) || FAILED(device.p->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.p)))) return 1;
+  if (indirect_live) {
+    if (static_ranges) return 1;
+    srv.Buffer.FirstElement = 2;
+    device.p->CreateShaderResourceView(upload.p, &srv, heap.p->GetCPUDescriptorHandleForHeapStart());
+  }
   ID3D12CommandList *commands[] = {list.p}; queue.p->ExecuteCommandLists(1, commands);
   if (FAILED(queue.p->Signal(fence.p, 1))) return 1;
   HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -151,7 +180,8 @@ int main(int argc, char **argv) {
   bool ok = true;
   for (unsigned i = 0; i < 64; ++i) {
     const UINT expected = i == 0 ? 11 : i == 1 ? 41 : i == 2 ? 99 :
-        nonuniform && i == 4 ? 28 :
+        indirect_live && i == 4 ? 116 :
+        (nonuniform || indirect_multi) && i == 4 ? 28 :
         i == (selected ? 3u : 4u) ? (selected ? 58u : 28u) : 0xcafe1234;
     if (words[i] != expected) { std::cerr << "word " << i << " actual=" << words[i] << " expected=" << expected << '\n'; ok = false; }
   }

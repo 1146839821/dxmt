@@ -51,7 +51,7 @@ Task Analysis for this refresh:
 
 | Production gap | Current boundary | Next closure work |
 | --- | --- | --- |
-| Typed UAV | Production origin lowering and bounded direct/non-updating-indirect probes exist; additional-format declaration remains FALSE | Default production enablement, remaining indirect/provenance/view/lifetime contracts, then complete matrices |
+| Typed UAV | Production origin lowering and bounded direct/indirect compute probes exist, including MSC root constant updates; additional-format declaration remains FALSE | Default production qualification, root-VA/graphics indirect and remaining provenance/view/lifetime contracts, then complete matrices |
 | MinMax | Opt-in AIR operations/clamps and DXIL float Texture2D SampleLevel/static roots plus bounded dynamic SampleGrad compute dispatch have focused GPU readbacks | Broader operations/formats/shapes, cube/aniso/feedback, indirect and production qualification remain open |
 | Tiled Tier 2 | Declared NOT_SUPPORTED | Packed mips, mapping, feedback, filtering/LOD, lifetime and synchronization closure |
 | LogicOp (no-private) | OPTIONS reports FALSE in this variant | Implement a compliant path or explicitly exclude this variant from the FL12_0 claim; tests alone cannot close this gap |

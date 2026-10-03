@@ -36,6 +36,13 @@ struct dxmt_compute_command_data {
   device ulong * rootsig_qwords;
   uint rootsig_qwords_stride;
   packed_uint3 tgsize;
+  device char *msc_tlab;
+  device char *msc_template;
+  device uint *msc_layout_offsets;
+  device void *msc_heap;
+  device void *msc_sampler_heap;
+  ulong msc_tlab_stride;
+  ulong msc_template_size;
 };
 
 struct d3d12_draw_arguments {
@@ -209,6 +216,11 @@ public:
     if (is_compute)
       source << "if (x !=0 ) return;\n";
 
+    if (is_compute) {
+      // Named runtime binding constants, not AIR slots, for MSC commands.
+      source << "device char *msc_tlab = nullptr;\n";
+    }
+
     source << "uint count = command_data.max_count_buffer ? "
               "command_data.max_count_buffer[0] : command_data.max_count;\n";
     source << "for (uint i = 0; i < command_data.max_count; i++) {\n";
@@ -222,6 +234,10 @@ public:
     }
     source << "cmd.reset();\n";
     source << "if (i >= count) continue;\n";
+    if (is_compute)
+      source << "msc_tlab = command_data.msc_tlab ? command_data.msc_tlab + i * command_data.msc_tlab_stride : nullptr;\n"
+                "if (msc_tlab) { for (ulong b = 0; b < command_data.msc_template_size; ++b) "
+                "msc_tlab[b] = command_data.msc_template[b]; }\n";
     source << "device ulong * rootsig_qwords = command_data.rootsig_qwords + "
               "(i * command_data.rootsig_qwords_stride);\n";
     if (!is_compute)
@@ -238,8 +254,14 @@ public:
         source << "cmd.set_fragment_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS
                << ");\n";
       } else {
+        source << "if (msc_tlab) {\n"
+               << "cmd.set_kernel_buffer(msc_tlab," << DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT << ");\n"
+               << "cmd.set_kernel_buffer(command_data.msc_heap," << DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT << ");\n"
+               << "cmd.set_kernel_buffer(command_data.msc_sampler_heap," << DXMT_MSC_SAMPLER_HEAP_BIND_POINT << ");\n"
+               << "} else {\n";
         source << "cmd.set_kernel_buffer(rootsig_qwords, " << SM50_BINDING_INDEX_ROOT_ARGUMENTS << ");\n";
         source << "cmd.set_kernel_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS << ");\n";
+        source << "}\n";
       }
     }
 
@@ -297,6 +319,10 @@ public:
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
         for (unsigned j = 0; j < arg.Constant.Num32BitValuesToSet; j++) {
+          if (is_compute)
+            source << "if (msc_tlab) reinterpret_cast<device uint *>(msc_tlab + command_data.msc_layout_offsets["
+                   << parameter_index << "])[" << (j + arg.Constant.DestOffsetIn32BitValues)
+                   << "] = arg.constant_" << i << "_" << j << "; else ";
           source << "reinterpret_cast<device uint *>(rootsig_qwords + " << offset << ")["
                  << (j + arg.Constant.DestOffsetIn32BitValues) << "] = arg.constant_" << i << "_" << j << ";\n";
         }

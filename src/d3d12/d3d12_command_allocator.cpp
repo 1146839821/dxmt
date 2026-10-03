@@ -181,7 +181,7 @@ MTLD3D12CommandAllocatorImpl::DiscardRecord() {
 
 IndirectComputeCommandData *
 MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount,
-    const D3D12TypedOriginComputeVariant *variant) {
+    const D3D12TypedOriginComputeVariant *variant, const wmtcmd_compute_setbuffer **resolver_binding) {
   const auto threadgroup_size = variant ? variant->threadgroup_size : pPSO->threadgroup_size;
   WMTIndirectCommandBufferInfo info;
   info.inherit_buffers = !pCmdSig->UpdateRootArguments;
@@ -228,6 +228,13 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
     data->rootsig_qwords = 0;
     data->rootsig_qwords_stride = 0;
     data->static_samplers = 0;
+    data->msc_tlab = 0;
+    data->msc_template = 0;
+    data->msc_layout_offsets = 0;
+    data->msc_heap = 0;
+    data->msc_sampler_heap = 0;
+    data->msc_tlab_stride = 0;
+    data->msc_template_size = 0;
   }
 
   {
@@ -250,10 +257,16 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
     cmd_argbuf_res.buffer = gpu_heap_buffer_;
     cmd_argbuf_res.offset = Offset;
     cmd_argbuf_res.index = 30;
+    if (resolver_binding) *resolver_binding = &cmd_argbuf_res;
 
     auto &cmd_dispatch_res = EncodeComputeCommand<wmtcmd_compute_dispatch>();
     cmd_dispatch_res.type = WMTComputeCommandDispatch;
     cmd_dispatch_res.size = {1, 1, 1};
+
+    // The resolver writes root/TLAB bytes consumed by the indirect dispatches.
+    auto &barrier = EncodeComputeCommand<wmtcmd_compute_memory_barrier>();
+    barrier.type = WMTComputeCommandMemoryBarrier;
+    barrier.scope = WMTBarrierScopeBuffers;
 
     auto &cmd_setpso = EncodeComputeCommand<wmtcmd_compute_setpso>();
     cmd_setpso.type = WMTComputeCommandSetPSO;
