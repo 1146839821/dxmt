@@ -2004,16 +2004,36 @@ public:
     const auto gpu_address = allocation->gpuAddress();
     auto interval_iter = interval_map_.find(gpu_address);
     if (interval_iter != interval_map_.end() && interval_iter->second == allocation) {
-      interval_map_.erase(interval_iter);
       auto resource_iter = resource_interval_map_.find(gpu_address);
-      if (resource_iter != resource_interval_map_.end() &&
-          (!resource || resource_iter->second == resource))
+      auto current_owner = resource_iter != resource_interval_map_.end() ? resource_iter->second : nullptr;
+      // A replacement registration may keep the same allocation but change
+      // owners. A stale unregister must not remove its VA or residency entry.
+      if (current_owner != resource)
+        return S_OK;
+      interval_map_.erase(interval_iter);
+      if (resource_iter != resource_interval_map_.end())
         resource_interval_map_.erase(resource_iter);
     }
     auto buffer = allocation->buffer();
     residency_set_.removeAllocations(&buffer, 1);
     residency_set_.commit();
     return S_OK;
+  }
+
+  HRESULT
+  SnapshotRegisteredBuffers(std::vector<Rc<BufferAllocation>> &allocations) {
+    try {
+      std::vector<Rc<BufferAllocation>> snapshot;
+      {
+        std::unique_lock<dxmt::mutex> lock(residency_lock_);
+        snapshot.reserve(interval_map_.size());
+        for (const auto &[address, allocation] : interval_map_)
+          snapshot.emplace_back(allocation);
+      }
+      // Drop the caller's previous references outside the registry lock.
+      allocations = std::move(snapshot);
+      return S_OK;
+    } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
   }
 
   BufferAllocation *

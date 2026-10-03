@@ -16,6 +16,7 @@ int main(int argc, char **argv) {
   const bool indirect = argc == 3 && std::strstr(argv[2], "--indirect") == argv[2];
   const bool indirect_multi = indirect && std::strstr(argv[2], "multi");
   const bool indirect_live = indirect && std::strstr(argv[2], "live");
+  const bool indirect_va = indirect && std::strstr(argv[2], "-va");
   const bool mismatch = argc == 3 && !std::strcmp(argv[2], "--embedded-mismatch");
   const bool override_root = argc == 3 && !std::strcmp(argv[2], "--embedded-override");
   const bool embedded = argc == 3 && (!std::strcmp(argv[2], "--embedded") ||
@@ -43,6 +44,7 @@ int main(int argc, char **argv) {
   Owned<ID3D12DescriptorHeap> heap;
   Owned<ID3D12Resource> upload, output, readback;
   Owned<ID3D12Resource> indirect_arguments;
+  Owned<ID3D12Resource> selection;
   Owned<ID3D12CommandSignature> signature;
   Owned<ID3D12Fence> fence;
   Owned<ID3DBlob> blob;
@@ -58,6 +60,7 @@ int main(int argc, char **argv) {
   parameters[0].DescriptorTable = {2, ranges};
   parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
   parameters[1].Constants = {0, 0, 1};
+  if (indirect_va) { parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; parameters[1].Descriptor = {0, 0}; }
   D3D12_ROOT_SIGNATURE_DESC rd = {dynamic ? 2u : 1u, parameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
   HRESULT serialized;
   if (static_ranges) {
@@ -69,6 +72,10 @@ int main(int argc, char **argv) {
     parameters1[0].DescriptorTable = {2, ranges1};
     parameters1[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameters1[1].Constants = {0, 0, 1};
+    if (indirect_va) {
+      parameters1[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+      parameters1[1].Descriptor = {0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_NONE};
+    }
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC versioned = {};
     versioned.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     versioned.Desc_1_1 = {dynamic ? 2u : 1u, parameters1, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
@@ -103,8 +110,12 @@ int main(int argc, char **argv) {
     D3D12_INDIRECT_ARGUMENT_DESC args[2] = {};
     args[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
     args[0].Constant = {1, 0, 1};
+    if (indirect_va) {
+      args[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW;
+      args[0].ConstantBufferView.RootParameterIndex = 1;
+    }
     args[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-    D3D12_COMMAND_SIGNATURE_DESC desc = {16, 2, args, 0};
+    D3D12_COMMAND_SIGNATURE_DESC desc = {indirect_va ? 20u : 16u, 2, args, 0};
     if (FAILED(device.p->CreateCommandSignature(&desc, root.p, IID_PPV_ARGS(&signature.p)))) return 1;
   }
   if (!buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, &upload.p) ||
@@ -150,7 +161,8 @@ int main(int argc, char **argv) {
   list.p->SetDescriptorHeaps(1, &heap.p);
   list.p->SetComputeRootSignature(root.p);
   list.p->SetComputeRootDescriptorTable(0, heap.p->GetGPUDescriptorHandleForHeapStart());
-  if (dynamic) list.p->SetComputeRoot32BitConstant(1, indirect ? selected ^ 1u : selected, 0);
+  if (indirect_va) list.p->SetComputeRootConstantBufferView(1, 0);
+  else if (dynamic) list.p->SetComputeRoot32BitConstant(1, indirect ? selected ^ 1u : selected, 0);
   if (indirect) list.p->ExecuteIndirect(signature.p, indirect_multi ? 2 : 1, indirect_arguments.p, 0, nullptr, 0);
   else list.p->Dispatch(1, 1, 1);
   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -164,6 +176,18 @@ int main(int argc, char **argv) {
     return 0;
   }
   if (FAILED(closed) || FAILED(device.p->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.p)))) return 1;
+  if (indirect_va) {
+    bd.Flags = D3D12_RESOURCE_FLAG_NONE;
+    if (!buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, &selection.p)) return 1;
+    if (FAILED(selection.p->Map(0, nullptr, &mapped))) return 1;
+    std::memcpy(mapped, &selected, sizeof(selected)); selection.p->Unmap(0, nullptr);
+    if (FAILED(indirect_arguments.p->Map(0, nullptr, &mapped))) return 1;
+    const UINT64 va = selection.p->GetGPUVirtualAddress();
+    const UINT dispatch[] = {1, 1, 1};
+    std::memcpy(mapped, &va, sizeof(va));
+    std::memcpy(static_cast<char *>(mapped) + sizeof(va), dispatch, sizeof(dispatch));
+    indirect_arguments.p->Unmap(0, nullptr);
+  }
   if (indirect_live) {
     if (static_ranges) return 1;
     srv.Buffer.FirstElement = 2;

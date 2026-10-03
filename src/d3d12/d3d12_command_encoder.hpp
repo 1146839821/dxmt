@@ -93,6 +93,8 @@ struct EncoderData {
   std::vector<PendingSamplerHeapUse> pending_sampler_uses; // Volatile only.
   bool static_sampler_reduction = false;
   bool static_reduction_defaults_invalid = false;
+  // GPU-generated root VAs cannot be enumerated at recording time.
+  bool indirect_root_va = false;
 
   void
   RetainDescriptorHeap(IUnknown *heap) {

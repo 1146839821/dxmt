@@ -336,6 +336,9 @@ public:
         if (parameter_index >= rootsig->ParameterSlots)
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
+        if (is_compute)
+          source << "if (msc_tlab) *reinterpret_cast<device ulong *>(msc_tlab + command_data.msc_layout_offsets["
+                 << parameter_index << "]) = arg.cb_" << i << "; else ";
         source << "rootsig_qwords[" << offset << "] = arg.cb_" << i << ";\n";
         break;
       }
@@ -347,6 +350,9 @@ public:
         if (parameter_index >= rootsig->ParameterSlots)
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
+        if (is_compute)
+          source << "if (msc_tlab) *reinterpret_cast<device ulong *>(msc_tlab + command_data.msc_layout_offsets["
+                 << parameter_index << "]) = arg.srv_" << i << "; else ";
         source << "rootsig_qwords[" << offset << "] = arg.srv_" << i << ";\n";
         break;
       }
@@ -358,6 +364,9 @@ public:
         if (parameter_index >= rootsig->ParameterSlots)
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
+        if (is_compute)
+          source << "if (msc_tlab) *reinterpret_cast<device ulong *>(msc_tlab + command_data.msc_layout_offsets["
+                 << parameter_index << "]) = arg.uav_" << i << "; else ";
         source << "rootsig_qwords[" << offset << "] = arg.uav_" << i << ";\n";
         break;
       }

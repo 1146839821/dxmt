@@ -30,13 +30,11 @@ D3D12_RESOURCE_DESC Buffer(UINT64 bytes) {
 void Run(unsigned mode, const void *shader, size_t shader_size) {
   Owned<ID3D12Device> device;
   Check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.p)));
-  D3D12_ROOT_PARAMETER params[3] = {};
+  D3D12_ROOT_PARAMETER params[2] = {};
   params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
   params[0].Constants = {0, 0, 3};
   params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-  params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-  params[2].Descriptor.ShaderRegister = 1;
-  D3D12_ROOT_SIGNATURE_DESC root_desc = {mode == 4 ? 3u : 2u, params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {2, params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
   Owned<ID3DBlob> root_blob;
   Check(D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob.p, nullptr));
   Owned<ID3D12RootSignature> root;
@@ -51,12 +49,8 @@ void Run(unsigned mode, const void *shader, size_t shader_size) {
   args[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
   args[0].Constant = {0, 1, 1}; // Reset one odd-offset DWORD, not the whole parameter.
   if (mode == 3) args[0].Constant = {0, 0, 2};
-  if (mode == 4) {
-    args[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW;
-    args[0].ConstantBufferView.RootParameterIndex = 2;
-  }
   args[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-  D3D12_COMMAND_SIGNATURE_DESC sd = {mode >= 3 ? 20u : 16u, 2, args, 0};
+  D3D12_COMMAND_SIGNATURE_DESC sd = {mode == 3 ? 20u : 16u, 2, args, 0};
   Owned<ID3D12CommandSignature> signature;
   Check(device->CreateCommandSignature(&sd, root.p, IID_PPV_ARGS(&signature.p)));
   Owned<ID3D12Resource> upload, output, readback;
@@ -68,12 +62,6 @@ void Run(unsigned mode, const void *shader, size_t shader_size) {
   Check(upload->Map(0, nullptr, &mapping));
   const UINT data[] = {99, 1, 1, 1, 0}; // Last DWORD is a zero GPU count.
   std::memcpy(mapping, data, sizeof(data));
-  if (mode == 4) {
-    const UINT64 va = upload->GetGPUVirtualAddress();
-    std::memcpy(mapping, &va, sizeof(va));
-    const UINT dispatch[] = {1, 1, 1};
-    std::memcpy(static_cast<char *>(mapping) + sizeof(va), dispatch, sizeof(dispatch));
-  }
   if (mode == 3) {
     const UINT two_commands[] = {0, 99, 1, 1, 1, 1, 100, 1, 1, 1};
     std::memcpy(mapping, two_commands, sizeof(two_commands));
@@ -103,11 +91,6 @@ void Run(unsigned mode, const void *shader, size_t shader_size) {
   list->ResourceBarrier(1, &barrier);
   list->ExecuteIndirect(signature.p, mode == 1 ? 0 : mode == 3 ? 2 : 1, upload.p, 0,
                         mode == 2 ? upload.p : nullptr, mode == 2 ? 16 : 0);
-  if (mode == 4) {
-    if (SUCCEEDED(list->Close())) throw std::runtime_error("MSC root VA update unexpectedly admitted");
-    std::cout << "MSC root VA update rejected at recording PASS\n";
-    return;
-  }
   list->ResourceBarrier(1, &barrier);
   list->SetComputeRoot32BitConstant(0, mode == 3 ? 2 : 1, 0); // Leave reset value and preserved keep untouched.
   list->Dispatch(1, 1, 1);
@@ -149,7 +132,7 @@ int main(int argc, char **argv) {
     std::ifstream file(argv[1], std::ios::binary);
     std::vector<char> bytes((std::istreambuf_iterator<char>(file)), {});
     if (bytes.empty()) return 2;
-    try { for (unsigned mode = 0; mode != 5; ++mode) Run(mode, bytes.data(), bytes.size()); }
+    try { for (unsigned mode = 0; mode != 4; ++mode) Run(mode, bytes.data(), bytes.size()); }
     catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }
     return 0;
   }

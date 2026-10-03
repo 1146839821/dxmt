@@ -433,6 +433,8 @@ public:
 
   virtual BufferAllocation *LookupBufferByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) = 0;
 
+  virtual HRESULT SnapshotRegisteredBuffers(std::vector<Rc<BufferAllocation>> &allocations) = 0;
+
   virtual MTLD3D12Resource *LookupResourceByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) = 0;
 
   virtual bool BeginEnhancedSplitBarrier(const EnhancedSplitBarrierState &state) = 0;

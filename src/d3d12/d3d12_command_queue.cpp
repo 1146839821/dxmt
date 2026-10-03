@@ -160,6 +160,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     std::vector<std::shared_ptr<D3D12TypedOriginSubmissionBinding>> typed_origin_bindings;
     std::vector<std::shared_ptr<D3D12MinMaxSubmissionBinding>> minmax_bindings;
     std::vector<Rc<Sampler>> sampler_refs;
+    std::vector<std::vector<Rc<BufferAllocation>>> indirect_root_buffers;
     HANDLE latency_waitable = nullptr;
   };
 
@@ -1188,6 +1189,25 @@ public:
           auto encoder = cmdbuf.computeCommandEncoder(false);
            LabelEncoder(encoder, recording_id, data->id, "Compute");
            encoder.waitForFence(fence_);
+          if (data->indirect_root_va) {
+            std::vector<Rc<BufferAllocation>> snapshot;
+            if (FAILED(device_->SnapshotRegisteredBuffers(snapshot))) {
+              translation_failed = true;
+              encoder.endEncoding();
+              break;
+            }
+            // GPU commands may select any currently registered buffer. Resolve
+            // and retain under the registry lock; native fan-out is outside it.
+            try { submission.indirect_root_buffers.push_back(std::move(snapshot)); }
+            catch (const std::bad_alloc &) {
+              translation_failed = true;
+              encoder.endEncoding();
+              break;
+            }
+            for (const auto &allocation : submission.indirect_root_buffers.back())
+              encoder.useResource(allocation->buffer(),
+                  static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite));
+          }
           bool sampler_reduction = false;
           if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs, &sampler_reduction) ||
               !pCommandList->ResolvePendingDescriptorUses(

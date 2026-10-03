@@ -5,6 +5,13 @@ dx12_sm6_probe = executable('dx12_compute_sm6', 'dx12_compute_sm6.cpp',
 executable('dx12_indirect_state', 'dx12_indirect_state.cpp',
   build_by_default: false, dependencies: [d3d12_dep],
 )
+executable('dx12_indirect_root_va', 'dx12_indirect_root_va.cpp',
+  build_by_default: false, dependencies: [d3d12_dep],
+)
+executable('dx12_va_snapshot', 'dx12_va_snapshot.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
 
 executable('dx12_typed_origin_root', 'dx12_typed_origin_root.cpp',
   build_by_default: false,
@@ -413,6 +420,11 @@ if dxc_command.length() > 0
   )
   custom_target('dx12_indirect_state_fixture',
     input: 'indirect_state.hlsl', output: 'indirect_state.cs.cso',
+    command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
+  custom_target('dx12_indirect_root_va_fixture',
+    input: 'indirect_root_va.hlsl', output: 'indirect_root_va.cs.cso',
     command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
     build_by_default: false,
   )

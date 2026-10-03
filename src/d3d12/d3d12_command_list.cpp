@@ -1384,12 +1384,15 @@ public:
 
     if (pipeline->shader_backend == D3D12ShaderBackend::MetalShaderConverter &&
         (signature->UpdateRootArguments || signature->UpdateVertexBuffers || signature->UpdateIndexBuffer)) {
-      bool constants_only = pipeline->IsComputePipelineState &&
+      bool compute_roots_only = pipeline->IsComputePipelineState &&
           signature->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
       for (const auto &update : signature->StateUpdates)
-        constants_only &= update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-      if (!constants_only) {
-        FailRecording(name, "MSC indirect root VA or graphics binding updates are unsupported");
+        compute_roots_only &= update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT ||
+            update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW ||
+            update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW ||
+            update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+      if (!compute_roots_only) {
+        FailRecording(name, "MSC indirect graphics binding updates are unsupported");
         return false;
       }
     }
@@ -5658,20 +5661,38 @@ public:
     auto offsets = static_cast<uint32_t *>(offsets_ptr);
     std::fill_n(offsets, root->ParameterSlots, UINT32_MAX);
     for (const auto &update : signature->StateUpdates) {
-      const auto &constant = update.Constant;
+      uint32_t parameter = 0, type = 0;
+      uint64_t end = sizeof(uint64_t);
+      switch (update.Type) {
+      case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT:
+        parameter = update.Constant.RootParameterIndex;
+        type = DXMT_MSC_RESOURCE_CONSTANT;
+        end = (uint64_t(update.Constant.DestOffsetIn32BitValues) + update.Constant.Num32BitValuesToSet) * sizeof(uint32_t);
+        break;
+      case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW:
+        parameter = update.ConstantBufferView.RootParameterIndex; type = DXMT_MSC_RESOURCE_CBV;
+        break;
+      case D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW:
+        parameter = update.ShaderResourceView.RootParameterIndex; type = DXMT_MSC_RESOURCE_SRV;
+        break;
+      case D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW:
+        parameter = update.UnorderedAccessView.RootParameterIndex; type = DXMT_MSC_RESOURCE_UAV;
+        break;
+      default:
+        FailRecording(__func__, "unsupported updated MSC root kind"); return false;
+      }
       bool found = false;
       for (size_t i = 0; i < count; ++i) {
         const auto &layout = layouts[i];
-        if (layout.parameter_index != constant.RootParameterIndex) continue;
-        const uint64_t end = uint64_t(constant.DestOffsetIn32BitValues) + constant.Num32BitValuesToSet;
-        if (layout.resource_type != DXMT_MSC_RESOURCE_CONSTANT || layout.top_level_offset > UINT32_MAX ||
+        if (layout.parameter_index != parameter) continue;
+        if (layout.resource_type != type || layout.top_level_offset > UINT32_MAX ||
             layout.top_level_offset > template_size || layout.size_bytes > template_size - layout.top_level_offset ||
-            end > layout.size_bytes / sizeof(uint32_t)) break;
-        offsets[constant.RootParameterIndex] = static_cast<uint32_t>(layout.top_level_offset);
+            end > layout.size_bytes) break;
+        offsets[parameter] = static_cast<uint32_t>(layout.top_level_offset);
         found = true;
         break;
       }
-      if (!found) { FailRecording(__func__, "updated constant has no compatible MSC layout"); return false; }
+      if (!found) { FailRecording(__func__, "updated root has no compatible MSC layout"); return false; }
     }
     data->msc_tlab_stride = stride;
     data->msc_template_size = template_size;
@@ -5836,6 +5857,11 @@ public:
           pso_compute_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
       if (!PreDispatch(sig->UpdateRootArguments && !msc_updates, true, &origin_variant))
         return;
+      for (const auto &update : sig->StateUpdates)
+        if (update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW ||
+            update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW ||
+            update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW)
+          allocator_->encoder_current->indirect_root_va = true;
 
       if (indirect_residency_) {
         EncodeComputeResourceUse(arg_buffer->buffer->current()->buffer().handle, WMTResourceUsageRead);
