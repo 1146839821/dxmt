@@ -184,3 +184,121 @@ review agents are unavailable; these are not independent-review results.
 No game/prefix DLL deployment or Steam/process restart. Next: construct the
 graphics PSO variant and connect render replay to this shared binding path, then
 verify actual minimum/maximum pixel output.
+
+## Graphics replay integration — Task Analysis
+
+Branch `feat/d3d12-1`, clean HEAD `7dd0894`, baseline `e147c710` (113 local
+commits). Existing stage-aware compiler and shared descriptor materializer are
+not selected by PreDraw or replayed by the render queue. Hypothesis: retain the
+ordinary native render description and original VS/PS, compile a PSO-owned
+pixel variant using the shared augmented root for both stages, and replace a
+recorded marker with submission-owned PSO/TLAB commands. Static reduction roots
+need eager private compilation; ordinary roots can select lazily under the
+existing explicit DXC-directory opt-in. No executable-family fallback.
+
+Evidence: current PreDraw binds ordinary root layouts and sampler validation;
+render queue replays allocator nodes directly. Expected effect: real standard
+graphics MinMax SampleLevel/SampleGrad draws, including static and volatile
+descriptor snapshots, without modifying immutable command nodes. Risks: shared
+VS/PS root offsets, graphics-state preservation, PSO switching, borrowed lifetime,
+mixed render streams and unsupported indirect/emulation. Implement PSO variant,
+recorded markers, submission cloning/lifetime, then focused actual pixel readback
+and compute regression in both builds. Broader GPU matrices follow production
+gap closure. Capabilities/FL/SM, native ABI, AIRCONV and game deployment unchanged.
+
+## Graphics replay integration — Task Result
+
+### Branch / Baseline / Local Commit
+
+`feat/d3d12-1`; read-only baseline `origin/feat/d3d12` (`e147c710`),
+parent `7dd0894` (113 local commits). This is the local
+`feat(d3d12): integrate MinMax graphics draw replay` commit; final hash is
+reported in the task response. NOT PUSHED.
+
+### Changed Files / Implementation
+
+Graphics pipeline/device interfaces and `d3d12_minmax_pipeline.hpp` now expose
+a PSO-owned pixel MinMax variant. Standard graphics retains the original VS/PS
+and value-owned native render description. Lazy variants compile VS and lowered
+PS against the same augmented compiler root; static reduction roots compile
+eagerly and require the explicit DXC-directory opt-in. Root/application pipeline
+cache provenance remains original. Native vertex input, attachments, blending,
+raster/MSAA and other stored render state are reused, not reconstructed from
+defaults. Transient native function/archive pointers are not borrowed in the
+saved description. Cached variants reject a different compiler directory.
+
+`d3d12_command_list.cpp`, command encoder and MinMax dispatch metadata record
+private draw markers and the shared descriptor/TLAB snapshots. Root buffer uses
+remain explicit; private application tables are not independently reread by the
+ordinary pending-use path. Ordinary draws restore their PSO and application TLAB.
+`d3d12_command_queue.cpp` clones only passes containing private draws, replaces
+markers with PSO plus vertex/fragment TLAB bindings, declares resources resident
+and retains submission bindings until GPU completion. Allocator-owned command
+nodes/templates are not patched. Ordinary passes keep direct single-call replay.
+
+### DXBC / AIRCONV Impact / DXIL / MSC Impact / Shared Runtime Impact
+
+No AIRCONV changes or executable-family fallback. Existing mixed-family and
+stage validation remain enforced. DXIL classification records sampler-dependent
+operations (sample/gather/LOD query) so pixel-only lowering cannot silently run
+vertex sampling through point-encoded reduction descriptors. Such VS variants
+remain rejected pending actual pre-raster lowering. Native ABI/IR lowering is
+unchanged. Shared runtime now consumes the stage-aware binding implementation
+from the prior commit in actual render submissions. The MSC compilation and
+integration skills informed the same-root VS/PS layout, native vertex-fetch
+preservation and submission residency/lifetime contract.
+
+### Tests Added / Tests Run / Runtime Results
+
+`dx12_minmax_fragment.cpp` now uploads distinguishable 2x2 textures, renders to
+a 4x4 target and checks every RGBA pixel after D3D12 texture copy/readback.
+SampleLevel/SampleGrad cover ALL/PIXEL visibility, dynamic samplers, static root
+MINIMUM/MAXIMUM samplers, static/volatile application descriptors and two
+submissions of the same closed list. Dynamic cases also switch to an ordinary
+linear draw in the same render pass, checking 128/128 control pixels against
+the private extrema (16/240 or replacement 32/224). Descriptor-static mutation
+is a defensive snapshot probe, not evidence that D3D12 permits changing static
+descriptors before re-recording. Templates and command-node links are checked
+unchanged after both submissions; overlapping submissions are not tested.
+
+Negative probes cover absent static opt-in, stage/visibility/root deny flags,
+directory mismatch, real sampling VS rejection and graphics ExecuteIndirect
+recording rejection. The latter list is not submitted; `Close` must return
+`E_FAIL`. `minmax_fragment.hlsl` adds a sampling-VS negative fixture. All four
+shader fixtures were freshly built with repository DXC for the final runs.
+
+Both configurations were reconfigured, optional targets built and final full
+default builds completed before task-owned DLL staging. Evidence:
+`/Users/zhangbo/.cache/dxmt-minmax-render.WnEX31`, final `review-*` logs and
+`dxc-*` logs. Matching native runtime hashes were verified. Eight final process
+runs passed: two fragment operations, existing GPU-generated MinMax indirect
+count and typed-origin multi-command readback per configuration. Fragment runs
+cover 16 graphics cases and **32 real MinMax draw submissions**, plus 16 ordinary
+linear control draws; each case also performs a separate input upload submission.
+Compute count regression passes six GPU submissions with counts 0/1/7 and
+MaxCommandCount 2. Typed-origin GPU readbacks pass. Five host suites pass in each
+configuration. No shader/compiler warning in the reviewed optional builds.
+
+### Known Limitations / Capability Status / Feature Level Impact
+
+Bounded 2D float SampleLevel/SampleGrad direct graphics: DXMT_LOCAL_PASS.
+Full MinMax capability: PARTIAL. Graphics indirect (including non-updating),
+pre-raster sampling, emulation, implicit Sample/Bias, broader dimensions/views,
+cube/aniso/feedback and default-path complete qualification remain open. Direct
+indexed draw, graphics root VA updates, overlapping/in-flight reuse, Metal API/
+shader validation and native Windows oracle were not qualified by this probe.
+No full mandatory GPU matrix, game, performance or tessellation acceptance run.
+FL11_1 reporting unchanged; FL12_0/FL12_1 are not enabled; capability and SM
+declarations unchanged. Bounded success does not satisfy the full promotion gate.
+
+### Review / Git Status / Push Status / Next Recommended Task
+
+Standards main-agent self-review against `7dd0894`: ownership, saved native
+pointer clearing, exhaustive replay node sizes, marker validation, static/live
+snapshot isolation and ordinary-state restoration checked; no remaining blocking
+finding. Spec main-agent self-review: the full graphics/MinMax objective remains
+incomplete; unsupported cases reject instead of falling back or raising gates.
+Independent review agents are unavailable. `git diff --check` passed. Only task
+files committed locally, NOT PUSHED; no game/prefix DLL deployment or Steam kill.
+Next production gap: MinMax graphics indirect replay, beginning with inherited
+non-updating draw/indexed draw, then GPU-generated counts and root-update TLABs.

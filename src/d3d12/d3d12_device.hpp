@@ -353,6 +353,9 @@ public:
 
 class MTLD3D12GraphicsPipelineState : public MTLD3D12PipelineState {
 public:
+  virtual HRESULT GetMinMaxVariant(const wchar_t *dxc_directory,
+      const struct D3D12MinMaxGraphicsVariant **variant) = 0;
+  bool requires_minmax_variant = false;
   WMT::Reference<WMT::RenderPipelineState> pso;
   WMT::Reference<WMT::DepthStencilState> dsso;
   WMT::Reference<WMT::DepthStencilState> dsso_stencil_disabled;

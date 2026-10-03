@@ -2046,7 +2046,8 @@ public:
   DrawCallStatus
   PreDraw(
       bool SkipResourceBinding = false,
-      SM50_INDEX_BUFFER_FORMAT airconv_index_format = SM50_INDEX_BUFFER_FORMAT_NONE
+      SM50_INDEX_BUFFER_FORMAT airconv_index_format = SM50_INDEX_BUFFER_FORMAT_NONE,
+      bool AllowMinMax = true
   ) {
     if (!pso_graphics_)
       return DrawCallStatus::Invalid;
@@ -2054,6 +2055,24 @@ public:
       return DrawCallStatus::Invalid;
 
     const bool use_msc = pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
+    const D3D12MinMaxGraphicsVariant *minmax_variant = nullptr;
+    const auto minmax_directory = use_msc ? env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY") : "";
+    if (pso_graphics_->requires_minmax_variant && minmax_directory.empty()) {
+      FailRecording(__func__, "static reduction graphics PSO requires the MinMax path");
+      return DrawCallStatus::Invalid;
+    }
+    if (!minmax_directory.empty()) {
+      if (SkipResourceBinding || !AllowMinMax) {
+        FailRecording(__func__, "MinMax graphics indirect/skipped binding is unsupported");
+        return DrawCallStatus::Invalid;
+      }
+      const auto directory = str::tows(minmax_directory.c_str());
+      const auto hr = pso_graphics_->GetMinMaxVariant(directory.c_str(), &minmax_variant);
+      if (FAILED(hr) || !rootsig_graphics_ || !descriptor_heap_) {
+        FailRecording(__func__, "MinMax graphics preparation failed HRESULT=", hr);
+        return DrawCallStatus::Invalid;
+      }
+    }
     const bool use_msc_tessellation = pso_graphics_->msc_tessellation;
     const bool use_msc_geometry = pso_graphics_->msc_geometry;
     const bool use_msc_mesh = pso_graphics_->msc_mesh;
@@ -2083,7 +2102,7 @@ public:
           encode(WMTRenderCommandSetFragmentBuffer);
       }
     };
-    if (use_msc && rootsig_graphics_) {
+    if (use_msc && rootsig_graphics_ && !minmax_variant) {
       auto hr = rootsig_graphics_->InitializeMSCLayout();
       if (FAILED(hr)) {
         DEBUG("[DEBUG-DRAW] PreDraw rejected: MSC layout hr=", hr);
@@ -2273,7 +2292,7 @@ public:
       dirty_state_.clr(DirtyState::DescriptorHeaps);
     }
 
-    if (dirty_state_.test(DirtyState::GraphicsRootArguments) && !SkipResourceBinding) {
+    if (dirty_state_.test(DirtyState::GraphicsRootArguments) && !SkipResourceBinding && !minmax_variant) {
       if (use_msc) {
         auto offset = rootsig_graphics_ && rootsig_graphics_->MSCArgumentBufferSize
                           ? EncodeMSCArgumentBuffer(
@@ -2320,11 +2339,11 @@ public:
       dirty_state_.clr(DirtyState::GraphicsRootArguments);
     }
 
-    if (!EncodeSamplerUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, sampler_heap_.ptr(),
+    if (!minmax_variant && !EncodeSamplerUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, sampler_heap_.ptr(),
                            use_msc, pso_graphics_->air_sampler_reduction_eligible, SkipResourceBinding))
       return DrawCallStatus::Invalid;
 
-    if (encode_msc_resource_uses)
+    if (encode_msc_resource_uses && !minmax_variant)
       EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
 
     if ((airconv_render_residency_ || (pso_graphics_->air_sampler_reduction_eligible && sampler_heap_) ||
@@ -2436,6 +2455,22 @@ public:
       cmd.type = WMTRenderCommandSetStencilRef;
       cmd.stencil_ref = stencil_ref_;
       dirty_state_.clr(DirtyState::StencilRef);
+    }
+
+    if (minmax_variant) {
+      const auto offset = EncodeMSCArgumentBuffer(rootsig_graphics_.ptr(), rootarg_graphics_staging_,
+          descriptor_heap_.ptr(), sampler_heap_.ptr(), &minmax_variant->root.layout);
+      if (recording_failed_) return DrawCallStatus::Invalid;
+      std::shared_ptr<D3D12MinMaxDispatch> draw;
+      const auto hr = RecordD3D12MinMaxBinding(pso_graphics_.ptr(), minmax_variant, rootsig_graphics_.ptr(),
+          rootarg_graphics_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr(), ptr_add(allocator_->gpu_heap_, offset), draw);
+      if (FAILED(hr)) { FailRecording(__func__, "MinMax draw recording failed HRESULT=", hr); return DrawCallStatus::Invalid; }
+      EncodeRootResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, msc_render_stages, false);
+      auto &marker = allocator_->EncodeRenderCommand<wmtcmd_render_nop>();
+      marker.type = WMTRenderCommandNop; draw->render_marker = &marker; draw->graphics_variant = minmax_variant;
+      try { render->minmax_draws.push_back(std::move(draw)); }
+      catch (const std::bad_alloc &) { FailRecording(__func__, "MinMax draw allocation failed"); return DrawCallStatus::Invalid; }
+      dirty_state_.set(DirtyState::GraphicsRootArguments, DirtyState::GraphicsPipelineState);
     }
 
     if (recording_failed_)
@@ -5947,7 +5982,7 @@ public:
         return;
       }
       const auto index_format = indexed ? to_airconv_index_format(index_type) : SM50_INDEX_BUFFER_FORMAT_NONE;
-      if (PreDraw(false, index_format) != DrawCallStatus::AirconvTessellation)
+      if (PreDraw(false, index_format, false) != DrawCallStatus::AirconvTessellation)
         return;
 
       const uint32_t threads_per_patch = pso_graphics_->airconv_tessellation_threads_per_patch;
@@ -5981,7 +6016,7 @@ public:
         return;
       const bool indexed = sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
       const auto index_format = indexed ? to_airconv_index_format(index_type) : SM50_INDEX_BUFFER_FORMAT_NONE;
-      const auto status = PreDraw(false, index_format);
+      const auto status = PreDraw(false, index_format, false);
       if (status != DrawCallStatus::AirconvGeometry ||
           !geometry_primitive_matches(primitive_type, pso_graphics_->airconv_geometry_input_primitive))
         return;
@@ -6016,7 +6051,7 @@ public:
       FailRecording(__func__, "MSC indirect vertex input exceeds Metal buffer slots");
       return;
     }
-    DrawCallStatus status = PreDraw(encode_binding && !msc_updates);
+    DrawCallStatus status = PreDraw(encode_binding && !msc_updates, SM50_INDEX_BUFFER_FORMAT_NONE, false);
     if (status == DrawCallStatus::Invalid)
       return;
     if (status != DrawCallStatus::Ordinary)

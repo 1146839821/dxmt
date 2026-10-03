@@ -419,3 +419,11 @@ vs volatile replacement and vertex-only table retention, with compute GPU
 regressions intact (`D3D12_MINMAX_GRAPHICS.md`). Production graphics variant
 selection/render replay and real pixel readback still remain open; no FL gate or
 capability promotion follows from these binding tests.
+
+Graphics replay is now connected for bounded DXIL/MSC direct pixel MinMax
+SampleLevel/SampleGrad (`D3D12_MINMAX_GRAPHICS.md`). Normal/no-private fresh GPU
+readbacks pass static/volatile tables, static reduction samplers, repeat closed
+list submissions and ordinary linear draw restoration. This closes the direct
+runtime wiring gap, not full MinMax qualification: graphics indirect, pre-raster
+sampling, emulation, implicit operations and broader resource/matrix coverage
+remain open. Feature declarations and FL12_0 promotion remain unchanged.

@@ -22,6 +22,8 @@ struct D3D12MinMaxDispatch {
     std::vector<Slot> slots;
   };
   const wmtcmd_compute_nop *marker = nullptr;
+  const wmtcmd_render_nop *render_marker = nullptr;
+  const D3D12MinMaxGraphicsVariant *graphics_variant = nullptr;
   Com<MTLD3D12PipelineState> application_pso;
   Com<MTLD3D12RootSignature> application_root;
   Com<MTLD3D12DescriptorHeap> heap;

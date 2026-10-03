@@ -19,6 +19,9 @@
 #include "d3d12_device.hpp"
 #include "d3d12_pageable.hpp"
 #include "d3d12_shader_converter.hpp"
+#include "d3d12_minmax_pipeline.hpp"
+#include "util_env.hpp"
+#include "util_string.hpp"
 #include "dxmt_format.hpp"
 #include "com/com_object.hpp"
 #include "com/com_pointer.hpp"
@@ -448,6 +451,34 @@ InitializeDepthStencilStates(
 }
 
 class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12GraphicsPipelineState> {
+  Com<MTLD3D12RootSignature> application_root_;
+  std::vector<uint8_t> original_vs_, original_ps_;
+  WMTRenderPipelineInfo minmax_render_info_ = {};
+  bool minmax_render_info_valid_ = false;
+  std::mutex minmax_mutex_;
+  std::wstring minmax_dxc_directory_;
+  std::unique_ptr<D3D12MinMaxGraphicsVariant> minmax_variant_;
+
+  HRESULT PrepareMinMaxVariant(const wchar_t *directory, D3D12MinMaxShader &shader,
+      std::unique_ptr<D3D12MinMaxGraphicsVariant> &variant) {
+    // This variant lowers pixel sampling only. Do not silently execute a
+    // vertex sampler against the application's point-encoded reduction table.
+    if (ClassifyD3D12Shader({original_vs_.data(), original_vs_.size()}).uses_texture_sampling) return E_NOTIMPL;
+    std::string diagnostics;
+    auto hr = PrepareD3D12MinMaxShader({original_ps_.data(), original_ps_.size()}, directory,
+        shader, diagnostics, D3D12MinMaxShaderStage::Pixel);
+    if (FAILED(hr)) { ERR("MinMax pixel preparation failed: ", diagnostics); return hr; }
+    const D3D12MinMaxRoot *root = nullptr;
+    hr = application_root_->GetMinMaxCompilerRoot(shader.bindings.size(), &root);
+    if (FAILED(hr)) return hr;
+    auto candidate = std::make_unique<D3D12MinMaxGraphicsVariant>();
+    candidate->root = *root; candidate->bindings = shader.bindings;
+    hr = ResolveD3D12MinMaxBindings(candidate->root, candidate->bindings, candidate->locations,
+        diagnostics, D3D12MinMaxShaderStage::Pixel);
+    if (FAILED(hr)) { ERR("MinMax pixel bindings failed: ", diagnostics); return hr; }
+    variant = std::move(candidate);
+    return S_OK;
+  }
 
   D3D12AirconvShader shader_vs;
   D3D12AirconvShader shader_ps;
@@ -461,6 +492,46 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
   MTL_SHADER_REFLECTION ref_ds = {};
 
 public:
+  HRESULT GetMinMaxVariant(const wchar_t *directory, const D3D12MinMaxGraphicsVariant **variant) override {
+    if (!variant) return E_POINTER;
+    *variant = nullptr;
+    if (!directory) return E_INVALIDARG;
+    std::lock_guard<std::mutex> lock(minmax_mutex_);
+    try {
+      if (minmax_variant_) {
+        if (minmax_dxc_directory_ != directory) return E_INVALIDARG;
+        *variant = minmax_variant_.get(); return S_OK;
+      }
+      if (shader_backend != D3D12ShaderBackend::MetalShaderConverter || !application_root_ ||
+          !minmax_render_info_valid_ || original_vs_.empty() || original_ps_.empty()) return E_NOTIMPL;
+      D3D12MinMaxShader shader;
+      std::unique_ptr<D3D12MinMaxGraphicsVariant> candidate;
+      auto hr = PrepareMinMaxVariant(directory, shader, candidate);
+      if (FAILED(hr)) return hr;
+      D3D12ConvertedShader vs, ps;
+      const auto &root = candidate->root.layout.bytecode;
+      hr = ConvertD3D12Shader({original_vs_.data(), original_vs_.size()}, DXMT_MSC_STAGE_VERTEX,
+          vs, root.data(), root.size(), nullptr, 0, &device_->GetMSCCapabilities());
+      if (FAILED(hr)) return hr;
+      hr = ConvertD3D12MinMaxShader(shader, candidate->root, ps, &device_->GetMSCCapabilities());
+      if (FAILED(hr)) return hr;
+      WMT::Reference<WMT::Error> error;
+      auto metal = device_->GetMTLDevice();
+      auto vs_lib = metal.newLibrary(vs.metallib.data(), vs.metallib.size(), error);
+      auto ps_lib = metal.newLibrary(ps.metallib.data(), ps.metallib.size(), error);
+      if (!vs_lib || !ps_lib) return E_FAIL;
+      auto vs_function = vs_lib.newFunction(vs.entry_point.c_str());
+      auto ps_function = ps_lib.newFunction(ps.entry_point.c_str());
+      if (!vs_function || !ps_function) return E_FAIL;
+      auto info = minmax_render_info_;
+      info.vertex_function = vs_function.handle; info.fragment_function = ps_function.handle;
+      candidate->pso = metal.newRenderPipelineState(info, error);
+      if (!candidate->pso) { ERR("MinMax render PSO failed"); return E_FAIL; }
+      minmax_dxc_directory_ = directory;
+      minmax_variant_ = std::move(candidate); *variant = minmax_variant_.get();
+      return S_OK;
+    } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+  }
   MTLD3D12GraphicsPipelineStateImpl(MTLD3D12Device *pDevice) :
       MTLD3D12Pageable<MTLD3D12GraphicsPipelineState>(pDevice) {
     IsComputePipelineState = FALSE;
@@ -1099,6 +1170,33 @@ public:
         return hr;
     }
 
+    D3D12MinMaxShader static_minmax_shader;
+    if (use_msc && !msc_emulation_flags && has_pixel_shader && !has_stream_output) {
+      try {
+        original_vs_.assign(static_cast<const uint8_t *>(pDesc->VS.pShaderBytecode),
+            static_cast<const uint8_t *>(pDesc->VS.pShaderBytecode) + pDesc->VS.BytecodeLength);
+        original_ps_.assign(static_cast<const uint8_t *>(pDesc->PS.pShaderBytecode),
+            static_cast<const uint8_t *>(pDesc->PS.pShaderBytecode) + pDesc->PS.BytecodeLength);
+        if (pDesc->pRootSignature) application_root_ = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+        else if (root_signature && root_signature_size) {
+          Com<ID3D12RootSignature> root;
+          hr = device_->CreateRootSignature(0, root_signature, root_signature_size, IID_PPV_ARGS(&root));
+          if (FAILED(hr)) return hr;
+          application_root_ = static_cast<MTLD3D12RootSignature *>(root.ptr());
+        }
+        requires_minmax_variant = application_root_ && application_root_->HasAIRReductionSamplers;
+        if (requires_minmax_variant) {
+          const auto selected = env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY");
+          if (selected.empty()) return E_NOTIMPL;
+          minmax_dxc_directory_ = str::tows(selected.c_str());
+          hr = PrepareMinMaxVariant(minmax_dxc_directory_.c_str(), static_minmax_shader, minmax_variant_);
+          if (FAILED(hr)) return hr;
+          root_signature = minmax_variant_->root.layout.bytecode.data();
+          root_signature_size = minmax_variant_->root.layout.bytecode.size();
+        }
+      } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+    }
+
     D3D12ConvertedShader converted_vs;
     D3D12ConvertedShader converted_ps;
     D3D12ConvertedShader converted_gs;
@@ -1151,7 +1249,8 @@ public:
 
       if (pDesc->PS.pShaderBytecode) {
         if (FAILED(
-              hr = ConvertD3D12Shader(
+              hr = requires_minmax_variant ? ConvertD3D12MinMaxShader(static_minmax_shader,
+                    minmax_variant_->root, converted_ps, &msc_capabilities) : ConvertD3D12Shader(
                     ps_classification, pDesc->PS, DXMT_MSC_STAGE_FRAGMENT, converted_ps, root_signature,
                     root_signature_size, nullptr, 0, &msc_capabilities
                 )
@@ -1644,6 +1743,16 @@ public:
           return hr;
       } else {
         pso = metal.newRenderPipelineState(info, err);
+        if (use_msc && application_root_ && has_pixel_shader) {
+          minmax_render_info_ = info;
+          minmax_render_info_.vertex_function = minmax_render_info_.fragment_function = NULL_OBJECT_HANDLE;
+          minmax_render_info_.binary_archive_for_serialization = NULL_OBJECT_HANDLE;
+          minmax_render_info_.binary_archives_for_lookup.set(nullptr);
+          minmax_render_info_.num_binary_archives_for_lookup = 0;
+          minmax_render_info_.fail_on_binary_archive_miss = false;
+          minmax_render_info_valid_ = true;
+          if (minmax_variant_) minmax_variant_->pso = pso;
+        }
       }
 
       stream_output = has_stream_output;

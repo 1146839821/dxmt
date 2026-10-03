@@ -138,6 +138,111 @@ static bool ReplayPrivateCompute(
   } catch (const std::bad_alloc &) { ERR("Private compute replay allocation failed"); return false; }
 }
 
+union PrivateRenderReplayCommand {
+  wmtcmd_render_nop nop;
+  wmtcmd_render_setpso pso;
+  wmtcmd_render_setbuffer buffer;
+  wmtcmd_render_draw_indexed draw;
+  wmtcmd_render_setviewport viewport;
+  wmtcmd_render_msc_tessellation_draw_indexed tessellation;
+  wmtcmd_render_msc_geometry_draw_indexed geometry;
+  wmtcmd_render_dxmt_tessellation_mesh_draw_indexed air_tessellation;
+};
+
+static bool ReplayMinMaxRender(MTLD3D12Device *device, WMT::RenderCommandEncoder encoder,
+    RenderEncoderData *data, std::vector<std::shared_ptr<D3D12MinMaxSubmissionBinding>> &bindings) {
+  try {
+    std::unordered_map<const void *, const D3D12MinMaxDispatch *> markers;
+    for (const auto &draw : data->minmax_draws) {
+      if (!draw->render_marker || !draw->graphics_variant || draw->binding_variant != draw->graphics_variant ||
+          !markers.emplace(draw->render_marker, draw.get()).second) return false;
+    }
+    std::vector<PrivateRenderReplayCommand> replay;
+    for (auto *node = reinterpret_cast<wmtcmd_base *>(&data->cmd_head); node;
+         node = static_cast<wmtcmd_base *>(node->next.get())) {
+      if (auto marker = markers.find(node); marker != markers.end()) {
+        std::shared_ptr<D3D12MinMaxSubmissionBinding> binding;
+        const auto hr = MaterializeD3D12MinMaxDispatch(device, *marker->second, binding);
+        if (FAILED(hr)) { ERR("MinMax render materialization failed HRESULT=", hr); return false; }
+        bindings.push_back(binding);
+        for (const auto &use : binding->resources)
+          encoder.useResource(use.resource, use.usage, WMTRenderStageVertex | WMTRenderStageFragment);
+        PrivateRenderReplayCommand pso = {};
+        pso.pso.type = WMTRenderCommandSetPSO; pso.pso.pso = marker->second->graphics_variant->pso.handle;
+        replay.push_back(pso);
+        for (const auto type : {WMTRenderCommandSetVertexBuffer, WMTRenderCommandSetFragmentBuffer}) {
+          PrivateRenderReplayCommand set = {};
+          set.buffer.type = type; set.buffer.buffer = binding->buffer.handle;
+          set.buffer.index = DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT;
+          replay.push_back(set);
+        }
+        markers.erase(marker);
+        continue;
+      }
+      size_t size = 0;
+#define RENDER_SIZE(type, structure) case type: static_assert(sizeof(structure) <= sizeof(PrivateRenderReplayCommand)); size = sizeof(structure); break
+      switch (node->type) {
+      RENDER_SIZE(WMTRenderCommandNop, wmtcmd_render_nop);
+      RENDER_SIZE(WMTRenderCommandUseResource, wmtcmd_render_useresource);
+      RENDER_SIZE(WMTRenderCommandSetVertexBuffer, wmtcmd_render_setbuffer);
+      RENDER_SIZE(WMTRenderCommandSetFragmentBuffer, wmtcmd_render_setbuffer);
+      RENDER_SIZE(WMTRenderCommandSetObjectBuffer, wmtcmd_render_setbuffer);
+      RENDER_SIZE(WMTRenderCommandSetMeshBuffer, wmtcmd_render_setbuffer);
+      RENDER_SIZE(WMTRenderCommandSetVertexBufferOffset, wmtcmd_render_setbufferoffset);
+      RENDER_SIZE(WMTRenderCommandSetFragmentBufferOffset, wmtcmd_render_setbufferoffset);
+      RENDER_SIZE(WMTRenderCommandSetObjectBufferOffset, wmtcmd_render_setbufferoffset);
+      RENDER_SIZE(WMTRenderCommandSetMeshBufferOffset, wmtcmd_render_setbufferoffset);
+      RENDER_SIZE(WMTRenderCommandSetFragmentTexture, wmtcmd_render_settexture);
+      RENDER_SIZE(WMTRenderCommandSetFragmentBytes, wmtcmd_render_setbytes);
+      RENDER_SIZE(WMTRenderCommandSetRasterizerState, wmtcmd_render_setrasterizerstate);
+      RENDER_SIZE(WMTRenderCommandSetPSO, wmtcmd_render_setpso);
+      RENDER_SIZE(WMTRenderCommandSetDSSO, wmtcmd_render_setdsso);
+      RENDER_SIZE(WMTRenderCommandSetDepthStencilState, wmtcmd_render_setdepthstencilstate);
+      RENDER_SIZE(WMTRenderCommandSetBlendFactorAndStencilRef, wmtcmd_render_setblendcolor);
+      RENDER_SIZE(WMTRenderCommandSetBlendFactor, wmtcmd_render_setblendcolor);
+      RENDER_SIZE(WMTRenderCommandSetStencilRef, wmtcmd_render_setstencilref);
+      RENDER_SIZE(WMTRenderCommandSetViewports, wmtcmd_render_setviewports);
+      RENDER_SIZE(WMTRenderCommandSetViewport, wmtcmd_render_setviewport);
+      RENDER_SIZE(WMTRenderCommandSetScissorRects, wmtcmd_render_setscissorrects);
+      RENDER_SIZE(WMTRenderCommandSetScissorRect, wmtcmd_render_setscissorrect);
+      RENDER_SIZE(WMTRenderCommandSetVisibilityMode, wmtcmd_render_setvisibilitymode);
+      RENDER_SIZE(WMTRenderCommandDraw, wmtcmd_render_draw);
+      RENDER_SIZE(WMTRenderCommandDrawIndexed, wmtcmd_render_draw_indexed);
+      RENDER_SIZE(WMTRenderCommandDrawIndirect, wmtcmd_render_draw_indirect);
+      RENDER_SIZE(WMTRenderCommandDrawIndexedIndirect, wmtcmd_render_draw_indexed_indirect);
+      RENDER_SIZE(WMTRenderCommandDrawMeshThreadgroups, wmtcmd_render_draw_meshthreadgroups);
+      RENDER_SIZE(WMTRenderCommandDrawMeshThreadgroupsIndirect, wmtcmd_render_draw_meshthreadgroups_indirect);
+      RENDER_SIZE(WMTRenderCommandMemoryBarrier, wmtcmd_render_memory_barrier);
+      RENDER_SIZE(WMTRenderCommandWaitForFence, wmtcmd_render_fence_op);
+      RENDER_SIZE(WMTRenderCommandUpdateFence, wmtcmd_render_fence_op);
+      RENDER_SIZE(WMTRenderCommandDispatchThreadsPerTile, wmtcmd_render_dispatch_threads_per_tile);
+      RENDER_SIZE(WMTRenderCommandExecuteCommandsInBuffer, wmtcmd_render_executecommands);
+      RENDER_SIZE(WMTRenderCommandDXMTGeometryDraw, wmtcmd_render_dxmt_geometry_draw);
+      RENDER_SIZE(WMTRenderCommandDXMTGeometryDrawIndexed, wmtcmd_render_dxmt_geometry_draw_indexed);
+      RENDER_SIZE(WMTRenderCommandDXMTGeometryDrawIndirect, wmtcmd_render_dxmt_geometry_draw_indirect);
+      RENDER_SIZE(WMTRenderCommandDXMTGeometryDrawIndexedIndirect, wmtcmd_render_dxmt_geometry_draw_indexed_indirect);
+      RENDER_SIZE(WMTRenderCommandDXMTTessellationMeshDraw, wmtcmd_render_dxmt_tessellation_mesh_draw);
+      RENDER_SIZE(WMTRenderCommandDXMTTessellationMeshDrawIndexed, wmtcmd_render_dxmt_tessellation_mesh_draw_indexed);
+      RENDER_SIZE(WMTRenderCommandDXMTTessellationMeshDrawIndirect, wmtcmd_render_dxmt_tessellation_mesh_draw_indirect);
+      RENDER_SIZE(WMTRenderCommandDXMTTessellationMeshDrawIndexedIndirect, wmtcmd_render_dxmt_tessellation_mesh_draw_indexed_indirect);
+      RENDER_SIZE(WMTRenderCommandMSCTessellationDraw, wmtcmd_render_msc_tessellation_draw);
+      RENDER_SIZE(WMTRenderCommandMSCTessellationDrawIndexed, wmtcmd_render_msc_tessellation_draw_indexed);
+      RENDER_SIZE(WMTRenderCommandMSCGeometryDraw, wmtcmd_render_msc_geometry_draw);
+      RENDER_SIZE(WMTRenderCommandMSCGeometryDrawIndexed, wmtcmd_render_msc_geometry_draw_indexed);
+      default: ERR("Unsupported command in MinMax render replay: ", node->type); return false;
+      }
+#undef RENDER_SIZE
+      PrivateRenderReplayCommand copy = {};
+      std::memcpy(&copy, node, size); replay.push_back(copy);
+    }
+    if (!markers.empty()) return false;
+    for (size_t i = 0; i < replay.size(); ++i)
+      replay[i].nop.next.set(i + 1 < replay.size() ? &replay[i + 1] : nullptr);
+    if (!replay.empty()) encoder.encodeCommands(&replay.front().nop);
+    return true;
+  } catch (const std::bad_alloc &) { ERR("MinMax render replay allocation failed"); return false; }
+}
+
 class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, IMTLSwapChainFactory> {
 
   D3D12_COMMAND_QUEUE_DESC desc_;
@@ -1199,7 +1304,10 @@ public:
              encoder.endEncoding();
              break;
            }
-          encoder.encodeCommands(&data->cmd_head);
+          if (data->minmax_draws.empty()) encoder.encodeCommands(&data->cmd_head);
+          else if (!ReplayMinMaxRender(device_, encoder, data, submission.minmax_bindings)) {
+            translation_failed = true; encoder.endEncoding(); break;
+          }
           encoder.updateFence(fence_, WMTRenderStageFragment);
           encoder.endEncoding();
           break;

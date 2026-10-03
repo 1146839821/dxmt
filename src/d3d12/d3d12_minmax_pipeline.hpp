@@ -19,4 +19,9 @@ struct D3D12MinMaxComputeVariant : D3D12MinMaxBindingVariant {
   WMTSize threadgroup_size = {};
 };
 
+struct D3D12MinMaxGraphicsVariant : D3D12MinMaxBindingVariant {
+  D3D12MinMaxGraphicsVariant() { stage = D3D12MinMaxShaderStage::Pixel; }
+  WMT::Reference<WMT::RenderPipelineState> pso;
+};
+
 } // namespace dxmt
