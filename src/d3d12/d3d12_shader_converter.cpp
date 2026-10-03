@@ -1843,21 +1843,31 @@ ConvertD3D12ComputeShader(
   );
 }
 
-HRESULT ConvertD3D12MinMaxComputeShader(
+HRESULT ConvertD3D12MinMaxShader(
     const D3D12MinMaxShader &shader, const D3D12MinMaxRoot &root,
     D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities) {
-  if (shader.bytecode.empty() || shader.bindings.empty() || shader.bindings.size() > 64 ||
+  if ((shader.stage != D3D12MinMaxShaderStage::Compute && shader.stage != D3D12MinMaxShaderStage::Pixel) ||
+      shader.bytecode.empty() || shader.bindings.empty() || shader.bindings.size() > 64 ||
       root.layout.bytecode.empty() || root.pair_count != shader.bindings.size())
     return E_INVALIDARG;
   std::vector<D3D12MinMaxPairLocation> locations;
   std::string diagnostics;
-  HRESULT hr = ResolveD3D12MinMaxBindings(root, shader.bindings, locations, diagnostics);
+  HRESULT hr = ResolveD3D12MinMaxBindings(root, shader.bindings, locations, diagnostics, shader.stage);
   if (FAILED(hr)) return hr;
   const D3D12_SHADER_BYTECODE bytecode = {shader.bytecode.data(), shader.bytecode.size()};
   return ConvertD3D12ShaderInternal(
-      ClassifyD3D12Shader(bytecode), bytecode, DXMT_MSC_STAGE_COMPUTE, nullptr, false, converted,
+      ClassifyD3D12Shader(bytecode), bytecode,
+      shader.stage == D3D12MinMaxShaderStage::Pixel ? DXMT_MSC_STAGE_FRAGMENT : DXMT_MSC_STAGE_COMPUTE,
+      nullptr, false, converted,
       root.layout.bytecode.data(), root.layout.bytecode.size(), nullptr, 0, nullptr, 0,
       msc_capabilities, nullptr, &shader);
+}
+
+HRESULT ConvertD3D12MinMaxComputeShader(
+    const D3D12MinMaxShader &shader, const D3D12MinMaxRoot &root,
+    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities) {
+  if (shader.stage != D3D12MinMaxShaderStage::Compute) return E_INVALIDARG;
+  return ConvertD3D12MinMaxShader(shader, root, converted, msc_capabilities);
 }
 
 } // namespace dxmt

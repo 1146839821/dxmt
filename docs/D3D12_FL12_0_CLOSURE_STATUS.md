@@ -402,3 +402,13 @@ agent reviews, not independent review evidence.
 Validation: `meson setup --reconfigure build` succeeded; direct gate unit suite
 passed 55/55; Meson `dx12-fl12-gate-unit` passed 1/1 (the same suite, not extra
 coverage). `git diff --check` passed. No full runtime gate rerun. No push.
+
+## Follow-up: MinMax pixel compiler prerequisite
+
+`D3D12_MINMAX_GRAPHICS.md` records stage-aware DXIL pixel preparation, visible
+binding resolution and MSC fragment conversion. Normal/no-private full builds
+and focused regressions pass, including 16 native render PSO creations and
+existing compute GPU readbacks. This does not execute a graphics draw: production
+graphics PSO/private binding/recording/submission and pixel reduction readback
+remain open. Feature declarations and FL12_0 acceptance are unchanged; compiler
+success must not be counted as completion of the mandatory graphics matrix.

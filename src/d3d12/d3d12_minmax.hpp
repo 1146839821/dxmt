@@ -6,10 +6,12 @@
 #include <vector>
 
 namespace dxmt {
+enum class D3D12MinMaxShaderStage { Compute, Pixel };
 // Owned compiler artifact, not an admitted PSO. The caller must augment and
 // reflect the root and provide the private state/point/ordinary bindings.
 struct D3D12MinMaxShader {
   static constexpr uint32_t kLoweringVersion = DXMT_MSC_MINMAX_VERSION;
+  D3D12MinMaxShaderStage stage = D3D12MinMaxShaderStage::Compute;
   std::vector<uint8_t> bytecode;
   std::vector<dxmt_msc_minmax_binding> bindings;
 };
@@ -34,9 +36,11 @@ HRESULT PrepareD3D12MinMaxRoot(const D3D12_ROOT_SIGNATURE_DESC1 &application, ui
     D3D12MinMaxRoot &prepared, std::string &diagnostics);
 HRESULT ResolveD3D12MinMaxBindings(const D3D12MinMaxRoot &root,
     const std::vector<dxmt_msc_minmax_binding> &bindings,
-    std::vector<D3D12MinMaxPairLocation> &locations, std::string &diagnostics);
-// Selected absolute Windows DXC directory; validated SM6.0..6.6 compute envelope.
+    std::vector<D3D12MinMaxPairLocation> &locations, std::string &diagnostics,
+    D3D12MinMaxShaderStage stage = D3D12MinMaxShaderStage::Compute);
+// Selected absolute Windows DXC directory; validated SM6.0..6.6 compute/pixel envelope.
 // No fallback. Failure leaves the artifact unchanged.
 HRESULT PrepareD3D12MinMaxShader(const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
-    D3D12MinMaxShader &prepared, std::string &diagnostics);
+    D3D12MinMaxShader &prepared, std::string &diagnostics,
+    D3D12MinMaxShaderStage stage = D3D12MinMaxShaderStage::Compute);
 }

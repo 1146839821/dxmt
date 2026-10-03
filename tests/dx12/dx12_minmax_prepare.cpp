@@ -27,7 +27,8 @@ int wmain(int argc, wchar_t **argv) {
   std::string diagnostics;
   HRESULT hr = dxmt::PrepareD3D12MinMaxShader(shader, argv[2], prepared, diagnostics);
   const unsigned count = !wcscmp(argv[3], L"two") ? 2 : 1;
-  if (FAILED(hr) || prepared.bindings.size() != count || prepared.bytecode.empty()) {
+  if (FAILED(hr) || prepared.stage != dxmt::D3D12MinMaxShaderStage::Compute ||
+      prepared.bindings.size() != count || prepared.bytecode.empty()) {
     std::fprintf(stderr, "prepare failed hr=0x%08lx %s\n", static_cast<unsigned long>(hr), diagnostics.c_str());
     return 1;
   }
@@ -37,7 +38,7 @@ int wmain(int argc, wchar_t **argv) {
   }
   const auto saved = prepared;
   auto unchanged = [&] {
-    return prepared.bytecode == saved.bytecode && prepared.bindings.size() == saved.bindings.size() &&
+    return prepared.stage == saved.stage && prepared.bytecode == saved.bytecode && prepared.bindings.size() == saved.bindings.size() &&
         !std::memcmp(prepared.bindings.data(), saved.bindings.data(), count * sizeof(saved.bindings[0]));
   };
   input[0] ^= 1;

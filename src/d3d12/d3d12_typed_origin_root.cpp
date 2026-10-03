@@ -284,12 +284,13 @@ HRESULT PrepareD3D12MinMaxRoot(const D3D12_ROOT_SIGNATURE_DESC1 &application, ui
 
 HRESULT ResolveD3D12MinMaxBindings(const D3D12MinMaxRoot &root,
     const std::vector<dxmt_msc_minmax_binding> &bindings,
-    std::vector<D3D12MinMaxPairLocation> &locations, std::string &diagnostics) {
+    std::vector<D3D12MinMaxPairLocation> &locations, std::string &diagnostics, D3D12MinMaxShaderStage stage) {
   diagnostics.clear();
   struct ReleaseDeserializer {
     void operator()(ID3D12VersionedRootSignatureDeserializer *value) const { if (value) value->Release(); }
   };
   try {
+    if (stage != D3D12MinMaxShaderStage::Compute && stage != D3D12MinMaxShaderStage::Pixel) return E_INVALIDARG;
     if (!root.pair_count || root.pair_count > 64 || bindings.size() != root.pair_count || root.layout.bytecode.empty())
       return E_INVALIDARG;
     ID3D12VersionedRootSignatureDeserializer *raw = nullptr;
@@ -300,6 +301,12 @@ HRESULT ResolveD3D12MinMaxBindings(const D3D12MinMaxRoot &root,
     const auto *versioned = decoded->GetUnconvertedRootSignatureDesc();
     if (!versioned || versioned->Version != D3D_ROOT_SIGNATURE_VERSION_1_1) return E_INVALIDARG;
     const auto &desc = versioned->Desc_1_1;
+    if (stage == D3D12MinMaxShaderStage::Pixel && (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS))
+      return E_NOTIMPL;
+    const auto visible = [&](D3D12_SHADER_VISIBILITY visibility) {
+      return visibility == D3D12_SHADER_VISIBILITY_ALL ||
+          (stage == D3D12MinMaxShaderStage::Pixel && visibility == D3D12_SHADER_VISIBILITY_PIXEL);
+    };
     if (uint64_t(root.layout.application_parameter_count) + 3 != desc.NumParameters) return E_INVALIDARG;
     auto resolve = [&](D3D12_DESCRIPTOR_RANGE_TYPE type, uint32_t space, uint32_t reg,
                        D3D12MinMaxLocation &location) -> HRESULT {
@@ -308,7 +315,7 @@ HRESULT ResolveD3D12MinMaxBindings(const D3D12MinMaxRoot &root,
       for (uint32_t i = 0; i < root.layout.application_parameter_count; ++i) {
         const auto &parameter = desc.pParameters[i];
         if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE ||
-            parameter.ShaderVisibility != D3D12_SHADER_VISIBILITY_ALL) continue;
+            !visible(parameter.ShaderVisibility)) continue;
         uint64_t next = 0;
         for (uint32_t j = 0; j < parameter.DescriptorTable.NumDescriptorRanges; ++j) {
           const auto &range = parameter.DescriptorTable.pDescriptorRanges[j];
@@ -327,7 +334,7 @@ HRESULT ResolveD3D12MinMaxBindings(const D3D12MinMaxRoot &root,
       if (type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
         for (uint32_t i = 0; i < desc.NumStaticSamplers; ++i) {
           const auto &sampler = desc.pStaticSamplers[i];
-          if (sampler.ShaderVisibility != D3D12_SHADER_VISIBILITY_ALL || sampler.RegisterSpace != space ||
+          if (!visible(sampler.ShaderVisibility) || sampler.RegisterSpace != space ||
               sampler.ShaderRegister != reg) continue;
           if (found) return E_NOTIMPL;
           location.static_sampler_index = i;
@@ -342,7 +349,7 @@ HRESULT ResolveD3D12MinMaxBindings(const D3D12MinMaxRoot &root,
       if (SUCCEEDED(hr))
         hr = resolve(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, binding.sampler_space, binding.sampler_register, candidate[i].sampler);
       if (FAILED(hr)) {
-        diagnostics = "missing, ambiguous or overflowing compute-visible MinMax application binding";
+        diagnostics = "missing, ambiguous or overflowing stage-visible MinMax application binding";
         return hr;
       }
     }

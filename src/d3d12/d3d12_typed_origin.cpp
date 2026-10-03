@@ -80,7 +80,7 @@ HRESULT LoweringResult(int result) {
 // Assembly rebuilds signatures/PSV/resource metadata from IR. Reject parts
 // whose application-visible semantics would otherwise be silently discarded.
 HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<IDxcBlob> &program,
-    uint32_t maximum_minor, std::vector<uint8_t> *embedded_root = nullptr) {
+    uint32_t maximum_minor, std::vector<uint8_t> *embedded_root = nullptr, uint32_t program_kind = 5) {
   HRESULT hr = reflection->Load(blob);
   if (FAILED(hr)) return hr;
   UINT32 count = 0;
@@ -111,7 +111,7 @@ HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<ID
         if (!program || program->GetBufferSize() < 24)
           return E_NOTIMPL;
         const auto version = Word(static_cast<const uint8_t *>(program->GetBufferPointer()));
-        if ((version & ~15u) != ((5u << 16) | 0x60u) || (version & 15u) > maximum_minor)
+        if ((version & ~15u) != ((program_kind << 16) | 0x60u) || (version & 15u) > maximum_minor)
           return E_NOTIMPL;
       }
       break;
@@ -212,7 +212,7 @@ struct MinMaxPreparation {
 template <typename Operation>
 static HRESULT PrepareShaderInternal(
     const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
-    typename Operation::Artifact &prepared, std::string &diagnostics) {
+    typename Operation::Artifact &prepared, std::string &diagnostics, uint32_t program_kind = 5) {
   using Params = typename Operation::Params;
   using Prepared = typename Operation::Artifact;
   const char *export_name = Operation::ExportName;
@@ -258,10 +258,12 @@ static HRESULT PrepareShaderInternal(
   if (FAILED(hr)) return hr;
   OwnedCOM<IDxcBlob> program;
   Prepared candidate;
+  if constexpr (std::is_same_v<Operation, MinMaxPreparation>)
+    candidate.stage = program_kind == 0 ? D3D12MinMaxShaderStage::Pixel : D3D12MinMaxShaderStage::Compute;
   if constexpr (std::is_same_v<Operation, TypedOriginPreparation>)
     hr = Inspect(reflection.get(), validated_input.get(), program, Operation::MaximumMinor,
         &candidate.application_root_signature);
-  else hr = Inspect(reflection.get(), validated_input.get(), program, Operation::MaximumMinor);
+  else hr = Inspect(reflection.get(), validated_input.get(), program, Operation::MaximumMinor, nullptr, program_kind);
   if (FAILED(hr)) { diagnostics += "unsupported input container envelope"; return hr; }
   auto *bytes = static_cast<const uint8_t *>(program->GetBufferPointer());
   const size_t length = program->GetBufferSize();
@@ -299,7 +301,7 @@ static HRESULT PrepareShaderInternal(
   hr = Validate(validator.get(), assembled.get(), output, diagnostics);
   if (FAILED(hr)) return hr;
   program.reset();
-  hr = Inspect(reflection.get(), output.get(), program, Operation::MaximumMinor);
+  hr = Inspect(reflection.get(), output.get(), program, Operation::MaximumMinor, nullptr, program_kind);
   if (FAILED(hr)) return hr;
   auto *output_bytes = static_cast<const uint8_t *>(output->GetBufferPointer());
   candidate.bytecode.assign(output_bytes, output_bytes + output->GetBufferSize());
@@ -319,9 +321,11 @@ HRESULT PrepareD3D12TypedOriginShader(
 
 HRESULT PrepareD3D12MinMaxShader(
     const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
-    D3D12MinMaxShader &prepared, std::string &diagnostics) {
+    D3D12MinMaxShader &prepared, std::string &diagnostics, D3D12MinMaxShaderStage stage) {
   try {
-    return PrepareShaderInternal<MinMaxPreparation>(shader, dxc_directory, prepared, diagnostics);
+    if (stage != D3D12MinMaxShaderStage::Compute && stage != D3D12MinMaxShaderStage::Pixel) return E_INVALIDARG;
+    return PrepareShaderInternal<MinMaxPreparation>(shader, dxc_directory, prepared, diagnostics,
+        stage == D3D12MinMaxShaderStage::Pixel ? 0 : 5);
   } catch (const std::bad_alloc &) {
     return E_OUTOFMEMORY;
   }
