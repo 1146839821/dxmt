@@ -478,12 +478,43 @@ int wmain(int argc, wchar_t **argv) {
         bad_list->SetComputeRootDescriptorTable(0, resources->GetGPUDescriptorHandleForHeapStart());
         bad_list->SetComputeRootDescriptorTable(1, samplers->GetGPUDescriptorHandleForHeapStart());
         if (indirect) {
+          set_samplers(D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR, D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR);
+          auto args_desc = buffer_desc; args_desc.Width = 12; args_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+          ID3D12Resource *raw_args = nullptr;
+          if (!Check(device->CreateCommittedResource(&upload_properties, D3D12_HEAP_FLAG_NONE, &args_desc,
+              D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&raw_args)), "indirect arguments")) return 1;
+          OwnedCOM<ID3D12Resource> args(raw_args);
+          if (!Check(args->Map(0, nullptr, &mapped), "map indirect arguments")) return 1;
+          const UINT groups[] = {1, 1, 1}; std::memcpy(mapped, groups, sizeof(groups)); args->Unmap(0, nullptr);
+          auto reset = barrier;
+          reset.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+          reset.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+          bad_list->ResourceBarrier(1, &reset);
+          bad_list->CopyBufferRegion(output.get(), 0, upload.get(), total, 16);
+          std::swap(reset.Transition.StateBefore, reset.Transition.StateAfter);
+          bad_list->ResourceBarrier(1, &reset);
           D3D12_INDIRECT_ARGUMENT_DESC argument = {}; argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
           D3D12_COMMAND_SIGNATURE_DESC signature_desc = {12, 1, &argument, 0};
           ID3D12CommandSignature *signature = nullptr;
           if (!Check(device->CreateCommandSignature(&signature_desc, nullptr, IID_PPV_ARGS(&signature)), "signature")) return 1;
           OwnedCOM<ID3D12CommandSignature> owned_signature(signature);
-          bad_list->ExecuteIndirect(signature, 1, upload.get(), 0, nullptr, 0);
+          bad_list->ExecuteIndirect(signature, 1, args.get(), 0, nullptr, 0);
+          reset.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+          reset.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+          bad_list->ResourceBarrier(1, &reset);
+          bad_list->CopyBufferRegion(readback.get(), 0, output.get(), 0, 16);
+          std::swap(reset.Transition.StateBefore, reset.Transition.StateAfter);
+          bad_list->ResourceBarrier(1, &reset);
+          if (!Check(bad_list->Close(), "indirect close") || !complete(bad_list, ++serial)) return 1;
+          if (!Check(readback->Map(0, nullptr, &mapped), "indirect readback")) return 1;
+          UINT values[4]; std::memcpy(values, mapped, sizeof(values)); readback->Unmap(0, nullptr);
+          for (unsigned i = 0; i < (pairs == 2 ? 4u : 1u); ++i)
+            if (values[i] != (use_static ? (i & 1 ? static_second : static_first) : (i & 1 ? 240u : 16u))) {
+              std::printf("indirect mismatch component=%u value=%u\n", i, values[i]); return 1;
+            }
+          if (pairs == 1 && values[1] != sentinel[1]) return 1;
+          std::puts("MINMAX_INDIRECT non-updating dispatch GPU readback PASS");
+          continue;
         } else {
           SetEnvironmentVariableW(L"DXMT_TYPED_ORIGIN_DXC_DIRECTORY", argv[3]);
           bad_list->Dispatch(1, 1, 1);
@@ -491,7 +522,7 @@ int wmain(int argc, wchar_t **argv) {
         }
         if (bad_list->Close() != E_FAIL) { std::puts("unsupported private route did not fail closed"); return 1; }
       }
-      std::puts("MINMAX_REJECTION combined/indirect recording PASS (no GPU submission)");
+      std::puts("MINMAX_REJECTION combined recording PASS (no GPU submission)");
     }
   }
   std::puts(typed_rejection ? "MinMax typed guard PASS (rejection only)" :

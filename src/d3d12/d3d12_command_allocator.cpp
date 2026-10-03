@@ -17,6 +17,7 @@
  */
 
 #include "d3d12_command_allocator.hpp"
+#include "d3d12_minmax_pipeline.hpp"
 #include "d3d12_typed_origin_pipeline.hpp"
 #include "com/com_pointer.hpp"
 
@@ -181,8 +182,10 @@ MTLD3D12CommandAllocatorImpl::DiscardRecord() {
 
 IndirectComputeCommandData *
 MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount,
-    const D3D12TypedOriginComputeVariant *variant, const wmtcmd_compute_setbuffer **resolver_binding) {
-  const auto threadgroup_size = variant ? variant->threadgroup_size : pPSO->threadgroup_size;
+    const D3D12TypedOriginComputeVariant *variant, const wmtcmd_compute_setbuffer **resolver_binding,
+    const D3D12MinMaxComputeVariant *minmax_variant) {
+  const auto threadgroup_size = variant ? variant->threadgroup_size :
+      minmax_variant ? minmax_variant->threadgroup_size : pPSO->threadgroup_size;
   WMTIndirectCommandBufferInfo info;
   info.inherit_buffers = !pCmdSig->UpdateRootArguments;
   info.inherit_pso = 1;
@@ -270,7 +273,7 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
 
     auto &cmd_setpso = EncodeComputeCommand<wmtcmd_compute_setpso>();
     cmd_setpso.type = WMTComputeCommandSetPSO;
-    cmd_setpso.pso = variant ? variant->pso : pPSO->pso;
+    cmd_setpso.pso = variant ? variant->pso : minmax_variant ? minmax_variant->pso : pPSO->pso;
     cmd_setpso.threadgroup_size = threadgroup_size; // not really used
   }
 

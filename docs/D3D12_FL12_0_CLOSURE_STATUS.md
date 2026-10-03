@@ -2,6 +2,13 @@
 
 ## Current snapshot (2026-10-03, static DXIL MinMax dispatch checkpoint)
 
+MinMax indirect follow-up: non-root-updating DXIL DISPATCH now inherits the
+submission-owned private TLAB and restores the reflected MinMax PSO/threadgroup
+size (`D3D12_MINMAX_INDIRECT.md`). Four focused one/two-pair GPU executions across
+both builds pass real MIN/MAX reduction and existing direct/lifetime regressions.
+Root-updating indirect and broader indirect descriptor/count contracts remain
+open; this does not change the four production workstreams or FL qualification.
+
 MSC graphics indirect follow-up: ordinary DRAW/DRAW_INDEXED root updates now
 reuse reflected compute TLAB encoding and restore ordinary vertex inputs
 (`D3D12_MSC_GRAPHICS_INDIRECT.md`). Primary focused work yields 25 full GPU passes

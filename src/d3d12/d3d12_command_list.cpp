@@ -3535,8 +3535,10 @@ public:
 
   bool
   PreDispatch(bool SkipResourceBinding = false, bool AllowTypedOrigin = false,
-      const D3D12TypedOriginComputeVariant **selected_variant = nullptr) {
+      const D3D12TypedOriginComputeVariant **selected_variant = nullptr,
+      const D3D12MinMaxComputeVariant **selected_minmax = nullptr, bool updates_roots = false) {
     if (selected_variant) *selected_variant = nullptr;
+    if (selected_minmax) *selected_minmax = nullptr;
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Compute) {
       allocator_->InvalidateCurrentPass();
       auto compute = allocator_->AllocatePass<ComputeEncoderData>();
@@ -3578,8 +3580,8 @@ public:
     if (!minmax_directory.empty()) {
       // Root-updating indirect commands need per-command state. Do not route
       // them through a recording-time argument template or silently fall back.
-      if (SkipResourceBinding || selected_variant || !origin_directory.empty()) {
-        FailRecording(__func__, "MinMax indirect or combined private variants are unsupported");
+      if (SkipResourceBinding || updates_roots || !origin_directory.empty()) {
+        FailRecording(__func__, "MinMax root-updating indirect or combined private variants are unsupported");
         return false;
       }
       const auto directory = str::tows(minmax_directory.c_str());
@@ -3759,6 +3761,7 @@ public:
       );
 
     if (!recording_failed_ && selected_variant) *selected_variant = origin_variant;
+    if (!recording_failed_ && selected_minmax) *selected_minmax = minmax_variant;
     return !recording_failed_;
   }
 
@@ -5869,9 +5872,11 @@ public:
           !EncodePredicationCount(count_buffer, CountBufferOffset, MaxCommandCount, filtered_count_buffer_address))
         return;
       const D3D12TypedOriginComputeVariant *origin_variant = nullptr;
+      const D3D12MinMaxComputeVariant *minmax_variant = nullptr;
       const bool msc_updates = sig->UpdateRootArguments &&
           pso_compute_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
-      if (!PreDispatch(sig->UpdateRootArguments && !msc_updates, true, &origin_variant))
+      if (!PreDispatch(sig->UpdateRootArguments && !msc_updates, true, &origin_variant,
+              &minmax_variant, sig->UpdateRootArguments))
         return;
       for (const auto &update : sig->StateUpdates)
         if (update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW ||
@@ -5887,7 +5892,7 @@ public:
 
       const wmtcmd_compute_setbuffer *resolver_binding = nullptr;
       auto cmd = allocator_->EncodeIndirectComputeCommand(sig, pso_compute_.ptr(), MaxCommandCount, origin_variant,
-          &resolver_binding);
+          &resolver_binding, minmax_variant);
       if (!cmd) {
         FailRecording(__func__, "indirect compute command allocation failed");
         return;
