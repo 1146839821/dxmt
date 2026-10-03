@@ -78,3 +78,107 @@ signal remains (`clean-{1..3}.log`). No event wait failure occurred. Main-agent
 Standards/Spec self-review found no remaining experimental production edits or
 weakened assertions; independent review was unavailable. `git diff --check`
 passed. Wait checking is test hardening, not a resolution of the timestamp bug.
+
+## Destination separation experiment
+
+- Hypothesis: adjacent occlusion copy and timestamp resolve writes interfere.
+- Evidence: isolated-encoder bulk queries passed 25 times; original coalesced
+  queries failed three fresh runs, with native samples previously proven valid.
+- Expected effect: relocating occlusion output from byte 16 to byte 256 should
+  remove adjacency without changing sampling or blit encoder boundaries.
+- Risk: larger allocation changes scheduling; success alone is not a fix.
+- Validation: original textured indirect probe five times with all assertions;
+  restore original layout afterwards. Separate resource is a subsequent probe.
+
+Byte-256 separation returned PASS/FAIL/FAIL/FAIL/FAIL. Thus destination adjacency
+alone does not explain the symptom. Next isolate the occlusion result into a
+distinct resource, retaining the same encoder arrangement and timestamp range.
+
+Distinct-resource probe returned FAIL five times, always zero end timestamp and
+green pixels (`resource-{1..5}.log`). Metal API validation explicitly reported
+enabled, then reproduced the same failure without an API misuse diagnostic
+(`resource-validation.log`). This does not prove shader or synchronization
+correctness. Both destination experiments were removed from source. Together
+these results reject adjacent destination writes as a sufficient explanation;
+next investigation must target counter sampling-to-resolution visibility rather
+than padding or separating application readback buffers.
+
+## Submission-boundary experiment
+
+- Hypothesis: counter visibility requires a stronger boundary than commands in
+  the sampling command buffer. Alternative: resolution algorithm or sampling
+  placement itself is defective.
+- Evidence: destination separation does not help, isolated bulk encoders do.
+- Expected effect: move query resolution into a second submitted command list,
+  with a distinct allocator, no CPU wait and unchanged GPU readback assertions.
+- Risk: extra submission changes scheduling; not yet a production solution.
+- Validation: repeat original fixture with boundary opt-in; default unchanged.
+
+Boundary probe passed 25/25 fresh no-private runs with no CPU wait. Test the
+corresponding production boundary: retain all constituent command buffers in one
+submission, split before a counter-resolving blit when this buffer has sampled
+timestamps, commit only after translation succeeds, and retain allocations until
+all constituent GPU buffers complete. No timestamp-free split or CPU result
+substitution. Risks include extra command-buffer cost, cross-buffer ordering and
+partial error reporting; completion must inspect every constituent buffer.
+
+Production split alone returned 9/10 passes; run 6 retained the same zero-end
+failure. It is insufficient. Next test explicit GPU event ordering between the
+constituent buffers; fail closed on event creation/value exhaustion. No CPU wait.
+
+Explicit event plus production split also returned 9/10 passes, with run 8
+failing the same timestamp assertion. Both production candidates and the
+submission-boundary test hook were removed. The 25 passing diagnostic submits
+are not complete qualification or proof that splitting alone fixes the bug.
+Evidence: `production-boundary-{1..10}.log`, `production-event-{1..10}.log`.
+Next distinguish sample attachment visibility from resolve behavior with a
+minimal native counter-only reproduction, before adding more queue complexity.
+
+## Native minimization
+
+- Hypothesis: the same attachment/fence/GPU-resolve pattern fails without
+  Wine/MSC; alternatives are untracked resource synchronization or bridge/load.
+- Evidence: multiple GPU ordering experiments only reduce failure frequency.
+- Expected effect: native Objective-C Metal loop separates runtime layers.
+- Risk: minimal workload may not reproduce; a pass cannot exonerate the bridge.
+- Validation: fresh sample buffer, two sampled blit passes, fenced dummy fill,
+  same-buffer GPU resolve, compare CPU-native pair after completion, 200 runs.
+  Harness lives in task cache, not a capability/acceptance test.
+
+Native original harness reproduced zero second GPU timestamps with valid CPU
+samples: untracked 2/200 failures, tracked 2/200; API validation enabled then
+3/200 failures without misuse diagnostics. A repository standalone probe adds
+native-pair and dummy-copy oracles; five subsequent untracked processes yielded
+FAIL/FAIL/PASS/FAIL/PASS (200 iterations each). This rules out Wine/MSC/indirect
+as necessary conditions, not a definitive driver-fault attribution.
+
+Next hypothesis: shared sample-buffer storage affects GPU resolve visibility.
+Compare private storage, using unchanged GPU monotonicity/copy assertions;
+CPU native resolution is unavailable in that mode and must not be substituted.
+
+Private sample storage reproduced four failures in 200 iterations. Do not change
+production storage mode on this evidence. Native counter repro is retained as
+`tests/dx12/metal_timestamp_resolve_probe.m`, intentionally standalone and not
+registered as FL acceptance. Build/run from repository root:
+
+```sh
+xcrun clang -fobjc-arc -Wall -Wextra -Werror -framework Foundation -framework Metal \
+  tests/dx12/metal_timestamp_resolve_probe.m -o /tmp/dxmt-metal-counter-probe
+/tmp/dxmt-metal-counter-probe
+/tmp/dxmt-metal-counter-probe tracked
+/tmp/dxmt-metal-counter-probe private
+MTL_DEBUG_LAYER=1 /tmp/dxmt-metal-counter-probe
+```
+
+Exit 0 means this 200-iteration process passed, not a bug fix; exit 1 means the
+GPU timestamp oracle failed, exit 2 means setup/native/copy oracle failure.
+Fresh processes have both passing and failing results; repeated launches are
+needed. Evidence directory: `/Users/zhangbo/.cache/dxmt-native-counter.TNlJCN`.
+No Wine/game runtime mutation, new production workaround or capability promotion.
+
+Final standalone build passed with `-Wall -Wextra -Werror`. Three fresh final
+untracked runs reproduced 5/200, 5/200 and 1/200 failures with valid native pairs
+and dummy-copy oracles (`final-{1..3}.log`). Main-agent Standards/Spec review
+found no production changes or weakened assertions; independent review was
+unavailable. Repository diff whitespace check passed. Native diagnostic does
+not join the cross-build graph and is not a passing D3D12 regression claim.
