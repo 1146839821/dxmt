@@ -1,5 +1,6 @@
 #include "d3d12_minmax_dispatch.hpp"
 #include "d3d12_command_allocator.hpp"
+#include <d3dcompiler.h>
 #include <cstdio>
 #include <memory>
 #include <cwchar>
@@ -11,6 +12,10 @@ dxmt::Logger dxmt::Logger::s_instance("dx12_minmax_dispatch");
 
 template <typename T> struct ReleaseCOM { void operator()(T *p) const { if (p) p->Release(); } };
 template <typename T> using OwnedCOM = std::unique_ptr<T, ReleaseCOM<T>>;
+struct OwnedModule {
+  HMODULE handle;
+  ~OwnedModule() { if (handle) FreeLibrary(handle); }
+};
 static bool Check(HRESULT hr, const char *name) {
   if (FAILED(hr)) std::printf("%s failed %08lx\n", name, (unsigned long)hr);
   return SUCCEEDED(hr);
@@ -19,7 +24,8 @@ static bool Check(HRESULT hr, const char *name) {
 int wmain(int argc, wchar_t **argv) {
   if ((argc != 4 && argc != 5) || (std::wcscmp(argv[2], L"1") && std::wcscmp(argv[2], L"2"))) return 1;
   const bool typed_rejection = argc == 5 && std::wcscmp(argv[4], L"--typed-rejection") == 0;
-  const bool root_updates = argc == 5 && std::wcscmp(argv[4], L"--root-updates") == 0;
+  const bool gpu_count = argc == 5 && std::wcscmp(argv[4], L"--gpu-count") == 0;
+  const bool root_updates = gpu_count || (argc == 5 && std::wcscmp(argv[4], L"--root-updates") == 0);
   if (argc == 5 && !typed_rejection && !root_updates) return 1;
   if (root_updates && argv[2][0] != L'2') return 1;
   const unsigned pairs = argv[2][0] - L'0';
@@ -250,6 +256,8 @@ int wmain(int argc, wchar_t **argv) {
     };
     set_samplers(D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR);
     if (root_updates) {
+      if (static_cast<dxmt::MTLD3D12ComputePipelineState *>(pso.get())->shader_backend !=
+          dxmt::D3D12ShaderBackend::MetalShaderConverter) return 1;
       auto desc = buffer_desc; desc.Width = 768;
       ID3D12Resource *raw_inputs = nullptr, *raw_args = nullptr;
       if (!Check(device->CreateCommittedResource(&upload_properties, D3D12_HEAP_FLAG_NONE, &desc,
@@ -262,11 +270,12 @@ int wmain(int argc, wchar_t **argv) {
       for (unsigned i = 0; i < 4; ++i)
         std::memcpy(static_cast<uint8_t *>(mapped) + input_offsets[i], input_values + i, 4);
       inputs->Unmap(0, nullptr);
-      desc.Width = 80;
+      desc.Width = gpu_count ? 256 : 80;
       if (!Check(device->CreateCommittedResource(&upload_properties, D3D12_HEAP_FLAG_NONE, &desc,
           D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&raw_args)), "root arguments")) return 1;
       OwnedCOM<ID3D12Resource> args(raw_args);
       if (!Check(args->Map(0, nullptr, &mapped), "root arguments map")) return 1;
+      std::memset(mapped, 0, desc.Width);
       const UINT groups[] = {1, 1, 1};
       for (unsigned i = 0; i < 2; ++i) {
         auto *bytes = static_cast<uint8_t *>(mapped) + i * 40;
@@ -278,6 +287,55 @@ int wmain(int argc, wchar_t **argv) {
         std::memcpy(bytes + 28, groups, sizeof(groups));
       }
       args->Unmap(0, nullptr);
+      OwnedCOM<ID3D12Resource> generated;
+      OwnedCOM<ID3D12RootSignature> producer_root;
+      OwnedCOM<ID3D12PipelineState> producer_pso;
+      if (gpu_count) {
+        const char producer_source[] =
+            "ByteAddressBuffer source : register(t0); RWByteAddressBuffer generated : register(u0);"
+            "[numthreads(1,1,1)] void main() {"
+            "for(uint i=0; i<20; ++i) generated.Store(16+i*4, source.Load(i*4));"
+            "generated.Store(112, source.Load(80)); }";
+        OwnedModule compiler{LoadLibraryW(L"d3dcompiler_47.dll")};
+        if (!compiler.handle) return 1;
+        auto compile = reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler.handle, "D3DCompile"));
+        if (!compile) return 1;
+        ID3DBlob *raw_shader = nullptr, *raw_errors = nullptr;
+        const auto hr = compile(producer_source, sizeof(producer_source) - 1, nullptr, nullptr, nullptr,
+            "main", "cs_5_0", 0, 0, &raw_shader, &raw_errors);
+        {
+          OwnedCOM<ID3DBlob> producer_shader(raw_shader), errors(raw_errors);
+          if (!Check(hr, "producer DXBC compile")) {
+            if (errors) std::printf("%s\n", static_cast<const char *>(errors->GetBufferPointer()));
+            return 1;
+          }
+          D3D12_ROOT_PARAMETER producer_parameters[2] = {};
+          producer_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+          producer_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+          D3D12_ROOT_SIGNATURE_DESC producer_desc = {2, producer_parameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+          ID3DBlob *raw_producer_blob = nullptr;
+          if (!Check(D3D12SerializeRootSignature(&producer_desc, D3D_ROOT_SIGNATURE_VERSION_1,
+              &raw_producer_blob, nullptr), "producer serialize")) return 1;
+          OwnedCOM<ID3DBlob> producer_blob(raw_producer_blob);
+          ID3D12RootSignature *raw_producer_root = nullptr;
+          if (!Check(device->CreateRootSignature(0, producer_blob->GetBufferPointer(), producer_blob->GetBufferSize(),
+              IID_PPV_ARGS(&raw_producer_root)), "producer root")) return 1;
+          producer_root.reset(raw_producer_root);
+          D3D12_COMPUTE_PIPELINE_STATE_DESC producer_desc_pso = {};
+          producer_desc_pso.pRootSignature = producer_root.get();
+          producer_desc_pso.CS = {producer_shader->GetBufferPointer(), producer_shader->GetBufferSize()};
+          ID3D12PipelineState *raw_producer_pso = nullptr;
+          if (!Check(device->CreateComputePipelineState(&producer_desc_pso, IID_PPV_ARGS(&raw_producer_pso)), "producer PSO")) return 1;
+          producer_pso.reset(raw_producer_pso);
+          if (static_cast<dxmt::MTLD3D12ComputePipelineState *>(producer_pso.get())->shader_backend !=
+              dxmt::D3D12ShaderBackend::Airconv) return 1;
+        }
+        desc.Width = 128; desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        ID3D12Resource *raw_generated = nullptr;
+        if (!Check(device->CreateCommittedResource(&defaults, D3D12_HEAP_FLAG_NONE, &desc,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&raw_generated)), "GPU generated arguments")) return 1;
+        generated.reset(raw_generated);
+      }
       D3D12_INDIRECT_ARGUMENT_DESC arguments[5] = {};
       arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT; arguments[0].Constant = {2, 0, 1};
       arguments[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW; arguments[1].ConstantBufferView.RootParameterIndex = 3;
@@ -293,6 +351,21 @@ int wmain(int argc, wchar_t **argv) {
       OwnedCOM<ID3D12CommandAllocator> allocator(raw_allocator);
       if (!Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.get(), pso.get(), IID_PPV_ARGS(&raw_list)), "root list")) return 1;
       OwnedCOM<ID3D12GraphicsCommandList> list(raw_list);
+      if (gpu_count) {
+        list->CopyBufferRegion(generated.get(), 0, args.get(), 128, 128);
+        D3D12_RESOURCE_BARRIER generated_barrier = {}; generated_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        generated_barrier.Transition = {generated.get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+        list->ResourceBarrier(1, &generated_barrier);
+        list->SetPipelineState(producer_pso.get()); list->SetComputeRootSignature(producer_root.get());
+        list->SetComputeRootShaderResourceView(0, args->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(1, generated->GetGPUVirtualAddress());
+        list->Dispatch(1, 1, 1);
+        generated_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        generated_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+        list->ResourceBarrier(1, &generated_barrier);
+        list->SetPipelineState(pso.get());
+      }
       ID3D12DescriptorHeap *heaps[] = {resources.get(), samplers.get()};
       list->SetDescriptorHeaps(2, heaps); list->SetComputeRootSignature(root.get());
       list->SetComputeRootDescriptorTable(0, resources->GetGPUDescriptorHandleForHeapStart());
@@ -306,17 +379,29 @@ int wmain(int argc, wchar_t **argv) {
       list->ResourceBarrier(1, &reset);
       for (unsigned i = 0; i < 3; ++i) list->CopyBufferRegion(output.get(), i * 16, upload.get(), total, 16);
       std::swap(reset.Transition.StateBefore, reset.Transition.StateAfter); list->ResourceBarrier(1, &reset);
-      list->ExecuteIndirect(signature.get(), 2, args.get(), 0, nullptr, 0);
+      list->ExecuteIndirect(signature.get(), 2, gpu_count ? generated.get() : args.get(), gpu_count ? 16 : 0,
+          gpu_count ? generated.get() : nullptr, gpu_count ? 112 : 0);
       reset.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
       reset.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE; list->ResourceBarrier(1, &reset);
       list->CopyBufferRegion(readback.get(), 0, output.get(), 0, 48);
       std::swap(reset.Transition.StateBefore, reset.Transition.StateAfter); list->ResourceBarrier(1, &reset);
+      if (gpu_count) {
+        D3D12_RESOURCE_BARRIER generated_barrier = {}; generated_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        generated_barrier.Transition = {generated.get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_SOURCE};
+        list->ResourceBarrier(1, &generated_barrier);
+        list->CopyBufferRegion(readback.get(), 48, generated.get(), 0, 128);
+        generated_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        generated_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        list->ResourceBarrier(1, &generated_barrier);
+      }
       if (!Check(list->Close(), "root indirect close")) return 1;
       const dxmt::D3D12MinMaxDispatch *recorded = nullptr;
       auto *native = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list.get());
       for (auto *encoder = native->entry; encoder; encoder = encoder->next)
         if (encoder->type == dxmt::EncoderType::Compute) {
           auto *compute = static_cast<dxmt::ComputeEncoderData *>(encoder);
+          if (compute->minmax_dispatches.empty()) continue;
           if (recorded || compute->minmax_dispatches.size() != 1 || !compute->pending_descriptor_uses.empty() ||
               !compute->pending_sampler_uses.empty()) return 1;
           recorded = compute->minmax_dispatches[0].get();
@@ -324,10 +409,19 @@ int wmain(int argc, wchar_t **argv) {
       if (!recorded || !recorded->indirect_data || !recorded->indirect_data_binding) return 1;
       const auto payload = *recorded->indirect_data;
       const auto argument_template = recorded->argument_template;
-      for (unsigned execution = 0; execution < 2; ++execution) {
+      for (unsigned execution = 0; execution < (gpu_count ? 3u : 2u); ++execution) {
+        const UINT counts[] = {0, 1, 7};
+        const UINT count = gpu_count ? counts[execution] : 2;
+        UINT command_words[20] = {};
+        if (gpu_count) {
+          if (!Check(args->Map(0, nullptr, &mapped), "producer count map")) return 1;
+          std::memcpy(static_cast<uint8_t *>(mapped) + 80, &count, 4);
+          std::memcpy(command_words, mapped, sizeof(command_words)); args->Unmap(0, nullptr);
+        }
         if (!complete(list.get(), ++serial) || !Check(readback->Map(0, nullptr, &mapped), "root readback")) return 1;
         UINT values[12]; std::memcpy(values, mapped, sizeof(values)); readback->Unmap(0, nullptr);
-        const UINT expected[] = {86, 310, sentinel[0], sentinel[0], 98, 322,
+        const UINT expected[] = {count ? 86u : sentinel[0], count ? 310u : sentinel[0], sentinel[0], sentinel[0],
+            count > 1 ? 98u : sentinel[0], count > 1 ? 322u : sentinel[0],
             sentinel[0], sentinel[0], sentinel[0], sentinel[0], sentinel[0], sentinel[0]};
         for (unsigned i = 0; i < 12; ++i)
           if (values[i] != expected[i]) {
@@ -337,8 +431,18 @@ int wmain(int argc, wchar_t **argv) {
             argument_template != recorded->argument_template) {
           std::puts("submission modified recorded MinMax payload/template"); return 1;
         }
+        if (gpu_count) {
+          if (!Check(readback->Map(0, nullptr, &mapped), "producer byte oracle")) return 1;
+          UINT observed_count = 0;
+          std::memcpy(&observed_count, static_cast<uint8_t *>(mapped) + 48 + 112, 4);
+          const bool bytes_match = !std::memcmp(static_cast<uint8_t *>(mapped) + 48 + 16, command_words, sizeof(command_words));
+          readback->Unmap(0, nullptr);
+          if (!bytes_match || observed_count != count) { std::puts("GPU producer byte/count mismatch"); return 1; }
+          std::printf("MINMAX_GPU_COUNT count=%u MaxCommandCount=2 producer bytes and reduction readback PASS\n", count);
+        }
       }
-      std::puts("MINMAX_INDIRECT_ROOTS two-command constants/CBV/SRV/UAV GPU readback PASS (two submissions)");
+      std::puts(gpu_count ? "MINMAX_GPU_COUNT AIRCONV producer / MSC consumer PASS (three submissions)" :
+          "MINMAX_INDIRECT_ROOTS two-command constants/CBV/SRV/UAV GPU readback PASS (two submissions)");
       return 0;
     }
     raw_allocator = nullptr; raw_list = nullptr;

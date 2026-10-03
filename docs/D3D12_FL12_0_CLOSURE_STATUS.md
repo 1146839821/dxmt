@@ -9,8 +9,12 @@ both builds pass real MIN/MAX reduction and existing direct/lifetime regressions
 Root-updating DISPATCH now also uses submission-owned per-command private TLABs;
 both builds pass focused two-command partial-constant/CBV/SRV/UAV GPU readbacks
 and typed-origin shared-replay regressions. Broader indirect descriptor/count,
-GPU-produced arguments, overlap and reset contracts remain open; this does not
-change the four production workstreams or FL qualification.
+overlap and reset contracts remain open. A subsequent bounded GPU producer/count
+probe passes counts 0/1/7 with maximum 2 and nonzero offsets on both builds,
+including explicit AIRCONV producer/MSC consumer isolation and actual parameter/
+count plus reduction readbacks. No new production defect was found; this removes
+that narrow evidence gap, not the broader indirect or MinMax qualification gap.
+The four production workstreams and FL qualification remain unchanged.
 
 MSC graphics indirect follow-up: ordinary DRAW/DRAW_INDEXED root updates now
 reuse reflected compute TLAB encoding and restore ordinary vertex inputs
