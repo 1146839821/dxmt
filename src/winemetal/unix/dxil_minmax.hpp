@@ -49,5 +49,6 @@ llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &err
 // The application root must be augmented/reflected and the regenerated DXIL
 // container fully validated before MSC compilation. No runtime admission here.
 bool LowerReductionSamplerBindings(llvm::Module &module,
-    std::vector<dxmt_msc_minmax_binding> &bindings, std::string &error);
+    std::vector<dxmt_msc_minmax_binding> &bindings, std::string &error,
+    unsigned pair_offset = 0, unsigned pair_count = 0);
 }

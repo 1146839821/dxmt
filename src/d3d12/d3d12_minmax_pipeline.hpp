@@ -12,6 +12,8 @@ struct D3D12MinMaxBindingVariant {
   D3D12MinMaxRoot root;
   std::vector<dxmt_msc_minmax_binding> bindings;
   std::vector<D3D12MinMaxPairLocation> locations;
+  // Empty retains the single-stage contract; graphics can label each interval.
+  std::vector<D3D12MinMaxShaderStage> binding_stages;
 };
 
 struct D3D12MinMaxComputeVariant : D3D12MinMaxBindingVariant {

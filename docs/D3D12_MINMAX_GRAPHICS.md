@@ -654,3 +654,129 @@ arguments/counts, same-address root-VA remap, in-flight overlap, game/performanc
 tessellation acceptance and mandatory FL12_0 matrices are not claimed. Continue
 production pre-raster/resource gaps before broad qualification; MinMax and FL12_0
 remain partial and the overall development goal remains active.
+
+## Vertex sampling and cross-stage pairs — Task Analysis
+
+Branch `feat/d3d12-1`, clean parent `a2359be`, baseline `e147c710`, 117 local
+commits. Previous task is progress: implicit pixel production lowering, two bias
+repairs, fresh GPU evidence and local commit. Next production gap: graphics PSO
+explicitly rejects sampling VS; preparation and conversion accept Compute/Pixel
+only. Existing private point/ordinary arrays and CBV use stage-local pair indices,
+so simply removing the VS guard would alias vertex/pixel pairs incorrectly.
+
+Hypothesis: assign disjoint pair intervals in one shared augmented root/TLAB,
+lower each sampled stage against that interval, and resolve each interval with
+its own application visibility. Evidence: current materializer already retains
+ALL/VERTEX/PIXEL tables, binds slot 2 to both stages and handles shared direct/
+indirect replay. Native finite-pair lowering only needs register/CBV ordinal
+rebasing; resource range IDs remain stage-local. Expected effect: standard VS/PS
+sampling uses the existing recording/snapshot/submission/residency pipeline,
+including inherited and root-updating indirect draws, without another ABI.
+
+Plan: add Vertex compiler stage and explicit pair offset/total metadata. A tagged
+layout option in the existing reserved transport word preserves its 64-byte
+layout and makes old runtimes reject new requests rather than silently ignore
+them. Zero retains old single-stage behavior. Discover/validate sampled stages,
+then reprepare both against a shared interval when both sample. Resolve their
+bindings independently, concatenate stage-labelled locations, and compile every
+participating stage against the same reflected root. Keep implicit derivatives
+pixel-only, no GS/HS/DS/mesh/SO admission or backend fallback. Support vertex-only
+sampling with an ordinary pixel stage and fragment-less standard graphics.
+
+Risks: wrong ordinary sampler half, CBV range size, duplicate register numbers
+with stage-separated application bindings, deny-root flags, eager static PSO and
+lazy dynamic variants, stale native overlays and loss of ordinary state after
+indirect replay. Validate native rebasing/invalid intervals, stage/visibility
+failures and actual vertex-sampled pixel colors alongside PS reduction, static/
+volatile tables, ordinary draw restoration, direct and indirect paths in both
+builds. Reconfigure/full builds before staging; focused regressions and main-agent
+Standards/Spec self-review before local commit, no push. Broad pre-raster/emulation
+and mandatory matrices remain open; do not promote capability or feature level.
+
+## Vertex sampling and cross-stage pairs — Task Result
+
+### Branch / Baseline / Changed Implementation
+
+`feat/d3d12-1`, parent `a2359be` (117 local commits since baseline `e147c710`,
+merge-base `85bb2dd2`). Standard graphics now prepares sampled vertex and pixel
+stages separately, allocates disjoint pair intervals, resolves stage-specific
+application bindings and compiles both against one reflected augmented root.
+Vertex-only sampling and a missing pixel shader are no longer rejected by the
+standard graphics variant factory. Unsampled stages are recompiled unchanged
+against the same root. Both eager static-sampler and lazy dynamic variants use
+this shared preparation. The existing render replay and indirect resolver are
+reused; no second submission/materialization algorithm was introduced.
+
+Native lowering rebases private t/s registers and CBV rows while preserving local
+DXIL range IDs. The ordinary sampler half begins at the shared total pair count;
+the private CBV size covers that entire layout. The tagged reserved transport word
+keeps the existing 64-byte structure size/offsets, with zero retaining prior local
+behavior. This is a semantic extension, not a new struct layout. Prior runtimes'
+nonzero-reserved rejection makes this fail closed by source inspection; no old-
+runtime cross-version execution was performed. Invalid tags, counts and intervals
+are rejected before publishing artifacts. Pair offset/total join conversion cache
+keys. The legacy Pixel binding-variant tag still identifies render replay, while
+per-pair stage labels identify actual Vertex/Pixel visibility and deny-root checks.
+
+No DXBC/AIRCONV routing change, mixed-family pipeline or fallback. No SM, feature
+declaration, FL gate, native descriptor/state structure or heap-lock/residency
+policy change. Compute retains its original default stage and local pair layout.
+Vertex implicit Sample/SampleBias remains disallowed; admitted VS operations are
+explicit SampleLevel/SampleGrad through the existing finite-pair lowering.
+
+### Tests / Runtime Evidence
+
+Normal/no-private were reconfigured, optional targets built and full default builds
+completed before isolated cache staging. Final evidence:
+`/Users/zhangbo/.cache/dxmt-minmax-vertex.LH73mW`, `final-targets*`,
+`accepted-full*`, `accepted-*`, `final-*-prepare/compute/typed.log`, `host-*`.
+Native overlay hashes match the built libraries. No game/prefix DLL deployment or
+Steam/wineserver process manipulation occurred. Existing Managed-storage
+deprecation and libunwind reexport warnings remain, unrelated to these source edits.
+
+Thirty-six final runtime process runs pass: twelve new graphics, sixteen graphics
+regressions, two preparation/export probes, two root-signature probes and four
+compute/typed-origin GPU regressions. Graphics checks perform 928 draw submissions
+(excluding texture uploads), all full 4x4 RGBA readbacks. New cases cover combined
+VS/PS and VS-only SampleLevel/SampleGrad, static/volatile application tables,
+minimum/maximum static samplers, two submissions of immutable closed lists,
+direct/DRAW/DRAW_INDEXED, counts 0/1/7 clipped to MaxCommandCount 2 and ordinary
+PSO/TLAB restoration. Vertex samples are independently visible in the blue channel;
+PS slot replacement does not replace the static VS slot. Same t0/register-space
+bindings with PIXEL/VERTEX visibility resolve to different physical slots and
+independent private intervals. Invalid ALL-plus-stage duplicate root layouts are
+not substituted for that legal stage-separated case.
+
+Forty focused cases additionally create/select depth-only application/private
+MinMax PSOs without a fragment shader. These prove pipeline creation and variant
+selection only, **not depth GPU output**. Existing explicit/implicit/bias and
+root-only updating graphics readbacks remain green; new cross-stage root-updating
+semantics are not independently qualified by those old pixel-only regressions.
+Compute GPU-produced counts 0/1/7 and typed-origin multi-command full-buffer
+readback pass. Ten native IR invocations pass: four shared-layout transforms
+(register halves, CBV size/rows, LLVM verification), four implicit transforms
+with prior negative checks, and two base IR probes. PE export probes exercise
+valid tagged rebasing plus malformed layouts and unchanged output on failure.
+RS1.0/1.1 dynamic/static/unbounded root reflection and existing volatile conversion
+pass. Five registered host suites pass in each configuration.
+
+### Review / Limitations / Next Production Work
+
+Main-agent code-review Standards axis against `a2359be`: shared algorithms, bounded
+tagged transport, range-ID/ordinal separation, root reflection/cache keys, pinned
+PSO artifacts, exception/output preservation and unchanged static/live residency
+checked; no remaining blocking finding. Spec axis: removing only the VS guard
+would have been incorrect; actual cross-stage lowering and GPU evidence are
+present. The new VS-only binding probe initially expected a PS replacement to
+change a static VS descriptor; its oracle was corrected to the binding contract,
+with both stages still independently verified. Independent agents unavailable;
+these are main-agent two-axis reviews. `git diff --check` passes. Task files
+committed locally, no push; the overall goal remains active.
+
+This closes bounded standard VS MinMax production wiring, not all pre-raster
+sampling. GS/HS/DS/mesh/SO emulation, complete dimensions/views/address/filter/
+clamp/feedback qualification, GPU-produced graphics counts, cross-stage updating
+indirect qualification, overlapping submissions and root-VA remap remain open.
+No game/performance/tessellation or mandatory FL12_0 matrix acceptance was run.
+Next production gap: integrate MinMax stage-private bindings with the existing
+MSC pre-raster emulation pipeline. Full MinMax and FL12_0/FL12_1 remain unqualified.

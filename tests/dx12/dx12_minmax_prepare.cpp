@@ -39,6 +39,7 @@ int wmain(int argc, wchar_t **argv) {
   const auto saved = prepared;
   auto unchanged = [&] {
     return prepared.stage == saved.stage && prepared.bytecode == saved.bytecode && prepared.bindings.size() == saved.bindings.size() &&
+        prepared.pair_offset == saved.pair_offset && prepared.pair_count == saved.pair_count &&
         !std::memcmp(prepared.bindings.data(), saved.bindings.data(), count * sizeof(saved.bindings[0]));
   };
   input[0] ^= 1;
@@ -124,6 +125,18 @@ int wmain(int argc, wchar_t **argv) {
   reserved.reserved = 1;
   if (DXMTMSCLowerReductionSamplers(&reserved) != DXMT_MSC_ERROR_INVALID_ARGUMENT ||
       reserved.ir_size || reserved.binding_count) return 1;
+  for (const uint32_t layout : {DXMT_MSC_MINMAX_LAYOUT_TAG, DXMT_MSC_MINMAX_LAYOUT_TAG | (65u << 8),
+      DXMT_MSC_MINMAX_LAYOUT_TAG | (2u << 8) | 2u, 0x4d4e0200u}) {
+    auto invalid = query; invalid.reserved = layout;
+    if (DXMTMSCLowerReductionSamplers(&invalid) != DXMT_MSC_ERROR_INVALID_ARGUMENT ||
+        invalid.ir_size || invalid.binding_count) return 1;
+  }
+  if (count < 64) {
+    auto shared = query;
+    shared.ir = shared.bindings = shared.ir_capacity = shared.binding_capacity = 0;
+    shared.reserved = DXMT_MSC_MINMAX_LAYOUT_TAG | ((count + 1) << 8) | 1u;
+    if (DXMTMSCLowerReductionSamplers(&shared) != DXMT_MSC_SUCCESS || !shared.ir_size || shared.binding_count != count) return 1;
+  }
   if (DXMTMSCLowerReductionSamplers(nullptr) != DXMT_MSC_ERROR_INVALID_ARGUMENT) return 1;
   if (DXMTMSCLowerReductionSamplers(&fill) != DXMT_MSC_SUCCESS ||
       fill.ir_size != ir.size() || fill.binding_count != count ||

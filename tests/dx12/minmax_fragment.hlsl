@@ -54,3 +54,32 @@ float4 pixel(float4 position : SV_Position) : SV_Target0
     return float4(first, second, 0, 1);
 #endif
 }
+
+#ifdef VS_SHARED_REG
+Texture2D<float4> vertex_texture : register(t0);
+#else
+Texture2D<float4> vertex_texture : register(t0, space6);
+#endif
+float4 vertex_sample(uint id : SV_VertexID, out float2 sampled : TEXCOORD0) : SV_Position
+{
+#ifdef VS_GRAD
+    sampled.x = vertex_texture.SampleGrad(first_sampler, float2(0.5, 0.5), float2(0.25, 0), float2(0, 0.25)).x;
+    sampled.y = vertex_texture.SampleGrad(second_sampler, float2(0.5, 0.5), float2(0.25, 0), float2(0, 0.25)).x;
+#else
+    sampled.x = vertex_texture.SampleLevel(first_sampler, float2(0.5, 0.5), 0).x;
+    sampled.y = vertex_texture.SampleLevel(second_sampler, float2(0.5, 0.5), 0).x;
+#endif
+    return vertex(id);
+}
+
+float4 pixel_vertex(float4 position : SV_Position, float2 sampled : TEXCOORD0) : SV_Target0
+{
+    float4 result = pixel(position);
+    result.z = sampled.x * 0.25 + sampled.y * 0.75;
+    return result;
+}
+
+float4 pixel_vertex_only(float4 position : SV_Position, float2 sampled : TEXCOORD0) : SV_Target0
+{
+    return float4(sampled, sampled.x * 0.25 + sampled.y * 0.75, 1);
+}

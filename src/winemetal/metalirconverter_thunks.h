@@ -260,6 +260,7 @@ typedef char dxmt_msc_lower_typed_origins_offset_check[
     offsetof(struct dxmt_msc_lower_typed_origins_params, bindings) == 40 ? 1 : -1];
 
 /* Same fixed-width transport, distinct operation and binding record ABI. */
+#define DXMT_MSC_MINMAX_LAYOUT_TAG 0x4d4d0000u
 struct dxmt_msc_lower_reduction_samplers_params {
   uint64_t bitcode;
   uint64_t bitcode_size;
@@ -270,6 +271,8 @@ struct dxmt_msc_lower_reduction_samplers_params {
   uint32_t binding_capacity;
   uint32_t binding_count;
   int32_t ret;
+  /* Zero: local pairs. Tagged: low byte offset, next byte shared pair count.
+   * Older runtimes reject nonzero rather than silently use local ordinals. */
   uint32_t reserved;
 };
 typedef char dxmt_msc_lower_reduction_samplers_size_check[

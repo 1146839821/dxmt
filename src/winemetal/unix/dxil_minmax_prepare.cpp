@@ -16,7 +16,11 @@ static int LowerReductionSamplers(dxmt_msc_lower_reduction_samplers_params *para
     return address <= UINTPTR_MAX && size <= UINTPTR_MAX - address;
   };
   const uint64_t binding_bytes = uint64_t(params->binding_capacity) * sizeof(dxmt_msc_minmax_binding);
-  if (params->reserved || !params->bitcode || !params->bitcode_size || params->bitcode_size > 16 * 1024 * 1024 ||
+  const unsigned pair_offset = params->reserved & 0xffu;
+  const unsigned pair_count = (params->reserved >> 8) & 0xffu;
+  if ((params->reserved && ((params->reserved & 0xffff0000u) != DXMT_MSC_MINMAX_LAYOUT_TAG ||
+          !pair_count || pair_count > 64 || pair_offset >= pair_count)) ||
+      !params->bitcode || !params->bitcode_size || params->bitcode_size > 16 * 1024 * 1024 ||
       !valid_address(params->bitcode, params->bitcode_size) ||
       (!params->ir && params->ir_capacity) || (!params->bindings && params->binding_capacity) ||
       !valid_address(params->ir, params->ir_capacity) || !valid_address(params->bindings, binding_bytes))
@@ -42,7 +46,7 @@ static int LowerReductionSamplers(dxmt_msc_lower_reduction_samplers_params *para
   }
   std::vector<dxmt_msc_minmax_binding> records;
   std::string error;
-  if (!dxmt::dxil::LowerReductionSamplerBindings(**module, records, error))
+  if (!dxmt::dxil::LowerReductionSamplerBindings(**module, records, error, pair_offset, pair_count))
     return DXMT_MSC_ERROR_UNSUPPORTED_SHADER;
   // LLVM 15 and the selected older DXC assembler number unnamed SSA differently.
   for (auto &function : **module) for (auto &block : function) {

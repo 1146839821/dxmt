@@ -453,3 +453,11 @@ indirect draws, descriptor snapshots and ordinary state restoration, plus
 root-buffer/compute regressions (`D3D12_MINMAX_GRAPHICS.md`). Pre-raster sampling,
 cube/aniso/feedback, full resource/filter qualification and mandatory matrices
 remain open; this does not promote MinMax declarations or FL12_0/FL12_1.
+
+Standard DXIL graphics VS SampleLevel/SampleGrad MinMax now shares the augmented
+root/TLAB with PS using disjoint private pair intervals and per-stage application
+visibility. Both builds pass focused VS/PS, VS-only and same-register/different-
+visibility pixel readbacks plus existing graphics/compute/root regressions
+(`D3D12_MINMAX_GRAPHICS.md`). Fragment-less depth PSO creation is verified, not
+depth GPU output. GS/HS/DS/mesh/SO emulation and full resource/filter/matrix
+qualification remain open. No capability or feature-level promotion follows.

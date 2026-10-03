@@ -212,7 +212,8 @@ struct MinMaxPreparation {
 template <typename Operation>
 static HRESULT PrepareShaderInternal(
     const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
-    typename Operation::Artifact &prepared, std::string &diagnostics, uint32_t program_kind = 5) {
+    typename Operation::Artifact &prepared, std::string &diagnostics, uint32_t program_kind = 5,
+    uint32_t pair_offset = 0, uint32_t pair_count = 0) {
   using Params = typename Operation::Params;
   using Prepared = typename Operation::Artifact;
   const char *export_name = Operation::ExportName;
@@ -259,7 +260,8 @@ static HRESULT PrepareShaderInternal(
   OwnedCOM<IDxcBlob> program;
   Prepared candidate;
   if constexpr (std::is_same_v<Operation, MinMaxPreparation>)
-    candidate.stage = program_kind == 0 ? D3D12MinMaxShaderStage::Pixel : D3D12MinMaxShaderStage::Compute;
+    candidate.stage = program_kind == 0 ? D3D12MinMaxShaderStage::Pixel :
+        program_kind == 1 ? D3D12MinMaxShaderStage::Vertex : D3D12MinMaxShaderStage::Compute;
   if constexpr (std::is_same_v<Operation, TypedOriginPreparation>)
     hr = Inspect(reflection.get(), validated_input.get(), program, Operation::MaximumMinor,
         &candidate.application_root_signature);
@@ -273,6 +275,8 @@ static HRESULT PrepareShaderInternal(
   Params params = {};
   params.bitcode = uintptr_t(bytes + 8 + offset);
   params.bitcode_size = size;
+  if constexpr (std::is_same_v<Operation, MinMaxPreparation>)
+    if (pair_count) params.reserved = DXMT_MSC_MINMAX_LAYOUT_TAG | (pair_count << 8) | pair_offset;
   int result = lower(&params);
   if (result != DXMT_MSC_SUCCESS) {
     diagnostics += std::string(export_name) + " sizing failed: " + std::to_string(result); return LoweringResult(result);
@@ -305,6 +309,10 @@ static HRESULT PrepareShaderInternal(
   if (FAILED(hr)) return hr;
   auto *output_bytes = static_cast<const uint8_t *>(output->GetBufferPointer());
   candidate.bytecode.assign(output_bytes, output_bytes + output->GetBufferSize());
+  if constexpr (std::is_same_v<Operation, MinMaxPreparation>) {
+    candidate.pair_offset = pair_offset;
+    candidate.pair_count = pair_count ? pair_count : candidate.bindings.size();
+  }
   prepared = std::move(candidate);
   return S_OK;
 }
@@ -321,11 +329,15 @@ HRESULT PrepareD3D12TypedOriginShader(
 
 HRESULT PrepareD3D12MinMaxShader(
     const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
-    D3D12MinMaxShader &prepared, std::string &diagnostics, D3D12MinMaxShaderStage stage) {
+    D3D12MinMaxShader &prepared, std::string &diagnostics, D3D12MinMaxShaderStage stage,
+    uint32_t pair_offset, uint32_t pair_count) {
   try {
-    if (stage != D3D12MinMaxShaderStage::Compute && stage != D3D12MinMaxShaderStage::Pixel) return E_INVALIDARG;
+    if ((stage != D3D12MinMaxShaderStage::Compute && stage != D3D12MinMaxShaderStage::Pixel &&
+            stage != D3D12MinMaxShaderStage::Vertex) || pair_count > 64 ||
+        (!pair_count && pair_offset) || (pair_count && pair_offset >= pair_count)) return E_INVALIDARG;
     return PrepareShaderInternal<MinMaxPreparation>(shader, dxc_directory, prepared, diagnostics,
-        stage == D3D12MinMaxShaderStage::Pixel ? 0 : 5);
+        stage == D3D12MinMaxShaderStage::Pixel ? 0 : stage == D3D12MinMaxShaderStage::Vertex ? 1 : 5,
+        pair_offset, pair_count);
   } catch (const std::bad_alloc &) {
     return E_OUTOFMEMORY;
   }

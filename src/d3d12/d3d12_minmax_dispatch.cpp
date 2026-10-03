@@ -47,6 +47,10 @@ HRESULT RecordD3D12MinMaxBinding(MTLD3D12PipelineState *pso, const D3D12MinMaxBi
         variant->bindings.size() != variant->locations.size()) return E_INVALIDARG;
     if (variant->stage != D3D12MinMaxShaderStage::Compute && variant->stage != D3D12MinMaxShaderStage::Pixel)
       return E_INVALIDARG;
+    if (!variant->binding_stages.empty() && (variant->stage != D3D12MinMaxShaderStage::Pixel ||
+        variant->binding_stages.size() != variant->bindings.size())) return E_INVALIDARG;
+    for (const auto stage : variant->binding_stages)
+      if (stage != D3D12MinMaxShaderStage::Pixel && stage != D3D12MinMaxShaderStage::Vertex) return E_INVALIDARG;
     if (!!pso->IsComputePipelineState != (variant->stage == D3D12MinMaxShaderStage::Compute)) return E_INVALIDARG;
     if (pso->shader_backend != D3D12ShaderBackend::MetalShaderConverter) return E_NOTIMPL;
     const bool uses_texture_load = pso->msc_uses_texture_load;
@@ -70,8 +74,15 @@ HRESULT RecordD3D12MinMaxBinding(MTLD3D12PipelineState *pso, const D3D12MinMaxBi
     hr = D3D12CreateVersionedRootSignatureDeserializer(layout.bytecode.data(), layout.bytecode.size(), IID_PPV_ARGS(&decoded));
     if (FAILED(hr)) return hr;
     const auto &desc = decoded->GetUnconvertedRootSignatureDesc()->Desc_1_1;
-    if (variant->stage == D3D12MinMaxShaderStage::Pixel &&
-        (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS)) return E_NOTIMPL;
+    if (variant->stage == D3D12MinMaxShaderStage::Pixel) {
+      const auto uses = [&](D3D12MinMaxShaderStage stage) {
+        return variant->binding_stages.empty() ? stage == variant->stage :
+            std::find(variant->binding_stages.begin(), variant->binding_stages.end(), stage) != variant->binding_stages.end();
+      };
+      if ((uses(D3D12MinMaxShaderStage::Pixel) && (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS)) ||
+          (uses(D3D12MinMaxShaderStage::Vertex) && (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS)))
+        return E_NOTIMPL;
+    }
     if (desc.Flags & (D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
         D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED)) return E_NOTIMPL;
     std::vector<UINT> resource_indices, sampler_indices;

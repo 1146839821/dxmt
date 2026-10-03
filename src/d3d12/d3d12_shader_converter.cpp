@@ -118,6 +118,8 @@ MakeMSCConversionCacheKey(
     constexpr char contract[] = "reduction-sampler-pairs";
     hash.update(contract, sizeof(contract) - 1);
     hash.update(D3D12MinMaxShader::kLoweringVersion);
+    hash.update(minmax->pair_offset);
+    hash.update(minmax->pair_count);
     hash.update(D3D12CompilerRoot::kBindingVersion);
     hash.update(static_cast<uint32_t>(minmax->bindings.size()));
     for (const auto &binding : minmax->bindings) {
@@ -1853,9 +1855,12 @@ ConvertD3D12ComputeShader(
 HRESULT ConvertD3D12MinMaxShader(
     const D3D12MinMaxShader &shader, const D3D12MinMaxRoot &root,
     D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities) {
-  if ((shader.stage != D3D12MinMaxShaderStage::Compute && shader.stage != D3D12MinMaxShaderStage::Pixel) ||
+  const uint32_t pair_count = shader.pair_count ? shader.pair_count : shader.bindings.size();
+  if ((shader.stage != D3D12MinMaxShaderStage::Compute && shader.stage != D3D12MinMaxShaderStage::Pixel &&
+          shader.stage != D3D12MinMaxShaderStage::Vertex) ||
       shader.bytecode.empty() || shader.bindings.empty() || shader.bindings.size() > 64 ||
-      root.layout.bytecode.empty() || root.pair_count != shader.bindings.size())
+      root.layout.bytecode.empty() || root.pair_count != pair_count || shader.pair_offset >= pair_count ||
+      shader.bindings.size() > pair_count - shader.pair_offset)
     return E_INVALIDARG;
   std::vector<D3D12MinMaxPairLocation> locations;
   std::string diagnostics;
@@ -1864,7 +1869,8 @@ HRESULT ConvertD3D12MinMaxShader(
   const D3D12_SHADER_BYTECODE bytecode = {shader.bytecode.data(), shader.bytecode.size()};
   return ConvertD3D12ShaderInternal(
       ClassifyD3D12Shader(bytecode), bytecode,
-      shader.stage == D3D12MinMaxShaderStage::Pixel ? DXMT_MSC_STAGE_FRAGMENT : DXMT_MSC_STAGE_COMPUTE,
+      shader.stage == D3D12MinMaxShaderStage::Pixel ? DXMT_MSC_STAGE_FRAGMENT :
+          shader.stage == D3D12MinMaxShaderStage::Vertex ? DXMT_MSC_STAGE_VERTEX : DXMT_MSC_STAGE_COMPUTE,
       nullptr, false, converted,
       root.layout.bytecode.data(), root.layout.bytecode.size(), nullptr, 0, nullptr, 0,
       msc_capabilities, nullptr, &shader);

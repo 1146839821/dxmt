@@ -59,7 +59,7 @@ struct Pair {
 }
 
 bool LowerReductionSamplerBindings(llvm::Module &module,
-    std::vector<dxmt_msc_minmax_binding> &bindings, std::string &error) {
+    std::vector<dxmt_msc_minmax_binding> &bindings, std::string &error, unsigned pair_offset, unsigned pair_count) {
   using namespace llvm;
   error.clear();
   auto reject = [&](const char *message) { error = message; return false; };
@@ -271,6 +271,12 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     samples.push_back({call, index->second, texture_kind == 4 ? 3u : texture_kind == 1 || texture_kind == 6 ? 1u : 2u});
   }
   if (samples.empty()) return reject("no qualified sampling pairs");
+  if (!pair_count) {
+    if (pair_offset) return reject("pair offset requires a shared layout");
+    pair_count = pairs.size();
+  }
+  if (pair_count > 64 || pair_offset >= pair_count || pairs.size() > pair_count - pair_offset)
+    return reject("sampling pairs exceed shared layout");
   if (uint64_t(next_id[0]) + pairs.size() > UINT32_MAX || uint64_t(next_id[3]) + pairs.size() * 2 > UINT32_MAX)
     return reject("private resource range identity overflow");
   auto *cb_ret = StructType::getTypeByName(context, "dx.types.CBufRet.i32");
@@ -327,16 +333,16 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
       for (auto &operand : source->operands()) operands.push_back(operand.get());
       operands[0] = word(next_id[kind] + slot);
       operands[3] = word(DXMT_MSC_MINMAX_SPACE);
-      operands[4] = word(slot);
+      operands[4] = word(pair_offset + pair + (kind == 3 && slot >= pairs.size() ? pair_count : 0));
       operands[5] = word(1); // Each private pair is one descriptor, not the application array.
       additional.push_back(MDNode::get(context, operands));
     }
     append(kind, additional);
   }
   auto *state_type = StructType::create(context,
-      {ArrayType::get(FixedVectorType::get(i32, 4), pairs.size() * 2)}, "dxmt.ReductionStates");
+      {ArrayType::get(FixedVectorType::get(i32, 4), pair_count * 2)}, "dxmt.ReductionStates");
   append(2, {MDNode::get(context, {word(next_id[2]), ConstantAsMetadata::get(UndefValue::get(PointerType::getUnqual(state_type))),
-      MDString::get(context, ""), word(DXMT_MSC_MINMAX_SPACE), word(0), word(1), word(pairs.size() * 32), nullptr})});
+      MDString::get(context, ""), word(DXMT_MSC_MINMAX_SPACE), word(0), word(1), word(pair_count * 32), nullptr})});
   auto *dimensions_type = StructType::getTypeByName(context, "dx.types.Dimensions");
   if (!dimensions_type) dimensions_type = StructType::create(context, {i32, i32, i32, i32}, "dx.types.Dimensions");
   auto dimensions = module.getOrInsertFunction("dx.op.getDimensions", dimensions_type, i32, handle, i32);
@@ -414,15 +420,15 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
         Constant *properties;
         if (kind == 0) properties = cast<Constant>(cast<CallInst>(sample->getArgOperand(1))->getArgOperand(2));
         else properties = ConstantStruct::get(properties_type, {builder.getInt32(kind == 3 ? 14 : 13),
-            builder.getInt32(kind == 3 ? 0 : pairs.size() * sizeof(dxmt_msc_minmax_state))});
+            builder.getInt32(kind == 3 ? 0 : pair_count * sizeof(dxmt_msc_minmax_state))});
         return builder.CreateCall(annotate, {builder.getInt32(216), raw, properties});
       }
       return builder.CreateCall(create, {builder.getInt32(CreateHandle), builder.getInt8(kind), builder.getInt32(range),
           builder.getInt32(reg), builder.getFalse()});
     };
     auto *cb = make_handle(b, 2, next_id[2], 0);
-    auto *first = b.CreateCall(cb_load, {b.getInt32(CBufferLoadLegacy), cb, b.getInt32(pair * 2)});
-    auto *second = b.CreateCall(cb_load, {b.getInt32(CBufferLoadLegacy), cb, b.getInt32(pair * 2 + 1)});
+    auto *first = b.CreateCall(cb_load, {b.getInt32(CBufferLoadLegacy), cb, b.getInt32((pair_offset + pair) * 2)});
+    auto *second = b.CreateCall(cb_load, {b.getInt32(CBufferLoadLegacy), cb, b.getInt32((pair_offset + pair) * 2 + 1)});
     auto *flags = b.CreateExtractValue(first, 0);
     Value *original_lod = sample->getArgOperand(10);
     original_lod = b.CreateFAdd(original_lod,
@@ -430,7 +436,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     if (instruction_bias) original_lod = b.CreateFAdd(original_lod, instruction_bias, "dxmt.sample.biased.lod");
     b.CreateCondBr(b.CreateICmpNE(b.CreateAnd(flags, b.getInt32(DXMT_MSC_MINMAX_ENABLED)), b.getInt32(0)), reduction, ordinary);
     b.SetInsertPoint(ordinary);
-    auto *ordinary_sampler = make_handle(b, 3, next_id[3] + pairs.size() + pair, pairs.size() + pair);
+    auto *ordinary_sampler = make_handle(b, 3, next_id[3] + pairs.size() + pair, pair_count + pair_offset + pair);
     auto as_float = [&](Value *value) { return b.CreateBitCast(value, b.getFloatTy()); };
     auto *minimum_lod = as_float(b.CreateExtractValue(first, 1));
     auto *maximum_lod = as_float(b.CreateExtractValue(first, 2));
@@ -475,8 +481,8 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     }
     b.CreateBr(merge);
     b.SetInsertPoint(reduction);
-    auto *point_texture = make_handle(b, 0, next_id[0] + pair, pair);
-    auto *point_sampler = make_handle(b, 3, next_id[3] + pair, pair);
+    auto *point_texture = make_handle(b, 0, next_id[0] + pair, pair_offset + pair);
+    auto *point_sampler = make_handle(b, 3, next_id[3] + pair, pair_offset + pair);
     ReductionSampleState state{flags, as_float(b.CreateExtractValue(first, 1)), as_float(b.CreateExtractValue(first, 2)),
         merge_clamp(as_float(b.CreateExtractValue(first, 3))), b.CreateExtractValue(second, 0), point_texture,
         b.CreateExtractValue(second, 1),

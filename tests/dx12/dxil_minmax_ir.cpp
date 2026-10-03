@@ -220,7 +220,8 @@ static int TransformContainer(const char *path, const char *mode) {
           call->getCalledFunction()->getName() == "dx.op.sample.f32" ||
           call->getCalledFunction()->getName() == "dx.op.sampleBias.f32")) samples.push_back(call);
   const bool binding_implicit = !std::strcmp(mode, "binding-implicit");
-  const bool binding_two = !std::strcmp(mode, "binding-two") || binding_implicit;
+  const bool binding_shared = !std::strcmp(mode, "binding-shared");
+  const bool binding_two = !std::strcmp(mode, "binding-two") || binding_implicit || binding_shared;
   const bool binding_grad = !std::strcmp(mode, "binding-grad");
   const bool binding_array = !std::strcmp(mode, "binding-array");
   if (samples.size() != (binding_two ? 2 : 1)) return 1;
@@ -257,12 +258,37 @@ static int TransformContainer(const char *path, const char *mode) {
     if (modern && binding_array && !CheckModernQualification(**parsed)) return 1;
     if (!modern && !binding_two && !binding_array && !CheckBindingQualification(**parsed)) return 1;
     std::vector<dxmt_msc_minmax_binding> records;
-    if (!dxmt::dxil::LowerReductionSamplerBindings(**parsed, records, error)) { errs() << error; return 1; }
+    if (!dxmt::dxil::LowerReductionSamplerBindings(**parsed, records, error,
+        binding_shared ? 2 : 0, binding_shared ? 4 : 0)) { errs() << error; return 1; }
     if (records.size() != (binding_two ? 2 : 1) || records[0].texture_space ||
         records[0].texture_register != (binding_array ? 1u : 0u) ||
         records[0].sampler_space || records[0].sampler_register != (binding_array ? 1u : 0u)) return 1;
     if (binding_two && (records[1].texture_space || records[1].texture_register ||
         records[1].sampler_space || records[1].sampler_register != 1)) return 1;
+    if (binding_shared) {
+      auto *resources = (*parsed)->getNamedMetadata("dx.resources")->getOperand(0);
+      const auto word = [](Metadata *value) { return mdconst::extract<ConstantInt>(value)->getZExtValue(); };
+      for (const unsigned kind : {0u, 3u}) {
+        auto *list = cast<MDNode>(resources->getOperand(kind));
+        const unsigned added = kind == 0 ? 2 : 4;
+        for (unsigned i = 0; i < added; ++i) {
+          auto *record = cast<MDNode>(list->getOperand(list->getNumOperands() - added + i));
+          if (word(record->getOperand(3)) != DXMT_MSC_MINMAX_SPACE ||
+              word(record->getOperand(4)) != 2 + i % 2 + (i >= 2 ? 4 : 0)) return 1;
+        }
+      }
+      auto *cbvs = cast<MDNode>(resources->getOperand(2));
+      if (word(cast<MDNode>(cbvs->getOperand(cbvs->getNumOperands() - 1))->getOperand(6)) != 128) return 1;
+      unsigned loads = 0;
+      for (auto &function : **parsed) for (auto &block : function) for (auto &instruction : block)
+        if (auto *call = dyn_cast<CallInst>(&instruction))
+          if (call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.cbufferLoadLegacy.i32") {
+            const auto row = cast<ConstantInt>(call->getArgOperand(2))->getZExtValue();
+            if (row < 4 || row > 7) return 1;
+            ++loads;
+          }
+      if (loads != 4) return 1;
+    }
     if (binding_implicit) {
       unsigned derivatives = 0;
       for (auto &function : **parsed) for (auto &block : function) for (auto &instruction : block)

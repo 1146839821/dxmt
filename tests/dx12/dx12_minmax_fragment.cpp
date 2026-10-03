@@ -17,6 +17,9 @@ static bool root_updates_fixture = false;
 static bool root_buffers_fixture = false;
 static bool implicit_fixture = false;
 static bool implicit_bias_fixture = false;
+static bool vertex_sampling_fixture = false;
+static bool vertex_only_fixture = false;
+static bool vertex_shared_fixture = false;
 
 static bool Load(const wchar_t *path, std::vector<uint8_t> &bytes) {
   HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -342,9 +345,14 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
           }
         }
       }
+      if (vertex_only_fixture) {
+        expected_r = !static_sampler && x >= 2 ? 128 : static_sampler || !changed ? 16 : 240;
+        expected_g = !static_sampler && x >= 2 ? 128 : static_sampler || changed ? 240 : 16;
+      }
       const bool untouched = empty && (static_sampler || x < 2);
       unsigned blue = !root_updates_fixture ? 0 : !static_sampler && x >= 2 ? (updates ? 31 : 130) :
           updates ? (submission == 1 ? 38 : 42) : 130;
+      if (vertex_sampling_fixture) blue = !static_sampler && x >= 2 ? 128 : static_sampler ? 184 : changed ? 240 : 16;
       if (root_buffers_fixture) blue += updates && (static_sampler || x < 2) && submission == 2 ? 49 : 37;
       if (pixel[0] != (untouched ? 64u : expected_r) || pixel[1] != (untouched ? 64u : expected_g) ||
           pixel[2] != (untouched ? 64u : blue) || pixel[3] != (untouched ? 64u : 255u)) {
@@ -416,14 +424,38 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
     auto rejected_desc = pso_desc; rejected_desc.VS = sampling_vs;
     if (FAILED(device->CreateGraphicsPipelineState(&rejected_desc, IID_PPV_ARGS(&raw_pso)))) return false;
     OwnedCOM<ID3D12PipelineState> sampled(raw_pso);
-    const dxmt::D3D12MinMaxGraphicsVariant *unsupported = nullptr;
+    const dxmt::D3D12MinMaxGraphicsVariant *selected_variant = nullptr;
     wchar_t selected[32768];
     if (!GetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", selected, 32768) ||
-        static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(sampled.get())->GetMinMaxVariant(selected, &unsupported) != E_NOTIMPL || unsupported)
+        FAILED(static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(sampled.get())->GetMinMaxVariant(selected, &selected_variant)) ||
+        !selected_variant || selected_variant->bindings.size() != 3 || selected_variant->binding_stages.size() != 3 ||
+        selected_variant->binding_stages[0] != dxmt::D3D12MinMaxShaderStage::Vertex)
       return false;
   }
   if (FAILED(device->CreateGraphicsPipelineState(&pso_desc, IID_PPV_ARGS(&raw_pso)))) return false;
   OwnedCOM<ID3D12PipelineState> pso(raw_pso);
+  if (vertex_sampling_fixture) {
+    wchar_t selected[32768];
+    const dxmt::D3D12MinMaxGraphicsVariant *selected_variant = nullptr;
+    if (!GetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", selected, 32768) ||
+        FAILED(static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(pso.get())->GetMinMaxVariant(selected, &selected_variant)) ||
+        !selected_variant || selected_variant->bindings.size() != (vertex_only_fixture ? 2u : 4u) ||
+        selected_variant->binding_stages.size() != selected_variant->bindings.size() ||
+        selected_variant->binding_stages[0] != dxmt::D3D12MinMaxShaderStage::Vertex ||
+        (!vertex_only_fixture && (selected_variant->binding_stages[2] != dxmt::D3D12MinMaxShaderStage::Pixel ||
+        selected_variant->locations[0].texture.parameter_index == selected_variant->locations[2].texture.parameter_index))) return false;
+    auto depth_only = pso_desc;
+    depth_only.PS = {}; depth_only.NumRenderTargets = 0; depth_only.RTVFormats[0] = DXGI_FORMAT_UNKNOWN;
+    depth_only.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    depth_only.DepthStencilState.DepthEnable = TRUE;
+    depth_only.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    depth_only.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    ID3D12PipelineState *raw_depth = nullptr;
+    if (FAILED(device->CreateGraphicsPipelineState(&depth_only, IID_PPV_ARGS(&raw_depth)))) return false;
+    OwnedCOM<ID3D12PipelineState> depth_pso(raw_depth);
+    if (FAILED(static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(depth_pso.get())->GetMinMaxVariant(selected, &selected_variant)) ||
+        !selected_variant || selected_variant->bindings.size() != 2) return false;
+  }
   D3D12_HEAP_PROPERTIES props = {}; props.Type = D3D12_HEAP_TYPE_DEFAULT;
   D3D12_RESOURCE_DESC texture_desc = {};
   texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -495,7 +527,8 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
           D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR)))) return false;
   if (static_sampler && (first->pairs[0].state.flags != (7u | dxmt::GetAIRSamplerReductionFlags(D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR)) ||
       second->pairs[0].state.flags != first->pairs[0].state.flags)) return false;
-  if ((first->pairs[0].texture_descriptor.texture_view_id != second->pairs[0].texture_descriptor.texture_view_id) != live ||
+  if ((first->pairs[0].texture_descriptor.texture_view_id != second->pairs[0].texture_descriptor.texture_view_id) !=
+          (live && !vertex_only_fixture) ||
       first->snapshots.size() != 2 || second->snapshots.size() != 2 ||
       first->snapshots.back().msc_descriptor.texture_view_id != second->snapshots.back().msc_descriptor.texture_view_id)
     return false;
@@ -514,8 +547,11 @@ int wmain(int argc, wchar_t **argv) {
     else if (!std::wcscmp(argv[5], L"--implicit-bias") || !std::wcscmp(argv[5], L"--level-bias"))
       implicit_fixture = implicit_bias_fixture = true;
     else if (!std::wcscmp(argv[5], L"--root-buffers")) root_buffers_fixture = true;
+    else if (!std::wcscmp(argv[5], L"--vertex-sampling")) vertex_sampling_fixture = true;
+    else if (!std::wcscmp(argv[5], L"--vertex-only")) vertex_sampling_fixture = vertex_only_fixture = true;
+    else if (!std::wcscmp(argv[5], L"--vertex-shared")) vertex_sampling_fixture = vertex_shared_fixture = true;
     else if (std::wcscmp(argv[5], L"--root-updates")) return 1;
-    root_updates_fixture = !implicit_fixture;
+    root_updates_fixture = !implicit_fixture && !vertex_sampling_fixture;
   }
   if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", argv[3])) return 1;
   std::vector<uint8_t> ps, vs, sampling_vs;
@@ -523,29 +559,43 @@ int wmain(int argc, wchar_t **argv) {
   if (argc >= 5 && (!Load(argv[4], sampling_vs) ||
       !dxmt::ClassifyD3D12Shader({sampling_vs.data(), sampling_vs.size()}).uses_texture_sampling)) return 1;
   const D3D12_SHADER_BYTECODE pixel = {ps.data(), ps.size()}, vertex = {vs.data(), vs.size()};
-  if (!dxmt::ClassifyD3D12Shader(pixel).uses_texture_sampling || dxmt::ClassifyD3D12Shader(vertex).uses_texture_sampling) return 1;
+  if (dxmt::ClassifyD3D12Shader(pixel).uses_texture_sampling == vertex_only_fixture ||
+      dxmt::ClassifyD3D12Shader(vertex).uses_texture_sampling != vertex_sampling_fixture) return 1;
   dxmt::D3D12MinMaxShader prepared;
   std::string error;
   using Stage = dxmt::D3D12MinMaxShaderStage;
-  auto hr = dxmt::PrepareD3D12MinMaxShader(pixel, argv[3], prepared, error, Stage::Pixel);
-  if (FAILED(hr) || prepared.stage != Stage::Pixel || prepared.bindings.size() != 2) {
+  const auto sampled_stage = vertex_only_fixture ? Stage::Vertex : Stage::Pixel;
+  const auto sampled_input = vertex_only_fixture ? vertex : pixel;
+  auto hr = dxmt::PrepareD3D12MinMaxShader(sampled_input, argv[3], prepared, error, sampled_stage);
+  if (FAILED(hr) || prepared.stage != sampled_stage || prepared.bindings.size() != 2) {
     std::printf("pixel preparation failed %08lx %s\n", (unsigned long)hr, error.c_str()); return 1;
   }
   const auto saved = prepared;
   const auto unchanged = [&] {
     return prepared.stage == saved.stage && prepared.bytecode == saved.bytecode && prepared.bindings.size() == 2 &&
+        prepared.pair_offset == saved.pair_offset && prepared.pair_count == saved.pair_count &&
         !std::memcmp(prepared.bindings.data(), saved.bindings.data(), 2 * sizeof(saved.bindings[0]));
   };
-  if (dxmt::PrepareD3D12MinMaxShader(pixel, argv[3], prepared, error) != E_NOTIMPL || !unchanged() ||
-      dxmt::PrepareD3D12MinMaxShader(vertex, argv[3], prepared, error, Stage::Pixel) != E_NOTIMPL || !unchanged() ||
+  if (dxmt::PrepareD3D12MinMaxShader(sampled_input, argv[3], prepared, error) != E_NOTIMPL || !unchanged() ||
+      dxmt::PrepareD3D12MinMaxShader(vertex_only_fixture ? pixel : vertex, argv[3], prepared, error, sampled_stage) != E_NOTIMPL || !unchanged() ||
       dxmt::PrepareD3D12MinMaxShader(pixel, argv[3], prepared, error, static_cast<Stage>(99)) != E_INVALIDARG || !unchanged())
     return 1;
+  if (dxmt::PrepareD3D12MinMaxShader(sampled_input, argv[3], prepared, error, sampled_stage, 64, 64) != E_INVALIDARG || !unchanged() ||
+      dxmt::PrepareD3D12MinMaxShader(sampled_input, argv[3], prepared, error, sampled_stage, 1, 2) != E_NOTIMPL || !unchanged()) return 1;
+  if (vertex_sampling_fixture) {
+    dxmt::D3D12MinMaxShader prepared_vertex;
+    if (FAILED(dxmt::PrepareD3D12MinMaxShader(vertex, argv[3], prepared_vertex, error, Stage::Vertex, 0, 4)) ||
+        prepared_vertex.stage != Stage::Vertex || prepared_vertex.bindings.size() != 2 ||
+        prepared_vertex.pair_offset != 0 || prepared_vertex.pair_count != 4) return 1;
+  }
   ID3D12Device *raw_device = nullptr;
   if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&raw_device)))) return 1;
   OwnedCOM<ID3D12Device> device(raw_device);
   auto *native = static_cast<dxmt::MTLD3D12Device *>(device.get());
   auto metal = native->GetMTLDevice();
   for (unsigned mode = 0; mode < 4; ++mode) {
+    // ALL and stage-specific duplicate registers are invalid root signatures.
+    if (vertex_shared_fixture && !(mode & 1)) continue;
     const bool static_sampler = mode & 2;
     const auto visibility = mode & 1 ? D3D12_SHADER_VISIBILITY_PIXEL : D3D12_SHADER_VISIBILITY_ALL;
     const auto flags = mode & 1 ? D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE : D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
@@ -556,10 +606,12 @@ int wmain(int argc, wchar_t **argv) {
         {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 6, D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 0},
         {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 7, D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 0}};
     D3D12_ROOT_PARAMETER1 parameters[8] = {};
+    if (vertex_shared_fixture) ranges[2].RegisterSpace = 0;
     for (unsigned i = 0; i < 2; ++i) {
       parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
       parameters[i].DescriptorTable = {1, ranges + i}; parameters[i].ShaderVisibility = visibility;
     }
+    if (vertex_sampling_fixture) parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     const unsigned vertex_index = static_sampler ? 1 : 2;
     parameters[vertex_index].ParameterType = parameters[vertex_index + 1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[vertex_index].DescriptorTable = {1, ranges + 2};
@@ -582,6 +634,7 @@ int wmain(int argc, wchar_t **argv) {
       samplers[i].Filter = i ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;
       samplers[i].AddressU = samplers[i].AddressV = samplers[i].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
       samplers[i].MaxLOD = D3D12_FLOAT32_MAX; samplers[i].ShaderRegister = i; samplers[i].ShaderVisibility = visibility;
+      if (vertex_sampling_fixture) samplers[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
       samplers[i].MipLODBias = implicit_fixture ? 1 : 0;
     }
     D3D12_ROOT_SIGNATURE_DESC1 application = {(static_sampler ? 4u : 5u) + (root_buffers_fixture ? 3u : 0u), parameters,
@@ -589,12 +642,13 @@ int wmain(int argc, wchar_t **argv) {
     dxmt::D3D12MinMaxRoot root;
     if (FAILED(dxmt::PrepareD3D12MinMaxRoot(application, 2, root, error))) return 1;
     std::vector<dxmt::D3D12MinMaxPairLocation> locations;
-    if (FAILED(dxmt::ResolveD3D12MinMaxBindings(root, prepared.bindings, locations, error, Stage::Pixel)) ||
-        locations.size() != 2 || locations[0].texture.parameter_index != 0 || locations[0].texture.table_offset != 2 ||
+    if (FAILED(dxmt::ResolveD3D12MinMaxBindings(root, prepared.bindings, locations, error, sampled_stage)) ||
+        locations.size() != 2 || locations[0].texture.parameter_index != (vertex_only_fixture ? vertex_index : 0) ||
+        locations[0].texture.table_offset != (vertex_only_fixture ? 0u : 2u) ||
         (static_sampler ? locations[1].sampler.static_sampler_index != 1 : locations[1].sampler.table_offset != 2)) return 1;
     const auto saved_locations = locations;
     if ((mode & 1) && (dxmt::ResolveD3D12MinMaxBindings(root, prepared.bindings, locations, error) != E_NOTIMPL ||
-        locations.size() != saved_locations.size() || locations[0].texture.table_offset != 2)) return 1;
+        locations.size() != saved_locations.size() || locations[0].texture.table_offset != (vertex_only_fixture ? 0u : 2u))) return 1;
     dxmt::D3D12ConvertedShader converted_ps, converted_vs;
     if (dxmt::ConvertD3D12MinMaxComputeShader(prepared, root, converted_ps, &native->GetMSCCapabilities()) != E_INVALIDARG)
       return 1;
@@ -607,7 +661,11 @@ int wmain(int argc, wchar_t **argv) {
     const auto saved_entry = converted_ps.entry_point;
     if (SUCCEEDED(dxmt::ConvertD3D12MinMaxShader(mislabeled, root, converted_ps, &native->GetMSCCapabilities())) ||
         converted_ps.metallib != saved_metallib || converted_ps.entry_point != saved_entry) return 1;
-    hr = dxmt::ConvertD3D12Shader(vertex, DXMT_MSC_STAGE_VERTEX, converted_vs,
+    if (vertex_only_fixture) {
+      converted_vs = std::move(converted_ps);
+      hr = dxmt::ConvertD3D12Shader(pixel, DXMT_MSC_STAGE_FRAGMENT, converted_ps,
+          root.layout.bytecode.data(), root.layout.bytecode.size(), nullptr, 0, &native->GetMSCCapabilities());
+    } else hr = dxmt::ConvertD3D12Shader(vertex, DXMT_MSC_STAGE_VERTEX, converted_vs,
         root.layout.bytecode.data(), root.layout.bytecode.size(), nullptr, 0, &native->GetMSCCapabilities());
     if (FAILED(hr)) return 1;
     WMT::Error metal_error;
@@ -628,25 +686,28 @@ int wmain(int argc, wchar_t **argv) {
     dxmt::D3D12MinMaxBindingVariant binding_variant;
     binding_variant.stage = Stage::Pixel; binding_variant.root = root;
     binding_variant.bindings = prepared.bindings; binding_variant.locations = saved_locations;
+    if (vertex_only_fixture) binding_variant.binding_stages.assign(2, Stage::Vertex);
     if (!CheckBinding(native, application, binding_variant, vertex, pixel, static_sampler, mode & 1,
-        mode == 0 ? D3D12_SHADER_BYTECODE{sampling_vs.data(), sampling_vs.size()} : D3D12_SHADER_BYTECODE{})) return 1;
+        mode == 0 && !vertex_sampling_fixture ? D3D12_SHADER_BYTECODE{sampling_vs.data(), sampling_vs.size()} : D3D12_SHADER_BYTECODE{})) return 1;
     const auto unchanged_locations = [&] {
       return locations.size() == saved_locations.size() &&
           !std::memcmp(locations.data(), saved_locations.data(), locations.size() * sizeof(locations[0]));
     };
     if (dxmt::ResolveD3D12MinMaxBindings(root, prepared.bindings, locations, error,
         static_cast<Stage>(99)) != E_INVALIDARG || !unchanged_locations()) return 1;
-    application.Flags = D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS;
+    application.Flags = vertex_only_fixture ? D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS :
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS;
     dxmt::D3D12MinMaxRoot denied;
     if (FAILED(dxmt::PrepareD3D12MinMaxRoot(application, 2, denied, error)) ||
-        dxmt::ResolveD3D12MinMaxBindings(denied, prepared.bindings, locations, error, Stage::Pixel) != E_NOTIMPL ||
+        dxmt::ResolveD3D12MinMaxBindings(denied, prepared.bindings, locations, error, sampled_stage) != E_NOTIMPL ||
         !unchanged_locations()) return 1;
     application.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
-    if (static_sampler) samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-    else parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    const auto wrong_stage_visibility = vertex_only_fixture ? D3D12_SHADER_VISIBILITY_PIXEL : D3D12_SHADER_VISIBILITY_VERTEX;
+    if (static_sampler) samplers[0].ShaderVisibility = wrong_stage_visibility;
+    else parameters[1].ShaderVisibility = wrong_stage_visibility;
     dxmt::D3D12MinMaxRoot wrong_visibility;
     if (FAILED(dxmt::PrepareD3D12MinMaxRoot(application, 2, wrong_visibility, error)) ||
-        dxmt::ResolveD3D12MinMaxBindings(wrong_visibility, prepared.bindings, locations, error, Stage::Pixel) != E_NOTIMPL ||
+        dxmt::ResolveD3D12MinMaxBindings(wrong_visibility, prepared.bindings, locations, error, sampled_stage) != E_NOTIMPL ||
         !unchanged_locations()) return 1;
     std::printf("MINMAX_FRAGMENT mode=%u compiler/binding/direct/indirect GPU draw PASS\n", mode);
   }
