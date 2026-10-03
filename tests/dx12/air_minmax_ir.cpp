@@ -94,6 +94,22 @@ int main() {
           clamped->size() != block_count || ir.GetInsertBlock()->size() != clamped_instruction_count) return 1;
     }
   }
+  for (const auto kind : {Texture::texturecube, Texture::texturecube_array}) {
+    Texture texture{kind, Texture::sample_float, Texture::access_sample};
+    auto *function = llvm::Function::Create(llvm::FunctionType::get(air.getFloatTy(),
+        {air.getTextureHandleType(texture), air.getFloatTy(3), air.getFloatTy(3), air.getFloatTy(3)}, false),
+        llvm::GlobalValue::ExternalLinkage, "cube_gradient" + std::to_string(passed), module);
+    ir.SetInsertPoint(llvm::BasicBlock::Create(context, "entry", function));
+    const auto before = ir.GetInsertBlock()->size();
+    if (air.CreateIsotropicGradientLOD(texture, function->getArg(0), function->getArg(2), function->getArg(3)) ||
+        air.CreateIsotropicGradientLOD(texture, function->getArg(0), function->getArg(2), function->getArg(3),
+            air.getFloat(1)) || ir.GetInsertBlock()->size() != before) return 1;
+    auto lod = air.CreateIsotropicGradientLOD(texture, function->getArg(0), function->getArg(2),
+        function->getArg(3), function->getArg(1));
+    if (!lod || (*lod)->getType() != air.getFloatTy()) return 1;
+    ir.CreateRet(*lod);
+    ++passed;
+  }
   if (llvm::verifyModule(module, &llvm::errs())) return 1;
   llvm::outs() << "AIR reduction linkage: passed=" << passed << " failed=0\n";
   return 0;

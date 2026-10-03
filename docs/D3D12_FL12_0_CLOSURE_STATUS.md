@@ -481,3 +481,11 @@ footprints and real D3D12 interior/edge/corner/array/mip/point-tie readbacks.
 Cube gradients/implicit/feedback and DXIL cube lowering remain closed; broader
 view/clamp/lifetime and full resource/filter qualification remain open. This is
 an explicit-LOD production increment, not full Cube/MinMax or FL qualification.
+
+AIR float Cube/CubeArray feedback-free, zero-offset SampleGrad now projects
+direction derivatives to primary-face space before existing Gram-matrix LOD and
+reduction sampling (`D3D12_MINMAX_CUBE_GRAD.md`). Both full builds, focused IR
+and real D3D12 gradient/tie/radial readbacks pass. This supersedes the prior AIR
+explicit-gradient rejection, not implicit Cube, DXIL Cube or full MinMax
+qualification. View/clamp/filter/format/lifetime and mandatory FL gates remain
+open; no capability/FL promotion.

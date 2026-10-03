@@ -130,12 +130,23 @@ static bool CompileDXBC(std::vector<char> &shader, bool unsupported_reduction = 
       "[numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){o[0]=(uint)(t." +
       (gradient ? "SampleGrad" : "SampleLevel") + "(s," + (line_array ? "float2(0.5,1)" : "0.5") +
       (gradient ? (gradient_case ? ",0.23,0.0" : ",1.0,0.0") : ",0.0") + ").x*255+0.5);}";
-  const char *cube_direction[] = {"1,0,0", "1,0,1", "1,1,1", "1,0,0"};
+  const char *cube_direction[] = {"1,0,0", "1,0,1", "1,1,1", "1,0,0",
+      "1,0,0", "1,0,0", "10,0,0", "-1,0.5,0",
+      "-1,0.5,0", "1,0.5,1", "1,1,0.5", "-1,0.5,0"};
+  const char *cube_gradient[] = {",float3(0.25,0,0),float3(0,0.25,0)",
+      ",float3(0,2,0),float3(0,0,2)",
+      ",float3(4096,0,0),float3(0,0,0)",
+      ",float3(0,20,0),float3(0,0,20)",
+      ",float3(-2,1,0),float3(0,0,2)",
+      ",float3(-4096,2048,0),float3(0,0,0)",
+      ",float3(0,1,1),float3(0,0,0)",
+      ",float3(0,1,1),float3(0,0,0)",
+      ",float3(-1,1,0),float3(0,0,0)"};
   const std::string cube_source = std::string(cube_array ? "TextureCubeArray<float4>" : "TextureCube<float4>") +
       " t:register(t0); SamplerState s:register(s0); RWBuffer<uint> o:register(u0);"
       "[numthreads(1,1,1)] void main(){o[0]=(uint)(t." + std::string(gradient ? "SampleGrad" : "SampleLevel") + "(s," +
       (cube_array ? "float4(" : "float3(") + cube_direction[cube_case] + (cube_array ? ",1)" : ")") +
-      (gradient ? ",float3(0.25,0,0),float3(0,0.25,0)" : cube_case == 3 ? ",0.5" : ",0") + ").x*255+0.5);}";
+      (gradient ? cube_gradient[cube_case >= 4 ? cube_case - 3 : 0] : cube_case == 3 ? ",0.5" : ",0") + ").x*255+0.5);}";
   const char *selected_source = cube ? cube_source.c_str() : instruction_clamp >= 0 ? instruction_source.c_str() : clamp_probe ? clamp_source :
       unsupported_reduction ? unsupported_source : line ? line_source.c_str() :
       gradient ? gradient_source.c_str() : source;
@@ -270,10 +281,23 @@ main(int argc, char **argv) {
        strcmp(argv[2], "--minimum-cube-edge-point") == 0 || strcmp(argv[2], "--maximum-cube-edge-point") == 0 ||
        strcmp(argv[2], "--minimum-cube-array-edge-point") == 0 || strcmp(argv[2], "--maximum-cube-array-edge-point") == 0 ||
        strcmp(argv[2], "--static-minimum-cube") == 0 || strcmp(argv[2], "--static-maximum-cube") == 0 ||
-       strcmp(argv[2], "--static-minimum-cube-grad") == 0);
+       strcmp(argv[2], "--static-minimum-cube-grad") == 0 ||
+       strcmp(argv[2], "--minimum-cube-grad-mip") == 0 || strcmp(argv[2], "--maximum-cube-grad-mip") == 0 ||
+       strcmp(argv[2], "--minimum-cube-array-grad-mip") == 0 || strcmp(argv[2], "--maximum-cube-array-grad-mip") == 0 ||
+       strcmp(argv[2], "--minimum-cube-grad-radial") == 0 || strcmp(argv[2], "--maximum-cube-grad-radial") == 0 ||
+       strcmp(argv[2], "--minimum-cube-grad-scaled") == 0 || strcmp(argv[2], "--maximum-cube-grad-scaled") == 0 ||
+       strcmp(argv[2], "--minimum-cube-grad-negative") == 0 || strcmp(argv[2], "--maximum-cube-grad-negative") == 0 ||
+       strcmp(argv[2], "--minimum-cube-grad-negative-radial") == 0 || strcmp(argv[2], "--maximum-cube-grad-negative-radial") == 0 ||
+       strcmp(argv[2], "--minimum-cube-grad-tie-z-point") == 0 || strcmp(argv[2], "--maximum-cube-grad-tie-z-point") == 0 ||
+       strcmp(argv[2], "--minimum-cube-grad-tie-y-point") == 0 || strcmp(argv[2], "--maximum-cube-grad-tie-y-point") == 0 ||
+       strcmp(argv[2], "--minimum-cube-grad-negative-offaxis-point") == 0 || strcmp(argv[2], "--maximum-cube-grad-negative-offaxis-point") == 0);
   const bool cube_array = cube && strstr(argv[2], "array");
   const bool cube_point = cube && strstr(argv[2], "point");
-  const unsigned cube_case = !cube ? 0 : strstr(argv[2], "edge") ? 1 : strstr(argv[2], "corner") ? 2 :
+  const unsigned cube_case = !cube ? 0 : strstr(argv[2], "negative-radial") ? 8 :
+      strstr(argv[2], "tie-z") ? 9 : strstr(argv[2], "tie-y") ? 10 : strstr(argv[2], "offaxis") ? 11 :
+      strstr(argv[2], "radial") ? 5 : strstr(argv[2], "scaled") ? 6 :
+      strstr(argv[2], "negative") ? 7 : strstr(argv[2], "grad-mip") ? 4 :
+      strstr(argv[2], "edge") ? 1 : strstr(argv[2], "corner") ? 2 :
       strstr(argv[2], "mip") ? 3 : 0;
   const bool volume = argc == 3 && (strcmp(argv[2], "--minimum-3d") == 0 ||
       strcmp(argv[2], "--maximum-3d") == 0 || strcmp(argv[2], "--minimum-3d-grad") == 0 ||
@@ -337,7 +361,9 @@ main(int argc, char **argv) {
                                         D3D12_FILTER_MIN_MAG_MIP_LINEAR;
   // The nonorthogonal footprint's major axis is 8*.23*golden_ratio:
   // LOD ~1.574 -> point mip 2; max raw derivative length wrongly picks mip 1.
-  const UINT expected = cube_point ? 80 : cube ? (minimum ? (cube_case == 3 ? 8 : 16) :
+  const UINT expected = cube && (cube_case == 8 || cube_case == 11) ? 112 : cube && cube_case == 10 ? 32 :
+      cube && (cube_case == 4 || cube_case == 6 || cube_case == 7) ? 8 :
+      cube_point ? 80 : cube ? (minimum ? (cube_case == 3 ? 8 : 16) :
       cube_case == 1 ? 192 : cube_case == 2 ? 80 : 240) :
       clamp_probe ? clamp_probe->expected : volume_clamp ? 64 : volume && grad_lod ? 160 :
       line_axis ? 32 : line_lod ? 224 : line ? (minimum ? (line_array ? 192 : 16) : (line_array ? 240 : 64)) :
@@ -559,7 +585,7 @@ main(int argc, char **argv) {
   texture_desc.Width = grad_lod ? 8 : reduction ? 2 : 1;
   texture_desc.Height = line ? 1 : grad_lod ? 8 : reduction ? 2 : 1;
   texture_desc.DepthOrArraySize = cube ? (cube_array ? 12 : 6) : volume ? (grad_lod ? 8 : 2) : line_array || array_2d ? 2 : 1;
-  texture_desc.MipLevels = cube && cube_case == 3 ? 2 : grad_lod ? 4 : 1;
+  texture_desc.MipLevels = cube && cube_case >= 3 ? 2 : grad_lod ? 4 : 1;
   texture_subresources = texture_desc.MipLevels * (volume ? 1 : texture_desc.DepthOrArraySize);
   texture_desc.Format = defaults_r ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
   texture_desc.SampleDesc.Count = 1;

@@ -1985,11 +1985,14 @@ Converter::operator()(const InstSampleDerivative &sample) {
     if (sample.feedback ||
         (Tex->Logical != Texture::texture1d && Tex->Logical != Texture::texture1d_array &&
          Tex->Logical != Texture::texture2d && Tex->Logical != Texture::texture2d_array &&
-         Tex->Logical != Texture::texture3d) || Tex->Texture.sample_type != Texture::sample_float) {
+         Tex->Logical != Texture::texture3d && Tex->Logical != Texture::texturecube &&
+         Tex->Logical != Texture::texturecube_array) || Tex->Texture.sample_type != Texture::sample_float ||
+        ((Tex->Logical == Texture::texturecube || Tex->Logical == Texture::texturecube_array) &&
+         (sample.offsets[0] || sample.offsets[1] || sample.offsets[2]))) {
       failure = "AIR Min/Max SampleGrad texture kind/type or feedback is unsupported";
       return;
     }
-    auto lod = air.CreateIsotropicGradientLOD(Tex->Texture, Tex->Handle, DDX, DDY);
+    auto lod = air.CreateIsotropicGradientLOD(Tex->Texture, Tex->Handle, DDX, DDY, Coord);
     if (!lod) { failure = "AIR Min/Max gradient LOD is unsupported"; return; }
     auto *biased_lod = ir.CreateFAdd(*lod, Sampler->Bias);
     auto result = CreateReductionSample(*Tex, *Sampler, Coord, ArrayIndex, biased_lod, sample.offsets, [&] {

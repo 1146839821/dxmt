@@ -669,7 +669,8 @@ read_control_flow(
                  texture.resource_type == ResourceType::Texture2D ||
                  texture.resource_type == ResourceType::Texture2DArray ||
                  texture.resource_type == ResourceType::Texture3D);
-            if constexpr (std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleLOD>)
+            if constexpr (std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleLOD> ||
+                          std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleDerivative>)
               eligible |= !decoded.feedback && texture.scaler_type == ScalerDataType::Float &&
                   (texture.resource_type == ResourceType::TextureCube ||
                    texture.resource_type == ResourceType::TextureCubeArray) &&

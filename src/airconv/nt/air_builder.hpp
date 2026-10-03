@@ -255,7 +255,7 @@ public:
 
   Value *CreateTextureQuery(const Texture &Texture, Value *Handle, Texture::Query Query, Value *Level);
   Optional<Value *> CreateIsotropicGradientLOD(const Texture &Texture, Value *Handle,
-                                              Value *DerivX, Value *DerivY);
+                                              Value *DerivX, Value *DerivY, Value *Direction = nullptr);
 
   /**
   \returns (float clamped_lod, float unclamped_lod)

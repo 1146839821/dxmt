@@ -14,17 +14,51 @@
 namespace llvm::air {
 
 Optional<Value *>
-AIRBuilder::CreateIsotropicGradientLOD(const Texture &Texture, Value *Handle, Value *DerivX, Value *DerivY) {
+AIRBuilder::CreateIsotropicGradientLOD(const Texture &Texture, Value *Handle, Value *DerivX, Value *DerivY,
+                                     Value *Direction) {
+  const bool cube = Texture.kind == Texture::texturecube || Texture.kind == Texture::texturecube_array;
   unsigned axes = 2;
   if (Texture.kind == Texture::texture3d) axes = 3;
-  else if (Texture.kind != Texture::texture2d && Texture.kind != Texture::texture2d_array) return None;
+  else if (!cube && Texture.kind != Texture::texture2d && Texture.kind != Texture::texture2d_array) return None;
   if (!Handle || !DerivX || !DerivY || Handle->getType() != getTextureHandleType(Texture) ||
-      DerivX->getType() != getFloatTy(axes) || DerivY->getType() != getFloatTy(axes)) return None;
+      DerivX->getType() != getFloatTy(cube ? 3 : axes) ||
+      DerivY->getType() != getFloatTy(cube ? 3 : axes) ||
+      (cube && (!Direction || Direction->getType() != getFloatTy(3)))) return None;
+  if (cube) {
+    auto *absolute = CreateFPUnOp(fabs, Direction, false);
+    auto *x = builder.CreateExtractElement(absolute, 0ull);
+    auto *y = builder.CreateExtractElement(absolute, 1ull);
+    auto *z = builder.CreateExtractElement(absolute, 2ull);
+    auto *major_z = builder.CreateAnd(builder.CreateFCmpOGE(z, x), builder.CreateFCmpOGE(z, y));
+    auto *major_y = builder.CreateFCmpOGE(y, x);
+    auto *major_axis = builder.CreateSelect(major_z, getInt(2),
+        builder.CreateSelect(major_y, getInt(1), getInt(0)));
+    auto *first_axis = builder.CreateSelect(builder.CreateICmpEQ(major_axis, getInt(0)), getInt(1), getInt(0));
+    auto *second_axis = builder.CreateSelect(major_z, getInt(1), getInt(2));
+    auto *major = builder.CreateExtractElement(Direction, major_axis);
+    // Mirroring/permuting both face derivatives preserves the Gram matrix.
+    // Quotient-rule projection removes radial direction changes before LOD.
+    auto project = [&](Value *derivative) {
+      auto *major_derivative = builder.CreateFDiv(builder.CreateExtractElement(derivative, major_axis), major);
+      Value *result = ConstantFP::getNullValue(getFloatTy(2));
+      unsigned component = 0;
+      for (auto *axis : {first_axis, second_axis}) {
+        auto *coordinate = builder.CreateFDiv(builder.CreateExtractElement(Direction, axis), major);
+        auto *minor = builder.CreateFDiv(builder.CreateExtractElement(derivative, axis), major);
+        auto *projected = builder.CreateFMul(getFloat(0.5),
+            builder.CreateFSub(minor, builder.CreateFMul(coordinate, major_derivative)));
+        result = builder.CreateInsertElement(result, projected, component++);
+      }
+      return result;
+    };
+    DerivX = project(DerivX);
+    DerivY = project(DerivY);
+  }
   const Texture::Query queries[] = {Texture::width, Texture::height, Texture::depth};
   SmallVector<Value *, 3> dx, dy;
   Value *scale = getFloat(0);
   for (unsigned axis = 0; axis < axes; ++axis) {
-    auto *size = builder.CreateUIToFP(CreateTextureQuery(Texture, Handle, queries[axis], getInt(0)), getFloatTy());
+    auto *size = builder.CreateUIToFP(CreateTextureQuery(Texture, Handle, cube ? Texture::width : queries[axis], getInt(0)), getFloatTy());
     auto *x = builder.CreateFMul(builder.CreateExtractElement(DerivX, axis), size);
     auto *y = builder.CreateFMul(builder.CreateExtractElement(DerivY, axis), size);
     dx.push_back(x); dy.push_back(y);
