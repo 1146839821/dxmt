@@ -114,7 +114,7 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
     return reject("invalid DXIL resource metadata");
   auto *resources = named->getOperand(0);
   std::vector<TypedOriginBinding> records;
-  std::map<std::pair<uint32_t, uint32_t>, uint32_t> ranges;
+  std::map<std::pair<uint32_t, uint32_t>, std::pair<uint32_t, uint32_t>> ranges;
   for (uint32_t resource_class = 0; resource_class < 2; ++resource_class) {
     auto *list = dyn_cast_or_null<MDNode>(resources->getOperand(resource_class));
     if (!list && resources->getOperand(resource_class)) return reject("invalid resource list");
@@ -127,10 +127,12 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
           !Word(resource->getOperand(5), count) || !Word(resource->getOperand(6), kind))
         return reject("invalid SRV/UAV record");
       if (kind != 10) continue; // TypedBuffer; leave textures/raw/structured alone.
-      if (count != 1 || records.size() >= 64) return reject("typed resource arrays exceed current lowering contract");
-      if (!ranges.emplace(std::make_pair(resource_class, id), records.size()).second)
+      if (!count || count > 64 - records.size() || uint64_t(reg) + count > uint64_t(UINT32_MAX) + 1)
+        return reject("typed resource range exceeds finite lowering contract");
+      if (!ranges.emplace(std::make_pair(resource_class, id), std::make_pair(records.size(), count)).second)
         return reject("duplicate typed resource range");
-      records.push_back({resource_class, space, reg});
+      for (uint32_t offset = 0; offset < count; ++offset)
+        records.push_back({resource_class, space, reg + offset});
     }
   }
   if (records.empty()) return reject("no typed buffer resources");
@@ -175,9 +177,12 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
     if (match == ranges.end()) continue;
     uint32_t reg;
     auto *nonuniform = dyn_cast<ConstantInt>(call->getArgOperand(4));
-    if (!Word(call->getArgOperand(3), reg) || reg != records[match->second].shader_register ||
+    const auto [first, count] = match->second;
+    const auto base_register = records[first].shader_register;
+    if (!Word(call->getArgOperand(3), reg) || reg < base_register ||
+        uint64_t(reg) >= uint64_t(base_register) + count ||
         !nonuniform || !nonuniform->isZero()) return reject("dynamic/nonuniform typed handle");
-    handles.emplace_back(call, match->second);
+    handles.emplace_back(call, first + (reg - base_register));
   }
   std::vector<Access> accesses;
   for (auto [handle, record] : handles) for (auto *user : handle->users()) {
@@ -203,6 +208,19 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
     accesses.push_back({call, record, coordinate});
   }
   if (accesses.empty()) return reject("no directly resolved typed accesses");
+
+  // Declaring a finite range does not require unused slots to be initialized.
+  // Keep only accessed slots in the private state and submission binding list.
+  std::vector<bool> used(records.size(), false);
+  for (const auto &access : accesses) used[access.record] = true;
+  std::vector<uint32_t> remap(records.size());
+  std::vector<TypedOriginBinding> accessed_records;
+  for (uint32_t index = 0; index < records.size(); ++index) if (used[index]) {
+    remap[index] = accessed_records.size();
+    accessed_records.push_back(records[index]);
+  }
+  for (auto &access : accesses) access.record = remap[access.record];
+  records = std::move(accessed_records);
 
   // All supported operations have been identified before modifying the module.
   // Per-access insertion works in existing branches and loops; no text grammar

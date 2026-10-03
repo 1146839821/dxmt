@@ -12,7 +12,7 @@ static uint32_t Word(const unsigned char *bytes) {
   return uint32_t(bytes[0]) | uint32_t(bytes[1]) << 8 | uint32_t(bytes[2]) << 16 | uint32_t(bytes[3]) << 24;
 }
 int main(int argc, char **argv) {
-  if (argc != 2) return 1;
+  if (argc != 2 && (argc != 3 || std::strcmp(argv[2], "--array"))) return 1;
   auto file = llvm::MemoryBuffer::getFileOrSTDIN(argv[1]);
   if (!file) return 1;
   auto input = (*file)->getBuffer();
@@ -82,6 +82,9 @@ int main(int argc, char **argv) {
   for (unsigned i = 0; i < bindings.size(); ++i)
     llvm::errs() << "record=" << i << " class=" << bindings[i].resource_class << " space=" <<
         bindings[i].register_space << " register=" << bindings[i].shader_register << '\n';
+  if (argc == 3 && (bindings.size() != 2 || bindings[0].resource_class != 0 ||
+      bindings[0].register_space || bindings[0].shader_register != 4 ||
+      bindings[1].resource_class != 1 || bindings[1].register_space || bindings[1].shader_register != 6)) return 1;
   (*parsed)->setSourceFileName("");
   (*parsed)->setModuleIdentifier("");
   std::string expected;
