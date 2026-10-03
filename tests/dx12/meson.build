@@ -773,6 +773,13 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach stage : ['vs', 'ps']
+    custom_target('dx12_graphics_indirect_fragment_' + stage + '_fixture',
+      input: 'graphics_indirect_fragment.hlsl', output: 'graphics_indirect_fragment.' + stage + '.cso',
+      command: dxc_command + ['-E', stage + '_main', '-T', stage + '_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+  endforeach
   custom_target('dx12_graphics_sm6_ps_fixture',
     input: 'graphics_sm6.hlsl',
     output: 'graphics_sm6.ps.cso',

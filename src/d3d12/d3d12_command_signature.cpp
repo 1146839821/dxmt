@@ -91,6 +91,15 @@ struct dxmt_render_command_data {
   device void * index_buffer;
   uint index_buffer_format;
   uint vertex_argbuf_stride;
+  device char *msc_tlab;
+  device char *msc_template;
+  device uint *msc_layout_offsets;
+  device void *msc_heap;
+  device void *msc_sampler_heap;
+  ulong msc_tlab_stride;
+  ulong msc_template_size;
+  device ulong *msc_vertex_buffers;
+  ulong msc_vertex_slot_mask;
 };
 
 )";
@@ -216,10 +225,7 @@ public:
     if (is_compute)
       source << "if (x !=0 ) return;\n";
 
-    if (is_compute) {
-      // Named runtime binding constants, not AIR slots, for MSC commands.
-      source << "device char *msc_tlab = nullptr;\n";
-    }
+    source << "device char *msc_tlab = nullptr;\n";
 
     source << "uint count = command_data.max_count_buffer ? "
               "command_data.max_count_buffer[0] : command_data.max_count;\n";
@@ -234,8 +240,7 @@ public:
     }
     source << "cmd.reset();\n";
     source << "if (i >= count) continue;\n";
-    if (is_compute)
-      source << "msc_tlab = command_data.msc_tlab ? command_data.msc_tlab + i * command_data.msc_tlab_stride : nullptr;\n"
+    source << "msc_tlab = command_data.msc_tlab ? command_data.msc_tlab + i * command_data.msc_tlab_stride : nullptr;\n"
                 "if (msc_tlab) { for (ulong b = 0; b < command_data.msc_template_size; ++b) "
                 "msc_tlab[b] = command_data.msc_template[b]; }\n";
     source << "device ulong * rootsig_qwords = command_data.rootsig_qwords + "
@@ -247,12 +252,24 @@ public:
 
     if (UpdateRootArguments || UpdateVertexBuffers || UpdateIndexBuffer) {
       if (!is_compute) {
+        source << "if (msc_tlab) {\n"
+               << "cmd.set_vertex_buffer(msc_tlab," << DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT << ");\n"
+               << "cmd.set_fragment_buffer(msc_tlab," << DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT << ");\n"
+               << "cmd.set_vertex_buffer(command_data.msc_heap," << DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT << ");\n"
+               << "cmd.set_fragment_buffer(command_data.msc_heap," << DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT << ");\n"
+               << "cmd.set_vertex_buffer(command_data.msc_sampler_heap," << DXMT_MSC_SAMPLER_HEAP_BIND_POINT << ");\n"
+               << "cmd.set_fragment_buffer(command_data.msc_sampler_heap," << DXMT_MSC_SAMPLER_HEAP_BIND_POINT << ");\n"
+               << "for (uint slot = 0; slot < 32; ++slot) if (command_data.msc_vertex_slot_mask & (1ul << slot)) "
+               << "cmd.set_vertex_buffer(reinterpret_cast<device void *>(command_data.msc_vertex_buffers[slot]), "
+               << DXMT_MSC_VERTEX_BUFFER_BIND_POINT << " + slot);\n"
+               << "} else {\n";
         source << "cmd.set_vertex_buffer(vertex_buffer," << SM50_BINDING_INDEX_VERTEX_BUFFER << ");\n";
         source << "cmd.set_vertex_buffer(rootsig_qwords," << SM50_BINDING_INDEX_ROOT_ARGUMENTS << ");\n";
         source << "cmd.set_vertex_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS << ");\n";
         source << "cmd.set_fragment_buffer(rootsig_qwords," << SM50_BINDING_INDEX_ROOT_ARGUMENTS << ");\n";
         source << "cmd.set_fragment_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS
                << ");\n";
+        source << "}\n";
       } else {
         source << "if (msc_tlab) {\n"
                << "cmd.set_kernel_buffer(msc_tlab," << DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT << ");\n"
@@ -319,8 +336,7 @@ public:
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
         for (unsigned j = 0; j < arg.Constant.Num32BitValuesToSet; j++) {
-          if (is_compute)
-            source << "if (msc_tlab) reinterpret_cast<device uint *>(msc_tlab + command_data.msc_layout_offsets["
+          source << "if (msc_tlab) reinterpret_cast<device uint *>(msc_tlab + command_data.msc_layout_offsets["
                    << parameter_index << "])[" << (j + arg.Constant.DestOffsetIn32BitValues)
                    << "] = arg.constant_" << i << "_" << j << "; else ";
           source << "reinterpret_cast<device uint *>(rootsig_qwords + " << offset << ")["
@@ -336,8 +352,7 @@ public:
         if (parameter_index >= rootsig->ParameterSlots)
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
-        if (is_compute)
-          source << "if (msc_tlab) *reinterpret_cast<device ulong *>(msc_tlab + command_data.msc_layout_offsets["
+        source << "if (msc_tlab) *reinterpret_cast<device ulong *>(msc_tlab + command_data.msc_layout_offsets["
                  << parameter_index << "]) = arg.cb_" << i << "; else ";
         source << "rootsig_qwords[" << offset << "] = arg.cb_" << i << ";\n";
         break;
@@ -350,8 +365,7 @@ public:
         if (parameter_index >= rootsig->ParameterSlots)
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
-        if (is_compute)
-          source << "if (msc_tlab) *reinterpret_cast<device ulong *>(msc_tlab + command_data.msc_layout_offsets["
+        source << "if (msc_tlab) *reinterpret_cast<device ulong *>(msc_tlab + command_data.msc_layout_offsets["
                  << parameter_index << "]) = arg.srv_" << i << "; else ";
         source << "rootsig_qwords[" << offset << "] = arg.srv_" << i << ";\n";
         break;
@@ -364,8 +378,7 @@ public:
         if (parameter_index >= rootsig->ParameterSlots)
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
-        if (is_compute)
-          source << "if (msc_tlab) *reinterpret_cast<device ulong *>(msc_tlab + command_data.msc_layout_offsets["
+        source << "if (msc_tlab) *reinterpret_cast<device ulong *>(msc_tlab + command_data.msc_layout_offsets["
                  << parameter_index << "]) = arg.uav_" << i << "; else ";
         source << "rootsig_qwords[" << offset << "] = arg.uav_" << i << ";\n";
         break;

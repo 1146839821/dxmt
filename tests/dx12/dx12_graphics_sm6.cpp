@@ -42,11 +42,18 @@ int main(int argc, char **argv) {
       argc == 5 && (strcmp(argv[3], "--geometry") == 0 || geometry_indexed ||
                     geometry_adjacency || geometry_root_cbv || geometry_instanced);
   const bool textured = argc == 4 && strcmp(argv[3], "--texture") == 0;
-  const bool root_cbv = argc == 4 && strcmp(argv[3], "--root-cbv") == 0;
-  const bool root_constants = argc == 4 && strcmp(argv[3], "--root-constants") == 0;
-  const bool root_srv = argc == 4 && strcmp(argv[3], "--root-srv") == 0;
-  const bool root_uav = argc == 4 && strcmp(argv[3], "--root-uav") == 0;
-  const bool textured_root_cbv = argc == 4 && strcmp(argv[3], "--texture-root-cbv") == 0;
+  const bool indirect_indexed = argc == 4 && strcmp(argv[3], "--indirect-root-cbv-indexed") == 0;
+  const bool indirect_fragment = argc == 4 && strcmp(argv[3], "--indirect-fragment-constants") == 0;
+  const bool indirect_partial = argc == 4 && strcmp(argv[3], "--indirect-partial-constants") == 0;
+  const bool root_cbv = argc == 4 && (strcmp(argv[3], "--root-cbv") == 0 ||
+      strcmp(argv[3], "--indirect-root-cbv") == 0 || indirect_indexed);
+  const bool root_constants = argc == 4 && (strcmp(argv[3], "--root-constants") == 0 ||
+      strcmp(argv[3], "--indirect-root-constants") == 0 || indirect_fragment || indirect_partial);
+  const bool root_srv = argc == 4 && (strcmp(argv[3], "--root-srv") == 0 || strcmp(argv[3], "--indirect-root-srv") == 0);
+  const bool root_uav = argc == 4 && (strcmp(argv[3], "--root-uav") == 0 || strcmp(argv[3], "--indirect-root-uav") == 0);
+  const bool indirect = argc == 4 && strncmp(argv[3], "--indirect-", 11) == 0;
+  const bool textured_root_cbv = argc == 4 && (strcmp(argv[3], "--texture-root-cbv") == 0 ||
+      strcmp(argv[3], "--indirect-texture-root-cbv") == 0);
   const bool logic_op = argc == 4 && strcmp(argv[3], "--logic-op") == 0;
   const bool stencil = argc == 4 && strcmp(argv[3], "--stencil") == 0;
   const bool barycentrics = argc == 4 && strcmp(argv[3], "--barycentrics") == 0;
@@ -143,6 +150,8 @@ int main(int argc, char **argv) {
   ID3D12Resource *index_buffer = nullptr;
   ID3D12Resource *root_data_buffer = nullptr;
   ID3D12Resource *root_uav_buffer = nullptr;
+  ID3D12Resource *indirect_args = nullptr;
+  ID3D12CommandSignature *command_signature = nullptr;
   ID3D12Resource *texture = nullptr;
   ID3D12Resource *texture_upload = nullptr;
   ID3D12Resource *readback = nullptr;
@@ -277,7 +286,7 @@ int main(int argc, char **argv) {
     root_parameters[0].Constants.Num32BitValues = 4;
     root_parameters[0].Constants.ShaderRegister = 0;
     root_parameters[0].Constants.RegisterSpace = 0;
-    root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    root_parameters[0].ShaderVisibility = indirect_fragment ? D3D12_SHADER_VISIBILITY_ALL : D3D12_SHADER_VISIBILITY_VERTEX;
     root_desc.NumParameters = 1;
     root_desc.pParameters = root_parameters;
   } else if (root_srv) {
@@ -501,7 +510,7 @@ int main(int argc, char **argv) {
   vertex_view.SizeInBytes = vertex_data_size;
   vertex_view.StrideInBytes = sizeof(Vertex);
 
-  if (geometry_indexed) {
+  if (geometry_indexed || indirect_indexed) {
     buffer_desc.Width = index_data_size;
     if (!CheckHR("CreateIndexBuffer",
                  device->CreateCommittedResource(
@@ -685,18 +694,20 @@ int main(int argc, char **argv) {
         sampler_root_index, sampler_heap->GetGPUDescriptorHandleForHeapStart());
   }
   if (root_cbv || textured_root_cbv || geometry_root_cbv)
-    list->SetGraphicsRootConstantBufferView(0, root_data_buffer->GetGPUVirtualAddress());
-  if (root_constants)
-    list->SetGraphicsRoot32BitConstants(0, 4, root_color_bits, 0);
+    list->SetGraphicsRootConstantBufferView(0, indirect ? 0 : root_data_buffer->GetGPUVirtualAddress());
+  if (root_constants) {
+    static const UINT wrong_color[] = {0x3f800000u, 0, 0, 0x3f800000u};
+    list->SetGraphicsRoot32BitConstants(0, 4, indirect ? wrong_color : root_color_bits, 0);
+  }
   if (root_srv)
-    list->SetGraphicsRootShaderResourceView(0, root_data_buffer->GetGPUVirtualAddress());
+    list->SetGraphicsRootShaderResourceView(0, indirect ? 0 : root_data_buffer->GetGPUVirtualAddress());
   if (root_uav)
-    list->SetGraphicsRootUnorderedAccessView(0, root_uav_buffer->GetGPUVirtualAddress());
+    list->SetGraphicsRootUnorderedAccessView(0, indirect ? 0 : root_uav_buffer->GetGPUVirtualAddress());
   list->IASetPrimitiveTopology(geometry_adjacency
                                    ? D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ
                                    : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   list->IASetVertexBuffers(0, 1, &vertex_view);
-  if (geometry_indexed)
+  if (geometry_indexed || indirect_indexed)
     list->IASetIndexBuffer(&index_view);
   list->OMSetRenderTargets(1, &rtv_handle, FALSE, stencil ? &dsv_handle : nullptr);
   if (logic_op || stencil)
@@ -709,7 +720,45 @@ int main(int argc, char **argv) {
   list->BeginQuery(query_heap, D3D12_QUERY_TYPE_OCCLUSION, 0);
   if (stencil)
     list->OMSetStencilRef(0x2a);
-  if (geometry_indexed)
+  if (indirect) {
+    D3D12_INDIRECT_ARGUMENT_DESC arguments[2] = {};
+    arguments[0].Type = root_constants ? D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT : (root_cbv || textured_root_cbv) ?
+        D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW : root_srv ?
+        D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW : D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+    if (root_constants) {
+      arguments[0].Constant.RootParameterIndex = 0;
+      arguments[0].Constant.Num32BitValuesToSet = indirect_partial ? 3 : 4;
+    }
+    arguments[1].Type = indirect_indexed ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+    const UINT root_bytes = root_constants ? arguments[0].Constant.Num32BitValuesToSet * 4 : 8;
+    D3D12_COMMAND_SIGNATURE_DESC signature = {};
+    signature.ByteStride = root_bytes + (indirect_indexed ? sizeof(D3D12_DRAW_INDEXED_ARGUMENTS) : sizeof(D3D12_DRAW_ARGUMENTS));
+    signature.NumArgumentDescs = 2;
+    signature.pArgumentDescs = arguments;
+    if (!CheckHR("CreateIndirectSignature", device->CreateCommandSignature(
+            &signature, root_signature, IID_PPV_ARGS(&command_signature)))) goto cleanup;
+    auto args_desc = buffer_desc;
+    args_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    args_desc.Width = signature.ByteStride;
+    if (!CheckHR("CreateIndirectArgs", device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE,
+            &args_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&indirect_args)))) goto cleanup;
+    void *mapped = nullptr;
+    if (!CheckHR("MapIndirectArgs", indirect_args->Map(0, nullptr, &mapped))) goto cleanup;
+    if (root_constants) memcpy(mapped, root_color_bits, root_bytes);
+    else {
+      const UINT64 address = (root_uav ? root_uav_buffer : root_data_buffer)->GetGPUVirtualAddress();
+      memcpy(mapped, &address, sizeof(address));
+    }
+    if (indirect_indexed) {
+      const D3D12_DRAW_INDEXED_ARGUMENTS draw = {draw_count, 1, 0, 0, 0};
+      memcpy(static_cast<BYTE *>(mapped) + root_bytes, &draw, sizeof(draw));
+    } else {
+      const D3D12_DRAW_ARGUMENTS draw = {draw_count, 1, 0, 0};
+      memcpy(static_cast<BYTE *>(mapped) + root_bytes, &draw, sizeof(draw));
+    }
+    indirect_args->Unmap(0, nullptr);
+    list->ExecuteIndirect(command_signature, 1, indirect_args, 0, nullptr, 0);
+  } else if (geometry_indexed)
     list->DrawIndexedInstanced(draw_count, 1, 0, 0, 0);
   else
     list->DrawInstanced(draw_count, 1, 0, 0);
@@ -816,7 +865,8 @@ int main(int argc, char **argv) {
     goto cleanup;
   }
   if (timestamp_end <= timestamp_begin) {
-    std::cerr << "timestamp query did not advance: " << timestamp_begin << " -> " << timestamp_end << "\n";
+    std::cerr << "timestamp query did not advance: " << timestamp_begin << " -> " << timestamp_end
+              << "; readback=0x" << std::hex << pixel << std::dec << "\n";
     goto cleanup;
   }
   expected_pixel = (wave_quad_ops || int64_ops || native16_ops || helper_lane || helper_lane_derivative || helper_lane_discard)
@@ -860,6 +910,10 @@ int main(int argc, char **argv) {
   result = 0;
 
 cleanup:
+  if (command_signature)
+    command_signature->Release();
+  if (indirect_args)
+    indirect_args->Release();
   if (event)
     CloseHandle(event);
   if (fence)

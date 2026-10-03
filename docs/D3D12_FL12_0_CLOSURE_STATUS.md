@@ -2,6 +2,14 @@
 
 ## Current snapshot (2026-10-03, static DXIL MinMax dispatch checkpoint)
 
+MSC graphics indirect follow-up: ordinary DRAW/DRAW_INDEXED root updates now
+reuse reflected compute TLAB encoding and restore ordinary vertex inputs
+(`D3D12_MSC_GRAPHICS_INDIRECT.md`). Primary focused work yields 25 full GPU passes
+and three zero-timestamp failures despite correct data. Query qualification stays
+open; VB/IB updates, emulated indirect roots and complete graphics acceptance
+remain open. This narrows an implementation gap without changing capability
+declarations, the four production workstreams or complete matrix workload.
+
 Graphics indirect residency follow-up: ordinary AIR root-updating draws now share
 compute's submission-owned allocation snapshots and have explicit resolver-write
 visibility (`D3D12_GRAPHICS_INDIRECT_RESIDENCY.md`). Both builds pass focused DRAW

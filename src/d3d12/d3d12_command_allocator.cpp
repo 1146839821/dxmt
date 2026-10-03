@@ -337,6 +337,15 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
     data->primitive_type = 0;
     data->index_buffer = 0;
     data->index_buffer_format = {};
+    data->msc_tlab = 0;
+    data->msc_template = 0;
+    data->msc_layout_offsets = 0;
+    data->msc_heap = 0;
+    data->msc_sampler_heap = 0;
+    data->msc_tlab_stride = 0;
+    data->msc_template_size = 0;
+    data->msc_vertex_buffers = 0;
+    data->msc_vertex_slot_mask = 0;
   }
 
   {

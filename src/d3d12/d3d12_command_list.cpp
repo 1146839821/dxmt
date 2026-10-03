@@ -29,6 +29,7 @@
 #include "air_texture_abi.hpp"
 #include "util_env.hpp"
 #include <atomic>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -1384,15 +1385,17 @@ public:
 
     if (pipeline->shader_backend == D3D12ShaderBackend::MetalShaderConverter &&
         (signature->UpdateRootArguments || signature->UpdateVertexBuffers || signature->UpdateIndexBuffer)) {
-      bool compute_roots_only = pipeline->IsComputePipelineState &&
-          signature->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+      bool roots_only = pipeline->IsComputePipelineState
+          ? signature->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH
+          : signature->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW ||
+              signature->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
       for (const auto &update : signature->StateUpdates)
-        compute_roots_only &= update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT ||
+        roots_only &= update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT ||
             update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW ||
             update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW ||
             update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
-      if (!compute_roots_only) {
-        FailRecording(name, "MSC indirect graphics binding updates are unsupported");
+      if (!roots_only) {
+        FailRecording(name, "MSC indirect vertex/index binding updates are unsupported");
         return false;
       }
     }
@@ -5642,10 +5645,13 @@ public:
     return true;
   }
 
+  template <typename Data>
   bool
-  EncodeMSCIndirectArguments(MTLD3D12CommandSignature *signature, IndirectComputeCommandData *data,
-      const D3D12TypedOriginComputeVariant *variant, const wmtcmd_compute_setbuffer *resolver_binding) {
-    auto root = rootsig_compute_.ptr();
+  EncodeMSCIndirectArguments(MTLD3D12CommandSignature *signature, Data *data,
+      const D3D12TypedOriginComputeVariant *variant = nullptr, const wmtcmd_compute_setbuffer *resolver_binding = nullptr) {
+    constexpr bool compute = std::is_same_v<Data, IndirectComputeCommandData>;
+    auto root = compute ? rootsig_compute_.ptr() : rootsig_graphics_.ptr();
+    auto staging = compute ? rootarg_compute_staging_ : rootarg_graphics_staging_;
     const auto *compiler_root = variant ? &variant->root : nullptr;
     const auto template_size = compiler_root ? compiler_root->argument_buffer_size : root->MSCArgumentBufferSize;
     if (template_size > UINT64_MAX - 15) { FailRecording(__func__, "indirect TLAB size overflow"); return false; }
@@ -5703,22 +5709,32 @@ public:
     if (sampler_heap_) {
       data->msc_sampler_heap = sampler_heap_->GetMSCDescriptorTableAddress(sampler_heap_->GetGPUDescriptorHandleForHeapStart());
     }
-    if (variant) {
-      auto &dispatches = static_cast<ComputeEncoderData *>(allocator_->encoder_current)->typed_origin_dispatches;
-      if (dispatches.empty() || dispatches.back()->variant != variant) {
-        FailRecording(__func__, "missing typed-origin indirect marker"); return false;
+    bool defer_template = false;
+    if constexpr (compute) {
+      if (variant) {
+        auto &dispatches = static_cast<ComputeEncoderData *>(allocator_->encoder_current)->typed_origin_dispatches;
+        if (dispatches.empty() || dispatches.back()->variant != variant) {
+          FailRecording(__func__, "missing typed-origin indirect marker"); return false;
+        }
+        dispatches.back()->indirect_data = data;
+        dispatches.back()->indirect_data_binding = resolver_binding;
+        defer_template = true;
       }
-      dispatches.back()->indirect_data = data;
-      dispatches.back()->indirect_data_binding = resolver_binding;
-    } else {
-      const auto source = EncodeMSCArgumentBuffer(root, rootarg_compute_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr());
+    }
+    if (!defer_template) {
+      const auto source = EncodeMSCArgumentBuffer(root, staging, descriptor_heap_.ptr(), sampler_heap_.ptr());
       auto [tlabs_ptr, tlabs_offset] = allocator_->AllocateGPUHeap(static_cast<size_t>(data->max_count * stride), 16);
       if (!tlabs_ptr || recording_failed_) { FailRecording(__func__, "indirect TLAB allocation failed"); return false; }
       data->msc_template = allocator_->gpu_heap_buffer_address_ + source;
       data->msc_tlab = allocator_->gpu_heap_buffer_address_ + tlabs_offset;
     }
-    EncodeComputeResourceUse(allocator_->gpu_heap_buffer_.handle,
-        static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite));
+    if constexpr (compute)
+      EncodeComputeResourceUse(allocator_->gpu_heap_buffer_.handle,
+          static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite));
+    else
+      EncodeRenderResourceUse(allocator_->gpu_heap_buffer_.handle,
+          static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite),
+          WMTRenderStageVertex | WMTRenderStageFragment);
     return !recording_failed_;
   }
 
@@ -5981,7 +5997,13 @@ public:
       allocator_->InvalidateCurrentPass();
     }
     bool encode_binding = sig->UpdateRootArguments || sig->UpdateIndexBuffer || sig->UpdateVertexBuffers;
-    DrawCallStatus status = PreDraw(encode_binding);
+    const bool msc_updates = sig->UpdateRootArguments &&
+        pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
+    if (msc_updates && (uint64_t(pso_graphics_->slot_mask) >> (31 - DXMT_MSC_VERTEX_BUFFER_BIND_POINT))) {
+      FailRecording(__func__, "MSC indirect vertex input exceeds Metal buffer slots");
+      return;
+    }
+    DrawCallStatus status = PreDraw(encode_binding && !msc_updates);
     if (status == DrawCallStatus::Invalid)
       return;
     if (status != DrawCallStatus::Ordinary)
@@ -6013,6 +6035,28 @@ public:
     cmd->index_buffer_format = index_type == WMTIndexTypeUInt32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
     if (!encode_binding)
       return;
+    if (msc_updates) {
+      if (!EncodeMSCIndirectArguments(sig, cmd)) return;
+      auto [addresses_ptr, addresses_offset] = allocator_->AllocateGPUHeap(32 * sizeof(uint64_t), 16);
+      if (!addresses_ptr) { FailRecording(__func__, "indirect vertex addresses allocation failed"); return; }
+      auto addresses = static_cast<uint64_t *>(addresses_ptr);
+      std::fill_n(addresses, 32, uint64_t(0));
+      const auto mask = pso_graphics_->slot_mask;
+      for (unsigned slot = 0; slot < 32; ++slot) {
+        if (!(mask & (1u << slot))) continue;
+        const auto address = vertex_buffers_[slot].BufferLocation;
+        uint64_t offset = 0;
+        auto allocation = address ? device_->LookupBufferByVA(address, &offset) : nullptr;
+        if (!address) continue; // Preserve a null vertex binding, as in ordinary draws.
+        if (!allocation) { FailRecording(__func__, "indirect vertex input has no allocation"); return; }
+        addresses[slot] = allocation->gpuAddress() + offset;
+        EncodeRenderResourceUse(allocation->buffer().handle, WMTResourceUsageRead, WMTRenderStageVertex);
+      }
+      cmd->msc_vertex_buffers = allocator_->gpu_heap_buffer_address_ + addresses_offset;
+      cmd->msc_vertex_slot_mask = mask;
+      ResetIndirectState(sig, false);
+      return;
+    }
     cmd->rootsig_qwords = EncodeRootArgument(rootsig_graphics_.ptr(), rootarg_graphics_staging_, MaxCommandCount);
     cmd->rootsig_qwords += allocator_->gpu_heap_buffer_address_;
     cmd->rootsig_qwords_stride = rootsig_graphics_->UploadQwords;
