@@ -1,5 +1,17 @@
 # Typed origin dynamic finite arrays
 
+## Runtime Task Analysis
+
+- Hypothesis: existing Null snapshots supply zero-count state, and dynamic
+  root constants select the correct finite SRV/UAV origins without new replay.
+- Evidence: snapshot validation accepts Null and materialization writes zero
+  state. No real dynamically selected array origin readback has been performed.
+- Expected effect: accept initialized dynamic ranges and unused Null candidates.
+- Risk: testing only slot 0 or identical views hides dynamic state selection.
+- Validation: select slots 0/1 via a root constant with differing SRV/UAV
+  origins; compare full-buffer results, out-of-view read/write guards, and
+  partially uninitialized arrays through static and volatile range paths.
+
 ## Task Analysis
 
 - Hypothesis: finite legacy binding ranges can select private per-slot origin
@@ -39,3 +51,31 @@ informed structural verification. This is production compiler progress, not
 runtime dynamic GPU acceptance, partially initialized dynamic-range admission,
 MSC conversion, capability/default enablement, independent review or FL12_0.
 Evidence: `/Users/zhangbo/.cache/dxmt-typed-dynamic.ViDLcN`.
+
+## Dynamic runtime acceptance
+
+The production path accepts finite uniform dynamic SRV/UAV indices and partially
+uninitialized ranges without additional replay code. The new original SM6.0
+fixture selects both Inputs/Outputs via b0 root constants; private origin state
+selection is therefore genuinely runtime-dependent rather than a constant slot.
+
+Both builds passed slot 0 and slot 1 selection with RS1.1 static and RS1.0
+volatile ranges, plus both range modes with unused slot 0 left uninitialized
+(twelve final dynamic dispatches). SRV origins differ (0/1) and UAV origins
+differ (4/3). Results are respectively 28 at physical output word 4 and 58 at
+word 3, with every other word unchanged. Out-of-view reads contribute zero and
+out-of-view writes preserve neighboring sentinel words. Both builds also passed
+static and volatile constant-array regressions (four dispatches).
+
+Fresh task-local PE/Unix loads were confirmed. Original DXIL is prepared,
+validated and MSC-compiled by the actual production dispatch path using the
+selected DXC directory; no game/prefix libraries were replaced. Both
+reconfigured full builds and host suites (4/4 each) passed.
+
+Main-agent self-review checked exact probe mode parsing, root-constant layout,
+distinct slot oracles, all-word comparison, unused Null candidates and resource
+lifetime through GPU completion. MSC integration skill informed layout/lifetime
+checks. This is focused compute uniform dynamic-array acceptance, not nonuniform
+or modern typed handles, unbounded arrays, complete matrices, default capability
+enablement, game performance, independent review or FL12_0.
+Evidence: `/Users/zhangbo/.cache/dxmt-typed-dynamic-gpu.Sng08G`.

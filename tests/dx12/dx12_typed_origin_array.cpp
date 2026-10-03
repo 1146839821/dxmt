@@ -12,8 +12,15 @@ template <typename T> struct Owned {
 };
 
 int main(int argc, char **argv) {
-  const bool static_ranges = argc == 3 && !std::strcmp(argv[2], "--static");
-  if (argc != 2 && !static_ranges) return 1;
+  bool dynamic = false;
+  for (const char *mode : {"--dynamic0", "--dynamic1", "--dynamic-static0", "--dynamic-static1",
+      "--dynamic-unused", "--dynamic-static-unused"})
+    dynamic |= argc == 3 && !std::strcmp(argv[2], mode);
+  const bool partial = dynamic && std::strstr(argv[2], "unused");
+  const UINT selected = dynamic && !partial && argv[2][std::strlen(argv[2]) - 1] == '0' ? 0 : 1;
+  const bool static_ranges = argc == 3 && (!std::strcmp(argv[2], "--static") ||
+      (dynamic && std::strstr(argv[2], "static")));
+  if (argc != 2 && !static_ranges && !dynamic) return 1;
   std::ifstream file(argv[1], std::ios::binary);
   std::vector<char> shader((std::istreambuf_iterator<char>(file)), {});
   if (shader.empty()) return 1;
@@ -34,21 +41,25 @@ int main(int argc, char **argv) {
   D3D12_DESCRIPTOR_RANGE ranges[2] = {
       {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 3, 0, 0},
       {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 5, 0, 2}};
-  D3D12_ROOT_PARAMETER parameter = {};
-  parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-  parameter.DescriptorTable = {2, ranges};
-  D3D12_ROOT_SIGNATURE_DESC rd = {1, &parameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+  D3D12_ROOT_PARAMETER parameters[2] = {};
+  parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  parameters[0].DescriptorTable = {2, ranges};
+  parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  parameters[1].Constants = {0, 0, 1};
+  D3D12_ROOT_SIGNATURE_DESC rd = {dynamic ? 2u : 1u, parameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
   HRESULT serialized;
   if (static_ranges) {
     D3D12_DESCRIPTOR_RANGE1 ranges1[2] = {
         {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 3, 0, D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 0},
         {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 5, 0, D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 2}};
-    D3D12_ROOT_PARAMETER1 parameter1 = {};
-    parameter1.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameter1.DescriptorTable = {2, ranges1};
+    D3D12_ROOT_PARAMETER1 parameters1[2] = {};
+    parameters1[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters1[0].DescriptorTable = {2, ranges1};
+    parameters1[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters1[1].Constants = {0, 0, 1};
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC versioned = {};
     versioned.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    versioned.Desc_1_1 = {1, &parameter1, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    versioned.Desc_1_1 = {dynamic ? 2u : 1u, parameters1, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
     serialized = D3D12SerializeVersionedRootSignature(&versioned, &blob.p, nullptr);
   } else serialized = D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &blob.p, nullptr);
   if (FAILED(serialized) ||
@@ -90,6 +101,14 @@ int main(int argc, char **argv) {
   uav.Format = DXGI_FORMAT_R32_UINT; uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
   uav.Buffer.FirstElement = 3; uav.Buffer.NumElements = 1;
   device.p->CreateUnorderedAccessView(output.p, nullptr, &uav, cpu);
+  if (dynamic && !partial) {
+    cpu = heap.p->GetCPUDescriptorHandleForHeapStart();
+    srv.Buffer.FirstElement = 0;
+    device.p->CreateShaderResourceView(upload.p, &srv, cpu);
+    cpu.ptr += 2 * increment;
+    uav.Buffer.FirstElement = 4;
+    device.p->CreateUnorderedAccessView(output.p, nullptr, &uav, cpu);
+  }
   if (FAILED(device.p->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, pso.p, IID_PPV_ARGS(&list.p)))) return 1;
   list.p->CopyBufferRegion(output.p, 0, upload.p, 0, 256);
   D3D12_RESOURCE_BARRIER barrier = {};
@@ -100,6 +119,7 @@ int main(int argc, char **argv) {
   list.p->SetDescriptorHeaps(1, &heap.p);
   list.p->SetComputeRootSignature(root.p);
   list.p->SetComputeRootDescriptorTable(0, heap.p->GetGPUDescriptorHandleForHeapStart());
+  if (dynamic) list.p->SetComputeRoot32BitConstant(1, selected, 0);
   list.p->Dispatch(1, 1, 1);
   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
@@ -116,11 +136,13 @@ int main(int argc, char **argv) {
   words = static_cast<UINT *>(mapped);
   bool ok = true;
   for (unsigned i = 0; i < 64; ++i) {
-    const UINT expected = i == 0 ? 11 : i == 1 ? 41 : i == 2 ? 99 : i == 3 ? 58 : 0xcafe1234;
+    const UINT expected = i == 0 ? 11 : i == 1 ? 41 : i == 2 ? 99 :
+        i == (selected ? 3u : 4u) ? (selected ? 58u : 28u) : 0xcafe1234;
     if (words[i] != expected) { std::cerr << "word " << i << " actual=" << words[i] << " expected=" << expected << '\n'; ok = false; }
   }
   readback.p->Unmap(0, nullptr);
   if (!ok) return 1;
-  std::cout << "typed array origin/count full-buffer readback passed\n";
+  std::cout << "typed array origin/count full-buffer readback passed: " <<
+      (argc == 3 ? argv[2] : "--volatile") << '\n';
   return 0;
 }

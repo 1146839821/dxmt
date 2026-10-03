@@ -705,6 +705,11 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_typed_origin_dynamic_array_fixture',
+    input: 'typed_origin_dynamic_array.hlsl', output: 'typed_origin_dynamic_array.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_minmax_typed_guard_fixture',
     input: 'minmax_typed_guard.hlsl', output: 'minmax_typed_guard.cs.cso',
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
