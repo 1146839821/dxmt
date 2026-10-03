@@ -20,6 +20,8 @@ static bool implicit_bias_fixture = false;
 static bool vertex_sampling_fixture = false;
 static bool vertex_only_fixture = false;
 static bool vertex_shared_fixture = false;
+static bool geometry_fixture = false, tessellation_fixture = false;
+static std::vector<uint8_t> geometry_shader, hull_shader, domain_shader;
 
 static bool Load(const wchar_t *path, std::vector<uint8_t> &bytes) {
   HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -33,8 +35,9 @@ static bool Load(const wchar_t *path, std::vector<uint8_t> &bytes) {
 static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12RootSignature *root,
     ID3D12DescriptorHeap *heap, ID3D12DescriptorHeap *samplers, ID3D12Resource *texture,
     ID3D12Resource *replacement, bool static_sampler, bool live, unsigned indirect_kind) {
-  const bool updates = indirect_kind >= 3;
-  const bool indexed = indirect_kind == 2 || indirect_kind == 4;
+  const bool updates = indirect_kind == 3 || indirect_kind == 4;
+  const bool indexed = indirect_kind == 2 || indirect_kind == 4 || indirect_kind == 5;
+  const bool indirect = indirect_kind && indirect_kind != 5;
   const auto check = [](HRESULT hr, const char *what) {
     if (FAILED(hr)) std::printf("MinMax draw %s failed %08lx\n", what, (unsigned long)hr);
     return SUCCEEDED(hr);
@@ -139,7 +142,7 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     command->SetGraphicsRootUnorderedAccessView(constants_parameter + 3, root_uav->GetGPUVirtualAddress());
   };
   OwnedCOM<ID3D12CommandSignature> signature;
-  if (indirect_kind) {
+  if (indirect) {
     D3D12_INDIRECT_ARGUMENT_DESC arguments[5] = {};
     arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
     arguments[0].Constant = {static_sampler ? 3u : 4u, 0, 1};
@@ -172,6 +175,12 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
       }
       std::memcpy(command, draw, indexed ? 20 : 16);
     }
+    const UINT indices[] = {0, 1, 2};
+    std::memcpy(static_cast<uint8_t *>(mapped) + 128, indices, sizeof(indices));
+    upload->Unmap(0, nullptr);
+  }
+  if (indirect_kind == 5) {
+    if (!check(upload->Map(0, nullptr, &mapped), "direct index map")) return false;
     const UINT indices[] = {0, 1, 2};
     std::memcpy(static_cast<uint8_t *>(mapped) + 128, indices, sizeof(indices));
     upload->Unmap(0, nullptr);
@@ -249,13 +258,16 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
   list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
   list->OMSetRenderTargets(1, &target, FALSE, nullptr);
   const float clear[] = {0.25f, 0.25f, 0.25f, 0.25f}; list->ClearRenderTargetView(target, clear, 0, nullptr);
-  list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-  if (indirect_kind) {
-    if (indexed) {
-      const D3D12_INDEX_BUFFER_VIEW indices = {upload->GetGPUVirtualAddress() + 128, 12, DXGI_FORMAT_R32_UINT};
-      list->IASetIndexBuffer(&indices);
-    }
+  list->IASetPrimitiveTopology(tessellation_fixture ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST :
+      D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  if (indexed) {
+    const D3D12_INDEX_BUFFER_VIEW indices = {upload->GetGPUVirtualAddress() + 128, 12, DXGI_FORMAT_R32_UINT};
+    list->IASetIndexBuffer(&indices);
+  }
+  if (indirect) {
     list->ExecuteIndirect(signature.get(), 2, upload.get(), 16, upload.get(), 112);
+  } else if (indexed) {
+    list->DrawIndexedInstanced(3, 1, 0, 0, 0);
   } else {
     list->DrawInstanced(3, 1, 0, 0);
   }
@@ -270,7 +282,9 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     list->SetGraphicsRootDescriptorTable(2, ordinary_heap->GetGPUDescriptorHandleForHeapStart());
     list->SetGraphicsRootDescriptorTable(3, ordinary_heap->GetGPUDescriptorHandleForHeapStart());
     set_root_buffers(list.get());
-    scissor = {2, 0, 4, 4}; list->RSSetScissorRects(1, &scissor); list->DrawInstanced(3, 1, 0, 0);
+    scissor = {2, 0, 4, 4}; list->RSSetScissorRects(1, &scissor);
+    if (indexed) list->DrawIndexedInstanced(3, 1, 0, 0, 0);
+    else list->DrawInstanced(3, 1, 0, 0);
     if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", selected)) return false;
   }
   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET; barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
@@ -301,10 +315,10 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     if (!private_draw->indirect_render_data || !private_draw->indirect_render_binding) return false;
     immutable_payload = *private_draw->indirect_render_data;
   } else if (private_draw->indirect_render_data) return false;
-  for (unsigned submission = 0; submission < (indirect_kind ? 3u : 2u); ++submission) {
+  for (unsigned submission = 0; submission < (indirect ? 3u : 2u); ++submission) {
     if (submission) write(true);
-    const bool empty = indirect_kind && !submission;
-    if (indirect_kind) {
+    const bool empty = indirect && !submission;
+    if (indirect) {
       if (!check(upload->Map(0, nullptr, &mapped), "count map")) return false;
       const UINT count = submission == 0 ? 0 : submission == 1 ? 1 : 7;
       std::memcpy(static_cast<uint8_t *>(mapped) + 112, &count, sizeof(count));
@@ -353,6 +367,8 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
       unsigned blue = !root_updates_fixture ? 0 : !static_sampler && x >= 2 ? (updates ? 31 : 130) :
           updates ? (submission == 1 ? 38 : 42) : 130;
       if (vertex_sampling_fixture) blue = !static_sampler && x >= 2 ? 128 : static_sampler ? 184 : changed ? 240 : 16;
+      if (geometry_fixture) blue = !static_sampler && x >= 2 ? 128 : static_sampler ? 184 : changed ? 240 : 16;
+      if (tessellation_fixture) blue = !static_sampler && x >= 2 ? 76 : static_sampler ? 104 : changed ? 132 : 20;
       if (root_buffers_fixture) blue += updates && (static_sampler || x < 2) && submission == 2 ? 49 : 37;
       if (pixel[0] != (untouched ? 64u : expected_r) || pixel[1] != (untouched ? 64u : expected_g) ||
           pixel[2] != (untouched ? 64u : blue) || pixel[3] != (untouched ? 64u : 255u)) {
@@ -383,10 +399,12 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
       IID_PPV_ARGS(&raw_list)), "negative list")) return false;
   OwnedCOM<ID3D12GraphicsCommandList> negative(raw_list);
   negative->SetGraphicsRootSignature(root); negative->SetDescriptorHeaps(static_sampler ? 1 : 2, heaps);
-  negative->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  negative->IASetPrimitiveTopology(tessellation_fixture ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST :
+      D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   negative->ExecuteIndirect(updating_signature.get(), 1, upload.get(), 0, nullptr, 0);
   if (negative->Close() != E_FAIL) return false;
-  std::printf("MINMAX_FRAGMENT real D3D12 pixel readback PASS kind=%u (direct=2 submits, indirect=counts 0/1/7)\n", indirect_kind);
+  std::printf("MINMAX_FRAGMENT real D3D12 graphics readback PASS kind=%u (%s)\n", indirect_kind,
+      indirect ? "indirect counts 0/1/7" : "direct 2 submits");
   return true;
 }
 
@@ -404,12 +422,18 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
   auto *native_root = static_cast<dxmt::MTLD3D12RootSignature *>(root.get());
   D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc = {};
   pso_desc.pRootSignature = root.get(); pso_desc.VS = vs; pso_desc.PS = ps;
+  if (geometry_fixture) pso_desc.GS = {geometry_shader.data(), geometry_shader.size()};
+  if (tessellation_fixture) {
+    pso_desc.HS = {hull_shader.data(), hull_shader.size()};
+    pso_desc.DS = {domain_shader.data(), domain_shader.size()};
+  }
   pso_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
   pso_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
   pso_desc.RasterizerState.DepthClipEnable = TRUE;
   pso_desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
   pso_desc.SampleMask = UINT_MAX; pso_desc.SampleDesc.Count = 1;
-  pso_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  pso_desc.PrimitiveTopologyType = tessellation_fixture ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH :
+      D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   pso_desc.NumRenderTargets = 1; pso_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
   ID3D12PipelineState *raw_pso = nullptr;
   if (static_sampler) {
@@ -492,6 +516,28 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
     for (unsigned i = 1; i <= 2; ++i) { scpu.ptr += stride; device->CreateSampler(&sampler, scpu); }
   };
   set_samplers(D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR);
+  if (geometry_fixture || tessellation_fixture) {
+    wchar_t selected[32768];
+    const dxmt::D3D12MinMaxGraphicsVariant *actual = nullptr;
+    using Stage = dxmt::D3D12MinMaxShaderStage;
+    if (!GetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", selected, 32768) ||
+        FAILED(static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(pso.get())->GetMinMaxVariant(selected, &actual)) ||
+        !actual || actual->bindings.size() != (tessellation_fixture ? 6u : 4u) ||
+        actual->binding_stages.size() != actual->bindings.size() ||
+        actual->geometry != geometry_fixture || actual->tessellation != tessellation_fixture ||
+        actual->binding_stages[0] != Stage::Pixel ||
+        actual->binding_stages[2] != (tessellation_fixture ? Stage::Hull : Stage::Geometry) ||
+        (tessellation_fixture && actual->binding_stages[4] != Stage::Domain)) return false;
+    ID3D12Resource *raw_replacement = nullptr;
+    if (FAILED(device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &texture_desc,
+        static_cast<D3D12_RESOURCE_STATES>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+        nullptr, IID_PPV_ARGS(&raw_replacement)))) return false;
+    OwnedCOM<ID3D12Resource> replacement(raw_replacement);
+    for (const unsigned kind : {0u, 5u})
+      if (!CheckDraw(device, pso.get(), root.get(), heap.get(), samplers.get(), texture.get(), replacement.get(),
+              static_sampler, live, kind)) return false;
+    return true;
+  }
   std::vector<uint64_t> staging(native_root->UploadQwords), argument_template((variant.root.layout.argument_buffer_size + 7) / 8);
   staging[native_root->SlotQwordOffsets[0]] = heap->GetGPUDescriptorHandleForHeapStart().ptr;
   if (!static_sampler) staging[native_root->SlotQwordOffsets[1]] = samplers->GetGPUDescriptorHandleForHeapStart().ptr;
@@ -540,23 +586,29 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
 }
 
 int wmain(int argc, wchar_t **argv) {
-  if (argc != 4 && argc != 5 && argc != 6) return 1;
-  if (argc == 6) {
-    if (!std::wcscmp(argv[5], L"--implicit-sample") ||
-        !std::wcscmp(argv[5], L"--grad-bias")) implicit_fixture = true;
-    else if (!std::wcscmp(argv[5], L"--implicit-bias") || !std::wcscmp(argv[5], L"--level-bias"))
+  if (argc != 4 && argc != 5 && argc != 6 && argc != 7) return 1;
+  if (argc >= 6) {
+    const auto *option = argv[argc - 1];
+    if (!std::wcscmp(option, L"--implicit-sample") ||
+        !std::wcscmp(option, L"--grad-bias")) implicit_fixture = true;
+    else if (!std::wcscmp(option, L"--implicit-bias") || !std::wcscmp(option, L"--level-bias"))
       implicit_fixture = implicit_bias_fixture = true;
-    else if (!std::wcscmp(argv[5], L"--root-buffers")) root_buffers_fixture = true;
-    else if (!std::wcscmp(argv[5], L"--vertex-sampling")) vertex_sampling_fixture = true;
-    else if (!std::wcscmp(argv[5], L"--vertex-only")) vertex_sampling_fixture = vertex_only_fixture = true;
-    else if (!std::wcscmp(argv[5], L"--vertex-shared")) vertex_sampling_fixture = vertex_shared_fixture = true;
-    else if (std::wcscmp(argv[5], L"--root-updates")) return 1;
-    root_updates_fixture = !implicit_fixture && !vertex_sampling_fixture;
+    else if (!std::wcscmp(option, L"--root-buffers")) root_buffers_fixture = true;
+    else if (!std::wcscmp(option, L"--vertex-sampling")) vertex_sampling_fixture = true;
+    else if (!std::wcscmp(option, L"--vertex-only")) vertex_sampling_fixture = vertex_only_fixture = true;
+    else if (!std::wcscmp(option, L"--vertex-shared")) vertex_sampling_fixture = vertex_shared_fixture = true;
+    else if (!std::wcscmp(option, L"--geometry") && argc == 6) geometry_fixture = true;
+    else if (!std::wcscmp(option, L"--tessellation") && argc == 7) tessellation_fixture = true;
+    else if (std::wcscmp(option, L"--root-updates")) return 1;
+    if (argc == 7 && !tessellation_fixture) return 1;
+    root_updates_fixture = !implicit_fixture && !vertex_sampling_fixture && !geometry_fixture && !tessellation_fixture;
   }
   if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", argv[3])) return 1;
   std::vector<uint8_t> ps, vs, sampling_vs;
   if (!Load(argv[1], ps) || !Load(argv[2], vs)) return 1;
-  if (argc >= 5 && (!Load(argv[4], sampling_vs) ||
+  if (geometry_fixture && !Load(argv[4], geometry_shader)) return 1;
+  if (tessellation_fixture && (!Load(argv[4], hull_shader) || !Load(argv[5], domain_shader))) return 1;
+  if (argc >= 5 && !geometry_fixture && !tessellation_fixture && (!Load(argv[4], sampling_vs) ||
       !dxmt::ClassifyD3D12Shader({sampling_vs.data(), sampling_vs.size()}).uses_texture_sampling)) return 1;
   const D3D12_SHADER_BYTECODE pixel = {ps.data(), ps.size()}, vertex = {vs.data(), vs.size()};
   if (dxmt::ClassifyD3D12Shader(pixel).uses_texture_sampling == vertex_only_fixture ||
@@ -611,13 +663,16 @@ int wmain(int argc, wchar_t **argv) {
       parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
       parameters[i].DescriptorTable = {1, ranges + i}; parameters[i].ShaderVisibility = visibility;
     }
-    if (vertex_sampling_fixture) parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    if (vertex_sampling_fixture || geometry_fixture || tessellation_fixture)
+      parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     const unsigned vertex_index = static_sampler ? 1 : 2;
     parameters[vertex_index].ParameterType = parameters[vertex_index + 1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[vertex_index].DescriptorTable = {1, ranges + 2};
-    parameters[vertex_index].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    parameters[vertex_index].ShaderVisibility = geometry_fixture ? D3D12_SHADER_VISIBILITY_GEOMETRY :
+        tessellation_fixture ? D3D12_SHADER_VISIBILITY_HULL : D3D12_SHADER_VISIBILITY_VERTEX;
     parameters[vertex_index + 1].DescriptorTable = {1, ranges + 3};
-    parameters[vertex_index + 1].ShaderVisibility = D3D12_SHADER_VISIBILITY_HULL;
+    parameters[vertex_index + 1].ShaderVisibility = tessellation_fixture ? D3D12_SHADER_VISIBILITY_DOMAIN :
+        D3D12_SHADER_VISIBILITY_HULL;
     parameters[vertex_index + 2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameters[vertex_index + 2].Constants = {0, 8, 2};
     parameters[vertex_index + 2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -634,13 +689,48 @@ int wmain(int argc, wchar_t **argv) {
       samplers[i].Filter = i ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;
       samplers[i].AddressU = samplers[i].AddressV = samplers[i].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
       samplers[i].MaxLOD = D3D12_FLOAT32_MAX; samplers[i].ShaderRegister = i; samplers[i].ShaderVisibility = visibility;
-      if (vertex_sampling_fixture) samplers[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+      if (vertex_sampling_fixture || geometry_fixture || tessellation_fixture)
+        samplers[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
       samplers[i].MipLODBias = implicit_fixture ? 1 : 0;
     }
     D3D12_ROOT_SIGNATURE_DESC1 application = {(static_sampler ? 4u : 5u) + (root_buffers_fixture ? 3u : 0u), parameters,
         static_sampler ? 2u : 0u, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE};
     dxmt::D3D12MinMaxRoot root;
     if (FAILED(dxmt::PrepareD3D12MinMaxRoot(application, 2, root, error))) return 1;
+    if (geometry_fixture || tessellation_fixture) {
+      const auto count = tessellation_fixture ? 6u : 4u;
+      dxmt::D3D12MinMaxRoot shared;
+      if (FAILED(dxmt::PrepareD3D12MinMaxRoot(application, count, shared, error))) return 1;
+      for (unsigned i = 0; i < (tessellation_fixture ? 2u : 1u); ++i) {
+        const auto kind = geometry_fixture ? Stage::Geometry : i ? Stage::Domain : Stage::Hull;
+        const auto &bytes = geometry_fixture ? geometry_shader : i ? domain_shader : hull_shader;
+        dxmt::D3D12MinMaxShader stage_shader;
+        const D3D12_SHADER_BYTECODE input = {bytes.data(), bytes.size()};
+        if (FAILED(dxmt::PrepareD3D12MinMaxShader(input, argv[3], stage_shader, error, kind, 2 + 2 * i, count)) ||
+            stage_shader.stage != kind || stage_shader.pair_offset != 2 + 2 * i ||
+            stage_shader.pair_count != count || stage_shader.bindings.size() != 2) return 1;
+        std::vector<dxmt::D3D12MinMaxPairLocation> stage_locations;
+        if (FAILED(dxmt::ResolveD3D12MinMaxBindings(shared, stage_shader.bindings, stage_locations, error, kind)) ||
+            stage_locations.size() != 2 || stage_locations[0].texture.parameter_index != vertex_index + i) return 1;
+        const auto saved_stage_locations = stage_locations;
+        auto denied_application = application;
+        denied_application.Flags = geometry_fixture ? D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS :
+            i ? D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS : D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS;
+        dxmt::D3D12MinMaxRoot denied_stage;
+        if (FAILED(dxmt::PrepareD3D12MinMaxRoot(denied_application, count, denied_stage, error)) ||
+            dxmt::ResolveD3D12MinMaxBindings(denied_stage, stage_shader.bindings, stage_locations, error, kind) != E_NOTIMPL ||
+            stage_locations.size() != saved_stage_locations.size() ||
+            std::memcmp(stage_locations.data(), saved_stage_locations.data(), stage_locations.size() * sizeof(stage_locations[0]))) return 1;
+        const auto saved_visibility = parameters[vertex_index + i].ShaderVisibility;
+        parameters[vertex_index + i].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        dxmt::D3D12MinMaxRoot wrong_stage;
+        if (FAILED(dxmt::PrepareD3D12MinMaxRoot(application, count, wrong_stage, error)) ||
+            dxmt::ResolveD3D12MinMaxBindings(wrong_stage, stage_shader.bindings, stage_locations, error, kind) != E_NOTIMPL ||
+            stage_locations.size() != saved_stage_locations.size() ||
+            std::memcmp(stage_locations.data(), saved_stage_locations.data(), stage_locations.size() * sizeof(stage_locations[0]))) return 1;
+        parameters[vertex_index + i].ShaderVisibility = saved_visibility;
+      }
+    }
     std::vector<dxmt::D3D12MinMaxPairLocation> locations;
     if (FAILED(dxmt::ResolveD3D12MinMaxBindings(root, prepared.bindings, locations, error, sampled_stage)) ||
         locations.size() != 2 || locations[0].texture.parameter_index != (vertex_only_fixture ? vertex_index : 0) ||
@@ -688,7 +778,8 @@ int wmain(int argc, wchar_t **argv) {
     binding_variant.bindings = prepared.bindings; binding_variant.locations = saved_locations;
     if (vertex_only_fixture) binding_variant.binding_stages.assign(2, Stage::Vertex);
     if (!CheckBinding(native, application, binding_variant, vertex, pixel, static_sampler, mode & 1,
-        mode == 0 && !vertex_sampling_fixture ? D3D12_SHADER_BYTECODE{sampling_vs.data(), sampling_vs.size()} : D3D12_SHADER_BYTECODE{})) return 1;
+        mode == 0 && !vertex_sampling_fixture && !geometry_fixture && !tessellation_fixture ?
+            D3D12_SHADER_BYTECODE{sampling_vs.data(), sampling_vs.size()} : D3D12_SHADER_BYTECODE{})) return 1;
     const auto unchanged_locations = [&] {
       return locations.size() == saved_locations.size() &&
           !std::memcmp(locations.data(), saved_locations.data(), locations.size() * sizeof(locations[0]));
@@ -709,8 +800,9 @@ int wmain(int argc, wchar_t **argv) {
     if (FAILED(dxmt::PrepareD3D12MinMaxRoot(application, 2, wrong_visibility, error)) ||
         dxmt::ResolveD3D12MinMaxBindings(wrong_visibility, prepared.bindings, locations, error, sampled_stage) != E_NOTIMPL ||
         !unchanged_locations()) return 1;
-    std::printf("MINMAX_FRAGMENT mode=%u compiler/binding/direct/indirect GPU draw PASS\n", mode);
+    std::printf("MINMAX_FRAGMENT mode=%u compiler/binding GPU draw PASS (pre-raster=%u)\n", mode,
+        geometry_fixture ? 1 : tessellation_fixture ? 2 : 0);
   }
-  std::puts("MinMax pixel compiler/binding/direct/indirect draw integration PASS; full graphics qualification remains open");
+  std::puts("MinMax graphics integration PASS; full graphics qualification remains open");
   return 0;
 }

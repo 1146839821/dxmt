@@ -1854,11 +1854,20 @@ ConvertD3D12ComputeShader(
 
 HRESULT ConvertD3D12MinMaxShader(
     const D3D12MinMaxShader &shader, const D3D12MinMaxRoot &root,
-    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities) {
+    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities,
+    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags) {
+  uint32_t stage;
+  switch (shader.stage) {
+  case D3D12MinMaxShaderStage::Compute: stage = DXMT_MSC_STAGE_COMPUTE; break;
+  case D3D12MinMaxShaderStage::Pixel: stage = DXMT_MSC_STAGE_FRAGMENT; break;
+  case D3D12MinMaxShaderStage::Vertex: stage = DXMT_MSC_STAGE_VERTEX; break;
+  case D3D12MinMaxShaderStage::Geometry: stage = DXMT_MSC_STAGE_GEOMETRY; break;
+  case D3D12MinMaxShaderStage::Hull: stage = DXMT_MSC_STAGE_HULL; break;
+  case D3D12MinMaxShaderStage::Domain: stage = DXMT_MSC_STAGE_DOMAIN; break;
+  default: return E_INVALIDARG;
+  }
   const uint32_t pair_count = shader.pair_count ? shader.pair_count : shader.bindings.size();
-  if ((shader.stage != D3D12MinMaxShaderStage::Compute && shader.stage != D3D12MinMaxShaderStage::Pixel &&
-          shader.stage != D3D12MinMaxShaderStage::Vertex) ||
-      shader.bytecode.empty() || shader.bindings.empty() || shader.bindings.size() > 64 ||
+  if (shader.bytecode.empty() || shader.bindings.empty() || shader.bindings.size() > 64 ||
       root.layout.bytecode.empty() || root.pair_count != pair_count || shader.pair_offset >= pair_count ||
       shader.bindings.size() > pair_count - shader.pair_offset)
     return E_INVALIDARG;
@@ -1869,10 +1878,9 @@ HRESULT ConvertD3D12MinMaxShader(
   const D3D12_SHADER_BYTECODE bytecode = {shader.bytecode.data(), shader.bytecode.size()};
   return ConvertD3D12ShaderInternal(
       ClassifyD3D12Shader(bytecode), bytecode,
-      shader.stage == D3D12MinMaxShaderStage::Pixel ? DXMT_MSC_STAGE_FRAGMENT :
-          shader.stage == D3D12MinMaxShaderStage::Vertex ? DXMT_MSC_STAGE_VERTEX : DXMT_MSC_STAGE_COMPUTE,
+      stage,
       nullptr, false, converted,
-      root.layout.bytecode.data(), root.layout.bytecode.size(), nullptr, 0, nullptr, 0,
+      root.layout.bytecode.data(), root.layout.bytecode.size(), nullptr, 0, input_layout, compile_flags,
       msc_capabilities, nullptr, &shader);
 }
 

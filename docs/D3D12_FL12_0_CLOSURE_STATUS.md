@@ -461,3 +461,15 @@ visibility pixel readbacks plus existing graphics/compute/root regressions
 (`D3D12_MINMAX_GRAPHICS.md`). Fragment-less depth PSO creation is verified, not
 depth GPU output. GS/HS/DS/mesh/SO emulation and full resource/filter/matrix
 qualification remain open. No capability or feature-level promotion follows.
+
+Bounded MSC GS/HS/DS SampleLevel/SampleGrad MinMax now reaches companion PSO
+creation and Object/Mesh/Fragment submission-private TLAB/residency, including
+the hull/domain bind point. Private draw configurations use their own reflection;
+the common descriptor materializer preserves static/volatile range semantics.
+Both full builds and focused new-stage GPU readbacks pass, including ordinary
+restore, indexed/direct repeat submissions and a user patch constant
+(`D3D12_MINMAX_MSC_PRERASTER.md`). This supersedes the previous bounded emulation
+wiring gap, not full pre-raster/MinMax qualification: native mesh/SO, emulated
+indirect, cube/aniso/feedback and broader resource/view/lifetime semantics remain
+open. The four production workstreams, 1,584 existing typed executions and seven
+mandatory complete GPU categories remain unchanged. No capability/FL promotion.

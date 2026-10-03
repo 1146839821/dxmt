@@ -10,7 +10,17 @@ static uint32_t Word(const uint8_t *data) {
 }
 
 int wmain(int argc, wchar_t **argv) {
-  if (argc != 5 || (wcscmp(argv[3], L"one") && wcscmp(argv[3], L"two"))) return 1;
+  if ((argc != 5 && argc != 6) || (wcscmp(argv[3], L"one") && wcscmp(argv[3], L"two"))) return 1;
+  using Stage = dxmt::D3D12MinMaxShaderStage;
+  Stage stage = Stage::Compute;
+  uint32_t texture_space = 0;
+  if (argc == 6) {
+    if (!wcscmp(argv[5], L"gs")) stage = Stage::Geometry;
+    else if (!wcscmp(argv[5], L"hs")) stage = Stage::Hull;
+    else if (!wcscmp(argv[5], L"ds")) stage = Stage::Domain;
+    else return 1;
+    texture_space = stage == Stage::Domain ? 7 : 6;
+  }
   HANDLE file = CreateFileW(argv[1], GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
   if (file == INVALID_HANDLE_VALUE) return 1;
   LARGE_INTEGER length = {};
@@ -25,15 +35,15 @@ int wmain(int argc, wchar_t **argv) {
   D3D12_SHADER_BYTECODE shader = {input.data(), input.size()};
   dxmt::D3D12MinMaxShader prepared;
   std::string diagnostics;
-  HRESULT hr = dxmt::PrepareD3D12MinMaxShader(shader, argv[2], prepared, diagnostics);
+  HRESULT hr = dxmt::PrepareD3D12MinMaxShader(shader, argv[2], prepared, diagnostics, stage);
   const unsigned count = !wcscmp(argv[3], L"two") ? 2 : 1;
-  if (FAILED(hr) || prepared.stage != dxmt::D3D12MinMaxShaderStage::Compute ||
+  if (FAILED(hr) || prepared.stage != stage ||
       prepared.bindings.size() != count || prepared.bytecode.empty()) {
     std::fprintf(stderr, "prepare failed hr=0x%08lx %s\n", static_cast<unsigned long>(hr), diagnostics.c_str());
     return 1;
   }
   for (unsigned i = 0; i < count; ++i) {
-    const dxmt_msc_minmax_binding expected = {0, 0, 0, i};
+    const dxmt_msc_minmax_binding expected = {texture_space, 0, 0, i};
     if (std::memcmp(&prepared.bindings[i], &expected, sizeof(expected))) return 1;
   }
   const auto saved = prepared;
@@ -43,10 +53,10 @@ int wmain(int argc, wchar_t **argv) {
         !std::memcmp(prepared.bindings.data(), saved.bindings.data(), count * sizeof(saved.bindings[0]));
   };
   input[0] ^= 1;
-  hr = dxmt::PrepareD3D12MinMaxShader(shader, argv[2], prepared, diagnostics);
+  hr = dxmt::PrepareD3D12MinMaxShader(shader, argv[2], prepared, diagnostics, stage);
   if (SUCCEEDED(hr) || !unchanged()) return 1;
   input[0] ^= 1;
-  hr = dxmt::PrepareD3D12MinMaxShader(shader, L"relative", prepared, diagnostics);
+  hr = dxmt::PrepareD3D12MinMaxShader(shader, L"relative", prepared, diagnostics, stage);
   if (hr != E_INVALIDARG || !unchanged()) return 1;
 
   // Exercise the actual PE -> Unix export, not a host replacement of the thunk.

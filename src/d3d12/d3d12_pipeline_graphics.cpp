@@ -450,16 +450,56 @@ InitializeDepthStencilStates(
   return S_OK;
 }
 
+static bool ConfigureMSCTessellation(const dxmt_msc_shader_reflection &vs,
+    const dxmt_msc_shader_reflection &hs, const dxmt_msc_shader_reflection &ds,
+    WMTMSCTessellationPipelineConfig &config) {
+  if (!MTLValidateMSCTessellationPipeline(hs.hs_tessellator_output_primitive, WMTPrimitiveTypeTriangle,
+          hs.hs_output_control_point_size, ds.ds_input_control_point_size, hs.hs_patch_constants_size,
+          ds.ds_patch_constants_size, hs.hs_output_control_point_count, ds.ds_input_control_point_count) ||
+      !vs.vertex_output_size_in_bytes || !hs.hs_output_control_point_size || !ds.ds_input_control_point_size ||
+      hs.hs_output_control_point_size != ds.ds_input_control_point_size ||
+      hs.hs_patch_constants_size != ds.ds_patch_constants_size ||
+      hs.hs_output_control_point_count != ds.ds_input_control_point_count ||
+      hs.hs_tessellator_domain != ds.ds_tessellator_domain ||
+      hs.hs_tessellation_type_half != ds.ds_tessellation_type_half ||
+      !hs.hs_max_patches_per_object_threadgroup || !hs.hs_max_object_threads_per_patch ||
+      !ds.ds_max_input_prims_per_mesh_threadgroup || !hs.hs_max_tessellation_factor)
+    return false;
+  config.output_primitive_type = hs.hs_tessellator_output_primitive;
+  config.vs_output_size_in_bytes = vs.vertex_output_size_in_bytes;
+  config.gs_max_input_primitives_per_mesh_threadgroup = ds.ds_max_input_prims_per_mesh_threadgroup;
+  config.hs_max_patches_per_object_threadgroup = hs.hs_max_patches_per_object_threadgroup;
+  config.hs_input_control_point_count = hs.hs_input_control_point_count;
+  config.hs_max_object_threads_per_threadgroup = hs.hs_max_object_threads_per_patch;
+  config.hs_max_tessellation_factor = hs.hs_max_tessellation_factor;
+  config.gs_instance_count = 1;
+  return true;
+}
+
+static bool ConfigureMSCGeometry(const dxmt_msc_shader_reflection &vs,
+    const dxmt_msc_shader_reflection &gs, WMTMSCGeometryPipelineConfig &config) {
+  if (!vs.vertex_output_size_in_bytes || !gs.gs_max_input_primitives_per_mesh_threadgroup ||
+      gs.gs_instance_count != 1) return false;
+  config.gs_vertex_size_in_bytes = vs.vertex_output_size_in_bytes;
+  config.gs_max_input_primitives_per_mesh_threadgroup = gs.gs_max_input_primitives_per_mesh_threadgroup;
+  config.gs_instance_count = gs.gs_instance_count;
+  return true;
+}
+
 class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12GraphicsPipelineState> {
   Com<MTLD3D12RootSignature> application_root_;
-  std::vector<uint8_t> original_vs_, original_ps_;
+  std::vector<uint8_t> original_vs_, original_ps_, original_gs_, original_hs_, original_ds_;
+  dxmt_msc_input_layout minmax_stage_in_layout_ = {};
+  uint32_t minmax_emulation_flags_ = 0;
+  WMTMSCGeometryPipelineInfo minmax_geometry_info_ = {};
+  WMTMSCTessellationPipelineInfo minmax_tessellation_info_ = {};
   WMTRenderPipelineInfo minmax_render_info_ = {};
   bool minmax_render_info_valid_ = false;
   std::mutex minmax_mutex_;
   std::wstring minmax_dxc_directory_;
   std::unique_ptr<D3D12MinMaxGraphicsVariant> minmax_variant_;
 
-  struct MinMaxShaders { D3D12MinMaxShader vertex, pixel; };
+  struct MinMaxShaders { D3D12MinMaxShader vertex, pixel, geometry, hull, domain; };
 
   HRESULT PrepareMinMaxVariant(const wchar_t *directory, MinMaxShaders &shaders,
       std::unique_ptr<D3D12MinMaxGraphicsVariant> &variant) {
@@ -470,23 +510,43 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
       if (original.empty() || !ClassifyD3D12Shader({original.data(), original.size()}).uses_texture_sampling) return S_OK;
       return PrepareD3D12MinMaxShader({original.data(), original.size()}, directory, shader, diagnostics, stage, offset, count);
     };
-    auto hr = prepare(original_vs_, D3D12MinMaxShaderStage::Vertex, prepared.vertex);
-    if (SUCCEEDED(hr)) hr = prepare(original_ps_, D3D12MinMaxShaderStage::Pixel, prepared.pixel);
-    if (FAILED(hr)) { ERR("MinMax graphics preparation failed: ", diagnostics); return hr; }
-    const uint32_t vertex_count = prepared.vertex.bindings.size();
-    const uint32_t pair_count = vertex_count + prepared.pixel.bindings.size();
+    struct Stage {
+      const std::vector<uint8_t> *original;
+      D3D12MinMaxShaderStage kind;
+      D3D12MinMaxShader *shader;
+    };
+    const Stage stages[] = {
+        {&original_vs_, D3D12MinMaxShaderStage::Vertex, &prepared.vertex},
+        {&original_ps_, D3D12MinMaxShaderStage::Pixel, &prepared.pixel},
+        {&original_gs_, D3D12MinMaxShaderStage::Geometry, &prepared.geometry},
+        {&original_hs_, D3D12MinMaxShaderStage::Hull, &prepared.hull},
+        {&original_ds_, D3D12MinMaxShaderStage::Domain, &prepared.domain}};
+    uint32_t pair_count = 0;
+    HRESULT hr = S_OK;
+    for (const auto &stage : stages) {
+      hr = prepare(*stage.original, stage.kind, *stage.shader);
+      if (FAILED(hr)) { ERR("MinMax graphics preparation failed: ", diagnostics); return hr; }
+      pair_count += stage.shader->bindings.size();
+    }
     if (!pair_count || pair_count > 64) return E_NOTIMPL;
-    if (vertex_count && !prepared.pixel.bindings.empty()) {
-      hr = prepare(original_vs_, D3D12MinMaxShaderStage::Vertex, prepared.vertex, 0, pair_count);
-      if (SUCCEEDED(hr)) hr = prepare(original_ps_, D3D12MinMaxShaderStage::Pixel, prepared.pixel, vertex_count, pair_count);
+    uint32_t pair_offset = 0;
+    for (const auto &stage : stages) {
+      if (stage.shader->bindings.empty()) continue;
+      const auto count = stage.shader->bindings.size();
+      if (count == pair_count) continue;
+      hr = prepare(*stage.original, stage.kind, *stage.shader, pair_offset, pair_count);
       if (FAILED(hr)) { ERR("MinMax shared pair layout failed: ", diagnostics); return hr; }
+      if (stage.shader->bindings.size() != count) return E_FAIL;
+      pair_offset += count;
     }
     const D3D12MinMaxRoot *root = nullptr;
     hr = application_root_->GetMinMaxCompilerRoot(pair_count, &root);
     if (FAILED(hr)) return hr;
     auto candidate = std::make_unique<D3D12MinMaxGraphicsVariant>();
     candidate->root = *root;
-    for (const auto *shader : {&prepared.vertex, &prepared.pixel}) {
+    for (const auto &stage : stages) {
+      if (!stage.original->empty()) candidate->active_graphics_stages.push_back(stage.kind);
+      const auto *shader = stage.shader;
       if (shader->bindings.empty()) continue;
       std::vector<D3D12MinMaxPairLocation> locations;
       hr = ResolveD3D12MinMaxBindings(candidate->root, shader->bindings, locations, diagnostics, shader->stage);
@@ -497,6 +557,57 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
     }
     shaders = std::move(prepared);
     variant = std::move(candidate);
+    return S_OK;
+  }
+
+  HRESULT CreateMinMaxEmulationPipeline(const D3D12ConvertedShader &vs, const D3D12ConvertedShader &ps,
+      const D3D12ConvertedShader &gs, const D3D12ConvertedShader &hs, const D3D12ConvertedShader &ds,
+      D3D12MinMaxGraphicsVariant &variant) {
+    if (vs.stage_in_metallib.empty()) return E_FAIL;
+    auto metal = device_->GetMTLDevice();
+    WMT::Reference<WMT::Error> error;
+    const auto library = [&](const std::vector<uint8_t> &bytes) {
+      return bytes.empty() ? WMT::Reference<WMT::Library>{} : metal.newLibrary(bytes.data(), bytes.size(), error);
+    };
+    auto stage_in = library(vs.stage_in_metallib);
+    auto vertex = library(vs.metallib), fragment = library(ps.metallib);
+    if (!stage_in || !vertex || (!original_ps_.empty() && !fragment)) return E_FAIL;
+    const auto name = [](auto &target, const std::string &entry) {
+      std::memset(target, 0, sizeof(target));
+      std::strncpy(target, entry.c_str(), sizeof(target) - 1);
+    };
+    if (msc_tessellation) {
+      auto hull = library(hs.metallib), domain = library(ds.metallib);
+      if (!hull || !domain) return E_FAIL;
+      auto info = minmax_tessellation_info_;
+      if (!ConfigureMSCTessellation(vs.reflection, hs.reflection, ds.reflection, info.config) ||
+          info.config.hs_input_control_point_count != msc_tessellation_config.hs_input_control_point_count)
+        return E_INVALIDARG;
+      info.stage_in_library = stage_in.handle; info.vertex_library = vertex.handle;
+      info.fragment_library = fragment.handle; info.hull_library = hull.handle; info.domain_library = domain.handle;
+      name(info.vertex_function_name, vs.entry_point); name(info.fragment_function_name, ps.entry_point);
+      name(info.hull_function_name, hs.entry_point); name(info.domain_function_name, ds.entry_point);
+      variant.pso = metal.newMSCTessellationPipelineState(info, error);
+      variant.tessellation = true; variant.tessellation_config = info.config;
+    } else if (msc_geometry) {
+      auto geometry = library(gs.metallib);
+      if (!geometry) return E_FAIL;
+      auto info = minmax_geometry_info_;
+      WMTPrimitiveType primitive;
+      if (!ConfigureMSCGeometry(vs.reflection, gs.reflection, info.config) ||
+          !MapMSCGeometryInputPrimitive(gs.reflection.gs_input_primitive, primitive) ||
+          primitive != msc_geometry_input_primitive) return E_INVALIDARG;
+      info.stage_in_library = stage_in.handle; info.vertex_library = vertex.handle;
+      info.fragment_library = fragment.handle; info.geometry_library = geometry.handle;
+      name(info.vertex_function_name, vs.entry_point); name(info.fragment_function_name, ps.entry_point);
+      name(info.geometry_function_name, gs.entry_point);
+      variant.pso = metal.newMSCGeometryPipelineState(info, error);
+      variant.geometry = true; variant.geometry_config = info.config;
+    } else return E_NOTIMPL;
+    if (!variant.pso) {
+      ERR("MinMax emulation PSO failed: ", error ? error.description().getUTF8String() : "unknown error");
+      return E_FAIL;
+    }
     return S_OK;
   }
 
@@ -528,30 +639,39 @@ public:
       std::unique_ptr<D3D12MinMaxGraphicsVariant> candidate;
       auto hr = PrepareMinMaxVariant(directory, shaders, candidate);
       if (FAILED(hr)) return hr;
-      D3D12ConvertedShader vs, ps;
+      D3D12ConvertedShader vs, ps, gs, hs, ds;
       const auto &root = candidate->root.layout.bytecode;
-      hr = !shaders.vertex.bytecode.empty() ? ConvertD3D12MinMaxShader(shaders.vertex, candidate->root, vs,
-          &device_->GetMSCCapabilities()) : ConvertD3D12Shader({original_vs_.data(), original_vs_.size()}, DXMT_MSC_STAGE_VERTEX,
-          vs, root.data(), root.size(), nullptr, 0, &device_->GetMSCCapabilities());
-      if (FAILED(hr)) return hr;
-      if (!original_ps_.empty()) {
-        hr = !shaders.pixel.bytecode.empty() ? ConvertD3D12MinMaxShader(shaders.pixel, candidate->root, ps,
-            &device_->GetMSCCapabilities()) : ConvertD3D12Shader({original_ps_.data(), original_ps_.size()}, DXMT_MSC_STAGE_FRAGMENT,
-            ps, root.data(), root.size(), nullptr, 0, &device_->GetMSCCapabilities());
+      const auto convert = [&](const std::vector<uint8_t> &original, const D3D12MinMaxShader &shader,
+                               uint32_t stage, D3D12ConvertedShader &converted) {
+        if (original.empty()) return S_OK;
+        const auto *layout = stage == DXMT_MSC_STAGE_VERTEX && minmax_emulation_flags_ ? &minmax_stage_in_layout_ : nullptr;
+        return !shader.bytecode.empty() ? ConvertD3D12MinMaxShader(shader, candidate->root, converted,
+            &device_->GetMSCCapabilities(), layout, minmax_emulation_flags_) :
+            ConvertD3D12Shader({original.data(), original.size()}, stage, converted,
+                root.data(), root.size(), layout, minmax_emulation_flags_, &device_->GetMSCCapabilities());
+      };
+      if (FAILED(hr = convert(original_vs_, shaders.vertex, DXMT_MSC_STAGE_VERTEX, vs)) ||
+          FAILED(hr = convert(original_ps_, shaders.pixel, DXMT_MSC_STAGE_FRAGMENT, ps)) ||
+          FAILED(hr = convert(original_gs_, shaders.geometry, DXMT_MSC_STAGE_GEOMETRY, gs)) ||
+          FAILED(hr = convert(original_hs_, shaders.hull, DXMT_MSC_STAGE_HULL, hs)) ||
+          FAILED(hr = convert(original_ds_, shaders.domain, DXMT_MSC_STAGE_DOMAIN, ds))) return hr;
+      if (minmax_emulation_flags_) {
+        hr = CreateMinMaxEmulationPipeline(vs, ps, gs, hs, ds, *candidate);
         if (FAILED(hr)) return hr;
+      } else {
+        WMT::Reference<WMT::Error> error;
+        auto metal = device_->GetMTLDevice();
+        auto vs_lib = metal.newLibrary(vs.metallib.data(), vs.metallib.size(), error);
+        auto ps_lib = original_ps_.empty() ? WMT::Reference<WMT::Library>{} : metal.newLibrary(ps.metallib.data(), ps.metallib.size(), error);
+        if (!vs_lib || (!original_ps_.empty() && !ps_lib)) return E_FAIL;
+        auto vs_function = vs_lib.newFunction(vs.entry_point.c_str());
+        auto ps_function = ps_lib ? ps_lib.newFunction(ps.entry_point.c_str()) : WMT::Reference<WMT::Function>{};
+        if (!vs_function || (!original_ps_.empty() && !ps_function)) return E_FAIL;
+        auto info = minmax_render_info_;
+        info.vertex_function = vs_function.handle; info.fragment_function = ps_function.handle;
+        candidate->pso = metal.newRenderPipelineState(info, error);
+        if (!candidate->pso) { ERR("MinMax render PSO failed"); return E_FAIL; }
       }
-      WMT::Reference<WMT::Error> error;
-      auto metal = device_->GetMTLDevice();
-      auto vs_lib = metal.newLibrary(vs.metallib.data(), vs.metallib.size(), error);
-      auto ps_lib = original_ps_.empty() ? WMT::Reference<WMT::Library>{} : metal.newLibrary(ps.metallib.data(), ps.metallib.size(), error);
-      if (!vs_lib || (!original_ps_.empty() && !ps_lib)) return E_FAIL;
-      auto vs_function = vs_lib.newFunction(vs.entry_point.c_str());
-      auto ps_function = ps_lib ? ps_lib.newFunction(ps.entry_point.c_str()) : WMT::Reference<WMT::Function>{};
-      if (!vs_function || (!original_ps_.empty() && !ps_function)) return E_FAIL;
-      auto info = minmax_render_info_;
-      info.vertex_function = vs_function.handle; info.fragment_function = ps_function.handle;
-      candidate->pso = metal.newRenderPipelineState(info, error);
-      if (!candidate->pso) { ERR("MinMax render PSO failed"); return E_FAIL; }
       minmax_dxc_directory_ = directory;
       minmax_variant_ = std::move(candidate); *variant = minmax_variant_.get();
       return S_OK;
@@ -1196,12 +1316,21 @@ public:
     }
 
     MinMaxShaders static_minmax_shaders;
-    if (use_msc && !msc_emulation_flags && !has_stream_output) {
+    if (use_msc && !has_stream_output) {
       try {
         original_vs_.assign(static_cast<const uint8_t *>(pDesc->VS.pShaderBytecode),
             static_cast<const uint8_t *>(pDesc->VS.pShaderBytecode) + pDesc->VS.BytecodeLength);
         if (has_pixel_shader) original_ps_.assign(static_cast<const uint8_t *>(pDesc->PS.pShaderBytecode),
             static_cast<const uint8_t *>(pDesc->PS.pShaderBytecode) + pDesc->PS.BytecodeLength);
+        const auto retain_stage = [](const D3D12_SHADER_BYTECODE &shader, std::vector<uint8_t> &bytes) {
+          if (!shader.pShaderBytecode) return;
+          const auto *begin = static_cast<const uint8_t *>(shader.pShaderBytecode);
+          bytes.assign(begin, begin + shader.BytecodeLength);
+        };
+        retain_stage(pDesc->GS, original_gs_);
+        retain_stage(pDesc->HS, original_hs_);
+        retain_stage(pDesc->DS, original_ds_);
+        minmax_emulation_flags_ = msc_emulation_flags;
         if (pDesc->pRootSignature) application_root_ = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
         else if (root_signature && root_signature_size) {
           Com<ID3D12RootSignature> root;
@@ -1243,6 +1372,7 @@ public:
       hr = InitializeMSCStageInLayout(pDesc, msc_stage_in_layout);
       if (FAILED(hr))
         return hr;
+      minmax_stage_in_layout_ = msc_stage_in_layout;
     }
 
     SM50_SHADER_COMMON_DATA common = {};
@@ -1257,7 +1387,8 @@ public:
       if (FAILED(
               hr = requires_minmax_variant && !static_minmax_shaders.vertex.bytecode.empty() ?
                   ConvertD3D12MinMaxShader(static_minmax_shaders.vertex, minmax_variant_->root, converted_vs,
-                      &msc_capabilities) : ConvertD3D12Shader(
+                      &msc_capabilities, msc_emulation_flags ? &msc_stage_in_layout : nullptr,
+                      msc_emulation_flags) : ConvertD3D12Shader(
                   vs_classification, pDesc->VS, DXMT_MSC_STAGE_VERTEX, converted_vs, root_signature,
                   root_signature_size, msc_emulation_flags ? &msc_stage_in_layout : nullptr, msc_emulation_flags,
                   &msc_capabilities
@@ -1307,7 +1438,9 @@ public:
 
       if (use_msc_tessellation) {
         if (FAILED(
-                hr = ConvertD3D12Shader(
+                hr = requires_minmax_variant && !static_minmax_shaders.hull.bytecode.empty() ?
+                    ConvertD3D12MinMaxShader(static_minmax_shaders.hull, minmax_variant_->root, converted_hs,
+                        &msc_capabilities, nullptr, msc_emulation_flags) : ConvertD3D12Shader(
                     hs_classification, pDesc->HS, DXMT_MSC_STAGE_HULL, converted_hs, root_signature,
                     root_signature_size, nullptr, DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION, &msc_capabilities
                 )
@@ -1316,7 +1449,9 @@ public:
           return hr;
         }
         if (FAILED(
-                hr = ConvertD3D12Shader(
+                hr = requires_minmax_variant && !static_minmax_shaders.domain.bytecode.empty() ?
+                    ConvertD3D12MinMaxShader(static_minmax_shaders.domain, minmax_variant_->root, converted_ds,
+                        &msc_capabilities, nullptr, msc_emulation_flags) : ConvertD3D12Shader(
                     ds_classification, pDesc->DS, DXMT_MSC_STAGE_DOMAIN, converted_ds, root_signature,
                     root_signature_size, nullptr, DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION, &msc_capabilities
                 )
@@ -1331,7 +1466,9 @@ public:
       }
       if (use_msc_geometry) {
         if (FAILED(
-                hr = ConvertD3D12Shader(
+                hr = requires_minmax_variant && !static_minmax_shaders.geometry.bytecode.empty() ?
+                    ConvertD3D12MinMaxShader(static_minmax_shaders.geometry, minmax_variant_->root, converted_gs,
+                        &msc_capabilities, nullptr, msc_emulation_flags) : ConvertD3D12Shader(
                     gs_classification, pDesc->GS, DXMT_MSC_STAGE_GEOMETRY, converted_gs, root_signature,
                     root_signature_size, nullptr, DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION, &msc_capabilities
                 )
@@ -1618,26 +1755,10 @@ public:
         if (pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH)
           return E_INVALIDARG;
 
-        const auto &hs = converted_hs.reflection;
-        const auto &ds = converted_ds.reflection;
-        if (!MTLValidateMSCTessellationPipeline(
-                hs.hs_tessellator_output_primitive, WMTPrimitiveTypeTriangle, hs.hs_output_control_point_size,
-                ds.ds_input_control_point_size, hs.hs_patch_constants_size, ds.ds_patch_constants_size,
-                hs.hs_output_control_point_count, ds.ds_input_control_point_count
-            ) ||
-            !converted_vs.reflection.vertex_output_size_in_bytes || !hs.hs_output_control_point_size ||
-            !ds.ds_input_control_point_size ||
-            hs.hs_output_control_point_size != ds.ds_input_control_point_size ||
-            hs.hs_patch_constants_size != ds.ds_patch_constants_size ||
-            hs.hs_output_control_point_count != ds.ds_input_control_point_count ||
-            hs.hs_tessellator_domain != ds.ds_tessellator_domain ||
-            hs.hs_tessellation_type_half != ds.ds_tessellation_type_half ||
-            !hs.hs_max_patches_per_object_threadgroup || !hs.hs_max_object_threads_per_patch ||
-            !ds.ds_max_input_prims_per_mesh_threadgroup || !hs.hs_max_tessellation_factor)
-          return E_INVALIDARG;
-
         WMTMSCTessellationPipelineInfo tess_info;
         WMT::InitializeMSCTessellationPipelineInfo(tess_info);
+        if (!ConfigureMSCTessellation(converted_vs.reflection, converted_hs.reflection,
+                converted_ds.reflection, tess_info.config)) return E_INVALIDARG;
         for (unsigned i = 0; i < 8; i++)
           tess_info.base.colors[i] = info.colors[i];
         tess_info.base.alpha_to_coverage_enabled = info.alpha_to_coverage_enabled;
@@ -1669,15 +1790,6 @@ public:
             tess_info.fragment_function_name, converted_ps.entry_point.c_str(),
             sizeof(tess_info.fragment_function_name) - 1
         );
-        tess_info.config.output_primitive_type = hs.hs_tessellator_output_primitive;
-        tess_info.config.vs_output_size_in_bytes = converted_vs.reflection.vertex_output_size_in_bytes;
-        tess_info.config.gs_max_input_primitives_per_mesh_threadgroup = ds.ds_max_input_prims_per_mesh_threadgroup;
-        tess_info.config.hs_max_patches_per_object_threadgroup = hs.hs_max_patches_per_object_threadgroup;
-        tess_info.config.hs_input_control_point_count = hs.hs_input_control_point_count;
-        tess_info.config.hs_max_object_threads_per_threadgroup = hs.hs_max_object_threads_per_patch;
-        tess_info.config.hs_max_tessellation_factor = hs.hs_max_tessellation_factor;
-        tess_info.config.gs_instance_count = 1;
-
         pso = metal.newMSCTessellationPipelineState(tess_info, err);
         if (pso)
           msc_tessellator_tables = metal.newMSCTessellatorTables();
@@ -1689,6 +1801,17 @@ public:
           return E_FAIL;
         msc_tessellation = true;
         msc_tessellation_config = tess_info.config;
+        if (application_root_) {
+          minmax_tessellation_info_ = tess_info;
+          minmax_tessellation_info_.stage_in_library = minmax_tessellation_info_.vertex_library =
+              minmax_tessellation_info_.hull_library = minmax_tessellation_info_.domain_library =
+              minmax_tessellation_info_.fragment_library = NULL_OBJECT_HANDLE;
+          minmax_render_info_valid_ = true;
+          if (minmax_variant_) {
+            minmax_variant_->pso = pso; minmax_variant_->tessellation = true;
+            minmax_variant_->tessellation_config = tess_info.config;
+          }
+        }
       } else if (use_msc_geometry) {
         WMTPrimitiveType geometry_input_primitive;
         if (!MapMSCGeometryInputPrimitive(converted_gs.reflection.gs_input_primitive, geometry_input_primitive) ||
@@ -1741,10 +1864,8 @@ public:
               sizeof(geometry_info.fragment_function_name) - 1
           );
         }
-        geometry_info.config.gs_vertex_size_in_bytes = converted_vs.reflection.vertex_output_size_in_bytes;
-        geometry_info.config.gs_max_input_primitives_per_mesh_threadgroup =
-            converted_gs.reflection.gs_max_input_primitives_per_mesh_threadgroup;
-        geometry_info.config.gs_instance_count = converted_gs.reflection.gs_instance_count;
+        if (!ConfigureMSCGeometry(converted_vs.reflection, converted_gs.reflection, geometry_info.config))
+          return E_INVALIDARG;
 
         pso = metal.newMSCGeometryPipelineState(geometry_info, err);
         if (!pso)
@@ -1754,6 +1875,16 @@ public:
         msc_geometry = true;
         msc_geometry_config = geometry_info.config;
         msc_geometry_input_primitive = geometry_input_primitive;
+        if (application_root_) {
+          minmax_geometry_info_ = geometry_info;
+          minmax_geometry_info_.stage_in_library = minmax_geometry_info_.vertex_library =
+              minmax_geometry_info_.geometry_library = minmax_geometry_info_.fragment_library = NULL_OBJECT_HANDLE;
+          minmax_render_info_valid_ = true;
+          if (minmax_variant_) {
+            minmax_variant_->pso = pso; minmax_variant_->geometry = true;
+            minmax_variant_->geometry_config = geometry_info.config;
+          }
+        }
       } else if (use_airconv_geometry) {
         if (pDesc->PrimitiveTopologyType == D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH)
           return E_INVALIDARG;

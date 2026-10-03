@@ -290,8 +290,23 @@ HRESULT ResolveD3D12MinMaxBindings(const D3D12MinMaxRoot &root,
     void operator()(ID3D12VersionedRootSignatureDeserializer *value) const { if (value) value->Release(); }
   };
   try {
-    if (stage != D3D12MinMaxShaderStage::Compute && stage != D3D12MinMaxShaderStage::Pixel &&
-        stage != D3D12MinMaxShaderStage::Vertex) return E_INVALIDARG;
+    D3D12_SHADER_VISIBILITY stage_visibility;
+    D3D12_ROOT_SIGNATURE_FLAGS deny_flag;
+    switch (stage) {
+    case D3D12MinMaxShaderStage::Compute:
+      stage_visibility = D3D12_SHADER_VISIBILITY_ALL; deny_flag = D3D12_ROOT_SIGNATURE_FLAG_NONE; break;
+    case D3D12MinMaxShaderStage::Pixel:
+      stage_visibility = D3D12_SHADER_VISIBILITY_PIXEL; deny_flag = D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS; break;
+    case D3D12MinMaxShaderStage::Vertex:
+      stage_visibility = D3D12_SHADER_VISIBILITY_VERTEX; deny_flag = D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS; break;
+    case D3D12MinMaxShaderStage::Geometry:
+      stage_visibility = D3D12_SHADER_VISIBILITY_GEOMETRY; deny_flag = D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS; break;
+    case D3D12MinMaxShaderStage::Hull:
+      stage_visibility = D3D12_SHADER_VISIBILITY_HULL; deny_flag = D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS; break;
+    case D3D12MinMaxShaderStage::Domain:
+      stage_visibility = D3D12_SHADER_VISIBILITY_DOMAIN; deny_flag = D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS; break;
+    default: return E_INVALIDARG;
+    }
     if (!root.pair_count || root.pair_count > 64 || bindings.empty() || bindings.size() > root.pair_count || root.layout.bytecode.empty())
       return E_INVALIDARG;
     ID3D12VersionedRootSignatureDeserializer *raw = nullptr;
@@ -302,14 +317,9 @@ HRESULT ResolveD3D12MinMaxBindings(const D3D12MinMaxRoot &root,
     const auto *versioned = decoded->GetUnconvertedRootSignatureDesc();
     if (!versioned || versioned->Version != D3D_ROOT_SIGNATURE_VERSION_1_1) return E_INVALIDARG;
     const auto &desc = versioned->Desc_1_1;
-    if (stage == D3D12MinMaxShaderStage::Pixel && (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS))
-      return E_NOTIMPL;
-    if (stage == D3D12MinMaxShaderStage::Vertex && (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS))
-      return E_NOTIMPL;
+    if (desc.Flags & deny_flag) return E_NOTIMPL;
     const auto visible = [&](D3D12_SHADER_VISIBILITY visibility) {
-      return visibility == D3D12_SHADER_VISIBILITY_ALL ||
-          (stage == D3D12MinMaxShaderStage::Pixel && visibility == D3D12_SHADER_VISIBILITY_PIXEL) ||
-          (stage == D3D12MinMaxShaderStage::Vertex && visibility == D3D12_SHADER_VISIBILITY_VERTEX);
+      return visibility == D3D12_SHADER_VISIBILITY_ALL || visibility == stage_visibility;
     };
     if (uint64_t(root.layout.application_parameter_count) + 3 != desc.NumParameters) return E_INVALIDARG;
     auto resolve = [&](D3D12_DESCRIPTOR_RANGE_TYPE type, uint32_t space, uint32_t reg,

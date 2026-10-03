@@ -339,6 +339,17 @@ else
 endif
 
 if dxc_command.length() > 0
+  foreach operation : ['level', 'grad']
+    foreach stage : [['vs', 'vertex'], ['ps', 'pixel'], ['gs', 'geometry'], ['hs', 'hull'], ['ds', 'domain']]
+      custom_target('dx12_minmax_preraster_@0@_@1@_fixture'.format(operation, stage[0]),
+        input: 'minmax_preraster.hlsl',
+        output: 'minmax_preraster.@0@.@1@.cso'.format(operation, stage[0]),
+        command: dxc_command + ['-E', stage[1], '-T', stage[0] + '_6_0',
+            '-D', operation == 'grad' ? 'USE_GRAD=1' : 'USE_LEVEL=1', '@INPUT@', '-Fo', '@OUTPUT@'],
+        build_by_default: false,
+      )
+    endforeach
+  endforeach
   foreach stage : ['vs', 'ps']
     custom_target('dx12_backend_failure_@0@_fixture'.format(stage),
       input: 'backend_failure_graphics.hlsl', output: 'backend_failure.@0@.cso'.format(stage),

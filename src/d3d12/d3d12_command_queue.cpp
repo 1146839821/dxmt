@@ -146,6 +146,8 @@ union PrivateRenderReplayCommand {
   wmtcmd_render_setviewport viewport;
   wmtcmd_render_msc_tessellation_draw_indexed tessellation;
   wmtcmd_render_msc_geometry_draw_indexed geometry;
+  wmtcmd_render_msc_tessellation_draw tessellation_direct;
+  wmtcmd_render_msc_geometry_draw geometry_direct;
   wmtcmd_render_dxmt_tessellation_mesh_draw_indexed air_tessellation;
 };
 
@@ -160,6 +162,7 @@ static bool ReplayMinMaxRender(MTLD3D12Device *device, WMT::RenderCommandEncoder
     std::vector<PrivateRenderReplayCommand> replay;
     struct IndirectBinding { obj_handle_t buffer; uint64_t offset; };
     std::unordered_map<const void *, IndirectBinding> indirect_bindings;
+    const D3D12MinMaxGraphicsVariant *active_variant = nullptr;
     for (auto *node = reinterpret_cast<wmtcmd_base *>(&data->cmd_head); node;
          node = static_cast<wmtcmd_base *>(node->next.get())) {
       if (auto marker = markers.find(node); marker != markers.end()) {
@@ -170,17 +173,32 @@ static bool ReplayMinMaxRender(MTLD3D12Device *device, WMT::RenderCommandEncoder
         if (marker->second->indirect_render_binding &&
             !indirect_bindings.emplace(marker->second->indirect_render_binding,
                 IndirectBinding{binding->buffer.handle, binding->indirect_data_offset}).second) return false;
+        active_variant = marker->second->graphics_variant;
+        const bool emulation = active_variant->geometry || active_variant->tessellation;
+        const auto stages = emulation ? WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment :
+            WMTRenderStageVertex | WMTRenderStageFragment;
         for (const auto &use : binding->resources)
-          encoder.useResource(use.resource, use.usage, WMTRenderStageVertex | WMTRenderStageFragment);
+          encoder.useResource(use.resource, use.usage, stages);
         PrivateRenderReplayCommand pso = {};
         pso.pso.type = WMTRenderCommandSetPSO; pso.pso.pso = marker->second->graphics_variant->pso.handle;
         replay.push_back(pso);
-        for (const auto type : {WMTRenderCommandSetVertexBuffer, WMTRenderCommandSetFragmentBuffer}) {
+        const auto set_buffer = [&](WMTRenderCommandType type, uint32_t index) {
           PrivateRenderReplayCommand set = {};
           set.buffer.type = type; set.buffer.buffer = binding->buffer.handle;
-          set.buffer.index = DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT;
+          set.buffer.index = index;
           replay.push_back(set);
+        };
+        if (emulation) {
+          set_buffer(WMTRenderCommandSetObjectBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
+          set_buffer(WMTRenderCommandSetMeshBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
+          if (active_variant->tessellation) {
+            set_buffer(WMTRenderCommandSetObjectBuffer, DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT);
+            set_buffer(WMTRenderCommandSetMeshBuffer, DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT);
+          }
+        } else {
+          set_buffer(WMTRenderCommandSetVertexBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
         }
+        set_buffer(WMTRenderCommandSetFragmentBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
         markers.erase(marker);
         continue;
       }
@@ -239,6 +257,26 @@ static bool ReplayMinMaxRender(MTLD3D12Device *device, WMT::RenderCommandEncoder
 #undef RENDER_SIZE
       PrivateRenderReplayCommand copy = {};
       std::memcpy(&copy, node, size);
+      // The companion draw configuration must match the private PSO's
+      // reflection, not the application pipeline's threadgroup configuration.
+      if (node->type == WMTRenderCommandSetPSO) active_variant = nullptr;
+      if (active_variant) {
+        switch (node->type) {
+        case WMTRenderCommandMSCTessellationDraw:
+          if (!active_variant->tessellation) return false;
+          copy.tessellation_direct.config = active_variant->tessellation_config; break;
+        case WMTRenderCommandMSCTessellationDrawIndexed:
+          if (!active_variant->tessellation) return false;
+          copy.tessellation.config = active_variant->tessellation_config; break;
+        case WMTRenderCommandMSCGeometryDraw:
+          if (!active_variant->geometry) return false;
+          copy.geometry_direct.config = active_variant->geometry_config; break;
+        case WMTRenderCommandMSCGeometryDrawIndexed:
+          if (!active_variant->geometry) return false;
+          copy.geometry.config = active_variant->geometry_config; break;
+        default: break;
+        }
+      }
       if (auto patch = indirect_bindings.find(node); patch != indirect_bindings.end()) {
         if (node->type != WMTRenderCommandSetVertexBuffer) return false;
         copy.buffer.buffer = patch->second.buffer; copy.buffer.offset = patch->second.offset;

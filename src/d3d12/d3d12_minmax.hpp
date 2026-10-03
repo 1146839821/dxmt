@@ -6,7 +6,7 @@
 #include <vector>
 
 namespace dxmt {
-enum class D3D12MinMaxShaderStage { Compute, Pixel, Vertex };
+enum class D3D12MinMaxShaderStage { Compute, Pixel, Vertex, Geometry, Hull, Domain };
 // Owned compiler artifact, not an admitted PSO. The caller must augment and
 // reflect the root and provide the private state/point/ordinary bindings.
 struct D3D12MinMaxShader {
@@ -41,7 +41,7 @@ HRESULT ResolveD3D12MinMaxBindings(const D3D12MinMaxRoot &root,
     const std::vector<dxmt_msc_minmax_binding> &bindings,
     std::vector<D3D12MinMaxPairLocation> &locations, std::string &diagnostics,
     D3D12MinMaxShaderStage stage = D3D12MinMaxShaderStage::Compute);
-// Selected absolute Windows DXC directory; validated SM6.0..6.6 compute/pixel/vertex envelope.
+// Selected absolute Windows DXC directory; validated SM6.0..6.6 stage envelope.
 // Zero pair_count retains a local layout; otherwise use the given shared interval.
 // No fallback. Failure leaves the artifact unchanged.
 HRESULT PrepareD3D12MinMaxShader(const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,

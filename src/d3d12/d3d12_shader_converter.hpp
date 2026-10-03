@@ -352,6 +352,7 @@ HRESULT ConvertD3D12MinMaxComputeShader(
 
 HRESULT ConvertD3D12MinMaxShader(
     const D3D12MinMaxShader &shader, const D3D12MinMaxRoot &root,
-    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities);
+    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities,
+    const dxmt_msc_input_layout *input_layout = nullptr, uint32_t compile_flags = 0);
 
 } // namespace dxmt

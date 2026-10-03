@@ -49,15 +49,35 @@ HRESULT RecordD3D12MinMaxBinding(MTLD3D12PipelineState *pso, const D3D12MinMaxBi
       return E_INVALIDARG;
     if (!variant->binding_stages.empty() && (variant->stage != D3D12MinMaxShaderStage::Pixel ||
         variant->binding_stages.size() != variant->bindings.size())) return E_INVALIDARG;
+    const auto graphics_stage = [](D3D12MinMaxShaderStage stage) {
+      return stage == D3D12MinMaxShaderStage::Pixel || stage == D3D12MinMaxShaderStage::Vertex ||
+          stage == D3D12MinMaxShaderStage::Geometry || stage == D3D12MinMaxShaderStage::Hull ||
+          stage == D3D12MinMaxShaderStage::Domain;
+    };
     for (const auto stage : variant->binding_stages)
-      if (stage != D3D12MinMaxShaderStage::Pixel && stage != D3D12MinMaxShaderStage::Vertex) return E_INVALIDARG;
+      if (!graphics_stage(stage)) return E_INVALIDARG;
+    for (const auto stage : variant->active_graphics_stages)
+      if (variant->stage != D3D12MinMaxShaderStage::Pixel || !graphics_stage(stage)) return E_INVALIDARG;
     if (!!pso->IsComputePipelineState != (variant->stage == D3D12MinMaxShaderStage::Compute)) return E_INVALIDARG;
     if (pso->shader_backend != D3D12ShaderBackend::MetalShaderConverter) return E_NOTIMPL;
     const bool uses_texture_load = pso->msc_uses_texture_load;
     if (variant->stage == D3D12MinMaxShaderStage::Pixel) {
       const auto *graphics = static_cast<MTLD3D12GraphicsPipelineState *>(pso);
-      if (graphics->msc_mesh || graphics->msc_geometry || graphics->msc_tessellation || graphics->stream_output)
+      if (graphics->msc_mesh || graphics->stream_output)
         return E_NOTIMPL;
+      const auto active = [&](D3D12MinMaxShaderStage stage) {
+        return std::find(variant->active_graphics_stages.begin(), variant->active_graphics_stages.end(), stage) !=
+            variant->active_graphics_stages.end();
+      };
+      if ((graphics->msc_geometry && !active(D3D12MinMaxShaderStage::Geometry)) ||
+          (graphics->msc_tessellation && (!active(D3D12MinMaxShaderStage::Hull) || !active(D3D12MinMaxShaderStage::Domain))))
+        return E_INVALIDARG;
+      for (const auto stage : variant->binding_stages) {
+        if ((stage == D3D12MinMaxShaderStage::Geometry && !graphics->msc_geometry) ||
+            ((stage == D3D12MinMaxShaderStage::Hull || stage == D3D12MinMaxShaderStage::Domain) && !graphics->msc_tessellation))
+          return E_INVALIDARG;
+        if (!variant->active_graphics_stages.empty() && !active(stage)) return E_INVALIDARG;
+      }
     }
     const D3D12MinMaxRoot *bound = nullptr;
     HRESULT hr = root->GetMinMaxCompilerRoot(variant->bindings.size(), &bound);
@@ -80,19 +100,33 @@ HRESULT RecordD3D12MinMaxBinding(MTLD3D12PipelineState *pso, const D3D12MinMaxBi
             std::find(variant->binding_stages.begin(), variant->binding_stages.end(), stage) != variant->binding_stages.end();
       };
       if ((uses(D3D12MinMaxShaderStage::Pixel) && (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS)) ||
-          (uses(D3D12MinMaxShaderStage::Vertex) && (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS)))
+          (uses(D3D12MinMaxShaderStage::Vertex) && (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS)) ||
+          (uses(D3D12MinMaxShaderStage::Geometry) && (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS)) ||
+          (uses(D3D12MinMaxShaderStage::Hull) && (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS)) ||
+          (uses(D3D12MinMaxShaderStage::Domain) && (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS)))
         return E_NOTIMPL;
     }
     if (desc.Flags & (D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
         D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED)) return E_NOTIMPL;
     std::vector<UINT> resource_indices, sampler_indices;
     std::vector<std::pair<size_t, size_t>> resource_destinations, sampler_destinations;
+    const auto stage_visible = [&](D3D12_SHADER_VISIBILITY visibility) {
+      if (visibility == D3D12_SHADER_VISIBILITY_ALL) return true;
+      if (variant->stage != D3D12MinMaxShaderStage::Pixel) return false;
+      if (variant->active_graphics_stages.empty())
+        return visibility == D3D12_SHADER_VISIBILITY_PIXEL || visibility == D3D12_SHADER_VISIBILITY_VERTEX;
+      for (const auto stage : variant->active_graphics_stages) {
+        if ((stage == D3D12MinMaxShaderStage::Pixel && visibility == D3D12_SHADER_VISIBILITY_PIXEL) ||
+            (stage == D3D12MinMaxShaderStage::Vertex && visibility == D3D12_SHADER_VISIBILITY_VERTEX) ||
+            (stage == D3D12MinMaxShaderStage::Geometry && visibility == D3D12_SHADER_VISIBILITY_GEOMETRY) ||
+            (stage == D3D12MinMaxShaderStage::Hull && visibility == D3D12_SHADER_VISIBILITY_HULL) ||
+            (stage == D3D12MinMaxShaderStage::Domain && visibility == D3D12_SHADER_VISIBILITY_DOMAIN)) return true;
+      }
+      return false;
+    };
     for (uint32_t p = 0; p < layout.application_parameter_count; ++p) {
       const auto &parameter = desc.pParameters[p];
-      const bool visible = parameter.ShaderVisibility == D3D12_SHADER_VISIBILITY_ALL ||
-          (variant->stage == D3D12MinMaxShaderStage::Pixel &&
-           (parameter.ShaderVisibility == D3D12_SHADER_VISIBILITY_PIXEL ||
-            parameter.ShaderVisibility == D3D12_SHADER_VISIBILITY_VERTEX));
+      const bool visible = stage_visible(parameter.ShaderVisibility);
       if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE ||
           !visible) continue;
       const auto &ranges = parameter.DescriptorTable;

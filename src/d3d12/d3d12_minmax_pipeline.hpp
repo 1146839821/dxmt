@@ -14,6 +14,9 @@ struct D3D12MinMaxBindingVariant {
   std::vector<D3D12MinMaxPairLocation> locations;
   // Empty retains the single-stage contract; graphics can label each interval.
   std::vector<D3D12MinMaxShaderStage> binding_stages;
+  // All application stages, including stages without reduction samples.
+  // Empty preserves the legacy ordinary VS/PS capture contract.
+  std::vector<D3D12MinMaxShaderStage> active_graphics_stages;
 };
 
 struct D3D12MinMaxComputeVariant : D3D12MinMaxBindingVariant {
@@ -24,6 +27,10 @@ struct D3D12MinMaxComputeVariant : D3D12MinMaxBindingVariant {
 struct D3D12MinMaxGraphicsVariant : D3D12MinMaxBindingVariant {
   D3D12MinMaxGraphicsVariant() { stage = D3D12MinMaxShaderStage::Pixel; }
   WMT::Reference<WMT::RenderPipelineState> pso;
+  bool geometry = false;
+  bool tessellation = false;
+  WMTMSCGeometryPipelineConfig geometry_config = {};
+  WMTMSCTessellationPipelineConfig tessellation_config = {};
 };
 
 } // namespace dxmt

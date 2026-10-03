@@ -122,6 +122,12 @@ HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<ID
     case DXC_FOURCC('P', 'S', 'V', '0'):
     case DXC_FOURCC('S', 'F', 'I', '0'):
       break;
+    case DXC_FOURCC('P', 'S', 'G', '1'):
+      // The assembler reconstructs patch signatures from HS/DS metadata,
+      // just as it reconstructs input/output signatures. Other stages must
+      // not silently discard an application-visible patch signature.
+      if (program_kind != 3 && program_kind != 4) return E_NOTIMPL;
+      break;
     default: return E_NOTIMPL;
     }
   }
@@ -260,8 +266,15 @@ static HRESULT PrepareShaderInternal(
   OwnedCOM<IDxcBlob> program;
   Prepared candidate;
   if constexpr (std::is_same_v<Operation, MinMaxPreparation>)
-    candidate.stage = program_kind == 0 ? D3D12MinMaxShaderStage::Pixel :
-        program_kind == 1 ? D3D12MinMaxShaderStage::Vertex : D3D12MinMaxShaderStage::Compute;
+    switch (program_kind) {
+    case 0: candidate.stage = D3D12MinMaxShaderStage::Pixel; break;
+    case 1: candidate.stage = D3D12MinMaxShaderStage::Vertex; break;
+    case 2: candidate.stage = D3D12MinMaxShaderStage::Geometry; break;
+    case 3: candidate.stage = D3D12MinMaxShaderStage::Hull; break;
+    case 4: candidate.stage = D3D12MinMaxShaderStage::Domain; break;
+    case 5: candidate.stage = D3D12MinMaxShaderStage::Compute; break;
+    default: return E_INVALIDARG;
+    }
   if constexpr (std::is_same_v<Operation, TypedOriginPreparation>)
     hr = Inspect(reflection.get(), validated_input.get(), program, Operation::MaximumMinor,
         &candidate.application_root_signature);
@@ -332,11 +345,20 @@ HRESULT PrepareD3D12MinMaxShader(
     D3D12MinMaxShader &prepared, std::string &diagnostics, D3D12MinMaxShaderStage stage,
     uint32_t pair_offset, uint32_t pair_count) {
   try {
-    if ((stage != D3D12MinMaxShaderStage::Compute && stage != D3D12MinMaxShaderStage::Pixel &&
-            stage != D3D12MinMaxShaderStage::Vertex) || pair_count > 64 ||
+    uint32_t program_kind;
+    switch (stage) {
+    case D3D12MinMaxShaderStage::Pixel: program_kind = 0; break;
+    case D3D12MinMaxShaderStage::Vertex: program_kind = 1; break;
+    case D3D12MinMaxShaderStage::Geometry: program_kind = 2; break;
+    case D3D12MinMaxShaderStage::Hull: program_kind = 3; break;
+    case D3D12MinMaxShaderStage::Domain: program_kind = 4; break;
+    case D3D12MinMaxShaderStage::Compute: program_kind = 5; break;
+    default: return E_INVALIDARG;
+    }
+    if (pair_count > 64 ||
         (!pair_count && pair_offset) || (pair_count && pair_offset >= pair_count)) return E_INVALIDARG;
     return PrepareShaderInternal<MinMaxPreparation>(shader, dxc_directory, prepared, diagnostics,
-        stage == D3D12MinMaxShaderStage::Pixel ? 0 : stage == D3D12MinMaxShaderStage::Vertex ? 1 : 5,
+        program_kind,
         pair_offset, pair_count);
   } catch (const std::bad_alloc &) {
     return E_OUTOFMEMORY;
