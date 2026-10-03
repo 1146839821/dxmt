@@ -4,6 +4,8 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/raw_ostream.h>
 #include <cstring>
@@ -14,7 +16,8 @@ static uint32_t Word(const unsigned char *bytes) {
 int main(int argc, char **argv) {
   const bool array = argc == 3 && !std::strcmp(argv[2], "--array");
   const bool dynamic_array = argc == 3 && !std::strcmp(argv[2], "--dynamic-array");
-  if (argc != 2 && !array && !dynamic_array) return 1;
+  const bool modern = argc == 3 && !std::strcmp(argv[2], "--modern");
+  if (argc != 2 && !array && !dynamic_array && !modern) return 1;
   auto file = llvm::MemoryBuffer::getFileOrSTDIN(argv[1]);
   if (!file) return 1;
   auto input = (*file)->getBuffer();
@@ -37,6 +40,42 @@ int main(int argc, char **argv) {
     bitcode = llvm::StringRef(reinterpret_cast<const char *>(program + 8 + start), size);
   }
   if (bitcode.empty()) return 1;
+  if (modern) for (unsigned negative = 0; negative < 3; ++negative) {
+    llvm::LLVMContext context;
+    context.setOpaquePointers(false);
+    auto parsed = llvm::parseBitcodeFile(llvm::MemoryBufferRef(bitcode, argv[1]), context);
+    if (!parsed) { llvm::consumeError(parsed.takeError()); return 1; }
+    llvm::CallInst *annotation = nullptr, *binding = nullptr, *load = nullptr;
+    for (auto &function : **parsed) for (auto &block : function) for (auto &instruction : block) {
+      auto *call = llvm::dyn_cast<llvm::CallInst>(&instruction);
+      if (!call || !call->getCalledFunction()) continue;
+      auto name = call->getCalledFunction()->getName();
+      if (name == "dx.op.annotateHandle" && !annotation) annotation = call;
+      if (name == "dx.op.createHandleFromBinding" && !binding) binding = call;
+      if (name.startswith("dx.op.bufferLoad") && !load) load = call;
+    }
+    if (!annotation || !binding || !load || annotation->getArgOperand(1) != binding ||
+        load->getArgOperand(1) != annotation) return 1;
+    if (negative == 0) {
+      auto *type = llvm::cast<llvm::StructType>(annotation->getArgOperand(2)->getType());
+      annotation->setArgOperand(2, llvm::ConstantStruct::get(type,
+          {llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 10),
+           llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 265)})); // float versus uint metadata
+    } else if (negative == 1) load->setArgOperand(1, binding);
+    else {
+      auto *type = llvm::cast<llvm::StructType>(binding->getArgOperand(1)->getType());
+      binding->setArgOperand(1, llvm::ConstantStruct::get(type,
+          {llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 3),
+           llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 5),
+           llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0),
+           llvm::ConstantInt::get(llvm::Type::getInt8Ty(context), 0)}));
+    }
+    std::vector<dxmt::dxil::TypedOriginBinding> rejected;
+    std::string error;
+    if (llvm::verifyModule(**parsed, &llvm::errs()) ||
+        dxmt::dxil::LowerTypedBufferOrigins(**parsed, rejected, error) || error.empty()) return 1;
+    llvm::errs() << "modern-negative=" << negative << " rejected: " << error << '\n';
+  }
   dxmt_msc_lower_typed_origins_params params = {};
   params.bitcode = uintptr_t(bitcode.data());
   params.bitcode_size = bitcode.size();

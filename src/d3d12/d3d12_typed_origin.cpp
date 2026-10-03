@@ -118,7 +118,7 @@ HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<ID
 } // namespace
 
 struct TypedOriginPreparation {
-  static constexpr uint32_t MaximumMinor = 0;
+  static constexpr uint32_t MaximumMinor = 6;
   using Params = dxmt_msc_lower_typed_origins_params;
   using Artifact = D3D12TypedOriginShader;
   static constexpr const char *ExportName = "DXMTMSCLowerTypedBufferOrigins";

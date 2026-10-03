@@ -7,8 +7,15 @@ nonuniform handle flags. Four fresh divergent two-lane GPU readbacks and four
 uniform regressions pass across both builds (`D3D12_TYPED_ORIGIN_NONUNIFORM.md`).
 This narrows a binding-provenance gap; it does not change the four production
 workstreams, 1,584 existing typed case executions or seven missing complete GPU
-categories below. Modern typed handles, default qualification and complete
-format/lifetime acceptance remain open.
+categories below. Default qualification and complete format/lifetime acceptance
+remain open.
+
+Modern typed follow-up: finite SM6.6 binding/annotation chains now reuse guarded
+origin/count selection, including divergent lane indices
+(`D3D12_TYPED_ORIGIN_MODERN.md`). Both builds pass focused actual static/volatile
+readbacks and legacy regressions. Heap/unbounded provenance, default enablement
+and complete typed acceptance remain open; the four workstreams and complete
+matrix workload below are unchanged.
 
 This section supersedes the historical checkpoints below. The implementation
 is not yet in a tests-only closure phase. No percentage or completion date can

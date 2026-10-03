@@ -102,6 +102,7 @@ struct Handle {
   llvm::CallInst *call;
   uint32_t record, count, base_register;
   llvm::Value *index;
+  llvm::CallInst *binding = nullptr;
 };
 struct Access {
   llvm::CallInst *call;
@@ -164,22 +165,123 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
   if (!handle_type || StructType::getTypeByName(module.getContext(), "dxmt.TypedBufferOrigins"))
     return reject("invalid handle type or already lowered module");
   auto *create = module.getFunction("dx.op.createHandle");
+  auto *modern_create = module.getFunction("dx.op.createHandleFromBinding");
+  auto *annotate = module.getFunction("dx.op.annotateHandle");
   auto &input_context = module.getContext();
-  if (!create || create->getFunctionType() != FunctionType::get(handle_type,
+  auto *bind_type = StructType::getTypeByName(input_context, "dx.types.ResBind");
+  auto *properties_type = StructType::getTypeByName(input_context, "dx.types.ResourceProperties");
+  const bool modern = modern_create != nullptr;
+  IRBuilder<> signature(input_context);
+  auto *word_type = signature.getInt32Ty();
+  if ((create && modern) || (!create && !modern)) return reject("one handle model required");
+  if (create && create->getFunctionType() != FunctionType::get(handle_type,
       {Type::getInt32Ty(input_context), Type::getInt8Ty(input_context), Type::getInt32Ty(input_context),
        Type::getInt32Ty(input_context), Type::getInt1Ty(input_context)}, false))
-    return reject("legacy createHandle required");
+    return reject("invalid legacy handle signature");
+  if (modern && (!bind_type || bind_type->isOpaque() || bind_type->elements() !=
+      ArrayRef<Type *>({word_type, word_type, word_type, signature.getInt8Ty()}) ||
+      !properties_type || properties_type->isOpaque() || properties_type->elements() !=
+      ArrayRef<Type *>({word_type, word_type}) || !annotate ||
+      modern_create->getFunctionType() != FunctionType::get(handle_type,
+          {word_type, bind_type, word_type, signature.getInt1Ty()}, false) ||
+      annotate->getFunctionType() != FunctionType::get(handle_type, {word_type, handle_type, properties_type}, false)))
+    return reject("invalid modern handle signatures");
+  auto aggregate_word = [](Value *value, unsigned index, uint32_t &word) {
+    auto *constant = dyn_cast<Constant>(value);
+    auto *element = constant ? dyn_cast_or_null<ConstantInt>(constant->getAggregateElement(index)) : nullptr;
+    if (!element || element->getBitWidth() > 32) return false;
+    word = element->getZExtValue();
+    return true;
+  };
   std::vector<Handle> handles;
   for (auto &function : module) for (auto &block : function) for (auto &instruction : block) {
     auto *base = dyn_cast<CallBase>(&instruction);
     if (!base) continue;
     auto *call = dyn_cast<CallInst>(base);
-    if (base->getType() == handle_type && (!call || !call->getCalledFunction() || call->getCalledFunction() != create))
+    if (base->getType() == handle_type && (!call || !call->getCalledFunction() ||
+        (call->getCalledFunction() != create && call->getCalledFunction() != modern_create &&
+         call->getCalledFunction() != annotate)))
       return reject("unsupported handle-producing call/invoke/alias");
     if (!call || !call->getCalledFunction()) continue;
     const auto name = call->getCalledFunction()->getName();
-    if (name.startswith("dx.op.createHandleFrom") || name.startswith("dx.op.annotateHandle"))
-      return reject("modern/dynamic handle provenance is not implemented");
+    if ((name.startswith("dx.op.createHandleFrom") && call->getCalledFunction() != modern_create) ||
+        (name.startswith("dx.op.annotateHandle") && call->getCalledFunction() != annotate))
+      return reject("unsupported modern handle provenance");
+    if (modern && call->getCalledFunction() == modern_create) {
+      uint32_t lower, upper, space, resource_class;
+      if (!aggregate_word(call->getArgOperand(1), 0, lower) ||
+          !aggregate_word(call->getArgOperand(1), 1, upper) ||
+          !aggregate_word(call->getArgOperand(1), 2, space) ||
+          !aggregate_word(call->getArgOperand(1), 3, resource_class))
+        return reject("constant modern binding required");
+      for (auto &[key, range] : ranges) {
+        if (key.first != resource_class || records[range.first].register_space != space ||
+            records[range.first].shader_register != lower ||
+            uint64_t(lower) + range.second != uint64_t(upper) + 1) continue;
+        for (auto *user : call->users()) {
+          auto *annotation = dyn_cast<CallInst>(user);
+          uint32_t property;
+          if (!annotation || annotation->getCalledFunction() != annotate ||
+              annotation->getArgOperand(1) != call ||
+              !aggregate_word(annotation->getArgOperand(2), 0, property) || (property & 255u) != 10)
+            return reject("typed binding requires typed annotation");
+        }
+      }
+    }
+    if (modern && call->getCalledFunction() == annotate) {
+      uint32_t opcode, lower, upper, space, resource_class, property, component;
+      auto *binding = dyn_cast<CallInst>(call->getArgOperand(1));
+      if (!Word(call->getArgOperand(0), opcode) || opcode != 216 || !binding ||
+          binding->getCalledFunction() != modern_create || !Word(binding->getArgOperand(0), opcode) || opcode != 217 ||
+          !aggregate_word(binding->getArgOperand(1), 0, lower) ||
+          !aggregate_word(binding->getArgOperand(1), 1, upper) ||
+          !aggregate_word(binding->getArgOperand(1), 2, space) ||
+          !aggregate_word(binding->getArgOperand(1), 3, resource_class) ||
+          !aggregate_word(call->getArgOperand(2), 0, property) ||
+          !aggregate_word(call->getArgOperand(2), 1, component))
+        return reject("constant modern binding and annotation required");
+      if ((property & 255u) != 10) continue;
+      if (resource_class > 1 || property != (10u | (resource_class ? 4096u : 0u)) ||
+          (component >> 8) < 1 || (component >> 8) > 4 || (component & 255u) == 0 ||
+          upper == UINT32_MAX || upper < lower || !isa<ConstantInt>(binding->getArgOperand(3)))
+        return reject("unsupported modern typed properties");
+      uint32_t first = UINT32_MAX, count = 0;
+      for (auto &[key, range] : ranges) {
+        if (key.first != resource_class || records[range.first].register_space != space ||
+            records[range.first].shader_register != lower ||
+            uint64_t(lower) + range.second != uint64_t(upper) + 1) continue;
+        if (first != UINT32_MAX) return reject("ambiguous modern typed range");
+        auto *list = cast<MDNode>(resources->getOperand(resource_class));
+        MDNode *metadata = nullptr;
+        for (auto &operand : list->operands()) {
+          auto *candidate = cast<MDNode>(operand);
+          uint32_t id;
+          if (Word(candidate->getOperand(0), id) && id == key.second) metadata = candidate;
+        }
+        const unsigned component_operand = resource_class ? 10 : 8;
+        auto *components = metadata && metadata->getNumOperands() > component_operand ?
+            dyn_cast_or_null<MDNode>(metadata->getOperand(component_operand)) : nullptr;
+        uint32_t tag, component_type;
+        if (!components || components->getNumOperands() != 2 || !Word(components->getOperand(0), tag) ||
+            tag != 0 || !Word(components->getOperand(1), component_type) || component_type != (component & 255u))
+          return reject("modern typed component metadata mismatch");
+        first = range.first; count = range.second;
+      }
+      if (first == UINT32_MAX) return reject("modern typed range does not match metadata");
+      for (auto *user : binding->users()) {
+        auto *annotation = dyn_cast<CallInst>(user);
+        if (!annotation || annotation->getCalledFunction() != annotate ||
+            annotation->getArgOperand(1) != binding || annotation->getArgOperand(2) != call->getArgOperand(2))
+          return reject("unannotated or inconsistent modern typed handle");
+      }
+      auto *index = binding->getArgOperand(2);
+      uint32_t reg;
+      if (Word(index, reg)) {
+        if (reg < lower || reg > upper) return reject("out-of-range modern typed handle");
+        handles.push_back({call, first + reg - lower, 1, lower, nullptr, binding});
+      } else handles.push_back({call, first, count, lower, index, binding});
+      continue;
+    }
     if (call->getCalledFunction() != create) continue;
     auto *resource_class = dyn_cast<ConstantInt>(call->getArgOperand(1));
     uint32_t range;
@@ -199,7 +301,10 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
     } else handles.push_back({call, first, count, base_register, call->getArgOperand(3)});
   }
   std::vector<Access> accesses;
-  for (auto [handle, record, range_count, base_register, index] : handles) for (auto *user : handle->users()) {
+  for (const auto &resolved : handles) for (auto *user : resolved.call->users()) {
+    auto *handle = resolved.call;
+    const auto record = resolved.record, range_count = resolved.count, base_register = resolved.base_register;
+    auto *index = resolved.index;
     auto *call = dyn_cast<CallInst>(user);
     uint32_t opcode;
     if (!call || !call->getCalledFunction() || call->arg_size() < 4 || call->getArgOperand(1) != handle ||
@@ -254,16 +359,27 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
   if (!cb_ret) cb_ret = StructType::create(context, {i32, i32, i32, i32}, "dx.types.CBufRet.i32");
   auto cb_load = module.getOrInsertFunction("dx.op.cbufferLoadLegacy.i32", cb_ret, i32, handle_type, i32);
   for (const auto &handle : handles) if (handle.index) {
-    IRBuilder<> builder(handle.call);
+    IRBuilder<> builder(handle.binding ? handle.binding : handle.call);
     auto *relative = builder.CreateSub(handle.index, builder.getInt32(handle.base_register));
     auto *in_range = builder.CreateICmpULT(relative, builder.getInt32(handle.count));
-    handle.call->setArgOperand(3, builder.CreateSelect(in_range, handle.index, builder.getInt32(handle.base_register)));
+    auto *binding = handle.binding ? handle.binding : handle.call;
+    binding->setArgOperand(handle.binding ? 2 : 3,
+        builder.CreateSelect(in_range, handle.index, builder.getInt32(handle.base_register)));
   }
   for (auto access : accesses) {
     auto *call = access.call;
     IRBuilder<> builder(call);
-    auto *cb = builder.CreateCall(create, {builder.getInt32(57), builder.getInt8(2), builder.getInt32(cbv_id),
-                                         builder.getInt32(0), builder.getFalse()}, "dxmt.origin.cb");
+    Value *cb;
+    if (modern) {
+      auto *binding = ConstantStruct::get(bind_type, {builder.getInt32(0), builder.getInt32(0),
+          builder.getInt32(1), builder.getInt8(2)});
+      auto *raw = builder.CreateCall(modern_create,
+          {builder.getInt32(217), binding, builder.getInt32(0), builder.getFalse()});
+      auto *properties = ConstantStruct::get(properties_type,
+          {builder.getInt32(13), builder.getInt32(records.size() * 16)});
+      cb = builder.CreateCall(annotate, {builder.getInt32(216), raw, properties}, "dxmt.origin.cb");
+    } else cb = builder.CreateCall(create, {builder.getInt32(57), builder.getInt8(2), builder.getInt32(cbv_id),
+                                          builder.getInt32(0), builder.getFalse()}, "dxmt.origin.cb");
     Value *state_index = builder.getInt32(access.record);
     Value *handle_valid = builder.getTrue();
     if (access.index) {
