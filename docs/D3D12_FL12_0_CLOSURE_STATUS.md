@@ -2,6 +2,13 @@
 
 ## Current snapshot (2026-10-03, static DXIL MinMax dispatch checkpoint)
 
+Embedded compute root follow-up: Typed origin now retains implicit shader roots
+and preserves explicit-root override precedence
+(`D3D12_TYPED_ORIGIN_EMBEDDED_ROOT.md`). Both builds pass focused embedded,
+override and explicit regression readbacks; different bound roots are rejected.
+Graphics, root-updating indirect, full typed acceptance and unconditional compiler
+distribution remain open; no feature-level or matrix-status promotion.
+
 Automatic compute selection follow-up: deploying a `dxmt-dxc` compiler/validator
 folder beside D3D12 now permits reflected typed-buffer shaders to select the
 origin variant without an environment override

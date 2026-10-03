@@ -13,8 +13,12 @@ template <typename T> struct Owned {
 
 int main(int argc, char **argv) {
   bool dynamic = false;
+  const bool mismatch = argc == 3 && !std::strcmp(argv[2], "--embedded-mismatch");
+  const bool override_root = argc == 3 && !std::strcmp(argv[2], "--embedded-override");
+  const bool embedded = argc == 3 && (!std::strcmp(argv[2], "--embedded") ||
+      !std::strcmp(argv[2], "--embedded-static"));
   const bool nonuniform = argc == 3 && (!std::strcmp(argv[2], "--nonuniform") ||
-      !std::strcmp(argv[2], "--nonuniform-static"));
+      !std::strcmp(argv[2], "--nonuniform-static") || embedded || mismatch || override_root);
   for (const char *mode : {"--dynamic0", "--dynamic1", "--dynamic-static0", "--dynamic-static1",
       "--dynamic-unused", "--dynamic-static-unused"})
     dynamic |= argc == 3 && !std::strcmp(argv[2], mode);
@@ -66,9 +70,10 @@ int main(int argc, char **argv) {
     serialized = D3D12SerializeVersionedRootSignature(&versioned, &blob.p, nullptr);
   } else serialized = D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &blob.p, nullptr);
   if (FAILED(serialized) ||
-      FAILED(device.p->CreateRootSignature(0, blob.p->GetBufferPointer(), blob.p->GetBufferSize(), IID_PPV_ARGS(&root.p)))) return 1;
+      FAILED(device.p->CreateRootSignature(0, embedded ? shader.data() : blob.p->GetBufferPointer(),
+          embedded ? shader.size() : blob.p->GetBufferSize(), IID_PPV_ARGS(&root.p)))) return 1;
   D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
-  pd.pRootSignature = root.p; pd.CS = {shader.data(), shader.size()};
+  pd.pRootSignature = embedded || mismatch ? nullptr : root.p; pd.CS = {shader.data(), shader.size()};
   if (FAILED(device.p->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso.p)))) return 1;
   D3D12_RESOURCE_DESC bd = {};
   bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = 256;
@@ -128,7 +133,13 @@ int main(int argc, char **argv) {
   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
   list.p->ResourceBarrier(1, &barrier);
   list.p->CopyBufferRegion(readback.p, 0, output.p, 0, 256);
-  if (FAILED(list.p->Close()) || FAILED(device.p->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.p)))) return 1;
+  const HRESULT closed = list.p->Close();
+  if (mismatch) {
+    if (SUCCEEDED(closed)) return 1;
+    std::cout << "embedded/application root mismatch rejected at recording\n";
+    return 0;
+  }
+  if (FAILED(closed) || FAILED(device.p->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.p)))) return 1;
   ID3D12CommandList *commands[] = {list.p}; queue.p->ExecuteCommandLists(1, commands);
   if (FAILED(queue.p->Signal(fence.p, 1))) return 1;
   HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);

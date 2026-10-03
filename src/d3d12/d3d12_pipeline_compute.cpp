@@ -23,6 +23,7 @@
 #include "d3d12_shader_converter.hpp"
 #include "d3d12_typed_origin_pipeline.hpp"
 #include "d3d12_minmax_pipeline.hpp"
+#include "DXBCParser/DXBCUtils.h"
 #include "log/log.hpp"
 #include "airconv_public.h"
 #include "util_env.hpp"
@@ -31,6 +32,7 @@
 #include <utility>
 #include <mutex>
 #include <memory>
+#include <cstring>
 
 namespace dxmt {
 
@@ -40,6 +42,7 @@ class MTLD3D12ComputePipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Compute
   MTL_SHADER_REFLECTION ref_cs = {};
   std::vector<uint8_t> original_cs_;
   Com<MTLD3D12RootSignature> application_root_;
+  bool embedded_application_root_ = false;
   std::mutex origin_mutex_;
   std::unique_ptr<D3D12TypedOriginComputeVariant> origin_variant_;
   std::wstring origin_dxc_directory_;
@@ -146,6 +149,15 @@ public:
         original_cs_.assign(bytes, bytes + pDesc->CS.BytecodeLength);
         if (pDesc->pRootSignature)
           application_root_ = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+        else if (root_signature && root_signature_size) {
+          ID3D12RootSignature *embedded = nullptr;
+          const HRESULT root_hr = device_->CreateRootSignature(0, pDesc->CS.pShaderBytecode, pDesc->CS.BytecodeLength,
+              __uuidof(ID3D12RootSignature), reinterpret_cast<void **>(&embedded));
+          if (FAILED(root_hr)) return root_hr;
+          application_root_ = static_cast<MTLD3D12RootSignature *>(embedded);
+          embedded->Release();
+          embedded_application_root_ = true;
+        }
       } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
 
       threadgroup_size = {
@@ -245,6 +257,15 @@ public:
       HRESULT hr = PrepareD3D12TypedOriginShader(
           {original_cs_.data(), original_cs_.size()}, dxc_directory, shader, diagnostics);
       if (FAILED(hr)) { ERR("Typed-origin shader preparation failed HRESULT=", hr, ": ", diagnostics); return hr; }
+      if (embedded_application_root_ && !shader.application_root_signature.empty()) {
+        const void *root_bytes = nullptr;
+        application_root_->GetBlob(&root_bytes);
+        UINT root_size = 0;
+        const HRESULT root_hr = microsoft::DXBCGetRootSignature(root_bytes, &root_bytes, &root_size);
+        if (FAILED(root_hr)) return root_hr;
+        if (root_size != shader.application_root_signature.size() ||
+            std::memcmp(root_bytes, shader.application_root_signature.data(), root_size)) return E_INVALIDARG;
+      }
       const D3D12TypedOriginRoot *root = nullptr;
       hr = application_root_->GetTypedOriginCompilerRoot(&root);
       if (FAILED(hr)) return hr;

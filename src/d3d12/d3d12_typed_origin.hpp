@@ -17,8 +17,9 @@ HRESULT SelectD3D12TypedOriginCompiler(const D3D12_SHADER_BYTECODE &shader, std:
 // binding before passing this shader to MSC. Application shader/root identity
 // remains separate from this artifact's transformed identity.
 struct D3D12TypedOriginShader {
-  static constexpr uint32_t kLoweringVersion = 5;
+  static constexpr uint32_t kLoweringVersion = 6;
   std::vector<uint8_t> bytecode;
+  std::vector<uint8_t> application_root_signature;
   std::vector<dxmt_msc_typed_origin_binding> bindings;
 };
 

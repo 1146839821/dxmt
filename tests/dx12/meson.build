@@ -720,6 +720,15 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach static_root : [0, 1]
+    custom_target('dx12_typed_origin_embedded_array_' + static_root.to_string(),
+      input: 'typed_origin_nonuniform_array.hlsl',
+      output: 'typed_origin_embedded_array_' + static_root.to_string() + '.cs.cso',
+      command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '-D', 'EMBEDDED_ROOT=1',
+        '-D', 'STATIC_ROOT=' + static_root.to_string(), '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
   custom_target('dx12_minmax_typed_guard_fixture',
     input: 'minmax_typed_guard.hlsl', output: 'minmax_typed_guard.cs.cso',
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],

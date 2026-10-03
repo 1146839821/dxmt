@@ -8,6 +8,7 @@
 #include "d3d12shader.h"
 #include <cstring>
 #include <memory>
+#include <type_traits>
 
 namespace dxmt {
 namespace {
@@ -79,7 +80,7 @@ HRESULT LoweringResult(int result) {
 // Assembly rebuilds signatures/PSV/resource metadata from IR. Reject parts
 // whose application-visible semantics would otherwise be silently discarded.
 HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<IDxcBlob> &program,
-    uint32_t maximum_minor) {
+    uint32_t maximum_minor, std::vector<uint8_t> *embedded_root = nullptr) {
   HRESULT hr = reflection->Load(blob);
   if (FAILED(hr)) return hr;
   UINT32 count = 0;
@@ -90,6 +91,16 @@ HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<ID
     hr = reflection->GetPartKind(i, &kind);
     if (FAILED(hr)) return hr;
     switch (kind) {
+    case DXC_PART_ROOT_SIGNATURE: {
+      if (!embedded_root || !embedded_root->empty()) return E_NOTIMPL;
+      IDxcBlob *raw = nullptr;
+      hr = reflection->GetPartContent(i, &raw);
+      OwnedCOM<IDxcBlob> root(raw);
+      if (FAILED(hr) || !root || !root->GetBufferSize()) return FAILED(hr) ? hr : E_INVALIDARG;
+      const auto *bytes = static_cast<const uint8_t *>(root->GetBufferPointer());
+      embedded_root->assign(bytes, bytes + root->GetBufferSize());
+      break;
+    }
     case DXC_PART_DXIL:
       if (program) return E_INVALIDARG;
       {
@@ -246,7 +257,11 @@ static HRESULT PrepareShaderInternal(
   hr = Validate(validator.get(), input.get(), validated_input, diagnostics);
   if (FAILED(hr)) return hr;
   OwnedCOM<IDxcBlob> program;
-  hr = Inspect(reflection.get(), validated_input.get(), program, Operation::MaximumMinor);
+  Prepared candidate;
+  if constexpr (std::is_same_v<Operation, TypedOriginPreparation>)
+    hr = Inspect(reflection.get(), validated_input.get(), program, Operation::MaximumMinor,
+        &candidate.application_root_signature);
+  else hr = Inspect(reflection.get(), validated_input.get(), program, Operation::MaximumMinor);
   if (FAILED(hr)) { diagnostics += "unsupported input container envelope"; return hr; }
   auto *bytes = static_cast<const uint8_t *>(program->GetBufferPointer());
   const size_t length = program->GetBufferSize();
@@ -261,7 +276,6 @@ static HRESULT PrepareShaderInternal(
     diagnostics += std::string(export_name) + " sizing failed: " + std::to_string(result); return LoweringResult(result);
   }
   if (!params.ir_size || params.ir_size > 64 * 1024 * 1024 || params.binding_count > 64) return E_FAIL;
-  Prepared candidate;
   std::vector<char> ir(params.ir_size);
   candidate.bindings.resize(params.binding_count);
   params.ir = uintptr_t(ir.data());
