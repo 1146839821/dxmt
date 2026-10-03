@@ -397,6 +397,7 @@ public:
   WMTSize threadgroup_size;
   // Static reduction roots have no semantically valid ordinary MSC PSO.
   bool requires_minmax_variant = false;
+  std::wstring typed_origin_compiler_directory;
   // Internal preparation only. Encoder selection requires coherent origin
   // descriptors/records and a submission-owned lifetime before dispatch.
   virtual HRESULT GetTypedOriginVariant(

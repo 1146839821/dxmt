@@ -8,6 +8,10 @@
 
 namespace dxmt {
 
+// S_OK selects deployed typed-buffer compute preparation; S_FALSE leaves an
+// ordinary shader or an installation without the compiler on its native path.
+HRESULT SelectD3D12TypedOriginCompiler(const D3D12_SHADER_BYTECODE &shader, std::wstring &directory);
+
 // Private shader preparation, not an enabled binding ABI. The caller must
 // reserve b0/space1 in the compiler root and supply one 16-byte record per
 // binding before passing this shader to MSC. Application shader/root identity

@@ -3550,10 +3550,16 @@ public:
       return false;
 
     const bool use_msc = pso_compute_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
+    if (use_msc && !AllowTypedOrigin && !pso_compute_->typed_origin_compiler_directory.empty()) {
+      FailRecording(__func__, "automatic typed-origin selection requires supported direct/non-updating indirect dispatch");
+      return false;
+    }
     const D3D12TypedOriginComputeVariant *origin_variant = nullptr;
     const D3D12MinMaxComputeVariant *minmax_variant = nullptr;
     const auto minmax_directory = use_msc ? env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY") : "";
-    const auto origin_directory = AllowTypedOrigin && use_msc ? env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY") : "";
+    const auto origin_override = AllowTypedOrigin && use_msc ? env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY") : "";
+    const auto origin_directory = !origin_override.empty() ? str::tows(origin_override.c_str()) :
+        AllowTypedOrigin && use_msc && minmax_directory.empty() ? pso_compute_->typed_origin_compiler_directory : L"";
     if (pso_compute_->requires_minmax_variant && minmax_directory.empty()) {
       FailRecording(__func__, "static reduction PSO requires the qualified MinMax path");
       return false;
@@ -3573,8 +3579,7 @@ public:
       }
     }
     if (!origin_directory.empty()) {
-      const auto directory = str::tows(origin_directory.c_str());
-      const auto hr = pso_compute_->GetTypedOriginVariant(directory.c_str(), &origin_variant);
+      const auto hr = pso_compute_->GetTypedOriginVariant(origin_directory.c_str(), &origin_variant);
       if (FAILED(hr) || !rootsig_compute_ || !descriptor_heap_) {
         FailRecording(__func__, "typed-origin dispatch preparation failed HRESULT=", hr);
         return false;

@@ -5,6 +5,7 @@
 #define CROSS_PLATFORM_UUIDOF(interface, spec) struct interface;
 #endif
 #include "../../tools/dxc/inc/dxcapi.h"
+#include "d3d12shader.h"
 #include <cstring>
 #include <memory>
 
@@ -116,6 +117,73 @@ HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<ID
   return program ? S_OK : E_INVALIDARG;
 }
 } // namespace
+
+static HRESULT SelectTypedOriginCompilerInternal(const D3D12_SHADER_BYTECODE &shader, std::wstring &directory) {
+  directory.clear();
+  if (!shader.pShaderBytecode || !shader.BytecodeLength || shader.BytecodeLength > 32 * 1024 * 1024)
+    return E_INVALIDARG;
+  HMODULE module = nullptr;
+  if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+      reinterpret_cast<LPCWSTR>(&SelectD3D12TypedOriginCompiler), &module)) return E_FAIL;
+  std::vector<wchar_t> path(32768);
+  const DWORD length = GetModuleFileNameW(module, path.data(), path.size());
+  if (!length || length >= path.size()) return E_FAIL;
+  std::wstring candidate(path.data(), length);
+  const auto separator = candidate.find_last_of(L"/\\");
+  if (separator == std::wstring::npos) return E_FAIL;
+  candidate.resize(separator + 1);
+  candidate += L"dxmt-dxc";
+  const auto compiler_path = candidate + L"/dxcompiler.dll";
+  const auto validator_path = candidate + L"/dxil.dll";
+  if (GetFileAttributesW(compiler_path.c_str()) == INVALID_FILE_ATTRIBUTES ||
+      GetFileAttributesW(validator_path.c_str()) == INVALID_FILE_ATTRIBUTES) return S_FALSE;
+  OwnedModule compiler(LoadLibraryExW(compiler_path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH));
+  if (!compiler) return E_FAIL;
+  auto factory = reinterpret_cast<DxcCreateInstanceProc>(GetProcAddress(compiler.get(), "DxcCreateInstance"));
+  if (!factory) return E_FAIL;
+  OwnedCOM<IDxcUtils> utils;
+  OwnedCOM<IDxcContainerReflection> container;
+  HRESULT hr = Create(factory, CLSID_DxcUtils, L"{4605C4CB-2019-492A-ADA4-65F20BB7D67F}", utils);
+  if (SUCCEEDED(hr)) hr = Create(factory, CLSID_DxcContainerReflection,
+      L"{D2C21B26-8350-4BDC-976A-331CE6F4C54C}", container);
+  if (FAILED(hr)) return hr;
+  IDxcBlobEncoding *raw = nullptr;
+  hr = utils->CreateBlob(shader.pShaderBytecode, shader.BytecodeLength, 0, &raw);
+  OwnedCOM<IDxcBlobEncoding> blob(raw);
+  if (FAILED(hr) || !blob) return FAILED(hr) ? hr : E_FAIL;
+  hr = container->Load(blob.get());
+  UINT32 part;
+  if (SUCCEEDED(hr)) hr = container->FindFirstPartKind(DXC_PART_DXIL, &part);
+  IID iid;
+  if (SUCCEEDED(hr)) hr = CLSIDFromString(L"{5A58797D-A72C-478D-8BA2-EFC6B0EFE88E}", &iid);
+  ID3D12ShaderReflection *reflection_raw = nullptr;
+  if (SUCCEEDED(hr)) hr = container->GetPartReflection(part, iid, reinterpret_cast<void **>(&reflection_raw));
+  OwnedCOM<ID3D12ShaderReflection> reflection(reflection_raw);
+  if (FAILED(hr) || !reflection) return FAILED(hr) ? hr : E_FAIL;
+  D3D12_SHADER_DESC desc = {};
+  hr = reflection->GetDesc(&desc);
+  if (FAILED(hr)) return hr;
+  for (UINT i = 0; i < desc.BoundResources; ++i) {
+    D3D12_SHADER_INPUT_BIND_DESC binding = {};
+    hr = reflection->GetResourceBindingDesc(i, &binding);
+    if (FAILED(hr)) return hr;
+    if ((binding.Type == D3D_SIT_TEXTURE || binding.Type == D3D_SIT_UAV_RWTYPED) &&
+        (binding.Dimension == D3D_SRV_DIMENSION_BUFFER || binding.Dimension == D3D_SRV_DIMENSION_BUFFEREX)) {
+      directory = std::move(candidate);
+      return S_OK;
+    }
+  }
+  return S_FALSE;
+}
+
+HRESULT SelectD3D12TypedOriginCompiler(const D3D12_SHADER_BYTECODE &shader, std::wstring &directory) {
+  try {
+    return SelectTypedOriginCompilerInternal(shader, directory);
+  } catch (const std::bad_alloc &) {
+    directory.clear();
+    return E_OUTOFMEMORY;
+  }
+}
 
 struct TypedOriginPreparation {
   static constexpr uint32_t MaximumMinor = 6;

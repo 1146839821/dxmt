@@ -2,6 +2,14 @@
 
 ## Current snapshot (2026-10-03, static DXIL MinMax dispatch checkpoint)
 
+Automatic compute selection follow-up: deploying a `dxmt-dxc` compiler/validator
+folder beside D3D12 now permits reflected typed-buffer shaders to select the
+origin variant without an environment override
+(`D3D12_TYPED_ORIGIN_AUTO_SELECTION.md`). Both builds pass focused typed and
+ordinary compute readbacks. Distribution packaging, graphics, embedded roots,
+root-updating indirect and full qualification remain open; this is not complete
+default feature enablement or a change to the acceptance workload below.
+
 Latest typed-origin follow-up: finite legacy dynamic arrays now retain and admit
 nonuniform handle flags. Four fresh divergent two-lane GPU readbacks and four
 uniform regressions pass across both builds (`D3D12_TYPED_ORIGIN_NONUNIFORM.md`).

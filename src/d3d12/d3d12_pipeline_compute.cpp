@@ -87,6 +87,11 @@ public:
       if (!device_->GetMSCCapabilities().CoreShaderPathUsable())
         return E_FAIL;
       msc_uses_texture_load = classification.uses_texture_load;
+      if (env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY").empty() &&
+          env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY").empty()) {
+        const HRESULT selection = SelectD3D12TypedOriginCompiler(pDesc->CS, typed_origin_compiler_directory);
+        if (FAILED(selection)) return selection;
+      }
       D3D12ConvertedShader converted;
       const void *root_signature = nullptr;
       size_t root_signature_size = 0;
