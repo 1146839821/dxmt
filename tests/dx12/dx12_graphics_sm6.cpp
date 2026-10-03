@@ -845,7 +845,10 @@ int main(int argc, char **argv) {
   if (!event ||
       !CheckHR("SetEventOnCompletion", fence->SetEventOnCompletion(1, event)))
     goto cleanup;
-  WaitForSingleObject(event, INFINITE);
+  if (WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0) {
+    std::cerr << "queue event wait failed: " << GetLastError() << "\n";
+    goto cleanup;
+  }
 
   if (!CheckHR("MapReadback",
                readback->Map(0, nullptr,
