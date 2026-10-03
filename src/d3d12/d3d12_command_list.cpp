@@ -3536,7 +3536,7 @@ public:
   bool
   PreDispatch(bool SkipResourceBinding = false, bool AllowTypedOrigin = false,
       const D3D12TypedOriginComputeVariant **selected_variant = nullptr,
-      const D3D12MinMaxComputeVariant **selected_minmax = nullptr, bool updates_roots = false) {
+      const D3D12MinMaxComputeVariant **selected_minmax = nullptr) {
     if (selected_variant) *selected_variant = nullptr;
     if (selected_minmax) *selected_minmax = nullptr;
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Compute) {
@@ -3578,10 +3578,8 @@ public:
       return false;
     }
     if (!minmax_directory.empty()) {
-      // Root-updating indirect commands need per-command state. Do not route
-      // them through a recording-time argument template or silently fall back.
-      if (SkipResourceBinding || updates_roots || !origin_directory.empty()) {
-        FailRecording(__func__, "MinMax root-updating indirect or combined private variants are unsupported");
+      if (SkipResourceBinding || !origin_directory.empty()) {
+        FailRecording(__func__, "MinMax skipped binding or combined private variants are unsupported");
         return false;
       }
       const auto directory = str::tows(minmax_directory.c_str());
@@ -5651,11 +5649,12 @@ public:
   template <typename Data>
   bool
   EncodeMSCIndirectArguments(MTLD3D12CommandSignature *signature, Data *data,
-      const D3D12TypedOriginComputeVariant *variant = nullptr, const wmtcmd_compute_setbuffer *resolver_binding = nullptr) {
+      const D3D12TypedOriginComputeVariant *variant = nullptr, const wmtcmd_compute_setbuffer *resolver_binding = nullptr,
+      const D3D12MinMaxComputeVariant *minmax_variant = nullptr) {
     constexpr bool compute = std::is_same_v<Data, IndirectComputeCommandData>;
     auto root = compute ? rootsig_compute_.ptr() : rootsig_graphics_.ptr();
     auto staging = compute ? rootarg_compute_staging_ : rootarg_graphics_staging_;
-    const auto *compiler_root = variant ? &variant->root : nullptr;
+    const auto *compiler_root = variant ? &variant->root : minmax_variant ? &minmax_variant->root.layout : nullptr;
     const auto template_size = compiler_root ? compiler_root->argument_buffer_size : root->MSCArgumentBufferSize;
     if (template_size > UINT64_MAX - 15) { FailRecording(__func__, "indirect TLAB size overflow"); return false; }
     const auto stride = (template_size + 15) & ~uint64_t(15);
@@ -5718,6 +5717,15 @@ public:
         auto &dispatches = static_cast<ComputeEncoderData *>(allocator_->encoder_current)->typed_origin_dispatches;
         if (dispatches.empty() || dispatches.back()->variant != variant) {
           FailRecording(__func__, "missing typed-origin indirect marker"); return false;
+        }
+        dispatches.back()->indirect_data = data;
+        dispatches.back()->indirect_data_binding = resolver_binding;
+        defer_template = true;
+      }
+      if (minmax_variant) {
+        auto &dispatches = static_cast<ComputeEncoderData *>(allocator_->encoder_current)->minmax_dispatches;
+        if (dispatches.empty() || dispatches.back()->variant != minmax_variant) {
+          FailRecording(__func__, "missing MinMax indirect marker"); return false;
         }
         dispatches.back()->indirect_data = data;
         dispatches.back()->indirect_data_binding = resolver_binding;
@@ -5876,7 +5884,7 @@ public:
       const bool msc_updates = sig->UpdateRootArguments &&
           pso_compute_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
       if (!PreDispatch(sig->UpdateRootArguments && !msc_updates, true, &origin_variant,
-              &minmax_variant, sig->UpdateRootArguments))
+              &minmax_variant))
         return;
       for (const auto &update : sig->StateUpdates)
         if (update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW ||
@@ -5901,7 +5909,7 @@ public:
       cmd->argument_buffer = ArgBufferAddress;
 
       if (msc_updates) {
-        if (!EncodeMSCIndirectArguments(sig, cmd, origin_variant, resolver_binding)) return;
+        if (!EncodeMSCIndirectArguments(sig, cmd, origin_variant, resolver_binding, minmax_variant)) return;
       } else if (sig->UpdateRootArguments) {
         cmd->rootsig_qwords = EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_, MaxCommandCount);
         cmd->rootsig_qwords += allocator_->gpu_heap_buffer_address_;

@@ -1,4 +1,5 @@
 #include "d3d12_minmax_dispatch.hpp"
+#include "d3d12_command_allocator.hpp"
 #include <cstdio>
 #include <memory>
 #include <cwchar>
@@ -18,7 +19,9 @@ static bool Check(HRESULT hr, const char *name) {
 int wmain(int argc, wchar_t **argv) {
   if ((argc != 4 && argc != 5) || (std::wcscmp(argv[2], L"1") && std::wcscmp(argv[2], L"2"))) return 1;
   const bool typed_rejection = argc == 5 && std::wcscmp(argv[4], L"--typed-rejection") == 0;
-  if (argc == 5 && !typed_rejection) return 1;
+  const bool root_updates = argc == 5 && std::wcscmp(argv[4], L"--root-updates") == 0;
+  if (argc == 5 && !typed_rejection && !root_updates) return 1;
+  if (root_updates && argv[2][0] != L'2') return 1;
   const unsigned pairs = argv[2][0] - L'0';
   if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", argv[3])) return 1;
   SetEnvironmentVariableW(L"DXMT_ENABLE_AIR_MINMAX", nullptr);
@@ -113,6 +116,7 @@ int wmain(int argc, wchar_t **argv) {
   if (!Check(upload_list->Close(), "upload close") || !complete(upload_list.get(), 1)) return 1;
   UINT64 serial = 1;
   for (unsigned mode = 0; mode < 11; ++mode) {
+    if (root_updates && mode != 0) continue;
     if (typed_rejection && mode != 0 && mode != 4) continue;
     const bool legacy = mode == 4 || mode == 10, use_static = mode >= 5;
     const bool texture_live = legacy || (!use_static && (mode & 1));
@@ -124,9 +128,17 @@ int wmain(int argc, wchar_t **argv) {
         {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND},
         {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 2, 0, 0,
             (mode & 2) ? D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE : D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 1}};
-    D3D12_ROOT_PARAMETER1 parameters[2] = {};
-    for (auto &p : parameters) p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    D3D12_ROOT_PARAMETER1 parameters[6] = {};
+    parameters[0].ParameterType = parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[0].DescriptorTable = {2, ranges}; parameters[1].DescriptorTable = {1, ranges + 2};
+    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[2].Constants = {1, 0, 2};
+    parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    parameters[3].Descriptor = {2, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
+    parameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    parameters[4].Descriptor = {1, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
+    parameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    parameters[5].Descriptor = {1, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
     D3D12_STATIC_SAMPLER_DESC statics[2] = {};
     for (unsigned i = 0; i < 2; ++i) {
       statics[i].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -145,6 +157,7 @@ int wmain(int argc, wchar_t **argv) {
     }
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC rs = {}; rs.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     rs.Desc_1_1 = {use_static ? 1u : 2u, parameters, use_static ? 2u : 0u, use_static ? statics : nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    if (root_updates) rs.Desc_1_1.NumParameters = 6;
     D3D12_DESCRIPTOR_RANGE old_ranges[3] = {};
     D3D12_ROOT_PARAMETER old_parameters[2] = {};
     if (legacy) {
@@ -236,6 +249,98 @@ int wmain(int argc, wchar_t **argv) {
       desc.Filter = second; device->CreateSampler(&desc, scpu);
     };
     set_samplers(D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR);
+    if (root_updates) {
+      auto desc = buffer_desc; desc.Width = 768;
+      ID3D12Resource *raw_inputs = nullptr, *raw_args = nullptr;
+      if (!Check(device->CreateCommittedResource(&upload_properties, D3D12_HEAP_FLAG_NONE, &desc,
+          D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&raw_inputs)), "root inputs")) return 1;
+      OwnedCOM<ID3D12Resource> inputs(raw_inputs);
+      if (!Check(inputs->Map(0, nullptr, &mapped), "root inputs map")) return 1;
+      std::memset(mapped, 0, 768);
+      const UINT input_values[] = {13, 17, 19, 23};
+      const unsigned input_offsets[] = {0, 256, 512, 516};
+      for (unsigned i = 0; i < 4; ++i)
+        std::memcpy(static_cast<uint8_t *>(mapped) + input_offsets[i], input_values + i, 4);
+      inputs->Unmap(0, nullptr);
+      desc.Width = 80;
+      if (!Check(device->CreateCommittedResource(&upload_properties, D3D12_HEAP_FLAG_NONE, &desc,
+          D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&raw_args)), "root arguments")) return 1;
+      OwnedCOM<ID3D12Resource> args(raw_args);
+      if (!Check(args->Map(0, nullptr, &mapped), "root arguments map")) return 1;
+      const UINT groups[] = {1, 1, 1};
+      for (unsigned i = 0; i < 2; ++i) {
+        auto *bytes = static_cast<uint8_t *>(mapped) + i * 40;
+        const UINT addend = i ? 11 : 7;
+        const UINT64 addresses[] = {inputs->GetGPUVirtualAddress() + i * 256,
+            inputs->GetGPUVirtualAddress() + 512 + i * 4, output->GetGPUVirtualAddress() + i * 16};
+        std::memcpy(bytes, &addend, 4);
+        std::memcpy(bytes + 4, addresses, sizeof(addresses));
+        std::memcpy(bytes + 28, groups, sizeof(groups));
+      }
+      args->Unmap(0, nullptr);
+      D3D12_INDIRECT_ARGUMENT_DESC arguments[5] = {};
+      arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT; arguments[0].Constant = {2, 0, 1};
+      arguments[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW; arguments[1].ConstantBufferView.RootParameterIndex = 3;
+      arguments[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW; arguments[2].ShaderResourceView.RootParameterIndex = 4;
+      arguments[3].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW; arguments[3].UnorderedAccessView.RootParameterIndex = 5;
+      arguments[4].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+      D3D12_COMMAND_SIGNATURE_DESC signature_desc = {40, 5, arguments, 0};
+      ID3D12CommandSignature *raw_signature = nullptr;
+      if (!Check(device->CreateCommandSignature(&signature_desc, root.get(), IID_PPV_ARGS(&raw_signature)), "root signature command")) return 1;
+      OwnedCOM<ID3D12CommandSignature> signature(raw_signature);
+      raw_allocator = nullptr; raw_list = nullptr;
+      if (!Check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&raw_allocator)), "root allocator")) return 1;
+      OwnedCOM<ID3D12CommandAllocator> allocator(raw_allocator);
+      if (!Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.get(), pso.get(), IID_PPV_ARGS(&raw_list)), "root list")) return 1;
+      OwnedCOM<ID3D12GraphicsCommandList> list(raw_list);
+      ID3D12DescriptorHeap *heaps[] = {resources.get(), samplers.get()};
+      list->SetDescriptorHeaps(2, heaps); list->SetComputeRootSignature(root.get());
+      list->SetComputeRootDescriptorTable(0, resources->GetGPUDescriptorHandleForHeapStart());
+      list->SetComputeRootDescriptorTable(1, samplers->GetGPUDescriptorHandleForHeapStart());
+      const UINT constants[] = {999, 31}; list->SetComputeRoot32BitConstants(2, 2, constants, 0);
+      list->SetComputeRootConstantBufferView(3, inputs->GetGPUVirtualAddress());
+      list->SetComputeRootShaderResourceView(4, inputs->GetGPUVirtualAddress() + 512);
+      list->SetComputeRootUnorderedAccessView(5, output->GetGPUVirtualAddress() + 32);
+      auto reset = barriers[1]; reset.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      reset.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+      list->ResourceBarrier(1, &reset);
+      for (unsigned i = 0; i < 3; ++i) list->CopyBufferRegion(output.get(), i * 16, upload.get(), total, 16);
+      std::swap(reset.Transition.StateBefore, reset.Transition.StateAfter); list->ResourceBarrier(1, &reset);
+      list->ExecuteIndirect(signature.get(), 2, args.get(), 0, nullptr, 0);
+      reset.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      reset.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE; list->ResourceBarrier(1, &reset);
+      list->CopyBufferRegion(readback.get(), 0, output.get(), 0, 48);
+      std::swap(reset.Transition.StateBefore, reset.Transition.StateAfter); list->ResourceBarrier(1, &reset);
+      if (!Check(list->Close(), "root indirect close")) return 1;
+      const dxmt::D3D12MinMaxDispatch *recorded = nullptr;
+      auto *native = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list.get());
+      for (auto *encoder = native->entry; encoder; encoder = encoder->next)
+        if (encoder->type == dxmt::EncoderType::Compute) {
+          auto *compute = static_cast<dxmt::ComputeEncoderData *>(encoder);
+          if (recorded || compute->minmax_dispatches.size() != 1 || !compute->pending_descriptor_uses.empty() ||
+              !compute->pending_sampler_uses.empty()) return 1;
+          recorded = compute->minmax_dispatches[0].get();
+        }
+      if (!recorded || !recorded->indirect_data || !recorded->indirect_data_binding) return 1;
+      const auto payload = *recorded->indirect_data;
+      const auto argument_template = recorded->argument_template;
+      for (unsigned execution = 0; execution < 2; ++execution) {
+        if (!complete(list.get(), ++serial) || !Check(readback->Map(0, nullptr, &mapped), "root readback")) return 1;
+        UINT values[12]; std::memcpy(values, mapped, sizeof(values)); readback->Unmap(0, nullptr);
+        const UINT expected[] = {86, 310, sentinel[0], sentinel[0], 98, 322,
+            sentinel[0], sentinel[0], sentinel[0], sentinel[0], sentinel[0], sentinel[0]};
+        for (unsigned i = 0; i < 12; ++i)
+          if (values[i] != expected[i]) {
+            std::printf("root indirect mismatch execution=%u index=%u value=%u expected=%u\n", execution, i, values[i], expected[i]); return 1;
+          }
+        if (std::memcmp(&payload, recorded->indirect_data, sizeof(payload)) ||
+            argument_template != recorded->argument_template) {
+          std::puts("submission modified recorded MinMax payload/template"); return 1;
+        }
+      }
+      std::puts("MINMAX_INDIRECT_ROOTS two-command constants/CBV/SRV/UAV GPU readback PASS (two submissions)");
+      return 0;
+    }
     raw_allocator = nullptr; raw_list = nullptr;
     if (!Check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&raw_allocator)), "allocator")) return 1;
     OwnedCOM<ID3D12CommandAllocator> allocator(raw_allocator);

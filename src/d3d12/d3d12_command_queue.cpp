@@ -65,7 +65,8 @@ static bool ReplayPrivateCompute(
     std::unordered_map<const void *, const D3D12MinMaxDispatch *> minmax_markers;
     for (const auto &dispatch : data->minmax_dispatches) minmax_markers.emplace(dispatch->marker, dispatch.get());
     std::vector<PrivateComputeReplayCommand> replay;
-    std::unordered_map<const void *, std::shared_ptr<D3D12TypedOriginSubmissionBinding>> indirect_bindings;
+    struct IndirectBinding { obj_handle_t buffer; uint64_t offset; };
+    std::unordered_map<const void *, IndirectBinding> indirect_bindings;
     const auto append_binding = [&](const auto &binding, const auto &variant) {
       for (const auto &use : binding.resources) encoder.useResource(use.resource, use.usage);
       PrivateComputeReplayCommand set_pso = {};
@@ -87,7 +88,8 @@ static bool ReplayPrivateCompute(
         if (FAILED(hr)) { ERR("Typed-origin submission materialization failed HRESULT=", hr); return false; }
         bindings.push_back(binding);
         if (marker->second->indirect_data_binding)
-          indirect_bindings.emplace(marker->second->indirect_data_binding, binding);
+          indirect_bindings.emplace(marker->second->indirect_data_binding,
+              IndirectBinding{binding->buffer.handle, binding->indirect_data_offset});
         append_binding(*binding, *marker->second->variant);
         continue;
       }
@@ -96,6 +98,9 @@ static bool ReplayPrivateCompute(
         const auto hr = MaterializeD3D12MinMaxDispatch(device, *marker->second, binding);
         if (FAILED(hr)) { ERR("MinMax submission materialization failed HRESULT=", hr); return false; }
         minmax_bindings.push_back(binding);
+        if (marker->second->indirect_data_binding)
+          indirect_bindings.emplace(marker->second->indirect_data_binding,
+              IndirectBinding{binding->buffer.handle, binding->indirect_data_offset});
         append_binding(*binding, *marker->second->variant);
         continue;
       }
@@ -121,8 +126,8 @@ static bool ReplayPrivateCompute(
       std::memcpy(&command, node, size);
       if (auto indirect = indirect_bindings.find(node); indirect != indirect_bindings.end()) {
         if (node->type != WMTComputeCommandSetBuffer) return false;
-        command.buffer.buffer = indirect->second->buffer.handle;
-        command.buffer.offset = indirect->second->indirect_data_offset;
+        command.buffer.buffer = indirect->second.buffer;
+        command.buffer.offset = indirect->second.offset;
       }
       replay.push_back(command);
     }

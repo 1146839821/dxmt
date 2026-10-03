@@ -5,6 +5,7 @@
 #include "d3d12_minmax_pipeline.hpp"
 
 namespace dxmt {
+struct IndirectComputeCommandData;
 
 struct D3D12MinMaxDispatch {
   struct Slot {
@@ -30,6 +31,9 @@ struct D3D12MinMaxDispatch {
   std::vector<Table> tables;
   std::vector<D3D12_SAMPLER_DESC> static_samplers;
   std::vector<dxmt_msc_descriptor_entry> static_entries;
+  // Borrowed immutable allocator payload/node; replay clones into submission storage.
+  const IndirectComputeCommandData *indirect_data = nullptr;
+  const wmtcmd_compute_setbuffer *indirect_data_binding = nullptr;
 };
 
 struct D3D12MinMaxSubmissionBinding {
@@ -38,6 +42,7 @@ struct D3D12MinMaxSubmissionBinding {
     WMTResourceUsage usage;
   };
   WMT::Reference<WMT::Buffer> buffer;
+  uint64_t indirect_data_offset = 0;
   Com<MTLD3D12RootSignature> application_root;
   std::vector<ResourceUse> resources;
   std::vector<ShaderVisibleDescriptorSnapshot> snapshots;

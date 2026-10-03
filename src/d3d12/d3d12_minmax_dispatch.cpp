@@ -1,4 +1,5 @@
 #include "d3d12_minmax_dispatch.hpp"
+#include "d3d12_command_allocator.hpp"
 #include <cstring>
 #include <new>
 #include <unordered_map>
@@ -197,6 +198,20 @@ HRESULT MaterializeD3D12MinMaxDispatch(MTLD3D12Device *device, const D3D12MinMax
     for (const auto &table : dispatch.tables) {
       offsets.push_back(total); total = align(total + table.slots.size() * sizeof(dxmt_msc_descriptor_entry));
     }
+    uint64_t indirect_tlabs_offset = 0;
+    if (dispatch.indirect_data) {
+      const auto &payload = *dispatch.indirect_data;
+      if (!dispatch.indirect_data_binding || !payload.max_count || !root.argument_buffer_size ||
+          payload.msc_template_size != root.argument_buffer_size ||
+          payload.msc_tlab_stride < root.argument_buffer_size || (payload.msc_tlab_stride & 15))
+        return E_INVALIDARG;
+      if (total > UINT64_MAX - sizeof(payload) - 255) return E_OUTOFMEMORY;
+      candidate->indirect_data_offset = total;
+      total = align(total + sizeof(payload));
+      indirect_tlabs_offset = total;
+      if (payload.max_count > (UINT64_MAX - total) / payload.msc_tlab_stride) return E_OUTOFMEMORY;
+      total += payload.max_count * payload.msc_tlab_stride;
+    }
     if (!total || total > SIZE_MAX) return E_OUTOFMEMORY;
     WMTBufferInfo info = {}; info.length = total; info.options = WMTResourceStorageModeShared;
     candidate->buffer = device->GetMTLDevice().newBuffer(info);
@@ -261,7 +276,14 @@ HRESULT MaterializeD3D12MinMaxDispatch(MTLD3D12Device *device, const D3D12MinMax
         candidate->snapshots.push_back(snapshot);
       }
     }
-    retain(candidate->buffer.handle, WMTResourceUsageRead);
+    if (dispatch.indirect_data) {
+      auto payload = *dispatch.indirect_data;
+      payload.msc_template = info.gpu_address;
+      payload.msc_tlab = info.gpu_address + indirect_tlabs_offset;
+      std::memcpy(memory + candidate->indirect_data_offset, &payload, sizeof(payload));
+    }
+    retain(candidate->buffer.handle, dispatch.indirect_data ?
+        static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite) : WMTResourceUsageRead);
     DEBUG("MinMax submission buffer=", candidate->buffer.handle, " bytes=", total,
         " pairs=", pairs, " unique_live_resources=", resource_indices.size(), " unique_live_samplers=", sampler_indices.size());
     binding = std::move(candidate);
