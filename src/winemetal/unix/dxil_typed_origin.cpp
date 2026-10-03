@@ -190,8 +190,8 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
     auto *nonuniform = dyn_cast<ConstantInt>(call->getArgOperand(4));
     const auto [first, count] = match->second;
     const auto base_register = records[first].shader_register;
-    if (!nonuniform || !nonuniform->isZero() || !call->getArgOperand(3)->getType()->isIntegerTy(32))
-      return reject("nonuniform or invalid typed handle");
+    if (!nonuniform || !call->getArgOperand(3)->getType()->isIntegerTy(32))
+      return reject("invalid typed handle index or nonuniform flag");
     if (Word(call->getArgOperand(3), reg)) {
       if (reg < base_register || uint64_t(reg) >= uint64_t(base_register) + count)
         return reject("out-of-range typed handle");

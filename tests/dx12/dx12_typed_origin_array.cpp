@@ -13,9 +13,12 @@ template <typename T> struct Owned {
 
 int main(int argc, char **argv) {
   bool dynamic = false;
+  const bool nonuniform = argc == 3 && (!std::strcmp(argv[2], "--nonuniform") ||
+      !std::strcmp(argv[2], "--nonuniform-static"));
   for (const char *mode : {"--dynamic0", "--dynamic1", "--dynamic-static0", "--dynamic-static1",
       "--dynamic-unused", "--dynamic-static-unused"})
     dynamic |= argc == 3 && !std::strcmp(argv[2], mode);
+  dynamic |= nonuniform;
   const bool partial = dynamic && std::strstr(argv[2], "unused");
   const UINT selected = dynamic && !partial && argv[2][std::strlen(argv[2]) - 1] == '0' ? 0 : 1;
   const bool static_ranges = argc == 3 && (!std::strcmp(argv[2], "--static") ||
@@ -137,6 +140,7 @@ int main(int argc, char **argv) {
   bool ok = true;
   for (unsigned i = 0; i < 64; ++i) {
     const UINT expected = i == 0 ? 11 : i == 1 ? 41 : i == 2 ? 99 :
+        nonuniform && i == 4 ? 28 :
         i == (selected ? 3u : 4u) ? (selected ? 58u : 28u) : 0xcafe1234;
     if (words[i] != expected) { std::cerr << "word " << i << " actual=" << words[i] << " expected=" << expected << '\n'; ok = false; }
   }

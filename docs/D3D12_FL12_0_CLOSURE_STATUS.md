@@ -2,6 +2,14 @@
 
 ## Current snapshot (2026-10-03, static DXIL MinMax dispatch checkpoint)
 
+Latest typed-origin follow-up: finite legacy dynamic arrays now retain and admit
+nonuniform handle flags. Four fresh divergent two-lane GPU readbacks and four
+uniform regressions pass across both builds (`D3D12_TYPED_ORIGIN_NONUNIFORM.md`).
+This narrows a binding-provenance gap; it does not change the four production
+workstreams, 1,584 existing typed case executions or seven missing complete GPU
+categories below. Modern typed handles, default qualification and complete
+format/lifetime acceptance remain open.
+
 This section supersedes the historical checkpoints below. The implementation
 is not yet in a tests-only closure phase. No percentage or completion date can
 be justified while required semantics are still missing.
