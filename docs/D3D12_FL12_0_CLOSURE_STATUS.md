@@ -473,3 +473,11 @@ wiring gap, not full pre-raster/MinMax qualification: native mesh/SO, emulated
 indirect, cube/aniso/feedback and broader resource/view/lifetime semantics remain
 open. The four production workstreams, 1,584 existing typed executions and seven
 mandatory complete GPU categories remain unchanged. No capability/FL promotion.
+
+AIR float Cube/CubeArray feedback-free, zero-offset SampleLevel reduction now
+uses cube-specific face/seam/corner footprints and existing root/sampler/view
+bindings (`D3D12_MINMAX_CUBE.md`). Both builds pass focused signed native helper
+footprints and real D3D12 interior/edge/corner/array/mip/point-tie readbacks.
+Cube gradients/implicit/feedback and DXIL cube lowering remain closed; broader
+view/clamp/lifetime and full resource/filter qualification remain open. This is
+an explicit-LOD production increment, not full Cube/MinMax or FL qualification.

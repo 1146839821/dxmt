@@ -89,7 +89,7 @@ static bool CheckSamplerStorage(WMT::Device device, dxmt::MTLD3D12SamplerDescrip
 
 static bool CompileDXBC(std::vector<char> &shader, bool unsupported_reduction = false, bool gradient = false,
                         unsigned gradient_case = 0, bool line = false, bool line_array = false, bool clamp_probe = false,
-                        float instruction_clamp = -1) {
+                        float instruction_clamp = -1, bool cube = false, bool cube_array = false, unsigned cube_case = 0) {
   HMODULE compiler = LoadLibraryA(D3DCOMPILER_DLL_A);
   if (!compiler)
     return false;
@@ -130,7 +130,13 @@ static bool CompileDXBC(std::vector<char> &shader, bool unsupported_reduction = 
       "[numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){o[0]=(uint)(t." +
       (gradient ? "SampleGrad" : "SampleLevel") + "(s," + (line_array ? "float2(0.5,1)" : "0.5") +
       (gradient ? (gradient_case ? ",0.23,0.0" : ",1.0,0.0") : ",0.0") + ").x*255+0.5);}";
-  const char *selected_source = instruction_clamp >= 0 ? instruction_source.c_str() : clamp_probe ? clamp_source :
+  const char *cube_direction[] = {"1,0,0", "1,0,1", "1,1,1", "1,0,0"};
+  const std::string cube_source = std::string(cube_array ? "TextureCubeArray<float4>" : "TextureCube<float4>") +
+      " t:register(t0); SamplerState s:register(s0); RWBuffer<uint> o:register(u0);"
+      "[numthreads(1,1,1)] void main(){o[0]=(uint)(t." + std::string(gradient ? "SampleGrad" : "SampleLevel") + "(s," +
+      (cube_array ? "float4(" : "float3(") + cube_direction[cube_case] + (cube_array ? ",1)" : ")") +
+      (gradient ? ",float3(0.25,0,0),float3(0,0.25,0)" : cube_case == 3 ? ",0.5" : ",0") + ").x*255+0.5);}";
+  const char *selected_source = cube ? cube_source.c_str() : instruction_clamp >= 0 ? instruction_source.c_str() : clamp_probe ? clamp_source :
       unsupported_reduction ? unsupported_source : line ? line_source.c_str() :
       gradient ? gradient_source.c_str() : source;
   HRESULT hr = compile ? compile(selected_source, std::strlen(selected_source),
@@ -253,6 +259,22 @@ main(int argc, char **argv) {
       strcmp(argv[2], "--maximum-1d-array-grad") == 0 || strcmp(argv[2], "--minimum-1d-grad-lod") == 0 ||
       strcmp(argv[2], "--minimum-1d-grad-axis") == 0);
   const bool line_array = line && strstr(argv[2], "array");
+  const bool cube = argc >= 3 &&
+      (strcmp(argv[2], "--minimum-cube") == 0 || strcmp(argv[2], "--maximum-cube") == 0 ||
+       strcmp(argv[2], "--minimum-cube-edge") == 0 || strcmp(argv[2], "--maximum-cube-edge") == 0 ||
+       strcmp(argv[2], "--minimum-cube-corner") == 0 || strcmp(argv[2], "--maximum-cube-corner") == 0 ||
+       strcmp(argv[2], "--minimum-cube-mip") == 0 || strcmp(argv[2], "--maximum-cube-mip") == 0 ||
+       strcmp(argv[2], "--minimum-cube-array") == 0 || strcmp(argv[2], "--maximum-cube-array") == 0 ||
+       strcmp(argv[2], "--minimum-cube-array-edge") == 0 || strcmp(argv[2], "--maximum-cube-array-edge") == 0 ||
+       strcmp(argv[2], "--minimum-cube-array-corner") == 0 || strcmp(argv[2], "--maximum-cube-array-corner") == 0 ||
+       strcmp(argv[2], "--minimum-cube-edge-point") == 0 || strcmp(argv[2], "--maximum-cube-edge-point") == 0 ||
+       strcmp(argv[2], "--minimum-cube-array-edge-point") == 0 || strcmp(argv[2], "--maximum-cube-array-edge-point") == 0 ||
+       strcmp(argv[2], "--static-minimum-cube") == 0 || strcmp(argv[2], "--static-maximum-cube") == 0 ||
+       strcmp(argv[2], "--static-minimum-cube-grad") == 0);
+  const bool cube_array = cube && strstr(argv[2], "array");
+  const bool cube_point = cube && strstr(argv[2], "point");
+  const unsigned cube_case = !cube ? 0 : strstr(argv[2], "edge") ? 1 : strstr(argv[2], "corner") ? 2 :
+      strstr(argv[2], "mip") ? 3 : 0;
   const bool volume = argc == 3 && (strcmp(argv[2], "--minimum-3d") == 0 ||
       strcmp(argv[2], "--maximum-3d") == 0 || strcmp(argv[2], "--minimum-3d-grad") == 0 ||
       strcmp(argv[2], "--minimum-3d-wrap") == 0 || strcmp(argv[2], "--minimum-3d-clamp") == 0);
@@ -279,7 +301,7 @@ main(int argc, char **argv) {
       strcmp(argv[2], "--minimum-grad-zero") == 0 ? 4 : 1;
   const bool gradient_probe = argc >= 3 && (strcmp(argv[2], "--minimum-grad") == 0 ||
       strcmp(argv[2], "--maximum-grad") == 0 || strcmp(argv[2], "--static-minimum-grad") == 0 ||
-      strcmp(argv[2], "--static-maximum-grad") == 0 || grad_lod || line_grad);
+      strcmp(argv[2], "--static-maximum-grad") == 0 || grad_lod || line_grad || (cube && strstr(argv[2], "grad")));
   const bool descriptor_array = argc == 3 && (strcmp(argv[2], "--minimum-descriptor-array") == 0 ||
       strcmp(argv[2], "--maximum-descriptor-array") == 0);
   const bool minimum = argc >= 3 &&
@@ -288,12 +310,12 @@ main(int argc, char **argv) {
        strcmp(argv[2], "--minimum-static-observation") == 0 ||
        strcmp(argv[2], "--minimum-live-observation") == 0 || strcmp(argv[2], "--minimum-grad") == 0 ||
        strcmp(argv[2], "--static-minimum-grad") == 0 || grad_lod || clamp_probe ||
-       ((line || array_2d || volume || descriptor_array) && strstr(argv[2], "minimum")));
+       ((line || array_2d || volume || descriptor_array || cube) && strstr(argv[2], "minimum")));
   const bool state_probe = argc >= 3 && strcmp(argv[2], "--static-minimum-state") == 0;
   const bool maximum = argc >= 3 &&
       (strcmp(argv[2], "--maximum") == 0 || strcmp(argv[2], "--static-maximum") == 0 ||
        strcmp(argv[2], "--maximum-grad") == 0 || strcmp(argv[2], "--static-maximum-grad") == 0 ||
-       ((line || array_2d || volume || descriptor_array) && strstr(argv[2], "maximum")));
+       ((line || array_2d || volume || descriptor_array || cube) && strstr(argv[2], "maximum")));
   const bool reduction = minimum || maximum;
   const bool static_observation = argc >= 3 && (strcmp(argv[2], "--sampler-static-observation") == 0 ||
       strcmp(argv[2], "--minimum-static-observation") == 0);
@@ -304,8 +326,9 @@ main(int argc, char **argv) {
       (strcmp(argv[2], "--static-sampler") == 0 || state_probe ||
        strcmp(argv[2], "--static-minimum") == 0 || strcmp(argv[2], "--static-maximum") == 0 ||
        strcmp(argv[2], "--static-minimum-grad") == 0 || strcmp(argv[2], "--static-maximum-grad") == 0 ||
-       (clamp_probe && clamp_probe->root_sampler));
-  const D3D12_FILTER filter = clamp_probe ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR :
+       (clamp_probe && clamp_probe->root_sampler) || (cube && strstr(argv[2], "static")));
+  const D3D12_FILTER filter = cube_point ? (minimum ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_POINT :
+      D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_POINT) : clamp_probe ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR :
       grad_lod ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_POINT :
       state_probe ? D3D12_ENCODE_BASIC_FILTER(D3D12_FILTER_TYPE_LINEAR,
       D3D12_FILTER_TYPE_POINT, D3D12_FILTER_TYPE_POINT, D3D12_FILTER_REDUCTION_TYPE_MINIMUM) :
@@ -314,7 +337,9 @@ main(int argc, char **argv) {
                                         D3D12_FILTER_MIN_MAG_MIP_LINEAR;
   // The nonorthogonal footprint's major axis is 8*.23*golden_ratio:
   // LOD ~1.574 -> point mip 2; max raw derivative length wrongly picks mip 1.
-  const UINT expected = clamp_probe ? clamp_probe->expected : volume_clamp ? 64 : volume && grad_lod ? 160 :
+  const UINT expected = cube_point ? 80 : cube ? (minimum ? (cube_case == 3 ? 8 : 16) :
+      cube_case == 1 ? 192 : cube_case == 2 ? 80 : 240) :
+      clamp_probe ? clamp_probe->expected : volume_clamp ? 64 : volume && grad_lod ? 160 :
       line_axis ? 32 : line_lod ? 224 : line ? (minimum ? (line_array ? 192 : 16) : (line_array ? 240 : 64)) :
       grad_lod ? (dxil_gradient_clamp ? 160 : grad_bias || grad_case == 2 || grad_case == 3 ? 224 :
       grad_case == 4 || grad_maxlod ? 32 : 96) : minimum ? 16 : maximum ? 240 : 255;
@@ -333,6 +358,7 @@ main(int argc, char **argv) {
   if ((expect_consumer_unsupported || expect_null_unsupported) && (!reduction || static_sampler)) return 2;
   if ((expect_null_unsupported || clamp_probe) && !dxbc) return 2;
   if (dynamic_switch && !dxbc) return 2;
+  if (cube && !dxbc) return 2; // DXIL cube reduction is a separate, still-closed path.
   // DXIL uses the external major-axis fixture. Parallel/zero/perpendicular
   // vectors are generated internally only by the DXBC probe.
   if (grad_lod && !dxbc && grad_case != 1) return 2;
@@ -343,7 +369,8 @@ main(int argc, char **argv) {
   std::vector<char> shader;
   if (dxbc) {
     if (!CompileDXBC(shader, expect_air_unsupported || expect_consumer_unsupported, gradient_probe, grad_case,
-            line, line_array, clamp_probe != nullptr, clamp_probe ? clamp_probe->instruction_clamp : -1))
+            line, line_array, clamp_probe != nullptr, clamp_probe ? clamp_probe->instruction_clamp : -1,
+            cube, cube_array, cube_case))
       return 3;
   } else {
     std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
@@ -403,9 +430,9 @@ main(int argc, char **argv) {
   D3D12_RESOURCE_DESC output_texture_desc = {};
   D3D12_RESOURCE_DESC buffer_desc = {};
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
-  D3D12_PLACED_SUBRESOURCE_FOOTPRINT mip_footprints[8] = {};
-  UINT mip_rows[8] = {};
-  UINT64 mip_row_sizes[8] = {};
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT mip_footprints[48] = {};
+  UINT mip_rows[48] = {};
+  UINT64 mip_row_sizes[48] = {};
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT output_texture_footprint = {};
   UINT row_count = 0;
   UINT64 row_size = 0;
@@ -531,8 +558,8 @@ main(int argc, char **argv) {
       line ? D3D12_RESOURCE_DIMENSION_TEXTURE1D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
   texture_desc.Width = grad_lod ? 8 : reduction ? 2 : 1;
   texture_desc.Height = line ? 1 : grad_lod ? 8 : reduction ? 2 : 1;
-  texture_desc.DepthOrArraySize = volume ? (grad_lod ? 8 : 2) : line_array || array_2d ? 2 : 1;
-  texture_desc.MipLevels = grad_lod ? 4 : 1;
+  texture_desc.DepthOrArraySize = cube ? (cube_array ? 12 : 6) : volume ? (grad_lod ? 8 : 2) : line_array || array_2d ? 2 : 1;
+  texture_desc.MipLevels = cube && cube_case == 3 ? 2 : grad_lod ? 4 : 1;
   texture_subresources = texture_desc.MipLevels * (volume ? 1 : texture_desc.DepthOrArraySize);
   texture_desc.Format = defaults_r ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
   texture_desc.SampleDesc.Count = 1;
@@ -546,10 +573,10 @@ main(int argc, char **argv) {
   upload_heap.CreationNodeMask = 1;
   upload_heap.VisibleNodeMask = 1;
   buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  if (grad_lod || line_array || array_2d || volume)
+  if (grad_lod || line_array || array_2d || volume || cube)
     device->GetCopyableFootprints(&texture_desc, 0, texture_subresources,
         0, mip_footprints, mip_rows, mip_row_sizes, &total_size);
-  buffer_desc.Width = grad_lod || line_array || array_2d || volume ? total_size : reduction ? 512 : 256;
+  buffer_desc.Width = grad_lod || line_array || array_2d || volume || cube ? total_size : reduction ? 512 : 256;
   if (clamp_probe) {
     sentinel_offset = buffer_desc.Width;
     buffer_desc.Width += sizeof(UINT);
@@ -564,7 +591,7 @@ main(int argc, char **argv) {
           device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
                                            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload))))
     goto cleanup;
-  if (grad_lod || line_array || array_2d || volume)
+  if (grad_lod || line_array || array_2d || volume || cube)
     footprint = mip_footprints[0];
   else
     device->GetCopyableFootprints(&texture_desc, 0, 1, 0, &footprint, &row_count, &row_size, &total_size);
@@ -572,7 +599,23 @@ main(int argc, char **argv) {
     goto cleanup;
   static const UINT pixel = 0xff0000ff;
   memcpy(upload_data, &pixel, sizeof(pixel));
-  if (grad_lod) {
+  if (cube) {
+    const UINT face_red[6] = {0, 112, 32, 160, 80, 144};
+    const UINT primary[4] = {16, 64, 192, 240};
+    memset(upload_data, 0, static_cast<size_t>(total_size));
+    for (unsigned subresource = 0; subresource < texture_subresources; ++subresource) {
+      const unsigned mip = subresource % texture_desc.MipLevels;
+      const unsigned slice = subresource / texture_desc.MipLevels;
+      for (unsigned y = 0; y < mip_rows[subresource]; ++y)
+        for (unsigned x = 0; x < mip_footprints[subresource].Footprint.Width; ++x) {
+          const UINT red = cube_array && slice < 6 ? 7 : mip ? 8 :
+              slice % 6 ? face_red[slice % 6] : primary[y * 2 + x];
+          const UINT pixel = 0xff000000 | red;
+          memcpy(static_cast<char *>(upload_data) + mip_footprints[subresource].Offset +
+              y * mip_footprints[subresource].Footprint.RowPitch + x * sizeof(UINT), &pixel, sizeof(pixel));
+        }
+    }
+  } else if (grad_lod) {
     const UINT mip_red[4] = {32, 224, 96, 160};
     memset(upload_data, 0, static_cast<size_t>(total_size));
     for (unsigned mip = 0; mip < texture_subresources; ++mip)
@@ -631,7 +674,16 @@ main(int argc, char **argv) {
     srv_desc.Texture2D.MostDetailedMip = clamp_probe->first_mip;
     if (clamp_probe->view_mips) srv_desc.Texture2D.MipLevels = clamp_probe->view_mips;
   }
-  if (volume) {
+  if (cube_array) {
+    srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+    srv_desc.TextureCubeArray = {};
+    srv_desc.TextureCubeArray.MipLevels = texture_desc.MipLevels;
+    srv_desc.TextureCubeArray.NumCubes = 2;
+  } else if (cube) {
+    srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+    srv_desc.TextureCube = {};
+    srv_desc.TextureCube.MipLevels = texture_desc.MipLevels;
+  } else if (volume) {
     srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
     srv_desc.Texture3D = {};
     srv_desc.Texture3D.MipLevels = texture_desc.MipLevels;
@@ -868,7 +920,7 @@ main(int argc, char **argv) {
   texture_src.PlacedFootprint = footprint;
   for (unsigned mip = 0; mip < texture_subresources; ++mip) {
     texture_dst.SubresourceIndex = mip;
-    texture_src.PlacedFootprint = grad_lod || line_array || array_2d || volume ? mip_footprints[mip] : footprint;
+    texture_src.PlacedFootprint = grad_lod || line_array || array_2d || volume || cube ? mip_footprints[mip] : footprint;
     list->CopyTextureRegion(&texture_dst, 0, 0, 0, &texture_src, nullptr);
   }
   {

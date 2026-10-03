@@ -81,6 +81,33 @@ kernel void nan_centers(texture2d<float> t [[texture(0)]], device float4 *out [[
   out[id] = minmax2d(t, point, float2(id / 2u ? 0.75f : 0.25f), 0.0f,
       MagLinear | ((id & 1u) ? Maximum : 0u), int2(0));
 }
+constant float3 cube_directions[] = {
+  float3(1,0,0), float3(-1,0,0), float3(0,1,0), float3(0,-1,0), float3(0,0,1), float3(0,0,-1),
+  float3(1,1,.5), float3(1,-1,.5), float3(-1,1,.5), float3(-1,-1,.5),
+  float3(1,.5,1), float3(1,.5,-1), float3(-1,.5,1), float3(-1,.5,-1),
+  float3(.5,1,1), float3(.5,1,-1), float3(.5,-1,1), float3(.5,-1,-1),
+  float3(1,1,1), float3(1,1,-1), float3(1,-1,1), float3(1,-1,-1),
+  float3(-1,1,1), float3(-1,1,-1), float3(-1,-1,1), float3(-1,-1,-1),
+  float3(1,.75,.75), float3(-1,.75,-.75), float3(-.75,1,-.75),
+  float3(-.75,-1,.75), float3(-.75,.75,1), float3(.75,.75,-1)
+};
+kernel void cube_footprints(texturecube<float> t [[texture(0)]], device float4 *out [[buffer(0)]],
+                            uint id [[thread_position_in_grid]]) {
+  constexpr sampler point(coord::normalized, address::clamp_to_edge, filter::nearest, mip_filter::nearest);
+  uint group = id / 2u;
+  float lod = group >= 38u ? 1.0f : group >= 32u ? 0.5f : 0.0f;
+  float3 direction = cube_directions[group >= 32u ? (group - 32u) % 6u : group];
+  out[id] = minmaxcube(t, point, direction, lod, MinLinear | MagLinear | MipLinear | ((id & 1u) ? Maximum : 0u));
+}
+kernel void cube_array_footprints(texturecube_array<float> t [[texture(0)]], device float4 *out [[buffer(0)]],
+                                  uint id [[thread_position_in_grid]]) {
+  constexpr sampler point(coord::normalized, address::clamp_to_edge, filter::nearest, mip_filter::nearest);
+  uint group = id / 2u;
+  float lod = group >= 38u ? 1.0f : group >= 32u ? 0.5f : 0.0f;
+  float3 direction = cube_directions[group >= 32u ? (group - 32u) % 6u : group];
+  out[id] = minmaxcube_array(t, point, direction, 1u, lod,
+      MinLinear | MagLinear | MipLinear | ((id & 1u) ? Maximum : 0u));
+}
 )"];
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     if (!device) return 1;
@@ -139,15 +166,61 @@ kernel void nan_centers(texture2d<float> t [[texture(0)]], device float4 *out [[
     const float nan_pixels[16] = {NAN, 4, -0.0f, 0.0f, 2, NAN, -0.0f, 0.0f,
         3, 3, -0.0f, 0.0f, 4, 2, -0.0f, 0.0f};
     [nan_texture replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0 withBytes:nan_pixels bytesPerRow:32];
+    id<MTLTexture> cubemaps[2] = {nil, nil};
+    for (unsigned array = 0; array < 2; ++array) {
+      desc = [MTLTextureDescriptor new];
+      desc.textureType = array ? MTLTextureTypeCubeArray : MTLTextureTypeCube;
+      desc.pixelFormat = MTLPixelFormatRGBA32Float;
+      desc.width = desc.height = 4; desc.mipmapLevelCount = 3;
+      desc.arrayLength = array ? 2 : 1;
+      desc.storageMode = MTLStorageModeShared; desc.usage = MTLTextureUsageShaderRead;
+      cubemaps[array] = [device newTextureWithDescriptor:desc];
+      if (!cubemaps[array]) return 1;
+      for (unsigned slice = 0; slice < (array ? 12u : 6u); ++slice)
+        for (unsigned level = 0; level < 3; ++level) {
+          const unsigned size = 4u >> level, face = slice % 6;
+          float texels[64];
+          for (unsigned y = 0; y < size; ++y) for (unsigned x = 0; x < size; ++x) {
+            const float r = (level == 2 ? 20000.0f : level == 1 ? -1000.0f : float(face * 100 + y * 10 + x + 1)) +
+                float(slice / 6u) * 1000.0f;
+            const unsigned p = (y * size + x) * 4;
+            texels[p] = r; texels[p + 1] = -r;
+            // Y-face corners must be independently observable even when R's
+            // extrema belong to X/Z faces and the Y contribution is intermediate.
+            texels[p + 2] = !level && (face == 2 || face == 3) ? -10000.0f - r : r;
+            texels[p + 3] = r + 2000;
+          }
+          [cubemaps[array] replaceRegion:MTLRegionMake2D(0, 0, size, size) mipmapLevel:level slice:slice
+              withBytes:texels bytesPerRow:size * 16 bytesPerImage:size * size * 16];
+        }
+    }
+    // Hand-enumerated face texels for the directions above, not the production
+    // face projection/remapping algorithm. Duplicate entries do not change extrema.
+    const float cube_texels[44][4] = {
+      {12,13,22,23}, {112,113,122,123}, {212,213,222,223}, {312,313,322,323},
+      {412,413,422,423}, {512,513,522,523},
+      {1,2,224,234}, {31,32,304,314}, {103,104,221,231}, {133,134,301,311},
+      {1,11,404,414}, {4,14,501,511}, {104,114,401,411}, {101,111,504,514},
+      {233,234,403,404}, {203,204,501,502}, {303,304,433,434}, {333,334,531,532},
+      {1,234,404,404}, {4,204,501,501}, {31,304,434,434}, {34,334,531,531},
+      {104,231,401,401}, {101,201,504,504}, {134,301,431,431}, {131,331,534,534},
+      {1,1,1,1}, {101,101,101,101}, {201,201,201,201}, {301,301,301,301},
+      {401,401,401,401}, {501,501,501,501},
+      {12,23,-1000,-1000}, {112,123,-1000,-1000}, {212,223,-1000,-1000},
+      {312,323,-1000,-1000}, {412,423,-1000,-1000}, {512,523,-1000,-1000},
+      {-1000,-1000,-1000,-1000}, {-1000,-1000,-1000,-1000}, {-1000,-1000,-1000,-1000},
+      {-1000,-1000,-1000,-1000}, {-1000,-1000,-1000,-1000}, {-1000,-1000,-1000,-1000}
+    };
     id<MTLCommandQueue> queue = [device newCommandQueue];
     unsigned passed = 0;
-    enum class Kind { Probe, Centers, Layers, Volume, Edges, MipBoundary, NanMix, NanCenters, Line, LineArray };
+    enum class Kind { Probe, Centers, Layers, Volume, Edges, MipBoundary, NanMix, NanCenters, Line, LineArray, Cube, CubeArray };
     struct Case { NSString *name; id<MTLTexture> texture; unsigned count; Kind kind; };
     const Case cases[] = {{@"probe", texture, 64, Kind::Probe}, {@"centers", texture, 2, Kind::Centers},
         {@"layers", layers, 2, Kind::Layers}, {@"volume", volume, 2, Kind::Volume},
         {@"edges", texture, 10, Kind::Edges}, {@"mip_boundary", mip_texture, 2, Kind::MipBoundary},
         {@"nan_mix", nan_texture, 2, Kind::NanMix}, {@"nan_centers", nan_texture, 4, Kind::NanCenters},
-        {@"logical_1d", line, 2, Kind::Line}, {@"logical_1d_array", line_array, 2, Kind::LineArray}};
+        {@"logical_1d", line, 2, Kind::Line}, {@"logical_1d_array", line_array, 2, Kind::LineArray},
+        {@"cube_footprints", cubemaps[0], 88, Kind::Cube}, {@"cube_array_footprints", cubemaps[1], 88, Kind::CubeArray}};
     for (const auto &test : cases) {
       NSString *name = test.name;
       const unsigned count = test.count;
@@ -167,7 +240,16 @@ kernel void nan_centers(texture2d<float> t [[texture(0)]], device float4 *out [[
       const float *values = static_cast<const float *>(output.contents);
       for (unsigned id = 0; id < count; ++id) {
         float expected[4];
-        if (test.kind == Kind::Line || test.kind == Kind::LineArray) {
+        if (test.kind == Kind::Cube || test.kind == Kind::CubeArray) {
+          for (unsigned p = 0; p < 4; ++p) {
+            const float raw = cube_texels[id / 2u][p];
+            const float r = raw + (test.kind == Kind::CubeArray ? 1000 : 0);
+            const bool y_face = raw >= 200 && raw < 400;
+            const float texel[4] = {r, -r, y_face ? -10000.0f - r : r, r + 2000};
+            for (unsigned c = 0; c < 4; ++c)
+              expected[c] = !p ? texel[c] : (id & 1u) ? std::fmax(expected[c], texel[c]) : std::fmin(expected[c], texel[c]);
+          }
+        } else if (test.kind == Kind::Line || test.kind == Kind::LineArray) {
           const float *texels = test.kind == Kind::Line ? pixels : layer;
           for (unsigned c = 0; c < 4; ++c)
             expected[c] = id ? std::fmax(texels[c], texels[4 + c]) : std::fmin(texels[c], texels[4 + c]);

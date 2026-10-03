@@ -11,17 +11,19 @@ int main() {
   llvm::air::AIRBuilder air(ir, llvm::errs());
   using Texture = llvm::air::Texture;
   unsigned passed = 0;
-  for (const auto kind : {Texture::texture2d, Texture::texture2d_array, Texture::texture3d}) {
+  for (const auto kind : {Texture::texture2d, Texture::texture2d_array, Texture::texture3d,
+                         Texture::texturecube, Texture::texturecube_array}) {
+    const bool array = kind == Texture::texture2d_array || kind == Texture::texturecube_array;
     Texture texture{kind, Texture::sample_float, Texture::access_sample};
     std::vector<llvm::Type *> arguments{air.getTextureHandleType(texture), air.getSamplerHandleType(),
         air.getTextureSampleCoordType(texture), air.getFloatTy(), air.getIntTy()};
-    if (kind == Texture::texture2d_array) arguments.push_back(air.getIntTy());
+    if (array) arguments.push_back(air.getIntTy());
     auto *function = llvm::Function::Create(llvm::FunctionType::get(air.getFloatTy(4), arguments, false),
         llvm::GlobalValue::ExternalLinkage, "probe" + std::to_string(passed), module);
     ir.SetInsertPoint(llvm::BasicBlock::Create(context, "entry", function));
     const int32_t offset[] = {0, 0, 0};
     auto value = air.CreateReductionSampleLevel(texture, function->getArg(0), function->getArg(1),
-        function->getArg(2), kind == Texture::texture2d_array ? function->getArg(5) : nullptr,
+        function->getArg(2), array ? function->getArg(5) : nullptr,
         function->getArg(3), function->getArg(4), offset);
     if (!value) return 1;
     auto *call = llvm::dyn_cast<llvm::CallInst>(*value);
@@ -32,9 +34,16 @@ int main() {
     ++passed;
     const auto instruction_count = ir.GetInsertBlock()->size();
     // Reject unsupported kinds before touching the command's IR.
-    Texture unsupported{Texture::texturecube, Texture::sample_float, Texture::access_sample};
+    Texture unsupported{Texture::texture2d_ms, Texture::sample_float, Texture::access_sample};
     if (air.CreateReductionSampleLevel(unsupported, nullptr, nullptr, nullptr, nullptr,
             nullptr, nullptr, offset) || ir.GetInsertBlock()->size() != instruction_count) return 1;
+    if (kind == Texture::texturecube || kind == Texture::texturecube_array) {
+      const int32_t invalid_offset[] = {1, 0, 0};
+      if (air.CreateReductionSampleLevel(texture, function->getArg(0), function->getArg(1),
+              function->getArg(2), array ? function->getArg(5) : nullptr,
+              function->getArg(3), function->getArg(4), invalid_offset) ||
+          ir.GetInsertBlock()->size() != instruction_count) return 1;
+    }
 
     arguments.push_back(air.getFloatTy());
     arguments.push_back(ir.getInt64Ty());
@@ -45,7 +54,7 @@ int main() {
     const unsigned clamp_index = arguments.size() - 2;
     const unsigned defaults_index = arguments.size() - 1;
     auto result = air.CreateClampedReductionSampleLevel(texture, clamped->getArg(0), clamped->getArg(1),
-        clamped->getArg(2), kind == Texture::texture2d_array ? clamped->getArg(5) : nullptr,
+        clamped->getArg(2), array ? clamped->getArg(5) : nullptr,
         clamped->getArg(3), clamped->getArg(4), offset,
         clamped->getArg(clamp_index), clamped->getArg(defaults_index));
     if (!result) return 1;
@@ -76,6 +85,14 @@ int main() {
     if (air.CreateClampedReductionSampleLevel(unsupported, nullptr, nullptr, nullptr, nullptr,
             nullptr, nullptr, offset, nullptr, nullptr) || clamped->size() != block_count ||
         ir.GetInsertBlock()->size() != clamped_instruction_count) return 1;
+    if (kind == Texture::texturecube || kind == Texture::texturecube_array) {
+      const int32_t invalid_offset[] = {0, -1, 0};
+      if (air.CreateClampedReductionSampleLevel(texture, clamped->getArg(0), clamped->getArg(1),
+              clamped->getArg(2), array ? clamped->getArg(5) : nullptr,
+              clamped->getArg(3), clamped->getArg(4), invalid_offset,
+              clamped->getArg(clamp_index), clamped->getArg(defaults_index)) ||
+          clamped->size() != block_count || ir.GetInsertBlock()->size() != clamped_instruction_count) return 1;
+    }
   }
   if (llvm::verifyModule(module, &llvm::errs())) return 1;
   llvm::outs() << "AIR reduction linkage: passed=" << passed << " failed=0\n";

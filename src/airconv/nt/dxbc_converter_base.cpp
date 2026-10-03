@@ -1788,7 +1788,8 @@ Converter::operator()(const InstSampleLOD &sample) {
   if (Sampler->Reduction) {
     if (sample.feedback || (Tex->Logical != Texture::texture1d && Tex->Logical != Texture::texture1d_array &&
                             Tex->Logical != Texture::texture2d && Tex->Logical != Texture::texture2d_array &&
-                            Tex->Logical != Texture::texture3d) || Tex->Texture.sample_type != Texture::sample_float) {
+                            Tex->Logical != Texture::texture3d && Tex->Logical != Texture::texturecube &&
+                            Tex->Logical != Texture::texturecube_array) || Tex->Texture.sample_type != Texture::sample_float) {
       failure = "AIR Min/Max SampleLevel texture kind/type or feedback is unsupported";
       return;
     }

@@ -669,6 +669,11 @@ read_control_flow(
                  texture.resource_type == ResourceType::Texture2D ||
                  texture.resource_type == ResourceType::Texture2DArray ||
                  texture.resource_type == ResourceType::Texture3D);
+            if constexpr (std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleLOD>)
+              eligible |= !decoded.feedback && texture.scaler_type == ScalerDataType::Float &&
+                  (texture.resource_type == ResourceType::TextureCube ||
+                   texture.resource_type == ResourceType::TextureCubeArray) &&
+                  !decoded.offsets[0] && !decoded.offsets[1] && !decoded.offsets[2];
             if constexpr (std::is_same_v<std::decay_t<decltype(decoded)>, InstSample> ||
                           std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleBias>)
               eligible &= sm50_shader->shader_type == microsoft::D3D10_SB_PIXEL_SHADER;

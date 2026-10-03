@@ -66,6 +66,9 @@ AIRBuilder::CreateReductionSampleLevel(
     return None;
   const char *symbol = nullptr;
   unsigned dimensions = 2;
+  const bool cube = Texture.kind == Texture::texturecube || Texture.kind == Texture::texturecube_array;
+  const bool array = Texture.kind == Texture::texture2d_array || Texture.kind == Texture::texturecube_array;
+  if (cube && (Offset[0] || Offset[1] || Offset[2])) return None;
   switch (Texture.kind) {
   case Texture::texture2d: symbol = "dxmt.minmax.sample_level.2d"; break;
   case Texture::texture2d_array:
@@ -73,19 +76,25 @@ AIRBuilder::CreateReductionSampleLevel(
     symbol = "dxmt.minmax.sample_level.2d_array";
     break;
   case Texture::texture3d: symbol = "dxmt.minmax.sample_level.3d"; dimensions = 3; break;
+  case Texture::texturecube: symbol = "dxmt.minmax.sample_level.cube"; break;
+  case Texture::texturecube_array:
+    if (!ArrayIndex) return None;
+    symbol = "dxmt.minmax.sample_level.cube_array";
+    break;
   default: return None;
   }
   if (!Handle || !PointSampler || !Coord || !ClampedLOD || !Flags ||
       Handle->getType() != getTextureHandleType(Texture) || PointSampler->getType() != getSamplerHandleType() ||
       Coord->getType() != getTextureSampleCoordType(Texture) || ClampedLOD->getType() != getFloatTy() ||
       Flags->getType() != getIntTy() ||
-      (Texture.kind == Texture::texture2d_array && ArrayIndex->getType() != getIntTy()))
+      (array && ArrayIndex->getType() != getIntTy()))
     return None;
   SmallVector<Value *> operands{Handle, PointSampler, Coord};
-  if (Texture.kind == Texture::texture2d_array) operands.push_back(ArrayIndex);
+  if (array) operands.push_back(ArrayIndex);
   operands.push_back(ClampedLOD);
   operands.push_back(Flags);
-  operands.push_back(dimensions == 2 ? getInt2(Offset[0], Offset[1]) : getInt3(Offset[0], Offset[1], Offset[2]));
+  if (!cube)
+    operands.push_back(dimensions == 2 ? getInt2(Offset[0], Offset[1]) : getInt3(Offset[0], Offset[1], Offset[2]));
   SmallVector<Type *> types;
   for (auto *operand : operands) types.push_back(operand->getType());
   auto function = getModule()->getOrInsertFunction(symbol, FunctionType::get(getFloatTy(4), types, false));
@@ -107,15 +116,18 @@ AIRBuilder::CreateClampedReductionSampleLevel(
     Value *MinLODClamp, Value *DefaultComponents) {
   // Validate before creating blocks or querying a texture. Legacy bindings do
   // not carry default components and must keep using the unclamped primitive.
+  const bool cube = Texture.kind == Texture::texturecube || Texture.kind == Texture::texturecube_array;
+  if (cube && (Offset[0] || Offset[1] || Offset[2])) return None;
   if (Texture.sample_type != Texture::sample_float || Texture.memory_access != Texture::access_sample ||
       (Texture.kind != Texture::texture2d && Texture.kind != Texture::texture2d_array &&
-       Texture.kind != Texture::texture3d) ||
+       Texture.kind != Texture::texture3d && !cube) ||
       !Handle || !PointSampler || !Coord || !SamplerClampedLOD || !Flags || !MinLODClamp || !DefaultComponents ||
       Handle->getType() != getTextureHandleType(Texture) || PointSampler->getType() != getSamplerHandleType() ||
       Coord->getType() != getTextureSampleCoordType(Texture) || SamplerClampedLOD->getType() != getFloatTy() ||
       Flags->getType() != getIntTy() || MinLODClamp->getType() != getFloatTy() ||
       !DefaultComponents->getType()->isIntegerTy(64) ||
-      (Texture.kind == Texture::texture2d_array && (!ArrayIndex || ArrayIndex->getType() != getIntTy())))
+      ((Texture.kind == Texture::texture2d_array || Texture.kind == Texture::texturecube_array) &&
+          (!ArrayIndex || ArrayIndex->getType() != getIntTy())))
     return None;
 
   auto *mips = CreateTextureQuery(Texture, Handle, Texture::num_mip_levels, getInt(0));
