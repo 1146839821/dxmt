@@ -527,3 +527,12 @@ or reduction versus ordinary filtering there. This
 supersedes the prior kind5/9 binding rejection, not full Cube/MinMax qualification.
 Anisotropic/feedback, broader format/view/clamp/lifetime and mandatory FL matrices
 remain open. FL11_1 unchanged; FL12_0/FL12_1 unpromoted. Full objective active.
+
+Independent statically resolved DXIL f32 comparison consumers now survive MinMax
+shader regeneration (`D3D12_MINMAX_COMPARISON_COEXISTENCE.md`): exact nonvariadic
+SampleCmp/SampleCmpLevelZero signatures and sampler comparison metadata/modern
+annotation bits are qualified before mutation; compare calls remain native MSC,
+not reduction pairs. Both builds pass legacy/modern CS/PS container regeneration,
+DXIL validation and offline MSC plus regular Cube GPU regressions. **Mixed
+comparison/reduction GPU output remains unverified**; no sampler/filter or FL
+capability is promoted by this compiler compatibility increment.

@@ -401,6 +401,76 @@ static bool CheckCubeQualification(llvm::Module &module) {
   return true;
 }
 
+static bool CheckComparisonCoexistence(llvm::Module &module) {
+  using namespace llvm;
+  SmallVector<char, 0> bitcode;
+  raw_svector_ostream serialized(bitcode);
+  WriteBitcodeToFile(module, serialized);
+  for (unsigned probe = 0; probe < 8; ++probe) {
+    LLVMContext context;
+    context.setOpaquePointers(false);
+    auto parsed = parseBitcodeFile(MemoryBufferRef(StringRef(bitcode.data(), bitcode.size()), "comparison-probe"), context);
+    if (!parsed) { consumeError(parsed.takeError()); return false; }
+    auto &clone = *parsed;
+    CallInst *comparison = nullptr, *regular = nullptr;
+    for (auto &function : *clone) for (auto &block : function) for (auto &instruction : block)
+      if (auto *call = dyn_cast<CallInst>(&instruction)) if (call->getCalledFunction()) {
+        const auto name = call->getCalledFunction()->getName();
+        if (name == "dx.op.sampleCmp.f32" || name == "dx.op.sampleCmpLevelZero.f32") comparison = call;
+        if (name == "dx.op.sampleLevel.f32") regular = call;
+      }
+    if (!comparison || !regular) return false;
+    IRBuilder<> builder(comparison);
+    auto *samplers = cast<MDNode>(clone->getNamedMetadata("dx.resources")->getOperand(0)->getOperand(3));
+    if (samplers->getNumOperands() != 2) return false;
+    auto *comparison_record = cast<MDNode>(samplers->getOperand(1));
+    if (probe == 1) comparison_record->replaceOperandWith(6, ConstantAsMetadata::get(builder.getInt32(0)));
+    if (probe == 2) comparison->setArgOperand(2, regular->getArgOperand(2));
+    if (probe == 3) comparison->setArgOperand(0, builder.getInt32(999));
+    if (probe == 4) ExtractValueInst::Create(comparison, {4}, "forbidden.status", comparison->getNextNode());
+    if (probe == 5) regular->setArgOperand(2, comparison->getArgOperand(2));
+    if (probe == 6) {
+      auto *handle = cast<CallInst>(comparison->getArgOperand(2));
+      if (handle->getCalledFunction()->getName() == "dx.op.annotateHandle") {
+        auto *properties = cast<ConstantStruct>(handle->getArgOperand(2));
+        handle->setArgOperand(2, ConstantStruct::get(properties->getType(), {builder.getInt32(14), builder.getInt32(0)}));
+      } else handle->setArgOperand(4, builder.getTrue());
+    }
+    if (probe == 7) {
+      auto *original = comparison->getCalledFunction();
+      const auto name = original->getName().str();
+      original->setName("comparison.original");
+      auto *variadic = Function::Create(FunctionType::get(original->getReturnType(),
+          original->getFunctionType()->params(), true), Function::ExternalLinkage, name, *clone);
+      comparison->setCalledFunction(variadic);
+    }
+    auto *callee = comparison->getCalledFunction();
+    auto *result_type = comparison->getType();
+    SmallVector<Value *, 12> arguments(comparison->arg_begin(), comparison->arg_end());
+    SmallVector<User *, 4> users(comparison->user_begin(), comparison->user_end());
+    std::string before;
+    raw_string_ostream before_stream(before); clone->print(before_stream, nullptr); before_stream.flush();
+    std::vector<dxmt_msc_minmax_binding> records{{11,22,33,44}};
+    std::string error;
+    const bool accepted = dxmt::dxil::LowerReductionSamplerBindings(*clone, records, error);
+    if (probe) {
+      std::string after;
+      raw_string_ostream after_stream(after); clone->print(after_stream, nullptr); after_stream.flush();
+      if (accepted || error.empty() || before != after || records.size() != 1 ||
+          records[0].texture_space != 11 || records[0].texture_register != 22 ||
+          records[0].sampler_space != 33 || records[0].sampler_register != 44) return false;
+    } else {
+      if (!accepted || !error.empty() || records.size() != 1 || records[0].texture_space ||
+          records[0].texture_register || records[0].sampler_space || records[0].sampler_register ||
+          comparison->getCalledFunction() != callee || comparison->getType() != result_type ||
+          SmallVector<Value *, 12>(comparison->arg_begin(), comparison->arg_end()) != arguments ||
+          SmallVector<User *, 4>(comparison->user_begin(), comparison->user_end()) != users ||
+          verifyModule(*clone, &errs())) return false;
+    }
+  }
+  return true;
+}
+
 static int TransformContainer(const char *path, const char *mode) {
   using namespace llvm;
   auto file = MemoryBuffer::getFile(path);
@@ -428,6 +498,14 @@ static int TransformContainer(const char *path, const char *mode) {
   context.setOpaquePointers(false);
   auto parsed = parseBitcodeFile(MemoryBufferRef(bitcode, path), context);
   if (!parsed) { logAllUnhandledErrors(parsed.takeError(), errs()); return 1; }
+  if (!std::strcmp(mode, "binding-comparison")) {
+    if (!CheckComparisonCoexistence(**parsed)) return 1;
+    std::vector<dxmt_msc_minmax_binding> records;
+    std::string error;
+    if (!dxmt::dxil::LowerReductionSamplerBindings(**parsed, records, error) || verifyModule(**parsed, &errs())) return 1;
+    (*parsed)->print(outs(), nullptr);
+    return 0;
+  }
   SmallVector<CallInst *, 4> samples;
   for (auto &function : **parsed) for (auto &block : function) for (auto &instruction : block)
     if (auto *call = dyn_cast<CallInst>(&instruction))

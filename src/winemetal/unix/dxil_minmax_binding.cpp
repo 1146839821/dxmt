@@ -16,6 +16,7 @@ namespace dxmt::dxil {
 namespace {
 constexpr unsigned CreateHandle = 57, CBufferLoadLegacy = 59, SampleLevel = 62, GetDimensions = 72, FMax = 35, FMin = 36;
 constexpr unsigned Sample = 60, SampleBias = 61, SampleGrad = 63, DerivCoarseX = 83, DerivCoarseY = 84;
+constexpr unsigned SamplerResourceKind = 14, SamplerComparisonFlag = 1u << 15;
 unsigned SampleOpcode(llvm::StringRef name) {
   if (name == "dx.op.sample.f32") return Sample;
   if (name == "dx.op.sampleBias.f32") return SampleBias;
@@ -29,6 +30,11 @@ unsigned SampleArgumentCount(llvm::StringRef name) {
 }
 bool IsQualifiedSampleName(llvm::StringRef name) {
   return SampleOpcode(name) != 0;
+}
+unsigned ComparisonOpcode(llvm::StringRef name) {
+  if (name == "dx.op.sampleCmp.f32") return 64;
+  if (name == "dx.op.sampleCmpLevelZero.f32") return 65;
+  return 0;
 }
 bool Word(llvm::Metadata *metadata, uint32_t &value) {
   auto *constant = llvm::mdconst::dyn_extract_or_null<llvm::ConstantInt>(metadata);
@@ -157,7 +163,8 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
         if (resource.space != space || resource.reg != lower || uint64_t(lower) + resource.count != uint64_t(upper) + 1)
           continue;
         if (!Word(resource.metadata->getOperand(6), resource_kind) ||
-            property_kind != (kind == 3 ? 14u : resource_kind) ||
+            (kind == 3 && resource_kind > 1) ||
+            property_kind != (kind == 3 ? (SamplerResourceKind | (resource_kind == 1 ? SamplerComparisonFlag : 0u)) : resource_kind) ||
             (kind == 3 ? component != 0 : (component & 255u) != 9u || (component >> 8) < 1 || (component >> 8) > 4))
           return nullptr;
         resolved_register = reg;
@@ -183,6 +190,33 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
   std::vector<Pair> pairs;
   bool has_gradient = false, has_mapping_check = false;
   std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, uint32_t> pair_indices;
+  auto comparison_consumer = [&](CallInst *call) {
+    if (!call || !call->getCalledFunction()) return false;
+    const unsigned opcode = ComparisonOpcode(call->getCalledFunction()->getName());
+    if (!opcode || call->arg_size() != (opcode == 64 ? 12u : 11u)) return false;
+    uint32_t actual_opcode, sampler_register, texture_register, sampler_kind;
+    const auto *sampler = resolve(call->getArgOperand(2), 3, sampler_register);
+    if (!Word(call->getArgOperand(0), actual_opcode) || actual_opcode != opcode || !sampler ||
+        sampler->metadata->getNumOperands() != 8 || !Word(sampler->metadata->getOperand(6), sampler_kind) ||
+        sampler_kind != 1 || !resolve(call->getArgOperand(1), 0, texture_register)) return false;
+    auto *result = dyn_cast<StructType>(call->getType());
+    if (!result || result->isOpaque() || result->getNumElements() != 5 ||
+        !result->getElementType(4)->isIntegerTy(32)) return false;
+    for (unsigned component = 0; component < 4; ++component)
+      if (!result->getElementType(component)->isFloatTy()) return false;
+    SmallVector<Type *, 12> parameters{i32, handle, handle};
+    for (unsigned argument = 3; argument < call->arg_size(); ++argument)
+      parameters.push_back(argument >= 7 && argument < 10 ? i32 : types.getFloatTy());
+    if (call->getCalledFunction()->getFunctionType() != FunctionType::get(result, parameters, false)) return false;
+    for (auto *user : call->users()) {
+      auto *extract = dyn_cast<ExtractValueInst>(user);
+      if (!extract || extract->getNumIndices() != 1 || *extract->idx_begin() >= 4) return false;
+    }
+    // Native comparison calls never enter the reduction pair list. Retain the
+    // original sampler/texture and let regenerated DXIL validation plus MSC
+    // enforce the operation's stage, resource and coordinate contract.
+    return true;
+  };
   for (auto &function : module) for (auto &block : function) for (auto &instruction : block) {
     auto *call = dyn_cast<CallInst>(&instruction);
     if (!call || !call->getCalledFunction()) continue;
@@ -190,13 +224,14 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     has_mapping_check |= name.startswith("dx.op.checkAccessFullyMapped");
     if (name.startswith("dx.op.createHandleFrom") && call->getCalledFunction() != modern_create)
       return reject("modern/dynamic handle provenance requires further lowering");
-    if (name.startswith("dx.op.sample") && !IsQualifiedSampleName(name))
+    if (name.startswith("dx.op.sample") && !IsQualifiedSampleName(name) && !comparison_consumer(call))
       return reject("unsupported float sampling operation");
     // Qualify every sampler consumer, not only the samples being rewritten.
     if (call->getCalledFunction() == create) {
       auto *kind = dyn_cast<ConstantInt>(call->getArgOperand(1));
       if (kind && kind->getZExtValue() == 3) for (auto *user : call->users()) {
         auto *consumer = dyn_cast<CallInst>(user);
+        if (comparison_consumer(consumer) && consumer->getArgOperand(2) == call) continue;
         if (!consumer || !consumer->getCalledFunction() || !IsQualifiedSampleName(consumer->getCalledFunction()->getName()) ||
             consumer->arg_size() != SampleArgumentCount(consumer->getCalledFunction()->getName()) ||
             consumer->getArgOperand(2) != call)
@@ -206,8 +241,9 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     if (modern && call->getCalledFunction() == annotate) {
       uint32_t property;
       if (!aggregate_word(call->getArgOperand(2), 0, property)) return reject("constant annotation required");
-      if (property == 14) for (auto *user : call->users()) {
+      if (property == SamplerResourceKind || property == (SamplerResourceKind | SamplerComparisonFlag)) for (auto *user : call->users()) {
         auto *consumer = dyn_cast<CallInst>(user);
+        if (comparison_consumer(consumer) && consumer->getArgOperand(2) == call) continue;
         if (!consumer || !consumer->getCalledFunction() || !IsQualifiedSampleName(consumer->getCalledFunction()->getName()) ||
             consumer->arg_size() < 3 || consumer->getArgOperand(2) != call)
           return reject("unsupported annotated sampler consumer");

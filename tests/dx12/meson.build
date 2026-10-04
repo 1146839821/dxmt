@@ -711,6 +711,14 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach stage : ['cs', 'ps']
+    custom_target('dx12_minmax_comparison_' + stage + '_fixture',
+      input: 'minmax_comparison.hlsl', output: 'minmax_comparison.' + stage + '.cso',
+      command: dxc_command + ['-E', 'main', '-T', stage + '_6_0'] +
+          (stage == 'ps' ? ['-D', 'PIXEL=1'] : []) + ['@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+  endforeach
   custom_target('dx12_minmax_grad_fixture',
     input: 'minmax_grad.hlsl', output: 'minmax_grad.cs.cso',
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '-D', 'MINMAX_GRAD_STRUCTURED=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
