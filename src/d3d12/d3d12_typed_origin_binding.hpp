@@ -45,6 +45,7 @@ struct D3D12TypedOriginSubmissionBinding {
   std::vector<ResourceUse> resources;
   std::vector<ShaderVisibleDescriptorSnapshot> snapshots;
   uint64_t indirect_data_offset = 0;
+  uint64_t fragment_argument_offset = 0;
 };
 
 HRESULT RecordD3D12TypedOriginDispatch(

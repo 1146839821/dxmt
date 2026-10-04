@@ -187,6 +187,7 @@ static bool ReplayPrivateRender(MTLD3D12Device *device, WMT::RenderCommandEncode
           PrivateRenderReplayCommand set = {};
           set.buffer.type = type; set.buffer.buffer = binding->buffer.handle;
           set.buffer.index = DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT;
+          set.buffer.offset = type == WMTRenderCommandSetFragmentBuffer ? binding->fragment_argument_offset : 0;
           replay.push_back(set);
         }
         origin_markers.erase(marker);

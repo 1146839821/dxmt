@@ -1,5 +1,22 @@
 # FL12_0 closure checkpoint
 
+## Native typed VS/PS implementation update (2026-10-04)
+
+Native DXIL vertex origin preparation/conversion and VS/PS shared table capture
+are now connected. Combined shaders receive separate private CBV record intervals
+through two submission-owned TLABs; single typed-stage draws retain one TLAB.
+Focused GPU readbacks pass on normal/no-private for SM6.0/6.6, explicit/deployed
+DXC, VS-only and combined stages, disjoint same-register tables, live resource/
+origin/count updates, OOB reads, UAV guards and ordinary restoration. Matching
+embedded roots also pass. See `D3D12_TYPED_ORIGIN_VERTEX_PIXEL.md` for exact scope.
+
+This narrows a real production gap, not full typed or FL12 acceptance. Depth-only
+typed VS (no PS), remaining pre-raster stages, indirect graphics, full formats/
+provenance/lifetime matrices and unconditional compiler distribution remain open.
+Static no-reread remains source-inspected, not an independent timing GPU oracle.
+The four production workstreams and seven complete GPU categories remain open;
+no FL/capability promotion, game benchmark or fresh tessellation acceptance.
+
 ## Current snapshot (2026-10-03, static DXIL MinMax dispatch checkpoint)
 
 MinMax indirect follow-up: non-root-updating DXIL DISPATCH now inherits the

@@ -695,37 +695,54 @@ public:
           !minmax_render_info_valid_ || minmax_emulation_flags_ || msc_mesh || stream_output ||
           requires_minmax_variant || original_vs_.empty() || original_ps_.empty()) return E_NOTIMPL;
       std::wstring selected;
-      // The shared patched tables are also visible to VS. An unmodified typed
-      // VS must never read an origin descriptor without origin correction.
-      auto hr = SelectD3D12TypedOriginCompiler({original_vs_.data(), original_vs_.size()}, selected, directory);
-      if (FAILED(hr)) return hr;
-      if (hr != S_FALSE) return E_NOTIMPL;
-      hr = SelectD3D12TypedOriginCompiler({original_ps_.data(), original_ps_.size()}, selected, directory);
-      if (hr != S_OK) return hr;
-      D3D12TypedOriginShader shader;
-      std::string diagnostics;
-      hr = PrepareD3D12TypedOriginShader({original_ps_.data(), original_ps_.size()}, directory,
-          shader, diagnostics, D3D12_SHADER_VISIBILITY_PIXEL);
-      if (FAILED(hr)) { ERR("Pixel typed-origin preparation failed: ", diagnostics); return hr; }
-      if (!shader.application_root_signature.empty()) {
-        const void *bytes = nullptr;
-        const auto size = application_root_->GetBlob(&bytes);
-        if (size != shader.application_root_signature.size() ||
-            std::memcmp(bytes, shader.application_root_signature.data(), size)) return E_INVALIDARG;
-      }
+      const auto vertex_selection = SelectD3D12TypedOriginCompiler(
+          {original_vs_.data(), original_vs_.size()}, selected, directory);
+      if (FAILED(vertex_selection)) return vertex_selection;
+      const auto pixel_selection = SelectD3D12TypedOriginCompiler(
+          {original_ps_.data(), original_ps_.size()}, selected, directory);
+      if (FAILED(pixel_selection)) return pixel_selection;
+      if (vertex_selection == S_FALSE && pixel_selection == S_FALSE) return S_FALSE;
       const D3D12TypedOriginRoot *root = nullptr;
-      hr = application_root_->GetTypedOriginCompilerRoot(&root);
+      auto hr = application_root_->GetTypedOriginCompilerRoot(&root);
       if (FAILED(hr)) return hr;
       auto candidate = std::make_unique<D3D12TypedOriginGraphicsVariant>();
-      candidate->root = *root; candidate->bindings = shader.bindings;
-      hr = ResolveD3D12TypedOriginBindings(*root, shader.bindings, candidate->locations, diagnostics,
-          D3D12_SHADER_VISIBILITY_PIXEL);
-      if (FAILED(hr)) { ERR("Pixel typed-origin binding resolution failed: ", diagnostics); return hr; }
+      candidate->root = *root;
       D3D12ConvertedShader vs, ps;
-      hr = ConvertD3D12Shader({original_vs_.data(), original_vs_.size()}, DXMT_MSC_STAGE_VERTEX, vs,
-          root->bytecode.data(), root->bytecode.size(), nullptr, 0, &device_->GetMSCCapabilities());
-      if (SUCCEEDED(hr)) hr = ConvertD3D12TypedOriginPixelShader(shader, *root, ps, &device_->GetMSCCapabilities());
+      const auto prepare_stage = [&](const std::vector<uint8_t> &original, HRESULT selection, D3D12_SHADER_VISIBILITY visibility,
+                                     D3D12ConvertedShader &converted) -> HRESULT {
+        if (selection == S_FALSE)
+          return ConvertD3D12Shader({original.data(), original.size()},
+              visibility == D3D12_SHADER_VISIBILITY_VERTEX ? DXMT_MSC_STAGE_VERTEX : DXMT_MSC_STAGE_FRAGMENT,
+              converted, root->bytecode.data(), root->bytecode.size(), nullptr, 0, &device_->GetMSCCapabilities());
+        D3D12TypedOriginShader shader;
+        std::string diagnostics;
+        auto result = PrepareD3D12TypedOriginShader({original.data(), original.size()}, directory,
+            shader, diagnostics, visibility);
+        if (FAILED(result)) { ERR("Graphics typed-origin preparation failed: ", diagnostics); return result; }
+        if (!shader.application_root_signature.empty()) {
+          const void *bytes = nullptr;
+          application_root_->GetBlob(&bytes);
+          UINT size = 0;
+          result = microsoft::DXBCGetRootSignature(bytes, &bytes, &size);
+          if (FAILED(result)) return result;
+          if (size != shader.application_root_signature.size() ||
+              std::memcmp(bytes, shader.application_root_signature.data(), size)) return E_INVALIDARG;
+        }
+        std::vector<D3D12TypedOriginBindingLocation> locations;
+        result = ResolveD3D12TypedOriginBindings(*root, shader.bindings, locations, diagnostics, visibility);
+        if (FAILED(result)) { ERR("Graphics typed-origin binding resolution failed: ", diagnostics); return result; }
+        candidate->bindings.insert(candidate->bindings.end(), shader.bindings.begin(), shader.bindings.end());
+        candidate->locations.insert(candidate->locations.end(), locations.begin(), locations.end());
+        return visibility == D3D12_SHADER_VISIBILITY_VERTEX ?
+            ConvertD3D12TypedOriginVertexShader(shader, *root, converted, &device_->GetMSCCapabilities()) :
+            ConvertD3D12TypedOriginPixelShader(shader, *root, converted, &device_->GetMSCCapabilities());
+      };
+      hr = prepare_stage(original_vs_, vertex_selection, D3D12_SHADER_VISIBILITY_VERTEX, vs);
       if (FAILED(hr)) return hr;
+      candidate->vertex_binding_count = candidate->bindings.size();
+      hr = prepare_stage(original_ps_, pixel_selection, D3D12_SHADER_VISIBILITY_PIXEL, ps);
+      if (FAILED(hr)) return hr;
+      if (candidate->bindings.empty()) return S_FALSE;
       auto metal = device_->GetMTLDevice();
       WMT::Reference<WMT::Error> error;
       auto vs_lib = metal.newLibrary(vs.metallib.data(), vs.metallib.size(), error);

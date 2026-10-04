@@ -20,7 +20,10 @@ struct D3D12TypedOriginComputeVariant : D3D12TypedOriginBindingVariant {
 };
 
 struct D3D12TypedOriginGraphicsVariant : D3D12TypedOriginBindingVariant {
+  // PIXEL on the binding base selects native graphics table capture (ALL/VS/PS).
   D3D12TypedOriginGraphicsVariant() { visibility = D3D12_SHADER_VISIBILITY_PIXEL; }
+  // Records are concatenated VS then PS; each shader still indexes from zero.
+  uint32_t vertex_binding_count = 0;
   WMT::Reference<WMT::RenderPipelineState> pso;
 };
 

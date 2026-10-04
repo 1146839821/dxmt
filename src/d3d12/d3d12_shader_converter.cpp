@@ -1830,27 +1830,38 @@ ConvertD3D12ComputeShader(
   );
 }
 
-HRESULT ConvertD3D12TypedOriginComputeShader(
+static HRESULT ConvertD3D12TypedOriginStage(
     const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
-    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities) {
-  if (shader.visibility != D3D12_SHADER_VISIBILITY_ALL || shader.bytecode.empty() ||
+    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities,
+    D3D12_SHADER_VISIBILITY visibility, uint32_t stage) {
+  if (shader.visibility != visibility || shader.bytecode.empty() ||
       shader.bindings.empty() || shader.bindings.size() > 64 || root.bytecode.empty())
     return E_INVALIDARG;
   const D3D12_SHADER_BYTECODE bytecode = {shader.bytecode.data(), shader.bytecode.size()};
   return ConvertD3D12ShaderInternal(
-      ClassifyD3D12Shader(bytecode), bytecode, DXMT_MSC_STAGE_COMPUTE, nullptr, false, converted,
+      ClassifyD3D12Shader(bytecode), bytecode, stage, nullptr, false, converted,
       root.bytecode.data(), root.bytecode.size(), nullptr, 0, nullptr, 0, msc_capabilities, &shader);
+}
+
+HRESULT ConvertD3D12TypedOriginComputeShader(
+    const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
+    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities) {
+  return ConvertD3D12TypedOriginStage(shader, root, converted, msc_capabilities,
+      D3D12_SHADER_VISIBILITY_ALL, DXMT_MSC_STAGE_COMPUTE);
 }
 
 HRESULT ConvertD3D12TypedOriginPixelShader(
     const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
     D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities) {
-  if (shader.visibility != D3D12_SHADER_VISIBILITY_PIXEL || shader.bytecode.empty() ||
-      shader.bindings.empty() || shader.bindings.size() > 64 || root.bytecode.empty()) return E_INVALIDARG;
-  const D3D12_SHADER_BYTECODE bytecode = {shader.bytecode.data(), shader.bytecode.size()};
-  return ConvertD3D12ShaderInternal(
-      ClassifyD3D12Shader(bytecode), bytecode, DXMT_MSC_STAGE_FRAGMENT, nullptr, false, converted,
-      root.bytecode.data(), root.bytecode.size(), nullptr, 0, nullptr, 0, msc_capabilities, &shader);
+  return ConvertD3D12TypedOriginStage(shader, root, converted, msc_capabilities,
+      D3D12_SHADER_VISIBILITY_PIXEL, DXMT_MSC_STAGE_FRAGMENT);
+}
+
+HRESULT ConvertD3D12TypedOriginVertexShader(
+    const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
+    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities) {
+  return ConvertD3D12TypedOriginStage(shader, root, converted, msc_capabilities,
+      D3D12_SHADER_VISIBILITY_VERTEX, DXMT_MSC_STAGE_VERTEX);
 }
 
 HRESULT

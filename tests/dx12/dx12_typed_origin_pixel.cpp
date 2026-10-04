@@ -21,14 +21,18 @@ static bool Load(const wchar_t *path, std::vector<unsigned char> &bytes) {
   CloseHandle(file); return ok;
 }
 
-enum class DrawMode { Typed, RejectTypedVS, Ordinary, RejectMinMaxSwitch };
+enum class DrawMode { Typed, RejectHiddenVS, Ordinary, RejectMinMaxSwitch, VertexOnly, Combined };
 
 static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
     const std::vector<unsigned char> &ps, const std::vector<unsigned char> &ordinary,
-    bool live, bool pixel_visibility, DrawMode mode = DrawMode::Typed) {
-  const bool reject_typed_vs = mode == DrawMode::RejectTypedVS;
+    bool live, bool pixel_visibility, DrawMode mode = DrawMode::Typed,
+    const std::vector<unsigned char> *ordinary_vs = nullptr) {
+  const bool reject_typed_vs = mode == DrawMode::RejectHiddenVS;
   const bool reject_minmax_switch = mode == DrawMode::RejectMinMaxSwitch;
   const bool ordinary_only = mode == DrawMode::Ordinary;
+  const bool vertex_only = mode == DrawMode::VertexOnly;
+  const bool vertex_origin = vertex_only || mode == DrawMode::Combined;
+  const bool disjoint = vertex_origin && pixel_visibility;
   D3D12_COMMAND_QUEUE_DESC qd = {}; ID3D12CommandQueue *raw_queue = nullptr;
   if (!Check(device->CreateCommandQueue(&qd, IID_PPV_ARGS(&raw_queue)), "queue")) return false;
   OwnedCOM<ID3D12CommandQueue> queue(raw_queue);
@@ -84,7 +88,7 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
     Check(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&raw)), "heap");
     return OwnedCOM<ID3D12DescriptorHeap>(raw);
   };
-  auto resources = heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 2, true);
+  auto resources = heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, disjoint ? 3 : 2, true);
   auto rtvs = heap(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1, false);
   if (!resources || !rtvs) return false;
   const auto cpu = resources->GetCPUDescriptorHandleForHeapStart();
@@ -93,6 +97,10 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
   srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER; srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
   srv.Buffer.FirstElement = 1; srv.Buffer.NumElements = 2;
   device->CreateShaderResourceView(first.get(), &srv, cpu);
+  auto vertex_cpu = uav_cpu;
+  vertex_cpu.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+  auto vertex_srv = srv; vertex_srv.Buffer.FirstElement = 2; vertex_srv.Buffer.NumElements = 1;
+  if (disjoint) device->CreateShaderResourceView(first.get(), &vertex_srv, vertex_cpu);
   D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {}; uav.Format = DXGI_FORMAT_R32_UINT;
   uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER; uav.Buffer.FirstElement = 1; uav.Buffer.NumElements = 2;
   device->CreateUnorderedAccessView(output.get(), nullptr, &uav, uav_cpu);
@@ -102,13 +110,17 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
   D3D12_DESCRIPTOR_RANGE1 ranges[] = {
       {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, flags, 0},
       {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, flags, 1}};
-  D3D12_ROOT_PARAMETER1 parameters[2] = {}; parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  D3D12_ROOT_PARAMETER1 parameters[3] = {}; parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
   parameters[0].DescriptorTable = {2, ranges};
   parameters[0].ShaderVisibility = pixel_visibility ? D3D12_SHADER_VISIBILITY_PIXEL : D3D12_SHADER_VISIBILITY_ALL;
   parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
   parameters[1].Constants = {3, 0, 1}; parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+  D3D12_DESCRIPTOR_RANGE1 vertex_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, flags, 0};
+  parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  parameters[2].DescriptorTable = {1, &vertex_range};
+  parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
   D3D12_VERSIONED_ROOT_SIGNATURE_DESC rd = {}; rd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-  rd.Desc_1_1.NumParameters = 2; rd.Desc_1_1.pParameters = parameters;
+  rd.Desc_1_1.NumParameters = disjoint ? 3 : 2; rd.Desc_1_1.pParameters = parameters;
   if (ordinary_only) { rd.Desc_1_1.NumParameters = 1; rd.Desc_1_1.pParameters = parameters + 1; }
   ID3DBlob *raw_blob = nullptr;
   if (!Check(D3D12SerializeVersionedRootSignature(&rd, &raw_blob, nullptr), "serialize")) return false;
@@ -123,8 +135,13 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
   pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
   pd.RasterizerState.DepthClipEnable = TRUE; pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
   ID3D12PipelineState *raw_pso = nullptr;
-  if (!Check(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&raw_pso)), "pso")) return false;
+  const auto pso_hr = device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&raw_pso));
   OwnedCOM<ID3D12PipelineState> pso(raw_pso);
+  if (reject_typed_vs && (pso_hr == E_NOTIMPL || pso_hr == E_INVALIDARG)) {
+    std::puts("PIXEL_ORIGIN typed VS hidden by pixel visibility rejected at PSO PASS (no GPU submission)");
+    return true;
+  }
+  if (!Check(pso_hr, "pso")) return false;
   auto ordinary_rd = rd; ordinary_rd.Desc_1_1.NumParameters = 1; ordinary_rd.Desc_1_1.pParameters = parameters + 1;
   raw_blob = nullptr;
   if (!Check(D3D12SerializeVersionedRootSignature(&ordinary_rd, &raw_blob, nullptr), "ordinary serialize")) return false;
@@ -132,6 +149,7 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
   if (!Check(device->CreateRootSignature(0, ordinary_blob->GetBufferPointer(), ordinary_blob->GetBufferSize(),
       IID_PPV_ARGS(&raw_root)), "ordinary root")) return false;
   OwnedCOM<ID3D12RootSignature> ordinary_root(raw_root); pd.pRootSignature = ordinary_root.get();
+  if (ordinary_vs) pd.VS = {ordinary_vs->data(), ordinary_vs->size()};
   pd.PS = {ordinary.data(), ordinary.size()}; raw_pso = nullptr;
   if (!reject_typed_vs && !Check(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&raw_pso)), "ordinary pso")) return false;
   OwnedCOM<ID3D12PipelineState> ordinary_pso(raw_pso);
@@ -153,6 +171,11 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
   list->SetGraphicsRootSignature(root.get()); ID3D12DescriptorHeap *heaps[] = {resources.get()};
   list->SetDescriptorHeaps(1, heaps);
   if (!ordinary_only) list->SetGraphicsRootDescriptorTable(0, resources->GetGPUDescriptorHandleForHeapStart());
+  if (disjoint) {
+    auto vertex_gpu = resources->GetGPUDescriptorHandleForHeapStart();
+    vertex_gpu.ptr += 2 * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    list->SetGraphicsRootDescriptorTable(2, vertex_gpu);
+  }
   list->SetGraphicsRoot32BitConstant(ordinary_only ? 0 : 1, 0xabc123, 0);
   list->OMSetRenderTargets(1, &rtv, FALSE, nullptr); list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   D3D12_VIEWPORT viewport = {0, 0, 2, 1, 0, 1}; D3D12_RECT rect = {0, 0, 2, 1};
@@ -163,7 +186,7 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
   if (reject_typed_vs || reject_minmax_switch) {
     const bool rejected = FAILED(list->Close());
     if (rejected) std::puts(reject_typed_vs ?
-        "PIXEL_ORIGIN typed VS + ordinary PS rejected PASS (no GPU submission)" :
+        "PIXEL_ORIGIN typed VS hidden by pixel visibility rejected PASS (no GPU submission)" :
         "PIXEL_ORIGIN late MinMax override rejected PASS (no GPU submission)");
     return rejected;
   }
@@ -182,29 +205,50 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
   if (!Check(list->Close(), "close")) return false;
   for (unsigned pass = 0; pass < 4; ++pass) {
     const bool replacement = live && (pass % 2 == 0);
-    if (live) device->CreateShaderResourceView(replacement ? second.get() : first.get(), &srv, cpu);
-    const UINT x = ordinary_only ? 77 : replacement ? 40 : 20, y = ordinary_only ? 77 : replacement ? 56 : 36;
+    auto current_srv = srv;
+    if (vertex_origin && replacement) {
+      current_srv.Buffer.FirstElement = 2;
+      current_srv.Buffer.NumElements = 1;
+    }
+    if (live) device->CreateShaderResourceView(replacement ? second.get() : first.get(), &current_srv, cpu);
+    // Deliberately swap the VS and PS replacements. Colliding t0 identities must
+    // remain distinct, with different FirstElement/count and shader record counts.
+    auto current_vertex_srv = vertex_srv;
+    if (replacement) { current_vertex_srv.Buffer.FirstElement = 1; current_vertex_srv.Buffer.NumElements = 2; }
+    if (disjoint && live)
+      device->CreateShaderResourceView(replacement ? first.get() : second.get(), &current_vertex_srv, vertex_cpu);
+    const UINT vertex_value = disjoint ? (replacement ? 75 : live ? 49 : 29) : (replacement ? 49 : 75);
+    const UINT vertex_term = vertex_origin ? vertex_value * 10 : 0;
+    const UINT source_x = replacement ? vertex_origin ? 49 : 37 : 17;
+    const UINT source_y = replacement ? vertex_origin ? 0 : 49 : 29;
+    const UINT x = ordinary_only ? 77 : vertex_only ? vertex_term : vertex_term + source_x + init[1];
+    const UINT y = ordinary_only ? 77 : vertex_only ? vertex_term + 1 : vertex_term + source_y + init[2];
     if (!execute(list.get(), pass + 1)) return false;
     void *mapped = nullptr;
     if (!Check(readback->Map(0, nullptr, &mapped), "readback")) return false;
     const auto *words = static_cast<const UINT *>(mapped);
-    const bool ok = words[0] == init[0] && words[1] == (ordinary_only ? init[1] : x + 100) &&
-        words[2] == (ordinary_only ? init[2] : y + 100) &&
+    const bool unchanged_uav = ordinary_only || vertex_only;
+    const bool ok = words[0] == init[0] && words[1] == (unchanged_uav ? init[1] : x + 100) &&
+        words[2] == (unchanged_uav ? init[2] : y + 100) &&
         words[3] == init[3] && words[128] == x && words[129] == 77;
     if (!ok) std::printf("PIXEL_ORIGIN mismatch static=%u pixel=%u pass=%u values=%08x,%u,%u,%08x rt=%u,%u\n",
         !live, pixel_visibility, pass, words[0], words[1], words[2], words[3], words[128], words[129]);
     readback->Unmap(0, nullptr); if (!ok) return false;
-    std::printf("PIXEL_ORIGIN PASS live=%u pixel=%u pass=%u values=%u,%u guards=preserved\n", live, pixel_visibility, pass, x, y);
+    std::printf("PIXEL_ORIGIN PASS live=%u pixel=%u vertex=%u vertex_only=%u pass=%u values=%u,%u guards=preserved\n",
+        live, pixel_visibility, vertex_origin, vertex_only, pass, x, y);
   }
   return true;
 }
 
 int wmain(int argc, wchar_t **argv) {
+  const bool embedded = argc == 8 && !wcscmp(argv[7], L"--stages-embedded");
+  const bool stages = argc == 8 && (!wcscmp(argv[7], L"--stages") || !wcscmp(argv[7], L"--stages-auto") || embedded);
   const bool minmax_switch = argc == 7 && !wcscmp(argv[6], L"--minmax-switch");
-  const bool automatic = argc == 7 && (!wcscmp(argv[6], L"--auto") || minmax_switch);
+  const bool automatic = (argc == 7 && (!wcscmp(argv[6], L"--auto") || minmax_switch)) ||
+      (stages && !wcscmp(argv[7], L"--stages-auto"));
   const bool ordinary_only = argc == 7 && !wcscmp(argv[6], L"--ordinary");
-  if (argc != 6 && !automatic && !ordinary_only) return 1;
-  std::vector<unsigned char> vs, ps, ordinary, typed_vs;
+  if (argc != 6 && !automatic && !ordinary_only && !stages) return 1;
+  std::vector<unsigned char> vs, ps, ordinary, typed_vs, vertex_ps;
   if (!Load(argv[1], vs) || !Load(argv[2], ps) || !Load(argv[3], ordinary) ||
       !Load(argv[4], typed_vs) || !SetEnvironmentVariableW(L"DXMT_TYPED_ORIGIN_DXC_DIRECTORY",
           automatic || ordinary_only ? nullptr : argv[5]) ||
@@ -213,6 +257,16 @@ int wmain(int argc, wchar_t **argv) {
   ID3D12Device *raw = nullptr;
   if (!Check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&raw)), "device")) return 1;
   OwnedCOM<ID3D12Device> device(raw);
+  if (stages) {
+    if (!Load(argv[6], vertex_ps)) return 1;
+    for (bool live : {false, true}) for (bool disjoint : {false, true}) {
+      if (embedded && (live || disjoint)) continue;
+      if (!Run(device.get(), typed_vs, vertex_ps, ordinary, live, disjoint, DrawMode::VertexOnly, &vs) ||
+          !Run(device.get(), typed_vs, ps, ordinary, live, disjoint, DrawMode::Combined, &vs)) return 1;
+    }
+    std::puts(embedded ? "typed-origin matching embedded VS/PS GPU PASS (8 draws)" :
+        "typed-origin native VS/PS GPU PASS (32 draws)"); return 0;
+  }
   if (minmax_switch) return Run(device.get(), vs, ps, ordinary, false, false, DrawMode::RejectMinMaxSwitch) ? 0 : 1;
   if (ordinary_only) {
     if (!Run(device.get(), vs, ordinary, ordinary, false, false, DrawMode::Ordinary)) return 1;
@@ -220,6 +274,6 @@ int wmain(int argc, wchar_t **argv) {
   }
   for (bool live : {false, true}) for (bool pixel : {false, true})
     if (!Run(device.get(), vs, ps, ordinary, live, pixel)) return 1;
-  if (!Run(device.get(), typed_vs, ordinary, ordinary, false, false, DrawMode::RejectTypedVS)) return 1;
+  if (!Run(device.get(), typed_vs, ordinary, ordinary, false, true, DrawMode::RejectHiddenVS)) return 1;
   std::puts("typed-origin production pixel GPU PASS (16 draws)"); return 0;
 }

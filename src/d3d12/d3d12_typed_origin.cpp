@@ -342,10 +342,11 @@ HRESULT PrepareD3D12TypedOriginShader(
     const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
     D3D12TypedOriginShader &prepared, std::string &diagnostics, D3D12_SHADER_VISIBILITY visibility) {
   try {
-    if (visibility != D3D12_SHADER_VISIBILITY_ALL && visibility != D3D12_SHADER_VISIBILITY_PIXEL)
+    if (visibility != D3D12_SHADER_VISIBILITY_ALL && visibility != D3D12_SHADER_VISIBILITY_PIXEL &&
+        visibility != D3D12_SHADER_VISIBILITY_VERTEX)
       return E_INVALIDARG;
     const auto hr = PrepareShaderInternal<TypedOriginPreparation>(shader, dxc_directory, prepared, diagnostics,
-        visibility == D3D12_SHADER_VISIBILITY_PIXEL ? 0 : 5);
+        visibility == D3D12_SHADER_VISIBILITY_PIXEL ? 0 : visibility == D3D12_SHADER_VISIBILITY_VERTEX ? 1 : 5);
     if (SUCCEEDED(hr)) prepared.visibility = visibility;
     return hr;
   } catch (const std::bad_alloc &) {

@@ -350,6 +350,10 @@ HRESULT ConvertD3D12TypedOriginPixelShader(
     const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
     D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities);
 
+HRESULT ConvertD3D12TypedOriginVertexShader(
+    const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
+    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities);
+
 HRESULT ConvertD3D12MinMaxComputeShader(
     const D3D12MinMaxShader &shader, const D3D12MinMaxRoot &root,
     D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities);

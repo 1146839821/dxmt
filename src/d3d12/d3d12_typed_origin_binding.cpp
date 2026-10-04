@@ -146,6 +146,18 @@ HRESULT MaterializeD3D12TypedOriginDispatch(
   try {
     if (!device || !dispatch.variant || !dispatch.heap) return E_INVALIDARG;
     const auto &variant = *dispatch.variant;
+    const auto *graphics = dispatch.graphics_variant;
+    if (variant.bindings.empty() || variant.locations.size() != variant.bindings.size() ||
+        dispatch.argument_template.size() != variant.root.argument_buffer_size) return E_INVALIDARG;
+    if (graphics) {
+      if (dispatch.variant != graphics || dispatch.compute_variant || dispatch.indirect_data ||
+          graphics->vertex_binding_count > variant.bindings.size() || graphics->vertex_binding_count > 64 ||
+          variant.bindings.size() - graphics->vertex_binding_count > 64) return E_INVALIDARG;
+    } else if (dispatch.variant != dispatch.compute_variant || variant.bindings.size() > 64) return E_INVALIDARG;
+    // An ordinary stage does not consume the private CBV. Keep the original
+    // single-TLAB cost for pixel-only and vertex-only origin variants.
+    const bool split_arguments = graphics && graphics->vertex_binding_count &&
+        graphics->vertex_binding_count < variant.bindings.size();
     auto candidate = std::make_shared<D3D12TypedOriginSubmissionBinding>();
     std::unordered_map<UINT, size_t> positions;
     std::vector<UINT> indices;
@@ -161,6 +173,10 @@ HRESULT MaterializeD3D12TypedOriginDispatch(
     if (live.size() != indices.size()) return E_FAIL;
     const auto align = [](uint64_t value) { return (value + 255) & ~uint64_t(255); };
     uint64_t total = align(variant.root.argument_buffer_size);
+    if (split_arguments) {
+      candidate->fragment_argument_offset = total;
+      total += align(variant.root.argument_buffer_size);
+    }
     const uint64_t records_offset = total;
     total += variant.bindings.size() * 16;
     std::vector<uint64_t> table_offsets;
@@ -237,6 +253,18 @@ HRESULT MaterializeD3D12TypedOriginDispatch(
         retain(snapshot.acceleration_structure_header.handle, usage);
         candidate->snapshots.push_back(snapshot);
       }
+    }
+    if (split_arguments) {
+      // All application root arguments and shared table pointers are identical.
+      // Only the private CBV differs: each lowered stage indexes its own records
+      // from zero. Keep both copies in submission-owned immutable storage.
+      auto *fragment = memory + candidate->fragment_argument_offset;
+      std::memcpy(fragment, memory, variant.root.argument_buffer_size);
+      const uint64_t vertex_records = graphics->vertex_binding_count ? records_address : 0;
+      const uint64_t fragment_records = variant.bindings.size() > graphics->vertex_binding_count ?
+          records_address + uint64_t(graphics->vertex_binding_count) * 16 : 0;
+      std::memcpy(memory + hidden.top_level_offset, &vertex_records, sizeof(vertex_records));
+      std::memcpy(fragment + hidden.top_level_offset, &fragment_records, sizeof(fragment_records));
     }
     if (dispatch.indirect_data) {
       auto payload = *dispatch.indirect_data;
