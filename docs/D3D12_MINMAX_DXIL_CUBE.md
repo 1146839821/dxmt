@@ -1,5 +1,18 @@
 # Task Analysis
 
+## Follow-up footprint analysis
+
+Baseline 879867c, clean worktree. Hypothesis: retaining Cube resource kinds
+while reconstructing interior texel-centre directions can express independent
+DXIL reduction footprints without a flattened 2D view. Evidence: existing
+SampleLevel lowering interprets xyz as planar coordinates; binding remains
+closed for kinds5/9. Expected effect: explicit qualified Cube lowering only,
+with edge remapping and three-face corner reduction. Risks: face orientation,
+point face ties, excluded tap execution and Cube offset legality. Validation:
+native LLVM verification and focused structural checks, both builds; production
+binding must stay closed until regenerated DXIL/MSC/GPU qualification. No AIR,
+descriptor ABI, capability, game deployment or feature-level change.
+
 ## Branch / Baseline / Local Commits
 
 `feat/d3d12-1`, clean `a8e52b0`, 122 local commits beyond read-only
@@ -117,3 +130,45 @@ incomplete as explicitly recorded. `git diff --check` passes.
 
 Local commit reported at handoff; NOT PUSHED. Continue independent Cube
 footprint lowering and bind it only after regeneration/MSC/GPU verification.
+
+# Follow-up Task Result: independent footprint primitive
+
+Explicit qualified Cube mode in `LowerReductionSampleLevel` now preserves the
+original Cube handle and array layer. Scalar DXIL operations implement signed
+face bases with Z/Y/X ties, interior point centres, exact edge projection to an
+adjacent face, and guarded three-face corner union. Existing planar callers
+default to non-cube mode. All three generated offsets are undefined, and input
+nonzero offsets / undefined xyz / incompatible dimensions reject before mutation.
+No AIR linkage, descriptor ABI or production binding admission was added.
+
+Both Cube/CubeArray-oriented native functions verify: 24 static point-call
+sites, 24 conditional branches and three dimensions queries per function;
+handle/layer preservation and no fast-math. A test-only generated-CFG evaluator
+adds 14 reduction-value and 10 exact-routing probes per function: **48 probes
+per build, 96 total**, in addition to existing gradient probes. Routing probes
+use spatially distinct values on every signed face and assert exact visited
+texel identities with multiplicities for positive/negative seams and three-face
+corner union. Native samples execute on block visitation even when their result
+does not affect the extrema. Unknown evaluator operations fail the test.
+
+Both native executables and LLVM15 `opt -passes=verify -disable-output` pass.
+Evidence: `/Users/zhangbo/.cache/dxmt-dxil-cube-footprint.68NMy9/normal.ll`
+and `no-private.ll`. Both focused and full default builds finish; host suites
+remain 5/5 in each configuration. These CPU double-arithmetic / synthetic-sampler
+checks are not float32 precision qualification, regenerated DXIL validation,
+MSC acceptance or real GPU semantics. No Wine/game run or DLL deployment.
+
+Standards source review found no hard breach; clarified inverse-basis names.
+The optional parallel-basis-table smell is retained: compact fixed scalar lookup
+tables keep normal/U/V transform data visible, with signed-face routing probes.
+Spec review identified two test gaps (executed tap tracking and spatial face
+orientation / corner union); added exact routing coverage as described above.
+Follow-up source review closed both findings. The evaluator rejects unsupported
+operations when evaluated and SampleLevel calls without component extracts;
+it is not a general interpreter that rejects every unused unknown call.
+Reviewers inspect source only; test commands are run by the main agent.
+
+Production resource kinds5/9 remain rejected. Next: connect paired binding and
+all-three-axis implicit gradients, then regenerated DXIL validation, MSC compile
+and isolated real GPU readbacks before opening runtime admission. Full MinMax,
+FL12_0 and FL12_1 remain unqualified. Local commit only; never pushed.

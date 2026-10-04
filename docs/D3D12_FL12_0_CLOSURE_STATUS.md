@@ -505,3 +505,10 @@ arithmetic probes in both builds. Production Cube/CubeArray binding remains
 rejected: direction-space footprints, seams/corners, regeneration/MSC/GPU and
 captured-view admission are not completed. This is not closure of the DXIL Cube
 gap and does not change any MinMax/capability/FL status.
+
+Independent explicitly qualified DXIL Cube/CubeArray SampleLevel footprint
+primitive now emits face-interior point directions, edge remapping and guarded
+three-face corner union (`D3D12_MINMAX_DXIL_CUBE.md`). Both builds pass verified
+IR and focused synthetic-CFG footprint/routing probes. Production binding still
+rejects Cube kinds5/9: regeneration validation, MSC and real GPU acceptance are
+not completed. This narrows the compiler gap, not full Cube/MinMax or FL closure.

@@ -174,11 +174,12 @@ llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &err
 }
 
 bool LowerReductionSampleLevel(llvm::CallInst &sample,
-    const ReductionSampleState &state, std::string &error, unsigned spatial_dimensions) {
+    const ReductionSampleState &state, std::string &error, unsigned spatial_dimensions, bool cube) {
   using namespace llvm;
   error.clear();
   auto reject = [&](const char *reason) { error = reason; return false; };
   if (spatial_dimensions < 1 || spatial_dimensions > 3) return reject("expected one to three spatial dimensions");
+  if (cube && spatial_dimensions != 2) return reject("cube footprint requires two projected dimensions");
   auto *callee = sample.getCalledFunction();
   if (!callee || callee->getName() != "dx.op.sampleLevel.f32" || sample.arg_size() != 11 ||
       !IsFloat4Status(sample.getType())) return reject("expected float SampleLevel signature");
@@ -194,6 +195,13 @@ bool LowerReductionSampleLevel(llvm::CallInst &sample,
   for (unsigned i = 7; i < 10; ++i)
     if (!sample.getArgOperand(i)->getType()->isIntegerTy(32)) return reject("invalid offsets");
   if (!sample.getArgOperand(10)->getType()->isFloatTy()) return reject("invalid level");
+  if (cube) for (unsigned axis = 0; axis < 3; ++axis) {
+    if (isa<UndefValue>(sample.getArgOperand(3 + axis))) return reject("cube direction requires three defined components");
+    auto *offset = sample.getArgOperand(7 + axis);
+    auto *constant = dyn_cast<ConstantInt>(offset);
+    if (!isa<UndefValue>(offset) && (!constant || !constant->isZero()))
+      return reject("cube sampling offsets are unsupported");
+  }
   if (!state.flags || !state.flags->getType()->isIntegerTy(32) ||
       !state.default_components || !state.default_components->getType()->isIntegerTy(32) ||
       !state.min_lod || !state.min_lod->getType()->isFloatTy() ||
@@ -296,6 +304,134 @@ bool LowerReductionSampleLevel(llvm::CallInst &sample,
   };
   auto level = [&](IRBuilder<> &b, Value *mip) -> Components {
     auto *dims = b.CreateCall(dimensions, {b.getInt32(GetDimensions), state.point_texture, mip});
+    if (cube) {
+      using Direction = std::array<Value *, 3>;
+      // D3D cube face bases: +X, -X, +Y, -Y, +Z, -Z. Keep the
+      // original Cube handle and array coordinate; only xyz is reconstructed.
+      constexpr int normals[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+      constexpr int horizontal[6][3] = {{0,0,-1},{0,0,1},{1,0,0},{1,0,0},{1,0,0},{-1,0,0}};
+      constexpr int vertical[6][3] = {{0,-1,0},{0,-1,0},{0,0,1},{0,0,-1},{0,-1,0},{0,-1,0}};
+      auto face = [&](IRBuilder<> &ir, const Direction &direction) -> Value * {
+        Value *absolute[3];
+        for (unsigned axis = 0; axis < 3; ++axis)
+          absolute[axis] = ir.CreateCall(unary, {ir.getInt32(FAbs), direction[axis]});
+        auto signed_face = [&](unsigned axis, unsigned positive) {
+          return ir.CreateSelect(ir.CreateFCmpOGE(direction[axis], number(0)),
+              ir.getInt32(positive), ir.getInt32(positive + 1));
+        };
+        return ir.CreateSelect(ir.CreateAnd(ir.CreateFCmpOGE(absolute[2], absolute[0]),
+            ir.CreateFCmpOGE(absolute[2], absolute[1])), signed_face(2, 4),
+            ir.CreateSelect(ir.CreateFCmpOGE(absolute[1], absolute[0]), signed_face(1, 2), signed_face(0, 0)));
+      };
+      auto basis = [&](IRBuilder<> &ir, Value *selected, const int values[6][3]) {
+        Direction result;
+        for (unsigned axis = 0; axis < 3; ++axis) {
+          result[axis] = number(values[5][axis]);
+          for (int index = 4; index >= 0; --index)
+            result[axis] = ir.CreateSelect(ir.CreateICmpEQ(selected, ir.getInt32(index)),
+                number(values[index][axis]), result[axis]);
+        }
+        return result;
+      };
+      auto dot = [&](IRBuilder<> &ir, const Direction &a, const Direction &c) -> Value * {
+        Value *result = number(0);
+        for (unsigned axis = 0; axis < 3; ++axis)
+          result = ir.CreateFAdd(result, ir.CreateFMul(a[axis], c[axis]));
+        return result;
+      };
+      auto project = [&](IRBuilder<> &ir, Value *selected, const Direction &direction) {
+        auto *major = dot(ir, direction, basis(ir, selected, normals));
+        std::array<Value *, 2> result;
+        result[0] = ir.CreateFMul(number(0.5f), ir.CreateFAdd(number(1),
+            ir.CreateFDiv(dot(ir, direction, basis(ir, selected, horizontal)), major)));
+        result[1] = ir.CreateFMul(number(0.5f), ir.CreateFAdd(number(1),
+            ir.CreateFDiv(dot(ir, direction, basis(ir, selected, vertical)), major)));
+        return result;
+      };
+      auto inverse = [&](IRBuilder<> &ir, Value *selected, Value *u, Value *v) {
+        auto normal = basis(ir, selected, normals);
+        auto u_basis = basis(ir, selected, horizontal), v_basis = basis(ir, selected, vertical);
+        auto *s = ir.CreateFSub(ir.CreateFMul(number(2), u), number(1));
+        auto *r = ir.CreateFSub(ir.CreateFMul(number(2), v), number(1));
+        Direction result;
+        for (unsigned axis = 0; axis < 3; ++axis)
+          result[axis] = ir.CreateFAdd(normal[axis],
+              ir.CreateFAdd(ir.CreateFMul(s, u_basis[axis]), ir.CreateFMul(r, v_basis[axis])));
+        return result;
+      };
+      Direction direction = {sample.getArgOperand(3), sample.getArgOperand(4), sample.getArgOperand(5)};
+      auto *selected = face(b, direction);
+      auto uv = project(b, selected, direction);
+      auto *side = b.CreateUIToFP(b.CreateExtractValue(dims, 0), f32);
+      Value *base[2], *fraction[2];
+      for (unsigned axis = 0; axis < 2; ++axis) {
+        auto *position = b.CreateFSub(b.CreateFMul(uv[axis], side), b.CreateSelect(linear, number(0.5f), number(0)));
+        base[axis] = b.CreateCall(unary, {b.getInt32(Floor), position});
+        fraction[axis] = b.CreateFSub(position, base[axis]);
+      }
+      auto tap = [&](IRBuilder<> &ir, unsigned corner) -> Components {
+        Value *position[2], *outside[2], *boundary[2], *sign[2];
+        for (unsigned axis = 0; axis < 2; ++axis) {
+          position[axis] = ir.CreateFAdd(base[axis], number((corner >> axis) & 1u));
+          auto *negative = ir.CreateFCmpOLT(position[axis], number(0));
+          outside[axis] = ir.CreateOr(negative, ir.CreateFCmpOGE(position[axis], side));
+          sign[axis] = ir.CreateSelect(negative, number(-1), number(1));
+          boundary[axis] = ir.CreateSelect(outside[axis], ir.CreateSelect(negative, number(0), number(1)),
+              ir.CreateFDiv(ir.CreateFAdd(position[axis], number(0.5f)), side));
+        }
+        auto query = inverse(ir, selected, boundary[0], boundary[1]);
+        auto h = basis(ir, selected, horizontal), v = basis(ir, selected, vertical);
+        for (unsigned axis = 0; axis < 3; ++axis) {
+          h[axis] = ir.CreateFMul(h[axis], sign[0]);
+          v[axis] = ir.CreateFMul(v[axis], sign[1]);
+        }
+        auto *horizontal_face = face(ir, h), *vertical_face = face(ir, v);
+        auto *primary = ir.CreateSelect(ir.CreateAnd(linear, ir.CreateOr(outside[0], outside[1])),
+            ir.CreateSelect(outside[0], horizontal_face, vertical_face), selected);
+        auto read = [&](IRBuilder<> &reader, Value *target) -> Components {
+          auto coordinates = project(reader, target, query);
+          for (auto &coordinate : coordinates) {
+            auto *texel = reader.CreateCall(unary, {reader.getInt32(Floor), reader.CreateFMul(coordinate, side)});
+            auto *bounded_texel = operation(reader, FMax, number(0),
+                operation(reader, FMin, texel, reader.CreateFSub(side, number(1))));
+            coordinate = reader.CreateFDiv(reader.CreateFAdd(bounded_texel, number(0.5f)), side);
+          }
+          auto center = inverse(reader, target, coordinates[0], coordinates[1]);
+          SmallVector<Value *, 11> arguments(sample.args());
+          arguments[1] = state.point_texture;
+          for (unsigned axis = 0; axis < 3; ++axis) {
+            arguments[3 + axis] = center[axis];
+            arguments[7 + axis] = UndefValue::get(i32);
+          }
+          arguments[10] = reader.CreateUIToFP(mip, f32);
+          auto *value = reader.CreateCall(callee, arguments);
+          Components result;
+          for (unsigned component = 0; component < 4; ++component) result[component] = reader.CreateExtractValue(value, component);
+          return result;
+        };
+        auto result = read(ir, primary);
+        auto *corner_crossing = ir.CreateAnd(linear, ir.CreateAnd(outside[0], outside[1]));
+        auto previous = result;
+        result = OptionalTap(ir, corner_crossing, previous, [&](IRBuilder<> &reader) {
+          return reduce_values(reader, previous, read(reader, vertical_face));
+        });
+        previous = result;
+        return OptionalTap(ir, corner_crossing, previous, [&](IRBuilder<> &reader) {
+          return reduce_values(reader, previous, read(reader, selected));
+        });
+      };
+      auto result = tap(b, 0);
+      for (unsigned corner = 1; corner < 4; ++corner) {
+        Value *contributes = linear;
+        for (unsigned axis = 0; axis < 2; ++axis)
+          if (corner & (1u << axis)) contributes = b.CreateAnd(contributes, b.CreateFCmpOGT(fraction[axis], number(0)));
+        auto previous = result;
+        result = OptionalTap(b, contributes, previous, [&](IRBuilder<> &reader) {
+          return reduce_values(reader, previous, tap(reader, corner));
+        });
+      }
+      return result;
+    }
     Value *size[3], *base[3], *fraction[3];
     for (unsigned axis = 0; axis < spatial_dimensions; ++axis) {
       size[axis] = b.CreateUIToFP(b.CreateExtractValue(dims, axis), f32);

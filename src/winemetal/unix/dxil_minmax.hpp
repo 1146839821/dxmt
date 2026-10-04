@@ -29,8 +29,12 @@ struct ReductionSampleState {
 // reusing a nonzero-clamp descriptor would re-clamp each generated integer tap.
 // Address values use D3D's 1..5 encoding and must be validated by the caller.
 // No production admission may use this until binding/provenance is connected.
+// Explicit cube mode requires spatial_dimensions=2, finite nonzero xyz and
+// zero/undefined offsets. It preserves the Cube/CubeArray handle and layer,
+// reconstructs face-interior directions, and does not open binding admission.
 bool LowerReductionSampleLevel(llvm::CallInst &sample,
-    const ReductionSampleState &state, std::string &error, unsigned spatial_dimensions = 2);
+    const ReductionSampleState &state, std::string &error, unsigned spatial_dimensions = 2,
+    bool cube = false);
 
 // Emit the view-relative isotropic LOD before a qualified float 1D/2D/3D (or array)
 // SampleGrad. Mirrors AIR's normalized major-axis algorithm. The caller still

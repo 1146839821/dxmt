@@ -71,6 +71,125 @@ static double EvaluateCubeLOD(llvm::Value *root, llvm::Function &function,
   return evaluate(root);
 }
 
+// Execute the generated CFG against a synthetic two-by-two cube. This catches
+// incorrect face routing and skipped/extra taps; it is not a GPU sampler oracle.
+static double EvaluateCubeFootprint(llvm::Function &function, std::array<float, 3> direction,
+    unsigned flags, bool &valid, std::unordered_map<unsigned, unsigned> &visited, bool unique = false) {
+  using namespace llvm;
+  std::unordered_map<Value *, double> values;
+  for (unsigned axis = 0; axis < 3; ++axis) values[function.getArg(2 + axis)] = direction[axis];
+  values[function.getArg(5)] = flags;
+  values[function.getArg(6)] = 0; values[function.getArg(7)] = 100;
+  values[function.getArg(8)] = 0; values[function.getArg(9)] = 0;
+  std::function<double(Value *)> evaluate = [&](Value *value) -> double {
+    if (auto found = values.find(value); found != values.end()) return found->second;
+    if (auto *constant = dyn_cast<ConstantFP>(value)) return constant->getValueAPF().convertToDouble();
+    if (auto *constant = dyn_cast<ConstantInt>(value)) return constant->getZExtValue();
+    if (auto *select = dyn_cast<SelectInst>(value))
+      return values[value] = evaluate(select->getCondition()) ? evaluate(select->getTrueValue()) : evaluate(select->getFalseValue());
+    if (auto *extract = dyn_cast<ExtractValueInst>(value)) {
+      auto *call = dyn_cast<CallInst>(extract->getAggregateOperand());
+      if (call && call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.getDimensions")
+        return values[value] = *extract->idx_begin() == 3 ? 1 : 2;
+      if (call && call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32") {
+        if (values.count(call)) return values[value] = values[call];
+        double xyz[3];
+        for (unsigned axis = 0; axis < 3; ++axis) xyz[axis] = evaluate(call->getArgOperand(3 + axis));
+        const unsigned axis = std::fabs(xyz[2]) >= std::fabs(xyz[0]) && std::fabs(xyz[2]) >= std::fabs(xyz[1]) ? 2 :
+            std::fabs(xyz[1]) >= std::fabs(xyz[0]) ? 1 : 0;
+        const unsigned face = axis * 2 + (xyz[axis] < 0);
+        double u = 0, v = 0;
+        switch (face) {
+        case 0: u = -xyz[2]; v = -xyz[1]; break;
+        case 1: u = xyz[2]; v = -xyz[1]; break;
+        case 2: u = xyz[0]; v = xyz[2]; break;
+        case 3: u = xyz[0]; v = -xyz[2]; break;
+        case 4: u = xyz[0]; v = -xyz[1]; break;
+        case 5: u = -xyz[0]; v = -xyz[1]; break;
+        }
+        const unsigned x = u >= 0, y = v >= 0;
+        const unsigned identity = face * 4 + y * 2 + x;
+        ++visited[identity];
+        if (unique) return values[value] = identity;
+        const double constants[] = {0,112,32,160,80,144};
+        if (face) return values[value] = constants[face];
+        const double texels[] = {16,64,192,240};
+        return values[value] = texels[y * 2 + x];
+      }
+    }
+    if (auto *call = dyn_cast<CallInst>(value)) {
+      auto *callee = call->getCalledFunction();
+      auto *opcode = dyn_cast<ConstantInt>(call->getArgOperand(0));
+      if (callee && opcode && callee->getName() == "dx.op.unary.f32") {
+        const double x = evaluate(call->getArgOperand(1));
+        if (opcode->getZExtValue() == 6) return values[value] = std::fabs(x);
+        if (opcode->getZExtValue() == 27) return values[value] = std::floor(x);
+      }
+      if (callee && opcode && callee->getName() == "dx.op.binary.f32") {
+        const double x = evaluate(call->getArgOperand(1)), y = evaluate(call->getArgOperand(2));
+        if (opcode->getZExtValue() == 35) return values[value] = std::fmax(x, y);
+        if (opcode->getZExtValue() == 36) return values[value] = std::fmin(x, y);
+      }
+    }
+    if (auto *compare = dyn_cast<CmpInst>(value)) {
+      const double x = evaluate(compare->getOperand(0)), y = evaluate(compare->getOperand(1));
+      switch (compare->getPredicate()) {
+      case CmpInst::FCMP_OGE: return values[value] = x >= y;
+      case CmpInst::FCMP_OGT: return values[value] = x > y;
+      case CmpInst::FCMP_OLT: return values[value] = x < y;
+      case CmpInst::ICMP_EQ: return values[value] = x == y;
+      case CmpInst::ICMP_NE: return values[value] = x != y;
+      default: break;
+      }
+    }
+    if (auto *instruction = dyn_cast<Instruction>(value)) {
+      if (instruction->getOpcode() == Instruction::UIToFP || instruction->getOpcode() == Instruction::FPToUI)
+        return values[value] = evaluate(instruction->getOperand(0));
+      if (isa<BinaryOperator>(instruction)) {
+        const double x = evaluate(instruction->getOperand(0)), y = evaluate(instruction->getOperand(1));
+        switch (instruction->getOpcode()) {
+        case Instruction::FAdd: return values[value] = x + y;
+        case Instruction::FSub: return values[value] = x - y;
+        case Instruction::FMul: return values[value] = x * y;
+        case Instruction::FDiv: return values[value] = x / y;
+        case Instruction::Sub: return values[value] = x - y;
+        case Instruction::Add: return values[value] = x + y;
+        case Instruction::And: return values[value] = unsigned(x) & unsigned(y);
+        case Instruction::Or: return values[value] = unsigned(x) | unsigned(y);
+        default: break;
+        }
+      }
+    }
+    valid = false;
+    return std::numeric_limits<double>::quiet_NaN();
+  };
+  BasicBlock *block = &function.getEntryBlock(), *previous = nullptr;
+  for (unsigned steps = 0; steps < 100 && valid; ++steps) {
+    for (auto &phi : block->phis()) {
+      const int incoming = phi.getBasicBlockIndex(previous);
+      if (incoming < 0) { valid = false; return 0; }
+      values[&phi] = evaluate(phi.getIncomingValue(incoming));
+    }
+    // Execute samples on block visitation, even if their result is discarded.
+    for (auto &instruction : *block)
+      if (auto *call = dyn_cast<CallInst>(&instruction)) {
+        if (call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32") {
+          ExtractValueInst *component = nullptr;
+          for (auto *user : call->users()) if ((component = dyn_cast<ExtractValueInst>(user))) break;
+          if (!component) { valid = false; return 0; }
+          values[call] = evaluate(component);
+        }
+      }
+    if (auto *result = dyn_cast<ReturnInst>(block->getTerminator())) return evaluate(result->getReturnValue());
+    auto *branch = dyn_cast<BranchInst>(block->getTerminator());
+    if (!branch) break;
+    previous = block;
+    block = branch->getSuccessor(branch->isConditional() && !evaluate(branch->getCondition()) ? 1 : 0);
+  }
+  valid = false;
+  return 0;
+}
+
 static uint32_t Word(const unsigned char *bytes) {
   return uint32_t(bytes[0]) | uint32_t(bytes[1]) << 8 | uint32_t(bytes[2]) << 16 | uint32_t(bytes[3]) << 24;
 }
@@ -561,6 +680,82 @@ int main(int argc, char **argv) {
       const double observed = EvaluateCubeLOD(lod, *cube, probe.input, valid);
       if (!valid || std::isnan(observed) || (std::isinf(probe.lod) ? observed != probe.lod :
           std::fabs(observed - probe.lod) > 1e-5)) return 1;
+    }
+  }
+  for (unsigned array = 0; array < 2; ++array) {
+    auto *cube = Function::Create(function->getFunctionType(), Function::ExternalLinkage,
+        array ? "footprint_cube_array" : "footprint_cube", module);
+    builder.SetInsertPoint(BasicBlock::Create(context, "entry", cube));
+    auto *layer = array ? static_cast<Value *>(ConstantFP::get(f32, 1)) : UndefValue::get(f32);
+    auto *call = builder.CreateCall(sample, {builder.getInt32(62), cube->getArg(0), cube->getArg(1),
+        cube->getArg(2), cube->getArg(3), cube->getArg(4), layer,
+        UndefValue::get(i32), UndefValue::get(i32), UndefValue::get(i32), ConstantFP::get(f32, 0)});
+    builder.CreateRet(builder.CreateExtractValue(call, 0));
+    dxmt::dxil::ReductionSampleState cube_state{cube->getArg(5), cube->getArg(6), cube->getArg(7),
+        cube->getArg(8), cube->getArg(9), cube->getArg(0), builder.getInt32(3), builder.getInt32(3)};
+    const auto before = cube->getEntryBlock().size(), declarations = module.size();
+    if (dxmt::dxil::LowerReductionSampleLevel(*call, cube_state, error, 3, true) || error.empty()) return 1;
+    call->setArgOperand(5, UndefValue::get(f32));
+    if (dxmt::dxil::LowerReductionSampleLevel(*call, cube_state, error, 2, true) || error.empty()) return 1;
+    call->setArgOperand(5, cube->getArg(4));
+    call->setArgOperand(9, builder.getInt32(1));
+    if (dxmt::dxil::LowerReductionSampleLevel(*call, cube_state, error, 2, true) || error.empty() ||
+        cube->size() != 1 || cube->getEntryBlock().size() != before || module.size() != declarations) return 1;
+    call->setArgOperand(9, UndefValue::get(i32));
+    if (!dxmt::dxil::LowerReductionSampleLevel(*call, cube_state, error, 2, true) || !error.empty() ||
+        verifyModule(module, &errs())) return 1;
+    unsigned taps = 0, branches = 0, queries = 0;
+    for (auto &block : *cube) for (auto &instruction : block) {
+      if (auto *fp = dyn_cast<FPMathOperator>(&instruction)) if (fp->getFastMathFlags().any()) return 1;
+      if (auto *branch = dyn_cast<BranchInst>(&instruction)) branches += branch->isConditional();
+      auto *operation = dyn_cast<CallInst>(&instruction);
+      if (!operation || !operation->getCalledFunction()) continue;
+      if (operation->getCalledFunction()->getName() == "dx.op.getDimensions") ++queries;
+      if (operation->getCalledFunction()->getName() != "dx.op.sampleLevel.f32") continue;
+      ++taps;
+      if (operation->getArgOperand(1) != cube->getArg(0) || operation->getArgOperand(6) != layer) return 1;
+      for (unsigned axis = 0; axis < 3; ++axis)
+        if (!isa<UndefValue>(operation->getArgOperand(7 + axis)) ||
+            isa<UndefValue>(operation->getArgOperand(3 + axis))) return 1;
+    }
+    // Four taps per mip, each with two guarded three-face corner additions.
+    if (taps != 24 || branches != 24 || queries != 3) return 1;
+    struct FootprintProbe { std::array<float, 3> direction; unsigned flags; double expected; };
+    const FootprintProbe probes[] = {
+        {{1,0,0},7,16}, {{1,0,0},15,240},
+        {{-1,0,0},7,112}, {{0,1,0},7,32}, {{0,-1,0},7,160},
+        {{0,0,1},7,80}, {{0,0,-1},7,144},
+        {{1,0,1},7,16}, {{1,0,1},15,192},
+        {{1,1,1},7,16}, {{1,1,1},15,80},
+        {{1,0,1},0,80}, {{10,0,10},7,16}, {{10,0,10},15,192}};
+    for (const auto &probe : probes) {
+      bool valid = true;
+      std::unordered_map<unsigned, unsigned> visited;
+      const double observed = EvaluateCubeFootprint(*cube, probe.direction, probe.flags, valid, visited);
+      if (!valid || observed != probe.expected) {
+        errs() << "cube footprint: expected " << probe.expected << ", observed " << observed << '\n';
+        return 1;
+      }
+    }
+    struct RoutingProbe { std::array<float, 3> direction; unsigned flags; std::unordered_map<unsigned, unsigned> taps; };
+    const RoutingProbe routing[] = {
+        {{1,.5,-.5},0,{{1,1}}}, {{-1,.5,.5},0,{{5,1}}},
+        {{.5,1,-.5},0,{{9,1}}}, {{.5,-1,.5},0,{{13,1}}},
+        {{.5,.5,1},0,{{17,1}}}, {{-.5,.5,-1},0,{{21,1}}},
+        {{1,0,1},7,{{0,1},{2,1},{17,1},{19,1}}},
+        {{-1,0,-1},7,{{4,1},{6,1},{21,1},{23,1}}},
+        {{1,1,1},7,{{0,2},{11,2},{17,2}}},
+        {{1,1,1},15,{{0,2},{11,2},{17,2}}}};
+    for (const auto &probe : routing) {
+      bool valid = true;
+      std::unordered_map<unsigned, unsigned> visited;
+      const double observed = EvaluateCubeFootprint(*cube, probe.direction, probe.flags, valid, visited, true);
+      unsigned expected = probe.taps.begin()->first;
+      for (const auto &[identity, count] : probe.taps)
+        expected = probe.flags & 8 ? std::max(expected, identity) : std::min(expected, identity);
+      if (!valid || observed != expected || visited != probe.taps) {
+        errs() << "cube routing mismatch\n"; return 1;
+      }
     }
   }
   module.print(outs(), nullptr);
