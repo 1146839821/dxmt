@@ -722,6 +722,17 @@ if dxc_command.length() > 0
     build_by_default: false,
   )
   foreach shape : ['cube', 'cube_array']
+    foreach mode : ['sample', 'bias']
+      fragment_defines = shape == 'cube_array' ? ['-D', 'MINMAX_CUBE_ARRAY=1'] : []
+      if mode == 'bias'
+        fragment_defines += ['-D', 'USE_BIAS=1']
+      endif
+      custom_target('dx12_minmax_' + shape + '_fragment_' + mode + '_fixture',
+        input: 'minmax_cube_fragment.hlsl', output: 'minmax_' + shape + '_fragment_' + mode + '.ps.cso',
+        command: dxc_command + ['-E', 'pixel', '-T', 'ps_6_0'] + fragment_defines + ['@INPUT@', '-Fo', '@OUTPUT@'],
+        build_by_default: false,
+      )
+    endforeach
     custom_target('dx12_minmax_' + shape + '_pixel_fixture',
       input: 'minmax_cube_pixel.hlsl', output: 'minmax_' + shape + '.ps.cso',
       command: dxc_command + ['-E', 'main', '-T', 'ps_6_0'] +
@@ -740,6 +751,11 @@ if dxc_command.length() > 0
       )
     endforeach
   endforeach
+  custom_target('dx12_minmax_cube_fragment_vertex_fixture',
+    input: 'minmax_cube_fragment.hlsl', output: 'minmax_cube_fragment.vs.cso',
+    command: dxc_command + ['-E', 'vertex', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
   custom_target('dx12_minmax_line_fixture',
     input: 'minmax_line.hlsl', output: 'minmax_line.cs.cso',
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],

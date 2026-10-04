@@ -17,11 +17,29 @@ static bool root_updates_fixture = false;
 static bool root_buffers_fixture = false;
 static bool implicit_fixture = false;
 static bool implicit_bias_fixture = false;
+static bool cube_fixture = false, cube_array_fixture = false;
 static bool vertex_sampling_fixture = false;
 static bool vertex_only_fixture = false;
 static bool vertex_shared_fixture = false;
 static bool geometry_fixture = false, tessellation_fixture = false;
 static std::vector<uint8_t> geometry_shader, hull_shader, domain_shader;
+
+static D3D12_SHADER_RESOURCE_VIEW_DESC InputView() {
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+  srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  if (cube_array_fixture) {
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+    srv.TextureCubeArray.MipLevels = 2; srv.TextureCubeArray.NumCubes = 2;
+  } else if (cube_fixture) {
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+    srv.TextureCube.MipLevels = 2;
+  } else {
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Texture2D.MipLevels = implicit_fixture ? 2 : 1;
+  }
+  return srv;
+}
 
 static bool Load(const wchar_t *path, std::vector<uint8_t> &bytes) {
   HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -57,7 +75,7 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     CloseHandle(event); return ok;
   };
   D3D12_RESOURCE_DESC buffer_desc = {}; buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  buffer_desc.Width = implicit_fixture ? 2048 : 1024;
+  buffer_desc.Width = cube_fixture ? 3072 : implicit_fixture ? 2048 : 1024;
   buffer_desc.Height = buffer_desc.DepthOrArraySize = buffer_desc.MipLevels = buffer_desc.SampleDesc.Count = 1;
   buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
   D3D12_HEAP_PROPERTIES props = {}; props.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -74,6 +92,12 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
   if (implicit_fixture) {
     const UINT mips[] = {0xff000060, 0xff000090};
     for (unsigned i = 0; i < 2; ++i) std::memcpy(static_cast<uint8_t *>(mapped) + 1024 + i * 512, mips + i, 4);
+  }
+  if (cube_fixture) {
+    const UINT poison[] = {0xff000007, 0xff000007};
+    for (unsigned row = 0; row < 2; ++row)
+      std::memcpy(static_cast<uint8_t *>(mapped) + 2048 + row * 256, poison, sizeof(poison));
+    std::memcpy(static_cast<uint8_t *>(mapped) + 2560, poison, 4);
   }
   upload->Unmap(0, nullptr);
   ID3D12CommandAllocator *raw_allocator = nullptr;
@@ -94,11 +118,23 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     dst.pResource = input; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     src.pResource = upload.get(); src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     src.PlacedFootprint = {i * 512u, {DXGI_FORMAT_R8G8B8A8_UNORM, 2, 2, 1, 256}};
-    upload_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-    if (implicit_fixture) {
-      dst.SubresourceIndex = 1;
-      src.PlacedFootprint = {1024 + i * 512u, {DXGI_FORMAT_R8G8B8A8_UNORM, 1, 1, 1, 256}};
+    const auto base_footprint = src.PlacedFootprint;
+    const unsigned slices = cube_fixture ? (cube_array_fixture ? 12 : 6) : 1;
+    for (unsigned slice = 0; slice < slices; ++slice) {
+      dst.SubresourceIndex = slice * (implicit_fixture ? 2 : 1);
+      src.PlacedFootprint = base_footprint;
+      // +Z of cube1 for arrays, +Z of cube0 otherwise; all other faces are poison.
+      const bool poison = cube_fixture && slice != (cube_array_fixture ? 10u : 4u);
+      if (poison) src.PlacedFootprint.Offset = 2048;
       upload_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+      if (implicit_fixture) {
+        ++dst.SubresourceIndex;
+        src.PlacedFootprint = {1024 + i * 512u, {DXGI_FORMAT_R8G8B8A8_UNORM, 1, 1, 1, 256}};
+        // A 1x1 cube mip's linear footprint can cross faces even away from
+        // cube edges. Keep every target-cube face equal, but poison cube0.
+        if (cube_array_fixture && slice < 6) src.PlacedFootprint.Offset = 2560;
+        upload_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+      }
     }
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
     barrier.Transition.StateAfter = static_cast<D3D12_RESOURCE_STATES>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -186,7 +222,7 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     upload->Unmap(0, nullptr);
   }
   auto rt_desc = texture->GetDesc(); rt_desc.Width = rt_desc.Height = 4; rt_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-  rt_desc.MipLevels = 1;
+  rt_desc.MipLevels = rt_desc.DepthOrArraySize = 1;
   props.Type = D3D12_HEAP_TYPE_DEFAULT;
   ID3D12Resource *raw_rt = nullptr;
   if (!check(device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &rt_desc,
@@ -202,9 +238,7 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
   if (!check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&raw_rtv)), "RTV heap")) return false;
   OwnedCOM<ID3D12DescriptorHeap> rtv(raw_rtv);
   const auto target = rtv->GetCPUDescriptorHandleForHeapStart(); device->CreateRenderTargetView(rt.get(), nullptr, target);
-  D3D12_SHADER_RESOURCE_VIEW_DESC srv = {}; srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-  srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-  srv.Texture2D.MipLevels = implicit_fixture ? 2 : 1;
+  const auto srv = InputView();
   auto cpu = heap->GetCPUDescriptorHandleForHeapStart(); cpu.ptr += 2 * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
   OwnedCOM<ID3D12DescriptorHeap> ordinary_heap, ordinary_samplers;
   if (!static_sampler) {
@@ -363,6 +397,20 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
         expected_r = !static_sampler && x >= 2 ? 128 : static_sampler || !changed ? 16 : 240;
         expected_g = !static_sampler && x >= 2 ? 128 : static_sampler || changed ? 240 : 16;
       }
+      if (cube_fixture) {
+        const bool ordinary = !static_sampler && x >= 2;
+        if (implicit_bias_fixture) expected_r = expected_g = ordinary || !changed ? 96 : 144;
+        else {
+          // The four mip0 texels are affine: 16 + 48*x + 176*y.
+          // Projected texture coordinates are 2*uv - 0.5; all taps are interior.
+          const float fx = 0.25f + (float(x) + 0.5f) * 0.125f;
+          const float fy = 0.25f + (float(y) + 0.5f) * 0.125f;
+          expected_r = ordinary ? unsigned(std::lround(16 + 48 * fx + 176 * fy)) :
+              static_sampler || !changed ? 16 : 224;
+          expected_g = ordinary ? expected_r : static_sampler ? (changed ? 224 : 240) : expected_r;
+          if (static_sampler && changed) expected_r = 32;
+        }
+      }
       const bool untouched = empty && (static_sampler || x < 2);
       unsigned blue = !root_updates_fixture ? 0 : !static_sampler && x >= 2 ? (updates ? 31 : 130) :
           updates ? (submission == 1 ? 38 : 42) : 130;
@@ -486,6 +534,7 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
   texture_desc.Width = texture_desc.Height = 2;
   texture_desc.DepthOrArraySize = texture_desc.MipLevels = texture_desc.SampleDesc.Count = 1;
   texture_desc.MipLevels = implicit_fixture ? 2 : 1;
+  if (cube_fixture) texture_desc.DepthOrArraySize = cube_array_fixture ? 12 : 6;
   texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   ID3D12Resource *raw_texture = nullptr;
   if (FAILED(device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &texture_desc,
@@ -499,9 +548,7 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
   hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
   if (!static_sampler && FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&raw_samplers)))) return false;
   OwnedCOM<ID3D12DescriptorHeap> samplers(raw_samplers);
-  D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
-  srv.Format = texture_desc.Format; srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-  srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; srv.Texture2D.MipLevels = implicit_fixture ? 2 : 1;
+  const auto srv = InputView();
   auto cpu = heap->GetCPUDescriptorHandleForHeapStart();
   device->CreateShaderResourceView(texture.get(), &srv, cpu);
   cpu.ptr += 2 * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -587,9 +634,16 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
 
 int wmain(int argc, wchar_t **argv) {
   if (argc != 4 && argc != 5 && argc != 6 && argc != 7) return 1;
-  if (argc >= 6) {
+  if (argc >= 5) {
     const auto *option = argv[argc - 1];
-    if (!std::wcscmp(option, L"--implicit-sample") ||
+    if (!std::wcscmp(option, L"--cube-sample") || !std::wcscmp(option, L"--cube-bias") ||
+        !std::wcscmp(option, L"--cube-array-sample") || !std::wcscmp(option, L"--cube-array-bias")) {
+      if (argc != 5) return 1;
+      cube_fixture = implicit_fixture = true;
+      cube_array_fixture = !std::wcscmp(option, L"--cube-array-sample") || !std::wcscmp(option, L"--cube-array-bias");
+      implicit_bias_fixture = !std::wcscmp(option, L"--cube-bias") || !std::wcscmp(option, L"--cube-array-bias");
+    } else if (argc == 5) { /* Existing optional sampling-VS path. */ }
+    else if (!std::wcscmp(option, L"--implicit-sample") ||
         !std::wcscmp(option, L"--grad-bias")) implicit_fixture = true;
     else if (!std::wcscmp(option, L"--implicit-bias") || !std::wcscmp(option, L"--level-bias"))
       implicit_fixture = implicit_bias_fixture = true;
@@ -601,14 +655,14 @@ int wmain(int argc, wchar_t **argv) {
     else if (!std::wcscmp(option, L"--tessellation") && argc == 7) tessellation_fixture = true;
     else if (std::wcscmp(option, L"--root-updates")) return 1;
     if (argc == 7 && !tessellation_fixture) return 1;
-    root_updates_fixture = !implicit_fixture && !vertex_sampling_fixture && !geometry_fixture && !tessellation_fixture;
+    root_updates_fixture = argc >= 6 && !implicit_fixture && !vertex_sampling_fixture && !geometry_fixture && !tessellation_fixture;
   }
   if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", argv[3])) return 1;
   std::vector<uint8_t> ps, vs, sampling_vs;
   if (!Load(argv[1], ps) || !Load(argv[2], vs)) return 1;
   if (geometry_fixture && !Load(argv[4], geometry_shader)) return 1;
   if (tessellation_fixture && (!Load(argv[4], hull_shader) || !Load(argv[5], domain_shader))) return 1;
-  if (argc >= 5 && !geometry_fixture && !tessellation_fixture && (!Load(argv[4], sampling_vs) ||
+  if (argc >= 5 && !cube_fixture && !geometry_fixture && !tessellation_fixture && (!Load(argv[4], sampling_vs) ||
       !dxmt::ClassifyD3D12Shader({sampling_vs.data(), sampling_vs.size()}).uses_texture_sampling)) return 1;
   const D3D12_SHADER_BYTECODE pixel = {ps.data(), ps.size()}, vertex = {vs.data(), vs.size()};
   if (dxmt::ClassifyD3D12Shader(pixel).uses_texture_sampling == vertex_only_fixture ||

@@ -1,5 +1,27 @@
 # Task Analysis
 
+## Pixel GPU follow-up analysis
+
+Baseline c9313e6, clean worktree. Hypothesis: the existing graphics fixture can
+exercise the admitted Cube bindings with DXIL-only VS/PS, without a new runtime
+path. Evidence: compute readback is qualified, while pixel evidence stops at
+regeneration and offline MSC. Expected effect: real pixel Sample/SampleBias
+draws using application roots, static/live descriptors and private TLABs.
+Risk: Cube face/subresource upload, array-layer poison, render-target array size,
+derivative-dependent LOD and ordinary sampler restoration. Reuse the existing
+graphics fixture, choose an interior +Z footprint with independent analytical
+readback, and retain the existing planar regression. No capability promotion.
+Validation must include both full builds and current-DLL isolated GPU runs;
+fixture source or offline compilation alone does not close this gap.
+
+Branch `feat/d3d12-1`; read-only remote baseline `origin/feat/d3d12` e147c710,
+merge-base 85bb2dd; 125 local commits at analysis baseline c9313e6. Existing
+implementation: independent DXIL lowering and captured Cube view binding;
+relevant files/tests: `dx12_minmax_fragment.cpp`, Cube pixel HLSL and optional
+Meson DXC targets. DXBC/AIRCONV and shared production runtime are unchanged.
+Missing piece: actual pixel GPU draw evidence, not further compiler admission.
+Full goal and mandatory FL gates remain unchanged.
+
 ## Binding follow-up analysis
 
 Baseline 94a1cac, clean worktree. Hypothesis: resource-kind qualification plus
@@ -295,3 +317,109 @@ the bounded explicit Cube binding/reachability gap, **not full Cube or MinMax**.
 Local repository-style commit only, never pushed. Full goal remains active.
 Next production gap: real DXIL Cube pixel Sample/SampleBias GPU draw acceptance,
 then remaining MinMax anisotropic/feedback and full resource/filter contracts.
+
+# Task Result: production Cube pixel follow-up
+
+## Branch / Baseline / Local Commit / Changed Files
+
+`feat/d3d12-1`; task baseline c9313e6, read-only remote baseline e147c710.
+This local test commit extends `tests/dx12/dx12_minmax_fragment.cpp`, adds
+`minmax_cube_fragment.hlsl` and five optional Meson shader targets, and updates
+this result plus the closure ledger. No runtime or capability source changes.
+
+## Implementation / Backend and Shared Runtime Impact
+
+Reuse the actual production graphics PSO, application root signature, private
+pair binding and direct/indirect/indexed draw path. VS and PS are independently
+compiled DXIL SM6.0; no mixed executable family or AIR fallback. Cube-array
+coordinate chooses cube1. Mip0 +Z has texels 16/64/192/240 (replacement
+32/80/176/224); every wrong face/cube is poison7. All six target-cube mip1
+faces contain96 (replacement144); wrong array cube0 remains7 at mip1.
+Render targets remain single-slice. InputView centralizes SRV shape construction.
+Cube flags require exactly PS/VS/DXC-directory/option arguments.
+
+Sample uses nonzero projected derivatives and an interior footprint, testing
+minimum/maximum versus analytical ordinary bilinear output. SampleBias adds4,
+selecting mip1, testing mip/resource/array-layer selection. Static samplers and
+static/volatile descriptor modes retain the existing observation-time assertions,
+recorded-template immutability and repeated submission checks. Ordinary sampling
+is restored after a private reduction draw, using the original resource.
+
+## Tests Added / Tests Run / Runtime Results
+
+Both builds reconfigured, focused graphics target built, then full default builds
+completed before final staging. Host suites **5/5 each**. Selected repository DXC
+compiled one VS and four Cube/CubeArray Sample/SampleBias PS fixtures; production
+preparation validates regenerated DXIL and MSC4.0.1 creates the real GPU PSOs.
+
+Final evidence root `/Users/zhangbo/.cache/dxmt-dxil-cube-pixel.p6NAkj`:
+`full-final-{normal,no-private}.log`, `test-final-{normal,no-private}.log`, and
+only `final-{normal,no-private}-{cube-sample,cube-bias,array-sample,array-bias,planar}.log`
+count as final runtime evidence. **10 processes return0: eight Cube tests and two
+planar regressions**. Each completes four root/sampler modes and three draw kinds
+(direct, indirect non-indexed, indirect indexed): **96 Cube readback groups plus
+24 planar groups**, not 120 independent process runs. Each group covers repeated
+submissions (direct2, indirect counts0/1/7). Negative stage/root/compiler and
+unsupported indirect binding-update checks remain intentional rejection evidence,
+not unexpected runtime errors.
+
+Actual Apple M4 GPU results: Sample reduction16/240 for original static samplers,
+replacement32/224 for live texture/static sampler, live dynamic MAX224; ordinary
+output `16 + 48*fx + 176*fy`, `fx/fy = .25 + (pixel+.5)*.125`. SampleBias reads96
+or live replacement144, with ordinary restore96. Array cube0 poison never reaches
+the tested output. All final processes pass the exact per-pixel oracle.
+
+Current D3D12 SHA1: normal `cf3e9a3824e2eb88aee1663d46f56aaad7beaf0e`, no-private
+`d7e43f0dec220eea97f338ada82e2512d88648d2`. Build, staged adjacent DLL and overlay
+`x86_64-windows` copies match. Native winemetal build/overlay hashes match:
+normal `169fd26f1cc391811e260606010bf1d5a173e374`, no-private
+`4786e8425c0ad9d1889a96733e4dde65726078e2`. Only cache overlays are updated;
+installed Wine/prefix DLLs, games, Steam and wineserver state are not managed.
+
+Reproduce the corrected final Cube-array bias run, with both AIR gates unset:
+
+```sh
+WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 \
+WINEDLLOVERRIDES='d3d12,dxgi,winemetal=n,b' \
+WINEDLLPATH=/Users/zhangbo/.cache/dxmt-dxil-cube-pixel.p6NAkj/normal \
+DXMT_SHADER_CACHE_PATH=/Users/zhangbo/.cache/dxmt-dxil-cube-pixel.p6NAkj/repro-cache \
+WINEPREFIX=/Users/zhangbo/Documents/Vibe-Codeding/wineprefix \
+/Users/zhangbo/.cache/dxmt-dxil-cube-pixel.p6NAkj/runtime/bin/wine \
+  /Users/zhangbo/.cache/dxmt-dxil-cube-pixel.p6NAkj/normal/dx12_minmax_fragment.exe \
+  /Users/zhangbo/.cache/dxmt-dxil-cube-pixel.p6NAkj/array-bias.dxil \
+  /Users/zhangbo/.cache/dxmt-dxil-cube-pixel.p6NAkj/vertex.dxil \
+  'Z:\Users\zhangbo\Documents\Vibe-Codeding\dxmt\tools\dxc\bin\x64' \
+  --cube-array-bias
+```
+
+## Self-review / Standards / Spec
+
+Main self-review and diff whitespace check pass. Independent Standards review:
+zero hard breaches or actionable smells. Spec review found no wrong oracle or
+scope creep, requested final evidence (recorded above), and identified the bias
+coverage boundary below. Reviewers did not run GPU tests. MSC integration skills
+guided correct Cube-view type and production TLAB acceptance; diagnosis skills
+kept the incorrect initial bias oracle separate from production defects.
+
+Initial diagnostic bias runs failed because other target-cube mip1 faces were
+poison7. A linear 1x1 cube footprint can legitimately reach those faces; ordinary
+output85/91 and MIN7 did not support the original96 oracle. Corrected fixture
+keeps all target-cube mip1 faces uniform while retaining wrong-layer poison.
+Those initial logs are retained but excluded from final counts. No production
+fix was justified by that test-data defect.
+
+## Known Limitations / Capability Status / Feature Level Impact
+
+This is bounded **DXMT_LOCAL_PASS**, not full Cube/MinMax qualification. Bias's
+uniform target mip1 does not independently discriminate face selection or
+reduction versus ordinary filtering; Sample mip0 supplies those complementary
+checks. All signed faces, seams/corners, fractional LOD/clamps, anisotropic,
+feedback, wider formats/views/lifetimes and pre-raster Cube remain incomplete.
+No native-Windows oracle, Metal validation/trace or game performance/tessellation
+acceptance was run here. FL11_1 unchanged; FL12_0/12_1 unpromoted; full goal active.
+
+## Git / Push Status / Next Recommended Task
+
+Local repository-style test commit after review; **NOT PUSHED**. Next prioritize
+remaining production MinMax operations and resource/filter contracts, not a
+full Cube matrix or capability-number changes.
