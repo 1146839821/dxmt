@@ -533,6 +533,18 @@ shader regeneration (`D3D12_MINMAX_COMPARISON_COEXISTENCE.md`): exact nonvariadi
 SampleCmp/SampleCmpLevelZero signatures and sampler comparison metadata/modern
 annotation bits are qualified before mutation; compare calls remain native MSC,
 not reduction pairs. Both builds pass legacy/modern CS/PS container regeneration,
-DXIL validation and offline MSC plus regular Cube GPU regressions. **Mixed
-comparison/reduction GPU output remains unverified**; no sampler/filter or FL
-capability is promoted by this compiler compatibility increment.
+DXIL validation and offline MSC plus regular Cube GPU regressions. At that
+compiler milestone, mixed comparison/reduction GPU output was unverified; no
+sampler/filter or FL capability was promoted by compiler compatibility alone.
+
+The subsequent bounded production-root compute fixture now passes native
+SampleCmpLevelZero plus independent regular Min/Max/ordinary sampling
+(`D3D12_MINMAX_COMPARISON_GPU.md`). Both builds execute legacy/modern DXIL:
+four processes, 48 exact readback groups, two uniform depth values on opposite
+sides of the reference, both comparison directions and repeated closed-list
+volatile sampler updates. This is DXMT_LOCAL_PASS, not native Windows evidence,
+full comparison/PCF coverage or full MinMax qualification. A pre-sampling
+no-private allocator-reset failure passed an unchanged-binary retry; cause remains
+unresolved and the sampling fixture now uses separate upload/dispatch storage.
+Pixel/static comparison paths and the broader production workstreams remain
+open. FL11_1 unchanged; FL12_0/FL12_1 disabled; full objective active.
