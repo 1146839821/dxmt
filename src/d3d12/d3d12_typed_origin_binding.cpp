@@ -21,8 +21,8 @@ static bool UnsupportedTextureLoadClamp(const D3D12TypedOriginDispatch &dispatch
       snapshot.descriptor.SRVTexture.resource_min_lod_clamp != 0.0f;
 }
 
-HRESULT RecordD3D12TypedOriginDispatch(
-    MTLD3D12ComputePipelineState *pso, const D3D12TypedOriginComputeVariant *variant,
+static HRESULT RecordD3D12TypedOriginBinding(
+    MTLD3D12PipelineState *pso, const D3D12TypedOriginBindingVariant *variant,
     MTLD3D12RootSignature *application_root, const uint64_t *staging, MTLD3D12DescriptorHeap *heap,
     const void *argument_template, std::shared_ptr<D3D12TypedOriginDispatch> &dispatch) {
   try {
@@ -50,7 +50,10 @@ HRESULT RecordD3D12TypedOriginDispatch(
     for (uint32_t p = 0; p < variant->root.application_parameter_count; ++p) {
       const auto &parameter = desc.pParameters[p];
       if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE ||
-          parameter.ShaderVisibility != D3D12_SHADER_VISIBILITY_ALL) continue;
+          (parameter.ShaderVisibility != D3D12_SHADER_VISIBILITY_ALL &&
+           !(variant->visibility == D3D12_SHADER_VISIBILITY_PIXEL &&
+             (parameter.ShaderVisibility == D3D12_SHADER_VISIBILITY_PIXEL ||
+              parameter.ShaderVisibility == D3D12_SHADER_VISIBILITY_VERTEX)))) continue;
       const auto &ranges = parameter.DescriptorTable;
       if (!ranges.NumDescriptorRanges || ranges.pDescriptorRanges[0].RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
         continue;
@@ -115,6 +118,26 @@ HRESULT RecordD3D12TypedOriginDispatch(
     dispatch = std::move(candidate);
     return S_OK;
   } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+}
+
+HRESULT RecordD3D12TypedOriginDispatch(
+    MTLD3D12ComputePipelineState *pso, const D3D12TypedOriginComputeVariant *variant,
+    MTLD3D12RootSignature *root, const uint64_t *staging, MTLD3D12DescriptorHeap *heap,
+    const void *argument_template, std::shared_ptr<D3D12TypedOriginDispatch> &dispatch) {
+  if (!variant || variant->visibility != D3D12_SHADER_VISIBILITY_ALL) return E_INVALIDARG;
+  const auto hr = RecordD3D12TypedOriginBinding(pso, variant, root, staging, heap, argument_template, dispatch);
+  if (SUCCEEDED(hr)) dispatch->compute_variant = variant;
+  return hr;
+}
+
+HRESULT RecordD3D12TypedOriginDraw(
+    MTLD3D12GraphicsPipelineState *pso, const D3D12TypedOriginGraphicsVariant *variant,
+    MTLD3D12RootSignature *root, const uint64_t *staging, MTLD3D12DescriptorHeap *heap,
+    const void *argument_template, std::shared_ptr<D3D12TypedOriginDispatch> &dispatch) {
+  if (!variant || variant->visibility != D3D12_SHADER_VISIBILITY_PIXEL) return E_INVALIDARG;
+  const auto hr = RecordD3D12TypedOriginBinding(pso, variant, root, staging, heap, argument_template, dispatch);
+  if (SUCCEEDED(hr)) dispatch->graphics_variant = variant;
+  return hr;
 }
 
 HRESULT MaterializeD3D12TypedOriginDispatch(

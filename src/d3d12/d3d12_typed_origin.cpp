@@ -135,7 +135,8 @@ HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<ID
 }
 } // namespace
 
-static HRESULT SelectTypedOriginCompilerInternal(const D3D12_SHADER_BYTECODE &shader, std::wstring &directory) {
+static HRESULT SelectTypedOriginCompilerInternal(const D3D12_SHADER_BYTECODE &shader, std::wstring &directory,
+    const wchar_t *selected_directory) {
   directory.clear();
   if (!shader.pShaderBytecode || !shader.BytecodeLength || shader.BytecodeLength > 32 * 1024 * 1024)
     return E_INVALIDARG;
@@ -150,10 +151,16 @@ static HRESULT SelectTypedOriginCompilerInternal(const D3D12_SHADER_BYTECODE &sh
   if (separator == std::wstring::npos) return E_FAIL;
   candidate.resize(separator + 1);
   candidate += L"dxmt-dxc";
+  if (selected_directory) {
+    candidate = selected_directory;
+    if (candidate.size() < 3 || candidate[1] != ':' ||
+        !((candidate[0] >= L'A' && candidate[0] <= L'Z') || (candidate[0] >= L'a' && candidate[0] <= L'z')) ||
+        (candidate[2] != L'/' && candidate[2] != L'\\')) return E_INVALIDARG;
+  }
   const auto compiler_path = candidate + L"/dxcompiler.dll";
   const auto validator_path = candidate + L"/dxil.dll";
   if (GetFileAttributesW(compiler_path.c_str()) == INVALID_FILE_ATTRIBUTES ||
-      GetFileAttributesW(validator_path.c_str()) == INVALID_FILE_ATTRIBUTES) return S_FALSE;
+      GetFileAttributesW(validator_path.c_str()) == INVALID_FILE_ATTRIBUTES) return selected_directory ? E_NOTIMPL : S_FALSE;
   OwnedModule compiler(LoadLibraryExW(compiler_path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH));
   if (!compiler) return E_FAIL;
   auto factory = reinterpret_cast<DxcCreateInstanceProc>(GetProcAddress(compiler.get(), "DxcCreateInstance"));
@@ -193,9 +200,10 @@ static HRESULT SelectTypedOriginCompilerInternal(const D3D12_SHADER_BYTECODE &sh
   return S_FALSE;
 }
 
-HRESULT SelectD3D12TypedOriginCompiler(const D3D12_SHADER_BYTECODE &shader, std::wstring &directory) {
+HRESULT SelectD3D12TypedOriginCompiler(const D3D12_SHADER_BYTECODE &shader, std::wstring &directory,
+    const wchar_t *selected_directory) {
   try {
-    return SelectTypedOriginCompilerInternal(shader, directory);
+    return SelectTypedOriginCompilerInternal(shader, directory, selected_directory);
   } catch (const std::bad_alloc &) {
     directory.clear();
     return E_OUTOFMEMORY;
@@ -277,7 +285,7 @@ static HRESULT PrepareShaderInternal(
     }
   if constexpr (std::is_same_v<Operation, TypedOriginPreparation>)
     hr = Inspect(reflection.get(), validated_input.get(), program, Operation::MaximumMinor,
-        &candidate.application_root_signature);
+        &candidate.application_root_signature, program_kind);
   else hr = Inspect(reflection.get(), validated_input.get(), program, Operation::MaximumMinor, nullptr, program_kind);
   if (FAILED(hr)) { diagnostics += "unsupported input container envelope"; return hr; }
   auto *bytes = static_cast<const uint8_t *>(program->GetBufferPointer());
@@ -332,9 +340,14 @@ static HRESULT PrepareShaderInternal(
 
 HRESULT PrepareD3D12TypedOriginShader(
     const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
-    D3D12TypedOriginShader &prepared, std::string &diagnostics) {
+    D3D12TypedOriginShader &prepared, std::string &diagnostics, D3D12_SHADER_VISIBILITY visibility) {
   try {
-    return PrepareShaderInternal<TypedOriginPreparation>(shader, dxc_directory, prepared, diagnostics);
+    if (visibility != D3D12_SHADER_VISIBILITY_ALL && visibility != D3D12_SHADER_VISIBILITY_PIXEL)
+      return E_INVALIDARG;
+    const auto hr = PrepareShaderInternal<TypedOriginPreparation>(shader, dxc_directory, prepared, diagnostics,
+        visibility == D3D12_SHADER_VISIBILITY_PIXEL ? 0 : 5);
+    if (SUCCEEDED(hr)) prepared.visibility = visibility;
+    return hr;
   } catch (const std::bad_alloc &) {
     return E_OUTOFMEMORY;
   }

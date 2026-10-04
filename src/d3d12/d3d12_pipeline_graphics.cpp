@@ -20,6 +20,7 @@
 #include "d3d12_pageable.hpp"
 #include "d3d12_shader_converter.hpp"
 #include "d3d12_minmax_pipeline.hpp"
+#include "d3d12_typed_origin_pipeline.hpp"
 #include "util_env.hpp"
 #include "util_string.hpp"
 #include "dxmt_format.hpp"
@@ -495,6 +496,9 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
   WMTMSCTessellationPipelineInfo minmax_tessellation_info_ = {};
   WMTRenderPipelineInfo minmax_render_info_ = {};
   bool minmax_render_info_valid_ = false;
+  std::mutex typed_origin_mutex_;
+  std::wstring typed_origin_directory_;
+  std::unique_ptr<D3D12TypedOriginGraphicsVariant> typed_origin_variant_;
   std::mutex minmax_mutex_;
   std::wstring minmax_dxc_directory_;
   std::unique_ptr<D3D12MinMaxGraphicsVariant> minmax_variant_;
@@ -677,6 +681,69 @@ public:
       return S_OK;
     } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
   }
+  HRESULT GetTypedOriginVariant(const wchar_t *directory, const D3D12TypedOriginGraphicsVariant **variant) override {
+    if (!variant) return E_POINTER;
+    *variant = nullptr;
+    if (!directory) return E_INVALIDARG;
+    try {
+      std::lock_guard<std::mutex> lock(typed_origin_mutex_);
+      if (typed_origin_variant_) {
+        if (typed_origin_directory_ != directory) return E_INVALIDARG;
+        *variant = typed_origin_variant_.get(); return S_OK;
+      }
+      if (shader_backend != D3D12ShaderBackend::MetalShaderConverter || !application_root_ ||
+          !minmax_render_info_valid_ || minmax_emulation_flags_ || msc_mesh || stream_output ||
+          requires_minmax_variant || original_vs_.empty() || original_ps_.empty()) return E_NOTIMPL;
+      std::wstring selected;
+      // The shared patched tables are also visible to VS. An unmodified typed
+      // VS must never read an origin descriptor without origin correction.
+      auto hr = SelectD3D12TypedOriginCompiler({original_vs_.data(), original_vs_.size()}, selected, directory);
+      if (FAILED(hr)) return hr;
+      if (hr != S_FALSE) return E_NOTIMPL;
+      hr = SelectD3D12TypedOriginCompiler({original_ps_.data(), original_ps_.size()}, selected, directory);
+      if (hr != S_OK) return hr;
+      D3D12TypedOriginShader shader;
+      std::string diagnostics;
+      hr = PrepareD3D12TypedOriginShader({original_ps_.data(), original_ps_.size()}, directory,
+          shader, diagnostics, D3D12_SHADER_VISIBILITY_PIXEL);
+      if (FAILED(hr)) { ERR("Pixel typed-origin preparation failed: ", diagnostics); return hr; }
+      if (!shader.application_root_signature.empty()) {
+        const void *bytes = nullptr;
+        const auto size = application_root_->GetBlob(&bytes);
+        if (size != shader.application_root_signature.size() ||
+            std::memcmp(bytes, shader.application_root_signature.data(), size)) return E_INVALIDARG;
+      }
+      const D3D12TypedOriginRoot *root = nullptr;
+      hr = application_root_->GetTypedOriginCompilerRoot(&root);
+      if (FAILED(hr)) return hr;
+      auto candidate = std::make_unique<D3D12TypedOriginGraphicsVariant>();
+      candidate->root = *root; candidate->bindings = shader.bindings;
+      hr = ResolveD3D12TypedOriginBindings(*root, shader.bindings, candidate->locations, diagnostics,
+          D3D12_SHADER_VISIBILITY_PIXEL);
+      if (FAILED(hr)) { ERR("Pixel typed-origin binding resolution failed: ", diagnostics); return hr; }
+      D3D12ConvertedShader vs, ps;
+      hr = ConvertD3D12Shader({original_vs_.data(), original_vs_.size()}, DXMT_MSC_STAGE_VERTEX, vs,
+          root->bytecode.data(), root->bytecode.size(), nullptr, 0, &device_->GetMSCCapabilities());
+      if (SUCCEEDED(hr)) hr = ConvertD3D12TypedOriginPixelShader(shader, *root, ps, &device_->GetMSCCapabilities());
+      if (FAILED(hr)) return hr;
+      auto metal = device_->GetMTLDevice();
+      WMT::Reference<WMT::Error> error;
+      auto vs_lib = metal.newLibrary(vs.metallib.data(), vs.metallib.size(), error);
+      auto ps_lib = metal.newLibrary(ps.metallib.data(), ps.metallib.size(), error);
+      if (!vs_lib || !ps_lib) return E_FAIL;
+      auto vs_function = vs_lib.newFunction(vs.entry_point.c_str());
+      auto ps_function = ps_lib.newFunction(ps.entry_point.c_str());
+      if (!vs_function || !ps_function) return E_FAIL;
+      auto info = minmax_render_info_;
+      info.vertex_function = vs_function.handle; info.fragment_function = ps_function.handle;
+      candidate->pso = metal.newRenderPipelineState(info, error);
+      if (!candidate->pso) return E_FAIL;
+      typed_origin_directory_ = directory;
+      typed_origin_variant_ = std::move(candidate); *variant = typed_origin_variant_.get();
+      return S_OK;
+    } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+  }
+
   MTLD3D12GraphicsPipelineStateImpl(MTLD3D12Device *pDevice) :
       MTLD3D12Pageable<MTLD3D12GraphicsPipelineState>(pDevice) {
     IsComputePipelineState = FALSE;

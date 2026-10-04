@@ -162,6 +162,7 @@ struct RenderEncoderStencilAttachmentData {
 };
 
 struct RenderEncoderData : EncoderData {
+  std::vector<std::shared_ptr<D3D12TypedOriginDispatch>> typed_origin_draws;
   std::vector<std::shared_ptr<D3D12MinMaxDispatch>> minmax_draws;
   std::array<RenderEncoderColorAttachmentData, 8> colors;
   RenderEncoderDepthAttachmentData depth;

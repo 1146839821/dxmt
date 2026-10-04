@@ -100,6 +100,43 @@ static bool Run(ID3D12Device *device, bool legacy, uint32_t constants, bool coll
   return true;
 }
 
+static bool RunPixelBindings() {
+  using namespace dxmt;
+  D3D12_DESCRIPTOR_RANGE1 range = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 7, 3,
+      D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE, 2};
+  D3D12_ROOT_PARAMETER1 parameter = {};
+  parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  parameter.DescriptorTable = {1, &range};
+  D3D12_ROOT_SIGNATURE_DESC1 desc = {1, &parameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+  const std::vector<dxmt_msc_typed_origin_binding> bindings = {{1, 3, 8}};
+  for (auto visibility : {D3D12_SHADER_VISIBILITY_ALL, D3D12_SHADER_VISIBILITY_PIXEL,
+                         D3D12_SHADER_VISIBILITY_VERTEX}) {
+    for (bool denied : {false, true}) {
+      parameter.ShaderVisibility = visibility;
+      desc.Flags = denied ? D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS : D3D12_ROOT_SIGNATURE_FLAG_NONE;
+      D3D12TypedOriginRoot root;
+      std::string diagnostics;
+      if (FAILED(PrepareD3D12TypedOriginRoot(desc, root, diagnostics))) return false;
+      std::vector<D3D12TypedOriginBindingLocation> locations = {{99, 17, D3D12_DESCRIPTOR_RANGE_FLAG_NONE}};
+      const auto original = locations;
+      const auto hr = ResolveD3D12TypedOriginBindings(root, bindings, locations, diagnostics,
+          D3D12_SHADER_VISIBILITY_PIXEL);
+      const bool supported = !denied && visibility != D3D12_SHADER_VISIBILITY_VERTEX;
+      if (supported) {
+        if (hr != S_OK || locations.size() != 1 || locations[0].parameter_index != 0 ||
+            locations[0].table_offset != 3 || locations[0].flags != range.Flags) return false;
+      } else if (hr != E_NOTIMPL || locations.size() != 1 ||
+          std::memcmp(locations.data(), original.data(), sizeof(original[0]))) return false;
+      const auto saved = locations;
+      if (ResolveD3D12TypedOriginBindings(root, bindings, locations, diagnostics,
+          D3D12_SHADER_VISIBILITY_VERTEX) != E_INVALIDARG || locations.size() != saved.size() ||
+          std::memcmp(locations.data(), saved.data(), sizeof(saved[0]))) return false;
+    }
+  }
+  std::puts("typed-origin pixel visibility/deny/flags/transactional resolution PASS");
+  return true;
+}
+
 int main() {
   ID3D12Device *raw = nullptr;
   HRESULT hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&raw));
@@ -108,7 +145,7 @@ int main() {
   bool ok = Run(device.get(), false, 3, false, false) && Run(device.get(), true, 3, false, false) &&
       Run(device.get(), false, 3, false, true) && Run(device.get(), false, 61, false, false) &&
       Run(device.get(), false, 62, false, false) &&
-      Run(device.get(), false, 3, true, false);
+      Run(device.get(), false, 3, true, false) && RunPixelBindings();
   std::printf("typed-origin production root %s (not PSO/GPU acceptance)\n", ok ? "PASS" : "FAIL");
   return ok ? 0 : 1;
 }

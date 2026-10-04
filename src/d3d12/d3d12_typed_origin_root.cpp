@@ -186,13 +186,15 @@ HRESULT PrepareRootInternal(
 
 HRESULT ResolveD3D12TypedOriginBindings(
     const D3D12TypedOriginRoot &root, const std::vector<dxmt_msc_typed_origin_binding> &bindings,
-    std::vector<D3D12TypedOriginBindingLocation> &locations, std::string &diagnostics) {
+    std::vector<D3D12TypedOriginBindingLocation> &locations, std::string &diagnostics,
+    D3D12_SHADER_VISIBILITY visibility) {
   diagnostics.clear();
   struct ReleaseDeserializer {
     void operator()(ID3D12VersionedRootSignatureDeserializer *value) const { if (value) value->Release(); }
   };
   try {
-    if (root.bytecode.empty() || bindings.empty() || bindings.size() > 64) return E_INVALIDARG;
+    if (root.bytecode.empty() || bindings.empty() || bindings.size() > 64 ||
+        (visibility != D3D12_SHADER_VISIBILITY_ALL && visibility != D3D12_SHADER_VISIBILITY_PIXEL)) return E_INVALIDARG;
     ID3D12VersionedRootSignatureDeserializer *raw = nullptr;
     HRESULT hr = D3D12CreateVersionedRootSignatureDeserializer(
         root.bytecode.data(), root.bytecode.size(), IID_PPV_ARGS(&raw));
@@ -202,6 +204,11 @@ HRESULT ResolveD3D12TypedOriginBindings(
     if (!versioned || versioned->Version != D3D_ROOT_SIGNATURE_VERSION_1_1) return E_INVALIDARG;
     const auto &desc = versioned->Desc_1_1;
     if (desc.NumParameters != root.application_parameter_count + 1) return E_INVALIDARG;
+    if (visibility == D3D12_SHADER_VISIBILITY_PIXEL &&
+        (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS)) {
+      diagnostics = "typed-origin pixel root access is denied";
+      return E_NOTIMPL;
+    }
     std::vector<D3D12TypedOriginBindingLocation> candidate;
     candidate.reserve(bindings.size());
     for (const auto &binding : bindings) {
@@ -212,7 +219,8 @@ HRESULT ResolveD3D12TypedOriginBindings(
       for (uint32_t i = 0; i < root.application_parameter_count; ++i) {
         const auto &parameter = desc.pParameters[i];
         if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE ||
-            parameter.ShaderVisibility != D3D12_SHADER_VISIBILITY_ALL) continue;
+            (parameter.ShaderVisibility != D3D12_SHADER_VISIBILITY_ALL &&
+             parameter.ShaderVisibility != visibility)) continue;
         uint64_t next = 0;
         for (uint32_t j = 0; j < parameter.DescriptorTable.NumDescriptorRanges; ++j) {
           const auto &range = parameter.DescriptorTable.pDescriptorRanges[j];
@@ -234,7 +242,7 @@ HRESULT ResolveD3D12TypedOriginBindings(
         }
       }
       if (!found) {
-        diagnostics = "typed-origin resource has no compute-visible application descriptor table location";
+        diagnostics = "typed-origin resource has no stage-visible application descriptor table location";
         return E_NOTIMPL;
       }
       candidate.push_back(location);

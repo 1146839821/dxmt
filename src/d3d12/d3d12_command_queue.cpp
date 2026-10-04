@@ -90,7 +90,8 @@ static bool ReplayPrivateCompute(
         if (marker->second->indirect_data_binding)
           indirect_bindings.emplace(marker->second->indirect_data_binding,
               IndirectBinding{binding->buffer.handle, binding->indirect_data_offset});
-        append_binding(*binding, *marker->second->variant);
+        if (!marker->second->compute_variant || marker->second->variant != marker->second->compute_variant) return false;
+        append_binding(*binding, *marker->second->compute_variant);
         continue;
       }
       if (auto marker = minmax_markers.find(node); marker != minmax_markers.end()) {
@@ -151,9 +152,14 @@ union PrivateRenderReplayCommand {
   wmtcmd_render_dxmt_tessellation_mesh_draw_indexed air_tessellation;
 };
 
-static bool ReplayMinMaxRender(MTLD3D12Device *device, WMT::RenderCommandEncoder encoder,
-    RenderEncoderData *data, std::vector<std::shared_ptr<D3D12MinMaxSubmissionBinding>> &bindings) {
+static bool ReplayPrivateRender(MTLD3D12Device *device, WMT::RenderCommandEncoder encoder,
+    RenderEncoderData *data, std::vector<std::shared_ptr<D3D12MinMaxSubmissionBinding>> &bindings,
+    std::vector<std::shared_ptr<D3D12TypedOriginSubmissionBinding>> &origin_bindings) {
   try {
+    std::unordered_map<const void *, const D3D12TypedOriginDispatch *> origin_markers;
+    for (const auto &draw : data->typed_origin_draws)
+      if (!draw->render_marker || !draw->graphics_variant || draw->variant != draw->graphics_variant ||
+          !origin_markers.emplace(draw->render_marker, draw.get()).second) return false;
     std::unordered_map<const void *, const D3D12MinMaxDispatch *> markers;
     for (const auto &draw : data->minmax_draws) {
       if (!draw->render_marker || !draw->graphics_variant || draw->binding_variant != draw->graphics_variant ||
@@ -165,6 +171,27 @@ static bool ReplayMinMaxRender(MTLD3D12Device *device, WMT::RenderCommandEncoder
     const D3D12MinMaxGraphicsVariant *active_variant = nullptr;
     for (auto *node = reinterpret_cast<wmtcmd_base *>(&data->cmd_head); node;
          node = static_cast<wmtcmd_base *>(node->next.get())) {
+      if (auto marker = origin_markers.find(node); marker != origin_markers.end()) {
+        if (markers.count(node)) return false;
+        std::shared_ptr<D3D12TypedOriginSubmissionBinding> binding;
+        const auto hr = MaterializeD3D12TypedOriginDispatch(device, *marker->second, binding);
+        if (FAILED(hr)) { ERR("Typed-origin render materialization failed HRESULT=", hr); return false; }
+        origin_bindings.push_back(binding);
+        active_variant = nullptr;
+        for (const auto &use : binding->resources)
+          encoder.useResource(use.resource, use.usage, WMTRenderStageVertex | WMTRenderStageFragment);
+        PrivateRenderReplayCommand pso = {};
+        pso.pso.type = WMTRenderCommandSetPSO; pso.pso.pso = marker->second->graphics_variant->pso.handle;
+        replay.push_back(pso);
+        for (auto type : {WMTRenderCommandSetVertexBuffer, WMTRenderCommandSetFragmentBuffer}) {
+          PrivateRenderReplayCommand set = {};
+          set.buffer.type = type; set.buffer.buffer = binding->buffer.handle;
+          set.buffer.index = DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT;
+          replay.push_back(set);
+        }
+        origin_markers.erase(marker);
+        continue;
+      }
       if (auto marker = markers.find(node); marker != markers.end()) {
         std::shared_ptr<D3D12MinMaxSubmissionBinding> binding;
         const auto hr = MaterializeD3D12MinMaxDispatch(device, *marker->second, binding);
@@ -284,7 +311,7 @@ static bool ReplayMinMaxRender(MTLD3D12Device *device, WMT::RenderCommandEncoder
       }
       replay.push_back(copy);
     }
-    if (!markers.empty() || !indirect_bindings.empty()) return false;
+    if (!markers.empty() || !origin_markers.empty() || !indirect_bindings.empty()) return false;
     for (size_t i = 0; i < replay.size(); ++i)
       replay[i].nop.next.set(i + 1 < replay.size() ? &replay[i + 1] : nullptr);
     if (!replay.empty()) encoder.encodeCommands(&replay.front().nop);
@@ -1377,8 +1404,8 @@ public:
              encoder.endEncoding();
              break;
            }
-          if (data->minmax_draws.empty()) encoder.encodeCommands(&data->cmd_head);
-          else if (!ReplayMinMaxRender(device_, encoder, data, submission.minmax_bindings)) {
+          if (data->minmax_draws.empty() && data->typed_origin_draws.empty()) encoder.encodeCommands(&data->cmd_head);
+          else if (!ReplayPrivateRender(device_, encoder, data, submission.minmax_bindings, submission.typed_origin_bindings)) {
             translation_failed = true; encoder.endEncoding(); break;
           }
           encoder.updateFence(fence_, WMTRenderStageFragment);

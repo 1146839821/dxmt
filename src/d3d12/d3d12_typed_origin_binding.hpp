@@ -20,11 +20,14 @@ struct D3D12TypedOriginDispatch {
     std::vector<Slot> slots;
   };
   const wmtcmd_compute_nop *marker = nullptr;
-  Com<MTLD3D12ComputePipelineState> application_pso;
+  const wmtcmd_render_nop *render_marker = nullptr;
+  Com<MTLD3D12PipelineState> application_pso;
   Com<MTLD3D12RootSignature> application_root;
   Com<MTLD3D12SamplerDescriptorHeap> sampler_heap;
   Com<MTLD3D12DescriptorHeap> heap;
-  const D3D12TypedOriginComputeVariant *variant = nullptr;
+  const D3D12TypedOriginBindingVariant *variant = nullptr;
+  const D3D12TypedOriginComputeVariant *compute_variant = nullptr;
+  const D3D12TypedOriginGraphicsVariant *graphics_variant = nullptr;
   std::vector<uint8_t> argument_template;
   std::vector<Table> tables;
   // Borrowed allocator-owned immutable resolver payload/node. Submission replay
@@ -46,6 +49,11 @@ struct D3D12TypedOriginSubmissionBinding {
 
 HRESULT RecordD3D12TypedOriginDispatch(
     MTLD3D12ComputePipelineState *pso, const D3D12TypedOriginComputeVariant *variant,
+    MTLD3D12RootSignature *application_root, const uint64_t *staging, MTLD3D12DescriptorHeap *heap,
+    const void *argument_template, std::shared_ptr<D3D12TypedOriginDispatch> &dispatch);
+
+HRESULT RecordD3D12TypedOriginDraw(
+    MTLD3D12GraphicsPipelineState *pso, const D3D12TypedOriginGraphicsVariant *variant,
     MTLD3D12RootSignature *application_root, const uint64_t *staging, MTLD3D12DescriptorHeap *heap,
     const void *argument_template, std::shared_ptr<D3D12TypedOriginDispatch> &dispatch);
 

@@ -2048,7 +2048,8 @@ public:
       bool SkipResourceBinding = false,
       SM50_INDEX_BUFFER_FORMAT airconv_index_format = SM50_INDEX_BUFFER_FORMAT_NONE,
       bool AllowMinMax = true,
-      const D3D12MinMaxGraphicsVariant **selected_minmax = nullptr
+      const D3D12MinMaxGraphicsVariant **selected_minmax = nullptr,
+      bool AllowTypedOrigin = true
   ) {
     if (selected_minmax)
       *selected_minmax = nullptr;
@@ -2059,7 +2060,21 @@ public:
 
     const bool use_msc = pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
     const D3D12MinMaxGraphicsVariant *minmax_variant = nullptr;
+    const D3D12TypedOriginGraphicsVariant *origin_variant = nullptr;
+    const auto origin_directory = use_msc ? env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY") : "";
     const auto minmax_directory = use_msc ? env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY") : "";
+    if (!origin_directory.empty()) {
+      if (SkipResourceBinding || !AllowMinMax || !AllowTypedOrigin || predication_buffer_ || !minmax_directory.empty()) {
+        FailRecording(__func__, "pixel typed-origin indirect/skipped/MinMax combination is unsupported");
+        return DrawCallStatus::Invalid;
+      }
+      const auto directory = str::tows(origin_directory.c_str());
+      const auto hr = pso_graphics_->GetTypedOriginVariant(directory.c_str(), &origin_variant);
+      if (FAILED(hr) || (hr == S_OK && (!origin_variant || !rootsig_graphics_ || !descriptor_heap_))) {
+        FailRecording(__func__, "pixel typed-origin preparation failed HRESULT=", hr);
+        return DrawCallStatus::Invalid;
+      }
+    }
     if (pso_graphics_->requires_minmax_variant && minmax_directory.empty()) {
       FailRecording(__func__, "static reduction graphics PSO requires the MinMax path");
       return DrawCallStatus::Invalid;
@@ -2105,7 +2120,7 @@ public:
           encode(WMTRenderCommandSetFragmentBuffer);
       }
     };
-    if (use_msc && rootsig_graphics_ && !minmax_variant) {
+    if (use_msc && rootsig_graphics_ && !minmax_variant && !origin_variant) {
       auto hr = rootsig_graphics_->InitializeMSCLayout();
       if (FAILED(hr)) {
         DEBUG("[DEBUG-DRAW] PreDraw rejected: MSC layout hr=", hr);
@@ -2113,7 +2128,7 @@ public:
         return DrawCallStatus::Invalid;
       }
     }
-    if (use_msc && pso_graphics_->msc_uses_texture_load && descriptor_heap_ &&
+    if (use_msc && !origin_variant && pso_graphics_->msc_uses_texture_load && descriptor_heap_ &&
         HasBoundResourceMinLODClamp(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr())) {
       ERR("D3D12 graphics Texture.Load with ResourceMinLODClamp is unsupported");
       FailRecording(__func__, "MSC Texture.Load with non-zero ResourceMinLODClamp");
@@ -2295,7 +2310,7 @@ public:
       dirty_state_.clr(DirtyState::DescriptorHeaps);
     }
 
-    if (dirty_state_.test(DirtyState::GraphicsRootArguments) && !SkipResourceBinding && !minmax_variant) {
+    if (dirty_state_.test(DirtyState::GraphicsRootArguments) && !SkipResourceBinding && !minmax_variant && !origin_variant) {
       if (use_msc) {
         auto offset = rootsig_graphics_ && rootsig_graphics_->MSCArgumentBufferSize
                           ? EncodeMSCArgumentBuffer(
@@ -2346,7 +2361,7 @@ public:
                            use_msc, pso_graphics_->air_sampler_reduction_eligible, SkipResourceBinding))
       return DrawCallStatus::Invalid;
 
-    if (encode_msc_resource_uses && !minmax_variant)
+    if (encode_msc_resource_uses && !minmax_variant && !origin_variant)
       EncodeMSCResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
 
     if ((airconv_render_residency_ || (pso_graphics_->air_sampler_reduction_eligible && sampler_heap_) ||
@@ -2458,6 +2473,23 @@ public:
       cmd.type = WMTRenderCommandSetStencilRef;
       cmd.stencil_ref = stencil_ref_;
       dirty_state_.clr(DirtyState::StencilRef);
+    }
+
+    if (origin_variant) {
+      const auto offset = EncodeMSCArgumentBuffer(rootsig_graphics_.ptr(), rootarg_graphics_staging_,
+          descriptor_heap_.ptr(), sampler_heap_.ptr(), &origin_variant->root);
+      if (recording_failed_) return DrawCallStatus::Invalid;
+      std::shared_ptr<D3D12TypedOriginDispatch> draw;
+      const auto hr = RecordD3D12TypedOriginDraw(pso_graphics_.ptr(), origin_variant, rootsig_graphics_.ptr(),
+          rootarg_graphics_staging_, descriptor_heap_.ptr(), ptr_add(allocator_->gpu_heap_, offset), draw);
+      if (FAILED(hr)) { FailRecording(__func__, "pixel typed-origin recording failed HRESULT=", hr); return DrawCallStatus::Invalid; }
+      draw->sampler_heap = sampler_heap_;
+      EncodeRootResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, msc_render_stages, false);
+      auto &marker = allocator_->EncodeRenderCommand<wmtcmd_render_nop>();
+      marker.type = WMTRenderCommandNop; draw->render_marker = &marker;
+      try { render->typed_origin_draws.push_back(std::move(draw)); }
+      catch (const std::bad_alloc &) { FailRecording(__func__, "pixel typed-origin draw allocation failed"); return DrawCallStatus::Invalid; }
+      dirty_state_.set(DirtyState::GraphicsRootArguments, DirtyState::GraphicsPipelineState);
     }
 
     if (minmax_variant) {
@@ -6072,7 +6104,7 @@ public:
     }
     const D3D12MinMaxGraphicsVariant *minmax_variant = nullptr;
     DrawCallStatus status = PreDraw(
-        encode_binding && !msc_updates, SM50_INDEX_BUFFER_FORMAT_NONE, !encode_binding || msc_updates, &minmax_variant
+        encode_binding && !msc_updates, SM50_INDEX_BUFFER_FORMAT_NONE, !encode_binding || msc_updates, &minmax_variant, false
     );
     if (status == DrawCallStatus::Invalid)
       return;

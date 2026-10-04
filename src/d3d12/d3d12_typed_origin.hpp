@@ -8,16 +8,19 @@
 
 namespace dxmt {
 
-// S_OK selects deployed typed-buffer compute preparation; S_FALSE leaves an
-// ordinary shader or an installation without the compiler on its native path.
-HRESULT SelectD3D12TypedOriginCompiler(const D3D12_SHADER_BYTECODE &shader, std::wstring &directory);
+// S_OK identifies typed buffers using the selected or deployed compiler;
+// S_FALSE leaves an ordinary shader on its native path. An explicitly selected
+// unavailable compiler fails rather than silently disabling correction.
+HRESULT SelectD3D12TypedOriginCompiler(const D3D12_SHADER_BYTECODE &shader, std::wstring &directory,
+    const wchar_t *selected_directory = nullptr);
 
-// Private shader preparation, not an enabled binding ABI. The caller must
+// Private shader preparation. The caller must
 // reserve b0/space1 in the compiler root and supply one 16-byte record per
 // binding before passing this shader to MSC. Application shader/root identity
 // remains separate from this artifact's transformed identity.
 struct D3D12TypedOriginShader {
   static constexpr uint32_t kLoweringVersion = 6;
+  D3D12_SHADER_VISIBILITY visibility = D3D12_SHADER_VISIBILITY_ALL;
   std::vector<uint8_t> bytecode;
   std::vector<uint8_t> application_root_signature;
   std::vector<dxmt_msc_typed_origin_binding> bindings;
@@ -36,7 +39,8 @@ struct D3D12TypedOriginBindingLocation {
 // command recording/submission. Failure leaves locations unchanged.
 HRESULT ResolveD3D12TypedOriginBindings(
     const D3D12TypedOriginRoot &root, const std::vector<dxmt_msc_typed_origin_binding> &bindings,
-    std::vector<D3D12TypedOriginBindingLocation> &locations, std::string &diagnostics);
+    std::vector<D3D12TypedOriginBindingLocation> &locations, std::string &diagnostics,
+    D3D12_SHADER_VISIBILITY visibility = D3D12_SHADER_VISIBILITY_ALL);
 
 // Accepts a trusted, decoded RS1.1 descriptor (including the existing RS1.0
 // deserializer's volatile conversion). Owns serialized bytes and reflected
@@ -47,10 +51,11 @@ HRESULT PrepareD3D12TypedOriginRoot(
 
 // The selected DXC directory must be an absolute Windows drive path. Both
 // compiler and validator are loaded from that directory; no backend fallback.
-// Currently accepts the verified SM6.0 compute container envelope. On failure
+// Accepts bounded SM6.0-6.6 compute/pixel envelopes. On failure
 // the caller's artifact is unchanged.
 HRESULT PrepareD3D12TypedOriginShader(
     const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
-    D3D12TypedOriginShader &prepared, std::string &diagnostics);
+    D3D12TypedOriginShader &prepared, std::string &diagnostics,
+    D3D12_SHADER_VISIBILITY visibility = D3D12_SHADER_VISIBILITY_ALL);
 
 } // namespace dxmt

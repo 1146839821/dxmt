@@ -558,3 +558,16 @@ no-copy GPU backing-buffer reuse are repaired. Earlier invalid same-list overlap
 runs are excluded. Forced OOM/late-worker injection, buffer identity fingerprint
 and performance cost remain unverified. This closes the bounded Reset race, not
 full allocator/lifetime or FL qualification; full production objective stays active.
+
+### Typed-origin pixel production path (2026-10-04)
+
+[Task record](D3D12_TYPED_ORIGIN_PIXEL.md): bounded opt-in DXIL native VS/PS draws
+now reuse compute origin descriptors/records and submission materialization.
+PIXEL/ALL table visibility and pixel root denial are honored; ordinary PS cannot
+bypass typed-VS rejection. Static capture/live submission timing and immutable
+private command replay are preserved. Final same-binary old-DLL failure/current
+pass verified on normal and no-private; SM6.0/6.6 pass64 private and64 ordinary
+GPU draws plus VS-root, live replacement and boundary guards. Compute/root,
+allocator and MinMax compute/graphics regressions pass. Broader stages/formats,
+default selection, parallel lifetime timing and game/performance acceptance remain
+open. No capability or FL promotion; full production objective remains active.
