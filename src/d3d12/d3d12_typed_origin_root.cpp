@@ -194,7 +194,8 @@ HRESULT ResolveD3D12TypedOriginBindings(
   };
   try {
     if (root.bytecode.empty() || bindings.empty() || bindings.size() > 64 ||
-        (visibility != D3D12_SHADER_VISIBILITY_ALL && visibility != D3D12_SHADER_VISIBILITY_PIXEL)) return E_INVALIDARG;
+        (visibility != D3D12_SHADER_VISIBILITY_ALL && visibility != D3D12_SHADER_VISIBILITY_PIXEL &&
+         visibility != D3D12_SHADER_VISIBILITY_VERTEX)) return E_INVALIDARG;
     ID3D12VersionedRootSignatureDeserializer *raw = nullptr;
     HRESULT hr = D3D12CreateVersionedRootSignatureDeserializer(
         root.bytecode.data(), root.bytecode.size(), IID_PPV_ARGS(&raw));
@@ -204,6 +205,11 @@ HRESULT ResolveD3D12TypedOriginBindings(
     if (!versioned || versioned->Version != D3D_ROOT_SIGNATURE_VERSION_1_1) return E_INVALIDARG;
     const auto &desc = versioned->Desc_1_1;
     if (desc.NumParameters != root.application_parameter_count + 1) return E_INVALIDARG;
+    if (visibility == D3D12_SHADER_VISIBILITY_VERTEX &&
+        (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS)) {
+      diagnostics = "typed-origin vertex root access is denied";
+      return E_NOTIMPL;
+    }
     if (visibility == D3D12_SHADER_VISIBILITY_PIXEL &&
         (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS)) {
       diagnostics = "typed-origin pixel root access is denied";
