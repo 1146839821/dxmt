@@ -498,3 +498,10 @@ readbacks pass, including radial cancellation, sampler/instruction bias and
 gate-off ordinary sampling. This supersedes the prior AIR implicit Cube
 rejection; independent DXIL Cube and full resource/filter/format/lifetime /
 view/clamp qualification remain open. No capability/FL promotion.
+
+Independent DXIL Cube primary-face gradient LOD is now available as a private
+compiler primitive (`D3D12_MINMAX_DXIL_CUBE.md`), with verified IR and focused CPU
+arithmetic probes in both builds. Production Cube/CubeArray binding remains
+rejected: direction-space footprints, seams/corners, regeneration/MSC/GPU and
+captured-view admission are not completed. This is not closure of the DXIL Cube
+gap and does not change any MinMax/capability/FL status.

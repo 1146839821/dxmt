@@ -8,6 +8,68 @@
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <cstring>
 #include <limits>
+#include <array>
+#include <cmath>
+#include <functional>
+#include <unordered_map>
+
+// Evaluate the emitted scalar LOD graph, not a second projection algorithm.
+// Dimensions supplies a synthetic cube side of eight. This is a CPU arithmetic
+// oracle for this primitive, not DXIL validation, MSC compilation or GPU proof.
+static double EvaluateCubeLOD(llvm::Value *root, llvm::Function &function,
+    const std::array<float, 9> &input, bool &valid) {
+  using namespace llvm;
+  std::unordered_map<Value *, double> values;
+  for (unsigned i = 0; i < input.size(); ++i) values[function.getArg(i + 2)] = input[i];
+  std::function<double(Value *)> evaluate = [&](Value *value) -> double {
+    if (auto found = values.find(value); found != values.end()) return found->second;
+    if (auto *constant = dyn_cast<ConstantFP>(value)) return constant->getValueAPF().convertToDouble();
+    if (auto *constant = dyn_cast<ConstantInt>(value)) return constant->getZExtValue();
+    if (auto *select = dyn_cast<SelectInst>(value))
+      return values[value] = evaluate(select->getCondition()) ? evaluate(select->getTrueValue()) : evaluate(select->getFalseValue());
+    if (auto *extract = dyn_cast<ExtractValueInst>(value)) {
+      auto *query = dyn_cast<CallInst>(extract->getAggregateOperand());
+      if (query && query->getCalledFunction() && query->getCalledFunction()->getName() == "dx.op.getDimensions" &&
+          extract->getNumIndices() == 1 && *extract->idx_begin() == 0) return values[value] = 8;
+    }
+    if (auto *call = dyn_cast<CallInst>(value)) {
+      auto *callee = call->getCalledFunction();
+      auto *opcode = dyn_cast<ConstantInt>(call->getArgOperand(0));
+      if (callee && opcode && callee->getName() == "dx.op.unary.f32") {
+        const double x = evaluate(call->getArgOperand(1));
+        if (opcode->getZExtValue() == 6) return values[value] = std::fabs(x);
+        if (opcode->getZExtValue() == 23) return values[value] = std::log2(x);
+        if (opcode->getZExtValue() == 24) return values[value] = std::sqrt(x);
+      }
+      if (callee && opcode && callee->getName() == "dx.op.binary.f32" && opcode->getZExtValue() == 35)
+        return values[value] = std::fmax(evaluate(call->getArgOperand(1)), evaluate(call->getArgOperand(2)));
+    }
+    if (auto *compare = dyn_cast<FCmpInst>(value)) {
+      const double x = evaluate(compare->getOperand(0)), y = evaluate(compare->getOperand(1));
+      if (compare->getPredicate() == CmpInst::FCMP_OGE) return values[value] = x >= y;
+      if (compare->getPredicate() == CmpInst::FCMP_OGT) return values[value] = x > y;
+      if (compare->getPredicate() == CmpInst::FCMP_OEQ) return values[value] = x == y;
+    }
+    if (auto *instruction = dyn_cast<Instruction>(value)) {
+      if (instruction->getOpcode() == Instruction::UIToFP) return values[value] = evaluate(instruction->getOperand(0));
+      if (isa<BinaryOperator>(instruction)) {
+        const double x = evaluate(instruction->getOperand(0)), y = evaluate(instruction->getOperand(1));
+        switch (instruction->getOpcode()) {
+        case Instruction::FAdd: return values[value] = x + y;
+        case Instruction::FSub: return values[value] = x - y;
+        case Instruction::FMul: return values[value] = x * y;
+        case Instruction::FDiv: return values[value] = x / y;
+        case Instruction::And: return values[value] = bool(x) && bool(y);
+        case Instruction::Or: return values[value] = bool(x) || bool(y);
+        default: break;
+        }
+      }
+    }
+    valid = false;
+    return std::numeric_limits<double>::quiet_NaN();
+  };
+  return evaluate(root);
+}
 
 static uint32_t Word(const unsigned char *bytes) {
   return uint32_t(bytes[0]) | uint32_t(bytes[1]) << 8 | uint32_t(bytes[2]) << 16 | uint32_t(bytes[3]) << 24;
@@ -441,6 +503,66 @@ int main(int argc, char **argv) {
           cast<ConstantInt>(operation->getArgOperand(0))->getZExtValue() == 6) ++volume_abs;
   }
   if (volume_abs != 6 || depth_reads != 1 || verifyModule(module, &errs())) return 1;
+  for (unsigned array = 0; array < 2; ++array) {
+    std::vector<Type *> arguments{handle, handle};
+    arguments.insert(arguments.end(), 9, f32);
+    auto *cube = Function::Create(FunctionType::get(f32, arguments, false), Function::ExternalLinkage,
+        array ? "gradient_cube_array" : "gradient_cube", module);
+    builder.SetInsertPoint(BasicBlock::Create(context, "entry", cube));
+    auto *layer = array ? static_cast<Value *>(ConstantFP::get(f32, 1)) : UndefValue::get(f32);
+    auto *call = builder.CreateCall(gradient, {builder.getInt32(63), cube->getArg(0), cube->getArg(1),
+        cube->getArg(2), cube->getArg(3), cube->getArg(4), layer,
+        UndefValue::get(i32), UndefValue::get(i32), UndefValue::get(i32),
+        cube->getArg(5), cube->getArg(6), cube->getArg(7),
+        cube->getArg(8), cube->getArg(9), cube->getArg(10), UndefValue::get(f32)});
+    auto *result = builder.CreateRet(ConstantFP::get(f32, 0));
+    const auto before = cube->getEntryBlock().size();
+    const auto declarations = module.size();
+    if (dxmt::dxil::CreateReductionGradientLOD(*call, error, 3, true) || error.empty()) return 1;
+    call->setArgOperand(5, UndefValue::get(f32));
+    if (dxmt::dxil::CreateReductionGradientLOD(*call, error, 2, true) || error.empty()) return 1;
+    call->setArgOperand(5, cube->getArg(4));
+    call->setArgOperand(7, builder.getInt32(1));
+    if (dxmt::dxil::CreateReductionGradientLOD(*call, error, 2, true) || error.empty() ||
+        cube->getEntryBlock().size() != before || module.size() != declarations) return 1;
+    call->setArgOperand(7, UndefValue::get(i32));
+    auto *lod = dxmt::dxil::CreateReductionGradientLOD(*call, error, 2, true);
+    if (!lod || !error.empty() || call->getArgOperand(6) != layer) return 1;
+    result->setOperand(0, lod);
+    unsigned side_reads = 0, cube_abs = 0, cube_sqrt = 0;
+    for (auto &instruction : cube->getEntryBlock()) {
+      if (auto *fp = dyn_cast<FPMathOperator>(&instruction)) if (fp->getFastMathFlags().any()) return 1;
+      if (auto *extract = dyn_cast<ExtractValueInst>(&instruction))
+        if (extract->getAggregateOperand()->getType() == StructType::getTypeByName(context, "dx.types.Dimensions")) {
+          if (extract->getNumIndices() != 1 || *extract->idx_begin() != 0) return 1;
+          ++side_reads;
+        }
+      if (auto *operation = dyn_cast<CallInst>(&instruction))
+        if (operation->getCalledFunction() && operation->getCalledFunction()->getName() == "dx.op.unary.f32") {
+          const auto opcode = cast<ConstantInt>(operation->getArgOperand(0))->getZExtValue();
+          cube_abs += opcode == 6;
+          cube_sqrt += opcode == 24;
+        }
+    }
+    if (side_reads != 2 || cube_abs != 7 || cube_sqrt != 1 || verifyModule(module, &errs())) return 1;
+    struct Probe { std::array<float, 9> input; double lod; };
+    const double zero = -std::numeric_limits<double>::infinity();
+    const Probe probes[] = {
+        {{1,0,0, 0,2,0, 0,0,2}, 3}, {{-1,0,0, 0,2,0, 0,0,2}, 3},
+        {{0,1,0, 2,0,0, 0,0,2}, 3}, {{0,-1,0, 2,0,0, 0,0,2}, 3},
+        {{0,0,1, 2,0,0, 0,2,0}, 3}, {{0,0,-1, 2,0,0, 0,2,0}, 3},
+        {{1,.5,0, 2,1,0, 0,0,0}, zero}, {{-1,.5,0, -2,1,0, 0,0,0}, zero},
+        {{10,0,0, 0,20,0, 0,0,20}, 3}, {{-1,.5,0, -1,1,0, 0,0,0}, 1},
+        {{1,.5,1, 0,1,1, 0,0,0}, .5 * std::log2(20)},
+        {{1,1,.5, 0,1,1, 0,0,0}, .5 * std::log2(20)},
+        {{1,1,1, 0,1,0, 0,0,0}, 2}};
+    for (const auto &probe : probes) {
+      bool valid = true;
+      const double observed = EvaluateCubeLOD(lod, *cube, probe.input, valid);
+      if (!valid || std::isnan(observed) || (std::isinf(probe.lod) ? observed != probe.lod :
+          std::fabs(observed - probe.lod) > 1e-5)) return 1;
+    }
+  }
   module.print(outs(), nullptr);
   return 0;
 }

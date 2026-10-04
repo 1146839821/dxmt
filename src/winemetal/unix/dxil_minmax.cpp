@@ -49,11 +49,13 @@ Components OptionalTap(llvm::IRBuilder<> &builder, llvm::Value *condition,
 }
 }
 
-llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &error, unsigned spatial_dimensions) {
+llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &error,
+    unsigned spatial_dimensions, bool cube) {
   using namespace llvm;
   error.clear();
   auto reject = [&](const char *reason) -> Value * { error = reason; return nullptr; };
   if (spatial_dimensions < 1 || spatial_dimensions > 3) return reject("expected one to three spatial dimensions");
+  if (cube && spatial_dimensions != 2) return reject("cube LOD requires two projected spatial dimensions");
   auto *callee = sample.getCalledFunction();
   if (!callee || callee->getName() != "dx.op.sampleGrad.f32" || sample.arg_size() != 17 ||
       !IsFloat4Status(sample.getType())) return reject("expected float SampleGrad signature");
@@ -69,6 +71,18 @@ llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &err
   for (unsigned i = 3; i < 17; ++i)
     if (sample.getArgOperand(i)->getType() != (i >= 7 && i < 10 ? i32 : f32))
       return reject("invalid SampleGrad operand types");
+  if (cube) {
+    for (unsigned axis = 0; axis < 3; ++axis) {
+      if (isa<UndefValue>(sample.getArgOperand(3 + axis)) ||
+          isa<UndefValue>(sample.getArgOperand(10 + axis)) ||
+          isa<UndefValue>(sample.getArgOperand(13 + axis)))
+        return reject("cube direction and gradients require three defined components");
+      auto *offset = sample.getArgOperand(7 + axis);
+      auto *constant = dyn_cast<ConstantInt>(offset);
+      if (!isa<UndefValue>(offset) && (!constant || !constant->isZero()))
+        return reject("cube sampling offsets are unsupported");
+    }
+  }
   auto *dimensions_type = StructType::getTypeByName(sample.getContext(), "dx.types.Dimensions");
   if (dimensions_type) {
     if (dimensions_type->isOpaque() || dimensions_type->getNumElements() != 4)
@@ -97,11 +111,40 @@ llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &err
   auto fp = [&](float value) { return ConstantFP::get(f32, value); };
   auto *size = b.CreateCall(dimensions, {b.getInt32(GetDimensions), sample.getArgOperand(1), b.getInt32(0)});
   std::array<Value *, 3> dx, dy;
+  std::array<Value *, 2> cube_dx, cube_dy;
+  if (cube) {
+    auto *x = sample.getArgOperand(3), *y = sample.getArgOperand(4), *z = sample.getArgOperand(5);
+    auto *ax = un(FAbs, x), *ay = un(FAbs, y), *az = un(FAbs, z);
+    auto *major_z = b.CreateAnd(b.CreateFCmpOGE(az, ax), b.CreateFCmpOGE(az, ay));
+    auto *major_y = b.CreateFCmpOGE(ay, ax);
+    auto *major = b.CreateSelect(major_z, z, b.CreateSelect(major_y, y, x));
+    auto select_major = [&](Value *vx, Value *vy, Value *vz) {
+      return b.CreateSelect(major_z, vz, b.CreateSelect(major_y, vy, vx));
+    };
+    auto select_minor = [&](unsigned axis, Value *vx, Value *vy, Value *vz) {
+      return axis ? b.CreateSelect(major_z, vy, vz) :
+          b.CreateSelect(b.CreateOr(major_z, major_y), vx, vy);
+    };
+    // A common signed permutation maps these minor axes to the actual face's
+    // U/V axes. It preserves the derivative Gram matrix and hence isotropic LOD.
+    for (unsigned derivative = 0; derivative < 2; ++derivative) {
+      auto *vx = sample.getArgOperand(10 + 3 * derivative);
+      auto *vy = sample.getArgOperand(11 + 3 * derivative);
+      auto *vz = sample.getArgOperand(12 + 3 * derivative);
+      auto *dm = b.CreateFDiv(select_major(vx, vy, vz), major);
+      for (unsigned axis = 0; axis < 2; ++axis) {
+        auto *coordinate = b.CreateFDiv(select_minor(axis, x, y, z), major);
+        auto *minor = b.CreateFDiv(select_minor(axis, vx, vy, vz), major);
+        auto *projected = b.CreateFMul(fp(0.5), b.CreateFSub(minor, b.CreateFMul(coordinate, dm)));
+        (derivative ? cube_dy : cube_dx)[axis] = projected;
+      }
+    }
+  }
   Value *scale = fp(0);
   for (unsigned axis = 0; axis < spatial_dimensions; ++axis) {
-    auto *extent = b.CreateUIToFP(b.CreateExtractValue(size, axis), f32);
-    dx[axis] = b.CreateFMul(sample.getArgOperand(10 + axis), extent);
-    dy[axis] = b.CreateFMul(sample.getArgOperand(13 + axis), extent);
+    auto *extent = b.CreateUIToFP(b.CreateExtractValue(size, cube ? 0 : axis), f32);
+    dx[axis] = b.CreateFMul(cube ? cube_dx[axis] : sample.getArgOperand(10 + axis), extent);
+    dy[axis] = b.CreateFMul(cube ? cube_dy[axis] : sample.getArgOperand(13 + axis), extent);
     scale = max(scale, un(FAbs, dx[axis]));
     scale = max(scale, un(FAbs, dy[axis]));
   }

@@ -36,7 +36,10 @@ bool LowerReductionSampleLevel(llvm::CallInst &sample,
 // SampleGrad. Mirrors AIR's normalized major-axis algorithm. The caller still
 // applies sampler bias/clamps and instruction/resource clamps in API order.
 // This helper does not rewrite or admit the sampling operation itself.
-llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &error, unsigned spatial_dimensions = 2);
+// Cube qualification uses two projected axes, three direction/gradient operands
+// and a common side width. This does not admit Cube binding or lower its taps.
+llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &error,
+    unsigned spatial_dimensions = 2, bool cube = false);
 
 // Qualify float 1D/2D/3D (or array) SampleLevel/SampleGrad pairs and pixel-only
 // Sample/SampleBias, append private tN/sN and
