@@ -1657,7 +1657,10 @@ Converter::CreateImplicitReductionSample(
   if (ctx.shader_type != microsoft::D3D10_SB_PIXEL_SHADER ||
       (texture.Logical != Texture::texture1d && texture.Logical != Texture::texture1d_array &&
        texture.Logical != Texture::texture2d && texture.Logical != Texture::texture2d_array &&
-       texture.Logical != Texture::texture3d) || texture.Texture.sample_type != Texture::sample_float) {
+       texture.Logical != Texture::texture3d && texture.Logical != Texture::texturecube &&
+       texture.Logical != Texture::texturecube_array) || texture.Texture.sample_type != Texture::sample_float ||
+      ((texture.Logical == Texture::texturecube || texture.Logical == Texture::texturecube_array) &&
+       (offsets[0] || offsets[1] || offsets[2]))) {
     failure = "AIR Min/Max implicit stage or texture type is unsupported";
     return {};
   }
@@ -1668,7 +1671,7 @@ Converter::CreateImplicitReductionSample(
   auto *ordinary_value = sampler.Reduction->RuntimePredicate ? ordinary_sample() : nullptr;
   return CreateReductionSample(texture, sampler, coord, array_index, nullptr, offsets,
       [ordinary_value] { return ordinary_value; }, [&]() -> llvm::Value * {
-        auto lod = air.CreateIsotropicGradientLOD(texture.Texture, texture.Handle, dx, dy);
+        auto lod = air.CreateIsotropicGradientLOD(texture.Texture, texture.Handle, dx, dy, coord);
         if (!lod) { failure = "AIR Min/Max implicit LOD is unsupported"; return nullptr; }
         auto *biased_lod = ir.CreateFAdd(*lod, sampler.Bias);
         if (instruction_bias) biased_lod = ir.CreateFAdd(biased_lod, instruction_bias);

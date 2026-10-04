@@ -93,9 +93,23 @@ struct ShaderSet {
   std::vector<uint8_t> pixel_query;
   std::vector<uint8_t> pixel_sample, pixel_sample_mip, pixel_sample_bias, pixel_sample_combined;
   std::vector<uint8_t> pixel_sample_clamp, pixel_bias_clamp, pixel_sample_empty, pixel_bias_force;
+  std::vector<uint8_t> pixel_cube[2][5];
 };
 
 bool CompileShaders(pD3DCompile compile_shader, ShaderSet &shaders) {
+  for (unsigned array = 0; array < 2; ++array) {
+    const char *directions[] = {"1,0,0", "1,p.x*0.46,p.y*0.46", "1,p.x*0.46,p.y*0.46",
+        "1,p.x*0.46,p.y*0.46", "p.x,p.x*0.5,0"};
+    for (unsigned probe = 0; probe < 5; ++probe) {
+      const bool bias = probe == 2 || probe == 3;
+      const std::string source = std::string(array ? "TextureCubeArray<float4>" : "TextureCube<float4>") +
+          " t:register(t0); SamplerState s:register(s0); float4 ps_main(float4 p:SV_Position):SV_Target{return t." +
+          (bias ? "SampleBias" : "Sample") + "(s," + (array ? "float4(" : "float3(") +
+          directions[probe] + (array ? ",1)" : ")") + (bias ? (probe == 2 ? ",0.75" : ",-0.75") : "") + ");}";
+      if (!CompileShader(compile_shader, source.c_str(), "implicit-cube.hlsl", "ps_main", "ps_5_0",
+              shaders.pixel_cube[array][probe])) return false;
+    }
+  }
   const char *sample_prefix = "Texture2D<float4> t:register(t0); SamplerState s:register(s0);"
       "float4 ps_main(float4 p:SV_Position):SV_Target{return t.";
   const std::string sample_source = std::string(sample_prefix) + "Sample(s,float2(0.5,0.5));}";
@@ -305,8 +319,12 @@ struct TestCase {
   bool sampling_dynamic = false;
   float sampling_resource_clamp = 0;
   bool indirect_root_cbv = false;
+  bool sampling_cube_array = false;
+
+  bool SampleCube() const { return sampling >= 11; }
 
   unsigned SampleMipCount() const {
+    if (SampleCube()) return sampling >= 13 && sampling <= 16 ? 4 : 1;
     return (sampling >= 3 && sampling <= 5) || sampling >= 7 ? 4 : 1;
   }
 };
@@ -357,7 +375,7 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   ID3D12DescriptorHeap *shader_heap = nullptr;
   ID3D12DescriptorHeap *sampler_heap = nullptr;
   ID3D12Resource *sample_texture = nullptr, *sample_upload = nullptr;
-  D3D12_PLACED_SUBRESOURCE_FOOTPRINT sample_footprints[4] = {};
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT sample_footprints[48] = {};
   ID3D12Resource *render_target = nullptr;
   ID3D12Resource *vertex_buffer = nullptr;
   ID3D12Resource *index_buffer = nullptr;
@@ -439,11 +457,12 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   D3D12_SAMPLER_DESC sample_sampler = {};
   D3D12_DESCRIPTOR_RANGE sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
   if (test.sampling) {
-    sample_sampler.Filter = test.sampling == 2 ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR :
-        test.sampling == 6 ? D3D12_FILTER_MIN_MAG_MIP_LINEAR : test.sampling >= 3 ?
+    sample_sampler.Filter = test.sampling == 2 || test.sampling == 12 ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR :
+        test.sampling == 6 || test.sampling == 17 ? D3D12_FILTER_MIN_MAG_MIP_LINEAR :
+        test.sampling == 11 ? D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR : test.sampling >= 3 ?
         D3D12_FILTER_MINIMUM_MIN_MAG_MIP_POINT : D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;
     sample_sampler.AddressU = sample_sampler.AddressV = sample_sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sample_sampler.MipLODBias = test.sampling == 5 ? 0.75f : 0.0f;
+    sample_sampler.MipLODBias = test.sampling == 5 || test.sampling == 15 ? 0.75f : 0.0f;
     sample_sampler.MaxLOD = D3D12_FLOAT32_MAX;
     sample_sampler.MaxAnisotropy = 1;
     sample_sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
@@ -522,7 +541,9 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   pso_desc.VS = {vertex_shader.data(), vertex_shader.size()};
   pso_desc.GS = test.null_texture_query || test.sampling || test.indirect_root_cbv ? D3D12_SHADER_BYTECODE{}
                                          : D3D12_SHADER_BYTECODE{geometry_shader.data(), geometry_shader.size()};
-  const auto &pixel_shader = test.sampling == 7 ? shaders.pixel_sample_clamp :
+  const auto &pixel_shader = test.SampleCube() ? shaders.pixel_cube[test.sampling_cube_array]
+      [test.sampling >= 13 && test.sampling <= 16 ? test.sampling - 12 : 0] :
+      test.sampling == 7 ? shaders.pixel_sample_clamp :
       test.sampling == 8 ? shaders.pixel_bias_clamp : test.sampling == 9 ? shaders.pixel_sample_empty :
       test.sampling == 10 ? shaders.pixel_bias_force :
       test.sampling == 3 ? shaders.pixel_sample_mip :
@@ -584,11 +605,13 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
       desc.Flags = D3D12_RESOURCE_FLAG_NONE;
       desc.Width = desc.Height = null_srv.Texture2D.MipLevels == 4 ? 8 : 2;
       desc.MipLevels = null_srv.Texture2D.MipLevels;
+      desc.DepthOrArraySize = test.SampleCube() ? (test.sampling_cube_array ? 12 : 6) : 1;
       if (!CheckHR("CreateSampleTexture", device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE,
           &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&sample_texture))))
         return fail("sample texture creation failed");
-      UINT rows[4] = {}; UINT64 row_sizes[4] = {}, total = 0;
-      device->GetCopyableFootprints(&desc, 0, desc.MipLevels, 0, sample_footprints, rows, row_sizes, &total);
+      const unsigned subresources = desc.MipLevels * desc.DepthOrArraySize;
+      UINT rows[48] = {}; UINT64 row_sizes[48] = {}, total = 0;
+      device->GetCopyableFootprints(&desc, 0, subresources, 0, sample_footprints, rows, row_sizes, &total);
       auto upload_desc = BufferDescription(total);
       if (!CheckHR("CreateSampleUpload", device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE,
           &upload_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&sample_upload))))
@@ -598,14 +621,21 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
       const uint32_t mip_red[] = {32, 224, 96, 160};
       const uint32_t spatial_red[] = {16, 64, 192, 240};
       std::memset(data, 0, static_cast<size_t>(total));
-      for (unsigned mip = 0; mip < desc.MipLevels; ++mip)
-        for (UINT y = 0; y < rows[mip]; ++y)
-          for (UINT x = 0; x < sample_footprints[mip].Footprint.Width; ++x) {
-            const uint32_t pixel = 0xff000000u | (desc.MipLevels == 4 ? mip_red[mip] : spatial_red[y * 2 + x]);
-            std::memcpy(static_cast<char *>(data) + sample_footprints[mip].Offset +
-                y * sample_footprints[mip].Footprint.RowPitch + x * 4, &pixel, 4);
+      for (unsigned subresource = 0; subresource < subresources; ++subresource)
+        for (UINT y = 0; y < rows[subresource]; ++y)
+          for (UINT x = 0; x < sample_footprints[subresource].Footprint.Width; ++x) {
+            const unsigned mip = subresource % desc.MipLevels;
+            const bool poison = test.sampling_cube_array && subresource / desc.MipLevels < 6;
+            const uint32_t pixel = 0xff000000u | (poison ? 7 : desc.MipLevels == 4 ? mip_red[mip] : spatial_red[y * 2 + x]);
+            std::memcpy(static_cast<char *>(data) + sample_footprints[subresource].Offset +
+                y * sample_footprints[subresource].Footprint.RowPitch + x * 4, &pixel, 4);
           }
       sample_upload->Unmap(0, nullptr);
+      if (test.SampleCube()) {
+        null_srv.ViewDimension = test.sampling_cube_array ? D3D12_SRV_DIMENSION_TEXTURECUBEARRAY : D3D12_SRV_DIMENSION_TEXTURECUBE;
+        if (test.sampling_cube_array) null_srv.TextureCubeArray = {0, desc.MipLevels, 0, 2, test.sampling_resource_clamp};
+        else null_srv.TextureCube = {0, desc.MipLevels, test.sampling_resource_clamp};
+      }
       if (test.sampling_dynamic) {
         auto sampler_desc = shader_heap_desc;
         sampler_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
@@ -729,8 +759,8 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
   list->SetPipelineState(pso);
   if (test.sampling) {
-    const unsigned mips = test.SampleMipCount();
-    for (unsigned mip = 0; mip < mips; ++mip) {
+    const unsigned subresources = test.SampleMipCount() * (test.SampleCube() ? (test.sampling_cube_array ? 12 : 6) : 1);
+    for (unsigned mip = 0; mip < subresources; ++mip) {
       D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
       dst.pResource = sample_texture; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = mip;
       src.pResource = sample_upload; src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
@@ -930,6 +960,42 @@ int main(int argc, char **argv) {
        .expected_rgb = 160, .no_input = true, .sampling = 10, .sampling_resource_clamp = 1.25f},
       {.name = "instruction-bias-force-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
        .expected_rgb = 160, .no_input = true, .sampling = 10, .sampling_dynamic = true, .sampling_resource_clamp = 1.25f},
+      {.name = "cube-implicit-min-static", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 16, .no_input = true, .sampling = 11},
+      {.name = "cube-implicit-min-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 16, .no_input = true, .sampling = 11, .sampling_dynamic = true},
+      {.name = "cube-implicit-max-static", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 240, .no_input = true, .sampling = 12},
+      {.name = "cube-implicit-max-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 240, .no_input = true, .sampling = 12, .sampling_dynamic = true},
+      {.name = "cube-implicit-mip-static", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 224, .no_input = true, .sampling = 13},
+      {.name = "cube-implicit-mip-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 224, .no_input = true, .sampling = 13, .sampling_dynamic = true},
+      {.name = "cube-implicit-bias-static", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 96, .no_input = true, .sampling = 14},
+      {.name = "cube-implicit-bias-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 96, .no_input = true, .sampling = 14, .sampling_dynamic = true},
+      {.name = "cube-implicit-combined-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 224, .no_input = true, .sampling = 15, .sampling_dynamic = true},
+      {.name = "cube-implicit-radial-static", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 32, .no_input = true, .sampling = 16},
+      {.name = "cube-implicit-radial-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 32, .no_input = true, .sampling = 16, .sampling_dynamic = true},
+      {.name = "cube-implicit-ordinary-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 128, .no_input = true, .sampling = 17, .sampling_dynamic = true},
+      {.name = "cube-array-implicit-min-static", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 16, .no_input = true, .sampling = 11, .sampling_cube_array = true},
+      {.name = "cube-array-implicit-max-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 240, .no_input = true, .sampling = 12, .sampling_dynamic = true, .sampling_cube_array = true},
+      {.name = "cube-array-implicit-mip-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 224, .no_input = true, .sampling = 13, .sampling_dynamic = true, .sampling_cube_array = true},
+      {.name = "cube-array-implicit-bias-static", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 96, .no_input = true, .sampling = 14, .sampling_cube_array = true},
+      {.name = "cube-array-implicit-radial-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 32, .no_input = true, .sampling = 16, .sampling_dynamic = true, .sampling_cube_array = true},
+      {.name = "cube-array-implicit-ordinary-dynamic", .topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+       .expected_rgb = 128, .no_input = true, .sampling = 17, .sampling_dynamic = true, .sampling_cube_array = true},
       {"implicit-min-static", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
        16, true, false, false, false, false, false, 1, false},
       {"implicit-min-dynamic", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,

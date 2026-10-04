@@ -489,3 +489,12 @@ and real D3D12 gradient/tie/radial readbacks pass. This supersedes the prior AIR
 explicit-gradient rejection, not implicit Cube, DXIL Cube or full MinMax
 qualification. View/clamp/filter/format/lifetime and mandatory FL gates remain
 open; no capability/FL promotion.
+
+AIR bounded float Cube/CubeArray pixel Sample/SampleBias now reuse primary-face
+gradient projection and the existing reduction helper, with quad derivatives
+and ordinary dynamic samples kept before descriptor-controlled branches
+(`D3D12_MINMAX_CUBE_IMPLICIT.md`). Both full builds and focused real pixel
+readbacks pass, including radial cancellation, sampler/instruction bias and
+gate-off ordinary sampling. This supersedes the prior AIR implicit Cube
+rejection; independent DXIL Cube and full resource/filter/format/lifetime /
+view/clamp qualification remain open. No capability/FL promotion.
