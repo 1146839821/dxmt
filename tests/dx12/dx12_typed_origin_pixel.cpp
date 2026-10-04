@@ -21,9 +21,14 @@ static bool Load(const wchar_t *path, std::vector<unsigned char> &bytes) {
   CloseHandle(file); return ok;
 }
 
+enum class DrawMode { Typed, RejectTypedVS, Ordinary, RejectMinMaxSwitch };
+
 static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
     const std::vector<unsigned char> &ps, const std::vector<unsigned char> &ordinary,
-    bool live, bool pixel_visibility, bool reject_typed_vs = false) {
+    bool live, bool pixel_visibility, DrawMode mode = DrawMode::Typed) {
+  const bool reject_typed_vs = mode == DrawMode::RejectTypedVS;
+  const bool reject_minmax_switch = mode == DrawMode::RejectMinMaxSwitch;
+  const bool ordinary_only = mode == DrawMode::Ordinary;
   D3D12_COMMAND_QUEUE_DESC qd = {}; ID3D12CommandQueue *raw_queue = nullptr;
   if (!Check(device->CreateCommandQueue(&qd, IID_PPV_ARGS(&raw_queue)), "queue")) return false;
   OwnedCOM<ID3D12CommandQueue> queue(raw_queue);
@@ -104,6 +109,7 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
   parameters[1].Constants = {3, 0, 1}; parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
   D3D12_VERSIONED_ROOT_SIGNATURE_DESC rd = {}; rd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
   rd.Desc_1_1.NumParameters = 2; rd.Desc_1_1.pParameters = parameters;
+  if (ordinary_only) { rd.Desc_1_1.NumParameters = 1; rd.Desc_1_1.pParameters = parameters + 1; }
   ID3DBlob *raw_blob = nullptr;
   if (!Check(D3D12SerializeVersionedRootSignature(&rd, &raw_blob, nullptr), "serialize")) return false;
   OwnedCOM<ID3DBlob> blob(raw_blob); ID3D12RootSignature *raw_root = nullptr;
@@ -145,14 +151,20 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
   transition(output.get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   transition(target.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
   list->SetGraphicsRootSignature(root.get()); ID3D12DescriptorHeap *heaps[] = {resources.get()};
-  list->SetDescriptorHeaps(1, heaps); list->SetGraphicsRootDescriptorTable(0, resources->GetGPUDescriptorHandleForHeapStart());
-  list->SetGraphicsRoot32BitConstant(1, 0xabc123, 0);
+  list->SetDescriptorHeaps(1, heaps);
+  if (!ordinary_only) list->SetGraphicsRootDescriptorTable(0, resources->GetGPUDescriptorHandleForHeapStart());
+  list->SetGraphicsRoot32BitConstant(ordinary_only ? 0 : 1, 0xabc123, 0);
   list->OMSetRenderTargets(1, &rtv, FALSE, nullptr); list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   D3D12_VIEWPORT viewport = {0, 0, 2, 1, 0, 1}; D3D12_RECT rect = {0, 0, 2, 1};
-  list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &rect); list->DrawInstanced(3, 1, 0, 0);
-  if (reject_typed_vs) {
+  list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &rect);
+  if (reject_minmax_switch && !SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", L"Z:\\not-used-after-combination-rejection"))
+    return false;
+  list->DrawInstanced(3, 1, 0, 0);
+  if (reject_typed_vs || reject_minmax_switch) {
     const bool rejected = FAILED(list->Close());
-    if (rejected) std::puts("PIXEL_ORIGIN typed VS + ordinary PS rejected PASS (no GPU submission)");
+    if (rejected) std::puts(reject_typed_vs ?
+        "PIXEL_ORIGIN typed VS + ordinary PS rejected PASS (no GPU submission)" :
+        "PIXEL_ORIGIN late MinMax override rejected PASS (no GPU submission)");
     return rejected;
   }
   // Same encoder: restore the ordinary application PSO/TLAB after the private draw.
@@ -171,12 +183,13 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
   for (unsigned pass = 0; pass < 4; ++pass) {
     const bool replacement = live && (pass % 2 == 0);
     if (live) device->CreateShaderResourceView(replacement ? second.get() : first.get(), &srv, cpu);
-    const UINT x = replacement ? 40 : 20, y = replacement ? 56 : 36;
+    const UINT x = ordinary_only ? 77 : replacement ? 40 : 20, y = ordinary_only ? 77 : replacement ? 56 : 36;
     if (!execute(list.get(), pass + 1)) return false;
     void *mapped = nullptr;
     if (!Check(readback->Map(0, nullptr, &mapped), "readback")) return false;
     const auto *words = static_cast<const UINT *>(mapped);
-    const bool ok = words[0] == init[0] && words[1] == x + 100 && words[2] == y + 100 &&
+    const bool ok = words[0] == init[0] && words[1] == (ordinary_only ? init[1] : x + 100) &&
+        words[2] == (ordinary_only ? init[2] : y + 100) &&
         words[3] == init[3] && words[128] == x && words[129] == 77;
     if (!ok) std::printf("PIXEL_ORIGIN mismatch static=%u pixel=%u pass=%u values=%08x,%u,%u,%08x rt=%u,%u\n",
         !live, pixel_visibility, pass, words[0], words[1], words[2], words[3], words[128], words[129]);
@@ -187,16 +200,26 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
 }
 
 int wmain(int argc, wchar_t **argv) {
-  if (argc != 6) return 1;
+  const bool minmax_switch = argc == 7 && !wcscmp(argv[6], L"--minmax-switch");
+  const bool automatic = argc == 7 && (!wcscmp(argv[6], L"--auto") || minmax_switch);
+  const bool ordinary_only = argc == 7 && !wcscmp(argv[6], L"--ordinary");
+  if (argc != 6 && !automatic && !ordinary_only) return 1;
   std::vector<unsigned char> vs, ps, ordinary, typed_vs;
   if (!Load(argv[1], vs) || !Load(argv[2], ps) || !Load(argv[3], ordinary) ||
-      !Load(argv[4], typed_vs) || !SetEnvironmentVariableW(L"DXMT_TYPED_ORIGIN_DXC_DIRECTORY", argv[5])) return 1;
-  SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr);
+      !Load(argv[4], typed_vs) || !SetEnvironmentVariableW(L"DXMT_TYPED_ORIGIN_DXC_DIRECTORY",
+          automatic || ordinary_only ? nullptr : argv[5]) ||
+      !SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr)) return 1;
+  std::printf("PIXEL_ORIGIN selection=%s\n", automatic ? "deployed" : ordinary_only ? "ordinary" : "override");
   ID3D12Device *raw = nullptr;
   if (!Check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&raw)), "device")) return 1;
   OwnedCOM<ID3D12Device> device(raw);
+  if (minmax_switch) return Run(device.get(), vs, ps, ordinary, false, false, DrawMode::RejectMinMaxSwitch) ? 0 : 1;
+  if (ordinary_only) {
+    if (!Run(device.get(), vs, ordinary, ordinary, false, false, DrawMode::Ordinary)) return 1;
+    std::puts("ordinary graphics without origin override GPU PASS"); return 0;
+  }
   for (bool live : {false, true}) for (bool pixel : {false, true})
     if (!Run(device.get(), vs, ps, ordinary, live, pixel)) return 1;
-  if (!Run(device.get(), typed_vs, ordinary, ordinary, false, false, true)) return 1;
+  if (!Run(device.get(), typed_vs, ordinary, ordinary, false, false, DrawMode::RejectTypedVS)) return 1;
   std::puts("typed-origin production pixel GPU PASS (16 draws)"); return 0;
 }

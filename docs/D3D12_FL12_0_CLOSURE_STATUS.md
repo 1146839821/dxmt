@@ -571,3 +571,16 @@ GPU draws plus VS-root, live replacement and boundary guards. Compute/root,
 allocator and MinMax compute/graphics regressions pass. Broader stages/formats,
 default selection, parallel lifetime timing and game/performance acceptance remain
 open. No capability or FL promotion; full production objective remains active.
+
+### Typed-origin deployed graphics selection (2026-10-04)
+
+[Task record](D3D12_TYPED_ORIGIN_GRAPHICS_SELECTION.md): validated DXIL graphics
+now selects the existing pixel repair from DXC deployed beside D3D12 without an
+environment override. Ordinary shaders remain ordinary; absent deployment keeps
+prior compatibility, present broken compiler fails explicitly, valid override
+takes priority. A late MinMax switch cannot bypass retained origin selection.
+Final same-binary old-DLL failure/current pass and64 automatic private GPU draws
+are verified on normal/no-private and SM6.0/6.6; ordinary, explicit, missing/broken,
+late-switch, compute and MinMax graphics controls pass their expected outcomes.
+Default distribution policy, VS/PS shared records and full typed/FL matrices
+remain open. No capability promotion; full production objective stays active.

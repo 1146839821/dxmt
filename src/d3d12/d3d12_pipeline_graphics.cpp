@@ -1383,6 +1383,22 @@ public:
     }
 
     MinMaxShaders static_minmax_shaders;
+    if (use_msc && env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY").empty() &&
+        env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY").empty()) {
+      // Select by validated DXIL declarations, not by descriptor heap contents
+      // or an assumed shader-model capability. Unsupported stages stay subject
+      // to GetTypedOriginVariant's fail-closed graphics qualification.
+      for (const auto &shader : {pDesc->PS, pDesc->VS, pDesc->GS, pDesc->HS, pDesc->DS}) {
+        if (!shader.pShaderBytecode) continue;
+        std::wstring directory;
+        const auto selection = SelectD3D12TypedOriginCompiler(shader, directory);
+        if (FAILED(selection)) return selection;
+        if (selection == S_OK) {
+          typed_origin_compiler_directory = std::move(directory);
+          break;
+        }
+      }
+    }
     if (use_msc && !has_stream_output) {
       try {
         original_vs_.assign(static_cast<const uint8_t *>(pDesc->VS.pShaderBytecode),

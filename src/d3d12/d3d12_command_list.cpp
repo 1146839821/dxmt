@@ -2061,15 +2061,28 @@ public:
     const bool use_msc = pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
     const D3D12MinMaxGraphicsVariant *minmax_variant = nullptr;
     const D3D12TypedOriginGraphicsVariant *origin_variant = nullptr;
-    const auto origin_directory = use_msc ? env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY") : "";
+    const auto origin_override = use_msc ? env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY") : "";
     const auto minmax_directory = use_msc ? env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY") : "";
-    if (!origin_directory.empty()) {
+    std::wstring overridden_origin_directory;
+    const std::wstring *origin_directory = nullptr;
+    if (!origin_override.empty()) {
+      try { overridden_origin_directory = str::tows(origin_override.c_str()); }
+      catch (const std::bad_alloc &) {
+        FailRecording(__func__, "typed-origin override directory allocation failed");
+        return DrawCallStatus::Invalid;
+      }
+      origin_directory = &overridden_origin_directory;
+    } else if (use_msc && !pso_graphics_->typed_origin_compiler_directory.empty()) {
+      // The command list retains the application PSO: borrow its immutable
+      // deployment selection rather than allocating a directory copy per draw.
+      origin_directory = &pso_graphics_->typed_origin_compiler_directory;
+    }
+    if (origin_directory) {
       if (SkipResourceBinding || !AllowMinMax || !AllowTypedOrigin || predication_buffer_ || !minmax_directory.empty()) {
         FailRecording(__func__, "pixel typed-origin indirect/skipped/MinMax combination is unsupported");
         return DrawCallStatus::Invalid;
       }
-      const auto directory = str::tows(origin_directory.c_str());
-      const auto hr = pso_graphics_->GetTypedOriginVariant(directory.c_str(), &origin_variant);
+      const auto hr = pso_graphics_->GetTypedOriginVariant(origin_directory->c_str(), &origin_variant);
       if (FAILED(hr) || (hr == S_OK && (!origin_variant || !rootsig_graphics_ || !descriptor_heap_))) {
         FailRecording(__func__, "pixel typed-origin preparation failed HRESULT=", hr);
         return DrawCallStatus::Invalid;

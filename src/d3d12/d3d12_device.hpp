@@ -353,6 +353,7 @@ public:
 
 class MTLD3D12GraphicsPipelineState : public MTLD3D12PipelineState {
 public:
+  std::wstring typed_origin_compiler_directory;
   virtual HRESULT GetTypedOriginVariant(const wchar_t *dxc_directory,
       const struct D3D12TypedOriginGraphicsVariant **variant) = 0;
   virtual HRESULT GetMinMaxVariant(const wchar_t *dxc_directory,
