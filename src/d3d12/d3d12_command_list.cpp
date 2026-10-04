@@ -2079,12 +2079,12 @@ public:
     }
     if (origin_directory) {
       if (SkipResourceBinding || !AllowMinMax || !AllowTypedOrigin || predication_buffer_ || !minmax_directory.empty()) {
-        FailRecording(__func__, "pixel typed-origin indirect/skipped/MinMax combination is unsupported");
+        FailRecording(__func__, "graphics typed-origin indirect/skipped/MinMax combination is unsupported");
         return DrawCallStatus::Invalid;
       }
       const auto hr = pso_graphics_->GetTypedOriginVariant(origin_directory->c_str(), &origin_variant);
       if (FAILED(hr) || (hr == S_OK && (!origin_variant || !rootsig_graphics_ || !descriptor_heap_))) {
-        FailRecording(__func__, "pixel typed-origin preparation failed HRESULT=", hr);
+        FailRecording(__func__, "graphics typed-origin preparation failed HRESULT=", hr);
         return DrawCallStatus::Invalid;
       }
     }
@@ -2495,13 +2495,13 @@ public:
       std::shared_ptr<D3D12TypedOriginDispatch> draw;
       const auto hr = RecordD3D12TypedOriginDraw(pso_graphics_.ptr(), origin_variant, rootsig_graphics_.ptr(),
           rootarg_graphics_staging_, descriptor_heap_.ptr(), ptr_add(allocator_->gpu_heap_, offset), draw);
-      if (FAILED(hr)) { FailRecording(__func__, "pixel typed-origin recording failed HRESULT=", hr); return DrawCallStatus::Invalid; }
+      if (FAILED(hr)) { FailRecording(__func__, "graphics typed-origin recording failed HRESULT=", hr); return DrawCallStatus::Invalid; }
       draw->sampler_heap = sampler_heap_;
       EncodeRootResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, msc_render_stages, false);
       auto &marker = allocator_->EncodeRenderCommand<wmtcmd_render_nop>();
       marker.type = WMTRenderCommandNop; draw->render_marker = &marker;
       try { render->typed_origin_draws.push_back(std::move(draw)); }
-      catch (const std::bad_alloc &) { FailRecording(__func__, "pixel typed-origin draw allocation failed"); return DrawCallStatus::Invalid; }
+      catch (const std::bad_alloc &) { FailRecording(__func__, "graphics typed-origin draw allocation failed"); return DrawCallStatus::Invalid; }
       dirty_state_.set(DirtyState::GraphicsRootArguments, DirtyState::GraphicsPipelineState);
     }
 

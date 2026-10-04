@@ -693,12 +693,12 @@ public:
       }
       if (shader_backend != D3D12ShaderBackend::MetalShaderConverter || !application_root_ ||
           !minmax_render_info_valid_ || minmax_emulation_flags_ || msc_mesh || stream_output ||
-          requires_minmax_variant || original_vs_.empty() || original_ps_.empty()) return E_NOTIMPL;
+          requires_minmax_variant || original_vs_.empty()) return E_NOTIMPL;
       std::wstring selected;
       const auto vertex_selection = SelectD3D12TypedOriginCompiler(
           {original_vs_.data(), original_vs_.size()}, selected, directory);
       if (FAILED(vertex_selection)) return vertex_selection;
-      const auto pixel_selection = SelectD3D12TypedOriginCompiler(
+      const auto pixel_selection = original_ps_.empty() ? S_FALSE : SelectD3D12TypedOriginCompiler(
           {original_ps_.data(), original_ps_.size()}, selected, directory);
       if (FAILED(pixel_selection)) return pixel_selection;
       if (vertex_selection == S_FALSE && pixel_selection == S_FALSE) return S_FALSE;
@@ -740,17 +740,20 @@ public:
       hr = prepare_stage(original_vs_, vertex_selection, D3D12_SHADER_VISIBILITY_VERTEX, vs);
       if (FAILED(hr)) return hr;
       candidate->vertex_binding_count = candidate->bindings.size();
-      hr = prepare_stage(original_ps_, pixel_selection, D3D12_SHADER_VISIBILITY_PIXEL, ps);
-      if (FAILED(hr)) return hr;
+      if (!original_ps_.empty()) {
+        hr = prepare_stage(original_ps_, pixel_selection, D3D12_SHADER_VISIBILITY_PIXEL, ps);
+        if (FAILED(hr)) return hr;
+      }
       if (candidate->bindings.empty()) return S_FALSE;
       auto metal = device_->GetMTLDevice();
       WMT::Reference<WMT::Error> error;
       auto vs_lib = metal.newLibrary(vs.metallib.data(), vs.metallib.size(), error);
-      auto ps_lib = metal.newLibrary(ps.metallib.data(), ps.metallib.size(), error);
-      if (!vs_lib || !ps_lib) return E_FAIL;
+      auto ps_lib = original_ps_.empty() ? WMT::Reference<WMT::Library>{} :
+          metal.newLibrary(ps.metallib.data(), ps.metallib.size(), error);
+      if (!vs_lib || (!original_ps_.empty() && !ps_lib)) return E_FAIL;
       auto vs_function = vs_lib.newFunction(vs.entry_point.c_str());
-      auto ps_function = ps_lib.newFunction(ps.entry_point.c_str());
-      if (!vs_function || !ps_function) return E_FAIL;
+      auto ps_function = ps_lib ? ps_lib.newFunction(ps.entry_point.c_str()) : WMT::Reference<WMT::Function>{};
+      if (!vs_function || (!original_ps_.empty() && !ps_function)) return E_FAIL;
       auto info = minmax_render_info_;
       info.vertex_function = vs_function.handle; info.fragment_function = ps_function.handle;
       candidate->pso = metal.newRenderPipelineState(info, error);

@@ -1,5 +1,20 @@
 # FL12_0 closure checkpoint
 
+## Native depth-only typed VS implementation update (2026-10-04)
+
+Native typed VS now supports absent-PS depth-only pipelines without a fabricated
+fragment stage. The existing vertex-only origin ABI and single TLAB are reused.
+Normal/no-private, SM6.0/6.6 and explicit/deployed compiler runs pass 416 typed
+depth draws and 416 ordinary restoration draws; 192 additional typed VS/PS draws
+and their ordinary restoration checks pass. The same depth fixture fails before
+GPU submission against the previous DLLs. See `D3D12_TYPED_ORIGIN_DEPTH_ONLY.md`.
+
+This supersedes the depth-only gap below, not full typed or FL12 qualification.
+Remaining pre-raster stages, indirect graphics, broad formats/provenance/lifetime
+matrices and compiler distribution remain open. Static no-reread is source-only
+evidence. Four production workstreams and seven complete GPU categories remain
+open; capability declarations and game/performance/tessellation status unchanged.
+
 ## Native typed VS/PS implementation update (2026-10-04)
 
 Native DXIL vertex origin preparation/conversion and VS/PS shared table capture
