@@ -721,6 +721,25 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '-D', 'MINMAX_ARRAY_STRUCTURED=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach shape : ['cube', 'cube_array']
+    custom_target('dx12_minmax_' + shape + '_pixel_fixture',
+      input: 'minmax_cube_pixel.hlsl', output: 'minmax_' + shape + '.ps.cso',
+      command: dxc_command + ['-E', 'main', '-T', 'ps_6_0'] +
+          (shape == 'cube_array' ? ['-D', 'MINMAX_CUBE_ARRAY=1'] : []) + ['@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+    foreach mode : ['level', 'grad']
+      cube_defines = shape == 'cube_array' ? ['-D', 'MINMAX_CUBE_ARRAY=1'] : []
+      if mode == 'grad'
+        cube_defines += ['-D', 'MINMAX_CUBE_GRAD=1']
+      endif
+      custom_target('dx12_minmax_' + shape + '_' + mode + '_fixture',
+        input: 'minmax_cube.hlsl', output: 'minmax_' + shape + '_' + mode + '.cs.cso',
+        command: dxc_command + ['-E', 'main', '-T', 'cs_6_0'] + cube_defines + ['@INPUT@', '-Fo', '@OUTPUT@'],
+        build_by_default: false,
+      )
+    endforeach
+  endforeach
   custom_target('dx12_minmax_line_fixture',
     input: 'minmax_line.hlsl', output: 'minmax_line.cs.cso',
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],

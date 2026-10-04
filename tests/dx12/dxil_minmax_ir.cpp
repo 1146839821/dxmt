@@ -9,6 +9,7 @@
 #include <cstring>
 #include <limits>
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <unordered_map>
@@ -242,7 +243,7 @@ static bool CheckBindingQualification(llvm::Module &module) {
     auto *texture = cast<MDNode>(cast<MDNode>(resources->getOperand(0))->getOperand(0));
     IRBuilder<> builder(clone->getContext());
     if (probe == 0) texture->replaceOperandWith(3, ConstantAsMetadata::get(builder.getInt32(DXMT_MSC_MINMAX_SPACE)));
-    if (probe == 9) texture->replaceOperandWith(6, ConstantAsMetadata::get(builder.getInt32(5))); // Cube remains excluded.
+    if (probe == 9) texture->replaceOperandWith(6, ConstantAsMetadata::get(builder.getInt32(3))); // Multisample remains excluded.
     CallInst *sample = nullptr;
     for (auto &function : *clone) for (auto &block : function) for (auto &instruction : block)
       if (auto *call = dyn_cast<CallInst>(&instruction))
@@ -302,7 +303,8 @@ static bool CheckBindingQualification(llvm::Module &module) {
         if (auto *call = dyn_cast<CallInst>(&instruction))
           if (call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32") ++samples;
       const auto texture_kind = mdconst::extract<ConstantInt>(texture->getOperand(6))->getZExtValue();
-      if (samples != (texture_kind == 4 ? 34 : texture_kind == 1 || texture_kind == 6 ? 10 : 18)) return false;
+      if (samples != (texture_kind == 5 || texture_kind == 9 ? 50 :
+          texture_kind == 4 ? 34 : texture_kind == 1 || texture_kind == 6 ? 10 : 18)) return false;
       auto *result_resources = clone->getNamedMetadata("dx.resources")->getOperand(0);
       auto *cbvs = cast<MDNode>(result_resources->getOperand(2));
       if (cbvs->getNumOperands() != 1) return false;
@@ -366,6 +368,39 @@ static bool CheckModernQualification(llvm::Module &module) {
   return true;
 }
 
+static bool CheckCubeQualification(llvm::Module &module) {
+  using namespace llvm;
+  SmallVector<char, 0> bitcode; raw_svector_ostream serialized(bitcode);
+  WriteBitcodeToFile(module, serialized);
+  for (unsigned probe = 0; probe < 12; ++probe) {
+    LLVMContext context; context.setOpaquePointers(false);
+    auto clone = parseBitcodeFile(MemoryBufferRef(StringRef(bitcode.data(), bitcode.size()), "cube-negative"), context);
+    if (!clone) { consumeError(clone.takeError()); return false; }
+    CallInst *sample = nullptr;
+    for (auto &function : **clone) for (auto &block : function) for (auto &instruction : block)
+      if (auto *call = dyn_cast<CallInst>(&instruction))
+        if (call->getCalledFunction() && (call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32" ||
+            call->getCalledFunction()->getName() == "dx.op.sampleGrad.f32" ||
+            call->getCalledFunction()->getName() == "dx.op.sample.f32" ||
+            call->getCalledFunction()->getName() == "dx.op.sampleBias.f32")) sample = call;
+    if (!sample) return false;
+    if (probe >= 6 && sample->getCalledFunction()->getName() != "dx.op.sampleGrad.f32") continue;
+    IRBuilder<> builder(context);
+    if (probe < 3) sample->setArgOperand(7 + probe, builder.getInt32(1));
+    else if (probe < 6) sample->setArgOperand(probe, UndefValue::get(builder.getFloatTy()));
+    else sample->setArgOperand(10 + probe - 6, UndefValue::get(builder.getFloatTy()));
+    std::string before, after, error;
+    raw_string_ostream initial(before); (*clone)->print(initial, nullptr); initial.flush();
+    std::vector<dxmt_msc_minmax_binding> records{{11,22,33,44}};
+    if (dxmt::dxil::LowerReductionSamplerBindings(**clone, records, error) || error.empty() ||
+        records.size() != 1 || records[0].texture_space != 11 || records[0].texture_register != 22 ||
+        records[0].sampler_space != 33 || records[0].sampler_register != 44) return false;
+    raw_string_ostream final(after); (*clone)->print(final, nullptr); final.flush();
+    if (before != after) return false;
+  }
+  return true;
+}
+
 static int TransformContainer(const char *path, const char *mode) {
   using namespace llvm;
   auto file = MemoryBuffer::getFile(path);
@@ -410,6 +445,12 @@ static int TransformContainer(const char *path, const char *mode) {
   auto *resource_groups = (*parsed)->getNamedMetadata("dx.resources")->getOperand(0);
   auto *texture_record = cast<MDNode>(cast<MDNode>(resource_groups->getOperand(0))->getOperand(0));
   const auto texture_kind = mdconst::extract<ConstantInt>(texture_record->getOperand(6))->getZExtValue();
+  std::vector<std::pair<uint64_t, Value *>> expected_derivatives;
+  if (binding_implicit)
+    for (auto *sample : samples)
+      for (uint64_t opcode : {83u, 84u})
+        for (unsigned axis = 0; axis < (texture_kind == 5 || texture_kind == 9 ? 3u : 2u); ++axis)
+          expected_derivatives.emplace_back(opcode, sample->getArgOperand(3 + axis));
   const unsigned layer_operand = texture_kind == 6 ? 4 : texture_kind == 7 ? 5 : 6;
   auto *array_coordinate = samples[0]->getArgOperand(layer_operand);
   IRBuilder<> builder(context);
@@ -434,6 +475,7 @@ static int TransformContainer(const char *path, const char *mode) {
       samples[0]->getArgOperand(1), builder.getInt32(mirror ? 2 : mirror_once ? 5 : 3), builder.getInt32(3), builder.getInt32(3)};
   std::string error;
   if (binding) {
+    if ((texture_kind == 5 || texture_kind == 9) && !CheckCubeQualification(**parsed)) return 1;
     if (binding_implicit && !CheckImplicitQualification(**parsed)) return 1;
     const bool modern = (*parsed)->getFunction("dx.op.createHandleFromBinding") != nullptr;
     if (modern && binding_array && !CheckModernQualification(**parsed)) return 1;
@@ -478,14 +520,19 @@ static int TransformContainer(const char *path, const char *mode) {
             const auto opcode = cast<ConstantInt>(call->getArgOperand(0))->getZExtValue();
             if (opcode == 83 || opcode == 84) {
               if (block.getName().startswith("dxmt.reduction.enabled") || block.getName().startswith("dxmt.ordinary")) return 1;
+              auto expected = std::find(expected_derivatives.begin(), expected_derivatives.end(),
+                  std::make_pair(opcode, call->getArgOperand(1)));
+              if (expected == expected_derivatives.end()) return 1;
+              expected_derivatives.erase(expected);
               ++derivatives;
             }
           }
-      if (derivatives != 8 || (*parsed)->getFunction("dx.op.sample.f32") ||
+      if (!expected_derivatives.empty() || derivatives != (texture_kind == 5 || texture_kind == 9 ? 12 : 8) || (*parsed)->getFunction("dx.op.sample.f32") ||
           (*parsed)->getFunction("dx.op.sampleBias.f32") || (*parsed)->getFunction("dx.op.sampleGrad.f32")) return 1;
     }
   } else if (!dxmt::dxil::LowerReductionSampleLevel(*samples[0], state, error,
-      texture_kind == 4 ? 3 : texture_kind == 1 || texture_kind == 6 ? 1 : 2)) { errs() << error; return 1; }
+      texture_kind == 4 ? 3 : texture_kind == 1 || texture_kind == 6 ? 1 : 2,
+      texture_kind == 5 || texture_kind == 9)) { errs() << error; return 1; }
   for (auto &function : **parsed) for (auto &block : function) for (auto &instruction : block)
     if (auto *call = dyn_cast<CallInst>(&instruction))
       if (!binding_two && call->getCalledFunction() && call->getCalledFunction()->getName() == "dx.op.sampleLevel.f32" &&

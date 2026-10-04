@@ -1,5 +1,18 @@
 # Task Analysis
 
+## Binding follow-up analysis
+
+Baseline 94a1cac, clean worktree. Hypothesis: resource-kind qualification plus
+the independent cube footprint/gradient primitives can use the existing captured
+Cube view and submission-private pair ABI. Evidence: compiler rejects kinds5/9;
+host pair preparation also rejects Cube/CubeArray types. Expected effect:
+bounded float, feedback-free, zero-offset cube SampleLevel/SampleGrad and pixel
+Sample/SampleBias reach MSC and isolated GPU dispatch. Risks: preserve original
+resource metadata and array layer, derive all three xyz axes (not layer), reject
+invalid cube operands before mutation, retain correct captured view and ordinary
+branch behavior. Validate regenerated DXIL and real GPU readbacks in both builds
+before reporting runtime acceptance. No AIR linkage or capability/FL promotion.
+
 ## Follow-up footprint analysis
 
 Baseline 879867c, clean worktree. Hypothesis: retaining Cube resource kinds
@@ -172,3 +185,113 @@ Production resource kinds5/9 remain rejected. Next: connect paired binding and
 all-three-axis implicit gradients, then regenerated DXIL validation, MSC compile
 and isolated real GPU readbacks before opening runtime admission. Full MinMax,
 FL12_0 and FL12_1 remain unqualified. Local commit only; never pushed.
+
+# Binding Follow-up Task Result
+
+## Implementation / Backend and Runtime Impact
+
+`LowerReductionSamplerBindings` now qualifies float Cube/CubeArray kinds5/9
+for feedback-free, zero-offset SampleLevel/SampleGrad and pixel Sample/SampleBias.
+Cube sites explicitly propagate the qualified cube shape to both independent
+DXIL primitives. Direction xyz and all explicit xyz derivatives must be defined;
+all three offsets are checked before module mutation. Implicit derivatives use
+xyz ahead of the descriptor predicate, never CubeArray W. Original/private
+resource kind metadata and layer coordinates remain intact.
+
+Host pair preparation admits Cube/CubeArray alongside existing texture shapes,
+using the same captured native object, zero private clamp metadata and existing
+submission-owned TLAB/residency/sampler lifetime. No flattened views, native view
+reacquisition or shared ABI change. Static/live descriptor observation is unchanged.
+DXBC remains AIRCONV-only; DXIL remains MSC-only. No capability or FL promotion.
+
+## Tests / Evidence / Runtime Boundaries
+
+Both configurations reconfigured and full default builds complete. Final host
+suites pass 5/5 each, native primitive probes remain passing, and LLVM15 verifies
+the generated modules. Actual selected-DXC container probes cover Cube and
+CubeArray SampleLevel, SampleGrad, modern SM6.6 handles, and pixel Sample plus
+SampleBias. Cube negatives check all three nonzero offsets, undefined xyz and
+six undefined gradient operands: rejection preserves complete printed module IR
+and binding output. Pixel tests assert the exact original `(derivative opcode,
+xyz operand)` multiset, branch placement, removed old sampling declarations and
+layer preservation, not only a derivative count.
+
+Final evidence root: `/Users/zhangbo/.cache/dxmt-dxil-cube-binding.v4Oh5A`.
+Only `verified-*-final.log` GPU results are counted: **96 GPU readback processes**,
+48 per configuration, all exit0:
+
+- 39 Cube/CubeArray explicit-LOD/gradient cases each, including static samplers,
+  interior/edge/corner/array/mip/point ties, signed gradients, radial cancellation,
+  scale invariance and discriminating Z/Y LOD ties.
+- Two modern SM6.6 handle cube/array gradient cases each.
+- Four DXIL planar ordinary/MIN/MAX/static regressions each.
+- Three AIR Cube regressions each with both AIR gates explicitly enabled.
+
+Each DXIL dispatch reaches selected-DXC regenerated-container validation and
+the real MSC 4.0.1 Apple9 compiler/pipeline. Four separate pixel preparation
+processes (two shapes, two builds) pass full regenerated-container validation
+and export checks; their four outputs also pass offline MSC Apple9 conversion
+with reflection. **Pixel GPU output was not tested.** Offline conversion uses
+automatic layout, not proof of the production reflected pixel TLAB. Broader
+pre-raster Cube execution, formats/views/clamps/filter/lifetime and mandatory
+matrices remain open. No Metal validation run, game benchmark or game deployment.
+
+## Runtime Reproduction and Loader Finding
+
+Initial diagnostics ran a stale installed PE: the copied overlay retained
+`x86_64-windows/d3d12.dll` as a symlink to the installation. Wine's displayed
+module path alone was insufficient. Replacing only task-cache PE links with
+regular current-build copies made the new boundary logs appear and the red
+readback return16. All temporary `[DEBUG-CUBE-PAIR]` instrumentation was removed
+before final builds. Earlier failed/diagnostic/pass runs are excluded above.
+Original cache links/files were moved to `.pre-final` / `.before-final4` backups;
+no installed Wine DLL, prefix DLL, Steam or game process was changed.
+
+Final staged PE and overlay PE SHA1 match their build: normal D3D12
+`17ed2d27a26588b52c3663d2d9452bfcd25ca747`, no-private
+`b5f21626fb955df042173e4ec149c664105cd9b4`. Native winemetal also matches:
+normal `169fd26f1cc391811e260606010bf1d5a173e374`, no-private
+`4786e8425c0ad9d1889a96733e4dde65726078e2`.
+
+Compile `minmax_cube.hlsl` with `cs_6_0`, `MINMAX_CUBE_CASE=0..11`, optional
+`MINMAX_CUBE_ARRAY=1` and `MINMAX_CUBE_GRAD=1`. Case values mirror the existing
+sampler harness. Modern probes use `cs_6_6`, case4 and gradients. Pixel fixtures
+use `ps_6_0`. Meson registers four optional compute baseline and two pixel targets;
+focused seam/LOD fixtures above use explicit macro selections, not a full matrix.
+Example final runtime command (AIR gates unset for DXIL):
+
+```sh
+WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 \
+WINEDLLOVERRIDES='d3d12,dxgi,winemetal=n,b' \
+WINEDLLPATH=/Users/zhangbo/.cache/dxmt-dxil-cube-binding.v4Oh5A/verified-normal \
+DXMT_MINMAX_DXC_DIRECTORY='Z:\Users\zhangbo\Documents\Vibe-Codeding\dxmt\tools\dxc\bin\x64' \
+DXMT_SHADER_CACHE_PATH=/Users/zhangbo/.cache/dxmt-dxil-cube-binding.v4Oh5A/repro-cache \
+WINEPREFIX=/Users/zhangbo/Documents/Vibe-Codeding/wineprefix \
+/Users/zhangbo/.cache/dxmt-dxil-cube-binding.v4Oh5A/runtime/bin/wine \
+  /Users/zhangbo/.cache/dxmt-dxil-cube-binding.v4Oh5A/verified-normal/dx12_texture_sampler.exe \
+  /Users/zhangbo/.cache/dxmt-dxil-cube-binding.v4Oh5A/cube-grad-8.dxil \
+  --minimum-cube-grad-negative-radial
+```
+
+## Standards
+
+Independent source review: zero documented hard breaches; one optional duplicated
+validation smell. Retain boundary preflight plus primitive checks so all sample
+sites reject before mutation while the independently callable primitives remain
+defensive. Main self-review and `git diff --check` pass. Compiler/binding skills
+guided Cube-type preservation and runtime evidence; diagnosis skill guided the
+isolated loader red/green loop. No executable-family fallback was added.
+
+## Spec
+
+Initial source review found missing pixel fixtures; added both shapes, Pixel
+preparation mode and container tests. Follow-up review found no actionable Spec
+defect and confirmed exact xyz derivative operands. Reviewers did not run tests;
+all stated numerical/runtime checks were executed by the main agent. This closes
+the bounded explicit Cube binding/reachability gap, **not full Cube or MinMax**.
+
+## Git / Next Task
+
+Local repository-style commit only, never pushed. Full goal remains active.
+Next production gap: real DXIL Cube pixel Sample/SampleBias GPU draw acceptance,
+then remaining MinMax anisotropic/feedback and full resource/filter contracts.

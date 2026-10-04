@@ -45,7 +45,7 @@ bool LowerReductionSampleLevel(llvm::CallInst &sample,
 llvm::Value *CreateReductionGradientLOD(llvm::CallInst &sample, std::string &error,
     unsigned spatial_dimensions = 2, bool cube = false);
 
-// Qualify float 1D/2D/3D (or array) SampleLevel/SampleGrad pairs and pixel-only
+// Qualify float 1D/2D/3D/Cube (or array) SampleLevel/SampleGrad pairs and pixel-only
 // Sample/SampleBias, append private tN/sN and
 // b0 in DXMT_MSC_MINMAX_SPACE, and guard reduction with the runtime enabled bit.
 // Returned pair ordinal N selects its point texture/sampler and 32-byte CBV

@@ -384,7 +384,6 @@ main(int argc, char **argv) {
   if ((expect_consumer_unsupported || expect_null_unsupported) && (!reduction || static_sampler)) return 2;
   if ((expect_null_unsupported || clamp_probe) && !dxbc) return 2;
   if (dynamic_switch && !dxbc) return 2;
-  if (cube && !dxbc) return 2; // DXIL cube reduction is a separate, still-closed path.
   // DXIL uses the external major-axis fixture. Parallel/zero/perpendicular
   // vectors are generated internally only by the DXBC probe.
   if (grad_lod && !dxbc && grad_case != 1) return 2;

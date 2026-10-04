@@ -512,3 +512,13 @@ three-face corner union (`D3D12_MINMAX_DXIL_CUBE.md`). Both builds pass verified
 IR and focused synthetic-CFG footprint/routing probes. Production binding still
 rejects Cube kinds5/9: regeneration validation, MSC and real GPU acceptance are
 not completed. This narrows the compiler gap, not full Cube/MinMax or FL closure.
+
+Bounded float, feedback-free, zero-offset DXIL Cube/CubeArray paired binding now
+reaches independent cube footprints/gradients and the captured Cube MSC view
+(`D3D12_MINMAX_DXIL_CUBE.md`). Final matching builds pass focused actual compute
+readbacks in both configurations, including modern SM6.6 handles and AIR/planar
+regressions. Pixel Sample/SampleBias has regenerated DXIL, exact xyz derivative
+IR checks and offline MSC conversion, **not pixel GPU acceptance**. This
+supersedes the prior kind5/9 binding rejection, not full Cube/MinMax qualification.
+Anisotropic/feedback, broader format/view/clamp/lifetime and mandatory FL matrices
+remain open. FL11_1 unchanged; FL12_0/FL12_1 unpromoted. Full objective active.

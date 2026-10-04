@@ -50,6 +50,7 @@ struct SampleSite {
   llvm::CallInst *call;
   uint32_t pair;
   unsigned spatial_dimensions;
+  bool cube;
 };
 struct Pair {
   dxmt_msc_minmax_binding binding;
@@ -250,9 +251,22 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     uint32_t texture_kind, sampler_kind, component_tag, component_type;
     if (!texture || !sampler || texture->metadata->getNumOperands() != 9 ||
         sampler->metadata->getNumOperands() != 8 || !Word(texture->metadata->getOperand(6), texture_kind) ||
-        (texture_kind != 1 && texture_kind != 2 && texture_kind != 4 && texture_kind != 6 && texture_kind != 7) ||
+        (texture_kind != 1 && texture_kind != 2 && texture_kind != 4 && texture_kind != 5 &&
+            texture_kind != 6 && texture_kind != 7 && texture_kind != 9) ||
         !Word(sampler->metadata->getOperand(6), sampler_kind) || sampler_kind != 0)
-      return reject("finite one/two/three-dimensional texture and SamplerState pair required");
+      return reject("finite float texture and SamplerState pair required");
+    const bool cube = texture_kind == 5 || texture_kind == 9;
+    if (cube) for (unsigned axis = 0; axis < 3; ++axis) {
+      if (isa<UndefValue>(call->getArgOperand(3 + axis)))
+        return reject("cube direction requires three defined components");
+      auto *offset = call->getArgOperand(7 + axis);
+      auto *constant = dyn_cast<ConstantInt>(offset);
+      if (!isa<UndefValue>(offset) && (!constant || !constant->isZero()))
+        return reject("cube sampling offsets are unsupported");
+      if (sample_opcode == SampleGrad && (isa<UndefValue>(call->getArgOperand(10 + axis)) ||
+          isa<UndefValue>(call->getArgOperand(13 + axis))))
+        return reject("cube gradients require three defined components");
+    }
     auto *component = dyn_cast_or_null<MDNode>(texture->metadata->getOperand(8));
     if (!component || component->getNumOperands() != 2 || !Word(component->getOperand(0), component_tag) || component_tag != 0 ||
         !Word(component->getOperand(1), component_type) || component_type != 9)
@@ -268,7 +282,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
       if (pairs.size() >= 64) return reject("too many sampled pairs");
       pairs.push_back({{texture->space, texture_register, sampler->space, sampler_register}, texture, sampler});
     }
-    samples.push_back({call, index->second, texture_kind == 4 ? 3u : texture_kind == 1 || texture_kind == 6 ? 1u : 2u});
+    samples.push_back({call, index->second, texture_kind == 4 ? 3u : texture_kind == 1 || texture_kind == 6 ? 1u : 2u, cube});
   }
   if (samples.empty()) return reject("no qualified sampling pairs");
   if (!pair_count) {
@@ -347,7 +361,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
   if (!dimensions_type) dimensions_type = StructType::create(context, {i32, i32, i32, i32}, "dx.types.Dimensions");
   auto dimensions = module.getOrInsertFunction("dx.op.getDimensions", dimensions_type, i32, handle, i32);
   auto binary = module.getOrInsertFunction("dx.op.binary.f32", types.getFloatTy(), i32, types.getFloatTy(), types.getFloatTy());
-  for (auto [sample, pair, spatial_dimensions] : samples) {
+  for (auto [sample, pair, spatial_dimensions, cube] : samples) {
     const auto opcode = SampleOpcode(sample->getCalledFunction()->getName());
     const bool implicit = opcode == Sample || opcode == SampleBias;
     const bool gradient = implicit || opcode == SampleGrad;
@@ -376,7 +390,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
       for (const auto derivative : {DerivCoarseX, DerivCoarseY})
         for (unsigned axis = 0; axis < 3; ++axis) {
           Value *value = UndefValue::get(f32);
-          if (axis < spatial_dimensions) value = normalize.CreateCall(unary,
+          if (cube || axis < spatial_dimensions) value = normalize.CreateCall(unary,
               {normalize.getInt32(derivative), sample->getArgOperand(3 + axis)});
           arguments.push_back(value);
         }
@@ -385,7 +399,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
       sample->replaceAllUsesWith(normalized); sample->eraseFromParent(); sample = normalized;
     }
     if (gradient) {
-      auto *gradient_lod = CreateReductionGradientLOD(*sample, error, spatial_dimensions);
+      auto *gradient_lod = CreateReductionGradientLOD(*sample, error, spatial_dimensions, cube);
       if (!gradient_lod) return false;
       IRBuilder<> normalize(sample);
       SmallVector<Value *, 11> arguments;
@@ -507,7 +521,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
       extract->replaceAllUsesWith(values[*extract->idx_begin()]);
       extract->eraseFromParent();
     }
-    if (!LowerReductionSampleLevel(*lowered, state, error, spatial_dimensions)) return false;
+    if (!LowerReductionSampleLevel(*lowered, state, error, spatial_dimensions, cube)) return false;
     BasicBlock *reduction_end = nullptr;
     for (auto *predecessor : predecessors(merge)) if (predecessor != ordinary_done) {
       if (reduction_end) return reject("invalid reduction branch merge");

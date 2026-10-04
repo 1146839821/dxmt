@@ -15,11 +15,12 @@ int wmain(int argc, wchar_t **argv) {
   Stage stage = Stage::Compute;
   uint32_t texture_space = 0;
   if (argc == 6) {
-    if (!wcscmp(argv[5], L"gs")) stage = Stage::Geometry;
+    if (!wcscmp(argv[5], L"ps")) stage = Stage::Pixel;
+    else if (!wcscmp(argv[5], L"gs")) stage = Stage::Geometry;
     else if (!wcscmp(argv[5], L"hs")) stage = Stage::Hull;
     else if (!wcscmp(argv[5], L"ds")) stage = Stage::Domain;
     else return 1;
-    texture_space = stage == Stage::Domain ? 7 : 6;
+    texture_space = stage == Stage::Pixel ? 0 : stage == Stage::Domain ? 7 : 6;
   }
   HANDLE file = CreateFileW(argv[1], GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
   if (file == INVALID_HANDLE_VALUE) return 1;
