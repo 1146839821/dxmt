@@ -544,7 +544,17 @@ four processes, 48 exact readback groups, two uniform depth values on opposite
 sides of the reference, both comparison directions and repeated closed-list
 volatile sampler updates. This is DXMT_LOCAL_PASS, not native Windows evidence,
 full comparison/PCF coverage or full MinMax qualification. A pre-sampling
-no-private allocator-reset failure passed an unchanged-binary retry; cause remains
-unresolved and the sampling fixture now uses separate upload/dispatch storage.
+no-private allocator-reset failure passed an unchanged-binary retry; at that
+milestone the cause was unresolved and sampling used separate upload/dispatch storage.
 Pixel/static comparison paths and the broader production workstreams remain
 open. FL11_1 unchanged; FL12_0/FL12_1 disabled; full objective active.
+
+The allocator follow-up (`D3D12_ALLOCATOR_GPU_COMPLETION.md`) now replaces
+CPU-worker-dependent Reset rejection with retained per-queue GPU completion
+markers. Identical final executables fail against cached baseline DLLs in both
+configurations, then pass4096 cycles across four current-runtime processes.
+Distinct-list cross-queue/later-use blocking guards pass; registration unwind and
+no-copy GPU backing-buffer reuse are repaired. Earlier invalid same-list overlap
+runs are excluded. Forced OOM/late-worker injection, buffer identity fingerprint
+and performance cost remain unverified. This closes the bounded Reset race, not
+full allocator/lifetime or FL qualification; full production objective stays active.

@@ -301,6 +301,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   WMT::Reference<WMT::Buffer> timestamp_dummy_buffer_;
   WMT::Reference<WMT::SparseMappingQueue> sparse_mapping_queue_;
   WMT::Reference<WMT::SharedEvent> sparse_event_;
+  WMT::Reference<WMT::SharedEvent> allocator_completion_event_;
   uint64_t sparse_event_value_ = 0;
 
   struct Submission {
@@ -553,7 +554,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       }
 
       for (auto &allocator : submission.allocators)
-        allocator->MarkSubmissionCompleted();
+        allocator->MarkSubmissionCompleted(allocator_completion_event_, submission.serial);
 
       if (submission.latency_waitable)
         ReleaseSemaphore(submission.latency_waitable, 1, nullptr);
@@ -590,6 +591,8 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     assert(submission_count_ < kCommandQueueSize);
 
     submission.serial = next_submission_serial_++;
+    if (!submission.allocators.empty())
+      submission.command_buffer.encodeSignalEvent(allocator_completion_event_, submission.serial);
     submission.command_buffer.commit();
     submissions_[submission_tail_] = std::move(submission);
     submission_tail_ = (submission_tail_ + 1) % kCommandQueueSize;
@@ -602,7 +605,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   void
   AbortSubmission(Submission &submission) {
     for (auto &allocator : submission.allocators)
-      allocator->MarkSubmissionCompleted();
+      allocator->MarkSubmissionCompleted(allocator_completion_event_, submission.serial);
   }
 
   void
@@ -699,6 +702,9 @@ public:
     auto metal_device = device_->GetMTLDevice();
     queue_ = metal_device.newCommandQueue(kCommandQueueSize);
     if (!queue_)
+      return E_FAIL;
+    allocator_completion_event_ = metal_device.newSharedEvent();
+    if (!allocator_completion_event_)
       return E_FAIL;
     queue_.addResidencySet(device_->GetGlobalResidencySet());
 
@@ -820,7 +826,7 @@ public:
   };
 
   void STDMETHODCALLTYPE
-  ExecuteCommandLists(UINT Count, ID3D12CommandList *const *ppCommandLists) {
+  ExecuteCommandLists(UINT Count, ID3D12CommandList *const *ppCommandLists) try {
     if (!Count)
       return;
     if (!ppCommandLists) {
@@ -874,8 +880,26 @@ public:
         command_list.encoders.push_back({encoder->type, encoder->id});
       submission.allocators.emplace_back(pCommandList->GetAllocator());
     }
-    for (auto &allocator : submission.allocators)
-      allocator->MarkSubmissionSubmitted();
+    // Reserve this submission's GPU marker before translation. The commit lock
+    // keeps the serial stable, including while the translation test hook pauses.
+    submission.serial = next_submission_serial_;
+    for (size_t registered = 0; registered < submission.allocators.size(); ++registered) {
+      if (!submission.allocators[registered]->MarkSubmissionSubmitted(allocator_completion_event_, submission.serial)) {
+        for (size_t previous = 0; previous < registered; ++previous)
+          submission.allocators[previous]->MarkSubmissionCompleted(allocator_completion_event_, submission.serial);
+        ERR("D3D12 allocator submission registration allocation failed");
+        return;
+      }
+    }
+    struct PendingRegistration {
+      MTLD3D12CommandQueueImpl *queue;
+      Submission &submission;
+      bool committed = false;
+      ~PendingRegistration() {
+        if (!committed)
+          queue->AbortSubmission(submission);
+      }
+    } pending{this, submission};
 
     PauseTranslationForTesting();
 
@@ -1571,18 +1595,19 @@ public:
         current = current->next;
       }
       if (translation_failed) {
-        AbortSubmission(submission);
         return;
       }
     }
     if (!CommitSubmissionLocked(submission)) {
-      AbortSubmission(submission);
       return;
     }
+    pending.committed = true;
     for (unsigned i = 0; i < Count; i++) {
       static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->MarkSubmitted();
       static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->CommitResourceStates();
     }
+  } catch (const std::bad_alloc &) {
+    ERR("D3D12 ExecuteCommandLists allocation failed");
   };
 
   void STDMETHODCALLTYPE SetMarker(UINT metadata, const void *data, UINT size) {};

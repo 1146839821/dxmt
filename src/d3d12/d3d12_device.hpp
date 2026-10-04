@@ -93,8 +93,8 @@ public:
 
   virtual D3D12_COMMAND_LIST_TYPE GetType() const = 0;
 
-  virtual void MarkSubmissionSubmitted() = 0;
-  virtual void MarkSubmissionCompleted() = 0;
+  virtual bool MarkSubmissionSubmitted(WMT::SharedEvent event, uint64_t value) = 0;
+  virtual void MarkSubmissionCompleted(WMT::SharedEvent event, uint64_t value) = 0;
   virtual bool IsInFlight() const = 0;
 
   virtual HRESULT STDMETHODCALLTYPE CreateCommandList(

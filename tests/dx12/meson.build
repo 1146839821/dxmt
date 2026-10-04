@@ -56,6 +56,10 @@ executable('dx12_minmax_comparison_gpu', 'dx12_minmax_comparison_gpu.cpp',
   build_by_default: false, link_args: ['-municode'], dependencies: [d3d12_dep],
 )
 
+executable('dx12_allocator_fence', 'dx12_allocator_fence.cpp',
+  build_by_default: false, dependencies: [d3d12_dep],
+)
+
 executable('dx12_typed_origin_prepare', 'dx12_typed_origin_prepare.cpp',
   '../../src/d3d12/d3d12_typed_origin.cpp',
   build_by_default: false, link_args: ['-municode'],

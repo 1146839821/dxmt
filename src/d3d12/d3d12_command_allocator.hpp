@@ -20,7 +20,7 @@
 
 #include "d3d12_pageable.hpp"
 #include "dxmt_command_clear.hpp"
-#include <atomic>
+#include <mutex>
 #include <limits>
 #include <vector>
 
@@ -109,7 +109,12 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
   EncoderData *encoder_last;
   EncoderData *encoder_current;
   size_t encoder_count_;
-  std::atomic_uint32_t in_flight_submissions_ = {0u};
+  struct SubmissionUse {
+    WMT::Reference<WMT::SharedEvent> completion;
+    uint64_t value;
+  };
+  mutable dxmt::mutex submission_mutex_;
+  std::vector<SubmissionUse> submission_uses_;
 
   small_vector<EncoderData, 64> encoder_lists_;
 
@@ -182,21 +187,40 @@ public:
     return type_;
   }
 
-  void
-  MarkSubmissionSubmitted() final {
-    in_flight_submissions_.fetch_add(1u, std::memory_order_relaxed);
+  bool
+  MarkSubmissionSubmitted(WMT::SharedEvent event, uint64_t value) final {
+    std::lock_guard<dxmt::mutex> lock(submission_mutex_);
+    try {
+      submission_uses_.push_back({event, value});
+      return true;
+    } catch (const std::bad_alloc &) {
+      return false;
+    }
   }
 
   void
-  MarkSubmissionCompleted() final {
-    auto previous = in_flight_submissions_.fetch_sub(1u, std::memory_order_release);
-    assert(previous > 0);
-    (void)previous;
+  MarkSubmissionCompleted(WMT::SharedEvent event, uint64_t value) final {
+    std::lock_guard<dxmt::mutex> lock(submission_mutex_);
+    for (auto it = submission_uses_.begin(); it != submission_uses_.end(); ++it) {
+      if (it->completion.handle == event.handle && it->value == value) {
+        submission_uses_.erase(it);
+        return;
+      }
+    }
+    assert(false && "allocator submission retired without registration");
   }
 
   bool
   IsInFlight() const final {
-    return in_flight_submissions_.load(std::memory_order_acquire) != 0;
+    std::lock_guard<dxmt::mutex> lock(submission_mutex_);
+    // GPU completion is authoritative, not when the CPU worker happens to
+    // retire its references. Before translation/commit the marker is unsignaled.
+    for (const auto &use : submission_uses_) {
+      WMT::SharedEvent event = use.completion;
+      if (event.signaledValue() < use.value)
+        return true;
+    }
+    return false;
   }
 
   HRESULT STDMETHODCALLTYPE CreateCommandList(
