@@ -86,6 +86,7 @@ struct PhaseInfo {
 
 class ShaderInfo {
 public:
+  uint32_t unsupported_opcode = UINT32_MAX;
   std::vector<std::array<uint32_t, 4>> immConstantBufferData;
   std::map<uint32_t, ShaderResourceViewInfo> srvMap;
   std::map<uint32_t, UnorderedAccessViewInfo> uavMap;

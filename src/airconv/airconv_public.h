@@ -5,8 +5,8 @@
 #ifndef __AIRCONV_H
 #define __AIRCONV_H
 
-/* 27 invalidates AIR caches after Round2 root-signature and firstbit_shi parity fixes. */
-#define AIRCONV_VERSION 29
+/* 30 invalidates cached AIR after interpolation, mul_hi and GS reflection fixes. */
+#define AIRCONV_VERSION 30
 
 #ifdef __cplusplus
 #include <string>

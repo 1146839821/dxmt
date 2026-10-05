@@ -2107,7 +2107,10 @@ Instruction readInstruction(
   }
   default: {
     llvm::outs() << "unhandled dxbc instruction " << Inst.OpCode() << "\n";
-    assert(0 && "unhandled dxbc instruction");
+    // Return a defined parser value, but never publish a shader that silently
+    // drops this instruction. SM50Initialize rejects the recorded opcode.
+    shader_info.unsupported_opcode = Inst.OpCode();
+    return InstNop{};
   }
   }
 };

@@ -1106,6 +1106,11 @@ AIRCONV_API int SM50Initialize(
   }
 
   sm50_shader->bbs = read_control_flow(CodeParser, sm50_shader.get(), inputParser, outputParser);
+  if (shader_info->unsupported_opcode != UINT32_MAX) {
+    errorOut << "Unsupported DXBC opcode " << shader_info->unsupported_opcode << '\0';
+    TransferErrorToCaller(errorObj, ppError);
+    return 1;
+  }
 
   auto &binding_table = shader_info->binding_table;
   auto &binding_table_cbuffer = shader_info->binding_table_cbuffer;
@@ -1360,14 +1365,11 @@ AIRCONV_API int SM50Initialize(
       pRefl->PostTessellator = {.MaxPotentialTessFactor = max_potential_tess_factor};
     }
     if (sm50_shader->shader_type == microsoft::D3D10_SB_GEOMETRY_SHADER) {
-      if (binding_cbuffer_mask || binding_sampler_mask || binding_uav_mask ||
-          binding_srv_hi_mask || binding_srv_lo_mask ||
-          !CheckGSBBIsPassThrough(sm50_shader->entry())) {
+      if (binding_cbuffer_mask || binding_sampler_mask || binding_uav_mask || binding_srv_hi_mask ||
+          binding_srv_lo_mask ||
+          !(CheckGSBBIsPassThrough(sm50_shader->entry()) &&
+            CheckGSSignatureIsPassThrough(inputParser, outputParser, pRefl->GeometryShader.Data))) {
         pRefl->GeometryShader.GSPassThrough = ~0u;
-      } else {
-        CheckGSSignatureIsPassThrough(
-          inputParser, outputParser, pRefl->GeometryShader.Data
-        );
       }
       pRefl->GeometryShader.Primitive = sm50_shader->gs_input_primitive;
     }
