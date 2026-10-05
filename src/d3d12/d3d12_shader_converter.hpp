@@ -346,6 +346,11 @@ HRESULT ConvertD3D12TypedOriginComputeShader(
     const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
     D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities);
 
+HRESULT ConvertD3D12TypedOriginShader(
+    const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
+    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities,
+    const dxmt_msc_input_layout *input_layout = nullptr, uint32_t compile_flags = 0);
+
 HRESULT ConvertD3D12TypedOriginPixelShader(
     const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
     D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities);

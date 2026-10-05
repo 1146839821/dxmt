@@ -241,6 +241,10 @@ struct dxmt_msc_typed_origin_binding {
   uint32_t shader_register;
 };
 
+/* Zero preserves the legacy local layout. Nonzero reserved is explicitly
+ * versioned: tag | (total records << 8) | stage record offset. Old runtimes
+ * reject this tag rather than silently generating stage-local indices. */
+#define DXMT_MSC_TYPED_ORIGIN_LAYOUT_TAG 0x544f0000u
 struct dxmt_msc_lower_typed_origins_params {
   uint64_t bitcode;
   uint64_t bitcode_size;

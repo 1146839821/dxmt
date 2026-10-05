@@ -227,7 +227,7 @@ template <typename Operation>
 static HRESULT PrepareShaderInternal(
     const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
     typename Operation::Artifact &prepared, std::string &diagnostics, uint32_t program_kind = 5,
-    uint32_t pair_offset = 0, uint32_t pair_count = 0) {
+    uint32_t layout_offset = 0, uint32_t layout_count = 0) {
   using Params = typename Operation::Params;
   using Prepared = typename Operation::Artifact;
   const char *export_name = Operation::ExportName;
@@ -297,7 +297,9 @@ static HRESULT PrepareShaderInternal(
   params.bitcode = uintptr_t(bytes + 8 + offset);
   params.bitcode_size = size;
   if constexpr (std::is_same_v<Operation, MinMaxPreparation>)
-    if (pair_count) params.reserved = DXMT_MSC_MINMAX_LAYOUT_TAG | (pair_count << 8) | pair_offset;
+    if (layout_count) params.reserved = DXMT_MSC_MINMAX_LAYOUT_TAG | (layout_count << 8) | layout_offset;
+  if constexpr (std::is_same_v<Operation, TypedOriginPreparation>)
+    if (layout_count) params.reserved = DXMT_MSC_TYPED_ORIGIN_LAYOUT_TAG | (layout_count << 8) | layout_offset;
   int result = lower(&params);
   if (result != DXMT_MSC_SUCCESS) {
     diagnostics += std::string(export_name) + " sizing failed: " + std::to_string(result); return LoweringResult(result);
@@ -331,8 +333,12 @@ static HRESULT PrepareShaderInternal(
   auto *output_bytes = static_cast<const uint8_t *>(output->GetBufferPointer());
   candidate.bytecode.assign(output_bytes, output_bytes + output->GetBufferSize());
   if constexpr (std::is_same_v<Operation, MinMaxPreparation>) {
-    candidate.pair_offset = pair_offset;
-    candidate.pair_count = pair_count ? pair_count : candidate.bindings.size();
+    candidate.pair_offset = layout_offset;
+    candidate.pair_count = layout_count ? layout_count : candidate.bindings.size();
+  }
+  if constexpr (std::is_same_v<Operation, TypedOriginPreparation>) {
+    candidate.record_offset = layout_offset;
+    candidate.record_count = layout_count ? layout_count : candidate.bindings.size();
   }
   prepared = std::move(candidate);
   return S_OK;
@@ -340,13 +346,23 @@ static HRESULT PrepareShaderInternal(
 
 HRESULT PrepareD3D12TypedOriginShader(
     const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
-    D3D12TypedOriginShader &prepared, std::string &diagnostics, D3D12_SHADER_VISIBILITY visibility) {
+    D3D12TypedOriginShader &prepared, std::string &diagnostics, D3D12_SHADER_VISIBILITY visibility,
+    uint32_t record_offset, uint32_t record_count) {
   try {
-    if (visibility != D3D12_SHADER_VISIBILITY_ALL && visibility != D3D12_SHADER_VISIBILITY_PIXEL &&
-        visibility != D3D12_SHADER_VISIBILITY_VERTEX)
-      return E_INVALIDARG;
+    uint32_t program_kind;
+    switch (visibility) {
+    case D3D12_SHADER_VISIBILITY_PIXEL: program_kind = 0; break;
+    case D3D12_SHADER_VISIBILITY_VERTEX: program_kind = 1; break;
+    case D3D12_SHADER_VISIBILITY_GEOMETRY: program_kind = 2; break;
+    case D3D12_SHADER_VISIBILITY_HULL: program_kind = 3; break;
+    case D3D12_SHADER_VISIBILITY_DOMAIN: program_kind = 4; break;
+    case D3D12_SHADER_VISIBILITY_ALL: program_kind = 5; break;
+    default: return E_INVALIDARG;
+    }
+    if (record_count > 64 || (!record_count && record_offset) ||
+        (record_count && record_offset >= record_count)) return E_INVALIDARG;
     const auto hr = PrepareShaderInternal<TypedOriginPreparation>(shader, dxc_directory, prepared, diagnostics,
-        visibility == D3D12_SHADER_VISIBILITY_PIXEL ? 0 : visibility == D3D12_SHADER_VISIBILITY_VERTEX ? 1 : 5);
+        program_kind, record_offset, record_count);
     if (SUCCEEDED(hr)) prepared.visibility = visibility;
     return hr;
   } catch (const std::bad_alloc &) {

@@ -106,6 +106,8 @@ MakeMSCConversionCacheKey(
     constexpr char contract[] = "typed-buffer-origin";
     hash.update(contract, sizeof(contract) - 1);
     hash.update(D3D12TypedOriginShader::kLoweringVersion);
+    hash.update(typed_origin->record_offset);
+    hash.update(typed_origin->record_count);
     hash.update(D3D12TypedOriginRoot::kBindingVersion);
     hash.update(static_cast<uint32_t>(typed_origin->bindings.size()));
     for (const auto &binding : typed_origin->bindings) {
@@ -1830,38 +1832,49 @@ ConvertD3D12ComputeShader(
   );
 }
 
-static HRESULT ConvertD3D12TypedOriginStage(
+HRESULT ConvertD3D12TypedOriginShader(
     const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
     D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities,
-    D3D12_SHADER_VISIBILITY visibility, uint32_t stage) {
-  if (shader.visibility != visibility || shader.bytecode.empty() ||
-      shader.bindings.empty() || shader.bindings.size() > 64 || root.bytecode.empty())
+    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags) {
+  uint32_t stage;
+  switch (shader.visibility) {
+  case D3D12_SHADER_VISIBILITY_ALL: stage = DXMT_MSC_STAGE_COMPUTE; break;
+  case D3D12_SHADER_VISIBILITY_VERTEX: stage = DXMT_MSC_STAGE_VERTEX; break;
+  case D3D12_SHADER_VISIBILITY_PIXEL: stage = DXMT_MSC_STAGE_FRAGMENT; break;
+  case D3D12_SHADER_VISIBILITY_GEOMETRY: stage = DXMT_MSC_STAGE_GEOMETRY; break;
+  case D3D12_SHADER_VISIBILITY_HULL: stage = DXMT_MSC_STAGE_HULL; break;
+  case D3D12_SHADER_VISIBILITY_DOMAIN: stage = DXMT_MSC_STAGE_DOMAIN; break;
+  default: return E_INVALIDARG;
+  }
+  if (shader.bytecode.empty() || shader.bindings.empty() || shader.record_count > 64 ||
+      shader.record_offset >= shader.record_count ||
+      shader.bindings.size() > shader.record_count - shader.record_offset || root.bytecode.empty())
     return E_INVALIDARG;
   const D3D12_SHADER_BYTECODE bytecode = {shader.bytecode.data(), shader.bytecode.size()};
   return ConvertD3D12ShaderInternal(
       ClassifyD3D12Shader(bytecode), bytecode, stage, nullptr, false, converted,
-      root.bytecode.data(), root.bytecode.size(), nullptr, 0, nullptr, 0, msc_capabilities, &shader);
+      root.bytecode.data(), root.bytecode.size(), nullptr, 0, input_layout, compile_flags, msc_capabilities, &shader);
 }
 
 HRESULT ConvertD3D12TypedOriginComputeShader(
     const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
     D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities) {
-  return ConvertD3D12TypedOriginStage(shader, root, converted, msc_capabilities,
-      D3D12_SHADER_VISIBILITY_ALL, DXMT_MSC_STAGE_COMPUTE);
+  if (shader.visibility != D3D12_SHADER_VISIBILITY_ALL) return E_INVALIDARG;
+  return ConvertD3D12TypedOriginShader(shader, root, converted, msc_capabilities);
 }
 
 HRESULT ConvertD3D12TypedOriginPixelShader(
     const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
     D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities) {
-  return ConvertD3D12TypedOriginStage(shader, root, converted, msc_capabilities,
-      D3D12_SHADER_VISIBILITY_PIXEL, DXMT_MSC_STAGE_FRAGMENT);
+  if (shader.visibility != D3D12_SHADER_VISIBILITY_PIXEL) return E_INVALIDARG;
+  return ConvertD3D12TypedOriginShader(shader, root, converted, msc_capabilities);
 }
 
 HRESULT ConvertD3D12TypedOriginVertexShader(
     const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
     D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities) {
-  return ConvertD3D12TypedOriginStage(shader, root, converted, msc_capabilities,
-      D3D12_SHADER_VISIBILITY_VERTEX, DXMT_MSC_STAGE_VERTEX);
+  if (shader.visibility != D3D12_SHADER_VISIBILITY_VERTEX) return E_INVALIDARG;
+  return ConvertD3D12TypedOriginShader(shader, root, converted, msc_capabilities);
 }
 
 HRESULT

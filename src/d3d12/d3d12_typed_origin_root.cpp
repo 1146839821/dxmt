@@ -195,7 +195,8 @@ HRESULT ResolveD3D12TypedOriginBindings(
   try {
     if (root.bytecode.empty() || bindings.empty() || bindings.size() > 64 ||
         (visibility != D3D12_SHADER_VISIBILITY_ALL && visibility != D3D12_SHADER_VISIBILITY_PIXEL &&
-         visibility != D3D12_SHADER_VISIBILITY_VERTEX)) return E_INVALIDARG;
+         visibility != D3D12_SHADER_VISIBILITY_VERTEX && visibility != D3D12_SHADER_VISIBILITY_GEOMETRY &&
+         visibility != D3D12_SHADER_VISIBILITY_HULL && visibility != D3D12_SHADER_VISIBILITY_DOMAIN)) return E_INVALIDARG;
     ID3D12VersionedRootSignatureDeserializer *raw = nullptr;
     HRESULT hr = D3D12CreateVersionedRootSignatureDeserializer(
         root.bytecode.data(), root.bytecode.size(), IID_PPV_ARGS(&raw));
@@ -213,6 +214,15 @@ HRESULT ResolveD3D12TypedOriginBindings(
     if (visibility == D3D12_SHADER_VISIBILITY_PIXEL &&
         (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS)) {
       diagnostics = "typed-origin pixel root access is denied";
+      return E_NOTIMPL;
+    }
+    if ((visibility == D3D12_SHADER_VISIBILITY_GEOMETRY &&
+         (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS)) ||
+        (visibility == D3D12_SHADER_VISIBILITY_HULL &&
+         (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS)) ||
+        (visibility == D3D12_SHADER_VISIBILITY_DOMAIN &&
+         (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS))) {
+      diagnostics = "typed-origin pre-raster root access is denied";
       return E_NOTIMPL;
     }
     std::vector<D3D12TypedOriginBindingLocation> candidate;

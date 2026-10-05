@@ -110,24 +110,35 @@ static bool RunStageBindings() {
   D3D12_ROOT_SIGNATURE_DESC1 desc = {1, &parameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
   const std::vector<dxmt_msc_typed_origin_binding> bindings = {{1, 3, 8}};
   for (auto visibility : {D3D12_SHADER_VISIBILITY_ALL, D3D12_SHADER_VISIBILITY_PIXEL,
-                         D3D12_SHADER_VISIBILITY_VERTEX}) {
+                         D3D12_SHADER_VISIBILITY_VERTEX, D3D12_SHADER_VISIBILITY_GEOMETRY,
+                         D3D12_SHADER_VISIBILITY_HULL, D3D12_SHADER_VISIBILITY_DOMAIN}) {
     for (auto flags : {D3D12_ROOT_SIGNATURE_FLAG_NONE,
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS,
-                       D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS}) {
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS,
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS,
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS,
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS}) {
       parameter.ShaderVisibility = visibility;
       desc.Flags = flags;
       D3D12TypedOriginRoot root;
       std::string diagnostics;
       if (FAILED(PrepareD3D12TypedOriginRoot(desc, root, diagnostics))) return false;
       for (auto stage : {D3D12_SHADER_VISIBILITY_PIXEL, D3D12_SHADER_VISIBILITY_VERTEX,
-                         D3D12_SHADER_VISIBILITY_ALL}) {
+                         D3D12_SHADER_VISIBILITY_ALL, D3D12_SHADER_VISIBILITY_GEOMETRY,
+                         D3D12_SHADER_VISIBILITY_HULL, D3D12_SHADER_VISIBILITY_DOMAIN}) {
         std::vector<D3D12TypedOriginBindingLocation> locations = {{99, 17, D3D12_DESCRIPTOR_RANGE_FLAG_NONE}};
         const auto original = locations;
         const auto hr = ResolveD3D12TypedOriginBindings(root, bindings, locations, diagnostics, stage);
         const bool denied = (stage == D3D12_SHADER_VISIBILITY_PIXEL &&
             (flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS)) ||
             (stage == D3D12_SHADER_VISIBILITY_VERTEX &&
-            (flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS));
+            (flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS)) ||
+            (stage == D3D12_SHADER_VISIBILITY_GEOMETRY &&
+            (flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS)) ||
+            (stage == D3D12_SHADER_VISIBILITY_HULL &&
+            (flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS)) ||
+            (stage == D3D12_SHADER_VISIBILITY_DOMAIN &&
+            (flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS));
         const bool supported = !denied && (visibility == D3D12_SHADER_VISIBILITY_ALL || visibility == stage);
         if (supported) {
           if (hr != S_OK || locations.size() != 1 || locations[0].parameter_index != 0 ||
@@ -136,12 +147,12 @@ static bool RunStageBindings() {
             std::memcmp(locations.data(), original.data(), sizeof(original[0]))) return false;
         const auto saved = locations;
         if (ResolveD3D12TypedOriginBindings(root, bindings, locations, diagnostics,
-            D3D12_SHADER_VISIBILITY_GEOMETRY) != E_INVALIDARG || locations.size() != saved.size() ||
+            static_cast<D3D12_SHADER_VISIBILITY>(99)) != E_INVALIDARG || locations.size() != saved.size() ||
             std::memcmp(locations.data(), saved.data(), sizeof(saved[0]))) return false;
       }
     }
   }
-  std::puts("typed-origin compute/vertex/pixel visibility/deny/flags/transactional resolution PASS");
+  std::puts("typed-origin compute/VS/PS/GS/HS/DS visibility/deny/flags/transactional resolution PASS");
   return true;
 }
 

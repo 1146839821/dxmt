@@ -19,8 +19,10 @@ HRESULT SelectD3D12TypedOriginCompiler(const D3D12_SHADER_BYTECODE &shader, std:
 // binding before passing this shader to MSC. Application shader/root identity
 // remains separate from this artifact's transformed identity.
 struct D3D12TypedOriginShader {
-  static constexpr uint32_t kLoweringVersion = 6;
+  static constexpr uint32_t kLoweringVersion = 7;
   D3D12_SHADER_VISIBILITY visibility = D3D12_SHADER_VISIBILITY_ALL;
+  uint32_t record_offset = 0;
+  uint32_t record_count = 0;
   std::vector<uint8_t> bytecode;
   std::vector<uint8_t> application_root_signature;
   std::vector<dxmt_msc_typed_origin_binding> bindings;
@@ -51,11 +53,14 @@ HRESULT PrepareD3D12TypedOriginRoot(
 
 // The selected DXC directory must be an absolute Windows drive path. Both
 // compiler and validator are loaded from that directory; no backend fallback.
-// Accepts bounded SM6.0-6.6 compute/pixel envelopes. On failure
+// Accepts bounded SM6.0-6.6 compute and VS/PS/GS/HS/DS envelopes. A nonzero
+// record_count selects a shared CBV interval; zero preserves stage-local layout.
+// On failure
 // the caller's artifact is unchanged.
 HRESULT PrepareD3D12TypedOriginShader(
     const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
     D3D12TypedOriginShader &prepared, std::string &diagnostics,
-    D3D12_SHADER_VISIBILITY visibility = D3D12_SHADER_VISIBILITY_ALL);
+    D3D12_SHADER_VISIBILITY visibility = D3D12_SHADER_VISIBILITY_ALL,
+    uint32_t record_offset = 0, uint32_t record_count = 0);
 
 } // namespace dxmt

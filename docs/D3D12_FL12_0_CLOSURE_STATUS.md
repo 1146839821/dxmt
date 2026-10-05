@@ -1,5 +1,19 @@
 # FL12_0 closure checkpoint
 
+## Typed pre-raster shader ABI update (2026-10-05)
+
+Version-tagged shared origin intervals, compacted CBV sizing, GS/HS/DS DXC
+preparation/conversion and visibility/deny resolution are implemented. Both
+builds pass 32 local/shared VS/GS/HS/DS MSC artifact conversions, 46 native
+structural processes and 400 native typed graphics draws plus ordinary
+restoration checks. Old runtimes preserve local layout and explicitly reject
+the new shared tag. See `D3D12_TYPED_ORIGIN_PRERASTER_ABI.md`.
+
+This removes a necessary shader ABI blocker, not the pre-raster runtime gap:
+typed emulation PSO/capture/replay wiring and actual GS/tessellation GPU oracles
+remain next. Four production workstreams, seven complete GPU categories,
+capability declarations and game/performance/tessellation acceptance unchanged.
+
 ## Native depth-only typed VS implementation update (2026-10-04)
 
 Native typed VS now supports absent-PS depth-only pipelines without a fabricated

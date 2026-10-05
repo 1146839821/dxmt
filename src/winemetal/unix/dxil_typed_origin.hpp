@@ -15,5 +15,6 @@ struct TypedOriginBinding {
 // module. Returned records are indexed by the generated legacy CBV loads.
 // The caller must augment the compiler root and validate a regenerated DXIL
 // container before compiling; LLVM verification is not DXIL validation.
-bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBinding> &bindings, std::string &error);
+bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBinding> &bindings, std::string &error,
+    uint32_t record_offset = 0, uint32_t record_count = 0);
 }

@@ -26,7 +26,16 @@ static int LowerTypedOrigins(dxmt_msc_lower_typed_origins_params *params) {
   auto valid_address = [](uint64_t address, uint64_t size) {
     return address <= UINTPTR_MAX && size <= UINTPTR_MAX - address;
   };
-  if (params->reserved || !params->bitcode || !params->bitcode_size ||
+  uint32_t record_offset = 0, record_count = 0;
+  if (params->reserved) {
+    if ((params->reserved & 0xffff0000u) != DXMT_MSC_TYPED_ORIGIN_LAYOUT_TAG)
+      return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+    record_offset = params->reserved & 255u;
+    record_count = (params->reserved >> 8) & 255u;
+    if (!record_count || record_count > 64 || record_offset >= record_count)
+      return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  }
+  if (!params->bitcode || !params->bitcode_size ||
       params->bitcode_size > max_input_size || !valid_address(params->bitcode, params->bitcode_size) ||
       (!params->ir && params->ir_capacity) || (!params->bindings && params->binding_capacity) ||
       !valid_address(params->ir, params->ir_capacity) ||
@@ -53,7 +62,7 @@ static int LowerTypedOrigins(dxmt_msc_lower_typed_origins_params *params) {
   }
   std::vector<dxmt::dxil::TypedOriginBinding> records;
   std::string error;
-  if (!dxmt::dxil::LowerTypedBufferOrigins(**module, records, error))
+  if (!dxmt::dxil::LowerTypedBufferOrigins(**module, records, error, record_offset, record_count))
     return DXMT_MSC_ERROR_UNSUPPORTED_SHADER;
   (*module)->setSourceFileName("");
   (*module)->setModuleIdentifier("");
@@ -113,7 +122,8 @@ struct Access {
 };
 }
 
-bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBinding> &bindings, std::string &error) {
+bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBinding> &bindings, std::string &error,
+    uint32_t record_offset, uint32_t record_count) {
   using namespace llvm;
   error.clear();
   {
@@ -121,6 +131,8 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
     if (verifyModule(module, &diagnostics)) { diagnostics.flush(); return false; }
   }
   auto reject = [&](const char *message) { error = message; return false; };
+  if (record_count > 64 || (!record_count && record_offset) ||
+      (record_count && record_offset >= record_count)) return reject("invalid shared typed-origin interval");
   auto *named = module.getNamedMetadata("dx.resources");
   if (!named || named->getNumOperands() != 1 || named->getOperand(0)->getNumOperands() != 4)
     return reject("invalid DXIL resource metadata");
@@ -343,6 +355,11 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
   records = std::move(accessed_records);
 
   // All supported operations have been identified before modifying the module.
+  // Size only after pruning unused declarations: published bindings and shader
+  // CBV metadata must describe the same local or shared record layout.
+  if (!record_count) record_count = records.size();
+  if (records.size() > record_count - record_offset)
+    return reject("typed-origin stage exceeds shared interval");
   // Per-access insertion works in existing branches and loops; no text grammar
   // or fixed main/register numbering is used, and output UAVs are guarded too.
   auto &context = module.getContext();
@@ -376,17 +393,17 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
       auto *raw = builder.CreateCall(modern_create,
           {builder.getInt32(217), binding, builder.getInt32(0), builder.getFalse()});
       auto *properties = ConstantStruct::get(properties_type,
-          {builder.getInt32(13), builder.getInt32(records.size() * 16)});
+          {builder.getInt32(13), builder.getInt32(record_count * 16)});
       cb = builder.CreateCall(annotate, {builder.getInt32(216), raw, properties}, "dxmt.origin.cb");
     } else cb = builder.CreateCall(create, {builder.getInt32(57), builder.getInt8(2), builder.getInt32(cbv_id),
                                           builder.getInt32(0), builder.getFalse()}, "dxmt.origin.cb");
-    Value *state_index = builder.getInt32(access.record);
+    Value *state_index = builder.getInt32(record_offset + access.record);
     Value *handle_valid = builder.getTrue();
     if (access.index) {
       auto *relative = builder.CreateSub(access.index, builder.getInt32(access.base_register));
       handle_valid = builder.CreateICmpULT(relative, builder.getInt32(access.range_count));
       state_index = builder.CreateSelect(handle_valid,
-          builder.CreateAdd(relative, state_index), builder.getInt32(0));
+          builder.CreateAdd(relative, state_index), builder.getInt32(record_offset));
     }
     auto *data = builder.CreateCall(cb_load, {builder.getInt32(59), cb, state_index}, "dxmt.origin.data");
     auto *origin = builder.CreateExtractValue(data, 0);
@@ -407,12 +424,12 @@ bool LowerTypedBufferOrigins(llvm::Module &module, std::vector<TypedOriginBindin
       phi->addIncoming(Constant::getNullValue(call->getType()), skip);
     }
   }
-  auto *origin_type = StructType::create(context, {ArrayType::get(FixedVectorType::get(i32, 4), records.size())},
+  auto *origin_type = StructType::create(context, {ArrayType::get(FixedVectorType::get(i32, 4), record_count)},
                                        "dxmt.TypedBufferOrigins");
   auto metadata_word = [&](uint32_t value) -> Metadata * { return ConstantAsMetadata::get(types.getInt32(value)); };
   auto *record = MDNode::get(context, {metadata_word(cbv_id),
       ConstantAsMetadata::get(UndefValue::get(PointerType::getUnqual(origin_type))), MDString::get(context, ""),
-      metadata_word(1), metadata_word(0), metadata_word(1), metadata_word(records.size() * 16), nullptr});
+      metadata_word(1), metadata_word(0), metadata_word(1), metadata_word(record_count * 16), nullptr});
   std::vector<Metadata *> cbv_records;
   if (cbvs) for (auto &operand : cbvs->operands()) cbv_records.push_back(operand.get());
   cbv_records.push_back(record);
