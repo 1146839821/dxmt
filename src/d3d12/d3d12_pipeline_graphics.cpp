@@ -1681,11 +1681,11 @@ public:
               device_, pDesc->VS.pShaderBytecode, pDesc->InputLayout.pInputElementDescs,
               pDesc->InputLayout.NumElements, elements.data(), &data_ia_layout.num_elements
           );
-          elements.resize(data_ia_layout.num_elements);
-          data_ia_layout.elements = elements.data();
           if (FAILED(hr)) {
             return hr;
           }
+          elements.resize(data_ia_layout.num_elements);
+          data_ia_layout.elements = elements.data();
           slot_mask = 0;
           for (auto &element : elements) {
             slot_mask |= (1u << element.slot);
