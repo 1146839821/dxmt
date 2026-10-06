@@ -889,7 +889,7 @@ public:
     if (msc_dynamic_vertex_fetch) {
       slot_mask = 0;
       for (uint32_t i = 0; i < element_count; ++i) {
-        if (elements[i].slot >= 31) return E_NOTIMPL;
+        if (elements[i].slot >= D3D12MSCVertexBufferCount) return E_NOTIMPL;
         slot_mask |= 1u << elements[i].slot;
       }
       return S_OK;

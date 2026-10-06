@@ -78,6 +78,12 @@ struct dxmt_vertex_buffer {
   uint length;
 };
 
+struct msc_vertex_buffer {
+  device void *buffer;
+  uint length;
+  uint stride;
+};
+
 struct dxmt_render_command_data {
   command_buffer cmd_buf;
   ulong max_count;
@@ -258,6 +264,13 @@ public:
       source << "device dxmt_vertex_buffer * vertex_buffer = "
                 "reinterpret_cast<device dxmt_vertex_buffer *>(command_data.vertex_buffer + "
                 "(i * command_data.vertex_argbuf_stride));\n";
+    if (!is_compute) {
+      source << "device msc_vertex_buffer *msc_records = reinterpret_cast<device msc_vertex_buffer *>(command_data.msc_vertex_records);\n";
+      if (UpdateVertexBuffers)
+        source << "if (msc_records) { device msc_vertex_buffer *output = reinterpret_cast<device msc_vertex_buffer *>(vertex_buffer); "
+                  "for (uint slot = 0; slot < " << D3D12MSCVertexBufferCount
+               << "; ++slot) output[slot] = msc_records[slot]; msc_records = output; }\n";
+    }
 
     if (UpdateRootArguments || UpdateVertexBuffers || UpdateIndexBuffer) {
       if (!is_compute) {
@@ -268,7 +281,7 @@ public:
                << "cmd.set_fragment_buffer(command_data.msc_heap," << DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT << ");\n"
                << "cmd.set_vertex_buffer(command_data.msc_sampler_heap," << DXMT_MSC_SAMPLER_HEAP_BIND_POINT << ");\n"
                << "cmd.set_fragment_buffer(command_data.msc_sampler_heap," << DXMT_MSC_SAMPLER_HEAP_BIND_POINT << ");\n"
-               << "if (command_data.msc_vertex_records) cmd.set_vertex_buffer(command_data.msc_vertex_records, "
+               << "if (msc_records) cmd.set_vertex_buffer(msc_records, "
                << DXMT_MSC_VERTEX_BUFFER_BIND_POINT << "); else "
                << "for (uint slot = 0; slot < 32; ++slot) if (command_data.msc_vertex_slot_mask & (1ul << slot)) "
                << "cmd.set_vertex_buffer(reinterpret_cast<device void *>(command_data.msc_vertex_buffers[slot]), "
@@ -329,6 +342,8 @@ public:
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW: {
         auto slot = arg.VertexBuffer.Slot;
+        source << "if (msc_records) msc_records[" << slot << "] = {arg.vb_" << i << ".buffer,arg.vb_" << i
+               << ".size_in_bytes,arg.vb_" << i << ".stride_in_bytes}; else ";
         source << "vertex_buffer[" << slot << "] = {arg.vb_" << i << ".buffer,arg.vb_" << i
                << ".stride_in_bytes,arg.vb_" << i << ".size_in_bytes};\n";
         break;

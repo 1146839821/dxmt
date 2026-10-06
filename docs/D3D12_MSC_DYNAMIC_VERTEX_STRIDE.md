@@ -198,3 +198,61 @@ Two partial validation findings remain: same-PSO stride changes/instance step,
 and private/indirect padded IA readback. These are tracked qualification gaps,
 not claimed completed requirements. No new hard standards findings remain;
 dynamic fetch work and the broader FL goal remain open.
+
+## Indirect VB continuation (baseline 55ae8294)
+
+Hypothesis: a distinct 31-entry MSC record region per indirect command lets the
+GPU resolver update address, length and stride without mutating inherited input.
+Evidence: linked stage-in consumes pointer/length/stride, whereas AIRCONV records
+use pointer/stride/length. Expected effect: ordinary/private MSC DRAW and indexed
+DRAW accept VB signatures with dynamic fetch, retaining all registered VA buffers.
+Risk: output region overflow, stale inherited bindings, per-command isolation and
+post-indirect reset. Validate both builds and focused GPU VB payload readback;
+companion and slot 31 support remain separate gaps.
+
+### Indirect VB implementation and validation
+
+Admission now permits VB updates for ordinary MSC dynamic-fetch graphics PSOs
+on slots 0..30. Each command gets an independent 496-byte output region, copied
+from inherited records before GPU-side updates. Generated MSL writes MSC
+pointer/length/stride order, preserving AIRCONV pointer/stride/length. The
+existing payload output pointer/stride fields carry these regions; transport
+layout does not change. Updated slots are excluded from inherited lookup and
+PreDraw skips redundant vertex binding. Registered VA residency retention is
+enabled for VB updates, and ResetIndirectState clears the affected slots.
+Private typed/MinMax allocation no longer rejects VB updates; GPU qualification
+of those private paths remains pending. Empty root signatures get a non-null
+16-byte TLAB sentinel and at least one offset allocation element, with zero
+template copy bytes; this keeps resolver backend selection valid for VB-only
+signatures without changing shader parameter layout.
+
+Both reconfigured full builds and probe builds passed, with host tests 12/12
+each. The --indirect-vb GPU probe supplies VB only in the indirect arguments,
+stride 64 and address offset 16. Both variants passed pixel, occlusion and
+timestamp checks, readback 0xff0000ff. The final fixture adds a second command
+with stride 24 and zero vertex count: it must not overwrite the first draw's
+records. Both isolation runs passed. Typed-origin IB regressions passed 32
+draws plus ordinary restoration per variant. Logs: indirect-vb-*.log in the
+reconciliation cache. No prefix/game deployment, capability promotion or push.
+
+Remaining qualification: VB updates on private typed/MinMax shaders, indexed
+VB+IB/root combinations, inherited untouched slots, count buffer/predication,
+per-instance fetch and post-indirect VB reset readback. Existing packed normal
+timestamp failure from the preceding task has not been attributed or resolved.
+
+### Indirect VB self-review
+
+Standards: zero documented breaches, two heuristic findings addressed. The
+MSC record/count now have a shared CPU definition with size/length/stride
+offset assertions; allocation uses sizeof(record), MSL copy count is emitted
+from the same constant. Renamed roots_only to supported_msc_updates.
+Spec: no confirmed implementation defect or scope creep; two partial validation
+findings remain, untouched inherited-slot preservation and observable post-VB
+reset/rebind. Other qualification gaps listed above remain open.
+
+Final post-review full builds passed both variants, native regressions 12/12
+each, and the two-command VB isolation GPU fixture passed both with 0xff0000ff.
+The MSC integration skill guided distinct record field order, binding point
+and indirect resource residency; source review checked per-command output,
+updated-slot exclusion and unchanged compute/AIRCONV admission/order. No broad
+D3D capability or full-game claim is justified by this increment.

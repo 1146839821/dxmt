@@ -53,6 +53,17 @@
 
 namespace dxmt {
 
+struct D3D12MSCVertexBufferRecord {
+  uint64_t address;
+  uint32_t length;
+  uint32_t stride;
+};
+static_assert(sizeof(D3D12MSCVertexBufferRecord) == 16);
+static_assert(offsetof(D3D12MSCVertexBufferRecord, length) == 8);
+static_assert(offsetof(D3D12MSCVertexBufferRecord, stride) == 12);
+constexpr uint32_t D3D12MSCVertexBufferCount = 31;
+constexpr uint32_t D3D12MSCVertexBufferMask = (1u << D3D12MSCVertexBufferCount) - 1;
+
 class MTLD3D12Resource;
 class MTLD3D12CommandAllocator;
 

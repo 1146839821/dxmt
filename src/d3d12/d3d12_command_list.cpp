@@ -1386,19 +1386,22 @@ public:
 
     if (pipeline->shader_backend == D3D12ShaderBackend::MetalShaderConverter &&
         (signature->UpdateRootArguments || signature->UpdateVertexBuffers || signature->UpdateIndexBuffer)) {
-      bool roots_only = pipeline->IsComputePipelineState
+      bool supported_msc_updates = pipeline->IsComputePipelineState
           ? signature->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH
           : signature->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW ||
               signature->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
       for (const auto &update : signature->StateUpdates)
-        roots_only &= update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT ||
+        supported_msc_updates &= update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT ||
             update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW ||
             update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW ||
             update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW ||
             (!pipeline->IsComputePipelineState &&
              signature->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED &&
-             update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW);
-      if (!roots_only) {
+             update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW) ||
+            (!pipeline->IsComputePipelineState &&
+             static_cast<MTLD3D12GraphicsPipelineState *>(pipeline)->msc_dynamic_vertex_fetch &&
+             update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW && update.VertexBuffer.Slot < D3D12MSCVertexBufferCount);
+      if (!supported_msc_updates) {
         FailRecording(name, "unsupported MSC indirect binding update");
         return false;
       }
@@ -1855,21 +1858,16 @@ public:
 
   uint64_t
   PopulateMSCVertexBufferTable(
-      WMTRenderStages stages = WMTRenderStageObject | WMTRenderStageMesh, uint32_t slot_mask = 0x7fffffffu) {
-    struct MSC_VERTEX_BUFFER_ENTRY {
-      uint64_t address;
-      uint32_t length;
-      uint32_t stride;
-    };
-    constexpr uint32_t count = 31;
-    auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(MSC_VERTEX_BUFFER_ENTRY) * count, 16);
+      WMTRenderStages stages = WMTRenderStageObject | WMTRenderStageMesh, uint32_t slot_mask = D3D12MSCVertexBufferMask) {
+    constexpr uint32_t count = D3D12MSCVertexBufferCount;
+    auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(D3D12MSCVertexBufferRecord) * count, 16);
     if (!mapped) {
       FailRecording(__func__, "GPU heap allocation failed");
       return 0;
     }
-    std::memset(mapped, 0, sizeof(MSC_VERTEX_BUFFER_ENTRY) * count);
+    std::memset(mapped, 0, sizeof(D3D12MSCVertexBufferRecord) * count);
 
-    auto *entries = static_cast<MSC_VERTEX_BUFFER_ENTRY *>(mapped);
+    auto *entries = static_cast<D3D12MSCVertexBufferRecord *>(mapped);
     for (uint32_t slot = 0; slot < count; slot++) {
       if (!(slot_mask & (1u << slot))) continue;
       auto &state = vertex_buffers_[slot];
@@ -1929,7 +1927,7 @@ public:
       if (emulation || pso_graphics_->msc_dynamic_vertex_fetch) {
         auto offset = PopulateMSCVertexBufferTable(emulation ?
             WMTRenderStageObject | WMTRenderStageMesh : WMTRenderStageVertex,
-            emulation ? 0x7fffffffu : slot_mask);
+            emulation ? D3D12MSCVertexBufferMask : slot_mask);
         if (recording_failed_)
           return;
         auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
@@ -2058,7 +2056,8 @@ public:
       bool AllowMinMax = true,
       const D3D12MinMaxGraphicsVariant **selected_minmax = nullptr,
       bool AllowTypedOrigin = true,
-      const D3D12TypedOriginGraphicsVariant **selected_origin = nullptr
+      const D3D12TypedOriginGraphicsVariant **selected_origin = nullptr,
+      bool SkipVertexBinding = false
   ) {
     if (selected_minmax)
       *selected_minmax = nullptr;
@@ -2285,7 +2284,7 @@ public:
     const bool encode_msc_resource_uses =
         use_msc && !SkipResourceBinding &&
         (dirty_state_.test(DirtyState::DescriptorHeaps) || dirty_state_.test(DirtyState::GraphicsRootArguments));
-    if (dirty_state_.test(DirtyState::VertexBuffer)) {
+    if (!SkipVertexBinding && dirty_state_.test(DirtyState::VertexBuffer)) {
       EncodeVertexBuffers();
       dirty_state_.clr(DirtyState::VertexBuffer);
     }
@@ -5764,14 +5763,14 @@ public:
         origin_graphics_variant ? &origin_graphics_variant->root : nullptr;
     const auto template_size = compiler_root ? compiler_root->argument_buffer_size : root->MSCArgumentBufferSize;
     if (template_size > UINT64_MAX - 15) { FailRecording(__func__, "indirect TLAB size overflow"); return false; }
-    const auto stride = (template_size + 15) & ~uint64_t(15);
+    const auto stride = std::max(uint64_t(16), (template_size + 15) & ~uint64_t(15));
     const auto count = compiler_root ? compiler_root->layouts.size() : root->MSCParameterCount;
     const auto *layouts = compiler_root ? compiler_root->layouts.data() : root->MSCParameterLayouts;
     if (!stride || !data->max_count || stride > SIZE_MAX || data->max_count > SIZE_MAX / stride) {
       FailRecording(__func__, "invalid indirect TLAB allocation size");
       return false;
     }
-    auto [offsets_ptr, offsets_offset] = allocator_->AllocateGPUHeap(root->ParameterSlots * sizeof(uint32_t), 16);
+    auto [offsets_ptr, offsets_offset] = allocator_->AllocateGPUHeap(std::max(1u, root->ParameterSlots) * sizeof(uint32_t), 16);
     if (!offsets_ptr) { FailRecording(__func__, "indirect layout allocation failed"); return false; }
     auto offsets = static_cast<uint32_t *>(offsets_ptr);
     std::fill_n(offsets, root->ParameterSlots, UINT32_MAX);
@@ -5779,9 +5778,10 @@ public:
       uint32_t parameter = 0, type = 0;
       uint64_t end = sizeof(uint64_t);
       switch (update.Type) {
+      case D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW:
       case D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW:
         if constexpr (!compute) continue;
-        FailRecording(__func__, "compute indirect index binding is unsupported"); return false;
+        FailRecording(__func__, "compute indirect IA binding is unsupported"); return false;
       case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT:
         parameter = update.Constant.RootParameterIndex;
         type = DXMT_MSC_RESOURCE_CONSTANT;
@@ -6140,7 +6140,7 @@ public:
       allocator_->InvalidateCurrentPass();
     }
     bool encode_binding = sig->UpdateRootArguments || sig->UpdateIndexBuffer || sig->UpdateVertexBuffers;
-    const bool msc_updates = (sig->UpdateRootArguments || sig->UpdateIndexBuffer) &&
+    const bool msc_updates = (sig->UpdateRootArguments || sig->UpdateIndexBuffer || sig->UpdateVertexBuffers) &&
         pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
     if (msc_updates && !pso_graphics_->msc_dynamic_vertex_fetch &&
         (uint64_t(pso_graphics_->slot_mask) >> (31 - DXMT_MSC_VERTEX_BUFFER_BIND_POINT))) {
@@ -6151,7 +6151,7 @@ public:
     const D3D12TypedOriginGraphicsVariant *origin_variant = nullptr;
     DrawCallStatus status = PreDraw(
         encode_binding && !msc_updates, SM50_INDEX_BUFFER_FORMAT_NONE, !encode_binding || msc_updates,
-        &minmax_variant, true, &origin_variant
+        &minmax_variant, true, &origin_variant, msc_updates && sig->UpdateVertexBuffers
     );
     if (status == DrawCallStatus::Invalid)
       return;
@@ -6165,7 +6165,8 @@ public:
       if (update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW ||
           update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW ||
           update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW ||
-          update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW)
+          update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW ||
+          update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW)
         allocator_->encoder_current->indirect_root_va = true;
 
     if (indirect_residency_) {
@@ -6193,9 +6194,23 @@ public:
     if (msc_updates) {
       if (!EncodeMSCIndirectArguments(sig, cmd, nullptr, nullptr, nullptr, minmax_variant, resolver_binding, origin_variant)) return;
       if (pso_graphics_->msc_dynamic_vertex_fetch) {
-        const auto offset = PopulateMSCVertexBufferTable(WMTRenderStageVertex, pso_graphics_->slot_mask);
+        uint32_t inherited_mask = pso_graphics_->slot_mask;
+        for (const auto &update : sig->StateUpdates)
+          if (update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW)
+            inherited_mask &= ~(1u << update.VertexBuffer.Slot);
+        const auto offset = PopulateMSCVertexBufferTable(WMTRenderStageVertex, inherited_mask);
         if (recording_failed_) return;
         cmd->msc_vertex_records = allocator_->gpu_heap_buffer_address_ + offset;
+        if (sig->UpdateVertexBuffers) {
+          constexpr uint32_t record_stride = D3D12MSCVertexBufferCount * sizeof(D3D12MSCVertexBufferRecord);
+          if (MaxCommandCount > SIZE_MAX / record_stride) {
+            FailRecording(__func__, "indirect MSC vertex records size overflow"); return;
+          }
+          auto [records, records_offset] = allocator_->AllocateGPUHeap(size_t(MaxCommandCount) * record_stride, 16);
+          if (!records) { FailRecording(__func__, "indirect MSC vertex records allocation failed"); return; }
+          cmd->vertex_buffer = allocator_->gpu_heap_buffer_address_ + records_offset;
+          cmd->vertex_argbuf_stride = record_stride;
+        }
         ResetIndirectState(sig, false);
         return;
       }

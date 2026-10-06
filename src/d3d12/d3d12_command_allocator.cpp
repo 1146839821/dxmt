@@ -296,8 +296,6 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
     const D3D12TypedOriginGraphicsVariant *origin_variant
 ) {
   if (resolver_binding) *resolver_binding = nullptr;
-  if ((minmax_variant || origin_variant) && pCmdSig->UpdateVertexBuffers)
-    return nullptr;
   WMTIndirectCommandBufferInfo info;
   info.inherit_buffers = !(pCmdSig->UpdateVertexBuffers || pCmdSig->UpdateIndexBuffer || pCmdSig->UpdateRootArguments);
   info.inherit_pso = 1;

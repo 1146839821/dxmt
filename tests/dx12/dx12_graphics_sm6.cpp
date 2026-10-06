@@ -51,6 +51,7 @@ int main(int argc, char **argv) {
       strcmp(argv[3], "--indirect-root-constants") == 0 || indirect_fragment || indirect_partial);
   const bool root_srv = argc == 4 && (strcmp(argv[3], "--root-srv") == 0 || strcmp(argv[3], "--indirect-root-srv") == 0);
   const bool root_uav = argc == 4 && (strcmp(argv[3], "--root-uav") == 0 || strcmp(argv[3], "--indirect-root-uav") == 0);
+  const bool indirect_vb = argc == 4 && strcmp(argv[3], "--indirect-vb") == 0;
   const bool indirect = argc == 4 && strncmp(argv[3], "--indirect-", 11) == 0;
   const bool textured_root_cbv = argc == 4 && (strcmp(argv[3], "--texture-root-cbv") == 0 ||
       strcmp(argv[3], "--indirect-texture-root-cbv") == 0);
@@ -67,7 +68,7 @@ int main(int argc, char **argv) {
   const bool get_attribute_unsupported = argc == 4 && strcmp(argv[3], "--get-attribute-unsupported") == 0;
   const bool vrs_unsupported = argc == 4 && strcmp(argv[3], "--vrs-unsupported") == 0;
   const bool stencil_ref_unsupported = argc == 4 && strcmp(argv[3], "--stencil-ref-unsupported") == 0;
-  const bool padded_stride = argc == 4 && strcmp(argv[3], "--padded-stride") == 0;
+  const bool padded_stride = (argc == 4 && strcmp(argv[3], "--padded-stride") == 0) || indirect_vb;
   if ((argc == 4 && !textured && !root_cbv && !root_constants && !root_srv &&
        !root_uav && !textured_root_cbv && !logic_op && !stencil && !barycentrics &&
        !wave_quad_ops && !int64_ops && !native16_ops && !helper_lane && !helper_lane_derivative &&
@@ -717,7 +718,7 @@ int main(int argc, char **argv) {
   list->IASetPrimitiveTopology(geometry_adjacency
                                    ? D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ
                                    : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-  list->IASetVertexBuffers(0, 1, &vertex_view);
+  if (!indirect_vb) list->IASetVertexBuffers(0, 1, &vertex_view);
   if (geometry_indexed || indirect_indexed)
     list->IASetIndexBuffer(&index_view);
   list->OMSetRenderTargets(1, &rtv_handle, FALSE, stencil ? &dsv_handle : nullptr);
@@ -736,26 +737,32 @@ int main(int argc, char **argv) {
     arguments[0].Type = root_constants ? D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT : (root_cbv || textured_root_cbv) ?
         D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW : root_srv ?
         D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW : D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+    if (indirect_vb) {
+      arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW;
+      arguments[0].VertexBuffer.Slot = 0;
+    }
     if (root_constants) {
       arguments[0].Constant.RootParameterIndex = 0;
       arguments[0].Constant.Num32BitValuesToSet = indirect_partial ? 3 : 4;
     }
     arguments[1].Type = indirect_indexed ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
-    const UINT root_bytes = root_constants ? arguments[0].Constant.Num32BitValuesToSet * 4 : 8;
+    const UINT root_bytes = indirect_vb ? sizeof(D3D12_VERTEX_BUFFER_VIEW) :
+        root_constants ? arguments[0].Constant.Num32BitValuesToSet * 4 : 8;
     D3D12_COMMAND_SIGNATURE_DESC signature = {};
     signature.ByteStride = root_bytes + (indirect_indexed ? sizeof(D3D12_DRAW_INDEXED_ARGUMENTS) : sizeof(D3D12_DRAW_ARGUMENTS));
     signature.NumArgumentDescs = 2;
     signature.pArgumentDescs = arguments;
     if (!CheckHR("CreateIndirectSignature", device->CreateCommandSignature(
-            &signature, root_signature, IID_PPV_ARGS(&command_signature)))) goto cleanup;
+            &signature, indirect_vb ? nullptr : root_signature, IID_PPV_ARGS(&command_signature)))) goto cleanup;
     auto args_desc = buffer_desc;
     args_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-    args_desc.Width = signature.ByteStride;
+    args_desc.Width = signature.ByteStride * (indirect_vb ? 2 : 1);
     if (!CheckHR("CreateIndirectArgs", device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE,
             &args_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&indirect_args)))) goto cleanup;
     void *mapped = nullptr;
     if (!CheckHR("MapIndirectArgs", indirect_args->Map(0, nullptr, &mapped))) goto cleanup;
-    if (root_constants) memcpy(mapped, root_color_bits, root_bytes);
+    if (indirect_vb) memcpy(mapped, &vertex_view, root_bytes);
+    else if (root_constants) memcpy(mapped, root_color_bits, root_bytes);
     else {
       const UINT64 address = (root_uav ? root_uav_buffer : root_data_buffer)->GetGPUVirtualAddress();
       memcpy(mapped, &address, sizeof(address));
@@ -767,8 +774,18 @@ int main(int argc, char **argv) {
       const D3D12_DRAW_ARGUMENTS draw = {draw_count, 1, 0, 0};
       memcpy(static_cast<BYTE *>(mapped) + root_bytes, &draw, sizeof(draw));
     }
+    if (indirect_vb) {
+      // A later non-drawing command must not overwrite the first command's
+      // vertex records with a different stride before the ICB executes.
+      auto second_view = vertex_view;
+      second_view.StrideInBytes = sizeof(Vertex);
+      const D3D12_DRAW_ARGUMENTS no_draw = {0, 1, 0, 0};
+      auto second = static_cast<BYTE *>(mapped) + signature.ByteStride;
+      memcpy(second, &second_view, sizeof(second_view));
+      memcpy(second + root_bytes, &no_draw, sizeof(no_draw));
+    }
     indirect_args->Unmap(0, nullptr);
-    list->ExecuteIndirect(command_signature, 1, indirect_args, 0, nullptr, 0);
+    list->ExecuteIndirect(command_signature, indirect_vb ? 2 : 1, indirect_args, 0, nullptr, 0);
   } else if (geometry_indexed)
     list->DrawIndexedInstanced(draw_count, 1, 0, 0, 0);
   else
@@ -919,6 +936,7 @@ int main(int argc, char **argv) {
                 : helper_lane ? "helper lane graphics"
                 : textured_root_cbv  ? "root CBV textured graphics"
                 : textured           ? "textured graphics"
+                : indirect_vb        ? "indirect VB padded-stride graphics"
                 : padded_stride      ? "padded-stride graphics"
                                      : "graphics")
             << " readback passed: 0x" << std::hex << pixel << std::dec << "\n";
