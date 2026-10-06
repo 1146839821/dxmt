@@ -45,6 +45,13 @@ executable('airconv', airconv_src + airconv_cli_src,
 )
 
 if get_option('enable_tests')
+  airconv_api_boundary_test = executable('airconv-api-boundary-test',
+    files('../tests/api_boundary.cpp'),
+    dependencies : [ airconv_dep_darwin ],
+    native : dxmt_crossbuild
+  )
+  test('airconv API boundary', airconv_api_boundary_test)
+
   lower_unsupported_double_test = executable('lower-unsupported-double-test',
     files('../tests/lower_unsupported_double.cpp', '../transforms/lower_unsupported_double.cpp'),
     include_directories : [ include_directories('..'), llvm_include_path_darwin ],

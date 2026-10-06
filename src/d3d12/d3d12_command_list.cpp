@@ -963,8 +963,9 @@ public:
     memset(enabled, 0, sizeof(enabled));
     compute_trace_ = GetEnvironmentVariableA("DXMT_COMPUTE_TRACE", enabled, sizeof(enabled)) && enabled[0] != '0';
     memset(enabled, 0, sizeof(enabled));
-    airconv_compute_residency_ =
-        GetEnvironmentVariableA("DXMT_AIRCONV_COMPUTE_RESIDENCY", enabled, sizeof(enabled)) && enabled[0] != '0';
+    airconv_compute_residency_ = true;
+    if (GetEnvironmentVariableA("DXMT_AIRCONV_COMPUTE_RESIDENCY", enabled, sizeof(enabled)))
+      airconv_compute_residency_ = enabled[0] != '0';
     memset(enabled, 0, sizeof(enabled));
     airconv_render_residency_ = true;
     if (GetEnvironmentVariableA("DXMT_AIRCONV_RENDER_RESIDENCY", enabled, sizeof(enabled)))
@@ -3399,7 +3400,8 @@ public:
     // descriptor-table enumeration below is an independent concern.
     const auto stages =
         pso_graphics_ &&
-        (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry || pso_graphics_->airconv_geometry ||
+        (pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry || pso_graphics_->msc_mesh ||
+         pso_graphics_->airconv_geometry ||
          pso_graphics_->airconv_tessellation)
             ? static_cast<WMTRenderStages>(WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment)
             : static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment);
