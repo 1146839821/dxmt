@@ -6,6 +6,7 @@
 
 namespace dxmt {
 struct IndirectComputeCommandData;
+struct IndirectRenderCommandData;
 
 struct D3D12TypedOriginDispatch {
   struct Slot {
@@ -34,6 +35,8 @@ struct D3D12TypedOriginDispatch {
   // clones the payload into its own binding buffer; never patches these objects.
   const IndirectComputeCommandData *indirect_data = nullptr;
   const wmtcmd_compute_setbuffer *indirect_data_binding = nullptr;
+  const IndirectRenderCommandData *indirect_render_data = nullptr;
+  const wmtcmd_render_setbuffer *indirect_render_binding = nullptr;
 };
 
 struct D3D12TypedOriginSubmissionBinding {

@@ -151,11 +151,17 @@ HRESULT MaterializeD3D12TypedOriginDispatch(
           graphics->vertex_binding_count > variant.bindings.size() || graphics->vertex_binding_count > 64 ||
           variant.bindings.size() - graphics->vertex_binding_count > 64 ||
           (graphics->UsesSharedOriginRecords() && variant.bindings.size() > 64)) return E_INVALIDARG;
-    } else if (dispatch.variant != dispatch.compute_variant || variant.bindings.size() > 64) return E_INVALIDARG;
+    } else if (dispatch.variant != dispatch.compute_variant || variant.bindings.size() > 64 ||
+        dispatch.indirect_render_data || dispatch.indirect_render_binding) return E_INVALIDARG;
+    if (bool(dispatch.indirect_data) != bool(dispatch.indirect_data_binding) ||
+        bool(dispatch.indirect_render_data) != bool(dispatch.indirect_render_binding)) return E_INVALIDARG;
     // An ordinary stage does not consume the private CBV. Keep the original
     // single-TLAB cost for pixel-only and vertex-only origin variants.
     const bool split_arguments = graphics && !graphics->UsesSharedOriginRecords() && graphics->vertex_binding_count &&
         graphics->vertex_binding_count < variant.bindings.size();
+    // The current render resolver consumes one TLAB for both stages. Do not
+    // publish split-stage indirect data until its dual-TLAB ABI is connected.
+    if (split_arguments && dispatch.indirect_render_data) return E_INVALIDARG;
     auto candidate = std::make_shared<D3D12TypedOriginSubmissionBinding>();
     std::unordered_map<UINT, size_t> positions;
     std::vector<UINT> indices;
@@ -184,19 +190,27 @@ HRESULT MaterializeD3D12TypedOriginDispatch(
       total += table.slots.size() * sizeof(dxmt_msc_descriptor_entry);
     }
     uint64_t indirect_tlabs_offset = 0;
-    if (dispatch.indirect_data) {
-      if (!dispatch.indirect_data_binding || !dispatch.indirect_data->max_count || !variant.root.argument_buffer_size ||
-          dispatch.indirect_data->msc_template_size != variant.root.argument_buffer_size ||
-          dispatch.indirect_data->msc_tlab_stride < variant.root.argument_buffer_size ||
-          (dispatch.indirect_data->msc_tlab_stride & 15)) return E_INVALIDARG;
+    const auto allocate_indirect = [&](const auto &payload) -> HRESULT {
+      if (!payload.max_count || !variant.root.argument_buffer_size ||
+          payload.msc_template_size != variant.root.argument_buffer_size ||
+          payload.msc_tlab_stride < variant.root.argument_buffer_size ||
+          (payload.msc_tlab_stride & 15)) return E_INVALIDARG;
       total = align(total);
       candidate->indirect_data_offset = total;
-      total += sizeof(IndirectComputeCommandData);
+      total += sizeof(payload);
       total = align(total);
       indirect_tlabs_offset = total;
-      if (dispatch.indirect_data->max_count > (UINT64_MAX - total) / dispatch.indirect_data->msc_tlab_stride)
+      if (payload.max_count > (UINT64_MAX - total) / payload.msc_tlab_stride)
         return E_OUTOFMEMORY;
-      total += dispatch.indirect_data->max_count * dispatch.indirect_data->msc_tlab_stride;
+      total += payload.max_count * payload.msc_tlab_stride;
+      return S_OK;
+    };
+    if (dispatch.indirect_data) {
+      const auto hr = allocate_indirect(*dispatch.indirect_data);
+      if (FAILED(hr)) return hr;
+    } else if (dispatch.indirect_render_data) {
+      const auto hr = allocate_indirect(*dispatch.indirect_render_data);
+      if (FAILED(hr)) return hr;
     }
     if (total > SIZE_MAX || !total) return E_OUTOFMEMORY;
     WMTBufferInfo info = {};
@@ -264,13 +278,15 @@ HRESULT MaterializeD3D12TypedOriginDispatch(
       std::memcpy(memory + hidden.top_level_offset, &vertex_records, sizeof(vertex_records));
       std::memcpy(fragment + hidden.top_level_offset, &fragment_records, sizeof(fragment_records));
     }
-    if (dispatch.indirect_data) {
-      auto payload = *dispatch.indirect_data;
+    const auto copy_indirect = [&](auto payload) {
       payload.msc_template = info.gpu_address;
       payload.msc_tlab = info.gpu_address + indirect_tlabs_offset;
       std::memcpy(memory + candidate->indirect_data_offset, &payload, sizeof(payload));
-    }
-    retain(candidate->buffer.handle, dispatch.indirect_data ? read_write : WMTResourceUsageRead);
+    };
+    if (dispatch.indirect_data) copy_indirect(*dispatch.indirect_data);
+    else if (dispatch.indirect_render_data) copy_indirect(*dispatch.indirect_render_data);
+    retain(candidate->buffer.handle, (dispatch.indirect_data || dispatch.indirect_render_data) ?
+        read_write : WMTResourceUsageRead);
     DEBUG("Typed-origin submission buffer=", candidate->buffer.handle, " bytes=", total,
         " records=", variant.bindings.size(), " unique_live_slots=", indices.size());
     binding = std::move(candidate);
