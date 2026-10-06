@@ -26,7 +26,7 @@ enum class DrawMode { Typed, RejectHiddenVS, Ordinary, RejectMinMaxSwitch, Verte
 static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
     const std::vector<unsigned char> &ps, const std::vector<unsigned char> &ordinary,
     bool live, bool pixel_visibility, DrawMode mode = DrawMode::Typed,
-    const std::vector<unsigned char> *ordinary_vs = nullptr, bool indirect = false) {
+    const std::vector<unsigned char> *ordinary_vs = nullptr, bool indirect = false, bool indexed = false) {
   const bool reject_typed_vs = mode == DrawMode::RejectHiddenVS;
   const bool reject_minmax_switch = mode == DrawMode::RejectMinMaxSwitch;
   const bool ordinary_only = mode == DrawMode::Ordinary;
@@ -184,13 +184,26 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
     return false;
   OwnedCOM<ID3D12CommandSignature> signature;
   OwnedCOM<ID3D12Resource> arguments;
+  OwnedCOM<ID3D12Resource> indices;
   if (indirect) {
     D3D12_INDIRECT_ARGUMENT_DESC updates[2] = {};
     updates[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
     updates[0].Constant = {ordinary_only ? 0u : 1u, 0, 1};
-    updates[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
-    struct Payload { UINT constant; D3D12_DRAW_ARGUMENTS draw; } payload = {0xabc123, {3, 1, 0, 0}};
-    D3D12_COMMAND_SIGNATURE_DESC desc = {sizeof(Payload), 2, updates, 0};
+    updates[1].Type = indexed ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+    const UINT payload[] = {0xabc123, 3, 1, indexed ? 1u : 0u, 0, 0};
+    const UINT payload_size = sizeof(UINT) + (indexed ? sizeof(D3D12_DRAW_INDEXED_ARGUMENTS) : sizeof(D3D12_DRAW_ARGUMENTS));
+    if (indexed) {
+      indices = buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false);
+      if (!indices) return false;
+      void *mapped = nullptr;
+      if (!Check(indices->Map(0, nullptr, &mapped), "indices")) return false;
+      // Nonzero view offset and StartIndexLocation must both be honored.
+      const UINT values[] = {99, 99, 0, 1, 2};
+      std::memcpy(mapped, values, sizeof(values)); indices->Unmap(0, nullptr);
+      D3D12_INDEX_BUFFER_VIEW view = {indices->GetGPUVirtualAddress() + sizeof(UINT), 4 * sizeof(UINT), DXGI_FORMAT_R32_UINT};
+      list->IASetIndexBuffer(&view);
+    }
+    D3D12_COMMAND_SIGNATURE_DESC desc = {payload_size, 2, updates, 0};
     ID3D12CommandSignature *raw = nullptr;
     if (!Check(device->CreateCommandSignature(&desc, root.get(), IID_PPV_ARGS(&raw)), "indirect signature")) return false;
     signature.reset(raw);
@@ -198,7 +211,7 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
     if (!arguments) return false;
     void *mapped = nullptr;
     if (!Check(arguments->Map(0, nullptr, &mapped), "indirect arguments")) return false;
-    std::memcpy(mapped, &payload, sizeof(payload)); arguments->Unmap(0, nullptr);
+    std::memcpy(mapped, payload, payload_size); arguments->Unmap(0, nullptr);
     // A stale inherited constant must not accidentally satisfy the oracle.
     list->SetGraphicsRoot32BitConstant(ordinary_only ? 0 : 1, 0, 0);
     list->ExecuteIndirect(signature.get(), 1, arguments.get(), 0, nullptr, 0);
@@ -263,7 +276,8 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
 }
 
 int wmain(int argc, wchar_t **argv) {
-  const bool indirect = argc == 8 && !wcscmp(argv[7], L"--stages-indirect");
+  const bool indexed = argc == 8 && !wcscmp(argv[7], L"--stages-indirect-indexed");
+  const bool indirect = indexed || (argc == 8 && !wcscmp(argv[7], L"--stages-indirect"));
   const bool embedded = argc == 8 && !wcscmp(argv[7], L"--stages-embedded");
   const bool stages = argc == 8 && (!wcscmp(argv[7], L"--stages") || !wcscmp(argv[7], L"--stages-auto") || embedded || indirect);
   const bool minmax_switch = argc == 7 && !wcscmp(argv[6], L"--minmax-switch");
@@ -284,10 +298,11 @@ int wmain(int argc, wchar_t **argv) {
     if (!Load(argv[6], vertex_ps)) return 1;
     for (bool live : {false, true}) for (bool disjoint : {false, true}) {
       if (embedded && (live || disjoint)) continue;
-      if (!Run(device.get(), typed_vs, vertex_ps, ordinary, live, disjoint, DrawMode::VertexOnly, &vs, indirect) ||
-          !Run(device.get(), typed_vs, ps, ordinary, live, disjoint, DrawMode::Combined, &vs, indirect)) return 1;
+      if (!Run(device.get(), typed_vs, vertex_ps, ordinary, live, disjoint, DrawMode::VertexOnly, &vs, indirect, indexed) ||
+          !Run(device.get(), typed_vs, ps, ordinary, live, disjoint, DrawMode::Combined, &vs, indirect, indexed)) return 1;
     }
     std::puts(embedded ? "typed-origin matching embedded VS/PS GPU PASS (8 draws)" :
+        indexed ? "typed-origin indexed indirect VS/PS GPU PASS (32 draws)" :
         indirect ? "typed-origin indirect VS/PS GPU PASS (32 draws)" :
         "typed-origin native VS/PS GPU PASS (32 draws)"); return 0;
   }

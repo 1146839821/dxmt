@@ -143,3 +143,33 @@ D3D12. No game directory or prefix DLL deployment, process restart or push.
 Remaining: DRAW_INDEXED, CBV/SRV/UAV root updates, multi-command/count contracts,
 broader lifetime/provenance and companion/VB/IB implementation. This focused
 DRAW evidence does not qualify complete typed graphics indirect or FL12_0.
+
+## Indexed indirect GPU follow-up
+
+Baseline ffd52f2c, clean. Hypothesis: ordinary typed DRAW_INDEXED can use the
+same split-stage TLAB resolver with inherited index-buffer bindings. Extend
+the focused fixture, not the full matrix. A 32-bit index buffer uses a nonzero
+view offset plus StartIndexLocation=1; skipped entries contain invalid vertex
+IDs so an offset error cannot reproduce the expected triangle. The inherited
+root constant remains deliberately wrong until its indirect update.
+
+--stages-indirect-indexed now selects a DRAW_INDEXED argument layout, retains
+the index upload resource through all submissions and uses the existing exact
+typed/render-target/guard/ordinary-restoration oracles. Both probe builds pass.
+Normal and no-private each exit 0 with 32 indexed typed draws and accompanying
+ordinary restoration draws, covering VS-only/combined, static/volatile,
+shared/disjoint tables and four repeated submissions per case. This evidence
+uses SM6.0 fixtures and R32_UINT indices, not all index widths/shader models.
+
+Self-review checked raw payload word order and byte stride, distinct direct
+argument size, index view bounds, skipped indices, COM lifetime and unchanged
+non-indexed modes. git diff --check passes. Current PE/Unix libraries were staged
+only after both probe builds terminated, in cache overlays; variants executed
+sequentially. Load traces and hashes are retained with typed-indexed-gpu-*.log
+and typed-indexed-hashes.log in the reconciliation cache. No production change,
+prefix/game DLL deployment or feature promotion.
+
+The earlier DRAW_INDEXED evidence gap is now narrowed for this exact scope.
+CBV/SRV/UAV updates, multiple commands/counts, command-signature VB/IB updates
+and companion indirect remain open; next prioritize missing production update
+paths instead of rerunning complete matrices.
