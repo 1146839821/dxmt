@@ -355,6 +355,8 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
     data->msc_template_size = 0;
     data->msc_vertex_buffers = 0;
     data->msc_vertex_slot_mask = 0;
+    data->msc_fragment_tlab = 0;
+    data->msc_fragment_template = 0;
   }
 
   {

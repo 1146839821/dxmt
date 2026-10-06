@@ -2,6 +2,7 @@
 #include "d3d12_command_allocator.hpp"
 #include <algorithm>
 #include <cstring>
+#include <type_traits>
 #include <unordered_map>
 
 namespace dxmt {
@@ -159,9 +160,6 @@ HRESULT MaterializeD3D12TypedOriginDispatch(
     // single-TLAB cost for pixel-only and vertex-only origin variants.
     const bool split_arguments = graphics && !graphics->UsesSharedOriginRecords() && graphics->vertex_binding_count &&
         graphics->vertex_binding_count < variant.bindings.size();
-    // The current render resolver consumes one TLAB for both stages. Do not
-    // publish split-stage indirect data until its dual-TLAB ABI is connected.
-    if (split_arguments && dispatch.indirect_render_data) return E_INVALIDARG;
     auto candidate = std::make_shared<D3D12TypedOriginSubmissionBinding>();
     std::unordered_map<UINT, size_t> positions;
     std::vector<UINT> indices;
@@ -190,6 +188,7 @@ HRESULT MaterializeD3D12TypedOriginDispatch(
       total += table.slots.size() * sizeof(dxmt_msc_descriptor_entry);
     }
     uint64_t indirect_tlabs_offset = 0;
+    uint64_t indirect_fragment_tlabs_offset = 0;
     const auto allocate_indirect = [&](const auto &payload) -> HRESULT {
       if (!payload.max_count || !variant.root.argument_buffer_size ||
           payload.msc_template_size != variant.root.argument_buffer_size ||
@@ -211,6 +210,13 @@ HRESULT MaterializeD3D12TypedOriginDispatch(
     } else if (dispatch.indirect_render_data) {
       const auto hr = allocate_indirect(*dispatch.indirect_render_data);
       if (FAILED(hr)) return hr;
+      if (split_arguments) {
+        indirect_fragment_tlabs_offset = total;
+        const auto &payload = *dispatch.indirect_render_data;
+        if (payload.max_count > (UINT64_MAX - total) / payload.msc_tlab_stride)
+          return E_OUTOFMEMORY;
+        total += payload.max_count * payload.msc_tlab_stride;
+      }
     }
     if (total > SIZE_MAX || !total) return E_OUTOFMEMORY;
     WMTBufferInfo info = {};
@@ -281,6 +287,13 @@ HRESULT MaterializeD3D12TypedOriginDispatch(
     const auto copy_indirect = [&](auto payload) {
       payload.msc_template = info.gpu_address;
       payload.msc_tlab = info.gpu_address + indirect_tlabs_offset;
+      if constexpr (std::is_same_v<decltype(payload), IndirectRenderCommandData>) {
+        // Explicitly clear inherited addresses for single-TLAB variants.
+        payload.msc_fragment_template = split_arguments ?
+            info.gpu_address + candidate->fragment_argument_offset : 0;
+        payload.msc_fragment_tlab = split_arguments ?
+            info.gpu_address + indirect_fragment_tlabs_offset : 0;
+      }
       std::memcpy(memory + candidate->indirect_data_offset, &payload, sizeof(payload));
     };
     if (dispatch.indirect_data) copy_indirect(*dispatch.indirect_data);

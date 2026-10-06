@@ -100,6 +100,8 @@ struct dxmt_render_command_data {
   ulong msc_template_size;
   device ulong *msc_vertex_buffers;
   ulong msc_vertex_slot_mask;
+  device char *msc_fragment_tlab;
+  device char *msc_fragment_template;
 };
 
 )";
@@ -226,6 +228,7 @@ public:
       source << "if (x !=0 ) return;\n";
 
     source << "device char *msc_tlab = nullptr;\n";
+    source << "device char *msc_fragment_tlab = nullptr;\n";
 
     source << "uint count = command_data.max_count_buffer ? "
               "command_data.max_count_buffer[0] : command_data.max_count;\n";
@@ -243,6 +246,11 @@ public:
     source << "msc_tlab = command_data.msc_tlab ? command_data.msc_tlab + i * command_data.msc_tlab_stride : nullptr;\n"
                 "if (msc_tlab) { for (ulong b = 0; b < command_data.msc_template_size; ++b) "
                 "msc_tlab[b] = command_data.msc_template[b]; }\n";
+    if (!is_compute)
+      source << "msc_fragment_tlab = command_data.msc_fragment_tlab ? command_data.msc_fragment_tlab + "
+                "i * command_data.msc_tlab_stride : nullptr;\n"
+                "if (msc_fragment_tlab) { for (ulong b = 0; b < command_data.msc_template_size; ++b) "
+                "msc_fragment_tlab[b] = command_data.msc_fragment_template[b]; }\n";
     source << "device ulong * rootsig_qwords = command_data.rootsig_qwords + "
               "(i * command_data.rootsig_qwords_stride);\n";
     if (!is_compute)
@@ -254,7 +262,7 @@ public:
       if (!is_compute) {
         source << "if (msc_tlab) {\n"
                << "cmd.set_vertex_buffer(msc_tlab," << DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT << ");\n"
-               << "cmd.set_fragment_buffer(msc_tlab," << DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT << ");\n"
+               << "cmd.set_fragment_buffer(msc_fragment_tlab ? msc_fragment_tlab : msc_tlab," << DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT << ");\n"
                << "cmd.set_vertex_buffer(command_data.msc_heap," << DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT << ");\n"
                << "cmd.set_fragment_buffer(command_data.msc_heap," << DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT << ");\n"
                << "cmd.set_vertex_buffer(command_data.msc_sampler_heap," << DXMT_MSC_SAMPLER_HEAP_BIND_POINT << ");\n"
@@ -336,9 +344,11 @@ public:
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
         for (unsigned j = 0; j < arg.Constant.Num32BitValuesToSet; j++) {
-          source << "if (msc_tlab) reinterpret_cast<device uint *>(msc_tlab + command_data.msc_layout_offsets["
+          source << "if (msc_tlab) { for (uint stage = 0; stage < 2; ++stage) { "
+                    "device char *target = stage ? msc_fragment_tlab : msc_tlab; "
+                    "if (target) reinterpret_cast<device uint *>(target + command_data.msc_layout_offsets["
                    << parameter_index << "])[" << (j + arg.Constant.DestOffsetIn32BitValues)
-                   << "] = arg.constant_" << i << "_" << j << "; else ";
+                   << "] = arg.constant_" << i << "_" << j << "; } } else ";
           source << "reinterpret_cast<device uint *>(rootsig_qwords + " << offset << ")["
                  << (j + arg.Constant.DestOffsetIn32BitValues) << "] = arg.constant_" << i << "_" << j << ";\n";
         }
@@ -352,8 +362,10 @@ public:
         if (parameter_index >= rootsig->ParameterSlots)
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
-        source << "if (msc_tlab) *reinterpret_cast<device ulong *>(msc_tlab + command_data.msc_layout_offsets["
-                 << parameter_index << "]) = arg.cb_" << i << "; else ";
+        source << "if (msc_tlab) { for (uint stage = 0; stage < 2; ++stage) { "
+                  "device char *target = stage ? msc_fragment_tlab : msc_tlab; "
+                  "if (target) *reinterpret_cast<device ulong *>(target + command_data.msc_layout_offsets["
+                 << parameter_index << "]) = arg.cb_" << i << "; } } else ";
         source << "rootsig_qwords[" << offset << "] = arg.cb_" << i << ";\n";
         break;
       }
@@ -365,8 +377,10 @@ public:
         if (parameter_index >= rootsig->ParameterSlots)
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
-        source << "if (msc_tlab) *reinterpret_cast<device ulong *>(msc_tlab + command_data.msc_layout_offsets["
-                 << parameter_index << "]) = arg.srv_" << i << "; else ";
+        source << "if (msc_tlab) { for (uint stage = 0; stage < 2; ++stage) { "
+                  "device char *target = stage ? msc_fragment_tlab : msc_tlab; "
+                  "if (target) *reinterpret_cast<device ulong *>(target + command_data.msc_layout_offsets["
+                 << parameter_index << "]) = arg.srv_" << i << "; } } else ";
         source << "rootsig_qwords[" << offset << "] = arg.srv_" << i << ";\n";
         break;
       }
@@ -378,8 +392,10 @@ public:
         if (parameter_index >= rootsig->ParameterSlots)
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
-        source << "if (msc_tlab) *reinterpret_cast<device ulong *>(msc_tlab + command_data.msc_layout_offsets["
-                 << parameter_index << "]) = arg.uav_" << i << "; else ";
+        source << "if (msc_tlab) { for (uint stage = 0; stage < 2; ++stage) { "
+                  "device char *target = stage ? msc_fragment_tlab : msc_tlab; "
+                  "if (target) *reinterpret_cast<device ulong *>(target + command_data.msc_layout_offsets["
+                 << parameter_index << "]) = arg.uav_" << i << "; } } else ";
         source << "rootsig_qwords[" << offset << "] = arg.uav_" << i << ";\n";
         break;
       }
