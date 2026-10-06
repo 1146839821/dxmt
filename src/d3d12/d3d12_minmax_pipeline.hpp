@@ -2,6 +2,7 @@
 
 #include "Metal.hpp"
 #include "d3d12_minmax.hpp"
+#include "d3d12_private_graphics_pipeline.hpp"
 
 namespace dxmt {
 
@@ -24,13 +25,8 @@ struct D3D12MinMaxComputeVariant : D3D12MinMaxBindingVariant {
   WMTSize threadgroup_size = {};
 };
 
-struct D3D12MinMaxGraphicsVariant : D3D12MinMaxBindingVariant {
+struct D3D12MinMaxGraphicsVariant : D3D12MinMaxBindingVariant, D3D12PrivateGraphicsPipeline {
   D3D12MinMaxGraphicsVariant() { stage = D3D12MinMaxShaderStage::Pixel; }
-  WMT::Reference<WMT::RenderPipelineState> pso;
-  bool geometry = false;
-  bool tessellation = false;
-  WMTMSCGeometryPipelineConfig geometry_config = {};
-  WMTMSCTessellationPipelineConfig tessellation_config = {};
 };
 
 } // namespace dxmt

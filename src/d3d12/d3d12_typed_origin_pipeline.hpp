@@ -2,6 +2,7 @@
 
 #include "Metal.hpp"
 #include "d3d12_typed_origin.hpp"
+#include "d3d12_private_graphics_pipeline.hpp"
 
 namespace dxmt {
 
@@ -19,12 +20,11 @@ struct D3D12TypedOriginComputeVariant : D3D12TypedOriginBindingVariant {
   WMTSize threadgroup_size = {};
 };
 
-struct D3D12TypedOriginGraphicsVariant : D3D12TypedOriginBindingVariant {
+struct D3D12TypedOriginGraphicsVariant : D3D12TypedOriginBindingVariant, D3D12PrivateGraphicsPipeline {
   // PIXEL on the binding base selects native graphics table capture (ALL/VS/PS).
   D3D12TypedOriginGraphicsVariant() { visibility = D3D12_SHADER_VISIBILITY_PIXEL; }
   // Records are concatenated VS then PS; each shader still indexes from zero.
   uint32_t vertex_binding_count = 0;
-  WMT::Reference<WMT::RenderPipelineState> pso;
 };
 
 } // namespace dxmt

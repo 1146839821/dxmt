@@ -564,9 +564,9 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
     return S_OK;
   }
 
-  HRESULT CreateMinMaxEmulationPipeline(const D3D12ConvertedShader &vs, const D3D12ConvertedShader &ps,
+  HRESULT CreatePrivateEmulationPipeline(const D3D12ConvertedShader &vs, const D3D12ConvertedShader &ps,
       const D3D12ConvertedShader &gs, const D3D12ConvertedShader &hs, const D3D12ConvertedShader &ds,
-      D3D12MinMaxGraphicsVariant &variant) {
+      D3D12PrivateGraphicsPipeline &variant) {
     if (vs.stage_in_metallib.empty()) return E_FAIL;
     auto metal = device_->GetMTLDevice();
     WMT::Reference<WMT::Error> error;
@@ -609,7 +609,7 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
       variant.geometry = true; variant.geometry_config = info.config;
     } else return E_NOTIMPL;
     if (!variant.pso) {
-      ERR("MinMax emulation PSO failed: ", error ? error.description().getUTF8String() : "unknown error");
+      ERR("Private emulation PSO failed: ", error ? error.description().getUTF8String() : "unknown error");
       return E_FAIL;
     }
     return S_OK;
@@ -660,7 +660,7 @@ public:
           FAILED(hr = convert(original_hs_, shaders.hull, DXMT_MSC_STAGE_HULL, hs)) ||
           FAILED(hr = convert(original_ds_, shaders.domain, DXMT_MSC_STAGE_DOMAIN, ds))) return hr;
       if (minmax_emulation_flags_) {
-        hr = CreateMinMaxEmulationPipeline(vs, ps, gs, hs, ds, *candidate);
+        hr = CreatePrivateEmulationPipeline(vs, ps, gs, hs, ds, *candidate);
         if (FAILED(hr)) return hr;
       } else {
         WMT::Reference<WMT::Error> error;
