@@ -965,6 +965,11 @@ public:
   }
 
   Reference<Function>
+  newUniqueFunction() {
+    return Reference<Function>(MTLLibrary_newUniqueFunction(handle));
+  }
+
+  Reference<Function>
   newFunctionWithConstants(
       const char *name, const WMTFunctionConstant *constants, uint32_t num_constants, Error &error
   ) {

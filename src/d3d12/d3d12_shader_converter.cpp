@@ -1872,9 +1872,10 @@ HRESULT ConvertD3D12TypedOriginPixelShader(
 
 HRESULT ConvertD3D12TypedOriginVertexShader(
     const D3D12TypedOriginShader &shader, const D3D12TypedOriginRoot &root,
-    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities) {
+    D3D12ConvertedShader &converted, const DXMTMSCCapabilities *msc_capabilities,
+    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags) {
   if (shader.visibility != D3D12_SHADER_VISIBILITY_VERTEX) return E_INVALIDARG;
-  return ConvertD3D12TypedOriginShader(shader, root, converted, msc_capabilities);
+  return ConvertD3D12TypedOriginShader(shader, root, converted, msc_capabilities, input_layout, compile_flags);
 }
 
 HRESULT

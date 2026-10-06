@@ -412,7 +412,14 @@ static NTSTATUS
 _MTLLibrary_newFunction(void *obj) {
   struct unixcall_generic_obj_uint64_obj_ret *params = obj;
   id<MTLLibrary> library = (id<MTLLibrary>)params->handle;
-  NSString *name = [[NSString alloc] initWithCString:(char *)params->arg encoding:NSUTF8StringEncoding];
+  NSString *name;
+  if (params->arg) {
+    name = [[NSString alloc] initWithCString:(char *)params->arg encoding:NSUTF8StringEncoding];
+  } else {
+    params->ret = 0;
+    if (library.functionNames.count != 1) return STATUS_SUCCESS;
+    name = [library.functionNames.firstObject retain];
+  }
   params->ret = (obj_handle_t)[library newFunctionWithName:name];
   [name release];
   return STATUS_SUCCESS;

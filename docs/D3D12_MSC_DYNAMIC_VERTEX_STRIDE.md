@@ -1,5 +1,17 @@
 # Task Analysis
 
+## Stage-in ABI / private shader continuation
+
+Baseline 80e7a838, clean. Verify the actual generated ordinary stage-in ABI
+before binding companion records. MSC CLI 4.0.1 emits a separate metallib;
+metal-objdump reflection identifies buffer 6, and disassembly identifies the
+address/length/stride record plus dynamic stride multiplication. Add safe unique
+function retrieval and propagate input layout/compile flags through typed VS
+conversion so subsequent private PSO integration can use the same stage-in mode.
+Risk: hardcoded names, old-runtime null-name calls, nonmatching private artifacts.
+Validation: source review, compiler artifact reflection/disassembly, full builds
+and native regression; ordinary dynamic-fetch GPU acceptance remains required.
+
 ## Linked stage-in runtime continuation
 
 Baseline 3cb11e82, clean. Implement the missing ordinary render PSO linked
@@ -97,3 +109,33 @@ Remaining implementation: verify the synthesized ordinary stage-in record ABI,
 connect converter flag/artifact/cache identity and D3D12 PSO selection, bind
 dynamic vertex records and extend the indirect resolver, then focused readback.
 The original dynamic stride requirement remains incomplete.
+
+## Verified ordinary stage-in ABI and private compile preparation
+
+MSC CLI 4.0.1 compiled graphics_sm6.vs.cso with --vertex-stage-in and a generated
+input-layout template. metal-objdump reflection of the VS identifies
+vertex_buffers_ab at buffer 6 and a visible function reference. Disassembly of
+stride-separate.stageIn.metallib shows vertexBufferAndLength as pointer/i32/i32,
+loads field 2 as stride and multiplies it by vertex_id before fetching POSITION
+and COLOR. This establishes the 16-byte record ABI for this artifact, matching
+the existing address/length/stride builder; it is not GPU correctness evidence.
+
+The MSC skills require querying the generated function name instead of assuming
+it. Added MTLLibrary_newUniqueFunction and WMT wrapper: the native library must
+contain exactly one function, otherwise it returns null. A distinct renderer
+capability bit 28 gates the new null-name query behavior against older MSC-aware
+runtimes. Named lookup remains unchanged; retain/release of the selected name is
+balanced. No new Unix dispatch number is needed.
+
+Typed-origin vertex conversion now forwards optional input layout and compile
+flags to its shared converter, with defaults preserving existing callers.
+This avoids losing synthesized stage-in mode when preparing private typed VS.
+Ordinary/typed/MinMax PSO selection and dynamic record binding still need wiring.
+
+Reconfigured full builds and final incremental builds pass for normal and
+no-private. Existing native tests pass 12/12 each. Source self-review and
+git diff --check pass. Host units do not call unique retrieval or prove linked
+PSO creation; no new GPU acceptance is claimed. Compiler artifacts and
+stride-separate-reflection.log / stride-separate-air.log are retained under
+/Users/zhangbo/.cache/dxmt-reconciliation.ZLDvwE, with stagein-abi-final-*.log
+build evidence. No FL capability promotion, prefix/game changes or push.

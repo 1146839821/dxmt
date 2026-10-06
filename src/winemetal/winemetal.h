@@ -642,6 +642,7 @@ struct WMTVertexBufferLayout {
 WINEMETAL_API obj_handle_t MTLDevice_newLibrary(obj_handle_t device, obj_handle_t data, obj_handle_t *err_out);
 
 WINEMETAL_API obj_handle_t MTLLibrary_newFunction(obj_handle_t library, const char *name);
+WINEMETAL_API obj_handle_t MTLLibrary_newUniqueFunction(obj_handle_t library);
 
 WINEMETAL_API uint64_t NSString_lengthOfBytesUsingEncoding(obj_handle_t str, enum WMTStringEncoding encoding);
 

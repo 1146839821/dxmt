@@ -334,6 +334,14 @@ MTLLibrary_newFunction(obj_handle_t library, const char *name) {
   return params.ret;
 }
 
+WINEMETAL_API obj_handle_t
+MTLLibrary_newUniqueFunction(obj_handle_t library) {
+  struct dxmt_msc_capabilities capabilities = {0};
+  if (!library || DXMTMSCGetCapabilities(&capabilities) ||
+      !(capabilities.optional_symbols & DXMT_MSC_RUNTIME_SYMBOL_UNIQUE_LIBRARY_FUNCTION)) return 0;
+  return MTLLibrary_newFunction(library, NULL);
+}
+
 WINEMETAL_API uint64_t
 NSString_lengthOfBytesUsingEncoding(obj_handle_t str, enum WMTStringEncoding encoding) {
   struct unixcall_generic_obj_uint64_uint64_ret params;

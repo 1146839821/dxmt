@@ -117,6 +117,7 @@ enum dxmt_msc_validation_flags {
 #define DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_REFLECTION (UINT64_C(1) << 26)
 /* Native renderer entry availability, not a libmetalirconverter API symbol. */
 #define DXMT_MSC_RUNTIME_SYMBOL_LINKED_VERTEX_PSO (UINT64_C(1) << 27)
+#define DXMT_MSC_RUNTIME_SYMBOL_UNIQUE_LIBRARY_FUNCTION (UINT64_C(1) << 28)
 
 #pragma pack(push, 8)
 
