@@ -1,5 +1,18 @@
 # Task Analysis
 
+## Index-view update implementation
+
+Baseline 88610f1b, clean. Hypothesis: ordinary MSC indexed indirect can reuse
+the existing resolver's index-view argument reader while retaining all possible
+GPU-selected index allocations through submission. Evidence: generated MSL
+already decodes arg.ib, but MSC validation and private allocator reject it.
+Expected effect: connect root/IB update resolver and snapshot residency without
+allowing VB stride changes. Risk: inherited buffers instead of per-command TLAB,
+unretained GPU-selected VA or mixed companion admission. Validation: full builds,
+native regressions and focused indexed IB-update readback. VB remains a separate
+required implementation, not a reduced final goal. MSC integration skill informs
+reflected TLAB and completion lifetime requirements.
+
 ## Recording/replay continuation
 
 Baseline f432b483, clean. Hypothesis: ordinary typed DRAW/DRAW_INDEXED can use
@@ -173,3 +186,34 @@ The earlier DRAW_INDEXED evidence gap is now narrowed for this exact scope.
 CBV/SRV/UAV updates, multiple commands/counts, command-signature VB/IB updates
 and companion indirect remain open; next prioritize missing production update
 paths instead of rerunning complete matrices.
+
+## Index-view update result
+
+Ordinary MSC DRAW_INDEXED now admits INDEX_BUFFER_VIEW signature updates.
+The reflected TLAB encoder skips IB entries (they are not root parameters),
+but selects its resolver path for IB-only as well as root-update signatures.
+Private typed/MinMax allocator rejection now applies to VB updates only.
+IB-selected buffers use the existing submission-owned registered-allocation
+snapshot, acquired under the registry lock and made resident outside it.
+Compute signatures and MSC companion/VB updates remain fail-closed.
+
+Focused --stages-indirect-ib supplies no inherited index view. Command arguments
+contain root constant, index view and DRAW_INDEXED, with nonzero view offset and
+StartIndexLocation. Both variants exit 0 for 32 typed draws plus ordinary
+restoration draws, across VS-only/combined, static/volatile, shared/disjoint
+tables and replays. Exact typed/render-target/guard oracles pass. This qualifies
+the tested SM6.0/R32_UINT root+IB case, not IB-only, MinMax or arbitrary formats.
+
+Full normal/no-private builds pass after reconfiguration; explicit non-default
+probe builds pass; existing native tests pass 12/12 each. Initial execution used
+the old probe because it is not built by default; it was rebuilt explicitly
+before final GPU runs. Self-review checked admission scope, layout skipping,
+resolver selection, index resource snapshot, raw argument byte layout, retention
+and unchanged direct/indexed control modes. git diff --check passes. Logs under
+the reconciliation cache: typed-ib-build*.log / typed-ib-build-no-private.log,
+typed-ib-probe-*.log and typed-ib-gpu-*.log (actual build logs use the
+typed-ib-build and typed-ib-build-no-private names).
+
+No capability promotion, push, prefix/game DLL deployment or benchmark. VB
+stride updates and companion indirect remain production gaps. Wider root,
+multi-command/count and lifetime matrices remain subsequent acceptance work.

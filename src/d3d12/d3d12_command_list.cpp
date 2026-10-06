@@ -1394,9 +1394,12 @@ public:
         roots_only &= update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT ||
             update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW ||
             update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW ||
-            update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+            update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW ||
+            (!pipeline->IsComputePipelineState &&
+             signature->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED &&
+             update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW);
       if (!roots_only) {
-        FailRecording(name, "MSC indirect vertex/index binding updates are unsupported");
+        FailRecording(name, "unsupported MSC indirect binding update");
         return false;
       }
     }
@@ -5772,6 +5775,9 @@ public:
       uint32_t parameter = 0, type = 0;
       uint64_t end = sizeof(uint64_t);
       switch (update.Type) {
+      case D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW:
+        if constexpr (!compute) continue;
+        FailRecording(__func__, "compute indirect index binding is unsupported"); return false;
       case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT:
         parameter = update.Constant.RootParameterIndex;
         type = DXMT_MSC_RESOURCE_CONSTANT;
@@ -6130,7 +6136,7 @@ public:
       allocator_->InvalidateCurrentPass();
     }
     bool encode_binding = sig->UpdateRootArguments || sig->UpdateIndexBuffer || sig->UpdateVertexBuffers;
-    const bool msc_updates = sig->UpdateRootArguments &&
+    const bool msc_updates = (sig->UpdateRootArguments || sig->UpdateIndexBuffer) &&
         pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
     if (msc_updates && (uint64_t(pso_graphics_->slot_mask) >> (31 - DXMT_MSC_VERTEX_BUFFER_BIND_POINT))) {
       FailRecording(__func__, "MSC indirect vertex input exceeds Metal buffer slots");
@@ -6153,7 +6159,8 @@ public:
     for (const auto &update : sig->StateUpdates)
       if (update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW ||
           update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW ||
-          update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW)
+          update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW ||
+          update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW)
         allocator_->encoder_current->indirect_root_va = true;
 
     if (indirect_residency_) {
