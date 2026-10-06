@@ -5,6 +5,7 @@
 #endif
 
 #include "winemetal_thunks.h"
+#include "metalirconverter_thunks.h"
 #include <wineunixlib.h>
 #include "assert.h"
 #include "string.h"
@@ -520,6 +521,24 @@ MTLDevice_newRenderPipelineState(obj_handle_t device, const struct WMTRenderPipe
   if (err_out)
     *err_out = params.ret_error;
   return params.ret_pso;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newRenderPipelineStateWithStageIn(
+    obj_handle_t device, const struct WMTRenderPipelineInfo *info, obj_handle_t stage_in_function,
+    obj_handle_t *err_out) {
+  struct unixcall_mtldevice_newrenderpso_stagein params = {0};
+  params.pipeline.device = device;
+  WMT_MEMPTR_SET(params.pipeline.info, info);
+  params.stage_in_function = stage_in_function;
+  if (err_out) *err_out = 0;
+  struct dxmt_msc_capabilities capabilities = {0};
+  if (!stage_in_function || DXMTMSCGetCapabilities(&capabilities) ||
+      !(capabilities.optional_symbols & DXMT_MSC_RUNTIME_SYMBOL_LINKED_VERTEX_PSO)) return 0;
+  // An older Unix runtime must fail instead of ignoring the linked function.
+  if (WINE_UNIX_CALL(unix_mtldevice_newrenderpso_stagein, &params)) return 0;
+  if (err_out) *err_out = params.pipeline.ret_error;
+  return params.pipeline.ret_pso;
 }
 
 WINEMETAL_API obj_handle_t

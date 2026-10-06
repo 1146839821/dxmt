@@ -964,6 +964,9 @@ struct WMTMSCGeometryPipelineInfo {
 
 WINEMETAL_API obj_handle_t
 MTLDevice_newRenderPipelineState(obj_handle_t device, const struct WMTRenderPipelineInfo *info, obj_handle_t *err_out);
+WINEMETAL_API obj_handle_t MTLDevice_newRenderPipelineStateWithStageIn(
+    obj_handle_t device, const struct WMTRenderPipelineInfo *info, obj_handle_t stage_in_function,
+    obj_handle_t *err_out);
 
 WINEMETAL_API obj_handle_t MTLDevice_newMeshRenderPipelineState(
     obj_handle_t device, const struct WMTMeshRenderPipelineInfo *info, obj_handle_t *err_out

@@ -682,8 +682,7 @@ MTLMeshRenderPipelineDescriptor ()
 #endif
 
 static NTSTATUS
-_MTLDevice_newRenderPipelineState(void *obj) {
-  struct unixcall_mtldevice_newrenderpso *params = obj;
+CreateRenderPipelineState(struct unixcall_mtldevice_newrenderpso *params, obj_handle_t stage_in_function) {
   const struct WMTRenderPipelineInfo *info = params->info.ptr;
   MTLRenderPipelineDescriptor *descriptor = [[MTLRenderPipelineDescriptor alloc] init];
 
@@ -748,6 +747,12 @@ _MTLDevice_newRenderPipelineState(void *obj) {
   }
 
   descriptor.vertexFunction = (id<MTLFunction>)info->vertex_function;
+  if (stage_in_function) {
+    MTLLinkedFunctions *linked = [[MTLLinkedFunctions alloc] init];
+    linked.functions = @[(id<MTLFunction>)stage_in_function];
+    descriptor.vertexLinkedFunctions = linked;
+    [linked release];
+  }
   descriptor.fragmentFunction = (id<MTLFunction>)info->fragment_function;
   descriptor.supportIndirectCommandBuffers = info->support_indirect_command_buffers;
 
@@ -768,6 +773,18 @@ _MTLDevice_newRenderPipelineState(void *obj) {
   }
   [descriptor release];
   return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLDevice_newRenderPipelineState(void *obj) {
+  return CreateRenderPipelineState(obj, 0);
+}
+
+static NTSTATUS
+_MTLDevice_newRenderPipelineStateWithStageIn(void *obj) {
+  struct unixcall_mtldevice_newrenderpso_stagein *params = obj;
+  if (!params->stage_in_function) return STATUS_UNSUCCESSFUL;
+  return CreateRenderPipelineState(&params->pipeline, params->stage_in_function);
 }
 
 static NTSTATUS
@@ -4512,6 +4529,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLDevice_minimumTextureBufferAlignmentForPixelFormat,
     &thunk_DXMTMSCLowerTypedBufferOrigins,
     &thunk_DXMTMSCLowerReductionSamplers,
+    &_MTLDevice_newRenderPipelineStateWithStageIn,
 };
 
 #ifndef DXMT_NATIVE
@@ -4714,5 +4732,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_minimumTextureBufferAlignmentForPixelFormat,
     &thunk_DXMTMSCLowerTypedBufferOrigins,
     &thunk_DXMTMSCLowerReductionSamplers,
+    &_MTLDevice_newRenderPipelineStateWithStageIn,
 };
 #endif

@@ -28,6 +28,7 @@ enum winemetal_unixcall {
   unix_sparsemappingqueue_barrierbeforeresourcestate = 166,
   unix_mtlcommandqueue_commandbuffer_with_error_options = 167,
   unix_mtltexture_tailsizeinbytes = 168,
+  unix_mtldevice_newrenderpso_stagein = 198,
   unix_mtldevice_supportsraytracing = 170,
   unix_mtldevice_accelerationstructuresizes,
   unix_mtldevice_newaccelerationstructure,
@@ -212,6 +213,11 @@ struct unixcall_mtldevice_newmeshrenderpso {
   struct WMTConstMemoryPointer info;
   obj_handle_t ret_error;
   obj_handle_t ret_pso;
+};
+
+struct unixcall_mtldevice_newrenderpso_stagein {
+  struct unixcall_mtldevice_newrenderpso pipeline;
+  obj_handle_t stage_in_function;
 };
 
 struct unixcall_mtldevice_newmsctessellationpso {

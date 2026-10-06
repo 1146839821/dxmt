@@ -1,5 +1,16 @@
 # Task Analysis
 
+## Linked stage-in runtime continuation
+
+Baseline 3cb11e82, clean. Implement the missing ordinary render PSO linked
+vertex-function entry before changing shader compilation/binding. Keep the old
+pipeline-info layout and Unix call 34 unchanged. Append call 198 with a fixed
+wrapper containing the old parameters and a function handle; both PE widths
+share this fixed-width ABI. Unsupported older runtimes return no PSO rather
+than ignoring linkage. Risk: thunk index/layout mismatch and unbalanced ObjC
+ownership. Validation: normal/no-private builds and native regression; linking
+and dynamic-fetch GPU tests remain required before enabling this in D3D12.
+
 Baseline 1e507117, feat/d3d12-1, clean. Intended next gap: MSC indirect VB
 updates, preserving address, size, stride, instance step and submission lifetime.
 Hypothesis: the existing resolver could extend IB updates to VB records.
@@ -59,3 +70,30 @@ prove compatibility of a custom dynamic-record ABI. This changes the next
 implementation from resolver admission to dynamic-fetch runtime integration.
 No source/capability change or GPU acceptance in this investigation, no push.
 VB updates remain rejected. Broader typed indirect and FL12_0 goals remain open.
+
+## Linked-function runtime result
+
+Added MTLDevice_newRenderPipelineStateWithStageIn and its WMT C++ wrapper. A
+new fixed-width transport wraps the existing pipeline parameters with one
+function handle. Call 198 is appended to both Unix dispatch tables; call 34 and
+WMTRenderPipelineInfo are unchanged. The shared native factory installs a
+balanced MTLLinkedFunctions object on vertexLinkedFunctions when requested.
+The existing factory supplies a zero handle and retains its old behavior.
+
+The PE wrapper checks the existing MSC capability query for native renderer bit
+27 before issuing call 198. This bit describes renderer entry availability,
+not a libmetalirconverter symbol or qualified D3D capability. MSC-aware older
+Unix runtimes without the bit fail before the new dispatch. Missing stage-in
+handles and failed dispatch return no PSO; no unlinked fallback is created.
+
+Both reconfigured full builds passed, as did existing native regressions 12/12
+per variant. Source self-review checked table append positions, unchanged old
+layout/call, output initialization, capability gate and ObjC ownership balance.
+git diff --check passed. These tests do not create a linked stage-in PSO; no GPU
+dynamic stride correctness or PE32 runtime compatibility is claimed. Logs are
+linked-stagein-final-build*.log under the reconciliation cache.
+
+Remaining implementation: verify the synthesized ordinary stage-in record ABI,
+connect converter flag/artifact/cache identity and D3D12 PSO selection, bind
+dynamic vertex records and extend the indirect resolver, then focused readback.
+The original dynamic stride requirement remains incomplete.

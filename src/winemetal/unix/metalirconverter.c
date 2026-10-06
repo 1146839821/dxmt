@@ -593,7 +593,8 @@ dxmt_msc_get_capabilities(struct dxmt_msc_capabilities *capabilities) {
     capabilities->ir_version_minor = IR_VERSION_MINOR;
     capabilities->ir_version_patch = IR_VERSION_PATCH;
   }
-  capabilities->optional_symbols = g_msc_available ? g_msc_optional_symbols : 0;
+  capabilities->optional_symbols = g_msc_available ?
+      g_msc_optional_symbols | DXMT_MSC_RUNTIME_SYMBOL_LINKED_VERTEX_PSO : 0;
   capabilities->ret = g_msc_available ? DXMT_MSC_SUCCESS : DXMT_MSC_ERROR_UNAVAILABLE;
   return capabilities->ret;
 }

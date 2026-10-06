@@ -1131,6 +1131,12 @@ public:
     return Reference<RenderPipelineState>(MTLDevice_newRenderPipelineState(handle, &info, &error.handle));
   }
 
+  Reference<RenderPipelineState>
+  newRenderPipelineStateWithStageIn(const WMTRenderPipelineInfo &info, const Function &stage_in, Error &error) {
+    return Reference<RenderPipelineState>(
+        MTLDevice_newRenderPipelineStateWithStageIn(handle, &info, stage_in.handle, &error.handle));
+  }
+
   Reference<ComputePipelineState>
   newComputePipelineState(const WMTComputePipelineInfo &info, Error &error) {
     return Reference<ComputePipelineState>(MTLDevice_newComputePipelineState(handle, &info, &error.handle));
