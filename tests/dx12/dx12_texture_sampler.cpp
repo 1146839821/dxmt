@@ -1105,8 +1105,10 @@ main(int argc, char **argv) {
       std::cout << "dynamic reduction unsupported consumer rejected without fallback\n";
     } else {
       device->CreateShaderResourceView(nullptr, &srv_desc, resource_cpu);
+      std::vector<WMT::Reference<WMT::Resource>> submission_resources;
       if (!sampler_accepted || !observed_reduction || native_list->ResolvePendingDescriptorUses(
-              compute_encoder, [](obj_handle_t, WMTResourceUsage, WMTRenderStages) {}, observed_reduction)) goto cleanup;
+              compute_encoder, submission_resources,
+              [](obj_handle_t, WMTResourceUsage, WMTRenderStages) {}, observed_reduction)) goto cleanup;
       std::cout << "dynamic reduction null texture defaults rejected\n";
     }
     result = 0;

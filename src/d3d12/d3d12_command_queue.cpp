@@ -362,6 +362,9 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     std::vector<std::shared_ptr<D3D12TypedOriginSubmissionBinding>> typed_origin_bindings;
     std::vector<std::shared_ptr<D3D12MinMaxSubmissionBinding>> minmax_bindings;
     std::vector<Rc<Sampler>> sampler_refs;
+    // Live descriptor observations belong to this execution, not the reusable
+    // recording encoder. CompletionThread destroys them after GPU completion.
+    std::vector<WMT::Reference<WMT::Resource>> descriptor_resource_refs;
     std::vector<std::vector<Rc<BufferAllocation>>> indirect_root_buffers;
     HANDLE latency_waitable = nullptr;
   };
@@ -1408,7 +1411,7 @@ public:
            bool sampler_reduction = false;
            if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs, &sampler_reduction) ||
                !pCommandList->ResolvePendingDescriptorUses(
-                   data,
+                   data, submission.descriptor_resource_refs,
                    [&](obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages stages) {
                      WMT::Resource native_resource;
                      native_resource.handle = resource;
@@ -1453,7 +1456,7 @@ public:
           bool sampler_reduction = false;
           if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs, &sampler_reduction) ||
               !pCommandList->ResolvePendingDescriptorUses(
-                  data,
+                  data, submission.descriptor_resource_refs,
                   [&](obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages) {
                     WMT::Resource native_resource;
                     native_resource.handle = resource;

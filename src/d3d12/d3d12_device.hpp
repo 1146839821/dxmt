@@ -79,6 +79,7 @@ public:
   virtual void CommitResourceStates() = 0;
   virtual bool ResolvePendingDescriptorUses(
       EncoderData *encoder,
+      std::vector<WMT::Reference<WMT::Resource>> &submission_resources,
       const std::function<void(obj_handle_t, WMTResourceUsage, WMTRenderStages)> &use_resource,
       bool sampler_reduction = false
   ) = 0;

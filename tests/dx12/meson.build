@@ -175,7 +175,7 @@ test('dx12-fl12-gate-unit', find_program('python3', native: true),
 )
 
 dx12_airconv_firstbit = executable('dx12_airconv_firstbit', 'dx12_airconv_firstbit.cpp',
-  dependencies: [ d3d12_dep ],
+  dependencies: [ d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep ],
 )
 
 dx12_shader_runtime = executable('dx12_shader_runtime', 'dx12_shader_runtime.cpp',

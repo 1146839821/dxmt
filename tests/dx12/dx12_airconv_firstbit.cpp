@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
+#include "d3d12_device.hpp"
 
 #include <array>
 #include <cstdint>
@@ -47,7 +48,10 @@ D3D12_RESOURCE_DESC BufferDescription(UINT64 size) {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+  if (argc != 1 && (argc != 2 || std::strcmp(argv[1], "--repeat") != 0))
+    return 2;
+  const unsigned repetitions = argc == 2 ? 32 : 1;
   static constexpr char source[] = R"HLSL(
 RWStructuredBuffer<uint> output : register(u0);
 
@@ -205,10 +209,30 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
   barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
   list->ResourceBarrier(1, &barrier);
   list->CopyBufferRegion(readback, 0, output, 0, sizeof(UINT) * expected.size());
+  // Restore the recorded entry state so replay is a valid D3D12 state cycle.
+  barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  list->ResourceBarrier(1, &barrier);
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
   command_lists[0] = list;
-  queue->ExecuteCommandLists(1, command_lists);
+  {
+    auto recording_references = [&] {
+      size_t count = 0;
+      auto *native_list = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list);
+      for (auto *encoder = native_list->entry; encoder; encoder = encoder->next)
+        count += encoder->resource_refs.size();
+      return count;
+    };
+    const auto recorded = recording_references();
+    for (unsigned execution = 0; execution < repetitions; ++execution) {
+      queue->ExecuteCommandLists(1, command_lists);
+      if (recording_references() != recorded) {
+        std::cerr << "queue execution mutated recording resource ownership\n";
+        goto cleanup;
+      }
+    }
+  }
   if (!CheckHR("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))) ||
       !CheckHR("Signal", queue->Signal(fence, 1)))
     goto cleanup;
@@ -248,5 +272,7 @@ cleanup:
   Release(shader_blob);
   FreeLibrary(compiler);
   std::cout << (passed ? "AIRCONV firstbit_shi vector test passed\n" : "AIRCONV firstbit_shi vector test failed\n");
+  if (passed && repetitions > 1)
+    std::cout << repetitions << " closed-list executions preserved recording ownership\n";
   return passed ? 0 : 1;
 }

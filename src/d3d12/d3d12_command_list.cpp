@@ -3495,6 +3495,7 @@ public:
   bool
   ResolvePendingDescriptorUses(
       EncoderData *encoder,
+      std::vector<WMT::Reference<WMT::Resource>> &submission_resources,
       const std::function<void(obj_handle_t, WMTResourceUsage, WMTRenderStages)> &use_resource,
       bool sampler_reduction
   ) final {
@@ -3562,7 +3563,9 @@ public:
                   if (retained_resources.insert(resource).second) {
                     WMT::Resource native_resource;
                     native_resource.handle = resource;
-                    encoder->resource_refs.emplace_back(native_resource);
+                    // Each execution owns its live observations independently.
+                    // Never append them to persistent recording-time state.
+                    submission_resources.emplace_back(native_resource);
                   }
                   use_resource(resource, usage, render_stages);
                 }
