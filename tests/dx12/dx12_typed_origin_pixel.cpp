@@ -26,7 +26,7 @@ enum class DrawMode { Typed, RejectHiddenVS, Ordinary, RejectMinMaxSwitch, Verte
 static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
     const std::vector<unsigned char> &ps, const std::vector<unsigned char> &ordinary,
     bool live, bool pixel_visibility, DrawMode mode = DrawMode::Typed,
-    const std::vector<unsigned char> *ordinary_vs = nullptr) {
+    const std::vector<unsigned char> *ordinary_vs = nullptr, bool indirect = false) {
   const bool reject_typed_vs = mode == DrawMode::RejectHiddenVS;
   const bool reject_minmax_switch = mode == DrawMode::RejectMinMaxSwitch;
   const bool ordinary_only = mode == DrawMode::Ordinary;
@@ -182,7 +182,29 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
   list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &rect);
   if (reject_minmax_switch && !SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", L"Z:\\not-used-after-combination-rejection"))
     return false;
-  list->DrawInstanced(3, 1, 0, 0);
+  OwnedCOM<ID3D12CommandSignature> signature;
+  OwnedCOM<ID3D12Resource> arguments;
+  if (indirect) {
+    D3D12_INDIRECT_ARGUMENT_DESC updates[2] = {};
+    updates[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+    updates[0].Constant = {ordinary_only ? 0u : 1u, 0, 1};
+    updates[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+    struct Payload { UINT constant; D3D12_DRAW_ARGUMENTS draw; } payload = {0xabc123, {3, 1, 0, 0}};
+    D3D12_COMMAND_SIGNATURE_DESC desc = {sizeof(Payload), 2, updates, 0};
+    ID3D12CommandSignature *raw = nullptr;
+    if (!Check(device->CreateCommandSignature(&desc, root.get(), IID_PPV_ARGS(&raw)), "indirect signature")) return false;
+    signature.reset(raw);
+    arguments = buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false);
+    if (!arguments) return false;
+    void *mapped = nullptr;
+    if (!Check(arguments->Map(0, nullptr, &mapped), "indirect arguments")) return false;
+    std::memcpy(mapped, &payload, sizeof(payload)); arguments->Unmap(0, nullptr);
+    // A stale inherited constant must not accidentally satisfy the oracle.
+    list->SetGraphicsRoot32BitConstant(ordinary_only ? 0 : 1, 0, 0);
+    list->ExecuteIndirect(signature.get(), 1, arguments.get(), 0, nullptr, 0);
+  } else {
+    list->DrawInstanced(3, 1, 0, 0);
+  }
   if (reject_typed_vs || reject_minmax_switch) {
     const bool rejected = FAILED(list->Close());
     if (rejected) std::puts(reject_typed_vs ?
@@ -241,8 +263,9 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
 }
 
 int wmain(int argc, wchar_t **argv) {
+  const bool indirect = argc == 8 && !wcscmp(argv[7], L"--stages-indirect");
   const bool embedded = argc == 8 && !wcscmp(argv[7], L"--stages-embedded");
-  const bool stages = argc == 8 && (!wcscmp(argv[7], L"--stages") || !wcscmp(argv[7], L"--stages-auto") || embedded);
+  const bool stages = argc == 8 && (!wcscmp(argv[7], L"--stages") || !wcscmp(argv[7], L"--stages-auto") || embedded || indirect);
   const bool minmax_switch = argc == 7 && !wcscmp(argv[6], L"--minmax-switch");
   const bool automatic = (argc == 7 && (!wcscmp(argv[6], L"--auto") || minmax_switch)) ||
       (stages && !wcscmp(argv[7], L"--stages-auto"));
@@ -261,10 +284,11 @@ int wmain(int argc, wchar_t **argv) {
     if (!Load(argv[6], vertex_ps)) return 1;
     for (bool live : {false, true}) for (bool disjoint : {false, true}) {
       if (embedded && (live || disjoint)) continue;
-      if (!Run(device.get(), typed_vs, vertex_ps, ordinary, live, disjoint, DrawMode::VertexOnly, &vs) ||
-          !Run(device.get(), typed_vs, ps, ordinary, live, disjoint, DrawMode::Combined, &vs)) return 1;
+      if (!Run(device.get(), typed_vs, vertex_ps, ordinary, live, disjoint, DrawMode::VertexOnly, &vs, indirect) ||
+          !Run(device.get(), typed_vs, ps, ordinary, live, disjoint, DrawMode::Combined, &vs, indirect)) return 1;
     }
     std::puts(embedded ? "typed-origin matching embedded VS/PS GPU PASS (8 draws)" :
+        indirect ? "typed-origin indirect VS/PS GPU PASS (32 draws)" :
         "typed-origin native VS/PS GPU PASS (32 draws)"); return 0;
   }
   if (minmax_switch) return Run(device.get(), vs, ps, ordinary, false, false, DrawMode::RejectMinMaxSwitch) ? 0 : 1;

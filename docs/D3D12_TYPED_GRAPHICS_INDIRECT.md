@@ -114,3 +114,32 @@ payload ownership and old caller default behavior. git diff --check passed.
 Evidence logs retained as typed-wire-*.log in the reconciliation cache. Next
 required work is a focused typed split-stage direct/indexed indirect readback
 fixture, before expanding the full graphics matrix or declaring qualification.
+
+## Focused public GPU readback
+
+Baseline aeeb4bb0, clean. Extended the existing typed pixel fixture with
+--stages-indirect: a root constant update precedes DRAW in its command signature.
+The inherited constant is deliberately wrong, so the oracle must observe the
+resolver update. Reuses existing output guards, exact render-target readback,
+ordinary pipeline restoration and four submission replays with descriptor
+updates. No new full matrix or production behavior change.
+
+Final normal and no-private runs both exit 0, each with 32 typed indirect draws
+and their ordinary restoration draws: VS-only/combined VS+PS, static/volatile,
+shared/disjoint descriptor tables and repeated submissions. This exercises real
+resolver Metal compilation and split-stage TLAB consumption on the GPU, not only
+API creation. Focused probe builds pass in both configurations; self-review
+checked signature/argument layout, correct root parameter, intentionally wrong
+inherited value and retained argument/signature objects. git diff --check passes.
+
+Initial normal and no-private attempts used old DLLs and failed at the old
+PreDraw rejection. These failures are retained, not treated as implementation
+or GPU successes. After both builds were terminal, app-local PE libraries and
+matching Unix winemetal libraries were staged in cache-only overlays and rerun.
+Final logs: typed-indirect-final-normal.log and typed-indirect-final-no-private.log
+under /Users/zhangbo/.cache/dxmt-reconciliation.ZLDvwE; load traces show app-local
+D3D12. No game directory or prefix DLL deployment, process restart or push.
+
+Remaining: DRAW_INDEXED, CBV/SRV/UAV root updates, multi-command/count contracts,
+broader lifetime/provenance and companion/VB/IB implementation. This focused
+DRAW evidence does not qualify complete typed graphics indirect or FL12_0.
