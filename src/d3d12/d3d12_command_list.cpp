@@ -1858,8 +1858,9 @@ public:
 
   uint64_t
   PopulateMSCVertexBufferTable(
-      WMTRenderStages stages = WMTRenderStageObject | WMTRenderStageMesh, uint32_t slot_mask = D3D12MSCVertexBufferMask) {
-    constexpr uint32_t count = D3D12MSCVertexBufferCount;
+      WMTRenderStages stages = WMTRenderStageObject | WMTRenderStageMesh,
+      uint32_t slot_mask = D3D12MSCCompanionVertexBufferMask,
+      uint32_t count = D3D12MSCCompanionVertexBufferCount) {
     auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(D3D12MSCVertexBufferRecord) * count, 16);
     if (!mapped) {
       FailRecording(__func__, "GPU heap allocation failed");
@@ -1927,7 +1928,8 @@ public:
       if (emulation || pso_graphics_->msc_dynamic_vertex_fetch) {
         auto offset = PopulateMSCVertexBufferTable(emulation ?
             WMTRenderStageObject | WMTRenderStageMesh : WMTRenderStageVertex,
-            emulation ? D3D12MSCVertexBufferMask : slot_mask);
+            emulation ? D3D12MSCCompanionVertexBufferMask : slot_mask,
+            emulation ? D3D12MSCCompanionVertexBufferCount : D3D12MSCVertexBufferCount);
         if (recording_failed_)
           return;
         auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
@@ -6198,7 +6200,7 @@ public:
         for (const auto &update : sig->StateUpdates)
           if (update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW)
             inherited_mask &= ~(1u << update.VertexBuffer.Slot);
-        const auto offset = PopulateMSCVertexBufferTable(WMTRenderStageVertex, inherited_mask);
+        const auto offset = PopulateMSCVertexBufferTable(WMTRenderStageVertex, inherited_mask, D3D12MSCVertexBufferCount);
         if (recording_failed_) return;
         cmd->msc_vertex_records = allocator_->gpu_heap_buffer_address_ + offset;
         if (sig->UpdateVertexBuffers) {

@@ -51,7 +51,8 @@ int main(int argc, char **argv) {
       strcmp(argv[3], "--indirect-root-constants") == 0 || indirect_fragment || indirect_partial);
   const bool root_srv = argc == 4 && (strcmp(argv[3], "--root-srv") == 0 || strcmp(argv[3], "--indirect-root-srv") == 0);
   const bool root_uav = argc == 4 && (strcmp(argv[3], "--root-uav") == 0 || strcmp(argv[3], "--indirect-root-uav") == 0);
-  const bool indirect_vb = argc == 4 && strcmp(argv[3], "--indirect-vb") == 0;
+  const bool slot31 = argc == 4 && (strcmp(argv[3], "--slot31") == 0 || strcmp(argv[3], "--indirect-vb-slot31") == 0);
+  const bool indirect_vb = argc == 4 && (strcmp(argv[3], "--indirect-vb") == 0 || strcmp(argv[3], "--indirect-vb-slot31") == 0);
   const bool indirect = argc == 4 && strncmp(argv[3], "--indirect-", 11) == 0;
   const bool textured_root_cbv = argc == 4 && (strcmp(argv[3], "--texture-root-cbv") == 0 ||
       strcmp(argv[3], "--indirect-texture-root-cbv") == 0);
@@ -68,7 +69,7 @@ int main(int argc, char **argv) {
   const bool get_attribute_unsupported = argc == 4 && strcmp(argv[3], "--get-attribute-unsupported") == 0;
   const bool vrs_unsupported = argc == 4 && strcmp(argv[3], "--vrs-unsupported") == 0;
   const bool stencil_ref_unsupported = argc == 4 && strcmp(argv[3], "--stencil-ref-unsupported") == 0;
-  const bool padded_stride = (argc == 4 && strcmp(argv[3], "--padded-stride") == 0) || indirect_vb;
+  const bool padded_stride = (argc == 4 && strcmp(argv[3], "--padded-stride") == 0) || indirect_vb || slot31;
   if ((argc == 4 && !textured && !root_cbv && !root_constants && !root_srv &&
        !root_uav && !textured_root_cbv && !logic_op && !stencil && !barycentrics &&
        !wave_quad_ops && !int64_ops && !native16_ops && !helper_lane && !helper_lane_derivative &&
@@ -193,9 +194,9 @@ int main(int argc, char **argv) {
   D3D12_DESCRIPTOR_HEAP_DESC resource_heap_desc = {};
   D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_desc = {};
   D3D12_INPUT_ELEMENT_DESC input_layout[] = {
-      {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0,
+      {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, slot31 ? 31u : 0u, 0,
        D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-      {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 8,
+      {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, slot31 ? 31u : 0u, 8,
        D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
   };
   D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc = {};
@@ -718,7 +719,7 @@ int main(int argc, char **argv) {
   list->IASetPrimitiveTopology(geometry_adjacency
                                    ? D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ
                                    : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-  if (!indirect_vb) list->IASetVertexBuffers(0, 1, &vertex_view);
+  if (!indirect_vb) list->IASetVertexBuffers(slot31 ? 31 : 0, 1, &vertex_view);
   if (geometry_indexed || indirect_indexed)
     list->IASetIndexBuffer(&index_view);
   list->OMSetRenderTargets(1, &rtv_handle, FALSE, stencil ? &dsv_handle : nullptr);
@@ -739,7 +740,7 @@ int main(int argc, char **argv) {
         D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW : D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
     if (indirect_vb) {
       arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW;
-      arguments[0].VertexBuffer.Slot = 0;
+      arguments[0].VertexBuffer.Slot = slot31 ? 31 : 0;
     }
     if (root_constants) {
       arguments[0].Constant.RootParameterIndex = 0;
@@ -936,7 +937,9 @@ int main(int argc, char **argv) {
                 : helper_lane ? "helper lane graphics"
                 : textured_root_cbv  ? "root CBV textured graphics"
                 : textured           ? "textured graphics"
+                : indirect_vb && slot31 ? "indirect VB slot31 padded-stride graphics"
                 : indirect_vb        ? "indirect VB padded-stride graphics"
+                : slot31             ? "slot31 padded-stride graphics"
                 : padded_stride      ? "padded-stride graphics"
                                      : "graphics")
             << " readback passed: 0x" << std::hex << pixel << std::dec << "\n";

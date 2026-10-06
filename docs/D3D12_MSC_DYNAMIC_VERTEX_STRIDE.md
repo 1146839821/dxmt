@@ -256,3 +256,61 @@ The MSC integration skill guided distinct record field order, binding point
 and indirect resource residency; source review checked per-command output,
 updated-slot exclusion and unchanged compute/AIRCONV admission/order. No broad
 D3D capability or full-game claim is justified by this increment.
+
+## IA slot 31 continuation (baseline 32f244ea)
+
+Hypothesis: ordinary separate stage-in can fetch slot 31 from a 32-entry record
+table, independent of Metal's direct buffer-index limit. Evidence: stage-in
+input layout already validates slots below 32, native synthesis forwards the
+slot unchanged, and only the dynamic table/admission count rejects slot 31.
+Expected effect: ordinary direct/indirect MSC fetch covers all 32 D3D12 IA slots.
+Risk: bit-31 mask handling, per-command table stride and accidentally changing
+companion behavior. Validation: old PSO rejection, matched shader slot-31 direct
+and indirect GPU readback on both variants, plus host/build regression.
+Preserve companion count and behavior; element-count limits are separate.
+
+### IA slot 31 result
+
+Before the production change, the new direct slot-31 probe failed at PSO creation
+with E_NOTIMPL (0x80004001). Ordinary MSC count now uses the D3D12 32-slot constant;
+per-command records consequently use 512 bytes. Shared count drives admission,
+PSO slot masks, inherited tables and MSL copies. Companion table count/mask remain
+31/0x7fffffff and are explicitly selected for the unchanged object/mesh path.
+No shift by 32 is used to construct masks.
+
+Both reconfigured full builds passed and native tests passed 12/12 each. The
+--slot31 and --indirect-vb-slot31 GPU probes passed both variants, pixel
+0xff0000ff plus occlusion/timestamp checks. Layout POSITION and COLOR both use
+slot 31, stride 64 and address offset 16. The indirect probe supplies VB only via
+GPU arguments and retains the second non-drawing stride-24 isolation command.
+This proves the tested runtime synthesis/link/fetch chain for the highest IA
+slot, not 32 input attributes or private/companion GPU qualification.
+
+Slot-0 indirect regression passed normal. No-private produced the expected red
+pixel but timestamp_end was zero, so that run is a failure, not a pass. This
+matches the symptom of the preceding un-attributed query issue but does not
+establish the same cause. Retained logs slot31-*.log in reconciliation cache.
+No prefix/game writes, capability promotion or push.
+
+### Slot 31 final self-review
+
+Standards: zero documented breaches; one nonblocking configuration-clump
+heuristic remains. The private table builder's stages/mask/count are coordinated
+at both current ordinary call sites and its companion defaults remain explicit;
+bundling these parameters is optional future refactoring, not a current ABI bug.
+Removed the unused ordinary all-slots mask constant.
+
+Spec: zero actionable findings after reviewing the four completed GPU logs.
+The initial review's pending-GPU finding was withdrawn because that snapshot
+preceded actual verification. Independent source review checked unsigned bit31,
+512-byte ordinary output, inherited updated-slot exclusion, and unchanged
+companion count/mask. Final full builds and host regressions passed both (12/12).
+Final direct probes passed both and indirect no-private passed. Final indirect
+normal initially failed timestamp_end=0 despite red readback, then a separate
+serial retry passed every fixture check. Both logs are retained: this is not a
+claim of clean repeated-run query reliability or attribution of the failure.
+
+MSC compilation/integration skills guided the distinction between layout slots,
+native Metal buffer indices and separate stage-in records. No native converter
+or companion API change was needed. Full private/instanced/indexed qualification
+and the broader FL goal remain incomplete.
