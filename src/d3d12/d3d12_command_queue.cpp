@@ -168,7 +168,7 @@ static bool ReplayPrivateRender(MTLD3D12Device *device, WMT::RenderCommandEncode
     std::vector<PrivateRenderReplayCommand> replay;
     struct IndirectBinding { obj_handle_t buffer; uint64_t offset; };
     std::unordered_map<const void *, IndirectBinding> indirect_bindings;
-    const D3D12MinMaxGraphicsVariant *active_variant = nullptr;
+    const D3D12PrivateGraphicsPipeline *active_variant = nullptr;
     for (auto *node = reinterpret_cast<wmtcmd_base *>(&data->cmd_head); node;
          node = static_cast<wmtcmd_base *>(node->next.get())) {
       if (auto marker = origin_markers.find(node); marker != origin_markers.end()) {
@@ -177,19 +177,33 @@ static bool ReplayPrivateRender(MTLD3D12Device *device, WMT::RenderCommandEncode
         const auto hr = MaterializeD3D12TypedOriginDispatch(device, *marker->second, binding);
         if (FAILED(hr)) { ERR("Typed-origin render materialization failed HRESULT=", hr); return false; }
         origin_bindings.push_back(binding);
-        active_variant = nullptr;
+        active_variant = marker->second->graphics_variant;
+        const bool emulation = active_variant->geometry || active_variant->tessellation;
+        const auto stages = emulation ? WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment :
+            WMTRenderStageVertex | WMTRenderStageFragment;
         for (const auto &use : binding->resources)
-          encoder.useResource(use.resource, use.usage, WMTRenderStageVertex | WMTRenderStageFragment);
+          encoder.useResource(use.resource, use.usage, stages);
         PrivateRenderReplayCommand pso = {};
         pso.pso.type = WMTRenderCommandSetPSO; pso.pso.pso = marker->second->graphics_variant->pso.handle;
         replay.push_back(pso);
-        for (auto type : {WMTRenderCommandSetVertexBuffer, WMTRenderCommandSetFragmentBuffer}) {
+        const auto set_buffer = [&](WMTRenderCommandType type, uint32_t index, uint64_t offset = 0) {
           PrivateRenderReplayCommand set = {};
           set.buffer.type = type; set.buffer.buffer = binding->buffer.handle;
-          set.buffer.index = DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT;
-          set.buffer.offset = type == WMTRenderCommandSetFragmentBuffer ? binding->fragment_argument_offset : 0;
+          set.buffer.index = index; set.buffer.offset = offset;
           replay.push_back(set);
+        };
+        if (emulation) {
+          set_buffer(WMTRenderCommandSetObjectBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
+          set_buffer(WMTRenderCommandSetMeshBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
+          if (active_variant->tessellation) {
+            set_buffer(WMTRenderCommandSetObjectBuffer, DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT);
+            set_buffer(WMTRenderCommandSetMeshBuffer, DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT);
+          }
+        } else {
+          set_buffer(WMTRenderCommandSetVertexBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
         }
+        set_buffer(WMTRenderCommandSetFragmentBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT,
+            binding->fragment_argument_offset);
         origin_markers.erase(marker);
         continue;
       }

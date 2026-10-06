@@ -1,5 +1,23 @@
 # FL12_0 closure checkpoint
 
+## Typed geometry/tessellation runtime update (2026-10-06)
+
+Globally offset typed-origin records now drive companion GS/HS/DS PSOs and
+object/mesh/HS-DS argument bindings. Replay uses private reflection configs for
+direct/indexed draws. Absent-PS depth-only companion pipelines are supported
+without a fabricated fragment shader. Both builds pass 672 typed/mixed-stage
+emulation depth draws plus ordinary restoration, 128 ordinary controls, 400
+existing native typed draws plus restoration, and existing MinMax geometry/
+tessellation fragment-stage regressions. See `D3D12_TYPED_ORIGIN_EMULATION.md`.
+
+This supersedes the pre-raster runtime blocker below only within the qualified
+depth-only triangle scope. Typed emulation PS, broader topology/format/view/
+provenance/lifetime, indirect/SO/mesh and complete matrices remain open. Static
+no-reread remains source-only evidence. No feature-level/capability promotion,
+game benchmark or fresh ROTTR acceptance. Four production workstreams and seven
+complete GPU categories remain open. Next priority is the user-requested audit
+of the 17 divergent `feat/d3d12` commits, especially residency reconciliation.
+
 ## Typed pre-raster shader ABI update (2026-10-05)
 
 Version-tagged shared origin intervals, compacted CBV sizing, GS/HS/DS DXC

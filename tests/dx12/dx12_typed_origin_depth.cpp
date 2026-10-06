@@ -22,7 +22,7 @@ static bool Load(const wchar_t *path, std::vector<unsigned char> &bytes) {
   CloseHandle(file); return ok;
 }
 
-enum class DepthMode { Typed, Ordinary, DenyVertex };
+enum class DepthMode { Typed, Ordinary, DenyVertex, DenyGeometry, DenyHull, DenyDomain };
 enum class RootVersion { RS10, RS11 };
 struct DepthCase {
   RootVersion root_version;
@@ -30,16 +30,30 @@ struct DepthCase {
   D3D12_SHADER_VISIBILITY table_visibility;
   bool indexed;
   DepthMode mode = DepthMode::Typed;
+  UINT structured_stage = UINT_MAX;
 };
 
-static bool Run(ID3D12Device *device, const std::vector<unsigned char> &typed,
-    const std::vector<unsigned char> &ordinary, const DepthCase &test) {
+enum class FixtureKind { Native, Geometry, Tessellation };
+struct DepthShaders {
+  FixtureKind kind = FixtureKind::Native;
+  struct Stages { std::vector<unsigned char> vertex, geometry, hull, domain; } typed, ordinary, structured;
+};
+
+static bool Run(ID3D12Device *device, const DepthShaders &shaders, const DepthCase &test) {
+  const auto &typed = shaders.typed.vertex, &ordinary = shaders.ordinary.vertex;
+  const bool geometry_fixture = shaders.kind == FixtureKind::Geometry;
+  const bool tessellation_fixture = shaders.kind == FixtureKind::Tessellation;
   const bool legacy = test.root_version == RootVersion::RS10;
   const bool live = test.live;
   const bool indexed = test.indexed;
   const bool vertex_visibility = test.table_visibility == D3D12_SHADER_VISIBILITY_VERTEX;
   const bool ordinary_only = test.mode == DepthMode::Ordinary;
-  const bool deny_vertex = test.mode == DepthMode::DenyVertex;
+  const bool deny_root = test.mode != DepthMode::Typed && test.mode != DepthMode::Ordinary;
+  const bool emulation = geometry_fixture || tessellation_fixture;
+  const UINT table_count = tessellation_fixture ? 3 : geometry_fixture ? 2 : 1;
+  const D3D12_SHADER_VISIBILITY stages[] = {D3D12_SHADER_VISIBILITY_VERTEX,
+      geometry_fixture ? D3D12_SHADER_VISIBILITY_GEOMETRY : D3D12_SHADER_VISIBILITY_HULL,
+      D3D12_SHADER_VISIBILITY_DOMAIN};
   D3D12_COMMAND_QUEUE_DESC qd = {}; ID3D12CommandQueue *raw_queue = nullptr;
   if (!Check(device->CreateCommandQueue(&qd, IID_PPV_ARGS(&raw_queue)), "queue")) return false;
   OwnedCOM<ID3D12CommandQueue> queue(raw_queue);
@@ -67,6 +81,7 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &typed,
   };
   auto first = buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
   auto second = buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+  OwnedCOM<ID3D12Resource> extra_first[2], extra_second[2];
   auto indices = buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
   auto readback = buffer(D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
   if (!first || !second || !indices || !readback) return false;
@@ -80,8 +95,17 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &typed,
   const unsigned short order[] = {0xffff, 0, 1, 2, 0xffff};
   if (!fill(first.get(), a, sizeof(a)) || !fill(second.get(), b, sizeof(b)) ||
       !fill(indices.get(), order, sizeof(order))) return false;
+  for (UINT s = 1; s < table_count; ++s) {
+    extra_first[s - 1] = buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+    extra_second[s - 1] = buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+    const UINT av[] = {0xdeadbeef, 8 + 4 * s, 16 + 4 * s, 32 + 4 * s, 48 + 4 * s, 60 + 4 * s, 0xbadc0ffe};
+    const UINT bv[] = {0xdeadbeef, 48, 64 + 8 * s, 24 + 4 * s, 32 + 4 * s, 40 + 4 * s, 0xbadc0ffe};
+    if (!extra_first[s - 1] || !extra_second[s - 1] ||
+        !fill(extra_first[s - 1].get(), av, sizeof(av)) ||
+        !fill(extra_second[s - 1].get(), bv, sizeof(bv))) return false;
+  }
   auto heap = [&](D3D12_DESCRIPTOR_HEAP_TYPE type, bool visible) {
-    D3D12_DESCRIPTOR_HEAP_DESC desc = {}; desc.Type = type; desc.NumDescriptors = 1;
+    D3D12_DESCRIPTOR_HEAP_DESC desc = {}; desc.Type = type; desc.NumDescriptors = visible ? table_count : 1;
     if (visible) desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ID3D12DescriptorHeap *raw = nullptr;
     Check(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&raw)), "heap");
@@ -95,6 +119,14 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &typed,
   srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER; srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
   srv.Buffer.FirstElement = 1; srv.Buffer.NumElements = 2;
   device->CreateShaderResourceView(first.get(), &srv, cpu);
+  const auto descriptor_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+  for (UINT s = 1; s < table_count; ++s) {
+    auto stage_srv = srv;
+    stage_srv.Buffer.FirstElement = 1 + s;
+    stage_srv.Buffer.NumElements = s == 1 ? 3 : 2;
+    if (test.structured_stage == s) { stage_srv.Format = DXGI_FORMAT_UNKNOWN; stage_srv.Buffer.StructureByteStride = 4; }
+    device->CreateShaderResourceView(extra_first[s - 1].get(), &stage_srv, {cpu.ptr + s * descriptor_size});
+  }
   D3D12_RESOURCE_DESC td = {}; td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
   td.Width = 2; td.Height = td.DepthOrArraySize = td.MipLevels = td.SampleDesc.Count = 1;
   td.Format = DXGI_FORMAT_D32_FLOAT; td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
@@ -107,26 +139,35 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &typed,
   const auto flags = static_cast<D3D12_DESCRIPTOR_RANGE_FLAGS>(D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE |
       (live ? D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE : 0));
   D3D12_DESCRIPTOR_RANGE1 range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, flags, 0};
-  D3D12_ROOT_PARAMETER1 parameters[2] = {};
-  parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-  parameters[0].DescriptorTable = {1, &range};
-  parameters[0].ShaderVisibility = test.table_visibility;
-  parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-  parameters[1].Constants = {3, 0, 1}; parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+  D3D12_ROOT_PARAMETER1 parameters[4] = {};
+  for (UINT s = 0; s < table_count; ++s) {
+    parameters[s].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[s].DescriptorTable = {1, &range};
+    parameters[s].ShaderVisibility = emulation ? stages[s] : test.table_visibility;
+  }
+  parameters[table_count].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  parameters[table_count].Constants = {3, 0, 1};
+  parameters[table_count].ShaderVisibility = emulation ? D3D12_SHADER_VISIBILITY_ALL : D3D12_SHADER_VISIBILITY_VERTEX;
   const auto root_flags = static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS |
-      (deny_vertex ? D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS : 0));
+      (test.mode == DepthMode::DenyVertex ? D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS : 0) |
+      (test.mode == DepthMode::DenyGeometry ? D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS : 0) |
+      (test.mode == DepthMode::DenyHull ? D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS : 0) |
+      (test.mode == DepthMode::DenyDomain ? D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS : 0));
   auto make_root = [&](bool constants_only) {
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC rd = {}; rd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    rd.Desc_1_1 = {constants_only ? 1u : 2u, parameters + (constants_only ? 1 : 0), 0, nullptr, root_flags};
+    rd.Desc_1_1 = {constants_only ? 1u : table_count + 1, parameters + (constants_only ? table_count : 0), 0, nullptr, root_flags};
     D3D12_DESCRIPTOR_RANGE range0 = {range.RangeType, 1, 0, 0, 0};
-    D3D12_ROOT_PARAMETER parameters0[2] = {};
-    parameters0[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameters0[0].DescriptorTable = {1, &range0}; parameters0[0].ShaderVisibility = parameters[0].ShaderVisibility;
-    parameters0[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters0[1].Constants = parameters[1].Constants; parameters0[1].ShaderVisibility = parameters[1].ShaderVisibility;
+    D3D12_ROOT_PARAMETER parameters0[4] = {};
+    for (UINT s = 0; s < table_count; ++s) {
+      parameters0[s].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      parameters0[s].DescriptorTable = {1, &range0}; parameters0[s].ShaderVisibility = parameters[s].ShaderVisibility;
+    }
+    parameters0[table_count].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters0[table_count].Constants = parameters[table_count].Constants;
+    parameters0[table_count].ShaderVisibility = parameters[table_count].ShaderVisibility;
     if (legacy) {
       rd.Version = D3D_ROOT_SIGNATURE_VERSION_1_0;
-      rd.Desc_1_0 = {constants_only ? 1u : 2u, parameters0 + (constants_only ? 1 : 0), 0, nullptr, root_flags};
+      rd.Desc_1_0 = {constants_only ? 1u : table_count + 1, parameters0 + (constants_only ? table_count : 0), 0, nullptr, root_flags};
     }
     ID3DBlob *raw_blob = nullptr;
     Check(D3D12SerializeVersionedRootSignature(&rd, &raw_blob, nullptr), "serialize");
@@ -140,8 +181,17 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &typed,
   D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {}; pd.pRootSignature = root.get();
   const auto &shader = ordinary_only ? ordinary : typed;
   pd.VS = {shader.data(), shader.size()}; // PS deliberately absent, no color attachments.
+  const auto set_emulation = [&](bool ordinary_stages) {
+    const auto &selected = ordinary_stages ? shaders.ordinary : shaders.typed;
+    const auto &gs = !ordinary_stages && test.structured_stage == 1 ? shaders.structured.geometry : selected.geometry;
+    const auto &hs = !ordinary_stages && test.structured_stage == 1 ? shaders.structured.hull : selected.hull;
+    const auto &ds = !ordinary_stages && test.structured_stage == 2 ? shaders.structured.domain : selected.domain;
+    if (geometry_fixture) pd.GS = {gs.data(), gs.size()};
+    if (tessellation_fixture) { pd.HS = {hs.data(), hs.size()}; pd.DS = {ds.data(), ds.size()}; }
+  };
+  set_emulation(ordinary_only);
   pd.SampleMask = UINT_MAX; pd.SampleDesc.Count = 1; pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-  pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  pd.PrimitiveTopologyType = tessellation_fixture ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
   pd.RasterizerState.DepthClipEnable = TRUE;
   pd.DepthStencilState.DepthEnable = TRUE; pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
@@ -149,13 +199,14 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &typed,
   ID3D12PipelineState *raw_pso = nullptr;
   const auto hr = device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&raw_pso));
   OwnedCOM<ID3D12PipelineState> pso(raw_pso);
-  if (deny_vertex && (hr == E_NOTIMPL || hr == E_INVALIDARG)) {
-    std::puts("DEPTH_ORIGIN denied vertex root rejected at PSO PASS (no GPU submission)"); return true;
+  if (deny_root && (hr == E_NOTIMPL || hr == E_INVALIDARG)) {
+    std::printf("DEPTH_ORIGIN denied root mode=%u rejected at PSO PASS (no GPU submission)\n", unsigned(test.mode)); return true;
   }
   if (!Check(hr, "pso")) return false;
   OwnedCOM<ID3D12PipelineState> ordinary_pso;
-  if (!deny_vertex) {
+  if (!deny_root) {
     pd.pRootSignature = ordinary_root.get(); pd.VS = {ordinary.data(), ordinary.size()}; raw_pso = nullptr;
+    set_emulation(true);
     if (!Check(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&raw_pso)), "ordinary pso")) return false;
     ordinary_pso.reset(raw_pso);
   }
@@ -174,9 +225,11 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &typed,
   list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
   list->SetGraphicsRootSignature(root.get()); ID3D12DescriptorHeap *heaps[] = {resources.get()};
   list->SetDescriptorHeaps(1, heaps);
-  if (!ordinary_only) list->SetGraphicsRootDescriptorTable(0, resources->GetGPUDescriptorHandleForHeapStart());
-  list->SetGraphicsRoot32BitConstant(ordinary_only ? 0 : 1, 0xabc123, 0);
-  list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  if (!ordinary_only) for (UINT s = 0; s < table_count; ++s)
+    list->SetGraphicsRootDescriptorTable(s, {resources->GetGPUDescriptorHandleForHeapStart().ptr + s * descriptor_size});
+  list->SetGraphicsRoot32BitConstant(ordinary_only ? 0 : table_count, 0xabc123, 0);
+  list->IASetPrimitiveTopology(tessellation_fixture ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST :
+      D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   D3D12_INDEX_BUFFER_VIEW ibv = {indices->GetGPUVirtualAddress(), sizeof(order), DXGI_FORMAT_R16_UINT};
   if (indexed) list->IASetIndexBuffer(&ibv);
   D3D12_VIEWPORT viewport = {0, 0, 2, 1, 0, 1}; D3D12_RECT rect = {0, 0, 2, 1};
@@ -185,9 +238,9 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &typed,
     if (indexed) list->DrawIndexedInstanced(3, 1, 1, 0, 0); else list->DrawInstanced(3, 1, 0, 0);
   };
   draw();
-  if (deny_vertex) {
+  if (deny_root) {
     const bool rejected = FAILED(list->Close());
-    if (rejected) std::puts("DEPTH_ORIGIN denied vertex root rejected at Close PASS (no GPU submission)");
+    if (rejected) std::printf("DEPTH_ORIGIN denied root mode=%u rejected at Close PASS (no GPU submission)\n", unsigned(test.mode));
     return rejected;
   }
   rect.left = 1; list->RSSetScissorRects(1, &rect);
@@ -204,26 +257,59 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &typed,
     auto current = srv;
     if (replacement) { current.Buffer.FirstElement = 2; current.Buffer.NumElements = 1; }
     if (live) device->CreateShaderResourceView(replacement ? second.get() : first.get(), &current, cpu);
+    if (live) for (UINT s = 1; s < table_count; ++s) {
+      auto stage_srv = srv;
+      stage_srv.Buffer.FirstElement = replacement ? 2 + s : 1 + s;
+      stage_srv.Buffer.NumElements = replacement ? (s == 1 ? 2 : 1) : (s == 1 ? 3 : 2);
+      if (test.structured_stage == s) { stage_srv.Format = DXGI_FORMAT_UNKNOWN; stage_srv.Buffer.StructureByteStride = 4; }
+      device->CreateShaderResourceView(replacement ? extra_second[s - 1].get() : extra_first[s - 1].get(),
+          &stage_srv, {cpu.ptr + s * descriptor_size});
+    }
     if (!execute(list.get(), pass + 1)) return false;
     void *mapped = nullptr;
     if (!Check(readback->Map(0, nullptr, &mapped), "readback")) return false;
     const float *values = reinterpret_cast<const float *>(static_cast<const unsigned char *>(mapped) + 512);
-    const float expected = ordinary_only ? 0.75f : replacement ? 0.25f : 0.15625f;
+    float expected = ordinary_only ? 0.75f : replacement ? 0.25f : 0.15625f;
+    if (emulation && !ordinary_only) {
+      // Independent hand-calculated stage contributions, including OOB zero:
+      // initial VS=40, GS/HS=2*300, DS=4*152; live VS=64,
+      // GS/HS=2*100, DS=4*40. Every stage has a distinct origin/count.
+      expected = (replacement ? (tessellation_fixture ? 424 : 264) :
+          (tessellation_fixture ? 1248 : 640)) / 4096.0f;
+    }
     const bool ok = std::isfinite(values[0]) && std::isfinite(values[1]) &&
         std::fabs(values[0] - expected) < 0.000001f && std::fabs(values[1] - 0.75f) < 0.000001f;
-    std::printf("DEPTH_ORIGIN %s RS=%s live=%u vertex=%u indexed=%u ordinary=%u pass=%u depth=%g,%g expected=%g,0.75\n",
+    std::printf("DEPTH_ORIGIN %s RS=%s live=%u vertex=%u indexed=%u ordinary=%u structured=%u pass=%u depth=%g,%g expected=%g,0.75\n",
         ok ? "PASS" : "FAIL", legacy ? "1.0" : "1.1", live, vertex_visibility, indexed, ordinary_only,
-        pass, values[0], values[1], expected);
+        test.structured_stage, pass, values[0], values[1], expected);
     readback->Unmap(0, nullptr); if (!ok) return false;
   }
   return true;
 }
 
 int wmain(int argc, wchar_t **argv) {
-  const bool automatic = argc == 5 && !wcscmp(argv[4], L"--auto");
-  const bool ordinary_only = argc == 5 && !wcscmp(argv[4], L"--ordinary");
-  if (argc != 4 && !automatic && !ordinary_only) return 1;
-  std::vector<unsigned char> typed, ordinary;
+  DepthShaders shaders;
+  const wchar_t *mode = argc >= 5 ? argv[4] : L"";
+  const bool geometry_fixture = (argc == 7 || argc == 8) && (!wcscmp(mode, L"--geometry") || !wcscmp(mode, L"--geometry-auto") ||
+      !wcscmp(mode, L"--geometry-ordinary"));
+  const bool tessellation_fixture = (argc == 9 || argc == 11) && (!wcscmp(mode, L"--tessellation") || !wcscmp(mode, L"--tessellation-auto") ||
+      !wcscmp(mode, L"--tessellation-ordinary"));
+  const bool automatic = (argc == 5 && !wcscmp(mode, L"--auto")) ||
+      (geometry_fixture && !wcscmp(mode, L"--geometry-auto")) ||
+      (tessellation_fixture && !wcscmp(mode, L"--tessellation-auto"));
+  const bool ordinary_only = (argc == 5 && !wcscmp(mode, L"--ordinary")) ||
+      (geometry_fixture && !wcscmp(mode, L"--geometry-ordinary")) ||
+      (tessellation_fixture && !wcscmp(mode, L"--tessellation-ordinary"));
+  if (argc != 4 && !automatic && !ordinary_only && !geometry_fixture && !tessellation_fixture) return 1;
+  shaders.kind = tessellation_fixture ? FixtureKind::Tessellation : geometry_fixture ? FixtureKind::Geometry : FixtureKind::Native;
+  if (geometry_fixture && (!Load(argv[5], shaders.typed.geometry) || !Load(argv[6], shaders.ordinary.geometry))) return 1;
+  if (tessellation_fixture && (!Load(argv[5], shaders.typed.hull) || !Load(argv[6], shaders.typed.domain) ||
+      !Load(argv[7], shaders.ordinary.hull) || !Load(argv[8], shaders.ordinary.domain))) return 1;
+  const bool mixed_stages = (geometry_fixture && argc == 8) || (tessellation_fixture && argc == 11);
+  if (geometry_fixture && mixed_stages && !Load(argv[7], shaders.structured.geometry)) return 1;
+  if (tessellation_fixture && mixed_stages &&
+      (!Load(argv[9], shaders.structured.hull) || !Load(argv[10], shaders.structured.domain))) return 1;
+  auto &typed = shaders.typed.vertex, &ordinary = shaders.ordinary.vertex;
   if (!Load(argv[1], typed) || !Load(argv[2], ordinary) ||
       !SetEnvironmentVariableW(L"DXMT_TYPED_ORIGIN_DXC_DIRECTORY", automatic || ordinary_only ? nullptr : argv[3]) ||
       !SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr)) return 1;
@@ -232,19 +318,41 @@ int wmain(int argc, wchar_t **argv) {
   OwnedCOM<ID3D12Device> device(raw);
   if (ordinary_only) {
     for (bool indexed : {false, true})
-      if (!Run(device.get(), typed, ordinary,
+      if (!Run(device.get(), shaders,
           {RootVersion::RS11, false, D3D12_SHADER_VISIBILITY_ALL, indexed, DepthMode::Ordinary})) return 1;
     std::puts("ordinary depth-only GPU PASS (8 draws)"); return 0;
   }
+  if (geometry_fixture || tessellation_fixture) {
+    for (bool indexed : {false, true}) {
+      for (bool live : {false, true})
+        if (!Run(device.get(), shaders, {RootVersion::RS11, live, D3D12_SHADER_VISIBILITY_VERTEX, indexed})) return 1;
+      if (!Run(device.get(), shaders, {RootVersion::RS10, true, D3D12_SHADER_VISIBILITY_VERTEX, indexed})) return 1;
+    }
+    for (auto mode : geometry_fixture ? std::vector<DepthMode>{DepthMode::DenyGeometry} :
+        std::vector<DepthMode>{DepthMode::DenyHull, DepthMode::DenyDomain}) {
+      DepthCase pair = {RootVersion::RS11, false, D3D12_SHADER_VISIBILITY_VERTEX, false};
+      if (!Run(device.get(), shaders, pair)) return 1;
+      pair.mode = mode;
+      if (!Run(device.get(), shaders, pair)) return 1;
+    }
+    if (mixed_stages) for (UINT s = 1; s < (tessellation_fixture ? 3u : 2u); ++s) for (bool live : {false, true}) {
+      DepthCase mixed = {RootVersion::RS11, live, D3D12_SHADER_VISIBILITY_VERTEX, true};
+      mixed.structured_stage = s;
+      if (!Run(device.get(), shaders, mixed)) return 1;
+    }
+    std::printf("typed-origin %s depth GPU PASS (direct/indexed, deny pairs, mixed=%u, ordinary restoration)\n",
+        geometry_fixture ? "geometry" : "tessellation", mixed_stages);
+    return 0;
+  }
   for (bool indexed : {false, true}) for (auto visibility : {D3D12_SHADER_VISIBILITY_ALL, D3D12_SHADER_VISIBILITY_VERTEX}) {
     for (bool live : {false, true})
-      if (!Run(device.get(), typed, ordinary, {RootVersion::RS11, live, visibility, indexed})) return 1;
-    if (!Run(device.get(), typed, ordinary, {RootVersion::RS10, true, visibility, indexed})) return 1;
+      if (!Run(device.get(), shaders, {RootVersion::RS11, live, visibility, indexed})) return 1;
+    if (!Run(device.get(), shaders, {RootVersion::RS10, true, visibility, indexed})) return 1;
   }
   DepthCase deny_pair = {RootVersion::RS11, false, D3D12_SHADER_VISIBILITY_VERTEX, false};
   std::puts("DEPTH_ORIGIN DenyVS pair: positive control (same shader/data/draw/root except deny flag)");
-  if (!Run(device.get(), typed, ordinary, deny_pair)) return 1;
+  if (!Run(device.get(), shaders, deny_pair)) return 1;
   deny_pair.mode = DepthMode::DenyVertex;
-  if (!Run(device.get(), typed, ordinary, deny_pair)) return 1;
+  if (!Run(device.get(), shaders, deny_pair)) return 1;
   std::puts("typed-origin native depth-only GPU PASS (52 draws)"); return 0;
 }

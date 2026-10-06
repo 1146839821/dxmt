@@ -1499,10 +1499,13 @@ renderpipelinestate_t IRRuntimeNewGeometryEmulationPipeline(device_t device, con
 
     // Fragment function:
 
-    pFragmentFn = descriptor->fragmentLibrary->newFunction( NS::String::string(descriptor->fragmentFunctionName, NS::UTF8StringEncoding) );
-    if (!pFragmentFn)
+    // DXMT: depth-only D3D12 pipelines have no fragment stage. Keep an
+    // explicitly supplied but invalid fragment library/function fail-closed.
+    if (descriptor->fragmentLibrary)
     {
-        goto exit_fragment_function_error;
+        pFragmentFn = descriptor->fragmentLibrary->newFunction( NS::String::string(descriptor->fragmentFunctionName, NS::UTF8StringEncoding) );
+        if (!pFragmentFn)
+            goto exit_fragment_function_error;
     }
 
     // Assemble the mesh render pipeline descriptor and build the pipeline.
@@ -1526,7 +1529,8 @@ renderpipelinestate_t IRRuntimeNewGeometryEmulationPipeline(device_t device, con
         pRenderPipelineState = device->newRenderPipelineState( pDesc, MTL::PipelineOptionNone, nullptr, error );
     }
 
-    pFragmentFn->release();
+    if (pFragmentFn)
+        pFragmentFn->release();
 
 exit_fragment_function_error:
     pGeometryFn->release();
@@ -1591,10 +1595,12 @@ exit_vertex_function_error:
 
     // Fragment function:
 
-    pFragmentFn = [descriptor->fragmentLibrary newFunctionWithName:[NSString stringWithUTF8String:descriptor->fragmentFunctionName]];
-    if (!pFragmentFn)
+    // DXMT: permit an absent fragment stage, not failed function lookup.
+    if (descriptor->fragmentLibrary)
     {
-        return nil;
+        pFragmentFn = [descriptor->fragmentLibrary newFunctionWithName:[NSString stringWithUTF8String:descriptor->fragmentFunctionName]];
+        if (!pFragmentFn)
+            return nil;
     }
 
     // Assemble the mesh render pipeline descriptor and build the pipeline.
@@ -1655,10 +1661,12 @@ renderpipelinestate_t IRRuntimeNewGeometryTessellationEmulationPipeline(device_t
         goto exit_stagein_function_error;
     }
 
-    pFragmentFn = descriptor->fragmentLibrary->newFunction(NS::String::string(descriptor->fragmentFunctionName, NS::UTF8StringEncoding));
-    if (!pFragmentFn)
+    // DXMT: depth-only emulation does not require a fabricated fragment shader.
+    if (descriptor->fragmentLibrary)
     {
-        goto exit_fragment_function_error;
+        pFragmentFn = descriptor->fragmentLibrary->newFunction(NS::String::string(descriptor->fragmentFunctionName, NS::UTF8StringEncoding));
+        if (!pFragmentFn)
+            goto exit_fragment_function_error;
     }
 
     pDomainFn = descriptor->domainLibrary->newFunction(MTLSTR("irconverter_dxil_domain_shader"));
@@ -1848,7 +1856,8 @@ exit_vertex_function_error:
     pDomainFn->release();
 
 exit_domain_function_error:
-    pFragmentFn->release();
+    if (pFragmentFn)
+        pFragmentFn->release();
 
 exit_fragment_function_error:
     pStageInFn->release();
@@ -1877,10 +1886,12 @@ exit_stagein_function_error:
         return nil;
     }
 
-    pFragmentFn = [descriptor->fragmentLibrary newFunctionWithName:[NSString stringWithUTF8String:descriptor->fragmentFunctionName]];
-    if (!pFragmentFn)
+    // DXMT: permit an absent fragment stage, not failed function lookup.
+    if (descriptor->fragmentLibrary)
     {
-        return nil;
+        pFragmentFn = [descriptor->fragmentLibrary newFunctionWithName:[NSString stringWithUTF8String:descriptor->fragmentFunctionName]];
+        if (!pFragmentFn)
+            return nil;
     }
 
     pDomainFn = [descriptor->domainLibrary newFunctionWithName:@"irconverter_dxil_domain_shader"];

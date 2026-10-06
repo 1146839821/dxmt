@@ -681,6 +681,93 @@ public:
       return S_OK;
     } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
   }
+  HRESULT AppendTypedOriginBindings(const D3D12TypedOriginShader &shader,
+      D3D12TypedOriginGraphicsVariant &variant) {
+    if (!shader.application_root_signature.empty()) {
+      const void *bytes = nullptr;
+      application_root_->GetBlob(&bytes);
+      UINT size = 0;
+      const auto hr = microsoft::DXBCGetRootSignature(bytes, &bytes, &size);
+      if (FAILED(hr)) return hr;
+      if (size != shader.application_root_signature.size() ||
+          std::memcmp(bytes, shader.application_root_signature.data(), size)) return E_INVALIDARG;
+    }
+    std::string diagnostics;
+    std::vector<D3D12TypedOriginBindingLocation> locations;
+    const auto hr = ResolveD3D12TypedOriginBindings(variant.root, shader.bindings, locations, diagnostics, shader.visibility);
+    if (FAILED(hr)) { ERR("Graphics typed-origin binding resolution failed: ", diagnostics); return hr; }
+    variant.bindings.insert(variant.bindings.end(), shader.bindings.begin(), shader.bindings.end());
+    variant.locations.insert(variant.locations.end(), locations.begin(), locations.end());
+    return S_OK;
+  }
+
+  HRESULT PrepareTypedOriginEmulationVariant(const wchar_t *directory,
+      std::unique_ptr<D3D12TypedOriginGraphicsVariant> &candidate) {
+    struct Stage {
+      const std::vector<uint8_t> *original;
+      D3D12_SHADER_VISIBILITY visibility;
+      uint32_t kind;
+      D3D12TypedOriginShader prepared;
+      D3D12ConvertedShader converted;
+    } stages[] = {
+      {&original_vs_, D3D12_SHADER_VISIBILITY_VERTEX, DXMT_MSC_STAGE_VERTEX},
+      {&original_ps_, D3D12_SHADER_VISIBILITY_PIXEL, DXMT_MSC_STAGE_FRAGMENT},
+      {&original_gs_, D3D12_SHADER_VISIBILITY_GEOMETRY, DXMT_MSC_STAGE_GEOMETRY},
+      {&original_hs_, D3D12_SHADER_VISIBILITY_HULL, DXMT_MSC_STAGE_HULL},
+      {&original_ds_, D3D12_SHADER_VISIBILITY_DOMAIN, DXMT_MSC_STAGE_DOMAIN},
+    };
+    uint32_t count = 0;
+    std::string diagnostics;
+    for (auto &stage : stages) {
+      if (stage.original->empty()) continue;
+      std::wstring selected;
+      auto hr = SelectD3D12TypedOriginCompiler({stage.original->data(), stage.original->size()}, selected, directory);
+      if (FAILED(hr)) return hr;
+      if (hr == S_FALSE) continue;
+      hr = PrepareD3D12TypedOriginShader({stage.original->data(), stage.original->size()}, directory,
+          stage.prepared, diagnostics, stage.visibility);
+      if (FAILED(hr)) { ERR("Emulation typed-origin preparation failed: ", diagnostics); return hr; }
+      if (stage.prepared.bindings.size() > 64 - count) return E_NOTIMPL;
+      count += stage.prepared.bindings.size();
+    }
+    if (!count) return S_FALSE;
+    const D3D12TypedOriginRoot *root = nullptr;
+    auto hr = application_root_->GetTypedOriginCompilerRoot(&root);
+    if (FAILED(hr)) return hr;
+    auto result = std::make_unique<D3D12TypedOriginGraphicsVariant>();
+    result->root = *root;
+    uint32_t offset = 0;
+    for (auto &stage : stages) {
+      if (stage.original->empty()) continue;
+      result->active_graphics_stages.push_back(stage.visibility);
+      const auto *layout = stage.kind == DXMT_MSC_STAGE_VERTEX ? &minmax_stage_in_layout_ : nullptr;
+      const auto flags = stage.kind == DXMT_MSC_STAGE_VERTEX ? minmax_emulation_flags_ : 0;
+      if (stage.prepared.bindings.empty()) {
+        hr = ConvertD3D12Shader({stage.original->data(), stage.original->size()}, stage.kind,
+            stage.converted, root->bytecode.data(), root->bytecode.size(), layout, flags,
+            &device_->GetMSCCapabilities());
+      } else {
+        const auto stage_count = stage.prepared.bindings.size();
+        hr = PrepareD3D12TypedOriginShader({stage.original->data(), stage.original->size()}, directory,
+            stage.prepared, diagnostics, stage.visibility, offset, count);
+        if (FAILED(hr)) { ERR("Shared typed-origin preparation failed: ", diagnostics); return hr; }
+        if (stage.prepared.bindings.size() != stage_count) return E_FAIL;
+        hr = AppendTypedOriginBindings(stage.prepared, *result);
+        if (FAILED(hr)) return hr;
+        offset += stage_count;
+        hr = ConvertD3D12TypedOriginShader(stage.prepared, *root, stage.converted,
+            &device_->GetMSCCapabilities(), layout, flags);
+      }
+      if (FAILED(hr)) return hr;
+    }
+    if (offset != count) return E_FAIL;
+    hr = CreatePrivateEmulationPipeline(stages[0].converted, stages[1].converted, stages[2].converted,
+        stages[3].converted, stages[4].converted, *result);
+    if (FAILED(hr)) return hr;
+    candidate = std::move(result);
+    return S_OK;
+  }
+
   HRESULT GetTypedOriginVariant(const wchar_t *directory, const D3D12TypedOriginGraphicsVariant **variant) override {
     if (!variant) return E_POINTER;
     *variant = nullptr;
@@ -692,8 +779,16 @@ public:
         *variant = typed_origin_variant_.get(); return S_OK;
       }
       if (shader_backend != D3D12ShaderBackend::MetalShaderConverter || !application_root_ ||
-          !minmax_render_info_valid_ || minmax_emulation_flags_ || msc_mesh || stream_output ||
+          !minmax_render_info_valid_ || msc_mesh || stream_output ||
           requires_minmax_variant || original_vs_.empty()) return E_NOTIMPL;
+      if (minmax_emulation_flags_) {
+        std::unique_ptr<D3D12TypedOriginGraphicsVariant> candidate;
+        const auto hr = PrepareTypedOriginEmulationVariant(directory, candidate);
+        if (hr != S_OK) return hr;
+        typed_origin_directory_ = directory;
+        typed_origin_variant_ = std::move(candidate); *variant = typed_origin_variant_.get();
+        return S_OK;
+      }
       std::wstring selected;
       const auto vertex_selection = SelectD3D12TypedOriginCompiler(
           {original_vs_.data(), original_vs_.size()}, selected, directory);
@@ -719,20 +814,8 @@ public:
         auto result = PrepareD3D12TypedOriginShader({original.data(), original.size()}, directory,
             shader, diagnostics, visibility);
         if (FAILED(result)) { ERR("Graphics typed-origin preparation failed: ", diagnostics); return result; }
-        if (!shader.application_root_signature.empty()) {
-          const void *bytes = nullptr;
-          application_root_->GetBlob(&bytes);
-          UINT size = 0;
-          result = microsoft::DXBCGetRootSignature(bytes, &bytes, &size);
-          if (FAILED(result)) return result;
-          if (size != shader.application_root_signature.size() ||
-              std::memcmp(bytes, shader.application_root_signature.data(), size)) return E_INVALIDARG;
-        }
-        std::vector<D3D12TypedOriginBindingLocation> locations;
-        result = ResolveD3D12TypedOriginBindings(*root, shader.bindings, locations, diagnostics, visibility);
-        if (FAILED(result)) { ERR("Graphics typed-origin binding resolution failed: ", diagnostics); return result; }
-        candidate->bindings.insert(candidate->bindings.end(), shader.bindings.begin(), shader.bindings.end());
-        candidate->locations.insert(candidate->locations.end(), locations.begin(), locations.end());
+        result = AppendTypedOriginBindings(shader, *candidate);
+        if (FAILED(result)) return result;
         return visibility == D3D12_SHADER_VISIBILITY_VERTEX ?
             ConvertD3D12TypedOriginVertexShader(shader, *root, converted, &device_->GetMSCCapabilities()) :
             ConvertD3D12TypedOriginPixelShader(shader, *root, converted, &device_->GetMSCCapabilities());
@@ -1346,10 +1429,6 @@ public:
       return E_NOTIMPL;
     if ((has_hull || has_domain) && !use_msc_tessellation && !use_airconv_tessellation) {
       ERR("CreatePipelineState: tessellation requires a supported shader backend");
-      return E_NOTIMPL;
-    }
-    if (use_msc_tessellation && !pDesc->PS.pShaderBytecode) {
-      ERR("CreatePipelineState: MSC tessellation requires a pixel shader");
       return E_NOTIMPL;
     }
 

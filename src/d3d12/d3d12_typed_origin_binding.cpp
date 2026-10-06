@@ -50,10 +50,7 @@ static HRESULT RecordD3D12TypedOriginBinding(
     for (uint32_t p = 0; p < variant->root.application_parameter_count; ++p) {
       const auto &parameter = desc.pParameters[p];
       if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE ||
-          (parameter.ShaderVisibility != D3D12_SHADER_VISIBILITY_ALL &&
-           !(variant->visibility == D3D12_SHADER_VISIBILITY_PIXEL &&
-             (parameter.ShaderVisibility == D3D12_SHADER_VISIBILITY_PIXEL ||
-              parameter.ShaderVisibility == D3D12_SHADER_VISIBILITY_VERTEX)))) continue;
+          !variant->CapturesTableStage(parameter.ShaderVisibility)) continue;
       const auto &ranges = parameter.DescriptorTable;
       if (!ranges.NumDescriptorRanges || ranges.pDescriptorRanges[0].RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
         continue;
@@ -152,11 +149,12 @@ HRESULT MaterializeD3D12TypedOriginDispatch(
     if (graphics) {
       if (dispatch.variant != graphics || dispatch.compute_variant || dispatch.indirect_data ||
           graphics->vertex_binding_count > variant.bindings.size() || graphics->vertex_binding_count > 64 ||
-          variant.bindings.size() - graphics->vertex_binding_count > 64) return E_INVALIDARG;
+          variant.bindings.size() - graphics->vertex_binding_count > 64 ||
+          (graphics->UsesSharedOriginRecords() && variant.bindings.size() > 64)) return E_INVALIDARG;
     } else if (dispatch.variant != dispatch.compute_variant || variant.bindings.size() > 64) return E_INVALIDARG;
     // An ordinary stage does not consume the private CBV. Keep the original
     // single-TLAB cost for pixel-only and vertex-only origin variants.
-    const bool split_arguments = graphics && graphics->vertex_binding_count &&
+    const bool split_arguments = graphics && !graphics->UsesSharedOriginRecords() && graphics->vertex_binding_count &&
         graphics->vertex_binding_count < variant.bindings.size();
     auto candidate = std::make_shared<D3D12TypedOriginSubmissionBinding>();
     std::unordered_map<UINT, size_t> positions;
