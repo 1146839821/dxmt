@@ -1854,7 +1854,8 @@ public:
   }
 
   uint64_t
-  PopulateMSCVertexBufferTable() {
+  PopulateMSCVertexBufferTable(
+      WMTRenderStages stages = WMTRenderStageObject | WMTRenderStageMesh, uint32_t slot_mask = 0x7fffffffu) {
     struct MSC_VERTEX_BUFFER_ENTRY {
       uint64_t address;
       uint32_t length;
@@ -1870,6 +1871,7 @@ public:
 
     auto *entries = static_cast<MSC_VERTEX_BUFFER_ENTRY *>(mapped);
     for (uint32_t slot = 0; slot < count; slot++) {
+      if (!(slot_mask & (1u << slot))) continue;
       auto &state = vertex_buffers_[slot];
       uint64_t buffer_offset = 0;
       auto allocation = state.BufferLocation ? device_->LookupBufferByVA(state.BufferLocation, &buffer_offset) : nullptr;
@@ -1893,7 +1895,7 @@ public:
 
       EncodeRenderResourceUse(
           allocation->buffer().handle, WMTResourceUsageRead,
-          (WMTRenderStages)(WMTRenderStageObject | WMTRenderStageMesh)
+          stages
       );
     }
     return offset;
@@ -1924,12 +1926,14 @@ public:
     if (pso_graphics_ && pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter) {
       auto slot_mask = pso_graphics_->slot_mask;
       const bool emulation = pso_graphics_->msc_tessellation || pso_graphics_->msc_geometry;
-      if (emulation) {
-        auto offset = PopulateMSCVertexBufferTable();
+      if (emulation || pso_graphics_->msc_dynamic_vertex_fetch) {
+        auto offset = PopulateMSCVertexBufferTable(emulation ?
+            WMTRenderStageObject | WMTRenderStageMesh : WMTRenderStageVertex,
+            emulation ? 0x7fffffffu : slot_mask);
         if (recording_failed_)
           return;
         auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-        cmd.type = WMTRenderCommandSetObjectBuffer;
+        cmd.type = emulation ? WMTRenderCommandSetObjectBuffer : WMTRenderCommandSetVertexBuffer;
         cmd.buffer = allocator_->gpu_heap_buffer_;
         cmd.offset = offset;
         cmd.index = DXMT_MSC_VERTEX_BUFFER_BIND_POINT;
@@ -6138,7 +6142,8 @@ public:
     bool encode_binding = sig->UpdateRootArguments || sig->UpdateIndexBuffer || sig->UpdateVertexBuffers;
     const bool msc_updates = (sig->UpdateRootArguments || sig->UpdateIndexBuffer) &&
         pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
-    if (msc_updates && (uint64_t(pso_graphics_->slot_mask) >> (31 - DXMT_MSC_VERTEX_BUFFER_BIND_POINT))) {
+    if (msc_updates && !pso_graphics_->msc_dynamic_vertex_fetch &&
+        (uint64_t(pso_graphics_->slot_mask) >> (31 - DXMT_MSC_VERTEX_BUFFER_BIND_POINT))) {
       FailRecording(__func__, "MSC indirect vertex input exceeds Metal buffer slots");
       return;
     }
@@ -6187,6 +6192,13 @@ public:
       return;
     if (msc_updates) {
       if (!EncodeMSCIndirectArguments(sig, cmd, nullptr, nullptr, nullptr, minmax_variant, resolver_binding, origin_variant)) return;
+      if (pso_graphics_->msc_dynamic_vertex_fetch) {
+        const auto offset = PopulateMSCVertexBufferTable(WMTRenderStageVertex, pso_graphics_->slot_mask);
+        if (recording_failed_) return;
+        cmd->msc_vertex_records = allocator_->gpu_heap_buffer_address_ + offset;
+        ResetIndirectState(sig, false);
+        return;
+      }
       auto [addresses_ptr, addresses_offset] = allocator_->AllocateGPUHeap(32 * sizeof(uint64_t), 16);
       if (!addresses_ptr) { FailRecording(__func__, "indirect vertex addresses allocation failed"); return; }
       auto addresses = static_cast<uint64_t *>(addresses_ptr);

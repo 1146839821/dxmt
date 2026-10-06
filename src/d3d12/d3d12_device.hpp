@@ -372,6 +372,7 @@ public:
   WMT::Reference<WMT::DepthStencilState> dsso_stencil_readonly_depth_disabled;
   virtual WMT::DepthStencilState GetDepthStencilState(uint8_t planar_flags, uint8_t readonly_flags) const = 0;
   uint32_t slot_mask = 0;
+  bool msc_dynamic_vertex_fetch = false;
   bool msc_tessellation = false;
   WMT::Reference<WMT::Buffer> msc_tessellator_tables;
   WMTMSCTessellationPipelineConfig msc_tessellation_config = {};

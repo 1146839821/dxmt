@@ -102,6 +102,7 @@ struct dxmt_render_command_data {
   ulong msc_vertex_slot_mask;
   device char *msc_fragment_tlab;
   device char *msc_fragment_template;
+  device void *msc_vertex_records;
 };
 
 )";
@@ -267,6 +268,8 @@ public:
                << "cmd.set_fragment_buffer(command_data.msc_heap," << DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT << ");\n"
                << "cmd.set_vertex_buffer(command_data.msc_sampler_heap," << DXMT_MSC_SAMPLER_HEAP_BIND_POINT << ");\n"
                << "cmd.set_fragment_buffer(command_data.msc_sampler_heap," << DXMT_MSC_SAMPLER_HEAP_BIND_POINT << ");\n"
+               << "if (command_data.msc_vertex_records) cmd.set_vertex_buffer(command_data.msc_vertex_records, "
+               << DXMT_MSC_VERTEX_BUFFER_BIND_POINT << "); else "
                << "for (uint slot = 0; slot < 32; ++slot) if (command_data.msc_vertex_slot_mask & (1ul << slot)) "
                << "cmd.set_vertex_buffer(reinterpret_cast<device void *>(command_data.msc_vertex_buffers[slot]), "
                << DXMT_MSC_VERTEX_BUFFER_BIND_POINT << " + slot);\n"

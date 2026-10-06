@@ -67,11 +67,12 @@ int main(int argc, char **argv) {
   const bool get_attribute_unsupported = argc == 4 && strcmp(argv[3], "--get-attribute-unsupported") == 0;
   const bool vrs_unsupported = argc == 4 && strcmp(argv[3], "--vrs-unsupported") == 0;
   const bool stencil_ref_unsupported = argc == 4 && strcmp(argv[3], "--stencil-ref-unsupported") == 0;
+  const bool padded_stride = argc == 4 && strcmp(argv[3], "--padded-stride") == 0;
   if ((argc == 4 && !textured && !root_cbv && !root_constants && !root_srv &&
        !root_uav && !textured_root_cbv && !logic_op && !stencil && !barycentrics &&
        !wave_quad_ops && !int64_ops && !native16_ops && !helper_lane && !helper_lane_derivative &&
        !helper_lane_discard && !view_id_unsupported &&
-       !get_attribute_unsupported && !vrs_unsupported && !stencil_ref_unsupported) ||
+       !get_attribute_unsupported && !vrs_unsupported && !stencil_ref_unsupported && !padded_stride) ||
       (argc == 5 && !geometry))
     return 2;
 
@@ -122,6 +123,16 @@ int main(int argc, char **argv) {
       geometry_adjacency ? adjacency_vertices : vertices;
   const size_t vertex_data_size =
       geometry_adjacency ? sizeof(adjacency_vertices) : sizeof(vertices);
+  const UINT vertex_stride = padded_stride ? 64 : sizeof(Vertex);
+  const UINT vertex_offset = padded_stride ? 16 : 0;
+  std::vector<unsigned char> vertex_upload(vertex_offset +
+      (padded_stride ? 3 * vertex_stride : vertex_data_size), 0xcd);
+  if (padded_stride) {
+    for (UINT i = 0; i < 3; ++i)
+      memcpy(vertex_upload.data() + vertex_offset + i * vertex_stride, &vertices[i], sizeof(Vertex));
+  } else {
+    memcpy(vertex_upload.data(), vertex_data, vertex_data_size);
+  }
   const uint16_t *index_data = geometry_adjacency ? adjacency_indices : indices;
   const size_t index_data_size =
       geometry_adjacency ? sizeof(adjacency_indices) : sizeof(indices);
@@ -489,7 +500,7 @@ int main(int argc, char **argv) {
   upload_heap.CreationNodeMask = 1;
   upload_heap.VisibleNodeMask = 1;
   buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  buffer_desc.Width = vertex_data_size;
+  buffer_desc.Width = vertex_upload.size();
   buffer_desc.Height = 1;
   buffer_desc.DepthOrArraySize = 1;
   buffer_desc.MipLevels = 1;
@@ -504,11 +515,11 @@ int main(int argc, char **argv) {
   if (!CheckHR("MapVertexBuffer",
                vertex_buffer->Map(0, nullptr, &mapped_upload)))
     goto cleanup;
-  memcpy(mapped_upload, vertex_data, vertex_data_size);
+  memcpy(mapped_upload, vertex_upload.data(), vertex_upload.size());
   vertex_buffer->Unmap(0, nullptr);
-  vertex_view.BufferLocation = vertex_buffer->GetGPUVirtualAddress();
-  vertex_view.SizeInBytes = vertex_data_size;
-  vertex_view.StrideInBytes = sizeof(Vertex);
+  vertex_view.BufferLocation = vertex_buffer->GetGPUVirtualAddress() + vertex_offset;
+  vertex_view.SizeInBytes = vertex_upload.size() - vertex_offset;
+  vertex_view.StrideInBytes = vertex_stride;
 
   if (geometry_indexed || indirect_indexed) {
     buffer_desc.Width = index_data_size;
@@ -908,6 +919,7 @@ int main(int argc, char **argv) {
                 : helper_lane ? "helper lane graphics"
                 : textured_root_cbv  ? "root CBV textured graphics"
                 : textured           ? "textured graphics"
+                : padded_stride      ? "padded-stride graphics"
                                      : "graphics")
             << " readback passed: 0x" << std::hex << pixel << std::dec << "\n";
   result = 0;

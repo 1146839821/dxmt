@@ -91,10 +91,12 @@ struct IndirectRenderCommandData {
   uint64_t msc_vertex_slot_mask;
   uint64_t msc_fragment_tlab;
   uint64_t msc_fragment_template;
+  uint64_t msc_vertex_records;
 };
-static_assert(sizeof(IndirectRenderCommandData) == 168);
+static_assert(sizeof(IndirectRenderCommandData) == 176);
 static_assert(offsetof(IndirectRenderCommandData, msc_fragment_tlab) == 152);
 static_assert(offsetof(IndirectRenderCommandData, msc_fragment_template) == 160);
+static_assert(offsetof(IndirectRenderCommandData, msc_vertex_records) == 168);
 
 class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllocator> {
   friend class MTLD3D12GraphicsCommandListImpl;

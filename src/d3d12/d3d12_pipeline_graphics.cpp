@@ -490,7 +490,7 @@ static bool ConfigureMSCGeometry(const dxmt_msc_shader_reflection &vs,
 class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12GraphicsPipelineState> {
   Com<MTLD3D12RootSignature> application_root_;
   std::vector<uint8_t> original_vs_, original_ps_, original_gs_, original_hs_, original_ds_;
-  dxmt_msc_input_layout minmax_stage_in_layout_ = {};
+  dxmt_msc_input_layout msc_stage_in_layout_ = {};
   uint32_t minmax_emulation_flags_ = 0;
   WMTMSCGeometryPipelineInfo minmax_geometry_info_ = {};
   WMTMSCTessellationPipelineInfo minmax_tessellation_info_ = {};
@@ -616,6 +616,18 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
   }
 
   D3D12AirconvShader shader_vs;
+  WMT::Reference<WMT::RenderPipelineState> CreateOrdinaryMSCPipeline(
+      WMTRenderPipelineInfo info, const D3D12ConvertedShader &vertex, WMT::Error &error) {
+    auto metal = device_->GetMTLDevice();
+    if (!msc_dynamic_vertex_fetch) return metal.newRenderPipelineState(info, error);
+    if (vertex.stage_in_metallib.empty()) return {};
+    auto library = metal.newLibrary(vertex.stage_in_metallib.data(), vertex.stage_in_metallib.size(), error);
+    if (!library) return {};
+    auto function = library.newUniqueFunction();
+    if (!function) return {};
+    info.vertex_attribute_count = info.vertex_buffer_layout_count = 0;
+    return metal.newRenderPipelineStateWithStageIn(info, function, error);
+  }
   D3D12AirconvShader shader_ps;
   D3D12AirconvShader shader_gs;
   D3D12AirconvShader shader_hs;
@@ -648,11 +660,13 @@ public:
       const auto convert = [&](const std::vector<uint8_t> &original, const D3D12MinMaxShader &shader,
                                uint32_t stage, D3D12ConvertedShader &converted) {
         if (original.empty()) return S_OK;
-        const auto *layout = stage == DXMT_MSC_STAGE_VERTEX && minmax_emulation_flags_ ? &minmax_stage_in_layout_ : nullptr;
+        const auto flags = minmax_emulation_flags_ | (stage == DXMT_MSC_STAGE_VERTEX && msc_dynamic_vertex_fetch ?
+            DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0);
+        const auto *layout = stage == DXMT_MSC_STAGE_VERTEX && flags ? &msc_stage_in_layout_ : nullptr;
         return !shader.bytecode.empty() ? ConvertD3D12MinMaxShader(shader, candidate->root, converted,
-            &device_->GetMSCCapabilities(), layout, minmax_emulation_flags_) :
+            &device_->GetMSCCapabilities(), layout, flags) :
             ConvertD3D12Shader({original.data(), original.size()}, stage, converted,
-                root.data(), root.size(), layout, minmax_emulation_flags_, &device_->GetMSCCapabilities());
+                root.data(), root.size(), layout, flags, &device_->GetMSCCapabilities());
       };
       if (FAILED(hr = convert(original_vs_, shaders.vertex, DXMT_MSC_STAGE_VERTEX, vs)) ||
           FAILED(hr = convert(original_ps_, shaders.pixel, DXMT_MSC_STAGE_FRAGMENT, ps)) ||
@@ -673,7 +687,7 @@ public:
         if (!vs_function || (!original_ps_.empty() && !ps_function)) return E_FAIL;
         auto info = minmax_render_info_;
         info.vertex_function = vs_function.handle; info.fragment_function = ps_function.handle;
-        candidate->pso = metal.newRenderPipelineState(info, error);
+        candidate->pso = CreateOrdinaryMSCPipeline(info, vs, error);
         if (!candidate->pso) { ERR("MinMax render PSO failed"); return E_FAIL; }
       }
       minmax_dxc_directory_ = directory;
@@ -740,7 +754,7 @@ public:
     for (auto &stage : stages) {
       if (stage.original->empty()) continue;
       result->active_graphics_stages.push_back(stage.visibility);
-      const auto *layout = stage.kind == DXMT_MSC_STAGE_VERTEX ? &minmax_stage_in_layout_ : nullptr;
+      const auto *layout = stage.kind == DXMT_MSC_STAGE_VERTEX ? &msc_stage_in_layout_ : nullptr;
       const auto flags = stage.kind == DXMT_MSC_STAGE_VERTEX ? minmax_emulation_flags_ : 0;
       if (stage.prepared.bindings.empty()) {
         hr = ConvertD3D12Shader({stage.original->data(), stage.original->size()}, stage.kind,
@@ -805,10 +819,13 @@ public:
       D3D12ConvertedShader vs, ps;
       const auto prepare_stage = [&](const std::vector<uint8_t> &original, HRESULT selection, D3D12_SHADER_VISIBILITY visibility,
                                      D3D12ConvertedShader &converted) -> HRESULT {
+        const auto flags = visibility == D3D12_SHADER_VISIBILITY_VERTEX && msc_dynamic_vertex_fetch ?
+            DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0;
+        const auto *layout = flags ? &msc_stage_in_layout_ : nullptr;
         if (selection == S_FALSE)
           return ConvertD3D12Shader({original.data(), original.size()},
               visibility == D3D12_SHADER_VISIBILITY_VERTEX ? DXMT_MSC_STAGE_VERTEX : DXMT_MSC_STAGE_FRAGMENT,
-              converted, root->bytecode.data(), root->bytecode.size(), nullptr, 0, &device_->GetMSCCapabilities());
+              converted, root->bytecode.data(), root->bytecode.size(), layout, flags, &device_->GetMSCCapabilities());
         D3D12TypedOriginShader shader;
         std::string diagnostics;
         auto result = PrepareD3D12TypedOriginShader({original.data(), original.size()}, directory,
@@ -817,7 +834,7 @@ public:
         result = AppendTypedOriginBindings(shader, *candidate);
         if (FAILED(result)) return result;
         return visibility == D3D12_SHADER_VISIBILITY_VERTEX ?
-            ConvertD3D12TypedOriginVertexShader(shader, *root, converted, &device_->GetMSCCapabilities()) :
+            ConvertD3D12TypedOriginVertexShader(shader, *root, converted, &device_->GetMSCCapabilities(), layout, flags) :
             ConvertD3D12TypedOriginPixelShader(shader, *root, converted, &device_->GetMSCCapabilities());
       };
       hr = prepare_stage(original_vs_, vertex_selection, D3D12_SHADER_VISIBILITY_VERTEX, vs);
@@ -839,7 +856,7 @@ public:
       if (!vs_function || (!original_ps_.empty() && !ps_function)) return E_FAIL;
       auto info = minmax_render_info_;
       info.vertex_function = vs_function.handle; info.fragment_function = ps_function.handle;
-      candidate->pso = metal.newRenderPipelineState(info, error);
+      candidate->pso = CreateOrdinaryMSCPipeline(info, vs, error);
       if (!candidate->pso) return E_FAIL;
       typed_origin_directory_ = directory;
       typed_origin_variant_ = std::move(candidate); *variant = typed_origin_variant_.get();
@@ -869,6 +886,14 @@ public:
       return hr;
     if (element_count > WMT_MAX_VERTEX_ATTRIBUTES)
       return E_NOTIMPL;
+    if (msc_dynamic_vertex_fetch) {
+      slot_mask = 0;
+      for (uint32_t i = 0; i < element_count; ++i) {
+        if (elements[i].slot >= 31) return E_NOTIMPL;
+        slot_mask |= 1u << elements[i].slot;
+      }
+      return S_OK;
+    }
 
     uint32_t append_offset[32] = {};
     uint32_t strides[WMT_MAX_VERTEX_BUFFER_LAYOUTS] = {};
@@ -1413,6 +1438,9 @@ public:
     const uint32_t msc_emulation_flags = use_msc_tessellation ? DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION
                                          : use_msc_geometry   ? DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION
                                                               : 0;
+    msc_dynamic_vertex_fetch = use_msc && !msc_emulation_flags && pDesc->InputLayout.NumElements;
+    const uint32_t msc_vertex_flags = msc_emulation_flags |
+        (msc_dynamic_vertex_fetch ? DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0);
     if (has_geometry && (has_hull || has_domain)) {
       ERR("CreatePipelineState: geometry and tessellation emulation are not combined");
       return E_NOTIMPL;
@@ -1550,11 +1578,11 @@ public:
         return hr;
     }
 
-    if (msc_emulation_flags) {
+    if (msc_vertex_flags) {
       hr = InitializeMSCStageInLayout(pDesc, msc_stage_in_layout);
       if (FAILED(hr))
         return hr;
-      minmax_stage_in_layout_ = msc_stage_in_layout;
+      msc_stage_in_layout_ = msc_stage_in_layout;
     }
 
     SM50_SHADER_COMMON_DATA common = {};
@@ -1569,10 +1597,10 @@ public:
       if (FAILED(
               hr = requires_minmax_variant && !static_minmax_shaders.vertex.bytecode.empty() ?
                   ConvertD3D12MinMaxShader(static_minmax_shaders.vertex, minmax_variant_->root, converted_vs,
-                      &msc_capabilities, msc_emulation_flags ? &msc_stage_in_layout : nullptr,
-                      msc_emulation_flags) : ConvertD3D12Shader(
+                      &msc_capabilities, msc_vertex_flags ? &msc_stage_in_layout : nullptr,
+                      msc_vertex_flags) : ConvertD3D12Shader(
                   vs_classification, pDesc->VS, DXMT_MSC_STAGE_VERTEX, converted_vs, root_signature,
-                  root_signature_size, msc_emulation_flags ? &msc_stage_in_layout : nullptr, msc_emulation_flags,
+                  root_signature_size, msc_vertex_flags ? &msc_stage_in_layout : nullptr, msc_vertex_flags,
                   &msc_capabilities
               )
           )) {
@@ -2082,7 +2110,7 @@ public:
         if (FAILED(hr))
           return hr;
       } else {
-        pso = metal.newRenderPipelineState(info, err);
+        pso = use_msc ? CreateOrdinaryMSCPipeline(info, converted_vs, err) : metal.newRenderPipelineState(info, err);
         if (use_msc && application_root_) {
           minmax_render_info_ = info;
           minmax_render_info_.vertex_function = minmax_render_info_.fragment_function = NULL_OBJECT_HANDLE;

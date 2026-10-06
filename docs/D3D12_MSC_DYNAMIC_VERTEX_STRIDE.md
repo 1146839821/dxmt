@@ -139,3 +139,62 @@ PSO creation; no new GPU acceptance is claimed. Compiler artifacts and
 stride-separate-reflection.log / stride-separate-air.log are retained under
 /Users/zhangbo/.cache/dxmt-reconciliation.ZLDvwE, with stagein-abi-final-*.log
 build evidence. No FL capability promotion, prefix/game changes or push.
+
+## Dynamic fetch wiring continuation (baseline 3a0c219f)
+
+Hypothesis: linking the synthesized ordinary stage-in and binding the existing
+16-byte vertex records at buffer 6 removes fixed input-layout extent as the
+source of ordinary MSC stride. Evidence: the compiler artifact ABI above.
+Expected effect: ordinary, typed and MinMax variants share dynamic fetch mode;
+indirect root/index updates retain inherited vertex records. Risk: linked PSO
+creation, CPU/MSL payload alignment and stage-specific resource retention.
+Validation: reconfigure and build both variants, run native regressions, then
+focused padded-stride GPU readback. Vertex-buffer command-signature updates
+remain rejected; no capability promotion or full-game qualification is implied.
+
+### Dynamic fetch wiring result
+
+Ordinary MSC PSOs with input layouts now synthesize and link stage-in, without
+fixed Metal vertex attributes/strides. Typed-origin and MinMax private variants
+forward the same layout and synthesis flag. Used IA slots select 16-byte dynamic
+address/length/stride records at vertex buffer 6; companion object/mesh binding
+is unchanged. Root/index indirect updates carry an inherited record pointer in
+the mirrored 176-byte CPU/MSL payload. VB command-signature updates remain gated.
+
+Normal and no-private full builds passed after reconfigure. Native regressions
+passed 12/12 each. The new --padded-stride fixture uses stride 64 for 24-byte
+attributes, upload padding filled with 0xcd, and VB GPU address offset 16. Both
+GPU runs passed the existing pixel, occlusion and timestamp checks; color readback
+was 0xff0000ff. The first normal attempt stopped at an unimplemented entry due
+to stale cached runtime PE DLLs despite the app-local copy; matching cache-only
+PE/native staging fixed the retry. No prefix/game DLLs were deployed.
+
+The existing typed-origin indirect IB fixture passed 32 typed draws and ordinary
+restoration per variant. It uses no IA input and therefore does not qualify the
+new indirect record pointer path. Same-PSO stride changes, per-instance input,
+typed/MinMax IA GPU tests and GPU-selected VB updates remain follow-up work.
+No FL promotion, full-game acceptance, FPS claim or push. Logs are
+dynamic-fetch-*.log under the reconciliation cache.
+
+Additional packed-stride normal run returned failure: the expected red pixel
+was present, but timestamp_end was zero (timestamp_begin 977974628654833).
+This run is not counted as passed; attribution needs separate query diagnosis
+and baseline comparison. The padded-stride acceptance above remains limited
+to its recorded successful runs, not a clean whole graphics regression matrix.
+The corresponding packed-stride no-private run passed all fixture checks.
+
+### Submission self-review
+
+Standards axis: no documented breach identified; the shared stage-in layout was
+renamed from minmax_stage_in_layout_ to msc_stage_in_layout_ to remove misleading
+ownership. Spec axis identified unused stale IA bindings as a recording failure
+risk; ordinary direct/indirect builders now filter the active PSO slot mask before
+lookup, validation and retention, leaving companion behavior unchanged. Added a
+CPU payload offset assertion for the inherited record pointer at byte 168.
+
+Final post-review full builds and native regressions passed for both variants
+(12/12 each); both final padded-stride GPU runs passed, red pixel 0xff0000ff.
+Two partial validation findings remain: same-PSO stride changes/instance step,
+and private/indirect padded IA readback. These are tracked qualification gaps,
+not claimed completed requirements. No new hard standards findings remain;
+dynamic fetch work and the broader FL goal remain open.
