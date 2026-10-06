@@ -177,6 +177,9 @@ static bool ReplayPrivateRender(MTLD3D12Device *device, WMT::RenderCommandEncode
         const auto hr = MaterializeD3D12TypedOriginDispatch(device, *marker->second, binding);
         if (FAILED(hr)) { ERR("Typed-origin render materialization failed HRESULT=", hr); return false; }
         origin_bindings.push_back(binding);
+        if (marker->second->indirect_render_binding &&
+            !indirect_bindings.emplace(marker->second->indirect_render_binding,
+                IndirectBinding{binding->buffer.handle, binding->indirect_data_offset}).second) return false;
         active_variant = marker->second->graphics_variant;
         const bool emulation = active_variant->geometry || active_variant->tessellation;
         const auto stages = emulation ? WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment :

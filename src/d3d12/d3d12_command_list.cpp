@@ -2050,10 +2050,13 @@ public:
       SM50_INDEX_BUFFER_FORMAT airconv_index_format = SM50_INDEX_BUFFER_FORMAT_NONE,
       bool AllowMinMax = true,
       const D3D12MinMaxGraphicsVariant **selected_minmax = nullptr,
-      bool AllowTypedOrigin = true
+      bool AllowTypedOrigin = true,
+      const D3D12TypedOriginGraphicsVariant **selected_origin = nullptr
   ) {
     if (selected_minmax)
       *selected_minmax = nullptr;
+    if (selected_origin)
+      *selected_origin = nullptr;
     if (!pso_graphics_)
       return DrawCallStatus::Invalid;
     if (recording_failed_)
@@ -2527,6 +2530,8 @@ public:
             " pso=", pso_graphics_ ? pso_graphics_->pso.handle : 0, " rtvs=", num_rtvs);
     if (recording_failed_)
       return DrawCallStatus::Invalid;
+    if (selected_origin)
+      *selected_origin = origin_variant;
     if (use_msc_tessellation)
       return DrawCallStatus::MSCTessellation;
     if (use_airconv_tessellation)
@@ -5742,12 +5747,14 @@ public:
       const D3D12TypedOriginComputeVariant *variant = nullptr, const wmtcmd_compute_setbuffer *resolver_binding = nullptr,
       const D3D12MinMaxComputeVariant *minmax_variant = nullptr,
       const D3D12MinMaxGraphicsVariant *graphics_variant = nullptr,
-      const wmtcmd_render_setbuffer *render_binding = nullptr) {
+      const wmtcmd_render_setbuffer *render_binding = nullptr,
+      const D3D12TypedOriginGraphicsVariant *origin_graphics_variant = nullptr) {
     constexpr bool compute = std::is_same_v<Data, IndirectComputeCommandData>;
     auto root = compute ? rootsig_compute_.ptr() : rootsig_graphics_.ptr();
     auto staging = compute ? rootarg_compute_staging_ : rootarg_graphics_staging_;
     const auto *compiler_root = variant ? &variant->root : minmax_variant ? &minmax_variant->root.layout :
-        graphics_variant ? &graphics_variant->root.layout : nullptr;
+        graphics_variant ? &graphics_variant->root.layout :
+        origin_graphics_variant ? &origin_graphics_variant->root : nullptr;
     const auto template_size = compiler_root ? compiler_root->argument_buffer_size : root->MSCArgumentBufferSize;
     if (template_size > UINT64_MAX - 15) { FailRecording(__func__, "indirect TLAB size overflow"); return false; }
     const auto stride = (template_size + 15) & ~uint64_t(15);
@@ -5826,6 +5833,15 @@ public:
       }
     }
     if constexpr (!compute) {
+      if (origin_graphics_variant) {
+        auto &draws = static_cast<RenderEncoderData *>(allocator_->encoder_current)->typed_origin_draws;
+        if (graphics_variant || draws.empty() || draws.back()->graphics_variant != origin_graphics_variant || !render_binding) {
+          FailRecording(__func__, "missing typed-origin render indirect marker"); return false;
+        }
+        draws.back()->indirect_render_data = data;
+        draws.back()->indirect_render_binding = render_binding;
+        defer_template = true;
+      }
       if (graphics_variant) {
         auto &draws = static_cast<RenderEncoderData *>(allocator_->encoder_current)->minmax_draws;
         if (draws.empty() || draws.back()->graphics_variant != graphics_variant || !render_binding) {
@@ -6121,13 +6137,18 @@ public:
       return;
     }
     const D3D12MinMaxGraphicsVariant *minmax_variant = nullptr;
+    const D3D12TypedOriginGraphicsVariant *origin_variant = nullptr;
     DrawCallStatus status = PreDraw(
-        encode_binding && !msc_updates, SM50_INDEX_BUFFER_FORMAT_NONE, !encode_binding || msc_updates, &minmax_variant, false
+        encode_binding && !msc_updates, SM50_INDEX_BUFFER_FORMAT_NONE, !encode_binding || msc_updates,
+        &minmax_variant, true, &origin_variant
     );
     if (status == DrawCallStatus::Invalid)
       return;
-    if (status != DrawCallStatus::Ordinary)
+    if (status != DrawCallStatus::Ordinary) {
+      if (origin_variant)
+        FailRecording(__func__, "typed-origin companion indirect path is not connected");
       return;
+    }
 
     for (const auto &update : sig->StateUpdates)
       if (update.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW ||
@@ -6144,7 +6165,8 @@ public:
     }
 
     const wmtcmd_render_setbuffer *resolver_binding = nullptr;
-    auto cmd = allocator_->EncodeIndirectRenderCommand(sig, pso_graphics_.ptr(), MaxCommandCount, minmax_variant, &resolver_binding);
+    auto cmd = allocator_->EncodeIndirectRenderCommand(sig, pso_graphics_.ptr(), MaxCommandCount, minmax_variant, &resolver_binding,
+        origin_variant);
     if (!cmd) {
       FailRecording(__func__, "indirect render command allocation failed");
       return;
@@ -6157,7 +6179,7 @@ public:
     if (!encode_binding)
       return;
     if (msc_updates) {
-      if (!EncodeMSCIndirectArguments(sig, cmd, nullptr, nullptr, nullptr, minmax_variant, resolver_binding)) return;
+      if (!EncodeMSCIndirectArguments(sig, cmd, nullptr, nullptr, nullptr, minmax_variant, resolver_binding, origin_variant)) return;
       auto [addresses_ptr, addresses_offset] = allocator_->AllocateGPUHeap(32 * sizeof(uint64_t), 16);
       if (!addresses_ptr) { FailRecording(__func__, "indirect vertex addresses allocation failed"); return; }
       auto addresses = static_cast<uint64_t *>(addresses_ptr);

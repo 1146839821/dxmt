@@ -1,5 +1,18 @@
 # Task Analysis
 
+## Recording/replay continuation
+
+Baseline f432b483, clean. Hypothesis: ordinary typed DRAW/DRAW_INDEXED can use
+the existing MSC reflected root-update resolver now that split-TLAB payloads
+exist. Evidence: ExecuteIndirect explicitly disabled typed PreDraw selection,
+and replay only redirected MinMax resolver buffers. Expected effect: retain
+typed draw markers, select reflected private layouts, defer template creation,
+redirect resolver buffers to submission-owned clones and restore private PSOs.
+Risk: allocator mutation, stale variant selection, lost split-stage bindings,
+accidentally admitting companion/VB/IB paths not implemented. Validation:
+normal/no-private builds, existing native regressions, targeted runtime follow-up.
+Complete graphics indirect qualification remains the objective, not this slice.
+
 ## Dual-TLAB ABI continuation
 
 Baseline 3f035eef, clean. CPU render payload and generated Metal resolver both
@@ -79,3 +92,25 @@ compute/legacy behavior; git diff --check passed. The generated Metal resolver
 has not been compiled/executed by these host tests. Logs: typed-dual-*.log under
 the existing reconciliation evidence directory. Replay wiring, public indirect
 admission and GPU validation still remain; this is not complete typed indirect.
+
+## Recording/replay result
+
+Ordinary MSC typed DRAW/DRAW_INDEXED now selects its private variant through
+PreDraw. Non-updating commands inherit submission-bound stage TLABs. Root-updating
+commands resolve application parameter offsets against the private reflected
+layout and attach immutable render resolver payloads to the typed marker.
+Submission replay redirects the resolver's vertex-buffer binding to the cloned
+payload and retains its allocation through completion. The allocator restores
+the typed private PSO after the resolver instead of the application PSO.
+
+Companion GS/HS/DS indirect and typed VB/IB updates are still unsupported, as are
+the previously rejected predication/MinMax combinations. Companion selection
+is reported before status return so unsupported paths fail recording explicitly
+instead of silently dropping the command. Full typed graphics indirect remains
+incomplete. Both full builds and native regressions (12/12 each) passed; these
+host tests do not prove public GPU draw correctness. Source self-review checked
+marker association, resolver clone redirection, private PSO restoration, immutable
+payload ownership and old caller default behavior. git diff --check passed.
+Evidence logs retained as typed-wire-*.log in the reconciliation cache. Next
+required work is a focused typed split-stage direct/indexed indirect readback
+fixture, before expanding the full graphics matrix or declaring qualification.

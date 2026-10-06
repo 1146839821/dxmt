@@ -27,6 +27,7 @@
 namespace dxmt {
 
 struct D3D12TypedOriginComputeVariant;
+struct D3D12TypedOriginGraphicsVariant;
 struct D3D12MinMaxComputeVariant;
 struct D3D12MinMaxGraphicsVariant;
 
@@ -417,7 +418,8 @@ public:
       const D3D12MinMaxComputeVariant *minmax_variant = nullptr);
 
   IndirectRenderCommandData *EncodeIndirectRenderCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12GraphicsPipelineState *pPSO, size_t MaxCount,
-      const D3D12MinMaxGraphicsVariant *minmax_variant = nullptr, const wmtcmd_render_setbuffer **resolver_binding = nullptr);
+      const D3D12MinMaxGraphicsVariant *minmax_variant = nullptr, const wmtcmd_render_setbuffer **resolver_binding = nullptr,
+      const D3D12TypedOriginGraphicsVariant *origin_variant = nullptr);
 };
 
 } // namespace dxmt
