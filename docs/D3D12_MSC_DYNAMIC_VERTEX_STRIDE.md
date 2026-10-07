@@ -314,3 +314,59 @@ MSC compilation/integration skills guided the distinction between layout slots,
 native Metal buffer indices and separate stage-in records. No native converter
 or companion API change was needed. Full private/instanced/indexed qualification
 and the broader FL goal remain incomplete.
+
+## Unused layout element continuation (baseline 63bf8ebc)
+
+Hypothesis: ordinary dynamic fetch can accept a legal 32-declaration layout when
+the VS signature consumes no more than the MSC stage-in descriptor capacity.
+Evidence: vendor IRInputLayoutDescriptor1 has 31 entries; current code rejects
+the raw count before filtering shader-unmatched elements. Do not enlarge the
+vendor/transport ABI. Expected effect: omit unmatched entries only after their
+APPEND offset contribution is calculated. Risk: offset packing, semantic/index
+matching and changed companion behavior. Validate a 32-entry layout with 30
+unmatched padding fields between POSITION and appended COLOR, direct/indirect
+readback in both variants; preserve 31-entry companion and consumed-entry limit.
+
+### Unused layout implementation and result
+
+Ordinary dynamic stage-in now matches VS signature semantics/indexes using the
+existing DXBC signature parser, case-insensitively. It validates each raw entry
+and computes its per-slot APPEND contribution before omitting an unmatched
+entry. Only matching entries enter the unchanged 31-entry transport/vendor
+descriptor. A zero-parameter signature short-circuits before pointer arithmetic.
+Companion retains the raw-count gate and unfiltered layout. More than 32 raw
+entries are invalid; more than 31 matched entries remain unsupported. This is
+not full 32-consumed-attribute support and does not bypass the vendor ABI.
+
+The baseline cached DLL rejected the new --wide-layout probe at PSO creation
+with E_NOTIMPL. New full builds passed normal/no-private after reconfigure;
+host tests passed 12/12 each. --wide-layout and --indirect-vb-wide-layout both
+passed on both variants, including final serial runs after the zero-count guard.
+Each layout has POSITION, 30 unmatched R32_FLOAT APPEND fields, and COLOR at
+APPEND offset 128. VB stride is 192, VA offset 16. Offset 8 deliberately contains
+green while offset 128 contains red, so erroneously compacting the layout changes
+the oracle. All four final GPU results are 0xff0000ff with occlusion/timestamp
+checks passing. Indirect mode retains the second non-drawing stride-24 command
+to check record isolation. Logs: wide-layout-*.log in reconciliation cache.
+No prefix/game DLL writes, capability promotion, full FL claim or push.
+
+Remaining: matched-entry boundary/duplicate-semantic/instance classification
+qualification and private shader GPU coverage. Existing intermittent timestamp
+failures from previous increments remain unattributed; this task did not remove
+their checks or claim repeated-run reliability.
+
+### Unused layout self-review
+
+Standards: zero actionable findings. Spec: one P2 was found and fixed: an
+unmatched semantic longer than the transport's name capacity was rejected before
+filtering. Ordinary name capacity is now checked only after matching, immediately
+before copy; companion retains the earlier check. The fixture includes such a
+long unmatched semantic. Its pre-fix run failed PSO creation with E_INVALIDARG;
+all four post-review direct/indirect normal/no-private GPU runs passed every
+fixture check (0xff0000ff). Final reviewed full builds and host tests passed both,
+12/12 each. Re-review found no remaining concrete source defect; matched-entry
+boundary and private qualification gaps above remain open.
+
+The MSC skills informed retaining the vendor's 31-entry descriptor instead of
+enlarging it. Signature filtering is an implementation repair for legal layouts
+with unused declarations, not a workaround claimed to complete 32 consumed inputs.

@@ -52,7 +52,9 @@ int main(int argc, char **argv) {
   const bool root_srv = argc == 4 && (strcmp(argv[3], "--root-srv") == 0 || strcmp(argv[3], "--indirect-root-srv") == 0);
   const bool root_uav = argc == 4 && (strcmp(argv[3], "--root-uav") == 0 || strcmp(argv[3], "--indirect-root-uav") == 0);
   const bool slot31 = argc == 4 && (strcmp(argv[3], "--slot31") == 0 || strcmp(argv[3], "--indirect-vb-slot31") == 0);
-  const bool indirect_vb = argc == 4 && (strcmp(argv[3], "--indirect-vb") == 0 || strcmp(argv[3], "--indirect-vb-slot31") == 0);
+  const bool wide_layout = argc == 4 && (strcmp(argv[3], "--wide-layout") == 0 || strcmp(argv[3], "--indirect-vb-wide-layout") == 0);
+  const bool indirect_vb = argc == 4 && (strcmp(argv[3], "--indirect-vb") == 0 || strcmp(argv[3], "--indirect-vb-slot31") == 0 ||
+      strcmp(argv[3], "--indirect-vb-wide-layout") == 0);
   const bool indirect = argc == 4 && strncmp(argv[3], "--indirect-", 11) == 0;
   const bool textured_root_cbv = argc == 4 && (strcmp(argv[3], "--texture-root-cbv") == 0 ||
       strcmp(argv[3], "--indirect-texture-root-cbv") == 0);
@@ -69,7 +71,7 @@ int main(int argc, char **argv) {
   const bool get_attribute_unsupported = argc == 4 && strcmp(argv[3], "--get-attribute-unsupported") == 0;
   const bool vrs_unsupported = argc == 4 && strcmp(argv[3], "--vrs-unsupported") == 0;
   const bool stencil_ref_unsupported = argc == 4 && strcmp(argv[3], "--stencil-ref-unsupported") == 0;
-  const bool padded_stride = (argc == 4 && strcmp(argv[3], "--padded-stride") == 0) || indirect_vb || slot31;
+  const bool padded_stride = (argc == 4 && strcmp(argv[3], "--padded-stride") == 0) || indirect_vb || slot31 || wide_layout;
   if ((argc == 4 && !textured && !root_cbv && !root_constants && !root_srv &&
        !root_uav && !textured_root_cbv && !logic_op && !stencil && !barycentrics &&
        !wave_quad_ops && !int64_ops && !native16_ops && !helper_lane && !helper_lane_derivative &&
@@ -125,13 +127,20 @@ int main(int argc, char **argv) {
       geometry_adjacency ? adjacency_vertices : vertices;
   const size_t vertex_data_size =
       geometry_adjacency ? sizeof(adjacency_vertices) : sizeof(vertices);
-  const UINT vertex_stride = padded_stride ? 64 : sizeof(Vertex);
+  const UINT vertex_stride = wide_layout ? 192 : padded_stride ? 64 : sizeof(Vertex);
   const UINT vertex_offset = padded_stride ? 16 : 0;
   std::vector<unsigned char> vertex_upload(vertex_offset +
       (padded_stride ? 3 * vertex_stride : vertex_data_size), 0xcd);
   if (padded_stride) {
-    for (UINT i = 0; i < 3; ++i)
-      memcpy(vertex_upload.data() + vertex_offset + i * vertex_stride, &vertices[i], sizeof(Vertex));
+    for (UINT i = 0; i < 3; ++i) {
+      auto destination = vertex_upload.data() + vertex_offset + i * vertex_stride;
+      memcpy(destination, &vertices[i], sizeof(Vertex));
+      if (wide_layout) {
+        static const float wrong_color[] = {0.0f, 1.0f, 0.0f, 1.0f};
+        memcpy(destination + 8, wrong_color, sizeof(wrong_color));
+        memcpy(destination + 128, vertices[i].color, sizeof(vertices[i].color));
+      }
+    }
   } else {
     memcpy(vertex_upload.data(), vertex_data, vertex_data_size);
   }
@@ -193,12 +202,21 @@ int main(int argc, char **argv) {
   D3D12_DESCRIPTOR_HEAP_DESC dsv_heap_desc = {};
   D3D12_DESCRIPTOR_HEAP_DESC resource_heap_desc = {};
   D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_desc = {};
-  D3D12_INPUT_ELEMENT_DESC input_layout[] = {
+  std::vector<D3D12_INPUT_ELEMENT_DESC> input_layout = {
       {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, slot31 ? 31u : 0u, 0,
        D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
       {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, slot31 ? 31u : 0u, 8,
        D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
   };
+  if (wide_layout) {
+    input_layout.resize(32);
+    for (UINT i = 1; i < 31; ++i)
+      input_layout[i] = {"UNUSED", i, DXGI_FORMAT_R32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT,
+          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0};
+    input_layout[15].SemanticName = "UNUSED_PADDING_SEMANTIC_THAT_IS_LONGER_THAN_THE_MSC_TRANSPORT_NAME_CAPACITY_64_BYTES";
+    input_layout[31] = {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT,
+        D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0};
+  }
   D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc = {};
   D3D12_VERTEX_BUFFER_VIEW vertex_view = {};
   D3D12_INDEX_BUFFER_VIEW index_view = {};
@@ -575,8 +593,8 @@ int main(int argc, char **argv) {
     pso_desc.GS.pShaderBytecode = geometry_shader.data();
     pso_desc.GS.BytecodeLength = geometry_shader.size();
   }
-  pso_desc.InputLayout.pInputElementDescs = input_layout;
-  pso_desc.InputLayout.NumElements = 2;
+  pso_desc.InputLayout.pInputElementDescs = input_layout.data();
+  pso_desc.InputLayout.NumElements = input_layout.size();
   pso_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   pso_desc.NumRenderTargets = 1;
   pso_desc.RTVFormats[0] = logic_op ? DXGI_FORMAT_R8G8B8A8_UINT : DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -937,6 +955,8 @@ int main(int argc, char **argv) {
                 : helper_lane ? "helper lane graphics"
                 : textured_root_cbv  ? "root CBV textured graphics"
                 : textured           ? "textured graphics"
+                : indirect_vb && wide_layout ? "indirect VB wide-layout graphics"
+                : wide_layout        ? "wide-layout graphics"
                 : indirect_vb && slot31 ? "indirect VB slot31 padded-stride graphics"
                 : indirect_vb        ? "indirect VB padded-stride graphics"
                 : slot31             ? "slot31 padded-stride graphics"

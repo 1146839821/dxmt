@@ -952,14 +952,26 @@ public:
       const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, dxmt_msc_input_layout &layout
   ) {
     std::memset(&layout, 0, sizeof(layout));
-    if (pDesc->InputLayout.NumElements > std::size(layout.elements))
+    if (!msc_dynamic_vertex_fetch && pDesc->InputLayout.NumElements > std::size(layout.elements))
       return E_NOTIMPL;
+    if (pDesc->InputLayout.NumElements > D3D12_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT ||
+        (pDesc->InputLayout.NumElements && !pDesc->InputLayout.pInputElementDescs))
+      return E_INVALIDARG;
+
+    microsoft::CSignatureParser parser;
+    const microsoft::D3D11_SIGNATURE_PARAMETER *parameters = nullptr;
+    uint32_t parameter_count = 0;
+    if (msc_dynamic_vertex_fetch) {
+      const auto hr = microsoft::DXBCGetInputSignature(pDesc->VS.pShaderBytecode, &parser);
+      if (FAILED(hr)) return hr;
+      parameter_count = parser.GetParameters(&parameters);
+    }
 
     uint32_t append_offset[32] = {};
-    layout.num_elements = pDesc->InputLayout.NumElements;
-    for (uint32_t i = 0; i < layout.num_elements; i++) {
+    for (uint32_t i = 0; i < pDesc->InputLayout.NumElements; i++) {
       const auto &desc = pDesc->InputLayout.pInputElementDescs[i];
-      if (!desc.SemanticName || std::strlen(desc.SemanticName) >= DXMT_MSC_SEMANTIC_NAME_CAPACITY || desc.InputSlot >= 32)
+      if (!desc.SemanticName || desc.InputSlot >= 32 ||
+          (!msc_dynamic_vertex_fetch && std::strlen(desc.SemanticName) >= DXMT_MSC_SEMANTIC_NAME_CAPACITY))
         return E_INVALIDARG;
 
       MTL_DXGI_FORMAT_DESC format_desc;
@@ -974,7 +986,15 @@ public:
         return E_INVALIDARG;
       append_offset[desc.InputSlot] = aligned_offset + format_desc.BytesPerTexel;
 
-      auto &element = layout.elements[i];
+      // Unmatched declarations still contribute to APPEND offsets in this slot.
+      if (msc_dynamic_vertex_fetch && (!parameter_count || std::none_of(parameters, parameters + parameter_count, [&](const auto &parameter) {
+            return desc.SemanticIndex == parameter.SemanticIndex &&
+                strcasecmp(desc.SemanticName, parameter.SemanticName) == 0;
+          })))
+        continue;
+      if (layout.num_elements == std::size(layout.elements)) return E_NOTIMPL;
+      if (std::strlen(desc.SemanticName) >= DXMT_MSC_SEMANTIC_NAME_CAPACITY) return E_INVALIDARG;
+      auto &element = layout.elements[layout.num_elements++];
       std::strcpy(element.semantic_name, desc.SemanticName);
       element.semantic_index = desc.SemanticIndex;
       element.format = desc.Format;
