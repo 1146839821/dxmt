@@ -261,6 +261,20 @@ byte-footprint lowering, DXIL support and GPU feedback matrices remain required.
 
 ## GPU mapping lookup lowering checkpoint
 
+UAV execution follow-up: the buffer feedback oracle now accepts `--uav`, compiles
+RWByteAddressBuffer/RWStructuredBuffer feedback at u1/u2, creates matching raw and
+structured UAVs, and uses UAV resource states. Disassembly confirms raw and
+structured feedback instructions actually read u1/u2. All four alternating
+mapping phases pass for both normal and no-private runtimes; default SRV mode
+also passes again in both. Evidence is in
+`dxmt-reconciliation.ZLDvwE/buffer-feedback-uav-wine-{normal,np}.log` and
+`buffer-feedback-uav-srv-regression-{normal,np}.log`. This validates serial
+compute UAV reads only, not concurrent reads/writes or UAV feedback in other
+stages. Root-header transport remains open: AIR root argument uploads currently
+share their stride with ExecuteIndirect, so extending their layout requires
+coordinated direct/indirect changes rather than appending bytes only at direct
+binding sites. MSC root entries remain unchanged.
+
 GPU oracle follow-up: `tests/dx12/dx12_buffer_feedback.cpp` now executes raw
 Load/Load2 and structured Load with feedback in both normal and no-private
 cache-only Wine runtimes. Native D3DCompile disassembly is checked for
