@@ -1,5 +1,59 @@
 # Timestamp resolve ordering investigation
 
+## Production scheduling seam and D3D12 oracle (2026-10-08)
+
+Baseline ee8dd54b. Timestamp ResolveQueryData previously emitted an opaque raw
+handle command inside an ordinary blit chain. It now records a dedicated
+ResolveTimestamp encoder owning the native sample buffer and destination buffer.
+Replay preserves the original GPU resolve operation, query range, destination
+offset and queue fence ordering. Allocator destruction explicitly destroys the
+new record. This exposes the exact split point without parsing/rewriting arbitrary
+blit chains, and keeps both native objects alive with the recording. It does not
+introduce a completion boundary, change commit scheduling or fix zero timestamps.
+
+The new shader-free dx12_timestamp_resolve diagnostic runs 200 fresh submissions:
+sample indices 1/2, destination offsets 8/32, repeated resolution, surrounding
+ordinary copies, four canaries and allocator reset after completion. Zero/error
+sentinels, nonincreasing pairs and unequal repeated results return failure.
+Canary/copy corruption and completion timeout are distinct setup/ordering errors.
+The fixture is build_by_default:false and is not a passing FL acceptance row.
+
+Both reconfigured full builds pass; both fixture builds pass; all 16 host tests
+pass per build. Matching cache-only DLLs are used (no game/prefix deployment).
+Actual Unix runtime identity identifies the respective cache runtime. Normal
+runtime observes 123/200 timestamp failures; no-private with API validation
+observes 76/200. Both return 1 with the original zero-end symptom, not timeout or
+canary/copy failure. API validation explicitly reports enabled without misuse
+diagnostics. These are not an A/B failure-rate comparison: configuration and
+validation differ. No independent lifetime/concurrency qualification is claimed.
+Logs: /Users/zhangbo/.cache/dxmt-reconciliation.ZLDvwE/timestamp-seam-*.log.
+The initial relative-path staging attempt failed before loading the fixture;
+that attempt is excluded. Corrected absolute-path copies and matching normal
+source/staged/runtime DLL SHA256 precede the successful diagnostic executions.
+
+Main-agent review uses standards/spec axes; no independent review is claimed.
+The existing encoder allocation/destruction pattern and strict range validation
+are preserved. ResolveTimestamp never accepts ordinary blit append operations;
+the next copy opens a new blit encoder. Occlusion remains on its existing path.
+The historical CPU_SUBMISSION_REDESIGN_PLAN path is absent from this checkout;
+no unverified copy of that plan is treated as current repository instructions.
+
+Next production change preparation:
+
+- Hypothesis: host-observed completion before timestamp resolve removes the
+  reproduced zero-end symptom; dedicated resolve encoders define split points.
+- Evidence: native completion-handler exact-pair/consumer tests pass while the
+  new D3D12 oracle remains red at a useful reproduction rate.
+- Expected effect: GPU resolution and all downstream consumers execute only
+  after sampling completion, without CPU result replacement or caller GPU wait.
+- Risk: later queue Signal/Wait, sparse handoffs or presentation may overtake a
+  deferred segment; early allocator completion or worker lock acquisition may
+  deadlock. All queue entry points must use one ordered commit mechanism.
+- Validation: first run the same D3D12 oracle, then queued external CPU Signal,
+  downstream GPU consumer, repeated submissions and allocator lifetime cases.
+  Reserve allocator completion for the final segment. Keep ordinary submissions
+  pipelined; do not serialize every submission behind GPU completion.
+
 ## Completion-handler continuation (2026-10-08)
 
 Baseline 8b52846a. The new standalone post-callback mode registers completion

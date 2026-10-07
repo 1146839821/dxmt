@@ -508,6 +508,8 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       return "TemporalUpscale";
     case EncoderType::SampleTimestamp:
       return "SampleTimestamp";
+    case EncoderType::ResolveTimestamp:
+      return "ResolveTimestamp";
     case EncoderType::AccelerationStructure:
       return "AccelerationStructure";
     }
@@ -1716,6 +1718,24 @@ public:
            LabelEncoder(end_scaler, recording_id, data->id, "TemporalEnd");
           end_scaler.updateFence(fence_);
           end_scaler.endEncoding();
+          break;
+        }
+        case EncoderType::ResolveTimestamp: {
+          auto data = static_cast<ResolveTimestampData *>(current);
+          auto encoder = cmdbuf.blitCommandEncoder();
+          LabelEncoder(encoder, recording_id, data->id, "ResolveTimestamp");
+          encoder.waitForFence(fence_);
+          wmtcmd_blit_resolvecounters resolve = {};
+          resolve.type = WMTBlitCommandResolveCounters;
+          resolve.next.set(nullptr);
+          resolve.sample_buffer = data->sample_buffer.handle;
+          resolve.start = data->start;
+          resolve.len = data->count;
+          resolve.dst_buffer = data->destination;
+          resolve.dst_offset = data->destination_offset;
+          MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&resolve);
+          encoder.updateFence(fence_);
+          encoder.endEncoding();
           break;
         }
         case EncoderType::SampleTimestamp: {

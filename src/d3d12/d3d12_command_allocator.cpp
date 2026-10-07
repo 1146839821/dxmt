@@ -145,6 +145,9 @@ MTLD3D12CommandAllocatorImpl::DestroyEncoder(EncoderData *encoder) {
   case EncoderType::SampleTimestamp:
     reinterpret_cast<SampleTimestampData *>(encoder)->~SampleTimestampData();
     break;
+  case EncoderType::ResolveTimestamp:
+    reinterpret_cast<ResolveTimestampData *>(encoder)->~ResolveTimestampData();
+    break;
   case EncoderType::AccelerationStructure:
     reinterpret_cast<AccelerationStructureEncoderData *>(encoder)->~AccelerationStructureEncoderData();
     break;

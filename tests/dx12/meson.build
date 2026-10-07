@@ -2,6 +2,10 @@ dx12_sm6_probe = executable('dx12_compute_sm6', 'dx12_compute_sm6.cpp',
   dependencies: [ d3d12_dep ],
 )
 
+executable('dx12_timestamp_resolve', 'dx12_timestamp_resolve.cpp',
+  build_by_default: false, dependencies: [d3d12_dep],
+)
+
 executable('dx12_buffer_feedback', 'dx12_buffer_feedback.cpp',
   build_by_default: false, dependencies: [d3d12_dep],
 )

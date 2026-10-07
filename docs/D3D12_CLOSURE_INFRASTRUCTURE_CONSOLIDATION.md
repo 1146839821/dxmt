@@ -64,6 +64,17 @@ and full Typed/MinMax/Tiled/format/raster qualification remain pending.
 
 ## Task analysis
 
+Production timestamp seam checkpoint (2026-10-08): ResolveTimestamp is now a
+dedicated recording/replay encoder with owned sample/destination native objects
+and explicit allocator destruction. Both full builds and 16 host tests per build
+pass. A shader-free real D3D12 diagnostic reproduces zero-end timestamps at
+123/200 (normal) and 76/200 (no-private/API validation), preserving canaries and
+ordinary copies. This is a high-reproduction production oracle, not a fix or a
+failure-rate A/B. The next change must introduce ordered deferred segment commit
+across all queue entry points while retaining allocator completion until the
+final segment. Timestamp closure and the remaining performance/qualification
+requirements are still open. See D3D12_TIMESTAMP_RESOLVE_ORDER.md.
+
 Completion-handler diagnostic checkpoint (2026-10-08): native callbacks submit a
 later GPU resolve without callback waits or CPU counter resolution. Fenced GPU
 copy consumption and exact native-pair comparisons pass 800 iterations, then a

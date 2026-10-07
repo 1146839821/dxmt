@@ -71,6 +71,7 @@ enum class EncoderType {
   TemporalUpscale,
   SampleTimestamp,
   AccelerationStructure,
+  ResolveTimestamp,
 };
 
 struct EncoderData {
@@ -232,6 +233,16 @@ struct TemporalUpscaleData : EncoderData {
 struct SampleTimestampData : EncoderData {
   WMT::Reference<WMT::CounterSampleBuffer> sample_buffer;
   uint64_t sample_index;
+};
+
+// Keep timestamp resolution visible to queue scheduling rather than burying
+// its completion-boundary requirement in an ordinary blit command chain.
+struct ResolveTimestampData : EncoderData {
+  WMT::Reference<WMT::CounterSampleBuffer> sample_buffer;
+  WMT::Reference<WMT::Buffer> destination;
+  uint64_t start;
+  uint64_t count;
+  uint64_t destination_offset;
 };
 
 enum class AccelerationStructureCommandType {

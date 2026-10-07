@@ -5506,21 +5506,23 @@ public:
                     " count=", QueryCount);
       return;
     }
-    if (!PreBlit())
-      return;
-
     if (Type == D3D12_QUERY_TYPE_TIMESTAMP) {
       if (query->type != D3D12_QUERY_HEAP_TYPE_TIMESTAMP || !query->timestamp_buffer) {
         FailRecording(__func__, "timestamp query heap is invalid");
         return;
       }
-      auto &cmd = allocator_->EncodeBlitCommand<wmtcmd_blit_resolvecounters>();
-      cmd.type = WMTBlitCommandResolveCounters;
-      cmd.sample_buffer = query->timestamp_buffer.handle;
-      cmd.start = StartIndex;
-      cmd.len = QueryCount;
-      cmd.dst_buffer = destination->buffer->current()->buffer();
-      cmd.dst_offset = AlignedDstBufferOffset;
+      allocator_->InvalidateCurrentPass();
+      auto resolve = allocator_->AllocatePass<ResolveTimestampData>();
+      if (!resolve) {
+        FailRecording(__func__, "timestamp resolve encoder allocation failed");
+        return;
+      }
+      resolve->type = EncoderType::ResolveTimestamp;
+      resolve->sample_buffer = query->timestamp_buffer;
+      resolve->destination = destination->buffer->current()->buffer();
+      resolve->start = StartIndex;
+      resolve->count = QueryCount;
+      resolve->destination_offset = AlignedDstBufferOffset;
       return;
     }
 
@@ -5529,6 +5531,8 @@ public:
       FailRecording(__func__, "occlusion query heap is invalid");
       return;
     }
+    if (!PreBlit())
+      return;
     auto &cmd = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
     cmd.type = WMTBlitCommandCopyFromBufferToBuffer;
     cmd.src = query->visibility_buffer;
