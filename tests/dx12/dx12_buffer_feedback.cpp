@@ -28,8 +28,9 @@ void Transition(ID3D12GraphicsCommandList *list, ID3D12Resource *resource,
   b.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
   list->ResourceBarrier(1, &b);
 }
-int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect, bool pixel, bool vertex, bool geometry) {
-  const bool graphics_stage = pixel || vertex || geometry;
+int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect, bool pixel, bool vertex, bool geometry, bool hull, bool domain) {
+  const bool tessellation = hull || domain;
+  const bool graphics_stage = pixel || vertex || geometry || tessellation;
   // Equal zero payloads in mapped and NULL tiles force status to be independent
   // of payload. Both descriptor views start at the last word of tile zero.
   const char *hlsl = R"(
@@ -41,7 +42,23 @@ ByteAddressBuffer raw : register(t0);
 StructuredBuffer<uint> structured : register(t1);
 #endif
 RWStructuredBuffer<uint> output : register(u0);
-#ifdef GEOMETRY_SOURCE
+#if defined(HULL_SOURCE) || defined(DOMAIN_SOURCE)
+struct TessVertex { float4 position : SV_Position; };
+struct TessFactors { float edge[3] : SV_TessFactor; float inside : SV_InsideTessFactor; };
+TessFactors patch_constants(InputPatch<TessVertex, 3> patch) {
+  TessFactors factors = {{1, 1, 1}, 1}; return factors;
+}
+#endif
+#ifdef HULL_SOURCE
+[domain("tri")][partitioning("integer")][outputtopology("triangle_cw")]
+[outputcontrolpoints(3)][patchconstantfunc("patch_constants")]
+TessVertex main(InputPatch<TessVertex, 3> patch, uint id : SV_OutputControlPointID) {
+  if (id == 0) {
+#elif defined(DOMAIN_SOURCE)
+[domain("tri")]
+TessVertex main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, float3 coord : SV_DomainLocation) {
+  if (coord.x == 1 && coord.y == 0 && coord.z == 0) {
+#elif defined(GEOMETRY_SOURCE)
 struct GeometryVertex { float4 position : SV_Position; };
 [maxvertexcount(3)] void main(triangle GeometryVertex positions[3],
                             inout TriangleStream<GeometryVertex> stream) {
@@ -65,6 +82,15 @@ void main(float4 position : SV_Position) {
   output[7]=s; output[8]=CheckAccessFullyMapped(d);
   output[9]=t; output[10]=CheckAccessFullyMapped(e);
   output[11]=0x1234u;
+#ifdef HULL_SOURCE
+  }
+  return patch[id];
+#elif defined(DOMAIN_SOURCE)
+  }
+  TessVertex result;
+  result.position = patch[0].position * coord.x + patch[1].position * coord.y + patch[2].position * coord.z;
+  return result;
+#endif
 #ifdef VERTEX_SOURCE
   }
   return float4(id == 2 ? 3 : -1, id == 1 ? 3 : -1, 0, 1);
@@ -75,12 +101,14 @@ void main(float4 position : SV_Position) {
 #endif
 })";
   Owned<ID3DBlob> shader, errors;
-  D3D_SHADER_MACRO macros[5] = {}; UINT macro_count = 0;
+  D3D_SHADER_MACRO macros[7] = {}; UINT macro_count = 0;
   if (uav_source) macros[macro_count++] = {"UAV_SOURCE", "1"};
   if (pixel) macros[macro_count++] = {"PIXEL_SOURCE", "1"};
   if (vertex) macros[macro_count++] = {"VERTEX_SOURCE", "1"};
   if (geometry) macros[macro_count++] = {"GEOMETRY_SOURCE", "1"};
-  auto hr = compile(hlsl, std::strlen(hlsl), "buffer-feedback", macros, nullptr, "main", geometry ? "gs_5_0" : vertex ? "vs_5_0" : pixel ? "ps_5_0" : "cs_5_0",
+  if (hull) macros[macro_count++] = {"HULL_SOURCE", "1"};
+  if (domain) macros[macro_count++] = {"DOMAIN_SOURCE", "1"};
+  auto hr = compile(hlsl, std::strlen(hlsl), "buffer-feedback", macros, nullptr, "main", hull ? "hs_5_0" : domain ? "ds_5_0" : geometry ? "gs_5_0" : vertex ? "vs_5_0" : pixel ? "ps_5_0" : "cs_5_0",
                     D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &shader.p, &errors.p);
   if (errors.p) std::printf("%s\n", (const char *)errors.p->GetBufferPointer());
   Check(hr);
@@ -185,6 +213,29 @@ void main(float4 position : SV_Position) {
     graphics.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     graphics.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     graphics.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    Owned<ID3DBlob> companion;
+    if (tessellation) {
+      const char *helper = R"(
+struct TessVertex { float4 position : SV_Position; };
+struct TessFactors { float edge[3] : SV_TessFactor; float inside : SV_InsideTessFactor; };
+TessFactors patch_constants(InputPatch<TessVertex, 3> patch) {
+  TessFactors factors = {{1, 1, 1}, 1}; return factors;
+}
+[domain("tri")][partitioning("integer")][outputtopology("triangle_cw")]
+[outputcontrolpoints(3)][patchconstantfunc("patch_constants")]
+TessVertex hs_main(InputPatch<TessVertex, 3> patch, uint id : SV_OutputControlPointID) { return patch[id]; }
+[domain("tri")]
+TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, float3 coord : SV_DomainLocation) {
+  TessVertex result;
+  result.position = patch[0].position * coord.x + patch[1].position * coord.y + patch[2].position * coord.z;
+  return result;
+})";
+      Check(compile(helper, std::strlen(helper), nullptr, nullptr, nullptr, hull ? "ds_main" : "hs_main",
+                    hull ? "ds_5_0" : "hs_5_0", 0, 0, &companion.p, nullptr));
+      D3D12_SHADER_BYTECODE other = {companion.p->GetBufferPointer(), companion.p->GetBufferSize()};
+      graphics.HS = hull ? pd.CS : other; graphics.DS = domain ? pd.CS : other;
+      graphics.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+    }
     Check(device.p->CreateGraphicsPipelineState(&graphics, IID_PPV_ARGS(&pipeline.p)));
   } else Check(device.p->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pipeline.p)));
   Owned<ID3D12GraphicsCommandList> list;
@@ -247,7 +298,7 @@ void main(float4 position : SV_Position) {
       list.p->SetGraphicsRootDescriptorTable(root_source ? 2 : 0, descriptors.p->GetGPUDescriptorHandleForHeapStart());
       D3D12_VIEWPORT viewport = {0, 0, 1, 1, 0, 1}; D3D12_RECT scissor = {0, 0, 1, 1};
       list.p->RSSetViewports(1, &viewport); list.p->RSSetScissorRects(1, &scissor);
-      list.p->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      list.p->IASetPrimitiveTopology(tessellation ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
       if (indirect) list.p->ExecuteIndirect(signature.p, 1, arguments.p, 0, nullptr, 0);
       else list.p->DrawInstanced(3, 1, 0, 0);
     } else {
@@ -275,12 +326,12 @@ void main(float4 position : SV_Position) {
   }
   CloseHandle(event);
   std::printf("BUFFER_FEEDBACK %s %s %s raw/structured zero-payload, boundary and alternating remap PASS\n",
-              geometry ? "geometry" : vertex ? (indirect ? "indirect-vertex" : "vertex") : pixel ? (indirect ? "indirect-pixel" : "pixel") : indirect ? "indirect" : "direct", root_source ? "root" : "table", uav_source ? "UAV" : "SRV");
+              hull ? "hull" : domain ? "domain" : geometry ? "geometry" : vertex ? (indirect ? "indirect-vertex" : "vertex") : pixel ? (indirect ? "indirect-pixel" : "pixel") : indirect ? "indirect" : "direct", root_source ? "root" : "table", uav_source ? "UAV" : "SRV");
   return 0;
 }
 }
 int main(int argc, char **argv) {
-  bool uav_source = false, root_source = false, indirect = false, pixel = false, vertex = false, geometry = false;
+  bool uav_source = false, root_source = false, indirect = false, pixel = false, vertex = false, geometry = false, hull = false, domain = false;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--uav")) uav_source = true;
     else if (!std::strcmp(argv[i], "--root")) root_source = true;
@@ -288,13 +339,16 @@ int main(int argc, char **argv) {
     else if (!std::strcmp(argv[i], "--pixel")) { pixel = true; root_source = true; }
     else if (!std::strcmp(argv[i], "--vertex")) { vertex = true; root_source = true; }
     else if (!std::strcmp(argv[i], "--geometry")) { geometry = true; root_source = true; }
+    else if (!std::strcmp(argv[i], "--hull")) { hull = true; root_source = true; }
+    else if (!std::strcmp(argv[i], "--domain")) { domain = true; root_source = true; }
     else return 2;
   }
-  if (unsigned(pixel) + unsigned(vertex) + unsigned(geometry) > 1 || (geometry && indirect)) return 2;
+  if (unsigned(pixel) + unsigned(vertex) + unsigned(geometry) + unsigned(hull) + unsigned(domain) > 1 ||
+      ((geometry || hull || domain) && indirect)) return 2;
   auto library = LoadLibraryA("d3dcompiler_47.dll");
   if (!library) return 77;
   auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(library, "D3DCompile"));
   int result = 1;
-  try { if (compile) result = Run(compile, uav_source, root_source, indirect, pixel, vertex, geometry); } catch (const std::exception &e) { std::puts(e.what()); }
+  try { if (compile) result = Run(compile, uav_source, root_source, indirect, pixel, vertex, geometry, hull, domain); } catch (const std::exception &e) { std::puts(e.what()); }
   FreeLibrary(library); return result;
 }

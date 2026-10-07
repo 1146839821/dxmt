@@ -448,6 +448,30 @@ and instance combinations, inflight/multiqueue lifetime, DXIL and the broader
 sparse/performance matrices remain open. No API/shader-validation run, complete
 geometry conformance or game acceptance is claimed here.
 
+### Hull/domain-stage root feedback oracles
+
+`--hull` and `--domain` independently compile the consuming stage as hs_5_0 or
+ds_5_0, pairing it with a non-consuming companion. The fixture reuses the
+repository's triangular, three-control-point, integer-partitioned tessellation
+shape and factors of one. Hull control point 0 writes the 12-word output; the
+domain stage writes only at the exact corner (1,0,0), avoiding repeated writes
+from the other invocations. No PS is present. Data, mapping status and nonzero
+execution sentinel are checked independently after a fence, so these checks
+prove HS/DS consumption rather than inferred PS or GS success.
+
+Normal/no-private full builds and 15/15 host tests each pass. Both runtimes'
+HS/DS root SRV/UAV probes pass all four serial remaps at VA + 65532. Evidence:
+`dxmt-reconciliation.ZLDvwE/root-feedback-tess-*`.
+The tested direct consumers require no additional runtime implementation change.
+
+HS fork/join or patch-constant feedback consumers, joint-stage feedback/input
+deduplication, other tessellation domains/partitioning/factors, multiple patches,
+instances, indirect root updates, inflight/multiqueue/alias semantics, DXIL and
+the broader sparse/performance matrices remain open. No API/shader-validation
+run, full tessellation conformance or ROTTR visual/performance acceptance is
+claimed by these zero-payload root-buffer status tests. The CLI explicitly
+rejects conflicting stage selectors and unsupported tessellation indirect mode.
+
 Selective root-transport prerequisite: raw/structured decoder uses now accumulate
 `buffer_feedback` on the corresponding SRV/UAV only when the status destination
 is non-NULL. AIR argument reflection publishes this as the previously unused
