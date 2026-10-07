@@ -30,6 +30,11 @@ int main() {
   auto first_owner = static_cast<dxmt::MTLD3D12Resource *>(first.p);
   auto second_owner = static_cast<dxmt::MTLD3D12Resource *>(second.p);
   bool ok = true;
+  auto retained = internal->SnapshotBufferByVA(va + 17, &offset);
+  ok &= retained.ptr() == allocation && offset == 17;
+  offset = 99;
+  ok &= !internal->SnapshotBufferByVA(0, &offset) && offset == 0;
+  ok &= !internal->SnapshotBufferByVA(va, nullptr);
   for (auto new_owner : {second_owner, static_cast<dxmt::MTLD3D12Resource *>(nullptr)}) {
     ok &= SUCCEEDED(internal->RegisterResidencyAndVA(allocation, new_owner));
     ok &= SUCCEEDED(internal->UnregisterResidencyAndVA(allocation, first_owner));
@@ -48,6 +53,8 @@ int main() {
   ok &= found != snapshot.end();
   first.p->Release(); first.p = nullptr;
   ok &= internal->LookupBufferByVA(va, &offset) == nullptr;
+  ok &= !internal->SnapshotBufferByVA(va, &offset) && offset == 0;
+  ok &= retained && retained->gpuAddress() == va && retained->length() >= 256;
   if (found != snapshot.end()) ok &= (*found)->gpuAddress() == va && (*found)->length() >= 256;
   if (!ok) { std::cerr << "VA owner/snapshot regression failed\n"; return 1; }
   std::cout << "same-allocation owner replacement, stale unregister and retained snapshot PASS\n";

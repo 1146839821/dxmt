@@ -2037,10 +2037,9 @@ public:
   }
 
   BufferAllocation *
-  LookupBufferByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) {
+  LookupBufferByVALocked(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) {
     if (!pOffset)
       return {};
-    std::unique_lock<dxmt::mutex> lock(residency_lock_);
     auto iter = interval_map_.upper_bound(VA);
     if (iter == interval_map_.begin()) {
       *pOffset = 0;
@@ -2055,6 +2054,18 @@ public:
     }
     *pOffset = offset;
     return allocation;
+  }
+
+  BufferAllocation *
+  LookupBufferByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) {
+    std::unique_lock<dxmt::mutex> lock(residency_lock_);
+    return LookupBufferByVALocked(VA, pOffset);
+  }
+
+  Rc<BufferAllocation>
+  SnapshotBufferByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) {
+    std::unique_lock<dxmt::mutex> lock(residency_lock_);
+    return Rc<BufferAllocation>(LookupBufferByVALocked(VA, pOffset));
   }
 
   MTLD3D12Resource *

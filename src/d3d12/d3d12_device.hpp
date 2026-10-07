@@ -455,6 +455,8 @@ public:
   virtual HRESULT UnregisterResidencyAndVA(BufferAllocation *allocation, MTLD3D12Resource *resource = nullptr) = 0;
 
   virtual BufferAllocation *LookupBufferByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) = 0;
+  // Acquire allocation ownership before releasing the VA registry lock.
+  virtual Rc<BufferAllocation> SnapshotBufferByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) = 0;
 
   virtual HRESULT SnapshotRegisteredBuffers(std::vector<Rc<BufferAllocation>> &allocations) = 0;
 

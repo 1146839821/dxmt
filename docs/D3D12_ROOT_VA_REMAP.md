@@ -1,0 +1,51 @@
+# Root VA same-address remap task
+
+Baseline: a7d7203c, clean worktree at inspection. This is the user's outstanding
+P2 root-VA item, not a feature-level promotion or complete lifetime matrix.
+
+Hypothesis: root residency must observe the correct VA generation at its defined
+recording/submission boundary and retain that generation until GPU completion.
+Evidence: EncodeRootResourceUses currently calls LookupBufferByVA while recording;
+the registry lookup returns a raw allocation pointer after releasing its lock.
+It then dereferences the pointer to retain a native resource. A concurrent owner
+unregister can therefore race the ownership acquisition. Indirect root-updating
+commands already use SnapshotRegisteredBuffers at submission, acquiring strong
+allocation references under the registry lock and fanning out outside it.
+
+Existing dx12_va_snapshot proves same-allocation owner replacement, stale-owner
+unregister protection and retention after unregister. It does not substitute a
+different allocation at the same VA or execute a root-descriptor GPU consumer.
+Do not credit it as same-address root remap acceptance.
+
+Next implementation: add a retained single-VA lookup boundary for CPU-known root
+addresses, acquiring ownership under the registry lock. Then determine and honor
+root descriptor data/static/volatile semantics for submission observations,
+without rereading static descriptor ranges or expanding heap lock scope.
+Expected effect: remove the ownership-acquisition race and provide a coherent
+generation token for the subsequent remap path. Risk: static timing changes,
+allocation lifetime inflation and conflating sparse physical mapping changes
+with a different virtual allocation. The retained lookup alone is not remap closure.
+
+Validation required: retained lookup/unregister control, real direct and indirect
+CBV/SRV/UAV consumer evidence, legal same-address generation replacement, repeated
+closed-list submissions and in-flight old-generation lifetime. First establish
+whether an exact replacement can be constructed through supported public resource
+APIs; an internal owner-only swap is not equivalent GPU evidence.
+
+## Retained lookup implementation result
+
+SnapshotBufferByVA now returns Rc<BufferAllocation> acquired under the VA registry
+lock. Both lookup methods share the locked range/offset validation. CPU-known root
+residency encoding uses the retained method and performs native retention/encoding
+after the lock is released. This fixes the observed acquisition race without
+altering root staging, static descriptor timing or submission remap policy.
+
+Normal/no-private full builds and explicit dx12_va_snapshot targets pass. Both
+cache-only Wine runtimes pass offset 17, null-output, missing-address, owner/stale
+unregister and retained-allocation access after public resource release controls.
+Logs: `dxmt-reconciliation.ZLDvwE/root-va-*`. No game/prefix changes or push.
+Main-agent self-review: no nested registry lock, no encoding under the lock,
+shared range validation, and strong ownership returned before lock destruction.
+This test is a structural/lifetime control, not a GPU remap oracle or concurrent
+stress proof. Other raw-lookup consumers and real same-address submission behavior
+remain open; the overall root-VA task is not complete.

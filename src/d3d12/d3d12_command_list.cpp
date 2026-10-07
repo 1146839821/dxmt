@@ -2907,7 +2907,7 @@ public:
       if (!va)
         return;
       uint64_t buffer_offset = 0;
-      auto allocation = device_->LookupBufferByVA(va, &buffer_offset);
+      auto allocation = device_->SnapshotBufferByVA(va, &buffer_offset);
       if (allocation) {
         const auto usage = type == D3D12_ROOT_PARAMETER_TYPE_UAV
                                ? static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite)
