@@ -1,5 +1,16 @@
 # FL12_0 closure checkpoint
 
+## Infrastructure consolidation priority (2026-10-07)
+
+Current work follows D3D12_CLOSURE_INFRASTRUCTURE_CONSOLIDATION.md rather than
+the dated next-priority statements below. Gate schema 2 separates optional
+Mesh/DXR regressions from mandatory FL requirements. Resource audit now has a
+backend-specific continuation in D3D12_RESOURCE_AUDIT_CONTINUATION_2026-10-07.md;
+AIR raw/structured sideband is implemented/partially qualified, while MSC and
+complete qualification remain open. Experimental environment isolation, actual
+module provenance, timestamp oracle and root-feedback performance are next,
+before complete Typed/MinMax/Tiled/format/raster runs. No capability promotion.
+
 ## Typed geometry/tessellation runtime update (2026-10-06)
 
 Globally offset typed-origin records now drive companion GS/HS/DS PSOs and

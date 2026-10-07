@@ -1,5 +1,11 @@
 # D3D12 Resource Audit — Round 2 Re-audit
 
+Historical snapshot: retain this report's original M1/native observations.
+For current feat/d3d12-1 implementation and bounded validation, see
+[2026-10-07 continuation](D3D12_RESOURCE_AUDIT_CONTINUATION_2026-10-07.md).
+That update narrows the AIR raw/structured blocker; it does not retroactively
+turn the failures or missing evidence below into passes.
+
 Date: 2026-09-12
 Branch: `feat/d3d12`
 Scope: post-GO Tiled/Reserved Tier 2 semantic closure only.

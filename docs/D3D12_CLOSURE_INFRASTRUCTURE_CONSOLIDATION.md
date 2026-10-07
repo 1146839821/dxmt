@@ -12,6 +12,14 @@ build passing. Optional Mesh/DXR results stay visible without affecting mandator
 FL aggregates. This closes only that classification slice; provenance, capability
 isolation and full category registration remain pending. See D3D12_FL12_GATE.md.
 
+Resource audit continuation now separates current AIR implementation/partial
+qualification from the MSC gap and preserves historical packed-tail/LOD/native
+observations. Four matching-cache compute oracles and two PE-loader trace runs
+pass with experimental gates explicitly disabled. Initial cache PE mismatches
+were corrected and preliminary results excluded. Actual Unix-image provenance,
+runner-level experimental isolation and complete resource matrices remain open.
+See D3D12_RESOURCE_AUDIT_CONTINUATION_2026-10-07.md.
+
 ## Task analysis
 
 Current implementation has separate DXBC/AIRCONV and DXIL/MSC paths, bounded

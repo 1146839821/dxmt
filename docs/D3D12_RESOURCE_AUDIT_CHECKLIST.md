@@ -4,6 +4,13 @@ Status: In progress
 Branch: `feat/d3d12`
 Scope: Phase B resource, heap, tiled-resource, and `CopyTiles` contract audit.
 
+Current continuation (2026-10-07, feat/d3d12-1): see
+[backend-specific closure ledger](D3D12_RESOURCE_AUDIT_CONTINUATION_2026-10-07.md).
+The sections below retain their dated historical evidence. In particular, the
+Round 2 blanket AIR raw/structured design blocker is superseded only by the
+implemented/bounded AIR scope in that continuation; MSC and full qualification
+remain open. Temporary capability opt-ins are not qualified feature levels.
+
 This ledger is the source of truth for this audit. Before starting a new slice,
 check the completed list and its slice record. Every completed slice must add a
 record under `docs/` and link it below. Do not reimplement a completed item
