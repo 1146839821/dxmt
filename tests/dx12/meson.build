@@ -258,6 +258,10 @@ dx12_feature_support = executable('dx12_feature_support', 'dx12_feature_support.
   dependencies: [ d3d12_dep ],
 )
 
+dx12_experimental_caps = executable('dx12_experimental_caps', 'dx12_experimental_caps.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dx12_msc_probe = executable('dx12_msc_probe', 'dx12_msc_probe.cpp',
   include_directories: [ include_directories('../../src/winemetal') ],
   dependencies: [ d3d12_dep ],

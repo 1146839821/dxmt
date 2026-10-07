@@ -21,6 +21,7 @@
 #include "d3d12_device.hpp"
 #include "dxgi_interfaces.h"
 #include "log/log.hpp"
+#include "util_env.hpp"
 
 namespace dxmt {
 
@@ -41,13 +42,21 @@ is_supported_feature_level(D3D_FEATURE_LEVEL level) {
 
 static D3D_FEATURE_LEVEL
 get_max_supported_feature_level(WMT::Device device) {
+  const auto capabilities = QueryDXMTMSCCapabilities(device);
+  // Temporary development opt-in, not a claim of complete FL12_0 semantics.
+  // Do not bypass the MSC binding ABI/hardware prerequisites or expose FL12_1.
+  if (env::getEnvVar("DXMT_EXPERIMENTAL_FL12_0") == "1" &&
+      capabilities.apple7_or_newer && capabilities.CoreShaderPathUsable()) {
+    WARN("Experimental FL12_0 enabled; full feature-level qualification is incomplete");
+    return D3D_FEATURE_LEVEL_12_0;
+  }
 #ifdef DXMT_NO_PRIVATE_API
   return D3D_FEATURE_LEVEL_11_0;
 #else
   // FL12_0 and FL12_1 require Tier 2 tiled resources, which DXMT does not
   // expose yet. Keep the hardware-dependent FL11_1 cutoff consistent with
   // the D3D11 device creation path.
-  return QueryDXMTMSCCapabilities(device).apple7_or_newer ? D3D_FEATURE_LEVEL_11_1 : D3D_FEATURE_LEVEL_11_0;
+  return capabilities.apple7_or_newer ? D3D_FEATURE_LEVEL_11_1 : D3D_FEATURE_LEVEL_11_0;
 #endif
 }
 

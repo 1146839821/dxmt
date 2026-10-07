@@ -3,6 +3,7 @@
 #include <initializer_list>
 
 #include "log/log.hpp"
+#include "util_env.hpp"
 
 namespace dxmt {
 
@@ -152,6 +153,10 @@ QueryDXMTMSCCapabilities(WMT::Device device) {
 
 D3D_SHADER_MODEL
 GetMaximumD3D12ShaderModel(const DXMTMSCCapabilities &capabilities) {
+  if (capabilities.CoreShaderPathUsable() && env::getEnvVar("DXMT_EXPERIMENTAL_SM6_6") == "1") {
+    WARN("Experimental SM6.6 enabled; full shader-model qualification is incomplete");
+    return static_cast<D3D_SHADER_MODEL>(0x66);
+  }
   /* MSC API 4 is the current DXIL integration floor; this is deliberately
    * independent from the converter's own 4.0.1 version and from D3D shader
    * model numbering.  Higher shader models remain unclaimed until fixtures
