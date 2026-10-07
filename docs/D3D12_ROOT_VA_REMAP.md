@@ -87,3 +87,20 @@ Both targets keep the same shared heap storage; this verifies legal placed alias
 generation replacement, not a reserved-resource physical tile remap. No production
 defect was exposed in the existing indirect submission snapshot path. Direct-root,
 repeat-list and overlapping old-generation cases remain separate unfinished work.
+
+## Direct root consumer
+
+`--direct-remap` creates CBV/SRV targets before recording, captures their original
+root addresses through SetComputeRoot*View and Dispatch, then replaces all six
+targets at exactly the same VA after Close. The independent 317/619 numeric oracle
+and release-after-gated-submission control pass on AIRCONV/MSC and both builds.
+Logs: `root-direct-remap-{air,msc}-{normal,no-private}.log`. All four indirect
+remap regressions also pass with the same updated executables.
+
+Self-review: direct targets are allocated before their root setter calls; indirect
+targets stay late. Both reuse identical alias index pairing and exact-address
+guards, and producer argument storage is not aliased. Existing root-signature
+1.0 volatile semantics remain unchanged. This shows correctness for the shared
+heap-storage placed alias case, not interchangeable independent GPU allocations
+or sparse physical remapping. No new production defect was exposed; repeated
+closed lists and separately gated old/new-generation overlap remain open.

@@ -20,7 +20,7 @@ void Check(HRESULT hr) {
     throw std::runtime_error("D3D12 operation failed");
   }
 }
-void Run(const void *consumer, size_t consumer_size, ID3DBlob *producer, bool remap = false) {
+void Run(const void *consumer, size_t consumer_size, ID3DBlob *producer, bool remap = false, bool direct = false) {
   Owned<ID3D12Device> device;
   Check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.p)));
   Owned<ID3D12Heap> alias_heaps[6];
@@ -82,6 +82,11 @@ void Run(const void *consumer, size_t consumer_size, ID3DBlob *producer, bool re
   for (auto &resource : output)
     buffer(resource, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, remap);
   buffer(readback, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, false);
+  Owned<ID3D12Resource> late_cbv[2], late_srv[2];
+  if (direct) for (unsigned i = 0; i < 2; ++i) {
+    buffer(late_cbv[i], D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false, remap);
+    buffer(late_srv[i], D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false, remap);
+  }
   D3D12_COMMAND_QUEUE_DESC qd = {};
   Owned<ID3D12CommandQueue> queue;
   Owned<ID3D12CommandAllocator> allocator;
@@ -108,7 +113,13 @@ void Run(const void *consumer, size_t consumer_size, ID3DBlob *producer, bool re
     alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
     list->ResourceBarrier(1, &alias);
   }
-  list->ExecuteIndirect(signature.p, 2, arguments.p, 0, nullptr, 0);
+  if (direct) for (unsigned i = 0; i < 2; ++i) {
+    list->SetComputeRootConstantBufferView(0, late_cbv[i]->GetGPUVirtualAddress());
+    list->SetComputeRootShaderResourceView(1, late_srv[i]->GetGPUVirtualAddress());
+    list->SetComputeRootUnorderedAccessView(2, output[i]->GetGPUVirtualAddress());
+    list->SetComputeRoot32BitConstant(3, i, 0);
+    list->Dispatch(1, 1, 1);
+  } else list->ExecuteIndirect(signature.p, 2, arguments.p, 0, nullptr, 0);
   if (remap) {
     // Reactivate the recorded copy-source aliases after the replacement UAVs.
     D3D12_RESOURCE_BARRIER alias = {};
@@ -122,13 +133,14 @@ void Run(const void *consumer, size_t consumer_size, ID3DBlob *producer, bool re
     list->CopyBufferRegion(readback.p, i * 4, output[i].p, i * 4, 4);
   }
   Check(list->Close());
-  // Targets did not exist during recording: only submission-time registry
-  // retention can find them. CPU arguments are never the ExecuteIndirect buffer.
-  Owned<ID3D12Resource> late_cbv[2], late_srv[2];
+  // Indirect targets did not exist during recording; direct targets did.
+  // CPU arguments are never the ExecuteIndirect buffer.
   UINT command_words[20] = {};
   for (unsigned i = 0; i < 2; ++i) {
-    buffer(late_cbv[i], D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false, remap);
-    buffer(late_srv[i], D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false, remap);
+    if (!direct) {
+      buffer(late_cbv[i], D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false, remap);
+      buffer(late_srv[i], D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false, remap);
+    }
     void *mapped = nullptr;
     const UINT value = (i + 1) * 100, input = i ? 9 : 7;
     Check(late_cbv[i]->Map(0, nullptr, &mapped)); std::memcpy(mapped, &value, 4); late_cbv[i]->Unmap(0, nullptr);
@@ -190,13 +202,14 @@ void Run(const void *consumer, size_t consumer_size, ID3DBlob *producer, bool re
     std::cerr << "readback=" << values[0] << ',' << values[1] << '\n';
     throw std::runtime_error("GPU-selected root VA mismatch");
   }
-  std::cout << "GPU-produced CBV/SRV/UAV roots, late registration and gated lifetime: "
-            << values[0] << ',' << values[1] << " remap=" << remap << " PASS\n";
+  std::cout << "CBV/SRV/UAV roots and gated lifetime: "
+            << values[0] << ',' << values[1] << " remap=" << remap << " direct=" << direct << " PASS\n";
 }
 } // namespace
 
 int main(int argc, char **argv) {
-  const bool remap = argc > 1 && !std::strcmp(argv[argc - 1], "--remap");
+  const bool direct = argc > 1 && !std::strcmp(argv[argc - 1], "--direct-remap");
+  const bool remap = direct || (argc > 1 && !std::strcmp(argv[argc - 1], "--remap"));
   const int shader_argc = argc - (remap ? 1 : 0);
   if (shader_argc > 2) return 2;
   HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
@@ -216,10 +229,10 @@ int main(int argc, char **argv) {
       std::ifstream file(argv[1], std::ios::binary);
       std::vector<char> bytes((std::istreambuf_iterator<char>(file)), {});
       if (bytes.empty()) throw std::runtime_error("empty shader file");
-      Run(bytes.data(), bytes.size(), producer.p, remap);
+      Run(bytes.data(), bytes.size(), producer.p, remap, direct);
     } else {
       Check(compile(consumer, sizeof(consumer) - 1, nullptr, nullptr, nullptr, "main", "cs_5_0", 0, 0, &shader.p, nullptr));
-      Run(shader->GetBufferPointer(), shader->GetBufferSize(), producer.p, remap);
+      Run(shader->GetBufferPointer(), shader->GetBufferSize(), producer.p, remap, direct);
     }
     result = 0;
   } catch (const std::exception &error) { std::cerr << error.what() << '\n'; }
