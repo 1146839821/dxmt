@@ -6,6 +6,12 @@ Starting branch feat/d3d12-1, HEAD 4dfe46a5. All items below are pending unless
 explicitly backed by fresh implementation and evidence. No capability promotion
 is authorized by this plan; temporary gates remain experimental opt-ins.
 
+Progress checkpoint: gate classification and raw/structured watchlist wording
+are corrected in report schema 2, with 58 Python tests and 16 host tests per
+build passing. Optional Mesh/DXR results stay visible without affecting mandatory
+FL aggregates. This closes only that classification slice; provenance, capability
+isolation and full category registration remain pending. See D3D12_FL12_GATE.md.
+
 ## Task analysis
 
 Current implementation has separate DXBC/AIRCONV and DXIL/MSC paths, bounded

@@ -1,5 +1,39 @@
 # FL12 evidence gate and backend isolation
 
+## Closure classification update (2026-10-07)
+
+Starting HEAD 050af612, branch feat/d3d12-1. Hypothesis: optional modern-feature
+regressions must remain observable without becoming mandatory FL12 prerequisites.
+Evidence: mesh and five DXR failure-oracle groups previously contributed to both
+FL12_0 requirements and backend isolation. Expected effect: accurate requirement
+classification, not a less demanding mandatory contract. Risk: optional failures
+could disappear if merely removed; therefore they remain in an independently
+aggregated optional_regressions section and the CLI output summary.
+
+Report schema is now version 2. Six Mesh/DXR groups move to optional_regressions;
+all probes, failure-injection modes, hashes and raw results remain available.
+Mandatory compute/ordinary graphics/GS/HS/DS isolation and pipeline-library
+regressions remain required. Missing complete GPU categories and API-only claims
+still cannot PASS. The process exit status remains tied to the FL gates; consumers
+needing optional regression enforcement must also inspect optional_regressions.
+This explicitly separates FL acceptance from general project regression health.
+
+The raw/structured watchlist now distinguishes the missing DXIL/MSC sideband from
+implemented AIR transport with focused GPU evidence. AIR complete current matrix
+status stays UNVERIFIED; dual-backend closure stays BLOCKED_BY_ARCHITECTURE.
+Packed-tail, clamp and native-oracle evidence are not promoted.
+
+Validation: 58 Python unit tests, including missing/all-status transitions for
+every optional group, unchanged complete FL requirement lists under optional
+changes, visible optional failure aggregation, and mandatory-failure preservation.
+Both build configurations reconfigured successfully and all 16 host tests per
+build pass (no C++ production changes). Main-agent standards/spec self-review
+informed by code-review found no outstanding actionable finding for this slice;
+independent sub-agent review and fresh runtime matrices were not performed.
+No capability changes, deployment, restart or push. Resource audit refresh,
+experimental isolation, actual-module provenance, timestamp oracle, root-feedback
+profiling and complete qualification remain pending consolidation work.
+
 ## Task analysis
 
 Scope: first task in the supplied FL12_1 master prompt, not FL12 promotion.

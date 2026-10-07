@@ -33,6 +33,48 @@ class GateTests(unittest.TestCase):
             self.assertNotEqual(report[name]["status"], gate.PASS)
         self.assertFalse(report["capability_changes"])
 
+    def test_optional_failures_do_not_change_mandatory_requirements(self):
+        optional_names = ("mesh_failure_oracle", "shader_library_failure_oracle",
+                          "state_object_failure_oracle", "state_object_addition_failure_oracle",
+                          "ray_synthesis_failure_oracle", "ray_metal_failure_oracle")
+        probes = self.probes()
+        for name in ("backend_failure_oracle", "graphics_failure_oracle",
+                     "tessellation_failure_oracle", "geometry_failure_oracle", *optional_names):
+            probes[name] = {"status": gate.PASS}
+        baseline = gate.build_report(probes, "normal")
+        for name in optional_names:
+            for status in (None, *gate.STATUSES):
+                with self.subTest(probe=name, status=status):
+                    changed = dict(probes)
+                    if status is None: changed.pop(name)
+                    else: changed[name] = {"status": status}
+                    report = gate.build_report(changed, "normal")
+                    for level in ("FL12_0_GATE", "FL12_1_GATE"):
+                        self.assertEqual(report[level], baseline[level])
+                        self.assertNotEqual(report[level]["status"], gate.PASS)
+                    self.assertEqual(report["optional_regressions"]["status"],
+                                     gate.UNVERIFIED if status is None else status)
+                    self.assertEqual(len(report["optional_regressions"]["requirements"]), 6)
+
+    def test_optional_success_does_not_mask_mandatory_failure(self):
+        probes = self.probes()
+        for name in ("backend_failure_oracle", "graphics_failure_oracle", "tessellation_failure_oracle",
+                     "geometry_failure_oracle", "mesh_failure_oracle"):
+            probes[name] = {"status": gate.PASS}
+        probes["geometry_failure_oracle"] = {"status": gate.FAIL}
+        report = gate.build_report(probes, "no-private")
+        self.assertEqual(report["optional_regressions"]["status"], gate.PASS)
+        for level in ("FL12_0_GATE", "FL12_1_GATE"):
+            self.assertEqual(report[level]["status"], gate.FAIL)
+
+    def test_watchlist_distinguishes_air_implementation_from_msc_gap(self):
+        report = gate.build_report(self.probes(), "normal")
+        rows = {r["name"]: r for r in report["architecture_watchlist"]}
+        self.assertEqual(rows["tiled_raw_structured_buffer"]["status"], gate.BLOCKED)
+        self.assertIn("DXIL/MSC", rows["tiled_raw_structured_buffer"]["reason"])
+        self.assertEqual(rows["tiled_raw_structured_dxbc"]["status"], gate.UNVERIFIED)
+        self.assertEqual(report["schema_version"], 2)
+
     def test_each_isolation_contract_probe_is_required(self):
         invocations = ("backend_failure_oracle", "graphics_failure_oracle", "tessellation_failure_oracle",
                        "geometry_failure_oracle", "mesh_failure_oracle")
@@ -207,11 +249,13 @@ class GateTests(unittest.TestCase):
             for name in ("backend_failure_oracle", "graphics_failure_oracle", "tessellation_failure_oracle", "geometry_failure_oracle"):
                 probes[name] = {"status": gate.PASS}
             if status is not None: probes["mesh_failure_oracle"] = {"status": status}
-            rows = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
+            report = gate.build_report(probes, "normal")
+            rows = report["optional_regressions"]["requirements"]
             expected = gate.UNVERIFIED if status is None else status
             self.assertEqual(next(r["status"] for r in rows if r["name"] == "mesh_backend_failure_invocations"), expected)
-            self.assertEqual(next(r["status"] for r in rows if r["name"] == "backend_isolation"),
-                             gate.PARTIAL if expected == gate.PASS else expected)
+            self.assertEqual(next(r["status"] for r in report["FL12_0_GATE"]["requirements"]
+                                  if r["name"] == "backend_isolation"), gate.PARTIAL)
+            self.assertEqual(report["optional_regressions"]["status"], expected)
 
     def test_mesh_every_failure_mode_is_required(self):
         def fixture(*args):
@@ -333,11 +377,13 @@ class GateTests(unittest.TestCase):
                          "geometry_failure_oracle", "mesh_failure_oracle"):
                 probes[name] = {"status": gate.PASS}
             if status is not None: probes["shader_library_failure_oracle"] = {"status": status}
-            rows = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
+            report = gate.build_report(probes, "normal")
+            rows = report["optional_regressions"]["requirements"]
             expected = gate.UNVERIFIED if status is None else status
             self.assertEqual(next(r["status"] for r in rows if r["name"] == "shader_library_converter_failure_invocations"), expected)
-            self.assertEqual(next(r["status"] for r in rows if r["name"] == "backend_isolation"),
-                             gate.PARTIAL if expected == gate.PASS else expected)
+            self.assertEqual(next(r["status"] for r in report["FL12_0_GATE"]["requirements"]
+                                  if r["name"] == "backend_isolation"), gate.PARTIAL)
+            self.assertEqual(report["optional_regressions"]["status"], expected)
 
     def test_shader_library_every_failure_mode_is_required(self):
         def fixture(*args):
@@ -358,11 +404,13 @@ class GateTests(unittest.TestCase):
                          "geometry_failure_oracle", "mesh_failure_oracle"):
                 probes[name] = {"status": gate.PASS}
             if status is not None: probes["state_object_failure_oracle"] = {"status": status}
-            rows = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
+            report = gate.build_report(probes, "normal")
+            rows = report["optional_regressions"]["requirements"]
             expected = gate.UNVERIFIED if status is None else status
             self.assertEqual(next(r["status"] for r in rows if r["name"] == "state_object_failure_invocations"), expected)
-            self.assertEqual(next(r["status"] for r in rows if r["name"] == "backend_isolation"),
-                             gate.PARTIAL if expected == gate.PASS else expected)
+            self.assertEqual(next(r["status"] for r in report["FL12_0_GATE"]["requirements"]
+                                  if r["name"] == "backend_isolation"), gate.PARTIAL)
+            self.assertEqual(report["optional_regressions"]["status"], expected)
 
     def test_state_object_every_mode_is_required(self):
         seen = []
@@ -422,11 +470,13 @@ class GateTests(unittest.TestCase):
                          "geometry_failure_oracle", "mesh_failure_oracle"):
                 probes[name] = {"status": gate.PASS}
             if status is not None: probes["state_object_addition_failure_oracle"] = {"status": status}
-            rows = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
+            report = gate.build_report(probes, "normal")
+            rows = report["optional_regressions"]["requirements"]
             expected = gate.UNVERIFIED if status is None else status
             self.assertEqual(next(r["status"] for r in rows if r["name"] == "state_object_addition_failure_invocations"), expected)
-            self.assertEqual(next(r["status"] for r in rows if r["name"] == "backend_isolation"),
-                             gate.PARTIAL if expected == gate.PASS else expected)
+            self.assertEqual(next(r["status"] for r in report["FL12_0_GATE"]["requirements"]
+                                  if r["name"] == "backend_isolation"), gate.PARTIAL)
+            self.assertEqual(report["optional_regressions"]["status"], expected)
 
     def test_state_object_addition_every_mode_is_required(self):
         seen = []
@@ -487,11 +537,13 @@ class GateTests(unittest.TestCase):
                          "geometry_failure_oracle", "mesh_failure_oracle"):
                 probes[name] = {"status": gate.PASS}
             if status is not None: probes["ray_synthesis_failure_oracle"] = {"status": status}
-            rows = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
+            report = gate.build_report(probes, "normal")
+            rows = report["optional_regressions"]["requirements"]
             expected = gate.UNVERIFIED if status is None else status
             self.assertEqual(next(r["status"] for r in rows if r["name"] == "ray_synthesis_failure_invocations"), expected)
-            self.assertEqual(next(r["status"] for r in rows if r["name"] == "backend_isolation"),
-                             gate.PARTIAL if expected == gate.PASS else expected)
+            self.assertEqual(next(r["status"] for r in report["FL12_0_GATE"]["requirements"]
+                                  if r["name"] == "backend_isolation"), gate.PARTIAL)
+            self.assertEqual(report["optional_regressions"]["status"], expected)
 
     def test_ray_synthesis_every_mode_is_required(self):
         seen = []
@@ -515,11 +567,13 @@ class GateTests(unittest.TestCase):
                          "geometry_failure_oracle", "mesh_failure_oracle"):
                 probes[name] = {"status": gate.PASS}
             if status is not None: probes["ray_metal_failure_oracle"] = {"status": status}
-            rows = gate.build_report(probes, "normal")["FL12_0_GATE"]["requirements"]
+            report = gate.build_report(probes, "normal")
+            rows = report["optional_regressions"]["requirements"]
             expected = gate.UNVERIFIED if status is None else status
             self.assertEqual(next(r["status"] for r in rows if r["name"] == "ray_metal_failure_invocations"), expected)
-            self.assertEqual(next(r["status"] for r in rows if r["name"] == "backend_isolation"),
-                             gate.PARTIAL if expected == gate.PASS else expected)
+            self.assertEqual(next(r["status"] for r in report["FL12_0_GATE"]["requirements"]
+                                  if r["name"] == "backend_isolation"), gate.PARTIAL)
+            self.assertEqual(report["optional_regressions"]["status"], expected)
 
     def test_ray_metal_every_mode_is_required(self):
         seen = []

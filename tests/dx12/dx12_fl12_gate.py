@@ -438,8 +438,9 @@ def build_report(probes, variant, provenance=None):
     geometry = probes.get("geometry_failure_oracle", {"status": UNVERIFIED})
     fl0.append(row("geometry_backend_failure_invocations", geometry["status"],
                    "GS and combined VS/GS ordered compiler traces; mixed/wrong-stage precompiler rejection"))
+    optional = []
     mesh = probes.get("mesh_failure_oracle", {"status": UNVERIFIED})
-    fl0.append(row("mesh_backend_failure_invocations", mesh["status"],
+    optional.append(row("mesh_backend_failure_invocations", mesh["status"],
                    "native MS/AS/PS compiler traces; DXBC/wrong-stage precompiler rejection"))
     library = probes.get("pipeline_library_failure_oracle", {"status": UNVERIFIED})
     fl0.append(row("compute_pipeline_library_failure_invocations", library["status"],
@@ -454,33 +455,28 @@ def build_report(probes, variant, provenance=None):
     fl0.append(row("geometry_pipeline_library_failure_invocations", geom_library["status"],
                    "GS retained hits, metadata reload, combined failures and same-library retry"))
     shader_library = probes.get("shader_library_failure_oracle", {"status": UNVERIFIED})
-    fl0.append(row("shader_library_converter_failure_invocations", shader_library["status"],
+    optional.append(row("shader_library_converter_failure_invocations", shader_library["status"],
                    "six ray stages, selected-pass errors, converter retry/cache and precompiler rejection"))
     state_object = probes.get("state_object_failure_oracle", {"status": UNVERIFIED})
-    fl0.append(row("state_object_failure_invocations", state_object["status"],
+    optional.append(row("state_object_failure_invocations", state_object["status"],
                    "six-stage candidate probing, AH/CH hints, failed publication and retry/cache"))
     addition = probes.get("state_object_addition_failure_oracle", {"status": UNVERIFIED})
-    fl0.append(row("state_object_addition_failure_invocations", addition["status"],
+    optional.append(row("state_object_addition_failure_invocations", addition["status"],
                    "same-parent addition failure/retry/cache, inherited identifiers and parent immutability"))
     synthesis = probes.get("ray_synthesis_failure_oracle", {"status": UNVERIFIED})
-    fl0.append(row("ray_synthesis_failure_invocations", synthesis["status"],
+    optional.append(row("ray_synthesis_failure_invocations", synthesis["status"],
                    "dispatch/intersection query/materialization failures, same-object retry and retained state"))
     metal = probes.get("ray_metal_failure_oracle", {"status": UNVERIFIED})
-    fl0.append(row("ray_metal_failure_invocations", metal["status"],
+    optional.append(row("ray_metal_failure_invocations", metal["status"],
                    "lazy library/function-load and PSO/table/handle failures, complete-state publication and retry"))
     isolation = aggregate([row("PSO_contracts", isolation, ""), row("compute_invocations", invocation["status"], ""),
                            row("graphics_invocations", graphics["status"], ""),
                            row("tessellation_invocations", tessellation["status"], ""),
-                           row("geometry_invocations", geometry["status"], ""), row("mesh_invocations", mesh["status"], ""),
+                           row("geometry_invocations", geometry["status"], ""),
                            row("compute_library_invocations", library["status"], ""),
                            row("ordinary_graphics_library_invocations", graphics_library["status"], ""),
                            row("tessellation_library_invocations", tess_library["status"], ""),
-                           row("geometry_library_invocations", geom_library["status"], ""),
-                           row("shader_library_converter_invocations", shader_library["status"], ""),
-                           row("state_object_invocations", state_object["status"], ""),
-                           row("state_object_addition_invocations", addition["status"], ""),
-                           row("ray_synthesis_invocations", synthesis["status"], ""),
-                           row("ray_metal_invocations", metal["status"], "")])
+                           row("geometry_library_invocations", geom_library["status"], "")])
     fl0.append(row("backend_isolation", PARTIAL if isolation == PASS else isolation,
                    "bounded invocation probes including compute/VS/PS container rejection; full backend contract remains unverified"))
     fl1 = [
@@ -491,13 +487,15 @@ def build_report(probes, variant, provenance=None):
         row("fl12_1_full_contract", UNVERIFIED, "full raster/format/backend semantic matrix missing"),
     ]
     blockers = [
-        row("tiled_raw_structured_buffer", BLOCKED, "flat-VA sparse shader ABI gap; see resource audit"),
+        row("tiled_raw_structured_buffer", BLOCKED, "DXIL/MSC residency sideband missing; AIR implementation does not close both backends"),
+        row("tiled_raw_structured_dxbc", UNVERIFIED, "AIR sideband implemented with focused local readbacks; complete current matrix required"),
         row("tiled_packed_mip_multi_tile", BLOCKED, "packed multi-tile residency/aliasing gap; see resource audit"),
         row("tiled_clamp_and_windows_oracle", UNVERIFIED, "independent clamp/oracle evidence required"),
     ]
-    return {"schema_version": 1, "build_variant": variant, "capability_changes": False,
+    return {"schema_version": 2, "build_variant": variant, "capability_changes": False,
             "FL12_0_GATE": {"status": aggregate(fl0), "requirements": fl0},
             "FL12_1_GATE": {"status": aggregate(fl1), "requirements": fl1},
+            "optional_regressions": {"status": aggregate(optional), "requirements": optional},
             "architecture_watchlist": blockers, "probes": probes}
 
 
@@ -562,7 +560,8 @@ def main():
     if args.output:
         args.output.write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps({name: report[name]["status"] for name in ("FL12_0_GATE", "FL12_1_GATE")} |
-                         {"probes": {name: probe["status"] for name, probe in probes.items()}}, indent=2))
+                         {"optional_regressions": report["optional_regressions"]["status"],
+                          "probes": {name: probe["status"] for name, probe in probes.items()}}, indent=2))
     else:
         print(json.dumps(report, indent=2))
     return 0 if all(report[gate]["status"] == PASS for gate in ("FL12_0_GATE", "FL12_1_GATE")) else 1
