@@ -1645,14 +1645,39 @@ public:
   }
 
   bool
-  EncodeAirconvIndirectRoots(MTLD3D12CommandSignature *signature, WMT::Buffer arguments,
-                             uint64_t arguments_offset, uint64_t &root_offset) {
+  EncodeAirconvIndirectBindings(MTLD3D12CommandSignature *signature, WMT::Buffer arguments,
+                               uint64_t arguments_offset, uint64_t &root_offset, uint64_t &vertex_offset) {
     if (!signature->air_emulation_root_resolver || !rootsig_graphics_) {
       FailRecording(__func__, "AIR emulation root resolver is unavailable");
       return false;
     }
     root_offset = EncodeRootArgument(rootsig_graphics_.ptr(), rootarg_graphics_staging_);
     if (recording_failed_) return false;
+    // AIR uses compact records ordered by the active API slot mask. Keep every
+    // untouched record seeded from pre-ExecuteIndirect state, just like roots.
+    struct VertexEntry { uint64_t address; uint32_t stride; uint32_t length; };
+    static_assert(sizeof(VertexEntry) == 16);
+    const size_t vertex_table_size = sizeof(VertexEntry) * (signature->UpdateVertexBuffers ? 32 : 1);
+    auto [vertex_mapping, vertex_table_offset] = allocator_->AllocateGPUHeap(vertex_table_size, 16);
+    auto [mask_mapping, mask_offset] = allocator_->AllocateGPUHeap(sizeof(uint32_t), 4);
+    if (!vertex_mapping || !mask_mapping) { FailRecording(__func__, "vertex table allocation failed"); return false; }
+    vertex_offset = vertex_table_offset;
+    const uint32_t slot_mask = signature->UpdateVertexBuffers ? pso_graphics_->slot_mask : 0;
+    std::memcpy(mask_mapping, &slot_mask, sizeof(slot_mask));
+    std::memset(vertex_mapping, 0, vertex_table_size);
+    auto entries = static_cast<VertexEntry *>(vertex_mapping);
+    for (unsigned slot = 0, index = 0; slot < 32; ++slot) {
+      if (!(slot_mask & (1u << slot))) continue;
+      const auto &state = vertex_buffers_[slot];
+      uint64_t offset = 0;
+      auto allocation = state.BufferLocation ? device_->LookupBufferByVA(state.BufferLocation, &offset) : nullptr;
+      if (state.BufferLocation && (!allocation || offset > allocation->length() ||
+          state.SizeInBytes > allocation->length() - offset)) {
+        FailRecording(__func__, "invalid seeded vertex buffer slot=", slot);
+        return false;
+      }
+      entries[index++] = {allocation ? allocation->gpuAddress() + offset : 0, state.StrideInBytes, state.SizeInBytes};
+    }
     allocator_->InvalidateCurrentPass();
     auto compute = allocator_->AllocatePass<ComputeEncoderData>();
     if (!compute) { FailRecording(__func__, "root resolver encoder allocation failed"); return false; }
@@ -1672,6 +1697,12 @@ public:
     auto &output = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
     output.type = WMTComputeCommandSetBuffer; output.buffer = allocator_->gpu_heap_buffer_;
     output.offset = root_offset; output.index = 1;
+    auto &vertices = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+    vertices.type = WMTComputeCommandSetBuffer; vertices.buffer = allocator_->gpu_heap_buffer_;
+    vertices.offset = vertex_offset; vertices.index = 2;
+    auto &mask = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+    mask.type = WMTComputeCommandSetBuffer; mask.buffer = allocator_->gpu_heap_buffer_;
+    mask.offset = mask_offset; mask.index = 3;
     auto &dispatch = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch>();
     dispatch.type = WMTComputeCommandDispatchThreads; dispatch.size = {1, 1, 1};
     auto &barrier = allocator_->EncodeComputeCommand<wmtcmd_compute_memory_barrier>();
@@ -1691,6 +1722,17 @@ public:
       bind.type = type; bind.buffer = allocator_->gpu_heap_buffer_; bind.offset = offset;
       bind.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
     }
+  }
+
+  void
+  BindAirconvIndirectVertexBuffers(uint64_t offset) {
+    // GPU-selected VAs need the same completion-owned live buffer retention as
+    // indirect roots, even when the signature does not update any roots.
+    allocator_->encoder_current->indirect_root_va = true;
+    EncodeRenderResourceUse(allocator_->gpu_heap_buffer_.handle, WMTResourceUsageRead, WMTRenderStagePreRaster);
+    auto &bind = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+    bind.type = WMTRenderCommandSetObjectBuffer; bind.buffer = allocator_->gpu_heap_buffer_;
+    bind.offset = offset; bind.index = SM50_BINDING_INDEX_VERTEX_BUFFER;
   }
 
   void
@@ -6154,9 +6196,8 @@ public:
         return;
       if ((sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW &&
            sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED) ||
-          sig->UpdateVertexBuffers ||
           sig->UpdateIndexBuffer) {
-        WARN("D3D12 ExecuteIndirect with AIRCONV tessellation does not support VB/IB updates");
+        WARN("D3D12 ExecuteIndirect with AIRCONV tessellation does not support IB updates");
         FailRecording(__func__, "AIRCONV tessellation indirect signature is unsupported");
         return;
       }
@@ -6175,11 +6216,13 @@ public:
       if (predication_buffer_ && !EncodePredicationCount(count_buffer, CountBufferOffset, MaxCommandCount, filtered_count)) return;
       for (UINT command_index = 0; command_index < MaxCommandCount; command_index++) {
         const uint64_t command_offset = uint64_t(command_index) * sig->ByteStride;
-        uint64_t root_offset = 0;
-        if (sig->UpdateRootArguments && !EncodeAirconvIndirectRoots(sig, arg_buffer->buffer->current()->buffer(), ArgBufferOffset + command_offset, root_offset)) return;
+        uint64_t root_offset = 0, vertex_offset = 0;
+        if ((sig->UpdateRootArguments || sig->UpdateVertexBuffers) &&
+            !EncodeAirconvIndirectBindings(sig, arg_buffer->buffer->current()->buffer(), ArgBufferOffset + command_offset, root_offset, vertex_offset)) return;
         if (PreDraw(false, index_format, false) != DrawCallStatus::AirconvTessellation)
           return;
         if (sig->UpdateRootArguments) BindAirconvIndirectRoots(root_offset);
+        if (sig->UpdateVertexBuffers) BindAirconvIndirectVertexBuffers(vertex_offset);
         if (filtered_count)
           EncodeRenderResourceUse(predication_buffer_ ? allocator_->gpu_heap_buffer_.handle : count_buffer->buffer->current()->buffer().handle,
                                   WMTResourceUsageRead, WMTRenderStageVertex);
@@ -6202,9 +6245,8 @@ public:
         return;
       if ((sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW &&
            sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED) ||
-           sig->UpdateVertexBuffers ||
            sig->UpdateIndexBuffer) {
-        WARN("D3D12 ExecuteIndirect with AIRCONV geometry does not support VB/IB updates");
+        WARN("D3D12 ExecuteIndirect with AIRCONV geometry does not support IB updates");
         FailRecording(__func__, "AIRCONV geometry indirect signature is unsupported");
         return;
       }
@@ -6218,8 +6260,9 @@ public:
       if (predication_buffer_ && !EncodePredicationCount(count_buffer, CountBufferOffset, MaxCommandCount, filtered_count)) return;
       for (UINT command_index = 0; command_index < MaxCommandCount; command_index++) {
         const uint64_t command_offset = uint64_t(command_index) * sig->ByteStride;
-        uint64_t root_offset = 0;
-        if (sig->UpdateRootArguments && !EncodeAirconvIndirectRoots(sig, arg_buffer->buffer->current()->buffer(), ArgBufferOffset + command_offset, root_offset)) return;
+        uint64_t root_offset = 0, vertex_offset = 0;
+        if ((sig->UpdateRootArguments || sig->UpdateVertexBuffers) &&
+            !EncodeAirconvIndirectBindings(sig, arg_buffer->buffer->current()->buffer(), ArgBufferOffset + command_offset, root_offset, vertex_offset)) return;
         const auto status = PreDraw(false, index_format, false);
         if (status != DrawCallStatus::AirconvGeometry ||
             !geometry_primitive_matches(primitive_type, pso_graphics_->airconv_geometry_input_primitive))
@@ -6227,6 +6270,7 @@ public:
         if (indexed && !index_buffer)
           return;
         if (sig->UpdateRootArguments) BindAirconvIndirectRoots(root_offset);
+        if (sig->UpdateVertexBuffers) BindAirconvIndirectVertexBuffers(vertex_offset);
         if (filtered_count)
           EncodeRenderResourceUse(predication_buffer_ ? allocator_->gpu_heap_buffer_.handle : count_buffer->buffer->current()->buffer().handle,
                                   WMTResourceUsageRead, WMTRenderStageVertex);

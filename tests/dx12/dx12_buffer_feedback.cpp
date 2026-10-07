@@ -28,7 +28,7 @@ void Transition(ID3D12GraphicsCommandList *list, ID3D12Resource *resource,
   b.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
   list->ResourceBarrier(1, &b);
 }
-int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect, bool pixel, bool vertex, bool geometry, bool hull, bool domain, bool counted, bool predicated, bool root_updates, bool multi) {
+int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect, bool pixel, bool vertex, bool geometry, bool hull, bool domain, bool counted, bool predicated, bool root_updates, bool multi, bool vb_updates, bool vb_only) {
   const UINT command_count = multi ? 3 : 1;
   const UINT output_words = 12 * command_count;
   const bool tessellation = hull || domain;
@@ -86,6 +86,13 @@ void main(float4 position : SV_Position) {
 #ifdef MULTI_SOURCE
   base = command_id * 12;
 #endif
+#ifdef VB_SOURCE
+#ifdef GEOMETRY_SOURCE
+  x = asuint(positions[0].position.w) + asuint(positions[1].position.w) + asuint(positions[2].position.w);
+#else
+  x = asuint(patch[0].position.w) + asuint(patch[1].position.w) + asuint(patch[2].position.w);
+#endif
+#endif
   output[base + 0]=x; output[base + 1]=CheckAccessFullyMapped(a);
   output[base + 2]=y; output[base + 3]=CheckAccessFullyMapped(b);
   output[base + 4]=z.x; output[base + 5]=z.y; output[base + 6]=CheckAccessFullyMapped(c);
@@ -111,7 +118,8 @@ void main(float4 position : SV_Position) {
 #endif
 })";
   Owned<ID3DBlob> shader, errors;
-  D3D_SHADER_MACRO macros[8] = {}; UINT macro_count = 0;
+  D3D_SHADER_MACRO macros[9] = {}; UINT macro_count = 0;
+  if (vb_updates) macros[macro_count++] = {"VB_SOURCE", "1"};
   if (multi) macros[macro_count++] = {"MULTI_SOURCE", "1"};
   if (uav_source) macros[macro_count++] = {"UAV_SOURCE", "1"};
   if (pixel) macros[macro_count++] = {"PIXEL_SOURCE", "1"};
@@ -155,6 +163,22 @@ void main(float4 position : SV_Position) {
   void *mapped = nullptr; Check(upload.p->Map(0, nullptr, &mapped)); std::memset(mapped, 0, 65536); upload.p->Unmap(0, nullptr);
   create(output, output_words * 4, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
   create(readback, output_words * 4, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
+  Owned<ID3D12Resource> indirect_vertices, initial_vertices;
+  if (vb_updates) {
+    create(indirect_vertices, 72, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+    create(initial_vertices, 24, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+    Check(indirect_vertices.p->Map(0, nullptr, &mapped));
+    auto values = static_cast<UINT *>(mapped);
+    for (UINT row = 0; row < 3; ++row)
+      for (UINT vertex_id = 0; vertex_id < 3; ++vertex_id) {
+        values[row * 6 + vertex_id * 2] = 100 + row;
+        values[row * 6 + vertex_id * 2 + 1] = 0xdeadbeef;
+      }
+    indirect_vertices.p->Unmap(0, nullptr);
+    Check(initial_vertices.p->Map(0, nullptr, &mapped));
+    const UINT initial[] = {999, 999, 999, 700, 700, 700};
+    std::memcpy(mapped, initial, sizeof(initial)); initial_vertices.p->Unmap(0, nullptr);
+  }
   Owned<ID3D12Heap> tiles;
   D3D12_HEAP_DESC hd = {}; hd.SizeInBytes = 65536; hd.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
   hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
@@ -217,9 +241,16 @@ void main(float4 position : SV_Position) {
   pd.CS = {shader.p->GetBufferPointer(), shader.p->GetBufferSize()};
   if (graphics_stage) {
     const char *vertex_source = "float4 main(uint id : SV_VertexID) : SV_Position { return float4(id == 2 ? 3 : -1, id == 1 ? 3 : -1, 0, 1); }";
+    if (vb_updates) vertex_source =
+        "float4 main(uint marker : VALUE0, uint kept : VALUE1, uint id : SV_VertexID) : SV_Position { "
+        "return float4(id == 2 ? 3 : -1, id == 1 ? 3 : -1, 0, asfloat(marker + kept)); }";
     Owned<ID3DBlob> vs;
     if (!vertex) Check(compile(vertex_source, std::strlen(vertex_source), nullptr, nullptr, nullptr, "main", "vs_5_0", 0, 0, &vs.p, nullptr));
     D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics = {};
+    D3D12_INPUT_ELEMENT_DESC elements[] = {
+        {"VALUE", 0, DXGI_FORMAT_R32_UINT, 3, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"VALUE", 1, DXGI_FORMAT_R32_UINT, 7, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
+    if (vb_updates) graphics.InputLayout = {elements, 2};
     graphics.pRootSignature = root.p;
     graphics.VS = vertex ? pd.CS : D3D12_SHADER_BYTECODE{vs.p->GetBufferPointer(), vs.p->GetBufferSize()};
     if (pixel) graphics.PS = pd.CS;
@@ -261,7 +292,7 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
   Owned<ID3D12Resource> count_buffer;
   if (counted) create(count_buffer, 16, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
   if (indirect) {
-    D3D12_INDIRECT_ARGUMENT_DESC updates[4] = {};
+    D3D12_INDIRECT_ARGUMENT_DESC updates[5] = {};
     for (UINT i = 0; i < 2; ++i) {
       updates[i].Type = uav_source ? D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW : D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
       if (uav_source) updates[i].UnorderedAccessView.RootParameterIndex = i;
@@ -274,8 +305,20 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
       updates[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
       updates[2].Constant = {3, 0, 1};
       sd.ByteStride = 40; sd.NumArgumentDescs = 4;
+      if (vb_updates) {
+        updates[4] = updates[3];
+        updates[3].Type = D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW;
+        updates[3].VertexBuffer.Slot = 3;
+        sd.ByteStride = 56; sd.NumArgumentDescs = 5;
+      }
     }
     if (!update_roots) { sd.ByteStride = 16; sd.NumArgumentDescs = 1; sd.pArgumentDescs = &updates[2]; }
+    if (vb_only) {
+      updates[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW;
+      updates[0].VertexBuffer.Slot = 3;
+      updates[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+      sd.ByteStride = 32; sd.NumArgumentDescs = 2; sd.pArgumentDescs = updates;
+    }
     Check(device.p->CreateCommandSignature(&sd, update_roots ? root.p : nullptr, IID_PPV_ARGS(&signature.p)));
     create(arguments, sd.ByteStride * command_count, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
     Check(arguments.p->Map(0, nullptr, &mapped));
@@ -283,13 +326,23 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
     std::memset(mapped, 0, sd.ByteStride * command_count);
     for (UINT row = 0; row < command_count; ++row) {
       auto stream = static_cast<char *>(mapped) + row * sd.ByteStride;
+      if (vb_only) {
+        const D3D12_VERTEX_BUFFER_VIEW vb = {indirect_vertices.p->GetGPUVirtualAddress(), 24, 8};
+        const UINT draw[4] = {3, 1, 0, 0};
+        std::memcpy(stream, &vb, sizeof(vb)); std::memcpy(stream + 16, draw, sizeof(draw));
+        continue;
+      }
       if (update_roots) {
         std::memcpy(stream, &address, 8);
         std::memcpy(stream + 8, &address, 8);
       }
       if (multi) std::memcpy(stream + 16, &row, 4);
+      if (vb_updates) {
+        const D3D12_VERTEX_BUFFER_VIEW vb = {indirect_vertices.p->GetGPUVirtualAddress() + row * 24, 24, 8};
+        std::memcpy(stream + 20, &vb, sizeof(vb));
+      }
       const UINT draw[4] = {3, 1, 0, 0}, dispatch[3] = {1, 1, 1};
-      std::memcpy(stream + (update_roots ? (multi ? 20 : 16) : 0), graphics_stage ? draw : dispatch, graphics_stage ? 16 : 12);
+      std::memcpy(stream + (update_roots ? (multi ? (vb_updates ? 36 : 20) : 16) : 0), graphics_stage ? draw : dispatch, graphics_stage ? 16 : 12);
     }
     arguments.p->Unmap(0, nullptr);
   }
@@ -343,6 +396,11 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
       D3D12_VIEWPORT viewport = {0, 0, 1, 1, 0, 1}; D3D12_RECT scissor = {0, 0, 1, 1};
       list.p->RSSetViewports(1, &viewport); list.p->RSSetScissorRects(1, &scissor);
       list.p->IASetPrimitiveTopology(tessellation ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      if (vb_updates) {
+        const D3D12_VERTEX_BUFFER_VIEW wrong = {initial_vertices.p->GetGPUVirtualAddress(), 12, 4};
+        const D3D12_VERTEX_BUFFER_VIEW kept = {initial_vertices.p->GetGPUVirtualAddress() + 12, 12, 4};
+        list.p->IASetVertexBuffers(3, 1, &wrong); list.p->IASetVertexBuffers(7, 1, &kept);
+      }
       if (multi) list.p->SetGraphicsRoot32BitConstant(3, command_count, 0);
       if (predicated) list.p->SetPredication(count_buffer.p, 8, D3D12_PREDICATION_OP_EQUAL_ZERO);
       if (indirect) list.p->ExecuteIndirect(signature.p, command_count, arguments.p, 0, count_buffer.p, 0);
@@ -364,7 +422,7 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
     for (UINT word = 0; word < output_words; ++word) {
       const UINT i = word % 12;
       const bool active = multi ? (predicated ? phase == 2 && word / 12 == 0 : word / 12 < (phase == 3 ? command_count : phase)) : should_execute;
-      UINT expected = 0;
+      UINT expected = active && vb_updates && i == 0 ? 3 * (800 + word / 12) : 0;
       if (active && (i == 1 || i == 8)) expected = (phase & 1) == 0;
       if (active && (i == 3 || i == 10)) expected = phase & 1;
       if (active && i == 11) expected = 0x1234;
@@ -374,6 +432,7 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
     if (!passed) { CloseHandle(event); return 1; }
   }
   CloseHandle(event);
+  if (vb_updates) std::puts("INDIRECT_VB slots 3/7, updated/seeded records PASS");
   if (multi) std::puts("MULTI_COMMAND separate-output-slots PASS");
   if (counted) std::printf("GPU count/predication gate predicated=%u PASS\n", predicated);
   std::printf("BUFFER_FEEDBACK %s %s %s raw/structured zero-payload, boundary and alternating remap PASS\n",
@@ -384,7 +443,7 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
 int main(int argc, char **argv) {
   bool uav_source = false, root_source = false, indirect = false, pixel = false, vertex = false, geometry = false, hull = false, domain = false;
   bool counted = false, predicated = false;
-  bool root_updates = false, multi = false;
+  bool root_updates = false, multi = false, vb_updates = false, vb_only = false;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--uav")) uav_source = true;
     else if (!std::strcmp(argv[i], "--root")) root_source = true;
@@ -396,16 +455,19 @@ int main(int argc, char **argv) {
     else if (!std::strcmp(argv[i], "--domain")) { domain = true; root_source = true; }
     else if (!std::strcmp(argv[i], "--counted")) { counted = true; indirect = true; root_source = true; }
     else if (!std::strcmp(argv[i], "--predicated")) { predicated = counted = indirect = root_source = true; }
+    else if (!std::strcmp(argv[i], "--vb-updates")) { vb_updates = multi = root_updates = counted = indirect = root_source = true; }
+    else if (!std::strcmp(argv[i], "--vb-only")) { vb_only = vb_updates = counted = indirect = root_source = true; }
     else if (!std::strcmp(argv[i], "--multi")) { multi = root_updates = counted = indirect = root_source = true; }
     else if (!std::strcmp(argv[i], "--root-updates")) { root_updates = indirect = root_source = true; }
     else return 2;
   }
+  if (vb_only) { multi = false; root_updates = false; }
   if (unsigned(pixel) + unsigned(vertex) + unsigned(geometry) + unsigned(hull) + unsigned(domain) > 1 ||
       (counted && !(geometry || hull || domain))) return 2;
   auto library = LoadLibraryA("d3dcompiler_47.dll");
   if (!library) return 77;
   auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(library, "D3DCompile"));
   int result = 1;
-  try { if (compile) result = Run(compile, uav_source, root_source, indirect, pixel, vertex, geometry, hull, domain, counted, predicated, root_updates, multi); } catch (const std::exception &e) { std::puts(e.what()); }
+  try { if (compile) result = Run(compile, uav_source, root_source, indirect, pixel, vertex, geometry, hull, domain, counted, predicated, root_updates, multi, vb_updates, vb_only); } catch (const std::exception &e) { std::puts(e.what()); }
   FreeLibrary(library); return result;
 }

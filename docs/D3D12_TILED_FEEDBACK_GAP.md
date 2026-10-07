@@ -1,5 +1,62 @@
 # Tiled raw/structured feedback production gap
 
+## AIR emulation indirect vertex-buffer updates checkpoint
+
+Baseline ba792a13. Hypothesis: extend the per-row GPU root resolver to update a
+seeded AIR vertex-buffer table, using the PSO slot mask to translate API slots
+to compact table indices. Evidence: PopulateVertexBufferTable emits only used
+slots, whereas command signatures describe API slots; the object-stage binding
+already consumes that table. Expected effect: GPU-selected VB address, size and
+stride without CPU argument readback. Risk: wrong compact indexing or omission
+of submission-owned residency would produce incorrect loads or premature release.
+Validation: independent vertex inputs in noncontiguous slots, initially different
+staged VB, multi-command separate output slices, count/predication regressions,
+both builds and targeted API validation. Dynamic IB requires a separate shader
+index-read ABI seam and remains rejected until implemented; it is not waived.
+
+Implementation extends the existing signature resolver to write GPU-selected
+VB address/stride/length into compact per-row records. popcount(mask & lower-slot
+bits) translates API slots; unused signature slots cannot overwrite used records.
+Untouched records are seeded from the pre-call bindings. Object-stage table
+binding independently marks indirect VA use, including signatures with no root
+updates, so submission snapshots retain selected buffers until completion.
+The managing-metal-cpp-lifetimes skill informed the explicit resolver Reference
+and completion-owned snapshot review; no ownership mechanism was replaced.
+Compute writes precede render consumption through the existing encoder/fence
+path. CPU staging resets modified VB slots once after the complete operation.
+No shader backend fallback, MSC ABI change, public capability promotion or native
+bridge layout change is introduced.
+
+Tests added: --vb-updates (combined multi-command root/VB) and --vb-only (one
+VB-updating command without root updates). Inputs use API slots 3 and 7, GPU
+stride 8 vs staged stride 4, different staged data and per-row buffer offsets.
+Self-review strengthened the oracle from one vertex to a three-vertex checksum,
+which observes incorrect stride/record length, not just the first address.
+Normal GS/DS count and HS UAV predication, no-private DS UAV count with explicit
+Metal API Validation Enabled and GS predication all pass the final oracle.
+Normal GS and no-private HS UAV VB-only probes pass. Normal root-only GS
+multi-command regression also passes. Both reconfigured full builds and all
+16 host tests per build pass. Evidence: cache dxmt-reconciliation.ZLDvwE/
+emulation-vb-final-*.log. A preliminary launcher run from the wrong directory
+failed to locate the executable; it is not counted as graphics evidence.
+
+Main-agent self-review uses the code-review standards/spec axes; independent
+sub-agent review was not performed. Standards: no outstanding actionable finding
+in the changed implementation after the oracle correction. Spec: PARTIAL;
+dynamic IB remains unsupported, and negative/null/size boundary tests, all slots,
+GPU-produced VB views, DrawIndexed, concurrent list reuse and early release are
+not qualified by these probes. Full GS/tessellation and FL12 qualification stay
+open. API validation is not shader-memory validation. Recording/private-output
+cost remains unmeasured and is assigned to closure infrastructure consolidation.
+Branch feat/d3d12-1; baseline origin/feat/d3d12; starting HEAD ba792a13;
+206 commits unique to local HEAD and 12 unique to the baseline were observed
+before this commit (not a claim that reconciliation was undone). Changes cover
+command signature/list, the feedback fixture and this document. Local commit
+identity is the commit containing this checkpoint; NOT PUSHED. No game/prefix
+deployment or process restart was performed. FL11_1 policy, default-off temporary
+FL12_0/SM6.6 gates and FL12_1 rejection are unchanged. Next task: closure
+infrastructure consolidation, before further feature slices/full matrices.
+
 ## Multi-command AIR emulation indirect execution checkpoint
 
 Baseline ad7d81a6. Hypothesis: marshal each signature-stride row separately and

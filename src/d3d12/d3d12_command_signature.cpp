@@ -130,7 +130,9 @@ public:
     std::stringstream source;
     std::stringstream root_source;
     root_source << "kernel void resolve_emulation_roots(device const d3d12_arguments& arg [[buffer(0)]], "
-                   "device ulong* rootsig_qwords [[buffer(1)]]) {\n";
+                   "device ulong* rootsig_qwords [[buffer(1)]], "
+                   "device dxmt_vertex_buffer* vertex_buffer [[buffer(2)]], "
+                   "constant uint& vertex_slot_mask [[buffer(3)]]) {\n";
     D3D12_INDIRECT_ARGUMENT_TYPE side_effect = ~(D3D12_INDIRECT_ARGUMENT_TYPE){};
     uint64_t argument_size = 0;
     ByteStride = pDesc->ByteStride;
@@ -356,6 +358,9 @@ public:
                << ".size_in_bytes,arg.vb_" << i << ".stride_in_bytes}; else ";
         source << "vertex_buffer[" << slot << "] = {arg.vb_" << i << ".buffer,arg.vb_" << i
                << ".stride_in_bytes,arg.vb_" << i << ".size_in_bytes};\n";
+        root_source << "if (vertex_slot_mask & (1u << " << slot << ")) vertex_buffer[popcount(vertex_slot_mask & "
+                    << ((uint32_t(1) << slot) - 1) << "u)] = {arg.vb_" << i << ".buffer,arg.vb_" << i
+                    << ".stride_in_bytes,arg.vb_" << i << ".size_in_bytes};\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW: {
@@ -439,7 +444,7 @@ public:
 
     source << "}\n"
               "};\n";
-    if (!is_compute && UpdateRootArguments) source << root_source.str() << "}\n";
+    if (!is_compute && (UpdateRootArguments || UpdateVertexBuffers)) source << root_source.str() << "}\n";
     if (!is_compute)
       air_emulation_draw_offset = static_cast<UINT>(argument_size -
           (CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED ? 20 : 16));
@@ -473,7 +478,7 @@ public:
       ERR("Failed to compile command signature resolve pso: ", err.description().getUTF8String());
       return E_FAIL;
     }
-    if (!is_compute && UpdateRootArguments) {
+    if (!is_compute && (UpdateRootArguments || UpdateVertexBuffers)) {
       auto root_function = lib.newFunction("resolve_emulation_roots");
       if (!root_function) return E_FAIL;
       air_emulation_root_resolver = device_->GetMTLDevice().newComputePipelineState(root_function, err);
