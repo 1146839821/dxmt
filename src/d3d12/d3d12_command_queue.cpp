@@ -383,8 +383,13 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     // are acquired under the registry lock; native fan-out is outside it.
     try { submission.indirect_root_buffers.push_back(std::move(snapshot)); }
     catch (const std::bad_alloc &) { return false; }
-    for (const auto &allocation : submission.indirect_root_buffers.back())
-      use_resource(allocation->buffer());
+    for (const auto &allocation : submission.indirect_root_buffers.back()) {
+      use_resource(allocation->buffer(), static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite));
+      if (allocation->sparse_feedback_header)
+        use_resource(allocation->sparse_feedback_header->buffer(), WMTResourceUsageRead);
+      if (allocation->sparse_mapping_bytes)
+        use_resource(allocation->sparse_mapping_bytes->buffer(), WMTResourceUsageRead);
+    }
     return true;
   }
 
@@ -1402,9 +1407,8 @@ public:
            auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
            LabelEncoder(encoder, recording_id, data->id, "Render");
            encoder.waitForFence(fence_, data->use_geometry ? WMTRenderStagePreRaster : WMTRenderStageVertex);
-           if (!RetainIndirectRootBuffers(data, submission, [&](WMT::Buffer buffer) {
-                 encoder.useResource(buffer,
-                     static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite),
+           if (!RetainIndirectRootBuffers(data, submission, [&](WMT::Buffer buffer, WMTResourceUsage usage) {
+                 encoder.useResource(buffer, usage,
                      WMTRenderStageVertex | WMTRenderStageFragment);
                })) {
              translation_failed = true;
@@ -1448,9 +1452,8 @@ public:
           auto encoder = cmdbuf.computeCommandEncoder(false);
            LabelEncoder(encoder, recording_id, data->id, "Compute");
            encoder.waitForFence(fence_);
-          if (!RetainIndirectRootBuffers(data, submission, [&](WMT::Buffer buffer) {
-                encoder.useResource(buffer,
-                    static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite));
+          if (!RetainIndirectRootBuffers(data, submission, [&](WMT::Buffer buffer, WMTResourceUsage usage) {
+                encoder.useResource(buffer, usage);
               })) {
             translation_failed = true;
             encoder.endEncoding();

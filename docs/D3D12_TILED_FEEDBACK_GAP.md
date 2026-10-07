@@ -261,6 +261,19 @@ byte-footprint lowering, DXIL support and GPU feedback matrices remain required.
 
 ## GPU mapping lookup lowering checkpoint
 
+Indirect root residency prerequisite: submission snapshots already strongly
+retain registered primary allocations, but their encoder fan-out previously
+declared only the primary buffer. It now also declares attached sparse header
+and mapping allocations as read-only for render/compute encoders, after the
+registry lock is released. Primary buffers retain their conservative read/write
+usage. The submission's source allocation reference owns both auxiliary
+allocations through completion; no root/MSC ABI or indirect stride changed.
+Normal/no-private full builds, all 15 host tests, and existing indirect root VA
+same-address-remap oracles pass (317/619) in both runtimes. These ordinary-buffer
+oracles are regression evidence, not a GPU oracle for the new auxiliary branch.
+Root shader header lookup and sparse indirect feedback execution remain open.
+Evidence: `dxmt-reconciliation.ZLDvwE/indirect-sparse-aux-{build,remap}-{normal,np}.log`.
+
 UAV execution follow-up: the buffer feedback oracle now accepts `--uav`, compiles
 RWByteAddressBuffer/RWStructuredBuffer feedback at u1/u2, creates matching raw and
 structured UAVs, and uses UAV resource states. Disassembly confirms raw and
