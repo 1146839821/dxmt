@@ -257,3 +257,23 @@ and lifetime evidence, not a shader access-status oracle. Raw/structured feedbac
 opcodes still fail closed in SM50Initialize; no Tier 2 or capability promotion,
 game deployment, process management or push occurred. Root transport, actual
 byte-footprint lowering, DXIL support and GPU feedback matrices remain required.
+# Raw/structured feedback decoder checkpoint
+
+Hypothesis: normalize feedback loads into the existing raw/structured load IR
+while retaining the separate status destination, so later residency lowering
+can share the data-load implementation without losing status semantics.
+Evidence: feedback variants insert a status operand before the address operands.
+Expected effect: correct operand indices and resource-read tracking, including
+NULL status destinations. Risk: decoding alone must not admit uninitialized
+status outputs. Validation: explicit lowering failure precedes every data-load
+path when a status destination is present; NULL status uses ordinary load lowering.
+
+The decoder now handles `LD_RAW_FEEDBACK` and `LD_STRUCTURED_FEEDBACK` and retains
+their optional integer status destination. Non-NULL status still produces an
+explicit unsupported-feature compile failure: header reads, GPU bitmap lookup,
+root-header transport, and shader execution acceptance remain unfinished.
+This checkpoint does not expose tiled-resource Tier 2 or prove sparse NULL data
+semantics. The new host test covers both load shapes, ordinary/feedback variants,
+NULL/non-NULL status, shifted immediate addresses, register identity, alignment,
+and SRV read tracking. Normal and no-private full builds and all 14 host tests
+pass; UAV/TGSM and GPU shader feedback cases remain outside this test's scope.

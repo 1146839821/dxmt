@@ -2428,6 +2428,11 @@ void
 Converter::operator()(const InstLoadRaw &load) {
   using namespace llvm::air;
 
+  if (load.feedback) {
+    failure = "Raw buffer residency feedback lowering is not implemented";
+    return;
+  }
+
   auto Buf = LoadBuffer(load.src);
   if (!Buf)
     return;
@@ -2457,6 +2462,11 @@ Converter::operator()(const InstLoadRaw &load) {
 void
 Converter::operator()(const InstLoadStructured &load) {
   using namespace llvm::air;
+
+  if (load.feedback) {
+    failure = "Structured buffer residency feedback lowering is not implemented";
+    return;
+  }
 
   auto Buf = LoadBuffer(load.src);
   if (!Buf)

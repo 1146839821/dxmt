@@ -979,12 +979,17 @@ Instruction readInstruction(
     shader_info.uavMap[dst.range_id].written = true;
     return inst;
   };
-  case microsoft::D3D11_SB_OPCODE_LD_RAW: {
+  case microsoft::D3D11_SB_OPCODE_LD_RAW:
+  case microsoft::D3DWDDM1_3_SB_OPCODE_LD_RAW_FEEDBACK: {
+    const bool sparse = Inst.m_OpCode == microsoft::D3DWDDM1_3_SB_OPCODE_LD_RAW_FEEDBACK;
     auto inst = InstLoadRaw{
       .dst = readDstOperand(Inst.m_Operands[0], phase, OperandDataType::Integer),
-      .src_byte_offset = readSrcOperand(Inst.m_Operands[1], phase, OperandDataType::Integer),
-      .src = readTypelessSrc(Inst.m_Operands[2], phase),
+      .src_byte_offset = readSrcOperand(Inst.m_Operands[1 + sparse], phase, OperandDataType::Integer),
+      .src = readTypelessSrc(Inst.m_Operands[2 + sparse], phase),
       .opt_flag_offset_is_vec4_aligned = false,
+      .feedback = sparse && Inst.m_Operands[1].m_Type != microsoft::D3D10_SB_OPERAND_TYPE_NULL
+                    ? std::optional<DstOperand>{readDstOperand(Inst.m_Operands[1], phase, OperandDataType::Integer)}
+                    : std::optional<DstOperand>{},
     };
     std::visit(
       patterns{
@@ -1026,13 +1031,18 @@ Instruction readInstruction(
     );
     return inst;
   };
-  case microsoft::D3D11_SB_OPCODE_LD_STRUCTURED: {
+  case microsoft::D3D11_SB_OPCODE_LD_STRUCTURED:
+  case microsoft::D3DWDDM1_3_SB_OPCODE_LD_STRUCTURED_FEEDBACK: {
+    const bool sparse = Inst.m_OpCode == microsoft::D3DWDDM1_3_SB_OPCODE_LD_STRUCTURED_FEEDBACK;
     auto inst = InstLoadStructured{
       .dst = readDstOperand(Inst.m_Operands[0], phase, OperandDataType::Integer),
-      .src_address = readSrcOperand(Inst.m_Operands[1], phase, OperandDataType::Integer),
-      .src_byte_offset = readSrcOperand(Inst.m_Operands[2], phase, OperandDataType::Integer),
-      .src = readTypelessSrc(Inst.m_Operands[3], phase),
+      .src_address = readSrcOperand(Inst.m_Operands[1 + sparse], phase, OperandDataType::Integer),
+      .src_byte_offset = readSrcOperand(Inst.m_Operands[2 + sparse], phase, OperandDataType::Integer),
+      .src = readTypelessSrc(Inst.m_Operands[3 + sparse], phase),
       .opt_flag_offset_is_vec4_aligned = false,
+      .feedback = sparse && Inst.m_Operands[1].m_Type != microsoft::D3D10_SB_OPERAND_TYPE_NULL
+                    ? std::optional<DstOperand>{readDstOperand(Inst.m_Operands[1], phase, OperandDataType::Integer)}
+                    : std::optional<DstOperand>{},
     };
     std::visit(
       patterns{

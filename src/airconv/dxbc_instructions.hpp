@@ -459,6 +459,7 @@ struct InstLoadRaw {
   std::variant<SrcOperandResource, SrcOperandUAV, SrcOperandTGSM> src;
   // then we can load 4 components at once
   bool opt_flag_offset_is_vec4_aligned = false;
+  std::optional<DstOperand> feedback;
 };
 
 struct InstLoadStructured {
@@ -468,6 +469,7 @@ struct InstLoadStructured {
   std::variant<SrcOperandResource, SrcOperandUAV, SrcOperandTGSM> src;
   // 2nd condition: stride is also vec4 aligned
   bool opt_flag_offset_is_vec4_aligned = false;
+  std::optional<DstOperand> feedback;
 };
 
 struct InstLoadUAVTyped {
