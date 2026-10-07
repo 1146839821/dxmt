@@ -24,8 +24,8 @@ int main(int argc, char **argv) {
   }
   if (argc > 2 || (argc == 2 && strcmp(argv[1], "tracked") && strcmp(argv[1], "private") &&
                   strcmp(argv[1], "compute") && strcmp(argv[1], "repeat") &&
-                  strcmp(argv[1], "post-complete") && strcmp(argv[1], "post-cpu"))) {
-    fprintf(stderr, "usage: %s [tracked|private|compute|repeat|post-complete|post-cpu]\n", argv[0]);
+                  strcmp(argv[1], "post-complete") && strcmp(argv[1], "post-cpu") && strcmp(argv[1], "post-callback"))) {
+    fprintf(stderr, "usage: %s [tracked|private|compute|repeat|post-complete|post-cpu|post-callback]\n", argv[0]);
     return 2;
   }
   @autoreleasepool {
@@ -48,7 +48,8 @@ int main(int argc, char **argv) {
     BOOL repeatResolve = argc > 1 && !strcmp(argv[1], "repeat");
     BOOL postComplete = argc > 1 && !strcmp(argv[1], "post-complete");
     BOOL postCPU = argc > 1 && !strcmp(argv[1], "post-cpu");
-    BOOL postResolve = postComplete || postCPU;
+    BOOL postCallback = argc > 1 && !strcmp(argv[1], "post-callback");
+    BOOL postResolve = postComplete || postCPU || postCallback;
     id<MTLComputePipelineState> pipeline = nil;
     if (computeSamples) {
       NSError *error = nil;
@@ -75,10 +76,15 @@ int main(int argc, char **argv) {
         const NSUInteger resultSize = repeatResolve ? 40 : 24;
         id<MTLBuffer> result = [device newBufferWithLength:resultSize options:options];
         id<MTLBuffer> postResult = postResolve ? [device newBufferWithLength:16 options:options] : nil;
-        if (!samples || !dummy || !result || (postResolve && !postResult)) { NSLog(@"allocation: %@", error); return 2; }
+        id<MTLBuffer> consumed = postCallback ? [device newBufferWithLength:16 options:options] : nil;
+        id<MTLFence> continuationFence = postCallback ? [device newFence] : nil;
+        if (!samples || !dummy || !result || (postResolve && !postResult) ||
+            (postCallback && (!consumed || !continuationFence))) { NSLog(@"allocation: %@", error); return 2; }
         memset(result.contents, 0, resultSize);
         if (postResolve) memset(postResult.contents, 0, 16);
+        if (postCallback) memset(consumed.contents, 0, 16);
         id<MTLCommandBuffer> buffer = [queue commandBuffer];
+        if (!buffer) { fprintf(stderr, "command buffer allocation failed\n"); return 2; }
         for (unsigned index = 0; index < 2; ++index) {
           if (computeSamples) {
             MTLComputePassDescriptor *pass = [MTLComputePassDescriptor new];
@@ -124,13 +130,52 @@ int main(int argc, char **argv) {
           [second updateFence:fence];
           [second endEncoding];
         }
+        dispatch_semaphore_t continuationDone = postCallback ? dispatch_semaphore_create(0) : nil;
+        if (postCallback && !continuationDone) { fprintf(stderr, "continuation semaphore allocation failed\n"); return 2; }
+        __block BOOL continuationError = NO;
+        if (postCallback) {
+          [buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+            @autoreleasepool {
+              if (completed.status != MTLCommandBufferStatusCompleted) {
+                continuationError = YES; dispatch_semaphore_signal(continuationDone); return;
+              }
+              id<MTLCommandBuffer> post = [queue commandBuffer];
+              id<MTLBlitCommandEncoder> second = [post blitCommandEncoder];
+              if (!post || !second) {
+                continuationError = YES; dispatch_semaphore_signal(continuationDone); return;
+              }
+              [second resolveCounters:samples inRange:NSMakeRange(0, 2) destinationBuffer:postResult destinationOffset:0];
+              [second updateFence:continuationFence];
+              [second endEncoding];
+              id<MTLBlitCommandEncoder> consumer = [post blitCommandEncoder];
+              if (!consumer) {
+                continuationError = YES; dispatch_semaphore_signal(continuationDone); return;
+              }
+              [consumer waitForFence:continuationFence];
+              [consumer copyFromBuffer:postResult sourceOffset:0 toBuffer:consumed destinationOffset:0 size:16];
+              [consumer endEncoding];
+              [post addCompletedHandler:^(id<MTLCommandBuffer> finished) {
+                continuationError = finished.status != MTLCommandBufferStatusCompleted;
+                dispatch_semaphore_signal(continuationDone);
+              }];
+              [post commit];
+              // Neither callback waits or calls CPU counter resolution.
+            }
+          }];
+        }
         [buffer commit];
-        [buffer waitUntilCompleted];
+        if (postCallback) {
+          // This is the test collector, not the submission callback. The only
+          // signal follows the continuation's GPU completion (or an error).
+          if (dispatch_semaphore_wait(continuationDone, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) || continuationError) {
+            fprintf(stderr, "callback continuation failed or timed out\n"); return 2;
+          }
+        } else [buffer waitUntilCompleted];
         if (buffer.status == MTLCommandBufferStatusError) { NSLog(@"GPU: %@", buffer.error); return 2; }
         // In post-complete mode, no CPU counter resolve occurs before the second
         // GPU resolve. post-cpu differs only by doing that CPU diagnostic first.
         NSData *raw = privateSamples || postComplete ? nil : [samples resolveCounterRange:NSMakeRange(0, 2)];
-        if (postResolve) {
+        if (postResolve && !postCallback) {
           id<MTLCommandBuffer> post = [queue commandBuffer];
           id<MTLBlitCommandEncoder> second = [post blitCommandEncoder];
           [second resolveCounters:samples inRange:NSMakeRange(0, 2) destinationBuffer:postResult destinationOffset:0];
@@ -149,10 +194,14 @@ int main(int argc, char **argv) {
         }
         if (postResolve) {
           const uint64_t *values = postResult.contents;
-          if (!ValidTimestampPair(values) || values[0] != native[0] || values[1] != native[1]) {
+          const uint64_t *copied = postCallback ? consumed.contents : values;
+          if (!ValidTimestampPair(values) || values[0] != native[0] || values[1] != native[1] ||
+              copied[0] != values[0] || copied[1] != values[1]) {
             printf("POST_FAIL iteration=%u gpu=%llu,%llu native=%llu,%llu\n", iteration,
                    (unsigned long long)values[0], (unsigned long long)values[1],
                    (unsigned long long)native[0], (unsigned long long)native[1]);
+            if (postCallback) printf("POST_CONSUMER iteration=%u copied=%llu,%llu\n", iteration,
+                                     (unsigned long long)copied[0], (unsigned long long)copied[1]);
             ++postFailures;
           }
         }
@@ -172,7 +221,7 @@ int main(int argc, char **argv) {
       }
     }
     printf("mode=%s runs=200 failures=%u repeatFailures=%u postFailures=%u\n",
-        postComplete ? "post-complete" : postCPU ? "post-cpu" : repeatResolve ? "repeat" :
+        postCallback ? "post-callback" : postComplete ? "post-complete" : postCPU ? "post-cpu" : repeatResolve ? "repeat" :
         computeSamples ? "compute" : privateSamples ? "private" : tracked ? "tracked" : "untracked",
         failures, repeatFailures, postFailures);
     return failures || repeatFailures || postFailures ? 1 : 0;

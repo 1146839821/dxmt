@@ -64,6 +64,17 @@ and full Typed/MinMax/Tiled/format/raster qualification remain pending.
 
 ## Task analysis
 
+Completion-handler diagnostic checkpoint (2026-10-08): native callbacks submit a
+later GPU resolve without callback waits or CPU counter resolution. Fenced GPU
+copy consumption and exact native-pair comparisons pass 800 iterations, then a
+final 200-iteration API-validation run; original failures remain red (17 and 2,
+respectively). Strict native build/self-test pass. The collector still waits,
+so asynchronous production submission is not qualified. See
+D3D12_TIMESTAMP_RESOLVE_ORDER.md for evidence and limits. Next advance the
+production queue-safe continuation, not more diagnostic permutations; timestamp
+closure, root-feedback performance and full resource/raster qualification remain
+open.
+
 Current implementation has separate DXBC/AIRCONV and DXIL/MSC paths, bounded
 readback fixtures, a fail-closed Python gate, historical resource audits, temporary
 SM6.6/FL12_0 opt-ins and a standalone Metal timestamp diagnostic. Existing focused

@@ -1,5 +1,42 @@
 # Timestamp resolve ordering investigation
 
+## Completion-handler continuation (2026-10-08)
+
+Baseline 8b52846a. The new standalone post-callback mode registers completion
+handlers before commit and submits a second GPU resolve from the first handler.
+Neither handler waits or invokes CPU counter resolution. The test collector
+waits with a five-second timeout; this is not proof that production submission
+is nonblocking. Status/allocation errors remain fatal, and the original resolve
+failure remains in the process exit status.
+
+Before adding a GPU consumer, six processes (including API validation) observed
+20 original failures over 1,200 iterations and zero later-result mismatches.
+The consumer variant uses separate storage and a fenced blit copy in the later
+command buffer. Three ordinary processes plus one API-validation process observed
+17 original failures over 800 iterations and zero later-result/consumer failures.
+Final strict compilation (-Wall -Wextra -Werror) and oracle self-test pass.
+The final API-validation process observes 2 original failures over 200 iterations,
+zero later-result/consumer failures, and an explicit validation-enabled message
+without API misuse diagnostics. Each later pair equals the native samples exactly;
+the consumed pair equals the later pair. CPU diagnostics run after GPU completion.
+
+Evidence under /Users/zhangbo/.cache/dxmt-reconciliation.ZLDvwE:
+closure-timestamp-callback-{1..5}.log, closure-timestamp-callback-api.log,
+closure-timestamp-callback-consumer-{1..3}.log,
+closure-timestamp-callback-consumer-api.log and
+closure-timestamp-callback-final-api.log. The fresh default baseline happened to
+pass 200 iterations; the retained first-result failures above reproduce the flaky
+symptom. These are scheduling-sensitive bounded observations, not timestamp closure.
+
+The diagnosis skill guided retaining the red oracle; Metal validation guided
+enabled-message checking. Main-agent standards/spec self-review checked callback
+registration, completion publication, owned storage, error exits and consumer
+ordering; no independent sub-agent review was performed. No production runtime,
+Wine deployment, game process or FL qualification changed. Next implement/evaluate
+a queue-safe production continuation preserving queued Wait/Signal ordering,
+downstream GPU consumers, query/resource lifetimes and error publication. Do not
+wait synchronously in ExecuteCommandLists or substitute CPU timestamp data.
+
 ## Completion-boundary discrimination (2026-10-08)
 
 Baseline 1821386a, branch feat/d3d12-1. The diagnosing-bugs skill guided a fresh
