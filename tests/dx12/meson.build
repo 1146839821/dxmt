@@ -105,6 +105,10 @@ if build_machine.system() == 'darwin'
     native: true, include_directories: include_directories('../../src/airconv', '../../src/dxmt', '../../src/winemetal'))
   test('air-texture-defaults-unit', air_texture_defaults)
   add_languages('objcpp', native: true)
+  executable('sparse_sideband_queue', 'sparse_sideband_queue.mm', native: true, build_by_default: false,
+    objcpp_args: ['-fobjc-arc'],
+    dependencies: dependency('appleframeworks', modules: ['Metal', 'Foundation'], native: true),
+  )
   executable('air_minmax_gpu', 'air_minmax_gpu.mm', native: true, build_by_default: false,
     objcpp_args: ['-fobjc-arc'],
     dependencies: dependency('appleframeworks', modules: ['Metal', 'Foundation'], native: true),
@@ -126,6 +130,10 @@ if build_machine.system() == 'darwin'
 endif
 dxil_origin_parser_test = executable('dxil_origin_transform_test', 'dxil_origin_transform_test.cpp', native: true)
 test('dxil-origin-parser-unit', dxil_origin_parser_test)
+
+sparse_buffer_footprint_test = executable('sparse_buffer_footprint', 'sparse_buffer_footprint.cpp',
+  native: true, include_directories: include_directories('../../src/airconv'))
+test('sparse-buffer-footprint-unit', sparse_buffer_footprint_test)
 executable('dxil_roundtrip', 'dxil_roundtrip.cpp',
   build_by_default: false,
   link_args: ['-municode'],
