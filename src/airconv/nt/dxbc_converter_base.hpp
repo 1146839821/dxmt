@@ -218,6 +218,8 @@ public:
   void StoreOperandHull(const DstOperandIndexableOutput &DstOp, llvm::Value *Value);
 
   void StoreFeedback(const std::optional<DstOperand> &DstOp, llvm::Value *Residency);
+  bool StoreBufferFeedback(const std::optional<DstOperand> &DstOp, BufferResourceHandle &Buffer,
+                           llvm::Value *Index, mask_t Mask);
 
   void
   StoreOperand(const DstOperand &DstOp, llvm::Value *Value, bool Saturate = false) {

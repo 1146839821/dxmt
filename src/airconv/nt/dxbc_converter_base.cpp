@@ -2428,11 +2428,6 @@ void
 Converter::operator()(const InstLoadRaw &load) {
   using namespace llvm::air;
 
-  if (load.feedback) {
-    failure = "Raw buffer residency feedback lowering is not implemented";
-    return;
-  }
-
   auto Buf = LoadBuffer(load.src);
   if (!Buf)
     return;
@@ -2441,6 +2436,8 @@ Converter::operator()(const InstLoadRaw &load) {
   bool Volatile = cast<llvm::PointerType>(Buf->Pointer->getType())->getAddressSpace() == 3;
 
   auto Index = ir.CreateLShr(LoadOperand(load.src_byte_offset, kMaskComponentX), 2);
+  if (!StoreBufferFeedback(load.feedback, *Buf, Index, Mask))
+    return;
 
   if (auto Comp = ComponentFromScalarMask(Mask, Buf->Swizzle); Comp >= 0) {
     auto Ptr = CreateGEPInt32WithBoundCheck(Buf.value(), ir.CreateAdd(Index, ir.getInt32(Comp)));
@@ -2463,11 +2460,6 @@ void
 Converter::operator()(const InstLoadStructured &load) {
   using namespace llvm::air;
 
-  if (load.feedback) {
-    failure = "Structured buffer residency feedback lowering is not implemented";
-    return;
-  }
-
   auto Buf = LoadBuffer(load.src);
   if (!Buf)
     return;
@@ -2478,6 +2470,8 @@ Converter::operator()(const InstLoadStructured &load) {
   auto IndexStruct =
       ir.CreateMul(ir.getInt32(Buf->StructureStride >> 2), LoadOperand(load.src_address, kMaskComponentX));
   auto Index = ir.CreateAdd(IndexStruct, ir.CreateLShr(LoadOperand(load.src_byte_offset, kMaskComponentX), 2));
+  if (!StoreBufferFeedback(load.feedback, *Buf, Index, Mask))
+    return;
 
   if (auto Comp = ComponentFromScalarMask(Mask, Buf->Swizzle); Comp >= 0) {
     auto Ptr = CreateGEPInt32WithBoundCheck(Buf.value(), ir.CreateAdd(Index, ir.getInt32(Comp)));
@@ -3097,6 +3091,73 @@ Converter::DomainGeneratePrimitives(
   }
   auto Fn = air.getModule()->getOrInsertFunction(FnName, llvm::FunctionType::get(air.getVoidTy(), Tys, false), Attrs);
   ir.CreateCall(Fn, Ops);
+}
+
+bool
+Converter::StoreBufferFeedback(const std::optional<DstOperand> &DstOp, BufferResourceHandle &Buffer,
+                               llvm::Value *Index, mask_t Mask) {
+  if (!DstOp)
+    return true;
+  if (!Buffer.SparseFeedbackHeader || !Buffer.Metadata) {
+    failure = "Buffer residency feedback requires AIR descriptor-table metadata";
+    return false;
+  }
+
+  auto Fn = ir.GetInsertBlock()->getParent();
+  auto Entry = ir.GetInsertBlock();
+  auto Sparse = llvm::BasicBlock::Create(ir.getContext(), "feedback.sparse", Fn);
+  auto Done = llvm::BasicBlock::Create(ir.getContext(), "feedback.done", Fn);
+  ir.CreateCondBr(ir.CreateICmpNE(Buffer.SparseFeedbackHeader, ir.getInt64(0)), Sparse, Done);
+  ir.SetInsertPoint(Sparse);
+  auto Header = ir.CreateIntToPtr(Buffer.SparseFeedbackHeader, ir.getInt64Ty()->getPointerTo(1));
+  auto Field = [&](unsigned i) {
+    return ir.CreateLoad(ir.getInt64Ty(), ir.CreateGEP(ir.getInt64Ty(), Header, ir.getInt64(i)));
+  };
+  auto Base = Field(0);
+  auto Size = Field(1);
+  auto Mapping = Field(2);
+  auto Count = Field(3);
+  auto View = ir.CreatePtrToInt(Buffer.Pointer, ir.getInt64Ty());
+  auto Origin = ir.CreateSub(View, Base);
+  llvm::Value *Resident = ir.getTrue();
+  for (auto [Comp, _] : EnumerateComponents(MemoryAccessMask(Mask, Buffer.Swizzle))) {
+    // Match the data load's i32 component arithmetic before extending to i64.
+    auto ComponentIndex = ir.CreateAdd(Index, ir.getInt32(Comp));
+    auto Offset = ir.CreateShl(ir.CreateZExt(ComponentIndex, ir.getInt64Ty()), 2);
+    auto Byte = ir.CreateAdd(Origin, Offset);
+    auto Tile = ir.CreateLShr(Byte, 16);
+    auto InView = ir.CreateICmpULT(ComponentIndex, ir.CreateLShr(DecodeRawBufferByteLength(Buffer.Metadata), 2));
+    auto OutsideView = ir.CreateNot(InView);
+    auto Valid = ir.CreateAnd(ir.CreateICmpUGE(View, Base), ir.CreateICmpUGE(Byte, Origin));
+    Valid = ir.CreateAnd(Valid, ir.CreateAnd(ir.CreateICmpUGE(Size, ir.getInt64(4)),
+                                         ir.CreateICmpULE(Byte, ir.CreateSub(Size, ir.getInt64(4)))));
+    Valid = ir.CreateAnd(Valid, ir.CreateAnd(ir.CreateICmpULT(Tile, Count),
+                                          ir.CreateICmpNE(Mapping, ir.getInt64(0))));
+    auto Before = ir.GetInsertBlock();
+    auto Read = llvm::BasicBlock::Create(ir.getContext(), "feedback.tile", Fn);
+    auto Merge = llvm::BasicBlock::Create(ir.getContext(), "feedback.component", Fn);
+    ir.CreateCondBr(ir.CreateAnd(InView, Valid), Read, Merge);
+    ir.SetInsertPoint(Read);
+    auto Bytes = ir.CreateIntToPtr(Mapping, ir.getInt8Ty()->getPointerTo(1));
+    auto Mapped = ir.CreateLoad(ir.getInt8Ty(), ir.CreateGEP(ir.getInt8Ty(), Bytes, Tile));
+    // Mapping updates are GPU ordered; do not fold repeated bitmap reads.
+    Mapped->setVolatile(true);
+    auto TileResident = ir.CreateICmpNE(Mapped, ir.getInt8(0));
+    ir.CreateBr(Merge);
+    ir.SetInsertPoint(Merge);
+    auto ComponentResident = ir.CreatePHI(ir.getInt1Ty(), 2);
+    ComponentResident->addIncoming(OutsideView, Before);
+    ComponentResident->addIncoming(TileResident, Read);
+    Resident = ir.CreateAnd(Resident, ComponentResident);
+  }
+  auto SparseEnd = ir.GetInsertBlock();
+  ir.CreateBr(Done);
+  ir.SetInsertPoint(Done);
+  auto Result = ir.CreatePHI(ir.getInt1Ty(), 2);
+  Result->addIncoming(ir.getTrue(), Entry); // Ordinary buffers have no unmapped tiles.
+  Result->addIncoming(Resident, SparseEnd);
+  StoreOperand(*DstOp, ir.CreateSelect(Result, ir.getInt32(~0u), ir.getInt32(0)));
+  return true;
 }
 
 llvm::Value *

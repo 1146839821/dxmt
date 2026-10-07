@@ -61,6 +61,15 @@ if get_option('enable_tests')
   )
   test('airconv buffer feedback decode', buffer_feedback_decode_test)
 
+  buffer_feedback_ir_test = executable('buffer-feedback-ir-test',
+    files('../tests/buffer_feedback_ir.cpp'),
+    include_directories : [ llvm_include_path_darwin ],
+    cpp_args : [ airconv_args ],
+    dependencies : [ airconv_dep_darwin, dxbc_parser_native_dep ],
+    native : dxmt_crossbuild
+  )
+  test('airconv buffer feedback IR', buffer_feedback_ir_test)
+
   lower_unsupported_double_test = executable('lower-unsupported-double-test',
     files('../tests/lower_unsupported_double.cpp', '../transforms/lower_unsupported_double.cpp'),
     include_directories : [ include_directories('..'), llvm_include_path_darwin ],

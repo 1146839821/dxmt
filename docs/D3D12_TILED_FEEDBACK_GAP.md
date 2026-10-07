@@ -259,6 +259,39 @@ game deployment, process management or push occurred. Root transport, actual
 byte-footprint lowering, DXIL support and GPU feedback matrices remain required.
 # Raw/structured feedback decoder checkpoint
 
+## GPU mapping lookup lowering checkpoint
+
+Hypothesis: the retained resource header and queue-ordered GPU mapping bytes
+can provide raw/structured status independently of payload values. Expected
+effect: descriptor-table feedback loads no longer stop at decoding. Risk:
+incorrect component footprints or speculative zero-address loads could corrupt
+status or fault; validation starts with typed-pointer LLVM verification before
+GPU execution qualification.
+
+The converter now branches on the live header address, reads its four immutable
+qwords, derives the view origin from the payload pointer, and checks every source
+component selected by destination mask/swizzle. It uses the same i32 word-index
+arithmetic as data lowering, checks view/resource/tile bounds, and branches before
+reading a volatile mapping byte. A zero runtime header represents an ordinary
+buffer; missing compiler-side header support (root/D3D11/TGSM) still rejects
+feedback explicitly. Out-of-view components do not inspect any tile. That status
+policy still requires GPU/reference qualification, as do structured overflow and
+offset cases. The implementation does not infer mapping from payload zeroes.
+
+Normal/no-private full builds and all 15 host tests pass. The new LLVM verifier
+test covers all 15 nonempty component masks and missing-header rejection; it
+does not execute the generated shader or prove mapping status values. Its first
+run crashed because its LLVM context omitted the production typed-pointer
+setting; adding `setOpaquePointers(false)` fixed the fixture. Fresh focused
+decode/IR reruns pass in both builds after the x86 execution wait cleared.
+Root header transport, GPU shader data/status oracles, DXIL feedback, and the
+full tiled-resource qualification matrix remain open. No capability promotion,
+game deployment, or game performance/visual acceptance occurred here.
+
+Reference: [D3D11.3 resource access specification](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm),
+sections 22.4.10 and 22.4.12 define mask/swizzle-selected buffer components and
+optional status; section 5.9.4.5 defines mapped-status consumption.
+
 Shader binding follow-up: AIR descriptor-table raw/structured SRV and UAV
 bindings now load qword 3 (32-byte descriptor stride) into
 `BufferDescriptor::SparseFeedbackHeader` and propagate it to the converter's
