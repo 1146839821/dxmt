@@ -53,6 +53,15 @@ tests and 16 host tests per build pass. Default-off and pure-PE controls pass.
 Native Windows/wow64 and in-memory attestation are not claimed. Proceed to the
 timestamp oracle and root-feedback performance work before full qualification.
 
+Timestamp checkpoint (2026-10-08): original native GPU resolve remains red.
+post-complete/post-cpu diagnostics preserve first failures while testing a later
+GPU resolve after observed completion; each passes 600 second-result comparisons
+against the actual native samples. CPU resolve is not required for post-complete
+success. Sentinel rejection/self-test and API-validation run strengthen the
+oracle. This is a continuation candidate, not production closure. Next validate
+nonblocking completion-handler ordering and queue-safe consumption; performance
+and full Typed/MinMax/Tiled/format/raster qualification remain pending.
+
 ## Task analysis
 
 Current implementation has separate DXBC/AIRCONV and DXIL/MSC paths, bounded

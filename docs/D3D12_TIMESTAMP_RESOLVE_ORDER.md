@@ -1,5 +1,72 @@
 # Timestamp resolve ordering investigation
 
+## Completion-boundary discrimination (2026-10-08)
+
+Baseline 1821386a, branch feat/d3d12-1. The diagnosing-bugs skill guided a fresh
+red-capable native loop before hypotheses: original untracked probe produced
+3/200 zero second GPU values, with valid CPU-native pairs and ordinary-copy
+sentinels. This reproduces without Wine/MSC/D3D12, not proof of a driver defect.
+Existing failed event/split/storage/repeat experiments were reviewed, not repeated
+as if new. No production synchronization change is introduced in this checkpoint.
+
+Ranked predictions: (1) an observed sampling-command-buffer completion boundary
+may make a later GPU resolve reliable; (2) CPU resolve may change subsequent GPU
+visibility; (3) neither boundary changes the native resolve symptom. Added modes:
+
+- post-complete waits for the original buffer, then submits a second GPU resolve
+  into independent storage; no CPU counter resolve occurs before that second
+  resolve. CPU-native diagnostic happens only after the second GPU completes.
+- post-cpu has the same layout/boundary but performs CPU-native diagnostic before
+  the second GPU resolve, isolating that intervention.
+- Both keep the original GPU result and its failure in exit status. Second results
+  never replace it. Real GPU timestamps are compared exactly with the same native
+  samples, not merely checked for monotonicity.
+
+Strict native compilation passes. Three exact-oracle processes per mode:
+
+| Mode | Iterations | First GPU resolve failures | Post-boundary failures/mismatches |
+| --- | ---: | ---: | ---: |
+| post-complete | 600 | 2 + 5 + 7 = 14 | 0 |
+| post-cpu | 600 | 10 + 7 + 12 = 29 | 0 |
+
+All six processes return failure because the original result remains invalid.
+These bounded observations support a completion-boundary candidate and show CPU
+counter resolution is not necessary for the observed second-result success.
+They do not prove a production remedy, every ordering contract, or zero failure
+probability. Allocations/extra commands alter scheduling; observed host completion
+is stronger than the previously unsuccessful GPU-only event/split interventions.
+
+Apple's [counter conversion documentation](https://developer.apple.com/documentation/metal/converting-a-gpus-counter-data-into-a-readable-format)
+describes CPU resolution after GPU completion, GPU blit resolution, and invalid
+zero/error values. The oracle now explicitly rejects MTLCounterErrorValue in
+addition to zero/nonincreasing values. --oracle-self-test validates normal,
+zero, reversed/equal and sentinel pairs without needing a GPU. This strengthens
+the oracle; it does not change production timestamp frequency or substitute CPU
+time/data for GPU query results.
+
+Final strict compilation and oracle self-test pass. With Metal API validation
+explicitly enabled, final post-complete run retains 2/200 original failures and
+0 post failures/mismatches, without API misuse diagnostics. using-metal-validation
+guided configuration and enabled-message checking; shader validation is not claimed.
+Final default still returns failure with the unchanged zero-end symptom.
+Evidence: cache dxmt-reconciliation.ZLDvwE/closure-timestamp-baseline.log,
+closure-timestamp-exact-{post-complete,post-cpu}-{1,2,3}.log,
+closure-timestamp-final-post-complete-api.log and closure-timestamp-final-default.log.
+The standalone Objective-C diagnostic is not in the Meson FL acceptance graph;
+no DXMT/Wine build/deployment, game restart or full GPU qualification occurred.
+
+Main-agent standards/spec self-review informed by code-review found no outstanding
+actionable issue in the diagnostic/oracle changes; independent sub-agent review
+was not performed. The probe is retained in its explicitly diagnostic location,
+not as a successful regression workaround. No temporary production instrumentation
+was added. Next: test native completion-handler continuation, without invoking CPU
+counter resolve or blocking the submitting caller; then evaluate a production
+queue-safe continuation that preserves downstream GPU consumers, external waits,
+error publication and completion-owned lifetimes. Do not add a synchronous GPU
+wait to ExecuteCommandLists, fake timestamps or a retry-as-PASS rule. Timestamp
+closure remains incomplete; root-feedback profiling must distinguish this oracle
+gap from CPU submission costs. No capability promotion or push.
+
 ## Task Analysis
 
 - Hypothesis: zero end timestamps may arise from early CPU fence/event completion,
