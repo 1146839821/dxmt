@@ -5,10 +5,12 @@ import argparse
 import hashlib
 import json
 import os
+import ntpath
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import struct
 import tempfile
 
 PASS = "PASS"
@@ -46,6 +48,82 @@ def runtime_hashes(runtime):
             for dll in ("d3d12", "dxgi", "winemetal")}
 
 
+def pe_imports(path):
+    """Read static DLL imports so test-linked factories need not load d3d12.dll."""
+    data = path.read_bytes()
+    def unpack(fmt, offset):
+        if offset < 0 or offset + struct.calcsize(fmt) > len(data):
+            raise ValueError("truncated PE import metadata")
+        return struct.unpack_from(fmt, data, offset)
+    if data[:2] != b"MZ": raise ValueError("not a PE executable")
+    pe, = unpack("<I", 60)
+    if data[pe:pe + 4] != b"PE\0\0": raise ValueError("invalid PE signature")
+    sections, = unpack("<H", pe + 6)
+    optional_size, = unpack("<H", pe + 20)
+    optional = pe + 24
+    magic, = unpack("<H", optional)
+    if magic not in (0x10b, 0x20b): raise ValueError("unknown PE optional header")
+    directory_offset = 96 if magic == 0x10b else 112
+    if optional_size < directory_offset + 16 or sections > 4096:
+        raise ValueError("invalid PE optional header/section count")
+    headers, = unpack("<I", optional + 60)
+    count, = unpack("<I", optional + directory_offset - 4)
+    def read_rva(rva, size):
+        if rva < headers and size <= headers - rva:
+            offset = rva
+        else:
+            offset = None
+            for index in range(sections):
+                virtual, raw_size, raw = unpack("<III", optional + optional_size + index * 40 + 12)
+                if rva >= virtual and rva - virtual <= raw_size and size <= raw_size - (rva - virtual):
+                    offset = raw + rva - virtual
+                    break
+            if offset is None: raise ValueError("PE import RVA outside file-backed sections")
+        if offset + size > len(data): raise ValueError("truncated PE import data")
+        return data[offset:offset + size]
+    if count < 2: return set()
+    rva, size = unpack("<II", optional + directory_offset + 8)
+    if not rva: return set()
+    imports = set()
+    for index in range(min(size // 20, 65536)):
+        descriptor = struct.unpack("<IIIII", read_rva(rva + index * 20, 20))
+        if not any(descriptor): return imports
+        name = bytearray()
+        for offset in range(512):
+            byte = read_rva(descriptor[3] + offset, 1)
+            if byte == b"\0": break
+            name.extend(byte)
+        else: raise ValueError("unterminated PE DLL name")
+        imports.add(name.decode("ascii").lower())
+    raise ValueError("unterminated PE import directory")
+
+
+def verify_loaded_pe(output, stage, name, hashes, required):
+    """Require process-qualified observations; helper processes are not evidence."""
+    expected_path = lambda file: ("Z:" + str(stage / file).replace("/", "\\")).casefold()
+    records = []
+    pattern = r'^([0-9a-f]+):[0-9a-f]+:trace:loaddll:build_module Loaded L"([^"\n]+)" at '
+    for pid, path in re.findall(pattern, output, re.MULTILINE | re.IGNORECASE):
+        records.append((pid, path.replace("\\\\", "\\")))
+    pids = {pid for pid, path in records if path.casefold() == expected_path(name)}
+    if len(pids) != 1:
+        return {"status": UNVERIFIED, "reason": "missing/ambiguous target-process PE loader trace"}
+    pid = next(iter(pids))
+    observed = {}
+    for process, path in records:
+        dll = ntpath.basename(path).lower().removesuffix(".dll")
+        if process != pid or dll not in hashes: continue
+        if path.casefold() != expected_path(dll + ".dll"):
+            return {"status": FAIL, "reason": "target loaded unexpected DLL: " + path}
+        digest = hashlib.sha256((stage / (dll + ".dll")).read_bytes()).hexdigest()
+        if digest != hashes[dll]:
+            return {"status": FAIL, "reason": "staged DLL changed during execution: " + dll}
+        observed[dll] = {"path": path, "sha256": digest}
+    missing = sorted(required - observed.keys())
+    return {"status": UNVERIFIED if missing else PASS, "pid": pid, "modules": observed,
+            "reason": "missing loaded DLLs: " + ", ".join(missing) if missing else "target PE paths/hashes matched"}
+
+
 def verify_build(build, variant, wine):
     """Bind the variant label and Unix runtime to this build, not ambient DLLs."""
     try:
@@ -74,12 +152,15 @@ def verify_build(build, variant, wine):
             hashes = runtime_hashes(build / "src")
             # Wine builtin-marked DLLs can resolve through the installed runtime,
             # even when a matching DLL was copied beside the fixture executable.
-            for root in (wine_root / "lib/wine/x86_64-windows", Path(prefix) / "drive_c/windows/system32"):
+            # Prefix copies are not evidence of what this probe loads. Each
+            # execution verifies target-process PE paths separately.
+            for root in (wine_root / "lib/wine/x86_64-windows",):
                 for dll, expected_hash in hashes.items():
                     if digest(root / (dll + ".dll")) != expected_hash:
                         return {"status": UNVERIFIED, "reason": "installed DLL does not match build: " + str(root / (dll + ".dll"))}
             return {"status": PASS, "reason": "compile flags, installed PE DLLs and Unix runtime matched",
-                    "unix_sha256": digest(expected), "runtime_sha256": runtime_hashes(build / "src")}
+                    "unix_sha256": digest(expected), "runtime_sha256": runtime_hashes(build / "src"),
+                    "loaded_unix_image": UNVERIFIED}
         return {"status": PASS, "reason": "compile flags matched; native Windows, no Unix runtime",
                 "runtime_sha256": runtime_hashes(build / "src")}
     except (OSError, ValueError, KeyError) as error:
@@ -98,7 +179,7 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
             return {"status": UNVERIFIED, "reason": "missing runtime DLLs: " + ", ".join(missing)}
     # Never load stale test-local DXMT DLLs; use the explicitly deployed runtime.
     with tempfile.TemporaryDirectory(prefix="dxmt-fl12-") as staging:
-        stage = Path(staging)
+        stage = Path(staging).resolve()
         staged_hashes = {}
         for file in files:
             shutil.copy2(directory / file, stage / file)
@@ -111,6 +192,17 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
         if compiler.is_file():
             shutil.copy2(compiler, stage / compiler.name)
         command = ([wine] if wine else []) + [str(stage / name)] + list(args)
+        controls = dict(QUALIFICATION_ENVIRONMENT)
+        loaded = None
+        required_modules = set()
+        if wine and runtime is not None:
+            controls["WINEDEBUG"] = "-all,+pid,+loaddll"
+            try:
+                imports = pe_imports(stage / name)
+                required_modules = {dll for dll in dlls if dll + ".dll" in imports}
+                if "d3d12" in required_modules: required_modules.update(dlls)
+            except (OSError, ValueError, UnicodeError, struct.error) as error:
+                return {"status": UNVERIFIED, "reason": "PE import provenance: " + str(error)}
         try:
             # Wine helpers may inherit output handles after the probe exits.
             # A file records output without waiting for pipe EOF from helpers.
@@ -118,7 +210,7 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
                 result = subprocess.run(
                     command, cwd=stage, stdout=log, stderr=subprocess.STDOUT,
                     timeout=timeout,
-                    env={**os.environ, **QUALIFICATION_ENVIRONMENT,
+                    env={**os.environ, **controls,
                          "WINEDLLOVERRIDES": os.environ.get("WINEDLLOVERRIDES", "") + ";d3d12,dxgi,winemetal=n,b"},
                 )
                 log.seek(0)
@@ -128,10 +220,17 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
         status = PASS if result.returncode == 0 and all(marker in output for marker in required) else FAIL
         if result.returncode == 77:
             status = UNVERIFIED
+        if wine and runtime is not None:
+            try:
+                loaded = verify_loaded_pe(output, stage, name, staged_hashes, required_modules)
+            except OSError as error:
+                loaded = {"status": UNVERIFIED, "reason": str(error)}
+            status = aggregate([row("execution", status, ""), row("loaded_pe", loaded["status"], "")])
         return {"status": status, "returncode": result.returncode, "output": output,
                 "reason": "fresh execution; required markers checked", "runtime_sha256": staged_hashes,
                 "executable_sha256": executable_hash,
-                "controlled_environment": dict(QUALIFICATION_ENVIRONMENT)}
+                "loaded_pe": loaded,
+                "controlled_environment": controls}
 
 
 def run_minmax_contract(directory, wine, timeout, runtime):
@@ -407,6 +506,8 @@ def build_report(probes, variant, provenance=None):
 
     fl0 = [
         row("feature_query_contract", feature["status"], "fresh feature probe must succeed independently"),
+        row("loaded_pe_runtime_provenance", (feature.get("loaded_pe") or {"status": UNVERIFIED})["status"],
+            "actual feature-probe PE module evidence required; staged files alone are insufficient"),
         api("resource_binding_tier2", "binding", 2),
         api("tiled_resources_tier2", "tiled", 2),
         api("typed_uav_additional_formats", "typed", 1),
@@ -414,6 +515,9 @@ def build_report(probes, variant, provenance=None):
     ]
     if provenance is not None:
         fl0.append(row("build_runtime_provenance", provenance["status"], provenance["reason"]))
+        if "unix_sha256" in provenance:
+            fl0.append(row("loaded_unix_runtime_provenance", provenance.get("loaded_unix_image", UNVERIFIED),
+                           "installed-file equality is not actual loaded Unix-image evidence"))
     typed = probes.get("typed_uav_matrix")
     typed_api = options is not None and options["typed"] == 1
     if typed and typed["status"] == PASS and typed_api:

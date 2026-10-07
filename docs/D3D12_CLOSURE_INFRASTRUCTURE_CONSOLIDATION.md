@@ -27,6 +27,14 @@ on both cache Wine runtimes. Production opt-ins remain intact. Loaded-module
 enforcement/prefix provenance reconciliation, timestamp and profiling are still
 pending; policy metadata alone is not module or GPU conformance proof.
 
+Actual PE observation is now enforced per Wine fixture: import-aware required
+modules, exact staged-executable PID, canonical staged paths and matched hashes.
+65 Python tests plus both actual Wine capability controls and binary preflights
+pass; unused stale prefix DLLs no longer force deployment. Separate mandatory
+PE and Unix evidence rows prevent copied-file-only qualification. Actual Unix
+image observation and native Windows module evidence are still UNVERIFIED.
+See the 2026-10-08 checkpoint in D3D12_FL12_GATE.md.
+
 ## Task analysis
 
 Current implementation has separate DXBC/AIRCONV and DXIL/MSC paths, bounded

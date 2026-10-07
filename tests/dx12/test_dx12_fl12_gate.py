@@ -816,8 +816,84 @@ class GateTests(unittest.TestCase):
                 for pe_root in pe_roots:
                     target = pe_root / "d3d12.dll"
                     target.write_bytes(b"stale")
-                    self.assertEqual(gate.verify_build(build, "normal", str(wine))["status"], gate.UNVERIFIED)
+                    self.assertEqual(gate.verify_build(build, "normal", str(wine))["status"],
+                                     gate.UNVERIFIED if pe_root == pe_roots[0] else gate.PASS)
                     target.write_bytes(b"d3d12")
+
+    def test_loaded_pe_requires_target_pid_paths_and_hashes(self):
+        import hashlib
+        with TemporaryDirectory() as directory:
+            stage = Path(directory).resolve()
+            hashes = {}
+            for dll in ("d3d12", "dxgi", "winemetal"):
+                (stage / (dll + ".dll")).write_bytes(dll.encode())
+                hashes[dll] = hashlib.sha256(dll.encode()).hexdigest()
+            def record(pid, file):
+                path = "Z:" + str(stage / file).replace("/", "\\")
+                return f'{pid}:0024:trace:loaddll:build_module Loaded L"{path}" at 00000000: builtin\n'
+            executable = record("0020", "probe.exe")
+            modules = "".join(record("0020", dll + ".dll") for dll in hashes)
+            required = set(hashes)
+            good = gate.verify_loaded_pe(executable + modules, stage, "probe.exe", hashes, required)
+            self.assertEqual(good["status"], gate.PASS)
+            self.assertEqual(len(good["modules"]), 3)
+            self.assertEqual(gate.verify_loaded_pe(modules, stage, "probe.exe", hashes, required)["status"], gate.UNVERIFIED)
+            self.assertEqual(gate.verify_loaded_pe(executable + modules.replace("0020:", "0040:"),
+                             stage, "probe.exe", hashes, required)["status"], gate.UNVERIFIED)
+            self.assertEqual(gate.verify_loaded_pe(executable + record("0040", "probe.exe") + modules,
+                             stage, "probe.exe", hashes, required)["status"], gate.UNVERIFIED)
+            bad = modules.replace(str(stage).replace("/", "\\"), "\\unexpected")
+            self.assertEqual(gate.verify_loaded_pe(executable + bad, stage, "probe.exe", hashes, required)["status"], gate.FAIL)
+            (stage / "d3d12.dll").write_bytes(b"changed")
+            self.assertEqual(gate.verify_loaded_pe(executable + modules, stage, "probe.exe", hashes, required)["status"], gate.FAIL)
+
+    def test_pe_import_parser_rejects_non_pe(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.exe"
+            for data in (b"", b"not-pe", b"MZ" + b"\0" * 62):
+                path.write_bytes(data)
+                with self.assertRaises(ValueError): gate.pe_imports(path)
+
+    def test_pe_import_parser_handles_both_optional_header_layouts(self):
+        import struct
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.exe"
+            for magic, optional_size, directory_offset in ((0x10b, 224, 96), (0x20b, 240, 112)):
+                data = bytearray(1024); data[:2] = b"MZ"
+                struct.pack_into("<I", data, 60, 128); data[128:132] = b"PE\0\0"
+                struct.pack_into("<H", data, 134, 1)
+                struct.pack_into("<H", data, 148, optional_size)
+                optional = 152
+                struct.pack_into("<H", data, optional, magic)
+                struct.pack_into("<I", data, optional + 60, 512)
+                struct.pack_into("<I", data, optional + directory_offset - 4, 16)
+                struct.pack_into("<II", data, optional + directory_offset + 8, 0x1000, 40)
+                struct.pack_into("<III", data, optional + optional_size + 12, 0x1000, 512, 512)
+                struct.pack_into("<IIIII", data, 512, 1, 0, 0, 0x1050, 1)
+                data[592:602] = b"D3D12.dll\0"
+                path.write_bytes(data)
+                self.assertEqual(gate.pe_imports(path), {"d3d12.dll"})
+                struct.pack_into("<I", data, 524, 0xffffffff)
+                path.write_bytes(data)
+                with self.assertRaises(ValueError): gate.pe_imports(path)
+
+    def test_installed_unix_file_is_not_loaded_image_proof(self):
+        probes = self.probes()
+        provenance = {"status": gate.PASS, "reason": "files matched", "unix_sha256": "digest"}
+        report = gate.build_report(probes, "normal", provenance)
+        row = next(r for r in report["FL12_0_GATE"]["requirements"] if r["name"] == "loaded_unix_runtime_provenance")
+        self.assertEqual(row["status"], gate.UNVERIFIED)
+
+    def test_feature_probe_requires_actual_pe_evidence(self):
+        probes = self.probes()
+        for status in (None, *gate.STATUSES):
+            with self.subTest(status=status):
+                probes["feature_support"].pop("loaded_pe", None)
+                if status is not None: probes["feature_support"]["loaded_pe"] = {"status": status}
+                report = gate.build_report(probes, "normal")
+                row = next(r for r in report["FL12_0_GATE"]["requirements"]
+                           if r["name"] == "loaded_pe_runtime_provenance")
+                self.assertEqual(row["status"], gate.UNVERIFIED if status is None else status)
 
 
 if __name__ == "__main__":

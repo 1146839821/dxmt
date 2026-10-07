@@ -1,5 +1,56 @@
 # FL12 evidence gate and backend isolation
 
+## Actual PE module provenance checkpoint (2026-10-08)
+
+Baseline e1205f41, branch feat/d3d12-1. Hypothesis: matching copied/installed files
+does not establish which DLLs the target actually loaded. Evidence: historical
+cache PE mismatches and Wine builtin-marked DLL resolution; system32 equality
+previously blocked cache-only qualification even when those files were unused.
+Expected effect: target-process PE path/hash evidence without prefix deployment.
+Risk: helper traces, missing imports or unverified Unix images could create a
+false provenance PASS. Verification keeps those cases distinct/fail-closed.
+
+Wine runtime executions now use fixed -all,+pid,+loaddll tracing, recorded in
+controlled_environment. Actual PE import metadata determines required DXMT DLLs;
+an imported d3d12.dll requires the complete D3D12/DXGI/Winemetal PE chain.
+Any observed known DXMT module is checked even if not statically imported.
+Target PID comes from the exact staged executable path. Missing/ambiguous target
+records and missing required modules are UNVERIFIED; other directories or staged
+DLL mutation fail. Helper-process records cannot stand in for target modules.
+Temporary staging uses canonical paths to avoid /var vs /private/var ambiguity.
+Records retain PID, observed paths and post-run hashes matched to staged hashes.
+This is trusted test/loader evidence, not an adversarial in-memory image attestation.
+
+verify_build still checks compile variant, installed Wine PE files and installed
+winemetal.so against this build, but no longer requires unused prefix system32
+files to match. Each executed Wine probe enforces loaded PE validation before
+accepting its markers. The feature-query gate additionally requires loaded PE
+evidence, including on native Windows where that evidence is currently missing.
+Installed Unix hash equality remains only binary preflight: loaded_unix_image is
+UNVERIFIED and a distinct mandatory gate row prevents promotion without actual
+Unix-image evidence. This deliberately does not claim complete provenance.
+
+Validation: 65 Python tests pass, including PE32/PE32+ import layouts, malformed
+metadata, exact PID attribution, helper/ambiguous/missing traces, wrong paths,
+changed bytes, stale unused prefix files and mandatory PE/Unix evidence rows.
+PE32 parsing coverage is not 32-bit runtime qualification. Actual run_fixture and
+verify_build calls pass normal/no-private capability controls, with parent
+experimental gates set to 1 and WINEDEBUG=+timestamp. Child tracing remains
+deterministic, experimental gates remain 0, and the target's three PE paths/hash
+records match; controls remain FL11_1/SM6.0 and FL11_0/SM6.0 respectively.
+Logs: dxmt-reconciliation.ZLDvwE/closure-loaded-pe-final-{normal,no-private}.log.
+Both configurations reconfigure and all 16 host tests per build pass. No production
+C++/shader/bridge ABI changes, prefix deployment, game restart or push.
+
+Main-agent standards/spec self-review informed by code-review found no outstanding
+actionable issue for this PE slice; independent sub-agent review was not performed.
+Native Windows module observation, delayed imports not observed during a fixture,
+actual Unix image identity and full qualification remain gaps. Loader tracing is
+diagnostic overhead, not a root-feedback performance benchmark. Timing runs must
+separate provenance qualification from measurement while preserving binary identity.
+Next: actual Unix runtime evidence, timestamp oracle and root-feedback profiling,
+then complete Typed/MinMax/Tiled/format/raster qualification. No capability promotion.
+
 ## Experimental environment isolation checkpoint (2026-10-07)
 
 Baseline 23c2fecb, branch feat/d3d12-1. Hypothesis: qualification must not inherit
