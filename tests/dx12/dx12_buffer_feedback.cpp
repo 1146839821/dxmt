@@ -28,7 +28,7 @@ void Transition(ID3D12GraphicsCommandList *list, ID3D12Resource *resource,
   b.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
   list->ResourceBarrier(1, &b);
 }
-int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect) {
+int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect, bool pixel) {
   // Equal zero payloads in mapped and NULL tiles force status to be independent
   // of payload. Both descriptor views start at the last word of tile zero.
   const char *hlsl = R"(
@@ -40,7 +40,11 @@ ByteAddressBuffer raw : register(t0);
 StructuredBuffer<uint> structured : register(t1);
 #endif
 RWStructuredBuffer<uint> output : register(u0);
+#ifdef PIXEL_SOURCE
+void main(float4 position : SV_Position) {
+#else
 [numthreads(1,1,1)] void main() {
+#endif
   uint a, b, c, d, e;
   uint x = raw.Load(0, a);
   uint y = raw.Load(4, b);
@@ -55,8 +59,10 @@ RWStructuredBuffer<uint> output : register(u0);
   output[11]=0x1234u;
 })";
   Owned<ID3DBlob> shader, errors;
-  D3D_SHADER_MACRO macros[] = {{"UAV_SOURCE", "1"}, {nullptr, nullptr}};
-  auto hr = compile(hlsl, std::strlen(hlsl), "buffer-feedback", uav_source ? macros : nullptr, nullptr, "main", "cs_5_0",
+  D3D_SHADER_MACRO macros[3] = {}; UINT macro_count = 0;
+  if (uav_source) macros[macro_count++] = {"UAV_SOURCE", "1"};
+  if (pixel) macros[macro_count++] = {"PIXEL_SOURCE", "1"};
+  auto hr = compile(hlsl, std::strlen(hlsl), "buffer-feedback", macros, nullptr, "main", pixel ? "ps_5_0" : "cs_5_0",
                     D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &shader.p, &errors.p);
   if (errors.p) std::printf("%s\n", (const char *)errors.p->GetBufferPointer());
   Check(hr);
@@ -148,7 +154,19 @@ RWStructuredBuffer<uint> output : register(u0);
   Owned<ID3D12PipelineState> pipeline;
   D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {}; pd.pRootSignature = root.p;
   pd.CS = {shader.p->GetBufferPointer(), shader.p->GetBufferSize()};
-  Check(device.p->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pipeline.p)));
+  if (pixel) {
+    const char *vertex = "float4 main(uint id : SV_VertexID) : SV_Position { return float4(id == 2 ? 3 : -1, id == 1 ? 3 : -1, 0, 1); }";
+    Owned<ID3DBlob> vs;
+    Check(compile(vertex, std::strlen(vertex), nullptr, nullptr, nullptr, "main", "vs_5_0", 0, 0, &vs.p, nullptr));
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics = {};
+    graphics.pRootSignature = root.p;
+    graphics.VS = {vs.p->GetBufferPointer(), vs.p->GetBufferSize()}; graphics.PS = pd.CS;
+    graphics.SampleMask = UINT_MAX; graphics.SampleDesc.Count = 1;
+    graphics.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    graphics.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    graphics.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    Check(device.p->CreateGraphicsPipelineState(&graphics, IID_PPV_ARGS(&pipeline.p)));
+  } else Check(device.p->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pipeline.p)));
   Owned<ID3D12GraphicsCommandList> list;
   Check(device.p->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, pipeline.p, IID_PPV_ARGS(&list.p)));
   Check(list.p->Close());
@@ -175,7 +193,8 @@ RWStructuredBuffer<uint> output : register(u0);
   }
   HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
   if (!event) throw std::runtime_error("event creation");
-  const auto source_state = uav_source ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+  const auto source_state = uav_source ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS :
+      pixel ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
   for (UINT phase = 0; phase < 4; ++phase) {
     D3D12_TILED_RESOURCE_COORDINATE origin = {};
     D3D12_TILE_REGION_SIZE region = {2, FALSE, 0, 0, 0};
@@ -189,20 +208,32 @@ RWStructuredBuffer<uint> output : register(u0);
     list.p->CopyBufferRegion(source.p, UINT64(phase & 1) * 65536, upload.p, 0, 65536);
     Transition(list.p, source.p, D3D12_RESOURCE_STATE_COPY_DEST, source_state);
     if (phase) Transition(list.p, output.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    list.p->SetComputeRootSignature(root.p);
+    if (pixel) list.p->SetGraphicsRootSignature(root.p);
+    else list.p->SetComputeRootSignature(root.p);
     ID3D12DescriptorHeap *heaps[] = {descriptors.p}; list.p->SetDescriptorHeaps(1, heaps);
     if (root_source) {
       for (UINT i = 0; i < 2; ++i) {
         // Deliberately different from the indirect stream's VA: the oracle
         // must fail if the resolver forgets to apply its root updates.
         const auto initial = source.p->GetGPUVirtualAddress() + (indirect ? 65536 : 65532);
-        if (uav_source) list.p->SetComputeRootUnorderedAccessView(i, initial);
+        if (pixel) {
+          if (uav_source) list.p->SetGraphicsRootUnorderedAccessView(i, initial);
+          else list.p->SetGraphicsRootShaderResourceView(i, initial);
+        } else if (uav_source) list.p->SetComputeRootUnorderedAccessView(i, initial);
         else list.p->SetComputeRootShaderResourceView(i, initial);
       }
     }
-    list.p->SetComputeRootDescriptorTable(root_source ? 2 : 0, descriptors.p->GetGPUDescriptorHandleForHeapStart());
-    if (indirect) list.p->ExecuteIndirect(signature.p, 1, arguments.p, 0, nullptr, 0);
-    else list.p->Dispatch(1, 1, 1);
+    if (pixel) {
+      list.p->SetGraphicsRootDescriptorTable(root_source ? 2 : 0, descriptors.p->GetGPUDescriptorHandleForHeapStart());
+      D3D12_VIEWPORT viewport = {0, 0, 1, 1, 0, 1}; D3D12_RECT scissor = {0, 0, 1, 1};
+      list.p->RSSetViewports(1, &viewport); list.p->RSSetScissorRects(1, &scissor);
+      list.p->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      list.p->DrawInstanced(3, 1, 0, 0);
+    } else {
+      list.p->SetComputeRootDescriptorTable(root_source ? 2 : 0, descriptors.p->GetGPUDescriptorHandleForHeapStart());
+      if (indirect) list.p->ExecuteIndirect(signature.p, 1, arguments.p, 0, nullptr, 0);
+      else list.p->Dispatch(1, 1, 1);
+    }
     Transition(list.p, output.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
     list.p->CopyBufferRegion(readback.p, 0, output.p, 0, 48); Check(list.p->Close());
     ID3D12CommandList *lists[] = {list.p}; queue.p->ExecuteCommandLists(1, lists);
@@ -223,22 +254,24 @@ RWStructuredBuffer<uint> output : register(u0);
   }
   CloseHandle(event);
   std::printf("BUFFER_FEEDBACK %s %s %s raw/structured zero-payload, boundary and alternating remap PASS\n",
-              indirect ? "indirect" : "direct", root_source ? "root" : "table", uav_source ? "UAV" : "SRV");
+              pixel ? "pixel" : indirect ? "indirect" : "direct", root_source ? "root" : "table", uav_source ? "UAV" : "SRV");
   return 0;
 }
 }
 int main(int argc, char **argv) {
-  bool uav_source = false, root_source = false, indirect = false;
+  bool uav_source = false, root_source = false, indirect = false, pixel = false;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--uav")) uav_source = true;
     else if (!std::strcmp(argv[i], "--root")) root_source = true;
     else if (!std::strcmp(argv[i], "--indirect")) { indirect = true; root_source = true; }
+    else if (!std::strcmp(argv[i], "--pixel")) { pixel = true; root_source = true; }
     else return 2;
   }
+  if (pixel && indirect) return 2;
   auto library = LoadLibraryA("d3dcompiler_47.dll");
   if (!library) return 77;
   auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(library, "D3DCompile"));
   int result = 1;
-  try { if (compile) result = Run(compile, uav_source, root_source, indirect); } catch (const std::exception &e) { std::puts(e.what()); }
+  try { if (compile) result = Run(compile, uav_source, root_source, indirect, pixel); } catch (const std::exception &e) { std::puts(e.what()); }
   FreeLibrary(library); return result;
 }

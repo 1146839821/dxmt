@@ -287,8 +287,9 @@ serial mapping alternations; table-UAV regressions also pass. Evidence:
 `root-feedback-table-regression-{normal,np}.log`. No API-validation run or
 inflight/multiqueue/VA-alias lifecycle qualification is claimed here.
 
-Graphics/geometry/tessellation root feedback still rejects compilation. The
-compute ICB transport below removes the earlier conservative recording gate;
+At this checkpoint graphics/geometry/tessellation root feedback still rejected
+compilation; the later graphics transport below changes that boundary. The
+compute ICB transport removes its earlier conservative recording gate;
 no tiled Tier2/feature-level promotion occurred.
 
 ### Indirect compute root feedback transport
@@ -331,6 +332,44 @@ not GPU-produced arguments, count buffers, predication, concurrent resubmission,
 inflight remap or multiqueue lifetime. Graphics/GS/tessellation and DXIL feedback,
 VA alias coverage, full sparse matrices and allocation/lookup performance remain
 open. No game/prefix deployment, process management or push was performed.
+
+### Graphics root feedback transport
+
+Hypothesis: reuse the compute VA/header table for render encoders and make its
+private AIR input available to every graphics stage. Expected effect: root
+loads with feedback no longer fail solely because they are outside compute.
+Risk: synthesized GS/tessellation functions share input signatures, render ICBs
+do not inherit bindings with root updates, and residency stage masks must cover
+object/mesh consumption as well as ordinary vertex/fragment consumption.
+
+Root binding setup now defines slot 8 for any stage with a consuming root
+SRV/UAV. FunctionSignatureBuilder already deduplicates ArgumentBindingBuffer
+inputs by location, so combined signatures reuse the same input index. AIR
+graphics reflection accumulates the existing buffer-feedback flag with an
+allocation-failure boundary. PreDraw marks the encoder; submission reuses the
+VA snapshot/table lifetime and binds vertex/object/mesh/fragment buffers, with
+resource-use stages extended to pre-raster when emulation is present. Application
+root and MSC layouts stay unchanged. Like compute, host eligibility currently
+includes table-only consumers and its performance cost remains unmeasured.
+
+The earlier compiler-stage restriction is removed, but root-updating render
+ExecuteIndirect explicitly fails recording until its private ICB transport is
+implemented. This is an open implementation gap, not qualified graphics ICB
+support. No capability or Tier 2 promotion follows from this change.
+
+Normal/no-private full builds and 15/15 host tests each pass. New `--pixel`
+SRV/UAV probes execute a full-screen triangle in a 1x1 viewport/scissor without
+color attachments, writing 12 independently checked UAV words. Raw/structured
+loads use root VA + 65532, zero mapped/NULL payloads, four serial mapping
+alternations and a nonzero execution sentinel. All four probes pass. No-private
+UAV additionally passes with explicit Metal API Validation enabled and no API
+errors observed. Evidence: `dxmt-reconciliation.ZLDvwE/root-feedback-graphics-{srv,uav}-{normal,np}.log`.
+
+VS/GS/HS/DS consumption and shared synthesized signatures are source-reviewed,
+not GPU-qualified by the PS probe. Stage-specific GPU oracles, render ICB
+transport, DXIL feedback, inflight/multiqueue/alias matrices and performance
+remain open. The binding integration review preserves AIR/MSC separation;
+API validation does not establish complete GPU memory correctness.
 
 Selective root-transport prerequisite: raw/structured decoder uses now accumulate
 `buffer_feedback` on the corresponding SRV/UAV only when the status destination

@@ -2263,6 +2263,7 @@ public:
     // wait conservative for every draw recorded into it.
     auto *render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
     render->use_geometry |= use_msc_mesh_stages || use_airconv_geometry || use_airconv_tessellation;
+    render->root_buffer_feedback |= !use_msc && pso_graphics_->air_buffer_feedback;
 
     if (dirty_state_.test(DirtyState::GraphicsPipelineState)) {
       UpdateGraphicsPSO(pso_graphics_.ptr(), airconv_index_format);
@@ -6004,6 +6005,11 @@ public:
     } else if (!ValidateCommand(SupportsGraphics(), "ExecuteIndirect(Draw)")) {
       return;
     } else if (!ValidateIndirectPipeline(pso_graphics_.ptr(), sig, "ExecuteIndirect(Draw)")) {
+      return;
+    }
+    if (sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH &&
+        sig->UpdateRootArguments && pso_graphics_->air_buffer_feedback) {
+      FailRecording(__func__, "indirect graphics root feedback table binding is not implemented");
       return;
     }
     auto arg_buffer = static_cast<MTLD3D12Resource *>(pArgBuffer);

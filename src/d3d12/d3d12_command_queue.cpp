@@ -1461,13 +1461,25 @@ public:
            auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
            LabelEncoder(encoder, recording_id, data->id, "Render");
            encoder.waitForFence(fence_, data->use_geometry ? WMTRenderStagePreRaster : WMTRenderStageVertex);
+           const auto root_stages = static_cast<WMTRenderStages>(
+               (data->use_geometry ? WMTRenderStagePreRaster : WMTRenderStageVertex) | WMTRenderStageFragment);
+           WMT::Buffer root_feedback_table;
            if (!RetainIndirectRootBuffers(data, submission, [&](WMT::Buffer buffer, WMTResourceUsage usage) {
-                 encoder.useResource(buffer, usage,
-                     WMTRenderStageVertex | WMTRenderStageFragment);
-               })) {
+                 encoder.useResource(buffer, usage, root_stages);
+               }, &root_feedback_table)) {
              translation_failed = true;
              encoder.endEncoding();
              break;
+           }
+           if (data->root_buffer_feedback) {
+             PrivateRenderReplayCommand bind = {};
+             bind.buffer.buffer = root_feedback_table.handle;
+             bind.buffer.index = SM50_BINDING_INDEX_ROOT_BUFFER_FEEDBACK;
+             for (auto type : {WMTRenderCommandSetVertexBuffer, WMTRenderCommandSetObjectBuffer,
+                               WMTRenderCommandSetMeshBuffer, WMTRenderCommandSetFragmentBuffer}) {
+               bind.buffer.type = type;
+               encoder.encodeCommands(&bind.nop);
+             }
            }
            bool sampler_reduction = false;
            if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs, &sampler_reduction) ||

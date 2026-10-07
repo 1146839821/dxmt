@@ -370,6 +370,7 @@ public:
 
 class MTLD3D12GraphicsPipelineState : public MTLD3D12PipelineState {
 public:
+  bool air_buffer_feedback = false;
   std::wstring typed_origin_compiler_directory;
   std::wstring minmax_compiler_directory;
   virtual HRESULT GetTypedOriginVariant(const wchar_t *dxc_directory,

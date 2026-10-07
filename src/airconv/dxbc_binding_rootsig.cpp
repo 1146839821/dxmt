@@ -677,7 +677,7 @@ setup_binding_rootsig(
     }
   }
 
-  if (shader_type == microsoft::D3D11_SB_COMPUTE_SHADER) {
+  {
     bool root_feedback = false;
     for (const auto &[range, binding] : binding_map->SRVs)
       root_feedback |= binding.second == ~0u && binding.first.buffer_feedback;
