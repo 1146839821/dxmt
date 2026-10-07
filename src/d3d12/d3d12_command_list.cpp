@@ -1644,6 +1644,55 @@ public:
     return true;
   }
 
+  bool
+  EncodeAirconvIndirectRoots(MTLD3D12CommandSignature *signature, WMT::Buffer arguments,
+                             uint64_t arguments_offset, uint64_t &root_offset) {
+    if (!signature->air_emulation_root_resolver || !rootsig_graphics_) {
+      FailRecording(__func__, "AIR emulation root resolver is unavailable");
+      return false;
+    }
+    root_offset = EncodeRootArgument(rootsig_graphics_.ptr(), rootarg_graphics_staging_);
+    if (recording_failed_) return false;
+    allocator_->InvalidateCurrentPass();
+    auto compute = allocator_->AllocatePass<ComputeEncoderData>();
+    if (!compute) { FailRecording(__func__, "root resolver encoder allocation failed"); return false; }
+    indirect_resources_used_.clear(); resource_use_masks_.clear();
+    compute->type = EncoderType::Compute;
+    compute->cmd_head.type = WMTComputeCommandNop; compute->cmd_head.next.set(0);
+    compute->air_emulation_root_resolver = signature->air_emulation_root_resolver;
+    compute->cmd_tail = reinterpret_cast<wmtcmd_base *>(&compute->cmd_head);
+    EncodeComputeResourceUse(arguments.handle, WMTResourceUsageRead);
+    EncodeComputeResourceUse(allocator_->gpu_heap_buffer_.handle,
+                             static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite));
+    auto &pso = allocator_->EncodeComputeCommand<wmtcmd_compute_setpso>();
+    pso.type = WMTComputeCommandSetPSO; pso.pso = signature->air_emulation_root_resolver;
+    pso.threadgroup_size = {1, 1, 1};
+    auto &input = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+    input.type = WMTComputeCommandSetBuffer; input.buffer = arguments; input.offset = arguments_offset; input.index = 0;
+    auto &output = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+    output.type = WMTComputeCommandSetBuffer; output.buffer = allocator_->gpu_heap_buffer_;
+    output.offset = root_offset; output.index = 1;
+    auto &dispatch = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch>();
+    dispatch.type = WMTComputeCommandDispatchThreads; dispatch.size = {1, 1, 1};
+    auto &barrier = allocator_->EncodeComputeCommand<wmtcmd_compute_memory_barrier>();
+    barrier.type = WMTComputeCommandMemoryBarrier; barrier.scope = WMTBarrierScopeBuffers;
+    dirty_state_.set(DirtyState::ComputePipelineState, DirtyState::ComputeRootArguments,
+                     DirtyState::ComputeRootSignature, DirtyState::DescriptorHeaps);
+    return !recording_failed_;
+  }
+
+  void
+  BindAirconvIndirectRoots(uint64_t offset) {
+    allocator_->encoder_current->indirect_root_va = true;
+    EncodeRenderResourceUse(allocator_->gpu_heap_buffer_.handle, WMTResourceUsageRead,
+                            static_cast<WMTRenderStages>(WMTRenderStagePreRaster | WMTRenderStageFragment));
+    for (auto type : {WMTRenderCommandSetObjectBuffer, WMTRenderCommandSetMeshBuffer, WMTRenderCommandSetFragmentBuffer}) {
+      auto &bind = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+      bind.type = type; bind.buffer = allocator_->gpu_heap_buffer_; bind.offset = offset;
+      bind.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
+    }
+  }
+
   void
   EmitMemoryBarrier(WMTBarrierScope scope, WMTRenderStages stages_after, WMTRenderStages stages_before) {
     switch (allocator_->encoder_current->type) {
@@ -6099,9 +6148,9 @@ public:
         return;
       if ((sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW &&
            sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED) ||
-          MaxCommandCount != 1 || sig->UpdateRootArguments || sig->UpdateVertexBuffers ||
+          MaxCommandCount != 1 || sig->UpdateVertexBuffers ||
           sig->UpdateIndexBuffer) {
-        WARN("D3D12 ExecuteIndirect with AIRCONV tessellation requires one non-updating draw command");
+        WARN("D3D12 ExecuteIndirect with AIRCONV tessellation requires one draw without VB/IB updates");
         FailRecording(__func__, "AIRCONV tessellation indirect signature is unsupported");
         return;
       }
@@ -6116,21 +6165,25 @@ public:
         return;
       }
       const auto index_format = indexed ? to_airconv_index_format(index_type) : SM50_INDEX_BUFFER_FORMAT_NONE;
+      uint64_t root_offset = 0;
+      if (sig->UpdateRootArguments && !EncodeAirconvIndirectRoots(sig, arg_buffer->buffer->current()->buffer(), ArgBufferOffset, root_offset)) return;
       uint64_t filtered_count = CountBufferAddress;
       if (predication_buffer_ && !EncodePredicationCount(count_buffer, CountBufferOffset, MaxCommandCount, filtered_count)) return;
       if (PreDraw(false, index_format, false) != DrawCallStatus::AirconvTessellation)
         return;
+      if (sig->UpdateRootArguments) BindAirconvIndirectRoots(root_offset);
       if (filtered_count)
         EncodeRenderResourceUse(predication_buffer_ ? allocator_->gpu_heap_buffer_.handle : count_buffer->buffer->current()->buffer().handle,
                                 WMTResourceUsageRead, WMTRenderStageVertex);
 
       const uint32_t threads_per_patch = pso_graphics_->airconv_tessellation_threads_per_patch;
       if (!EncodeAirconvTessellationIndirect(
-              indexed, index_format, arg_buffer->buffer->current()->buffer(), ArgBufferOffset,
-              ArgBufferAddress, control_point_count, threads_per_patch, filtered_count
+              indexed, index_format, arg_buffer->buffer->current()->buffer(), ArgBufferOffset + sig->air_emulation_draw_offset,
+              ArgBufferAddress + sig->air_emulation_draw_offset, control_point_count, threads_per_patch, filtered_count
           )) {
         FailRecording(__func__, "AIRCONV tessellation indirect encoding failed");
       }
+      ResetIndirectState(sig, false);
       return;
     }
 
@@ -6139,9 +6192,9 @@ public:
         return;
       if ((sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW &&
            sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED) ||
-           MaxCommandCount != 1 || sig->UpdateRootArguments || sig->UpdateVertexBuffers ||
+           MaxCommandCount != 1 || sig->UpdateVertexBuffers ||
            sig->UpdateIndexBuffer) {
-        WARN("D3D12 ExecuteIndirect with AIRCONV geometry requires one non-updating draw command");
+        WARN("D3D12 ExecuteIndirect with AIRCONV geometry requires one draw without VB/IB updates");
         FailRecording(__func__, "AIRCONV geometry indirect signature is unsupported");
         return;
       }
@@ -6151,6 +6204,8 @@ public:
         return;
       const bool indexed = sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
       const auto index_format = indexed ? to_airconv_index_format(index_type) : SM50_INDEX_BUFFER_FORMAT_NONE;
+      uint64_t root_offset = 0;
+      if (sig->UpdateRootArguments && !EncodeAirconvIndirectRoots(sig, arg_buffer->buffer->current()->buffer(), ArgBufferOffset, root_offset)) return;
       uint64_t filtered_count = CountBufferAddress;
       if (predication_buffer_ && !EncodePredicationCount(count_buffer, CountBufferOffset, MaxCommandCount, filtered_count)) return;
       const auto status = PreDraw(false, index_format, false);
@@ -6159,6 +6214,7 @@ public:
         return;
       if (indexed && !index_buffer)
         return;
+      if (sig->UpdateRootArguments) BindAirconvIndirectRoots(root_offset);
       if (filtered_count)
         EncodeRenderResourceUse(predication_buffer_ ? allocator_->gpu_heap_buffer_.handle : count_buffer->buffer->current()->buffer().handle,
                                 WMTResourceUsageRead, WMTRenderStageVertex);
@@ -6166,11 +6222,12 @@ public:
       if (!vertex_increment_per_warp)
         return;
       if (!EncodeAirconvGeometryIndirect(
-              indexed, index_format, arg_buffer->buffer->current()->buffer(), ArgBufferOffset,
-              ArgBufferAddress, vertex_per_warp, vertex_increment_per_warp, filtered_count
+              indexed, index_format, arg_buffer->buffer->current()->buffer(), ArgBufferOffset + sig->air_emulation_draw_offset,
+              ArgBufferAddress + sig->air_emulation_draw_offset, vertex_per_warp, vertex_increment_per_warp, filtered_count
           )) {
         FailRecording(__func__, "AIRCONV geometry indirect encoding failed");
       }
+      ResetIndirectState(sig, false);
       return;
     }
 

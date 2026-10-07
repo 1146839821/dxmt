@@ -550,6 +550,53 @@ multi-command execution, indirect root updates and broad topology/tessellation
 matrices remain unqualified. No shader-validation, full predication/geometry/
 tessellation conformance, capability promotion or game acceptance is claimed.
 
+### AIR emulation indirect root updates
+
+Hypothesis: reuse the command-signature root-write generator in a dedicated GPU
+compute prepass, then bind its private output to object/mesh/fragment stages.
+Expected effect: single-command GS/tessellation indirect draws can update roots
+without CPU reading the argument stream. Risk: treating root words as draw
+arguments, losing resolver PSO lifetime, stale graphics/compute state, and
+inflight writes to the recording-owned private root region.
+
+Render signatures with root updates additionally generate a read-only-input
+compute resolver using the existing root constant/CBV/SRV/UAV stores and canonical
+SlotQwordOffsets. Its PSO is retained by ComputeEncoderData as well as the
+signature; the lifetime skill prompted this explicit recording-owner retention.
+The prepass seeds a private root region from recorded staging, applies updates
+on GPU, inserts a buffer barrier and marks compute bindings dirty. PreDraw's
+encoder transition precedes the object/mesh/fragment root override. The render
+encoder marks indirect_root_va so submission retains/declares registered root
+buffers; root feedback still uses its independent submission table.
+
+The signature stores the actual draw offset from serialized argument sizes,
+not ByteStride (which may include padding). Marshal and native indirect draw
+bindings both add this offset. Existing ResetIndirectState runs after encoding.
+MaxCommandCount=1 and no VB/IB updates remain enforced; application ByteStride,
+root layout and MSC TLAB routing are unchanged. Additional compute PSO creation
+and prepass cost are unmeasured, including signatures not ultimately used for
+AIR emulation. Concurrent closed-list reuse/private-region isolation is not
+qualified by this implementation checkpoint.
+
+The fixture now permits `--geometry/--hull/--domain --indirect`; two root updates
+precede Draw in a 32-byte stream. Recording VA + 65536 differs from argument
+VA + 65532. `--predicated --root-updates` combines root writes with count and
+predicate gating and clears output before each phase. Both full builds and
+16/16 host tests pass. Normal GS/HS root SRV, DS root UAV and GS combined
+root/count/predicate SRV probes pass; normal HS combined root/count/predicate
+UAV also passes. No-private GS root UAV, HS root SRV and
+DS combined root/count/predicate UAV pass; the latter additionally passes with
+explicit Metal API Validation enabled and no API errors observed. Evidence:
+`dxmt-reconciliation.ZLDvwE/emulation-roots-*`.
+The ordinary PS root-updating render ICB regression also passes after adding
+the extra signature kernel.
+
+CBV/constants (including partial constants and post-execution reset), padded
+strides/offsets, DrawIndexed, early signature/resource release, GPU-produced
+arguments, multiple commands, joint-stage consumers, inflight/multiqueue/alias
+matrices and performance remain open. No shader-validation, full ExecuteIndirect
+conformance, aggregate capability promotion or game acceptance is claimed.
+
 Selective root-transport prerequisite: raw/structured decoder uses now accumulate
 `buffer_feedback` on the corresponding SRV/UAV only when the status destination
 is non-NULL. AIR argument reflection publishes this as the previously unused

@@ -28,9 +28,10 @@ void Transition(ID3D12GraphicsCommandList *list, ID3D12Resource *resource,
   b.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
   list->ResourceBarrier(1, &b);
 }
-int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect, bool pixel, bool vertex, bool geometry, bool hull, bool domain, bool counted, bool predicated) {
+int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect, bool pixel, bool vertex, bool geometry, bool hull, bool domain, bool counted, bool predicated, bool root_updates) {
   const bool tessellation = hull || domain;
   const bool graphics_stage = pixel || vertex || geometry || tessellation;
+  const bool update_roots = indirect && (!counted || root_updates);
   // Equal zero payloads in mapped and NULL tiles force status to be independent
   // of payload. Both descriptor views start at the last word of tile zero.
   const char *hlsl = R"(
@@ -254,17 +255,17 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
     }
     updates[2].Type = graphics_stage ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW : D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
     D3D12_COMMAND_SIGNATURE_DESC sd = {}; sd.ByteStride = graphics_stage ? 32 : 28; sd.NumArgumentDescs = 3; sd.pArgumentDescs = updates;
-    if (counted) { sd.ByteStride = 16; sd.NumArgumentDescs = 1; sd.pArgumentDescs = &updates[2]; }
-    Check(device.p->CreateCommandSignature(&sd, counted ? nullptr : root.p, IID_PPV_ARGS(&signature.p)));
+    if (!update_roots) { sd.ByteStride = 16; sd.NumArgumentDescs = 1; sd.pArgumentDescs = &updates[2]; }
+    Check(device.p->CreateCommandSignature(&sd, update_roots ? root.p : nullptr, IID_PPV_ARGS(&signature.p)));
     create(arguments, sd.ByteStride, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
     Check(arguments.p->Map(0, nullptr, &mapped));
     const UINT64 address = source.p->GetGPUVirtualAddress() + 65532;
-    if (!counted) {
+    if (update_roots) {
       std::memcpy(mapped, &address, 8);
       std::memcpy(static_cast<char *>(mapped) + 8, &address, 8);
     }
     const UINT draw[4] = {3, 1, 0, 0}, dispatch[3] = {1, 1, 1};
-    std::memcpy(static_cast<char *>(mapped) + (counted ? 0 : 16), graphics_stage ? draw : dispatch, graphics_stage ? 16 : 12);
+    std::memcpy(static_cast<char *>(mapped) + (update_roots ? 16 : 0), graphics_stage ? draw : dispatch, graphics_stage ? 16 : 12);
     arguments.p->Unmap(0, nullptr);
   }
   HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
@@ -304,7 +305,7 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
       for (UINT i = 0; i < 2; ++i) {
         // Deliberately different from the indirect stream's VA: the oracle
         // must fail if the resolver forgets to apply its root updates.
-        const auto initial = source.p->GetGPUVirtualAddress() + (indirect && !counted ? 65536 : 65532);
+        const auto initial = source.p->GetGPUVirtualAddress() + (update_roots ? 65536 : 65532);
         if (graphics_stage) {
           if (uav_source) list.p->SetGraphicsRootUnorderedAccessView(i, initial);
           else list.p->SetGraphicsRootShaderResourceView(i, initial);
@@ -354,6 +355,7 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
 int main(int argc, char **argv) {
   bool uav_source = false, root_source = false, indirect = false, pixel = false, vertex = false, geometry = false, hull = false, domain = false;
   bool counted = false, predicated = false;
+  bool root_updates = false;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--uav")) uav_source = true;
     else if (!std::strcmp(argv[i], "--root")) root_source = true;
@@ -365,14 +367,15 @@ int main(int argc, char **argv) {
     else if (!std::strcmp(argv[i], "--domain")) { domain = true; root_source = true; }
     else if (!std::strcmp(argv[i], "--counted")) { counted = true; indirect = true; root_source = true; }
     else if (!std::strcmp(argv[i], "--predicated")) { predicated = counted = indirect = root_source = true; }
+    else if (!std::strcmp(argv[i], "--root-updates")) { root_updates = indirect = root_source = true; }
     else return 2;
   }
   if (unsigned(pixel) + unsigned(vertex) + unsigned(geometry) + unsigned(hull) + unsigned(domain) > 1 ||
-      ((geometry || hull || domain) && indirect && !counted) || (counted && !(geometry || hull || domain))) return 2;
+      (counted && !(geometry || hull || domain))) return 2;
   auto library = LoadLibraryA("d3dcompiler_47.dll");
   if (!library) return 77;
   auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(library, "D3DCompile"));
   int result = 1;
-  try { if (compile) result = Run(compile, uav_source, root_source, indirect, pixel, vertex, geometry, hull, domain, counted, predicated); } catch (const std::exception &e) { std::puts(e.what()); }
+  try { if (compile) result = Run(compile, uav_source, root_source, indirect, pixel, vertex, geometry, hull, domain, counted, predicated, root_updates); } catch (const std::exception &e) { std::puts(e.what()); }
   FreeLibrary(library); return result;
 }

@@ -342,6 +342,8 @@ public:
 
   WMT::Reference<WMT::RenderPipelineState> render_resolver;
   WMT::Reference<WMT::ComputePipelineState> compute_resolver;
+  WMT::Reference<WMT::ComputePipelineState> air_emulation_root_resolver;
+  UINT air_emulation_draw_offset = 0;
 
   virtual void AddRefPrivate() = 0;
   virtual void ReleasePrivate() = 0;

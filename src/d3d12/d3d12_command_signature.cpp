@@ -128,6 +128,9 @@ public:
       return E_INVALIDARG;
 
     std::stringstream source;
+    std::stringstream root_source;
+    root_source << "kernel void resolve_emulation_roots(device const d3d12_arguments& arg [[buffer(0)]], "
+                   "device ulong* rootsig_qwords [[buffer(1)]]) {\n";
     D3D12_INDIRECT_ARGUMENT_TYPE side_effect = ~(D3D12_INDIRECT_ARGUMENT_TYPE){};
     uint64_t argument_size = 0;
     ByteStride = pDesc->ByteStride;
@@ -376,6 +379,8 @@ public:
                    << "] = arg.constant_" << i << "_" << j << "; } } else ";
           source << "reinterpret_cast<device uint *>(rootsig_qwords + " << offset << ")["
                  << (j + arg.Constant.DestOffsetIn32BitValues) << "] = arg.constant_" << i << "_" << j << ";\n";
+          root_source << "reinterpret_cast<device uint *>(rootsig_qwords + " << offset << ")["
+                      << (j + arg.Constant.DestOffsetIn32BitValues) << "] = arg.constant_" << i << "_" << j << ";\n";
         }
         break;
       }
@@ -392,6 +397,7 @@ public:
                   "if (target) *reinterpret_cast<device ulong *>(target + command_data.msc_layout_offsets["
                  << parameter_index << "]) = arg.cb_" << i << "; } } else ";
         source << "rootsig_qwords[" << offset << "] = arg.cb_" << i << ";\n";
+        root_source << "rootsig_qwords[" << offset << "] = arg.cb_" << i << ";\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW: {
@@ -407,6 +413,7 @@ public:
                   "if (target) *reinterpret_cast<device ulong *>(target + command_data.msc_layout_offsets["
                  << parameter_index << "]) = arg.srv_" << i << "; } } else ";
         source << "rootsig_qwords[" << offset << "] = arg.srv_" << i << ";\n";
+        root_source << "rootsig_qwords[" << offset << "] = arg.srv_" << i << ";\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW: {
@@ -422,6 +429,7 @@ public:
                   "if (target) *reinterpret_cast<device ulong *>(target + command_data.msc_layout_offsets["
                  << parameter_index << "]) = arg.uav_" << i << "; } } else ";
         source << "rootsig_qwords[" << offset << "] = arg.uav_" << i << ";\n";
+        root_source << "rootsig_qwords[" << offset << "] = arg.uav_" << i << ";\n";
         break;
       }
       default:
@@ -431,6 +439,10 @@ public:
 
     source << "}\n"
               "};\n";
+    if (!is_compute && UpdateRootArguments) source << root_source.str() << "}\n";
+    if (!is_compute)
+      air_emulation_draw_offset = static_cast<UINT>(argument_size -
+          (CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED ? 20 : 16));
 
     WMT::Reference<WMT::Error> err;
     auto lib = device_->GetMTLDevice().newLibraryWithSource(source.view(), err);
@@ -460,6 +472,12 @@ public:
     if (err) {
       ERR("Failed to compile command signature resolve pso: ", err.description().getUTF8String());
       return E_FAIL;
+    }
+    if (!is_compute && UpdateRootArguments) {
+      auto root_function = lib.newFunction("resolve_emulation_roots");
+      if (!root_function) return E_FAIL;
+      air_emulation_root_resolver = device_->GetMTLDevice().newComputePipelineState(root_function, err);
+      if (!air_emulation_root_resolver || err) return E_FAIL;
     }
 
     StateUpdates.assign(pDesc->pArgumentDescs, pDesc->pArgumentDescs + pDesc->NumArgumentDescs - 1);

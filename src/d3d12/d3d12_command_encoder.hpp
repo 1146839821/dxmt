@@ -204,6 +204,7 @@ struct CopyTilesEncoderData : EncoderData {
 
 struct IndirectComputeCommandData;
 struct ComputeEncoderData : EncoderData {
+  WMT::Reference<WMT::ComputePipelineState> air_emulation_root_resolver;
   wmtcmd_compute_nop cmd_head;
   wmtcmd_base *cmd_tail;
   std::vector<std::shared_ptr<D3D12TypedOriginDispatch>> typed_origin_dispatches;
