@@ -424,6 +424,30 @@ tested VS path. GS/HS/DS and synthesized shared-signature consumption remain
 unqualified, alongside the outstanding indirect/lifetime/DXIL/performance
 matrices. No API/shader-validation run is claimed for this checkpoint.
 
+### Geometry-stage root feedback oracle
+
+The `--geometry` probe independently compiles the consuming GS as gs_5_0. A
+single input triangle invokes the GS once; it performs the raw/structured loads,
+writes the 12-word data/status/sentinel output, then appends three vertices with
+explicit SV_Position semantics. The helper VS consumes no feedback and no PS
+is present. This exercises the AIRCONV GS synthesized path rather than ordinary
+VS/PS binding. The first fixture used a bare float4 stream and was rejected by
+D3DCompile for missing output semantics before DXMT execution; the committed
+fixture uses a semantic-bearing structure.
+
+Normal/no-private full builds and 15/15 host tests each pass. Both runtimes pass
+GS root SRV/UAV GPU checks across four serial mapping alternations at VA + 65532,
+with zero mapped/NULL payloads and independently expected status and execution
+sentinel. Evidence: `dxmt-reconciliation.ZLDvwE/root-feedback-gs-*`.
+The tested direct GS consumer required no further runtime implementation change.
+
+Root-updating GS indirect signatures remain unsupported and the probe rejects
+that combination explicitly rather than reporting false coverage. HS/DS,
+joint VS/GS feedback/shared-input deduplication, stream output, other topology
+and instance combinations, inflight/multiqueue lifetime, DXIL and the broader
+sparse/performance matrices remain open. No API/shader-validation run, complete
+geometry conformance or game acceptance is claimed here.
+
 Selective root-transport prerequisite: raw/structured decoder uses now accumulate
 `buffer_feedback` on the corresponding SRV/UAV only when the status destination
 is non-NULL. AIR argument reflection publishes this as the previously unused

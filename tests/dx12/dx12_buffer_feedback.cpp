@@ -28,8 +28,8 @@ void Transition(ID3D12GraphicsCommandList *list, ID3D12Resource *resource,
   b.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
   list->ResourceBarrier(1, &b);
 }
-int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect, bool pixel, bool vertex) {
-  const bool graphics_stage = pixel || vertex;
+int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect, bool pixel, bool vertex, bool geometry) {
+  const bool graphics_stage = pixel || vertex || geometry;
   // Equal zero payloads in mapped and NULL tiles force status to be independent
   // of payload. Both descriptor views start at the last word of tile zero.
   const char *hlsl = R"(
@@ -41,7 +41,11 @@ ByteAddressBuffer raw : register(t0);
 StructuredBuffer<uint> structured : register(t1);
 #endif
 RWStructuredBuffer<uint> output : register(u0);
-#ifdef VERTEX_SOURCE
+#ifdef GEOMETRY_SOURCE
+struct GeometryVertex { float4 position : SV_Position; };
+[maxvertexcount(3)] void main(triangle GeometryVertex positions[3],
+                            inout TriangleStream<GeometryVertex> stream) {
+#elif defined(VERTEX_SOURCE)
 float4 main(uint id : SV_VertexID) : SV_Position {
   if (id == 0) {
 #elif defined(PIXEL_SOURCE)
@@ -65,13 +69,18 @@ void main(float4 position : SV_Position) {
   }
   return float4(id == 2 ? 3 : -1, id == 1 ? 3 : -1, 0, 1);
 #endif
+#ifdef GEOMETRY_SOURCE
+  for (uint i = 0; i < 3; ++i) stream.Append(positions[i]);
+  stream.RestartStrip();
+#endif
 })";
   Owned<ID3DBlob> shader, errors;
-  D3D_SHADER_MACRO macros[4] = {}; UINT macro_count = 0;
+  D3D_SHADER_MACRO macros[5] = {}; UINT macro_count = 0;
   if (uav_source) macros[macro_count++] = {"UAV_SOURCE", "1"};
   if (pixel) macros[macro_count++] = {"PIXEL_SOURCE", "1"};
   if (vertex) macros[macro_count++] = {"VERTEX_SOURCE", "1"};
-  auto hr = compile(hlsl, std::strlen(hlsl), "buffer-feedback", macros, nullptr, "main", vertex ? "vs_5_0" : pixel ? "ps_5_0" : "cs_5_0",
+  if (geometry) macros[macro_count++] = {"GEOMETRY_SOURCE", "1"};
+  auto hr = compile(hlsl, std::strlen(hlsl), "buffer-feedback", macros, nullptr, "main", geometry ? "gs_5_0" : vertex ? "vs_5_0" : pixel ? "ps_5_0" : "cs_5_0",
                     D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &shader.p, &errors.p);
   if (errors.p) std::printf("%s\n", (const char *)errors.p->GetBufferPointer());
   Check(hr);
@@ -171,6 +180,7 @@ void main(float4 position : SV_Position) {
     graphics.pRootSignature = root.p;
     graphics.VS = vertex ? pd.CS : D3D12_SHADER_BYTECODE{vs.p->GetBufferPointer(), vs.p->GetBufferSize()};
     if (pixel) graphics.PS = pd.CS;
+    if (geometry) graphics.GS = pd.CS;
     graphics.SampleMask = UINT_MAX; graphics.SampleDesc.Count = 1;
     graphics.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     graphics.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
@@ -265,25 +275,26 @@ void main(float4 position : SV_Position) {
   }
   CloseHandle(event);
   std::printf("BUFFER_FEEDBACK %s %s %s raw/structured zero-payload, boundary and alternating remap PASS\n",
-              vertex ? (indirect ? "indirect-vertex" : "vertex") : pixel ? (indirect ? "indirect-pixel" : "pixel") : indirect ? "indirect" : "direct", root_source ? "root" : "table", uav_source ? "UAV" : "SRV");
+              geometry ? "geometry" : vertex ? (indirect ? "indirect-vertex" : "vertex") : pixel ? (indirect ? "indirect-pixel" : "pixel") : indirect ? "indirect" : "direct", root_source ? "root" : "table", uav_source ? "UAV" : "SRV");
   return 0;
 }
 }
 int main(int argc, char **argv) {
-  bool uav_source = false, root_source = false, indirect = false, pixel = false, vertex = false;
+  bool uav_source = false, root_source = false, indirect = false, pixel = false, vertex = false, geometry = false;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--uav")) uav_source = true;
     else if (!std::strcmp(argv[i], "--root")) root_source = true;
     else if (!std::strcmp(argv[i], "--indirect")) { indirect = true; root_source = true; }
     else if (!std::strcmp(argv[i], "--pixel")) { pixel = true; root_source = true; }
     else if (!std::strcmp(argv[i], "--vertex")) { vertex = true; root_source = true; }
+    else if (!std::strcmp(argv[i], "--geometry")) { geometry = true; root_source = true; }
     else return 2;
   }
-  if (pixel && vertex) return 2;
+  if (unsigned(pixel) + unsigned(vertex) + unsigned(geometry) > 1 || (geometry && indirect)) return 2;
   auto library = LoadLibraryA("d3dcompiler_47.dll");
   if (!library) return 77;
   auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(library, "D3DCompile"));
   int result = 1;
-  try { if (compile) result = Run(compile, uav_source, root_source, indirect, pixel, vertex); } catch (const std::exception &e) { std::puts(e.what()); }
+  try { if (compile) result = Run(compile, uav_source, root_source, indirect, pixel, vertex, geometry); } catch (const std::exception &e) { std::puts(e.what()); }
   FreeLibrary(library); return result;
 }
