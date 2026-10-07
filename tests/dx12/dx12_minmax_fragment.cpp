@@ -14,6 +14,7 @@ dxmt::Logger dxmt::Logger::s_instance("dx12_minmax_fragment");
 template <typename T> struct ReleaseCOM { void operator()(T *p) const { if (p) p->Release(); } };
 template <typename T> using OwnedCOM = std::unique_ptr<T, ReleaseCOM<T>>;
 static bool root_updates_fixture = false;
+static bool deployed_fixture = false;
 static bool root_buffers_fixture = false;
 static bool implicit_fixture = false;
 static bool implicit_bias_fixture = false;
@@ -484,7 +485,7 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
       D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   pso_desc.NumRenderTargets = 1; pso_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
   ID3D12PipelineState *raw_pso = nullptr;
-  if (static_sampler) {
+  if (static_sampler && !deployed_fixture) {
     wchar_t selected[32768];
     const auto length = GetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", selected, 32768);
     if (!length || length >= 32768 || !SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr)) return false;
@@ -642,7 +643,8 @@ int wmain(int argc, wchar_t **argv) {
       cube_fixture = implicit_fixture = true;
       cube_array_fixture = !std::wcscmp(option, L"--cube-array-sample") || !std::wcscmp(option, L"--cube-array-bias");
       implicit_bias_fixture = !std::wcscmp(option, L"--cube-bias") || !std::wcscmp(option, L"--cube-array-bias");
-    } else if (argc == 5) { /* Existing optional sampling-VS path. */ }
+    } else if (argc == 5 && !std::wcscmp(option, L"--deployed")) deployed_fixture = true;
+    else if (argc == 5) { /* Existing optional sampling-VS path. */ }
     else if (!std::wcscmp(option, L"--implicit-sample") ||
         !std::wcscmp(option, L"--grad-bias")) implicit_fixture = true;
     else if (!std::wcscmp(option, L"--implicit-bias") || !std::wcscmp(option, L"--level-bias"))
@@ -657,12 +659,12 @@ int wmain(int argc, wchar_t **argv) {
     if (argc == 7 && !tessellation_fixture) return 1;
     root_updates_fixture = argc >= 6 && !implicit_fixture && !vertex_sampling_fixture && !geometry_fixture && !tessellation_fixture;
   }
-  if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", argv[3])) return 1;
+  if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", deployed_fixture ? nullptr : argv[3])) return 1;
   std::vector<uint8_t> ps, vs, sampling_vs;
   if (!Load(argv[1], ps) || !Load(argv[2], vs)) return 1;
   if (geometry_fixture && !Load(argv[4], geometry_shader)) return 1;
   if (tessellation_fixture && (!Load(argv[4], hull_shader) || !Load(argv[5], domain_shader))) return 1;
-  if (argc >= 5 && !cube_fixture && !geometry_fixture && !tessellation_fixture && (!Load(argv[4], sampling_vs) ||
+  if (argc >= 5 && !deployed_fixture && !cube_fixture && !geometry_fixture && !tessellation_fixture && (!Load(argv[4], sampling_vs) ||
       !dxmt::ClassifyD3D12Shader({sampling_vs.data(), sampling_vs.size()}).uses_texture_sampling)) return 1;
   const D3D12_SHADER_BYTECODE pixel = {ps.data(), ps.size()}, vertex = {vs.data(), vs.size()};
   if (dxmt::ClassifyD3D12Shader(pixel).uses_texture_sampling == vertex_only_fixture ||
@@ -700,6 +702,7 @@ int wmain(int argc, wchar_t **argv) {
   auto *native = static_cast<dxmt::MTLD3D12Device *>(device.get());
   auto metal = native->GetMTLDevice();
   for (unsigned mode = 0; mode < 4; ++mode) {
+    if (deployed_fixture && mode < 2) continue;
     // ALL and stage-specific duplicate registers are invalid root signatures.
     if (vertex_shared_fixture && !(mode & 1)) continue;
     const bool static_sampler = mode & 2;

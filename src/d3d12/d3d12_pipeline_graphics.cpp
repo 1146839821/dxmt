@@ -1573,8 +1573,13 @@ public:
         requires_minmax_variant = application_root_ && application_root_->HasAIRReductionSamplers;
         if (requires_minmax_variant) {
           const auto selected = env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY");
-          if (selected.empty()) return E_NOTIMPL;
-          minmax_dxc_directory_ = str::tows(selected.c_str());
+          if (!env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY").empty()) return E_NOTIMPL;
+          if (selected.empty()) {
+            const auto selection = SelectD3D12CompilerDirectory(minmax_compiler_directory);
+            if (selection != S_OK) return FAILED(selection) ? selection : E_NOTIMPL;
+          } else minmax_compiler_directory = str::tows(selected.c_str());
+          typed_origin_compiler_directory.clear();
+          minmax_dxc_directory_ = minmax_compiler_directory;
           hr = PrepareMinMaxVariant(minmax_dxc_directory_.c_str(), static_minmax_shaders, minmax_variant_);
           if (FAILED(hr)) return hr;
           root_signature = minmax_variant_->root.layout.bytecode.data();

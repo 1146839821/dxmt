@@ -104,15 +104,19 @@ public:
           // Compile only the qualified private path. An ordinary MSC pipeline
           // would consume the native point surrogate with incorrect semantics.
           const auto directory = env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY");
-          if (directory.empty() || !env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY").empty()) return E_NOTIMPL;
+          if (!env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY").empty()) return E_NOTIMPL;
           try {
+            if (directory.empty()) {
+              const auto selection = SelectD3D12CompilerDirectory(minmax_compiler_directory);
+              if (selection != S_OK) return FAILED(selection) ? selection : E_NOTIMPL;
+            } else minmax_compiler_directory = str::tows(directory.c_str());
+            typed_origin_compiler_directory.clear();
             const auto *bytes = static_cast<const uint8_t *>(pDesc->CS.pShaderBytecode);
             original_cs_.assign(bytes, bytes + pDesc->CS.BytecodeLength);
             application_root_ = rootsig;
             this->shader_backend = D3D12ShaderBackend::MetalShaderConverter;
-            const auto selected = str::tows(directory.c_str());
             const D3D12MinMaxComputeVariant *variant = nullptr;
-            const HRESULT hr = GetMinMaxVariant(selected.c_str(), &variant);
+            const HRESULT hr = GetMinMaxVariant(minmax_compiler_directory.c_str(), &variant);
             if (FAILED(hr)) return hr;
             pso = variant->pso;
             threadgroup_size = variant->threadgroup_size;

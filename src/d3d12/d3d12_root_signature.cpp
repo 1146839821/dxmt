@@ -459,9 +459,13 @@ public:
         const bool air_reduction = reduction == D3D12_FILTER_REDUCTION_TYPE_MINIMUM ||
                                    reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM;
         if (air_reduction) {
-          if ((env::getEnvVar("DXMT_ENABLE_AIR_MINMAX") != "1" &&
-               env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY").empty()) ||
-              D3D12_DECODE_IS_ANISOTROPIC_FILTER(original.Filter)) return E_NOTIMPL;
+          if (D3D12_DECODE_IS_ANISOTROPIC_FILTER(original.Filter)) return E_NOTIMPL;
+          if (env::getEnvVar("DXMT_ENABLE_AIR_MINMAX") != "1" &&
+              env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY").empty()) {
+            std::wstring directory;
+            const auto selection = SelectD3D12CompilerDirectory(directory);
+            if (selection != S_OK) return FAILED(selection) ? selection : E_NOTIMPL;
+          }
           if (!std::isfinite(original.MinLOD) || !std::isfinite(original.MaxLOD)) return E_INVALIDARG;
           HasAIRReductionSamplers = true;
           native.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;

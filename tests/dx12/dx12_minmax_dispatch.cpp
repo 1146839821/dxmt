@@ -24,12 +24,13 @@ static bool Check(HRESULT hr, const char *name) {
 int wmain(int argc, wchar_t **argv) {
   if ((argc != 4 && argc != 5) || (std::wcscmp(argv[2], L"1") && std::wcscmp(argv[2], L"2"))) return 1;
   const bool typed_rejection = argc == 5 && std::wcscmp(argv[4], L"--typed-rejection") == 0;
+  const bool deployed = argc == 5 && std::wcscmp(argv[4], L"--deployed") == 0;
   const bool gpu_count = argc == 5 && std::wcscmp(argv[4], L"--gpu-count") == 0;
   const bool root_updates = gpu_count || (argc == 5 && std::wcscmp(argv[4], L"--root-updates") == 0);
-  if (argc == 5 && !typed_rejection && !root_updates) return 1;
+  if (argc == 5 && !typed_rejection && !root_updates && !deployed) return 1;
   if (root_updates && argv[2][0] != L'2') return 1;
   const unsigned pairs = argv[2][0] - L'0';
-  if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", argv[3])) return 1;
+  if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", deployed ? nullptr : argv[3])) return 1;
   SetEnvironmentVariableW(L"DXMT_ENABLE_AIR_MINMAX", nullptr);
   SetEnvironmentVariableW(L"DXMT_ENABLE_AIR_MINMAX_DYNAMIC", nullptr);
   SetEnvironmentVariableW(L"DXMT_TYPED_ORIGIN_DXC_DIRECTORY", nullptr);
@@ -122,6 +123,8 @@ int wmain(int argc, wchar_t **argv) {
   if (!Check(upload_list->Close(), "upload close") || !complete(upload_list.get(), 1)) return 1;
   UINT64 serial = 1;
   for (unsigned mode = 0; mode < 11; ++mode) {
+    if (deployed && mode < 6) continue; // Only reduction roots select at PSO creation.
+    std::printf("MINMAX_CASE mode=%u deployed=%u\n", mode, unsigned(deployed));
     if (root_updates && mode != 0) continue;
     if (typed_rejection && mode != 0 && mode != 4) continue;
     const bool legacy = mode == 4 || mode == 10, use_static = mode >= 5;
@@ -178,7 +181,7 @@ int wmain(int argc, wchar_t **argv) {
     ID3DBlob *raw_blob = nullptr;
     if (!Check(D3D12SerializeVersionedRootSignature(&rs, &raw_blob, nullptr), "serialize")) return 1;
     OwnedCOM<ID3DBlob> blob(raw_blob);
-    if (mode >= 6) {
+    if (mode >= 6 && !deployed) {
       SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr);
       ID3D12RootSignature *rejected = nullptr;
       const auto hr = device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&rejected));
@@ -198,8 +201,9 @@ int wmain(int argc, wchar_t **argv) {
       const dxmt::D3D12TypedOriginRoot *typed = nullptr;
       if (native->GetTypedOriginCompilerRoot(&typed) != E_NOTIMPL || typed) return 1;
     }
+    std::printf("MINMAX_ROOT mode=%u PASS\n", mode);
     D3D12_COMPUTE_PIPELINE_STATE_DESC pso_desc = {}; pso_desc.pRootSignature = root.get(); pso_desc.CS = {shader.data(), shader.size()};
-    if (mode >= 6) {
+    if (mode >= 6 && !deployed) {
       SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr);
       ID3D12PipelineState *rejected = nullptr;
       const auto hr = device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&rejected));
@@ -215,6 +219,7 @@ int wmain(int argc, wchar_t **argv) {
       const dxmt::D3D12TypedOriginComputeVariant *typed = nullptr;
       if (!native->requires_minmax_variant || native->GetTypedOriginVariant(argv[3], &typed) != E_NOTIMPL || typed) return 1;
     }
+    std::printf("MINMAX_PSO mode=%u PASS\n", mode);
     D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 4, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
     ID3D12DescriptorHeap *raw_resources = nullptr, *raw_samplers = nullptr;
     if (!Check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&raw_resources)), "resources")) return 1;
@@ -463,12 +468,12 @@ int wmain(int argc, wchar_t **argv) {
       OwnedCOM<ID3D12GraphicsCommandList> owned_list(bad_list);
       bad_list->SetDescriptorHeaps(1, heaps); bad_list->SetComputeRootSignature(root.get());
       bad_list->SetComputeRootDescriptorTable(0, resources->GetGPUDescriptorHandleForHeapStart());
-      SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr);
+      SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", L"Z:\\dxmt-invalid-late-minmax-selection");
       bad_list->Dispatch(1, 1, 1);
       const auto rejected = bad_list->Close();
-      SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", argv[3]);
+      SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", deployed ? nullptr : argv[3]);
       if (rejected != E_FAIL) return 1;
-      std::printf("MINMAX_STATIC_GATE mode=%u root/PSO/layout/typed/recording rejection PASS\n", mode);
+      std::printf("MINMAX_STATIC_OVERRIDE_GATE mode=%u incompatible late directory rejected\n", mode);
     }
     list->Dispatch(1, 1, 1);
     D3D12_RESOURCE_BARRIER barrier = {}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -481,6 +486,7 @@ int wmain(int argc, wchar_t **argv) {
       std::puts("MINMAX_TYPED_REJECTION static recording PASS"); continue;
     }
     if (!Check(close_hr, "close")) return 1;
+    std::printf("MINMAX_CLOSE mode=%u PASS\n", mode);
     auto *native_list = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list.get());
     const dxmt::D3D12MinMaxDispatch *recorded = nullptr;
     for (auto *encoder = native_list->entry; encoder; encoder = encoder->next)
@@ -735,6 +741,7 @@ int wmain(int argc, wchar_t **argv) {
     }
   }
   std::puts(typed_rejection ? "MinMax typed guard PASS (rejection only)" :
+      deployed ? "MinMax deployed dispatch PASS: five reduction roots x five executions (focused subset)" :
       "MinMax D3D12 dispatch PASS: eleven roots x five executions, including static reduction (focused subset)");
   return 0;
 }

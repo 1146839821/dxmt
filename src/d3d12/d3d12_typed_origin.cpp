@@ -135,11 +135,9 @@ HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<ID
 }
 } // namespace
 
-static HRESULT SelectTypedOriginCompilerInternal(const D3D12_SHADER_BYTECODE &shader, std::wstring &directory,
+static HRESULT SelectCompilerDirectoryInternal(std::wstring &directory,
     const wchar_t *selected_directory) {
   directory.clear();
-  if (!shader.pShaderBytecode || !shader.BytecodeLength || shader.BytecodeLength > 32 * 1024 * 1024)
-    return E_INVALIDARG;
   HMODULE module = nullptr;
   if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
       reinterpret_cast<LPCWSTR>(&SelectD3D12TypedOriginCompiler), &module)) return E_FAIL;
@@ -161,6 +159,24 @@ static HRESULT SelectTypedOriginCompilerInternal(const D3D12_SHADER_BYTECODE &sh
   const auto validator_path = candidate + L"/dxil.dll";
   if (GetFileAttributesW(compiler_path.c_str()) == INVALID_FILE_ATTRIBUTES ||
       GetFileAttributesW(validator_path.c_str()) == INVALID_FILE_ATTRIBUTES) return selected_directory ? E_NOTIMPL : S_FALSE;
+  directory = std::move(candidate);
+  return S_OK;
+}
+
+HRESULT SelectD3D12CompilerDirectory(std::wstring &directory, const wchar_t *selected_directory) {
+  try { return SelectCompilerDirectoryInternal(directory, selected_directory); }
+  catch (const std::bad_alloc &) { directory.clear(); return E_OUTOFMEMORY; }
+}
+
+static HRESULT SelectTypedOriginCompilerInternal(const D3D12_SHADER_BYTECODE &shader, std::wstring &directory,
+    const wchar_t *selected_directory) {
+  directory.clear();
+  if (!shader.pShaderBytecode || !shader.BytecodeLength || shader.BytecodeLength > 32 * 1024 * 1024)
+    return E_INVALIDARG;
+  std::wstring candidate;
+  const auto selection = SelectD3D12CompilerDirectory(candidate, selected_directory);
+  if (selection != S_OK) return selection;
+  const auto compiler_path = candidate + L"/dxcompiler.dll";
   OwnedModule compiler(LoadLibraryExW(compiler_path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH));
   if (!compiler) return E_FAIL;
   auto factory = reinterpret_cast<DxcCreateInstanceProc>(GetProcAddress(compiler.get(), "DxcCreateInstance"));

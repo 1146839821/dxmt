@@ -368,6 +368,7 @@ public:
 class MTLD3D12GraphicsPipelineState : public MTLD3D12PipelineState {
 public:
   std::wstring typed_origin_compiler_directory;
+  std::wstring minmax_compiler_directory;
   virtual HRESULT GetTypedOriginVariant(const wchar_t *dxc_directory,
       const struct D3D12TypedOriginGraphicsVariant **variant) = 0;
   virtual HRESULT GetMinMaxVariant(const wchar_t *dxc_directory,
@@ -423,6 +424,7 @@ public:
   // Static reduction roots have no semantically valid ordinary MSC PSO.
   bool requires_minmax_variant = false;
   std::wstring typed_origin_compiler_directory;
+  std::wstring minmax_compiler_directory;
   // Internal preparation only. Encoder selection requires coherent origin
   // descriptors/records and a submission-owned lifetime before dispatch.
   virtual HRESULT GetTypedOriginVariant(

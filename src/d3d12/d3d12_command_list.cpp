@@ -2074,7 +2074,9 @@ public:
     const D3D12MinMaxGraphicsVariant *minmax_variant = nullptr;
     const D3D12TypedOriginGraphicsVariant *origin_variant = nullptr;
     const auto origin_override = use_msc ? env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY") : "";
-    const auto minmax_directory = use_msc ? env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY") : "";
+    const auto minmax_override = use_msc ? env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY") : "";
+    const auto minmax_directory = !minmax_override.empty() ? str::tows(minmax_override.c_str()) :
+        use_msc ? pso_graphics_->minmax_compiler_directory : L"";
     std::wstring overridden_origin_directory;
     const std::wstring *origin_directory = nullptr;
     if (!origin_override.empty()) {
@@ -2109,8 +2111,7 @@ public:
         FailRecording(__func__, "MinMax graphics indirect/skipped binding is unsupported");
         return DrawCallStatus::Invalid;
       }
-      const auto directory = str::tows(minmax_directory.c_str());
-      const auto hr = pso_graphics_->GetMinMaxVariant(directory.c_str(), &minmax_variant);
+      const auto hr = pso_graphics_->GetMinMaxVariant(minmax_directory.c_str(), &minmax_variant);
       if (FAILED(hr) || !rootsig_graphics_ || !descriptor_heap_) {
         FailRecording(__func__, "MinMax graphics preparation failed HRESULT=", hr);
         return DrawCallStatus::Invalid;
@@ -3683,7 +3684,9 @@ public:
     }
     const D3D12TypedOriginComputeVariant *origin_variant = nullptr;
     const D3D12MinMaxComputeVariant *minmax_variant = nullptr;
-    const auto minmax_directory = use_msc ? env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY") : "";
+    const auto minmax_override = use_msc ? env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY") : "";
+    const auto minmax_directory = !minmax_override.empty() ? str::tows(minmax_override.c_str()) :
+        use_msc ? pso_compute_->minmax_compiler_directory : L"";
     const auto origin_override = AllowTypedOrigin && use_msc ? env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY") : "";
     const auto origin_directory = !origin_override.empty() ? str::tows(origin_override.c_str()) :
         AllowTypedOrigin && use_msc && minmax_directory.empty() ? pso_compute_->typed_origin_compiler_directory : L"";
@@ -3696,8 +3699,7 @@ public:
         FailRecording(__func__, "MinMax skipped binding or combined private variants are unsupported");
         return false;
       }
-      const auto directory = str::tows(minmax_directory.c_str());
-      const auto hr = pso_compute_->GetMinMaxVariant(directory.c_str(), &minmax_variant);
+      const auto hr = pso_compute_->GetMinMaxVariant(minmax_directory.c_str(), &minmax_variant);
       if (FAILED(hr) || !rootsig_compute_ || !descriptor_heap_) {
         FailRecording(__func__, "MinMax dispatch preparation failed HRESULT=", hr);
         return false;
