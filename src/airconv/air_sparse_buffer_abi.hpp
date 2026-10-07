@@ -17,4 +17,13 @@ static_assert(sizeof(SparseBufferFeedbackHeader) == 32);
 static_assert(offsetof(SparseBufferFeedbackHeader, mapping_gpu_address) == 16);
 static_assert(offsetof(SparseBufferFeedbackHeader, tile_count) == 24);
 
+// Submission-owned root lookup table: a qword count followed by these rows.
+// Separate from both AIR root arguments and MSC descriptors/TLABs.
+struct RootBufferFeedbackEntry {
+  uint64_t gpu_address;
+  uint64_t byte_size;
+  uint64_t feedback_header;
+};
+static_assert(sizeof(RootBufferFeedbackEntry) == 24);
+
 } // namespace dxmt::air

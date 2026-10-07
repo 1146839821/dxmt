@@ -31,6 +31,53 @@ using namespace llvm::air;
 
 class RootSignatureBindingMap : public BindingMap {
 public:
+  uint32_t RootFeedbackArgumentIndex = ~0u;
+
+  BufferDescriptor GetRootFeedbackDescriptor(llvm::air::AIRBuilder &AIR, llvm::Value *Pointer,
+                                             uint32_t Stride, bool Coherent) {
+    auto &B = AIR.builder;
+    auto Fn = B.GetInsertBlock()->getParent();
+    auto Table = Fn->getArg(RootFeedbackArgumentIndex);
+    auto Entry = B.GetInsertBlock();
+    auto Loop = llvm::BasicBlock::Create(AIR.getContext(), "root.feedback.loop", Fn);
+    auto Read = llvm::BasicBlock::Create(AIR.getContext(), "root.feedback.read", Fn);
+    auto Next = llvm::BasicBlock::Create(AIR.getContext(), "root.feedback.next", Fn);
+    auto Found = llvm::BasicBlock::Create(AIR.getContext(), "root.feedback.found", Fn);
+    auto Done = llvm::BasicBlock::Create(AIR.getContext(), "root.feedback.done", Fn);
+    auto VA = B.CreatePtrToInt(Pointer, B.getInt64Ty());
+    auto Count = B.CreateLoad(B.getInt64Ty(), Table);
+    B.CreateBr(Loop);
+    B.SetInsertPoint(Loop);
+    auto Index = B.CreatePHI(B.getInt64Ty(), 2);
+    Index->addIncoming(B.getInt64(0), Entry);
+    B.CreateCondBr(B.CreateICmpULT(Index, Count), Read, Done);
+    B.SetInsertPoint(Read);
+    auto Row = B.CreateAdd(B.CreateMul(Index, B.getInt64(3)), B.getInt64(1));
+    auto Load = [&](unsigned field) {
+      return B.CreateLoad(B.getInt64Ty(), B.CreateGEP(B.getInt64Ty(), Table, B.CreateAdd(Row, B.getInt64(field))));
+    };
+    auto Base = Load(0);
+    auto Size = Load(1);
+    auto Offset = B.CreateSub(VA, Base);
+    B.CreateCondBr(B.CreateAnd(B.CreateICmpUGE(VA, Base), B.CreateICmpULT(Offset, Size)), Found, Next);
+    B.SetInsertPoint(Next);
+    auto Increment = B.CreateAdd(Index, B.getInt64(1));
+    Index->addIncoming(Increment, Next);
+    B.CreateBr(Loop);
+    B.SetInsertPoint(Found);
+    auto Header = Load(2);
+    auto Remaining = B.CreateSub(Size, Offset);
+    auto Length = B.CreateSelect(B.CreateICmpUGT(Remaining, B.getInt64(0xffffffff)), B.getInt64(0xffffffff), Remaining);
+    B.CreateBr(Done);
+    B.SetInsertPoint(Done);
+    auto Metadata = B.CreatePHI(B.getInt64Ty(), 2);
+    Metadata->addIncoming(B.getInt64(0), Loop);
+    Metadata->addIncoming(Length, Found);
+    auto Feedback = B.CreatePHI(B.getInt64Ty(), 2);
+    Feedback->addIncoming(B.getInt64(0), Loop);
+    Feedback->addIncoming(Header, Found);
+    return {Pointer, Metadata, Stride, Coherent, Feedback};
+  }
   llvm::Value *
   GetArgument(llvm::air::AIRBuilder &AIR, uint32_t TableIndex, uint32_t Index) {
     auto &B = AIR.builder;
@@ -336,6 +383,8 @@ public:
     auto DescriptorOffset = Iter->second.second;
     auto HeapPointer = GetArgument(Builder, RootSignatureArgumentIndex, SRV.arg_index);
     if (DescriptorOffset == ~0u) {
+      if (SRV.buffer_feedback && RootFeedbackArgumentIndex != ~0u)
+        return GetRootFeedbackDescriptor(Builder, HeapPointer, SRV.structure_stride, false);
       return BufferDescriptor{HeapPointer, Builder.builder.getInt64(0xffffffff), SRV.structure_stride, false};
     }
     auto [Pointer, Metadata] = GetBufferDescriptor(
@@ -359,6 +408,8 @@ public:
     auto DescriptorOffset = Iter->second.second;
     auto HeapPointer = GetArgument(Builder, RootSignatureArgumentIndex, UAV.arg_index);
     if (DescriptorOffset == ~0u) {
+      if (UAV.buffer_feedback && RootFeedbackArgumentIndex != ~0u)
+        return GetRootFeedbackDescriptor(Builder, HeapPointer, UAV.structure_stride, UAV.global_coherent);
       return BufferDescriptor{
           HeapPointer, Builder.builder.getInt64(0xffffffff), UAV.structure_stride, UAV.global_coherent
       };
@@ -626,6 +677,19 @@ setup_binding_rootsig(
     }
   }
 
+  if (shader_type == microsoft::D3D11_SB_COMPUTE_SHADER) {
+    bool root_feedback = false;
+    for (const auto &[range, binding] : binding_map->SRVs)
+      root_feedback |= binding.second == ~0u && binding.first.buffer_feedback;
+    for (const auto &[range, binding] : binding_map->UAVs)
+      root_feedback |= binding.second == ~0u && binding.first.buffer_feedback;
+    if (root_feedback)
+      binding_map->RootFeedbackArgumentIndex = func_signature.DefineInput(air::ArgumentBindingBuffer{
+          .buffer_size = {}, .location_index = SM50_BINDING_INDEX_ROOT_BUFFER_FEEDBACK, .array_size = 0,
+          .memory_access = air::MemoryAccess::read, .address_space = air::AddressSpace::constant,
+          .type = air::msl_ulong, .arg_name = "root_feedback", .raster_order_group = {},
+      });
+  }
   auto [type, metadata] = builder.Build(module.getContext(), module.getDataLayout());
 
   binding_map->RootSignatureArgumentIndex = func_signature.DefineInput(air::ArgumentBindingIndirectBuffer{

@@ -230,6 +230,12 @@ public:
 
     threadgroup_size = {ref_cs.ThreadgroupSize[0], ref_cs.ThreadgroupSize[1], ref_cs.ThreadgroupSize[2]};
     air_sampler_reduction_eligible = shader_cs.SupportsSamplerReduction(ref_cs);
+    try {
+      std::vector<MTL_SM50_SHADER_ARGUMENT> arguments(ref_cs.NumArguments);
+      SM50GetArgumentsInfo(shader_cs.get(), nullptr, arguments.data());
+      for (const auto &argument : arguments)
+        air_buffer_feedback |= (argument.Flags & MTL_SM50_SHADER_ARGUMENT_BUFFER_FEEDBACK) != 0;
+    } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
 
     D3D12AirconvBitcode cs_bitcode;
 

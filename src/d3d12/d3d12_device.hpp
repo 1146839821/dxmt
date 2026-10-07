@@ -422,6 +422,7 @@ public:
 
 class MTLD3D12ComputePipelineState : public MTLD3D12PipelineState {
 public:
+  bool air_buffer_feedback = false;
   WMT::Reference<WMT::ComputePipelineState> pso;
   WMTSize threadgroup_size;
   // Static reduction roots have no semantically valid ordinary MSC PSO.

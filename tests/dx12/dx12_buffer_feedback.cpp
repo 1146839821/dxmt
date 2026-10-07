@@ -28,7 +28,7 @@ void Transition(ID3D12GraphicsCommandList *list, ID3D12Resource *resource,
   b.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
   list->ResourceBarrier(1, &b);
 }
-int Run(pD3DCompile compile, bool uav_source) {
+int Run(pD3DCompile compile, bool uav_source, bool root_source) {
   // Equal zero payloads in mapped and NULL tiles force status to be independent
   // of payload. Both descriptor views start at the last word of tile zero.
   const char *hlsl = R"(
@@ -128,6 +128,18 @@ RWStructuredBuffer<uint> output : register(u0);
   D3D12_ROOT_PARAMETER parameter = {}; parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
   parameter.DescriptorTable = {2, ranges};
   D3D12_ROOT_SIGNATURE_DESC rd = {}; rd.NumParameters = 1; rd.pParameters = &parameter;
+  D3D12_ROOT_PARAMETER root_parameters[3] = {};
+  if (root_source) {
+    for (UINT i = 0; i < 2; ++i) {
+      root_parameters[i].ParameterType = uav_source ? D3D12_ROOT_PARAMETER_TYPE_UAV : D3D12_ROOT_PARAMETER_TYPE_SRV;
+      root_parameters[i].Descriptor.ShaderRegister = uav_source ? i + 1 : i;
+    }
+    root_parameters[2] = parameter;
+    root_parameters[2].DescriptorTable.NumDescriptorRanges = 1;
+    root_parameters[2].DescriptorTable.pDescriptorRanges = &ranges[1];
+    // Table starts at the heap base; output remains at descriptor offset 2.
+    rd.NumParameters = 3; rd.pParameters = root_parameters;
+  }
   Owned<ID3DBlob> root_blob, root_error;
   Check(D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob.p, &root_error.p));
   Owned<ID3D12RootSignature> root;
@@ -157,7 +169,13 @@ RWStructuredBuffer<uint> output : register(u0);
     if (phase) Transition(list.p, output.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     list.p->SetComputeRootSignature(root.p);
     ID3D12DescriptorHeap *heaps[] = {descriptors.p}; list.p->SetDescriptorHeaps(1, heaps);
-    list.p->SetComputeRootDescriptorTable(0, descriptors.p->GetGPUDescriptorHandleForHeapStart());
+    if (root_source) {
+      for (UINT i = 0; i < 2; ++i) {
+        if (uav_source) list.p->SetComputeRootUnorderedAccessView(i, source.p->GetGPUVirtualAddress() + 65532);
+        else list.p->SetComputeRootShaderResourceView(i, source.p->GetGPUVirtualAddress() + 65532);
+      }
+    }
+    list.p->SetComputeRootDescriptorTable(root_source ? 2 : 0, descriptors.p->GetGPUDescriptorHandleForHeapStart());
     list.p->Dispatch(1, 1, 1);
     Transition(list.p, output.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
     list.p->CopyBufferRegion(readback.p, 0, output.p, 0, 44); Check(list.p->Close());
@@ -177,17 +195,22 @@ RWStructuredBuffer<uint> output : register(u0);
     if (!passed) { CloseHandle(event); return 1; }
   }
   CloseHandle(event);
-  std::printf("BUFFER_FEEDBACK %s raw/structured zero-payload, boundary and alternating remap PASS\n", uav_source ? "UAV" : "SRV");
+  std::printf("BUFFER_FEEDBACK %s %s raw/structured zero-payload, boundary and alternating remap PASS\n",
+              root_source ? "root" : "table", uav_source ? "UAV" : "SRV");
   return 0;
 }
 }
 int main(int argc, char **argv) {
-  const bool uav_source = argc == 2 && std::strcmp(argv[1], "--uav") == 0;
-  if (argc != 1 && !uav_source) return 2;
+  bool uav_source = false, root_source = false;
+  for (int i = 1; i < argc; ++i) {
+    if (!std::strcmp(argv[i], "--uav")) uav_source = true;
+    else if (!std::strcmp(argv[i], "--root")) root_source = true;
+    else return 2;
+  }
   auto library = LoadLibraryA("d3dcompiler_47.dll");
   if (!library) return 77;
   auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(library, "D3DCompile"));
   int result = 1;
-  try { if (compile) result = Run(compile, uav_source); } catch (const std::exception &e) { std::puts(e.what()); }
+  try { if (compile) result = Run(compile, uav_source, root_source); } catch (const std::exception &e) { std::puts(e.what()); }
   FreeLibrary(library); return result;
 }

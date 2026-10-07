@@ -3727,6 +3727,8 @@ public:
       }
     }
     static std::atomic<uint32_t> compute_trace_count{0};
+    if (!use_msc && pso_compute_->air_buffer_feedback && allocator_->encoder_current)
+      allocator_->encoder_current->root_buffer_feedback = true;
     compute_trace_id_ = compute_trace_ ? compute_trace_count.fetch_add(1, std::memory_order_relaxed) : UINT_MAX;
     if (compute_trace_id_ < 4096) {
       DEBUG(
@@ -5999,6 +6001,10 @@ public:
         return;
       if (!ValidateIndirectPipeline(pso_compute_.ptr(), sig, "ExecuteIndirect(Dispatch)"))
         return;
+      if (sig->UpdateRootArguments && pso_compute_->air_buffer_feedback) {
+        FailRecording(__func__, "indirect root buffer feedback table binding is not implemented");
+        return;
+      }
     } else if (!ValidateCommand(SupportsGraphics(), "ExecuteIndirect(Draw)")) {
       return;
     } else if (!ValidateIndirectPipeline(pso_graphics_.ptr(), sig, "ExecuteIndirect(Draw)")) {

@@ -261,6 +261,40 @@ byte-footprint lowering, DXIL support and GPU feedback matrices remain required.
 
 ## GPU mapping lookup lowering checkpoint
 
+### Compute root feedback transport
+
+Hypothesis: an independent submission-owned VA lookup table can serve root
+feedback without changing application root arguments or ExecuteIndirect stride.
+Expected effect: direct compute root SRV/UAV feedback uses the same bitmap
+lowering as descriptor tables. Risk: omitted residency/lifetime, binding-slot
+collisions, excessive lookup cost, and ICB buffer inheritance differences.
+
+The AIR compute root binding now adds a private buffer input at slot 8 only
+when a root SRV/UAV consumes feedback. Its qword count is followed by 24-byte
+VA/size/header rows; a bounded GPU loop finds the containing allocation and
+computes remaining bytes. The host conservatively marks AIR compute pipelines
+with any buffer-feedback consumer, snapshots registered allocations per encoder
+at submission, fills a separate shared buffer outside the registry lock, declares
+table/main/auxiliary resources, and keeps table plus source references until
+completion. Application root argument and MSC layouts/strides are unchanged.
+Table-only feedback pipelines currently also incur the snapshot/table cost;
+exact root-only host eligibility and linear-search performance remain to refine.
+
+Normal/no-private full builds and 15 host tests pass. Both runtimes pass root
+SRV and root UAV raw/structured GPU data/status oracles at VA + 65532 over four
+serial mapping alternations; table-UAV regressions also pass. Evidence:
+`dxmt-reconciliation.ZLDvwE/root-feedback-{srv,uav}-{normal,np}.log` and
+`root-feedback-table-regression-{normal,np}.log`. No API-validation run or
+inflight/multiqueue/VA-alias lifecycle qualification is claimed here.
+
+Graphics/geometry/tessellation root feedback still rejects compilation. ICBs
+with root updates do not inherit buffers and only explicitly bind slots 0/1;
+slot 8 is not yet transported into them. Until that is implemented, AIR compute
+ExecuteIndirect with root updates and any buffer-feedback consumer explicitly
+fails recording after pipeline validation. This conservative temporary gate
+also affects table-feedback consumers with root updates; it must be removed
+when the ICB transport lands. No tiled Tier2/feature-level promotion occurred.
+
 Selective root-transport prerequisite: raw/structured decoder uses now accumulate
 `buffer_feedback` on the corresponding SRV/UAV only when the status destination
 is non-NULL. AIR argument reflection publishes this as the previously unused

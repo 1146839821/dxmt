@@ -19,6 +19,7 @@
 #include "com/com_guid.hpp"
 #include "com/com_pointer.hpp"
 #include "d3d12_device.hpp"
+#include "air_sparse_buffer_abi.hpp"
 #include "d3d12_typed_origin_binding.hpp"
 #include "d3d12_minmax_dispatch.hpp"
 #include "d3d12_pageable.hpp"
@@ -369,12 +370,14 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     // recording encoder. CompletionThread destroys them after GPU completion.
     std::vector<WMT::Reference<WMT::Resource>> descriptor_resource_refs;
     std::vector<std::vector<Rc<BufferAllocation>>> indirect_root_buffers;
+    std::vector<WMT::Reference<WMT::Buffer>> root_feedback_tables;
     HANDLE latency_waitable = nullptr;
   };
 
   template <typename UseResource>
-  bool RetainIndirectRootBuffers(EncoderData *data, Submission &submission, UseResource use_resource) {
-    if (!data->indirect_root_va)
+  bool RetainIndirectRootBuffers(EncoderData *data, Submission &submission, UseResource use_resource,
+                                WMT::Buffer *feedback_table = nullptr) {
+    if (!data->indirect_root_va && !data->root_buffer_feedback)
       return true;
     std::vector<Rc<BufferAllocation>> snapshot;
     if (FAILED(device_->SnapshotRegisteredBuffers(snapshot)))
@@ -383,6 +386,28 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     // are acquired under the registry lock; native fan-out is outside it.
     try { submission.indirect_root_buffers.push_back(std::move(snapshot)); }
     catch (const std::bad_alloc &) { return false; }
+    if (data->root_buffer_feedback) {
+      if (!feedback_table) return false;
+      const auto &allocations = submission.indirect_root_buffers.back();
+      if (allocations.size() > (SIZE_MAX - sizeof(uint64_t)) / sizeof(air::RootBufferFeedbackEntry)) return false;
+      WMTBufferInfo info = {};
+      info.length = sizeof(uint64_t) + allocations.size() * sizeof(air::RootBufferFeedbackEntry);
+      info.options = WMTResourceStorageModeShared;
+      auto table = device_->GetMTLDevice().newBuffer(info);
+      if (!table || !info.memory.get()) return false;
+      const uint64_t count = allocations.size();
+      std::memcpy(info.memory.get(), &count, sizeof(count));
+      auto rows = reinterpret_cast<air::RootBufferFeedbackEntry *>(static_cast<uint8_t *>(info.memory.get()) + sizeof(count));
+      for (size_t i = 0; i < allocations.size(); ++i) {
+        const auto &allocation = allocations[i];
+        rows[i] = {allocation->gpuAddress(), allocation->length(),
+                   allocation->sparse_feedback_header ? allocation->sparse_feedback_header->gpuAddress() : 0};
+      }
+      *feedback_table = table;
+      try { submission.root_feedback_tables.emplace_back(std::move(table)); }
+      catch (const std::bad_alloc &) { return false; }
+      use_resource(*feedback_table, WMTResourceUsageRead);
+    }
     for (const auto &allocation : submission.indirect_root_buffers.back()) {
       use_resource(allocation->buffer(), static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite));
       if (allocation->sparse_feedback_header)
@@ -1452,12 +1477,20 @@ public:
           auto encoder = cmdbuf.computeCommandEncoder(false);
            LabelEncoder(encoder, recording_id, data->id, "Compute");
            encoder.waitForFence(fence_);
+          WMT::Buffer root_feedback_table;
           if (!RetainIndirectRootBuffers(data, submission, [&](WMT::Buffer buffer, WMTResourceUsage usage) {
                 encoder.useResource(buffer, usage);
-              })) {
+              }, &root_feedback_table)) {
             translation_failed = true;
             encoder.endEncoding();
             break;
+          }
+          if (data->root_buffer_feedback) {
+            PrivateComputeReplayCommand bind = {};
+            bind.buffer.type = WMTComputeCommandSetBuffer;
+            bind.buffer.buffer = root_feedback_table.handle;
+            bind.buffer.index = SM50_BINDING_INDEX_ROOT_BUFFER_FEEDBACK;
+            encoder.encodeCommands(&bind.nop);
           }
           bool sampler_reduction = false;
           if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs, &sampler_reduction) ||

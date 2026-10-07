@@ -95,6 +95,7 @@ struct EncoderData {
   bool static_reduction_defaults_invalid = false;
   // GPU-generated root VAs cannot be enumerated at recording time.
   bool indirect_root_va = false;
+  bool root_buffer_feedback = false;
 
   void
   RetainDescriptorHeap(IUnknown *heap) {
