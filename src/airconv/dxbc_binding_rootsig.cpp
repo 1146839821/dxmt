@@ -17,6 +17,7 @@
  */
 
 #include "air_signature.hpp"
+#include "DXBCParser/BlobContainer.h"
 #include "air_sampler_abi.hpp"
 #include "dxbc_converter.hpp"
 #include "dxbc_root_signature.hpp"
@@ -741,3 +742,78 @@ setup_binding_rootsig(
 }
 
 } // namespace dxmt::dxbc
+
+AIRCONV_API int SM50UsesRootBufferFeedback(sm50_shader_t shader, const void *bytecode, size_t size) {
+  if (!shader || !bytecode || !size) return -1;
+  microsoft::CDXBCParser parser;
+  if (parser.ReadDXBC(bytecode, size) != S_OK) return -1;
+  const void *raw = nullptr;
+  UINT raw_size = 0;
+  if (FAILED(microsoft::DXBCGetRootSignature(bytecode, &raw, &raw_size))) return -1;
+  using namespace dxmt;
+  auto bounded = [&](uint32_t offset, uint32_t count, size_t stride) {
+    return offset % alignof(uint32_t) == 0 && offset <= raw_size && count <= (raw_size - offset) / stride;
+  };
+  if (raw_size < sizeof(RawRootSignatureDesc)) return -1;
+  const auto &header = *static_cast<const RawRootSignatureDesc *>(raw);
+  if ((header.Version != 1 && header.Version != 2) ||
+      !bounded(header.RootParametersOffset, header.NumParameters, sizeof(RawRootParameter)) ||
+      !bounded(header.StaticSamplersOffset, header.NumStaticSamplers, sizeof(D3D12_STATIC_SAMPLER_DESC))) return -1;
+  const auto parameters = reinterpret_cast<const RawRootParameter *>(
+      static_cast<const char *>(raw) + header.RootParametersOffset);
+  for (uint32_t i = 0; i < header.NumParameters; ++i) {
+    const auto &parameter = parameters[i];
+    size_t payload_size = 0;
+    switch (parameter.ParameterType) {
+    case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE: {
+      if (!bounded(parameter.PayloadOffset, 1, sizeof(RawRootDescriptorTable))) return -1;
+      const auto &table = *reinterpret_cast<const RawRootDescriptorTable *>(
+          static_cast<const char *>(raw) + parameter.PayloadOffset);
+      if (!bounded(table.DescriptorRangesOffset, table.NumDescriptorRanges,
+                   header.Version == 1 ? sizeof(D3D12_DESCRIPTOR_RANGE) : sizeof(D3D12_DESCRIPTOR_RANGE1))) return -1;
+      break;
+    }
+    case D3D12_ROOT_PARAMETER_TYPE_CBV:
+    case D3D12_ROOT_PARAMETER_TYPE_SRV:
+    case D3D12_ROOT_PARAMETER_TYPE_UAV:
+      payload_size = header.Version == 1 ? sizeof(D3D12_ROOT_DESCRIPTOR) : sizeof(D3D12_ROOT_DESCRIPTOR1);
+      break;
+    case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS: payload_size = sizeof(D3D12_ROOT_CONSTANTS); break;
+    default: return -1;
+    }
+    if (payload_size && !bounded(parameter.PayloadOffset, 1, payload_size)) return -1;
+  }
+  {
+    dxmt::RootSignatureDeserializer deserializer;
+    if (FAILED(deserializer.Deserialize(raw, raw_size))) return -1;
+    const auto *internal = static_cast<dxmt::dxbc::SM50ShaderInternal *>(shader);
+    const auto &desc = deserializer.desc_1_1_.Desc_1_1;
+    auto visible = [&](D3D12_SHADER_VISIBILITY visibility) {
+      using namespace microsoft;
+      switch (visibility) {
+      case D3D12_SHADER_VISIBILITY_ALL: return true;
+      case D3D12_SHADER_VISIBILITY_VERTEX: return internal->shader_type == D3D10_SB_VERTEX_SHADER;
+      case D3D12_SHADER_VISIBILITY_PIXEL: return internal->shader_type == D3D10_SB_PIXEL_SHADER;
+      case D3D12_SHADER_VISIBILITY_GEOMETRY: return internal->shader_type == D3D10_SB_GEOMETRY_SHADER;
+      case D3D12_SHADER_VISIBILITY_HULL: return internal->shader_type == D3D11_SB_HULL_SHADER;
+      case D3D12_SHADER_VISIBILITY_DOMAIN: return internal->shader_type == D3D11_SB_DOMAIN_SHADER;
+      default: return false;
+      }
+    };
+    auto consumes = [](const auto &resources, const D3D12_ROOT_DESCRIPTOR1 &root) {
+      for (const auto &[id, resource] : resources)
+        if (resource.buffer_feedback && resource.range.lower_bound == root.ShaderRegister &&
+            resource.range.space == root.RegisterSpace) return true;
+      return false;
+    };
+    for (UINT i = 0; i < desc.NumParameters; ++i) {
+      const auto &parameter = desc.pParameters[i];
+      if (!visible(parameter.ShaderVisibility)) continue;
+      if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV &&
+          consumes(internal->shader_info.srvMap, parameter.Descriptor)) return 1;
+      if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_UAV &&
+          consumes(internal->shader_info.uavMap, parameter.Descriptor)) return 1;
+    }
+    return 0;
+  }
+}

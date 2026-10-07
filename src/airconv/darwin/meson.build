@@ -51,6 +51,14 @@ if get_option('enable_tests')
     native : dxmt_crossbuild
   )
   test('airconv API boundary', airconv_api_boundary_test)
+  root_feedback_query_test = executable('root-feedback-query-test',
+    files('../tests/root_feedback_query.cpp'),
+    include_directories : [ llvm_include_path_darwin ],
+    cpp_args : [ airconv_args ],
+    dependencies : [ airconv_dep_darwin, dxbc_parser_native_dep ],
+    native : dxmt_crossbuild
+  )
+  test('airconv root feedback query', root_feedback_query_test)
 
   buffer_feedback_decode_test = executable('buffer-feedback-decode-test',
     files('../tests/buffer_feedback_decode.cpp'),

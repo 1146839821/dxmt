@@ -1383,14 +1383,19 @@ public:
 
   HRESULT
   Initialize(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) {
-    auto record_feedback = [&](D3D12AirconvShader &shader, const MTL_SHADER_REFLECTION &reflection) {
-      try {
-        std::vector<MTL_SM50_SHADER_ARGUMENT> arguments(reflection.NumArguments);
-        SM50GetArgumentsInfo(shader.get(), nullptr, arguments.data());
-        for (const auto &argument : arguments)
-          air_buffer_feedback |= (argument.Flags & MTL_SM50_SHADER_ARGUMENT_BUFFER_FEEDBACK) != 0;
-        return true;
-      } catch (const std::bad_alloc &) { return false; }
+    auto record_feedback = [&](D3D12AirconvShader &shader, const D3D12_SHADER_BYTECODE &bytecode,
+                               const D3D12ShaderClassification &classification) -> HRESULT {
+      const void *explicit_root = nullptr;
+      size_t explicit_size = 0;
+      if (pDesc->pRootSignature)
+        explicit_size = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&explicit_root);
+      SM50_SHADER_ROOT_SIGNATURE_DATA root = {};
+      const auto hr = InitializeD3D12AirconvRootSignature(bytecode, classification, explicit_root, explicit_size, root);
+      if (FAILED(hr)) return hr;
+      const auto feedback = SM50UsesRootBufferFeedback(shader.get(), root.bytecode, root.bytecode_length);
+      if (feedback < 0) return E_FAIL;
+      air_buffer_feedback |= feedback != 0;
+      return S_OK;
     };
     const bool has_stream_output = pDesc->StreamOutput.NumEntries != 0;
     const bool has_hull = pDesc->HS.pShaderBytecode != nullptr;
@@ -1736,7 +1741,7 @@ public:
       if (FAILED(hr))
         return hr;
       air_sampler_reduction_eligible &= shader_vs.SupportsSamplerReduction(ref_vs);
-      if (!record_feedback(shader_vs, ref_vs)) return E_OUTOFMEMORY;
+      if (FAILED(hr = record_feedback(shader_vs, pDesc->VS, vs_classification))) return hr;
       if (!use_airconv_geometry && !use_airconv_tessellation) {
           SM50_SHADER_IA_INPUT_LAYOUT_DATA data_ia_layout = {};
           data_ia_layout.type = SM50_SHADER_IA_INPUT_LAYOUT;
@@ -1811,7 +1816,7 @@ public:
       if (FAILED(hr))
         return hr;
       air_sampler_reduction_eligible &= shader_gs.SupportsSamplerReduction(ref_gs);
-      if (!record_feedback(shader_gs, ref_gs)) return E_OUTOFMEMORY;
+      if (FAILED(hr = record_feedback(shader_gs, pDesc->GS, gs_classification))) return hr;
 
       std::vector<SM50_IA_INPUT_ELEMENT> elements(pDesc->InputLayout.NumElements);
       uint32_t element_count = 0;
@@ -1831,12 +1836,12 @@ public:
       if (FAILED(hr))
         return hr;
       air_sampler_reduction_eligible &= shader_hs.SupportsSamplerReduction(ref_hs);
-      if (!record_feedback(shader_hs, ref_hs)) return E_OUTOFMEMORY;
+      if (FAILED(hr = record_feedback(shader_hs, pDesc->HS, hs_classification))) return hr;
       hr = shader_ds.Initialize(pDesc->DS, ds_classification, D3D12ShaderKind::Domain, &ref_ds, "ds");
       if (FAILED(hr))
         return hr;
       air_sampler_reduction_eligible &= shader_ds.SupportsSamplerReduction(ref_ds);
-      if (!record_feedback(shader_ds, ref_ds)) return E_OUTOFMEMORY;
+      if (FAILED(hr = record_feedback(shader_ds, pDesc->DS, ds_classification))) return hr;
     }
 
     WMTRenderPipelineInfo info;
@@ -1925,7 +1930,7 @@ public:
       if (FAILED(hr))
         return hr;
       air_sampler_reduction_eligible &= shader_ps.SupportsSamplerReduction(ref_ps);
-      if (!record_feedback(shader_ps, ref_ps)) return E_OUTOFMEMORY;
+      if (FAILED(hr = record_feedback(shader_ps, pDesc->PS, ps_classification))) return hr;
       SM50_SHADER_PSO_PIXEL_SHADER_DATA data_ps;
       data_ps.dual_source_blending = dual_source_blending;
       data_ps.disable_depth_output = false;

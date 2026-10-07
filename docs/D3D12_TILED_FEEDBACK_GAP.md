@@ -472,6 +472,45 @@ run, full tessellation conformance or ROTTR visual/performance acceptance is
 claimed by these zero-payload root-buffer status tests. The CLI explicitly
 rejects conflicting stage selectors and unsupported tessellation indirect mode.
 
+### Exact root-feedback host eligibility
+
+Hypothesis: shader-wide BUFFER_FEEDBACK reflection over-admits table-only
+consumers, causing avoidable submission VA snapshots, tables and private ICB
+payloads. Expected effect: request root transport only for a visible consuming
+root SRV/UAV, without changing table feedback or ordinary indirect VA retention.
+Risk: reflection exposes range IDs rather than full register/space; a host-only
+slot comparison can incorrectly suppress SM5.1 root consumers.
+
+New read-only AIR query SM50UsesRootBufferFeedback matches decoded consuming
+resources against root descriptors by register, space, type and stage visibility.
+It uses the same matching conditions as root binding setup, not reflection
+range IDs. The query validates DXBC length and serialized parameter/table/sampler
+extents and alignment before deserialization, returns 0/1 or -1, and does not
+mutate the shader. Compute and all graphics stages query their resolved explicit
+or embedded root; query failure rejects PSO initialization rather than silently
+disabling transport. Existing root argument, reflection and MSC ABIs are unchanged.
+The PE/native bridge appends entry 202 in both tables with a size-checked wow64
+payload; matched new winemetal PE/native binaries are required. wow64 execution
+is source-reviewed, not runtime-tested here.
+
+Table-only direct feedback now avoids the root VA/table submission path.
+Indirect root VA snapshots/retention remain independently enabled when needed;
+only unnecessary feedback table/private payload work is suppressed. No FPS,
+allocation count or full performance benefit has been measured.
+
+The native query oracle deliberately uses range IDs different from registers,
+nonzero space, visibility/type/usage mismatches, a real descriptor table, RS1.0,
+no parameters and invalid lengths/payloads. An initial empty-table fixture was
+rejected by the existing deserializer and was replaced with a valid populated
+table. Both full builds and 16/16 host tests pass. Normal table SRV, indirect
+compute/PS root UAV, indirect VS root SRV, and direct GS/HS/DS root SRV GPU
+regressions pass. No-private table SRV, indirect compute root UAV and direct DS
+root UAV also pass; this is a targeted regression subset, not a full stage matrix.
+Evidence: `dxmt-reconciliation.ZLDvwE/root-feedback-select-*`.
+SM5.1 matching is tested against decoded records, not a compiled SM5.1 GPU
+fixture; broad visibility/alias/concurrency/indirect-emulation and sparse matrices
+remain open. No API/shader-validation run or capability promotion is claimed.
+
 Selective root-transport prerequisite: raw/structured decoder uses now accumulate
 `buffer_feedback` on the corresponding SRV/UAV only when the status destination
 is non-NULL. AIR argument reflection publishes this as the previously unused

@@ -168,3 +168,9 @@ AIRCONV_API void SM50GetArgumentsInfo(
   params.arguments = pArguments;
   UNIX_CALL(sm50_get_arguments_info, &params);
 };
+
+AIRCONV_API int SM50UsesRootBufferFeedback(sm50_shader_t shader, const void *bytecode, size_t size) {
+  struct sm50_uses_root_buffer_feedback_params params = {shader, bytecode, size, -1};
+  if (UNIX_CALL(sm50_uses_root_buffer_feedback, &params)) return -1;
+  return params.ret;
+}

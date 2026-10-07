@@ -343,6 +343,8 @@ AIRCONV_API int SM50Initialize(
   struct MTL_SHADER_REFLECTION *pRefl, sm50_error_t *ppError
 );
 AIRCONV_API void SM50Destroy(sm50_shader_t pShader);
+// Returns 0/1, or -1 when the root-signature query cannot be completed.
+AIRCONV_API int SM50UsesRootBufferFeedback(sm50_shader_t pShader, const void *Bytecode, size_t BytecodeSize);
 AIRCONV_API int SM50Compile(
   sm50_shader_t pShader, struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs,
   const char *FunctionName, sm50_bitcode_t *ppBitcode, sm50_error_t *ppError

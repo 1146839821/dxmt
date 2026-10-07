@@ -2534,6 +2534,12 @@ thunk_SM50GetArgumentsInfo(void *args) {
   return STATUS_SUCCESS;
 }
 
+static NTSTATUS thunk_SM50UsesRootBufferFeedback(void *args) {
+  struct sm50_uses_root_buffer_feedback_params *params = args;
+  params->ret = SM50UsesRootBufferFeedback(params->shader, params->bytecode, params->size);
+  return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 thunk_DXMTMSCIsAvailable(void *args) {
   struct {
@@ -3069,6 +3075,11 @@ thunk32_SM50GetArgumentsInfo(void *args) {
 
   SM50GetArgumentsInfo(params->shader, UInt32ToPtr(params->constant_buffers), UInt32ToPtr(params->arguments));
 
+  return STATUS_SUCCESS;
+}
+static NTSTATUS thunk32_SM50UsesRootBufferFeedback(void *args) {
+  struct sm50_uses_root_buffer_feedback_params32 *params = args;
+  params->ret = SM50UsesRootBufferFeedback(params->shader, UInt32ToPtr(params->bytecode), params->size);
   return STATUS_SUCCESS;
 }
 #endif /* DXMT_NATIVE */
@@ -4619,6 +4630,7 @@ const void *__wine_unix_call_funcs[] = {
     &_SparseMappingQueue_updateBufferMappingsWithSideband,
     &_SparseMappingQueue_copyBufferMappingsWithSideband,
     &_SparseMappingQueue_updateBufferMappingsWithSidebandAndHeaps,
+    &thunk_SM50UsesRootBufferFeedback,
 };
 
 #ifndef DXMT_NATIVE
@@ -4825,5 +4837,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_SparseMappingQueue_updateBufferMappingsWithSideband,
     &_SparseMappingQueue_copyBufferMappingsWithSideband,
     &_SparseMappingQueue_updateBufferMappingsWithSidebandAndHeaps,
+    &thunk32_SM50UsesRootBufferFeedback,
 };
 #endif
