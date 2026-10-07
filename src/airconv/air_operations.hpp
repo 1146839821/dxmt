@@ -1,5 +1,7 @@
 #pragma once
 
+#include "airconv_public.h"
+
 #include "air_signature.hpp"
 #include "air_type.hpp"
 #include "monad.hpp"
@@ -86,6 +88,7 @@ enum class MTLAttributeFormat {
   Half = 53,
   FloatRG11B10 = 54,
   FloatRGB9E5 = 55,
+  UInt1010102 = SM50_IA_FORMAT_UINT1010102,
 };
 
 AIRBuilderResult pull_vec4_from_addr(

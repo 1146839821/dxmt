@@ -500,14 +500,14 @@ IsValidInputLayout(const D3D12_INPUT_LAYOUT_DESC &desc) {
 }
 
 bool
-IsSupportedInputLayout(MTLD3D12Device *device, const D3D12_INPUT_LAYOUT_DESC &desc, bool allow_msc_packed_uint) {
+IsSupportedInputLayout(MTLD3D12Device *device, const D3D12_INPUT_LAYOUT_DESC &desc, bool allow_packed_uint_fetch) {
   if (!device)
     return false;
   for (UINT i = 0; i < desc.NumElements; i++) {
     MTL_DXGI_FORMAT_DESC format_desc;
     if (FAILED(MTLQueryDXGIFormat(device->GetMTLDevice(), desc.pInputElementDescs[i].Format, format_desc)) ||
         (!format_desc.AttributeFormat &&
-         !(allow_msc_packed_uint && desc.pInputElementDescs[i].Format == DXGI_FORMAT_R10G10B10A2_UINT)) ||
+         !(allow_packed_uint_fetch && desc.pInputElementDescs[i].Format == DXGI_FORMAT_R10G10B10A2_UINT)) ||
         !format_desc.BytesPerTexel)
       return false;
   }
@@ -632,12 +632,18 @@ ValidateComputePipelineDescriptor(MTLD3D12Device *device, const D3D12_COMPUTE_PI
 
 HRESULT
 ValidateGraphicsPipelineDescriptor(MTLD3D12Device *device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC &desc) {
+  const auto supports_packed_uint_fetch = [&] {
+    if (desc.GS.pShaderBytecode || desc.HS.pShaderBytecode || desc.DS.pShaderBytecode || desc.StreamOutput.NumEntries)
+      return false;
+    const auto shader = ClassifyD3D12Shader(desc.VS);
+    return SUCCEEDED(shader.validation_hr) && (shader.backend == D3D12ShaderBackend::MetalShaderConverter ||
+        shader.backend == D3D12ShaderBackend::Airconv);
+  };
   if (!device || (desc.NodeMask & ~1u) || !IsValidShaderBytecode(desc.VS, true) || !IsValidShaderBytecode(desc.PS, false) ||
       !IsValidShaderBytecode(desc.HS, false) || !IsValidShaderBytecode(desc.DS, false) ||
       !IsValidShaderBytecode(desc.GS, false) || !IsValidCachedPSO(desc.CachedPSO) || desc.NumRenderTargets > 8 ||
       !IsValidInputLayout(desc.InputLayout) || !IsSupportedInputLayout(device, desc.InputLayout,
-          !desc.GS.pShaderBytecode && !desc.HS.pShaderBytecode && !desc.DS.pShaderBytecode &&
-          !desc.StreamOutput.NumEntries && ClassifyD3D12Shader(desc.VS).backend == D3D12ShaderBackend::MetalShaderConverter) ||
+          supports_packed_uint_fetch()) ||
       !IsSupportedGraphicsFormats(device, desc) || !IsValidBlendDesc(desc.BlendState, desc.NumRenderTargets) ||
       !IsValidRasterizerDesc(desc.RasterizerState) || !IsValidDepthStencilDesc(desc.DepthStencilState) ||
       !IsValidStripCutValue(desc.IBStripCutValue) || !IsValidPrimitiveTopologyType(desc.PrimitiveTopologyType) ||

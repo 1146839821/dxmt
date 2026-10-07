@@ -5,8 +5,8 @@
 #ifndef __AIRCONV_H
 #define __AIRCONV_H
 
-/* 30 invalidates cached AIR after interpolation, mul_hi and GS reflection fixes. */
-#define AIRCONV_VERSION 30
+/* 31 adds unsigned packed 10/10/10/2 vertex pulling. */
+#define AIRCONV_VERSION 31
 
 #ifdef __cplusplus
 #include <string>
@@ -104,6 +104,14 @@ struct MTL_PIXEL_SHADER_REFLECTION {
   uint32_t HasCoverageOutput;
 };
 
+enum MTL_VERTEX_COMPILER_CAPABILITY {
+  MTL_VERTEX_COMPILER_PACKED_UINT_PULLING = 1u << 0,
+};
+
+struct MTL_VERTEX_SHADER_REFLECTION {
+  uint32_t CompilerCapabilities;
+};
+
 struct MTL_SHADER_REFLECTION {
   uint32_t ConstanttBufferTableBindIndex;
   uint32_t ArgumentBufferBindIndex;
@@ -111,6 +119,8 @@ struct MTL_SHADER_REFLECTION {
   uint32_t NumArguments;
   union {
     uint32_t ThreadgroupSize[3];
+    /* Uses existing stage-union storage; does not enlarge the reflection ABI. */
+    struct MTL_VERTEX_SHADER_REFLECTION VertexShader;
     struct MTL_TESSELLATOR_REFLECTION Tessellator;
     struct MTL_GEOMETRY_SHADER_REFLECTION GeometryShader;
     struct MTL_POST_TESSELLATOR_REFLECTION PostTessellator;
@@ -127,6 +137,11 @@ struct MTL_SHADER_REFLECTION {
   uint32_t ThreadsPerPatch;
   uint32_t ArgumentTableQwords;
 };
+
+#ifdef __cplusplus
+static_assert(sizeof(MTL_VERTEX_SHADER_REFLECTION) <= 3 * sizeof(uint32_t));
+static_assert(offsetof(MTL_SHADER_REFLECTION, VertexShader) == offsetof(MTL_SHADER_REFLECTION, ThreadgroupSize));
+#endif
 
 #if defined(__LP64__) || defined(_WIN64)
 typedef void *sm50_ptr64_t;
@@ -264,10 +279,15 @@ struct SM50_IA_INPUT_ELEMENT {
   uint32_t reg;
   uint32_t slot;
   uint32_t aligned_byte_offset;
-  /** MTLAttributeFormat */
+  /** MTLAttributeFormat or an AIRCONV-only SM50_IA_FORMAT tag. */
   uint32_t format;
   uint32_t step_function: 1;
   uint32_t step_rate: 31;
+};
+
+enum SM50_IA_FORMAT {
+  /* Vertex pulling only; never pass this tag to a fixed Metal descriptor. */
+  SM50_IA_FORMAT_UINT1010102 = 0x100,
 };
 
 enum SM50_INDEX_BUFFER_FORMAT {

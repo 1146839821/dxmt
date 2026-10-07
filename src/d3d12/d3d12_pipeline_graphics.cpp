@@ -168,7 +168,7 @@ HRESULT
 ExtractMTLInputLayoutElements(
     MTLD3D12Device *device, const void *pShaderBytecodeWithInputSignature,
     const D3D12_INPUT_ELEMENT_DESC *pInputElementDescs, uint32_t NumElements, SM50_IA_INPUT_ELEMENT *pInputLayout,
-    uint32_t *pNumElementsOut, bool AllowMSCPackedUInt = false
+    uint32_t *pNumElementsOut, bool AllowMSCPackedUInt = false, bool AllowAirconvPackedUInt = false
 ) {
 
   using namespace microsoft;
@@ -193,7 +193,8 @@ ExtractMTLInputLayoutElements(
       return E_FAIL;
     }
 
-    if (!metal_format.AttributeFormat && !(AllowMSCPackedUInt && desc.Format == DXGI_FORMAT_R10G10B10A2_UINT)) {
+    if (!metal_format.AttributeFormat &&
+        !((AllowMSCPackedUInt || AllowAirconvPackedUInt) && desc.Format == DXGI_FORMAT_R10G10B10A2_UINT)) {
       ERR("CreateInputLayout: Unsupported vertex format: ", desc.Format);
       return E_INVALIDARG;
     }
@@ -216,7 +217,8 @@ ExtractMTLInputLayoutElements(
     auto &inputSig = *pSig;
     auto &attribute = pInputLayout[attribute_count++];
 
-    attribute.format = metal_format.AttributeFormat;
+    attribute.format = AllowAirconvPackedUInt && desc.Format == DXGI_FORMAT_R10G10B10A2_UINT
+        ? uint32_t(SM50_IA_FORMAT_UINT1010102) : uint32_t(metal_format.AttributeFormat);
 
     attribute.slot = desc.InputSlot;
     attribute.reg = inputSig.Register;
@@ -1727,7 +1729,8 @@ public:
           std::vector<SM50_IA_INPUT_ELEMENT> elements(pDesc->InputLayout.NumElements);
           hr = ExtractMTLInputLayoutElements(
               device_, pDesc->VS.pShaderBytecode, pDesc->InputLayout.pInputElementDescs,
-              pDesc->InputLayout.NumElements, elements.data(), &data_ia_layout.num_elements
+              pDesc->InputLayout.NumElements, elements.data(), &data_ia_layout.num_elements, false,
+              (ref_vs.VertexShader.CompilerCapabilities & MTL_VERTEX_COMPILER_PACKED_UINT_PULLING) != 0
           );
           if (FAILED(hr)) {
             return hr;

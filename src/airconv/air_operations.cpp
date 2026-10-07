@@ -423,6 +423,16 @@ AIRBuilderResult pull_vec4_from_addr_checked(
       types._int4, base_addr, byte_offset, 0, 4
     );
     break;
+  case MTLAttributeFormat::UInt1010102: {
+    auto packed = co_yield load_from_device_buffer(types._int, base_addr, byte_offset, 0, 4);
+    value = llvm::PoisonValue::get(types._int4);
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+      auto component = builder.CreateLShr(packed, builder.getInt32(lane * 10));
+      component = builder.CreateAnd(component, builder.getInt32(lane == 3 ? 3 : 1023));
+      value = builder.CreateInsertElement(value, component, lane);
+    }
+    break;
+  }
   case MTLAttributeFormat::UCharNormalized:
   case MTLAttributeFormat::UChar2Normalized:
   case MTLAttributeFormat::UChar4Normalized:

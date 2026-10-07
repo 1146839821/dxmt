@@ -424,3 +424,39 @@ direct/indirect runs on both variants again passed all checks with 0xaa4080ff.
 Full builds and host tests remain passed (12/12 each); git diff --check passed.
 MSC skills guided delegating packed conversion to linked stage-in rather than
 inventing a fixed Metal format. Broader format/FL qualification remains open.
+
+## AIRCONV packed UINT continuation (baseline 1181b683)
+
+Hypothesis: reuse AIRCONV vertex pulling and bounds/null handling, adding only
+unsigned 10/10/10/2 extraction into i32x4. Evidence: current UINT vectors use
+integer register storage; UNORM packed decode calls a float unpack intrinsic.
+Expected effect: ordinary DXBC D3D12 accepts the packed UINT format without
+reinterpreting UNORM or using MSC. Risk: tag leakage into fixed Metal descriptors,
+shift signedness, public compiler/cache identity and two format admission gates.
+Validation: compile genuine SM5 VS/PS, full RGBA direct/indirect readback in both
+variants and MSC regression. Preserve D3D11/companion gates and format reporting.
+
+Task Result / self-review: ordinary AIRCONV vertex pulling now decodes packed
+UINT using an i32 load, logical shifts and unsigned masks, producing i32x4.
+AIRCONV_VERSION 31 invalidates cached AIR. A VS compiler capability bit occupies
+existing reflection-union storage (no transport growth); zero-initialized VS
+reflection keeps an old native compiler fail-closed. This compatibility gate was
+source-reviewed, not validated by executing a mixed-version runtime.
+
+Both full builds and explicit fixture builds passed; host tests passed 12/12 in
+each build. Matching PE/native bundles were staged only in cache overlays.
+Genuine vs_5_0/ps_5_0 direct probes passed full RGBA `0xaa4080ff` in normal and
+no-private builds. Both SM5 indirect probes failed before submission with
+`EncodeRootArgument` allocation overflow (`count=2`, `qword_bytes=0`). This is an
+unresolved empty-root-signature indirect blocker, not a passed GPU case.
+MSC direct/indirect regression passed in both variants; normal direct first
+failed its timestamp assertion despite correct RGBA, then passed a separate
+serial retry. Both logs remain under
+`/Users/zhangbo/.cache/dxmt-reconciliation.ZLDvwE/airconv-packed-*`.
+
+Standards/spec review found no implementation blocker, with a nonblocking
+suggestion to replace the two backend-admission booleans with an enum. Current
+callers never enable both. The planned SM5 indirect validation remains unmet.
+D3D11, geometry/tessellation, format-support reporting and device feature level
+are unchanged. Next implementation gap: empty-root AIRCONV ExecuteIndirect;
+full packed-input and FL12_0 qualification remain incomplete.

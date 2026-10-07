@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include <d3dcompiler.h>
 
 #include <cstdint>
 #include <cstring>
@@ -19,6 +20,41 @@ bool CheckHR(const char *name, HRESULT hr) {
     return false;
   }
   return true;
+}
+
+bool CompilePackedUIntSM5(std::vector<char> &vertex, std::vector<char> &pixel) {
+  static const char source[] = R"HLSL(
+struct Input { float2 position : POSITION; uint4 color : COLOR; };
+struct Output { float4 position : SV_Position; float4 color : COLOR; };
+Output vs_main(Input input) {
+  Output output;
+  output.position = float4(input.position, 0, 1);
+  output.color = float4(input.color) / float4(1023.0, 1023.0, 1023.0, 3.0);
+  return output;
+}
+float4 ps_main(Output input) : SV_Target0 { return input.color; }
+)HLSL";
+  auto library = LoadLibraryA(D3DCOMPILER_DLL_A);
+  if (!library) return false;
+  auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(library, "D3DCompile"));
+  const auto stage = [&](const char *entry, const char *profile, std::vector<char> &bytes) {
+    bytes.clear();
+    if (!compile) return false;
+    ID3DBlob *blob = nullptr, *error = nullptr;
+    const auto hr = compile(source, sizeof(source) - 1, "packed_uint_sm5.hlsl", nullptr, nullptr,
+        entry, profile, D3DCOMPILE_ENABLE_STRICTNESS, 0, &blob, &error);
+    if (FAILED(hr) && error) std::cerr << static_cast<const char *>(error->GetBufferPointer()) << "\n";
+    if (SUCCEEDED(hr) && blob) {
+      auto data = static_cast<const char *>(blob->GetBufferPointer());
+      bytes.assign(data, data + blob->GetBufferSize());
+    }
+    if (error) error->Release();
+    if (blob) blob->Release();
+    return SUCCEEDED(hr) && !bytes.empty();
+  };
+  const bool result = stage("vs_main", "vs_5_0", vertex) && stage("ps_main", "ps_5_0", pixel);
+  FreeLibrary(library);
+  return result;
 }
 
 } // namespace
@@ -53,9 +89,11 @@ int main(int argc, char **argv) {
   const bool root_uav = argc == 4 && (strcmp(argv[3], "--root-uav") == 0 || strcmp(argv[3], "--indirect-root-uav") == 0);
   const bool slot31 = argc == 4 && (strcmp(argv[3], "--slot31") == 0 || strcmp(argv[3], "--indirect-vb-slot31") == 0);
   const bool wide_layout = argc == 4 && (strcmp(argv[3], "--wide-layout") == 0 || strcmp(argv[3], "--indirect-vb-wide-layout") == 0);
-  const bool packed_uint = argc == 4 && (strcmp(argv[3], "--packed-uint") == 0 || strcmp(argv[3], "--indirect-vb-packed-uint") == 0);
+  const bool packed_sm5 = argc == 4 && (strcmp(argv[3], "--packed-uint-sm5") == 0 || strcmp(argv[3], "--indirect-vb-packed-uint-sm5") == 0);
+  const bool packed_uint = packed_sm5 || (argc == 4 && (strcmp(argv[3], "--packed-uint") == 0 || strcmp(argv[3], "--indirect-vb-packed-uint") == 0));
   const bool indirect_vb = argc == 4 && (strcmp(argv[3], "--indirect-vb") == 0 || strcmp(argv[3], "--indirect-vb-slot31") == 0 ||
-      strcmp(argv[3], "--indirect-vb-wide-layout") == 0 || strcmp(argv[3], "--indirect-vb-packed-uint") == 0);
+      strcmp(argv[3], "--indirect-vb-wide-layout") == 0 || strcmp(argv[3], "--indirect-vb-packed-uint") == 0 ||
+      strcmp(argv[3], "--indirect-vb-packed-uint-sm5") == 0);
   const bool indirect = argc == 4 && strncmp(argv[3], "--indirect-", 11) == 0;
   const bool textured_root_cbv = argc == 4 && (strcmp(argv[3], "--texture-root-cbv") == 0 ||
       strcmp(argv[3], "--indirect-texture-root-cbv") == 0);
@@ -102,6 +140,7 @@ int main(int argc, char **argv) {
   std::vector<char> geometry_shader(static_cast<size_t>(geometry_size));
   vertex_file.read(vertex_shader.data(), vertex_shader.size());
   pixel_file.read(pixel_shader.data(), pixel_shader.size());
+  if (packed_sm5 && !CompilePackedUIntSM5(vertex_shader, pixel_shader)) return 1;
   if (geometry)
     geometry_file.read(geometry_shader.data(), geometry_shader.size());
 
@@ -939,7 +978,7 @@ int main(int argc, char **argv) {
               << std::dec << "\n";
     goto cleanup;
   }
-  std::cout << "DXIL "
+  std::cout << (packed_sm5 ? "DXBC AIRCONV " : "DXIL ")
             << (geometry_adjacency_indexed
                     ? "indexed adjacency geometry graphics"
                 : geometry_adjacency ? "adjacency geometry graphics"

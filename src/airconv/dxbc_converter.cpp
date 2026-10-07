@@ -1313,6 +1313,8 @@ AIRCONV_API int SM50Initialize(
     pRefl->UAVSlotMask = binding_uav_mask;
     pRefl->NumConstantBuffers = sm50_shader->args_reflection_cbuffer.size();
     pRefl->NumArguments = sm50_shader->args_reflection.size();
+    if (sm50_shader->shader_type == microsoft::D3D10_SB_VERTEX_SHADER)
+      pRefl->VertexShader.CompilerCapabilities = MTL_VERTEX_COMPILER_PACKED_UINT_PULLING;
     if (sm50_shader->shader_type == microsoft::D3D11_SB_COMPUTE_SHADER) {
       pRefl->ThreadgroupSize[0] = sm50_shader->threadgroup_size[0];
       pRefl->ThreadgroupSize[1] = sm50_shader->threadgroup_size[1];
