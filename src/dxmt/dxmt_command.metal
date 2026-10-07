@@ -420,8 +420,8 @@ struct DXMTTSDispatchMarshal {
   uint end_of_command;
 };
 
-[[vertex]] void ts_draw_arguments_marshal(
-    constant DXMTTSDispatchMarshal* tasks [[buffer(kCustomBufferArgumentIndex0)]]
+void ts_draw_arguments_marshal_impl(
+    constant DXMTTSDispatchMarshal* tasks
 ) {
   uint index = 0;
   for(;;) {
@@ -456,8 +456,8 @@ struct DXMTGSDispatchMarshal {
   uint end_of_command;
 };
 
-[[vertex]] void gs_draw_arguments_marshal(
-    constant DXMTGSDispatchMarshal* tasks [[buffer(kCustomBufferArgumentIndex0)]]
+void gs_draw_arguments_marshal_impl(
+    constant DXMTGSDispatchMarshal* tasks
 ) {
   uint index = 0;
   for(;;) {
@@ -481,6 +481,33 @@ struct DXMTGSDispatchMarshal {
       break;
     index++;
   };
+}
+
+[[vertex]] void ts_draw_arguments_marshal(
+    constant DXMTTSDispatchMarshal* tasks [[buffer(kCustomBufferArgumentIndex0)]]) {
+  ts_draw_arguments_marshal_impl(tasks);
+}
+[[vertex]] void gs_draw_arguments_marshal(
+    constant DXMTGSDispatchMarshal* tasks [[buffer(kCustomBufferArgumentIndex0)]]) {
+  gs_draw_arguments_marshal_impl(tasks);
+}
+struct DXMTTSCountedMarshal { DXMTTSDispatchMarshal task; constant uint& count; };
+struct DXMTGSCountedMarshal { DXMTGSDispatchMarshal task; constant uint& count; };
+[[vertex]] void ts_draw_arguments_marshal_counted(
+    constant DXMTTSCountedMarshal& data [[buffer(kCustomBufferArgumentIndex0)]]) {
+  if (data.count == 0) {
+    data.task.dispatch_arguments_out.x = 0;
+    data.task.dispatch_arguments_out.y = 0;
+    data.task.dispatch_arguments_out.z = 0;
+  } else ts_draw_arguments_marshal_impl(&data.task);
+}
+[[vertex]] void gs_draw_arguments_marshal_counted(
+    constant DXMTGSCountedMarshal& data [[buffer(kCustomBufferArgumentIndex0)]]) {
+  if (data.count == 0) {
+    data.task.dispatch_arguments_out.x = 0;
+    data.task.dispatch_arguments_out.y = 0;
+    data.task.dispatch_arguments_out.z = 0;
+  } else gs_draw_arguments_marshal_impl(&data.task);
 }
 
 struct depth_stencil_out {

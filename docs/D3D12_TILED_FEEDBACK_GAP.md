@@ -511,6 +511,45 @@ SM5.1 matching is tested against decoded records, not a compiled SM5.1 GPU
 fixture; broad visibility/alias/concurrency/indirect-emulation and sparse matrices
 remain open. No API/shader-validation run or capability promotion is claimed.
 
+### AIR geometry/tessellation indirect count and predication
+
+Hypothesis: reuse the existing GPU predication-count filter and gate marshal
+dispatch output from a GPU count pointer, removing the unconditional count/
+predication rejection without a CPU readback. Expected effect: single-command
+GS/tessellation ExecuteIndirect honors count and predicate. Risk: changing the
+shared D3D11 marshal ABI, losing count-buffer residency or missing compute-to-
+render synchronization, and stale output falsely passing skipped-draw checks.
+
+The original 32-byte GS/TS task layouts and entry names remain intact. Their
+arithmetic is shared with new counted entries consuming a private 40-byte task
+(base task plus count GPU pointer). A zero count emits zero mesh dispatch;
+nonzero count uses the existing arithmetic. Command-list PSO caches distinguish
+counted/ordinary functions. Count/predicate support retains MaxCommandCount=1
+and non-updating signatures; no root/VB/IB update or multi-command rejection is
+bypassed. Predication uses the existing compute filter before PreDraw and the
+existing encoder/fence transition. The marshal declares the actual source count
+or filtered allocator buffer read-only for the vertex stage.
+
+The `--counted` fixture uses a 16-byte non-updating Draw stream with count values
+0/1/0/UINT_MAX; `--predicated` independently tests predicate rejection, count
+rejection, execution and predicate rejection with count UINT_MAX. Each phase
+clears output before setting the predicate, and skipped draws must leave all
+12 words zero, including the execution sentinel. Active phases must match the
+independent sparse data/status expectations. Count/predicate uploads are CPU
+written between completed submissions; consumption and filtering are GPU-side.
+
+Both full builds and 16/16 host tests pass. Normal GS/HS/DS count-only and
+predicate/count SRV probes pass. No-private GS count-only, GS/HS predicate/count SRV and DS
+predicate/count UAV pass; DS additionally passes with explicit Metal API
+Validation enabled and no API errors observed. Evidence:
+`dxmt-reconciliation.ZLDvwE/emulation-{count,predicate}-*`.
+
+DrawIndexed, count offsets, GPU-produced counts, predicate-without-count-buffer,
+NOT_EQUAL_ZERO, concurrent/inflight updates, D3D11 runtime marshal regression,
+multi-command execution, indirect root updates and broad topology/tessellation
+matrices remain unqualified. No shader-validation, full predication/geometry/
+tessellation conformance, capability promotion or game acceptance is claimed.
+
 Selective root-transport prerequisite: raw/structured decoder uses now accumulate
 `buffer_feedback` on the corresponding SRV/UAV only when the status destination
 is non-NULL. AIR argument reflection publishes this as the previously unused
