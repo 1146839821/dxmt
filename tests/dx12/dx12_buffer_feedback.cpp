@@ -28,7 +28,8 @@ void Transition(ID3D12GraphicsCommandList *list, ID3D12Resource *resource,
   b.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
   list->ResourceBarrier(1, &b);
 }
-int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect, bool pixel) {
+int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect, bool pixel, bool vertex) {
+  const bool graphics_stage = pixel || vertex;
   // Equal zero payloads in mapped and NULL tiles force status to be independent
   // of payload. Both descriptor views start at the last word of tile zero.
   const char *hlsl = R"(
@@ -40,7 +41,10 @@ ByteAddressBuffer raw : register(t0);
 StructuredBuffer<uint> structured : register(t1);
 #endif
 RWStructuredBuffer<uint> output : register(u0);
-#ifdef PIXEL_SOURCE
+#ifdef VERTEX_SOURCE
+float4 main(uint id : SV_VertexID) : SV_Position {
+  if (id == 0) {
+#elif defined(PIXEL_SOURCE)
 void main(float4 position : SV_Position) {
 #else
 [numthreads(1,1,1)] void main() {
@@ -57,12 +61,17 @@ void main(float4 position : SV_Position) {
   output[7]=s; output[8]=CheckAccessFullyMapped(d);
   output[9]=t; output[10]=CheckAccessFullyMapped(e);
   output[11]=0x1234u;
+#ifdef VERTEX_SOURCE
+  }
+  return float4(id == 2 ? 3 : -1, id == 1 ? 3 : -1, 0, 1);
+#endif
 })";
   Owned<ID3DBlob> shader, errors;
-  D3D_SHADER_MACRO macros[3] = {}; UINT macro_count = 0;
+  D3D_SHADER_MACRO macros[4] = {}; UINT macro_count = 0;
   if (uav_source) macros[macro_count++] = {"UAV_SOURCE", "1"};
   if (pixel) macros[macro_count++] = {"PIXEL_SOURCE", "1"};
-  auto hr = compile(hlsl, std::strlen(hlsl), "buffer-feedback", macros, nullptr, "main", pixel ? "ps_5_0" : "cs_5_0",
+  if (vertex) macros[macro_count++] = {"VERTEX_SOURCE", "1"};
+  auto hr = compile(hlsl, std::strlen(hlsl), "buffer-feedback", macros, nullptr, "main", vertex ? "vs_5_0" : pixel ? "ps_5_0" : "cs_5_0",
                     D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &shader.p, &errors.p);
   if (errors.p) std::printf("%s\n", (const char *)errors.p->GetBufferPointer());
   Check(hr);
@@ -154,13 +163,14 @@ void main(float4 position : SV_Position) {
   Owned<ID3D12PipelineState> pipeline;
   D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {}; pd.pRootSignature = root.p;
   pd.CS = {shader.p->GetBufferPointer(), shader.p->GetBufferSize()};
-  if (pixel) {
-    const char *vertex = "float4 main(uint id : SV_VertexID) : SV_Position { return float4(id == 2 ? 3 : -1, id == 1 ? 3 : -1, 0, 1); }";
+  if (graphics_stage) {
+    const char *vertex_source = "float4 main(uint id : SV_VertexID) : SV_Position { return float4(id == 2 ? 3 : -1, id == 1 ? 3 : -1, 0, 1); }";
     Owned<ID3DBlob> vs;
-    Check(compile(vertex, std::strlen(vertex), nullptr, nullptr, nullptr, "main", "vs_5_0", 0, 0, &vs.p, nullptr));
+    if (!vertex) Check(compile(vertex_source, std::strlen(vertex_source), nullptr, nullptr, nullptr, "main", "vs_5_0", 0, 0, &vs.p, nullptr));
     D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics = {};
     graphics.pRootSignature = root.p;
-    graphics.VS = {vs.p->GetBufferPointer(), vs.p->GetBufferSize()}; graphics.PS = pd.CS;
+    graphics.VS = vertex ? pd.CS : D3D12_SHADER_BYTECODE{vs.p->GetBufferPointer(), vs.p->GetBufferSize()};
+    if (pixel) graphics.PS = pd.CS;
     graphics.SampleMask = UINT_MAX; graphics.SampleDesc.Count = 1;
     graphics.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     graphics.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
@@ -179,8 +189,8 @@ void main(float4 position : SV_Position) {
       if (uav_source) updates[i].UnorderedAccessView.RootParameterIndex = i;
       else updates[i].ShaderResourceView.RootParameterIndex = i;
     }
-    updates[2].Type = pixel ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW : D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-    D3D12_COMMAND_SIGNATURE_DESC sd = {}; sd.ByteStride = pixel ? 32 : 28; sd.NumArgumentDescs = 3; sd.pArgumentDescs = updates;
+    updates[2].Type = graphics_stage ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW : D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    D3D12_COMMAND_SIGNATURE_DESC sd = {}; sd.ByteStride = graphics_stage ? 32 : 28; sd.NumArgumentDescs = 3; sd.pArgumentDescs = updates;
     Check(device.p->CreateCommandSignature(&sd, root.p, IID_PPV_ARGS(&signature.p)));
     create(arguments, sd.ByteStride, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
     Check(arguments.p->Map(0, nullptr, &mapped));
@@ -188,7 +198,7 @@ void main(float4 position : SV_Position) {
     std::memcpy(mapped, &address, 8);
     std::memcpy(static_cast<char *>(mapped) + 8, &address, 8);
     const UINT draw[4] = {3, 1, 0, 0}, dispatch[3] = {1, 1, 1};
-    std::memcpy(static_cast<char *>(mapped) + 16, pixel ? draw : dispatch, pixel ? 16 : 12);
+    std::memcpy(static_cast<char *>(mapped) + 16, graphics_stage ? draw : dispatch, graphics_stage ? 16 : 12);
     arguments.p->Unmap(0, nullptr);
   }
   HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
@@ -208,7 +218,7 @@ void main(float4 position : SV_Position) {
     list.p->CopyBufferRegion(source.p, UINT64(phase & 1) * 65536, upload.p, 0, 65536);
     Transition(list.p, source.p, D3D12_RESOURCE_STATE_COPY_DEST, source_state);
     if (phase) Transition(list.p, output.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    if (pixel) list.p->SetGraphicsRootSignature(root.p);
+    if (graphics_stage) list.p->SetGraphicsRootSignature(root.p);
     else list.p->SetComputeRootSignature(root.p);
     ID3D12DescriptorHeap *heaps[] = {descriptors.p}; list.p->SetDescriptorHeaps(1, heaps);
     if (root_source) {
@@ -216,14 +226,14 @@ void main(float4 position : SV_Position) {
         // Deliberately different from the indirect stream's VA: the oracle
         // must fail if the resolver forgets to apply its root updates.
         const auto initial = source.p->GetGPUVirtualAddress() + (indirect ? 65536 : 65532);
-        if (pixel) {
+        if (graphics_stage) {
           if (uav_source) list.p->SetGraphicsRootUnorderedAccessView(i, initial);
           else list.p->SetGraphicsRootShaderResourceView(i, initial);
         } else if (uav_source) list.p->SetComputeRootUnorderedAccessView(i, initial);
         else list.p->SetComputeRootShaderResourceView(i, initial);
       }
     }
-    if (pixel) {
+    if (graphics_stage) {
       list.p->SetGraphicsRootDescriptorTable(root_source ? 2 : 0, descriptors.p->GetGPUDescriptorHandleForHeapStart());
       D3D12_VIEWPORT viewport = {0, 0, 1, 1, 0, 1}; D3D12_RECT scissor = {0, 0, 1, 1};
       list.p->RSSetViewports(1, &viewport); list.p->RSSetScissorRects(1, &scissor);
@@ -255,23 +265,25 @@ void main(float4 position : SV_Position) {
   }
   CloseHandle(event);
   std::printf("BUFFER_FEEDBACK %s %s %s raw/structured zero-payload, boundary and alternating remap PASS\n",
-              pixel ? (indirect ? "indirect-pixel" : "pixel") : indirect ? "indirect" : "direct", root_source ? "root" : "table", uav_source ? "UAV" : "SRV");
+              vertex ? (indirect ? "indirect-vertex" : "vertex") : pixel ? (indirect ? "indirect-pixel" : "pixel") : indirect ? "indirect" : "direct", root_source ? "root" : "table", uav_source ? "UAV" : "SRV");
   return 0;
 }
 }
 int main(int argc, char **argv) {
-  bool uav_source = false, root_source = false, indirect = false, pixel = false;
+  bool uav_source = false, root_source = false, indirect = false, pixel = false, vertex = false;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--uav")) uav_source = true;
     else if (!std::strcmp(argv[i], "--root")) root_source = true;
     else if (!std::strcmp(argv[i], "--indirect")) { indirect = true; root_source = true; }
     else if (!std::strcmp(argv[i], "--pixel")) { pixel = true; root_source = true; }
+    else if (!std::strcmp(argv[i], "--vertex")) { vertex = true; root_source = true; }
     else return 2;
   }
+  if (pixel && vertex) return 2;
   auto library = LoadLibraryA("d3dcompiler_47.dll");
   if (!library) return 77;
   auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(library, "D3DCompile"));
   int result = 1;
-  try { if (compile) result = Run(compile, uav_source, root_source, indirect, pixel); } catch (const std::exception &e) { std::puts(e.what()); }
+  try { if (compile) result = Run(compile, uav_source, root_source, indirect, pixel, vertex); } catch (const std::exception &e) { std::puts(e.what()); }
   FreeLibrary(library); return result;
 }

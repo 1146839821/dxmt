@@ -405,6 +405,25 @@ GPU-produced arguments, multiple commands, concurrent resubmission, inflight
 remap or VS/GS/HS/DS feedback consumption. Those matrices and DXIL feedback
 remain open; no aggregate capability promotion or game deployment occurred.
 
+### Vertex-stage root feedback oracle
+
+The `--vertex` probe moves feedback consumption and the independent 12-word
+data/status/sentinel output into a VS compiled as vs_5_0. Only SV_VertexID 0
+writes the output, avoiding repeated writes from other vertices. No pixel shader
+is present; the VS returns a triangle position after the feedback checks. Both
+direct Draw and root-updating ExecuteIndirect use graphics roots. The latter
+retains the different recorded/argument VAs and 32-byte draw stream, checking
+actual vertex ICB slot 8 rather than inferring it from the PS oracle.
+
+Normal/no-private full builds and 15/15 host tests each pass. Both runtimes'
+direct and indirect SRV/UAV GPU probes pass all four serial remaps. Evidence:
+`dxmt-reconciliation.ZLDvwE/root-feedback-vertex-*`.
+These are zero-payload raw/structured root-load tests, not complete stage or
+sparse qualification. No new runtime implementation was necessary for the
+tested VS path. GS/HS/DS and synthesized shared-signature consumption remain
+unqualified, alongside the outstanding indirect/lifetime/DXIL/performance
+matrices. No API/shader-validation run is claimed for this checkpoint.
+
 Selective root-transport prerequisite: raw/structured decoder uses now accumulate
 `buffer_feedback` on the corresponding SRV/UAV only when the status destination
 is non-NULL. AIR argument reflection publishes this as the previously unused
