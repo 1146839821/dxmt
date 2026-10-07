@@ -8,8 +8,8 @@
 
 int main(int argc, char **argv) {
   if (argc > 2 || (argc == 2 && strcmp(argv[1], "tracked") && strcmp(argv[1], "private") &&
-                  strcmp(argv[1], "compute"))) {
-    fprintf(stderr, "usage: %s [tracked|private|compute]\n", argv[0]);
+                  strcmp(argv[1], "compute") && strcmp(argv[1], "repeat"))) {
+    fprintf(stderr, "usage: %s [tracked|private|compute|repeat]\n", argv[0]);
     return 2;
   }
   @autoreleasepool {
@@ -29,6 +29,7 @@ int main(int argc, char **argv) {
     BOOL tracked = argc > 1 && !strcmp(argv[1], "tracked");
     BOOL privateSamples = argc > 1 && !strcmp(argv[1], "private");
     BOOL computeSamples = argc > 1 && !strcmp(argv[1], "compute");
+    BOOL repeatResolve = argc > 1 && !strcmp(argv[1], "repeat");
     id<MTLComputePipelineState> pipeline = nil;
     if (computeSamples) {
       NSError *error = nil;
@@ -42,7 +43,7 @@ int main(int argc, char **argv) {
     }
     MTLResourceOptions options = MTLResourceStorageModeShared |
         (tracked ? MTLResourceHazardTrackingModeTracked : MTLResourceHazardTrackingModeUntracked);
-    unsigned failures = 0;
+    unsigned failures = 0, repeatFailures = 0;
     for (unsigned iteration = 0; iteration < 200; ++iteration) {
       @autoreleasepool {
         MTLCounterSampleBufferDescriptor *desc = [MTLCounterSampleBufferDescriptor new];
@@ -52,9 +53,10 @@ int main(int argc, char **argv) {
         NSError *error = nil;
         id<MTLCounterSampleBuffer> samples = [device newCounterSampleBufferWithDescriptor:desc error:&error];
         id<MTLBuffer> dummy = [device newBufferWithLength:4096 options:options];
-        id<MTLBuffer> result = [device newBufferWithLength:24 options:options];
+        const NSUInteger resultSize = repeatResolve ? 40 : 24;
+        id<MTLBuffer> result = [device newBufferWithLength:resultSize options:options];
         if (!samples || !dummy || !result) { NSLog(@"allocation: %@", error); return 2; }
-        memset(result.contents, 0, 24);
+        memset(result.contents, 0, resultSize);
         id<MTLCommandBuffer> buffer = [queue commandBuffer];
         for (unsigned index = 0; index < 2; ++index) {
           if (computeSamples) {
@@ -94,6 +96,13 @@ int main(int argc, char **argv) {
         [resolve resolveCounters:samples inRange:NSMakeRange(0, 2) destinationBuffer:result destinationOffset:0];
         [resolve updateFence:fence];
         [resolve endEncoding];
+        if (repeatResolve) {
+          id<MTLBlitCommandEncoder> second = [buffer blitCommandEncoder];
+          [second waitForFence:fence];
+          [second resolveCounters:samples inRange:NSMakeRange(0, 2) destinationBuffer:result destinationOffset:24];
+          [second updateFence:fence];
+          [second endEncoding];
+        }
         [buffer commit];
         [buffer waitUntilCompleted];
         if (buffer.status == MTLCommandBufferStatusError) { NSLog(@"GPU: %@", buffer.error); return 2; }
@@ -115,10 +124,16 @@ int main(int argc, char **argv) {
               (unsigned long long)native[0], (unsigned long long)native[1]);
           ++failures;
         }
+        if (repeatResolve && (!gpu[3] || gpu[4] <= gpu[3])) {
+          printf("REPEAT_FAIL iteration=%u gpu=%llu,%llu\n", iteration,
+              (unsigned long long)gpu[3], (unsigned long long)gpu[4]);
+          ++repeatFailures;
+        }
       }
     }
-    printf("mode=%s runs=200 failures=%u\n",
-        computeSamples ? "compute" : privateSamples ? "private" : tracked ? "tracked" : "untracked", failures);
-    return failures ? 1 : 0;
+    printf("mode=%s runs=200 failures=%u repeatFailures=%u\n",
+        repeatResolve ? "repeat" : computeSamples ? "compute" : privateSamples ? "private" : tracked ? "tracked" : "untracked",
+        failures, repeatFailures);
+    return failures || repeatFailures ? 1 : 0;
   }
 }

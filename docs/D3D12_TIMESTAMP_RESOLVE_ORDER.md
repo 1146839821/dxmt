@@ -211,3 +211,32 @@ the red-capable oracle (`compute-final.log`). Main-agent Standards/Spec review
 only, independent reviewer unavailable. No API declaration or GPU acceptance
 status changed; diff whitespace check passed. This is diagnostic evidence, not
 closure of the timestamp or feature-level requirement.
+
+## Repeated GPU resolve discrimination (baseline aecf5f91)
+
+Hypothesis: a later fenced GPU resolve of identical samples may recover a zero
+end value. Evidence: fresh current native counter-only run failed 17/200 with
+valid CPU-native samples. Expected effect: compare first and second resolves
+without CPU substitution. Risk: additional encoder and destination storage
+change scheduling; no causal inference from failure-rate differences alone.
+Validation: preserve first resolve, copy/native oracles, add a second fenced
+blit resolve into nonoverlapping bytes of the same destination, and fail if
+either GPU pair is invalid. The opt-in `repeat` mode leaves default allocation
+and encoder arrangement unchanged. This is not a production retry mechanism.
+
+Strict native compilation passed. First repeat process had 16/200 first-resolve
+failures and 16/200 second-resolve failures, at the same iterations. Final source
+repeat run had 17/200 first failures and 16/200 second failures: repeat resolution
+does not reliably restore valid results. CPU-native pair and dummy-copy oracles
+remained valid. Final default mode also returned the existing failure exit 1;
+this retained red signal is not a regression pass. Logs `timestamp-native-*`
+are in `/Users/zhangbo/.cache/dxmt-reconciliation.ZLDvwE/`.
+
+Run the existing strict build command, then invoke the probe with `repeat`.
+No DXMT/Wine build is needed for this standalone Objective-C diagnostic.
+Self-review: first result is never overwritten; second range starts at byte24
+and occupies16 bytes in a40-byte repeat-only allocation; ordinary-copy bytes
+remain16..23. Both GPU oracles influence exit status. No production fallback,
+weakened assertion, prefix deployment or feature-level claim was introduced.
+Next investigate the representation consumed by GPU resolve versus native CPU
+resolve, rather than retaining unproven extra encoder/event workarounds.
