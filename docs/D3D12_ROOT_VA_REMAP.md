@@ -62,3 +62,28 @@ Evidence: `root-va-alias-{normal,no-private}.log` in the same cache. Both explic
 targets compile and both Wine processes pass; this is registry/lifetime evidence,
 not a submitted GPU root-consumer result. The public construction removes a
 previous uncertainty and supplies the next direct/indirect remap fixture input.
+
+## GPU root-consumer checkpoint
+
+The indirect root fixture now has a `--remap` mode: six distinct public placed
+CBV/SRV/UAV targets are replaced at identical heap offsets/VA after list closure,
+then only the new CBV/SRV generations are initialized. GPU-produced root arguments
+remain unchanged and expected output changes from 107/209 to 317/619. Both builds
+pass the initial AIRCONV consumer runs, including release after gated submission.
+Logs: `root-remap-air-{normal,np}.log`. Self-review added explicit alias activation
+before dispatch and reactivation before recorded output-copy aliases, plus a named
+placed-allocation argument instead of temporarily mutating the remap mode flag.
+These latest refinements require rebuild/retest. Direct/MSC/replay and old-generation
+overlap acceptance remain open; this is not complete root-VA task closure.
+
+Latest alias refinements compile and pass on both builds. AIRCONV and MSC
+consumer runs both return 317/619 in remap mode; unchanged no-remap controls
+return 107/209 in all four backend/build combinations. Logs:
+`root-remap-final-{air,msc}-{normal,no-private}.log` and `root-remap-control-*`.
+Main self-review checks heap/target index pairing (two UAVs followed by alternating
+CBV/SRV), exact VA identity before owner release, new-only input initialization,
+activation/reactivation barriers, and independent numeric expectations.
+Both targets keep the same shared heap storage; this verifies legal placed alias
+generation replacement, not a reserved-resource physical tile remap. No production
+defect was exposed in the existing indirect submission snapshot path. Direct-root,
+repeat-list and overlapping old-generation cases remain separate unfinished work.

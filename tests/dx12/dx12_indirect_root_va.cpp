@@ -20,17 +20,27 @@ void Check(HRESULT hr) {
     throw std::runtime_error("D3D12 operation failed");
   }
 }
-void Run(const void *consumer, size_t consumer_size, ID3DBlob *producer) {
+void Run(const void *consumer, size_t consumer_size, ID3DBlob *producer, bool remap = false) {
   Owned<ID3D12Device> device;
   Check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.p)));
-  auto buffer = [&](Owned<ID3D12Resource> &resource, D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state, bool uav) {
+  Owned<ID3D12Heap> alias_heaps[6];
+  unsigned alias_count = 0;
+  auto buffer = [&](Owned<ID3D12Resource> &resource, D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state,
+                    bool uav, bool placed = false) {
     D3D12_HEAP_PROPERTIES hp = {}; hp.Type = heap;
     D3D12_RESOURCE_DESC d = {};
     d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; d.Width = 256;
     d.Height = d.DepthOrArraySize = d.MipLevels = d.SampleDesc.Count = 1;
     d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     d.Flags = uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
-    Check(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, state, nullptr, IID_PPV_ARGS(&resource.p)));
+    if (placed) {
+      if (alias_count >= 6) throw std::runtime_error("too many alias targets");
+      D3D12_HEAP_DESC hd = {};
+      hd.SizeInBytes = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+      hd.Properties = hp; hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+      Check(device->CreateHeap(&hd, IID_PPV_ARGS(&alias_heaps[alias_count].p)));
+      Check(device->CreatePlacedResource(alias_heaps[alias_count++].p, 0, &d, state, nullptr, IID_PPV_ARGS(&resource.p)));
+    } else Check(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, state, nullptr, IID_PPV_ARGS(&resource.p)));
   };
   auto root = [&](D3D12_ROOT_PARAMETER *params, UINT count, Owned<ID3D12RootSignature> &result) {
     D3D12_ROOT_SIGNATURE_DESC d = {count, params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
@@ -69,7 +79,8 @@ void Run(const void *consumer, size_t consumer_size, ID3DBlob *producer) {
   Owned<ID3D12Resource> source, arguments, output[2], readback;
   buffer(source, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false);
   buffer(arguments, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true);
-  for (auto &resource : output) buffer(resource, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true);
+  for (auto &resource : output)
+    buffer(resource, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, remap);
   buffer(readback, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, false);
   D3D12_COMMAND_QUEUE_DESC qd = {};
   Owned<ID3D12CommandQueue> queue;
@@ -92,7 +103,18 @@ void Run(const void *consumer, size_t consumer_size, ID3DBlob *producer) {
   list->SetComputeRootShaderResourceView(1, 0);
   list->SetComputeRootUnorderedAccessView(2, 0);
   list->SetComputeRoot32BitConstant(3, 63, 0);
+  if (remap) {
+    D3D12_RESOURCE_BARRIER alias = {};
+    alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+    list->ResourceBarrier(1, &alias);
+  }
   list->ExecuteIndirect(signature.p, 2, arguments.p, 0, nullptr, 0);
+  if (remap) {
+    // Reactivate the recorded copy-source aliases after the replacement UAVs.
+    D3D12_RESOURCE_BARRIER alias = {};
+    alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+    list->ResourceBarrier(1, &alias);
+  }
   for (unsigned i = 0; i < 2; ++i) {
     barrier.Transition = {output[i].p, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                          D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE};
@@ -105,8 +127,8 @@ void Run(const void *consumer, size_t consumer_size, ID3DBlob *producer) {
   Owned<ID3D12Resource> late_cbv[2], late_srv[2];
   UINT command_words[20] = {};
   for (unsigned i = 0; i < 2; ++i) {
-    buffer(late_cbv[i], D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false);
-    buffer(late_srv[i], D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false);
+    buffer(late_cbv[i], D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false, remap);
+    buffer(late_srv[i], D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false, remap);
     void *mapped = nullptr;
     const UINT value = (i + 1) * 100, input = i ? 9 : 7;
     Check(late_cbv[i]->Map(0, nullptr, &mapped)); std::memcpy(mapped, &value, 4); late_cbv[i]->Unmap(0, nullptr);
@@ -116,6 +138,31 @@ void Run(const void *consumer, size_t consumer_size, ID3DBlob *producer) {
     const UINT64 va[] = {late_cbv[i]->GetGPUVirtualAddress(), late_srv[i]->GetGPUVirtualAddress(), output[i]->GetGPUVirtualAddress()};
     std::memcpy(bytes + 4, va, sizeof(va));
     const UINT dispatch[] = {1, 1, 1}; std::memcpy(bytes + 28, dispatch, sizeof(dispatch));
+  }
+  if (remap) {
+    ID3D12Resource **targets[] = {&output[0].p, &output[1].p,
+        &late_cbv[0].p, &late_srv[0].p, &late_cbv[1].p, &late_srv[1].p};
+    if (alias_count != 6) throw std::runtime_error("alias target count mismatch");
+    for (unsigned i = 0; i < 6; ++i) {
+      auto *old = *targets[i];
+      const auto desc = old->GetDesc();
+      const auto va = old->GetGPUVirtualAddress();
+      const auto state = i < 2 ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_GENERIC_READ;
+      ID3D12Resource *replacement = nullptr;
+      Check(device->CreatePlacedResource(alias_heaps[i].p, 0, &desc, state, nullptr, IID_PPV_ARGS(&replacement)));
+      if (replacement->GetGPUVirtualAddress() != va) {
+        replacement->Release(); throw std::runtime_error("alias VA changed");
+      }
+      *targets[i] = replacement;
+      old->Release();
+    }
+    // Initialize only the new target generation, after old owners unregister.
+    for (unsigned i = 0; i < 2; ++i) {
+      void *data = nullptr;
+      const UINT value = (i + 1) * 300, input = i ? 19 : 17;
+      Check(late_cbv[i]->Map(0, nullptr, &data)); std::memcpy(data, &value, 4); late_cbv[i]->Unmap(0, nullptr);
+      Check(late_srv[i]->Map(0, nullptr, &data)); std::memcpy(data, &input, 4); late_srv[i]->Unmap(0, nullptr);
+    }
   }
   void *mapped = nullptr;
   Check(source->Map(0, nullptr, &mapped)); std::memcpy(mapped, command_words, sizeof(command_words)); source->Unmap(0, nullptr);
@@ -139,16 +186,19 @@ void Run(const void *consumer, size_t consumer_size, ID3DBlob *producer) {
   D3D12_RANGE range = {0, 8}; Check(readback->Map(0, &range, &mapped));
   UINT values[2]; std::memcpy(values, mapped, sizeof(values));
   D3D12_RANGE empty = {}; readback->Unmap(0, &empty);
-  if (values[0] != 107 || values[1] != 209) {
+  if (values[0] != (remap ? 317u : 107u) || values[1] != (remap ? 619u : 209u)) {
     std::cerr << "readback=" << values[0] << ',' << values[1] << '\n';
     throw std::runtime_error("GPU-selected root VA mismatch");
   }
-  std::cout << "GPU-produced CBV/SRV/UAV roots, late registration and gated lifetime: 107,209 PASS\n";
+  std::cout << "GPU-produced CBV/SRV/UAV roots, late registration and gated lifetime: "
+            << values[0] << ',' << values[1] << " remap=" << remap << " PASS\n";
 }
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc > 2) return 2;
+  const bool remap = argc > 1 && !std::strcmp(argv[argc - 1], "--remap");
+  const int shader_argc = argc - (remap ? 1 : 0);
+  if (shader_argc > 2) return 2;
   HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
   if (!compiler) return 2;
   auto compile = reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler, "D3DCompile"));
@@ -162,14 +212,14 @@ int main(int argc, char **argv) {
       "[numthreads(1,1,1)] void main() {output[slot] = value + input[0];}";
     Owned<ID3DBlob> producer, shader, errors;
     Check(compile(generator, sizeof(generator) - 1, nullptr, nullptr, nullptr, "main", "cs_5_0", 0, 0, &producer.p, &errors.p));
-    if (argc == 2) {
+    if (shader_argc == 2) {
       std::ifstream file(argv[1], std::ios::binary);
       std::vector<char> bytes((std::istreambuf_iterator<char>(file)), {});
       if (bytes.empty()) throw std::runtime_error("empty shader file");
-      Run(bytes.data(), bytes.size(), producer.p);
+      Run(bytes.data(), bytes.size(), producer.p, remap);
     } else {
       Check(compile(consumer, sizeof(consumer) - 1, nullptr, nullptr, nullptr, "main", "cs_5_0", 0, 0, &shader.p, nullptr));
-      Run(shader->GetBufferPointer(), shader->GetBufferSize(), producer.p);
+      Run(shader->GetBufferPointer(), shader->GetBufferSize(), producer.p, remap);
     }
     result = 0;
   } catch (const std::exception &error) { std::cerr << error.what() << '\n'; }
