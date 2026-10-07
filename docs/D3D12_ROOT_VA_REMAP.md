@@ -49,3 +49,16 @@ shared range validation, and strong ownership returned before lock destruction.
 This test is a structural/lifetime control, not a GPU remap oracle or concurrent
 stress proof. Other raw-lookup consumers and real same-address submission behavior
 remain open; the overall root-VA task is not complete.
+
+## Exact-address public alias construction
+
+Two upload placed resources created at heap offset 0 produce the same GPU VA and
+different BufferAllocation objects on both tested configurations. The extended
+fixture verifies new-owner lookup after releasing the old public resource,
+retained old-allocation access and protection against stale unregister. It now
+requires both exact address equality and distinct allocation identity, rather
+than treating a nonmatching-address run as a passing remap case.
+Evidence: `root-va-alias-{normal,no-private}.log` in the same cache. Both explicit
+targets compile and both Wine processes pass; this is registry/lifetime evidence,
+not a submitted GPU root-consumer result. The public construction removes a
+previous uncertainty and supplies the next direct/indirect remap fixture input.

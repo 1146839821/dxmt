@@ -56,7 +56,36 @@ int main() {
   ok &= !internal->SnapshotBufferByVA(va, &offset) && offset == 0;
   ok &= retained && retained->gpuAddress() == va && retained->length() >= 256;
   if (found != snapshot.end()) ok &= (*found)->gpuAddress() == va && (*found)->length() >= 256;
+  // Public placed-resource aliases, unlike an internal owner-only swap, may
+  // produce distinct allocations at exactly the same GPU virtual address.
+  D3D12_HEAP_DESC heap_desc = {};
+  heap_desc.SizeInBytes = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+  heap_desc.Properties = hp;
+  heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+  Owned<ID3D12Heap> heap;
+  Owned<ID3D12Resource> alias_first, alias_second;
+  if (FAILED(device.p->CreateHeap(&heap_desc, IID_PPV_ARGS(&heap.p)))) return 1;
+  if (FAILED(device.p->CreatePlacedResource(heap.p, 0, &d, D3D12_RESOURCE_STATE_GENERIC_READ,
+      nullptr, IID_PPV_ARGS(&alias_first.p)))) return 1;
+  const auto alias_va = alias_first.p->GetGPUVirtualAddress();
+  auto old_alias = internal->SnapshotBufferByVA(alias_va, &offset);
+  if (FAILED(device.p->CreatePlacedResource(heap.p, 0, &d, D3D12_RESOURCE_STATE_GENERIC_READ,
+      nullptr, IID_PPV_ARGS(&alias_second.p)))) return 1;
+  auto new_alias = internal->SnapshotBufferByVA(alias_second.p->GetGPUVirtualAddress(), &offset);
+  const bool same_address = alias_va == alias_second.p->GetGPUVirtualAddress();
+  const bool distinct_allocation = old_alias.ptr() != new_alias.ptr();
+  std::cout << "placed aliases same_address=" << same_address
+            << " distinct_allocation=" << distinct_allocation << "\n";
+  ok &= same_address && distinct_allocation;
+  if (same_address) {
+    ok &= distinct_allocation && old_alias && new_alias;
+    alias_first.p->Release(); alias_first.p = nullptr;
+    ok &= internal->SnapshotBufferByVA(alias_va, &offset).ptr() == new_alias.ptr();
+    ok &= internal->LookupResourceByVA(alias_va, &offset) ==
+        static_cast<dxmt::MTLD3D12Resource *>(alias_second.p);
+    ok &= old_alias->gpuAddress() == alias_va;
+  }
   if (!ok) { std::cerr << "VA owner/snapshot regression failed\n"; return 1; }
-  std::cout << "same-allocation owner replacement, stale unregister and retained snapshot PASS\n";
+  std::cout << "VA owner replacement, same-address placed aliases and retained snapshot PASS\n";
   return 0;
 }
