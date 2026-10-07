@@ -2851,7 +2851,18 @@ public:
       return 0;
     }
     const auto qword_bytes = sizeof(uint64_t) * size_t(pRootSig->UploadQwords);
-    if (!qword_bytes || Count > std::numeric_limits<size_t>::max() / qword_bytes) {
+    // IA-only indirect commands still bind this pointer. An empty root has
+    // zero stride and no root writes, so all commands can share one sentinel.
+    if (!qword_bytes) {
+      auto [Ptr, Offset] = allocator_->AllocateGPUHeap(sizeof(uint64_t), 64);
+      if (!Ptr) {
+        FailRecording(__func__, "empty root argument allocation failed");
+        return 0;
+      }
+      *static_cast<uint64_t *>(Ptr) = 0;
+      return Offset;
+    }
+    if (Count > std::numeric_limits<size_t>::max() / qword_bytes) {
       FailRecording(__func__, "root argument allocation overflow count=", Count,
                     " qword_bytes=", qword_bytes);
       return 0;

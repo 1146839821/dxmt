@@ -460,3 +460,35 @@ callers never enable both. The planned SM5 indirect validation remains unmet.
 D3D11, geometry/tessellation, format-support reporting and device feature level
 are unchanged. Next implementation gap: empty-root AIRCONV ExecuteIndirect;
 full packed-input and FL12_0 qualification remain incomplete.
+
+Task Analysis — empty AIRCONV indirect roots (baseline 9256c92a):
+Hypothesis: zero UploadQwords is legal, but EncodeRootArgument rejects it as
+allocation overflow. Evidence: the unchanged SM5 indirect fixture fails Close
+with count=2/qword_bytes=0 in both variants; generated ICB code binds a root
+pointer even for IA-only updates. Expected effect: allocate one initialized
+qword sentinel for an empty root, keeping logical stride zero and avoiding
+per-command empty uploads. Risk: accidental writes through shared storage;
+validated signatures cannot update root parameters absent from the root layout.
+Validation: original SM5 indirect full-RGBA fixture in both variants, direct
+and MSC regression, both builds and host tests. Keep nonempty overflow guards.
+
+Task Result: the baseline probe again failed Close with qword_bytes=0 before
+the fix. The empty-root path now allocates one zeroed, 64-byte-aligned qword
+and retains zero logical stride; Count/null/layout validation and nonempty
+overflow/copy behavior are unchanged. No transport or generated shader changes.
+Both reconfigured full builds passed, and host tests passed 12/12 each.
+Existing genuine SM5 direct/indirect fixtures passed full RGBA `0xaa4080ff`
+in both variants, including two indirect command records with distinct VB
+stride and a zero-count second command. The prior packed-input indirect blocker
+is resolved for this fixture. Nonempty-root AIRCONV firstbit_shi compute readback
+also passed in both variants (one UAV descriptor-table root parameter).
+MSC packed indirect passed in no-private; normal first failed timestamp-end=0
+with correct RGBA, then passed a separately logged serial retry. This does not
+resolve timestamp qualification. Evidence is retained in cache overlay logs
+`/Users/zhangbo/.cache/dxmt-reconciliation.ZLDvwE/empty-root-*`.
+No prefix/game DLL deployment or feature-level/reporting changes were made.
+Compute empty-root indirect and broader IA/root-update matrices remain untested.
+Self-review: Standards 0 findings; Spec 0 implementation findings. Independent
+review checked generated ICB pointer arithmetic and signature/root-write
+validation; runtime results above were verified by the main agent, not by the
+reviewers. No temporary production instrumentation was added.
