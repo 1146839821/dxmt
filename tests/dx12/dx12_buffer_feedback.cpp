@@ -179,16 +179,16 @@ void main(float4 position : SV_Position) {
       if (uav_source) updates[i].UnorderedAccessView.RootParameterIndex = i;
       else updates[i].ShaderResourceView.RootParameterIndex = i;
     }
-    updates[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-    D3D12_COMMAND_SIGNATURE_DESC sd = {}; sd.ByteStride = 28; sd.NumArgumentDescs = 3; sd.pArgumentDescs = updates;
+    updates[2].Type = pixel ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW : D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    D3D12_COMMAND_SIGNATURE_DESC sd = {}; sd.ByteStride = pixel ? 32 : 28; sd.NumArgumentDescs = 3; sd.pArgumentDescs = updates;
     Check(device.p->CreateCommandSignature(&sd, root.p, IID_PPV_ARGS(&signature.p)));
-    create(arguments, 28, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+    create(arguments, sd.ByteStride, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
     Check(arguments.p->Map(0, nullptr, &mapped));
     const UINT64 address = source.p->GetGPUVirtualAddress() + 65532;
     std::memcpy(mapped, &address, 8);
     std::memcpy(static_cast<char *>(mapped) + 8, &address, 8);
-    const UINT dispatch[3] = {1, 1, 1};
-    std::memcpy(static_cast<char *>(mapped) + 16, dispatch, 12);
+    const UINT draw[4] = {3, 1, 0, 0}, dispatch[3] = {1, 1, 1};
+    std::memcpy(static_cast<char *>(mapped) + 16, pixel ? draw : dispatch, pixel ? 16 : 12);
     arguments.p->Unmap(0, nullptr);
   }
   HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
@@ -228,7 +228,8 @@ void main(float4 position : SV_Position) {
       D3D12_VIEWPORT viewport = {0, 0, 1, 1, 0, 1}; D3D12_RECT scissor = {0, 0, 1, 1};
       list.p->RSSetViewports(1, &viewport); list.p->RSSetScissorRects(1, &scissor);
       list.p->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-      list.p->DrawInstanced(3, 1, 0, 0);
+      if (indirect) list.p->ExecuteIndirect(signature.p, 1, arguments.p, 0, nullptr, 0);
+      else list.p->DrawInstanced(3, 1, 0, 0);
     } else {
       list.p->SetComputeRootDescriptorTable(root_source ? 2 : 0, descriptors.p->GetGPUDescriptorHandleForHeapStart());
       if (indirect) list.p->ExecuteIndirect(signature.p, 1, arguments.p, 0, nullptr, 0);
@@ -254,7 +255,7 @@ void main(float4 position : SV_Position) {
   }
   CloseHandle(event);
   std::printf("BUFFER_FEEDBACK %s %s %s raw/structured zero-payload, boundary and alternating remap PASS\n",
-              pixel ? "pixel" : indirect ? "indirect" : "direct", root_source ? "root" : "table", uav_source ? "UAV" : "SRV");
+              pixel ? (indirect ? "indirect-pixel" : "pixel") : indirect ? "indirect" : "direct", root_source ? "root" : "table", uav_source ? "UAV" : "SRV");
   return 0;
 }
 }
@@ -267,7 +268,6 @@ int main(int argc, char **argv) {
     else if (!std::strcmp(argv[i], "--pixel")) { pixel = true; root_source = true; }
     else return 2;
   }
-  if (pixel && indirect) return 2;
   auto library = LoadLibraryA("d3dcompiler_47.dll");
   if (!library) return 77;
   auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(library, "D3DCompile"));

@@ -162,7 +162,9 @@ struct RenderEncoderStencilAttachmentData {
   uint8_t clear_stencil;
 };
 
+struct IndirectRenderCommandData;
 struct RenderEncoderData : EncoderData {
+  std::vector<std::pair<const wmtcmd_render_setbuffer *, const IndirectRenderCommandData *>> root_feedback_indirect;
   std::vector<std::shared_ptr<D3D12TypedOriginDispatch>> typed_origin_draws;
   std::vector<std::shared_ptr<D3D12MinMaxDispatch>> minmax_draws;
   std::array<RenderEncoderColorAttachmentData, 8> colors;

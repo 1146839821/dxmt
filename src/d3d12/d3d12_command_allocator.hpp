@@ -94,8 +94,10 @@ struct IndirectRenderCommandData {
   uint64_t msc_fragment_tlab;
   uint64_t msc_fragment_template;
   uint64_t msc_vertex_records;
+  uint64_t root_feedback_table;
 };
-static_assert(sizeof(IndirectRenderCommandData) == 176);
+static_assert(sizeof(IndirectRenderCommandData) == 184);
+static_assert(offsetof(IndirectRenderCommandData, root_feedback_table) == 176);
 static_assert(offsetof(IndirectRenderCommandData, msc_fragment_tlab) == 152);
 static_assert(offsetof(IndirectRenderCommandData, msc_fragment_template) == 160);
 static_assert(offsetof(IndirectRenderCommandData, msc_vertex_records) == 168);

@@ -352,10 +352,10 @@ resource-use stages extended to pre-raster when emulation is present. Applicatio
 root and MSC layouts stay unchanged. Like compute, host eligibility currently
 includes table-only consumers and its performance cost remains unmeasured.
 
-The earlier compiler-stage restriction is removed, but root-updating render
-ExecuteIndirect explicitly fails recording until its private ICB transport is
-implemented. This is an open implementation gap, not qualified graphics ICB
-support. No capability or Tier 2 promotion follows from this change.
+The earlier compiler-stage restriction is removed. At this checkpoint
+root-updating render ExecuteIndirect still failed recording; the transport
+below replaces that temporary gate. No capability or Tier 2 promotion follows
+from this change.
 
 Normal/no-private full builds and 15/15 host tests each pass. New `--pixel`
 SRV/UAV probes execute a full-screen triangle in a 1x1 viewport/scissor without
@@ -370,6 +370,40 @@ not GPU-qualified by the PS probe. Stage-specific GPU oracles, render ICB
 transport, DXIL feedback, inflight/multiqueue/alias matrices and performance
 remain open. The binding integration review preserves AIR/MSC separation;
 API validation does not establish complete GPU memory correctness.
+
+### Render ICB root feedback transport
+
+Hypothesis: apply the compute submission-owned payload pattern to the render
+resolver, then explicitly bind slot 8 in generated AIR vertex/fragment ICBs.
+Expected effect: root-updating ordinary indirect draws consume the same table
+as direct graphics. Risk: lost implicit allocator-heap residency, stale payloads
+on resubmission, and interference with MSC private replay markers.
+
+The private render payload now has 184 bytes, with root_feedback_table at
+offset 176 and matching host assertions/MSL fields. Application indirect stride,
+root UploadQwords and MSC TLAB layouts are unchanged. When any root/VB/IB update
+disables ICB buffer inheritance and AIR feedback is present, recording stores
+a resolver marker. Submission snapshots the VA table and creates a retained
+shared payload copy. Replay declares the original heap read/write for vertex
+and fragment consumption, changes only the copied binding, rejects conflicting
+or unmatched markers, and leaves original commands/payloads untouched. AIR ICBs
+explicitly bind slot 8 for vertex and fragment; MSC branch routing is unchanged.
+The former root-feedback recording rejection is removed. Existing GS/tessellation
+indirect signature limitations are not bypassed by this ordinary render change.
+
+GPU oracle `--pixel --indirect` uses two root updates followed by Draw with
+32-byte application stride, MaxCount=1 and CPU-uploaded arguments. Recording
+VA + 65536 differs from argument VA + 65532; four serial remaps, independent
+data/status expectations and the nonzero dispatch/draw sentinel remain active.
+Normal/no-private SRV/UAV pass; normal UAV additionally passes with explicit Metal API
+Validation enabled and no API errors observed. Both full builds and 15/15 host
+tests each pass; no-private indirect compute UAV regression also passes.
+Evidence: `dxmt-reconciliation.ZLDvwE/root-feedback-render-icb-*`.
+
+This does not qualify DrawIndexed, VB/IB-only updates, count buffers, predication,
+GPU-produced arguments, multiple commands, concurrent resubmission, inflight
+remap or VS/GS/HS/DS feedback consumption. Those matrices and DXIL feedback
+remain open; no aggregate capability promotion or game deployment occurred.
 
 Selective root-transport prerequisite: raw/structured decoder uses now accumulate
 `buffer_feedback` on the corresponding SRV/UAV only when the status destination

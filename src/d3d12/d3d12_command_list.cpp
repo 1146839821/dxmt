@@ -6007,11 +6007,6 @@ public:
     } else if (!ValidateIndirectPipeline(pso_graphics_.ptr(), sig, "ExecuteIndirect(Draw)")) {
       return;
     }
-    if (sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH &&
-        sig->UpdateRootArguments && pso_graphics_->air_buffer_feedback) {
-      FailRecording(__func__, "indirect graphics root feedback table binding is not implemented");
-      return;
-    }
     auto arg_buffer = static_cast<MTLD3D12Resource *>(pArgBuffer);
     if (!ValidateIndirectStateUpdates(sig, sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH))
       return;
@@ -6234,6 +6229,14 @@ public:
     cmd->primitive_type = primitive_type;
     cmd->index_buffer = index_buffer_address;
     cmd->index_buffer_format = index_type == WMTIndexTypeUInt32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
+    if (encode_binding && pso_graphics_->air_buffer_feedback) {
+      try {
+        static_cast<RenderEncoderData *>(allocator_->encoder_current)->root_feedback_indirect.emplace_back(resolver_binding, cmd);
+      } catch (const std::bad_alloc &) {
+        FailRecording(__func__, "indirect render root feedback marker allocation failed");
+        return;
+      }
+    }
     if (!encode_binding)
       return;
     if (msc_updates) {

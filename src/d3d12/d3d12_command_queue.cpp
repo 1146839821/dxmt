@@ -183,8 +183,14 @@ union PrivateRenderReplayCommand {
 
 static bool ReplayPrivateRender(MTLD3D12Device *device, WMT::RenderCommandEncoder encoder,
     RenderEncoderData *data, std::vector<std::shared_ptr<D3D12MinMaxSubmissionBinding>> &bindings,
-    std::vector<std::shared_ptr<D3D12TypedOriginSubmissionBinding>> &origin_bindings) {
+    std::vector<std::shared_ptr<D3D12TypedOriginSubmissionBinding>> &origin_bindings,
+    uint64_t root_feedback_address = 0,
+    std::vector<WMT::Reference<WMT::Buffer>> *root_feedback_buffers = nullptr) {
   try {
+    std::unordered_map<const void *, const IndirectRenderCommandData *> root_feedback_markers;
+    for (const auto &[binding, payload] : data->root_feedback_indirect)
+      if (!binding || !payload || !root_feedback_address ||
+          !root_feedback_markers.emplace(binding, payload).second) return false;
     std::unordered_map<const void *, const D3D12TypedOriginDispatch *> origin_markers;
     for (const auto &draw : data->typed_origin_draws)
       if (!draw->render_marker || !draw->graphics_variant || draw->variant != draw->graphics_variant ||
@@ -331,6 +337,24 @@ static bool ReplayPrivateRender(MTLD3D12Device *device, WMT::RenderCommandEncode
 #undef RENDER_SIZE
       PrivateRenderReplayCommand copy = {};
       std::memcpy(&copy, node, size);
+      if (auto feedback = root_feedback_markers.find(node); feedback != root_feedback_markers.end()) {
+        if (node->type != WMTRenderCommandSetVertexBuffer || !root_feedback_buffers ||
+            indirect_bindings.contains(node)) return false;
+        // The resolver still writes root/vertex arguments into the original heap.
+        WMT::Buffer original_heap; original_heap.handle = copy.buffer.buffer;
+        encoder.useResource(original_heap, static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite),
+                            static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment));
+        auto payload = *feedback->second;
+        payload.root_feedback_table = root_feedback_address;
+        WMTBufferInfo info = {}; info.length = sizeof(payload); info.options = WMTResourceStorageModeShared;
+        auto buffer = device->GetMTLDevice().newBuffer(info);
+        if (!buffer || !info.memory.get()) return false;
+        std::memcpy(info.memory.get(), &payload, sizeof(payload));
+        encoder.useResource(buffer, WMTResourceUsageRead, WMTRenderStageVertex);
+        copy.buffer.buffer = buffer.handle; copy.buffer.offset = 0;
+        root_feedback_buffers->emplace_back(std::move(buffer));
+        root_feedback_markers.erase(feedback);
+      }
       // The companion draw configuration must match the private PSO's
       // reflection, not the application pipeline's threadgroup configuration.
       if (node->type == WMTRenderCommandSetPSO) active_variant = nullptr;
@@ -358,7 +382,7 @@ static bool ReplayPrivateRender(MTLD3D12Device *device, WMT::RenderCommandEncode
       }
       replay.push_back(copy);
     }
-    if (!markers.empty() || !origin_markers.empty() || !indirect_bindings.empty()) return false;
+    if (!markers.empty() || !origin_markers.empty() || !indirect_bindings.empty() || !root_feedback_markers.empty()) return false;
     for (size_t i = 0; i < replay.size(); ++i)
       replay[i].nop.next.set(i + 1 < replay.size() ? &replay[i + 1] : nullptr);
     if (!replay.empty()) encoder.encodeCommands(&replay.front().nop);
@@ -1464,9 +1488,10 @@ public:
            const auto root_stages = static_cast<WMTRenderStages>(
                (data->use_geometry ? WMTRenderStagePreRaster : WMTRenderStageVertex) | WMTRenderStageFragment);
            WMT::Buffer root_feedback_table;
+           uint64_t root_feedback_address = 0;
            if (!RetainIndirectRootBuffers(data, submission, [&](WMT::Buffer buffer, WMTResourceUsage usage) {
                  encoder.useResource(buffer, usage, root_stages);
-               }, &root_feedback_table)) {
+               }, &root_feedback_table, &root_feedback_address)) {
              translation_failed = true;
              encoder.endEncoding();
              break;
@@ -1495,8 +1520,9 @@ public:
              encoder.endEncoding();
              break;
            }
-          if (data->minmax_draws.empty() && data->typed_origin_draws.empty()) encoder.encodeCommands(&data->cmd_head);
-          else if (!ReplayPrivateRender(device_, encoder, data, submission.minmax_bindings, submission.typed_origin_bindings)) {
+          if (data->minmax_draws.empty() && data->typed_origin_draws.empty() && data->root_feedback_indirect.empty()) encoder.encodeCommands(&data->cmd_head);
+          else if (!ReplayPrivateRender(device_, encoder, data, submission.minmax_bindings, submission.typed_origin_bindings,
+                                        root_feedback_address, &submission.root_feedback_tables)) {
             translation_failed = true; encoder.endEncoding(); break;
           }
           encoder.updateFence(fence_, WMTRenderStageFragment);

@@ -110,6 +110,7 @@ struct dxmt_render_command_data {
   device char *msc_fragment_tlab;
   device char *msc_fragment_template;
   device void *msc_vertex_records;
+  device ulong *root_feedback_table;
 };
 
 )";
@@ -294,6 +295,9 @@ public:
         source << "cmd.set_fragment_buffer(rootsig_qwords," << SM50_BINDING_INDEX_ROOT_ARGUMENTS << ");\n";
         source << "cmd.set_fragment_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS
                << ");\n";
+        source << "if (command_data.root_feedback_table) {\n"
+               << "cmd.set_vertex_buffer(command_data.root_feedback_table," << SM50_BINDING_INDEX_ROOT_BUFFER_FEEDBACK << ");\n"
+               << "cmd.set_fragment_buffer(command_data.root_feedback_table," << SM50_BINDING_INDEX_ROOT_BUFFER_FEEDBACK << ");\n}\n";
         source << "}\n";
       } else {
         source << "if (msc_tlab) {\n"
