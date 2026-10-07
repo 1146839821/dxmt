@@ -22,12 +22,37 @@
 #include "dxmt_format.hpp"
 #include <limits>
 #include <mutex>
+#include <cstring>
+#include <unordered_set>
 
 namespace dxmt {
 
 namespace {
 
 constexpr uint64_t kD3D12TileSize = 64ull * 1024;
+
+struct SparseBufferSidebandAPI {
+  decltype(&SparseMappingQueue_updateBufferMappingsWithSidebandAndHeaps) update = nullptr;
+  decltype(&SparseMappingQueue_copyBufferMappingsWithSideband) copy = nullptr;
+  explicit operator bool() const { return update && copy; }
+};
+
+const SparseBufferSidebandAPI &
+GetSparseBufferSidebandAPI() {
+  static const auto api = [] {
+    SparseBufferSidebandAPI result;
+    // Existing hard imports keep this module loaded. Do not introduce missing
+    // import stubs when pairing D3D12 with an older winemetal runtime.
+    if (auto module = GetModuleHandleW(L"winemetal.dll")) {
+      result.update = reinterpret_cast<decltype(result.update)>(
+          GetProcAddress(module, "SparseMappingQueue_updateBufferMappingsWithSidebandAndHeaps"));
+      result.copy = reinterpret_cast<decltype(result.copy)>(
+          GetProcAddress(module, "SparseMappingQueue_copyBufferMappingsWithSideband"));
+    }
+    return result;
+  }();
+  return api;
+}
 
 void
 ClearResourceTiling(
@@ -189,6 +214,23 @@ public:
         return E_OUTOFMEMORY;
       buffer->rename(std::move(allocation));
       device_->RegisterResidencyAndVA(buffer->current(), this);
+      if (GetSparseBufferSidebandAPI()) {
+        sparse_mapping_sideband = new Buffer(tile_count_, device_->GetMTLDevice());
+        auto sideband = sparse_mapping_sideband->allocate({});
+        if (!sideband || !sideband->buffer()) return E_OUTOFMEMORY;
+        // Initial unmapped state only; later status never comes from the CPU.
+        if (auto memory = sideband->mappedMemory(0)) {
+          std::memset(memory, 0, tile_count_);
+        } else {
+          // Native shared memory may be above Wine's 32-bit address space.
+          // Keep Metal-owned backing storage so the native completion retain
+          // also owns its bytes; CpuPlaced storage would be freed with the Rc.
+          const std::vector<uint8_t> zeroes(tile_count_, 0);
+          sideband->updateContents(0, zeroes.data(), zeroes.size());
+        }
+        sparse_mapping_sideband->rename(std::move(sideband));
+        device_->RegisterResidency(sparse_mapping_sideband->current()->buffer());
+      }
     }
 
     tile_mappings_.resize(tile_count_);
@@ -196,6 +238,8 @@ public:
   }
 
   ~MTLD3D12Buffer() {
+    if (sparse_mapping_sideband && sparse_mapping_sideband->current())
+      device_->UnregisterResidency(sparse_mapping_sideband->current()->buffer());
     if (buffer && buffer->current())
       device_->UnregisterResidencyAndVA(buffer->current(), this);
   }
@@ -581,10 +625,29 @@ public:
         operation.buffer_range.length = 1;
         operation.heap_offset = update.heap_tile;
       }
-      sparse_mapping_queue.updateBufferMappings(
-          buffer->current()->buffer(), pHeap ? static_cast<MTLD3D12Heap *>(pHeap)->GetMetalHeap() : WMT::Heap{},
-          mapping_operations.data(), mapping_operations.size()
-      );
+      const auto heap = pHeap ? static_cast<MTLD3D12Heap *>(pHeap)->GetMetalHeap() : WMT::Heap{};
+      if (sparse_mapping_sideband) {
+        std::vector<Com<MTLD3D12Heap, false>> prior_heap_refs;
+        std::vector<obj_handle_t> prior_heaps;
+        std::unordered_set<obj_handle_t> seen;
+        {
+          std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
+          for (const auto &update : updates) {
+            const auto &prior = tile_mappings_[update.resource_tile].heap;
+            if (prior && seen.insert(prior->GetMetalHeap().handle).second) {
+              prior_heap_refs.push_back(prior);
+              prior_heaps.push_back(prior->GetMetalHeap().handle);
+            }
+          }
+        }
+        if (!GetSparseBufferSidebandAPI().update(
+                sparse_mapping_queue.handle, buffer->current()->buffer().handle, heap.handle,
+                sparse_mapping_sideband->current()->buffer().handle,
+                mapping_operations.data(), mapping_operations.size(), prior_heaps.data(), prior_heaps.size())) return E_FAIL;
+      } else {
+        sparse_mapping_queue.updateBufferMappings(
+            buffer->current()->buffer(), heap, mapping_operations.data(), mapping_operations.size());
+      }
     }
 
     std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
@@ -637,24 +700,52 @@ public:
           source->tile_mappings_.begin() + src_coordinate.X + tile_count
       );
     }
+    if (sparse_mapping_queue) {
+      if (sparse_mapping_sideband) {
+        if (!source->sparse_mapping_sideband) return E_NOTIMPL;
+        std::vector<obj_handle_t> heaps;
+        std::unordered_set<obj_handle_t> seen;
+        std::vector<Com<MTLD3D12Heap, false>> prior_heap_refs;
+        {
+          std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
+          for (UINT tile = 0; tile < tile_count; ++tile) {
+            const auto &prior = tile_mappings_[dst_coordinate.X + tile].heap;
+            if (prior && seen.insert(prior->GetMetalHeap().handle).second) {
+              prior_heap_refs.push_back(prior);
+              heaps.push_back(prior->GetMetalHeap().handle);
+            }
+          }
+        }
+        for (const auto &mapping : copied) {
+          if (mapping.heap) {
+            const auto heap = mapping.heap->GetMetalHeap().handle;
+            if (seen.insert(heap).second) heaps.push_back(heap);
+          }
+        }
+        if (!GetSparseBufferSidebandAPI().copy(
+                sparse_mapping_queue.handle, source->buffer->current()->buffer().handle,
+                buffer->current()->buffer().handle,
+                source->sparse_mapping_sideband->current()->buffer().handle,
+                sparse_mapping_sideband->current()->buffer().handle,
+                src_coordinate.X, dst_coordinate.X, tile_count, heaps.data(), heaps.size())) return E_FAIL;
+      } else {
+        std::vector<WMTCopySparseBufferMappingOperation> mapping_operations;
+        mapping_operations.reserve(tile_count);
+        for (UINT tile = 0; tile < tile_count; tile++) {
+          auto &operation = mapping_operations.emplace_back();
+          operation.source_range.location = src_coordinate.X + tile;
+          operation.source_range.length = 1;
+          operation.destination_offset = dst_coordinate.X + tile;
+        }
+        sparse_mapping_queue.copyBufferMappings(
+            source->buffer->current()->buffer(), buffer->current()->buffer(), mapping_operations.data(),
+            mapping_operations.size()
+        );
+      }
+    }
     {
       std::unique_lock<dxmt::mutex> destination_lock(tile_mapping_mutex_);
       std::copy(copied.begin(), copied.end(), tile_mappings_.begin() + dst_coordinate.X);
-    }
-
-    if (sparse_mapping_queue) {
-      std::vector<WMTCopySparseBufferMappingOperation> mapping_operations;
-      mapping_operations.reserve(tile_count);
-      for (UINT tile = 0; tile < tile_count; tile++) {
-        auto &operation = mapping_operations.emplace_back();
-        operation.source_range.location = src_coordinate.X + tile;
-        operation.source_range.length = 1;
-        operation.destination_offset = dst_coordinate.X + tile;
-      }
-      sparse_mapping_queue.copyBufferMappings(
-          source->buffer->current()->buffer(), buffer->current()->buffer(), mapping_operations.data(),
-          mapping_operations.size()
-      );
     }
     return S_OK;
   }

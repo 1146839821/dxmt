@@ -135,3 +135,80 @@ no map mutation before object preparation, and completion-owned MRC lifetime.
 The tests do not prove error-injection recovery, overlapping-map last-wins,
 cross-queue remap overlap or shader status semantics. Next connect resource-side
 ownership and both update/copy mapping paths before descriptor/AIR integration.
+
+## Resource-owned GPU mapping sideband
+
+Task Analysis / Hypothesis: reserved buffers need a stable, resource-owned
+allocation updated in mapping queue order, including CopyTileMappings. CPU
+bookkeeping is only used to retain copied backing heaps, never to reconstruct
+the shader mapping bytes. Expected effect: immutable sideband identity for
+future descriptor transport, with GPU update/copy semantics. Risk: transient
+copy allocation and heap lifetime, old runtime pairing, copy failure publication.
+Validation: both builds, shared native mapping/data/copy probe, public D3D12
+queue update/copy probe inspecting GPU-written bytes only after a fence.
+
+The copied byte range is staged on the GPU before destination writes. Unix call
+200 preserves prior table indices; copied backing heaps are included in its
+completion-owned residency/lifetime. Reserved buffers initialize sideband to
+unmapped once before GPU use, register residency without registering a D3D VA,
+and enable this path only when both optional exports resolve. Existing older
+runtime mapping behavior remains available without a sideband. Failed native
+submission does not publish destination CPU mapping bookkeeping. Descriptor,
+AIR/DXIL lowering and feedback admission remain unchanged and unfinished.
+Validation results: reconfigured normal/no-private full builds pass. Both native
+probes pass mapping/remap/copy byte and payload checks, including a right-shifted
+overlapping mapping's real page data. The shared helper also passes the MRC
+standalone probe. Both public D3D12 Wine probes pass eight update/copy phases
+plus overlapping copies in both directions, with GPU-written mapping bytes
+checked after the main-queue fence. Both host suites pass 13/13. Native API
+validation runs explicitly report Metal API Validation Enabled and pass without
+API errors in both variants. Shader validation and feedback shader tests were
+not run because shader transport/lowering is not yet connected.
+
+An isolated older matched winemetal PE/Unix pair with neither new export passes
+the normal build's legacy probe (export absence, queue completion, resource
+creation and CPU bookkeeping only). This does not qualify the older runtime's
+GPU sparse data or overlapping-copy semantics. Current PE/Unix runtime halves
+must remain matched. Evidence is under `dxmt-reconciliation.ZLDvwE`:
+`resource-sideband-{build,overlap-build,final-build,wine,native,api-validation}-{normal,np}.log`,
+`resource-sideband-legacy-normal.log`, and `sparse-sideband-copy-mrc-native.log`.
+
+Main self-review: stable resource ownership and one-time zero initialization;
+inaccessible native pointers use the existing native updateContents bridge for
+initialization without adopting CpuPlaced external-memory lifetime (32-bit
+runtime is not tested here);
+no new mandatory imports; fixed 48/64/80-byte appended thunk layouts; overflow-safe
+range validation; private completion-owned residency for copied backing heaps,
+byte scratch and mapping scratch; native failure before CPU mapping publication.
+The Metal resource/synchronization skills guided explicit lifetime and barriers;
+the validation skill guided API-only diagnostics. No game/prefix deployment,
+process management, push, shader feedback admission or capability promotion.
+The prerequisite producer barrier also now retains its own command allocator
+through completion instead of releasing it immediately after commit.
+Allocation-error injection, multi-queue overlap and full shader matrices remain
+unqualified. Next connect descriptor/root transport and actual access lowering.
+
+[D3D12 CopyTileMappings](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12commandqueue-copytilemappings)
+requires snapshot-like results when source and destination overlap. The new
+native copy helper stages both mapping and sideband in that case, rather than
+depending on an undocumented Metal overlap guarantee. The native probe checks
+the shifted mapping's actual page data; the D3D12 probe checks both overlap
+directions' GPU-written bytes. This is distinct from legacy compatibility,
+whose probe checks export absence, resource creation, queue completion and
+CPU bookkeeping only, not GPU sparse status or overlap mapping correctness.
+
+Final residency review: capture unique old backing heaps under the resource
+mapping lock, retain their private COM identity until native submission, then
+keep them in native completion-owned residency until the remap finishes. Copy
+retains both copied source heaps and replaced destination heaps. Update uses
+an independent retained variant (Unix call 201 / 64-byte layout); the previously
+published call 199 remains ABI-compatible. Sideband allocation requires the
+retained-update and copy exports. Mutable completion containers explicitly
+release transient objects at callback time. Fresh final normal/no-private builds,
+native API validation, MRC and public D3D12 Wine API validation runs all pass
+with alternating distinct backing heaps. Host suites again pass 13/13 each.
+Evidence: `resource-sideband-retained-build-{normal,np}.log`,
+`resource-sideband-wine-api-validation-{normal,np}.log`,
+`resource-sideband-api-validation-{normal,np}.log`, and
+`sparse-sideband-copy-mrc-native.log`. In-flight old/new heap overlap remains a
+broader GPU regression matrix item, not inferred from this serial phase probe.

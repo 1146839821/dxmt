@@ -30,6 +30,8 @@ enum winemetal_unixcall {
   unix_mtltexture_tailsizeinbytes = 168,
   unix_mtldevice_newrenderpso_stagein = 198,
   unix_sparsemappingqueue_updatebuffermappings_sideband = 199,
+  unix_sparsemappingqueue_copybuffermappings_sideband = 200,
+  unix_sparsemappingqueue_updatebuffermappings_sideband_retained = 201,
   unix_mtldevice_supportsraytracing = 170,
   unix_mtldevice_accelerationstructuresizes,
   unix_mtldevice_newaccelerationstructure,
@@ -541,6 +543,23 @@ struct unixcall_sparsemappingqueue_mappings_sideband {
   struct unixcall_sparsemappingqueue_mappings mappings;
   obj_handle_t sideband;
 };
+
+struct unixcall_sparsemappingqueue_mappings_sideband_retained {
+  struct unixcall_sparsemappingqueue_mappings_sideband update;
+  struct WMTConstMemoryPointer prior_heaps;
+  uint64_t prior_heap_count;
+};
+
+struct unixcall_sparsemappingqueue_copy_sideband {
+  obj_handle_t queue, source, destination, source_sideband, destination_sideband;
+  uint64_t source_tile, destination_tile, count;
+  struct WMTConstMemoryPointer heaps;
+  uint64_t heap_count;
+};
+
+STATIC_ASSERT(sizeof(struct unixcall_sparsemappingqueue_mappings_sideband) == 48);
+STATIC_ASSERT(sizeof(struct unixcall_sparsemappingqueue_mappings_sideband_retained) == 64);
+STATIC_ASSERT(sizeof(struct unixcall_sparsemappingqueue_copy_sideband) == 80);
 
 struct unixcall_sparsemappingqueue_copy_mappings {
   obj_handle_t queue;

@@ -4040,7 +4040,9 @@ _SparseMappingQueue_barrierBeforeResourceState(void *obj) {
     id<MTLDevice> device = [queue device];
     id<MTL4CommandBuffer> command_buffer = [device newCommandBuffer];
     id<MTL4CommandAllocator> allocator = [device newCommandAllocator];
-    if (!command_buffer || !allocator) {
+    MTL4CommitOptions *options = [MTL4CommitOptions new];
+    if (!command_buffer || !allocator || !options) {
+      [options release];
       [command_buffer release];
       [allocator release];
       return STATUS_UNSUCCESSFUL;
@@ -4049,6 +4051,7 @@ _SparseMappingQueue_barrierBeforeResourceState(void *obj) {
     [command_buffer beginCommandBufferWithAllocator:allocator];
     id<MTL4ComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
     if (!encoder) {
+      [options release];
       [command_buffer release];
       [allocator release];
       return STATUS_UNSUCCESSFUL;
@@ -4059,8 +4062,20 @@ _SparseMappingQueue_barrierBeforeResourceState(void *obj) {
     [encoder endEncoding];
     [command_buffer endCommandBuffer];
 
+    // This producer barrier is a prerequisite of the sideband path too. Its
+    // allocator must survive GPU completion, not merely queue submission.
+    NSMutableArray *keepalive = [[NSMutableArray alloc] initWithObjects:command_buffer, allocator, nil];
+    if (!keepalive) {
+      [options release]; [command_buffer release]; [allocator release];
+      return STATUS_UNSUCCESSFUL;
+    }
+    [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+      (void)feedback; [keepalive removeAllObjects];
+    }];
     id<MTL4CommandBuffer> command_buffers[] = {command_buffer};
-    [queue commit:command_buffers count:1];
+    [queue commit:command_buffers count:1 options:options];
+    [keepalive release];
+    [options release];
     [command_buffer release];
     [allocator release];
     return STATUS_SUCCESS;
@@ -4111,6 +4126,46 @@ _SparseMappingQueue_updateBufferMappingsWithSideband(void *obj) {
     );
     free(operations);
     return submitted ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+  }
+#endif
+  return STATUS_UNSUCCESSFUL;
+}
+
+static NTSTATUS
+_SparseMappingQueue_updateBufferMappingsWithSidebandAndHeaps(void *obj) {
+  struct unixcall_sparsemappingqueue_mappings_sideband_retained *params = obj;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260400
+  if (@available(macOS 26.4, *)) {
+    const struct unixcall_sparsemappingqueue_mappings *mappings = &params->update.mappings;
+    if (params->prior_heap_count > SIZE_MAX / sizeof(obj_handle_t)) return STATUS_UNSUCCESSFUL;
+    MTL4UpdateSparseBufferMappingOperation *operations = NULL;
+    if (mappings->count) {
+      operations = copy_sparse_buffer_mapping_operations(mappings->operations.ptr, mappings->count);
+      if (!operations) return STATUS_UNSUCCESSFUL;
+    }
+    bool submitted = dxmt_update_sparse_buffer_sideband_retained(
+        (id<MTL4CommandQueue>)mappings->queue, (id<MTLBuffer>)mappings->resource,
+        (id<MTLHeap>)mappings->heap, (id<MTLBuffer>)params->update.sideband,
+        operations, mappings->count, params->prior_heaps.ptr, params->prior_heap_count
+    );
+    free(operations);
+    return submitted ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+  }
+#endif
+  return STATUS_UNSUCCESSFUL;
+}
+
+static NTSTATUS
+_SparseMappingQueue_copyBufferMappingsWithSideband(void *obj) {
+  struct unixcall_sparsemappingqueue_copy_sideband *params = obj;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260400
+  if (@available(macOS 26.4, *)) {
+    if (params->heap_count > SIZE_MAX / sizeof(obj_handle_t)) return STATUS_UNSUCCESSFUL;
+    return dxmt_copy_sparse_buffer_sideband(
+        (id<MTL4CommandQueue>)params->queue, (id<MTLBuffer>)params->source, (id<MTLBuffer>)params->destination,
+        (id<MTLBuffer>)params->source_sideband, (id<MTLBuffer>)params->destination_sideband,
+        params->source_tile, params->destination_tile, params->count, params->heaps.ptr, params->heap_count
+    ) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
   }
 #endif
   return STATUS_UNSUCCESSFUL;
@@ -4562,6 +4617,8 @@ const void *__wine_unix_call_funcs[] = {
     &thunk_DXMTMSCLowerReductionSamplers,
     &_MTLDevice_newRenderPipelineStateWithStageIn,
     &_SparseMappingQueue_updateBufferMappingsWithSideband,
+    &_SparseMappingQueue_copyBufferMappingsWithSideband,
+    &_SparseMappingQueue_updateBufferMappingsWithSidebandAndHeaps,
 };
 
 #ifndef DXMT_NATIVE
@@ -4766,5 +4823,7 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &thunk_DXMTMSCLowerReductionSamplers,
     &_MTLDevice_newRenderPipelineStateWithStageIn,
     &_SparseMappingQueue_updateBufferMappingsWithSideband,
+    &_SparseMappingQueue_copyBufferMappingsWithSideband,
+    &_SparseMappingQueue_updateBufferMappingsWithSidebandAndHeaps,
 };
 #endif

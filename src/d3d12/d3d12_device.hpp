@@ -129,6 +129,9 @@ public:
 
   Rc<Texture> texture;
   Rc<Buffer> buffer;
+  // Reserved-buffer mapping bytes. Immutable allocation identity; only the
+  // sparse queue mutates bytes after zero initialization, not CPU bookkeeping.
+  Rc<Buffer> sparse_mapping_sideband;
   WMT::Reference<WMT::AccelerationStructure> acceleration_structure;
   uint64_t acceleration_structure_size = 0;
   WMT::Reference<WMT::Buffer> acceleration_structure_header;

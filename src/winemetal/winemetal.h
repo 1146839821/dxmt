@@ -2485,6 +2485,19 @@ WINEMETAL_API bool SparseMappingQueue_updateBufferMappingsWithSideband(
     const struct WMTUpdateSparseBufferMappingOperation *operations, uint64_t count
 );
 
+WINEMETAL_API bool SparseMappingQueue_copyBufferMappingsWithSideband(
+    obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
+    obj_handle_t source_sideband, obj_handle_t destination_sideband,
+    uint64_t source_tile, uint64_t destination_tile, uint64_t count,
+    const obj_handle_t *heaps, uint64_t heap_count
+);
+
+WINEMETAL_API bool SparseMappingQueue_updateBufferMappingsWithSidebandAndHeaps(
+    obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap, obj_handle_t sideband,
+    const struct WMTUpdateSparseBufferMappingOperation *operations, uint64_t count,
+    const obj_handle_t *prior_heaps, uint64_t prior_heap_count
+);
+
 WINEMETAL_API void SparseMappingQueue_updateTextureMappings(
     obj_handle_t queue, obj_handle_t texture, obj_handle_t heap,
     const struct WMTUpdateSparseTextureMappingOperation *operations, uint64_t count

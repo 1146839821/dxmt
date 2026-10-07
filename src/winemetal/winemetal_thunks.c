@@ -1643,6 +1643,38 @@ SparseMappingQueue_updateBufferMappingsWithSideband(
   return WINE_UNIX_CALL(unix_sparsemappingqueue_updatebuffermappings_sideband, &params) == 0;
 }
 
+WINEMETAL_API bool
+SparseMappingQueue_updateBufferMappingsWithSidebandAndHeaps(
+    obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap, obj_handle_t sideband,
+    const struct WMTUpdateSparseBufferMappingOperation *operations, uint64_t count,
+    const obj_handle_t *prior_heaps, uint64_t prior_heap_count
+) {
+  struct unixcall_sparsemappingqueue_mappings_sideband_retained params = {0};
+  params.update.mappings.queue = queue; params.update.mappings.resource = buffer;
+  params.update.mappings.heap = heap; params.update.sideband = sideband;
+  WMT_MEMPTR_SET(params.update.mappings.operations, operations);
+  params.update.mappings.count = count;
+  WMT_MEMPTR_SET(params.prior_heaps, prior_heaps);
+  params.prior_heap_count = prior_heap_count;
+  return WINE_UNIX_CALL(unix_sparsemappingqueue_updatebuffermappings_sideband_retained, &params) == 0;
+}
+
+WINEMETAL_API bool
+SparseMappingQueue_copyBufferMappingsWithSideband(
+    obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
+    obj_handle_t source_sideband, obj_handle_t destination_sideband,
+    uint64_t source_tile, uint64_t destination_tile, uint64_t count,
+    const obj_handle_t *heaps, uint64_t heap_count
+) {
+  struct unixcall_sparsemappingqueue_copy_sideband params = {0};
+  params.queue = queue; params.source = source; params.destination = destination;
+  params.source_sideband = source_sideband; params.destination_sideband = destination_sideband;
+  params.source_tile = source_tile; params.destination_tile = destination_tile; params.count = count;
+  WMT_MEMPTR_SET(params.heaps, heaps);
+  params.heap_count = heap_count;
+  return WINE_UNIX_CALL(unix_sparsemappingqueue_copybuffermappings_sideband, &params) == 0;
+}
+
 WINEMETAL_API void
 SparseMappingQueue_updateTextureMappings(
     obj_handle_t queue, obj_handle_t texture, obj_handle_t heap,

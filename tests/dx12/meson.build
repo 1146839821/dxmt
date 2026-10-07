@@ -6,6 +6,11 @@ executable('dx12_sparse_sideband', 'dx12_sparse_sideband.cpp',
   build_by_default: false, dependencies: [winemetal_dep],
 )
 
+executable('dx12_resource_sideband', 'dx12_resource_sideband.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
 executable('dx12_indirect_state', 'dx12_indirect_state.cpp',
   build_by_default: false, dependencies: [d3d12_dep],
 )
