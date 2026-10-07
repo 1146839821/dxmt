@@ -261,6 +261,21 @@ byte-footprint lowering, DXIL support and GPU feedback matrices remain required.
 
 ## GPU mapping lookup lowering checkpoint
 
+GPU oracle follow-up: `tests/dx12/dx12_buffer_feedback.cpp` now executes raw
+Load/Load2 and structured Load with feedback in both normal and no-private
+cache-only Wine runtimes. Native D3DCompile disassembly is checked for
+`ld_raw_s`, `ld_structured_s`, and `check_access_fully_mapped`, preventing ordinary
+loads from standing in for feedback coverage. The two views start at byte 65532;
+two scalar addresses select opposite tiles and Load2 crosses the 64KiB boundary.
+Each of four serial phases alternates which tile maps the same physical page,
+initializes the mapped page to zero, and checks all eleven GPU outputs after
+queue completion. Mapped and NULL data are both zero while status distinguishes
+them; the cross-boundary status is false in every phase. Both builds pass.
+Evidence: `dxmt-reconciliation.ZLDvwE/buffer-feedback-wine-{normal,np}.log`.
+This is SRV compute data/status execution evidence, not inflight/multiqueue,
+UAV/root/DXIL, ordinary/OOB, all masks/swizzles, or full Tier2 qualification.
+No game/prefix DLL replacement or process restart occurred.
+
 Hypothesis: the retained resource header and queue-ordered GPU mapping bytes
 can provide raw/structured status independently of payload values. Expected
 effect: descriptor-table feedback loads no longer stop at decoding. Risk:

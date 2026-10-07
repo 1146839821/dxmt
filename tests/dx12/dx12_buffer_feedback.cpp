@@ -1,0 +1,172 @@
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <d3d12.h>
+#include <d3dcompiler.h>
+#include <cstdio>
+#include <cstring>
+#include <stdexcept>
+
+namespace {
+template <typename T> struct Owned {
+  T *p = nullptr;
+  ~Owned() { if (p) p->Release(); }
+};
+void Check(HRESULT hr) { if (FAILED(hr)) { std::printf("HRESULT %08lx\n", (unsigned long)hr); throw std::runtime_error("API failed"); } }
+D3D12_RESOURCE_DESC Buffer(UINT64 size, D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE) {
+  D3D12_RESOURCE_DESC d = {};
+  d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; d.Width = size;
+  d.Height = d.DepthOrArraySize = d.MipLevels = d.SampleDesc.Count = 1;
+  d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR; d.Flags = flags;
+  return d;
+}
+D3D12_HEAP_PROPERTIES Properties(D3D12_HEAP_TYPE type) {
+  D3D12_HEAP_PROPERTIES p = {}; p.Type = type; p.CreationNodeMask = p.VisibleNodeMask = 1; return p;
+}
+void Transition(ID3D12GraphicsCommandList *list, ID3D12Resource *resource,
+                D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+  D3D12_RESOURCE_BARRIER b = {}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  b.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
+  list->ResourceBarrier(1, &b);
+}
+int Run(pD3DCompile compile) {
+  // Equal zero payloads in mapped and NULL tiles force status to be independent
+  // of payload. Both descriptor views start at the last word of tile zero.
+  const char *hlsl = R"(
+ByteAddressBuffer raw : register(t0);
+StructuredBuffer<uint> structured : register(t1);
+RWStructuredBuffer<uint> output : register(u0);
+[numthreads(1,1,1)] void main() {
+  uint a, b, c, d, e;
+  uint x = raw.Load(0, a);
+  uint y = raw.Load(4, b);
+  uint2 z = raw.Load2(0, c);
+  uint s = structured.Load(0, d);
+  uint t = structured.Load(1, e);
+  output[0]=x; output[1]=CheckAccessFullyMapped(a);
+  output[2]=y; output[3]=CheckAccessFullyMapped(b);
+  output[4]=z.x; output[5]=z.y; output[6]=CheckAccessFullyMapped(c);
+  output[7]=s; output[8]=CheckAccessFullyMapped(d);
+  output[9]=t; output[10]=CheckAccessFullyMapped(e);
+})";
+  Owned<ID3DBlob> shader, errors;
+  auto hr = compile(hlsl, std::strlen(hlsl), "buffer-feedback", nullptr, nullptr, "main", "cs_5_0",
+                    D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &shader.p, &errors.p);
+  if (errors.p) std::printf("%s\n", (const char *)errors.p->GetBufferPointer());
+  Check(hr);
+  auto disassemble = reinterpret_cast<pD3DDisassemble>(
+      GetProcAddress(GetModuleHandleA("d3dcompiler_47.dll"), "D3DDisassemble"));
+  if (!disassemble) throw std::runtime_error("disassembler unavailable");
+  Owned<ID3DBlob> assembly;
+  Check(disassemble(shader.p->GetBufferPointer(), shader.p->GetBufferSize(), 0, nullptr, &assembly.p));
+  auto text = static_cast<const char *>(assembly.p->GetBufferPointer());
+  std::printf("%s\n", text);
+  if (!std::strstr(text, "ld_raw_s") || !std::strstr(text, "ld_structured_s") ||
+      !std::strstr(text, "check_access_fully_mapped"))
+    throw std::runtime_error("feedback opcodes missing from compiled DXBC");
+  Owned<ID3D12Device> device;
+  Check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.p)));
+  Owned<ID3D12CommandQueue> queue;
+  D3D12_COMMAND_QUEUE_DESC qd = {};
+  Check(device.p->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue.p)));
+  Owned<ID3D12CommandAllocator> allocator;
+  Check(device.p->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator.p)));
+  Owned<ID3D12Fence> fence;
+  Check(device.p->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.p)));
+  Owned<ID3D12Resource> source, upload, output, readback;
+  auto source_desc = Buffer(131072);
+  Check(device.p->CreateReservedResource(&source_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&source.p)));
+  auto create = [&](Owned<ID3D12Resource> &resource, UINT64 size, D3D12_HEAP_TYPE type,
+                    D3D12_RESOURCE_STATES state, D3D12_RESOURCE_FLAGS flags) {
+    auto properties = Properties(type); auto desc = Buffer(size, flags);
+    Check(device.p->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr,
+                                            IID_PPV_ARGS(&resource.p)));
+  };
+  create(upload, 65536, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+  void *mapped = nullptr; Check(upload.p->Map(0, nullptr, &mapped)); std::memset(mapped, 0, 65536); upload.p->Unmap(0, nullptr);
+  create(output, 44, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  create(readback, 44, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
+  Owned<ID3D12Heap> tiles;
+  D3D12_HEAP_DESC hd = {}; hd.SizeInBytes = 65536; hd.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
+  hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+  Check(device.p->CreateHeap(&hd, IID_PPV_ARGS(&tiles.p)));
+  Owned<ID3D12DescriptorHeap> descriptors;
+  D3D12_DESCRIPTOR_HEAP_DESC dd = {}; dd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  dd.NumDescriptors = 3; dd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  Check(device.p->CreateDescriptorHeap(&dd, IID_PPV_ARGS(&descriptors.p)));
+  auto cpu = descriptors.p->GetCPUDescriptorHandleForHeapStart();
+  auto stride = device.p->GetDescriptorHandleIncrementSize(dd.Type);
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv = {}; srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+  srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  srv.Format = DXGI_FORMAT_R32_TYPELESS; srv.Buffer.FirstElement = 16383; srv.Buffer.NumElements = 2;
+  srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+  device.p->CreateShaderResourceView(source.p, &srv, cpu); cpu.ptr += stride;
+  srv.Format = DXGI_FORMAT_UNKNOWN; srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE; srv.Buffer.StructureByteStride = 4;
+  device.p->CreateShaderResourceView(source.p, &srv, cpu); cpu.ptr += stride;
+  D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {}; uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+  uav.Buffer.NumElements = 11; uav.Buffer.StructureByteStride = 4;
+  device.p->CreateUnorderedAccessView(output.p, nullptr, &uav, cpu);
+  D3D12_DESCRIPTOR_RANGE ranges[] = {{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, 0},
+                                    {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 2}};
+  D3D12_ROOT_PARAMETER parameter = {}; parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  parameter.DescriptorTable = {2, ranges};
+  D3D12_ROOT_SIGNATURE_DESC rd = {}; rd.NumParameters = 1; rd.pParameters = &parameter;
+  Owned<ID3DBlob> root_blob, root_error;
+  Check(D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob.p, &root_error.p));
+  Owned<ID3D12RootSignature> root;
+  Check(device.p->CreateRootSignature(0, root_blob.p->GetBufferPointer(), root_blob.p->GetBufferSize(), IID_PPV_ARGS(&root.p)));
+  Owned<ID3D12PipelineState> pipeline;
+  D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {}; pd.pRootSignature = root.p;
+  pd.CS = {shader.p->GetBufferPointer(), shader.p->GetBufferSize()};
+  Check(device.p->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pipeline.p)));
+  Owned<ID3D12GraphicsCommandList> list;
+  Check(device.p->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, pipeline.p, IID_PPV_ARGS(&list.p)));
+  Check(list.p->Close());
+  HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+  if (!event) throw std::runtime_error("event creation");
+  for (UINT phase = 0; phase < 4; ++phase) {
+    D3D12_TILED_RESOURCE_COORDINATE origin = {};
+    D3D12_TILE_REGION_SIZE region = {2, FALSE, 0, 0, 0};
+    D3D12_TILE_RANGE_FLAGS flags[] = {D3D12_TILE_RANGE_FLAG_NULL, D3D12_TILE_RANGE_FLAG_NULL};
+    flags[phase & 1] = D3D12_TILE_RANGE_FLAG_NONE;
+    UINT offsets[] = {0, 0}, counts[] = {1, 1};
+    queue.p->UpdateTileMappings(source.p, 1, &origin, &region, tiles.p, 2, flags, offsets, counts, D3D12_TILE_MAPPING_FLAG_NONE);
+    Check(allocator.p->Reset()); Check(list.p->Reset(allocator.p, pipeline.p));
+    Transition(list.p, source.p, phase ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_COMMON,
+               D3D12_RESOURCE_STATE_COPY_DEST);
+    list.p->CopyBufferRegion(source.p, UINT64(phase & 1) * 65536, upload.p, 0, 65536);
+    Transition(list.p, source.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (phase) Transition(list.p, output.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    list.p->SetComputeRootSignature(root.p);
+    ID3D12DescriptorHeap *heaps[] = {descriptors.p}; list.p->SetDescriptorHeaps(1, heaps);
+    list.p->SetComputeRootDescriptorTable(0, descriptors.p->GetGPUDescriptorHandleForHeapStart());
+    list.p->Dispatch(1, 1, 1);
+    Transition(list.p, output.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    list.p->CopyBufferRegion(readback.p, 0, output.p, 0, 44); Check(list.p->Close());
+    ID3D12CommandList *lists[] = {list.p}; queue.p->ExecuteCommandLists(1, lists);
+    Check(queue.p->Signal(fence.p, phase + 1)); Check(fence.p->SetEventOnCompletion(phase + 1, event));
+    if (WaitForSingleObject(event, 30000) != WAIT_OBJECT_0) { CloseHandle(event); throw std::runtime_error("GPU timeout"); }
+    Check(readback.p->Map(0, nullptr, &mapped));
+    auto actual = static_cast<const UINT *>(mapped);
+    bool passed = true;
+    for (UINT i = 0; i < 11; ++i) {
+      UINT expected = 0;
+      if (i == 1 || i == 8) expected = (phase & 1) == 0;
+      if (i == 3 || i == 10) expected = phase & 1;
+      if (actual[i] != expected) { std::printf("phase %u output %u expected %u actual %u\n", phase, i, expected, actual[i]); passed = false; }
+    }
+    readback.p->Unmap(0, nullptr);
+    if (!passed) { CloseHandle(event); return 1; }
+  }
+  CloseHandle(event);
+  std::puts("BUFFER_FEEDBACK raw/structured zero-payload, boundary and alternating remap PASS");
+  return 0;
+}
+}
+int main() {
+  auto library = LoadLibraryA("d3dcompiler_47.dll");
+  if (!library) return 77;
+  auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(library, "D3DCompile"));
+  int result = 1;
+  try { if (compile) result = Run(compile); } catch (const std::exception &e) { std::puts(e.what()); }
+  FreeLibrary(library); return result;
+}
