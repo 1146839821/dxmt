@@ -17,6 +17,8 @@ static bool root_updates_fixture = false;
 static bool deployed_fixture = false;
 static bool root_buffers_fixture = false;
 static bool implicit_fixture = false;
+static bool varying_clamp_fixture = false;
+static bool directional_grad_fixture = false;
 static bool implicit_bias_fixture = false;
 static bool cube_fixture = false, cube_array_fixture = false;
 static bool vertex_sampling_fixture = false;
@@ -255,7 +257,8 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     ordinary_samplers.reset(raw);
     handle = ordinary_samplers->GetCPUDescriptorHandleForHeapStart();
     const auto stride = device->GetDescriptorHandleIncrementSize(hd.Type);
-    D3D12_SAMPLER_DESC sd = {}; sd.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    D3D12_SAMPLER_DESC sd = {}; sd.Filter = deployed_fixture ? D3D12_FILTER_ANISOTROPIC : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sd.MaxAnisotropy = deployed_fixture ? 16 : 1;
     sd.AddressU = sd.AddressV = sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP; sd.MaxLOD = D3D12_FLOAT32_MAX;
     sd.MipLODBias = implicit_fixture ? 1 : 0;
     for (unsigned i = 0; i < 2; ++i) { handle.ptr += stride; device->CreateSampler(&sd, handle); }
@@ -307,9 +310,9 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     list->DrawInstanced(3, 1, 0, 0);
   }
   if (!static_sampler) {
-    wchar_t selected[32768];
+    wchar_t selected[32768] = {};
     const auto length = GetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", selected, 32768);
-    if (!length || length >= 32768 || !SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr)) return false;
+    if ((!length && !deployed_fixture) || length >= 32768 || !SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr)) return false;
     ID3D12DescriptorHeap *ordinary[] = {ordinary_heap.get(), ordinary_samplers.get()};
     list->SetDescriptorHeaps(2, ordinary);
     list->SetGraphicsRootDescriptorTable(0, ordinary_heap->GetGPUDescriptorHandleForHeapStart());
@@ -320,7 +323,7 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     scissor = {2, 0, 4, 4}; list->RSSetScissorRects(1, &scissor);
     if (indexed) list->DrawIndexedInstanced(3, 1, 0, 0, 0);
     else list->DrawInstanced(3, 1, 0, 0);
-    if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", selected)) return false;
+    if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", deployed_fixture ? nullptr : selected)) return false;
   }
   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET; barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
   list->ResourceBarrier(1, &barrier);
@@ -337,7 +340,7 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
     if (pass->type != dxmt::EncoderType::Render) continue;
     auto *render = static_cast<dxmt::RenderEncoderData *>(pass);
     if (!render->minmax_draws.empty()) {
-      if (private_draw || render->minmax_draws.size() != 1) return false;
+      if (private_draw || render->minmax_draws.size() != (deployed_fixture && !static_sampler ? 2u : 1u)) return false;
       private_draw = render->minmax_draws[0].get();
     }
     for (auto *node = reinterpret_cast<wmtcmd_base *>(&render->cmd_head); node;
@@ -413,6 +416,8 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
         }
       }
       const bool untouched = empty && (static_sampler || x < 2);
+      if (varying_clamp_fixture && !(x & 1)) expected_r = expected_g = 0;
+      if (directional_grad_fixture && !static_sampler && x >= 2) expected_r = expected_g = 128;
       unsigned blue = !root_updates_fixture ? 0 : !static_sampler && x >= 2 ? (updates ? 31 : 130) :
           updates ? (submission == 1 ? 38 : 42) : 130;
       if (vertex_sampling_fixture) blue = !static_sampler && x >= 2 ? 128 : static_sampler ? 184 : changed ? 240 : 16;
@@ -645,6 +650,12 @@ int wmain(int argc, wchar_t **argv) {
       implicit_bias_fixture = !std::wcscmp(option, L"--cube-bias") || !std::wcscmp(option, L"--cube-array-bias");
     } else if (argc == 5 && !std::wcscmp(option, L"--deployed")) deployed_fixture = true;
     else if (argc == 5) { /* Existing optional sampling-VS path. */ }
+    else if (!std::wcscmp(option, L"--deployed-directional-grad"))
+      deployed_fixture = implicit_fixture = implicit_bias_fixture = directional_grad_fixture = true;
+    else if (!std::wcscmp(option, L"--deployed-varying-clamp"))
+      deployed_fixture = implicit_fixture = varying_clamp_fixture = true;
+    else if (!std::wcscmp(option, L"--varying-clamp"))
+      implicit_fixture = varying_clamp_fixture = true;
     else if (!std::wcscmp(option, L"--implicit-sample") ||
         !std::wcscmp(option, L"--grad-bias")) implicit_fixture = true;
     else if (!std::wcscmp(option, L"--implicit-bias") || !std::wcscmp(option, L"--level-bias"))
@@ -702,7 +713,6 @@ int wmain(int argc, wchar_t **argv) {
   auto *native = static_cast<dxmt::MTLD3D12Device *>(device.get());
   auto metal = native->GetMTLDevice();
   for (unsigned mode = 0; mode < 4; ++mode) {
-    if (deployed_fixture && mode < 2) continue;
     // ALL and stage-specific duplicate registers are invalid root signatures.
     if (vertex_shared_fixture && !(mode & 1)) continue;
     const bool static_sampler = mode & 2;

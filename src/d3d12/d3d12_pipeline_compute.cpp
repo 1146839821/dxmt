@@ -180,7 +180,24 @@ public:
         return E_FAIL;
       }
 
-      return CreateNativeComputePSO(cs_func, pso);
+      const auto native_hr = CreateNativeComputePSO(cs_func, pso);
+      if (FAILED(native_hr)) return native_hr;
+      if (classification.uses_texture_sampling && typed_origin_compiler_directory.empty() &&
+          env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY").empty() &&
+          env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY").empty()) {
+        std::wstring directory;
+        const auto selection = SelectD3D12CompilerDirectory(directory);
+        if (FAILED(selection)) return selection;
+        if (selection == S_OK) {
+          const D3D12MinMaxComputeVariant *variant = nullptr;
+          const auto hr = GetMinMaxVariant(directory.c_str(), &variant);
+          if (hr == S_OK && variant) minmax_compiler_directory = std::move(directory);
+          else if (hr != E_NOTIMPL) return FAILED(hr) ? hr : E_FAIL;
+          // Unsupported ordinary consumers retain native MSC; sampler guards
+          // still reject reduction metadata rather than using a surrogate.
+        }
+      }
+      return S_OK;
     }
 
     D3D12AirconvError sm50_err;

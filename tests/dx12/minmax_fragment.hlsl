@@ -24,7 +24,17 @@ float4 pixel(float4 position : SV_Position) : SV_Target0
 {
 #if defined(USE_IMPLICIT)
     float2 uv = position.xy * 0.25;
-#if defined(USE_LEVEL)
+#if defined(USE_DIRECTIONAL_GRAD)
+    // A 16:1 footprint: scalar major-axis LOD selects the distinct upper mip,
+    // whereas ANISO=16 keeps the symmetric lower-mip footprint.
+    float first = input_texture.SampleGrad(first_sampler, float2(0.5, 0.5), float2(2, 0), float2(0, 0.125)).x;
+    float second = input_texture.SampleGrad(second_sampler, float2(0.5, 0.5), float2(2, 0), float2(0, 0.125)).x;
+#elif defined(USE_VARYING_CLAMP)
+    // Adjacent lanes in each quad cross the two-mip view's upper boundary.
+    float clamp_lod = (uint(position.x) & 1) ? 0.0 : 3.0;
+    float first = input_texture.Sample(first_sampler, uv, int2(0, 0), clamp_lod).x;
+    float second = input_texture.Sample(second_sampler, uv, int2(0, 0), clamp_lod).x;
+#elif defined(USE_LEVEL)
     float first = input_texture.SampleLevel(first_sampler, uv, 0).x;
     float second = input_texture.SampleLevel(second_sampler, uv, 0).x;
 #elif defined(USE_EXPLICIT_GRAD)

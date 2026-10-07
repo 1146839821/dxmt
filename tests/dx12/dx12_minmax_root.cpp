@@ -63,6 +63,18 @@ static bool Run(ID3D12Device *device, bool legacy, bool static_samplers, bool un
   const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *converted = nullptr;
   if (FAILED(decoded->GetRootSignatureDescAtVersion(D3D_ROOT_SIGNATURE_VERSION_1_1, &converted))) return false;
   auto application = converted->Desc_1_1;
+  for (const auto direct_flag : {D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED,
+      D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED}) {
+    auto direct = application;
+    direct.Flags = static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(direct.Flags | direct_flag);
+    dxmt::D3D12MinMaxRoot rejected;
+    rejected.pair_count = 7;
+    rejected.layout.bytecode = {1, 2, 3};
+    std::string diagnostics;
+    if (dxmt::PrepareD3D12MinMaxRoot(direct, 2, rejected, diagnostics) != E_NOTIMPL ||
+        rejected.pair_count != 7 || rejected.layout.bytecode != std::vector<uint8_t>({1, 2, 3}) ||
+        diagnostics.empty()) return false;
+  }
   ID3D12RootSignature *application_root_raw = nullptr;
   if (FAILED(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
       IID_PPV_ARGS(&application_root_raw)))) return false;

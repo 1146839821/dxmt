@@ -262,6 +262,13 @@ dx12_experimental_caps = executable('dx12_experimental_caps', 'dx12_experimental
   dependencies: [ d3d12_dep ],
 )
 
+dxc_factory_notimpl = shared_library('dxc_factory_notimpl', 'dxc_factory_notimpl.cpp',
+  name_prefix: '',
+  include_directories: [ dxmt_include_path ],
+  vs_module_defs: 'dxc_factory_notimpl.def',
+  build_by_default: false,
+)
+
 dx12_msc_probe = executable('dx12_msc_probe', 'dx12_msc_probe.cpp',
   include_directories: [ include_directories('../../src/winemetal') ],
   dependencies: [ d3d12_dep ],

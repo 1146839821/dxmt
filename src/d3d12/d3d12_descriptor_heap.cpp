@@ -18,6 +18,7 @@
 
 #include "d3d12_device.hpp"
 #include "d3d12_descriptor_heap.hpp"
+#include "d3d12_compiler_root.hpp"
 #include "d3d12_pageable.hpp"
 #include "com/com_pointer.hpp"
 #include "dxmt_format.hpp"
@@ -1017,11 +1018,15 @@ public:
                                reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM;
     uint32_t flags = 0;
     if (air_reduction) {
-      if ((env::getEnvVar("DXMT_ENABLE_AIR_MINMAX_DYNAMIC") != "1" &&
-           env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY").empty()) ||
-          D3D12_DECODE_IS_ANISOTROPIC_FILTER(pDesc->Filter)) {
+      if (D3D12_DECODE_IS_ANISOTROPIC_FILTER(pDesc->Filter)) {
         invalidate();
         return E_NOTIMPL;
+      }
+      if (env::getEnvVar("DXMT_ENABLE_AIR_MINMAX_DYNAMIC") != "1" &&
+          env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY").empty()) {
+        std::wstring directory;
+        const auto selection = SelectD3D12CompilerDirectory(directory);
+        if (selection != S_OK) { invalidate(); return FAILED(selection) ? selection : E_NOTIMPL; }
       }
       if (!std::isfinite(pDesc->MinLOD) || !std::isfinite(pDesc->MaxLOD)) {
         invalidate();

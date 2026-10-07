@@ -21,6 +21,12 @@ struct ReleaseModule {
 };
 using OwnedModule = std::unique_ptr<HINSTANCE__, ReleaseModule>;
 
+// E_NOTIMPL is reserved for our semantic qualification boundary. A selected
+// DXC implementation failing a COM operation must not select the native PSO.
+HRESULT CompilerOperationResult(HRESULT hr) {
+  return hr == E_NOTIMPL ? E_FAIL : hr;
+}
+
 template <typename T>
 HRESULT Create(DxcCreateInstanceProc factory, REFCLSID clsid, const wchar_t *iid_text, OwnedCOM<T> &output) {
   IID iid;
@@ -29,27 +35,27 @@ HRESULT Create(DxcCreateInstanceProc factory, REFCLSID clsid, const wchar_t *iid
   T *object = nullptr;
   hr = factory(clsid, iid, reinterpret_cast<void **>(&object));
   output.reset(object);
-  return FAILED(hr) ? hr : object ? S_OK : E_FAIL;
+  return FAILED(hr) ? CompilerOperationResult(hr) : object ? S_OK : E_FAIL;
 }
 
 HRESULT Result(HRESULT call_hr, IDxcOperationResult *raw, OwnedCOM<IDxcBlob> &blob, std::string &diagnostics) {
   OwnedCOM<IDxcOperationResult> operation(raw);
-  if (FAILED(call_hr)) return call_hr;
+  if (FAILED(call_hr)) return CompilerOperationResult(call_hr);
   if (!operation) return E_FAIL;
   IDxcBlobEncoding *errors_raw = nullptr;
   HRESULT hr = operation->GetErrorBuffer(&errors_raw);
   OwnedCOM<IDxcBlobEncoding> errors(errors_raw);
-  if (FAILED(hr)) return hr;
+  if (FAILED(hr)) return CompilerOperationResult(hr);
   if (errors && errors->GetBufferSize())
     diagnostics.append(static_cast<const char *>(errors->GetBufferPointer()), errors->GetBufferSize());
   HRESULT status = E_FAIL;
   hr = operation->GetStatus(&status);
-  if (FAILED(hr)) return hr;
-  if (FAILED(status)) return status;
+  if (FAILED(hr)) return CompilerOperationResult(hr);
+  if (FAILED(status)) return CompilerOperationResult(status);
   IDxcBlob *result = nullptr;
   hr = operation->GetResult(&result);
   blob.reset(result);
-  return FAILED(hr) ? hr : result ? S_OK : E_FAIL;
+  return FAILED(hr) ? CompilerOperationResult(hr) : result ? S_OK : E_FAIL;
 }
 
 HRESULT Validate(IDxcValidator *validator, IDxcBlob *input, OwnedCOM<IDxcBlob> &output, std::string &diagnostics) {
@@ -82,21 +88,22 @@ HRESULT LoweringResult(int result) {
 HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<IDxcBlob> &program,
     uint32_t maximum_minor, std::vector<uint8_t> *embedded_root = nullptr, uint32_t program_kind = 5) {
   HRESULT hr = reflection->Load(blob);
-  if (FAILED(hr)) return hr;
+  if (FAILED(hr)) return CompilerOperationResult(hr);
   UINT32 count = 0;
   hr = reflection->GetPartCount(&count);
-  if (FAILED(hr)) return hr;
+  if (FAILED(hr)) return CompilerOperationResult(hr);
   for (UINT32 i = 0; i < count; ++i) {
     UINT32 kind = 0;
     hr = reflection->GetPartKind(i, &kind);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) return CompilerOperationResult(hr);
     switch (kind) {
     case DXC_PART_ROOT_SIGNATURE: {
       if (!embedded_root || !embedded_root->empty()) return E_NOTIMPL;
       IDxcBlob *raw = nullptr;
       hr = reflection->GetPartContent(i, &raw);
       OwnedCOM<IDxcBlob> root(raw);
-      if (FAILED(hr) || !root || !root->GetBufferSize()) return FAILED(hr) ? hr : E_INVALIDARG;
+      if (FAILED(hr) || !root || !root->GetBufferSize())
+        return FAILED(hr) ? CompilerOperationResult(hr) : E_INVALIDARG;
       const auto *bytes = static_cast<const uint8_t *>(root->GetBufferPointer());
       embedded_root->assign(bytes, bytes + root->GetBufferSize());
       break;
@@ -107,7 +114,7 @@ HRESULT Inspect(IDxcContainerReflection *reflection, IDxcBlob *blob, OwnedCOM<ID
         IDxcBlob *raw = nullptr;
         hr = reflection->GetPartContent(i, &raw);
         program.reset(raw);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) return CompilerOperationResult(hr);
         if (!program || program->GetBufferSize() < 24)
           return E_NOTIMPL;
         const auto version = Word(static_cast<const uint8_t *>(program->GetBufferPointer()));
@@ -254,15 +261,19 @@ static HRESULT PrepareShaderInternal(
   if (directory.size() < 3 || directory[1] != ':' ||
       !((directory[0] >= L'A' && directory[0] <= L'Z') || (directory[0] >= L'a' && directory[0] <= L'z')) ||
       (directory[2] != L'/' && directory[2] != L'\\')) return E_INVALIDARG;
+  if (GetFileAttributesW((directory + L"/dxcompiler.dll").c_str()) == INVALID_FILE_ATTRIBUTES ||
+      GetFileAttributesW((directory + L"/dxil.dll").c_str()) == INVALID_FILE_ATTRIBUTES) {
+    diagnostics = "selected DXC compiler/validator DLL absent"; return E_NOTIMPL;
+  }
   OwnedModule compiler_module(LoadLibraryExW((directory + L"/dxcompiler.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH));
   OwnedModule validator_module(LoadLibraryExW((directory + L"/dxil.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH));
   if (!compiler_module || !validator_module) {
-    diagnostics = "selected DXC compiler/validator DLL unavailable"; return E_NOTIMPL;
+    diagnostics = "selected DXC compiler/validator DLL failed to load"; return E_FAIL;
   }
   auto factory = reinterpret_cast<DxcCreateInstanceProc>(GetProcAddress(compiler_module.get(), "DxcCreateInstance"));
   auto validator_factory = reinterpret_cast<DxcCreateInstanceProc>(GetProcAddress(validator_module.get(), "DxcCreateInstance"));
   if (!factory || !validator_factory) {
-    diagnostics = "selected DXC factory unavailable"; return E_NOTIMPL;
+    diagnostics = "selected DXC factory unavailable"; return E_FAIL;
   }
   // Older winemetal runtimes do not export this optional preparation boundary.
   // Resolve it explicitly instead of invoking Wine's missing-import stub.
@@ -282,7 +293,7 @@ static HRESULT PrepareShaderInternal(
   IDxcBlobEncoding *raw = nullptr;
   hr = utils->CreateBlob(shader.pShaderBytecode, static_cast<UINT32>(shader.BytecodeLength), 0, &raw);
   OwnedCOM<IDxcBlobEncoding> input(raw);
-  if (FAILED(hr)) return hr;
+  if (FAILED(hr)) return CompilerOperationResult(hr);
   if (!input) return E_FAIL;
   OwnedCOM<IDxcBlob> validated_input;
   hr = Validate(validator.get(), input.get(), validated_input, diagnostics);
@@ -333,7 +344,7 @@ static HRESULT PrepareShaderInternal(
   raw = nullptr;
   hr = utils->CreateBlob(ir.data(), static_cast<UINT32>(ir.size()), DXC_CP_UTF8, &raw);
   OwnedCOM<IDxcBlobEncoding> ir_blob(raw);
-  if (FAILED(hr)) return hr;
+  if (FAILED(hr)) return CompilerOperationResult(hr);
   if (!ir_blob) return E_FAIL;
   IDxcOperationResult *operation = nullptr;
   hr = assembler->AssembleToContainer(ir_blob.get(), &operation);

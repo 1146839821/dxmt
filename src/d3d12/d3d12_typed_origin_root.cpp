@@ -286,6 +286,11 @@ HRESULT PrepareD3D12MinMaxRoot(const D3D12_ROOT_SIGNATURE_DESC1 &application, ui
     D3D12MinMaxRoot &prepared, std::string &diagnostics) {
   diagnostics.clear();
   if (!pair_count || pair_count > 64) return E_INVALIDARG;
+  if (application.Flags & (D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+      D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED)) {
+    diagnostics = "MinMax direct-heap consumers are unsupported";
+    return E_NOTIMPL;
+  }
   try {
     D3D12_DESCRIPTOR_RANGE1 point = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, pair_count, 0, DXMT_MSC_MINMAX_SPACE,
         D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 0};

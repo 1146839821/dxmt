@@ -188,7 +188,6 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
   };
   std::vector<SampleSite> samples;
   std::vector<Pair> pairs;
-  bool has_gradient = false, has_mapping_check = false;
   std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, uint32_t> pair_indices;
   auto comparison_consumer = [&](CallInst *call) {
     if (!call || !call->getCalledFunction()) return false;
@@ -221,7 +220,6 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     auto *call = dyn_cast<CallInst>(&instruction);
     if (!call || !call->getCalledFunction()) continue;
     auto name = call->getCalledFunction()->getName();
-    has_mapping_check |= name.startswith("dx.op.checkAccessFullyMapped");
     if (name.startswith("dx.op.createHandleFrom") && call->getCalledFunction() != modern_create)
       return reject("modern/dynamic handle provenance requires further lowering");
     if (name.startswith("dx.op.sample") && !IsQualifiedSampleName(name) && !comparison_consumer(call))
@@ -266,7 +264,6 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
           dyn_cast_or_null<MDString>(model->getOperand(0)->getOperand(0)) : nullptr;
       if (!stage || stage->getString() != "ps") return reject("implicit reduction sampling requires a pixel shader");
     }
-    has_gradient |= sample_opcode != SampleLevel;
     if (call->arg_size() != SampleArgumentCount(name) || samples.size() >= 1024)
       return reject("invalid or oversized sampling module");
     auto *result = dyn_cast<StructType>(call->getType());
@@ -398,6 +395,10 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
   auto dimensions = module.getOrInsertFunction("dx.op.getDimensions", dimensions_type, i32, handle, i32);
   auto binary = module.getOrInsertFunction("dx.op.binary.f32", types.getFloatTy(), i32, types.getFloatTy(), types.getFloatTy());
   for (auto [sample, pair, spatial_dimensions, cube] : samples) {
+    // Preserve the application operation for the ordinary branch. In particular,
+    // SampleGrad's directional footprint cannot be reconstructed from scalar LOD.
+    auto *ordinary_function = sample->getCalledFunction();
+    SmallVector<Value *, 17> ordinary_arguments(sample->args());
     const auto opcode = SampleOpcode(sample->getCalledFunction()->getName());
     const bool implicit = opcode == Sample || opcode == SampleBias;
     const bool gradient = implicit || opcode == SampleGrad;
@@ -486,10 +487,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     if (instruction_bias) original_lod = b.CreateFAdd(original_lod, instruction_bias, "dxmt.sample.biased.lod");
     b.CreateCondBr(b.CreateICmpNE(b.CreateAnd(flags, b.getInt32(DXMT_MSC_MINMAX_ENABLED)), b.getInt32(0)), reduction, ordinary);
     b.SetInsertPoint(ordinary);
-    auto *ordinary_sampler = make_handle(b, 3, next_id[3] + pairs.size() + pair, pair_count + pair_offset + pair);
     auto as_float = [&](Value *value) { return b.CreateBitCast(value, b.getFloatTy()); };
-    auto *minimum_lod = as_float(b.CreateExtractValue(first, 1));
-    auto *maximum_lod = as_float(b.CreateExtractValue(first, 2));
     auto *resource_clamp = as_float(b.CreateExtractValue(first, 3));
     auto merge_clamp = [&](Value *resource) -> Value * {
       if (!instruction_clamp || isa<UndefValue>(instruction_clamp)) return resource;
@@ -499,22 +497,20 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     };
     resource_clamp = merge_clamp(resource_clamp);
     auto *component_defaults = b.CreateExtractValue(second, 0);
-    auto *sampler_lod = b.CreateCall(binary, {b.getInt32(FMax), minimum_lod,
-        b.CreateCall(binary, {b.getInt32(FMin), maximum_lod, original_lod})});
-    auto *lod = b.CreateCall(binary, {b.getInt32(FMax), sampler_lod, resource_clamp});
     auto *dim0 = b.CreateCall(dimensions, {b.getInt32(GetDimensions), sample->getArgOperand(1), b.getInt32(0)});
     auto *last_mip = b.CreateUIToFP(b.CreateSub(b.CreateExtractValue(dim0, 3), b.getInt32(1)), b.getFloatTy());
     auto *ordinary_sample = BasicBlock::Create(context, "dxmt.ordinary.sample", function, merge);
     auto *ordinary_empty = BasicBlock::Create(context, "dxmt.ordinary.empty", function, merge);
     auto *ordinary_done = BasicBlock::Create(context, "dxmt.ordinary.result", function, merge);
+    // Original handles retain MSC descriptor bias, native sampler clamps and
+    // texture-view metadata. Applying the private state again would double bias.
+    // Instruction clamp may vary within a quad. Execute implicit sampling before
+    // its empty-view branch so that the injected branch cannot invalidate derivatives.
+    auto *ordinary_call = b.CreateCall(ordinary_function, ordinary_arguments);
     b.CreateCondBr(b.CreateFCmpOGT(resource_clamp, last_mip), ordinary_empty, ordinary_sample);
     b.SetInsertPoint(ordinary_sample);
-    sample->removeFromParent();
-    b.Insert(sample);
-    sample->setArgOperand(2, ordinary_sampler);
-    sample->setArgOperand(10, lod);
     std::array<Value *, 4> ordinary_values;
-    for (unsigned i = 0; i < 4; ++i) ordinary_values[i] = b.CreateExtractValue(sample, i);
+    for (unsigned i = 0; i < 4; ++i) ordinary_values[i] = b.CreateExtractValue(ordinary_call, i);
     b.CreateBr(ordinary_done);
     b.SetInsertPoint(ordinary_empty);
     std::array<Value *, 4> default_values;
@@ -557,6 +553,7 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
       extract->replaceAllUsesWith(values[*extract->idx_begin()]);
       extract->eraseFromParent();
     }
+    sample->eraseFromParent();
     if (!LowerReductionSampleLevel(*lowered, state, error, spatial_dimensions, cube)) return false;
     BasicBlock *reduction_end = nullptr;
     for (auto *predecessor : predecessors(merge)) if (predecessor != ordinary_done) {
@@ -571,31 +568,8 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
   for (const auto name : {"dx.op.sampleGrad.f32", "dx.op.sample.f32", "dx.op.sampleBias.f32"})
     if (auto *normalized = module.getFunction(name))
       if (normalized->isDeclaration() && normalized->use_empty()) normalized->eraseFromParent();
-  // No native clamped sampler operation remains. DXC's TiledResources flag
-  // reflects LOD-clamp or CheckAccessFullyMapped use, not arithmetic clamps.
-  // Preserve it if a mapping check remains; keep all unrelated shader flags.
-  if (has_gradient && !has_mapping_check) for (unsigned index = 0; index < entry_points->getNumOperands(); ++index) {
-    auto *entry = entry_points->getOperand(index);
-    if (entry->getNumOperands() < 5) continue;
-    auto *properties = dyn_cast_or_null<MDNode>(entry->getOperand(4));
-    if (!properties) continue;
-    if (properties->getNumOperands() % 2) return reject("invalid entry property pairs");
-    std::vector<Metadata *> properties_copy;
-    for (auto &operand : properties->operands()) properties_copy.push_back(operand.get());
-    for (unsigned property = 0; property < properties_copy.size(); property += 2) {
-      uint32_t tag;
-      if (!Word(properties_copy[property], tag)) return reject("invalid entry property tag");
-      if (tag != 0) continue;
-      auto *flags = mdconst::dyn_extract_or_null<ConstantInt>(properties_copy[property + 1]);
-      if (!flags || !flags->getType()->isIntegerTy(64)) return reject("invalid shader flags");
-      constexpr uint64_t TiledResources = uint64_t(1) << 12;
-      properties_copy[property + 1] = ConstantAsMetadata::get(types.getInt64(flags->getZExtValue() & ~TiledResources));
-    }
-    std::vector<Metadata *> entry_copy;
-    for (auto &operand : entry->operands()) entry_copy.push_back(operand.get());
-    entry_copy[4] = MDNode::getDistinct(context, properties_copy);
-    entry_points->setOperand(index, MDNode::getDistinct(context, entry_copy));
-  }
+  // Ordinary calls still carry native LOD clamps. Preserve their shader flags,
+  // including TiledResources, even without a CheckAccessFullyMapped consumer.
   raw_string_ostream diagnostics(error);
   if (verifyModule(module, &diagnostics)) return false;
   std::vector<dxmt_msc_minmax_binding> result;

@@ -25,12 +25,14 @@ int wmain(int argc, wchar_t **argv) {
   if ((argc != 4 && argc != 5) || (std::wcscmp(argv[2], L"1") && std::wcscmp(argv[2], L"2"))) return 1;
   const bool typed_rejection = argc == 5 && std::wcscmp(argv[4], L"--typed-rejection") == 0;
   const bool deployed = argc == 5 && std::wcscmp(argv[4], L"--deployed") == 0;
+  const bool native_direct = argc == 5 && std::wcscmp(argv[4], L"--native-direct-heap") == 0;
   const bool gpu_count = argc == 5 && std::wcscmp(argv[4], L"--gpu-count") == 0;
   const bool root_updates = gpu_count || (argc == 5 && std::wcscmp(argv[4], L"--root-updates") == 0);
-  if (argc == 5 && !typed_rejection && !root_updates && !deployed) return 1;
+  if (argc == 5 && !typed_rejection && !root_updates && !deployed && !native_direct) return 1;
+  if (native_direct && argv[2][0] != L'2') return 1;
   if (root_updates && argv[2][0] != L'2') return 1;
   const unsigned pairs = argv[2][0] - L'0';
-  if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", deployed ? nullptr : argv[3])) return 1;
+  if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", deployed || native_direct ? nullptr : argv[3])) return 1;
   SetEnvironmentVariableW(L"DXMT_ENABLE_AIR_MINMAX", nullptr);
   SetEnvironmentVariableW(L"DXMT_ENABLE_AIR_MINMAX_DYNAMIC", nullptr);
   SetEnvironmentVariableW(L"DXMT_TYPED_ORIGIN_DXC_DIRECTORY", nullptr);
@@ -123,7 +125,7 @@ int wmain(int argc, wchar_t **argv) {
   if (!Check(upload_list->Close(), "upload close") || !complete(upload_list.get(), 1)) return 1;
   UINT64 serial = 1;
   for (unsigned mode = 0; mode < 11; ++mode) {
-    if (deployed && mode < 6) continue; // Only reduction roots select at PSO creation.
+    if (native_direct && mode) continue;
     std::printf("MINMAX_CASE mode=%u deployed=%u\n", mode, unsigned(deployed));
     if (root_updates && mode != 0) continue;
     if (typed_rejection && mode != 0 && mode != 4) continue;
@@ -166,6 +168,9 @@ int wmain(int argc, wchar_t **argv) {
     }
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC rs = {}; rs.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     rs.Desc_1_1 = {use_static ? 1u : 2u, parameters, use_static ? 2u : 0u, use_static ? statics : nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    if (native_direct) rs.Desc_1_1.Flags = static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(
+        D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+        D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED);
     if (root_updates) rs.Desc_1_1.NumParameters = 6;
     D3D12_DESCRIPTOR_RANGE old_ranges[3] = {};
     D3D12_ROOT_PARAMETER old_parameters[2] = {};
@@ -214,6 +219,12 @@ int wmain(int argc, wchar_t **argv) {
     ID3D12PipelineState *raw_pso = nullptr;
     if (!Check(device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&raw_pso)), "pso")) return 1;
     OwnedCOM<ID3D12PipelineState> pso(raw_pso);
+    if (native_direct) {
+      auto *native = static_cast<dxmt::MTLD3D12ComputePipelineState *>(pso.get());
+      const dxmt::D3D12MinMaxComputeVariant *unsupported = nullptr;
+      if (!native->minmax_compiler_directory.empty() ||
+          native->GetMinMaxVariant(argv[3], &unsupported) != E_NOTIMPL || unsupported) return 1;
+    }
     if (mode >= 6) {
       auto *native = static_cast<dxmt::MTLD3D12ComputePipelineState *>(pso.get());
       const dxmt::D3D12TypedOriginComputeVariant *typed = nullptr;
@@ -255,9 +266,11 @@ int wmain(int argc, wchar_t **argv) {
       if (use_static) return;
       auto scpu = samplers->GetCPUDescriptorHandleForHeapStart();
       scpu.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-      auto desc = sd; desc.Filter = first; device->CreateSampler(&desc, scpu);
+      auto desc = sd; desc.Filter = native_direct ? D3D12_FILTER_MIN_MAG_MIP_LINEAR : first;
+      desc.MaxAnisotropy = deployed ? 16 : 1;
+      device->CreateSampler(&desc, scpu);
       scpu.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-      desc.Filter = second; device->CreateSampler(&desc, scpu);
+      desc.Filter = native_direct ? D3D12_FILTER_MIN_MAG_MIP_LINEAR : second; device->CreateSampler(&desc, scpu);
     };
     set_samplers(D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR);
     if (root_updates) {
@@ -492,11 +505,12 @@ int wmain(int argc, wchar_t **argv) {
     for (auto *encoder = native_list->entry; encoder; encoder = encoder->next)
       if (encoder->type == dxmt::EncoderType::Compute) {
         auto *compute = static_cast<dxmt::ComputeEncoderData *>(encoder);
+        if (native_direct) { if (!compute->minmax_dispatches.empty()) return 1; continue; }
         if (compute->minmax_dispatches.size() != 1 || !compute->pending_descriptor_uses.empty() ||
             !compute->pending_sampler_uses.empty()) return 1;
         recorded = compute->minmax_dispatches[0].get();
       }
-    if (!recorded || recorded->variant->bindings.size() != pairs) return 1;
+    if (!native_direct && (!recorded || recorded->variant->bindings.size() != pairs)) return 1;
     if (use_static) {
       if (recorded->static_samplers.size() != 2) return 1;
       for (unsigned i = 0; i < 2; ++i)
@@ -521,7 +535,7 @@ int wmain(int argc, wchar_t **argv) {
       }
       std::puts("MINMAX_TYPED_REJECTION live submission PASS (no invalid GPU dispatch)"); continue;
     }
-    for (const auto &table : recorded->tables)
+    if (recorded) for (const auto &table : recorded->tables)
       for (const auto &slot : table.slots) if (slot.populated) {
         const bool live = legacy || (table.sampler ? (mode & 2) : (table.slots.size() > 2 && &slot == &table.slots[2] && texture_live));
         if (slot.live != live) return 1;
@@ -530,7 +544,8 @@ int wmain(int argc, wchar_t **argv) {
       root.reset(); pso.reset(); // Closed commands and the private dispatch own both.
     }
     for (unsigned iteration = 0; iteration < 3; ++iteration) {
-      const D3D12_FILTER filters[] = {D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR, D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR, D3D12_FILTER_MIN_MAG_MIP_LINEAR};
+      const D3D12_FILTER filters[] = {D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR, D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR,
+          deployed ? D3D12_FILTER_ANISOTROPIC : D3D12_FILTER_MIN_MAG_MIP_LINEAR};
       set_samplers(filters[iteration]);
       if (texture_live) {
         srv.Texture2D.ResourceMinLODClamp = iteration == 1 ? 1.1f : 0;
@@ -540,9 +555,9 @@ int wmain(int argc, wchar_t **argv) {
       if (!Check(readback->Map(0, nullptr, &mapped), "map")) return 1;
       UINT values[4]; std::memcpy(values, mapped, sizeof(values)); readback->Unmap(0, nullptr);
       const bool empty = texture_live && iteration == 1;
-      const UINT first = empty ? 0 : use_static ? static_first : (legacy || (mode & 2)) ?
+      const UINT first = native_direct ? 128 : empty ? 0 : use_static ? static_first : (legacy || (mode & 2)) ?
           (iteration == 0 ? 16 : iteration == 1 ? 240 : 128) : 16;
-      const UINT second = empty ? 0 : use_static ? static_second : 240u;
+      const UINT second = native_direct ? 128 : empty ? 0 : use_static ? static_second : 240u;
       for (unsigned i = 0; i < (pairs == 2 ? 4u : 1u); ++i)
         if (values[i] != (i & 1 ? second : first)) {
           std::printf("numeric mismatch mode=%u repeat=%u component=%u value=%u expected=%u\n", mode, iteration, i, values[i], i & 1 ? second : first); return 1;
@@ -591,7 +606,7 @@ int wmain(int argc, wchar_t **argv) {
       std::memcpy(values[1], mapped, 16); readback->Unmap(0, nullptr);
       for (unsigned execution = 0; execution < 2; ++execution)
         for (unsigned i = 0; i < (pairs == 2 ? 4u : 1u); ++i) {
-          const UINT expected = use_static ? (i & 1 ? static_second : static_first) :
+          const UINT expected = native_direct ? 128 : use_static ? (i & 1 ? static_second : static_first) :
               (i & 1) || (execution && sampler_live) ? 240 : 16;
           if (values[execution][i] != expected) {
             std::printf("in-flight mismatch mode=%u execution=%u component=%u actual=%u expected=%u\n",
@@ -599,6 +614,26 @@ int wmain(int argc, wchar_t **argv) {
           }
         }
       std::printf("MINMAX_INFLIGHT mode=%u first=%u second=%u\n", mode, values[0][0], values[1][0]);
+    }
+    if (native_direct) {
+      auto reduction = sd;
+      reduction.Filter = D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;
+      auto handle = samplers->GetCPUDescriptorHandleForHeapStart();
+      handle.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+      device->CreateSampler(&reduction, handle);
+      ID3D12CommandAllocator *raw_bad_allocator = nullptr;
+      if (!Check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&raw_bad_allocator)), "direct-heap guard allocator")) return 1;
+      OwnedCOM<ID3D12CommandAllocator> bad_allocator(raw_bad_allocator);
+      ID3D12GraphicsCommandList *raw_bad_list = nullptr;
+      if (!Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, bad_allocator.get(), pso.get(), IID_PPV_ARGS(&raw_bad_list)), "direct-heap guard list")) return 1;
+      OwnedCOM<ID3D12GraphicsCommandList> bad_list(raw_bad_list);
+      bad_list->SetDescriptorHeaps(2, heaps); bad_list->SetComputeRootSignature(root.get());
+      bad_list->SetComputeRootDescriptorTable(0, resources->GetGPUDescriptorHandleForHeapStart());
+      bad_list->SetComputeRootDescriptorTable(1, samplers->GetGPUDescriptorHandleForHeapStart());
+      bad_list->Dispatch(1, 1, 1);
+      if (bad_list->Close() != E_FAIL) return 1;
+      std::puts("MINMAX_DIRECT_HEAP native ordinary numeric PASS; reduction recording rejected without submission");
+      return 0;
     }
     if (mode == 0) {
       // Two dispatches in one compute encoder: private first, ordinary second
@@ -638,7 +673,7 @@ int wmain(int argc, wchar_t **argv) {
       SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr);
       table_gpu.ptr += 4 * stride; restored->SetComputeRootDescriptorTable(0, table_gpu);
       restored->Dispatch(1, 1, 1);
-      SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", argv[3]);
+      SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", deployed ? nullptr : argv[3]);
       D3D12_RESOURCE_BARRIER copies[2] = {};
       for (auto &b : copies) { b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE; }
@@ -655,18 +690,20 @@ int wmain(int argc, wchar_t **argv) {
         if (encoder->type == dxmt::EncoderType::Compute) {
           ++compute_count;
           auto *compute = static_cast<dxmt::ComputeEncoderData *>(encoder);
-          if (compute->minmax_dispatches.size() != 1) return 1;
-          bool after_marker = false, application_pso_restored = false;
+          if (compute->minmax_dispatches.size() != (deployed ? 2u : 1u)) return 1;
+          bool after_marker = false, application_pso_restored = false, second_marker_seen = false;
           unsigned dispatch_count = 0;
           const auto original_pso = static_cast<dxmt::MTLD3D12ComputePipelineState *>(pso.get())->pso.handle;
           for (auto *node = reinterpret_cast<wmtcmd_base *>(&compute->cmd_head); node;
                node = static_cast<wmtcmd_base *>(node->next.get())) {
             if (node == reinterpret_cast<const wmtcmd_base *>(compute->minmax_dispatches[0]->marker)) after_marker = true;
+            if (deployed && node == reinterpret_cast<const wmtcmd_base *>(compute->minmax_dispatches[1]->marker))
+              second_marker_seen = true;
             if (after_marker && dispatch_count == 1 && node->type == WMTComputeCommandSetPSO &&
                 reinterpret_cast<wmtcmd_compute_setpso *>(node)->pso == original_pso)
               application_pso_restored = true;
             if (node->type == WMTComputeCommandDispatch) {
-              if (++dispatch_count == 2 && !application_pso_restored) return 1;
+              if (++dispatch_count == 2 && (!application_pso_restored || (deployed && !second_marker_seen))) return 1;
             }
           }
           if (dispatch_count != 2) return 1;
@@ -741,7 +778,7 @@ int wmain(int argc, wchar_t **argv) {
     }
   }
   std::puts(typed_rejection ? "MinMax typed guard PASS (rejection only)" :
-      deployed ? "MinMax deployed dispatch PASS: five reduction roots x five executions (focused subset)" :
+      deployed ? "MinMax deployed dispatch PASS: eleven roots x five executions (focused subset)" :
       "MinMax D3D12 dispatch PASS: eleven roots x five executions, including static reduction (focused subset)");
   return 0;
 }

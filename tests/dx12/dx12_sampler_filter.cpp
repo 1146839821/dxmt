@@ -86,6 +86,20 @@ int main() {
       ++private_cases;
     }
   }
+  for (unsigned anisotropy : {1u, 2u, 4u, 16u}) {
+    D3D12_SAMPLER_DESC desc = {};
+    desc.Filter = D3D12_FILTER_ANISOTROPIC;
+    desc.MaxAnisotropy = anisotropy;
+    desc.AddressU = desc.AddressV = desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    desc.MaxLOD = D3D12_FLOAT32_MAX;
+    WMTSamplerInfo point = {}, ordinary = {};
+    dxmt_msc_minmax_state state = {};
+    if (FAILED(dxmt::PrepareD3D12MinMaxSamplerInfo({}, desc, point, ordinary, state)) ||
+        (state.flags & DXMT_MSC_MINMAX_ENABLED) || ordinary.max_anisotroy != anisotropy ||
+        point.max_anisotroy != 1 || ordinary.min_filter != WMTSamplerMinMagFilterLinear ||
+        ordinary.mag_filter != WMTSamplerMinMagFilterLinear || !ordinary.support_argument_buffers) return 1;
+    ++private_cases;
+  }
   for (unsigned bad = 0; bad < 7; ++bad) {
     D3D12_SAMPLER_DESC desc = {};
     desc.Filter = D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;

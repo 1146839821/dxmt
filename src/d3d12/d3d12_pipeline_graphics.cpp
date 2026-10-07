@@ -651,7 +651,7 @@ public:
         if (minmax_dxc_directory_ != directory) return E_INVALIDARG;
         *variant = minmax_variant_.get(); return S_OK;
       }
-      if (shader_backend != D3D12ShaderBackend::MetalShaderConverter || !application_root_ ||
+      if (shader_backend != D3D12ShaderBackend::MetalShaderConverter || !application_root_ || stream_output || msc_mesh ||
           !minmax_render_info_valid_ || original_vs_.empty()) return E_NOTIMPL;
       MinMaxShaders shaders;
       std::unique_ptr<D3D12MinMaxGraphicsVariant> candidate;
@@ -2302,6 +2302,22 @@ public:
       forced_sample_count = pDesc->RasterizerState.ForcedSampleCount;
     }
 
+    if (use_msc && !has_stream_output && !msc_mesh && !requires_minmax_variant && typed_origin_compiler_directory.empty() &&
+        (vs_classification.uses_texture_sampling || ps_classification.uses_texture_sampling ||
+         gs_classification.uses_texture_sampling || hs_classification.uses_texture_sampling ||
+         ds_classification.uses_texture_sampling) &&
+        env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY").empty() &&
+        env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY").empty()) {
+      std::wstring directory;
+      const auto selection = SelectD3D12CompilerDirectory(directory);
+      if (FAILED(selection)) return selection;
+      if (selection == S_OK) {
+        const D3D12MinMaxGraphicsVariant *variant = nullptr;
+        const auto hr = GetMinMaxVariant(directory.c_str(), &variant);
+        if (hr == S_OK && variant) minmax_compiler_directory = std::move(directory);
+        else if (hr != E_NOTIMPL) return FAILED(hr) ? hr : E_FAIL;
+      }
+    }
     return S_OK;
   }
 
