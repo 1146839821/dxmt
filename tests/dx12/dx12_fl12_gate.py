@@ -18,6 +18,14 @@ BLOCKED = "BLOCKED_BY_ARCHITECTURE"
 UNVERIFIED = "UNVERIFIED"
 STATUSES = {PASS, PARTIAL, FAIL, BLOCKED, UNVERIFIED}
 
+# Capability opt-ins are development tools, never qualification evidence.
+# Explicit zeros also override persistent Wine environment defaults.
+QUALIFICATION_ENVIRONMENT = {
+    "DXMT_SHADER_CACHE": "0",
+    "DXMT_EXPERIMENTAL_SM6_6": "0",
+    "DXMT_EXPERIMENTAL_FL12_0": "0",
+}
+
 
 def aggregate(rows):
     statuses = [row["status"] for row in rows]
@@ -110,7 +118,7 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
                 result = subprocess.run(
                     command, cwd=stage, stdout=log, stderr=subprocess.STDOUT,
                     timeout=timeout,
-                    env={**os.environ, "DXMT_SHADER_CACHE": "0",
+                    env={**os.environ, **QUALIFICATION_ENVIRONMENT,
                          "WINEDLLOVERRIDES": os.environ.get("WINEDLLOVERRIDES", "") + ";d3d12,dxgi,winemetal=n,b"},
                 )
                 log.seek(0)
@@ -122,7 +130,8 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
             status = UNVERIFIED
         return {"status": status, "returncode": result.returncode, "output": output,
                 "reason": "fresh execution; required markers checked", "runtime_sha256": staged_hashes,
-                "executable_sha256": executable_hash}
+                "executable_sha256": executable_hash,
+                "controlled_environment": dict(QUALIFICATION_ENVIRONMENT)}
 
 
 def run_minmax_contract(directory, wine, timeout, runtime):
@@ -493,6 +502,7 @@ def build_report(probes, variant, provenance=None):
         row("tiled_clamp_and_windows_oracle", UNVERIFIED, "independent clamp/oracle evidence required"),
     ]
     return {"schema_version": 2, "build_variant": variant, "capability_changes": False,
+            "qualification_environment_policy": dict(QUALIFICATION_ENVIRONMENT),
             "FL12_0_GATE": {"status": aggregate(fl0), "requirements": fl0},
             "FL12_1_GATE": {"status": aggregate(fl1), "requirements": fl1},
             "optional_regressions": {"status": aggregate(optional), "requirements": optional},

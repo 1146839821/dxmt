@@ -1,5 +1,44 @@
 # FL12 evidence gate and backend isolation
 
+## Experimental environment isolation checkpoint (2026-10-07)
+
+Baseline 23c2fecb, branch feat/d3d12-1. Hypothesis: qualification must not inherit
+temporary capability advertisement from the caller or Wine environment defaults.
+Evidence: run_fixture previously copied ambient os.environ without overriding
+DXMT_EXPERIMENTAL_SM6_6/FL12_0. Expected effect: explicit default-capability
+controls independent of the interactive game-launch environment. Risk: changing
+the parent environment would disrupt legitimate experimental startup, so only
+the child subprocess environment is overridden.
+
+Every fixture execution now explicitly receives DXMT_EXPERIMENTAL_SM6_6=0,
+DXMT_EXPERIMENTAL_FL12_0=0 and the existing DXMT_SHADER_CACHE=0. Completed process
+results include controlled_environment; the schema-2 report separately records
+qualification_environment_policy. The policy is declared configuration, not
+proof that unexecuted/missing probes observed it. Production gate implementation
+and direct opt-in game startup remain unchanged. Experimental opt-in observations
+must be run/reported separately and do not contribute qualification evidence.
+
+Validation: 60 Python tests pass, including mock spawn checks for parent values
+1/true/0 and a real child process independently reading the two zero overrides.
+Parent values and unrelated WINEPREFIX are preserved. Actual run_fixture calls
+with parent SM6.6/FL12_0 set to 1 pass dx12_experimental_caps.exe on both cache
+Wine runtimes: normal returns FL11_1/SM6.0 and no-private FL11_0/SM6.0, checking
+device-create/query agreement, FL12_1 rejection and lower SM5.1 requests.
+Logs: dxmt-reconciliation.ZLDvwE/closure-cap-isolation-{normal,no-private}.log.
+Those are controls on the tested AppleFamily 1009/MSC 4.0.1/macOS 27.0.1 host,
+not assumptions about other hardware, missing converter or native Windows.
+Both build configurations reconfigure and all 16 host tests per build pass;
+no C++ production change or new GPU semantic qualification is claimed.
+
+Main-agent standards/spec self-review informed by code-review found no outstanding
+actionable issue in this isolation slice; independent sub-agent review was not
+performed. Actual loaded-module enforcement remains pending: a fresh Wine
+-all,+pid,+loaddll probe establishes process/thread-qualified PE trace syntax,
+but neither that trace nor controlled_environment proves the loaded Unix image.
+verify_build still requires prefix DLL equality and must be reconciled with
+actual-module provenance without prefix deployment. Timestamp oracle,
+root-feedback profiling and complete qualification remain open. No push.
+
 ## Closure classification update (2026-10-07)
 
 Starting HEAD 050af612, branch feat/d3d12-1. Hypothesis: optional modern-feature

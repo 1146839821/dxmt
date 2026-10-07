@@ -20,6 +20,13 @@ were corrected and preliminary results excluded. Actual Unix-image provenance,
 runner-level experimental isolation and complete resource matrices remain open.
 See D3D12_RESOURCE_AUDIT_CONTINUATION_2026-10-07.md.
 
+Experimental capability environment isolation is implemented in run_fixture:
+explicit zero overrides, per-process controlled_environment and report policy.
+60 Python tests and actual parent-opt-in/default-child capability probes pass
+on both cache Wine runtimes. Production opt-ins remain intact. Loaded-module
+enforcement/prefix provenance reconciliation, timestamp and profiling are still
+pending; policy metadata alone is not module or GPU conformance proof.
+
 ## Task analysis
 
 Current implementation has separate DXBC/AIRCONV and DXIL/MSC paths, bounded

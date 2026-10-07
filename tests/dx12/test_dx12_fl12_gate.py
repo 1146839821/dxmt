@@ -688,6 +688,43 @@ class GateTests(unittest.TestCase):
             self.assertEqual(result["status"], gate.UNVERIFIED)
             run.assert_not_called()
 
+    def test_qualification_overrides_ambient_experimental_caps(self):
+        import shutil
+        from types import SimpleNamespace
+        with TemporaryDirectory() as directory:
+            shutil.copy2(__file__, Path(directory) / "probe.exe")
+            for inherited in ("1", "true", "0"):
+                with self.subTest(inherited=inherited), patch.dict(gate.os.environ, {
+                    "DXMT_EXPERIMENTAL_SM6_6": inherited,
+                    "DXMT_EXPERIMENTAL_FL12_0": inherited,
+                    "DXMT_SHADER_CACHE": "1",
+                    "WINEPREFIX": "preserved-prefix",
+                }):
+                    def execute(*args, **kwargs):
+                        for key in gate.QUALIFICATION_ENVIRONMENT:
+                            self.assertEqual(kwargs["env"][key], "0")
+                        self.assertEqual(kwargs["env"]["WINEPREFIX"], "preserved-prefix")
+                        kwargs["stdout"].write("passed")
+                        return SimpleNamespace(returncode=0)
+                    with patch.object(gate.subprocess, "run", side_effect=execute):
+                        result = gate.run_fixture(Path(directory), None, "probe.exe", (), ("passed",), 1)
+                    self.assertEqual(result["status"], gate.PASS)
+                    self.assertEqual(result["controlled_environment"], gate.QUALIFICATION_ENVIRONMENT)
+                    self.assertEqual(gate.os.environ["DXMT_EXPERIMENTAL_SM6_6"], inherited)
+
+    def test_child_observes_isolated_capability_environment(self):
+        import json
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "probe.exe").write_text(
+                "import os,json\nprint(json.dumps({k:os.environ.get(k) for k in "
+                "['DXMT_EXPERIMENTAL_SM6_6','DXMT_EXPERIMENTAL_FL12_0']}))\nprint('passed')\n")
+            with patch.dict(gate.os.environ, {"DXMT_EXPERIMENTAL_SM6_6": "1", "DXMT_EXPERIMENTAL_FL12_0": "1"}):
+                result = gate.run_fixture(root, sys.executable, "probe.exe", (), ("passed",), 5)
+            self.assertEqual(result["status"], gate.PASS)
+            observed = json.loads(result["output"].splitlines()[0])
+            self.assertEqual(observed, {"DXMT_EXPERIMENTAL_SM6_6": "0", "DXMT_EXPERIMENTAL_FL12_0": "0"})
+
     def test_exit_zero_without_markers_fails(self):
         with TemporaryDirectory() as directory:
             # A real existing file suffices: execution is mocked, not the evidence checks.
