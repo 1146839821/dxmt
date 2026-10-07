@@ -36,6 +36,7 @@ struct ShaderResourceViewInfo {
   bool read = false;
   bool sampled = false;
   bool compared = false; // therefore we use depth texture!
+  bool buffer_feedback = false;
 
   uint32_t structure_stride = 0;
   uint32_t arg_index;
@@ -50,6 +51,7 @@ struct UnorderedAccessViewInfo {
   bool global_coherent = false;
   bool rasterizer_order = false;
   bool with_counter = false;
+  bool buffer_feedback = false;
 
   uint32_t structure_stride = 0;
   uint32_t arg_index;

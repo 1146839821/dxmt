@@ -1208,6 +1208,8 @@ AIRCONV_API int SM50Initialize(
     if (srv.read || srv.sampled || srv.compared) {
       flags |= MTL_SM50_SHADER_ARGUMENT_READ_ACCESS;
     }
+    if (srv.buffer_feedback)
+      flags |= MTL_SM50_SHADER_ARGUMENT_BUFFER_FEEDBACK;
     sm50_shader->args_reflection.push_back({
       .Type = SM50BindingType::SRV,
       .SM50BindingSlot = range_id,
@@ -1278,6 +1280,8 @@ AIRCONV_API int SM50Initialize(
     if (uav.with_counter) {
       flags |= MTL_SM50_SHADER_ARGUMENT_UAV_COUNTER;
     }
+    if (uav.buffer_feedback)
+      flags |= MTL_SM50_SHADER_ARGUMENT_BUFFER_FEEDBACK;
     sm50_shader->args_reflection.push_back({
       .Type = SM50BindingType::UAV,
       .SM50BindingSlot = range_id,

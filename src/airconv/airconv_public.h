@@ -49,6 +49,9 @@ enum MTL_SM50_SHADER_ARGUMENT_FLAG : uint32_t {
   // helper. This is consumer eligibility, not a device capability declaration.
   MTL_SM50_SHADER_ARGUMENT_SAMPLER_REDUCTION_SAMPLING = 1 << 7,
   MTL_SM50_SHADER_ARGUMENT_SAMPLER_REDUCTION_SAMPLE_LEVEL = MTL_SM50_SHADER_ARGUMENT_SAMPLER_REDUCTION_SAMPLING,
+  // Raw/structured loads consume a non-NULL residency status destination.
+  // This is shader usage, not a tiled-resource capability claim.
+  MTL_SM50_SHADER_ARGUMENT_BUFFER_FEEDBACK = 1 << 8,
   MTL_SM50_SHADER_ARGUMENT_READ_ACCESS = 1 << 10,
   MTL_SM50_SHADER_ARGUMENT_WRITE_ACCESS = 1 << 11,
 };

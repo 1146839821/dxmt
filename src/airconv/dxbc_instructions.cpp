@@ -995,9 +995,11 @@ Instruction readInstruction(
       patterns{
         [&](const SrcOperandResource &res) {
           shader_info.srvMap[res.range_id].read = true;
+          shader_info.srvMap[res.range_id].buffer_feedback |= inst.feedback.has_value();
         },
         [&](const SrcOperandUAV &uav) {
           shader_info.uavMap[uav.range_id].read = true;
+          shader_info.uavMap[uav.range_id].buffer_feedback |= inst.feedback.has_value();
         },
         [](auto) {}
       },
@@ -1048,9 +1050,11 @@ Instruction readInstruction(
       patterns{
         [&](const SrcOperandResource &res) {
           shader_info.srvMap[res.range_id].read = true;
+          shader_info.srvMap[res.range_id].buffer_feedback |= inst.feedback.has_value();
         },
         [&](const SrcOperandUAV &uav) {
           shader_info.uavMap[uav.range_id].read = true;
+          shader_info.uavMap[uav.range_id].buffer_feedback |= inst.feedback.has_value();
         },
         [](auto) {}
       },

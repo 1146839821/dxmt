@@ -261,6 +261,19 @@ byte-footprint lowering, DXIL support and GPU feedback matrices remain required.
 
 ## GPU mapping lookup lowering checkpoint
 
+Selective root-transport prerequisite: raw/structured decoder uses now accumulate
+`buffer_feedback` on the corresponding SRV/UAV only when the status destination
+is non-NULL. AIR argument reflection publishes this as the previously unused
+bit 8, `MTL_SM50_SHADER_ARGUMENT_BUFFER_FEEDBACK`, without expanding either
+reflection structure. Ordinary loads and NULL status do not request the flag.
+This provides usage information for a future submission VA/header table without
+forcing one on every buffer shader. Root lookup/table binding itself is not yet
+implemented. Expanded decoding tests cover raw/structured, SRV/UAV, normal/
+feedback, and NULL/non-NULL status combinations. Normal/no-private full builds
+and all 15 host tests pass; focused tests also pass after formatting. Reflection
+flag publication is source-reviewed, not independently runtime-asserted here.
+No capability promotion or public root/MSC ABI change occurred.
+
 Indirect root residency prerequisite: submission snapshots already strongly
 retain registered primary allocations, but their encoder fan-out previously
 declared only the primary buffer. It now also declares attached sparse header
