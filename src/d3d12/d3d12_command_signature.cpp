@@ -43,6 +43,7 @@ struct dxmt_compute_command_data {
   device void *msc_sampler_heap;
   ulong msc_tlab_stride;
   ulong msc_template_size;
+  device ulong *root_feedback_table;
 };
 
 struct d3d12_draw_arguments {
@@ -302,6 +303,8 @@ public:
                << "} else {\n";
         source << "cmd.set_kernel_buffer(rootsig_qwords, " << SM50_BINDING_INDEX_ROOT_ARGUMENTS << ");\n";
         source << "cmd.set_kernel_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS << ");\n";
+        source << "if (command_data.root_feedback_table) cmd.set_kernel_buffer(command_data.root_feedback_table,"
+               << SM50_BINDING_INDEX_ROOT_BUFFER_FEEDBACK << ");\n";
         source << "}\n";
       }
     }

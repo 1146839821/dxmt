@@ -200,11 +200,13 @@ struct CopyTilesEncoderData : EncoderData {
   bool tiled_to_buffer = false;
 };
 
+struct IndirectComputeCommandData;
 struct ComputeEncoderData : EncoderData {
   wmtcmd_compute_nop cmd_head;
   wmtcmd_base *cmd_tail;
   std::vector<std::shared_ptr<D3D12TypedOriginDispatch>> typed_origin_dispatches;
   std::vector<std::shared_ptr<D3D12MinMaxDispatch>> minmax_dispatches;
+  std::vector<std::pair<const wmtcmd_compute_setbuffer *, const IndirectComputeCommandData *>> root_feedback_indirect;
   WMT::Reference<WMT::ComputePipelineState> ray_dispatch_pso;
   WMT::Reference<WMT::VisibleFunctionTable> ray_dispatch_visible_function_table;
   WMT::Reference<WMT::IntersectionFunctionTable> ray_dispatch_intersection_function_table;

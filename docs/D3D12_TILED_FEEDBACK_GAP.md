@@ -287,13 +287,50 @@ serial mapping alternations; table-UAV regressions also pass. Evidence:
 `root-feedback-table-regression-{normal,np}.log`. No API-validation run or
 inflight/multiqueue/VA-alias lifecycle qualification is claimed here.
 
-Graphics/geometry/tessellation root feedback still rejects compilation. ICBs
-with root updates do not inherit buffers and only explicitly bind slots 0/1;
-slot 8 is not yet transported into them. Until that is implemented, AIR compute
-ExecuteIndirect with root updates and any buffer-feedback consumer explicitly
-fails recording after pipeline validation. This conservative temporary gate
-also affects table-feedback consumers with root updates; it must be removed
-when the ICB transport lands. No tiled Tier2/feature-level promotion occurred.
+Graphics/geometry/tessellation root feedback still rejects compilation. The
+compute ICB transport below removes the earlier conservative recording gate;
+no tiled Tier2/feature-level promotion occurred.
+
+### Indirect compute root feedback transport
+
+Hypothesis: a submission-owned resolver payload can supply slot 8 to compute
+ICBs without mutating recorded commands or application indirect arguments.
+Expected effect: root-updating ExecuteIndirect uses the direct compute VA table.
+Risk: replacing the resolver binding loses implicit allocator-heap residency;
+payload ownership, ICB binding and repeated submission must remain isolated.
+
+The private compute resolver payload grows from 120 to 128 bytes, with the
+table address at offset 120 (host assertions and matching MSL declaration).
+Application ByteStride, root UploadQwords and MSC TLAB layouts are unchanged.
+Submission replay copies the payload into a retained shared buffer, replaces
+only its resolver binding, and explicitly declares the original allocator GPU
+heap read/write: the resolver still writes root arguments into that heap.
+AIR root-updating ICBs explicitly bind the table at slot 8. MSC routing is
+unchanged, and recorded nodes/payloads remain immutable.
+
+Diagnostic negative evidence: both inline and shared payload carriers without
+the original heap declaration failed data/status outputs and the independent
+dispatch sentinel. Changing the carrier alone did not fix execution. Adding
+the heap declaration made the same oracle pass. Temporary diagnostics were
+removed before final builds; the shared carrier gives submission ownership,
+not a measured performance improvement.
+
+Normal/no-private full builds and 15/15 host tests each pass. Both runtimes
+pass indirect root SRV/UAV raw/structured data/status checks through four serial
+mapping alternations. The argument stream uses VA + 65532 while recording
+stages VA + 65536, so missed root updates fail independently. Output includes
+a nonzero dispatch sentinel to detect nonexecution. The normal SRV final run
+passes with explicit Metal API Validation enabled. Existing ordinary indirect
+root VA remap regression passes with 317/619 in both runtimes.
+Evidence: `dxmt-reconciliation.ZLDvwE/root-feedback-indirect-{srv,uav}-{normal,np}.log`,
+`root-feedback-indirect-ordinary-regression.log`, and
+`root-feedback-indirect-ordinary-np.log`.
+
+This tests MaxCount=1 with CPU-uploaded arguments and GPU resolver/ICB execution,
+not GPU-produced arguments, count buffers, predication, concurrent resubmission,
+inflight remap or multiqueue lifetime. Graphics/GS/tessellation and DXIL feedback,
+VA alias coverage, full sparse matrices and allocation/lookup performance remain
+open. No game/prefix deployment, process management or push was performed.
 
 Selective root-transport prerequisite: raw/structured decoder uses now accumulate
 `buffer_feedback` on the corresponding SRV/UAV only when the status destination

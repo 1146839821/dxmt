@@ -19,6 +19,7 @@
 #include "com/com_guid.hpp"
 #include "com/com_pointer.hpp"
 #include "d3d12_device.hpp"
+#include "d3d12_command_allocator.hpp"
 #include "air_sparse_buffer_abi.hpp"
 #include "d3d12_typed_origin_binding.hpp"
 #include "d3d12_minmax_dispatch.hpp"
@@ -59,8 +60,15 @@ union PrivateComputeReplayCommand {
 static bool ReplayPrivateCompute(
     MTLD3D12Device *device, WMT::ComputeCommandEncoder encoder, ComputeEncoderData *data,
     std::vector<std::shared_ptr<D3D12TypedOriginSubmissionBinding>> &bindings,
-    std::vector<std::shared_ptr<D3D12MinMaxSubmissionBinding>> &minmax_bindings) {
+    std::vector<std::shared_ptr<D3D12MinMaxSubmissionBinding>> &minmax_bindings,
+    uint64_t root_feedback_address = 0,
+    std::vector<WMT::Reference<WMT::Buffer>> *root_feedback_buffers = nullptr) {
   try {
+    std::unordered_map<const void *, const IndirectComputeCommandData *> root_feedback_markers;
+    for (const auto &[binding, payload] : data->root_feedback_indirect)
+      if (!binding || !payload || !root_feedback_address ||
+          !root_feedback_markers.emplace(binding, payload).second)
+        return false;
     std::unordered_map<const void *, const D3D12TypedOriginDispatch *> markers;
     for (const auto &dispatch : data->typed_origin_dispatches) markers.emplace(dispatch->marker, dispatch.get());
     std::unordered_map<const void *, const D3D12MinMaxDispatch *> minmax_markers;
@@ -126,7 +134,27 @@ static bool ReplayPrivateCompute(
       }
       PrivateComputeReplayCommand command = {};
       std::memcpy(&command, node, size);
+      if (auto feedback = root_feedback_markers.find(node); feedback != root_feedback_markers.end()) {
+        if (node->type != WMTComputeCommandSetBuffer) return false;
+        if (!root_feedback_buffers) return false;
+        // Replacing slot 30 removes the original heap's implicit binding.
+        // The resolver still writes root arguments into that same heap.
+        WMT::Buffer original_heap;
+        original_heap.handle = command.buffer.buffer;
+        encoder.useResource(original_heap, static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite));
+        auto payload = *feedback->second;
+        payload.root_feedback_table = root_feedback_address;
+        WMTBufferInfo info = {}; info.length = sizeof(payload); info.options = WMTResourceStorageModeShared;
+        auto buffer = device->GetMTLDevice().newBuffer(info);
+        if (!buffer || !info.memory.get()) return false;
+        std::memcpy(info.memory.get(), &payload, sizeof(payload));
+        encoder.useResource(buffer, WMTResourceUsageRead);
+        command.buffer.buffer = buffer.handle;
+        command.buffer.offset = 0;
+        root_feedback_buffers->emplace_back(std::move(buffer));
+      }
       if (auto indirect = indirect_bindings.find(node); indirect != indirect_bindings.end()) {
+        if (root_feedback_markers.contains(node)) return false;
         if (node->type != WMTComputeCommandSetBuffer) return false;
         command.buffer.buffer = indirect->second.buffer;
         command.buffer.offset = indirect->second.offset;
@@ -376,7 +404,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
 
   template <typename UseResource>
   bool RetainIndirectRootBuffers(EncoderData *data, Submission &submission, UseResource use_resource,
-                                WMT::Buffer *feedback_table = nullptr) {
+                                WMT::Buffer *feedback_table = nullptr, uint64_t *feedback_address = nullptr) {
     if (!data->indirect_root_va && !data->root_buffer_feedback)
       return true;
     std::vector<Rc<BufferAllocation>> snapshot;
@@ -404,6 +432,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
                    allocation->sparse_feedback_header ? allocation->sparse_feedback_header->gpuAddress() : 0};
       }
       *feedback_table = table;
+      if (feedback_address) *feedback_address = info.gpu_address;
       try { submission.root_feedback_tables.emplace_back(std::move(table)); }
       catch (const std::bad_alloc &) { return false; }
       use_resource(*feedback_table, WMTResourceUsageRead);
@@ -1478,9 +1507,10 @@ public:
            LabelEncoder(encoder, recording_id, data->id, "Compute");
            encoder.waitForFence(fence_);
           WMT::Buffer root_feedback_table;
+          uint64_t root_feedback_address = 0;
           if (!RetainIndirectRootBuffers(data, submission, [&](WMT::Buffer buffer, WMTResourceUsage usage) {
                 encoder.useResource(buffer, usage);
-              }, &root_feedback_table)) {
+              }, &root_feedback_table, &root_feedback_address)) {
             translation_failed = true;
             encoder.endEncoding();
             break;
@@ -1506,9 +1536,10 @@ public:
             encoder.endEncoding();
             break;
           }
-          if (data->typed_origin_dispatches.empty() && data->minmax_dispatches.empty()) {
+          if (data->typed_origin_dispatches.empty() && data->minmax_dispatches.empty() && data->root_feedback_indirect.empty()) {
             encoder.encodeCommands(&data->cmd_head);
-          } else if (!ReplayPrivateCompute(device_, encoder, data, submission.typed_origin_bindings, submission.minmax_bindings)) {
+          } else if (!ReplayPrivateCompute(device_, encoder, data, submission.typed_origin_bindings, submission.minmax_bindings,
+                                          root_feedback_address, &submission.root_feedback_tables)) {
             translation_failed = true;
             encoder.endEncoding();
             break;

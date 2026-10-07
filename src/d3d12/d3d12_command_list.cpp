@@ -6001,10 +6001,6 @@ public:
         return;
       if (!ValidateIndirectPipeline(pso_compute_.ptr(), sig, "ExecuteIndirect(Dispatch)"))
         return;
-      if (sig->UpdateRootArguments && pso_compute_->air_buffer_feedback) {
-        FailRecording(__func__, "indirect root buffer feedback table binding is not implemented");
-        return;
-      }
     } else if (!ValidateCommand(SupportsGraphics(), "ExecuteIndirect(Draw)")) {
       return;
     } else if (!ValidateIndirectPipeline(pso_graphics_.ptr(), sig, "ExecuteIndirect(Draw)")) {
@@ -6072,6 +6068,14 @@ public:
       }
       cmd->max_count_buffer = filtered_count_buffer_address;
       cmd->argument_buffer = ArgBufferAddress;
+      if (sig->UpdateRootArguments && pso_compute_->air_buffer_feedback) {
+        try {
+          static_cast<ComputeEncoderData *>(allocator_->encoder_current)->root_feedback_indirect.emplace_back(resolver_binding, cmd);
+        } catch (const std::bad_alloc &) {
+          FailRecording(__func__, "indirect root feedback marker allocation failed");
+          return;
+        }
+      }
 
       if (msc_updates) {
         if (!EncodeMSCIndirectArguments(sig, cmd, origin_variant, resolver_binding, minmax_variant)) return;

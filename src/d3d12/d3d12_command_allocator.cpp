@@ -239,6 +239,7 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
     data->msc_sampler_heap = 0;
     data->msc_tlab_stride = 0;
     data->msc_template_size = 0;
+    data->root_feedback_table = 0;
   }
 
   {

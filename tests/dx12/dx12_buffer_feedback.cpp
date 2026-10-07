@@ -28,7 +28,7 @@ void Transition(ID3D12GraphicsCommandList *list, ID3D12Resource *resource,
   b.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
   list->ResourceBarrier(1, &b);
 }
-int Run(pD3DCompile compile, bool uav_source, bool root_source) {
+int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect) {
   // Equal zero payloads in mapped and NULL tiles force status to be independent
   // of payload. Both descriptor views start at the last word of tile zero.
   const char *hlsl = R"(
@@ -52,6 +52,7 @@ RWStructuredBuffer<uint> output : register(u0);
   output[4]=z.x; output[5]=z.y; output[6]=CheckAccessFullyMapped(c);
   output[7]=s; output[8]=CheckAccessFullyMapped(d);
   output[9]=t; output[10]=CheckAccessFullyMapped(e);
+  output[11]=0x1234u;
 })";
   Owned<ID3DBlob> shader, errors;
   D3D_SHADER_MACRO macros[] = {{"UAV_SOURCE", "1"}, {nullptr, nullptr}};
@@ -89,8 +90,8 @@ RWStructuredBuffer<uint> output : register(u0);
   };
   create(upload, 65536, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
   void *mapped = nullptr; Check(upload.p->Map(0, nullptr, &mapped)); std::memset(mapped, 0, 65536); upload.p->Unmap(0, nullptr);
-  create(output, 44, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-  create(readback, 44, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
+  create(output, 48, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  create(readback, 48, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
   Owned<ID3D12Heap> tiles;
   D3D12_HEAP_DESC hd = {}; hd.SizeInBytes = 65536; hd.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
   hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
@@ -120,7 +121,7 @@ RWStructuredBuffer<uint> output : register(u0);
   } else device.p->CreateShaderResourceView(source.p, &srv, cpu);
   cpu.ptr += stride;
   D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {}; uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-  uav.Buffer.NumElements = 11; uav.Buffer.StructureByteStride = 4;
+  uav.Buffer.NumElements = 12; uav.Buffer.StructureByteStride = 4;
   device.p->CreateUnorderedAccessView(output.p, nullptr, &uav, cpu);
   D3D12_DESCRIPTOR_RANGE ranges[] = {{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, 0},
                                     {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 2}};
@@ -151,6 +152,27 @@ RWStructuredBuffer<uint> output : register(u0);
   Owned<ID3D12GraphicsCommandList> list;
   Check(device.p->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, pipeline.p, IID_PPV_ARGS(&list.p)));
   Check(list.p->Close());
+  Owned<ID3D12CommandSignature> signature;
+  Owned<ID3D12Resource> arguments;
+  if (indirect) {
+    D3D12_INDIRECT_ARGUMENT_DESC updates[3] = {};
+    for (UINT i = 0; i < 2; ++i) {
+      updates[i].Type = uav_source ? D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW : D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
+      if (uav_source) updates[i].UnorderedAccessView.RootParameterIndex = i;
+      else updates[i].ShaderResourceView.RootParameterIndex = i;
+    }
+    updates[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    D3D12_COMMAND_SIGNATURE_DESC sd = {}; sd.ByteStride = 28; sd.NumArgumentDescs = 3; sd.pArgumentDescs = updates;
+    Check(device.p->CreateCommandSignature(&sd, root.p, IID_PPV_ARGS(&signature.p)));
+    create(arguments, 28, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+    Check(arguments.p->Map(0, nullptr, &mapped));
+    const UINT64 address = source.p->GetGPUVirtualAddress() + 65532;
+    std::memcpy(mapped, &address, 8);
+    std::memcpy(static_cast<char *>(mapped) + 8, &address, 8);
+    const UINT dispatch[3] = {1, 1, 1};
+    std::memcpy(static_cast<char *>(mapped) + 16, dispatch, 12);
+    arguments.p->Unmap(0, nullptr);
+  }
   HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
   if (!event) throw std::runtime_error("event creation");
   const auto source_state = uav_source ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -171,46 +193,52 @@ RWStructuredBuffer<uint> output : register(u0);
     ID3D12DescriptorHeap *heaps[] = {descriptors.p}; list.p->SetDescriptorHeaps(1, heaps);
     if (root_source) {
       for (UINT i = 0; i < 2; ++i) {
-        if (uav_source) list.p->SetComputeRootUnorderedAccessView(i, source.p->GetGPUVirtualAddress() + 65532);
-        else list.p->SetComputeRootShaderResourceView(i, source.p->GetGPUVirtualAddress() + 65532);
+        // Deliberately different from the indirect stream's VA: the oracle
+        // must fail if the resolver forgets to apply its root updates.
+        const auto initial = source.p->GetGPUVirtualAddress() + (indirect ? 65536 : 65532);
+        if (uav_source) list.p->SetComputeRootUnorderedAccessView(i, initial);
+        else list.p->SetComputeRootShaderResourceView(i, initial);
       }
     }
     list.p->SetComputeRootDescriptorTable(root_source ? 2 : 0, descriptors.p->GetGPUDescriptorHandleForHeapStart());
-    list.p->Dispatch(1, 1, 1);
+    if (indirect) list.p->ExecuteIndirect(signature.p, 1, arguments.p, 0, nullptr, 0);
+    else list.p->Dispatch(1, 1, 1);
     Transition(list.p, output.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    list.p->CopyBufferRegion(readback.p, 0, output.p, 0, 44); Check(list.p->Close());
+    list.p->CopyBufferRegion(readback.p, 0, output.p, 0, 48); Check(list.p->Close());
     ID3D12CommandList *lists[] = {list.p}; queue.p->ExecuteCommandLists(1, lists);
     Check(queue.p->Signal(fence.p, phase + 1)); Check(fence.p->SetEventOnCompletion(phase + 1, event));
     if (WaitForSingleObject(event, 30000) != WAIT_OBJECT_0) { CloseHandle(event); throw std::runtime_error("GPU timeout"); }
     Check(readback.p->Map(0, nullptr, &mapped));
     auto actual = static_cast<const UINT *>(mapped);
     bool passed = true;
-    for (UINT i = 0; i < 11; ++i) {
+    for (UINT i = 0; i < 12; ++i) {
       UINT expected = 0;
       if (i == 1 || i == 8) expected = (phase & 1) == 0;
       if (i == 3 || i == 10) expected = phase & 1;
+      if (i == 11) expected = 0x1234;
       if (actual[i] != expected) { std::printf("phase %u output %u expected %u actual %u\n", phase, i, expected, actual[i]); passed = false; }
     }
     readback.p->Unmap(0, nullptr);
     if (!passed) { CloseHandle(event); return 1; }
   }
   CloseHandle(event);
-  std::printf("BUFFER_FEEDBACK %s %s raw/structured zero-payload, boundary and alternating remap PASS\n",
-              root_source ? "root" : "table", uav_source ? "UAV" : "SRV");
+  std::printf("BUFFER_FEEDBACK %s %s %s raw/structured zero-payload, boundary and alternating remap PASS\n",
+              indirect ? "indirect" : "direct", root_source ? "root" : "table", uav_source ? "UAV" : "SRV");
   return 0;
 }
 }
 int main(int argc, char **argv) {
-  bool uav_source = false, root_source = false;
+  bool uav_source = false, root_source = false, indirect = false;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--uav")) uav_source = true;
     else if (!std::strcmp(argv[i], "--root")) root_source = true;
+    else if (!std::strcmp(argv[i], "--indirect")) { indirect = true; root_source = true; }
     else return 2;
   }
   auto library = LoadLibraryA("d3dcompiler_47.dll");
   if (!library) return 77;
   auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(library, "D3DCompile"));
   int result = 1;
-  try { if (compile) result = Run(compile, uav_source, root_source); } catch (const std::exception &e) { std::puts(e.what()); }
+  try { if (compile) result = Run(compile, uav_source, root_source, indirect); } catch (const std::exception &e) { std::puts(e.what()); }
   FreeLibrary(library); return result;
 }

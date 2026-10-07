@@ -64,8 +64,10 @@ struct IndirectComputeCommandData {
   uint64_t msc_sampler_heap;
   uint64_t msc_tlab_stride;
   uint64_t msc_template_size;
+  uint64_t root_feedback_table;
 };
-static_assert(sizeof(IndirectComputeCommandData) == 120);
+static_assert(sizeof(IndirectComputeCommandData) == 128);
+static_assert(offsetof(IndirectComputeCommandData, root_feedback_table) == 120);
 
 struct IndirectRenderCommandData {
   uint64_t cmd_buf;
