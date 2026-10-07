@@ -500,13 +500,15 @@ IsValidInputLayout(const D3D12_INPUT_LAYOUT_DESC &desc) {
 }
 
 bool
-IsSupportedInputLayout(MTLD3D12Device *device, const D3D12_INPUT_LAYOUT_DESC &desc) {
+IsSupportedInputLayout(MTLD3D12Device *device, const D3D12_INPUT_LAYOUT_DESC &desc, bool allow_msc_packed_uint) {
   if (!device)
     return false;
   for (UINT i = 0; i < desc.NumElements; i++) {
     MTL_DXGI_FORMAT_DESC format_desc;
     if (FAILED(MTLQueryDXGIFormat(device->GetMTLDevice(), desc.pInputElementDescs[i].Format, format_desc)) ||
-        !format_desc.AttributeFormat || !format_desc.BytesPerTexel)
+        (!format_desc.AttributeFormat &&
+         !(allow_msc_packed_uint && desc.pInputElementDescs[i].Format == DXGI_FORMAT_R10G10B10A2_UINT)) ||
+        !format_desc.BytesPerTexel)
       return false;
   }
   return true;
@@ -633,7 +635,9 @@ ValidateGraphicsPipelineDescriptor(MTLD3D12Device *device, const D3D12_GRAPHICS_
   if (!device || (desc.NodeMask & ~1u) || !IsValidShaderBytecode(desc.VS, true) || !IsValidShaderBytecode(desc.PS, false) ||
       !IsValidShaderBytecode(desc.HS, false) || !IsValidShaderBytecode(desc.DS, false) ||
       !IsValidShaderBytecode(desc.GS, false) || !IsValidCachedPSO(desc.CachedPSO) || desc.NumRenderTargets > 8 ||
-      !IsValidInputLayout(desc.InputLayout) || !IsSupportedInputLayout(device, desc.InputLayout) ||
+      !IsValidInputLayout(desc.InputLayout) || !IsSupportedInputLayout(device, desc.InputLayout,
+          !desc.GS.pShaderBytecode && !desc.HS.pShaderBytecode && !desc.DS.pShaderBytecode &&
+          !desc.StreamOutput.NumEntries && ClassifyD3D12Shader(desc.VS).backend == D3D12ShaderBackend::MetalShaderConverter) ||
       !IsSupportedGraphicsFormats(device, desc) || !IsValidBlendDesc(desc.BlendState, desc.NumRenderTargets) ||
       !IsValidRasterizerDesc(desc.RasterizerState) || !IsValidDepthStencilDesc(desc.DepthStencilState) ||
       !IsValidStripCutValue(desc.IBStripCutValue) || !IsValidPrimitiveTopologyType(desc.PrimitiveTopologyType) ||

@@ -370,3 +370,57 @@ boundary and private qualification gaps above remain open.
 The MSC skills informed retaining the vendor's 31-entry descriptor instead of
 enlarging it. Signature filtering is an implementation repair for legal layouts
 with unused declarations, not a workaround claimed to complete 32 consumed inputs.
+
+## Packed UINT continuation (baseline aa5ad708)
+
+Hypothesis: separate MSC stage-in can fetch R10G10B10A2_UINT without a fixed
+Metal attribute format. Evidence: DXMT's format has a valid four-byte size but
+no fixed attribute mapping; the ordinary dynamic path still requires that
+mapping before reading only the slot mask. Expected effect: admit this exact
+format only in ordinary dynamic MSC fetch; preserve AIRCONV/companion refusal
+and conservative feature reporting. Risk: unsigned field widths and extraction,
+accidentally admitting other invalid formats. Validate uint4 COLOR VS with mixed
+RGB/alpha fields and full RGBA readback, direct/indirect on both variants.
+
+### Packed UINT implementation and validation
+
+There are two fixed-attribute gates, not one: graphics descriptor validation
+IsSupportedInputLayout rejects the format before MSC initialization, and input
+extraction rejects it again. Both now permit exactly R10G10B10A2_UINT for ordinary
+MSC dynamic fetch. The front gate selects by VS backend, absent GS/HS/DS and
+stream output; signature/byte-size/offset validation remains. Extraction's
+permission defaults false for every AIRCONV/companion caller. Its invalid native
+attribute placeholder is used only for the dynamic branch's slot mask; it never
+enters a fixed Metal vertex descriptor. No format capability bit was changed.
+
+The new uint4 COLOR VS normalizes integer values in shader, not in vertex fetch.
+The fixture packs (1023,512,257,2), uses stride64 and address offset16, and checks
+all RGBA bits against 0xaa4080ff. Indirect mode retains the second zero-vertex
+stride24 command to check output isolation. Baseline and first extraction-only
+repair both failed PSO creation with E_INVALIDARG; diagnostic logs/source located
+the pre-init front gate. After both gates were repaired, all four direct/indirect
+normal/no-private GPU runs passed pixel, occlusion and timestamp checks. Both
+reconfigured full builds and host regressions passed, 12/12 each. Logs are
+packed-uint-*.log under the reconciliation cache; the VS DXIL has its own Meson
+non-default target. No prefix/game DLL deployment or push.
+
+Remaining: AIRCONV packed-UINT implementation, conservative feature reporting
+qualification, private/companion/instanced/indexed GPU coverage. This completes
+the demonstrated ordinary MSC path, not the cross-backend FL format requirement.
+
+### Packed UINT self-review
+
+Standards: zero hard violations or actionable smell findings, including the
+additional front gate. Spec: the initial failed GPU qualification was resolved
+by fixing that front gate; re-review confirmed zero unresolved findings for this
+increment and independently checked the four full-RGBA logs. Legacy/default
+callers cannot enable the exception, and no other unmapped format is admitted.
+The invalid attribute placeholder cannot escape the dynamic branch to native
+vertex descriptors. Source review includes the cached/persisted PSO validation
+entry, not just the inner graphics initializer.
+
+Both PS fixture targets were regenerated after the HLSL change. Final serial
+direct/indirect runs on both variants again passed all checks with 0xaa4080ff.
+Full builds and host tests remain passed (12/12 each); git diff --check passed.
+MSC skills guided delegating packed conversion to linked stage-in rather than
+inventing a fixed Metal format. Broader format/FL qualification remains open.

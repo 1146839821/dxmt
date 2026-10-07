@@ -53,8 +53,9 @@ int main(int argc, char **argv) {
   const bool root_uav = argc == 4 && (strcmp(argv[3], "--root-uav") == 0 || strcmp(argv[3], "--indirect-root-uav") == 0);
   const bool slot31 = argc == 4 && (strcmp(argv[3], "--slot31") == 0 || strcmp(argv[3], "--indirect-vb-slot31") == 0);
   const bool wide_layout = argc == 4 && (strcmp(argv[3], "--wide-layout") == 0 || strcmp(argv[3], "--indirect-vb-wide-layout") == 0);
+  const bool packed_uint = argc == 4 && (strcmp(argv[3], "--packed-uint") == 0 || strcmp(argv[3], "--indirect-vb-packed-uint") == 0);
   const bool indirect_vb = argc == 4 && (strcmp(argv[3], "--indirect-vb") == 0 || strcmp(argv[3], "--indirect-vb-slot31") == 0 ||
-      strcmp(argv[3], "--indirect-vb-wide-layout") == 0);
+      strcmp(argv[3], "--indirect-vb-wide-layout") == 0 || strcmp(argv[3], "--indirect-vb-packed-uint") == 0);
   const bool indirect = argc == 4 && strncmp(argv[3], "--indirect-", 11) == 0;
   const bool textured_root_cbv = argc == 4 && (strcmp(argv[3], "--texture-root-cbv") == 0 ||
       strcmp(argv[3], "--indirect-texture-root-cbv") == 0);
@@ -71,7 +72,7 @@ int main(int argc, char **argv) {
   const bool get_attribute_unsupported = argc == 4 && strcmp(argv[3], "--get-attribute-unsupported") == 0;
   const bool vrs_unsupported = argc == 4 && strcmp(argv[3], "--vrs-unsupported") == 0;
   const bool stencil_ref_unsupported = argc == 4 && strcmp(argv[3], "--stencil-ref-unsupported") == 0;
-  const bool padded_stride = (argc == 4 && strcmp(argv[3], "--padded-stride") == 0) || indirect_vb || slot31 || wide_layout;
+  const bool padded_stride = (argc == 4 && strcmp(argv[3], "--padded-stride") == 0) || indirect_vb || slot31 || wide_layout || packed_uint;
   if ((argc == 4 && !textured && !root_cbv && !root_constants && !root_srv &&
        !root_uav && !textured_root_cbv && !logic_op && !stencil && !barycentrics &&
        !wave_quad_ops && !int64_ops && !native16_ops && !helper_lane && !helper_lane_derivative &&
@@ -135,6 +136,10 @@ int main(int argc, char **argv) {
     for (UINT i = 0; i < 3; ++i) {
       auto destination = vertex_upload.data() + vertex_offset + i * vertex_stride;
       memcpy(destination, &vertices[i], sizeof(Vertex));
+      if (packed_uint) {
+        const UINT color = 1023u | (512u << 10) | (257u << 20) | (2u << 30);
+        memcpy(destination + 8, &color, sizeof(color));
+      }
       if (wide_layout) {
         static const float wrong_color[] = {0.0f, 1.0f, 0.0f, 1.0f};
         memcpy(destination + 8, wrong_color, sizeof(wrong_color));
@@ -205,7 +210,7 @@ int main(int argc, char **argv) {
   std::vector<D3D12_INPUT_ELEMENT_DESC> input_layout = {
       {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, slot31 ? 31u : 0u, 0,
        D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-      {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, slot31 ? 31u : 0u, 8,
+      {"COLOR", 0, packed_uint ? DXGI_FORMAT_R10G10B10A2_UINT : DXGI_FORMAT_R32G32B32A32_FLOAT, slot31 ? 31u : 0u, 8,
        D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
   };
   if (wide_layout) {
@@ -928,7 +933,8 @@ int main(int argc, char **argv) {
                        : (geometry || root_cbv || root_constants || root_srv || root_uav || textured_root_cbv)
                            ? 0xff00ff00u
                            : 0xff0000ffu;
-  if ((pixel & 0x00ffffffu) != (expected_pixel & 0x00ffffffu)) {
+  if (packed_uint) expected_pixel = 0xaa4080ffu;
+  if ((pixel & (packed_uint ? UINT_MAX : 0x00ffffffu)) != (expected_pixel & (packed_uint ? UINT_MAX : 0x00ffffffu))) {
     std::cerr << "graphics readback mismatch: 0x" << std::hex << pixel
               << std::dec << "\n";
     goto cleanup;
@@ -955,6 +961,8 @@ int main(int argc, char **argv) {
                 : helper_lane ? "helper lane graphics"
                 : textured_root_cbv  ? "root CBV textured graphics"
                 : textured           ? "textured graphics"
+                : indirect_vb && packed_uint ? "indirect VB packed UINT graphics"
+                : packed_uint        ? "packed UINT graphics"
                 : indirect_vb && wide_layout ? "indirect VB wide-layout graphics"
                 : wide_layout        ? "wide-layout graphics"
                 : indirect_vb && slot31 ? "indirect VB slot31 padded-stride graphics"

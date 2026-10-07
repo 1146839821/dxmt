@@ -22,3 +22,17 @@ float4 ps_main(VSOutput input) : SV_Target0
 {
     return input.color;
 }
+
+struct PackedUIntInput
+{
+    float2 position : POSITION;
+    uint4 color : COLOR;
+};
+
+VSOutput vs_packed_uint(PackedUIntInput input)
+{
+    VSOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.color = float4(input.color) / float4(1023.0, 1023.0, 1023.0, 3.0);
+    return output;
+}

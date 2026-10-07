@@ -168,7 +168,7 @@ HRESULT
 ExtractMTLInputLayoutElements(
     MTLD3D12Device *device, const void *pShaderBytecodeWithInputSignature,
     const D3D12_INPUT_ELEMENT_DESC *pInputElementDescs, uint32_t NumElements, SM50_IA_INPUT_ELEMENT *pInputLayout,
-    uint32_t *pNumElementsOut
+    uint32_t *pNumElementsOut, bool AllowMSCPackedUInt = false
 ) {
 
   using namespace microsoft;
@@ -193,7 +193,7 @@ ExtractMTLInputLayoutElements(
       return E_FAIL;
     }
 
-    if (!metal_format.AttributeFormat) {
+    if (!metal_format.AttributeFormat && !(AllowMSCPackedUInt && desc.Format == DXGI_FORMAT_R10G10B10A2_UINT)) {
       ERR("CreateInputLayout: Unsupported vertex format: ", desc.Format);
       return E_INVALIDARG;
     }
@@ -880,7 +880,7 @@ public:
     uint32_t element_count = 0;
     HRESULT hr = ExtractMTLInputLayoutElements(
         device_, pDesc->VS.pShaderBytecode, pDesc->InputLayout.pInputElementDescs, pDesc->InputLayout.NumElements,
-        elements.data(), &element_count
+        elements.data(), &element_count, msc_dynamic_vertex_fetch
     );
     if (FAILED(hr))
       return hr;
