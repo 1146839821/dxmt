@@ -5544,7 +5544,7 @@ public:
   EncodeAirconvGeometryIndirect(
       bool indexed, SM50_INDEX_BUFFER_FORMAT index_format, WMT::Buffer indirect_args_buffer,
       uint64_t indirect_args_offset, uint64_t draw_arguments_address, uint32_t vertex_per_warp,
-      uint32_t vertex_increment_per_warp, uint64_t count_address = 0
+      uint32_t vertex_increment_per_warp, uint64_t count_address = 0, uint32_t command_index = 0
   ) {
     const auto strip = is_strip_topology(topology_) ? 1u : 0u;
     const auto index = static_cast<unsigned>(index_format);
@@ -5556,7 +5556,7 @@ public:
       return false;
 
     static_assert(sizeof(DXMT_GS_DISPATCH_MARSHAL) == 32);
-    auto [task_mapping, task_offset] = allocator_->AllocateGPUHeap(32 + (count_address ? 8 : 0), 16);
+    auto [task_mapping, task_offset] = allocator_->AllocateGPUHeap(32 + (count_address ? 16 : 0), 16);
     auto [dispatch_mapping, dispatch_offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_DISPATCH_ARGUMENTS), 4);
     if (!task_mapping || !dispatch_mapping)
       return false;
@@ -5568,7 +5568,10 @@ public:
         device_->GetMSCCapabilities().apple7_or_newer ? UINT64_MAX : 1024;
     task->vertex_count_per_warp = vertex_increment_per_warp;
     task->end_of_command = 1;
-    if (count_address) std::memcpy(static_cast<char *>(task_mapping) + 32, &count_address, 8);
+    if (count_address) {
+      std::memcpy(static_cast<char *>(task_mapping) + 32, &count_address, 8);
+      std::memcpy(static_cast<char *>(task_mapping) + 40, &command_index, 4);
+    }
 
     auto &draw_args_use = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
     draw_args_use.type = WMTRenderCommandUseResource;
@@ -5725,7 +5728,7 @@ public:
   EncodeAirconvTessellationIndirect(
       bool indexed, SM50_INDEX_BUFFER_FORMAT index_format, WMT::Buffer indirect_args_buffer,
       uint64_t indirect_args_offset, uint64_t draw_arguments_address, uint32_t control_point_count,
-      uint32_t threads_per_patch, uint64_t count_address = 0
+      uint32_t threads_per_patch, uint64_t count_address = 0, uint32_t command_index = 0
   ) {
     if (!indirect_args_buffer || !control_point_count || !threads_per_patch || threads_per_patch > 32 ||
         32 % threads_per_patch || (indexed && !index_buffer))
@@ -5754,14 +5757,17 @@ public:
     const uint64_t max_object_threadgroups = device_->GetMTLDevice().supportsFamily(WMTGPUFamilyApple7)
                                                  ? UINT64_MAX
                                                  : 1024;
-    auto [task_mapping, task_offset] = allocator_->AllocateGPUHeap(sizeof(TS_DISPATCH_MARSHAL) + (count_address ? 8 : 0), 16);
+    auto [task_mapping, task_offset] = allocator_->AllocateGPUHeap(sizeof(TS_DISPATCH_MARSHAL) + (count_address ? 16 : 0), 16);
     auto [dispatch_mapping, dispatch_offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_DISPATCH_ARGUMENTS), 4);
     if (!task_mapping || !dispatch_mapping)
       return false;
 
     auto *task = static_cast<TS_DISPATCH_MARSHAL *>(task_mapping);
     task->draw_arguments = draw_arguments_address;
-    if (count_address) std::memcpy(static_cast<char *>(task_mapping) + 32, &count_address, 8);
+    if (count_address) {
+      std::memcpy(static_cast<char *>(task_mapping) + 32, &count_address, 8);
+      std::memcpy(static_cast<char *>(task_mapping) + 40, &command_index, 4);
+    }
     task->dispatch_arguments_out = allocator_->gpu_heap_buffer_address_ + dispatch_offset;
     task->max_object_threadgroups = max_object_threadgroups;
     task->control_point_count = static_cast<uint16_t>(control_point_count);
@@ -6148,9 +6154,9 @@ public:
         return;
       if ((sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW &&
            sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED) ||
-          MaxCommandCount != 1 || sig->UpdateVertexBuffers ||
+          sig->UpdateVertexBuffers ||
           sig->UpdateIndexBuffer) {
-        WARN("D3D12 ExecuteIndirect with AIRCONV tessellation requires one draw without VB/IB updates");
+        WARN("D3D12 ExecuteIndirect with AIRCONV tessellation does not support VB/IB updates");
         FailRecording(__func__, "AIRCONV tessellation indirect signature is unsupported");
         return;
       }
@@ -6165,23 +6171,27 @@ public:
         return;
       }
       const auto index_format = indexed ? to_airconv_index_format(index_type) : SM50_INDEX_BUFFER_FORMAT_NONE;
-      uint64_t root_offset = 0;
-      if (sig->UpdateRootArguments && !EncodeAirconvIndirectRoots(sig, arg_buffer->buffer->current()->buffer(), ArgBufferOffset, root_offset)) return;
       uint64_t filtered_count = CountBufferAddress;
       if (predication_buffer_ && !EncodePredicationCount(count_buffer, CountBufferOffset, MaxCommandCount, filtered_count)) return;
-      if (PreDraw(false, index_format, false) != DrawCallStatus::AirconvTessellation)
-        return;
-      if (sig->UpdateRootArguments) BindAirconvIndirectRoots(root_offset);
-      if (filtered_count)
-        EncodeRenderResourceUse(predication_buffer_ ? allocator_->gpu_heap_buffer_.handle : count_buffer->buffer->current()->buffer().handle,
-                                WMTResourceUsageRead, WMTRenderStageVertex);
+      for (UINT command_index = 0; command_index < MaxCommandCount; command_index++) {
+        const uint64_t command_offset = uint64_t(command_index) * sig->ByteStride;
+        uint64_t root_offset = 0;
+        if (sig->UpdateRootArguments && !EncodeAirconvIndirectRoots(sig, arg_buffer->buffer->current()->buffer(), ArgBufferOffset + command_offset, root_offset)) return;
+        if (PreDraw(false, index_format, false) != DrawCallStatus::AirconvTessellation)
+          return;
+        if (sig->UpdateRootArguments) BindAirconvIndirectRoots(root_offset);
+        if (filtered_count)
+          EncodeRenderResourceUse(predication_buffer_ ? allocator_->gpu_heap_buffer_.handle : count_buffer->buffer->current()->buffer().handle,
+                                  WMTResourceUsageRead, WMTRenderStageVertex);
 
-      const uint32_t threads_per_patch = pso_graphics_->airconv_tessellation_threads_per_patch;
-      if (!EncodeAirconvTessellationIndirect(
-              indexed, index_format, arg_buffer->buffer->current()->buffer(), ArgBufferOffset + sig->air_emulation_draw_offset,
-              ArgBufferAddress + sig->air_emulation_draw_offset, control_point_count, threads_per_patch, filtered_count
-          )) {
-        FailRecording(__func__, "AIRCONV tessellation indirect encoding failed");
+        const uint32_t threads_per_patch = pso_graphics_->airconv_tessellation_threads_per_patch;
+        if (!EncodeAirconvTessellationIndirect(
+                indexed, index_format, arg_buffer->buffer->current()->buffer(), ArgBufferOffset + command_offset + sig->air_emulation_draw_offset,
+                ArgBufferAddress + command_offset + sig->air_emulation_draw_offset, control_point_count, threads_per_patch, filtered_count, command_index
+            )) {
+          FailRecording(__func__, "AIRCONV tessellation indirect encoding failed");
+          return;
+        }
       }
       ResetIndirectState(sig, false);
       return;
@@ -6192,9 +6202,9 @@ public:
         return;
       if ((sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW &&
            sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED) ||
-           MaxCommandCount != 1 || sig->UpdateVertexBuffers ||
+           sig->UpdateVertexBuffers ||
            sig->UpdateIndexBuffer) {
-        WARN("D3D12 ExecuteIndirect with AIRCONV geometry requires one draw without VB/IB updates");
+        WARN("D3D12 ExecuteIndirect with AIRCONV geometry does not support VB/IB updates");
         FailRecording(__func__, "AIRCONV geometry indirect signature is unsupported");
         return;
       }
@@ -6204,28 +6214,32 @@ public:
         return;
       const bool indexed = sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
       const auto index_format = indexed ? to_airconv_index_format(index_type) : SM50_INDEX_BUFFER_FORMAT_NONE;
-      uint64_t root_offset = 0;
-      if (sig->UpdateRootArguments && !EncodeAirconvIndirectRoots(sig, arg_buffer->buffer->current()->buffer(), ArgBufferOffset, root_offset)) return;
       uint64_t filtered_count = CountBufferAddress;
       if (predication_buffer_ && !EncodePredicationCount(count_buffer, CountBufferOffset, MaxCommandCount, filtered_count)) return;
-      const auto status = PreDraw(false, index_format, false);
-      if (status != DrawCallStatus::AirconvGeometry ||
-          !geometry_primitive_matches(primitive_type, pso_graphics_->airconv_geometry_input_primitive))
-        return;
-      if (indexed && !index_buffer)
-        return;
-      if (sig->UpdateRootArguments) BindAirconvIndirectRoots(root_offset);
-      if (filtered_count)
-        EncodeRenderResourceUse(predication_buffer_ ? allocator_->gpu_heap_buffer_.handle : count_buffer->buffer->current()->buffer().handle,
-                                WMTResourceUsageRead, WMTRenderStageVertex);
-      auto [vertex_per_warp, vertex_increment_per_warp] = get_airconv_geometry_vertex_count(topology_);
-      if (!vertex_increment_per_warp)
-        return;
-      if (!EncodeAirconvGeometryIndirect(
-              indexed, index_format, arg_buffer->buffer->current()->buffer(), ArgBufferOffset + sig->air_emulation_draw_offset,
-              ArgBufferAddress + sig->air_emulation_draw_offset, vertex_per_warp, vertex_increment_per_warp, filtered_count
-          )) {
-        FailRecording(__func__, "AIRCONV geometry indirect encoding failed");
+      for (UINT command_index = 0; command_index < MaxCommandCount; command_index++) {
+        const uint64_t command_offset = uint64_t(command_index) * sig->ByteStride;
+        uint64_t root_offset = 0;
+        if (sig->UpdateRootArguments && !EncodeAirconvIndirectRoots(sig, arg_buffer->buffer->current()->buffer(), ArgBufferOffset + command_offset, root_offset)) return;
+        const auto status = PreDraw(false, index_format, false);
+        if (status != DrawCallStatus::AirconvGeometry ||
+            !geometry_primitive_matches(primitive_type, pso_graphics_->airconv_geometry_input_primitive))
+          return;
+        if (indexed && !index_buffer)
+          return;
+        if (sig->UpdateRootArguments) BindAirconvIndirectRoots(root_offset);
+        if (filtered_count)
+          EncodeRenderResourceUse(predication_buffer_ ? allocator_->gpu_heap_buffer_.handle : count_buffer->buffer->current()->buffer().handle,
+                                  WMTResourceUsageRead, WMTRenderStageVertex);
+        auto [vertex_per_warp, vertex_increment_per_warp] = get_airconv_geometry_vertex_count(topology_);
+        if (!vertex_increment_per_warp)
+          return;
+        if (!EncodeAirconvGeometryIndirect(
+                indexed, index_format, arg_buffer->buffer->current()->buffer(), ArgBufferOffset + command_offset + sig->air_emulation_draw_offset,
+                ArgBufferAddress + command_offset + sig->air_emulation_draw_offset, vertex_per_warp, vertex_increment_per_warp, filtered_count, command_index
+            )) {
+          FailRecording(__func__, "AIRCONV geometry indirect encoding failed");
+          return;
+        }
       }
       ResetIndirectState(sig, false);
       return;

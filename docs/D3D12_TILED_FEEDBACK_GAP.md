@@ -1,5 +1,46 @@
 # Tiled raw/structured feedback production gap
 
+## Multi-command AIR emulation indirect execution checkpoint
+
+Baseline ad7d81a6. Hypothesis: marshal each signature-stride row separately and
+compare its ordinal with the GPU-visible count, removing the single-command
+restriction without CPU readback. Evidence: GS/TS branches previously rejected
+MaxCommandCount other than one and counted marshals tested only count == 0.
+Expected effect: independent root updates and draws for each active row. Risk:
+recording/allocation cost is O(MaxCommandCount); repeated in-flight submission of
+private root/dispatch output regions still needs qualification. No performance
+improvement or complete ExecuteIndirect conformance is claimed.
+
+Implementation filters predication once, retains its GPU count through all rows,
+seeds a distinct root output region per updating row, and resets affected CPU
+bindings once after the entire operation. Ordinal gating uses count <= index;
+the recording bound supplies the MaxCommandCount clamp. Existing uncounted entry
+names and 32-byte task layouts remain unchanged. Private counted payloads expand
+to 48 bytes (count pointer at 32, ordinal at 40). Packed uint2 argument references
+honor D3D12's four-byte stream alignment, including a draw after a root constant.
+The AIR draw structures themselves contain scalar 32-bit fields.
+
+Validation: both reconfigured full builds and 16 host tests per build pass.
+The new --multi GPU oracle uses three separate 12-word output slices selected by
+indirect root constants, different initially staged root VAs/constants, a
+40-byte padded stride with draw offset 20, and serial mapped/NULL alternations.
+Count-only cases check 0, 1, 2 and UINT_MAX against MaxCommandCount 3, inspecting
+every word in active and skipped slices. Combined predication cases check both
+blocking and execution, including a zero count. Normal GS/DS count and HS UAV
+predication pass; no-private HS UAV count, GS predication and DS UAV count pass.
+The no-private DS run explicitly reports Metal API Validation Enabled without
+validation errors. This is API validation, not shader-memory validation. A normal
+single-command GS root/count regression also passes.
+Evidence: cache dxmt-reconciliation.ZLDvwE/emulation-multi-*.log.
+
+Self-review checked stream bounds/64-bit stride arithmetic, private payload
+offsets, root seeding/reset scope, and single-command compatibility. The review
+uses the code-review skill's standards/spec axes, performed by the main agent
+without independent sub-agents. VB/IB state updates remain rejected; DrawIndexed,
+uncounted multi-command execution, GPU-produced arguments/counts, nonzero buffer
+offsets, partial constants, multiple queues, concurrent closed-list reuse and
+D3D11 marshal runtime regressions remain unqualified. These gaps are not waived.
+
 Baseline cc665176. Task Analysis: prioritize a real Tier 2 implementation gap,
 not another complete matrix rerun. Packed array tails are not the next missing
 feature: the existing packed audit records Tier 2's rejection of substandard

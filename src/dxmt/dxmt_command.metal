@@ -412,7 +412,7 @@ struct DXMTDispatchArguments {
 };
 
 struct DXMTTSDispatchMarshal {
-  constant uint2& draw_arguments; // (vertex|index_count, instance_count)
+  constant packed_uint2& draw_arguments; // D3D indirect arguments are only four-byte aligned.
   device DXMTDispatchArguments& dispatch_arguments_out;
   ulong max_object_threadgroups;
   ushort control_point_count;
@@ -449,7 +449,7 @@ void ts_draw_arguments_marshal_impl(
 }
 
 struct DXMTGSDispatchMarshal {
-  constant uint2& draw_arguments; // (vertex|index_count, instance_count)
+  constant packed_uint2& draw_arguments; // D3D indirect arguments are only four-byte aligned.
   device DXMTDispatchArguments& dispatch_arguments_out;
   ulong max_object_threadgroups;
   uint vertex_count_per_warp;
@@ -491,11 +491,11 @@ void gs_draw_arguments_marshal_impl(
     constant DXMTGSDispatchMarshal* tasks [[buffer(kCustomBufferArgumentIndex0)]]) {
   gs_draw_arguments_marshal_impl(tasks);
 }
-struct DXMTTSCountedMarshal { DXMTTSDispatchMarshal task; constant uint& count; };
-struct DXMTGSCountedMarshal { DXMTGSDispatchMarshal task; constant uint& count; };
+struct DXMTTSCountedMarshal { DXMTTSDispatchMarshal task; constant uint& count; uint command_index; };
+struct DXMTGSCountedMarshal { DXMTGSDispatchMarshal task; constant uint& count; uint command_index; };
 [[vertex]] void ts_draw_arguments_marshal_counted(
     constant DXMTTSCountedMarshal& data [[buffer(kCustomBufferArgumentIndex0)]]) {
-  if (data.count == 0) {
+  if (data.count <= data.command_index) {
     data.task.dispatch_arguments_out.x = 0;
     data.task.dispatch_arguments_out.y = 0;
     data.task.dispatch_arguments_out.z = 0;
@@ -503,7 +503,7 @@ struct DXMTGSCountedMarshal { DXMTGSDispatchMarshal task; constant uint& count; 
 }
 [[vertex]] void gs_draw_arguments_marshal_counted(
     constant DXMTGSCountedMarshal& data [[buffer(kCustomBufferArgumentIndex0)]]) {
-  if (data.count == 0) {
+  if (data.count <= data.command_index) {
     data.task.dispatch_arguments_out.x = 0;
     data.task.dispatch_arguments_out.y = 0;
     data.task.dispatch_arguments_out.z = 0;

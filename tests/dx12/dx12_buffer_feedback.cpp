@@ -28,7 +28,9 @@ void Transition(ID3D12GraphicsCommandList *list, ID3D12Resource *resource,
   b.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
   list->ResourceBarrier(1, &b);
 }
-int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect, bool pixel, bool vertex, bool geometry, bool hull, bool domain, bool counted, bool predicated, bool root_updates) {
+int Run(pD3DCompile compile, bool uav_source, bool root_source, bool indirect, bool pixel, bool vertex, bool geometry, bool hull, bool domain, bool counted, bool predicated, bool root_updates, bool multi) {
+  const UINT command_count = multi ? 3 : 1;
+  const UINT output_words = 12 * command_count;
   const bool tessellation = hull || domain;
   const bool graphics_stage = pixel || vertex || geometry || tessellation;
   const bool update_roots = indirect && (!counted || root_updates);
@@ -43,6 +45,9 @@ ByteAddressBuffer raw : register(t0);
 StructuredBuffer<uint> structured : register(t1);
 #endif
 RWStructuredBuffer<uint> output : register(u0);
+#ifdef MULTI_SOURCE
+cbuffer Control : register(b0) { uint command_id; };
+#endif
 #if defined(HULL_SOURCE) || defined(DOMAIN_SOURCE)
 struct TessVertex { float4 position : SV_Position; };
 struct TessFactors { float edge[3] : SV_TessFactor; float inside : SV_InsideTessFactor; };
@@ -77,12 +82,16 @@ void main(float4 position : SV_Position) {
   uint2 z = raw.Load2(0, c);
   uint s = structured.Load(0, d);
   uint t = structured.Load(1, e);
-  output[0]=x; output[1]=CheckAccessFullyMapped(a);
-  output[2]=y; output[3]=CheckAccessFullyMapped(b);
-  output[4]=z.x; output[5]=z.y; output[6]=CheckAccessFullyMapped(c);
-  output[7]=s; output[8]=CheckAccessFullyMapped(d);
-  output[9]=t; output[10]=CheckAccessFullyMapped(e);
-  output[11]=0x1234u;
+  uint base = 0;
+#ifdef MULTI_SOURCE
+  base = command_id * 12;
+#endif
+  output[base + 0]=x; output[base + 1]=CheckAccessFullyMapped(a);
+  output[base + 2]=y; output[base + 3]=CheckAccessFullyMapped(b);
+  output[base + 4]=z.x; output[base + 5]=z.y; output[base + 6]=CheckAccessFullyMapped(c);
+  output[base + 7]=s; output[base + 8]=CheckAccessFullyMapped(d);
+  output[base + 9]=t; output[base + 10]=CheckAccessFullyMapped(e);
+  output[base + 11]=0x1234u;
 #ifdef HULL_SOURCE
   }
   return patch[id];
@@ -102,7 +111,8 @@ void main(float4 position : SV_Position) {
 #endif
 })";
   Owned<ID3DBlob> shader, errors;
-  D3D_SHADER_MACRO macros[7] = {}; UINT macro_count = 0;
+  D3D_SHADER_MACRO macros[8] = {}; UINT macro_count = 0;
+  if (multi) macros[macro_count++] = {"MULTI_SOURCE", "1"};
   if (uav_source) macros[macro_count++] = {"UAV_SOURCE", "1"};
   if (pixel) macros[macro_count++] = {"PIXEL_SOURCE", "1"};
   if (vertex) macros[macro_count++] = {"VERTEX_SOURCE", "1"};
@@ -143,8 +153,8 @@ void main(float4 position : SV_Position) {
   };
   create(upload, 65536, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
   void *mapped = nullptr; Check(upload.p->Map(0, nullptr, &mapped)); std::memset(mapped, 0, 65536); upload.p->Unmap(0, nullptr);
-  create(output, 48, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-  create(readback, 48, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
+  create(output, output_words * 4, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  create(readback, output_words * 4, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
   Owned<ID3D12Heap> tiles;
   D3D12_HEAP_DESC hd = {}; hd.SizeInBytes = 65536; hd.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
   hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
@@ -174,7 +184,7 @@ void main(float4 position : SV_Position) {
   } else device.p->CreateShaderResourceView(source.p, &srv, cpu);
   cpu.ptr += stride;
   D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {}; uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-  uav.Buffer.NumElements = 12; uav.Buffer.StructureByteStride = 4;
+  uav.Buffer.NumElements = output_words; uav.Buffer.StructureByteStride = 4;
   device.p->CreateUnorderedAccessView(output.p, nullptr, &uav, cpu);
   D3D12_DESCRIPTOR_RANGE ranges[] = {{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, 0},
                                     {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 2}};
@@ -182,7 +192,7 @@ void main(float4 position : SV_Position) {
   D3D12_ROOT_PARAMETER parameter = {}; parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
   parameter.DescriptorTable = {2, ranges};
   D3D12_ROOT_SIGNATURE_DESC rd = {}; rd.NumParameters = 1; rd.pParameters = &parameter;
-  D3D12_ROOT_PARAMETER root_parameters[3] = {};
+  D3D12_ROOT_PARAMETER root_parameters[4] = {};
   if (root_source) {
     for (UINT i = 0; i < 2; ++i) {
       root_parameters[i].ParameterType = uav_source ? D3D12_ROOT_PARAMETER_TYPE_UAV : D3D12_ROOT_PARAMETER_TYPE_SRV;
@@ -192,7 +202,11 @@ void main(float4 position : SV_Position) {
     root_parameters[2].DescriptorTable.NumDescriptorRanges = 1;
     root_parameters[2].DescriptorTable.pDescriptorRanges = &ranges[1];
     // Table starts at the heap base; output remains at descriptor offset 2.
-    rd.NumParameters = 3; rd.pParameters = root_parameters;
+    rd.NumParameters = multi ? 4 : 3; rd.pParameters = root_parameters;
+    if (multi) {
+      root_parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+      root_parameters[3].Constants = {0, 0, 1};
+    }
   }
   Owned<ID3DBlob> root_blob, root_error;
   Check(D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob.p, &root_error.p));
@@ -247,7 +261,7 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
   Owned<ID3D12Resource> count_buffer;
   if (counted) create(count_buffer, 16, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
   if (indirect) {
-    D3D12_INDIRECT_ARGUMENT_DESC updates[3] = {};
+    D3D12_INDIRECT_ARGUMENT_DESC updates[4] = {};
     for (UINT i = 0; i < 2; ++i) {
       updates[i].Type = uav_source ? D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW : D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
       if (uav_source) updates[i].UnorderedAccessView.RootParameterIndex = i;
@@ -255,17 +269,28 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
     }
     updates[2].Type = graphics_stage ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW : D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
     D3D12_COMMAND_SIGNATURE_DESC sd = {}; sd.ByteStride = graphics_stage ? 32 : 28; sd.NumArgumentDescs = 3; sd.pArgumentDescs = updates;
+    if (multi) {
+      updates[3] = updates[2];
+      updates[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+      updates[2].Constant = {3, 0, 1};
+      sd.ByteStride = 40; sd.NumArgumentDescs = 4;
+    }
     if (!update_roots) { sd.ByteStride = 16; sd.NumArgumentDescs = 1; sd.pArgumentDescs = &updates[2]; }
     Check(device.p->CreateCommandSignature(&sd, update_roots ? root.p : nullptr, IID_PPV_ARGS(&signature.p)));
-    create(arguments, sd.ByteStride, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+    create(arguments, sd.ByteStride * command_count, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
     Check(arguments.p->Map(0, nullptr, &mapped));
     const UINT64 address = source.p->GetGPUVirtualAddress() + 65532;
-    if (update_roots) {
-      std::memcpy(mapped, &address, 8);
-      std::memcpy(static_cast<char *>(mapped) + 8, &address, 8);
+    std::memset(mapped, 0, sd.ByteStride * command_count);
+    for (UINT row = 0; row < command_count; ++row) {
+      auto stream = static_cast<char *>(mapped) + row * sd.ByteStride;
+      if (update_roots) {
+        std::memcpy(stream, &address, 8);
+        std::memcpy(stream + 8, &address, 8);
+      }
+      if (multi) std::memcpy(stream + 16, &row, 4);
+      const UINT draw[4] = {3, 1, 0, 0}, dispatch[3] = {1, 1, 1};
+      std::memcpy(stream + (update_roots ? (multi ? 20 : 16) : 0), graphics_stage ? draw : dispatch, graphics_stage ? 16 : 12);
     }
-    const UINT draw[4] = {3, 1, 0, 0}, dispatch[3] = {1, 1, 1};
-    std::memcpy(static_cast<char *>(mapped) + (update_roots ? 16 : 0), graphics_stage ? draw : dispatch, graphics_stage ? 16 : 12);
     arguments.p->Unmap(0, nullptr);
   }
   HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
@@ -276,7 +301,7 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
     const bool should_execute = !counted || (predicated ? phase == 2 : (phase & 1) != 0);
     if (counted) {
       Check(count_buffer.p->Map(0, nullptr, &mapped));
-      const UINT count = predicated ? (phase == 1 ? 0 : phase == 3 ? UINT_MAX : 1) : (phase & 1 ? (phase == 3 ? UINT_MAX : 1) : 0);
+      const UINT count = multi && !predicated ? (phase == 3 ? UINT_MAX : phase) : predicated ? (phase == 1 ? 0 : phase == 3 ? UINT_MAX : 1) : (phase & 1 ? (phase == 3 ? UINT_MAX : 1) : 0);
       const UINT64 predicate = phase == 0 || phase == 3 ? 1 : 0;
       std::memcpy(mapped, &count, 4); std::memcpy(static_cast<char *>(mapped) + 8, &predicate, 8);
       count_buffer.p->Unmap(0, nullptr);
@@ -295,7 +320,7 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
     if (phase) Transition(list.p, output.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     if (counted) {
       Transition(list.p, output.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-      list.p->CopyBufferRegion(output.p, 0, upload.p, 0, 48);
+      list.p->CopyBufferRegion(output.p, 0, upload.p, 0, output_words * 4);
       Transition(list.p, output.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
     if (graphics_stage) list.p->SetGraphicsRootSignature(root.p);
@@ -318,8 +343,9 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
       D3D12_VIEWPORT viewport = {0, 0, 1, 1, 0, 1}; D3D12_RECT scissor = {0, 0, 1, 1};
       list.p->RSSetViewports(1, &viewport); list.p->RSSetScissorRects(1, &scissor);
       list.p->IASetPrimitiveTopology(tessellation ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      if (multi) list.p->SetGraphicsRoot32BitConstant(3, command_count, 0);
       if (predicated) list.p->SetPredication(count_buffer.p, 8, D3D12_PREDICATION_OP_EQUAL_ZERO);
-      if (indirect) list.p->ExecuteIndirect(signature.p, 1, arguments.p, 0, count_buffer.p, 0);
+      if (indirect) list.p->ExecuteIndirect(signature.p, command_count, arguments.p, 0, count_buffer.p, 0);
       else list.p->DrawInstanced(3, 1, 0, 0);
       if (predicated) list.p->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
     } else {
@@ -328,24 +354,27 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
       else list.p->Dispatch(1, 1, 1);
     }
     Transition(list.p, output.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    list.p->CopyBufferRegion(readback.p, 0, output.p, 0, 48); Check(list.p->Close());
+    list.p->CopyBufferRegion(readback.p, 0, output.p, 0, output_words * 4); Check(list.p->Close());
     ID3D12CommandList *lists[] = {list.p}; queue.p->ExecuteCommandLists(1, lists);
     Check(queue.p->Signal(fence.p, phase + 1)); Check(fence.p->SetEventOnCompletion(phase + 1, event));
     if (WaitForSingleObject(event, 30000) != WAIT_OBJECT_0) { CloseHandle(event); throw std::runtime_error("GPU timeout"); }
     Check(readback.p->Map(0, nullptr, &mapped));
     auto actual = static_cast<const UINT *>(mapped);
     bool passed = true;
-    for (UINT i = 0; i < 12; ++i) {
+    for (UINT word = 0; word < output_words; ++word) {
+      const UINT i = word % 12;
+      const bool active = multi ? (predicated ? phase == 2 && word / 12 == 0 : word / 12 < (phase == 3 ? command_count : phase)) : should_execute;
       UINT expected = 0;
-      if (should_execute && (i == 1 || i == 8)) expected = (phase & 1) == 0;
-      if (should_execute && (i == 3 || i == 10)) expected = phase & 1;
-      if (should_execute && i == 11) expected = 0x1234;
-      if (actual[i] != expected) { std::printf("phase %u output %u expected %u actual %u\n", phase, i, expected, actual[i]); passed = false; }
+      if (active && (i == 1 || i == 8)) expected = (phase & 1) == 0;
+      if (active && (i == 3 || i == 10)) expected = phase & 1;
+      if (active && i == 11) expected = 0x1234;
+      if (actual[word] != expected) { std::printf("phase %u output %u expected %u actual %u\n", phase, word, expected, actual[word]); passed = false; }
     }
     readback.p->Unmap(0, nullptr);
     if (!passed) { CloseHandle(event); return 1; }
   }
   CloseHandle(event);
+  if (multi) std::puts("MULTI_COMMAND separate-output-slots PASS");
   if (counted) std::printf("GPU count/predication gate predicated=%u PASS\n", predicated);
   std::printf("BUFFER_FEEDBACK %s %s %s raw/structured zero-payload, boundary and alternating remap PASS\n",
               hull ? "hull" : domain ? "domain" : geometry ? "geometry" : vertex ? (indirect ? "indirect-vertex" : "vertex") : pixel ? (indirect ? "indirect-pixel" : "pixel") : indirect ? "indirect" : "direct", root_source ? "root" : "table", uav_source ? "UAV" : "SRV");
@@ -355,7 +384,7 @@ TessVertex ds_main(TessFactors factors, const OutputPatch<TessVertex, 3> patch, 
 int main(int argc, char **argv) {
   bool uav_source = false, root_source = false, indirect = false, pixel = false, vertex = false, geometry = false, hull = false, domain = false;
   bool counted = false, predicated = false;
-  bool root_updates = false;
+  bool root_updates = false, multi = false;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--uav")) uav_source = true;
     else if (!std::strcmp(argv[i], "--root")) root_source = true;
@@ -367,6 +396,7 @@ int main(int argc, char **argv) {
     else if (!std::strcmp(argv[i], "--domain")) { domain = true; root_source = true; }
     else if (!std::strcmp(argv[i], "--counted")) { counted = true; indirect = true; root_source = true; }
     else if (!std::strcmp(argv[i], "--predicated")) { predicated = counted = indirect = root_source = true; }
+    else if (!std::strcmp(argv[i], "--multi")) { multi = root_updates = counted = indirect = root_source = true; }
     else if (!std::strcmp(argv[i], "--root-updates")) { root_updates = indirect = root_source = true; }
     else return 2;
   }
@@ -376,6 +406,6 @@ int main(int argc, char **argv) {
   if (!library) return 77;
   auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(library, "D3DCompile"));
   int result = 1;
-  try { if (compile) result = Run(compile, uav_source, root_source, indirect, pixel, vertex, geometry, hull, domain, counted, predicated, root_updates); } catch (const std::exception &e) { std::puts(e.what()); }
+  try { if (compile) result = Run(compile, uav_source, root_source, indirect, pixel, vertex, geometry, hull, domain, counted, predicated, root_updates, multi); } catch (const std::exception &e) { std::puts(e.what()); }
   FreeLibrary(library); return result;
 }
