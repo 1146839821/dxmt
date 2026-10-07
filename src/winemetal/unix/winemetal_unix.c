@@ -2,6 +2,8 @@
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
 #import <Cocoa/Cocoa.h>
 #import <ColorSync/ColorSync.h>
 #import <CoreFoundation/CFRunLoop.h>
@@ -24,6 +26,16 @@
 typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
 #define STATUS_UNSUCCESSFUL 0xC0000001
+
+static NTSTATUS
+_WMTTraceRuntimeIdentity(void *obj) {
+  Dl_info image;
+  if (!dladdr((const void *)&_WMTTraceRuntimeIdentity, &image) || !image.dli_fname)
+    return STATUS_UNSUCCESSFUL;
+  fprintf(stderr, "DXMT_RUNTIME_IDENTITY wine_pid=%08x unix_pid=%ld image=%s\n",
+          *(const uint32_t *)obj, (long)getpid(), image.dli_fname);
+  return STATUS_SUCCESS;
+}
 
 void
 execute_on_main(dispatch_block_t block) {
@@ -4631,6 +4643,7 @@ const void *__wine_unix_call_funcs[] = {
     &_SparseMappingQueue_copyBufferMappingsWithSideband,
     &_SparseMappingQueue_updateBufferMappingsWithSidebandAndHeaps,
     &thunk_SM50UsesRootBufferFeedback,
+    &_WMTTraceRuntimeIdentity,
 };
 
 #ifndef DXMT_NATIVE
@@ -4838,5 +4851,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_SparseMappingQueue_copyBufferMappingsWithSideband,
     &_SparseMappingQueue_updateBufferMappingsWithSidebandAndHeaps,
     &thunk32_SM50UsesRootBufferFeedback,
+    &_WMTTraceRuntimeIdentity,
 };
 #endif

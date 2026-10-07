@@ -35,6 +35,24 @@ PE and Unix evidence rows prevent copied-file-only qualification. Actual Unix
 image observation and native Windows module evidence are still UNVERIFIED.
 See the 2026-10-08 checkpoint in D3D12_FL12_GATE.md.
 
+Unix identity preparation, baseline 1c2d3de1: add a default-off diagnostic unixcall
+that receives the Windows PID from PE process attach and reports getpid plus
+dladdr of its own native function. Expected effect: correlate the selected PE
+process with the actual Unix image, rather than helper dyld logs or installed-file
+assumptions. Risk: mixed bridge versions; append the call without renumbering and
+require matched cache binaries during validation. Production remains silent when
+the diagnostic gate is unset. Validate PID/path/hash correlation and negative
+cases before permitting the Unix provenance gate to PASS. This is identity
+evidence, not an in-memory attestation or GPU semantic acceptance.
+
+Unix identity implementation checkpoint: both matched cache runtimes now pass
+target-correlated PE/Unix provenance with diagnostic unixcall 203, dladdr/getpid
+and observed-image file hashes. Both feature-support probes satisfy the three
+provenance rows; aggregate FL12 gate remains FAIL. Both full builds, 66 Python
+tests and 16 host tests per build pass. Default-off and pure-PE controls pass.
+Native Windows/wow64 and in-memory attestation are not claimed. Proceed to the
+timestamp oracle and root-feedback performance work before full qualification.
+
 ## Task analysis
 
 Current implementation has separate DXBC/AIRCONV and DXIL/MSC paths, bounded

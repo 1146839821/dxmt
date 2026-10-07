@@ -56,6 +56,7 @@ enum winemetal_unixcall {
   unix_mtlcomputecommandencoder_setintersectionfunctiontable,
   unix_mtldevice_supportsargumentbufferstier2 = 194,
   unix_mtldevice_minimumtexturebufferalignment = 195,
+  unix_trace_runtime_identity = 203,
 };
 
 struct unixcall_mtldevice_newmscgeometrypso {

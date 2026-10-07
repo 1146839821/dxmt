@@ -124,6 +124,30 @@ def verify_loaded_pe(output, stage, name, hashes, required):
             "reason": "missing loaded DLLs: " + ", ".join(missing) if missing else "target PE paths/hashes matched"}
 
 
+def verify_loaded_unix(output, loaded_pe, expected):
+    if loaded_pe["status"] != PASS or "pid" not in loaded_pe:
+        return {"status": UNVERIFIED, "reason": "no verified target PE process"}
+    if "winemetal" not in loaded_pe.get("modules", {}):
+        return {"status": PASS, "applicable": False,
+                "reason": "target has no observed Winemetal PE use; Unix runtime not exercised"}
+    records = re.findall(r'^DXMT_RUNTIME_IDENTITY wine_pid=([0-9a-f]+) unix_pid=(\d+) image=([^\n\r]+)$',
+                         output, re.MULTILINE | re.IGNORECASE)
+    target = int(loaded_pe["pid"], 16)
+    identities = {(int(pid), path) for wine_pid, pid, path in records if int(wine_pid, 16) == target}
+    if len(identities) != 1:
+        return {"status": UNVERIFIED, "reason": "missing/ambiguous target Unix image identity"}
+    pid, image = next(iter(identities))
+    path = Path(image)
+    if not pid or not path.is_absolute():
+        return {"status": UNVERIFIED, "reason": "invalid Unix image identity"}
+    digest = lambda file: hashlib.sha256(file.read_bytes()).hexdigest()
+    observed = digest(path)
+    expected_digest = digest(expected)
+    return {"status": PASS if observed == expected_digest else FAIL, "applicable": True,
+            "unix_pid": pid, "path": str(path.resolve()), "sha256": observed,
+            "reason": "target Unix image file matched" if observed == expected_digest else "loaded Unix image mismatch"}
+
+
 def verify_build(build, variant, wine):
     """Bind the variant label and Unix runtime to this build, not ambient DLLs."""
     try:
@@ -194,9 +218,11 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
         command = ([wine] if wine else []) + [str(stage / name)] + list(args)
         controls = dict(QUALIFICATION_ENVIRONMENT)
         loaded = None
+        loaded_unix = None
         required_modules = set()
         if wine and runtime is not None:
             controls["WINEDEBUG"] = "-all,+pid,+loaddll"
+            controls["DXMT_TRACE_RUNTIME_IDENTITY"] = "1"
             try:
                 imports = pe_imports(stage / name)
                 required_modules = {dll for dll in dlls if dll + ".dll" in imports}
@@ -223,13 +249,17 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
         if wine and runtime is not None:
             try:
                 loaded = verify_loaded_pe(output, stage, name, staged_hashes, required_modules)
+                loaded_unix = verify_loaded_unix(output, loaded, runtime / "winemetal/unix/winemetal.so")
             except OSError as error:
-                loaded = {"status": UNVERIFIED, "reason": str(error)}
-            status = aggregate([row("execution", status, ""), row("loaded_pe", loaded["status"], "")])
+                loaded_unix = {"status": UNVERIFIED, "reason": str(error)}
+                if loaded is None: loaded = {"status": UNVERIFIED, "reason": str(error)}
+            status = aggregate([row("execution", status, ""), row("loaded_pe", loaded["status"], ""),
+                                row("loaded_unix", loaded_unix["status"], "")])
         return {"status": status, "returncode": result.returncode, "output": output,
                 "reason": "fresh execution; required markers checked", "runtime_sha256": staged_hashes,
                 "executable_sha256": executable_hash,
                 "loaded_pe": loaded,
+                "loaded_unix": loaded_unix,
                 "controlled_environment": controls}
 
 
@@ -516,8 +546,10 @@ def build_report(probes, variant, provenance=None):
     if provenance is not None:
         fl0.append(row("build_runtime_provenance", provenance["status"], provenance["reason"]))
         if "unix_sha256" in provenance:
-            fl0.append(row("loaded_unix_runtime_provenance", provenance.get("loaded_unix_image", UNVERIFIED),
-                           "installed-file equality is not actual loaded Unix-image evidence"))
+            unix = feature.get("loaded_unix") or {"status": UNVERIFIED}
+            unix_status = UNVERIFIED if unix["status"] == PASS and not unix.get("applicable") else unix["status"]
+            fl0.append(row("loaded_unix_runtime_provenance", unix_status,
+                           "actual feature-process Unix image evidence required; installed-file equality is insufficient"))
     typed = probes.get("typed_uav_matrix")
     typed_api = options is not None and options["typed"] == 1
     if typed and typed["status"] == PASS and typed_api:

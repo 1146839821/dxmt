@@ -883,6 +883,10 @@ class GateTests(unittest.TestCase):
         report = gate.build_report(probes, "normal", provenance)
         row = next(r for r in report["FL12_0_GATE"]["requirements"] if r["name"] == "loaded_unix_runtime_provenance")
         self.assertEqual(row["status"], gate.UNVERIFIED)
+        probes["feature_support"]["loaded_unix"] = {"status": gate.PASS, "applicable": False}
+        report = gate.build_report(probes, "normal", provenance)
+        self.assertEqual(next(r["status"] for r in report["FL12_0_GATE"]["requirements"]
+                              if r["name"] == "loaded_unix_runtime_provenance"), gate.UNVERIFIED)
 
     def test_feature_probe_requires_actual_pe_evidence(self):
         probes = self.probes()
@@ -894,6 +898,24 @@ class GateTests(unittest.TestCase):
                 row = next(r for r in report["FL12_0_GATE"]["requirements"]
                            if r["name"] == "loaded_pe_runtime_provenance")
                 self.assertEqual(row["status"], gate.UNVERIFIED if status is None else status)
+
+    def test_unix_identity_is_correlated_and_hashed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected, actual = root / "expected.so", root / "loaded.so"
+            expected.write_bytes(b"unix"); actual.write_bytes(b"unix")
+            pe = {"status": gate.PASS, "pid": "0020", "modules": {"winemetal": {}}}
+            line = f"DXMT_RUNTIME_IDENTITY wine_pid=00000020 unix_pid=42 image={actual}\n"
+            self.assertEqual(gate.verify_loaded_unix(line, pe, expected)["status"], gate.PASS)
+            for bad in ("", line.replace("00000020", "00000040"), line.replace("unix_pid=42", "unix_pid=0"),
+                        line + line.replace("unix_pid=42", "unix_pid=43")):
+                self.assertEqual(gate.verify_loaded_unix(bad, pe, expected)["status"], gate.UNVERIFIED)
+            actual.write_bytes(b"stale")
+            self.assertEqual(gate.verify_loaded_unix(line, pe, expected)["status"], gate.FAIL)
+            self.assertEqual(gate.verify_loaded_unix(line, {"status": gate.FAIL}, expected)["status"], gate.UNVERIFIED)
+            control = gate.verify_loaded_unix("", {"status": gate.PASS, "pid": "0020", "modules": {}}, expected)
+            self.assertEqual(control["status"], gate.PASS)
+            self.assertFalse(control["applicable"])
 
 
 if __name__ == "__main__":

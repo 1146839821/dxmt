@@ -1,5 +1,61 @@
 # FL12 evidence gate and backend isolation
 
+## Actual Unix runtime identity checkpoint (2026-10-08)
+
+Baseline 1c2d3de1, branch feat/d3d12-1. The preparation hypothesis is recorded in
+D3D12_CLOSURE_INFRASTRUCTURE_CONSOLIDATION.md: correlate native image identity
+with the selected PE process, not arbitrary dyld/helper output or installed files.
+
+Winemetal PE process attach checks the exact-value, default-off
+DXMT_TRACE_RUNTIME_IDENTITY=1 diagnostic. Appended unixcall 203 receives one
+uint32 Windows PID; native dladdr of that function reports its own image path
+plus getpid. Existing call IDs and shared shader/resource structs remain
+unchanged. The native and wow64 tables append the same pointer-free scalar call;
+wow64 runtime remains unqualified. The diagnostic requires matching PE/Unix
+bridge versions; old installations are not diagnostic-compatible. Ordinary
+startup never calls the new index when the switch is unset/non-enabling.
+
+run_fixture enables the diagnostic only in controlled qualification processes.
+verify_loaded_unix correlates Windows PID with verified PE target, requires one
+unambiguous positive Unix PID/absolute path identity, and compares the observed
+image-file hash with this build's Unix binary. Helper identities, missing/ambiguous
+records and invalid identity remain UNVERIFIED; mismatched image bytes fail.
+For pure PE fixtures that neither import nor observe Winemetal, results explicitly
+record applicable=false / Unix runtime not exercised. Such a result cannot satisfy
+the feature-probe Unix gate. Native Windows observation remains a separate gap.
+
+Validation: both reconfigured full builds pass; 66 Python tests and all 16 host
+tests per build pass. Tests cover PID mismatch, missing/ambiguous/invalid identities,
+wrong image bytes, absent verified PE target, pure-PE applicability, and prohibition
+on using a not-exercised result as feature-process proof. Normal/no-private actual
+capability and feature-support probes pass matched PE and Unix path/hash checks.
+The three provenance requirements are PASS for each fresh feature-support probe,
+while FL12_0_GATE remains FAIL for unsupported capabilities/missing matrices.
+This is not a full gate run or capability promotion.
+
+Actual diagnostic images:
+
+- safety-runtime/lib/wine/x86_64-unix/winemetal.so SHA256
+  13c4a9ea90b9f8bb26c2d42f316a162690c5b2c8bcb53619933181ce5bc2f9be
+- safety-runtime-no-private/lib/wine/x86_64-unix/winemetal.so SHA256
+  88ef38043819075f18892472488ea21d029bc84aa2ba125c20ec417ea811326a
+
+Logs under cache dxmt-reconciliation.ZLDvwE: closure-unix-identity-*.log,
+closure-unix-feature-*.log, closure-unix-pe-only-control.log. Normal direct startup
+controls with the diagnostic unset, 0 and 11 pass capability checks and produce
+no identity record (closure-unix-silent-*.log). A real shader-validation pure PE
+control passes with applicable=false, not an invented loaded Unix image.
+Only cache runtime/overlay PE DLLs and Unix images were refreshed. No game/prefix
+deployment, process restart or push. No production capability changes.
+
+Main-agent standards/spec self-review informed by code-review found no outstanding
+actionable issue in this identity slice; independent sub-agent review was not
+performed. The evidence is diagnostic self-report plus on-disk image hash, not an
+adversarial in-memory attestation. File replacement races, all runtime variants,
+native Windows and wow64 are not qualified. Tracing/hashing must stay outside
+performance measurements. Next work: timestamp oracle, root-feedback profiling,
+production counter gating and complete Typed/MinMax/Tiled/format/raster matrices.
+
 ## Actual PE module provenance checkpoint (2026-10-08)
 
 Baseline e1205f41, branch feat/d3d12-1. Hypothesis: matching copied/installed files
