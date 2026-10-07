@@ -90,3 +90,48 @@ residency, exact independent per-phase data and status expectations; no CPU bitm
 write substitutes for GPU updates. No production admission, prefix deployment,
 game test or capability promotion follows. These prerequisites are ready for a
 local checkpoint commit, not completion of the sparse-feedback task.
+
+## Optional native/Wine sideband entry point
+
+Hypothesis: reuse the proven queue write primitive through an independently
+appended Unix call (199), preserving the old mapping ABI. Expected effect:
+GPU-written one-byte-per-64KiB-tile mapping state without a CPU snapshot.
+Risk: asynchronous object lifetime, overlapping operation ordering and mixed
+runtime versions. Validation: compile both variants and run the shared native
+helper with numeric mapping/readback checks before integrating shader consumers.
+
+The new entry point returns submission success/failure, prepares command buffer,
+allocator and private per-command residency before changing mappings, validates
+range arithmetic, and orders overlapping sideband writes. A completion feedback
+block retains the command, allocator, residency and resource objects. Callers
+must serialize the mapping queue and supply preceding resource-state barriers
+and cross-queue synchronization. The internal contract requires a compatible
+64KiB placement sparse buffer/heap; it is not a general Metal sparse API.
+
+The native probe now calls the same helper as the Unix entry. No production
+D3D12 caller imports the new export yet: integration must dynamically resolve it
+for old-runtime compatibility. Resource-side ownership, copy-mapping updates,
+descriptor transport, AIR/DXIL lowering and shader feedback admission remain
+unfinished. No capability promotion.
+
+Validation result: both reconfigured full builds pass, both native probes pass
+the eight mapping/remapping data and sideband oracles, range/NULL-input rejection
+and a final NULL-heap whole-buffer unmap. The same shared helper also passes a
+standalone MRC build/run, matching the Unix runtime's ownership mode. Both
+cache-only Wine probes dynamically resolve the export and pass eight GPU-written
+sideband phases through the PE/Unix call. Both host suites pass 13/13.
+Evidence: `dxmt-reconciliation.ZLDvwE/sideband-api-{build,probe-build,native-build,
+wine}-{normal,np}.log` and `sparse-sideband-api-mrc-native.log`.
+
+The first Wine attempt found the new export missing despite the app-local DLL
+containing it; updating the isolated runtime's PE counterpart alongside its
+Unix `.so` made the probe pass. Match both halves when deploying; app-local
+path output alone does not prove the builtin export table was refreshed.
+No game/prefix DLL replacement, game launch, process management or push occurred.
+
+Main self-review checks appended table order (including WOW64), fixed-width
+pointer transport, submission failure propagation, overflow-safe tile bounds,
+no map mutation before object preparation, and completion-owned MRC lifetime.
+The tests do not prove error-injection recovery, overlapping-map last-wins,
+cross-queue remap overlap or shader status semantics. Next connect resource-side
+ownership and both update/copy mapping paths before descriptor/AIR integration.

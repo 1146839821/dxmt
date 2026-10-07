@@ -1628,6 +1628,21 @@ SparseMappingQueue_updateBufferMappings(
   UNIX_CALL(unix_sparsemappingqueue_updatebuffermappings, &params);
 }
 
+WINEMETAL_API bool
+SparseMappingQueue_updateBufferMappingsWithSideband(
+    obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap, obj_handle_t sideband,
+    const struct WMTUpdateSparseBufferMappingOperation *operations, uint64_t count
+) {
+  struct unixcall_sparsemappingqueue_mappings_sideband params = {0};
+  params.mappings.queue = queue;
+  params.mappings.resource = buffer;
+  params.mappings.heap = heap;
+  WMT_MEMPTR_SET(params.mappings.operations, operations);
+  params.mappings.count = count;
+  params.sideband = sideband;
+  return WINE_UNIX_CALL(unix_sparsemappingqueue_updatebuffermappings_sideband, &params) == 0;
+}
+
 WINEMETAL_API void
 SparseMappingQueue_updateTextureMappings(
     obj_handle_t queue, obj_handle_t texture, obj_handle_t heap,

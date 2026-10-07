@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <cstdio>
+#include "../../src/winemetal/unix/sparse_mapping_sideband.h"
 
 // Native mapping/write ordering prerequisite, not a shader feedback oracle.
 int main() {
@@ -29,6 +30,16 @@ int main() {
       [residency addAllocation:bitmap]; [residency addAllocation:sparse];
       [residency addAllocation:heap]; [residency addAllocation:readback]; [residency commit];
       [queue addResidencySet:residency];
+      MTL4UpdateSparseBufferMappingOperation invalid = {};
+      invalid.mode = MTLSparseTextureMappingModeMap;
+      invalid.bufferRange = NSMakeRange(2, 1);
+      if (dxmt_update_sparse_buffer_sideband(queue, sparse, heap, bitmap, &invalid, 1)) return 1;
+      invalid.bufferRange = NSMakeRange(0, 1);
+      invalid.heapOffset = 2;
+      if (dxmt_update_sparse_buffer_sideband(queue, sparse, heap, bitmap, &invalid, 1)) return 1;
+      invalid.heapOffset = 0;
+      if (dxmt_update_sparse_buffer_sideband(queue, sparse, nil, bitmap, &invalid, 1)) return 1;
+      if (dxmt_update_sparse_buffer_sideband(queue, sparse, heap, bitmap, nullptr, 1)) return 1;
       for (unsigned phase = 0; phase < 8; ++phase) {
         const NSUInteger mapped_tile = phase & 1;
         MTL4UpdateSparseBufferMappingOperation mappings[2] = {};
@@ -37,7 +48,7 @@ int main() {
           mappings[tile].bufferRange = NSMakeRange(tile, 1);
           mappings[tile].heapOffset = (phase / 2) & 1;
         }
-        [queue updateBufferMappings:sparse heap:heap operations:mappings count:2];
+        if (!dxmt_update_sparse_buffer_sideband(queue, sparse, heap, bitmap, mappings, 2)) return 1;
         id<MTL4CommandBuffer> command = [device newCommandBuffer];
         id<MTL4CommandAllocator> allocator = [device newCommandAllocator];
         if (!command || !allocator) return 1;
@@ -47,8 +58,6 @@ int main() {
         [encoder barrierAfterQueueStages:MTLStageResourceState beforeStages:MTLStageBlit
                      visibilityOptions:MTL4VisibilityOptionResourceAlias];
         [encoder fillBuffer:sparse range:NSMakeRange(mapped_tile * tile_size, 4) value:0x40 + phase];
-        [encoder fillBuffer:bitmap range:NSMakeRange(0, 1) value:mapped_tile == 0];
-        [encoder fillBuffer:bitmap range:NSMakeRange(1, 1) value:mapped_tile == 1];
         [encoder barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit
                         visibilityOptions:MTL4VisibilityOptionDevice];
         [encoder copyFromBuffer:sparse sourceOffset:mapped_tile * tile_size toBuffer:readback destinationOffset:0 size:4];
@@ -64,7 +73,15 @@ int main() {
         const auto *data = static_cast<const unsigned char *>(readback.contents);
         for (unsigned i = 0; i < 4; ++i) if (data[i] != 0x40 + phase) return 1;
       }
-      std::puts("GPU sparse map/remap + sideband queue order PASS: 8 phases (no shader feedback claim)");
+      MTL4UpdateSparseBufferMappingOperation unmap = {};
+      unmap.mode = MTLSparseTextureMappingModeUnmap;
+      unmap.bufferRange = NSMakeRange(0, 2);
+      if (!dxmt_update_sparse_buffer_sideband(queue, sparse, nil, bitmap, &unmap, 1)) return 1;
+      [queue signalEvent:done value:9];
+      if (![done waitUntilSignaledValue:9 timeoutMS:10000]) return 1;
+      const auto *unmapped = static_cast<const unsigned char *>(bitmap.contents);
+      if (unmapped[0] || unmapped[1]) return 1;
+      std::puts("GPU sparse map/remap + production sideband helper PASS: 8 phases (no shader feedback claim)");
       return 0;
     }
     return 77;

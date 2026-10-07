@@ -2478,6 +2478,13 @@ WINEMETAL_API void SparseMappingQueue_updateBufferMappings(
     const struct WMTUpdateSparseBufferMappingOperation *operations, uint64_t count
 );
 
+// Optional development entry point; resolve dynamically when pairing runtimes.
+// A 64KiB placement-sparse buffer and one sideband byte per tile are required.
+WINEMETAL_API bool SparseMappingQueue_updateBufferMappingsWithSideband(
+    obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap, obj_handle_t sideband,
+    const struct WMTUpdateSparseBufferMappingOperation *operations, uint64_t count
+);
+
 WINEMETAL_API void SparseMappingQueue_updateTextureMappings(
     obj_handle_t queue, obj_handle_t texture, obj_handle_t heap,
     const struct WMTUpdateSparseTextureMappingOperation *operations, uint64_t count

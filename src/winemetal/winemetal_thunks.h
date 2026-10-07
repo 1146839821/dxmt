@@ -29,6 +29,7 @@ enum winemetal_unixcall {
   unix_mtlcommandqueue_commandbuffer_with_error_options = 167,
   unix_mtltexture_tailsizeinbytes = 168,
   unix_mtldevice_newrenderpso_stagein = 198,
+  unix_sparsemappingqueue_updatebuffermappings_sideband = 199,
   unix_mtldevice_supportsraytracing = 170,
   unix_mtldevice_accelerationstructuresizes,
   unix_mtldevice_newaccelerationstructure,
@@ -534,6 +535,11 @@ struct unixcall_sparsemappingqueue_mappings {
   obj_handle_t heap;
   struct WMTConstMemoryPointer operations;
   uint64_t count;
+};
+
+struct unixcall_sparsemappingqueue_mappings_sideband {
+  struct unixcall_sparsemappingqueue_mappings mappings;
+  obj_handle_t sideband;
 };
 
 struct unixcall_sparsemappingqueue_copy_mappings {

@@ -19,6 +19,7 @@
 #include "../airconv_thunks.h"
 #include "../metalirconverter_thunks.h"
 #include "metalirconverter_native.h"
+#include "sparse_mapping_sideband.h"
 
 typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
@@ -4093,6 +4094,29 @@ _SparseMappingQueue_updateBufferMappings(void *obj) {
 }
 
 static NTSTATUS
+_SparseMappingQueue_updateBufferMappingsWithSideband(void *obj) {
+  struct unixcall_sparsemappingqueue_mappings_sideband *params = obj;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260400
+  if (@available(macOS 26.4, *)) {
+    const struct unixcall_sparsemappingqueue_mappings *mappings = &params->mappings;
+    MTL4UpdateSparseBufferMappingOperation *operations = NULL;
+    if (mappings->count) {
+      operations = copy_sparse_buffer_mapping_operations(mappings->operations.ptr, mappings->count);
+      if (!operations) return STATUS_UNSUCCESSFUL;
+    }
+    bool submitted = dxmt_update_sparse_buffer_sideband(
+        (id<MTL4CommandQueue>)mappings->queue, (id<MTLBuffer>)mappings->resource,
+        (id<MTLHeap>)mappings->heap, (id<MTLBuffer>)params->sideband,
+        operations, (NSUInteger)mappings->count
+    );
+    free(operations);
+    return submitted ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+  }
+#endif
+  return STATUS_UNSUCCESSFUL;
+}
+
+static NTSTATUS
 _SparseMappingQueue_updateTextureMappings(void *obj) {
   struct unixcall_sparsemappingqueue_mappings *params = obj;
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
@@ -4537,6 +4561,7 @@ const void *__wine_unix_call_funcs[] = {
     &thunk_DXMTMSCLowerTypedBufferOrigins,
     &thunk_DXMTMSCLowerReductionSamplers,
     &_MTLDevice_newRenderPipelineStateWithStageIn,
+    &_SparseMappingQueue_updateBufferMappingsWithSideband,
 };
 
 #ifndef DXMT_NATIVE
@@ -4740,5 +4765,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &thunk_DXMTMSCLowerTypedBufferOrigins,
     &thunk_DXMTMSCLowerReductionSamplers,
     &_MTLDevice_newRenderPipelineStateWithStageIn,
+    &_SparseMappingQueue_updateBufferMappingsWithSideband,
 };
 #endif

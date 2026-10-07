@@ -2,6 +2,10 @@ dx12_sm6_probe = executable('dx12_compute_sm6', 'dx12_compute_sm6.cpp',
   dependencies: [ d3d12_dep ],
 )
 
+executable('dx12_sparse_sideband', 'dx12_sparse_sideband.cpp',
+  build_by_default: false, dependencies: [winemetal_dep],
+)
+
 executable('dx12_indirect_state', 'dx12_indirect_state.cpp',
   build_by_default: false, dependencies: [d3d12_dep],
 )
