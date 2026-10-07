@@ -488,7 +488,7 @@ Converter::LoadBuffer(const SrcOperandResource &SrcOp) {
 
   return llvm::Optional<BufferResourceHandle>(
       {descriptor->Pointer, descriptor->Metadata, descriptor->StructureStride, SrcOp.read_swizzle,
-       descriptor->GlobalCoherent && SupportsMemoryCoherency()}
+       descriptor->GlobalCoherent && SupportsMemoryCoherency(), descriptor->SparseFeedbackHeader}
   );
 }
 
@@ -502,7 +502,7 @@ Converter::LoadBuffer(const SrcOperandUAV &SrcOp) {
 
   return llvm::Optional<BufferResourceHandle>(
       {descriptor->Pointer, descriptor->Metadata, descriptor->StructureStride, SrcOp.read_swizzle,
-       descriptor->GlobalCoherent && SupportsMemoryCoherency()}
+       descriptor->GlobalCoherent && SupportsMemoryCoherency(), descriptor->SparseFeedbackHeader}
   );
 }
 

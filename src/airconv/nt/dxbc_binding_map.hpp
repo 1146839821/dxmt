@@ -45,6 +45,8 @@ struct BufferDescriptor {
   llvm::Value *Metadata;
   uint32_t StructureStride;
   bool GlobalCoherent;
+  // AIR descriptor word 3. Null when the binding ABI cannot carry feedback.
+  llvm::Value *SparseFeedbackHeader = nullptr;
 };
 
 struct CounterDescriptor {

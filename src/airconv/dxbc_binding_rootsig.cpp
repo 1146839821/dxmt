@@ -70,6 +70,20 @@ public:
   }
 
   llvm::Value *
+  GetSparseBufferFeedbackHeader(
+      llvm::air::AIRBuilder &AIR, llvm::Value *IntPtr, llvm::Value *Index, RangeId RangeId,
+      uint32_t DescriptorOffset
+  ) {
+    // AIR uses four qwords; this is not the MSC three-qword descriptor ABI.
+    auto &B = AIR.builder;
+    auto TyDescriptor = llvm::ArrayType::get(B.getInt64Ty(), 4);
+    auto IdxDescriptor = B.CreateAdd(B.CreateSub(Index, AIR.getInt(RangeId)), AIR.getInt(DescriptorOffset));
+    return B.CreateLoad(B.getInt64Ty(), B.CreateGEP(
+        TyDescriptor, B.CreatePointerCast(IntPtr, TyDescriptor->getPointerTo(2)),
+        {IdxDescriptor, AIR.getInt(3)}));
+  }
+
+  llvm::Value *
   GetUAVCounterDescriptor(
       llvm::air::AIRBuilder &AIR, llvm::Value *IntPtr, llvm::Value *Index, RangeId RangeId, uint32_t DescriptorOffset
   ) {
@@ -328,7 +342,8 @@ public:
         Builder, HeapPointer, Index, Builder.getIntTy()->getPointerTo(1), SRV.range.lower_bound, DescriptorOffset
     );
 
-    return BufferDescriptor{Pointer, Metadata, SRV.structure_stride, false};
+    return BufferDescriptor{Pointer, Metadata, SRV.structure_stride, false,
+        GetSparseBufferFeedbackHeader(Builder, HeapPointer, Index, SRV.range.lower_bound, DescriptorOffset)};
   }
 
   virtual llvm::Optional<BufferDescriptor>
@@ -352,7 +367,8 @@ public:
         Builder, HeapPointer, Index, Builder.getIntTy()->getPointerTo(1), UAV.range.lower_bound, DescriptorOffset
     );
 
-    return BufferDescriptor{Pointer, Metadata, UAV.structure_stride, UAV.global_coherent};
+    return BufferDescriptor{Pointer, Metadata, UAV.structure_stride, UAV.global_coherent,
+        GetSparseBufferFeedbackHeader(Builder, HeapPointer, Index, UAV.range.lower_bound, DescriptorOffset)};
   }
 
   virtual llvm::Optional<CounterDescriptor>

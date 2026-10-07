@@ -259,6 +259,18 @@ game deployment, process management or push occurred. Root transport, actual
 byte-footprint lowering, DXIL support and GPU feedback matrices remain required.
 # Raw/structured feedback decoder checkpoint
 
+Shader binding follow-up: AIR descriptor-table raw/structured SRV and UAV
+bindings now load qword 3 (32-byte descriptor stride) into
+`BufferDescriptor::SparseFeedbackHeader` and propagate it to the converter's
+read handle. D3D11, TGSM, and root descriptors retain a null compiler-side field;
+a table descriptor can instead carry the runtime integer zero for an ordinary
+buffer. Lowering must distinguish these cases and branch before dereferencing
+zero. CBV/counter and MSC three-qword descriptor layouts are unchanged.
+Normal/no-private full builds and 14 host regressions pass. This is source and
+build evidence only: the existing tests do not execute a shader header load,
+and non-NULL feedback compilation still fails explicitly. Root transport,
+header dereference, byte-footprint checks, and GPU bitmap lookup remain open.
+
 Hypothesis: normalize feedback loads into the existing raw/structured load IR
 while retaining the separate status destination, so later residency lowering
 can share the data-load implementation without losing status semantics.

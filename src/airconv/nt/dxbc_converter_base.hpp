@@ -62,6 +62,7 @@ struct BufferResourceHandle {
   uint32_t StructureStride; // 0 if not structured
   Swizzle Swizzle;
   bool GlobalCoherent;
+  llvm::Value *SparseFeedbackHeader = nullptr;
 };
 
 struct AtomicBufferResourceHandle {
