@@ -212,3 +212,48 @@ Evidence: `resource-sideband-retained-build-{normal,np}.log`,
 `resource-sideband-api-validation-{normal,np}.log`, and
 `sparse-sideband-copy-mrc-native.log`. In-flight old/new heap overlap remains a
 broader GPU regression matrix item, not inferred from this serial phase probe.
+
+## AIR descriptor transport
+
+Hypothesis: an immutable resource-level header in AIR raw/structured descriptor
+word 3 can carry resource base VA, actual byte size and the live GPU mapping
+array. View origin is then pointer minus resource base, preserving nonzero
+views without per-view CPU mapping snapshots. Evidence: AIR buffer descriptors
+are four qwords, with word 2 reserved for UAV counters and word 3 unused; MSC
+has a separate three-qword entry and must remain untouched. Expected effect:
+real descriptor transport with allocation-owned header/bitmap lifetime.
+Risk: stale descriptor reuse, padded reserved allocation size, auxiliary resource
+residency and partially published VA metadata. Validation: inspect raw and
+structured views, counter/MSC invariance, overwrite/copy behavior and retained
+allocation metadata in the isolated resource probe. Root shader transport,
+feedback decoding/lowering and admission remain unfinished.
+
+Implementation: allocation-owned header and mapping byte references are
+immutable before VA publication; failed initialization does not unregister an
+unpublished primary allocation. AIR raw/structured SRV/UAV entries populate
+word 3, preserve UAV counter word 2, and clear both auxiliary words when an
+ordinary/null SRV replaces the entry. MSC entries remain exactly three qwords.
+Descriptor copy retains the source allocation and its auxiliary references.
+Existing record/submission resource fan-out declares header and bitmap read-only
+outside the heap/VA locks. Root residency is prepared, but root shader transport
+has not been added. Static descriptor flags, pending-use eligibility and live
+submission reread policy are unchanged.
+
+Validation: both reconfigured full builds and host suites (13/13 each) pass.
+Both cache-only Wine descriptor probes, with API validation visibly enabled,
+check nonzero raw SRV and structured UAV origins, actual 65552-byte resource
+width versus 131072-byte sparse allocation, counter preservation, MSC entries,
+descriptor copy/overwrite, and allocation-owned header/bitmap after public
+resource/heap release. Both prior public sideband update/copy/overlap probes
+also pass. Evidence: `sparse-descriptor-{build,wine,sideband-regression}-{normal,np}.log`
+under `dxmt-reconciliation.ZLDvwE` and the build host test logs.
+
+Main self-review checks acyclic allocation ownership, publish ordering, header
+size/offset assertions, counter/MSC separation, ordinary/null overwrite reset,
+and read-only auxiliary resource declaration. The binding-model skill guided
+the independent AIR/MSC layout; API validation guided diagnostics. No feedback
+shader was compiled or executed: the protocol probe is CPU-visible descriptor
+and lifetime evidence, not a shader access-status oracle. Raw/structured feedback
+opcodes still fail closed in SM50Initialize; no Tier 2 or capability promotion,
+game deployment, process management or push occurred. Root transport, actual
+byte-footprint lowering, DXIL support and GPU feedback matrices remain required.

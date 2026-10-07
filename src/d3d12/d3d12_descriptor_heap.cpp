@@ -103,8 +103,9 @@ struct UAVBufferGPUStorage {
   uint64_t pointer;
   uint64_t metadata;
   uint64_t counter_pointer;
-  uint64_t padding;
+  uint64_t sparse_feedback_header;
 };
+static_assert(sizeof(UAVBufferGPUStorage) == 32);
 
 using SRVBufferGPUStorage = UAVBufferGPUStorage;
 
@@ -612,11 +613,14 @@ public:
         gpu_storage.UAVBuffer.pointer = UAVBuffer->current()->gpuAddress() + Slice.byteOffset;
         gpu_storage.UAVBuffer.metadata = Slice.byteLength;
         gpu_storage.UAVBuffer.counter_pointer = Counter ? Counter->current()->gpuAddress() + CounterOffsetInBytes : 0;
+        const auto &header = UAVBuffer->current()->sparse_feedback_header;
+        gpu_storage.UAVBuffer.sparse_feedback_header = header ? header->gpuAddress() : 0;
         SetMSCDescriptor(Index, {gpu_storage.UAVBuffer.pointer, 0, Slice.byteLength});
       } else {
         gpu_storage.UAVBuffer.pointer = 0;
         gpu_storage.UAVBuffer.metadata = 0;
         gpu_storage.UAVBuffer.counter_pointer = 0;
+        gpu_storage.UAVBuffer.sparse_feedback_header = 0;
         SetMSCDescriptor(Index, {});
       }
     }
@@ -665,10 +669,15 @@ public:
       if (Buffer) {
         gpu_storage.SRVBuffer.pointer = Buffer->current()->gpuAddress() + Slice.byteOffset;
         gpu_storage.SRVBuffer.metadata = Slice.byteLength;
+        gpu_storage.SRVBuffer.counter_pointer = 0;
+        const auto &header = Buffer->current()->sparse_feedback_header;
+        gpu_storage.SRVBuffer.sparse_feedback_header = header ? header->gpuAddress() : 0;
         SetMSCDescriptor(Index, {gpu_storage.SRVBuffer.pointer, 0, Slice.byteLength});
       } else {
         gpu_storage.SRVBuffer.pointer = 0;
         gpu_storage.SRVBuffer.metadata = 0;
+        gpu_storage.SRVBuffer.counter_pointer = 0;
+        gpu_storage.SRVBuffer.sparse_feedback_header = 0;
         SetMSCDescriptor(Index, {});
       }
     }

@@ -20,6 +20,7 @@
 #include "d3d12_pageable.hpp"
 #include "com/com_pointer.hpp"
 #include "dxmt_format.hpp"
+#include "air_sparse_buffer_abi.hpp"
 #include <limits>
 #include <mutex>
 #include <cstring>
@@ -97,6 +98,7 @@ class MTLD3D12Buffer : public MTLD3D12Pageable<MTLD3D12Resource> {
   D3D12_HEAP_FLAGS heap_flags_;
   Com<MTLD3D12Heap, false> heap_;
   bool reserved_ = false;
+  bool buffer_registered_ = false;
   UINT tile_count_ = 0;
 
   struct TileMapping {
@@ -173,6 +175,7 @@ public:
     if (pHeap)
       heap_ = pHeap;
     device_->RegisterResidencyAndVA(buffer->current(), this);
+    buffer_registered_ = true;
 
     return S_OK;
   };
@@ -213,7 +216,6 @@ public:
       if (!allocation || !allocation->buffer())
         return E_OUTOFMEMORY;
       buffer->rename(std::move(allocation));
-      device_->RegisterResidencyAndVA(buffer->current(), this);
       if (GetSparseBufferSidebandAPI()) {
         sparse_mapping_sideband = new Buffer(tile_count_, device_->GetMTLDevice());
         auto sideband = sparse_mapping_sideband->allocate({});
@@ -230,7 +232,20 @@ public:
         }
         sparse_mapping_sideband->rename(std::move(sideband));
         device_->RegisterResidency(sparse_mapping_sideband->current()->buffer());
+        Rc<Buffer> header_buffer = new Buffer(sizeof(air::SparseBufferFeedbackHeader), device_->GetMTLDevice());
+        auto header = header_buffer->allocate({});
+        if (!header || !header->buffer()) return E_OUTOFMEMORY;
+        const air::SparseBufferFeedbackHeader contents = {
+            buffer->current()->gpuAddress(), desc_.Width,
+            sparse_mapping_sideband->current()->gpuAddress(), tile_count_};
+        header->updateContents(0, &contents, sizeof(contents));
+        buffer->current()->sparse_mapping_bytes = sparse_mapping_sideband->current();
+        buffer->current()->sparse_feedback_header = std::move(header);
+        device_->RegisterResidency(buffer->current()->sparse_feedback_header->buffer());
       }
+      // Publish only after immutable auxiliary allocation identities are ready.
+      device_->RegisterResidencyAndVA(buffer->current(), this);
+      buffer_registered_ = true;
     }
 
     tile_mappings_.resize(tile_count_);
@@ -238,9 +253,11 @@ public:
   }
 
   ~MTLD3D12Buffer() {
+    if (buffer && buffer->current() && buffer->current()->sparse_feedback_header)
+      device_->UnregisterResidency(buffer->current()->sparse_feedback_header->buffer());
     if (sparse_mapping_sideband && sparse_mapping_sideband->current())
       device_->UnregisterResidency(sparse_mapping_sideband->current()->buffer());
-    if (buffer && buffer->current())
+    if (buffer_registered_ && buffer && buffer->current())
       device_->UnregisterResidencyAndVA(buffer->current(), this);
   }
 

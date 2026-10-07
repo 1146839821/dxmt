@@ -150,6 +150,11 @@ public:
   DXMT_RESOURCE_RESIDENCY_STATE residencyState;
   small_vector<GenericAccessTracker, 1> fenceTrackers;
 
+  // Optional immutable sparse-feedback transport, initialized before VA
+  // publication. Retaining the source allocation also retains both buffers.
+  Rc<BufferAllocation> sparse_feedback_header;
+  Rc<BufferAllocation> sparse_mapping_bytes;
+
 private:
   BufferAllocation(
       WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags, WMT::Heap heap = {},

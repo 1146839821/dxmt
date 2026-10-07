@@ -2914,8 +2914,16 @@ public:
                                : WMTResourceUsageRead;
         if (compute) {
           EncodeComputeResourceUse(allocation->buffer().handle, usage);
+          if (allocation->sparse_feedback_header)
+            EncodeComputeResourceUse(allocation->sparse_feedback_header->buffer().handle, WMTResourceUsageRead);
+          if (allocation->sparse_mapping_bytes)
+            EncodeComputeResourceUse(allocation->sparse_mapping_bytes->buffer().handle, WMTResourceUsageRead);
         } else {
           EncodeRenderResourceUse(allocation->buffer().handle, usage, render_stages);
+          if (allocation->sparse_feedback_header)
+            EncodeRenderResourceUse(allocation->sparse_feedback_header->buffer().handle, WMTResourceUsageRead, render_stages);
+          if (allocation->sparse_mapping_bytes)
+            EncodeRenderResourceUse(allocation->sparse_mapping_bytes->buffer().handle, WMTResourceUsageRead, render_stages);
         }
       }
       if (trace_id < 128)
@@ -3383,16 +3391,22 @@ public:
       if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) || !snapshot.buffer)
         return;
       auto *allocation = snapshot.buffer_allocation ? snapshot.buffer_allocation.ptr() : snapshot.buffer->current();
-      if (allocation)
+      if (allocation) {
         emit(allocation->buffer().handle, WMTResourceUsageRead);
+        if (allocation->sparse_feedback_header) emit(allocation->sparse_feedback_header->buffer().handle, WMTResourceUsageRead);
+        if (allocation->sparse_mapping_bytes) emit(allocation->sparse_mapping_bytes->buffer().handle, WMTResourceUsageRead);
+      }
       break;
     }
     case ShaderVisibleDescriptorType::UAVBuffer: {
       if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV) || !snapshot.buffer)
         return;
       auto *allocation = snapshot.buffer_allocation ? snapshot.buffer_allocation.ptr() : snapshot.buffer->current();
-      if (allocation)
+      if (allocation) {
         emit(allocation->buffer().handle, read_write);
+        if (allocation->sparse_feedback_header) emit(allocation->sparse_feedback_header->buffer().handle, WMTResourceUsageRead);
+        if (allocation->sparse_mapping_bytes) emit(allocation->sparse_mapping_bytes->buffer().handle, WMTResourceUsageRead);
+      }
       break;
     }
     case ShaderVisibleDescriptorType::Null:
