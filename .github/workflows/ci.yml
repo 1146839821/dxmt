@@ -226,6 +226,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_TARGETS_TO_BUILD="" \
             -DLLVM_BUILD_TOOLS=Off \
+            -DLLVM_INCLUDE_BENCHMARKS=Off \
             -DBUG_REPORT_URL="https://github.com/3Shain/dxmt" \
             -DPACKAGE_VENDOR="DXMT" \
             -DLLVM_VERSION_PRINTER_SHOW_HOST_TARGET_INFO=Off \
@@ -280,6 +281,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_TARGETS_TO_BUILD="" \
             -DLLVM_BUILD_TOOLS=Off \
+             -DLLVM_INCLUDE_BENCHMARKS=Off \
             -DCMAKE_SYSROOT="$(pwd)/toolchains/${{ env.LLVM_MINGW_DIR }}" \
             -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
             -DBUG_REPORT_URL="https://github.com/3Shain/dxmt" \
@@ -330,6 +332,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_TARGETS_TO_BUILD="" \
             -DLLVM_BUILD_TOOLS=Off \
+            -DLLVM_INCLUDE_BENCHMARKS=Off \
             -DBUG_REPORT_URL="https://github.com/3Shain/dxmt" \
             -DPACKAGE_VENDOR="DXMT" \
             -DLLVM_VERSION_PRINTER_SHOW_HOST_TARGET_INFO=Off \
