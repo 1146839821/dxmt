@@ -36,14 +36,14 @@ class GateTests(unittest.TestCase):
     def test_logic_op_compiler_is_scoped_to_dxil(self):
         with patch.object(gate, "run_fixture", return_value={"status": gate.PASS}) as fixture:
             gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, Path("runtime"), Path("compiler"))
-            self.assertEqual(fixture.call_count, 169)
+            self.assertEqual(fixture.call_count, 183)
             for index, call in enumerate(fixture.call_args_list):
                 self.assertEqual(call.kwargs["compiler"], None if index < 16 or index >= 162 else Path("compiler"))
 
     def test_logic_op_matrix_checks_all_operations_and_both_backends(self):
         with patch.object(gate, "run_fixture", return_value={"status": gate.PASS}) as fixture:
             result = gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, Path("runtime"), Path("compiler"))
-            self.assertEqual(fixture.call_count, 169)
+            self.assertEqual(fixture.call_count, 183)
             self.assertEqual(result["execution_status"], gate.PASS)
             self.assertEqual(result["status"], gate.PARTIAL)
             for index, call in enumerate(fixture.call_args_list[:32]):
@@ -82,14 +82,14 @@ class GateTests(unittest.TestCase):
             self.assertNotEqual(report["FL12_0_GATE"]["status"], gate.PASS)
 
     def test_logic_op_root_failure_is_mandatory(self):
-        cases = [{"status": gate.PASS} for _ in range(79)] + [{"status": gate.FAIL}] + [{"status": gate.PASS}] * 89
+        cases = [{"status": gate.PASS} for _ in range(79)] + [{"status": gate.FAIL}] + [{"status": gate.PASS}] * 103
         with patch.object(gate, "run_fixture", side_effect=cases):
             result = gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, Path("runtime"), Path("compiler"))
             self.assertEqual(result["status"], gate.FAIL)
             self.assertEqual(result["cases"]["dxil-root-cbv-collision-chain-15"]["status"], gate.FAIL)
 
     def test_logic_op_composition_failure_is_mandatory(self):
-        cases = [{"status": gate.PASS} for _ in range(81)] + [{"status": gate.FAIL}] + [{"status": gate.PASS}] * 87
+        cases = [{"status": gate.PASS} for _ in range(81)] + [{"status": gate.FAIL}] + [{"status": gate.PASS}] * 101
         with patch.object(gate, "run_fixture", side_effect=cases):
             result = gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, Path("runtime"), Path("compiler"))
             self.assertEqual(result["status"], gate.FAIL)
@@ -98,13 +98,13 @@ class GateTests(unittest.TestCase):
     def test_logic_op_composition_requires_compiler(self):
         with patch.object(gate, "run_fixture", return_value={"status": gate.PASS}) as fixture:
             result = gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, Path("runtime"))
-            self.assertEqual(fixture.call_count, 87)
-            self.assertEqual(len(result["cases"]), 169)
+            self.assertEqual(fixture.call_count, 101)
+            self.assertEqual(len(result["cases"]), 183)
             self.assertEqual(result["execution_status"], gate.UNVERIFIED)
             self.assertEqual(result["cases"]["dxil-typed-origin-logic-op"]["status"], gate.UNVERIFIED)
 
     def test_logic_op_minmax_switch_failure_is_mandatory(self):
-        cases = [{"status": gate.PASS} for _ in range(161)] + [{"status": gate.FAIL}] + [{"status": gate.PASS}] * 7
+        cases = [{"status": gate.PASS} for _ in range(161)] + [{"status": gate.FAIL}] + [{"status": gate.PASS}] * 21
         with patch.object(gate, "run_fixture", side_effect=cases):
             result = gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, Path("runtime"), Path("compiler"))
             self.assertEqual(result["status"], gate.FAIL)
@@ -114,7 +114,7 @@ class GateTests(unittest.TestCase):
         with patch.object(gate, "run_fixture") as fixture:
             self.assertEqual(gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, None)["status"], gate.UNVERIFIED)
             fixture.assert_not_called()
-        cases = [{"status": gate.PASS, "runtime_sha256": {"d3d12": str(index)}} for index in range(169)]
+        cases = [{"status": gate.PASS, "runtime_sha256": {"d3d12": str(index)}} for index in range(183)]
         with patch.object(gate, "run_fixture", side_effect=cases):
             self.assertEqual(gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, Path("runtime"))["status"], gate.UNVERIFIED)
 
@@ -126,10 +126,20 @@ class GateTests(unittest.TestCase):
                 self.assertNotIn("--experimental", call.args[3])
                 self.assertIn(f"D3D12_MSAA sample-mask={mask:08x} PASS", call.args[4])
                 self.assertIsNone(call.kwargs["compiler"])
-        cases = [{"status": gate.PASS}] * 168 + [{"status": gate.FAIL}]
+        cases = [{"status": gate.PASS}] * 182 + [{"status": gate.FAIL}]
         with patch.object(gate, "run_fixture", side_effect=cases):
             result = gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, Path("runtime"), Path("compiler"))
             self.assertEqual(result["execution_status"], gate.FAIL)
+
+    def test_emulation_depth_coverage_registers_both_stages(self):
+        with patch.object(gate, "run_fixture", return_value={"status": gate.PASS}) as fixture:
+            gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, Path("runtime"), Path("compiler"))
+            for index, call in enumerate(fixture.call_args_list[169:]):
+                self.assertNotIn("--experimental", call.args[3])
+                self.assertIsNone(call.kwargs["compiler"])
+                self.assertTrue(any(option.startswith("--geometry=") for option in call.args[3]) if index < 7 else
+                                any(option.startswith("--hull=") for option in call.args[3]))
+                self.assertIn("D3D12_DEPTH_ONLY " + ("geometry" if index < 7 else "hull/domain") + " coverage PASS", call.args[4])
 
     def test_timestamp_oracle_is_required_without_promoting_full_qualification(self):
         for status in (None, *gate.STATUSES):

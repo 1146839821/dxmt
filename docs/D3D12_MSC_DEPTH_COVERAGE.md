@@ -3,6 +3,11 @@
 Baseline 2c1ae1d3. Scope: implement masked coverage for ordinary MSC vertex
 pipelines without an application pixel shader. Emulated GS/HS/DS remains open.
 
+Later checkpoint: D3D12_MSC_EMULATED_DEPTH_COVERAGE.md connects the retained
+coverage function to GS/HS/DS initial/private emulation builders and records
+bounded raw-depth GPU acceptance. This supersedes the emulation rejection
+below, not complete stage/topology or masked private-variant qualification.
+
 Hypothesis: an internal fragment which only outputs sample_mask can preserve
 the rasterized depth while applying the PSO mask. Evidence: the previous fragment
 SampleMask path has no shader to configure when PS is absent and rejects the

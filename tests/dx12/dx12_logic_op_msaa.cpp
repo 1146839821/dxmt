@@ -26,11 +26,15 @@ int main(int argc, char **argv) {
   bool experimental = false;
   bool ordinary = false, depth_only = false, contrast_mask = false;
   unsigned sample_mask = UINT_MAX;
+  const char *geometry_path = nullptr, *hull_path = nullptr, *domain_path = nullptr;
   for (int i = 6; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--experimental")) experimental = true;
     else if (!std::strcmp(argv[i], "--ordinary")) ordinary = true;
     else if (!std::strcmp(argv[i], "--depth-only")) depth_only = true;
     else if (!std::strcmp(argv[i], "--contrast-mask")) contrast_mask = true;
+    else if (!std::strncmp(argv[i], "--geometry=", 11)) geometry_path = argv[i] + 11;
+    else if (!std::strncmp(argv[i], "--hull=", 7)) hull_path = argv[i] + 7;
+    else if (!std::strncmp(argv[i], "--domain=", 9)) domain_path = argv[i] + 9;
     else if (!std::strncmp(argv[i], "--sample-mask=", 14)) {
       char *end = nullptr;
       const unsigned long long value = std::strtoull(argv[i] + 14, &end, 0);
@@ -49,6 +53,10 @@ int main(int argc, char **argv) {
   }
   if (op > 15) return 2;
   std::vector<unsigned char> vs, seed, source, read;
+  std::vector<unsigned char> geometry, hull, domain;
+  if ((geometry_path && !Load(geometry_path, geometry)) || (hull_path && !Load(hull_path, hull)) ||
+      (domain_path && !Load(domain_path, domain)) || bool(hull_path) != bool(domain_path) ||
+      (geometry_path && hull_path) || ((geometry_path || hull_path) && !depth_only)) return 2;
   if (!Load(argv[1], vs) || !Load(argv[2], seed) || !Load(argv[3], source) || !Load(argv[4], read)) return 1;
   ID3D12Device *raw_device = nullptr;
   if (!Check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&raw_device)), "device")) return 1;
@@ -101,6 +109,11 @@ int main(int argc, char **argv) {
     pd.DepthStencilState.DepthEnable = TRUE;
     pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
     pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    if (geometry_path) pd.GS = {geometry.data(), geometry.size()};
+    if (hull_path) {
+      pd.HS = {hull.data(), hull.size()}; pd.DS = {domain.data(), domain.size()};
+      pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+    }
   }
   // Warm the same bytecode with a different mask before the tested PSO. This
   // catches conversion-cache keys which omit SampleMask, not only API wiring.
@@ -175,7 +188,9 @@ int main(int argc, char **argv) {
   D3D12_VIEWPORT viewport = {0, 0, 1, 1, 0, 1}; D3D12_RECT rect = {0, 0, 1, 1};
   list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &rect); list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   if (!depth_only) list->DrawInstanced(3, 1, 0, 0);
-  list->SetPipelineState(logic_pso.get()); list->DrawInstanced(3, 1, 0, 0);
+  list->SetPipelineState(logic_pso.get());
+  if (hull_path) list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+  list->DrawInstanced(3, 1, 0, 0);
   auto transition = [&](ID3D12Resource *r, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
     D3D12_RESOURCE_BARRIER barrier = {}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition = {r, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after}; list->ResourceBarrier(1, &barrier);
@@ -214,5 +229,7 @@ int main(int argc, char **argv) {
   if (!ok) return 1;
   std::printf("D3D12_MSAA sample-mask=%08x PASS\n", sample_mask);
   if (depth_only) std::puts("D3D12_DEPTH_ONLY 4x D32_FLOAT raw-sample coverage PASS");
+  if (geometry_path) std::puts("D3D12_DEPTH_ONLY geometry coverage PASS");
+  if (hull_path) std::puts("D3D12_DEPTH_ONLY hull/domain coverage PASS");
   std::puts("D3D12_MSAA 4x R32_UINT raw-sample LogicOp PASS"); return 0;
 }

@@ -1514,7 +1514,9 @@ renderpipelinestate_t IRRuntimeNewGeometryEmulationPipeline(device_t device, con
         MTL::MeshRenderPipelineDescriptor* pDesc = descriptor->basePipelineDescriptor;
         pDesc->setObjectFunction( pVertexFn );
         pDesc->setMeshFunction( pGeometryFn );
-        pDesc->setFragmentFunction( pFragmentFn );
+        // DXMT: a supplied base function may already be specialized (coverage).
+        if (descriptor->fragmentLibrary)
+            pDesc->setFragmentFunction( pFragmentFn );
 
         // Link stage-in function:
         NS::Array* pFunctions = (NS::Array *)CFArrayCreate( nullptr, (const void **)&pStageInFn, 1, &kCFTypeArrayCallBacks );
@@ -1609,7 +1611,8 @@ exit_vertex_function_error:
         MTLMeshRenderPipelineDescriptor* pDesc = descriptor->basePipelineDescriptor;
         [pDesc setObjectFunction:pVertexFn];
         [pDesc setMeshFunction:pGeometryFn];
-        [pDesc setFragmentFunction:pFragmentFn];
+        if (descriptor->fragmentLibrary)
+            [pDesc setFragmentFunction:pFragmentFn];
 
         // Link stage-in function:
         MTLLinkedFunctions* pStageInFunctions = [[MTLLinkedFunctions alloc] init];
@@ -1796,7 +1799,8 @@ renderpipelinestate_t IRRuntimeNewGeometryTessellationEmulationPipeline(device_t
         pPipelineDesc->setMeshFunction(pGeometryFn);
 
         // The fragment stage remains as the fragment function.
-        pPipelineDesc->setFragmentFunction(pFragmentFn);
+        if (descriptor->fragmentLibrary)
+            pPipelineDesc->setFragmentFunction(pFragmentFn);
 
         // Link the stage-in function and hull stage as functions visible to the object stage.
         MTL::Function* objectLinkedStages[] = { pStageInFn, pHullFn };
@@ -2012,7 +2016,8 @@ exit_stagein_function_error:
         [pPipelineDesc setMeshFunction:pGeometryFn];
 
         // The fragment stage remains as the fragment function.
-        [pPipelineDesc setFragmentFunction:pFragmentFn];
+        if (descriptor->fragmentLibrary)
+            [pPipelineDesc setFragmentFunction:pFragmentFn];
 
         // Link the stage-in function and hull stage as functions visible to the object stage.
         MTLLinkedFunctions* pObjectLinkedFunctions = [[MTLLinkedFunctions alloc] init];

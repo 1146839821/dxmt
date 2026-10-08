@@ -71,6 +71,7 @@ dxmt_msc_make_mesh_descriptor(const WMTMeshRenderPipelineInfo *info) {
   }
 
   descriptor->setDepthAttachmentPixelFormat((MTL::PixelFormat)ORIGINAL_FORMAT(info->depth_pixel_format));
+  descriptor->setFragmentFunction(dxmt_msc_object<MTL::Function>(info->fragment_function));
   descriptor->setStencilAttachmentPixelFormat((MTL::PixelFormat)ORIGINAL_FORMAT(info->stencil_pixel_format));
   descriptor->setAlphaToCoverageEnabled(info->alpha_to_coverage_enabled);
   descriptor->setRasterizationEnabled(info->rasterization_enabled);

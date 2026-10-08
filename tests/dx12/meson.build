@@ -1090,12 +1090,18 @@ if dxc_command.length() > 0
       build_by_default: false,
     )
   endforeach
-  foreach entry : ['vertex', 'seed', 'source', 'read_samples', 'read_depth']
+  foreach entry : ['vertex', 'seed', 'source', 'read_samples', 'read_depth', 'depth_geometry', 'depth_hull', 'depth_domain']
     profile = 'ps_6_0'
     if entry == 'vertex'
       profile = 'vs_6_0'
     elif entry == 'read_samples' or entry == 'read_depth'
       profile = 'cs_6_0'
+    elif entry == 'depth_geometry'
+      profile = 'gs_6_0'
+    elif entry == 'depth_hull'
+      profile = 'hs_6_0'
+    elif entry == 'depth_domain'
+      profile = 'ds_6_0'
     endif
     custom_target('dx12_logic_msaa_d3d12_' + entry + '_fixture',
       input: 'logic_op_msaa_d3d12.hlsl',

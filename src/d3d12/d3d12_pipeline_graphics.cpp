@@ -355,6 +355,7 @@ CopyRenderPipelineInfoToMesh(const WMTRenderPipelineInfo &source, WMTMeshRenderP
   destination.raster_sample_count = source.raster_sample_count;
   destination.depth_pixel_format = source.depth_pixel_format;
   destination.stencil_pixel_format = source.stencil_pixel_format;
+  destination.fragment_function = source.fragment_function;
 }
 
 static HRESULT
@@ -600,6 +601,7 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
       auto hull = library(hs.metallib), domain = library(ds.metallib);
       if (!hull || !domain) return E_FAIL;
       auto info = minmax_tessellation_info_;
+      info.base.fragment_function = depth_coverage_function_.handle;
       if (!ConfigureMSCTessellation(vs.reflection, hs.reflection, ds.reflection, info.config) ||
           info.config.hs_input_control_point_count != msc_tessellation_config.hs_input_control_point_count)
         return E_INVALIDARG;
@@ -613,6 +615,7 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
       auto geometry = library(gs.metallib);
       if (!geometry) return E_FAIL;
       auto info = minmax_geometry_info_;
+      info.base.fragment_function = depth_coverage_function_.handle;
       WMTPrimitiveType primitive;
       if (!ConfigureMSCGeometry(vs.reflection, gs.reflection, info.config) ||
           !MapMSCGeometryInputPrimitive(gs.reflection.gs_input_primitive, primitive) ||
@@ -1480,8 +1483,9 @@ public:
     }
     const bool use_msc = msc_capabilities.CoreShaderPathUsable() &&
                          vs_backend == D3D12ShaderBackend::MetalShaderConverter;
-    if (use_msc && !has_pixel_shader && sample_mask_ != UINT32_MAX && (has_geometry || has_hull || has_domain)) {
-      ERR("CreatePipelineState: emulated MSC depth-only sample mask requires coverage integration");
+    if (use_msc && !has_pixel_shader && sample_mask_ != UINT32_MAX && (has_geometry || has_hull || has_domain) &&
+        !(msc_capabilities.runtime_symbols & DXMT_MSC_RUNTIME_SYMBOL_EMULATION_BASE_FRAGMENT)) {
+      ERR("CreatePipelineState: runtime lacks emulated depth coverage support");
       return E_NOTIMPL;
     }
     if (vs_backend == D3D12ShaderBackend::MetalShaderConverter && !msc_capabilities.CoreShaderPathUsable()) {
@@ -2162,6 +2166,7 @@ public:
         tess_info.base.raster_sample_count = info.raster_sample_count;
         tess_info.base.depth_pixel_format = info.depth_pixel_format;
         tess_info.base.stencil_pixel_format = info.stencil_pixel_format;
+        tess_info.base.fragment_function = depth_coverage_function_.handle;
         tess_info.base.support_indirect_command_buffers = false;
         tess_info.stage_in_library = stage_in_lib.handle;
         tess_info.vertex_library = vs_lib.handle;

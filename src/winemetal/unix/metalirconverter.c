@@ -597,7 +597,8 @@ dxmt_msc_get_capabilities(struct dxmt_msc_capabilities *capabilities) {
   }
   capabilities->optional_symbols = g_msc_available ?
       g_msc_optional_symbols | DXMT_MSC_RUNTIME_SYMBOL_LINKED_VERTEX_PSO |
-          DXMT_MSC_RUNTIME_SYMBOL_UNIQUE_LIBRARY_FUNCTION : 0;
+          DXMT_MSC_RUNTIME_SYMBOL_UNIQUE_LIBRARY_FUNCTION |
+          DXMT_MSC_RUNTIME_SYMBOL_EMULATION_BASE_FRAGMENT : 0;
   capabilities->ret = g_msc_available ? DXMT_MSC_SUCCESS : DXMT_MSC_ERROR_UNAVAILABLE;
   return capabilities->ret;
 }

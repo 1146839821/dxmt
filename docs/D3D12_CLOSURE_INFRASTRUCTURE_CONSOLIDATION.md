@@ -1,5 +1,14 @@
 # Closure infrastructure consolidation
 
+MSC emulated depth coverage checkpoint (2026-10-08): GS/HS/DS builders now retain
+the specialized internal base fragment function instead of replacing it with
+null. Both builds pass 28 stage/mask cases/112 raw depth comparisons under API
+validation. Old native explicitly rejects non-default masks and preserves
+default-all depth draws. Fourteen mandatory cases expand the raster ledger to
+183. See D3D12_MSC_EMULATED_DEPTH_COVERAGE.md. Masked private GPU acceptance,
+stencil/topology/count/format breadth and complete raster/FL qualification stay
+open; no capability promotion or game deployment.
+
 Ordinary MSC depth coverage checkpoint (2026-10-08): absent-PS non-default
 masks now specialize a no-binding internal coverage fragment. Both builds pass
 fourteen D32_FLOAT 4x cases/56 raw sample comparisons, including different-mask
