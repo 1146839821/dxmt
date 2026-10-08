@@ -2,12 +2,16 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/AsmParser/Parser.h>
+#include <llvm/Support/SourceMgr.h>
+#include <llvm/Transforms/Utils/Cloning.h>
 #include <array>
 #include <iostream>
 
-int main() {
+int main(int argc, char **argv) {
   using namespace llvm;
   LLVMContext context;
+  context.setOpaquePointers(false);
   Module module("logic-output", context);
   IRBuilder<> builder(context);
   auto *i32 = builder.getInt32Ty();
@@ -64,6 +68,56 @@ int main() {
   }
   builder.CreateRetVoid();
   if (verifyModule(module, &errs())) return 6;
-  std::cout << "DXIL logic output CPU IR checks=" << checked << " PASS (not GPU qualification)\n";
+  auto word = [&](unsigned value) -> Metadata * { return ConstantAsMetadata::get(builder.getInt32(value)); };
+  auto *signature_record = MDNode::get(context, {word(0), MDString::get(context, "SV_Target"),
+      ConstantAsMetadata::get(builder.getInt8(5)), ConstantAsMetadata::get(builder.getInt8(16)),
+      MDNode::get(context, {word(3)}), ConstantAsMetadata::get(builder.getInt8(0)), word(1),
+      ConstantAsMetadata::get(builder.getInt8(4)), word(0), ConstantAsMetadata::get(builder.getInt8(0)), nullptr});
+  auto *signature = MDNode::get(context, {nullptr, MDNode::get(context, {signature_record}), nullptr});
+  module.getOrInsertNamedMetadata("dx.shaderModel")->addOperand(
+      MDNode::get(context, {MDString::get(context, "ps"), word(6), word(0)}));
+  module.getOrInsertNamedMetadata("dx.entryPoints")->addOperand(
+      MDNode::get(context, {ValueAsMetadata::get(symbolic), MDString::get(context, "symbolic"), signature, nullptr, nullptr}));
+  std::array<std::array<uint32_t, 4>, 8> mapped_widths{};
+  mapped_widths[3] = {10, 10, 10, 2};
+  uint32_t mapped_space;
+  auto modern_module = CloneModule(module);
+  modern_module->getNamedMetadata("dx.shaderModel")->setOperand(0,
+      MDNode::get(context, {MDString::get(context, "ps"), word(6), word(6)}));
+  if (!dxmt::dxil::LowerIntegerLogicOutputs(*modern_module, 10, mapped_widths, mapped_space, error) ||
+      !modern_module->getFunction("dx.op.createHandleFromBinding") ||
+      !modern_module->getFunction("dx.op.annotateHandle") || verifyModule(*modern_module, &errs())) return 13;
+  // The clone must not mutate the original metadata graph.
+  if (module.getNamedMetadata("dx.entryPoints")->getOperand(0)->getOperand(3)) return 14;
+  if (!dxmt::dxil::LowerIntegerLogicOutputs(module, 10, mapped_widths, mapped_space, error)) return 10;
+  unsigned fetches = 0;
+  for (auto &block : *symbolic) for (auto &instruction : block)
+    if (auto *call = dyn_cast<CallInst>(&instruction))
+      if (call->getCalledFunction()->getName() == "dx.op.createHandle") {
+        if (cast<ConstantInt>(call->getArgOperand(3))->getZExtValue() != 3) return 11;
+        ++fetches;
+      }
+  if (fetches != 16 || mapped_space == UINT32_MAX || verifyModule(module, &errs())) return 12;
+  if (argc == 2) {
+    SMDiagnostic diagnostics;
+    auto shader = parseAssemblyFile(argv[1], diagnostics, context);
+    if (!shader) { diagnostics.print(argv[0], errs()); return 8; }
+    std::array<std::array<uint32_t, 4>, 8> widths{};
+    widths[0] = {8, 8, 8, 8};
+    uint32_t space;
+    if (!dxmt::dxil::LowerIntegerLogicOutputs(*shader, 10, widths, space, error)) {
+      errs() << error << "\n"; return 9;
+    }
+    for (auto &function : *shader) for (auto &block : function) {
+      if (!block.hasName()) block.setName("dxmt.block");
+      for (auto &instruction : block)
+        if (!instruction.getType()->isVoidTy() && !instruction.hasName()) instruction.setName("dxmt.value");
+    }
+    shader->setSourceFileName("");
+    shader->setModuleIdentifier("");
+    shader->print(outs(), nullptr);
+    std::cerr << "DXIL framebuffer injection verified space=" << space << " (not GPU qualification)\n";
+  }
+  (argc == 2 ? std::cerr : std::cout) << "DXIL logic output CPU IR checks=" << checked << " PASS (not GPU qualification)\n";
   return 0;
 }

@@ -67,3 +67,26 @@ verification. This primitive is compiled into the native preparation library,
 but is not yet called by production shader preparation. No PSO or capability
 admission changed. Container/DXC validation, MSC compilation and GPU ordering
 are still unverified for this new primitive; no GPU, WOW64 or performance claim.
+
+## Module injection checkpoint
+
+LowerIntegerLogicOutputs now resolves signature IDs through UINT SV_Target
+semantic indices, retains non-color outputs, appends framebuffer Texture2D SRV
+metadata and inserts loads immediately before each selected store. It supports
+legacy createHandle and SM6.6 createHandleFromBinding/annotateHandle. The chosen
+feature space avoids all shader resource spaces; the eventual preparation caller
+must also check application root-signature spaces before publishing a variant.
+Resource roots and entry-point records are replaced, not mutated in place, to
+preserve metadata shared with a clone. Failure requires discarding the private
+module, and returns no selected compiler feature space.
+
+Fresh DXC ps_6_0 and ps_6_6 shader inputs from graphics_logic_op_sm6.hlsl were
+rewritten for XOR with RGBA8 widths. Both assembled containers passed full DXC
+validation. MSC 4.0.1 compiled both results using the selected public feature
+space; evidence is retained in /Users/zhangbo/.cache/dxmt-msc-logic.6jblCq.
+The host fixture additionally checks nonidentity signature-ID/attachment mapping
+and both handle models. This is compiler evidence, not attachment-ordering GPU
+acceptance. Production DXC preparation, root-layout checks, cache keys and PSO
+integration are still required; no admission or capability declaration changed.
+Both targeted builds and both host suites (17/17) pass. Main-agent Standards/Spec
+self-review and diff whitespace checks pass; no independent review is claimed.
