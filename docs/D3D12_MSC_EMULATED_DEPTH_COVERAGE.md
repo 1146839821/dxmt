@@ -82,7 +82,11 @@ gate registration. No independent review, shader validation, actual WOW64 GPU
 execution, Metal 4 qualification or native Windows oracle is claimed. Cache-only
 runtime deployment; no game/prefix deployment or process restart.
 
-Remaining: actual masked Typed/MinMax private variants, broader topology/count/
+Follow-up: D3D12_PRIVATE_VARIANT_SAMPLE_MASK.md records actual single-sample
+masked Typed/MinMax private GPU evidence. It does not establish 4x private
+acceptance or broaden this report's original 28-case evidence.
+
+Remaining: four-sample masked Typed/MinMax private variants, broader topology/count/
 format/stencil/indirect/lifetime matrices, AIR absent-PS audit and full raster/FL
 qualification. Existing bounded tessellation evidence is not fresh ROTTR
 performance or game tessellation acceptance. No FL/SM/LogicOp promotion.

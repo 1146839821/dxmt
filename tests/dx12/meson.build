@@ -96,7 +96,8 @@ executable('dx12_logic_op_msaa', 'dx12_logic_op_msaa.cpp',
 )
 
 executable('dx12_typed_origin_depth', 'dx12_typed_origin_depth.cpp',
-  build_by_default: false, link_args: ['-municode'], dependencies: [d3d12_dep],
+  build_by_default: false, link_args: ['-municode'],
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
 )
 
 executable('dx12_typed_origin_prepare', 'dx12_typed_origin_prepare.cpp',
@@ -422,6 +423,35 @@ else
 endif
 
 if dxc_command.length() > 0
+  foreach entry : ['typed_vertex', 'ordinary_vertex']
+    custom_target('private_mask_depth_' + entry,
+      input: 'typed_origin_depth.hlsl', output: 'private_mask_depth_' + entry + '.cso',
+      command: dxc_command + ['-E', entry, '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false)
+  endforeach
+  foreach config : [['vertex', 'vs_6_0', '1'], ['geometry', 'gs_6_0', '2'],
+                    ['hull', 'hs_6_0', '2'], ['domain', 'ds_6_0', '4']]
+    foreach ordinary : [false, true]
+      suffix = ordinary ? '_ordinary' : '_typed'
+      definitions = ordinary ? ['-DORDINARY=1'] : ['-DSTAGE_WEIGHT=' + config[2]]
+      custom_target('private_mask_depth_' + config[0] + suffix,
+        input: 'typed_origin_emulation_depth.hlsl', output: 'private_mask_depth_' + config[0] + suffix + '.cso',
+        command: dxc_command + ['-E', config[0], '-T', config[1]] + definitions + ['@INPUT@', '-Fo', '@OUTPUT@'],
+        build_by_default: false)
+    endforeach
+  endforeach
+  foreach config : [['vertex_sample', 'vs_6_0'], ['pixel_vertex', 'ps_6_0'], ['vertex', 'vs_6_0'], ['pixel', 'ps_6_0']]
+    custom_target('private_mask_minmax_' + config[0],
+      input: 'minmax_fragment.hlsl', output: 'private_mask_minmax_' + config[0] + '.cso',
+      command: dxc_command + ['-E', config[0], '-T', config[1], '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false)
+  endforeach
+  foreach config : [['vertex', 'vs_6_0'], ['geometry', 'gs_6_0'], ['hull', 'hs_6_0'], ['domain', 'ds_6_0'], ['pixel', 'ps_6_0']]
+    custom_target('private_mask_preraster_' + config[0],
+      input: 'minmax_preraster.hlsl', output: 'private_mask_preraster_' + config[0] + '.cso',
+      command: dxc_command + ['-E', config[0], '-T', config[1], '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false)
+  endforeach
   foreach operation : ['level', 'grad']
     foreach stage : [['vs', 'vertex'], ['ps', 'pixel'], ['gs', 'geometry'], ['hs', 'hull'], ['ds', 'domain']]
       custom_target('dx12_minmax_preraster_@0@_@1@_fixture'.format(operation, stage[0]),

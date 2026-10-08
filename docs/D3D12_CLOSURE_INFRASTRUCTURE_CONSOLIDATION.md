@@ -1,5 +1,13 @@
 # Closure infrastructure consolidation
 
+Private SampleMask checkpoint (2026-10-08): both builds pass 24 single-sample
+Typed depth/MinMax color cases across native/GS/HS-DS, paired masks 0/1 and
+observed runtime/compiler identities. Relative-directory and stale automatic
+deployment assertions are fixed in the fixtures, not by relaxing production
+validation. See D3D12_PRIVATE_VARIANT_SAMPLE_MASK.md. Four-sample private GPU
+acceptance and full raster/FL qualification remain open; next user priority is
+R11G11B10 Typed UAV load/store support, not capability-only promotion.
+
 MSC emulated depth coverage checkpoint (2026-10-08): GS/HS/DS builders now retain
 the specialized internal base fragment function instead of replacing it with
 null. Both builds pass 28 stage/mask cases/112 raw depth comparisons under API

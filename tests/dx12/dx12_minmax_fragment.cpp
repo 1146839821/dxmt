@@ -9,6 +9,10 @@
 #include <cstring>
 #include <cmath>
 #include <memory>
+#include <cstdlib>
+#include <cwchar>
+
+static UINT fixture_sample_mask = UINT_MAX;
 
 dxmt::Logger dxmt::Logger::s_instance("dx12_minmax_fragment");
 template <typename T> struct ReleaseCOM { void operator()(T *p) const { if (p) p->Release(); } };
@@ -415,7 +419,7 @@ static bool CheckDraw(ID3D12Device *device, ID3D12PipelineState *pso, ID3D12Root
           if (static_sampler && changed) expected_r = 32;
         }
       }
-      const bool untouched = empty && (static_sampler || x < 2);
+      const bool untouched = !(fixture_sample_mask & 1u) || (empty && (static_sampler || x < 2));
       if (varying_clamp_fixture && !(x & 1)) expected_r = expected_g = 0;
       if (directional_grad_fixture && !static_sampler && x >= 2) expected_r = expected_g = 128;
       unsigned blue = !root_updates_fixture ? 0 : !static_sampler && x >= 2 ? (updates ? 31 : 130) :
@@ -485,7 +489,7 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
   pso_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
   pso_desc.RasterizerState.DepthClipEnable = TRUE;
   pso_desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-  pso_desc.SampleMask = UINT_MAX; pso_desc.SampleDesc.Count = 1;
+  pso_desc.SampleMask = fixture_sample_mask; pso_desc.SampleDesc.Count = 1;
   pso_desc.PrimitiveTopologyType = tessellation_fixture ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH :
       D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   pso_desc.NumRenderTargets = 1; pso_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -495,8 +499,20 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
     const auto length = GetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", selected, 32768);
     if (!length || length >= 32768 || !SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr)) return false;
     const auto hr = device->CreateGraphicsPipelineState(&pso_desc, IID_PPV_ARGS(&raw_pso));
-    OwnedCOM<ID3D12PipelineState> rejected(raw_pso);
-    if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", selected) || hr != E_NOTIMPL || rejected) return false;
+    OwnedCOM<ID3D12PipelineState> automatic_pso(raw_pso);
+    if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", selected)) return false;
+    std::wstring deployed_directory;
+    const auto deployment = dxmt::SelectD3D12CompilerDirectory(deployed_directory);
+    if (deployment == S_FALSE) {
+      if (hr != E_NOTIMPL || automatic_pso) return false;
+    } else {
+      const dxmt::D3D12MinMaxGraphicsVariant *automatic_variant = nullptr;
+      if (deployment != S_OK || FAILED(hr) || !automatic_pso ||
+          FAILED(static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(automatic_pso.get())->GetMinMaxVariant(
+              deployed_directory.c_str(), &automatic_variant)) ||
+          !automatic_variant || !automatic_variant->pso || automatic_variant->bindings.empty()) return false;
+      std::puts("MINMAX_FRAGMENT automatic compiler private variant PASS");
+    }
   }
   if (sampling_vs.BytecodeLength) {
     auto rejected_desc = pso_desc; rejected_desc.VS = sampling_vs;
@@ -639,7 +655,17 @@ static bool CheckBinding(dxmt::MTLD3D12Device *device, D3D12_ROOT_SIGNATURE_DESC
 }
 
 int wmain(int argc, wchar_t **argv) {
+  if (argc > 4 && !std::wcsncmp(argv[argc - 1], L"--sample-mask=", 14)) {
+    wchar_t *end = nullptr;
+    const auto value = std::wcstoull(argv[argc - 1] + 14, &end, 0);
+    if (!argv[argc - 1][14] || argv[argc - 1][14] == L'-' || *end || value > UINT_MAX) return 2;
+    fixture_sample_mask = static_cast<UINT>(value); --argc;
+  }
   if (argc != 4 && argc != 5 && argc != 6 && argc != 7) return 1;
+  std::vector<wchar_t> compiler_directory(32768);
+  const auto directory_length = GetFullPathNameW(argv[3], compiler_directory.size(), compiler_directory.data(), nullptr);
+  if (!directory_length || directory_length >= compiler_directory.size()) return 1;
+  argv[3] = compiler_directory.data();
   if (argc >= 5) {
     const auto *option = argv[argc - 1];
     if (!std::wcscmp(option, L"--cube-sample") || !std::wcscmp(option, L"--cube-bias") ||
@@ -870,6 +896,7 @@ int wmain(int argc, wchar_t **argv) {
     std::printf("MINMAX_FRAGMENT mode=%u compiler/binding GPU draw PASS (pre-raster=%u)\n", mode,
         geometry_fixture ? 1 : tessellation_fixture ? 2 : 0);
   }
+  std::printf("MINMAX_PRIVATE sample-mask=%08x numeric GPU PASS\n", fixture_sample_mask);
   std::puts("MinMax graphics integration PASS; full graphics qualification remains open");
   return 0;
 }

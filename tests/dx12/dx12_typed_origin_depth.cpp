@@ -6,6 +6,13 @@
 #include <cstring>
 #include <memory>
 #include <vector>
+#include <cstdlib>
+#include <cwchar>
+#include "../../src/d3d12/d3d12_device.hpp"
+#include "../../src/d3d12/d3d12_typed_origin_pipeline.hpp"
+
+static UINT fixture_sample_mask = UINT_MAX;
+static const wchar_t *fixture_compiler_directory = nullptr;
 
 template <typename T> struct ReleaseCOM { void operator()(T *p) const { if (p) p->Release(); } };
 template <typename T> using OwnedCOM = std::unique_ptr<T, ReleaseCOM<T>>;
@@ -190,7 +197,7 @@ static bool Run(ID3D12Device *device, const DepthShaders &shaders, const DepthCa
     if (tessellation_fixture) { pd.HS = {hs.data(), hs.size()}; pd.DS = {ds.data(), ds.size()}; }
   };
   set_emulation(ordinary_only);
-  pd.SampleMask = UINT_MAX; pd.SampleDesc.Count = 1; pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+  pd.SampleMask = fixture_sample_mask; pd.SampleDesc.Count = 1; pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
   pd.PrimitiveTopologyType = tessellation_fixture ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
   pd.RasterizerState.DepthClipEnable = TRUE;
@@ -203,8 +210,16 @@ static bool Run(ID3D12Device *device, const DepthShaders &shaders, const DepthCa
     std::printf("DEPTH_ORIGIN denied root mode=%u rejected at PSO PASS (no GPU submission)\n", unsigned(test.mode)); return true;
   }
   if (!Check(hr, "pso")) return false;
+  if (!deny_root && !ordinary_only && fixture_sample_mask != UINT_MAX) {
+    const dxmt::D3D12TypedOriginGraphicsVariant *variant = nullptr;
+    if (!Check(static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(pso.get())->GetTypedOriginVariant(
+            fixture_compiler_directory, &variant), "private variant") || !variant ||
+        !variant->pso || variant->bindings.empty()) return false;
+    std::printf("DEPTH_ORIGIN private variant bindings=%zu mask=%08x PASS\n", variant->bindings.size(), fixture_sample_mask);
+  }
   OwnedCOM<ID3D12PipelineState> ordinary_pso;
   if (!deny_root) {
+    pd.SampleMask = UINT_MAX;
     pd.pRootSignature = ordinary_root.get(); pd.VS = {ordinary.data(), ordinary.size()}; raw_pso = nullptr;
     set_emulation(true);
     if (!Check(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&raw_pso)), "ordinary pso")) return false;
@@ -277,6 +292,7 @@ static bool Run(ID3D12Device *device, const DepthShaders &shaders, const DepthCa
       expected = (replacement ? (tessellation_fixture ? 424 : 264) :
           (tessellation_fixture ? 1248 : 640)) / 4096.0f;
     }
+    if (!(fixture_sample_mask & 1u)) expected = 1.0f;
     const bool ok = std::isfinite(values[0]) && std::isfinite(values[1]) &&
         std::fabs(values[0] - expected) < 0.000001f && std::fabs(values[1] - 0.75f) < 0.000001f;
     std::printf("DEPTH_ORIGIN %s RS=%s live=%u vertex=%u indexed=%u ordinary=%u structured=%u pass=%u depth=%g,%g expected=%g,0.75\n",
@@ -288,6 +304,18 @@ static bool Run(ID3D12Device *device, const DepthShaders &shaders, const DepthCa
 }
 
 int wmain(int argc, wchar_t **argv) {
+  if (argc > 4 && !std::wcsncmp(argv[argc - 1], L"--sample-mask=", 14)) {
+    wchar_t *end = nullptr;
+    const auto value = std::wcstoull(argv[argc - 1] + 14, &end, 0);
+    if (!argv[argc - 1][14] || argv[argc - 1][14] == L'-' || *end || value > UINT_MAX) return 2;
+    fixture_sample_mask = static_cast<UINT>(value); --argc;
+  }
+  std::vector<wchar_t> compiler_directory(32768);
+  if (argc >= 4) {
+    const auto length = GetFullPathNameW(argv[3], compiler_directory.size(), compiler_directory.data(), nullptr);
+    if (!length || length >= compiler_directory.size()) return 1;
+    fixture_compiler_directory = compiler_directory.data();
+  }
   DepthShaders shaders;
   const wchar_t *mode = argc >= 5 ? argv[4] : L"";
   const bool geometry_fixture = (argc == 7 || argc == 8) && (!wcscmp(mode, L"--geometry") || !wcscmp(mode, L"--geometry-auto") ||
@@ -311,7 +339,7 @@ int wmain(int argc, wchar_t **argv) {
       (!Load(argv[9], shaders.structured.hull) || !Load(argv[10], shaders.structured.domain))) return 1;
   auto &typed = shaders.typed.vertex, &ordinary = shaders.ordinary.vertex;
   if (!Load(argv[1], typed) || !Load(argv[2], ordinary) ||
-      !SetEnvironmentVariableW(L"DXMT_TYPED_ORIGIN_DXC_DIRECTORY", automatic || ordinary_only ? nullptr : argv[3]) ||
+      !SetEnvironmentVariableW(L"DXMT_TYPED_ORIGIN_DXC_DIRECTORY", automatic || ordinary_only ? nullptr : fixture_compiler_directory) ||
       !SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr)) return 1;
   ID3D12Device *raw = nullptr;
   if (!Check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&raw)), "device")) return 1;
