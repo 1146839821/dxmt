@@ -33,6 +33,39 @@ class GateTests(unittest.TestCase):
             self.assertNotEqual(report[name]["status"], gate.PASS)
         self.assertFalse(report["capability_changes"])
 
+    def test_logic_op_matrix_checks_all_operations_and_both_backends(self):
+        with patch.object(gate, "run_fixture", return_value={"status": gate.PASS}) as fixture:
+            result = gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, Path("runtime"))
+            self.assertEqual(fixture.call_count, 32)
+            self.assertEqual(result["execution_status"], gate.PASS)
+            self.assertEqual(result["status"], gate.PARTIAL)
+            for index, call in enumerate(fixture.call_args_list):
+                operation = index % 16
+                prefix = "sm5-" if index < 16 else ""
+                self.assertEqual(call.args[3][-1], f"--logic-op-{prefix}{operation}")
+                self.assertEqual(call.args[7], () if index < 16 else
+                                 ("graphics_logic_op_sm6.vs.cso", "graphics_logic_op_sm6.ps.cso"))
+                self.assertIn(f"LOGIC_OP index={operation} RGBA8_UINT PASS", call.args[4])
+        with patch.object(gate, "run_fixture", return_value={"status": gate.FAIL}):
+            self.assertEqual(gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, Path("runtime"))["status"], gate.FAIL)
+
+    def test_logic_op_success_cannot_close_full_raster_and_failure_is_not_hidden(self):
+        for status in gate.STATUSES:
+            probes = self.probes()
+            probes["logic_op_gpu_matrix"] = {"status": status}
+            report = gate.build_report(probes, "normal")
+            rows = {r["name"]: r for r in report["FL12_0_GATE"]["requirements"]}
+            self.assertEqual(rows["mandatory_raster_matrix"]["status"], gate.PARTIAL if status == gate.PASS else status)
+            self.assertNotEqual(report["FL12_0_GATE"]["status"], gate.PASS)
+
+    def test_logic_op_matrix_requires_runtime_and_stable_hashes(self):
+        with patch.object(gate, "run_fixture") as fixture:
+            self.assertEqual(gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, None)["status"], gate.UNVERIFIED)
+            fixture.assert_not_called()
+        cases = [{"status": gate.PASS, "runtime_sha256": {"d3d12": str(index)}} for index in range(32)]
+        with patch.object(gate, "run_fixture", side_effect=cases):
+            self.assertEqual(gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, Path("runtime"))["status"], gate.UNVERIFIED)
+
     def test_timestamp_oracle_is_required_without_promoting_full_qualification(self):
         for status in (None, *gate.STATUSES):
             with self.subTest(status=status):

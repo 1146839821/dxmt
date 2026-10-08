@@ -22,8 +22,8 @@ bool CheckHR(const char *name, HRESULT hr) {
   return true;
 }
 
-bool CompilePackedUIntSM5(std::vector<char> &vertex, std::vector<char> &pixel) {
-  static const char source[] = R"HLSL(
+bool CompileGraphicsSM5(std::vector<char> &vertex, std::vector<char> &pixel, bool logic = false) {
+  static const char packed_source[] = R"HLSL(
 struct Input { float2 position : POSITION; uint4 color : COLOR; };
 struct Output { float4 position : SV_Position; float4 color : COLOR; };
 Output vs_main(Input input) {
@@ -34,6 +34,15 @@ Output vs_main(Input input) {
 }
 float4 ps_main(Output input) : SV_Target0 { return input.color; }
 )HLSL";
+  static const char logic_source[] = R"HLSL(
+struct Input { float2 position : POSITION; float4 color : COLOR; };
+struct Output { float4 position : SV_Position; float4 color : COLOR; };
+Output vs_main(Input input) {
+  Output output; output.position = float4(input.position, 0, 1); output.color = input.color; return output;
+}
+uint4 ps_main(Output input) : SV_Target0 { return uint4(240, 15, 170, 85); }
+)HLSL";
+  const auto source = logic ? logic_source : packed_source;
   auto library = LoadLibraryA(D3DCOMPILER_DLL_A);
   if (!library) return false;
   auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(library, "D3DCompile"));
@@ -41,7 +50,7 @@ float4 ps_main(Output input) : SV_Target0 { return input.color; }
     bytes.clear();
     if (!compile) return false;
     ID3DBlob *blob = nullptr, *error = nullptr;
-    const auto hr = compile(source, sizeof(source) - 1, "packed_uint_sm5.hlsl", nullptr, nullptr,
+    const auto hr = compile(source, std::strlen(source), "graphics_sm5.hlsl", nullptr, nullptr,
         entry, profile, D3DCOMPILE_ENABLE_STRICTNESS, 0, &blob, &error);
     if (FAILED(hr) && error) std::cerr << static_cast<const char *>(error->GetBufferPointer()) << "\n";
     if (SUCCEEDED(hr) && blob) {
@@ -97,7 +106,21 @@ int main(int argc, char **argv) {
   const bool indirect = argc == 4 && strncmp(argv[3], "--indirect-", 11) == 0;
   const bool textured_root_cbv = argc == 4 && (strcmp(argv[3], "--texture-root-cbv") == 0 ||
       strcmp(argv[3], "--indirect-texture-root-cbv") == 0);
-  const bool logic_op = argc == 4 && strcmp(argv[3], "--logic-op") == 0;
+  const bool logic_sm5 = argc == 4 && strncmp(argv[3], "--logic-op-sm5-", 15) == 0;
+  const bool numbered_logic = argc == 4 && (logic_sm5 || strncmp(argv[3], "--logic-op-", 11) == 0);
+  unsigned logic_index = D3D12_LOGIC_OP_OR;
+  if (numbered_logic) {
+    const auto number = argv[3] + (logic_sm5 ? 15 : 11);
+    // Reject malformed options instead of silently selecting CLEAR.
+    if (!*number) return 2;
+    logic_index = 0;
+    for (auto digit = number; *digit; ++digit) {
+      if (*digit < '0' || *digit > '9' || logic_index > 15) return 2;
+      logic_index = logic_index * 10 + (*digit - '0');
+    }
+    if (logic_index > 15) return 2;
+  }
+  const bool logic_op = numbered_logic || (argc == 4 && strcmp(argv[3], "--logic-op") == 0);
   const bool stencil = argc == 4 && strcmp(argv[3], "--stencil") == 0;
   const bool barycentrics = argc == 4 && strcmp(argv[3], "--barycentrics") == 0;
   const bool wave_quad_ops = argc == 4 && strcmp(argv[3], "--wave-quad-ops") == 0;
@@ -124,23 +147,28 @@ int main(int argc, char **argv) {
   std::ifstream geometry_file;
   if (geometry)
     geometry_file.open(argv[4], std::ios::binary | std::ios::ate);
-  if (!vertex_file || !pixel_file || (geometry && !geometry_file))
+  if (!logic_sm5 && (!vertex_file || !pixel_file || (geometry && !geometry_file)))
     return 3;
-  auto vertex_size = vertex_file.tellg();
-  auto pixel_size = pixel_file.tellg();
+  const std::streamoff vertex_size = logic_sm5 ? 0 : static_cast<std::streamoff>(vertex_file.tellg());
+  const std::streamoff pixel_size = logic_sm5 ? 0 : static_cast<std::streamoff>(pixel_file.tellg());
   std::streamoff geometry_size = 0;
   if (geometry)
     geometry_size = static_cast<std::streamoff>(geometry_file.tellg());
-  vertex_file.seekg(0);
-  pixel_file.seekg(0);
+  if (!logic_sm5) {
+    vertex_file.seekg(0);
+    pixel_file.seekg(0);
+  }
   if (geometry)
     geometry_file.seekg(0);
   std::vector<char> vertex_shader(static_cast<size_t>(vertex_size));
   std::vector<char> pixel_shader(static_cast<size_t>(pixel_size));
   std::vector<char> geometry_shader(static_cast<size_t>(geometry_size));
-  vertex_file.read(vertex_shader.data(), vertex_shader.size());
-  pixel_file.read(pixel_shader.data(), pixel_shader.size());
-  if (packed_sm5 && !CompilePackedUIntSM5(vertex_shader, pixel_shader)) return 1;
+  if (!logic_sm5) {
+    vertex_file.read(vertex_shader.data(), vertex_shader.size());
+    pixel_file.read(pixel_shader.data(), pixel_shader.size());
+  }
+  if (packed_sm5 && !CompileGraphicsSM5(vertex_shader, pixel_shader)) return 1;
+  if (logic_sm5 && !CompileGraphicsSM5(vertex_shader, pixel_shader, true)) return 1;
   if (geometry)
     geometry_file.read(geometry_shader.data(), geometry_shader.size());
 
@@ -436,10 +464,10 @@ int main(int argc, char **argv) {
   clear_value.Color[2] = 0.0f;
   clear_value.Color[3] = 1.0f;
   if (logic_op) {
-    clear_value.Color[0] = 15.0f;
-    clear_value.Color[1] = 240.0f;
-    clear_value.Color[2] = 85.0f;
-    clear_value.Color[3] = 170.0f;
+    clear_value.Color[0] = 204.0f;
+    clear_value.Color[1] = 51.0f;
+    clear_value.Color[2] = 15.0f;
+    clear_value.Color[3] = 240.0f;
   }
   if (!CheckHR("CreateRenderTarget",
                device->CreateCommittedResource(
@@ -668,7 +696,7 @@ int main(int argc, char **argv) {
       D3D12_COLOR_WRITE_ENABLE_ALL;
   if (logic_op) {
     pso_desc.BlendState.RenderTarget[0].LogicOpEnable = TRUE;
-    pso_desc.BlendState.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_OR;
+    pso_desc.BlendState.RenderTarget[0].LogicOp = static_cast<D3D12_LOGIC_OP>(logic_index);
   }
   if (geometry_instanced) {
     instanced_geometry_hr =
@@ -973,12 +1001,22 @@ int main(int argc, char **argv) {
                            ? 0xff00ff00u
                            : 0xff0000ffu;
   if (packed_uint) expected_pixel = 0xaa4080ffu;
-  if ((pixel & (packed_uint ? UINT_MAX : 0x00ffffffu)) != (expected_pixel & (packed_uint ? UINT_MAX : 0x00ffffffu))) {
+  if (logic_op) {
+    // CPU Boolean oracle, independent from Metal's operation enum translation.
+    constexpr UINT source = 0x55aa0ff0u, destination = 0xf00f33ccu;
+    const UINT expected[] = {0, UINT_MAX, source, ~source, destination, ~destination,
+        source & destination, ~(source & destination), source | destination, ~(source | destination),
+        source ^ destination, ~(source ^ destination), source & ~destination, ~source & destination,
+        source | ~destination, ~source | destination};
+    expected_pixel = expected[logic_index];
+  }
+  if ((pixel & ((packed_uint || logic_op) ? UINT_MAX : 0x00ffffffu)) != (expected_pixel & ((packed_uint || logic_op) ? UINT_MAX : 0x00ffffffu))) {
     std::cerr << "graphics readback mismatch: 0x" << std::hex << pixel
               << std::dec << "\n";
     goto cleanup;
   }
-  std::cout << (packed_sm5 ? "DXBC AIRCONV " : "DXIL ")
+  if (logic_op) std::cout << "LOGIC_OP index=" << logic_index << " RGBA8_UINT PASS\n";
+  std::cout << ((packed_sm5 || logic_sm5) ? "DXBC AIRCONV " : "DXIL ")
             << (geometry_adjacency_indexed
                     ? "indexed adjacency geometry graphics"
                 : geometry_adjacency ? "adjacency geometry graphics"

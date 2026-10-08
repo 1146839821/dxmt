@@ -1,5 +1,14 @@
 # Closure infrastructure consolidation
 
+Raster Boolean qualification checkpoint (2026-10-08): all 16 logic ops now have
+independent RGBA8_UINT four-channel expectations on both DXBC and DXIL, registered
+into the mandatory raster ledger. Normal passes 32/32; no-private rejects all
+32 PSOs with E_NOTIMPL, with target PE/Unix provenance matched. Final reruns,
+ordinary controls and both host suites (85 gate tests) confirm the result.
+See D3D12_LOGIC_OP_QUALIFICATION_2026-10-08.md. No-private LogicOp is a real
+implementation gap; full raster/format coverage remains open, not promoted by
+normal's Boolean subset pass. No renderer or capability change.
+
 MinMax lifetime oracle checkpoint (2026-10-08): the previous in-flight red
 violated both volatile descriptor immutability during submitted execution and
 direct-list resubmission rules. The repaired fixture uses distinct lists,

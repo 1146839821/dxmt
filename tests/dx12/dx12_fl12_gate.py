@@ -361,6 +361,33 @@ TILED_COVERAGE_GAPS = (
 )
 
 
+def run_logic_op_gpu_matrix(directory, wine, timeout, runtime):
+    """All Boolean operations on RGBA8_UINT; not full format/raster closure."""
+    files = ("graphics_logic_op_sm6.vs.cso", "graphics_logic_op_sm6.ps.cso")
+    cases = {}
+    for backend in ("dxbc", "dxil"):
+        for operation in range(16):
+            name = f"{backend}-{operation}"
+            option = f"--logic-op-{'sm5-' if backend == 'dxbc' else ''}{operation}"
+            stage_files = files if backend == "dxil" else ()
+            args = (*files, option) if backend == "dxil" else ("-", "-", option)
+            cases[name] = run_fixture(
+                directory, wine, "dx12_graphics_sm6.exe", args,
+                (f"LOGIC_OP index={operation} RGBA8_UINT PASS",
+                 ("DXBC AIRCONV" if backend == "dxbc" else "DXIL") + " logic op graphics readback passed"),
+                timeout, runtime, stage_files) if runtime is not None else {
+                    "status": UNVERIFIED, "reason": "explicit runtime required for provenance"}
+    execution = aggregate([row(name, case["status"], "") for name, case in cases.items()])
+    hashes = [case["runtime_sha256"] for case in cases.values() if case.get("runtime_sha256")]
+    if hashes and any(digest != hashes[0] for digest in hashes):
+        execution = aggregate([row("execution", execution, ""), row("hash_consistency", UNVERIFIED, "")])
+    return {"status": PARTIAL if execution == PASS else execution, "execution_status": execution,
+            "reason": "16 Boolean operations, both backends, exact four-channel readback; remaining raster matrix open",
+            "coverage_gaps": ["complete RTV format/component widths", "write masks/MRT/MSAA",
+                              "blend/depth/stencil/cull/scissor/sample coverage", "native Windows oracle"],
+            "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
+
+
 def run_tiled_gpu_matrix(directory, wine, timeout, runtime, selected=None, compiler=None):
     cases = {}
     for name, executable, args, files, markers in tiled_gpu_cases():
@@ -736,7 +763,10 @@ def build_report(probes, variant, provenance=None):
                    BLOCKED if minmax and minmax["status"] == PASS else
                    minmax["status"] if minmax else UNVERIFIED,
                    "rejection contract only; opt-in AIR subset exists, full min/max GPU acceptance incomplete"))
-    for name in ("mandatory_raster_matrix", "mandatory_format_matrix",
+    raster = probes.get("logic_op_gpu_matrix", {"status": UNVERIFIED})
+    fl0.append(row("mandatory_raster_matrix", PARTIAL if raster["status"] == PASS else raster["status"],
+                   "logic-op Boolean subset plus explicit format/fixed-function/native coverage gaps"))
+    for name in ("mandatory_format_matrix",
                  "dxbc_mandatory_shader_paths", "dxil_mandatory_shader_paths",
                  "dxbc_tessellation", "dxil_tessellation", "geometry_shader_stream_output"):
         fl0.append(row(name, UNVERIFIED, "complete mandatory GPU readback matrix not registered"))
@@ -858,6 +888,7 @@ def main():
              "container dxil-library-in-ordinary-graphics-slot passed"), args.timeout, runtime),
     }
     probes["minmax_sampler_contract"] = run_minmax_contract(directory, args.wine, args.timeout, runtime)
+    probes["logic_op_gpu_matrix"] = run_logic_op_gpu_matrix(directory, args.wine, args.timeout, runtime)
     probes["tiled_gpu_matrix"] = run_tiled_gpu_matrix(directory, args.wine, args.timeout, runtime,
                                                      compiler=args.tiled_compiler_dir)
     probes["minmax_gpu_matrix"] = run_minmax_gpu_matrix(directory, args.wine, args.timeout, runtime,
