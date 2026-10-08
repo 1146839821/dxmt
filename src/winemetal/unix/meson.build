@@ -7,7 +7,7 @@ winemetal_unix_src = [
 
 # Catch host allocation exceptions at the C/Wine boundary without changing
 # AIRCONV's exception policy or unrelated runtime translation units.
-typed_origin_native = static_library('dxil_typed_origin', ['dxil_typed_origin.cpp', 'dxil_minmax.cpp', 'dxil_minmax_binding.cpp', 'dxil_minmax_prepare.cpp'],
+typed_origin_native = static_library('dxil_typed_origin', ['dxil_typed_origin.cpp', 'dxil_minmax.cpp', 'dxil_minmax_binding.cpp', 'dxil_minmax_prepare.cpp', 'dxil_logic_op.cpp'],
   native: true, include_directories: [dxmt_include_path, llvm_include_path_darwin],
   cpp_args: airconv_args + ['-fexceptions'],
 )

@@ -52,5 +52,18 @@ support; accepting a PSO while leaving its shader unmodified is incorrect.
    required MSC backend actually passes; then expand MSAA, UINT formats, MRT,
    write masks, discard/depth and full raster qualification.
 
-No production code or capability declaration was changed by this preparation.
-No new GPU acceptance, WOW64 acceptance or game performance claim is made.
+## Output primitive checkpoint
+
+LowerIntegerLogicOutput now rewrites a qualified scalar storeOutput.i32 using
+the caller-supplied destination component. It implements all sixteen operations
+and masks narrow component widths. Constant output IDs, row zero and valid
+component indices are required; invalid inputs reject without modifying the
+store. Signature mapping, framebuffer resource insertion and dominance proof
+remain the module-level caller's responsibility.
+
+Both build configurations pass 5,120 independent per-bit truth-table CPU checks
+across 2/8/10/16/32-bit widths, negative input checks and nonconstant SSA module
+verification. This primitive is compiled into the native preparation library,
+but is not yet called by production shader preparation. No PSO or capability
+admission changed. Container/DXC validation, MSC compilation and GPU ordering
+are still unverified for this new primitive; no GPU, WOW64 or performance claim.

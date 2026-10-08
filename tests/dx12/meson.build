@@ -154,6 +154,12 @@ if build_machine.system() == 'darwin'
     include_directories: [include_directories('../../src/winemetal/unix'), llvm_include_path_darwin],
     cpp_args: airconv_args, dependencies: [typed_origin_native_dep],
   )
+  dxil_logic_op_ir_test = executable('dxil_logic_op_ir', 'dxil_logic_op_ir.cpp',
+    native: true,
+    include_directories: [include_directories('../../src/winemetal/unix'), llvm_include_path_darwin],
+    cpp_args: airconv_args, dependencies: [typed_origin_native_dep],
+  )
+  test('dxil-logic-op-ir-unit', dxil_logic_op_ir_test)
 endif
 dxil_origin_parser_test = executable('dxil_origin_transform_test', 'dxil_origin_transform_test.cpp', native: true)
 test('dxil-origin-parser-unit', dxil_origin_parser_test)
