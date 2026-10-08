@@ -1,5 +1,15 @@
 # Closure infrastructure consolidation
 
+MinMax lifetime oracle checkpoint (2026-10-08): the previous in-flight red
+violated both volatile descriptor immutability during submitted execution and
+direct-list resubmission rules. The repaired fixture uses distinct lists,
+allocators and immutable sampler heap versions, preserving GPU-gated overlap and
+completed-list sequential reuse. Both variants pass two deployed repeats each
+(220 dispatches), target PE/Unix/compiler provenance and both host suites.
+See D3D12_MINMAX_INFLIGHT_CONTRACT_AUDIT.md. No production waits or residency
+changes; full qualification remains open. This supersedes the observation-boundary
+interpretation below, not the remaining coverage gaps.
+
 Explicit-LOD fractional clamp repair checkpoint (2026-10-08): ordinary MSC
 SampleLevel now explicitly applies sampler bias/limits then resource clamp using
 the existing private ordinary sampler/texture. A wrong reserved last-mip oracle

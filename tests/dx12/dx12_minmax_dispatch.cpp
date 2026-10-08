@@ -262,9 +262,10 @@ int wmain(int argc, wchar_t **argv) {
     }
     D3D12_SAMPLER_DESC sd = {}; sd.Filter = D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;
     sd.AddressU = sd.AddressV = sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP; sd.MaxLOD = D3D12_FLOAT32_MAX;
-    const auto set_samplers = [&](D3D12_FILTER first, D3D12_FILTER second = D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR) {
+    const auto set_samplers = [&](D3D12_FILTER first, D3D12_FILTER second = D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR,
+                                 ID3D12DescriptorHeap *target = nullptr) {
       if (use_static) return;
-      auto scpu = samplers->GetCPUDescriptorHandleForHeapStart();
+      auto scpu = (target ? target : samplers.get())->GetCPUDescriptorHandleForHeapStart();
       scpu.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
       auto desc = sd; desc.Filter = native_direct ? D3D12_FILTER_MIN_MAG_MIP_LINEAR : first;
       desc.MaxAnisotropy = deployed ? 16 : 1;
@@ -540,13 +541,11 @@ int wmain(int argc, wchar_t **argv) {
         const bool live = legacy || (table.sampler ? (mode & 2) : (table.slots.size() > 2 && &slot == &table.slots[2] && texture_live));
         if (slot.live != live) return 1;
       }
-    if (mode >= 6) {
-      root.reset(); pso.reset(); // Closed commands and the private dispatch own both.
-    }
+    const bool sampler_live = !use_static && (legacy || (mode & 2));
     for (unsigned iteration = 0; iteration < 3; ++iteration) {
       const D3D12_FILTER filters[] = {D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR, D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR,
           deployed ? D3D12_FILTER_ANISOTROPIC : D3D12_FILTER_MIN_MAG_MIP_LINEAR};
-      set_samplers(filters[iteration]);
+      if (sampler_live) set_samplers(filters[iteration]);
       if (texture_live) {
         srv.Texture2D.ResourceMinLODClamp = iteration == 1 ? 1.1f : 0;
         device->CreateShaderResourceView(texture.get(), &srv, cpu);
@@ -566,8 +565,9 @@ int wmain(int argc, wchar_t **argv) {
       std::printf("MINMAX_DISPATCH mode=%u repeat=%u pairs=%u first=%u\n", mode, iteration, pairs, values[0]);
     }
     {
-      // Preserve the first execution on the GPU before a second execution of
-      // the SAME closed list overwrites its readback. No CPU wait between them.
+      // Two distinct lists and immutable heap versions may be in flight together.
+      // Volatile descriptors still cannot be edited while referenced by the GPU,
+      // and a direct list cannot be resubmitted before its previous execution ends.
       ID3D12Resource *raw_preserved = nullptr;
       if (!Check(device->CreateCommittedResource(&readback_properties, D3D12_HEAP_FLAG_NONE, &buffer_desc,
           D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&raw_preserved)), "preserved readback")) return 1;
@@ -586,18 +586,42 @@ int wmain(int argc, wchar_t **argv) {
       std::swap(transition.Transition.StateBefore, transition.Transition.StateAfter);
       observer->ResourceBarrier(1, &transition);
       if (!Check(observer->Close(), "observer close")) return 1;
-      const bool sampler_live = !use_static && (legacy || (mode & 2));
       if (sampler_live) set_samplers(D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR);
+      ID3D12DescriptorHeap *raw_second_samplers = nullptr;
+      if (!use_static && !Check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&raw_second_samplers)), "second samplers")) return 1;
+      OwnedCOM<ID3D12DescriptorHeap> second_samplers(raw_second_samplers);
+      set_samplers(sampler_live ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR,
+          D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR, second_samplers.get());
+      ID3D12CommandAllocator *raw_second_allocator = nullptr;
+      if (!Check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&raw_second_allocator)), "second allocator")) return 1;
+      OwnedCOM<ID3D12CommandAllocator> second_allocator(raw_second_allocator);
+      ID3D12GraphicsCommandList *raw_second_list = nullptr;
+      if (!Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, second_allocator.get(), pso.get(), IID_PPV_ARGS(&raw_second_list)), "second list")) return 1;
+      OwnedCOM<ID3D12GraphicsCommandList> second_list(raw_second_list);
+      ID3D12DescriptorHeap *second_heaps[] = {resources.get(), second_samplers.get()};
+      second_list->SetDescriptorHeaps(use_static ? 1 : 2, second_heaps);
+      second_list->SetComputeRootSignature(root.get());
+      second_list->SetComputeRootDescriptorTable(0, resources->GetGPUDescriptorHandleForHeapStart());
+      if (!use_static) second_list->SetComputeRootDescriptorTable(1, second_samplers->GetGPUDescriptorHandleForHeapStart());
+      second_list->Dispatch(1, 1, 1);
+      std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+      second_list->ResourceBarrier(1, &barrier);
+      second_list->CopyBufferRegion(readback.get(), 0, output.get(), 0, 16);
+      std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+      second_list->ResourceBarrier(1, &barrier);
+      if (!Check(second_list->Close(), "second close")) return 1;
+      if (mode >= 6) {
+        root.reset(); pso.reset(); // Both closed lists must retain their recording dependencies.
+      }
       ID3D12Fence *raw_gate = nullptr;
       if (!Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&raw_gate)), "GPU gate")) return 1;
       OwnedCOM<ID3D12Fence> gate(raw_gate);
-      // Hold the GPU until BOTH native bindings have been materialized. This
-      // proves overlapping lifetime rather than hoping a tiny kernel is slow.
+      // Hold GPU execution until both independent lists have been enqueued.
+      // ExecuteCommandLists returning does not imply worker materialization.
       if (!Check(queue->Wait(gate.get(), 1), "GPU gate wait")) return 1;
       ID3D12CommandList *first[] = {list.get()}; queue->ExecuteCommandLists(1, first);
       ID3D12CommandList *save[] = {observer.get()}; queue->ExecuteCommandLists(1, save);
-      if (sampler_live) set_samplers(D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR);
-      queue->ExecuteCommandLists(1, first);
+      ID3D12CommandList *second[] = {second_list.get()}; queue->ExecuteCommandLists(1, second);
       if (!Check(gate->Signal(1), "GPU gate release") || !wait_complete(++serial)) return 1;
       UINT values[2][4];
       if (!Check(preserved->Map(0, nullptr, &mapped), "map preserved")) return 1;
