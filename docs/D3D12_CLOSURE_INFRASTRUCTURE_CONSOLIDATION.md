@@ -1,5 +1,48 @@
 # Closure infrastructure consolidation
 
+## Current consolidation handoff (baseline 3c048a3c, 2026-10-08)
+
+This section is the current work order; dated checkpoints below are historical
+evidence, not an accumulating list of still-pending prerequisites. Hypothesis:
+one authoritative handoff prevents repeated infrastructure work and prevents
+bounded GPU passes from being mistaken for complete feature qualification.
+Evidence: the gate's controlled environment and timestamp registration, the
+resource continuation, and the timestamp/root-feedback reports linked below.
+Expected effect: prioritize uncovered semantics rather than repeat proven slices.
+Risk: stale documentation or experimental results entering formal aggregates.
+Validation: inspect the current gate, run its unit suite, and retain each report's
+backend, provenance and coverage limitations. This handoff adds no GPU evidence.
+
+1. Gate: mandatory/optional classification, observed PE/Unix identity and explicit
+   experimental environment overrides are implemented. Audit complete-category
+   registration and incomplete-subset aggregation before further full runs.
+   A passing bounded raster ledger is still PARTIAL, not full raster acceptance.
+2. Resource audit: use D3D12_RESOURCE_AUDIT_CONTINUATION_2026-10-07.md as the
+   current backend-specific ledger. Refresh its stale clamp/performance entries
+   against the later reports without discarding historical native observations.
+   MSC raw/structured status sideband, packed tails and lifetime breadth remain
+   implementation/qualification gaps, not documentation-only closure.
+3. Experimental isolation: formal children explicitly clear SM6.6, FL12_0 and
+   LogicOp MSAA opt-ins. Separately labelled opt-in fixtures must not promote
+   mandatory capability results. Preserve default-off production admission.
+4. Timestamp: the reproduced zero-end resolve path has a bounded red-to-green
+   production oracle; see D3D12_TIMESTAMP_RESOLVE_ORDER.md. Do not reopen that
+   diagnosed defect without a fresh failure. Duration/frequency accuracy, queue
+   types, sharing/reuse and fault recovery still require query qualification.
+5. Root feedback: same-build worker-inclusive CPU/GPU A/B and fixed-VA pruning
+   are recorded in D3D12_ROOT_FEEDBACK_PERFORMANCE.md. Full-registry acquisition,
+   same-address GPU remap, independent sort A/B and counter gating remain open.
+   These timings are not game FPS or complete residency correctness evidence.
+6. Next qualification phase: run the existing complete Typed, MinMax and Tiled
+   runners on both builds with matched modules and explicit compiler deployment;
+   expand missing format/raster cells with numeric GPU oracles. Record missing
+   stage/format/lifetime/native coverage separately from executed-case PASS.
+   Experimental MSAA sample masks/frequency/side effects remain separate work.
+
+The SampleIndex/texture-sampling classifier investigation is still pending at
+this baseline. No classifier fix, fresh full qualification, capability promotion
+or game acceptance is claimed by this documentation consolidation.
+
 Experimental D3D12 MSAA checkpoint (2026-10-08): scalar Apple7+ R32 integer MSAA
 allocation/load capability is corrected without enabling integer resolve.
 DXMT_EXPERIMENTAL_LOGIC_OP_MSAA=1 connects MSC multisample lowering; default
