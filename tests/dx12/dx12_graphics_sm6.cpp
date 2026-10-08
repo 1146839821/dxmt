@@ -90,8 +90,10 @@ int main(int argc, char **argv) {
   const bool indirect_indexed = argc == 4 && strcmp(argv[3], "--indirect-root-cbv-indexed") == 0;
   const bool indirect_fragment = argc == 4 && strcmp(argv[3], "--indirect-fragment-constants") == 0;
   const bool indirect_partial = argc == 4 && strcmp(argv[3], "--indirect-partial-constants") == 0;
+  const bool logic_root_cbv = argc == 4 && strncmp(argv[3], "--logic-op-root-cbv-", 20) == 0;
+  const bool logic_root_chain = logic_root_cbv && strncmp(argv[3], "--logic-op-root-cbv-chain-", 26) == 0;
   const bool root_cbv = argc == 4 && (strcmp(argv[3], "--root-cbv") == 0 ||
-      strcmp(argv[3], "--indirect-root-cbv") == 0 || indirect_indexed);
+      strcmp(argv[3], "--indirect-root-cbv") == 0 || indirect_indexed || logic_root_cbv);
   const bool root_constants = argc == 4 && (strcmp(argv[3], "--root-constants") == 0 ||
       strcmp(argv[3], "--indirect-root-constants") == 0 || indirect_fragment || indirect_partial);
   const bool root_srv = argc == 4 && (strcmp(argv[3], "--root-srv") == 0 || strcmp(argv[3], "--indirect-root-srv") == 0);
@@ -108,11 +110,12 @@ int main(int argc, char **argv) {
       strcmp(argv[3], "--indirect-texture-root-cbv") == 0);
   const bool logic_sm5 = argc == 4 && strncmp(argv[3], "--logic-op-sm5-", 15) == 0;
   const bool logic_chain = argc == 4 && (strncmp(argv[3], "--logic-op-sm5-chain-", 21) == 0 ||
-      strncmp(argv[3], "--logic-op-chain-", 17) == 0);
+      strncmp(argv[3], "--logic-op-chain-", 17) == 0 || logic_root_chain);
   const bool numbered_logic = argc == 4 && (logic_sm5 || strncmp(argv[3], "--logic-op-", 11) == 0);
   unsigned logic_index = D3D12_LOGIC_OP_OR;
   if (numbered_logic) {
-    const auto number = argv[3] + (logic_sm5 ? (logic_chain ? 21 : 15) : (logic_chain ? 17 : 11));
+    const auto number = argv[3] + (logic_root_cbv ? (logic_root_chain ? 26 : 20) :
+        logic_sm5 ? (logic_chain ? 21 : 15) : (logic_chain ? 17 : 11));
     // Reject malformed options instead of silently selecting CLEAR.
     if (!*number) return 2;
     logic_index = 0;
@@ -383,7 +386,7 @@ int main(int argc, char **argv) {
     root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     root_parameters[0].Descriptor.ShaderRegister = 0;
     root_parameters[0].Descriptor.RegisterSpace = 0;
-    root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    root_parameters[0].ShaderVisibility = logic_root_cbv ? D3D12_SHADER_VISIBILITY_PIXEL : D3D12_SHADER_VISIBILITY_VERTEX;
     root_desc.NumParameters = 1;
     root_desc.pParameters = root_parameters;
   } else if (root_constants) {
@@ -634,7 +637,7 @@ int main(int argc, char **argv) {
   }
 
   if (root_cbv || root_srv || textured_root_cbv || geometry_root_cbv) {
-    buffer_desc.Width = 256;
+    buffer_desc.Width = logic_root_cbv ? 512 : 256;
     if (!CheckHR("CreateRootData",
                  device->CreateCommittedResource(
                      &upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
@@ -644,7 +647,11 @@ int main(int argc, char **argv) {
     if (!CheckHR("MapRootData",
                  root_data_buffer->Map(0, nullptr, &mapped_root_data)))
       goto cleanup;
-    memcpy(mapped_root_data, root_color, sizeof(root_color));
+    if (logic_root_cbv) {
+      const UINT source[] = {240, 15, 170, 85}, second_source[] = {60, 105, 150, 195};
+      memcpy(mapped_root_data, source, sizeof(source));
+      memcpy(static_cast<unsigned char *>(mapped_root_data) + 256, second_source, sizeof(second_source));
+    } else memcpy(mapped_root_data, root_color, sizeof(root_color));
     root_data_buffer->Unmap(0, nullptr);
   }
   if (root_uav) {
@@ -896,7 +903,10 @@ int main(int argc, char **argv) {
       list->DrawInstanced(draw_count, 1, 0, 0);
   }
   list->EndQuery(query_heap, D3D12_QUERY_TYPE_OCCLUSION, 0);
-  if (logic_chain) list->DrawInstanced(draw_count, 1, 0, 0);
+  if (logic_chain) {
+    if (logic_root_cbv) list->SetGraphicsRootConstantBufferView(0, root_data_buffer->GetGPUVirtualAddress() + 256);
+    list->DrawInstanced(draw_count, 1, 0, 0);
+  }
   list->EndQuery(timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
 
   if (root_uav) {
@@ -1007,15 +1017,15 @@ int main(int argc, char **argv) {
   if (logic_op) {
     // CPU Boolean oracle, independent from Metal's operation enum translation.
     constexpr UINT source = 0x55aa0ff0u, destination = 0xf00f33ccu;
-    const auto apply = [&](UINT dest) {
-      const UINT expected[] = {0, UINT_MAX, source, ~source, dest, ~dest,
-          source & dest, ~(source & dest), source | dest, ~(source | dest),
-          source ^ dest, ~(source ^ dest), source & ~dest, ~source & dest,
-          source | ~dest, ~source | dest};
+    const auto apply = [&](UINT dest, UINT src) {
+      const UINT expected[] = {0, UINT_MAX, src, ~src, dest, ~dest,
+          src & dest, ~(src & dest), src | dest, ~(src | dest),
+          src ^ dest, ~(src ^ dest), src & ~dest, ~src & dest,
+          src | ~dest, ~src | dest};
       return expected[logic_index];
     };
-    expected_pixel = apply(destination);
-    if (logic_chain) expected_pixel = apply(expected_pixel);
+    expected_pixel = apply(destination, source);
+    if (logic_chain) expected_pixel = apply(expected_pixel, logic_root_cbv ? 0xc396693cu : source);
   }
   if ((pixel & ((packed_uint || logic_op) ? UINT_MAX : 0x00ffffffu)) != (expected_pixel & ((packed_uint || logic_op) ? UINT_MAX : 0x00ffffffu))) {
     std::cerr << "graphics readback mismatch: 0x" << std::hex << pixel
@@ -1024,6 +1034,7 @@ int main(int argc, char **argv) {
   }
   if (logic_op) std::cout << "LOGIC_OP index=" << logic_index << " RGBA8_UINT PASS\n";
   if (logic_chain) std::cout << "LOGIC_OP_CHAIN draws=2 PASS\n";
+  if (logic_root_cbv) std::cout << "LOGIC_OP_ROOT_CBV " << (logic_chain ? "rebound" : "direct") << " PASS\n";
   std::cout << ((packed_sm5 || logic_sm5) ? "DXBC AIRCONV " : "DXIL ")
             << (geometry_adjacency_indexed
                     ? "indexed adjacency geometry graphics"

@@ -1,5 +1,32 @@
 # MSC programmable logic-op implementation boundary
 
+## Nonempty root-CBV checkpoint — 2026-10-08
+
+Starting HEAD 589bf096. The pixel shader now has a qualification entry that
+actually reads UINT source values from b0. Its application signature has a
+pixel-visible root CBV, not an unused placeholder parameter. Two-draw cases
+rebind to a different 256-byte-aligned address containing a different source;
+the CPU Boolean oracle uses that second value independently. This checks the
+combined application TLAB binding and ordered framebuffer path rather than
+merely accepting a nonempty root at PSO creation.
+
+All sixteen operations pass both direct and rebinding cases on normal and
+no-private builds (64 executions), with API validation enabled and matched PE,
+native and required compiler/validator provenance. No production repair was
+needed for this particular root layout. The gate now includes these thirty-two
+MSC root cases, totaling sixty-four cases, and still cannot report complete
+raster PASS. Both full builds and both host suites (17/17, 87 gate tests) pass.
+
+Evidence: root-cbv-first.json, root-cbv-matrix.json and root-cbv-gate.json under
+/Users/zhangbo/.cache/dxmt-msc-logic.6jblCq. Binding-model and compiler skills
+informed the shader/root pairing; API validation and main-agent Standards/Spec
+self-review were used. No independent review or shader validation is claimed.
+This closes the tested root-CBV layout only: tables, static samplers, root
+constants, collision retry, Typed/MinMax composition, MSAA/full-format/MRT and
+native comparison remain open. Formal capabilities and game deployments remain
+unchanged. The previous blanket nonempty-root gap below is now qualified by
+this evidence, not removed for all root layouts.
+
 ## PSO integration checkpoint — 2026-10-08
 
 Starting HEAD b5719375. No-private ordinary MSC pixel PSOs now call the validated

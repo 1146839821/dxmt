@@ -1,5 +1,12 @@
 # Closure infrastructure consolidation
 
+Nonempty LogicOp root checkpoint (2026-10-08): an actually consumed pixel root
+CBV and per-draw rebinding with distinct source values pass all sixteen operations
+on both builds under API validation. The raster gate now includes thirty-two
+MSC root cases (sixty-four total). See D3D12_MSC_LOGIC_OP_LOWERING.md. Only this
+CBV layout is qualified; remaining roots/private-variant/MSAA/format scope stays
+open and full raster remains PARTIAL, without capability promotion.
+
 MSC logic-op PSO checkpoint (2026-10-08): public framebuffer-fetch lowering now
 executes all sixteen RGBA8_UINT single-sample operations in no-private MSC,
 including two overlapping draws with API validation. AIR and normal regressions

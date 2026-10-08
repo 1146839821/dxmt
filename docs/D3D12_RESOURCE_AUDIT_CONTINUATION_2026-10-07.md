@@ -1,5 +1,11 @@
 # Resource closure continuation — 2026-10-07
 
+2026-10-08 LogicOp root-CBV evidence: real shader reads and a second draw with a
+different aligned CBV address/source pass sixteen operations on both builds with
+API validation. This qualifies that root-buffer/TLAB combination; it does not
+prove same-address VA remap, table/static-sampler layout, or Typed/MinMax private
+variants. See D3D12_MSC_LOGIC_OP_LOWERING.md for provenance and remaining gaps.
+
 2026-10-08 programmable-logic update: MSC now consumes attachment inputs through
 its public compiler feature space, not a host descriptor or new residency entry.
 The PSO checks application root-space collisions and uses local compiler state;

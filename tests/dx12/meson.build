@@ -1049,6 +1049,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_graphics_logic_op_root_cbv_fixture',
+    input: 'graphics_logic_op_sm6.hlsl',
+    output: 'graphics_logic_op_root_cbv.ps.cso',
+    command: dxc_command + [ '-E', 'ps_root_cbv', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_geometry_sm6_vs_fixture',
     input: 'geometry_sm6.hlsl',
     output: 'geometry_sm6.vs.cso',
