@@ -28,6 +28,8 @@ QUALIFICATION_ENVIRONMENT = {
     "DXMT_EXPERIMENTAL_FL12_0": "0",
     "DXMT_TYPED_ORIGIN_DXC_DIRECTORY": "",
     "DXMT_MINMAX_DXC_DIRECTORY": "",
+    "DXMT_ENABLE_AIR_MINMAX": "0",
+    "DXMT_ENABLE_AIR_MINMAX_DYNAMIC": "0",
 }
 
 
@@ -195,7 +197,8 @@ def verify_build(build, variant, wine):
         return {"status": UNVERIFIED, "reason": str(error)}
 
 
-def run_fixture(directory, wine, name, args, required, timeout, runtime=None, stage_files=None, compiler=None):
+def run_fixture(directory, wine, name, args, required, timeout, runtime=None, stage_files=None, compiler=None,
+                air_minmax=False):
     files = (name,) + (tuple(args) if stage_files is None else tuple(stage_files))
     missing = [file for file in files if not (directory / file).is_file()]
     if missing:
@@ -235,6 +238,8 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
             shutil.copy2(legacy_compiler, stage / legacy_compiler.name)
         command = ([wine] if wine else []) + [str(stage / name)] + list(args)
         controls = dict(QUALIFICATION_ENVIRONMENT)
+        if air_minmax:
+            controls.update(DXMT_ENABLE_AIR_MINMAX="1", DXMT_ENABLE_AIR_MINMAX_DYNAMIC="1")
         loaded = None
         loaded_unix = None
         required_modules = set()
@@ -307,6 +312,66 @@ def run_minmax_contract(directory, wine, timeout, runtime):
     if hashes and any(digest != hashes[0] for digest in hashes):
         status = aggregate([row("execution", status, ""), row("hash_consistency", UNVERIFIED, "")])
     return {"status": status, "reason": "rejection contracts and ordinary GPU controls; not min/max GPU acceptance",
+            "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
+
+
+def minmax_numeric_cases():
+    # Values match CPU-seeded textures, not rejection or compiler success.
+    common = [("texture_sampler.cs.cso", mode, value) for mode, value in
+              (("minimum", 16), ("maximum", 240), ("static-minimum", 16), ("static-maximum", 240))]
+    common += [("minmax_grad.cs.cso", mode, value) for mode, value in
+               (("minimum-grad", 16), ("maximum-grad", 240),
+                ("static-minimum-grad", 16), ("static-maximum-grad", 240))]
+    common += [("minmax_line.cs.cso", "minimum-1d", 16),
+               ("minmax_line.cs.cso", "maximum-1d", 64)]
+    common += [("minmax_cube_level.cs.cso", mode, value) for mode, value in
+               (("minimum-cube", 16), ("maximum-cube", 240),
+                ("static-minimum-cube", 16), ("static-maximum-cube", 240))]
+    common += [("minmax_cube_array_level.cs.cso", "minimum-cube-array", 16),
+               ("minmax_cube_array_level.cs.cso", "maximum-cube-array", 240)]
+    cases = [(backend, shader, mode, value) for backend in ("dxbc", "dxil")
+             for shader, mode, value in common]
+    cases += [("dxil", "minmax_array.cs.cso", "minimum-2d-array", 16),
+              ("dxil", "minmax_array.cs.cso", "maximum-2d-array", 240),
+              ("dxil", "minmax_volume.cs.cso", "minimum-3d", 16),
+              ("dxil", "minmax_volume.cs.cso", "maximum-3d", 240)]
+    cases += [("dxbc", "", mode, value) for mode, value in
+              (("minimum-grad-lod", 96), ("minimum-grad-bias", 224),
+               ("minimum-grad-parallel", 224), ("minimum-grad-perpendicular", 224),
+               ("minimum-grad-zero", 32), ("minimum-grad-minlod", 96),
+               ("minimum-grad-maxlod", 32), ("dynamic-switch", 16),
+               ("minimum-static-observation", 16), ("minimum-live-observation", 16),
+               ("minimum-clamp-mip", 0xff000060), ("minimum-clamp-past-last", 0),
+               ("minimum-clamp-live", 0), ("minimum-clamp-static", 0),
+               ("minimum-clamp-copy", 0xff000000), ("minimum-instruction-resource-wins", 0xff0000a0))]
+    return cases
+
+
+def run_minmax_gpu_matrix(directory, wine, timeout, runtime, compiler=None):
+    cases = {}
+    for backend, shader, mode, value in minmax_numeric_cases():
+        name = backend + "_" + mode
+        if backend == "dxil" and compiler is None:
+            cases[name] = {"status": UNVERIFIED, "reason": "explicit MSC compiler deployment required"}
+            continue
+        selection = "--dxbc" if backend == "dxbc" else shader
+        markers = ("texture sampler readback passed: " + str(value) + "\n",)
+        if mode == "dynamic-switch": markers += ("same-PSO volatile sampler switch passed: 16/240/128/16",)
+        if mode.endswith("observation"):
+            markers += (("static" if "static" in mode else "volatile") + " sampler observation contract passed",)
+        cases[name] = run_fixture(
+            directory, wine, "dx12_texture_sampler.exe", (selection, "--" + mode), markers, timeout, runtime,
+            () if backend == "dxbc" else (shader,), compiler=compiler if backend == "dxil" else None,
+            air_minmax=backend == "dxbc")
+    execution = aggregate([row(name, case["status"], "") for name, case in cases.items()])
+    hashes = [case["runtime_sha256"] for case in cases.values() if case.get("runtime_sha256")]
+    if hashes and any(digest != hashes[0] for digest in hashes):
+        execution = aggregate([row("execution", execution, ""), row("hash_consistency", UNVERIFIED, "")])
+    return {"status": PARTIAL if execution == PASS else execution, "execution_status": execution,
+            "reason": "numeric compute subset; AIR opt-in and independent deployed MSC, not complete MinMax support",
+            "coverage_gaps": ["anisotropic", "complete formats/address/filter combinations", "all graphics stages",
+                              "implicit/bias and full derivative/cube-edge matrix", "comparison/coexistence and descriptor arrays",
+                              "indirect/root updates and submission lifetimes", "sparse feedback", "native Windows oracle"],
             "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
 
 
@@ -592,6 +657,9 @@ def build_report(probes, variant, provenance=None):
     fl0.append(row("timestamp_resolve_submission_oracle", timestamp["status"],
                    "bounded 200-submission timestamp/copy/CPU-gate/reset/calibration GPU oracle; not full query qualification"))
     minmax = probes.get("minmax_sampler_contract")
+    numeric_minmax = probes.get("minmax_gpu_matrix", {"status": UNVERIFIED})
+    fl0.append(row("min_max_numeric_gpu_matrix", numeric_minmax["status"],
+                   "independent compute numeric subset; full format/stage/filter/address/sparse qualification required"))
     fl0.append(row("min_max_reduction_filtering",
                    BLOCKED if minmax and minmax["status"] == PASS else
                    minmax["status"] if minmax else UNVERIFIED,
@@ -686,6 +754,8 @@ def main():
     parser.add_argument("--output", type=Path, help="save full JSON evidence; print compact status")
     parser.add_argument("--typed-compiler-dir", type=Path,
                         help="stage DXC/validator beside D3D12 for the production DXIL typed matrix only")
+    parser.add_argument("--minmax-compiler-dir", type=Path,
+                        help="stage DXC/validator only for independent MSC MinMax numerical cases")
     args = parser.parse_args()
     directory = args.build_dir.resolve() / "tests" / "dx12"
     runtime = args.build_dir.resolve() / "src"
@@ -714,6 +784,8 @@ def main():
              "container dxil-library-in-ordinary-graphics-slot passed"), args.timeout, runtime),
     }
     probes["minmax_sampler_contract"] = run_minmax_contract(directory, args.wine, args.timeout, runtime)
+    probes["minmax_gpu_matrix"] = run_minmax_gpu_matrix(directory, args.wine, args.timeout, runtime,
+                                                       args.minmax_compiler_dir)
     probes["backend_failure_oracle"] = run_backend_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["graphics_failure_oracle"] = run_graphics_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["tessellation_failure_oracle"] = run_tessellation_failure_oracle(directory, args.wine, args.timeout, runtime)

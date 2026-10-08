@@ -707,6 +707,70 @@ class GateTests(unittest.TestCase):
             self.assertEqual(result["status"], gate.UNVERIFIED)
             run.assert_not_called()
 
+    def test_minmax_numeric_success_remains_partial_and_uses_independent_controls(self):
+        seen = []
+        def fixture(*args, **kwargs):
+            seen.append((args, kwargs))
+            dxbc = args[3][0] == "--dxbc"
+            self.assertEqual(kwargs["air_minmax"], dxbc)
+            self.assertEqual(kwargs["compiler"], None if dxbc else Path("compiler"))
+            self.assertFalse(any("rejected" in marker for marker in args[4]))
+            self.assertTrue(args[4][0].endswith("\n")) # 16 must not match 160
+            return {"status": gate.PASS, "runtime_sha256": {"d3d12": "same"}}
+        with patch.object(gate, "run_fixture", side_effect=fixture):
+            result = gate.run_minmax_gpu_matrix(Path("."), "wine", 1, Path("runtime"), Path("compiler"))
+        self.assertEqual(len(seen), 52)
+        self.assertEqual(len(result["cases"]), 52)
+        self.assertEqual(result["execution_status"], gate.PASS)
+        self.assertEqual(result["status"], gate.PARTIAL)
+        self.assertTrue(result["coverage_gaps"])
+
+    def test_minmax_numeric_missing_compiler_and_failure_cannot_pass(self):
+        with patch.object(gate, "run_fixture", return_value={"status": gate.PASS}):
+            result = gate.run_minmax_gpu_matrix(Path("."), "wine", 1, None)
+            self.assertEqual(result["status"], gate.UNVERIFIED)
+            self.assertEqual(result["cases"]["dxil_minimum"]["status"], gate.UNVERIFIED)
+        def fixture(*args, **kwargs):
+            return {"status": gate.FAIL if args[3] == ("--dxbc", "--minimum-clamp-live") else gate.PASS}
+        with patch.object(gate, "run_fixture", side_effect=fixture):
+            self.assertEqual(gate.run_minmax_gpu_matrix(Path("."), "wine", 1, None, Path("compiler"))["status"], gate.FAIL)
+
+    def test_minmax_numeric_gate_preserves_missing_and_partial_evidence(self):
+        for status in (None, *gate.STATUSES):
+            probes = self.probes()
+            if status is not None: probes["minmax_gpu_matrix"] = {"status": status}
+            report = gate.build_report(probes, "normal")
+            rows = {r["name"]: r for r in report["FL12_0_GATE"]["requirements"]}
+            self.assertEqual(rows["min_max_numeric_gpu_matrix"]["status"], gate.UNVERIFIED if status is None else status)
+            self.assertNotEqual(report["FL12_0_GATE"]["status"], gate.PASS)
+
+    def test_minmax_numeric_runtime_hash_changes_are_unverified(self):
+        def fixture(*args, **kwargs):
+            return {"status": gate.PASS, "runtime_sha256": {
+                "d3d12": "changed" if args[3] == ("--dxbc", "--minimum") else "same"}}
+        with patch.object(gate, "run_fixture", side_effect=fixture):
+            self.assertEqual(gate.run_minmax_gpu_matrix(Path("."), "wine", 1, None, Path("compiler"))["status"],
+                             gate.UNVERIFIED)
+
+    def test_air_minmax_control_is_explicit_without_enabling_capabilities(self):
+        from types import SimpleNamespace
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "probe.exe").write_bytes(b"probe")
+            for enabled in (False, True):
+                def execute(*args, **kwargs):
+                    for key in ("DXMT_ENABLE_AIR_MINMAX", "DXMT_ENABLE_AIR_MINMAX_DYNAMIC"):
+                        self.assertEqual(kwargs["env"][key], "1" if enabled else "0")
+                    for key in ("DXMT_EXPERIMENTAL_SM6_6", "DXMT_EXPERIMENTAL_FL12_0"):
+                        self.assertEqual(kwargs["env"][key], "0")
+                    kwargs["stdout"].write("passed")
+                    return SimpleNamespace(returncode=0)
+                with patch.dict(gate.os.environ, {"DXMT_ENABLE_AIR_MINMAX": "1"}), \
+                     patch.object(gate.subprocess, "run", side_effect=execute):
+                    result = gate.run_fixture(root, None, "probe.exe", (), ("passed",), 1, air_minmax=enabled)
+                self.assertEqual(result["status"], gate.PASS)
+                self.assertEqual(result["controlled_environment"]["DXMT_ENABLE_AIR_MINMAX"], "1" if enabled else "0")
+
     def test_compiler_deployment_missing_pair_never_runs(self):
         with TemporaryDirectory() as directory, patch.object(gate.subprocess, "run") as run:
             root = Path(directory)

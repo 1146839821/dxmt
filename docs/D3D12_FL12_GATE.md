@@ -1,5 +1,16 @@
 # FL12 evidence gate and backend isolation
 
+## Independent MinMax numeric evidence (2026-10-08)
+
+The minmax_gpu_matrix registers 52 explicit compute readback cases independently
+of minmax_sampler_contract rejection controls. --minmax-compiler-dir deploys DXC
+only for MSC numerical cases; all default children force AIR gates off, while
+DXBC numerical cases record their explicit opt-ins. Missing, failed or runtime-
+mismatched cases remain nonpassing. Numeric success is PARTIAL, never complete
+MinMax support: formats, anisotropy, implicit/bias/derivatives, stages, arrays,
+indirect/lifetime, sparse and Windows coverage remain outstanding. See
+D3D12_MINMAX_QUALIFICATION_2026-10-08.md. No capability or FL promotion.
+
 ## Typed compiler deployment qualification (2026-10-08)
 
 The --typed-compiler-dir option stages the compiler/validator pair in dxmt-dxc

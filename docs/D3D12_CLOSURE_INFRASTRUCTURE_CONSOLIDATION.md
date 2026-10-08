@@ -1,5 +1,18 @@
 # Closure infrastructure consolidation
 
+MinMax numeric checkpoint (2026-10-08): a separate 52-case compute runner now
+checks actual MIN/MAX values, independently from rejection contracts. Both
+variants pass all executions (104), and no-private passes 52 additional
+API-validation cases. MSC compiler modules are observed with AIR gates off;
+AIR opt-ins are recorded explicitly. Default children clear both AIR gates,
+and both 13-case rejection/ordinary controls pass despite parent opt-ins.
+Both host suites pass, including 77 gate tests. See
+D3D12_MINMAX_QUALIFICATION_2026-10-08.md. Category remains PARTIAL with explicit
+anisotropic, format/address/filter, implicit/bias/derivative, graphics/array,
+indirect/lifetime, sparse and Windows coverage gaps. No renderer/capability
+change or full gate PASS. Next prioritize the stale Tiled runner integration and
+fresh sparse semantics, then complete format/raster and remaining MinMax coverage.
+
 Typed qualification checkpoint (2026-10-08): full fresh runs exposed the gate's
 missing compiler deployment rather than a new renderer defect. The new explicit
 --typed-compiler-dir stages DXC/validator beside the temporary D3D12 module and
