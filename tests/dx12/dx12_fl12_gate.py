@@ -315,6 +315,71 @@ def run_minmax_contract(directory, wine, timeout, runtime):
             "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
 
 
+def tiled_gpu_cases():
+    cases = [
+        ("resource-tiling-and-boundaries", "dx12_resource_tests.exe", (), (),
+         ("D3D12 allocation and placed resource tests passed",)),
+        ("reserved-buffer-descriptor-table", "dx12_reserved_buffer.exe",
+         ("reserved_buffer.probe_read.cs.cso", "reserved_buffer.probe_write.cs.cso"),
+         ("reserved_buffer.probe_read.cs.cso", "reserved_buffer.probe_write.cs.cso"),
+         ("Reserved buffer shader, remap, NULL and cross-queue tests passed",)),
+        ("reserved-buffer-copy-mapping", "dx12_reserved_buffer_copy_mapping.exe",
+         ("reserved_buffer.copy_mapping.cs.cso",), ("reserved_buffer.copy_mapping.cs.cso",),
+         ("Reserved buffer CopyTileMappings shader semantics passed",)),
+        ("reserved-texture-standard-multi-heap", "dx12_reserved_texture.exe",
+         ("reserved_texture.read.cs.cso", "reserved_texture.write.cs.cso"),
+         ("reserved_texture.read.cs.cso", "reserved_texture.write.cs.cso"),
+         ("Reserved texture shader, remap, NULL and cross-queue tests passed",)),
+        ("reserved-texture-array", "dx12_reserved_texture_mip_array.exe",
+         ("reserved_texture.mip_array.cs.cso",), ("reserved_texture.mip_array.cs.cso",),
+         ("Reserved texture mip/array SRV and CopyTiles semantics passed",)),
+        ("shader-status-feedback-texture", "dx12_tiled_status_sm5.exe", (), (),
+         ("feedback and CheckAccessFullyMapped passed",)),
+        ("sparse-lod-clamp", "dx12_texture_lod_clamp.exe", ("texture_lod_clamp.cs.cso",),
+         ("texture_lod_clamp.cs.cso",), ("Fractional ResourceMinLODClamp ordinary/reserved matrix passed",)),
+    ]
+    for kind in ("srv", "uav"):
+        shader = "compute_sm6_root_" + kind + ".cs.cso"
+        cases.append(("reserved-buffer-root-" + kind, "dx12_compute_sm6.exe",
+                      (shader, "--reserved-" + kind), (shader,),
+                      ("readback passed: " + ("305419896" if kind == "srv" else "1234") + "\n",)))
+    for name, args in (("table-srv", ()), ("table-uav", ("--uav",)),
+                       ("root-srv", ("--root",)), ("root-uav", ("--root", "--uav")),
+                       ("indirect-srv", ("--indirect",)), ("indirect-uav", ("--indirect", "--uav")),
+                       ("vertex", ("--vertex",)), ("pixel", ("--pixel",)),
+                       ("geometry", ("--geometry",)), ("hull", ("--hull",)), ("domain", ("--domain",))):
+        cases.append(("air-buffer-feedback-" + name, "dx12_buffer_feedback.exe", args, (),
+                      ("BUFFER_FEEDBACK ", "alternating remap PASS\n")))
+    return cases
+
+
+TILED_COVERAGE_GAPS = (
+    ("msc-raw-structured-status", BLOCKED, "MSC residency/status sideband missing; AIR success cannot close MSC"),
+    ("packed-tail-physical-semantics", BLOCKED, "full multi-tile translation/aliasing/lifetime qualification missing"),
+    ("native-windows-runtime-oracle", UNVERIFIED, "historical Windows evidence is not fresh full native qualification"),
+    ("complete-resource-format-stage-matrix", UNVERIFIED, "all resource dimensions/formats/stages and logical-width aliases incomplete"),
+)
+
+
+def run_tiled_gpu_matrix(directory, wine, timeout, runtime, selected=None):
+    cases = {}
+    for name, executable, args, files, markers in tiled_gpu_cases():
+        if selected is not None and name not in selected:
+            cases[name] = {"status": UNVERIFIED, "reason": "not selected; subset is not full qualification"}
+        elif runtime is None:
+            cases[name] = {"status": UNVERIFIED, "reason": "explicit runtime required for provenance"}
+        else:
+            cases[name] = run_fixture(directory, wine, executable, args, markers, timeout, runtime, files)
+    execution = aggregate([row(name, case["status"], "") for name, case in cases.items()])
+    hashes = [case["runtime_sha256"] for case in cases.values() if case.get("runtime_sha256")]
+    if hashes and any(digest != hashes[0] for digest in hashes):
+        execution = aggregate([row("execution", execution, ""), row("hash_consistency", UNVERIFIED, "")])
+    gaps = [row(*gap) for gap in TILED_COVERAGE_GAPS]
+    return {"status": aggregate([row("executions", execution, ""), *gaps]), "execution_status": execution,
+            "reason": "bounded current GPU matrix plus explicit required coverage gaps; not Tier 2 closure",
+            "runtime_sha256": hashes[0] if hashes else {}, "coverage_gaps": gaps, "cases": cases}
+
+
 def minmax_numeric_cases():
     # Values match CPU-seeded textures, not rejection or compiler success.
     common = [("texture_sampler.cs.cso", mode, value) for mode, value in
@@ -644,6 +709,9 @@ def build_report(probes, variant, provenance=None):
             fl0.append(row("loaded_unix_runtime_provenance", unix_status,
                            "actual feature-process Unix image evidence required; installed-file equality is insufficient"))
     typed = probes.get("typed_uav_matrix")
+    tiled = probes.get("tiled_gpu_matrix", {"status": UNVERIFIED})
+    fl0.append(row("tiled_mandatory_gpu_matrix", tiled["status"],
+                   "actual current sparse matrix plus MSC/packed-tail/native/full-coverage gaps; API query alone insufficient"))
     typed_api = options is not None and options["typed"] == 1
     if typed and typed["status"] == PASS and typed_api:
         for requirement in fl0:
@@ -784,6 +852,7 @@ def main():
              "container dxil-library-in-ordinary-graphics-slot passed"), args.timeout, runtime),
     }
     probes["minmax_sampler_contract"] = run_minmax_contract(directory, args.wine, args.timeout, runtime)
+    probes["tiled_gpu_matrix"] = run_tiled_gpu_matrix(directory, args.wine, args.timeout, runtime)
     probes["minmax_gpu_matrix"] = run_minmax_gpu_matrix(directory, args.wine, args.timeout, runtime,
                                                        args.minmax_compiler_dir)
     probes["backend_failure_oracle"] = run_backend_failure_oracle(directory, args.wine, args.timeout, runtime)

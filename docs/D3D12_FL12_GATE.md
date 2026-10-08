@@ -1,5 +1,17 @@
 # FL12 evidence gate and backend isolation
 
+## Current Tiled numerical gate (2026-10-08)
+
+The standalone gate now shares run_tiled_gpu_matrix and its 20 current cases
+with the FL12 gate, requiring runtime provenance rather than ambient DLLs.
+Subset exclusions are UNVERIFIED and cannot qualify Tier 2. AIR raw/structured
+feedback is executed by stage/path instead of declared unimplemented; MSC
+status, packed-tail, full coverage and native Windows gaps remain separate.
+Fractional clamp is actually executed: both builds and no-private API validation
+return 19 PASS / clamp FAIL. Additional DXC deployment does not repair it.
+See D3D12_TILED_QUALIFICATION_2026-10-08.md. This is a real unresolved numerical
+defect, not a historical fixed status or successful rejection contract.
+
 ## Independent MinMax numeric evidence (2026-10-08)
 
 The minmax_gpu_matrix registers 52 explicit compute readback cases independently

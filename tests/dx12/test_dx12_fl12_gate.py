@@ -707,6 +707,47 @@ class GateTests(unittest.TestCase):
             self.assertEqual(result["status"], gate.UNVERIFIED)
             run.assert_not_called()
 
+    def test_tiled_success_keeps_architecture_and_oracle_gaps(self):
+        with patch.object(gate, "run_fixture", return_value={"status": gate.PASS, "runtime_sha256": {"d3d12": "same"}}) as run:
+            result = gate.run_tiled_gpu_matrix(Path("."), "wine", 1, Path("runtime"))
+        self.assertEqual(run.call_count, 20)
+        self.assertEqual(len(result["cases"]), 20)
+        self.assertEqual(result["execution_status"], gate.PASS)
+        self.assertEqual(result["status"], gate.BLOCKED)
+        self.assertEqual({gap["name"] for gap in result["coverage_gaps"]},
+                         {name for name, _, _ in gate.TILED_COVERAGE_GAPS})
+
+    def test_tiled_subset_and_missing_runtime_never_qualify(self):
+        with patch.object(gate, "run_fixture", return_value={"status": gate.PASS}) as run:
+            result = gate.run_tiled_gpu_matrix(Path("."), "wine", 1, Path("runtime"), {"air-buffer-feedback-table-srv"})
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(result["execution_status"], gate.UNVERIFIED)
+            self.assertNotEqual(result["status"], gate.PASS)
+            self.assertEqual(result["cases"]["sparse-lod-clamp"]["status"], gate.UNVERIFIED)
+            run.reset_mock()
+            self.assertEqual(gate.run_tiled_gpu_matrix(Path("."), "wine", 1, None)["execution_status"], gate.UNVERIFIED)
+            run.assert_not_called()
+
+    def test_tiled_actual_clamp_failure_and_hash_changes_cannot_be_hidden(self):
+        for failed in (True, False):
+            def fixture(*args):
+                clamp = args[2] == "dx12_texture_lod_clamp.exe"
+                return {"status": gate.FAIL if failed and clamp else gate.PASS,
+                        "runtime_sha256": {"d3d12": "other" if clamp else "same"}}
+            with patch.object(gate, "run_fixture", side_effect=fixture):
+                result = gate.run_tiled_gpu_matrix(Path("."), "wine", 1, Path("runtime"))
+                self.assertEqual(result["execution_status"], gate.FAIL if failed else gate.UNVERIFIED)
+                self.assertNotEqual(result["status"], gate.PASS)
+
+    def test_tiled_numeric_gate_registration_cannot_be_omitted(self):
+        for status in (None, *gate.STATUSES):
+            probes = self.probes()
+            if status is not None: probes["tiled_gpu_matrix"] = {"status": status}
+            report = gate.build_report(probes, "normal")
+            rows = {r["name"]: r for r in report["FL12_0_GATE"]["requirements"]}
+            self.assertEqual(rows["tiled_mandatory_gpu_matrix"]["status"], gate.UNVERIFIED if status is None else status)
+            self.assertNotEqual(report["FL12_0_GATE"]["status"], gate.PASS)
+
     def test_minmax_numeric_success_remains_partial_and_uses_independent_controls(self):
         seen = []
         def fixture(*args, **kwargs):

@@ -1,5 +1,16 @@
 # Closure infrastructure consolidation
 
+Tiled qualification checkpoint (2026-10-08): standalone and FL12 gates now
+share a 20-case provenance-controlled matrix, replacing stale AIR-no-sideband
+classification and preventing --only subsets from printing Tier2 PASS. Both
+variants return 19 PASS and actual fractional ResourceMinLODClamp FAIL;
+no-private API validation reproduces the same semantic failure. A deployed
+DXC contrast does not repair it. Both host suites pass (81 gate tests). See
+D3D12_TILED_QUALIFICATION_2026-10-08.md. MSC status sideband, packed-tail physical
+semantics, complete resource/stage/format/logical-width and native Windows gaps
+remain explicit. Next implementation target is the now-reproduced fractional
+clamp defect, not relabeling failure as expected rejection. No Tier/FL promotion.
+
 MinMax numeric checkpoint (2026-10-08): a separate 52-case compute runner now
 checks actual MIN/MAX values, independently from rejection contracts. Both
 variants pass all executions (104), and no-private passes 52 additional
