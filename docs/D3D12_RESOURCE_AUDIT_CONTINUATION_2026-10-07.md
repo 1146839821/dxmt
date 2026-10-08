@@ -1,5 +1,15 @@
 # Resource closure continuation — 2026-10-07
 
+2026-10-08 private-variant update: pixel-only framebuffer feature-space settings
+and transformed bytecode are retained for draw-selected Typed/MinMax variants.
+No synthetic framebuffer descriptor/residency entry is added. Typed+XOR checks
+actual R32_UINT output, typed-UAV side effects and guards, submission-time live
+SRV replacement, and same-encoder ordinary root restoration on both builds with
+automatic/explicit compiler selection under API validation (64 submissions).
+MinMax composition has implementation changes but no combined GPU acceptance
+yet. Same-address VA remap, remaining layout/lifetime matrices and simultaneous
+Typed+MinMax stay open. See D3D12_MSC_LOGIC_OP_LOWERING.md; no capability promotion.
+
 2026-10-08 root-space collision update: application descriptor ranges, root
 constants/descriptors and static samplers participate in feature-space exclusion.
 Retries lower the original shader with a decreasing ceiling and preserve existing

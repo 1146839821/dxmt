@@ -1,5 +1,15 @@
 # Closure infrastructure consolidation
 
+Private-variant checkpoint (2026-10-08): LogicOp bytecode and local pixel feature
+space now survive Typed/MinMax variant compilation. Typed+XOR R32_UINT passes
+automatic/explicit compiler selection on both builds under API validation,
+including live descriptors, UAV guards and ordinary PSO restoration (64 submissions).
+Two mandatory composition cases expand the raster gate to eighty-two cases;
+the final no-private run passes all eighty-two executions and remains PARTIAL.
+MinMax combined GPU acceptance and other private operations/layouts remain open;
+the gate cannot declare complete raster qualification. Both full builds and host
+suites pass. See D3D12_MSC_LOGIC_OP_LOWERING.md. Capability isolation is unchanged.
+
 Root-space collision checkpoint (2026-10-08): MSC lowering now reselects a local
 feature space around application root spaces without altering their layout.
 Two adjacent occupied spaces plus CBV rebinding pass sixteen operations on both

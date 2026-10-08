@@ -1055,6 +1055,14 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'ps_root_cbv', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach entry : ['vs', 'ps', 'ordinary', 'typed_vs']
+    custom_target('dx12_logic_typed_origin_' + entry + '_fixture',
+      input: 'typed_origin_pixel.hlsl',
+      output: 'logic_typed_origin_' + entry + '.cso',
+      command: dxc_command + [ '-E', entry, '-T', entry == 'vs' or entry == 'typed_vs' ? 'vs_6_0' : 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
   custom_target('dx12_geometry_sm6_vs_fixture',
     input: 'geometry_sm6.hlsl',
     output: 'geometry_sm6.vs.cso',

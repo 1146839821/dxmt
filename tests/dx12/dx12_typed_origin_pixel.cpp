@@ -22,6 +22,7 @@ static bool Load(const wchar_t *path, std::vector<unsigned char> &bytes) {
 }
 
 enum class DrawMode { Typed, RejectHiddenVS, Ordinary, RejectMinMaxSwitch, VertexOnly, Combined };
+static bool logic_fixture = false;
 
 static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
     const std::vector<unsigned char> &ps, const std::vector<unsigned char> &ordinary,
@@ -135,6 +136,8 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
   pd.RTVFormats[0] = DXGI_FORMAT_R32_UINT; pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
   pd.RasterizerState.DepthClipEnable = TRUE; pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+  pd.BlendState.RenderTarget[0].LogicOpEnable = logic_fixture;
+  pd.BlendState.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_XOR;
   ID3D12PipelineState *raw_pso = nullptr;
   const auto pso_hr = device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&raw_pso));
   OwnedCOM<ID3D12PipelineState> pso(raw_pso);
@@ -152,6 +155,7 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
   OwnedCOM<ID3D12RootSignature> ordinary_root(raw_root); pd.pRootSignature = ordinary_root.get();
   if (ordinary_vs) pd.VS = {ordinary_vs->data(), ordinary_vs->size()};
   pd.PS = {ordinary.data(), ordinary.size()}; raw_pso = nullptr;
+  pd.BlendState.RenderTarget[0].LogicOpEnable = FALSE;
   if (!reject_typed_vs && !Check(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&raw_pso)), "ordinary pso")) return false;
   OwnedCOM<ID3D12PipelineState> ordinary_pso(raw_pso);
   ID3D12CommandAllocator *raw_allocator = nullptr; ID3D12GraphicsCommandList *raw_list = nullptr;
@@ -169,6 +173,10 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
   list->CopyBufferRegion(output.get(), 0, initial.get(), 0, 512);
   transition(output.get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   transition(target.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  if (logic_fixture) {
+    const float clear[] = {165, 0, 0, 0};
+    list->ClearRenderTargetView(rtv, clear, 0, nullptr);
+  }
   list->SetGraphicsRootSignature(root.get()); ID3D12DescriptorHeap *heaps[] = {resources.get()};
   list->SetDescriptorHeaps(1, heaps);
   if (!ordinary_only) list->SetGraphicsRootDescriptorTable(0, resources->GetGPUDescriptorHandleForHeapStart());
@@ -278,7 +286,7 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
     const bool unchanged_uav = ordinary_only || vertex_only;
     const bool ok = words[0] == init[0] && words[1] == (unchanged_uav ? init[1] : x + 100) &&
         words[2] == (unchanged_uav ? init[2] : y + 100) &&
-        words[3] == init[3] && words[128] == x && words[129] == 77;
+        words[3] == init[3] && words[128] == (logic_fixture ? x ^ 165u : x) && words[129] == 77;
     if (!ok) std::printf("PIXEL_ORIGIN mismatch static=%u pixel=%u pass=%u values=%08x,%u,%u,%08x rt=%u,%u\n",
         !live, pixel_visibility, pass, words[0], words[1], words[2], words[3], words[128], words[129]);
     readback->Unmap(0, nullptr); if (!ok) return false;
@@ -289,20 +297,26 @@ static bool Run(ID3D12Device *device, const std::vector<unsigned char> &vs,
 }
 
 int wmain(int argc, wchar_t **argv) {
+  logic_fixture = argc == 7 && (!wcscmp(argv[6], L"--logic-op") || !wcscmp(argv[6], L"--logic-op-auto"));
   const bool update_index = argc == 8 && !wcscmp(argv[7], L"--stages-indirect-ib");
   const bool indexed = update_index || (argc == 8 && !wcscmp(argv[7], L"--stages-indirect-indexed"));
   const bool indirect = indexed || (argc == 8 && !wcscmp(argv[7], L"--stages-indirect"));
   const bool embedded = argc == 8 && !wcscmp(argv[7], L"--stages-embedded");
   const bool stages = argc == 8 && (!wcscmp(argv[7], L"--stages") || !wcscmp(argv[7], L"--stages-auto") || embedded || indirect);
   const bool minmax_switch = argc == 7 && !wcscmp(argv[6], L"--minmax-switch");
-  const bool automatic = (argc == 7 && (!wcscmp(argv[6], L"--auto") || minmax_switch)) ||
+  const bool automatic = (argc == 7 && (!wcscmp(argv[6], L"--auto") || minmax_switch || !wcscmp(argv[6], L"--logic-op-auto"))) ||
       (stages && !wcscmp(argv[7], L"--stages-auto"));
   const bool ordinary_only = argc == 7 && !wcscmp(argv[6], L"--ordinary");
-  if (argc != 6 && !automatic && !ordinary_only && !stages) return 1;
+  if (argc != 6 && !automatic && !ordinary_only && !stages && !logic_fixture) return 1;
   std::vector<unsigned char> vs, ps, ordinary, typed_vs, vertex_ps;
+  std::vector<wchar_t> compiler_directory(32768);
+  if (!automatic && !ordinary_only) {
+    const auto length = GetFullPathNameW(argv[5], compiler_directory.size(), compiler_directory.data(), nullptr);
+    if (!length || length >= compiler_directory.size()) return 1;
+  }
   if (!Load(argv[1], vs) || !Load(argv[2], ps) || !Load(argv[3], ordinary) ||
       !Load(argv[4], typed_vs) || !SetEnvironmentVariableW(L"DXMT_TYPED_ORIGIN_DXC_DIRECTORY",
-          automatic || ordinary_only ? nullptr : argv[5]) ||
+          automatic || ordinary_only ? nullptr : compiler_directory.data()) ||
       !SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", nullptr)) return 1;
   std::printf("PIXEL_ORIGIN selection=%s\n", automatic ? "deployed" : ordinary_only ? "ordinary" : "override");
   ID3D12Device *raw = nullptr;
@@ -328,6 +342,9 @@ int wmain(int argc, wchar_t **argv) {
   }
   for (bool live : {false, true}) for (bool pixel : {false, true})
     if (!Run(device.get(), vs, ps, ordinary, live, pixel)) return 1;
+  if (logic_fixture) {
+    std::puts("typed-origin LogicOp XOR pixel GPU PASS (16 submissions; ordinary restore)"); return 0;
+  }
   if (!Run(device.get(), typed_vs, ordinary, ordinary, false, true, DrawMode::RejectHiddenVS)) return 1;
   std::puts("typed-origin production pixel GPU PASS (16 draws)"); return 0;
 }

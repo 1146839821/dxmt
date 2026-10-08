@@ -1,5 +1,44 @@
 # MSC programmable logic-op implementation boundary
 
+## Private-variant composition checkpoint — 2026-10-08
+
+Starting HEAD d8533c26. Hypothesis: rebuilding a private root from the saved
+application PS and device-default capabilities drops programmable LogicOp.
+Evidence: GetTypedOriginVariant/GetMinMaxVariant previously used that pair;
+the automatic Typed path was explicitly rejected during initial LogicOp PSO
+creation. Expected effect: retain LogicOp across private-root recompilation.
+Risk: feature-space collisions, accidentally applying pixel options to other
+stages, or losing Typed/MinMax binding records when composing bytecode.
+
+The PSO now retains logic-lowered PS bytes for draw-selected variants and supplies
+its local framebuffer feature space to every pixel variant conversion. Static
+MinMax composes after its prepared pixel shader and preserves its binding records;
+future private spaces 1/2 are excluded from framebuffer-space selection. Other
+stage/device capability snapshots and application root indices remain unchanged.
+Existing conversion hashes include both resulting bytecode and feature-space
+configuration. Simultaneous Typed+MinMax remains unsupported.
+
+Both full builds and host suites pass (17/17 each; 89 gate unit tests). R32_UINT
+Typed+XOR passes automatic and explicit compiler selection on both builds under
+Metal API validation: 64 submissions, checking UAV side effects/guards, live
+descriptor replacement, and ordinary-PSO restoration in the same encoder.
+Evidence: composition-api.json under /Users/zhangbo/.cache/dxmt-msc-logic.6jblCq.
+The final no-private gate executes 82/82 successfully and remains PARTIAL
+(composition-gate.json). The optional legacy negative control returns E_NOTIMPL
+but lacks required validator-load provenance after early rejection; its
+composition-legacy.json is UNVERIFIED, not an accepted compatibility oracle.
+The earlier composition-final.json/composition-qualified.json are failed harness
+runs, not qualification: the optional fixture needed explicit rebuilding, and
+the explicit relative DXC path needed GetFullPathNameW normalization. Meson now
+provides four reproducible shader targets for the mandatory composition cases.
+
+Compiler and integration skills informed per-stage feature-space propagation and
+private-root composition. Main-agent Standards/Spec self-review checked those
+invariants; no independent reviewer or shader validation is claimed. MinMax
+composition is implemented but lacks combined GPU acceptance evidence. Remaining
+operations/private layouts, MSAA, full format/MRT and native qualification stay
+open; no capability promotion or game deployment.
+
 ## Root-space reselection checkpoint — 2026-10-08
 
 Starting HEAD b834ca55. Hypothesis: application roots can occupy a shader-free

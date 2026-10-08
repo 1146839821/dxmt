@@ -506,6 +506,14 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
   std::mutex minmax_mutex_;
   std::wstring minmax_dxc_directory_;
   std::unique_ptr<D3D12MinMaxGraphicsVariant> minmax_variant_;
+  uint32_t logic_framebuffer_space_ = DXMT_MSC_RESOURCE_SPACE_DISABLED;
+
+  DXMTMSCCapabilities CapabilitiesForStage(uint32_t stage) const {
+    auto capabilities = device_->GetMSCCapabilities();
+    if (stage == DXMT_MSC_STAGE_FRAGMENT && logic_framebuffer_space_ != DXMT_MSC_RESOURCE_SPACE_DISABLED)
+      capabilities.compiler_framebuffer_fetch_resource_space = logic_framebuffer_space_;
+    return capabilities;
+  }
 
   struct MinMaxShaders { D3D12MinMaxShader vertex, pixel, geometry, hull, domain; };
 
@@ -664,13 +672,14 @@ public:
       const auto convert = [&](const std::vector<uint8_t> &original, const D3D12MinMaxShader &shader,
                                uint32_t stage, D3D12ConvertedShader &converted) {
         if (original.empty()) return S_OK;
+        const auto capabilities = CapabilitiesForStage(stage);
         const auto flags = minmax_emulation_flags_ | (stage == DXMT_MSC_STAGE_VERTEX && msc_dynamic_vertex_fetch ?
             DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0);
         const auto *layout = stage == DXMT_MSC_STAGE_VERTEX && flags ? &msc_stage_in_layout_ : nullptr;
         return !shader.bytecode.empty() ? ConvertD3D12MinMaxShader(shader, candidate->root, converted,
-            &device_->GetMSCCapabilities(), layout, flags) :
+            &capabilities, layout, flags) :
             ConvertD3D12Shader({original.data(), original.size()}, stage, converted,
-                root.data(), root.size(), layout, flags, &device_->GetMSCCapabilities());
+                root.data(), root.size(), layout, flags, &capabilities);
       };
       if (FAILED(hr = convert(original_vs_, shaders.vertex, DXMT_MSC_STAGE_VERTEX, vs)) ||
           FAILED(hr = convert(original_ps_, shaders.pixel, DXMT_MSC_STAGE_FRAGMENT, ps)) ||
@@ -760,10 +769,11 @@ public:
       result->active_graphics_stages.push_back(stage.visibility);
       const auto *layout = stage.kind == DXMT_MSC_STAGE_VERTEX ? &msc_stage_in_layout_ : nullptr;
       const auto flags = stage.kind == DXMT_MSC_STAGE_VERTEX ? minmax_emulation_flags_ : 0;
+      const auto capabilities = CapabilitiesForStage(stage.kind);
       if (stage.prepared.bindings.empty()) {
         hr = ConvertD3D12Shader({stage.original->data(), stage.original->size()}, stage.kind,
             stage.converted, root->bytecode.data(), root->bytecode.size(), layout, flags,
-            &device_->GetMSCCapabilities());
+            &capabilities);
       } else {
         const auto stage_count = stage.prepared.bindings.size();
         hr = PrepareD3D12TypedOriginShader({stage.original->data(), stage.original->size()}, directory,
@@ -774,7 +784,7 @@ public:
         if (FAILED(hr)) return hr;
         offset += stage_count;
         hr = ConvertD3D12TypedOriginShader(stage.prepared, *root, stage.converted,
-            &device_->GetMSCCapabilities(), layout, flags);
+            &capabilities, layout, flags);
       }
       if (FAILED(hr)) return hr;
     }
@@ -823,13 +833,15 @@ public:
       D3D12ConvertedShader vs, ps;
       const auto prepare_stage = [&](const std::vector<uint8_t> &original, HRESULT selection, D3D12_SHADER_VISIBILITY visibility,
                                      D3D12ConvertedShader &converted) -> HRESULT {
+        const auto capabilities = CapabilitiesForStage(visibility == D3D12_SHADER_VISIBILITY_VERTEX ?
+            DXMT_MSC_STAGE_VERTEX : DXMT_MSC_STAGE_FRAGMENT);
         const auto flags = visibility == D3D12_SHADER_VISIBILITY_VERTEX && msc_dynamic_vertex_fetch ?
             DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0;
         const auto *layout = flags ? &msc_stage_in_layout_ : nullptr;
         if (selection == S_FALSE)
           return ConvertD3D12Shader({original.data(), original.size()},
               visibility == D3D12_SHADER_VISIBILITY_VERTEX ? DXMT_MSC_STAGE_VERTEX : DXMT_MSC_STAGE_FRAGMENT,
-              converted, root->bytecode.data(), root->bytecode.size(), layout, flags, &device_->GetMSCCapabilities());
+              converted, root->bytecode.data(), root->bytecode.size(), layout, flags, &capabilities);
         D3D12TypedOriginShader shader;
         std::string diagnostics;
         auto result = PrepareD3D12TypedOriginShader({original.data(), original.size()}, directory,
@@ -838,8 +850,8 @@ public:
         result = AppendTypedOriginBindings(shader, *candidate);
         if (FAILED(result)) return result;
         return visibility == D3D12_SHADER_VISIBILITY_VERTEX ?
-            ConvertD3D12TypedOriginVertexShader(shader, *root, converted, &device_->GetMSCCapabilities(), layout, flags) :
-            ConvertD3D12TypedOriginPixelShader(shader, *root, converted, &device_->GetMSCCapabilities());
+            ConvertD3D12TypedOriginVertexShader(shader, *root, converted, &capabilities, layout, flags) :
+            ConvertD3D12TypedOriginPixelShader(shader, *root, converted, &capabilities);
       };
       hr = prepare_stage(original_vs_, vertex_selection, D3D12_SHADER_VISIBILITY_VERTEX, vs);
       if (FAILED(hr)) return hr;
@@ -1662,10 +1674,10 @@ public:
 #ifdef DXMT_NO_PRIVATE_API
         D3D12LogicOpShader logic_shader;
         auto pixel_capabilities = msc_capabilities;
-        D3D12_SHADER_BYTECODE pixel_bytecode = pDesc->PS;
+        D3D12_SHADER_BYTECODE pixel_bytecode = requires_minmax_variant && !static_minmax_shaders.pixel.bytecode.empty() ?
+            D3D12_SHADER_BYTECODE{static_minmax_shaders.pixel.bytecode.data(), static_minmax_shaders.pixel.bytecode.size()} : pDesc->PS;
         if (pDesc->BlendState.RenderTarget[0].LogicOpEnable) {
-          if (!msc_capabilities.api_framebuffer_fetch || requires_minmax_variant ||
-              !typed_origin_compiler_directory.empty()) return E_NOTIMPL;
+          if (!msc_capabilities.api_framebuffer_fetch) return E_NOTIMPL;
           std::wstring directory;
           const auto selected = env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY");
           const auto explicit_directory = str::tows(selected.c_str());
@@ -1688,7 +1700,9 @@ public:
             }
           }
           std::string diagnostics;
-          std::set<uint32_t> occupied_spaces;
+          // Future draw-selected private roots append Typed/MinMax bindings in
+          // spaces 1/2. They must not become framebuffer feature resources.
+          std::set<uint32_t> occupied_spaces{1u, DXMT_MSC_MINMAX_SPACE};
           if (root_signature && root_signature_size) {
             Com<ID3D12VersionedRootSignatureDeserializer> decoded;
             hr = D3D12CreateVersionedRootSignatureDeserializer(root_signature, root_signature_size, IID_PPV_ARGS(&decoded));
@@ -1723,7 +1737,14 @@ public:
             ceiling = logic_shader.framebuffer_space - 1;
           }
           pixel_capabilities.compiler_framebuffer_fetch_resource_space = logic_shader.framebuffer_space;
+          logic_framebuffer_space_ = logic_shader.framebuffer_space;
           pixel_bytecode = {logic_shader.bytecode.data(), logic_shader.bytecode.size()};
+          // Static MinMax was prepared before this block. Dynamic variants must
+          // start from the logic-lowered application shader instead of dropping
+          // programmable blending when rebuilding their private root layout.
+          if (requires_minmax_variant && !static_minmax_shaders.pixel.bytecode.empty())
+            static_minmax_shaders.pixel.bytecode = logic_shader.bytecode;
+          else original_ps_ = logic_shader.bytecode;
         }
         const auto pixel_classification = ClassifyD3D12Shader(pixel_bytecode);
 #else
@@ -1733,7 +1754,7 @@ public:
 #endif
         if (FAILED(
               hr = requires_minmax_variant && !static_minmax_shaders.pixel.bytecode.empty() ? ConvertD3D12MinMaxShader(static_minmax_shaders.pixel,
-                    minmax_variant_->root, converted_ps, &msc_capabilities) : ConvertD3D12Shader(
+                    minmax_variant_->root, converted_ps, &pixel_capabilities) : ConvertD3D12Shader(
                     pixel_classification, pixel_bytecode, DXMT_MSC_STAGE_FRAGMENT, converted_ps, root_signature,
                     root_signature_size, nullptr, 0, &pixel_capabilities
                 )

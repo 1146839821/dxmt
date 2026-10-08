@@ -391,13 +391,21 @@ def run_logic_op_gpu_matrix(directory, wine, timeout, runtime, compiler=None):
                 directory, wine, "dx12_graphics_sm6.exe", (*root_files, option),
                 required, timeout, runtime, root_files, compiler=compiler) if runtime is not None else {
                     "status": UNVERIFIED, "reason": "explicit runtime required for provenance"}
+    typed_files = tuple("logic_typed_origin_" + entry + ".cso" for entry in ("vs", "ps", "ordinary", "typed_vs"))
+    for option in ("--logic-op", "--logic-op-auto"):
+        cases["dxil-typed-origin-" + option.removeprefix("--")] = run_fixture(
+            directory, wine, "dx12_typed_origin_pixel.exe", (*typed_files, "dxmt-dxc", option),
+            ("typed-origin LogicOp XOR pixel GPU PASS (16 submissions; ordinary restore)",),
+            timeout, runtime, typed_files, compiler=compiler) if runtime is not None and compiler is not None else {
+                "status": UNVERIFIED, "reason": "explicit runtime and compiler required for composition"}
     execution = aggregate([row(name, case["status"], "") for name, case in cases.items()])
     hashes = [case["runtime_sha256"] for case in cases.values() if case.get("runtime_sha256")]
     if hashes and any(digest != hashes[0] for digest in hashes):
         execution = aggregate([row("execution", execution, ""), row("hash_consistency", UNVERIFIED, "")])
     return {"status": PARTIAL if execution == PASS else execution, "execution_status": execution,
-            "reason": "16 Boolean operations, both backends plus MSC root-CBV/rebinding, exact four-channel readback; remaining raster matrix open",
+            "reason": "16 Boolean operations, both backends plus MSC root-CBV/rebinding and Typed XOR composition; remaining raster matrix open",
             "coverage_gaps": ["complete RTV format/component widths", "write masks/MRT/MSAA",
+                              "remaining private-variant operations and MinMax composition",
                               "blend/depth/stencil/cull/scissor/sample coverage", "native Windows oracle"],
             "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
 
