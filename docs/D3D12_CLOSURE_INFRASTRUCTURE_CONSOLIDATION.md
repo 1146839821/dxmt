@@ -1,5 +1,16 @@
 # Closure infrastructure consolidation
 
+Root-feedback performance checkpoint (2026-10-08): frozen-build paired workloads
+now expose costs hidden by caller-only timing. At 1,028 registered buffers,
+feedback median process CPU/GPU interval is about 918/290 us per submission
+versus control 273/9 us, while caller enqueue remains around 10 us. Twenty-two
+timing cases validate GPU output and fresh queries; separate worker-accounting,
+provenance, no-private API and sparse/remap correctness checks pass. No production
+instrumentation was added. See D3D12_ROOT_FEEDBACK_PERFORMANCE.md for raw evidence,
+variance, timing scope and remaining attribution/qualification limits. Address
+the full-registry fixed-root cost without weakening indirect/remap correctness;
+full mandatory matrices and the independent sort/counter audit remain open.
+
 Latest checkpoint (2026-10-08): ordered production worker and on-demand timestamp
 segments turn the same original D3D12 oracle from 188/200 failures to 0/200.
 Enhanced GPU consumer/CPU gate/list Reset/canary runs pass repeatedly on both

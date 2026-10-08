@@ -6,6 +6,11 @@ executable('dx12_timestamp_resolve', 'dx12_timestamp_resolve.cpp',
   build_by_default: false, dependencies: [d3d12_dep],
 )
 
+executable('dx12_root_feedback_perf', 'dx12_root_feedback_perf.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
 executable('dx12_buffer_feedback', 'dx12_buffer_feedback.cpp',
   build_by_default: false, dependencies: [d3d12_dep],
 )
