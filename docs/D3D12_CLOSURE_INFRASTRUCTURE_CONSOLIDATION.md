@@ -1,5 +1,18 @@
 # Closure infrastructure consolidation
 
+Typed qualification checkpoint (2026-10-08): full fresh runs exposed the gate's
+missing compiler deployment rather than a new renderer defect. The new explicit
+--typed-compiler-dir stages DXC/validator beside the temporary D3D12 module and
+requires actual compiler PE path/hash evidence, with inherited override paths
+cleared. Both complete Typed runners now pass 1,584 format/view contract cases
+(576 numeric GPU cases); undeployed 132/12 DXIL failures remain recorded. A
+separate no-private API-validation full DXIL matrix passes. Both MinMax
+rejection/control matrices and host suites pass (72 Python gate tests). See
+D3D12_TYPED_QUALIFICATION_2026-10-08.md. Additional-format API support remains
+FALSE and arbitrary views/lifetimes/stages are not qualified. Next register
+real MIN/MAX numeric acceptance separately from rejection controls, then Tiled
+and format/raster matrices. No full gate run or FL12 promotion is claimed.
+
 Fixed-root optimization checkpoint (2026-10-08): bounded recording-time numeric
 VA unions prune fresh submission snapshots without changing overlap precedence,
 live owner resolution or the full GPU-selected/unknown/overflow path. Final-build

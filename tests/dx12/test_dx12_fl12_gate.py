@@ -707,6 +707,84 @@ class GateTests(unittest.TestCase):
             self.assertEqual(result["status"], gate.UNVERIFIED)
             run.assert_not_called()
 
+    def test_compiler_deployment_missing_pair_never_runs(self):
+        with TemporaryDirectory() as directory, patch.object(gate.subprocess, "run") as run:
+            root = Path(directory)
+            (root / "probe.exe").write_bytes(b"probe")
+            (root / "dxcompiler.dll").write_bytes(b"compiler")
+            result = gate.run_fixture(root, "wine", "probe.exe", (), (), 1, root, (), compiler=root)
+            self.assertEqual(result["status"], gate.UNVERIFIED)
+            self.assertIn("dxil.dll", result["reason"])
+            run.assert_not_called()
+
+    def test_typed_deployment_only_changes_full_dxil_matrix(self):
+        calls = []
+        def fixture(*args, **kwargs):
+            calls.append((args, kwargs))
+            return {"status": gate.PASS, "runtime_sha256": {"d3d12": "same"}}
+        with patch.object(gate, "run_fixture", side_effect=fixture):
+            result = gate.run_typed_uav_matrix(Path("."), "wine", 1, Path("runtime"), Path("compiler"))
+        self.assertEqual(result["status"], gate.PASS)
+        deployed = [(args[3], kwargs) for args, kwargs in calls if kwargs]
+        self.assertEqual(deployed, [(("--dxil",), {"compiler": Path("compiler")})])
+        self.assertEqual(len(calls), 9)
+
+    def test_fixture_stages_and_observes_compiler_without_ambient_override(self):
+        from types import SimpleNamespace
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "probe.exe").write_bytes(b"probe")
+            for dll in ("d3d12", "dxgi", "winemetal"):
+                (root / dll).mkdir()
+                (root / dll / (dll + ".dll")).write_bytes(dll.encode())
+            for dll in ("dxcompiler", "dxil"):
+                (root / (dll + ".dll")).write_bytes(dll.encode())
+            for missing_validator in (False, True):
+                def execute(*args, **kwargs):
+                    stage = kwargs["cwd"]
+                    for key in ("DXMT_TYPED_ORIGIN_DXC_DIRECTORY", "DXMT_MINMAX_DXC_DIRECTORY"):
+                        self.assertEqual(kwargs["env"][key], "")
+                    for dll in ("dxcompiler", "dxil"):
+                        self.assertEqual((stage / "dxmt-dxc" / (dll + ".dll")).read_bytes(), dll.encode())
+                    files = ["probe.exe", "d3d12.dll", "dxgi.dll", "winemetal.dll", "dxmt-dxc/dxcompiler.dll"]
+                    if not missing_validator: files.append("dxmt-dxc/dxil.dll")
+                    for file in files:
+                        path = "Z:" + str(stage / file).replace("/", "\\")
+                        kwargs["stdout"].write(f'0020:0024:trace:loaddll:build_module Loaded L"{path}" at 0000: native\n')
+                    kwargs["stdout"].write("passed")
+                    return SimpleNamespace(returncode=0)
+                with patch.dict(gate.os.environ, {"DXMT_TYPED_ORIGIN_DXC_DIRECTORY": "ambient"}), \
+                     patch.object(gate, "pe_imports", return_value={"d3d12.dll"}), \
+                     patch.object(gate, "verify_loaded_unix", return_value={"status": gate.PASS}), \
+                     patch.object(gate.subprocess, "run", side_effect=execute):
+                    result = gate.run_fixture(root, "wine", "probe.exe", (), ("passed",), 1, root, (), compiler=root)
+                self.assertEqual(result["status"], gate.UNVERIFIED if missing_validator else gate.PASS)
+                self.assertEqual(set(result["compiler_deployment"]["sha256"]), {"dxcompiler", "dxil"})
+                self.assertEqual(result["compiler_deployment"]["source"], str(root.resolve()))
+
+    def test_compiler_loaded_pe_requires_nested_path_target_and_immutable_hash(self):
+        import hashlib
+        with TemporaryDirectory() as directory:
+            stage = Path(directory).resolve()
+            (stage / "dxmt-dxc").mkdir()
+            paths = {dll: "dxmt-dxc/" + dll + ".dll" for dll in ("dxcompiler", "dxil")}
+            hashes = {}
+            for dll, file in paths.items():
+                (stage / file).write_bytes(dll.encode())
+                hashes[dll] = hashlib.sha256(dll.encode()).hexdigest()
+            def record(pid, file):
+                path = "Z:" + str(stage / file).replace("/", "\\")
+                return f'{pid}:0024:trace:loaddll:build_module Loaded L"{path}" at 00000000: native\n'
+            executable = record("0020", "probe.exe")
+            modules = "".join(record("0020", file) for file in paths.values())
+            verify = lambda output: gate.verify_loaded_pe(output, stage, "probe.exe", hashes, set(hashes), paths)
+            self.assertEqual(verify(executable + modules)["status"], gate.PASS)
+            self.assertEqual(verify(executable)["status"], gate.UNVERIFIED)
+            self.assertEqual(verify(executable + modules.replace("0020:", "0040:"))["status"], gate.UNVERIFIED)
+            self.assertEqual(verify(executable + modules.replace("dxmt-dxc", "other"))["status"], gate.FAIL)
+            (stage / paths["dxil"]).write_bytes(b"changed")
+            self.assertEqual(verify(executable + modules)["status"], gate.FAIL)
+
     def test_qualification_overrides_ambient_experimental_caps(self):
         import shutil
         from types import SimpleNamespace
@@ -721,7 +799,7 @@ class GateTests(unittest.TestCase):
                 }):
                     def execute(*args, **kwargs):
                         for key in gate.QUALIFICATION_ENVIRONMENT:
-                            self.assertEqual(kwargs["env"][key], "0")
+                            self.assertEqual(kwargs["env"][key], gate.QUALIFICATION_ENVIRONMENT[key])
                         self.assertEqual(kwargs["env"]["WINEPREFIX"], "preserved-prefix")
                         kwargs["stdout"].write("passed")
                         return SimpleNamespace(returncode=0)
@@ -772,6 +850,7 @@ class GateTests(unittest.TestCase):
                     expected = gate.UNVERIFIED if code == 77 else gate.PASS if code == 0 and marker else gate.FAIL
                     self.assertEqual(result["status"], expected)
                     self.assertEqual(result["output"], marker)
+                    self.assertIsNone(result["compiler_deployment"])
 
     def test_helper_output_handle_does_not_delay_probe_completion(self):
         import time

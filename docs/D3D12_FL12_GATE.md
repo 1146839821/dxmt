@@ -1,5 +1,17 @@
 # FL12 evidence gate and backend isolation
 
+## Typed compiler deployment qualification (2026-10-08)
+
+The --typed-compiler-dir option stages the compiler/validator pair in dxmt-dxc
+only for the full DXIL numeric typed matrix, invoking existing automatic
+module-relative production selection. Every qualification child clears inherited
+typed-origin/MinMax directory overrides. Actual target PE provenance includes
+both nested compiler paths/hashes; absent deployment still executes the legacy
+path and may fail. Native-view rejection/control fixtures are unchanged.
+See D3D12_TYPED_QUALIFICATION_2026-10-08.md for scope and fresh evidence.
+Neither this option nor numeric matrix success promotes the additional-format
+API bit, closes arbitrary view/lifetime semantics, or makes the full FL12 gate PASS.
+
 ## Actual Unix runtime identity checkpoint (2026-10-08)
 
 Baseline 1c2d3de1, branch feat/d3d12-1. The preparation hypothesis is recorded in

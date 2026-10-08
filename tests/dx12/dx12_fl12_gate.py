@@ -26,6 +26,8 @@ QUALIFICATION_ENVIRONMENT = {
     "DXMT_SHADER_CACHE": "0",
     "DXMT_EXPERIMENTAL_SM6_6": "0",
     "DXMT_EXPERIMENTAL_FL12_0": "0",
+    "DXMT_TYPED_ORIGIN_DXC_DIRECTORY": "",
+    "DXMT_MINMAX_DXC_DIRECTORY": "",
 }
 
 
@@ -98,9 +100,10 @@ def pe_imports(path):
     raise ValueError("unterminated PE import directory")
 
 
-def verify_loaded_pe(output, stage, name, hashes, required):
+def verify_loaded_pe(output, stage, name, hashes, required, paths=None):
     """Require process-qualified observations; helper processes are not evidence."""
     expected_path = lambda file: ("Z:" + str(stage / file).replace("/", "\\")).casefold()
+    paths = paths or {}
     records = []
     pattern = r'^([0-9a-f]+):[0-9a-f]+:trace:loaddll:build_module Loaded L"([^"\n]+)" at '
     for pid, path in re.findall(pattern, output, re.MULTILINE | re.IGNORECASE):
@@ -113,9 +116,10 @@ def verify_loaded_pe(output, stage, name, hashes, required):
     for process, path in records:
         dll = ntpath.basename(path).lower().removesuffix(".dll")
         if process != pid or dll not in hashes: continue
-        if path.casefold() != expected_path(dll + ".dll"):
+        file = paths.get(dll, dll + ".dll")
+        if path.casefold() != expected_path(file):
             return {"status": FAIL, "reason": "target loaded unexpected DLL: " + path}
-        digest = hashlib.sha256((stage / (dll + ".dll")).read_bytes()).hexdigest()
+        digest = hashlib.sha256((stage / file).read_bytes()).hexdigest()
         if digest != hashes[dll]:
             return {"status": FAIL, "reason": "staged DLL changed during execution: " + dll}
         observed[dll] = {"path": path, "sha256": digest}
@@ -191,11 +195,16 @@ def verify_build(build, variant, wine):
         return {"status": UNVERIFIED, "reason": str(error)}
 
 
-def run_fixture(directory, wine, name, args, required, timeout, runtime=None, stage_files=None):
+def run_fixture(directory, wine, name, args, required, timeout, runtime=None, stage_files=None, compiler=None):
     files = (name,) + (tuple(args) if stage_files is None else tuple(stage_files))
     missing = [file for file in files if not (directory / file).is_file()]
     if missing:
         return {"status": UNVERIFIED, "reason": "missing: " + ", ".join(missing)}
+    if compiler is not None:
+        missing = [dll for dll in ("dxcompiler.dll", "dxil.dll") if not (compiler / dll).is_file()]
+        if missing or not wine or runtime is None:
+            return {"status": UNVERIFIED, "reason": "compiler deployment requires Wine/runtime provenance and both DLLs: " +
+                    ", ".join(missing)}
     dlls = ("d3d12", "dxgi", "winemetal")
     if runtime is not None:
         missing = [dll for dll in dlls if not (runtime / dll / (dll + ".dll")).is_file()]
@@ -205,6 +214,8 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
     with tempfile.TemporaryDirectory(prefix="dxmt-fl12-") as staging:
         stage = Path(staging).resolve()
         staged_hashes = {}
+        compiler_hashes = {}
+        compiler_paths = {}
         for file in files:
             shutil.copy2(directory / file, stage / file)
         executable_hash = hashlib.sha256((stage / name).read_bytes()).hexdigest()
@@ -212,9 +223,16 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
             for dll in dlls:
                 shutil.copy2(runtime / dll / (dll + ".dll"), stage / (dll + ".dll"))
                 staged_hashes[dll] = hashlib.sha256((stage / (dll + ".dll")).read_bytes()).hexdigest()
-        compiler = directory / "d3dcompiler_47.dll"
-        if compiler.is_file():
-            shutil.copy2(compiler, stage / compiler.name)
+        if compiler is not None:
+            (stage / "dxmt-dxc").mkdir()
+            for dll in ("dxcompiler", "dxil"):
+                file = "dxmt-dxc/" + dll + ".dll"
+                shutil.copy2(compiler / (dll + ".dll"), stage / file)
+                compiler_paths[dll] = file
+                compiler_hashes[dll] = hashlib.sha256((stage / file).read_bytes()).hexdigest()
+        legacy_compiler = directory / "d3dcompiler_47.dll"
+        if legacy_compiler.is_file():
+            shutil.copy2(legacy_compiler, stage / legacy_compiler.name)
         command = ([wine] if wine else []) + [str(stage / name)] + list(args)
         controls = dict(QUALIFICATION_ENVIRONMENT)
         loaded = None
@@ -248,7 +266,8 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
             status = UNVERIFIED
         if wine and runtime is not None:
             try:
-                loaded = verify_loaded_pe(output, stage, name, staged_hashes, required_modules)
+                loaded = verify_loaded_pe(output, stage, name, {**staged_hashes, **compiler_hashes},
+                                          required_modules | compiler_hashes.keys(), compiler_paths)
                 loaded_unix = verify_loaded_unix(output, loaded, runtime / "winemetal/unix/winemetal.so")
             except OSError as error:
                 loaded_unix = {"status": UNVERIFIED, "reason": str(error)}
@@ -260,6 +279,8 @@ def run_fixture(directory, wine, name, args, required, timeout, runtime=None, st
                 "executable_sha256": executable_hash,
                 "loaded_pe": loaded,
                 "loaded_unix": loaded_unix,
+                "compiler_deployment": {"source": str(compiler.resolve()), "sha256": compiler_hashes}
+                                       if compiler is not None else None,
                 "controlled_environment": controls}
 
 
@@ -289,7 +310,7 @@ def run_minmax_contract(directory, wine, timeout, runtime):
             "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
 
 
-def run_typed_uav_matrix(directory, wine, timeout, runtime):
+def run_typed_uav_matrix(directory, wine, timeout, runtime, compiler=None):
     cases = {
         "policy": run_fixture(directory, wine, "dx12_typed_uav_policy.exe", (),
                               ("typed UAV policy contracts passed",), timeout, runtime),
@@ -301,8 +322,9 @@ def run_typed_uav_matrix(directory, wine, timeout, runtime):
     for backend in ("dxbc", "dxil"):
         files = ("typed_uav_formats.hlsl",) if backend == "dxbc" else tuple(
             "typed_uav_%d_%d.cso" % (type_index, shape) for type_index in range(8) for shape in range(6))
+        deployment = {"compiler": compiler} if backend == "dxil" and compiler is not None else {}
         cases[backend] = run_fixture(directory, wine, "dx12_typed_uav_formats.exe", ("--" + backend,),
-                                     ("typed UAV matrix: passed=144 failed=0",), timeout, runtime, files)
+                                     ("typed UAV matrix: passed=144 failed=0",), timeout, runtime, files, **deployment)
         view_files = ("typed_uav_formats.hlsl",) if backend == "dxbc" else tuple(
             "typed_uav_%d_0.cso" % type_index for type_index in range(8))
         cases[backend + "_views"] = run_fixture(
@@ -662,6 +684,8 @@ def main():
                         help="label only; caller must independently verify build configuration")
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--output", type=Path, help="save full JSON evidence; print compact status")
+    parser.add_argument("--typed-compiler-dir", type=Path,
+                        help="stage DXC/validator beside D3D12 for the production DXIL typed matrix only")
     args = parser.parse_args()
     directory = args.build_dir.resolve() / "tests" / "dx12"
     runtime = args.build_dir.resolve() / "src"
@@ -704,7 +728,8 @@ def main():
     probes["state_object_addition_failure_oracle"] = run_state_object_addition_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["ray_synthesis_failure_oracle"] = run_ray_synthesis_failure_oracle(directory, args.wine, args.timeout, runtime)
     probes["ray_metal_failure_oracle"] = run_ray_metal_failure_oracle(directory, args.wine, args.timeout, runtime)
-    probes["typed_uav_matrix"] = run_typed_uav_matrix(directory, args.wine, args.timeout, runtime)
+    probes["typed_uav_matrix"] = run_typed_uav_matrix(directory, args.wine, args.timeout, runtime,
+                                                    args.typed_compiler_dir)
     if verify_build(args.build_dir.resolve(), args.variant, args.wine) != provenance:
         provenance = {"status": UNVERIFIED, "reason": "build/runtime provenance changed during probes"}
     expected_hashes = provenance.get("runtime_sha256")
