@@ -1,5 +1,14 @@
 # Closure infrastructure consolidation
 
+MinMax+LogicOp checkpoint (2026-10-08): all sixteen operations pass static MIN/MAX,
+dynamic MIN/MAX and same-PSO MIN/MAX/LINEAR/MIN sampler replay on both builds under
+API validation (160 cases, 256 submissions). CPU expectations separate reduction
+from ordinary sampling and Boolean output. Both full builds and host suites pass
+(90 gate tests). Eighty mandatory composition cases expand the raster ledger to
+162; its final no-private execution passes all 162 and remains PARTIAL. Complete
+stage/format/MSAA/native qualification still remains open. See
+D3D12_MSC_LOGIC_OP_LOWERING.md. No capability promotion or game deployment.
+
 Private-variant checkpoint (2026-10-08): LogicOp bytecode and local pixel feature
 space now survive Typed/MinMax variant compilation. Typed+XOR R32_UINT passes
 automatic/explicit compiler selection on both builds under API validation,

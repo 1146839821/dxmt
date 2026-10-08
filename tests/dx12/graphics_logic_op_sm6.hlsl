@@ -28,3 +28,11 @@ uint4 ps_root_cbv(VSOutput input) : SV_Target0
 {
     return logic_source;
 }
+
+Texture2D<float4> reduction_source : register(t0);
+SamplerState reduction_sampler : register(s0);
+uint4 ps_minmax(VSOutput input) : SV_Target0
+{
+    uint red = uint(reduction_source.SampleLevel(reduction_sampler, float2(0.5, 0.5), 0).r * 255 + 0.5);
+    return uint4(red, 15, 170, 85);
+}

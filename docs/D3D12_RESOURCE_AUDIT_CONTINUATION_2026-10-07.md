@@ -1,5 +1,14 @@
 # Resource closure continuation — 2026-10-07
 
+2026-10-08 combined-MinMax pixel evidence: sixteen LogicOps pass static reduction
+samplers, dynamic MIN/MAX and same-PSO MIN/MAX/LINEAR/MIN replay on both builds
+under API validation (160 cases, 256 submissions). Volatile sampler replacement
+occurs only after fence completion; the immutable list restores texture/attachment
+initial states and uses increasing fence values. This validates the tested live
+descriptor reread together with framebuffer-feature handling, not same-address VA
+remap or full resource lifetime/stage/root-layout coverage. Source changes are
+test/gate only. See D3D12_MSC_LOGIC_OP_LOWERING.md; formal capabilities unchanged.
+
 2026-10-08 private-variant update: pixel-only framebuffer feature-space settings
 and transformed bytecode are retained for draw-selected Typed/MinMax variants.
 No synthetic framebuffer descriptor/residency entry is added. Typed+XOR checks

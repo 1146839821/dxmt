@@ -86,7 +86,22 @@ int main(int argc, char **argv) {
   const bool geometry =
       argc == 5 && (strcmp(argv[3], "--geometry") == 0 || geometry_indexed ||
                     geometry_adjacency || geometry_root_cbv || geometry_instanced);
-  const bool textured = argc == 4 && strcmp(argv[3], "--texture") == 0;
+  const char *logic_minmax_number = nullptr;
+  bool logic_minmax_static = false, logic_minmax_maximum = false;
+  bool logic_minmax_switch = false;
+  const char *minmax_modes[] = {"--logic-op-minmax-static-min-", "--logic-op-minmax-static-max-",
+      "--logic-op-minmax-dynamic-min-", "--logic-op-minmax-dynamic-max-", "--logic-op-minmax-dynamic-switch-"};
+  if (argc == 4) for (unsigned mode = 0; mode < 5; ++mode) {
+    const auto length = strlen(minmax_modes[mode]);
+    if (!strncmp(argv[3], minmax_modes[mode], length)) {
+      logic_minmax_number = argv[3] + length;
+      logic_minmax_static = mode < 2;
+      logic_minmax_maximum = mode & 1;
+      logic_minmax_switch = mode == 4;
+    }
+  }
+  const bool logic_minmax = logic_minmax_number != nullptr;
+  const bool textured = logic_minmax || (argc == 4 && strcmp(argv[3], "--texture") == 0);
   const bool indirect_indexed = argc == 4 && strcmp(argv[3], "--indirect-root-cbv-indexed") == 0;
   const bool indirect_fragment = argc == 4 && strcmp(argv[3], "--indirect-fragment-constants") == 0;
   const bool indirect_partial = argc == 4 && strcmp(argv[3], "--indirect-partial-constants") == 0;
@@ -116,7 +131,7 @@ int main(int argc, char **argv) {
   const bool numbered_logic = argc == 4 && (logic_sm5 || strncmp(argv[3], "--logic-op-", 11) == 0);
   unsigned logic_index = D3D12_LOGIC_OP_OR;
   if (numbered_logic) {
-    const auto number = argv[3] + (logic_root_collision ? (logic_root_chain ? 36 : 30) : logic_root_cbv ? (logic_root_chain ? 26 : 20) :
+    const auto number = logic_minmax ? logic_minmax_number : argv[3] + (logic_root_collision ? (logic_root_chain ? 36 : 30) : logic_root_cbv ? (logic_root_chain ? 26 : 20) :
         logic_sm5 ? (logic_chain ? 21 : 15) : (logic_chain ? 17 : 11));
     // Reject malformed options instead of silently selecting CLEAR.
     if (!*number) return 2;
@@ -243,6 +258,7 @@ int main(int argc, char **argv) {
   ID3D12DescriptorHeap *dsv_heap = nullptr;
   ID3D12DescriptorHeap *resource_heap = nullptr;
   ID3D12DescriptorHeap *sampler_heap = nullptr;
+  D3D12_STATIC_SAMPLER_DESC reduction_static_sampler = {};
   ID3D12QueryHeap *query_heap = nullptr;
   ID3D12QueryHeap *timestamp_heap = nullptr;
   ID3D12Resource *render_target = nullptr;
@@ -335,6 +351,15 @@ int main(int argc, char **argv) {
   UINT64 calibration_cpu = 0;
   HRESULT instanced_geometry_hr = E_FAIL;
   int result = 1;
+  unsigned minmax_submission = 0;
+
+  if (logic_minmax && !logic_minmax_static) {
+    wchar_t directory[32768] = {};
+    const auto length = GetCurrentDirectoryW(32768, directory);
+    if (!length || length + 10 >= 32768) return 1;
+    wcscat(directory, L"\\dxmt-dxc");
+    if (!SetEnvironmentVariableW(L"DXMT_MINMAX_DXC_DIRECTORY", directory)) return 1;
+  }
 
   if (!CheckHR("D3D12CreateDevice",
                D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
@@ -450,6 +475,17 @@ int main(int argc, char **argv) {
     }
     root_desc.NumParameters = 2;
     root_desc.pParameters = root_parameters;
+    if (logic_minmax_static) {
+      reduction_static_sampler.Filter = logic_minmax_maximum ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR :
+          D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;
+      reduction_static_sampler.AddressU = reduction_static_sampler.AddressV = reduction_static_sampler.AddressW =
+          D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+      reduction_static_sampler.MaxLOD = D3D12_FLOAT32_MAX;
+      reduction_static_sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+      root_desc.NumParameters = 1;
+      root_desc.NumStaticSamplers = 1;
+      root_desc.pStaticSamplers = &reduction_static_sampler;
+    }
   }
 
   if (!CheckHR("D3D12SerializeRootSignature",
@@ -548,8 +584,8 @@ int main(int argc, char **argv) {
     texture_upload_heap.CreationNodeMask = 1;
     texture_upload_heap.VisibleNodeMask = 1;
     texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    texture_desc.Width = 1;
-    texture_desc.Height = 1;
+    texture_desc.Width = logic_minmax ? 2 : 1;
+    texture_desc.Height = logic_minmax ? 2 : 1;
     texture_desc.DepthOrArraySize = 1;
     texture_desc.MipLevels = 1;
     texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -565,7 +601,7 @@ int main(int argc, char **argv) {
     upload_heap.CreationNodeMask = 1;
     upload_heap.VisibleNodeMask = 1;
     buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    buffer_desc.Width = 256;
+    buffer_desc.Width = logic_minmax ? 512 : 256;
     buffer_desc.Height = 1;
     buffer_desc.DepthOrArraySize = 1;
     buffer_desc.MipLevels = 1;
@@ -585,6 +621,11 @@ int main(int argc, char **argv) {
       goto cleanup;
     static const UINT texture_pixel = 0xff0000ff;
     memcpy(mapped_texture_upload, &texture_pixel, sizeof(texture_pixel));
+    if (logic_minmax) {
+      const UINT pixels[] = {0xff000010, 0xff000040, 0xff0000c0, 0xff0000f0};
+      memcpy(mapped_texture_upload, pixels, 8);
+      memcpy(static_cast<unsigned char *>(mapped_texture_upload) + 256, pixels + 2, 8);
+    }
     texture_upload->Unmap(0, nullptr);
 
     srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -595,6 +636,8 @@ int main(int argc, char **argv) {
     device->CreateShaderResourceView(texture, &srv_desc, resource_cpu);
 
     sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    if (logic_minmax) sampler_desc.Filter = logic_minmax_maximum ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR :
+        D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;
     sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -813,7 +856,7 @@ int main(int argc, char **argv) {
     const UINT sampler_root_index = textured_root_cbv ? 2 : 1;
     list->SetGraphicsRootDescriptorTable(
         resource_root_index, resource_heap->GetGPUDescriptorHandleForHeapStart());
-    list->SetGraphicsRootDescriptorTable(
+    if (!logic_minmax_static) list->SetGraphicsRootDescriptorTable(
         sampler_root_index, sampler_heap->GetGPUDescriptorHandleForHeapStart());
   }
   if (root_cbv || textured_root_cbv || geometry_root_cbv)
@@ -974,19 +1017,29 @@ int main(int argc, char **argv) {
   }
   list->ResolveQueryData(query_heap, D3D12_QUERY_TYPE_OCCLUSION, 0, 1, query_readback, sizeof(UINT64) * 2);
   list->ResolveQueryData(timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, query_readback, 0);
+  if (logic_minmax_switch) {
+    // Restore initial resource states before replaying this immutable list.
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    list->ResourceBarrier(1, &barrier);
+    texture_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    texture_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    list->ResourceBarrier(1, &texture_barrier);
+  }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
 
-  lists[0] = list;
-  queue->ExecuteCommandLists(1, lists);
   if (!CheckHR("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
                                                   IID_PPV_ARGS(&fence))))
     goto cleanup;
-  if (!CheckHR("Signal", queue->Signal(fence, 1)))
-    goto cleanup;
   event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+submit:
+  lists[0] = list;
+  queue->ExecuteCommandLists(1, lists);
+  if (!CheckHR("Signal", queue->Signal(fence, minmax_submission + 1)))
+    goto cleanup;
   if (!event ||
-      !CheckHR("SetEventOnCompletion", fence->SetEventOnCompletion(1, event)))
+      !CheckHR("SetEventOnCompletion", fence->SetEventOnCompletion(minmax_submission + 1, event)))
     goto cleanup;
   if (WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0) {
     std::cerr << "queue event wait failed: " << GetLastError() << "\n";
@@ -1027,7 +1080,9 @@ int main(int argc, char **argv) {
   if (packed_uint) expected_pixel = 0xaa4080ffu;
   if (logic_op) {
     // CPU Boolean oracle, independent from Metal's operation enum translation.
-    constexpr UINT source = 0x55aa0ff0u, destination = 0xf00f33ccu;
+    const UINT source = logic_minmax ? 0x55aa0f00u |
+        (minmax_submission == 2 ? 128u : logic_minmax_maximum ? 240u : 16u) : 0x55aa0ff0u;
+    constexpr UINT destination = 0xf00f33ccu;
     const auto apply = [&](UINT dest, UINT src) {
       const UINT expected[] = {0, UINT_MAX, src, ~src, dest, ~dest,
           src & dest, ~(src & dest), src | dest, ~(src | dest),
@@ -1047,6 +1102,19 @@ int main(int argc, char **argv) {
   if (logic_chain) std::cout << "LOGIC_OP_CHAIN draws=2 PASS\n";
   if (logic_root_cbv) std::cout << "LOGIC_OP_ROOT_CBV " << (logic_chain ? "rebound" : "direct") << " PASS\n";
   if (logic_root_collision) std::cout << "LOGIC_OP_ROOT_SPACE collision-reselected PASS\n";
+  if (logic_minmax) std::cout << "LOGIC_OP_MINMAX " << (logic_minmax_static ? "static" : "dynamic") << " "
+      << (minmax_submission == 2 ? "LINEAR" : logic_minmax_maximum ? "MAX" : "MIN") << " PASS\n";
+  if (logic_minmax_switch && minmax_submission < 3) {
+    // The prior fence completed: mutate a volatile descriptor only between
+    // submissions, never while the GPU can still consume it.
+    ++minmax_submission;
+    logic_minmax_maximum = minmax_submission == 1;
+    sampler_desc.Filter = minmax_submission == 2 ? D3D12_FILTER_MIN_MAG_MIP_LINEAR :
+        logic_minmax_maximum ? D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR;
+    device->CreateSampler(&sampler_desc, sampler_cpu);
+    goto submit;
+  }
+  if (logic_minmax_switch) std::cout << "LOGIC_OP_MINMAX same-PSO switch MIN/MAX/LINEAR/MIN PASS\n";
   std::cout << ((packed_sm5 || logic_sm5) ? "DXBC AIRCONV " : "DXIL ")
             << (geometry_adjacency_indexed
                     ? "indexed adjacency geometry graphics"

@@ -398,14 +398,27 @@ def run_logic_op_gpu_matrix(directory, wine, timeout, runtime, compiler=None):
             ("typed-origin LogicOp XOR pixel GPU PASS (16 submissions; ordinary restore)",),
             timeout, runtime, typed_files, compiler=compiler) if runtime is not None and compiler is not None else {
                 "status": UNVERIFIED, "reason": "explicit runtime and compiler required for composition"}
+    minmax_files = ("graphics_logic_op_sm6.vs.cso", "graphics_logic_op_minmax.ps.cso")
+    for mode in ("static-min", "static-max", "dynamic-min", "dynamic-max", "dynamic-switch"):
+        for operation in range(16):
+            markers = (f"LOGIC_OP index={operation} RGBA8_UINT PASS",)
+            if mode == "dynamic-switch":
+                markers += ("LOGIC_OP_MINMAX same-PSO switch MIN/MAX/LINEAR/MIN PASS",)
+            else:
+                kind, reduction = mode.split("-")
+                markers += (f"LOGIC_OP_MINMAX {kind} {reduction.upper()} PASS",)
+            cases[f"dxil-minmax-{mode}-{operation}"] = run_fixture(
+                directory, wine, "dx12_graphics_sm6.exe", (*minmax_files, f"--logic-op-minmax-{mode}-{operation}"),
+                markers, timeout, runtime, minmax_files, compiler=compiler) if runtime is not None and compiler is not None else {
+                    "status": UNVERIFIED, "reason": "explicit runtime and compiler required for MinMax composition"}
     execution = aggregate([row(name, case["status"], "") for name, case in cases.items()])
     hashes = [case["runtime_sha256"] for case in cases.values() if case.get("runtime_sha256")]
     if hashes and any(digest != hashes[0] for digest in hashes):
         execution = aggregate([row("execution", execution, ""), row("hash_consistency", UNVERIFIED, "")])
     return {"status": PARTIAL if execution == PASS else execution, "execution_status": execution,
-            "reason": "16 Boolean operations, both backends plus MSC root-CBV/rebinding and Typed XOR composition; remaining raster matrix open",
+            "reason": "16 Boolean operations, MSC root-CBV/rebinding, Typed XOR and MinMax static/dynamic/switch composition; remaining raster matrix open",
             "coverage_gaps": ["complete RTV format/component widths", "write masks/MRT/MSAA",
-                              "remaining private-variant operations and MinMax composition",
+                              "remaining Typed operations, private layouts and MinMax stage coverage",
                               "blend/depth/stencil/cull/scissor/sample coverage", "native Windows oracle"],
             "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
 

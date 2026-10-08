@@ -1,5 +1,40 @@
 # MSC programmable logic-op implementation boundary
 
+## MinMax composition qualification checkpoint — 2026-10-08
+
+Starting HEAD fa9dab0e. Hypothesis: static MinMax-before-LogicOp and dynamic
+LogicOp-before-MinMax transformations preserve both reduction behavior and ordered
+attachment reads. Previous evidence covered only Typed+XOR. Expected effect:
+replace the blanket missing combined-MinMax GPU evidence with a bounded pixel
+qualification. Risk: constant inputs hide ordinary sampling, a frozen reduction
+mode hides volatile descriptor rereads, or invalid list replay contaminates results.
+
+The shared graphics fixture now samples a 2x2 UNORM texture whose red taps are
+16/64/192/240, then emits UINT output into RGBA8_UINT. Independent CPU expectations
+distinguish MIN=16, MAX=240 and center-linear=128 before applying each Boolean
+operation to the cleared destination. All sixteen operations pass static MIN/MAX,
+dynamic MIN/MAX and same-PSO MIN/MAX/LINEAR/MIN replay on both builds under Metal
+API validation: 160 cases, 256 submissions. Each replay waits for its prior fence,
+changes only a volatile sampler between executions, uses an increasing fence
+value, and restores texture/attachment initial states in the immutable list.
+
+Both full builds and host suites pass (17/17 each; 90 gate unit tests). The gate
+adds eighty mandatory combined-MinMax cases and a fail-closed switch-failure unit
+test. Source changes in this checkpoint are fixtures/gate only; no further
+production repair was needed for the tested composition. Evidence:
+minmax-logic-first.json, minmax-logic-switch.json and minmax-logic-api.json under
+/Users/zhangbo/.cache/dxmt-msc-logic.6jblCq. Compiler/integration skills informed
+feature-space and static-sampler checks; validation was enabled before device
+creation. Main-agent Standards/Spec review checked descriptor mutation and replay
+state contracts; no independent review or shader validation is claimed.
+The final no-private gate passes all 162 executions and remains PARTIAL
+(minmax-logic-gate.json), including the prior AIR/MSC, root-CBV and Typed cases.
+
+This supersedes the missing combined-MinMax pixel evidence below, not complete
+stage/shape/filter/root-layout coverage, simultaneous Typed+MinMax, Typed's other
+operations, MSAA/full-format/MRT or native qualification. Formal capabilities,
+experimental opt-ins and game deployments remain unchanged.
+
 ## Private-variant composition checkpoint — 2026-10-08
 
 Starting HEAD d8533c26. Hypothesis: rebuilding a private root from the saved
