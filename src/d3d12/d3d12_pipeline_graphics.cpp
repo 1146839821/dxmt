@@ -508,6 +508,7 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
   std::unique_ptr<D3D12MinMaxGraphicsVariant> minmax_variant_;
   uint32_t logic_framebuffer_space_ = DXMT_MSC_RESOURCE_SPACE_DISABLED;
   uint32_t sample_mask_ = UINT32_MAX;
+  WMT::Reference<WMT::Function> depth_coverage_function_;
 
   DXMTMSCCapabilities CapabilitiesForStage(uint32_t stage) const {
     auto capabilities = device_->GetMSCCapabilities();
@@ -702,7 +703,8 @@ public:
         auto ps_function = ps_lib ? ps_lib.newFunction(ps.entry_point.c_str()) : WMT::Reference<WMT::Function>{};
         if (!vs_function || (!original_ps_.empty() && !ps_function)) return E_FAIL;
         auto info = minmax_render_info_;
-        info.vertex_function = vs_function.handle; info.fragment_function = ps_function.handle;
+        info.vertex_function = vs_function.handle;
+        info.fragment_function = ps_function ? ps_function.handle : depth_coverage_function_.handle;
         candidate->pso = CreateOrdinaryMSCPipeline(info, vs, error);
         if (!candidate->pso) { ERR("MinMax render PSO failed"); return E_FAIL; }
       }
@@ -874,7 +876,8 @@ public:
       auto ps_function = ps_lib ? ps_lib.newFunction(ps.entry_point.c_str()) : WMT::Reference<WMT::Function>{};
       if (!vs_function || (!original_ps_.empty() && !ps_function)) return E_FAIL;
       auto info = minmax_render_info_;
-      info.vertex_function = vs_function.handle; info.fragment_function = ps_function.handle;
+      info.vertex_function = vs_function.handle;
+      info.fragment_function = ps_function ? ps_function.handle : depth_coverage_function_.handle;
       candidate->pso = CreateOrdinaryMSCPipeline(info, vs, error);
       if (!candidate->pso) return E_FAIL;
       typed_origin_directory_ = directory;
@@ -1477,8 +1480,8 @@ public:
     }
     const bool use_msc = msc_capabilities.CoreShaderPathUsable() &&
                          vs_backend == D3D12ShaderBackend::MetalShaderConverter;
-    if (use_msc && !has_pixel_shader && sample_mask_ != UINT32_MAX) {
-      ERR("CreatePipelineState: MSC depth-only sample mask requires a coverage shader");
+    if (use_msc && !has_pixel_shader && sample_mask_ != UINT32_MAX && (has_geometry || has_hull || has_domain)) {
+      ERR("CreatePipelineState: emulated MSC depth-only sample mask requires coverage integration");
       return E_NOTIMPL;
     }
     if (vs_backend == D3D12ShaderBackend::MetalShaderConverter && !msc_capabilities.CoreShaderPathUsable()) {
@@ -1778,6 +1781,20 @@ public:
         ps_func = ps_lib.newFunction(converted_ps.entry_point.c_str());
         if (!ps_func)
           return E_FAIL;
+      }
+
+      if (!has_pixel_shader && sample_mask_ != UINT32_MAX) {
+        WMTFunctionConstant mask = {};
+        mask.index = kDepthCoverageFCIndex_SampleMask;
+        mask.type = WMTDataTypeUInt;
+        mask.data.set(&sample_mask_);
+        depth_coverage_function_ = device_->GetLib().getLibrary().newFunctionWithConstants(
+            "fs_depth_coverage", &mask, 1, err);
+        if (!depth_coverage_function_) {
+          ERR("Failed to specialize depth-only coverage shader");
+          return E_FAIL;
+        }
+        ps_func = depth_coverage_function_;
       }
 
       if (msc_emulation_flags) {

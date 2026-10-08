@@ -265,6 +265,16 @@ struct depth_out {
   float depth [[depth(any)]];
 };
 
+constant uint depth_coverage_mask [[function_constant(kDepthCoverageFCIndex_SampleMask)]];
+struct coverage_out {
+  uint mask [[sample_mask]];
+};
+// No inputs, color/depth output or resource bindings: retain rasterized depth
+// and intersect raster coverage with the absent-PS application's sample mask.
+[[fragment]] coverage_out fs_depth_coverage() {
+  return {depth_coverage_mask};
+}
+
 [[fragment]] depth_out fs_clear_rt_depth (
   constant float4& clear_value [[buffer(kCustomBufferArgumentIndex0)]]
 ) {

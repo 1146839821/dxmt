@@ -14,3 +14,9 @@ void read_samples(uint3 id : SV_DispatchThreadID)
 {
     output.Store(id.x * 4, samples.Load(int2(0, 0), id.x));
 }
+Texture2DMS<float, 4> depth_samples : register(t0);
+[numthreads(4, 1, 1)]
+void read_depth(uint3 id : SV_DispatchThreadID)
+{
+    output.Store(id.x * 4, asuint(depth_samples.Load(int2(0, 0), id.x)));
+}

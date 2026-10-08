@@ -104,7 +104,7 @@ int main(int argc, char **argv) {
   }
   // Warm the same bytecode with a different mask before the tested PSO. This
   // catches conversion-cache keys which omit SampleMask, not only API wiring.
-  if (contrast_mask && !depth_only) {
+  if (contrast_mask) {
     const unsigned target_mask = pd.SampleMask;
     pd.SampleMask = target_mask ^ 15u;
     if (!Check(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&raw)), "contrast PSO")) return 1;
@@ -120,9 +120,11 @@ int main(int argc, char **argv) {
   D3D12_RESOURCE_DESC td = {}; td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
   td.Width = td.Height = td.DepthOrArraySize = td.MipLevels = 1; td.SampleDesc.Count = 4;
   td.Format = DXGI_FORMAT_R32_UINT; td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  if (depth_only) { td.Format = DXGI_FORMAT_R32_TYPELESS; td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL; }
   D3D12_HEAP_PROPERTIES props = {}; props.Type = D3D12_HEAP_TYPE_DEFAULT;
   ID3D12Resource *resource = nullptr;
-  if (!Check(device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_RENDER_TARGET,
+  const auto target_state = depth_only ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_RENDER_TARGET;
+  if (!Check(device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &td, target_state,
       nullptr, IID_PPV_ARGS(&resource)), "MSAA target")) return 1;
   OwnedCOM<ID3D12Resource> target(resource);
   D3D12_RESOURCE_DESC bd = {}; bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = 256;
@@ -142,12 +144,18 @@ int main(int argc, char **argv) {
     Check(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&raw_heap)), "heap");
     return OwnedCOM<ID3D12DescriptorHeap>(raw_heap);
   };
-  auto rtvs = heap(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, false), resources = heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, true);
+  auto rtvs = heap(depth_only ? D3D12_DESCRIPTOR_HEAP_TYPE_DSV : D3D12_DESCRIPTOR_HEAP_TYPE_RTV, false),
+       resources = heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, true);
   if (!rtvs || !resources) return 1;
   D3D12_RENDER_TARGET_VIEW_DESC rtv = {}; rtv.Format = td.Format; rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMS;
   const auto rtv_handle = rtvs->GetCPUDescriptorHandleForHeapStart();
-  device->CreateRenderTargetView(target.get(), &rtv, rtv_handle);
+  if (depth_only) {
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsv = {}; dsv.Format = DXGI_FORMAT_D32_FLOAT;
+    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMS;
+    device->CreateDepthStencilView(target.get(), &dsv, rtv_handle);
+  } else device->CreateRenderTargetView(target.get(), &rtv, rtv_handle);
   D3D12_SHADER_RESOURCE_VIEW_DESC srv = {}; srv.Format = td.Format; srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
+  if (depth_only) srv.Format = DXGI_FORMAT_R32_FLOAT;
   srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
   device->CreateShaderResourceView(target.get(), &srv, resources->GetCPUDescriptorHandleForHeapStart());
   ID3D12CommandQueue *raw_queue = nullptr; D3D12_COMMAND_QUEUE_DESC qd = {};
@@ -159,15 +167,20 @@ int main(int argc, char **argv) {
   ID3D12GraphicsCommandList *raw_list = nullptr;
   if (!Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.get(), seed_pso.get(), IID_PPV_ARGS(&raw_list)), "list")) return 1;
   OwnedCOM<ID3D12GraphicsCommandList> list(raw_list);
-  list->SetGraphicsRootSignature(graphics_root.get()); list->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
+  list->SetGraphicsRootSignature(graphics_root.get());
+  if (depth_only) {
+    list->OMSetRenderTargets(0, nullptr, FALSE, &rtv_handle);
+    list->ClearDepthStencilView(rtv_handle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+  } else list->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
   D3D12_VIEWPORT viewport = {0, 0, 1, 1, 0, 1}; D3D12_RECT rect = {0, 0, 1, 1};
   list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &rect); list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-  list->DrawInstanced(3, 1, 0, 0); list->SetPipelineState(logic_pso.get()); list->DrawInstanced(3, 1, 0, 0);
+  if (!depth_only) list->DrawInstanced(3, 1, 0, 0);
+  list->SetPipelineState(logic_pso.get()); list->DrawInstanced(3, 1, 0, 0);
   auto transition = [&](ID3D12Resource *r, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
     D3D12_RESOURCE_BARRIER barrier = {}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition = {r, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after}; list->ResourceBarrier(1, &barrier);
   };
-  transition(target.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  transition(target.get(), target_state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   list->SetPipelineState(read_pso.get()); list->SetComputeRootSignature(compute_root.get());
   ID3D12DescriptorHeap *heaps[] = {resources.get()}; list->SetDescriptorHeaps(1, heaps);
   list->SetComputeRootDescriptorTable(0, resources->GetGPUDescriptorHandleForHeapStart());
@@ -192,12 +205,14 @@ int main(int argc, char **argv) {
     const unsigned src = 240, dst = 0x12340000u + sample * 0x101u;
     const unsigned expected[] = {0, UINT_MAX, src, ~src, dst, ~dst, src & dst, ~(src & dst),
         src | dst, ~(src | dst), src ^ dst, ~(src ^ dst), src & ~dst, ~src & dst, src | ~dst, ~src | dst};
-    const unsigned masked_expected = (sample_mask & (1u << sample)) ? (ordinary ? src : expected[op]) : dst;
+    const unsigned masked_expected = depth_only ? ((sample_mask & (1u << sample)) ? 0u : 0x3f800000u) :
+        (sample_mask & (1u << sample)) ? (ordinary ? src : expected[op]) : dst;
     std::printf("D3D12_MSAA op=%u sample=%u observed=%08x expected=%08x\n", op, sample, values[sample], masked_expected);
     ok &= values[sample] == masked_expected;
   }
   readback->Unmap(0, nullptr);
   if (!ok) return 1;
   std::printf("D3D12_MSAA sample-mask=%08x PASS\n", sample_mask);
+  if (depth_only) std::puts("D3D12_DEPTH_ONLY 4x D32_FLOAT raw-sample coverage PASS");
   std::puts("D3D12_MSAA 4x R32_UINT raw-sample LogicOp PASS"); return 0;
 }

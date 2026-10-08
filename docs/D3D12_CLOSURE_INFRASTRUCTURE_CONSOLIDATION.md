@@ -1,5 +1,14 @@
 # Closure infrastructure consolidation
 
+Ordinary MSC depth coverage checkpoint (2026-10-08): absent-PS non-default
+masks now specialize a no-binding internal coverage fragment. Both builds pass
+fourteen D32_FLOAT 4x cases/56 raw sample comparisons, including different-mask
+contrast PSOs and default-all restoration, with experimental gates off and API
+validation. Seven mandatory depth cases expand the raster ledger to 169.
+See D3D12_MSC_DEPTH_COVERAGE.md. GS/HS/DS masked depth remains rejected;
+private masked GPU acceptance, stencil/count/format breadth and full raster/FL
+qualification stay open. No capability promotion or game deployment.
+
 MSC SampleMask checkpoint (2026-10-08): PSO masks now reach fragment compilation,
 conversion keys and stage-local private configs through an appended bridge entry.
 The original mask-5 XOR red turns green. Both builds pass 238 numeric cases/952

@@ -412,12 +412,22 @@ def run_logic_op_gpu_matrix(directory, wine, timeout, runtime, compiler=None):
                 directory, wine, "dx12_graphics_sm6.exe", (*minmax_files, f"--logic-op-minmax-{mode}-{operation}"),
                 markers, timeout, runtime, minmax_files, compiler=compiler) if runtime is not None and compiler is not None else {
                     "status": UNVERIFIED, "reason": "explicit runtime and compiler required for MinMax composition"}
+    depth_files = tuple("logic_msaa_d3d12_" + entry + ".cso" for entry in
+                        ("vertex", "seed", "source", "read_depth"))
+    for mask in (0, 1, 5, 10, 15, 0x80000000, 0xffffffff):
+        cases[f"dxil-depth-coverage-{mask:08x}"] = run_fixture(
+            directory, wine, "dx12_logic_op_msaa.exe",
+            (*depth_files, "2", "--depth-only", f"--sample-mask={mask}", "--contrast-mask"),
+            ("D3D12_DEPTH_ONLY 4x D32_FLOAT raw-sample coverage PASS",
+             f"D3D12_MSAA sample-mask={mask:08x} PASS"),
+            timeout, runtime, depth_files, compiler=None) if runtime is not None else {
+                "status": UNVERIFIED, "reason": "explicit runtime required for depth coverage provenance"}
     execution = aggregate([row(name, case["status"], "") for name, case in cases.items()])
     hashes = [case["runtime_sha256"] for case in cases.values() if case.get("runtime_sha256")]
     if hashes and any(digest != hashes[0] for digest in hashes):
         execution = aggregate([row("execution", execution, ""), row("hash_consistency", UNVERIFIED, "")])
     return {"status": PARTIAL if execution == PASS else execution, "execution_status": execution,
-            "reason": "16 Boolean operations, MSC root-CBV/rebinding, Typed XOR and MinMax static/dynamic/switch composition; remaining raster matrix open",
+            "reason": "16 Boolean operations, MSC root-CBV/rebinding, Typed XOR, MinMax composition and ordinary absent-PS D32 4x coverage; remaining raster matrix open",
             "coverage_gaps": ["complete RTV format/component widths", "write masks/MRT/MSAA",
                               "remaining Typed operations, private layouts and MinMax stage coverage",
                               "blend/depth/stencil/cull/scissor/sample coverage", "native Windows oracle"],

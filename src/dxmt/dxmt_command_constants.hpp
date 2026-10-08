@@ -24,5 +24,6 @@ constexpr CONSTANT auto kPresentFCIndex_HDRPQ = 0x101;
 constexpr CONSTANT auto kPresentFCIndex_WithHDRMetadata = 0x102;
 constexpr CONSTANT auto kPresentFCIndex_BackbufferIsMS = 0x104;
 constexpr CONSTANT auto kPresentFCIndex_GammaEnabled = 0x105;
+constexpr CONSTANT auto kDepthCoverageFCIndex_SampleMask = 0x106;
 
 } // namespace dxmt

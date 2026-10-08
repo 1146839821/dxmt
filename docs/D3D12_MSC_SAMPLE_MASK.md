@@ -38,6 +38,11 @@ setting. Non-default masks now explicitly return E_NOTIMPL instead of being
 ignored. A depth-only coverage-shader implementation remains a real gap; this
 guard is not feature completion. Default-all depth-only behavior is unchanged.
 
+Later checkpoint: D3D12_MSC_DEPTH_COVERAGE.md supersedes that blanket rejection
+for ordinary MSC vertex pipelines via an internal coverage fragment. Masked
+GS/HS/DS remains rejected; broader masked private/depth/stencil qualification
+is not closed by the ordinary depth subset.
+
 ## Fixture
 
 dx12_logic_op_msaa accepts --sample-mask=N, --ordinary, --contrast-mask and
