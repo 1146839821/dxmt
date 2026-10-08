@@ -1,5 +1,13 @@
 # Resource closure continuation — 2026-10-07
 
+2026-10-08 MSAA mechanism evidence: native public MSC fetch preserves four
+different R32_UINT sample values through XOR, with ordinary and explicit
+sample-ID shaders, on M4 under API validation. Raw compute sample reads avoid
+resolve-based evidence loss. This bypasses DXMT D3D12 root/residency/binding paths
+and therefore does not qualify them or shader side-effect frequency. Production
+single-sample admission remains unchanged. See
+D3D12_LOGIC_OP_MSAA_FEASIBILITY_2026-10-08.md for the next integration requirements.
+
 2026-10-08 combined-MinMax pixel evidence: sixteen LogicOps pass static reduction
 samplers, dynamic MIN/MAX and same-PSO MIN/MAX/LINEAR/MIN replay on both builds
 under API validation (160 cases, 256 submissions). Volatile sampler replacement

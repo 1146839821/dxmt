@@ -1,5 +1,12 @@
 # Closure infrastructure consolidation
 
+MSAA mechanism checkpoint (2026-10-08): public MSC fetch reads four distinct
+R32_UINT attachment samples correctly on M4, both without and with explicit
+SV_SampleIndex, using raw compute sample readback under API validation. See
+D3D12_LOGIC_OP_MSAA_FEASIBILITY_2026-10-08.md. This establishes a backend route,
+not D3D12 integration, frequency/side-effect preservation or full MSAA closure.
+The production single-sample guard and raster gate are unchanged.
+
 MinMax+LogicOp checkpoint (2026-10-08): all sixteen operations pass static MIN/MAX,
 dynamic MIN/MAX and same-PSO MIN/MAX/LINEAR/MIN sampler replay on both builds under
 API validation (160 cases, 256 submissions). CPU expectations separate reduction

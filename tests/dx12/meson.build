@@ -140,6 +140,10 @@ if build_machine.system() == 'darwin'
     objcpp_args: ['-fobjc-arc'],
     dependencies: dependency('appleframeworks', modules: ['Metal', 'Foundation'], native: true),
   )
+  executable('msc_logic_msaa_probe', 'msc_logic_msaa_probe.mm', native: true, build_by_default: false,
+    objcpp_args: ['-fobjc-arc'],
+    dependencies: dependency('appleframeworks', modules: ['Metal', 'Foundation'], native: true),
+  )
   executable('air_minmax_ir', 'air_minmax_ir.cpp', native: true, build_by_default: false,
     cpp_args: airconv_args, include_directories: llvm_include_path_darwin,
     dependencies: airconv_dep_darwin,
@@ -1069,6 +1073,14 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'ps_minmax', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach entry : ['pixel_frequency', 'sample_frequency']
+    custom_target('dx12_logic_msaa_' + entry + '_probe',
+      input: 'logic_op_msaa_probe.hlsl',
+      output: 'logic_msaa_' + entry + '.ps.cso',
+      command: dxc_command + [ '-E', entry, '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
   custom_target('dx12_geometry_sm6_vs_fixture',
     input: 'geometry_sm6.hlsl',
     output: 'geometry_sm6.vs.cso',
