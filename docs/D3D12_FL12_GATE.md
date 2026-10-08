@@ -375,3 +375,16 @@ not complete mandatory GPU matrix evidence.
 Normal-runtime deployment was restored after no-private testing using the
 user's sync script. No game benchmark or Townfall launch acceptance is claimed
 by this gate task. The existing DirectX submodule changes remain untouched.
+
+## Timestamp submission oracle registration (2026-10-08)
+
+The mandatory timestamp_resolve_submission_oracle row requires the default
+200-submission GPU consumer/CPU-gate/list-reset/canary loop and clock calibration.
+Build dx12_timestamp_resolve.exe explicitly (build_by_default:false); a missing
+fixture stays UNVERIFIED. Failure/absence propagates without accepting the
+one-iteration pressure mode or failure-injection mode as successful query evidence.
+Both actual cache-runtime executions pass with target PE/Unix provenance and
+experimental capabilities explicitly disabled. There are 68 gate Python tests.
+The bounded row is not a full query qualification or FL12 promotion; complete
+mandatory resource/raster/backend matrices remain required. Production ordering
+and limitations are documented in D3D12_TIMESTAMP_RESOLVE_ORDER.md.

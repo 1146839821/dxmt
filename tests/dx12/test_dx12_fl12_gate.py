@@ -33,6 +33,25 @@ class GateTests(unittest.TestCase):
             self.assertNotEqual(report[name]["status"], gate.PASS)
         self.assertFalse(report["capability_changes"])
 
+    def test_timestamp_oracle_is_required_without_promoting_full_qualification(self):
+        for status in (None, *gate.STATUSES):
+            with self.subTest(status=status):
+                probes = self.probes()
+                if status is not None: probes["timestamp_resolve_oracle"] = {"status": status}
+                report = gate.build_report(probes, "normal")
+                rows = {r["name"]: r for r in report["FL12_0_GATE"]["requirements"]}
+                self.assertEqual(rows["timestamp_resolve_submission_oracle"]["status"],
+                                 gate.UNVERIFIED if status is None else status)
+                self.assertNotEqual(report["FL12_0_GATE"]["status"], gate.PASS)
+
+    def test_timestamp_runner_requires_complete_default_oracle(self):
+        with patch.object(gate, "run_fixture", return_value={"status": gate.FAIL}) as fixture:
+            result = gate.run_timestamp_resolve_oracle(Path("."), "wine", 5, None)
+            self.assertEqual(result["status"], gate.FAIL)
+            fixture.assert_called_once_with(
+                Path("."), "wine", "dx12_timestamp_resolve.exe", (),
+                ("CLOCK_CALIBRATION PASS", "TIMESTAMP_RESOLVE runs=200 failures=0 resolves_per_list=2"), 5, None)
+
     def test_optional_failures_do_not_change_mandatory_requirements(self):
         optional_names = ("mesh_failure_oracle", "shader_library_failure_oracle",
                           "state_object_failure_oracle", "state_object_addition_failure_oracle",

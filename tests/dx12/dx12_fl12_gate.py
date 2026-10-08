@@ -321,6 +321,12 @@ def run_typed_uav_matrix(directory, wine, timeout, runtime):
             "runtime_sha256": hashes[0] if hashes else {}, "cases": cases}
 
 
+def run_timestamp_resolve_oracle(directory, wine, timeout, runtime):
+    return run_fixture(directory, wine, "dx12_timestamp_resolve.exe", (),
+                       ("CLOCK_CALIBRATION PASS",
+                        "TIMESTAMP_RESOLVE runs=200 failures=0 resolves_per_list=2"), timeout, runtime)
+
+
 def run_invocation_modes(directory, wine, timeout, runtime, specifications, reason):
     cases = {}
     def probe_digest():
@@ -560,6 +566,9 @@ def build_report(probes, variant, provenance=None):
                    typed["status"] if typed and typed["status"] != PASS else
                    PASS if typed and typed_api else FAIL if typed else UNVERIFIED,
                    "requires complete GPU matrix and advertised additional-format support"))
+    timestamp = probes.get("timestamp_resolve_oracle", {"status": UNVERIFIED})
+    fl0.append(row("timestamp_resolve_submission_oracle", timestamp["status"],
+                   "bounded 200-submission timestamp/copy/CPU-gate/reset/calibration GPU oracle; not full query qualification"))
     minmax = probes.get("minmax_sampler_contract")
     fl0.append(row("min_max_reduction_filtering",
                    BLOCKED if minmax and minmax["status"] == PASS else
@@ -661,6 +670,7 @@ def main():
                 "shader_embedded.graphics.vs.cso", "shader_embedded.graphics.ps.cso",
                 "shader_embedded.graphics.mismatch.ps.cso")
     probes = {
+        "timestamp_resolve_oracle": run_timestamp_resolve_oracle(directory, args.wine, args.timeout, runtime),
         "feature_support": run_fixture(directory, args.wine, "dx12_feature_support.exe", (),
                                       ("D3D12 feature support contract passed",), args.timeout, runtime),
         "shader_validation": run_fixture(directory, args.wine, "dx12_shader_validation.exe", (),

@@ -1,5 +1,86 @@
 # Timestamp resolve ordering investigation
 
+## Production continuation checkpoint (2026-10-08)
+
+The eda42f05 red oracle is now green with ordered worker submission. All queue
+entry points enqueue into the same existing bounded ring. One worker translates
+captured recording entries and commits packets in order; ordinary submissions
+are pipelined without GPU completion waits on that worker. Before each timestamp
+resolve, it commits/waits for the sampling prefix, creates the next segment and
+encodes the actual GPU counter resolve. Later GPU consumers, Signal/Wait, sparse
+handoffs and presentation cannot commit ahead of that continuation. No CPU
+counter readback or host-time replacement supplies ResolveQueryData results.
+
+Recording identity/entry, list ownership and allocator registrations are captured
+before ExecuteCommandLists returns. List Reset may select another allocator while
+the worker still owns the old recording. The allocator GPU marker is emitted
+only on the final segment; retirement waits for commit publication and final GPU
+completion. Worker predicates start after complete object initialization. Native
+buffer capacity reserves two slots beyond the 32-packet ring; split buffers are
+created/released on demand, not allocated for every resolve up front. Legacy
+bounded queue backpressure remains; unlimited nonblocking enqueue is not claimed.
+
+CopyTiles captures mapped/unmapped state and fallback backing references at
+enqueue, avoiding a later CPU mapping update changing an earlier packet. Clock
+calibration waits for worker commit publication before its existing synchronous
+collector wait. Asynchronous translation exceptions/failures and Metal errors
+publish device removal. Skipped Signal packets retain the exact event generation
+and notify its listeners with the removal sentinel. GetCompletedValue then
+returns UINT64_MAX, consistent with [Microsoft's fence contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12fence-getcompletedvalue).
+The legal in-flight list Reset case follows [Microsoft's Reset contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-reset).
+
+Fresh evidence in /Users/zhangbo/.cache/dxmt-reconciliation.ZLDvwE:
+
+| Check | Evidence | Result |
+| --- | --- | --- |
+| Same original executable | timestamp-worker-baseline.log / timestamp-worker-original-normal.log | 188/200 failures before, 0/200 after |
+| GPU consumer, CPU gate, list Reset, canaries | timestamp-worker-{consumer,final,verified}-* logs | three 200-iteration processes per variant, all pass |
+| 64 resolves in one recording plus calibration | timestamp-worker-many-{normal,no-private}-api.log | both pass without pool exhaustion |
+| Injected asynchronous failure and post-removal listener | timestamp-worker-error-final-{normal,no-private}.log | both pass; exact-1 default-off test hook only |
+| Allocator pending/cross-queue/later-use guards | timestamp-worker-allocator-{normal,no-private}.log | 1,024 iterations per variant pass |
+| Concurrent submission while translation is paused | timestamp-worker-queue-{normal,no-private}.log | both pass with retained pending recordings |
+| Existing allocation/placed/CopyTiles/remap tests | timestamp-worker-resource-{normal,no-private}-api.log | both pass; deliberate invalid-argument diagnostics retained |
+| Registered gate runner | timestamp-worker-gate-{normal,no-private}.json | both PASS with target PE and Unix provenance |
+
+Both reconfigured full builds and final fixture builds pass. All 16 host tests
+per build and 68 gate Python tests pass. API validation is explicitly enabled
+in the timestamp/consumer/many-resolve/resource/gate runs, without API misuse
+diagnostics. All runtime updates are cache-only; no game/prefix DLL deployment,
+game restart, shader validation or independent native-Windows run occurred.
+
+The diagnosis skill guided the unchanged red-to-green oracle; Metal validation
+guided enabled-message checking. Main-agent standards/spec review checked ring
+ownership/publication, worker startup, captured recording lifetime, mapping
+snapshots, marker placement and failure notification. No independent review is
+claimed. No temporary profiling counters or broad debug instrumentation were
+added. The explicit failure hook remains default-off for deterministic regression.
+
+This fixes the reproduced D3D12 zero-end path in bounded tests, not the underlying
+standalone Metal symptom or all query semantics. Timestamp duration/frequency
+accuracy, cross-queue query sharing, compute/copy queues, query reuse and real GPU
+fault recovery remain qualification work. The gate now requires this bounded
+oracle, not a complete-query conformance claim. Next prioritize root-feedback
+CPU/GPU performance (including worker CPU attribution), then full
+Typed/MinMax/Tiled/format/raster qualification; capability opt-ins remain isolated.
+
+## Ordered submission worker preparation (2026-10-08)
+
+Baseline eda42f05; fresh matching-cache D3D12 diagnostic returns 1 with
+188/200 invalid timestamp pairs (timestamp-worker-baseline.log).
+Hypothesis: a host-observed sampling completion boundary before GPU resolve
+removes the zero-end symptom. Evidence: red real-D3D12 loop plus the earlier
+native exact-pair continuation experiments. Expected effect: ordered worker
+translation commits/waits only timestamp prefixes, preserving asynchronous
+ExecuteCommandLists and normal submission pipelining. Risk: queue-entry overtaking,
+recording reset, command-buffer pool exhaustion, early allocator markers and
+asynchronous failures. Validation: unchanged 200-iteration oracle, external CPU
+gate/Signal, downstream GPU copy, allocator guards, both builds and API validation.
+Snapshot recording entry/identity and retain the list plus allocator; do not read
+a reset list's entry from the worker. Reserve native buffer pool headroom for the
+active split. Publish terminal translation/commit state before retirement, and
+place the allocator GPU marker only on the final segment. No CPU query result
+substitution or synchronous caller GPU wait is permitted.
+
 ## Production scheduling seam and D3D12 oracle (2026-10-08)
 
 Baseline ee8dd54b. Timestamp ResolveQueryData previously emitted an opaque raw

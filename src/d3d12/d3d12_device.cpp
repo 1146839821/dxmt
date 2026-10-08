@@ -1651,7 +1651,7 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   GetDeviceRemovedReason() {
-    return S_OK;
+    return removal_reason.load();
   };
 
   void STDMETHODCALLTYPE GetCopyableFootprints(

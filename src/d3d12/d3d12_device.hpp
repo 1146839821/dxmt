@@ -35,6 +35,7 @@
 #include "d3d12_pipeline_persistence.hpp"
 #include "dxmt_texture.hpp"
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include "log/log.hpp"
@@ -445,6 +446,13 @@ public:
 
 class MTLD3D12Device : public ID3D12Device10 {
 public:
+  std::atomic<HRESULT> removal_reason{S_OK};
+
+  void MarkDeviceRemoved(HRESULT reason) {
+    HRESULT expected = S_OK;
+    removal_reason.compare_exchange_strong(expected, reason);
+  }
+
   virtual WMT::Device GetMTLDevice() = 0;
 
   virtual D3D_FEATURE_LEVEL GetFeatureLevel() = 0;

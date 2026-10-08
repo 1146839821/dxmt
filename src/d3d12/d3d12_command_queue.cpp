@@ -405,8 +405,20 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   struct Submission {
     uint64_t serial = 0;
     WMT::Reference<WMT::CommandBuffer> command_buffer;
+    WMT::Reference<WMT::SharedEvent> error_event;
+    uint64_t sparse_wait_value = 0;
+    bool commit_finished = false;
+    bool failed = false;
     struct CommandList {
       uint64_t recording_id = 0;
+      Com<ID3D12GraphicsCommandList> recording;
+      EncoderData *entry = nullptr;
+      struct TileMapping {
+        bool mapped = false;
+        WMT::Reference<WMT::Buffer> buffer;
+        UINT64 offset = 0;
+      };
+      std::unordered_map<EncoderData *, std::vector<TileMapping>> tile_mappings;
       struct Encoder {
         EncoderType type;
         uint64_t id;
@@ -475,14 +487,19 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   dxmt::mutex submission_mutex_;
   dxmt::condition_variable submission_condition_;
   dxmt::condition_variable submission_space_condition_;
+  dxmt::condition_variable commit_condition_;
   std::array<Submission, kCommandQueueSize> submissions_;
   size_t submission_head_ = 0;
   size_t submission_tail_ = 0;
   size_t submission_count_ = 0;
+  size_t commit_head_ = 0;
+  size_t commit_count_ = 0;
+  dxmt::thread commit_thread_;
   dxmt::thread completion_thread_;
   bool stopping_ = false;
   uint64_t next_submission_serial_ = 1;
   uint64_t completed_submission_serial_ = 0;
+  uint64_t committed_submission_serial_ = 0; // submission_mutex_
   bool encoder_execution_status_ = false;
   std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_psos_;
   std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_rtv_psos_;
@@ -657,13 +674,60 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   }
 
   void
+  CommitThread() {
+    for (;;) {
+      Submission *submission;
+      {
+        std::unique_lock<dxmt::mutex> lock(submission_mutex_);
+        commit_condition_.wait(lock, [this] { return stopping_ || commit_count_ != 0; });
+        if (!commit_count_) return;
+        submission = &submissions_[commit_head_];
+      }
+      auto pool = WMT::MakeAutoreleasePool();
+      bool succeeded = SUCCEEDED(device_->GetDeviceRemovedReason());
+      try {
+        if (succeeded && !submission->command_lists.empty())
+          succeeded = TranslateSubmission(*submission);
+        if (succeeded) {
+          if (!submission->allocators.empty())
+            submission->command_buffer.encodeSignalEvent(allocator_completion_event_, submission->serial);
+          submission->command_buffer.commit();
+        }
+      } catch (const std::exception &error) {
+        ERR("D3D12 asynchronous submission failed: ", submission->serial, " ", error.what());
+        succeeded = false;
+      } catch (...) {
+        ERR("D3D12 asynchronous submission failed: ", submission->serial);
+        succeeded = false;
+      }
+      if (!succeeded) {
+        device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+        ERR("D3D12 submission rejected asynchronously: ", submission->serial, DescribeSubmission(*submission));
+        if (submission->error_event) submission->error_event.signalValue(UINT64_MAX);
+      }
+      {
+        std::lock_guard<dxmt::mutex> lock(submission_mutex_);
+        submission->failed = !succeeded;
+        submission->commit_finished = true;
+        committed_submission_serial_ = submission->serial;
+        commit_head_ = (commit_head_ + 1) % kCommandQueueSize;
+        --commit_count_;
+      }
+      submission_condition_.notify_all();
+    }
+  }
+
+  void
   CompletionThread() {
     for (;;) {
       Submission submission;
       size_t submission_slot = 0;
       {
         std::unique_lock<dxmt::mutex> lock(submission_mutex_);
-        submission_condition_.wait(lock, [this] { return stopping_ || submission_count_ != 0; });
+        submission_condition_.wait(lock, [this] {
+          return (stopping_ && !submission_count_) ||
+                 (submission_count_ && submissions_[submission_head_].commit_finished);
+        });
         if (!submission_count_) {
           if (stopping_)
             return;
@@ -674,8 +738,10 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       }
 
       auto pool = WMT::MakeAutoreleasePool();
-      submission.command_buffer.waitUntilCompleted();
-      if (submission.command_buffer.status() == WMTCommandBufferStatusError) {
+      if (!submission.failed) submission.command_buffer.waitUntilCompleted();
+      if (!submission.failed && submission.command_buffer.status() == WMTCommandBufferStatusError) {
+        device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+        if (submission.error_event) submission.error_event.signalValue(UINT64_MAX);
         auto error = submission.command_buffer.error();
         ERR("D3D12 command buffer submission ", submission.serial, " failed: ",
             error ? error.description().getUTF8String() : "unknown error", DescribeSubmission(submission));
@@ -713,25 +779,23 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     submission_space_condition_.wait(submission_lock, [this] {
       return stopping_ || submission_count_ < kCommandQueueSize;
     });
-    return !stopping_;
+    return !stopping_ && SUCCEEDED(device_->GetDeviceRemovedReason());
   }
 
   bool
   CommitSubmissionLocked(Submission &submission) {
     std::unique_lock<dxmt::mutex> submission_lock(submission_mutex_);
-    if (stopping_ || submission_count_ >= kCommandQueueSize)
+    if (stopping_ || FAILED(device_->GetDeviceRemovedReason()) || submission_count_ >= kCommandQueueSize)
       return false;
     assert(submission_count_ < kCommandQueueSize);
 
     submission.serial = next_submission_serial_++;
-    if (!submission.allocators.empty())
-      submission.command_buffer.encodeSignalEvent(allocator_completion_event_, submission.serial);
-    submission.command_buffer.commit();
     submissions_[submission_tail_] = std::move(submission);
     submission_tail_ = (submission_tail_ + 1) % kCommandQueueSize;
     submission_count_++;
+    commit_count_++;
     submission_lock.unlock();
-    submission_condition_.notify_one();
+    commit_condition_.notify_one();
     return true;
   }
 
@@ -776,6 +840,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       stopping_ = true;
     }
     submission_condition_.notify_all();
+    commit_condition_.notify_all();
     submission_space_condition_.notify_all();
   }
 
@@ -812,11 +877,17 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
 
 public:
   MTLD3D12CommandQueueImpl(MTLD3D12Device *pDevice) :
-      MTLD3D12Pageable<MTLD3D12CommandQueue, IMTLSwapChainFactory>(pDevice),
-      completion_thread_([this] { CompletionThread(); }) {}
+      MTLD3D12Pageable<MTLD3D12CommandQueue, IMTLSwapChainFactory>(pDevice) {
+    // Start only after all predicates and queue indices are initialized.
+    completion_thread_ = dxmt::thread([this] { CompletionThread(); });
+    try { commit_thread_ = dxmt::thread([this] { CommitThread(); }); }
+    catch (...) { StopCompletionThread(); completion_thread_.join(); throw; }
+  }
 
   ~MTLD3D12CommandQueueImpl() {
     StopCompletionThread();
+    if (commit_thread_.joinable())
+      commit_thread_.join();
     if (completion_thread_.joinable())
       completion_thread_.join();
   }
@@ -833,7 +904,9 @@ public:
         encoder_status[0] != '0';
 
     auto metal_device = device_->GetMTLDevice();
-    queue_ = metal_device.newCommandQueue(kCommandQueueSize);
+    // Queued Signal/Wait/Present packets may already own one buffer each.
+    // Leave bounded headroom for the worker's current and next split segment.
+    queue_ = metal_device.newCommandQueue(kCommandQueueSize + 2);
     if (!queue_)
       return E_FAIL;
     allocator_completion_event_ = metal_device.newSharedEvent();
@@ -996,21 +1069,39 @@ public:
     if (!WaitForSubmissionSpaceLocked())
       return;
 
-    auto pool = WMT::MakeAutoreleasePool();
-
-    auto cmdbuf = NewCommandBuffer();
-    if (sparse_event_value_)
-      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     Submission submission;
-    submission.command_buffer = cmdbuf;
+    submission.sparse_wait_value = sparse_event_value_;
     submission.allocators.reserve(Count);
     submission.command_lists.reserve(Count);
     for (unsigned i = 0; i < Count; i++) {
       auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i]);
       auto &command_list = submission.command_lists.emplace_back();
       command_list.recording_id = pCommandList->GetRecordingId();
-      for (auto *encoder = pCommandList->entry; encoder; encoder = encoder->next)
+      command_list.recording = pCommandList;
+      command_list.entry = pCommandList->entry;
+      for (auto *encoder = pCommandList->entry; encoder; encoder = encoder->next) {
         command_list.encoders.push_back({encoder->type, encoder->id});
+        if (encoder->type == EncoderType::CopyTiles) {
+          auto data = static_cast<CopyTilesEncoderData *>(encoder);
+          auto tiled = data->tiled_resource.ptr();
+          std::vector<UINT> indices;
+          auto coordinate = data->has_region_start_coordinate ? &data->region_start_coordinate : nullptr;
+          if (!tiled || FAILED(tiled->GetTileIndices(coordinate, &data->region_size, indices))) return;
+          auto &mappings = command_list.tile_mappings[encoder];
+          mappings.reserve(indices.size());
+          const bool native_sparse = sparse_mapping_queue_ && (tiled->GetMetalBuffer() || tiled->GetMetalTexture());
+          for (auto index : indices) {
+            auto &mapping = mappings.emplace_back();
+            if (native_sparse) mapping.mapped = tiled->IsTileMapped(index);
+            else {
+              WMT::Buffer backing;
+              if (FAILED(tiled->GetTileMapping(index, backing, mapping.offset))) return;
+              mapping.buffer = backing;
+              mapping.mapped = bool(backing);
+            }
+          }
+        }
+      }
       submission.allocators.emplace_back(pCommandList->GetAllocator());
     }
     // Reserve this submission's GPU marker before translation. The commit lock
@@ -1034,14 +1125,36 @@ public:
       }
     } pending{this, submission};
 
+    if (!CommitSubmissionLocked(submission))
+      return;
+    pending.committed = true;
+    for (unsigned i = 0; i < Count; i++) {
+      static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->MarkSubmitted();
+      static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->CommitResourceStates();
+    }
+  } catch (const std::bad_alloc &) {
+    ERR("D3D12 ExecuteCommandLists allocation failed");
+  };
+
+private:
+  bool
+  TranslateSubmission(Submission &submission) {
+    auto cmdbuf = NewCommandBuffer();
+    if (!cmdbuf) return false;
+    submission.command_buffer = cmdbuf;
+    if (submission.sparse_wait_value)
+      cmdbuf.encodeWaitForEvent(sparse_event_, submission.sparse_wait_value);
     PauseTranslationForTesting();
+    char fail[2] = {};
+    if (GetEnvironmentVariableA("DXMT_TEST_FAIL_QUEUE_TRANSLATION", fail, sizeof(fail)) == 1 && fail[0] == '1')
+      return false;
 
     bool translation_failed = false;
-    for (unsigned i = 0; i < Count; i++) {
-      auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i]);
-      EncoderData *current = pCommandList->entry;
+    for (const auto &command_list : submission.command_lists) {
+      auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(command_list.recording.ptr());
+      EncoderData *current = command_list.entry;
       while (current) {
-        const auto recording_id = pCommandList->GetRecordingId();
+        const auto recording_id = command_list.recording_id;
         switch (current->type) {
         case EncoderType::Null:
           break;
@@ -1072,6 +1185,11 @@ public:
           if (translation_failed)
             break;
 
+          // Mapping APIs update CPU bookkeeping immediately. Observe it at
+          // enqueue, not after a later UpdateTileMappings has changed it.
+          const auto &tile_mappings = command_list.tile_mappings.at(current);
+          if (tile_mappings.size() != tile_indices.size()) return false;
+
           constexpr UINT64 tile_size = 64ull * 1024;
           if (tile_indices.size() > std::numeric_limits<UINT64>::max() / tile_size) {
             WARN("D3D12 CopyTiles translation overflowed its tile range");
@@ -1095,7 +1213,7 @@ public:
               const UINT tile_index = tile_indices[index];
               const UINT64 linear_offset = data->buffer_offset + index * tile_size;
               const UINT64 sparse_offset = uint64_t(tile_index) * tile_size;
-              const bool mapped = tiled->IsTileMapped(tile_index);
+              const bool mapped = tile_mappings[index].mapped;
               if (data->buffer_to_tiled) {
                 if (!mapped)
                   continue;
@@ -1167,10 +1285,9 @@ public:
             auto encoder = cmdbuf.blitCommandEncoder();
             encoder.waitForFence(fence_);
             for (size_t index = 0; index < tile_indices.size(); index++) {
-              const UINT tile_index = tile_indices[index];
               const UINT64 linear_offset = data->buffer_offset + index * tile_size;
               const auto &copy_info = copy_infos[index];
-              if (!tiled->IsTileMapped(tile_index)) {
+              if (!tile_mappings[index].mapped) {
                 if (data->tiled_to_buffer) {
                   wmtcmd_blit_fillbuffer fill = {};
                   fill.type = WMTBlitCommandFillBuffer;
@@ -1217,32 +1334,11 @@ public:
             break;
           }
 
-          struct ResolvedTile {
-            WMT::Buffer buffer;
-            UINT64 offset;
-          };
-          std::vector<ResolvedTile> resolved_tiles;
-          resolved_tiles.reserve(tile_indices.size());
-          bool mapping_failed = false;
-          for (auto tile_index : tile_indices) {
-            ResolvedTile tile = {};
-            if (FAILED(tiled->GetTileMapping(tile_index, tile.buffer, tile.offset))) {
-              WARN("D3D12 CopyTiles translation failed to resolve a tile mapping");
-              mapping_failed = true;
-              break;
-            }
-            resolved_tiles.push_back(tile);
-          }
-          if (mapping_failed) {
-            translation_failed = true;
-            break;
-          }
-
           const auto linear_buffer = linear->buffer->current()->buffer();
           auto encoder = cmdbuf.blitCommandEncoder();
           encoder.waitForFence(fence_);
-          for (size_t index = 0; index < resolved_tiles.size(); index++) {
-            const auto &tile = resolved_tiles[index];
+          for (size_t index = 0; index < tile_mappings.size(); index++) {
+            const auto &tile = tile_mappings[index];
             const UINT64 linear_offset = data->buffer_offset + index * tile_size;
             if (data->buffer_to_tiled) {
               if (!tile.buffer)
@@ -1722,6 +1818,22 @@ public:
         }
         case EncoderType::ResolveTimestamp: {
           auto data = static_cast<ResolveTimestampData *>(current);
+          // Observe actual GPU completion on the worker, not on the caller.
+          // This also covers samples in an earlier submission: the fence wait
+          // makes even an otherwise empty prefix depend on prior queue work.
+          auto boundary = cmdbuf.blitCommandEncoder();
+          boundary.waitForFence(fence_);
+          boundary.updateFence(fence_);
+          boundary.endEncoding();
+          cmdbuf.commit();
+          cmdbuf.waitUntilCompleted();
+          if (cmdbuf.status() != WMTCommandBufferStatusCompleted) {
+            ERR("D3D12 timestamp prefix failed: submission ", submission.serial, DescribeSubmission(submission));
+            return false;
+          }
+          cmdbuf = NewCommandBuffer();
+          if (!cmdbuf) return false;
+          submission.command_buffer = cmdbuf;
           auto encoder = cmdbuf.blitCommandEncoder();
           LabelEncoder(encoder, recording_id, data->id, "ResolveTimestamp");
           encoder.waitForFence(fence_);
@@ -1768,21 +1880,13 @@ public:
         current = current->next;
       }
       if (translation_failed) {
-        return;
+        return false;
       }
     }
-    if (!CommitSubmissionLocked(submission)) {
-      return;
-    }
-    pending.committed = true;
-    for (unsigned i = 0; i < Count; i++) {
-      static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->MarkSubmitted();
-      static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->CommitResourceStates();
-    }
-  } catch (const std::bad_alloc &) {
-    ERR("D3D12 ExecuteCommandLists allocation failed");
-  };
+    return true;
+  }
 
+public:
   void STDMETHODCALLTYPE SetMarker(UINT metadata, const void *data, UINT size) {};
 
   void STDMETHODCALLTYPE BeginEvent(UINT metadata, const void *data, UINT size) {};
@@ -1804,6 +1908,9 @@ public:
     static_cast<MTLD3D12Fence *>(pFence)->fence->signal(cmdbuf, Value);
     Submission submission;
     submission.command_buffer = cmdbuf;
+    // Retain the exact event generation encoded above. Failure wakes registered
+    // listeners with device removal, never with a fabricated successful value.
+    submission.error_event = static_cast<MTLD3D12Fence *>(pFence)->fence->sharedEvent();
     if (!CommitSubmissionLocked(submission))
       return E_FAIL;
     return S_OK;
@@ -1880,10 +1987,16 @@ public:
     encoder.endEncoding();
     Submission submission;
     submission.command_buffer = cmdbuf;
+    const auto serial = next_submission_serial_;
     if (!CommitSubmissionLocked(submission))
       return E_FAIL;
 
     commit_lock.unlock();
+    {
+      std::unique_lock<dxmt::mutex> lock(submission_mutex_);
+      submission_condition_.wait(lock, [this, serial] { return committed_submission_serial_ >= serial; });
+    }
+    if (FAILED(device_->GetDeviceRemovedReason())) return device_->GetDeviceRemovedReason();
     cmdbuf.waitUntilCompleted();
 
     if (!QueryPerformanceCounter(&cpu_after))

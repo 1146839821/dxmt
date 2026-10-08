@@ -1,5 +1,16 @@
 # Closure infrastructure consolidation
 
+Latest checkpoint (2026-10-08): ordered production worker and on-demand timestamp
+segments turn the same original D3D12 oracle from 188/200 failures to 0/200.
+Enhanced GPU consumer/CPU gate/list Reset/canary runs pass repeatedly on both
+variants, alongside 64-resolve pool pressure, asynchronous error notification,
+clock calibration, allocator and resource/CopyTiles regressions. Both full builds,
+16 host tests per build and 68 gate Python tests pass. The new bounded timestamp
+gate probe passes with actual PE/Unix provenance; it does not close full query
+qualification or promote FL12_0. See D3D12_TIMESTAMP_RESOLVE_ORDER.md. Next move
+to root-feedback CPU/GPU profiling, including the new worker rather than just
+caller timings; full Typed/MinMax/Tiled/format/raster qualification remains open.
+
 Requested priority: after the AIR indirect VB checkpoint, consolidate closure
 infrastructure before continuing feature slices or running full qualification.
 Starting branch feat/d3d12-1, HEAD 4dfe46a5. All items below are pending unless

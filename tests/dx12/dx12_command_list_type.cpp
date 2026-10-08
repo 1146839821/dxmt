@@ -119,9 +119,13 @@ bool TestConcurrentCommandSubmission(ID3D12Device *device) {
   second_thread = CreateThread(nullptr, 0, ExecuteCommandListsThread, &second, 0, nullptr);
   if (!second_thread)
     return cleanup();
-  Sleep(50);
-  if (InterlockedCompareExchange(&second.returned, 0, 0) != 0) {
-    std::cerr << "second command submission completed during first translation\n";
+  if (WaitForSingleObject(first_thread, 5000) != WAIT_OBJECT_0 ||
+      WaitForSingleObject(second_thread, 5000) != WAIT_OBJECT_0) {
+    std::cerr << "command submission blocked on worker translation\n";
+    return cleanup();
+  }
+  if (SUCCEEDED(allocator_a->Reset()) || SUCCEEDED(allocator_b->Reset())) {
+    std::cerr << "pending worker recording allowed allocator Reset\n";
     return cleanup();
   }
 
