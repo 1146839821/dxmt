@@ -59,8 +59,15 @@ IsD3D12TypedUAVFormat(DXGI_FORMAT format) {
 }
 
 constexpr bool
-SupportsD3D12TypedUAVLoad(DXGI_FORMAT format, bool complete_additional_formats, bool native_read_write) {
-  return IsD3D12TypedUAVFormat(format) && native_read_write &&
+SupportsD3D12R11G11B10LoadStore(bool shared_backend, bool buffer_read, bool buffer_write) {
+  // AIR and MSC implement packed loads/stores; this is not a promotion of
+  // Metal's generic texture-buffer read_write capability.
+  return shared_backend && buffer_read && buffer_write;
+}
+
+constexpr bool
+SupportsD3D12TypedUAVLoad(DXGI_FORMAT format, bool complete_additional_formats, bool backend_read_write) {
+  return IsD3D12TypedUAVFormat(format) && backend_read_write &&
          (IsD3D12BaselineTypedUAVFormat(format) || complete_additional_formats);
 }
 

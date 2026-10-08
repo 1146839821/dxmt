@@ -2,6 +2,21 @@
 #include <iostream>
 
 int main() {
+  for (bool shared_backend : {false, true}) for (bool read : {false, true}) for (bool write : {false, true}) {
+    const bool ready = dxmt::SupportsD3D12R11G11B10LoadStore(shared_backend, read, write);
+    if (ready != (shared_backend && read && write)) {
+      std::cerr << "R11 backend availability failed shared=" << shared_backend << " read=" << read << " write=" << write << "\n";
+      return 1;
+    }
+  }
+  if (dxmt::SupportsD3D12TypedUAVLoad(DXGI_FORMAT_R11G11B10_FLOAT, false, true) ||
+      dxmt::SupportsD3D12TypedUAVLoad(DXGI_FORMAT_R11G11B10_FLOAT, false, false) ||
+      !dxmt::SupportsD3D12TypedUAVLoad(DXGI_FORMAT_R11G11B10_FLOAT, true, true) ||
+      dxmt::SupportsD3D12TypedUAVLoad(DXGI_FORMAT_R11G11B10_FLOAT, true, false) ||
+      dxmt::SupportsD3D12TypedUAVLoad(DXGI_FORMAT_R32G32_FLOAT, false, true)) {
+    std::cerr << "R11G11B10 prerequisite/backend load policy failed\n";
+    return 1;
+  }
   for (auto format : dxmt::kD3D12AdditionalTypedUAVFormats) {
     if (!dxmt::IsD3D12TypedUAVFormat(format) ||
         dxmt::SupportsD3D12TypedUAVLoad(format, false, true) ||

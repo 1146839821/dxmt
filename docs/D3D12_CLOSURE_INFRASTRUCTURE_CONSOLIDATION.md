@@ -1,5 +1,13 @@
 # Closure infrastructure consolidation
 
+R11G11B10 prerequisite checkpoint (2026-10-08): packed backend readiness is
+separated from native read_write, but the full additional-format prerequisite
+remains mandatory. Independent Spec review caught and removed an invalid R11
+public exemption before commit; candidate load=1/additional=0 logs are excluded
+from qualification. Public load remains 0. Selected probes can now explicitly
+require advertised load. See D3D12_R11G11B10_TYPED_UAV.md. Next implementation
+work is the actual fifteen-format/shader-feature contract, not a global-bit flip.
+
 R11G11B10 checkpoint (2026-10-08): opt-in packed-float probes pass 32 basic
 load/store cases across AIR/MSC and both builds; default typed matrix unchanged.
 See D3D12_R11G11B10_TYPED_UAV.md. Public typed-load reporting is still disabled,

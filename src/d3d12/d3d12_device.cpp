@@ -999,10 +999,15 @@ public:
       D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
       CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options));
       const bool typed_uav = IsD3D12TypedUAVFormat(out->Format);
-      // Native read-only textures are not equivalent to a read/write typed UAV.
-      // Additional/optional loads require the complete shared backend contract.
+      // Packed R11G11B10 backend readiness is not native read_write support.
+      // The shared additional-format prerequisite still controls public loads.
+      const bool backend_read_write = out->Format == DXGI_FORMAT_R11G11B10_FLOAT ?
+          SupportsD3D12R11G11B10LoadStore(msc.core_converter && msc.apple7_or_newer,
+              has_capability(FormatCapability::TextureBufferRead),
+              has_capability(FormatCapability::TextureBufferWrite)) :
+          has_capability(FormatCapability::TextureBufferReadWrite);
       if (SupportsD3D12TypedUAVLoad(out->Format, options.TypedUAVLoadAdditionalFormats,
-                                  has_capability(FormatCapability::TextureBufferReadWrite)))
+                                  backend_read_write))
         out->Support2 |= D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD;
       if (typed_uav && (has_capability(FormatCapability::TextureBufferWrite) || has_capability(FormatCapability::TextureBufferReadWrite)))
         out->Support1 |= D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW;

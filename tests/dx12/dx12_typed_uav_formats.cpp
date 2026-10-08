@@ -433,7 +433,8 @@ static bool CheckAPI(ID3D12Device *device) {
 
 int main(int argc, char **argv) {
   const bool origin_contract = argc == 3 && !std::strcmp(argv[2], "--origin-contract");
-  const bool selected_case = argc == 6 && !std::strcmp(argv[2], "--case");
+  const bool require_advertised = argc == 7 && !std::strcmp(argv[6], "--require-advertised-load");
+  const bool selected_case = (argc == 6 || require_advertised) && !std::strcmp(argv[2], "--case");
   if ((argc != 2 && argc != 3 && !selected_case) || (std::strcmp(argv[1], "--dxbc") && std::strcmp(argv[1], "--dxil") && std::strcmp(argv[1], "--api-policy")) ||
       (argc == 3 && std::strcmp(argv[2], "--buffer-only") && std::strcmp(argv[2], "--view-contract") &&
        std::strcmp(argv[2], "--srv-view-contract") && !origin_contract)) return 2;
@@ -522,12 +523,14 @@ int main(int argc, char **argv) {
     bool supported = CheckHR("FormatSupport", device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) &&
         (support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) &&
         (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE);
-    if (format.format == DXGI_FORMAT_R11G11B10_FLOAT)
+    if (format.format == DXGI_FORMAT_R11G11B10_FLOAT) {
       std::cout << "R11 typed UAV public view=" << bool(support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW)
                 << " load=" << bool(support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD)
                 << " store=" << bool(support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) << "\n";
-    // Audit GPU semantics independently of the deliberately disabled load claim.
-    // This does not turn an unadvertised format into an accepted public feature.
+    }
+    if (require_advertised) supported = supported && (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD);
+    // Semantic bring-up is separate from public qualification; callers can
+    // explicitly require the advertised load bit rather than waive its absence.
     for (unsigned shape = 0; shape < (argc == 3 ? 1u : 6u); ++shape) {
       if (selected_case && shape != selected_shape) continue;
       const unsigned key = format.type * 6 + shape;

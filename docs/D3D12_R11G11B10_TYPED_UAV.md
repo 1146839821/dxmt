@@ -1,5 +1,56 @@
 # R11G11B10 Typed UAV bring-up
 
+## Current prerequisite-correct backend policy (baseline 3813d5ec)
+
+The packed backend eligibility is now separate from native Metal read_write:
+MSC core, Apple7+ and R11 buffer read/write must all be available. The public
+load query additionally retains the complete shared additional-format gate.
+This corrects the future R11 eligibility path without fabricating a native
+TextureBufferReadWrite flag. It does not enable public typed load today.
+
+An initial candidate incorrectly let R11 bypass the fifteen-format prerequisite.
+Independent Spec review found P1: the
+[Microsoft normative specification](https://microsoft.github.io/DirectX-Specs/d3d/UAVTypedLoad.html#checkformatsupport)
+requires the complete all-or-nothing subset before other new typed-load formats
+may report support; shader-feature consistency is also required. The main agent
+verified that clause and withdrew the exemption before commit. GPU success
+cannot make the rejected public combination conformant. Global additional=0
+and R11 public load=0 remain correct until that prerequisite is qualified.
+
+The corrected policy tests cover eight named availability combinations and both
+public gates: complete-set false rejects R11 even when its backend is ready;
+complete-set true admits it only with the backend ready. Existing baseline,
+additional-set and unsupported-format checks remain. Standards review's small
+diagnostic suggestion was addressed with named conditions and failed values.
+
+Selected numeric probes accept a final `--require-advertised-load` flag. Without
+it they remain explicitly semantic bring-up; with it they must also observe the
+public load bit and cannot turn its absence into qualification PASS. The old
+18-format default matrix is unchanged. No shader transform, native ABI, PSO
+relaxation, experimental switch or global capability promotion is introduced.
+
+Evidence under /Users/zhangbo/.cache/dxmt-msc-logic.6jblCq:
+
+- r11-admission-green.jsonl and r11-admission-origin-one.jsonl belong to the
+  rejected candidate: their 8+4 numerical results and observed identities are
+  retained, but the load=1/additional=0 combination is NOT public qualification.
+  These files must not enter formal acceptance aggregates.
+- r11-prerequisite-build-{normal,no-private}.log records the corrected complete
+  builds; updated optional fixtures are built separately.
+- r11-prerequisite-final.jsonl records the corrected policy checks, semantic
+  FirstElement=1/2D readbacks with load=0, and explicit advertised-load rejection
+  controls. DXIL semantics use verified compiler deployment, retaining the
+  existing typed-origin dependency rather than claiming arbitrary views without it.
+
+Public R11 support is still incomplete. The next implementation target is the
+actual fifteen-format/shader-feature contract, including known typed-origin
+deployment and Typed/MinMax-combination gaps; merely setting its option TRUE
+is not a fix. Diagnosis/compiler/validation and independent Standards/Spec
+reviews guided this correction. Cache-only runtime deployment; no game/prefix
+writes or process restart, no shader validation or native Windows qualification.
+
+## Historical bring-up
+
 Baseline: 4e22bffa, feat/d3d12-1. User priority: add R11G11B10 Typed UAV support
 after masked private-variant acceptance. This checkpoint establishes the
 existing backends' basic packed load/store behavior and the remaining public
