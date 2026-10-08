@@ -1,5 +1,52 @@
 # MSC programmable logic-op implementation boundary
 
+## PSO integration checkpoint — 2026-10-08
+
+Starting HEAD b5719375. No-private ordinary MSC pixel PSOs now call the validated
+preparation API for shared UINT logic ops. Component widths follow the bound
+RT formats. A local capability snapshot sets only this pixel conversion's
+framebuffer-fetch space; the device snapshot and ordinary vertex compilation
+remain unchanged. Existing conversion-cache hashing includes transformed DXIL
+bytes and the feature-space configuration; the original pipeline key already
+includes blend state and target formats. No untransformed shader is accepted as
+a substitute when preparation fails.
+
+Decoded application root spaces (ranges, root constants/descriptors and static
+samplers) are checked for collisions before MSC compilation. A collision rejects
+instead of changing application TLAB indices. Root-layout qualification across
+nonempty roots remains pending. Initial MinMax/Typed private-variant composition
+is explicitly rejected in this path and remains an implementation gap, not a
+claim that logic ops only require resource-free shaders.
+
+Both full builds pass. Both host suites pass 17/17, including the gate's scoped
+compiler-deployment regression. Fresh no-private single-draw AIR and MSC cases
+pass all sixteen operations each; sixteen MSC overlapping double-draw cases pass
+with API validation enabled. Normal fixed-function MSC single/double-draw cases
+also pass sixteen each; AIR sixteen-case regression passes. Actual loaded PE,
+native and required DXC/validator provenance are checked. Normal fixed-function
+cases are run without an unnecessary compiler deployment: staging a validator
+that this path does not load correctly remains UNVERIFIED, not relabeled PASS.
+Both feature-support contracts and both table/root-UAV-indirect feedback
+regressions pass, without experimental capability opt-ins.
+
+Evidence: gpu-matrix.json (no-private 48 PASS, normal compiler-provenance
+UNVERIFIED preserved), gpu-normal.json (normal 32 PASS) and gate-regressions.json
+in /Users/zhangbo/.cache/dxmt-msc-logic.6jblCq. The initial regression invocation
+used a nonexistent feature-query executable and retains UNVERIFIED; the corrected
+feature-final.json uses dx12_feature_support.exe and passes both configurations.
+--logic-compiler-dir explicitly
+deploys the DXC pair only to DXIL matrix cases. Overall raster qualification
+remains PARTIAL after numeric execution passes. No-private formal logic-op
+advertisement remains FALSE; MSAA, full UINT/MRT/write-mask/depth/discard/native
+qualification, private-variant composition and root-space collision retry remain
+open. No shader-validation, game benchmark or PE32 GPU acceptance is claimed.
+
+MSC compilation/integration skills informed feature-space isolation and binding
+review; API validation and main-agent Standards/Spec self-review were used. No
+independent review is claimed. Only cache runtimes were updated, without push.
+
+The following sections retain the earlier preparation checkpoints chronologically.
+
 Starting HEAD: dd2db4fb. Implementation remains open; this is a source-level
 preparation checkpoint, not GPU qualification or permission to accept MSC PSOs.
 

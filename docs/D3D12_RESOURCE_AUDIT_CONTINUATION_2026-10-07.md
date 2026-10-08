@@ -1,5 +1,13 @@
 # Resource closure continuation — 2026-10-07
 
+2026-10-08 programmable-logic update: MSC now consumes attachment inputs through
+its public compiler feature space, not a host descriptor or new residency entry.
+The PSO checks application root-space collisions and uses local compiler state;
+application TLAB/descriptor ownership is unchanged. RGBA8_UINT overlapping-draw
+readback passes, but nonempty-root layout, private Typed/MinMax composition,
+collision retry and complete raster qualification remain open. See
+D3D12_MSC_LOGIC_OP_LOWERING.md; no Tier/FL/resource capability is promoted.
+
 Branch: feat/d3d12-1. Starting HEAD: 96b935bc2c0ad94c79bad0af1d5e7062780222ff.
 Scope: refresh current implementation/evidence classification for closure
 infrastructure consolidation, not Tier 2 or feature-level promotion.

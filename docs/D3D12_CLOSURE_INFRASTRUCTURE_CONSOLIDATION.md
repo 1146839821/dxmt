@@ -1,5 +1,13 @@
 # Closure infrastructure consolidation
 
+MSC logic-op PSO checkpoint (2026-10-08): public framebuffer-fetch lowering now
+executes all sixteen RGBA8_UINT single-sample operations in no-private MSC,
+including two overlapping draws with API validation. AIR and normal regressions
+pass; compiler deployment is explicit and backend scoped. See
+D3D12_MSC_LOGIC_OP_LOWERING.md. This supersedes MSC's blanket sixteen-case
+rejection below, not MSAA/full-format/MRT/root/private-variant qualification.
+Formal capability advertisement is unchanged and full raster remains PARTIAL.
+
 AIR logic-op implementation checkpoint (2026-10-08): no-private now lowers all
 sixteen Boolean operations to ordered UINT attachment reads and fragment output,
 with component masks, versioned compiler capability and WOW64 argument conversion.

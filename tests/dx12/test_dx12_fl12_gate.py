@@ -33,6 +33,13 @@ class GateTests(unittest.TestCase):
             self.assertNotEqual(report[name]["status"], gate.PASS)
         self.assertFalse(report["capability_changes"])
 
+    def test_logic_op_compiler_is_scoped_to_dxil(self):
+        with patch.object(gate, "run_fixture", return_value={"status": gate.PASS}) as fixture:
+            gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, Path("runtime"), Path("compiler"))
+            self.assertEqual(fixture.call_count, 32)
+            for index, call in enumerate(fixture.call_args_list):
+                self.assertEqual(call.kwargs["compiler"], None if index < 16 else Path("compiler"))
+
     def test_logic_op_matrix_checks_all_operations_and_both_backends(self):
         with patch.object(gate, "run_fixture", return_value={"status": gate.PASS}) as fixture:
             result = gate.run_logic_op_gpu_matrix(Path("."), "wine", 5, Path("runtime"))

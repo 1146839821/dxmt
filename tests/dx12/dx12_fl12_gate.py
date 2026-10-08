@@ -361,7 +361,7 @@ TILED_COVERAGE_GAPS = (
 )
 
 
-def run_logic_op_gpu_matrix(directory, wine, timeout, runtime):
+def run_logic_op_gpu_matrix(directory, wine, timeout, runtime, compiler=None):
     """All Boolean operations on RGBA8_UINT; not full format/raster closure."""
     files = ("graphics_logic_op_sm6.vs.cso", "graphics_logic_op_sm6.ps.cso")
     cases = {}
@@ -375,7 +375,7 @@ def run_logic_op_gpu_matrix(directory, wine, timeout, runtime):
                 directory, wine, "dx12_graphics_sm6.exe", args,
                 (f"LOGIC_OP index={operation} RGBA8_UINT PASS",
                  ("DXBC AIRCONV" if backend == "dxbc" else "DXIL") + " logic op graphics readback passed"),
-                timeout, runtime, stage_files) if runtime is not None else {
+                timeout, runtime, stage_files, compiler=compiler if backend == "dxil" else None) if runtime is not None else {
                     "status": UNVERIFIED, "reason": "explicit runtime required for provenance"}
     execution = aggregate([row(name, case["status"], "") for name, case in cases.items()])
     hashes = [case["runtime_sha256"] for case in cases.values() if case.get("runtime_sha256")]
@@ -860,6 +860,8 @@ def main():
                         help="stage DXC/validator only for independent MSC MinMax numerical cases")
     parser.add_argument("--tiled-compiler-dir", type=Path,
                         help="stage DXC/validator for the qualified private fractional-clamp path only")
+    parser.add_argument("--logic-compiler-dir", type=Path,
+                        help="stage DXC/validator only for DXIL logic-op preparation cases")
     args = parser.parse_args()
     directory = args.build_dir.resolve() / "tests" / "dx12"
     runtime = args.build_dir.resolve() / "src"
@@ -888,7 +890,8 @@ def main():
              "container dxil-library-in-ordinary-graphics-slot passed"), args.timeout, runtime),
     }
     probes["minmax_sampler_contract"] = run_minmax_contract(directory, args.wine, args.timeout, runtime)
-    probes["logic_op_gpu_matrix"] = run_logic_op_gpu_matrix(directory, args.wine, args.timeout, runtime)
+    probes["logic_op_gpu_matrix"] = run_logic_op_gpu_matrix(directory, args.wine, args.timeout, runtime,
+                                                          compiler=args.logic_compiler_dir)
     probes["tiled_gpu_matrix"] = run_tiled_gpu_matrix(directory, args.wine, args.timeout, runtime,
                                                      compiler=args.tiled_compiler_dir)
     probes["minmax_gpu_matrix"] = run_minmax_gpu_matrix(directory, args.wine, args.timeout, runtime,

@@ -21,6 +21,7 @@
 #include "d3d12_shader_converter.hpp"
 #include "d3d12_minmax_pipeline.hpp"
 #include "d3d12_typed_origin_pipeline.hpp"
+#include "d3d12_logic_op.hpp"
 #include "util_env.hpp"
 #include "util_string.hpp"
 #include "dxmt_format.hpp"
@@ -1657,11 +1658,73 @@ public:
       }
 
       if (pDesc->PS.pShaderBytecode) {
+#ifdef DXMT_NO_PRIVATE_API
+        D3D12LogicOpShader logic_shader;
+        auto pixel_capabilities = msc_capabilities;
+        D3D12_SHADER_BYTECODE pixel_bytecode = pDesc->PS;
+        if (pDesc->BlendState.RenderTarget[0].LogicOpEnable) {
+          if (!msc_capabilities.api_framebuffer_fetch || requires_minmax_variant ||
+              !typed_origin_compiler_directory.empty()) return E_NOTIMPL;
+          std::wstring directory;
+          const auto selected = env::getEnvVar("DXMT_TYPED_ORIGIN_DXC_DIRECTORY");
+          const auto explicit_directory = str::tows(selected.c_str());
+          hr = SelectD3D12CompilerDirectory(directory, selected.empty() ? nullptr : explicit_directory.c_str());
+          if (hr != S_OK) return FAILED(hr) ? hr : E_NOTIMPL;
+          std::array<std::array<uint32_t, 4>, 8> widths{};
+          for (UINT target = 0; target < pDesc->NumRenderTargets; ++target) {
+            switch (pDesc->RTVFormats[target]) {
+            case DXGI_FORMAT_R8_UINT: widths[target] = {8, 0, 0, 0}; break;
+            case DXGI_FORMAT_R8G8_UINT: widths[target] = {8, 8, 0, 0}; break;
+            case DXGI_FORMAT_R8G8B8A8_UINT: widths[target] = {8, 8, 8, 8}; break;
+            case DXGI_FORMAT_R16_UINT: widths[target] = {16, 0, 0, 0}; break;
+            case DXGI_FORMAT_R16G16_UINT: widths[target] = {16, 16, 0, 0}; break;
+            case DXGI_FORMAT_R16G16B16A16_UINT: widths[target] = {16, 16, 16, 16}; break;
+            case DXGI_FORMAT_R32_UINT: widths[target] = {32, 0, 0, 0}; break;
+            case DXGI_FORMAT_R32G32_UINT: widths[target] = {32, 32, 0, 0}; break;
+            case DXGI_FORMAT_R32G32B32A32_UINT: widths[target] = {32, 32, 32, 32}; break;
+            case DXGI_FORMAT_R10G10B10A2_UINT: widths[target] = {10, 10, 10, 2}; break;
+            default: return E_NOTIMPL;
+            }
+          }
+          std::string diagnostics;
+          hr = PrepareD3D12LogicOpShader(pixel_bytecode, directory.c_str(),
+              pDesc->BlendState.RenderTarget[0].LogicOp, widths, logic_shader, diagnostics);
+          if (FAILED(hr)) { ERR("Logic-op shader preparation: ", diagnostics); return hr; }
+          if (root_signature && root_signature_size) {
+            Com<ID3D12VersionedRootSignatureDeserializer> decoded;
+            hr = D3D12CreateVersionedRootSignatureDeserializer(root_signature, root_signature_size, IID_PPV_ARGS(&decoded));
+            if (FAILED(hr)) return hr;
+            const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *description = nullptr;
+            hr = decoded->GetRootSignatureDescAtVersion(D3D_ROOT_SIGNATURE_VERSION_1_1, &description);
+            if (FAILED(hr)) return hr;
+            const auto &root = description->Desc_1_1;
+            for (UINT i = 0; i < root.NumParameters; ++i) {
+              const auto &parameter = root.pParameters[i];
+              if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+                for (UINT range = 0; range < parameter.DescriptorTable.NumDescriptorRanges; ++range)
+                  if (parameter.DescriptorTable.pDescriptorRanges[range].RegisterSpace == logic_shader.framebuffer_space)
+                    return E_NOTIMPL;
+              } else if ((parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS ?
+                  parameter.Constants.RegisterSpace : parameter.Descriptor.RegisterSpace) == logic_shader.framebuffer_space)
+                return E_NOTIMPL;
+            }
+            for (UINT i = 0; i < root.NumStaticSamplers; ++i)
+              if (root.pStaticSamplers[i].RegisterSpace == logic_shader.framebuffer_space) return E_NOTIMPL;
+          }
+          pixel_capabilities.compiler_framebuffer_fetch_resource_space = logic_shader.framebuffer_space;
+          pixel_bytecode = {logic_shader.bytecode.data(), logic_shader.bytecode.size()};
+        }
+        const auto pixel_classification = ClassifyD3D12Shader(pixel_bytecode);
+#else
+        const auto &pixel_bytecode = pDesc->PS;
+        const auto &pixel_classification = ps_classification;
+        const auto &pixel_capabilities = msc_capabilities;
+#endif
         if (FAILED(
               hr = requires_minmax_variant && !static_minmax_shaders.pixel.bytecode.empty() ? ConvertD3D12MinMaxShader(static_minmax_shaders.pixel,
                     minmax_variant_->root, converted_ps, &msc_capabilities) : ConvertD3D12Shader(
-                    ps_classification, pDesc->PS, DXMT_MSC_STAGE_FRAGMENT, converted_ps, root_signature,
-                    root_signature_size, nullptr, 0, &msc_capabilities
+                    pixel_classification, pixel_bytecode, DXMT_MSC_STAGE_FRAGMENT, converted_ps, root_signature,
+                    root_signature_size, nullptr, 0, &pixel_capabilities
                 )
             ))
         {

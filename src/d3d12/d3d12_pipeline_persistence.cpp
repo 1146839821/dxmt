@@ -1330,7 +1330,8 @@ bool CanLowerD3D12IntegerLogicOp(const D3D12_BLEND_DESC &blend, UINT count,
   if (blend.IndependentBlendEnable || !count || count > 8 || samples != 1 || !formats)
     return false;
   const auto shader = ClassifyD3D12Shader(pixel);
-  if (FAILED(shader.validation_hr) || shader.backend != D3D12ShaderBackend::Airconv ||
+  if (FAILED(shader.validation_hr) || (shader.backend != D3D12ShaderBackend::Airconv &&
+      shader.backend != D3D12ShaderBackend::MetalShaderConverter) ||
       shader.shader_kind != D3D12ShaderKind::Pixel)
     return false;
   for (UINT i = 0; i < count; ++i) {
