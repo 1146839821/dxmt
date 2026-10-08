@@ -1,5 +1,6 @@
 #include "d3d12_typed_origin.hpp"
 #include "d3d12_minmax.hpp"
+#include "d3d12_logic_op.hpp"
 
 #if defined(__GNUC__) && !defined(__clang__)
 #define CROSS_PLATFORM_UUIDOF(interface, spec) struct interface;
@@ -245,12 +246,19 @@ struct MinMaxPreparation {
   using Artifact = D3D12MinMaxShader;
   static constexpr const char *ExportName = "DXMTMSCLowerReductionSamplers";
 };
+struct LogicOpPreparation {
+  static constexpr uint32_t MaximumMinor = 6;
+  using Params = dxmt_msc_lower_logic_outputs_params;
+  using Artifact = D3D12LogicOpShader;
+  static constexpr const char *ExportName = "DXMTMSCLowerLogicOutputs";
+};
 
 template <typename Operation>
 static HRESULT PrepareShaderInternal(
     const D3D12_SHADER_BYTECODE &shader, const wchar_t *dxc_directory,
     typename Operation::Artifact &prepared, std::string &diagnostics, uint32_t program_kind = 5,
-    uint32_t layout_offset = 0, uint32_t layout_count = 0) {
+    uint32_t layout_offset = 0, uint32_t layout_count = 0,
+    const dxmt_msc_lower_logic_outputs_params *logic_options = nullptr) {
   using Params = typename Operation::Params;
   using Prepared = typename Operation::Artifact;
   const char *export_name = Operation::ExportName;
@@ -310,7 +318,7 @@ static HRESULT PrepareShaderInternal(
     case 5: candidate.stage = D3D12MinMaxShaderStage::Compute; break;
     default: return E_INVALIDARG;
     }
-  if constexpr (std::is_same_v<Operation, TypedOriginPreparation>)
+  if constexpr (std::is_same_v<Operation, TypedOriginPreparation> || std::is_same_v<Operation, LogicOpPreparation>)
     hr = Inspect(reflection.get(), validated_input.get(), program, Operation::MaximumMinor,
         &candidate.application_root_signature, program_kind);
   else hr = Inspect(reflection.get(), validated_input.get(), program, Operation::MaximumMinor, nullptr, program_kind);
@@ -323,6 +331,11 @@ static HRESULT PrepareShaderInternal(
   Params params = {};
   params.bitcode = uintptr_t(bytes + 8 + offset);
   params.bitcode_size = size;
+  if constexpr (std::is_same_v<Operation, LogicOpPreparation>) {
+    if (!logic_options) return E_INVALIDARG;
+    params.operation = logic_options->operation;
+    std::memcpy(params.component_bits, logic_options->component_bits, sizeof(params.component_bits));
+  }
   if constexpr (std::is_same_v<Operation, MinMaxPreparation>)
     if (layout_count) params.reserved = DXMT_MSC_MINMAX_LAYOUT_TAG | (layout_count << 8) | layout_offset;
   if constexpr (std::is_same_v<Operation, TypedOriginPreparation>)
@@ -331,16 +344,27 @@ static HRESULT PrepareShaderInternal(
   if (result != DXMT_MSC_SUCCESS) {
     diagnostics += std::string(export_name) + " sizing failed: " + std::to_string(result); return LoweringResult(result);
   }
-  if (!params.ir_size || params.ir_size > 64 * 1024 * 1024 || params.binding_count > 64) return E_FAIL;
+  if (!params.ir_size || params.ir_size > 64 * 1024 * 1024) {
+    diagnostics += "invalid lowering IR size " + std::to_string(params.ir_size); return E_FAIL;
+  }
   std::vector<char> ir(params.ir_size);
-  candidate.bindings.resize(params.binding_count);
+  if constexpr (std::is_same_v<Operation, LogicOpPreparation>) {
+    if (params.framebuffer_space == UINT32_MAX) return E_FAIL;
+    candidate.framebuffer_space = params.framebuffer_space;
+  } else {
+    if (params.binding_count > 64) return E_FAIL;
+    candidate.bindings.resize(params.binding_count);
+    params.bindings = uintptr_t(candidate.bindings.data());
+    params.binding_capacity = candidate.bindings.size();
+  }
   params.ir = uintptr_t(ir.data());
   params.ir_capacity = ir.size();
-  params.bindings = uintptr_t(candidate.bindings.data());
-  params.binding_capacity = candidate.bindings.size();
   result = lower(&params);
   if (result != DXMT_MSC_SUCCESS) return LoweringResult(result);
-  if (params.ir_size != ir.size() || params.binding_count != candidate.bindings.size()) return E_FAIL;
+  if (params.ir_size != ir.size()) { diagnostics += "lowering IR size changed between calls"; return E_FAIL; }
+  if constexpr (std::is_same_v<Operation, LogicOpPreparation>) {
+    if (params.framebuffer_space != candidate.framebuffer_space) { diagnostics += "framebuffer space changed between calls"; return E_FAIL; }
+  } else if (params.binding_count != candidate.bindings.size()) return E_FAIL;
   raw = nullptr;
   hr = utils->CreateBlob(ir.data(), static_cast<UINT32>(ir.size()), DXC_CP_UTF8, &raw);
   OwnedCOM<IDxcBlobEncoding> ir_blob(raw);
@@ -369,6 +393,22 @@ static HRESULT PrepareShaderInternal(
   }
   prepared = std::move(candidate);
   return S_OK;
+}
+
+HRESULT PrepareD3D12LogicOpShader(const D3D12_SHADER_BYTECODE &shader,
+    const wchar_t *dxc_directory, uint32_t operation,
+    const std::array<std::array<uint32_t, 4>, 8> &component_bits,
+    D3D12LogicOpShader &prepared, std::string &diagnostics) {
+  try {
+    if (operation > 15) return E_INVALIDARG;
+    dxmt_msc_lower_logic_outputs_params options{};
+    options.operation = operation;
+    for (unsigned target = 0; target < 8; ++target) for (unsigned component = 0; component < 4; ++component) {
+      if (component_bits[target][component] > 32) return E_INVALIDARG;
+      options.component_bits[target][component] = component_bits[target][component];
+    }
+    return PrepareShaderInternal<LogicOpPreparation>(shader, dxc_directory, prepared, diagnostics, 0, 0, 0, &options);
+  } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
 }
 
 HRESULT PrepareD3D12TypedOriginShader(

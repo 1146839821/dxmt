@@ -1,4 +1,6 @@
 #include "dxil_logic_op.hpp"
+#include "metalirconverter_native.h"
+#include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
@@ -80,6 +82,29 @@ int main(int argc, char **argv) {
       MDNode::get(context, {ValueAsMetadata::get(symbolic), MDString::get(context, "symbolic"), signature, nullptr, nullptr}));
   std::array<std::array<uint32_t, 4>, 8> mapped_widths{};
   mapped_widths[3] = {10, 10, 10, 2};
+  SmallVector<char, 0> bitcode;
+  raw_svector_ostream bitcode_stream(bitcode);
+  WriteBitcodeToFile(module, bitcode_stream);
+  dxmt_msc_lower_logic_outputs_params params{};
+  params.bitcode = uintptr_t(bitcode.data());
+  params.bitcode_size = bitcode.size();
+  params.operation = 10;
+  for (unsigned i = 0; i < 4; ++i) params.component_bits[3][i] = mapped_widths[3][i];
+  if (dxmt_msc_lower_logic_outputs(&params) != DXMT_MSC_SUCCESS || !params.ir_size ||
+      params.framebuffer_space == UINT32_MAX) return 15;
+  std::vector<char> transported(params.ir_size);
+  const auto sized_space = params.framebuffer_space;
+  params.ir = uintptr_t(transported.data());
+  params.ir_capacity = transported.size() - 1;
+  if (dxmt_msc_lower_logic_outputs(&params) != DXMT_MSC_ERROR_OUTPUT_TOO_SMALL ||
+      params.framebuffer_space != UINT32_MAX) return 16;
+  params.ir_capacity = transported.size();
+  if (dxmt_msc_lower_logic_outputs(&params) != DXMT_MSC_SUCCESS || params.framebuffer_space != sized_space) return 17;
+  params.ir = params.bitcode;
+  params.ir_capacity = 1;
+  if (dxmt_msc_lower_logic_outputs(&params) != DXMT_MSC_ERROR_INVALID_ARGUMENT) return 18;
+  params.ir = uintptr_t(&params);
+  if (dxmt_msc_lower_logic_outputs(&params) != DXMT_MSC_ERROR_INVALID_ARGUMENT) return 19;
   uint32_t mapped_space;
   auto modern_module = CloneModule(module);
   modern_module->getNamedMetadata("dx.shaderModel")->setOperand(0,

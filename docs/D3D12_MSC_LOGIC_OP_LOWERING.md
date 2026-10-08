@@ -90,3 +90,36 @@ acceptance. Production DXC preparation, root-layout checks, cache keys and PSO
 integration are still required; no admission or capability declaration changed.
 Both targeted builds and both host suites (17/17) pass. Main-agent Standards/Spec
 self-review and diff whitespace checks pass; no independent review is claimed.
+
+## Production preparation boundary checkpoint
+
+PrepareD3D12LogicOpShader now shares the existing validated DXC preparation
+sequence with Typed/MinMax. It dynamically resolves DXMTMSCLowerLogicOutputs,
+rejects missing exports, validates and inspects the input container, transports
+bitcode through the native boundary, assembles/validates the output and publishes
+only after both calls return identical IR sizes and feature spaces. Embedded
+application root bytes remain separate from the transformed shader.
+
+The new transport is 184 bytes with fixed-width addresses and widths. Native
+preparation checks ranges, parameter/input/output aliases, reserved fields and
+widths, contains allocation exceptions and normalizes LLVM text to the selected
+DXC dialect. Unixcall 204 is appended to both tables (the existing NULL slot
+counts toward the index); no existing call index changes. WOW64 shares this
+fixed-width transport, but no actual PE32 runtime acceptance is claimed.
+
+Fresh isolated PE-to-Unix preparation passes on both configurations for ps_6_0
+and ps_6_6, including malformed-input/invalid-operation artifact preservation.
+All four fixture PE/native provenance checks pass. The final evidence is
+prepare-qualified.json in /Users/zhangbo/.cache/dxmt-msc-logic.6jblCq; earlier
+prepare files retain failed packaging/index experiments. Required Wine builtin
+postprocessing and matched cache PE/native deployment resolved the load/export
+failures; the PE integration fixture caught an intermediate index mistake that
+host-only tests could not catch. Only cache runtimes were updated.
+
+This makes the preparation API available, not the production PSO call site:
+root-space collision/layout checks, compiler/cache specialization, pipeline
+admission and actual overlapping GPU draws are still pending. No capability
+promotion, game deployment/restart or push occurred.
+Both final complete builds pass (122 incremental targets each); both host suites
+remain 17/17. Main-agent self-review retained the PE preparation regression
+because a successful host-only lowering does not prove correct unixcall dispatch.

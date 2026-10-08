@@ -2585,6 +2585,14 @@ thunk_DXMTMSCLowerReductionSamplers(void *args) {
 }
 
 static NTSTATUS
+thunk_DXMTMSCLowerLogicOutputs(void *args) {
+  struct dxmt_msc_lower_logic_outputs_params *params = args;
+  if (dxmt_msc_logic_params_alias(params)) return STATUS_UNSUCCESSFUL;
+  params->ret = dxmt_msc_lower_logic_outputs(params);
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 thunk_DXMTMSCSynthesizeRayDispatch(void *args) {
   struct dxmt_msc_synthesize_ray_dispatch_params *params = args;
   params->ret = dxmt_msc_synthesize_ray_dispatch(params);
@@ -4666,6 +4674,7 @@ const void *__wine_unix_call_funcs[] = {
     &_SparseMappingQueue_updateBufferMappingsWithSidebandAndHeaps,
     &thunk_SM50UsesRootBufferFeedback,
     &_WMTTraceRuntimeIdentity,
+    &thunk_DXMTMSCLowerLogicOutputs,
 };
 
 #ifndef DXMT_NATIVE
@@ -4874,5 +4883,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_SparseMappingQueue_updateBufferMappingsWithSidebandAndHeaps,
     &thunk32_SM50UsesRootBufferFeedback,
     &_WMTTraceRuntimeIdentity,
+    &thunk_DXMTMSCLowerLogicOutputs,
 };
 #endif

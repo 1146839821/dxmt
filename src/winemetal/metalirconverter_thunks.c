@@ -116,3 +116,16 @@ DXMTMSCLowerReductionSamplers(struct dxmt_msc_lower_reduction_samplers_params *p
     return -1;
   return params->ret;
 }
+
+WINEMETAL_API int
+DXMTMSCLowerLogicOutputs(struct dxmt_msc_lower_logic_outputs_params *params) {
+  if (!params || dxmt_msc_logic_params_alias(params)) return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+#if UINTPTR_MAX == UINT32_MAX
+  if (params->bitcode > UINT32_MAX || params->ir > UINT32_MAX ||
+      params->bitcode_size > UINT32_MAX - params->bitcode ||
+      params->ir_capacity > UINT32_MAX - params->ir) return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+#endif
+  NTSTATUS status = WINE_UNIX_CALL(unix_dxmt_msc_lower_logic_outputs, params);
+  if (status) return -1;
+  return params->ret;
+}

@@ -231,9 +231,30 @@ enum dxmt_msc_unixcall {
   unix_dxmt_msc_synthesize_ray_intersection,
   unix_dxmt_msc_lower_typed_origins = 196,
   unix_dxmt_msc_lower_reduction_samplers = 197,
+  unix_dxmt_msc_lower_logic_outputs = 204,
 };
 
 #pragma pack(push, 8)
+
+struct dxmt_msc_lower_logic_outputs_params {
+  uint64_t bitcode, bitcode_size;
+  uint64_t ir, ir_capacity, ir_size;
+  uint32_t operation, framebuffer_space;
+  uint32_t component_bits[8][4];
+  int32_t ret;
+  uint32_t reserved;
+};
+typedef char dxmt_msc_lower_logic_outputs_size_check[
+    sizeof(struct dxmt_msc_lower_logic_outputs_params) == 184 ? 1 : -1];
+static inline int dxmt_msc_logic_params_alias(const struct dxmt_msc_lower_logic_outputs_params *params) {
+  const uint64_t base = (uintptr_t)params;
+  const uint64_t addresses[] = {params->bitcode, params->ir};
+  const uint64_t lengths[] = {params->bitcode_size, params->ir_capacity};
+  for (unsigned i = 0; i < 2; ++i)
+    if (lengths[i] && (addresses[i] <= base ? base - addresses[i] < lengths[i] : addresses[i] - base < sizeof(*params)))
+      return 1;
+  return 0;
+}
 
 /* Fixed-width addresses keep the same ABI for PE32, PE64 and Unix. Input is
  * bitcode, not a DXIL container. A successful result still requires DXC
@@ -538,6 +559,7 @@ struct dxmt_msc_get_root_layout_params32 {
 WINEMETAL_API int DXMTMSCIsAvailable(void);
 WINEMETAL_API int DXMTMSCLowerTypedBufferOrigins(struct dxmt_msc_lower_typed_origins_params *params);
 WINEMETAL_API int DXMTMSCLowerReductionSamplers(struct dxmt_msc_lower_reduction_samplers_params *params);
+WINEMETAL_API int DXMTMSCLowerLogicOutputs(struct dxmt_msc_lower_logic_outputs_params *params);
 
 WINEMETAL_API int DXMTMSCGetCapabilities(struct dxmt_msc_capabilities *capabilities);
 
