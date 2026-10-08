@@ -97,6 +97,31 @@ struct EncoderData {
   // GPU-generated root VAs cannot be enumerated at recording time.
   bool indirect_root_va = false;
   bool root_buffer_feedback = false;
+  // Numeric addresses only: resolve the current registry owner at submission.
+  // Capture the union across every feedback consumer sharing this encoder.
+  bool root_feedback_vas_known = true;
+  std::vector<uint64_t> root_feedback_vas;
+
+  void CaptureRootFeedbackVA(uint64_t va) {
+    if (!root_feedback_vas_known || !va) return;
+    for (auto captured : root_feedback_vas)
+      if (captured == va) return;
+    // Bound both recording-time deduplication and submission interval tests.
+    // Overflow must retain the full live registry, never truncate the union.
+    if (root_feedback_vas.size() == 64) {
+      root_feedback_vas_known = false;
+      root_feedback_vas.clear();
+      return;
+    }
+    root_feedback_vas.push_back(va);
+  }
+
+  bool NeedsRootFeedbackInterval(uint64_t base, uint64_t length) const {
+    if (indirect_root_va || !root_feedback_vas_known) return true;
+    for (auto va : root_feedback_vas)
+      if (va >= base && va - base < length) return true;
+    return false;
+  }
 
   void
   RetainDescriptorHeap(IUnknown *heap) {

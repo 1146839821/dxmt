@@ -30,6 +30,50 @@ int main() {
   auto first_owner = static_cast<dxmt::MTLD3D12Resource *>(first.p);
   auto second_owner = static_cast<dxmt::MTLD3D12Resource *>(second.p);
   bool ok = true;
+  D3D12_DESCRIPTOR_RANGE range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1, 0,
+                                  D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+  D3D12_ROOT_PARAMETER params[5] = {};
+  params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  params[0].Constants = {0, 0, 3};
+  params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  params[1].DescriptorTable = {1, &range};
+  params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+  params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+  params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+  params[4].Descriptor.ShaderRegister = 1;
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {5, params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+  Owned<ID3DBlob> root_blob;
+  Owned<ID3D12RootSignature> root;
+  if (FAILED(D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob.p, nullptr)) ||
+      FAILED(device.p->CreateRootSignature(0, root_blob.p->GetBufferPointer(), root_blob.p->GetBufferSize(),
+                                           IID_PPV_ARGS(&root.p)))) return 1;
+  ok &= static_cast<dxmt::MTLD3D12RootSignature *>(root.p)->RootBufferQwordMask ==
+        ((uint64_t(1) << 3) | (uint64_t(1) << 4) | (uint64_t(1) << 5));
+  dxmt::EncoderData feedback = {};
+  feedback.root_feedback_vas = {va + 17, va + 255};
+  ok &= feedback.NeedsRootFeedbackInterval(va, 256);
+  ok &= feedback.NeedsRootFeedbackInterval(va + 16, 2); // overlapping interval stays eligible
+  ok &= !feedback.NeedsRootFeedbackInterval(va + 256, 256);
+  ok &= !feedback.NeedsRootFeedbackInterval(va, 0);
+  feedback.root_feedback_vas = {UINT64_MAX - 1};
+  ok &= feedback.NeedsRootFeedbackInterval(UINT64_MAX - 2, 2);
+  ok &= !feedback.NeedsRootFeedbackInterval(UINT64_MAX, 2); // no end-address overflow
+  feedback.indirect_root_va = true;
+  ok &= feedback.NeedsRootFeedbackInterval(0, 1);
+  dxmt::EncoderData bounded = {};
+  bounded.CaptureRootFeedbackVA(0);
+  for (uint64_t address = 1; address <= 64; ++address) {
+    bounded.CaptureRootFeedbackVA(address);
+    bounded.CaptureRootFeedbackVA(address);
+  }
+  ok &= bounded.root_feedback_vas_known && bounded.root_feedback_vas.size() == 64;
+  bounded.CaptureRootFeedbackVA(65);
+  bounded.CaptureRootFeedbackVA(66);
+  ok &= !bounded.root_feedback_vas_known && bounded.root_feedback_vas.empty();
+  ok &= bounded.NeedsRootFeedbackInterval(1000, 1);
+  feedback.indirect_root_va = false;
+  feedback.root_feedback_vas_known = false;
+  ok &= feedback.NeedsRootFeedbackInterval(0, 1);
   auto retained = internal->SnapshotBufferByVA(va + 17, &offset);
   ok &= retained.ptr() == allocation && offset == 17;
   offset = 99;
@@ -81,6 +125,14 @@ int main() {
     ok &= distinct_allocation && old_alias && new_alias;
     alias_first.p->Release(); alias_first.p = nullptr;
     ok &= internal->SnapshotBufferByVA(alias_va, &offset).ptr() == new_alias.ptr();
+    std::vector<dxmt::Rc<dxmt::BufferAllocation>> current;
+    ok &= SUCCEEDED(internal->SnapshotRegisteredBuffers(current));
+    dxmt::EncoderData fixed = {}; fixed.root_feedback_vas = {alias_va};
+    current.erase(std::remove_if(current.begin(), current.end(), [&](const auto &entry) {
+      return !fixed.NeedsRootFeedbackInterval(entry->gpuAddress(), entry->length());
+    }), current.end());
+    ok &= std::any_of(current.begin(), current.end(), [&](const auto &entry) { return entry.ptr() == new_alias.ptr(); });
+    ok &= std::none_of(current.begin(), current.end(), [&](const auto &entry) { return entry.ptr() == old_alias.ptr(); });
     ok &= internal->LookupResourceByVA(alias_va, &offset) ==
         static_cast<dxmt::MTLD3D12Resource *>(alias_second.p);
     ok &= old_alias->gpuAddress() == alias_va;

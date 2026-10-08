@@ -446,6 +446,14 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     std::vector<Rc<BufferAllocation>> snapshot;
     if (FAILED(device_->SnapshotRegisteredBuffers(snapshot)))
       return false;
+    if (data->root_buffer_feedback && !data->indirect_root_va && data->root_feedback_vas_known &&
+        !full_root_feedback_snapshot_) {
+      // Preserve every containing interval and its order, including overlaps.
+      // Do not replace first-match GPU lookup with closest-base CPU lookup.
+      snapshot.erase(std::remove_if(snapshot.begin(), snapshot.end(), [&](const auto &allocation) {
+        return !data->NeedsRootFeedbackInterval(allocation->gpuAddress(), allocation->length());
+      }), snapshot.end());
+    }
     // GPU commands may select any currently registered buffer. Strong references
     // are acquired under the registry lock; native fan-out is outside it.
     try { submission.indirect_root_buffers.push_back(std::move(snapshot)); }
@@ -501,6 +509,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   uint64_t completed_submission_serial_ = 0;
   uint64_t committed_submission_serial_ = 0; // submission_mutex_
   bool encoder_execution_status_ = false;
+  bool full_root_feedback_snapshot_ = false;
   std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_psos_;
   std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_rtv_psos_;
   std::array<WMT::Reference<WMT::DepthStencilState>, 4> clear_dssos_;
@@ -904,6 +913,10 @@ public:
         encoder_status[0] != '0';
 
     auto metal_device = device_->GetMTLDevice();
+    char full_snapshot[2] = {};
+    full_root_feedback_snapshot_ =
+        GetEnvironmentVariableA("DXMT_TEST_FULL_ROOT_FEEDBACK_SNAPSHOT", full_snapshot, sizeof(full_snapshot)) == 1 &&
+        full_snapshot[0] == '1';
     // Queued Signal/Wait/Present packets may already own one buffer each.
     // Leave bounded headroom for the worker's current and next split segment.
     queue_ = metal_device.newCommandQueue(kCommandQueueSize + 2);

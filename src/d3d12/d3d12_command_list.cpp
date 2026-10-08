@@ -2355,6 +2355,8 @@ public:
     auto *render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
     render->use_geometry |= use_msc_mesh_stages || use_airconv_geometry || use_airconv_tessellation;
     render->root_buffer_feedback |= !use_msc && pso_graphics_->air_buffer_feedback;
+    if (!use_msc && pso_graphics_->air_buffer_feedback)
+      CaptureRootFeedbackVAs(rootsig_graphics_.ptr(), rootarg_graphics_staging_, SkipResourceBinding);
 
     if (dirty_state_.test(DirtyState::GraphicsPipelineState)) {
       UpdateGraphicsPSO(pso_graphics_.ptr(), airconv_index_format);
@@ -2936,6 +2938,23 @@ public:
     if (pso_graphics_->stream_output)
       EmitMemoryBarrier(WMTBarrierScopeBuffers, WMTRenderStageVertex, WMTRenderStageVertex);
   };
+
+  void
+  CaptureRootFeedbackVAs(MTLD3D12RootSignature *root, const uint64_t staging[64], bool skipped) {
+    auto encoder = allocator_->encoder_current;
+    if (!encoder) { FailRecording(__func__, "feedback consumer has no encoder"); return; }
+    if (!encoder->root_feedback_vas_known) return;
+    if (skipped || !root || !staging || root->UploadQwords > 64) {
+      encoder->root_feedback_vas_known = false;
+      return;
+    }
+    try {
+      for (UINT qword = 0; qword < root->UploadQwords; ++qword) {
+        if (!(root->RootBufferQwordMask & (uint64_t(1) << qword)) || !staging[qword]) continue;
+        encoder->CaptureRootFeedbackVA(staging[qword]);
+      }
+    } catch (const std::bad_alloc &) { FailRecording(__func__, "feedback root address capture failed"); }
+  }
 
   uint64_t
   EncodeRootArgument(MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], UINT Count = 1) {
@@ -3819,8 +3838,10 @@ public:
       }
     }
     static std::atomic<uint32_t> compute_trace_count{0};
-    if (!use_msc && pso_compute_->air_buffer_feedback && allocator_->encoder_current)
+    if (!use_msc && pso_compute_->air_buffer_feedback && allocator_->encoder_current) {
       allocator_->encoder_current->root_buffer_feedback = true;
+      CaptureRootFeedbackVAs(rootsig_compute_.ptr(), rootarg_compute_staging_, SkipResourceBinding);
+    }
     compute_trace_id_ = compute_trace_ ? compute_trace_count.fetch_add(1, std::memory_order_relaxed) : UINT_MAX;
     if (compute_trace_id_ < 4096) {
       DEBUG(

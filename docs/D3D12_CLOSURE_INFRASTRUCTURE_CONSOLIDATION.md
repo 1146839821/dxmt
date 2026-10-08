@@ -1,5 +1,17 @@
 # Closure infrastructure consolidation
 
+Fixed-root optimization checkpoint (2026-10-08): bounded recording-time numeric
+VA unions prune fresh submission snapshots without changing overlap precedence,
+live owner resolution or the full GPU-selected/unknown/overflow path. Final-build
+paired A/B (12 cases, 6,144 measured submissions) reduces 1,028-entry median CPU
+from 918 to 293 us and GPU interval from 290 to 8.8 us; four-entry results are
+unchanged at observed granularity. Both full builds, host suites, direct/indirect
+sparse and hull/domain regressions, union/owner tests and separate API/provenance
+checks pass. See D3D12_ROOT_FEEDBACK_PERFORMANCE.md. Full registry acquisition
+still scales with registry size. Next priority is the actual complete mandatory
+Typed/MinMax/Tiled/format/raster qualification, not additional benchmark variants;
+FL12_0, full timestamp contracts and independent sort/counter audit remain open.
+
 Root-feedback performance checkpoint (2026-10-08): frozen-build paired workloads
 now expose costs hidden by caller-only timing. At 1,028 registered buffers,
 feedback median process CPU/GPU interval is about 918/290 us per submission

@@ -327,6 +327,7 @@ public:
   uint64_t MSCArgumentBufferSize = 0;
   uint32_t MSCParameterCount = 0;
   const dxmt_msc_root_parameter_layout *MSCParameterLayouts = nullptr;
+  uint64_t RootBufferQwordMask = 0;
 };
 
 class MTLD3D12CommandSignature : public ID3D12CommandSignature {

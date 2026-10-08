@@ -75,11 +75,13 @@ int main(int argc, char **argv) try {
     std::printf("CPU_ACCOUNTING worker_process_100ns=%llu status=PASS\n", static_cast<unsigned long long>(elapsed));
     return 0;
   }
-  if (argc != 6) throw std::runtime_error("usage: padding dispatches iterations feedback|control first|last");
+  if (argc != 6) throw std::runtime_error("usage: padding dispatches iterations feedback|control first|last|union");
   const unsigned padding = Number(argv[1], 0, 4096), dispatches = Number(argv[2], 1, 128);
   const unsigned iterations = Number(argv[3], 16, 4096);
   const bool feedback = !std::strcmp(argv[4], "feedback"), first = !std::strcmp(argv[5], "first");
-  if ((!feedback && std::strcmp(argv[4], "control")) || (!first && std::strcmp(argv[5], "last")))
+  const bool root_union = !std::strcmp(argv[5], "union");
+  if ((!feedback && std::strcmp(argv[4], "control")) || (!first && !root_union && std::strcmp(argv[5], "last")) ||
+      (root_union && !feedback))
     throw std::runtime_error("invalid mode");
   auto library = LoadLibraryA("d3dcompiler_47.dll");
   if (!library) throw std::runtime_error("D3D compiler unavailable");
@@ -106,7 +108,7 @@ RWStructuredBuffer<uint> output : register(u0);
   Check(compiled);
   Owned<ID3D12Device> device;
   Check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.p)));
-  Owned<ID3D12Resource> input, output, readback, timestamps;
+  Owned<ID3D12Resource> input, output, readback, timestamps, second_input, second_output;
   auto make_input = [&] {
     CreateBuffer(device.p, input, 4096, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
     void *data; Check(input.p->Map(0, nullptr, &data));
@@ -120,7 +122,15 @@ RWStructuredBuffer<uint> output : register(u0);
   if (!first) make_input();
   CreateBuffer(device.p, output, 4096 * 4, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-  CreateBuffer(device.p, readback, 4096 * 4, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+  CreateBuffer(device.p, readback, (root_union ? 2 : 1) * 4096 * 4, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+  if (root_union) {
+    CreateBuffer(device.p, second_input, 4096, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+    void *data; Check(second_input.p->Map(0, nullptr, &data));
+    for (unsigned i = 0; i < 1024; ++i) static_cast<UINT *>(data)[i] = i ^ 0x2234abcdu;
+    second_input.p->Unmap(0, nullptr);
+    CreateBuffer(device.p, second_output, 4096 * 4, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  }
   CreateBuffer(device.p, timestamps, 16, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
   D3D12_ROOT_PARAMETER parameters[2] = {};
   parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
@@ -150,12 +160,34 @@ RWStructuredBuffer<uint> output : register(u0);
   list.p->SetComputeRootUnorderedAccessView(1, output.p->GetGPUVirtualAddress());
   list.p->EndQuery(queries.p, D3D12_QUERY_TYPE_TIMESTAMP, 0);
   for (unsigned i = 0; i < dispatches; ++i) list.p->Dispatch(64, 1, 1);
+  if (root_union) {
+    list.p->SetComputeRootShaderResourceView(0, second_input.p->GetGPUVirtualAddress());
+    list.p->SetComputeRootUnorderedAccessView(1, second_output.p->GetGPUVirtualAddress());
+    list.p->Dispatch(64, 1, 1);
+  }
   list.p->EndQuery(queries.p, D3D12_QUERY_TYPE_TIMESTAMP, 1);
   list.p->ResolveQueryData(queries.p, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, timestamps.p, 0);
   Transition(list.p, output.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
   list.p->CopyBufferRegion(readback.p, 0, output.p, 0, 4096 * 4);
   Transition(list.p, output.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  if (root_union) {
+    Transition(list.p, second_output.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    list.p->CopyBufferRegion(readback.p, 4096 * 4, second_output.p, 0, 4096 * 4);
+    Transition(list.p, second_output.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  }
   Check(list.p->Close());
+  if (feedback) {
+    unsigned consumers = 0;
+    auto internal = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list.p);
+    for (auto encoder = internal->entry; encoder; encoder = encoder->next) {
+      if (!encoder->root_buffer_feedback) continue;
+      ++consumers;
+      if (!encoder->root_feedback_vas_known || encoder->indirect_root_va ||
+          encoder->root_feedback_vas.size() != (root_union ? 4u : 2u))
+        throw std::runtime_error("fixed root capture mismatch");
+    }
+    if (consumers != 1) throw std::runtime_error("feedback consumers did not share one encoder");
+  }
   std::vector<dxmt::Rc<dxmt::BufferAllocation>> snapshot;
   Check(static_cast<dxmt::MTLD3D12Device *>(device.p)->SnapshotRegisteredBuffers(snapshot));
   const auto registry_count = snapshot.size();
@@ -187,6 +219,8 @@ RWStructuredBuffer<uint> output : register(u0);
     bool valid = true;
     for (unsigned i = 0; i < 4096; ++i)
       valid &= static_cast<UINT *>(data)[i] == ((i & 1023) ^ 0x1234abcdu ^ 0x40000000u);
+    if (root_union) for (unsigned i = 0; i < 4096; ++i)
+      valid &= static_cast<UINT *>(data)[4096 + i] == ((i & 1023) ^ 0x2234abcdu ^ 0x40000000u);
     readback.p->Unmap(0, nullptr);
     if (!valid) throw std::runtime_error("GPU output/status mismatch");
     Check(timestamps.p->Map(0, nullptr, &data));
@@ -204,9 +238,10 @@ RWStructuredBuffer<uint> output : register(u0);
   queue.p->Release(); queue.p = nullptr;
   const auto wall_ticks = Tick() - wall_start, cpu_ticks = ProcessCPU() - cpu_start;
   std::sort(gpu_us.begin(), gpu_us.end());
-  std::printf("ROOT_FEEDBACK_PERF mode=%s padding=%u registry=%zu rank=%zu dispatches=%u iterations=%u "
+  std::printf("ROOT_FEEDBACK_PERF mode=%s padding=%u registry=%zu rank=%zu dispatches=%u iterations=%u root_union=%u "
               "process_cpu_100ns=%llu process_cpu_us=%.3f caller_us=%.3f completion_wall_us=%.3f gpu_median_us=%.3f gpu_p95_us=%.3f status=PASS\n",
-      feedback ? "feedback" : "control", padding, registry_count, rank, dispatches, iterations,
+      feedback ? "feedback" : "control", padding, registry_count, rank, dispatches + unsigned(root_union), iterations,
+      unsigned(root_union),
       static_cast<unsigned long long>(cpu_ticks), double(cpu_ticks) / 10 / iterations,
       double(caller_ticks) * 1e6 / frequency.QuadPart / iterations,
       double(wall_ticks) * 1e6 / frequency.QuadPart / iterations, gpu_us[gpu_us.size()/2],

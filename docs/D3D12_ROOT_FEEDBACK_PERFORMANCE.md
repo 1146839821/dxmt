@@ -1,5 +1,59 @@
 # Root feedback performance
 
+## Fixed-VA pruning result (2026-10-08)
+
+The production path now captures numeric root CBV/SRV/UAV addresses on every
+AIR feedback draw/dispatch, including root changes within one encoder. CBVs are
+conservatively included even though current AIR feedback consumers are SRV/UAV.
+The union is bounded to 64 unique nonzero addresses; overflow or incomplete
+capture permanently falls back to the full registry for that encoder. GPU
+indirect root updates always retain the full path. Matching intervals retain
+their original order and overlaps; current owners are resolved at submission,
+not cached at recording. Full-registry strong-reference acquisition still occurs
+under the existing lock; pruning and native fan-out occur outside that lock.
+
+Final-build A/B uses the same EXE and runtime DLLs with
+DXMT_TEST_FULL_ROOT_FEEDBACK_SNAPSHOT=1 (old full path) versus 0 (pruned path),
+three alternating repetitions at each of 0/1,024 padding buffers, 512 measured
+submissions per case after warmup. All 12 cases / 6,144 submissions pass GPU
+output and fresh timestamp checks. At 1,028 registry entries, median process
+CPU is 917.969 versus 292.969 us/submission, GPU interval 290.125 versus 8.833 us,
+and completion wall 1,434.205 versus 540.978 us. At four entries both modes report
+273.438-us CPU and 8.833-us GPU medians. CPU granularity and uncontrolled desktop
+load still apply; this is not a game FPS result or individual CPU-phase attribution.
+
+Both complete builds and 16 host tests per build pass. Both variants pass VA
+snapshot/owner replacement, overlapping intervals, layout offsets, zero/end and
+overflow arithmetic, bounded-union fallback, same-encoder root switching,
+sparse direct/indirect root SRV, hull and domain GPU regressions. Four separate
+API-validation union runs (override 0/11, both variants) pass actual PE/Unix
+path/hash provenance and are excluded from timings. The exact-1 switch is
+default-off test infrastructure, not capability promotion or a production counter.
+
+Evidence: root-prune-final-matrix.json, root-prune-final-provenance.json,
+root-prune-final-*.log and root-prune-bounded-{build,fixtures,host}*.log under
+/Users/zhangbo/.cache/dxmt-reconciliation.ZLDvwE. Earlier root-prune-matrix.json
+is pre-bounded-union evidence; final claims use the rebuilt matrix above.
+Main-agent standards/spec review found and corrected unbounded quadratic union
+growth. No independent review or full GPU same-address remap oracle is claimed.
+No game/prefix deployment, production counters, GPU lookup or LLVM changes.
+Full Typed/MinMax/Tiled/format/raster and sort/counter qualification remain open.
+
+## Fixed-VA pruning preparation (2026-10-08)
+
+Baseline 0329bddc. Hypothesis: retaining only registry intervals that can match
+recorded fixed root VAs removes most table/fan-out/lookup cost. Evidence: frozen
+1,028-entry feedback baseline (about 918-us process CPU / 290-us GPU interval).
+Expected effect: known-root table size follows the root-address union, not the
+unrelated registry size. Risk: partial root capture, pipeline/root changes,
+overlapping intervals, indirect updates and same-address remaps. Validation:
+collect every feedback draw/dispatch's root descriptor addresses, preserve all
+matching intervals in original order from a fresh submission snapshot, and keep
+full snapshots for GPU-selected or unknown roots. Compare identical binaries
+with an exact-1 default-off full-snapshot test override; preserve functional
+sparse/remap/indirect/tessellation regressions. Initial implementation still
+scans/acquires the registry snapshot; do not claim O(root-count) CPU acquisition.
+
 ## Preparation (2026-10-08)
 
 Baseline 74bbc767. Hypothesis: feedback adds registry snapshot/table construction

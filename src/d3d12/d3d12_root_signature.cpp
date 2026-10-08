@@ -496,6 +496,12 @@ public:
     UploadQwords = total_qwords;
     ParameterSlots = qword_offsets_.size();
     SlotQwordOffsets = qword_offsets_.data();
+    for (UINT i = 0; i < desc.NumParameters; ++i) {
+      const auto type = desc.pParameters[i].ParameterType;
+      if ((type == D3D12_ROOT_PARAMETER_TYPE_CBV || type == D3D12_ROOT_PARAMETER_TYPE_SRV ||
+           type == D3D12_ROOT_PARAMETER_TYPE_UAV) && qword_offsets_[i] < 64)
+        RootBufferQwordMask |= uint64_t(1) << qword_offsets_[i];
+    }
 
     return S_OK;
   }
