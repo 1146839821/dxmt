@@ -361,7 +361,7 @@ TILED_COVERAGE_GAPS = (
 )
 
 
-def run_tiled_gpu_matrix(directory, wine, timeout, runtime, selected=None):
+def run_tiled_gpu_matrix(directory, wine, timeout, runtime, selected=None, compiler=None):
     cases = {}
     for name, executable, args, files, markers in tiled_gpu_cases():
         if selected is not None and name not in selected:
@@ -369,7 +369,11 @@ def run_tiled_gpu_matrix(directory, wine, timeout, runtime, selected=None):
         elif runtime is None:
             cases[name] = {"status": UNVERIFIED, "reason": "explicit runtime required for provenance"}
         else:
-            cases[name] = run_fixture(directory, wine, executable, args, markers, timeout, runtime, files)
+            deployment = {"compiler": compiler} if name == "sparse-lod-clamp" and compiler is not None else {}
+            if deployment:
+                args += ("--require-private-clamp",)
+                markers += ("CLAMP_PRIVATE_PATH selected",)
+            cases[name] = run_fixture(directory, wine, executable, args, markers, timeout, runtime, files, **deployment)
     execution = aggregate([row(name, case["status"], "") for name, case in cases.items()])
     hashes = [case["runtime_sha256"] for case in cases.values() if case.get("runtime_sha256")]
     if hashes and any(digest != hashes[0] for digest in hashes):
@@ -824,6 +828,8 @@ def main():
                         help="stage DXC/validator beside D3D12 for the production DXIL typed matrix only")
     parser.add_argument("--minmax-compiler-dir", type=Path,
                         help="stage DXC/validator only for independent MSC MinMax numerical cases")
+    parser.add_argument("--tiled-compiler-dir", type=Path,
+                        help="stage DXC/validator for the qualified private fractional-clamp path only")
     args = parser.parse_args()
     directory = args.build_dir.resolve() / "tests" / "dx12"
     runtime = args.build_dir.resolve() / "src"
@@ -852,7 +858,8 @@ def main():
              "container dxil-library-in-ordinary-graphics-slot passed"), args.timeout, runtime),
     }
     probes["minmax_sampler_contract"] = run_minmax_contract(directory, args.wine, args.timeout, runtime)
-    probes["tiled_gpu_matrix"] = run_tiled_gpu_matrix(directory, args.wine, args.timeout, runtime)
+    probes["tiled_gpu_matrix"] = run_tiled_gpu_matrix(directory, args.wine, args.timeout, runtime,
+                                                     compiler=args.tiled_compiler_dir)
     probes["minmax_gpu_matrix"] = run_minmax_gpu_matrix(directory, args.wine, args.timeout, runtime,
                                                        args.minmax_compiler_dir)
     probes["backend_failure_oracle"] = run_backend_failure_oracle(directory, args.wine, args.timeout, runtime)

@@ -502,8 +502,21 @@ bool LowerReductionSamplerBindings(llvm::Module &module,
     auto *ordinary_sample = BasicBlock::Create(context, "dxmt.ordinary.sample", function, merge);
     auto *ordinary_empty = BasicBlock::Create(context, "dxmt.ordinary.empty", function, merge);
     auto *ordinary_done = BasicBlock::Create(context, "dxmt.ordinary.result", function, merge);
-    // Original handles retain MSC descriptor bias, native sampler clamps and
-    // texture-view metadata. Applying the private state again would double bias.
+    if (opcode == SampleLevel) {
+      // Native MSC ignores texture minLOD metadata on affected devices. Apply
+      // sampler limits first, then the resource clamp, using the already-bound
+      // unbiased/unclamped ordinary sampler and zero-clamp private texture.
+      // Keep gradient/implicit operations directional rather than scalarizing.
+      ordinary_arguments[1] = make_handle(b, 0, next_id[0] + pair, pair_offset + pair);
+      ordinary_arguments[2] = make_handle(b, 3, next_id[3] + pairs.size() + pair,
+                                         pair_offset + pair_count + pair);
+      auto *sampler_max = as_float(b.CreateExtractValue(first, 2));
+      auto *sampler_min = as_float(b.CreateExtractValue(first, 1));
+      auto *limited = b.CreateCall(binary, {b.getInt32(FMin), original_lod, sampler_max});
+      limited = b.CreateCall(binary, {b.getInt32(FMax), limited, sampler_min});
+      ordinary_arguments[10] = b.CreateCall(binary, {b.getInt32(FMax), limited, resource_clamp});
+    }
+    // Other operations retain application handles, bias and sampler clamps.
     // Instruction clamp may vary within a quad. Execute implicit sampling before
     // its empty-view branch so that the injected branch cannot invalidate derivatives.
     auto *ordinary_call = b.CreateCall(ordinary_function, ordinary_arguments);

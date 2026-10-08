@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include "d3d12_device.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -14,6 +15,7 @@ namespace {
 
 constexpr UINT TileBytes = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
 constexpr UINT OutputCount = 5;
+bool require_private_clamp = false;
 
 template <typename T> struct Owned {
   T *ptr = nullptr;
@@ -268,6 +270,12 @@ void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Ow
   pipeline_desc.CS.pShaderBytecode = shader.data();
   pipeline_desc.CS.BytecodeLength = shader.size();
   Check("CreateLODPipeline", device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&pipeline.ptr)));
+  if (require_private_clamp) {
+    auto *native = static_cast<dxmt::MTLD3D12ComputePipelineState *>(pipeline.ptr);
+    if (native->minmax_compiler_directory.empty())
+      throw std::runtime_error("fractional clamp private sampling path was not selected");
+    std::cout << "CLAMP_PRIVATE_PATH selected\n";
+  }
 }
 
 std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
@@ -419,7 +427,8 @@ bool CheckCase(const char *name, const std::vector<uint32_t> &actual, const std:
 
 int main(int argc, char **argv) {
   const bool unsupported_read = argc == 3 && strcmp(argv[2], "--load-unsupported") == 0;
-  if (argc != 2 && !unsupported_read) {
+  require_private_clamp = argc == 3 && strcmp(argv[2], "--require-private-clamp") == 0;
+  if (argc != 2 && !unsupported_read && !require_private_clamp) {
     std::cerr << "usage: dx12_texture_lod_clamp <shader.cs.cso> [--load-unsupported]\n";
     return 2;
   }
@@ -438,7 +447,9 @@ int main(int argc, char **argv) {
       return 0;
     }
     const std::vector<uint32_t> ordinary_expected = {0x3f800000, 0x40000000, 0x40400000, 0x40800000, 0x40400000};
-    const std::vector<uint32_t> reserved_expected = {0x3f800000, 0x40000000, 0x40400000, 0x40400000, 0x40400000};
+    // D3D empty-set exception: a fractional clamp past the last visible mip
+    // returns OOB even when floor(clamp) still names that last mip (§5.8.5).
+    const std::vector<uint32_t> reserved_expected = {0x3f800000, 0x40000000, 0x40400000, 0, 0x40400000};
     const auto ordinary = RunCase(device.ptr, queue.ptr, shader, false, false);
     const bool ordinary_pass = CheckCase("ordinary ResourceMinLODClamp", ordinary, ordinary_expected);
     const auto reserved = RunCase(device.ptr, queue.ptr, shader, true, false);

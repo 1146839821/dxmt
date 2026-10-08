@@ -20,13 +20,14 @@ def main():
     parser.add_argument("--only", action="append", choices=[case[0] for case in tiled_gpu_cases()])
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--output", type=Path, help="save full JSON execution and provenance evidence")
+    parser.add_argument("--compiler-dir", type=Path, help="DXC/validator deployment for fractional-clamp case only")
     args = parser.parse_args()
     if args.list:
         for name, executable, modes, _, _ in tiled_gpu_cases():
             print(name, executable, " ".join(modes))
         return 0
     report = run_tiled_gpu_matrix(args.build_dir.resolve(), args.wine, args.timeout,
-                                 args.runtime_dir.resolve(), set(args.only) if args.only else None)
+                                 args.runtime_dir.resolve(), set(args.only) if args.only else None, args.compiler_dir)
     if args.output:
         args.output.write_text(json.dumps(report, indent=2) + "\n")
     for name, case in report["cases"].items():

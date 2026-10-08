@@ -1,5 +1,16 @@
 # Closure infrastructure consolidation
 
+Explicit-LOD fractional clamp repair checkpoint (2026-10-08): ordinary MSC
+SampleLevel now explicitly applies sampler bias/limits then resource clamp using
+the existing private ordinary sampler/texture. A wrong reserved last-mip oracle
+is corrected per §5.8.5. Frozen EXE/PE/compiler with old/new native fails/passes;
+both variants' 20 Tiled and 52 MinMax executions pass, plus no-private Tiled API
+validation and host suites (82 gate tests). See D3D12_FRACTIONAL_CLAMP_REPAIR.md.
+Complete Tier/FL promotion is still blocked. Broader deployed-dispatch in-flight
+checks fail on old and new native in repeated matched comparisons, exposing a
+pre-existing observation-boundary issue. Next prioritize that asynchronous
+volatile/private-binding audit; do not claim full lifecycle regression success.
+
 Tiled qualification checkpoint (2026-10-08): standalone and FL12 gates now
 share a 20-case provenance-controlled matrix, replacing stale AIR-no-sideband
 classification and preventing --only subsets from printing Tier2 PASS. Both

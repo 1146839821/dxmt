@@ -1,5 +1,15 @@
 # FL12 evidence gate and backend isolation
 
+## Qualified fractional clamp deployment (2026-10-08)
+
+--tiled-compiler-dir (standalone Tiled --compiler-dir) stages DXC only for the
+clamp case and requires the private sampling path assertion. Corrected explicit
+SampleLevel semantics and the reserved last-mip OOB oracle pass all current
+Tiled executions on both variants, with matched old/new evidence in
+D3D12_FRACTIONAL_CLAMP_REPAIR.md. Default undeployed native limitations, complete
+coverage gaps and the independently reproduced in-flight regression remain
+nonpassing requirements. No full FL12 gate PASS or capability change is claimed.
+
 ## Current Tiled numerical gate (2026-10-08)
 
 The standalone gate now shares run_tiled_gpu_matrix and its 20 current cases

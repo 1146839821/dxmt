@@ -1275,7 +1275,8 @@ dx12_reserved_texture_packed = executable('dx12_reserved_texture_packed', 'dx12_
 dx12_reserved_buffer_copy_mapping = executable('dx12_reserved_buffer_copy_mapping', 'dx12_reserved_buffer_copy_mapping.cpp', dependencies: [ d3d12_dep ])
 dx12_tiled_status_sm5 = executable('dx12_tiled_status_sm5', 'dx12_tiled_status_sm5.cpp', dependencies: [ d3d12_dep ])
 dx12_tiled_tier2_oracle = executable('dx12_tiled_tier2_oracle', 'dx12_tiled_tier2_oracle.cpp', dependencies: [ d3d12_dep, dxgi_dep ])
-dx12_texture_lod_clamp = executable('dx12_texture_lod_clamp', 'dx12_texture_lod_clamp.cpp', dependencies: [ d3d12_dep ])
+dx12_texture_lod_clamp = executable('dx12_texture_lod_clamp', 'dx12_texture_lod_clamp.cpp',
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep])
 dx12_reserved_texture_view_range = executable('dx12_reserved_texture_view_range', 'dx12_reserved_texture_view_range.cpp', dependencies: [ d3d12_dep ])
 
 if dxc_command.length() > 0

@@ -728,6 +728,23 @@ class GateTests(unittest.TestCase):
             self.assertEqual(gate.run_tiled_gpu_matrix(Path("."), "wine", 1, None)["execution_status"], gate.UNVERIFIED)
             run.assert_not_called()
 
+    def test_tiled_compiler_only_deploys_for_asserted_clamp_path(self):
+        deployed = []
+        def fixture(*args, **kwargs):
+            if kwargs:
+                deployed.append((args[2], args[3], args[4], kwargs))
+            return {"status": gate.PASS}
+        with patch.object(gate, "run_fixture", side_effect=fixture):
+            result = gate.run_tiled_gpu_matrix(Path("."), "wine", 1, Path("runtime"), compiler=Path("compiler"))
+        self.assertEqual(len(deployed), 1)
+        name, args, markers, options = deployed[0]
+        self.assertEqual(name, "dx12_texture_lod_clamp.exe")
+        self.assertEqual(args, ("texture_lod_clamp.cs.cso", "--require-private-clamp"))
+        self.assertIn("CLAMP_PRIVATE_PATH selected", markers)
+        self.assertEqual(options, {"compiler": Path("compiler")})
+        self.assertEqual(result["execution_status"], gate.PASS)
+        self.assertEqual(result["status"], gate.BLOCKED)
+
     def test_tiled_actual_clamp_failure_and_hash_changes_cannot_be_hidden(self):
         for failed in (True, False):
             def fixture(*args):

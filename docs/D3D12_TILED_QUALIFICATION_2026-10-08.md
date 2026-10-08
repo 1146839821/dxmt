@@ -1,5 +1,14 @@
 # Tiled qualification consolidation
 
+Deployed-path repair checkpoint: D3D12_FRACTIONAL_CLAMP_REPAIR.md supersedes the
+unresolved SampleLevel lowering and reserved clamp=1.5 oracle described below.
+The latter must return OOB (0), not the last mip value. Corrected final fixture
+fails against old native and passes against new with matched EXE/PE/compiler
+and actual runtime provenance. --tiled-compiler-dir (standalone --compiler-dir)
+enables the existing automatic private path only for that case. Without the
+deployment option the native metadata limitation remains. All historical
+results below are preserved with this explicit scope correction; no Tier2 closure.
+
 Baseline 98d5183f. Hypothesis: reusing the provenance-controlled fixture runner
 and separating implemented AIR scopes from remaining MSC/packed-tail/oracle gaps
 will expose current sparse failures without falsely closing Tier 2. Evidence:
