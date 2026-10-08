@@ -20,11 +20,19 @@
 
 #include "d3d12_pageable.hpp"
 #include "dxmt_command_clear.hpp"
+#include <mutex>
+#include <limits>
+#include <vector>
 
 namespace dxmt {
 
+struct D3D12TypedOriginComputeVariant;
+struct D3D12TypedOriginGraphicsVariant;
+struct D3D12MinMaxComputeVariant;
+struct D3D12MinMaxGraphicsVariant;
+
 constexpr auto kCPUHeapSize = 0x400000u;
-constexpr auto kGPUHeapSize = 0x400000u;
+constexpr auto kGPUHeapSize = 0x2000000u;
 
 inline std::size_t
 align_forward_adjustment(const void *const ptr, const std::size_t &alignment) noexcept {
@@ -49,7 +57,17 @@ struct IndirectComputeCommandData {
   uint32_t tgsize_x;
   uint32_t tgsize_y;
   uint32_t tgsize_z;
+  uint64_t msc_tlab;
+  uint64_t msc_template;
+  uint64_t msc_layout_offsets;
+  uint64_t msc_heap;
+  uint64_t msc_sampler_heap;
+  uint64_t msc_tlab_stride;
+  uint64_t msc_template_size;
+  uint64_t root_feedback_table;
 };
+static_assert(sizeof(IndirectComputeCommandData) == 128);
+static_assert(offsetof(IndirectComputeCommandData, root_feedback_table) == 120);
 
 struct IndirectRenderCommandData {
   uint64_t cmd_buf;
@@ -64,16 +82,35 @@ struct IndirectRenderCommandData {
   uint64_t index_buffer;
   DXGI_FORMAT index_buffer_format;
   uint32_t vertex_argbuf_stride;
+  uint64_t msc_tlab;
+  uint64_t msc_template;
+  uint64_t msc_layout_offsets;
+  uint64_t msc_heap;
+  uint64_t msc_sampler_heap;
+  uint64_t msc_tlab_stride;
+  uint64_t msc_template_size;
+  uint64_t msc_vertex_buffers;
+  uint64_t msc_vertex_slot_mask;
+  uint64_t msc_fragment_tlab;
+  uint64_t msc_fragment_template;
+  uint64_t msc_vertex_records;
+  uint64_t root_feedback_table;
 };
+static_assert(sizeof(IndirectRenderCommandData) == 184);
+static_assert(offsetof(IndirectRenderCommandData, root_feedback_table) == 176);
+static_assert(offsetof(IndirectRenderCommandData, msc_fragment_tlab) == 152);
+static_assert(offsetof(IndirectRenderCommandData, msc_fragment_template) == 160);
+static_assert(offsetof(IndirectRenderCommandData, msc_vertex_records) == 168);
 
 class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllocator> {
   friend class MTLD3D12GraphicsCommandListImpl;
   friend struct SimpleCommandContext<MTLD3D12CommandAllocatorImpl>;
 
   D3D12_COMMAND_LIST_TYPE type_;
-  
+  std::vector<void *> spilled_cpu_heaps_;
   void *cpu_heap_ = nullptr;
   size_t cpu_heap_offset_;
+  bool cpu_allocation_failed_ = false;
 
   WMT::Reference<WMT::Buffer> gpu_heap_buffer_;
   void *gpu_heap_ = nullptr;
@@ -83,6 +120,12 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
   EncoderData *encoder_last;
   EncoderData *encoder_current;
   size_t encoder_count_;
+  struct SubmissionUse {
+    WMT::Reference<WMT::SharedEvent> completion;
+    uint64_t value;
+  };
+  mutable dxmt::mutex submission_mutex_;
+  std::vector<SubmissionUse> submission_uses_;
 
   small_vector<EncoderData, 64> encoder_lists_;
 
@@ -90,10 +133,50 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
 
   ClearUAV<MTLD3D12CommandAllocatorImpl> clear_uav_;
 
+  void
+  DestroyEncoder(EncoderData *encoder);
+
+  void
+  DestroyEncoders();
+
+  void
+  DiscardRecord();
+
+  void
+  ReleaseSpilledCPUHeaps() {
+    for (auto ptr : spilled_cpu_heaps_)
+      free(ptr);
+    spilled_cpu_heaps_.clear();
+  }
+
+  bool
+  TrackSpilledCPUHeap(void *heap) noexcept {
+    try {
+      spilled_cpu_heaps_.push_back(heap);
+      return true;
+    } catch (...) {
+      cpu_allocation_failed_ = true;
+      return false;
+    }
+  }
+
+  template <typename T>
+  static T &
+  FailedCommandStorage() noexcept {
+    // Command recording APIs return references for historical reasons.  Keep
+    // a per-thread sink so an allocation failure cannot turn a recoverable
+    // Close() error into a null dereference.  The sink is never linked into
+    // the command stream and Close() reports the allocator failure.
+    static thread_local T storage{};
+    return storage;
+  }
+
 public:
   MTLD3D12CommandAllocatorImpl(MTLD3D12Device *pDevice, D3D12_COMMAND_LIST_TYPE Type);
 
   ~MTLD3D12CommandAllocatorImpl() {
+    DestroyEncoders();
+    ReleaseSpilledCPUHeaps();
     free(cpu_heap_);
     cpu_heap_ = nullptr;
     gpu_heap_buffer_ = {};
@@ -109,6 +192,47 @@ public:
   QueryInterface(REFIID riid, void **ppvObject);
 
   HRESULT STDMETHODCALLTYPE Reset();
+
+  D3D12_COMMAND_LIST_TYPE
+  GetType() const override {
+    return type_;
+  }
+
+  bool
+  MarkSubmissionSubmitted(WMT::SharedEvent event, uint64_t value) final {
+    std::lock_guard<dxmt::mutex> lock(submission_mutex_);
+    try {
+      submission_uses_.push_back({event, value});
+      return true;
+    } catch (const std::bad_alloc &) {
+      return false;
+    }
+  }
+
+  void
+  MarkSubmissionCompleted(WMT::SharedEvent event, uint64_t value) final {
+    std::lock_guard<dxmt::mutex> lock(submission_mutex_);
+    for (auto it = submission_uses_.begin(); it != submission_uses_.end(); ++it) {
+      if (it->completion.handle == event.handle && it->value == value) {
+        submission_uses_.erase(it);
+        return;
+      }
+    }
+    assert(false && "allocator submission retired without registration");
+  }
+
+  bool
+  IsInFlight() const final {
+    std::lock_guard<dxmt::mutex> lock(submission_mutex_);
+    // GPU completion is authoritative, not when the CPU worker happens to
+    // retire its references. Before translation/commit the marker is unsignaled.
+    for (const auto &use : submission_uses_) {
+      WMT::SharedEvent event = use.completion;
+      if (event.signaledValue() < use.value)
+        return true;
+    }
+    return false;
+  }
 
   HRESULT STDMETHODCALLTYPE CreateCommandList(
       UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, ID3D12PipelineState *pInitialPipelineState, REFIID riid,
@@ -148,17 +272,71 @@ public:
 
   void *
   AllocateCPUHeap(size_t Length, size_t Alignment) {
-    std::size_t adjustment = align_forward_adjustment((void *)cpu_heap_offset_, Alignment);
-    auto aligned = cpu_heap_offset_ + adjustment;
-    cpu_heap_offset_ = aligned + Length;
-    assert(cpu_heap_offset_ < kCPUHeapSize);
-    return ptr_add(cpu_heap_, aligned);
+    if (cpu_allocation_failed_)
+      return nullptr;
+    if (!cpu_heap_ || !Alignment || (Alignment & (Alignment - 1))) {
+      cpu_allocation_failed_ = true;
+      return nullptr;
+    }
+
+    if (Length > kCPUHeapSize) {
+      if (Length > std::numeric_limits<size_t>::max() - (Alignment - 1)) {
+        cpu_allocation_failed_ = true;
+        return nullptr;
+      }
+      auto *allocation = malloc(Length + Alignment - 1);
+      if (!allocation) {
+        cpu_allocation_failed_ = true;
+        return nullptr;
+      }
+      if (!TrackSpilledCPUHeap(allocation)) {
+        free(allocation);
+        return nullptr;
+      }
+      const auto address = reinterpret_cast<std::uintptr_t>(allocation);
+      if (address > std::numeric_limits<std::uintptr_t>::max() - (Alignment - 1)) {
+        cpu_allocation_failed_ = true;
+        return nullptr;
+      }
+      const auto aligned = (address + Alignment - 1) & ~(Alignment - 1);
+      return reinterpret_cast<void *>(aligned);
+    }
+
+    for (;;) {
+      const std::size_t adjustment = align_forward_adjustment((void *)cpu_heap_offset_, Alignment);
+      if (cpu_heap_offset_ <= kCPUHeapSize && adjustment <= kCPUHeapSize - cpu_heap_offset_ &&
+          Length <= kCPUHeapSize - (cpu_heap_offset_ + adjustment)) {
+        const auto aligned = cpu_heap_offset_ + adjustment;
+        cpu_heap_offset_ = aligned + Length;
+        return ptr_add(cpu_heap_, aligned);
+      }
+
+      if (!TrackSpilledCPUHeap(cpu_heap_))
+        return nullptr;
+      cpu_heap_ = nullptr;
+      auto *new_heap = malloc(kCPUHeapSize);
+      if (!new_heap) {
+        cpu_allocation_failed_ = true;
+        return nullptr;
+      }
+      cpu_heap_ = new_heap;
+      cpu_heap_offset_ = 0;
+    }
+  }
+
+  bool
+  CPUAllocationFailed() const noexcept {
+    return cpu_allocation_failed_;
   }
 
   template <typename T>
   T *
   AllocatePass() {
-    auto p = (new (AllocateCPUHeap(sizeof(T), alignof(T))) T());
+    auto storage = AllocateCPUHeap(sizeof(T), alignof(T));
+    if (!storage)
+      return static_cast<T *>(nullptr);
+    auto p = new (storage) T();
+    p->id = encoder_count_;
     encoder_current = p;
     return p;
   };
@@ -166,15 +344,24 @@ public:
   template <typename T>
   T *
   AllocateCommandData(size_t Count) {
+    if (Count > std::numeric_limits<size_t>::max() / sizeof(T)) {
+      cpu_allocation_failed_ = true;
+      return static_cast<T *>(nullptr);
+    }
     return (T *)AllocateCPUHeap(sizeof(T) * Count, alignof(T));
   };
 
   template <typename cmd_struct>
   cmd_struct &
   EncodeRenderCommand() {
-    assert(encoder_current->type == EncoderType::Render);
+    if (!encoder_current || encoder_current->type != EncoderType::Render) {
+      cpu_allocation_failed_ = true;
+      return FailedCommandStorage<cmd_struct>();
+    }
     auto encoder = static_cast<RenderEncoderData *>(encoder_current);
     auto storage = (cmd_struct *)AllocateCPUHeap(sizeof(cmd_struct), 16);
+    if (!storage)
+      return FailedCommandStorage<cmd_struct>();
     encoder->cmd_tail->next.set(storage);
     encoder->cmd_tail = (wmtcmd_base *)storage;
     storage->next.set(nullptr);
@@ -184,9 +371,14 @@ public:
   template <typename cmd_struct>
   cmd_struct &
   EncodeBlitCommand() {
-    assert(encoder_current->type == EncoderType::Blit);
+    if (!encoder_current || encoder_current->type != EncoderType::Blit) {
+      cpu_allocation_failed_ = true;
+      return FailedCommandStorage<cmd_struct>();
+    }
     auto encoder = static_cast<BlitEncoderData *>(encoder_current);
     auto storage = (cmd_struct *)AllocateCPUHeap(sizeof(cmd_struct), 16);
+    if (!storage)
+      return FailedCommandStorage<cmd_struct>();
     encoder->cmd_tail->next.set(storage);
     encoder->cmd_tail = (wmtcmd_base *)storage;
     storage->next.set(nullptr);
@@ -196,9 +388,14 @@ public:
   template <typename cmd_struct>
   cmd_struct &
   EncodeComputeCommand() {
-    assert(encoder_current->type == EncoderType::Compute);
+    if (!encoder_current || encoder_current->type != EncoderType::Compute) {
+      cpu_allocation_failed_ = true;
+      return FailedCommandStorage<cmd_struct>();
+    }
     auto encoder = static_cast<ComputeEncoderData *>(encoder_current);
     auto storage = (cmd_struct *)AllocateCPUHeap(sizeof(cmd_struct), 16);
+    if (!storage)
+      return FailedCommandStorage<cmd_struct>();
     encoder->cmd_tail->next.set(storage);
     encoder->cmd_tail = (wmtcmd_base *)storage;
     storage->next.set(nullptr);
@@ -207,18 +404,28 @@ public:
 
   std::tuple<void *, size_t>
   AllocateGPUHeap(size_t Length, size_t Alignment) {
+    if (gpu_heap_offset_ > kGPUHeapSize)
+      return {nullptr, 0};
     if (!Length)
       return {nullptr, 0};
     std::size_t adjustment = align_forward_adjustment((void *)gpu_heap_offset_, Alignment);
+    if (adjustment > kGPUHeapSize - gpu_heap_offset_ ||
+        Length > kGPUHeapSize - gpu_heap_offset_ - adjustment)
+      return {nullptr, 0};
     auto aligned = gpu_heap_offset_ + adjustment;
     gpu_heap_offset_ = aligned + Length;
-    assert(gpu_heap_offset_ < kGPUHeapSize);
+    assert(gpu_heap_offset_ <= kGPUHeapSize);
     return {ptr_add(gpu_heap_, aligned), aligned};
   }
 
-  IndirectComputeCommandData *EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount);
+  IndirectComputeCommandData *EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount,
+      const D3D12TypedOriginComputeVariant *variant = nullptr,
+      const wmtcmd_compute_setbuffer **resolver_binding = nullptr,
+      const D3D12MinMaxComputeVariant *minmax_variant = nullptr);
 
-  IndirectRenderCommandData *EncodeIndirectRenderCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12GraphicsPipelineState *pPSO, size_t MaxCount);
+  IndirectRenderCommandData *EncodeIndirectRenderCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12GraphicsPipelineState *pPSO, size_t MaxCount,
+      const D3D12MinMaxGraphicsVariant *minmax_variant = nullptr, const wmtcmd_render_setbuffer **resolver_binding = nullptr,
+      const D3D12TypedOriginGraphicsVariant *origin_variant = nullptr);
 };
 
 } // namespace dxmt

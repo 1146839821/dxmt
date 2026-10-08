@@ -5,7 +5,8 @@
 #ifndef __AIRCONV_H
 #define __AIRCONV_H
 
-#define AIRCONV_VERSION 24
+/* 32 adds integer attachment programmable logic operations. */
+#define AIRCONV_VERSION 32
 
 #ifdef __cplusplus
 #include <string>
@@ -34,6 +35,7 @@ enum SM50_BINDING_INDEX: uint32_t {
 
   SM50_BINDING_INDEX_ROOT_ARGUMENTS = 0,
   SM50_BINDING_INDEX_STATIC_SAMPLERS = 1,
+  SM50_BINDING_INDEX_ROOT_BUFFER_FEEDBACK = 8,
 };
 
 enum MTL_SM50_SHADER_ARGUMENT_FLAG : uint32_t {
@@ -44,6 +46,13 @@ enum MTL_SM50_SHADER_ARGUMENT_FLAG : uint32_t {
   MTL_SM50_SHADER_ARGUMENT_TEXTURE_MINLOD_CLAMP = 1 << 4,
   MTL_SM50_SHADER_ARGUMENT_TBUFFER_OFFSET = 1 << 5,
   MTL_SM50_SHADER_ARGUMENT_TEXTURE_ARRAY = 1 << 6,
+  // Every decoded use of this sampler supports the AIR explicit-LOD reduction
+  // helper. This is consumer eligibility, not a device capability declaration.
+  MTL_SM50_SHADER_ARGUMENT_SAMPLER_REDUCTION_SAMPLING = 1 << 7,
+  MTL_SM50_SHADER_ARGUMENT_SAMPLER_REDUCTION_SAMPLE_LEVEL = MTL_SM50_SHADER_ARGUMENT_SAMPLER_REDUCTION_SAMPLING,
+  // Raw/structured loads consume a non-NULL residency status destination.
+  // This is shader usage, not a tiled-resource capability claim.
+  MTL_SM50_SHADER_ARGUMENT_BUFFER_FEEDBACK = 1 << 8,
   MTL_SM50_SHADER_ARGUMENT_READ_ACCESS = 1 << 10,
   MTL_SM50_SHADER_ARGUMENT_WRITE_ACCESS = 1 << 11,
 };
@@ -94,6 +103,24 @@ struct MTL_POST_TESSELLATOR_REFLECTION {
   uint32_t MaxPotentialTessFactor;
 };
 
+struct MTL_PIXEL_SHADER_REFLECTION {
+  uint32_t ValidRenderTargets;
+  uint32_t HasCoverageOutput;
+  uint32_t CompilerCapabilities;
+};
+
+enum MTL_PIXEL_COMPILER_CAPABILITY {
+  MTL_PIXEL_COMPILER_INTEGER_LOGIC_OP = 1u << 0,
+};
+
+enum MTL_VERTEX_COMPILER_CAPABILITY {
+  MTL_VERTEX_COMPILER_PACKED_UINT_PULLING = 1u << 0,
+};
+
+struct MTL_VERTEX_SHADER_REFLECTION {
+  uint32_t CompilerCapabilities;
+};
+
 struct MTL_SHADER_REFLECTION {
   uint32_t ConstanttBufferTableBindIndex;
   uint32_t ArgumentBufferBindIndex;
@@ -101,10 +128,14 @@ struct MTL_SHADER_REFLECTION {
   uint32_t NumArguments;
   union {
     uint32_t ThreadgroupSize[3];
+    /* Uses existing stage-union storage; does not enlarge the reflection ABI. */
+    struct MTL_VERTEX_SHADER_REFLECTION VertexShader;
     struct MTL_TESSELLATOR_REFLECTION Tessellator;
     struct MTL_GEOMETRY_SHADER_REFLECTION GeometryShader;
     struct MTL_POST_TESSELLATOR_REFLECTION PostTessellator;
+    /* Kept as the first member of PixelShader for ABI compatibility. */
     uint32_t PSValidRenderTargets;
+    struct MTL_PIXEL_SHADER_REFLECTION PixelShader;
   };
   uint16_t ConstantBufferSlotMask;
   uint16_t SamplerSlotMask;
@@ -115,6 +146,12 @@ struct MTL_SHADER_REFLECTION {
   uint32_t ThreadsPerPatch;
   uint32_t ArgumentTableQwords;
 };
+
+#ifdef __cplusplus
+static_assert(sizeof(MTL_VERTEX_SHADER_REFLECTION) <= 3 * sizeof(uint32_t));
+static_assert(sizeof(MTL_PIXEL_SHADER_REFLECTION) <= 3 * sizeof(uint32_t));
+static_assert(offsetof(MTL_SHADER_REFLECTION, VertexShader) == offsetof(MTL_SHADER_REFLECTION, ThreadgroupSize));
+#endif
 
 #if defined(__LP64__) || defined(_WIN64)
 typedef void *sm50_ptr64_t;
@@ -194,6 +231,8 @@ enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE {
   SM50_SHADER_PSO_GEOMETRY_SHADER = 6,
   SM50_SHADER_PSO_TESSELLATOR = 7,
   SM50_SHADER_ROOT_SIGNATURE = 8,
+  SM50_SHADER_ROOT_SIGNATURE2 = 9,
+  SM50_SHADER_PIXEL_LOGIC_OP = 10,
   SM50_SHADER_ARGUMENT_TYPE_MAX = 0xffffffff,
 };
 
@@ -243,16 +282,31 @@ struct SM50_SHADER_PSO_PIXEL_SHADER_DATA {
   bool dual_source_blending;
   bool disable_depth_output;
   uint32_t unorm_output_reg_mask;
+  /** MTLPixelFormat */
+  uint32_t pixel_formats[8];
+};
+
+// Separate chained argument: do not enlarge the existing pixel-PSO ABI.
+struct SM50_SHADER_PIXEL_LOGIC_OP_DATA {
+  void *next;
+  enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint32_t render_target_mask;
+  uint32_t operation; // D3D12_LOGIC_OP Boolean ordering, 0..15.
 };
 
 struct SM50_IA_INPUT_ELEMENT {
   uint32_t reg;
   uint32_t slot;
   uint32_t aligned_byte_offset;
-  /** MTLAttributeFormat */
+  /** MTLAttributeFormat or an AIRCONV-only SM50_IA_FORMAT tag. */
   uint32_t format;
   uint32_t step_function: 1;
   uint32_t step_rate: 31;
+};
+
+enum SM50_IA_FORMAT {
+  /* Vertex pulling only; never pass this tag to a fixed Metal descriptor. */
+  SM50_IA_FORMAT_UINT1010102 = 0x100,
 };
 
 enum SM50_INDEX_BUFFER_FORMAT {
@@ -304,9 +358,14 @@ AIRCONV_API int SM50Initialize(
   struct MTL_SHADER_REFLECTION *pRefl, sm50_error_t *ppError
 );
 AIRCONV_API void SM50Destroy(sm50_shader_t pShader);
+// Returns 0/1, or -1 when the root-signature query cannot be completed.
+AIRCONV_API int SM50UsesRootBufferFeedback(sm50_shader_t pShader, const void *Bytecode, size_t BytecodeSize);
 AIRCONV_API int SM50Compile(
   sm50_shader_t pShader, struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs,
   const char *FunctionName, sm50_bitcode_t *ppBitcode, sm50_error_t *ppError
+);
+AIRCONV_API int SM50PatchMetalLibUnsupportedDouble(
+  const void *Data, size_t Size, sm50_bitcode_t *pPatched
 );
 AIRCONV_API void SM50GetCompiledBitcode(
   sm50_bitcode_t pBitcode, struct SM50_COMPILED_BITCODE *pData

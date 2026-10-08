@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <optional>
 #include <string>
@@ -35,6 +36,7 @@ struct ShaderResourceViewInfo {
   bool read = false;
   bool sampled = false;
   bool compared = false; // therefore we use depth texture!
+  bool buffer_feedback = false;
 
   uint32_t structure_stride = 0;
   uint32_t arg_index;
@@ -49,6 +51,7 @@ struct UnorderedAccessViewInfo {
   bool global_coherent = false;
   bool rasterizer_order = false;
   bool with_counter = false;
+  bool buffer_feedback = false;
 
   uint32_t structure_stride = 0;
   uint32_t arg_index;
@@ -65,6 +68,8 @@ struct SamplerInfo {
   uint32_t arg_index;
   uint32_t arg_cube_index;
   uint32_t arg_metadata_index;
+  bool reduction_consumer_seen = false;
+  bool reduction_sampling_only = true;
 };
 
 struct ThreadgroupBufferInfo {
@@ -83,6 +88,7 @@ struct PhaseInfo {
 
 class ShaderInfo {
 public:
+  uint32_t unsupported_opcode = UINT32_MAX;
   std::vector<std::array<uint32_t, 4>> immConstantBufferData;
   std::map<uint32_t, ShaderResourceViewInfo> srvMap;
   std::map<uint32_t, UnorderedAccessViewInfo> uavMap;
@@ -331,14 +337,21 @@ struct SignatureContext {
   bool skip_vertex_output;
   uint32_t pull_mode_reg_mask;
   uint32_t unorm_output_reg_mask;
+  uint32_t logic_op_mask = 0;
+  uint32_t logic_op = 0;
+  air::MTLPixelFormat pixel_formats[8];
 
   SignatureContext(
     IREffect &prologue, IRValue &epilogue, air::FunctionSignatureBuilder &func_signature, io_binding_map &resource
   )
       : prologue(prologue), epilogue(epilogue), func_signature(func_signature), resource(resource), ia_layout(nullptr),
         dual_source_blending(false), disable_depth_output(false), skip_vertex_output(false), pull_mode_reg_mask(0),
-        unorm_output_reg_mask(0){};
+        unorm_output_reg_mask(0) {
+    memset(pixel_formats, 0, sizeof(pixel_formats));
+  };
 };
+
+RegisterComponentType component_type_from_pixel_format(air::MTLPixelFormat format);
 
 struct MeshOutputContext {
   llvm::Value *vertex_id;
@@ -434,6 +447,7 @@ public:
   microsoft::D3D10_SB_PRIMITIVE_TOPOLOGY gs_output_topology = {};
   uint32_t gs_max_vertex_output = 0;
   uint32_t gs_instance_count = 1;
+  uint32_t ps_has_coverage_output = 0;
 
   BasicBlock *entry() const {
     return bbs.front().get();

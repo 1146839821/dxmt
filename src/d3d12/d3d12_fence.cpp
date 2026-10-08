@@ -61,6 +61,7 @@ public:
 
   UINT64 STDMETHODCALLTYPE
   GetCompletedValue() {
+    if (FAILED(device_->GetDeviceRemovedReason())) return UINT64_MAX;
     return fence->completedValue();
   }
 

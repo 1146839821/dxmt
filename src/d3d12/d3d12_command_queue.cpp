@@ -19,13 +19,376 @@
 #include "com/com_guid.hpp"
 #include "com/com_pointer.hpp"
 #include "d3d12_device.hpp"
+#include "d3d12_command_allocator.hpp"
+#include "air_sparse_buffer_abi.hpp"
+#include "d3d12_typed_origin_binding.hpp"
+#include "d3d12_minmax_dispatch.hpp"
 #include "d3d12_pageable.hpp"
+#include "dxmt_command_constants.hpp"
+#include "dxmt_format.hpp"
 #include "dxgi_interfaces.h"
 #include "log/log.hpp"
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <limits>
+#include <string>
+#include <unordered_map>
 
 namespace dxmt {
 
 constexpr auto kCommandQueueSize = 32u;
+
+// Only explicitly enabled private variants clone a stream. Ordinary compute
+// retains the existing single-call replay. Never patch allocator-owned nodes:
+// the same closed list can be submitted while a prior execution is in flight.
+union PrivateComputeReplayCommand {
+  wmtcmd_compute_nop nop;
+  wmtcmd_compute_dispatch dispatch;
+  wmtcmd_compute_dispatch_indirect indirect;
+  wmtcmd_compute_setpso pso;
+  wmtcmd_compute_setbuffer buffer;
+  wmtcmd_compute_setbufferoffset offset;
+  wmtcmd_compute_useresource use;
+  wmtcmd_compute_setbytes bytes;
+  wmtcmd_compute_settexture texture;
+  wmtcmd_compute_fence_op fence;
+  wmtcmd_compute_memory_barrier barrier;
+  wmtcmd_compute_executecommands execute;
+};
+
+static bool ReplayPrivateCompute(
+    MTLD3D12Device *device, WMT::ComputeCommandEncoder encoder, ComputeEncoderData *data,
+    std::vector<std::shared_ptr<D3D12TypedOriginSubmissionBinding>> &bindings,
+    std::vector<std::shared_ptr<D3D12MinMaxSubmissionBinding>> &minmax_bindings,
+    uint64_t root_feedback_address = 0,
+    std::vector<WMT::Reference<WMT::Buffer>> *root_feedback_buffers = nullptr) {
+  try {
+    std::unordered_map<const void *, const IndirectComputeCommandData *> root_feedback_markers;
+    for (const auto &[binding, payload] : data->root_feedback_indirect)
+      if (!binding || !payload || !root_feedback_address ||
+          !root_feedback_markers.emplace(binding, payload).second)
+        return false;
+    std::unordered_map<const void *, const D3D12TypedOriginDispatch *> markers;
+    for (const auto &dispatch : data->typed_origin_dispatches) markers.emplace(dispatch->marker, dispatch.get());
+    std::unordered_map<const void *, const D3D12MinMaxDispatch *> minmax_markers;
+    for (const auto &dispatch : data->minmax_dispatches) minmax_markers.emplace(dispatch->marker, dispatch.get());
+    std::vector<PrivateComputeReplayCommand> replay;
+    struct IndirectBinding { obj_handle_t buffer; uint64_t offset; };
+    std::unordered_map<const void *, IndirectBinding> indirect_bindings;
+    const auto append_binding = [&](const auto &binding, const auto &variant) {
+      for (const auto &use : binding.resources) encoder.useResource(use.resource, use.usage);
+      PrivateComputeReplayCommand set_pso = {};
+      set_pso.pso.type = WMTComputeCommandSetPSO;
+      set_pso.pso.pso = variant.pso.handle;
+      set_pso.pso.threadgroup_size = variant.threadgroup_size;
+      replay.push_back(set_pso);
+      PrivateComputeReplayCommand set_buffer = {};
+      set_buffer.buffer.type = WMTComputeCommandSetBuffer;
+      set_buffer.buffer.buffer = binding.buffer.handle;
+      set_buffer.buffer.index = DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT;
+      replay.push_back(set_buffer);
+    };
+    for (auto *node = reinterpret_cast<wmtcmd_base *>(&data->cmd_head); node;
+         node = static_cast<wmtcmd_base *>(node->next.get())) {
+      if (auto marker = markers.find(node); marker != markers.end()) {
+        std::shared_ptr<D3D12TypedOriginSubmissionBinding> binding;
+        const auto hr = MaterializeD3D12TypedOriginDispatch(device, *marker->second, binding);
+        if (FAILED(hr)) { ERR("Typed-origin submission materialization failed HRESULT=", hr); return false; }
+        bindings.push_back(binding);
+        if (marker->second->indirect_data_binding)
+          indirect_bindings.emplace(marker->second->indirect_data_binding,
+              IndirectBinding{binding->buffer.handle, binding->indirect_data_offset});
+        if (!marker->second->compute_variant || marker->second->variant != marker->second->compute_variant) return false;
+        append_binding(*binding, *marker->second->compute_variant);
+        continue;
+      }
+      if (auto marker = minmax_markers.find(node); marker != minmax_markers.end()) {
+        std::shared_ptr<D3D12MinMaxSubmissionBinding> binding;
+        const auto hr = MaterializeD3D12MinMaxDispatch(device, *marker->second, binding);
+        if (FAILED(hr)) { ERR("MinMax submission materialization failed HRESULT=", hr); return false; }
+        minmax_bindings.push_back(binding);
+        if (marker->second->indirect_data_binding)
+          indirect_bindings.emplace(marker->second->indirect_data_binding,
+              IndirectBinding{binding->buffer.handle, binding->indirect_data_offset});
+        append_binding(*binding, *marker->second->variant);
+        continue;
+      }
+      size_t size = 0;
+      switch (node->type) {
+      case WMTComputeCommandNop: size = sizeof(wmtcmd_compute_nop); break;
+      case WMTComputeCommandDispatch:
+      case WMTComputeCommandDispatchThreads: size = sizeof(wmtcmd_compute_dispatch); break;
+      case WMTComputeCommandDispatchIndirect: size = sizeof(wmtcmd_compute_dispatch_indirect); break;
+      case WMTComputeCommandSetPSO: size = sizeof(wmtcmd_compute_setpso); break;
+      case WMTComputeCommandSetBuffer: size = sizeof(wmtcmd_compute_setbuffer); break;
+      case WMTComputeCommandSetBufferOffset: size = sizeof(wmtcmd_compute_setbufferoffset); break;
+      case WMTComputeCommandUseResource: size = sizeof(wmtcmd_compute_useresource); break;
+      case WMTComputeCommandSetBytes: size = sizeof(wmtcmd_compute_setbytes); break;
+      case WMTComputeCommandSetTexture: size = sizeof(wmtcmd_compute_settexture); break;
+      case WMTComputeCommandWaitForFence:
+      case WMTComputeCommandUpdateFence: size = sizeof(wmtcmd_compute_fence_op); break;
+      case WMTComputeCommandMemoryBarrier: size = sizeof(wmtcmd_compute_memory_barrier); break;
+      case WMTComputeCommandExecuteCommandsInBuffer: size = sizeof(wmtcmd_compute_executecommands); break;
+      default: return false;
+      }
+      PrivateComputeReplayCommand command = {};
+      std::memcpy(&command, node, size);
+      if (auto feedback = root_feedback_markers.find(node); feedback != root_feedback_markers.end()) {
+        if (node->type != WMTComputeCommandSetBuffer) return false;
+        if (!root_feedback_buffers) return false;
+        // Replacing slot 30 removes the original heap's implicit binding.
+        // The resolver still writes root arguments into that same heap.
+        WMT::Buffer original_heap;
+        original_heap.handle = command.buffer.buffer;
+        encoder.useResource(original_heap, static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite));
+        auto payload = *feedback->second;
+        payload.root_feedback_table = root_feedback_address;
+        WMTBufferInfo info = {}; info.length = sizeof(payload); info.options = WMTResourceStorageModeShared;
+        auto buffer = device->GetMTLDevice().newBuffer(info);
+        if (!buffer || !info.memory.get()) return false;
+        std::memcpy(info.memory.get(), &payload, sizeof(payload));
+        encoder.useResource(buffer, WMTResourceUsageRead);
+        command.buffer.buffer = buffer.handle;
+        command.buffer.offset = 0;
+        root_feedback_buffers->emplace_back(std::move(buffer));
+      }
+      if (auto indirect = indirect_bindings.find(node); indirect != indirect_bindings.end()) {
+        if (root_feedback_markers.contains(node)) return false;
+        if (node->type != WMTComputeCommandSetBuffer) return false;
+        command.buffer.buffer = indirect->second.buffer;
+        command.buffer.offset = indirect->second.offset;
+      }
+      replay.push_back(command);
+    }
+    for (size_t i = 0; i < replay.size(); ++i)
+      replay[i].nop.next.set(i + 1 < replay.size() ? &replay[i + 1] : nullptr);
+    if (!replay.empty()) encoder.encodeCommands(&replay[0].nop);
+    return true;
+  } catch (const std::bad_alloc &) { ERR("Private compute replay allocation failed"); return false; }
+}
+
+union PrivateRenderReplayCommand {
+  wmtcmd_render_nop nop;
+  wmtcmd_render_setpso pso;
+  wmtcmd_render_setbuffer buffer;
+  wmtcmd_render_draw_indexed draw;
+  wmtcmd_render_setviewport viewport;
+  wmtcmd_render_msc_tessellation_draw_indexed tessellation;
+  wmtcmd_render_msc_geometry_draw_indexed geometry;
+  wmtcmd_render_msc_tessellation_draw tessellation_direct;
+  wmtcmd_render_msc_geometry_draw geometry_direct;
+  wmtcmd_render_dxmt_tessellation_mesh_draw_indexed air_tessellation;
+};
+
+static bool ReplayPrivateRender(MTLD3D12Device *device, WMT::RenderCommandEncoder encoder,
+    RenderEncoderData *data, std::vector<std::shared_ptr<D3D12MinMaxSubmissionBinding>> &bindings,
+    std::vector<std::shared_ptr<D3D12TypedOriginSubmissionBinding>> &origin_bindings,
+    uint64_t root_feedback_address = 0,
+    std::vector<WMT::Reference<WMT::Buffer>> *root_feedback_buffers = nullptr) {
+  try {
+    std::unordered_map<const void *, const IndirectRenderCommandData *> root_feedback_markers;
+    for (const auto &[binding, payload] : data->root_feedback_indirect)
+      if (!binding || !payload || !root_feedback_address ||
+          !root_feedback_markers.emplace(binding, payload).second) return false;
+    std::unordered_map<const void *, const D3D12TypedOriginDispatch *> origin_markers;
+    for (const auto &draw : data->typed_origin_draws)
+      if (!draw->render_marker || !draw->graphics_variant || draw->variant != draw->graphics_variant ||
+          !origin_markers.emplace(draw->render_marker, draw.get()).second) return false;
+    std::unordered_map<const void *, const D3D12MinMaxDispatch *> markers;
+    for (const auto &draw : data->minmax_draws) {
+      if (!draw->render_marker || !draw->graphics_variant || draw->binding_variant != draw->graphics_variant ||
+          !markers.emplace(draw->render_marker, draw.get()).second) return false;
+    }
+    std::vector<PrivateRenderReplayCommand> replay;
+    struct IndirectBinding { obj_handle_t buffer; uint64_t offset; };
+    std::unordered_map<const void *, IndirectBinding> indirect_bindings;
+    const D3D12PrivateGraphicsPipeline *active_variant = nullptr;
+    for (auto *node = reinterpret_cast<wmtcmd_base *>(&data->cmd_head); node;
+         node = static_cast<wmtcmd_base *>(node->next.get())) {
+      if (auto marker = origin_markers.find(node); marker != origin_markers.end()) {
+        if (markers.count(node)) return false;
+        std::shared_ptr<D3D12TypedOriginSubmissionBinding> binding;
+        const auto hr = MaterializeD3D12TypedOriginDispatch(device, *marker->second, binding);
+        if (FAILED(hr)) { ERR("Typed-origin render materialization failed HRESULT=", hr); return false; }
+        origin_bindings.push_back(binding);
+        if (marker->second->indirect_render_binding &&
+            !indirect_bindings.emplace(marker->second->indirect_render_binding,
+                IndirectBinding{binding->buffer.handle, binding->indirect_data_offset}).second) return false;
+        active_variant = marker->second->graphics_variant;
+        const bool emulation = active_variant->geometry || active_variant->tessellation;
+        const auto stages = emulation ? WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment :
+            WMTRenderStageVertex | WMTRenderStageFragment;
+        for (const auto &use : binding->resources)
+          encoder.useResource(use.resource, use.usage, stages);
+        PrivateRenderReplayCommand pso = {};
+        pso.pso.type = WMTRenderCommandSetPSO; pso.pso.pso = marker->second->graphics_variant->pso.handle;
+        replay.push_back(pso);
+        const auto set_buffer = [&](WMTRenderCommandType type, uint32_t index, uint64_t offset = 0) {
+          PrivateRenderReplayCommand set = {};
+          set.buffer.type = type; set.buffer.buffer = binding->buffer.handle;
+          set.buffer.index = index; set.buffer.offset = offset;
+          replay.push_back(set);
+        };
+        if (emulation) {
+          set_buffer(WMTRenderCommandSetObjectBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
+          set_buffer(WMTRenderCommandSetMeshBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
+          if (active_variant->tessellation) {
+            set_buffer(WMTRenderCommandSetObjectBuffer, DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT);
+            set_buffer(WMTRenderCommandSetMeshBuffer, DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT);
+          }
+        } else {
+          set_buffer(WMTRenderCommandSetVertexBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
+        }
+        set_buffer(WMTRenderCommandSetFragmentBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT,
+            binding->fragment_argument_offset);
+        origin_markers.erase(marker);
+        continue;
+      }
+      if (auto marker = markers.find(node); marker != markers.end()) {
+        std::shared_ptr<D3D12MinMaxSubmissionBinding> binding;
+        const auto hr = MaterializeD3D12MinMaxDispatch(device, *marker->second, binding);
+        if (FAILED(hr)) { ERR("MinMax render materialization failed HRESULT=", hr); return false; }
+        bindings.push_back(binding);
+        if (marker->second->indirect_render_binding &&
+            !indirect_bindings.emplace(marker->second->indirect_render_binding,
+                IndirectBinding{binding->buffer.handle, binding->indirect_data_offset}).second) return false;
+        active_variant = marker->second->graphics_variant;
+        const bool emulation = active_variant->geometry || active_variant->tessellation;
+        const auto stages = emulation ? WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment :
+            WMTRenderStageVertex | WMTRenderStageFragment;
+        for (const auto &use : binding->resources)
+          encoder.useResource(use.resource, use.usage, stages);
+        PrivateRenderReplayCommand pso = {};
+        pso.pso.type = WMTRenderCommandSetPSO; pso.pso.pso = marker->second->graphics_variant->pso.handle;
+        replay.push_back(pso);
+        const auto set_buffer = [&](WMTRenderCommandType type, uint32_t index) {
+          PrivateRenderReplayCommand set = {};
+          set.buffer.type = type; set.buffer.buffer = binding->buffer.handle;
+          set.buffer.index = index;
+          replay.push_back(set);
+        };
+        if (emulation) {
+          set_buffer(WMTRenderCommandSetObjectBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
+          set_buffer(WMTRenderCommandSetMeshBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
+          if (active_variant->tessellation) {
+            set_buffer(WMTRenderCommandSetObjectBuffer, DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT);
+            set_buffer(WMTRenderCommandSetMeshBuffer, DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT);
+          }
+        } else {
+          set_buffer(WMTRenderCommandSetVertexBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
+        }
+        set_buffer(WMTRenderCommandSetFragmentBuffer, DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
+        markers.erase(marker);
+        continue;
+      }
+      size_t size = 0;
+#define RENDER_SIZE(type, structure) case type: static_assert(sizeof(structure) <= sizeof(PrivateRenderReplayCommand)); size = sizeof(structure); break
+      switch (node->type) {
+      RENDER_SIZE(WMTRenderCommandNop, wmtcmd_render_nop);
+      RENDER_SIZE(WMTRenderCommandUseResource, wmtcmd_render_useresource);
+      RENDER_SIZE(WMTRenderCommandSetVertexBuffer, wmtcmd_render_setbuffer);
+      RENDER_SIZE(WMTRenderCommandSetFragmentBuffer, wmtcmd_render_setbuffer);
+      RENDER_SIZE(WMTRenderCommandSetObjectBuffer, wmtcmd_render_setbuffer);
+      RENDER_SIZE(WMTRenderCommandSetMeshBuffer, wmtcmd_render_setbuffer);
+      RENDER_SIZE(WMTRenderCommandSetVertexBufferOffset, wmtcmd_render_setbufferoffset);
+      RENDER_SIZE(WMTRenderCommandSetFragmentBufferOffset, wmtcmd_render_setbufferoffset);
+      RENDER_SIZE(WMTRenderCommandSetObjectBufferOffset, wmtcmd_render_setbufferoffset);
+      RENDER_SIZE(WMTRenderCommandSetMeshBufferOffset, wmtcmd_render_setbufferoffset);
+      RENDER_SIZE(WMTRenderCommandSetFragmentTexture, wmtcmd_render_settexture);
+      RENDER_SIZE(WMTRenderCommandSetFragmentBytes, wmtcmd_render_setbytes);
+      RENDER_SIZE(WMTRenderCommandSetRasterizerState, wmtcmd_render_setrasterizerstate);
+      RENDER_SIZE(WMTRenderCommandSetPSO, wmtcmd_render_setpso);
+      RENDER_SIZE(WMTRenderCommandSetDSSO, wmtcmd_render_setdsso);
+      RENDER_SIZE(WMTRenderCommandSetDepthStencilState, wmtcmd_render_setdepthstencilstate);
+      RENDER_SIZE(WMTRenderCommandSetBlendFactorAndStencilRef, wmtcmd_render_setblendcolor);
+      RENDER_SIZE(WMTRenderCommandSetBlendFactor, wmtcmd_render_setblendcolor);
+      RENDER_SIZE(WMTRenderCommandSetStencilRef, wmtcmd_render_setstencilref);
+      RENDER_SIZE(WMTRenderCommandSetViewports, wmtcmd_render_setviewports);
+      RENDER_SIZE(WMTRenderCommandSetViewport, wmtcmd_render_setviewport);
+      RENDER_SIZE(WMTRenderCommandSetScissorRects, wmtcmd_render_setscissorrects);
+      RENDER_SIZE(WMTRenderCommandSetScissorRect, wmtcmd_render_setscissorrect);
+      RENDER_SIZE(WMTRenderCommandSetVisibilityMode, wmtcmd_render_setvisibilitymode);
+      RENDER_SIZE(WMTRenderCommandDraw, wmtcmd_render_draw);
+      RENDER_SIZE(WMTRenderCommandDrawIndexed, wmtcmd_render_draw_indexed);
+      RENDER_SIZE(WMTRenderCommandDrawIndirect, wmtcmd_render_draw_indirect);
+      RENDER_SIZE(WMTRenderCommandDrawIndexedIndirect, wmtcmd_render_draw_indexed_indirect);
+      RENDER_SIZE(WMTRenderCommandDrawMeshThreadgroups, wmtcmd_render_draw_meshthreadgroups);
+      RENDER_SIZE(WMTRenderCommandDrawMeshThreadgroupsIndirect, wmtcmd_render_draw_meshthreadgroups_indirect);
+      RENDER_SIZE(WMTRenderCommandMemoryBarrier, wmtcmd_render_memory_barrier);
+      RENDER_SIZE(WMTRenderCommandWaitForFence, wmtcmd_render_fence_op);
+      RENDER_SIZE(WMTRenderCommandUpdateFence, wmtcmd_render_fence_op);
+      RENDER_SIZE(WMTRenderCommandDispatchThreadsPerTile, wmtcmd_render_dispatch_threads_per_tile);
+      RENDER_SIZE(WMTRenderCommandExecuteCommandsInBuffer, wmtcmd_render_executecommands);
+      RENDER_SIZE(WMTRenderCommandDXMTGeometryDraw, wmtcmd_render_dxmt_geometry_draw);
+      RENDER_SIZE(WMTRenderCommandDXMTGeometryDrawIndexed, wmtcmd_render_dxmt_geometry_draw_indexed);
+      RENDER_SIZE(WMTRenderCommandDXMTGeometryDrawIndirect, wmtcmd_render_dxmt_geometry_draw_indirect);
+      RENDER_SIZE(WMTRenderCommandDXMTGeometryDrawIndexedIndirect, wmtcmd_render_dxmt_geometry_draw_indexed_indirect);
+      RENDER_SIZE(WMTRenderCommandDXMTTessellationMeshDraw, wmtcmd_render_dxmt_tessellation_mesh_draw);
+      RENDER_SIZE(WMTRenderCommandDXMTTessellationMeshDrawIndexed, wmtcmd_render_dxmt_tessellation_mesh_draw_indexed);
+      RENDER_SIZE(WMTRenderCommandDXMTTessellationMeshDrawIndirect, wmtcmd_render_dxmt_tessellation_mesh_draw_indirect);
+      RENDER_SIZE(WMTRenderCommandDXMTTessellationMeshDrawIndexedIndirect, wmtcmd_render_dxmt_tessellation_mesh_draw_indexed_indirect);
+      RENDER_SIZE(WMTRenderCommandMSCTessellationDraw, wmtcmd_render_msc_tessellation_draw);
+      RENDER_SIZE(WMTRenderCommandMSCTessellationDrawIndexed, wmtcmd_render_msc_tessellation_draw_indexed);
+      RENDER_SIZE(WMTRenderCommandMSCGeometryDraw, wmtcmd_render_msc_geometry_draw);
+      RENDER_SIZE(WMTRenderCommandMSCGeometryDrawIndexed, wmtcmd_render_msc_geometry_draw_indexed);
+      default: ERR("Unsupported command in MinMax render replay: ", node->type); return false;
+      }
+#undef RENDER_SIZE
+      PrivateRenderReplayCommand copy = {};
+      std::memcpy(&copy, node, size);
+      if (auto feedback = root_feedback_markers.find(node); feedback != root_feedback_markers.end()) {
+        if (node->type != WMTRenderCommandSetVertexBuffer || !root_feedback_buffers ||
+            indirect_bindings.contains(node)) return false;
+        // The resolver still writes root/vertex arguments into the original heap.
+        WMT::Buffer original_heap; original_heap.handle = copy.buffer.buffer;
+        encoder.useResource(original_heap, static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite),
+                            static_cast<WMTRenderStages>(WMTRenderStageVertex | WMTRenderStageFragment));
+        auto payload = *feedback->second;
+        payload.root_feedback_table = root_feedback_address;
+        WMTBufferInfo info = {}; info.length = sizeof(payload); info.options = WMTResourceStorageModeShared;
+        auto buffer = device->GetMTLDevice().newBuffer(info);
+        if (!buffer || !info.memory.get()) return false;
+        std::memcpy(info.memory.get(), &payload, sizeof(payload));
+        encoder.useResource(buffer, WMTResourceUsageRead, WMTRenderStageVertex);
+        copy.buffer.buffer = buffer.handle; copy.buffer.offset = 0;
+        root_feedback_buffers->emplace_back(std::move(buffer));
+        root_feedback_markers.erase(feedback);
+      }
+      // The companion draw configuration must match the private PSO's
+      // reflection, not the application pipeline's threadgroup configuration.
+      if (node->type == WMTRenderCommandSetPSO) active_variant = nullptr;
+      if (active_variant) {
+        switch (node->type) {
+        case WMTRenderCommandMSCTessellationDraw:
+          if (!active_variant->tessellation) return false;
+          copy.tessellation_direct.config = active_variant->tessellation_config; break;
+        case WMTRenderCommandMSCTessellationDrawIndexed:
+          if (!active_variant->tessellation) return false;
+          copy.tessellation.config = active_variant->tessellation_config; break;
+        case WMTRenderCommandMSCGeometryDraw:
+          if (!active_variant->geometry) return false;
+          copy.geometry_direct.config = active_variant->geometry_config; break;
+        case WMTRenderCommandMSCGeometryDrawIndexed:
+          if (!active_variant->geometry) return false;
+          copy.geometry.config = active_variant->geometry_config; break;
+        default: break;
+        }
+      }
+      if (auto patch = indirect_bindings.find(node); patch != indirect_bindings.end()) {
+        if (node->type != WMTRenderCommandSetVertexBuffer) return false;
+        copy.buffer.buffer = patch->second.buffer; copy.buffer.offset = patch->second.offset;
+        indirect_bindings.erase(patch);
+      }
+      replay.push_back(copy);
+    }
+    if (!markers.empty() || !origin_markers.empty() || !indirect_bindings.empty() || !root_feedback_markers.empty()) return false;
+    for (size_t i = 0; i < replay.size(); ++i)
+      replay[i].nop.next.set(i + 1 < replay.size() ? &replay[i + 1] : nullptr);
+    if (!replay.empty()) encoder.encodeCommands(&replay.front().nop);
+    return true;
+  } catch (const std::bad_alloc &) { ERR("MinMax render replay allocation failed"); return false; }
+}
 
 class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, IMTLSwapChainFactory> {
 
@@ -33,10 +396,510 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
 
   WMT::Reference<WMT::CommandQueue> queue_;
   WMT::Reference<WMT::Fence> fence_;
+  WMT::Reference<WMT::Buffer> timestamp_dummy_buffer_;
+  WMT::Reference<WMT::SparseMappingQueue> sparse_mapping_queue_;
+  WMT::Reference<WMT::SharedEvent> sparse_event_;
+  WMT::Reference<WMT::SharedEvent> allocator_completion_event_;
+  uint64_t sparse_event_value_ = 0;
+
+  struct Submission {
+    uint64_t serial = 0;
+    WMT::Reference<WMT::CommandBuffer> command_buffer;
+    WMT::Reference<WMT::SharedEvent> error_event;
+    uint64_t sparse_wait_value = 0;
+    bool commit_finished = false;
+    bool failed = false;
+    struct CommandList {
+      uint64_t recording_id = 0;
+      Com<ID3D12GraphicsCommandList> recording;
+      EncoderData *entry = nullptr;
+      struct TileMapping {
+        bool mapped = false;
+        WMT::Reference<WMT::Buffer> buffer;
+        UINT64 offset = 0;
+      };
+      std::unordered_map<EncoderData *, std::vector<TileMapping>> tile_mappings;
+      struct Encoder {
+        EncoderType type;
+        uint64_t id;
+      };
+      std::vector<Encoder> encoders;
+    };
+    std::vector<CommandList> command_lists;
+    std::vector<Com<MTLD3D12CommandAllocator, false>> allocators;
+    std::vector<std::shared_ptr<D3D12TypedOriginSubmissionBinding>> typed_origin_bindings;
+    std::vector<std::shared_ptr<D3D12MinMaxSubmissionBinding>> minmax_bindings;
+    std::vector<Rc<Sampler>> sampler_refs;
+    // Live descriptor observations belong to this execution, not the reusable
+    // recording encoder. CompletionThread destroys them after GPU completion.
+    std::vector<WMT::Reference<WMT::Resource>> descriptor_resource_refs;
+    std::vector<std::vector<Rc<BufferAllocation>>> indirect_root_buffers;
+    std::vector<WMT::Reference<WMT::Buffer>> root_feedback_tables;
+    HANDLE latency_waitable = nullptr;
+  };
+
+  template <typename UseResource>
+  bool RetainIndirectRootBuffers(EncoderData *data, Submission &submission, UseResource use_resource,
+                                WMT::Buffer *feedback_table = nullptr, uint64_t *feedback_address = nullptr) {
+    if (!data->indirect_root_va && !data->root_buffer_feedback)
+      return true;
+    std::vector<Rc<BufferAllocation>> snapshot;
+    if (FAILED(device_->SnapshotRegisteredBuffers(snapshot)))
+      return false;
+    if (data->root_buffer_feedback && !data->indirect_root_va && data->root_feedback_vas_known &&
+        !full_root_feedback_snapshot_) {
+      // Preserve every containing interval and its order, including overlaps.
+      // Do not replace first-match GPU lookup with closest-base CPU lookup.
+      snapshot.erase(std::remove_if(snapshot.begin(), snapshot.end(), [&](const auto &allocation) {
+        return !data->NeedsRootFeedbackInterval(allocation->gpuAddress(), allocation->length());
+      }), snapshot.end());
+    }
+    // GPU commands may select any currently registered buffer. Strong references
+    // are acquired under the registry lock; native fan-out is outside it.
+    try { submission.indirect_root_buffers.push_back(std::move(snapshot)); }
+    catch (const std::bad_alloc &) { return false; }
+    if (data->root_buffer_feedback) {
+      if (!feedback_table) return false;
+      const auto &allocations = submission.indirect_root_buffers.back();
+      if (allocations.size() > (SIZE_MAX - sizeof(uint64_t)) / sizeof(air::RootBufferFeedbackEntry)) return false;
+      WMTBufferInfo info = {};
+      info.length = sizeof(uint64_t) + allocations.size() * sizeof(air::RootBufferFeedbackEntry);
+      info.options = WMTResourceStorageModeShared;
+      auto table = device_->GetMTLDevice().newBuffer(info);
+      if (!table || !info.memory.get()) return false;
+      const uint64_t count = allocations.size();
+      std::memcpy(info.memory.get(), &count, sizeof(count));
+      auto rows = reinterpret_cast<air::RootBufferFeedbackEntry *>(static_cast<uint8_t *>(info.memory.get()) + sizeof(count));
+      for (size_t i = 0; i < allocations.size(); ++i) {
+        const auto &allocation = allocations[i];
+        rows[i] = {allocation->gpuAddress(), allocation->length(),
+                   allocation->sparse_feedback_header ? allocation->sparse_feedback_header->gpuAddress() : 0};
+      }
+      *feedback_table = table;
+      if (feedback_address) *feedback_address = info.gpu_address;
+      try { submission.root_feedback_tables.emplace_back(std::move(table)); }
+      catch (const std::bad_alloc &) { return false; }
+      use_resource(*feedback_table, WMTResourceUsageRead);
+    }
+    for (const auto &allocation : submission.indirect_root_buffers.back()) {
+      use_resource(allocation->buffer(), static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite));
+      if (allocation->sparse_feedback_header)
+        use_resource(allocation->sparse_feedback_header->buffer(), WMTResourceUsageRead);
+      if (allocation->sparse_mapping_bytes)
+        use_resource(allocation->sparse_mapping_bytes->buffer(), WMTResourceUsageRead);
+    }
+    return true;
+  }
+
+  dxmt::mutex commit_mutex_;
+  dxmt::mutex submission_mutex_;
+  dxmt::condition_variable submission_condition_;
+  dxmt::condition_variable submission_space_condition_;
+  dxmt::condition_variable commit_condition_;
+  std::array<Submission, kCommandQueueSize> submissions_;
+  size_t submission_head_ = 0;
+  size_t submission_tail_ = 0;
+  size_t submission_count_ = 0;
+  size_t commit_head_ = 0;
+  size_t commit_count_ = 0;
+  dxmt::thread commit_thread_;
+  dxmt::thread completion_thread_;
+  bool stopping_ = false;
+  uint64_t next_submission_serial_ = 1;
+  uint64_t completed_submission_serial_ = 0;
+  uint64_t committed_submission_serial_ = 0; // submission_mutex_
+  bool encoder_execution_status_ = false;
+  bool full_root_feedback_snapshot_ = false;
+  std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_psos_;
+  std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_rtv_psos_;
+  std::array<WMT::Reference<WMT::DepthStencilState>, 4> clear_dssos_;
+
+  static const char *EncoderTypeName(EncoderType type) {
+    switch (type) {
+    case EncoderType::Null:
+      return "Null";
+    case EncoderType::Clear:
+      return "Clear";
+    case EncoderType::Render:
+      return "Render";
+    case EncoderType::Blit:
+      return "Blit";
+    case EncoderType::CopyTiles:
+      return "CopyTiles";
+    case EncoderType::Compute:
+      return "Compute";
+    case EncoderType::Resolve:
+      return "Resolve";
+    case EncoderType::TemporalUpscale:
+      return "TemporalUpscale";
+    case EncoderType::SampleTimestamp:
+      return "SampleTimestamp";
+    case EncoderType::ResolveTimestamp:
+      return "ResolveTimestamp";
+    case EncoderType::AccelerationStructure:
+      return "AccelerationStructure";
+    }
+    return "Unknown";
+  }
+
+  static std::string DescribeSubmission(const Submission &submission) {
+    std::string description = " command_lists=[";
+    for (size_t i = 0; i < submission.command_lists.size(); i++) {
+      if (i)
+        description += ",";
+      const auto &command_list = submission.command_lists[i];
+      description += "{id=" + std::to_string(command_list.recording_id) + ",encoders=[";
+      bool first_encoder = true;
+      for (const auto &encoder : command_list.encoders) {
+        if (encoder.type == EncoderType::Null)
+          continue;
+        if (!first_encoder)
+          description += ",";
+        description += EncoderTypeName(encoder.type);
+        description += "#" + std::to_string(encoder.id);
+        first_encoder = false;
+      }
+      if (first_encoder)
+        description += "None";
+      description += "]}";
+    }
+    description += "]";
+    return description;
+  }
+
+  template <typename Encoder>
+  void LabelEncoder(Encoder &encoder, uint64_t recording_id, uint64_t encoder_id, const char *phase = nullptr) {
+    if (!encoder_execution_status_)
+      return;
+    std::string label = "DXMT recording=" + std::to_string(recording_id) + " encoder=" + std::to_string(encoder_id);
+    if (phase) {
+      label += " ";
+      label += phase;
+    }
+    encoder.setLabel(WMT::String::string(label.c_str(), WMTUTF8StringEncoding));
+  }
+
+  WMT::CommandBuffer NewCommandBuffer() {
+    if (encoder_execution_status_)
+      return queue_.commandBufferWithErrorOptions(WMTCommandBufferErrorOptionEncoderExecutionStatus);
+    return queue_.commandBuffer();
+  }
+
+  WMT::RenderPipelineState
+  GetClearPSO(WMTPixelFormat format, uint8_t sample_count) {
+    if (format == WMTPixelFormatInvalid || !sample_count)
+      return {};
+
+    const uint64_t key = (uint64_t(format) << 8) | sample_count;
+    if (auto it = clear_psos_.find(key); it != clear_psos_.end())
+      return it->second;
+
+    auto library = device_->GetLib().getLibrary();
+    auto vertex_function = library.newFunction("vs_clear_rt");
+    auto fragment_function = library.newFunction("fs_clear_rt_depth");
+    if (!vertex_function || !fragment_function)
+      return {};
+
+    WMTRenderPipelineInfo info;
+    WMT::InitializeRenderPipelineInfo(info);
+    info.raster_sample_count = sample_count;
+    info.vertex_function = vertex_function;
+    info.fragment_function = fragment_function;
+    const auto dsv_flags = DepthStencilPlanarFlags(format);
+    if (dsv_flags & 1)
+      info.depth_pixel_format = format;
+    if (dsv_flags & 2)
+      info.stencil_pixel_format = format;
+    info.input_primitive_topology = WMTPrimitiveTopologyClassTriangle;
+
+    WMT::Reference<WMT::Error> error;
+    auto pso = device_->GetMTLDevice().newRenderPipelineState(info, error);
+    if (!pso) {
+      ERR("Failed to create D3D12 partial depth clear PSO: ",
+          error ? error.description().getUTF8String() : "unknown error");
+      return {};
+    }
+    return clear_psos_.emplace(key, std::move(pso)).first->second;
+  }
+
+  WMT::RenderPipelineState
+  GetClearRTVPSO(WMTPixelFormat format, uint8_t sample_count) {
+    if (format == WMTPixelFormatInvalid || !sample_count)
+      return {};
+
+    const uint64_t key = (uint64_t(format) << 8) | sample_count;
+    if (auto it = clear_rtv_psos_.find(key); it != clear_rtv_psos_.end())
+      return it->second;
+
+    auto library = device_->GetLib().getLibrary();
+    auto vertex_function = library.newFunction("vs_clear_rt");
+    const char *fragment_name = IsIntegerFormat(format)
+                                    ? (MTLGetUnsignedIntegerFormat(format) == format ? "fs_clear_rt_uint"
+                                                                                       : "fs_clear_rt_sint")
+                                    : "fs_clear_rt_float";
+    auto fragment_function = library.newFunction(fragment_name);
+    if (!vertex_function || !fragment_function)
+      return {};
+
+    WMTRenderPipelineInfo info;
+    WMT::InitializeRenderPipelineInfo(info);
+    info.raster_sample_count = sample_count;
+    info.vertex_function = vertex_function;
+    info.fragment_function = fragment_function;
+    info.colors[0].pixel_format = format;
+    info.input_primitive_topology = WMTPrimitiveTopologyClassTriangle;
+
+    WMT::Reference<WMT::Error> error;
+    auto pso = device_->GetMTLDevice().newRenderPipelineState(info, error);
+    if (!pso) {
+      ERR("Failed to create D3D12 partial RTV clear PSO: ",
+          error ? error.description().getUTF8String() : "unknown error");
+      return {};
+    }
+    return clear_rtv_psos_.emplace(key, std::move(pso)).first->second;
+  }
+
+  WMT::DepthStencilState
+  GetClearDSSO(unsigned clear_flags) {
+    if (!clear_flags || clear_flags >= clear_dssos_.size())
+      return {};
+    if (clear_dssos_[clear_flags])
+      return clear_dssos_[clear_flags];
+
+    WMTDepthStencilInfo info = {};
+    info.depth_compare_function = WMTCompareFunctionAlways;
+    info.depth_write_enabled = clear_flags & 1;
+    for (auto *stencil : {&info.front_stencil, &info.back_stencil}) {
+      stencil->enabled = clear_flags & 2;
+      stencil->depth_stencil_pass_op = (clear_flags & 2) ? WMTStencilOperationReplace : WMTStencilOperationKeep;
+      stencil->stencil_fail_op = WMTStencilOperationKeep;
+      stencil->depth_fail_op = WMTStencilOperationKeep;
+      stencil->stencil_compare_function = WMTCompareFunctionAlways;
+      stencil->write_mask = (clear_flags & 2) ? 0xff : 0;
+      stencil->read_mask = 0xff;
+    }
+    clear_dssos_[clear_flags] = device_->GetMTLDevice().newDepthStencilState(info);
+    return clear_dssos_[clear_flags];
+  }
+
+  void
+  CommitThread() {
+    for (;;) {
+      Submission *submission;
+      {
+        std::unique_lock<dxmt::mutex> lock(submission_mutex_);
+        commit_condition_.wait(lock, [this] { return stopping_ || commit_count_ != 0; });
+        if (!commit_count_) return;
+        submission = &submissions_[commit_head_];
+      }
+      auto pool = WMT::MakeAutoreleasePool();
+      bool succeeded = SUCCEEDED(device_->GetDeviceRemovedReason());
+      try {
+        if (succeeded && !submission->command_lists.empty())
+          succeeded = TranslateSubmission(*submission);
+        if (succeeded) {
+          if (!submission->allocators.empty())
+            submission->command_buffer.encodeSignalEvent(allocator_completion_event_, submission->serial);
+          submission->command_buffer.commit();
+        }
+      } catch (const std::exception &error) {
+        ERR("D3D12 asynchronous submission failed: ", submission->serial, " ", error.what());
+        succeeded = false;
+      } catch (...) {
+        ERR("D3D12 asynchronous submission failed: ", submission->serial);
+        succeeded = false;
+      }
+      if (!succeeded) {
+        device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+        ERR("D3D12 submission rejected asynchronously: ", submission->serial, DescribeSubmission(*submission));
+        if (submission->error_event) submission->error_event.signalValue(UINT64_MAX);
+      }
+      {
+        std::lock_guard<dxmt::mutex> lock(submission_mutex_);
+        submission->failed = !succeeded;
+        submission->commit_finished = true;
+        committed_submission_serial_ = submission->serial;
+        commit_head_ = (commit_head_ + 1) % kCommandQueueSize;
+        --commit_count_;
+      }
+      submission_condition_.notify_all();
+    }
+  }
+
+  void
+  CompletionThread() {
+    for (;;) {
+      Submission submission;
+      size_t submission_slot = 0;
+      {
+        std::unique_lock<dxmt::mutex> lock(submission_mutex_);
+        submission_condition_.wait(lock, [this] {
+          return (stopping_ && !submission_count_) ||
+                 (submission_count_ && submissions_[submission_head_].commit_finished);
+        });
+        if (!submission_count_) {
+          if (stopping_)
+            return;
+          continue;
+        }
+        submission_slot = submission_head_;
+        submission = std::move(submissions_[submission_slot]);
+      }
+
+      auto pool = WMT::MakeAutoreleasePool();
+      if (!submission.failed) submission.command_buffer.waitUntilCompleted();
+      if (!submission.failed && submission.command_buffer.status() == WMTCommandBufferStatusError) {
+        device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+        if (submission.error_event) submission.error_event.signalValue(UINT64_MAX);
+        auto error = submission.command_buffer.error();
+        ERR("D3D12 command buffer submission ", submission.serial, " failed: ",
+            error ? error.description().getUTF8String() : "unknown error", DescribeSubmission(submission));
+        if (encoder_execution_status_) {
+          for (auto &log : submission.command_buffer.logs().elements())
+            ERR("[DEBUG-METAL-ENCODER] submission ", submission.serial, ": ",
+                log.description().getUTF8String());
+        }
+      }
+
+      for (auto &allocator : submission.allocators)
+        allocator->MarkSubmissionCompleted(allocator_completion_event_, submission.serial);
+
+      if (submission.latency_waitable)
+        ReleaseSemaphore(submission.latency_waitable, 1, nullptr);
+
+      if (submission.serial != completed_submission_serial_ + 1)
+        WARN("D3D12 command buffer completion serial gap: expected ", completed_submission_serial_ + 1,
+             ", got ", submission.serial);
+      completed_submission_serial_ = submission.serial;
+
+      {
+        std::lock_guard<dxmt::mutex> lock(submission_mutex_);
+        assert(submission_slot == submission_head_);
+        submission_head_ = (submission_head_ + 1) % kCommandQueueSize;
+        submission_count_--;
+      }
+      submission_space_condition_.notify_all();
+    }
+  }
+
+  bool
+  WaitForSubmissionSpaceLocked() {
+    std::unique_lock<dxmt::mutex> submission_lock(submission_mutex_);
+    submission_space_condition_.wait(submission_lock, [this] {
+      return stopping_ || submission_count_ < kCommandQueueSize;
+    });
+    return !stopping_ && SUCCEEDED(device_->GetDeviceRemovedReason());
+  }
+
+  bool
+  CommitSubmissionLocked(Submission &submission) {
+    std::unique_lock<dxmt::mutex> submission_lock(submission_mutex_);
+    if (stopping_ || FAILED(device_->GetDeviceRemovedReason()) || submission_count_ >= kCommandQueueSize)
+      return false;
+    assert(submission_count_ < kCommandQueueSize);
+
+    submission.serial = next_submission_serial_++;
+    submissions_[submission_tail_] = std::move(submission);
+    submission_tail_ = (submission_tail_ + 1) % kCommandQueueSize;
+    submission_count_++;
+    commit_count_++;
+    submission_lock.unlock();
+    commit_condition_.notify_one();
+    return true;
+  }
+
+  void
+  AbortSubmission(Submission &submission) {
+    for (auto &allocator : submission.allocators)
+      allocator->MarkSubmissionCompleted(allocator_completion_event_, submission.serial);
+  }
+
+  void
+  PauseTranslationForTesting() {
+    char enabled[2] = {};
+    if (!GetEnvironmentVariableA("DXMT_TEST_PAUSE_QUEUE_TRANSLATION", enabled, sizeof(enabled)))
+      return;
+
+    static LONG pause_claimed = 0;
+    HANDLE entered = OpenEventA(EVENT_MODIFY_STATE, FALSE, "DXMT.Test.QueueTranslationEntered");
+    HANDLE resume = OpenEventA(SYNCHRONIZE, FALSE, "DXMT.Test.QueueTranslationResume");
+    if (!entered || !resume) {
+      if (entered)
+        CloseHandle(entered);
+      if (resume)
+        CloseHandle(resume);
+      return;
+    }
+    if (InterlockedCompareExchange(&pause_claimed, 1, 0) != 0) {
+      CloseHandle(entered);
+      CloseHandle(resume);
+      return;
+    }
+
+    SetEvent(entered);
+    WaitForSingleObject(resume, INFINITE);
+    CloseHandle(entered);
+    CloseHandle(resume);
+  }
+
+  void
+  StopCompletionThread() {
+    {
+      std::lock_guard<dxmt::mutex> lock(submission_mutex_);
+      stopping_ = true;
+    }
+    submission_condition_.notify_all();
+    commit_condition_.notify_all();
+    submission_space_condition_.notify_all();
+  }
+
+  bool
+  BeginSparseMapping(uint64_t &main_queue_signal) {
+    if (!sparse_mapping_queue_)
+      return true;
+    if (!WaitForSubmissionSpaceLocked())
+      return false;
+
+    auto pool = WMT::MakeAutoreleasePool();
+    auto cmdbuf = NewCommandBuffer();
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
+    main_queue_signal = sparse_event_value_ + 1;
+    cmdbuf.encodeSignalEvent(sparse_event_, main_queue_signal);
+
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    if (!CommitSubmissionLocked(submission))
+      return false;
+    sparse_event_value_ = main_queue_signal;
+    sparse_mapping_queue_.waitForEvent(sparse_event_, main_queue_signal);
+    sparse_mapping_queue_.barrierBeforeResourceState();
+    return true;
+  }
+
+  void
+  EndSparseMapping(uint64_t main_queue_signal) {
+    const uint64_t mapping_signal = main_queue_signal + 1;
+    sparse_mapping_queue_.signalEvent(sparse_event_, mapping_signal);
+    sparse_event_value_ = mapping_signal;
+  }
 
 public:
   MTLD3D12CommandQueueImpl(MTLD3D12Device *pDevice) :
-      MTLD3D12Pageable<MTLD3D12CommandQueue, IMTLSwapChainFactory>(pDevice) {}
+      MTLD3D12Pageable<MTLD3D12CommandQueue, IMTLSwapChainFactory>(pDevice) {
+    // Start only after all predicates and queue indices are initialized.
+    completion_thread_ = dxmt::thread([this] { CompletionThread(); });
+    try { commit_thread_ = dxmt::thread([this] { CommitThread(); }); }
+    catch (...) { StopCompletionThread(); completion_thread_.join(); throw; }
+  }
+
+  ~MTLD3D12CommandQueueImpl() {
+    StopCompletionThread();
+    if (commit_thread_.joinable())
+      commit_thread_.join();
+    if (completion_thread_.joinable())
+      completion_thread_.join();
+  }
 
   HRESULT
   Initialize(const D3D12_COMMAND_QUEUE_DESC *pDesc) {
@@ -44,13 +907,46 @@ public:
     desc_ = *pDesc;
     desc_.NodeMask = 1; // typically 1 GPU only
 
+    char encoder_status[2] = {};
+    encoder_execution_status_ =
+        GetEnvironmentVariableA("DXMT_METAL_ENCODER_EXECUTION_STATUS", encoder_status, sizeof(encoder_status)) &&
+        encoder_status[0] != '0';
+
     auto metal_device = device_->GetMTLDevice();
-    queue_ = metal_device.newCommandQueue(kCommandQueueSize);
+    char full_snapshot[2] = {};
+    full_root_feedback_snapshot_ =
+        GetEnvironmentVariableA("DXMT_TEST_FULL_ROOT_FEEDBACK_SNAPSHOT", full_snapshot, sizeof(full_snapshot)) == 1 &&
+        full_snapshot[0] == '1';
+    // Queued Signal/Wait/Present packets may already own one buffer each.
+    // Leave bounded headroom for the worker's current and next split segment.
+    queue_ = metal_device.newCommandQueue(kCommandQueueSize + 2);
     if (!queue_)
+      return E_FAIL;
+    allocator_completion_event_ = metal_device.newSharedEvent();
+    if (!allocator_completion_event_)
       return E_FAIL;
     queue_.addResidencySet(device_->GetGlobalResidencySet());
 
+    if (metal_device.supportsPlacementSparse()) {
+      sparse_mapping_queue_ = metal_device.newSparseMappingQueue();
+      sparse_event_ = metal_device.newSharedEvent();
+      if (sparse_mapping_queue_ && sparse_event_)
+        sparse_mapping_queue_.addResidencySet(device_->GetGlobalResidencySet());
+      else {
+        sparse_mapping_queue_ = {};
+        sparse_event_ = {};
+      }
+    }
+
     fence_ = metal_device.newFence();
+
+    WMTBufferInfo timestamp_dummy_info = {};
+    timestamp_dummy_info.length = sizeof(uint32_t);
+    timestamp_dummy_info.options = WMTResourceHazardTrackingModeUntracked;
+    timestamp_dummy_info.memory.set(nullptr);
+    timestamp_dummy_buffer_ = metal_device.newBuffer(timestamp_dummy_info);
+    if (!timestamp_dummy_buffer_)
+      return E_OUTOFMEMORY;
 
     return S_OK;
   }
@@ -63,6 +959,11 @@ public:
 
     *ppvObject = nullptr;
 
+    if (riid == DXMT_STREAMLINE_RETRIEVE_BASE_INTERFACE) {
+      *ppvObject = ref(static_cast<ID3D12CommandQueue *>(this));
+      return S_OK;
+    }
+
     if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
         riid == __uuidof(ID3D12Pageable) || riid == __uuidof(ID3D12CommandQueue)) {
       *ppvObject = ref(this);
@@ -73,6 +974,9 @@ public:
       *ppvObject = ref_and_cast<IMTLSwapChainFactory>(this);
       return S_OK;
     }
+
+    if (riid == DXMT_STREAMLINE_D3D12_COMMAND_QUEUE_GUID || riid == DXMT_ID3D11_DEVICE_GUID)
+      return E_NOINTERFACE;
 
     if (logQueryInterfaceError(__uuidof(ID3D12CommandQueue), riid)) {
       WARN("D3D12CommandQueue: Unknown interface query ", str::format(riid));
@@ -87,7 +991,27 @@ public:
       const D3D12_TILE_RANGE_FLAGS *range_flags, const UINT *heap_range_offsets, const UINT *range_tile_counts,
       D3D12_TILE_MAPPING_FLAGS flags
   ) {
-    IMPLEMENT_ME
+    if (!resource || !IsSameDevice(device_, resource)) {
+      WARN("D3D12 UpdateTileMappings received a resource from another device");
+      return;
+    }
+
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    uint64_t main_queue_signal = 0;
+    if (!BeginSparseMapping(main_queue_signal))
+      return;
+    auto hr = static_cast<MTLD3D12Resource *>(resource)->UpdateTileMappings(
+        region_count, region_start_coordinates, region_sizes, heap, range_count, range_flags, heap_range_offsets,
+        range_tile_counts, flags, sparse_mapping_queue_
+    );
+    // BeginSparseMapping has already queued the main-queue handoff and the
+    // mapping queue wait. Always close that event pair, including when the
+    // resource-side validation rejects the update, so a failed API call cannot
+    // leave an unsignaled sparse-queue wait behind.
+    if (sparse_mapping_queue_)
+      EndSparseMapping(main_queue_signal);
+    if (FAILED(hr))
+      WARN("D3D12 UpdateTileMappings failed with HRESULT 0x", std::hex, hr, std::dec);
   };
 
   void STDMETHODCALLTYPE CopyTileMappings(
@@ -95,23 +1019,493 @@ public:
       ID3D12Resource *src_resource, const D3D12_TILED_RESOURCE_COORDINATE *src_region_start_coordinate,
       const D3D12_TILE_REGION_SIZE *region_size, D3D12_TILE_MAPPING_FLAGS flags
   ) {
-    IMPLEMENT_ME
+    if (!dst_resource || !src_resource || !IsSameDevice(device_, dst_resource) || !IsSameDevice(device_, src_resource)) {
+      WARN("D3D12 CopyTileMappings received a resource from another device");
+      return;
+    }
+    if (!dst_region_start_coordinate || !src_region_start_coordinate || !region_size) {
+      WARN("D3D12 CopyTileMappings received a null required tile-region parameter");
+      return;
+    }
+
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    uint64_t main_queue_signal = 0;
+    if (!BeginSparseMapping(main_queue_signal))
+      return;
+    auto hr = static_cast<MTLD3D12Resource *>(dst_resource)->CopyTileMappingsFrom(
+        static_cast<MTLD3D12Resource *>(src_resource), dst_region_start_coordinate, src_region_start_coordinate,
+        region_size, flags, sparse_mapping_queue_
+    );
+    // See UpdateTileMappings above: a rejected copy must still release the
+    // sparse queue handoff established by BeginSparseMapping.
+    if (sparse_mapping_queue_)
+      EndSparseMapping(main_queue_signal);
+    if (FAILED(hr))
+      WARN("D3D12 CopyTileMappings failed with HRESULT 0x", std::hex, hr, std::dec);
   };
 
   void STDMETHODCALLTYPE
-  ExecuteCommandLists(UINT Count, ID3D12CommandList *const *ppCommandLists) {
-    auto pool = WMT::MakeAutoreleasePool();
+  ExecuteCommandLists(UINT Count, ID3D12CommandList *const *ppCommandLists) try {
+    if (!Count)
+      return;
+    if (!ppCommandLists) {
+      WARN("D3D12 ExecuteCommandLists received a null command list array");
+      return;
+    }
+    for (UINT i = 0; i < Count; i++) {
+      auto command_list = ppCommandLists[i];
+      if (!command_list) {
+        WARN("D3D12 ExecuteCommandLists received a null command list");
+        return;
+      }
+      if (!IsSameDevice(device_, command_list)) {
+        WARN("D3D12 ExecuteCommandLists received a command list from another device");
+        return;
+      }
+      switch (command_list->GetType()) {
+      case D3D12_COMMAND_LIST_TYPE_DIRECT:
+      case D3D12_COMMAND_LIST_TYPE_COMPUTE:
+      case D3D12_COMMAND_LIST_TYPE_COPY:
+        break;
+      default:
+        WARN("D3D12 ExecuteCommandLists received an unsupported command list type");
+        return;
+      }
+      auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(command_list);
+      if (pCommandList->encoder_count == std::numeric_limits<size_t>::max()) {
+        WARN("D3D12 ExecuteCommandLists received an open command list");
+        return;
+      }
+    }
 
-    auto cmdbuf = queue_.commandBuffer();
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return;
+
+    Submission submission;
+    submission.sparse_wait_value = sparse_event_value_;
+    submission.allocators.reserve(Count);
+    submission.command_lists.reserve(Count);
     for (unsigned i = 0; i < Count; i++) {
       auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i]);
-      EncoderData *current = pCommandList->entry;
+      auto &command_list = submission.command_lists.emplace_back();
+      command_list.recording_id = pCommandList->GetRecordingId();
+      command_list.recording = pCommandList;
+      command_list.entry = pCommandList->entry;
+      for (auto *encoder = pCommandList->entry; encoder; encoder = encoder->next) {
+        command_list.encoders.push_back({encoder->type, encoder->id});
+        if (encoder->type == EncoderType::CopyTiles) {
+          auto data = static_cast<CopyTilesEncoderData *>(encoder);
+          auto tiled = data->tiled_resource.ptr();
+          std::vector<UINT> indices;
+          auto coordinate = data->has_region_start_coordinate ? &data->region_start_coordinate : nullptr;
+          if (!tiled || FAILED(tiled->GetTileIndices(coordinate, &data->region_size, indices))) return;
+          auto &mappings = command_list.tile_mappings[encoder];
+          mappings.reserve(indices.size());
+          const bool native_sparse = sparse_mapping_queue_ && (tiled->GetMetalBuffer() || tiled->GetMetalTexture());
+          for (auto index : indices) {
+            auto &mapping = mappings.emplace_back();
+            if (native_sparse) mapping.mapped = tiled->IsTileMapped(index);
+            else {
+              WMT::Buffer backing;
+              if (FAILED(tiled->GetTileMapping(index, backing, mapping.offset))) return;
+              mapping.buffer = backing;
+              mapping.mapped = bool(backing);
+            }
+          }
+        }
+      }
+      submission.allocators.emplace_back(pCommandList->GetAllocator());
+    }
+    // Reserve this submission's GPU marker before translation. The commit lock
+    // keeps the serial stable, including while the translation test hook pauses.
+    submission.serial = next_submission_serial_;
+    for (size_t registered = 0; registered < submission.allocators.size(); ++registered) {
+      if (!submission.allocators[registered]->MarkSubmissionSubmitted(allocator_completion_event_, submission.serial)) {
+        for (size_t previous = 0; previous < registered; ++previous)
+          submission.allocators[previous]->MarkSubmissionCompleted(allocator_completion_event_, submission.serial);
+        ERR("D3D12 allocator submission registration allocation failed");
+        return;
+      }
+    }
+    struct PendingRegistration {
+      MTLD3D12CommandQueueImpl *queue;
+      Submission &submission;
+      bool committed = false;
+      ~PendingRegistration() {
+        if (!committed)
+          queue->AbortSubmission(submission);
+      }
+    } pending{this, submission};
+
+    if (!CommitSubmissionLocked(submission))
+      return;
+    pending.committed = true;
+    for (unsigned i = 0; i < Count; i++) {
+      static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->MarkSubmitted();
+      static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->CommitResourceStates();
+    }
+  } catch (const std::bad_alloc &) {
+    ERR("D3D12 ExecuteCommandLists allocation failed");
+  };
+
+private:
+  bool
+  TranslateSubmission(Submission &submission) {
+    auto cmdbuf = NewCommandBuffer();
+    if (!cmdbuf) return false;
+    submission.command_buffer = cmdbuf;
+    if (submission.sparse_wait_value)
+      cmdbuf.encodeWaitForEvent(sparse_event_, submission.sparse_wait_value);
+    PauseTranslationForTesting();
+    char fail[2] = {};
+    if (GetEnvironmentVariableA("DXMT_TEST_FAIL_QUEUE_TRANSLATION", fail, sizeof(fail)) == 1 && fail[0] == '1')
+      return false;
+
+    bool translation_failed = false;
+    for (const auto &command_list : submission.command_lists) {
+      auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(command_list.recording.ptr());
+      EncoderData *current = command_list.entry;
       while (current) {
+        const auto recording_id = command_list.recording_id;
         switch (current->type) {
         case EncoderType::Null:
           break;
+        case EncoderType::CopyTiles: {
+          auto data = static_cast<CopyTilesEncoderData *>(current);
+          auto *tiled = data->tiled_resource.ptr();
+          auto *linear = data->linear_resource.ptr();
+          if (!tiled || !linear || !linear->buffer || !linear->buffer->current()) {
+            WARN("D3D12 CopyTiles translation received an invalid resource");
+            translation_failed = true;
+            break;
+          }
+
+          std::vector<UINT> tile_indices;
+          const auto *coordinate = data->has_region_start_coordinate ? &data->region_start_coordinate : nullptr;
+          if (FAILED(tiled->GetTileIndices(coordinate, &data->region_size, tile_indices)) || tile_indices.empty()) {
+            WARN("D3D12 CopyTiles translation failed to resolve resource tiles");
+            translation_failed = true;
+            break;
+          }
+          for (UINT tile_index : tile_indices) {
+            if (tiled->IsPackedTile(tile_index)) {
+              WARN("D3D12 CopyTiles translation cannot access packed mip tiles");
+              translation_failed = true;
+              break;
+            }
+          }
+          if (translation_failed)
+            break;
+
+          // Mapping APIs update CPU bookkeeping immediately. Observe it at
+          // enqueue, not after a later UpdateTileMappings has changed it.
+          const auto &tile_mappings = command_list.tile_mappings.at(current);
+          if (tile_mappings.size() != tile_indices.size()) return false;
+
+          constexpr UINT64 tile_size = 64ull * 1024;
+          if (tile_indices.size() > std::numeric_limits<UINT64>::max() / tile_size) {
+            WARN("D3D12 CopyTiles translation overflowed its tile range");
+            translation_failed = true;
+            break;
+          }
+          const UINT64 copy_size = uint64_t(tile_indices.size()) * tile_size;
+          const auto linear_desc = linear->GetDesc();
+          if (data->buffer_offset > linear_desc.Width || copy_size > linear_desc.Width - data->buffer_offset) {
+            WARN("D3D12 CopyTiles translation received an out-of-bounds buffer range");
+            translation_failed = true;
+            break;
+          }
+
+          const auto sparse_buffer = tiled->GetMetalBuffer();
+          if (sparse_mapping_queue_ && sparse_buffer) {
+            const auto linear_buffer = linear->buffer->current()->buffer();
+            auto encoder = cmdbuf.blitCommandEncoder();
+            encoder.waitForFence(fence_);
+            for (size_t index = 0; index < tile_indices.size(); index++) {
+              const UINT tile_index = tile_indices[index];
+              const UINT64 linear_offset = data->buffer_offset + index * tile_size;
+              const UINT64 sparse_offset = uint64_t(tile_index) * tile_size;
+              const bool mapped = tile_mappings[index].mapped;
+              if (data->buffer_to_tiled) {
+                if (!mapped)
+                  continue;
+                wmtcmd_blit_copy_from_buffer_to_buffer copy = {};
+                copy.type = WMTBlitCommandCopyFromBufferToBuffer;
+                copy.src = linear_buffer;
+                copy.src_offset = linear_offset;
+                copy.dst = sparse_buffer;
+                copy.dst_offset = sparse_offset;
+                copy.copy_length = tile_size;
+                MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+                continue;
+              }
+
+              if (!data->tiled_to_buffer)
+                continue;
+              if (!mapped) {
+                wmtcmd_blit_fillbuffer fill = {};
+                fill.type = WMTBlitCommandFillBuffer;
+                fill.buffer = linear_buffer;
+                fill.offset = linear_offset;
+                fill.length = tile_size;
+                fill.value = 0;
+                MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
+                continue;
+              }
+
+              wmtcmd_blit_copy_from_buffer_to_buffer copy = {};
+              copy.type = WMTBlitCommandCopyFromBufferToBuffer;
+              copy.src = sparse_buffer;
+              copy.src_offset = sparse_offset;
+              copy.dst = linear_buffer;
+              copy.dst_offset = linear_offset;
+              copy.copy_length = tile_size;
+              MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+            }
+            encoder.updateFence(fence_);
+            encoder.endEncoding();
+            break;
+          }
+
+          const auto sparse_texture = tiled->GetMetalTexture();
+          if (sparse_mapping_queue_ && sparse_texture) {
+            struct TextureTileCopyInfo {
+              WMTOrigin origin;
+              WMTSize size;
+              uint64_t level;
+              uint64_t slice;
+              uint32_t bytes_per_row;
+              uint32_t bytes_per_image;
+            };
+            std::vector<TextureTileCopyInfo> copy_infos;
+            copy_infos.reserve(tile_indices.size());
+            for (UINT tile_index : tile_indices) {
+              auto &copy_info = copy_infos.emplace_back();
+              if (FAILED(tiled->GetTileTextureCopyInfo(
+                      tile_index, copy_info.origin, copy_info.level, copy_info.slice, copy_info.size,
+                      copy_info.bytes_per_row, copy_info.bytes_per_image
+                  ))) {
+                WARN("D3D12 CopyTiles translation failed to resolve a sparse texture tile");
+                translation_failed = true;
+                break;
+              }
+            }
+            if (translation_failed)
+              break;
+
+            const auto linear_buffer = linear->buffer->current()->buffer();
+            auto encoder = cmdbuf.blitCommandEncoder();
+            encoder.waitForFence(fence_);
+            for (size_t index = 0; index < tile_indices.size(); index++) {
+              const UINT64 linear_offset = data->buffer_offset + index * tile_size;
+              const auto &copy_info = copy_infos[index];
+              if (!tile_mappings[index].mapped) {
+                if (data->tiled_to_buffer) {
+                  wmtcmd_blit_fillbuffer fill = {};
+                  fill.type = WMTBlitCommandFillBuffer;
+                  fill.buffer = linear_buffer;
+                  fill.offset = linear_offset;
+                  fill.length = tile_size;
+                  fill.value = 0;
+                  MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
+                }
+                continue;
+              }
+
+              if (data->buffer_to_tiled) {
+                wmtcmd_blit_copy_from_buffer_to_texture copy = {};
+                copy.type = WMTBlitCommandCopyFromBufferToTexture;
+                copy.src = linear_buffer;
+                copy.src_offset = linear_offset;
+                copy.bytes_per_row = copy_info.bytes_per_row;
+                copy.bytes_per_image = copy_info.bytes_per_image;
+                copy.size = copy_info.size;
+                copy.dst = sparse_texture;
+                copy.slice = static_cast<uint32_t>(copy_info.slice);
+                copy.level = static_cast<uint32_t>(copy_info.level);
+                copy.origin = copy_info.origin;
+                MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+                continue;
+              }
+
+              wmtcmd_blit_copy_from_texture_to_buffer copy = {};
+              copy.type = WMTBlitCommandCopyFromTextureToBuffer;
+              copy.src = sparse_texture;
+              copy.slice = static_cast<uint32_t>(copy_info.slice);
+              copy.level = static_cast<uint32_t>(copy_info.level);
+              copy.origin = copy_info.origin;
+              copy.size = copy_info.size;
+              copy.dst = linear_buffer;
+              copy.offset = linear_offset;
+              copy.bytes_per_row = copy_info.bytes_per_row;
+              copy.bytes_per_image = copy_info.bytes_per_image;
+              MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+            }
+            encoder.updateFence(fence_);
+            encoder.endEncoding();
+            break;
+          }
+
+          const auto linear_buffer = linear->buffer->current()->buffer();
+          auto encoder = cmdbuf.blitCommandEncoder();
+          encoder.waitForFence(fence_);
+          for (size_t index = 0; index < tile_mappings.size(); index++) {
+            const auto &tile = tile_mappings[index];
+            const UINT64 linear_offset = data->buffer_offset + index * tile_size;
+            if (data->buffer_to_tiled) {
+              if (!tile.buffer)
+                continue;
+              wmtcmd_blit_copy_from_buffer_to_buffer copy = {};
+              copy.type = WMTBlitCommandCopyFromBufferToBuffer;
+              copy.src = linear_buffer;
+              copy.src_offset = linear_offset;
+              copy.dst = tile.buffer;
+              copy.dst_offset = tile.offset;
+              copy.copy_length = tile_size;
+              MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+              continue;
+            }
+
+            if (!data->tiled_to_buffer)
+              continue;
+            if (!tile.buffer) {
+              wmtcmd_blit_fillbuffer fill = {};
+              fill.type = WMTBlitCommandFillBuffer;
+              fill.buffer = linear_buffer;
+              fill.offset = linear_offset;
+              fill.length = tile_size;
+              MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
+              continue;
+            }
+
+            wmtcmd_blit_copy_from_buffer_to_buffer copy = {};
+            copy.type = WMTBlitCommandCopyFromBufferToBuffer;
+            copy.src = tile.buffer;
+            copy.src_offset = tile.offset;
+            copy.dst = linear_buffer;
+            copy.dst_offset = linear_offset;
+            copy.copy_length = tile_size;
+            MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+          }
+          encoder.updateFence(fence_);
+          encoder.endEncoding();
+          break;
+        }
         case EncoderType::Clear: {
           auto data = static_cast<ClearEncoderData *>(current);
+          if (data->rect_count) {
+            if (!data->attachment || !data->rects) {
+              translation_failed = true;
+              break;
+            }
+            auto pso = data->clear_dsv ? GetClearPSO(data->format, data->raster_sample_count)
+                                       : GetClearRTVPSO(data->format, data->raster_sample_count);
+            auto dsso = data->clear_dsv ? GetClearDSSO(data->clear_dsv) : WMT::DepthStencilState{};
+            if (!pso || (data->clear_dsv && !dsso)) {
+              translation_failed = true;
+              break;
+            }
+
+            WMTRenderPassInfo info;
+            WMT::InitializeRenderPassInfo(info);
+            const auto dsv_planar_flags = DepthStencilPlanarFlags(data->format);
+            if (data->clear_dsv) {
+              if (dsv_planar_flags & 1) {
+                info.depth.texture = data->attachment.texture();
+                info.depth.level = 0;
+                info.depth.slice = 0;
+                info.depth.depth_plane = data->depth_plane;
+                info.depth.load_action = WMTLoadActionLoad;
+                info.depth.store_action = WMTStoreActionStore;
+              }
+              if (dsv_planar_flags & 2) {
+                info.stencil.texture = data->attachment.texture();
+                info.stencil.level = 0;
+                info.stencil.slice = 0;
+                info.stencil.depth_plane = data->depth_plane;
+                info.stencil.load_action = WMTLoadActionLoad;
+                info.stencil.store_action = WMTStoreActionStore;
+              }
+            } else {
+              info.colors[0].texture = data->attachment.texture();
+              info.colors[0].level = 0;
+              info.colors[0].slice = 0;
+              info.colors[0].depth_plane = data->depth_plane;
+              info.colors[0].load_action = WMTLoadActionLoad;
+              info.colors[0].store_action = WMTStoreActionStore;
+            }
+            info.default_raster_sample_count = data->raster_sample_count;
+            const auto array_length = std::max(data->array_length, 1u);
+            info.render_target_array_length = array_length;
+            info.render_target_width = data->width;
+            info.render_target_height = data->height;
+
+            auto encoder = cmdbuf.renderCommandEncoder(info);
+            LabelEncoder(encoder, recording_id, data->id, "ClearPartial");
+            encoder.waitForFence(fence_, WMTRenderStageFragment);
+
+            wmtcmd_render_setpso set_pso = {};
+            set_pso.type = WMTRenderCommandSetPSO;
+            set_pso.pso = pso;
+            encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_pso));
+
+            wmtcmd_render_setviewport set_viewport = {};
+            set_viewport.type = WMTRenderCommandSetViewport;
+            set_viewport.viewport = {0.0, 0.0, (double)data->width, (double)data->height, 0.0, 1.0};
+            encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_viewport));
+
+            if (data->clear_dsv) {
+              wmtcmd_render_setdsso set_dsso = {};
+              set_dsso.type = WMTRenderCommandSetDSSO;
+              set_dsso.dsso = dsso;
+              set_dsso.stencil_ref = data->depth_stencil.second;
+              encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_dsso));
+            }
+
+            float clear_value[4] = {};
+            if (data->clear_dsv) {
+              clear_value[0] = data->depth_stencil.first;
+            } else {
+              clear_value[0] = static_cast<float>(data->color.r);
+              clear_value[1] = static_cast<float>(data->color.g);
+              clear_value[2] = static_cast<float>(data->color.b);
+              clear_value[3] = static_cast<float>(data->color.a);
+            }
+            wmtcmd_render_setbytes set_value = {};
+            set_value.type = WMTRenderCommandSetFragmentBytes;
+            set_value.bytes.set(clear_value);
+            set_value.length = sizeof(clear_value);
+            set_value.index = kCustomBufferArgumentIndex0;
+            encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_value));
+
+            for (UINT i = 0; i < data->rect_count; i++) {
+              const auto &rect = data->rects[i];
+              const LONG left = std::max<LONG>(0, rect.left);
+              const LONG top = std::max<LONG>(0, rect.top);
+              const LONG right = std::min<LONG>((LONG)data->width, rect.right);
+              const LONG bottom = std::min<LONG>((LONG)data->height, rect.bottom);
+              if (left >= right || top >= bottom)
+                continue;
+
+              wmtcmd_render_setscissorrect set_scissor = {};
+              set_scissor.type = WMTRenderCommandSetScissorRect;
+              set_scissor.scissor_rect = {
+                  (uint64_t)left, (uint64_t)top, (uint64_t)(right - left), (uint64_t)(bottom - top)
+              };
+              encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_scissor));
+
+              wmtcmd_render_draw draw = {};
+              draw.type = WMTRenderCommandDraw;
+              draw.primitive_type = WMTPrimitiveTypeTriangle;
+              draw.vertex_count = 3;
+              draw.instance_count = array_length;
+              encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&draw));
+            }
+            encoder.updateFence(fence_, WMTRenderStageFragment);
+            encoder.endEncoding();
+            break;
+          }
           {
             WMTRenderPassInfo info;
             WMT::InitializeRenderPassInfo(info);
@@ -119,12 +1513,14 @@ public:
               if (data->clear_dsv & 1) {
                 info.depth.clear_depth = data->depth_stencil.first;
                 info.depth.texture = data->attachment.texture();
+                info.depth.depth_plane = data->depth_plane;
                 info.depth.load_action = WMTLoadActionClear;
                 info.depth.store_action = WMTStoreActionStore;
               }
               if (data->clear_dsv & 2) {
                 info.stencil.clear_stencil = data->depth_stencil.second;
                 info.stencil.texture = data->attachment.texture();
+                info.stencil.depth_plane = data->depth_plane;
                 info.stencil.load_action = WMTLoadActionClear;
                 info.stencil.store_action = WMTStoreActionStore;
               }
@@ -133,12 +1529,13 @@ public:
             } else {
               info.colors[0].clear_color = data->color;
               info.colors[0].texture = data->attachment.texture();
+              info.colors[0].depth_plane = data->depth_plane;
               info.colors[0].load_action = WMTLoadActionClear;
               info.colors[0].store_action = WMTStoreActionStore;
             }
             info.render_target_array_length = data->array_length;
             auto encoder = cmdbuf.renderCommandEncoder(info);
-            encoder.setLabel(WMT::String::string("ClearPass", WMTUTF8StringEncoding));
+            LabelEncoder(encoder, recording_id, data->id, "Clear");
             encoder.waitForFence(fence_, WMTRenderStageFragment);
             encoder.updateFence(fence_, WMTRenderStageFragment);
             encoder.endEncoding();
@@ -193,18 +1590,61 @@ public:
             render_pass_info.render_target_array_length = data->render_target_array_length;
             render_pass_info.render_target_width = data->render_target_width;
             render_pass_info.render_target_height = data->render_target_height;
+            if (data->use_visibility_result)
+              render_pass_info.visibility_buffer = data->visibility_buffer.handle;
+           }
+           auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
+           LabelEncoder(encoder, recording_id, data->id, "Render");
+           encoder.waitForFence(fence_, data->use_geometry ? WMTRenderStagePreRaster : WMTRenderStageVertex);
+           const auto root_stages = static_cast<WMTRenderStages>(
+               (data->use_geometry ? WMTRenderStagePreRaster : WMTRenderStageVertex) | WMTRenderStageFragment);
+           WMT::Buffer root_feedback_table;
+           uint64_t root_feedback_address = 0;
+           if (!RetainIndirectRootBuffers(data, submission, [&](WMT::Buffer buffer, WMTResourceUsage usage) {
+                 encoder.useResource(buffer, usage, root_stages);
+               }, &root_feedback_table, &root_feedback_address)) {
+             translation_failed = true;
+             encoder.endEncoding();
+             break;
+           }
+           if (data->root_buffer_feedback) {
+             PrivateRenderReplayCommand bind = {};
+             bind.buffer.buffer = root_feedback_table.handle;
+             bind.buffer.index = SM50_BINDING_INDEX_ROOT_BUFFER_FEEDBACK;
+             for (auto type : {WMTRenderCommandSetVertexBuffer, WMTRenderCommandSetObjectBuffer,
+                               WMTRenderCommandSetMeshBuffer, WMTRenderCommandSetFragmentBuffer}) {
+               bind.buffer.type = type;
+               encoder.encodeCommands(&bind.nop);
+             }
+           }
+           bool sampler_reduction = false;
+           if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs, &sampler_reduction) ||
+               !pCommandList->ResolvePendingDescriptorUses(
+                   data, submission.descriptor_resource_refs,
+                   [&](obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages stages) {
+                     WMT::Resource native_resource;
+                     native_resource.handle = resource;
+                     encoder.useResource(native_resource, usage, stages);
+                   }, sampler_reduction
+               )) {
+             translation_failed = true;
+             encoder.endEncoding();
+             break;
+           }
+          if (data->minmax_draws.empty() && data->typed_origin_draws.empty() && data->root_feedback_indirect.empty()) encoder.encodeCommands(&data->cmd_head);
+          else if (!ReplayPrivateRender(device_, encoder, data, submission.minmax_bindings, submission.typed_origin_bindings,
+                                        root_feedback_address, &submission.root_feedback_tables)) {
+            translation_failed = true; encoder.endEncoding(); break;
           }
-          auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
-          encoder.waitForFence(fence_, WMTRenderStageVertex);
-          encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_, WMTRenderStageFragment);
           encoder.endEncoding();
           break;
         }
-        case EncoderType::Blit: {
-          auto data = static_cast<BlitEncoderData *>(current);
-          auto encoder = cmdbuf.blitCommandEncoder();
-          encoder.waitForFence(fence_);
+         case EncoderType::Blit: {
+           auto data = static_cast<BlitEncoderData *>(current);
+           auto encoder = cmdbuf.blitCommandEncoder();
+           LabelEncoder(encoder, recording_id, data->id, "Blit");
+           encoder.waitForFence(fence_);
           encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_);
           encoder.endEncoding();
@@ -213,9 +1653,140 @@ public:
         case EncoderType::Compute: {
           auto data = static_cast<ComputeEncoderData *>(current);
           auto encoder = cmdbuf.computeCommandEncoder(false);
-          encoder.waitForFence(fence_);
-          encoder.encodeCommands(&data->cmd_head);
+           LabelEncoder(encoder, recording_id, data->id, "Compute");
+           encoder.waitForFence(fence_);
+          WMT::Buffer root_feedback_table;
+          uint64_t root_feedback_address = 0;
+          if (!RetainIndirectRootBuffers(data, submission, [&](WMT::Buffer buffer, WMTResourceUsage usage) {
+                encoder.useResource(buffer, usage);
+              }, &root_feedback_table, &root_feedback_address)) {
+            translation_failed = true;
+            encoder.endEncoding();
+            break;
+          }
+          if (data->root_buffer_feedback) {
+            PrivateComputeReplayCommand bind = {};
+            bind.buffer.type = WMTComputeCommandSetBuffer;
+            bind.buffer.buffer = root_feedback_table.handle;
+            bind.buffer.index = SM50_BINDING_INDEX_ROOT_BUFFER_FEEDBACK;
+            encoder.encodeCommands(&bind.nop);
+          }
+          bool sampler_reduction = false;
+          if (!pCommandList->ResolvePendingSamplerUses(data, submission.sampler_refs, &sampler_reduction) ||
+              !pCommandList->ResolvePendingDescriptorUses(
+                  data, submission.descriptor_resource_refs,
+                  [&](obj_handle_t resource, WMTResourceUsage usage, WMTRenderStages) {
+                    WMT::Resource native_resource;
+                    native_resource.handle = resource;
+                    encoder.useResource(native_resource, usage);
+                  }, sampler_reduction
+              )) {
+            translation_failed = true;
+            encoder.endEncoding();
+            break;
+          }
+          if (data->typed_origin_dispatches.empty() && data->minmax_dispatches.empty() && data->root_feedback_indirect.empty()) {
+            encoder.encodeCommands(&data->cmd_head);
+          } else if (!ReplayPrivateCompute(device_, encoder, data, submission.typed_origin_bindings, submission.minmax_bindings,
+                                          root_feedback_address, &submission.root_feedback_tables)) {
+            translation_failed = true;
+            encoder.endEncoding();
+            break;
+          }
           encoder.updateFence(fence_);
+          encoder.endEncoding();
+          break;
+        }
+        case EncoderType::AccelerationStructure: {
+          auto data = static_cast<AccelerationStructureEncoderData *>(current);
+          auto encoder = cmdbuf.accelerationStructureCommandEncoder();
+          LabelEncoder(encoder, recording_id, data->id, "AccelerationStructure");
+          if (!encoder) {
+            WARN("D3D12 acceleration-structure translation could not create an encoder");
+            translation_failed = true;
+            break;
+          }
+
+          const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
+          auto use_resource = [&](obj_handle_t resource, WMTResourceUsage usage) {
+            if (!resource)
+              return true;
+            WMT::Resource resource_object;
+            resource_object.handle = resource;
+            return encoder.useResource(resource_object, usage);
+          };
+          auto use_descriptor_resources = [&](const WMTAccelerationStructureDescriptorInfo &descriptor) {
+            if (descriptor.type == WMTAccelerationStructureDescriptorPrimitive) {
+              for (uint32_t i = 0; i < descriptor.data.primitive.geometry_count; i++) {
+                const auto &geometry = descriptor.data.primitive.geometries[i];
+                if (!use_resource(geometry.vertex_buffer, WMTResourceUsageRead) ||
+                    !use_resource(geometry.index_buffer, WMTResourceUsageRead) ||
+                    !use_resource(geometry.bounding_box_buffer, WMTResourceUsageRead))
+                  return false;
+              }
+            } else if (descriptor.type == WMTAccelerationStructureDescriptorInstance) {
+              if (!use_resource(
+                      descriptor.data.instance.instance_descriptor_buffer, WMTResourceUsageRead
+                  ))
+                return false;
+              for (uint32_t i = 0; i < descriptor.data.instance.instanced_acceleration_structure_count; i++) {
+                if (!use_resource(
+                        descriptor.data.instance.instanced_acceleration_structures[i], WMTResourceUsageRead
+                    ))
+                  return false;
+              }
+            } else {
+              return false;
+            }
+            return true;
+          };
+
+          for (const auto &command : data->commands) {
+            bool command_ok = false;
+            switch (command.type) {
+            case AccelerationStructureCommandType::Build:
+              command_ok = use_descriptor_resources(command.descriptor) &&
+                           use_resource(command.scratch.handle, read_write) &&
+                           use_resource(command.destination.handle, read_write) &&
+                           encoder.build(
+                               command.destination, command.descriptor, command.scratch, command.scratch_offset
+                           );
+              break;
+            case AccelerationStructureCommandType::Refit:
+              command_ok = use_descriptor_resources(command.descriptor) &&
+                           use_resource(command.scratch.handle, read_write) &&
+                           use_resource(command.source.handle, read_write) &&
+                           use_resource(command.destination.handle, read_write) &&
+                           encoder.refit(
+                               command.source, command.destination, command.descriptor, command.scratch,
+                               command.scratch_offset
+                           );
+              break;
+            case AccelerationStructureCommandType::Copy:
+              command_ok = use_resource(command.source.handle, WMTResourceUsageRead) &&
+                           use_resource(command.destination.handle, WMTResourceUsageWrite) &&
+                           encoder.copy(command.source, command.destination);
+              break;
+            case AccelerationStructureCommandType::CopyAndCompact:
+              command_ok = use_resource(command.source.handle, WMTResourceUsageRead) &&
+                           use_resource(command.destination.handle, WMTResourceUsageWrite) &&
+                           encoder.copyAndCompact(command.source, command.destination);
+              break;
+            case AccelerationStructureCommandType::WriteCompactedSize:
+              command_ok = use_resource(command.acceleration_structure.handle, WMTResourceUsageRead) &&
+                           use_resource(command.buffer.handle, WMTResourceUsageWrite) &&
+                           encoder.writeCompactedSize(
+                               command.acceleration_structure, command.buffer, command.buffer_offset,
+                               command.size_data_type
+                           );
+              break;
+            }
+            if (!command_ok) {
+              WARN("D3D12 acceleration-structure translation failed to encode a command");
+              translation_failed = true;
+              break;
+            }
+          }
           encoder.endEncoding();
           break;
         }
@@ -229,23 +1800,106 @@ public:
           info.colors[0].store_action = WMTStoreActionStoreAndMultisampleResolve;
           info.colors[0].resolve_texture = data->dst.texture();
 
-          auto encoder = cmdbuf.renderCommandEncoder(info);
-          encoder.waitForFence(fence_, WMTRenderStageFragment);
-          encoder.setLabel(WMT::String::string("ResolvePass", WMTUTF8StringEncoding));
+           auto encoder = cmdbuf.renderCommandEncoder(info);
+           LabelEncoder(encoder, recording_id, data->id, "Resolve");
+           encoder.waitForFence(fence_, WMTRenderStageFragment);
           encoder.updateFence(fence_, WMTRenderStageFragment);
           encoder.endEncoding();
 
           break;
         }
+        case EncoderType::TemporalUpscale: {
+           auto data = static_cast<TemporalUpscaleData *>(current);
+
+           auto begin_scaler = cmdbuf.blitCommandEncoder();
+           LabelEncoder(begin_scaler, recording_id, data->id, "TemporalBegin");
+          begin_scaler.waitForFence(fence_);
+          begin_scaler.updateFence(data->scaler->fence());
+          begin_scaler.endEncoding();
+
+          cmdbuf.encodeTemporalScale(
+              data->scaler->scaler(), data->input, data->output, data->depth, data->motion_vector, data->exposure,
+              data->scaler->fence(), data->props
+          );
+
+           auto end_scaler = cmdbuf.blitCommandEncoder();
+           end_scaler.waitForFence(data->scaler->fence());
+           LabelEncoder(end_scaler, recording_id, data->id, "TemporalEnd");
+          end_scaler.updateFence(fence_);
+          end_scaler.endEncoding();
+          break;
+        }
+        case EncoderType::ResolveTimestamp: {
+          auto data = static_cast<ResolveTimestampData *>(current);
+          // Observe actual GPU completion on the worker, not on the caller.
+          // This also covers samples in an earlier submission: the fence wait
+          // makes even an otherwise empty prefix depend on prior queue work.
+          auto boundary = cmdbuf.blitCommandEncoder();
+          boundary.waitForFence(fence_);
+          boundary.updateFence(fence_);
+          boundary.endEncoding();
+          cmdbuf.commit();
+          cmdbuf.waitUntilCompleted();
+          if (cmdbuf.status() != WMTCommandBufferStatusCompleted) {
+            ERR("D3D12 timestamp prefix failed: submission ", submission.serial, DescribeSubmission(submission));
+            return false;
+          }
+          cmdbuf = NewCommandBuffer();
+          if (!cmdbuf) return false;
+          submission.command_buffer = cmdbuf;
+          auto encoder = cmdbuf.blitCommandEncoder();
+          LabelEncoder(encoder, recording_id, data->id, "ResolveTimestamp");
+          encoder.waitForFence(fence_);
+          wmtcmd_blit_resolvecounters resolve = {};
+          resolve.type = WMTBlitCommandResolveCounters;
+          resolve.next.set(nullptr);
+          resolve.sample_buffer = data->sample_buffer.handle;
+          resolve.start = data->start;
+          resolve.len = data->count;
+          resolve.dst_buffer = data->destination;
+          resolve.dst_offset = data->destination_offset;
+          MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&resolve);
+          encoder.updateFence(fence_);
+          encoder.endEncoding();
+          break;
+        }
+        case EncoderType::SampleTimestamp: {
+          auto data = static_cast<SampleTimestampData *>(current);
+          if (!data->sample_buffer || !timestamp_dummy_buffer_)
+            break;
+
+          WMTSampleBufferAttachmentInfo attachment = {};
+          attachment.sample_buffer = data->sample_buffer.handle;
+          attachment.start_of_encoder_sample_index = data->sample_index;
+           attachment.end_of_encoder_sample_index = ~0ull;
+           auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&attachment, 1);
+           LabelEncoder(encoder, recording_id, data->id, "SampleTimestamp");
+           encoder.waitForFence(fence_);
+
+          wmtcmd_blit_fillbuffer fill = {};
+          fill.type = WMTBlitCommandFillBuffer;
+          fill.next.set(nullptr);
+          fill.buffer = timestamp_dummy_buffer_;
+          fill.offset = 0;
+          fill.length = sizeof(uint32_t);
+          fill.value = 0;
+          MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
+
+          encoder.updateFence(fence_);
+          encoder.endEncoding();
+          break;
+        }
         }
         current = current->next;
       }
+      if (translation_failed) {
+        return false;
+      }
     }
-    cmdbuf.commit();
-    // temporary workaround
-    cmdbuf.waitUntilCompleted();
-  };
+    return true;
+  }
 
+public:
   void STDMETHODCALLTYPE SetMarker(UINT metadata, const void *data, UINT size) {};
 
   void STDMETHODCALLTYPE BeginEvent(UINT metadata, const void *data, UINT size) {};
@@ -254,33 +1908,123 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   Signal(ID3D12Fence *pFence, UINT64 Value) {
+    if (!IsSameDevice(device_, pFence))
+      return E_INVALIDARG;
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return E_FAIL;
+
     auto pool = WMT::MakeAutoreleasePool();
-    auto cmdbuf = queue_.commandBuffer();
+    auto cmdbuf = NewCommandBuffer();
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     static_cast<MTLD3D12Fence *>(pFence)->fence->signal(cmdbuf, Value);
-    cmdbuf.commit();
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    // Retain the exact event generation encoded above. Failure wakes registered
+    // listeners with device removal, never with a fabricated successful value.
+    submission.error_event = static_cast<MTLD3D12Fence *>(pFence)->fence->sharedEvent();
+    if (!CommitSubmissionLocked(submission))
+      return E_FAIL;
     return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE
   Wait(ID3D12Fence *pFence, UINT64 Value) {
+    if (!IsSameDevice(device_, pFence))
+      return E_INVALIDARG;
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return E_FAIL;
+
     auto pool = WMT::MakeAutoreleasePool();
-    auto cmdbuf = queue_.commandBuffer();
+    auto cmdbuf = NewCommandBuffer();
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     static_cast<MTLD3D12Fence *>(pFence)->fence->wait(cmdbuf, Value);
-    cmdbuf.commit();
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    if (!CommitSubmissionLocked(submission))
+      return E_FAIL;
     return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE
   GetTimestampFrequency(UINT64 *pFrequency) {
-    // FIXME: stub
-    if (pFrequency)
-      *pFrequency = 1;
+    if (!pFrequency)
+      return E_INVALIDARG;
+    *pFrequency = 1000000000ull;
     return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE
   GetClockCalibration(UINT64 *gpu_timestamp, UINT64 *cpu_timestamp) {
-    return E_NOTIMPL;
+    if (!gpu_timestamp || !cpu_timestamp)
+      return E_INVALIDARG;
+
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return E_FAIL;
+
+    auto pool = WMT::MakeAutoreleasePool();
+    auto sample_buffer = device_->GetMTLDevice().newCounterSampleBuffer(1, true);
+    if (!sample_buffer)
+      return E_FAIL;
+
+    LARGE_INTEGER cpu_before = {};
+    LARGE_INTEGER cpu_after = {};
+    if (!QueryPerformanceCounter(&cpu_before))
+      return E_FAIL;
+
+    WMTSampleBufferAttachmentInfo attachment = {};
+    attachment.sample_buffer = sample_buffer.handle;
+    attachment.start_of_encoder_sample_index = 0;
+    attachment.end_of_encoder_sample_index = ~0ull;
+
+    auto cmdbuf = NewCommandBuffer();
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
+    auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&attachment, 1);
+    encoder.waitForFence(fence_);
+
+    wmtcmd_blit_fillbuffer fill = {};
+    fill.type = WMTBlitCommandFillBuffer;
+    fill.next.set(nullptr);
+    fill.buffer = timestamp_dummy_buffer_;
+    fill.offset = 0;
+    fill.length = sizeof(uint32_t);
+    fill.value = 0;
+    MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
+
+    encoder.updateFence(fence_);
+    encoder.endEncoding();
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    const auto serial = next_submission_serial_;
+    if (!CommitSubmissionLocked(submission))
+      return E_FAIL;
+
+    commit_lock.unlock();
+    {
+      std::unique_lock<dxmt::mutex> lock(submission_mutex_);
+      submission_condition_.wait(lock, [this, serial] { return committed_submission_serial_ >= serial; });
+    }
+    if (FAILED(device_->GetDeviceRemovedReason())) return device_->GetDeviceRemovedReason();
+    cmdbuf.waitUntilCompleted();
+
+    if (!QueryPerformanceCounter(&cpu_after))
+      return E_FAIL;
+
+    UINT64 gpu_value = 0;
+    sample_buffer.resolveCounterRange(0, 1, &gpu_value, sizeof(gpu_value));
+    if (!gpu_value)
+      return E_FAIL;
+
+    const auto cpu_start = static_cast<UINT64>(cpu_before.QuadPart);
+    const auto cpu_end = static_cast<UINT64>(cpu_after.QuadPart);
+    *gpu_timestamp = gpu_value;
+    *cpu_timestamp = cpu_start + (cpu_end - cpu_start) / 2;
+    return S_OK;
   };
 
   D3D12_COMMAND_QUEUE_DESC *STDMETHODCALLTYPE
@@ -298,9 +2042,16 @@ public:
   }
 
   HRESULT
-  Present(Presenter *presenter, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable) {
+  Present(Presenter *presenter, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable, double after) {
+    static uint32_t trace_present_count = 0;
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return E_FAIL;
+
     auto pool = WMT::MakeAutoreleasePool();
-    auto cmdbuf = queue_.commandBuffer();
+    auto cmdbuf = NewCommandBuffer();
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
 
     auto g = reinterpret_cast<MTLD3D12Resource *>(backbuffer);
     auto &view = g->texture->view(g->texture->fullView);
@@ -312,14 +2063,21 @@ public:
         [&](auto encoder) { encoder.updateFence(fence_, WMTRenderStageFragment); }
     );
 
-    cmdbuf.presentDrawable(drawable);
-    cmdbuf.commit();
-
-    {
-      // temporary workaround
-      cmdbuf.waitUntilCompleted();
-      ReleaseSemaphore(hLantecyWaitable, 1, nullptr);
+    if (trace_present_count++ < 32) {
+      auto drawable_texture = drawable.texture();
+      DEBUG("D3D12 queue Present: backbuffer=", view.texture.handle, " drawable=", drawable.handle,
+            " drawable_texture=", drawable_texture.handle);
     }
+
+    if (after > 0)
+      cmdbuf.presentDrawableAfterMinimumDuration(drawable, after);
+    else
+      cmdbuf.presentDrawable(drawable);
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    submission.latency_waitable = hLantecyWaitable;
+    if (!CommitSubmissionLocked(submission))
+      return E_FAIL;
 
     return S_OK;
   }

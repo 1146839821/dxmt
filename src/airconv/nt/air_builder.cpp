@@ -1,4 +1,6 @@
 #include "air_builder.hpp"
+#include "../airconv_context.hpp"
+#include "../air_sampler_abi.hpp"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Instructions.h"
@@ -7,8 +9,196 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <format>
+#include <limits>
 
 namespace llvm::air {
+
+Optional<Value *>
+AIRBuilder::CreateIsotropicGradientLOD(const Texture &Texture, Value *Handle, Value *DerivX, Value *DerivY,
+                                     Value *Direction) {
+  const bool cube = Texture.kind == Texture::texturecube || Texture.kind == Texture::texturecube_array;
+  unsigned axes = 2;
+  if (Texture.kind == Texture::texture3d) axes = 3;
+  else if (!cube && Texture.kind != Texture::texture2d && Texture.kind != Texture::texture2d_array) return None;
+  if (!Handle || !DerivX || !DerivY || Handle->getType() != getTextureHandleType(Texture) ||
+      DerivX->getType() != getFloatTy(cube ? 3 : axes) ||
+      DerivY->getType() != getFloatTy(cube ? 3 : axes) ||
+      (cube && (!Direction || Direction->getType() != getFloatTy(3)))) return None;
+  if (cube) {
+    auto *absolute = CreateFPUnOp(fabs, Direction, false);
+    auto *x = builder.CreateExtractElement(absolute, 0ull);
+    auto *y = builder.CreateExtractElement(absolute, 1ull);
+    auto *z = builder.CreateExtractElement(absolute, 2ull);
+    auto *major_z = builder.CreateAnd(builder.CreateFCmpOGE(z, x), builder.CreateFCmpOGE(z, y));
+    auto *major_y = builder.CreateFCmpOGE(y, x);
+    auto *major_axis = builder.CreateSelect(major_z, getInt(2),
+        builder.CreateSelect(major_y, getInt(1), getInt(0)));
+    auto *first_axis = builder.CreateSelect(builder.CreateICmpEQ(major_axis, getInt(0)), getInt(1), getInt(0));
+    auto *second_axis = builder.CreateSelect(major_z, getInt(1), getInt(2));
+    auto *major = builder.CreateExtractElement(Direction, major_axis);
+    // Mirroring/permuting both face derivatives preserves the Gram matrix.
+    // Quotient-rule projection removes radial direction changes before LOD.
+    auto project = [&](Value *derivative) {
+      auto *major_derivative = builder.CreateFDiv(builder.CreateExtractElement(derivative, major_axis), major);
+      Value *result = ConstantFP::getNullValue(getFloatTy(2));
+      unsigned component = 0;
+      for (auto *axis : {first_axis, second_axis}) {
+        auto *coordinate = builder.CreateFDiv(builder.CreateExtractElement(Direction, axis), major);
+        auto *minor = builder.CreateFDiv(builder.CreateExtractElement(derivative, axis), major);
+        auto *projected = builder.CreateFMul(getFloat(0.5),
+            builder.CreateFSub(minor, builder.CreateFMul(coordinate, major_derivative)));
+        result = builder.CreateInsertElement(result, projected, component++);
+      }
+      return result;
+    };
+    DerivX = project(DerivX);
+    DerivY = project(DerivY);
+  }
+  const Texture::Query queries[] = {Texture::width, Texture::height, Texture::depth};
+  SmallVector<Value *, 3> dx, dy;
+  Value *scale = getFloat(0);
+  for (unsigned axis = 0; axis < axes; ++axis) {
+    auto *size = builder.CreateUIToFP(CreateTextureQuery(Texture, Handle, cube ? Texture::width : queries[axis], getInt(0)), getFloatTy());
+    auto *x = builder.CreateFMul(builder.CreateExtractElement(DerivX, axis), size);
+    auto *y = builder.CreateFMul(builder.CreateExtractElement(DerivY, axis), size);
+    dx.push_back(x); dy.push_back(y);
+    scale = CreateFPBinOp(fmax, scale, CreateFPUnOp(fabs, x, false), false);
+    scale = CreateFPBinOp(fmax, scale, CreateFPUnOp(fabs, y, false), false);
+  }
+  // Normalize before forming the Gram matrix, avoiding squared-length overflow
+  // for finite scaled derivatives. Zero gradients retain LOD -infinity.
+  auto *safe_scale = builder.CreateSelect(builder.CreateFCmpOGT(scale, getFloat(0)), scale, getFloat(1));
+  Value *a = getFloat(0), *b = getFloat(0), *c = getFloat(0);
+  for (unsigned axis = 0; axis < axes; ++axis) {
+    auto *x = builder.CreateFDiv(dx[axis], safe_scale);
+    auto *y = builder.CreateFDiv(dy[axis], safe_scale);
+    a = builder.CreateFAdd(a, builder.CreateFMul(x, x));
+    b = builder.CreateFAdd(b, builder.CreateFMul(x, y));
+    c = builder.CreateFAdd(c, builder.CreateFMul(y, y));
+  }
+  auto *difference = builder.CreateFSub(a, c);
+  auto *discriminant = builder.CreateFAdd(builder.CreateFMul(difference, difference),
+      builder.CreateFMul(getFloat(4), builder.CreateFMul(b, b)));
+  auto *major = builder.CreateFMul(getFloat(0.5), builder.CreateFAdd(builder.CreateFAdd(a, c),
+      CreateFPUnOp(sqrt, discriminant, false)));
+  auto *determinant = builder.CreateFSub(builder.CreateFMul(a, c), builder.CreateFMul(b, b));
+  // D3D's zero/parallel-gradient caveat skips ellipse transformation. For
+  // perpendicular vectors the major eigenvalue already equals max(a,c).
+  auto *squared_length = builder.CreateSelect(builder.CreateFCmpOGT(determinant, getFloat(0)),
+      major, CreateFPBinOp(fmax, a, c, false));
+  auto *lod = builder.CreateFAdd(builder.CreateFMul(getFloat(0.5), CreateFPUnOp(log2, squared_length, false)),
+      CreateFPUnOp(log2, safe_scale, false));
+  auto *infinity = getFloat(std::numeric_limits<float>::infinity());
+  return builder.CreateSelect(builder.CreateFCmpOEQ(scale, infinity), infinity, lod);
+}
+
+Optional<Value *>
+AIRBuilder::CreateReductionSampleLevel(
+    const Texture &Texture, Value *Handle, Value *PointSampler, Value *Coord,
+    Value *ArrayIndex, Value *ClampedLOD, Value *Flags, const int32_t Offset[3]) {
+  if (Texture.sample_type != Texture::sample_float || Texture.memory_access != Texture::access_sample)
+    return None;
+  const char *symbol = nullptr;
+  unsigned dimensions = 2;
+  const bool cube = Texture.kind == Texture::texturecube || Texture.kind == Texture::texturecube_array;
+  const bool array = Texture.kind == Texture::texture2d_array || Texture.kind == Texture::texturecube_array;
+  if (cube && (Offset[0] || Offset[1] || Offset[2])) return None;
+  switch (Texture.kind) {
+  case Texture::texture2d: symbol = "dxmt.minmax.sample_level.2d"; break;
+  case Texture::texture2d_array:
+    if (!ArrayIndex) return None;
+    symbol = "dxmt.minmax.sample_level.2d_array";
+    break;
+  case Texture::texture3d: symbol = "dxmt.minmax.sample_level.3d"; dimensions = 3; break;
+  case Texture::texturecube: symbol = "dxmt.minmax.sample_level.cube"; break;
+  case Texture::texturecube_array:
+    if (!ArrayIndex) return None;
+    symbol = "dxmt.minmax.sample_level.cube_array";
+    break;
+  default: return None;
+  }
+  if (!Handle || !PointSampler || !Coord || !ClampedLOD || !Flags ||
+      Handle->getType() != getTextureHandleType(Texture) || PointSampler->getType() != getSamplerHandleType() ||
+      Coord->getType() != getTextureSampleCoordType(Texture) || ClampedLOD->getType() != getFloatTy() ||
+      Flags->getType() != getIntTy() ||
+      (array && ArrayIndex->getType() != getIntTy()))
+    return None;
+  SmallVector<Value *> operands{Handle, PointSampler, Coord};
+  if (array) operands.push_back(ArrayIndex);
+  operands.push_back(ClampedLOD);
+  operands.push_back(Flags);
+  if (!cube)
+    operands.push_back(dimensions == 2 ? getInt2(Offset[0], Offset[1]) : getInt3(Offset[0], Offset[1], Offset[2]));
+  SmallVector<Type *> types;
+  for (auto *operand : operands) types.push_back(operand->getType());
+  auto function = getModule()->getOrInsertFunction(symbol, FunctionType::get(getFloatTy(4), types, false));
+  auto *callee = dyn_cast<Function>(function.getCallee());
+  if (!callee) return None;
+  const bool needs_link = callee->isDeclaration();
+  auto *result = builder.CreateCall(function, operands);
+  if (needs_link && !dxmt::linkMinMax(*getModule())) {
+    result->eraseFromParent();
+    return None;
+  }
+  return result;
+}
+
+Optional<Value *>
+AIRBuilder::CreateClampedReductionSampleLevel(
+    const Texture &Texture, Value *Handle, Value *PointSampler, Value *Coord,
+    Value *ArrayIndex, Value *SamplerClampedLOD, Value *Flags, const int32_t Offset[3],
+    Value *MinLODClamp, Value *DefaultComponents) {
+  // Validate before creating blocks or querying a texture. Legacy bindings do
+  // not carry default components and must keep using the unclamped primitive.
+  const bool cube = Texture.kind == Texture::texturecube || Texture.kind == Texture::texturecube_array;
+  if (cube && (Offset[0] || Offset[1] || Offset[2])) return None;
+  if (Texture.sample_type != Texture::sample_float || Texture.memory_access != Texture::access_sample ||
+      (Texture.kind != Texture::texture2d && Texture.kind != Texture::texture2d_array &&
+       Texture.kind != Texture::texture3d && !cube) ||
+      !Handle || !PointSampler || !Coord || !SamplerClampedLOD || !Flags || !MinLODClamp || !DefaultComponents ||
+      Handle->getType() != getTextureHandleType(Texture) || PointSampler->getType() != getSamplerHandleType() ||
+      Coord->getType() != getTextureSampleCoordType(Texture) || SamplerClampedLOD->getType() != getFloatTy() ||
+      Flags->getType() != getIntTy() || MinLODClamp->getType() != getFloatTy() ||
+      !DefaultComponents->getType()->isIntegerTy(64) ||
+      ((Texture.kind == Texture::texture2d_array || Texture.kind == Texture::texturecube_array) &&
+          (!ArrayIndex || ArrayIndex->getType() != getIntTy())))
+    return None;
+
+  auto *mips = CreateTextureQuery(Texture, Handle, Texture::num_mip_levels, getInt(0));
+  auto *last_mip = builder.CreateFSub(builder.CreateUIToFP(mips, getFloatTy()), getFloat(1));
+  auto *empty = builder.CreateFCmpOGT(MinLODClamp, last_mip, "sample.clamp.empty");
+  auto *function = builder.GetInsertBlock()->getParent();
+  auto *default_block = BasicBlock::Create(builder.getContext(), "sample.clamp.defaults", function);
+  auto *sample_block = BasicBlock::Create(builder.getContext(), "sample.clamp.active", function);
+  auto *merge_block = BasicBlock::Create(builder.getContext(), "sample.clamp.merge", function);
+  builder.CreateCondBr(empty, default_block, sample_block);
+
+  builder.SetInsertPoint(default_block);
+  Value *defaults = Constant::getNullValue(getFloatTy(4));
+  for (unsigned component = 0; component < 4; ++component) {
+    auto *bit = builder.CreateAnd(DefaultComponents, builder.getInt64(uint64_t(1) << component));
+    auto *one = builder.CreateICmpNE(bit, builder.getInt64(0));
+    defaults = builder.CreateInsertElement(defaults, builder.CreateSelect(one, getFloat(1), getFloat(0)), component);
+  }
+  builder.CreateBr(merge_block);
+
+  builder.SetInsertPoint(sample_block);
+  auto *lod = CreateFPBinOp(fmax, SamplerClampedLOD, MinLODClamp, false);
+  // Resource/instruction clamps can move magnification into minification.
+  // Clear the caller's classification and derive it from the final LOD.
+  auto *flags = builder.CreateAnd(Flags, getInt(~dxmt::air::SamplerMinifying));
+  flags = builder.CreateOr(flags, builder.CreateSelect(builder.CreateFCmpOGT(lod, getFloat(0)),
+      getInt(dxmt::air::SamplerMinifying), getInt(0)));
+  auto value = CreateReductionSampleLevel(Texture, Handle, PointSampler, Coord, ArrayIndex, lod, flags, Offset);
+  if (!value) return None;
+  auto *sample_exit = builder.GetInsertBlock();
+  builder.CreateBr(merge_block);
+  builder.SetInsertPoint(merge_block);
+  auto *result = builder.CreatePHI(getFloatTy(4), 2, "sample.clamp.result");
+  result->addIncoming(defaults, default_block);
+  result->addIncoming(*value, sample_exit);
+  return result;
+}
 
 struct TextureOperationInfo {
   const char *air_symbol_suffix;
@@ -973,7 +1163,9 @@ AIRBuilder::CreateTextureQuery(const Texture &Texture, Value *Handle, Texture::Q
 
   auto Fn = getModule()->getOrInsertFunction(FnName, FunctionType::get(getIntTy(), Tys, false), Attrs);
 
-  return builder.CreateCall(Fn, Ops);
+  // D3D12 permits NULL SRV descriptors.  AIR's texture query intrinsics
+  // produce an undefined result for a null handle; HLSL requires zero.
+  return builder.CreateSelect(builder.CreateIsNull(Handle), builder.getInt32(0), builder.CreateCall(Fn, Ops));
 }
 
 std::pair<Value *, Value *>
@@ -1093,7 +1285,8 @@ AIRBuilder::CreateDerivative(Value *Val, bool YAxis) {
   }
   auto &Context = getContext();
   auto Attrs = AttributeList::get(
-      Context, {{~0U, Attribute::get(Context, Attribute::AttrKind::NoUnwind)},
+      Context, {{~0U, Attribute::get(Context, Attribute::AttrKind::Convergent)},
+                {~0U, Attribute::get(Context, Attribute::AttrKind::NoUnwind)},
                 {~0U, Attribute::get(Context, Attribute::AttrKind::WillReturn)}}
   );
 
@@ -1483,7 +1676,7 @@ AIRBuilder::CreateInterpolateAtOffset(Value *Interpoant, Value *Offset, bool Per
 
   auto Fn = getModule()->getOrInsertFunction(
       Perspective ? "air.interpolate_offset_perspective.v4f32" : "air.interpolate_offset_no_perspective.v4f32",
-      FunctionType::get(getFloatTy(4), {Interpoant->getType(), getIntTy(2)}, false), Attrs
+      FunctionType::get(getFloatTy(4), {Interpoant->getType(), getFloatTy(2)}, false), Attrs
   );
 
   return builder.CreateCall(Fn, {Interpoant, Offset});
@@ -1780,6 +1973,7 @@ AIRBuilder::CreateIntBinOp(IntBinOp Op, Value *LHS, Value *RHS, bool Signed) {
   static char const *FnNames[] = {
       "max",
       "min",
+      "mul_hi",
   };
 
   if (uint32_t(Op) >= std::size(FnNames)) {

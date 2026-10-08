@@ -43,3 +43,48 @@ executable('airconv', airconv_src + airconv_cli_src,
   link_args           : [ llvm_ld_flags_darwin, llvm_deps ],
   native              : dxmt_crossbuild
 )
+
+if get_option('enable_tests')
+  airconv_api_boundary_test = executable('airconv-api-boundary-test',
+    files('../tests/api_boundary.cpp'),
+    dependencies : [ airconv_dep_darwin ],
+    native : dxmt_crossbuild
+  )
+  test('airconv API boundary', airconv_api_boundary_test)
+  root_feedback_query_test = executable('root-feedback-query-test',
+    files('../tests/root_feedback_query.cpp'),
+    include_directories : [ llvm_include_path_darwin ],
+    cpp_args : [ airconv_args ],
+    dependencies : [ airconv_dep_darwin, dxbc_parser_native_dep ],
+    native : dxmt_crossbuild
+  )
+  test('airconv root feedback query', root_feedback_query_test)
+
+  buffer_feedback_decode_test = executable('buffer-feedback-decode-test',
+    files('../tests/buffer_feedback_decode.cpp'),
+    include_directories : [ llvm_include_path_darwin ],
+    cpp_args : [ airconv_args ],
+    dependencies : [ airconv_dep_darwin, dxbc_parser_native_dep ],
+    native : dxmt_crossbuild
+  )
+  test('airconv buffer feedback decode', buffer_feedback_decode_test)
+
+  buffer_feedback_ir_test = executable('buffer-feedback-ir-test',
+    files('../tests/buffer_feedback_ir.cpp'),
+    include_directories : [ llvm_include_path_darwin ],
+    cpp_args : [ airconv_args ],
+    dependencies : [ airconv_dep_darwin, dxbc_parser_native_dep ],
+    native : dxmt_crossbuild
+  )
+  test('airconv buffer feedback IR', buffer_feedback_ir_test)
+
+  lower_unsupported_double_test = executable('lower-unsupported-double-test',
+    files('../tests/lower_unsupported_double.cpp', '../transforms/lower_unsupported_double.cpp'),
+    include_directories : [ include_directories('..'), llvm_include_path_darwin ],
+    cpp_args            : [ airconv_args ],
+    link_args           : [ llvm_ld_flags_darwin, llvm_deps ],
+    native              : dxmt_crossbuild
+  )
+
+  test('airconv lower unsupported double', lower_unsupported_double_test)
+endif

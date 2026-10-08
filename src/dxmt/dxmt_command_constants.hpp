@@ -11,11 +11,19 @@ namespace dxmt {
 constexpr CONSTANT auto kCustomBufferArgumentIndex0 = 30;
 constexpr CONSTANT auto kCustomBufferArgumentIndex1 = 29;
 
+// Internal predication kernels use the high binding slots so that their
+// temporary bindings cannot overlap the normal D3D12 root argument slots.
+constexpr CONSTANT auto kPredicationParamsIndex = 27;
+constexpr CONSTANT auto kPredicationPredicateIndex = 28;
+constexpr CONSTANT auto kPredicationSourceIndex = 29;
+constexpr CONSTANT auto kPredicationOutputIndex = 30;
+
 constexpr CONSTANT auto kPresentFCIndex_BackbufferSizeMatched = 0x100;
 constexpr CONSTANT auto kPresentFCIndex_BackbufferIsSRGB = 0x103;
 constexpr CONSTANT auto kPresentFCIndex_HDRPQ = 0x101;
 constexpr CONSTANT auto kPresentFCIndex_WithHDRMetadata = 0x102;
 constexpr CONSTANT auto kPresentFCIndex_BackbufferIsMS = 0x104;
 constexpr CONSTANT auto kPresentFCIndex_GammaEnabled = 0x105;
+constexpr CONSTANT auto kDepthCoverageFCIndex_SampleMask = 0x106;
 
 } // namespace dxmt

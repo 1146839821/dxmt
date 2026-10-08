@@ -587,6 +587,7 @@ void handle_signature_ps(
           });
         };
       });
+      sm50_shader->ps_has_coverage_output = 1;
       break;
     }
 
@@ -600,9 +601,14 @@ void handle_signature_ps(
       max_output_register = std::max(reg + 1, max_output_register);
       pso_valid_output_reg_mask |= (1 << reg);
       if (sig.mask() == 0) break;
-      auto type = sig.componentType();
+      auto sig_type = sig.componentType();
       signature_handlers.push_back([=](SignatureContext &ctx) {
         uint32_t assigned_index;
+        auto type = reg < std::size(ctx.pixel_formats)
+                      ? component_type_from_pixel_format(ctx.pixel_formats[reg])
+                      : RegisterComponentType::Unknown;
+        if (ctx.dual_source_blending || type == RegisterComponentType::Unknown)
+          type = sig_type;
         if (ctx.dual_source_blending) {
           if (reg > 1 || reg < 0)
             return;
@@ -622,6 +628,51 @@ void handle_signature_ps(
           ctx.epilogue >> pop_output_reg_fix_unorm(reg, mask, assigned_index);
         else
           ctx.epilogue >> pop_output_reg(reg, mask, assigned_index);
+        if (reg < 8 && (ctx.logic_op_mask & (1u << reg))) {
+          const auto argument = ctx.func_signature.DefineInput(InputRenderTarget{reg, to_msl_type(type)});
+          const auto operation = ctx.logic_op;
+          uint32_t bits[4] = {32, 32, 32, 32};
+          switch (ctx.pixel_formats[reg]) {
+          case MTLPixelFormat::R8Uint: case MTLPixelFormat::RG8Uint: case MTLPixelFormat::RGBA8Uint:
+            std::fill(std::begin(bits), std::end(bits), 8); break;
+          case MTLPixelFormat::R16Uint: case MTLPixelFormat::RG16Uint: case MTLPixelFormat::RGBA16Uint:
+            std::fill(std::begin(bits), std::end(bits), 16); break;
+          case MTLPixelFormat::RGB10A2Uint: bits[0] = bits[1] = bits[2] = 10; bits[3] = 2; break;
+          default: break;
+          }
+          ctx.epilogue >> [=](pvalue ret) -> IRValue {
+            return make_irvalue([=](context ctx) -> pvalue {
+              auto &b = ctx.builder;
+              auto source = b.CreateExtractValue(ret, assigned_index);
+              auto destination = ctx.function->getArg(argument);
+              llvm::Value *result = nullptr;
+              switch (operation) {
+              case 0: result = llvm::Constant::getNullValue(source->getType()); break;
+              case 1: result = llvm::Constant::getAllOnesValue(source->getType()); break;
+              case 2: result = source; break;
+              case 3: result = b.CreateNot(source); break;
+              case 4: result = destination; break;
+              case 5: result = b.CreateNot(destination); break;
+              case 6: result = b.CreateAnd(source, destination); break;
+              case 7: result = b.CreateNot(b.CreateAnd(source, destination)); break;
+              case 8: result = b.CreateOr(source, destination); break;
+              case 9: result = b.CreateNot(b.CreateOr(source, destination)); break;
+              case 10: result = b.CreateXor(source, destination); break;
+              case 11: result = b.CreateNot(b.CreateXor(source, destination)); break;
+              case 12: result = b.CreateAnd(source, b.CreateNot(destination)); break;
+              case 13: result = b.CreateAnd(b.CreateNot(source), destination); break;
+              case 14: result = b.CreateOr(source, b.CreateNot(destination)); break;
+              case 15: result = b.CreateOr(b.CreateNot(source), destination); break;
+              default: llvm_unreachable("validated logic operation");
+              }
+              llvm::Constant *masks[4];
+              for (unsigned i = 0; i < 4; ++i)
+                masks[i] = b.getInt32(bits[i] == 32 ? ~0u : (1u << bits[i]) - 1);
+              result = b.CreateAnd(result, llvm::ConstantVector::get(masks));
+              return b.CreateInsertValue(ret, result, assigned_index);
+            });
+          };
+        }
       });
       break;
     }

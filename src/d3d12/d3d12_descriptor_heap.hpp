@@ -20,37 +20,42 @@
 #include "d3d12.h"
 #include "dxmt_buffer.hpp"
 #include "dxmt_texture.hpp"
+#include "dxmt_sampler.hpp"
+#include "air_sampler_abi.hpp"
+#include "metalirconverter_thunks.h"
 #include <cstdint>
-
-#if UINTPTR_MAX == 0xffffffffffffffffULL
-#define DXMT_USE_EMBEDDED_HEAP_POINTER
-#endif
+#include <mutex>
+#include <vector>
 
 namespace dxmt {
 
-struct EMBEDDED_DESCRIPTOR_HANDLE {
-#ifndef DXMT_USE_EMBEDDED_HEAP_POINTER
-  SIZE_T Tag        : 5;
-  SIZE_T Descriptor : 20;
-  SIZE_T Heap       : 7;
-#else
-  SIZE_T Tag        : 5;
-  SIZE_T Descriptor : 20;
-  SIZE_T Heap       : 39;
+SIZE_T RegisterDescriptorHeap(const void *heap);
+void UnregisterDescriptorHeap(const void *heap);
+const void *LookupDescriptorHeap(SIZE_T index);
 
-  // assume pointer is 8-byte aligned, providing 3 free bits
+constexpr SIZE_T kDescriptorHeapTag = 0x1f;
+
+struct EMBEDDED_DESCRIPTOR_HANDLE {
+  SIZE_T Tag        : 5;
+  SIZE_T Descriptor : 20;
+  SIZE_T Heap       : sizeof(SIZE_T) == 4 ? 7 : 39;
+
+  const void *
+  getHeap() const {
+    return Tag == kDescriptorHeapTag ? LookupDescriptorHeap(Heap) : nullptr;
+  }
+
   template <typename T>
   T *
   extract() {
-    return reinterpret_cast<T *>((Heap << 8) | (Tag << 3));
+    return reinterpret_cast<T *>(const_cast<void *>(getHeap()));
   }
 
   EMBEDDED_DESCRIPTOR_HANDLE(const void *heap, SIZE_T index) {
-    Heap = (SIZE_T)heap >> 8;
-    Tag = (SIZE_T)heap >> 3;
+    Heap = RegisterDescriptorHeap(heap);
+    Tag = kDescriptorHeapTag;
     Descriptor = index;
   }
-#endif
 
   EMBEDDED_DESCRIPTOR_HANDLE(D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
     union {
@@ -78,6 +83,7 @@ static_assert(sizeof(EMBEDDED_DESCRIPTOR_HANDLE) == sizeof(D3D12_CPU_DESCRIPTOR_
 enum class ShaderVisibleDescriptorType {
   Null,
   SRVTexture,
+  SRVAccelerationStructure,
   ConstantBuffer,
   UAVTexture,
   UAVTexelBuffer,
@@ -89,9 +95,17 @@ enum class ShaderVisibleDescriptorType {
 struct SRVTextureCPUStorage {
   Texture *texture = nullptr;
   TextureViewKey view{};
+  FLOAT resource_min_lod_clamp = 0.0f;
+  uint64_t default_components = 0; // Same validity/one-mask as AIR texture word 2.
 };
 
 using UAVTextureCPUStorage = SRVTextureCPUStorage;
+
+struct SRVAccelerationStructureCPUStorage {
+  obj_handle_t acceleration_structure = NULL_OBJECT_HANDLE;
+  obj_handle_t acceleration_structure_header = NULL_OBJECT_HANDLE;
+  D3D12_GPU_VIRTUAL_ADDRESS header_gpu_virtual_address = 0;
+};
 
 struct UAVTexelBufferCPUStorage {
   Buffer *buffer = nullptr;
@@ -117,6 +131,7 @@ struct ShaderVisibleDescriptorCPUStorage {
   ShaderVisibleDescriptorType type;
   union {
     SRVTextureCPUStorage SRVTexture;
+    SRVAccelerationStructureCPUStorage SRVAccelerationStructure;
     CBVCommonStorage ConstantBuffer;
     UAVTextureCPUStorage UAVTexture;
     UAVTexelBufferCPUStorage UAVTexelBuffer;
@@ -124,16 +139,115 @@ struct ShaderVisibleDescriptorCPUStorage {
     SRVTexelBufferCPUStorage SRVTexelBuffer;
     SRVBufferCPUStorage SRVBuffer;
   };
+  // Keep the allocation identity available after the owning D3D12 resource
+  // is released. The descriptor heap owns the matching Rc separately.
+  BufferAllocation *allocation = nullptr;
 
-  ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null) {}
+  ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null), ConstantBuffer{}, allocation(nullptr) {}
+};
+
+// Logical typed-view metadata belongs to the allocation used to create the
+// native view, not to Buffer::current() at a later observation point.
+struct MSCTypedBufferBinding {
+  Rc<BufferAllocation> allocation;
+  WMT::Reference<WMT::Texture> view;
+  uint64_t byte_offset = 0;
+  uint32_t element_count = 0;
+  uint32_t element_stride = 0;
+  // Separate from the exact view: unmodified MSC shaders must never consume
+  // an aligned-down view without applying this origin and logical bound.
+  WMT::Reference<WMT::Texture> origin_view;
+  dxmt_msc_descriptor_entry origin_descriptor = {};
+  uint32_t texel_origin = 0;
+};
+
+// A descriptor snapshot owns the native objects that back the CPU-side
+// descriptor payload.  The owning references are copied while the heap lock
+// is held, so callers can fan out resource-use declarations after releasing
+// the lock without observing a half-overwritten descriptor.
+struct ShaderVisibleDescriptorSnapshot {
+  UINT index = 0;
+  ShaderVisibleDescriptorCPUStorage descriptor{};
+  Rc<Texture> texture;
+  Rc<Buffer> buffer;
+  Rc<BufferAllocation> buffer_allocation;
+  MSCTypedBufferBinding msc_typed_buffer;
+  dxmt_msc_descriptor_entry msc_descriptor = {};
+  WMT::Reference<WMT::Texture> msc_texture_view;
+  Rc<BufferAllocation> allocation;
+  WMT::Reference<WMT::AccelerationStructure> acceleration_structure;
+  WMT::Reference<WMT::Buffer> acceleration_structure_header;
+
+  void
+  Rebind() {
+    switch (descriptor.type) {
+    case ShaderVisibleDescriptorType::SRVTexture:
+      descriptor.SRVTexture.texture = texture.ptr();
+      break;
+    case ShaderVisibleDescriptorType::UAVTexture:
+      descriptor.UAVTexture.texture = texture.ptr();
+      break;
+    case ShaderVisibleDescriptorType::ConstantBuffer:
+      descriptor.allocation = allocation.ptr();
+      break;
+    case ShaderVisibleDescriptorType::UAVTexelBuffer:
+      descriptor.UAVTexelBuffer.buffer = buffer.ptr();
+      break;
+    case ShaderVisibleDescriptorType::SRVTexelBuffer:
+      descriptor.SRVTexelBuffer.buffer = buffer.ptr();
+      break;
+    case ShaderVisibleDescriptorType::UAVBuffer:
+      descriptor.UAVBuffer.buffer = buffer.ptr();
+      break;
+    case ShaderVisibleDescriptorType::SRVBuffer:
+      descriptor.SRVBuffer.buffer = buffer.ptr();
+      break;
+    case ShaderVisibleDescriptorType::SRVAccelerationStructure:
+    case ShaderVisibleDescriptorType::Null:
+      break;
+    }
+  }
+};
+
+// Keep the type, union payload and heap-owned resources stable for the whole
+// CPU read. Residency walks may visit slots that the application is updating
+// concurrently because those slots are not used by the current shader.
+class ShaderVisibleDescriptorRead {
+  std::unique_lock<dxmt::mutex> lock_;
+  const ShaderVisibleDescriptorCPUStorage &descriptor_;
+
+public:
+  ShaderVisibleDescriptorRead(dxmt::mutex &mutex, const ShaderVisibleDescriptorCPUStorage &descriptor) :
+      lock_(mutex), descriptor_(descriptor) {}
+
+  const ShaderVisibleDescriptorCPUStorage &get() const { return descriptor_; }
 };
 
 class MTLD3D12DescriptorHeap : public ID3D12DescriptorHeap {
 public:
+  virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
+  virtual WMT::Buffer GetDescriptorHeapBuffer() = 0;
+  virtual WMT::Buffer GetMSCDescriptorHeapBuffer() = 0;
+
   virtual HRESULT
   AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp) = 0;
 
+  virtual HRESULT AddRaytracingAccelerationStructureView(
+      UINT Index, const WMT::Reference<WMT::AccelerationStructure> &AccelerationStructure,
+      const WMT::Reference<WMT::Buffer> &AccelerationStructureHeader,
+      D3D12_GPU_VIRTUAL_ADDRESS HeaderLocation
+  ) = 0;
+
+  virtual bool HasNonZeroResourceMinLODClamp(UINT Index) = 0;
+
+  virtual void ResolveDescriptors(
+      const std::vector<UINT> &Indices, std::vector<ShaderVisibleDescriptorSnapshot> &Snapshots
+  ) = 0;
+
   virtual HRESULT AddConstantBufferView(UINT Index, UINT64 VA, UINT32 SizeInBytes) = 0;
+
+  // Replace a descriptor slot with the canonical null descriptor state.
+  virtual void ClearDescriptor(UINT Index) = 0;
 
   virtual HRESULT AddUnorderedAccessView(UINT Index, Texture *Texture, TextureViewKey View) = 0;
 
@@ -151,14 +265,29 @@ public:
 
   virtual HRESULT AddUnorderedAccessView(UINT Index, D3D12_UNORDERED_ACCESS_VIEW_DESC const *pDesc) = 0;
 
-  virtual ShaderVisibleDescriptorCPUStorage const &GetDescriptor(UINT Index) = 0;
+  virtual ShaderVisibleDescriptorRead ReadDescriptor(UINT Index) = 0;
 
   virtual void CopyDescriptors(UINT From, MTLD3D12DescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;
 };
 
+struct SamplerDescriptorSnapshot {
+  Rc<Sampler> sampler;
+  // Original API descriptor, not the native point surrogate for AIR reduction.
+  // Valid only when sampler is populated; copied under the same heap lock.
+  D3D12_SAMPLER_DESC descriptor = {};
+  air::SamplerGPUStorage air = {};
+  dxmt_msc_descriptor_entry msc = {};
+};
+
 class MTLD3D12SamplerDescriptorHeap : public ID3D12DescriptorHeap {
 public:
+  virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
+  virtual WMT::Buffer GetDescriptorHeapBuffer() = 0;
+  virtual WMT::Buffer GetMSCDescriptorHeapBuffer() = 0;
+
   virtual HRESULT AddSampler(UINT Index, const D3D12_SAMPLER_DESC *Desc) = 0;
+  virtual void ResolveSamplers(const std::vector<UINT> &Indices,
+                               std::vector<SamplerDescriptorSnapshot> &Snapshots) = 0;
 
   virtual void CopyDescriptors(UINT From, MTLD3D12SamplerDescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;
 };

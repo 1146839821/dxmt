@@ -1,0 +1,219 @@
+# Task Analysis
+
+## Index-view update implementation
+
+Baseline 88610f1b, clean. Hypothesis: ordinary MSC indexed indirect can reuse
+the existing resolver's index-view argument reader while retaining all possible
+GPU-selected index allocations through submission. Evidence: generated MSL
+already decodes arg.ib, but MSC validation and private allocator reject it.
+Expected effect: connect root/IB update resolver and snapshot residency without
+allowing VB stride changes. Risk: inherited buffers instead of per-command TLAB,
+unretained GPU-selected VA or mixed companion admission. Validation: full builds,
+native regressions and focused indexed IB-update readback. VB remains a separate
+required implementation, not a reduced final goal. MSC integration skill informs
+reflected TLAB and completion lifetime requirements.
+
+## Recording/replay continuation
+
+Baseline f432b483, clean. Hypothesis: ordinary typed DRAW/DRAW_INDEXED can use
+the existing MSC reflected root-update resolver now that split-TLAB payloads
+exist. Evidence: ExecuteIndirect explicitly disabled typed PreDraw selection,
+and replay only redirected MinMax resolver buffers. Expected effect: retain
+typed draw markers, select reflected private layouts, defer template creation,
+redirect resolver buffers to submission-owned clones and restore private PSOs.
+Risk: allocator mutation, stale variant selection, lost split-stage bindings,
+accidentally admitting companion/VB/IB paths not implemented. Validation:
+normal/no-private builds, existing native regressions, targeted runtime follow-up.
+Complete graphics indirect qualification remains the objective, not this slice.
+
+## Dual-TLAB ABI continuation
+
+Baseline 3f035eef, clean. CPU render payload and generated Metal resolver both
+receive two appended addresses, with static size/offset assertions. Resolver
+copies vertex and optional fragment templates separately and applies application
+root updates to both, preserving the distinct private record CBVs. Submission
+materialization allocates both per-command arrays with overflow checks and
+clones fresh addresses without touching allocator-owned data. Single-TLAB and
+compute paths preserve their original behavior. Full builds/native regression
+plus source review are required; GPU source compilation/execution is separate.
+No ExecuteIndirect admission change at this ABI checkpoint.
+
+Current branch feat/d3d12-1; baseline feb27542; clean worktree. Typed graphics
+indirect remains rejected by PreDraw. Compute typed indirect and graphics
+MinMax already clone resolver payloads into submission-owned buffers.
+
+Hypothesis: typed graphics can reuse that ownership pattern, but native
+combined VS/PS requires two stage-local TLABs. Evidence: the typed materializer
+currently accepts only IndirectComputeCommandData, while the render resolver
+uses one TLAB for both stages. Expected effect: implement the missing render
+payload ownership foundation without enabling a path with incorrect stage data.
+Risk: partial payload publication or allocator mutation across replays.
+Validation: both builds, native regressions, inspect size/overflow checks and
+payload cloning. This checkpoint is not GPU indirect acceptance.
+
+The MSC integration skill requires per-draw TLAB storage, reflection-derived
+offsets and retention through GPU completion. Preserve static descriptor
+recording snapshots and unique volatile submission resolution. No capability
+promotion, compiler fallback, game changes or full matrix reruns.
+
+# Task Result
+
+Typed-origin materialization accepts a paired allocator-owned immutable render
+payload and resolver binding, validates the reflected size/stride/count,
+allocates submission-owned resolver/TLAB storage and clones the payload.
+The allocator payload is never patched. Compute and render payloads are
+mutually exclusive. At the initial checkpoint split native VS/PS materialization
+was rejected pending the dual-TLAB resolver ABI; this is superseded below.
+Ordinary split direct draws remain unchanged.
+
+PreDraw rejection and ExecuteIndirect routing remain unchanged in this
+foundation checkpoint. Remaining implementation: dual-stage resolver ABI,
+typed render replay binding, private PSO restoration and command-list wiring,
+then focused direct/indexed late-descriptor and replay GPU oracles. The whole
+typed graphics indirect requirement remains incomplete.
+
+## Validation and self-review
+
+Reconfigured normal/no-private full builds passed. Existing native tests passed
+12/12 in each; these do not invoke the new render materialization path and are
+not its runtime acceptance. Source review checked paired payload/binding,
+graphics/compute exclusion, reflected template bounds and count multiplication,
+submission-owned copy and read/write residency. Original allocator data and
+static/volatile observation logic are unchanged. git diff --check passed.
+Logs retained under /Users/zhangbo/.cache/dxmt-reconciliation.ZLDvwE as
+typed-render-payload-*.log. No FL/capability promotion or game acceptance.
+
+## Dual-TLAB ABI result
+
+CPU/Metal render payloads append fragment TLAB/template at offsets 152/160;
+CPU size is asserted as 168. Both are initialized to zero by the allocator.
+The resolver copies separate templates and writes constants/CBV/SRV/UAV root
+updates into each present stage TLAB. Fragment ICB binding selects its private
+TLAB when present and otherwise preserves the original shared binding.
+Compute has no added payload fields and keeps its single TLAB.
+
+Typed materialization now accepts split-stage render payloads, allocates two
+per-command arrays with overflow checks and writes fresh submission addresses
+into a cloned payload. Only application roots are updated by the resolver;
+the private CBV address in each original template remains distinct. For single
+TLAB variants, both optional fragment addresses are explicitly zeroed.
+
+Normal/no-private full builds passed after reconfiguration. Existing native
+regressions passed 12/12 in each. Self-review checked CPU/MSL field ordering,
+zero defaults, template preservation, mirrored root updates and unchanged
+compute/legacy behavior; git diff --check passed. The generated Metal resolver
+has not been compiled/executed by these host tests. Logs: typed-dual-*.log under
+the existing reconciliation evidence directory. Replay wiring, public indirect
+admission and GPU validation still remain; this is not complete typed indirect.
+
+## Recording/replay result
+
+Ordinary MSC typed DRAW/DRAW_INDEXED now selects its private variant through
+PreDraw. Non-updating commands inherit submission-bound stage TLABs. Root-updating
+commands resolve application parameter offsets against the private reflected
+layout and attach immutable render resolver payloads to the typed marker.
+Submission replay redirects the resolver's vertex-buffer binding to the cloned
+payload and retains its allocation through completion. The allocator restores
+the typed private PSO after the resolver instead of the application PSO.
+
+Companion GS/HS/DS indirect and typed VB/IB updates are still unsupported, as are
+the previously rejected predication/MinMax combinations. Companion selection
+is reported before status return so unsupported paths fail recording explicitly
+instead of silently dropping the command. Full typed graphics indirect remains
+incomplete. Both full builds and native regressions (12/12 each) passed; these
+host tests do not prove public GPU draw correctness. Source self-review checked
+marker association, resolver clone redirection, private PSO restoration, immutable
+payload ownership and old caller default behavior. git diff --check passed.
+Evidence logs retained as typed-wire-*.log in the reconciliation cache. Next
+required work is a focused typed split-stage direct/indexed indirect readback
+fixture, before expanding the full graphics matrix or declaring qualification.
+
+## Focused public GPU readback
+
+Baseline aeeb4bb0, clean. Extended the existing typed pixel fixture with
+--stages-indirect: a root constant update precedes DRAW in its command signature.
+The inherited constant is deliberately wrong, so the oracle must observe the
+resolver update. Reuses existing output guards, exact render-target readback,
+ordinary pipeline restoration and four submission replays with descriptor
+updates. No new full matrix or production behavior change.
+
+Final normal and no-private runs both exit 0, each with 32 typed indirect draws
+and their ordinary restoration draws: VS-only/combined VS+PS, static/volatile,
+shared/disjoint descriptor tables and repeated submissions. This exercises real
+resolver Metal compilation and split-stage TLAB consumption on the GPU, not only
+API creation. Focused probe builds pass in both configurations; self-review
+checked signature/argument layout, correct root parameter, intentionally wrong
+inherited value and retained argument/signature objects. git diff --check passes.
+
+Initial normal and no-private attempts used old DLLs and failed at the old
+PreDraw rejection. These failures are retained, not treated as implementation
+or GPU successes. After both builds were terminal, app-local PE libraries and
+matching Unix winemetal libraries were staged in cache-only overlays and rerun.
+Final logs: typed-indirect-final-normal.log and typed-indirect-final-no-private.log
+under /Users/zhangbo/.cache/dxmt-reconciliation.ZLDvwE; load traces show app-local
+D3D12. No game directory or prefix DLL deployment, process restart or push.
+
+Remaining: DRAW_INDEXED, CBV/SRV/UAV root updates, multi-command/count contracts,
+broader lifetime/provenance and companion/VB/IB implementation. This focused
+DRAW evidence does not qualify complete typed graphics indirect or FL12_0.
+
+## Indexed indirect GPU follow-up
+
+Baseline ffd52f2c, clean. Hypothesis: ordinary typed DRAW_INDEXED can use the
+same split-stage TLAB resolver with inherited index-buffer bindings. Extend
+the focused fixture, not the full matrix. A 32-bit index buffer uses a nonzero
+view offset plus StartIndexLocation=1; skipped entries contain invalid vertex
+IDs so an offset error cannot reproduce the expected triangle. The inherited
+root constant remains deliberately wrong until its indirect update.
+
+--stages-indirect-indexed now selects a DRAW_INDEXED argument layout, retains
+the index upload resource through all submissions and uses the existing exact
+typed/render-target/guard/ordinary-restoration oracles. Both probe builds pass.
+Normal and no-private each exit 0 with 32 indexed typed draws and accompanying
+ordinary restoration draws, covering VS-only/combined, static/volatile,
+shared/disjoint tables and four repeated submissions per case. This evidence
+uses SM6.0 fixtures and R32_UINT indices, not all index widths/shader models.
+
+Self-review checked raw payload word order and byte stride, distinct direct
+argument size, index view bounds, skipped indices, COM lifetime and unchanged
+non-indexed modes. git diff --check passes. Current PE/Unix libraries were staged
+only after both probe builds terminated, in cache overlays; variants executed
+sequentially. Load traces and hashes are retained with typed-indexed-gpu-*.log
+and typed-indexed-hashes.log in the reconciliation cache. No production change,
+prefix/game DLL deployment or feature promotion.
+
+The earlier DRAW_INDEXED evidence gap is now narrowed for this exact scope.
+CBV/SRV/UAV updates, multiple commands/counts, command-signature VB/IB updates
+and companion indirect remain open; next prioritize missing production update
+paths instead of rerunning complete matrices.
+
+## Index-view update result
+
+Ordinary MSC DRAW_INDEXED now admits INDEX_BUFFER_VIEW signature updates.
+The reflected TLAB encoder skips IB entries (they are not root parameters),
+but selects its resolver path for IB-only as well as root-update signatures.
+Private typed/MinMax allocator rejection now applies to VB updates only.
+IB-selected buffers use the existing submission-owned registered-allocation
+snapshot, acquired under the registry lock and made resident outside it.
+Compute signatures and MSC companion/VB updates remain fail-closed.
+
+Focused --stages-indirect-ib supplies no inherited index view. Command arguments
+contain root constant, index view and DRAW_INDEXED, with nonzero view offset and
+StartIndexLocation. Both variants exit 0 for 32 typed draws plus ordinary
+restoration draws, across VS-only/combined, static/volatile, shared/disjoint
+tables and replays. Exact typed/render-target/guard oracles pass. This qualifies
+the tested SM6.0/R32_UINT root+IB case, not IB-only, MinMax or arbitrary formats.
+
+Full normal/no-private builds pass after reconfiguration; explicit non-default
+probe builds pass; existing native tests pass 12/12 each. Initial execution used
+the old probe because it is not built by default; it was rebuilt explicitly
+before final GPU runs. Self-review checked admission scope, layout skipping,
+resolver selection, index resource snapshot, raw argument byte layout, retention
+and unchanged direct/indexed control modes. git diff --check passes. Logs under
+the reconciliation cache: typed-ib-build*.log / typed-ib-build-no-private.log,
+typed-ib-probe-*.log and typed-ib-gpu-*.log (actual build logs use the
+typed-ib-build and typed-ib-build-no-private names).
+
+No capability promotion, push, prefix/game DLL deployment or benchmark. VB
+stride updates and companion indirect remain production gaps. Wider root,
+multi-command/count and lifetime matrices remain subsequent acceptance work.

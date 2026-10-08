@@ -1,0 +1,1422 @@
+dx12_sm6_probe = executable('dx12_compute_sm6', 'dx12_compute_sm6.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+executable('dx12_timestamp_resolve', 'dx12_timestamp_resolve.cpp',
+  build_by_default: false, dependencies: [d3d12_dep],
+)
+
+executable('dx12_root_feedback_perf', 'dx12_root_feedback_perf.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
+executable('dx12_buffer_feedback', 'dx12_buffer_feedback.cpp',
+  build_by_default: false, dependencies: [d3d12_dep],
+)
+
+executable('dx12_sparse_sideband', 'dx12_sparse_sideband.cpp',
+  build_by_default: false, dependencies: [winemetal_dep],
+)
+
+executable('dx12_resource_sideband', 'dx12_resource_sideband.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
+executable('dx12_sparse_descriptor', 'dx12_sparse_descriptor.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
+executable('dx12_indirect_state', 'dx12_indirect_state.cpp',
+  build_by_default: false, dependencies: [d3d12_dep],
+)
+executable('dx12_indirect_root_va', 'dx12_indirect_root_va.cpp',
+  build_by_default: false, dependencies: [d3d12_dep],
+)
+executable('dx12_va_snapshot', 'dx12_va_snapshot.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
+executable('dx12_typed_origin_root', 'dx12_typed_origin_root.cpp',
+  '../../src/d3d12/d3d12_typed_origin_root.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
+executable('dx12_minmax_root', 'dx12_minmax_root.cpp',
+  '../../src/d3d12/d3d12_typed_origin_root.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
+executable('dx12_typed_origin_pipeline', 'dx12_typed_origin_pipeline.cpp',
+  build_by_default: false, link_args: ['-municode'],
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
+executable('dx12_minmax_pipeline', 'dx12_minmax_pipeline.cpp',
+  build_by_default: false, link_args: ['-municode'],
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
+executable('dx12_sampler_snapshot', 'dx12_sampler_snapshot.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
+executable('dx12_minmax_pair', 'dx12_minmax_pair.cpp',
+  '../../src/d3d12/d3d12_minmax_binding.cpp', '../../src/d3d12/d3d12_sampler.cpp',
+  build_by_default: false,
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
+executable('dx12_minmax_dispatch', 'dx12_minmax_dispatch.cpp',
+  '../../src/d3d12/d3d12_minmax_dispatch.cpp', '../../src/d3d12/d3d12_minmax_binding.cpp',
+  '../../src/d3d12/d3d12_sampler.cpp',
+  build_by_default: false, link_args: ['-municode'],
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
+executable('dx12_minmax_comparison_gpu', 'dx12_minmax_comparison_gpu.cpp',
+  build_by_default: false, link_args: ['-municode'], dependencies: [d3d12_dep],
+)
+
+executable('dx12_allocator_fence', 'dx12_allocator_fence.cpp',
+  build_by_default: false, dependencies: [d3d12_dep],
+)
+
+executable('dx12_typed_origin_pixel', 'dx12_typed_origin_pixel.cpp',
+  build_by_default: false, link_args: ['-municode'], dependencies: [d3d12_dep],
+)
+executable('dx12_logic_op_msaa', 'dx12_logic_op_msaa.cpp',
+  build_by_default: false, dependencies: [d3d12_dep],
+)
+
+executable('dx12_typed_origin_depth', 'dx12_typed_origin_depth.cpp',
+  build_by_default: false, link_args: ['-municode'],
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
+executable('dx12_typed_origin_prepare', 'dx12_typed_origin_prepare.cpp',
+  '../../src/d3d12/d3d12_typed_origin.cpp',
+  build_by_default: false, link_args: ['-municode'],
+  include_directories: [include_directories('../../src/d3d12')],
+  dependencies: [winemetal_dep, cpp.find_library('ole32')],
+)
+
+executable('dx12_minmax_prepare', 'dx12_minmax_prepare.cpp',
+  '../../src/d3d12/d3d12_typed_origin.cpp',
+  build_by_default: false, link_args: ['-municode'],
+  include_directories: [include_directories('../../src/d3d12')],
+  dependencies: [winemetal_dep, cpp.find_library('ole32')],
+)
+
+executable('dx12_typed_origin_preraster', 'dx12_typed_origin_preraster.cpp',
+  '../../src/d3d12/d3d12_typed_origin.cpp', '../../src/d3d12/d3d12_typed_origin_root.cpp',
+  '../../src/d3d12/d3d12_shader_converter.cpp',
+  build_by_default: false, link_args: ['-municode'],
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
+executable('dx12_minmax_fragment', 'dx12_minmax_fragment.cpp',
+  '../../src/d3d12/d3d12_typed_origin.cpp', '../../src/d3d12/d3d12_typed_origin_root.cpp',
+  '../../src/d3d12/d3d12_shader_converter.cpp',
+  '../../src/d3d12/d3d12_minmax_dispatch.cpp', '../../src/d3d12/d3d12_minmax_binding.cpp',
+  '../../src/d3d12/d3d12_sampler.cpp',
+  build_by_default: false, link_args: ['-municode'],
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep],
+)
+
+# Offline experiment; dynamically loads the explicitly selected DXC SDK only.
+if build_machine.system() == 'darwin'
+  air_texture_defaults = executable('air_texture_defaults', 'air_texture_defaults.cpp',
+    native: true, include_directories: include_directories('../../src/airconv', '../../src/dxmt', '../../src/winemetal'))
+  test('air-texture-defaults-unit', air_texture_defaults)
+  add_languages('objcpp', native: true)
+  executable('sparse_sideband_queue', 'sparse_sideband_queue.mm', native: true, build_by_default: false,
+    objcpp_args: ['-fobjc-arc'],
+    dependencies: dependency('appleframeworks', modules: ['Metal', 'Foundation'], native: true),
+  )
+  executable('air_minmax_gpu', 'air_minmax_gpu.mm', native: true, build_by_default: false,
+    objcpp_args: ['-fobjc-arc'],
+    dependencies: dependency('appleframeworks', modules: ['Metal', 'Foundation'], native: true),
+  )
+  executable('msc_logic_msaa_probe', 'msc_logic_msaa_probe.mm', native: true, build_by_default: false,
+    objcpp_args: ['-fobjc-arc'],
+    dependencies: dependency('appleframeworks', modules: ['Metal', 'Foundation'], native: true),
+  )
+  executable('air_minmax_ir', 'air_minmax_ir.cpp', native: true, build_by_default: false,
+    cpp_args: airconv_args, include_directories: llvm_include_path_darwin,
+    dependencies: airconv_dep_darwin,
+  )
+  executable('dxil_structured_origin', 'dxil_structured_origin.cpp',
+    native: true, build_by_default: false,
+    include_directories: [include_directories('../../src/winemetal/unix'), llvm_include_path_darwin],
+    cpp_args: airconv_args, dependencies: [typed_origin_native_dep],
+  )
+  executable('dxil_minmax_ir', 'dxil_minmax_ir.cpp',
+    native: true, build_by_default: false,
+    include_directories: [include_directories('../../src/winemetal/unix'), llvm_include_path_darwin],
+    cpp_args: airconv_args, dependencies: [typed_origin_native_dep],
+  )
+  dxil_logic_op_ir_test = executable('dxil_logic_op_ir', 'dxil_logic_op_ir.cpp',
+    native: true,
+    include_directories: [include_directories('../../src/winemetal/unix'), llvm_include_path_darwin],
+    cpp_args: airconv_args, dependencies: [typed_origin_native_dep],
+  )
+  test('dxil-logic-op-ir-unit', dxil_logic_op_ir_test)
+endif
+dxil_origin_parser_test = executable('dxil_origin_transform_test', 'dxil_origin_transform_test.cpp', native: true)
+test('dxil-origin-parser-unit', dxil_origin_parser_test)
+
+sparse_buffer_footprint_test = executable('sparse_buffer_footprint', 'sparse_buffer_footprint.cpp',
+  native: true, include_directories: include_directories('../../src/airconv'))
+test('sparse-buffer-footprint-unit', sparse_buffer_footprint_test)
+executable('dxil_roundtrip', 'dxil_roundtrip.cpp',
+  build_by_default: false,
+  link_args: ['-municode'],
+  dependencies: [cpp.find_library('ole32')],
+)
+
+dx12_shader_container = executable('dx12_shader_container', 'dx12_shader_container.cpp', '../../src/util/util_md5.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_shader_validation = executable('dx12_shader_validation', 'dx12_shader_validation.cpp',
+  include_directories: [include_directories('../../src/airconv'), include_directories('../../src/winemetal')],
+  dependencies: [d3d12_dep],
+)
+
+# Observe the actual production compute/graphics routing without shipping fault hooks.
+# Import wrapping is the x64 MinGW test ABI; other targets retain existing tests.
+if cpu_family == 'x86_64'
+  configure_file(input: 'shader_backend_stages.hlsl', output: 'shader_backend_stages.hlsl', copy: true)
+  executable('dx12_backend_failure', 'dx12_backend_failure.cpp',
+    '../../src/d3d12/d3d12_pipeline_compute.cpp', '../../src/d3d12/d3d12_shader_converter.cpp',
+    '../../src/d3d12/d3d12_typed_origin.cpp', '../../src/d3d12/d3d12_typed_origin_root.cpp',
+    '../../src/d3d12/d3d12_pipeline_graphics.cpp',
+    '../../src/d3d12/d3d12_raytracing_pipeline.cpp',
+    '../../src/d3d12/d3d12_pipeline_persistence.cpp', '../../src/d3d10/d3d10_blob.cpp',
+    dependencies: [d3d12_dep, dxgi_dep, dxmt_dep, airconv_forward_dep, util_dep, winemetal_dep, dxbc_parser_dep,
+      cpp.find_library('ole32')],
+    cpp_args: ['-ffunction-sections', '-fdata-sections'],
+    link_args: ['-Wl,--gc-sections', '-Wl,--wrap=__imp_SM50Initialize', '-Wl,--wrap=__imp_SM50Compile',
+      '-Wl,--wrap=__imp_SM50CompileTessellationPipelineHull', '-Wl,--wrap=__imp_SM50CompileTessellationPipelineDomain',
+      '-Wl,--wrap=__imp_SM50CompileGeometryPipelineVertex', '-Wl,--wrap=__imp_SM50CompileGeometryPipelineGeometry',
+      '-Wl,--wrap=__imp_DXMTMSCCompileDXIL', '-Wl,--wrap=__imp_DXMTMSCSynthesizeRayDispatch',
+      '-Wl,--wrap=__imp_DXMTMSCSynthesizeRayIntersection',
+      '-Wl,--wrap=__imp_MTLDevice_newComputePipelineState',
+      '-Wl,--wrap=__imp_MTLDevice_newLibrary', '-Wl,--wrap=__imp_MTLLibrary_newFunction',
+      '-Wl,--wrap=__imp_MTLComputePipelineState_newVisibleFunctionTable',
+      '-Wl,--wrap=__imp_MTLComputePipelineState_newIntersectionFunctionTable',
+      '-Wl,--wrap=__imp_MTLComputePipelineState_functionHandle',
+      '-Wl,--wrap=__imp_MTLVisibleFunctionTable_setFunction',
+      '-Wl,--wrap=__imp_MTLIntersectionFunctionTable_setFunction',
+      '-Wl,--wrap=__imp_MTLIntersectionFunctionTable_setVisibleFunctionTable'],
+  )
+endif
+
+test('dx12-fl12-gate-unit', find_program('python3', native: true),
+  args: [files('test_dx12_fl12_gate.py')],
+)
+
+dx12_airconv_firstbit = executable('dx12_airconv_firstbit', 'dx12_airconv_firstbit.cpp',
+  dependencies: [ d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep ],
+)
+
+dx12_shader_runtime = executable('dx12_shader_runtime', 'dx12_shader_runtime.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_texture_sampler = executable('dx12_texture_sampler', 'dx12_texture_sampler.cpp',
+  dependencies: [ d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep ],
+)
+
+dx12_sampler_filter = executable('dx12_sampler_filter', 'dx12_sampler_filter.cpp',
+  '../../src/d3d12/d3d12_sampler.cpp',
+  include_directories: [include_directories('../../src/airconv')],
+  dependencies: [d3d12_dep, winemetal_dep, util_dep],
+)
+
+dx12_texture_dimensions = executable('dx12_texture_dimensions', 'dx12_texture_dimensions.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_typed_uav_formats = executable('dx12_typed_uav_formats', 'dx12_typed_uav_formats.cpp',
+  dependencies: [d3d12_dep],
+)
+dx12_typed_origin_array = executable('dx12_typed_origin_array', 'dx12_typed_origin_array.cpp',
+  dependencies: [d3d12_dep],
+)
+dx12_typed_buffer_residency = executable('dx12_typed_buffer_residency', 'dx12_typed_buffer_residency.cpp',
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep],
+)
+# Opt-in native diagnostic. Never register expected-unsupported execution as a
+# D3D12 GPU acceptance test or require the optional MSC SDK to build DXMT.
+if build_machine.system() == 'darwin'
+  msc_probe_library = clang.find_library('metalirconverter', dirs: ['/usr/local/lib'], required: false)
+  msc_probe_includes = ['-I/usr/local/include']
+  if msc_probe_library.found() and clang.has_header('metal_irconverter/metal_irconverter.h', args: msc_probe_includes) and clang.has_header('metal_irconverter_runtime/metal_irconverter_runtime.h', args: msc_probe_includes)
+    executable('dxil_minmax_gpu', 'dxil_minmax_gpu.c',
+      native: true, build_by_default: false,
+      c_args: ['-ObjC', '-fobjc-arc'] + msc_probe_includes,
+      dependencies: [msc_probe_library],
+      link_args: ['-arch', native_compiler_arch, '-framework', 'Foundation', '-framework', 'Metal'],
+    )
+    executable('msc_typed_buffer_padding_probe', 'msc_typed_buffer_padding_probe.c',
+      native: true, build_by_default: false,
+      c_args: ['-ObjC', '-fobjc-arc'] + msc_probe_includes,
+      dependencies: [msc_probe_library],
+      link_args: ['-arch', native_compiler_arch, '-framework', 'Foundation', '-framework', 'Metal'],
+    )
+    executable('msc_static_alias_probe', 'msc_static_alias_probe.c',
+      native: true, build_by_default: false,
+      c_args: ['-ObjC', '-fobjc-arc'] + msc_probe_includes,
+      dependencies: [msc_probe_library],
+      link_args: ['-arch', native_compiler_arch, '-framework', 'Foundation', '-framework', 'Metal'],
+    )
+    executable('msc_root_layout_probe', 'msc_root_layout_probe.c',
+      native: true, build_by_default: false,
+      c_args: msc_probe_includes,
+      dependencies: [msc_probe_library],
+      link_args: ['-arch', native_compiler_arch],
+    )
+  endif
+endif
+configure_file(input: 'typed_uav_formats.hlsl', output: 'typed_uav_formats.hlsl', copy: true)
+dx12_typed_uav_policy = executable('dx12_typed_uav_policy', 'dx12_typed_uav_policy.cpp',
+  dependencies: [d3d12_dep],
+)
+
+dx12_graphics_sm6 = executable('dx12_graphics_sm6', 'dx12_graphics_sm6.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_graphics_sm5 = executable('dx12_graphics_sm5', 'dx12_graphics_sm5.cpp',
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep],
+)
+
+dx12_stream_output = executable('dx12_stream_output', 'dx12_stream_output.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_feature_support = executable('dx12_feature_support', 'dx12_feature_support.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_experimental_caps = executable('dx12_experimental_caps', 'dx12_experimental_caps.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dxc_factory_notimpl = shared_library('dxc_factory_notimpl', 'dxc_factory_notimpl.cpp',
+  name_prefix: '',
+  include_directories: [ dxmt_include_path ],
+  vs_module_defs: 'dxc_factory_notimpl.def',
+  build_by_default: false,
+)
+
+dx12_msc_probe = executable('dx12_msc_probe', 'dx12_msc_probe.cpp',
+  include_directories: [ include_directories('../../src/winemetal') ],
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_msc_capability_gate = executable('dx12_msc_capability_gate', 'dx12_msc_capability_gate.cpp',
+  include_directories: [ include_directories('../../src/winemetal') ],
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_msc_raytracing = executable('dx12_msc_raytracing', 'dx12_msc_raytracing.cpp',
+  include_directories: [ include_directories('../../src/winemetal') ],
+  dependencies: [ d3d12_dep, winemetal_dep ],
+)
+
+dx12_metal_acceleration = executable('dx12_metal_acceleration', 'dx12_metal_acceleration.cpp',
+  include_directories: [ include_directories('../../src/winemetal') ],
+  dependencies: [ winemetal_dep ],
+)
+
+dx12_raytracing_prebuild = executable('dx12_raytracing_prebuild', 'dx12_raytracing_prebuild.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_raytracing_build = executable('dx12_raytracing_build', 'dx12_raytracing_build.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_raytracing_state_object = executable('dx12_raytracing_state_object', 'dx12_raytracing_state_object.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_raytracing_dispatch = executable('dx12_raytracing_dispatch', 'dx12_raytracing_dispatch.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_raytracing_trace = executable('dx12_raytracing_trace', 'dx12_raytracing_trace.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_msc_function_constants = executable('dx12_msc_function_constants', 'dx12_msc_function_constants.cpp',
+  include_directories: [ include_directories('../../src/winemetal') ],
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_msc_debug_validation = executable('dx12_msc_debug_validation', 'dx12_msc_debug_validation.cpp',
+  include_directories: [ include_directories('../../src/winemetal') ],
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_msc_framebuffer_fetch = executable('dx12_msc_framebuffer_fetch', 'dx12_msc_framebuffer_fetch.cpp',
+  include_directories: [ include_directories('../../src/winemetal') ],
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_interface_support = executable('dx12_interface_support', 'dx12_interface_support.cpp',
+  dependencies: [ d3d12_dep, dxgi_dep ],
+)
+
+dx12_command_list_type = executable('dx12_command_list_type', 'dx12_command_list_type.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_resource_tests = executable('dx12_resource_tests', 'dx12_resource_tests.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_ngx_smoke = executable('dx12_ngx_smoke', 'dx12_ngx_smoke.cpp',
+  dependencies: [ d3d12_dep, dxgi_dep ],
+)
+
+dx12_hdr = executable('dx12_hdr', 'dx12_hdr.cpp',
+  dependencies: [ d3d12_dep, dxgi_dep ],
+)
+
+dx12_present = executable('dx12_present', 'dx12_present.cpp',
+  include_directories: [ include_directories('../../src/dxgi') ],
+  dependencies: [ d3d12_dep, dxgi_dep ],
+)
+
+dx12_pipeline_persistence = executable('dx12_pipeline_persistence', 'dx12_pipeline_persistence.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dx12_mesh_sm6 = executable('dx12_mesh_sm6', 'dx12_mesh_sm6.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
+dxc_command = []
+dxc = find_program('dxc', required: false)
+if dxc.found()
+  dxc_command = [dxc]
+else
+  dxc_arch = cpu_family == 'x86' ? 'x86' : 'x64'
+  dxc_executable = join_paths(meson.project_source_root(), 'tools', 'dxc', 'bin', dxc_arch, 'dxc.exe')
+  wine = find_program(join_paths(meson.project_source_root(), 'toolchains', 'wine', 'bin', 'wine'), required: false)
+  if not wine.found()
+    wine = find_program('wine', required: false)
+  endif
+  if wine.found() and fs.is_file(dxc_executable)
+    dxc_command = [wine, dxc_executable]
+  endif
+endif
+
+if dxc_command.length() > 0
+  foreach entry : ['typed_vertex', 'ordinary_vertex']
+    custom_target('private_mask_depth_' + entry,
+      input: 'typed_origin_depth.hlsl', output: 'private_mask_depth_' + entry + '.cso',
+      command: dxc_command + ['-E', entry, '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false)
+  endforeach
+  foreach config : [['vertex', 'vs_6_0', '1'], ['geometry', 'gs_6_0', '2'],
+                    ['hull', 'hs_6_0', '2'], ['domain', 'ds_6_0', '4']]
+    foreach ordinary : [false, true]
+      suffix = ordinary ? '_ordinary' : '_typed'
+      definitions = ordinary ? ['-DORDINARY=1'] : ['-DSTAGE_WEIGHT=' + config[2]]
+      custom_target('private_mask_depth_' + config[0] + suffix,
+        input: 'typed_origin_emulation_depth.hlsl', output: 'private_mask_depth_' + config[0] + suffix + '.cso',
+        command: dxc_command + ['-E', config[0], '-T', config[1]] + definitions + ['@INPUT@', '-Fo', '@OUTPUT@'],
+        build_by_default: false)
+    endforeach
+  endforeach
+  foreach config : [['vertex_sample', 'vs_6_0'], ['pixel_vertex', 'ps_6_0'], ['vertex', 'vs_6_0'], ['pixel', 'ps_6_0']]
+    custom_target('private_mask_minmax_' + config[0],
+      input: 'minmax_fragment.hlsl', output: 'private_mask_minmax_' + config[0] + '.cso',
+      command: dxc_command + ['-E', config[0], '-T', config[1], '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false)
+  endforeach
+  foreach config : [['vertex', 'vs_6_0'], ['geometry', 'gs_6_0'], ['hull', 'hs_6_0'], ['domain', 'ds_6_0'], ['pixel', 'ps_6_0']]
+    custom_target('private_mask_preraster_' + config[0],
+      input: 'minmax_preraster.hlsl', output: 'private_mask_preraster_' + config[0] + '.cso',
+      command: dxc_command + ['-E', config[0], '-T', config[1], '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false)
+  endforeach
+  foreach operation : ['level', 'grad']
+    foreach stage : [['vs', 'vertex'], ['ps', 'pixel'], ['gs', 'geometry'], ['hs', 'hull'], ['ds', 'domain']]
+      custom_target('dx12_minmax_preraster_@0@_@1@_fixture'.format(operation, stage[0]),
+        input: 'minmax_preraster.hlsl',
+        output: 'minmax_preraster.@0@.@1@.cso'.format(operation, stage[0]),
+        command: dxc_command + ['-E', stage[1], '-T', stage[0] + '_6_0',
+            '-D', operation == 'grad' ? 'USE_GRAD=1' : 'USE_LEVEL=1', '@INPUT@', '-Fo', '@OUTPUT@'],
+        build_by_default: false,
+      )
+    endforeach
+  endforeach
+  foreach stage : ['vs', 'ps']
+    custom_target('dx12_backend_failure_@0@_fixture'.format(stage),
+      input: 'backend_failure_graphics.hlsl', output: 'backend_failure.@0@.cso'.format(stage),
+      command: dxc_command + ['-E', '@0@_main'.format(stage), '-T', '@0@_6_0'.format(stage), '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+  endforeach
+  foreach phase : range(3)
+    custom_target('dxil_static_alias_@0@'.format(phase),
+      input: 'dxil_static_alias.hlsl', output: 'dxil_static_alias_@0@.cso'.format(phase),
+      command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '-D', 'PHASE=@0@'.format(phase), '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+  endforeach
+  foreach kind : range(3)
+    custom_target('dxil_typed_buffer_transform_wrap_@0@'.format(kind),
+      input: 'dxil_typed_buffer_transform_input.hlsl', output: 'dxil_typed_buffer_transform_wrap_@0@.cso'.format(kind),
+      command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '-D', 'KIND=@0@'.format(kind),
+        '-D', 'INDEX_BIAS=4294967294u', '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+  endforeach
+  foreach raw : [0, 1]
+    foreach kind : range(3)
+      custom_target('dxil_typed_buffer_lowering_@0@_@1@'.format(raw, kind),
+        input: 'dxil_typed_buffer_lowering.hlsl', output: 'dxil_typed_buffer_lowering_@0@_@1@.cso'.format(raw, kind),
+        command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '-D', 'RAW_R32=@0@'.format(raw),
+          '-D', 'KIND=@0@'.format(kind), '@INPUT@', '-Fo', '@OUTPUT@'],
+        build_by_default: false,
+      )
+    endforeach
+  endforeach
+  custom_target('dxil_typed_buffer_snorm_fixture',
+    input: 'typed_uav_formats.hlsl', output: 'typed_uav_snorm_0.cso',
+    command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '-D', 'TYPE=snorm float',
+      '-D', 'SHAPE=0', '-D', 'CHANNELS=1', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
+  custom_target('msc_typed_buffer_padding_sint_fixture',
+    input: 'msc_typed_buffer_padding.hlsl', output: 'msc_typed_buffer_padding_sint.cso',
+    command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '-D', 'TYPE=int', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
+  custom_target('msc_typed_buffer_padding_fixture',
+    input: 'msc_typed_buffer_padding.hlsl', output: 'msc_typed_buffer_padding.cso',
+    command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
+  typed_uav_types = ['float', 'uint', 'int', 'float4', 'uint4', 'int4', 'unorm float', 'unorm float4']
+  foreach type_index : range(8)
+    custom_target('dx12_typed_uav_srv_@0@_fixture'.format(type_index),
+      input: 'typed_uav_formats.hlsl', output: 'typed_uav_srv_@0@.cso'.format(type_index),
+      command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '-D', 'TYPE=' + typed_uav_types[type_index],
+        '-D', 'SHAPE=0', '-D', 'READ_ONLY=1', '-D', 'CHANNELS=' + (type_index in [3, 4, 5, 7] ? '4' : '1'),
+        '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+    foreach shape : range(6)
+      channels = type_index in [3, 4, 5, 7] ? '4' : '1'
+      custom_target('dx12_typed_uav_@0@_@1@_fixture'.format(type_index, shape),
+        input: 'typed_uav_formats.hlsl',
+        output: 'typed_uav_@0@_@1@.cso'.format(type_index, shape),
+        command: dxc_command + ['-E', 'main', '-T', 'cs_6_0',
+          '-D', 'TYPE=' + typed_uav_types[type_index], '-D', 'SHAPE=@0@'.format(shape),
+          '-D', 'CHANNELS=' + channels, '@INPUT@', '-Fo', '@OUTPUT@'],
+        build_by_default: false,
+      )
+    endforeach
+  endforeach
+  foreach stage : [['geometry', 'gs', 'gs_main'], ['tessellation', 'hs', 'hs_main'], ['tessellation', 'ds', 'ds_main']]
+    custom_target('dx12_shader_backend_' + stage[1] + '_fixture',
+      input: 'shader_backend_stages.hlsl',
+      output: 'shader_backend.' + stage[0] + '.' + stage[1] + '.cso',
+      command: dxc_command + ['-E', stage[2], '-T', stage[1] + '_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_shader_backend_library_fixture',
+    input: 'shader_backend_library.hlsl', output: 'shader_backend.library.lib.cso',
+    command: dxc_command + ['-T', 'lib_6_3', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_fixture',
+    input: 'compute_sm6.hlsl',
+    output: 'compute_sm6.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_indirect_state_fixture',
+    input: 'indirect_state.hlsl', output: 'indirect_state.cs.cso',
+    command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
+  custom_target('dx12_indirect_root_va_fixture',
+    input: 'indirect_root_va.hlsl', output: 'indirect_root_va.cs.cso',
+    command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
+  custom_target('dx12_function_constants_sm6_fixture',
+    input: 'function_constants_sm6.hlsl',
+    output: 'function_constants_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_debug_validation_sm6_fixture',
+    input: 'debug_validation_sm6.hlsl',
+    output: 'debug_validation_sm6.ps.cso',
+    command: dxc_command + [ '-Zi', '-Qembed_debug', '-E', 'main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_framebuffer_fetch_sm6_fixture',
+    input: 'framebuffer_fetch_sm6.hlsl',
+    output: 'framebuffer_fetch_sm6.ps.cso',
+    command: dxc_command + [ '-enable-16bit-types', '-E', 'main', '-T', 'ps_6_2', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_shader_embedded_compute_fixture',
+    input: 'shader_embedded_compute.hlsl',
+    output: 'shader_embedded.compute.cs.cso',
+    command: dxc_command + [ '-E', 'cs_main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_shader_embedded_graphics_vs_fixture',
+    input: 'shader_embedded_graphics.hlsl',
+    output: 'shader_embedded.graphics.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_shader_embedded_graphics_ps_fixture',
+    input: 'shader_embedded_graphics.hlsl',
+    output: 'shader_embedded.graphics.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_shader_embedded_graphics_mismatch_fixture',
+    input: 'shader_embedded_graphics_mismatch.hlsl',
+    output: 'shader_embedded.graphics.mismatch.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_root_uav_fixture',
+    input: 'compute_sm6_root_uav.hlsl',
+    output: 'compute_sm6_root_uav.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_global_coherent_fixture',
+    input: 'compute_sm6_global_coherent.hlsl',
+    output: 'compute_sm6_global_coherent.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_root_value_fixture',
+    input: 'compute_sm6_root_value.hlsl',
+    output: 'compute_sm6_root_value.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_root_srv_fixture',
+    input: 'compute_sm6_root_srv.hlsl',
+    output: 'compute_sm6_root_srv.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_descriptor_resources_fixture',
+    input: 'compute_sm6_descriptor_resources.hlsl',
+    output: 'compute_sm6_descriptor_resources.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_descriptor_resources_space_fixture',
+    input: 'compute_sm6_descriptor_resources_space.hlsl',
+    output: 'compute_sm6_descriptor_resources_space.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_unbounded_resources_fixture',
+    input: 'compute_sm6_unbounded_resources.hlsl',
+    output: 'compute_sm6_unbounded_resources.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_append_buffer_fixture',
+    input: 'compute_sm6_append_buffer.hlsl',
+    output: 'compute_sm6_append_buffer.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_sampler_feedback_fixture',
+    input: 'compute_sm6_sampler_feedback.hlsl',
+    output: 'compute_sm6_sampler_feedback.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_5', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_nan_inf_fixture',
+    input: 'compute_sm6_nan_inf.hlsl',
+    output: 'compute_sm6_nan_inf.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_direct_indexed_fixture',
+    input: 'compute_sm6_direct_indexed.hlsl',
+    output: 'compute_sm6_direct_indexed.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_direct_indexed_resources_fixture',
+    input: 'compute_sm6_direct_indexed_resources.hlsl',
+    output: 'compute_sm6_direct_indexed_resources.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_direct_indexed_nonuniform_fixture',
+    input: 'compute_sm6_direct_indexed_nonuniform.hlsl',
+    output: 'compute_sm6_direct_indexed_nonuniform.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_wave_ops_fixture',
+    input: 'compute_sm6_wave_ops.hlsl',
+    output: 'compute_sm6_wave_ops.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_5', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_wave_size_unsupported_fixture',
+    input: 'compute_sm6_wave_size_unsupported.hlsl',
+    output: 'compute_sm6_wave_size_unsupported.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_wave_size_32_fixture',
+    input: 'compute_sm6_wave_size_32.hlsl',
+    output: 'compute_sm6_wave_size_32.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_texture_dimensions_sm6_fixture',
+    input: 'texture_dimensions_sm6.hlsl',
+    output: 'texture_dimensions_sm6.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_int64_fixture',
+    input: 'compute_sm6_int64.hlsl',
+    output: 'compute_sm6_int64.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_native16_fixture',
+    input: 'compute_sm6_native16.hlsl',
+    output: 'compute_sm6_native16.cs.cso',
+    command: dxc_command + [ '-enable-16bit-types', '-E', 'main', '-T', 'cs_6_2', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_native16_denorm_preserve_fixture',
+    input: 'compute_sm6_native16.hlsl',
+    output: 'compute_sm6_native16_denorm_preserve.cs.cso',
+    command: dxc_command + [ '-enable-16bit-types', '-denorm', 'preserve', '-E', 'main', '-T', 'cs_6_2', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_native16_denorm_ftz_fixture',
+    input: 'compute_sm6_native16.hlsl',
+    output: 'compute_sm6_native16_denorm_ftz.cs.cso',
+    command: dxc_command + [ '-enable-16bit-types', '-denorm', 'ftz', '-E', 'main', '-T', 'cs_6_2', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_library_subobjects_sm6_fixture',
+    input: 'library_subobjects_sm6.hlsl',
+    output: 'library_subobjects_sm6.lib.cso',
+    command: dxc_command + [ '-T', 'lib_6_3', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_ray_stages_sm6_fixture',
+    input: 'ray_stages_sm6.hlsl',
+    output: 'ray_stages_sm6.lib.cso',
+    command: dxc_command + [ '-T', 'lib_6_3', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_ray_dispatch_sm6_fixture',
+    input: 'ray_dispatch_sm6.hlsl',
+    output: 'ray_dispatch_sm6.lib.cso',
+    command: dxc_command + [ '-T', 'lib_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_ray_trace_sm6_fixture',
+    input: 'ray_trace_sm6.hlsl',
+    output: 'ray_trace_sm6.lib.cso',
+    command: dxc_command + [ '-T', 'lib_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_ray_payload_qualifiers_sm6_fixture',
+    input: 'ray_payload_qualifiers_sm6.hlsl',
+    output: 'ray_payload_qualifiers_sm6.lib.cso',
+    command: dxc_command + [ '-enable-payload-qualifiers', '-T', 'lib_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_mesh_sm6_ms_fixture',
+    input: 'mesh_sm6.hlsl',
+    output: 'mesh_sm6.ms.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'ms_6_5', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_mesh_sm6_cull_primitive_fixture',
+    input: 'mesh_sm6_cull_primitive.hlsl',
+    output: 'mesh_sm6_cull_primitive.ms.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'ms_6_5', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_mesh_sm6_as_fixture',
+    input: 'mesh_sm6_as.hlsl',
+    output: 'mesh_sm6.as.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'as_6_5', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_mesh_sm6_ps_fixture',
+    input: 'mesh_sm6.hlsl',
+    output: 'mesh_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_packed_dot_fixture',
+    input: 'compute_sm6_packed_dot.hlsl',
+    output: 'compute_sm6_packed_dot.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_4', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_pack_unpack_fixture',
+    input: 'compute_sm6_pack_unpack.hlsl',
+    output: 'compute_sm6_pack_unpack.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_derivatives_fixture',
+    input: 'compute_sm6_derivatives.hlsl',
+    output: 'compute_sm6_derivatives.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_derivatives_unsupported_fixture',
+    input: 'compute_sm6_derivatives_unsupported.hlsl',
+    output: 'compute_sm6_derivatives_unsupported.cs.cso',
+    command: dxc_command + [ '-Vd', '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_compute_sm6_atomic64_fixture',
+    input: 'compute_sm6_atomic64.hlsl',
+    output: 'compute_sm6_atomic64.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_texture_sampler_fixture',
+    input: 'texture_sampler.hlsl',
+    output: 'texture_sampler.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_minmax_bindings_fixture',
+    input: 'minmax_bindings.hlsl', output: 'minmax_bindings.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  foreach stage : ['cs', 'ps']
+    custom_target('dx12_minmax_comparison_' + stage + '_fixture',
+      input: 'minmax_comparison.hlsl', output: 'minmax_comparison.' + stage + '.cso',
+      command: dxc_command + ['-E', 'main', '-T', stage + '_6_0'] +
+          (stage == 'ps' ? ['-D', 'PIXEL=1'] : []) + ['@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_minmax_comparison_gpu_fixture',
+    input: 'minmax_comparison_gpu.hlsl', output: 'minmax_comparison_gpu.cs.cso',
+    command: dxc_command + ['-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
+  custom_target('dx12_minmax_grad_fixture',
+    input: 'minmax_grad.hlsl', output: 'minmax_grad.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '-D', 'MINMAX_GRAD_STRUCTURED=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_minmax_array_fixture',
+    input: 'minmax_array.hlsl', output: 'minmax_array.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '-D', 'MINMAX_ARRAY_STRUCTURED=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  foreach shape : ['cube', 'cube_array']
+    foreach mode : ['sample', 'bias']
+      fragment_defines = shape == 'cube_array' ? ['-D', 'MINMAX_CUBE_ARRAY=1'] : []
+      if mode == 'bias'
+        fragment_defines += ['-D', 'USE_BIAS=1']
+      endif
+      custom_target('dx12_minmax_' + shape + '_fragment_' + mode + '_fixture',
+        input: 'minmax_cube_fragment.hlsl', output: 'minmax_' + shape + '_fragment_' + mode + '.ps.cso',
+        command: dxc_command + ['-E', 'pixel', '-T', 'ps_6_0'] + fragment_defines + ['@INPUT@', '-Fo', '@OUTPUT@'],
+        build_by_default: false,
+      )
+    endforeach
+    custom_target('dx12_minmax_' + shape + '_pixel_fixture',
+      input: 'minmax_cube_pixel.hlsl', output: 'minmax_' + shape + '.ps.cso',
+      command: dxc_command + ['-E', 'main', '-T', 'ps_6_0'] +
+          (shape == 'cube_array' ? ['-D', 'MINMAX_CUBE_ARRAY=1'] : []) + ['@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+    foreach mode : ['level', 'grad']
+      cube_defines = shape == 'cube_array' ? ['-D', 'MINMAX_CUBE_ARRAY=1'] : []
+      if mode == 'grad'
+        cube_defines += ['-D', 'MINMAX_CUBE_GRAD=1']
+      endif
+      custom_target('dx12_minmax_' + shape + '_' + mode + '_fixture',
+        input: 'minmax_cube.hlsl', output: 'minmax_' + shape + '_' + mode + '.cs.cso',
+        command: dxc_command + ['-E', 'main', '-T', 'cs_6_0'] + cube_defines + ['@INPUT@', '-Fo', '@OUTPUT@'],
+        build_by_default: false,
+      )
+    endforeach
+  endforeach
+  custom_target('dx12_minmax_cube_fragment_vertex_fixture',
+    input: 'minmax_cube_fragment.hlsl', output: 'minmax_cube_fragment.vs.cso',
+    command: dxc_command + ['-E', 'vertex', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
+  custom_target('dx12_minmax_line_fixture',
+    input: 'minmax_line.hlsl', output: 'minmax_line.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_minmax_volume_fixture',
+    input: 'minmax_volume.hlsl', output: 'minmax_volume.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_minmax_descriptor_array_fixture',
+    input: 'minmax_descriptor_array.hlsl', output: 'minmax_descriptor_array.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_minmax_modern_handle_fixture',
+    input: 'minmax_descriptor_array.hlsl', output: 'minmax_modern_handle.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_typed_origin_array_fixture',
+    input: 'typed_origin_array.hlsl', output: 'typed_origin_array.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_typed_origin_dynamic_array_fixture',
+    input: 'typed_origin_dynamic_array.hlsl', output: 'typed_origin_dynamic_array.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_typed_origin_nonuniform_array_fixture',
+    input: 'typed_origin_nonuniform_array.hlsl', output: 'typed_origin_nonuniform_array.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_typed_origin_modern_array_fixture',
+    input: 'typed_origin_nonuniform_array.hlsl', output: 'typed_origin_modern_array.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  foreach static_root : [0, 1]
+    custom_target('dx12_typed_origin_embedded_array_' + static_root.to_string(),
+      input: 'typed_origin_nonuniform_array.hlsl',
+      output: 'typed_origin_embedded_array_' + static_root.to_string() + '.cs.cso',
+      command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '-D', 'EMBEDDED_ROOT=1',
+        '-D', 'STATIC_ROOT=' + static_root.to_string(), '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_minmax_typed_guard_fixture',
+    input: 'minmax_typed_guard.hlsl', output: 'minmax_typed_guard.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_texture_sampler_direct_indexed_fixture',
+    input: 'texture_sampler_direct_indexed.hlsl',
+    output: 'texture_sampler_direct_indexed.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_texture_sampler_direct_indexed_uav_texture_fixture',
+    input: 'texture_sampler_direct_indexed_uav_texture.hlsl',
+    output: 'texture_sampler_direct_indexed_uav_texture.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_sm6_vs_fixture',
+    input: 'graphics_sm6.hlsl',
+    output: 'graphics_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_packed_uint_vs_fixture',
+    input: 'graphics_sm6.hlsl', output: 'graphics_packed_uint.vs.cso',
+    command: dxc_command + ['-E', 'vs_packed_uint', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+    build_by_default: false,
+  )
+  foreach stage : ['vs', 'ps']
+    custom_target('dx12_graphics_indirect_fragment_' + stage + '_fixture',
+      input: 'graphics_indirect_fragment.hlsl', output: 'graphics_indirect_fragment.' + stage + '.cso',
+      command: dxc_command + ['-E', stage + '_main', '-T', stage + '_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_graphics_sm6_ps_fixture',
+    input: 'graphics_sm6.hlsl',
+    output: 'graphics_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_wave_ops_sm6_vs_fixture',
+    input: 'graphics_wave_ops_sm6.hlsl',
+    output: 'graphics_wave_ops_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_wave_ops_sm6_ps_fixture',
+    input: 'graphics_wave_ops_sm6.hlsl',
+    output: 'graphics_wave_ops_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_wave_quad', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_shader_ops_sm6_int64_vs_fixture',
+    input: 'graphics_shader_ops_sm6.hlsl',
+    output: 'graphics_shader_ops_sm6_int64.vs.cso',
+    command: dxc_command + [ '-E', 'vs_int64', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_shader_ops_sm6_int64_ps_fixture',
+    input: 'graphics_shader_ops_sm6.hlsl',
+    output: 'graphics_shader_ops_sm6_int64.ps.cso',
+    command: dxc_command + [ '-E', 'ps_int64', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_shader_ops_sm6_native16_vs_fixture',
+    input: 'graphics_shader_ops_sm6.hlsl',
+    output: 'graphics_shader_ops_sm6_native16.vs.cso',
+    command: dxc_command + [ '-enable-16bit-types', '-DDXMT_NATIVE16', '-E', 'vs_native16', '-T', 'vs_6_2', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_shader_ops_sm6_native16_ps_fixture',
+    input: 'graphics_shader_ops_sm6.hlsl',
+    output: 'graphics_shader_ops_sm6_native16.ps.cso',
+    command: dxc_command + [ '-enable-16bit-types', '-DDXMT_NATIVE16', '-E', 'ps_native16', '-T', 'ps_6_2', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_stencil_ref_sm6_fixture',
+    input: 'graphics_stencil_ref_sm6.hlsl',
+    output: 'graphics_stencil_ref_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_barycentrics_sm6_vs_fixture',
+    input: 'graphics_barycentrics_sm6.hlsl',
+    output: 'graphics_barycentrics_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_barycentrics_sm6_ps_fixture',
+    input: 'graphics_barycentrics_sm6.hlsl',
+    output: 'graphics_barycentrics_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_helper_lane_sm6_vs_fixture',
+    input: 'graphics_helper_lane_sm6.hlsl',
+    output: 'graphics_helper_lane_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_helper_lane_sm6_ps_fixture',
+    input: 'graphics_helper_lane_sm6.hlsl',
+    output: 'graphics_helper_lane_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_helper_lane', '-T', 'ps_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_helper_lane_derivative_sm6_ps_fixture',
+    input: 'graphics_helper_lane_sm6.hlsl',
+    output: 'graphics_helper_lane_derivative_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_helper_lane_derivative', '-T', 'ps_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_helper_lane_discard_sm6_ps_fixture',
+    input: 'graphics_helper_lane_sm6.hlsl',
+    output: 'graphics_helper_lane_discard_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_helper_lane_discard', '-T', 'ps_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_unsupported_semantics_sm6_vs_fixture',
+    input: 'graphics_unsupported_semantics_sm6.hlsl',
+    output: 'graphics_unsupported_semantics_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_view_id_sm6_ps_fixture',
+    input: 'graphics_unsupported_semantics_sm6.hlsl',
+    output: 'graphics_view_id_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_view_id', '-T', 'ps_6_1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_get_attribute_sm6_ps_fixture',
+    input: 'graphics_unsupported_semantics_sm6.hlsl',
+    output: 'graphics_get_attribute_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_get_attribute', '-T', 'ps_6_1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_vrs_sm6_ps_fixture',
+    input: 'graphics_unsupported_semantics_sm6.hlsl',
+    output: 'graphics_vrs_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_shading_rate', '-T', 'ps_6_4', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_logic_op_sm6_vs_fixture',
+    input: 'graphics_logic_op_sm6.hlsl',
+    output: 'graphics_logic_op_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_logic_op_sm6_ps_fixture',
+    input: 'graphics_logic_op_sm6.hlsl',
+    output: 'graphics_logic_op_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_logic_op_root_cbv_fixture',
+    input: 'graphics_logic_op_sm6.hlsl',
+    output: 'graphics_logic_op_root_cbv.ps.cso',
+    command: dxc_command + [ '-E', 'ps_root_cbv', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  foreach entry : ['vs', 'ps', 'ordinary', 'typed_vs']
+    custom_target('dx12_logic_typed_origin_' + entry + '_fixture',
+      input: 'typed_origin_pixel.hlsl',
+      output: 'logic_typed_origin_' + entry + '.cso',
+      command: dxc_command + [ '-E', entry, '-T', entry == 'vs' or entry == 'typed_vs' ? 'vs_6_0' : 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_logic_minmax_fixture',
+    input: 'graphics_logic_op_sm6.hlsl',
+    output: 'graphics_logic_op_minmax.ps.cso',
+    command: dxc_command + [ '-E', 'ps_minmax', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_logic_minmax_sample_index_fixture',
+    input: 'graphics_logic_op_sm6.hlsl',
+    output: 'graphics_logic_op_minmax_sample_index.ps.cso',
+    command: dxc_command + [ '-E', 'ps_minmax_sample_index', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  foreach entry : ['pixel_frequency', 'sample_frequency']
+    custom_target('dx12_logic_msaa_' + entry + '_probe',
+      input: 'logic_op_msaa_probe.hlsl',
+      output: 'logic_msaa_' + entry + '.ps.cso',
+      command: dxc_command + [ '-E', entry, '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  foreach entry : ['vertex', 'seed', 'source', 'read_samples', 'read_depth', 'depth_geometry', 'depth_hull', 'depth_domain']
+    profile = 'ps_6_0'
+    if entry == 'vertex'
+      profile = 'vs_6_0'
+    elif entry == 'read_samples' or entry == 'read_depth'
+      profile = 'cs_6_0'
+    elif entry == 'depth_geometry'
+      profile = 'gs_6_0'
+    elif entry == 'depth_hull'
+      profile = 'hs_6_0'
+    elif entry == 'depth_domain'
+      profile = 'ds_6_0'
+    endif
+    custom_target('dx12_logic_msaa_d3d12_' + entry + '_fixture',
+      input: 'logic_op_msaa_d3d12.hlsl',
+      output: 'logic_msaa_d3d12_' + entry + '.cso',
+      command: dxc_command + [ '-E', entry, '-T', profile, '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_geometry_sm6_vs_fixture',
+    input: 'geometry_sm6.hlsl',
+    output: 'geometry_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_sm6_gs_fixture',
+    input: 'geometry_sm6.hlsl',
+    output: 'geometry_sm6.gs.cso',
+    command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_sm6_ps_fixture',
+    input: 'geometry_sm6.hlsl',
+    output: 'geometry_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_adj_sm6_vs_fixture',
+    input: 'geometry_adj_sm6.hlsl',
+    output: 'geometry_adj_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_adj_sm6_gs_fixture',
+    input: 'geometry_adj_sm6.hlsl',
+    output: 'geometry_adj_sm6.gs.cso',
+    command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_adj_sm6_ps_fixture',
+    input: 'geometry_adj_sm6.hlsl',
+    output: 'geometry_adj_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_root_cbv_sm6_vs_fixture',
+    input: 'geometry_root_cbv_sm6.hlsl',
+    output: 'geometry_root_cbv_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_root_cbv_sm6_gs_fixture',
+    input: 'geometry_root_cbv_sm6.hlsl',
+    output: 'geometry_root_cbv_sm6.gs.cso',
+    command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_root_cbv_sm6_ps_fixture',
+    input: 'geometry_root_cbv_sm6.hlsl',
+    output: 'geometry_root_cbv_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_instanced_sm6_vs_fixture',
+    input: 'geometry_instanced_sm6.hlsl',
+    output: 'geometry_instanced_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_instanced_sm6_gs_fixture',
+    input: 'geometry_instanced_sm6.hlsl',
+    output: 'geometry_instanced_sm6.gs.cso',
+    command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_instanced_sm6_ps_fixture',
+    input: 'geometry_instanced_sm6.hlsl',
+    output: 'geometry_instanced_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_root_cbv_sm6_vs_fixture',
+    input: 'graphics_root_cbv_sm6.hlsl',
+    output: 'graphics_root_cbv_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_root_cbv_sm6_ps_fixture',
+    input: 'graphics_root_cbv_sm6.hlsl',
+    output: 'graphics_root_cbv_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_root_constants_sm6_vs_fixture',
+    input: 'graphics_root_constants_sm6.hlsl',
+    output: 'graphics_root_constants_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_root_constants_sm6_ps_fixture',
+    input: 'graphics_root_constants_sm6.hlsl',
+    output: 'graphics_root_constants_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_root_srv_sm6_vs_fixture',
+    input: 'graphics_root_srv_sm6.hlsl',
+    output: 'graphics_root_srv_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_root_srv_sm6_ps_fixture',
+    input: 'graphics_root_srv_sm6.hlsl',
+    output: 'graphics_root_srv_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_root_uav_sm6_vs_fixture',
+    input: 'graphics_root_uav_sm6.hlsl',
+    output: 'graphics_root_uav_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_root_uav_sm6_ps_fixture',
+    input: 'graphics_root_uav_sm6.hlsl',
+    output: 'graphics_root_uav_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_root_cbv_texture_sm6_vs_fixture',
+    input: 'graphics_root_cbv_texture_sm6.hlsl',
+    output: 'graphics_root_cbv_texture_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_root_cbv_texture_sm6_ps_fixture',
+    input: 'graphics_root_cbv_texture_sm6.hlsl',
+    output: 'graphics_root_cbv_texture_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_texture_sm6_vs_fixture',
+    input: 'graphics_texture_sm6.hlsl',
+    output: 'graphics_texture_sm6.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_graphics_texture_sm6_ps_fixture',
+    input: 'graphics_texture_sm6.hlsl',
+    output: 'graphics_texture_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_hdr_vs_fixture',
+    input: 'dx12_hdr.hlsl',
+    output: 'dx12_hdr.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: true,
+  )
+  custom_target('dx12_hdr_linear_ps_fixture',
+    input: 'dx12_hdr.hlsl',
+    output: 'dx12_hdr.linear.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main_linear', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: true,
+  )
+  custom_target('dx12_hdr_pq_ps_fixture',
+    input: 'dx12_hdr.hlsl',
+    output: 'dx12_hdr.pq.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main_pq', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: true,
+  )
+endif
+
+if dxc_command.length() > 0
+  foreach entry : ['main', 'probe_read', 'probe_write']
+    custom_target('dx12_reserved_buffer_' + entry + '_fixture',
+      input: 'reserved_buffer.hlsl',
+      output: 'reserved_buffer.' + entry + '.cs.cso',
+      command: dxc_command + [ '-E', entry, '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_reserved_texture_read_fixture',
+    input: 'reserved_texture.hlsl',
+    output: 'reserved_texture.read.cs.cso',
+    command: dxc_command + [ '-E', 'read_phase', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_reserved_texture_write_fixture',
+    input: 'reserved_texture.hlsl',
+    output: 'reserved_texture.write.cs.cso',
+    command: dxc_command + [ '-E', 'write_phase', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_reserved_texture_mip_array_fixture',
+    input: 'reserved_texture_mip_array.hlsl',
+    output: 'reserved_texture.mip_array.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  foreach entry : ['read_phase', 'write_phase_a', 'write_phase_b']
+    custom_target('dx12_reserved_texture_packed_' + entry + '_fixture',
+      input: 'reserved_texture_packed.hlsl',
+      output: 'reserved_texture.packed.' + entry + '.cs.cso',
+      command: dxc_command + [ '-E', entry, '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_reserved_buffer_copy_mapping_fixture',
+    input: 'reserved_buffer_copy_mapping.hlsl',
+    output: 'reserved_buffer.copy_mapping.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_texture_lod_clamp_fixture',
+    input: 'texture_lod_clamp.hlsl',
+    output: 'texture_lod_clamp.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_texture_lod_clamp_read_fixture',
+    input: 'texture_lod_clamp_read.hlsl',
+    output: 'texture_lod_clamp_read.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_reserved_texture_view_range_fixture',
+    input: 'reserved_texture_view_range.hlsl',
+    output: 'reserved_texture.view_range.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+endif
+
+dx12_reserved_buffer = executable('dx12_reserved_buffer', 'dx12_reserved_buffer.cpp', dependencies: [ d3d12_dep ])
+dx12_reserved_texture = executable('dx12_reserved_texture', 'dx12_reserved_texture.cpp', dependencies: [ d3d12_dep ])
+dx12_reserved_texture_mip_array = executable('dx12_reserved_texture_mip_array', 'dx12_reserved_texture_mip_array.cpp', dependencies: [ d3d12_dep ])
+dx12_reserved_texture_packed = executable('dx12_reserved_texture_packed', 'dx12_reserved_texture_packed.cpp', dependencies: [ d3d12_dep ])
+dx12_reserved_buffer_copy_mapping = executable('dx12_reserved_buffer_copy_mapping', 'dx12_reserved_buffer_copy_mapping.cpp', dependencies: [ d3d12_dep ])
+dx12_tiled_status_sm5 = executable('dx12_tiled_status_sm5', 'dx12_tiled_status_sm5.cpp', dependencies: [ d3d12_dep ])
+dx12_tiled_tier2_oracle = executable('dx12_tiled_tier2_oracle', 'dx12_tiled_tier2_oracle.cpp', dependencies: [ d3d12_dep, dxgi_dep ])
+dx12_texture_lod_clamp = executable('dx12_texture_lod_clamp', 'dx12_texture_lod_clamp.cpp',
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep, dxbc_parser_dep])
+dx12_reserved_texture_view_range = executable('dx12_reserved_texture_view_range', 'dx12_reserved_texture_view_range.cpp', dependencies: [ d3d12_dep ])
+
+if dxc_command.length() > 0
+  custom_target('dx12_predication_vs_fixture',
+    input: 'predication.hlsl',
+    output: 'predication.vs.cso',
+    command: dxc_command + [ '-E', 'vs_main', '-T', 'vs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_predication_ps_fixture',
+    input: 'predication.hlsl',
+    output: 'predication.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_predication_cs_fixture',
+    input: 'predication.hlsl',
+    output: 'predication.cs.cso',
+    command: dxc_command + [ '-E', 'cs_main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+endif
+
+dx12_predication = executable('dx12_predication', 'dx12_predication.cpp', dependencies: [ d3d12_dep ])
+dx12_enhanced_barriers = executable('dx12_enhanced_barriers', 'dx12_enhanced_barriers.cpp', dependencies: [ d3d12_dep ])
+dx12_descriptor_stress = executable('dx12_descriptor_stress', 'dx12_descriptor_stress.cpp', dependencies: [ d3d12_dep ])
+dx12_texture_map = executable('dx12_texture_map', 'dx12_texture_map.cpp', dependencies: [ d3d12_dep ])
+dx12_texture_cpu_oracle = executable('dx12_texture_cpu_oracle', 'dx12_texture_cpu_oracle.cpp', dependencies: [ d3d12_dep ])
+dx12_present_oracle = executable('dx12_present_oracle', 'dx12_present_oracle.cpp', dependencies: [ d3d12_dep, dxgi_dep ])
+dx12_descriptor_ownership = executable(
+  'dx12_descriptor_ownership', 'dx12_descriptor_ownership.cpp',
+  include_directories: [
+    include_directories('../../src/dxmt'),
+    include_directories('../../src/winemetal'),
+    include_directories('../../src/util'),
+  ],
+  dependencies: [d3d12_dep, dxmt_dep, dxgi_dep, airconv_forward_dep, winemetal_dep, util_dep],
+)
+dx12_pipeline_statistics = executable('dx12_pipeline_statistics', 'dx12_pipeline_statistics.cpp', dependencies: [ d3d12_dep ])
+
+python = import('python').find_installation('python3', required: false)
+if python.found()
+  run_target('dx12_tiled_tier2_gate',
+    command: [python, files('dx12_tiled_tier2_gate'), '--build-dir', meson.current_build_dir()],
+  )
+endif

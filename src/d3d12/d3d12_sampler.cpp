@@ -17,9 +17,26 @@
  */
 
 #include "Metal.hpp"
-#include "d3d12_device.hpp"
+#include "d3d12_sampler.hpp"
+#include "air_sampler_abi.hpp"
+#include "log/log.hpp"
+
+#include <algorithm>
+#include <cmath>
 
 namespace dxmt {
+
+uint32_t GetAIRSamplerReductionFlags(D3D12_FILTER filter) {
+  const auto reduction = D3D12_DECODE_FILTER_REDUCTION(filter);
+  if (reduction != D3D12_FILTER_REDUCTION_TYPE_MINIMUM &&
+      reduction != D3D12_FILTER_REDUCTION_TYPE_MAXIMUM) return 0;
+  uint32_t flags = air::SamplerReduction;
+  if (D3D12_DECODE_MIN_FILTER(filter)) flags |= air::SamplerMinLinear;
+  if (D3D12_DECODE_MAG_FILTER(filter)) flags |= air::SamplerMagLinear;
+  if (D3D12_DECODE_MIP_FILTER(filter)) flags |= air::SamplerMipLinear;
+  if (reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM) flags |= air::SamplerMaximum;
+  return flags;
+}
 
 constexpr WMTCompareFunction kCompareFunctionMap[] = {
     WMTCompareFunctionNever, // padding 0
@@ -66,9 +83,19 @@ constexpr WMTSamplerAddressMode kAddressModeMap[] = {
     WMTSamplerAddressModeMirrorClampToEdge // 5 - 1
 };
 
-void
-PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_STATIC_SAMPLER_DESC const &Desc) {
+static bool
+IsMinMaxReductionFilter(D3D12_FILTER filter) {
+  const auto reduction = D3D12_DECODE_FILTER_REDUCTION(filter);
+  return reduction == D3D12_FILTER_REDUCTION_TYPE_MINIMUM || reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM;
+}
 
+HRESULT
+PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_STATIC_SAMPLER_DESC const &Desc) {
+  InfoOut = {};
+  // Native reduction is Apple10-only and cannot cover D3D's mixed filter modes.
+  // Do not silently create an ordinary sampler while shader emulation is absent.
+  if (IsMinMaxReductionFilter(Desc.Filter))
+    return E_NOTIMPL;
   InfoOut.lod_average = false;
   InfoOut.mip_filter = WMTSamplerMipFilterNotMipmapped;
   // filter
@@ -131,11 +158,14 @@ PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_STATIC
   }
   InfoOut.support_argument_buffers = true;
   InfoOut.normalized_coords = true;
+  return S_OK;
 }
 
-void
+HRESULT
 PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_SAMPLER_DESC const &Desc) {
-
+  InfoOut = {};
+  if (IsMinMaxReductionFilter(Desc.Filter))
+    return E_NOTIMPL;
   InfoOut.lod_average = false;
   InfoOut.mip_filter = WMTSamplerMipFilterNotMipmapped;
   // filter
@@ -209,6 +239,54 @@ PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_SAMPLE
 
   InfoOut.support_argument_buffers = true;
   InfoOut.normalized_coords = true;
+  return S_OK;
+}
+
+HRESULT PrepareD3D12MinMaxSamplerInfo(WMT::Device device, const D3D12_SAMPLER_DESC &desc,
+    WMTSamplerInfo &point, WMTSamplerInfo &ordinary, dxmt_msc_minmax_state &state) {
+  const uint32_t filter = static_cast<uint32_t>(desc.Filter);
+  constexpr uint32_t basic_filter_mask = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+  constexpr uint32_t reduction_mask = D3D12_FILTER_REDUCTION_TYPE_MASK << D3D12_FILTER_REDUCTION_TYPE_SHIFT;
+  const bool ordinary_anisotropic = desc.Filter == D3D12_FILTER_ANISOTROPIC;
+  const uint32_t ordinary_anisotropic_mask = ordinary_anisotropic ? uint32_t(D3D12_FILTER_ANISOTROPIC) : 0;
+  if ((filter & ~(basic_filter_mask | reduction_mask | ordinary_anisotropic_mask)) ||
+      (D3D12_DECODE_IS_ANISOTROPIC_FILTER(desc.Filter) && !ordinary_anisotropic) ||
+      D3D12_DECODE_IS_COMPARISON_FILTER(desc.Filter)) return E_NOTIMPL;
+  if (!std::isfinite(desc.MinLOD) || !std::isfinite(desc.MaxLOD) || !std::isfinite(desc.MipLODBias) ||
+      desc.AddressU < 1 || desc.AddressU > 5 || desc.AddressV < 1 || desc.AddressV > 5 ||
+      desc.AddressW < 1 || desc.AddressW > 5) return E_INVALIDARG;
+  if (IsMinMaxReductionFilter(desc.Filter) &&
+      (desc.AddressU == D3D12_TEXTURE_ADDRESS_MODE_BORDER || desc.AddressV == D3D12_TEXTURE_ADDRESS_MODE_BORDER ||
+       desc.AddressW == D3D12_TEXTURE_ADDRESS_MODE_BORDER)) {
+    const auto *b = desc.BorderColor;
+    if (!((b[0] == 0 && b[1] == 0 && b[2] == 0 && (b[3] == 0 || b[3] == 1)) ||
+          (b[0] == 1 && b[1] == 1 && b[2] == 1 && b[3] == 1))) return E_NOTIMPL;
+  }
+  D3D12_SAMPLER_DESC native = desc;
+  native.Filter = ordinary_anisotropic ? desc.Filter : static_cast<D3D12_FILTER>(filter & basic_filter_mask);
+  native.MinLOD = 0;
+  native.MaxLOD = D3D12_FLOAT32_MAX;
+  native.MipLODBias = 0;
+  WMTSamplerInfo ordinary_candidate = {}, point_candidate = {};
+  HRESULT hr = PopulateWMTSamplerInfo(device, ordinary_candidate, native);
+  if (FAILED(hr)) return hr;
+  native.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+  hr = PopulateWMTSamplerInfo(device, point_candidate, native);
+  if (FAILED(hr)) return hr;
+  dxmt_msc_minmax_state candidate = {};
+  candidate.flags = GetAIRSamplerReductionFlags(desc.Filter);
+  if (D3D12_DECODE_MIN_FILTER(desc.Filter)) candidate.flags |= 1u;
+  if (D3D12_DECODE_MAG_FILTER(desc.Filter)) candidate.flags |= 2u;
+  if (D3D12_DECODE_MIP_FILTER(desc.Filter)) candidate.flags |= 4u;
+  candidate.min_lod = desc.MinLOD;
+  candidate.max_lod = desc.MaxLOD;
+  candidate.mip_lod_bias = desc.MipLODBias;
+  candidate.address_u = desc.AddressU;
+  candidate.address_vw = desc.AddressV | (uint32_t(desc.AddressW) << DXMT_MSC_MINMAX_ADDRESS_W_SHIFT);
+  point = point_candidate;
+  ordinary = ordinary_candidate;
+  state = candidate;
+  return S_OK;
 }
 
 } // namespace dxmt

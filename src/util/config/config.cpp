@@ -42,9 +42,9 @@ namespace dxmt {
 
   const static ProfileList g_profiles = {{
     { R"(\\(GenshinImpact|YuanShen|ZenlessZoneZero)\.exe$)", {{
-      { "dxgi.customDeviceDesc",   "AMD Radeon Pro 5300M" },
-      { "dxgi.customVendorId",     "1002" },
-      { "dxgi.customDeviceId",     "7340" },
+      { "dxgi.customDeviceDesc",   "NVIDIA GeForce RTX 4090" },
+      { "dxgi.customVendorId",     "10DE" },
+      { "dxgi.customDeviceId",     "2684" },
     }} },
     { R"(\\SONIC_X_SHADOW_GENERATIONS\.exe$)", {{
       { "d3d11.ignoreMapFlagNoWait",   "True" },

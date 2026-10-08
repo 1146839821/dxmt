@@ -21,14 +21,22 @@
 #include "com/com_object.hpp"
 #include "com/com_pointer.hpp"
 #include "d3d12_device.hpp"
+#include "d3d12_minmax.hpp"
+#include <map>
 #include "d3d12_device_child.hpp"
 #include "dxmt_sampler.hpp"
+#include "air_sampler_abi.hpp"
 #include "util_math.hpp"
 #include "util_md5.hpp"
 #include <cstring>
+#include <algorithm>
 #include <vector>
 #include "../d3d10/d3d10_blob.hpp"
 #include "../airconv/dxbc_root_signature.hpp"
+#include "d3d12_typed_origin.hpp"
+#include <mutex>
+#include <cmath>
+#include "util_env.hpp"
 
 namespace dxmt {
 
@@ -379,6 +387,14 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
   Let's do it in the simple way
   */
   std::vector<uint64_t> static_samplers_encoded_;
+  std::vector<dxmt_msc_root_parameter_layout> msc_layout_;
+  bool msc_layout_initialized_ = false;
+  RootSignatureDeserializer decoded_root_;
+  std::mutex typed_origin_mutex_;
+  D3D12TypedOriginRoot typed_origin_root_;
+  bool typed_origin_initialized_ = false;
+  std::mutex minmax_mutex_;
+  std::map<uint32_t, D3D12MinMaxRoot> minmax_roots_;
 
 public:
   MTLD3D12RootSignatureImpl(MTLD3D12Device *pDevice, const void *pBytecode, SIZE_T BytecodeLength) :
@@ -395,12 +411,11 @@ public:
     if (FAILED(hr))
       return hr;
 
-    RootSignatureDeserializer deserializer;
-    hr = deserializer.Deserialize(pRawRootSig, RawRootSigSize);
+    hr = decoded_root_.Deserialize(pRawRootSig, RawRootSigSize);
     if (FAILED(hr))
       return hr;
 
-    auto &desc = deserializer.desc_1_1_.Desc_1_1;
+    auto &desc = decoded_root_.desc_1_1_.Desc_1_1;
 
     if (desc.NumParameters) {
       if (desc.NumParameters > D3D12_MAX_ROOT_COST)
@@ -438,14 +453,38 @@ public:
     NumStaticSamplers = desc.NumStaticSamplers;
     if (NumStaticSamplers) {
       for (unsigned i = 0; i < desc.NumStaticSamplers; i++) {
+        const auto &original = desc.pStaticSamplers[i];
+        auto native = original;
+        const auto reduction = D3D12_DECODE_FILTER_REDUCTION(original.Filter);
+        const bool air_reduction = reduction == D3D12_FILTER_REDUCTION_TYPE_MINIMUM ||
+                                   reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM;
+        if (air_reduction) {
+          if (D3D12_DECODE_IS_ANISOTROPIC_FILTER(original.Filter)) return E_NOTIMPL;
+          if (env::getEnvVar("DXMT_ENABLE_AIR_MINMAX") != "1" &&
+              env::getEnvVar("DXMT_MINMAX_DXC_DIRECTORY").empty()) {
+            std::wstring directory;
+            const auto selection = SelectD3D12CompilerDirectory(directory);
+            if (selection != S_OK) return FAILED(selection) ? selection : E_NOTIMPL;
+          }
+          if (!std::isfinite(original.MinLOD) || !std::isfinite(original.MaxLOD)) return E_INVALIDARG;
+          HasAIRReductionSamplers = true;
+          native.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+          native.MinLOD = 0;
+          native.MaxLOD = D3D12_FLOAT32_MAX;
+        }
         WMTSamplerInfo info;
-        PopulateWMTSamplerInfo(device_->GetMTLDevice(), info, desc.pStaticSamplers[i]);
+        hr = PopulateWMTSamplerInfo(device_->GetMTLDevice(), info, native);
+        if (FAILED(hr))
+          return hr;
 
         auto sampler = Sampler::createSampler(device_->GetMTLDevice(), info, desc.pStaticSamplers[i].MipLODBias);
+        if (!sampler)
+          return E_OUTOFMEMORY;
         static_samplers_encoded_.push_back(sampler->sampler_state_handle);
         static_samplers_encoded_.push_back(sampler->sampler_state_cube_handle);
-        static_samplers_encoded_.push_back((uint64_t)std::bit_cast<uint32_t>(sampler->lod_bias));
-        static_samplers_encoded_.push_back(0 /* padding */);
+        const uint32_t flags = GetAIRSamplerReductionFlags(original.Filter);
+        static_samplers_encoded_.push_back(air::PackSamplerMetadata(sampler->lod_bias, flags));
+        static_samplers_encoded_.push_back(air::PackSamplerLODClamps(original.MinLOD, original.MaxLOD));
 
         static_samplers_.emplace_back(std::move(sampler));
       }
@@ -457,8 +496,120 @@ public:
     UploadQwords = total_qwords;
     ParameterSlots = qword_offsets_.size();
     SlotQwordOffsets = qword_offsets_.data();
+    for (UINT i = 0; i < desc.NumParameters; ++i) {
+      const auto type = desc.pParameters[i].ParameterType;
+      if ((type == D3D12_ROOT_PARAMETER_TYPE_CBV || type == D3D12_ROOT_PARAMETER_TYPE_SRV ||
+           type == D3D12_ROOT_PARAMETER_TYPE_UAV) && qword_offsets_[i] < 64)
+        RootBufferQwordMask |= uint64_t(1) << qword_offsets_[i];
+    }
 
     return S_OK;
+  }
+
+  HRESULT
+  InitializeMSCLayout() override {
+    if (HasAIRReductionSamplers)
+      return E_NOTIMPL;
+    if (msc_layout_initialized_)
+      return S_OK;
+    if (!device_->GetMSCCapabilities().CoreShaderPathUsable())
+      return E_FAIL;
+
+    const void *blob = nullptr;
+    size_t blob_size = GetBlob(&blob);
+    char error_message[1024] = {};
+
+    dxmt_msc_get_root_layout_params params = {};
+    params.root_signature = blob;
+    params.root_signature_size = blob_size;
+    params.error_message = error_message;
+    params.error_message_capacity = sizeof(error_message);
+
+    int result = DXMTMSCGetRootSignatureLayout(&params);
+    if (result != DXMT_MSC_SUCCESS) {
+      ERR("Failed to query MSC root signature layout, result=", result, " message=", error_message);
+      return E_FAIL;
+    }
+
+    msc_layout_.resize(params.layout_count);
+    if (!msc_layout_.empty()) {
+      params.layouts = msc_layout_.data();
+      params.layout_capacity = msc_layout_.size();
+      params.layout_count = 0;
+      params.argument_buffer_size = 0;
+      error_message[0] = '\0';
+      result = DXMTMSCGetRootSignatureLayout(&params);
+      if (result != DXMT_MSC_SUCCESS) {
+        ERR("Failed to retrieve MSC root signature layout, result=", result, " message=", error_message);
+        msc_layout_.clear();
+        return E_FAIL;
+      }
+    }
+
+    MSCArgumentBufferSize = params.argument_buffer_size;
+    MSCParameterCount = msc_layout_.size();
+    MSCParameterLayouts = msc_layout_.data();
+    msc_layout_initialized_ = true;
+
+    DEBUG("MSC root layout size=", MSCArgumentBufferSize, " resources=", MSCParameterCount);
+    for (auto &layout : msc_layout_) {
+      DEBUG(
+          "MSC root parameter ", layout.parameter_index, " type=", layout.resource_type,
+          " register=", layout.shader_register, " space=", layout.register_space,
+          " offset=", layout.top_level_offset, " size=", layout.size_bytes
+      );
+    }
+    return S_OK;
+  }
+
+  void RetainStaticSamplers(std::vector<Rc<Sampler>> &references) override {
+    for (const auto &sampler : static_samplers_) {
+      if (std::find(references.begin(), references.end(), sampler) == references.end())
+        references.push_back(sampler);
+    }
+  }
+
+  HRESULT
+  GetTypedOriginCompilerRoot(const D3D12TypedOriginRoot **root) override {
+    if (!root) return E_POINTER;
+    *root = nullptr;
+    if (HasAIRReductionSamplers) return E_NOTIMPL;
+    std::lock_guard<std::mutex> lock(typed_origin_mutex_);
+    if (!typed_origin_initialized_) {
+      if (!device_->GetMSCCapabilities().CoreShaderPathUsable()) return E_FAIL;
+      std::string diagnostics;
+      HRESULT hr = PrepareD3D12TypedOriginRoot(decoded_root_.desc_1_1_.Desc_1_1, typed_origin_root_, diagnostics);
+      if (FAILED(hr)) {
+        ERR("Failed to prepare typed-origin compiler root: ", diagnostics);
+        return hr;
+      }
+      typed_origin_initialized_ = true;
+    }
+    *root = &typed_origin_root_;
+    return S_OK;
+  }
+
+  HRESULT GetMinMaxCompilerRoot(uint32_t pair_count, const D3D12MinMaxRoot **root) override {
+    if (!root) return E_POINTER;
+    *root = nullptr;
+    if (!pair_count || pair_count > 64) return E_INVALIDARG;
+    try {
+      std::lock_guard<std::mutex> lock(minmax_mutex_);
+      auto found = minmax_roots_.find(pair_count);
+      if (found == minmax_roots_.end()) {
+        if (!device_->GetMSCCapabilities().CoreShaderPathUsable()) return E_FAIL;
+        D3D12MinMaxRoot candidate;
+        std::string diagnostics;
+        HRESULT hr = PrepareD3D12MinMaxRoot(decoded_root_.desc_1_1_.Desc_1_1, pair_count, candidate, diagnostics);
+        if (FAILED(hr)) {
+          ERR("Failed to prepare MinMax compiler root: ", diagnostics);
+          return hr;
+        }
+        found = minmax_roots_.emplace(pair_count, std::move(candidate)).first;
+      }
+      *root = &found->second;
+      return S_OK;
+    } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
   }
 
   HRESULT

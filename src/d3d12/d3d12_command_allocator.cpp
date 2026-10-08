@@ -17,6 +17,8 @@
  */
 
 #include "d3d12_command_allocator.hpp"
+#include "d3d12_minmax_pipeline.hpp"
+#include "d3d12_typed_origin_pipeline.hpp"
 #include "com/com_pointer.hpp"
 
 namespace dxmt {
@@ -28,6 +30,7 @@ MTLD3D12CommandAllocatorImpl::MTLD3D12CommandAllocatorImpl(MTLD3D12Device *pDevi
 
 HRESULT
 CreateCommandAllocator(MTLD3D12Device *pDevice, D3D12_COMMAND_LIST_TYPE Type, REFIID riid, void **ppCommandAllocator) {
+  InitReturnPtr(ppCommandAllocator);
   switch (Type) {
   case D3D12_COMMAND_LIST_TYPE_DIRECT:
   case D3D12_COMMAND_LIST_TYPE_BUNDLE:
@@ -59,17 +62,18 @@ MTLD3D12CommandAllocatorImpl::Initialize() {
     return E_OUTOFMEMORY;
   gpu_heap_offset_ = 0;
 
-  WMTBufferInfo buffer_info;
-  buffer_info.memory.set(gpu_heap_);
-  buffer_info.length = kGPUHeapSize;
-  buffer_info.options = WMTResourceHazardTrackingModeUntracked;
-  gpu_heap_buffer_ = device_->GetMTLDevice().newBuffer(buffer_info);
-
   if (!gpu_heap_buffer_) {
-    ERR("CommandAllocator: failed to allocate gpu buffer");
-    return E_FAIL;
+    WMTBufferInfo buffer_info;
+    buffer_info.memory.set(gpu_heap_);
+    buffer_info.length = kGPUHeapSize;
+    buffer_info.options = WMTResourceHazardTrackingModeUntracked;
+    gpu_heap_buffer_ = device_->GetMTLDevice().newBuffer(buffer_info);
+    if (!gpu_heap_buffer_) {
+      ERR("CommandAllocator: failed to allocate gpu buffer");
+      return E_FAIL;
+    }
+    gpu_heap_buffer_address_ = buffer_info.gpu_address;
   }
-  gpu_heap_buffer_address_ = buffer_info.gpu_address;
 
   encoder_current = nullptr;
   encoder_last = nullptr;
@@ -103,41 +107,89 @@ MTLD3D12CommandAllocatorImpl::QueryInterface(REFIID riid, void **ppvObject) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D12CommandAllocatorImpl::Reset() {
-  if (encoder_last)
+  if (encoder_last || IsInFlight())
     return E_FAIL;
+
+  DestroyEncoders();
+  ReleaseSpilledCPUHeaps();
+  cpu_allocation_failed_ = false;
+  return Initialize();
+};
+
+void
+MTLD3D12CommandAllocatorImpl::DestroyEncoder(EncoderData *encoder) {
+  switch (encoder->type) {
+  case EncoderType::Null:
+    break;
+  case EncoderType::Clear:
+    reinterpret_cast<ClearEncoderData *>(encoder)->~ClearEncoderData();
+    break;
+  case EncoderType::Render:
+    reinterpret_cast<RenderEncoderData *>(encoder)->~RenderEncoderData();
+    break;
+  case EncoderType::Blit:
+    reinterpret_cast<BlitEncoderData *>(encoder)->~BlitEncoderData();
+    break;
+  case EncoderType::CopyTiles:
+    reinterpret_cast<CopyTilesEncoderData *>(encoder)->~CopyTilesEncoderData();
+    break;
+  case EncoderType::Compute:
+    reinterpret_cast<ComputeEncoderData *>(encoder)->~ComputeEncoderData();
+    break;
+  case EncoderType::Resolve:
+    reinterpret_cast<ResolveEncoderData *>(encoder)->~ResolveEncoderData();
+    break;
+  case EncoderType::TemporalUpscale:
+    reinterpret_cast<TemporalUpscaleData *>(encoder)->~TemporalUpscaleData();
+    break;
+  case EncoderType::SampleTimestamp:
+    reinterpret_cast<SampleTimestampData *>(encoder)->~SampleTimestampData();
+    break;
+  case EncoderType::ResolveTimestamp:
+    reinterpret_cast<ResolveTimestampData *>(encoder)->~ResolveTimestampData();
+    break;
+  case EncoderType::AccelerationStructure:
+    reinterpret_cast<AccelerationStructureEncoderData *>(encoder)->~AccelerationStructureEncoderData();
+    break;
+  }
+}
+
+void
+MTLD3D12CommandAllocatorImpl::DestroyEncoders() {
+  if (encoder_current) {
+    DestroyEncoder(encoder_current);
+    encoder_current = nullptr;
+  }
 
   for (auto &encoder_list : encoder_lists_) {
     EncoderData *next = encoder_list.next;
     while (next) {
-      switch (next->type) {
-      case EncoderType::Null:
-        break;
-      case EncoderType::Clear:
-        reinterpret_cast<ClearEncoderData *>(next)->~ClearEncoderData();
-        break;
-      case EncoderType::Render:
-        reinterpret_cast<RenderEncoderData *>(next)->~RenderEncoderData();
-        break;
-      case EncoderType::Blit:
-        reinterpret_cast<BlitEncoderData *>(next)->~BlitEncoderData();
-        break;
-      case EncoderType::Compute:
-        reinterpret_cast<ComputeEncoderData *>(next)->~ComputeEncoderData();
-        break;
-      case EncoderType::Resolve:
-        reinterpret_cast<ResolveEncoderData *>(next)->~ResolveEncoderData();
-        break;
-      }
-      next = next->next;
+      EncoderData *encoder = next;
+      next = encoder->next;
+      DestroyEncoder(encoder);
     }
   }
   encoder_lists_.clear();
+  encoder_last = nullptr;
+  encoder_count_ = 0;
+}
 
-  return Initialize();
-};
+void
+MTLD3D12CommandAllocatorImpl::DiscardRecord() {
+  if (encoder_current) {
+    DestroyEncoder(encoder_current);
+    encoder_current = nullptr;
+  }
+  encoder_last = nullptr;
+  encoder_count_ = 0;
+}
 
 IndirectComputeCommandData *
-MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount) {
+MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount,
+    const D3D12TypedOriginComputeVariant *variant, const wmtcmd_compute_setbuffer **resolver_binding,
+    const D3D12MinMaxComputeVariant *minmax_variant) {
+  const auto threadgroup_size = variant ? variant->threadgroup_size :
+      minmax_variant ? minmax_variant->threadgroup_size : pPSO->threadgroup_size;
   WMTIndirectCommandBufferInfo info;
   info.inherit_buffers = !pCmdSig->UpdateRootArguments;
   info.inherit_pso = 1;
@@ -161,16 +213,20 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
   info.gpu_resource_id = 0;
 
   auto icb = device_->GetMTLDevice().newIndirectCommandBuffer(info, MaxCount, WMTResourceStorageModeShared);
+  if (!icb)
+    return nullptr;
 
   auto [Ptr, Offset] = AllocateGPUHeap(sizeof(IndirectComputeCommandData), 16);
+  if (!Ptr)
+    return nullptr;
 
   auto data = reinterpret_cast<IndirectComputeCommandData *>(Ptr);
 
   data->cmd_buf = info.gpu_resource_id;
   data->max_count = MaxCount;
-  data->tgsize_x = pPSO->threadgroup_size.width;
-  data->tgsize_y = pPSO->threadgroup_size.height;
-  data->tgsize_z = pPSO->threadgroup_size.depth;
+  data->tgsize_x = threadgroup_size.width;
+  data->tgsize_y = threadgroup_size.height;
+  data->tgsize_z = threadgroup_size.depth;
 
   {
     // populated outside
@@ -179,6 +235,14 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
     data->rootsig_qwords = 0;
     data->rootsig_qwords_stride = 0;
     data->static_samplers = 0;
+    data->msc_tlab = 0;
+    data->msc_template = 0;
+    data->msc_layout_offsets = 0;
+    data->msc_heap = 0;
+    data->msc_sampler_heap = 0;
+    data->msc_tlab_stride = 0;
+    data->msc_template_size = 0;
+    data->root_feedback_table = 0;
   }
 
   {
@@ -201,15 +265,21 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
     cmd_argbuf_res.buffer = gpu_heap_buffer_;
     cmd_argbuf_res.offset = Offset;
     cmd_argbuf_res.index = 30;
+    if (resolver_binding) *resolver_binding = &cmd_argbuf_res;
 
     auto &cmd_dispatch_res = EncodeComputeCommand<wmtcmd_compute_dispatch>();
     cmd_dispatch_res.type = WMTComputeCommandDispatch;
     cmd_dispatch_res.size = {1, 1, 1};
 
+    // The resolver writes root/TLAB bytes consumed by the indirect dispatches.
+    auto &barrier = EncodeComputeCommand<wmtcmd_compute_memory_barrier>();
+    barrier.type = WMTComputeCommandMemoryBarrier;
+    barrier.scope = WMTBarrierScopeBuffers;
+
     auto &cmd_setpso = EncodeComputeCommand<wmtcmd_compute_setpso>();
     cmd_setpso.type = WMTComputeCommandSetPSO;
-    cmd_setpso.pso = pPSO->pso;
-    cmd_setpso.threadgroup_size = pPSO->threadgroup_size; // not really used
+    cmd_setpso.pso = variant ? variant->pso : minmax_variant ? minmax_variant->pso : pPSO->pso;
+    cmd_setpso.threadgroup_size = threadgroup_size; // not really used
   }
 
   auto &cmd = EncodeComputeCommand<wmtcmd_compute_executecommands>();
@@ -225,8 +295,11 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
 
 IndirectRenderCommandData *
 MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
-    MTLD3D12CommandSignature *pCmdSig, MTLD3D12GraphicsPipelineState *pPSO, size_t MaxCount
+    MTLD3D12CommandSignature *pCmdSig, MTLD3D12GraphicsPipelineState *pPSO, size_t MaxCount,
+    const D3D12MinMaxGraphicsVariant *minmax_variant, const wmtcmd_render_setbuffer **resolver_binding,
+    const D3D12TypedOriginGraphicsVariant *origin_variant
 ) {
+  if (resolver_binding) *resolver_binding = nullptr;
   WMTIndirectCommandBufferInfo info;
   info.inherit_buffers = !(pCmdSig->UpdateVertexBuffers || pCmdSig->UpdateIndexBuffer || pCmdSig->UpdateRootArguments);
   info.inherit_pso = 1;
@@ -251,8 +324,12 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
   info.gpu_resource_id = 0;
 
   auto icb = device_->GetMTLDevice().newIndirectCommandBuffer(info, MaxCount, WMTResourceStorageModePrivate);
+  if (!icb)
+    return nullptr;
 
   auto [Ptr, Offset] = AllocateGPUHeap(sizeof(IndirectRenderCommandData), 16);
+  if (!Ptr)
+    return nullptr;
 
   auto data = reinterpret_cast<IndirectRenderCommandData *>(Ptr);
 
@@ -271,6 +348,19 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
     data->primitive_type = 0;
     data->index_buffer = 0;
     data->index_buffer_format = {};
+    data->msc_tlab = 0;
+    data->msc_template = 0;
+    data->msc_layout_offsets = 0;
+    data->msc_heap = 0;
+    data->msc_sampler_heap = 0;
+    data->msc_tlab_stride = 0;
+    data->msc_template_size = 0;
+    data->msc_vertex_buffers = 0;
+    data->msc_vertex_slot_mask = 0;
+    data->msc_fragment_tlab = 0;
+    data->msc_fragment_template = 0;
+    data->msc_vertex_records = 0;
+    data->root_feedback_table = 0;
   }
 
   {
@@ -293,6 +383,7 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
     cmd_argbuf_res.buffer = gpu_heap_buffer_;
     cmd_argbuf_res.offset = Offset;
     cmd_argbuf_res.index = 30;
+    if (resolver_binding) *resolver_binding = &cmd_argbuf_res;
 
     auto &cmd_draw_res = EncodeRenderCommand<wmtcmd_render_draw>();
     cmd_draw_res.type = WMTRenderCommandDraw;
@@ -302,9 +393,18 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
     cmd_draw_res.base_instance = 0;
     cmd_draw_res.instance_count = 1;
 
+    // The resolver writes per-command root/VB tables before the ICB consumes
+    // them in vertex and fragment shaders in the same render pass.
+    auto &barrier = EncodeRenderCommand<wmtcmd_render_memory_barrier>();
+    barrier.type = WMTRenderCommandMemoryBarrier;
+    barrier.scope = WMTBarrierScopeBuffers;
+    barrier.stages_after = WMTRenderStageVertex;
+    barrier.stages_before = WMTRenderStageVertex | WMTRenderStageFragment;
+
     auto &cmd_setpso = EncodeRenderCommand<wmtcmd_render_setpso>();
     cmd_setpso.type = WMTRenderCommandSetPSO;
-    cmd_setpso.pso = pPSO->pso;
+    // Both inherited and root-updating ICB TLABs require the private pipeline.
+    cmd_setpso.pso = origin_variant ? origin_variant->pso : minmax_variant ? minmax_variant->pso : pPSO->pso;
   }
 
   auto &cmd = EncodeRenderCommand<wmtcmd_render_executecommands>();
@@ -338,6 +438,8 @@ void
 SimpleCommandContext<MTLD3D12CommandAllocatorImpl>::startComputePass() {
   ctx.InvalidateCurrentPass();
   auto compute = ctx.AllocatePass<ComputeEncoderData>();
+  if (!compute)
+    return;
   compute->type = EncoderType::Compute;
   compute->cmd_head.type = WMTComputeCommandNop;
   compute->cmd_head.next.set(0);

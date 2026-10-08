@@ -19,6 +19,7 @@
 #include "dxbc_converter_base.hpp"
 #include "../dxbc_converter.hpp"
 #include "air_builder.hpp"
+#include "../air_sampler_abi.hpp"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Instructions.h"
@@ -434,7 +435,7 @@ Converter::LoadTexture(const SrcOperandResource &SrcOp) {
 
   return llvm::Optional<TextureResourceHandle>(
       {texture, descriptor->ResourceKindLogical, descriptor->ResourceHandle, descriptor->Metadata, SrcOp.read_swizzle,
-       descriptor->GlobalCoherent && SupportsMemoryCoherency()}
+       descriptor->GlobalCoherent && SupportsMemoryCoherency(), descriptor->DefaultComponents}
   );
 }
 
@@ -487,7 +488,7 @@ Converter::LoadBuffer(const SrcOperandResource &SrcOp) {
 
   return llvm::Optional<BufferResourceHandle>(
       {descriptor->Pointer, descriptor->Metadata, descriptor->StructureStride, SrcOp.read_swizzle,
-       descriptor->GlobalCoherent && SupportsMemoryCoherency()}
+       descriptor->GlobalCoherent && SupportsMemoryCoherency(), descriptor->SparseFeedbackHeader}
   );
 }
 
@@ -501,7 +502,7 @@ Converter::LoadBuffer(const SrcOperandUAV &SrcOp) {
 
   return llvm::Optional<BufferResourceHandle>(
       {descriptor->Pointer, descriptor->Metadata, descriptor->StructureStride, SrcOp.read_swizzle,
-       descriptor->GlobalCoherent && SupportsMemoryCoherency()}
+       descriptor->GlobalCoherent && SupportsMemoryCoherency(), descriptor->SparseFeedbackHeader}
   );
 }
 
@@ -552,16 +553,20 @@ Converter::LoadCounter(const AtomicDstOperandUAV &SrcOp) {
 }
 
 llvm::Optional<SamplerHandle>
-Converter::LoadSampler(const SrcOperandSampler &SrcOp) {
+Converter::LoadSampler(const SrcOperandSampler &SrcOp, bool AllowReduction) {
   using namespace llvm::air;
 
   auto descriptor = ctx.binding.GetSampler(air, SrcOp.range_id, LoadOperandIndex(SrcOp.index));
   if (!descriptor)
     return {};
+  if (descriptor->Reduction && (!AllowReduction || descriptor->Reduction->Unsupported)) {
+    failure = "AIR Min/Max sampler requires a supported sampling operation without feedback";
+    return {};
+  }
 
   auto Bias = ir.CreateBitCast(ir.CreateTrunc(descriptor->Metadata, ctx.types._int), ctx.types._float);
 
-  return llvm::Optional<SamplerHandle>({descriptor->SamplerHandle, descriptor->CubeSamplerHandle, Bias});
+  return llvm::Optional<SamplerHandle>({descriptor->SamplerHandle, descriptor->CubeSamplerHandle, Bias, descriptor->Reduction});
 }
 
 void
@@ -718,6 +723,24 @@ Converter::StoreOperand(const DstOperandIndexableTemp &DstOp, llvm::Value *Value
     );
     ir.CreateStore(ExtractElement(ValueInt, SrcComp), Ptr);
   }
+}
+
+void
+Converter::StoreFeedback(const std::optional<DstOperand> &DstOp, llvm::Value *Residency) {
+  if (!DstOp || IsNull(*DstOp))
+    return;
+
+  // AIR's sparse access byte is the inverse of the Metal resident() result:
+  // bit 0 is set when any accessed texel is nonresident. DXBC exposes an
+  // opaque uint status whose only legal consumer is CheckAccessFullyMapped,
+  // so canonicalize the flag to the D3D form rather than leaking the AIR ABI
+  // representation into a shader register.
+  auto NonResident = ir.CreateAnd(Residency, llvm::ConstantInt::get(Residency->getType(), 1));
+  auto Resident = ir.CreateICmpEQ(NonResident, llvm::Constant::getNullValue(Residency->getType()));
+  auto Status = ir.CreateSelect(
+      Resident, llvm::ConstantInt::getAllOnesValue(ir.getInt32Ty()), ir.getInt32(0)
+  );
+  StoreOperand(*DstOp, Status);
 }
 
 llvm::Value *
@@ -1011,7 +1034,10 @@ Converter::operator()(const InstIntegerUnaryOp &unary) {
   case IntegerUnaryOp::FirstHiBitSigned:
     Value = ir.CreateSelect(
         ir.CreateIsNotNeg(Value), air.CreateCountZero(Value, false),
-        ir.CreateAdd(air.CreateCountZero(ir.CreateShl(ir.CreateNot(Value), ir.getInt32(1)), false), ir.getInt32(1))
+        ir.CreateAdd(
+            air.CreateCountZero(ir.CreateShl(ir.CreateNot(Value), 1ull), false),
+            llvm::ConstantInt::get(Value->getType(), 1)
+        )
     );
     Value = MaxIfInMask(~((uint32_t)0x1f), Value);
     break;
@@ -1418,6 +1444,7 @@ Converter::operator()(const InstLoad &load) {
       air.CreateRead(Tex->Texture, Tex->Handle, Address, ArrayIndex, SampleIndex, LOD, Tex->GlobalCoherent);
 
   StoreOperand(load.dst, MaskSwizzle(Value, GetMask(load.dst), Tex->Swizzle));
+  StoreFeedback(load.feedback, Residency);
 }
 void
 Converter::operator()(const InstLoadUAVTyped &load) {
@@ -1472,6 +1499,15 @@ Converter::operator()(const InstLoadUAVTyped &load) {
       air.CreateRead(Tex->Texture, Tex->Handle, Address, ArrayIndex, SampleIndex, air.getInt(0), Tex->GlobalCoherent);
 
   StoreOperand(load.dst, MaskSwizzle(Value, GetMask(load.dst), Tex->Swizzle));
+  StoreFeedback(load.feedback, Residency);
+}
+
+void
+Converter::operator()(const InstCheckAccessFullyMapped &check) {
+  auto Status = LoadOperand(check.src, kMaskComponentX);
+  auto FullyMapped = ir.CreateICmpNE(Status, ir.getInt32(0));
+  auto Result = ir.CreateSub(ir.getInt32(0), ir.CreateZExt(FullyMapped, ir.getInt32Ty()));
+  StoreOperand(check.dst, Result);
 }
 
 void
@@ -1535,7 +1571,7 @@ Converter::operator()(const InstSample &sample) {
   if (!Tex)
     return;
 
-  auto Sampler = LoadSampler(sample.src_sampler);
+  auto Sampler = LoadSampler(sample.src_sampler, true);
   if (!Sampler)
     return;
 
@@ -1590,12 +1626,107 @@ Converter::operator()(const InstSample &sample) {
     return;
   }
 
+  if (Sampler->Reduction) {
+    if (sample.feedback) {
+      failure = "AIR Min/Max implicit feedback is unsupported";
+      return;
+    }
+    auto result = CreateImplicitReductionSample(*Tex, *Sampler, Coord, ArrayIndex, nullptr, sample.offsets, [&] {
+      return air.CreateSample(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets,
+          sample_bias{Sampler->Bias}, sample_min_lod_clamp{MinLODClamp}).first;
+    }, MinLODClamp);
+    if (!result) return;
+    StoreOperand(sample.dst, MaskSwizzle(*result, GetMask(sample.dst), Tex->Swizzle));
+    return;
+  }
   auto [Value, Residency] = air.CreateSample(
       Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets, sample_bias{Sampler->Bias},
       sample_min_lod_clamp{MinLODClamp}
   );
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  StoreFeedback(sample.feedback, Residency);
+}
+
+llvm::Optional<llvm::Value *>
+Converter::CreateImplicitReductionSample(
+    const TextureResourceHandle &texture, const SamplerHandle &sampler, llvm::Value *coord,
+    llvm::Value *array_index, llvm::Value *instruction_bias, const int32_t offsets[3],
+    const std::function<llvm::Value *()> &ordinary_sample, llvm::Value *min_lod_clamp) {
+  using namespace llvm::air;
+  if (ctx.shader_type != microsoft::D3D10_SB_PIXEL_SHADER ||
+      (texture.Logical != Texture::texture1d && texture.Logical != Texture::texture1d_array &&
+       texture.Logical != Texture::texture2d && texture.Logical != Texture::texture2d_array &&
+       texture.Logical != Texture::texture3d && texture.Logical != Texture::texturecube &&
+       texture.Logical != Texture::texturecube_array) || texture.Texture.sample_type != Texture::sample_float ||
+      ((texture.Logical == Texture::texturecube || texture.Logical == Texture::texturecube_array) &&
+       (offsets[0] || offsets[1] || offsets[2]))) {
+    failure = "AIR Min/Max implicit stage or texture type is unsupported";
+    return {};
+  }
+  // Never evaluate quad derivatives or implicit ordinary sampling in a branch
+  // controlled by per-lane descriptor state. Both precede reduction dispatch.
+  auto *dx = air.CreateDerivative(coord, false);
+  auto *dy = air.CreateDerivative(coord, true);
+  auto *ordinary_value = sampler.Reduction->RuntimePredicate ? ordinary_sample() : nullptr;
+  return CreateReductionSample(texture, sampler, coord, array_index, nullptr, offsets,
+      [ordinary_value] { return ordinary_value; }, [&]() -> llvm::Value * {
+        auto lod = air.CreateIsotropicGradientLOD(texture.Texture, texture.Handle, dx, dy, coord);
+        if (!lod) { failure = "AIR Min/Max implicit LOD is unsupported"; return nullptr; }
+        auto *biased_lod = ir.CreateFAdd(*lod, sampler.Bias);
+        if (instruction_bias) biased_lod = ir.CreateFAdd(biased_lod, instruction_bias);
+        return biased_lod;
+      }, min_lod_clamp);
+}
+
+llvm::Optional<llvm::Value *>
+Converter::CreateReductionSample(
+    const TextureResourceHandle &texture, const SamplerHandle &sampler, llvm::Value *coord,
+    llvm::Value *array_index, llvm::Value *biased_lod, const int32_t offsets[3],
+    const std::function<llvm::Value *()> &ordinary_sample,
+    const std::function<llvm::Value *()> &reduction_lod, llvm::Value *min_lod_clamp) {
+  using namespace llvm::air;
+  const auto &state = *sampler.Reduction;
+  llvm::BasicBlock *ordinary_block = nullptr;
+  llvm::BasicBlock *merge_block = nullptr;
+  if (state.RuntimePredicate) {
+    auto *function = ir.GetInsertBlock()->getParent();
+    auto *reduction_block = llvm::BasicBlock::Create(ir.getContext(), "sample.reduction", function);
+    ordinary_block = llvm::BasicBlock::Create(ir.getContext(), "sample.ordinary", function);
+    merge_block = llvm::BasicBlock::Create(ir.getContext(), "sample.merge", function);
+    ir.CreateCondBr(state.RuntimePredicate, reduction_block, ordinary_block);
+    ir.SetInsertPoint(reduction_block);
+  }
+  if (!biased_lod && reduction_lod) biased_lod = reduction_lod();
+  if (!biased_lod) { failure = "AIR Min/Max reduction LOD is unavailable"; return {}; }
+  auto *lod = air.CreateFPBinOp(AIRBuilder::fmin, state.MaxLOD, biased_lod, false);
+  lod = air.CreateFPBinOp(AIRBuilder::fmax, state.MinLOD, lod, false);
+  auto *flags = ir.CreateOr(state.Flags,
+      ir.CreateSelect(ir.CreateFCmpOGT(lod, air.getFloat(0)), air.getInt(dxmt::air::SamplerMinifying), air.getInt(0)));
+  if (texture.Logical == Texture::texture1d || texture.Logical == Texture::texture1d_array)
+    flags = ir.CreateOr(flags, air.getInt(dxmt::air::SamplerLogical1D));
+  auto value = texture.DefaultComponents
+      ? air.CreateClampedReductionSampleLevel(texture.Texture, texture.Handle, sampler.Handle,
+          coord, array_index, lod, flags, offsets,
+          min_lod_clamp ? min_lod_clamp : DecodeTextureMinLODClamp(texture.Metadata), texture.DefaultComponents)
+      : air.CreateReductionSampleLevel(texture.Texture, texture.Handle, sampler.Handle,
+          coord, array_index, lod, flags, offsets);
+  if (!value) { failure = "AIR Min/Max helper ABI is unsupported"; return {}; }
+  auto *result = *value;
+  if (ordinary_block) {
+    auto *reduction_exit = ir.GetInsertBlock();
+    ir.CreateBr(merge_block);
+    ir.SetInsertPoint(ordinary_block);
+    auto *ordinary_value = ordinary_sample();
+    auto *ordinary_exit = ir.GetInsertBlock();
+    ir.CreateBr(merge_block);
+    ir.SetInsertPoint(merge_block);
+    auto *merged = ir.CreatePHI(result->getType(), 2, "sample.result");
+    merged->addIncoming(result, reduction_exit);
+    merged->addIncoming(ordinary_value, ordinary_exit);
+    result = merged;
+  }
+  return result;
 }
 
 void
@@ -1606,7 +1737,7 @@ Converter::operator()(const InstSampleLOD &sample) {
   if (!Tex)
     return;
 
-  auto Sampler = LoadSampler(sample.src_sampler);
+  auto Sampler = LoadSampler(sample.src_sampler, true);
   if (!Sampler)
     return;
 
@@ -1657,10 +1788,28 @@ Converter::operator()(const InstSampleLOD &sample) {
 
   llvm::Value *LOD = ir.CreateFAdd(LoadOperand(sample.src_lod, kMaskComponentX), Sampler->Bias);
 
+  if (Sampler->Reduction) {
+    if (sample.feedback || (Tex->Logical != Texture::texture1d && Tex->Logical != Texture::texture1d_array &&
+                            Tex->Logical != Texture::texture2d && Tex->Logical != Texture::texture2d_array &&
+                            Tex->Logical != Texture::texture3d && Tex->Logical != Texture::texturecube &&
+                            Tex->Logical != Texture::texturecube_array) || Tex->Texture.sample_type != Texture::sample_float) {
+      failure = "AIR Min/Max SampleLevel texture kind/type or feedback is unsupported";
+      return;
+    }
+    auto result = CreateReductionSample(*Tex, *Sampler, Coord, ArrayIndex, LOD, sample.offsets, [&] {
+      return air.CreateSample(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex,
+          sample.offsets, sample_level{LOD}).first;
+    });
+    if (!result) return;
+    StoreOperand(sample.dst, MaskSwizzle(*result, GetMask(sample.dst), Tex->Swizzle));
+    return; // No fabricated residency success; feedback was rejected above.
+  }
+
   auto [Value, Residency] =
       air.CreateSample(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets, sample_level{LOD});
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  StoreFeedback(sample.feedback, Residency);
 }
 
 void
@@ -1671,7 +1820,7 @@ Converter::operator()(const InstSampleBias &sample) {
   if (!Tex)
     return;
 
-  auto Sampler = LoadSampler(sample.src_sampler);
+  auto Sampler = LoadSampler(sample.src_sampler, true);
   if (!Sampler)
     return;
 
@@ -1726,7 +1875,22 @@ Converter::operator()(const InstSampleBias &sample) {
     return;
   }
 
-  auto Bias = ir.CreateFAdd(Sampler->Bias, LoadOperand(sample.src_bias, kMaskComponentX));
+  auto *InstructionBias = LoadOperand(sample.src_bias, kMaskComponentX);
+  auto Bias = ir.CreateFAdd(Sampler->Bias, InstructionBias);
+
+  if (Sampler->Reduction) {
+    if (sample.feedback) {
+      failure = "AIR Min/Max implicit feedback is unsupported";
+      return;
+    }
+    auto result = CreateImplicitReductionSample(*Tex, *Sampler, Coord, ArrayIndex, InstructionBias, sample.offsets, [&] {
+      return air.CreateSample(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets,
+          sample_bias{Bias}, sample_min_lod_clamp{MinLODClamp}).first;
+    }, MinLODClamp);
+    if (!result) return;
+    StoreOperand(sample.dst, MaskSwizzle(*result, GetMask(sample.dst), Tex->Swizzle));
+    return;
+  }
 
   auto [Value, Residency] = air.CreateSample(
       Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets, sample_bias{Bias},
@@ -1734,6 +1898,7 @@ Converter::operator()(const InstSampleBias &sample) {
   );
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  StoreFeedback(sample.feedback, Residency);
 }
 
 void
@@ -1744,7 +1909,7 @@ Converter::operator()(const InstSampleDerivative &sample) {
   if (!Tex)
     return;
 
-  auto Sampler = LoadSampler(sample.src_sampler);
+  auto Sampler = LoadSampler(sample.src_sampler, true);
   if (!Sampler)
     return;
 
@@ -1819,11 +1984,34 @@ Converter::operator()(const InstSampleDerivative &sample) {
     return;
   }
 
+  if (Sampler->Reduction) {
+    if (sample.feedback ||
+        (Tex->Logical != Texture::texture1d && Tex->Logical != Texture::texture1d_array &&
+         Tex->Logical != Texture::texture2d && Tex->Logical != Texture::texture2d_array &&
+         Tex->Logical != Texture::texture3d && Tex->Logical != Texture::texturecube &&
+         Tex->Logical != Texture::texturecube_array) || Tex->Texture.sample_type != Texture::sample_float ||
+        ((Tex->Logical == Texture::texturecube || Tex->Logical == Texture::texturecube_array) &&
+         (sample.offsets[0] || sample.offsets[1] || sample.offsets[2]))) {
+      failure = "AIR Min/Max SampleGrad texture kind/type or feedback is unsupported";
+      return;
+    }
+    auto lod = air.CreateIsotropicGradientLOD(Tex->Texture, Tex->Handle, DDX, DDY, Coord);
+    if (!lod) { failure = "AIR Min/Max gradient LOD is unsupported"; return; }
+    auto *biased_lod = ir.CreateFAdd(*lod, Sampler->Bias);
+    auto result = CreateReductionSample(*Tex, *Sampler, Coord, ArrayIndex, biased_lod, sample.offsets, [&] {
+      return air.CreateSampleGrad(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex,
+          DDX, DDY, MinLODClamp, sample.offsets).first;
+    }, {}, MinLODClamp);
+    if (!result) return;
+    StoreOperand(sample.dst, MaskSwizzle(*result, GetMask(sample.dst), Tex->Swizzle));
+    return;
+  }
   auto [Value, Residency] = air.CreateSampleGrad(
       Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, DDX, DDY, MinLODClamp, sample.offsets
   );
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  StoreFeedback(sample.feedback, Residency);
 }
 
 void
@@ -1889,6 +2077,7 @@ Converter::operator()(const InstSampleCompare &sample) {
             );
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  StoreFeedback(sample.feedback, Residency);
 }
 
 void
@@ -1946,6 +2135,7 @@ Converter::operator()(const InstGather &sample) {
       air.CreateGather(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, Offset, Component);
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  StoreFeedback(sample.feedback, Residency);
 }
 
 void
@@ -1999,6 +2189,7 @@ Converter::operator()(const InstGatherCompare &sample) {
       air.CreateGatherCompare(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, Reference, Offset);
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  StoreFeedback(sample.feedback, Residency);
 }
 
 void
@@ -2245,6 +2436,8 @@ Converter::operator()(const InstLoadRaw &load) {
   bool Volatile = cast<llvm::PointerType>(Buf->Pointer->getType())->getAddressSpace() == 3;
 
   auto Index = ir.CreateLShr(LoadOperand(load.src_byte_offset, kMaskComponentX), 2);
+  if (!StoreBufferFeedback(load.feedback, *Buf, Index, Mask))
+    return;
 
   if (auto Comp = ComponentFromScalarMask(Mask, Buf->Swizzle); Comp >= 0) {
     auto Ptr = CreateGEPInt32WithBoundCheck(Buf.value(), ir.CreateAdd(Index, ir.getInt32(Comp)));
@@ -2277,6 +2470,8 @@ Converter::operator()(const InstLoadStructured &load) {
   auto IndexStruct =
       ir.CreateMul(ir.getInt32(Buf->StructureStride >> 2), LoadOperand(load.src_address, kMaskComponentX));
   auto Index = ir.CreateAdd(IndexStruct, ir.CreateLShr(LoadOperand(load.src_byte_offset, kMaskComponentX), 2));
+  if (!StoreBufferFeedback(load.feedback, *Buf, Index, Mask))
+    return;
 
   if (auto Comp = ComponentFromScalarMask(Mask, Buf->Swizzle); Comp >= 0) {
     auto Ptr = CreateGEPInt32WithBoundCheck(Buf.value(), ir.CreateAdd(Index, ir.getInt32(Comp)));
@@ -2896,6 +3091,73 @@ Converter::DomainGeneratePrimitives(
   }
   auto Fn = air.getModule()->getOrInsertFunction(FnName, llvm::FunctionType::get(air.getVoidTy(), Tys, false), Attrs);
   ir.CreateCall(Fn, Ops);
+}
+
+bool
+Converter::StoreBufferFeedback(const std::optional<DstOperand> &DstOp, BufferResourceHandle &Buffer,
+                               llvm::Value *Index, mask_t Mask) {
+  if (!DstOp)
+    return true;
+  if (!Buffer.SparseFeedbackHeader || !Buffer.Metadata) {
+    failure = "Buffer residency feedback requires AIR descriptor-table metadata";
+    return false;
+  }
+
+  auto Fn = ir.GetInsertBlock()->getParent();
+  auto Entry = ir.GetInsertBlock();
+  auto Sparse = llvm::BasicBlock::Create(ir.getContext(), "feedback.sparse", Fn);
+  auto Done = llvm::BasicBlock::Create(ir.getContext(), "feedback.done", Fn);
+  ir.CreateCondBr(ir.CreateICmpNE(Buffer.SparseFeedbackHeader, ir.getInt64(0)), Sparse, Done);
+  ir.SetInsertPoint(Sparse);
+  auto Header = ir.CreateIntToPtr(Buffer.SparseFeedbackHeader, ir.getInt64Ty()->getPointerTo(1));
+  auto Field = [&](unsigned i) {
+    return ir.CreateLoad(ir.getInt64Ty(), ir.CreateGEP(ir.getInt64Ty(), Header, ir.getInt64(i)));
+  };
+  auto Base = Field(0);
+  auto Size = Field(1);
+  auto Mapping = Field(2);
+  auto Count = Field(3);
+  auto View = ir.CreatePtrToInt(Buffer.Pointer, ir.getInt64Ty());
+  auto Origin = ir.CreateSub(View, Base);
+  llvm::Value *Resident = ir.getTrue();
+  for (auto [Comp, _] : EnumerateComponents(MemoryAccessMask(Mask, Buffer.Swizzle))) {
+    // Match the data load's i32 component arithmetic before extending to i64.
+    auto ComponentIndex = ir.CreateAdd(Index, ir.getInt32(Comp));
+    auto Offset = ir.CreateShl(ir.CreateZExt(ComponentIndex, ir.getInt64Ty()), 2);
+    auto Byte = ir.CreateAdd(Origin, Offset);
+    auto Tile = ir.CreateLShr(Byte, 16);
+    auto InView = ir.CreateICmpULT(ComponentIndex, ir.CreateLShr(DecodeRawBufferByteLength(Buffer.Metadata), 2));
+    auto OutsideView = ir.CreateNot(InView);
+    auto Valid = ir.CreateAnd(ir.CreateICmpUGE(View, Base), ir.CreateICmpUGE(Byte, Origin));
+    Valid = ir.CreateAnd(Valid, ir.CreateAnd(ir.CreateICmpUGE(Size, ir.getInt64(4)),
+                                         ir.CreateICmpULE(Byte, ir.CreateSub(Size, ir.getInt64(4)))));
+    Valid = ir.CreateAnd(Valid, ir.CreateAnd(ir.CreateICmpULT(Tile, Count),
+                                          ir.CreateICmpNE(Mapping, ir.getInt64(0))));
+    auto Before = ir.GetInsertBlock();
+    auto Read = llvm::BasicBlock::Create(ir.getContext(), "feedback.tile", Fn);
+    auto Merge = llvm::BasicBlock::Create(ir.getContext(), "feedback.component", Fn);
+    ir.CreateCondBr(ir.CreateAnd(InView, Valid), Read, Merge);
+    ir.SetInsertPoint(Read);
+    auto Bytes = ir.CreateIntToPtr(Mapping, ir.getInt8Ty()->getPointerTo(1));
+    auto Mapped = ir.CreateLoad(ir.getInt8Ty(), ir.CreateGEP(ir.getInt8Ty(), Bytes, Tile));
+    // Mapping updates are GPU ordered; do not fold repeated bitmap reads.
+    Mapped->setVolatile(true);
+    auto TileResident = ir.CreateICmpNE(Mapped, ir.getInt8(0));
+    ir.CreateBr(Merge);
+    ir.SetInsertPoint(Merge);
+    auto ComponentResident = ir.CreatePHI(ir.getInt1Ty(), 2);
+    ComponentResident->addIncoming(OutsideView, Before);
+    ComponentResident->addIncoming(TileResident, Read);
+    Resident = ir.CreateAnd(Resident, ComponentResident);
+  }
+  auto SparseEnd = ir.GetInsertBlock();
+  ir.CreateBr(Done);
+  ir.SetInsertPoint(Done);
+  auto Result = ir.CreatePHI(ir.getInt1Ty(), 2);
+  Result->addIncoming(ir.getTrue(), Entry); // Ordinary buffers have no unmapped tiles.
+  Result->addIncoming(Resident, SparseEnd);
+  StoreOperand(*DstOp, ir.CreateSelect(Result, ir.getInt32(~0u), ir.getInt32(0)));
+  return true;
 }
 
 llvm::Value *

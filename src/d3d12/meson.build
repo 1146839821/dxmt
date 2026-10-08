@@ -1,3 +1,20 @@
+d3d12_pipeline_persistence_abi = cpp.compiles('''
+#include <d3d12.h>
+
+static void probe_d3d12_pipeline_persistence_abi() {
+  D3D12_PIPELINE_STATE_STREAM_DESC stream = {};
+  ID3D12PipelineLibrary1 *library = nullptr;
+  ID3D12Device2 *device = nullptr;
+  (void) stream;
+  (void) library;
+  (void) device;
+}
+''', name : 'D3D12 pipeline persistence ABI declarations', include_directories : dxmt_include_path)
+
+if not d3d12_pipeline_persistence_abi
+  error('D3D12 pipeline persistence requires compiler-provided stream and pipeline-library declarations')
+endif
+
 d3d12_src = [
   'd3d12.cpp',
   'd3d12_buffer.cpp',
@@ -7,11 +24,21 @@ d3d12_src = [
   'd3d12_command_signature.cpp',
   'd3d12_descriptor_heap.cpp',
   'd3d12_device.cpp',
+  'd3d12_msc_capabilities.cpp',
   'd3d12_fence.cpp',
   'd3d12_heap.cpp',
   'd3d12_pipeline_compute.cpp',
   'd3d12_pipeline_graphics.cpp',
+  'd3d12_pipeline_persistence.cpp',
+  'd3d12_shader_converter.cpp',
+  'd3d12_typed_origin.cpp',
+  'd3d12_typed_origin_root.cpp',
+  'd3d12_typed_origin_binding.cpp',
+  'd3d12_minmax_binding.cpp',
+  'd3d12_minmax_dispatch.cpp',
   'd3d12_query_heap.cpp',
+  'd3d12_raytracing.cpp',
+  'd3d12_raytracing_pipeline.cpp',
   'd3d12_resource_helper.cpp',
   'd3d12_root_signature.cpp',
   'd3d12_sampler.cpp',
@@ -38,6 +65,29 @@ d3d12_dep = declare_dependency(
   link_with           : [ d3d12_dll ],
   include_directories : [ dxmt_include_path, include_directories('.') ],
 )
+
+dxc_deployment = get_option('typed_origin_dxc_path')
+if dxc_deployment != ''
+  if not dxmt_crossbuild
+    error('Typed origin DXC deployment requires a Windows cross build')
+  endif
+  deployment_python = import('python').find_installation()
+  run_command(deployment_python, meson.project_source_root() / 'tools/check_dxc_deployment.py',
+    dxc_deployment, cpu_family, check : true)
+  install_data(dxc_deployment / 'dxcompiler.dll', dxc_deployment / 'dxil.dll',
+    dxc_deployment / 'LICENSE.txt', install_dir : windows_native_install_dir / 'dxmt-dxc')
+  foreach notice : ['LICENSE-MIT.txt', 'LICENSE-LLVM.txt', 'LICENSE-MS.txt', 'ThirdPartyNotices.txt']
+    if fs.is_file(dxc_deployment / notice)
+      install_data(dxc_deployment / notice, install_dir : windows_native_install_dir / 'dxmt-dxc')
+    endif
+  endforeach
+endif
+
+if get_option('enable_tests')
+  deployment_test_python = import('python').find_installation()
+  test('dxc-deployment-unit', deployment_test_python,
+    args : [meson.project_source_root() / 'tests/dx12/dxc_deployment_test.py'])
+endif
 
 if wine_builtin_dll
 custom_target('postprocess_libd3d12',

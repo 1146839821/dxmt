@@ -25,6 +25,39 @@
 using namespace metal;
 using namespace dxmt;
 
+struct DXMTPredicationParams {
+  uint operation;
+  uint reserved;
+};
+
+[[kernel]] void dxmt_predicate_arguments(
+    device const ulong* predicate [[buffer(kPredicationPredicateIndex)]],
+    device uint* arguments [[buffer(kPredicationOutputIndex)]],
+    constant DXMTPredicationParams& params [[buffer(kPredicationParamsIndex)]],
+    uint position [[thread_position_in_grid]]
+) {
+  if (position != 0)
+    return;
+
+  const bool execute = params.operation ? predicate[0] != 0 : predicate[0] == 0;
+  if (!execute)
+    arguments[0] = 0;
+}
+
+[[kernel]] void dxmt_predicate_count(
+    device const ulong* predicate [[buffer(kPredicationPredicateIndex)]],
+    device const uint* source_count [[buffer(kPredicationSourceIndex)]],
+    device uint* output_count [[buffer(kPredicationOutputIndex)]],
+    constant DXMTPredicationParams& params [[buffer(kPredicationParamsIndex)]],
+    uint position [[thread_position_in_grid]]
+) {
+  if (position != 0)
+    return;
+
+  const bool execute = params.operation ? predicate[0] != 0 : predicate[0] == 0;
+  output_count[0] = execute ? source_count[0] : 0;
+}
+
 [[kernel]] void clear_texture_1d_uint(
     texture1d<uint, access::read_write> tex [[texture(0)]],
     constant uint4& value [[buffer(1)]],
@@ -232,6 +265,16 @@ struct depth_out {
   float depth [[depth(any)]];
 };
 
+constant uint depth_coverage_mask [[function_constant(kDepthCoverageFCIndex_SampleMask)]];
+struct coverage_out {
+  uint mask [[sample_mask]];
+};
+// No inputs, color/depth output or resource bindings: retain rasterized depth
+// and intersect raster coverage with the absent-PS application's sample mask.
+[[fragment]] coverage_out fs_depth_coverage() {
+  return {depth_coverage_mask};
+}
+
 [[fragment]] depth_out fs_clear_rt_depth (
   constant float4& clear_value [[buffer(kCustomBufferArgumentIndex0)]]
 ) {
@@ -379,7 +422,7 @@ struct DXMTDispatchArguments {
 };
 
 struct DXMTTSDispatchMarshal {
-  constant uint2& draw_arguments; // (vertex|index_count, instance_count)
+  constant packed_uint2& draw_arguments; // D3D indirect arguments are only four-byte aligned.
   device DXMTDispatchArguments& dispatch_arguments_out;
   ulong max_object_threadgroups;
   ushort control_point_count;
@@ -387,8 +430,8 @@ struct DXMTTSDispatchMarshal {
   uint end_of_command;
 };
 
-[[vertex]] void ts_draw_arguments_marshal(
-    constant DXMTTSDispatchMarshal* tasks [[buffer(kCustomBufferArgumentIndex0)]]
+void ts_draw_arguments_marshal_impl(
+    constant DXMTTSDispatchMarshal* tasks
 ) {
   uint index = 0;
   for(;;) {
@@ -416,15 +459,15 @@ struct DXMTTSDispatchMarshal {
 }
 
 struct DXMTGSDispatchMarshal {
-  constant uint2& draw_arguments; // (vertex|index_count, instance_count)
+  constant packed_uint2& draw_arguments; // D3D indirect arguments are only four-byte aligned.
   device DXMTDispatchArguments& dispatch_arguments_out;
   ulong max_object_threadgroups;
   uint vertex_count_per_warp;
   uint end_of_command;
 };
 
-[[vertex]] void gs_draw_arguments_marshal(
-    constant DXMTGSDispatchMarshal* tasks [[buffer(kCustomBufferArgumentIndex0)]]
+void gs_draw_arguments_marshal_impl(
+    constant DXMTGSDispatchMarshal* tasks
 ) {
   uint index = 0;
   for(;;) {
@@ -448,6 +491,33 @@ struct DXMTGSDispatchMarshal {
       break;
     index++;
   };
+}
+
+[[vertex]] void ts_draw_arguments_marshal(
+    constant DXMTTSDispatchMarshal* tasks [[buffer(kCustomBufferArgumentIndex0)]]) {
+  ts_draw_arguments_marshal_impl(tasks);
+}
+[[vertex]] void gs_draw_arguments_marshal(
+    constant DXMTGSDispatchMarshal* tasks [[buffer(kCustomBufferArgumentIndex0)]]) {
+  gs_draw_arguments_marshal_impl(tasks);
+}
+struct DXMTTSCountedMarshal { DXMTTSDispatchMarshal task; constant uint& count; uint command_index; };
+struct DXMTGSCountedMarshal { DXMTGSDispatchMarshal task; constant uint& count; uint command_index; };
+[[vertex]] void ts_draw_arguments_marshal_counted(
+    constant DXMTTSCountedMarshal& data [[buffer(kCustomBufferArgumentIndex0)]]) {
+  if (data.count <= data.command_index) {
+    data.task.dispatch_arguments_out.x = 0;
+    data.task.dispatch_arguments_out.y = 0;
+    data.task.dispatch_arguments_out.z = 0;
+  } else ts_draw_arguments_marshal_impl(&data.task);
+}
+[[vertex]] void gs_draw_arguments_marshal_counted(
+    constant DXMTGSCountedMarshal& data [[buffer(kCustomBufferArgumentIndex0)]]) {
+  if (data.count <= data.command_index) {
+    data.task.dispatch_arguments_out.x = 0;
+    data.task.dispatch_arguments_out.y = 0;
+    data.task.dispatch_arguments_out.z = 0;
+  } else gs_draw_arguments_marshal_impl(&data.task);
 }
 
 struct depth_stencil_out {

@@ -59,8 +59,10 @@ FormatCapabilityInspector::Inspect(WMT::Device device) {
     APPEND_CAP(WMTPixelFormatABGR4Unorm, NO_ATOMIC_RESOLVE)
     APPEND_CAP(WMTPixelFormatBGR5A1Unorm, NO_ATOMIC_RESOLVE)
 
-    APPEND_CAP(WMTPixelFormatR32Uint, APPLE_INT_FORMAT_CAP_32 | TEXTURE_BUFFER_ALL_CAP)
-    APPEND_CAP(WMTPixelFormatR32Sint, APPLE_INT_FORMAT_CAP_32 | TEXTURE_BUFFER_ALL_CAP)
+    // Apple7+ supports scalar 32-bit integer MSAA, but not integer resolve.
+    // Keep this separate from the wider integer formats sharing the base caps.
+    APPEND_CAP(WMTPixelFormatR32Uint, APPLE_INT_FORMAT_CAP_32 | TEXTURE_BUFFER_ALL_CAP | FormatCapability::MSAA)
+    APPEND_CAP(WMTPixelFormatR32Sint, APPLE_INT_FORMAT_CAP_32 | TEXTURE_BUFFER_ALL_CAP | FormatCapability::MSAA)
     APPEND_CAP(
         WMTPixelFormatR32Float, FormatCapability::Write | FormatCapability::Color | FormatCapability::MSAA |
                                       FormatCapability::Blend | FormatCapability::Sparse | TEXTURE_BUFFER_ALL_CAP
@@ -198,7 +200,7 @@ FormatCapabilityInspector::Inspect(WMT::Device device) {
     APPEND_CAP(WMTPixelFormatRG8Sint, NONAPPLE_INT_FORMAT_CAP | TEXTURE_BUFFER_READ_OR_WRITE)
 
     APPEND_CAP(WMTPixelFormatR32Uint, NONAPPLE_INT_FORMAT_CAP | TEXTURE_BUFFER_ALL_CAP | FormatCapability::Atomic)
-    APPEND_CAP(WMTPixelFormatR32Uint, NONAPPLE_INT_FORMAT_CAP | TEXTURE_BUFFER_ALL_CAP | FormatCapability::Atomic)
+    APPEND_CAP(WMTPixelFormatR32Sint, NONAPPLE_INT_FORMAT_CAP | TEXTURE_BUFFER_ALL_CAP | FormatCapability::Atomic)
     APPEND_CAP(WMTPixelFormatR32Float, ALL_CAP | TEXTURE_BUFFER_ALL_CAP)
 
     APPEND_CAP(WMTPixelFormatRG16Unorm, ALL_CAP | TEXTURE_BUFFER_READ_OR_WRITE)
@@ -563,18 +565,21 @@ MTLQueryDXGIFormat(WMT::Device device, uint32_t format, MTL_DXGI_FORMAT_DESC &de
   case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: {
     description.PixelFormat = WMTPixelFormatDepth32Float_Stencil8;
     description.Flag = MTL_DXGI_FORMAT_DEPTH_PLANER | MTL_DXGI_FORMAT_STENCIL_PLANER;
+    description.BytesPerTexel = 8;
     description.PlanarCount = 2;
     break;
   }
   case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS: {
     description.PixelFormat = WMTPixelFormatR32X8X32;
     description.Flag = MTL_DXGI_FORMAT_TYPELESS | MTL_DXGI_FORMAT_DEPTH_PLANER;
+    description.BytesPerTexel = 8;
     description.PlanarCount = 2;
     break;
   }
   case DXGI_FORMAT_X32_TYPELESS_G8X24_UINT: {
     description.PixelFormat = WMTPixelFormatX32G8X32;
     description.Flag = MTL_DXGI_FORMAT_TYPELESS | MTL_DXGI_FORMAT_STENCIL_PLANER;
+    description.BytesPerTexel = 8;
     description.PlanarCount = 2;
     break;
   }
@@ -718,18 +723,21 @@ MTLQueryDXGIFormat(WMT::Device device, uint32_t format, MTL_DXGI_FORMAT_DESC &de
   case DXGI_FORMAT_D24_UNORM_S8_UINT: {
     description.Flag = MTL_DXGI_FORMAT_DEPTH_PLANER | MTL_DXGI_FORMAT_STENCIL_PLANER | MTL_DXGI_FORMAT_EMULATED_D24;
     description.PixelFormat = WMTPixelFormatDepth32Float_Stencil8;
+    description.BytesPerTexel = 4;
     description.PlanarCount = 2;
     break;
   }
   case DXGI_FORMAT_R24_UNORM_X8_TYPELESS: {
     description.Flag = MTL_DXGI_FORMAT_DEPTH_PLANER | MTL_DXGI_FORMAT_EMULATED_D24;
     description.PixelFormat = WMTPixelFormatR32X8X32;
+    description.BytesPerTexel = 4;
     description.PlanarCount = 2;
     break;
   }
   case DXGI_FORMAT_X24_TYPELESS_G8_UINT: {
     description.Flag = MTL_DXGI_FORMAT_STENCIL_PLANER | MTL_DXGI_FORMAT_EMULATED_D24;
     description.PixelFormat = WMTPixelFormatX32G8X32;
+    description.BytesPerTexel = 4;
     description.PlanarCount = 2;
     break;
   }

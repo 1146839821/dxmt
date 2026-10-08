@@ -120,6 +120,22 @@ public:
 
   /* Texture Operations */
 
+  // Explicit-LOD reduction primitive. PointSampler must have point min/mag/mip,
+  // zero bias and no LOD clamps; address/border modes are retained. Flags use
+  // the private air_minmax.metal contract, not D3D filter enum values. Unsupported
+  // texture kinds/types return None without emitting instructions.
+  Optional<Value *> CreateReductionSampleLevel(
+      const Texture &Texture, Value *Handle, Value *PointSampler, Value *Coord,
+      Value *ArrayIndex, Value *ClampedLOD, Value *Flags, const int32_t Offset[3]);
+
+  // View-space resource/instruction clamp, applied after sampler LOD clamps.
+  // Empty views return the mapped OOB one-mask without calling the tap helper.
+  // Admission must validate the descriptor's defaults before enabling clamps.
+  Optional<Value *> CreateClampedReductionSampleLevel(
+      const Texture &Texture, Value *Handle, Value *PointSampler, Value *Coord,
+      Value *ArrayIndex, Value *SamplerClampedLOD, Value *Flags, const int32_t Offset[3],
+      Value *MinLODClamp, Value *DefaultComponents);
+
   std::pair<Value *, Value *>
   CreateSample(
       const Texture &Texture, Value *Handle, Value *Sampler, Value *Coord, Value *ArrayIndex, const int32_t Offset[3]
@@ -238,6 +254,8 @@ public:
   );
 
   Value *CreateTextureQuery(const Texture &Texture, Value *Handle, Texture::Query Query, Value *Level);
+  Optional<Value *> CreateIsotropicGradientLOD(const Texture &Texture, Value *Handle,
+                                              Value *DerivX, Value *DerivY, Value *Direction = nullptr);
 
   /**
   \returns (float clamped_lod, float unclamped_lod)

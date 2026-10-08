@@ -26,6 +26,8 @@
 #include "../dxbc_instructions.hpp"
 #include "adt.hpp"
 #include "air_builder.hpp"
+#include <functional>
+#include "dxbc_binding_map.hpp"
 #include "tl/generator.hpp"
 #include "ftl.hpp"
 
@@ -51,6 +53,7 @@ struct TextureResourceHandle {
   llvm::Value *Metadata;
   Swizzle Swizzle;
   bool GlobalCoherent;
+  llvm::Value *DefaultComponents = nullptr;
 };
 
 struct BufferResourceHandle {
@@ -59,6 +62,7 @@ struct BufferResourceHandle {
   uint32_t StructureStride; // 0 if not structured
   Swizzle Swizzle;
   bool GlobalCoherent;
+  llvm::Value *SparseFeedbackHeader = nullptr;
 };
 
 struct AtomicBufferResourceHandle {
@@ -77,6 +81,7 @@ struct SamplerHandle {
   llvm::Value *Handle;
   llvm::Value *HandleCube;
   llvm::Value *Bias;
+  std::optional<SamplerReductionState> Reduction;
 };
 
 struct InterpolantHandle {
@@ -100,6 +105,7 @@ enum class TessellatorOutputPrimitive {
 
 class Converter {
 public:
+  const char *failure = nullptr;
   Converter(llvm::air::AIRBuilder &air, context &ctx_legacy, io_binding_map &res_legacy) :
       air(air),
       ir(air.builder),
@@ -156,7 +162,16 @@ public:
     );
   }
 
-  llvm::Optional<SamplerHandle> LoadSampler(const SrcOperandSampler &SrcOp);
+  llvm::Optional<SamplerHandle> LoadSampler(const SrcOperandSampler &SrcOp, bool AllowReduction = false);
+  llvm::Optional<llvm::Value *> CreateImplicitReductionSample(
+      const TextureResourceHandle &texture, const SamplerHandle &sampler, llvm::Value *coord,
+      llvm::Value *array_index, llvm::Value *instruction_bias, const int32_t offsets[3],
+      const std::function<llvm::Value *()> &ordinary_sample, llvm::Value *min_lod_clamp = nullptr);
+  llvm::Optional<llvm::Value *> CreateReductionSample(
+      const TextureResourceHandle &texture, const SamplerHandle &sampler, llvm::Value *coord,
+      llvm::Value *array_index, llvm::Value *biased_lod, const int32_t offsets[3],
+      const std::function<llvm::Value *()> &ordinary_sample,
+      const std::function<llvm::Value *()> &reduction_lod = {}, llvm::Value *min_lod_clamp = nullptr);
 
   llvm::Optional<BufferResourceHandle> LoadBuffer(const SrcOperandResource &SrcOp);
   llvm::Optional<BufferResourceHandle> LoadBuffer(const SrcOperandUAV &SrcOp);
@@ -201,6 +216,10 @@ public:
   void StoreOperand(const DstOperandIndexableTemp &DstOp, llvm::Value *Value);
   void StoreOperandHull(const DstOperandOutput &DstOp, llvm::Value *Value);
   void StoreOperandHull(const DstOperandIndexableOutput &DstOp, llvm::Value *Value);
+
+  void StoreFeedback(const std::optional<DstOperand> &DstOp, llvm::Value *Residency);
+  bool StoreBufferFeedback(const std::optional<DstOperand> &DstOp, BufferResourceHandle &Buffer,
+                           llvm::Value *Index, mask_t Mask);
 
   void
   StoreOperand(const DstOperand &DstOp, llvm::Value *Value, bool Saturate = false) {
@@ -284,6 +303,7 @@ public:
   void operator()(const InstLoad &);
   void operator()(const InstLoadUAVTyped &);
   void operator()(const InstStoreUAVTyped &);
+  void operator()(const InstCheckAccessFullyMapped &);
 
   void operator()(const InstSample &);
   void operator()(const InstSampleLOD &);

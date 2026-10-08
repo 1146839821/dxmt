@@ -2,6 +2,7 @@
 
 #include "air_builder.hpp"
 #include "llvm/IR/Value.h"
+#include <optional>
 
 namespace dxmt::dxbc {
 
@@ -10,10 +11,21 @@ struct ConstantBufferDescriptor {
   llvm::Value *Metadata; // may be null
 };
 
+struct SamplerReductionState {
+  llvm::Value *Flags;
+  llvm::Value *MinLOD;
+  llvm::Value *MaxLOD;
+  bool Unsupported = false;
+  // Null for a statically known reduction sampler; otherwise an i1 decoded
+  // from the live descriptor tag. Only one sampling operation may execute.
+  llvm::Value *RuntimePredicate = nullptr;
+};
+
 struct SamplerDescriptor {
   llvm::Value *SamplerHandle;
   llvm::Value *CubeSamplerHandle;
   llvm::Value *Metadata;
+  std::optional<SamplerReductionState> Reduction;
 };
 
 struct TextureDescirptor {
@@ -24,6 +36,7 @@ struct TextureDescirptor {
   llvm::air::Texture::ResourceKind ResourceKindLogical;
   llvm::air::Texture::MemoryAccess MemoryAccess;
   llvm::air::Texture::SampleType SampleType;
+  llvm::Value *DefaultComponents = nullptr; // D3D12 AIR descriptor word 2; absent in legacy bindings.
 
 };
 
@@ -32,6 +45,8 @@ struct BufferDescriptor {
   llvm::Value *Metadata;
   uint32_t StructureStride;
   bool GlobalCoherent;
+  // AIR descriptor word 3. Null when the binding ABI cannot carry feedback.
+  llvm::Value *SparseFeedbackHeader = nullptr;
 };
 
 struct CounterDescriptor {

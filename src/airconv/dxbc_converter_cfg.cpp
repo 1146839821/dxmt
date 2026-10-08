@@ -651,9 +651,38 @@ read_control_flow(
       bb_current->instructions.push_back(InstCut{});
       break;
     }
-    default:
-      bb_current->instructions.push_back(readInstruction(Inst, shader_info, phase));
+    default: {
+      auto instruction = readInstruction(Inst, shader_info, phase);
+      std::visit([&](const auto &decoded) {
+        if constexpr (requires { decoded.src_sampler; }) {
+          auto &sampler = shader_info.samplerMap.at(decoded.src_sampler.range_id);
+          sampler.reduction_consumer_seen = true;
+          bool eligible = false;
+          if constexpr (std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleLOD> ||
+                        std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleDerivative> ||
+                        std::is_same_v<std::decay_t<decltype(decoded)>, InstSample> ||
+                        std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleBias>) {
+            const auto &texture = shader_info.srvMap.at(decoded.src_resource.range_id);
+            eligible = !decoded.feedback && texture.scaler_type == ScalerDataType::Float &&
+                (texture.resource_type == ResourceType::Texture1D ||
+                 texture.resource_type == ResourceType::Texture1DArray ||
+                 texture.resource_type == ResourceType::Texture2D ||
+                 texture.resource_type == ResourceType::Texture2DArray ||
+                 texture.resource_type == ResourceType::Texture3D);
+            eligible |= !decoded.feedback && texture.scaler_type == ScalerDataType::Float &&
+                  (texture.resource_type == ResourceType::TextureCube ||
+                   texture.resource_type == ResourceType::TextureCubeArray) &&
+                  !decoded.offsets[0] && !decoded.offsets[1] && !decoded.offsets[2];
+            if constexpr (std::is_same_v<std::decay_t<decltype(decoded)>, InstSample> ||
+                          std::is_same_v<std::decay_t<decltype(decoded)>, InstSampleBias>)
+              eligible &= sm50_shader->shader_type == microsoft::D3D10_SB_PIXEL_SHADER;
+          }
+          sampler.reduction_sampling_only &= eligible;
+        }
+      }, instruction);
+      bb_current->instructions.push_back(instruction);
       break;
+    }
     }
   }
 

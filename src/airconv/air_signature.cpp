@@ -454,6 +454,9 @@ uint32_t FunctionSignatureBuilder::DefineInput(const FunctionInput &input) {
                 return s.user ==
                        std::get<InputFragmentStageIn>(element.value()).user;
               },
+              [&](const InputRenderTarget s) {
+                return s.index == std::get<InputRenderTarget>(element.value()).index;
+              },
               [&](const ArgumentBindingBuffer s) {
                 return s.location_index ==
                        std::get<ArgumentBindingBuffer>(element.value())
@@ -719,6 +722,13 @@ auto FunctionSignatureBuilder::CreateFunction(
             ->string("air.arg_name")
             ->string("mtl_rt_index");
           return msl_uint.get_llvm_type(context);
+        },
+        [&](const InputRenderTarget &target) {
+          metadata_field.string("air.render_target")->integer(target.index)
+              ->string("air.raster_order_group")->integer(0)
+              ->string("air.arg_type_name")->string(get_name(target.type))
+              ->string("air.arg_name")->string("destination_" + std::to_string(target.index));
+          return get_llvm_type(target.type, context);
         },
         [&](const InputViewportArrayIndex &) {
           metadata_field.string("air.viewport_array_index")

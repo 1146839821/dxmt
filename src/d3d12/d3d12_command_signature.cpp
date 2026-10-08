@@ -36,6 +36,14 @@ struct dxmt_compute_command_data {
   device ulong * rootsig_qwords;
   uint rootsig_qwords_stride;
   packed_uint3 tgsize;
+  device char *msc_tlab;
+  device char *msc_template;
+  device uint *msc_layout_offsets;
+  device void *msc_heap;
+  device void *msc_sampler_heap;
+  ulong msc_tlab_stride;
+  ulong msc_template_size;
+  device ulong *root_feedback_table;
 };
 
 struct d3d12_draw_arguments {
@@ -71,6 +79,12 @@ struct dxmt_vertex_buffer {
   uint length;
 };
 
+struct msc_vertex_buffer {
+  device void *buffer;
+  uint length;
+  uint stride;
+};
+
 struct dxmt_render_command_data {
   command_buffer cmd_buf;
   ulong max_count;
@@ -84,6 +98,19 @@ struct dxmt_render_command_data {
   device void * index_buffer;
   uint index_buffer_format;
   uint vertex_argbuf_stride;
+  device char *msc_tlab;
+  device char *msc_template;
+  device uint *msc_layout_offsets;
+  device void *msc_heap;
+  device void *msc_sampler_heap;
+  ulong msc_tlab_stride;
+  ulong msc_template_size;
+  device ulong *msc_vertex_buffers;
+  ulong msc_vertex_slot_mask;
+  device char *msc_fragment_tlab;
+  device char *msc_fragment_template;
+  device void *msc_vertex_records;
+  device ulong *root_feedback_table;
 };
 
 )";
@@ -95,8 +122,20 @@ public:
 
   HRESULT
   Initialize(const D3D12_COMMAND_SIGNATURE_DESC *pDesc, ID3D12RootSignature *pRootSignature) {
+    if (!pDesc || (!pDesc->NumArgumentDescs && pDesc->pArgumentDescs) ||
+        (pDesc->NumArgumentDescs && !pDesc->pArgumentDescs) || !pDesc->ByteStride ||
+        (pDesc->ByteStride & 3) || (pRootSignature && !IsSameDevice(device_, pRootSignature)))
+      return E_INVALIDARG;
+
     std::stringstream source;
+    std::stringstream root_source;
+    root_source << "kernel void resolve_emulation_roots(device const d3d12_arguments& arg [[buffer(0)]], "
+                   "device ulong* rootsig_qwords [[buffer(1)]], "
+                   "device dxmt_vertex_buffer* vertex_buffer [[buffer(2)]], "
+                   "constant uint& vertex_slot_mask [[buffer(3)]]) {\n";
     D3D12_INDIRECT_ARGUMENT_TYPE side_effect = ~(D3D12_INDIRECT_ARGUMENT_TYPE){};
+    uint64_t argument_size = 0;
+    ByteStride = pDesc->ByteStride;
     UpdateRootArguments = false;
     UpdateVertexBuffers = false;
     uint32_t ib_index = ~-0u;
@@ -111,21 +150,27 @@ public:
       auto &arg = pDesc->pArgumentDescs[i];
       switch (arg.Type) {
       case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH: {
+        argument_size += sizeof(uint32_t) * 3;
         side_effect = arg.Type;
         source << "packed_uint3 dispatch;\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW: {
+        argument_size += sizeof(uint32_t) * 4;
         side_effect = arg.Type;
         source << "d3d12_draw_arguments draw;\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED: {
+        argument_size += sizeof(uint32_t) * 5;
         side_effect = arg.Type;
         source << "d3d12_draw_indexed_arguments draw_indexed;\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW: {
+        if (arg.VertexBuffer.Slot >= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT)
+          return E_INVALIDARG;
+        argument_size += sizeof(uint64_t) + sizeof(uint32_t) * 2;
         UpdateVertexBuffers = true;
         source << "d3d12_vertex_buffer_view vb_" << i << ";\n";
         break;
@@ -134,10 +179,14 @@ public:
         if (ib_index != ~0u)
           return E_INVALIDARG;
         ib_index = i;
+        argument_size += sizeof(uint64_t) + sizeof(uint32_t) * 2;
         source << "d3d12_index_buffer_view ib;\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT: {
+        if (arg.Constant.Num32BitValuesToSet > (UINT64_MAX - argument_size) / sizeof(uint32_t))
+          return E_INVALIDARG;
+        argument_size += uint64_t(arg.Constant.Num32BitValuesToSet) * sizeof(uint32_t);
         UpdateRootArguments = true;
         for (unsigned j = 0; j < arg.Constant.Num32BitValuesToSet; j++) {
           source << "uint constant_" << i << "_" << j << ";\n";
@@ -145,16 +194,19 @@ public:
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW: {
+        argument_size += sizeof(uint64_t);
         UpdateRootArguments = true;
         source << "ulong cb_" << i << ";\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW: {
+        argument_size += sizeof(uint64_t);
         UpdateRootArguments = true;
         source << "ulong srv_" << i << ";\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW: {
+        argument_size += sizeof(uint64_t);
         UpdateRootArguments = true;
         source << "ulong uav_" << i << ";\n";
         break;
@@ -171,9 +223,13 @@ public:
 
     if (~side_effect == 0)
       return E_INVALIDARG;
+    if (!argument_size || argument_size > pDesc->ByteStride)
+      return E_INVALIDARG;
     bool is_compute = side_effect == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
     CommandType = side_effect;
     UpdateIndexBuffer = ib_index != ~0u;
+    if (is_compute && (UpdateVertexBuffers || UpdateIndexBuffer))
+      return E_INVALIDARG;
 
     if (is_compute)
       source
@@ -184,6 +240,9 @@ public:
 
     if (is_compute)
       source << "if (x !=0 ) return;\n";
+
+    source << "device char *msc_tlab = nullptr;\n";
+    source << "device char *msc_fragment_tlab = nullptr;\n";
 
     source << "uint count = command_data.max_count_buffer ? "
               "command_data.max_count_buffer[0] : command_data.max_count;\n";
@@ -198,24 +257,64 @@ public:
     }
     source << "cmd.reset();\n";
     source << "if (i >= count) continue;\n";
+    source << "msc_tlab = command_data.msc_tlab ? command_data.msc_tlab + i * command_data.msc_tlab_stride : nullptr;\n"
+                "if (msc_tlab) { for (ulong b = 0; b < command_data.msc_template_size; ++b) "
+                "msc_tlab[b] = command_data.msc_template[b]; }\n";
+    if (!is_compute)
+      source << "msc_fragment_tlab = command_data.msc_fragment_tlab ? command_data.msc_fragment_tlab + "
+                "i * command_data.msc_tlab_stride : nullptr;\n"
+                "if (msc_fragment_tlab) { for (ulong b = 0; b < command_data.msc_template_size; ++b) "
+                "msc_fragment_tlab[b] = command_data.msc_fragment_template[b]; }\n";
     source << "device ulong * rootsig_qwords = command_data.rootsig_qwords + "
               "(i * command_data.rootsig_qwords_stride);\n";
     if (!is_compute)
       source << "device dxmt_vertex_buffer * vertex_buffer = "
                 "reinterpret_cast<device dxmt_vertex_buffer *>(command_data.vertex_buffer + "
                 "(i * command_data.vertex_argbuf_stride));\n";
+    if (!is_compute) {
+      source << "device msc_vertex_buffer *msc_records = reinterpret_cast<device msc_vertex_buffer *>(command_data.msc_vertex_records);\n";
+      if (UpdateVertexBuffers)
+        source << "if (msc_records) { device msc_vertex_buffer *output = reinterpret_cast<device msc_vertex_buffer *>(vertex_buffer); "
+                  "for (uint slot = 0; slot < " << D3D12MSCVertexBufferCount
+               << "; ++slot) output[slot] = msc_records[slot]; msc_records = output; }\n";
+    }
 
     if (UpdateRootArguments || UpdateVertexBuffers || UpdateIndexBuffer) {
       if (!is_compute) {
+        source << "if (msc_tlab) {\n"
+               << "cmd.set_vertex_buffer(msc_tlab," << DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT << ");\n"
+               << "cmd.set_fragment_buffer(msc_fragment_tlab ? msc_fragment_tlab : msc_tlab," << DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT << ");\n"
+               << "cmd.set_vertex_buffer(command_data.msc_heap," << DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT << ");\n"
+               << "cmd.set_fragment_buffer(command_data.msc_heap," << DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT << ");\n"
+               << "cmd.set_vertex_buffer(command_data.msc_sampler_heap," << DXMT_MSC_SAMPLER_HEAP_BIND_POINT << ");\n"
+               << "cmd.set_fragment_buffer(command_data.msc_sampler_heap," << DXMT_MSC_SAMPLER_HEAP_BIND_POINT << ");\n"
+               << "if (msc_records) cmd.set_vertex_buffer(msc_records, "
+               << DXMT_MSC_VERTEX_BUFFER_BIND_POINT << "); else "
+               << "for (uint slot = 0; slot < 32; ++slot) if (command_data.msc_vertex_slot_mask & (1ul << slot)) "
+               << "cmd.set_vertex_buffer(reinterpret_cast<device void *>(command_data.msc_vertex_buffers[slot]), "
+               << DXMT_MSC_VERTEX_BUFFER_BIND_POINT << " + slot);\n"
+               << "} else {\n";
         source << "cmd.set_vertex_buffer(vertex_buffer," << SM50_BINDING_INDEX_VERTEX_BUFFER << ");\n";
         source << "cmd.set_vertex_buffer(rootsig_qwords," << SM50_BINDING_INDEX_ROOT_ARGUMENTS << ");\n";
         source << "cmd.set_vertex_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS << ");\n";
         source << "cmd.set_fragment_buffer(rootsig_qwords," << SM50_BINDING_INDEX_ROOT_ARGUMENTS << ");\n";
         source << "cmd.set_fragment_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS
                << ");\n";
+        source << "if (command_data.root_feedback_table) {\n"
+               << "cmd.set_vertex_buffer(command_data.root_feedback_table," << SM50_BINDING_INDEX_ROOT_BUFFER_FEEDBACK << ");\n"
+               << "cmd.set_fragment_buffer(command_data.root_feedback_table," << SM50_BINDING_INDEX_ROOT_BUFFER_FEEDBACK << ");\n}\n";
+        source << "}\n";
       } else {
+        source << "if (msc_tlab) {\n"
+               << "cmd.set_kernel_buffer(msc_tlab," << DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT << ");\n"
+               << "cmd.set_kernel_buffer(command_data.msc_heap," << DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT << ");\n"
+               << "cmd.set_kernel_buffer(command_data.msc_sampler_heap," << DXMT_MSC_SAMPLER_HEAP_BIND_POINT << ");\n"
+               << "} else {\n";
         source << "cmd.set_kernel_buffer(rootsig_qwords, " << SM50_BINDING_INDEX_ROOT_ARGUMENTS << ");\n";
         source << "cmd.set_kernel_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS << ");\n";
+        source << "if (command_data.root_feedback_table) cmd.set_kernel_buffer(command_data.root_feedback_table,"
+               << SM50_BINDING_INDEX_ROOT_BUFFER_FEEDBACK << ");\n";
+        source << "}\n";
       }
     }
 
@@ -255,8 +354,13 @@ public:
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW: {
         auto slot = arg.VertexBuffer.Slot;
+        source << "if (msc_records) msc_records[" << slot << "] = {arg.vb_" << i << ".buffer,arg.vb_" << i
+               << ".size_in_bytes,arg.vb_" << i << ".stride_in_bytes}; else ";
         source << "vertex_buffer[" << slot << "] = {arg.vb_" << i << ".buffer,arg.vb_" << i
                << ".stride_in_bytes,arg.vb_" << i << ".size_in_bytes};\n";
+        root_source << "if (vertex_slot_mask & (1u << " << slot << ")) vertex_buffer[popcount(vertex_slot_mask & "
+                    << ((uint32_t(1) << slot) - 1) << "u)] = {arg.vb_" << i << ".buffer,arg.vb_" << i
+                    << ".stride_in_bytes,arg.vb_" << i << ".size_in_bytes};\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW: {
@@ -273,8 +377,15 @@ public:
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
         for (unsigned j = 0; j < arg.Constant.Num32BitValuesToSet; j++) {
+          source << "if (msc_tlab) { for (uint stage = 0; stage < 2; ++stage) { "
+                    "device char *target = stage ? msc_fragment_tlab : msc_tlab; "
+                    "if (target) reinterpret_cast<device uint *>(target + command_data.msc_layout_offsets["
+                   << parameter_index << "])[" << (j + arg.Constant.DestOffsetIn32BitValues)
+                   << "] = arg.constant_" << i << "_" << j << "; } } else ";
           source << "reinterpret_cast<device uint *>(rootsig_qwords + " << offset << ")["
                  << (j + arg.Constant.DestOffsetIn32BitValues) << "] = arg.constant_" << i << "_" << j << ";\n";
+          root_source << "reinterpret_cast<device uint *>(rootsig_qwords + " << offset << ")["
+                      << (j + arg.Constant.DestOffsetIn32BitValues) << "] = arg.constant_" << i << "_" << j << ";\n";
         }
         break;
       }
@@ -286,7 +397,12 @@ public:
         if (parameter_index >= rootsig->ParameterSlots)
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
+        source << "if (msc_tlab) { for (uint stage = 0; stage < 2; ++stage) { "
+                  "device char *target = stage ? msc_fragment_tlab : msc_tlab; "
+                  "if (target) *reinterpret_cast<device ulong *>(target + command_data.msc_layout_offsets["
+                 << parameter_index << "]) = arg.cb_" << i << "; } } else ";
         source << "rootsig_qwords[" << offset << "] = arg.cb_" << i << ";\n";
+        root_source << "rootsig_qwords[" << offset << "] = arg.cb_" << i << ";\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW: {
@@ -297,7 +413,12 @@ public:
         if (parameter_index >= rootsig->ParameterSlots)
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
+        source << "if (msc_tlab) { for (uint stage = 0; stage < 2; ++stage) { "
+                  "device char *target = stage ? msc_fragment_tlab : msc_tlab; "
+                  "if (target) *reinterpret_cast<device ulong *>(target + command_data.msc_layout_offsets["
+                 << parameter_index << "]) = arg.srv_" << i << "; } } else ";
         source << "rootsig_qwords[" << offset << "] = arg.srv_" << i << ";\n";
+        root_source << "rootsig_qwords[" << offset << "] = arg.srv_" << i << ";\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW: {
@@ -308,7 +429,12 @@ public:
         if (parameter_index >= rootsig->ParameterSlots)
           return E_INVALIDARG;
         auto offset = rootsig->SlotQwordOffsets[parameter_index];
+        source << "if (msc_tlab) { for (uint stage = 0; stage < 2; ++stage) { "
+                  "device char *target = stage ? msc_fragment_tlab : msc_tlab; "
+                  "if (target) *reinterpret_cast<device ulong *>(target + command_data.msc_layout_offsets["
+                 << parameter_index << "]) = arg.uav_" << i << "; } } else ";
         source << "rootsig_qwords[" << offset << "] = arg.uav_" << i << ";\n";
+        root_source << "rootsig_qwords[" << offset << "] = arg.uav_" << i << ";\n";
         break;
       }
       default:
@@ -318,6 +444,10 @@ public:
 
     source << "}\n"
               "};\n";
+    if (!is_compute && (UpdateRootArguments || UpdateVertexBuffers)) source << root_source.str() << "}\n";
+    if (!is_compute)
+      air_emulation_draw_offset = static_cast<UINT>(argument_size -
+          (CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED ? 20 : 16));
 
     WMT::Reference<WMT::Error> err;
     auto lib = device_->GetMTLDevice().newLibraryWithSource(source.view(), err);
@@ -348,7 +478,14 @@ public:
       ERR("Failed to compile command signature resolve pso: ", err.description().getUTF8String());
       return E_FAIL;
     }
+    if (!is_compute && (UpdateRootArguments || UpdateVertexBuffers)) {
+      auto root_function = lib.newFunction("resolve_emulation_roots");
+      if (!root_function) return E_FAIL;
+      air_emulation_root_resolver = device_->GetMTLDevice().newComputePipelineState(root_function, err);
+      if (!air_emulation_root_resolver || err) return E_FAIL;
+    }
 
+    StateUpdates.assign(pDesc->pArgumentDescs, pDesc->pArgumentDescs + pDesc->NumArgumentDescs - 1);
     return S_OK;
   };
 

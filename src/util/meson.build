@@ -46,3 +46,15 @@ util_dep = declare_dependency(
   link_with           : [ util_lib ],
   include_directories : [ include_directories('.') ],
 )
+
+if get_option('enable_tests')
+  debug_logging_test = executable('debug-logging-test', 'tests/debug_logging.cpp',
+    include_directories: [include_directories('.'), dxmt_native_include_path],
+    native: dxmt_crossbuild,
+  )
+  foreach level : [0, 1, 2, 3, 4, 5]
+    test('debug logging level ' + level.to_string(), debug_logging_test,
+      env: ['DXMT_TEST_LOG_LEVEL=' + level.to_string()],
+    )
+  endforeach
+endif
