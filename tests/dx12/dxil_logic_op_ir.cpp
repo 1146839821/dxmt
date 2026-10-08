@@ -100,6 +100,16 @@ int main(int argc, char **argv) {
       params.framebuffer_space != UINT32_MAX) return 16;
   params.ir_capacity = transported.size();
   if (dxmt_msc_lower_logic_outputs(&params) != DXMT_MSC_SUCCESS || params.framebuffer_space != sized_space) return 17;
+  params.ir = 0;
+  params.ir_capacity = 0;
+  params.reserved = 8; // ceiling 7, explicitly distinct from the default ABI.
+  if (dxmt_msc_lower_logic_outputs(&params) != DXMT_MSC_SUCCESS || params.framebuffer_space != 7) return 20;
+  params.reserved = 1; // ceiling zero is valid and must not underflow.
+  if (dxmt_msc_lower_logic_outputs(&params) != DXMT_MSC_SUCCESS || params.framebuffer_space != 0) return 21;
+  params.reserved = UINT32_MAX;
+  if (dxmt_msc_lower_logic_outputs(&params) != DXMT_MSC_ERROR_INVALID_ARGUMENT ||
+      params.framebuffer_space != UINT32_MAX) return 22;
+  params.reserved = 0;
   params.ir = params.bitcode;
   params.ir_capacity = 1;
   if (dxmt_msc_lower_logic_outputs(&params) != DXMT_MSC_ERROR_INVALID_ARGUMENT) return 18;

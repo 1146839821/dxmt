@@ -1,5 +1,15 @@
 # Closure infrastructure consolidation
 
+Root-space collision checkpoint (2026-10-08): MSC lowering now reselects a local
+feature space around application root spaces without altering their layout.
+Two adjacent occupied spaces plus CBV rebinding pass sixteen operations on both
+builds under API validation. The mandatory raster ledger expands to eighty cases;
+no-private execution passes all eighty, while complete qualification remains
+PARTIAL. Old native explicitly rejects the new hint. Both builds and host suites
+pass. See D3D12_MSC_LOGIC_OP_LOWERING.md. Experimental capability isolation remains
+in force; this does not close timestamp, root-feedback performance or the full
+Typed/MinMax/Tiled/format/raster qualification requirements.
+
 Nonempty LogicOp root checkpoint (2026-10-08): an actually consumed pixel root
 CBV and per-draw rebinding with distinct source values pass all sixteen operations
 on both builds under API validation. The raster gate now includes thirty-two

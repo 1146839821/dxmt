@@ -14,7 +14,7 @@
 namespace dxmt::dxil {
 bool LowerIntegerLogicOutputs(llvm::Module &module, uint32_t operation,
     const std::array<std::array<uint32_t, 4>, 8> &widths,
-    uint32_t &framebuffer_space, std::string &error) {
+    uint32_t &framebuffer_space, std::string &error, uint32_t space_ceiling) {
   using namespace llvm;
   error.clear();
   framebuffer_space = UINT32_MAX;
@@ -23,7 +23,7 @@ bool LowerIntegerLogicOutputs(llvm::Module &module, uint32_t operation,
     raw_string_ostream diagnostics(error);
     if (verifyModule(module, &diagnostics)) return false;
   }
-  if (operation > 15) return reject("invalid logic operation");
+  if (operation > 15 || space_ceiling > 2147420893u) return reject("invalid logic operation or feature space ceiling");
   for (auto &target : widths) for (auto width : target)
     if (width > 32) return reject("invalid target width");
   auto *model = module.getNamedMetadata("dx.shaderModel");
@@ -112,7 +112,7 @@ bool LowerIntegerLogicOutputs(llvm::Module &module, uint32_t operation,
     }
   }
   if (next_id > UINT32_MAX - 8) return reject("SRV identity overflow");
-  uint32_t space = 2147420893u;
+  uint32_t space = space_ceiling;
   while (spaces.count(space)) { if (!space) return reject("no feature space available"); --space; }
   uint32_t major, minor;
   if (!word(model->getOperand(0)->getOperand(1), major) || major != 6 ||

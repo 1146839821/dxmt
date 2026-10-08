@@ -14,7 +14,8 @@ static int LowerLogicOutputs(dxmt_msc_lower_logic_outputs_params *params) {
   auto valid = [](uint64_t address, uint64_t size) {
     return address <= UINTPTR_MAX && size <= UINTPTR_MAX - address;
   };
-  if (params->reserved || params->operation > 15 || !params->bitcode || !params->bitcode_size ||
+  const uint32_t ceiling = params->reserved ? params->reserved - 1 : 2147420893u;
+  if (ceiling > 2147420893u || params->operation > 15 || !params->bitcode || !params->bitcode_size ||
       params->bitcode_size > 16 * 1024 * 1024 || !valid(params->bitcode, params->bitcode_size) ||
       (!params->ir && params->ir_capacity) || !valid(params->ir, params->ir_capacity))
     return DXMT_MSC_ERROR_INVALID_ARGUMENT;
@@ -32,7 +33,7 @@ static int LowerLogicOutputs(dxmt_msc_lower_logic_outputs_params *params) {
   if (!module) { llvm::consumeError(module.takeError()); return DXMT_MSC_ERROR_INVALID_DXIL; }
   uint32_t space;
   std::string error;
-  if (!dxmt::dxil::LowerIntegerLogicOutputs(**module, params->operation, widths, space, error))
+  if (!dxmt::dxil::LowerIntegerLogicOutputs(**module, params->operation, widths, space, error, ceiling))
     return DXMT_MSC_ERROR_UNSUPPORTED_SHADER;
   for (auto &function : **module) for (auto &block : function) {
     if (!block.hasName()) block.setName("dxmt.block");

@@ -91,7 +91,9 @@ int main(int argc, char **argv) {
   const bool indirect_fragment = argc == 4 && strcmp(argv[3], "--indirect-fragment-constants") == 0;
   const bool indirect_partial = argc == 4 && strcmp(argv[3], "--indirect-partial-constants") == 0;
   const bool logic_root_cbv = argc == 4 && strncmp(argv[3], "--logic-op-root-cbv-", 20) == 0;
-  const bool logic_root_chain = logic_root_cbv && strncmp(argv[3], "--logic-op-root-cbv-chain-", 26) == 0;
+  const bool logic_root_collision = logic_root_cbv && strncmp(argv[3], "--logic-op-root-cbv-collision-", 30) == 0;
+  const bool logic_root_chain = logic_root_cbv && (strncmp(argv[3], "--logic-op-root-cbv-chain-", 26) == 0 ||
+      strncmp(argv[3], "--logic-op-root-cbv-collision-chain-", 36) == 0);
   const bool root_cbv = argc == 4 && (strcmp(argv[3], "--root-cbv") == 0 ||
       strcmp(argv[3], "--indirect-root-cbv") == 0 || indirect_indexed || logic_root_cbv);
   const bool root_constants = argc == 4 && (strcmp(argv[3], "--root-constants") == 0 ||
@@ -114,7 +116,7 @@ int main(int argc, char **argv) {
   const bool numbered_logic = argc == 4 && (logic_sm5 || strncmp(argv[3], "--logic-op-", 11) == 0);
   unsigned logic_index = D3D12_LOGIC_OP_OR;
   if (numbered_logic) {
-    const auto number = argv[3] + (logic_root_cbv ? (logic_root_chain ? 26 : 20) :
+    const auto number = argv[3] + (logic_root_collision ? (logic_root_chain ? 36 : 30) : logic_root_cbv ? (logic_root_chain ? 26 : 20) :
         logic_sm5 ? (logic_chain ? 21 : 15) : (logic_chain ? 17 : 11));
     // Reject malformed options instead of silently selecting CLEAR.
     if (!*number) return 2;
@@ -389,6 +391,15 @@ int main(int argc, char **argv) {
     root_parameters[0].ShaderVisibility = logic_root_cbv ? D3D12_SHADER_VISIBILITY_PIXEL : D3D12_SHADER_VISIBILITY_VERTEX;
     root_desc.NumParameters = 1;
     root_desc.pParameters = root_parameters;
+    if (logic_root_collision) {
+      for (unsigned i = 1; i < 3; ++i) {
+        root_parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        root_parameters[i].Constants.Num32BitValues = 1;
+        root_parameters[i].Constants.RegisterSpace = 2147420894u - i;
+        root_parameters[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+      }
+      root_desc.NumParameters = 3;
+    }
   } else if (root_constants) {
     root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     root_parameters[0].Constants.Num32BitValues = 4;
@@ -1035,6 +1046,7 @@ int main(int argc, char **argv) {
   if (logic_op) std::cout << "LOGIC_OP index=" << logic_index << " RGBA8_UINT PASS\n";
   if (logic_chain) std::cout << "LOGIC_OP_CHAIN draws=2 PASS\n";
   if (logic_root_cbv) std::cout << "LOGIC_OP_ROOT_CBV " << (logic_chain ? "rebound" : "direct") << " PASS\n";
+  if (logic_root_collision) std::cout << "LOGIC_OP_ROOT_SPACE collision-reselected PASS\n";
   std::cout << ((packed_sm5 || logic_sm5) ? "DXBC AIRCONV " : "DXIL ")
             << (geometry_adjacency_indexed
                     ? "indexed adjacency geometry graphics"

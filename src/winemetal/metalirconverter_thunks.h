@@ -242,6 +242,8 @@ struct dxmt_msc_lower_logic_outputs_params {
   uint32_t operation, framebuffer_space;
   uint32_t component_bits[8][4];
   int32_t ret;
+  /* Zero: default feature space. Nonzero: requested ceiling + 1. Older
+   * native implementations reject nonzero instead of ignoring the request. */
   uint32_t reserved;
 };
 typedef char dxmt_msc_lower_logic_outputs_size_check[

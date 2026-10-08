@@ -16,5 +16,5 @@ bool LowerIntegerLogicOutput(llvm::CallInst &store, llvm::Value *destination,
 // against the application root signature before publication.
 bool LowerIntegerLogicOutputs(llvm::Module &module, uint32_t operation,
     const std::array<std::array<uint32_t, 4>, 8> &widths,
-    uint32_t &framebuffer_space, std::string &error);
+    uint32_t &framebuffer_space, std::string &error, uint32_t space_ceiling = 2147420893u);
 }

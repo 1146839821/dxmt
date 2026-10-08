@@ -37,6 +37,7 @@
 #include <limits>
 #include <utility>
 #include <vector>
+#include <set>
 
 namespace dxmt {
 
@@ -1687,9 +1688,7 @@ public:
             }
           }
           std::string diagnostics;
-          hr = PrepareD3D12LogicOpShader(pixel_bytecode, directory.c_str(),
-              pDesc->BlendState.RenderTarget[0].LogicOp, widths, logic_shader, diagnostics);
-          if (FAILED(hr)) { ERR("Logic-op shader preparation: ", diagnostics); return hr; }
+          std::set<uint32_t> occupied_spaces;
           if (root_signature && root_signature_size) {
             Com<ID3D12VersionedRootSignatureDeserializer> decoded;
             hr = D3D12CreateVersionedRootSignatureDeserializer(root_signature, root_signature_size, IID_PPV_ARGS(&decoded));
@@ -1702,14 +1701,26 @@ public:
               const auto &parameter = root.pParameters[i];
               if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
                 for (UINT range = 0; range < parameter.DescriptorTable.NumDescriptorRanges; ++range)
-                  if (parameter.DescriptorTable.pDescriptorRanges[range].RegisterSpace == logic_shader.framebuffer_space)
-                    return E_NOTIMPL;
-              } else if ((parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS ?
-                  parameter.Constants.RegisterSpace : parameter.Descriptor.RegisterSpace) == logic_shader.framebuffer_space)
-                return E_NOTIMPL;
+                  occupied_spaces.insert(parameter.DescriptorTable.pDescriptorRanges[range].RegisterSpace);
+              } else occupied_spaces.insert(parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS ?
+                  parameter.Constants.RegisterSpace : parameter.Descriptor.RegisterSpace);
             }
             for (UINT i = 0; i < root.NumStaticSamplers; ++i)
-              if (root.pStaticSamplers[i].RegisterSpace == logic_shader.framebuffer_space) return E_NOTIMPL;
+              occupied_spaces.insert(root.pStaticSamplers[i].RegisterSpace);
+          }
+          uint32_t ceiling = 2147420893u;
+          for (;;) {
+            while (occupied_spaces.count(ceiling)) {
+              if (!ceiling) return E_NOTIMPL;
+              --ceiling;
+            }
+            hr = PrepareD3D12LogicOpShader(pixel_bytecode, directory.c_str(),
+                pDesc->BlendState.RenderTarget[0].LogicOp, widths, logic_shader, diagnostics, ceiling);
+            if (FAILED(hr)) { ERR("Logic-op shader preparation: ", diagnostics); return hr; }
+            if (logic_shader.framebuffer_space > ceiling) return E_FAIL;
+            if (!occupied_spaces.count(logic_shader.framebuffer_space)) break;
+            if (!logic_shader.framebuffer_space) return E_NOTIMPL;
+            ceiling = logic_shader.framebuffer_space - 1;
           }
           pixel_capabilities.compiler_framebuffer_fetch_resource_space = logic_shader.framebuffer_space;
           pixel_bytecode = {logic_shader.bytecode.data(), logic_shader.bytecode.size()};

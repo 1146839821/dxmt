@@ -334,6 +334,7 @@ static HRESULT PrepareShaderInternal(
   if constexpr (std::is_same_v<Operation, LogicOpPreparation>) {
     if (!logic_options) return E_INVALIDARG;
     params.operation = logic_options->operation;
+    params.reserved = logic_options->reserved;
     std::memcpy(params.component_bits, logic_options->component_bits, sizeof(params.component_bits));
   }
   if constexpr (std::is_same_v<Operation, MinMaxPreparation>)
@@ -398,11 +399,12 @@ static HRESULT PrepareShaderInternal(
 HRESULT PrepareD3D12LogicOpShader(const D3D12_SHADER_BYTECODE &shader,
     const wchar_t *dxc_directory, uint32_t operation,
     const std::array<std::array<uint32_t, 4>, 8> &component_bits,
-    D3D12LogicOpShader &prepared, std::string &diagnostics) {
+    D3D12LogicOpShader &prepared, std::string &diagnostics, uint32_t space_ceiling) {
   try {
-    if (operation > 15) return E_INVALIDARG;
+    if (operation > 15 || space_ceiling > 2147420893u) return E_INVALIDARG;
     dxmt_msc_lower_logic_outputs_params options{};
     options.operation = operation;
+    options.reserved = space_ceiling == 2147420893u ? 0 : space_ceiling + 1;
     for (unsigned target = 0; target < 8; ++target) for (unsigned component = 0; component < 4; ++component) {
       if (component_bits[target][component] > 32) return E_INVALIDARG;
       options.component_bits[target][component] = component_bits[target][component];

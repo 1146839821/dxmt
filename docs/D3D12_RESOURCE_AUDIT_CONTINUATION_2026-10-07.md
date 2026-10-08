@@ -1,5 +1,16 @@
 # Resource closure continuation — 2026-10-07
 
+2026-10-08 root-space collision update: application descriptor ranges, root
+constants/descriptors and static samplers participate in feature-space exclusion.
+Retries lower the original shader with a decreasing ceiling and preserve existing
+TLAB indices, descriptor ownership and residency behavior. Two occupied root
+constant spaces plus a consumed/rebound CBV pass all sixteen operations on both
+builds under API validation. The expanded no-private gate passes eighty executions
+but remains PARTIAL. Old native rejects the explicit ceiling safely. This closes
+the tested collision layout, not same-address VA remap, all table/static-sampler
+layouts, private Typed/MinMax composition or complete resource/raster coverage.
+See D3D12_MSC_LOGIC_OP_LOWERING.md for evidence. No capability is promoted.
+
 2026-10-08 LogicOp root-CBV evidence: real shader reads and a second draw with a
 different aligned CBV address/source pass sixteen operations on both builds with
 API validation. This qualifies that root-buffer/TLAB combination; it does not

@@ -17,5 +17,5 @@ struct D3D12LogicOpShader {
 HRESULT PrepareD3D12LogicOpShader(const D3D12_SHADER_BYTECODE &shader,
     const wchar_t *dxc_directory, uint32_t operation,
     const std::array<std::array<uint32_t, 4>, 8> &component_bits,
-    D3D12LogicOpShader &prepared, std::string &diagnostics);
+    D3D12LogicOpShader &prepared, std::string &diagnostics, uint32_t space_ceiling = 2147420893u);
 }

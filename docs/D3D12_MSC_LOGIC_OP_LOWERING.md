@@ -1,5 +1,31 @@
 # MSC programmable logic-op implementation boundary
 
+## Root-space reselection checkpoint — 2026-10-08
+
+Starting HEAD b834ca55. Hypothesis: application roots can occupy a shader-free
+framebuffer feature space, so rejecting the first selection unnecessarily blocks
+valid PSOs. The PSO now collects descriptor-range, root-parameter and static-sampler
+spaces, then retries lowering from the original shader with a strictly decreasing
+ceiling. Application root indices and device-wide compiler state remain unchanged;
+transformed bytecode and the selected local feature space retain cache isolation.
+Risk: stale native code could ignore the hint or repeated lowering could compound
+the transformation. The existing 184-byte transport encodes default as zero and
+an explicit ceiling as ceiling+1; old native rejects nonzero instead of ignoring it.
+
+Both full builds and host suites pass. All sixteen operations with two adjacent
+reserved root spaces, a consumed CBV and CBV rebinding pass on both builds under
+Metal API validation (32 executions). The expanded no-private gate executes
+80/80 cases successfully but correctly remains PARTIAL for complete raster
+qualification. Native ceiling 7, ceiling 0 and invalid-hint checks pass; a new PE
+with the previous native binary rejects the collision PSO as expected.
+Evidence: collision-first.json, collision-legacy.json and collision-final.json in
+/Users/zhangbo/.cache/dxmt-msc-logic.6jblCq. Compiler/binding skills informed the
+ABI and local feature-space handling; main-agent code-review checked bounded
+retry and cache isolation. No independent review or shader validation is claimed.
+This supersedes the collision-retry gap in older checkpoints below, not full root
+layout, Typed/MinMax composition, MSAA, format/MRT or native qualification.
+Formal capabilities and game deployment are unchanged.
+
 ## Nonempty root-CBV checkpoint — 2026-10-08
 
 Starting HEAD 589bf096. The pixel shader now has a qualification entry that

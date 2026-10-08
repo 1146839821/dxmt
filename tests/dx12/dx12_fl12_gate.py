@@ -378,14 +378,16 @@ def run_logic_op_gpu_matrix(directory, wine, timeout, runtime, compiler=None):
                 timeout, runtime, stage_files, compiler=compiler if backend == "dxil" else None) if runtime is not None else {
                     "status": UNVERIFIED, "reason": "explicit runtime required for provenance"}
     root_files = (files[0], "graphics_logic_op_root_cbv.ps.cso")
-    for chain in (False, True):
+    for mode, chain in (("", False), ("chain-", True), ("collision-chain-", True)):
         for operation in range(16):
-            option = f"--logic-op-root-cbv-{'chain-' if chain else ''}{operation}"
+            option = f"--logic-op-root-cbv-{mode}{operation}"
             required = (f"LOGIC_OP index={operation} RGBA8_UINT PASS",
                         f"LOGIC_OP_ROOT_CBV {'rebound' if chain else 'direct'} PASS")
             if chain:
                 required += ("LOGIC_OP_CHAIN draws=2 PASS",)
-            cases[f"dxil-root-cbv-{'chain-' if chain else ''}{operation}"] = run_fixture(
+            if mode == "collision-chain-":
+                required += ("LOGIC_OP_ROOT_SPACE collision-reselected PASS",)
+            cases[f"dxil-root-cbv-{mode}{operation}"] = run_fixture(
                 directory, wine, "dx12_graphics_sm6.exe", (*root_files, option),
                 required, timeout, runtime, root_files, compiler=compiler) if runtime is not None else {
                     "status": UNVERIFIED, "reason": "explicit runtime required for provenance"}
