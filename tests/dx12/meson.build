@@ -91,6 +91,9 @@ executable('dx12_allocator_fence', 'dx12_allocator_fence.cpp',
 executable('dx12_typed_origin_pixel', 'dx12_typed_origin_pixel.cpp',
   build_by_default: false, link_args: ['-municode'], dependencies: [d3d12_dep],
 )
+executable('dx12_logic_op_msaa', 'dx12_logic_op_msaa.cpp',
+  build_by_default: false, dependencies: [d3d12_dep],
+)
 
 executable('dx12_typed_origin_depth', 'dx12_typed_origin_depth.cpp',
   build_by_default: false, link_args: ['-municode'], dependencies: [d3d12_dep],
@@ -1078,6 +1081,20 @@ if dxc_command.length() > 0
       input: 'logic_op_msaa_probe.hlsl',
       output: 'logic_msaa_' + entry + '.ps.cso',
       command: dxc_command + [ '-E', entry, '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  foreach entry : ['vertex', 'seed', 'source', 'read_samples']
+    profile = 'ps_6_0'
+    if entry == 'vertex'
+      profile = 'vs_6_0'
+    elif entry == 'read_samples'
+      profile = 'cs_6_0'
+    endif
+    custom_target('dx12_logic_msaa_d3d12_' + entry + '_fixture',
+      input: 'logic_op_msaa_d3d12.hlsl',
+      output: 'logic_msaa_d3d12_' + entry + '.cso',
+      command: dxc_command + [ '-E', entry, '-T', profile, '@INPUT@', '-Fo', '@OUTPUT@' ],
       build_by_default: false,
     )
   endforeach

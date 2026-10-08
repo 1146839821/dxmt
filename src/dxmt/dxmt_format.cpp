@@ -59,8 +59,10 @@ FormatCapabilityInspector::Inspect(WMT::Device device) {
     APPEND_CAP(WMTPixelFormatABGR4Unorm, NO_ATOMIC_RESOLVE)
     APPEND_CAP(WMTPixelFormatBGR5A1Unorm, NO_ATOMIC_RESOLVE)
 
-    APPEND_CAP(WMTPixelFormatR32Uint, APPLE_INT_FORMAT_CAP_32 | TEXTURE_BUFFER_ALL_CAP)
-    APPEND_CAP(WMTPixelFormatR32Sint, APPLE_INT_FORMAT_CAP_32 | TEXTURE_BUFFER_ALL_CAP)
+    // Apple7+ supports scalar 32-bit integer MSAA, but not integer resolve.
+    // Keep this separate from the wider integer formats sharing the base caps.
+    APPEND_CAP(WMTPixelFormatR32Uint, APPLE_INT_FORMAT_CAP_32 | TEXTURE_BUFFER_ALL_CAP | FormatCapability::MSAA)
+    APPEND_CAP(WMTPixelFormatR32Sint, APPLE_INT_FORMAT_CAP_32 | TEXTURE_BUFFER_ALL_CAP | FormatCapability::MSAA)
     APPEND_CAP(
         WMTPixelFormatR32Float, FormatCapability::Write | FormatCapability::Color | FormatCapability::MSAA |
                                       FormatCapability::Blend | FormatCapability::Sparse | TEXTURE_BUFFER_ALL_CAP

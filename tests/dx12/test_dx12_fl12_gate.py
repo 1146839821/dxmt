@@ -1022,12 +1022,14 @@ class GateTests(unittest.TestCase):
             root = Path(directory)
             (root / "probe.exe").write_text(
                 "import os,json\nprint(json.dumps({k:os.environ.get(k) for k in "
-                "['DXMT_EXPERIMENTAL_SM6_6','DXMT_EXPERIMENTAL_FL12_0']}))\nprint('passed')\n")
-            with patch.dict(gate.os.environ, {"DXMT_EXPERIMENTAL_SM6_6": "1", "DXMT_EXPERIMENTAL_FL12_0": "1"}):
+                "['DXMT_EXPERIMENTAL_SM6_6','DXMT_EXPERIMENTAL_FL12_0','DXMT_EXPERIMENTAL_LOGIC_OP_MSAA']}))\nprint('passed')\n")
+            with patch.dict(gate.os.environ, {"DXMT_EXPERIMENTAL_SM6_6": "1", "DXMT_EXPERIMENTAL_FL12_0": "1",
+                                             "DXMT_EXPERIMENTAL_LOGIC_OP_MSAA": "1"}):
                 result = gate.run_fixture(root, sys.executable, "probe.exe", (), ("passed",), 5)
             self.assertEqual(result["status"], gate.PASS)
             observed = json.loads(result["output"].splitlines()[0])
-            self.assertEqual(observed, {"DXMT_EXPERIMENTAL_SM6_6": "0", "DXMT_EXPERIMENTAL_FL12_0": "0"})
+            self.assertEqual(observed, {"DXMT_EXPERIMENTAL_SM6_6": "0", "DXMT_EXPERIMENTAL_FL12_0": "0",
+                                        "DXMT_EXPERIMENTAL_LOGIC_OP_MSAA": "0"})
 
     def test_exit_zero_without_markers_fails(self):
         with TemporaryDirectory() as directory:

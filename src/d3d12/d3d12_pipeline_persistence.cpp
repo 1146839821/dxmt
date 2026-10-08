@@ -4,6 +4,7 @@
 #include "com/com_pointer.hpp"
 #include "../d3d10/d3d10_blob.hpp"
 #include "d3d12_device.hpp"
+#include "util_env.hpp"
 #include "d3d12_device_child.hpp"
 #include "d3d12_pageable.hpp"
 #include "log/log.hpp"
@@ -1327,12 +1328,18 @@ private:
 
 bool CanLowerD3D12IntegerLogicOp(const D3D12_BLEND_DESC &blend, UINT count,
     const DXGI_FORMAT *formats, const D3D12_SHADER_BYTECODE &pixel, UINT samples) {
-  if (blend.IndependentBlendEnable || !count || count > 8 || samples != 1 || !formats)
+  if (blend.IndependentBlendEnable || !count || count > 8 || !samples || !formats)
     return false;
   const auto shader = ClassifyD3D12Shader(pixel);
   if (FAILED(shader.validation_hr) || (shader.backend != D3D12ShaderBackend::Airconv &&
       shader.backend != D3D12ShaderBackend::MetalShaderConverter) ||
       shader.shader_kind != D3D12ShaderKind::Pixel)
+    return false;
+  // Public MSC attachment inputs can read distinct MSAA samples. Keep this
+  // development path isolated until frequency/side-effect/coverage qualification
+  // is complete; AIRCONV's multisample lowering remains a separate gap.
+  if (samples != 1 && (shader.backend != D3D12ShaderBackend::MetalShaderConverter ||
+      env::getEnvVar("DXMT_EXPERIMENTAL_LOGIC_OP_MSAA") != "1"))
     return false;
   for (UINT i = 0; i < count; ++i) {
     switch (formats[i]) {

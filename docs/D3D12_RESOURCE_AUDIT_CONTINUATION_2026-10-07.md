@@ -1,5 +1,15 @@
 # Resource closure continuation — 2026-10-07
 
+2026-10-08 D3D12 MSAA integration: the missing scalar R32 integer MSAA capability
+was blocking committed texture creation. Correcting it leaves integer resolve
+unsupported. D3D12 render-to-texture2DMS-to-raw-root-UAV readback now validates
+four distinct samples through all sixteen LogicOps on both normal and explicit
+experimental no-private paths under API validation (128 comparisons). The new
+MSAA lowering flag defaults off and is cleared by formal qualification. This
+qualifies the bounded allocation/view/residency/barrier/readback chain, not all
+sample counts, side-effect frequency, lifetime/root layouts or full raster.
+See D3D12_LOGIC_OP_MSAA_INTEGRATION_2026-10-08.md; FL/SM declarations unchanged.
+
 2026-10-08 MSAA mechanism evidence: native public MSC fetch preserves four
 different R32_UINT sample values through XOR, with ordinary and explicit
 sample-ID shaders, on M4 under API validation. Raw compute sample reads avoid

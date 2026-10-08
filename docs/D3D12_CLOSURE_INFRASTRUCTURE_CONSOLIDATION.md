@@ -1,5 +1,14 @@
 # Closure infrastructure consolidation
 
+Experimental D3D12 MSAA checkpoint (2026-10-08): scalar Apple7+ R32 integer MSAA
+allocation/load capability is corrected without enabling integer resolve.
+DXMT_EXPERIMENTAL_LOGIC_OP_MSAA=1 connects MSC multisample lowering; default
+admission stays closed and qualification explicitly clears the flag. All sixteen
+4x R32_UINT operations pass both normal native and experimental no-private paths
+under API validation (128 raw sample comparisons). See
+D3D12_LOGIC_OP_MSAA_INTEGRATION_2026-10-08.md. Sample masks/frequency/side effects,
+other formats/counts and AIRCONV MSAA remain open; no FL/SM/LogicOp promotion.
+
 MSAA mechanism checkpoint (2026-10-08): public MSC fetch reads four distinct
 R32_UINT attachment samples correctly on M4, both without and with explicit
 SV_SampleIndex, using raw compute sample readback under API validation. See
