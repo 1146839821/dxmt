@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,9 @@ constexpr Format formats[] = {
   {DXGI_FORMAT_R8_UINT, "R8_UINT", 1, 1, 1},
   {DXGI_FORMAT_R8_SINT, "R8_SINT", 1, 1, 2},
 };
+// Opt-in selected case only: a packed four-byte texel with default alpha 1.
+// Reuse the float4 shaders without changing the established 18-format matrix.
+constexpr Format r11g11b10 = {DXGI_FORMAT_R11G11B10_FLOAT, "R11G11B10_FLOAT", 4, 1, 3};
 constexpr const char *types[] = {"float", "uint", "int", "float4", "uint4", "int4", "unorm float", "unorm float4"};
 constexpr const char *shapes[] = {"buffer", "1d", "1d-array", "2d", "2d-array", "3d"};
 
@@ -59,8 +63,32 @@ static bool CheckHR(const char *name, HRESULT hr) {
   return false;
 }
 
+static unsigned ChannelOffset(const Format &f, unsigned channel) {
+  return f.format == DXGI_FORMAT_R11G11B10_FLOAT ? 0 : channel * f.bytes;
+}
+
 // Independent CPU encodings and decoded shader-result oracle. Half values are exact.
 static uint32_t Encode(const Format &f, unsigned element, unsigned channel, uint8_t *dst) {
+  if (f.format == DXGI_FORMAT_R11G11B10_FLOAT) {
+    const float values[] = {0.0f, 0.5f, 2.25f, 4.0f};
+    const uint16_t half[] = {0x0000, 0x3800, 0x4080, 0x4400};
+    const auto index = (element + channel) % 4;
+    const float value = channel == 3 ? 1.0f : values[index];
+    uint32_t decoded;
+    std::memcpy(&decoded, &value, sizeof(decoded));
+    if (channel < 3) {
+      // Exact nonnegative half values share the five-bit exponent. The
+      // independent oracle drops four/five zero mantissa bits for 11/10 bits.
+      const unsigned shift = channel == 2 ? 22 : channel * 11;
+      const unsigned width = channel == 2 ? 10 : 11;
+      const uint32_t mask = ((1u << width) - 1) << shift;
+      uint32_t packed;
+      std::memcpy(&packed, dst, sizeof(packed));
+      packed = (packed & ~mask) | (uint32_t(half[index] >> (channel == 2 ? 5 : 4)) << shift);
+      std::memcpy(dst, &packed, sizeof(packed));
+    }
+    return decoded;
+  }
   const unsigned index = (element + channel) % 4;
   uint32_t raw = 0, decoded = 0;
   if (f.type == 0 || f.type == 3) {
@@ -161,9 +189,10 @@ static bool RunCase(ID3D12Device *device, ID3D12CommandQueue *queue, ID3D12RootS
   if (view_case == ViewCase::Repeated) {
     for (unsigned x = 0; x < 4; ++x)
       for (unsigned c = 0; c < f.channels; ++c) {
-        repeated_expected[x * f.channels + c] = Encode(f, x + 10, c, repeated_raw.data() + x * pixel + c * f.bytes);
-        std::memcpy(static_cast<uint8_t *>(mapped) + x * pixel + c * f.bytes,
-            repeated_raw.data() + x * pixel + c * f.bytes, f.bytes);
+        repeated_expected[x * f.channels + c] = Encode(f, x + 10, c, repeated_raw.data() + x * pixel + ChannelOffset(f, c));
+        std::memcpy(static_cast<uint8_t *>(mapped) + x * pixel + ChannelOffset(f, c),
+            repeated_raw.data() + x * pixel + ChannelOffset(f, c),
+            f.format == DXGI_FORMAT_R11G11B10_FLOAT ? pixel : f.bytes);
       }
   }
   std::vector<uint8_t> expected_buffer;
@@ -172,10 +201,10 @@ static bool RunCase(ID3D12Device *device, ID3D12CommandQueue *queue, ID3D12RootS
       for (unsigned x = 0; x < 4; ++x)
         for (unsigned c = 0; c < f.channels; ++c) {
           const auto value = Encode(f, x + 2 * y + z, c,
-              static_cast<uint8_t *>(mapped) + z * pitch * height + y * pitch + (x + (shape ? 0 : first_element)) * pixel + c * f.bytes);
+              static_cast<uint8_t *>(mapped) + z * pitch * height + y * pitch + (x + (shape ? 0 : first_element)) * pixel + ChannelOffset(f, c));
           if (y == height - 1 && z == depth - 1) {
             expected[x * f.channels + c] = value;
-            Encode(f, x + 2 * y + z, c, raw_expected.data() + x * pixel + c * f.bytes);
+            Encode(f, x + 2 * y + z, c, raw_expected.data() + x * pixel + ChannelOffset(f, c));
           }
         }
   if (!shape) {
@@ -414,6 +443,7 @@ int main(int argc, char **argv) {
     if (!std::strcmp(argv[1], "--api-policy")) return 2;
     for (const auto &format : formats)
       if (!std::strcmp(argv[3], format.name)) selected_format = &format;
+    if (!std::strcmp(argv[3], r11g11b10.name)) selected_format = &r11g11b10;
     bool found_shape = false;
     for (unsigned shape = 0; shape < 6; ++shape) {
       if (!std::strcmp(argv[4], shapes[shape])) { selected_shape = shape; found_shape = true; }
@@ -485,12 +515,17 @@ int main(int argc, char **argv) {
     std::cout << "typed origin focused contracts: passed=" << passed << " failed=" << failed << "\n";
     return failed ? 1 : 0;
   }
-  for (const auto &format : formats) {
+  const auto selected_formats = selected_case ? std::span<const Format>(selected_format, 1) : std::span<const Format>(formats);
+  for (const auto &format : selected_formats) {
     if (selected_case && &format != selected_format) continue;
     D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {format.format};
     bool supported = CheckHR("FormatSupport", device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) &&
         (support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) &&
         (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE);
+    if (format.format == DXGI_FORMAT_R11G11B10_FLOAT)
+      std::cout << "R11 typed UAV public view=" << bool(support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW)
+                << " load=" << bool(support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD)
+                << " store=" << bool(support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) << "\n";
     // Audit GPU semantics independently of the deliberately disabled load claim.
     // This does not turn an unadvertised format into an accepted public feature.
     for (unsigned shape = 0; shape < (argc == 3 ? 1u : 6u); ++shape) {

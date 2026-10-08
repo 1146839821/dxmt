@@ -1,5 +1,12 @@
 # Closure infrastructure consolidation
 
+R11G11B10 checkpoint (2026-10-08): opt-in packed-float probes pass 32 basic
+load/store cases across AIR/MSC and both builds; default typed matrix unchanged.
+See D3D12_R11G11B10_TYPED_UAV.md. Public typed-load reporting is still disabled,
+so the user-requested support is not complete. Next work is capability/shader-
+feature policy consistency, not repeated basic numeric probes or a fabricated
+Metal TextureBufferReadWrite flag.
+
 Private SampleMask checkpoint (2026-10-08): both builds pass 24 single-sample
 Typed depth/MinMax color cases across native/GS/HS-DS, paired masks 0/1 and
 observed runtime/compiler identities. Relative-directory and stale automatic
