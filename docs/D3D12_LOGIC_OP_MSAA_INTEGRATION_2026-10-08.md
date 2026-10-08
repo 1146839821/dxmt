@@ -80,7 +80,8 @@ The ordinary fixture uses a constant source with no interpolants or UAV side
 effects; it cannot prove their preservation. AIRCONV MSAA is a separate gap.
 Normal here means DXMT's native Metal LogicOp path, not a Windows hardware oracle.
 
-The sample-ID seed can trigger a speculative MinMax-preparation diagnostic due
-to the existing sampling-symbol-prefix classifier; it returns unsupported and
-does not select a MinMax draw. The raw-sample oracles pass. This is not a clean
-diagnostics/frequency qualification claim and merits classifier follow-up.
+The initial sample-ID seed triggered a speculative MinMax-preparation diagnostic
+because the sampling-symbol-prefix classifier included dx.op.sampleIndex.i32.
+D3D12_SAMPLE_INDEX_CLASSIFICATION.md records the later production red-to-green
+fix and rerun of all 32 MSAA cases without that diagnostic. This supersedes the
+classifier issue, not the remaining frequency/side-effect qualification gaps.

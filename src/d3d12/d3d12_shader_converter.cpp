@@ -399,8 +399,8 @@ public:
     return HasValueSymbolInternal(symbol, false);
   }
 
-  bool HasValueSymbolPrefix(std::string_view prefix) {
-    return HasValueSymbolInternal(prefix, true);
+  bool HasValueSymbolPrefix(std::string_view prefix, std::string_view excluded_prefix = {}) {
+    return HasValueSymbolInternal(prefix, true, excluded_prefix);
   }
 
   bool HasDXILDerivativeOperations() {
@@ -428,7 +428,7 @@ public:
   }
 
 private:
-  bool HasValueSymbolInternal(std::string_view symbol, bool prefix) {
+  bool HasValueSymbolInternal(std::string_view symbol, bool prefix, std::string_view excluded_prefix = {}) {
     if (!data_ || size_ < 4 || std::memcmp(data_, "BC\xc0\xde", 4) != 0)
       return false;
 
@@ -446,7 +446,8 @@ private:
       return false;
 
     bool found = false;
-    if (!ParseBlock(module_block_id, module_code_width, module_end_bit, symbol, prefix, &found, nullptr, nullptr))
+    if (!ParseBlock(module_block_id, module_code_width, module_end_bit, symbol, prefix, &found, nullptr, nullptr,
+                    excluded_prefix))
       return false;
     return found;
   }
@@ -726,7 +727,7 @@ private:
 
   bool ParseBlock(
       uint32_t block_id, unsigned code_width, size_t end_bit, std::string_view symbol, bool symbol_prefix, bool *found,
-      DerivativeScan *derivative, DerivativeFunctionScan *function
+      DerivativeScan *derivative, DerivativeFunctionScan *function, std::string_view excluded_prefix = {}
   ) {
     if (!found || end_bit > size_ * 8 || code_width == 0 || code_width > 32)
       return false;
@@ -757,11 +758,11 @@ private:
                       child_function.global_value_base = derivative->module_value_count;
                       return ParseBlock(
                           child_block_id, child_code_width, child_end_bit, symbol, symbol_prefix, found, derivative,
-                          &child_function
+                          &child_function, excluded_prefix
                       );
                     }()
                   : ParseBlock(child_block_id, child_code_width, child_end_bit, symbol, symbol_prefix, found,
-                                derivative, function)))
+                                derivative, function, excluded_prefix)))
           return false;
         if (*found)
           return true;
@@ -825,7 +826,8 @@ private:
         block_info_target = static_cast<uint32_t>(values[0]);
         has_block_info_target = true;
       } else if (block_id == kDXILValueSymbolTableBlockID && record_code == 1 &&
-                 (symbol_prefix ? MatchesValueSymbolPrefix(values, symbol) : MatchesValueSymbol(values, symbol))) {
+                 (symbol_prefix ? MatchesValueSymbolPrefix(values, symbol) : MatchesValueSymbol(values, symbol)) &&
+                 (excluded_prefix.empty() || !MatchesValueSymbolPrefix(values, excluded_prefix))) {
         *found = true;
         return true;
       }
@@ -1431,7 +1433,9 @@ ClassifyD3D12Shader(const D3D12_SHADER_BYTECODE &shader) {
     size_t bitcode_size = 0;
     if (GetDXILBitcode(shader, &bitcode, &bitcode_size)) {
       DXILBitcodeReader reader(bitcode, bitcode_size);
-      classification.uses_texture_sampling = reader.HasValueSymbolPrefix("dx.op.sample") ||
+      // SampleIndex shares the spelling prefix, not the texture-sampling semantics.
+      // Exclude individual symbols so a shader using both still selects sampling.
+      classification.uses_texture_sampling = reader.HasValueSymbolPrefix("dx.op.sample", "dx.op.sampleIndex.") ||
           reader.HasValueSymbolPrefix("dx.op.textureGather") || reader.HasValueSymbolPrefix("dx.op.calculateLOD");
     }
     classification.atomic64_feature_flags = GetDXILAtomic64FeatureFlags(shader);

@@ -36,3 +36,9 @@ uint4 ps_minmax(VSOutput input) : SV_Target0
     uint red = uint(reduction_source.SampleLevel(reduction_sampler, float2(0.5, 0.5), 0).r * 255 + 0.5);
     return uint4(red, 15, 170, 85);
 }
+
+uint4 ps_minmax_sample_index(VSOutput input, uint sample : SV_SampleIndex) : SV_Target0
+{
+    uint red = uint(reduction_source.SampleLevel(reduction_sampler, float2(0.5, 0.5), 0).r * 255 + 0.5);
+    return uint4(red ^ sample, 15, 170, 85);
+}

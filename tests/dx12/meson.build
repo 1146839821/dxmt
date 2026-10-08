@@ -1076,6 +1076,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'ps_minmax', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_logic_minmax_sample_index_fixture',
+    input: 'graphics_logic_op_sm6.hlsl',
+    output: 'graphics_logic_op_minmax_sample_index.ps.cso',
+    command: dxc_command + [ '-E', 'ps_minmax_sample_index', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   foreach entry : ['pixel_frequency', 'sample_frequency']
     custom_target('dx12_logic_msaa_' + entry + '_probe',
       input: 'logic_op_msaa_probe.hlsl',

@@ -1270,6 +1270,19 @@ static int RunSynthesis(const std::string &request_mode, const char *library_pat
 
 int main(int argc, char **argv) {
   SetEnvironmentVariableA("DXMT_SHADER_CACHE", "0");
+  if (argc == 3 && (std::string(argv[1]) == "classify-no-sampling" ||
+                    std::string(argv[1]) == "classify-sampling")) {
+    std::vector<uint8_t> bytes;
+    if (!LoadShader(argv[2], bytes)) return 2;
+    const auto classification = dxmt::ClassifyD3D12Shader({bytes.data(), bytes.size()});
+    const bool expected = std::string(argv[1]) == "classify-sampling";
+    const bool passed = SUCCEEDED(classification.validation_hr) &&
+        classification.backend == dxmt::D3D12ShaderBackend::MetalShaderConverter &&
+        classification.uses_texture_sampling == expected;
+    std::cout << "texture_sampling observed=" << classification.uses_texture_sampling
+              << " expected=" << expected << " " << (passed ? "PASS" : "FAIL") << "\n";
+    return passed ? 0 : 1;
+  }
   if (argc == 3 && (std::string(argv[1]).rfind("synth-", 0) == 0 || std::string(argv[1]).rfind("metal-", 0) == 0 ||
       std::string(argv[1]).rfind("load-", 0) == 0))
     return RunSynthesis(argv[1], argv[2]);

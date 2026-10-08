@@ -1,5 +1,13 @@
 # Closure infrastructure consolidation
 
+SampleIndex classifier checkpoint (2026-10-08): the production-linked red oracle
+confirms dx.op.sample incorrectly admitted dx.op.sampleIndex.i32. Individual
+symbol exclusion preserves one-pass scanning and real SampleLevel+SampleIndex
+classification. Eight controls and all 32 normal/experimental MSAA operations
+pass; 128 raw sample comparisons remain correct without the speculative MinMax
+preparation error. See D3D12_SAMPLE_INDEX_CLASSIFICATION.md. SampleMask/frequency,
+full raster qualification and capability promotion are not closed by this fix.
+
 ## Current consolidation handoff (baseline 3c048a3c, 2026-10-08)
 
 This section is the current work order; dated checkpoints below are historical
@@ -39,9 +47,10 @@ backend, provenance and coverage limitations. This handoff adds no GPU evidence.
    stage/format/lifetime/native coverage separately from executed-case PASS.
    Experimental MSAA sample masks/frequency/side effects remain separate work.
 
-The SampleIndex/texture-sampling classifier investigation is still pending at
-this baseline. No classifier fix, fresh full qualification, capability promotion
-or game acceptance is claimed by this documentation consolidation.
+The SampleIndex/texture-sampling classifier investigation was pending at this
+baseline; the later checkpoint above supersedes that narrow gap. No fresh full
+qualification, capability promotion or game acceptance is claimed by the
+documentation consolidation itself.
 
 Experimental D3D12 MSAA checkpoint (2026-10-08): scalar Apple7+ R32 integer MSAA
 allocation/load capability is corrected without enabling integer resolve.
