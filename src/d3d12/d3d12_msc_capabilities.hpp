@@ -74,6 +74,7 @@ struct DXMTMSCCapabilities {
   bool compiler_ignore_debug_information = false;
   uint32_t compiler_function_constant_resource_space = DXMT_MSC_RESOURCE_SPACE_DISABLED;
   uint32_t compiler_framebuffer_fetch_resource_space = DXMT_MSC_RESOURCE_SPACE_DISABLED;
+  uint32_t compiler_sample_mask = UINT32_MAX;
 
   bool msc_wave_ops = false;
   bool msc_int64 = false;

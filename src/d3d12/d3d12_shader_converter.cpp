@@ -176,6 +176,7 @@ MakeMSCConversionCacheKey(
   hash.update(compiler_ignore_debug_information);
   hash.update(compiler_function_constant_resource_space);
   hash.update(compiler_framebuffer_fetch_resource_space);
+  hash.update(msc_capabilities ? msc_capabilities->compiler_sample_mask : UINT32_MAX);
   hash.update(stage);
   const uint8_t has_entry_point = entry_point ? 1u : 0u;
   hash.update(has_entry_point);
@@ -1302,7 +1303,13 @@ CompileDXIL(
     params.framebuffer_fetch_resource_space = msc_capabilities->compiler_framebuffer_fetch_resource_space;
   }
 
-  int result = DXMTMSCCompileDXIL(&params);
+  const uint32_t sample_mask = stage == DXMT_MSC_STAGE_FRAGMENT && msc_capabilities ?
+      msc_capabilities->compiler_sample_mask : UINT32_MAX;
+  if (sample_mask != UINT32_MAX &&
+      !(msc_capabilities->runtime_symbols & DXMT_MSC_RUNTIME_SYMBOL_SAMPLE_MASK))
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  int result = sample_mask == UINT32_MAX ? DXMTMSCCompileDXIL(&params) :
+      DXMTMSCCompileDXILWithSampleMask(&params, sample_mask);
   if (metallib_size)
     *metallib_size = params.metallib_size;
   if (entry_point_size)

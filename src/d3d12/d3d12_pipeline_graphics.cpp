@@ -507,9 +507,12 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
   std::wstring minmax_dxc_directory_;
   std::unique_ptr<D3D12MinMaxGraphicsVariant> minmax_variant_;
   uint32_t logic_framebuffer_space_ = DXMT_MSC_RESOURCE_SPACE_DISABLED;
+  uint32_t sample_mask_ = UINT32_MAX;
 
   DXMTMSCCapabilities CapabilitiesForStage(uint32_t stage) const {
     auto capabilities = device_->GetMSCCapabilities();
+    if (stage == DXMT_MSC_STAGE_FRAGMENT)
+      capabilities.compiler_sample_mask = sample_mask_;
     if (stage == DXMT_MSC_STAGE_FRAGMENT && logic_framebuffer_space_ != DXMT_MSC_RESOURCE_SPACE_DISABLED)
       capabilities.compiler_framebuffer_fetch_resource_space = logic_framebuffer_space_;
     return capabilities;
@@ -1456,6 +1459,7 @@ public:
       return hr;
     D3D12AirconvError sm50_err;
     auto metal = device_->GetMTLDevice();
+    sample_mask_ = pDesc->SampleMask;
     const auto &msc_capabilities = device_->GetMSCCapabilities();
     WMT::Reference<WMT::Error> err;
     WMT::Reference<WMT::Function> vs_func, ps_func;
@@ -1473,6 +1477,10 @@ public:
     }
     const bool use_msc = msc_capabilities.CoreShaderPathUsable() &&
                          vs_backend == D3D12ShaderBackend::MetalShaderConverter;
+    if (use_msc && !has_pixel_shader && sample_mask_ != UINT32_MAX) {
+      ERR("CreatePipelineState: MSC depth-only sample mask requires a coverage shader");
+      return E_NOTIMPL;
+    }
     if (vs_backend == D3D12ShaderBackend::MetalShaderConverter && !msc_capabilities.CoreShaderPathUsable()) {
       ERR("CreatePipelineState: DXIL vertex shader requires a usable MSC core shader path");
       return E_FAIL;
@@ -1674,6 +1682,7 @@ public:
 #ifdef DXMT_NO_PRIVATE_API
         D3D12LogicOpShader logic_shader;
         auto pixel_capabilities = msc_capabilities;
+        pixel_capabilities.compiler_sample_mask = sample_mask_;
         D3D12_SHADER_BYTECODE pixel_bytecode = requires_minmax_variant && !static_minmax_shaders.pixel.bytecode.empty() ?
             D3D12_SHADER_BYTECODE{static_minmax_shaders.pixel.bytecode.data(), static_minmax_shaders.pixel.bytecode.size()} : pDesc->PS;
         if (pDesc->BlendState.RenderTarget[0].LogicOpEnable) {
@@ -1750,7 +1759,8 @@ public:
 #else
         const auto &pixel_bytecode = pDesc->PS;
         const auto &pixel_classification = ps_classification;
-        const auto &pixel_capabilities = msc_capabilities;
+        auto pixel_capabilities = msc_capabilities;
+        pixel_capabilities.compiler_sample_mask = sample_mask_;
 #endif
         if (FAILED(
               hr = requires_minmax_variant && !static_minmax_shaders.pixel.bytecode.empty() ? ConvertD3D12MinMaxShader(static_minmax_shaders.pixel,

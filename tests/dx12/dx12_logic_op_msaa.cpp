@@ -22,8 +22,22 @@ static bool Load(const char *path, std::vector<unsigned char> &bytes) {
   CloseHandle(file); return ok;
 }
 int main(int argc, char **argv) {
-  const bool experimental = argc == 7 && !std::strcmp(argv[6], "--experimental");
-  if ((argc != 6 && !experimental) || !*argv[5]) return 2;
+  if (argc < 6 || !*argv[5]) return 2;
+  bool experimental = false;
+  bool ordinary = false, depth_only = false, contrast_mask = false;
+  unsigned sample_mask = UINT_MAX;
+  for (int i = 6; i < argc; ++i) {
+    if (!std::strcmp(argv[i], "--experimental")) experimental = true;
+    else if (!std::strcmp(argv[i], "--ordinary")) ordinary = true;
+    else if (!std::strcmp(argv[i], "--depth-only")) depth_only = true;
+    else if (!std::strcmp(argv[i], "--contrast-mask")) contrast_mask = true;
+    else if (!std::strncmp(argv[i], "--sample-mask=", 14)) {
+      char *end = nullptr;
+      const unsigned long long value = std::strtoull(argv[i] + 14, &end, 0);
+      if (!argv[i][14] || argv[i][14] == '-' || *end || value > UINT_MAX) return 2;
+      sample_mask = static_cast<unsigned>(value);
+    } else return 2;
+  }
   if (experimental) {
     if (!SetEnvironmentVariableW(L"DXMT_EXPERIMENTAL_LOGIC_OP_MSAA", L"1")) return 1;
     std::puts("D3D12_MSAA experimental admission requested");
@@ -79,7 +93,25 @@ int main(int argc, char **argv) {
   if (!Check(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&raw)), "seed PSO")) return 1;
   OwnedCOM<ID3D12PipelineState> seed_pso(raw);
   pd.PS = {source.data(), source.size()}; pd.BlendState.RenderTarget[0].LogicOpEnable = TRUE;
-  pd.BlendState.RenderTarget[0].LogicOp = static_cast<D3D12_LOGIC_OP>(op); raw = nullptr;
+  pd.SampleMask = sample_mask;
+  pd.BlendState.RenderTarget[0].LogicOp = static_cast<D3D12_LOGIC_OP>(op);
+  if (ordinary || depth_only) pd.BlendState.RenderTarget[0].LogicOpEnable = FALSE;
+  if (depth_only) {
+    pd.PS = {}; pd.NumRenderTargets = 0; pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pd.DepthStencilState.DepthEnable = TRUE;
+    pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+  }
+  // Warm the same bytecode with a different mask before the tested PSO. This
+  // catches conversion-cache keys which omit SampleMask, not only API wiring.
+  if (contrast_mask && !depth_only) {
+    const unsigned target_mask = pd.SampleMask;
+    pd.SampleMask = target_mask ^ 15u;
+    if (!Check(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&raw)), "contrast PSO")) return 1;
+    OwnedCOM<ID3D12PipelineState> contrast(raw);
+    pd.SampleMask = target_mask; raw = nullptr;
+  }
+  raw = nullptr;
   if (!Check(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&raw)), "logic PSO")) return 1;
   OwnedCOM<ID3D12PipelineState> logic_pso(raw);
   D3D12_COMPUTE_PIPELINE_STATE_DESC cd = {}; cd.pRootSignature = compute_root.get(); cd.CS = {read.data(), read.size()}; raw = nullptr;
@@ -160,10 +192,12 @@ int main(int argc, char **argv) {
     const unsigned src = 240, dst = 0x12340000u + sample * 0x101u;
     const unsigned expected[] = {0, UINT_MAX, src, ~src, dst, ~dst, src & dst, ~(src & dst),
         src | dst, ~(src | dst), src ^ dst, ~(src ^ dst), src & ~dst, ~src & dst, src | ~dst, ~src | dst};
-    std::printf("D3D12_MSAA op=%u sample=%u observed=%08x expected=%08x\n", op, sample, values[sample], expected[op]);
-    ok &= values[sample] == expected[op];
+    const unsigned masked_expected = (sample_mask & (1u << sample)) ? (ordinary ? src : expected[op]) : dst;
+    std::printf("D3D12_MSAA op=%u sample=%u observed=%08x expected=%08x\n", op, sample, values[sample], masked_expected);
+    ok &= values[sample] == masked_expected;
   }
   readback->Unmap(0, nullptr);
   if (!ok) return 1;
+  std::printf("D3D12_MSAA sample-mask=%08x PASS\n", sample_mask);
   std::puts("D3D12_MSAA 4x R32_UINT raw-sample LogicOp PASS"); return 0;
 }

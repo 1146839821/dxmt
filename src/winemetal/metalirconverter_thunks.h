@@ -118,6 +118,7 @@ enum dxmt_msc_validation_flags {
 /* Native renderer entry availability, not a libmetalirconverter API symbol. */
 #define DXMT_MSC_RUNTIME_SYMBOL_LINKED_VERTEX_PSO (UINT64_C(1) << 27)
 #define DXMT_MSC_RUNTIME_SYMBOL_UNIQUE_LIBRARY_FUNCTION (UINT64_C(1) << 28)
+#define DXMT_MSC_RUNTIME_SYMBOL_SAMPLE_MASK (UINT64_C(1) << 29)
 
 #pragma pack(push, 8)
 
@@ -232,6 +233,7 @@ enum dxmt_msc_unixcall {
   unix_dxmt_msc_lower_typed_origins = 196,
   unix_dxmt_msc_lower_reduction_samplers = 197,
   unix_dxmt_msc_lower_logic_outputs = 204,
+  unix_dxmt_msc_compile_dxil_with_sample_mask = 205,
 };
 
 #pragma pack(push, 8)
@@ -421,6 +423,22 @@ struct dxmt_msc_compile_dxil_params32 {
   uint32_t local_root_signature_size;
 };
 
+/* New call envelope; the legacy compile layouts and entry remain unchanged. */
+struct dxmt_msc_compile_sample_mask_params {
+  struct dxmt_msc_compile_dxil_params *compile;
+  uint32_t sample_mask;
+  int32_t ret;
+};
+struct dxmt_msc_compile_sample_mask_params32 {
+  uint32_t compile;
+  uint32_t sample_mask;
+  int32_t ret;
+};
+typedef char dxmt_msc_compile_sample_mask_size_check[
+    sizeof(struct dxmt_msc_compile_sample_mask_params) == sizeof(void *) + 8 ? 1 : -1];
+typedef char dxmt_msc_compile_sample_mask32_size_check[
+    sizeof(struct dxmt_msc_compile_sample_mask_params32) == 12 ? 1 : -1];
+
 struct dxmt_msc_synthesize_ray_dispatch_params {
   uint32_t max_attribute_size;
   int32_t max_recursive_depth;
@@ -566,6 +584,7 @@ WINEMETAL_API int DXMTMSCLowerLogicOutputs(struct dxmt_msc_lower_logic_outputs_p
 WINEMETAL_API int DXMTMSCGetCapabilities(struct dxmt_msc_capabilities *capabilities);
 
 WINEMETAL_API int DXMTMSCCompileDXIL(struct dxmt_msc_compile_dxil_params *params);
+WINEMETAL_API int DXMTMSCCompileDXILWithSampleMask(struct dxmt_msc_compile_dxil_params *params, uint32_t sample_mask);
 
 WINEMETAL_API int DXMTMSCSynthesizeRayDispatch(struct dxmt_msc_synthesize_ray_dispatch_params *params);
 

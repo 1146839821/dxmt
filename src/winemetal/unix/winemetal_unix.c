@@ -2570,6 +2570,14 @@ thunk_DXMTMSCCompileDXIL(void *args) {
 }
 
 static NTSTATUS
+thunk_DXMTMSCCompileDXILWithSampleMask(void *args) {
+  struct dxmt_msc_compile_sample_mask_params *call = args;
+  call->ret = dxmt_msc_compile_with_sample_mask(call->compile, call->sample_mask);
+  if (call->compile) call->compile->ret = call->ret;
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 thunk_DXMTMSCLowerTypedBufferOrigins(void *args) {
   struct dxmt_msc_lower_typed_origins_params *params = args;
   params->ret = dxmt_msc_lower_typed_origins(params);
@@ -2638,7 +2646,7 @@ thunk32_DXMTMSCIsAvailable(void *args) {
 }
 
 static NTSTATUS
-thunk32_DXMTMSCCompileDXIL(void *args) {
+thunk32_DXMTMSCCompileDXILInternal(void *args, uint32_t sample_mask) {
   struct dxmt_msc_compile_dxil_params32 *src = args;
   struct dxmt_msc_compile_dxil_params params = {};
 
@@ -2679,7 +2687,7 @@ thunk32_DXMTMSCCompileDXIL(void *args) {
   params.local_root_signature = UInt32ToPtr(src->local_root_signature);
   params.local_root_signature_size = src->local_root_signature_size;
 
-  params.ret = dxmt_msc_compile(&params);
+  params.ret = dxmt_msc_compile_with_sample_mask(&params, sample_mask);
 
   src->metallib_size = (uint32_t)params.metallib_size;
   src->stage_in_metallib_size = (uint32_t)params.stage_in_metallib_size;
@@ -2691,6 +2699,24 @@ thunk32_DXMTMSCCompileDXIL(void *args) {
   src->reflection = params.reflection;
   src->error_message_size = (uint32_t)params.error_message_size;
   src->ret = params.ret;
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk32_DXMTMSCCompileDXIL(void *args) {
+  return thunk32_DXMTMSCCompileDXILInternal(args, UINT32_MAX);
+}
+
+static NTSTATUS
+thunk32_DXMTMSCCompileDXILWithSampleMask(void *args) {
+  struct dxmt_msc_compile_sample_mask_params32 *call = args;
+  struct dxmt_msc_compile_dxil_params32 *compile = UInt32ToPtr(call->compile);
+  if (!compile) {
+    call->ret = DXMT_MSC_ERROR_INVALID_ARGUMENT;
+    return STATUS_SUCCESS;
+  }
+  NTSTATUS status = thunk32_DXMTMSCCompileDXILInternal(compile, call->sample_mask);
+  call->ret = status ? DXMT_MSC_ERROR_INVALID_ARGUMENT : compile->ret;
   return STATUS_SUCCESS;
 }
 
@@ -4675,6 +4701,7 @@ const void *__wine_unix_call_funcs[] = {
     &thunk_SM50UsesRootBufferFeedback,
     &_WMTTraceRuntimeIdentity,
     &thunk_DXMTMSCLowerLogicOutputs,
+    &thunk_DXMTMSCCompileDXILWithSampleMask,
 };
 
 #ifndef DXMT_NATIVE
@@ -4884,5 +4911,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &thunk32_SM50UsesRootBufferFeedback,
     &_WMTTraceRuntimeIdentity,
     &thunk_DXMTMSCLowerLogicOutputs,
+    &thunk32_DXMTMSCCompileDXILWithSampleMask,
 };
 #endif

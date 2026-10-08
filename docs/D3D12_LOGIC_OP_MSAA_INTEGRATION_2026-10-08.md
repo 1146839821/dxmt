@@ -72,6 +72,12 @@ deployment or Steam/Wine process restart was performed.
 
 ## Remaining implementation and qualification
 
+Later SampleMask checkpoint: D3D12_MSC_SAMPLE_MASK.md records fragment/compiler
+propagation, cache identity, a production red-to-green raw-sample oracle and
+bounded mask/control matrices. This supersedes the ordinary fragment mask
+plumbing gap, not depth-only coverage, private masked GPU acceptance or the
+remaining frequency/side-effect/count/format qualification requirements.
+
 Do not remove the development flag or promote capability from these cases.
 SampleMask/coverage, write masks, depth/stencil, interpolation/derivatives,
 pixel-frequency UAV side effects, other sample counts/formats, explicit

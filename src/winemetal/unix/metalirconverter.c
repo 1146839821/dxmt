@@ -20,6 +20,7 @@ typedef struct dxmt_msc_api {
   void (*IRCompilerIgnoreDebugInformation)(IRCompiler *, bool);
   void (*IRCompilerSetFunctionConstantResourceSpace)(IRCompiler *, uint32_t);
   void (*IRCompilerSetFramebufferFetchResourceSpace)(IRCompiler *, uint32_t);
+  void (*IRCompilerSetSampleMask)(IRCompiler *, uint32_t);
   void (*IRCompilerSetInputTopology)(IRCompiler *, IRInputTopology);
   void (*IRCompilerSetEntryPointName)(IRCompiler *, const char *);
   void (*IRCompilerSetGlobalRootSignature)(IRCompiler *, const IRRootSignature *);
@@ -393,6 +394,7 @@ dxmt_msc_load_symbols(void) {
       IRCompilerSetFramebufferFetchResourceSpace, DXMT_MSC_RUNTIME_SYMBOL_FRAMEBUFFER_FETCH_RESOURCE_SPACE
   );
   DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetInputTopology, DXMT_MSC_RUNTIME_SYMBOL_INPUT_TOPOLOGY);
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetSampleMask, DXMT_MSC_RUNTIME_SYMBOL_SAMPLE_MASK);
   DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetEntryPointName, DXMT_MSC_RUNTIME_SYMBOL_ENTRY_POINT_NAME);
   DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetLocalRootSignature, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_LOCAL_ROOT);
   DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetHitgroupType, DXMT_MSC_RUNTIME_SYMBOL_RAYTRACING_HITGROUP);
@@ -637,7 +639,7 @@ dxmt_msc_to_ir_stage(uint32_t stage) {
 }
 
 int
-dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
+dxmt_msc_compile_with_sample_mask(struct dxmt_msc_compile_dxil_params *params, uint32_t sample_mask) {
   IRObject *input = NULL;
   IRCompiler *compiler = NULL;
   IRObject *compiled = NULL;
@@ -880,6 +882,14 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     g_msc_api.IRCompilerSetLocalRootSignature(compiler, local_root_signature);
   }
 
+  if (sample_mask != UINT32_MAX &&
+      (params->stage != DXMT_MSC_STAGE_FRAGMENT || !g_msc_api.IRCompilerSetSampleMask)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "fragment sample mask is unsupported");
+    result = DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+    goto cleanup;
+  }
+  if (params->stage == DXMT_MSC_STAGE_FRAGMENT && g_msc_api.IRCompilerSetSampleMask)
+    g_msc_api.IRCompilerSetSampleMask(compiler, sample_mask);
   compiled = g_msc_api.IRCompilerAllocCompileAndLink(compiler, entry_point, input, &error);
   if (!compiled) {
     dxmt_msc_set_ire_error(params, error);
@@ -1255,6 +1265,11 @@ cleanup:
     g_msc_api.IRErrorDestroy(error);
   free(entry_point);
   return result;
+}
+
+int
+dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
+  return dxmt_msc_compile_with_sample_mask(params, UINT32_MAX);
 }
 
 int

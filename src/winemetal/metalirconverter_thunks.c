@@ -45,6 +45,15 @@ DXMTMSCCompileDXIL(struct dxmt_msc_compile_dxil_params *params) {
 }
 
 WINEMETAL_API int
+DXMTMSCCompileDXILWithSampleMask(struct dxmt_msc_compile_dxil_params *params, uint32_t sample_mask) {
+  if (!params)
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  struct dxmt_msc_compile_sample_mask_params call = {params, sample_mask, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE};
+  NTSTATUS status = WINE_UNIX_CALL(unix_dxmt_msc_compile_dxil_with_sample_mask, &call);
+  return status ? DXMT_MSC_ERROR_UNSUPPORTED_FEATURE : call.ret;
+}
+
+WINEMETAL_API int
 DXMTMSCSynthesizeRayDispatch(struct dxmt_msc_synthesize_ray_dispatch_params *params) {
   if (!params)
     return DXMT_MSC_ERROR_INVALID_ARGUMENT;

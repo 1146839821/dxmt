@@ -1,5 +1,14 @@
 # Closure infrastructure consolidation
 
+MSC SampleMask checkpoint (2026-10-08): PSO masks now reach fragment compilation,
+conversion keys and stage-local private configs through an appended bridge entry.
+The original mask-5 XOR red turns green. Both builds pass 238 numeric cases/952
+raw sample comparisons and corrected same-bytecode cache controls; old native
+rejects non-default masks while preserving default-all ordinary GPU output.
+Masked absent-PS depth-only pipelines explicitly reject until coverage is
+implemented. See D3D12_MSC_SAMPLE_MASK.md. Private masked GPU acceptance,
+frequency/side effects and full MSAA/raster qualification remain open; no promotion.
+
 SampleIndex classifier checkpoint (2026-10-08): the production-linked red oracle
 confirms dx.op.sample incorrectly admitted dx.op.sampleIndex.i32. Individual
 symbol exclusion preserves one-pass scanning and real SampleLevel+SampleIndex
