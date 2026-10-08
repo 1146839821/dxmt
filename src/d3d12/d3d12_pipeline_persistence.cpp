@@ -608,7 +608,9 @@ ValidatePipelineStreamData(const D3D12PipelineStreamData &data) {
   if (data.type == D3D12PipelineType::Graphics &&
       (
 #ifdef DXMT_NO_PRIVATE_API
-       HasActiveLogicOp(data.blend_state, data.num_render_targets) ||
+       (HasActiveLogicOp(data.blend_state, data.num_render_targets) &&
+        !CanLowerD3D12IntegerLogicOp(data.blend_state, data.num_render_targets,
+            data.render_target_formats.data(), {data.pixel_shader.data(), data.pixel_shader.size()}, data.sample_desc.Count)) ||
 #else
        (data.blend_state.IndependentBlendEnable && HasActiveLogicOp(data.blend_state, data.num_render_targets)) ||
 #endif
@@ -656,7 +658,9 @@ ValidateGraphicsPipelineDescriptor(MTLD3D12Device *device, const D3D12_GRAPHICS_
     return E_INVALIDARG;
   if (
 #ifdef DXMT_NO_PRIVATE_API
-      HasActiveLogicOp(desc.BlendState, desc.NumRenderTargets) ||
+      (HasActiveLogicOp(desc.BlendState, desc.NumRenderTargets) &&
+       (!device->GetMTLDevice().supportsFamily(WMTGPUFamilyApple4) ||
+        !CanLowerD3D12IntegerLogicOp(desc.BlendState, desc.NumRenderTargets, desc.RTVFormats, desc.PS, desc.SampleDesc.Count))) ||
 #else
       (desc.BlendState.IndependentBlendEnable && HasActiveLogicOp(desc.BlendState, desc.NumRenderTargets)) ||
 #endif
@@ -1320,6 +1324,26 @@ private:
 };
 
 } // namespace
+
+bool CanLowerD3D12IntegerLogicOp(const D3D12_BLEND_DESC &blend, UINT count,
+    const DXGI_FORMAT *formats, const D3D12_SHADER_BYTECODE &pixel, UINT samples) {
+  if (blend.IndependentBlendEnable || !count || count > 8 || samples != 1 || !formats)
+    return false;
+  const auto shader = ClassifyD3D12Shader(pixel);
+  if (FAILED(shader.validation_hr) || shader.backend != D3D12ShaderBackend::Airconv ||
+      shader.shader_kind != D3D12ShaderKind::Pixel)
+    return false;
+  for (UINT i = 0; i < count; ++i) {
+    switch (formats[i]) {
+    case DXGI_FORMAT_R8_UINT: case DXGI_FORMAT_R8G8_UINT: case DXGI_FORMAT_R8G8B8A8_UINT:
+    case DXGI_FORMAT_R16_UINT: case DXGI_FORMAT_R16G16_UINT: case DXGI_FORMAT_R16G16B16A16_UINT:
+    case DXGI_FORMAT_R32_UINT: case DXGI_FORMAT_R32G32_UINT: case DXGI_FORMAT_R32G32B32A32_UINT:
+    case DXGI_FORMAT_R10G10B10A2_UINT: break;
+    default: return false;
+    }
+  }
+  return true;
+}
 
 HRESULT
 BuildD3D12PipelineCacheData(

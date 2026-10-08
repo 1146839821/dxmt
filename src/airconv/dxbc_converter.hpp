@@ -337,6 +337,8 @@ struct SignatureContext {
   bool skip_vertex_output;
   uint32_t pull_mode_reg_mask;
   uint32_t unorm_output_reg_mask;
+  uint32_t logic_op_mask = 0;
+  uint32_t logic_op = 0;
   air::MTLPixelFormat pixel_formats[8];
 
   SignatureContext(

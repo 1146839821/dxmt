@@ -1,5 +1,16 @@
 # Closure infrastructure consolidation
 
+AIR logic-op implementation checkpoint (2026-10-08): no-private now lowers all
+sixteen Boolean operations to ordered UINT attachment reads and fragment output,
+with component masks, versioned compiler capability and WOW64 argument conversion.
+Both full builds/host suites pass. Final no-private AIR numeric and two-draw
+API-validation chains pass 16 each; normal passes both 16-case backends plus
+16 AIR chains. Old native safely rejects and ordinary/feedback regressions pass.
+See D3D12_AIR_LOGIC_OP_LOWERING.md. MSC still rejects all 16 operations; MSAA,
+complete format/MRT/write-mask/raster/native/WOW64 qualification remains open.
+OutputMergerLogicOp advertisement is unchanged. This supersedes the blanket AIR
+no-private implementation gap below, not the complete closure requirements.
+
 Raster Boolean qualification checkpoint (2026-10-08): all 16 logic ops now have
 independent RGBA8_UINT four-channel expectations on both DXBC and DXIL, registered
 into the mandatory raster ledger. Normal passes 32/32; no-private rejects all

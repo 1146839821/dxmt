@@ -5,8 +5,8 @@
 #ifndef __AIRCONV_H
 #define __AIRCONV_H
 
-/* 31 adds unsigned packed 10/10/10/2 vertex pulling. */
-#define AIRCONV_VERSION 31
+/* 32 adds integer attachment programmable logic operations. */
+#define AIRCONV_VERSION 32
 
 #ifdef __cplusplus
 #include <string>
@@ -106,6 +106,11 @@ struct MTL_POST_TESSELLATOR_REFLECTION {
 struct MTL_PIXEL_SHADER_REFLECTION {
   uint32_t ValidRenderTargets;
   uint32_t HasCoverageOutput;
+  uint32_t CompilerCapabilities;
+};
+
+enum MTL_PIXEL_COMPILER_CAPABILITY {
+  MTL_PIXEL_COMPILER_INTEGER_LOGIC_OP = 1u << 0,
 };
 
 enum MTL_VERTEX_COMPILER_CAPABILITY {
@@ -144,6 +149,7 @@ struct MTL_SHADER_REFLECTION {
 
 #ifdef __cplusplus
 static_assert(sizeof(MTL_VERTEX_SHADER_REFLECTION) <= 3 * sizeof(uint32_t));
+static_assert(sizeof(MTL_PIXEL_SHADER_REFLECTION) <= 3 * sizeof(uint32_t));
 static_assert(offsetof(MTL_SHADER_REFLECTION, VertexShader) == offsetof(MTL_SHADER_REFLECTION, ThreadgroupSize));
 #endif
 
@@ -226,6 +232,7 @@ enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE {
   SM50_SHADER_PSO_TESSELLATOR = 7,
   SM50_SHADER_ROOT_SIGNATURE = 8,
   SM50_SHADER_ROOT_SIGNATURE2 = 9,
+  SM50_SHADER_PIXEL_LOGIC_OP = 10,
   SM50_SHADER_ARGUMENT_TYPE_MAX = 0xffffffff,
 };
 
@@ -277,6 +284,14 @@ struct SM50_SHADER_PSO_PIXEL_SHADER_DATA {
   uint32_t unorm_output_reg_mask;
   /** MTLPixelFormat */
   uint32_t pixel_formats[8];
+};
+
+// Separate chained argument: do not enlarge the existing pixel-PSO ABI.
+struct SM50_SHADER_PIXEL_LOGIC_OP_DATA {
+  void *next;
+  enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint32_t render_target_mask;
+  uint32_t operation; // D3D12_LOGIC_OP Boolean ordering, 0..15.
 };
 
 struct SM50_IA_INPUT_ELEMENT {

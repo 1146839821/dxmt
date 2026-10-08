@@ -2821,7 +2821,17 @@ struct SM50_SHADER_PSO_PIXEL_SHADER_DATA32 {
   bool dual_source_blending;
   bool disable_depth_output;
   uint32_t unorm_output_reg_mask;
+  uint32_t pixel_formats[8];
 };
+_Static_assert(sizeof(struct SM50_SHADER_PSO_PIXEL_SHADER_DATA32) == 52, "WOW64 pixel PSO ABI");
+
+struct SM50_SHADER_PIXEL_LOGIC_OP_DATA32 {
+  uint32_t next;
+  enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint32_t render_target_mask;
+  uint32_t operation;
+};
+_Static_assert(sizeof(struct SM50_SHADER_PIXEL_LOGIC_OP_DATA32) == 16, "WOW64 pixel logic-op ABI");
 
 struct SM50_SHADER_GS_PASS_THROUGH_DATA32 {
   uint32_t next;
@@ -2902,6 +2912,18 @@ sm50_compilation_argument32_convert(
       data->disable_depth_output = src->disable_depth_output;
       data->sample_mask = src->sample_mask;
       data->dual_source_blending = src->dual_source_blending;
+      memcpy(data->pixel_formats, src->pixel_formats, sizeof(data->pixel_formats));
+      break;
+    }
+    case SM50_SHADER_PIXEL_LOGIC_OP: {
+      struct SM50_SHADER_PIXEL_LOGIC_OP_DATA32 *src = (void *)args32;
+      struct SM50_SHADER_PIXEL_LOGIC_OP_DATA *data = malloc(sizeof(*data));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      data->next = NULL;
+      data->type = src->type;
+      data->render_target_mask = src->render_target_mask;
+      data->operation = src->operation;
       break;
     }
     case SM50_SHADER_IA_INPUT_LAYOUT: {

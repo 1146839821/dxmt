@@ -107,10 +107,12 @@ int main(int argc, char **argv) {
   const bool textured_root_cbv = argc == 4 && (strcmp(argv[3], "--texture-root-cbv") == 0 ||
       strcmp(argv[3], "--indirect-texture-root-cbv") == 0);
   const bool logic_sm5 = argc == 4 && strncmp(argv[3], "--logic-op-sm5-", 15) == 0;
+  const bool logic_chain = argc == 4 && (strncmp(argv[3], "--logic-op-sm5-chain-", 21) == 0 ||
+      strncmp(argv[3], "--logic-op-chain-", 17) == 0);
   const bool numbered_logic = argc == 4 && (logic_sm5 || strncmp(argv[3], "--logic-op-", 11) == 0);
   unsigned logic_index = D3D12_LOGIC_OP_OR;
   if (numbered_logic) {
-    const auto number = argv[3] + (logic_sm5 ? 15 : 11);
+    const auto number = argv[3] + (logic_sm5 ? (logic_chain ? 21 : 15) : (logic_chain ? 17 : 11));
     // Reject malformed options instead of silently selecting CLEAR.
     if (!*number) return 2;
     logic_index = 0;
@@ -894,6 +896,7 @@ int main(int argc, char **argv) {
       list->DrawInstanced(draw_count, 1, 0, 0);
   }
   list->EndQuery(query_heap, D3D12_QUERY_TYPE_OCCLUSION, 0);
+  if (logic_chain) list->DrawInstanced(draw_count, 1, 0, 0);
   list->EndQuery(timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
 
   if (root_uav) {
@@ -1004,11 +1007,15 @@ int main(int argc, char **argv) {
   if (logic_op) {
     // CPU Boolean oracle, independent from Metal's operation enum translation.
     constexpr UINT source = 0x55aa0ff0u, destination = 0xf00f33ccu;
-    const UINT expected[] = {0, UINT_MAX, source, ~source, destination, ~destination,
-        source & destination, ~(source & destination), source | destination, ~(source | destination),
-        source ^ destination, ~(source ^ destination), source & ~destination, ~source & destination,
-        source | ~destination, ~source | destination};
-    expected_pixel = expected[logic_index];
+    const auto apply = [&](UINT dest) {
+      const UINT expected[] = {0, UINT_MAX, source, ~source, dest, ~dest,
+          source & dest, ~(source & dest), source | dest, ~(source | dest),
+          source ^ dest, ~(source ^ dest), source & ~dest, ~source & dest,
+          source | ~dest, ~source | dest};
+      return expected[logic_index];
+    };
+    expected_pixel = apply(destination);
+    if (logic_chain) expected_pixel = apply(expected_pixel);
   }
   if ((pixel & ((packed_uint || logic_op) ? UINT_MAX : 0x00ffffffu)) != (expected_pixel & ((packed_uint || logic_op) ? UINT_MAX : 0x00ffffffu))) {
     std::cerr << "graphics readback mismatch: 0x" << std::hex << pixel
@@ -1016,6 +1023,7 @@ int main(int argc, char **argv) {
     goto cleanup;
   }
   if (logic_op) std::cout << "LOGIC_OP index=" << logic_index << " RGBA8_UINT PASS\n";
+  if (logic_chain) std::cout << "LOGIC_OP_CHAIN draws=2 PASS\n";
   std::cout << ((packed_sm5 || logic_sm5) ? "DXBC AIRCONV " : "DXIL ")
             << (geometry_adjacency_indexed
                     ? "indexed adjacency geometry graphics"

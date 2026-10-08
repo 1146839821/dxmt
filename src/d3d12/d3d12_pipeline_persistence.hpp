@@ -14,6 +14,9 @@ namespace dxmt {
 
 class MTLD3D12Device;
 
+bool CanLowerD3D12IntegerLogicOp(const D3D12_BLEND_DESC &blend, UINT count,
+    const DXGI_FORMAT *formats, const D3D12_SHADER_BYTECODE &pixel, UINT samples);
+
 enum class D3D12PipelineType : uint32_t {
   Unknown = 0,
   Compute = 1,

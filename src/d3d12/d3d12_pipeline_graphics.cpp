@@ -1916,8 +1916,10 @@ public:
           info.stencil_pixel_format = format_desc.PixelFormat;
       }
       if (!pDesc->BlendState.IndependentBlendEnable && pDesc->BlendState.RenderTarget[0].LogicOpEnable) {
+#ifndef DXMT_NO_PRIVATE_API
         info.logic_operation_enabled = true;
         info.logic_operation = kLogicOpMap[pDesc->BlendState.RenderTarget[0].LogicOp];
+#endif
       }
     }
 
@@ -1938,6 +1940,19 @@ public:
       data_ps.sample_mask = pDesc->SampleMask;
       data_ps.type = SM50_SHADER_PSO_PIXEL_SHADER;
       data_ps.next = &common;
+
+#ifdef DXMT_NO_PRIVATE_API
+      SM50_SHADER_PIXEL_LOGIC_OP_DATA logic = {};
+      if (pDesc->BlendState.RenderTarget[0].LogicOpEnable) {
+        if (!(ref_ps.PixelShader.CompilerCapabilities & MTL_PIXEL_COMPILER_INTEGER_LOGIC_OP) ||
+            !metal.supportsFamily(WMTGPUFamilyApple4)) return E_NOTIMPL;
+        logic.type = SM50_SHADER_PIXEL_LOGIC_OP;
+        logic.operation = pDesc->BlendState.RenderTarget[0].LogicOp;
+        logic.render_target_mask = (1u << pDesc->NumRenderTargets) - 1;
+        logic.next = &common;
+        data_ps.next = &logic;
+      }
+#endif
 
       memset(data_ps.pixel_formats, 0, sizeof(data_ps.pixel_formats));
       for (unsigned i = 0; i < pDesc->NumRenderTargets; i++)

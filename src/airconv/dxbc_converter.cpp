@@ -349,6 +349,21 @@ llvm::Error convert_dxbc_pixel_shader(
   SM50_SHADER_ROOT_SIGNATURE_DATA *rootsig = nullptr;
   args_get_data<SM50_SHADER_ROOT_SIGNATURE, SM50_SHADER_ROOT_SIGNATURE_DATA>(pArgs, &rootsig);
 
+  SM50_SHADER_PIXEL_LOGIC_OP_DATA *logic = nullptr;
+  args_get_data<SM50_SHADER_PIXEL_LOGIC_OP, SM50_SHADER_PIXEL_LOGIC_OP_DATA>(pArgs, &logic);
+  if (logic) {
+    if (!pso_data || pso_dual_source_blending || logic->operation > 15 || (logic->render_target_mask & ~0xffu))
+      return llvm::make_error<UnsupportedFeature>("invalid programmable logic operation");
+    for (unsigned i = 0; i < 8; ++i) {
+      const auto type = component_type_from_pixel_format(static_cast<air::MTLPixelFormat>(pso_data->pixel_formats[i]));
+      if ((logic->render_target_mask & (1u << i)) && type != RegisterComponentType::Uint)
+        return llvm::make_error<UnsupportedFeature>("programmable logic operation requires UINT attachment");
+    }
+    if (logic->render_target_mask)
+      module.getOrInsertNamedMetadata("air.compile_options")->addOperand(llvm::MDNode::get(
+          context, llvm::MDString::get(context, "air.compile.framebuffer_fetch_enable")));
+  }
+
   IREffect prologue([](auto) { return std::monostate(); });
   IRValue epilogue([](struct context ctx) -> pvalue {
     auto retTy = ctx.function->getReturnType();
@@ -367,6 +382,10 @@ llvm::Error convert_dxbc_pixel_shader(
     sig_ctx.disable_depth_output = pso_disable_depth_output;
     sig_ctx.pull_mode_reg_mask = shader_info->pull_mode_reg_mask;
     sig_ctx.unorm_output_reg_mask = pso_unorm_output_reg_mask;
+    if (logic) {
+      sig_ctx.logic_op_mask = logic->render_target_mask;
+      sig_ctx.logic_op = logic->operation;
+    }
     if (pso_data)
       memcpy(sig_ctx.pixel_formats, pso_data->pixel_formats, sizeof(sig_ctx.pixel_formats));
     for (auto &p : pShaderInternal->signature_handlers) {
@@ -1382,6 +1401,7 @@ AIRCONV_API int SM50Initialize(
     if (sm50_shader->shader_type == microsoft::D3D10_SB_PIXEL_SHADER) {
       pRefl->PixelShader.ValidRenderTargets = sm50_shader->pso_valid_output_reg_mask;
       pRefl->PixelShader.HasCoverageOutput = sm50_shader->ps_has_coverage_output;
+      pRefl->PixelShader.CompilerCapabilities = MTL_PIXEL_COMPILER_INTEGER_LOGIC_OP;
     }
     pRefl->NumOutputElement = sm50_shader->max_output_register;
     pRefl->ArgumentTableQwords = binding_table.Size();

@@ -510,6 +510,11 @@ struct InputBaseInstance {};
 struct InputViewportArrayIndex {};
 struct InputRenderTargetArrayIndex {};
 
+struct InputRenderTarget {
+  uint32_t index;
+  MSLScalerOrVectorType type;
+};
+
 struct InputPrimitiveID {};
 struct InputFrontFacing {};
 struct InputInputCoverage {};
@@ -595,7 +600,7 @@ using FunctionInput = template_concat_t<
     /* fragment */
     InputPrimitiveID, InputViewportArrayIndex, InputRenderTargetArrayIndex,
     InputFrontFacing, InputPosition, InputSampleIndex, //
-    InputFragmentStageIn, InputInputCoverage,
+    InputFragmentStageIn, InputInputCoverage, InputRenderTarget,
     /* object & mesh */
     InputPayload, InputMeshGridProperties, InputMesh,
     /* kernel */
