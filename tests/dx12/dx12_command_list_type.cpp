@@ -4,6 +4,7 @@
 #include <d3d12.h>
 
 #include <iostream>
+#include <cstdint>
 
 namespace {
 
@@ -13,6 +14,117 @@ bool CheckHR(const char *name, HRESULT hr) {
     return false;
   }
   return true;
+}
+
+template <typename T> struct Owned {
+  T *ptr = nullptr;
+  Owned() = default;
+  Owned(const Owned &) = delete;
+  Owned &operator=(const Owned &) = delete;
+  ~Owned() { if (ptr) ptr->Release(); }
+  T *operator->() const { return ptr; }
+};
+
+bool TestResetAllocatorSubmission(ID3D12Device *device) {
+  Owned<ID3D12CommandQueue> queue;
+  Owned<ID3D12CommandAllocator> allocator;
+  Owned<ID3D12GraphicsCommandList> stale, fresh;
+  Owned<ID3D12Resource> source, readback;
+  Owned<ID3D12Fence> fence;
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  if (!CheckHR("Reset test queue", device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue.ptr))) ||
+      !CheckHR("Reset test allocator", device->CreateCommandAllocator(
+          D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator.ptr))))
+    return false;
+
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  desc.Width = 256;
+  desc.Height = 1;
+  desc.DepthOrArraySize = 1;
+  desc.MipLevels = 1;
+  desc.SampleDesc.Count = 1;
+  desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  if (!CheckHR("Reset test upload", device->CreateCommittedResource(
+          &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+          IID_PPV_ARGS(&source.ptr))))
+    return false;
+  heap.Type = D3D12_HEAP_TYPE_READBACK;
+  if (!CheckHR("Reset test readback", device->CreateCommittedResource(
+          &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+          IID_PPV_ARGS(&readback.ptr))))
+    return false;
+  uint32_t *mapped = nullptr;
+  if (!CheckHR("Reset test map source", source->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+    return false;
+  mapped[0] = 0x11111111;
+  mapped[1] = 0x22222222;
+  source->Unmap(0, nullptr);
+  if (!CheckHR("Reset test map readback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+    return false;
+  *mapped = 0;
+  readback->Unmap(0, nullptr);
+
+  if (!CheckHR("Reset test stale list", device->CreateCommandList(
+          0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.ptr, nullptr, IID_PPV_ARGS(&stale.ptr))))
+    return false;
+  stale->CopyBufferRegion(readback.ptr, 0, source.ptr, 0, sizeof(uint32_t));
+  if (!CheckHR("Reset test close stale", stale->Close()) ||
+      !CheckHR("Reset test allocator reset", allocator->Reset()) ||
+      !CheckHR("Reset test fresh list", device->CreateCommandList(
+          0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.ptr, nullptr, IID_PPV_ARGS(&fresh.ptr))))
+    return false;
+  if (allocator->Reset() != E_FAIL) {
+    std::cerr << "Reset test accepted an allocator reset while recording\n";
+    return false;
+  }
+  fresh->CopyBufferRegion(readback.ptr, 0, source.ptr, sizeof(uint32_t), sizeof(uint32_t));
+  if (!CheckHR("Reset test close fresh", fresh->Close()) ||
+      !CheckHR("Reset test fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.ptr))))
+    return false;
+  struct Event {
+    HANDLE handle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    ~Event() { if (handle) CloseHandle(handle); }
+  } event;
+  if (!event.handle)
+    return false;
+  UINT64 fence_value = 0;
+  const auto submit = [&](const char *name, ID3D12CommandList *const *lists, UINT count, uint32_t expected) {
+    queue->ExecuteCommandLists(count, lists);
+    if (!CheckHR("Reset test signal", queue->Signal(fence.ptr, ++fence_value)) ||
+        !CheckHR("Reset test event", fence->SetEventOnCompletion(fence_value, event.handle)) ||
+        WaitForSingleObject(event.handle, 5000) != WAIT_OBJECT_0) {
+      std::cerr << name << " queue wait failed\n";
+      return false;
+    }
+    if (!CheckHR("Reset test map result", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+      return false;
+    const auto actual = *mapped;
+    readback->Unmap(0, nullptr);
+    if (actual != expected) {
+      std::cerr << name << " readback 0x" << std::hex << actual << ", expected 0x" << expected << std::dec << "\n";
+      return false;
+    }
+    std::cout << name << " readback passed: 0x" << std::hex << actual << std::dec << "\n";
+    return true;
+  };
+  ID3D12CommandList *stale_list = stale.ptr;
+  if (!submit("stale allocator recording rejected", &stale_list, 1, 0))
+    return false;
+  ID3D12CommandList *batch[] = {fresh.ptr, stale.ptr};
+  if (!submit("mixed stale batch rejected", batch, 2, 0))
+    return false;
+  ID3D12CommandList *fresh_list = fresh.ptr;
+  if (!submit("fresh allocator recording", &fresh_list, 1, 0x22222222))
+    return false;
+  if (!CheckHR("Reset test rerecord stale", stale->Reset(allocator.ptr, nullptr)))
+    return false;
+  stale->CopyBufferRegion(readback.ptr, 0, source.ptr, 0, sizeof(uint32_t));
+  return CheckHR("Reset test close rerecorded", stale->Close()) &&
+         submit("rerecorded command list", &stale_list, 1, 0x11111111);
 }
 
 struct ExecuteContext {
@@ -135,6 +247,11 @@ int main() {
   ID3D12Device *device = nullptr;
   if (!CheckHR("D3D12CreateDevice", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))))
     return 1;
+
+  if (!TestResetAllocatorSubmission(device)) {
+    device->Release();
+    return 1;
+  }
 
   const D3D12_COMMAND_LIST_TYPE types[] = {
       D3D12_COMMAND_LIST_TYPE_DIRECT,

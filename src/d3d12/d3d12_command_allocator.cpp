@@ -107,6 +107,9 @@ MTLD3D12CommandAllocatorImpl::Reset() {
   if (encoder_last || IsInFlight())
     return E_FAIL;
 
+  // Invalidate closed recordings before releasing their encoder storage,
+  // including when reinitialization subsequently fails.
+  reset_generation_.fetch_add(1, std::memory_order_release);
   DestroyEncoders();
   ReleaseSpilledCPUHeaps();
   cpu_allocation_failed_ = false;

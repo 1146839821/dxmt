@@ -695,6 +695,10 @@ public:
         return;
       }
       auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(command_list);
+      if (!pCommandList->IsAllocatorRecordingValid()) {
+        WARN("D3D12 ExecuteCommandLists received a command list whose allocator was reset");
+        return;
+      }
       if (pCommandList->encoder_count == std::numeric_limits<size_t>::max()) {
         WARN("D3D12 ExecuteCommandLists received an open command list");
         return;

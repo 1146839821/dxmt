@@ -88,6 +88,7 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
   EncoderData *encoder_current;
   size_t encoder_count_;
   std::atomic_uint32_t in_flight_submissions_ = {0u};
+  std::atomic<uint64_t> reset_generation_{0};
 
   small_vector<EncoderData, 64> encoder_lists_;
 
@@ -175,6 +176,10 @@ public:
   bool
   IsInFlight() const final {
     return in_flight_submissions_.load(std::memory_order_acquire) != 0;
+  }
+
+  uint64_t GetResetGeneration() const {
+    return reset_generation_.load(std::memory_order_acquire);
   }
 
   HRESULT STDMETHODCALLTYPE CreateCommandList(

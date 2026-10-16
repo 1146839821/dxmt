@@ -107,6 +107,7 @@ public:
   size_t encoder_count = 0;
 
   virtual MTLD3D12CommandAllocator *GetAllocator() = 0;
+  virtual bool IsAllocatorRecordingValid() const = 0;
   virtual uint64_t GetRecordingId() const = 0;
   virtual AirconvResidencyCounters GetAirconvResidencyCounters() const = 0;
   virtual void MarkSubmitted() = 0;

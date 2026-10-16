@@ -640,6 +640,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   D3D12_COMMAND_LIST_TYPE type_;
   bool recording_failed_;
   uint64_t recording_id_ = 0;
+  uint64_t allocator_reset_generation_ = 0;
   bool airconv_render_residency_ = false;
   bool msc_compute_residency_ = false;
   bool indirect_residency_ = false;
@@ -1019,8 +1020,10 @@ public:
     resource_state_transitions_.clear();
 
     HRESULT hr = allocator_->StartRecord(&entry);
-    if (SUCCEEDED(hr))
+    if (SUCCEEDED(hr)) {
+      allocator_reset_generation_ = allocator_->GetResetGeneration();
       encoder_count = std::numeric_limits<size_t>::max();
+    }
     return hr;
   }
 
@@ -1236,6 +1239,10 @@ public:
 
   MTLD3D12CommandAllocator *GetAllocator() final {
     return allocator_.ptr();
+  }
+
+  bool IsAllocatorRecordingValid() const final {
+    return allocator_ && allocator_reset_generation_ == allocator_->GetResetGeneration();
   }
 
   uint64_t GetRecordingId() const final {
