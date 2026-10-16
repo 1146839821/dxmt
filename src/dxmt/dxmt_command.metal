@@ -25,6 +25,31 @@
 using namespace metal;
 using namespace dxmt;
 
+// Native GPU addresses use the existing argument-buffer pointer ABI. Only
+// D3D12 occlusion reduction uses this kernel; no application shader ABI changes.
+struct DXMTVisibilitySegment {
+  device const ulong *samples;
+};
+struct DXMTVisibilitySumParams {
+  uint count;
+  uint binary;
+};
+[[kernel]] void dxmt_sum_visibility_results(
+    device const DXMTVisibilitySegment *segments [[buffer(0)]],
+    device ulong *result [[buffer(1)]],
+    constant DXMTVisibilitySumParams &params [[buffer(2)]],
+    uint position [[thread_position_in_grid]]
+) {
+  if (position != 0)
+    return;
+  ulong sum = 0;
+  for (uint i = 0; i < params.count; ++i) {
+    const ulong samples = segments[i].samples[0];
+    sum = params.binary ? (sum | samples) : (sum + samples);
+  }
+  result[0] = params.binary ? ulong(sum != 0) : sum;
+}
+
 struct DXMTPredicationParams {
   uint operation;
   uint reserved;

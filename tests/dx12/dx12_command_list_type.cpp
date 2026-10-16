@@ -596,6 +596,136 @@ bool TestTransitionChain(unsigned mode) {
   return true;
 }
 
+// Invalid query lifecycles are record-only: resolving an incomplete query on
+// the GPU is undefined behavior and is never used as a negative test oracle.
+bool TestQueryRecording(ID3D12Device *device, unsigned mode) {
+  Owned<ID3D12CommandAllocator> allocator;
+  Owned<ID3D12GraphicsCommandList> list;
+  Owned<ID3D12QueryHeap> heap, other;
+  Owned<ID3D12Resource> readback;
+  if (!CheckHR("Query allocator", device->CreateCommandAllocator(
+          D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator.ptr))) ||
+      !CheckHR("Query list", device->CreateCommandList(
+          0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.ptr, nullptr, IID_PPV_ARGS(&list.ptr)))) return false;
+  D3D12_QUERY_HEAP_DESC hd = {};
+  hd.Type = mode == 18 ? D3D12_QUERY_HEAP_TYPE_TIMESTAMP : D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+  hd.Count = 2;
+  const HRESULT heap_hr = device->CreateQueryHeap(&hd, IID_PPV_ARGS(&heap.ptr));
+  if (mode == 18 && heap_hr == E_NOTIMPL) {
+    std::cout << "timestamp query UNSUPPORTED on this device (not PASS)\n";
+    return true;
+  }
+  if (!CheckHR("Query heap", heap_hr) ||
+      !CheckHR("Other query heap", device->CreateQueryHeap(&hd, IID_PPV_ARGS(&other.ptr)))) return false;
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  desc.Width = 16; desc.Height = 1; desc.DepthOrArraySize = 1; desc.MipLevels = 1;
+  desc.SampleDesc.Count = 1; desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  D3D12_HEAP_PROPERTIES hp = {};
+  hp.Type = D3D12_HEAP_TYPE_READBACK;
+  if (!CheckHR("Query readback", device->CreateCommittedResource(
+          &hp, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+          IID_PPV_ARGS(&readback.ptr)))) return false;
+  const auto count = D3D12_QUERY_TYPE_OCCLUSION;
+  const auto binary = D3D12_QUERY_TYPE_BINARY_OCCLUSION;
+  if (mode != 2 && mode != 9 && mode != 18) list->BeginQuery(heap.ptr, count, 0);
+  switch (mode) {
+  case 0: list->BeginQuery(heap.ptr, count, 0); break;
+  case 1: break; // Missing End.
+  case 2: list->EndQuery(heap.ptr, count, 0); break;
+  case 3: list->EndQuery(heap.ptr, binary, 0); break;
+  case 4: list->EndQuery(heap.ptr, count, 1); break;
+  case 5: list->EndQuery(other.ptr, count, 0); break;
+  case 6: list->ResolveQueryData(heap.ptr, count, 0, 1, readback.ptr, 0); break;
+  case 7: list->BeginQuery(heap.ptr, binary, 0); break;
+  case 8: list->BeginQuery(heap.ptr, count, 2); break;
+  case 9: list->BeginQuery(heap.ptr, D3D12_QUERY_TYPE_TIMESTAMP, 0); break;
+  case 10:
+    list->EndQuery(heap.ptr, count, 0);
+    list->EndQuery(heap.ptr, count, 0);
+    break;
+  case 11: // Empty queries, including overlapping queries and reuse.
+    list->BeginQuery(other.ptr, binary, 0);
+    list->BeginQuery(heap.ptr, binary, 1);
+    list->EndQuery(heap.ptr, count, 0);
+    list->EndQuery(other.ptr, binary, 0);
+    list->EndQuery(heap.ptr, binary, 1);
+    list->BeginQuery(heap.ptr, count, 0);
+    list->EndQuery(heap.ptr, count, 0);
+    list->ResolveQueryData(heap.ptr, count, 0, 1, readback.ptr, 0);
+    list->ResolveQueryData(heap.ptr, binary, 1, 1, readback.ptr, 8);
+    break;
+  case 12: // Resolving an ended range while another slot is active is legal.
+    list->BeginQuery(heap.ptr, count, 1);
+    list->EndQuery(heap.ptr, count, 1);
+    list->ResolveQueryData(heap.ptr, count, 1, 1, readback.ptr, 0);
+    list->EndQuery(heap.ptr, count, 0);
+    list->ResolveQueryData(heap.ptr, count, 0, 1, readback.ptr, 8);
+    break;
+  case 13: {
+    Owned<ID3D12CommandAllocator> second_allocator;
+    Owned<ID3D12GraphicsCommandList> second;
+    if (!CheckHR("Cross-list query allocator", device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&second_allocator.ptr))) ||
+        !CheckHR("Cross-list query list", device->CreateCommandList(
+            0, D3D12_COMMAND_LIST_TYPE_DIRECT, second_allocator.ptr, nullptr, IID_PPV_ARGS(&second.ptr)))) return false;
+    second->EndQuery(heap.ptr, count, 0);
+    if (SUCCEEDED(second->Close())) { std::cerr << "cross-list query End accepted\n"; return false; }
+    break;
+  }
+  case 14: case 15: case 16: case 17:
+    list->EndQuery(heap.ptr, count, 0);
+    list->ResolveQueryData(heap.ptr, mode == 17 ? D3D12_QUERY_TYPE_TIMESTAMP : count,
+                          mode == 14 ? 2 : 0, mode == 15 ? UINT_MAX : 1,
+                          readback.ptr, mode == 16 ? 1 : 0);
+    break;
+  case 18:
+    list->EndQuery(heap.ptr, D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    list->EndQuery(heap.ptr, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+    list->ResolveQueryData(heap.ptr, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, readback.ptr, 0);
+    break;
+  }
+  HRESULT close = list->Close();
+  if (mode < 11 || (mode >= 13 && mode <= 17)) {
+    if (SUCCEEDED(close) || list->Reset(allocator.ptr, nullptr) != close) {
+      std::cerr << "invalid query mode " << mode << " accepted by Close/Reset\n";
+      return false;
+    }
+    std::cout << "query lifecycle mode " << mode << " rejected before submission\n";
+    return true;
+  }
+  if (!CheckHR("Empty query Close", close)) return false;
+  Owned<ID3D12CommandQueue> queue;
+  Owned<ID3D12Fence> fence;
+  D3D12_COMMAND_QUEUE_DESC qd = {};
+  if (!CheckHR("Empty query queue", device->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue.ptr))) ||
+      !CheckHR("Empty query fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.ptr)))) return false;
+  HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!event) return false;
+  bool ok = true;
+  for (UINT64 replay = 1; replay <= 2 && ok; ++replay) {
+    UINT64 *mapped = nullptr;
+    ok = CheckHR("Initialize query readback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped)));
+    if (!ok) break;
+    mapped[0] = mapped[1] = UINT64_MAX;
+    readback->Unmap(0, nullptr);
+    ID3D12CommandList *batch[] = {list.ptr};
+    queue->ExecuteCommandLists(1, batch);
+    ok = CheckHR("Empty query signal", queue->Signal(fence.ptr, replay)) &&
+        CheckHR("Empty query event", fence->SetEventOnCompletion(replay, event)) &&
+        WaitForSingleObject(event, 5000) == WAIT_OBJECT_0 &&
+        CheckHR("Empty query device", device->GetDeviceRemovedReason()) &&
+        CheckHR("Empty query map", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped)));
+    if (!ok) break;
+    ok = mode == 18 ? mapped[0] != 0 && mapped[1] >= mapped[0] : mapped[0] == 0 && mapped[1] == 0;
+    readback->Unmap(0, nullptr);
+  }
+  CloseHandle(event);
+  if (!ok) { std::cerr << "empty query/replay readback failed mode " << mode << "\n"; return false; }
+  std::cout << "query lifecycle mode " << mode << (mode == 18 ? " timestamp ordered readback/replay passed\n" : " exact zero readback/replay passed\n");
+  return true;
+}
+
 struct ExecuteContext {
   ID3D12CommandQueue *queue;
   ID3D12CommandList *command_list;
@@ -745,6 +875,13 @@ int main() {
 
   for (unsigned mode = 0; mode < 22; mode++) {
     if (!TestTransitionChain(mode)) {
+      device->Release();
+      return 1;
+    }
+  }
+
+  for (unsigned mode = 0; mode <= 18; ++mode) {
+    if (!TestQueryRecording(device, mode)) {
       device->Release();
       return 1;
     }

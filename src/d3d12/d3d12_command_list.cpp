@@ -24,6 +24,7 @@
 #include "dxmt_command_context.hpp"
 #include "dxmt_command_constants.hpp"
 #include "dxmt_format.hpp"
+#include "dxmt_occlusion_query.hpp"
 #include <array>
 #include <atomic>
 #include <optional>
@@ -666,6 +667,29 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   std::vector<CachedTemporalScaler> temporal_scaler_cache_;
   WMT::Reference<WMT::ComputePipelineState> predication_args_pso_;
   WMT::Reference<WMT::ComputePipelineState> predication_count_pso_;
+  // A visibility segment belongs to one render pass and all queries active in
+  // that pass. Query indices address the result heap, never Metal's per-pass
+  // visibility offset (which has a smaller implementation-defined limit).
+  struct VisibilitySegment {
+    WMT::Reference<WMT::Buffer> buffer;
+    uint64_t offset;
+    uint64_t address;
+  };
+  struct VisibilityChunk {
+    WMT::Reference<WMT::Buffer> buffer;
+    uint64_t address;
+  };
+  struct ActiveOcclusionQuery {
+    Com<MTLD3D12QueryHeap> heap;
+    UINT index;
+    D3D12_QUERY_TYPE type;
+    std::vector<VisibilitySegment> segments;
+  };
+  std::vector<ActiveOcclusionQuery> active_occlusion_queries_;
+  std::vector<VisibilityChunk> visibility_chunks_;
+  VisibilityResultOffsetBumpState visibility_offsets_;
+  WMT::Reference<WMT::ComputePipelineState> visibility_sum_pso_;
+  HRESULT query_recording_error_ = S_OK;
   Com<MTLD3D12Resource, false> predication_buffer_;
   UINT64 predication_offset_ = 0;
   D3D12_PREDICATION_OP predication_op_ = D3D12_PREDICATION_OP_EQUAL_ZERO;
@@ -1024,6 +1048,10 @@ public:
     if (GetEnvironmentVariableA("DXMT_AIRCONV_RENDER_RESIDENCY", enabled, sizeof(enabled)))
       airconv_render_residency_ = enabled[0] != '0';
     recording_failed_ = false;
+    active_occlusion_queries_.clear();
+    visibility_chunks_.clear();
+    visibility_offsets_.reset();
+    query_recording_error_ = S_OK;
     pending_barrier_scope_ = (WMTBarrierScope)0;
     pending_barrier_stages_after_ = (WMTRenderStages)0;
     pending_barrier_stages_before_ = (WMTRenderStages)0;
@@ -1286,8 +1314,12 @@ public:
   Close() {
     if (encoder_count < std::numeric_limits<size_t>::max())
       return E_FAIL;
+    if (!active_occlusion_queries_.empty())
+      FailRecording(__func__, "occlusion query has no matching EndQuery");
     HRESULT validation = S_OK;
-    if (allocator_->CPUAllocationFailed()) {
+    if (FAILED(query_recording_error_)) {
+      validation = query_recording_error_;
+    } else if (allocator_->CPUAllocationFailed()) {
       FailRecording(__func__, "command allocator CPU recording allocation failed");
       validation = E_OUTOFMEMORY;
     } else if (recording_failed_) {
@@ -1572,6 +1604,154 @@ public:
     } catch (...) {
       FailRecording(__func__, "resource lifetime retention allocation failed");
     }
+  }
+
+  bool
+  ClearVisibilityResult(WMT::Buffer buffer, uint64_t offset) {
+    if (!PreBlit())
+      return false;
+    RetainResourceForCurrentEncoder(buffer.handle);
+    auto &cmd = allocator_->EncodeBlitCommand<wmtcmd_blit_fillbuffer>();
+    cmd.type = WMTBlitCommandFillBuffer;
+    cmd.buffer = buffer;
+    cmd.offset = offset;
+    cmd.length = sizeof(uint64_t);
+    cmd.value = 0;
+    return !recording_failed_;
+  }
+
+  bool
+  BeginVisibilitySegment(VisibilitySegment &segment) {
+    constexpr uint64_t chunk_size = 64 * 1024;
+    constexpr uint64_t slots_per_chunk = chunk_size / sizeof(uint64_t);
+    uint64_t slot = 0;
+    visibility_offsets_.beginEncoder();
+    visibility_offsets_.tryGetNextWriteOffset(true, slot);
+    visibility_offsets_.endEncoder();
+    try {
+      if (slot / slots_per_chunk == visibility_chunks_.size()) {
+        WMTBufferInfo info = {};
+        info.length = chunk_size;
+        info.options = WMTResourceStorageModeShared | WMTResourceHazardTrackingModeUntracked;
+        auto buffer = device_->GetMTLDevice().newBuffer(info);
+        if (!buffer || !info.gpu_address) {
+          query_recording_error_ = E_OUTOFMEMORY;
+          FailRecording(__func__, "visibility buffer allocation failed");
+          return false;
+        }
+        visibility_chunks_.push_back({std::move(buffer), info.gpu_address});
+      }
+      const auto &chunk = visibility_chunks_[slot / slots_per_chunk];
+      const auto offset = (slot % slots_per_chunk) * sizeof(uint64_t);
+      segment = {chunk.buffer, offset, chunk.address + offset};
+      for (auto &query : active_occlusion_queries_)
+        query.segments.push_back(segment);
+    } catch (...) {
+      query_recording_error_ = E_OUTOFMEMORY;
+      FailRecording(__func__, "visibility segment allocation failed");
+      return false;
+    }
+    // Clear on the GPU, including every replay of this recording. CPU zeroing
+    // here would race previous submissions and leave stale values on replay.
+    return ClearVisibilityResult(segment.buffer, segment.offset);
+  }
+
+  bool
+  EndVisibilityQuery(const ActiveOcclusionQuery &query) {
+    allocator_->InvalidateCurrentPass();
+    if (query.segments.empty())
+      return ClearVisibilityResult(query.heap->visibility_buffer, uint64_t(query.index) * sizeof(uint64_t));
+    if (query.segments.size() == 1 && query.type == D3D12_QUERY_TYPE_OCCLUSION) {
+      // A single counting segment is already the final UINT64 result. Avoid
+      // compiling or dispatching the reduction kernel for this common case.
+      if (!PreBlit())
+        return false;
+      const auto &segment = query.segments.front();
+      RetainResourceForCurrentEncoder(segment.buffer.handle);
+      RetainResourceForCurrentEncoder(query.heap->visibility_buffer.handle);
+      auto &copy = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
+      copy.type = WMTBlitCommandCopyFromBufferToBuffer;
+      copy.src = segment.buffer;
+      copy.src_offset = segment.offset;
+      copy.dst = query.heap->visibility_buffer;
+      copy.dst_offset = uint64_t(query.index) * sizeof(uint64_t);
+      copy.copy_length = sizeof(uint64_t);
+      return !recording_failed_;
+    }
+    if (!visibility_sum_pso_) {
+      auto function = device_->GetLib().getLibrary().newFunction("dxmt_sum_visibility_results");
+      if (function) {
+        WMT::Reference<WMT::Error> error;
+        visibility_sum_pso_ = device_->GetMTLDevice().newComputePipelineState(function, error);
+        if (!visibility_sum_pso_ && error)
+          ERR("D3D12 visibility sum PSO: ", error.description().getUTF8String());
+      }
+    }
+    if (!visibility_sum_pso_) {
+      FailRecording(__func__, "visibility sum pipeline is unavailable");
+      return false;
+    }
+    if (query.segments.size() > UINT_MAX) {
+      query_recording_error_ = E_OUTOFMEMORY;
+      FailRecording(__func__, "too many visibility segments");
+      return false;
+    }
+    auto [mapped, offset] = allocator_->AllocateGPUHeap(query.segments.size() * sizeof(uint64_t), alignof(uint64_t));
+    if (!mapped) {
+      query_recording_error_ = E_OUTOFMEMORY;
+      FailRecording(__func__, "visibility segment table allocation failed");
+      return false;
+    }
+    auto addresses = static_cast<uint64_t *>(mapped);
+    for (size_t i = 0; i < query.segments.size(); ++i)
+      addresses[i] = query.segments[i].address;
+    auto compute = allocator_->AllocatePass<ComputeEncoderData>();
+    if (!compute) {
+      FailRecording(__func__, "visibility sum encoder allocation failed");
+      return false;
+    }
+    ResetCurrentEncoderResourceUseState();
+    compute->type = EncoderType::Compute;
+    compute->cmd_head.type = WMTComputeCommandNop;
+    compute->cmd_head.next.set(nullptr);
+    compute->cmd_tail = reinterpret_cast<wmtcmd_base *>(&compute->cmd_head);
+    for (const auto &segment : query.segments)
+      EncodeComputeResourceUse(segment.buffer.handle, WMTResourceUsageRead);
+    EncodeComputeResourceUse(allocator_->gpu_heap_buffer_.handle, WMTResourceUsageRead);
+    EncodeComputeResourceUse(query.heap->visibility_buffer.handle, WMTResourceUsageWrite);
+    auto &setpso = allocator_->EncodeComputeCommand<wmtcmd_compute_setpso>();
+    setpso.type = WMTComputeCommandSetPSO;
+    setpso.pso = visibility_sum_pso_;
+    setpso.threadgroup_size = {1, 1, 1};
+    auto &table = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+    table.type = WMTComputeCommandSetBuffer;
+    table.buffer = allocator_->gpu_heap_buffer_;
+    table.offset = offset;
+    table.index = 0;
+    auto &output = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+    output.type = WMTComputeCommandSetBuffer;
+    output.buffer = query.heap->visibility_buffer;
+    output.offset = uint64_t(query.index) * sizeof(uint64_t);
+    output.index = 1;
+    struct VisibilitySumParams { uint32_t count; uint32_t binary; };
+    auto params = allocator_->AllocateCommandData<VisibilitySumParams>(1);
+    if (!params) {
+      FailRecording(__func__, "visibility sum parameter allocation failed");
+      return false;
+    }
+    *params = {static_cast<uint32_t>(query.segments.size()), query.type == D3D12_QUERY_TYPE_BINARY_OCCLUSION};
+    auto &bytes = allocator_->EncodeComputeCommand<wmtcmd_compute_setbytes>();
+    bytes.type = WMTComputeCommandSetBytes;
+    bytes.bytes.set(params);
+    bytes.length = sizeof(*params);
+    bytes.index = 2;
+    auto &dispatch = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch>();
+    dispatch.type = WMTComputeCommandDispatchThreads;
+    dispatch.size = {1, 1, 1};
+    dirty_state_.set(DirtyState::ComputePipelineState, DirtyState::ComputeRootArguments,
+                     DirtyState::ComputeRootSignature, DirtyState::DescriptorHeaps);
+    allocator_->InvalidateCurrentPass();
+    return !recording_failed_;
   }
 
   void
@@ -2252,6 +2432,12 @@ public:
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render) {
 
       allocator_->InvalidateCurrentPass();
+      VisibilitySegment visibility;
+      if (!active_occlusion_queries_.empty()) {
+        if (!BeginVisibilitySegment(visibility))
+          return DrawCallStatus::Invalid;
+        allocator_->InvalidateCurrentPass();
+      }
       auto render = allocator_->AllocatePass<RenderEncoderData>();
       if (!render) {
         FailRecording(__func__, "render encoder allocation failed");
@@ -2262,6 +2448,14 @@ public:
       render->cmd_head.type = WMTRenderCommandNop;
       render->cmd_head.next.set(0);
       render->cmd_tail = (wmtcmd_base *)&render->cmd_head;
+      if (!active_occlusion_queries_.empty()) {
+        render->use_visibility_result = true;
+        render->visibility_buffer = visibility.buffer;
+        auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setvisibilitymode>();
+        cmd.type = WMTRenderCommandSetVisibilityMode;
+        cmd.offset = visibility.offset;
+        cmd.mode = WMTVisibilityResultModeCounting;
+      }
       FlushPendingMemoryBarrier();
       render->dsv_planar_flags = 0;
       render->dsv_readonly_flags = 0;
@@ -5243,16 +5437,22 @@ public:
       FailRecording(__func__, "invalid occlusion query heap or index=", Index);
       return;
     }
-    if (PreDraw() == DrawCallStatus::Invalid)
+    for (const auto &active : active_occlusion_queries_) {
+      if (active.heap.ptr() == query && active.index == Index) {
+        FailRecording(__func__, "query already active index=", Index);
+        return;
+      }
+    }
+    try {
+      active_occlusion_queries_.push_back({query, Index, Type, {}});
+    } catch (...) {
+      query_recording_error_ = E_OUTOFMEMORY;
+      FailRecording(__func__, "active query allocation failed");
       return;
-    auto render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
-    render->use_visibility_result = true;
-    render->visibility_buffer = query->visibility_buffer;
-    auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setvisibilitymode>();
-    cmd.type = WMTRenderCommandSetVisibilityMode;
-    cmd.offset = uint64_t(Index) * sizeof(uint64_t);
-    cmd.mode = Type == D3D12_QUERY_TYPE_BINARY_OCCLUSION ? WMTVisibilityResultModeBoolean
-                                                         : WMTVisibilityResultModeCounting;
+    }
+    // Begin is independent of graphics bindings. The first subsequent draw
+    // creates a counter segment for the new active set.
+    allocator_->InvalidateCurrentPass();
   };
 
   void STDMETHODCALLTYPE
@@ -5289,15 +5489,18 @@ public:
     }
     auto query = static_cast<MTLD3D12QueryHeap *>(pHeap);
     if (!query || query->type != D3D12_QUERY_HEAP_TYPE_OCCLUSION || Index >= query->count ||
-        (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION) ||
-        !allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render) {
+        (Type != D3D12_QUERY_TYPE_OCCLUSION && Type != D3D12_QUERY_TYPE_BINARY_OCCLUSION)) {
       FailRecording(__func__, "invalid occlusion query state index=", Index);
       return;
     }
-    auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setvisibilitymode>();
-    cmd.type = WMTRenderCommandSetVisibilityMode;
-    cmd.offset = 0;
-    cmd.mode = WMTVisibilityResultModeDisabled;
+    auto active = std::find_if(active_occlusion_queries_.begin(), active_occlusion_queries_.end(),
+                              [=](const auto &entry) { return entry.heap.ptr() == query && entry.index == Index; });
+    if (active == active_occlusion_queries_.end() || active->type != Type) {
+      FailRecording(__func__, "EndQuery has no matching BeginQuery index=", Index);
+      return;
+    }
+    if (EndVisibilityQuery(*active))
+      active_occlusion_queries_.erase(active);
   };
 
   void STDMETHODCALLTYPE
@@ -5329,14 +5532,22 @@ public:
                     " count=", QueryCount);
       return;
     }
+    for (const auto &active : active_occlusion_queries_) {
+      if (active.heap.ptr() == query && active.index >= StartIndex && active.index - StartIndex < QueryCount) {
+        FailRecording(__func__, "cannot resolve an active query index=", active.index);
+        return;
+      }
+    }
     if (!PreBlit())
       return;
+    RetainResourceForCurrentEncoder(destination->buffer->current()->buffer().handle);
 
     if (Type == D3D12_QUERY_TYPE_TIMESTAMP) {
       if (query->type != D3D12_QUERY_HEAP_TYPE_TIMESTAMP || !query->timestamp_buffer) {
         FailRecording(__func__, "timestamp query heap is invalid");
         return;
       }
+      RetainResourceForCurrentEncoder(query->timestamp_buffer.handle);
       auto &cmd = allocator_->EncodeBlitCommand<wmtcmd_blit_resolvecounters>();
       cmd.type = WMTBlitCommandResolveCounters;
       cmd.sample_buffer = query->timestamp_buffer.handle;
@@ -5352,6 +5563,7 @@ public:
       FailRecording(__func__, "occlusion query heap is invalid");
       return;
     }
+    RetainResourceForCurrentEncoder(query->visibility_buffer.handle);
     auto &cmd = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
     cmd.type = WMTBlitCommandCopyFromBufferToBuffer;
     cmd.src = query->visibility_buffer;

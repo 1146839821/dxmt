@@ -449,12 +449,16 @@ bool RunDepthOnlyGraphics(
     return false;
   D3D12_QUERY_HEAP_DESC query_desc = {};
   query_desc.Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
-  query_desc.Count = 1;
+  query_desc.Count = 40000;
   ComPtr<ID3D12QueryHeap> query_heap;
   if (!CheckHR("CreateOcclusionQueryHeap", device->CreateQueryHeap(&query_desc, IID_PPV_ARGS(query_heap.put()))))
     return false;
+  ComPtr<ID3D12QueryHeap> other_query_heap;
+  query_desc.Count = 1;
+  if (!CheckHR("CreateOtherOcclusionQueryHeap", device->CreateQueryHeap(&query_desc, IID_PPV_ARGS(other_query_heap.put()))))
+    return false;
   const auto readback_heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
-  const auto readback_desc = BufferDescription(sizeof(UINT64));
+  const auto readback_desc = BufferDescription(8 * sizeof(UINT64));
   ComPtr<ID3D12Resource> readback;
   if (!CheckHR(
           "CreateQueryReadback",
@@ -468,10 +472,13 @@ bool RunDepthOnlyGraphics(
   if (!CheckHR(
           "CreateCommandList",
           device->CreateCommandList(
-              0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.get(), pso.get(), IID_PPV_ARGS(list.put())
+              0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.get(), nullptr, IID_PPV_ARGS(list.put())
           )
       ))
     return false;
+  // Begin before binding any graphics state, then count across active-set
+  // changes and a clear pass. Each one-pixel draw uses DepthFunc ALWAYS.
+  list.get()->BeginQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 1);
   list.get()->SetPipelineState(pso.get());
   list.get()->SetGraphicsRootSignature(root_signature);
   list.get()->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -485,25 +492,109 @@ bool RunDepthOnlyGraphics(
   list.get()->BeginQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
   list.get()->DrawInstanced(3, 1, 0, 0);
   list.get()->EndQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
-  list.get()->ResolveQueryData(
-      query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0, 1, readback.get(), 0
-  );
+  list.get()->ResolveQueryData(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0, 1, readback.get(), 0);
+  list.get()->DrawInstanced(3, 1, 0, 0);
+  list.get()->DrawInstanced(3, 1, 0, 0); // A second draw in the same native pass.
+  list.get()->BeginQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 2);
+  list.get()->BeginQuery(other_query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
+  list.get()->DrawInstanced(3, 1, 0, 0);
+  list.get()->BeginQuery(query_heap.get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, 3);
+  list.get()->DrawInstanced(3, 1, 0, 0);
+  list.get()->EndQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 2);
+  list.get()->DrawInstanced(3, 1, 0, 0);
+  list.get()->EndQuery(query_heap.get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, 3);
+  list.get()->EndQuery(other_query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
+  list.get()->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+  list.get()->DrawInstanced(3, 1, 0, 0);
+  list.get()->EndQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 1);
+  for (UINT i = 1; i <= 3; ++i)
+    list.get()->ResolveQueryData(query_heap.get(), i == 3 ? D3D12_QUERY_TYPE_BINARY_OCCLUSION : D3D12_QUERY_TYPE_OCCLUSION,
+                                i, 1, readback.get(), i * sizeof(UINT64));
+  list.get()->BeginQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 4);
+  list.get()->EndQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 4);
+  list.get()->ResolveQueryData(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 4, 1, readback.get(), 4 * sizeof(UINT64));
+  list.get()->BeginQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 39999);
+  list.get()->DrawInstanced(3, 1, 0, 0);
+  list.get()->EndQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 39999);
+  list.get()->ResolveQueryData(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 39999, 1, readback.get(), 5 * sizeof(UINT64));
+  list.get()->ResolveQueryData(other_query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0, 1, readback.get(), 6 * sizeof(UINT64));
+  list.get()->BeginQuery(query_heap.get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, 4);
+  list.get()->EndQuery(query_heap.get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, 4);
+  list.get()->ResolveQueryData(query_heap.get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, 4, 1, readback.get(), 7 * sizeof(UINT64));
   if (!CheckHR("Close", list.get()->Close()))
     return false;
   ID3D12CommandList *lists[] = {list.get()};
+  UINT64 baseline_samples = 0;
+  for (unsigned replay = 0; replay < 2; ++replay) {
+    queue.get()->ExecuteCommandLists(1, lists);
+    if (!WaitForQueue(device, queue.get()) || !CheckHR("Query device", device->GetDeviceRemovedReason()))
+      return false;
+    void *mapped = nullptr;
+    if (!CheckHR("MapQueryReadback", readback.get()->Map(0, nullptr, &mapped)))
+      return false;
+    const auto values = static_cast<const UINT64 *>(mapped);
+    const UINT64 samples = values[0];
+    if (replay == 0) baseline_samples = samples;
+    const UINT64 expected[] = {samples, samples * 7, samples * 2, 1, 0, samples, samples * 3, 0};
+    bool correct = samples != 0 && samples == baseline_samples;
+    for (unsigned i = 0; i < 8; ++i) {
+      if (values[i] != expected[i]) {
+        std::cerr << label << " query replay=" << replay << " slot=" << i << " got=" << values[i]
+                  << " expected=" << expected[i] << "\n";
+        correct = false;
+      }
+    }
+    readback.get()->Unmap(0, nullptr);
+    if (!correct)
+      return false;
+    std::cout << label << " occlusion late-PSO/overlap/pass-split/high-index/binary/replay passed: "
+              << samples << " baseline samples\n";
+  }
+  if (!CheckHR("Reset query allocator", allocator.get()->Reset()) ||
+      !CheckHR("Reset query list", list.get()->Reset(allocator.get(), pso.get())))
+    return false;
+  list.get()->SetGraphicsRootSignature(root_signature);
+  list.get()->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  list.get()->IASetVertexBuffers(0, 1, &vertex_view);
+  list.get()->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+  list.get()->RSSetViewports(1, &viewport);
+  list.get()->RSSetScissorRects(1, &scissor);
+  list.get()->BeginQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
+  // Cross the 64 KiB visibility chunk boundary. A clear forces a distinct
+  // render pass without changing this query's active set.
+  constexpr UINT segments = 8193;
+  for (UINT i = 0; i < segments; ++i) {
+    list.get()->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    list.get()->DrawInstanced(3, 1, 0, 0);
+  }
+  list.get()->EndQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
+  list.get()->ResolveQueryData(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0, 1, readback.get(), 0);
+  if (!CheckHR("Close chunk query", list.get()->Close()))
+    return false;
+  // Native encoder references must retain the result heap even when its COM
+  // owner disappears before translation. The GPU consumes the recorded data.
+  query_heap.put();
+  other_query_heap.put();
   queue.get()->ExecuteCommandLists(1, lists);
-  if (!WaitForQueue(device, queue.get()))
+  // Drop list-owned scratch references before GPU completion; the allocator
+  // retained by the submission must keep the original recording alive.
+  ComPtr<ID3D12CommandAllocator> next_allocator;
+  if (!CheckHR("Next query allocator", device->CreateCommandAllocator(
+          D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(next_allocator.put()))) ||
+      !CheckHR("Reset submitted query list", list.get()->Reset(next_allocator.get(), nullptr)) ||
+      !CheckHR("Close next query list", list.get()->Close()) ||
+      !WaitForQueue(device, queue.get()) || !CheckHR("Chunk query device", device->GetDeviceRemovedReason()))
     return false;
   void *mapped = nullptr;
-  if (!CheckHR("MapQueryReadback", readback.get()->Map(0, nullptr, &mapped)))
+  if (!CheckHR("Map chunk query", readback.get()->Map(0, nullptr, &mapped)))
     return false;
-  const auto samples = *static_cast<const UINT64 *>(mapped);
+  const auto accumulated = *static_cast<const UINT64 *>(mapped);
   readback.get()->Unmap(0, nullptr);
-  if (!samples) {
-    std::cerr << label << " depth-only DrawInstanced produced zero samples\n";
+  if (accumulated != baseline_samples * segments) {
+    std::cerr << label << " chunk query got=" << accumulated << " expected=" << baseline_samples * segments << "\n";
     return false;
   }
-  std::cout << label << " empty-root depth-only DrawInstanced passed: " << samples << " samples\n";
+  std::cout << label << " query 8193-pass chunk boundary/heap release/list Reset passed\n";
   return true;
 }
 
