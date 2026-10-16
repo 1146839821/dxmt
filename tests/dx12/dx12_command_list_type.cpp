@@ -5,6 +5,8 @@
 
 #include <iostream>
 #include <cstdint>
+#include <thread>
+#include <atomic>
 
 namespace {
 
@@ -25,7 +27,7 @@ template <typename T> struct Owned {
   T *operator->() const { return ptr; }
 };
 
-bool TestResetAllocatorSubmission(ID3D12Device *device) {
+bool TestResetAllocatorSubmission(ID3D12Device *device, unsigned removal_mode = 0) {
   Owned<ID3D12CommandQueue> queue;
   Owned<ID3D12CommandAllocator> allocator;
   Owned<ID3D12GraphicsCommandList> stale, fresh;
@@ -112,19 +114,180 @@ bool TestResetAllocatorSubmission(ID3D12Device *device) {
     return true;
   };
   ID3D12CommandList *stale_list = stale.ptr;
-  if (!submit("stale allocator recording rejected", &stale_list, 1, 0))
-    return false;
-  ID3D12CommandList *batch[] = {fresh.ptr, stale.ptr};
-  if (!submit("mixed stale batch rejected", batch, 2, 0))
-    return false;
   ID3D12CommandList *fresh_list = fresh.ptr;
   if (!submit("fresh allocator recording", &fresh_list, 1, 0x22222222))
     return false;
+  if (removal_mode) {
+    if (!CheckHR("Reset removed-device readback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+      return false;
+    *mapped = 0;
+    readback->Unmap(0, nullptr);
+    ID3D12CommandList *batch[] = {fresh.ptr, stale.ptr};
+    queue->ExecuteCommandLists(removal_mode == 2 ? 2 : 1, removal_mode == 2 ? batch : &stale_list);
+    const HRESULT reason = device->GetDeviceRemovedReason();
+    if (SUCCEEDED(reason) || fence->GetCompletedValue() != UINT64_MAX ||
+        queue->Signal(fence.ptr, ++fence_value) != DXGI_ERROR_DEVICE_REMOVED ||
+        !CheckHR("Map dropped invalid batch", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped)))) {
+      std::cerr << "invalid allocator submission did not remove device and complete fence\n";
+      return false;
+    }
+    const bool dropped = *mapped == 0;
+    readback->Unmap(0, nullptr);
+    Owned<ID3D12Device5> device5;
+    if (!CheckHR("Removed device interface", device->QueryInterface(IID_PPV_ARGS(&device5.ptr))))
+      return false;
+    device5->RemoveDevice();
+    if (!dropped || device->GetDeviceRemovedReason() != reason) {
+      std::cerr << "invalid batch executed or removal reason was overwritten\n";
+      return false;
+    }
+    std::cout << (removal_mode == 2 ? "mixed" : "single") << " stale allocator batch removed device; readback remains zero\n";
+    return true;
+  }
   if (!CheckHR("Reset test rerecord stale", stale->Reset(allocator.ptr, nullptr)))
     return false;
   stale->CopyBufferRegion(readback.ptr, 0, source.ptr, 0, sizeof(uint32_t));
   return CheckHR("Reset test close rerecorded", stale->Close()) &&
          submit("rerecorded command list", &stale_list, 1, 0x11111111);
+}
+
+bool TestDeviceRemovalWaits() {
+  Owned<ID3D12Device5> device;
+  Owned<ID3D12CommandQueue> queue;
+  Owned<ID3D12Fence> fence, other, created_after;
+  if (!CheckHR("Removal device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.ptr))))
+    return false;
+  D3D12_COMMAND_QUEUE_DESC desc = {};
+  if (!CheckHR("Removal queue", device->CreateCommandQueue(&desc, IID_PPV_ARGS(&queue.ptr))) ||
+      !CheckHR("Removal fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.ptr))) ||
+      !CheckHR("Removal other fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&other.ptr))))
+    return false;
+  struct Events {
+    HANDLE values[7] = {};
+    ~Events() { for (auto event : values) if (event) CloseHandle(event); }
+  } events;
+  for (auto &event : events.values) {
+    event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!event)
+      return false;
+  }
+  ID3D12Fence *fences[] = {fence.ptr, other.ptr};
+  UINT64 values[] = {UINT64_MAX, UINT64_MAX};
+  if (!CheckHR("Pending removal event", fence->SetEventOnCompletion(UINT64_MAX, events.values[0])) ||
+      !CheckHR("Pending removal ALL", device->SetEventOnMultipleFenceCompletion(
+          fences, values, 2, D3D12_MULTIPLE_FENCE_WAIT_FLAG_NONE, events.values[1])) ||
+      !CheckHR("Pending removal ANY", device->SetEventOnMultipleFenceCompletion(
+          fences, values, 2, D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY, events.values[2])) ||
+      !CheckHR("Pending removal GPU wait", queue->Wait(fence.ptr, 1)))
+    return false;
+  // The wait occupies the first of 32 submission slots; fill the other 31.
+  for (UINT64 value = 1; value < 32; value++)
+    if (!CheckHR("Fill removal queue", queue->Signal(other.ptr, value))) {
+      fence->Signal(UINT64_MAX);
+      return false;
+    }
+  HRESULT cpu_result = E_FAIL, producer_result = E_FAIL;
+  std::thread cpu_wait([&] {
+    cpu_result = fence->SetEventOnCompletion(UINT64_MAX, nullptr);
+    SetEvent(events.values[3]);
+  });
+  std::thread producer([&] {
+    SetEvent(events.values[4]);
+    producer_result = queue->Signal(other.ptr, 32);
+    SetEvent(events.values[5]);
+  });
+  bool ok = WaitForSingleObject(events.values[4], 5000) == WAIT_OBJECT_0 &&
+            WaitForSingleObject(events.values[5], 0) == WAIT_TIMEOUT;
+  device->RemoveDevice();
+  const HRESULT reason = device->GetDeviceRemovedReason();
+  ok &= FAILED(reason) && fence->GetCompletedValue() == UINT64_MAX && other->GetCompletedValue() == UINT64_MAX;
+  for (unsigned i = 0; i < 4; i++)
+    ok &= WaitForSingleObject(events.values[i], 5000) == WAIT_OBJECT_0;
+  ok &= WaitForSingleObject(events.values[5], 5000) == WAIT_OBJECT_0;
+  if (FAILED(reason)) {
+    ok &= queue->Signal(other.ptr, 33) == DXGI_ERROR_DEVICE_REMOVED;
+    ok &= queue->Wait(fence.ptr, 1) == DXGI_ERROR_DEVICE_REMOVED;
+    ok &= fence->Signal(0) == DXGI_ERROR_DEVICE_REMOVED && fence->GetCompletedValue() == UINT64_MAX;
+    ok &= CheckHR("New removal event", fence->SetEventOnCompletion(UINT64_MAX, events.values[0]));
+    ok &= WaitForSingleObject(events.values[0], 0) == WAIT_OBJECT_0;
+    ok &= CheckHR("New removal null wait", fence->SetEventOnCompletion(UINT64_MAX, nullptr));
+    ok &= CheckHR("New removal ALL", device->SetEventOnMultipleFenceCompletion(
+        fences, values, 2, D3D12_MULTIPLE_FENCE_WAIT_FLAG_NONE, events.values[1]));
+    ok &= WaitForSingleObject(events.values[1], 0) == WAIT_OBJECT_0;
+    ok &= CheckHR("Fence created after removal", device->CreateFence(
+        0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&created_after.ptr)));
+    ok &= created_after.ptr && created_after->GetCompletedValue() == UINT64_MAX;
+    device->RemoveDevice();
+    ok &= device->GetDeviceRemovedReason() == reason;
+  }
+  // On the old runtime this recovery releases all dependencies before joining.
+  fence->Signal(UINT64_MAX);
+  other->Signal(UINT64_MAX);
+  cpu_wait.join();
+  producer.join();
+  ok &= cpu_result == S_OK && producer_result == DXGI_ERROR_DEVICE_REMOVED;
+  auto released_queue = queue.ptr;
+  queue.ptr = nullptr;
+  std::thread destroy_queue([&] {
+    released_queue->Release();
+    SetEvent(events.values[6]);
+  });
+  ok &= WaitForSingleObject(events.values[6], 5000) == WAIT_OBJECT_0;
+  destroy_queue.join();
+  if (!ok)
+    std::cerr << "device removal failed to release pending/new CPU/GPU waits or submission backpressure\n";
+  else
+    std::cout << "D3D12 removal event/null/ALL/ANY/GPU waits, backpressure and queue destruction passed\n";
+  return ok;
+}
+
+bool TestConcurrentRemovalListeners() {
+  Owned<ID3D12Device5> device;
+  if (!CheckHR("Concurrent removal device", D3D12CreateDevice(
+          nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.ptr))))
+    return false;
+  std::atomic<unsigned> ready{0};
+  std::atomic<bool> start{false}, success{true};
+  std::thread workers[4];
+  for (auto &worker : workers)
+    worker = std::thread([&] {
+      Owned<ID3D12Fence> initial;
+      if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&initial.ptr))))
+        success.store(false);
+      ready.fetch_add(1);
+      while (!start.load())
+        std::this_thread::yield();
+      // These states already exist when removal races their last COM release.
+      if (initial.ptr) {
+        initial.ptr->Release();
+        initial.ptr = nullptr;
+      }
+      for (unsigned i = 0; i < 64; i++) {
+        Owned<ID3D12Fence> fence;
+        HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!event || FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.ptr)))) {
+          if (event) CloseHandle(event);
+          success.store(false);
+          return;
+        }
+        const HRESULT registration = fence->SetEventOnCompletion(UINT64_MAX, event);
+        const HRESULT signal = fence->Signal(UINT64_MAX);
+        if (FAILED(registration) || (FAILED(signal) && signal != DXGI_ERROR_DEVICE_REMOVED) ||
+            WaitForSingleObject(event, 5000) != WAIT_OBJECT_0 || fence->GetCompletedValue() != UINT64_MAX)
+          success.store(false);
+        CloseHandle(event);
+      }
+    });
+  while (ready.load() != 4)
+    std::this_thread::yield();
+  start.store(true);
+  device->RemoveDevice();
+  for (auto &worker : workers)
+    worker.join();
+  if (!success.load() || SUCCEEDED(device->GetDeviceRemovedReason()))
+    return false;
+  std::cout << "D3D12 concurrent fence registration/destruction around removal passed\n";
+  return true;
 }
 
 struct ExecuteContext {
@@ -249,6 +412,20 @@ int main() {
     return 1;
 
   if (!TestResetAllocatorSubmission(device)) {
+    device->Release();
+    return 1;
+  }
+
+  for (unsigned mode = 1; mode <= 2; mode++) {
+    Owned<ID3D12Device> isolated;
+    if (!CheckHR("Isolated removal device", D3D12CreateDevice(
+            nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&isolated.ptr))) ||
+        !TestResetAllocatorSubmission(isolated.ptr, mode)) {
+      device->Release();
+      return 1;
+    }
+  }
+  if (!TestDeviceRemovalWaits() || !TestConcurrentRemovalListeners()) {
     device->Release();
     return 1;
   }

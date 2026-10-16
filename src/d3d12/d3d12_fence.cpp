@@ -26,19 +26,33 @@ namespace dxmt {
 
 class MTLD3D12FenceImpl : public MTLD3D12DeviceChild<MTLD3D12Fence> {
   D3D12_FENCE_FLAGS flags_;
-  dxmt::mutex mutex_;
-  UINT64 completed_value_ = 0;
   struct PendingWait {
     UINT64 value;
     std::shared_ptr<D3D12FenceWait> wait;
   };
-  std::vector<PendingWait> waits_;
 
   static void CompleteWait(D3D12FenceWait &wait) {
     wait.event.signalValue(1);
     if (wait.handle)
       SetEvent(wait.handle);
   }
+
+  struct State : D3D12DeviceRemovalListener {
+    dxmt::mutex mutex;
+    UINT64 completed_value = 0;
+    bool removed = false;
+    std::vector<PendingWait> waits;
+
+    void NotifyDeviceRemoved() final {
+      std::lock_guard lock(mutex);
+      removed = true;
+      completed_value = UINT64_MAX;
+      for (const auto &pending : waits)
+        CompleteWait(*pending.wait);
+      waits.clear();
+    }
+  };
+  std::shared_ptr<State> state_;
 
 public:
   MTLD3D12FenceImpl(MTLD3D12Device *pDevice, D3D12_FENCE_FLAGS flags) :
@@ -47,8 +61,13 @@ public:
 
   HRESULT
   Initialize(UINT64 InitialValue) {
-    completed_value_ = InitialValue;
-    return S_OK;
+    try {
+      state_ = std::make_shared<State>();
+      state_->completed_value = InitialValue;
+      return device_->RegisterRemovalListener(state_);
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
   }
 
   HRESULT
@@ -74,8 +93,8 @@ public:
 
   UINT64 STDMETHODCALLTYPE
   GetCompletedValue() {
-    std::lock_guard lock(mutex_);
-    return completed_value_;
+    std::lock_guard lock(state_->mutex);
+    return FAILED(device_->GetDeviceRemovedReason()) ? UINT64_MAX : state_->completed_value;
   }
 
   HRESULT STDMETHODCALLTYPE
@@ -91,14 +110,16 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   Signal(UINT64 Value) {
-    std::lock_guard lock(mutex_);
-    completed_value_ = Value;
-    waits_.erase(std::remove_if(waits_.begin(), waits_.end(), [&](const PendingWait &pending) {
+    std::lock_guard lock(state_->mutex);
+    if (state_->removed || FAILED(device_->GetDeviceRemovedReason()))
+      return DXGI_ERROR_DEVICE_REMOVED;
+    state_->completed_value = Value;
+    state_->waits.erase(std::remove_if(state_->waits.begin(), state_->waits.end(), [&](const PendingWait &pending) {
       if (pending.value > Value)
         return false;
       CompleteWait(*pending.wait);
       return true;
-    }), waits_.end());
+    }), state_->waits.end());
     return S_OK;
   }
 
@@ -112,11 +133,11 @@ public:
       if (event && !DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &pending->handle,
                                     0, FALSE, DUPLICATE_SAME_ACCESS))
         return HRESULT_FROM_WIN32(GetLastError());
-      std::lock_guard lock(mutex_);
-      if (completed_value_ >= value)
+      std::lock_guard lock(state_->mutex);
+      if (state_->removed || FAILED(device_->GetDeviceRemovedReason()) || state_->completed_value >= value)
         CompleteWait(*pending);
       else
-        waits_.push_back({value, pending});
+        state_->waits.push_back({value, pending});
       wait = std::move(pending);
       return S_OK;
     } catch (const std::bad_alloc &) {
@@ -125,10 +146,10 @@ public:
   }
 
   void CancelWait(const std::shared_ptr<D3D12FenceWait> &wait) final {
-    std::lock_guard lock(mutex_);
-    waits_.erase(std::remove_if(waits_.begin(), waits_.end(), [&](const PendingWait &pending) {
+    std::lock_guard lock(state_->mutex);
+    state_->waits.erase(std::remove_if(state_->waits.begin(), state_->waits.end(), [&](const PendingWait &pending) {
       return pending.wait == wait;
-    }), waits_.end());
+    }), state_->waits.end());
   }
 
   D3D12_FENCE_FLAGS STDMETHODCALLTYPE

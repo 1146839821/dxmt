@@ -71,9 +71,21 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   };
 
   dxmt::mutex commit_mutex_;
-  dxmt::mutex submission_mutex_;
-  dxmt::condition_variable submission_condition_;
-  dxmt::condition_variable submission_space_condition_;
+  struct SubmissionState : D3D12DeviceRemovalListener {
+    dxmt::mutex mutex;
+    dxmt::condition_variable ready;
+    dxmt::condition_variable space;
+    WMT::Reference<WMT::SharedEvent> sparse_event;
+
+    void NotifyDeviceRemoved() final {
+      std::lock_guard lock(mutex);
+      if (sparse_event)
+        sparse_event.signalValue(UINT64_MAX);
+      ready.notify_all();
+      space.notify_all();
+    }
+  };
+  std::shared_ptr<SubmissionState> submission_state_ = std::make_shared<SubmissionState>();
   std::array<Submission, kCommandQueueSize> submissions_;
   size_t submission_head_ = 0;
   size_t submission_tail_ = 0;
@@ -380,8 +392,8 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       Submission submission;
       size_t submission_slot = 0;
       {
-        std::unique_lock<dxmt::mutex> lock(submission_mutex_);
-        submission_condition_.wait(lock, [this] { return stopping_ || submission_count_ != 0; });
+        std::unique_lock<dxmt::mutex> lock(submission_state_->mutex);
+        submission_state_->ready.wait(lock, [this] { return stopping_ || submission_count_ != 0; });
         if (!submission_count_) {
           if (stopping_)
             return;
@@ -395,6 +407,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       submission.command_buffer.waitUntilCompleted();
       if (submission.command_buffer.status() == WMTCommandBufferStatusError) {
         auto error = submission.command_buffer.error();
+        device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
         ERR("D3D12 command buffer submission ", submission.serial, " failed: ",
             error ? error.description().getUTF8String() : "unknown error", DescribeSubmission(submission));
         if (encoder_execution_status_) {
@@ -423,28 +436,28 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       completed_submission_serial_ = submission.serial;
 
       {
-        std::lock_guard<dxmt::mutex> lock(submission_mutex_);
+        std::lock_guard<dxmt::mutex> lock(submission_state_->mutex);
         assert(submission_slot == submission_head_);
         submission_head_ = (submission_head_ + 1) % kCommandQueueSize;
         submission_count_--;
       }
-      submission_space_condition_.notify_all();
+      submission_state_->space.notify_all();
     }
   }
 
   bool
   WaitForSubmissionSpaceLocked() {
-    std::unique_lock<dxmt::mutex> submission_lock(submission_mutex_);
-    submission_space_condition_.wait(submission_lock, [this] {
-      return stopping_ || submission_count_ < kCommandQueueSize;
+    std::unique_lock<dxmt::mutex> submission_lock(submission_state_->mutex);
+    submission_state_->space.wait(submission_lock, [this] {
+      return stopping_ || FAILED(device_->GetDeviceRemovedReason()) || submission_count_ < kCommandQueueSize;
     });
-    return !stopping_;
+    return !stopping_ && SUCCEEDED(device_->GetDeviceRemovedReason());
   }
 
   bool
   CommitSubmissionLocked(Submission &submission) {
-    std::unique_lock<dxmt::mutex> submission_lock(submission_mutex_);
-    if (stopping_ || submission_count_ >= kCommandQueueSize)
+    std::unique_lock<dxmt::mutex> submission_lock(submission_state_->mutex);
+    if (stopping_ || FAILED(device_->GetDeviceRemovedReason()) || submission_count_ >= kCommandQueueSize)
       return false;
     assert(submission_count_ < kCommandQueueSize);
 
@@ -454,7 +467,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     submission_tail_ = (submission_tail_ + 1) % kCommandQueueSize;
     submission_count_++;
     submission_lock.unlock();
-    submission_condition_.notify_one();
+    submission_state_->ready.notify_one();
     return true;
   }
 
@@ -495,11 +508,11 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   void
   StopCompletionThread() {
     {
-      std::lock_guard<dxmt::mutex> lock(submission_mutex_);
+      std::lock_guard<dxmt::mutex> lock(submission_state_->mutex);
       stopping_ = true;
     }
-    submission_condition_.notify_all();
-    submission_space_condition_.notify_all();
+    submission_state_->ready.notify_all();
+    submission_state_->space.notify_all();
   }
 
   bool
@@ -582,7 +595,8 @@ public:
     if (!timestamp_dummy_buffer_)
       return E_OUTOFMEMORY;
 
-    return S_OK;
+    submission_state_->sparse_event = sparse_event_;
+    return device_->RegisterRemovalListener(submission_state_);
   }
 
   HRESULT
@@ -680,7 +694,7 @@ public:
 
   void STDMETHODCALLTYPE
   ExecuteCommandLists(UINT Count, ID3D12CommandList *const *ppCommandLists) {
-    if (!Count)
+    if (!Count || FAILED(device_->GetDeviceRemovedReason()))
       return;
     if (!ppCommandLists) {
       WARN("D3D12 ExecuteCommandLists received a null command list array");
@@ -708,6 +722,7 @@ public:
       auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(command_list);
       if (!pCommandList->IsAllocatorRecordingValid()) {
         WARN("D3D12 ExecuteCommandLists received a command list whose allocator was reset");
+        device_->MarkDeviceRemoved(DXGI_ERROR_INVALID_CALL);
         return;
       }
       if (pCommandList->encoder_count == std::numeric_limits<size_t>::max()) {
@@ -1433,7 +1448,7 @@ public:
       return E_INVALIDARG;
     std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
     if (!WaitForSubmissionSpaceLocked())
-      return E_FAIL;
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
 
     auto pool = WMT::MakeAutoreleasePool();
     auto cmdbuf = NewCommandBuffer();
@@ -1444,7 +1459,7 @@ public:
     submission.signal_fence = static_cast<MTLD3D12Fence *>(pFence);
     submission.signal_value = Value;
     if (!CommitSubmissionLocked(submission))
-      return E_FAIL;
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
     return S_OK;
   };
 
@@ -1454,7 +1469,7 @@ public:
       return E_INVALIDARG;
     std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
     if (!WaitForSubmissionSpaceLocked())
-      return E_FAIL;
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
 
     auto pool = WMT::MakeAutoreleasePool();
     auto cmdbuf = NewCommandBuffer();
@@ -1469,7 +1484,7 @@ public:
     submission.command_buffer = cmdbuf;
     if (!CommitSubmissionLocked(submission)) {
       submission.wait_fence->CancelWait(submission.fence_wait);
-      return E_FAIL;
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
     }
     return S_OK;
   };
@@ -1489,7 +1504,7 @@ public:
 
     std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
     if (!WaitForSubmissionSpaceLocked())
-      return E_FAIL;
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
 
     auto pool = WMT::MakeAutoreleasePool();
     auto sample_buffer = device_->GetMTLDevice().newCounterSampleBuffer(1, true);
@@ -1526,7 +1541,7 @@ public:
     Submission submission;
     submission.command_buffer = cmdbuf;
     if (!CommitSubmissionLocked(submission))
-      return E_FAIL;
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
 
     commit_lock.unlock();
     cmdbuf.waitUntilCompleted();
@@ -1565,7 +1580,7 @@ public:
     static uint32_t trace_present_count = 0;
     std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
     if (!WaitForSubmissionSpaceLocked())
-      return E_FAIL;
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
 
     auto pool = WMT::MakeAutoreleasePool();
     auto cmdbuf = NewCommandBuffer();
@@ -1596,7 +1611,7 @@ public:
     submission.command_buffer = cmdbuf;
     submission.latency_waitable = hLantecyWaitable;
     if (!CommitSubmissionLocked(submission))
-      return E_FAIL;
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
 
     return S_OK;
   }
@@ -1604,11 +1619,15 @@ public:
 
 HRESULT
 CreateCommandQueue(MTLD3D12Device *pDevice, const D3D12_COMMAND_QUEUE_DESC *pDesc, REFIID riid, void **ppCommandQueue) {
-  auto command_queue = Com(new MTLD3D12CommandQueueImpl(pDevice));
-  HRESULT hr = command_queue->Initialize(pDesc);
-  if (FAILED(hr))
-    return hr;
-  return command_queue->QueryInterface(riid, ppCommandQueue);
+  try {
+    auto command_queue = Com(new MTLD3D12CommandQueueImpl(pDevice));
+    HRESULT hr = command_queue->Initialize(pDesc);
+    if (FAILED(hr))
+      return hr;
+    return command_queue->QueryInterface(riid, ppCommandQueue);
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
+  }
 };
 
 } // namespace dxmt

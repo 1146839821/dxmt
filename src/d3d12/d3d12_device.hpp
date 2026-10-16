@@ -321,6 +321,12 @@ struct D3D12FenceWait {
   }
 };
 
+// Notification states outlive child COM objects during a concurrent removal.
+struct D3D12DeviceRemovalListener {
+  virtual ~D3D12DeviceRemovalListener() = default;
+  virtual void NotifyDeviceRemoved() = 0;
+};
+
 class MTLD3D12Fence : public ID3D12Fence1 {
 public:
   virtual HRESULT RegisterWait(UINT64 value, HANDLE event, std::shared_ptr<D3D12FenceWait> &wait) = 0;
@@ -487,6 +493,9 @@ public:
 
 class MTLD3D12Device : public ID3D12Device10 {
 public:
+  virtual HRESULT RegisterRemovalListener(const std::shared_ptr<D3D12DeviceRemovalListener> &listener) = 0;
+  virtual void MarkDeviceRemoved(HRESULT reason) = 0;
+
   virtual WMT::Device GetMTLDevice() = 0;
 
   virtual D3D_FEATURE_LEVEL GetFeatureLevel() = 0;

@@ -29,6 +29,7 @@
 #include "dxmt_format.hpp"
 #include "log/log.hpp"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <map>
 #include <thread>
@@ -307,6 +308,9 @@ class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
 
   Com<IMTLDXGIAdapter> adapter_;
   D3D_FEATURE_LEVEL feature_level_;
+  std::atomic<HRESULT> removed_reason_{S_OK};
+  dxmt::mutex removal_mutex_;
+  std::vector<std::weak_ptr<D3D12DeviceRemovalListener>> removal_listeners_;
 
   bool advertise_numa_ = false;
 
@@ -1641,8 +1645,37 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   GetDeviceRemovedReason() {
-    return S_OK;
+    return removed_reason_.load(std::memory_order_acquire);
   };
+
+  HRESULT RegisterRemovalListener(const std::shared_ptr<D3D12DeviceRemovalListener> &listener) final {
+    std::lock_guard lock(removal_mutex_);
+    if (FAILED(GetDeviceRemovedReason())) {
+      listener->NotifyDeviceRemoved();
+      return S_OK;
+    }
+    try {
+      removal_listeners_.erase(std::remove_if(removal_listeners_.begin(), removal_listeners_.end(),
+          [](const auto &entry) { return entry.expired(); }), removal_listeners_.end());
+      removal_listeners_.push_back(listener);
+      return S_OK;
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
+  }
+
+  void MarkDeviceRemoved(HRESULT reason) final {
+    if (SUCCEEDED(reason))
+      return;
+    std::lock_guard lock(removal_mutex_);
+    if (FAILED(GetDeviceRemovedReason()))
+      return;
+    removed_reason_.store(reason, std::memory_order_release);
+    for (const auto &entry : removal_listeners_)
+      if (auto listener = entry.lock())
+        listener->NotifyDeviceRemoved();
+    removal_listeners_.clear();
+  }
 
   void STDMETHODCALLTYPE GetCopyableFootprints(
       const D3D12_RESOURCE_DESC *pDesc, UINT FirstSubresource, UINT SubresourceCount, UINT64 BaseOffset,
@@ -2070,7 +2103,9 @@ public:
     return E_NOTIMPL;
   }
 
-  void STDMETHODCALLTYPE RemoveDevice() {}
+  void STDMETHODCALLTYPE RemoveDevice() {
+    MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+  }
 
   HRESULT STDMETHODCALLTYPE
   EnumerateMetaCommands(UINT *pNumMetaCommands, D3D12_META_COMMAND_DESC *pDescs) {
