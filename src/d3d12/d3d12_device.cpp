@@ -1885,48 +1885,59 @@ public:
       return E_INVALIDARG;
 
     const bool wait_any = Flags == D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY;
-    bool completed = !wait_any;
-    std::vector<Com<MTLD3D12Fence>> fences;
-    std::vector<UINT64> values;
-    fences.reserve(FenceCount);
-    values.reserve(FenceCount);
-
-    for (UINT i = 0; i < FenceCount; i++) {
+    for (UINT i = 0; i < FenceCount; i++)
       if (!IsSameDevice(this, pFences[i]))
         return E_INVALIDARG;
-      auto fence = static_cast<MTLD3D12Fence *>(pFences[i]);
-      const bool fence_completed = fence->GetCompletedValue() >= pValues[i];
-      if (wait_any)
-        completed |= fence_completed;
-      else
-        completed &= fence_completed;
 
-      fences.emplace_back(fence);
-      values.push_back(pValues[i]);
-    }
+    struct WaitSet {
+      std::vector<Com<MTLD3D12Fence>> fences;
+      std::vector<std::shared_ptr<D3D12FenceWait>> waits;
+      HANDLE event = nullptr;
 
-    if (completed) {
-      SetEvent(hEvent);
-      return S_OK;
-    }
+      ~WaitSet() {
+        for (size_t i = 0; i < waits.size(); i++)
+          fences[i]->CancelWait(waits[i]);
+        if (event)
+          CloseHandle(event);
+      }
+
+      bool Completed(bool any) {
+        bool complete = !any;
+        for (const auto &wait : waits) {
+          const bool reached = wait->event.signaledValue() != 0;
+          if (any)
+            complete |= reached;
+          else
+            complete &= reached;
+        }
+        return complete;
+      }
+    };
 
     try {
-      std::thread([fences = std::move(fences), values = std::move(values), wait_any, hEvent]() mutable {
-        for (;;) {
-          bool complete = !wait_any;
-          for (size_t i = 0; i < fences.size(); i++) {
-            const bool fence_completed = fences[i]->GetCompletedValue() >= values[i];
-            if (wait_any)
-              complete |= fence_completed;
-            else
-              complete &= fence_completed;
-          }
-          if (complete) {
-            SetEvent(hEvent);
-            return;
-          }
+      auto pending = std::make_shared<WaitSet>();
+      pending->fences.reserve(FenceCount);
+      pending->waits.reserve(FenceCount);
+      if (!DuplicateHandle(GetCurrentProcess(), hEvent, GetCurrentProcess(), &pending->event,
+                           0, FALSE, DUPLICATE_SAME_ACCESS))
+        return HRESULT_FROM_WIN32(GetLastError());
+      for (UINT i = 0; i < FenceCount; i++) {
+        pending->fences.emplace_back(static_cast<MTLD3D12Fence *>(pFences[i]));
+        std::shared_ptr<D3D12FenceWait> wait;
+        HRESULT hr = pending->fences.back()->RegisterWait(pValues[i], nullptr, wait);
+        if (FAILED(hr))
+          return hr;
+        pending->waits.push_back(std::move(wait));
+      }
+      if (pending->Completed(wait_any)) {
+        SetEvent(pending->event);
+        return S_OK;
+      }
+      // Poll the latched registrations, never the rewound logical values.
+      std::thread([pending = std::move(pending), wait_any] {
+        while (!pending->Completed(wait_any))
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        SetEvent(pending->event);
       }).detach();
     } catch (...) {
       return E_OUTOFMEMORY;

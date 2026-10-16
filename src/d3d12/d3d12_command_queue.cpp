@@ -63,6 +63,10 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     std::vector<Com<MTLD3D12CommandAllocator, false>> allocators;
     std::unordered_map<EncoderData *, std::vector<SubmissionResourceUse>> descriptor_resource_uses;
     std::vector<WMT::Reference<WMT::Resource>> descriptor_resource_refs;
+    Com<MTLD3D12Fence> signal_fence;
+    UINT64 signal_value = 0;
+    Com<MTLD3D12Fence> wait_fence;
+    std::shared_ptr<D3D12FenceWait> fence_wait;
     HANDLE latency_waitable = nullptr;
   };
 
@@ -399,6 +403,13 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
                 log.description().getUTF8String());
         }
       }
+
+      // Publish before retiring the next submission on this queue. A wait on
+      // another queue latches this value even if a later signal rewinds it.
+      if (submission.signal_fence && submission.command_buffer.status() == WMTCommandBufferStatusCompleted)
+        submission.signal_fence->Signal(submission.signal_value);
+      if (submission.wait_fence)
+        submission.wait_fence->CancelWait(submission.fence_wait);
 
       for (auto &allocator : submission.allocators)
         allocator->MarkSubmissionCompleted();
@@ -1428,11 +1439,10 @@ public:
     auto cmdbuf = NewCommandBuffer();
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
-    const HRESULT signal_hr = static_cast<MTLD3D12Fence *>(pFence)->EncodeSignal(cmdbuf, Value);
-    if (FAILED(signal_hr))
-      return signal_hr;
     Submission submission;
     submission.command_buffer = cmdbuf;
+    submission.signal_fence = static_cast<MTLD3D12Fence *>(pFence);
+    submission.signal_value = Value;
     if (!CommitSubmissionLocked(submission))
       return E_FAIL;
     return S_OK;
@@ -1450,13 +1460,17 @@ public:
     auto cmdbuf = NewCommandBuffer();
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
-    const HRESULT wait_hr = static_cast<MTLD3D12Fence *>(pFence)->EncodeWait(cmdbuf, Value);
+    Submission submission;
+    submission.wait_fence = static_cast<MTLD3D12Fence *>(pFence);
+    const HRESULT wait_hr = submission.wait_fence->RegisterWait(Value, nullptr, submission.fence_wait);
     if (FAILED(wait_hr))
       return wait_hr;
-    Submission submission;
+    cmdbuf.encodeWaitForEvent(submission.fence_wait->event, 1);
     submission.command_buffer = cmdbuf;
-    if (!CommitSubmissionLocked(submission))
+    if (!CommitSubmissionLocked(submission)) {
+      submission.wait_fence->CancelWait(submission.fence_wait);
       return E_FAIL;
+    }
     return S_OK;
   };
 

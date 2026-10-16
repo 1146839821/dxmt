@@ -35,6 +35,7 @@
 #include "dxmt_texture.hpp"
 #include <cstdint>
 #include <mutex>
+#include <memory>
 #include "log/log.hpp"
 #include <vector>
 
@@ -305,10 +306,25 @@ struct EnhancedSplitBarrierState {
   D3D12_RESOURCE_STATES after_state = D3D12_RESOURCE_STATE_COMMON;
 };
 
+// A wait latches once, independently of subsequent changes to the logical fence.
+struct D3D12FenceWait {
+  WMT::Reference<WMT::SharedEvent> event;
+  HANDLE handle = nullptr;
+
+  D3D12FenceWait() = default;
+  D3D12FenceWait(const D3D12FenceWait &) = delete;
+  D3D12FenceWait &operator=(const D3D12FenceWait &) = delete;
+
+  ~D3D12FenceWait() {
+    if (handle)
+      CloseHandle(handle);
+  }
+};
+
 class MTLD3D12Fence : public ID3D12Fence1 {
 public:
-  virtual HRESULT EncodeSignal(WMT::CommandBuffer command_buffer, UINT64 value) = 0;
-  virtual HRESULT EncodeWait(WMT::CommandBuffer command_buffer, UINT64 value) = 0;
+  virtual HRESULT RegisterWait(UINT64 value, HANDLE event, std::shared_ptr<D3D12FenceWait> &wait) = 0;
+  virtual void CancelWait(const std::shared_ptr<D3D12FenceWait> &wait) = 0;
 };
 
 class MTLD3D12RootSignature : public ID3D12RootSignature {
@@ -502,7 +518,6 @@ public:
 
   virtual FormatCapability GetMTLPixelFormatCapability(WMTPixelFormat Format) = 0;
 
-  EventListener event_listener;
 };
 
 bool ConvertBarrierLayout(

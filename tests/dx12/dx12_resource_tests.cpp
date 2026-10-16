@@ -30,6 +30,130 @@ UINT64 AlignUp(UINT64 value, UINT64 alignment) {
   return (value + alignment - 1) / alignment * alignment;
 }
 
+bool CheckFenceRewinds(ID3D12Device1 *device, ID3D12CommandQueue *queue) {
+  struct Fixture {
+    ID3D12Fence *fences[4] = {};
+    HANDLE events[5] = {};
+    ID3D12CommandQueue *second = nullptr;
+    ~Fixture() {
+      // Release every dependency even when a preceding assertion fails.
+      for (auto fence : fences)
+        if (fence)
+          fence->Signal(UINT64_MAX);
+      if (second)
+        second->Release();
+      for (auto fence : fences)
+        if (fence)
+          fence->Release();
+      for (auto event : events)
+        if (event)
+          CloseHandle(event);
+    }
+  } fixture;
+  for (auto &fence : fixture.fences)
+    if (!CheckHR("CreateRewindFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
+      return false;
+  for (auto &event : fixture.events) {
+    event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!event)
+      return false;
+  }
+  D3D12_COMMAND_QUEUE_DESC desc = {};
+  if (!CheckHR("CreateRewindQueue", device->CreateCommandQueue(&desc, IID_PPV_ARGS(&fixture.second))))
+    return false;
+  auto target = fixture.fences[0];
+  auto gate = fixture.fences[1];
+  auto drain = fixture.fences[2];
+  auto other = fixture.fences[3];
+  HANDLE reached = fixture.events[0], done = fixture.events[1], multiple = fixture.events[2];
+
+  if (!CheckHR("InitialRewindValue", target->Signal(5)) ||
+      !CheckHR("RegisterBeforeRewind", target->SetEventOnCompletion(10, reached)) ||
+      !CheckHR("CPURewind", target->Signal(1)) || !CheckHR("CPUReach", target->Signal(10)) ||
+      WaitForSingleObject(reached, 5000) != WAIT_OBJECT_0 || target->GetCompletedValue() != 10)
+    return false;
+  if (!CheckHR("RegisterBeforePulse", target->SetEventOnCompletion(20, reached)) ||
+      !CheckHR("PulseHigh", target->Signal(20)) || !CheckHR("PulseLow", target->Signal(1)) ||
+      WaitForSingleObject(reached, 5000) != WAIT_OBJECT_0 || target->GetCompletedValue() != 1 ||
+      !CheckHR("RegisterAfterPulse", target->SetEventOnCompletion(20, reached)) ||
+      WaitForSingleObject(reached, 0) != WAIT_TIMEOUT || !CheckHR("ReachAfterPulse", target->Signal(20)) ||
+      WaitForSingleObject(reached, 5000) != WAIT_OBJECT_0)
+    return false;
+
+  // The queued signal must survive a CPU rewind before that signal executes.
+  if (!CheckHR("RewindQueueGate", queue->Wait(gate, 1)) ||
+      !CheckHR("QueueReach", queue->Signal(target, 30)) ||
+      !CheckHR("RewindBeforeGPUCompletion", target->Signal(1)) ||
+      !CheckHR("RegisterAfterQueueSignal", target->SetEventOnCompletion(30, reached)) ||
+      !CheckHR("QueueRewindDrain", queue->Signal(drain, 1)) ||
+      !CheckHR("RegisterRewindDrain", drain->SetEventOnCompletion(1, done)) ||
+      !CheckHR("OpenRewindGate", gate->Signal(1)) ||
+      WaitForSingleObject(done, 5000) != WAIT_OBJECT_0 ||
+      WaitForSingleObject(reached, 5000) != WAIT_OBJECT_0 || target->GetCompletedValue() != 30)
+    return false;
+
+  // Each component of WAIT_ALL remains satisfied after a short high pulse.
+  ID3D12Fence *fences[] = {target, other};
+  UINT64 values[] = {40, 40};
+  if (!CheckHR("RegisterRewindAll", device->SetEventOnMultipleFenceCompletion(
+          fences, values, 2, D3D12_MULTIPLE_FENCE_WAIT_FLAG_NONE, multiple)) ||
+      !CheckHR("AllPulseHigh", target->Signal(40)) || !CheckHR("AllPulseLow", target->Signal(1)) ||
+      WaitForSingleObject(multiple, 0) != WAIT_TIMEOUT || !CheckHR("AllOtherReach", other->Signal(40)) ||
+      WaitForSingleObject(multiple, 5000) != WAIT_OBJECT_0)
+    return false;
+  UINT64 any_values[] = {50, 50};
+  if (!CheckHR("RegisterRewindAny", device->SetEventOnMultipleFenceCompletion(
+          fences, any_values, 2, D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY, multiple)) ||
+      !CheckHR("AnyPulseHigh", target->Signal(50)) || !CheckHR("AnyPulseLow", target->Signal(1)) ||
+      WaitForSingleObject(multiple, 5000) != WAIT_OBJECT_0)
+    return false;
+
+  // Cross-queue waits latch the high value before the dependent queue rewinds.
+  if (!CheckHR("CrossQueueWait", fixture.second->Wait(target, 60)) ||
+      !CheckHR("CrossQueueRewind", fixture.second->Signal(target, 1)) ||
+      !CheckHR("CrossQueueDrain", fixture.second->Signal(drain, 2)) ||
+      !CheckHR("RegisterCrossQueueDrain", drain->SetEventOnCompletion(2, done)) ||
+      !CheckHR("CrossQueueReach", queue->Signal(target, 60)) ||
+      WaitForSingleObject(done, 5000) != WAIT_OBJECT_0 || target->GetCompletedValue() != 1)
+    return false;
+  if (!CheckHR("RegisterAfterGPURewind", target->SetEventOnCompletion(60, reached)) ||
+      WaitForSingleObject(reached, 0) != WAIT_TIMEOUT || !CheckHR("ReachAfterGPURewind", target->Signal(60)) ||
+      WaitForSingleObject(reached, 5000) != WAIT_OBJECT_0)
+    return false;
+
+  if (!CheckHR("BlockLatchedGPUWait", fixture.second->Wait(gate, 2)) ||
+      !CheckHR("RegisterLatchedGPUWait", fixture.second->Wait(target, 70)) ||
+      !CheckHR("DrainLatchedGPUWait", fixture.second->Signal(drain, 3)) ||
+      !CheckHR("RegisterLatchedGPUDrain", drain->SetEventOnCompletion(3, done)) ||
+      !CheckHR("GPUWaitPulseHigh", target->Signal(70)) || !CheckHR("GPUWaitPulseLow", target->Signal(1)) ||
+      !CheckHR("OpenLatchedGPUWait", gate->Signal(2)) ||
+      WaitForSingleObject(done, 5000) != WAIT_OBJECT_0 || target->GetCompletedValue() != 1)
+    return false;
+
+  // Registration owns the event object, not a reusable numeric handle.
+  CloseHandle(fixture.events[4]);
+  fixture.events[4] = nullptr;
+  if (!DuplicateHandle(GetCurrentProcess(), fixture.events[3], GetCurrentProcess(), &fixture.events[4],
+                       0, FALSE, DUPLICATE_SAME_ACCESS) ||
+      !CheckHR("RegisterOwnedFenceEvent", target->SetEventOnCompletion(80, fixture.events[3])))
+    return false;
+  CloseHandle(fixture.events[3]);
+  fixture.events[3] = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!fixture.events[3] || !CheckHR("SignalOwnedFenceEvent", target->Signal(80)) ||
+      WaitForSingleObject(fixture.events[4], 5000) != WAIT_OBJECT_0 ||
+      WaitForSingleObject(fixture.events[3], 0) != WAIT_TIMEOUT)
+    return false;
+
+  const UINT64 wide_value = UINT64(1) << 40;
+  if (!CheckHR("RegisterWideFenceValue", target->SetEventOnCompletion(wide_value, reached)) ||
+      !CheckHR("SignalWideFenceValue", queue->Signal(target, wide_value)) ||
+      WaitForSingleObject(reached, 5000) != WAIT_OBJECT_0 || target->GetCompletedValue() != wide_value ||
+      !CheckHR("RewindFenceToZero", target->Signal(0)) || target->GetCompletedValue() != 0)
+    return false;
+  std::cout << "D3D12 CPU/GPU rewind, latched events, WAIT_ALL/ANY and cross-queue waits passed\n";
+  return true;
+}
+
 } // namespace
 
 int main() {
@@ -3069,6 +3193,12 @@ int main() {
       !CheckHR("SignalAnyFence", queue->Signal(multiple_fence, 4)) ||
       WaitForSingleObject(multiple_event, 5000) != WAIT_OBJECT_0) {
     std::cerr << "WAIT_ANY multiple fence completion failed\n";
+    cleanup();
+    return 1;
+  }
+
+  if (!CheckFenceRewinds(device1, queue)) {
+    std::cerr << "fence rewind completion contract failed\n";
     cleanup();
     return 1;
   }

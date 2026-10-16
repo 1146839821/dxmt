@@ -20,13 +20,25 @@
 #include "d3d12_device_child.hpp"
 #include "com/com_pointer.hpp"
 #include "log/log.hpp"
+#include <algorithm>
 
 namespace dxmt {
 
 class MTLD3D12FenceImpl : public MTLD3D12DeviceChild<MTLD3D12Fence> {
   D3D12_FENCE_FLAGS flags_;
   dxmt::mutex mutex_;
-  Rc<Fence> fence_;
+  UINT64 completed_value_ = 0;
+  struct PendingWait {
+    UINT64 value;
+    std::shared_ptr<D3D12FenceWait> wait;
+  };
+  std::vector<PendingWait> waits_;
+
+  static void CompleteWait(D3D12FenceWait &wait) {
+    wait.event.signalValue(1);
+    if (wait.handle)
+      SetEvent(wait.handle);
+  }
 
 public:
   MTLD3D12FenceImpl(MTLD3D12Device *pDevice, D3D12_FENCE_FLAGS flags) :
@@ -35,8 +47,7 @@ public:
 
   HRESULT
   Initialize(UINT64 InitialValue) {
-    fence_ = new Fence(device_->GetMTLDevice());
-    fence_->signal(InitialValue);
+    completed_value_ = InitialValue;
     return S_OK;
   }
 
@@ -64,48 +75,60 @@ public:
   UINT64 STDMETHODCALLTYPE
   GetCompletedValue() {
     std::lock_guard lock(mutex_);
-    return fence_->completedValue();
+    return completed_value_;
   }
 
   HRESULT STDMETHODCALLTYPE
   SetEventOnCompletion(UINT64 Value, HANDLE Event) {
-    WMT::Reference<WMT::SharedEvent> event;
-    {
-      std::lock_guard lock(mutex_);
-      if (fence_->completedValue() >= Value) {
-        if (Event)
-          SetEvent(Event);
-        return S_OK;
-      }
-      if (Event) {
-        device_->event_listener.setEventOnValue(fence_.ptr(), Event, Value);
-        return S_OK;
-      }
-      event = fence_->sharedEvent();
-    }
-    // Signal must be able to acquire mutex_ while the CPU waits. Retain the
-    // captured event even if another thread rewinds the fence meanwhile.
-    event.waitUntilSignaledValue(Value, ~0ULL);
+    std::shared_ptr<D3D12FenceWait> wait;
+    const HRESULT hr = RegisterWait(Value, Event, wait);
+    if (FAILED(hr))
+      return hr;
+    if (!Event)
+      wait->event.waitUntilSignaledValue(1, ~0ULL);
     return S_OK;
   }
 
   HRESULT STDMETHODCALLTYPE
   Signal(UINT64 Value) {
     std::lock_guard lock(mutex_);
-    fence_->signal(Value);
+    completed_value_ = Value;
+    waits_.erase(std::remove_if(waits_.begin(), waits_.end(), [&](const PendingWait &pending) {
+      if (pending.value > Value)
+        return false;
+      CompleteWait(*pending.wait);
+      return true;
+    }), waits_.end());
     return S_OK;
   }
 
-  HRESULT EncodeSignal(WMT::CommandBuffer command_buffer, UINT64 value) final {
-    std::lock_guard lock(mutex_);
-    fence_->signal(command_buffer, value);
-    return S_OK;
+  HRESULT RegisterWait(UINT64 value, HANDLE event, std::shared_ptr<D3D12FenceWait> &wait) final {
+    wait.reset();
+    try {
+      auto pending = std::make_shared<D3D12FenceWait>();
+      pending->event = device_->GetMTLDevice().newSharedEvent();
+      if (!pending->event)
+        return E_OUTOFMEMORY;
+      if (event && !DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &pending->handle,
+                                    0, FALSE, DUPLICATE_SAME_ACCESS))
+        return HRESULT_FROM_WIN32(GetLastError());
+      std::lock_guard lock(mutex_);
+      if (completed_value_ >= value)
+        CompleteWait(*pending);
+      else
+        waits_.push_back({value, pending});
+      wait = std::move(pending);
+      return S_OK;
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
   }
 
-  HRESULT EncodeWait(WMT::CommandBuffer command_buffer, UINT64 value) final {
+  void CancelWait(const std::shared_ptr<D3D12FenceWait> &wait) final {
     std::lock_guard lock(mutex_);
-    fence_->wait(command_buffer, value);
-    return S_OK;
+    waits_.erase(std::remove_if(waits_.begin(), waits_.end(), [&](const PendingWait &pending) {
+      return pending.wait == wait;
+    }), waits_.end());
   }
 
   D3D12_FENCE_FLAGS STDMETHODCALLTYPE
