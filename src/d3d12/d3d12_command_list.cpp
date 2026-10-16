@@ -639,6 +639,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   Com<MTLD3D12CommandAllocatorImpl, false> allocator_;
   D3D12_COMMAND_LIST_TYPE type_;
   bool recording_failed_;
+  HRESULT close_result_ = S_OK;
   uint64_t recording_id_ = 0;
   uint64_t allocator_reset_generation_ = 0;
   std::shared_ptr<D3D12CommandListRecording> recording_state_;
@@ -794,12 +795,13 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   struct ResourceStateTransition {
     // State commits run from ExecuteCommandLists after the application may
     // have released its last public ID3D12Resource reference. Keep the
-    // private resource object alive until the queued transition is committed.
+    // private resource object alive through this recording, including replay.
     Com<MTLD3D12Resource, false> resource;
     UINT subresource;
     D3D12_RESOURCE_STATES before;
     D3D12_RESOURCE_STATES after;
     bool split_end;
+    bool discard_before = false;
   };
   std::vector<ResourceStateTransition> resource_state_transitions_;
 
@@ -1258,6 +1260,10 @@ public:
     return recording_state_;
   }
 
+  HRESULT GetCloseResult() const final {
+    return close_result_;
+  }
+
   uint64_t GetRecordingId() const final {
     return recording_id_;
   }
@@ -1280,24 +1286,36 @@ public:
   Close() {
     if (encoder_count < std::numeric_limits<size_t>::max())
       return E_FAIL;
-    if (allocator_->CPUAllocationFailed())
+    HRESULT validation = S_OK;
+    if (allocator_->CPUAllocationFailed()) {
       FailRecording(__func__, "command allocator CPU recording allocation failed");
-    if (recording_failed_)
+      validation = E_OUTOFMEMORY;
+    } else if (recording_failed_) {
+      validation = E_FAIL;
+    } else {
+      D3D12RecordedResourceStates states;
+      validation = ValidateRecordedResourceStates(states);
+    }
+    if (FAILED(validation))
       CancelEnhancedSplitBegins();
     HRESULT hr = allocator_->EndRecord(&encoder_count);
-    if (FAILED(hr))
-      return hr;
-    return recording_failed_ ? E_FAIL : S_OK;
+    close_result_ = FAILED(hr) ? hr : validation;
+    return close_result_;
   };
 
   HRESULT STDMETHODCALLTYPE
   Reset(ID3D12CommandAllocator *pAllocator, ID3D12PipelineState *pInitialState) {
+    if (FAILED(close_result_))
+      return close_result_;
     if (encoder_count == std::numeric_limits<size_t>::max())
       return E_FAIL;
     return Initialize(pAllocator, pInitialState);
   };
 
   void CommitResourceStates() final {
+    if (resource_state_transitions_.empty())
+      return;
+    std::lock_guard lock(device_->GetResourceStateMutex());
     for (const auto &transition : resource_state_transitions_) {
       auto *resource = transition.resource.ptr();
       const auto state_matches = [&, resource](D3D12_RESOURCE_STATES current) {
@@ -1337,7 +1355,60 @@ public:
         resource->SetSubresourceState(transition.subresource, transition.after);
       }
     }
-    resource_state_transitions_.clear();
+  }
+
+  HRESULT ValidateRecordedResourceStates(D3D12RecordedResourceStates &states) const final {
+    const auto promotable = [](MTLD3D12Resource *resource, D3D12_RESOURCE_STATES before) {
+      const auto desc = resource->GetDesc();
+      if (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
+        return false;
+      UINT allowed = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                     D3D12_RESOURCE_STATE_COPY_SOURCE | D3D12_RESOURCE_STATE_COPY_DEST;
+      if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ||
+          (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS))
+        allowed |= D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER |
+                   D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS |
+                   D3D12_RESOURCE_STATE_STREAM_OUT | D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT |
+                   D3D12_RESOURCE_STATE_RESOLVE_SOURCE | D3D12_RESOURCE_STATE_RESOLVE_DEST;
+      const UINT value = static_cast<UINT>(before);
+      const UINT writes = value & (D3D12_RESOURCE_STATE_COPY_DEST | D3D12_RESOURCE_STATE_RENDER_TARGET |
+                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_STREAM_OUT |
+                                   D3D12_RESOURCE_STATE_RESOLVE_DEST);
+      return !(value & ~allowed) && (!writes || (value == writes && !(writes & (writes - 1))));
+    };
+    try {
+      for (const auto &transition : resource_state_transitions_) {
+        auto *resource = transition.resource.ptr();
+        if (resource->subresource_states.size() > std::numeric_limits<UINT>::max())
+          return E_INVALIDARG;
+        auto [it, inserted] = states.try_emplace(resource);
+        if (inserted)
+          it->second.resize(resource->subresource_states.size());
+        auto &current_states = it->second;
+        const auto apply = [&](UINT subresource) {
+          auto &current = current_states[subresource];
+          if (!transition.discard_before && current && *current != transition.before &&
+              !(*current == D3D12_RESOURCE_STATE_COMMON && promotable(resource, transition.before))) {
+            WARN("D3D12 recorded transition mismatch: recording=", recording_id_, " subresource=", subresource,
+                 " previous_after=0x", std::hex, *current, " before=0x", transition.before,
+                 " after=0x", transition.after, std::dec);
+            return false;
+          }
+          current = transition.after;
+          return true;
+        };
+        if (transition.subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) {
+          for (UINT subresource = 0; subresource < current_states.size(); subresource++)
+            if (!apply(subresource))
+              return E_INVALIDARG;
+        } else if (transition.subresource >= current_states.size() || !apply(transition.subresource)) {
+          return E_INVALIDARG;
+        }
+      }
+      return S_OK;
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
   }
 
   void STDMETHODCALLTYPE
@@ -1831,16 +1902,23 @@ public:
       enhanced_split_begins_.erase(local);
 
     // Make the consumer see the completed transition before starting its
-    // encoder. Resource state bookkeeping is committed after GPU completion.
+    // encoder. Keep transition bookkeeping for submission validation and replay.
     EncodeMemoryBarrier(scope, state.before_state, state.after_state);
     allocator_->InvalidateCurrentPass();
 
     if (state.type == EnhancedSplitBarrierType::Buffer) {
       resource_state_transitions_.push_back({
-          state.resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, state.before_state, state.after_state, false
+          state.resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+          D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON, false
       });
     } else if (state.type == EnhancedSplitBarrierType::Texture) {
       const auto desc = state.resource->GetDesc();
+      D3D12_RESOURCE_STATES tracked_before, tracked_after;
+      if (!ConvertBarrierLayout(desc.Dimension, state.layout_before, &tracked_before) ||
+          !ConvertBarrierLayout(desc.Dimension, state.layout_after, &tracked_after)) {
+        FailRecording(__func__, "split texture barrier layout cannot be tracked");
+        return false;
+      }
       const UINT mip_levels = std::max<UINT>(1, desc.MipLevels);
       const UINT array_size = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
                                   ? 1
@@ -1848,7 +1926,7 @@ public:
       const auto &range = state.subresources;
       if (!range.NumMipLevels) {
         resource_state_transitions_.push_back({
-            state.resource, range.IndexOrFirstMipLevel, state.before_state, state.after_state, false
+            state.resource, range.IndexOrFirstMipLevel, tracked_before, tracked_after, false
         });
       } else {
         const size_t subresource_plane_size = size_t(mip_levels) * array_size;
@@ -1859,7 +1937,7 @@ public:
               const UINT subresource = mip + mip_levels * (slice + array_size * plane);
               if (plane < plane_count && state.resource->HasSubresource(subresource))
                 resource_state_transitions_.push_back({
-                    state.resource, subresource, state.before_state, state.after_state, false
+                    state.resource, subresource, tracked_before, tracked_after, false
                 });
             }
       }
@@ -6138,15 +6216,8 @@ public:
 
     auto emit_memory_barrier = [&](MTLD3D12Resource *resource, D3D12_RESOURCE_STATES before,
                                    D3D12_RESOURCE_STATES after, bool force) {
-      if (before != after) {
-        D3D12_RESOURCE_BARRIER transition = {};
-        transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        transition.Transition.pResource = resource;
-        transition.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        transition.Transition.StateBefore = before;
-        transition.Transition.StateAfter = after;
-        ResourceBarrier(1, &transition);
-      } else if (force && (before != D3D12_RESOURCE_STATE_COMMON || after != D3D12_RESOURCE_STATE_COMMON)) {
+      if (before != after ||
+          (force && (before != D3D12_RESOURCE_STATE_COMMON || after != D3D12_RESOURCE_STATE_COMMON))) {
         EncodeMemoryBarrier(resource_barrier_scope(resource), before, after);
       }
     };
@@ -6264,6 +6335,9 @@ public:
             continue;
           }
 
+          // Enhanced buffers have access scopes but no legacy layout/state.
+          resource_state_transitions_.push_back({resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+              D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON, false});
           emit_memory_barrier(
               resource, before, after,
               static_cast<UINT32>(barrier.AccessBefore) != static_cast<UINT32>(barrier.AccessAfter) ||
@@ -6333,6 +6407,8 @@ public:
             continue;
           }
 
+          const auto tracked_before_layout = before_layout;
+          const auto tracked_after_layout = after_layout;
           // Enhanced barriers can keep a common layout while changing the access scope.
           if (before_access != D3D12_RESOURCE_STATE_COMMON)
             before_layout = before_access;
@@ -6388,19 +6464,17 @@ public:
 
           auto emit_subresource = [&](UINT subresource) {
             if (before_layout != after_layout) {
-              D3D12_RESOURCE_BARRIER transition = {};
-              transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-              transition.Transition.pResource = resource;
-              transition.Transition.Subresource = subresource;
-              transition.Transition.StateBefore = before_layout;
-              transition.Transition.StateAfter = after_layout;
-              ResourceBarrier(1, &transition);
+              EncodeMemoryBarrier(resource_barrier_scope(resource), before_layout, after_layout);
             } else if (barrier.LayoutBefore != barrier.LayoutAfter ||
                        static_cast<UINT32>(barrier.AccessBefore) != static_cast<UINT32>(barrier.AccessAfter) ||
                        before_access != D3D12_RESOURCE_STATE_COMMON ||
                        after_access != D3D12_RESOURCE_STATE_COMMON) {
               EncodeMemoryBarrier(resource_barrier_scope(resource), before_access, after_access);
             }
+            // Access scopes do not replace the layout when interoping with legacy barriers.
+            resource_state_transitions_.push_back({
+                resource, subresource, tracked_before_layout, tracked_after_layout, false, discard
+            });
           };
 
           if (!range.NumMipLevels) {

@@ -436,6 +436,166 @@ bool TestInFlightRecording(unsigned mode) {
   return true;
 }
 
+bool TestTransitionChain(unsigned mode) {
+  Owned<ID3D12Device> device;
+  Owned<ID3D12CommandQueue> queue;
+  Owned<ID3D12CommandAllocator> allocators[2];
+  Owned<ID3D12GraphicsCommandList> lists[2];
+  Owned<ID3D12Resource> resource, source, readback;
+  Owned<ID3D12Fence> done;
+  struct Event { HANDLE value = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    ~Event() { if (value) CloseHandle(value); } } event;
+  if (!event.value || !CheckHR("Transition device", D3D12CreateDevice(
+          nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.ptr)))) return false;
+  D3D12_COMMAND_QUEUE_DESC qdesc = {};
+  if (!CheckHR("Transition queue", device->CreateCommandQueue(&qdesc, IID_PPV_ARGS(&queue.ptr))) ||
+      !CheckHR("Transition done", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&done.ptr)))) return false;
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.Type = D3D12_HEAP_TYPE_DEFAULT; heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC desc = {};
+  const bool buffer = mode == 7 || mode == 8 || mode == 10 || mode == 17 || mode == 18;
+  const bool depth = mode == 12 || mode == 13;
+  desc.Dimension = buffer ? D3D12_RESOURCE_DIMENSION_BUFFER : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  desc.Width = buffer ? 256 : 16; desc.Height = buffer ? 1 : 16; desc.DepthOrArraySize = 1;
+  desc.MipLevels = buffer ? 1 : 2; desc.SampleDesc.Count = 1;
+  desc.Format = buffer ? DXGI_FORMAT_UNKNOWN : depth ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+  desc.Layout = buffer ? D3D12_TEXTURE_LAYOUT_ROW_MAJOR : D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  desc.Flags = buffer ? D3D12_RESOURCE_FLAG_NONE : depth ? D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL : D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  if (mode == 21) desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+  if (!CheckHR("Transition resource", device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+          depth ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&resource.ptr)))) return false;
+  desc = {}; desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; desc.Width = 256; desc.Height = 1;
+  desc.DepthOrArraySize = 1; desc.MipLevels = 1; desc.SampleDesc.Count = 1; desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+  if (!CheckHR("Transition marker source", device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+          D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&source.ptr)))) return false;
+  heap.Type = D3D12_HEAP_TYPE_READBACK;
+  if (!CheckHR("Transition marker result", device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+          D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback.ptr)))) return false;
+  uint32_t *mapped = nullptr;
+  if (!CheckHR("Transition map marker", source->Map(0, nullptr, reinterpret_cast<void **>(&mapped)))) return false;
+  *mapped = 1234; source->Unmap(0, nullptr);
+  if (!CheckHR("Transition clear marker", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped)))) return false;
+  *mapped = 0; readback->Unmap(0, nullptr);
+  for (unsigned i = 0; i < 2; i++)
+    if (!CheckHR("Transition allocator", device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocators[i].ptr))) ||
+        !CheckHR("Transition list", device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocators[i].ptr, nullptr, IID_PPV_ARGS(&lists[i].ptr)))) return false;
+  D3D12_RESOURCE_BARRIER first = {};
+  first.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  first.Transition.pResource = resource.ptr;
+  first.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  first.Transition.StateBefore = depth ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_COPY_DEST;
+  first.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  auto second = first;
+  second.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  second.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+  if (mode == 0) second.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+  if (mode == 1) { second.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST; second.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE; }
+  if (mode == 3 || mode == 4) {
+    first.Transition.Subresource = 0;
+    second.Transition.Subresource = mode == 3 ? D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES : 1;
+    second.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    second.Transition.StateAfter = mode == 3 ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_COPY_SOURCE;
+  }
+  if (mode == 5 || mode == 6 || mode == 7 || mode == 11 || mode == 21 || depth) {
+    first.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+    second.Transition.StateBefore = mode == 5 || mode == 21 ? D3D12_RESOURCE_STATE_RENDER_TARGET :
+        mode == 7 ? D3D12_RESOURCE_STATE_GENERIC_READ :
+        mode == 11 || mode == 13 ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_COPY_SOURCE;
+    second.Transition.StateAfter = depth ? D3D12_RESOURCE_STATE_DEPTH_WRITE :
+        mode == 11 ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_COPY_DEST;
+  }
+  if (mode == 8 || mode == 9 || mode == 10) {
+    second.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    second.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+  }
+  if (mode == 9) first.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+  if (mode == 15) second.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+  if (mode >= 16 && mode <= 20) {
+    first.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+    second.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+  }
+  lists[0]->ResourceBarrier(1, &first);
+  if (mode >= 16 && mode <= 20) {
+    Owned<ID3D12GraphicsCommandList7> enhanced[2];
+    for (unsigned i = 0; i < 2; i++)
+      if (!CheckHR("Transition enhanced interface", lists[i]->QueryInterface(IID_PPV_ARGS(&enhanced[i].ptr)))) return false;
+    const auto emit = [&](unsigned index, D3D12_BARRIER_SYNC before, D3D12_BARRIER_SYNC after) {
+      D3D12_BUFFER_BARRIER b = {};
+      b.SyncBefore = before; b.SyncAfter = after;
+      b.AccessBefore = D3D12_BARRIER_ACCESS_COPY_SOURCE; b.AccessAfter = D3D12_BARRIER_ACCESS_COPY_DEST;
+      b.pResource = resource.ptr; b.Size = UINT64_MAX;
+      D3D12_TEXTURE_BARRIER t = {};
+      t.SyncBefore = before; t.SyncAfter = after; t.AccessBefore = b.AccessBefore; t.AccessAfter = b.AccessAfter;
+      t.LayoutBefore = t.LayoutAfter = D3D12_BARRIER_LAYOUT_COMMON;
+      t.pResource = resource.ptr; t.Subresources.IndexOrFirstMipLevel = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      D3D12_BARRIER_GROUP group = {};
+      group.Type = buffer ? D3D12_BARRIER_TYPE_BUFFER : D3D12_BARRIER_TYPE_TEXTURE; group.NumBarriers = 1;
+      if (buffer) group.pBufferBarriers = &b; else group.pTextureBarriers = &t;
+      enhanced[index]->Barrier(1, &group);
+    };
+    if (mode == 20) {
+      D3D12_TEXTURE_BARRIER t = {};
+      t.SyncBefore = t.SyncAfter = D3D12_BARRIER_SYNC_ALL;
+      t.AccessBefore = D3D12_BARRIER_ACCESS_COPY_SOURCE; t.AccessAfter = D3D12_BARRIER_ACCESS_RENDER_TARGET;
+      t.LayoutBefore = D3D12_BARRIER_LAYOUT_COMMON; t.LayoutAfter = D3D12_BARRIER_LAYOUT_RENDER_TARGET;
+      t.pResource = resource.ptr; t.Subresources.IndexOrFirstMipLevel = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      D3D12_BARRIER_GROUP group = {}; group.Type = D3D12_BARRIER_TYPE_TEXTURE;
+      group.NumBarriers = 1; group.pTextureBarriers = &t;
+      enhanced[0]->Barrier(1, &group);
+      t.LayoutBefore = D3D12_BARRIER_LAYOUT_UNDEFINED; t.LayoutAfter = D3D12_BARRIER_LAYOUT_COMMON;
+      t.AccessBefore = D3D12_BARRIER_ACCESS_NO_ACCESS; t.AccessAfter = D3D12_BARRIER_ACCESS_COPY_DEST;
+      t.Flags = D3D12_TEXTURE_BARRIER_FLAG_DISCARD;
+      enhanced[1]->Barrier(1, &group);
+    } else if (mode >= 18) {
+      emit(0, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_SPLIT);
+      emit(1, D3D12_BARRIER_SYNC_SPLIT, D3D12_BARRIER_SYNC_ALL);
+    } else {
+      emit(1, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_ALL);
+    }
+  }
+  lists[mode == 0 || mode == 15 ? 0 : 1]->ResourceBarrier(1, &second);
+  lists[0]->CopyBufferRegion(readback.ptr, 0, source.ptr, 0, sizeof(uint32_t));
+  const HRESULT close_a = lists[0]->Close();
+  if (!CheckHR("Close transition B", lists[1]->Close())) return false;
+  if (mode == 0 || mode == 15) {
+    if (close_a != E_INVALIDARG || lists[0]->Reset(allocators[0].ptr, nullptr) != E_INVALIDARG) return false;
+    ID3D12CommandList *failed = lists[0].ptr;
+    queue->ExecuteCommandLists(1, &failed);
+    if (FAILED(device->GetDeviceRemovedReason()) ||
+        !CheckHR("Failed recording marker", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped)))) return false;
+    const bool untouched = *mapped == 0;
+    readback->Unmap(0, nullptr);
+    std::cout << "transition chain mode " << mode << " rejected by Close and Reset; failed recording dropped\n";
+    return untouched;
+  }
+  if (!CheckHR("Close transition A", close_a)) return false;
+  UINT64 value = 0;
+  const auto drain = [&] {
+    return CheckHR("Transition signal", queue->Signal(done.ptr, ++value)) &&
+        CheckHR("Transition event", done->SetEventOnCompletion(value, event.value)) &&
+        WaitForSingleObject(event.value, 5000) == WAIT_OBJECT_0;
+  };
+  ID3D12CommandList *batch[] = {lists[0].ptr, lists[1].ptr};
+  if (mode == 9) { queue->ExecuteCommandLists(1, &batch[1]); if (!drain()) return false; }
+  if (mode == 10) {
+    queue->ExecuteCommandLists(1, batch); if (!drain()) return false;
+    queue->ExecuteCommandLists(1, &batch[1]);
+  } else {
+    queue->ExecuteCommandLists(mode == 0 || mode == 15 ? 1 : 2, batch);
+  }
+  const bool invalid = mode == 0 || mode == 1 || mode == 3 || mode == 5 || mode == 8 || mode == 9 || mode == 12 || mode == 15;
+  bool correct = invalid ? FAILED(device->GetDeviceRemovedReason()) : SUCCEEDED(device->GetDeviceRemovedReason()) && drain();
+  if (mode == 14 && correct) { queue->ExecuteCommandLists(2, batch); correct = drain(); }
+  queue.ptr->Release(); queue.ptr = nullptr; // Wait for accepted native work before observing the marker.
+  if (!CheckHR("Transition marker readback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped)))) return false;
+  correct &= *mapped == (invalid ? 0u : 1234u);
+  readback->Unmap(0, nullptr);
+  if (!correct) { std::cerr << "transition chain mode " << mode << " failed removal/readback oracle\n"; return false; }
+  std::cout << "transition chain mode " << mode << " passed; marker=" << (invalid ? 0 : 1234) << "\n";
+  return true;
+}
+
 struct ExecuteContext {
   ID3D12CommandQueue *queue;
   ID3D12CommandList *command_list;
@@ -578,6 +738,13 @@ int main() {
 
   for (unsigned mode = 0; mode <= 6; mode++) {
     if (!TestInFlightRecording(mode)) {
+      device->Release();
+      return 1;
+    }
+  }
+
+  for (unsigned mode = 0; mode < 22; mode++) {
+    if (!TestTransitionChain(mode)) {
       device->Release();
       return 1;
     }

@@ -311,6 +311,7 @@ class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
   std::atomic<HRESULT> removed_reason_{S_OK};
   dxmt::mutex removal_mutex_;
   std::vector<std::weak_ptr<D3D12DeviceRemovalListener>> removal_listeners_;
+  dxmt::mutex resource_state_mutex_;
 
   bool advertise_numa_ = false;
 
@@ -355,6 +356,10 @@ public:
   GetMTLDevice() {
     return adapter_->GetMTLDevice();
   };
+
+  dxmt::mutex &GetResourceStateMutex() final {
+    return resource_state_mutex_;
+  }
 
   D3D_FEATURE_LEVEL
   GetFeatureLevel() {

@@ -730,6 +730,10 @@ public:
         WARN("D3D12 ExecuteCommandLists received an open command list");
         return;
       }
+      if (FAILED(pCommandList->GetCloseResult())) {
+        WARN("D3D12 ExecuteCommandLists received a command list whose recording failed");
+        return;
+      }
       if (auto recording = pCommandList->GetRecordingState(); recording && recording->IsInFlight()) {
         WARN("D3D12 ExecuteCommandLists received an in-flight command list recording");
         device_->MarkDeviceRemoved(DXGI_ERROR_INVALID_CALL);
@@ -762,6 +766,17 @@ public:
       if (!recording || !recording->TryAcquire(recording_lifetime)) {
         WARN("D3D12 ExecuteCommandLists raced another submission of the same recording");
         device_->MarkDeviceRemoved(DXGI_ERROR_INVALID_CALL);
+        return;
+      }
+    }
+
+    D3D12RecordedResourceStates recorded_states;
+    for (UINT i = 0; i < Count; i++) {
+      const HRESULT hr = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])
+                             ->ValidateRecordedResourceStates(recorded_states);
+      if (FAILED(hr)) {
+        WARN("D3D12 ExecuteCommandLists rejected an inconsistent recorded resource transition chain");
+        device_->MarkDeviceRemoved(hr == E_OUTOFMEMORY ? hr : DXGI_ERROR_INVALID_CALL);
         return;
       }
     }

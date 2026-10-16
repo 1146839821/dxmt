@@ -3391,7 +3391,18 @@ int main() {
     return 1;
   }
 
-  if (!CheckHR("ResetForCopyTilesInvalidZ", list->Reset(allocator, nullptr))) {
+  const auto renew_failed_copy_tiles_list = [&](const char *name) {
+    if (list->Reset(allocator, nullptr) != E_FAIL) {
+      std::cerr << "failed CopyTiles recording was reset successfully\n";
+      return false;
+    }
+    list->Release();
+    list = nullptr;
+    return CheckHR(name, device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr,
+                                                 IID_PPV_ARGS(&list)));
+  };
+
+  if (!renew_failed_copy_tiles_list("RecreateForCopyTilesInvalidZ")) {
     cleanup();
     return 1;
   }
@@ -3433,7 +3444,7 @@ int main() {
     return 1;
   }
 
-  if (!CheckHR("ResetForCopyTilesOutOfBounds", list->Reset(allocator, nullptr))) {
+  if (!renew_failed_copy_tiles_list("RecreateForCopyTilesOutOfBounds")) {
     cleanup();
     return 1;
   }
@@ -3453,7 +3464,7 @@ int main() {
                                                   const D3D12_TILED_RESOURCE_COORDINATE *coordinate,
                                                   const D3D12_TILE_REGION_SIZE *region_size, ID3D12Resource *buffer,
                                                   UINT64 buffer_offset, D3D12_TILE_COPY_FLAGS flags) {
-    if (!CheckHR(name, list->Reset(allocator, nullptr))) {
+    if (!renew_failed_copy_tiles_list(name)) {
       cleanup();
       return false;
     }
@@ -3500,7 +3511,7 @@ int main() {
       ))
     return 1;
 
-  if (!CheckHR("ResetForCopyTilesNullCoordinate", list->Reset(allocator, nullptr))) {
+  if (!renew_failed_copy_tiles_list("RecreateForCopyTilesNullCoordinate")) {
     cleanup();
     return 1;
   }
@@ -3514,7 +3525,7 @@ int main() {
     return 1;
   }
 
-  if (!CheckHR("ResetForCopyTilesPackedMip", list->Reset(allocator, nullptr))) {
+  if (!renew_failed_copy_tiles_list("RecreateForCopyTilesPackedMip")) {
     cleanup();
     return 1;
   }
@@ -3542,7 +3553,7 @@ int main() {
       reserved_texture_copy, 1, &boxed_coordinate, &valid_copy_region, reserved_texture_heap, 1, nullptr,
       &boxed_heap_offset, &default_direction_tile_count, D3D12_TILE_MAPPING_FLAG_NONE
   );
-  if (!CheckHR("ResetForCopyTilesDefaultDirection", list->Reset(allocator, nullptr))) {
+  if (!renew_failed_copy_tiles_list("RecreateForCopyTilesDefaultDirection")) {
     cleanup();
     return 1;
   }

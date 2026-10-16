@@ -37,6 +37,8 @@
 #include <atomic>
 #include <mutex>
 #include <memory>
+#include <optional>
+#include <unordered_map>
 #include "log/log.hpp"
 #include <vector>
 
@@ -115,6 +117,10 @@ struct D3D12CommandListSubmission {
   }
 };
 
+// Only transitions ordered within one ExecuteCommandLists batch are known here.
+using D3D12RecordedResourceStates =
+    std::unordered_map<MTLD3D12Resource *, std::vector<std::optional<D3D12_RESOURCE_STATES>>>;
+
 class D3D12CommandListRecording {
   dxmt::mutex mutex_;
   std::weak_ptr<D3D12CommandListSubmission> submission_;
@@ -143,6 +149,7 @@ public:
   virtual MTLD3D12CommandAllocator *GetAllocator() = 0;
   virtual bool IsAllocatorRecordingValid() const = 0;
   virtual std::shared_ptr<D3D12CommandListRecording> GetRecordingState() const = 0;
+  virtual HRESULT GetCloseResult() const = 0;
   virtual uint64_t GetRecordingId() const = 0;
   virtual AirconvResidencyCounters GetAirconvResidencyCounters() const = 0;
   virtual void MarkSubmitted() = 0;
@@ -150,6 +157,7 @@ public:
       std::vector<SubmissionResourceUse> &uses, std::vector<WMT::Reference<WMT::Resource>> &resources
   ) = 0;
   virtual void CommitResourceStates() = 0;
+  virtual HRESULT ValidateRecordedResourceStates(D3D12RecordedResourceStates &states) const = 0;
 };
 
 class MTLD3D12CommandAllocator : public ID3D12CommandAllocator {
@@ -529,6 +537,7 @@ class MTLD3D12Device : public ID3D12Device10 {
 public:
   virtual HRESULT RegisterRemovalListener(const std::shared_ptr<D3D12DeviceRemovalListener> &listener) = 0;
   virtual void MarkDeviceRemoved(HRESULT reason) = 0;
+  virtual dxmt::mutex &GetResourceStateMutex() = 0;
 
   virtual WMT::Device GetMTLDevice() = 0;
 
