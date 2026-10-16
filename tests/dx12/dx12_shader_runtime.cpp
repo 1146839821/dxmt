@@ -443,6 +443,10 @@ bool RunDepthOnlyGraphics(
   ComPtr<ID3D12PipelineState> pso;
   if (!CheckHR("CreateDepthOnlyPipelineState", device->CreateGraphicsPipelineState(&pso_desc, IID_PPV_ARGS(pso.put()))))
     return false;
+  ComPtr<ID3D12PipelineState> hidden_pso;
+  pso_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_NEVER;
+  if (!CheckHR("CreateHiddenDepthPipelineState", device->CreateGraphicsPipelineState(&pso_desc, IID_PPV_ARGS(hidden_pso.put()))))
+    return false;
   ComPtr<ID3D12Resource> vertex_buffer;
   D3D12_VERTEX_BUFFER_VIEW vertex_view = {};
   if (!CreateVertexBuffer(device, vertex_buffer, vertex_view))
@@ -516,9 +520,22 @@ bool RunDepthOnlyGraphics(
   list.get()->BeginQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 39999);
   list.get()->DrawInstanced(3, 1, 0, 0);
   list.get()->EndQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 39999);
+  list.get()->DrawInstanced(3, 1, 0, 0); // End must disable counting before this draw.
   list.get()->ResolveQueryData(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 39999, 1, readback.get(), 5 * sizeof(UINT64));
   list.get()->ResolveQueryData(other_query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0, 1, readback.get(), 6 * sizeof(UINT64));
+  // Start an ordinary render pass with no visibility attachment, then begin
+  // a query using an existing scratch chunk. The pass must be rebuilt.
+  list.get()->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+  list.get()->DrawInstanced(3, 1, 0, 0);
+  // Reuse one heap slot before publication: immutable segments and FIFO End
+  // order must retain the last result, including mixed count/binary writes.
   list.get()->BeginQuery(query_heap.get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, 4);
+  list.get()->DrawInstanced(3, 1, 0, 0);
+  list.get()->EndQuery(query_heap.get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, 4);
+  list.get()->BeginQuery(query_heap.get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, 4);
+  list.get()->SetPipelineState(hidden_pso.get());
+  list.get()->DrawInstanced(3, 1, 0, 0); // Nonempty segment, but no passing samples.
+  list.get()->SetPipelineState(pso.get());
   list.get()->EndQuery(query_heap.get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, 4);
   list.get()->ResolveQueryData(query_heap.get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, 4, 1, readback.get(), 7 * sizeof(UINT64));
   if (!CheckHR("Close", list.get()->Close()))
@@ -560,22 +577,44 @@ bool RunDepthOnlyGraphics(
   list.get()->RSSetViewports(1, &viewport);
   list.get()->RSSetScissorRects(1, &scissor);
   list.get()->BeginQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
-  // Cross the 64 KiB visibility chunk boundary. A clear forces a distinct
-  // render pass without changing this query's active set.
+  // Reuse a heap slot across 8193 immutable segments, including a chunk
+  // rollover inside a native render pass and occasional unrelated clear passes.
   constexpr UINT segments = 8193;
   for (UINT i = 0; i < segments; ++i) {
-    list.get()->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    list.get()->BeginQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 1);
     list.get()->DrawInstanced(3, 1, 0, 0);
+    list.get()->EndQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 1);
+    if (i % 33 == 32)
+      list.get()->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
   }
   list.get()->EndQuery(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
-  list.get()->ResolveQueryData(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0, 1, readback.get(), 0);
   if (!CheckHR("Close chunk query", list.get()->Close()))
     return false;
-  // Native encoder references must retain the result heap even when its COM
-  // owner disappears before translation. The GPU consumes the recorded data.
+  // No Resolve in the producer recording. Close must publish the result for
+  // another list/queue after a real queue dependency.
+  ComPtr<ID3D12CommandAllocator> resolve_allocator;
+  ComPtr<ID3D12GraphicsCommandList> resolve_list;
+  ComPtr<ID3D12CommandQueue> resolve_queue;
+  ComPtr<ID3D12Fence> produced;
+  if (!CheckHR("Resolve allocator", device->CreateCommandAllocator(
+          D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(resolve_allocator.put()))) ||
+      !CheckHR("Resolve list", device->CreateCommandList(
+          0, D3D12_COMMAND_LIST_TYPE_DIRECT, resolve_allocator.get(), nullptr, IID_PPV_ARGS(resolve_list.put()))) ||
+      !CheckHR("Resolve queue", device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(resolve_queue.put()))) ||
+      !CheckHR("Query dependency fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(produced.put()))))
+    return false;
+  resolve_list.get()->ResolveQueryData(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 0, 1, readback.get(), 0);
+  resolve_list.get()->ResolveQueryData(query_heap.get(), D3D12_QUERY_TYPE_OCCLUSION, 1, 1, readback.get(), 8);
+  if (!CheckHR("Close resolve list", resolve_list.get()->Close()))
+    return false;
   query_heap.put();
   other_query_heap.put();
   queue.get()->ExecuteCommandLists(1, lists);
+  if (!CheckHR("Publish query dependency", queue.get()->Signal(produced.get(), 1)) ||
+      !CheckHR("Wait query dependency", resolve_queue.get()->Wait(produced.get(), 1)))
+    return false;
+  ID3D12CommandList *resolves[] = {resolve_list.get()};
+  resolve_queue.get()->ExecuteCommandLists(1, resolves);
   // Drop list-owned scratch references before GPU completion; the allocator
   // retained by the submission must keep the original recording alive.
   ComPtr<ID3D12CommandAllocator> next_allocator;
@@ -583,18 +622,19 @@ bool RunDepthOnlyGraphics(
           D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(next_allocator.put()))) ||
       !CheckHR("Reset submitted query list", list.get()->Reset(next_allocator.get(), nullptr)) ||
       !CheckHR("Close next query list", list.get()->Close()) ||
-      !WaitForQueue(device, queue.get()) || !CheckHR("Chunk query device", device->GetDeviceRemovedReason()))
+      !WaitForQueue(device, resolve_queue.get()) || !CheckHR("Chunk query device", device->GetDeviceRemovedReason()))
     return false;
   void *mapped = nullptr;
   if (!CheckHR("Map chunk query", readback.get()->Map(0, nullptr, &mapped)))
     return false;
   const auto accumulated = *static_cast<const UINT64 *>(mapped);
+  const auto last_inner = static_cast<const UINT64 *>(mapped)[1];
   readback.get()->Unmap(0, nullptr);
-  if (accumulated != baseline_samples * segments) {
+  if (accumulated != baseline_samples * segments || last_inner != baseline_samples) {
     std::cerr << label << " chunk query got=" << accumulated << " expected=" << baseline_samples * segments << "\n";
     return false;
   }
-  std::cout << label << " query 8193-pass chunk boundary/heap release/list Reset passed\n";
+  std::cout << label << " query 8193-segment slot-reuse/chunk/heap release/list Reset/cross-queue Resolve passed\n";
   return true;
 }
 

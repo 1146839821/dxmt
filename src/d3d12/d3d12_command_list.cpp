@@ -667,8 +667,8 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   std::vector<CachedTemporalScaler> temporal_scaler_cache_;
   WMT::Reference<WMT::ComputePipelineState> predication_args_pso_;
   WMT::Reference<WMT::ComputePipelineState> predication_count_pso_;
-  // A visibility segment belongs to one render pass and all queries active in
-  // that pass. Query indices address the result heap, never Metal's per-pass
+  // A visibility segment belongs to an interval with an unchanged active query
+  // set within one render pass. Query indices address the result heap, never Metal's per-pass
   // visibility offset (which has a smaller implementation-defined limit).
   struct VisibilitySegment {
     WMT::Reference<WMT::Buffer> buffer;
@@ -686,6 +686,8 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
     std::vector<VisibilitySegment> segments;
   };
   std::vector<ActiveOcclusionQuery> active_occlusion_queries_;
+  std::vector<ActiveOcclusionQuery> pending_occlusion_queries_;
+  bool visibility_segment_dirty_ = false;
   std::vector<VisibilityChunk> visibility_chunks_;
   VisibilityResultOffsetBumpState visibility_offsets_;
   WMT::Reference<WMT::ComputePipelineState> visibility_sum_pso_;
@@ -1049,6 +1051,8 @@ public:
       airconv_render_residency_ = enabled[0] != '0';
     recording_failed_ = false;
     active_occlusion_queries_.clear();
+    pending_occlusion_queries_.clear();
+    visibility_segment_dirty_ = false;
     visibility_chunks_.clear();
     visibility_offsets_.reset();
     query_recording_error_ = S_OK;
@@ -1316,6 +1320,8 @@ public:
       return E_FAIL;
     if (!active_occlusion_queries_.empty())
       FailRecording(__func__, "occlusion query has no matching EndQuery");
+    if (!recording_failed_ && !allocator_->CPUAllocationFailed())
+      FlushPendingVisibilityQueries();
     HRESULT validation = S_OK;
     if (FAILED(query_recording_error_)) {
       validation = query_recording_error_;
@@ -1607,7 +1613,7 @@ public:
   }
 
   bool
-  ClearVisibilityResult(WMT::Buffer buffer, uint64_t offset) {
+  ClearVisibilityResult(WMT::Buffer buffer, uint64_t offset, uint64_t length = sizeof(uint64_t)) {
     if (!PreBlit())
       return false;
     RetainResourceForCurrentEncoder(buffer.handle);
@@ -1615,7 +1621,7 @@ public:
     cmd.type = WMTBlitCommandFillBuffer;
     cmd.buffer = buffer;
     cmd.offset = offset;
-    cmd.length = sizeof(uint64_t);
+    cmd.length = length;
     cmd.value = 0;
     return !recording_failed_;
   }
@@ -1625,6 +1631,7 @@ public:
     constexpr uint64_t chunk_size = 64 * 1024;
     constexpr uint64_t slots_per_chunk = chunk_size / sizeof(uint64_t);
     uint64_t slot = 0;
+    bool new_chunk = false;
     visibility_offsets_.beginEncoder();
     visibility_offsets_.tryGetNextWriteOffset(true, slot);
     visibility_offsets_.endEncoder();
@@ -1640,6 +1647,7 @@ public:
           return false;
         }
         visibility_chunks_.push_back({std::move(buffer), info.gpu_address});
+        new_chunk = true;
       }
       const auto &chunk = visibility_chunks_[slot / slots_per_chunk];
       const auto offset = (slot % slots_per_chunk) * sizeof(uint64_t);
@@ -1651,14 +1659,14 @@ public:
       FailRecording(__func__, "visibility segment allocation failed");
       return false;
     }
-    // Clear on the GPU, including every replay of this recording. CPU zeroing
-    // here would race previous submissions and leave stale values on replay.
-    return ClearVisibilityResult(segment.buffer, segment.offset);
+    // Every slot is written at most once per recording. Clear the entire chunk
+    // before its first render use, also on every replay, without splitting the
+    // render pass for each later slot. CPU zeroing would race earlier work.
+    return !new_chunk || ClearVisibilityResult(segment.buffer, 0, chunk_size);
   }
 
   bool
-  EndVisibilityQuery(const ActiveOcclusionQuery &query) {
-    allocator_->InvalidateCurrentPass();
+  EncodeVisibilityQueryResult(const ActiveOcclusionQuery &query) {
     if (query.segments.empty())
       return ClearVisibilityResult(query.heap->visibility_buffer, uint64_t(query.index) * sizeof(uint64_t));
     if (query.segments.size() == 1 && query.type == D3D12_QUERY_TYPE_OCCLUSION) {
@@ -1705,16 +1713,19 @@ public:
     auto addresses = static_cast<uint64_t *>(mapped);
     for (size_t i = 0; i < query.segments.size(); ++i)
       addresses[i] = query.segments[i].address;
-    auto compute = allocator_->AllocatePass<ComputeEncoderData>();
-    if (!compute) {
-      FailRecording(__func__, "visibility sum encoder allocation failed");
-      return false;
+    if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Compute) {
+      allocator_->InvalidateCurrentPass();
+      auto compute = allocator_->AllocatePass<ComputeEncoderData>();
+      if (!compute) {
+        FailRecording(__func__, "visibility sum encoder allocation failed");
+        return false;
+      }
+      ResetCurrentEncoderResourceUseState();
+      compute->type = EncoderType::Compute;
+      compute->cmd_head.type = WMTComputeCommandNop;
+      compute->cmd_head.next.set(nullptr);
+      compute->cmd_tail = reinterpret_cast<wmtcmd_base *>(&compute->cmd_head);
     }
-    ResetCurrentEncoderResourceUseState();
-    compute->type = EncoderType::Compute;
-    compute->cmd_head.type = WMTComputeCommandNop;
-    compute->cmd_head.next.set(nullptr);
-    compute->cmd_tail = reinterpret_cast<wmtcmd_base *>(&compute->cmd_head);
     for (const auto &segment : query.segments)
       EncodeComputeResourceUse(segment.buffer.handle, WMTResourceUsageRead);
     EncodeComputeResourceUse(allocator_->gpu_heap_buffer_.handle, WMTResourceUsageRead);
@@ -1748,10 +1759,29 @@ public:
     auto &dispatch = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch>();
     dispatch.type = WMTComputeCommandDispatchThreads;
     dispatch.size = {1, 1, 1};
+    // Query slots can be reused before a flush. Dispatches must publish those
+    // writes in End order, including untracked result buffers in one encoder.
+    auto &barrier = allocator_->EncodeComputeCommand<wmtcmd_compute_memory_barrier>();
+    barrier.type = WMTComputeCommandMemoryBarrier;
+    barrier.scope = WMTBarrierScopeBuffers;
     dirty_state_.set(DirtyState::ComputePipelineState, DirtyState::ComputeRootArguments,
                      DirtyState::ComputeRootSignature, DirtyState::DescriptorHeaps);
-    allocator_->InvalidateCurrentPass();
     return !recording_failed_;
+  }
+
+  bool
+  FlushPendingVisibilityQueries() {
+    if (pending_occlusion_queries_.empty())
+      return true;
+    // Never reuse an application compute encoder for the internal reductions.
+    allocator_->InvalidateCurrentPass();
+    for (const auto &query : pending_occlusion_queries_)
+      if (!EncodeVisibilityQueryResult(query))
+        return false;
+    if (allocator_->encoder_current && allocator_->encoder_current->type == EncoderType::Compute)
+      allocator_->InvalidateCurrentPass();
+    pending_occlusion_queries_.clear();
+    return true;
   }
 
   void
@@ -2429,15 +2459,23 @@ public:
       return DrawCallStatus::Invalid;
     }
 
-    if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render) {
-
+    if (!active_occlusion_queries_.empty() && allocator_->encoder_current &&
+        allocator_->encoder_current->type == EncoderType::Render &&
+        !static_cast<RenderEncoderData *>(allocator_->encoder_current)->use_visibility_result)
       allocator_->InvalidateCurrentPass();
-      VisibilitySegment visibility;
-      if (!active_occlusion_queries_.empty()) {
-        if (!BeginVisibilitySegment(visibility))
-          return DrawCallStatus::Invalid;
+    VisibilitySegment visibility;
+    const bool new_visibility_segment = !active_occlusion_queries_.empty() &&
+        (visibility_segment_dirty_ || !allocator_->encoder_current ||
+         allocator_->encoder_current->type != EncoderType::Render);
+    if (new_visibility_segment) {
+      if (!BeginVisibilitySegment(visibility))
+        return DrawCallStatus::Invalid;
+      if (allocator_->encoder_current && allocator_->encoder_current->type == EncoderType::Render &&
+          static_cast<RenderEncoderData *>(allocator_->encoder_current)->visibility_buffer != visibility.buffer)
         allocator_->InvalidateCurrentPass();
-      }
+    }
+    if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render) {
+      allocator_->InvalidateCurrentPass();
       auto render = allocator_->AllocatePass<RenderEncoderData>();
       if (!render) {
         FailRecording(__func__, "render encoder allocation failed");
@@ -2448,14 +2486,6 @@ public:
       render->cmd_head.type = WMTRenderCommandNop;
       render->cmd_head.next.set(0);
       render->cmd_tail = (wmtcmd_base *)&render->cmd_head;
-      if (!active_occlusion_queries_.empty()) {
-        render->use_visibility_result = true;
-        render->visibility_buffer = visibility.buffer;
-        auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setvisibilitymode>();
-        cmd.type = WMTRenderCommandSetVisibilityMode;
-        cmd.offset = visibility.offset;
-        cmd.mode = WMTVisibilityResultModeCounting;
-      }
       FlushPendingMemoryBarrier();
       render->dsv_planar_flags = 0;
       render->dsv_readonly_flags = 0;
@@ -2539,6 +2569,22 @@ public:
       dirty_state_.set(DirtyState::BlendFactor, DirtyState::StencilRef);
       dirty_state_.set(DirtyState::GraphicsPipelineState);
     }
+
+    auto *visibility_render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
+    if (new_visibility_segment) {
+      visibility_render->use_visibility_result = true;
+      visibility_render->visibility_buffer = visibility.buffer;
+      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setvisibilitymode>();
+      cmd.type = WMTRenderCommandSetVisibilityMode;
+      cmd.offset = visibility.offset;
+      cmd.mode = WMTVisibilityResultModeCounting;
+    } else if (visibility_segment_dirty_ && visibility_render->use_visibility_result) {
+      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setvisibilitymode>();
+      cmd.type = WMTRenderCommandSetVisibilityMode;
+      cmd.offset = 0;
+      cmd.mode = WMTVisibilityResultModeDisabled;
+    }
+    visibility_segment_dirty_ = false;
 
     // A command list may switch from an ordinary PSO to an emulated geometry
     // or tessellation PSO without ending the render encoder.  Keep the pass
@@ -5452,7 +5498,7 @@ public:
     }
     // Begin is independent of graphics bindings. The first subsequent draw
     // creates a counter segment for the new active set.
-    allocator_->InvalidateCurrentPass();
+    visibility_segment_dirty_ = true;
   };
 
   void STDMETHODCALLTYPE
@@ -5499,8 +5545,14 @@ public:
       FailRecording(__func__, "EndQuery has no matching BeginQuery index=", Index);
       return;
     }
-    if (EndVisibilityQuery(*active))
+    try {
+      pending_occlusion_queries_.push_back(std::move(*active));
       active_occlusion_queries_.erase(active);
+      visibility_segment_dirty_ = true;
+    } catch (...) {
+      query_recording_error_ = E_OUTOFMEMORY;
+      FailRecording(__func__, "completed query allocation failed");
+    }
   };
 
   void STDMETHODCALLTYPE
@@ -5538,7 +5590,7 @@ public:
         return;
       }
     }
-    if (!PreBlit())
+    if (!FlushPendingVisibilityQueries() || !PreBlit())
       return;
     RetainResourceForCurrentEncoder(destination->buffer->current()->buffer().handle);
 
