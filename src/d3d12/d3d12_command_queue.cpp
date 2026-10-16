@@ -1428,7 +1428,9 @@ public:
     auto cmdbuf = NewCommandBuffer();
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
-    static_cast<MTLD3D12Fence *>(pFence)->fence->signal(cmdbuf, Value);
+    const HRESULT signal_hr = static_cast<MTLD3D12Fence *>(pFence)->EncodeSignal(cmdbuf, Value);
+    if (FAILED(signal_hr))
+      return signal_hr;
     Submission submission;
     submission.command_buffer = cmdbuf;
     if (!CommitSubmissionLocked(submission))
@@ -1448,7 +1450,9 @@ public:
     auto cmdbuf = NewCommandBuffer();
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
-    static_cast<MTLD3D12Fence *>(pFence)->fence->wait(cmdbuf, Value);
+    const HRESULT wait_hr = static_cast<MTLD3D12Fence *>(pFence)->EncodeWait(cmdbuf, Value);
+    if (FAILED(wait_hr))
+      return wait_hr;
     Submission submission;
     submission.command_buffer = cmdbuf;
     if (!CommitSubmissionLocked(submission))

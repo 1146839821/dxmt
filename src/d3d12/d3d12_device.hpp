@@ -307,7 +307,8 @@ struct EnhancedSplitBarrierState {
 
 class MTLD3D12Fence : public ID3D12Fence1 {
 public:
-  Rc<Fence> fence;
+  virtual HRESULT EncodeSignal(WMT::CommandBuffer command_buffer, UINT64 value) = 0;
+  virtual HRESULT EncodeWait(WMT::CommandBuffer command_buffer, UINT64 value) = 0;
 };
 
 class MTLD3D12RootSignature : public ID3D12RootSignature {

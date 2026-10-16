@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <atomic>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -2981,6 +2983,59 @@ int main() {
     return 1;
   }
   WaitForSingleObject(event, INFINITE);
+
+  // CPU signals, queue signals and completion queries share one fence.
+  // Rewinds are intentional; only the final, drained value is deterministic.
+  std::atomic<bool> fence_access_ok{true};
+  std::atomic<unsigned> fence_writers_done{0};
+  std::thread cpu_signals([&] {
+    for (UINT64 value = 2; value < 66; ++value)
+      if (FAILED(fence->Signal(value)))
+        fence_access_ok.store(false);
+    fence_writers_done.fetch_add(1);
+  });
+  std::thread queue_signals([&] {
+    for (UINT64 value = 1000; value < 1064; ++value)
+      if (FAILED(queue->Signal(fence, value)))
+        fence_access_ok.store(false);
+    fence_writers_done.fetch_add(1);
+  });
+  std::thread completion_queries([&] {
+    while (fence_writers_done.load() != 2) {
+      if (fence->GetCompletedValue() > 2000)
+        fence_access_ok.store(false);
+      std::this_thread::yield();
+    }
+  });
+  cpu_signals.join();
+  queue_signals.join();
+  completion_queries.join();
+  if (!fence_access_ok.load() || !CheckHR("DrainConcurrentFenceSignals", queue->Signal(fence, 2000)) ||
+      !CheckHR("WaitConcurrentFenceSignals", fence->SetEventOnCompletion(2000, event)) ||
+      WaitForSingleObject(event, 5000) != WAIT_OBJECT_0 || fence->GetCompletedValue() != 2000 ||
+      !CheckHR("RewindConcurrentFenceSignals", fence->Signal(1)) || fence->GetCompletedValue() != 1) {
+    std::cerr << "concurrent fence signal/query or drained rewind failed\n";
+    cleanup();
+    return 1;
+  }
+  std::cout << "D3D12 concurrent fence access and drained rewind passed\n";
+
+  std::atomic<bool> blocking_wait_started{false};
+  HRESULT blocking_wait_result = E_FAIL;
+  std::thread blocking_wait([&] {
+    blocking_wait_started.store(true);
+    blocking_wait_result = fence->SetEventOnCompletion(2, nullptr);
+  });
+  while (!blocking_wait_started.load())
+    std::this_thread::yield();
+  const HRESULT unblock_result = fence->Signal(2);
+  blocking_wait.join();
+  if (!CheckHR("SignalBlockingFenceWait", unblock_result) ||
+      !CheckHR("BlockingFenceWait", blocking_wait_result) ||
+      !CheckHR("RestoreFenceAfterBlockingWait", fence->Signal(1))) {
+    cleanup();
+    return 1;
+  }
 
   if (!CheckHR("CreateMultipleFence",
                device->CreateFence(0, D3D12_FENCE_FLAG_NONE,

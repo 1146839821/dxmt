@@ -25,6 +25,8 @@ namespace dxmt {
 
 class MTLD3D12FenceImpl : public MTLD3D12DeviceChild<MTLD3D12Fence> {
   D3D12_FENCE_FLAGS flags_;
+  dxmt::mutex mutex_;
+  Rc<Fence> fence_;
 
 public:
   MTLD3D12FenceImpl(MTLD3D12Device *pDevice, D3D12_FENCE_FLAGS flags) :
@@ -33,8 +35,8 @@ public:
 
   HRESULT
   Initialize(UINT64 InitialValue) {
-    fence = new Fence(device_->GetMTLDevice());
-    fence->signal(InitialValue);
+    fence_ = new Fence(device_->GetMTLDevice());
+    fence_->signal(InitialValue);
     return S_OK;
   }
 
@@ -61,27 +63,48 @@ public:
 
   UINT64 STDMETHODCALLTYPE
   GetCompletedValue() {
-    return fence->completedValue();
+    std::lock_guard lock(mutex_);
+    return fence_->completedValue();
   }
 
   HRESULT STDMETHODCALLTYPE
   SetEventOnCompletion(UINT64 Value, HANDLE Event) {
-    if (GetCompletedValue() >= Value) {
-      if (Event)
-        SetEvent(Event);
-      return S_OK;
+    WMT::Reference<WMT::SharedEvent> event;
+    {
+      std::lock_guard lock(mutex_);
+      if (fence_->completedValue() >= Value) {
+        if (Event)
+          SetEvent(Event);
+        return S_OK;
+      }
+      if (Event) {
+        device_->event_listener.setEventOnValue(fence_.ptr(), Event, Value);
+        return S_OK;
+      }
+      event = fence_->sharedEvent();
     }
-    if (!Event) {
-      fence->wait(Value);
-      return S_OK;
-    }
-    device_->event_listener.setEventOnValue(fence.ptr(), Event, Value);
+    // Signal must be able to acquire mutex_ while the CPU waits. Retain the
+    // captured event even if another thread rewinds the fence meanwhile.
+    event.waitUntilSignaledValue(Value, ~0ULL);
     return S_OK;
   }
 
   HRESULT STDMETHODCALLTYPE
   Signal(UINT64 Value) {
-    fence->signal(Value);
+    std::lock_guard lock(mutex_);
+    fence_->signal(Value);
+    return S_OK;
+  }
+
+  HRESULT EncodeSignal(WMT::CommandBuffer command_buffer, UINT64 value) final {
+    std::lock_guard lock(mutex_);
+    fence_->signal(command_buffer, value);
+    return S_OK;
+  }
+
+  HRESULT EncodeWait(WMT::CommandBuffer command_buffer, UINT64 value) final {
+    std::lock_guard lock(mutex_);
+    fence_->wait(command_buffer, value);
     return S_OK;
   }
 

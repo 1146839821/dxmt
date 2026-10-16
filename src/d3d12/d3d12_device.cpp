@@ -1886,7 +1886,7 @@ public:
 
     const bool wait_any = Flags == D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY;
     bool completed = !wait_any;
-    std::vector<Rc<Fence>> fences;
+    std::vector<Com<MTLD3D12Fence>> fences;
     std::vector<UINT64> values;
     fences.reserve(FenceCount);
     values.reserve(FenceCount);
@@ -1895,16 +1895,13 @@ public:
       if (!IsSameDevice(this, pFences[i]))
         return E_INVALIDARG;
       auto fence = static_cast<MTLD3D12Fence *>(pFences[i]);
-      if (!fence->fence)
-        return E_INVALIDARG;
-
-      const bool fence_completed = fence->fence->completedValue() >= pValues[i];
+      const bool fence_completed = fence->GetCompletedValue() >= pValues[i];
       if (wait_any)
         completed |= fence_completed;
       else
         completed &= fence_completed;
 
-      fences.emplace_back(fence->fence);
+      fences.emplace_back(fence);
       values.push_back(pValues[i]);
     }
 
@@ -1918,7 +1915,7 @@ public:
         for (;;) {
           bool complete = !wait_any;
           for (size_t i = 0; i < fences.size(); i++) {
-            const bool fence_completed = fences[i]->completedValue() >= values[i];
+            const bool fence_completed = fences[i]->GetCompletedValue() >= values[i];
             if (wait_any)
               complete |= fence_completed;
             else
