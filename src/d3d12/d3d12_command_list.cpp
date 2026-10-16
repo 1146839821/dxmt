@@ -641,6 +641,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   bool recording_failed_;
   uint64_t recording_id_ = 0;
   uint64_t allocator_reset_generation_ = 0;
+  std::shared_ptr<D3D12CommandListRecording> recording_state_;
   bool airconv_render_residency_ = false;
   bool msc_compute_residency_ = false;
   bool indirect_residency_ = false;
@@ -910,6 +911,13 @@ public:
     if (allocator->GetType() != type_)
       return E_INVALIDARG;
 
+    std::shared_ptr<D3D12CommandListRecording> recording;
+    try {
+      recording = std::make_shared<D3D12CommandListRecording>();
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
+
     if (allocator_ != allocator)
       allocator_ = allocator;
 
@@ -1021,6 +1029,7 @@ public:
 
     HRESULT hr = allocator_->StartRecord(&entry);
     if (SUCCEEDED(hr)) {
+      recording_state_ = std::move(recording);
       allocator_reset_generation_ = allocator_->GetResetGeneration();
       encoder_count = std::numeric_limits<size_t>::max();
     }
@@ -1243,6 +1252,10 @@ public:
 
   bool IsAllocatorRecordingValid() const final {
     return allocator_ && allocator_reset_generation_ == allocator_->GetResetGeneration();
+  }
+
+  std::shared_ptr<D3D12CommandListRecording> GetRecordingState() const final {
+    return recording_state_;
   }
 
   uint64_t GetRecordingId() const final {

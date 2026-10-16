@@ -290,6 +290,152 @@ bool TestConcurrentRemovalListeners() {
   return true;
 }
 
+bool TestInFlightRecording(unsigned mode) {
+  struct Fixture {
+    Owned<ID3D12Device> device;
+    Owned<ID3D12CommandQueue> first_queue, second_queue;
+    Owned<ID3D12CommandAllocator> first_allocator, second_allocator;
+    Owned<ID3D12GraphicsCommandList> list, other;
+    Owned<ID3D12Fence> gate, done;
+    Owned<ID3D12Resource> source, readback;
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    void ReleaseQueues() {
+      if (first_queue.ptr) { first_queue.ptr->Release(); first_queue.ptr = nullptr; }
+      if (second_queue.ptr) { second_queue.ptr->Release(); second_queue.ptr = nullptr; }
+    }
+    ~Fixture() {
+      if (gate.ptr) gate->Signal(UINT64_MAX);
+      ReleaseQueues();
+      if (event) CloseHandle(event);
+    }
+  } f;
+  if (!f.event || !CheckHR("In-flight device", D3D12CreateDevice(
+          nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&f.device.ptr))))
+    return false;
+  D3D12_COMMAND_QUEUE_DESC qdesc = {};
+  if (!CheckHR("In-flight queue A", f.device->CreateCommandQueue(&qdesc, IID_PPV_ARGS(&f.first_queue.ptr))) ||
+      !CheckHR("In-flight queue B", f.device->CreateCommandQueue(&qdesc, IID_PPV_ARGS(&f.second_queue.ptr))) ||
+      !CheckHR("In-flight allocator A", f.device->CreateCommandAllocator(
+          D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&f.first_allocator.ptr))) ||
+      !CheckHR("In-flight allocator B", f.device->CreateCommandAllocator(
+          D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&f.second_allocator.ptr))) ||
+      !CheckHR("In-flight gate", f.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f.gate.ptr))) ||
+      !CheckHR("In-flight done", f.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f.done.ptr))))
+    return false;
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  desc.Width = 256; desc.Height = 1; desc.DepthOrArraySize = 1; desc.MipLevels = 1;
+  desc.SampleDesc.Count = 1; desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.Type = D3D12_HEAP_TYPE_UPLOAD; heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  if (!CheckHR("In-flight source", f.device->CreateCommittedResource(
+          &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+          IID_PPV_ARGS(&f.source.ptr))))
+    return false;
+  heap.Type = D3D12_HEAP_TYPE_READBACK;
+  if (!CheckHR("In-flight readback", f.device->CreateCommittedResource(
+          &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+          IID_PPV_ARGS(&f.readback.ptr))))
+    return false;
+  uint32_t *mapped = nullptr;
+  if (!CheckHR("In-flight map source", f.source->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+    return false;
+  mapped[0] = 1234; mapped[1] = 5678;
+  f.source->Unmap(0, nullptr);
+  if (!CheckHR("In-flight clear result", f.readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+    return false;
+  mapped[0] = mapped[1] = 0;
+  f.readback->Unmap(0, nullptr);
+  if (!CheckHR("In-flight list", f.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+          f.first_allocator.ptr, nullptr, IID_PPV_ARGS(&f.list.ptr))))
+    return false;
+  // Concurrent invalid admission uses no GPU resource accesses on either queue.
+  if (mode != 5)
+    f.list->CopyBufferRegion(f.readback.ptr, 0, f.source.ptr, 0, sizeof(uint32_t));
+  if (!CheckHR("In-flight close", f.list->Close()) ||
+      !CheckHR("In-flight other list", f.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+          f.first_allocator.ptr, nullptr, IID_PPV_ARGS(&f.other.ptr))))
+    return false;
+  f.other->CopyBufferRegion(f.readback.ptr, sizeof(uint32_t), f.source.ptr, sizeof(uint32_t), sizeof(uint32_t));
+  if (!CheckHR("In-flight close other", f.other->Close()) ||
+      !CheckHR("In-flight GPU gate", f.first_queue->Wait(f.gate.ptr, 1)))
+    return false;
+  ID3D12CommandList *list = f.list.ptr;
+  if (mode == 5) {
+    if (!CheckHR("Concurrent GPU gate", f.second_queue->Wait(f.gate.ptr, 1)))
+      return false;
+    std::atomic<unsigned> ready{0};
+    std::atomic<bool> start{false};
+    const auto submit = [&](ID3D12CommandQueue *queue) {
+      ready.fetch_add(1);
+      while (!start.load()) std::this_thread::yield();
+      queue->ExecuteCommandLists(1, &list);
+    };
+    std::thread first(submit, f.first_queue.ptr), second(submit, f.second_queue.ptr);
+    while (ready.load() != 2) std::this_thread::yield();
+    start.store(true);
+    first.join(); second.join();
+  } else {
+    f.first_queue->ExecuteCommandLists(1, &list);
+    if (mode == 0) {
+      f.first_queue->ExecuteCommandLists(1, &list);
+    } else if (mode == 1) {
+      ID3D12CommandList *batch[] = {f.other.ptr, list};
+      f.first_queue->ExecuteCommandLists(2, batch);
+    } else if (mode == 2 || mode == 3) {
+      if (!CheckHR("In-flight ordered signal", f.first_queue->Signal(f.done.ptr, 1)) ||
+          !CheckHR("In-flight cross-queue dependency", f.second_queue->Wait(f.done.ptr, 1)))
+        return false;
+      if (mode == 3) {
+        if (!CheckHR("Reset list while old recording pending", f.list->Reset(f.second_allocator.ptr, nullptr)))
+          return false;
+        f.list->CopyBufferRegion(f.readback.ptr, sizeof(uint32_t), f.source.ptr, sizeof(uint32_t), sizeof(uint32_t));
+        if (!CheckHR("Close new recording", f.list->Close())) return false;
+      }
+      f.second_queue->ExecuteCommandLists(1, &list);
+    } else if (mode == 6) {
+      ID3D12CommandList *other = f.other.ptr;
+      f.first_queue->ExecuteCommandLists(1, &other);
+    }
+  }
+  if (mode <= 2 || mode == 5) {
+    const bool removed = FAILED(f.device->GetDeviceRemovedReason()) && f.gate->GetCompletedValue() == UINT64_MAX;
+    f.gate->Signal(UINT64_MAX); // Recovery for the pre-fix runtime.
+    f.ReleaseQueues();
+    if (!CheckHR("In-flight rejected batch result", f.readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+      return false;
+    const bool dropped_other = mapped[1] == 0;
+    f.readback->Unmap(0, nullptr);
+    if (!removed || !dropped_other) {
+      std::cerr << "in-flight replay mode " << mode << " was accepted or mixed batch executed\n";
+      return false;
+    }
+    std::cout << "in-flight replay mode " << mode << " removed device; mixed output remains zero\n";
+    return true;
+  }
+  auto completion_queue = mode == 3 ? f.second_queue.ptr : f.first_queue.ptr;
+  if (!CheckHR("In-flight finish signal", completion_queue->Signal(f.done.ptr, 2)) ||
+      !CheckHR("In-flight finish event", f.done->SetEventOnCompletion(2, f.event)) ||
+      !CheckHR("Release in-flight gate", f.gate->Signal(1)) || WaitForSingleObject(f.event, 5000) != WAIT_OBJECT_0)
+    return false;
+  if (mode == 4) {
+    // The same closed recording can be executed again after GPU completion.
+    f.first_queue->ExecuteCommandLists(1, &list);
+    if (!CheckHR("Completed replay signal", f.first_queue->Signal(f.done.ptr, 3)) ||
+        !CheckHR("Completed replay event", f.done->SetEventOnCompletion(3, f.event)) ||
+        WaitForSingleObject(f.event, 5000) != WAIT_OBJECT_0)
+      return false;
+  }
+  if (!CheckHR("Healthy in-flight device", f.device->GetDeviceRemovedReason()) ||
+      !CheckHR("In-flight positive readback", f.readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+    return false;
+  const bool correct = mapped[0] == 1234 && mapped[1] == ((mode == 3 || mode == 6) ? 5678u : 0u);
+  f.readback->Unmap(0, nullptr);
+  if (!correct) { std::cerr << "valid recording mode " << mode << " readback failed\n"; return false; }
+  std::cout << "valid recording mode " << mode << " preserved independent recording/readback\n";
+  return true;
+}
+
 struct ExecuteContext {
   ID3D12CommandQueue *queue;
   ID3D12CommandList *command_list;
@@ -428,6 +574,13 @@ int main() {
   if (!TestDeviceRemovalWaits() || !TestConcurrentRemovalListeners()) {
     device->Release();
     return 1;
+  }
+
+  for (unsigned mode = 0; mode <= 6; mode++) {
+    if (!TestInFlightRecording(mode)) {
+      device->Release();
+      return 1;
+    }
   }
 
   const D3D12_COMMAND_LIST_TYPE types[] = {

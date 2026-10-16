@@ -51,6 +51,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   struct Submission {
     uint64_t serial = 0;
     WMT::Reference<WMT::CommandBuffer> command_buffer;
+    std::shared_ptr<D3D12CommandListSubmission> recording_lifetime;
     struct CommandList {
       uint64_t recording_id = 0;
       struct Encoder {
@@ -729,11 +730,41 @@ public:
         WARN("D3D12 ExecuteCommandLists received an open command list");
         return;
       }
+      if (auto recording = pCommandList->GetRecordingState(); recording && recording->IsInFlight()) {
+        WARN("D3D12 ExecuteCommandLists received an in-flight command list recording");
+        device_->MarkDeviceRemoved(DXGI_ERROR_INVALID_CALL);
+        return;
+      }
     }
 
     std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
     if (!WaitForSubmissionSpaceLocked())
       return;
+
+    // Keep admission alive both during CPU translation and until GPU completion.
+    // A fresh Reset owns a different recording, even on the same COM object.
+    std::shared_ptr<D3D12CommandListSubmission> recording_lifetime;
+    try {
+      recording_lifetime = std::make_shared<D3D12CommandListSubmission>();
+    } catch (const std::bad_alloc &) {
+      WARN("D3D12 ExecuteCommandLists could not allocate recording admission state");
+      device_->MarkDeviceRemoved(E_OUTOFMEMORY);
+      return;
+    }
+    struct TranslationLifetime {
+      std::shared_ptr<D3D12CommandListSubmission> state;
+      ~TranslationLifetime() { state->cpu_active.store(false, std::memory_order_release); }
+    } translation_lifetime{recording_lifetime};
+    Submission submission;
+    submission.recording_lifetime = recording_lifetime;
+    for (UINT i = 0; i < Count; i++) {
+      auto recording = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->GetRecordingState();
+      if (!recording || !recording->TryAcquire(recording_lifetime)) {
+        WARN("D3D12 ExecuteCommandLists raced another submission of the same recording");
+        device_->MarkDeviceRemoved(DXGI_ERROR_INVALID_CALL);
+        return;
+      }
+    }
 
     std::vector<SubmissionResourceUse> descriptor_resource_uses;
     std::vector<WMT::Reference<WMT::Resource>> descriptor_resource_refs;
@@ -756,8 +787,8 @@ public:
     auto cmdbuf = NewCommandBuffer();
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
-    Submission submission;
     submission.command_buffer = cmdbuf;
+    recording_lifetime->command_buffer = cmdbuf;
     for (auto &use : descriptor_resource_uses)
       submission.descriptor_resource_uses[use.encoder].push_back(std::move(use));
     submission.descriptor_resource_refs = std::move(descriptor_resource_refs);

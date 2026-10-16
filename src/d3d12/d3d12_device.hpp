@@ -34,6 +34,7 @@
 #include "d3d12_pipeline_persistence.hpp"
 #include "dxmt_texture.hpp"
 #include <cstdint>
+#include <atomic>
 #include <mutex>
 #include <memory>
 #include "log/log.hpp"
@@ -102,6 +103,38 @@ struct AirconvResidencyCounters {
   uint64_t direct_indexed_descriptors = 0;
 };
 
+struct D3D12CommandListSubmission {
+  // Published by the submitting CPU thread before cpu_active becomes false.
+  WMT::Reference<WMT::CommandBuffer> command_buffer;
+  std::atomic<bool> cpu_active{true};
+
+  bool IsInFlight() {
+    if (cpu_active.load(std::memory_order_acquire))
+      return true;
+    return command_buffer && command_buffer.status() != WMTCommandBufferStatusCompleted;
+  }
+};
+
+class D3D12CommandListRecording {
+  dxmt::mutex mutex_;
+  std::weak_ptr<D3D12CommandListSubmission> submission_;
+
+public:
+  bool IsInFlight() {
+    std::lock_guard lock(mutex_);
+    auto submission = submission_.lock();
+    return submission && submission->IsInFlight();
+  }
+
+  bool TryAcquire(const std::shared_ptr<D3D12CommandListSubmission> &submission) {
+    std::lock_guard lock(mutex_);
+    if (auto active = submission_.lock(); active && active != submission && active->IsInFlight())
+      return false;
+    submission_ = submission;
+    return true;
+  }
+};
+
 class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList7, public IMTLD3D12CommandListExt {
 public:
   EncoderData *entry = nullptr;
@@ -109,6 +142,7 @@ public:
 
   virtual MTLD3D12CommandAllocator *GetAllocator() = 0;
   virtual bool IsAllocatorRecordingValid() const = 0;
+  virtual std::shared_ptr<D3D12CommandListRecording> GetRecordingState() const = 0;
   virtual uint64_t GetRecordingId() const = 0;
   virtual AirconvResidencyCounters GetAirconvResidencyCounters() const = 0;
   virtual void MarkSubmitted() = 0;
