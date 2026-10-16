@@ -175,8 +175,24 @@ int main(int argc, char **argv) {
     return 1;
   }
   if (std::none_of(legacy_parts.begin(), legacy_parts.end(), [](const Part &part) { return part.fourcc == kShex; })) {
-    std::cerr << "D3DCompile did not produce a legacy SHEX fixture\n";
-    return 1;
+    // Some Wine compilers emit SM5.0 tokens in SHDR. Preserve the program
+    // payload and rebuild the container hash to exercise the SHEX route too.
+    bool converted_shdr = false;
+    for (auto &part : legacy_parts) {
+      if (part.fourcc == kShdr && part.payload.size() >= 2 * sizeof(uint32_t) &&
+          (ReadU32(part.payload.data()) & 0xffff) == 0x50) {
+        part.fourcc = kShex;
+        converted_shdr = true;
+      }
+    }
+    std::vector<uint8_t> normalized_shex;
+    if (!converted_shdr || !BuildContainer(legacy_shader, legacy_parts, normalized_shex) ||
+        !ReadContainer(normalized_shex, legacy_parts) ||
+        std::none_of(legacy_parts.begin(), legacy_parts.end(), [](const Part &part) { return part.fourcc == kShex; })) {
+      std::cerr << "failed to normalize the cs_5_0 fixture into a valid legacy SHEX container\n";
+      return 1;
+    }
+    legacy_shader = std::move(normalized_shex);
   }
   if (std::none_of(legacy_shdr_parts.begin(), legacy_shdr_parts.end(),
                    [](const Part &part) { return part.fourcc == kShdr; })) {
