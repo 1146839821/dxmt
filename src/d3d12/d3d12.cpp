@@ -78,7 +78,10 @@ D3D12CreateDevice(IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REF
       return hr;
     }
   } else {
-    dxgi_adapter = com_cast<IDXGIAdapter>(pAdapter);
+    if (FAILED(hr = pAdapter->QueryInterface(IID_PPV_ARGS(&dxgi_adapter)))) {
+      ERR("D3D12CreateDevice: Not a DXGI adapter");
+      return hr;
+    }
   }
 
   if (FAILED(hr = dxgi_adapter->QueryInterface(IID_PPV_ARGS(&dxgi_adapter_mtl)))) {

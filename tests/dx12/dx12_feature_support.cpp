@@ -9,6 +9,28 @@
 
 namespace {
 
+class NonAdapter final : public IUnknown {
+public:
+  LONG references = 1;
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **object) override {
+    *object = nullptr;
+    if (riid != __uuidof(IUnknown))
+      return E_NOINTERFACE;
+    *object = static_cast<IUnknown *>(this);
+    AddRef();
+    return S_OK;
+  }
+
+  ULONG STDMETHODCALLTYPE AddRef() override {
+    return InterlockedIncrement(&references);
+  }
+
+  ULONG STDMETHODCALLTYPE Release() override {
+    return InterlockedDecrement(&references);
+  }
+};
+
 template <typename T>
 void
 Release(T *&object) {
@@ -53,6 +75,22 @@ CheckShaderModelRequest(ID3D12Device *device, UINT requested, HRESULT expected_h
 
 int
 main() {
+  NonAdapter non_adapter;
+  ID3D12Device *invalid_device = nullptr;
+  if (!CheckHR(
+          "D3D12CreateDevice(non-adapter probe)",
+          D3D12CreateDevice(&non_adapter, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), nullptr),
+          E_NOINTERFACE
+      ) ||
+      !CheckHR(
+          "D3D12CreateDevice(non-adapter)",
+          D3D12CreateDevice(&non_adapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&invalid_device)),
+          E_NOINTERFACE
+      ) || invalid_device || non_adapter.references != 1) {
+    Release(invalid_device);
+    return 1;
+  }
+
   constexpr std::array feature_levels = {
       D3D_FEATURE_LEVEL_11_0,
       D3D_FEATURE_LEVEL_11_1,
