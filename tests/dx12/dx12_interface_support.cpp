@@ -204,17 +204,31 @@ int main() {
     passed = false;
   } else {
     IUnknown *const output_sentinel = reinterpret_cast<IUnknown *>(static_cast<uintptr_t>(1));
-    IUnknown *new_state_object = output_sentinel;
-    const HRESULT add_to_state_object_hr = device7->AddToStateObject(
-        nullptr, nullptr, __uuidof(ID3D12StateObject), reinterpret_cast<void **>(&new_state_object)
-    );
-    if (add_to_state_object_hr != E_NOTIMPL || new_state_object != nullptr) {
-      std::cerr << "ID3D12Device7::AddToStateObject returned 0x" << std::hex
-                << static_cast<unsigned long>(add_to_state_object_hr) << std::dec << "\n";
-      passed = false;
+    D3D12_STATE_OBJECT_DESC addition = {};
+    addition.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
+    const struct {
+      const char *name;
+      const D3D12_STATE_OBJECT_DESC *addition;
+      bool provide_output;
+    } invalid_additions[] = {
+        {"missing addition and parent", nullptr, true},
+        {"missing parent", &addition, true},
+        {"missing parent and output", &addition, false},
+    };
+    for (const auto &test : invalid_additions) {
+      IUnknown *new_state_object = output_sentinel;
+      const HRESULT add_to_state_object_hr = device7->AddToStateObject(
+          test.addition, nullptr, __uuidof(ID3D12StateObject),
+          test.provide_output ? reinterpret_cast<void **>(&new_state_object) : nullptr
+      );
+      if (add_to_state_object_hr != E_INVALIDARG || (test.provide_output && new_state_object != nullptr)) {
+        std::cerr << "ID3D12Device7::AddToStateObject (" << test.name << ") returned 0x" << std::hex
+                  << static_cast<unsigned long>(add_to_state_object_hr) << std::dec << "\n";
+        passed = false;
+      }
+      if (test.provide_output && new_state_object != output_sentinel)
+        Release(new_state_object);
     }
-    if (new_state_object != output_sentinel)
-      Release(new_state_object);
 
     IUnknown *protected_session = output_sentinel;
     const HRESULT protected_session_hr = device7->CreateProtectedResourceSession1(
