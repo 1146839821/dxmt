@@ -169,6 +169,62 @@ without first documenting a changed contract or a regression.
   currently report pre-existing violations in these large test/source files;
   do not reformat unrelated lines while closing a slice.
 
+### Runtime identity correction — 2026-10-22
+
+N15 investigated a reproducible CPU write fault during
+`CreateReservedResource -> MTLD3D12Texture::InitializeReserved ->
+Texture::allocatePlacementSparse`. The cause was deployment ABI mismatch,
+not a demonstrated sparse-resource implementation defect. The installed Wine
+builtin export writes through the fourth x64 argument (`r9`); the current
+`MTLDevice_newPlacementSparseTexture` declaration and caller pass three arguments.
+The fault at export offset `+0x0d` is that write. No resource workaround or
+production ABI change was made.
+
+An external identity probe inspected the loaded export without creating a GPU
+resource. It rejected the installed bridge and accepted the private build:
+
+| Loaded PE image | Image size | Sparse texture export RVA | Identity result |
+| --- | --- | --- | --- |
+| Installed WineMetal | `0x25000` | `0x2010` | mismatch, exit 1 |
+| Current build | `0x1a000` | `0x2090` | match, exit 0 |
+
+The original configuration used `winemetal=b` and `WINEDLLPATH`, but Wine 11.0
+searched its installation first. Its PE loading log named the requested
+app-local path even though the loaded image matched the installed builtin.
+`DYLD_PRINT_LIBRARIES=1` also identified the installed Unix companion.
+An isolated Wine installation with the matching PE/Unix pair, and PE builtin
+postprocessing, loaded both intended images. The original resource executable
+and D3D12 DLL then changed from exit 5 to exit 0. This corrects the earlier
+2026-10-22 N02 classification of the crash as a possible resource defect.
+See [private-build deployment](DEVELOPMENT.md#testing-a-private-winemetal-build).
+
+Environment: macOS 27.0.1, Xcode 27.1 (the actual installed version), M1 Max /
+Apple7, Wine 11.0, repository LLVM/Wine build dependencies, MSC API 4.0.1.
+After a scoped rebuild, the following existing runners all exited 0 with the
+paired runtime:
+
+- `dx12_resource_tests`: allocation/validation and queue/fence assertions.
+- `dx12_reserved_texture`: SM6 shader reads/writes, remap, NULL access,
+  cross-queue waits, and exact `CopyTiles` readback.
+- `dx12_reserved_buffer`: SM6 shader reads/writes, remap, NULL access,
+  backing preservation, cross-queue waits, and exact `CopyTiles` readback.
+- `dx12_tiled_status_sm5`: mapped status, linear filtering footprint,
+  per-sample LOD, and `CheckAccessFullyMapped` assertions.
+- `dx12_feature_support`: public capability consistency assertions.
+
+Commands, DLL/shader hashes, the build-specific identity probe, and raw logs
+are retained outside the repository under `dxmt-test/n15-20261022`. No gate
+runner was added to the repository. The user's Wine installation and shared
+prefix were not modified. Future runtime validation must use the verified
+pair; previous runs do not prove behavior of the intended source-built bridge
+unless its identity was established.
+
+No production hot path changed, so no performance improvement is claimed; the
+crashing configuration is not a meaningful performance baseline. Packed-tail
+layout, broader shader status coverage, native Windows comparison, and the
+other outstanding contracts above remain open. Feature Level, Shader Model,
+and TiledResourcesTier are unchanged; these passes do not establish Tier 2/3.
+
 ## Post-GO Tier2 audit — 2026-09-12 (Round 2 re-audit)
 
 This is an audit and semantic-closure record, not a capability declaration.

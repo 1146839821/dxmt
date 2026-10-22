@@ -79,6 +79,39 @@ meson compile -C build32
 
 > You can't build 32-bit dlls only, they need 64-bit unixlib to be functional
 
+#### Testing a private WineMetal build
+
+Deploy `winemetal.dll` and `winemetal.so` from the same build, together with
+the DXMT DLLs that use their headers. WineMetal exports and Unix call structures
+must agree across that boundary; finding an export with the expected name does
+not establish ABI compatibility.
+
+A full build runs the Wine builtin postprocessing step. After compiling only
+selected targets, run it explicitly before copying the PE DLL:
+
+```sh
+meson compile -C build postprocess_lib
+```
+
+For an x64 build, the pair is `build/src/winemetal/winemetal.dll` and
+`build/src/winemetal/unix/winemetal.so`. Install both into the corresponding
+`lib/wine/x86_64-windows` and `lib/wine/x86_64-unix` directories of a separate
+test Wine installation, and launch that installation with a dedicated prefix.
+Keep the user's Wine installation and shared prefix intact.
+
+On the tested Wine 11.0 installation, its builtin DLL directory takes precedence
+over `WINEDLLPATH`. Setting `winemetal=b` can therefore select an installed bridge
+instead of the private build, even when an app-local DLL exists. Switching only
+to `winemetal=n` does not establish the Unix companion association either.
+Verify both sides: `WINEDEBUG=+loaddll,+module` for loading diagnostics and
+`DYLD_PRINT_LIBRARIES=1` for the actual Unix library path. The PE path printed by
+Wine alone is insufficient: compare the loaded image metadata or export bytes
+with the intended build when another builtin with the same name is installed.
+
+The 2026-10-22 reserved-resource validation in
+[the resource audit checklist](D3D12_RESOURCE_AUDIT_CHECKLIST.md#runtime-identity-correction--2026-10-22)
+records a concrete ABI mismatch and the paired-runtime results.
+
 There are other compile options in [meson.options](/meson.options).
 
 #### `clangd` configuration for proper language server support 
