@@ -183,6 +183,46 @@ main() {
       ) || !options3.CopyQueueTimestampQueriesSupported || !options3.CastingFullyTypedFormatSupported)
     return fail("D3D12 options3 contract mismatch");
 
+  for (const auto format : {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_FLOAT,
+                            DXGI_FORMAT_D24_UNORM_S8_UINT}) {
+    for (const UINT sample_count : {1u, 2u, 4u, 8u}) {
+      D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS ordinary = {
+          format, sample_count, D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE,
+          UINT_MAX};
+      if (!CheckHR("CheckFeatureSupport(ordinary MSAA)",
+                   device->CheckFeatureSupport(
+                       D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &ordinary,
+                       sizeof(ordinary))) ||
+          ordinary.Flags != D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE ||
+          (sample_count == 1 && !ordinary.NumQualityLevels))
+        return fail("ordinary MSAA query contract mismatch");
+
+      auto tiled = ordinary;
+      tiled.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_TILED_RESOURCE;
+      tiled.NumQualityLevels = UINT_MAX;
+      if (!CheckHR("CheckFeatureSupport(tiled MSAA)",
+                   device->CheckFeatureSupport(
+                       D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &tiled,
+                       sizeof(tiled))) ||
+          tiled.Flags != D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_TILED_RESOURCE ||
+          (options.TiledResourcesTier ==
+               D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED &&
+           tiled.NumQualityLevels))
+        return fail("tiled MSAA query contradicts tiled resource support");
+    }
+  }
+
+  D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS invalid_msaa = {
+      DXGI_FORMAT_R8G8B8A8_UNORM, 4,
+      static_cast<D3D12_MULTISAMPLE_QUALITY_LEVEL_FLAGS>(0x80000000u),
+      UINT_MAX};
+  if (!CheckHR(
+          "CheckFeatureSupport(unknown MSAA flags)",
+          device->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
+                                      &invalid_msaa, sizeof(invalid_msaa)),
+          E_INVALIDARG))
+    return fail("unknown MSAA flags were accepted");
+
   constexpr std::array<UINT, 11> known_shader_model_requests = {
       0x51, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69,
   };

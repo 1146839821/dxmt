@@ -608,9 +608,11 @@ public:
       if (DataSize != sizeof(D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS))
         return E_INVALIDARG;
       auto *out = reinterpret_cast<D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS *>(pFeatureData);
+      if (out->Flags != D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE &&
+          out->Flags != D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_TILED_RESOURCE)
+        return E_INVALIDARG;
 
       if (out->SampleCount == 0) {
-        out->Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
         out->NumQualityLevels = 0;
         return E_FAIL;
       }
@@ -623,14 +625,15 @@ public:
       MTL_DXGI_FORMAT_DESC format_desc;
       HRESULT hr = MTLQueryDXGIFormat(metal, out->Format, format_desc);
       if (SUCCEEDED(hr) && out->SampleCount) {
-        out->Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
         const auto capabilities = GetMTLPixelFormatCapability(format_desc.PixelFormat);
         const bool format_supports_msaa =
             (static_cast<int>(capabilities) & static_cast<int>(FormatCapability::MSAA)) != 0;
+        // Native MSAA support does not provide a tiled multisample resource path.
+        const bool resource_supports_msaa = out->Flags == D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
         out->NumQualityLevels =
-            metal.supportsTextureSampleCount(out->SampleCount) && format_supports_msaa ? 1 : 0;
+            resource_supports_msaa && metal.supportsTextureSampleCount(out->SampleCount) && format_supports_msaa ? 1
+                                                                                                                 : 0;
       } else {
-        out->Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
         out->NumQualityLevels = 0;
         return E_FAIL;
       }
