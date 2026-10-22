@@ -939,9 +939,27 @@ public:
     if (allocator->GetType() != type_)
       return E_INVALIDARG;
 
+    if (!msc_dummy_buffer_) {
+      WMTBufferInfo info = {};
+      info.length = 8;
+      info.memory.set(nullptr);
+      info.options = WMTResourceStorageModeShared | WMTResourceHazardTrackingModeUntracked;
+      msc_dummy_buffer_ = device_->GetMTLDevice().newBuffer(info);
+      if (!msc_dummy_buffer_)
+        return E_OUTOFMEMORY;
+      if (info.memory.ptr)
+        memset(info.memory.ptr, 0, info.length);
+    }
+
+    // Reject a busy allocator before changing the closed recording's owner or
+    // dependencies. StartRecord is the allocator's sole recording admission.
     std::shared_ptr<D3D12CommandListRecording> recording;
+    EncoderData *recording_entry = nullptr;
     try {
       recording = std::make_shared<D3D12CommandListRecording>();
+      const HRESULT hr = allocator->StartRecord(&recording_entry);
+      if (FAILED(hr))
+        return hr;
     } catch (const std::bad_alloc &) {
       return E_OUTOFMEMORY;
     }
@@ -1007,17 +1025,6 @@ public:
     rootsig_compute_ = nullptr;
     descriptor_heap_ = nullptr;
     sampler_heap_ = nullptr;
-    if (!msc_dummy_buffer_) {
-      WMTBufferInfo info = {};
-      info.length = 8;
-      info.memory.set(nullptr);
-      info.options = WMTResourceStorageModeShared | WMTResourceHazardTrackingModeUntracked;
-      msc_dummy_buffer_ = device_->GetMTLDevice().newBuffer(info);
-      if (!msc_dummy_buffer_)
-        return E_OUTOFMEMORY;
-      if (info.memory.ptr)
-        memset(info.memory.ptr, 0, info.length);
-    }
     memset(rootarg_compute_staging_, 0, sizeof(rootarg_compute_staging_));
 
     memset(vertex_buffers_.data(), 0, sizeof(vertex_buffers_));
@@ -1061,13 +1068,11 @@ public:
     pending_barrier_stages_before_ = (WMTRenderStages)0;
     resource_state_transitions_.clear();
 
-    HRESULT hr = allocator_->StartRecord(&entry);
-    if (SUCCEEDED(hr)) {
-      recording_state_ = std::move(recording);
-      allocator_reset_generation_ = allocator_->GetResetGeneration();
-      encoder_count = std::numeric_limits<size_t>::max();
-    }
-    return hr;
+    entry = recording_entry;
+    recording_state_ = std::move(recording);
+    allocator_reset_generation_ = allocator_->GetResetGeneration();
+    encoder_count = std::numeric_limits<size_t>::max();
+    return S_OK;
   }
 
   void

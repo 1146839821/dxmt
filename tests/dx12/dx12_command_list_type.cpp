@@ -144,6 +144,37 @@ bool TestResetAllocatorSubmission(ID3D12Device *device, unsigned removal_mode = 
     std::cout << (removal_mode == 2 ? "mixed" : "single") << " stale allocator batch removed device; readback remains zero\n";
     return true;
   }
+  Owned<ID3D12CommandAllocator> busy_allocator;
+  Owned<ID3D12GraphicsCommandList> busy_list;
+  if (!CheckHR("Busy reset allocator", device->CreateCommandAllocator(
+          D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&busy_allocator.ptr))) ||
+      !CheckHR("Busy allocator generation 1", busy_allocator->Reset()) ||
+      !CheckHR("Busy allocator generation 2", busy_allocator->Reset()) ||
+      !CheckHR("Busy reset list", device->CreateCommandList(
+          0, D3D12_COMMAND_LIST_TYPE_DIRECT, busy_allocator.ptr, nullptr, IID_PPV_ARGS(&busy_list.ptr))))
+    return false;
+  // A rejected Reset must not replace the allocator owning the closed stream.
+  // Different generations make a mistaken owner observable before GPU access.
+  if (fresh->Reset(busy_allocator.ptr, nullptr) != E_INVALIDARG) {
+    std::cerr << "Reset accepted an allocator used by another recording list\n";
+    return false;
+  }
+  if (!CheckHR("Clear rejected Reset result", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+    return false;
+  *mapped = 0;
+  readback->Unmap(0, nullptr);
+  if (!submit("closed recording after rejected Reset", &fresh_list, 1, 0x22222222))
+    return false;
+  busy_list->CopyBufferRegion(readback.ptr, 0, source.ptr, 0, sizeof(uint32_t));
+  ID3D12CommandList *busy = busy_list.ptr;
+  if (!CheckHR("Close busy reset list", busy_list->Close()) ||
+      !submit("other recording after rejected Reset", &busy, 1, 0x11111111) ||
+      !CheckHR("Retry Reset after allocator released", fresh->Reset(busy_allocator.ptr, nullptr)))
+    return false;
+  fresh->CopyBufferRegion(readback.ptr, 0, source.ptr, sizeof(uint32_t), sizeof(uint32_t));
+  if (!CheckHR("Close retried Reset", fresh->Close()) ||
+      !submit("retried Reset recording", &fresh_list, 1, 0x22222222))
+    return false;
   if (!CheckHR("Reset test rerecord stale", stale->Reset(allocator.ptr, nullptr)))
     return false;
   stale->CopyBufferRegion(readback.ptr, 0, source.ptr, 0, sizeof(uint32_t));
