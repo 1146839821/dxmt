@@ -90,7 +90,9 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
   std::atomic_uint32_t in_flight_submissions_ = {0u};
   std::atomic<uint64_t> reset_generation_{0};
 
-  small_vector<EncoderData, 64> encoder_lists_;
+  // Heads live in the CPU arena so growing this index cannot invalidate a
+  // command list's entry pointer. Reset owns both the heads and their passes.
+  small_vector<EncoderData *, 64> encoder_lists_;
 
   small_vector<WMT::Reference<WMT::IndirectCommandBuffer>, 4> icb_;
 
@@ -202,7 +204,12 @@ public:
   StartRecord(EncoderData **pStartEncoder) {
     if (encoder_last)
       return E_INVALIDARG;
-    *pStartEncoder = encoder_last = &encoder_lists_.emplace_back(EncoderType::Null, nullptr);
+    auto storage = AllocateCPUHeap(sizeof(EncoderData), alignof(EncoderData));
+    if (!storage)
+      return E_OUTOFMEMORY;
+    auto &head = encoder_lists_.emplace_back();
+    head = new (storage) EncoderData{EncoderType::Null, nullptr};
+    *pStartEncoder = encoder_last = head;
     return S_OK;
   }
 

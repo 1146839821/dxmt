@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <thread>
 #include <atomic>
+#include <array>
 
 namespace {
 
@@ -180,6 +181,81 @@ bool TestResetAllocatorSubmission(ID3D12Device *device, unsigned removal_mode = 
   stale->CopyBufferRegion(readback.ptr, 0, source.ptr, 0, sizeof(uint32_t));
   return CheckHR("Reset test close rerecorded", stale->Close()) &&
          submit("rerecorded command list", &stale_list, 1, 0x11111111);
+}
+
+bool TestAllocatorRecordingGrowth(ID3D12Device *device) {
+  constexpr UINT max_recordings = 129;
+  Owned<ID3D12CommandQueue> queue;
+  Owned<ID3D12CommandAllocator> allocator;
+  Owned<ID3D12Resource> source, readback;
+  Owned<ID3D12Fence> fence;
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  if (!CheckHR("Growth queue", device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue.ptr))) ||
+      !CheckHR("Growth allocator", device->CreateCommandAllocator(
+          D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator.ptr))) ||
+      !CheckHR("Growth fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.ptr))))
+    return false;
+  struct Event {
+    HANDLE handle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    ~Event() { if (handle) CloseHandle(handle); }
+  } event;
+  if (!event.handle) return false;
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  desc.Width = max_recordings * sizeof(uint32_t);
+  desc.Height = desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+  desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  if (!CheckHR("Growth source", device->CreateCommittedResource(
+          &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&source.ptr))))
+    return false;
+  heap.Type = D3D12_HEAP_TYPE_READBACK;
+  if (!CheckHR("Growth readback", device->CreateCommittedResource(
+          &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback.ptr))))
+    return false;
+  uint32_t *mapped = nullptr;
+  if (!CheckHR("Growth map source", source->Map(0, nullptr, reinterpret_cast<void **>(&mapped)))) return false;
+  for (UINT i = 0; i < max_recordings; ++i) mapped[i] = 0x5a000000u + i;
+  source->Unmap(0, nullptr);
+  UINT64 value = 0;
+  for (UINT count : {63u, 64u, 65u, max_recordings}) {
+    if (!CheckHR("Growth allocator reset", allocator->Reset())) return false;
+    std::array<Owned<ID3D12GraphicsCommandList>, max_recordings> lists;
+    std::array<ID3D12CommandList *, max_recordings> batch{};
+    for (UINT i = 0; i < count; ++i) {
+      if (!CheckHR("Growth list", device->CreateCommandList(
+              0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.ptr, nullptr, IID_PPV_ARGS(&lists[i].ptr)))) return false;
+      lists[i]->CopyBufferRegion(readback.ptr, i * sizeof(uint32_t), source.ptr, i * sizeof(uint32_t), sizeof(uint32_t));
+      if (!CheckHR("Growth close", lists[i]->Close())) return false;
+      batch[i] = lists[i].ptr;
+    }
+    for (unsigned replay = 0; replay < 2; ++replay) {
+      if (!CheckHR("Growth clear readback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped)))) return false;
+      for (UINT i = 0; i < max_recordings; ++i) mapped[i] = 0;
+      readback->Unmap(0, nullptr);
+      queue->ExecuteCommandLists(count, batch.data());
+      if (!CheckHR("Growth signal", queue->Signal(fence.ptr, ++value)) ||
+          !CheckHR("Growth completion event", fence->SetEventOnCompletion(value, event.handle)) ||
+          WaitForSingleObject(event.handle, 5000) != WAIT_OBJECT_0 ||
+          !CheckHR("Growth healthy device", device->GetDeviceRemovedReason()) ||
+          !CheckHR("Growth result", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped)))) return false;
+      bool correct = true;
+      for (UINT i = 0; i < max_recordings; ++i) {
+        const uint32_t expected = i < count ? 0x5a000000u + i : 0;
+        if (mapped[i] != expected) {
+          std::cerr << "growth count " << count << " replay " << replay << " element " << i << " mismatch\n";
+          correct = false;
+          break;
+        }
+      }
+      readback->Unmap(0, nullptr);
+      if (!correct) return false;
+      std::cout << "allocator growth count " << count << " replay " << replay << " exact readback passed\n";
+    }
+  }
+  return true;
 }
 
 bool TestDeviceRemovalWaits() {
@@ -878,7 +954,7 @@ int main() {
   if (!CheckHR("D3D12CreateDevice", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))))
     return 1;
 
-  if (!TestResetAllocatorSubmission(device)) {
+  if (!TestResetAllocatorSubmission(device) || !TestAllocatorRecordingGrowth(device)) {
     device->Release();
     return 1;
   }

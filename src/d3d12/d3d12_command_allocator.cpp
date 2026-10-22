@@ -158,13 +158,14 @@ MTLD3D12CommandAllocatorImpl::DestroyEncoders() {
     encoder_current = nullptr;
   }
 
-  for (auto &encoder_list : encoder_lists_) {
-    EncoderData *next = encoder_list.next;
+  for (auto *encoder_list : encoder_lists_) {
+    EncoderData *next = encoder_list->next;
     while (next) {
       EncoderData *encoder = next;
       next = encoder->next;
       DestroyEncoder(encoder);
     }
+    encoder_list->~EncoderData();
   }
   encoder_lists_.clear();
   encoder_last = nullptr;
