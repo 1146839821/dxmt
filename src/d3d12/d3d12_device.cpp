@@ -21,7 +21,8 @@
 #include "d3d12_raytracing.hpp"
 #include "d3d12_raytracing_pipeline.hpp"
 #include "d3d12sdklayers.h"
-#include "d3d10.h"
+#include "d3d10_1.h"
+#include "d3d11_4.h"
 #include "Metal.hpp"
 #include "com/com_pointer.hpp"
 #include "com/com_object.hpp"
@@ -462,9 +463,12 @@ public:
 
     *ppvObject = nullptr;
 
-    // Device-child validation asks for canonical identity on the recording path.
-    if (riid == __uuidof(IUnknown)) {
-      *ppvObject = ref(static_cast<ID3D12Device *>(this));
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12Device) ||
+        riid == __uuidof(ID3D12Device1) || riid == __uuidof(ID3D12Device2) || riid == __uuidof(ID3D12Device3) ||
+        riid == __uuidof(ID3D12Device4) || riid == __uuidof(ID3D12Device5) || riid == __uuidof(ID3D12Device6) ||
+        riid == __uuidof(ID3D12Device7) || riid == __uuidof(ID3D12Device8) || riid == __uuidof(ID3D12Device9) ||
+        riid == __uuidof(ID3D12Device10)) {
+      *ppvObject = ref(this);
       return S_OK;
     }
 
@@ -473,63 +477,24 @@ public:
       return S_OK;
     }
 
-    if (riid == __uuidof(ID3D12Device1) || riid == __uuidof(ID3D12Device2) || riid == __uuidof(ID3D12Device3) ||
-        riid == __uuidof(ID3D12Device4)) {
-      auto *device = static_cast<ID3D12Device4 *>(this);
-      *ppvObject = ref(device);
-      return S_OK;
-    }
-
-    if (riid == __uuidof(ID3D12Device5)) {
-      *ppvObject = ref(static_cast<ID3D12Device5 *>(this));
-      return S_OK;
-    }
-
-    if (riid == __uuidof(ID3D12Device6)) {
-      *ppvObject = ref(static_cast<ID3D12Device6 *>(this));
-      return S_OK;
-    }
-
-    if (riid == __uuidof(ID3D12Device7)) {
-      *ppvObject = ref(static_cast<ID3D12Device7 *>(this));
-      return S_OK;
-    }
-
-    if (riid == __uuidof(ID3D12Device8)) {
-      *ppvObject = ref(static_cast<ID3D12Device8 *>(this));
-      return S_OK;
-    }
-
-    if (riid == __uuidof(ID3D12Device9)) {
-      *ppvObject = ref(static_cast<ID3D12Device9 *>(this));
-      return S_OK;
-    }
-
-    if (riid == __uuidof(ID3D12Device10)) {
-      *ppvObject = ref(static_cast<ID3D12Device10 *>(this));
-      return S_OK;
-    }
-
     if (riid == __uuidof(ID3D12InfoQueue)) {
       *ppvObject = ref(new MTLD3D12InfoQueue());
       return S_OK;
     }
 
-    if (riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12Device)) {
-      *ppvObject = ref(static_cast<ID3D12Device *>(this));
-      return S_OK;
-    }
-
-    // D3D12 devices do not expose the legacy D3D10 or DXGI device
-    // interfaces.  Recognize these probes explicitly so callers receive the
-    // contractually correct E_NOINTERFACE without an unknown-query warning.
-    if (riid == __uuidof(ID3D10Device) || riid == __uuidof(IDXGIDevice))
+    if (riid == __uuidof(IDXGIDevice) || riid == __uuidof(IDXGIDevice1) || riid == __uuidof(IDXGIDevice2) ||
+        riid == __uuidof(IDXGIDevice3) || riid == __uuidof(IDXGIDevice4))
       return E_NOINTERFACE;
 
-    // Keep newer interfaces explicit until their methods have an implementation.
-    if (riid == DXMT_STREAMLINE_D3D12_DEVICE_GUID || riid == DXMT_ID3D11_DEVICE_GUID) {
+    if (riid == __uuidof(ID3D10Device) || riid == __uuidof(ID3D10Device1))
       return E_NOINTERFACE;
-    }
+
+    if (riid == __uuidof(ID3D11Device) || riid == __uuidof(ID3D11Device1) || riid == __uuidof(ID3D11Device2) ||
+        riid == __uuidof(ID3D11Device3) || riid == __uuidof(ID3D11Device4) || riid == __uuidof(ID3D11Device5))
+      return E_NOINTERFACE;
+
+    if (riid == DXMT_STREAMLINE_D3D12_DEVICE_GUID)
+      return E_NOINTERFACE;
 
     if (logQueryInterfaceError(__uuidof(ID3D12Device1), riid)) {
       WARN("D3D12Device: Unknown interface query ", str::format(riid));

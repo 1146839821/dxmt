@@ -554,6 +554,31 @@ the root of the earlier uninstrumented +10.17% p95 alert remains unproven and
 the overall performance gate remains OPEN. Exact intervals, identities, commands,
 limits and raw evidence: `../dxmt-test/n13-submit-tail-20261023/N13-submit-tail.md`.
 
+### N02 — grouped device interface queries, 2026-10-23
+
+Per user request, follow the grouped QueryInterface style in upstream commit
+`a148782d431249405acdb1531dbb0c7e737bbece`, extended to the locally supported
+Device5–10 interfaces. IUnknown, ID3D12Object and Device through Device10 now
+share the first success branch and `ref(this)`; redundant per-version success
+branches are deleted. Explicit typed rejection groups cover DXGI Device–4,
+D3D10 Device/Device1 and D3D11 Device–5. These groups return E_NOINTERFACE;
+they do not expose D3D10/11 device functionality. Streamline and InfoQueue
+behavior is preserved. No new owner, cache/state, ABI or capability change.
+
+Build and diff checks pass. The existing feature runner covers canonical
+identity for thirteen supported interfaces plus thirteen legacy IID rejections,
+cleared outputs and E_POINTER. Same final PE passes against both DLLs; final
+command-list and descriptor-ownership runners pass (four correctness processes).
+Twelve performance processes pass GPU/fence checks. Median-of-process recording
+p50/p95 changes +3.36%/+10.54%; ordinary submit changes -2.76%/+4.75%.
+Recording p95 reaches the warning threshold, so this is not performance PASS.
+Disassembly confirms the first IUnknown comparison and identical AddRef/output
+success-epilogue instructions, with different branch distances/method layout;
+this does not explain the tail or rule out layout/runtime effects. Preserve all
+raw results and keep the overall performance gate OPEN; no additional retry
+matrix or unrelated performance patch is included. Exact identities, commands,
+limits and evidence: `../dxmt-test/n02-query-interface-20261023/N02-query-interface.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

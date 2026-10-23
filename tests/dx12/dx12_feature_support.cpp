@@ -2,6 +2,9 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include <d3d10_1.h>
+#include <d3d11_4.h>
+#include <dxgi1_6.h>
 
 #include <array>
 #include <cstring>
@@ -91,6 +94,20 @@ bool CheckDeviceIdentity(ID3D12Device *device) {
                   device->QueryInterface(unsupported_iid, &unsupported),
                   E_NOINTERFACE);
   good &= unsupported == nullptr;
+  const std::array<IID, 13> legacy_interfaces = {
+      __uuidof(IDXGIDevice),   __uuidof(IDXGIDevice1),  __uuidof(IDXGIDevice2),
+      __uuidof(IDXGIDevice3),  __uuidof(IDXGIDevice4),  __uuidof(ID3D10Device),
+      __uuidof(ID3D10Device1), __uuidof(ID3D11Device),  __uuidof(ID3D11Device1),
+      __uuidof(ID3D11Device2), __uuidof(ID3D11Device3), __uuidof(ID3D11Device4),
+      __uuidof(ID3D11Device5)};
+  for (const auto &iid : legacy_interfaces) {
+    void *view = device;
+    good &= CheckHR("Legacy device interface",
+                    device->QueryInterface(iid, &view), E_NOINTERFACE);
+    good &= view == nullptr;
+    good &= CheckHR("Legacy device null output",
+                    device->QueryInterface(iid, nullptr), E_POINTER);
+  }
   Release(identity);
   if (!good)
     std::cerr << "device interface identity contract failed\n";
