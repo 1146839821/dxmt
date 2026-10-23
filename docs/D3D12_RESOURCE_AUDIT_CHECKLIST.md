@@ -222,6 +222,54 @@ N09 exit gate. The next candidate is a heap/encoder submission intent that
 avoids per-slot pending records while preserving updates to previously empty
 slots. External evidence: `../dxmt-test/n09-nonuniform-20261023/`.
 
+### N09 — compact direct-indexed residency intents, 2026-10-23
+
+Direct-indexed recording now retains one whole-heap intent per existing
+encoder/heap/binding-context key in `PendingDescriptorUseKey`, using `UINT_MAX`
+instead of allocating and hashing one pending entry per slot. Recording still
+encodes every current resource. At submission, the existing retained heap and
+batch lock resolve its latest descriptors, including slots that were null at
+recording time. Exact table slots and whole-heap intents share one slot read;
+resource references and encoder usage/stage masks still use the existing
+submission owner. Reuse counters count actual fanout minus unique slot reads,
+not compact intent count minus slot reads.
+
+The existing SM6 nonuniform runner records slot 1 as null, then copies A[1]/B[0]
+after Close. A pre-submit check requires B's native resource in the collector's
+read uses, and GPU readback requires 888/1777. After a completed fence, updating
+both slots to A and replaying the same closed list requires 777/888. The mixed
+mode also binds an overlapping two-slot volatile descriptor table: each slot is
+read once, while both binding forms receive their uses. These cases pass on
+both baseline and changed DLLs with Metal API/shader validation. The existing
+SM5 direct-indexed case now crosses an encoder boundary: two intents resolve
+four slots once and fan out eight uses; its compact-count assertion fails on
+the baseline before GPU submission and its pixel oracle passes on the change.
+
+On the same M1 Max and isolated matched Wine 11 runtime, three alternating
+baseline/change runs give collector median-of-medians (microseconds):
+
+| Heap slots | Baseline | Compact intents | Pending entries before/after |
+| --- | ---: | ---: | ---: |
+| 3 | 1.59 | 1.57 | 3 / 1 |
+| 4096 | 38.80 | 23.65 | 4096 / 1 |
+| 65536 | 582.10 | 341.90 | 65536 / 1 |
+
+Each call still reads N slots with one batch lock and zero descriptor VA
+lookups. All 18 timing runs verify both GPU readbacks. These collector timings
+exclude GPU completion and do not establish overall frame performance. Three
+whole Execute calls per condition are too few for a latency percentile claim.
+Table controls retain 2/21/257 slot reads independent of heap capacity; their
+medians remain approximately 0.23/1.4/12 microseconds.
+
+Negative variants independently reject an unchanged null slot before GPU
+submission, a constant-index shader, and an omitted fenced replay update.
+Related graphics table/encoder/range cases, UAV counter/array compute probes,
+and descriptor ownership/registry stress pass. Scoped builds and diff checks
+pass. No public capability, shader backend, resource owner, or bridge ABI
+changes. Full direct-heap scans remain O(N), so this is a partial N09 performance
+slice, not the N09 exit gate or complete SM6.6 support. External commands,
+artifacts, hashes, and raw timings: `../dxmt-test/n09-intents-20261023/`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

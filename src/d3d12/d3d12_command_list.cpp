@@ -772,6 +772,8 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   struct PendingDescriptorUseKey {
     EncoderData *encoder;
     MTLD3D12DescriptorHeap *heap;
+    // UINT_MAX denotes the whole direct-indexed heap, including slots which
+    // acquire a resource after recording. Table uses retain their exact index.
     UINT index;
     D3D12_DESCRIPTOR_RANGE_TYPE range_type;
     bool direct_indexed;
@@ -3588,6 +3590,7 @@ public:
 
     size_t heap_begin = 0;
     size_t unique_slots = 0;
+    size_t fanout_uses = 0;
     while (heap_begin < pending_count) {
       auto *heap = pending_descriptor_uses_[pending_submission_order_[heap_begin]].key.heap;
       const auto retained_heap = pending_descriptor_heaps_.find(heap);
@@ -3607,33 +3610,50 @@ public:
              pending_descriptor_uses_[pending_submission_order_[heap_end]].key.heap == heap)
         heap_end++;
 
-      size_t slot_begin = heap_begin;
-      while (slot_begin < heap_end) {
-        const auto slot_index = pending_descriptor_uses_[pending_submission_order_[slot_begin]].key.index;
-        size_t slot_end = slot_begin + 1;
-        while (slot_end < heap_end &&
-               pending_descriptor_uses_[pending_submission_order_[slot_end]].key.index == slot_index)
-          slot_end++;
-
+      const auto key_at = [&](size_t position) -> const PendingDescriptorUseKey & {
+        return pending_descriptor_uses_[pending_submission_order_[position]].key;
+      };
+      // Whole-heap intents sort after all table slots. Resolve their live
+      // descriptors under this same lock, merging overlapping table uses so a
+      // slot is read only once even when both binding forms share a heap.
+      size_t direct_begin = heap_end;
+      while (direct_begin > heap_begin && key_at(direct_begin - 1).direct_indexed)
+        direct_begin--;
+      auto resolve_slot = [&](UINT slot_index, size_t slot_begin, size_t slot_end) {
         const auto &descriptor = descriptor_batch.get(slot_index);
         unique_slots++;
         airconv_residency_counters_.submission_unique_slots++;
         airconv_residency_counters_.submission_live_slot_resolutions++;
-        for (size_t use_index = slot_begin; use_index < slot_end; use_index++) {
-          const auto &pending = pending_descriptor_uses_[pending_submission_order_[use_index]];
-          airconv_residency_counters_.submission_fanout_uses++;
-          if (!resolve_descriptor_for_use(descriptor, pending.key)) {
-            pending_submission_order_.clear();
-            ERR("D3D12 failed to retain a volatile descriptor resource before command submission");
-            return E_OUTOFMEMORY;
+        const auto resolve_uses = [&](size_t begin, size_t end) {
+          for (size_t use_index = begin; use_index < end; use_index++) {
+            fanout_uses++;
+            airconv_residency_counters_.submission_fanout_uses++;
+            if (!resolve_descriptor_for_use(descriptor, key_at(use_index)))
+              return false;
           }
+          return true;
+        };
+        return resolve_uses(slot_begin, slot_end) && resolve_uses(direct_begin, heap_end);
+      };
+      size_t slot_begin = heap_begin;
+      UINT next_direct_index = 0;
+      const UINT direct_count = direct_begin != heap_end ? live_heap->GetDesc().NumDescriptors : 0;
+      while (next_direct_index < direct_count || slot_begin < direct_begin) {
+        const auto slot_index = next_direct_index < direct_count ? next_direct_index++ : key_at(slot_begin).index;
+        size_t slot_end = slot_begin;
+        while (slot_end < direct_begin && key_at(slot_end).index == slot_index)
+          slot_end++;
+        if (!resolve_slot(slot_index, slot_begin, slot_end)) {
+          pending_submission_order_.clear();
+          ERR("D3D12 failed to retain a volatile descriptor resource before command submission");
+          return E_OUTOFMEMORY;
         }
         slot_begin = slot_end;
       }
       heap_begin = heap_end;
     }
 
-    airconv_residency_counters_.submission_slot_reuse_hits += pending_count - unique_slots;
+    airconv_residency_counters_.submission_slot_reuse_hits += fanout_uses - unique_slots;
     pending_submission_order_.clear();
     return S_OK;
   }
@@ -3770,18 +3790,25 @@ public:
 
     auto encode_descriptor = [&](const ShaderVisibleDescriptorReadBatch &batch, UINT index,
                                  D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
-      size_t pending_index = 0;
-      const bool needs_read = CaptureVolatileDescriptorUse(
-              allocator_->encoder_current, descriptor_heap, index, range_type, direct_indexed, compute, descriptor_stages,
-              heap_generation, pending_index
-          );
-      if (!needs_read && unchanged_state_fast_path)
+      if (recording_failed_)
         return;
+      // A direct-indexed walk keeps one intent, not one pending record/hash
+      // entry per slot. Recording still encodes every current resource; submit
+      // will walk the latest heap, including descriptors which are null now.
+      if (!direct_indexed || index == 0) {
+        size_t pending_index = 0;
+        const bool needs_read = CaptureVolatileDescriptorUse(
+            allocator_->encoder_current, descriptor_heap, direct_indexed ? UINT_MAX : index, range_type, direct_indexed,
+            compute, descriptor_stages, heap_generation, pending_index
+        );
+        if (recording_failed_ || (!direct_indexed && !needs_read && unchanged_state_fast_path))
+          return;
+        auto &pending = pending_descriptor_uses_[pending_index];
+        pending.covered_generation = heap_generation;
+        pending.covered = true;
+      }
       airconv_residency_counters_.descriptor_slots_visited++;
       const auto &descriptor = batch.get(index);
-      auto &pending = pending_descriptor_uses_[pending_index];
-      pending.covered_generation = heap_generation;
-      pending.covered = true;
       switch (descriptor.type) {
       case ShaderVisibleDescriptorType::SRVTexture: {
         if ((!direct_indexed && range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV) ||

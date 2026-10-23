@@ -1,5 +1,12 @@
 dx12_sm6_probe = executable('dx12_compute_sm6', 'dx12_compute_sm6.cpp',
-  dependencies: [ d3d12_dep ],
+  include_directories: [
+    include_directories('../../src/airconv'),
+    include_directories('../../src/dxgi'),
+    include_directories('../../src/dxmt'),
+    include_directories('../../src/winemetal'),
+    include_directories('../../src/util'),
+  ],
+  dependencies: [ d3d12_dep, winemetal_dep ],
 )
 
 dx12_shader_container = executable('dx12_shader_container', 'dx12_shader_container.cpp', '../../src/util/util_md5.cpp',

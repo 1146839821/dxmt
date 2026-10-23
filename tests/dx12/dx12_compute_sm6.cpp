@@ -2,7 +2,9 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include "d3d12_device.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -30,7 +32,7 @@ int main(int argc, char **argv) {
                  "descriptor-resources-space|--root-cbv|--root-constants|--"
                  "descriptor-resources-1-1|--descriptor-null-cbv|--direct-indexed|--root-srv|--"
                  "direct-indexed-resources|--direct-indexed-resources-lifetime|"
-                 "--direct-indexed-nonuniform|"
+                 "--direct-indexed-nonuniform|--direct-indexed-nonuniform-mixed|"
                  "--unbounded-resources|"
                  "--append-consume-unsupported|"
                  "--nan-inf-ops|"
@@ -93,8 +95,11 @@ int main(int argc, char **argv) {
       argc == 3 && strcmp(argv[2], "--direct-indexed-resources") == 0;
   const bool direct_indexed_resources_lifetime =
       argc == 3 && strcmp(argv[2], "--direct-indexed-resources-lifetime") == 0;
+  const bool direct_indexed_nonuniform_mixed =
+      argc == 3 && strcmp(argv[2], "--direct-indexed-nonuniform-mixed") == 0;
   const bool direct_indexed_nonuniform =
-      argc == 3 && strcmp(argv[2], "--direct-indexed-nonuniform") == 0;
+      direct_indexed_nonuniform_mixed ||
+      (argc == 3 && strcmp(argv[2], "--direct-indexed-nonuniform") == 0);
   const bool unbounded_resources = argc == 3 && strcmp(argv[2], "--unbounded-resources") == 0;
   const bool direct_indexed_resource_heap = direct_indexed || direct_indexed_resources ||
                                             direct_indexed_resources_lifetime || direct_indexed_nonuniform;
@@ -222,6 +227,21 @@ int main(int argc, char **argv) {
       versioned_root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
       versioned_root_desc.Desc_1_1.Flags =
           D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
+      if (direct_indexed_nonuniform_mixed) {
+        descriptor_ranges_1[0] = {
+            D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+            2,
+            0,
+            0,
+            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
+                D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+            0};
+        root_parameters_1[0].ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        root_parameters_1[0].DescriptorTable = {1, descriptor_ranges_1};
+        versioned_root_desc.Desc_1_1.NumParameters = 1;
+        versioned_root_desc.Desc_1_1.pParameters = root_parameters_1;
+      }
     } else if (unbounded_resources) {
       descriptor_ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, 0, 0};
       descriptor_ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
@@ -407,7 +427,9 @@ int main(int argc, char **argv) {
         if (direct_indexed_nonuniform) {
           descriptor_cpu.ptr += descriptor_increment;
           srv_desc.Buffer.FirstElement = 1;
-          device->CreateShaderResourceView(input_buffer, &srv_desc, descriptor_cpu);
+          // This slot first acquires a live resource after Close. The resource
+          // is not referenced by any other recorded descriptor or command.
+          device->CreateShaderResourceView(nullptr, &srv_desc, descriptor_cpu);
         }
       }
     }
@@ -581,6 +603,9 @@ int main(int argc, char **argv) {
       list->SetDescriptorHeaps(1, heaps);
     }
     list->SetComputeRootSignature(root_signature);
+    if (direct_indexed_nonuniform_mixed)
+      list->SetComputeRootDescriptorTable(
+          0, descriptor_heap->GetGPUDescriptorHandleForHeapStart());
     if (root_cbv) {
       list->SetComputeRootConstantBufferView(
           0, input_buffer->GetGPUVirtualAddress());
@@ -693,7 +718,7 @@ int main(int argc, char **argv) {
     // at submission. Use a different native resource, not just another slice.
     auto source = nonuniform_source_heap->GetCPUDescriptorHandleForHeapStart();
     srv_desc.Buffer.FirstElement = 1;
-    device->CreateShaderResourceView(nonuniform_input, &srv_desc, source);
+    device->CreateShaderResourceView(input_buffer, &srv_desc, source);
     source.ptr += descriptor_increment;
     srv_desc.Buffer.FirstElement = 0;
     device->CreateShaderResourceView(nonuniform_input, &srv_desc, source);
@@ -703,6 +728,44 @@ int main(int argc, char **argv) {
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     nonuniform_source_heap->Release();
     nonuniform_source_heap = nullptr;
+
+    // Reject a missing late-populated indirect resource before submitting it
+    // to the GPU. The counter case uses the same collector seam.
+    std::vector<dxmt::SubmissionResourceUse> uses;
+    std::vector<WMT::Reference<WMT::Resource>> resources;
+    auto *internal_list =
+        static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list);
+    const auto before = internal_list->GetAirconvResidencyCounters();
+    if (!CheckHR(
+            "Collect late-populated descriptor",
+            internal_list->CollectResourceUsesForSubmission(uses, resources)))
+      goto cleanup;
+    const auto after = internal_list->GetAirconvResidencyCounters();
+    const auto slots = descriptor_heap->GetDesc().NumDescriptors;
+    const UINT overlap = direct_indexed_nonuniform_mixed ? 2 : 0;
+    if (after.submission_unique_slots - before.submission_unique_slots !=
+            slots ||
+        after.submission_batch_locks - before.submission_batch_locks != 1 ||
+        after.submission_fanout_uses - before.submission_fanout_uses !=
+            slots + overlap ||
+        after.submission_slot_reuse_hits - before.submission_slot_reuse_hits !=
+            overlap) {
+      std::cerr << "direct-indexed/table submission merge counters mismatch\n";
+      goto cleanup;
+    }
+    const auto late_resource =
+        static_cast<dxmt::MTLD3D12Resource *>(nonuniform_input)
+            ->buffer->current()
+            ->buffer()
+            .handle;
+    if (std::none_of(uses.begin(), uses.end(), [&](const auto &use) {
+          return use.resource.handle == late_resource &&
+                 (use.usage & WMTResourceUsageRead);
+        })) {
+      std::cerr << "late-populated descriptor missing from submission resource "
+                   "uses\n";
+      goto cleanup;
+    }
   }
 
   lists[0] = list;
@@ -727,9 +790,9 @@ int main(int argc, char **argv) {
       goto cleanup;
     const UINT first = mapped[0], second = mapped[1];
     readback_buffer->Unmap(0, nullptr);
-    if (first != input_value + 1111 || second != input_value + 1000) {
+    if (first != input_value + 111 || second != input_value + 1000) {
       std::cerr << "non-uniform pre-submit copy mismatch: " << first << ','
-                << second << " expected " << input_value + 1111 << ','
+                << second << " expected " << input_value + 111 << ','
                 << input_value + 1000 << '\n';
       goto cleanup;
     }

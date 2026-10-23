@@ -853,10 +853,16 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
   list->SetPipelineState(pso);
   if (root_signature) {
-    list->SetGraphicsRootSignature(root_signature);
-    if (test.null_texture_query || test.direct_indexed_heap_scan) {
+    if (test.direct_indexed_heap_scan) {
       ID3D12DescriptorHeap *heaps[] = {shader_heap};
       list->SetDescriptorHeaps(1, heaps);
+    }
+    list->SetGraphicsRootSignature(root_signature);
+    if (test.null_texture_query || test.direct_indexed_heap_scan) {
+      if (!test.direct_indexed_heap_scan) {
+        ID3D12DescriptorHeap *heaps[] = {shader_heap};
+        list->SetDescriptorHeaps(1, heaps);
+      }
       if (test.null_texture_query) {
         auto table = shader_heap->GetGPUDescriptorHandleForHeapStart();
         if (test.descriptor_unbounded_range)
@@ -899,6 +905,12 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     unrelated_descriptor.ptr += uint64_t(device->GetDescriptorHandleIncrementSize(
                                   D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)) * 3;
     device->CreateShaderResourceView(query_texture_a, nullptr, unrelated_descriptor);
+    draw();
+    // The same heap intent must fan out to a later encoder while retaining
+    // one live slot read/lock per submission.
+    D3D12_RESOURCE_BARRIER alias_barrier = {};
+    alias_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+    list->ResourceBarrier(1, &alias_barrier);
     draw();
   }
   if (test.descriptor_encoder_break) {
@@ -1057,12 +1069,17 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
   if (test.direct_indexed_heap_scan) {
     const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
-    if (counters.root_scan_requests != 3 || counters.root_scan_skips != 3 ||
-        counters.descriptor_requests != 3 || counters.descriptor_scans_executed != 2 ||
-        counters.descriptor_scan_skips != 1 || counters.descriptor_slots_visited != 8 ||
-        counters.descriptor_batch_locks != 2 || counters.direct_indexed_root_requests != 3 ||
-        counters.direct_indexed_scans != 2 || counters.direct_indexed_descriptors != 8 ||
-        counters.pending_descriptors_inserted != 4 || counters.pending_descriptor_duplicates != 4 ||
+    if (counters.root_scan_requests != 4 || counters.root_scan_skips != 4 ||
+        counters.descriptor_requests != 4 ||
+        counters.descriptor_scans_executed != 3 ||
+        counters.descriptor_scan_skips != 1 ||
+        counters.descriptor_slots_visited != 12 ||
+        counters.descriptor_batch_locks != 3 ||
+        counters.direct_indexed_root_requests != 4 ||
+        counters.direct_indexed_scans != 3 ||
+        counters.direct_indexed_descriptors != 12 ||
+        counters.pending_descriptors_inserted != 2 ||
+        counters.pending_descriptor_duplicates != 1 ||
         counters.heap_generation_invalidations != 1) {
       std::cerr << "DXBC SM5 " << test.name << ": direct-indexed scan did not conservatively cover the full heap\n";
       cleanup();
@@ -1135,10 +1152,13 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 
   if (test.direct_indexed_heap_scan) {
     const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
-    if (counters.submission_pending_uses != 4 || counters.submission_unique_heaps != 1 ||
-        counters.submission_unique_slots != 4 || counters.submission_batch_locks != 1 ||
-        counters.submission_live_slot_resolutions != 4 || counters.submission_slot_reuse_hits != 0 ||
-        counters.submission_fanout_uses != 4) {
+    if (counters.submission_pending_uses != 2 ||
+        counters.submission_unique_heaps != 1 ||
+        counters.submission_unique_slots != 4 ||
+        counters.submission_batch_locks != 1 ||
+        counters.submission_live_slot_resolutions != 4 ||
+        counters.submission_slot_reuse_hits != 4 ||
+        counters.submission_fanout_uses != 8) {
       std::cerr << "DXBC SM5 " << test.name << ": submission did not resolve the full direct-indexed heap\n";
       cleanup();
       return false;
