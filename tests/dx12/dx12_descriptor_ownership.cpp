@@ -7,6 +7,8 @@
 #include "d3d12_device.hpp"
 
 #include <iostream>
+#include <chrono>
+#include <string>
 #include <set>
 #include <thread>
 
@@ -271,9 +273,210 @@ bool CheckRootSignatureMetadata(ID3D12Device *device) {
   return passed;
 }
 
+bool CheckViewPermissions(bool cost = false) {
+  struct Objects {
+    ID3D12Device *device = nullptr;
+    ID3D12DescriptorHeap *shader = nullptr, *rtv = nullptr, *dsv = nullptr;
+    ID3D12Resource *color = nullptr, *plain = nullptr, *depth = nullptr,
+        *plain_depth = nullptr, *readable_depth = nullptr, *denied_depth = nullptr,
+        *buffer = nullptr, *plain_buffer = nullptr;
+    ~Objects() {
+      for (auto heap : {shader, rtv, dsv}) if (heap) heap->Release();
+      for (auto resource : {color, plain, depth, plain_depth, readable_depth,
+                            denied_depth, buffer, plain_buffer})
+        if (resource)
+          resource->Release();
+      if (device)
+        device->Release();
+    }
+  } o;
+  if (!CheckHR("View permission device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&o.device))))
+    return false;
+  const auto properties = DefaultHeap();
+  auto desc = RenderTargetDescription();
+  const auto create = [&](DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags,
+                          ID3D12Resource **out) {
+    desc.Format = format;
+    desc.Flags = flags;
+    return CheckHR(
+        "View permission resource",
+        o.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE,
+                                          &desc, D3D12_RESOURCE_STATE_COMMON,
+                                          nullptr, IID_PPV_ARGS(out)));
+  };
+  if (!create(DXGI_FORMAT_R8G8B8A8_UNORM,
+              D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                  D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+              &o.color) ||
+      !create(DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, &o.plain) ||
+      !create(DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+              &o.depth) ||
+      !create(DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_NONE,
+              &o.plain_depth) ||
+      !create(DXGI_FORMAT_R32_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+              &o.readable_depth) ||
+      !create(DXGI_FORMAT_R32_TYPELESS,
+              D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
+                  D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE,
+              &o.denied_depth))
+    return false;
+  desc = BufferDescription(256, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  if (!CheckHR(
+          "View permission UAV buffer",
+          o.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE,
+                                            &desc, D3D12_RESOURCE_STATE_COMMON,
+                                            nullptr, IID_PPV_ARGS(&o.buffer))))
+    return false;
+  desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+  if (!CheckHR("View permission plain buffer",
+               o.device->CreateCommittedResource(
+                   &properties, D3D12_HEAP_FLAG_NONE, &desc,
+                   D3D12_RESOURCE_STATE_COMMON, nullptr,
+                   IID_PPV_ARGS(&o.plain_buffer))))
+    return false;
+  for (auto pair :
+       {std::pair{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, &o.shader},
+        std::pair{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, &o.rtv},
+        std::pair{D3D12_DESCRIPTOR_HEAP_TYPE_DSV, &o.dsv}}) {
+    D3D12_DESCRIPTOR_HEAP_DESC heap = {};
+    heap.Type = pair.first;
+    heap.NumDescriptors = 1;
+    if (!CheckHR("View permission heap", o.device->CreateDescriptorHeap(
+                                             &heap, IID_PPV_ARGS(pair.second))))
+      return false;
+  }
+  auto *shader = static_cast<dxmt::MTLD3D12DescriptorHeap *>(o.shader);
+  auto *rtv = static_cast<dxmt::MTLD3D12RenderTargetDescriptorHeap *>(o.rtv);
+  auto *dsv = static_cast<dxmt::MTLD3D12RenderTargetDescriptorHeap *>(o.dsv);
+  const auto sh = o.shader->GetCPUDescriptorHandleForHeapStart();
+  const auto rh = o.rtv->GetCPUDescriptorHandleForHeapStart();
+  const auto dh = o.dsv->GetCPUDescriptorHandleForHeapStart();
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+  srv.Format = DXGI_FORMAT_R32_FLOAT;
+  srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+  srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  srv.Texture2D.MipLevels = 1;
+  D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
+  uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+  uav.Buffer.NumElements = 64;
+  uav.Buffer.StructureByteStride = 4;
+  if (cost) {
+    for (UINT round = 0; round < 25; round++) {
+      const auto start = std::chrono::steady_clock::now();
+      for (UINT repeat = 0; repeat < 2000; repeat++) {
+        o.device->CreateShaderResourceView(o.readable_depth, &srv, sh);
+        o.device->CreateUnorderedAccessView(o.color, nullptr, nullptr, sh);
+        o.device->CreateUnorderedAccessView(o.buffer, nullptr, &uav, sh);
+        o.device->CreateRenderTargetView(o.color, nullptr, rh);
+        o.device->CreateDepthStencilView(o.depth, nullptr, dh);
+      }
+      const double us = std::chrono::duration<double, std::micro>(
+                            std::chrono::steady_clock::now() - start)
+                            .count();
+      const auto descriptor = ReadDescriptorFields(shader, 0);
+      if (descriptor.type != dxmt::ShaderVisibleDescriptorType::UAVBuffer ||
+          descriptor.UAVBuffer.buffer !=
+              static_cast<dxmt::MTLD3D12Resource *>(o.buffer)->buffer.ptr() ||
+          rtv->GetRenderTarget(0).Texture !=
+              static_cast<dxmt::MTLD3D12Resource *>(o.color)->texture.ptr() ||
+          dsv->GetRenderTarget(0).Texture !=
+              static_cast<dxmt::MTLD3D12Resource *>(o.depth)->texture.ptr())
+        return false;
+      std::cout << "view_cost round=" << round
+                << " writes=10000 write_us=" << us << "\n";
+    }
+    return true;
+  }
+  bool good = true;
+  for (const bool seeded : {false, true}) {
+    for (UINT kind = 0; kind < 5; kind++) {
+      shader->ClearDescriptor(0);
+      rtv->AddRenderTarget(0, nullptr);
+      dsv->AddRenderTarget(0, nullptr);
+      const auto write = [&](bool allowed) {
+        switch (kind) {
+        case 0:
+          o.device->CreateShaderResourceView(
+              allowed ? o.readable_depth : o.denied_depth, &srv, sh);
+          break;
+        case 1:
+          o.device->CreateUnorderedAccessView(allowed ? o.color : o.plain,
+                                              nullptr, nullptr, sh);
+          break;
+        case 2:
+          o.device->CreateUnorderedAccessView(
+              allowed ? o.buffer : o.plain_buffer, nullptr, &uav, sh);
+          break;
+        case 3:
+          o.device->CreateRenderTargetView(allowed ? o.color : o.plain, nullptr,
+                                           rh);
+          break;
+        case 4:
+          o.device->CreateDepthStencilView(allowed ? o.depth : o.plain_depth,
+                                           nullptr, dh);
+          break;
+        }
+      };
+      if (seeded)
+        write(true);
+      const auto before = ReadDescriptorFields(shader, 0);
+      const auto before_rtv = rtv->GetRenderTarget(0);
+      const auto before_dsv = dsv->GetRenderTarget(0);
+      bool pass =
+          !seeded ||
+          (kind == 0
+               ? before.type == dxmt::ShaderVisibleDescriptorType::SRVTexture
+           : kind == 1
+               ? before.type == dxmt::ShaderVisibleDescriptorType::UAVTexture
+           : kind == 2
+               ? before.type == dxmt::ShaderVisibleDescriptorType::UAVBuffer
+           : kind == 3 ? before_rtv.Texture != nullptr
+                       : before_dsv.Texture != nullptr);
+      write(false);
+      const auto after = ReadDescriptorFields(shader, 0);
+      pass &= before.type == after.type;
+      if (seeded && kind == 0)
+        pass &= before.SRVTexture.texture == after.SRVTexture.texture;
+      if (seeded && kind == 1)
+        pass &= before.UAVTexture.texture == after.UAVTexture.texture;
+      if (seeded && kind == 2)
+        pass &= before.UAVBuffer.buffer == after.UAVBuffer.buffer;
+      pass &= before_rtv.Texture == rtv->GetRenderTarget(0).Texture &&
+              before_dsv.Texture == dsv->GetRenderTarget(0).Texture;
+      std::cout << "view_permission kind=" << kind << " seeded=" << seeded
+                << " pass=" << pass << "\n";
+      good &= pass;
+    }
+  }
+  o.device->CreateShaderResourceView(o.readable_depth, &srv, sh);
+  o.device->CreateShaderResourceView(nullptr, &srv, sh);
+  bool nulls = ReadDescriptorFields(shader, 0).type ==
+               dxmt::ShaderVisibleDescriptorType::Null;
+  o.device->CreateUnorderedAccessView(o.buffer, nullptr, &uav, sh);
+  o.device->CreateUnorderedAccessView(nullptr, nullptr, &uav, sh);
+  nulls &= ReadDescriptorFields(shader, 0).type ==
+           dxmt::ShaderVisibleDescriptorType::Null;
+  o.device->CreateRenderTargetView(o.color, nullptr, rh);
+  o.device->CreateRenderTargetView(nullptr, nullptr, rh);
+  o.device->CreateDepthStencilView(o.depth, nullptr, dh);
+  o.device->CreateDepthStencilView(nullptr, nullptr, dh);
+  nulls &= !rtv->GetRenderTarget(0).Texture && !dsv->GetRenderTarget(0).Texture;
+  std::cout << "view_permission null_descriptors pass=" << nulls << "\n";
+  good &= nulls;
+  return good;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+  if (argc == 2 && (std::string(argv[1]) == "--view-permissions" ||
+                    std::string(argv[1]) == "--view-permission-cost"))
+    return CheckViewPermissions(std::string(argv[1]) ==
+                                "--view-permission-cost")
+               ? 0
+               : 1;
   ID3D12Device *device_a = nullptr;
   ID3D12Device *device_b = nullptr;
   ID3D12DescriptorHeap *shader_heap_a = nullptr;

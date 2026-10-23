@@ -1181,6 +1181,51 @@ x64/Rosetta,bundled clang23.1.1. Full file list,root,issue table,official/upstre
 snapshots,exact commands/exits,hashes,performance and limitations:
 `../dxmt-test/n08-depth-format-flags-20261024/N08-depth-format-flags.md`.
 
+### N09 — resource flags gate public view creation, 2026-10-24
+
+Base2d57b2f1; Device attachment format/view consistency priority. Confirmed10
+negative descriptor writes (five kinds x empty/seeded) all published or replaced
+views despite resource permissions:denied SRV,texture/buffer missing UAV flag,
+missing RTV or DSV flag. Logical flags are correctly stored; native format support
+was incorrectly enough to reach descriptor publication. Device's existing public
+view entries now check immutable GetDesc flags after ownership and null handling,
+before native/heap dispatch. Exactly one guard per kind; no duplicate buffer/
+texture policy,state/cache/manager or production file. Void rejection warns and
+preserves target slot; not a Windows invalid-call output-conformance claim.
+
+Same final descriptor PE baseline exits1(all10 fail); candidate twice exits0.
+Five allowed view seeds remain correct; existing null clearing preserved. Full
+descriptor ownership,resource,feature,command-list and enhanced runners pass,
+as do prior28 depth-format and RGB96 GPU matrices. --copy-staging multi passes
+D32S8 plane/preservation/in-flight GPU readback,three mips/two slices/two rounds.
+Focused invalid views are inspected,never submitted to GPU. Final Meson build,
+no-private Device TU syntax and diff check pass. Full no-private linked/runtime,
+native Windows,D3D11 rendering,all-format casts/counter contracts andT4 NOT_RUN.
+Primary Microsoft flag source and pinned upstream a148782's unguarded dispatch
+saved externally; not copied as the contract. No newest-upstream claim.
+
+AB/BA/AB24 processes all exit0,median of3 process p50/p95 values,us:
+
+| Probe | Before | Final | Change |
+|---|---:|---:|---:|
+| Recording |3079.65/3203.30|3077.35/3179.10|-0.07%/-0.76%|
+| Ordinary submit |110.00/146.10|104.20/144.70|-5.27%/-0.96%|
+|120000 format queries |3554.35/3617.10|3404.40/3505.50|-4.22%/-3.09%|
+|10000 mixed view writes |1758.60/1805.20|1753.15/1801.10|-0.31%/-0.23%|
+
+Per side72 record/180 submit/72 format batches/72 view batches. View benchmark
+mixes SRV,texture UAV,buffer UAV,RTV,DSV with warmed existing views and verifies
+final descriptor/resource identities. No causal speedup or zero-cost claim;
+small view delta is INCONCLUSIVE. Cost is one GetDesc/bit test per non-null public
+view,no new lock/allocation/whole-heap scan or draw/submit work. Historical/global
+performance gate remains OPEN. Public/private/WMT ABI,legal layouts,GPU scheduling,
+capability masks and FL/SM/Options/Tiers unchanged; EnhancedBarriersSupported FALSE.
+Device5–10 grouping/legacy rejections and user .gitignore untouched; no push.
+M1Max/Apple7,macOS27.0.1,Xcode27.1(requested26 differs),MSC4.0.1,matched Wine11
+x64/Rosetta,clang23.1.1. Full changes,root,issue table,exact commands/exits,source
+snapshots,loaded-path hashes and remaining conformance limits:
+`../dxmt-test/n09-view-permissions-20261024/N09-view-permissions.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

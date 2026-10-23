@@ -1191,6 +1191,10 @@ public:
       WARN("CreateShaderResourceView received a resource from another device");
       return;
     }
+    if (pResource->GetDesc().Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) {
+      WARN("CreateShaderResourceView: resource flags do not allow a shader resource view");
+      return;
+    }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
     HRESULT hr = d3d12res->CreateShaderResourceView(pDesc, Descriptor);
     if (FAILED(hr))
@@ -1210,6 +1214,10 @@ public:
     }
     if (!IsSameDevice(this, pResource) || (pCounter && !IsSameDevice(this, pCounter))) {
       WARN("CreateUnorderedAccessView received a resource from another device");
+      return;
+    }
+    if (!(pResource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {
+      WARN("CreateUnorderedAccessView: resource flags do not allow an unordered access view");
       return;
     }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
@@ -1233,6 +1241,10 @@ public:
       WARN("CreateRenderTargetView received a resource from another device");
       return;
     }
+    if (!(pResource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
+      WARN("CreateRenderTargetView: resource flags do not allow a render target view");
+      return;
+    }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
     HRESULT hr = d3d12res->CreateRenderTargetView(pDesc, Descriptor);
     if (FAILED(hr))
@@ -1252,6 +1264,10 @@ public:
     }
     if (!IsSameDevice(this, pResource)) {
       WARN("CreateDepthStencilView received a resource from another device");
+      return;
+    }
+    if (!(pResource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
+      WARN("CreateDepthStencilView: resource flags do not allow a depth stencil view");
       return;
     }
     auto d3d12res = static_cast<MTLD3D12Resource *>(pResource);
