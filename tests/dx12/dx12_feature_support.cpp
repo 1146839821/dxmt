@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include <d3d12sdklayers.h>
 #include <d3d10_1.h>
 #include <d3d11_4.h>
 #include <dxgi1_6.h>
@@ -9,6 +10,8 @@
 #include <array>
 #include <cstring>
 #include <iostream>
+#include <thread>
+#include <atomic>
 
 namespace {
 
@@ -49,6 +52,69 @@ CheckHR(const char *name, HRESULT actual, HRESULT expected = S_OK) {
   std::cerr << name << " returned 0x" << std::hex << static_cast<unsigned long>(actual) << ", expected 0x"
             << static_cast<unsigned long>(expected) << std::dec << "\n";
   return false;
+}
+
+bool CheckInfoQueueIdentity(ID3D12Device *device) {
+  ID3D12InfoQueue *first = nullptr, *second = nullptr;
+  IUnknown *identity = nullptr, *view_identity = nullptr;
+  ID3D12Device *roundtrip = nullptr;
+  bool good = CheckHR("InfoQueue first", device->QueryInterface(IID_PPV_ARGS(&first))) &&
+              CheckHR("InfoQueue second", device->QueryInterface(IID_PPV_ARGS(&second))) &&
+              CheckHR("Device identity", device->QueryInterface(IID_PPV_ARGS(&identity)));
+  if (good) {
+    good &= CheckHR("InfoQueue identity", first->QueryInterface(IID_PPV_ARGS(&view_identity)));
+    good &= view_identity == identity;
+    good &= CheckHR("InfoQueue device roundtrip", first->QueryInterface(IID_PPV_ARGS(&roundtrip)));
+    good &= roundtrip == device;
+    first->SetMuteDebugOutput(TRUE);
+    good &= second->GetMuteDebugOutput() == TRUE;
+    first->SetMuteDebugOutput(FALSE);
+    good &= CheckHR("InfoQueue null output", first->QueryInterface(__uuidof(IUnknown), nullptr), E_POINTER);
+    if (!good) std::cerr << "InfoQueue canonical identity/shared state mismatch\n";
+  }
+  Release(roundtrip);
+  Release(view_identity);
+  Release(identity);
+  Release(second);
+  Release(first);
+  if (!good) return false;
+  // InfoQueue alone owns a public reference to the controlling device.
+  ID3D12Device *isolated = nullptr;
+  if (!CheckHR("InfoQueue lifetime device", D3D12CreateDevice(
+          nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&isolated)))) return false;
+  if (!CheckHR("InfoQueue lifetime view", isolated->QueryInterface(IID_PPV_ARGS(&first)))) {
+    Release(isolated);
+    return false;
+  }
+  Release(isolated);
+  std::atomic<bool> concurrent_good{true};
+  std::array<std::thread, 4> workers;
+  for (auto &worker : workers)
+    worker = std::thread([&] {
+      for (unsigned i = 0; i < 128; i++) {
+        ID3D12Device10 *view = nullptr;
+        IUnknown *a = nullptr, *b = nullptr;
+        if (FAILED(first->QueryInterface(IID_PPV_ARGS(&view))) ||
+            FAILED(first->QueryInterface(IID_PPV_ARGS(&a))) ||
+            FAILED(view->QueryInterface(IID_PPV_ARGS(&b))) || a != b)
+          concurrent_good = false;
+        first->SetMuteDebugOutput(i & 1);
+        first->GetMuteDebugOutput();
+        first->SetMessageCountLimit(i);
+        first->GetMessageCountLimit();
+        first->PushEmptyStorageFilter();
+        first->PopStorageFilter();
+        Release(b);
+        Release(a);
+        Release(view);
+      }
+    });
+  for (auto &worker : workers) worker.join();
+  good &= concurrent_good && first->GetStorageFilterStackSize() == 0;
+  good &= CheckHR("InfoQueue surviving device", first->QueryInterface(IID_PPV_ARGS(&isolated)));
+  Release(isolated);
+  good &= first->Release() == 0;
+  return good;
 }
 
 bool
@@ -186,7 +252,7 @@ main() {
       ))
     return fail("device creation failed");
 
-  if (!CheckDeviceIdentity(device))
+  if (!CheckDeviceIdentity(device) || !CheckInfoQueueIdentity(device))
     return fail("device identity query failed");
 
   D3D12_FEATURE_DATA_SHADER_MODEL maximum_shader_model = {D3D_SHADER_MODEL_6_0};

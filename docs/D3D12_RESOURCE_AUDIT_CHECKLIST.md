@@ -689,6 +689,30 @@ and pending-list storage change. Next Device priority is InfoQueue.
 Commands, ownership/timing proof, limitations and raw evidence:
 `../dxmt-test/n14-multiple-fences-20261023/N14-multiple-fences.md`.
 
+### N02 — InfoQueue controlling identity and lifetime, 2026-10-23
+
+Device now embeds its InfoQueue view instead of allocating a standalone COM
+object on every query. The view delegates QI/AddRef/Release to the controlling
+Device, sharing canonical IUnknown and supporting the reverse Device query.
+Raw owner pointer plus embedded storage avoids a COM reference cycle; public
+references to either view own the same Device. Mutable stub state is protected
+by one InfoQueue-only mutex; Device5–10 grouping remains intact.
+
+Baseline feature runner reproduces E_NOINTERFACE on the Device roundtrip and
+canonical/shared-state mismatch. Final feature test passes null-output,
+canonical identity, shared mute, and an isolated Device lifetime held only by
+InfoQueue:4 threads x128 queries/state operations, balanced final Release0.
+Full command-list and resource runners also pass. No-private Device syntax
+check passes; full no-private runtime and native Windows differential NOT_RUN.
+
+Twelve alternating performance processes: recording p50/P95 -0.85%/-3.43%,
+ordinary submission -0.81%/-4.87%. No causal speedup claim; historical tail alerts
+and overall performance gate stay OPEN. Public COM/WMT ABI, capabilities,
+resource layout and GPU scheduling unchanged. Message storage, filtering and
+break-control stubs remain confirmed pending; this is not a full debug layer.
+Commands, hashes, ownership proof, raw logs and scope:
+`../dxmt-test/n02-infoqueue-identity-20261023/N02-infoqueue-identity.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

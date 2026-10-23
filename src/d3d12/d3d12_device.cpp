@@ -192,20 +192,17 @@ ConvertBarrierLayout(
   }
 }
 
-class MTLD3D12InfoQueue final : public ComObject<ID3D12InfoQueue> {
+class MTLD3D12InfoQueue final : public ID3D12InfoQueue {
+  IUnknown *const owner_;
 public:
+  explicit MTLD3D12InfoQueue(IUnknown *owner) : owner_(owner) {}
+  ULONG STDMETHODCALLTYPE AddRef() override { return owner_->AddRef(); }
+  ULONG STDMETHODCALLTYPE Release() override { return owner_->Release(); }
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
-    if (!ppvObject)
-      return E_POINTER;
-    *ppvObject = nullptr;
-    if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12InfoQueue)) {
-      *ppvObject = ref(static_cast<ID3D12InfoQueue *>(this));
-      return S_OK;
-    }
-    return E_NOINTERFACE;
+    return owner_->QueryInterface(riid, ppvObject);
   }
 
-  HRESULT STDMETHODCALLTYPE SetMessageCountLimit(UINT64 limit) override {
+  HRESULT STDMETHODCALLTYPE SetMessageCountLimit(UINT64 limit) override { std::lock_guard lock(mutex_);
     message_count_limit_ = limit;
     return S_OK;
   }
@@ -224,7 +221,7 @@ public:
   UINT64 STDMETHODCALLTYPE GetNumStoredMessages() override { return 0; }
   UINT64 STDMETHODCALLTYPE GetNumStoredMessagesAllowedByRetrievalFilter() override { return 0; }
   UINT64 STDMETHODCALLTYPE GetNumMessagesDiscardedByMessageCountLimit() override { return 0; }
-  UINT64 STDMETHODCALLTYPE GetMessageCountLimit() override { return message_count_limit_; }
+  UINT64 STDMETHODCALLTYPE GetMessageCountLimit() override { std::lock_guard lock(mutex_); return message_count_limit_; }
 
   HRESULT STDMETHODCALLTYPE AddStorageFilterEntries(D3D12_INFO_QUEUE_FILTER *) override { return S_OK; }
 
@@ -236,23 +233,23 @@ public:
   }
 
   void STDMETHODCALLTYPE ClearStorageFilter() override {}
-  HRESULT STDMETHODCALLTYPE PushEmptyStorageFilter() override {
+  HRESULT STDMETHODCALLTYPE PushEmptyStorageFilter() override { std::lock_guard lock(mutex_);
     storage_filter_stack_size_++;
     return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE PushCopyOfStorageFilter() override {
+  HRESULT STDMETHODCALLTYPE PushCopyOfStorageFilter() override { std::lock_guard lock(mutex_);
     storage_filter_stack_size_++;
     return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE PushStorageFilter(D3D12_INFO_QUEUE_FILTER *) override {
+  HRESULT STDMETHODCALLTYPE PushStorageFilter(D3D12_INFO_QUEUE_FILTER *) override { std::lock_guard lock(mutex_);
     storage_filter_stack_size_++;
     return S_OK;
   }
-  void STDMETHODCALLTYPE PopStorageFilter() override {
+  void STDMETHODCALLTYPE PopStorageFilter() override { std::lock_guard lock(mutex_);
     if (storage_filter_stack_size_)
       storage_filter_stack_size_--;
   }
-  UINT STDMETHODCALLTYPE GetStorageFilterStackSize() override { return storage_filter_stack_size_; }
+  UINT STDMETHODCALLTYPE GetStorageFilterStackSize() override { std::lock_guard lock(mutex_); return storage_filter_stack_size_; }
 
   HRESULT STDMETHODCALLTYPE AddRetrievalFilterEntries(D3D12_INFO_QUEUE_FILTER *) override { return S_OK; }
 
@@ -264,23 +261,23 @@ public:
   }
 
   void STDMETHODCALLTYPE ClearRetrievalFilter() override {}
-  HRESULT STDMETHODCALLTYPE PushEmptyRetrievalFilter() override {
+  HRESULT STDMETHODCALLTYPE PushEmptyRetrievalFilter() override { std::lock_guard lock(mutex_);
     retrieval_filter_stack_size_++;
     return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE PushCopyOfRetrievalFilter() override {
+  HRESULT STDMETHODCALLTYPE PushCopyOfRetrievalFilter() override { std::lock_guard lock(mutex_);
     retrieval_filter_stack_size_++;
     return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE PushRetrievalFilter(D3D12_INFO_QUEUE_FILTER *) override {
+  HRESULT STDMETHODCALLTYPE PushRetrievalFilter(D3D12_INFO_QUEUE_FILTER *) override { std::lock_guard lock(mutex_);
     retrieval_filter_stack_size_++;
     return S_OK;
   }
-  void STDMETHODCALLTYPE PopRetrievalFilter() override {
+  void STDMETHODCALLTYPE PopRetrievalFilter() override { std::lock_guard lock(mutex_);
     if (retrieval_filter_stack_size_)
       retrieval_filter_stack_size_--;
   }
-  UINT STDMETHODCALLTYPE GetRetrievalFilterStackSize() override { return retrieval_filter_stack_size_; }
+  UINT STDMETHODCALLTYPE GetRetrievalFilterStackSize() override { std::lock_guard lock(mutex_); return retrieval_filter_stack_size_; }
 
   HRESULT STDMETHODCALLTYPE AddMessage(
       D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY, D3D12_MESSAGE_ID, const char *) override {
@@ -293,10 +290,11 @@ public:
   WINBOOL STDMETHODCALLTYPE GetBreakOnCategory(D3D12_MESSAGE_CATEGORY) override { return FALSE; }
   WINBOOL STDMETHODCALLTYPE GetBreakOnSeverity(D3D12_MESSAGE_SEVERITY) override { return FALSE; }
   WINBOOL STDMETHODCALLTYPE GetBreakOnID(D3D12_MESSAGE_ID) override { return FALSE; }
-  void STDMETHODCALLTYPE SetMuteDebugOutput(WINBOOL mute) override { mute_debug_output_ = mute; }
-  WINBOOL STDMETHODCALLTYPE GetMuteDebugOutput() override { return mute_debug_output_; }
+  void STDMETHODCALLTYPE SetMuteDebugOutput(WINBOOL mute) override { std::lock_guard lock(mutex_); mute_debug_output_ = mute; }
+  WINBOOL STDMETHODCALLTYPE GetMuteDebugOutput() override { std::lock_guard lock(mutex_); return mute_debug_output_; }
 
 private:
+  std::mutex mutex_;
   UINT64 message_count_limit_ = ~UINT64(0);
   UINT storage_filter_stack_size_ = 0;
   UINT retrieval_filter_stack_size_ = 0;
@@ -304,6 +302,8 @@ private:
 };
 
 class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
+  // Embedded interface shares the controlling IUnknown and its lifetime.
+  MTLD3D12InfoQueue info_queue_{static_cast<MTLD3D12Device *>(this)};
 
   Com<IMTLDXGIAdapter> adapter_;
   D3D_FEATURE_LEVEL feature_level_;
@@ -476,7 +476,7 @@ public:
     }
 
     if (riid == __uuidof(ID3D12InfoQueue)) {
-      *ppvObject = ref(new MTLD3D12InfoQueue());
+      *ppvObject = ref(static_cast<ID3D12InfoQueue *>(&info_queue_));
       return S_OK;
     }
 
