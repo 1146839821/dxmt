@@ -462,6 +462,12 @@ public:
 
     *ppvObject = nullptr;
 
+    // Device-child validation asks for canonical identity on the recording path.
+    if (riid == __uuidof(IUnknown)) {
+      *ppvObject = ref(static_cast<ID3D12Device *>(this));
+      return S_OK;
+    }
+
     if (riid == DXMT_STREAMLINE_RETRIEVE_BASE_INTERFACE) {
       *ppvObject = ref(static_cast<ID3D12Device *>(this));
       return S_OK;
@@ -509,7 +515,7 @@ public:
       return S_OK;
     }
 
-    if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12Device)) {
+    if (riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12Device)) {
       *ppvObject = ref(static_cast<ID3D12Device *>(this));
       return S_OK;
     }

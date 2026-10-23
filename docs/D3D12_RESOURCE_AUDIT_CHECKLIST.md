@@ -503,6 +503,30 @@ cost, not proof of the staging change's conditional regression. Sample shares
 are diagnostic, not latency acceptance; suspension perturbs execution. No
 production optimization or gate closure is included in this evidence round.
 
+### N02 — device identity query ordering, 2026-10-23
+
+The device-owner slice prioritizes the existing IUnknown branch in
+MTLD3D12DeviceImpl::QueryInterface. Canonical pointer, ref operation, null-output
+guard and unsupported-interface handling are preserved. IsSameDevice and all
+recording/submission lifetime checks remain authoritative. No new cache/state,
+lock, allocation, source/header, ABI or capability is introduced. N10 is the
+caller benchmark; allocator/list/queue implementations are unchanged here.
+
+The existing feature runner verifies canonical identity through thirteen device
+interfaces and error outputs on both pre-optimization and final DLLs. Eleven
+scoped/adjacent processes pass, including GPU copy capacity/plane preservation,
+foreign allocator rejection, descriptor ownership and submission-failure rollback.
+Three rotating-process comparisons per setup/batch variant use identical PEs:
+recording medians improve 35.38–36.23% versus pre-optimization and 34.04–35.53%
+versus the pre-capacity-fix DLL. This removes twelve preceding IID predicates
+per IUnknown query without deleting the four query/ref cycles per buffer copy.
+Forty-five performance processes pass their GPU/fence oracles. Submission
+medians improve, but ordinary-submit p95 is +6.99% versus pre-optimization and
++10.17% versus pre-capacity baseline. Overall performance gate stays OPEN;
+this does not establish the cause of earlier conditional staging regressions.
+Exact hashes, all timing variants, costs and limits:
+`../dxmt-test/n10-identity-query-20261023/N02-device-identity.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

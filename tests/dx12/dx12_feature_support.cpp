@@ -53,6 +53,50 @@ IsSupportedFeatureLevel(D3D_FEATURE_LEVEL level) {
   return SUCCEEDED(D3D12CreateDevice(nullptr, level, __uuidof(ID3D12Device), nullptr));
 }
 
+bool CheckDeviceIdentity(ID3D12Device *device) {
+  IUnknown *identity = nullptr;
+  if (!CheckHR("Device identity",
+               device->QueryInterface(IID_PPV_ARGS(&identity))))
+    return false;
+  const std::array<IID, 13> interfaces = {
+      __uuidof(IUnknown),      __uuidof(ID3D12Object),  __uuidof(ID3D12Device),
+      __uuidof(ID3D12Device1), __uuidof(ID3D12Device2), __uuidof(ID3D12Device3),
+      __uuidof(ID3D12Device4), __uuidof(ID3D12Device5), __uuidof(ID3D12Device6),
+      __uuidof(ID3D12Device7), __uuidof(ID3D12Device8), __uuidof(ID3D12Device9),
+      __uuidof(ID3D12Device10)};
+  bool good = true;
+  for (const auto &iid : interfaces) {
+    IUnknown *view = nullptr;
+    if (!CheckHR(
+            "Device interface",
+            device->QueryInterface(iid, reinterpret_cast<void **>(&view)))) {
+      good = false;
+      break;
+    }
+    IUnknown *roundtrip = nullptr;
+    if (!CheckHR("Canonical device identity",
+                 view->QueryInterface(IID_PPV_ARGS(&roundtrip))) ||
+        roundtrip != identity)
+      good = false;
+    Release(roundtrip);
+    Release(view);
+  }
+  good &=
+      CheckHR("Identity null output",
+              device->QueryInterface(__uuidof(IUnknown), nullptr), E_POINTER);
+  constexpr IID unsupported_iid = {
+      0x13572468, 0x2468, 0x1357, {1, 2, 3, 4, 5, 6, 7, 8}};
+  void *unsupported = device;
+  good &= CheckHR("Unsupported device interface",
+                  device->QueryInterface(unsupported_iid, &unsupported),
+                  E_NOINTERFACE);
+  good &= unsupported == nullptr;
+  Release(identity);
+  if (!good)
+    std::cerr << "device interface identity contract failed\n";
+  return good;
+}
+
 bool
 CheckShaderModelRequest(ID3D12Device *device, UINT requested, HRESULT expected_hr, UINT expected_returned) {
   D3D12_FEATURE_DATA_SHADER_MODEL data = {
@@ -124,6 +168,9 @@ main() {
           D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))
       ))
     return fail("device creation failed");
+
+  if (!CheckDeviceIdentity(device))
+    return fail("device identity query failed");
 
   D3D12_FEATURE_DATA_SHADER_MODEL maximum_shader_model = {D3D_SHADER_MODEL_6_0};
   if (!CheckHR(
