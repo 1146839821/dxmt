@@ -337,6 +337,13 @@ public:
 
     if (ViewDesc.ViewDimension != D3D12_UAV_DIMENSION_BUFFER)
       return E_INVALIDARG;
+    if (pCounter) {
+      if (ViewDesc.Format != DXGI_FORMAT_UNKNOWN || !ViewDesc.Buffer.StructureByteStride ||
+          ViewDesc.Buffer.Flags != D3D12_BUFFER_UAV_FLAG_NONE)
+        return E_INVALIDARG;
+    } else if (ViewDesc.Buffer.CounterOffsetInBytes) {
+      return E_INVALIDARG;
+    }
 
     // Reserved buffers are shader-visible only when the native placement-sparse backing exists.
     // Keep the unsupported fallback explicit rather than passing a null Metal buffer to the descriptor heap.
@@ -359,7 +366,7 @@ public:
       auto Counter = static_cast<MTLD3D12Resource *>(pCounter);
       auto counter_desc = Counter->GetDesc();
       if (!Counter->buffer || counter_desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
-          (ViewDesc.Buffer.CounterOffsetInBytes & 3) ||
+          (ViewDesc.Buffer.CounterOffsetInBytes & (D3D12_UAV_COUNTER_PLACEMENT_ALIGNMENT - 1)) ||
           ViewDesc.Buffer.CounterOffsetInBytes > counter_desc.Width ||
           sizeof(UINT) > counter_desc.Width - ViewDesc.Buffer.CounterOffsetInBytes)
         return E_INVALIDARG;

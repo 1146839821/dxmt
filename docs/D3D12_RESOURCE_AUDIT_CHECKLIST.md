@@ -1226,6 +1226,57 @@ x64/Rosetta,clang23.1.1. Full changes,root,issue table,exact commands/exits,sour
 snapshots,loaded-path hashes and remaining conformance limits:
 `../dxmt-test/n09-view-permissions-20261024/N09-view-permissions.md`.
 
+### N09 — UAV counter descriptor admission, 2026-10-24
+
+Actual base1b9593aa, Device attachment view-contract priority; one node only.
+Confirmed invalid descriptor publication: counter offsets4/4092/4100 accepted
+by a four-byte test, RAW+counter accepted in shared raw/structured path, nonzero
+counterless buffer offsets ignored, null-resource counter calls clearing seeded
+slots. Existing buffer owner now requires UNKNOWN/nonzero stride/non-RAW for
+counter views and4096-byte placement alignment, or zero offset without counter.
+Device rejects counter calls missing resource/desc before null handling, including
+counterless null buffer descriptors with nonzero offsets. Existing buffer-kind,
+foreign-owner and overflow-safe complete-UINT bounds checks remain. No counter
+flag assumption,new production file,manager/cache/state/ABI/capability promotion.
+
+Final same PE baseline twice exits1(16 failures of37); candidate twice exits0.
+Thirty invalid slot checks and seven legal controls, with distinct seeded buffer
+identity; void rejection preserves slot as local safety policy, not a native
+Windows invalid-output guarantee. Offset0/4096/8192 accepted; last fits8196-byte
+counter. Existing4096-offset GPU counter descriptor copy/mutation/fenced reuse,
+residency/output/counter readback pass before and after with unchanged GPU test.
+Full ownership,view permissions,resource,feature,command-list,enhanced barriers,
+prior28 depth-format andRGB96 matrices,andD32S8 multi-mip/slice in-flight plane
+copy pass. Device+Buffer no-private syntax passes; not full linked/runtime proof.
+Microsoft SDK primary bytes refreshed unchanged; pinned upstream a148782 Device/
+Buffer comparison retained without copying its missing checks or latest claim.
+
+AB/BA/AB24 processes all0; medians of3 process p50/p95,us:
+
+| Probe | Before p50/p95 us | Final p50/p95 us | Change p50/p95 |
+|---|---:|---:|---:|
+| Ordinary submit | 104.50/141.70 | 107.50/144.40 | +2.87%/+1.91% |
+| 120000 format queries | 3469.50/3508.70 | 3435.40/3526.60 | -0.98%/+0.51% |
+| Recording | 3083.75/3178.10 | 3168.05/3499.40 | +2.73%/+10.11% |
+| 10000 mixed view writes | 1772.85/1842.80 | 1790.90/1896.90 | +1.02%/+2.94% |
+| Recording isolated repeat | 3091.25/3438.30 | 3186.95/3363.00 | +3.10%/-2.19% |
+
+Independent record repeat6 processes all0. Each side first group72 record/180
+submit/72 format batches/72 view batches; repeat another72 record. Recording p50
++2.73%/+3.10% remains an unresolved performance observation; p95 does not repeat
+its direction. Do not claim no regression or attribute cause from these samples.
+View delta is inconclusive; counter-positive standalone microbenchmark NOT_RUN.
+Global performance gate remains OPEN. No extra draw/submit work,allocation/lock/
+heap scan; predicates only in descriptor creation. Public/private/WMT ABI,legal
+lifetime/scheduling/layouts,FL/SM/Options/Tiers and EnhancedBarriersSupported FALSE
+unchanged. Device5–10 grouping and legacy interface rejections preserved.
+Full no-private linked/runtime,native Windows,D3D11 rendering,all-format casts/
+RAW-stride combinations,sparse counter GPU andT4 NOT_RUN. Not all ofN09/Device
+attachment closed. M1Max/Apple7,macOS27.0.1,Xcode27.1(requested26 differs),MSC4.0.1,
+matched Wine11 x64/Rosetta,clang23.1.1. User.gitignore untouched,no push. Exact
+commands,exits,issue table,source/loaded-path hashes,raw timing and limitations:
+`../dxmt-test/n09-uav-counter-contract-20261024/N09-uav-counter-contract.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

@@ -468,9 +468,192 @@ bool CheckViewPermissions(bool cost = false) {
   return good;
 }
 
+bool CheckUAVCounterContract() {
+  struct Objects {
+    ID3D12Device *device = nullptr;
+    ID3D12DescriptorHeap *heap = nullptr;
+    ID3D12Resource *buffer = nullptr, *seed = nullptr, *counter = nullptr;
+    ~Objects() {
+      Release(heap);
+      Release(buffer);
+      Release(seed);
+      Release(counter);
+      Release(device);
+    }
+  } o;
+  if (!CheckHR("Counter contract device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&o.device))))
+    return false;
+  const auto properties = DefaultHeap();
+  auto desc =
+      BufferDescription(8196, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  for (auto out : {&o.buffer, &o.seed, &o.counter})
+    if (!CheckHR("Counter contract buffer",
+                 o.device->CreateCommittedResource(
+                     &properties, D3D12_HEAP_FLAG_NONE, &desc,
+                     D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(out))))
+      return false;
+  D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
+  heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  heap_desc.NumDescriptors = 1;
+  if (!CheckHR("Counter contract heap", o.device->CreateDescriptorHeap(
+                                            &heap_desc, IID_PPV_ARGS(&o.heap))))
+    return false;
+  auto *heap = static_cast<dxmt::MTLD3D12DescriptorHeap *>(o.heap);
+  const auto handle = o.heap->GetCPUDescriptorHandleForHeapStart();
+  D3D12_UNORDERED_ACCESS_VIEW_DESC structured = {};
+  structured.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+  structured.Buffer.NumElements = 4;
+  structured.Buffer.StructureByteStride = 4;
+  auto raw = structured;
+  raw.Format = DXGI_FORMAT_R32_TYPELESS;
+  raw.Buffer.StructureByteStride = 0;
+  raw.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+  auto typed = structured;
+  typed.Format = DXGI_FORMAT_R32_UINT;
+  typed.Buffer.StructureByteStride = 0;
+  const auto write = [&](ID3D12Resource *resource, ID3D12Resource *counter,
+                         const D3D12_UNORDERED_ACCESS_VIEW_DESC *view) {
+    o.device->CreateUnorderedAccessView(resource, counter, view, handle);
+  };
+  bool good = true;
+  // Distinct buffer identity makes even offset-only invalid writes observable.
+  // Invalid input is checked for safe slot preservation, not native slot
+  // semantics.
+  for (const bool seeded : {false, true}) {
+    for (UINT kind = 0; kind < 15; kind++) {
+      heap->ClearDescriptor(0);
+      if (seeded)
+        write(o.seed, nullptr, &structured);
+      const auto before = ReadDescriptorFields(heap, 0);
+      auto view = structured;
+      ID3D12Resource *resource = o.buffer, *counter = o.counter;
+      const D3D12_UNORDERED_ACCESS_VIEW_DESC *view_ptr = &view;
+      const char *name = nullptr;
+      switch (kind) {
+      case 0:
+        name = "offset4";
+        view.Buffer.CounterOffsetInBytes = 4;
+        break;
+      case 1:
+        name = "offset4092";
+        view.Buffer.CounterOffsetInBytes = 4092;
+        break;
+      case 2:
+        name = "offset4100";
+        view.Buffer.CounterOffsetInBytes = 4100;
+        break;
+      case 3:
+        name = "offset-past-last-word";
+        view.Buffer.CounterOffsetInBytes = 8196;
+        break;
+      case 4:
+        name = "offset-overflow";
+        view.Buffer.CounterOffsetInBytes = UINT64_MAX;
+        break;
+      case 5:
+        name = "raw-counter";
+        view = raw;
+        break;
+      case 6:
+        name = "typed-counter";
+        view = typed;
+        break;
+      case 7:
+        name = "zero-stride-counter";
+        view.Buffer.StructureByteStride = 0;
+        break;
+      case 8:
+        name = "null-resource-counter";
+        resource = nullptr;
+        break;
+      case 9:
+        name = "null-desc-counter";
+        view_ptr = nullptr;
+        break;
+      case 10:
+        name = "structured-offset-without-counter";
+        counter = nullptr;
+        view.Buffer.CounterOffsetInBytes = 4096;
+        break;
+      case 11:
+        name = "raw-offset-without-counter";
+        counter = nullptr;
+        view = raw;
+        view.Buffer.CounterOffsetInBytes = 4096;
+        break;
+      case 12:
+        name = "typed-offset-without-counter";
+        counter = nullptr;
+        view = typed;
+        view.Buffer.CounterOffsetInBytes = 4096;
+        break;
+      case 13:
+        name = "aligned-out-of-range";
+        view.Buffer.CounterOffsetInBytes = 12288;
+        break;
+      case 14:
+        name = "null-resource-offset-without-counter";
+        resource = nullptr;
+        counter = nullptr;
+        view.Buffer.CounterOffsetInBytes = 4096;
+        break;
+      }
+      write(resource, counter, view_ptr);
+      const auto after = ReadDescriptorFields(heap, 0);
+      const bool pass =
+          before.type == after.type &&
+          (!seeded ||
+           (after.type == dxmt::ShaderVisibleDescriptorType::UAVBuffer &&
+            after.UAVBuffer.buffer == before.UAVBuffer.buffer &&
+            after.UAVBuffer.counter == before.UAVBuffer.counter));
+      std::cout << "counter_contract case=" << name << " seeded=" << seeded
+                << " pass=" << pass << "\n";
+      good &= pass;
+    }
+  }
+  for (const UINT64 offset : {UINT64(0), UINT64(4096), UINT64(8192)}) {
+    heap->ClearDescriptor(0);
+    auto view = structured;
+    view.Buffer.CounterOffsetInBytes = offset;
+    write(o.buffer, o.counter, &view);
+    const auto stored = ReadDescriptorFields(heap, 0);
+    const bool pass =
+        stored.type == dxmt::ShaderVisibleDescriptorType::UAVBuffer &&
+        stored.UAVBuffer.buffer ==
+            static_cast<dxmt::MTLD3D12Resource *>(o.buffer)->buffer.ptr() &&
+        stored.UAVBuffer.counter ==
+            static_cast<dxmt::MTLD3D12Resource *>(o.counter)->buffer.ptr();
+    std::cout << "counter_contract valid_offset=" << offset << " pass=" << pass
+              << "\n";
+    good &= pass;
+  }
+  for (const auto &view : {structured, raw, typed}) {
+    heap->ClearDescriptor(0);
+    write(o.buffer, nullptr, &view);
+    const auto stored = ReadDescriptorFields(heap, 0);
+    const auto expected =
+        view.Format == DXGI_FORMAT_R32_UINT
+            ? dxmt::ShaderVisibleDescriptorType::UAVTexelBuffer
+            : dxmt::ShaderVisibleDescriptorType::UAVBuffer;
+    const bool pass = stored.type == expected;
+    std::cout << "counter_contract valid_counterless_format=" << view.Format
+              << " pass=" << pass << "\n";
+    good &= pass;
+  }
+  write(nullptr, nullptr, &structured);
+  const bool null_pass = ReadDescriptorFields(heap, 0).type ==
+                         dxmt::ShaderVisibleDescriptorType::Null;
+  std::cout << "counter_contract valid_null pass=" << null_pass << "\n";
+  return good && null_pass;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::string(argv[1]) == "--uav-counter-contract")
+    return CheckUAVCounterContract() ? 0 : 1;
   if (argc == 2 && (std::string(argv[1]) == "--view-permissions" ||
                     std::string(argv[1]) == "--view-permission-cost"))
     return CheckViewPermissions(std::string(argv[1]) ==

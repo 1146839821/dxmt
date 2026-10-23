@@ -1206,7 +1206,15 @@ public:
       ID3D12Resource *pResource, ID3D12Resource *pCounter, const D3D12_UNORDERED_ACCESS_VIEW_DESC *pDesc,
       D3D12_CPU_DESCRIPTOR_HANDLE Descriptor
   ) {
+    if (pCounter && (!pResource || !pDesc)) {
+      WARN("CreateUnorderedAccessView: a counter requires both a resource and a description");
+      return;
+    }
     if (!pResource) {
+      if (pDesc && pDesc->ViewDimension == D3D12_UAV_DIMENSION_BUFFER && pDesc->Buffer.CounterOffsetInBytes) {
+        WARN("CreateUnorderedAccessView: a counterless buffer view requires a zero counter offset");
+        return;
+      }
       auto [Heap, Index] = GetShaderVisibleDescriptorHeap(this, Descriptor);
       if (Heap)
         Heap->AddUnorderedAccessView(Index, pDesc);
