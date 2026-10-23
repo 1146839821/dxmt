@@ -348,10 +348,41 @@ struct EnhancedSplitBarrierState {
   D3D12_RESOURCE_STATES after_state = D3D12_RESOURCE_STATE_COMMON;
 };
 
+struct D3D12FenceWait;
+
+// Cancellation must not retain the fence COM object (and through it the device).
+struct D3D12FenceWaitSource {
+  virtual ~D3D12FenceWaitSource() = default;
+  virtual void CancelWait(const D3D12FenceWait *wait) = 0;
+};
+
+struct D3D12FenceWaitGroup {
+  HANDLE handle = nullptr;
+  bool synchronous = false;
+  bool wait_any = false;
+  UINT count = 0;
+  std::atomic<UINT> remaining{0};
+  std::atomic<bool> armed{false}, cancelled{false}, finished{false};
+  HRESULT result = S_OK;
+  std::vector<std::weak_ptr<D3D12FenceWait>> waits;
+
+  ~D3D12FenceWaitGroup();
+  HRESULT Initialize(UINT count, bool any, HANDLE event);
+  void Notify();
+  void Arm();
+  void Cancel();
+  HRESULT Wait();
+
+private:
+  void Finish();
+};
+
 // A wait latches once, independently of subsequent changes to the logical fence.
 struct D3D12FenceWait {
   WMT::Reference<WMT::SharedEvent> event;
   HANDLE handle = nullptr;
+  std::shared_ptr<D3D12FenceWaitGroup> group;
+  std::weak_ptr<D3D12FenceWaitSource> source;
 
   D3D12FenceWait() = default;
   D3D12FenceWait(const D3D12FenceWait &) = delete;
@@ -371,7 +402,10 @@ struct D3D12DeviceRemovalListener {
 
 class MTLD3D12Fence : public ID3D12Fence1 {
 public:
-  virtual HRESULT RegisterWait(UINT64 value, HANDLE event, std::shared_ptr<D3D12FenceWait> &wait) = 0;
+  virtual HRESULT RegisterWait(
+      UINT64 value, HANDLE event, std::shared_ptr<D3D12FenceWait> &wait,
+      const std::shared_ptr<D3D12FenceWaitGroup> &group = {}
+  ) = 0;
   virtual void CancelWait(const std::shared_ptr<D3D12FenceWait> &wait) = 0;
 };
 

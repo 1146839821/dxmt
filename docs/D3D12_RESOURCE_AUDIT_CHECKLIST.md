@@ -662,6 +662,33 @@ Device roundtrip. Their runtime/lifetime fixes are not part of this commit.
 Reproduction commands, manifests, status table, sources, raw logs and limitations:
 `../dxmt-test/n02-device-msaa-20261023/N02-device-msaa.md`.
 
+### N14 — multiple-fence notification and cancellation, 2026-10-23
+
+Null-event ALL/ANY now block on the same latched registrations as async waits.
+The old per-call detached polling thread and COM-owning WaitSet are removed.
+Groups own one event and weak cancellation links. ANY, registration failure,
+and fence destruction cancel pending peers; removal completes latched waits.
+Reached nodes splice out of the existing pending list under one fence lock;
+notifications/cancellation run outside it. No extra submission or worker thread.
+
+Same-runner baseline reproduces E_INVALIDARG for completed null waits. Final
+target covers pending null ALL/ANY, duplicate/rewound thresholds,129 entries,
+six OOM sites and96 abandoned groups. Threads remain1 ->1;96 duplicated event
+handles close, last Fence Release returns0, cancellation never signals completion.
+Full command-list/resource/feature runners also pass, including removal,
+CPU/GPU rewind, cross-queue replay and Device identity. Device/fence no-private
+translation-unit checks pass; full no-private link/runtime, native Windows
+differential and extended T4 concurrency are NOT_RUN.
+
+Twelve alternating performance processes pass correctness. Recording p50/P95
+-0.73%/+21.73%, ordinary submission +3.79%/+4.55%; recording tail triggers the
+team alert. Overall performance gate remains OPEN; no causal speedup/regression
+claim or speculative QI rollback. Public COM/WMT ABI, capability declarations,
+GPU scheduling and resource layout unchanged; private RegisterWait signature
+and pending-list storage change. Next Device priority is InfoQueue.
+Commands, ownership/timing proof, limitations and raw evidence:
+`../dxmt-test/n14-multiple-fences-20261023/N14-multiple-fences.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

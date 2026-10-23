@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include <windows.h>
+#include <tlhelp32.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
 
@@ -732,6 +733,192 @@ bool TestAllocatorRecordingGrowth(ID3D12Device *device) {
       std::cout << "allocator growth count " << count << " replay " << replay << " exact readback passed\n";
     }
   }
+  return true;
+}
+
+class FenceHandleProbe {
+  inline static BOOL (WINAPI *duplicate_)(HANDLE, HANDLE, HANDLE, LPHANDLE, DWORD, BOOL, DWORD) = nullptr;
+  inline static BOOL (WINAPI *close_)(HANDLE) = nullptr;
+  inline static std::atomic<unsigned> opened_{0}, closed_{0};
+  DriverImportPatch duplicate_patch_, close_patch_;
+  static BOOL WINAPI Duplicate(HANDLE a, HANDLE b, HANDLE c, LPHANDLE d, DWORD e, BOOL f, DWORD g) {
+    BOOL ok = duplicate_(a, b, c, d, e, f, g);
+    if (ok) opened_++;
+    return ok;
+  }
+  static BOOL WINAPI Close(HANDLE handle) {
+    BOOL ok = close_(handle);
+    if (ok) closed_++;
+    return ok;
+  }
+public:
+  bool Install() {
+    void *original = nullptr;
+    opened_ = closed_ = 0;
+    if (!duplicate_patch_.Install("DuplicateHandle", reinterpret_cast<void *>(&Duplicate), original)) return false;
+    duplicate_ = reinterpret_cast<decltype(duplicate_)>(original);
+    if (!close_patch_.Install("CloseHandle", reinterpret_cast<void *>(&Close), original)) return false;
+    close_ = reinterpret_cast<decltype(close_)>(original);
+    return true;
+  }
+  bool Balanced() const {
+    std::cout << "Fence handle duplicates=" << opened_ << " closes=" << closed_ << "\n";
+    return opened_ == closed_;
+  }
+};
+
+DWORD ProcessThreadCount() {
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) return 0;
+  THREADENTRY32 entry = {};
+  entry.dwSize = sizeof(entry);
+  DWORD count = 0;
+  if (Thread32First(snapshot, &entry))
+    do { if (entry.th32OwnerProcessID == GetCurrentProcessId()) count++; }
+    while (Thread32Next(snapshot, &entry));
+  CloseHandle(snapshot);
+  return count;
+}
+
+bool TestMultipleFenceWaits() {
+  Owned<ID3D12Device1> device;
+  Owned<ID3D12Fence> first, second;
+  if (!CheckHR("Multiple wait device", D3D12CreateDevice(
+          nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.ptr))) ||
+      !CheckHR("Multiple wait first", device->CreateFence(
+          1, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&first.ptr))) ||
+      !CheckHR("Multiple wait second", device->CreateFence(
+          1, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&second.ptr))))
+    return false;
+  ID3D12Fence *fences[] = {first.ptr, second.ptr};
+  UINT64 values[] = {1, 1};
+  for (auto flags : {D3D12_MULTIPLE_FENCE_WAIT_FLAG_NONE, D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY})
+    if (!CheckHR("Completed multiple wait with null event",
+                 device->SetEventOnMultipleFenceCompletion(fences, values, 2, flags, nullptr)))
+      return false;
+  for (auto flags : {D3D12_MULTIPLE_FENCE_WAIT_FLAG_NONE, D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY}) {
+    first->Signal(0);
+    second->Signal(0);
+    HANDLE entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!entered || !done) {
+      if (entered) CloseHandle(entered);
+      if (done) CloseHandle(done);
+      return false;
+    }
+    HRESULT result = E_FAIL;
+    std::thread waiter([&] {
+      SetEvent(entered);
+      result = device->SetEventOnMultipleFenceCompletion(fences, values, 2, flags, nullptr);
+      SetEvent(done);
+    });
+    bool ok = WaitForSingleObject(entered, 5000) == WAIT_OBJECT_0 &&
+              WaitForSingleObject(done, 20) == WAIT_TIMEOUT;
+    first->Signal(1);
+    if (flags == D3D12_MULTIPLE_FENCE_WAIT_FLAG_NONE)
+      ok &= WaitForSingleObject(done, 20) == WAIT_TIMEOUT;
+    else
+      ok &= WaitForSingleObject(done, 5000) == WAIT_OBJECT_0;
+    second->Signal(1);
+    ok &= WaitForSingleObject(done, 5000) == WAIT_OBJECT_0;
+    waiter.join();
+    CloseHandle(entered);
+    CloseHandle(done);
+    if (!ok || !CheckHR("Pending null multiple wait", result))
+      return false;
+  }
+  struct EventOwner {
+    HANDLE handle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    ~EventOwner() { if (handle) CloseHandle(handle); }
+  } event;
+  if (!event.handle)
+    return false;
+  // Duplicate fences have independent thresholds, and ANY cancels its peers.
+  ID3D12Fence *duplicates[] = {first.ptr, first.ptr};
+  UINT64 thresholds[] = {2, 3};
+  if (!CheckHR("Duplicate ALL", device->SetEventOnMultipleFenceCompletion(
+          duplicates, thresholds, 2, D3D12_MULTIPLE_FENCE_WAIT_FLAG_NONE, event.handle)))
+    return false;
+  first->Signal(2);
+  if (WaitForSingleObject(event.handle, 0) != WAIT_TIMEOUT)
+    return false;
+  first->Signal(0);
+  first->Signal(3);
+  if (WaitForSingleObject(event.handle, 5000) != WAIT_OBJECT_0)
+    return false;
+  ResetEvent(event.handle);
+  // More registrations than the Win32 WaitForMultipleObjects limit.
+  std::array<ID3D12Fence *, 129> many;
+  std::array<UINT64, 129> targets;
+  many.fill(first.ptr);
+  targets.fill(4);
+  if (!CheckHR("Wide fence group", device->SetEventOnMultipleFenceCompletion(
+          many.data(), targets.data(), many.size(), D3D12_MULTIPLE_FENCE_WAIT_FLAG_NONE, event.handle)))
+    return false;
+  first->Signal(4);
+  if (WaitForSingleObject(event.handle, 5000) != WAIT_OBJECT_0)
+    return false;
+  ResetEvent(event.handle);
+  first->Signal(0);
+  second->Signal(0);
+  UINT64 pending_values[] = {100, 100};
+  // An OOM after one fence has registered must cancel that partial group.
+  SubmissionAllocationFault fault;
+  if (!fault.Install())
+    return false;
+  unsigned failures = 0;
+  for (UINT allocation = 1; allocation <= 16; allocation++) {
+    fault.Arm(allocation);
+    HRESULT hr = device->SetEventOnMultipleFenceCompletion(
+        fences, pending_values, 2, D3D12_MULTIPLE_FENCE_WAIT_FLAG_NONE, event.handle);
+    fault.Stop();
+    if (!fault.Hit()) {
+      first->Signal(100);
+      second->Signal(100);
+      if (FAILED(hr) || WaitForSingleObject(event.handle, 5000) != WAIT_OBJECT_0)
+        return false;
+      ResetEvent(event.handle);
+      break;
+    }
+    failures++;
+    if (hr != E_OUTOFMEMORY)
+      return false;
+    first->Signal(100);
+    second->Signal(100);
+    if (WaitForSingleObject(event.handle, 0) != WAIT_TIMEOUT)
+      return false;
+    first->Signal(0);
+    second->Signal(0);
+  }
+  if (failures < 5)
+    return false;
+  // An unsatisfied group must not retain either COM child or its device.
+  Owned<ID3D12Fence> abandoned;
+  if (!CheckHR("Abandoned fence", device->CreateFence(
+          0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&abandoned.ptr))))
+    return false;
+  ID3D12Fence *abandoned_fences[] = {abandoned.ptr, first.ptr};
+  UINT64 never[] = {UINT64_MAX, UINT64_MAX};
+  FenceHandleProbe handles;
+  if (!handles.Install()) return false;
+  const DWORD threads_before = ProcessThreadCount();
+  for (unsigned i = 0; i < 96; i++)
+    if (!CheckHR("Abandoned group", device->SetEventOnMultipleFenceCompletion(
+            abandoned_fences, never, 2, D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY, event.handle)))
+      return false;
+  const DWORD threads_pending = ProcessThreadCount();
+  std::cout << "Fence pending groups=96 threads=" << threads_before << " -> " << threads_pending << "\n";
+  if (!threads_before || threads_pending > threads_before + 4) return false;
+  const ULONG references = abandoned.ptr->Release();
+  abandoned.ptr = nullptr;
+  if (references || WaitForSingleObject(event.handle, 0) != WAIT_TIMEOUT)
+    return false;
+  first->Signal(UINT64_MAX);
+  if (WaitForSingleObject(event.handle, 0) != WAIT_TIMEOUT)
+    return false;
+  if (!handles.Balanced()) return false;
+  std::cout << "Multiple fence synchronous/duplicate/wide/OOM/abandonment passed; OOM sites="
+            << failures << "\n";
   return true;
 }
 
@@ -1927,6 +2114,8 @@ int main(int argc, char **argv) {
   }
   if (argc == 3 && std::strcmp(argv[1], "--copy-staging") == 0)
     return TestCopyStaging(argv[2]) ? 0 : 1;
+  if (argc == 2 && std::strcmp(argv[1], "--multiple-fences") == 0)
+    return TestMultipleFenceWaits() ? 0 : 1;
   if (argc == 3 && std::strcmp(argv[1], "--encoder-creation-failure") == 0) {
     const char *mode = argv[2];
     if (std::strcmp(mode, "copy") && std::strcmp(mode, "clear") &&
@@ -1968,7 +2157,7 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
-  if (!TestDeviceRemovalWaits() || !TestConcurrentRemovalListeners()) {
+  if (!TestMultipleFenceWaits() || !TestDeviceRemovalWaits() || !TestConcurrentRemovalListeners()) {
     device->Release();
     return 1;
   }

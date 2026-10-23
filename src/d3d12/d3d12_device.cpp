@@ -31,9 +31,7 @@
 #include "log/log.hpp"
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <map>
-#include <thread>
 #include <vector>
 
 namespace dxmt {
@@ -1892,9 +1890,8 @@ public:
       ID3D12Fence *const *pFences, const UINT64 *pValues, UINT FenceCount, D3D12_MULTIPLE_FENCE_WAIT_FLAGS Flags,
       HANDLE hEvent
   ) {
-    if (!FenceCount || !pFences || !pValues || !hEvent ||
-        (Flags != D3D12_MULTIPLE_FENCE_WAIT_FLAG_NONE && Flags != D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY) ||
-        FenceCount > MAXIMUM_WAIT_OBJECTS)
+    if (!FenceCount || !pFences || !pValues ||
+        (Flags != D3D12_MULTIPLE_FENCE_WAIT_FLAG_NONE && Flags != D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY))
       return E_INVALIDARG;
 
     const bool wait_any = Flags == D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY;
@@ -1902,60 +1899,26 @@ public:
       if (!IsSameDevice(this, pFences[i]))
         return E_INVALIDARG;
 
-    struct WaitSet {
-      std::vector<Com<MTLD3D12Fence>> fences;
-      std::vector<std::shared_ptr<D3D12FenceWait>> waits;
-      HANDLE event = nullptr;
-
-      ~WaitSet() {
-        for (size_t i = 0; i < waits.size(); i++)
-          fences[i]->CancelWait(waits[i]);
-        if (event)
-          CloseHandle(event);
-      }
-
-      bool Completed(bool any) {
-        bool complete = !any;
-        for (const auto &wait : waits) {
-          const bool reached = wait->event.signaledValue() != 0;
-          if (any)
-            complete |= reached;
-          else
-            complete &= reached;
-        }
-        return complete;
-      }
-    };
-
     try {
-      auto pending = std::make_shared<WaitSet>();
-      pending->fences.reserve(FenceCount);
-      pending->waits.reserve(FenceCount);
-      if (!DuplicateHandle(GetCurrentProcess(), hEvent, GetCurrentProcess(), &pending->event,
-                           0, FALSE, DUPLICATE_SAME_ACCESS))
-        return HRESULT_FROM_WIN32(GetLastError());
+      auto pending = std::make_shared<D3D12FenceWaitGroup>();
+      const HRESULT hr = pending->Initialize(FenceCount, wait_any, hEvent);
+      if (FAILED(hr))
+        return hr;
       for (UINT i = 0; i < FenceCount; i++) {
-        pending->fences.emplace_back(static_cast<MTLD3D12Fence *>(pFences[i]));
         std::shared_ptr<D3D12FenceWait> wait;
-        HRESULT hr = pending->fences.back()->RegisterWait(pValues[i], nullptr, wait);
-        if (FAILED(hr))
-          return hr;
-        pending->waits.push_back(std::move(wait));
+        const HRESULT registration = static_cast<MTLD3D12Fence *>(pFences[i])->RegisterWait(
+            pValues[i], nullptr, wait, pending);
+        if (FAILED(registration)) {
+          pending->Cancel();
+          pending->Arm();
+          return registration;
+        }
       }
-      if (pending->Completed(wait_any)) {
-        SetEvent(pending->event);
-        return S_OK;
-      }
-      // Poll the latched registrations, never the rewound logical values.
-      std::thread([pending = std::move(pending), wait_any] {
-        while (!pending->Completed(wait_any))
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        SetEvent(pending->event);
-      }).detach();
-    } catch (...) {
+      pending->Arm();
+      return hEvent ? S_OK : pending->Wait();
+    } catch (const std::bad_alloc &) {
       return E_OUTOFMEMORY;
     }
-    return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE
