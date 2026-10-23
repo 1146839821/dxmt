@@ -241,7 +241,7 @@ This is an audit and semantic-closure record, not a capability declaration.
 | Shader status feedback | DXBC parsing accepts feedback forms of `LD`, `LD_MS`, typed UAV load, sample bias/LOD/gradient/compare, gather, and gather compare. The current GPU fixture proves `Load`, point/linear `SampleLevel`, tiled `SampleGrad`, and `CheckAccessFullyMapped` for mapped, NULL, and mixed accesses. | `PARTIAL`: representative texture paths pass; gather/compare/typed-UAV runtime proof and a native debug-layer comparison remain open. |
 | Raw/structured buffer feedback | The D3D/HLSL status-bearing load contract is defined (`SPEC_CLOSED`), but the direct raw/structured AIR load path has no residency/status sideband or shader-visible mapping metadata. | `BLOCKED_BY_ARCHITECTURE / DESIGN_REQUIRED`; do not fake fully-mapped status. |
 | LOD clamp | The common metadata path now preserves fractional `ResourceMinLODClamp`, and the independent ordinary/reserved fixture covers `0.0`, `0.5`, `1.0`, `1.5`, and `MostDetailedMip`. | `UNVERIFIED / MISSING_VALIDATION` for SRV clamp on this host: MSC 4.0.1/M1 ignores the descriptor minLOD in the final linked shader. Tiled per-sample clamp is covered separately by the passing status fixture. |
-| Packed mip tail | D3D12 packed metadata and logical tile ranges are modeled. Native sparse mapping is attempted only when `firstMipmapInTail` equals the D3D standard-mip boundary and Metal `tailSizeInBytes` equals the D3D packed-tail byte count; otherwise packed views/mappings stay rejected. A mixed resource now allows a representable standard-only SRV while rejecting an incompatible packed-intersecting view. The current host reports `d3d_first=0`, `metal_first=1`, and 65536-byte tails on both sides. The supplied native Windows oracle on an NVIDIA GeForce GTX 1650 (`0x10de:0x1f0a`, `TiledResourcesTier=3`) observed `64x64 R32 mips4 array1: total=1, standard=0, packed=4, packedTiles=1, start=0, shape=128x128x1` and `192x128 R32 mips2 array1: total=3, standard=1, packed=1, packedTiles=1, start=2, shape=128x128x1`; the array2 create returned `E_INVALIDARG`. Microsoft documents a zero shape for an entirely packed resource, so the native nonzero shape remains an adapter-specific observation; DXMT returns zero. | Current Metal 3 implementation: `BLOCKED_BY_ARCHITECTURE` for the incompatible packed-tail layout; Tier2 array rejection is a normative boundary, not a missing feature. |
+| Packed mip tail | D3D12 packed metadata and logical tile ranges are modeled. Native sparse mapping is attempted only when `firstMipmapInTail` equals the D3D standard-mip boundary and Metal `tailSizeInBytes` equals the D3D packed-tail byte count; otherwise packed views/mappings stay rejected. A mixed resource now allows a representable standard-only SRV while rejecting an incompatible packed-intersecting view. The UAV fixture reports `d3d_first=0`, `metal_first=1`, and 65536-byte tails on both sides. The supplied native Windows oracle on an NVIDIA GeForce GTX 1650 (`0x10de:0x1f0a`, `TiledResourcesTier=3`) observed `64x64 R32 mips4 array1: total=1, standard=0, packed=4, packedTiles=1, start=0, shape=128x128x1` and `192x128 R32 mips2 array1: total=3, standard=1, packed=1, packedTiles=1, start=2, shape=128x128x1`; the array2 create returned `E_INVALIDARG`. Microsoft documents a zero shape for an entirely packed resource, so the native nonzero shape remains an adapter-specific observation; DXMT returns zero. | `PARTIAL`: the read-only copy-upload case below passes locally; the UAV fixture remains `BLOCKED_BY_ARCHITECTURE` for its incompatible layout. Tier2 array rejection remains a normative boundary. |
 | Filtering footprint | The GPU fixture now uses a true linear sampler: fully mapped produces `2.0/true`, fully NULL produces `0.0/false`, and a mapped/NULL 50/50 footprint produces `0.5/false`, with exact `CheckAccessFullyMapped` predicates. | `LOCAL_PASS` for this representative footprint; broader format/dimension coverage and native comparison remain open. |
 
 ### Requirements and assumptions
@@ -267,11 +267,45 @@ The packed-tail fixture is `tests/dx12/dx12_reserved_texture_packed.cpp` with
 `reserved_texture_packed.hlsl`. It checks the single-array `64x64 R32_UINT`
 four-mip matrix, creates SRV/UAV descriptors before mapping, maps the logical
 tail to heap A, remaps to heap B, and holds heap B through its GPU use. On the
-current M1/Metal 3 host the D3D and Metal tail boundaries are incompatible
+M1 host in default UAV mode the D3D and Metal tail boundaries are incompatible
 (`d3d_first=0`, `metal_first=1`, both tails 65536 bytes), so the production
 view/mapping path returns `E_NOTIMPL` instead of assuming an offset. The
 fixture exits 1 with the expected packed shader mismatch (`got 0x0/0x0`) and
 is classified `BLOCKED_BY_ARCHITECTURE`, not as a semantic pass.
+
+### Packed-tail usage and failure verdicts — 2026-10-23
+
+N15 extended the existing packed fixture with `--copy-upload`. This creates the
+same `64x64 R32_UINT`, four-mip resource without UAV usage and populates mip 1
+through `CopyTextureRegion`. The original UAV mode remains available. A native
+metadata-only probe on M1 Max/macOS 27.0.1 observed Metal tail start 0 without
+shader-write usage and 1 with it; both tails require 65536 bytes. The D3D12
+logical start is 0 in both cases. Matching one mode does not validate the other.
+
+Run the existing executable with its three existing shader fixtures and append
+`--copy-upload` for the copy case. With the paired runtime documented above:
+
+- Copy mode exited 0: mip-1 GPU reads at `(0,0)` and `(31,31)` returned heap A's
+  `0x11112222`, heap B's `0x33334444`, zero after a complete NULL mapping, and
+  A's original value after remapping. The heap public-reference check passed;
+  heap B stayed alive through its GPU use and unmapping.
+- The UAV mode still produced zero instead of the written value and exited 1.
+  Native metadata and resource-side `E_NOTIMPL` establish its layout blocker;
+  the shader mismatch alone is not evidence of an architectural limitation.
+- An external corrupted read shader produced `0xdeadbeef` and exited 1. The
+  fixture now treats every GPU value mismatch as failure, rather than returning
+  77 and automatically calling it an architecture blocker. Explicit unsupported
+  resource-creation HRESULTs retain the existing skip behavior.
+- View-range and ordinary reserved-texture GPU regressions exited 0.
+
+Changed files: this checklist and `dx12_reserved_texture_packed.cpp`. Build,
+changed-line formatting, and `git diff --check` passed. Raw commands, layout
+observations, negative fixtures and hashes remain outside the repository in
+`dxmt-test/n15-packed-20261022` (the investigation began October 22).
+No production hot path changed; no performance improvement is claimed.
+Only the stated mip-1 points and operations were verified. Other mips/formats,
+UAV layout equivalence, broader feedback, native Windows comparison and complete
+Tier 2/3 coverage remain open. Public capability declarations are unchanged.
 
 `tests/dx12/dx12_tiled_tier2_oracle.cpp` remains a buildable native-Windows
 oracle target. The supplied run used an NVIDIA GeForce GTX 1650

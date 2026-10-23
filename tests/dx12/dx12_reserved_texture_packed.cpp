@@ -4,6 +4,7 @@
 #include <d3d12.h>
 
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -59,7 +60,7 @@ D3D12_RESOURCE_DESC BufferDesc(UINT64 bytes, D3D12_RESOURCE_FLAGS flags = D3D12_
   return desc;
 }
 
-D3D12_RESOURCE_DESC PackedTextureDesc() {
+D3D12_RESOURCE_DESC PackedTextureDesc(bool copy_upload) {
   D3D12_RESOURCE_DESC desc = {};
   desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
   // Keep the whole resource in the packed tail. This makes mip 1 a direct
@@ -71,7 +72,8 @@ D3D12_RESOURCE_DESC PackedTextureDesc() {
   desc.Format = DXGI_FORMAT_R32_UINT;
   desc.SampleDesc.Count = 1;
   desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
-  desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  desc.Flags = copy_upload ? D3D12_RESOURCE_FLAG_NONE
+                           : D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   return desc;
 }
 
@@ -118,7 +120,8 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource, UINT64 
                             &properties, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr, IID_PPV_ARGS(&resource.ptr)));
 }
 
-int Run(const char *read_path, const char *write_a_path, const char *write_b_path) {
+int Run(const char *read_path, const char *write_a_path,
+        const char *write_b_path, bool copy_upload) {
   const auto read_shader = ReadShader(read_path);
   const auto write_a_shader = ReadShader(write_a_path);
   const auto write_b_shader = ReadShader(write_b_path);
@@ -135,7 +138,7 @@ int Run(const char *read_path, const char *write_a_path, const char *write_b_pat
   Check("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.ptr)));
 
   Owned<ID3D12Resource> texture;
-  const auto texture_desc = PackedTextureDesc();
+  const auto texture_desc = PackedTextureDesc(copy_upload);
   const HRESULT reserved_hr = device->CreateReservedResource(
       &texture_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&texture.ptr));
   if (FAILED(reserved_hr) &&
@@ -171,6 +174,23 @@ int Run(const char *read_path, const char *write_a_path, const char *write_b_pat
   CreateBuffer(device.ptr, readback, 2 * sizeof(UINT), D3D12_HEAP_TYPE_READBACK,
                D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
 
+  // CopyTextureRegion can populate a packed mip without requiring a UAV-capable
+  // texture. Shader-write usage can change the native sparse-tail boundary.
+  constexpr UINT upload_row_pitch = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+  constexpr UINT upload_height = 32;
+  constexpr UINT upload_size = upload_row_pitch * upload_height;
+  Owned<ID3D12Resource> upload;
+  if (copy_upload) {
+    CreateBuffer(device.ptr, upload, 2 * upload_size, D3D12_HEAP_TYPE_UPLOAD,
+                 D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+    UINT *mapped = nullptr;
+    Check("MapPackedUpload",
+          upload->Map(0, nullptr, reinterpret_cast<void **>(&mapped)));
+    for (UINT i = 0; i < 2 * upload_size / sizeof(UINT); ++i)
+      mapped[i] = i < upload_size / sizeof(UINT) ? ValueA : ValueB;
+    upload->Unmap(0, nullptr);
+  }
+
   Owned<ID3D12DescriptorHeap> descriptors;
   D3D12_DESCRIPTOR_HEAP_DESC descriptor_desc = {};
   descriptor_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -200,7 +220,8 @@ int Run(const char *read_path, const char *write_a_path, const char *write_b_pat
   tail_uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
   tail_uav.Texture2D.MipSlice = 1;
   descriptor_cpu.ptr += descriptor_stride;
-  device->CreateUnorderedAccessView(texture.ptr, nullptr, &tail_uav, descriptor_cpu);
+  device->CreateUnorderedAccessView(copy_upload ? nullptr : texture.ptr,
+                                    nullptr, &tail_uav, descriptor_cpu);
 
   D3D12_DESCRIPTOR_RANGE ranges[2] = {};
   ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
@@ -229,10 +250,16 @@ int Run(const char *read_path, const char *write_a_path, const char *write_b_pat
   pipeline_desc.pRootSignature = root.ptr;
   pipeline_desc.CS = {read_shader.data(), read_shader.size()};
   Check("CreateReadPSO", device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&read_pso.ptr)));
-  pipeline_desc.CS = {write_a_shader.data(), write_a_shader.size()};
-  Check("CreateWriteAPSO", device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&write_a_pso.ptr)));
-  pipeline_desc.CS = {write_b_shader.data(), write_b_shader.size()};
-  Check("CreateWriteBPSO", device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&write_b_pso.ptr)));
+  if (!copy_upload) {
+    pipeline_desc.CS = {write_a_shader.data(), write_a_shader.size()};
+    Check("CreateWriteAPSO",
+          device->CreateComputePipelineState(&pipeline_desc,
+                                             IID_PPV_ARGS(&write_a_pso.ptr)));
+    pipeline_desc.CS = {write_b_shader.data(), write_b_shader.size()};
+    Check("CreateWriteBPSO",
+          device->CreateComputePipelineState(&pipeline_desc,
+                                             IID_PPV_ARGS(&write_b_pso.ptr)));
+  }
 
   Owned<ID3D12Heap> heap_a;
   Owned<ID3D12Heap> heap_b;
@@ -252,7 +279,10 @@ int Run(const char *read_path, const char *write_a_path, const char *write_b_pat
   UINT heap_tile = 0;
 
   auto map_tail = [&](ID3D12Heap *heap) {
-    queue->UpdateTileMappings(texture.ptr, 1, &coordinate, &region, heap, 1, nullptr, &heap_tile, nullptr,
+    const D3D12_TILE_RANGE_FLAGS range_flag =
+        heap ? D3D12_TILE_RANGE_FLAG_NONE : D3D12_TILE_RANGE_FLAG_NULL;
+    queue->UpdateTileMappings(texture.ptr, 1, &coordinate, &region, heap, 1,
+                              &range_flag, &heap_tile, nullptr,
                               D3D12_TILE_MAPPING_FLAG_NONE);
   };
 
@@ -291,6 +321,22 @@ int Run(const char *read_path, const char *write_a_path, const char *write_b_pat
       Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
       Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                  D3D12_RESOURCE_STATE_COMMON);
+    } else if (copy_upload) {
+      Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COMMON,
+                 D3D12_RESOURCE_STATE_COPY_DEST);
+      D3D12_TEXTURE_COPY_LOCATION source = {};
+      source.pResource = upload.ptr;
+      source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      source.PlacedFootprint.Offset = expected == ValueA ? 0 : upload_size;
+      source.PlacedFootprint.Footprint = {DXGI_FORMAT_R32_UINT, 32,
+                                          upload_height, 1, upload_row_pitch};
+      D3D12_TEXTURE_COPY_LOCATION destination = {};
+      destination.pResource = texture.ptr;
+      destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      destination.SubresourceIndex = 1;
+      list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+      Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COPY_DEST,
+                 D3D12_RESOURCE_STATE_COMMON);
     } else {
       Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
       list->Dispatch(1, 1, 1);
@@ -323,8 +369,7 @@ int Run(const char *read_path, const char *write_a_path, const char *write_b_pat
 
   if (!submit("packed tail write on heap A", write_a_pso.ptr, false, ValueA) ||
       !submit("packed tail read on heap A", read_pso.ptr, true, ValueA)) {
-    std::cout << "BLOCKED_BY_ARCHITECTURE: Metal packed-tail layout is not representable\n";
-    return 77;
+    throw std::runtime_error("packed tail heap A GPU result mismatch");
   }
 
   // A reserved resource does not retain one application reference for each
@@ -334,16 +379,17 @@ int Run(const char *read_path, const char *write_a_path, const char *write_b_pat
   map_tail(heap_b.ptr);
   if (!submit("packed tail write on heap B", write_b_pso.ptr, false, ValueB) ||
       !submit("packed tail read on heap B", read_pso.ptr, true, ValueB)) {
-    std::cout << "BLOCKED_BY_ARCHITECTURE: Metal packed-tail layout is not representable\n";
-    return 77;
+    throw std::runtime_error("packed tail heap B GPU result mismatch");
   }
+  map_tail(nullptr);
+  if (!submit("unmapped packed tail reads zero", read_pso.ptr, true, 0))
+    throw std::runtime_error("unmapped packed tail GPU result mismatch");
   heap_b.ptr->Release();
   heap_b.ptr = nullptr;
 
   map_tail(heap_a.ptr);
   if (!submit("packed tail remap to heap A preserves data", read_pso.ptr, true, ValueA)) {
-    std::cout << "BLOCKED_BY_ARCHITECTURE: Metal packed-tail layout is not representable\n";
-    return 77;
+    throw std::runtime_error("packed tail remap GPU result mismatch");
   }
   std::cout << "Packed mip sparse-tail mapping, remap, and lifetime tests passed\n";
   return 0;
@@ -352,12 +398,15 @@ int Run(const char *read_path, const char *write_a_path, const char *write_b_pat
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 4) {
-    std::cerr << "usage: dx12_reserved_texture_packed <read.cso> <write_a.cso> <write_b.cso>\n";
+  const bool copy_upload =
+      argc == 5 && std::strcmp(argv[4], "--copy-upload") == 0;
+  if (argc != 4 && !copy_upload) {
+    std::cerr << "usage: dx12_reserved_texture_packed <read.cso> <write_a.cso> "
+                 "<write_b.cso> [--copy-upload]\n";
     return 2;
   }
   try {
-    return Run(argv[1], argv[2], argv[3]);
+    return Run(argv[1], argv[2], argv[3], copy_upload);
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;
