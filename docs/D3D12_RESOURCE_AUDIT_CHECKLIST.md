@@ -738,6 +738,23 @@ layout or scheduler. Break controls/debug output remain stubs, not a full debug
 layer. Exact scope, Microsoft snapshots, assumptions, commands/hashes/raw logs:
 `../dxmt-test/n02-infoqueue-messages-20261023/N02-infoqueue-messages.md`.
 
+### N02 — InfoQueue allocation-failure rollback evidence, 2026-10-24
+
+The existing command-list runner adds opt-in --infoqueue-allocation-failure,
+reusing its scoped TLS malloc IAT injector. Fresh fixtures sweep2 message-write,
+4 storage-update,2 copy-push and4 retrieval-update allocation positions. All12
+failures return E_OUTOFMEMORY with old stored/allowed/discarded counts, both
+stack depths and copied filter contents intact. Existing implementation passes;
+no speculative production fix is introduced. Persistent/global OOM is not covered.
+
+Scoped build, targeted probe, full command-list and feature runners pass.
+Deployed production DLL is byte-identical to the previous validated final DLL.
+Performance NOT_RUN for this test-only slice; existing tail alert and overall
+gate remain OPEN. No ABI/capability/scheduling/layout changes. No-private full
+runtime/native Windows differential remain pending, as do break/output stubs.
+Commands, manifests,12-site results and limits:
+`../dxmt-test/n02-infoqueue-oom-20261024/N02-infoqueue-oom.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <d3d12.h>
+#include <d3d12sdklayers.h>
 #include <d3dcompiler.h>
 
 #include "d3d12_device.hpp"
@@ -778,6 +779,62 @@ DWORD ProcessThreadCount() {
     while (Thread32Next(snapshot, &entry));
   CloseHandle(snapshot);
   return count;
+}
+
+bool TestInfoQueueAllocationFailure() {
+  for (unsigned mode = 0; mode < 4; mode++) {
+    unsigned failures = 0;
+    for (unsigned allocation = 1; allocation <= 12; allocation++) {
+      Owned<ID3D12Device> device;
+      Owned<ID3D12InfoQueue> queue;
+      if (!CheckHR("OOM InfoQueue device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+              IID_PPV_ARGS(&device.ptr))) ||
+          !CheckHR("OOM InfoQueue", device->QueryInterface(IID_PPV_ARGS(&queue.ptr)))) return false;
+      queue->SetMuteDebugOutput(TRUE);
+      queue->SetMessageCountLimit(1);
+      queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO, "original");
+      D3D12_MESSAGE_CATEGORY category = D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED;
+      D3D12_INFO_QUEUE_FILTER base = {};
+      base.AllowList.NumCategories = 1;
+      base.AllowList.pCategoryList = &category;
+      if (!CheckHR("OOM initial storage filter", queue->AddStorageFilterEntries(&base)) ||
+          !CheckHR("OOM initial retrieval filter", queue->AddRetrievalFilterEntries(&base))) return false;
+      D3D12_MESSAGE_SEVERITY severity = D3D12_MESSAGE_SEVERITY_WARNING;
+      D3D12_MESSAGE_ID id = D3D12_MESSAGE_ID_UNKNOWN;
+      auto update = base;
+      update.AllowList.NumSeverities = 1;
+      update.AllowList.pSeverityList = &severity;
+      update.DenyList.NumIDs = 1;
+      update.DenyList.pIDList = &id;
+      std::array<char, 1024> text;
+      text.fill('x');
+      text.back() = 0;
+      SubmissionAllocationFault fault;
+      if (!fault.Install()) return false;
+      fault.Arm(allocation);
+      HRESULT hr = mode == 0 ? queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO, text.data()) :
+                   mode == 1 ? queue->AddStorageFilterEntries(&update) :
+                   mode == 2 ? queue->PushCopyOfStorageFilter() : queue->AddRetrievalFilterEntries(&update);
+      fault.Stop();
+      if (!fault.Hit()) {
+        if (FAILED(hr) || !failures) return false;
+        break;
+      }
+      failures++;
+      if (hr != E_OUTOFMEMORY || queue->GetNumStoredMessages() != 1 ||
+          queue->GetNumMessagesAllowedByStorageFilter() != 1 ||
+          queue->GetNumMessagesDiscardedByMessageCountLimit() != 0 ||
+          queue->GetStorageFilterStackSize() != 1 || queue->GetRetrievalFilterStackSize() != 1) return false;
+      alignas(D3D12_INFO_QUEUE_FILTER) std::array<unsigned char, 512> bytes = {};
+      auto *filter = reinterpret_cast<D3D12_INFO_QUEUE_FILTER *>(bytes.data());
+      SIZE_T size = bytes.size();
+      hr = mode == 3 ? queue->GetRetrievalFilter(filter, &size) : queue->GetStorageFilter(filter, &size);
+      if (FAILED(hr) || filter->AllowList.NumCategories != 1 || filter->AllowList.NumSeverities ||
+          filter->DenyList.NumIDs || filter->AllowList.pCategoryList[0] != category) return false;
+    }
+    std::cout << "InfoQueue OOM mode=" << mode << " rollback sites=" << failures << "\n";
+  }
+  return true;
 }
 
 bool TestMultipleFenceWaits() {
@@ -2116,6 +2173,8 @@ int main(int argc, char **argv) {
     return TestCopyStaging(argv[2]) ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--multiple-fences") == 0)
     return TestMultipleFenceWaits() ? 0 : 1;
+  if (argc == 2 && std::strcmp(argv[1], "--infoqueue-allocation-failure") == 0)
+    return TestInfoQueueAllocationFailure() ? 0 : 1;
   if (argc == 3 && std::strcmp(argv[1], "--encoder-creation-failure") == 0) {
     const char *mode = argv[2];
     if (std::strcmp(mode, "copy") && std::strcmp(mode, "clear") &&
