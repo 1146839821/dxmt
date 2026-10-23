@@ -1023,6 +1023,59 @@ limitation, not DXGI format illegality. User .gitignore and shared Wine untouche
 Evidence, exact commands/statuses/hashes and issue table:
 `../dxmt-test/n08-format-dimensions-20261024/N08-format-dimensions.md`.
 
+### N08 — pin RGB96 GPU data loss and representation design, 2026-10-24
+
+Base5b4fd397; diagnostic/design slice only. RGB96 is CONFIRMED and NOT FIXED.
+Existing resource runner adds selectable --rgb96-copy, --rgb96-copy-minimal and
+--rgb96-copy-control; no production changes or new runner/source file. The minimal
+1x1 R32G32B32_UINT texture receives words3f000001/3f000002/3f000003 but readback
+returns3f000001/cdcdcdcd/cdcdcdcd;8/12 payload bytes differ, Fence completes, device
+removal succeeds, outer guards intact. Same-size RGBA32_UINT control preserves16
+bytes. Shader/descriptor/Present code is absent from the minimal reproducer.
+
+Two repeated final matrix runs each fail all12 RGB96 cases (TYPELESS/FLOAT/UINT/
+SINT x1D/2D/3D), while all3 RGBA128 controls pass. Covers odd width5,two mips,two
+array slices or depth3, with buffer->texture->texture->buffer copies. Per RGB
+format, payload168/408/564 bytes and mismatches112/272/376: exactly2/3 lost.
+Padding is excluded from data equality; outer guard ranges remain unchanged.
+Known diagnostic commands exit1, not correctness PASS. Separate ordinary full
+resource runner, preceding format/dimension rejection runner and selected54 format
+query assertions exit0. Exact commands/results in external final-results.json.
+
+Root: dxmt_format.cpp:470-492 maps logical12-byte formats to native R32*, and
+texture.cpp:102 consumes it as a complete texel. Copy footprints/bounds retain12
+bytes, but command_list.cpp:4316/4498 native blit width consumes4 bytes per texel.
+Static SRV single-component mapping and CPU Map element-size12 rejection remain;
+shader/CPU RGB96 behavior NOT_RUN. Microsoft shared FL11 format table freshly
+saved externally requires these textures; rejecting them is not a complete fix.
+
+Root design: keep shared D3D11/buffer DXGI mapping stable; existing D3D12 resource
+helper owns pure logical-to-physical texture format policy. Candidate RGBA32 backing
+preserves logical coordinates and12-byte public footprints. Allocation/views must
+consume physical policy; pack/unpack byte boundaries through existing internal
+compute/allocator staging, with ordered submission and retention; CPU transfers
+need matching conversion. Validate missing-alpha/custom component mapping and
+logical cast compatibility; physical RGBA equivalence must not legalize unrelated
+DXGI formats. No second manager/cache/scheduler or app-shader workaround. R32x3
+width alternative needs shader coordinate lowering across Airconv/opaque MSC and
+is not a bounded repair. Full design and acceptance matrix are external.
+
+Theoretical physical texel payload+33.3%, O(texels) conversion and additional
+compute/staging traffic need actual allocation/GPU/Recording/Submit measurements
+before accepting implementation; these are NOT measured performance numbers.
+Production DLL text section matches preceding round; generated version string /
+build ID changes relinked binary. Final tests use current rebuilt DLL, with loaded
+paths/hashes retained; earlier DLL runs kept separately. No new perf run, full
+no-private link/runtime, native Windows comparison or T3/T4: NOT_RUN.
+
+M1Max/Apple7, macOS27.0.1(26A434), Xcode27.1(27A9275; requested26 differs), MSC4.0.1,
+matched Wine11.0 x64/Rosetta, bundled clang23.1.1. API/shader validation enabled.
+Final Meson resource-runner build exit0; existing unrelated enum comparison warnings
+remain. COM/private/WMT ABI, resource layout, scheduling and capability claims
+unchanged. Native layout bug remains OPEN; no FL/Tier promotion or push. User
+.gitignore unchanged. Evidence/root design:
+`../dxmt-test/n08-rgb96-20261024/N08-rgb96-design.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

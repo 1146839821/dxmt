@@ -154,6 +154,284 @@ bool CheckFenceRewinds(ID3D12Device1 *device, ID3D12CommandQueue *queue) {
   return true;
 }
 
+bool CheckRGB96TextureCopies(ID3D12Device *device, bool controls_only,
+                             bool minimal) {
+  struct Commands {
+    ID3D12CommandQueue *queue = nullptr;
+    ID3D12CommandAllocator *allocator = nullptr;
+    ID3D12GraphicsCommandList *list = nullptr;
+    ID3D12Fence *fence = nullptr;
+    HANDLE event = nullptr;
+    ~Commands() {
+      if (list)
+        list->Release();
+      if (allocator)
+        allocator->Release();
+      if (queue)
+        queue->Release();
+      if (fence)
+        fence->Release();
+      if (event)
+        CloseHandle(event);
+    }
+  } commands;
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  if (!CheckHR("RGB queue", device->CreateCommandQueue(
+                                &queue_desc, IID_PPV_ARGS(&commands.queue))) ||
+      !CheckHR("RGB allocator", device->CreateCommandAllocator(
+                                    D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                    IID_PPV_ARGS(&commands.allocator))) ||
+      !CheckHR("RGB list",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                         commands.allocator, nullptr,
+                                         IID_PPV_ARGS(&commands.list))) ||
+      !CheckHR("RGB initial close", commands.list->Close()) ||
+      !CheckHR("RGB fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                IID_PPV_ARGS(&commands.fence))))
+    return false;
+  commands.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!commands.event)
+    return false;
+  bool good = true;
+  UINT64 serial = 0;
+  for (const auto format :
+       {DXGI_FORMAT_R32G32B32_TYPELESS, DXGI_FORMAT_R32G32B32_FLOAT,
+        DXGI_FORMAT_R32G32B32_UINT, DXGI_FORMAT_R32G32B32_SINT,
+        DXGI_FORMAT_R32G32B32A32_UINT}) {
+    const bool control = format == DXGI_FORMAT_R32G32B32A32_UINT;
+    if ((controls_only && !control) ||
+        (minimal && !control && format != DXGI_FORMAT_R32G32B32_UINT))
+      continue;
+    const UINT components = control ? 4 : 3;
+    for (const auto dimension : {D3D12_RESOURCE_DIMENSION_TEXTURE1D,
+                                 D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+                                 D3D12_RESOURCE_DIMENSION_TEXTURE3D}) {
+      if (minimal && dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+        continue;
+      struct Resources {
+        ID3D12Resource *texture = nullptr, *copy = nullptr, *upload = nullptr,
+                       *readback = nullptr;
+        ~Resources() {
+          for (auto resource : {texture, copy, upload, readback})
+            if (resource)
+              resource->Release();
+        }
+      } resources;
+      D3D12_RESOURCE_DESC desc = {};
+      desc.Dimension = dimension;
+      desc.Width = minimal ? 1 : 5;
+      desc.Height =
+          minimal || dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D ? 1 : 3;
+      desc.DepthOrArraySize = minimal ? 1
+                              : dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                                  ? 3
+                                  : 2;
+      desc.MipLevels = minimal ? 1 : 2;
+      desc.Format = format;
+      desc.SampleDesc.Count = 1;
+      const UINT subresources =
+          desc.MipLevels * (dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                                ? 1
+                                : desc.DepthOrArraySize);
+      std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> layouts(subresources);
+      std::vector<UINT> rows(subresources);
+      std::vector<UINT64> row_sizes(subresources);
+      UINT64 total = UINT64_MAX;
+      constexpr UINT64 base = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+      device->GetCopyableFootprints(&desc, 0, subresources, base,
+                                    layouts.data(), rows.data(),
+                                    row_sizes.data(), &total);
+      if (total == UINT64_MAX || total > 1024 * 1024) {
+        std::cerr << "RGB invalid footprint format=" << format
+                  << " dimension=" << dimension << "\n";
+        return false;
+      }
+      const UINT64 buffer_size =
+          total + base + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+      std::vector<BYTE> input(static_cast<size_t>(buffer_size), 0x5a);
+      std::vector<BYTE> expected(static_cast<size_t>(buffer_size), 0xcd);
+      std::vector<bool> payload(static_cast<size_t>(buffer_size), false);
+      UINT64 payload_bytes = 0;
+      for (UINT subresource = 0; subresource < subresources; subresource++) {
+        const auto &layout = layouts[subresource];
+        if (rows[subresource] != layout.Footprint.Height ||
+            row_sizes[subresource] !=
+                UINT64(layout.Footprint.Width) * components * sizeof(UINT32)) {
+          std::cerr << "RGB logical footprint mismatch\n";
+          return false;
+        }
+        for (UINT z = 0; z < layout.Footprint.Depth; z++) {
+          for (UINT y = 0; y < rows[subresource]; y++) {
+            const UINT64 offset =
+                layout.Offset +
+                (UINT64(z) * rows[subresource] + y) * layout.Footprint.RowPitch;
+            const UINT64 words = row_sizes[subresource] / sizeof(UINT32);
+            if (offset > buffer_size ||
+                row_sizes[subresource] > buffer_size - offset)
+              return false;
+            for (UINT64 word = 0; word < words; word++) {
+              // Exact finite float bit patterns also distinguish
+              // integer/typeless components.
+              const UINT32 value = 0x3f000000u | (subresource << 16) |
+                                   (z << 12) | (y << 8) |
+                                   static_cast<UINT32>(word + 1);
+              std::memcpy(input.data() + offset + word * sizeof(value), &value,
+                          sizeof(value));
+            }
+            std::memcpy(expected.data() + offset, input.data() + offset,
+                        static_cast<size_t>(row_sizes[subresource]));
+            for (UINT64 byte = 0; byte < row_sizes[subresource]; byte++)
+              payload[offset + byte] = true;
+            payload_bytes += row_sizes[subresource];
+          }
+        }
+      }
+      D3D12_HEAP_PROPERTIES properties = {};
+      properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+      properties.CreationNodeMask = properties.VisibleNodeMask = 1;
+      if (!CheckHR("RGB texture", device->CreateCommittedResource(
+                                      &properties, D3D12_HEAP_FLAG_NONE, &desc,
+                                      D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                      IID_PPV_ARGS(&resources.texture))) ||
+          (!minimal && !CheckHR("RGB second texture",
+                                device->CreateCommittedResource(
+                                    &properties, D3D12_HEAP_FLAG_NONE, &desc,
+                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                    IID_PPV_ARGS(&resources.copy)))))
+        return false;
+      D3D12_RESOURCE_DESC buffer_desc = {};
+      buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+      buffer_desc.Width = buffer_size;
+      buffer_desc.Height = buffer_desc.DepthOrArraySize =
+          buffer_desc.MipLevels = buffer_desc.SampleDesc.Count = 1;
+      buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+      if (!CheckHR("RGB upload",
+                   device->CreateCommittedResource(
+                       &properties, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                       D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                       IID_PPV_ARGS(&resources.upload))))
+        return false;
+      properties.Type = D3D12_HEAP_TYPE_READBACK;
+      if (!CheckHR("RGB readback",
+                   device->CreateCommittedResource(
+                       &properties, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                       D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                       IID_PPV_ARGS(&resources.readback))))
+        return false;
+      void *mapped = nullptr;
+      D3D12_RANGE no_read = {0, 0};
+      if (!CheckHR("RGB map upload",
+                   resources.upload->Map(0, &no_read, &mapped)))
+        return false;
+      std::memcpy(mapped, input.data(), input.size());
+      resources.upload->Unmap(0, nullptr);
+      if (!CheckHR("RGB map readback sentinel",
+                   resources.readback->Map(0, &no_read, &mapped)))
+        return false;
+      std::memset(mapped, 0xcd, expected.size());
+      resources.readback->Unmap(0, nullptr);
+      if (!CheckHR("RGB reset allocator", commands.allocator->Reset()) ||
+          !CheckHR("RGB reset list",
+                   commands.list->Reset(commands.allocator, nullptr)))
+        return false;
+      for (UINT subresource = 0; subresource < subresources; subresource++) {
+        D3D12_TEXTURE_COPY_LOCATION upload = {}, texture = {};
+        upload.pResource = resources.upload;
+        upload.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        upload.PlacedFootprint = layouts[subresource];
+        texture.pResource = resources.texture;
+        texture.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        texture.SubresourceIndex = subresource;
+        commands.list->CopyTextureRegion(&texture, 0, 0, 0, &upload, nullptr);
+      }
+      const auto transition = [&](ID3D12Resource *resource) {
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resource;
+        barrier.Transition.Subresource =
+            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        commands.list->ResourceBarrier(1, &barrier);
+      };
+      transition(resources.texture);
+      if (!minimal) {
+        for (UINT subresource = 0; subresource < subresources; subresource++) {
+          D3D12_TEXTURE_COPY_LOCATION source = {}, destination = {};
+          source.pResource = resources.texture;
+          destination.pResource = resources.copy;
+          source.Type = destination.Type =
+              D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+          source.SubresourceIndex = destination.SubresourceIndex = subresource;
+          commands.list->CopyTextureRegion(&destination, 0, 0, 0, &source,
+                                           nullptr);
+        }
+        transition(resources.copy);
+      }
+      for (UINT subresource = 0; subresource < subresources; subresource++) {
+        D3D12_TEXTURE_COPY_LOCATION texture = {}, readback = {};
+        texture.pResource = minimal ? resources.texture : resources.copy;
+        texture.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        texture.SubresourceIndex = subresource;
+        readback.pResource = resources.readback;
+        readback.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        readback.PlacedFootprint = layouts[subresource];
+        commands.list->CopyTextureRegion(&readback, 0, 0, 0, &texture, nullptr);
+      }
+      if (!CheckHR("RGB close", commands.list->Close()))
+        return false;
+      ID3D12CommandList *lists[] = {commands.list};
+      commands.queue->ExecuteCommandLists(1, lists);
+      ++serial;
+      if (!CheckHR("RGB signal",
+                   commands.queue->Signal(commands.fence, serial)) ||
+          !CheckHR("RGB completion", commands.fence->SetEventOnCompletion(
+                                         serial, commands.event)) ||
+          WaitForSingleObject(commands.event, 10000) != WAIT_OBJECT_0 ||
+          FAILED(device->GetDeviceRemovedReason()))
+        return false;
+      D3D12_RANGE range = {0, static_cast<SIZE_T>(buffer_size)};
+      if (!CheckHR("RGB map result",
+                   resources.readback->Map(0, &range, &mapped)))
+        return false;
+      UINT64 mismatches = 0, guard_mismatches = 0, first = UINT64_MAX;
+      const auto actual = static_cast<const BYTE *>(mapped);
+      for (UINT64 byte = 0; byte < buffer_size; byte++) {
+        if (payload[byte] && actual[byte] != expected[byte]) {
+          if (first == UINT64_MAX)
+            first = byte;
+          mismatches++;
+        }
+        // Alignment gaps and row/slice padding are not part of the data oracle.
+        if ((byte < base || byte >= base + total) && actual[byte] != 0xcd)
+          guard_mismatches++;
+      }
+      std::cout << "rgb96_copy format=" << format << " dimension=" << dimension
+                << " components=" << components
+                << " subresources=" << subresources
+                << " payload_bytes=" << payload_bytes
+                << " mismatches=" << mismatches
+                << " guard_mismatches=" << guard_mismatches
+                << " first=" << first << " fence=" << serial;
+      if (first != UINT64_MAX)
+        std::cout << " expected=" << unsigned(expected[first])
+                  << " actual=" << unsigned(actual[first]);
+      if (minimal) {
+        UINT32 words[3] = {};
+        std::memcpy(words, actual + base, sizeof(words));
+        std::cout << " words=" << std::hex << words[0] << "," << words[1] << ","
+                  << words[2] << std::dec;
+      }
+      std::cout << " pass=" << (mismatches == 0 && guard_mismatches == 0)
+                << "\n";
+      resources.readback->Unmap(0, &no_read);
+      good &= mismatches == 0 && guard_mismatches == 0;
+    }
+  }
+  return good;
+}
+
 bool CheckTextureFormatDimensions(ID3D12Device *device, bool footprints_only) {
   struct Owners {
     ID3D12Heap *heap = nullptr;
@@ -304,6 +582,20 @@ bool CheckTextureFormatDimensions(ID3D12Device *device, bool footprints_only) {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && (!std::strcmp(argv[1], "--rgb96-copy") ||
+                    !std::strcmp(argv[1], "--rgb96-copy-control") ||
+                    !std::strcmp(argv[1], "--rgb96-copy-minimal"))) {
+    ID3D12Device *device = nullptr;
+    if (!CheckHR("D3D12CreateDevice",
+                 D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                   IID_PPV_ARGS(&device))))
+      return 1;
+    const bool good = CheckRGB96TextureCopies(
+        device, !std::strcmp(argv[1], "--rgb96-copy-control"),
+        !std::strcmp(argv[1], "--rgb96-copy-minimal"));
+    device->Release();
+    return good ? 0 : 1;
+  }
   if (argc == 2 && (!std::strcmp(argv[1], "--format-dimensions") ||
                     !std::strcmp(argv[1], "--format-dimensions-footprints"))) {
     ID3D12Device *device = nullptr;
