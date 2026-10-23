@@ -424,6 +424,39 @@ INCONCLUSIVE. No general speedup claim. Exact evidence, all three paired tables,
 commands, limits and environment: external
 `../dxmt-test/n13-encoder-failure-20261023/N13-encoder-failure.md`.
 
+### N10 — depth/stencil copy staging capacity, 2026-10-23
+
+Correctness PASS; performance gate OPEN. The same existing runner on the old
+DLL demonstrates a >32MiB copy silently omitted despite successful Close and
+cumulative ten 4MiB copies failing recording. The final DLL passes twelve
+scoped cases: tiny/large/repeated/growing/mip-array copies, separate plane
+preservation, multi-list/multi-allocator batches, in-flight Reset, allocation
+failure, invalid ranges and submission rollback. Five adjacent processes,
+including the resource GPU runner, also pass with Metal validation enabled.
+
+AllocateCopyStaging keeps a bounded first-64KiB arena fast path and reuses
+GPU-private tracked scratch scoped to the exact active blit encoder. The
+allocator's memo owns no buffer; existing encoder resource_refs retain all
+growth versions, and existing submission/Reset lifetime remains authoritative.
+The ordinary BlitEncoderData layout and argument allocator fast path are
+unchanged. Full matching native packed 2D/array single-sample CopyResource
+uses one direct copy per mip/slice (old four commands); plane copies still
+stage with 256-byte row/start alignment. No new src/d3d12 file or capability.
+
+Native scratch: one 33,570,816-byte buffer for the large case, one 4MiB for
+repeats, one 64KiB for small overflow, three growing versions totaling 5.25MiB.
+Tiny and ordinary small blits add zero native buffers. With the final cleanup-
+safe fixture, three paired processes give small CPU recording -1.86% and
+submit medians -0.59% to +2.67%; ordinary-submit p95 rises +16.1%. The prior
+fixture setup order measured recording +10.07% (same-DLL control -0.38%).
+That conditional regression is preserved, not dismissed. Overall performance
+is INCONCLUSIVE / gate OPEN, with no blanket no-regression claim.
+ZZZ/Windows differential and other GPUs are NOT_RUN. A single-slice array DSV
+setup has the same stencil anomaly on both DLLs; the direct 2D-view fixture
+passes. That independent combination remains unverified. Exact evidence,
+commands, all performance variants, scope and rollback:
+`../dxmt-test/n10-copy-staging-20261023/N10-copy-staging.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

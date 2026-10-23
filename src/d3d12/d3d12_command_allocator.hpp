@@ -22,6 +22,7 @@
 #include "dxmt_command_clear.hpp"
 #include <atomic>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace dxmt {
@@ -97,6 +98,14 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
   small_vector<WMT::Reference<WMT::IndirectCommandBuffer>, 4> icb_;
 
   ClearUAV<MTLD3D12CommandAllocatorImpl> clear_uav_;
+
+  // Recording-only memo for the current blit encoder. resource_refs owns the
+  // buffers; changing encoders never shares scratch with another recording.
+  BlitEncoderData *copy_staging_encoder_ = nullptr;
+  WMT::Buffer copy_staging_buffer_ = {};
+  size_t copy_staging_capacity_ = 0;
+
+  std::pair<WMT::Buffer, size_t> AllocateCopyStaging(size_t length);
 
   void
   DestroyEncoder(EncoderData *encoder);

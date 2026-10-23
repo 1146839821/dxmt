@@ -4217,6 +4217,16 @@ public:
       FailRecording(__func__, "source or destination texture is invalid");
       return;
     }
+    if ((pDst->Type != D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX &&
+         pDst->Type != D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT) ||
+        (pSrc->Type != D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX &&
+         pSrc->Type != D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT)) {
+      FailRecording(__func__, "invalid texture copy location type");
+      return;
+    }
+    if (pSrcBox &&
+        (pSrcBox->left == pSrcBox->right || pSrcBox->top == pSrcBox->bottom || pSrcBox->front == pSrcBox->back))
+      return;
     if (!PreBlit())
       return;
 
@@ -4225,8 +4235,10 @@ public:
         pSrc->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX && !pSrcBox) {
       auto source = static_cast<MTLD3D12Resource *>(pSrc->pResource);
       D3D12TextureSubresource source_subresource = {};
-      if (!source || !decode_texture_subresource(source->texture.ptr(), pSrc->SubresourceIndex, source_subresource))
+      if (!source || !decode_texture_subresource(source->texture.ptr(), pSrc->SubresourceIndex, source_subresource)) {
+        FailRecording(__func__, "invalid source texture subresource");
         return;
+      }
       full_source_box = texture_subresource_bounds(source->GetDesc(), source_subresource.mip);
       pSrcBox = &full_source_box;
     }
@@ -4237,8 +4249,10 @@ public:
         return;
       auto &dst = dst_resource->texture;
       D3D12TextureSubresource dst_subresource = {};
-      if (!decode_texture_subresource(dst.ptr(), pDst->SubresourceIndex, dst_subresource))
+      if (!decode_texture_subresource(dst.ptr(), pDst->SubresourceIndex, dst_subresource)) {
+        FailRecording(__func__, "invalid destination texture subresource");
         return;
+      }
 
       auto dst_planar_count = getPlanarCount(dst->pixelFormat());
 
@@ -4327,42 +4341,65 @@ public:
           return;
         auto &src = src_resource->texture;
         D3D12TextureSubresource src_subresource = {};
-        if (!decode_texture_subresource(src.ptr(), pSrc->SubresourceIndex, src_subresource))
+        if (!decode_texture_subresource(src.ptr(), pSrc->SubresourceIndex, src_subresource)) {
+          FailRecording(__func__, "invalid source texture subresource");
           return;
-        auto src_planar_count = getPlanarCount(src->pixelFormat());
-        // copy between depth-stencil texture is tricky
-        if (dst_planar_count > 1 || src_planar_count > 1) {
-          if (dst_planar_count > 1 && src_planar_count > 1 && dst_subresource.plane != src_subresource.plane) {
-            WARN("CopyTextureRegion: mismatched depth-stencil planes");
-            return;
-          }
         }
-
+        auto src_planar_count = getPlanarCount(src->pixelFormat());
         if (dst_planar_count > 1 || src_planar_count > 1) {
-          // Metal exposes depth/stencil aspect selection on texture-buffer copies, not texture-to-texture copies.
           const UINT plane = src_planar_count > 1 ? src_subresource.plane : dst_subresource.plane;
           const UINT bytes_per_pixel = plane ? 1 : 4;
+          // Packed formats must agree; a single-plane peer carries the same
+          // component bytes without Metal's packed depth/stencil blit option.
+          const auto src_format = src->pixelFormat();
+          const auto dst_format = dst->pixelFormat();
+          const auto component_format = plane ? WMTPixelFormatR8Uint : WMTPixelFormatR32Float;
+          MTL_DXGI_FORMAT_DESC src_desc = {}, dst_desc = {};
+          if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), src_resource->GetDesc().Format, src_desc)) ||
+              FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), dst_resource->GetDesc().Format, dst_desc))) {
+            FailRecording(__func__, "unknown depth-stencil copy format");
+            return;
+          }
+          if ((dst_planar_count > 1 && src_planar_count > 1 &&
+               (dst_subresource.plane != src_subresource.plane || src_format != dst_format ||
+                ((src_desc.Flag ^ dst_desc.Flag) & MTL_DXGI_FORMAT_EMULATED_D24))) ||
+              (src_planar_count == 1 && src_format != component_format) ||
+              (dst_planar_count == 1 && dst_format != component_format) || src->textureType() == WMTTextureType3D ||
+              dst->textureType() == WMTTextureType3D || src_resource->GetDesc().SampleDesc.Count != 1 ||
+              dst_resource->GetDesc().SampleDesc.Count != 1) {
+            FailRecording(__func__, "incompatible depth-stencil copy formats, planes or samples");
+            return;
+          }
+          const auto src_bounds = texture_subresource_bounds(src_resource->GetDesc(), src_subresource.mip);
+          const auto dst_bounds = texture_subresource_bounds(dst_resource->GetDesc(), dst_subresource.mip);
+          D3D12CopyFormat copy_format = {1, 1, bytes_per_pixel};
+          if (!validate_copy_box(*pSrcBox, src_bounds, copy_format)) {
+            FailRecording(__func__, "invalid depth-stencil source box");
+            return;
+          }
           const UINT width = pSrcBox->right - pSrcBox->left;
           const UINT height = pSrcBox->bottom - pSrcBox->top;
           const UINT depth = pSrcBox->back - pSrcBox->front;
-          const uint64_t row_pitch = (uint64_t(width) * bytes_per_pixel + 255u) & ~uint64_t(255u);
-          const uint64_t image_pitch = row_pitch * height;
-          const uint64_t staging_size = image_pitch * depth;
-          if (!width || !height || !depth || row_pitch > UINT_MAX || staging_size > kGPUHeapSize) {
-            WARN("CopyTextureRegion: depth-stencil staging range is invalid");
+          if (!validate_copy_destination(DstX, DstY, DstZ, width, height, depth, dst_bounds, copy_format)) {
+            FailRecording(__func__, "invalid depth-stencil destination range");
             return;
           }
-           auto [mapped, staging_offset] = allocator_->AllocateGPUHeap(staging_size, 256);
-           static uint32_t trace_staging_count = 0;
-           if (trace_staging_count++ < 32)
-             DEBUG("[DEBUG-STAGING] depth copy: size=", width, "x", height, "x", depth,
-                   " row_pitch=", row_pitch, " bytes=", staging_size,
-                   " heap_offset=", allocator_->gpu_heap_offset_, " heap_size=", kGPUHeapSize,
-                   " allocated=", mapped ? 1 : 0);
-            if (!mapped) {
-             FailRecording(__func__, "depth-stencil staging allocation failed size=", staging_size);
-             return;
+          const uint64_t row_pitch = (uint64_t(width) * bytes_per_pixel + 255u) & ~uint64_t(255u);
+          if (row_pitch > UINT_MAX || row_pitch > SIZE_MAX / height || row_pitch * height > SIZE_MAX / depth) {
+            FailRecording(__func__, "depth-stencil staging size overflow");
+            return;
           }
+          const uint64_t image_pitch = row_pitch * height;
+          const uint64_t staging_size = image_pitch * depth;
+          auto [staging, staging_offset] = allocator_->AllocateCopyStaging(staging_size);
+          if (!staging) {
+            FailRecording(__func__, "depth-stencil staging allocation failed size=", staging_size);
+            return;
+          }
+          RetainResourceForCurrentEncoder(src->current()->texture().handle);
+          RetainResourceForCurrentEncoder(dst->current()->texture().handle);
+          if (recording_failed_)
+            return;
 
           auto &to_buffer = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer_withblitoption>();
           to_buffer.type = WMTBlitCommandCopyFromTextureToBufferWithBlitOption;
@@ -4371,15 +4408,17 @@ public:
           to_buffer.level = src_subresource.mip;
           to_buffer.origin = {pSrcBox->left, pSrcBox->top, pSrcBox->front};
           to_buffer.size = {width, height, depth};
-          to_buffer.dst = allocator_->gpu_heap_buffer_;
+          to_buffer.dst = staging;
           to_buffer.offset = staging_offset;
           to_buffer.bytes_per_row = static_cast<uint32_t>(row_pitch);
           to_buffer.bytes_per_image = src->textureType() == WMTTextureType3D ? image_pitch : 0;
-          to_buffer.options = plane ? WMTBlitOptionStencilFromDepthStencil : WMTBlitOptionDepthFromDepthStencil;
+          to_buffer.options = src_planar_count > 1
+                                  ? (plane ? WMTBlitOptionStencilFromDepthStencil : WMTBlitOptionDepthFromDepthStencil)
+                                  : WMTBlitOptionNone;
 
           auto &from_buffer = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture_withblitoption>();
           from_buffer.type = WMTBlitCommandCopyFromBufferToTextureWithBlitOption;
-          from_buffer.src = allocator_->gpu_heap_buffer_;
+          from_buffer.src = staging;
           from_buffer.src_offset = staging_offset;
           from_buffer.bytes_per_row = static_cast<uint32_t>(row_pitch);
           from_buffer.bytes_per_image = dst->textureType() == WMTTextureType3D ? image_pitch : 0;
@@ -4387,7 +4426,9 @@ public:
           from_buffer.dst = dst->current()->texture();
           from_buffer.slice = dst_subresource.slice;
           from_buffer.level = dst_subresource.mip;
-          from_buffer.options = to_buffer.options;
+          from_buffer.options =
+              dst_planar_count > 1 ? (plane ? WMTBlitOptionStencilFromDepthStencil : WMTBlitOptionDepthFromDepthStencil)
+                                   : WMTBlitOptionNone;
           from_buffer.origin = {DstX, DstY, DstZ};
         } else {
           auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_texture>();
@@ -4605,6 +4646,34 @@ public:
     const UINT mip_levels = DstDesc.MipLevels;
     const UINT slice_count = DstDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : DstDesc.DepthOrArraySize;
     const UINT plane_count = getPlanarCount(pDst->texture->pixelFormat());
+    // CopyResource requests both aspects. Only this complete, same-native-
+    // format operation can collapse the two per-plane staging round trips.
+    if (plane_count > 1 && SrcDesc.SampleDesc.Count == 1 &&
+        pSrc->texture->pixelFormat() == WMTPixelFormatDepth32Float_Stencil8 &&
+        pDst->texture->pixelFormat() == pSrc->texture->pixelFormat() &&
+        (pSrc->texture->textureType() == WMTTextureType2D || pSrc->texture->textureType() == WMTTextureType2DArray) &&
+        pDst->texture->textureType() == pSrc->texture->textureType()) {
+      RetainResourceForCurrentEncoder(pSrc->texture->current()->texture().handle);
+      RetainResourceForCurrentEncoder(pDst->texture->current()->texture().handle);
+      for (UINT slice = 0; slice < slice_count; slice++) {
+        for (UINT mip = 0; mip < mip_levels; mip++) {
+          const auto bounds = texture_subresource_bounds(SrcDesc, mip);
+          auto &cmd = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_texture>();
+          cmd.type = WMTBlitCommandCopyFromTextureToTexture;
+          cmd.src = pSrc->texture->current()->texture();
+          cmd.src_level = mip;
+          cmd.src_slice = slice;
+          cmd.src_origin = {0, 0, 0};
+          cmd.src_size = {bounds.right, bounds.bottom, bounds.back};
+          cmd.dst = pDst->texture->current()->texture();
+          cmd.dst_level = mip;
+          cmd.dst_slice = slice;
+          cmd.dst_origin = {0, 0, 0};
+        }
+      }
+      return;
+    }
+
     for (UINT plane = 0; plane < plane_count; plane++) {
       for (UINT slice = 0; slice < slice_count; slice++) {
         for (UINT mip = 0; mip < mip_levels; mip++) {

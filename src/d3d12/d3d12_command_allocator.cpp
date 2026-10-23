@@ -48,6 +48,10 @@ CreateCommandAllocator(MTLD3D12Device *pDevice, D3D12_COMMAND_LIST_TYPE Type, RE
 HRESULT
 MTLD3D12CommandAllocatorImpl::Initialize() {
 
+  copy_staging_encoder_ = nullptr;
+  copy_staging_buffer_ = {};
+  copy_staging_capacity_ = 0;
+
   if (!cpu_heap_)
     cpu_heap_ = malloc(kCPUHeapSize);
   if (!cpu_heap_)
@@ -116,8 +120,63 @@ MTLD3D12CommandAllocatorImpl::Reset() {
   return Initialize();
 };
 
+std::pair<WMT::Buffer, size_t>
+MTLD3D12CommandAllocatorImpl::AllocateCopyStaging(size_t length) {
+  if (!length || !encoder_current || encoder_current->type != EncoderType::Blit)
+    return {};
+  // Keep a bounded tiny-copy fast path with unique untracked ranges. Copies
+  // may consume at most the arena's first 64KiB; a long copy stream must not
+  // exhaust the 32MiB argument arena used by later Draw/Dispatch/Indirect.
+  if (gpu_heap_offset_ <= 65536) {
+    const size_t aligned = (gpu_heap_offset_ + 255) & ~size_t(255);
+    if (length <= 65536 - aligned) {
+      auto [mapped, offset] = AllocateGPUHeap(length, 256);
+      if (mapped)
+        return {gpu_heap_buffer_, offset};
+    }
+  }
+  auto *encoder = static_cast<BlitEncoderData *>(encoder_current);
+  if (copy_staging_encoder_ != encoder) {
+    copy_staging_encoder_ = encoder;
+    copy_staging_buffer_ = {};
+    copy_staging_capacity_ = 0;
+  }
+  if (length <= copy_staging_capacity_)
+    return {copy_staging_buffer_, 0};
+
+  // Keep large/overflow copies out of the CPU-mapped argument arena. Grow
+  // geometrically, retaining old versions referenced by already-recorded blits.
+  size_t capacity = std::max<size_t>(65536, length);
+  if (copy_staging_capacity_ <= SIZE_MAX / 2)
+    capacity = std::max(capacity, copy_staging_capacity_ * 2);
+  if (capacity > SIZE_MAX - 255)
+    return {};
+  capacity = (capacity + 255) & ~size_t(255);
+  WMTBufferInfo info = {};
+  info.length = capacity;
+  // Reuse includes write-after-read between successive texture/buffer pairs.
+  // The argument arena is untracked and must not be used for this scratch.
+  info.options = WMTResourceStorageModePrivate | WMTResourceHazardTrackingModeTracked;
+  auto buffer = device_->GetMTLDevice().newBuffer(info);
+  if (!buffer)
+    return {};
+  try {
+    encoder->resource_refs.emplace_back(buffer);
+  } catch (...) {
+    return {};
+  }
+  copy_staging_buffer_ = buffer;
+  copy_staging_capacity_ = capacity;
+  return {buffer, 0};
+}
+
 void
 MTLD3D12CommandAllocatorImpl::DestroyEncoder(EncoderData *encoder) {
+  if (encoder == copy_staging_encoder_) {
+    copy_staging_encoder_ = nullptr;
+    copy_staging_buffer_ = {};
+    copy_staging_capacity_ = 0;
+  }
   switch (encoder->type) {
   case EncoderType::Null:
     break;

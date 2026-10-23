@@ -1426,7 +1426,473 @@ bool TestConcurrentCommandSubmission(ID3D12Device *device) {
 
 } // namespace
 
+// Count only native allocations made while recording the copy fixture. The
+// import patch is scoped to this test process and is absent from the driver.
+class CopyBufferCounter {
+  DriverImportPatch patch_;
+  inline static void *original_ = nullptr;
+  static obj_handle_t Create(obj_handle_t device, WMTBufferInfo *info) {
+    ++count;
+    bytes += info->length;
+    if (fail)
+      return 0;
+    return reinterpret_cast<decltype(&Create)>(original_)(device, info);
+  }
+
+public:
+  inline static size_t count = 0;
+  inline static uint64_t bytes = 0;
+  inline static bool fail = false;
+  bool Install() {
+    count = 0;
+    bytes = 0;
+    fail = false;
+    return patch_.Install("MTLDevice_newBuffer",
+                          reinterpret_cast<void *>(&Create), original_);
+  }
+};
+
+bool TestCopyStaging(const char *mode) {
+  UINT width = 1, height = 1, mips = 1, slices = 1, repeats = 1;
+  if (!std::strcmp(mode, "large")) {
+    width = 4096;
+    height = 2049;
+  } else if (!std::strcmp(mode, "repeat") || !std::strcmp(mode, "split") ||
+             !std::strcmp(mode, "split-allocators")) {
+    width = height = 1024;
+    repeats = 10;
+  } else if (!std::strcmp(mode, "small-repeat")) {
+    width = height = 64;
+    repeats = 2100;
+  } else if (!std::strcmp(mode, "growth")) {
+    width = height = 1024;
+    mips = 3;
+  } else if (!std::strcmp(mode, "allocation-failure") ||
+             !std::strcmp(mode, "submission-failure")) {
+    width = height = 1024;
+  } else if (!std::strcmp(mode, "multi")) {
+    width = height = 64;
+    mips = 3;
+    slices = 2;
+  } else if (std::strcmp(mode, "tiny") &&
+             std::strcmp(mode, "allocation-failure") &&
+             std::strcmp(mode, "invalid-box") &&
+             std::strcmp(mode, "invalid-destination"))
+    return false;
+  const bool fail = !std::strcmp(mode, "allocation-failure");
+  const bool invalid_box = !std::strcmp(mode, "invalid-box");
+  const bool invalid_dst = !std::strcmp(mode, "invalid-destination");
+  HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!event)
+    return false;
+  struct CloseEvent {
+    HANDLE value;
+    ~CloseEvent() { CloseHandle(value); }
+  } close_event{event};
+  Owned<ID3D12Device> device;
+  Owned<ID3D12CommandQueue> queue;
+  Owned<ID3D12CommandAllocator> allocator;
+  Owned<ID3D12GraphicsCommandList> list;
+  Owned<ID3D12Resource> source, target, readback;
+  Owned<ID3D12DescriptorHeap> views;
+  Owned<ID3D12Fence> gate, done;
+  if (!CheckHR("CreateDevice",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&device.ptr))))
+    return false;
+  D3D12_COMMAND_QUEUE_DESC q = {};
+  if (!CheckHR("CreateQueue",
+               device.ptr->CreateCommandQueue(&q, IID_PPV_ARGS(&queue.ptr))) ||
+      !CheckHR("CreateAllocator", device.ptr->CreateCommandAllocator(
+                                      q.Type, IID_PPV_ARGS(&allocator.ptr))) ||
+      !CheckHR("CreateList",
+               device.ptr->CreateCommandList(0, q.Type, allocator.ptr, nullptr,
+                                             IID_PPV_ARGS(&list.ptr))))
+    return false;
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  desc.Width = width;
+  desc.Height = height;
+  desc.DepthOrArraySize = slices;
+  desc.MipLevels = mips;
+  desc.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+  desc.SampleDesc.Count = 1;
+  desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  for (auto out : {&source.ptr, &target.ptr})
+    if (!CheckHR("CreateTexture", device.ptr->CreateCommittedResource(
+                                      &heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                      D3D12_RESOURCE_STATE_DEPTH_WRITE, nullptr,
+                                      IID_PPV_ARGS(out))))
+      return false;
+  const UINT subresources = 2 * mips * slices;
+  std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fp(subresources);
+  UINT64 total = 0;
+  device.ptr->GetCopyableFootprints(&desc, 0, subresources, 0, fp.data(),
+                                    nullptr, nullptr, &total);
+  D3D12_RESOURCE_DESC buffer = {};
+  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer.Width = ((total + 511) & ~UINT64(511)) * 3;
+  buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+  buffer.SampleDesc.Count = 1;
+  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  heap.Type = D3D12_HEAP_TYPE_READBACK;
+  if (!CheckHR("CreateReadback", device.ptr->CreateCommittedResource(
+                                     &heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                     IID_PPV_ARGS(&readback.ptr))))
+    return false;
+  D3D12_DESCRIPTOR_HEAP_DESC vh = {};
+  vh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+  vh.NumDescriptors = mips * slices * 2;
+  if (!CheckHR("CreateViews",
+               device.ptr->CreateDescriptorHeap(&vh, IID_PPV_ARGS(&views.ptr))))
+    return false;
+  auto base = views.ptr->GetCPUDescriptorHandleForHeapStart();
+  const UINT stride = device.ptr->GetDescriptorHandleIncrementSize(vh.Type);
+  auto handle = [&](UINT tex, UINT mip, UINT slice) {
+    auto h = base;
+    h.ptr += (tex * mips * slices + slice * mips + mip) * stride;
+    return h;
+  };
+  for (UINT tex = 0; tex < 2; ++tex)
+    for (UINT slice = 0; slice < slices; ++slice)
+      for (UINT mip = 0; mip < mips; ++mip) {
+        D3D12_DEPTH_STENCIL_VIEW_DESC v = {};
+        v.Format = desc.Format;
+        if (slices > 1) {
+          v.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+          v.Texture2DArray.MipSlice = mip;
+          v.Texture2DArray.FirstArraySlice = slice;
+          v.Texture2DArray.ArraySize = 1;
+        } else {
+          v.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+          v.Texture2D.MipSlice = mip;
+        }
+        device.ptr->CreateDepthStencilView(tex ? target.ptr : source.ptr, &v,
+                                           handle(tex, mip, slice));
+      }
+  if (!CheckHR("CreateGate",
+               device.ptr->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                       IID_PPV_ARGS(&gate.ptr))) ||
+      !CheckHR("CreateDone", device.ptr->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                     IID_PPV_ARGS(&done.ptr))))
+    return false;
+
+  auto barrier = [&](ID3D12Resource *r, D3D12_RESOURCE_STATES before,
+                     D3D12_RESOURCE_STATES after) {
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition = {r, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
+    list.ptr->ResourceBarrier(1, &b);
+  };
+  for (UINT round = 0; round < 2; ++round) {
+    if (round &&
+        (!CheckHR("ResetAllocator", allocator.ptr->Reset()) ||
+         !CheckHR("ResetList", list.ptr->Reset(allocator.ptr, nullptr))))
+      return false;
+    for (UINT tex = 0; tex < 2; ++tex)
+      for (UINT slice = 0; slice < slices; ++slice)
+        for (UINT mip = 0; mip < mips; ++mip)
+          list.ptr->ClearDepthStencilView(
+              handle(tex, mip, slice),
+              D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+              tex ? 0.75f : 0.25f + slice * 0.125f + mip * 0.03125f,
+              tex ? 0xa7 : 0x5a + slice + mip, 0, nullptr);
+    barrier(source.ptr, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+            D3D12_RESOURCE_STATE_COPY_SOURCE);
+    barrier(target.ptr, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+            D3D12_RESOURCE_STATE_COPY_DEST);
+    Owned<ID3D12CommandAllocator> first_allocator;
+    Owned<ID3D12GraphicsCommandList> first;
+    CopyBufferCounter counter;
+    if (!counter.Install())
+      return false;
+    CopyBufferCounter::fail = fail;
+    LARGE_INTEGER frequency, begin, end;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&begin);
+    // Each phase reads both planes, so a depth-only copy cannot accidentally
+    // pass by also copying stencil; the second phase checks stencil
+    // preservation.
+    for (UINT phase = 0; phase < 3; ++phase) {
+      if (phase == 2)
+        list.ptr->CopyResource(target.ptr, source.ptr);
+      else
+        for (UINT iteration = 0; iteration < repeats; ++iteration)
+          for (UINT slice = 0; slice < slices; ++slice)
+            for (UINT mip = 0; mip < mips; ++mip) {
+              D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+              src.pResource = source.ptr;
+              dst.pResource = target.ptr;
+              src.Type = dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+              const UINT copy_mip =
+                  !std::strcmp(mode, "growth") ? mips - 1 - mip : mip;
+              src.SubresourceIndex = dst.SubresourceIndex =
+                  copy_mip + mips * (slice + slices * phase);
+              D3D12_BOX box = {1, 0, 0, 0, 1, 1};
+              list.ptr->CopyTextureRegion(&dst, invalid_dst ? width : 0, 0, 0,
+                                          &src, invalid_box ? &box : nullptr);
+            }
+      barrier(target.ptr, D3D12_RESOURCE_STATE_COPY_DEST,
+              D3D12_RESOURCE_STATE_COPY_SOURCE);
+      for (UINT sub = 0; sub < subresources; ++sub) {
+        D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+        src.pResource = target.ptr;
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.SubresourceIndex = sub;
+        dst.pResource = readback.ptr;
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint = fp[sub];
+        dst.PlacedFootprint.Offset += phase * ((total + 511) & ~UINT64(511));
+        list.ptr->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+      }
+      if (phase != 2)
+        barrier(target.ptr, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                D3D12_RESOURCE_STATE_COPY_DEST);
+      if (phase == 0 && (!std::strcmp(mode, "split") ||
+                         !std::strcmp(mode, "split-allocators"))) {
+        if (!CheckHR("CloseFirst", list.ptr->Close()))
+          return false;
+        std::swap(first.ptr, list.ptr);
+        if (!std::strcmp(mode, "split-allocators")) {
+          std::swap(first_allocator.ptr, allocator.ptr);
+          if (!CheckHR("CreateSecondAllocator",
+                       device.ptr->CreateCommandAllocator(
+                           q.Type, IID_PPV_ARGS(&allocator.ptr))))
+            return false;
+        }
+        if (!CheckHR("CreateSecondList", device.ptr->CreateCommandList(
+                                             0, q.Type, allocator.ptr, nullptr,
+                                             IID_PPV_ARGS(&list.ptr))))
+          return false;
+      }
+    }
+    QueryPerformanceCounter(&end);
+    barrier(source.ptr, D3D12_RESOURCE_STATE_COPY_SOURCE,
+            D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    barrier(target.ptr, D3D12_RESOURCE_STATE_COPY_SOURCE,
+            D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    HRESULT closed = list.ptr->Close();
+    std::cout << "copy staging mode=" << mode << " round=" << round
+              << " close=0x" << std::hex << closed << std::dec
+              << " native_buffers=" << CopyBufferCounter::count
+              << " allocated_bytes=" << CopyBufferCounter::bytes
+              << " record_us="
+              << (end.QuadPart - begin.QuadPart) * 1e6 / frequency.QuadPart
+              << "\n";
+    if (fail || invalid_box || invalid_dst)
+      return FAILED(closed);
+    if (!CheckHR("CloseCopy", closed))
+      return false;
+    size_t direct = 0, to_buffer = 0, owned = 0;
+    for (auto *recorded : {first.ptr, list.ptr}) {
+      if (!recorded)
+        continue;
+      auto *internal =
+          static_cast<dxmt::MTLD3D12GraphicsCommandList *>(recorded);
+      for (auto *encoder = internal->entry->next; encoder;
+           encoder = encoder->next) {
+        owned += encoder->resource_refs.size();
+        if (encoder->type != dxmt::EncoderType::Blit)
+          continue;
+        auto *blit = static_cast<dxmt::BlitEncoderData *>(encoder);
+        for (auto *cmd = static_cast<wmtcmd_base *>(blit->cmd_head.next.get());
+             cmd; cmd = static_cast<wmtcmd_base *>(cmd->next.get())) {
+          direct += cmd->type == WMTBlitCommandCopyFromTextureToTexture;
+          to_buffer +=
+              cmd->type == WMTBlitCommandCopyFromTextureToBufferWithBlitOption;
+        }
+      }
+    }
+    std::cout << "copy staging commands direct=" << direct
+              << " texture_to_buffer=" << to_buffer
+              << " retained_refs=" << owned << "\n";
+
+    if (!std::strcmp(mode, "submission-failure")) {
+      SubmissionCreationFault fault;
+      if (!fault.Install("copy"))
+        return false;
+      fault.Arm();
+      ID3D12CommandList *batch[] = {list.ptr};
+      queue.ptr->ExecuteCommandLists(1, batch);
+      fault.Stop();
+      const auto busy =
+          static_cast<dxmt::MTLD3D12CommandAllocator *>(allocator.ptr)
+              ->IsInFlight();
+      const bool good =
+          fault.Hit() && !fault.Commits() && !busy &&
+          device.ptr->GetDeviceRemovedReason() == DXGI_ERROR_DEVICE_REMOVED &&
+          SUCCEEDED(allocator.ptr->Reset());
+      std::cout << "copy staging submission rollback=" << good << "\n";
+      return good;
+    }
+    // Gate the actual GPU work, then prove allocator Reset cannot free scratch.
+    if (!CheckHR("QueueGate", queue.ptr->Wait(gate.ptr, round + 1)))
+      return false;
+    ID3D12CommandList *batch[] = {first.ptr ? first.ptr : list.ptr, list.ptr};
+    queue.ptr->ExecuteCommandLists(first.ptr ? 2 : 1, batch);
+    const HRESULT reset = allocator.ptr->Reset();
+    const HRESULT first_reset =
+        first_allocator.ptr ? first_allocator.ptr->Reset() : E_FAIL;
+    // Always release the gate, including a failed assertion, before
+    // destructing.
+    const HRESULT release = gate.ptr->Signal(round + 1);
+    if (SUCCEEDED(reset) || SUCCEEDED(first_reset) ||
+        !CheckHR("ReleaseGate", release) ||
+        !CheckHR("SignalDone", queue.ptr->Signal(done.ptr, round + 1)) ||
+        !CheckHR("DoneEvent",
+                 done.ptr->SetEventOnCompletion(round + 1, event)) ||
+        WaitForSingleObject(event, 30000) != WAIT_OBJECT_0 ||
+        done.ptr->GetCompletedValue() == UINT64_MAX)
+      return false;
+    const uint8_t *data = nullptr;
+    if (!CheckHR("MapCopy",
+                 readback.ptr->Map(
+                     0, nullptr,
+                     reinterpret_cast<void **>(const_cast<uint8_t **>(&data)))))
+      return false;
+    bool good = true;
+    for (UINT phase = 0; phase < 3; ++phase)
+      for (UINT sub = 0; sub < subresources; ++sub) {
+        const bool stencil = sub >= mips * slices;
+        const UINT mip = sub % mips, slice = (sub / mips) % slices;
+        const auto &f = fp[sub];
+        const auto *start =
+            data + phase * ((total + 511) & ~UINT64(511)) + f.Offset;
+        for (UINT y = 0; y < f.Footprint.Height; ++y)
+          for (UINT x = 0; x < f.Footprint.Width; ++x) {
+            const auto *pixel =
+                start + y * f.Footprint.RowPitch + x * (stencil ? 1 : 4);
+            float value = *pixel;
+            if (!stencil)
+              std::memcpy(&value, pixel, 4);
+            const float expected =
+                stencil ? (phase ? 0x5a + slice + mip : 0xa7)
+                        : 0.25f + slice * 0.125f + mip * 0.03125f;
+            if (good && value != expected)
+              std::cerr << "copy mismatch phase=" << phase << " sub=" << sub
+                        << " x=" << x << " y=" << y << " actual=" << value
+                        << " expected=" << expected << "\n";
+            good &= value == expected;
+          }
+      }
+    readback.ptr->Unmap(0, nullptr);
+    if (!good || FAILED(device.ptr->GetDeviceRemovedReason())) {
+      std::cerr << "copy plane readback failed\n";
+      return false;
+    }
+    std::cout << "copy staging GPU planes/preservation/in-flight passed\n";
+  }
+  return true;
+}
+
+bool TestSmallBlitCost() {
+  HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!event)
+    return false;
+  struct CloseEvent {
+    HANDLE value;
+    ~CloseEvent() { CloseHandle(value); }
+  } close_event{event};
+  Owned<ID3D12Device> device;
+  Owned<ID3D12CommandQueue> queue;
+  Owned<ID3D12CommandAllocator> allocator;
+  Owned<ID3D12GraphicsCommandList> list;
+  Owned<ID3D12Resource> upload, readback;
+  Owned<ID3D12Fence> fence;
+  if (!CheckHR("CreateDevice",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&device.ptr))))
+    return false;
+  D3D12_COMMAND_QUEUE_DESC q = {};
+  if (!CheckHR("CreateQueue",
+               device.ptr->CreateCommandQueue(&q, IID_PPV_ARGS(&queue.ptr))) ||
+      !CheckHR("CreateAllocator", device.ptr->CreateCommandAllocator(
+                                      q.Type, IID_PPV_ARGS(&allocator.ptr))) ||
+      !CheckHR("CreateList",
+               device.ptr->CreateCommandList(0, q.Type, allocator.ptr, nullptr,
+                                             IID_PPV_ARGS(&list.ptr))) ||
+      !CheckHR("CreateFence",
+               device.ptr->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                       IID_PPV_ARGS(&fence.ptr))))
+    return false;
+  D3D12_RESOURCE_DESC b = {};
+  b.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  b.Width = 256;
+  b.Height = b.DepthOrArraySize = b.MipLevels = 1;
+  b.SampleDesc.Count = 1;
+  b.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  D3D12_HEAP_PROPERTIES h = {};
+  h.CreationNodeMask = h.VisibleNodeMask = 1;
+  h.Type = D3D12_HEAP_TYPE_UPLOAD;
+  if (!CheckHR("CreateUpload", device.ptr->CreateCommittedResource(
+                                   &h, D3D12_HEAP_FLAG_NONE, &b,
+                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                   IID_PPV_ARGS(&upload.ptr))))
+    return false;
+  h.Type = D3D12_HEAP_TYPE_READBACK;
+  if (!CheckHR("CreateReadback",
+               device.ptr->CreateCommittedResource(
+                   &h, D3D12_HEAP_FLAG_NONE, &b, D3D12_RESOURCE_STATE_COPY_DEST,
+                   nullptr, IID_PPV_ARGS(&readback.ptr))))
+    return false;
+  uint32_t *mapped = nullptr;
+  if (!CheckHR("MapUpload",
+               upload.ptr->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+    return false;
+  *mapped = 0x51a61234;
+  upload.ptr->Unmap(0, nullptr);
+
+  LARGE_INTEGER frequency;
+  QueryPerformanceFrequency(&frequency);
+  for (UINT round = 0; round < 9; ++round) {
+    if (round &&
+        (!CheckHR("ResetAllocator", allocator.ptr->Reset()) ||
+         !CheckHR("ResetList", list.ptr->Reset(allocator.ptr, nullptr))))
+      return false;
+    CopyBufferCounter counter;
+    if (!counter.Install())
+      return false;
+    LARGE_INTEGER start, end;
+    QueryPerformanceCounter(&start);
+    for (UINT i = 0; i < 10000; ++i)
+      list.ptr->CopyBufferRegion(readback.ptr, 0, upload.ptr, 0, 4);
+    QueryPerformanceCounter(&end);
+    if (!CheckHR("CloseBlit", list.ptr->Close()) || CopyBufferCounter::count)
+      return false;
+    ID3D12CommandList *batch[] = {list.ptr};
+    queue.ptr->ExecuteCommandLists(1, batch);
+    if (!CheckHR("SignalBlit", queue.ptr->Signal(fence.ptr, round + 1)) ||
+        !CheckHR("EventBlit",
+                 fence.ptr->SetEventOnCompletion(round + 1, event)) ||
+        WaitForSingleObject(event, 30000) != WAIT_OBJECT_0 ||
+        fence.ptr->GetCompletedValue() == UINT64_MAX)
+      return false;
+    if (!CheckHR(
+            "MapBlit",
+            readback.ptr->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+      return false;
+    const bool good = *mapped == 0x51a61234;
+    readback.ptr->Unmap(0, nullptr);
+    if (!good)
+      return false;
+    std::cout << "small_blit round=" << round
+              << " copies=10000 native_buffers=" << CopyBufferCounter::count
+              << " record_us="
+              << (end.QuadPart - start.QuadPart) * 1e6 / frequency.QuadPart
+              << "\n";
+  }
+  return true;
+}
+
 int main(int argc, char **argv) {
+  if (argc == 2 && std::strcmp(argv[1], "--small-blit-cost") == 0)
+    return TestSmallBlitCost() ? 0 : 1;
+  if (argc == 3 && std::strcmp(argv[1], "--copy-staging") == 0)
+    return TestCopyStaging(argv[2]) ? 0 : 1;
   if (argc == 3 && std::strcmp(argv[1], "--encoder-creation-failure") == 0) {
     const char *mode = argv[2];
     if (std::strcmp(mode, "copy") && std::strcmp(mode, "clear") &&
