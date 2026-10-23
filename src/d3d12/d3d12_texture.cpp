@@ -1047,6 +1047,8 @@ public:
     hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
     if (FAILED(hr))
       return hr;
+    if (IsFullyTypelessFormat(ViewDesc.Format, metal_format))
+      return E_INVALIDARG;
 
     UINT component_mapping = ViewDesc.Shader4ComponentMapping;
     if (metal_format.BytesPerTexel == 12) {
@@ -1256,6 +1258,8 @@ public:
     hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
     if (FAILED(hr))
       return hr;
+    if (IsFullyTypelessFormat(ViewDesc.Format, metal_format))
+      return E_INVALIDARG;
 
     view_descriptor.format = metal_format.PixelFormat;
     UINT PlaneSlice = 0;
@@ -1362,6 +1366,8 @@ public:
     hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
     if (FAILED(hr))
       return hr;
+    if (IsFullyTypelessFormat(ViewDesc.Format, metal_format))
+      return E_INVALIDARG;
 
     view_descriptor.format = metal_format.PixelFormat;
 
@@ -1494,6 +1500,8 @@ public:
     hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
     if (FAILED(hr))
       return hr;
+    if (IsFullyTypelessFormat(ViewDesc.Format, metal_format))
+      return E_INVALIDARG;
     view_descriptor.format = metal_format.PixelFormat;
 
     MTL_RENDER_TARGET_DESC RenderTargetDesc;

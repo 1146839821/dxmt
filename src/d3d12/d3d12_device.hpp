@@ -822,6 +822,13 @@ IsRGB96Format(DXGI_FORMAT format) {
   return format >= DXGI_FORMAT_R32G32B32_TYPELESS && format <= DXGI_FORMAT_R32G32B32_SINT;
 }
 
+inline bool
+IsFullyTypelessFormat(DXGI_FORMAT format, const MTL_DXGI_FORMAT_DESC &description) {
+  // These 64-bit component SRVs have a typed selected component despite the native TYPELESS flag.
+  return (description.Flag & MTL_DXGI_FORMAT_TYPELESS) && format != DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS &&
+         format != DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
+}
+
 HRESULT QueryRGB96TextureFormat(WMT::Device device, DXGI_FORMAT format, MTL_DXGI_FORMAT_DESC &description);
 
 inline HRESULT

@@ -825,9 +825,226 @@ bool CheckTextureViewDimensions() {
   return good;
 }
 
+bool CheckTypedViewFormats() {
+  struct Objects {
+    ID3D12Device *device = nullptr;
+    ID3D12DescriptorHeap *heaps[3] = {};
+    ID3D12Resource *resources[9] = {};
+    ~Objects() {
+      for (auto &heap : heaps)
+        Release(heap);
+      for (auto &resource : resources)
+        Release(resource);
+      Release(device);
+    }
+  } o;
+  if (!CheckHR("Typed formats device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&o.device))))
+    return false;
+  const auto properties = DefaultHeap();
+  // Texture storage: RGBA8,R32,RGB96,D32S8,D24S8, plus a buffer and seed
+  // texture.
+  const DXGI_FORMAT formats[] = {
+      DXGI_FORMAT_R8G8B8A8_TYPELESS,  DXGI_FORMAT_R32_TYPELESS,
+      DXGI_FORMAT_R32G32B32_TYPELESS, DXGI_FORMAT_R32G8X24_TYPELESS,
+      DXGI_FORMAT_R24G8_TYPELESS,     DXGI_FORMAT_UNKNOWN,
+      DXGI_FORMAT_R8G8B8A8_UNORM,     DXGI_FORMAT_R32_TYPELESS,
+      DXGI_FORMAT_D32_FLOAT};
+  for (UINT i = 0; i < 9; i++) {
+    auto desc =
+        i == 5
+            ? BufferDescription(256, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+            : RenderTargetDescription();
+    desc.Format = formats[i];
+    if (i == 0 || i == 1 || i == 6)
+      desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (i == 3 || i == 4 || i == 7 || i == 8)
+      desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    if (!CheckHR("Typed formats resource",
+                 o.device->CreateCommittedResource(
+                     &properties, D3D12_HEAP_FLAG_NONE, &desc,
+                     D3D12_RESOURCE_STATE_COMMON, nullptr,
+                     IID_PPV_ARGS(&o.resources[i]))))
+      return false;
+  }
+  for (UINT i = 0; i < 3; i++) {
+    D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+    desc.Type = i == 0   ? D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV
+                : i == 1 ? D3D12_DESCRIPTOR_HEAP_TYPE_RTV
+                         : D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    desc.NumDescriptors = 1;
+    if (!CheckHR("Typed formats heap", o.device->CreateDescriptorHeap(
+                                           &desc, IID_PPV_ARGS(&o.heaps[i]))))
+      return false;
+  }
+  auto *shader = static_cast<dxmt::MTLD3D12DescriptorHeap *>(o.heaps[0]);
+  auto *rtv =
+      static_cast<dxmt::MTLD3D12RenderTargetDescriptorHeap *>(o.heaps[1]);
+  auto *dsv =
+      static_cast<dxmt::MTLD3D12RenderTargetDescriptorHeap *>(o.heaps[2]);
+  const auto write = [&](UINT kind, UINT resource, DXGI_FORMAT format,
+                         bool raw = false, UINT plane = 0,
+                         bool defaults = false) {
+    auto *object = o.resources[resource];
+    if (kind == 0) {
+      D3D12_SHADER_RESOURCE_VIEW_DESC v = {};
+      v.Format = format;
+      v.ViewDimension = resource == 5 ? D3D12_SRV_DIMENSION_BUFFER
+                                      : D3D12_SRV_DIMENSION_TEXTURE2D;
+      v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+      if (resource == 5) {
+        v.Buffer.NumElements = 4;
+        v.Buffer.StructureByteStride = format == DXGI_FORMAT_UNKNOWN ? 4 : 0;
+        v.Buffer.Flags =
+            raw ? D3D12_BUFFER_SRV_FLAG_RAW : D3D12_BUFFER_SRV_FLAG_NONE;
+      } else {
+        v.Texture2D.MipLevels = 1;
+        v.Texture2D.PlaneSlice = plane;
+      }
+      o.device->CreateShaderResourceView(
+          object, defaults ? nullptr : &v,
+          o.heaps[0]->GetCPUDescriptorHandleForHeapStart());
+    } else if (kind == 1) {
+      D3D12_UNORDERED_ACCESS_VIEW_DESC v = {};
+      v.Format = format;
+      v.ViewDimension = resource == 5 ? D3D12_UAV_DIMENSION_BUFFER
+                                      : D3D12_UAV_DIMENSION_TEXTURE2D;
+      if (resource == 5) {
+        v.Buffer.NumElements = 4;
+        v.Buffer.StructureByteStride = format == DXGI_FORMAT_UNKNOWN ? 4 : 0;
+        v.Buffer.Flags =
+            raw ? D3D12_BUFFER_UAV_FLAG_RAW : D3D12_BUFFER_UAV_FLAG_NONE;
+      }
+      o.device->CreateUnorderedAccessView(
+          object, nullptr, defaults ? nullptr : &v,
+          o.heaps[0]->GetCPUDescriptorHandleForHeapStart());
+    } else if (kind == 2) {
+      D3D12_RENDER_TARGET_VIEW_DESC v = {};
+      v.Format = format;
+      v.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+      o.device->CreateRenderTargetView(
+          object, defaults ? nullptr : &v,
+          o.heaps[1]->GetCPUDescriptorHandleForHeapStart());
+    } else {
+      D3D12_DEPTH_STENCIL_VIEW_DESC v = {};
+      v.Format = format;
+      v.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+      o.device->CreateDepthStencilView(
+          object, defaults ? nullptr : &v,
+          o.heaps[2]->GetCPUDescriptorHandleForHeapStart());
+    }
+  };
+  const auto identity = [&](UINT kind) -> const void * {
+    if (kind == 2)
+      return rtv->GetRenderTarget(0).Texture;
+    if (kind == 3)
+      return dsv->GetRenderTarget(0).Texture;
+    const auto v = ReadDescriptorFields(shader, 0);
+    switch (v.type) {
+    case dxmt::ShaderVisibleDescriptorType::SRVTexture:
+      return v.SRVTexture.texture;
+    case dxmt::ShaderVisibleDescriptorType::UAVTexture:
+      return v.UAVTexture.texture;
+    case dxmt::ShaderVisibleDescriptorType::SRVBuffer:
+      return v.SRVBuffer.buffer;
+    case dxmt::ShaderVisibleDescriptorType::SRVTexelBuffer:
+      return v.SRVTexelBuffer.buffer;
+    case dxmt::ShaderVisibleDescriptorType::UAVBuffer:
+      return v.UAVBuffer.buffer;
+    case dxmt::ShaderVisibleDescriptorType::UAVTexelBuffer:
+      return v.UAVTexelBuffer.buffer;
+    default:
+      return nullptr;
+    }
+  };
+  struct Case {
+    UINT kind, resource;
+    DXGI_FORMAT typed;
+  };
+  const Case cases[] = {{0, 0, DXGI_FORMAT_R8G8B8A8_UNORM},
+                        {0, 1, DXGI_FORMAT_R32_FLOAT},
+                        {0, 2, DXGI_FORMAT_R32G32B32_FLOAT},
+                        {1, 0, DXGI_FORMAT_R8G8B8A8_UNORM},
+                        {1, 1, DXGI_FORMAT_R32_UINT},
+                        {2, 0, DXGI_FORMAT_R8G8B8A8_UNORM},
+                        {2, 1, DXGI_FORMAT_R32_FLOAT},
+                        {2, 2, DXGI_FORMAT_R32G32B32_FLOAT},
+                        {3, 7, DXGI_FORMAT_D32_FLOAT},
+                        {3, 3, DXGI_FORMAT_D32_FLOAT_S8X24_UINT},
+                        {3, 4, DXGI_FORMAT_D24_UNORM_S8_UINT},
+                        {0, 5, DXGI_FORMAT_R32_UINT},
+                        {1, 5, DXGI_FORMAT_R32_UINT}};
+  bool good = true;
+  for (UINT i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    const auto &c = cases[i];
+    for (const bool defaults : {false, true})
+      for (const bool seeded : {false, true}) {
+        shader->ClearDescriptor(0);
+        rtv->AddRenderTarget(0, nullptr);
+        dsv->AddRenderTarget(0, nullptr);
+        if (seeded)
+          write(c.kind, c.kind == 3 ? 8 : 6,
+                c.kind == 3 ? DXGI_FORMAT_D32_FLOAT
+                            : DXGI_FORMAT_R8G8B8A8_UNORM);
+        const auto before = identity(c.kind);
+        const auto before_shader = ReadDescriptorFields(shader, 0);
+        write(c.kind, c.resource,
+              c.resource == 5 ? DXGI_FORMAT_R32_TYPELESS : formats[c.resource],
+              false, 0, defaults);
+        const bool pass =
+            identity(c.kind) == before && (!seeded || before) &&
+            (c.kind >= 2 ||
+             ReadDescriptorFields(shader, 0).type == before_shader.type);
+        std::cout << "typed_view case=" << i << " defaults=" << defaults
+                  << " seeded=" << seeded << " pass=" << pass << "\n";
+        good &= pass;
+      }
+    write(c.kind, c.resource, c.typed);
+    const void *expected =
+        c.resource == 5
+            ? static_cast<const void *>(
+                  static_cast<dxmt::MTLD3D12Resource *>(o.resources[5])
+                      ->buffer.ptr())
+            : static_cast<dxmt::MTLD3D12Resource *>(o.resources[c.resource])
+                  ->texture.ptr();
+    const bool pass = identity(c.kind) == expected;
+    std::cout << "typed_view valid=" << i << " pass=" << pass << "\n";
+    good &= pass;
+  }
+  for (UINT kind : {0u, 1u})
+    for (const bool raw : {false, true}) {
+      write(kind, 5, raw ? DXGI_FORMAT_R32_TYPELESS : DXGI_FORMAT_UNKNOWN, raw);
+      const auto v = ReadDescriptorFields(shader, 0);
+      const bool pass =
+          v.type == (kind == 0 ? dxmt::ShaderVisibleDescriptorType::SRVBuffer
+                               : dxmt::ShaderVisibleDescriptorType::UAVBuffer);
+      std::cout << "typed_view raw=" << raw << " kind=" << kind
+                << " pass=" << pass << "\n";
+      good &= pass;
+    }
+  const DXGI_FORMAT planes[] = {
+      DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS, DXGI_FORMAT_X32_TYPELESS_G8X24_UINT,
+      DXGI_FORMAT_R24_UNORM_X8_TYPELESS, DXGI_FORMAT_X24_TYPELESS_G8_UINT};
+  for (UINT i = 0; i < 4; i++) {
+    write(0, i < 2 ? 3 : 4, planes[i], false, i % 2);
+    const bool pass = ReadDescriptorFields(shader, 0).type ==
+                          dxmt::ShaderVisibleDescriptorType::SRVTexture &&
+                      identity(0) == static_cast<dxmt::MTLD3D12Resource *>(
+                                         o.resources[i < 2 ? 3 : 4])
+                                         ->texture.ptr();
+    std::cout << "typed_view depth_plane=" << i << " pass=" << pass << "\n";
+    good &= pass;
+  }
+  return good;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::string(argv[1]) == "--typed-view-formats")
+    return CheckTypedViewFormats() ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--texture-view-dimensions")
     return CheckTextureViewDimensions() ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--uav-counter-contract")

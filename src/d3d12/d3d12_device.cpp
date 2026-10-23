@@ -1056,10 +1056,7 @@ public:
         out->Support1 = static_cast<D3D12_FORMAT_SUPPORT1>(out->Support1 & ~D3D12_FORMAT_SUPPORT1_TEXTURE1D);
       out->Support2 = D3D12_FORMAT_SUPPORT2_NONE;
 
-      // The two 64-bit plane SRV mappings also carry TYPELESS internally, but
-      // their selected component is typed. Do not confuse them with storage-only formats.
-      if ((format_desc.Flag & MTL_DXGI_FORMAT_TYPELESS) && out->Format != DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS &&
-          out->Format != DXGI_FORMAT_X32_TYPELESS_G8X24_UINT)
+      if (IsFullyTypelessFormat(out->Format, format_desc))
         return S_OK;
 
       const bool depth_target = has_capability(FormatCapability::DepthStencil);

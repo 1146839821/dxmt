@@ -311,6 +311,8 @@ public:
       ERR("D3D12Buffer::CreateShaderResourceView: not an ordinary or packed format: ", ViewDesc.Format);
       return E_FAIL;
     }
+    if (IsFullyTypelessFormat(ViewDesc.Format, Format))
+      return E_INVALIDARG;
     BufferViewDescriptor view_descriptor{Format.PixelFormat};
     if (!MakeBufferSlice(ViewDesc.Buffer.FirstElement, ViewDesc.Buffer.NumElements, Format.BytesPerTexel, desc_.Width, Slice))
       return E_INVALIDARG;
@@ -381,6 +383,8 @@ public:
       return E_FAIL;
     }
     if (pCounter)
+      return E_INVALIDARG;
+    if (IsFullyTypelessFormat(ViewDesc.Format, Format))
       return E_INVALIDARG;
     BufferViewDescriptor view_descriptor{Format.PixelFormat};
     if (!MakeBufferSlice(ViewDesc.Buffer.FirstElement, ViewDesc.Buffer.NumElements, Format.BytesPerTexel, desc_.Width, Slice))

@@ -1326,6 +1326,66 @@ matchedWine11x64/Rosetta,clang23.1.1. User.gitignore untouched,no push. Issue ta
 root/files/commands/exits,rawtimings,source andloadedpathhashes,remaininglimits:
 `../dxmt-test/n09-texture-view-dimensions-20261024/N09-texture-view-dimensions.md`.
 
+### N09 — storage-only formats cannot become resource-backed typed views, 2026-10-24
+
+Base42b5a8ea; one shared mechanism for the Device attachment's format/view
+consistency requirement. Native format mapping succeeded for fully typeless
+storage, and six typed view paths treated that as permission to publish a view.
+Extract the existing FORMAT_SUPPORT classification into inline
+IsFullyTypelessFormat in the existing Device header, preserving two selected
+64-bit depth/stencil component exceptions. Reuse it before four texture and two
+typed buffer view publications. RAW R32_TYPELESS and structured UNKNOWN paths
+remain separate. Format-query masks unchanged; no new format family table,
+state/cache/manager or production file. Default texture desc inheritance reaches
+the same guard; default buffer descriptions were already rejected.
+
+Final same PE twice on baseline:48 failures of73 (26 explicit and22 default
+texture checks). Candidate twice73/73:52 negative checks plus21 legal controls,
+including13 typed views on typeless storage,4 RAW/structured and4 selected
+D24/D32S8 component SRVs. Initial test compile failed on Buffer*/Texture* ternary
+conversion and an old PE incorrectly ran the default runner; those exit0 logs
+are explicitly excluded. Build-success staging and a mandatory73-row log assertion
+prevent stale-run acceptance. No production edit used those stale results.
+
+Twenty final processes meet expected exits:two baseline target1,other18zero.
+Unmodified nine-shape DXIL GPU oracle before/after returns11,22,33,44,55,66,77,88,99;
+candidate typeless-storage/typed-view mode passes. Counter GPU copy/mutation/
+fenced reuse/residency/readback passes before/after. Full ownership,viewflags,
+32 view dimensions,37 counter contract,resource,feature,command-list,enhanced
+barriers,28 depthformats,RGB96 andD32S8multi-plane/mip/slice/in-flight GPU copies
+pass. Device/Buffer/Texture no-private TU syntax passes,not full linked/runtime.
+
+First AB/BA/AB24 processes and isolated record/view repeat12 processes all0.
+Medians of3 process p50/p95,us; both original and repeat retained:
+
+| Group / probe | Before p50/p95 us | After p50/p95 us | Change p50/p95 |
+|---|---:|---:|---:|
+| First / Ordinary submit | 111.65/147.60 | 115.65/146.30 | +3.58%/-0.88% |
+| First / 120000 format queries | 3343.15/3474.60 | 3123.10/3185.10 | -6.58%/-8.33% |
+| First / Recording | 3133.20/3388.40 | 3237.55/3387.10 | +3.33%/-0.04% |
+| First / 10000 mixed view writes | 1798.50/1850.40 | 1872.35/1901.80 | +4.11%/+2.78% |
+| Isolated repeat / Recording | 3145.75/3303.00 | 3247.55/3410.30 | +3.24%/+3.25% |
+| Isolated repeat / 10000 mixed view writes | 1797.70/1854.10 | 1831.30/1884.30 | +1.87%/+1.63% |
+
+Each side first72 record/180 submit/72 format/72 view batches; repeat adds72
+record and72 view. View p50 overhead persists with differing size; no zero-cost
+claim. Recording p50+3.33%/+3.24% remains unresolved,not dismissed as noise merely
+because descriptor checks are outside the timed recording loop. No causal query
+speedup claim. Global performance gate OPEN. Fixed predicates reuse the existing
+format query; no allocation/lock/heap scan/new draw or submit work. Public/private
+COM/WMT ABI,virtual layouts,resource layouts,scheduling,lifetime and FL/SM/Options/
+Tiers unchanged; EnhancedBarriersSupported FALSE. Device5–10 grouping and legacy
+D3D10/11/DXGI rejections preserved. Microsoft SDK view/RAW rules and pinned upstream
+a148782 native-only view paths retained externally,not copied as validation.
+
+Full family casts/view-kind format legality,null-resource format validation,
+all22 typeless families' actual views,all depth-plane GPU sampling,native Windows,
+full no-private runtime,D3D11 rendering,T4 NOT_RUN/unclosed. M1Max/Apple7,
+macOS27.0.1,Xcode27.1(requested26 differs),MSC4.0.1,matchedWine11x64/Rosetta,
+clang23.1.1. User.gitignore preserved,no push. Full issue/root/file/command/exit/
+performance/source/hash/loaded-path evidence and remaining limits:
+`../dxmt-test/n09-typed-view-formats-20261024/N09-typed-view-formats.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
