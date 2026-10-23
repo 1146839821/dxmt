@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include <d3dcompiler.h>
 
 #include "d3d12_device.hpp"
 
@@ -131,67 +132,77 @@ public:
   ~SubmissionAllocationFault() { Stop(); }
 };
 
-// Return a nullable native command buffer once, before any real GPU work.
-// Capture nil commits so a broken driver cannot forward them to Metal.
-class CommandBufferFault {
-  inline static obj_handle_t(__cdecl *create_)(obj_handle_t) = nullptr;
-  inline static obj_handle_t(__cdecl *create_options_)(obj_handle_t,
-                                                       uint64_t) = nullptr;
-  inline static void(__cdecl *commit_)(obj_handle_t) = nullptr;
+// One-shot native factory failure. Valid command buffers still reach Metal;
+// count any commit after the injected failure to catch partial submissions.
+class SubmissionCreationFault {
+  inline static void *create_ = nullptr, *create_options_ = nullptr;
+  inline static void *commit_ = nullptr;
   inline static thread_local bool armed_ = false, hit_ = false;
-  inline static thread_local unsigned nil_commits_ = 0;
+  inline static thread_local unsigned commits_ = 0;
   DriverImportPatch create_patch_, options_patch_, commit_patch_;
-  static bool Fail() {
-    if (!armed_)
-      return false;
-    armed_ = false;
-    return hit_ = true;
-  }
-  static obj_handle_t __cdecl Create(obj_handle_t queue) {
-    return Fail() ? 0 : create_(queue);
-  }
-  static obj_handle_t __cdecl CreateOptions(obj_handle_t queue,
-                                            uint64_t options) {
-    return Fail() ? 0 : create_options_(queue, options);
+  template <bool Options, typename... Args>
+  static obj_handle_t __cdecl Create(obj_handle_t object, Args... args) {
+    if (armed_) {
+      armed_ = false;
+      hit_ = true;
+      return 0;
+    }
+    auto original =
+        reinterpret_cast<obj_handle_t(__cdecl *)(obj_handle_t, Args...)>(
+            Options ? create_options_ : create_);
+    return original(object, args...);
   }
   static void __cdecl Commit(obj_handle_t buffer) {
-    if (!buffer) {
-      nil_commits_++;
-      return;
-    }
-    commit_(buffer);
+    if (hit_)
+      commits_++;
+    // Do not forward nil commits to Metal when testing a broken driver.
+    if (buffer)
+      reinterpret_cast<void(__cdecl *)(obj_handle_t)>(commit_)(buffer);
   }
-
 public:
-  bool Install() {
-    void *original = nullptr;
-    if (!create_patch_.Install("MTLCommandQueue_commandBuffer",
-                               reinterpret_cast<void *>(&Create), original))
+  bool Install(const char *encoder = nullptr) {
+    const char *symbol = "MTLCommandQueue_commandBuffer";
+    void *replacement = reinterpret_cast<void *>(&Create<false>);
+    if (encoder) {
+      if (!std::strcmp(encoder, "copy"))
+        symbol = "MTLCommandBuffer_blitCommandEncoder";
+      else if (!std::strcmp(encoder, "compute")) {
+        symbol = "MTLCommandBuffer_computeCommandEncoder";
+        replacement = reinterpret_cast<void *>(&Create<false, bool>);
+      } else if (!std::strcmp(encoder, "clear") ||
+                 !std::strcmp(encoder, "late-clear")) {
+        symbol = "MTLCommandBuffer_renderCommandEncoder";
+        replacement =
+            reinterpret_cast<void *>(&Create<false, WMTRenderPassInfo *>);
+      } else {
+        symbol = "MTLCommandBuffer_blitCommandEncoderWithSampleBuffers";
+        replacement = reinterpret_cast<void *>(
+            &Create<false, WMTSampleBufferAttachmentInfo *, uint64_t>);
+      }
+    }
+    if (!create_patch_.Install(symbol, replacement, create_))
       return false;
-    create_ = reinterpret_cast<decltype(create_)>(original);
-    if (!options_patch_.Install("MTLCommandQueue_commandBufferWithErrorOptions",
-                                reinterpret_cast<void *>(&CreateOptions),
-                                original))
+    if (!encoder &&
+        !options_patch_.Install(
+            "MTLCommandQueue_commandBufferWithErrorOptions",
+            reinterpret_cast<void *>(&Create<true, uint64_t>), create_options_))
       return false;
-    create_options_ = reinterpret_cast<decltype(create_options_)>(original);
-    if (!commit_patch_.Install("MTLCommandBuffer_commit",
-                               reinterpret_cast<void *>(&Commit), original))
-      return false;
-    commit_ = reinterpret_cast<decltype(commit_)>(original);
-    return true;
+    return commit_patch_.Install("MTLCommandBuffer_commit",
+                                 reinterpret_cast<void *>(&Commit), commit_);
   }
   void Arm() {
     hit_ = false;
-    nil_commits_ = 0;
+    commits_ = 0;
     armed_ = true;
   }
   void Stop() { armed_ = false; }
   bool Hit() const { return hit_; }
-  unsigned NilCommits() const { return nil_commits_; }
-  ~CommandBufferFault() { Stop(); }
+  unsigned Commits() const { return commits_; }
+  ~SubmissionCreationFault() { Stop(); }
 };
 
-bool TestCommandBufferFailure(const char *operation) {
+bool TestCommandBufferFailure(const char *operation,
+                              const char *encoder = nullptr) {
   if (std::strcmp(operation, "execute") && std::strcmp(operation, "signal") &&
       std::strcmp(operation, "wait") && std::strcmp(operation, "calibrate"))
     return false;
@@ -208,6 +219,11 @@ bool TestCommandBufferFailure(const char *operation) {
   Owned<ID3D12CommandAllocator> allocator;
   Owned<ID3D12GraphicsCommandList> list;
   Owned<ID3D12Fence> fence;
+  Owned<ID3D12Resource> source, destination, texture;
+  Owned<ID3D12DescriptorHeap> rtv;
+  Owned<ID3D12RootSignature> root;
+  Owned<ID3D12PipelineState> pipeline;
+  Owned<ID3D12QueryHeap> query;
   D3D12_COMMAND_QUEUE_DESC desc = {};
   if (!event.handle ||
       !CheckHR("buffer device",
@@ -222,13 +238,117 @@ bool TestCommandBufferFailure(const char *operation) {
                device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                          allocator.ptr, nullptr,
                                          IID_PPV_ARGS(&list.ptr))) ||
-      !CheckHR("buffer close", list->Close()) ||
       !CheckHR("buffer fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
                                                    IID_PPV_ARGS(&fence.ptr))) ||
       !CheckHR("buffer event", fence->SetEventOnCompletion(1, event.handle)))
     return false;
-  CommandBufferFault fault;
-  if (!fault.Install())
+  if (encoder) {
+    const bool copy =
+        !std::strcmp(encoder, "copy") || !std::strcmp(encoder, "late-clear");
+    const bool clear =
+        !std::strcmp(encoder, "clear") || !std::strcmp(encoder, "late-clear");
+    if (copy) {
+      D3D12_RESOURCE_DESC buffer = {};
+      buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+      buffer.Width = 256;
+      buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels =
+          buffer.SampleDesc.Count = 1;
+      buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      D3D12_HEAP_PROPERTIES heap = {};
+      heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+      heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+      if (!CheckHR("encoder upload", device->CreateCommittedResource(
+                                         &heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                         D3D12_RESOURCE_STATE_GENERIC_READ,
+                                         nullptr, IID_PPV_ARGS(&source.ptr))))
+        return false;
+      heap.Type = D3D12_HEAP_TYPE_READBACK;
+      if (!CheckHR("encoder readback",
+                   device->CreateCommittedResource(
+                       &heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                       D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                       IID_PPV_ARGS(&destination.ptr))))
+        return false;
+      list->CopyBufferRegion(destination.ptr, 0, source.ptr, 0, 256);
+    }
+    if (clear) {
+      D3D12_RESOURCE_DESC desc = {};
+      desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+      desc.Width = desc.Height = 4;
+      desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+      desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+      D3D12_HEAP_PROPERTIES heap = {};
+      heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+      heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+      D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
+      heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+      heap_desc.NumDescriptors = 1;
+      if (!CheckHR("encoder texture",
+                   device->CreateCommittedResource(
+                       &heap, D3D12_HEAP_FLAG_NONE, &desc,
+                       D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                       IID_PPV_ARGS(&texture.ptr))) ||
+          !CheckHR("encoder RTV", device->CreateDescriptorHeap(
+                                      &heap_desc, IID_PPV_ARGS(&rtv.ptr))))
+        return false;
+      auto handle = rtv->GetCPUDescriptorHandleForHeapStart();
+      device->CreateRenderTargetView(texture.ptr, nullptr, handle);
+      const float color[] = {1, 0, 0, 1};
+      const D3D12_RECT rect = {0, 0, 2, 2};
+      list->ClearRenderTargetView(handle, color, 1, &rect);
+    } else if (!std::strcmp(encoder, "compute")) {
+      struct Compiler {
+        HMODULE module = LoadLibraryA(D3DCOMPILER_DLL_A);
+        ~Compiler() {
+          if (module)
+            FreeLibrary(module);
+        }
+      } compiler;
+      auto compile = compiler.module
+                         ? reinterpret_cast<pD3DCompile>(
+                               GetProcAddress(compiler.module, "D3DCompile"))
+                         : nullptr;
+      const char shader[] = "[numthreads(1,1,1)] void main() {}";
+      Owned<ID3DBlob> code, errors, serialized;
+      D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+      if (!compile ||
+          !CheckHR("encoder shader",
+                   compile(shader, sizeof(shader) - 1, nullptr, nullptr,
+                           nullptr, "main", "cs_5_0", 0, 0, &code.ptr,
+                           &errors.ptr)) ||
+          !CheckHR("encoder root serialization",
+                   D3D12SerializeRootSignature(&root_desc,
+                                               D3D_ROOT_SIGNATURE_VERSION_1,
+                                               &serialized.ptr, nullptr)) ||
+          !CheckHR("encoder root",
+                   device->CreateRootSignature(
+                       0, serialized->GetBufferPointer(),
+                       serialized->GetBufferSize(), IID_PPV_ARGS(&root.ptr))))
+        return false;
+      D3D12_COMPUTE_PIPELINE_STATE_DESC pso = {};
+      pso.pRootSignature = root.ptr;
+      pso.CS = {code->GetBufferPointer(), code->GetBufferSize()};
+      if (!CheckHR("encoder PSO", device->CreateComputePipelineState(
+                                      &pso, IID_PPV_ARGS(&pipeline.ptr))))
+        return false;
+      list->SetPipelineState(pipeline.ptr);
+      list->SetComputeRootSignature(root.ptr);
+      list->Dispatch(1, 1, 1);
+    } else if (!std::strcmp(encoder, "timestamp")) {
+      D3D12_QUERY_HEAP_DESC query_desc = {};
+      query_desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+      query_desc.Count = 1;
+      if (!CheckHR("encoder query", device->CreateQueryHeap(
+                                        &query_desc, IID_PPV_ARGS(&query.ptr))))
+        return false;
+      list->EndQuery(query.ptr, D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    }
+  }
+  if (!CheckHR("buffer close", list->Close()))
+    return false;
+  SubmissionCreationFault fault;
+  if (!fault.Install(encoder))
     return false;
   HRESULT result = S_OK;
   UINT64 gpu = 0x1234, cpu = 0x5678;
@@ -247,15 +367,21 @@ bool TestCommandBufferFailure(const char *operation) {
   const auto reason = device->GetDeviceRemovedReason();
   const bool busy = static_cast<dxmt::MTLD3D12CommandAllocator *>(allocator.ptr)
                         ->IsInFlight();
+  const auto recording =
+      static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list.ptr)
+          ->GetRecordingState();
+  const bool recording_busy = recording && recording->IsInFlight();
   const bool woke = WaitForSingleObject(event.handle, 0) == WAIT_OBJECT_0;
   const auto completed = fence->GetCompletedValue();
   std::cout << "command buffer operation=" << operation
-            << " hit=" << fault.Hit() << " nil_commits=" << fault.NilCommits()
-            << " allocator_busy=" << busy << " woke=" << woke
+            << " encoder=" << (encoder ? encoder : "none")
+            << " hit=" << fault.Hit() << " commits=" << fault.Commits()
+            << " allocator_busy=" << busy
+            << " recording_busy=" << recording_busy << " woke=" << woke
             << " completed=" << completed << " result=0x" << std::hex
             << static_cast<unsigned long>(result) << " reason=0x"
             << static_cast<unsigned long>(reason) << std::dec << "\n";
-  return fault.Hit() && !fault.NilCommits() && !busy && woke &&
+  return fault.Hit() && !fault.Commits() && !busy && !recording_busy && woke &&
          completed == UINT64_MAX && reason == DXGI_ERROR_DEVICE_REMOVED &&
          (!std::strcmp(operation, "execute") ||
           result == DXGI_ERROR_DEVICE_REMOVED) &&
@@ -1301,6 +1427,17 @@ bool TestConcurrentCommandSubmission(ID3D12Device *device) {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 3 && std::strcmp(argv[1], "--encoder-creation-failure") == 0) {
+    const char *mode = argv[2];
+    if (std::strcmp(mode, "copy") && std::strcmp(mode, "clear") &&
+        std::strcmp(mode, "late-clear") && std::strcmp(mode, "compute") &&
+        std::strcmp(mode, "timestamp") && std::strcmp(mode, "calibrate"))
+      return 2;
+    return TestCommandBufferFailure(
+               !std::strcmp(mode, "calibrate") ? "calibrate" : "execute", mode)
+               ? 0
+               : 1;
+  }
   if (argc == 3 && std::strcmp(argv[1], "--command-buffer-failure") == 0)
     return TestCommandBufferFailure(argv[2]) ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--submission-translation-abort") == 0)

@@ -138,7 +138,7 @@ dx12_command_list_type = executable('dx12_command_list_type', 'dx12_command_list
     include_directories('../../src/winemetal'),
     include_directories('../../src/util'),
   ],
-  dependencies: [ d3d12_dep ],
+  dependencies: [ d3d12_dep, winemetal_dep ],
 )
 
 dx12_resource_tests = executable('dx12_resource_tests', 'dx12_resource_tests.cpp',

@@ -285,16 +285,21 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   }
 
   HRESULT
+  CheckSubmissionObject(WMT::Object object) {
+    if (object) [[likely]]
+      return S_OK;
+    // Nullable native factories supply no failure reason. Losing ordered queue
+    // work is terminal, but does not establish a specific OOM cause.
+    device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+    return DXGI_ERROR_DEVICE_REMOVED;
+  }
+
+  HRESULT
   NewCommandBuffer(WMT::CommandBuffer &buffer) {
     buffer = encoder_execution_status_
                  ? queue_.commandBufferWithErrorOptions(WMTCommandBufferErrorOptionEncoderExecutionStatus)
                  : queue_.commandBuffer();
-    if (buffer)
-      return S_OK;
-    // Metal's nullable factory supplies no failure reason. Losing ordered
-    // queue work is terminal, but does not establish a specific OOM cause.
-    device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
-    return DXGI_ERROR_DEVICE_REMOVED;
+    return CheckSubmissionObject(buffer);
   }
 
   WMT::RenderPipelineState
@@ -886,6 +891,8 @@ public:
           if (sparse_mapping_queue_ && sparse_buffer) {
             const auto linear_buffer = linear->buffer->current()->buffer();
             auto encoder = cmdbuf.blitCommandEncoder();
+            if (FAILED(CheckSubmissionObject(encoder)))
+              return;
             encoder.waitForFence(fence_);
             for (size_t index = 0; index < tile_indices.size(); index++) {
               const UINT tile_index = tile_indices[index];
@@ -961,6 +968,8 @@ public:
 
             const auto linear_buffer = linear->buffer->current()->buffer();
             auto encoder = cmdbuf.blitCommandEncoder();
+            if (FAILED(CheckSubmissionObject(encoder)))
+              return;
             encoder.waitForFence(fence_);
             for (size_t index = 0; index < tile_indices.size(); index++) {
               const UINT tile_index = tile_indices[index];
@@ -1036,6 +1045,8 @@ public:
 
           const auto linear_buffer = linear->buffer->current()->buffer();
           auto encoder = cmdbuf.blitCommandEncoder();
+          if (FAILED(CheckSubmissionObject(encoder)))
+            return;
           encoder.waitForFence(fence_);
           for (size_t index = 0; index < resolved_tiles.size(); index++) {
             const auto &tile = resolved_tiles[index];
@@ -1129,6 +1140,8 @@ public:
             info.render_target_height = data->height;
 
             auto encoder = cmdbuf.renderCommandEncoder(info);
+            if (FAILED(CheckSubmissionObject(encoder)))
+              return;
             LabelEncoder(encoder, recording_id, data->id, "ClearPartial");
             encoder.waitForFence(fence_, WMTRenderStageFragment);
 
@@ -1222,6 +1235,8 @@ public:
             }
             info.render_target_array_length = data->array_length;
             auto encoder = cmdbuf.renderCommandEncoder(info);
+            if (FAILED(CheckSubmissionObject(encoder)))
+              return;
             LabelEncoder(encoder, recording_id, data->id, "Clear");
             encoder.waitForFence(fence_, WMTRenderStageFragment);
             encoder.updateFence(fence_, WMTRenderStageFragment);
@@ -1281,6 +1296,8 @@ public:
               render_pass_info.visibility_buffer = data->visibility_buffer.handle;
            }
           auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
+          if (FAILED(CheckSubmissionObject(encoder)))
+            return;
           LabelEncoder(encoder, recording_id, data->id, "Render");
           encoder.waitForFence(fence_, data->use_geometry ? WMTRenderStagePreRaster : WMTRenderStageVertex);
           if (auto uses = submission.descriptor_resource_uses.find(current);
@@ -1295,6 +1312,8 @@ public:
          case EncoderType::Blit: {
            auto data = static_cast<BlitEncoderData *>(current);
            auto encoder = cmdbuf.blitCommandEncoder();
+           if (FAILED(CheckSubmissionObject(encoder)))
+             return;
            LabelEncoder(encoder, recording_id, data->id, "Blit");
            encoder.waitForFence(fence_);
           encoder.encodeCommands(&data->cmd_head);
@@ -1305,6 +1324,8 @@ public:
         case EncoderType::Compute: {
           auto data = static_cast<ComputeEncoderData *>(current);
            auto encoder = cmdbuf.computeCommandEncoder(false);
+           if (FAILED(CheckSubmissionObject(encoder)))
+             return;
            LabelEncoder(encoder, recording_id, data->id, "Compute");
            encoder.waitForFence(fence_);
           if (auto uses = submission.descriptor_resource_uses.find(current);
@@ -1319,12 +1340,9 @@ public:
         case EncoderType::AccelerationStructure: {
           auto data = static_cast<AccelerationStructureEncoderData *>(current);
           auto encoder = cmdbuf.accelerationStructureCommandEncoder();
+          if (FAILED(CheckSubmissionObject(encoder)))
+            return;
           LabelEncoder(encoder, recording_id, data->id, "AccelerationStructure");
-          if (!encoder) {
-            WARN("D3D12 acceleration-structure translation could not create an encoder");
-            translation_failed = true;
-            break;
-          }
 
           const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
           auto use_resource = [&](obj_handle_t resource, WMTResourceUsage usage) {
@@ -1420,6 +1438,8 @@ public:
           info.colors[0].resolve_texture = data->dst.texture();
 
            auto encoder = cmdbuf.renderCommandEncoder(info);
+           if (FAILED(CheckSubmissionObject(encoder)))
+             return;
            LabelEncoder(encoder, recording_id, data->id, "Resolve");
            encoder.waitForFence(fence_, WMTRenderStageFragment);
           encoder.updateFence(fence_, WMTRenderStageFragment);
@@ -1431,6 +1451,8 @@ public:
            auto data = static_cast<TemporalUpscaleData *>(current);
 
            auto begin_scaler = cmdbuf.blitCommandEncoder();
+           if (FAILED(CheckSubmissionObject(begin_scaler)))
+             return;
            LabelEncoder(begin_scaler, recording_id, data->id, "TemporalBegin");
           begin_scaler.waitForFence(fence_);
           begin_scaler.updateFence(data->scaler->fence());
@@ -1442,6 +1464,8 @@ public:
           );
 
            auto end_scaler = cmdbuf.blitCommandEncoder();
+           if (FAILED(CheckSubmissionObject(end_scaler)))
+             return;
            end_scaler.waitForFence(data->scaler->fence());
            LabelEncoder(end_scaler, recording_id, data->id, "TemporalEnd");
           end_scaler.updateFence(fence_);
@@ -1458,6 +1482,8 @@ public:
           attachment.start_of_encoder_sample_index = data->sample_index;
            attachment.end_of_encoder_sample_index = ~0ull;
            auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&attachment, 1);
+           if (FAILED(CheckSubmissionObject(encoder)))
+             return;
            LabelEncoder(encoder, recording_id, data->id, "SampleTimestamp");
            encoder.waitForFence(fence_);
 
@@ -1589,6 +1615,8 @@ public:
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&attachment, 1);
+    if (FAILED(CheckSubmissionObject(encoder)))
+      return DXGI_ERROR_DEVICE_REMOVED;
     encoder.waitForFence(fence_);
 
     wmtcmd_blit_fillbuffer fill = {};

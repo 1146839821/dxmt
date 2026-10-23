@@ -402,6 +402,28 @@ are NOT_RUN. Capabilities and ABI are unchanged; no new src/d3d12 files.
 Evidence, exact commands, hashes, environment, raw p50/p95 and rollback notes:
 `../dxmt-test/n13-command-buffer-20261023/N13-command-buffer.md`.
 
+### N13 — nullable native encoder creation, 2026-10-23
+
+All fourteen queue-owned native encoder factories now use the same checked
+submission-object policy before encoding. Nil marks generic device removal and
+returns through existing translation rollback; the AS-specific late check is
+removed. No new state, lock, allocation, encoder or src/d3d12 file.
+
+The same existing runner on 391c720a/fixed DLLs reproduces six injected modes in
+both diagnostics settings: 12 expected failures old, 12 passes fixed, including
+late failure after a valid blit. Checks include zero commits, allocator/recording
+retirement and fence notification. Nineteen adjacent processes retain GPU copy,
+query, barrier, ownership and SM6 descriptor oracles. AS/sparse/temporal failure
+injection and sustained exhaustion are NOT_RUN; public capabilities unchanged.
+
+Unannotated checks regress the original mixed conservative submit scene +9.67%
+and +9.06% on confirmation; an isolated control does not erase those results.
+A likely-success hint gives 188.45→186.65 us on the original mixed scene.
+Other process variance remains high (including query); overall performance is
+INCONCLUSIVE. No general speedup claim. Exact evidence, all three paired tables,
+commands, limits and environment: external
+`../dxmt-test/n13-encoder-failure-20261023/N13-encoder-failure.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
