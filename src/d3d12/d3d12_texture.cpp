@@ -111,22 +111,10 @@ PopulateWMTTextureInfo(MTLD3D12Device *Device, WMTTextureInfo &InfoOut, const D3
   InfoOut.pixel_format = Format.PixelFormat;
 
   if (Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) {
-    switch (Format.PixelFormat) {
-    case WMTPixelFormatR32Uint:
-    case WMTPixelFormatR32Sint:
-    case WMTPixelFormatR32Float:
+    if (Desc.Format == DXGI_FORMAT_R32_TYPELESS)
       InfoOut.pixel_format = WMTPixelFormatDepth32Float;
-      break;
-    case WMTPixelFormatR16Uint:
-    case WMTPixelFormatR16Sint:
-    case WMTPixelFormatR16Float:
-    case WMTPixelFormatR16Unorm:
-    case WMTPixelFormatR16Snorm:
+    else if (Desc.Format == DXGI_FORMAT_R16_TYPELESS)
       InfoOut.pixel_format = WMTPixelFormatDepth16Unorm;
-      break;
-    default:
-      break;
-    }
   }
 
   if (FAILED(ValidateTextureResourceCapabilities(Desc, Device->GetMTLPixelFormatCapability(InfoOut.pixel_format))))

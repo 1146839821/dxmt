@@ -663,6 +663,23 @@ ValidateTextureResourceFlags(const D3D12_RESOURCE_DESC &Desc) {
 
   if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D && allow_depth_stencil)
     return E_INVALIDARG;
+  if (allow_depth_stencil) {
+    // Typed color/component views cannot acquire depth semantics from their
+    // native backing. Only depth formats and their fully typeless groups qualify.
+    switch (Desc.Format) {
+    case DXGI_FORMAT_D16_UNORM:
+    case DXGI_FORMAT_D32_FLOAT:
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:
+    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+    case DXGI_FORMAT_R16_TYPELESS:
+    case DXGI_FORMAT_R32_TYPELESS:
+    case DXGI_FORMAT_R24G8_TYPELESS:
+    case DXGI_FORMAT_R32G8X24_TYPELESS:
+      break;
+    default:
+      return E_INVALIDARG;
+    }
+  }
   if (allow_render_target && allow_depth_stencil)
     return E_INVALIDARG;
   if (allow_depth_stencil && (allow_unordered_access || allow_simultaneous_access))

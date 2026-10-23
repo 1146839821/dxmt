@@ -1136,6 +1136,51 @@ loaded-path/hash manifest: `../dxmt-test/n08-rgb96-fix-20261024/N08-rgb96-fix.md
 Next node prioritizes remaining Device attachment gaps against current HEAD;
 already committed MSAA/fence/InfoQueue/split slices are not reimplemented here.
 
+### N08 — logical depth/stencil format eligibility, 2026-10-24
+
+Base7cda7564; continues Device attachment's format consistency priority. Confirmed
+12 invalid typed-color/component formats reported no DEPTH_STENCIL but still
+returned valid allocation/footprint and committed/placed empty-output S_FALSE.
+Native R16/R32 promotion and depth-backed component mappings hid missing logical
+eligibility. Existing shared ValidateTextureResourceFlags now permits only4 typed
+depth formats or4 fully typeless depth groups with ALLOW_DEPTH_STENCIL. Native
+promotion keys only R16_TYPELESS/R32_TYPELESS. No creation-only duplicate guard,
+new format registry/cache or production file. Microsoft resource-flags source
+freshly saved; pinned upstream a148782 broad promotion not copied.
+
+Same final existing resource PE: baseline28 cases has16 pass/12 fail(exit1);
+candidate28/28 twice(exit0).8 valid depth/typeless and8 flagless color controls
+preserve actual committed/placed creation;12 negatives reject footprint,allocation,
+null-output and actual output-pointer creation. Invalid native factories are not
+called on red baseline. Full resource/feature/command-list/enhanced runners pass,
+as do format-dimension and RGB96 GPU regressions. --copy-staging multi passes
+D32S8 depth/stencil GPU readback,3 mips/2 slices,2 rounds,preservation and in-flight
+checks. R16/R32 typeless rendered shader paths are not established by metadata.
+Final Meson build and no-private device/helper/texture syntax checks exit0;
+full no-private link/runtime,native Windows,D3D11 rendered frame andT4 NOT_RUN.
+Initial missing staged winemetal loader failure retained separately,not counted
+as bug reproduction. Exact current DLL paths and hashes recorded externally.
+
+AB/BA/AB18 processes all exit0; median of3 process p50/p95 values,us:
+
+| Probe | Before | Final | Change |
+|---|---:|---:|---:|
+| Recording |3091.45/3378.40|3080.65/3206.00|-0.35%/-5.10%|
+| Ordinary submit |111.60/147.00|110.00/141.80|-1.43%/-3.54%|
+|120000 format queries |3140.85/3200.20|3466.85/3554.20|+10.38%/+11.06%|
+
+Per side72 record/180 submit/72 format batches. Format query code/masks unchanged;
+observed+11.06% p95 (~2.95ns/query averaged in batch) has INCONCLUSIVE cause,not
+silently called noise. No causal speedup or QI rollback. New switch only on depth
+flag descriptors; no lock/allocation/per-command work. Historical/global performance
+gate remains OPEN. Public/private/WMT ABI,legal native layouts,GPU scheduling,
+capability masks and FL/SM/Options/Tiers unchanged; EnhancedBarriersSupported FALSE.
+Device5–10 grouping/legacy rejections preserved. User .gitignore untouched; no push.
+M1Max/Apple7,macOS27.0.1,Xcode27.1(requested26 differs),MSC4.0.1,matched Wine11
+x64/Rosetta,bundled clang23.1.1. Full file list,root,issue table,official/upstream
+snapshots,exact commands/exits,hashes,performance and limitations:
+`../dxmt-test/n08-depth-format-flags-20261024/N08-depth-format-flags.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

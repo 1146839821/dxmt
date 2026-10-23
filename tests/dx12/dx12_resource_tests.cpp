@@ -728,9 +728,110 @@ bool CheckTextureFormatDimensions(ID3D12Device *device, bool footprints_only) {
   return good;
 }
 
+bool CheckDepthFormatFlags(ID3D12Device *device) {
+  D3D12_HEAP_PROPERTIES properties = {};
+  properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+  properties.CreationNodeMask = properties.VisibleNodeMask = 1;
+  D3D12_HEAP_DESC heap_desc = {};
+  heap_desc.SizeInBytes = 4 * 1024 * 1024;
+  heap_desc.Properties = properties;
+  ID3D12Heap *heap = nullptr;
+  if (!CheckHR("Depth format heap", device->CreateHeap(&heap_desc, IID_PPV_ARGS(&heap))))
+    return false;
+  bool good = true;
+  const auto check = [&](DXGI_FORMAT format, bool depth, bool valid) {
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = desc.Height = 4;
+    desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+    desc.Format = format;
+    desc.Flags = depth ? D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL
+                       : D3D12_RESOURCE_FLAG_NONE;
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {format, {}, {}};
+    const HRESULT query = device->CheckFeatureSupport(
+        D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support));
+    const auto allocation = device->GetResourceAllocationInfo(0, 1, &desc);
+    UINT64 footprint = 0;
+    device->GetCopyableFootprints(&desc, 0, 1, 0, nullptr, nullptr, nullptr,
+                                  &footprint);
+    const HRESULT committed = device->CreateCommittedResource(
+        &properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON,
+        nullptr, __uuidof(ID3D12Resource), nullptr);
+    const HRESULT placed = device->CreatePlacedResource(
+        heap, 0, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+        __uuidof(ID3D12Resource), nullptr);
+    bool pass =
+        query == S_OK &&
+        (valid || !(support.Support1 & D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL));
+    pass &= valid ? allocation.SizeInBytes != UINT64_MAX &&
+                        footprint != UINT64_MAX && committed == S_FALSE &&
+                        placed == S_FALSE
+                  : allocation.SizeInBytes == UINT64_MAX &&
+                        footprint == UINT64_MAX && committed == E_INVALIDARG &&
+                        placed == E_INVALIDARG;
+    // Do not send an invalid descriptor into Metal on a red baseline. Once all
+    // metadata rejects it, verify real output-pointer creation rejects it too.
+    if (pass) {
+      ID3D12Resource *resource = nullptr;
+      HRESULT hr = device->CreateCommittedResource(
+          &properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON,
+          nullptr, IID_PPV_ARGS(&resource));
+      pass &= valid ? hr == S_OK && resource : hr == E_INVALIDARG && !resource;
+      if (resource)
+        resource->Release();
+      resource = nullptr;
+      hr = device->CreatePlacedResource(heap, 0, &desc,
+                                        D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                        IID_PPV_ARGS(&resource));
+      pass &= valid ? hr == S_OK && resource : hr == E_INVALIDARG && !resource;
+      if (resource)
+        resource->Release();
+    }
+    std::cout << "depth-format format=" << format << " depth=" << depth
+              << " valid=" << valid << " support_ds="
+              << bool(support.Support1 & D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL)
+              << " allocation=" << allocation.SizeInBytes
+              << " footprint=" << footprint << " committed=0x" << std::hex
+              << static_cast<UINT>(committed) << " placed=0x"
+              << static_cast<UINT>(placed) << std::dec << " pass=" << pass
+              << "\n";
+    good &= pass;
+  };
+  for (const auto format :
+       {DXGI_FORMAT_D16_UNORM, DXGI_FORMAT_D32_FLOAT,
+        DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
+        DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R32_TYPELESS,
+        DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_R32G8X24_TYPELESS})
+    check(format, true, true);
+  for (const auto format :
+       {DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16_SNORM,
+        DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16_SINT, DXGI_FORMAT_R32_FLOAT,
+        DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_SINT}) {
+    check(format, true, false);
+    check(format, false, true);
+  }
+  for (const auto format :
+       {DXGI_FORMAT_R24_UNORM_X8_TYPELESS, DXGI_FORMAT_X24_TYPELESS_G8_UINT,
+        DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS,
+        DXGI_FORMAT_X32_TYPELESS_G8X24_UINT})
+    check(format, true, false);
+  heap->Release();
+  return good;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && !std::strcmp(argv[1], "--depth-format-flags")) {
+    ID3D12Device *device = nullptr;
+    if (!CheckHR("D3D12CreateDevice",
+                 D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                   IID_PPV_ARGS(&device))))
+      return 1;
+    const bool good = CheckDepthFormatFlags(device);
+    device->Release();
+    return good ? 0 : 1;
+  }
   if (argc == 2 && (!std::strcmp(argv[1], "--rgb96-copy") ||
                     !std::strcmp(argv[1], "--rgb96-copy-control") ||
                     !std::strcmp(argv[1], "--rgb96-copy-minimal") ||
