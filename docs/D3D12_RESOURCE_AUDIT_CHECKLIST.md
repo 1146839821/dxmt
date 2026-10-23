@@ -579,6 +579,31 @@ raw results and keep the overall performance gate OPEN; no additional retry
 matrix or unrelated performance patch is included. Exact identities, commands,
 limits and evidence: `../dxmt-test/n02-query-interface-20261023/N02-query-interface.md`.
 
+### N02 — grouped-query recording CPU follow-up, 2026-10-23
+
+One bounded diagnostic uses the previously validated named-thread CPU probe,
+the exact before/after DLLs from the grouped-query slice and identical probe/
+companion DLLs. HUD remains enabled. Sleep/busy controls distinguish wall delay
+from recording-thread user+system CPU; eight processes pass original GPU/fence
+oracles, with 144 measured recording observations and sixteen control samples.
+The existing small-blit runner source is unchanged from fcaf7a05 to 82a9660e.
+
+Three alternating pairs give median-of-process CPU p50 3085.5 -> 3085.5 us
+(0.00%) and CPU p95 3301 -> 3255 us (-1.39%). Diagnostic wall p50/p95 changes
+-0.31%/-4.65%. The third pair still has a higher after CPU p95; no samples or
+pairs are dropped. CPU snapshots bracket more than the copy-only QPC loop,
+include pipe/wakeup/publication cost and change pacing. They establish neither
+an exact stall duration nor a scheduler/driver cause. These results do not
+cancel the original uninstrumented +10.54% recording-p95 alert or the separate
+ordinary-submit alert; overall performance gate stays OPEN.
+
+No production/test source change or speculative QI optimization is justified.
+Keep the user-requested grouped interfaces and lifetime checks. Stop repeating
+this handshake matrix; further attribution needs a different causal measurement.
+Evidence is appended to `../dxmt-test/n02-query-interface-20261023/N02-query-interface.md`;
+exact identities, command, per-process results and raw logs are in
+`../dxmt-test/n02-query-cpu-20261023/`. This closes only the diagnostic slice.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
