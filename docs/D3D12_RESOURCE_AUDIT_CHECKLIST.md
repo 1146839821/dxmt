@@ -781,6 +781,95 @@ Enhanced Barrier split state, then format consistency; capability remains FALSE.
 Commands, source snapshot, manifests, raw logs and scope:
 `../dxmt-test/n02-infoqueue-break-20261024/N02-infoqueue-break.md`.
 
+### N12 — enhanced split execution-order diagnosis and owner design, 2026-10-24
+
+Baseline6458896f; production is unchanged in this diagnostic slice. The Device
+attachment explicitly asks for failing tests, root cause and a minimal design
+before a larger split-state ownership change. Existing enhanced-barrier smoke
+passes but accepts Global Split and never submits a reverse-recorded texture
+pair, so its old PASS is not a specification conformance result.
+
+New opt-in `dx12_enhanced_barriers --split-order-probe <mode>` uses an isolated
+Device per process. Eight modes plus the existing runner were built and run.
+EnhancedBarriersSupported remains FALSE; these probe the internal compatibility
+path and cannot justify feature promotion.
+
+| Status | Input / result | Baseline source and severity |
+|---|---|---|
+| Confirmed | `reversed`: END recorded first, planned execution BEGIN/END; END Close=0x80004005 instead of S_OK | command_list.cpp:2106; device.cpp:594; medium latent compatibility bug |
+| Confirmed | `threaded-reversed`: deterministic END-first on two CPU threads gives the same failure | same owner; not overlapping-thread stress |
+| Confirmed | `reset-isolation`: A-BEGIN/B-END, then C-BEGIN; Reset(A) cancels C and D-END Close fails | command_list.cpp:976,2084; device.cpp:615; medium lifetime/state isolation bug |
+| Confirmed | `clear-state`: BEGIN/ClearState/END makes Close fail | command_list.cpp:1461; medium pipeline-state/recorded-command confusion |
+| Confirmed | `global`: paired classic Global Split Close=S_OK, expected rejection | command_list.cpp:6640; medium validation bug |
+| Suspected contract issue | `disjoint`: BEGIN mip0/mip1, END mip0/mip1 rejected as same-resource overlap | device.cpp:579; current spec also says no intervening same-resource barriers; finer-grained legality needs native/spec clarification |
+| Not reproduced | `ordered`, `same-list` | both texture copy -> split layout transition -> readback pass, Fence complete, Device S_OK |
+
+Microsoft spec snapshot confirms cross-Execute texture splits and forbids
+classic Global Split. Cross-Execute buffer splits are effectively unused with
+warnings, not equivalent to persistent texture layout transitions. ClearState
+documentation describes unbinding/resetting pipeline state. Native Windows
+comparison remains NOT_RUN. Source snapshots and exact commands are external.
+
+The root is timing/ownership, not the equality predicate alone. Device BEGIN
+immediately mutates a global container and takes a private resource reference;
+END consumes it while recording, before a queue or execution order is known.
+The originating list retains its stale local signature after another list's
+END consumes it. Reset then cancels whichever later identical entry it finds.
+Submission failure also occurs after this irreversible record-time mutation.
+
+```text
+GOAL: Interpret split/layout events in command execution order (INV-03/04/07/08/15).
+CURRENT PATH: Barrier -> Device global pending -> Close; queue validates only completed transitions.
+PLAN A: Keep Device record-time pairing; rejected because CPU order and Reset ownership remain wrong.
+PLAN B: Record immutable ordered events; pair in existing submission validation/admission.
+SELECTION: Extend the existing transition stream/context; no second resource-state model or scheduler.
+FILES: Existing device.hpp, device.cpp, command_list.cpp, command_queue.cpp plus existing runner.
+OWNER: Recording owns events/references; queue execution timeline owns committed pending texture splits.
+COMMIT: Stage pending changes; publish allocation-free inside existing successful commit critical section.
+CLEANUP: Reset/failed Close discard only local recording; failure/removal/queue teardown release staged/pending refs.
+PERF: No global recording lock; O(recorded events + touched ranges), no whole-heap/resource sweep.
+PROOF: Reverse order, replay, cross-Execute texture, failure rollback, queues/Fences, ranges, GPU readback.
+CAPABILITY: Keep EnhancedBarriersSupported FALSE; no public ABI/WMT/layout change or new production file.
+```
+
+Implementation constraints for the next N12 slice:
+
+1. Preserve a single ordered transition/event stream, including ordinary
+   barriers between split halves. Close validates local structure and inputs;
+   an END that may be supplied by an earlier-executing list cannot fail merely
+   because BEGIN has not been recorded on another CPU thread.
+2. Reuse queue admission and its commit mutex. Validate candidate state in
+   ppCommandLists order, seeded from that timeline's committed pending texture
+   splits. Keep buffer/simultaneous-access boundary behavior distinct. Matching
+   must include resource, access/layout and normalized range; do not silently
+   broaden disjoint-range legality before resolving the spec ambiguity above.
+3. Move pending publication into CommitSubmissionLocked's existing state mutex
+   critical section alongside native commit/queue insertion; post-return
+   publication would race removal and could resurrect cleared state. Preallocate
+   all candidate storage. Failed translation/admission leaves old pending state
+   intact; removal makes it terminal and releases references without new work.
+4. Pending records use owned private resource references and the existing weak
+   removal-listener arrangement, without a queue/device reference cycle. List
+   Reset never edits executed pending state. ClearState must leave recorded
+   barrier events intact. Remove Device's global recording container, its four
+   private split methods, duplicated signature matcher and local cancellation
+   list/submitted flag together, rather than retain competing owners.
+5. Prove queue identity and Fence-order rules before allowing cross-queue
+   consumption; Device-global CPU arrival is not evidence of synchronization.
+   Add recording/submission-failure, replay and actual overlapping-recording
+   cases before declaring the implementation fixed. Correct the existing
+   Global Split positive fixture when production rejection lands.
+
+New probe build and existing enhanced/feature/command-list runners pass;
+6 opt-in modes intentionally exit1 exposing the issues above. Only ordered and
+same-list reach GPU readback. Cross-queue, fault rollback, native Windows,
+full no-private runtime and true overlapping-thread stress are NOT_RUN in this
+slice. Performance NOT_RUN: production DLL is byte-identical to the previous
+validated candidate. Overall correctness/performance gate stays OPEN. No ABI,
+capability, scheduler or layout changes. This is a diagnosis/design commit,
+not a claim that Enhanced Barrier correctness has been repaired.
+Evidence: `../dxmt-test/n12-split-order-20261024/N12-split-order.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
