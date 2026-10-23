@@ -527,6 +527,33 @@ this does not establish the cause of earlier conditional staging regressions.
 Exact hashes, all timing variants, costs and limits:
 `../dxmt-test/n10-identity-query-20261023/N02-device-identity.md`.
 
+### N13 — ordinary submission tail intervals, 2026-10-23
+
+Diagnostic-only follow-up to the open ordinary-submit performance alert; no
+production source, ABI, owner or capability changes. The older probe's
+`collector_us` measures an independent post-wait collector invocation, not
+collection inside timed ExecuteCommandLists. External scoped IAT timing now
+measures native imports and the prefix before autorelease-pool creation, which
+includes validation, commit-lock/admission and the actual resource collector.
+
+Four processes pass existing GPU/descriptor/fence/lifetime assertions (700
+samples). After ten warmup rounds, each ordinary scene has sixty samples and
+identical native call counts on both DLLs (three compute and two blit factories).
+Current mixed outer p50/p95 is 189.75/267.00 us; pre-capacity baseline mixed is
+182.75/226.50 us. Current ordinary-only is 183.50/229.70 us, yet one native
+blit-factory interval reaches 203.9 us. HUD-off mixed remains 183.40/266.20 us.
+The ordinary prefix p95 is 5.7–9.1 us across controls. Multiple native factory,
+encoding and cleanup intervals carry tails on both versions; these observations
+do not justify removing queue synchronization or resource/lifetime checks.
+
+These instrumented wall intervals include dispatch/scheduling and probe overhead;
+residual time includes bookkeeping and unwrapped operations. Prefix and native
+intervals overlap, and separate percentiles cannot be summed. Results are not
+acceptance timings. Mixed pacing and HUD do not individually eliminate tails;
+the root of the earlier uninstrumented +10.17% p95 alert remains unproven and
+the overall performance gate remains OPEN. Exact intervals, identities, commands,
+limits and raw evidence: `../dxmt-test/n13-submit-tail-20261023/N13-submit-tail.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
