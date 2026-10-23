@@ -199,8 +199,9 @@ void SetSrvDesc(D3D12_SHADER_RESOURCE_VIEW_DESC &desc, UINT index) {
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 2) {
-    std::cerr << "usage: dx12_texture_dimensions <shader.cso>\n";
+  const bool typeless = argc == 3 && !std::strcmp(argv[2], "--typeless");
+  if (argc != 2 && !typeless) {
+    std::cerr << "usage: dx12_texture_dimensions <shader.cso> [--typeless]\n";
     return 2;
   }
 
@@ -301,7 +302,7 @@ int main(int argc, char **argv) {
     texture_descs[i].Height = 1;
     texture_descs[i].DepthOrArraySize = 1;
     texture_descs[i].MipLevels = 1;
-    texture_descs[i].Format = format;
+    texture_descs[i].Format = typeless ? DXGI_FORMAT_R8G8B8A8_TYPELESS : format;
     texture_descs[i].SampleDesc.Count = 1;
     texture_descs[i].Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
   }
@@ -360,7 +361,8 @@ int main(int argc, char **argv) {
     return 1;
   device.ptr->CreateUnorderedAccessView(output.ptr, nullptr, &uav_desc, output_cpu);
 
-  sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+  sampler_desc.Filter = typeless ? D3D12_FILTER_MIN_MAG_MIP_LINEAR
+                                 : D3D12_FILTER_MIN_MAG_MIP_POINT;
   sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
   sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
   sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -464,6 +466,9 @@ int main(int argc, char **argv) {
     }
   }
   readback.ptr->Unmap(0, nullptr);
+  std::cout << "storage="
+            << (typeless ? "typeless filter=linear" : "typed filter=point")
+            << "\n";
   std::cout << "DXIL texture dimensions readback passed: 11,22,33,44,55,66,77,88,99\n";
   result = true;
   return result ? 0 : 1;

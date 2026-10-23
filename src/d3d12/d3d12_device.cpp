@@ -1048,11 +1048,30 @@ public:
                (static_cast<int>(capability_it->second) & static_cast<int>(capability));
       };
 
-      out->Support1 = D3D12_FORMAT_SUPPORT1_TEXTURE1D | D3D12_FORMAT_SUPPORT1_TEXTURE2D |
-                      D3D12_FORMAT_SUPPORT1_TEXTURE3D | D3D12_FORMAT_SUPPORT1_TEXTURECUBE |
-                      D3D12_FORMAT_SUPPORT1_SHADER_LOAD | D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE |
-                      D3D12_FORMAT_SUPPORT1_MIP | D3D12_FORMAT_SUPPORT1_CAST_WITHIN_BIT_LAYOUT;
+      // Storage dimensions and typed-view operations are separate DXGI contracts.
+      // Match the existing texture path's 1D exclusions; depth/stencil has no 3D view.
+      const bool depth_or_stencil = DepthStencilPlanarFlags(format_desc.PixelFormat) != 0;
+      out->Support1 = D3D12_FORMAT_SUPPORT1_TEXTURE2D | D3D12_FORMAT_SUPPORT1_TEXTURECUBE | D3D12_FORMAT_SUPPORT1_MIP |
+                      D3D12_FORMAT_SUPPORT1_CAST_WITHIN_BIT_LAYOUT;
+      if (!(format_desc.Flag & (MTL_DXGI_FORMAT_BC | MTL_DXGI_FORMAT_DEPTH_PLANER | MTL_DXGI_FORMAT_STENCIL_PLANER)))
+        out->Support1 |= D3D12_FORMAT_SUPPORT1_TEXTURE1D;
+      if (!depth_or_stencil)
+        out->Support1 |= D3D12_FORMAT_SUPPORT1_TEXTURE3D;
       out->Support2 = D3D12_FORMAT_SUPPORT2_NONE;
+
+      // The two 64-bit plane SRV mappings also carry TYPELESS internally, but
+      // their selected component is typed. Do not confuse them with storage-only formats.
+      if ((format_desc.Flag & MTL_DXGI_FORMAT_TYPELESS) && out->Format != DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS &&
+          out->Format != DXGI_FORMAT_X32_TYPELESS_G8X24_UINT)
+        return S_OK;
+
+      const bool depth_target = has_capability(FormatCapability::DepthStencil);
+      if (!depth_target) {
+        out->Support1 |= D3D12_FORMAT_SUPPORT1_SHADER_LOAD;
+        // SHADER_SAMPLE denotes filtering support, not just point sampling/Load.
+        if (has_capability(FormatCapability::Filter))
+          out->Support1 |= D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE;
+      }
 
       if (format_desc.AttributeFormat != WMTAttributeFormatInvalid)
         out->Support1 |= D3D12_FORMAT_SUPPORT1_IA_VERTEX_BUFFER;
@@ -1071,12 +1090,15 @@ public:
         out->Support1 |= D3D12_FORMAT_SUPPORT1_RENDER_TARGET;
       if (has_capability(FormatCapability::Blend))
         out->Support1 |= D3D12_FORMAT_SUPPORT1_BLENDABLE;
-      if (has_capability(FormatCapability::DepthStencil))
-        out->Support1 |= D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL | D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE_COMPARISON;
-      if (has_capability(FormatCapability::Resolve))
+      if (depth_target)
+        out->Support1 |= D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL;
+      if (!depth_target && has_capability(FormatCapability::Resolve))
         out->Support1 |= D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RESOLVE;
-      if (has_capability(FormatCapability::MSAA))
-        out->Support1 |= D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RENDERTARGET | D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD;
+      if (has_capability(FormatCapability::MSAA)) {
+        out->Support1 |= D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RENDERTARGET;
+        if (!depth_target)
+          out->Support1 |= D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD;
+      }
       if (has_capability(FormatCapability::TextureBufferRead) || has_capability(FormatCapability::TextureBufferReadWrite))
         out->Support2 |= D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD;
       if (has_capability(FormatCapability::TextureBufferWrite) || has_capability(FormatCapability::TextureBufferReadWrite))

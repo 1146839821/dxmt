@@ -926,6 +926,54 @@ Device interface grouping, capability claims and shared Wine untouched.
 Evidence: `../dxmt-test/n12-split-execution-20261024/N12-split-execution.md`;
 exact commands/results/environment/hashes in adjacent JSON and logs.
 
+### N02 — separate storage and typed format support, 2026-10-24
+
+Base a262662e. FORMAT_SUPPORT previously inherited typed shader/RT/UAV/atomic
+operations from the backing Metal format even for typeless storage, unconditionally
+reported filtered sampling, and advertised BC1D and depth/stencil3D. Assign storage
+dimensions first, return storage-only masks for fully typeless formats, distinguish
+the two internal TYPELESS component-view mappings, gate filtered sampling on the
+existing Filter capability, and separate DSV target from shader/MSAA load/resolve
+operations. Existing depth1D restriction is reflected honestly, not newly implemented.
+No second capability table/cache or production file; only device query branch changes.
+
+Same final PE: baseline --format-support exit1 (52/54 selected mask assertions
+fail); candidate all54 pass. Covers22 typeless,19 integer,4 DSV,4 component-view,
+3 BC,RGBA8,UNKNOWN plus null/size/planar-invalid cases and BC1D committed creation /
+allocation-info contradiction. Eleven correctness processes: expected baseline1,
+other10 exit0 (8 candidate,2 baseline GPU). Full feature/resource/command-list/
+enhanced runners and updated descriptor/GPU submit probe pass API/shader validation.
+Both DLLs pass existing nine-dimension typed/point and typeless-storage/typed-view/
+linear-sampler GPU readback11..99, including MSAA. Constant samples verify the view
+path, not all filtering math. Final Meson build and no-private device TU syntax
+check pass; full no-private link/runtime, native Windows and T4 NOT_RUN.
+
+M1 Max/Apple7, macOS27.0.1, Xcode27.1 (requested26 differs), MSC4.0.1, Wine11 x64/
+Rosetta, clang23.1.1. Perf validation disabled; AB/BA/AB,18 processes exit0. Median
+of three process p50/p95 values, microseconds:
+
+| Scenario / metric | Before p50 / p95 (us) | After p50 / p95 (us) | Change p50 / p95 |
+|---|---:|---:|---:|
+| N13_FULL / submit_us | 140.15 / 188.40 | 140.55 / 184.20 | +0.29% / -2.23% |
+| format_cost / query_us | 2882.50 / 3001.90 | 3017.90 / 3136.20 | +4.70% / +4.47% |
+| small_blit / record_us | 3429.80 / 3671.70 | 3426.10 / 3638.80 | -0.11% / -0.90% |
+
+Each side: record72 retained samples, ordinary submit180, format72 batches of
+120000 queries (12-format mix). Format p95 increase is about1.12ns/query averaged
+within the batch, not individual-call p95. Fixed O(1) branches; no new allocation,
+lock, Metal work or native resource. No causal ordinary-path speedup claim.
+Overall performance gate remains OPEN, including prior N12 costs. Same updated
+full-submit probe as preceding N12 (collector micro-measurement NOT_RUN).
+
+Pinned upstream a148782 returns all format bits with a TODO; not adopted.
+D3D12 flag definitions and Microsoft's shared DXGI FL11 table are saved externally;
+that table is not full D3D12 conformance proof. Other dimensions/96-bit textures,
+BC3D, all typed-UAV/format/view combinations and precise depth-plane filtering
+remain OPEN. No FL/SM/Tier, COM/WMT ABI, scheduling or layout changes; format
+claims only reduced, EnhancedBarriersSupported remains FALSE. User .gitignore
+excluded. Evidence and exact commands/results/manifests:
+`../dxmt-test/n02-format-support-20261024/N02-format-support.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

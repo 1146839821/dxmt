@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cstring>
+#include <chrono>
 #include <iostream>
 #include <thread>
 #include <atomic>
@@ -308,6 +309,183 @@ bool CheckDeviceIdentity(ID3D12Device *device) {
   return good;
 }
 
+bool CheckFormatSupportContract(ID3D12Device *device) {
+  bool good = true;
+  const auto check = [&](DXGI_FORMAT format, UINT required, UINT forbidden,
+                         bool no_support2 = false) {
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT query = {
+        format, static_cast<D3D12_FORMAT_SUPPORT1>(UINT_MAX),
+        static_cast<D3D12_FORMAT_SUPPORT2>(UINT_MAX)};
+    const HRESULT hr = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                                                   &query, sizeof(query));
+    const bool pass = hr == S_OK && query.Format == format &&
+                      (query.Support1 & required) == required &&
+                      !(query.Support1 & forbidden) &&
+                      (!no_support2 || !query.Support2);
+    std::cout << "format-contract format=" << format << " hr=0x" << std::hex
+              << static_cast<UINT>(hr) << " support1=0x" << query.Support1
+              << " support2=0x" << query.Support2 << std::dec
+              << " pass=" << pass << "\n";
+    good &= pass;
+  };
+  constexpr UINT dimensions =
+      D3D12_FORMAT_SUPPORT1_TEXTURE2D | D3D12_FORMAT_SUPPORT1_TEXTURECUBE |
+      D3D12_FORMAT_SUPPORT1_MIP | D3D12_FORMAT_SUPPORT1_CAST_WITHIN_BIT_LAYOUT;
+  constexpr UINT typed_operations =
+      D3D12_FORMAT_SUPPORT1_IA_VERTEX_BUFFER |
+      D3D12_FORMAT_SUPPORT1_IA_INDEX_BUFFER | D3D12_FORMAT_SUPPORT1_SO_BUFFER |
+      D3D12_FORMAT_SUPPORT1_SHADER_LOAD | D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE |
+      D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE_COMPARISON |
+      D3D12_FORMAT_SUPPORT1_RENDER_TARGET | D3D12_FORMAT_SUPPORT1_BLENDABLE |
+      D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL |
+      D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW |
+      D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RENDERTARGET |
+      D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD |
+      D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RESOLVE |
+      D3D12_FORMAT_SUPPORT1_DISPLAY | D3D12_FORMAT_SUPPORT1_BACK_BUFFER_CAST;
+  // Typeless storage is usable through typed views, not directly as a
+  // shader/RT/UAV format.
+  for (const auto format :
+       {DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32_TYPELESS,
+        DXGI_FORMAT_R16G16B16A16_TYPELESS, DXGI_FORMAT_R32G32_TYPELESS,
+        DXGI_FORMAT_R32G8X24_TYPELESS,     DXGI_FORMAT_R10G10B10A2_TYPELESS,
+        DXGI_FORMAT_R8G8B8A8_TYPELESS,     DXGI_FORMAT_R16G16_TYPELESS,
+        DXGI_FORMAT_R32_TYPELESS,          DXGI_FORMAT_R24G8_TYPELESS,
+        DXGI_FORMAT_R8G8_TYPELESS,         DXGI_FORMAT_R16_TYPELESS,
+        DXGI_FORMAT_R8_TYPELESS,           DXGI_FORMAT_BC1_TYPELESS,
+        DXGI_FORMAT_BC2_TYPELESS,          DXGI_FORMAT_BC3_TYPELESS,
+        DXGI_FORMAT_BC4_TYPELESS,          DXGI_FORMAT_BC5_TYPELESS,
+        DXGI_FORMAT_B8G8R8A8_TYPELESS,     DXGI_FORMAT_B8G8R8X8_TYPELESS,
+        DXGI_FORMAT_BC6H_TYPELESS,         DXGI_FORMAT_BC7_TYPELESS})
+    check(format, dimensions, typed_operations, true);
+  for (const auto format :
+       {DXGI_FORMAT_R8_UINT, DXGI_FORMAT_R8_SINT, DXGI_FORMAT_R8G8_UINT,
+        DXGI_FORMAT_R8G8_SINT, DXGI_FORMAT_R8G8B8A8_UINT,
+        DXGI_FORMAT_R8G8B8A8_SINT, DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16_SINT,
+        DXGI_FORMAT_R16G16_UINT, DXGI_FORMAT_R16G16_SINT,
+        DXGI_FORMAT_R16G16B16A16_UINT, DXGI_FORMAT_R16G16B16A16_SINT,
+        DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_SINT, DXGI_FORMAT_R32G32_UINT,
+        DXGI_FORMAT_R32G32_SINT, DXGI_FORMAT_R32G32B32A32_UINT,
+        DXGI_FORMAT_R32G32B32A32_SINT, DXGI_FORMAT_R10G10B10A2_UINT})
+    check(format, dimensions | D3D12_FORMAT_SUPPORT1_SHADER_LOAD,
+          D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE |
+              D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE_COMPARISON);
+  for (const auto format :
+       {DXGI_FORMAT_D16_UNORM, DXGI_FORMAT_D32_FLOAT,
+        DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D32_FLOAT_S8X24_UINT})
+    check(format, dimensions | D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL,
+          D3D12_FORMAT_SUPPORT1_TEXTURE3D | D3D12_FORMAT_SUPPORT1_SHADER_LOAD |
+              D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE |
+              D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE_COMPARISON |
+              D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD);
+  // These contain TYPELESS in their name but have typed depth/stencil SRV
+  // components.
+  for (const auto format :
+       {DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS, DXGI_FORMAT_R24_UNORM_X8_TYPELESS,
+        DXGI_FORMAT_X32_TYPELESS_G8X24_UINT, DXGI_FORMAT_X24_TYPELESS_G8_UINT})
+    check(format, dimensions | D3D12_FORMAT_SUPPORT1_SHADER_LOAD,
+          D3D12_FORMAT_SUPPORT1_TEXTURE3D |
+              D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL);
+  for (const auto format :
+       {DXGI_FORMAT_BC1_UNORM, DXGI_FORMAT_BC3_UNORM, DXGI_FORMAT_BC7_UNORM}) {
+    check(format,
+          dimensions | D3D12_FORMAT_SUPPORT1_SHADER_LOAD |
+              D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE,
+          D3D12_FORMAT_SUPPORT1_TEXTURE1D |
+              D3D12_FORMAT_SUPPORT1_RENDER_TARGET);
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+    desc.Width = 4;
+    desc.Height = desc.DepthOrArraySize = desc.MipLevels =
+        desc.SampleDesc.Count = 1;
+    desc.Format = format;
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+    ID3D12Resource *resource = nullptr;
+    good &= CheckHR(
+        "BC 1D creation",
+        device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                        D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                        IID_PPV_ARGS(&resource)),
+        E_INVALIDARG);
+    good &= !resource;
+    Release(resource);
+    good &= device->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes ==
+            UINT64_MAX;
+  }
+  check(DXGI_FORMAT_R8G8B8A8_UNORM,
+        dimensions | D3D12_FORMAT_SUPPORT1_TEXTURE1D |
+            D3D12_FORMAT_SUPPORT1_TEXTURE3D |
+            D3D12_FORMAT_SUPPORT1_SHADER_LOAD |
+            D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE |
+            D3D12_FORMAT_SUPPORT1_RENDER_TARGET,
+        0);
+  for (const auto format :
+       {DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_FORMAT_P016, DXGI_FORMAT_YUY2,
+        static_cast<DXGI_FORMAT>(UINT_MAX)}) {
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT query = {format, {}, {}};
+    good &= CheckHR("Unsupported planar/invalid format",
+                    device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                                                &query, sizeof(query)),
+                    E_INVALIDARG);
+  }
+  check(DXGI_FORMAT_UNKNOWN, D3D12_FORMAT_SUPPORT1_BUFFER,
+        ~UINT(D3D12_FORMAT_SUPPORT1_BUFFER), true);
+  D3D12_FEATURE_DATA_FORMAT_SUPPORT query = {
+      DXGI_FORMAT_R8G8B8A8_UNORM, {}, {}};
+  good &= CheckHR("Null format data",
+                  device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                                              nullptr, sizeof(query)),
+                  E_INVALIDARG);
+  good &= CheckHR("Short format data",
+                  device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                                              &query, sizeof(query) - 1),
+                  E_INVALIDARG);
+  good &= CheckHR("Long format data",
+                  device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                                              &query, sizeof(query) + 1),
+                  E_INVALIDARG);
+  return good;
+}
+
+bool MeasureFormatSupportCost(ID3D12Device *device) {
+  constexpr DXGI_FORMAT formats[] = {DXGI_FORMAT_R8G8B8A8_UNORM,
+                                     DXGI_FORMAT_R8G8B8A8_TYPELESS,
+                                     DXGI_FORMAT_R32_UINT,
+                                     DXGI_FORMAT_R32_TYPELESS,
+                                     DXGI_FORMAT_R32_FLOAT,
+                                     DXGI_FORMAT_D16_UNORM,
+                                     DXGI_FORMAT_D32_FLOAT,
+                                     DXGI_FORMAT_D24_UNORM_S8_UINT,
+                                     DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS,
+                                     DXGI_FORMAT_X32_TYPELESS_G8X24_UINT,
+                                     DXGI_FORMAT_BC1_UNORM,
+                                     DXGI_FORMAT_BC1_TYPELESS};
+  UINT64 checksum = 0;
+  for (UINT round = 0; round < 25; round++) {
+    const auto start = std::chrono::steady_clock::now();
+    for (UINT repeat = 0; repeat < 10000; repeat++) {
+      for (auto format : formats) {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT query = {format, {}, {}};
+        if (device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &query,
+                                        sizeof(query)) != S_OK ||
+            query.Format != format)
+          return false;
+        checksum += static_cast<UINT>(query.Support1) +
+                    static_cast<UINT>(query.Support2);
+      }
+    }
+    const double elapsed = std::chrono::duration<double, std::micro>(
+                               std::chrono::steady_clock::now() - start)
+                               .count();
+    std::cout << "format_cost round=" << round
+              << " queries=120000 query_us=" << elapsed
+              << " checksum=" << checksum << "\n";
+  }
+  return checksum != 0;
+}
+
 bool
 CheckShaderModelRequest(ID3D12Device *device, UINT requested, HRESULT expected_hr, UINT expected_returned) {
   D3D12_FEATURE_DATA_SHADER_MODEL data = {
@@ -328,8 +506,20 @@ CheckShaderModelRequest(ID3D12Device *device, UINT requested, HRESULT expected_h
 
 } // namespace
 
-int
-main() {
+int main(int argc, char **argv) {
+  if (argc == 2 && (!std::strcmp(argv[1], "--format-support") ||
+                    !std::strcmp(argv[1], "--format-cost"))) {
+    ID3D12Device *device = nullptr;
+    if (!CheckHR("D3D12CreateDevice",
+                 D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                   IID_PPV_ARGS(&device))))
+      return 1;
+    const bool good = !std::strcmp(argv[1], "--format-cost")
+                          ? MeasureFormatSupportCost(device)
+                          : CheckFormatSupportContract(device);
+    Release(device);
+    return good ? 0 : 1;
+  }
   NonAdapter non_adapter;
   ID3D12Device *invalid_device = nullptr;
   if (!CheckHR(
@@ -531,6 +721,9 @@ main() {
     if (!CheckShaderModelRequest(device, requested, E_INVALIDARG, 0))
       return fail("unknown shader model query mismatch");
   }
+
+  if (!CheckFormatSupportContract(device))
+    return fail("format support contract mismatch");
 
   D3D12_FEATURE_DATA_FORMAT_SUPPORT format_support = {DXGI_FORMAT_R32_FLOAT, {}, {}};
   if (!CheckHR(
