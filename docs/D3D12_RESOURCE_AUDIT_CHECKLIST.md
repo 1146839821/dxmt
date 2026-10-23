@@ -1277,6 +1277,55 @@ matched Wine11 x64/Rosetta,clang23.1.1. User.gitignore untouched,no push. Exact
 commands,exits,issue table,source/loaded-path hashes,raw timing and limitations:
 `../dxmt-test/n09-uav-counter-contract-20261024/N09-uav-counter-contract.md`.
 
+### N09 — preserve logical texture view dimension and sampling, 2026-10-24
+
+Base41b69a18; Device attachment format/resource/view consistency, one node.
+Confirmed22 unsafe publications: logical1D/2D mismatch onSRV/UAV/RTV both ways,
+DSV2D resource using1D view; RTV/DSV sample1 vsMS andsample2 vsnonMS, each empty/
+seeded slot. Native1D->2D lowering erases logical dimension; existing shared
+ValidateTextureViewType checked only3D parity. Its four callers now pass original
+1D/1DARRAY tag; checker preserves3D and checks logical1D and MSAA parity before
+createView/publication. Single owner,constant predicates,no new state/cache/
+production file. Internal helper signature changes,noCOM/private/WMT ABI change.
+
+Initial fixture failed creating intentionally unsupported depth1D resource; not
+counted as target red. Preserve that native limitation; after fixture correction,
+final same PE baseline twice22/32 fail and candidate twice32/32 pass. Ten legal
+controls retained. Invalid views checked onCPU only; SRV MSAA invalid combinations
+not directly probed because old diagnostic can eagerly materialize native views.
+Slot preservation is local rejection policy,notWindows invalid-call conformance.
+
+Existing unmodified nine-dimensional DXIL SRV GPU oracle before/after returns
+11,22,33,44,55,66,77,88,99; covers1D/array,2D/array,Cube/array,MS/array,3D. Candidate
+typeless variant passes. Existing counter GPU copy/mutation/reuse,residency and
+readback pass before/after; fullownership,viewflags,countercontract,resource,
+feature,command-list,enhancedbarriers,28depthformats,RGB96copy,D32S8multi-plane
+multi-mip/slice/in-flight readback pass. Nineteen processes meetexpected exits:
+two baseline negative1,other17zero. FinalMeson andno-private textureTU syntax
+pass; notfullno-private linked/runtime. MicrosoftSDK sources refreshed;pinned
+upstream a148782 texture1D lowering comparison retained,notcopied asvalidation.
+
+AB/BA/AB24processes all0; medianof3processp50/p95,us:
+
+| Probe | Before p50/p95 us | After p50/p95 us | Change p50/p95 |
+|---|---:|---:|---:|
+| Ordinary submit | 110.40/158.10 | 111.10/143.90 | +0.63%/-8.98% |
+| 120000 format queries | 3374.45/3473.90 | 3308.85/3379.00 | -1.94%/-2.73% |
+| Recording | 3126.70/3275.90 | 3142.35/3243.70 | +0.50%/-0.98% |
+| 10000 mixed view writes | 1796.60/1855.90 | 1774.25/1806.20 | -1.24%/-2.68% |
+
+Eachside72record/180submit/72format/72viewbatches. No causal speedup or zero-cost
+claim; viewdeltaINCONCLUSIVE. Priorroundrelative-earlier-base recordp50~+3% is
+notresolved by this adjacentcomparison; globalperformancegateOPEN. No draw/submit
+work or newallocation/lock/heapscan. PublicFL/SM/Options/Tiers unchanged,Enhanced
+BarriersSupported FALSE; Device5–10group/legacyidentityrejections untouched.
+Full no-private runtime,nativeWindows,D3D11rendering,allnonarray/cube/castnegative
+combinations,allUAVdimensionsGPU,sparseMSviews,T4 NOT_RUN. N09/Device attachment
+notfullyclosed. M1Max/Apple7,macOS27.0.1,Xcode27.1(requested26 differs),MSC4.0.1,
+matchedWine11x64/Rosetta,clang23.1.1. User.gitignore untouched,no push. Issue table,
+root/files/commands/exits,rawtimings,source andloadedpathhashes,remaininglimits:
+`../dxmt-test/n09-texture-view-dimensions-20261024/N09-texture-view-dimensions.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

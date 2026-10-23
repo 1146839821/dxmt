@@ -649,9 +649,187 @@ bool CheckUAVCounterContract() {
   return good && null_pass;
 }
 
+bool CheckTextureViewDimensions() {
+  struct Objects {
+    ID3D12Device *device = nullptr;
+    ID3D12DescriptorHeap *heaps[3] = {};
+    ID3D12Resource *resources[8] = {};
+    ~Objects() {
+      for (auto &heap : heaps) Release(heap);
+      for (auto &resource : resources) Release(resource);
+      Release(device);
+    }
+  } o;
+  if (!CheckHR("View dimensions device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&o.device))))
+    return false;
+  const auto properties = DefaultHeap();
+  for (UINT i = 0; i < 8; i++) {
+    // Native depth/stencil 1D resources are an existing unsupported path.
+    if (i == 3)
+      continue;
+    const bool depth = (i >= 3 && i <= 5) || i == 7;
+    const bool multisample = i == 2 || i == 5;
+    auto desc = RenderTargetDescription();
+    desc.Dimension = (i == 0 || i == 3) ? D3D12_RESOURCE_DIMENSION_TEXTURE1D
+                                        : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.DepthOrArraySize = 2;
+    desc.SampleDesc.Count = multisample ? 2 : 1;
+    desc.Format = depth ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.Flags = depth         ? D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL
+                 : multisample ? D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET
+                               : D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    std::cout << "view_dimensions create_resource=" << i << std::endl;
+    if (!CheckHR("View dimensions resource",
+                 o.device->CreateCommittedResource(
+                     &properties, D3D12_HEAP_FLAG_NONE, &desc,
+                     D3D12_RESOURCE_STATE_COMMON, nullptr,
+                     IID_PPV_ARGS(&o.resources[i]))))
+      return false;
+  }
+  for (UINT i = 0; i < 3; i++) {
+    D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+    desc.Type = i == 0   ? D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV
+                : i == 1 ? D3D12_DESCRIPTOR_HEAP_TYPE_RTV
+                         : D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    desc.NumDescriptors = 1;
+    if (!CheckHR("View dimensions heap", o.device->CreateDescriptorHeap(
+                                             &desc, IID_PPV_ARGS(&o.heaps[i]))))
+      return false;
+  }
+  auto *shader = static_cast<dxmt::MTLD3D12DescriptorHeap *>(o.heaps[0]);
+  auto *rtv =
+      static_cast<dxmt::MTLD3D12RenderTargetDescriptorHeap *>(o.heaps[1]);
+  auto *dsv =
+      static_cast<dxmt::MTLD3D12RenderTargetDescriptorHeap *>(o.heaps[2]);
+  // shape: 0=logical1D array,1=logical2D array,2=logical2D MS array.
+  const auto write = [&](UINT kind, UINT resource, UINT shape) {
+    auto *texture = o.resources[resource];
+    if (kind == 0) {
+      D3D12_SHADER_RESOURCE_VIEW_DESC v = {};
+      v.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+      v.ViewDimension = shape == 0   ? D3D12_SRV_DIMENSION_TEXTURE1DARRAY
+                        : shape == 1 ? D3D12_SRV_DIMENSION_TEXTURE2DARRAY
+                                     : D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY;
+      if (shape == 0) {
+        v.Texture1DArray.MipLevels = 1;
+        v.Texture1DArray.ArraySize = 2;
+      } else if (shape == 1) {
+        v.Texture2DArray.MipLevels = 1;
+        v.Texture2DArray.ArraySize = 2;
+      } else
+        v.Texture2DMSArray.ArraySize = 2;
+      o.device->CreateShaderResourceView(
+          texture, &v, o.heaps[0]->GetCPUDescriptorHandleForHeapStart());
+    } else if (kind == 1) {
+      D3D12_UNORDERED_ACCESS_VIEW_DESC v = {};
+      v.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      v.ViewDimension = shape == 0 ? D3D12_UAV_DIMENSION_TEXTURE1DARRAY
+                                   : D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+      if (shape == 0)
+        v.Texture1DArray.ArraySize = 2;
+      else
+        v.Texture2DArray.ArraySize = 2;
+      o.device->CreateUnorderedAccessView(
+          texture, nullptr, &v,
+          o.heaps[0]->GetCPUDescriptorHandleForHeapStart());
+    } else if (kind == 2) {
+      D3D12_RENDER_TARGET_VIEW_DESC v = {};
+      v.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      v.ViewDimension = shape == 0   ? D3D12_RTV_DIMENSION_TEXTURE1DARRAY
+                        : shape == 1 ? D3D12_RTV_DIMENSION_TEXTURE2DARRAY
+                                     : D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY;
+      if (shape == 0)
+        v.Texture1DArray.ArraySize = 2;
+      else if (shape == 1)
+        v.Texture2DArray.ArraySize = 2;
+      else
+        v.Texture2DMSArray.ArraySize = 2;
+      o.device->CreateRenderTargetView(
+          texture, &v, o.heaps[1]->GetCPUDescriptorHandleForHeapStart());
+    } else {
+      D3D12_DEPTH_STENCIL_VIEW_DESC v = {};
+      v.Format = DXGI_FORMAT_D32_FLOAT;
+      v.ViewDimension = shape == 0   ? D3D12_DSV_DIMENSION_TEXTURE1DARRAY
+                        : shape == 1 ? D3D12_DSV_DIMENSION_TEXTURE2DARRAY
+                                     : D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY;
+      if (shape == 0)
+        v.Texture1DArray.ArraySize = 2;
+      else if (shape == 1)
+        v.Texture2DArray.ArraySize = 2;
+      else
+        v.Texture2DMSArray.ArraySize = 2;
+      o.device->CreateDepthStencilView(
+          texture, &v, o.heaps[2]->GetCPUDescriptorHandleForHeapStart());
+    }
+  };
+  const auto bound_texture = [&](UINT kind) -> dxmt::Texture * {
+    if (kind == 2)
+      return rtv->GetRenderTarget(0).Texture;
+    if (kind == 3)
+      return dsv->GetRenderTarget(0).Texture;
+    const auto stored = ReadDescriptorFields(shader, 0);
+    if (kind == 0 &&
+        stored.type == dxmt::ShaderVisibleDescriptorType::SRVTexture)
+      return stored.SRVTexture.texture;
+    if (kind == 1 &&
+        stored.type == dxmt::ShaderVisibleDescriptorType::UAVTexture)
+      return stored.UAVTexture.texture;
+    return nullptr;
+  };
+  bool good = true;
+  for (UINT kind = 0; kind < 4; kind++) {
+    for (const bool seeded : {false, true}) {
+      // Cross logical dimensions in both directions. RTV/DSV additionally cover
+      // both MSAA mismatches without materializing invalid native views.
+      for (UINT mismatch = kind == 3 ? 1 : 0; mismatch < (kind >= 2 ? 4u : 2u);
+           mismatch++) {
+        shader->ClearDescriptor(0);
+        rtv->AddRenderTarget(0, nullptr);
+        dsv->AddRenderTarget(0, nullptr);
+        if (seeded)
+          write(kind, kind == 3 ? 7 : 6, 1);
+        const auto before = bound_texture(kind);
+        const UINT resource = (kind == 3 ? 3 : 0) + (mismatch == 0   ? 0
+                                                     : mismatch == 3 ? 2
+                                                                     : 1);
+        const UINT shape = mismatch == 0 || mismatch == 3 ? 1
+                           : mismatch == 1                ? 0
+                                                          : 2;
+        write(kind, resource, shape);
+        const bool pass =
+            bound_texture(kind) == before &&
+            (!seeded || before == static_cast<dxmt::MTLD3D12Resource *>(
+                                      o.resources[kind == 3 ? 7 : 6])
+                                      ->texture.ptr());
+        std::cout << "view_dimensions kind=" << kind << " mismatch=" << mismatch
+                  << " seeded=" << seeded << " pass=" << pass << "\n";
+        good &= pass;
+      }
+    }
+    for (UINT shape = kind == 3 ? 1 : 0; shape < (kind == 1 ? 2u : 3u);
+         shape++) {
+      write(kind, (kind == 3 ? 3 : 0) + shape, shape);
+      const bool pass =
+          bound_texture(kind) == static_cast<dxmt::MTLD3D12Resource *>(
+                                     o.resources[(kind == 3 ? 3 : 0) + shape])
+                                     ->texture.ptr();
+      std::cout << "view_dimensions kind=" << kind << " valid_shape=" << shape
+                << " pass=" << pass << "\n";
+      good &= pass;
+    }
+  }
+  return good;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::string(argv[1]) == "--texture-view-dimensions")
+    return CheckTextureViewDimensions() ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--uav-counter-contract")
     return CheckUAVCounterContract() ? 0 : 1;
   if (argc == 2 && (std::string(argv[1]) == "--view-permissions" ||

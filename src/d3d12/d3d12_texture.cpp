@@ -239,9 +239,16 @@ ValidateTextureView(
 }
 
 HRESULT
-ValidateTextureViewType(const D3D12_RESOURCE_DESC &ResourceDesc, WMTTextureType ViewType) {
+ValidateTextureViewType(const D3D12_RESOURCE_DESC &ResourceDesc, WMTTextureType ViewType, bool ViewIs1D) {
+  // Logical 1D views lower to Metal 2D, so the native type alone loses this distinction.
+  if ((ResourceDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D) != ViewIs1D)
+    return E_INVALIDARG;
   const bool ResourceIs3D = ResourceDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-  return ResourceIs3D == (ViewType == WMTTextureType3D) ? S_OK : E_INVALIDARG;
+  if (ResourceIs3D != (ViewType == WMTTextureType3D))
+    return E_INVALIDARG;
+  const bool ViewIsMultisampled =
+      ViewType == WMTTextureType2DMultisample || ViewType == WMTTextureType2DMultisampleArray;
+  return (ResourceDesc.SampleDesc.Count > 1) == ViewIsMultisampled ? S_OK : E_INVALIDARG;
 }
 
 UINT
@@ -1192,7 +1199,11 @@ public:
       return E_INVALIDARG;
     }
 
-    if (FAILED(ValidateTextureViewType(desc_, view_descriptor.type)) ||
+    if (FAILED(ValidateTextureViewType(
+            desc_, view_descriptor.type,
+            ViewDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE1D ||
+                ViewDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE1DARRAY
+        )) ||
         FAILED(ValidateTextureView(desc_, ViewFirstMipLevel, ViewMipLevelCount, ViewFirstArraySlice, ViewArraySize)) ||
         FAILED(ValidatePlaneSlice(metal_format, PlaneSlice)))
       return E_INVALIDARG;
@@ -1309,7 +1320,11 @@ public:
       return E_INVALIDARG;
     }
 
-    if (FAILED(ValidateTextureViewType(desc_, view_descriptor.type)) ||
+    if (FAILED(ValidateTextureViewType(
+            desc_, view_descriptor.type,
+            ViewDesc.ViewDimension == D3D12_UAV_DIMENSION_TEXTURE1D ||
+                ViewDesc.ViewDimension == D3D12_UAV_DIMENSION_TEXTURE1DARRAY
+        )) ||
         FAILED(ValidateTextureView(desc_, ViewFirstMipLevel, ViewMipLevelCount, ViewFirstArraySlice, ViewArraySize)) ||
         FAILED(ValidatePlaneSlice(metal_format, PlaneSlice)))
       return E_INVALIDARG;
@@ -1436,7 +1451,11 @@ public:
          ViewDesc.ViewDimension == D3D12_RTV_DIMENSION_TEXTURE2DARRAY) &&
         PlaneSlice)
       return E_NOTIMPL;
-    if (FAILED(ValidateTextureViewType(desc_, view_descriptor.type)) ||
+    if (FAILED(ValidateTextureViewType(
+            desc_, view_descriptor.type,
+            ViewDesc.ViewDimension == D3D12_RTV_DIMENSION_TEXTURE1D ||
+                ViewDesc.ViewDimension == D3D12_RTV_DIMENSION_TEXTURE1DARRAY
+        )) ||
         FAILED(ValidateTextureView(desc_, ViewFirstMipLevel, ViewMipLevelCount, ViewFirstArraySlice, ViewArraySize)) ||
         FAILED(ValidatePlaneSlice(metal_format, PlaneSlice)))
       return E_INVALIDARG;
@@ -1546,7 +1565,11 @@ public:
       return E_INVALIDARG;
     }
 
-    if (FAILED(ValidateTextureViewType(desc_, view_descriptor.type)) ||
+    if (FAILED(ValidateTextureViewType(
+            desc_, view_descriptor.type,
+            ViewDesc.ViewDimension == D3D12_DSV_DIMENSION_TEXTURE1D ||
+                ViewDesc.ViewDimension == D3D12_DSV_DIMENSION_TEXTURE1DARRAY
+        )) ||
         FAILED(ValidateTextureView(desc_, ViewFirstMipLevel, ViewMipLevelCount, ViewFirstArraySlice, ViewArraySize)))
       return E_INVALIDARG;
     View = texture->createView(view_descriptor);
