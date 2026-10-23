@@ -7,6 +7,7 @@
 #include "d3d12_device.hpp"
 
 #include <iostream>
+#include <set>
 #include <thread>
 
 namespace {
@@ -528,11 +529,13 @@ int main() {
   std::thread batch_writer([&] {
     WaitForSingleObject(batch_start, INFINITE);
     SetEvent(batch_entered);
-    device_a->CreateConstantBufferView(&cbv_desc, shader_cpu_a);
+    device_a->CreateConstantBufferView(nullptr, shader_cpu_a);
     SetEvent(batch_done);
   });
   {
     auto descriptor_batch = shader_impl_a->ReadDescriptorBatch();
+    const auto first_resource = descriptor_batch.first_resource();
+    const auto next_resource = descriptor_batch.next_resource(first_resource);
     const auto &descriptor = descriptor_batch.get(0);
     const auto type = descriptor.type;
     const auto texture = descriptor.SRVTexture.texture;
@@ -540,11 +543,15 @@ int main() {
     SetEvent(batch_start);
     WaitForSingleObject(batch_entered, INFINITE);
     WaitForSingleObject(batch_done, 50);
-    const bool stable = type == dxmt::ShaderVisibleDescriptorType::SRVTexture &&
-                        descriptor.type == type && descriptor.SRVTexture.texture == texture &&
-                        descriptor.SRVTexture.view.index == view.index;
+    const bool stable =
+        type == dxmt::ShaderVisibleDescriptorType::SRVTexture &&
+        descriptor.type == type && descriptor.SRVTexture.texture == texture &&
+        descriptor.SRVTexture.view.index == view.index &&
+        first_resource == descriptor_batch.first_resource() &&
+        next_resource == descriptor_batch.next_resource(first_resource);
     if (!stable)
-      std::cerr << "FAIL: batched descriptor read did not protect type, payload, and owner\n";
+      std::cerr << "FAIL: batched descriptor read did not protect type, "
+                   "payload, and owner\n";
     passed &= stable;
   }
   batch_writer.join();
@@ -552,7 +559,193 @@ int main() {
   CloseHandle(batch_entered);
   CloseHandle(batch_start);
   passed &= shader_impl_a->GetMutationGeneration() == generation + 1;
-  passed &= IsDescriptorType(shader_impl_a, dxmt::ShaderVisibleDescriptorType::ConstantBuffer, "batched writer update");
+  passed &=
+      IsDescriptorType(shader_impl_a, dxmt::ShaderVisibleDescriptorType::Null,
+                       "batched writer update");
+  {
+    ID3D12DescriptorHeap *index_heap = nullptr;
+    ID3D12Resource *index_uav_buffer = nullptr, *index_uav_texture = nullptr;
+    D3D12_DESCRIPTOR_HEAP_DESC hd = shader_desc;
+    hd.NumDescriptors = 128;
+    auto td = texture_desc;
+    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    bool ok = SUCCEEDED(device_a->CreateDescriptorHeap(
+                  &hd, IID_PPV_ARGS(&index_heap))) &&
+              SUCCEEDED(device_a->CreateCommittedResource(
+                  &default_heap, D3D12_HEAP_FLAG_NONE, &uav_buffer_desc,
+                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                  IID_PPV_ARGS(&index_uav_buffer))) &&
+              SUCCEEDED(device_a->CreateCommittedResource(
+                  &default_heap, D3D12_HEAP_FLAG_NONE, &td,
+                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                  IID_PPV_ARGS(&index_uav_texture)));
+    if (!ok) {
+      Release(index_uav_texture);
+      Release(index_uav_buffer);
+      Release(index_heap);
+      return abort();
+    }
+    const auto stride = device_a->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    auto handle = [&](UINT slot) {
+      auto h = index_heap->GetCPUDescriptorHandleForHeapStart();
+      h.ptr += size_t(slot) * stride;
+      return h;
+    };
+    std::set<UINT> expected;
+    auto verify = [&]() {
+      auto batch = static_cast<dxmt::MTLD3D12DescriptorHeap *>(index_heap)
+                       ->ReadDescriptorBatch();
+      std::set<UINT> actual;
+      for (UINT i = batch.first_resource(); i != UINT_MAX;
+           i = batch.next_resource(i)) {
+        if (i >= index_heap->GetDesc().NumDescriptors ||
+            (!actual.empty() && i <= *actual.rbegin()) ||
+            !actual.insert(i).second ||
+            actual.size() > index_heap->GetDesc().NumDescriptors)
+          return false;
+      }
+      std::set<UINT> candidates;
+      for (UINT i = batch.first_residency_slot(); i != UINT_MAX;
+           i = batch.next_residency_slot(i)) {
+        if (i >= index_heap->GetDesc().NumDescriptors ||
+            (!candidates.empty() && i <= *candidates.rbegin()) ||
+            !candidates.insert(i).second ||
+            candidates.size() > index_heap->GetDesc().NumDescriptors)
+          return false;
+      }
+      for (auto i : expected)
+        if (!candidates.count(i))
+          return false;
+      if (candidates.size() > 4 * expected.size())
+        return false;
+      if (actual != expected) {
+        std::cerr << "resource index set mismatch expected=" << expected.size()
+                  << " actual=" << actual.size() << "\n";
+        return false;
+      }
+      return true;
+    };
+    ok &= verify();
+    device_a->CreateConstantBufferView(&cbv_desc, handle(0));
+    expected.insert(0);
+    ok &= verify();
+    device_a->CreateShaderResourceView(buffer_a, &srv_desc, handle(3));
+    expected.insert(3);
+    ok &= verify();
+    auto typed_srv = srv_desc;
+    typed_srv.Format = DXGI_FORMAT_R32_UINT;
+    typed_srv.Buffer.StructureByteStride = 0;
+    device_a->CreateShaderResourceView(buffer_a, &typed_srv, handle(7));
+    expected.insert(7);
+    ok &= verify();
+    device_a->CreateUnorderedAccessView(index_uav_buffer, counter_a, &uav_desc,
+                                        handle(31));
+    expected.insert(31);
+    ok &= verify();
+    auto typed_uav = uav_desc;
+    typed_uav.Format = DXGI_FORMAT_R32_UINT;
+    typed_uav.Buffer.StructureByteStride = 0;
+    device_a->CreateUnorderedAccessView(index_uav_buffer, nullptr, &typed_uav,
+                                        handle(64));
+    expected.insert(64);
+    ok &= verify();
+    device_a->CreateShaderResourceView(texture_a, nullptr, handle(127));
+    expected.insert(127);
+    ok &= verify();
+    device_a->CreateUnorderedAccessView(index_uav_texture, nullptr, nullptr,
+                                        handle(65));
+    expected.insert(65);
+    ok &= verify();
+    for (auto slot : {65u, 7u, 0u, 127u, 3u, 31u, 64u}) {
+      device_a->CreateConstantBufferView(nullptr, handle(slot));
+      expected.erase(slot);
+      ok &= verify();
+    }
+    // Repeated clear, reinsertion, live-to-live replacement, and copied nulls.
+    UINT state = 41;
+    for (UINT iteration = 0; iteration < 256; iteration++) {
+      state = state * 1664525u + 1013904223u;
+      UINT slot = (state >> 16) % 128;
+      if (iteration % 3 == 0) {
+        device_a->CreateConstantBufferView(nullptr, handle(slot));
+        expected.erase(slot);
+      } else if (iteration % 3 == 1) {
+        device_a->CreateConstantBufferView(&cbv_desc, handle(slot));
+        expected.insert(slot);
+      } else {
+        device_a->CopyDescriptorsSimple(1, handle(slot), source_cpu,
+                                        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        expected.insert(slot);
+      }
+      if (iteration % 37 == 0)
+        ok &= verify();
+    }
+    for (UINT i = 0; i < 128; i++) {
+      device_a->CreateConstantBufferView(&cbv_desc, handle(i));
+      expected.insert(i);
+    }
+    ok &= verify();
+    for (UINT i = 0; i < 128; i++) {
+      device_a->CreateConstantBufferView(nullptr, handle(i));
+      expected.erase(i);
+      if (i % 17 == 0)
+        ok &= verify();
+    }
+    ok &= verify();
+    // Non-overlapping copies within a legal CPU-only source heap update the
+    // resource index too.
+    Release(index_heap);
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    ok &= SUCCEEDED(
+        device_a->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&index_heap)));
+    if (ok) {
+      device_a->CopyDescriptorsSimple(2, handle(0), source_cpu,
+                                      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+      expected = {0, 1};
+      ok &= verify();
+      device_a->CopyDescriptorsSimple(2, handle(64), handle(0),
+                                      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+      expected.insert(64);
+      expected.insert(65);
+      ok &= verify();
+      device_a->CreateConstantBufferView(nullptr, handle(1));
+      expected.erase(1);
+      device_a->CopyDescriptorsSimple(1, handle(64), handle(1),
+                                      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+      expected.erase(64);
+      ok &= verify();
+    }
+    Release(index_heap);
+    hd.NumDescriptors = 262147;
+    ok &= SUCCEEDED(
+        device_a->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&index_heap)));
+    expected.clear();
+    if (ok) {
+      for (UINT i : {0u, 63u, 64u, 65u, 4095u, 4096u, 4097u, 262143u, 262144u,
+                     262145u, 262146u}) {
+        device_a->CreateConstantBufferView(&cbv_desc, handle(i));
+        expected.insert(i);
+        ok &= verify();
+      }
+      for (UINT i : {4096u, 262144u, 0u, 262146u, 63u, 65u, 4097u, 262145u, 64u,
+                     4095u, 262143u}) {
+        device_a->CreateConstantBufferView(nullptr, handle(i));
+        expected.erase(i);
+        ok &= verify();
+      }
+    }
+    Release(index_uav_texture);
+    Release(index_uav_buffer);
+    Release(index_heap);
+    passed &= ok;
+    if (!ok)
+      std::cerr << "resource index enumeration or candidate bound failed\n";
+    if (ok)
+      std::cout << "resource index seven live view types, clear/reinsert, 256 "
+                   "mixed mutations, sparse/dense transitions, and CPU "
+                   "same-heap copies passed\n";
+  }
   Release(source_heap);
 
   device_a->CreateRenderTargetView(texture_a, &rtv_view, rtv_cpu_a);

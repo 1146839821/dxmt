@@ -326,6 +326,24 @@ C++ read-batch consumers were rebuilt together. AS execution and full N09/FL12_2
 gates remain unproven. Evidence:
 `../dxmt-test/n09-resource-index-20261023/N09-resource-slot-index.md`.
 
+### N09 — persistent resource-index contract, 2026-10-23
+
+The existing `dx12_descriptor_ownership` runner now carries the independent
+expected-slot oracle previously kept externally. It checks seven view classes,
+null replacement/copies, 256 mixed updates, sparse/dense transitions, sorted and
+bounded iteration, CPU same-heap copies and four-level directory boundaries in
+a 262,147-slot CPU heap. The guarded concurrent writer now clears its slot while
+the read batch protects both payload and index traversal. Expected sets derive
+from API operations; no bitmap internals are read by the test.
+
+Scoped build and the ownership runner pass. Empty-at-recording and mixed
+nonuniform GPU cases pass 888/1777 then 777/888 fenced replay; sparse graphics
+passes its pixel/counter assertions, all with Metal validation enabled. The
+production DLL hash is identical to the previous slice, with no new runtime
+cost or capability change. This preserves regression evidence rather than
+claiming full N09 completion. Commands, hashes and logs:
+`../dxmt-test/n09-index-contract-20261023/N09-index-contract.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
