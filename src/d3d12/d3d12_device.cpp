@@ -1048,15 +1048,12 @@ public:
                (static_cast<int>(capability_it->second) & static_cast<int>(capability));
       };
 
-      // Storage dimensions and typed-view operations are separate DXGI contracts.
-      // Match the existing texture path's 1D exclusions; depth/stencil has no 3D view.
-      const bool depth_or_stencil = DepthStencilPlanarFlags(format_desc.PixelFormat) != 0;
-      out->Support1 = D3D12_FORMAT_SUPPORT1_TEXTURE2D | D3D12_FORMAT_SUPPORT1_TEXTURECUBE | D3D12_FORMAT_SUPPORT1_MIP |
+      out->Support1 = GetTextureFormatDimensions(format_desc) | D3D12_FORMAT_SUPPORT1_MIP |
                       D3D12_FORMAT_SUPPORT1_CAST_WITHIN_BIT_LAYOUT;
-      if (!(format_desc.Flag & (MTL_DXGI_FORMAT_BC | MTL_DXGI_FORMAT_DEPTH_PLANER | MTL_DXGI_FORMAT_STENCIL_PLANER)))
-        out->Support1 |= D3D12_FORMAT_SUPPORT1_TEXTURE1D;
-      if (!depth_or_stencil)
-        out->Support1 |= D3D12_FORMAT_SUPPORT1_TEXTURE3D;
+      // Keep the native 1D depth/stencil view limitation distinct from DXGI
+      // dimension legality, which also governs architecture-independent footprints.
+      if (format_desc.Flag & (MTL_DXGI_FORMAT_DEPTH_PLANER | MTL_DXGI_FORMAT_STENCIL_PLANER))
+        out->Support1 = static_cast<D3D12_FORMAT_SUPPORT1>(out->Support1 & ~D3D12_FORMAT_SUPPORT1_TEXTURE1D);
       out->Support2 = D3D12_FORMAT_SUPPORT2_NONE;
 
       // The two 64-bit plane SRV mappings also carry TYPELESS internally, but
@@ -1418,8 +1415,15 @@ public:
     hr = ValidateResourceStates(InitialState, pHeapProps, pDesc);
     if (FAILED(hr))
       return hr;
-    if (!ppResource)
+    if (!ppResource) {
+      if (pDesc->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) {
+        WMTTextureInfo texture_info = {};
+        hr = PopulateWMTTextureInfo(this, texture_info, *pDesc);
+        if (FAILED(hr))
+          return hr;
+      }
       return S_FALSE;
+    }
     switch (pDesc->Dimension) {
     case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
     case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
@@ -1806,7 +1810,7 @@ public:
                SUCCEEDED(ValidateTextureResourceLayout(*pDesc)) &&
                SUCCEEDED(ValidateTextureResourceFlags(*pDesc))) {
       if (SUCCEEDED(MTLQueryDXGIFormat(GetMTLDevice(), pDesc->Format, FormatDesc)) &&
-          pDesc->SampleDesc.Count == 1) {
+          SupportsTextureDimension(FormatDesc, pDesc->Dimension) && pDesc->SampleDesc.Count == 1) {
         mip_levels = pDesc->MipLevels;
         if (!mip_levels) {
           UINT64 max_dimension = pDesc->Width;

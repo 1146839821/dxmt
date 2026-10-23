@@ -817,6 +817,10 @@ bool IsCpuVisibleHeap(const D3D12_HEAP_PROPERTIES *pHeapProps);
 
 bool IsValidBufferResourceDesc(const D3D12_RESOURCE_DESC &Desc);
 
+D3D12_FORMAT_SUPPORT1 GetTextureFormatDimensions(const MTL_DXGI_FORMAT_DESC &Format);
+
+bool SupportsTextureDimension(const MTL_DXGI_FORMAT_DESC &Format, D3D12_RESOURCE_DIMENSION Dimension);
+
 HRESULT ValidateTextureResourceDesc(const D3D12_RESOURCE_DESC &Desc);
 
 HRESULT ValidateTextureResourceLayout(const D3D12_RESOURCE_DESC &Desc);

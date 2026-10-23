@@ -154,9 +154,168 @@ bool CheckFenceRewinds(ID3D12Device1 *device, ID3D12CommandQueue *queue) {
   return true;
 }
 
+bool CheckTextureFormatDimensions(ID3D12Device *device, bool footprints_only) {
+  struct Owners {
+    ID3D12Heap *heap = nullptr;
+    ID3D12Device4 *device4 = nullptr;
+    ~Owners() {
+      if (heap)
+        heap->Release();
+      if (device4)
+        device4->Release();
+    }
+  } owners;
+  D3D12_HEAP_PROPERTIES properties = {};
+  properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+  properties.CreationNodeMask = properties.VisibleNodeMask = 1;
+  if (!footprints_only) {
+    D3D12_HEAP_DESC heap_desc = {};
+    heap_desc.SizeInBytes = 1024 * 1024;
+    heap_desc.Properties = properties;
+    if (!CheckHR("Dimension test heap",
+                 device->CreateHeap(&heap_desc, IID_PPV_ARGS(&owners.heap))) ||
+        !CheckHR("Dimension test device4",
+                 device->QueryInterface(IID_PPV_ARGS(&owners.device4))))
+      return false;
+  }
+  bool good = true;
+  UINT cases = 0;
+  const auto check = [&](DXGI_FORMAT format, D3D12_RESOURCE_DIMENSION dimension,
+                         D3D12_RESOURCE_FLAGS flags) {
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = dimension;
+    desc.Width = 4;
+    desc.Height = dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D ? 1 : 4;
+    desc.DepthOrArraySize =
+        dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 2 : 1;
+    desc.MipLevels = desc.SampleDesc.Count = 1;
+    desc.Format = format;
+    desc.Flags = flags;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout = {};
+    UINT rows = 0;
+    UINT64 row_size = 0, total = 0;
+    device->GetCopyableFootprints(&desc, 0, 1, 512, &layout, &rows, &row_size,
+                                  &total);
+    bool pass = total == UINT64_MAX && row_size == UINT64_MAX &&
+                rows == UINT_MAX && layout.Offset == UINT64_MAX &&
+                layout.Footprint.Width == UINT_MAX &&
+                layout.Footprint.Height == UINT_MAX &&
+                layout.Footprint.Depth == UINT_MAX &&
+                layout.Footprint.RowPitch == UINT_MAX &&
+                layout.Footprint.Format == static_cast<DXGI_FORMAT>(UINT_MAX);
+    // Metadata-only mode reproduces the error without sending an invalid Metal
+    // descriptor to a native factory.
+    if (!footprints_only) {
+      pass &= device->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes ==
+              UINT64_MAX;
+      D3D12_RESOURCE_ALLOCATION_INFO1 detail;
+      std::memset(&detail, 0xa5, sizeof(detail));
+      pass &= owners.device4->GetResourceAllocationInfo1(0, 1, &desc, &detail)
+                      .SizeInBytes == UINT64_MAX &&
+              !detail.Offset && !detail.SizeInBytes && !detail.Alignment;
+      ID3D12Resource *resource = nullptr;
+      const auto rejected = [&](const char *name, HRESULT hr) {
+        const bool result = hr == E_INVALIDARG && !resource;
+        if (!result)
+          std::cerr << name << " hr=0x" << std::hex << static_cast<UINT>(hr)
+                    << std::dec << "\n";
+        if (resource)
+          resource->Release();
+        resource = nullptr;
+        return result;
+      };
+      pass &= rejected(
+          "Invalid dimension committed",
+          device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE,
+                                          &desc, D3D12_RESOURCE_STATE_COMMON,
+                                          nullptr, IID_PPV_ARGS(&resource)));
+      pass &= rejected("Invalid dimension placed",
+                       device->CreatePlacedResource(
+                           owners.heap, 0, &desc, D3D12_RESOURCE_STATE_COMMON,
+                           nullptr, IID_PPV_ARGS(&resource)));
+      pass &= device->CreateCommittedResource(
+                  &properties, D3D12_HEAP_FLAG_NONE, &desc,
+                  D3D12_RESOURCE_STATE_COMMON, nullptr,
+                  __uuidof(ID3D12Resource), nullptr) == E_INVALIDARG;
+      pass &= device->CreatePlacedResource(
+                  owners.heap, 0, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                  __uuidof(ID3D12Resource), nullptr) == E_INVALIDARG;
+      desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+      const HRESULT reserved_hr = device->CreateReservedResource(
+          &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resource));
+      // Reserved 1D/3D remains an existing unsupported path, not newly
+      // advertised support.
+      pass &= reserved_hr == E_NOTIMPL && !resource;
+      if (resource)
+        resource->Release();
+    }
+    std::cout << "format-dimension format=" << format
+              << " dimension=" << dimension << " flags=" << flags
+              << " metadata_only=" << footprints_only << " pass=" << pass
+              << "\n";
+    good &= pass;
+    cases++;
+  };
+  for (const auto format : {DXGI_FORMAT_BC1_UNORM, DXGI_FORMAT_BC1_TYPELESS,
+                            DXGI_FORMAT_BC3_UNORM, DXGI_FORMAT_BC7_UNORM})
+    check(format, D3D12_RESOURCE_DIMENSION_TEXTURE1D, D3D12_RESOURCE_FLAG_NONE);
+  for (const auto format :
+       {DXGI_FORMAT_D16_UNORM, DXGI_FORMAT_D32_FLOAT,
+        DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D32_FLOAT_S8X24_UINT}) {
+    check(format, D3D12_RESOURCE_DIMENSION_TEXTURE3D, D3D12_RESOURCE_FLAG_NONE);
+    check(format, D3D12_RESOURCE_DIMENSION_TEXTURE3D,
+          D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  }
+  for (const auto format :
+       {DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_R32G8X24_TYPELESS,
+        DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS, DXGI_FORMAT_R24_UNORM_X8_TYPELESS,
+        DXGI_FORMAT_X32_TYPELESS_G8X24_UINT, DXGI_FORMAT_X24_TYPELESS_G8_UINT})
+    check(format, D3D12_RESOURCE_DIMENSION_TEXTURE3D, D3D12_RESOURCE_FLAG_NONE);
+  for (const auto format : {DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R16_TYPELESS})
+    check(format, D3D12_RESOURCE_DIMENSION_TEXTURE3D,
+          D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  // Preserve logical footprints for valid 1D depth and flagless typeless/color
+  // volumes.
+  for (const auto format : {DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_R32_TYPELESS,
+                            DXGI_FORMAT_R32G32B32A32_FLOAT}) {
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = format == DXGI_FORMAT_D32_FLOAT
+                         ? D3D12_RESOURCE_DIMENSION_TEXTURE1D
+                         : D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    desc.Width = 4;
+    desc.Height = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D ? 1 : 4;
+    desc.DepthOrArraySize =
+        desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D ? 1 : 2;
+    desc.MipLevels = desc.SampleDesc.Count = 1;
+    desc.Format = format;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout = {};
+    UINT64 row_size = 0, total = UINT64_MAX;
+    device->GetCopyableFootprints(&desc, 0, 1, 512, &layout, nullptr, &row_size,
+                                  &total);
+    good &= total != UINT64_MAX && total > 0 && layout.Offset == 512 &&
+            layout.Footprint.Width == 4 &&
+            row_size == (format == DXGI_FORMAT_R32G32B32A32_FLOAT ? 64 : 16);
+  }
+  std::cout << "format-dimension cases=" << cases
+            << " positive_footprints=3 pass=" << good << "\n";
+  return good;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+  if (argc == 2 && (!std::strcmp(argv[1], "--format-dimensions") ||
+                    !std::strcmp(argv[1], "--format-dimensions-footprints"))) {
+    ID3D12Device *device = nullptr;
+    if (!CheckHR("D3D12CreateDevice",
+                 D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                   IID_PPV_ARGS(&device))))
+      return 1;
+    const bool good = CheckTextureFormatDimensions(
+        device, !std::strcmp(argv[1], "--format-dimensions-footprints"));
+    device->Release();
+    return good ? 0 : 1;
+  }
   ID3D12Device *device = nullptr;
   ID3D12InfoQueue *info_queue = nullptr;
   ID3D12CommandQueue *queue = nullptr;
@@ -4051,6 +4210,10 @@ int main() {
 
   auto result = *static_cast<UINT32 *>(mapped);
   destination->Unmap(0, nullptr);
+  if (!CheckTextureFormatDimensions(device, false)) {
+    cleanup();
+    return 1;
+  }
   cleanup();
   if (result != value) {
     std::cerr << "placed resource copy mismatch: 0x" << std::hex << result << "\n";

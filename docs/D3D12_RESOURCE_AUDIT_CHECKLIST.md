@@ -974,6 +974,55 @@ claims only reduced, EnhancedBarriersSupported remains FALSE. User .gitignore
 excluded. Evidence and exact commands/results/manifests:
 `../dxmt-test/n02-format-support-20261024/N02-format-support.md`.
 
+### N08 — share texture format/dimension validation, 2026-10-24
+
+Base08f34684. One node; continues Device attachment's format consistency priority.
+Footprints accepted BC1D/depth3D independently of native setup; depth3D could
+reach native size/factory calls. Pure helpers in existing resource_helper share
+dimension legality across query, footprint and native setup. Shared flag validation
+rejects3D ALLOW_DEPTH_STENCIL, including R32/R16 typeless. Committed null-output
+validation previously returned S_FALSE before texture format/dimension checks;
+it now uses PopulateWMTTextureInfo without native allocation. No extra Populate
+call on successful normal creation. Native depth1D remains unsupported while its
+legal logical footprint is preserved. Reserved1D/3D retains E_NOTIMPL.
+
+Same final PE baseline focused metadata exit1 (all20 invalid cases accepted),
+candidate metadata/full checks exit0. Covers4 BC1D,14 depth/plane3D and2 typeless3D
+with DS flag; allocation-info/details, committed/placed and null-output results;
+3 positive footprints.13 final correctness processes: expected baseline1, other12
+exit0. Full feature/resource/command-list/enhanced and submit probe pass API/shader
+validation; baseline/candidate typed and typeless view nine-dimension GPU readbacks
+11..99 pass. Final Meson build and no-private device/helper/texture syntax checks
+exit0. Full no-private link/runtime, native Windows and T4 NOT_RUN.
+Initial test/build/stale-PE/wrong-compiler attempts retained externally and excluded;
+see report for the incorrect BaseOffset test oracle and its correction.
+
+M1Max/Apple7, macOS27.0.1, Xcode27.1 (requested26 differs), MSC4.0.1, matched Wine11
+x64/Rosetta, clang23.1.1. Perf validation disabled; AB/BA/AB18 processes exit0.
+Median of3 process p50/p95 values, microseconds:
+
+| Scenario / metric | Before p50 / p95 us | After p50 / p95 us | Change p50 / p95 |
+|---|---:|---:|---:|
+| N13_FULL / submit_us | 142.85 / 180.20 | 143.55 / 186.10 | +0.49% / +3.27% |
+| format_cost / query_us | 2991.20 / 3118.30 | 2778.35 / 2892.30 | -7.12% / -7.25% |
+| small_blit / record_us | 3401.55 / 3841.80 | 3522.95 / 3722.50 | +3.57% / -3.11% |
+
+Per side: record72 retained samples, ordinary submit180, format72 batches of120000
+queries. Same updated submit probe; collector micro NOT_RUN. No causal speedup
+claim. Global gate remains OPEN including prior N12 costs. Fixed pure checks;
+no new lock/allocation/cache/manager. No public/private COM/C++ or WMT ABI, resource
+layout, GPU scheduling or feature-level/tier changes. Format query masks equivalent
+to preceding N02; EnhancedBarriersSupported remains FALSE.
+
+Upstream pinned a148782 broad format TODO not copied. Shared DXGI FL11 table
+requires RGB96 textures; do not reject legal textures to mask the confirmed static
+R32 backing/12-byte logical-texel mismatch (dxmt_format.cpp:470-492). GPU data-loss
+reproducer and packing/lowering remain OPEN, along with BC3D/full view/typed-UAV/
+planar support and enhanced barrier follow-up. Native1D depth is an implementation
+limitation, not DXGI format illegality. User .gitignore and shared Wine untouched.
+Evidence, exact commands/statuses/hashes and issue table:
+`../dxmt-test/n08-format-dimensions-20261024/N08-format-dimensions.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

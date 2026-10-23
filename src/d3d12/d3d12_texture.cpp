@@ -100,7 +100,7 @@ PopulateWMTTextureInfo(MTLD3D12Device *Device, WMTTextureInfo &InfoOut, const D3
 
   MTL_DXGI_FORMAT_DESC Format;
   HRESULT hr = MTLQueryDXGIFormat(metal_device, Desc.Format, Format);
-  if (FAILED(hr))
+  if (FAILED(hr) || !SupportsTextureDimension(Format, Desc.Dimension))
     return E_INVALIDARG;
   if (Desc.SampleDesc.Count > 1 &&
       (Desc.SampleDesc.Quality || !metal_device.supportsTextureSampleCount(Desc.SampleDesc.Count)))
@@ -134,7 +134,9 @@ PopulateWMTTextureInfo(MTLD3D12Device *Device, WMTTextureInfo &InfoOut, const D3
   default:
     return E_INVALIDARG;
   case D3D12_RESOURCE_DIMENSION_TEXTURE1D: {
-    if (Format.Flag & (MTL_DXGI_FORMAT_BC | MTL_DXGI_FORMAT_DEPTH_PLANER | MTL_DXGI_FORMAT_STENCIL_PLANER))
+    // Native depth/stencil 1D views remain unsupported. This implementation
+    // limit does not invalidate their architecture-independent copy footprints.
+    if (Format.Flag & (MTL_DXGI_FORMAT_DEPTH_PLANER | MTL_DXGI_FORMAT_STENCIL_PLANER))
       return E_INVALIDARG;
     InfoOut.width = Desc.Width;
     InfoOut.height = 1;

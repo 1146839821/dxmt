@@ -551,6 +551,34 @@ CanUseSmallTextureAlignment(const D3D12_RESOURCE_DESC &Desc, const MTL_DXGI_FORM
   return true;
 }
 
+D3D12_FORMAT_SUPPORT1
+GetTextureFormatDimensions(const MTL_DXGI_FORMAT_DESC &Format) {
+  if (Format.PixelFormat == WMTPixelFormatInvalid)
+    return D3D12_FORMAT_SUPPORT1_NONE;
+  auto dimensions = D3D12_FORMAT_SUPPORT1_TEXTURE1D | D3D12_FORMAT_SUPPORT1_TEXTURE2D |
+                    D3D12_FORMAT_SUPPORT1_TEXTURE3D | D3D12_FORMAT_SUPPORT1_TEXTURECUBE;
+  if (Format.Flag & MTL_DXGI_FORMAT_BC)
+    dimensions &= ~D3D12_FORMAT_SUPPORT1_TEXTURE1D;
+  if (DepthStencilPlanarFlags(Format.PixelFormat))
+    dimensions &= ~D3D12_FORMAT_SUPPORT1_TEXTURE3D;
+  return static_cast<D3D12_FORMAT_SUPPORT1>(dimensions);
+}
+
+bool
+SupportsTextureDimension(const MTL_DXGI_FORMAT_DESC &Format, D3D12_RESOURCE_DIMENSION Dimension) {
+  const auto dimensions = GetTextureFormatDimensions(Format);
+  switch (Dimension) {
+  case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+    return dimensions & D3D12_FORMAT_SUPPORT1_TEXTURE1D;
+  case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+    return dimensions & D3D12_FORMAT_SUPPORT1_TEXTURE2D;
+  case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
+    return dimensions & D3D12_FORMAT_SUPPORT1_TEXTURE3D;
+  default:
+    return false;
+  }
+}
+
 HRESULT
 ValidateTextureResourceDesc(const D3D12_RESOURCE_DESC &Desc) {
   if (Desc.Format == DXGI_FORMAT_UNKNOWN || !Desc.Width || Desc.Width > std::numeric_limits<UINT>::max() ||
@@ -606,6 +634,8 @@ ValidateTextureResourceFlags(const D3D12_RESOURCE_DESC &Desc) {
   const bool allow_unordered_access = flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   const bool allow_simultaneous_access = flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
 
+  if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D && allow_depth_stencil)
+    return E_INVALIDARG;
   if (allow_render_target && allow_depth_stencil)
     return E_INVALIDARG;
   if (allow_depth_stencil && (allow_unordered_access || allow_simultaneous_access))
