@@ -476,6 +476,20 @@ No production change is justified by this evidence yet. Performance remains
 INCONCLUSIVE / OPEN. Commands, hashes, all samples and hypothesis limits:
 `../dxmt-test/n10-recording-perf-20261023/N10-recording-perf.md`.
 
+N10 thread-CPU follow-up separates recording wall time from the named native
+thread's CPU time using an external-only PE/native handshake probe. Sleep/busy
+controls pass; both versions pass all 24 four-mode paired processes and GPU
+oracles. CPU-bracket median deltas range -0.56% to +2.28%, but early-long CPU
+p95 is +7.97% and wall p95 +11.74%. Both DLLs have wall-only tail components;
+the largest observed gaps are 1.34ms old and 1.93ms current. Thus descheduling
+alone does not explain all recorded differences. The wider CPU bracket adds
+handshake/stdio work and changes pacing; these figures cannot replace the
+original uninstrumented results. HUD is disabled for both DLLs in this probe.
+No production changes or blanket performance acceptance. Gate remains OPEN;
+next evidence must identify on-CPU tail cost rather than repeat median-only
+comparisons. Method, controls, all samples and limitations:
+`../dxmt-test/n10-thread-cpu-20261023/N10-thread-cpu.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
