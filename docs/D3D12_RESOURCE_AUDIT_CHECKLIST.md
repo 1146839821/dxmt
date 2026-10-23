@@ -1489,6 +1489,62 @@ Evidence: `../dxmt-test/n10-code-placement-20261024/N10-code-placement.md`,
 `build-commands.json`, `inspection.json`, `section-comparison.json`,
 `validation-results.json`, `oriented-aggregate.json`, `manifest.json`.
 
+### N09 — resource/view logical format families and typed casting, 2026-10-24
+
+Actual base `88b1d4aad183e2862d3a27833785ddb8ee4be9a3`. Device attachment
+format consistency, one N09 slice. Four texture view owners previously checked
+native view-format availability/typelessness without comparing logical resource
+and view formats. Equal byte width/native aliases do not establish a DXGI family.
+A shared pure predicate in existing d3d12_texture.cpp now checks families and
+fully typed FLOAT/non-FLOAT and UNORM/SNORM restrictions. Exact-format views
+keep a fast path; typeless resources and selected packed depth/stencil planes
+retain legal casts. Two RGB96-vs-other guards are subsumed and removed; unsupported
+RGB96 UAV handling remains. No new state/cache/manager or src/d3d12 file.
+
+The existing descriptor runner adds --texture-view-casts, reusing its fixtures.
+Final same-PE old DLL runs twice exit 1 with all 50 negative checks failing and
+47 legal controls passing. Candidate passes all 97. Tests cover empty/distinct-
+resource-seeded slots, four view kinds, cross-family color/depth aliases, both
+directions of numeric-class restrictions, integer casts, UNORM/sRGB, BGRA and
+BC1/BC4 controls. The distinct seed corrects an initial six-check blind spot;
+intermediate results are not treated as the final oracle. Slot preservation is
+DXMT's safety check, not a native Windows contract for invalid descriptors.
+
+Twelve final candidate processes pass with Metal API/shader validation: cast97,
+typeless73 (including four selected plane SRVs and RAW/structured buffers),
+dimensions32, counter37, ownership, feature54, resource21, command/barrier,
+RGBA8 and RGB96 typeless linear-filter GPU oracles (nine exact values 11..99),
+and multi depth/stencil copy. An initial missing-shader-argument invocation
+exits 3 and is retained; corrected invocations pass numeric checks. Scoped
+regular build and both changed-TU no-private syntax checks pass. Metadata for
+89 family entries matches captured Microsoft parent-format data (STATIC only).
+Pinned upstream a148782d has no equivalent SRV family guard; Microsoft casting
+rules, not native Metal representation or copying upstream, govern this fix.
+
+Two 18-process alternating performance series are retained. Final recording
+p50/p95 is 3189.00/3280.10 -> 3196.95/3296.70 us (+0.25%/+0.51%);
+10000 mixed view writes 1848.80/1950.50 -> 1854.05/1929.70 us
+(+0.28%/-1.07%); ordinary submit 112.00/143.00 -> 109.05/139.50 us
+(-2.63%/-2.45%). Per-process recording/view samples=24 after first-round
+warmup; ordinary=60 after ten warmups; aggregate medians of three processes.
+Initial deltas remain recording +0.16%/+3.21%, views +0.11%/-1.13%, ordinary
+submit +1.62%/+6.83%. Fixed PE within each series; only descriptor PE differs
+between series due the fixture correction. All 36 processes exit 0. No new
+per-command/submit work or locks; different-format view creation performs at
+most two bounded 20-range family searches. Performance gate stays OPEN /
+INCONCLUSIVE; final medians do not erase initial tails or historical regressions.
+
+Same actual macOS27.0.1/Xcode27.1/M1Max/Apple7/MSC4.0.1/Wine11/clang23.1.1
+host. ABI/export names/ordinals, FL/SM/Options/Tiers, scheduling and resource
+layouts unchanged. Windows differential, T3/T4, full no-private runtime,
+exhaustive operation/plane/planar matrices and BC/sRGB GPU sampling NOT_RUN.
+Next bounded candidate: view-format operation/plane eligibility; Device audit
+and earlier gates remain incomplete. User .gitignore preserved; no push.
+
+Evidence: `../dxmt-test/n09-view-format-families-20261024/N09-view-format-families.md`,
+`red-results.json`, `validation-results.json`, `perf-aggregate.json`,
+`initial-perf-aggregate.json`, `family-metadata-crosscheck.json`, `manifest.json`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

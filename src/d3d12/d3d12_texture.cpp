@@ -223,6 +223,113 @@ EncodeComponentMapping(UINT Shader4ComponentMapping, WMTPixelFormat Format) {
   return WMTPixelFormat(ENCODE_FORMAT_SWIZZLE(Format, Map[MappingR], Map[MappingG], Map[MappingB], Map[MappingA]));
 }
 
+DXGI_FORMAT
+GetTextureViewFormatFamily(DXGI_FORMAT Format) {
+  // DXGI families describe logical layouts, including formats that share a
+  // Metal representation (for example emulated D24 and native D32S8).
+  constexpr struct {
+    DXGI_FORMAT first, last;
+  } families[] = {
+      {DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_SINT},
+      {DXGI_FORMAT_R32G32B32_TYPELESS, DXGI_FORMAT_R32G32B32_SINT},
+      {DXGI_FORMAT_R16G16B16A16_TYPELESS, DXGI_FORMAT_R16G16B16A16_SINT},
+      {DXGI_FORMAT_R32G32_TYPELESS, DXGI_FORMAT_R32G32_SINT},
+      {DXGI_FORMAT_R32G8X24_TYPELESS, DXGI_FORMAT_X32_TYPELESS_G8X24_UINT},
+      {DXGI_FORMAT_R10G10B10A2_TYPELESS, DXGI_FORMAT_R10G10B10A2_UINT},
+      {DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_SINT},
+      {DXGI_FORMAT_R16G16_TYPELESS, DXGI_FORMAT_R16G16_SINT},
+      {DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32_SINT},
+      {DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_X24_TYPELESS_G8_UINT},
+      {DXGI_FORMAT_R8G8_TYPELESS, DXGI_FORMAT_R8G8_SINT},
+      {DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_SINT},
+      {DXGI_FORMAT_R8_TYPELESS, DXGI_FORMAT_R8_SINT},
+      {DXGI_FORMAT_BC1_TYPELESS, DXGI_FORMAT_BC1_UNORM_SRGB},
+      {DXGI_FORMAT_BC2_TYPELESS, DXGI_FORMAT_BC2_UNORM_SRGB},
+      {DXGI_FORMAT_BC3_TYPELESS, DXGI_FORMAT_BC3_UNORM_SRGB},
+      {DXGI_FORMAT_BC4_TYPELESS, DXGI_FORMAT_BC4_SNORM},
+      {DXGI_FORMAT_BC5_TYPELESS, DXGI_FORMAT_BC5_SNORM},
+      {DXGI_FORMAT_BC6H_TYPELESS, DXGI_FORMAT_BC6H_SF16},
+      {DXGI_FORMAT_BC7_TYPELESS, DXGI_FORMAT_BC7_UNORM_SRGB}
+  };
+  for (const auto &family : families)
+    if (Format >= family.first && Format <= family.last)
+      return family.first;
+  switch (Format) {
+  case DXGI_FORMAT_B8G8R8A8_UNORM:
+  case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+    return DXGI_FORMAT_B8G8R8A8_TYPELESS;
+  case DXGI_FORMAT_B8G8R8X8_UNORM:
+  case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+    return DXGI_FORMAT_B8G8R8X8_TYPELESS;
+  case DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM:
+    return DXGI_FORMAT_R10G10B10A2_TYPELESS;
+  default:
+    return Format;
+  }
+}
+
+enum class TextureViewCastType { Other, Float, UNorm, SNorm };
+
+TextureViewCastType
+GetTextureViewCastType(DXGI_FORMAT Format) {
+  switch (Format) {
+  case DXGI_FORMAT_R32G32B32A32_FLOAT:
+  case DXGI_FORMAT_R32G32B32_FLOAT:
+  case DXGI_FORMAT_R16G16B16A16_FLOAT:
+  case DXGI_FORMAT_R32G32_FLOAT:
+  case DXGI_FORMAT_R32_FLOAT:
+  case DXGI_FORMAT_D32_FLOAT:
+  case DXGI_FORMAT_R16G16_FLOAT:
+  case DXGI_FORMAT_R16_FLOAT:
+  case DXGI_FORMAT_BC6H_UF16:
+  case DXGI_FORMAT_BC6H_SF16:
+    return TextureViewCastType::Float;
+  case DXGI_FORMAT_R16G16B16A16_UNORM:
+  case DXGI_FORMAT_R8G8B8A8_UNORM:
+  case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+  case DXGI_FORMAT_R16G16_UNORM:
+  case DXGI_FORMAT_R8G8_UNORM:
+  case DXGI_FORMAT_D16_UNORM:
+  case DXGI_FORMAT_R16_UNORM:
+  case DXGI_FORMAT_R8_UNORM:
+  case DXGI_FORMAT_BC4_UNORM:
+  case DXGI_FORMAT_BC5_UNORM:
+    return TextureViewCastType::UNorm;
+  case DXGI_FORMAT_R16G16B16A16_SNORM:
+  case DXGI_FORMAT_R8G8B8A8_SNORM:
+  case DXGI_FORMAT_R16G16_SNORM:
+  case DXGI_FORMAT_R8G8_SNORM:
+  case DXGI_FORMAT_R16_SNORM:
+  case DXGI_FORMAT_R8_SNORM:
+  case DXGI_FORMAT_BC4_SNORM:
+  case DXGI_FORMAT_BC5_SNORM:
+    return TextureViewCastType::SNorm;
+  default:
+    return TextureViewCastType::Other;
+  }
+}
+
+bool
+IsTextureViewFormatCompatible(DXGI_FORMAT ResourceFormat, DXGI_FORMAT ViewFormat) {
+  if (ResourceFormat == ViewFormat)
+    return true;
+  const auto family = GetTextureViewFormatFamily(ResourceFormat);
+  if (family != GetTextureViewFormatFamily(ViewFormat))
+    return false;
+  // A typeless resource permits every typed member. Packed depth/stencil SRVs
+  // select individual components; a stencil SRV does not reinterpret depth.
+  if (ResourceFormat == family || family == DXGI_FORMAT_R32G8X24_TYPELESS || family == DXGI_FORMAT_R24G8_TYPELESS)
+    return true;
+  const auto resource_type = GetTextureViewCastType(ResourceFormat);
+  const auto view_type = GetTextureViewCastType(ViewFormat);
+  if ((resource_type == TextureViewCastType::Float) != (view_type == TextureViewCastType::Float))
+    return false;
+  return !(
+      (resource_type == TextureViewCastType::UNorm && view_type == TextureViewCastType::SNorm) ||
+      (resource_type == TextureViewCastType::SNorm && view_type == TextureViewCastType::UNorm)
+  );
+}
+
 HRESULT
 ValidateTextureView(
     const D3D12_RESOURCE_DESC &ResourceDesc, UINT FirstMipLevel, UINT MipLevelCount, UINT FirstArraySlice,
@@ -1042,12 +1149,11 @@ public:
 
     TextureViewDescriptor view_descriptor;
     MTL_DXGI_FORMAT_DESC metal_format;
-    if (IsRGB96Format(desc_.Format) != IsRGB96Format(ViewDesc.Format))
-      return E_INVALIDARG;
     hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
     if (FAILED(hr))
       return hr;
-    if (IsFullyTypelessFormat(ViewDesc.Format, metal_format))
+    if (IsFullyTypelessFormat(ViewDesc.Format, metal_format) ||
+        !IsTextureViewFormatCompatible(desc_.Format, ViewDesc.Format))
       return E_INVALIDARG;
 
     UINT component_mapping = ViewDesc.Shader4ComponentMapping;
@@ -1258,7 +1364,8 @@ public:
     hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
     if (FAILED(hr))
       return hr;
-    if (IsFullyTypelessFormat(ViewDesc.Format, metal_format))
+    if (IsFullyTypelessFormat(ViewDesc.Format, metal_format) ||
+        !IsTextureViewFormatCompatible(desc_.Format, ViewDesc.Format))
       return E_INVALIDARG;
 
     view_descriptor.format = metal_format.PixelFormat;
@@ -1361,12 +1468,11 @@ public:
 
     TextureViewDescriptor view_descriptor;
     MTL_DXGI_FORMAT_DESC metal_format;
-    if (IsRGB96Format(desc_.Format) != IsRGB96Format(ViewDesc.Format))
-      return E_INVALIDARG;
     hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
     if (FAILED(hr))
       return hr;
-    if (IsFullyTypelessFormat(ViewDesc.Format, metal_format))
+    if (IsFullyTypelessFormat(ViewDesc.Format, metal_format) ||
+        !IsTextureViewFormatCompatible(desc_.Format, ViewDesc.Format))
       return E_INVALIDARG;
 
     view_descriptor.format = metal_format.PixelFormat;
@@ -1500,7 +1606,8 @@ public:
     hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
     if (FAILED(hr))
       return hr;
-    if (IsFullyTypelessFormat(ViewDesc.Format, metal_format))
+    if (IsFullyTypelessFormat(ViewDesc.Format, metal_format) ||
+        !IsTextureViewFormatCompatible(desc_.Format, ViewDesc.Format))
       return E_INVALIDARG;
     view_descriptor.format = metal_format.PixelFormat;
 

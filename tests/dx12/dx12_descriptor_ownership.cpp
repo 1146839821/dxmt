@@ -825,11 +825,11 @@ bool CheckTextureViewDimensions() {
   return good;
 }
 
-bool CheckTypedViewFormats() {
+bool CheckTypedViewFormats(bool check_casts = false) {
   struct Objects {
     ID3D12Device *device = nullptr;
     ID3D12DescriptorHeap *heaps[3] = {};
-    ID3D12Resource *resources[9] = {};
+    ID3D12Resource *resources[16] = {};
     ~Objects() {
       for (auto &heap : heaps)
         Release(heap);
@@ -850,18 +850,25 @@ bool CheckTypedViewFormats() {
       DXGI_FORMAT_R32G32B32_TYPELESS, DXGI_FORMAT_R32G8X24_TYPELESS,
       DXGI_FORMAT_R24G8_TYPELESS,     DXGI_FORMAT_UNKNOWN,
       DXGI_FORMAT_R8G8B8A8_UNORM,     DXGI_FORMAT_R32_TYPELESS,
-      DXGI_FORMAT_D32_FLOAT};
-  for (UINT i = 0; i < 9; i++) {
+      DXGI_FORMAT_D32_FLOAT,          DXGI_FORMAT_R32_FLOAT,
+      DXGI_FORMAT_R8G8B8A8_SNORM,     DXGI_FORMAT_R32_UINT,
+      DXGI_FORMAT_B8G8R8A8_TYPELESS,  DXGI_FORMAT_BC1_TYPELESS,
+      DXGI_FORMAT_BC4_TYPELESS,       DXGI_FORMAT_BC4_UNORM};
+  for (UINT i = 0; i < (check_casts ? 16u : 9u); i++) {
     auto desc =
         i == 5
             ? BufferDescription(256, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
             : RenderTargetDescription();
     desc.Format = formats[i];
-    if (i == 0 || i == 1 || i == 6)
+    if (i == 0 || i == 1 || i == 6 || (i >= 9 && i < 12))
       desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
                    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     if (i == 3 || i == 4 || i == 7 || i == 8)
       desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    if (i >= 12) {
+      desc.Width = desc.Height = 4;
+      desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    }
     if (!CheckHR("Typed formats resource",
                  o.device->CreateCommittedResource(
                      &properties, D3D12_HEAP_FLAG_NONE, &desc,
@@ -959,6 +966,117 @@ bool CheckTypedViewFormats() {
       return nullptr;
     }
   };
+  if (check_casts) {
+    struct Cast {
+      UINT resource;
+      DXGI_FORMAT format;
+      bool depth;
+    };
+    // Cross-family pairs include equal-width color formats and packed depth
+    // formats that alias the same native Metal storage on this host.
+    const Cast invalid[] = {{0, DXGI_FORMAT_R32_UINT, false},
+                            {1, DXGI_FORMAT_R8G8B8A8_UINT, false},
+                            {6, DXGI_FORMAT_R16G16_UINT, false},
+                            {7, DXGI_FORMAT_D16_UNORM, true},
+                            {3, DXGI_FORMAT_D24_UNORM_S8_UINT, true},
+                            {4, DXGI_FORMAT_D32_FLOAT_S8X24_UINT, true},
+                            {9, DXGI_FORMAT_R32_UINT, false},
+                            {11, DXGI_FORMAT_R32_FLOAT, false},
+                            {6, DXGI_FORMAT_R8G8B8A8_SNORM, false},
+                            {10, DXGI_FORMAT_R8G8B8A8_UNORM, false}};
+    bool good = true;
+    for (UINT i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+      const auto &c = invalid[i];
+      for (UINT kind = c.depth ? 3u : 0u; kind < (c.depth ? 4u : 3u); kind++)
+        for (bool seeded : {false, true}) {
+          shader->ClearDescriptor(0);
+          rtv->AddRenderTarget(0, nullptr);
+          dsv->AddRenderTarget(0, nullptr);
+          // A distinct seed resource makes a rejected write observable even
+          // when the view format changes but its descriptor kind does not.
+          if (seeded)
+            write(kind, c.depth ? 8 : (c.resource == 6 ? 0 : 6),
+                  c.depth ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM);
+          const void *before = identity(kind);
+          const auto before_shader = ReadDescriptorFields(shader, 0);
+          write(kind, c.resource, c.format);
+          const bool pass =
+              identity(kind) == before && (!seeded || before) &&
+              (kind >= 2 ||
+               ReadDescriptorFields(shader, 0).type == before_shader.type);
+          std::cout << "view_cast invalid=" << i << " kind=" << kind
+                    << " seeded=" << seeded << " pass=" << pass << "\n";
+          good &= pass;
+        }
+    }
+    const Cast valid[] = {{0, DXGI_FORMAT_R8G8B8A8_UNORM, false},
+                          {0, DXGI_FORMAT_R8G8B8A8_SNORM, false},
+                          {0, DXGI_FORMAT_R8G8B8A8_UINT, false},
+                          {0, DXGI_FORMAT_R8G8B8A8_SINT, false},
+                          {1, DXGI_FORMAT_R32_FLOAT, false},
+                          {1, DXGI_FORMAT_R32_UINT, false},
+                          {1, DXGI_FORMAT_R32_SINT, false},
+                          {6, DXGI_FORMAT_R8G8B8A8_UINT, false},
+                          {6, DXGI_FORMAT_R8G8B8A8_SINT, false},
+                          {10, DXGI_FORMAT_R8G8B8A8_SINT, false},
+                          {11, DXGI_FORMAT_R32_SINT, false},
+                          {9, DXGI_FORMAT_R32_FLOAT, false},
+                          {7, DXGI_FORMAT_D32_FLOAT, true},
+                          {3, DXGI_FORMAT_D32_FLOAT_S8X24_UINT, true},
+                          {4, DXGI_FORMAT_D24_UNORM_S8_UINT, true}};
+    for (UINT i = 0; i < sizeof(valid) / sizeof(valid[0]); i++) {
+      const auto &c = valid[i];
+      for (UINT kind = c.depth ? 3u : 0u; kind < (c.depth ? 4u : 3u); kind++) {
+        shader->ClearDescriptor(0);
+        rtv->AddRenderTarget(0, nullptr);
+        dsv->AddRenderTarget(0, nullptr);
+        write(kind, c.resource, c.format);
+        const bool pass =
+            identity(kind) ==
+            static_cast<dxmt::MTLD3D12Resource *>(o.resources[c.resource])
+                ->texture.ptr();
+        std::cout << "view_cast valid=" << i << " kind=" << kind
+                  << " pass=" << pass << "\n";
+        good &= pass;
+      }
+    }
+    for (UINT kind : {0u, 2u}) {
+      write(kind, 6, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+      const bool pass =
+          identity(kind) ==
+          static_cast<dxmt::MTLD3D12Resource *>(o.resources[6])->texture.ptr();
+      std::cout << "view_cast srgb kind=" << kind << " pass=" << pass << "\n";
+      good &= pass;
+    }
+    const Cast sampled[] = {{12, DXGI_FORMAT_B8G8R8A8_UNORM, false},
+                            {12, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, false},
+                            {13, DXGI_FORMAT_BC1_UNORM, false},
+                            {13, DXGI_FORMAT_BC1_UNORM_SRGB, false},
+                            {14, DXGI_FORMAT_BC4_UNORM, false},
+                            {14, DXGI_FORMAT_BC4_SNORM, false}};
+    for (const auto &c : sampled) {
+      shader->ClearDescriptor(0);
+      write(0, c.resource, c.format);
+      const bool pass = identity(0) == static_cast<dxmt::MTLD3D12Resource *>(
+                                           o.resources[c.resource])
+                                           ->texture.ptr();
+      std::cout << "view_cast sampled_format=" << c.format << " pass=" << pass
+                << "\n";
+      good &= pass;
+    }
+    for (bool seeded : {false, true}) {
+      shader->ClearDescriptor(0);
+      if (seeded)
+        write(0, 6, DXGI_FORMAT_R8G8B8A8_UNORM);
+      const void *before = identity(0);
+      write(0, 15, DXGI_FORMAT_BC4_SNORM);
+      const bool pass = identity(0) == before && (!seeded || before);
+      std::cout << "view_cast typed_bc4 seeded=" << seeded << " pass=" << pass
+                << "\n";
+      good &= pass;
+    }
+    return good;
+  }
   struct Case {
     UINT kind, resource;
     DXGI_FORMAT typed;
@@ -1043,6 +1161,8 @@ bool CheckTypedViewFormats() {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::string(argv[1]) == "--texture-view-casts")
+    return CheckTypedViewFormats(true) ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--typed-view-formats")
     return CheckTypedViewFormats() ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--texture-view-dimensions")
