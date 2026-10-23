@@ -589,7 +589,8 @@ public:
       }
 
       if (out->Format == DXGI_FORMAT_UNKNOWN) {
-        out->NumQualityLevels = out->SampleCount == 0 ? 1 : 0;
+        out->NumQualityLevels =
+            out->SampleCount == 1 && out->Flags == D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE ? 1 : 0;
         return S_OK;
       }
 

@@ -247,6 +247,44 @@ main() {
       ) || !options3.CopyQueueTimestampQueriesSupported || !options3.CastingFullyTypedFormatSupported)
     return fail("D3D12 options3 contract mismatch");
 
+  bool unknown_msaa_good = true;
+  for (const UINT sample_count : {0u, 1u, 2u, 4u, 8u}) {
+    for (const auto flags :
+         {D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE,
+          D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_TILED_RESOURCE}) {
+      D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS query = {
+          DXGI_FORMAT_UNKNOWN, sample_count, flags, UINT_MAX};
+      const HRESULT hr = device->CheckFeatureSupport(
+          D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &query, sizeof(query));
+      const UINT expected =
+          sample_count == 1 &&
+                  flags == D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE
+              ? 1
+              : 0;
+      const bool good = CheckHR("CheckFeatureSupport(UNKNOWN MSAA)", hr,
+                                sample_count ? S_OK : E_FAIL) &&
+                        query.NumQualityLevels == expected &&
+                        query.Format == DXGI_FORMAT_UNKNOWN &&
+                        query.SampleCount == sample_count &&
+                        query.Flags == flags;
+      if (!good)
+        std::cerr << "UNKNOWN MSAA count=" << sample_count << " flags=" << flags
+                  << " quality=" << query.NumQualityLevels
+                  << " expected=" << expected << "\n";
+      unknown_msaa_good &= good;
+
+      query.Flags =
+          static_cast<D3D12_MULTISAMPLE_QUALITY_LEVEL_FLAGS>(0x80000001u);
+      unknown_msaa_good &= CheckHR(
+          "CheckFeatureSupport(UNKNOWN invalid MSAA flags)",
+          device->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
+                                      &query, sizeof(query)),
+          E_INVALIDARG);
+    }
+  }
+  if (!unknown_msaa_good)
+    return fail("UNKNOWN MSAA query contract mismatch");
+
   for (const auto format : {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_FLOAT,
                             DXGI_FORMAT_D24_UNORM_S8_UINT}) {
     for (const UINT sample_count : {1u, 2u, 4u, 8u}) {

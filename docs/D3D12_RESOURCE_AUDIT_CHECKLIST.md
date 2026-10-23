@@ -631,6 +631,37 @@ gate remains OPEN; stop this optimization trial until causal evidence improves.
 Exact identities, candidate patch, final restoration, per-process results and
 commands: `../dxmt-test/n13-encode-prefix-20261023/N13-encode-prefix.md`.
 
+### N02 — UNKNOWN single-sample quality query, 2026-10-23
+
+The new Device priority list starts with MSAA, then multiple-fence waits and
+InfoQueue, followed by Enhanced Barrier ordering and format capabilities.
+This round executes only the N02 MSAA slice. UNKNOWN/count1/NONE returned0
+because its predicate tested count0 after count0 had already returned E_FAIL.
+The existing feature runner reproduces that exact failure on the baseline DLL
+and passes after the predicate fix. Counts0/1/2/4/8, NONE/TILED, combined invalid
+flags and unchanged inputs are covered. Tiled tier0 and ordinary per-format
+Metal MSAA checks remain; no ABI, scheduling or feature-level promotion.
+
+Feature, resource and full command-list runners pass, including canonical
+Device/legacy QI, GPU copy replay and allocation/copy validation. Final formatted
+sources are rebuilt and rerun separately. NO_PRIVATE_API device translation-unit
+syntax check passes; full no-private linked/runtime validation is NOT_RUN.
+Pinned upstream returns1 for UNKNOWN/count1; the fork additionally keeps tiled
+queries at0. Microsoft structure/flag pages do not explicitly specify the
+UNKNOWN special case; native Windows differential validation remains NOT_RUN.
+
+Twelve alternating performance processes all exit0. Median of three process
+p50/p95 values: recording3141.30/3484.20 ->3168.10/3604.10us (+0.85/+3.44%),
+ordinary submission143.45/194.70 ->145.30/213.80us (+1.29/+9.81%). Each stage has
+72 recording and180 ordinary-submit measured samples. No causal latency or
+speedup claim; overall performance gate stays OPEN. No QI regrouping revert.
+
+Pending: null-event synchronous multi-fence wait is statically rejected, async
+waits create polling threads, and InfoQueue QI creates distinct objects with no
+Device roundtrip. Their runtime/lifetime fixes are not part of this commit.
+Reproduction commands, manifests, status table, sources, raw logs and limitations:
+`../dxmt-test/n02-device-msaa-20261023/N02-device-msaa.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
