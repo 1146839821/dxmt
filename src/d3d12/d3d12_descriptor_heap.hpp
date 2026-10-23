@@ -22,6 +22,7 @@
 #include "dxmt_texture.hpp"
 #include "metalirconverter_thunks.h"
 #include <atomic>
+#include <bit>
 #include <cstdint>
 #include <mutex>
 
@@ -163,11 +164,86 @@ class ShaderVisibleDescriptorReadBatch {
   std::unique_lock<dxmt::mutex> lock_;
   const ShaderVisibleDescriptorCPUStorage *descriptors_;
   size_t count_;
+  const uint64_t *resource_index_;
+  const UINT *resource_level_offsets_;
+  UINT resource_index_levels_;
+  bool dense_resources_;
+
+  UINT
+  find_set_bit(UINT level, UINT index) const {
+    if (level >= resource_index_levels_)
+      return UINT_MAX;
+    const UINT begin = resource_level_offsets_[level];
+    const UINT end = resource_level_offsets_[level + 1];
+    UINT word = index / 64;
+    if (word >= end - begin)
+      return UINT_MAX;
+    auto available = resource_index_[begin + word] & (UINT64_MAX << (index % 64));
+    if (!available) {
+      word = find_set_bit(level + 1, word + 1);
+      if (word == UINT_MAX)
+        return UINT_MAX;
+      available = resource_index_[begin + word];
+    }
+    return word * 64 + std::countr_zero(available);
+  }
+
+  UINT
+  resource_at_or_after(UINT index) const {
+    if (index >= count_)
+      return UINT_MAX;
+    // Keep the common same-word step inline; directory searches only happen
+    // when crossing a nonempty bitmap word, never by scanning empty capacity.
+    UINT word = index / 64;
+    auto available = resource_index_[word] & (UINT64_MAX << (index % 64));
+    if (!available) {
+      word = find_set_bit(1, word + 1);
+      if (word == UINT_MAX)
+        return UINT_MAX;
+      available = resource_index_[word];
+    }
+    return word * 64 + std::countr_zero(available);
+  }
 
 public:
+  // Snapshot density only after lock_ acquires the heap mutex. Bitmap storage
+  // and level offsets are fixed at heap creation and borrowed under this lock.
   ShaderVisibleDescriptorReadBatch(
-      dxmt::mutex &mutex, const ShaderVisibleDescriptorCPUStorage *descriptors, size_t count
-  ) : lock_(mutex), descriptors_(descriptors), count_(count) {}
+      dxmt::mutex &mutex, const ShaderVisibleDescriptorCPUStorage *descriptors, size_t count,
+      const uint64_t *resource_index, const UINT *resource_level_offsets, UINT resource_index_levels,
+      const UINT &resource_count
+  ) :
+      lock_(mutex),
+      descriptors_(descriptors),
+      count_(count),
+      resource_index_(resource_index),
+      resource_level_offsets_(resource_level_offsets),
+      resource_index_levels_(resource_index_levels),
+      dense_resources_(resource_count && resource_count >= (count + 3) / 4) {}
+
+  UINT
+  first_resource() const {
+    return resource_at_or_after(0);
+  }
+  UINT
+  next_resource(UINT index) const {
+    return index < count_ ? resource_at_or_after(index + 1) : UINT_MAX;
+  }
+
+  // Dense heaps include null candidates in a sequential walk, bounded by
+  // four times the live slots. Sparse heaps follow only the resource bits.
+  UINT
+  first_residency_slot() const {
+    return dense_resources_ ? 0 : first_resource();
+  }
+  UINT
+  next_residency_slot(UINT index) const {
+    if (index >= count_)
+      return UINT_MAX;
+    if (!dense_resources_)
+      return next_resource(index);
+    return index + 1 < count_ ? index + 1 : UINT_MAX;
+  }
 
   const ShaderVisibleDescriptorCPUStorage &get(UINT index) const {
     static const ShaderVisibleDescriptorCPUStorage null_descriptor{};

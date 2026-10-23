@@ -3406,7 +3406,11 @@ public:
         airconv_residency_counters_.conservative_descriptor_slots += heap_desc.NumDescriptors;
         airconv_residency_counters_.shader_reachable_descriptor_slots += heap_desc.NumDescriptors;
       }
-      for (UINT index = 0; index < heap_desc.NumDescriptors; index++)
+      if (!batch) {
+        batch.emplace(descriptor_heap->ReadDescriptorBatch());
+        airconv_residency_counters_.descriptor_batch_locks++;
+      }
+      for (UINT index = batch->first_residency_slot(); index != UINT_MAX; index = batch->next_residency_slot(index))
         if (visit_index(index, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, true))
           return true;
     }
@@ -3619,7 +3623,18 @@ public:
       size_t direct_begin = heap_end;
       while (direct_begin > heap_begin && key_at(direct_begin - 1).direct_indexed)
         direct_begin--;
-      auto resolve_slot = [&](UINT slot_index, size_t slot_begin, size_t slot_end) {
+      size_t slot_begin = heap_begin;
+      UINT next_direct_index = direct_begin != heap_end ? descriptor_batch.first_residency_slot() : UINT_MAX;
+      while (slot_begin < direct_begin || next_direct_index != UINT_MAX) {
+        // Both bitmap candidates and table slots are ordered, so one merge
+        // reads their union without a second lookup for overlapping slots.
+        const auto table_index = slot_begin < direct_begin ? key_at(slot_begin).index : UINT_MAX;
+        const auto slot_index = std::min(table_index, next_direct_index);
+        if (slot_index == next_direct_index)
+          next_direct_index = descriptor_batch.next_residency_slot(slot_index);
+        size_t slot_end = slot_begin;
+        while (slot_end < direct_begin && key_at(slot_end).index == slot_index)
+          slot_end++;
         const auto &descriptor = descriptor_batch.get(slot_index);
         unique_slots++;
         airconv_residency_counters_.submission_unique_slots++;
@@ -3633,17 +3648,7 @@ public:
           }
           return true;
         };
-        return resolve_uses(slot_begin, slot_end) && resolve_uses(direct_begin, heap_end);
-      };
-      size_t slot_begin = heap_begin;
-      UINT next_direct_index = 0;
-      const UINT direct_count = direct_begin != heap_end ? live_heap->GetDesc().NumDescriptors : 0;
-      while (next_direct_index < direct_count || slot_begin < direct_begin) {
-        const auto slot_index = next_direct_index < direct_count ? next_direct_index++ : key_at(slot_begin).index;
-        size_t slot_end = slot_begin;
-        while (slot_end < direct_begin && key_at(slot_end).index == slot_index)
-          slot_end++;
-        if (!resolve_slot(slot_index, slot_begin, slot_end)) {
+        if (!resolve_uses(slot_begin, slot_end) || !resolve_uses(direct_begin, heap_end)) {
           pending_submission_order_.clear();
           ERR("D3D12 failed to retain a volatile descriptor resource before command submission");
           return E_OUTOFMEMORY;
@@ -3780,6 +3785,20 @@ public:
     const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
 
     auto descriptor_stages = stages;
+    // Capture the intent even if the heap is entirely empty now. Applications
+    // can populate its descriptors after Close and before Execute.
+    if (pRootSig->ResourceHeapDirectlyIndexed) {
+      size_t pending_index = 0;
+      CaptureVolatileDescriptorUse(
+          allocator_->encoder_current, descriptor_heap, UINT_MAX, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, true, compute,
+          descriptor_stages, heap_generation, pending_index
+      );
+      if (recording_failed_)
+        return;
+      auto &pending = pending_descriptor_uses_[pending_index];
+      pending.covered_generation = heap_generation;
+      pending.covered = true;
+    }
     auto encode_resource = [&](obj_handle_t resource, WMTResourceUsage usage) {
       if (compute) {
         EncodeComputeResourceUse(resource, usage);
@@ -3792,16 +3811,13 @@ public:
                                  D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed) {
       if (recording_failed_)
         return;
-      // A direct-indexed walk keeps one intent, not one pending record/hash
-      // entry per slot. Recording still encodes every current resource; submit
-      // will walk the latest heap, including descriptors which are null now.
-      if (!direct_indexed || index == 0) {
+      if (!direct_indexed) {
         size_t pending_index = 0;
         const bool needs_read = CaptureVolatileDescriptorUse(
-            allocator_->encoder_current, descriptor_heap, direct_indexed ? UINT_MAX : index, range_type, direct_indexed,
-            compute, descriptor_stages, heap_generation, pending_index
+            allocator_->encoder_current, descriptor_heap, index, range_type, direct_indexed, compute, descriptor_stages,
+            heap_generation, pending_index
         );
-        if (recording_failed_ || (!direct_indexed && !needs_read && unchanged_state_fast_path))
+        if (recording_failed_ || (!needs_read && unchanged_state_fast_path))
           return;
         auto &pending = pending_descriptor_uses_[pending_index];
         pending.covered_generation = heap_generation;

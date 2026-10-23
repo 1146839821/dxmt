@@ -136,6 +136,12 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
   dxmt::mutex descriptor_mutex_;
   std::atomic<uint64_t> mutation_generation_{0};
   std::vector<ShaderVisibleDescriptorCPUStorage> descriptors_;
+  // Level zero has one bit per resource-bearing slot. Each higher level has
+  // one bit per nonempty word below it. Six levels cover all UINT slot indices.
+  std::vector<uint64_t> resource_index_;
+  std::array<UINT, 7> resource_level_offsets_{};
+  UINT resource_index_levels_ = 0;
+  UINT resource_count_ = 0;
   // A descriptor may outlive the ID3D12Resource that created it. Keep the
   // native resource objects alive until the descriptor is overwritten or the
   // heap is destroyed, while the CPU descriptor storage retains lookup
@@ -170,6 +176,59 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
   }
 
   void
+  UpdateResourceIndex(UINT Index) {
+    const auto &descriptor = descriptors_[Index];
+    bool has_resource = false;
+    switch (descriptor.type) {
+    case ShaderVisibleDescriptorType::SRVTexture:
+      has_resource = descriptor.SRVTexture.texture != nullptr;
+      break;
+    case ShaderVisibleDescriptorType::UAVTexture:
+      has_resource = descriptor.UAVTexture.texture != nullptr;
+      break;
+    case ShaderVisibleDescriptorType::SRVAccelerationStructure:
+      has_resource = descriptor.SRVAccelerationStructure.acceleration_structure != NULL_OBJECT_HANDLE;
+      break;
+    case ShaderVisibleDescriptorType::ConstantBuffer:
+      has_resource = descriptor.allocation || descriptor.ConstantBuffer.address;
+      break;
+    case ShaderVisibleDescriptorType::SRVTexelBuffer:
+      has_resource = descriptor.SRVTexelBuffer.buffer != nullptr;
+      break;
+    case ShaderVisibleDescriptorType::UAVTexelBuffer:
+      has_resource = descriptor.UAVTexelBuffer.buffer != nullptr;
+      break;
+    case ShaderVisibleDescriptorType::SRVBuffer:
+      has_resource = descriptor.SRVBuffer.buffer != nullptr;
+      break;
+    case ShaderVisibleDescriptorType::UAVBuffer:
+      has_resource = descriptor.UAVBuffer.buffer != nullptr;
+      break;
+    case ShaderVisibleDescriptorType::Null:
+      break;
+    }
+
+    const bool indexed = resource_index_[Index / 64] & (uint64_t(1) << (Index % 64));
+    if (has_resource == indexed)
+      return;
+    if (has_resource)
+      resource_count_++;
+    else
+      resource_count_--;
+    for (UINT level = 0; level < resource_index_levels_; level++, Index /= 64) {
+      auto &word = resource_index_[resource_level_offsets_[level] + Index / 64];
+      const bool was_nonempty = word != 0;
+      const auto bit = uint64_t(1) << (Index % 64);
+      if (has_resource)
+        word |= bit;
+      else
+        word &= ~bit;
+      if ((word != 0) == was_nonempty)
+        break;
+    }
+  }
+
+  void
   MarkDescriptorMutation() {
     mutation_generation_.fetch_add(1, std::memory_order_release);
   }
@@ -190,6 +249,17 @@ public:
       return E_INVALIDARG;
     }
     descriptors_.resize(pDesc->NumDescriptors);
+    UINT index_words = 0;
+    for (size_t bits = pDesc->NumDescriptors; bits;) {
+      const auto words = (bits + 63) / 64;
+      resource_level_offsets_[resource_index_levels_++] = index_words;
+      index_words += words;
+      if (words == 1)
+        break;
+      bits = words;
+    }
+    resource_level_offsets_[resource_index_levels_] = index_words;
+    resource_index_.resize(index_words);
     texture_resources_.resize(pDesc->NumDescriptors);
     buffer_resources_.resize(pDesc->NumDescriptors);
     counter_resources_.resize(pDesc->NumDescriptors);
@@ -330,6 +400,7 @@ public:
       SetMSCDescriptor(Index, {0, texture_view.gpuResourceID, std::bit_cast<uint32_t>(ResourceMinLODClamp)});
 
     }
+    UpdateResourceIndex(Index);
     MarkDescriptorMutation();
     return S_OK;
   }
@@ -354,6 +425,7 @@ public:
     if (mapped_argument_buffer_)
       mapped_argument_buffer_[Index].ZeroFilled = {};
     SetMSCDescriptor(Index, {HeaderLocation, 0, 0});
+    UpdateResourceIndex(Index);
     MarkDescriptorMutation();
     return S_OK;
   }
@@ -387,6 +459,7 @@ public:
       gpu_storage.ConstantBuffer.size = SizeInBytes;
     }
     SetMSCDescriptor(Index, {VA, 0, SizeInBytes});
+    UpdateResourceIndex(Index);
     MarkDescriptorMutation();
     return S_OK;
   }
@@ -407,6 +480,7 @@ public:
     if (mapped_argument_buffer_)
       mapped_argument_buffer_[Index].ZeroFilled = {{}};
     SetMSCDescriptor(Index, {});
+    UpdateResourceIndex(Index);
     MarkDescriptorMutation();
   }
 
@@ -429,6 +503,7 @@ public:
       gpu_storage.UAVTexture.metadata = TextureMetadata(Texture->arrayLength(View), 0);
       SetMSCDescriptor(Index, {0, texture_view.gpuResourceID, 0});
     }
+    UpdateResourceIndex(Index);
     MarkDescriptorMutation();
     return S_OK;
   }
@@ -464,6 +539,7 @@ public:
         SetMSCDescriptor(Index, {});
       }
     }
+    UpdateResourceIndex(Index);
     MarkDescriptorMutation();
     return S_OK;
   }
@@ -495,6 +571,7 @@ public:
         SetMSCDescriptor(Index, {});
       }
     }
+    UpdateResourceIndex(Index);
     MarkDescriptorMutation();
     return S_OK;
   }
@@ -527,6 +604,7 @@ public:
         SetMSCDescriptor(Index, {});
       }
     }
+    UpdateResourceIndex(Index);
     MarkDescriptorMutation();
     return S_OK;
   }
@@ -554,6 +632,7 @@ public:
         SetMSCDescriptor(Index, {});
       }
     }
+    UpdateResourceIndex(Index);
     MarkDescriptorMutation();
     return S_OK;
   }
@@ -592,7 +671,15 @@ public:
 
   ShaderVisibleDescriptorReadBatch
   ReadDescriptorBatch() override {
-    return {descriptor_mutex_, descriptors_.data(), descriptors_.size()};
+    return {
+        descriptor_mutex_,
+        descriptors_.data(),
+        descriptors_.size(),
+        resource_index_.data(),
+        resource_level_offsets_.data(),
+        resource_index_levels_,
+        resource_count_
+    };
   }
 
   uint64_t
@@ -624,6 +711,7 @@ public:
         heap_to->mapped_argument_buffer_[DescriptorTo + i] = mapped_argument_buffer_[From + i];
       if (mapped_msc_argument_buffer_ && heap_to->mapped_msc_argument_buffer_)
         heap_to->mapped_msc_argument_buffer_[DescriptorTo + i] = mapped_msc_argument_buffer_[From + i];
+      heap_to->UpdateResourceIndex(DescriptorTo + i);
     }
     if (CopyCount)
       heap_to->MarkDescriptorMutation();

@@ -236,9 +236,14 @@ int main(int argc, char **argv) {
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
                 D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             0};
+        // Keep a null table-only slot alongside the two overlapping SRVs.
+        descriptor_ranges_1[1] = descriptor_ranges_1[0];
+        descriptor_ranges_1[1].NumDescriptors = 1;
+        descriptor_ranges_1[1].BaseShaderRegister = 2;
+        descriptor_ranges_1[1].OffsetInDescriptorsFromTableStart = 3;
         root_parameters_1[0].ParameterType =
             D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        root_parameters_1[0].DescriptorTable = {1, descriptor_ranges_1};
+        root_parameters_1[0].DescriptorTable = {2, descriptor_ranges_1};
         versioned_root_desc.Desc_1_1.NumParameters = 1;
         versioned_root_desc.Desc_1_1.pParameters = root_parameters_1;
       }
@@ -330,6 +335,8 @@ int main(int argc, char **argv) {
                                          direct_indexed_resources_lifetime || direct_indexed_nonuniform
                                      ? 3
                                      : 1;
+      if (direct_indexed_nonuniform_mixed)
+        heap_desc.NumDescriptors = 4;
       heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
       if (!CheckHR("CreateDescriptorHeap",
                    device->CreateDescriptorHeap(
@@ -532,6 +539,14 @@ int main(int argc, char **argv) {
         descriptor_cpu.ptr += descriptor_increment * 2;
       device->CreateUnorderedAccessView(output_buffer, nullptr, &uav_desc,
                                         descriptor_cpu);
+      if (direct_indexed_nonuniform && !direct_indexed_nonuniform_mixed) {
+        // Record with an entirely empty heap. A whole-heap submission intent
+        // must survive even when there is no resource slot to visit yet.
+        device->CreateUnorderedAccessView(nullptr, nullptr, &uav_desc,
+                                          descriptor_cpu);
+        auto first = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        device->CreateShaderResourceView(nullptr, &srv_desc, first);
+      }
     }
 
     if (direct_indexed_resources_lifetime) {
@@ -714,6 +729,21 @@ int main(int argc, char **argv) {
     goto cleanup;
 
   if (direct_indexed_nonuniform) {
+    if (!direct_indexed_nonuniform_mixed) {
+      const auto counters =
+          static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)
+              ->GetAirconvResidencyCounters();
+      if (counters.pending_descriptors_inserted != 1 ||
+          counters.direct_indexed_descriptors != 0) {
+        std::cerr << "empty direct-indexed heap did not retain one intent "
+                     "without a slot walk\n";
+        goto cleanup;
+      }
+      auto output = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+      output.ptr += descriptor_increment * 2;
+      device->CreateUnorderedAccessView(output_buffer, nullptr, &uav_desc,
+                                        output);
+    }
     // Closed direct-indexed lists read the descriptor heap's latest contents
     // at submission. Use a different native resource, not just another slice.
     auto source = nonuniform_source_heap->GetCPUDescriptorHandleForHeapStart();
@@ -742,7 +772,7 @@ int main(int argc, char **argv) {
       goto cleanup;
     const auto after = internal_list->GetAirconvResidencyCounters();
     const auto slots = descriptor_heap->GetDesc().NumDescriptors;
-    const UINT overlap = direct_indexed_nonuniform_mixed ? 2 : 0;
+    const UINT overlap = direct_indexed_nonuniform_mixed ? 3 : 0;
     if (after.submission_unique_slots - before.submission_unique_slots !=
             slots ||
         after.submission_batch_locks - before.submission_batch_locks != 1 ||

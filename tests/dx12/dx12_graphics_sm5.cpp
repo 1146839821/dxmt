@@ -674,10 +674,12 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
       test.descriptor_incompatible_range) {
     D3D12_DESCRIPTOR_HEAP_DESC shader_heap_desc = {};
     shader_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    shader_heap_desc.NumDescriptors = test.descriptor_wide_footprint ? 128 : test.descriptor_unbounded_range ? 192
-                                      : test.direct_indexed_heap_scan ? 4
-                                      : test.descriptor_two_slot_encoder_break ? 2
-                                                                                : 1;
+    shader_heap_desc.NumDescriptors = test.descriptor_wide_footprint    ? 128
+                                      : test.descriptor_unbounded_range ? 192
+                                      : test.direct_indexed_heap_scan   ? 128
+                                      : test.descriptor_two_slot_encoder_break
+                                          ? 2
+                                          : 1;
     shader_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (!CheckHR("CreateShaderHeap", device->CreateDescriptorHeap(&shader_heap_desc, IID_PPV_ARGS(&shader_heap))))
       return fail("shader heap creation failed");
@@ -905,6 +907,9 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     unrelated_descriptor.ptr += uint64_t(device->GetDescriptorHandleIncrementSize(
                                   D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)) * 3;
     device->CreateShaderResourceView(query_texture_a, nullptr, unrelated_descriptor);
+    device->CreateConstantBufferView(nullptr, unrelated_descriptor);
+    device->CreateShaderResourceView(query_texture_a, nullptr,
+                                     unrelated_descriptor);
     draw();
     // The same heap intent must fan out to a later encoder while retaining
     // one live slot read/lock per submission.
@@ -1073,15 +1078,16 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
         counters.descriptor_requests != 4 ||
         counters.descriptor_scans_executed != 3 ||
         counters.descriptor_scan_skips != 1 ||
-        counters.descriptor_slots_visited != 12 ||
+        counters.descriptor_slots_visited != 5 ||
         counters.descriptor_batch_locks != 3 ||
         counters.direct_indexed_root_requests != 4 ||
         counters.direct_indexed_scans != 3 ||
-        counters.direct_indexed_descriptors != 12 ||
+        counters.direct_indexed_descriptors != 5 ||
         counters.pending_descriptors_inserted != 2 ||
         counters.pending_descriptor_duplicates != 1 ||
         counters.heap_generation_invalidations != 1) {
-      std::cerr << "DXBC SM5 " << test.name << ": direct-indexed scan did not conservatively cover the full heap\n";
+      std::cerr << "DXBC SM5 " << test.name
+                << ": direct-indexed scan did not cover the resource slots\n";
       cleanup();
       return false;
     }
@@ -1154,12 +1160,14 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
     const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
     if (counters.submission_pending_uses != 2 ||
         counters.submission_unique_heaps != 1 ||
-        counters.submission_unique_slots != 4 ||
+        counters.submission_unique_slots != 2 ||
         counters.submission_batch_locks != 1 ||
-        counters.submission_live_slot_resolutions != 4 ||
-        counters.submission_slot_reuse_hits != 4 ||
-        counters.submission_fanout_uses != 8) {
-      std::cerr << "DXBC SM5 " << test.name << ": submission did not resolve the full direct-indexed heap\n";
+        counters.submission_live_slot_resolutions != 2 ||
+        counters.submission_slot_reuse_hits != 2 ||
+        counters.submission_fanout_uses != 4) {
+      std::cerr
+          << "DXBC SM5 " << test.name
+          << ": submission did not resolve the direct-indexed resource slots\n";
       cleanup();
       return false;
     }

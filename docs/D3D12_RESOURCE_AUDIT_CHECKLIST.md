@@ -270,6 +270,62 @@ changes. Full direct-heap scans remain O(N), so this is a partial N09 performanc
 slice, not the N09 exit gate or complete SM6.6 support. External commands,
 artifacts, hashes, and raw timings: `../dxmt-test/n09-intents-20261023/`.
 
+### N09 — heap-owned resource-slot index, 2026-10-23
+
+The existing descriptor heap maintains a hierarchical bitmap under its descriptor
+mutex. Level zero marks resource-bearing slots; upper levels mark nonempty words.
+View writes, null replacement, and copies update it alongside the existing payload
+and owners, before publishing the mutation generation. It contains no resource
+references and introduces no per-stage cache. The locked batch snapshots density
+after acquiring the mutex. An empty recording still retains one whole-heap intent,
+so Close-to-Execute population and fenced replay see the latest descriptors.
+
+For capacity N and population P, sparse walks use ordered bitmap candidates in
+O(P log64 N); at P >= ceil(N/4), sequential walking bounds candidates by N <= 4P.
+The submit loop merges ordered table slots and direct candidates, reading their
+union once under one batch lock per heap. Updates have at most six bitmap levels
+for UINT slot indices, with no update-time allocation. Heap creation allocates and
+zeros the bitmap: 15,875 uint64 words (127,000 bytes) at one million slots, plus
+constant metadata. Existing descriptor and native resource owners remain unchanged.
+
+Three alternating old/new pairs per scene, each with 20 warmups and 100 collector
+samples, produced these median-of-medians on M1 Max with matched isolated Wine.
+The same executable and shader ran against both DLLs; all 60 processes passed
+888/1777 pre-submit and 777/888 fenced-replay GPU readbacks.
+
+| Capacity / population | Baseline us | Bitmap us | Candidate slots before / after |
+| --- | ---: | ---: | ---: |
+| 3/sparse/default | 7.87 | 7.71 | 3 / 3 |
+| 4096/sparse/default | 30.05 | 8.05 | 4096 / 3 |
+| 65536/sparse/default | 346.10 | 8.30 | 65536 / 3 |
+| 1000000/sparse/default | 5303.50 | 8.60 | 1000000 / 3 |
+| 65536/ordered/default | 1457.00 | 1415.20 | 65536 / 65536 |
+| 65536/shuffle/default | 1397.50 | 1330.90 | 65536 / 65536 |
+| 65536/shuffle/16383 | 738.10 | 356.70 | 65536 / 16383 |
+| 65536/shuffle/16384 | 762.70 | 760.10 | 65536 / 65536 |
+| 1000000/shuffle/65536 | 6850.70 | 3241.30 | 1000000 / 65536 |
+| 1000000/shuffle/249999 | 11365.50 | 5733.00 | 1000000 / 249999 |
+
+Every collector call retains one pending direct intent, takes one heap batch lock,
+and performs zero descriptor VA lookups. Sparse scenes record an entirely empty
+heap, so compare these paired measurements rather than earlier fixtures. Cold
+heap creation, single Dispatch/Execute samples, mutation timings and p95 ranges
+are preserved in external performance-summary.json; these are CPU collector
+measurements, with no frame-rate or end-to-end GPU throughput claim.
+
+Metal validation passes empty-at-recording, mixed table/direct with a null table
+slot, and the 128-slot graphics encoder case. The ownership runner extension
+checks seven view classes, 5000 mixed mutations, sparse/dense transitions, <=4P
+candidate bounds, same-heap CPU copies and reader/writer exclusion. A 999,983-slot
+CPU heap checks bit/word/directory boundaries at 63/64, 4095/4096 and
+262143/262144, last-slot padding, and full removal back to an empty root.
+Counter, ownership, stress, adjacent GPU cases, three expected-failure controls
+and ordinary-table capacity controls pass. Scoped builds pass. Public COM and
+WineMetal ABIs, shader routing and capability declarations are unchanged; private
+C++ read-batch consumers were rebuilt together. AS execution and full N09/FL12_2
+gates remain unproven. Evidence:
+`../dxmt-test/n09-resource-index-20261023/N09-resource-slot-index.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
