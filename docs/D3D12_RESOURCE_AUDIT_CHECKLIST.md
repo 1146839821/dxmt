@@ -1443,6 +1443,52 @@ Evidence:
 `validation-results.json`, `control-aggregate.json`,
 `final-control-aggregate.json`, `disassembly-summary.json`, `manifest.json`.
 
+### N10 — controlled linked-layout attribution, 2026-10-24
+
+Actual base `0a01f54419ecfaa8cc4aa61b9f6f54facf7f30f8`. One bounded N10
+experiment; production source/build settings, ABI and capabilities unchanged.
+External snapshots of existing objects/libraries reproduce the previous measured
+DLL's exact `.text` bytes/RVAs. Normal relink differs only in version/build-ID
+section bytes plus header metadata. A second link adds `/order` for the existing
+CopyBufferRegion COMDAT: its RVA moves from 0xe1b0 to 0x1000 while all 172
+symbolized instructions remain identical. References/unwind metadata and other
+code placements necessarily move; this does not isolate a microarchitectural
+cause or establish byte-identical code across layouts.
+
+Both images pass default command-list, 25-round long-copy and multi depth/stencil
+GPU cases with Metal API/shader validation. Both reject the deliberately omitted
+second submission (exit 1, round 1 mismatch, device_reason=0). Native recording
+buffer allocation remains zero. Final links and eight validation processes
+complete with expected exits; earlier setup/loader failures are retained and
+excluded from correctness outcomes.
+
+Eighteen fixed-PE performance processes pass, 450 GPU-verified rows. Each has
+25 rounds of 50000 copies, discards round 0, and computes p50/nearest-rank p95
+across 24 samples; aggregate is median of three process statistics. Pair order
+alternates AB/BA/AB. Same-.text immutable/normal recording delta is
+-0.55%/-1.55%. Normal/front is 3208.35/4152.10 -> 3082.65/3179.00 us
+(-3.92%/-23.44%); after path swap 3197.85/3313.80 -> 3069.95/3177.60 us
+(-4.00%/-4.11%). Larger first-block baseline tails remain in the raw evidence.
+The layout intervention changes measured recording cost on this host; exact
+Rosetta/alignment/cache cause and historical +2% attribution remain UNPROVEN.
+No production ordering change or performance-gate closure follows from this.
+
+Close and batch-execute statistics are retained separately in the report.
+Batch-execute is the 50000-copy ExecuteCommandLists timer, not ordinary N13
+full-submit. Native Windows, other GPUs, T3/T4, full no-private runtime and
+ordinary N13 benchmark NOT_RUN. Same actual macOS27.0.1/Xcode27.1/M1Max/
+Apple7/MSC4.0.1/Wine11/clang23.1.1 host. Existing gates remain OPEN. Next
+attribution requires CPU profiling with layout sensitivity controlled; Device
+format-family review remains queued. No new source/header or runtime state.
+
+Provenance clarification: the previous external N10 report's “before-42b” label
+means the pre-3dab fixture based on `42b5a8ea`, as its N09 manifest records;
+it does not mean an implementation predating 42b. Captured hashes are unchanged.
+
+Evidence: `../dxmt-test/n10-code-placement-20261024/N10-code-placement.md`,
+`build-commands.json`, `inspection.json`, `section-comparison.json`,
+`validation-results.json`, `oriented-aggregate.json`, `manifest.json`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
