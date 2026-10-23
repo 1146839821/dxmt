@@ -693,7 +693,7 @@ public:
       }
 
       MTL_DXGI_FORMAT_DESC format_desc;
-      HRESULT hr = MTLQueryDXGIFormat(metal, out->Format, format_desc);
+      HRESULT hr = QueryD3D12TextureFormat(metal, out->Format, format_desc);
       if (SUCCEEDED(hr) && out->SampleCount) {
         const auto capabilities = GetMTLPixelFormatCapability(format_desc.PixelFormat);
         const bool format_supports_msaa =
@@ -750,7 +750,7 @@ public:
         return S_OK;
       }
       MTL_DXGI_FORMAT_DESC format_desc;
-      HRESULT hr = MTLQueryDXGIFormat(metal, out->Format, format_desc);
+      HRESULT hr = QueryD3D12TextureFormat(metal, out->Format, format_desc);
       if (FAILED(hr))
         return E_FAIL;
 
@@ -1038,7 +1038,7 @@ public:
       }
 
       MTL_DXGI_FORMAT_DESC format_desc;
-      if (FAILED(MTLQueryDXGIFormat(metal, out->Format, format_desc)) ||
+      if (FAILED(QueryD3D12TextureFormat(metal, out->Format, format_desc)) ||
           format_desc.PixelFormat == WMTPixelFormatInvalid)
         return E_INVALIDARG;
 
@@ -1096,6 +1096,9 @@ public:
         if (!depth_target)
           out->Support1 |= D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD;
       }
+      // A physical RGBA32 backing does not make logical RGB96 a typed UAV.
+      if (format_desc.BytesPerTexel == 12)
+        return S_OK;
       if (has_capability(FormatCapability::TextureBufferRead) || has_capability(FormatCapability::TextureBufferReadWrite))
         out->Support2 |= D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD;
       if (has_capability(FormatCapability::TextureBufferWrite) || has_capability(FormatCapability::TextureBufferReadWrite))

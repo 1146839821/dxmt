@@ -150,6 +150,7 @@ struct CopyTilesEncoderData : EncoderData {
 };
 
 struct ComputeEncoderData : EncoderData {
+  WMT::Reference<WMT::ComputePipelineState> internal_pipeline;
   wmtcmd_compute_nop cmd_head;
   wmtcmd_base *cmd_tail;
   WMT::Reference<WMT::ComputePipelineState> ray_dispatch_pso;

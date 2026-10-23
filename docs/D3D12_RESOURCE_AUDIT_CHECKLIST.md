@@ -1076,6 +1076,66 @@ unchanged. Native layout bug remains OPEN; no FL/Tier promotion or push. User
 .gitignore unchanged. Evidence/root design:
 `../dxmt-test/n08-rgb96-20261024/N08-rgb96-design.md`.
 
+### N08 — RGB96 physical texels and packed copy boundaries, 2026-10-24
+
+Base5cfac03f; one representation mechanism. Confirmed8/12-byte minimal GPU loss
+is fixed: same final PE exits1 on baseline,0 on final. D3D12 maps RGB96 to RGBA32
+native texels while keeping public footprints12 bytes. Committed/placed allocation,
+MSAA, format/view queries and CPU read/write consume one physical policy. Shared
+D3D11/buffer/vertex format mapping unchanged. Internal compute packs/unpacks three
+words only at buffer/texture boundaries; native texture copies retain coordinates.
+SRV missing-alpha1 composes with custom swizzle. Reject RGB96/RGBA128 logical
+casts/copies and RGB96 typed UAV; no inherited RGBA typed-UAV/index-buffer claim.
+
+Use existing allocator scratch, not a new pool: tiny copies keep unique bounded
+64KiB untracked ranges; large RGB96 copies reuse tracked scratch across compute/blit
+passes within one recording. Depth/stencil default scope stays per encoder.
+Encoder refs own native resources; ComputeEncoderData retains internal PSO. No
+new scheduler/thread/cache/manager. Allocation/PSO failure fails recording.
+
+Final Meson build and DXC shader builds exit0. API/shader validation enabled:
+12 RGB formats/dimensions plus3 RGBA controls pass exact GPU readback, guards,
+Fence completion; includes mips,arrays,volume,odd widths,committed->placed,CPU
+custom pitches/short-pitch rejection and incompatible-copy negatives. Repeated
+matrix runs pass. Partial-copy repeats detect corruption, not an independent
+partial no-op.512x512 scratch reuse9 repeats passes. Float/typeless SM6 nine-view
+oracles pass including default alpha/custom mapping; MSAA checksR only. Ordinary
+typeless,resource,format-dimension,selected format,command-list and enhanced-barrier
+runners pass. D3D11 SHDR/SHEX vs DXIL boundary test passes (shader creation only).
+Five no-private translation-unit syntax checks pass; full no-private link/runtime,
+Windows differential,RGB96 SM5/integer shader loads,full rendering/blending/fault
+sweep,reserved RGB96 andT3/T4 NOT_RUN/unproven. No full conformance claim.
+
+Final AB/BA/AB18 processes all pass; median of3 process p50/p95 values,us:
+
+| Probe | Before | Final | Change |
+|---|---:|---:|---:|
+| Recording |3281.05/3440.90|3072.10/3237.00|-6.37%/-5.93%|
+| Ordinary submit |106.45/137.90|111.40/148.10|+4.65%/+7.40%|
+|120000 format queries |2686.85/2727.90|3158.70/3217.40|+17.56%/+17.94%|
+
+Per side72 recording/180 submit/72 format batches. Initial format overhead37.39%
+p95 reduced by direct ordinary query path; residual~4.08ns/query recorded, no
+cache or causal speedup claim. Historical/global performance gate remains OPEN.
+Three processes x8 retained512x512 cases per format: RGB96 record135.10/186.90,
+submit167.45/223.20,submit+Fence1081.35/1273.70us; RGBA128 control153.65/173.80,
+129.95/160.60,864.95/944.90us. These are CPU+completion latencies, not GPU timestamps.
+RGB96 payload3MiB,actual allocation4MiB (same as correct RGBA128),two textures plus
+up to4MiB scratch; native texture4x broken R32 allocation. Conversion requires
+O(texels) extra traffic/dispatches; physical payload+33.3% over logical. No claim
+of zero-cost emulation or allocation-count measurement.
+
+Public COM/private virtual/WMT ABI unchanged; private ComputeEncoderData layout
+grows by a strong PSO ref and nonvirtual staging method gains scope argument.
+Native RGB96 layout and its internal compute/blit command sequence change. FL/SM/
+Options/Tiers unchanged; EnhancedBarriersSupported FALSE. No src/d3d12 new files,
+push or user .gitignore changes. M1Max/Apple7,macOS27.0.1,Xcode27.1(requested26
+mismatch),MSC4.0.1,matched Wine11 x64/Rosetta,bundled clang23.1.1.
+Exact commands/exits,issue table,all changed files,ABI/cost/coverage limits and
+loaded-path/hash manifest: `../dxmt-test/n08-rgb96-fix-20261024/N08-rgb96-fix.md`.
+Next node prioritizes remaining Device attachment gaps against current HEAD;
+already committed MSAA/fence/InfoQueue/split slices are not reimplemented here.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

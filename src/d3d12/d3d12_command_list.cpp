@@ -691,6 +691,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   std::vector<VisibilityChunk> visibility_chunks_;
   VisibilityResultOffsetBumpState visibility_offsets_;
   WMT::Reference<WMT::ComputePipelineState> visibility_sum_pso_;
+  WMT::Reference<WMT::ComputePipelineState> rgb96_pso_;
   HRESULT query_recording_error_ = S_OK;
   Com<MTLD3D12Resource, false> predication_buffer_;
   UINT64 predication_offset_ = 0;
@@ -4200,6 +4201,93 @@ public:
     cmd_cp.copy_length = ByteCount;
   };
 
+  bool
+  ConvertRGB96(
+      WMT::Buffer source, uint64_t source_offset, uint64_t source_row, uint64_t source_image, WMT::Buffer destination,
+      uint64_t destination_offset, uint64_t destination_row, uint64_t destination_image, UINT width, UINT height,
+      UINT depth, bool pack
+  ) {
+    if (!rgb96_pso_) {
+      auto function = device_->GetLib().getLibrary().newFunction("dxmt_convert_rgb96");
+      if (function) {
+        WMT::Reference<WMT::Error> error;
+        rgb96_pso_ = device_->GetMTLDevice().newComputePipelineState(function, error);
+        if (!rgb96_pso_ && error)
+          ERR("RGB96 conversion PSO: ", error.description().getUTF8String());
+      }
+    }
+    if (!rgb96_pso_) {
+      FailRecording(__func__, "RGB96 conversion pipeline unavailable");
+      return false;
+    }
+    allocator_->InvalidateCurrentPass();
+    auto compute = allocator_->AllocatePass<ComputeEncoderData>();
+    if (!compute) {
+      FailRecording(__func__, "RGB96 conversion encoder allocation failed");
+      return false;
+    }
+    ResetCurrentEncoderResourceUseState();
+    compute->type = EncoderType::Compute;
+    compute->cmd_head.type = WMTComputeCommandNop;
+    compute->cmd_head.next.set(nullptr);
+    compute->cmd_tail = reinterpret_cast<wmtcmd_base *>(&compute->cmd_head);
+    compute->internal_pipeline = rgb96_pso_;
+    EncodeComputeResourceUse(source.handle, WMTResourceUsageRead);
+    EncodeComputeResourceUse(destination.handle, WMTResourceUsageWrite);
+    auto &pipeline = allocator_->EncodeComputeCommand<wmtcmd_compute_setpso>();
+    pipeline.type = WMTComputeCommandSetPSO;
+    pipeline.pso = rgb96_pso_;
+    pipeline.threadgroup_size = {32, 1, 1};
+    auto &src = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+    src.type = WMTComputeCommandSetBuffer;
+    src.buffer = source;
+    src.offset = source_offset;
+    src.index = 0;
+    auto &dst = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+    dst.type = WMTComputeCommandSetBuffer;
+    dst.buffer = destination;
+    dst.offset = destination_offset;
+    dst.index = 1;
+    struct Params {
+      uint64_t source_row, source_image, destination_row, destination_image;
+      uint32_t width, height, depth, source_components;
+    };
+    auto params = allocator_->AllocateCommandData<Params>(1);
+    if (!params) {
+      FailRecording(__func__, "RGB96 conversion parameter allocation failed");
+      return false;
+    }
+    *params = {source_row, source_image, destination_row, destination_image, width, height, depth, pack ? 3u : 4u};
+    auto &bytes = allocator_->EncodeComputeCommand<wmtcmd_compute_setbytes>();
+    bytes.type = WMTComputeCommandSetBytes;
+    bytes.bytes.set(params);
+    bytes.length = sizeof(*params);
+    bytes.index = 2;
+    auto &dispatch = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch>();
+    dispatch.type = WMTComputeCommandDispatchThreads;
+    dispatch.size = {width, height, depth};
+    allocator_->InvalidateCurrentPass();
+    dirty_state_.set(
+        DirtyState::ComputePipelineState, DirtyState::ComputeRootArguments, DirtyState::ComputeRootSignature,
+        DirtyState::DescriptorHeaps
+    );
+    return !recording_failed_;
+  }
+
+  std::pair<WMT::Buffer, uint64_t>
+  AllocateRGB96Staging(UINT width, UINT height, UINT depth, uint64_t &row, uint64_t &image) {
+    row = (uint64_t(width) * 16 + 255) & ~uint64_t(255);
+    if (row > UINT_MAX || !height || !depth || row > SIZE_MAX / height || row * height > SIZE_MAX / depth) {
+      FailRecording(__func__, "RGB96 staging size overflow");
+      return {};
+    }
+    image = row * height;
+    auto result = allocator_->AllocateCopyStaging(image * depth, true);
+    if (!result.first)
+      FailRecording(__func__, "RGB96 staging allocation failed");
+    return result;
+  }
+
   void STDMETHODCALLTYPE
   CopyTextureRegion(
       const D3D12_TEXTURE_COPY_LOCATION *pDst, UINT DstX, UINT DstY, UINT DstZ, const D3D12_TEXTURE_COPY_LOCATION *pSrc,
@@ -4216,6 +4304,14 @@ public:
         (pSrc->Type != D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX &&
          pSrc->Type != D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT)) {
       FailRecording(__func__, "invalid texture copy location type");
+      return;
+    }
+    const auto logical_format = [](const D3D12_TEXTURE_COPY_LOCATION *location) {
+      return location->Type == D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT ? location->PlacedFootprint.Footprint.Format
+                                                                        : location->pResource->GetDesc().Format;
+    };
+    if (IsRGB96Format(logical_format(pSrc)) != IsRGB96Format(logical_format(pDst))) {
+      FailRecording(__func__, "RGB96 copy formats have incompatible logical layouts");
       return;
     }
     if (pSrcBox &&
@@ -4313,14 +4409,30 @@ public:
           );
         }
 
+        WMT::Buffer copy_source = src->current()->buffer();
+        uint64_t copy_offset = source_offset;
+        uint64_t copy_row = pSrc->PlacedFootprint.Footprint.RowPitch, copy_image = image_pitch;
+        if (copy_format.bytes_per_block == 12) {
+          auto [staging, offset] = AllocateRGB96Staging(width, height, depth, copy_row, copy_image);
+          if (!staging ||
+              !ConvertRGB96(
+                  copy_source, copy_offset, pSrc->PlacedFootprint.Footprint.RowPitch, image_pitch, staging, offset,
+                  copy_row, copy_image, width, height, depth, true
+              ) ||
+              !PreBlit())
+            return;
+          copy_source = staging;
+          copy_offset = offset;
+          RetainResourceForCurrentEncoder(dst->current()->texture().handle);
+          if (recording_failed_)
+            return;
+        }
         auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture_withblitoption>();
         cmd_cp.type = WMTBlitCommandCopyFromBufferToTextureWithBlitOption;
-        cmd_cp.src = src->current()->buffer();
-        cmd_cp.src_offset = source_offset;
-        cmd_cp.bytes_per_row = pSrc->PlacedFootprint.Footprint.RowPitch;
-        cmd_cp.bytes_per_image = dst->textureType() == WMTTextureType3D
-                                     ? image_pitch
-                                     : 0;
+        cmd_cp.src = copy_source;
+        cmd_cp.src_offset = copy_offset;
+        cmd_cp.bytes_per_row = static_cast<uint32_t>(copy_row);
+        cmd_cp.bytes_per_image = dst->textureType() == WMTTextureType3D ? copy_image : 0;
         cmd_cp.size = {width, height, depth};
         cmd_cp.dst = dst->current()->texture();
         cmd_cp.level = dst_subresource.mip;
@@ -4495,6 +4607,16 @@ public:
           return;
         }
 
+        WMT::Buffer copy_destination = dst->current()->buffer();
+        uint64_t copy_offset = destination_offset;
+        uint64_t copy_row = pDst->PlacedFootprint.Footprint.RowPitch, copy_image = image_pitch;
+        if (copy_format.bytes_per_block == 12) {
+          auto staging = AllocateRGB96Staging(width, height, depth, copy_row, copy_image);
+          if (!staging.first)
+            return;
+          copy_destination = staging.first;
+          copy_offset = staging.second;
+        }
         auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer_withblitoption>();
         cmd_cp.type = WMTBlitCommandCopyFromTextureToBufferWithBlitOption;
         cmd_cp.src = src->current()->texture();
@@ -4502,15 +4624,18 @@ public:
         cmd_cp.slice = src_subresource.slice;
         cmd_cp.origin = {source_box.left, source_box.top, source_box.front};
         cmd_cp.size = {width, height, depth};
-        cmd_cp.dst = dst->current()->buffer();
-        cmd_cp.offset = destination_offset;
-        cmd_cp.bytes_per_row = pDst->PlacedFootprint.Footprint.RowPitch;
-        cmd_cp.bytes_per_image = src->textureType() == WMTTextureType3D
-                                     ? image_pitch
-                                     : 0;
+        cmd_cp.dst = copy_destination;
+        cmd_cp.offset = copy_offset;
+        cmd_cp.bytes_per_row = static_cast<uint32_t>(copy_row);
+        cmd_cp.bytes_per_image = src->textureType() == WMTTextureType3D ? copy_image : 0;
         cmd_cp.options = (src_planar_count > 1) ? (src_subresource.plane ? WMTBlitOptionStencilFromDepthStencil
                                                                           : WMTBlitOptionDepthFromDepthStencil)
                                                 : WMTBlitOptionNone;
+        if (copy_format.bytes_per_block == 12)
+          ConvertRGB96(
+              copy_destination, copy_offset, copy_row, copy_image, dst->current()->buffer(), destination_offset,
+              pDst->PlacedFootprint.Footprint.RowPitch, image_pitch, width, height, depth, false
+          );
       } else if (pSrc->Type == D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT) {
         auto src_resource = static_cast<MTLD3D12Resource *>(pSrc->pResource);
         if (!src_resource || !src_resource->buffer)

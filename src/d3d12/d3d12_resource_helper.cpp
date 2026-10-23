@@ -551,6 +551,33 @@ CanUseSmallTextureAlignment(const D3D12_RESOURCE_DESC &Desc, const MTL_DXGI_FORM
   return true;
 }
 
+HRESULT
+QueryRGB96TextureFormat(WMT::Device device, DXGI_FORMAT format, MTL_DXGI_FORMAT_DESC &description) {
+  const HRESULT hr = MTLQueryDXGIFormat(device, format, description);
+  if (FAILED(hr))
+    return hr;
+  // Keep the public byte layout at 12 bytes; native textures need all three
+  // components in a single texel. Buffer/vertex formats retain the shared map.
+  if (description.BytesPerTexel == 12) {
+    switch (description.PixelFormat) {
+    case WMTPixelFormatR32Uint:
+      // Float storage also supports the float MSAA view of typeless RGB96.
+      description.PixelFormat =
+          format == DXGI_FORMAT_R32G32B32_TYPELESS ? WMTPixelFormatRGBA32Float : WMTPixelFormatRGBA32Uint;
+      break;
+    case WMTPixelFormatR32Sint:
+      description.PixelFormat = WMTPixelFormatRGBA32Sint;
+      break;
+    case WMTPixelFormatR32Float:
+      description.PixelFormat = WMTPixelFormatRGBA32Float;
+      break;
+    default:
+      return E_INVALIDARG;
+    }
+  }
+  return hr;
+}
+
 D3D12_FORMAT_SUPPORT1
 GetTextureFormatDimensions(const MTL_DXGI_FORMAT_DESC &Format) {
   if (Format.PixelFormat == WMTPixelFormatInvalid)

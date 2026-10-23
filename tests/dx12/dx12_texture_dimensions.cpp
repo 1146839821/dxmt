@@ -143,7 +143,15 @@ bool CreateUploadedTexture(
     for (UINT depth = 0; depth < footprint.Depth; depth++) {
       BYTE *slice = destination + static_cast<size_t>(depth) * footprint.RowPitch * row_counts[subresource];
       for (UINT row = 0; row < row_counts[subresource]; row++)
-        std::memcpy(slice + static_cast<size_t>(row) * footprint.RowPitch, &pixel, sizeof(pixel));
+        if (desc.Format == DXGI_FORMAT_R32G32B32_FLOAT ||
+            desc.Format == DXGI_FORMAT_R32G32B32_TYPELESS) {
+          const float rgb[] = {value / 255.0f, 0.25f, 0.75f};
+          std::memcpy(slice + static_cast<size_t>(row) * footprint.RowPitch,
+                      rgb, sizeof(rgb));
+        } else {
+          std::memcpy(slice + static_cast<size_t>(row) * footprint.RowPitch,
+                      &pixel, sizeof(pixel));
+        }
     }
   }
   upload.ptr->Unmap(0, nullptr);
@@ -199,9 +207,14 @@ void SetSrvDesc(D3D12_SHADER_RESOURCE_VIEW_DESC &desc, UINT index) {
 } // namespace
 
 int main(int argc, char **argv) {
-  const bool typeless = argc == 3 && !std::strcmp(argv[2], "--typeless");
-  if (argc != 2 && !typeless) {
-    std::cerr << "usage: dx12_texture_dimensions <shader.cso> [--typeless]\n";
+  const bool rgb96 = argc == 3 && (!std::strcmp(argv[2], "--rgb96") ||
+                                   !std::strcmp(argv[2], "--rgb96-typeless"));
+  const bool typeless =
+      argc == 3 && (!std::strcmp(argv[2], "--typeless") ||
+                    !std::strcmp(argv[2], "--rgb96-typeless"));
+  if (argc != 2 && !typeless && !rgb96) {
+    std::cerr << "usage: dx12_texture_dimensions <shader.cso> "
+                 "[--typeless|--rgb96|--rgb96-typeless]\n";
     return 2;
   }
 
@@ -294,7 +307,8 @@ int main(int argc, char **argv) {
   descriptor_increment = device.ptr->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
   rtv_increment = device.ptr->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
-  const DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  const DXGI_FORMAT format =
+      rgb96 ? DXGI_FORMAT_R32G32B32_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
   const D3D12_HEAP_PROPERTIES default_heap = DefaultHeap();
   const D3D12_HEAP_PROPERTIES readback_heap = ReadbackHeap();
   for (UINT i = 0; i < 9; i++) {
@@ -302,7 +316,10 @@ int main(int argc, char **argv) {
     texture_descs[i].Height = 1;
     texture_descs[i].DepthOrArraySize = 1;
     texture_descs[i].MipLevels = 1;
-    texture_descs[i].Format = typeless ? DXGI_FORMAT_R8G8B8A8_TYPELESS : format;
+    texture_descs[i].Format =
+        rgb96 ? (typeless ? DXGI_FORMAT_R32G32B32_TYPELESS
+                          : DXGI_FORMAT_R32G32B32_FLOAT)
+              : (typeless ? DXGI_FORMAT_R8G8B8A8_TYPELESS : format);
     texture_descs[i].SampleDesc.Count = 1;
     texture_descs[i].Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
   }
@@ -344,6 +361,12 @@ int main(int argc, char **argv) {
   resource_cpu = resource_heap.ptr->GetCPUDescriptorHandleForHeapStart();
   for (UINT i = 0; i < 9; i++) {
     SetSrvDesc(srv_desc, i);
+    if (rgb96) {
+      srv_desc.Format = DXGI_FORMAT_R32G32B32_FLOAT;
+      if (i == 2)
+        srv_desc.Shader4ComponentMapping =
+            D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 3, 2, 3);
+    }
     auto descriptor = resource_cpu;
     descriptor.ptr += descriptor_increment * i;
     device.ptr->CreateShaderResourceView(textures[i].ptr, &srv_desc, descriptor);
@@ -466,7 +489,7 @@ int main(int argc, char **argv) {
     }
   }
   readback.ptr->Unmap(0, nullptr);
-  std::cout << "storage="
+  std::cout << "rgb96=" << rgb96 << " storage="
             << (typeless ? "typeless filter=linear" : "typed filter=point")
             << "\n";
   std::cout << "DXIL texture dimensions readback passed: 11,22,33,44,55,66,77,88,99\n";

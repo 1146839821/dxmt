@@ -99,8 +99,10 @@ PopulateWMTTextureInfo(MTLD3D12Device *Device, WMTTextureInfo &InfoOut, const D3
     return E_INVALIDARG;
 
   MTL_DXGI_FORMAT_DESC Format;
-  HRESULT hr = MTLQueryDXGIFormat(metal_device, Desc.Format, Format);
+  HRESULT hr = QueryD3D12TextureFormat(metal_device, Desc.Format, Format);
   if (FAILED(hr) || !SupportsTextureDimension(Format, Desc.Dimension))
+    return E_INVALIDARG;
+  if (Format.BytesPerTexel == 12 && (Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
     return E_INVALIDARG;
   if (Desc.SampleDesc.Count > 1 &&
       (Desc.SampleDesc.Quality || !metal_device.supportsTextureSampleCount(Desc.SampleDesc.Count)))
@@ -436,6 +438,47 @@ class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
     return true;
   }
 
+  HRESULT
+  TransferRGB96(
+      const D3D12_BOX &box, UINT level, UINT slice, void *data, UINT row_pitch, UINT image_pitch, bool write
+  ) {
+    const uint64_t width = box.right - box.left, height = box.bottom - box.top, depth = box.back - box.front;
+    const uint64_t native_row = width * 16;
+    if (native_row > UINT_MAX || height > SIZE_MAX / native_row || depth > SIZE_MAX / (native_row * height))
+      return E_INVALIDARG;
+    const uint64_t native_image = native_row * height;
+    if (native_image * depth > std::vector<uint8_t>().max_size())
+      return E_OUTOFMEMORY;
+    try {
+      std::vector<uint8_t> bytes(native_image * depth);
+      const auto convert = [&]() {
+        for (uint64_t z = 0; z < depth; z++)
+          for (uint64_t y = 0; y < height; y++)
+            for (uint64_t x = 0; x < width; x++) {
+              auto logical = static_cast<uint8_t *>(data) + z * image_pitch + y * row_pitch + x * 12;
+              auto physical = bytes.data() + z * native_image + y * native_row + x * 16;
+              std::memcpy(write ? physical : logical, write ? logical : physical, 12);
+            }
+      };
+      if (write) {
+        convert();
+        texture->current()->texture().replaceRegion(
+            {box.left, box.top, box.front}, {width, height, depth}, level, slice, bytes.data(), native_row,
+            desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? native_image : 0
+        );
+      } else {
+        texture->current()->texture().getBytes(
+            {box.left, box.top, box.front}, {width, height, depth}, level, slice, bytes.data(), native_row,
+            desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? native_image : 0
+        );
+        convert();
+      }
+      return S_OK;
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
+  }
+
 public:
   MTLD3D12Texture(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12Resource>(pDevice) {}
 
@@ -539,7 +582,7 @@ public:
       return hr;
 
     MTL_DXGI_FORMAT_DESC format = {};
-    hr = MTLQueryDXGIFormat(device_->GetMTLDevice(), pDesc->Format, format);
+    hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), pDesc->Format, format);
     if (FAILED(hr))
       return hr;
     if (!format.BytesPerTexel || !GetReservedTextureTileShape(format, tile_shape_))
@@ -845,11 +888,11 @@ public:
       return E_INVALIDARG;
 
     MTL_DXGI_FORMAT_DESC format = {};
-    if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc_.Format, format)) || format.PlanarCount != 1)
+    if (FAILED(QueryD3D12TextureFormat(device_->GetMTLDevice(), desc_.Format, format)) || format.PlanarCount != 1)
       return E_INVALIDARG;
 
     const uint32_t element_size = (format.Flag & MTL_DXGI_FORMAT_BC) ? format.BlockSize : format.BytesPerTexel;
-    if (!element_size || (element_size & (element_size - 1)))
+    if (!element_size || (element_size != 12 && (element_size & (element_size - 1))))
       return E_INVALIDARG;
 
     // Strip-mine CPU access has no defined layout for a volume texture with
@@ -910,7 +953,7 @@ public:
       return E_INVALIDARG;
 
     MTL_DXGI_FORMAT_DESC Format;
-    if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc_.Format, Format)))
+    if (FAILED(QueryD3D12TextureFormat(device_->GetMTLDevice(), desc_.Format, Format)))
       return E_INVALIDARG;
 
     if (!ValidateTextureTransferPitch(
@@ -918,6 +961,8 @@ public:
             desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D))
       return E_INVALIDARG;
 
+    if (Format.BytesPerTexel == 12)
+      return TransferRGB96(box, Level, Slice, const_cast<void *>(pSrcData), SrcRowPitch, SrcSlicePitch, true);
     texture->current()->texture().replaceRegion(
         {box.left, box.top, box.front}, {box.right - box.left, box.bottom - box.top, box.back - box.front}, Level,
         Slice, pSrcData, SrcRowPitch, SrcSlicePitch
@@ -953,7 +998,7 @@ public:
       return E_INVALIDARG;
 
     MTL_DXGI_FORMAT_DESC Format;
-    if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc_.Format, Format)))
+    if (FAILED(QueryD3D12TextureFormat(device_->GetMTLDevice(), desc_.Format, Format)))
       return E_INVALIDARG;
 
     if (!ValidateTextureTransferPitch(
@@ -961,6 +1006,8 @@ public:
             desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D))
       return E_INVALIDARG;
 
+    if (Format.BytesPerTexel == 12)
+      return TransferRGB96(box, Level, Slice, pDstData, DstRowPitch, DstSlicePitch, false);
     texture->current()->texture().getBytes(
         {box.left, box.top, box.front}, {box.right - box.left, box.bottom - box.top, box.back - box.front}, Level,
         Slice, pDstData, DstRowPitch, DstSlicePitch
@@ -1000,11 +1047,24 @@ public:
 
     TextureViewDescriptor view_descriptor;
     MTL_DXGI_FORMAT_DESC metal_format;
-    hr = MTLQueryDXGIFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
+    if (IsRGB96Format(desc_.Format) != IsRGB96Format(ViewDesc.Format))
+      return E_INVALIDARG;
+    hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
     if (FAILED(hr))
       return hr;
 
-    view_descriptor.format = EncodeComponentMapping(ViewDesc.Shader4ComponentMapping, metal_format.PixelFormat);
+    UINT component_mapping = ViewDesc.Shader4ComponentMapping;
+    if (metal_format.BytesPerTexel == 12) {
+      D3D12_SHADER_COMPONENT_MAPPING components[4];
+      for (UINT i = 0; i < 4; i++) {
+        components[i] = D3D12_DECODE_SHADER_4_COMPONENT_MAPPING(i, component_mapping);
+        if (components[i] == D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3)
+          components[i] = D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1;
+      }
+      component_mapping =
+          D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(components[0], components[1], components[2], components[3]);
+    }
+    view_descriptor.format = EncodeComponentMapping(component_mapping, metal_format.PixelFormat);
 
     if (texture->pixelFormat() == WMTPixelFormatDepth32Float || texture->pixelFormat() == WMTPixelFormatDepth16Unorm) {
       view_descriptor.format = EncodeComponentMapping(ViewDesc.Shader4ComponentMapping, texture->pixelFormat());
@@ -1192,7 +1252,9 @@ public:
 
     TextureViewDescriptor view_descriptor;
     MTL_DXGI_FORMAT_DESC metal_format;
-    hr = MTLQueryDXGIFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
+    if (IsRGB96Format(desc_.Format) || IsRGB96Format(ViewDesc.Format))
+      return E_INVALIDARG;
+    hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
     if (FAILED(hr))
       return hr;
 
@@ -1292,7 +1354,9 @@ public:
 
     TextureViewDescriptor view_descriptor;
     MTL_DXGI_FORMAT_DESC metal_format;
-    hr = MTLQueryDXGIFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
+    if (IsRGB96Format(desc_.Format) != IsRGB96Format(ViewDesc.Format))
+      return E_INVALIDARG;
+    hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
     if (FAILED(hr))
       return hr;
 
@@ -1420,7 +1484,7 @@ public:
 
     TextureViewDescriptor view_descriptor;
     MTL_DXGI_FORMAT_DESC metal_format;
-    hr = MTLQueryDXGIFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
+    hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
     if (FAILED(hr))
       return hr;
     view_descriptor.format = metal_format.PixelFormat;

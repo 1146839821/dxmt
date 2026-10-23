@@ -25,6 +25,29 @@
 using namespace metal;
 using namespace dxmt;
 
+// D3D12 RGB96 keeps packed three-word application rows but uses RGBA32 texels.
+struct DXMTRGB96Params {
+  ulong source_row, source_image, destination_row, destination_image;
+  uint width, height, depth, source_components;
+};
+[[kernel]] void
+dxmt_convert_rgb96(
+    device const uint *source [[buffer(0)]], device uint *destination [[buffer(1)]],
+    constant DXMTRGB96Params &p [[buffer(2)]], uint3 position [[thread_position_in_grid]]
+) {
+  if (position.x >= p.width || position.y >= p.height || position.z >= p.depth)
+    return;
+  const uint destination_components = 7 - p.source_components;
+  const ulong src = (ulong(position.z) * p.source_image + ulong(position.y) * p.source_row) / 4 +
+                    ulong(position.x) * p.source_components;
+  const ulong dst = (ulong(position.z) * p.destination_image + ulong(position.y) * p.destination_row) / 4 +
+                    ulong(position.x) * destination_components;
+  for (uint i = 0; i < 3; i++)
+    destination[dst + i] = source[src + i];
+  if (destination_components == 4)
+    destination[dst + 3] = 0;
+}
+
 // Native GPU addresses use the existing argument-buffer pointer ABI. Only
 // D3D12 occlusion reduction uses this kernel; no application shader ABI changes.
 struct DXMTVisibilitySegment {

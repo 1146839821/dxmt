@@ -121,7 +121,7 @@ MTLD3D12CommandAllocatorImpl::Reset() {
 };
 
 std::pair<WMT::Buffer, size_t>
-MTLD3D12CommandAllocatorImpl::AllocateCopyStaging(size_t length) {
+MTLD3D12CommandAllocatorImpl::AllocateCopyStaging(size_t length, bool recording_scope) {
   if (!length || !encoder_current || encoder_current->type != EncoderType::Blit)
     return {};
   // Keep a bounded tiny-copy fast path with unique untracked ranges. Copies
@@ -136,8 +136,11 @@ MTLD3D12CommandAllocatorImpl::AllocateCopyStaging(size_t length) {
     }
   }
   auto *encoder = static_cast<BlitEncoderData *>(encoder_current);
-  if (copy_staging_encoder_ != encoder) {
-    copy_staging_encoder_ = encoder;
+  // RGB96 alternates internal compute and blit passes. Tracked scratch may
+  // cross those passes, but never another independently submitted recording.
+  EncoderData *scope = recording_scope ? encoder_lists_.back() : encoder;
+  if (copy_staging_encoder_ != scope) {
+    copy_staging_encoder_ = scope;
     copy_staging_buffer_ = {};
     copy_staging_capacity_ = 0;
   }

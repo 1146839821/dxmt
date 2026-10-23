@@ -817,6 +817,20 @@ bool IsCpuVisibleHeap(const D3D12_HEAP_PROPERTIES *pHeapProps);
 
 bool IsValidBufferResourceDesc(const D3D12_RESOURCE_DESC &Desc);
 
+inline bool
+IsRGB96Format(DXGI_FORMAT format) {
+  return format >= DXGI_FORMAT_R32G32B32_TYPELESS && format <= DXGI_FORMAT_R32G32B32_SINT;
+}
+
+HRESULT QueryRGB96TextureFormat(WMT::Device device, DXGI_FORMAT format, MTL_DXGI_FORMAT_DESC &description);
+
+inline HRESULT
+QueryD3D12TextureFormat(WMT::Device device, DXGI_FORMAT format, MTL_DXGI_FORMAT_DESC &description) {
+  // Preserve the shared query's direct path for ordinary formats.
+  return IsRGB96Format(format) ? QueryRGB96TextureFormat(device, format, description)
+                              : MTLQueryDXGIFormat(device, format, description);
+}
+
 D3D12_FORMAT_SUPPORT1 GetTextureFormatDimensions(const MTL_DXGI_FORMAT_DESC &Format);
 
 bool SupportsTextureDimension(const MTL_DXGI_FORMAT_DESC &Format, D3D12_RESOURCE_DIMENSION Dimension);

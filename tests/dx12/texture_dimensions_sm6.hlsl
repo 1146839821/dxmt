@@ -10,19 +10,42 @@ Texture3D<float4> texture_3d : register(t8);
 SamplerState texture_sampler : register(s0);
 RWStructuredBuffer<uint> output : register(u0);
 
-uint ToByte(float4 value) {
-    return (uint)(value.x * 255.0 + 0.5);
+uint ToByte(float4 value, uint index) {
+#ifdef RGB96
+  if (index != 6 && index != 7 &&
+      (abs(value.y - (index == 2 ? 1.0 : 0.25)) > 0.00001 ||
+       abs(value.z - 0.75) > 0.00001 || value.w != 1.0))
+    return 0;
+#endif
+  return (uint)(value.x * 255.0 + 0.5);
 }
 
-[numthreads(1, 1, 1)]
-void main() {
-    output[0] = ToByte(texture_1d.SampleLevel(texture_sampler, 0.5, 0.0));
-    output[1] = ToByte(texture_1d_array.SampleLevel(texture_sampler, float2(0.5, 1.0), 0.0));
-    output[2] = ToByte(texture_2d.SampleLevel(texture_sampler, float2(0.5, 0.5), 0.0));
-    output[3] = ToByte(texture_2d_array.SampleLevel(texture_sampler, float3(0.5, 0.5, 1.0), 0.0));
-    output[4] = ToByte(texture_cube.SampleLevel(texture_sampler, float3(0.0, 0.0, 1.0), 0.0));
-    output[5] = ToByte(texture_cube_array.SampleLevel(texture_sampler, float4(0.0, 0.0, 1.0, 1.0), 0.0));
-    output[6] = ToByte(texture_ms.Load(int2(0, 0), 0));
-    output[7] = ToByte(texture_ms_array.Load(int3(0, 0, 1), 0));
-    output[8] = ToByte(texture_3d.SampleLevel(texture_sampler, float3(0.5, 0.5, 0.5), 0.0));
+[numthreads(1, 1, 1)] void main() {
+  output[0] = ToByte(texture_1d.SampleLevel(texture_sampler, 0.5, 0.0), 0);
+  output[1] = ToByte(
+      texture_1d_array.SampleLevel(texture_sampler, float2(0.5, 1.0), 0.0), 1);
+  output[2] =
+      ToByte(texture_2d.SampleLevel(texture_sampler, float2(0.5, 0.5), 0.0), 2);
+  output[3] = ToByte(
+      texture_2d_array.SampleLevel(texture_sampler, float3(0.5, 0.5, 1.0), 0.0),
+      3);
+  output[4] = ToByte(
+      texture_cube.SampleLevel(texture_sampler, float3(0.0, 0.0, 1.0), 0.0), 4);
+  output[5] = ToByte(texture_cube_array.SampleLevel(
+                         texture_sampler, float4(0.0, 0.0, 1.0, 1.0), 0.0),
+                     5);
+  output[6] = ToByte(texture_ms.Load(int2(0, 0), 0), 6);
+  output[7] = ToByte(texture_ms_array.Load(int3(0, 0, 1), 0), 7);
+  output[8] = ToByte(
+      texture_3d.SampleLevel(texture_sampler, float3(0.5, 0.5, 0.5), 0.0), 8);
+#ifdef RGB96
+  // Loads also check all components, including default alpha and custom
+  // mapping.
+  if (ToByte(texture_1d.Load(int2(0, 0)), 0) != 11 ||
+      ToByte(texture_1d_array.Load(int3(0, 1, 0)), 1) != 22 ||
+      ToByte(texture_2d.Load(int3(0, 0, 0)), 2) != 33 ||
+      ToByte(texture_2d_array.Load(int4(0, 0, 1, 0)), 3) != 44 ||
+      ToByte(texture_3d.Load(int4(0, 0, 1, 0)), 8) != 99)
+    output[0] = 0;
+#endif
 }

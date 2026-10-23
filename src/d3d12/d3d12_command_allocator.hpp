@@ -99,13 +99,13 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
 
   ClearUAV<MTLD3D12CommandAllocatorImpl> clear_uav_;
 
-  // Recording-only memo for the current blit encoder. resource_refs owns the
-  // buffers; changing encoders never shares scratch with another recording.
-  BlitEncoderData *copy_staging_encoder_ = nullptr;
+  // Memo scoped to a blit encoder or its recording head. Encoder resource_refs
+  // owns the buffers; scratch never crosses independently submitted recordings.
+  EncoderData *copy_staging_encoder_ = nullptr;
   WMT::Buffer copy_staging_buffer_ = {};
   size_t copy_staging_capacity_ = 0;
 
-  std::pair<WMT::Buffer, size_t> AllocateCopyStaging(size_t length);
+  std::pair<WMT::Buffer, size_t> AllocateCopyStaging(size_t length, bool recording_scope = false);
 
   void
   DestroyEncoder(EncoderData *encoder);
