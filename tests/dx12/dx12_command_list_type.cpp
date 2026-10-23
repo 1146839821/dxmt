@@ -1789,13 +1789,13 @@ bool TestCopyStaging(const char *mode) {
   return true;
 }
 
-bool TestSmallBlitCost() {
-  HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-  if (!event)
+bool TestSmallBlitCost(bool late_event = false, bool long_batch = false) {
+  HANDLE event = late_event ? nullptr : CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!late_event && !event)
     return false;
   struct CloseEvent {
     HANDLE value;
-    ~CloseEvent() { CloseHandle(value); }
+    ~CloseEvent() { if (value) CloseHandle(value); }
   } close_event{event};
   Owned<ID3D12Device> device;
   Owned<ID3D12CommandQueue> queue;
@@ -1846,9 +1846,20 @@ bool TestSmallBlitCost() {
   *mapped = 0x51a61234;
   upload.ptr->Unmap(0, nullptr);
 
+  // Keep ownership before the device so either setup order has safe teardown.
+  if (late_event) {
+    event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    close_event.value = event;
+    if (!event)
+      return false;
+  }
+  // Both batches fit the existing 4MiB CPU arena (64 bytes per copy).
+  const UINT copies = long_batch ? 50000 : 10000;
+  const UINT rounds = long_batch ? 25 : 9;
+
   LARGE_INTEGER frequency;
   QueryPerformanceFrequency(&frequency);
-  for (UINT round = 0; round < 9; ++round) {
+  for (UINT round = 0; round < rounds; ++round) {
     if (round &&
         (!CheckHR("ResetAllocator", allocator.ptr->Reset()) ||
          !CheckHR("ResetList", list.ptr->Reset(allocator.ptr, nullptr))))
@@ -1858,7 +1869,7 @@ bool TestSmallBlitCost() {
       return false;
     LARGE_INTEGER start, end;
     QueryPerformanceCounter(&start);
-    for (UINT i = 0; i < 10000; ++i)
+    for (UINT i = 0; i < copies; ++i)
       list.ptr->CopyBufferRegion(readback.ptr, 0, upload.ptr, 0, 4);
     QueryPerformanceCounter(&end);
     if (!CheckHR("CloseBlit", list.ptr->Close()) || CopyBufferCounter::count)
@@ -1880,7 +1891,8 @@ bool TestSmallBlitCost() {
     if (!good)
       return false;
     std::cout << "small_blit round=" << round
-              << " copies=10000 native_buffers=" << CopyBufferCounter::count
+              << " copies=" << copies << " late_event=" << late_event
+              << " native_buffers=" << CopyBufferCounter::count
               << " record_us="
               << (end.QuadPart - start.QuadPart) * 1e6 / frequency.QuadPart
               << "\n";
@@ -1891,6 +1903,13 @@ bool TestSmallBlitCost() {
 int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--small-blit-cost") == 0)
     return TestSmallBlitCost() ? 0 : 1;
+  if (argc == 3 && std::strcmp(argv[1], "--small-blit-cost") == 0) {
+    const bool late = !std::strcmp(argv[2], "late") || !std::strcmp(argv[2], "late-long");
+    const bool extended = !std::strcmp(argv[2], "early-long") || !std::strcmp(argv[2], "late-long");
+    if (!late && !extended && std::strcmp(argv[2], "early"))
+      return 1;
+    return TestSmallBlitCost(late, extended) ? 0 : 1;
+  }
   if (argc == 3 && std::strcmp(argv[1], "--copy-staging") == 0)
     return TestCopyStaging(argv[2]) ? 0 : 1;
   if (argc == 3 && std::strcmp(argv[1], "--encoder-creation-failure") == 0) {

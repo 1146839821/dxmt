@@ -457,6 +457,25 @@ passes. That independent combination remains unverified. Exact evidence,
 commands, all performance variants, scope and rollback:
 `../dxmt-test/n10-copy-staging-20261023/N10-copy-staging.md`.
 
+N10 recording-performance follow-up: the existing command-list runner accepts
+`--small-blit-cost early|late|early-long|late-long`. The event's owner always
+outlives device teardown; creation order varies independently of batch length.
+Short batches keep 10,000 copies/9 rounds; long batches use 50,000 copies/25
+rounds, below the existing 4MiB CPU arena capacity. Both preserve the GPU
+readback/fence oracle and reject native buffer allocation while recording.
+The original no-argument cost option remains available.
+
+The same PE on captured old/final DLLs passes all 24 alternating processes.
+Median-of-process-median recording deltas are early +1.04%, late +6.02%,
+early-long +0.40%, late-long +1.87%. Short early and long late p95 deltas are
++12.00% and +13.28%. These do not close the gate or erase earlier failures.
+Normalized instructions match in CopyBufferRegion and its inspected allocator,
+device-identity and buffer-description callees; this excludes added instructions
+in those bodies, not address/layout/translation effects or scheduling costs.
+No production change is justified by this evidence yet. Performance remains
+INCONCLUSIVE / OPEN. Commands, hashes, all samples and hypothesis limits:
+`../dxmt-test/n10-recording-perf-20261023/N10-recording-perf.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
