@@ -713,6 +713,31 @@ break-control stubs remain confirmed pending; this is not a full debug layer.
 Commands, hashes, ownership proof, raw logs and scope:
 `../dxmt-test/n02-infoqueue-identity-20261023/N02-infoqueue-identity.md`.
 
+### N02 — owned InfoQueue messages and shared filters, 2026-10-24
+
+AddMessage/ApplicationMessage now own text/metadata, support bounded oldest
+eviction, zero capacity, counters and clear. GetMessage supports size query,
+short-buffer reporting and copied descriptions without removing messages.
+Storage/retrieval filters share owned descriptors, atomic copy-then-commit
+updates, packed export and stacks with an unpoppable base. Retrieval hides
+messages without deleting stored entries; allow union precedes deny override.
+All state uses the existing mutex; controlling Device identity is preserved.
+
+Baseline existing feature runner fails the lost-message oracle. Final feature,
+command-list and resource runners pass, including input ownership, metadata,
+capacity, filter copy/hide/pop, deny precedence, invalid arrays and4x64 concurrent
+inserts. Final null-buffer length-read correction is separately rebuilt and
+feature-tested. No-private TU syntax passes; full no-private runtime, native
+Windows differential and allocation-fault sweep are NOT_RUN. Do not treat tests
+alone as proof of native allow/counter/default/stack equivalence.
+
+Twelve alternating processes show recording p50/P95 -0.67%/+19.47%, ordinary
+submit -6.46%/-7.68%. Recording tail alert and overall performance gate stay OPEN;
+no causal performance claim. No new source/header, public ABI, capability,
+layout or scheduler. Break controls/debug output remain stubs, not a full debug
+layer. Exact scope, Microsoft snapshots, assumptions, commands/hashes/raw logs:
+`../dxmt-test/n02-infoqueue-messages-20261023/N02-infoqueue-messages.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

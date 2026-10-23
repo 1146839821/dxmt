@@ -12,6 +12,7 @@
 #include <iostream>
 #include <thread>
 #include <atomic>
+#include <vector>
 
 namespace {
 
@@ -52,6 +53,119 @@ CheckHR(const char *name, HRESULT actual, HRESULT expected = S_OK) {
   std::cerr << name << " returned 0x" << std::hex << static_cast<unsigned long>(actual) << ", expected 0x"
             << static_cast<unsigned long>(expected) << std::dec << "\n";
   return false;
+}
+
+bool CheckInfoQueueMessages(ID3D12Device *device) {
+  ID3D12InfoQueue *queue = nullptr;
+  if (!CheckHR("Message queue", device->QueryInterface(IID_PPV_ARGS(&queue)))) return false;
+  queue->ClearStoredMessages();
+  queue->SetMuteDebugOutput(TRUE);
+  bool good = CheckHR("Message limit", queue->SetMessageCountLimit(2));
+  char text[] = "caller-owned message";
+  good &= CheckHR("Application message", queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_WARNING, text));
+  text[0] = 'X';
+  SIZE_T length = 0;
+  good &= queue->GetNumStoredMessages() == 1;
+  good &= CheckHR("Message size", queue->GetMessage(0, nullptr, &length));
+  good &= length == sizeof(D3D12_MESSAGE) + sizeof(text);
+  if (good) {
+    std::vector<unsigned char> bytes(length);
+    auto *message = reinterpret_cast<D3D12_MESSAGE *>(bytes.data());
+    good &= CheckHR("Message copy", queue->GetMessage(0, message, &length));
+    good &= message->Category == D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED &&
+            message->Severity == D3D12_MESSAGE_SEVERITY_WARNING &&
+            message->DescriptionByteLength == sizeof(text) &&
+            !std::strcmp(message->pDescription, "caller-owned message");
+    SIZE_T short_length = sizeof(D3D12_MESSAGE);
+    good &= CheckHR("Short message buffer", queue->GetMessage(0, message, &short_length), DXGI_ERROR_MORE_DATA);
+    good &= short_length == length;
+  }
+  good &= CheckHR("Second message", queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO, "second"));
+  good &= CheckHR("Third message", queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO, "third"));
+  good &= queue->GetNumStoredMessages() == 2 &&
+          queue->GetNumMessagesAllowedByStorageFilter() == 3 &&
+          queue->GetNumMessagesDiscardedByMessageCountLimit() == 1;
+  length = 0;
+  if (SUCCEEDED(queue->GetMessage(0, nullptr, &length)) && length >= sizeof(D3D12_MESSAGE)) {
+    std::vector<unsigned char> bytes(length);
+    auto *message = reinterpret_cast<D3D12_MESSAGE *>(bytes.data());
+    good &= CheckHR("Oldest surviving message", queue->GetMessage(0, message, &length));
+    good &= !std::strcmp(message->pDescription, "second");
+  } else good = false;
+  queue->SetMessageCountLimit(0);
+  good &= queue->GetNumStoredMessages() == 0;
+  good &= CheckHR("Zero limit message", queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO, "discard"));
+  good &= queue->GetNumStoredMessages() == 0;
+  good &= CheckHR("Null message text", queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO, nullptr), E_INVALIDARG);
+  good &= CheckHR("Null message size", queue->GetMessage(0, nullptr, nullptr), E_INVALIDARG);
+  if (!good) std::cerr << "InfoQueue message storage/copy contract mismatch\n";
+  queue->ClearStoredMessages();
+  queue->SetMessageCountLimit(UINT64_MAX);
+  D3D12_MESSAGE_SEVERITY denied = D3D12_MESSAGE_SEVERITY_INFO;
+  D3D12_INFO_QUEUE_FILTER filter = {};
+  filter.DenyList.NumSeverities = 1;
+  filter.DenyList.pSeverityList = &denied;
+  good &= CheckHR("Storage deny", queue->AddStorageFilterEntries(&filter));
+  denied = D3D12_MESSAGE_SEVERITY_ERROR; // Filter must own its input.
+  good &= CheckHR("Denied message", queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO, "hidden"));
+  good &= CheckHR("Allowed message", queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_ERROR, "visible"));
+  good &= queue->GetNumStoredMessages() == 1 && queue->GetNumMessagesDeniedByStorageFilter() == 1;
+  denied = D3D12_MESSAGE_SEVERITY_ERROR;
+  good &= CheckHR("Retrieval deny", queue->PushRetrievalFilter(&filter));
+  good &= queue->GetNumStoredMessagesAllowedByRetrievalFilter() == 0 && queue->GetNumStoredMessages() == 1;
+  queue->PopRetrievalFilter();
+  good &= queue->GetNumStoredMessagesAllowedByRetrievalFilter() == 1;
+  length = 0;
+  good &= CheckHR("Filter size", queue->GetStorageFilter(nullptr, &length));
+  if (length >= sizeof(D3D12_INFO_QUEUE_FILTER)) {
+    std::vector<unsigned char> bytes(length);
+    auto *copy = reinterpret_cast<D3D12_INFO_QUEUE_FILTER *>(bytes.data());
+    good &= CheckHR("Filter copy", queue->GetStorageFilter(copy, &length));
+    good &= copy->DenyList.NumSeverities == 1 && copy->DenyList.pSeverityList &&
+            copy->DenyList.pSeverityList[0] == D3D12_MESSAGE_SEVERITY_INFO;
+  } else good = false;
+  queue->ClearStorageFilter();
+  queue->ClearStoredMessages();
+  D3D12_MESSAGE_CATEGORY allowed_category = D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED;
+  D3D12_MESSAGE_SEVERITY allowed_severity = D3D12_MESSAGE_SEVERITY_ERROR;
+  filter = {};
+  filter.AllowList.NumCategories = 1;
+  filter.AllowList.pCategoryList = &allowed_category;
+  filter.AllowList.NumSeverities = 1;
+  filter.AllowList.pSeverityList = &allowed_severity;
+  good &= CheckHR("Allow union", queue->PushStorageFilter(&filter));
+  good &= CheckHR("Allow by category", queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO, "category"));
+  good &= CheckHR("Allow by severity", queue->AddMessage(D3D12_MESSAGE_CATEGORY_EXECUTION,
+      D3D12_MESSAGE_SEVERITY_ERROR, D3D12_MESSAGE_ID_UNKNOWN, "severity"));
+  good &= CheckHR("Allow miss", queue->AddMessage(D3D12_MESSAGE_CATEGORY_EXECUTION,
+      D3D12_MESSAGE_SEVERITY_WARNING, D3D12_MESSAGE_ID_UNKNOWN, "deny"));
+  good &= queue->GetNumStoredMessages() == 2 && queue->GetNumMessagesDeniedByStorageFilter() == 1;
+  filter = {};
+  filter.DenyList.NumSeverities = 1;
+  filter.DenyList.pSeverityList = &allowed_severity;
+  good &= CheckHR("Deny precedence", queue->AddStorageFilterEntries(&filter));
+  queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_ERROR, "denied despite category");
+  good &= queue->GetNumStoredMessages() == 2 && queue->GetNumMessagesDeniedByStorageFilter() == 2;
+  filter.DenyList.pSeverityList = nullptr;
+  good &= CheckHR("Invalid filter array", queue->AddStorageFilterEntries(&filter), E_INVALIDARG);
+  queue->PopStorageFilter();
+  queue->PopStorageFilter();
+  good &= queue->GetStorageFilterStackSize() == 1;
+  queue->ClearStoredMessages();
+  std::atomic<bool> writes_good{true};
+  std::array<std::thread, 4> writers;
+  for (auto &writer : writers)
+    writer = std::thread([&] {
+      for (unsigned i = 0; i < 64; i++)
+        if (FAILED(queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO, "concurrent"))) writes_good = false;
+    });
+  for (auto &writer : writers) writer.join();
+  good &= writes_good && queue->GetNumStoredMessages() == 256;
+  queue->ClearStoredMessages();
+  if (!good) std::cerr << "InfoQueue filtering/stack contract mismatch\n";
+  queue->SetMuteDebugOutput(FALSE);
+  Release(queue);
+  return good;
 }
 
 bool CheckInfoQueueIdentity(ID3D12Device *device) {
@@ -110,7 +224,7 @@ bool CheckInfoQueueIdentity(ID3D12Device *device) {
       }
     });
   for (auto &worker : workers) worker.join();
-  good &= concurrent_good && first->GetStorageFilterStackSize() == 0;
+  good &= concurrent_good && first->GetStorageFilterStackSize() == 1;
   good &= CheckHR("InfoQueue surviving device", first->QueryInterface(IID_PPV_ARGS(&isolated)));
   Release(isolated);
   good &= first->Release() == 0;
@@ -252,7 +366,7 @@ main() {
       ))
     return fail("device creation failed");
 
-  if (!CheckDeviceIdentity(device) || !CheckInfoQueueIdentity(device))
+  if (!CheckDeviceIdentity(device) || !CheckInfoQueueIdentity(device) || !CheckInfoQueueMessages(device))
     return fail("device identity query failed");
 
   D3D12_FEATURE_DATA_SHADER_MODEL maximum_shader_model = {D3D_SHADER_MODEL_6_0};

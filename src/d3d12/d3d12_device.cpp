@@ -16,6 +16,7 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <stdexcept>
 #include "d3d12_device.hpp"
 #include "d3d12_device_child.hpp"
 #include "d3d12_raytracing.hpp"
@@ -204,86 +205,155 @@ public:
 
   HRESULT STDMETHODCALLTYPE SetMessageCountLimit(UINT64 limit) override { std::lock_guard lock(mutex_);
     message_count_limit_ = limit;
+    while (messages_.size() > limit) {
+      messages_.erase(messages_.begin());
+      discarded_++;
+    }
     return S_OK;
   }
 
-  void STDMETHODCALLTYPE ClearStoredMessages() override {}
-
-  HRESULT STDMETHODCALLTYPE GetMessage(UINT64, D3D12_MESSAGE *, SIZE_T *length) override {
-    if (!length)
-      return E_INVALIDARG;
-    *length = 0;
-    return DXGI_ERROR_NOT_FOUND;
+  void STDMETHODCALLTYPE ClearStoredMessages() override {
+    std::lock_guard lock(mutex_);
+    messages_.clear();
+    allowed_ = denied_ = discarded_ = 0;
   }
 
-  UINT64 STDMETHODCALLTYPE GetNumMessagesAllowedByStorageFilter() override { return 0; }
-  UINT64 STDMETHODCALLTYPE GetNumMessagesDeniedByStorageFilter() override { return 0; }
-  UINT64 STDMETHODCALLTYPE GetNumStoredMessages() override { return 0; }
-  UINT64 STDMETHODCALLTYPE GetNumStoredMessagesAllowedByRetrievalFilter() override { return 0; }
-  UINT64 STDMETHODCALLTYPE GetNumMessagesDiscardedByMessageCountLimit() override { return 0; }
+  HRESULT STDMETHODCALLTYPE GetMessage(UINT64 index, D3D12_MESSAGE *message, SIZE_T *length) override {
+    if (!length)
+      return E_INVALIDARG;
+    std::lock_guard lock(mutex_);
+    const Message *found = nullptr;
+    for (const auto &candidate : messages_)
+      if (retrieval_filters_.back().Allows(candidate.category, candidate.severity, candidate.id) && index-- == 0) {
+        found = &candidate;
+        break;
+      }
+    if (!found) return DXGI_ERROR_NOT_FOUND;
+    const auto &stored = *found;
+    const SIZE_T required = sizeof(D3D12_MESSAGE) + stored.text.size() + 1;
+    const SIZE_T available = message ? *length : 0;
+    *length = required;
+    if (!message)
+      return S_OK;
+    if (available < required)
+      return DXGI_ERROR_MORE_DATA;
+    char *description = reinterpret_cast<char *>(message + 1);
+    std::memcpy(description, stored.text.c_str(), stored.text.size() + 1);
+    *message = {stored.category, stored.severity, stored.id, description, stored.text.size() + 1};
+    return S_OK;
+  }
+
+  UINT64 STDMETHODCALLTYPE GetNumMessagesAllowedByStorageFilter() override { std::lock_guard lock(mutex_); return allowed_; }
+  UINT64 STDMETHODCALLTYPE GetNumMessagesDeniedByStorageFilter() override { std::lock_guard lock(mutex_); return denied_; }
+  UINT64 STDMETHODCALLTYPE GetNumStoredMessages() override { std::lock_guard lock(mutex_); return messages_.size(); }
+  UINT64 STDMETHODCALLTYPE GetNumStoredMessagesAllowedByRetrievalFilter() override {
+    std::lock_guard lock(mutex_);
+    return std::count_if(messages_.begin(), messages_.end(), [&](const Message &message) {
+      return retrieval_filters_.back().Allows(message.category, message.severity, message.id);
+    });
+  }
+  UINT64 STDMETHODCALLTYPE GetNumMessagesDiscardedByMessageCountLimit() override { std::lock_guard lock(mutex_); return discarded_; }
   UINT64 STDMETHODCALLTYPE GetMessageCountLimit() override { std::lock_guard lock(mutex_); return message_count_limit_; }
 
-  HRESULT STDMETHODCALLTYPE AddStorageFilterEntries(D3D12_INFO_QUEUE_FILTER *) override { return S_OK; }
-
-  HRESULT STDMETHODCALLTYPE GetStorageFilter(D3D12_INFO_QUEUE_FILTER *, SIZE_T *length) override {
-    if (!length)
-      return E_INVALIDARG;
-    *length = 0;
-    return DXGI_ERROR_NOT_FOUND;
+  HRESULT STDMETHODCALLTYPE AddStorageFilterEntries(D3D12_INFO_QUEUE_FILTER *filter) override {
+    std::lock_guard lock(mutex_);
+    return UpdateFilter(storage_filters_, filter, false, false);
+  }
+  HRESULT STDMETHODCALLTYPE GetStorageFilter(D3D12_INFO_QUEUE_FILTER *filter, SIZE_T *length) override {
+    std::lock_guard lock(mutex_);
+    return CopyFilter(storage_filters_.back(), filter, length);
+  }
+  void STDMETHODCALLTYPE ClearStorageFilter() override {
+    std::lock_guard lock(mutex_);
+    storage_filters_.back() = {};
+  }
+  HRESULT STDMETHODCALLTYPE PushEmptyStorageFilter() override {
+    std::lock_guard lock(mutex_);
+    return UpdateFilter(storage_filters_, nullptr, true, false);
+  }
+  HRESULT STDMETHODCALLTYPE PushCopyOfStorageFilter() override {
+    std::lock_guard lock(mutex_);
+    return UpdateFilter(storage_filters_, nullptr, true, true);
+  }
+  HRESULT STDMETHODCALLTYPE PushStorageFilter(D3D12_INFO_QUEUE_FILTER *filter) override {
+    std::lock_guard lock(mutex_);
+    if (!filter) return E_INVALIDARG;
+    return UpdateFilter(storage_filters_, filter, true, false);
+  }
+  void STDMETHODCALLTYPE PopStorageFilter() override {
+    std::lock_guard lock(mutex_);
+    if (storage_filters_.size() > 1) storage_filters_.pop_back();
+  }
+  UINT STDMETHODCALLTYPE GetStorageFilterStackSize() override {
+    std::lock_guard lock(mutex_);
+    return storage_filters_.size();
   }
 
-  void STDMETHODCALLTYPE ClearStorageFilter() override {}
-  HRESULT STDMETHODCALLTYPE PushEmptyStorageFilter() override { std::lock_guard lock(mutex_);
-    storage_filter_stack_size_++;
-    return S_OK;
+  HRESULT STDMETHODCALLTYPE AddRetrievalFilterEntries(D3D12_INFO_QUEUE_FILTER *filter) override {
+    std::lock_guard lock(mutex_);
+    return UpdateFilter(retrieval_filters_, filter, false, false);
   }
-  HRESULT STDMETHODCALLTYPE PushCopyOfStorageFilter() override { std::lock_guard lock(mutex_);
-    storage_filter_stack_size_++;
-    return S_OK;
+  HRESULT STDMETHODCALLTYPE GetRetrievalFilter(D3D12_INFO_QUEUE_FILTER *filter, SIZE_T *length) override {
+    std::lock_guard lock(mutex_);
+    return CopyFilter(retrieval_filters_.back(), filter, length);
   }
-  HRESULT STDMETHODCALLTYPE PushStorageFilter(D3D12_INFO_QUEUE_FILTER *) override { std::lock_guard lock(mutex_);
-    storage_filter_stack_size_++;
-    return S_OK;
+  void STDMETHODCALLTYPE ClearRetrievalFilter() override {
+    std::lock_guard lock(mutex_);
+    retrieval_filters_.back() = {};
   }
-  void STDMETHODCALLTYPE PopStorageFilter() override { std::lock_guard lock(mutex_);
-    if (storage_filter_stack_size_)
-      storage_filter_stack_size_--;
+  HRESULT STDMETHODCALLTYPE PushEmptyRetrievalFilter() override {
+    std::lock_guard lock(mutex_);
+    return UpdateFilter(retrieval_filters_, nullptr, true, false);
   }
-  UINT STDMETHODCALLTYPE GetStorageFilterStackSize() override { std::lock_guard lock(mutex_); return storage_filter_stack_size_; }
-
-  HRESULT STDMETHODCALLTYPE AddRetrievalFilterEntries(D3D12_INFO_QUEUE_FILTER *) override { return S_OK; }
-
-  HRESULT STDMETHODCALLTYPE GetRetrievalFilter(D3D12_INFO_QUEUE_FILTER *, SIZE_T *length) override {
-    if (!length)
-      return E_INVALIDARG;
-    *length = 0;
-    return DXGI_ERROR_NOT_FOUND;
+  HRESULT STDMETHODCALLTYPE PushCopyOfRetrievalFilter() override {
+    std::lock_guard lock(mutex_);
+    return UpdateFilter(retrieval_filters_, nullptr, true, true);
   }
-
-  void STDMETHODCALLTYPE ClearRetrievalFilter() override {}
-  HRESULT STDMETHODCALLTYPE PushEmptyRetrievalFilter() override { std::lock_guard lock(mutex_);
-    retrieval_filter_stack_size_++;
-    return S_OK;
+  HRESULT STDMETHODCALLTYPE PushRetrievalFilter(D3D12_INFO_QUEUE_FILTER *filter) override {
+    std::lock_guard lock(mutex_);
+    if (!filter) return E_INVALIDARG;
+    return UpdateFilter(retrieval_filters_, filter, true, false);
   }
-  HRESULT STDMETHODCALLTYPE PushCopyOfRetrievalFilter() override { std::lock_guard lock(mutex_);
-    retrieval_filter_stack_size_++;
-    return S_OK;
+  void STDMETHODCALLTYPE PopRetrievalFilter() override {
+    std::lock_guard lock(mutex_);
+    if (retrieval_filters_.size() > 1) retrieval_filters_.pop_back();
   }
-  HRESULT STDMETHODCALLTYPE PushRetrievalFilter(D3D12_INFO_QUEUE_FILTER *) override { std::lock_guard lock(mutex_);
-    retrieval_filter_stack_size_++;
-    return S_OK;
+  UINT STDMETHODCALLTYPE GetRetrievalFilterStackSize() override {
+    std::lock_guard lock(mutex_);
+    return retrieval_filters_.size();
   }
-  void STDMETHODCALLTYPE PopRetrievalFilter() override { std::lock_guard lock(mutex_);
-    if (retrieval_filter_stack_size_)
-      retrieval_filter_stack_size_--;
-  }
-  UINT STDMETHODCALLTYPE GetRetrievalFilterStackSize() override { std::lock_guard lock(mutex_); return retrieval_filter_stack_size_; }
 
   HRESULT STDMETHODCALLTYPE AddMessage(
-      D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY, D3D12_MESSAGE_ID, const char *) override {
+      D3D12_MESSAGE_CATEGORY category, D3D12_MESSAGE_SEVERITY severity, D3D12_MESSAGE_ID id, const char *text) override {
+    if (!text || category < D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED ||
+        category > D3D12_MESSAGE_CATEGORY_SHADER || severity < D3D12_MESSAGE_SEVERITY_CORRUPTION ||
+        severity > D3D12_MESSAGE_SEVERITY_MESSAGE)
+      return E_INVALIDARG;
+    std::lock_guard lock(mutex_);
+    try {
+      if (!storage_filters_.back().Allows(category, severity, id)) {
+        denied_++;
+        return S_OK;
+      }
+      if (!message_count_limit_) {
+        allowed_++;
+        discarded_++;
+        return S_OK;
+      }
+      messages_.push_back({category, severity, id, text});
+      allowed_++;
+      if (messages_.size() > message_count_limit_) {
+        messages_.erase(messages_.begin());
+        discarded_++;
+      }
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
     return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE AddApplicationMessage(D3D12_MESSAGE_SEVERITY, const char *) override { return S_OK; }
+  HRESULT STDMETHODCALLTYPE AddApplicationMessage(D3D12_MESSAGE_SEVERITY severity, const char *text) override {
+    return AddMessage(D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED, severity, D3D12_MESSAGE_ID_STRING_FROM_APPLICATION, text);
+  }
   HRESULT STDMETHODCALLTYPE SetBreakOnCategory(D3D12_MESSAGE_CATEGORY, WINBOOL) override { return S_OK; }
   HRESULT STDMETHODCALLTYPE SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY, WINBOOL) override { return S_OK; }
   HRESULT STDMETHODCALLTYPE SetBreakOnID(D3D12_MESSAGE_ID, WINBOOL) override { return S_OK; }
@@ -294,10 +364,92 @@ public:
   WINBOOL STDMETHODCALLTYPE GetMuteDebugOutput() override { std::lock_guard lock(mutex_); return mute_debug_output_; }
 
 private:
+  struct FilterList {
+    std::vector<D3D12_MESSAGE_CATEGORY> categories;
+    std::vector<D3D12_MESSAGE_SEVERITY> severities;
+    std::vector<D3D12_MESSAGE_ID> ids;
+    bool Empty() const { return categories.empty() && severities.empty() && ids.empty(); }
+    bool Matches(D3D12_MESSAGE_CATEGORY c, D3D12_MESSAGE_SEVERITY s, D3D12_MESSAGE_ID id) const {
+      return std::find(categories.begin(), categories.end(), c) != categories.end() ||
+             std::find(severities.begin(), severities.end(), s) != severities.end() ||
+             std::find(ids.begin(), ids.end(), id) != ids.end();
+    }
+    template <typename T> static void Append(std::vector<T> &to, UINT count, const T *from) {
+      if (count && !from) throw std::invalid_argument("null filter array");
+      if (count) to.insert(to.end(), from, from + count);
+    }
+    void Append(const D3D12_INFO_QUEUE_FILTER_DESC &desc) {
+      Append(categories, desc.NumCategories, desc.pCategoryList);
+      Append(severities, desc.NumSeverities, desc.pSeverityList);
+      Append(ids, desc.NumIDs, desc.pIDList);
+    }
+    SIZE_T Bytes() const { return categories.size() * sizeof(D3D12_MESSAGE_CATEGORY) +
+        severities.size() * sizeof(D3D12_MESSAGE_SEVERITY) + ids.size() * sizeof(D3D12_MESSAGE_ID); }
+    void Copy(D3D12_INFO_QUEUE_FILTER_DESC &desc, char *&cursor) const {
+      desc = {};
+      if (!categories.empty()) {
+        desc.NumCategories = categories.size();
+        desc.pCategoryList = reinterpret_cast<D3D12_MESSAGE_CATEGORY *>(cursor);
+        std::memcpy(cursor, categories.data(), categories.size() * sizeof(categories[0]));
+        cursor += categories.size() * sizeof(categories[0]);
+      }
+      if (!severities.empty()) {
+        desc.NumSeverities = severities.size();
+        desc.pSeverityList = reinterpret_cast<D3D12_MESSAGE_SEVERITY *>(cursor);
+        std::memcpy(cursor, severities.data(), severities.size() * sizeof(severities[0]));
+        cursor += severities.size() * sizeof(severities[0]);
+      }
+      if (!ids.empty()) {
+        desc.NumIDs = ids.size();
+        desc.pIDList = reinterpret_cast<D3D12_MESSAGE_ID *>(cursor);
+        std::memcpy(cursor, ids.data(), ids.size() * sizeof(ids[0]));
+        cursor += ids.size() * sizeof(ids[0]);
+      }
+    }
+  };
+  struct Filter {
+    FilterList allow, deny;
+    bool Allows(D3D12_MESSAGE_CATEGORY c, D3D12_MESSAGE_SEVERITY s, D3D12_MESSAGE_ID id) const {
+      return (allow.Empty() || allow.Matches(c, s, id)) && !deny.Matches(c, s, id);
+    }
+  };
+  static HRESULT UpdateFilter(std::vector<Filter> &stack, D3D12_INFO_QUEUE_FILTER *input, bool push, bool copy) {
+    try {
+      Filter next = !push || copy ? stack.back() : Filter{};
+      if (input) {
+        next.allow.Append(input->AllowList);
+        next.deny.Append(input->DenyList);
+      } else if (!push) return E_INVALIDARG;
+      if (push) stack.push_back(std::move(next));
+      else stack.back() = std::move(next);
+      return S_OK;
+    } catch (const std::invalid_argument &) { return E_INVALIDARG; }
+      catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+      catch (const std::length_error &) { return E_OUTOFMEMORY; }
+  }
+  static HRESULT CopyFilter(const Filter &stored, D3D12_INFO_QUEUE_FILTER *filter, SIZE_T *length) {
+    if (!length) return E_INVALIDARG;
+    const SIZE_T required = sizeof(*filter) + stored.allow.Bytes() + stored.deny.Bytes();
+    const SIZE_T available = filter ? *length : 0;
+    *length = required;
+    if (!filter) return S_OK;
+    if (available < required) return DXGI_ERROR_MORE_DATA;
+    char *cursor = reinterpret_cast<char *>(filter + 1);
+    stored.allow.Copy(filter->AllowList, cursor);
+    stored.deny.Copy(filter->DenyList, cursor);
+    return S_OK;
+  }
+  struct Message {
+    D3D12_MESSAGE_CATEGORY category;
+    D3D12_MESSAGE_SEVERITY severity;
+    D3D12_MESSAGE_ID id;
+    std::string text;
+  };
   std::mutex mutex_;
-  UINT64 message_count_limit_ = ~UINT64(0);
-  UINT storage_filter_stack_size_ = 0;
-  UINT retrieval_filter_stack_size_ = 0;
+  std::vector<Message> messages_;
+  UINT64 allowed_ = 0, denied_ = 0, discarded_ = 0;
+  UINT64 message_count_limit_ = 1024;
+  std::vector<Filter> storage_filters_{1}, retrieval_filters_{1};
   WINBOOL mute_debug_output_ = FALSE;
 };
 
