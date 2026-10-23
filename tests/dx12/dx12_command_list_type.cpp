@@ -2305,7 +2305,9 @@ public:
   }
 };
 
-bool TestSmallBlitCost(bool late_event = false, bool long_batch = false, bool split_cost = false) {
+bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
+                       bool split_cost = false,
+                       bool omit_second_submission = false) {
   HANDLE event = late_event ? nullptr : CreateEventW(nullptr, FALSE, FALSE, nullptr);
   if (!late_event && !event)
     return false;
@@ -2357,11 +2359,6 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false, bool sp
                    nullptr, IID_PPV_ARGS(&readback.ptr))))
     return false;
   uint32_t *mapped = nullptr;
-  if (!CheckHR("MapUpload",
-               upload.ptr->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
-    return false;
-  *mapped = 0x51a61234;
-  upload.ptr->Unmap(0, nullptr);
 
   // Keep ownership before the device so either setup order has safe teardown.
   if (late_event) {
@@ -2385,7 +2382,7 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false, bool sp
   group.NumBarriers = 1;
   // Both batches fit the existing 4MiB CPU arena (64 bytes per copy).
   const UINT copies = split_cost ? 2000 : long_batch ? 50000 : 10000;
-  const UINT rounds = long_batch ? 25 : 9;
+  const UINT rounds = omit_second_submission ? 2 : long_batch ? 25 : 9;
 
   LARGE_INTEGER frequency;
   QueryPerformanceFrequency(&frequency);
@@ -2394,6 +2391,17 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false, bool sp
         (!CheckHR("ResetAllocator", allocator.ptr->Reset()) ||
          !CheckHR("ResetList", list.ptr->Reset(allocator.ptr, nullptr))))
       return false;
+    // The previous round's fence completed before reset. Update outside the
+    // timed interval so stale readback cannot validate a missing submission.
+    const uint32_t payload = 0x51a61234u ^ (round * 0x9e3779b9u);
+    const D3D12_RANGE no_read = {0, 0};
+    if (!CheckHR(
+            "MapUpload",
+            upload.ptr->Map(0, &no_read, reinterpret_cast<void **>(&mapped))))
+      return false;
+    *mapped = payload;
+    const D3D12_RANGE written = {0, sizeof(payload)};
+    upload.ptr->Unmap(0, &written);
     CopyBufferCounter counter;
     if (!counter.Install())
       return false;
@@ -2419,7 +2427,9 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false, bool sp
       return false;
     QueryPerformanceCounter(&closed);
     ID3D12CommandList *batch[] = {list.ptr};
-    queue.ptr->ExecuteCommandLists(1, batch);
+    // Test-only fault: exercise the readback oracle without issuing this round's copy.
+    if (!omit_second_submission || round != 1)
+      queue.ptr->ExecuteCommandLists(1, batch);
     QueryPerformanceCounter(&submitted);
     if (split_cost && BlitEncoderCounter::count != 2) return false;
     if (!CheckHR("SignalBlit", queue.ptr->Signal(fence.ptr, round + 1)) ||
@@ -2432,25 +2442,35 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false, bool sp
             "MapBlit",
             readback.ptr->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
       return false;
-    const bool good = *mapped == 0x51a61234;
+    const uint32_t actual = *mapped;
     readback.ptr->Unmap(0, nullptr);
-    if (!good)
+    if (actual != payload) {
+      std::cerr << "small blit readback mismatch round=" << round
+                << " actual=" << actual << " expected=" << payload
+                << " device_reason=" << device.ptr->GetDeviceRemovedReason() << "\n";
       return false;
-    std::cout << (split_cost ? "split_cost round=" : "small_blit round=") << round
-              << " pairs=" << (split_cost ? copies : 0)
-              << " copies=" << (split_cost ? 2 : copies) << " late_event=" << late_event
-              << " native_buffers=" << CopyBufferCounter::count
-              << " record_us="
+    }
+    std::cout << (split_cost ? "split_cost round=" : "small_blit round=")
+              << round << " pairs=" << (split_cost ? copies : 0)
+              << " copies=" << (split_cost ? 2 : copies)
+              << " late_event=" << late_event << " payload=" << payload
+              << " native_buffers=" << CopyBufferCounter::count << " record_us="
               << (end.QuadPart - start.QuadPart) * 1e6 / frequency.QuadPart
-              << " close_us=" << (closed.QuadPart - end.QuadPart) * 1e6 / frequency.QuadPart
-              << " submit_us=" << (submitted.QuadPart - closed.QuadPart) * 1e6 / frequency.QuadPart
-              << " native_encoders=" << (split_cost ? BlitEncoderCounter::count : 0)
-              << "\n";
+              << " close_us="
+              << (closed.QuadPart - end.QuadPart) * 1e6 / frequency.QuadPart
+              << " submit_us="
+              << (submitted.QuadPart - closed.QuadPart) * 1e6 /
+                     frequency.QuadPart
+              << " native_encoders="
+              << (split_cost ? BlitEncoderCounter::count : 0) << "\n";
   }
   return true;
 }
 
 int main(int argc, char **argv) {
+  if (argc == 3 && !std::strcmp(argv[1], "--small-blit-cost") &&
+      !std::strcmp(argv[2], "stale"))
+    return TestSmallBlitCost(false, false, false, true) ? 0 : 1;
   if (argc == 2 && !std::strcmp(argv[1], "--split-cost"))
     return TestSmallBlitCost(false, true, true) ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--small-blit-cost") == 0)

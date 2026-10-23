@@ -1386,6 +1386,63 @@ clang23.1.1. User.gitignore preserved,no push. Full issue/root/file/command/exit
 performance/source/hash/loaded-path evidence and remaining limits:
 `../dxmt-test/n09-typed-view-formats-20261024/N09-typed-view-formats.md`.
 
+### N10 — detect stale copy benchmark readback and bound recording attribution, 2026-10-24
+
+Actual base `3dab6e928e384ff96f6f449cf65492e718b09de5`. One N10 node;
+production code, ABI, capabilities and scheduling are unchanged.
+
+Confirmed fixture bug: the small-copy benchmark reused one constant in every
+round. Deliberately omitting the second ExecuteCommandLists returned exit 0
+because the previous readback still matched. The existing runner now writes a
+unique per-round payload before timing, after the previous fence completes,
+and checks that payload after its current fence. Opt-in
+`--small-blit-cost stale` must fail: the old two-round oracle exits 0; the
+new one exits 1 at round 1, actual 1369838132, expected 3482413965,
+`device_reason=0`. This is an oracle fix, not evidence of a driver submit bug.
+
+Transition coverage is bounded: created/reset recording list -> upload write ->
+record -> close -> execute -> signal/wait -> current readback. The injected
+closed-but-unsubmitted round reaches a queue fence and is then rejected for
+stale data. These fixture transitions do not close the full N10 state machine.
+Native buffer-allocation count remains zero; split mode retains its two native
+blit encoders. Payload preparation is outside all three timers, but can affect
+CPU preconditions; comparing old/new probe timing is not driver speedup proof.
+
+Build and DXMT_NO_PRIVATE_API syntax compilation of the changed test TU exit 0.
+With Metal API/shader validation, early/late each pass 9 rounds, early-long/
+late-long each pass 25, split passes 25, and the default command-list suite and
+multi depth/stencil copy pass. The deliberate stale mode fails as expected.
+
+Original fixed-PE controls: 18 successful processes with A/A and crossed A/B,
+25 rounds/process, first discarded; per-process p50/nearest-rank p95 over 24
+samples, then median across three processes. Current/current A/A recording
+slot B vs A is -0.28%/-2.56%. Current vs old is +2.28%/-7.78% before the path
+swap and +2.36%/-9.03% after it. No fixed-slot bias was reproduced in this
+small sample; environmental variance is not excluded. CopyBufferRegion has
+172 identical symbolized instructions but different raw bytes and an RVA
+shift of 64 bytes (0xe170 -> 0xe1b0). Layout/Rosetta remains a hypothesis.
+
+Final fixed-PE controls with unique payloads: 12 successful processes, 300
+verified rows. Current/current A/A recording -0.94%/-3.41%; old/current A/B
+recording 3132.50/3241.50 vs 3195.40/3327.00 us (+2.01%/+2.64%). Close is
+1.30/2.00 vs 1.40/1.90 us. Batch-submit is 22127.55/23291.80 vs
+22036.25/22413.70 us (-0.41%/-3.77%); this is the 50000-copy Execute timer,
+not the ordinary N13 full-submit probe. Recording performance gate stays OPEN;
+no speculative runtime optimization or rollback was made.
+
+Same M1 Max/Apple7, macOS 27.0.1, Xcode 27.1 (26 unavailable), MSC 4.0.1,
+matched Wine11 x64/Rosetta host. Native Windows/debug layer, T3/T4, complete
+no-private runtime and ordinary N13 submit benchmark NOT_RUN this round.
+Device attachment and existing formal/performance gates remain incomplete.
+Next bounded candidate: code-placement experiment or CPU profiling for the
+DLL-associated recording difference. All scripts/logs/staged DLLs/PEs and
+per-process hashes are external; user `.gitignore` remains untouched.
+
+Evidence:
+`../dxmt-test/n10-recording-attribution-20261024/N10-recording-attribution.md`,
+`validation-results.json`, `control-aggregate.json`,
+`final-control-aggregate.json`, `disassembly-summary.json`, `manifest.json`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
