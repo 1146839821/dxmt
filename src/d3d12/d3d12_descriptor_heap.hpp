@@ -120,6 +120,8 @@ struct CBVCommonStorage {
 struct UAVBufferCPUStorage {
   Buffer *buffer = nullptr;
   BufferSlice slice{};
+  // The heap owns this identity through counter_resources_, including copies.
+  Buffer *counter = nullptr;
 };
 
 using SRVBufferCPUStorage = UAVBufferCPUStorage;

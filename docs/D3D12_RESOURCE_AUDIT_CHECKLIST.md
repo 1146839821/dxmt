@@ -160,6 +160,38 @@ without first documenting a changed contract or a regression.
 
 ## Validation Notes
 
+### N09 — structured UAV counter residency, 2026-10-23
+
+`UAVBufferCPUStorage` now carries the counter identity owned by the existing
+descriptor heap's `counter_resources_`. Both recording-time resource encoding
+and submit-time volatile descriptor resolution include its native buffer with
+read/write usage. Descriptor copies already copy the payload and owning refs
+under the same locks; no additional lifetime owner or heap scan was added.
+Replacing the descriptor with an SRV or a counterless UAV clears the identity.
+The x64 CPU descriptor remains 48 bytes; GPU descriptor layouts are unchanged.
+
+The existing `dx12_airconv_compute_residency` runner now records counter A,
+copies a CPU-only descriptor containing counter B after Close, checks both the
+recorded references and submit-latest resource declarations before submitting,
+and reads back four exact shader results plus both counters. After a fence it
+reuses the slot with a direct B-to-A update. The original DLL fails the resource
+declaration assertions before GPU dispatch; the fixed DLL passes with Metal API
+and shader validation enabled. Counter values are A=0/B=4, then A=4/B=4, with
+sorted output 100/101/102/103 in both passes. The source CPU heap is released
+after the copy. Application resource references remain alive through the fence.
+
+Ownership, registry stress, and AIRCONV/MSC mixed shader-runtime runners also
+exit 0 on the matched private WineMetal runtime. This validates the SM5 counter
+path, not DXIL counter lowering or a capability promotion. FL/SM/Tiers are unchanged.
+External evidence: `../dxmt-test/n09-20261023/N09-counter-residency.md`.
+The warm collector control probe retains one heap lock and 2/21/257 reachable
+slots at heap capacities 258/4096/65536. The 257-slot conservative case increases
+from about 11.2 to 11.7 microseconds; this measured cost is retained rather than
+claiming a performance improvement. The new counter case adds one live native
+resource declaration, one heap lock, and zero descriptor VA lookups per call.
+
+### Earlier validation notes
+
 - Build targets used for the current slice are `build`, `build-no-private`,
   and `build-X86`; current runtime conclusions are x64 and no-private only.
 - The test executable directories contain stale local DLL copies. Run the

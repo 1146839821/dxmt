@@ -3572,8 +3572,13 @@ public:
         break;
       case ShaderVisibleDescriptorType::UAVBuffer:
         if (accepts(D3D12_DESCRIPTOR_RANGE_TYPE_UAV) && descriptor.UAVBuffer.buffer &&
-            descriptor.UAVBuffer.buffer->current())
-          return add(descriptor.UAVBuffer.buffer->current()->buffer().handle, read_write);
+            descriptor.UAVBuffer.buffer->current()) {
+          if (!add(descriptor.UAVBuffer.buffer->current()->buffer().handle, read_write))
+            return false;
+          auto *counter = descriptor.UAVBuffer.counter;
+          if (counter && counter->current())
+            return add(counter->current()->buffer().handle, read_write);
+        }
         break;
       case ShaderVisibleDescriptorType::Null:
         break;
@@ -3844,6 +3849,8 @@ public:
             !descriptor.UAVBuffer.buffer->current())
           return;
         encode_resource(descriptor.UAVBuffer.buffer->current()->buffer().handle, read_write);
+        if (auto *counter = descriptor.UAVBuffer.counter; counter && counter->current())
+          encode_resource(counter->current()->buffer().handle, read_write);
         break;
       }
       case ShaderVisibleDescriptorType::Null:
