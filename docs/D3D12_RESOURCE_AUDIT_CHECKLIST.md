@@ -755,6 +755,32 @@ runtime/native Windows differential remain pending, as do break/output stubs.
 Commands, manifests,12-site results and limits:
 `../dxmt-test/n02-infoqueue-oom-20261024/N02-infoqueue-oom.md`.
 
+### N02 — InfoQueue break controls and debug output, 2026-10-24
+
+Confirmed setters returned success without retaining break state; getters were
+always FALSE and AddMessage never dispatched output/breaks. Three mutex-protected
+sets now persist category/severity/ID controls. Storage-accepted messages snapshot
+dispatch decisions under the mutex and call OutputDebugStringA/DebugBreak after
+unlock, including zero-capacity messages. Mute suppresses output only; retrieval
+filters do not suppress dispatch. Device0–10 QI grouping remains intact.
+
+Same feature PE fails on baseline and passes on candidate. Opt-in command-list
+--infoqueue-debug-controls intercepts only the driver imports: baseline lacks
+imports (exit1), candidate captures7 outputs/6 breaks (exit0), validates filters,
+mute, zero limit, invalid parameters and reentrant query/clear callbacks. Three
+fresh-device break-set allocation failures return E_OUTOFMEMORY without changing
+state. Existing12-site OOM probe and full command-list/feature/resource runners
+pass. Device NO_PRIVATE_API TU syntax passes; full no-private runtime, real OS
+debugger delivery and native Windows differential are NOT_RUN.
+
+Twelve alternating processes: recording p50/P95 +2.25%/+11.72%, ordinary submit
++5.05%/+2.82%. Recording tail and submit median trigger team alerts; overall gate
+remains OPEN, without causal QI/performance claims. No public ABI, capability,
+layout or scheduler change, and no complete debug-layer claim. Next priority is
+Enhanced Barrier split state, then format consistency; capability remains FALSE.
+Commands, source snapshot, manifests, raw logs and scope:
+`../dxmt-test/n02-infoqueue-break-20261024/N02-infoqueue-break.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

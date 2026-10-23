@@ -60,7 +60,21 @@ bool CheckInfoQueueMessages(ID3D12Device *device) {
   if (!CheckHR("Message queue", device->QueryInterface(IID_PPV_ARGS(&queue)))) return false;
   queue->ClearStoredMessages();
   queue->SetMuteDebugOutput(TRUE);
+  bool breaks_good = CheckHR("Enable break severity", queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE));
+  breaks_good &= queue->GetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING) == TRUE;
+  breaks_good &= CheckHR("Enable break category", queue->SetBreakOnCategory(D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED, TRUE));
+  breaks_good &= queue->GetBreakOnCategory(D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED) == TRUE;
+  breaks_good &= CheckHR("Enable break ID", queue->SetBreakOnID(D3D12_MESSAGE_ID_STRING_FROM_APPLICATION, TRUE));
+  breaks_good &= queue->GetBreakOnID(D3D12_MESSAGE_ID_STRING_FROM_APPLICATION) == TRUE;
+  queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, FALSE);
+  queue->SetBreakOnCategory(D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED, FALSE);
+  queue->SetBreakOnID(D3D12_MESSAGE_ID_STRING_FROM_APPLICATION, FALSE);
+  breaks_good &= !queue->GetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING) &&
+                 !queue->GetBreakOnCategory(D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED) &&
+                 !queue->GetBreakOnID(D3D12_MESSAGE_ID_STRING_FROM_APPLICATION);
+  if (!breaks_good) std::cerr << "InfoQueue break controls did not roundtrip\n";
   bool good = CheckHR("Message limit", queue->SetMessageCountLimit(2));
+  good &= breaks_good;
   char text[] = "caller-owned message";
   good &= CheckHR("Application message", queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_WARNING, text));
   text[0] = 'X';

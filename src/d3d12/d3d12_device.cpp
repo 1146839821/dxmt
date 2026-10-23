@@ -329,7 +329,7 @@ public:
         category > D3D12_MESSAGE_CATEGORY_SHADER || severity < D3D12_MESSAGE_SEVERITY_CORRUPTION ||
         severity > D3D12_MESSAGE_SEVERITY_MESSAGE)
       return E_INVALIDARG;
-    std::lock_guard lock(mutex_);
+    std::unique_lock lock(mutex_);
     try {
       if (!storage_filters_.back().Allows(category, severity, id)) {
         denied_++;
@@ -338,32 +338,77 @@ public:
       if (!message_count_limit_) {
         allowed_++;
         discarded_++;
-        return S_OK;
-      }
-      messages_.push_back({category, severity, id, text});
-      allowed_++;
-      if (messages_.size() > message_count_limit_) {
-        messages_.erase(messages_.begin());
-        discarded_++;
+      } else {
+        messages_.push_back({category, severity, id, text});
+        allowed_++;
+        if (messages_.size() > message_count_limit_) {
+          messages_.erase(messages_.begin());
+          discarded_++;
+        }
       }
     } catch (const std::bad_alloc &) {
       return E_OUTOFMEMORY;
     }
+    const bool stop = Has(break_categories_, category) || Has(break_severities_, severity) || Has(break_ids_, id);
+    const bool output = !mute_debug_output_;
+    lock.unlock();
+    // Debugger/output callbacks may reenter InfoQueue. Never hold its mutex.
+    if (output) OutputDebugStringA(text);
+    if (stop) DebugBreak();
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE AddApplicationMessage(D3D12_MESSAGE_SEVERITY severity, const char *text) override {
     return AddMessage(D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED, severity, D3D12_MESSAGE_ID_STRING_FROM_APPLICATION, text);
   }
-  HRESULT STDMETHODCALLTYPE SetBreakOnCategory(D3D12_MESSAGE_CATEGORY, WINBOOL) override { return S_OK; }
-  HRESULT STDMETHODCALLTYPE SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY, WINBOOL) override { return S_OK; }
-  HRESULT STDMETHODCALLTYPE SetBreakOnID(D3D12_MESSAGE_ID, WINBOOL) override { return S_OK; }
-  WINBOOL STDMETHODCALLTYPE GetBreakOnCategory(D3D12_MESSAGE_CATEGORY) override { return FALSE; }
-  WINBOOL STDMETHODCALLTYPE GetBreakOnSeverity(D3D12_MESSAGE_SEVERITY) override { return FALSE; }
-  WINBOOL STDMETHODCALLTYPE GetBreakOnID(D3D12_MESSAGE_ID) override { return FALSE; }
+  HRESULT STDMETHODCALLTYPE SetBreakOnCategory(D3D12_MESSAGE_CATEGORY value, WINBOOL enabled) override {
+    if (!(value >= D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED && value <= D3D12_MESSAGE_CATEGORY_SHADER)) return E_INVALIDARG;
+    std::lock_guard lock(mutex_);
+    try {
+      auto found = std::find(break_categories_.begin(), break_categories_.end(), value);
+      if (enabled && found == break_categories_.end()) break_categories_.push_back(value);
+      else if (!enabled && found != break_categories_.end()) break_categories_.erase(found);
+      return S_OK;
+    } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+  }
+  WINBOOL STDMETHODCALLTYPE GetBreakOnCategory(D3D12_MESSAGE_CATEGORY value) override {
+    std::lock_guard lock(mutex_);
+    return Has(break_categories_, value);
+  }
+  HRESULT STDMETHODCALLTYPE SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY value, WINBOOL enabled) override {
+    if (!(value >= D3D12_MESSAGE_SEVERITY_CORRUPTION && value <= D3D12_MESSAGE_SEVERITY_MESSAGE)) return E_INVALIDARG;
+    std::lock_guard lock(mutex_);
+    try {
+      auto found = std::find(break_severities_.begin(), break_severities_.end(), value);
+      if (enabled && found == break_severities_.end()) break_severities_.push_back(value);
+      else if (!enabled && found != break_severities_.end()) break_severities_.erase(found);
+      return S_OK;
+    } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+  }
+  WINBOOL STDMETHODCALLTYPE GetBreakOnSeverity(D3D12_MESSAGE_SEVERITY value) override {
+    std::lock_guard lock(mutex_);
+    return Has(break_severities_, value);
+  }
+  HRESULT STDMETHODCALLTYPE SetBreakOnID(D3D12_MESSAGE_ID value, WINBOOL enabled) override {
+    if (!(value >= D3D12_MESSAGE_ID_UNKNOWN)) return E_INVALIDARG;
+    std::lock_guard lock(mutex_);
+    try {
+      auto found = std::find(break_ids_.begin(), break_ids_.end(), value);
+      if (enabled && found == break_ids_.end()) break_ids_.push_back(value);
+      else if (!enabled && found != break_ids_.end()) break_ids_.erase(found);
+      return S_OK;
+    } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+  }
+  WINBOOL STDMETHODCALLTYPE GetBreakOnID(D3D12_MESSAGE_ID value) override {
+    std::lock_guard lock(mutex_);
+    return Has(break_ids_, value);
+  }
   void STDMETHODCALLTYPE SetMuteDebugOutput(WINBOOL mute) override { std::lock_guard lock(mutex_); mute_debug_output_ = mute; }
   WINBOOL STDMETHODCALLTYPE GetMuteDebugOutput() override { std::lock_guard lock(mutex_); return mute_debug_output_; }
 
 private:
+  template <typename T> static bool Has(const std::vector<T> &values, T value) {
+    return std::find(values.begin(), values.end(), value) != values.end();
+  }
   struct FilterList {
     std::vector<D3D12_MESSAGE_CATEGORY> categories;
     std::vector<D3D12_MESSAGE_SEVERITY> severities;
@@ -450,6 +495,9 @@ private:
   UINT64 allowed_ = 0, denied_ = 0, discarded_ = 0;
   UINT64 message_count_limit_ = 1024;
   std::vector<Filter> storage_filters_{1}, retrieval_filters_{1};
+  std::vector<D3D12_MESSAGE_CATEGORY> break_categories_;
+  std::vector<D3D12_MESSAGE_SEVERITY> break_severities_;
+  std::vector<D3D12_MESSAGE_ID> break_ids_;
   WINBOOL mute_debug_output_ = FALSE;
 };
 

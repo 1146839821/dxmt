@@ -781,6 +781,96 @@ DWORD ProcessThreadCount() {
   return count;
 }
 
+// Capture debugger dispatch without opening a debugger. Both callbacks reenter
+// the queue, so a driver holding its mutex across dispatch will deadlock.
+class InfoQueueDebugCapture {
+  DriverImportPatch output_patch_, break_patch_;
+  inline static ID3D12InfoQueue *queue_ = nullptr;
+  static void WINAPI Output(const char *text) {
+    outputs++;
+    text_matches &= std::strcmp(text, "debug probe") == 0;
+    queue_->GetMuteDebugOutput();
+    queue_->ClearStoredMessages();
+  }
+  static void WINAPI Break() {
+    breaks++;
+    queue_->GetNumStoredMessages();
+  }
+public:
+  inline static unsigned outputs = 0, breaks = 0;
+  inline static bool text_matches = true;
+  bool Install(ID3D12InfoQueue *queue) {
+    queue_ = queue;
+    void *original = nullptr;
+    return output_patch_.Install("OutputDebugStringA", reinterpret_cast<void *>(&Output), original) &&
+           break_patch_.Install("DebugBreak", reinterpret_cast<void *>(&Break), original);
+  }
+};
+
+bool TestInfoQueueDebugControls() {
+  Owned<ID3D12Device> device;
+  Owned<ID3D12InfoQueue> queue;
+  if (!CheckHR("Debug InfoQueue device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+          IID_PPV_ARGS(&device.ptr))) ||
+      !CheckHR("Debug InfoQueue", device->QueryInterface(IID_PPV_ARGS(&queue.ptr)))) return false;
+  InfoQueueDebugCapture capture;
+  if (!capture.Install(queue.ptr)) {
+    std::cerr << "InfoQueue debug imports unavailable\n";
+    return false;
+  }
+  const auto category = D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED;
+  const auto severity = D3D12_MESSAGE_SEVERITY_WARNING;
+  const auto id = D3D12_MESSAGE_ID_STRING_FROM_APPLICATION;
+  auto add = [&](unsigned output, unsigned stop) {
+    auto old_output = capture.outputs, old_break = capture.breaks;
+    return SUCCEEDED(queue->AddApplicationMessage(severity, "debug probe")) &&
+           capture.outputs == old_output + output && capture.breaks == old_break + stop && capture.text_matches;
+  };
+  queue->SetMuteDebugOutput(FALSE);
+  if (!add(1, 0)) return false;
+  if (FAILED(queue->SetBreakOnSeverity(severity, TRUE)) || !add(1, 1) ||
+      FAILED(queue->SetBreakOnSeverity(severity, FALSE))) return false;
+  if (FAILED(queue->SetBreakOnCategory(category, TRUE)) || !add(1, 1) ||
+      FAILED(queue->SetBreakOnCategory(category, FALSE))) return false;
+  if (FAILED(queue->SetBreakOnID(id, TRUE)) || !add(1, 1)) return false;
+  queue->SetMuteDebugOutput(TRUE);
+  if (!add(0, 1)) return false;
+  D3D12_INFO_QUEUE_FILTER filter = {};
+  auto filtered_id = id;
+  filter.DenyList.NumIDs = 1;
+  filter.DenyList.pIDList = &filtered_id;
+  queue->SetMuteDebugOutput(FALSE);
+  if (FAILED(queue->PushStorageFilter(&filter)) || !add(0, 0)) return false;
+  queue->PopStorageFilter();
+  if (FAILED(queue->PushRetrievalFilter(&filter)) || !add(1, 1)) return false;
+  queue->PopRetrievalFilter();
+  queue->SetMessageCountLimit(0);
+  if (!add(1, 1) || queue->GetNumStoredMessages()) return false;
+  if (queue->SetBreakOnCategory(static_cast<D3D12_MESSAGE_CATEGORY>(-1), TRUE) != E_INVALIDARG ||
+      queue->SetBreakOnSeverity(static_cast<D3D12_MESSAGE_SEVERITY>(-1), TRUE) != E_INVALIDARG ||
+      queue->SetBreakOnID(static_cast<D3D12_MESSAGE_ID>(-1), TRUE) != E_INVALIDARG ||
+      !queue->GetBreakOnID(id)) return false;
+  queue->SetBreakOnID(id, FALSE);
+  if (!add(1, 0)) return false;
+  for (unsigned mode = 0; mode < 3; mode++) {
+    Owned<ID3D12Device> fresh_device;
+    Owned<ID3D12InfoQueue> fresh;
+    if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&fresh_device.ptr))) ||
+        FAILED(fresh_device->QueryInterface(IID_PPV_ARGS(&fresh.ptr)))) return false;
+    SubmissionAllocationFault fault;
+    if (!fault.Install()) return false;
+    fault.Arm(1);
+    HRESULT hr = mode == 0 ? fresh->SetBreakOnCategory(category, TRUE) :
+                 mode == 1 ? fresh->SetBreakOnSeverity(severity, TRUE) : fresh->SetBreakOnID(id, TRUE);
+    fault.Stop();
+    if (!fault.Hit() || hr != E_OUTOFMEMORY || fresh->GetBreakOnCategory(category) ||
+        fresh->GetBreakOnSeverity(severity) || fresh->GetBreakOnID(id)) return false;
+  }
+  std::cout << "InfoQueue debug dispatch: output=" << capture.outputs << " break=" << capture.breaks
+            << " storage/retrieval/mute/zero-limit/reentry passed\n";
+  return true;
+}
+
 bool TestInfoQueueAllocationFailure() {
   for (unsigned mode = 0; mode < 4; mode++) {
     unsigned failures = 0;
@@ -2173,6 +2263,8 @@ int main(int argc, char **argv) {
     return TestCopyStaging(argv[2]) ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--multiple-fences") == 0)
     return TestMultipleFenceWaits() ? 0 : 1;
+  if (argc == 2 && std::strcmp(argv[1], "--infoqueue-debug-controls") == 0)
+    return TestInfoQueueDebugControls() ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--infoqueue-allocation-failure") == 0)
     return TestInfoQueueAllocationFailure() ? 0 : 1;
   if (argc == 3 && std::strcmp(argv[1], "--encoder-creation-failure") == 0) {
