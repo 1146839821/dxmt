@@ -490,6 +490,19 @@ next evidence must identify on-CPU tail cost rather than repeat median-only
 comparisons. Method, controls, all samples and limitations:
 `../dxmt-test/n10-thread-cpu-20261023/N10-thread-cpu.md`.
 
+Follow-up identity check: the captured current DLL and rebuilt DLL have identical
+`.text` bytes and section RVAs. The full-file hash differs because the version
+string/build metadata changed; exact measured-image hashes remain authoritative.
+Native macOS sampling completes but cannot attribute translated PE frames.
+An external Windows-context sampler instead captures recording-window RIPs,
+maps them using the verified loaded DLL base, and passes 100 GPU-checked rounds
+per DLL with zero sampling errors. Device QueryInterface accounts for 306/483
+old and 310/469 current samples. Source inspection locates the common IUnknown
+identity route after the other device-interface checks. This is a shared hot
+cost, not proof of the staging change's conditional regression. Sample shares
+are diagnostic, not latency acceptance; suspension perturbs execution. No
+production optimization or gate closure is included in this evidence round.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
