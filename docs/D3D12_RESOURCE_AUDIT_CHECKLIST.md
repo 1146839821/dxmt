@@ -190,6 +190,38 @@ from about 11.2 to 11.7 microseconds; this measured cost is retained rather than
 claiming a performance improvement. The new counter case adds one live native
 resource declaration, one heap lock, and zero descriptor VA lookups per call.
 
+### N09 — bounded nonuniform descriptor mutation oracle, 2026-10-23
+
+The existing `dx12_compute_sm6 --direct-indexed-nonuniform` runner now dispatches
+one group for its `numthreads(2,1,1)` fixture. The old two-group dispatch produced
+four threads against a three-slot heap, including a UAV interpreted as SRV and
+an out-of-heap descriptor index. That invalid workload was established from
+source and DXIL metadata; it was not deliberately executed for a GPU failure.
+The runner also sets directly indexed descriptor heaps before their root
+signature, as required by the SM6.6 Dynamic Resources contract.
+
+The same fixture now verifies two legal timings with different native input
+buffers: after Close, CPU-only heap descriptor copies select B and read back
+1888/1777; after a completed fence, direct descriptor updates select A and replay
+the same closed list to read back 777/888. Readback uses explicit UAV-to-copy and
+copy-to-UAV transitions so replay starts in the expected resource state. The
+source CPU heap is released after copying; both input resources remain alive
+through GPU completion. Fences have bounded waits and device-removal checks.
+
+Metal API/shader validation passes both timings. A constant-index shader and an
+external variant omitting the completed-slot update independently fail the two
+oracles with exit 1. Direct-indexed and descriptor-table adjacent cases pass.
+Production code, descriptor ownership, backend routing, and capabilities are
+unchanged; these internal probes do not establish complete SM6.6 support.
+
+Direct indexing still visits all slots because no exact reachable footprint is
+available. At capacities 3/4096/65536 the warm collector takes approximately
+1.7/40/604 microseconds, one batch lock, and no descriptor VA lookup per call.
+This is an unresolved capacity cost, not a performance improvement or a closed
+N09 exit gate. The next candidate is a heap/encoder submission intent that
+avoids per-slot pending records while preserving updates to previously empty
+slots. External evidence: `../dxmt-test/n09-nonuniform-20261023/`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

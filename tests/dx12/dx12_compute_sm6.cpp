@@ -7,6 +7,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -140,7 +141,9 @@ int main(int argc, char **argv) {
   ID3DBlob *root_blob = nullptr;
   ID3DBlob *root_error = nullptr;
   ID3D12DescriptorHeap *descriptor_heap = nullptr;
+  ID3D12DescriptorHeap *nonuniform_source_heap = nullptr;
   ID3D12Resource *input_buffer = nullptr;
+  ID3D12Resource *nonuniform_input = nullptr;
   ID3D12Resource *output_buffer = nullptr;
   ID3D12Resource *readback_buffer = nullptr;
   ID3D12Heap *reserved_heap = nullptr;
@@ -345,6 +348,27 @@ int main(int argc, char **argv) {
         memcpy(mapped_input, &input_value, sizeof(input_value));
       }
       input_buffer->Unmap(0, nullptr);
+
+      if (direct_indexed_nonuniform) {
+        if (!CheckHR("CreateNonuniformInput",
+                     device->CreateCommittedResource(
+                         &upload_heap, D3D12_HEAP_FLAG_NONE, &input_desc,
+                         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                         IID_PPV_ARGS(&nonuniform_input))) ||
+            !CheckHR("MapNonuniformInput",
+                     nonuniform_input->Map(0, nullptr, &mapped_input)))
+          goto cleanup;
+        const UINT replacement[] = {input_value + 1000, input_value + 1111};
+        memcpy(mapped_input, replacement, sizeof(replacement));
+        nonuniform_input->Unmap(0, nullptr);
+        D3D12_DESCRIPTOR_HEAP_DESC source_desc = {};
+        source_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        source_desc.NumDescriptors = 2;
+        if (!CheckHR("CreateNonuniformSourceHeap",
+                     device->CreateDescriptorHeap(
+                         &source_desc, IID_PPV_ARGS(&nonuniform_source_heap))))
+          goto cleanup;
+      }
 
       if (unbounded_resources) {
         descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
@@ -551,6 +575,11 @@ int main(int argc, char **argv) {
     goto cleanup;
 
   if (needs_root_signature) {
+    // A directly indexed root signature must be set after its descriptor heap.
+    if (direct_indexed_resource_heap) {
+      ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
+      list->SetDescriptorHeaps(1, heaps);
+    }
     list->SetComputeRootSignature(root_signature);
     if (root_cbv) {
       list->SetComputeRootConstantBufferView(
@@ -566,9 +595,6 @@ int main(int argc, char **argv) {
           0, input_buffer->GetGPUVirtualAddress());
       list->SetComputeRootUnorderedAccessView(
           1, output_buffer->GetGPUVirtualAddress());
-    } else if (direct_indexed_resource_heap) {
-      ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
-      list->SetDescriptorHeaps(1, heaps);
     } else if (descriptor_table_resources) {
       ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
       list->SetDescriptorHeaps(1, heaps);
@@ -582,7 +608,7 @@ int main(int argc, char **argv) {
     } else if (root_uav) {
       list->SetComputeRootUnorderedAccessView(
           0, output_buffer->GetGPUVirtualAddress());
-    } else {
+    } else if (!direct_indexed_resource_heap) {
       ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
       list->SetDescriptorHeaps(1, heaps);
       list->SetComputeRootDescriptorTable(
@@ -611,8 +637,10 @@ int main(int argc, char **argv) {
     list->ResourceBarrier(1, &uav_barrier);
     list->Dispatch(2, 1, 1);
   } else {
-    list->Dispatch(compute_derivatives ? 8 : direct_indexed_nonuniform ? 2 : 1,
-                   compute_derivatives ? 8 : 1, 1);
+    // The nonuniform fixture has numthreads(2,1,1): one group reads the two
+    // SRV slots. A second group would access the UAV slot and then leave the
+    // heap.
+    list->Dispatch(compute_derivatives ? 8 : 1, compute_derivatives ? 8 : 1, 1);
   }
   if (needs_output) {
     uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -636,11 +664,46 @@ int main(int argc, char **argv) {
                                     : int64_mode
                                         ? sizeof(UINT) * 2
                                         : sizeof(UINT);
-      list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0, output_copy_size);
+      if (direct_indexed_nonuniform) {
+        D3D12_RESOURCE_BARRIER transition = {};
+        transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        transition.Transition.pResource = output_buffer;
+        transition.Transition.Subresource =
+            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        transition.Transition.StateBefore =
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        transition.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        list->ResourceBarrier(1, &transition);
+        list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0,
+                               output_copy_size);
+        std::swap(transition.Transition.StateBefore,
+                  transition.Transition.StateAfter);
+        list->ResourceBarrier(1, &transition);
+      } else {
+        list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0,
+                               output_copy_size);
+      }
     }
   }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
+
+  if (direct_indexed_nonuniform) {
+    // Closed direct-indexed lists read the descriptor heap's latest contents
+    // at submission. Use a different native resource, not just another slice.
+    auto source = nonuniform_source_heap->GetCPUDescriptorHandleForHeapStart();
+    srv_desc.Buffer.FirstElement = 1;
+    device->CreateShaderResourceView(nonuniform_input, &srv_desc, source);
+    source.ptr += descriptor_increment;
+    srv_desc.Buffer.FirstElement = 0;
+    device->CreateShaderResourceView(nonuniform_input, &srv_desc, source);
+    device->CopyDescriptorsSimple(
+        2, descriptor_heap->GetCPUDescriptorHandleForHeapStart(),
+        nonuniform_source_heap->GetCPUDescriptorHandleForHeapStart(),
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    nonuniform_source_heap->Release();
+    nonuniform_source_heap = nullptr;
+  }
 
   lists[0] = list;
   queue->ExecuteCommandLists(1, lists);
@@ -653,7 +716,43 @@ int main(int argc, char **argv) {
   if (!event ||
       !CheckHR("SetEventOnCompletion", fence->SetEventOnCompletion(1, event)))
     goto cleanup;
-  WaitForSingleObject(event, INFINITE);
+  if (WaitForSingleObject(event, 30000) != WAIT_OBJECT_0 ||
+      !CheckHR("GetDeviceRemovedReason", device->GetDeviceRemovedReason()))
+    goto cleanup;
+
+  if (direct_indexed_nonuniform) {
+    if (!CheckHR("Map nonuniform mutation readback",
+                 readback_buffer->Map(0, nullptr,
+                                      reinterpret_cast<void **>(&mapped))))
+      goto cleanup;
+    const UINT first = mapped[0], second = mapped[1];
+    readback_buffer->Unmap(0, nullptr);
+    if (first != input_value + 1111 || second != input_value + 1000) {
+      std::cerr << "non-uniform pre-submit copy mismatch: " << first << ','
+                << second << " expected " << input_value + 1111 << ','
+                << input_value + 1000 << '\n';
+      goto cleanup;
+    }
+    std::cout << "non-uniform pre-submit copy readback passed: " << first << ','
+              << second << '\n';
+
+    // Reuse the descriptor slots only after the fence, then replay the same
+    // closed list without changing its recording or allocator.
+    auto destination = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+    srv_desc.Buffer.FirstElement = 0;
+    device->CreateShaderResourceView(input_buffer, &srv_desc, destination);
+    destination.ptr += descriptor_increment;
+    srv_desc.Buffer.FirstElement = 1;
+    device->CreateShaderResourceView(input_buffer, &srv_desc, destination);
+    queue->ExecuteCommandLists(1, lists);
+    if (!CheckHR("Signal nonuniform replay", queue->Signal(fence, 2)) ||
+        !CheckHR("SetEventOnCompletion nonuniform replay",
+                 fence->SetEventOnCompletion(2, event)) ||
+        WaitForSingleObject(event, 30000) != WAIT_OBJECT_0 ||
+        !CheckHR("GetDeviceRemovedReason replay",
+                 device->GetDeviceRemovedReason()))
+      goto cleanup;
+  }
 
   if (reserved_uav) {
     D3D12_TILED_RESOURCE_COORDINATE coord = {};
@@ -688,12 +787,17 @@ int main(int argc, char **argv) {
       readback_buffer->Unmap(0, nullptr);
       goto cleanup;
     }
-    if (direct_indexed_nonuniform && mapped[1] != input_value + 111) {
-      std::cerr << "non-uniform descriptor readback mismatch: " << mapped[1] << " expected "
-                << input_value + 111 << "\n";
+    if (direct_indexed_nonuniform &&
+        (mapped[0] != input_value || mapped[1] != input_value + 111)) {
+      std::cerr << "non-uniform fenced replay mismatch: " << mapped[0] << ','
+                << mapped[1] << " expected " << input_value << ','
+                << input_value + 111 << '\n';
       readback_buffer->Unmap(0, nullptr);
       goto cleanup;
     }
+    if (direct_indexed_nonuniform)
+      std::cout << "non-uniform fenced replay readback passed: " << mapped[0]
+                << ',' << mapped[1] << '\n';
     readback_buffer->Unmap(0, nullptr);
     UINT expected_value = 1234;
     if (reserved_srv)
@@ -803,6 +907,8 @@ cleanup:
     readback_buffer->Release();
   if (input_buffer && input_buffer != reserved_input)
     input_buffer->Release();
+  if (nonuniform_input)
+    nonuniform_input->Release();
   if (output_buffer && output_buffer != reserved_buffer)
     output_buffer->Release();
   if (reserved_buffer)
@@ -817,6 +923,8 @@ cleanup:
     reserved_input_heap->Release();
   if (descriptor_heap)
     descriptor_heap->Release();
+  if (nonuniform_source_heap)
+    nonuniform_source_heap->Release();
   if (root_signature)
     root_signature->Release();
   if (root_blob)
