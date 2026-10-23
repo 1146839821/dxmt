@@ -3,11 +3,15 @@
 #include <windows.h>
 #include <d3d12.h>
 
+#include "d3d12_device.hpp"
+
 #include <iostream>
 #include <cstdint>
 #include <thread>
 #include <atomic>
 #include <array>
+#include <cstdlib>
+#include <cstring>
 
 namespace {
 
@@ -27,6 +31,203 @@ template <typename T> struct Owned {
   ~Owned() { if (ptr) ptr->Release(); }
   T *operator->() const { return ptr; }
 };
+
+// Opt-in, process-local fault injection: the driver DLL alone sees one failed
+// malloc on this thread. No real memory pressure or production test switch.
+class SubmissionAllocationFault {
+  inline static void *(__cdecl *malloc_)(size_t) = nullptr;
+  inline static thread_local UINT remaining_ = 0, calls_ = 0;
+  inline static thread_local bool hit_ = false;
+  ULONG_PTR *import_ = nullptr;
+
+  static void *__cdecl Allocate(size_t size) {
+    if (remaining_) {
+      calls_++;
+      if (!--remaining_) {
+        hit_ = true;
+        return nullptr;
+      }
+    }
+    return malloc_(size);
+  }
+
+public:
+  bool Install() {
+    auto *base =
+        reinterpret_cast<unsigned char *>(GetModuleHandleA("d3d12.dll"));
+    if (!base)
+      return false;
+    auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
+    auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+    auto *imports = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR *>(
+        base + nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT]
+                   .VirtualAddress);
+    for (; imports->Name; imports++) {
+      if (!imports->OriginalFirstThunk)
+        continue;
+      auto *names = reinterpret_cast<IMAGE_THUNK_DATA *>(
+          base + imports->OriginalFirstThunk);
+      auto *iat =
+          reinterpret_cast<IMAGE_THUNK_DATA *>(base + imports->FirstThunk);
+      for (; names->u1.AddressOfData; names++, iat++) {
+        if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal))
+          continue;
+        auto *name = reinterpret_cast<IMAGE_IMPORT_BY_NAME *>(
+            base + names->u1.AddressOfData);
+        if (std::strcmp(reinterpret_cast<const char *>(name->Name), "malloc"))
+          continue;
+        DWORD protection;
+        if (!VirtualProtect(&iat->u1.Function, sizeof(iat->u1.Function),
+                            PAGE_READWRITE, &protection))
+          return false;
+        malloc_ = reinterpret_cast<decltype(malloc_)>(iat->u1.Function);
+        import_ = &iat->u1.Function;
+        InterlockedExchangePointer(reinterpret_cast<void *volatile *>(import_),
+                                   reinterpret_cast<void *>(&Allocate));
+        VirtualProtect(import_, sizeof(*import_), protection, &protection);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void Arm(UINT allocation) {
+    calls_ = 0;
+    hit_ = false;
+    remaining_ = allocation;
+  }
+  void Stop() { remaining_ = 0; }
+  bool Hit() const { return hit_; }
+  UINT Calls() const { return calls_; }
+  ~SubmissionAllocationFault() {
+    Stop();
+    if (import_) {
+      DWORD protection;
+      if (VirtualProtect(import_, sizeof(*import_), PAGE_READWRITE,
+                         &protection)) {
+        InterlockedExchangePointer(reinterpret_cast<void *volatile *>(import_),
+                                   reinterpret_cast<void *>(malloc_));
+        VirtualProtect(import_, sizeof(*import_), protection, &protection);
+      }
+    }
+  }
+};
+
+bool TestSubmissionAllocationFailure(UINT allocation, bool partial_clear,
+                                     bool abort_translation = false) {
+  Owned<ID3D12Device> device;
+  Owned<ID3D12CommandQueue> queue;
+  Owned<ID3D12CommandAllocator> allocator;
+  Owned<ID3D12GraphicsCommandList> list;
+  Owned<ID3D12Resource> texture;
+  Owned<ID3D12DescriptorHeap> rtv;
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  if (!CheckHR("OOM device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                               IID_PPV_ARGS(&device.ptr))) ||
+      !CheckHR("OOM queue", device->CreateCommandQueue(
+                                &queue_desc, IID_PPV_ARGS(&queue.ptr))) ||
+      !CheckHR("OOM allocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                              IID_PPV_ARGS(&allocator.ptr))) ||
+      !CheckHR("OOM list", device->CreateCommandList(
+                               0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.ptr,
+                               nullptr, IID_PPV_ARGS(&list.ptr))))
+    return false;
+  if (partial_clear) {
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = desc.Height = 4;
+    desc.DepthOrArraySize = desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    heap_desc.NumDescriptors = 1;
+    if (!CheckHR("OOM clear texture",
+                 device->CreateCommittedResource(
+                     &heap, D3D12_HEAP_FLAG_NONE, &desc,
+                     D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                     IID_PPV_ARGS(&texture.ptr))) ||
+        !CheckHR("OOM RTV heap", device->CreateDescriptorHeap(
+                                     &heap_desc, IID_PPV_ARGS(&rtv.ptr))))
+      return false;
+    auto handle = rtv->GetCPUDescriptorHandleForHeapStart();
+    device->CreateRenderTargetView(texture.ptr, nullptr, handle);
+    const float color[] = {1, 0, 0, 1};
+    const D3D12_RECT rect = {0, 0, 2, 2};
+    list->ClearRenderTargetView(handle, color, 1, &rect);
+  }
+  if (!CheckHR("OOM close", list->Close()))
+    return false;
+  dxmt::ClearEncoderData *clear = nullptr;
+  D3D12_RECT *saved_rects = nullptr;
+  if (abort_translation) {
+    // Exercise the existing CPU-side translation rejection without sending an
+    // invalid command to Metal. Restore the recording before its real replay.
+    auto *internal = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list.ptr);
+    for (auto *encoder = internal->entry; encoder; encoder = encoder->next)
+      if (encoder->type == dxmt::EncoderType::Clear) {
+        clear = static_cast<dxmt::ClearEncoderData *>(encoder);
+        break;
+      }
+    if (!clear || !clear->rect_count || !clear->rects)
+      return false;
+    saved_rects = clear->rects;
+    clear->rects = nullptr;
+  }
+  SubmissionAllocationFault fault;
+  if (!fault.Install()) {
+    if (clear)
+      clear->rects = saved_rects;
+    return false;
+  }
+  ID3D12CommandList *batch[] = {list.ptr};
+  bool escaped = false;
+  fault.Arm(allocation);
+  try {
+    queue->ExecuteCommandLists(1, batch);
+  } catch (...) {
+    escaped = true;
+  }
+  fault.Stop();
+  const auto reason = device->GetDeviceRemovedReason();
+  auto *internal_allocator =
+      static_cast<dxmt::MTLD3D12CommandAllocator *>(allocator.ptr);
+  std::cout << "submission allocation=" << allocation
+            << " calls=" << fault.Calls() << " hit=" << fault.Hit()
+            << " escaped=" << escaped
+            << " allocator_busy=" << internal_allocator->IsInFlight()
+            << " reason=0x" << std::hex << static_cast<unsigned long>(reason)
+            << std::dec << "\n";
+  if (clear) {
+    clear->rects = saved_rects;
+    if (escaped || internal_allocator->IsInFlight() || FAILED(reason))
+      return false;
+    queue->ExecuteCommandLists(1, batch);
+  }
+  if (fault.Hit())
+    return !escaped && !internal_allocator->IsInFlight() &&
+           reason == E_OUTOFMEMORY;
+  // A beyond-last-allocation control must still commit, complete and retire
+  // allocator admission. Keep the fault disabled during the fence operation.
+  Owned<ID3D12Fence> fence;
+  HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  const bool completed =
+      event && !escaped && SUCCEEDED(reason) &&
+      CheckHR("OOM control fence",
+              device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                  IID_PPV_ARGS(&fence.ptr))) &&
+      CheckHR("OOM control signal", queue->Signal(fence.ptr, 1)) &&
+      CheckHR("OOM control event", fence->SetEventOnCompletion(1, event)) &&
+      WaitForSingleObject(event, 5000) == WAIT_OBJECT_0;
+  if (event)
+    CloseHandle(event);
+  return completed && !internal_allocator->IsInFlight();
+}
 
 bool TestResetAllocatorSubmission(ID3D12Device *device, unsigned removal_mode = 0) {
   Owned<ID3D12CommandQueue> queue;
@@ -949,7 +1150,17 @@ bool TestConcurrentCommandSubmission(ID3D12Device *device) {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+  if (argc == 2 && std::strcmp(argv[1], "--submission-translation-abort") == 0)
+    return TestSubmissionAllocationFailure(0, true, true) ? 0 : 1;
+  if (argc >= 3 && std::strcmp(argv[1], "--submission-allocation-failure") == 0) {
+    char *end = nullptr;
+    const auto allocation = std::strtoull(argv[2], &end, 10);
+    if (end == argv[2] || *end || argv[2][0] == '-' || allocation > UINT_MAX || (argc != 3 && argc != 4) ||
+        (argc == 4 && std::strcmp(argv[3], "clear") != 0))
+      return 2;
+    return TestSubmissionAllocationFailure(static_cast<UINT>(allocation), argc == 4) ? 0 : 1;
+  }
   ID3D12Device *device = nullptr;
   if (!CheckHR("D3D12CreateDevice", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))))
     return 1;

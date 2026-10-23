@@ -344,6 +344,37 @@ cost or capability change. This preserves regression evidence rather than
 claiming full N09 completion. Commands, hashes and logs:
 `../dxmt-test/n09-index-contract-20261023/N09-index-contract.md`.
 
+### N13 — allocation failure and allocator rollback, 2026-10-23
+
+`ExecuteCommandLists` previously caught only its first allocation. Injected
+metadata failures escaped the COM entry, and translation cache failures after
+allocator marking left in-flight counts set. The live descriptor collector's
+returned E_OUTOFMEMORY was also silently dropped with a healthy device reason.
+
+The existing translation lifetime guard now rolls back uncommitted allocator
+marks on returns and exceptions; successful commit transfers the obligation to
+queue completion. One function-level bad_alloc boundary and the collector's
+failure path preserve the existing OOM removal policy. The two manual abort
+calls/helper are removed. No new lock, allocation, scan or encoder is added.
+
+The existing command-list runner adds opt-in TLS-scoped, one-shot malloc
+failure and explicit translation-abort/replay controls, with matching private
+include paths in Meson. Same-executable old/new checks reproduce and fix the
+metadata/post-mark failures. External sweeps cover 6 empty, 9 clear and 16
+multi-list descriptor allocation positions; fixed outcomes contain exceptions,
+clear allocator counts and report E_OUTOFMEMORY. Non-OOM rejection can still
+restore and replay its recording. Full command-list, enhanced-barrier and
+ownership runners pass; empty/mixed nonuniform GPU readbacks pass 888/1777 then
+777/888, with Metal validation enabled.
+
+Three paired CPU submission runs per scene, with GPU correctness, show median
+changes of -2.27% to +1.23% across no-op, ordinary/exact/conservative descriptor
+and mixed occlusion scenes. Small differences are INCONCLUSIVE; no sustained
+regression or speedup is claimed. Persistent/global OOM, native Metal allocation
+failures and full N13/FL12_2 remain unproven. Capabilities and ABI are unchanged.
+Commands, raw results, timing/P95 and binary hashes:
+`../dxmt-test/n13-submit-failure-20261023/N13-submit-failure.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

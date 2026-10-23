@@ -473,12 +473,6 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   }
 
   void
-  AbortSubmission(Submission &submission) {
-    for (auto &allocator : submission.allocators)
-      allocator->MarkSubmissionCompleted();
-  }
-
-  void
   PauseTranslationForTesting() {
     char enabled[2] = {};
     if (!GetEnvironmentVariableA("DXMT_TEST_PAUSE_QUEUE_TRANSLATION", enabled, sizeof(enabled)))
@@ -694,7 +688,7 @@ public:
   };
 
   void STDMETHODCALLTYPE
-  ExecuteCommandLists(UINT Count, ID3D12CommandList *const *ppCommandLists) {
+  ExecuteCommandLists(UINT Count, ID3D12CommandList *const *ppCommandLists) try {
     if (!Count || FAILED(device_->GetDeviceRemovedReason()))
       return;
     if (!ppCommandLists) {
@@ -747,20 +741,23 @@ public:
 
     // Keep admission alive both during CPU translation and until GPU completion.
     // A fresh Reset owns a different recording, even on the same COM object.
-    std::shared_ptr<D3D12CommandListSubmission> recording_lifetime;
-    try {
-      recording_lifetime = std::make_shared<D3D12CommandListSubmission>();
-    } catch (const std::bad_alloc &) {
-      WARN("D3D12 ExecuteCommandLists could not allocate recording admission state");
-      device_->MarkDeviceRemoved(E_OUTOFMEMORY);
-      return;
-    }
-    struct TranslationLifetime {
-      std::shared_ptr<D3D12CommandListSubmission> state;
-      ~TranslationLifetime() { state->cpu_active.store(false, std::memory_order_release); }
-    } translation_lifetime{recording_lifetime};
+    auto recording_lifetime = std::make_shared<D3D12CommandListSubmission>();
     Submission submission;
     submission.recording_lifetime = recording_lifetime;
+    struct TranslationLifetime {
+      const std::shared_ptr<D3D12CommandListSubmission> &state;
+      Submission &submission;
+      bool allocator_marks_pending = false;
+
+      ~TranslationLifetime() {
+        // Until commit transfers completion to the queue, every exit (including
+        // allocation failure during translation) must undo allocator admission.
+        if (allocator_marks_pending)
+          for (auto &allocator : submission.allocators)
+            allocator->MarkSubmissionCompleted();
+        state->cpu_active.store(false, std::memory_order_release);
+      }
+    } translation_lifetime{recording_lifetime, submission};
     for (UINT i = 0; i < Count; i++) {
       auto recording = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->GetRecordingState();
       if (!recording || !recording->TryAcquire(recording_lifetime)) {
@@ -791,6 +788,7 @@ public:
       );
       if (FAILED(hr)) {
         WARN("D3D12 ExecuteCommandLists failed to resolve live descriptor resources: 0x", std::hex, hr, std::dec);
+        device_->MarkDeviceRemoved(hr);
         return;
       }
       if (residency_stats_enabled)
@@ -819,6 +817,7 @@ public:
     }
     for (auto &allocator : submission.allocators)
       allocator->MarkSubmissionSubmitted();
+    translation_lifetime.allocator_marks_pending = true;
 
     PauseTranslationForTesting();
 
@@ -1467,19 +1466,21 @@ public:
         }
         current = current->next;
       }
-      if (translation_failed) {
-        AbortSubmission(submission);
+      if (translation_failed)
         return;
-      }
     }
-    if (!CommitSubmissionLocked(submission)) {
-      AbortSubmission(submission);
+    if (!CommitSubmissionLocked(submission))
       return;
-    }
+    translation_lifetime.allocator_marks_pending = false;
     for (unsigned i = 0; i < Count; i++) {
       static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->MarkSubmitted();
       static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->CommitResourceStates();
     }
+  } catch (const std::bad_alloc &) {
+    // ExecuteCommandLists has no HRESULT result. Preserve the existing OOM
+    // device-removal policy for every submission allocation, without allocating
+    // a diagnostic string while handling memory exhaustion.
+    device_->MarkDeviceRemoved(E_OUTOFMEMORY);
   };
 
   void STDMETHODCALLTYPE SetMarker(UINT metadata, const void *data, UINT size) {};

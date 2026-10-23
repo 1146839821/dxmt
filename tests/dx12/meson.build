@@ -131,6 +131,13 @@ dx12_interface_support = executable('dx12_interface_support', 'dx12_interface_su
 )
 
 dx12_command_list_type = executable('dx12_command_list_type', 'dx12_command_list_type.cpp',
+  include_directories: [
+    include_directories('../../src/airconv'),
+    include_directories('../../src/dxgi'),
+    include_directories('../../src/dxmt'),
+    include_directories('../../src/winemetal'),
+    include_directories('../../src/util'),
+  ],
   dependencies: [ d3d12_dep ],
 )
 
