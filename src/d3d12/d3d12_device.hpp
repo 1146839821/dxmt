@@ -121,6 +121,8 @@ struct D3D12CommandListSubmission {
 using D3D12RecordedResourceStates =
     std::unordered_map<MTLD3D12Resource *, std::vector<std::optional<D3D12_RESOURCE_STATES>>>;
 
+struct D3D12RecordedStateValidation;
+
 class D3D12CommandListRecording {
   dxmt::mutex mutex_;
   std::weak_ptr<D3D12CommandListSubmission> submission_;
@@ -152,12 +154,11 @@ public:
   virtual HRESULT GetCloseResult() const = 0;
   virtual uint64_t GetRecordingId() const = 0;
   virtual AirconvResidencyCounters GetAirconvResidencyCounters() const = 0;
-  virtual void MarkSubmitted() = 0;
   virtual HRESULT CollectResourceUsesForSubmission(
       std::vector<SubmissionResourceUse> &uses, std::vector<WMT::Reference<WMT::Resource>> &resources
   ) = 0;
   virtual void CommitResourceStates() = 0;
-  virtual HRESULT ValidateRecordedResourceStates(D3D12RecordedResourceStates &states) const = 0;
+  virtual HRESULT ValidateRecordedResourceStates(D3D12RecordedStateValidation &validation) const = 0;
 };
 
 class MTLD3D12CommandAllocator : public ID3D12CommandAllocator {
@@ -329,13 +330,12 @@ public:
 };
 
 enum class EnhancedSplitBarrierType : uint8_t {
-  Global,
   Buffer,
   Texture,
 };
 
 struct EnhancedSplitBarrierState {
-  EnhancedSplitBarrierType type = EnhancedSplitBarrierType::Global;
+  EnhancedSplitBarrierType type = EnhancedSplitBarrierType::Buffer;
   MTLD3D12Resource *resource = nullptr;
   D3D12_BARRIER_ACCESS access_before = D3D12_BARRIER_ACCESS_NO_ACCESS;
   D3D12_BARRIER_ACCESS access_after = D3D12_BARRIER_ACCESS_NO_ACCESS;
@@ -346,6 +346,24 @@ struct EnhancedSplitBarrierState {
   UINT64 size = 0;
   D3D12_RESOURCE_STATES before_state = D3D12_RESOURCE_STATE_COMMON;
   D3D12_RESOURCE_STATES after_state = D3D12_RESOURCE_STATE_COMMON;
+};
+
+// Pending execution state owns resources independently of recording Reset.
+// Resource layouts remain in the existing validation map; this tracks only
+// unfinished split synchronization, normalized to individual subresources.
+struct D3D12PendingEnhancedSplit {
+  EnhancedSplitBarrierState barrier;
+  UINT subresource;
+  bool inherited = false;
+  // Validation borrows the recording's reference. Only splits surviving the
+  // batch need a separate owner before publication to the queue timeline.
+  Com<MTLD3D12Resource, false> retained_resource;
+};
+
+struct D3D12RecordedStateValidation {
+  D3D12RecordedResourceStates states;
+  std::vector<D3D12PendingEnhancedSplit> splits;
+  bool local_only = false;
 };
 
 struct D3D12FenceWait;
@@ -592,13 +610,6 @@ public:
   virtual BufferAllocation *LookupBufferByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) = 0;
 
   virtual MTLD3D12Resource *LookupResourceByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) = 0;
-
-  virtual bool BeginEnhancedSplitBarrier(const EnhancedSplitBarrierState &state) = 0;
-  virtual bool EndEnhancedSplitBarrier(
-      const EnhancedSplitBarrierState &candidate, EnhancedSplitBarrierState &matched
-  ) = 0;
-  virtual bool CancelEnhancedSplitBarrier(const EnhancedSplitBarrierState &candidate) = 0;
-  virtual bool HasEnhancedSplitBarrier(MTLD3D12Resource *resource) = 0;
 
   virtual InternalCommandLibrary& GetLib() = 0;
 

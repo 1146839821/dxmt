@@ -77,13 +77,18 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     dxmt::condition_variable ready;
     dxmt::condition_variable space;
     WMT::Reference<WMT::SharedEvent> sparse_event;
+    std::vector<D3D12PendingEnhancedSplit> pending_splits;
 
     void NotifyDeviceRemoved() final {
-      std::lock_guard lock(mutex);
-      if (sparse_event)
-        sparse_event.signalValue(UINT64_MAX);
-      ready.notify_all();
-      space.notify_all();
+      std::vector<D3D12PendingEnhancedSplit> expired;
+      {
+        std::lock_guard lock(mutex);
+        expired.swap(pending_splits);
+        if (sparse_event)
+          sparse_event.signalValue(UINT64_MAX);
+        ready.notify_all();
+        space.notify_all();
+      } // Release private resource references outside the submission mutex.
     }
   };
   std::shared_ptr<SubmissionState> submission_state_ = std::make_shared<SubmissionState>();
@@ -468,7 +473,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   }
 
   bool
-  CommitSubmissionLocked(Submission &submission) {
+  CommitSubmissionLocked(Submission &submission, std::vector<D3D12PendingEnhancedSplit> *pending_splits = nullptr) {
     std::unique_lock<dxmt::mutex> submission_lock(submission_state_->mutex);
     if (stopping_ || FAILED(device_->GetDeviceRemovedReason()) || submission_count_ >= kCommandQueueSize)
       return false;
@@ -476,6 +481,8 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
 
     submission.serial = next_submission_serial_++;
     submission.command_buffer.commit();
+    if (pending_splits)
+      submission_state_->pending_splits.swap(*pending_splits);
     submissions_[submission_tail_] = std::move(submission);
     submission_tail_ = (submission_tail_ + 1) % kCommandQueueSize;
     submission_count_++;
@@ -781,7 +788,13 @@ public:
       }
     }
 
-    D3D12RecordedResourceStates recorded_states;
+    D3D12RecordedStateValidation recorded_states;
+    {
+      std::lock_guard lock(submission_state_->mutex);
+      recorded_states.splits = submission_state_->pending_splits;
+    }
+    for (auto &split : recorded_states.splits)
+      split.inherited = true;
     for (UINT i = 0; i < Count; i++) {
       const HRESULT hr = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])
                              ->ValidateRecordedResourceStates(recorded_states);
@@ -791,6 +804,16 @@ public:
         return;
       }
     }
+
+    // Only non-simultaneous texture layouts persist across Execute boundaries.
+    std::erase_if(recorded_states.splits, [](const auto &split) {
+      return split.barrier.type == EnhancedSplitBarrierType::Buffer ||
+             (split.barrier.resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS);
+    });
+
+    for (auto &split : recorded_states.splits)
+      if (!split.retained_resource)
+        split.retained_resource = split.barrier.resource;
 
     std::vector<SubmissionResourceUse> descriptor_resource_uses;
     std::vector<WMT::Reference<WMT::Resource>> descriptor_resource_refs;
@@ -1506,11 +1529,10 @@ public:
       if (translation_failed)
         return;
     }
-    if (!CommitSubmissionLocked(submission))
+    if (!CommitSubmissionLocked(submission, &recorded_states.splits))
       return;
     translation_lifetime.allocator_marks_pending = false;
     for (unsigned i = 0; i < Count; i++) {
-      static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->MarkSubmitted();
       static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->CommitResourceStates();
     }
   } catch (const std::bad_alloc &) {

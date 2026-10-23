@@ -870,6 +870,62 @@ capability, scheduler or layout changes. This is a diagnosis/design commit,
 not a claim that Enhanced Barrier correctness has been repaired.
 Evidence: `../dxmt-test/n12-split-order-20261024/N12-split-order.md`.
 
+### N12 — split validation in submission order, 2026-10-24
+
+Implemented the preceding owner design on base 9fdd6d08. Device-global
+recording-time split state, cancellation signatures and MarkSubmitted are
+removed. Immutable normalized BEGIN/END payloads use the existing ordered
+resource transition stream. Close checks local structure; queue validation
+pairs events in ppCommandLists order against its committed pending texture
+splits. Publication swaps preallocated candidates inside the existing native
+commit critical section. Reset/ClearState cannot cancel other recordings or
+executed pending state. Global Split rejects. Only surviving pending entries
+own independent private resource references; recording validation borrows its
+existing references. Removal/failed admission/queue teardown release owners.
+No second layout manager, new scheduler or production file. Pending lookup is
+O(E * Pmax), snapshot O(P); no whole-resource scan or recording global lock.
+
+Four same-PE red baseline probes (reversed, reset-isolation, clear-state,
+global) exit1; all 30 candidate correctness processes exit0 with API/shader
+validation enabled. Coverage includes GPU replay and cross-Execute Reset,
+actual concurrent recording, fence-ordered queue isolation, normalized/mismatched
+ranges, orphan END rejection, full existing runners, recording malloc failure,
+eight submission malloc positions, native creation failure and queue abandonment.
+Private-data lifetime observer verifies actual resource destruction. Queue
+isolation does not prove split handoff across queues. Disjoint-range CPU success
+is not native conformance; precise same-resource legality remains OPEN.
+
+Final Meson production/test builds pass. Device/list/queue no-private syntax
+checks pass; full no-private link/runtime and native Windows remain NOT_RUN.
+Private C++ virtual ABI changed, public COM/WMT ABI and resource layout unchanged.
+Old private submit probe failed due to shifted vtable and is retained as invalid
+performance evidence; updated same PE keeps descriptor/GPU/fence/lifetime
+assertions, excludes only the extra collector micro-measurement. Validation-enabled
+preflight passes both DLLs; current submit cadence differs from earlier rounds.
+
+Performance: M1 Max/Apple7, macOS27.0.1, Xcode27.1 (requested26 differs), MSC4.0.1,
+matched Wine11 x64/Rosetta, validation disabled. AB/BA/AB, 18 processes exit0;
+median of three process p50/p95 values; record/split 72 retained samples per side,
+ordinary submit 180. See table (microseconds) below.
+
+| Scenario / metric | Before p50 / p95 us | After p50 / p95 us | Change p50 / p95 |
+|---|---:|---:|---:|
+| N13_FULL / submit_us | 109.20 / 144.90 | 115.50 / 146.40 | +5.77% / +1.04% |
+| small_blit / record_us | 3032.60 / 3176.30 | 3315.75 / 3406.10 | +9.34% / +7.23% |
+| split_cost / close_us | 30.05 / 32.30 | 179.35 / 189.60 | +496.84% / +487.00% |
+| split_cost / record_us | 363.95 / 406.80 | 229.90 / 234.90 | -36.83% / -42.26% |
+| split_cost / submit_us | 84.75 / 123.20 | 115.20 / 155.40 | +35.93% / +26.14% |
+| split_cost / total_us | 478.45 / 576.50 | 526.25 / 566.80 | +9.99% / -1.68% |
+
+Split fixture has 2,000 pairs, two copies, exactly two native blit encoders and
+GPU readback each round. Added Close/submit costs and ordinary recording p95
+increase prevent performance acceptance. Overall gate stays OPEN. Full enhanced
+semantics, cross-queue handoff, precise disjoint-range contract, extended stress
+and performance remediation remain. EnhancedBarriersSupported stays FALSE;
+Device interface grouping, capability claims and shared Wine untouched.
+Evidence: `../dxmt-test/n12-split-execution-20261024/N12-split-execution.md`;
+exact commands/results/environment/hashes in adjacent JSON and logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

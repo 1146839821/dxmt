@@ -871,6 +871,154 @@ bool TestInfoQueueDebugControls() {
   return true;
 }
 
+// The private-data reference survives public Release until the resource object
+// is actually destroyed. It exposes leaks without adding production test hooks.
+struct SplitLifetimeObserver : IUnknown {
+  std::atomic<ULONG> refs{1};
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **result) override {
+    if (!result)
+      return E_POINTER;
+    *result = nullptr;
+    if (iid != __uuidof(IUnknown))
+      return E_NOINTERFACE;
+    *result = this;
+    AddRef();
+    return S_OK;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+  ULONG STDMETHODCALLTYPE Release() override { return --refs; }
+};
+
+bool TestSplitFailure(const char *mode, unsigned allocation) {
+  const bool native = !std::strcmp(mode, "native");
+  const bool oom = !std::strcmp(mode, "allocation");
+  const bool record = !std::strcmp(mode, "record");
+  const bool abandon = !std::strcmp(mode, "abandon");
+  if (!native && !oom && !record && !abandon)
+    return false;
+  SplitLifetimeObserver
+      observer; // Outlives every resource/queue/list reference.
+  Owned<ID3D12Device> device;
+  Owned<ID3D12CommandQueue> queue;
+  Owned<ID3D12CommandAllocator> a, b;
+  Owned<ID3D12GraphicsCommandList7> begin, end;
+  Owned<ID3D12Resource> resource;
+  Owned<ID3D12Fence> fence;
+  D3D12_COMMAND_QUEUE_DESC desc = {};
+  if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                               IID_PPV_ARGS(&device.ptr))) ||
+      FAILED(device->CreateCommandQueue(&desc, IID_PPV_ARGS(&queue.ptr))) ||
+      FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                            IID_PPV_ARGS(&a.ptr))) ||
+      FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                            IID_PPV_ARGS(&b.ptr))) ||
+      FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, a.ptr,
+                                       nullptr, IID_PPV_ARGS(&begin.ptr))) ||
+      FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, b.ptr,
+                                       nullptr, IID_PPV_ARGS(&end.ptr))) ||
+      FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                 IID_PPV_ARGS(&fence.ptr))))
+    return false;
+  D3D12_RESOURCE_DESC texture = {};
+  texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  texture.Width = texture.Height = 8;
+  texture.DepthOrArraySize = texture.MipLevels = texture.SampleDesc.Count = 1;
+  texture.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  if (FAILED(device->CreateCommittedResource(
+          &heap, D3D12_HEAP_FLAG_NONE, &texture, D3D12_RESOURCE_STATE_COPY_DEST,
+          nullptr, IID_PPV_ARGS(&resource.ptr))))
+    return false;
+  const GUID tag = {0xca2c8db1,
+                    0x7c0a,
+                    0x466c,
+                    {0x93, 0x32, 0x52, 0x92, 0x01, 0x11, 0x01, 0x12}};
+  if (FAILED(resource->SetPrivateDataInterface(tag, &observer)) ||
+      observer.refs != 2)
+    return false;
+  D3D12_TEXTURE_BARRIER barrier = {};
+  barrier.SyncBefore = D3D12_BARRIER_SYNC_COPY;
+  barrier.SyncAfter = D3D12_BARRIER_SYNC_SPLIT;
+  barrier.AccessBefore = D3D12_BARRIER_ACCESS_COPY_DEST;
+  barrier.AccessAfter = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+  barrier.LayoutBefore = D3D12_BARRIER_LAYOUT_COPY_DEST;
+  barrier.LayoutAfter = D3D12_BARRIER_LAYOUT_COPY_SOURCE;
+  barrier.pResource = resource.ptr;
+  barrier.Subresources = {0, 1, 0, 1, 0, 1};
+  D3D12_BARRIER_GROUP group = {};
+  group.Type = D3D12_BARRIER_TYPE_TEXTURE;
+  group.NumBarriers = 1;
+  group.pTextureBarriers = &barrier;
+  begin->Barrier(1, &group);
+  if (FAILED(begin->Close()))
+    return false;
+  HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!event)
+    return false;
+  struct EventOwner {
+    HANDLE value;
+    ~EventOwner() { CloseHandle(value); }
+  } event_owner{event};
+  auto wait = [&](UINT64 value) {
+    return SUCCEEDED(queue->Signal(fence.ptr, value)) &&
+           SUCCEEDED(fence->SetEventOnCompletion(value, event)) &&
+           WaitForSingleObject(event, 5000) == WAIT_OBJECT_0;
+  };
+  ID3D12CommandList *command = begin.ptr;
+  queue->ExecuteCommandLists(1, &command);
+  if (!wait(1) || FAILED(a->Reset()) || FAILED(begin->Reset(a.ptr, nullptr)))
+    return false;
+  SubmissionAllocationFault fault;
+  SubmissionCreationFault creation;
+  if ((oom || record) && !fault.Install())
+    return false;
+  if (native && !creation.Install())
+    return false;
+  barrier.SyncBefore = D3D12_BARRIER_SYNC_SPLIT;
+  barrier.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+  if (record)
+    fault.Arm(1);
+  end->Barrier(1, &group);
+  fault.Stop();
+  const HRESULT close = end->Close();
+  if (record ? (!fault.Hit() || SUCCEEDED(close)) : FAILED(close))
+    return false;
+  resource.ptr->Release();
+  resource.ptr = nullptr;
+  if (observer.refs != 2)
+    return false;
+  if (!record && !abandon) {
+    if (oom)
+      fault.Arm(allocation);
+    if (native)
+      creation.Arm();
+    command = end.ptr;
+    queue->ExecuteCommandLists(1, &command);
+    fault.Stop();
+    creation.Stop();
+    const HRESULT reason = device->GetDeviceRemovedReason();
+    if (native && (!creation.Hit() || creation.Commits() || SUCCEEDED(reason)))
+      return false;
+    if (oom && fault.Hit() && reason != E_OUTOFMEMORY)
+      return false;
+    if (oom && !fault.Hit() && (!wait(2) || FAILED(reason)))
+      return false;
+  }
+  end.ptr->Release();
+  end.ptr = nullptr;
+  const ULONG before_teardown = observer.refs;
+  if (before_teardown != (record || abandon ? 2u : 1u))
+    return false;
+  queue.ptr->Release();
+  queue.ptr = nullptr;
+  std::cout << "split failure mode=" << mode << " allocation=" << allocation
+            << " hit=" << (native ? creation.Hit() : fault.Hit())
+            << " observer=" << before_teardown << "->" << observer.refs << "\n";
+  return observer.refs == 1;
+}
+
 bool TestInfoQueueAllocationFailure() {
   for (unsigned mode = 0; mode < 4; mode++) {
     unsigned failures = 0;
@@ -2138,7 +2286,26 @@ bool TestCopyStaging(const char *mode) {
   return true;
 }
 
-bool TestSmallBlitCost(bool late_event = false, bool long_batch = false) {
+class BlitEncoderCounter {
+  DriverImportPatch patch_;
+  inline static obj_handle_t (__cdecl *original_)(obj_handle_t) = nullptr;
+  static obj_handle_t __cdecl Create(obj_handle_t buffer) {
+    count++;
+    return original_(buffer);
+  }
+public:
+  inline static unsigned count = 0;
+  bool Install() {
+    count = 0;
+    void *original = nullptr;
+    if (!patch_.Install("MTLCommandBuffer_blitCommandEncoder", reinterpret_cast<void *>(&Create), original))
+      return false;
+    original_ = reinterpret_cast<decltype(original_)>(original);
+    return true;
+  }
+};
+
+bool TestSmallBlitCost(bool late_event = false, bool long_batch = false, bool split_cost = false) {
   HANDLE event = late_event ? nullptr : CreateEventW(nullptr, FALSE, FALSE, nullptr);
   if (!late_event && !event)
     return false;
@@ -2150,6 +2317,7 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false) {
   Owned<ID3D12CommandQueue> queue;
   Owned<ID3D12CommandAllocator> allocator;
   Owned<ID3D12GraphicsCommandList> list;
+  Owned<ID3D12GraphicsCommandList7> list7;
   Owned<ID3D12Resource> upload, readback;
   Owned<ID3D12Fence> fence;
   if (!CheckHR("CreateDevice",
@@ -2202,8 +2370,21 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false) {
     if (!event)
       return false;
   }
+  if (split_cost && FAILED(list->QueryInterface(IID_PPV_ARGS(&list7.ptr)))) return false;
+  D3D12_BUFFER_BARRIER begin = {};
+  begin.SyncBefore = D3D12_BARRIER_SYNC_COPY;
+  begin.SyncAfter = D3D12_BARRIER_SYNC_SPLIT;
+  begin.AccessBefore = begin.AccessAfter = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+  begin.pResource = upload.ptr;
+  begin.Size = UINT64_MAX;
+  auto end_barrier = begin;
+  end_barrier.SyncBefore = D3D12_BARRIER_SYNC_SPLIT;
+  end_barrier.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+  D3D12_BARRIER_GROUP group = {};
+  group.Type = D3D12_BARRIER_TYPE_BUFFER;
+  group.NumBarriers = 1;
   // Both batches fit the existing 4MiB CPU arena (64 bytes per copy).
-  const UINT copies = long_batch ? 50000 : 10000;
+  const UINT copies = split_cost ? 2000 : long_batch ? 50000 : 10000;
   const UINT rounds = long_batch ? 25 : 9;
 
   LARGE_INTEGER frequency;
@@ -2216,15 +2397,31 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false) {
     CopyBufferCounter counter;
     if (!counter.Install())
       return false;
-    LARGE_INTEGER start, end;
+    BlitEncoderCounter encoders;
+    if (split_cost && !encoders.Install()) return false;
+    LARGE_INTEGER start, end, closed, submitted;
     QueryPerformanceCounter(&start);
-    for (UINT i = 0; i < copies; ++i)
-      list.ptr->CopyBufferRegion(readback.ptr, 0, upload.ptr, 0, 4);
+    if (split_cost) {
+      list->CopyBufferRegion(readback.ptr, 0, upload.ptr, 0, 4);
+      for (UINT i = 0; i < copies; ++i) {
+        group.pBufferBarriers = &begin;
+        list7->Barrier(1, &group);
+        group.pBufferBarriers = &end_barrier;
+        list7->Barrier(1, &group);
+      }
+      list->CopyBufferRegion(readback.ptr, 0, upload.ptr, 0, 4);
+    } else {
+      for (UINT i = 0; i < copies; ++i)
+        list.ptr->CopyBufferRegion(readback.ptr, 0, upload.ptr, 0, 4);
+    }
     QueryPerformanceCounter(&end);
     if (!CheckHR("CloseBlit", list.ptr->Close()) || CopyBufferCounter::count)
       return false;
+    QueryPerformanceCounter(&closed);
     ID3D12CommandList *batch[] = {list.ptr};
     queue.ptr->ExecuteCommandLists(1, batch);
+    QueryPerformanceCounter(&submitted);
+    if (split_cost && BlitEncoderCounter::count != 2) return false;
     if (!CheckHR("SignalBlit", queue.ptr->Signal(fence.ptr, round + 1)) ||
         !CheckHR("EventBlit",
                  fence.ptr->SetEventOnCompletion(round + 1, event)) ||
@@ -2239,17 +2436,23 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false) {
     readback.ptr->Unmap(0, nullptr);
     if (!good)
       return false;
-    std::cout << "small_blit round=" << round
-              << " copies=" << copies << " late_event=" << late_event
+    std::cout << (split_cost ? "split_cost round=" : "small_blit round=") << round
+              << " pairs=" << (split_cost ? copies : 0)
+              << " copies=" << (split_cost ? 2 : copies) << " late_event=" << late_event
               << " native_buffers=" << CopyBufferCounter::count
               << " record_us="
               << (end.QuadPart - start.QuadPart) * 1e6 / frequency.QuadPart
+              << " close_us=" << (closed.QuadPart - end.QuadPart) * 1e6 / frequency.QuadPart
+              << " submit_us=" << (submitted.QuadPart - closed.QuadPart) * 1e6 / frequency.QuadPart
+              << " native_encoders=" << (split_cost ? BlitEncoderCounter::count : 0)
               << "\n";
   }
   return true;
 }
 
 int main(int argc, char **argv) {
+  if (argc == 2 && !std::strcmp(argv[1], "--split-cost"))
+    return TestSmallBlitCost(false, true, true) ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--small-blit-cost") == 0)
     return TestSmallBlitCost() ? 0 : 1;
   if (argc == 3 && std::strcmp(argv[1], "--small-blit-cost") == 0) {
@@ -2263,6 +2466,12 @@ int main(int argc, char **argv) {
     return TestCopyStaging(argv[2]) ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--multiple-fences") == 0)
     return TestMultipleFenceWaits() ? 0 : 1;
+  if ((argc == 3 || argc == 4) && !std::strcmp(argv[1], "--split-failure")) {
+    unsigned allocation = argc == 4 ? std::strtoul(argv[3], nullptr, 10) : 1;
+    if (!allocation || allocation > 64)
+      return 2;
+    return TestSplitFailure(argv[2], allocation) ? 0 : 1;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--infoqueue-debug-controls") == 0)
     return TestInfoQueueDebugControls() ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--infoqueue-allocation-failure") == 0)

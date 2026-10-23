@@ -828,14 +828,16 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
     UINT subresource;
     D3D12_RESOURCE_STATES before;
     D3D12_RESOURCE_STATES after;
-    bool split_end;
+    bool split_begin;
     bool discard_before = false;
+    size_t split_index = std::numeric_limits<size_t>::max();
   };
   std::vector<ResourceStateTransition> resource_state_transitions_;
 
   using EnhancedSplitBarrier = EnhancedSplitBarrierState;
-  std::vector<EnhancedSplitBarrier> enhanced_split_begins_;
-  bool enhanced_split_submitted_ = false;
+  // Immutable payloads referenced by ordered resource_state_transitions_.
+  // This is not pending state and is never mutated by another recording.
+  std::vector<EnhancedSplitBarrier> enhanced_split_barriers_;
 
   FLOAT blend_factor_[4];
   UINT8 stencil_ref_;
@@ -845,8 +847,6 @@ public:
       MTLD3D12DeviceChild<MTLD3D12GraphicsCommandList>(pDevice), type_(type), recording_failed_(false) {}
 
   ~MTLD3D12GraphicsCommandListImpl() {
-    if (!enhanced_split_submitted_)
-      CancelEnhancedSplitBegins();
     if (allocator_ && encoder_count == std::numeric_limits<size_t>::max())
       allocator_->DiscardRecord();
   }
@@ -969,15 +969,7 @@ public:
     if (allocator_ != allocator)
       allocator_ = allocator;
 
-    // A closed list that was submitted may still own a split begin which is
-    // waiting for an end recorded on a different list. Keep that device-level
-    // state across Reset; discard only begins from a list that never reached
-    // queue submission.
-    if (!enhanced_split_submitted_)
-      CancelEnhancedSplitBegins();
-    else
-      enhanced_split_begins_.clear();
-    enhanced_split_submitted_ = false;
+    enhanced_split_barriers_.clear();
 
     pso_graphics_ = nullptr;
     airconv_geometry_pso_variant_ = UINT_MAX;
@@ -1311,10 +1303,6 @@ public:
     return airconv_residency_counters_;
   }
 
-  void MarkSubmitted() final {
-    enhanced_split_submitted_ = true;
-  }
-
   HRESULT CollectResourceUsesForSubmission(
       std::vector<SubmissionResourceUse> &uses, std::vector<WMT::Reference<WMT::Resource>> &resources
   ) final {
@@ -1338,11 +1326,10 @@ public:
     } else if (recording_failed_) {
       validation = E_FAIL;
     } else {
-      D3D12RecordedResourceStates states;
-      validation = ValidateRecordedResourceStates(states);
+      D3D12RecordedStateValidation state;
+      state.local_only = true;
+      validation = ValidateRecordedResourceStates(state);
     }
-    if (FAILED(validation))
-      CancelEnhancedSplitBegins();
     HRESULT hr = allocator_->EndRecord(&encoder_count);
     close_result_ = FAILED(hr) ? hr : validation;
     return close_result_;
@@ -1362,6 +1349,8 @@ public:
       return;
     std::lock_guard lock(device_->GetResourceStateMutex());
     for (const auto &transition : resource_state_transitions_) {
+      if (transition.split_begin)
+        continue;
       auto *resource = transition.resource.ptr();
       const auto state_matches = [&, resource](D3D12_RESOURCE_STATES current) {
         return current == transition.before ||
@@ -1402,7 +1391,10 @@ public:
     }
   }
 
-  HRESULT ValidateRecordedResourceStates(D3D12RecordedResourceStates &states) const final {
+  HRESULT
+  ValidateRecordedResourceStates(D3D12RecordedStateValidation &validation) const final {
+    auto &states = validation.states;
+    auto &splits = validation.splits;
     const auto promotable = [](MTLD3D12Resource *resource, D3D12_RESOURCE_STATES before) {
       const auto desc = resource->GetDesc();
       if (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
@@ -1431,6 +1423,45 @@ public:
           it->second.resize(resource->subresource_states.size());
         auto &current_states = it->second;
         const auto apply = [&](UINT subresource) {
+          auto pending = std::find_if(splits.begin(), splits.end(), [&](const auto &entry) {
+            return entry.barrier.resource == resource && entry.subresource == subresource;
+          });
+          if (transition.split_index != std::numeric_limits<size_t>::max()) {
+            const auto &barrier = enhanced_split_barriers_[transition.split_index];
+            if (transition.split_begin) {
+              if (pending != splits.end())
+                return false;
+              splits.push_back({barrier, subresource});
+            } else if (pending != splits.end()) {
+              const auto &begin = pending->barrier;
+              const auto &a = begin.subresources;
+              const auto &b = barrier.subresources;
+              if (a.IndexOrFirstMipLevel != b.IndexOrFirstMipLevel || a.NumMipLevels != b.NumMipLevels ||
+                  a.FirstArraySlice != b.FirstArraySlice || a.NumArraySlices != b.NumArraySlices ||
+                  a.FirstPlane != b.FirstPlane || a.NumPlanes != b.NumPlanes || begin.offset != barrier.offset ||
+                  begin.size != barrier.size)
+                return false;
+              if (begin.type != barrier.type || begin.layout_before != barrier.layout_before ||
+                  begin.layout_after != barrier.layout_after ||
+                  (!pending->inherited &&
+                   (begin.access_before != barrier.access_before || begin.access_after != barrier.access_after)))
+                return false;
+              splits.erase(pending);
+            } else if (
+                !validation.local_only && barrier.type == EnhancedSplitBarrierType::Texture &&
+                !(resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)
+            ) {
+              WARN(
+                  "D3D12 split end has no execution-ordered begin: recording=", recording_id_,
+                  " subresource=", subresource
+              );
+              return false;
+            }
+            // A buffer split has no layout to persist across Execute boundaries;
+            // an unmatched half there is unused, rather than a texture transition.
+          } else if (pending != splits.end()) {
+            return false;
+          }
           auto &current = current_states[subresource];
           if (!transition.discard_before && current && *current != transition.before &&
               !(*current == D3D12_RESOURCE_STATE_COMMON && promotable(resource, transition.before))) {
@@ -1439,7 +1470,7 @@ public:
                  " after=0x", transition.after, std::dec);
             return false;
           }
-          current = transition.after;
+          current = transition.split_begin ? transition.before : transition.after;
           return true;
         };
         if (transition.subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) {
@@ -1458,10 +1489,6 @@ public:
 
   void STDMETHODCALLTYPE
   ClearState(ID3D12PipelineState *pPipelineState) {
-    if (!enhanced_split_begins_.empty()) {
-      FailRecording(__func__, "ClearState discarded an unmatched enhanced split barrier");
-      CancelEnhancedSplitBegins();
-    }
     allocator_->InvalidateCurrentPass();
 
     pso_graphics_ = nullptr;
@@ -2056,110 +2083,77 @@ public:
     EmitMemoryBarrier(scope, render_stages_for_state(before), render_stages_for_state(after));
   }
 
-  bool
-  EnhancedSplitMatches(const EnhancedSplitBarrier &pending, const EnhancedSplitBarrier &candidate) const {
-    if (pending.type != candidate.type || pending.resource != candidate.resource ||
-        pending.access_before != candidate.access_before || pending.access_after != candidate.access_after ||
-        pending.layout_before != candidate.layout_before || pending.layout_after != candidate.layout_after)
-      return false;
-    if (pending.type == EnhancedSplitBarrierType::Buffer)
-      return pending.offset == candidate.offset && pending.size == candidate.size;
-    if (pending.type != EnhancedSplitBarrierType::Texture)
-      return true;
-    const auto &a = pending.subresources;
-    const auto &b = candidate.subresources;
-    return a.IndexOrFirstMipLevel == b.IndexOrFirstMipLevel && a.NumMipLevels == b.NumMipLevels &&
-           a.FirstArraySlice == b.FirstArraySlice && a.NumArraySlices == b.NumArraySlices &&
-           a.FirstPlane == b.FirstPlane && a.NumPlanes == b.NumPlanes;
-  }
-
-  bool
-  EnhancedSplitTouchesResource(MTLD3D12Resource *resource) const {
-    if (!resource)
-      return false;
-    return device_->HasEnhancedSplitBarrier(resource);
-  }
-
   void
-  CancelEnhancedSplitBegins() {
-    for (const auto &state : enhanced_split_begins_)
-      device_->CancelEnhancedSplitBarrier(state);
-    enhanced_split_begins_.clear();
-  }
-
-  bool
-  BeginEnhancedSplit(const EnhancedSplitBarrier &state, WMTBarrierScope scope) {
-    if (!device_->BeginEnhancedSplitBarrier(state)) {
-      FailRecording(__func__, "overlapping split barrier on the same resource scope");
-      return false;
-    }
-
-    // End the producer encoder now. Metal's encoder boundary is the closest
-    // equivalent to the begin half of a D3D12 split transition on this path.
-    EncodeMemoryBarrier(scope, state.before_state, state.after_state);
-    allocator_->InvalidateCurrentPass();
-    enhanced_split_begins_.push_back(state);
-    return true;
-  }
-
-  bool
-  EndEnhancedSplit(const EnhancedSplitBarrier &candidate, WMTBarrierScope scope) {
-    EnhancedSplitBarrier state;
-    if (!device_->EndEnhancedSplitBarrier(candidate, state)) {
-      FailRecording(__func__, "split barrier end has no matching begin");
-      return false;
-    }
-
-    auto local = std::find_if(
-        enhanced_split_begins_.begin(), enhanced_split_begins_.end(), [&](const auto &pending) {
-          return EnhancedSplitMatches(pending, state);
-        }
-    );
-    if (local != enhanced_split_begins_.end())
-      enhanced_split_begins_.erase(local);
-
-    // Make the consumer see the completed transition before starting its
-    // encoder. Keep transition bookkeeping for submission validation and replay.
-    EncodeMemoryBarrier(scope, state.before_state, state.after_state);
-    allocator_->InvalidateCurrentPass();
-
-    if (state.type == EnhancedSplitBarrierType::Buffer) {
-      resource_state_transitions_.push_back({
-          state.resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-          D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON, false
-      });
-    } else if (state.type == EnhancedSplitBarrierType::Texture) {
-      const auto desc = state.resource->GetDesc();
-      D3D12_RESOURCE_STATES tracked_before, tracked_after;
-      if (!ConvertBarrierLayout(desc.Dimension, state.layout_before, &tracked_before) ||
-          !ConvertBarrierLayout(desc.Dimension, state.layout_after, &tracked_after)) {
-        FailRecording(__func__, "split texture barrier layout cannot be tracked");
-        return false;
+  RecordEnhancedSplit(const EnhancedSplitBarrier &state, EnhancedSplitPhase phase, WMTBarrierScope scope) {
+    const auto first_transition = resource_state_transitions_.size();
+    const auto index = enhanced_split_barriers_.size();
+    D3D12_RESOURCE_STATES tracked_before = D3D12_RESOURCE_STATE_COMMON;
+    D3D12_RESOURCE_STATES tracked_after = D3D12_RESOURCE_STATE_COMMON;
+    if (state.type == EnhancedSplitBarrierType::Texture) {
+      const auto dimension = state.resource->GetDesc().Dimension;
+      if (!ConvertBarrierLayout(dimension, state.layout_before, &tracked_before) ||
+          !ConvertBarrierLayout(dimension, state.layout_after, &tracked_after)) {
+        FailRecording(__func__, "split texture layout cannot be tracked");
+        return;
       }
-      const UINT mip_levels = std::max<UINT>(1, desc.MipLevels);
-      const UINT array_size = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
-                                  ? 1
-                                  : std::max<UINT>(1, desc.DepthOrArraySize);
-      const auto &range = state.subresources;
-      if (!range.NumMipLevels) {
-        resource_state_transitions_.push_back({
-            state.resource, range.IndexOrFirstMipLevel, tracked_before, tracked_after, false
-        });
+    }
+    auto normalized = state;
+    const auto desc = state.resource->GetDesc();
+    if (state.type == EnhancedSplitBarrierType::Buffer) {
+      normalized.size = desc.Width;
+    } else if (!state.subresources.NumMipLevels) {
+      const UINT mips = std::max<UINT>(1, desc.MipLevels);
+      const UINT slices =
+          desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : std::max<UINT>(1, desc.DepthOrArraySize);
+      if (state.subresources.IndexOrFirstMipLevel == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) {
+        normalized.subresources = {
+            0,      mips, 0,
+            slices, 0,    static_cast<UINT>(state.resource->subresource_states.size() / (size_t(mips) * slices))
+        };
       } else {
-        const size_t subresource_plane_size = size_t(mip_levels) * array_size;
-        const UINT plane_count = static_cast<UINT>(state.resource->subresource_states.size() / subresource_plane_size);
+        const UINT index = state.subresources.IndexOrFirstMipLevel;
+        normalized.subresources = {index % mips, 1, (index / mips) % slices, 1, index / mips / slices, 1};
+      }
+    }
+    try {
+      enhanced_split_barriers_.push_back(normalized);
+      auto append = [&](UINT subresource) {
+        resource_state_transitions_.push_back(
+            {state.resource, subresource, tracked_before, tracked_after, phase == EnhancedSplitPhase::Begin, false,
+             index}
+        );
+      };
+      const auto &range = state.subresources;
+      if (state.type == EnhancedSplitBarrierType::Buffer) {
+        append(0);
+      } else if (!range.NumMipLevels) {
+        if (range.IndexOrFirstMipLevel == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) {
+          for (UINT subresource = 0; subresource < state.resource->subresource_states.size(); subresource++)
+            append(subresource);
+        } else {
+          append(range.IndexOrFirstMipLevel);
+        }
+      } else {
+        const auto desc = state.resource->GetDesc();
+        const UINT mip_levels = std::max<UINT>(1, desc.MipLevels);
+        const UINT array_size =
+            desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : std::max<UINT>(1, desc.DepthOrArraySize);
         for (UINT plane = range.FirstPlane; plane < range.FirstPlane + range.NumPlanes; plane++)
           for (UINT slice = range.FirstArraySlice; slice < range.FirstArraySlice + range.NumArraySlices; slice++)
-            for (UINT mip = range.IndexOrFirstMipLevel; mip < range.IndexOrFirstMipLevel + range.NumMipLevels; mip++) {
-              const UINT subresource = mip + mip_levels * (slice + array_size * plane);
-              if (plane < plane_count && state.resource->HasSubresource(subresource))
-                resource_state_transitions_.push_back({
-                    state.resource, subresource, tracked_before, tracked_after, false
-                });
-            }
+            for (UINT mip = range.IndexOrFirstMipLevel; mip < range.IndexOrFirstMipLevel + range.NumMipLevels; mip++)
+              append(mip + mip_levels * (slice + array_size * plane));
       }
+    } catch (const std::bad_alloc &) {
+      resource_state_transitions_.resize(first_transition);
+      if (enhanced_split_barriers_.size() != index)
+        enhanced_split_barriers_.pop_back();
+      FailRecording(__func__, "split barrier recording allocation failed");
+      return;
     }
-    return true;
+    // Both halves delimit encoders. Validation/pairing happens later, in
+    // submission order, without changing this immutable recorded synchronization.
+    EncodeMemoryBarrier(scope, state.before_state, state.after_state);
+    allocator_->InvalidateCurrentPass();
   }
 
   std::tuple<uint64_t, uint64_t>
@@ -4999,7 +4993,6 @@ public:
           FailRecording(__func__, "transition resource is invalid");
           continue;
         }
-        const bool split_end = barrier.Flags & D3D12_RESOURCE_BARRIER_FLAG_END_ONLY;
         if (barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) {
           FailRecording(__func__, "legacy split transition requires an explicit paired barrier");
           continue;
@@ -5015,9 +5008,9 @@ public:
           EncodeMemoryBarrier(
               resource_barrier_scope(resource), barrier.Transition.StateBefore, barrier.Transition.StateAfter
           );
-        resource_state_transitions_.push_back({
-            resource, subresource, barrier.Transition.StateBefore, barrier.Transition.StateAfter, split_end
-        });
+        resource_state_transitions_.push_back(
+            {resource, subresource, barrier.Transition.StateBefore, barrier.Transition.StateAfter, false}
+        );
         break;
       }
       case D3D12_RESOURCE_BARRIER_TYPE_UAV:
@@ -6623,38 +6616,15 @@ public:
         }
         for (UINT32 barrier_index = 0; barrier_index < group.NumBarriers; barrier_index++) {
           const auto &barrier = group.pGlobalBarriers[barrier_index];
-          const auto split_phase = enhanced_split_phase(barrier.SyncBefore, barrier.SyncAfter);
-          if (split_phase == EnhancedSplitPhase::Invalid) {
+          if (enhanced_split_phase(barrier.SyncBefore, barrier.SyncAfter) != EnhancedSplitPhase::None) {
             invalid_barrier();
             continue;
           }
-
           D3D12_RESOURCE_STATES before = D3D12_RESOURCE_STATE_COMMON;
           D3D12_RESOURCE_STATES after = D3D12_RESOURCE_STATE_COMMON;
           if (!barrier_access_to_state(barrier.AccessBefore, before) ||
               !barrier_access_to_state(barrier.AccessAfter, after)) {
             invalid_barrier();
-            continue;
-          }
-
-          if (split_phase != EnhancedSplitPhase::None) {
-            EnhancedSplitBarrier state{
-                EnhancedSplitBarrierType::Global,
-                nullptr,
-                barrier.AccessBefore,
-                barrier.AccessAfter,
-                D3D12_BARRIER_LAYOUT_COMMON,
-                D3D12_BARRIER_LAYOUT_COMMON,
-                {},
-                0,
-                0,
-                before,
-                after,
-            };
-            if (split_phase == EnhancedSplitPhase::Begin)
-              BeginEnhancedSplit(state, WMTBarrierScopeBuffers | WMTBarrierScopeTextures | WMTBarrierScopeRenderTargets);
-            else
-              EndEnhancedSplit(state, WMTBarrierScopeBuffers | WMTBarrierScopeTextures | WMTBarrierScopeRenderTargets);
             continue;
           }
 
@@ -6689,10 +6659,6 @@ public:
             invalid_barrier();
             continue;
           }
-          if (split_phase == EnhancedSplitPhase::None && EnhancedSplitTouchesResource(resource)) {
-            invalid_barrier();
-            continue;
-          }
 
           D3D12_RESOURCE_STATES before = D3D12_RESOURCE_STATE_COMMON;
           D3D12_RESOURCE_STATES after = D3D12_RESOURCE_STATE_COMMON;
@@ -6716,10 +6682,7 @@ public:
                 before,
                 after,
             };
-            if (split_phase == EnhancedSplitPhase::Begin)
-              BeginEnhancedSplit(state, resource_barrier_scope(resource));
-            else
-              EndEnhancedSplit(state, resource_barrier_scope(resource));
+            RecordEnhancedSplit(state, split_phase, resource_barrier_scope(resource));
             continue;
           }
 
@@ -6752,10 +6715,6 @@ public:
           auto resource = static_cast<MTLD3D12Resource *>(barrier.pResource);
           const auto desc = resource->GetDesc();
           if (!resource->texture || desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
-            invalid_barrier();
-            continue;
-          }
-          if (split_phase == EnhancedSplitPhase::None && EnhancedSplitTouchesResource(resource)) {
             invalid_barrier();
             continue;
           }
@@ -6843,10 +6802,7 @@ public:
                 before_layout,
                 after_layout,
             };
-            if (split_phase == EnhancedSplitPhase::Begin)
-              BeginEnhancedSplit(state, resource_barrier_scope(resource));
-            else
-              EndEnhancedSplit(state, resource_barrier_scope(resource));
+            RecordEnhancedSplit(state, split_phase, resource_barrier_scope(resource));
             continue;
           }
 
