@@ -375,6 +375,33 @@ failures and full N13/FL12_2 remain unproven. Capabilities and ABI are unchanged
 Commands, raw results, timing/P95 and binary hashes:
 `../dxmt-test/n13-submit-failure-20261023/N13-submit-failure.md`.
 
+### N13 — nullable native command-buffer creation, 2026-10-23
+
+The Metal SDK declares both native queue factories nullable. Previously a zero
+handle reached commit; completion did not report an error, Signal/Wait returned
+S_OK and pending fence events stayed unsignaled. The same existing command-list
+runner reproduces all four entries (Execute/Signal/Wait/calibration) in both
+ordinary and error-options modes: eight expected failures on `0158ad1d`.
+
+The private checked `NewCommandBuffer` now marks generic device removal and all
+six callers return before encoding, fence-wait registration, sparse timeline or
+presenter work. The factory provides no concrete failure cause, so this does not
+assert OOM. Execute retains its existing translation guard, before allocator
+marking. No new scheduler, state machine, lock, scan, allocation or encoder.
+The existing test-only IAT patch helper is reused for malloc/native factories;
+scoped zero-return injection records nil commits without forwarding them.
+
+Fixed: eight failure cases pass (no nil commits, no allocator count, removed
+device, pending fence wakes), plus nine allocation/abort/success and adjacent
+runner processes. GPU copy/transition marker, query replay, barrier and ownership
+assertions pass. Twelve paired performance processes retain GPU assertions;
+aggregate median changes -11.82% to -3.14%, but third-pair occlusion regresses
+and run variance is high: performance is INCONCLUSIVE, with no speedup claim.
+Present/sparse failure injection, sustained exhaustion and Windows differential
+are NOT_RUN. Capabilities and ABI are unchanged; no new src/d3d12 files.
+Evidence, exact commands, hashes, environment, raw p50/p95 and rollback notes:
+`../dxmt-test/n13-command-buffer-20261023/N13-command-buffer.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

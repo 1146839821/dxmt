@@ -284,10 +284,17 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     encoder.setLabel(WMT::String::string(label.c_str(), WMTUTF8StringEncoding));
   }
 
-  WMT::CommandBuffer NewCommandBuffer() {
-    if (encoder_execution_status_)
-      return queue_.commandBufferWithErrorOptions(WMTCommandBufferErrorOptionEncoderExecutionStatus);
-    return queue_.commandBuffer();
+  HRESULT
+  NewCommandBuffer(WMT::CommandBuffer &buffer) {
+    buffer = encoder_execution_status_
+                 ? queue_.commandBufferWithErrorOptions(WMTCommandBufferErrorOptionEncoderExecutionStatus)
+                 : queue_.commandBuffer();
+    if (buffer)
+      return S_OK;
+    // Metal's nullable factory supplies no failure reason. Losing ordered
+    // queue work is terminal, but does not establish a specific OOM cause.
+    device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+    return DXGI_ERROR_DEVICE_REMOVED;
   }
 
   WMT::RenderPipelineState
@@ -518,7 +525,9 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       return false;
 
     auto pool = WMT::MakeAutoreleasePool();
-    auto cmdbuf = NewCommandBuffer();
+    WMT::CommandBuffer cmdbuf;
+    if (FAILED(NewCommandBuffer(cmdbuf)))
+      return false;
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     main_queue_signal = sparse_event_value_ + 1;
@@ -797,7 +806,9 @@ public:
 
     auto pool = WMT::MakeAutoreleasePool();
 
-    auto cmdbuf = NewCommandBuffer();
+    WMT::CommandBuffer cmdbuf;
+    if (FAILED(NewCommandBuffer(cmdbuf)))
+      return;
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     submission.command_buffer = cmdbuf;
@@ -1498,7 +1509,9 @@ public:
       return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
 
     auto pool = WMT::MakeAutoreleasePool();
-    auto cmdbuf = NewCommandBuffer();
+    WMT::CommandBuffer cmdbuf;
+    if (FAILED(NewCommandBuffer(cmdbuf)))
+      return DXGI_ERROR_DEVICE_REMOVED;
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     Submission submission;
@@ -1519,7 +1532,9 @@ public:
       return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
 
     auto pool = WMT::MakeAutoreleasePool();
-    auto cmdbuf = NewCommandBuffer();
+    WMT::CommandBuffer cmdbuf;
+    if (FAILED(NewCommandBuffer(cmdbuf)))
+      return DXGI_ERROR_DEVICE_REMOVED;
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     Submission submission;
@@ -1568,7 +1583,9 @@ public:
     attachment.start_of_encoder_sample_index = 0;
     attachment.end_of_encoder_sample_index = ~0ull;
 
-    auto cmdbuf = NewCommandBuffer();
+    WMT::CommandBuffer cmdbuf;
+    if (FAILED(NewCommandBuffer(cmdbuf)))
+      return DXGI_ERROR_DEVICE_REMOVED;
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
     auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&attachment, 1);
@@ -1630,7 +1647,9 @@ public:
       return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
 
     auto pool = WMT::MakeAutoreleasePool();
-    auto cmdbuf = NewCommandBuffer();
+    WMT::CommandBuffer cmdbuf;
+    if (FAILED(NewCommandBuffer(cmdbuf)))
+      return DXGI_ERROR_DEVICE_REMOVED;
     if (sparse_event_value_)
       cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
 

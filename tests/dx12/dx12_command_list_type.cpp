@@ -32,27 +32,16 @@ template <typename T> struct Owned {
   T *operator->() const { return ptr; }
 };
 
-// Opt-in, process-local fault injection: the driver DLL alone sees one failed
-// malloc on this thread. No real memory pressure or production test switch.
-class SubmissionAllocationFault {
-  inline static void *(__cdecl *malloc_)(size_t) = nullptr;
-  inline static thread_local UINT remaining_ = 0, calls_ = 0;
-  inline static thread_local bool hit_ = false;
+// Scoped IAT replacement affects only this process's driver DLL.
+class DriverImportPatch {
   ULONG_PTR *import_ = nullptr;
-
-  static void *__cdecl Allocate(size_t size) {
-    if (remaining_) {
-      calls_++;
-      if (!--remaining_) {
-        hit_ = true;
-        return nullptr;
-      }
-    }
-    return malloc_(size);
-  }
+  void *original_ = nullptr;
 
 public:
-  bool Install() {
+  DriverImportPatch() = default;
+  DriverImportPatch(const DriverImportPatch &) = delete;
+  DriverImportPatch &operator=(const DriverImportPatch &) = delete;
+  bool Install(const char *symbol, void *replacement, void *&original) {
     auto *base =
         reinterpret_cast<unsigned char *>(GetModuleHandleA("d3d12.dll"));
     if (!base)
@@ -74,23 +63,63 @@ public:
           continue;
         auto *name = reinterpret_cast<IMAGE_IMPORT_BY_NAME *>(
             base + names->u1.AddressOfData);
-        if (std::strcmp(reinterpret_cast<const char *>(name->Name), "malloc"))
+        if (std::strcmp(reinterpret_cast<const char *>(name->Name), symbol))
           continue;
         DWORD protection;
         if (!VirtualProtect(&iat->u1.Function, sizeof(iat->u1.Function),
                             PAGE_READWRITE, &protection))
           return false;
-        malloc_ = reinterpret_cast<decltype(malloc_)>(iat->u1.Function);
+        original_ = reinterpret_cast<void *>(iat->u1.Function);
+        original = original_;
         import_ = &iat->u1.Function;
         InterlockedExchangePointer(reinterpret_cast<void *volatile *>(import_),
-                                   reinterpret_cast<void *>(&Allocate));
+                                   replacement);
         VirtualProtect(import_, sizeof(*import_), protection, &protection);
         return true;
       }
     }
     return false;
   }
+  ~DriverImportPatch() {
+    if (import_) {
+      DWORD protection;
+      if (VirtualProtect(import_, sizeof(*import_), PAGE_READWRITE,
+                         &protection)) {
+        InterlockedExchangePointer(reinterpret_cast<void *volatile *>(import_),
+                                   original_);
+        VirtualProtect(import_, sizeof(*import_), protection, &protection);
+      }
+    }
+  }
+};
 
+// Opt-in, process-local fault injection: the driver DLL alone sees one failed
+// malloc on this thread. No real memory pressure or production test switch.
+class SubmissionAllocationFault {
+  inline static void *(__cdecl *malloc_)(size_t) = nullptr;
+  inline static thread_local UINT remaining_ = 0, calls_ = 0;
+  inline static thread_local bool hit_ = false;
+  DriverImportPatch patch_;
+  static void *__cdecl Allocate(size_t size) {
+    if (remaining_) {
+      calls_++;
+      if (!--remaining_) {
+        hit_ = true;
+        return nullptr;
+      }
+    }
+    return malloc_(size);
+  }
+
+public:
+  bool Install() {
+    void *original = nullptr;
+    if (!patch_.Install("malloc", reinterpret_cast<void *>(&Allocate),
+                        original))
+      return false;
+    malloc_ = reinterpret_cast<decltype(malloc_)>(original);
+    return true;
+  }
   void Arm(UINT allocation) {
     calls_ = 0;
     hit_ = false;
@@ -99,19 +128,140 @@ public:
   void Stop() { remaining_ = 0; }
   bool Hit() const { return hit_; }
   UINT Calls() const { return calls_; }
-  ~SubmissionAllocationFault() {
-    Stop();
-    if (import_) {
-      DWORD protection;
-      if (VirtualProtect(import_, sizeof(*import_), PAGE_READWRITE,
-                         &protection)) {
-        InterlockedExchangePointer(reinterpret_cast<void *volatile *>(import_),
-                                   reinterpret_cast<void *>(malloc_));
-        VirtualProtect(import_, sizeof(*import_), protection, &protection);
-      }
-    }
-  }
+  ~SubmissionAllocationFault() { Stop(); }
 };
+
+// Return a nullable native command buffer once, before any real GPU work.
+// Capture nil commits so a broken driver cannot forward them to Metal.
+class CommandBufferFault {
+  inline static obj_handle_t(__cdecl *create_)(obj_handle_t) = nullptr;
+  inline static obj_handle_t(__cdecl *create_options_)(obj_handle_t,
+                                                       uint64_t) = nullptr;
+  inline static void(__cdecl *commit_)(obj_handle_t) = nullptr;
+  inline static thread_local bool armed_ = false, hit_ = false;
+  inline static thread_local unsigned nil_commits_ = 0;
+  DriverImportPatch create_patch_, options_patch_, commit_patch_;
+  static bool Fail() {
+    if (!armed_)
+      return false;
+    armed_ = false;
+    return hit_ = true;
+  }
+  static obj_handle_t __cdecl Create(obj_handle_t queue) {
+    return Fail() ? 0 : create_(queue);
+  }
+  static obj_handle_t __cdecl CreateOptions(obj_handle_t queue,
+                                            uint64_t options) {
+    return Fail() ? 0 : create_options_(queue, options);
+  }
+  static void __cdecl Commit(obj_handle_t buffer) {
+    if (!buffer) {
+      nil_commits_++;
+      return;
+    }
+    commit_(buffer);
+  }
+
+public:
+  bool Install() {
+    void *original = nullptr;
+    if (!create_patch_.Install("MTLCommandQueue_commandBuffer",
+                               reinterpret_cast<void *>(&Create), original))
+      return false;
+    create_ = reinterpret_cast<decltype(create_)>(original);
+    if (!options_patch_.Install("MTLCommandQueue_commandBufferWithErrorOptions",
+                                reinterpret_cast<void *>(&CreateOptions),
+                                original))
+      return false;
+    create_options_ = reinterpret_cast<decltype(create_options_)>(original);
+    if (!commit_patch_.Install("MTLCommandBuffer_commit",
+                               reinterpret_cast<void *>(&Commit), original))
+      return false;
+    commit_ = reinterpret_cast<decltype(commit_)>(original);
+    return true;
+  }
+  void Arm() {
+    hit_ = false;
+    nil_commits_ = 0;
+    armed_ = true;
+  }
+  void Stop() { armed_ = false; }
+  bool Hit() const { return hit_; }
+  unsigned NilCommits() const { return nil_commits_; }
+  ~CommandBufferFault() { Stop(); }
+};
+
+bool TestCommandBufferFailure(const char *operation) {
+  if (std::strcmp(operation, "execute") && std::strcmp(operation, "signal") &&
+      std::strcmp(operation, "wait") && std::strcmp(operation, "calibrate"))
+    return false;
+  struct Event {
+    HANDLE handle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    ~Event() {
+      if (handle)
+        CloseHandle(handle);
+    }
+  } event; // Outlive all fence references, including pending event
+           // registration.
+  Owned<ID3D12Device> device;
+  Owned<ID3D12CommandQueue> queue;
+  Owned<ID3D12CommandAllocator> allocator;
+  Owned<ID3D12GraphicsCommandList> list;
+  Owned<ID3D12Fence> fence;
+  D3D12_COMMAND_QUEUE_DESC desc = {};
+  if (!event.handle ||
+      !CheckHR("buffer device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&device.ptr))) ||
+      !CheckHR("buffer queue",
+               device->CreateCommandQueue(&desc, IID_PPV_ARGS(&queue.ptr))) ||
+      !CheckHR("buffer allocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                              IID_PPV_ARGS(&allocator.ptr))) ||
+      !CheckHR("buffer list",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                         allocator.ptr, nullptr,
+                                         IID_PPV_ARGS(&list.ptr))) ||
+      !CheckHR("buffer close", list->Close()) ||
+      !CheckHR("buffer fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                   IID_PPV_ARGS(&fence.ptr))) ||
+      !CheckHR("buffer event", fence->SetEventOnCompletion(1, event.handle)))
+    return false;
+  CommandBufferFault fault;
+  if (!fault.Install())
+    return false;
+  HRESULT result = S_OK;
+  UINT64 gpu = 0x1234, cpu = 0x5678;
+  fault.Arm();
+  if (!std::strcmp(operation, "execute")) {
+    ID3D12CommandList *batch[] = {list.ptr};
+    queue->ExecuteCommandLists(1, batch);
+  } else if (!std::strcmp(operation, "signal")) {
+    result = queue->Signal(fence.ptr, 1);
+  } else if (!std::strcmp(operation, "wait")) {
+    result = queue->Wait(fence.ptr, 1);
+  } else {
+    result = queue->GetClockCalibration(&gpu, &cpu);
+  }
+  fault.Stop();
+  const auto reason = device->GetDeviceRemovedReason();
+  const bool busy = static_cast<dxmt::MTLD3D12CommandAllocator *>(allocator.ptr)
+                        ->IsInFlight();
+  const bool woke = WaitForSingleObject(event.handle, 0) == WAIT_OBJECT_0;
+  const auto completed = fence->GetCompletedValue();
+  std::cout << "command buffer operation=" << operation
+            << " hit=" << fault.Hit() << " nil_commits=" << fault.NilCommits()
+            << " allocator_busy=" << busy << " woke=" << woke
+            << " completed=" << completed << " result=0x" << std::hex
+            << static_cast<unsigned long>(result) << " reason=0x"
+            << static_cast<unsigned long>(reason) << std::dec << "\n";
+  return fault.Hit() && !fault.NilCommits() && !busy && woke &&
+         completed == UINT64_MAX && reason == DXGI_ERROR_DEVICE_REMOVED &&
+         (!std::strcmp(operation, "execute") ||
+          result == DXGI_ERROR_DEVICE_REMOVED) &&
+         (std::strcmp(operation, "calibrate") ||
+          (gpu == 0x1234 && cpu == 0x5678));
+}
 
 bool TestSubmissionAllocationFailure(UINT allocation, bool partial_clear,
                                      bool abort_translation = false) {
@@ -1151,6 +1301,8 @@ bool TestConcurrentCommandSubmission(ID3D12Device *device) {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 3 && std::strcmp(argv[1], "--command-buffer-failure") == 0)
+    return TestCommandBufferFailure(argv[2]) ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--submission-translation-abort") == 0)
     return TestSubmissionAllocationFailure(0, true, true) ? 0 : 1;
   if (argc >= 3 && std::strcmp(argv[1], "--submission-allocation-failure") == 0) {
