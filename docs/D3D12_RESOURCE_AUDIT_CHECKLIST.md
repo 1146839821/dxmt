@@ -604,6 +604,33 @@ Evidence is appended to `../dxmt-test/n02-query-interface-20261023/N02-query-int
 exact identities, command, per-process results and raw logs are in
 `../dxmt-test/n02-query-cpu-20261023/`. This closes only the diagnostic slice.
 
+### N13 — completed cross-queue replay and withdrawn batching trial, 2026-10-23
+
+The existing command-list runner now reuses a completed closed copy recording
+on a second queue after changing upload marker1234 -> 4321 and clearing readback.
+Exact4321 readback plus a healthy device verifies new execution with no Reset/
+re-recording and another queue's fence. Existing same-queue growth/replay tests
+remain. No new runner or production source/header/ABI/capability is introduced.
+
+A stack-only fence-prefix candidate was evaluated, then WITHDRAWN. It kept
+recorded links immutable and all fence/residency/completion operations, reducing
+compute/blit encode bridge calls9/6 -> 6/4 in all420 trace samples while preserving
+3/2 factories,5 endEncoding calls and1 commit. Fourteen scoped correctness
+processes passed including descriptor/SM6, copy capacity and failure rollback.
+However twelve uninstrumented performance processes showed exact-descriptor
+p50/p95 +6.14%/+20.17% and no-op +5.03%/+15.38%, despite ordinary-submit
+-2.86%/-5.64% and occlusion -2.77%/-2.42%. No-op bypasses modified branches;
+this contradicts a simple local call-count explanation, not proof of harmless
+noise. All raw results remain; no retry matrix or speculative workaround follows.
+
+Production edits were removed and rebuilt. Restored DLL .text bytes/RVA equal
+the original; only embedded-version .rdata and .buildid differ. The restored
+full command-list runner is a fifteenth correctness PASS. Final delivery is
+regression coverage only, with no production latency claim. Overall performance
+gate remains OPEN; stop this optimization trial until causal evidence improves.
+Exact identities, candidate patch, final restoration, per-process results and
+commands: `../dxmt-test/n13-encode-prefix-20261023/N13-encode-prefix.md`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

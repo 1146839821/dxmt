@@ -1003,17 +1003,32 @@ bool TestInFlightRecording(unsigned mode) {
       !CheckHR("Release in-flight gate", f.gate->Signal(1)) || WaitForSingleObject(f.event, 5000) != WAIT_OBJECT_0)
     return false;
   if (mode == 4) {
-    // The same closed recording can be executed again after GPU completion.
-    f.first_queue->ExecuteCommandLists(1, &list);
-    if (!CheckHR("Completed replay signal", f.first_queue->Signal(f.done.ptr, 3)) ||
-        !CheckHR("Completed replay event", f.done->SetEventOnCompletion(3, f.event)) ||
+    // Reuse the immutable recording on another queue after completion, with new
+    // data.
+    if (!CheckHR("Completed replay source",
+                 f.source->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+      return false;
+    mapped[0] = 4321;
+    f.source->Unmap(0, nullptr);
+    if (!CheckHR(
+            "Completed replay clear",
+            f.readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+      return false;
+    mapped[0] = 0;
+    f.readback->Unmap(0, nullptr);
+    f.second_queue->ExecuteCommandLists(1, &list);
+    if (!CheckHR("Completed replay signal",
+                 f.second_queue->Signal(f.done.ptr, 3)) ||
+        !CheckHR("Completed replay event",
+                 f.done->SetEventOnCompletion(3, f.event)) ||
         WaitForSingleObject(f.event, 5000) != WAIT_OBJECT_0)
       return false;
   }
   if (!CheckHR("Healthy in-flight device", f.device->GetDeviceRemovedReason()) ||
       !CheckHR("In-flight positive readback", f.readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
     return false;
-  const bool correct = mapped[0] == 1234 && mapped[1] == ((mode == 3 || mode == 6) ? 5678u : 0u);
+  const bool correct = mapped[0] == (mode == 4 ? 4321u : 1234u) &&
+                       mapped[1] == ((mode == 3 || mode == 6) ? 5678u : 0u);
   f.readback->Unmap(0, nullptr);
   if (!correct) { std::cerr << "valid recording mode " << mode << " readback failed\n"; return false; }
   std::cout << "valid recording mode " << mode << " preserved independent recording/readback\n";
