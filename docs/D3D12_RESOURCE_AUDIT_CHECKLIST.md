@@ -1705,6 +1705,39 @@ Evidence: `../dxmt-test/n02-plane-capability-audit-20261024/`
 `N02-plane-capability-audit.md`, `manifest.json`, `results.json`,
 `final-results.json`, `no-private.json`, `sources.json`.
 
+### N02 — depth/stencil multisample GPU oracle, 2026-10-24
+
+Base3883152c. Existing texture-dimensions fixture now accepts --depth-ms and
+reversed family modes; the same DSV/resource/transition path serves depth and
+stencil. Reversal also covers the missing stencil family/dimension pairs.
+The existing shader uses one MSValue check and one all-samples/layers loop.
+Depth validates R=77/255 or88/255 within1e-6 and default G/B/A=0/0/1;
+stencil validates G=77/88 and default R/B/A=0/0/1. No new runner/source/header,
+production state, capability table, ABI/layout/scheduling or feature promotion.
+
+Final10 runtime processes: nine expected-success exit0; one deliberate
+wrong-depth-expectation shader exits1 with dimension6=0 expected77. This is
+oracle sensitivity evidence, not a runtime defect. Seven positive GPU runs
+(depth2, stencil2, ordinary, typeless, RGB96) read exact11..99. Both component
+families now cover MS and MSArray, every one of4 samples and both array
+layers. Samples have uniform clear values: per-sample distinct-value storage,
+resolve semantics and D24 quantization are not proven. Plane40 and format54
+controls pass. All final runs verify staged DLL and Metal API/GPU validation.
+Five CSOs compiled from current HLSL (one external wrong-oracle mutation),
+scoped Meson build, changed-TU no-private syntax and formatting pass.
+
+Both depth component formats21/46 and stencil22/47 still query
+Support1=0x1011a0 without MS_LOAD despite these narrow GPU successes.
+Depth-component MS Load moves from UNVERIFIED to locally GPU_VERIFIED for
+this4x MS/MSArray case. Full sample-count/filter/comparison/mip/default/view
+matrix, Windows differential, full no-private runtime and T3/T4 remain
+NOT_RUN; no capability exposure gate is closed. Existing underreport remains
+OPEN, and no blanket format support is inferred. Production DLL hash7010449e
+unchanged; performance NOT_RUN for this test-only slice, historical
+recording/submit regressions remain OPEN. Evidence:
+`../dxmt-test/n02-depth-ms-oracle-20261024/N02-depth-ms-oracle.md`,
+`results.json`, `shader-builds.json`, `no-private.json`, `manifest.json`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

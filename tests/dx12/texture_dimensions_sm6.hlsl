@@ -25,6 +25,24 @@ uint ToByte(float4 value, uint index) {
   return (uint)(value.x * 255.0 + 0.5);
 }
 
+#ifdef STENCIL_MS
+uint MSValue(uint4 value, uint index) {
+  if (value.x != 0 || value.z != 0 || value.w != 1)
+    return 0;
+  return value.y;
+}
+#else
+uint MSValue(float4 value, uint index) {
+#ifdef DEPTH_MS
+  const float expected = (index == 6 ? 77.0 : 88.0) / 255.0;
+  if (abs(value.x - expected) > 0.000001 || value.y != 0.0 || value.z != 0.0 ||
+      value.w != 1.0)
+    return 0;
+#endif
+  return ToByte(value, index);
+}
+#endif
+
 [numthreads(1, 1, 1)] void main() {
   output[0] = ToByte(texture_1d.SampleLevel(texture_sampler, 0.5, 0.0), 0);
   output[1] = ToByte(
@@ -39,21 +57,16 @@ uint ToByte(float4 value, uint index) {
   output[5] = ToByte(texture_cube_array.SampleLevel(
                          texture_sampler, float4(0.0, 0.0, 1.0, 1.0), 0.0),
                      5);
-#ifdef STENCIL_MS
-  output[6] = texture_ms.Load(int2(0, 0), 0).y;
-  output[7] = texture_ms_array.Load(int3(0, 0, 1), 0).y;
+  output[6] = MSValue(texture_ms.Load(int2(0, 0), 0), 6);
+  output[7] = MSValue(texture_ms_array.Load(int3(0, 0, 1), 0), 7);
   // Check every sample and both array layers, not just sample zero.
   for (uint sample = 0; sample < 4; sample++) {
-    if (texture_ms.Load(int2(0, 0), sample).y != 77)
+    if (MSValue(texture_ms.Load(int2(0, 0), sample), 6) != 77)
       output[6] = 0;
     for (uint layer = 0; layer < 2; layer++)
-      if (texture_ms_array.Load(int3(0, 0, layer), sample).y != 88)
+      if (MSValue(texture_ms_array.Load(int3(0, 0, layer), sample), 7) != 88)
         output[7] = 0;
   }
-#else
-  output[6] = ToByte(texture_ms.Load(int2(0, 0), 0), 6);
-  output[7] = ToByte(texture_ms_array.Load(int3(0, 0, 1), 0), 7);
-#endif
   output[8] = ToByte(
       texture_3d.SampleLevel(texture_sampler, float3(0.5, 0.5, 0.5), 0.0), 8);
 #ifdef RGB96
