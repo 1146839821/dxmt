@@ -33,7 +33,7 @@ are no longer current defects. Preserve their original red results and costs.
 | InfoQueue COM identity/lifetime | `78f4e9eb`; embedded controlling identity and concurrent query/state test | Full debug-layer compatibility is not established |
 | InfoQueue messages/filters/limits/mute | `59ebde1b`, `b627f28d`; owned messages, filter stacks and 12 allocation rollback positions covered | Native counter/filter/default equivalence and persistent/global OOM NOT_RUN |
 | InfoQueue break/output | `6458896f`; stored controls, intercepted output/break and reentrant callbacks covered | Real OS debugger delivery NOT_RUN; not a complete Debug Layer |
-| Enhanced split execution order | N12 `a262662e`; submission-order pairing, recording/reset isolation, admission failure and lifetime coverage; the N12 resource-order slice below corrects same-resource disjoint barrier acceptance | Cross-queue handoff, extended stress and performance acceptance OPEN; EnhancedBarriersSupported remains FALSE |
+| Enhanced split execution order | N12 `a262662e`; submission-order pairing, recording/reset isolation, admission failure and lifetime coverage; the N12 resource-order slice below corrects same-resource disjoint barrier acceptance | Direct->Direct fence handoff with complete per-queue pairs now has bounded N12 readback evidence; cross-queue half-pair semantics, other queue types, extended stress and performance acceptance OPEN; EnhancedBarriersSupported remains FALSE |
 | Format report/create/view/footprint consistency | N02/N08/N09 slices below; logical storage/view roles, BC sampling, RGB96 copies and typed UAV eligibility/readback have bounded evidence | Exhaustive format/planar/dimension/allocation coverage and native differential remain OPEN; additional typed-UAV Options remains FALSE |
 | Depth/stencil component MS_LOAD | `960ec7b0`, `4fe09340`, `1b74fa94`; sample-mask prerequisite, SM5/SM6 compute and pixel 2x/4x readbacks, four report bits corrected | 8x unsupported on this host; other devices/counts and native differential NOT_RUN; no full format/FL promotion |
 | Performance and deployment | Recorded matched-runtime AB/BA evidence, including N13 attribution controls | Historical recording/Submit warnings remain OPEN/INCONCLUSIVE; latest query improvement does not discharge them. Full no-private runtime and T3/T4 NOT_RUN |
@@ -2546,6 +2546,41 @@ Shared Wine and user .gitignore unchanged. Evidence:
 `../dxmt-test/n13-split-native-20261024/N13-split-native.md`, `manifest.json`,
 `identities.json`, `results.json`, `calibration.json`, `perf-results.json`,
 `aggregate.json`, `split-native-probe.cpp`, `rebuild-commands.json` and raw logs.
+
+### N12 — completed split pairs across queue handoff, 2026-10-24
+
+Base192ea1a3. Existing enhanced runner adds opt-in `queue-handoff` and
+`queue-handoff-reset`; no production change. Producer completes its texture
+COPY_DEST->COPY_SOURCE split pair; consumer completes COPY_SOURCE->COMMON
+pair then reads six subresources (3 mips x2 slices). END records first on one
+CPU thread and BEGIN later on another; execution is BEGIN->END. First mode
+queues consumer Wait/work before producer Execute, with no CPU completion wait
+replacing the GPU dependency. Reset mode completes producer BEGIN, resets its
+allocator/list, then submits END before signaling the consumer dependency.
+Handoff fence is checked pending before Signal and completed after readback.
+
+Both old/current N12 DLLs pass both modes with identical PE/dependencies and
+verified staged native loader paths. Final10 correctness processes pass with
+API/GPU validation1/1/HUD1, including full enhanced runner, range GPU/cross-Execute,
+queue isolation, threaded-reversed and concurrent recording. External wrong-pixel
+oracle intentionally exits1/readback FAIL; calibration controller passes and
+retains its source/binary/rebuild arguments. Earlier9 passes retained separately.
+No production defect reproduced. Existing concurrent test helpers did mutate a
+shared copy-location field; both now use local copies, removing that harness
+race. This is a static ownership correction, not a TSan result.
+
+Scoped build and changed-test-TU no-private syntax pass; diff check passes.
+Performance NOT_RUN (production unchanged); historical split Submit p95+34.46%
+and global Device gates stay OPEN. Full no-private runtime, native Windows,
+other queue types, cross-queue BEGIN/END half-pair matching and T3/T4 NOT_RUN.
+This evidence covers complete pairs on each Direct queue; it does not establish
+cross-queue half-pair semantics or full enhanced support. No public capability,
+COM ABI, runtime ownership, layout or scheduling changes; new src/d3d12 files0.
+Same actual M1Max/macOS27.0.1/Xcode27.1/Wine11/MSC API4.0.1 host, isolated n15
+prefix; shared Wine and user .gitignore unchanged. Evidence:
+`../dxmt-test/n12-crossqueue-20261024/N12-crossqueue.md`, `design.txt`,
+`manifest.json`, `results.json`, `initial-results.json`, `no-private.json`,
+`oracle-calibration.json`, rebuild arguments and raw validation logs.
 
 ### Earlier validation notes
 

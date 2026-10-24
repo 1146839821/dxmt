@@ -562,11 +562,14 @@ bool TestPendingTextureRemoval(bool ranged = false) {
 }
 
 bool TestSplitExecutionOrder(const char *mode) {
+  const bool handoff = !std::strcmp(mode, "queue-handoff") ||
+                       !std::strcmp(mode, "queue-handoff-reset");
   const bool mismatch = !std::strcmp(mode, "mismatch");
   const bool equivalent = !std::strcmp(mode, "equivalent-range");
   const bool cross = !std::strcmp(mode, "cross-execute-reset") ||
                      !std::strcmp(mode, "disjoint-cross-execute") ||
-                     !std::strcmp(mode, "range-cross-execute");
+                     !std::strcmp(mode, "range-cross-execute") ||
+                     !std::strcmp(mode, "queue-handoff-reset");
   const bool replay = !std::strcmp(mode, "replay");
   const bool concurrent = !std::strcmp(mode, "concurrent");
   const bool queue_isolation = !std::strcmp(mode, "queue-isolation");
@@ -584,12 +587,12 @@ bool TestSplitExecutionOrder(const char *mode) {
   const bool disjoint_submit = !std::strcmp(mode, "disjoint-submit") ||
                                !std::strcmp(mode, "disjoint-cross-execute");
   const bool ranged = !std::strcmp(mode, "range-gpu") ||
-                      !std::strcmp(mode, "range-cross-execute");
+                      !std::strcmp(mode, "range-cross-execute") || handoff;
   const bool global = !std::strcmp(mode, "global");
   if (!ordered && !reversed && !threaded_reversed && !same && !reset &&
       !clear && !disjoint && !global && !cross && !replay && !concurrent &&
       !queue_isolation && !end_only && !mismatch && !equivalent &&
-      !disjoint_transition && !disjoint_end && !disjoint_submit && !ranged && !sequential)
+      !disjoint_transition && !disjoint_end && !disjoint_submit && !ranged && !sequential && !handoff)
     return false;
   Owned<ID3D12Device> device;
   Owned<ID3D12Resource> unused_buffer, texture;
@@ -744,6 +747,8 @@ bool TestSplitExecutionOrder(const char *mode) {
   result = source;
   result.pResource = readback.ptr;
   auto record_begin = [&] {
+    auto copy_source = source;
+    auto copy_target = target;
     D3D12_RESOURCE_BARRIER initial = {};
     initial.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     initial.Transition.pResource = texture.ptr;
@@ -752,11 +757,21 @@ bool TestSplitExecutionOrder(const char *mode) {
     initial.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
     first.list->ResourceBarrier(1, &initial);
     for (UINT index = 0; index < subresource_count; ++index) {
-      source.PlacedFootprint = footprints[index];
-      target.SubresourceIndex = index;
-      first.list->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+      copy_source.PlacedFootprint = footprints[index];
+      copy_target.SubresourceIndex = index;
+      first.list->CopyTextureRegion(&copy_target, 0, 0, 0, &copy_source, nullptr);
     }
     split(first, true);
+  };
+  auto record_readback = [&](SplitProbeList &list) {
+    // Concurrent recording threads must not mutate shared copy locations.
+    auto copy_result = result;
+    auto copy_target = target;
+    for (UINT index = 0; index < subresource_count; ++index) {
+      copy_result.PlacedFootprint = footprints[index];
+      copy_target.SubresourceIndex = index;
+      list.list->CopyTextureRegion(&copy_result, 0, 0, 0, &copy_target, nullptr);
+    }
   };
   auto record_end = [&](SplitProbeList &list) {
     if (disjoint_submit) {
@@ -768,11 +783,8 @@ bool TestSplitExecutionOrder(const char *mode) {
       SubmitBarrier(list.list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
     }
     split(list, false);
-    for (UINT index = 0; index < subresource_count; ++index) {
-      result.PlacedFootprint = footprints[index];
-      target.SubresourceIndex = index;
-      list.list->CopyTextureRegion(&result, 0, 0, 0, &target, nullptr);
-    }
+    if (!handoff)
+      record_readback(list);
   };
   if (end_only) {
     record_end(second);
@@ -866,7 +878,50 @@ bool TestSplitExecutionOrder(const char *mode) {
     if (!wait(other_queue.ptr, 1))
       return false;
   }
+  // Each queue completes its own split pair. The generic COPY_SOURCE layout
+  // crosses queues via a fence; no cross-queue BEGIN/END pairing is assumed.
+  SplitProbeList consumer_begin, consumer_end;
+  Owned<ID3D12CommandQueue> consumer_queue;
+  Owned<ID3D12Fence> handoff_fence;
+  if (handoff) {
+    if (!consumer_begin.Create(device.ptr) || !consumer_end.Create(device.ptr) ||
+        !CheckHR("consumer queue", device->CreateCommandQueue(
+                                       &queue_desc, IID_PPV_ARGS(&consumer_queue.ptr))) ||
+        !CheckHR("handoff fence", device->CreateFence(
+                                      0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&handoff_fence.ptr))))
+      return false;
+    auto consumer_barrier = [&](SplitProbeList &list, bool begin) {
+      D3D12_TEXTURE_BARRIER barrier;
+      SetTexture(barrier,
+                 begin ? D3D12_BARRIER_SYNC_COPY : D3D12_BARRIER_SYNC_SPLIT,
+                 begin ? D3D12_BARRIER_SYNC_SPLIT : D3D12_BARRIER_SYNC_COPY,
+                 D3D12_BARRIER_ACCESS_COPY_SOURCE, D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                 D3D12_BARRIER_LAYOUT_COPY_SOURCE, D3D12_BARRIER_LAYOUT_COMMON,
+                 texture.ptr, {0, 3, 0, 2, 0, 1});
+      SubmitBarrier(list.list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
+    };
+    // Record END first on a different CPU thread. Both lists are closed before
+    // submission; only execution order determines the matching BEGIN.
+    std::thread end_thread([&] {
+      consumer_barrier(consumer_end, false);
+      record_readback(consumer_end);
+    });
+    end_thread.join();
+    std::thread begin_thread([&] { consumer_barrier(consumer_begin, true); });
+    begin_thread.join();
+    if (!CheckHR("consumer BEGIN Close", consumer_begin.list->Close()) ||
+        !CheckHR("consumer END Close", consumer_end.list->Close()))
+      return false;
+  }
   ID3D12CommandList *lists[] = {first.list.ptr, second.list.ptr};
+  if (handoff && !cross) {
+    // Queue all consumer work before producer submission. No CPU completion
+    // wait can accidentally replace the required GPU queue dependency.
+    if (!CheckHR("consumer pending Wait", consumer_queue->Wait(handoff_fence.ptr, 1)))
+      return false;
+    ID3D12CommandList *consumer_lists[] = {consumer_begin.list.ptr, consumer_end.list.ptr};
+    consumer_queue->ExecuteCommandLists(2, consumer_lists);
+  }
   if (cross) {
     queue->ExecuteCommandLists(1, lists);
     if (!wait(queue.ptr, 1) ||
@@ -885,8 +940,24 @@ bool TestSplitExecutionOrder(const char *mode) {
               << static_cast<unsigned long>(hr) << std::dec << "\n";
     return hr == DXGI_ERROR_INVALID_CALL;
   }
-  if (!wait(queue.ptr, 2))
+  if (handoff) {
+    if (cross) {
+      if (!CheckHR("consumer Wait after producer Reset", consumer_queue->Wait(handoff_fence.ptr, 1)))
+        return false;
+      ID3D12CommandList *consumer_lists[] = {consumer_begin.list.ptr, consumer_end.list.ptr};
+      consumer_queue->ExecuteCommandLists(2, consumer_lists);
+    }
+    if (handoff_fence->GetCompletedValue() != 0) {
+      std::cerr << "handoff fence completed before producer Signal\n";
+      return false;
+    }
+    std::cout << "handoff consumer dependency pending before producer Signal\n";
+    if (!CheckHR("producer handoff Signal", queue->Signal(handoff_fence.ptr, 1)) ||
+        !wait(consumer_queue.ptr, 2) || handoff_fence->GetCompletedValue() < 1)
+      return false;
+  } else if (!wait(queue.ptr, 2)) {
     return false;
+  }
   if (replay) {
     queue->ExecuteCommandLists(2, lists);
     if (!wait(queue.ptr, 3))
