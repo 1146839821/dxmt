@@ -440,7 +440,7 @@ struct SplitProbeList {
 
 // Remove an inherited middle entry, then consume both surviving resource keys
 // in later submissions after resetting the original BEGIN recording.
-bool TestPendingTextureRemoval() {
+bool TestPendingTextureRemoval(bool ranged = false) {
   Owned<ID3D12Device> device;
   Owned<ID3D12Resource> unused_buffers[3], textures[3], upload, readback;
   if (!CheckHR("pending device",
@@ -489,7 +489,7 @@ bool TestPendingTextureRemoval() {
     D3D12_RESOURCE_BARRIER initial = {};
     initial.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     initial.Transition.pResource = textures[index].ptr;
-    initial.Transition.Subresource = 0;
+    initial.Transition.Subresource = ranged && index == 2 ? D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES : 0;
     initial.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
     initial.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
     lists[0].list->ResourceBarrier(1, &initial);
@@ -505,7 +505,9 @@ bool TestPendingTextureRemoval() {
     SetTexture(barrier, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_SPLIT,
                D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COPY_SOURCE,
                D3D12_BARRIER_LAYOUT_COPY_DEST, D3D12_BARRIER_LAYOUT_COPY_SOURCE,
-               textures[index].ptr, {0, 1, 0, 1, 0, 1});
+               textures[index].ptr,
+               ranged && index == 2 ? D3D12_BARRIER_SUBRESOURCE_RANGE{0, 3, 0, 2, 0, 1}
+                                    : D3D12_BARRIER_SUBRESOURCE_RANGE{0, 1, 0, 1, 0, 1});
     SubmitBarrier(lists[0].list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
     UINT end_list = 1;
     while (end_order[end_list - 1] != index)
@@ -554,7 +556,7 @@ bool TestPendingTextureRemoval() {
                     mapped)[index * stride + y * footprint.Footprint.RowPitch +
                             x] == 0x31 + index;
   readback->Unmap(0, &no_read);
-  std::cout << "pending texture removal order=1,0,2 GPU readback="
+  std::cout << "pending texture removal order=1,0,2 ranged=" << ranged << " GPU readback="
             << (good ? "PASS" : "FAIL") << "\n";
   return good;
 }
@@ -562,7 +564,9 @@ bool TestPendingTextureRemoval() {
 bool TestSplitExecutionOrder(const char *mode) {
   const bool mismatch = !std::strcmp(mode, "mismatch");
   const bool equivalent = !std::strcmp(mode, "equivalent-range");
-  const bool cross = !std::strcmp(mode, "cross-execute-reset");
+  const bool cross = !std::strcmp(mode, "cross-execute-reset") ||
+                     !std::strcmp(mode, "disjoint-cross-execute") ||
+                     !std::strcmp(mode, "range-cross-execute");
   const bool replay = !std::strcmp(mode, "replay");
   const bool concurrent = !std::strcmp(mode, "concurrent");
   const bool queue_isolation = !std::strcmp(mode, "queue-isolation");
@@ -574,10 +578,18 @@ bool TestSplitExecutionOrder(const char *mode) {
   const bool reset = !std::strcmp(mode, "reset-isolation");
   const bool clear = !std::strcmp(mode, "clear-state");
   const bool disjoint = !std::strcmp(mode, "disjoint");
+  const bool sequential = !std::strcmp(mode, "sequential-ranges");
+  const bool disjoint_transition = !std::strcmp(mode, "disjoint-transition");
+  const bool disjoint_end = !std::strcmp(mode, "disjoint-end");
+  const bool disjoint_submit = !std::strcmp(mode, "disjoint-submit") ||
+                               !std::strcmp(mode, "disjoint-cross-execute");
+  const bool ranged = !std::strcmp(mode, "range-gpu") ||
+                      !std::strcmp(mode, "range-cross-execute");
   const bool global = !std::strcmp(mode, "global");
   if (!ordered && !reversed && !threaded_reversed && !same && !reset &&
       !clear && !disjoint && !global && !cross && !replay && !concurrent &&
-      !queue_isolation && !end_only && !mismatch && !equivalent)
+      !queue_isolation && !end_only && !mismatch && !equivalent &&
+      !disjoint_transition && !disjoint_end && !disjoint_submit && !ranged && !sequential)
     return false;
   Owned<ID3D12Device> device;
   Owned<ID3D12Resource> unused_buffer, texture;
@@ -615,7 +627,8 @@ bool TestSplitExecutionOrder(const char *mode) {
                begin ? D3D12_BARRIER_SYNC_SPLIT : D3D12_BARRIER_SYNC_COPY,
                D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COPY_SOURCE,
                D3D12_BARRIER_LAYOUT_COPY_DEST, D3D12_BARRIER_LAYOUT_COPY_SOURCE,
-               texture.ptr, {mip, 1, 0, 1, 0, 1});
+               texture.ptr, ranged ? D3D12_BARRIER_SUBRESOURCE_RANGE{0, 3, 0, 2, 0, 1}
+                                   : D3D12_BARRIER_SUBRESOURCE_RANGE{mip, 1, 0, 1, 0, 1});
     SubmitBarrier(list.list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
   };
   if (mismatch || equivalent) {
@@ -639,13 +652,32 @@ bool TestSplitExecutionOrder(const char *mode) {
               << static_cast<unsigned long>(access_close) << std::dec << "\n";
     return FAILED(range_close) && FAILED(access_close);
   }
-  if (disjoint) {
+  if (sequential) {
     split(first, true, 0);
-    split(first, true, 1);
     split(first, false, 0);
+    split(first, true, 1);
     split(first, false, 1);
-    return CheckHR("disjoint mip split Close (candidate semantic oracle)",
-                   first.list->Close());
+    return CheckHR("sequential same-resource mip splits", first.list->Close());
+  }
+  if (disjoint || disjoint_transition || disjoint_end) {
+    split(first, true, 0);
+    if (disjoint_transition) {
+      D3D12_TEXTURE_BARRIER barrier;
+      SetTexture(barrier, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_COPY,
+                 D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_COPY_DEST,
+                 D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_COPY_DEST,
+                 texture.ptr, {1, 1, 0, 1, 0, 1});
+      SubmitBarrier(first.list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
+    } else {
+      split(first, !disjoint_end, 1);
+    }
+    split(first, false, 0);
+    if (disjoint)
+      split(first, false, 1);
+    const HRESULT hr = first.list->Close();
+    std::cout << "interleaved same-resource mip splits Close=0x" << std::hex
+              << static_cast<unsigned long>(hr) << std::dec << "\n";
+    return hr == E_INVALIDARG;
   }
   if (reset) {
     // An unsubmitted A BEGIN is consumed by B during recording. A still has
@@ -669,9 +701,10 @@ bool TestSplitExecutionOrder(const char *mode) {
   // Actual copy -> split -> readback oracle, using a non-simultaneous texture
   // so the split contains a layout transition rather than only cache scopes.
   auto desc = TextureDesc();
-  D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprints[6] = {};
+  const UINT subresource_count = ranged ? 6 : 1;
   UINT64 size = 0;
-  device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr,
+  device->GetCopyableFootprints(&desc, 0, subresource_count, 0, footprints, nullptr, nullptr,
                                 &size);
   Owned<ID3D12Resource> upload, readback;
   auto buffer_desc = BufferDesc(size);
@@ -694,11 +727,18 @@ bool TestSplitExecutionOrder(const char *mode) {
   if (!CheckHR("probe upload Map", upload->Map(0, &no_read, &mapped)))
     return false;
   std::memset(mapped, 0x6d, static_cast<size_t>(size));
+  for (UINT index = 0; index < subresource_count; ++index) {
+    const auto &footprint = footprints[index];
+    for (UINT y = 0; y < footprint.Footprint.Height; ++y)
+      std::memset(static_cast<unsigned char *>(mapped) + footprint.Offset +
+                      y * footprint.Footprint.RowPitch,
+                  0x6d + index, footprint.Footprint.Width * 4);
+  }
   upload->Unmap(0, nullptr);
   D3D12_TEXTURE_COPY_LOCATION source = {}, target = {}, result = {};
   source.pResource = upload.ptr;
   source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-  source.PlacedFootprint = footprint;
+  source.PlacedFootprint = footprints[0];
   target.pResource = texture.ptr;
   target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
   result = source;
@@ -707,16 +747,32 @@ bool TestSplitExecutionOrder(const char *mode) {
     D3D12_RESOURCE_BARRIER initial = {};
     initial.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     initial.Transition.pResource = texture.ptr;
-    initial.Transition.Subresource = 0;
+    initial.Transition.Subresource = ranged ? D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES : 0;
     initial.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
     initial.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
     first.list->ResourceBarrier(1, &initial);
-    first.list->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+    for (UINT index = 0; index < subresource_count; ++index) {
+      source.PlacedFootprint = footprints[index];
+      target.SubresourceIndex = index;
+      first.list->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+    }
     split(first, true);
   };
   auto record_end = [&](SplitProbeList &list) {
+    if (disjoint_submit) {
+      D3D12_TEXTURE_BARRIER barrier;
+      SetTexture(barrier, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_COPY,
+                 D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_COPY_DEST,
+                 D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_COPY_DEST,
+                 texture.ptr, {1, 1, 0, 1, 0, 1});
+      SubmitBarrier(list.list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
+    }
     split(list, false);
-    list.list->CopyTextureRegion(&result, 0, 0, 0, &target, nullptr);
+    for (UINT index = 0; index < subresource_count; ++index) {
+      result.PlacedFootprint = footprints[index];
+      target.SubresourceIndex = index;
+      list.list->CopyTextureRegion(&result, 0, 0, 0, &target, nullptr);
+    }
   };
   if (end_only) {
     record_end(second);
@@ -823,9 +879,9 @@ bool TestSplitExecutionOrder(const char *mode) {
   } else {
     queue->ExecuteCommandLists(same || clear ? 1 : 2, lists);
   }
-  if (end_only) {
+  if (end_only || disjoint_submit) {
     const HRESULT hr = device->GetDeviceRemovedReason();
-    std::cout << "unmatched texture END admission status=0x" << std::hex
+    std::cout << "invalid split admission status=0x" << std::hex
               << static_cast<unsigned long>(hr) << std::dec << "\n";
     return hr == DXGI_ERROR_INVALID_CALL;
   }
@@ -841,19 +897,26 @@ bool TestSplitExecutionOrder(const char *mode) {
     return false;
   bool good = true;
   const auto *bytes = static_cast<const unsigned char *>(mapped);
-  for (UINT y = 0; y < desc.Height; y++)
-    for (UINT x = 0; x < desc.Width * 4; x++)
-      good &= bytes[footprint.Offset + y * footprint.Footprint.RowPitch + x] ==
-              0x6d;
+  for (UINT index = 0; index < subresource_count; ++index) {
+    const auto &footprint = footprints[index];
+    for (UINT y = 0; y < footprint.Footprint.Height; y++)
+      for (UINT x = 0; x < footprint.Footprint.Width * 4; x++)
+        good &= bytes[footprint.Offset + y * footprint.Footprint.RowPitch + x] ==
+                0x6d + index;
+  }
   readback->Unmap(0, &no_read);
   std::cout << "split mode=" << mode
-            << " GPU readback=" << (good ? "PASS" : "FAIL") << "\n";
+            << " GPU subresources=" << subresource_count
+            << " readback=" << (good ? "PASS" : "FAIL") << "\n";
   return good;
 }
 
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 3 && !std::strcmp(argv[1], "--split-order-probe") &&
+      !std::strcmp(argv[2], "pending-range-removal"))
+    return TestPendingTextureRemoval(true) ? 0 : 1;
   if (argc == 3 && !std::strcmp(argv[1], "--split-order-probe") &&
       !std::strcmp(argv[2], "pending-removal"))
     return TestPendingTextureRemoval() ? 0 : 1;

@@ -33,7 +33,7 @@ are no longer current defects. Preserve their original red results and costs.
 | InfoQueue COM identity/lifetime | `78f4e9eb`; embedded controlling identity and concurrent query/state test | Full debug-layer compatibility is not established |
 | InfoQueue messages/filters/limits/mute | `59ebde1b`, `b627f28d`; owned messages, filter stacks and 12 allocation rollback positions covered | Native counter/filter/default equivalence and persistent/global OOM NOT_RUN |
 | InfoQueue break/output | `6458896f`; stored controls, intercepted output/break and reentrant callbacks covered | Real OS debugger delivery NOT_RUN; not a complete Debug Layer |
-| Enhanced split execution order | N12 `a262662e`; submission-order pairing, recording/reset isolation, admission failure and lifetime coverage | Precise disjoint-range legality, cross-queue handoff, extended stress and performance acceptance OPEN; EnhancedBarriersSupported remains FALSE |
+| Enhanced split execution order | N12 `a262662e`; submission-order pairing, recording/reset isolation, admission failure and lifetime coverage; the N12 resource-order slice below corrects same-resource disjoint barrier acceptance | Cross-queue handoff, extended stress and performance acceptance OPEN; EnhancedBarriersSupported remains FALSE |
 | Format report/create/view/footprint consistency | N02/N08/N09 slices below; logical storage/view roles, BC sampling, RGB96 copies and typed UAV eligibility/readback have bounded evidence | Exhaustive format/planar/dimension/allocation coverage and native differential remain OPEN; additional typed-UAV Options remains FALSE |
 | Depth/stencil component MS_LOAD | `960ec7b0`, `4fe09340`, `1b74fa94`; sample-mask prerequisite, SM5/SM6 compute and pixel 2x/4x readbacks, four report bits corrected | 8x unsupported on this host; other devices/counts and native differential NOT_RUN; no full format/FL promotion |
 | Performance and deployment | Recorded matched-runtime AB/BA evidence, including N13 attribution controls | Historical recording/Submit warnings remain OPEN/INCONCLUSIVE; latest query improvement does not discharge them. Full no-private runtime and T3/T4 NOT_RUN |
@@ -47,10 +47,11 @@ capability, layout or scheduling. Build/GPU/performance reruns are NOT_RUN;
 commit ancestry, evidence-file existence and `git diff --check` are the checks.
 The user's `.gitignore` remains outside the commit.
 
-Next selected candidate: N12 precise split subresource-range contract, before
-any enhanced-barrier exposure. First reconcile the existing disjoint-range
-fixture with the normative contract; change production only for a demonstrated
-contradiction. Missing Windows/multi-device evidence remains explicitly missing,
+The selected N12 split subresource-range contract slice is recorded below;
+same-resource disjoint interleaving is invalid, while complete sequential pairs
+and a matched multi-subresource range remain valid. Cross-queue handoff is a
+separate remaining contract gate before any enhanced-barrier exposure.
+Missing Windows/multi-device evidence remains explicitly missing,
 and does not justify another unchanged local MS_LOAD or Submit timing matrix.
 
 ## Completed Slices
@@ -2413,6 +2414,56 @@ Evidence: `../dxmt-test/n02-msload-pixel-20261024/N02-msload-pixel.md`,
 `extra-lookup-trial`, official sources, commands and raw logs. Other devices,
 additional stages, full D24 quantization/filter/comparison/resolve semantics
 and native differential remain unverified. Overall Device/FL12_2 gates OPEN.
+
+### N12 — classic split ordering across subresource ranges, 2026-10-24
+
+Base f4dfb92d. Microsoft Enhanced Barriers / Split Barriers requires no other
+intervening barrier on the same resource. Disjoint subresources do not exempt
+classic split pairs from that rule. This closes the earlier normative ambiguity
+and supersedes the CPU-only disjoint positive candidate, not its historical log.
+Five same-PE baseline negative modes fail: interleaved BEGIN, ordinary disjoint
+transition, disjoint END, cross-list transition and cross-Execute transition.
+Candidate rejects them at Close/admission and all five pass.
+
+Existing transition validation now checks resource-level ordering once per
+original split_index group; expanded subresources remain part of one barrier.
+Normalized range/layout/access comparison moves out of the per-subresource loop.
+One pending-vector lookup serves both checks, except a reordered first range
+END may need a specific-subresource search. No second owner/state map, new
+production file, allocation, lock, encoder or scheduler. ABI/layout unchanged;
+six export names/ordinals match. Existing queue pending ownership is preserved.
+
+The existing enhanced runner adds legal sequential mip pairs and six-subresource
+GPU readback (3 mips x2 arrays, distinct values) within one Execute and across
+Execute/reset. Three-resource pending range removal exercises swap-reordered
+inherited entries and verifies GPU data. The single-lookup batch has27 expected
+exits:5 baseline red,14 targeted candidate,4 full runners,4 two-sided performance
+preflights. Final test-only range-removal/compiled-PE controls are separately
+recorded. Scoped builds and both changed-TU no-private syntax checks pass.
+Correctness verifies private loaded DLL/native paths and Metal validation1/1.
+Full no-private runtime/native Windows/D3D11 rendering/T3/T4 NOT_RUN.
+
+Final performance AB/BA/AB,18 processes, validation0/0/HUD1: median process
+p50/p95(us), split Close37.80/40.20->38.85/42.60(+2.78/+5.97%);
+split Submit91.05/121.60->92.65/163.50(+1.76/+34.46%);
+split total538.95/590.30->532.25/617.30(-1.24/+4.57%);
+ordinary recording3027.55/3122.30->3069.85/3141.70(+1.40/+0.62%);
+ordinary Submit109.55/142.40->110.35/142.60(+0.73/+0.14%).
+Split Submit paired p95 increases+11.30/+54.14/+32.98%, so performance acceptance
+remains OPEN. Retain the initial extra-lookup trial(+17.70% split Submit p95);
+one lookup did not eliminate the warning or establish its cause. No noise,
+speedup, universal no-regression or unavoidable-cost claim. Next performance
+work needs targeted split Submit phase attribution, not unchanged broad retries.
+
+Actual macOS27.0.1/Xcode27.1/M1Max/Apple7/MSC API4.0.1/Wine11/clang23.1.1.
+EnhancedBarriersSupported FALSE; FL/SM/Options/Tiers unchanged. Cross-queue
+handoff, full enhanced/legacy UAV/aliasing interaction, native differential and
+historical performance/Device gates remain OPEN. User .gitignore unchanged;
+local commit only. Evidence: `../dxmt-test/n12-split-ranges-20261024/`:
+`N12-split-ranges.md`, `design.txt`, `manifest.json`, `results.json`,
+`no-private.json`, `sources.json`, official HTML/text snapshot,
+`perf-identities.json`, `perf-results.json`, `perf-aggregate.json`,
+`extra-lookup-trial/`, scoped build logs and raw correctness/performance logs.
 
 ### Earlier validation notes
 

@@ -1417,6 +1417,7 @@ public:
     try {
       MTLD3D12Resource *previous_resource = nullptr;
       D3D12RecordedResourceStates::mapped_type *previous_states = nullptr;
+      const EnhancedSplitBarrier *previous_split = nullptr;
       for (const auto &transition : resource_state_transitions_) {
         auto *resource = transition.resource.ptr();
         // Consecutive events borrow the same authoritative validation entry.
@@ -1431,37 +1432,56 @@ public:
           previous_states = &it->second;
         }
         auto &current_states = *previous_states;
+        const auto *barrier = transition.split_index == std::numeric_limits<size_t>::max()
+                                  ? nullptr
+                                  : &enhanced_split_barriers_[transition.split_index];
+        // Classic split pairs cannot contain another barrier on the same
+        // resource, even on disjoint subresources. Check once per recorded
+        // barrier, not once per subresource in its normalized expansion.
+        const bool first_barrier_event = !barrier || barrier != previous_split;
+        auto pending = std::find_if(splits.begin(), splits.end(), [&](const auto &entry) {
+          return entry.barrier.resource == resource &&
+                 (first_barrier_event || entry.subresource == transition.subresource);
+        });
+        if (first_barrier_event) {
+          if (pending != splits.end()) {
+            if (!barrier || transition.split_begin)
+              return E_INVALIDARG;
+            const auto &begin = pending->barrier;
+            const auto &a = begin.subresources;
+            const auto &b = barrier->subresources;
+            if (a.IndexOrFirstMipLevel != b.IndexOrFirstMipLevel || a.NumMipLevels != b.NumMipLevels ||
+                a.FirstArraySlice != b.FirstArraySlice || a.NumArraySlices != b.NumArraySlices ||
+                a.FirstPlane != b.FirstPlane || a.NumPlanes != b.NumPlanes || begin.offset != barrier->offset ||
+                begin.size != barrier->size || begin.type != barrier->type ||
+                begin.layout_before != barrier->layout_before || begin.layout_after != barrier->layout_after ||
+                (!pending->inherited &&
+                 (begin.access_before != barrier->access_before || begin.access_after != barrier->access_after)))
+              return E_INVALIDARG;
+          }
+          // Swap-removal may have reordered an inherited multi-subresource
+          // pair. Reuse the resource lookup unless its first entry is another
+          // subresource of that same pair.
+          if (barrier && pending != splits.end() && pending->subresource != transition.subresource)
+            pending = std::find_if(splits.begin(), splits.end(), [&](const auto &entry) {
+              return entry.barrier.resource == resource && entry.subresource == transition.subresource;
+            });
+        }
+        previous_split = barrier;
         const auto apply = [&](UINT subresource) {
-          auto pending = std::find_if(splits.begin(), splits.end(), [&](const auto &entry) {
-            return entry.barrier.resource == resource && entry.subresource == subresource;
-          });
           if (transition.split_index != std::numeric_limits<size_t>::max()) {
-            const auto &barrier = enhanced_split_barriers_[transition.split_index];
             if (transition.split_begin) {
               if (pending != splits.end())
                 return false;
-              splits.push_back({barrier, subresource});
+              splits.push_back({*barrier, subresource});
             } else if (pending != splits.end()) {
-              const auto &begin = pending->barrier;
-              const auto &a = begin.subresources;
-              const auto &b = barrier.subresources;
-              if (a.IndexOrFirstMipLevel != b.IndexOrFirstMipLevel || a.NumMipLevels != b.NumMipLevels ||
-                  a.FirstArraySlice != b.FirstArraySlice || a.NumArraySlices != b.NumArraySlices ||
-                  a.FirstPlane != b.FirstPlane || a.NumPlanes != b.NumPlanes || begin.offset != barrier.offset ||
-                  begin.size != barrier.size)
-                return false;
-              if (begin.type != barrier.type || begin.layout_before != barrier.layout_before ||
-                  begin.layout_after != barrier.layout_after ||
-                  (!pending->inherited &&
-                   (begin.access_before != barrier.access_before || begin.access_after != barrier.access_after)))
-                return false;
               // Pending entries are keyed by resource/subresource, not vector
               // order. Preserve event order without shifting unrelated owners.
               if (pending != splits.end() - 1)
                 *pending = std::move(splits.back());
               splits.pop_back();
             } else if (
-                !validation.local_only && barrier.type == EnhancedSplitBarrierType::Texture &&
+                !validation.local_only && barrier->type == EnhancedSplitBarrierType::Texture &&
                 !(resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)
             ) {
               WARN(
