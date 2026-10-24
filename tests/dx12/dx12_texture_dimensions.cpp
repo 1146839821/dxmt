@@ -107,9 +107,10 @@ bool CreateUploadedTexture(
     ID3D12Device *device, const D3D12_RESOURCE_DESC &desc, UINT value, Owned<ID3D12Resource> &texture,
     Owned<ID3D12Resource> &upload, std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> &footprints
 ) {
-  const UINT subresource_count = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
-                                     ? 1
-                                     : static_cast<UINT>(desc.DepthOrArraySize);
+  const UINT subresource_count =
+      desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+          ? 1
+          : static_cast<UINT>(desc.DepthOrArraySize) * desc.MipLevels;
   std::vector<UINT> row_counts(subresource_count);
   std::vector<UINT64> row_sizes(subresource_count);
   UINT64 total_size = 0;
@@ -137,14 +138,44 @@ bool CreateUploadedTexture(
     return false;
   std::memset(mapped, 0, static_cast<size_t>(upload_desc.Width));
   const UINT pixel = value | 0xff000000u;
+  const bool bc1 = desc.Format == DXGI_FORMAT_BC1_UNORM ||
+                   desc.Format == DXGI_FORMAT_BC1_UNORM_SRGB ||
+                   desc.Format == DXGI_FORMAT_BC1_TYPELESS;
+  const bool bc3 = desc.Format == DXGI_FORMAT_BC3_UNORM ||
+                   desc.Format == DXGI_FORMAT_BC3_UNORM_SRGB ||
+                   desc.Format == DXGI_FORMAT_BC3_TYPELESS;
   for (UINT subresource = 0; subresource < subresource_count; subresource++) {
     const auto &footprint = footprints[subresource].Footprint;
     BYTE *destination = static_cast<BYTE *>(mapped) + footprints[subresource].Offset;
     for (UINT depth = 0; depth < footprint.Depth; depth++) {
       BYTE *slice = destination + static_cast<size_t>(depth) * footprint.RowPitch * row_counts[subresource];
       for (UINT row = 0; row < row_counts[subresource]; row++)
-        if (desc.Format == DXGI_FORMAT_R32G32B32_FLOAT ||
-            desc.Format == DXGI_FORMAT_R32G32B32_TYPELESS) {
+        if (bc1 || bc3) {
+          // Uniform blocks with distinct endpoints across blocks, mips and
+          // layers. The existing fixture value is 11 * (descriptor slot + 1).
+          // BC1 indices select RGB565 endpoint0; BC3 also selects alpha
+          // endpoint0.
+          const UINT block_bytes = bc3 ? 16 : 8;
+          for (UINT column = 0; column < (footprint.Width + 3) / 4; column++) {
+            BYTE *block = slice +
+                          static_cast<size_t>(row) * footprint.RowPitch +
+                          column * block_bytes;
+            const UINT layer = subresource / desc.MipLevels;
+            const UINT mip = subresource % desc.MipLevels;
+            const UINT red =
+                4 +
+                (value / 11 - 1 + layer + 3 * mip + 5 * column + 7 * row) % 24;
+            const uint16_t endpoint =
+                static_cast<uint16_t>((red << 11) | (17 << 5) | 23);
+            if (bc3) {
+              block[0] = static_cast<BYTE>(96 + 7 * layer + mip);
+              block[1] = 17;
+              block += 8;
+            }
+            std::memcpy(block, &endpoint, sizeof(endpoint));
+          }
+        } else if (desc.Format == DXGI_FORMAT_R32G32B32_FLOAT ||
+                   desc.Format == DXGI_FORMAT_R32G32B32_TYPELESS) {
           const float rgb[] = {value / 255.0f, 0.25f, 0.75f};
           std::memcpy(slice + static_cast<size_t>(row) * footprint.RowPitch,
                       rgb, sizeof(rgb));
@@ -219,13 +250,32 @@ int main(int argc, char **argv) {
   const bool depth_stencil_ms = stencil_ms || depth_ms;
   const bool rgb96 = argc == 3 && (!std::strcmp(argv[2], "--rgb96") ||
                                    !std::strcmp(argv[2], "--rgb96-typeless"));
+  const bool bc1 = argc == 3 && (!std::strcmp(argv[2], "--bc1") ||
+                                 !std::strcmp(argv[2], "--bc1-srgb") ||
+                                 !std::strcmp(argv[2], "--bc1-srgb-typeless") ||
+                                 !std::strcmp(argv[2], "--bc1-typeless"));
+  const bool bc3 = argc == 3 && (!std::strcmp(argv[2], "--bc3") ||
+                                 !std::strcmp(argv[2], "--bc3-srgb") ||
+                                 !std::strcmp(argv[2], "--bc3-srgb-typeless") ||
+                                 !std::strcmp(argv[2], "--bc3-typeless"));
+  const bool bc = bc1 || bc3;
+  const bool srgb = bc && (!std::strcmp(argv[2], "--bc1-srgb") ||
+                           !std::strcmp(argv[2], "--bc3-srgb") ||
+                           !std::strcmp(argv[2], "--bc1-srgb-typeless") ||
+                           !std::strcmp(argv[2], "--bc3-srgb-typeless"));
   const bool typeless =
       argc == 3 && (!std::strcmp(argv[2], "--typeless") ||
-                    !std::strcmp(argv[2], "--rgb96-typeless"));
-  if (argc != 2 && !typeless && !rgb96 && !depth_stencil_ms) {
+                    !std::strcmp(argv[2], "--rgb96-typeless") ||
+                    !std::strcmp(argv[2], "--bc1-typeless") ||
+                    !std::strcmp(argv[2], "--bc3-typeless") ||
+                    !std::strcmp(argv[2], "--bc1-srgb-typeless") ||
+                    !std::strcmp(argv[2], "--bc3-srgb-typeless"));
+  if (argc != 2 && !typeless && !rgb96 && !depth_stencil_ms && !bc) {
     std::cerr << "usage: dx12_texture_dimensions <shader.cso> "
                  "[--typeless|--rgb96|--rgb96-typeless|--stencil-ms|"
-                 "--stencil-ms-reversed|--depth-ms|--depth-ms-reversed]\n";
+                 "--stencil-ms-reversed|--depth-ms|--depth-ms-reversed|"
+                 "--bc1|--bc1-srgb|--bc1-typeless|--bc1-srgb-typeless|"
+                 "--bc3|--bc3-srgb|--bc3-typeless|--bc3-srgb-typeless]\n";
     return 2;
   }
 
@@ -359,6 +409,32 @@ int main(int argc, char **argv) {
   texture_descs[8].Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
   texture_descs[8].DepthOrArraySize = 2;
 
+  const DXGI_FORMAT bc_view =
+      bc3 ? (srgb ? DXGI_FORMAT_BC3_UNORM_SRGB : DXGI_FORMAT_BC3_UNORM)
+          : (srgb ? DXGI_FORMAT_BC1_UNORM_SRGB : DXGI_FORMAT_BC1_UNORM);
+  if (bc) {
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {bc_view};
+    const UINT required =
+        D3D12_FORMAT_SUPPORT1_TEXTURE2D | D3D12_FORMAT_SUPPORT1_TEXTURECUBE |
+        D3D12_FORMAT_SUPPORT1_MIP | D3D12_FORMAT_SUPPORT1_SHADER_LOAD |
+        D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE;
+    if (!CheckHR("BCFormatSupport",
+                 device.ptr->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                                                 &support, sizeof(support))) ||
+        (support.Support1 & required) != required) {
+      std::cerr << "BC sampling capabilities missing for format " << bc_view
+                << "\n";
+      return 1;
+    }
+    for (UINT i = 2; i <= 5; i++) {
+      texture_descs[i].Width = texture_descs[i].Height = 8;
+      texture_descs[i].MipLevels = 4;
+      texture_descs[i].Format =
+          typeless ? (bc3 ? DXGI_FORMAT_BC3_TYPELESS : DXGI_FORMAT_BC1_TYPELESS)
+                   : bc_view;
+    }
+  }
+
   for (UINT i = 0; i < 9; i++) {
     if (i == 6 || i == 7) {
       clear_value = {};
@@ -398,6 +474,17 @@ int main(int argc, char **argv) {
                                  : (d24 ? DXGI_FORMAT_X24_TYPELESS_G8_UINT
                                         : DXGI_FORMAT_X32_TYPELESS_G8X24_UINT);
     }
+    if (bc && i >= 2 && i <= 5) {
+      srv_desc.Format = bc_view;
+      if (i == 2)
+        srv_desc.Texture2D.MipLevels = 4;
+      else if (i == 3)
+        srv_desc.Texture2DArray.MipLevels = 4;
+      else if (i == 4)
+        srv_desc.TextureCube.MipLevels = 4;
+      else
+        srv_desc.TextureCubeArray.MipLevels = 4;
+    }
     if (rgb96) {
       srv_desc.Format = DXGI_FORMAT_R32G32B32_FLOAT;
       if (i == 2)
@@ -421,8 +508,8 @@ int main(int argc, char **argv) {
     return 1;
   device.ptr->CreateUnorderedAccessView(output.ptr, nullptr, &uav_desc, output_cpu);
 
-  sampler_desc.Filter = typeless ? D3D12_FILTER_MIN_MAG_MIP_LINEAR
-                                 : D3D12_FILTER_MIN_MAG_MIP_POINT;
+  sampler_desc.Filter = (typeless || bc) ? D3D12_FILTER_MIN_MAG_MIP_LINEAR
+                                         : D3D12_FILTER_MIN_MAG_MIP_POINT;
   sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
   sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
   sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -497,9 +584,11 @@ int main(int argc, char **argv) {
       list.ptr->ResourceBarrier(1, &barrier);
       continue;
     }
-    const UINT subresource_count = texture_descs[i].Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
-                                       ? 1
-                                       : static_cast<UINT>(texture_descs[i].DepthOrArraySize);
+    const UINT subresource_count =
+        texture_descs[i].Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+            ? 1
+            : static_cast<UINT>(texture_descs[i].DepthOrArraySize) *
+                  texture_descs[i].MipLevels;
     for (UINT subresource = 0; subresource < subresource_count; subresource++) {
       D3D12_TEXTURE_COPY_LOCATION destination = {};
       destination.pResource = textures[i].ptr;
@@ -549,10 +638,11 @@ int main(int argc, char **argv) {
     }
   }
   readback.ptr->Unmap(0, nullptr);
+  std::cout << "bc=" << bc << " bc3=" << bc3 << " srgb=" << srgb << "\n";
   std::cout << "depth_ms=" << depth_ms << " reversed=" << reversed
-            << " stencil_ms=" << stencil_ms << " rgb96=" << rgb96 << " storage="
-            << (typeless ? "typeless filter=linear" : "typed filter=point")
-            << "\n";
+            << " stencil_ms=" << stencil_ms << " rgb96=" << rgb96
+            << " storage=" << (typeless ? "typeless" : "typed")
+            << " filter=" << ((typeless || bc) ? "linear" : "point") << "\n";
   std::cout << "DXIL texture dimensions readback passed: 11,22,33,44,55,66,77,88,99\n";
   result = true;
   return result ? 0 : 1;

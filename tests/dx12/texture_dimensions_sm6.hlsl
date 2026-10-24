@@ -1,3 +1,4 @@
+// BC_TEST selects BC1; add BC3_TEST and/or BC_SRGB to match the runner mode.
 Texture1D<float4> texture_1d : register(t0);
 Texture1DArray<float4> texture_1d_array : register(t1);
 Texture2D<float4> texture_2d : register(t2);
@@ -43,10 +44,103 @@ uint MSValue(float4 value, uint index) {
 }
 #endif
 
+#ifdef BC_TEST
+float4 BCExpected(uint index, uint layer, uint mip, uint block_x) {
+  uint red = 4 + (index + layer + 3 * mip + 5 * block_x) % 24;
+  // Decode endpoint0. A small tolerance permits hardware endpoint precision.
+  float3 rgb = float3((red << 3) | (red >> 2), (17 << 2) | (17 >> 4),
+                      (23 << 3) | (23 >> 2)) /
+               255.0;
+#ifdef BC_SRGB
+  // All chosen endpoint channels exceed the sRGB linear-segment threshold.
+  rgb = pow((rgb + 0.055) / 1.055, 2.4);
+#endif
+#ifdef BC3_TEST
+  float alpha = (96.0 + 7.0 * layer + mip) / 255.0;
+#else
+  float alpha = 1.0;
+#endif
+  return float4(rgb, alpha);
+}
+
+bool BCEqual(float4 actual, float4 expected) {
+  return all(abs(actual - expected) < 0.006);
+}
+
+float3 CubeDirection(uint face, float2 uv) {
+  float2 p = 2.0 * uv - 1.0;
+  switch (face) {
+  case 0:
+    return float3(1, -p.y, -p.x);
+  case 1:
+    return float3(-1, -p.y, p.x);
+  case 2:
+    return float3(p.x, 1, p.y);
+  case 3:
+    return float3(p.x, -1, -p.y);
+  case 4:
+    return float3(p.x, -p.y, 1);
+  default:
+    return float3(-p.x, -p.y, -1);
+  }
+}
+
+bool CheckBC(uint index) {
+  const uint layers = index == 2 ? 1 : index == 3 ? 2 : index == 4 ? 6 : 12;
+  for (uint layer = 0; layer < layers; layer++) {
+    for (uint mip = 0; mip < 4; mip++) {
+      float4 expected = BCExpected(index, layer, mip, 0);
+      float2 uv = mip == 3 ? float2(0.5, 0.5) : float2(0.25, 0.25);
+      float4 actual;
+      if (index == 2) {
+        actual = texture_2d.SampleLevel(texture_sampler, uv, mip);
+        if (!BCEqual(texture_2d.Load(int3(0, 0, mip)), expected))
+          return false;
+      } else if (index == 3) {
+        actual = texture_2d_array.SampleLevel(texture_sampler,
+                                              float3(uv, layer), mip);
+        if (!BCEqual(texture_2d_array.Load(int4(0, 0, layer, mip)), expected))
+          return false;
+      } else if (index == 4) {
+        actual = texture_cube.SampleLevel(texture_sampler,
+                                          CubeDirection(layer, uv), mip);
+      } else {
+        actual = texture_cube_array.SampleLevel(
+            texture_sampler, float4(CubeDirection(layer % 6, uv), layer / 6),
+            mip);
+      }
+      if (!BCEqual(actual, expected))
+        return false;
+    }
+    // At the base-mip block boundary, linear filtering must mix two distinct
+    // decoded blocks. For sRGB views decoding precedes the average.
+    float4 midpoint =
+        0.5 * (BCExpected(index, layer, 0, 0) + BCExpected(index, layer, 0, 1));
+    float4 filtered;
+    if (index == 2)
+      filtered = texture_2d.SampleLevel(texture_sampler, float2(0.5, 0.25), 0);
+    else if (index == 3)
+      filtered = texture_2d_array.SampleLevel(texture_sampler,
+                                              float3(0.5, 0.25, layer), 0);
+    else if (index == 4)
+      filtered = texture_cube.SampleLevel(
+          texture_sampler, CubeDirection(layer, float2(0.5, 0.25)), 0);
+    else
+      filtered = texture_cube_array.SampleLevel(
+          texture_sampler,
+          float4(CubeDirection(layer % 6, float2(0.5, 0.25)), layer / 6), 0);
+    if (!BCEqual(filtered, midpoint))
+      return false;
+  }
+  return true;
+}
+#endif
+
 [numthreads(1, 1, 1)] void main() {
   output[0] = ToByte(texture_1d.SampleLevel(texture_sampler, 0.5, 0.0), 0);
   output[1] = ToByte(
       texture_1d_array.SampleLevel(texture_sampler, float2(0.5, 1.0), 0.0), 1);
+#ifndef BC_TEST
   output[2] =
       ToByte(texture_2d.SampleLevel(texture_sampler, float2(0.5, 0.5), 0.0), 2);
   output[3] = ToByte(
@@ -57,6 +151,10 @@ uint MSValue(float4 value, uint index) {
   output[5] = ToByte(texture_cube_array.SampleLevel(
                          texture_sampler, float4(0.0, 0.0, 1.0, 1.0), 0.0),
                      5);
+#else
+  for (uint index = 2; index <= 5; index++)
+    output[index] = CheckBC(index) ? 11 * (index + 1) : 0;
+#endif
   output[6] = MSValue(texture_ms.Load(int2(0, 0), 0), 6);
   output[7] = MSValue(texture_ms_array.Load(int3(0, 0, 1), 0), 7);
   // Check every sample and both array layers, not just sample zero.

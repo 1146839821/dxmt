@@ -1820,6 +1820,37 @@ Evidence: `../dxmt-test/n13-feature-query-layout-20261024/`
 `probe-source.json`, `validation-results.json`, `perf-aggregate.json`,
 `paired-comparisons.json`, and isolated native load logs.
 
+### N02 — BC1/BC3 mip, cube and sRGB GPU sampling, 2026-10-24
+
+Base72b28001; Device format-consistency evidence slice. Extend only existing
+texture-dimensions C++/HLSL fixture: BC1/BC3 typed/typeless storage crossed
+with UNORM/SRGB typed SRVs (8 modes). Four2D/cube dimensions, four mips8/4/2/1,
+all array layers/cube faces:84 subresources per mode. Distinct RGB565 block
+endpoint0 values and BC3 alpha endpoint0 are checked as float4, tolerance0.006.
+Per mode105 SampleLevel comparisons (84 mip/layer plus21 cross-block linear
+midpoints) and12 2D/array Load checks. SRGB RGB conversion precedes averaging;
+alpha stays linear. Integer LOD selection only; no trilinear claim.
+
+Final14 runtime processes have expected outcomes:8 BC modes and ordinary/
+typeless/depth-MS GPU controls exit0 with exact nine-word readbacks11..99;
+format54 checks pass; two deliberately wrong mip/sRGB shader oracles exit1
+at dimension2 (0 versus33). Exact immutable staged DLL de0751e8... and Metal
+API/GPU Validation verified. Eight current shader fixtures compile; scoped
+Meson build and changed-test-TU no-private syntax exit0. Initial target/PATH
+build failures and escaped-log-path verifier correction retained externally.
+
+Selected advertised format operations show no contradiction in this workload;
+no production defect claimed fixed or capability promoted. BC transparent/
+other palette selectors, BC2/4/5/6H/7,3D,full placed/view matrix, fractional LOD,
+cube seams, native Windows, full no-private runtime and T3/T4 NOT_RUN.
+No source/header added, production state/cache/table, ABI, layout or scheduling
+change. Performance NOT_RUN with unchanged runtime DLL; historical recording/
+submit and Device/FL12_2 gates OPEN. Actual macOS27.0.1/Xcode27.1/M1Max/
+Apple7/MSC4.0.1/Wine11/clang23.1.1. User .gitignore unchanged.
+Evidence: `../dxmt-test/n02-bc-sampling-20261024/N02-bc-sampling.md`,
+`manifest.json`, `results.json`, `shader-builds.json`, `no-private.json`,
+`machine.json`, `sources.json` and native-load/validation logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
