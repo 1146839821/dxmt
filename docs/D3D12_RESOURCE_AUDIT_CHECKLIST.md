@@ -1851,6 +1851,35 @@ Evidence: `../dxmt-test/n02-bc-sampling-20261024/N02-bc-sampling.md`,
 `manifest.json`, `results.json`, `shader-builds.json`, `no-private.json`,
 `machine.json`, `sources.json` and native-load/validation logs.
 
+### N02 — BC volume mip and Z-slice GPU evidence, 2026-10-24
+
+Basec81b2b8b. Existing texture-dimensions helper/fixture now uses volume mip
+count (not array-layer count) for3D subresources. BC slot8 is8x8x4 with four
+mips, typed/typeless and UNORM/SRGB; distinct RGB/BC3 alpha by Z. Four volume
+subresources have depths4/2/1/1:8 slices, each Load+Sample checked, plus one
+base-mip Z-midpoint interpolation per mode. Previous2D/cube assertions stay.
+
+Apple archive excludes compressed3D, while pinned modern Dawn Metal backend
+74e2c29bb92632dbf7fd6fa0f5bb8ea6ec55b5af enables BC sliced3D behind native
+BC support. Neither reference alone proves DXMT behavior. Actual8 BC1/BC3
+GPU mode successes reject an unsupported-everywhere premise on this machine;
+no speculative support reduction or upstream implementation copying.
+
+Final13 processes:8 BC modes plus ordinary/typeless/depth-MS GPU controls
+pass exact11..99; format54 checks pass; wrong expected Z(z+1) shader exits1
+at dimension8(0 expected99). Seven final shaders, scoped Meson build and
+changed-test-TU no-private syntax exit0. Immutable native DLL de0751e8...,
+final staged runner identity and Metal API/GPU validation verified. Selected
+BC3D evidence advances from NOT_RUN to locally GPU_VERIFIED; no full format
+or Device gate closes. No runtime source/header/state/cache/table/ABI/layout/
+scheduling or FL/SM/Options/Tier change. Performance NOT_RUN; prior gates OPEN.
+Other BC selectors/formats, sparse/placed permutations, fractional LOD, native
+Windows, full no-private runtime, D3D11 rendering and T3/T4 remain NOT_RUN.
+Actual macOS27.0.1/Xcode27.1/M1Max/Apple7/MSC4.0.1/Wine11/clang23.1.1.
+Evidence: `../dxmt-test/n02-bc-volume-20261024/N02-bc-volume.md`,
+`manifest.json`, `results.json`, `shader-builds.json`, `no-private.json`,
+`sources.json`, pinned source snapshots and native-load/validation logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

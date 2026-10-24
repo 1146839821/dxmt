@@ -109,7 +109,7 @@ bool CreateUploadedTexture(
 ) {
   const UINT subresource_count =
       desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
-          ? 1
+          ? desc.MipLevels
           : static_cast<UINT>(desc.DepthOrArraySize) * desc.MipLevels;
   std::vector<UINT> row_counts(subresource_count);
   std::vector<UINT64> row_sizes(subresource_count);
@@ -162,13 +162,13 @@ bool CreateUploadedTexture(
                           column * block_bytes;
             const UINT layer = subresource / desc.MipLevels;
             const UINT mip = subresource % desc.MipLevels;
-            const UINT red =
-                4 +
-                (value / 11 - 1 + layer + 3 * mip + 5 * column + 7 * row) % 24;
+            const UINT red = 4 + (value / 11 - 1 + layer + depth + 3 * mip +
+                                  5 * column + 7 * row) %
+                                     24;
             const uint16_t endpoint =
                 static_cast<uint16_t>((red << 11) | (17 << 5) | 23);
             if (bc3) {
-              block[0] = static_cast<BYTE>(96 + 7 * layer + mip);
+              block[0] = static_cast<BYTE>(96 + 7 * (layer + depth) + mip);
               block[1] = 17;
               block += 8;
             }
@@ -415,9 +415,9 @@ int main(int argc, char **argv) {
   if (bc) {
     D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {bc_view};
     const UINT required =
-        D3D12_FORMAT_SUPPORT1_TEXTURE2D | D3D12_FORMAT_SUPPORT1_TEXTURECUBE |
-        D3D12_FORMAT_SUPPORT1_MIP | D3D12_FORMAT_SUPPORT1_SHADER_LOAD |
-        D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE;
+        D3D12_FORMAT_SUPPORT1_TEXTURE2D | D3D12_FORMAT_SUPPORT1_TEXTURE3D |
+        D3D12_FORMAT_SUPPORT1_TEXTURECUBE | D3D12_FORMAT_SUPPORT1_MIP |
+        D3D12_FORMAT_SUPPORT1_SHADER_LOAD | D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE;
     if (!CheckHR("BCFormatSupport",
                  device.ptr->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
                                                  &support, sizeof(support))) ||
@@ -426,9 +426,11 @@ int main(int argc, char **argv) {
                 << "\n";
       return 1;
     }
-    for (UINT i = 2; i <= 5; i++) {
+    for (UINT i : {2u, 3u, 4u, 5u, 8u}) {
       texture_descs[i].Width = texture_descs[i].Height = 8;
       texture_descs[i].MipLevels = 4;
+      if (i == 8)
+        texture_descs[i].DepthOrArraySize = 4;
       texture_descs[i].Format =
           typeless ? (bc3 ? DXGI_FORMAT_BC3_TYPELESS : DXGI_FORMAT_BC1_TYPELESS)
                    : bc_view;
@@ -474,7 +476,7 @@ int main(int argc, char **argv) {
                                  : (d24 ? DXGI_FORMAT_X24_TYPELESS_G8_UINT
                                         : DXGI_FORMAT_X32_TYPELESS_G8X24_UINT);
     }
-    if (bc && i >= 2 && i <= 5) {
+    if (bc && ((i >= 2 && i <= 5) || i == 8)) {
       srv_desc.Format = bc_view;
       if (i == 2)
         srv_desc.Texture2D.MipLevels = 4;
@@ -482,8 +484,10 @@ int main(int argc, char **argv) {
         srv_desc.Texture2DArray.MipLevels = 4;
       else if (i == 4)
         srv_desc.TextureCube.MipLevels = 4;
-      else
+      else if (i == 5)
         srv_desc.TextureCubeArray.MipLevels = 4;
+      else
+        srv_desc.Texture3D.MipLevels = 4;
     }
     if (rgb96) {
       srv_desc.Format = DXGI_FORMAT_R32G32B32_FLOAT;
@@ -586,7 +590,7 @@ int main(int argc, char **argv) {
     }
     const UINT subresource_count =
         texture_descs[i].Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
-            ? 1
+            ? texture_descs[i].MipLevels
             : static_cast<UINT>(texture_descs[i].DepthOrArraySize) *
                   texture_descs[i].MipLevels;
     for (UINT subresource = 0; subresource < subresource_count; subresource++) {

@@ -85,6 +85,25 @@ float3 CubeDirection(uint face, float2 uv) {
   }
 }
 
+bool CheckBCVolume() {
+  for (uint mip = 0; mip < 4; mip++) {
+    uint depth = max(1u, 4u >> mip);
+    for (uint z = 0; z < depth; z++) {
+      // The upload varies Z like an array layer, while mip depth shrinks.
+      float4 expected = BCExpected(8, z, mip, 0);
+      float3 uvw = float3(0.25, 0.25, (z + 0.5) / depth);
+      if (!BCEqual(texture_3d.Load(int4(0, 0, z, mip)), expected) ||
+          !BCEqual(texture_3d.SampleLevel(texture_sampler, uvw, mip), expected))
+        return false;
+    }
+  }
+  // Texture3D linear filtering also mixes adjacent depth slices.
+  float4 z_midpoint = 0.5 * (BCExpected(8, 0, 0, 0) + BCExpected(8, 1, 0, 0));
+  return BCEqual(
+      texture_3d.SampleLevel(texture_sampler, float3(0.25, 0.25, 0.25), 0),
+      z_midpoint);
+}
+
 bool CheckBC(uint index) {
   const uint layers = index == 2 ? 1 : index == 3 ? 2 : index == 4 ? 6 : 12;
   for (uint layer = 0; layer < layers; layer++) {
@@ -165,8 +184,12 @@ bool CheckBC(uint index) {
       if (MSValue(texture_ms_array.Load(int3(0, 0, layer), sample), 7) != 88)
         output[7] = 0;
   }
+#ifdef BC_TEST
+  output[8] = CheckBCVolume() ? 99 : 0;
+#else
   output[8] = ToByte(
       texture_3d.SampleLevel(texture_sampler, float3(0.5, 0.5, 0.5), 0.0), 8);
+#endif
 #ifdef RGB96
   // Loads also check all components, including default alpha and custom
   // mapping.
