@@ -608,23 +608,30 @@ SupportsTextureDimension(const MTL_DXGI_FORMAT_DESC &Format, D3D12_RESOURCE_DIME
 
 HRESULT
 ValidateTextureResourceDesc(const D3D12_RESOURCE_DESC &Desc) {
-  if (Desc.Format == DXGI_FORMAT_UNKNOWN || !Desc.Width || Desc.Width > std::numeric_limits<UINT>::max() ||
-      !Desc.Height || !Desc.DepthOrArraySize || !Desc.SampleDesc.Count)
+  if (Desc.Format == DXGI_FORMAT_UNKNOWN || !Desc.Width || !Desc.Height || !Desc.DepthOrArraySize ||
+      !Desc.SampleDesc.Count)
     return E_INVALIDARG;
 
   switch (Desc.Dimension) {
   case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
-    if (Desc.Height != 1 || Desc.SampleDesc.Count != 1 || Desc.SampleDesc.Quality != 0)
+    if (Desc.Width > D3D12_REQ_TEXTURE1D_U_DIMENSION ||
+        Desc.DepthOrArraySize > D3D12_REQ_TEXTURE1D_ARRAY_AXIS_DIMENSION || Desc.Height != 1 ||
+        Desc.SampleDesc.Count != 1 || Desc.SampleDesc.Quality != 0)
       return E_INVALIDARG;
     break;
   case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+    if (Desc.Width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION || Desc.Height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+        Desc.DepthOrArraySize > D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION)
+      return E_INVALIDARG;
     if (Desc.SampleDesc.Count == 1 && Desc.SampleDesc.Quality != 0)
       return E_INVALIDARG;
     if (Desc.SampleDesc.Count > 1 && (Desc.MipLevels != 1 || Desc.SampleDesc.Quality != 0))
       return E_INVALIDARG;
     break;
   case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
-    if (Desc.SampleDesc.Count != 1 || Desc.SampleDesc.Quality != 0)
+    if (Desc.Width > D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION || Desc.Height > D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION ||
+        Desc.DepthOrArraySize > D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION || Desc.SampleDesc.Count != 1 ||
+        Desc.SampleDesc.Quality != 0)
       return E_INVALIDARG;
     break;
   default:

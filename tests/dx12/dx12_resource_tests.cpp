@@ -608,12 +608,13 @@ bool CheckTextureFormatDimensions(ID3D12Device *device, bool footprints_only) {
   bool good = true;
   UINT cases = 0;
   const auto check = [&](DXGI_FORMAT format, D3D12_RESOURCE_DIMENSION dimension,
-                         D3D12_RESOURCE_FLAGS flags) {
+                         D3D12_RESOURCE_FLAGS flags, UINT width = 4,
+                         UINT height = 0, UINT depth_or_array = 0) {
     D3D12_RESOURCE_DESC desc = {};
     desc.Dimension = dimension;
-    desc.Width = 4;
-    desc.Height = dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D ? 1 : 4;
-    desc.DepthOrArraySize =
+    desc.Width = width;
+    desc.Height = height ? height : dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D ? 1 : 4;
+    desc.DepthOrArraySize = depth_or_array ? depth_or_array :
         dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 2 : 1;
     desc.MipLevels = desc.SampleDesc.Count = 1;
     desc.Format = format;
@@ -672,12 +673,15 @@ bool CheckTextureFormatDimensions(ID3D12Device *device, bool footprints_only) {
           &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resource));
       // Reserved 1D/3D remains an existing unsupported path, not newly
       // advertised support.
-      pass &= reserved_hr == E_NOTIMPL && !resource;
+      pass &= reserved_hr == (dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D ? E_INVALIDARG : E_NOTIMPL) &&
+              !resource;
       if (resource)
         resource->Release();
     }
     std::cout << "format-dimension format=" << format
               << " dimension=" << dimension << " flags=" << flags
+              << " width=" << desc.Width << " height=" << desc.Height
+              << " depth_or_array=" << desc.DepthOrArraySize
               << " metadata_only=" << footprints_only << " pass=" << pass
               << "\n";
     good &= pass;
@@ -701,6 +705,48 @@ bool CheckTextureFormatDimensions(ID3D12Device *device, bool footprints_only) {
   for (const auto format : {DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R16_TYPELESS})
     check(format, D3D12_RESOURCE_DIMENSION_TEXTURE3D,
           D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  struct ExtentCase {
+    D3D12_RESOURCE_DIMENSION dimension;
+    UINT width, height, depth_or_array;
+  };
+  // Each maximum is exercised independently, with small remaining dimensions.
+  const ExtentCase boundaries[] = {
+      {D3D12_RESOURCE_DIMENSION_TEXTURE1D, D3D12_REQ_TEXTURE1D_U_DIMENSION, 1, 1},
+      {D3D12_RESOURCE_DIMENSION_TEXTURE1D, 1, 1, D3D12_REQ_TEXTURE1D_ARRAY_AXIS_DIMENSION},
+      {D3D12_RESOURCE_DIMENSION_TEXTURE2D, D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION, 1, 1},
+      {D3D12_RESOURCE_DIMENSION_TEXTURE2D, 1, D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION, 1},
+      {D3D12_RESOURCE_DIMENSION_TEXTURE2D, 1, 1, D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION},
+      {D3D12_RESOURCE_DIMENSION_TEXTURE3D, D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION, 1, 1},
+      {D3D12_RESOURCE_DIMENSION_TEXTURE3D, 1, D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION, 1},
+      {D3D12_RESOURCE_DIMENSION_TEXTURE3D, 1, 1, D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION},
+  };
+  for (const auto &boundary : boundaries) {
+    check(DXGI_FORMAT_R8G8B8A8_UNORM, boundary.dimension, D3D12_RESOURCE_FLAG_NONE,
+          boundary.width + (boundary.width > 1),
+          boundary.height + (boundary.height > 1),
+          boundary.depth_or_array + (boundary.depth_or_array > 1));
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = boundary.dimension;
+    desc.Width = boundary.width;
+    desc.Height = boundary.height;
+    desc.DepthOrArraySize = boundary.depth_or_array;
+    desc.MipLevels = desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout = {};
+    UINT rows = 0;
+    UINT64 row_size = 0, total = UINT64_MAX;
+    device->GetCopyableFootprints(&desc, 0, 1, 0, &layout, &rows, &row_size, &total);
+    const bool pass = total != UINT64_MAX && total > 0 && layout.Offset == 0 &&
+                      layout.Footprint.Width == boundary.width &&
+                      layout.Footprint.Height == boundary.height && rows == boundary.height &&
+                      layout.Footprint.Depth == (boundary.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                                                    ? boundary.depth_or_array : 1) &&
+                      row_size == UINT64(boundary.width) * 4;
+    std::cout << "extent-boundary dimension=" << boundary.dimension
+              << " width=" << boundary.width << " height=" << boundary.height
+              << " depth_or_array=" << boundary.depth_or_array << " pass=" << pass << "\n";
+    good &= pass;
+  }
   // Preserve logical footprints for valid 1D depth and flagless typeless/color
   // volumes.
   for (const auto format : {DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_R32_TYPELESS,
@@ -724,7 +770,7 @@ bool CheckTextureFormatDimensions(ID3D12Device *device, bool footprints_only) {
             row_size == (format == DXGI_FORMAT_R32G32B32A32_FLOAT ? 64 : 16);
   }
   std::cout << "format-dimension cases=" << cases
-            << " positive_footprints=3 pass=" << good << "\n";
+            << " positive_footprints=11 pass=" << good << "\n";
   return good;
 }
 

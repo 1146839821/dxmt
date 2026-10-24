@@ -34,7 +34,7 @@ are no longer current defects. Preserve their original red results and costs.
 | InfoQueue messages/filters/limits/mute | `59ebde1b`, `b627f28d`; owned messages, filter stacks and 12 allocation rollback positions covered | Native counter/filter/default equivalence and persistent/global OOM NOT_RUN |
 | InfoQueue break/output | `6458896f`; stored controls, intercepted output/break and reentrant callbacks covered | Real OS debugger delivery NOT_RUN; not a complete Debug Layer |
 | Enhanced split execution order | N12 `a262662e`; submission-order pairing, recording/reset isolation, admission failure and lifetime coverage; the N12 resource-order slice below corrects same-resource disjoint barrier acceptance | Direct->Direct fence handoff has corrected enhanced-only N12 readback evidence; cross-queue half-pair rejection reproduced but normative status unresolved; other queue types, extended stress and performance acceptance OPEN; EnhancedBarriersSupported remains FALSE |
-| Format report/create/view/footprint consistency | N02/N08/N09 slices below; logical storage/view roles, BC sampling, RGB96 copies and typed UAV eligibility/readback have bounded evidence | Exhaustive format/planar/dimension/allocation coverage and native differential remain OPEN; additional typed-UAV Options remains FALSE |
+| Format report/create/view/footprint consistency | N02/N08/N09 slices below; logical storage/view roles, BC sampling, RGB96 copies, typed UAV eligibility/readback and N08 shared texture extent guards have bounded evidence | Exhaustive format/planar/dimension/allocation coverage and native differential remain OPEN; additional typed-UAV Options remains FALSE |
 | Depth/stencil component MS_LOAD | `960ec7b0`, `4fe09340`, `1b74fa94`; sample-mask prerequisite, SM5/SM6 compute and pixel 2x/4x readbacks, four report bits corrected | 8x unsupported on this host; other devices/counts and native differential NOT_RUN; no full format/FL promotion |
 | Performance and deployment | Recorded matched-runtime AB/BA evidence, including N13 attribution controls | Historical recording/Submit warnings remain OPEN/INCONCLUSIVE; latest query improvement does not discharge them. Full no-private runtime and T3/T4 NOT_RUN |
 
@@ -2618,6 +2618,47 @@ FALSE, new src/d3d12 files0. Shared Wine and user .gitignore unchanged. Evidence
 `../dxmt-test/n12-split-queue-contract-20261024/N12-split-queue-contract.md`,
 `design.txt`, `sources.json`, primary-source snapshots, `manifest.json`,
 `results.json`, `no-private.json`, build and raw validation logs.
+
+### N08 — shared texture descriptor extent limits, 2026-10-24
+
+Base580d6931. Confirmed: eight max+1 texture descriptors returned finite copy
+footprints. Existing ValidateTextureResourceDesc bounded Width by UINT_MAX but
+omitted D3D12 dimension/array limits. Add required 1D/2D axes16384, arrays2048,
+and 3D axes2048 limits in its existing switch; remove the weaker global bound.
+All existing query/allocation/factory callers reuse this one descriptor validator.
+No extra owner/cache/state, lock, allocation, encoder, COM ABI, resource layout or
+capability change; new src/d3d12 files0. Planar remains unsupported, not promoted.
+
+Existing resource runner:28 negatives and11 positive footprints (eight exact
+maxima plus three existing controls). Same final PE: before metadata-only fails
+all eight new rejection expectations, after passes. After also rejects actual
+committed/placed output and null-output calls and allocation/Info1 queries.
+Reserved2D invalid bounds reject E_INVALIDARG; unimplemented Reserved1D/3D
+remain E_NOTIMPL. An inherited test expectation failure is preserved separately.
+Exact maxima are metadata controls, not giant native allocations. Before invalid
+cases are never sent to Metal. Adjacent RGBA 1D/2D/3D GPU copies pass both sides;
+full resource runner passes after. All59 printed format reports match.
+
+Final results: one expected red regression exit1; seven correctness passes,
+two public-API cost-control passes, six performance processes. API/GPU1/1/HUD1
+for correctness; actual staged D3D12 and native companion paths verified; no
+Metal validation errors. Scoped library/test builds and four-TU no-private syntax
+pass. Full no-private runtime, native Windows, maximum-size allocations, other
+hardware and T3/T4 NOT_RUN. User .gitignore/shared Wine unchanged.
+
+An initial benchmark used the N12 pre-fix DLL, introducing an unrelated baseline
+confound; it is retained and excluded. Final before hash matches preceding
+current-production DLL. Valid footprint query AB/BA/AB, validation0/0/HUD1,
+25x3000 calls/process minus first batch,72 retained batches/side. Median process
+p50/p95 of batch-average per-call costs(us):0.033100/0.034200->
+0.034167/0.036000(+3.22/+5.26%, about+1.07/+1.80ns). Not individual-call p95,
+no speedup/noise-bound claim. Keep the observed query cost increase and historical
+Recording/Submit warnings OPEN; those benchmarks NOT_RUN. No mandatory guard is
+removed for performance. Same actual M1Max/macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1
+host and isolated n15 prefix. Evidence:
+`../dxmt-test/n08-texture-extents-20261024/N08-texture-extents.md`, `design.txt`,
+`sources.json`, `manifest.json`, `results.json`, `no-private.json`,
+`perf-results.json`, `aggregate.json`, external cost source/rebuild args and logs.
 
 ### Earlier validation notes
 
