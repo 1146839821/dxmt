@@ -486,13 +486,14 @@ bool TestPendingTextureRemoval(bool ranged = false) {
       return false;
   const UINT end_order[] = {1, 0, 2};
   for (UINT index = 0; index < 3; ++index) {
-    D3D12_RESOURCE_BARRIER initial = {};
-    initial.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    initial.Transition.pResource = textures[index].ptr;
-    initial.Transition.Subresource = ranged && index == 2 ? D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES : 0;
-    initial.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-    initial.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-    lists[0].list->ResourceBarrier(1, &initial);
+    D3D12_TEXTURE_BARRIER initial;
+    SetTexture(initial, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_COPY,
+               D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_COPY_DEST,
+               D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_COPY_DEST,
+               textures[index].ptr,
+               ranged && index == 2 ? D3D12_BARRIER_SUBRESOURCE_RANGE{0, 3, 0, 2, 0, 1}
+                                    : D3D12_BARRIER_SUBRESOURCE_RANGE{0, 1, 0, 1, 0, 1});
+    SubmitBarrier(lists[0].list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &initial);
     D3D12_TEXTURE_COPY_LOCATION source = {}, target = {};
     source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     source.pResource = upload.ptr;
@@ -562,6 +563,9 @@ bool TestPendingTextureRemoval(bool ranged = false) {
 }
 
 bool TestSplitExecutionOrder(const char *mode) {
+  // Contract probe: a nonzero result remains visible until cross-queue half
+  // pairing has an authoritative contract and implementation.
+  const bool cross_queue_half = !std::strcmp(mode, "cross-queue-half");
   const bool handoff = !std::strcmp(mode, "queue-handoff") ||
                        !std::strcmp(mode, "queue-handoff-reset");
   const bool mismatch = !std::strcmp(mode, "mismatch");
@@ -587,7 +591,7 @@ bool TestSplitExecutionOrder(const char *mode) {
   const bool disjoint_submit = !std::strcmp(mode, "disjoint-submit") ||
                                !std::strcmp(mode, "disjoint-cross-execute");
   const bool ranged = !std::strcmp(mode, "range-gpu") ||
-                      !std::strcmp(mode, "range-cross-execute") || handoff;
+                      !std::strcmp(mode, "range-cross-execute") || handoff || cross_queue_half;
   const bool global = !std::strcmp(mode, "global");
   if (!ordered && !reversed && !threaded_reversed && !same && !reset &&
       !clear && !disjoint && !global && !cross && !replay && !concurrent &&
@@ -749,13 +753,15 @@ bool TestSplitExecutionOrder(const char *mode) {
   auto record_begin = [&] {
     auto copy_source = source;
     auto copy_target = target;
-    D3D12_RESOURCE_BARRIER initial = {};
-    initial.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    initial.Transition.pResource = texture.ptr;
-    initial.Transition.Subresource = ranged ? D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES : 0;
-    initial.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-    initial.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-    first.list->ResourceBarrier(1, &initial);
+    // Stay in the enhanced layout domain throughout this oracle. Interop
+    // with legacy ResourceBarrier would require a COMMON boundary.
+    D3D12_TEXTURE_BARRIER initial;
+    SetTexture(initial, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_COPY,
+               D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_COPY_DEST,
+               D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_COPY_DEST,
+               texture.ptr, ranged ? D3D12_BARRIER_SUBRESOURCE_RANGE{0, 3, 0, 2, 0, 1}
+                                   : D3D12_BARRIER_SUBRESOURCE_RANGE{0, 1, 0, 1, 0, 1});
+    SubmitBarrier(first.list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &initial);
     for (UINT index = 0; index < subresource_count; ++index) {
       copy_source.PlacedFootprint = footprints[index];
       copy_target.SubresourceIndex = index;
@@ -881,7 +887,7 @@ bool TestSplitExecutionOrder(const char *mode) {
   // Each queue completes its own split pair. The generic COPY_SOURCE layout
   // crosses queues via a fence; no cross-queue BEGIN/END pairing is assumed.
   SplitProbeList consumer_begin, consumer_end;
-  Owned<ID3D12CommandQueue> consumer_queue;
+  Owned<ID3D12CommandQueue> consumer_queue, half_queue;
   Owned<ID3D12Fence> handoff_fence;
   if (handoff) {
     if (!consumer_begin.Create(device.ptr) || !consumer_end.Create(device.ptr) ||
@@ -922,7 +928,22 @@ bool TestSplitExecutionOrder(const char *mode) {
     ID3D12CommandList *consumer_lists[] = {consumer_begin.list.ptr, consumer_end.list.ptr};
     consumer_queue->ExecuteCommandLists(2, consumer_lists);
   }
-  if (cross) {
+  if (cross_queue_half) {
+    if (!CheckHR("half-pair queue", device->CreateCommandQueue(
+                                      &queue_desc, IID_PPV_ARGS(&half_queue.ptr))))
+      return false;
+    queue->ExecuteCommandLists(1, lists);
+    // Complete producer work before admitting END on the other queue. This
+    // isolates validation ownership from overlap or incomplete native work.
+    if (!wait(queue.ptr, 1) || !CheckHR("half-pair Wait", half_queue->Wait(fence.ptr, 1)))
+      return false;
+    half_queue->ExecuteCommandLists(1, lists + 1);
+    const HRESULT status = device->GetDeviceRemovedReason();
+    std::cout << "cross-queue half-pair admission=0x" << std::hex
+              << static_cast<unsigned long>(status) << std::dec << "\n";
+    if (!CheckHR("cross-queue half-pair device status", status))
+      return false;
+  } else if (cross) {
     queue->ExecuteCommandLists(1, lists);
     if (!wait(queue.ptr, 1) ||
         !CheckHR("executed begin allocator Reset", first.allocator->Reset()) ||
@@ -955,7 +976,7 @@ bool TestSplitExecutionOrder(const char *mode) {
     if (!CheckHR("producer handoff Signal", queue->Signal(handoff_fence.ptr, 1)) ||
         !wait(consumer_queue.ptr, 2) || handoff_fence->GetCompletedValue() < 1)
       return false;
-  } else if (!wait(queue.ptr, 2)) {
+  } else if (!wait(cross_queue_half ? half_queue.ptr : queue.ptr, 2)) {
     return false;
   }
   if (replay) {

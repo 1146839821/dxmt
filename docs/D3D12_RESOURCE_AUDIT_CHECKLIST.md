@@ -33,7 +33,7 @@ are no longer current defects. Preserve their original red results and costs.
 | InfoQueue COM identity/lifetime | `78f4e9eb`; embedded controlling identity and concurrent query/state test | Full debug-layer compatibility is not established |
 | InfoQueue messages/filters/limits/mute | `59ebde1b`, `b627f28d`; owned messages, filter stacks and 12 allocation rollback positions covered | Native counter/filter/default equivalence and persistent/global OOM NOT_RUN |
 | InfoQueue break/output | `6458896f`; stored controls, intercepted output/break and reentrant callbacks covered | Real OS debugger delivery NOT_RUN; not a complete Debug Layer |
-| Enhanced split execution order | N12 `a262662e`; submission-order pairing, recording/reset isolation, admission failure and lifetime coverage; the N12 resource-order slice below corrects same-resource disjoint barrier acceptance | Direct->Direct fence handoff with complete per-queue pairs now has bounded N12 readback evidence; cross-queue half-pair semantics, other queue types, extended stress and performance acceptance OPEN; EnhancedBarriersSupported remains FALSE |
+| Enhanced split execution order | N12 `a262662e`; submission-order pairing, recording/reset isolation, admission failure and lifetime coverage; the N12 resource-order slice below corrects same-resource disjoint barrier acceptance | Direct->Direct fence handoff has corrected enhanced-only N12 readback evidence; cross-queue half-pair rejection reproduced but normative status unresolved; other queue types, extended stress and performance acceptance OPEN; EnhancedBarriersSupported remains FALSE |
 | Format report/create/view/footprint consistency | N02/N08/N09 slices below; logical storage/view roles, BC sampling, RGB96 copies and typed UAV eligibility/readback have bounded evidence | Exhaustive format/planar/dimension/allocation coverage and native differential remain OPEN; additional typed-UAV Options remains FALSE |
 | Depth/stencil component MS_LOAD | `960ec7b0`, `4fe09340`, `1b74fa94`; sample-mask prerequisite, SM5/SM6 compute and pixel 2x/4x readbacks, four report bits corrected | 8x unsupported on this host; other devices/counts and native differential NOT_RUN; no full format/FL promotion |
 | Performance and deployment | Recorded matched-runtime AB/BA evidence, including N13 attribution controls | Historical recording/Submit warnings remain OPEN/INCONCLUSIVE; latest query improvement does not discharge them. Full no-private runtime and T3/T4 NOT_RUN |
@@ -2581,6 +2581,43 @@ prefix; shared Wine and user .gitignore unchanged. Evidence:
 `../dxmt-test/n12-crossqueue-20261024/N12-crossqueue.md`, `design.txt`,
 `manifest.json`, `results.json`, `initial-results.json`, `no-private.json`,
 `oracle-calibration.json`, rebuild arguments and raw validation logs.
+
+### N12 — enhanced oracle interop and cross-queue halves, 2026-10-24
+
+Base7fdb9d6c. Found a test validity defect: TestSplitExecutionOrder and
+TestPendingTextureRemoval entered legacy COPY_DEST then switched directly to
+enhanced barriers. Microsoft interop requires a COMMON domain boundary.
+Both helpers now stay enhanced-only, using COMMON->COPY_DEST before upload;
+no production change. Prior GPU evidence for these helpers has superseded
+initial-layout validity; original logs are preserved. Current corrected tests
+supply the bounded readback evidence instead of relying on those old setups.
+
+New opt-in `cross-queue-half` completes producer BEGIN work, queues a fence Wait
+on another Direct queue, then admits matching END there. Both immutable old/
+current DLLs fail with0x887a0001 before native END encoding: pending split state
+is queue-local, and consumer validation sees no BEGIN. These are two reproduced
+failures, not correctness passes. Cross-Execute permission alone does not prove
+cross-queue half-pair legality. Fixed VKD3D-Proton reference defers split work
+until END but documents native-runtime issues at that revision; it is not a
+native differential oracle. Normative status remains unresolved. Do not delete
+unmatched-END validation or restore a device recording-pair container from this
+observation. External report records the transactional ownership/dependency
+requirements if cross-queue half-pair support is established.
+
+Corrected same PE:14 correctness passes, two raw half-pair failures; controller
+exit0 verifies these distinct outcomes. Both DLLs pass six-subresource range and
+complete-pair queue handoff. Current DLL also passes ranged cross-Execute/Reset,
+pending removal/reordered range, concurrent recording, queue isolation, full
+runner and end-only/disjoint/global negative probes. API/GPU validation1/1/HUD1,
+actual staged D3D12/native paths verified; no Metal validation errors. Scoped
+build, changed-test-TU no-private syntax and diff check pass. Full no-private
+runtime, native Windows, other queue types and T3/T4 NOT_RUN. Performance NOT_RUN
+(production unchanged); historical p95+34.46% and global Device gates OPEN.
+No COM ABI, owner, layout, scheduling or public capability changes; enhanced
+FALSE, new src/d3d12 files0. Shared Wine and user .gitignore unchanged. Evidence:
+`../dxmt-test/n12-split-queue-contract-20261024/N12-split-queue-contract.md`,
+`design.txt`, `sources.json`, primary-source snapshots, `manifest.json`,
+`results.json`, `no-private.json`, build and raw validation logs.
 
 ### Earlier validation notes
 
