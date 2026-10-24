@@ -16,6 +16,43 @@ without first documenting a changed contract or a regression.
 - `[ ]` not started or not yet validated.
 - A slice record must state changed files, invariants, tests, and follow-ups.
 
+## Current Device task acceptance — N02, 2026-10-24
+
+Reconciled against `DXMT D3D12：修复 Device相关.md` on base `1b74fa94`.
+This is an index of recorded evidence, not a new runtime test or complete
+Device acceptance. Historical slice paragraphs describe their own baseline;
+their pending items are superseded only by the specific later evidence below.
+In particular, the old InfoQueue stub and component MS_LOAD underreport notes
+are no longer current defects. Preserve their original red results and costs.
+
+| Requested mechanism | Current bounded result / commits | Remaining acceptance gap |
+|---|---|---|
+| Device QI, including grouped Device5–10 | `82a9660e`; canonical identity, supported interfaces and rejected legacy queries covered by recorded feature tests | D3D10/11 upstream interface exposure is not a requirement to expose those interfaces from this D3D12 Device; broader D3D11 rendering regression remains NOT_RUN |
+| UNKNOWN MSAA counts/flags | `8be5c596`; same-runner red/green, counts0/1/2/4/8, NONE/TILED/invalid flags | Native Windows differential NOT_RUN; do not infer unsupported hardware sample counts |
+| Multiple-fence NULL/event ALL/ANY | N14 `5a2f4d9a`; shared notification/cancellation, duplicate/rewound waits, OOM and abandoned ownership covered | Extended T4 concurrency and native Windows differential NOT_RUN |
+| InfoQueue COM identity/lifetime | `78f4e9eb`; embedded controlling identity and concurrent query/state test | Full debug-layer compatibility is not established |
+| InfoQueue messages/filters/limits/mute | `59ebde1b`, `b627f28d`; owned messages, filter stacks and 12 allocation rollback positions covered | Native counter/filter/default equivalence and persistent/global OOM NOT_RUN |
+| InfoQueue break/output | `6458896f`; stored controls, intercepted output/break and reentrant callbacks covered | Real OS debugger delivery NOT_RUN; not a complete Debug Layer |
+| Enhanced split execution order | N12 `a262662e`; submission-order pairing, recording/reset isolation, admission failure and lifetime coverage | Precise disjoint-range legality, cross-queue handoff, extended stress and performance acceptance OPEN; EnhancedBarriersSupported remains FALSE |
+| Format report/create/view/footprint consistency | N02/N08/N09 slices below; logical storage/view roles, BC sampling, RGB96 copies and typed UAV eligibility/readback have bounded evidence | Exhaustive format/planar/dimension/allocation coverage and native differential remain OPEN; additional typed-UAV Options remains FALSE |
+| Depth/stencil component MS_LOAD | `960ec7b0`, `4fe09340`, `1b74fa94`; sample-mask prerequisite, SM5/SM6 compute and pixel 2x/4x readbacks, four report bits corrected | 8x unsupported on this host; other devices/counts and native differential NOT_RUN; no full format/FL promotion |
+| Performance and deployment | Recorded matched-runtime AB/BA evidence, including N13 attribution controls | Historical recording/Submit warnings remain OPEN/INCONCLUSIVE; latest query improvement does not discharge them. Full no-private runtime and T3/T4 NOT_RUN |
+
+Evidence locations are the named N02/N07/N08/N09/N12/N14 slice records below.
+The reconciliation manifest verifies ten referenced fix/test commits are HEAD
+ancestors and hashes their existing reports:
+`../dxmt-test/n02-device-reconciliation-20261024/manifest.json`.
+This documentation-only round changes no runtime owner, source/header, ABI,
+capability, layout or scheduling. Build/GPU/performance reruns are NOT_RUN;
+commit ancestry, evidence-file existence and `git diff --check` are the checks.
+The user's `.gitignore` remains outside the commit.
+
+Next selected candidate: N12 precise split subresource-range contract, before
+any enhanced-barrier exposure. First reconcile the existing disjoint-range
+fixture with the normative contract; change production only for a demonstrated
+contradiction. Missing Windows/multi-device evidence remains explicitly missing,
+and does not justify another unchanged local MS_LOAD or Submit timing matrix.
+
 ## Completed Slices
 
 - [x] Capability boundary and feature-level contract. `D3D12CreateDevice`
