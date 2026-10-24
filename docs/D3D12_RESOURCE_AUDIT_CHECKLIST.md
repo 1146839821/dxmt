@@ -1780,6 +1780,46 @@ Evidence: `../dxmt-test/n02-feature-level-contract-20261024/`
 `validation-results.json`, `no-private.json`, `perf-aggregate.json`,
 `submit-recheck/perf-aggregate.json`, `sources.json`.
 
+### N13 — feature-query branch and PE-layout controls, 2026-10-24
+
+Base3fcf3d42; diagnostic/documentation slice only. B=pre-query-fix DLL;
+P=B with exactly two branch bytes replaced by an equal-length NOP, all other
+PE bytes/RVAs unchanged; A=current source-fix DLL; A2=byte-identical A in a
+second path. P is external diagnostic-only, never ship. Six exports and shared
+workload/DXGI/WMT identities verified. PE layout preservation does not guarantee
+Rosetta/runtime layout preservation.
+
+Six correctness processes have expected exits: B query8 pass/3 fail; P/A each
+11 pass; P full feature65 pass; P/A instrumented probes each210 full GPU cases
+plus221 empty fence iterations. Public CheckFeatureSupport vtable counters
+both total1/timed0/levels1/timed_levels0, with the known query outside timing
+as positive control. This observes virtual dispatch after hook installation,
+not creation or internal direct/devirtualized calls. Instrumented timings are
+excluded from acceptance. Timed QPC window covers ExecuteCommandLists only;
+fence waits/readback/collector are outside; collector_us=NOT_RUN.
+
+Sixteen uninstrumented processes pass, balanced B/P/A/A2, P/A2/B/A,
+A/B/A2/P, A2/A/P/B; retain60 per full scenario or200 empty per process.
+Median process ordinary p50/p95 us: B123.925/159.40, P123.625/155.20,
+A119.35/162.60, A2 128.30/161.60. P/B p95−2.63%, A/P+4.77%; A/P paired
+p95 changes are positive in all4 runs (+0.30%..+5.62%). Same-binary A2/A
+paired p95−6.25%..+1.95% demonstrates variation, not a universal noise bound.
+Exact/fallback/empty results and raw data remain in the external report.
+
+Observed timed virtual route does not support direct execution of the fixed
+query branch as the submit-tail cause. Linked-layout/process effects remain
+unproven; prior N02+10.50%/+4.21% signals retained. Performance INCONCLUSIVE;
+historical performance/Device gates OPEN. No hot-path optimization, state,
+cache, source/header, ABI/scheduling or FL/SM/Options/Tier change. Further work
+needs a distinct concrete-cost/owner observation; do not repeat this matrix.
+Actual macOS27.0.1/Xcode27.1/M1Max/Apple7/MSC4.0.1/Wine11/clang23.1.1.
+Regular external probe build passes; full build, no-private runtime, native
+Windows and T3/T4 NOT_RUN this round. Validation enabled only for correctness.
+Evidence: `../dxmt-test/n13-feature-query-layout-20261024/`
+`N13-feature-query-layout.md`, `manifest.json`, `patch-manifest.json`,
+`probe-source.json`, `validation-results.json`, `perf-aggregate.json`,
+`paired-comparisons.json`, and isolated native load logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
