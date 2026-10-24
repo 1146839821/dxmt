@@ -319,6 +319,12 @@ bool CheckFeatureLevelQueries(ID3D12Device *device) {
                device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS,
                                            &maximum, sizeof(maximum))))
     return false;
+#ifdef DXMT_NO_PRIVATE_API
+  if (maximum.MaxSupportedFeatureLevel != D3D_FEATURE_LEVEL_11_0) {
+    std::cerr << "no-private build must cap feature level at 11_0\n";
+    return false;
+  }
+#endif
 
   bool good = true;
   const auto check = [&](const char *name, const D3D_FEATURE_LEVEL *levels,
@@ -736,6 +742,10 @@ int main(int argc, char **argv) {
             << " ROV=" << options.ROVsSupported
             << " conservative=" << static_cast<UINT>(options.ConservativeRasterizationTier)
             << " heap=" << static_cast<UINT>(options.ResourceHeapTier) << "\n";
+#ifdef DXMT_NO_PRIVATE_API
+  if (options.OutputMergerLogicOp)
+    return fail("no-private build must not expose output-merger logic operations");
+#endif
   if (options.TiledResourcesTier != D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED ||
       options.ResourceBindingTier != D3D12_RESOURCE_BINDING_TIER_2 ||
       options.PSSpecifiedStencilRefSupported ||

@@ -36,7 +36,7 @@ are no longer current defects. Preserve their original red results and costs.
 | Enhanced split execution order | N12 `a262662e`; submission-order pairing, recording/reset isolation, admission failure and lifetime coverage; the N12 resource-order slice below corrects same-resource disjoint barrier acceptance | Direct->Direct fence handoff has corrected enhanced-only N12 readback evidence; cross-queue half-pair rejection reproduced but normative status unresolved; other queue types, extended stress and performance acceptance OPEN; EnhancedBarriersSupported remains FALSE |
 | Format report/create/view/footprint consistency | N02/N08/N09 slices below; logical storage/view roles, BC sampling, RGB96 copies, typed UAV eligibility/readback and N08 shared texture extent guards have bounded evidence | Exhaustive format/planar/dimension/allocation coverage and native differential remain OPEN; additional typed-UAV Options remains FALSE |
 | Depth/stencil component MS_LOAD | `960ec7b0`, `4fe09340`, `1b74fa94`; sample-mask prerequisite, SM5/SM6 compute and pixel 2x/4x readbacks, four report bits corrected | 8x unsupported on this host; other devices/counts and native differential NOT_RUN; no full format/FL promotion |
-| Performance and deployment | Recorded matched-runtime AB/BA evidence, including N13 attribution controls | Historical recording/Submit warnings remain OPEN/INCONCLUSIVE; latest query improvement does not discharge them. Full no-private runtime and T3/T4 NOT_RUN |
+| Performance and deployment | Recorded matched-runtime AB/BA evidence, including N13 attribution controls | Historical recording/Submit warnings remain OPEN/INCONCLUSIVE; latest query improvement does not discharge them. Matched no-private x64 Device/resource/SM5/SM6 runtime is covered by the N02 slice below; full no-private T3/T4 and D3D11 rendering NOT_RUN |
 
 Evidence locations are the named N02/N07/N08/N09/N12/N14 slice records below.
 The reconciliation manifest verifies ten referenced fix/test commits are HEAD
@@ -2698,6 +2698,55 @@ unchanged. Primary sources, baseline identity, red/green logs, exact benchmark
 rebuild args and manifest: `../dxmt-test/n08-small-msaa-20261024/N08-small-msaa.md`,
 `design.txt`, `sources.json`, `manifest.json`, `results.json`, `no-private.json`,
 `perf-results.json`, `aggregate.json`.
+
+### N02 — matched no-private Device runtime, 2026-10-24
+
+Base3e5e4f8f. Previous no-private translation-unit syntax checks could not prove
+PE/native link/deployment compatibility or actual configured feature gates.
+Clean external x64 release build defines DXMT_NO_PRIVATE_API for host C/C++ and
+native build C/C++; linked D3D12/DXGI/D3D11/WineMetal PE and Unix companion,
+postprocessed Wine builtin, and reused existing PE runners in isolated Wine.
+Compiler-command macro census covers D3D12(23),DXGI(5),D3D11(26),WineMetal PE(4),
+Unix(4),Airconv(43) entries. Native cache private imports are absent in candidate
+and present in private control; this pair is not an exhaustive private-API audit.
+
+Only tests/dx12/dx12_feature_support.cpp adds runtime assertions for existing
+no-private FL11_0 cap and OutputMergerLogicOp=FALSE. Same no-private test PE
+rejects private DLL(FL11_1) as expected; matching no-private passes. Private test
+variant still passes private Device contract(FL11_1/logicOp1). No production,
+ABI, capability policy, resource layout, scheduling or src/d3d12 new file change.
+SM6 cap stays6_0, Enhanced FALSE and advanced validation gates remain closed.
+
+One expected configuration-mismatch red;15 validation-on zero exits, comprising
+14 contract/readback passes and one no-resource SM6 dispatch SMOKE_ONLY; six
+validation-off cost processes. Device identity/MSAA/InfoQueue/filter/lifetime,
+interface contracts, multiple-fence ALL/ANY/cancellation/abandonment, InfoQueue
+break/output and OOM rollback pass. GPU: full resource runner(including small
+MSAA), D/S multi staging preservation/in-flight, SM5 graphics exact pixels,
+DXIL cs6_0 root-UAV readback1234 and cost-control copy payloads pass. All59 format
+rows unchanged. API/GPU1/1/HUD1 plus staged PE/native paths verified; no Metal
+validation errors. Full no-private T3/T4, D3D11 rendering, native Windows,
+other devices and extended stress NOT_RUN; no complete Debug Layer/FL claim.
+
+Matched same-PE private/no-private configuration cost AB/BA/AB, API/GPU0/0/HUD1,
+25 rounds/process,50k copies/round,first round dropped,72 retained rounds/side.
+Median process p50/p95(us): Recording3061.95/3198.8->3027.15/3615.7
+(-1.14/+13.03%); ordinary Submit22350.8/23034->22426.85/24279.9(+0.34/+5.41%).
+Recording tail crosses warning threshold and stays OPEN; cause INCONCLUSIVE.
+This is a configuration comparison, not performance attribution to test-only
+changes. Historical Recording/Submit/split warnings remain OPEN; no rerun loop
+or speculative runtime optimization. Close cost and per-process tails retained.
+
+Initial private staging carried an older dxgi.dll; that entire cost matrix is
+retained/excluded. Private runtime artifacts were rebuilt at current HEAD,
+version headers and all four staged PE/native hashes verified, then red/format
+checks and complete cost comparison rerun. An invalid no-work dry-run assertion
+was corrected: version.h is always-stale; successful actual build/output hashes
+are the evidence. Same actual M1Max/macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1 host;
+requested Xcode26 NOT_RUN. User .gitignore/shared Wine unchanged. Evidence:
+`../dxmt-test/n02-no-private-runtime-20261024/N02-no-private-runtime.md`,
+`design.txt`, `manifest.json`, `build-commands.json`, `macro-census.json`,
+`results.json`, `perf-results.json`, `aggregate.json`, native imports and logs.
 
 ### Earlier validation notes
 
