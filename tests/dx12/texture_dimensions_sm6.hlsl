@@ -4,8 +4,13 @@ Texture2D<float4> texture_2d : register(t2);
 Texture2DArray<float4> texture_2d_array : register(t3);
 TextureCube<float4> texture_cube : register(t4);
 TextureCubeArray<float4> texture_cube_array : register(t5);
+#ifdef STENCIL_MS
+Texture2DMS<uint4> texture_ms : register(t6);
+Texture2DMSArray<uint4> texture_ms_array : register(t7);
+#else
 Texture2DMS<float4> texture_ms : register(t6);
 Texture2DMSArray<float4> texture_ms_array : register(t7);
+#endif
 Texture3D<float4> texture_3d : register(t8);
 SamplerState texture_sampler : register(s0);
 RWStructuredBuffer<uint> output : register(u0);
@@ -34,8 +39,21 @@ uint ToByte(float4 value, uint index) {
   output[5] = ToByte(texture_cube_array.SampleLevel(
                          texture_sampler, float4(0.0, 0.0, 1.0, 1.0), 0.0),
                      5);
+#ifdef STENCIL_MS
+  output[6] = texture_ms.Load(int2(0, 0), 0).y;
+  output[7] = texture_ms_array.Load(int3(0, 0, 1), 0).y;
+  // Check every sample and both array layers, not just sample zero.
+  for (uint sample = 0; sample < 4; sample++) {
+    if (texture_ms.Load(int2(0, 0), sample).y != 77)
+      output[6] = 0;
+    for (uint layer = 0; layer < 2; layer++)
+      if (texture_ms_array.Load(int3(0, 0, layer), sample).y != 88)
+        output[7] = 0;
+  }
+#else
   output[6] = ToByte(texture_ms.Load(int2(0, 0), 0), 6);
   output[7] = ToByte(texture_ms_array.Load(int3(0, 0, 1), 0), 7);
+#endif
   output[8] = ToByte(
       texture_3d.SampleLevel(texture_sampler, float3(0.5, 0.5, 0.5), 0.0), 8);
 #ifdef RGB96

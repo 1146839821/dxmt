@@ -207,14 +207,15 @@ void SetSrvDesc(D3D12_SHADER_RESOURCE_VIEW_DESC &desc, UINT index) {
 } // namespace
 
 int main(int argc, char **argv) {
+  const bool stencil_ms = argc == 3 && !std::strcmp(argv[2], "--stencil-ms");
   const bool rgb96 = argc == 3 && (!std::strcmp(argv[2], "--rgb96") ||
                                    !std::strcmp(argv[2], "--rgb96-typeless"));
   const bool typeless =
       argc == 3 && (!std::strcmp(argv[2], "--typeless") ||
                     !std::strcmp(argv[2], "--rgb96-typeless"));
-  if (argc != 2 && !typeless && !rgb96) {
+  if (argc != 2 && !typeless && !rgb96 && !stencil_ms) {
     std::cerr << "usage: dx12_texture_dimensions <shader.cso> "
-                 "[--typeless|--rgb96|--rgb96-typeless]\n";
+                 "[--typeless|--rgb96|--rgb96-typeless|--stencil-ms]\n";
     return 2;
   }
 
@@ -232,7 +233,7 @@ int main(int argc, char **argv) {
   Owned<ID3DBlob> root_error;
   Owned<ID3D12DescriptorHeap> resource_heap;
   Owned<ID3D12DescriptorHeap> sampler_heap;
-  Owned<ID3D12DescriptorHeap> rtv_heap;
+  Owned<ID3D12DescriptorHeap> attachment_heap;
   Owned<ID3D12Resource> textures[9];
   Owned<ID3D12Resource> uploads[9];
   Owned<ID3D12Resource> output;
@@ -247,7 +248,7 @@ int main(int argc, char **argv) {
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
   D3D12_DESCRIPTOR_HEAP_DESC resource_heap_desc = {};
   D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_desc = {};
-  D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc = {};
+  D3D12_DESCRIPTOR_HEAP_DESC attachment_heap_desc = {};
   D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
   D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
   D3D12_SAMPLER_DESC sampler_desc = {};
@@ -255,9 +256,9 @@ int main(int argc, char **argv) {
   D3D12_RESOURCE_BARRIER barrier = {};
   D3D12_COMPUTE_PIPELINE_STATE_DESC pso_desc = {};
   D3D12_CPU_DESCRIPTOR_HANDLE resource_cpu = {};
-  D3D12_CPU_DESCRIPTOR_HANDLE rtv_cpu = {};
+  D3D12_CPU_DESCRIPTOR_HANDLE attachment_cpu = {};
   UINT descriptor_increment = 0;
-  UINT rtv_increment = 0;
+  UINT attachment_increment = 0;
   BYTE *mapped = nullptr;
   bool result = false;
 
@@ -295,17 +296,22 @@ int main(int argc, char **argv) {
   sampler_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
   sampler_heap_desc.NumDescriptors = 1;
   sampler_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-  rtv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-  rtv_heap_desc.NumDescriptors = 2;
-  if (!CheckHR("CreateResourceHeap", device.ptr->CreateDescriptorHeap(
-                                          &resource_heap_desc, IID_PPV_ARGS(&resource_heap.ptr))) ||
-      !CheckHR("CreateSamplerHeap", device.ptr->CreateDescriptorHeap(
-                                         &sampler_heap_desc, IID_PPV_ARGS(&sampler_heap.ptr))) ||
-      !CheckHR("CreateRTVHeap", device.ptr->CreateDescriptorHeap(
-                                     &rtv_heap_desc, IID_PPV_ARGS(&rtv_heap.ptr))))
+  attachment_heap_desc.Type = stencil_ms ? D3D12_DESCRIPTOR_HEAP_TYPE_DSV
+                                         : D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  attachment_heap_desc.NumDescriptors = 2;
+  if (!CheckHR("CreateResourceHeap",
+               device.ptr->CreateDescriptorHeap(
+                   &resource_heap_desc, IID_PPV_ARGS(&resource_heap.ptr))) ||
+      !CheckHR("CreateSamplerHeap",
+               device.ptr->CreateDescriptorHeap(
+                   &sampler_heap_desc, IID_PPV_ARGS(&sampler_heap.ptr))) ||
+      !CheckHR("CreateAttachmentHeap",
+               device.ptr->CreateDescriptorHeap(
+                   &attachment_heap_desc, IID_PPV_ARGS(&attachment_heap.ptr))))
     return 1;
   descriptor_increment = device.ptr->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-  rtv_increment = device.ptr->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+  attachment_increment =
+      device.ptr->GetDescriptorHandleIncrementSize(attachment_heap_desc.Type);
 
   const DXGI_FORMAT format =
       rgb96 ? DXGI_FORMAT_R32G32B32_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -348,10 +354,21 @@ int main(int argc, char **argv) {
       clear_value = {};
       clear_value.Format = format;
       clear_value.Color[3] = 1.0f;
-      if (!CheckHR(i == 6 ? "CreateTextureMS" : "CreateTextureMSArray", device.ptr->CreateCommittedResource(
-                                                        &default_heap, D3D12_HEAP_FLAG_NONE, &texture_descs[i],
-                                                        D3D12_RESOURCE_STATE_RENDER_TARGET, &clear_value,
-                                                        IID_PPV_ARGS(&textures[i].ptr))))
+      if (stencil_ms) {
+        texture_descs[i].Format =
+            i == 6 ? DXGI_FORMAT_R24G8_TYPELESS : DXGI_FORMAT_R32G8X24_TYPELESS;
+        texture_descs[i].Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        clear_value = {};
+        clear_value.Format = i == 6 ? DXGI_FORMAT_D24_UNORM_S8_UINT
+                                    : DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+        clear_value.DepthStencil.Depth = 0.25f;
+      }
+      if (!CheckHR(i == 6 ? "CreateTextureMS" : "CreateTextureMSArray",
+                   device.ptr->CreateCommittedResource(
+                       &default_heap, D3D12_HEAP_FLAG_NONE, &texture_descs[i],
+                       stencil_ms ? D3D12_RESOURCE_STATE_DEPTH_WRITE
+                                  : D3D12_RESOURCE_STATE_RENDER_TARGET,
+                       &clear_value, IID_PPV_ARGS(&textures[i].ptr))))
         return 1;
     } else if (!CreateUploadedTexture(device.ptr, texture_descs[i], 11 + i * 11, textures[i], uploads[i], footprints[i])) {
       return 1;
@@ -361,6 +378,9 @@ int main(int argc, char **argv) {
   resource_cpu = resource_heap.ptr->GetCPUDescriptorHandleForHeapStart();
   for (UINT i = 0; i < 9; i++) {
     SetSrvDesc(srv_desc, i);
+    if (stencil_ms && (i == 6 || i == 7))
+      srv_desc.Format = i == 6 ? DXGI_FORMAT_X24_TYPELESS_G8_UINT
+                               : DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
     if (rgb96) {
       srv_desc.Format = DXGI_FORMAT_R32G32B32_FLOAT;
       if (i == 2)
@@ -395,16 +415,30 @@ int main(int argc, char **argv) {
   sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
   device.ptr->CreateSampler(&sampler_desc, sampler_heap.ptr->GetCPUDescriptorHandleForHeapStart());
 
-  rtv_cpu = rtv_heap.ptr->GetCPUDescriptorHandleForHeapStart();
+  attachment_cpu = attachment_heap.ptr->GetCPUDescriptorHandleForHeapStart();
   D3D12_RENDER_TARGET_VIEW_DESC rtv_desc = {};
   rtv_desc.Format = format;
   rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMS;
-  device.ptr->CreateRenderTargetView(textures[6].ptr, &rtv_desc, rtv_cpu);
+  if (!stencil_ms)
+    device.ptr->CreateRenderTargetView(textures[6].ptr, &rtv_desc,
+                                       attachment_cpu);
   rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY;
   rtv_desc.Texture2DMSArray.ArraySize = 2;
-  auto rtv_array = rtv_cpu;
-  rtv_array.ptr += rtv_increment;
-  device.ptr->CreateRenderTargetView(textures[7].ptr, &rtv_desc, rtv_array);
+  auto attachment_array = attachment_cpu;
+  attachment_array.ptr += attachment_increment;
+  if (stencil_ms) {
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsv = {};
+    dsv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMS;
+    device.ptr->CreateDepthStencilView(textures[6].ptr, &dsv, attachment_cpu);
+    dsv.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY;
+    dsv.Texture2DMSArray.ArraySize = 2;
+    device.ptr->CreateDepthStencilView(textures[7].ptr, &dsv, attachment_array);
+  } else {
+    device.ptr->CreateRenderTargetView(textures[7].ptr, &rtv_desc,
+                                       attachment_array);
+  }
 
   const D3D12_RESOURCE_DESC readback_desc = BufferDesc(256, D3D12_RESOURCE_FLAG_NONE);
   if (!CheckHR("CreateReadback", device.ptr->CreateCommittedResource(
@@ -425,13 +459,20 @@ int main(int argc, char **argv) {
   for (UINT i = 0; i < 9; i++) {
     if (i == 6 || i == 7) {
       const float clear_color[] = {(i == 6 ? 77.0f : 88.0f) / 255.0f, 0.0f, 0.0f, 1.0f};
-      auto rtv = rtv_cpu;
-      rtv.ptr += rtv_increment * (i - 6);
-      list.ptr->ClearRenderTargetView(rtv, clear_color, 0, nullptr);
+      auto attachment = attachment_cpu;
+      attachment.ptr += attachment_increment * (i - 6);
+      if (stencil_ms)
+        list.ptr->ClearDepthStencilView(
+            attachment, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+            0.25f, i == 6 ? 77 : 88, 0, nullptr);
+      else
+        list.ptr->ClearRenderTargetView(attachment, clear_color, 0, nullptr);
       barrier = {};
       barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
       barrier.Transition.pResource = textures[i].ptr;
-      barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+      barrier.Transition.StateBefore = stencil_ms
+                                           ? D3D12_RESOURCE_STATE_DEPTH_WRITE
+                                           : D3D12_RESOURCE_STATE_RENDER_TARGET;
       barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
       barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
       list.ptr->ResourceBarrier(1, &barrier);
@@ -489,7 +530,7 @@ int main(int argc, char **argv) {
     }
   }
   readback.ptr->Unmap(0, nullptr);
-  std::cout << "rgb96=" << rgb96 << " storage="
+  std::cout << "stencil_ms=" << stencil_ms << " rgb96=" << rgb96 << " storage="
             << (typeless ? "typeless filter=linear" : "typed filter=point")
             << "\n";
   std::cout << "DXIL texture dimensions readback passed: 11,22,33,44,55,66,77,88,99\n";

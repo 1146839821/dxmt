@@ -1640,6 +1640,38 @@ User .gitignore unchanged; no push. Evidence:
 `perf-aggregate.json`, `repro-perf-aggregate.json`,
 `legacy-final-perf-aggregate.json`, `disassembly.json`, `manifest.json`.
 
+### N09 implicit stencil SRV planes (2026-10-24)
+
+Confirmed baseline regression: the shared PlaneSlice validator received zero
+for MS/MSArray SRVs, whose public descriptors have no PlaneSlice field, so
+four legal stencil-only views were rejected. The existing format flags now
+initialize the implicit plane; explicit 2D/2DArray descriptors still overwrite
+it and retain all format/plane bounds checks. No new source/header, state,
+cache, format table, capability or feature-level promotion.
+
+Same final PE + baseline DLL twice: 4 fail/36 pass. Candidate: 40/40,
+including seeded-descriptor preservation on rejected explicit selections.
+Sixteen final runtime processes pass with verified DLL loads and Metal
+API/GPU validation enabled. Public-API GPU stencil reads cover D24 MS and
+D32S8 MSArray, every one of four samples and both array layers (77/88),
+plus ordinary typeless/RGB96 controls and two depth/stencil copy rounds.
+Scoped build, three changed-TU no-private syntax checks, formatting and
+unchanged export names/ordinals101..106 pass. No-private full runtime,
+native Windows differential, exhaustive cube/1D/3D/default/video combinations
+and T3/T4 remain NOT_RUN.
+
+Three alternating pairs, 18 timing processes, median process p50/p95:
+10000 mixed view writes1841.65/1876.80 ->1869.75/1903.40us
+(+1.53%/+1.42%); record3185.10/3287.50 ->3172.50/3306.70us
+(-0.40%/+0.58%); ordinary submit112.80/143.10 ->101.50/121.80us
+(-10.02%/-14.88%). These are local fixture observations, not isolated
+instruction attribution; historical performance and overall Device gates stay
+OPEN. Initial fixture compile failure and two stale-runner usage failures
+are retained separately; corrected final runs are the evidence above.
+Evidence: `../dxmt-test/n09-implicit-stencil-plane-20261024/`
+`N09-implicit-stencil-plane.md`, `manifest.json`, `validation-results.json`,
+`red-results.json`, `no-private-final.json`, `perf-aggregate.json`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

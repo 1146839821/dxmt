@@ -1219,7 +1219,9 @@ public:
     }
 
     FLOAT ResourceMinLODClamp = 0;
-    UINT PlaneSlice = 0;
+    // Views without a PlaneSlice field select the depth/stencil plane by format.
+    // The 2D and 2D-array cases below replace this with their explicit selection.
+    UINT PlaneSlice = (metal_format.Flag & MTL_DXGI_FORMAT_STENCIL_PLANER) ? 1u : 0u;
     UINT ViewFirstMipLevel = 0;
     UINT ViewMipLevelCount = 1;
     UINT ViewFirstArraySlice = 0;

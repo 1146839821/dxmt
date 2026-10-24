@@ -829,7 +829,7 @@ bool CheckTypedViewFormats(UINT mode = 0) {
   struct Objects {
     ID3D12Device *device = nullptr;
     ID3D12DescriptorHeap *heaps[3] = {};
-    ID3D12Resource *resources[19] = {};
+    ID3D12Resource *resources[23] = {};
     ~Objects() {
       for (auto &heap : heaps)
         Release(heap);
@@ -855,8 +855,14 @@ bool CheckTypedViewFormats(UINT mode = 0) {
       DXGI_FORMAT_B8G8R8A8_TYPELESS,  DXGI_FORMAT_BC1_TYPELESS,
       DXGI_FORMAT_BC4_TYPELESS,       DXGI_FORMAT_BC4_UNORM,
       DXGI_FORMAT_R16_TYPELESS,       DXGI_FORMAT_D16_UNORM,
-      DXGI_FORMAT_R16_TYPELESS};
-  for (UINT i = 0; i < (mode == 2 ? 19u : mode == 1 ? 16u : 9u); i++) {
+      DXGI_FORMAT_R16_TYPELESS,       DXGI_FORMAT_R24G8_TYPELESS,
+      DXGI_FORMAT_R24G8_TYPELESS,     DXGI_FORMAT_R32G8X24_TYPELESS,
+      DXGI_FORMAT_R32G8X24_TYPELESS};
+  for (UINT i = 0; i < (mode == 3   ? 23u
+                        : mode == 2 ? 19u
+                        : mode == 1 ? 16u
+                                    : 9u);
+       i++) {
     auto desc =
         i == 5
             ? BufferDescription(256, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
@@ -870,6 +876,11 @@ bool CheckTypedViewFormats(UINT mode = 0) {
     if (i >= 12 && i < 16) {
       desc.Width = desc.Height = 4;
       desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    }
+    if (i >= 19) {
+      desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+      desc.SampleDesc.Count = 4;
+      desc.DepthOrArraySize = i % 2 ? 1 : 2;
     }
     if (!CheckHR("Typed formats resource",
                  o.device->CreateCommittedResource(
@@ -911,6 +922,17 @@ bool CheckTypedViewFormats(UINT mode = 0) {
       } else {
         v.Texture2D.MipLevels = 1;
         v.Texture2D.PlaneSlice = plane;
+      }
+      if (resource >= 19) {
+        v = {};
+        v.Format = format;
+        v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        if (resource % 2) {
+          v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
+        } else {
+          v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY;
+          v.Texture2DMSArray.ArraySize = 2;
+        }
       }
       o.device->CreateShaderResourceView(
           object, defaults ? nullptr : &v,
@@ -968,6 +990,47 @@ bool CheckTypedViewFormats(UINT mode = 0) {
       return nullptr;
     }
   };
+  if (mode == 3) {
+    const DXGI_FORMAT planes[] = {DXGI_FORMAT_R24_UNORM_X8_TYPELESS,
+                                  DXGI_FORMAT_X24_TYPELESS_G8_UINT,
+                                  DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS,
+                                  DXGI_FORMAT_X32_TYPELESS_G8X24_UINT};
+    bool good = true;
+    for (UINT resource = 19; resource < 23; resource++) {
+      for (UINT plane = 0; plane < 2; plane++) {
+        shader->ClearDescriptor(0);
+        write(0, resource, planes[(resource < 21 ? 0 : 2) + plane]);
+        const bool pass = identity(0) == static_cast<dxmt::MTLD3D12Resource *>(
+                                             o.resources[resource])
+                                             ->texture.ptr();
+        std::cout << "view_plane implicit_resource=" << resource
+                  << " plane=" << plane << " pass=" << pass << "\n";
+        good &= pass;
+      }
+    }
+    for (UINT i = 0; i < 4; i++) {
+      const UINT resource = i < 2 ? 4 : 3;
+      for (UINT plane : {0u, 1u, 2u, ~0u}) {
+        const bool valid = plane == i % 2;
+        for (bool seeded : {false, true}) {
+          shader->ClearDescriptor(0);
+          if (seeded)
+            write(0, 6, DXGI_FORMAT_R8G8B8A8_UNORM);
+          const void *before = identity(0);
+          write(0, resource, planes[i], false, plane);
+          const bool pass =
+              valid ? identity(0) == static_cast<dxmt::MTLD3D12Resource *>(
+                                         o.resources[resource])
+                                         ->texture.ptr()
+                    : identity(0) == before && (!seeded || before);
+          std::cout << "view_plane explicit=" << i << " plane=" << plane
+                    << " seeded=" << seeded << " pass=" << pass << "\n";
+          good &= pass;
+        }
+      }
+    }
+    return good;
+  }
   if (mode == 2) {
     struct Role {
       UINT kind, resource;
@@ -1247,6 +1310,8 @@ bool CheckTypedViewFormats(UINT mode = 0) {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::string(argv[1]) == "--texture-view-planes")
+    return CheckTypedViewFormats(3) ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--texture-view-roles")
     return CheckTypedViewFormats(2) ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--texture-view-casts")
