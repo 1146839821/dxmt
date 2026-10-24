@@ -2159,6 +2159,56 @@ remain OPEN. Evidence: `../dxmt-test/n02-depth-ms-samples-20261024/`:
 `N02-depth-ms-samples.md`, `results.json`, `raw-results.json`, `manifest.json`,
 `shader-builds.json`, `negative-builds.json`, `no-private.json`, `sources.json`.
 
+### N07 — MSC fragment PSO SampleMask and cache identity, 2026-10-24
+
+Baseecf87c94. Fresh private-runtime depth/stencil originals both reproduce the
+N02 failure before modification; both become green after forwarding canonical
+SampleMask through existing classic/mesh graphics conversion, key and thunk.
+MSC previously ignored the state while AIRCONV received it. The existing
+conversion key now hashes normalized fragment mask and setter availability;
+policy version11->12 excludes old incorrect conversions. Canonical PSO blobs
+already encode SampleMask and retain their existing owner/format.
+
+A flagged fragment-mask/vertex-layout union preserves native/PE64 size11960
+and WOW64/PE32 size11872 and all measured offsets. WOW64 forwards the tagged
+member. Native compilation calls optional IRCompilerSetSampleMask on each
+non-default fragment conversion, including both compilation passes. Missing
+setter rejects that PSO with E_NOTIMPL, while default all-one still works.
+Only an internal optional-symbol observation bit changes, not public features.
+
+Original/reversed depth/stencil, zero/default masks, explicit coverage,
+coverage intersection and warm-cache readbacks pass. First matrix:2 original
+red-to-green,19 directed/adjacent processes,2 missing-API controls;168 normal
+sample/layer comparisons plus12 missing-API default checks. Wrong zero-reader
+negative controls are detected. Warm runs each verify11 memory/6 persistent
+hits. Pipeline persistence compute/graphics, stream/library and invalid cases,
+feature70/70 and format59/59 pass. After adding the separate gated mesh caller,
+final PE build and four original/subset smokes add48 passing comparisons.
+Mesh execution remains unverified/gated; prior matrix DLL is retained separately.
+All correctness device runs verify API/GPU validation; native paths checked by
+dyld. No GPU validation error/abort. Scoped PE+Unix builds, postprocessing,
+three final no-private syntax TUs, native/PE64/PE32 layout checks,16 DXC compiles
+and five fixture registrations/dry-runs pass. Full no-private/WOW64 runtime,
+configured Meson shader command and T3/T4 NOT_RUN.
+
+Balanced4-process-order performance (validation0/0, HUD1) retains warnings:
+default conversion-cold first8 PSOs29286.9->30429.65us(+3.90%); persistent-warm
+18399.8->18421.95us(+0.12%). Recording p50/p95 -1.38%/-2.20%; ordinary Submit
+93.6/103.0->94.1/114.5us(+0.53%/+11.17%). Submit tail causality remains OPEN;
+no regression-free or speedup claim. Masked cold/persistent first8 costs
+80161.2/18261.1us (one pair, distinct masks require distinct compilations).
+No added draw/submit lock, allocation or scan; existing cache owns the extra
+32-bit identity input. Earlier/global performance gates remain OPEN.
+
+No new src/d3d12 source/header, cache manager, format table, root/binding ABI
+or FL/SM/Options/Tier/format promotion. Wire layout preserved; internal C++
+forwarding adds one value. PS-less/color-target/other-sample-count paths are
+not claimed verified. Component MS_LOAD underreport and full Device gates OPEN.
+Next: N13 ordinary Submit p95 investigation. Evidence:
+`../dxmt-test/n07-sample-mask-20261024/N07-sample-mask.md`, `manifest.json`,
+`red-results.json`, `green-results.json`, `results.json`, `final-results.json`,
+`missing-results.json`, `abi-results.json`, `perf-aggregate.json` and raw logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

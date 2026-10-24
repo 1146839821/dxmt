@@ -238,17 +238,19 @@ void SetSrvDesc(D3D12_SHADER_RESOURCE_VIEW_DESC &desc, UINT index) {
 } // namespace
 
 int main(int argc, char **argv) {
-  const bool stencil_ms = (argc == 3 || argc == 5) &&
+  const bool stencil_ms = (argc == 3 || argc == 5 || argc == 6) &&
                           (!std::strcmp(argv[2], "--stencil-ms") ||
                            !std::strcmp(argv[2], "--stencil-ms-reversed"));
-  const bool depth_ms = (argc == 3 || argc == 5) &&
+  const bool depth_ms = (argc == 3 || argc == 5 || argc == 6) &&
                         (!std::strcmp(argv[2], "--depth-ms") ||
                          !std::strcmp(argv[2], "--depth-ms-reversed"));
-  const bool reversed = (argc == 3 || argc == 5) &&
+  const bool reversed = (argc == 3 || argc == 5 || argc == 6) &&
                         (!std::strcmp(argv[2], "--depth-ms-reversed") ||
                          !std::strcmp(argv[2], "--stencil-ms-reversed"));
   const bool depth_stencil_ms = stencil_ms || depth_ms;
-  const bool distinct_ms = depth_stencil_ms && argc == 5;
+  const bool distinct_ms = depth_stencil_ms && argc >= 5;
+  const bool mask_all = argc == 6 && !std::strcmp(argv[5], "--mask-all");
+  const bool mask_zero = argc == 6 && !std::strcmp(argv[5], "--mask-zero");
   const bool rgb96 = argc == 3 && (!std::strcmp(argv[2], "--rgb96") ||
                                    !std::strcmp(argv[2], "--rgb96-typeless"));
   const bool bc1 = argc == 3 && (!std::strcmp(argv[2], "--bc1") ||
@@ -271,14 +273,17 @@ int main(int argc, char **argv) {
                     !std::strcmp(argv[2], "--bc3-typeless") ||
                     !std::strcmp(argv[2], "--bc1-srgb-typeless") ||
                     !std::strcmp(argv[2], "--bc3-srgb-typeless"));
-  if (argc != 2 && !typeless && !rgb96 && !depth_stencil_ms && !bc) {
-    std::cerr << "usage: dx12_texture_dimensions <shader.cso> "
-                 "[--typeless|--rgb96|--rgb96-typeless|--stencil-ms|"
-                 "--stencil-ms-reversed|--depth-ms|--depth-ms-reversed|"
-                 "--bc1|--bc1-srgb|--bc1-typeless|--bc1-srgb-typeless|"
-                 "--bc3|--bc3-srgb|--bc3-typeless|--bc3-srgb-typeless]\n"
-                 "Depth/stencil modes optionally take <write.vs.cso> "
-                 "<write.ps.cso> for distinct sample/layer values.\n";
+  if ((argc == 6 && !mask_all && !mask_zero) ||
+      (argc != 2 && !typeless && !rgb96 && !depth_stencil_ms && !bc)) {
+    std::cerr
+        << "usage: dx12_texture_dimensions <shader.cso> "
+           "[--typeless|--rgb96|--rgb96-typeless|--stencil-ms|"
+           "--stencil-ms-reversed|--depth-ms|--depth-ms-reversed|"
+           "--bc1|--bc1-srgb|--bc1-typeless|--bc1-srgb-typeless|"
+           "--bc3|--bc3-srgb|--bc3-typeless|--bc3-srgb-typeless]\n"
+           "Depth/stencil modes optionally take <write.vs.cso> "
+           "<write.ps.cso> [--mask-all|--mask-zero] for distinct "
+           "sample/layer values. Match the compute fixture to the mask.\n";
     return 2;
   }
 
@@ -610,7 +615,7 @@ int main(int argc, char **argv) {
                            ? DXGI_FORMAT_D24_UNORM_S8_UINT
                            : DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
       for (UINT sample = 0; sample < 4; sample++) {
-        draw.SampleMask = 1u << sample;
+        draw.SampleMask = mask_all ? UINT_MAX : mask_zero ? 0 : 1u << sample;
         if (!CheckHR("CreateSampleWritePipeline",
                      device.ptr->CreateGraphicsPipelineState(
                          &draw, IID_PPV_ARGS(&sample_psos[index][sample].ptr))))
@@ -754,7 +759,11 @@ int main(int argc, char **argv) {
   readback.ptr->Unmap(0, nullptr);
   std::cout << "bc=" << bc << " bc3=" << bc3 << " srgb=" << srgb << "\n";
   std::cout << "distinct_ms=" << distinct_ms
-            << " sample_values_checked=" << (distinct_ms ? 12 : 0) << "\n";
+            << " sample_values_checked=" << (distinct_ms ? 12 : 0) << " mask="
+            << (mask_all    ? "all"
+                : mask_zero ? "zero"
+                            : "one-bit")
+            << "\n";
   std::cout << "depth_ms=" << depth_ms << " reversed=" << reversed
             << " stencil_ms=" << stencil_ms << " rgb96=" << rgb96
             << " storage=" << (typeless ? "typeless" : "typed")

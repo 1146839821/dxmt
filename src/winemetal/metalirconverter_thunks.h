@@ -66,6 +66,7 @@ enum dxmt_msc_compile_flags {
   DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION = 1u << 0,
   DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN = 1u << 1,
   DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION = 1u << 2,
+  DXMT_MSC_COMPILE_FLAG_SAMPLE_MASK = 1u << 3,
 };
 
 /* MSC uses UINT32_MAX to disable extension resource-space interpretation. */
@@ -112,6 +113,7 @@ enum dxmt_msc_validation_flags {
 #define DXMT_MSC_RUNTIME_SYMBOL_GEOMETRY_REFLECTION (UINT64_C(1) << 24)
 #define DXMT_MSC_RUNTIME_SYMBOL_TESSELLATION_REFLECTION (UINT64_C(1) << 25)
 #define DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_REFLECTION (UINT64_C(1) << 26)
+#define DXMT_MSC_RUNTIME_SYMBOL_SAMPLE_MASK (UINT64_C(1) << 27)
 
 #pragma pack(push, 8)
 
@@ -233,7 +235,12 @@ struct dxmt_msc_compile_dxil_params {
   uint32_t stage;
   uint32_t reserved; /* dxmt_msc_compile_flags */
 
-  struct dxmt_msc_input_layout input_layout;
+  /* Stage-specific payload; retain the existing PE/native/WOW64 layout.
+   * sample_mask is valid only for fragments with COMPILE_FLAG_SAMPLE_MASK. */
+  union {
+    struct dxmt_msc_input_layout input_layout;
+    uint32_t sample_mask;
+  };
 
   const void *root_signature;
   size_t root_signature_size;
@@ -283,7 +290,12 @@ struct dxmt_msc_compile_dxil_params32 {
   uint32_t stage;
   uint32_t reserved; /* dxmt_msc_compile_flags */
 
-  struct dxmt_msc_input_layout input_layout;
+  /* Stage-specific payload; retain the existing PE/native/WOW64 layout.
+   * sample_mask is valid only for fragments with COMPILE_FLAG_SAMPLE_MASK. */
+  union {
+    struct dxmt_msc_input_layout input_layout;
+    uint32_t sample_mask;
+  };
 
   uint32_t root_signature;
   uint32_t root_signature_size;

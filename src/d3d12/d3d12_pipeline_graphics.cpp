@@ -969,12 +969,11 @@ public:
 
       if (pDesc->PS.pShaderBytecode) {
         if (FAILED(
-              hr = ConvertD3D12Shader(
+                hr = ConvertD3D12Shader(
                     ps_classification, pDesc->PS, DXMT_MSC_STAGE_FRAGMENT, converted_ps, root_signature,
-                    root_signature_size, nullptr, 0, &msc_capabilities
+                    root_signature_size, nullptr, 0, &msc_capabilities, pDesc->SampleMask
                 )
-            ))
-        {
+            )) {
           return hr;
         }
         ps_lib = metal.newLibrary(converted_ps.metallib.data(), converted_ps.metallib.size(), err);
@@ -1760,7 +1759,7 @@ MTLD3D12GraphicsPipelineStateImpl::InitializeMesh(const D3D12PipelineStreamData 
   if (!data.pixel_shader.empty()) {
     hr = ConvertD3D12Shader(
         ps_classification, ps_bytecode, DXMT_MSC_STAGE_FRAGMENT, converted_ps, root_signature, root_signature_size,
-        nullptr, 0, &msc_capabilities
+        nullptr, 0, &msc_capabilities, data.sample_mask
     );
     if (FAILED(hr))
       return hr;

@@ -17,7 +17,12 @@ struct WriteOutput {
 WriteOutput pixel_main() {
   WriteOutput value;
   value.depth = write_depth;
+#ifdef MS_COVERAGE_SUBSET
+  // Wider and narrower than the PSO mask: both inputs must participate in AND.
+  value.coverage = (write_coverage & 5) ? 0xffffffff : 0;
+#else
   value.coverage = write_coverage;
+#endif
   return value;
 }
 #else
@@ -54,19 +59,19 @@ uint ToByte(float4 value, uint index) {
 }
 
 #ifdef STENCIL_MS
-uint MSValue(uint4 value, uint expected) {
+bool MSMatches(uint4 value, uint expected) {
   if (value.x != 0 || value.z != 0 || value.w != 1)
     return 0;
-  return value.y;
+  return value.y == expected;
 }
 #else
-uint MSValue(float4 value, uint expected) {
+bool MSMatches(float4 value, uint expected) {
 #ifdef DEPTH_MS
   if (abs(value.x - expected / 255.0) > 0.000001 || value.y != 0.0 || value.z != 0.0 ||
       value.w != 1.0)
     return 0;
 #endif
-  return ToByte(value, 6);
+  return ToByte(value, 6) == expected;
 }
 #endif
 
@@ -210,8 +215,14 @@ bool CheckBC(uint index) {
 #else
     uint sample_delta = 0;
 #endif
-    if (MSValue(texture_ms.Load(int2(0, 0), sample), 77 + sample_delta) !=
-        77 + sample_delta)
+    uint expected_ms = 77 + sample_delta;
+#ifdef MS_ZERO
+    expected_ms = 0;
+#elif defined(MS_SUBSET)
+    if (sample & 1)
+      expected_ms = 0;
+#endif
+    if (!MSMatches(texture_ms.Load(int2(0, 0), sample), expected_ms))
       output[6] = 0;
     for (uint layer = 0; layer < 2; layer++) {
 #ifdef MS_DISTINCT
@@ -219,8 +230,13 @@ bool CheckBC(uint index) {
 #else
       uint expected = 88;
 #endif
-      if (MSValue(texture_ms_array.Load(int3(0, 0, layer), sample), expected) !=
-          expected)
+#ifdef MS_ZERO
+      expected = 0;
+#elif defined(MS_SUBSET)
+      if (sample & 1)
+        expected = 0;
+#endif
+      if (!MSMatches(texture_ms_array.Load(int3(0, 0, layer), sample), expected))
         output[7] = 0;
     }
   }

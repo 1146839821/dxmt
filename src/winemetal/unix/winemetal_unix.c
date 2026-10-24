@@ -2580,7 +2580,10 @@ thunk32_DXMTMSCCompileDXIL(void *args) {
   params.dxil_size = src->dxil_size;
   params.stage = src->stage;
   params.reserved = src->reserved;
-  params.input_layout = src->input_layout;
+  if (src->reserved & DXMT_MSC_COMPILE_FLAG_SAMPLE_MASK)
+    params.sample_mask = src->sample_mask;
+  else
+    params.input_layout = src->input_layout;
   params.root_signature = UInt32ToPtr(src->root_signature);
   params.root_signature_size = src->root_signature_size;
   params.entry_point = UInt32ToPtr(src->entry_point);

@@ -304,7 +304,7 @@ ConvertD3D12Shader(
     const D3D12ShaderClassification &classification, const D3D12_SHADER_BYTECODE &shader, uint32_t stage,
     D3D12ConvertedShader &converted, const void *root_signature = nullptr, size_t root_signature_size = 0,
     const dxmt_msc_input_layout *input_layout = nullptr, uint32_t compile_flags = 0,
-    const DXMTMSCCapabilities *msc_capabilities = nullptr
+    const DXMTMSCCapabilities *msc_capabilities = nullptr, uint32_t sample_mask = UINT32_MAX
 );
 
 HRESULT
@@ -320,7 +320,7 @@ ConvertD3D12Shader(
     const D3D12_SHADER_BYTECODE &shader, uint32_t stage, D3D12ConvertedShader &converted,
     const void *root_signature = nullptr, size_t root_signature_size = 0,
     const dxmt_msc_input_layout *input_layout = nullptr, uint32_t compile_flags = 0,
-    const DXMTMSCCapabilities *msc_capabilities = nullptr
+    const DXMTMSCCapabilities *msc_capabilities = nullptr, uint32_t sample_mask = UINT32_MAX
 );
 
 HRESULT

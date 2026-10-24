@@ -196,7 +196,7 @@ constexpr uint64_t kDXILAtomic64OnHeapResource = 0x10000000;
 // This cache is process-local, but the key still encodes every converter input
 // that can change the generated metallib. Bump the version when the ABI or
 // converter defaults change.
-constexpr uint32_t kMSCConversionCacheVersion = 11;
+constexpr uint32_t kMSCConversionCacheVersion = 12;
 constexpr uint32_t kMSCConverterAPIVersion = 0x040001;
 constexpr uint32_t kMSCMetalTargetVersion = 0;
 constexpr uint32_t kMSCCompileFlags = 0;
@@ -231,7 +231,8 @@ Sha1Digest
 MakeMSCConversionCacheKey(
     const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const char *entry_point, const void *root_signature,
     size_t root_signature_size, const void *local_root_signature, size_t local_root_signature_size,
-    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags, const DXMTMSCCapabilities *msc_capabilities
+    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags, const DXMTMSCCapabilities *msc_capabilities,
+    uint32_t sample_mask
 ) {
   Sha1HashState hash;
   hash.update(kMSCConversionCacheNamespace, sizeof(kMSCConversionCacheNamespace) - 1);
@@ -295,6 +296,7 @@ MakeMSCConversionCacheKey(
     hash.update(entry_point, entry_point_size);
   compile_flags |= input_layout ? DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0;
   hash.update(compile_flags);
+  hash.update(sample_mask);
   if (input_layout)
     hash.update(input_layout, sizeof(*input_layout));
   uint64_t shader_size = shader.BytecodeLength;
@@ -1365,14 +1367,13 @@ MSCResultToHRESULT(int result) {
 
 int
 CompileDXIL(
-  const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const char *requested_entry_point, const void *root_signature,
-  size_t root_signature_size, const void *local_root_signature, size_t local_root_signature_size,
-  const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
-  void *metallib, size_t metallib_capacity, char *entry_point_output, size_t entry_point_capacity,
-  size_t *metallib_size, size_t *entry_point_size, std::array<uint32_t, 3> *threadgroup_size,
-  void *stage_in_metallib,
-  size_t stage_in_metallib_capacity, size_t *stage_in_metallib_size, dxmt_msc_shader_reflection *reflection,
-  char *error_message, size_t error_message_capacity, const DXMTMSCCapabilities *msc_capabilities
+    const D3D12_SHADER_BYTECODE &shader, uint32_t stage, const char *requested_entry_point, const void *root_signature,
+    size_t root_signature_size, const void *local_root_signature, size_t local_root_signature_size,
+    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags, void *metallib, size_t metallib_capacity,
+    char *entry_point_output, size_t entry_point_capacity, size_t *metallib_size, size_t *entry_point_size,
+    std::array<uint32_t, 3> *threadgroup_size, void *stage_in_metallib, size_t stage_in_metallib_capacity,
+    size_t *stage_in_metallib_size, dxmt_msc_shader_reflection *reflection, char *error_message,
+    size_t error_message_capacity, const DXMTMSCCapabilities *msc_capabilities, uint32_t sample_mask
 ) {
   dxmt_msc_compile_dxil_params params = {};
   params.dxil = shader.pShaderBytecode;
@@ -1381,6 +1382,10 @@ CompileDXIL(
   params.reserved = compile_flags;
   if (input_layout)
     params.input_layout = *input_layout;
+  if (stage == DXMT_MSC_STAGE_FRAGMENT && sample_mask != UINT32_MAX) {
+    params.reserved |= DXMT_MSC_COMPILE_FLAG_SAMPLE_MASK;
+    params.sample_mask = sample_mask;
+  }
   params.root_signature = root_signature;
   params.root_signature_size = root_signature_size;
   params.local_root_signature = local_root_signature;
@@ -1717,7 +1722,7 @@ ConvertD3D12ShaderInternal(
     const char *requested_entry_point, bool allow_library_shader, D3D12ConvertedShader &converted,
     const void *root_signature, size_t root_signature_size, const void *local_root_signature,
     size_t local_root_signature_size, const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
-    const DXMTMSCCapabilities *msc_capabilities
+    const DXMTMSCCapabilities *msc_capabilities, uint32_t sample_mask
 ) {
   const HRESULT stage_hr = ValidateD3D12MSCShaderConversion(classification, stage, allow_library_shader);
   if (FAILED(stage_hr)) {
@@ -1797,10 +1802,14 @@ ConvertD3D12ShaderInternal(
     return E_FAIL;
   }
 
+  // PSO sample selection only affects fragments; other stages keep their
+  // existing canonical compiler configuration.
+  if (stage != DXMT_MSC_STAGE_FRAGMENT)
+    sample_mask = UINT32_MAX;
   compile_flags |= input_layout ? DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN : 0;
   auto cache_key = MakeMSCConversionCacheKey(
       shader, stage, requested_entry_point, root_signature, root_signature_size, local_root_signature,
-      local_root_signature_size, input_layout, compile_flags, msc_capabilities
+      local_root_signature_size, input_layout, compile_flags, msc_capabilities, sample_mask
   );
   auto &cache = GetMSCConversionCache();
   {
@@ -1828,9 +1837,9 @@ ConvertD3D12ShaderInternal(
 
   int result = CompileDXIL(
       shader, stage, requested_entry_point, root_signature, root_signature_size, local_root_signature,
-      local_root_signature_size, input_layout, compile_flags, nullptr, 0, nullptr, 0, &metallib_size,
-      &entry_point_size, &threadgroup_size, nullptr, 0, &stage_in_metallib_size, &reflection, error_message,
-      sizeof(error_message), msc_capabilities
+      local_root_signature_size, input_layout, compile_flags, nullptr, 0, nullptr, 0, &metallib_size, &entry_point_size,
+      &threadgroup_size, nullptr, 0, &stage_in_metallib_size, &reflection, error_message, sizeof(error_message),
+      msc_capabilities, sample_mask
   );
   if (result != DXMT_MSC_SUCCESS)
     return MSCResultToHRESULT(result);
@@ -1847,7 +1856,7 @@ ConvertD3D12ShaderInternal(
       local_root_signature_size, input_layout, compile_flags, converted.metallib.data(), converted.metallib.size(),
       entry_point.data(), entry_point.size(), &metallib_size, &entry_point_size, &threadgroup_size,
       converted.stage_in_metallib.data(), converted.stage_in_metallib.size(), &stage_in_metallib_size, &reflection,
-      error_message, sizeof(error_message), msc_capabilities
+      error_message, sizeof(error_message), msc_capabilities, sample_mask
   );
   if (result != DXMT_MSC_SUCCESS)
     return MSCResultToHRESULT(result);
@@ -1874,12 +1883,12 @@ HRESULT
 ConvertD3D12Shader(
     const D3D12ShaderClassification &classification, const D3D12_SHADER_BYTECODE &shader, uint32_t stage,
     D3D12ConvertedShader &converted, const void *root_signature, size_t root_signature_size,
-    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
-    const DXMTMSCCapabilities *msc_capabilities
+    const dxmt_msc_input_layout *input_layout, uint32_t compile_flags, const DXMTMSCCapabilities *msc_capabilities,
+    uint32_t sample_mask
 ) {
   return ConvertD3D12ShaderInternal(
       classification, shader, stage, nullptr, false, converted, root_signature, root_signature_size, nullptr, 0,
-      input_layout, compile_flags, msc_capabilities
+      input_layout, compile_flags, msc_capabilities, sample_mask
   );
 }
 
@@ -1891,7 +1900,7 @@ ConvertD3D12LibraryShader(
 ) {
   return ConvertD3D12ShaderInternal(
       classification, shader, stage, entry_point, true, converted, root_signature, root_signature_size,
-      local_root_signature, local_root_signature_size, nullptr, 0, msc_capabilities
+      local_root_signature, local_root_signature_size, nullptr, 0, msc_capabilities, UINT32_MAX
   );
 }
 
@@ -1899,12 +1908,12 @@ HRESULT
 ConvertD3D12Shader(
     const D3D12_SHADER_BYTECODE &shader, uint32_t stage, D3D12ConvertedShader &converted, const void *root_signature,
     size_t root_signature_size, const dxmt_msc_input_layout *input_layout, uint32_t compile_flags,
-    const DXMTMSCCapabilities *msc_capabilities
+    const DXMTMSCCapabilities *msc_capabilities, uint32_t sample_mask
 ) {
   auto classification = ClassifyD3D12Shader(shader);
   return ConvertD3D12Shader(
       classification, shader, stage, converted, root_signature, root_signature_size, input_layout, compile_flags,
-      msc_capabilities
+      msc_capabilities, sample_mask
   );
 }
 

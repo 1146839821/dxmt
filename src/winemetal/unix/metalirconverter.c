@@ -15,6 +15,7 @@ typedef struct dxmt_msc_api {
   void (*IRCompilerDestroy)(IRCompiler *);
   void (*IRCompilerSetCompatibilityFlags)(IRCompiler *, IRCompatibilityFlags);
   void (*IRCompilerSetValidationFlags)(IRCompiler *, IRCompilerValidationFlags);
+  void (*IRCompilerSetSampleMask)(IRCompiler *, uint32_t);
   void (*IRCompilerSetMinimumGPUFamily)(IRCompiler *, IRGPUFamily);
   void (*IRCompilerSetMinimumDeploymentTarget)(IRCompiler *, IROperatingSystem, const char *);
   void (*IRCompilerIgnoreDebugInformation)(IRCompiler *, bool);
@@ -253,6 +254,9 @@ dxmt_msc_set_compiler_configuration(IRCompiler *compiler, const struct dxmt_msc_
   if (g_msc_api.IRCompilerSetValidationFlags)
     g_msc_api.IRCompilerSetValidationFlags(compiler, (IRCompilerValidationFlags)params->validation_flags);
 
+  if (params->reserved & DXMT_MSC_COMPILE_FLAG_SAMPLE_MASK)
+    g_msc_api.IRCompilerSetSampleMask(compiler, params->sample_mask);
+
   if (g_msc_api.IRCompilerSetMinimumGPUFamily && params->minimum_gpu_family)
     g_msc_api.IRCompilerSetMinimumGPUFamily(compiler, (IRGPUFamily)params->minimum_gpu_family);
 
@@ -375,6 +379,7 @@ dxmt_msc_load_symbols(void) {
   DXMT_MSC_LOAD(IRErrorDestroy);
 
   DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetCompatibilityFlags, DXMT_MSC_RUNTIME_SYMBOL_COMPATIBILITY_FLAGS);
+  DXMT_MSC_LOAD_OPTIONAL(IRCompilerSetSampleMask, DXMT_MSC_RUNTIME_SYMBOL_SAMPLE_MASK);
   DXMT_MSC_LOAD_OPTIONAL(
       IRCompilerEnableGeometryAndTessellationEmulation, DXMT_MSC_RUNTIME_SYMBOL_GEOMETRY_TESSELLATION
   );
@@ -699,6 +704,17 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   if (ir_stage == IRShaderStageInvalid) {
     dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_SHADER, "shader stage is not supported by MSC runtime");
     return DXMT_MSC_ERROR_UNSUPPORTED_SHADER;
+  }
+
+  if (params->reserved & DXMT_MSC_COMPILE_FLAG_SAMPLE_MASK) {
+    if (ir_stage != IRShaderStageFragment) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_INVALID_ARGUMENT, "sample mask requires a fragment shader");
+      return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!g_msc_api.IRCompilerSetSampleMask) {
+      dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC fragment sample mask is unavailable");
+      return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+    }
   }
 
   const bool raytracing_stage =
