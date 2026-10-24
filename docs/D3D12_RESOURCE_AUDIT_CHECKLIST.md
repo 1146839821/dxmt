@@ -2508,6 +2508,45 @@ Evidence: `../dxmt-test/n13-split-phases-20261024/`: `N13-split-phases.md`,
 `design.txt`, `manifest.json`, `identities.json`, `results.json`,
 `no-private.json`, `perf-results.json`, `aggregate.json`, scoped build and logs.
 
+### N13 — split Submit native suffix boundaries, 2026-10-24
+
+Base20b2dc7a. Documentation-only outcome; production code and the tracked test
+runner are unchanged. Detailed scoped diagnostic source, PE, reproduction
+arguments and raw evidence are archived externally. External probe compile/link
+and restored ordinary Meson test target build pass. Test-TU no-private syntax
+passes; full no-private runtime, native Windows, D3D11 rendering and T3/T4 NOT_RUN.
+
+Final detailed correctness13 processes pass with API/GPU validation1/1/HUD1:
+both DLLs, four delay calibrations, error-options factory branch, full runner and
+six-subresource GPU readback. Two pilot failures from an incorrect probe count
+expectation are retained as rejected evidence. Actual sequence: two encoders,
+six encodeCommands calls (two wait/two update/two stream), two ends. All original
+calls forward; counts, phase partitions and changing GPU payload are checked.
+No descriptor uses/native references occur in this workload.
+
+AB/BA/AB three modes,18 performance processes, validation0/0/HUD1,24 retained
+rounds/process. Median process p50/p95(us), before->candidate:
+plain Submit95.70/155.40->92.10/131.40;
+detailed total102.90/135.70->105.65/148.50;
+collector0.70/0.80->0.70/0.90; native command-buffer factory3.50/5.00->3.50/5.70;
+factory-end to commit-begin43.10/68.80->43.90/78.00;
+native commit6.10/8.30->6.10/8.60;
+nested encoder creation14.95/33.00->15.40/41.50.
+Encoder creation contributes to slow samples on both DLLs; commands and residual
+intervals also vary. These wall-time percentiles are not additive or CPU self-time.
+Plain paired p95 directions+,-,-; detailed+,-,+. Instrumentation changes call
+shape. No stable DXMT root cause, noise bound or replacement performance
+acceptance is established; historical N12 p95+34.46% remains OPEN.
+
+Do not remove valid encoder/fence boundaries or cache validation on this evidence.
+Stop unchanged timing matrices; next distinct work can return to N12 cross-queue
+split semantics under Device acceptance. Global Device/performance gates remain
+OPEN, EnhancedBarriersSupported FALSE, no FL/SM/Options/Tier promotion.
+Shared Wine and user .gitignore unchanged. Evidence:
+`../dxmt-test/n13-split-native-20261024/N13-split-native.md`, `manifest.json`,
+`identities.json`, `results.json`, `calibration.json`, `perf-results.json`,
+`aggregate.json`, `split-native-probe.cpp`, `rebuild-commands.json` and raw logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
