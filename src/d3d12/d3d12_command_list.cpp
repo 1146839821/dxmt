@@ -2076,12 +2076,28 @@ public:
       // Metal only accepts Buffers and Textures here, not RenderTargets.
       if (scope & WMTBarrierScopeRenderTargets)
         scope = static_cast<WMTBarrierScope>((scope & ~WMTBarrierScopeRenderTargets) | WMTBarrierScopeTextures);
+      auto *tail = static_cast<ComputeEncoderData *>(allocator_->encoder_current)->cmd_tail;
+      if (tail->type == WMTComputeCommandMemoryBarrier) {
+        auto *barrier = reinterpret_cast<wmtcmd_compute_memory_barrier *>(tail);
+        barrier->scope = static_cast<WMTBarrierScope>(barrier->scope | scope);
+        break;
+      }
       auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_memory_barrier>();
       cmd.type = WMTComputeCommandMemoryBarrier;
       cmd.scope = scope;
       break;
     }
     case EncoderType::Render: {
+      // Adjacent packets have no intervening GPU work. Their union preserves
+      // every dependency; any other command ends the run through cmd_tail.
+      auto *tail = static_cast<RenderEncoderData *>(allocator_->encoder_current)->cmd_tail;
+      if (tail->type == WMTRenderCommandMemoryBarrier) {
+        auto *barrier = reinterpret_cast<wmtcmd_render_memory_barrier *>(tail);
+        barrier->scope = static_cast<WMTBarrierScope>(barrier->scope | scope);
+        barrier->stages_after = static_cast<WMTRenderStages>(barrier->stages_after | stages_after);
+        barrier->stages_before = static_cast<WMTRenderStages>(barrier->stages_before | stages_before);
+        break;
+      }
       auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_memory_barrier>();
       cmd.type = WMTRenderCommandMemoryBarrier;
       cmd.scope = scope;

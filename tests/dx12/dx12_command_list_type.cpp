@@ -2388,15 +2388,16 @@ class ComputeBarrierCounter {
          command = static_cast<const wmtcmd_base *>(command->next.ptr)) {
       if (command->type == WMTComputeCommandDispatch ||
           command->type == WMTComputeCommandDispatchThreads) {
-        if (!dispatches)
+        if (!dispatches) {
           first_encoder_ = encoder;
-        else if (dispatches == 1)
-          same_encoder = encoder == first_encoder_;
+          same_encoder = true;
+        } else
+          same_encoder &= encoder == first_encoder_;
         ++dispatches;
       } else if (command->type == WMTComputeCommandMemoryBarrier &&
-                 dispatches == 1) {
-        ++barriers;
-        scope |=
+                 (dispatches == 1 || dispatches == 2)) {
+        ++(dispatches == 1 ? barriers : second_barriers);
+        (dispatches == 1 ? scope : second_scope) |=
             reinterpret_cast<const wmtcmd_compute_memory_barrier *>(command)
                 ->scope;
       }
@@ -2406,9 +2407,10 @@ class ComputeBarrierCounter {
 
 public:
   inline static UINT dispatches = 0, barriers = 0, scope = 0;
+  inline static UINT second_barriers = 0, second_scope = 0;
   inline static bool same_encoder = false;
   bool Install() {
-    dispatches = barriers = scope = 0;
+    dispatches = barriers = scope = second_barriers = second_scope = 0;
     same_encoder = false;
     first_encoder_ = 0;
     return patch_.Install("MTLComputeCommandEncoder_encodeCommands",
@@ -2424,18 +2426,21 @@ class RenderBarrierCounter {
     for (auto *command = head; command;
          command = static_cast<const wmtcmd_base *>(command->next.ptr)) {
       if (command->type == WMTRenderCommandDraw) {
-        if (!draws)
+        if (!draws) {
           first_encoder_ = encoder;
-        else if (draws == 1)
-          same_encoder = encoder == first_encoder_;
+          same_encoder = true;
+        } else
+          same_encoder &= encoder == first_encoder_;
         ++draws;
-      } else if (command->type == WMTRenderCommandMemoryBarrier && draws == 1) {
+      } else if (command->type == WMTRenderCommandMemoryBarrier &&
+                 (draws == 1 || draws == 2)) {
         const auto *barrier =
             reinterpret_cast<const wmtcmd_render_memory_barrier *>(command);
         if (barrier->scope & WMTBarrierScopeBuffers) {
-          ++barriers;
-          after |= barrier->stages_after;
-          before |= barrier->stages_before;
+          ++(draws == 1 ? barriers : second_barriers);
+          (draws == 1 ? after : second_after) |= barrier->stages_after;
+          (draws == 1 ? before : second_before) |= barrier->stages_before;
+          (draws == 1 ? scope : second_scope) |= barrier->scope;
         }
       }
     }
@@ -2443,10 +2448,13 @@ class RenderBarrierCounter {
   }
 
 public:
-  inline static UINT draws = 0, barriers = 0, after = 0, before = 0;
+  inline static UINT draws = 0, barriers = 0, after = 0, before = 0, scope = 0;
+  inline static UINT second_barriers = 0, second_after = 0, second_before = 0,
+                     second_scope = 0;
   inline static bool same_encoder = false;
   bool Install() {
-    draws = barriers = after = before = 0;
+    draws = barriers = after = before = scope = 0;
+    second_barriers = second_after = second_before = second_scope = 0;
     same_encoder = false;
     first_encoder_ = 0;
     return patch_.Install("MTLRenderCommandEncoder_encodeCommands",
@@ -2454,7 +2462,7 @@ public:
   }
 };
 
-bool TestConstantBufferBarrierStages() {
+bool TestConstantBufferBarrierStages(bool adjacent = false) {
   struct Compiler {
     HMODULE value = LoadLibraryA(D3DCOMPILER_DLL_A);
     ~Compiler() {
@@ -2686,6 +2694,28 @@ bool TestConstantBufferBarrierStages() {
                       : D3D12_RESOURCE_STATE_COPY_SOURCE;
       list->ResourceBarrier(1, &transition);
     }
+    D3D12_GLOBAL_BARRIER dependency = {
+        D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_SYNC_PIXEL_SHADING,
+        D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_ACCESS_NO_ACCESS};
+    D3D12_BARRIER_GROUP dependencies = {};
+    dependencies.Type = D3D12_BARRIER_TYPE_GLOBAL;
+    dependencies.NumBarriers = 1;
+    dependencies.pGlobalBarriers = &dependency;
+    if (adjacent)
+      for (UINT i = 0; i < 8; ++i)
+        list7->Barrier(1, &dependencies);
+    if (adjacent && mode == 3) {
+      // End with narrower buffer/stage scopes to require a union, not
+      // overwrite.
+      transition.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+      transition.Transition.StateAfter =
+          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+      list->ResourceBarrier(1, &transition);
+      transition.Transition.StateBefore =
+          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+      transition.Transition.StateAfter = D3D12_RESOURCE_STATE_INDEX_BUFFER;
+      list->ResourceBarrier(1, &transition);
+    }
     list->SetGraphicsRootConstantBufferView(
         0,
         (mode == 0 || mode == 2 ? constants : upload)->GetGPUVirtualAddress());
@@ -2693,6 +2723,21 @@ bool TestConstantBufferBarrierStages() {
     viewport.TopLeftX = 1;
     list->RSSetViewports(1, &viewport);
     list->DrawInstanced(3, 1, 0, 0);
+    if (adjacent) {
+      for (UINT i = 0; i < 8; ++i)
+        list7->Barrier(1, &dependencies);
+      if (mode == 3) {
+        transition.Transition.StateBefore = D3D12_RESOURCE_STATE_INDEX_BUFFER;
+        transition.Transition.StateAfter =
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        list->ResourceBarrier(1, &transition);
+        transition.Transition.StateBefore =
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        transition.Transition.StateAfter = D3D12_RESOURCE_STATE_INDEX_BUFFER;
+        list->ResourceBarrier(1, &transition);
+      }
+      list->DrawInstanced(3, 1, 0, 0);
+    }
     if (mode == 0) {
       D3D12_BUFFER_BARRIER finish = {};
       finish.SyncBefore = D3D12_BARRIER_SYNC_PIXEL_SHADING;
@@ -2710,6 +2755,11 @@ bool TestConstantBufferBarrierStages() {
       transition.Transition.StateBefore =
           mode == 1 ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
                     : D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+      transition.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+      list->ResourceBarrier(1, &transition);
+    }
+    if (adjacent && mode == 3) {
+      transition.Transition.StateBefore = D3D12_RESOURCE_STATE_INDEX_BUFFER;
       transition.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
       list->ResourceBarrier(1, &transition);
     }
@@ -2751,9 +2801,17 @@ bool TestConstantBufferBarrierStages() {
     readback->Unmap(0, &no_read);
     const UINT all = WMTRenderStagePreRaster | WMTRenderStageFragment;
     const bool native =
-        counter.draws == 2 && counter.same_encoder && counter.barriers == 1 &&
-        counter.after == (mode == 3 ? UINT(WMTRenderStagePreRaster) : all) &&
-        counter.before == all;
+        counter.draws == (adjacent ? 3u : 2u) && counter.same_encoder &&
+        counter.barriers == 1 &&
+        counter.after ==
+            (!adjacent && mode == 3 ? UINT(WMTRenderStagePreRaster) : all) &&
+        counter.before == all &&
+        (!adjacent ||
+         (counter.scope == (WMTBarrierScopeBuffers | WMTBarrierScopeTextures |
+                            WMTBarrierScopeRenderTargets) &&
+          counter.second_barriers == 1 &&
+          counter.second_scope == counter.scope &&
+          counter.second_after == all && counter.second_before == all));
     const bool written = mode == 1 || mode == 2;
     const bool pixels =
         pixel_value == 0xff00ff00u &&
@@ -2763,18 +2821,21 @@ bool TestConstantBufferBarrierStages() {
     std::cout << "constant-stages mode=" << mode << " draws=" << counter.draws
               << " same_encoder=" << counter.same_encoder
               << " barriers=" << counter.barriers << " after=" << counter.after
-              << " before=" << counter.before << " native=" << native
-              << " pixel=0x" << std::hex << pixel_value << "/0x" << second_pixel
-              << std::dec << " buffer=" << buffer_color[0] << ","
-              << buffer_color[1] << "," << buffer_color[2] << ","
-              << buffer_color[3] << " readback=" << (pixels ? "PASS" : "FAIL")
-              << "\n";
+              << " before=" << counter.before << " adjacent=" << adjacent
+              << " scope=" << counter.scope
+              << " second_barriers=" << counter.second_barriers
+              << " second_scope=" << counter.second_scope
+              << " native=" << native << " pixel=0x" << std::hex << pixel_value
+              << "/0x" << second_pixel << std::dec
+              << " buffer=" << buffer_color[0] << "," << buffer_color[1] << ","
+              << buffer_color[2] << "," << buffer_color[3]
+              << " readback=" << (pixels ? "PASS" : "FAIL") << "\n";
     good &= native && pixels;
   }
   return good;
 }
 
-bool TestCommonAccessBarriers() {
+bool TestCommonAccessBarriers(bool adjacent = false) {
   struct Compiler {
     HMODULE module = LoadLibraryA(D3DCOMPILER_DLL_A);
     ~Compiler() {
@@ -2959,9 +3020,29 @@ bool TestCommonAccessBarriers() {
         group.Type = D3D12_BARRIER_TYPE_TEXTURE;
         group.pTextureBarriers = &texture_barrier;
       }
-      list7->Barrier(1, &group);
+      for (UINT i = 0; i < (adjacent ? 8u : 1u); ++i)
+        list7->Barrier(1, &group);
+      D3D12_GLOBAL_BARRIER dependency = {sync, sync,
+                                         D3D12_BARRIER_ACCESS_NO_ACCESS,
+                                         D3D12_BARRIER_ACCESS_NO_ACCESS};
+      D3D12_BARRIER_GROUP dependencies = {};
+      dependencies.Type = D3D12_BARRIER_TYPE_GLOBAL;
+      dependencies.NumBarriers = 1;
+      dependencies.pGlobalBarriers = &dependency;
+      if (adjacent) {
+        list7->Barrier(1, &dependencies);
+        // Buffer/texture scope after a global scope must not narrow the union.
+        list7->Barrier(1, &group);
+      }
       list->SetComputeRoot32BitConstant(1, 1, 0);
       list->Dispatch(1, 1, 1);
+      if (adjacent) {
+        for (UINT i = 0; i < 8; ++i)
+          list7->Barrier(1, &group);
+        list7->Barrier(1, &dependencies);
+        list7->Barrier(1, &group);
+        list->Dispatch(1, 1, 1);
+      }
       D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
       UINT64 total = desc.Width;
       if (!no_access) {
@@ -3033,22 +3114,31 @@ bool TestCommonAccessBarriers() {
           UINT actual;
           std::memcpy(&actual, static_cast<const BYTE *>(mapped) + offset,
                       sizeof(actual));
-          pixels &= actual == 3u * (0x12345600u ^ i) + 7u;
+          const UINT first = 3u * (0x12345600u ^ i) + 7u;
+          pixels &= actual == (adjacent ? 3u * first + 7u : first);
         }
         const D3D12_RANGE no_write = {};
         readback->Unmap(0, &no_write);
       }
       const UINT expected_scope =
           texture ? WMTBarrierScopeTextures : WMTBarrierScopeBuffers;
-      const bool native = counter.dispatches == 2 && counter.same_encoder &&
-                          counter.barriers == (mode == 2 ? 0u : 1u) &&
-                          (mode == 2 || (counter.scope & expected_scope));
+      const bool native =
+          counter.dispatches == (adjacent ? 3u : 2u) && counter.same_encoder &&
+          counter.barriers == (mode == 2 ? 0u : 1u) &&
+          (mode == 2 || (counter.scope & expected_scope)) &&
+          (!adjacent ||
+           (counter.second_barriers == (mode == 2 ? 0u : 1u) &&
+            (mode == 2 || (counter.scope == (WMTBarrierScopeBuffers |
+                                             WMTBarrierScopeTextures) &&
+                           counter.second_scope == counter.scope))));
       std::cout << "common-access type=" << type << " mode=" << mode
                 << " dispatches=" << counter.dispatches
                 << " same_encoder=" << counter.same_encoder
                 << " barriers=" << counter.barriers
-                << " scope=" << counter.scope << " native=" << native
-                << " readback="
+                << " scope=" << counter.scope << " adjacent=" << adjacent
+                << " second_barriers=" << counter.second_barriers
+                << " second_scope=" << counter.second_scope
+                << " native=" << native << " readback="
                 << (no_access ? "NOT_RUN"
                     : pixels  ? "PASS"
                               : "FAIL")
@@ -3336,6 +3426,11 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
 }
 
 int main(int argc, char **argv) {
+  if (argc == 2 && !std::strcmp(argv[1], "--adjacent-memory-barriers")) {
+    const bool render = TestConstantBufferBarrierStages(true);
+    const bool compute = TestCommonAccessBarriers(true);
+    return render && compute ? 0 : 1;
+  }
   if (argc == 2 && !std::strcmp(argv[1], "--constant-buffer-barrier-stages"))
     return TestConstantBufferBarrierStages() ? 0 : 1;
   if (argc == 2 && !std::strcmp(argv[1], "--common-access-barriers"))
@@ -3426,8 +3521,10 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
-  if (!TestConstantBufferBarrierStages() || !TestCommonAccessBarriers() || !TestMultipleFenceWaits() || !TestDeviceRemovalWaits() ||
-      !TestConcurrentRemovalListeners()) {
+  if (!TestConstantBufferBarrierStages() || !TestCommonAccessBarriers() ||
+      !TestConstantBufferBarrierStages(true) ||
+      !TestCommonAccessBarriers(true) || !TestMultipleFenceWaits() ||
+      !TestDeviceRemovalWaits() || !TestConcurrentRemovalListeners()) {
     device->Release();
     return 1;
   }

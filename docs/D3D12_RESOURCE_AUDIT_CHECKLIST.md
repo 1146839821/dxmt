@@ -2878,6 +2878,54 @@ Evidence: `../dxmt-test/n12-constant-stages-20261025/N12-constant-stages.md`,
 `ordinary-aggregate.json`, build/runtime logs and excluded-trial directories.
 Local focused commit only, no push; overall goal remains active.
 
+### N12 adjacent native memory-barrier coalescing — 2026-10-25
+
+Base9cf35826. Shared EmitMemoryBarrier emitted every contiguous native dependency
+packet, causing redundant synchronization in the previous1000-CBV pressure case.
+Use existing encoder cmd_tail to union adjacent render scope/after/before masks
+or normalized compute scope. Any other command/pass ends adjacency.16 production
+lines, O(1) predecessor check; avoids repeated packet allocation/native barriers.
+No new owner/state/cache/scan/lock, production source/header, native ABI, encoder/
+queue schedule, resource layout or capability change. Preserve all D3D12 input/
+transition/split/alias validation and references; EnhancedFALSE/FL/SM unchanged.
+
+Existing runner --adjacent-memory-barriers/default now checks two intervals
+around three real same-encoder draws/dispatches. Baseline same final PE twice:
+render modes0–2 count9/8,mode3 count11/10;compute9 nonempty count10/10;
+three NONE controls0/0.13 redundancy
+assertions fail,all10 GPU readbacks already PASS,six no-resource NOT_RUN. Candidate
+twice16 native PASS:each nonempty interval1/1,NONE0/0;render scope7/stages27/27,
+compute normalized scope3. Both pixels/float4 and six64-word buffer/texture RAW
+readbacks correct; third dispatch verifies second transformation9*x+28. The
+intervening GPU work retains separate dependencies. Broad-then-narrow scopes
+require preserving earlier bits. External overwrite mutation is rejected by7
+native union checks despite10 GPU data PASS;tracked production never replaced. Ordinary NON_PIXEL single
+barrier control remains25/27. This round fixes cost,not a new pixel corruption.
+
+Private full command-list/enhanced (including27 sync/access admission cases),
+complete queue-handoff,feature contract PASS. Matched no-private focused16native/
+10GPU,originalCBV4GPU,full command-list/enhanced,FL11_0+logicOp0 PASS. API/GPU1/1,
+Hud1,staged PE/native paths checked; no Metal validation errors. Final source,
+staged peers,benchmark lineage/no-private changed-TU macro verified by manifest.
+
+Cost AB/BA/AB,25 rounds/dropfirst,72 retained/side,median process p50/p95;
+observer off/API+GPU0/0/Hud1,same guarded benchmark PE.1000 CBV API calls produce
+1000->1 native barriers with BOTH stages27/27. Submit p50/p95 6590.9/7475.9 ->
+370.35/539.8 us (-94.38/-92.78%);Execute-through-fence65577.65/69321.1 ->
+2713.15/3214.7 us (-95.86/-95.36%);recording/call .11635/.1223 ->.05785/.0631 us.
+Completion includes CPU/Wine/event wait,not isolated GPU; synthetic adjacent
+pressure,not game/frame speedup. Ordinary50000-copy recording/Submit p95
+-.244%/-1.886%,Close p95 2.0->1.9 us; no causal ordinary speedup claim. Historical/
+global cost gates remain OPEN. Full Windows/otherGPU/D3D11/T3/T4/exhaustive
+raw-sync/queue/pending/alias-discard conformance NOT_RUN;cross-queue half legality
+unresolved. Xcode27.1 actual,requested26 NOT_RUN. User .gitignore/shared Wine
+unchanged;local focused commit only,no push;overall goal active. Evidence:
+`../dxmt-test/n12-adjacent-barriers-20261025/N12-adjacent-barriers.md`,manifest,
+sources/environment-actual/results JSON,final aggregate/ordinary-aggregate JSON,
+mutation evidence;pre-union-strengthening matrices retained/excluded;
+red/green/no-private/build/perf logs. Next candidate:N12 queue-specific raw-sync
+admission with existing barrier oracle; no second mechanism started this round.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
