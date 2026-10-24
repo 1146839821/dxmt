@@ -1,3 +1,30 @@
+#ifdef MS_WRITE
+cbuffer WriteValue : register(b0) {
+  float write_depth;
+  uint write_coverage;
+};
+
+float4 vertex_main(uint id : SV_VertexID) : SV_Position {
+  float2 uv = float2((id << 1) & 2, id & 2);
+  return float4(uv * 2.0 - 1.0, 0.5, 1.0);
+}
+
+#ifdef MS_COVERAGE
+struct WriteOutput {
+  float depth : SV_Depth;
+  uint coverage : SV_Coverage;
+};
+WriteOutput pixel_main() {
+  WriteOutput value;
+  value.depth = write_depth;
+  value.coverage = write_coverage;
+  return value;
+}
+#else
+// This variant relies only on PSO SampleMask; keep it as an independent check.
+float pixel_main() : SV_Depth { return write_depth; }
+#endif
+#else
 // BC_TEST selects BC1; add BC3_TEST and/or BC_SRGB to match the runner mode.
 Texture1D<float4> texture_1d : register(t0);
 Texture1DArray<float4> texture_1d_array : register(t1);
@@ -27,20 +54,19 @@ uint ToByte(float4 value, uint index) {
 }
 
 #ifdef STENCIL_MS
-uint MSValue(uint4 value, uint index) {
+uint MSValue(uint4 value, uint expected) {
   if (value.x != 0 || value.z != 0 || value.w != 1)
     return 0;
   return value.y;
 }
 #else
-uint MSValue(float4 value, uint index) {
+uint MSValue(float4 value, uint expected) {
 #ifdef DEPTH_MS
-  const float expected = (index == 6 ? 77.0 : 88.0) / 255.0;
-  if (abs(value.x - expected) > 0.000001 || value.y != 0.0 || value.z != 0.0 ||
+  if (abs(value.x - expected / 255.0) > 0.000001 || value.y != 0.0 || value.z != 0.0 ||
       value.w != 1.0)
     return 0;
 #endif
-  return ToByte(value, index);
+  return ToByte(value, 6);
 }
 #endif
 
@@ -174,15 +200,29 @@ bool CheckBC(uint index) {
   for (uint index = 2; index <= 5; index++)
     output[index] = CheckBC(index) ? 11 * (index + 1) : 0;
 #endif
-  output[6] = MSValue(texture_ms.Load(int2(0, 0), 0), 6);
-  output[7] = MSValue(texture_ms_array.Load(int3(0, 0, 1), 0), 7);
-  // Check every sample and both array layers, not just sample zero.
+  output[6] = 77;
+  output[7] = 88;
+  // Uniform clears cover every index. MS_DISTINCT additionally catches an
+  // implementation loading the wrong sample or aliasing the array layers.
   for (uint sample = 0; sample < 4; sample++) {
-    if (MSValue(texture_ms.Load(int2(0, 0), sample), 6) != 77)
+#ifdef MS_DISTINCT
+    uint sample_delta = 7 * sample;
+#else
+    uint sample_delta = 0;
+#endif
+    if (MSValue(texture_ms.Load(int2(0, 0), sample), 77 + sample_delta) !=
+        77 + sample_delta)
       output[6] = 0;
-    for (uint layer = 0; layer < 2; layer++)
-      if (MSValue(texture_ms_array.Load(int3(0, 0, layer), sample), 7) != 88)
+    for (uint layer = 0; layer < 2; layer++) {
+#ifdef MS_DISTINCT
+      uint expected = 88 + sample_delta + 31 * layer;
+#else
+      uint expected = 88;
+#endif
+      if (MSValue(texture_ms_array.Load(int3(0, 0, layer), sample), expected) !=
+          expected)
         output[7] = 0;
+    }
   }
 #ifdef BC_TEST
   output[8] = CheckBCVolume() ? 99 : 0;
@@ -201,3 +241,5 @@ bool CheckBC(uint index) {
     output[0] = 0;
 #endif
 }
+
+#endif // MS_WRITE

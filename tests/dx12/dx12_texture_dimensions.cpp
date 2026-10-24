@@ -54,9 +54,9 @@ bool WaitForQueue(ID3D12CommandQueue *queue, ID3D12Device *device, ID3D12Command
   event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
   if (!event || !CheckHR("SetEventOnCompletion", fence->SetEventOnCompletion(1, event)))
     goto cleanup;
-  if (WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0)
+  if (WaitForSingleObject(event, 30000) != WAIT_OBJECT_0)
     goto cleanup;
-  result = true;
+  result = CheckHR("GetDeviceRemovedReason", device->GetDeviceRemovedReason());
 
 cleanup:
   if (event)
@@ -238,16 +238,17 @@ void SetSrvDesc(D3D12_SHADER_RESOURCE_VIEW_DESC &desc, UINT index) {
 } // namespace
 
 int main(int argc, char **argv) {
-  const bool stencil_ms =
-      argc == 3 && (!std::strcmp(argv[2], "--stencil-ms") ||
-                    !std::strcmp(argv[2], "--stencil-ms-reversed"));
-  const bool depth_ms =
-      argc == 3 && (!std::strcmp(argv[2], "--depth-ms") ||
-                    !std::strcmp(argv[2], "--depth-ms-reversed"));
-  const bool reversed =
-      argc == 3 && (!std::strcmp(argv[2], "--depth-ms-reversed") ||
-                    !std::strcmp(argv[2], "--stencil-ms-reversed"));
+  const bool stencil_ms = (argc == 3 || argc == 5) &&
+                          (!std::strcmp(argv[2], "--stencil-ms") ||
+                           !std::strcmp(argv[2], "--stencil-ms-reversed"));
+  const bool depth_ms = (argc == 3 || argc == 5) &&
+                        (!std::strcmp(argv[2], "--depth-ms") ||
+                         !std::strcmp(argv[2], "--depth-ms-reversed"));
+  const bool reversed = (argc == 3 || argc == 5) &&
+                        (!std::strcmp(argv[2], "--depth-ms-reversed") ||
+                         !std::strcmp(argv[2], "--stencil-ms-reversed"));
   const bool depth_stencil_ms = stencil_ms || depth_ms;
+  const bool distinct_ms = depth_stencil_ms && argc == 5;
   const bool rgb96 = argc == 3 && (!std::strcmp(argv[2], "--rgb96") ||
                                    !std::strcmp(argv[2], "--rgb96-typeless"));
   const bool bc1 = argc == 3 && (!std::strcmp(argv[2], "--bc1") ||
@@ -275,13 +276,22 @@ int main(int argc, char **argv) {
                  "[--typeless|--rgb96|--rgb96-typeless|--stencil-ms|"
                  "--stencil-ms-reversed|--depth-ms|--depth-ms-reversed|"
                  "--bc1|--bc1-srgb|--bc1-typeless|--bc1-srgb-typeless|"
-                 "--bc3|--bc3-srgb|--bc3-typeless|--bc3-srgb-typeless]\n";
+                 "--bc3|--bc3-srgb|--bc3-typeless|--bc3-srgb-typeless]\n"
+                 "Depth/stencil modes optionally take <write.vs.cso> "
+                 "<write.ps.cso> for distinct sample/layer values.\n";
     return 2;
   }
 
   std::vector<char> shader;
   if (!ReadFile(argv[1], shader)) {
     std::cerr << "failed to read shader fixture\n";
+    return 3;
+  }
+
+  std::vector<char> vertex_shader, pixel_shader;
+  if (distinct_ms &&
+      (!ReadFile(argv[3], vertex_shader) || !ReadFile(argv[4], pixel_shader))) {
+    std::cerr << "failed to read MS write shader fixtures\n";
     return 3;
   }
 
@@ -299,12 +309,13 @@ int main(int argc, char **argv) {
   Owned<ID3D12Resource> output;
   Owned<ID3D12Resource> readback;
   Owned<ID3D12PipelineState> pso;
+  Owned<ID3D12PipelineState> sample_psos[2][4];
   Owned<ID3D12GraphicsCommandList> list;
   std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints[9];
   D3D12_RESOURCE_DESC texture_descs[9] = {};
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   D3D12_DESCRIPTOR_RANGE ranges[3] = {};
-  D3D12_ROOT_PARAMETER root_parameters[3] = {};
+  D3D12_ROOT_PARAMETER root_parameters[4] = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
   D3D12_DESCRIPTOR_HEAP_DESC resource_heap_desc = {};
   D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_desc = {};
@@ -340,7 +351,13 @@ int main(int argc, char **argv) {
     root_parameters[i].DescriptorTable.pDescriptorRanges = &ranges[i];
     root_parameters[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
   }
-  root_desc.NumParameters = 3;
+  if (distinct_ms) {
+    root_parameters[3].ParameterType =
+        D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    root_parameters[3].Constants.Num32BitValues = 2;
+    root_parameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+  }
+  root_desc.NumParameters = distinct_ms ? 4 : 3;
   root_desc.pParameters = root_parameters;
   if (!CheckHR("D3D12SerializeRootSignature", D3D12SerializeRootSignature(
                                                        &root_desc, D3D_ROOT_SIGNATURE_VERSION_1,
@@ -358,7 +375,7 @@ int main(int argc, char **argv) {
   sampler_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
   attachment_heap_desc.Type = depth_stencil_ms ? D3D12_DESCRIPTOR_HEAP_TYPE_DSV
                                                : D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-  attachment_heap_desc.NumDescriptors = 2;
+  attachment_heap_desc.NumDescriptors = distinct_ms ? 4 : 2;
   if (!CheckHR("CreateResourceHeap",
                device.ptr->CreateDescriptorHeap(
                    &resource_heap_desc, IID_PPV_ARGS(&resource_heap.ptr))) ||
@@ -451,8 +468,10 @@ int main(int argc, char **argv) {
         clear_value.Format = (i == 6) != reversed
                                  ? DXGI_FORMAT_D24_UNORM_S8_UINT
                                  : DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
-        clear_value.DepthStencil.Depth =
-            depth_ms ? (i == 6 ? 77.0f : 88.0f) / 255.0f : 0.25f;
+        clear_value.DepthStencil.Depth = distinct_ms ? 0.0f
+                                         : depth_ms
+                                             ? (i == 6 ? 77.0f : 88.0f) / 255.0f
+                                             : 0.25f;
       }
       if (!CheckHR(i == 6 ? "CreateTextureMS" : "CreateTextureMSArray",
                    device.ptr->CreateCommittedResource(
@@ -545,6 +564,15 @@ int main(int argc, char **argv) {
     dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY;
     dsv.Texture2DMSArray.ArraySize = 2;
     device.ptr->CreateDepthStencilView(textures[7].ptr, &dsv, attachment_array);
+    if (distinct_ms) {
+      dsv.Texture2DMSArray.ArraySize = 1;
+      for (UINT layer = 0; layer < 2; layer++) {
+        dsv.Texture2DMSArray.FirstArraySlice = layer;
+        auto slice = attachment_cpu;
+        slice.ptr += attachment_increment * (2 + layer);
+        device.ptr->CreateDepthStencilView(textures[7].ptr, &dsv, slice);
+      }
+    }
   } else {
     device.ptr->CreateRenderTargetView(textures[7].ptr, &rtv_desc,
                                        attachment_array);
@@ -556,6 +584,41 @@ int main(int argc, char **argv) {
                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback.ptr))))
     return 1;
 
+  if (distinct_ms) {
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC draw = {};
+    draw.pRootSignature = root_signature.ptr;
+    draw.VS = {vertex_shader.data(), vertex_shader.size()};
+    draw.PS = {pixel_shader.data(), pixel_shader.size()};
+    draw.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    draw.SampleDesc.Count = 4;
+    draw.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    draw.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    draw.RasterizerState.DepthClipEnable = TRUE;
+    draw.RasterizerState.MultisampleEnable = TRUE;
+    draw.DepthStencilState.DepthEnable = TRUE;
+    draw.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    draw.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    draw.DepthStencilState.StencilEnable = TRUE;
+    draw.DepthStencilState.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
+    draw.DepthStencilState.StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
+    draw.DepthStencilState.FrontFace = {
+        D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_REPLACE,
+        D3D12_COMPARISON_FUNC_ALWAYS};
+    draw.DepthStencilState.BackFace = draw.DepthStencilState.FrontFace;
+    for (UINT index = 0; index < 2; index++) {
+      draw.DSVFormat = (index == 0) != reversed
+                           ? DXGI_FORMAT_D24_UNORM_S8_UINT
+                           : DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+      for (UINT sample = 0; sample < 4; sample++) {
+        draw.SampleMask = 1u << sample;
+        if (!CheckHR("CreateSampleWritePipeline",
+                     device.ptr->CreateGraphicsPipelineState(
+                         &draw, IID_PPV_ARGS(&sample_psos[index][sample].ptr))))
+          return 1;
+      }
+    }
+  }
+
   pso_desc.pRootSignature = root_signature.ptr;
   pso_desc.CS.pShaderBytecode = shader.data();
   pso_desc.CS.BytecodeLength = shader.size();
@@ -566,6 +629,9 @@ int main(int argc, char **argv) {
                                       IID_PPV_ARGS(&list.ptr))))
     return 1;
 
+  ID3D12DescriptorHeap *heaps[] = {resource_heap.ptr, sampler_heap.ptr};
+  list.ptr->SetDescriptorHeaps(2, heaps);
+
   for (UINT i = 0; i < 9; i++) {
     if (i == 6 || i == 7) {
       const float clear_color[] = {(i == 6 ? 77.0f : 88.0f) / 255.0f, 0.0f, 0.0f, 1.0f};
@@ -574,9 +640,51 @@ int main(int argc, char **argv) {
       if (depth_stencil_ms)
         list.ptr->ClearDepthStencilView(
             attachment, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
-            depth_ms ? clear_color[0] : 0.25f, i == 6 ? 77 : 88, 0, nullptr);
+            distinct_ms ? 0.0f
+            : depth_ms  ? clear_color[0]
+                        : 0.25f,
+            distinct_ms ? 0
+            : i == 6    ? 77
+                        : 88,
+            0, nullptr);
       else
         list.ptr->ClearRenderTargetView(attachment, clear_color, 0, nullptr);
+      if (distinct_ms) {
+        const D3D12_VIEWPORT viewport = {0, 0, 1, 1, 0, 1};
+        const D3D12_RECT scissor = {0, 0, 1, 1};
+        list.ptr->RSSetViewports(1, &viewport);
+        list.ptr->RSSetScissorRects(1, &scissor);
+        list.ptr->SetGraphicsRootSignature(root_signature.ptr);
+        list.ptr->SetGraphicsRootDescriptorTable(
+            0, resource_heap.ptr->GetGPUDescriptorHandleForHeapStart());
+        list.ptr->SetGraphicsRootDescriptorTable(
+            1, sampler_heap.ptr->GetGPUDescriptorHandleForHeapStart());
+        auto output_table =
+            resource_heap.ptr->GetGPUDescriptorHandleForHeapStart();
+        output_table.ptr += descriptor_increment * 9;
+        list.ptr->SetGraphicsRootDescriptorTable(2, output_table);
+        list.ptr->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (UINT layer = 0; layer < (i == 6 ? 1u : 2u); layer++) {
+          auto slice = attachment_cpu;
+          if (i == 7)
+            slice.ptr += attachment_increment * (2 + layer);
+          list.ptr->OMSetRenderTargets(0, nullptr, FALSE, &slice);
+          for (UINT sample = 0; sample < 4; sample++) {
+            // Distinct values detect sample-index and array-layer aliasing.
+            const UINT value = (i == 6 ? 77 : 88) + 7 * sample + 31 * layer;
+            const struct {
+              float depth;
+              UINT coverage;
+            } write_value = {value / 255.0f, 1u << sample};
+            static_assert(sizeof(write_value) == 2 * sizeof(UINT));
+            list.ptr->SetPipelineState(sample_psos[i - 6][sample].ptr);
+            list.ptr->SetGraphicsRoot32BitConstants(3, 2, &write_value, 0);
+            list.ptr->OMSetStencilRef(value);
+            list.ptr->DrawInstanced(3, 1, 0, 0);
+          }
+        }
+        list.ptr->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+      }
       barrier = {};
       barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
       barrier.Transition.pResource = textures[i].ptr;
@@ -613,8 +721,7 @@ int main(int argc, char **argv) {
     list.ptr->ResourceBarrier(1, &barrier);
   }
 
-  ID3D12DescriptorHeap *heaps[] = {resource_heap.ptr, sampler_heap.ptr};
-  list.ptr->SetDescriptorHeaps(2, heaps);
+  list.ptr->SetPipelineState(pso.ptr);
   list.ptr->SetComputeRootSignature(root_signature.ptr);
   list.ptr->SetComputeRootDescriptorTable(0, resource_heap.ptr->GetGPUDescriptorHandleForHeapStart());
   list.ptr->SetComputeRootDescriptorTable(1, sampler_heap.ptr->GetGPUDescriptorHandleForHeapStart());
@@ -623,8 +730,11 @@ int main(int argc, char **argv) {
   list.ptr->SetComputeRootDescriptorTable(2, output_gpu);
   list.ptr->Dispatch(1, 1, 1);
   barrier = {};
-  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-  barrier.UAV.pResource = output.ptr;
+  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barrier.Transition.pResource = output.ptr;
+  barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
   list.ptr->ResourceBarrier(1, &barrier);
   list.ptr->CopyBufferRegion(readback.ptr, 0, output.ptr, 0, sizeof(UINT) * 9);
   if (!CheckHR("Close", list.ptr->Close()) || !WaitForQueue(queue.ptr, device.ptr, list.ptr))
@@ -643,6 +753,8 @@ int main(int argc, char **argv) {
   }
   readback.ptr->Unmap(0, nullptr);
   std::cout << "bc=" << bc << " bc3=" << bc3 << " srgb=" << srgb << "\n";
+  std::cout << "distinct_ms=" << distinct_ms
+            << " sample_values_checked=" << (distinct_ms ? 12 : 0) << "\n";
   std::cout << "depth_ms=" << depth_ms << " reversed=" << reversed
             << " stencil_ms=" << stencil_ms << " rgb96=" << rgb96
             << " storage=" << (typeless ? "typeless" : "typed")

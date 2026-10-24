@@ -2119,6 +2119,46 @@ no push. Evidence: `../dxmt-test/n02-a8-uav-20261024/`: `N02-a8-uav.md`,
 `manifest.json`, `validation-results.json`, `negative-results.json`,
 `adjacent-results.json`, `no-private.json`, official sources and raw build/DXC/logs.
 
+### N02 — distinct depth/stencil samples expose PSO mask loss, 2026-10-24
+
+Base445a3903. The existing texture-dimensions runner adds optional writer VS/PS
+fixtures, four one-bit SampleMask PSOs per DSV format and single-layer MSArray
+DSVs. After zero clears,12 draws write distinct values to4 MS samples and two
+MSArray layers. Both depth/stencil families run in MS and MSArray via reversal.
+Writer PS variants independently use PSO SampleMask alone or explicit
+SV_Coverage; the latter is a diagnostic control, not a production workaround.
+Existing readback now transitions UAV to COPY_SOURCE, bounds completion to30s
+and checks device removal. No new runner or src/d3d12 source/header.
+
+A real production defect is reproduced: SampleMask-only depth and stencil
+both FAIL exit1 at dimension6. Raw depth/stencil readbacks show every sample
+holding the last draw's value98/109/140, while array layers remain distinct.
+Changing only the PS to explicit coverage passes all48 distinct sample/layer
+values across four family/role runs, including default channels. This separates
+PSO sample selection loss from MS Load addressing. Static source forwards
+SampleMask to AIRCONV but has no MSC IRCompilerSetSampleMask caller; the bundled
+converter API documents an all-one default reset after compilation. Production
+fix is deferred to the next single-node N07 PSO/compiler/cache slice. These two
+red results are REAL_DEFECT_FAIL, not negative controls or a completed fix.
+
+Final17 device processes: four distinct-coverage GPU PASS, two real defect
+FAIL, four legal wrong-index/layer shaders detected by CPU mismatch, five
+original GPU controls PASS, feature70/70 and format59/59 PASS. Two additional
+parser/file rejects occur before device creation. All17 staged native-DLL logs
+have API/GPU validation enabled and no GPU validation error. Scoped build,
+changed-TU no-private syntax,13 final DXC compiles and five fixture-target dry
+runs pass. Full no-private runtime, configured Meson shader command and T3/T4
+NOT_RUN. Initial missing graphics tables and an overly strict external feature
+log check were corrected in the fixture/harness, with original logs retained.
+
+Production DLL b094fae2... unchanged; no owner/cache/ABI/format table or
+FL/SM/Options/Tier change. Four component MS_LOAD underreports and full
+Device/format gates remain OPEN; uniform-clear success cannot justify promotion.
+Performance NOT_RUN for this test-only change; prior cost/regression signals
+remain OPEN. Evidence: `../dxmt-test/n02-depth-ms-samples-20261024/`:
+`N02-depth-ms-samples.md`, `results.json`, `raw-results.json`, `manifest.json`,
+`shader-builds.json`, `negative-builds.json`, `no-private.json`, `sources.json`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

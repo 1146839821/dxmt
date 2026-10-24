@@ -361,6 +361,28 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach plane : ['depth', 'stencil']
+    custom_target('dx12_texture_dimensions_' + plane + '_distinct_fixture',
+      input: 'texture_dimensions_sm6.hlsl',
+      output: 'texture_dimensions_' + plane + '_distinct.cs.cso',
+      command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '-D', plane.to_upper() + '_MS=1', '-D', 'MS_DISTINCT=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  foreach stage : ['vs', 'ps']
+    custom_target('dx12_texture_dimensions_ms_write_' + stage + '_fixture',
+      input: 'texture_dimensions_sm6.hlsl',
+      output: 'texture_dimensions_ms_write.' + stage + '.cso',
+      command: dxc_command + [ '-E', stage == 'vs' ? 'vertex_main' : 'pixel_main', '-T', stage + '_6_0', '-D', 'MS_WRITE=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_texture_dimensions_ms_write_coverage_fixture',
+    input: 'texture_dimensions_sm6.hlsl',
+    output: 'texture_dimensions_ms_write_coverage.ps.cso',
+    command: dxc_command + [ '-E', 'pixel_main', '-T', 'ps_6_0', '-D', 'MS_WRITE=1', '-D', 'MS_COVERAGE=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_compute_sm6_int64_fixture',
     input: 'compute_sm6_int64.hlsl',
     output: 'compute_sm6_int64.cs.cso',
