@@ -1,3 +1,7 @@
+#ifndef MS_SAMPLES
+#define MS_SAMPLES 4
+#endif
+
 #ifdef MS_WRITE
 cbuffer WriteValue : register(b0) {
   float write_depth;
@@ -207,9 +211,22 @@ bool CheckBC(uint index) {
 #endif
   output[6] = 77;
   output[7] = 88;
+  uint ms_width, ms_height, ms_samples;
+  uint array_width, array_height, array_layers, array_samples;
+  texture_ms.GetDimensions(ms_width, ms_height, ms_samples);
+  texture_ms_array.GetDimensions(array_width, array_height, array_layers, array_samples);
+  // Reject mismatched fixtures before any Load can use an invalid sample index.
+  if (ms_width != 1 || ms_height != 1 || ms_samples != MS_SAMPLES) {
+    output[6] = 0;
+    return;
+  }
+  if (array_width != 1 || array_height != 1 || array_layers != 2 || array_samples != MS_SAMPLES) {
+    output[7] = 0;
+    return;
+  }
   // Uniform clears cover every index. MS_DISTINCT additionally catches an
   // implementation loading the wrong sample or aliasing the array layers.
-  for (uint sample = 0; sample < 4; sample++) {
+  for (uint sample = 0; sample < MS_SAMPLES; sample++) {
 #ifdef MS_DISTINCT
     uint sample_delta = 7 * sample;
 #else

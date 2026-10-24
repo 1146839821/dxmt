@@ -368,6 +368,14 @@ if dxc_command.length() > 0
       command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '-D', plane.to_upper() + '_MS=1', '-D', 'MS_DISTINCT=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
       build_by_default: false,
     )
+    foreach samples : ['2', '8']
+      custom_target('dx12_texture_dimensions_' + plane + '_distinct_' + samples + 'x_fixture',
+        input: 'texture_dimensions_sm6.hlsl',
+        output: 'texture_dimensions_' + plane + '_distinct_' + samples + 'x.cs.cso',
+        command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '-D', plane.to_upper() + '_MS=1', '-D', 'MS_DISTINCT=1', '-D', 'MS_SAMPLES=' + samples, '@INPUT@', '-Fo', '@OUTPUT@' ],
+        build_by_default: false,
+      )
+    endforeach
   endforeach
   foreach stage : ['vs', 'ps']
     custom_target('dx12_texture_dimensions_ms_write_' + stage + '_fixture',

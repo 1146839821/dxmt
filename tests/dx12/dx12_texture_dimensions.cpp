@@ -238,6 +238,24 @@ void SetSrvDesc(D3D12_SHADER_RESOURCE_VIEW_DESC &desc, UINT index) {
 } // namespace
 
 int main(int argc, char **argv) {
+  UINT sample_count = 4;
+  const bool explicit_samples =
+      argc > 2 && !std::strncmp(argv[argc - 1], "--samples=", 10);
+  if (explicit_samples) {
+    const char *value = argv[argc - 1] + 10;
+    if (!std::strcmp(value, "2"))
+      sample_count = 2;
+    else if (!std::strcmp(value, "4"))
+      sample_count = 4;
+    else if (!std::strcmp(value, "8"))
+      sample_count = 8;
+    else {
+      std::cerr << "samples must be 2, 4 or 8\n";
+      return 2;
+    }
+  }
+  if (explicit_samples)
+    --argc;
   const bool stencil_ms = (argc == 3 || argc == 5 || argc == 6) &&
                           (!std::strcmp(argv[2], "--stencil-ms") ||
                            !std::strcmp(argv[2], "--stencil-ms-reversed"));
@@ -273,7 +291,8 @@ int main(int argc, char **argv) {
                     !std::strcmp(argv[2], "--bc3-typeless") ||
                     !std::strcmp(argv[2], "--bc1-srgb-typeless") ||
                     !std::strcmp(argv[2], "--bc3-srgb-typeless"));
-  if ((argc == 6 && !mask_all && !mask_zero) ||
+  if ((explicit_samples && !distinct_ms) ||
+      (argc == 6 && !mask_all && !mask_zero) ||
       (argc != 2 && !typeless && !rgb96 && !depth_stencil_ms && !bc)) {
     std::cerr
         << "usage: dx12_texture_dimensions <shader.cso> "
@@ -283,7 +302,8 @@ int main(int argc, char **argv) {
            "--bc3|--bc3-srgb|--bc3-typeless|--bc3-srgb-typeless]\n"
            "Depth/stencil modes optionally take <write.vs.cso> "
            "<write.ps.cso> [--mask-all|--mask-zero] for distinct "
-           "sample/layer values. Match the compute fixture to the mask.\n";
+           "sample/layer values, then [--samples=2|4|8] (default 4).\n"
+           "Match the compute fixture to the mask and sample count.\n";
     return 2;
   }
 
@@ -314,7 +334,7 @@ int main(int argc, char **argv) {
   Owned<ID3D12Resource> output;
   Owned<ID3D12Resource> readback;
   Owned<ID3D12PipelineState> pso;
-  Owned<ID3D12PipelineState> sample_psos[2][4];
+  Owned<ID3D12PipelineState> sample_psos[2][8];
   Owned<ID3D12GraphicsCommandList> list;
   std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints[9];
   D3D12_RESOURCE_DESC texture_descs[9] = {};
@@ -340,6 +360,27 @@ int main(int argc, char **argv) {
 
   if (!CheckHR("D3D12CreateDevice", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.ptr))))
     return 1;
+
+  if (depth_stencil_ms) {
+    bool supported_samples = true;
+    for (const auto format :
+         {DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D32_FLOAT_S8X24_UINT}) {
+      D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS quality = {
+          format, sample_count, D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE, 0};
+      if (!CheckHR("DepthStencilSampleCount",
+                   device.ptr->CheckFeatureSupport(
+                       D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &quality,
+                       sizeof(quality))))
+        return 1;
+      std::cout << "MSAA format=" << format << " samples=" << sample_count
+                << " quality_levels=" << quality.NumQualityLevels << "\n";
+      supported_samples &= quality.NumQualityLevels != 0;
+    }
+    if (!supported_samples) {
+      std::cerr << "requested depth/stencil sample count is unsupported\n";
+      return 4;
+    }
+  }
 
   queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
   if (!CheckHR("CreateCommandQueue", device.ptr->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue.ptr))) ||
@@ -422,11 +463,11 @@ int main(int argc, char **argv) {
   texture_descs[5].Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
   texture_descs[5].DepthOrArraySize = 12;
   texture_descs[6].Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-  texture_descs[6].SampleDesc.Count = 4;
+  texture_descs[6].SampleDesc.Count = sample_count;
   texture_descs[6].Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
   texture_descs[7].Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
   texture_descs[7].DepthOrArraySize = 2;
-  texture_descs[7].SampleDesc.Count = 4;
+  texture_descs[7].SampleDesc.Count = sample_count;
   texture_descs[7].Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
   texture_descs[8].Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
   texture_descs[8].DepthOrArraySize = 2;
@@ -595,7 +636,7 @@ int main(int argc, char **argv) {
     draw.VS = {vertex_shader.data(), vertex_shader.size()};
     draw.PS = {pixel_shader.data(), pixel_shader.size()};
     draw.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    draw.SampleDesc.Count = 4;
+    draw.SampleDesc.Count = sample_count;
     draw.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     draw.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     draw.RasterizerState.DepthClipEnable = TRUE;
@@ -614,7 +655,7 @@ int main(int argc, char **argv) {
       draw.DSVFormat = (index == 0) != reversed
                            ? DXGI_FORMAT_D24_UNORM_S8_UINT
                            : DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
-      for (UINT sample = 0; sample < 4; sample++) {
+      for (UINT sample = 0; sample < sample_count; sample++) {
         draw.SampleMask = mask_all ? UINT_MAX : mask_zero ? 0 : 1u << sample;
         if (!CheckHR("CreateSampleWritePipeline",
                      device.ptr->CreateGraphicsPipelineState(
@@ -674,7 +715,7 @@ int main(int argc, char **argv) {
           if (i == 7)
             slice.ptr += attachment_increment * (2 + layer);
           list.ptr->OMSetRenderTargets(0, nullptr, FALSE, &slice);
-          for (UINT sample = 0; sample < 4; sample++) {
+          for (UINT sample = 0; sample < sample_count; sample++) {
             // Distinct values detect sample-index and array-layer aliasing.
             const UINT value = (i == 6 ? 77 : 88) + 7 * sample + 31 * layer;
             const struct {
@@ -758,8 +799,9 @@ int main(int argc, char **argv) {
   }
   readback.ptr->Unmap(0, nullptr);
   std::cout << "bc=" << bc << " bc3=" << bc3 << " srgb=" << srgb << "\n";
-  std::cout << "distinct_ms=" << distinct_ms
-            << " sample_values_checked=" << (distinct_ms ? 12 : 0) << " mask="
+  std::cout << "samples=" << sample_count << " distinct_ms=" << distinct_ms
+            << " sample_values_checked=" << (distinct_ms ? 3 * sample_count : 0)
+            << " mask="
             << (mask_all    ? "all"
                 : mask_zero ? "zero"
                             : "one-bit")
@@ -768,7 +810,7 @@ int main(int argc, char **argv) {
             << " stencil_ms=" << stencil_ms << " rgb96=" << rgb96
             << " storage=" << (typeless ? "typeless" : "typed")
             << " filter=" << ((typeless || bc) ? "linear" : "point") << "\n";
-  std::cout << "DXIL texture dimensions readback passed: 11,22,33,44,55,66,77,88,99\n";
+  std::cout << "texture dimensions readback passed: 11,22,33,44,55,66,77,88,99\n";
   result = true;
   return result ? 0 : 1;
 }

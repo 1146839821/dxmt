@@ -2259,6 +2259,58 @@ and T3/T4 NOT_RUN. Evidence: `../dxmt-test/n13-submit-tail-20261024/`
 `N13-submit-tail.md`, `manifest.json`, `probe-source.json`, `environment.json`,
 `results.json`, `aggregate.json`, `contrasts.json`, scripts and raw logs.
 
+### N02 — component MS Load sample counts and dual readers, 2026-10-24
+
+Base6fd5e260; test/evidence slice. Fresh component queries21/22/46/47 still
+report Support1=0x1011a0/Support2=0 without MS_LOAD. The external bit-presence
+gate is red for all four. No public bit change: N02 requires a separate
+capability milestone for exposure increases. Raw custom-swizzle keys miss the
+native capability table; blanket normalization would also incorrectly treat
+component SRVs as depth targets and suppress SHADER_LOAD. Role separation
+must be retained by any future narrow correction.
+
+The existing texture-dimensions runner accepts final --samples=2|4|8, default4,
+only with distinct depth/stencil writers. Resource and PSO counts, bounded
+one-bit masks and sample loops use that value. Both DSV quality queries run
+before an unsupported count exits4 without allocating textures. The existing
+shader uses MS_SAMPLES and validates both textures' dimensions/sample count;
+a mismatch returns before Load to avoid invalid indices. Distinct values and
+default channels still detect sample/layer aliasing. Four2x/8x DXIL fixture
+targets are registered beside the existing4x targets. No new runner or
+src/d3d12 source/header, runtime owner/cache/format table or state.
+
+Final accepted matrix:28 device processes,20 PASS and8 unsupported8x skips.
+Sixteen component GPU cases cover2x/4x, depth/stencil, both D24/D32S8 families,
+MS/MSArray and reversal, through both SM5/AIRCONV and SM6/MSC compute readers.
+Writers remain SM6/MSC in both groups; SM5 graphics writers are not claimed.
+Both DSV formats report quality1 at2x/4x and quality0 at8x on this host.
+Ordinary/typeless GPU controls and feature70/format59 assertions pass. Another
+15 final processes have expected exits: five GPU smokes, one unsupported8x,
+old-runner CLI rejection and dimension mismatch, three legal wrong-count/
+index/layer controls, four malformed CLI rejects. Positive component loops
+check192 sample/layer values across matrix and final smokes. All device runs
+verify staged DLL/native paths and API/GPU validation1/1/HUD1; no GPU validation
+error or aborted buffer observed. Pilot runs before the early-return guard are
+retained separately and excluded; accepted runs use final sources/PE/CSOs.
+
+Scoped build, final changed-TU no-private syntax,17 shader compiles (9 DXIL,
+6 DXBC,2 legal negative DXIL), four target registrations/dry-runs, changed-line
+formatting and diff check pass. Corrected initial Meson CLI/target errors are
+retained. Configured Meson shader execution, full no-private runtime, native
+Windows and T3/T4 NOT_RUN. Production DLLs are byte-identical to N07 candidate;
+performance NOT_RUN and historical warnings remain OPEN. Actual environment:
+macOS27.0.1/Xcode27.1/M1Max Apple7/Wine11 x64 Rosetta/clang23.1.1; actual MSC
+version not remeasured. FL/SM/Options/Tier, ABI/layout and scheduling unchanged.
+
+Compute evidence now covers supported2x/4x through both backends. Public
+underreport, Device and FL12_2 gates stay OPEN. Next distinct slice: dedicated
+MS_LOAD milestone with pixel-stage readers and role-negative/hardware gates,
+then review the narrow reporting correction; do not repeat this unchanged
+compute matrix. Evidence: `../dxmt-test/n02-component-msload-20261024/`
+`N02-component-msload.md`, `manifest.json`, `query-red.json`, `results.json`,
+`final-results.json`, `shader-builds.json`, `negative-builds.json`,
+`no-private.json`, environment/scripts and raw logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
