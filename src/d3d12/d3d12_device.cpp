@@ -1699,7 +1699,8 @@ public:
           goto invalid;
         size_and_align = GetMTLDevice().heapTextureSizeAndAlign(texture_info);
         resource_info.Alignment = size_and_align.align;
-        if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.SampleDesc.Count > 1)
+        // Explicit small alignment has already passed texture eligibility validation.
+        if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.SampleDesc.Count > 1 && !desc.Alignment)
           minimum_alignment = std::max<UINT64>(minimum_alignment, msaa_alignment);
       }
 

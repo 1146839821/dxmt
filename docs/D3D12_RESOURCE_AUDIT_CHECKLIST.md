@@ -2660,6 +2660,45 @@ host and isolated n15 prefix. Evidence:
 `sources.json`, `manifest.json`, `results.json`, `no-private.json`,
 `perf-results.json`, `aggregate.json`, external cost source/rebuild args and logs.
 
+### N08 — preserve eligible explicit small MSAA alignment, 2026-10-24
+
+`PopulateWMTTextureInfo` already checks the architecture-independent small-MSAA
+eligibility contract. `GetResourceAllocationInfo1` then unconditionally raised
+all MSAA requests to4MiB, including valid explicit64KiB requests; the shared
+placed-resource admission consequently rejected legal small offsets/capacity.
+One production condition now applies the automatic4MiB minimum only to zero
+requested alignment. Explicit alignment still passes the existing eligibility
+check and retains the native Metal alignment requirement. No new resource
+owner/cache/state, source file, capability or command/Submit path change.
+
+Red before: all4 eligible8x8 RGBA8/D32 2x/4x queries reported4MiB instead of64KiB.
+After: Info/Info1 per-resource offsets/sizes, two-small batch, mixed-small/4MiB,
+array2 query, automatic/explicit4MiB and oversized/4KiB-invalid controls pass.
+The two-small batch reservation changes8MiB->128KiB. RGBA8 2x/4x each places two
+textures at64KiB/128KiB in192KiB heap, releases the caller heap reference, clears
+both red/green before either resolve, then waits on the GPU fence and checks
+all pixels: four readbacks pass. This is allocation reservation/placement proof,
+not a claim of64x lower committed native memory. D32 and array tests are query
+only; no sample8 or exhaustive allocation claim.
+
+One expected red; seven correctness runs plus two cost-control runs pass with
+API/GPU1/1/HUD1 and staged DLL/native companion paths verified; no Metal validation
+errors. Full resource runner passes and all59 format-contract rows are unchanged.
+Library/test builds and four-TU no-private syntax pass; full no-private link/run,
+native Windows, other GPUs and T3/T4 NOT_RUN. An external format-report parser
+initially selected the wrong prefix; corrected comparison passes on retained
+logs, without treating the parser failure as a runtime failure.
+
+Matched valid public allocation-query AB/BA/AB, validation0/0/HUD1,25x3000 calls,
+first batch dropped:72 batch averages/side. Median process p50/p95(us per call)
+2.550020/2.594500->2.558035/2.611270(+0.31/+0.65%). These are batch-average tails,
+not individual-call p95 and no speedup/noise-bound claim. Prior Recording/Submit
+warnings remain OPEN; those unchanged paths NOT_RUN. User .gitignore/shared Wine
+unchanged. Primary sources, baseline identity, red/green logs, exact benchmark
+rebuild args and manifest: `../dxmt-test/n08-small-msaa-20261024/N08-small-msaa.md`,
+`design.txt`, `sources.json`, `manifest.json`, `results.json`, `no-private.json`,
+`perf-results.json`, `aggregate.json`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

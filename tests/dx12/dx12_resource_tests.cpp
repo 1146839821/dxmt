@@ -581,6 +581,261 @@ bool CheckRGB96TextureCopies(ID3D12Device *device, bool controls_only,
   return good;
 }
 
+bool CheckSmallMSAAAllocation(ID3D12Device *device, bool metadata_only) {
+  constexpr UINT64 small_alignment =
+      D3D12_SMALL_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;
+  constexpr UINT64 default_alignment =
+      D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;
+  bool good = true;
+  UINT cases = 0;
+  for (const auto format :
+       {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_D32_FLOAT}) {
+    for (UINT samples : {2u, 4u}) {
+      struct Fixture {
+        ID3D12Device4 *device4 = nullptr;
+        ID3D12Heap *heap = nullptr;
+        ID3D12Resource *placed[2] = {}, *resolved[2] = {}, *readback[2] = {};
+        ID3D12DescriptorHeap *rtvs = nullptr;
+        ID3D12CommandQueue *queue = nullptr;
+        ID3D12CommandAllocator *allocator = nullptr;
+        ID3D12GraphicsCommandList *list = nullptr;
+        ID3D12Fence *fence = nullptr;
+        HANDLE event = nullptr;
+        ~Fixture() {
+          IUnknown *objects[] = {
+              list,        allocator, queue,       fence,       rtvs,
+              placed[0],   placed[1], resolved[0], resolved[1], readback[0],
+              readback[1], heap,      device4};
+          for (auto *object : objects)
+            if (object)
+              object->Release();
+          if (event)
+            CloseHandle(event);
+        }
+      } f;
+      D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS quality = {
+          format, samples, {}, 0};
+      if (!CheckHR("Small MSAA quality",
+                   device->CheckFeatureSupport(
+                       D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &quality,
+                       sizeof(quality))))
+        return false;
+      if (!quality.NumQualityLevels) {
+        std::cout << "small-msaa format=" << format << " samples=" << samples
+                  << " SKIP unsupported\n";
+        continue;
+      }
+      if (!CheckHR("Small MSAA device4",
+                   device->QueryInterface(IID_PPV_ARGS(&f.device4))))
+        return false;
+      D3D12_RESOURCE_DESC desc = {};
+      desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+      desc.Alignment = small_alignment;
+      desc.Width = desc.Height = 8;
+      desc.DepthOrArraySize = desc.MipLevels = 1;
+      desc.Format = format;
+      desc.SampleDesc.Count = samples;
+      desc.Flags = format == DXGI_FORMAT_D32_FLOAT
+                       ? D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL
+                       : D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+      const auto small = device->GetResourceAllocationInfo(0, 1, &desc);
+      D3D12_RESOURCE_DESC pair[] = {desc, desc};
+      D3D12_RESOURCE_ALLOCATION_INFO1 details[2] = {};
+      const auto batch =
+          f.device4->GetResourceAllocationInfo1(0, 2, pair, details);
+      auto ordinary = desc;
+      ordinary.Alignment = 0;
+      const auto normal = device->GetResourceAllocationInfo(0, 1, &ordinary);
+      ordinary.Alignment = default_alignment;
+      const auto forced = device->GetResourceAllocationInfo(0, 1, &ordinary);
+      pair[1] = ordinary;
+      D3D12_RESOURCE_ALLOCATION_INFO1 mixed_details[2] = {};
+      const auto mixed =
+          f.device4->GetResourceAllocationInfo1(0, 2, pair, mixed_details);
+      auto array = desc;
+      array.DepthOrArraySize = 2;
+      const auto array_info = device->GetResourceAllocationInfo(0, 1, &array);
+      auto invalid = desc;
+      invalid.Width = invalid.Height = 1024;
+      const auto large = device->GetResourceAllocationInfo(0, 1, &invalid);
+      invalid = desc;
+      invalid.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+      const auto wrong = device->GetResourceAllocationInfo(0, 1, &invalid);
+      const bool pass =
+          small.Alignment == small_alignment &&
+          small.SizeInBytes == small_alignment &&
+          batch.Alignment == small_alignment &&
+          batch.SizeInBytes == 2 * small_alignment && details[0].Offset == 0 &&
+          details[1].Offset == small_alignment &&
+          details[0].Alignment == small_alignment &&
+          details[1].Alignment == small_alignment &&
+          details[0].SizeInBytes == small_alignment &&
+          details[1].SizeInBytes == small_alignment &&
+          normal.Alignment == default_alignment &&
+          forced.Alignment == default_alignment &&
+          mixed.Alignment == default_alignment &&
+          mixed.SizeInBytes == 2 * default_alignment &&
+          mixed_details[0].Alignment == small_alignment &&
+          mixed_details[1].Offset == default_alignment &&
+          mixed_details[1].Alignment == default_alignment &&
+          array_info.Alignment == small_alignment &&
+          array_info.SizeInBytes != UINT64_MAX && array_info.SizeInBytes > 0 &&
+          array_info.SizeInBytes % small_alignment == 0 &&
+          large.SizeInBytes == UINT64_MAX && wrong.SizeInBytes == UINT64_MAX;
+      std::cout << "small-msaa format=" << format << " samples=" << samples
+                << " size=" << small.SizeInBytes
+                << " alignment=" << small.Alignment
+                << " batch_size=" << batch.SizeInBytes
+                << " normal_alignment=" << normal.Alignment
+                << " mixed_alignment=" << mixed.Alignment << " pass=" << pass
+                << "\n";
+      good &= pass;
+      ++cases;
+      if (!pass || metadata_only || format != DXGI_FORMAT_R8G8B8A8_UNORM)
+        continue;
+      D3D12_HEAP_PROPERTIES properties = {};
+      properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+      properties.CreationNodeMask = properties.VisibleNodeMask = 1;
+      D3D12_HEAP_DESC heap_desc = {};
+      heap_desc.SizeInBytes = 3 * small_alignment;
+      heap_desc.Alignment = small_alignment;
+      heap_desc.Properties = properties;
+      heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES;
+      if (!CheckHR("Small MSAA heap",
+                   device->CreateHeap(&heap_desc, IID_PPV_ARGS(&f.heap))))
+        return false;
+      D3D12_DESCRIPTOR_HEAP_DESC rtv_desc = {};
+      rtv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+      rtv_desc.NumDescriptors = 2;
+      if (!CheckHR("Small MSAA RTVs", device->CreateDescriptorHeap(
+                                          &rtv_desc, IID_PPV_ARGS(&f.rtvs))))
+        return false;
+      auto resolved_desc = desc;
+      resolved_desc.Alignment = 0;
+      resolved_desc.SampleDesc.Count = 1;
+      resolved_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+      D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+      UINT64 total = 0;
+      device->GetCopyableFootprints(&resolved_desc, 0, 1, 0, &footprint,
+                                    nullptr, nullptr, &total);
+      if (!total || total == UINT64_MAX)
+        return false;
+      D3D12_RESOURCE_DESC buffer = {};
+      buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+      buffer.Width = total;
+      buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels =
+          buffer.SampleDesc.Count = 1;
+      buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      auto rtv = f.rtvs->GetCPUDescriptorHandleForHeapStart();
+      const UINT increment = device->GetDescriptorHandleIncrementSize(
+          D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+      for (UINT i = 0; i < 2; ++i) {
+        if (!CheckHR("Small MSAA placed",
+                     device->CreatePlacedResource(
+                         f.heap, (i + 1) * small_alignment, &desc,
+                         D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                         IID_PPV_ARGS(&f.placed[i]))) ||
+            !CheckHR("Small MSAA resolved",
+                     device->CreateCommittedResource(
+                         &properties, D3D12_HEAP_FLAG_NONE, &resolved_desc,
+                         D3D12_RESOURCE_STATE_RESOLVE_DEST, nullptr,
+                         IID_PPV_ARGS(&f.resolved[i]))))
+          return false;
+        auto readback_properties = properties;
+        readback_properties.Type = D3D12_HEAP_TYPE_READBACK;
+        if (!CheckHR("Small MSAA readback",
+                     device->CreateCommittedResource(
+                         &readback_properties, D3D12_HEAP_FLAG_NONE, &buffer,
+                         D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                         IID_PPV_ARGS(&f.readback[i]))))
+          return false;
+        D3D12_RENDER_TARGET_VIEW_DESC view = {};
+        view.Format = format;
+        view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMS;
+        device->CreateRenderTargetView(f.placed[i], &view,
+                                       {rtv.ptr + i * increment});
+      }
+      // Placed resources, rather than this caller reference, retain the heap.
+      f.heap->Release();
+      f.heap = nullptr;
+      D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+      if (!CheckHR("Small MSAA queue",
+                   device->CreateCommandQueue(&queue_desc,
+                                              IID_PPV_ARGS(&f.queue))) ||
+          !CheckHR("Small MSAA allocator", device->CreateCommandAllocator(
+                                               D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                               IID_PPV_ARGS(&f.allocator))) ||
+          !CheckHR("Small MSAA list",
+                   device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                             f.allocator, nullptr,
+                                             IID_PPV_ARGS(&f.list))) ||
+          !CheckHR("Small MSAA fence",
+                   device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                       IID_PPV_ARGS(&f.fence))))
+        return false;
+      const FLOAT colors[2][4] = {{1, 0, 0, 1}, {0, 1, 0, 1}};
+      // Clear both first: overlapping allocations would overwrite the first
+      // color.
+      for (UINT i = 0; i < 2; ++i)
+        f.list->ClearRenderTargetView({rtv.ptr + i * increment}, colors[i], 0,
+                                      nullptr);
+      for (UINT i = 0; i < 2; ++i) {
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition = {f.placed[i], 0,
+                              D3D12_RESOURCE_STATE_RENDER_TARGET,
+                              D3D12_RESOURCE_STATE_RESOLVE_SOURCE};
+        f.list->ResourceBarrier(1, &barrier);
+        f.list->ResolveSubresource(f.resolved[i], 0, f.placed[i], 0, format);
+        barrier.Transition = {f.resolved[i], 0,
+                              D3D12_RESOURCE_STATE_RESOLVE_DEST,
+                              D3D12_RESOURCE_STATE_COPY_SOURCE};
+        f.list->ResourceBarrier(1, &barrier);
+        D3D12_TEXTURE_COPY_LOCATION source = {}, target = {};
+        source.pResource = f.resolved[i];
+        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        target.pResource = f.readback[i];
+        target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        target.PlacedFootprint = footprint;
+        f.list->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+      }
+      if (!CheckHR("Small MSAA Close", f.list->Close()))
+        return false;
+      ID3D12CommandList *list = f.list;
+      f.queue->ExecuteCommandLists(1, &list);
+      f.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+      if (!f.event ||
+          !CheckHR("Small MSAA Signal", f.queue->Signal(f.fence, 1)) ||
+          !CheckHR("Small MSAA completion",
+                   f.fence->SetEventOnCompletion(1, f.event)) ||
+          WaitForSingleObject(f.event, 5000) != WAIT_OBJECT_0 ||
+          !CheckHR("Small MSAA device status",
+                   device->GetDeviceRemovedReason()))
+        return false;
+      for (UINT i = 0; i < 2; ++i) {
+        void *mapped = nullptr;
+        if (!CheckHR("Small MSAA Map", f.readback[i]->Map(0, nullptr, &mapped)))
+          return false;
+        const BYTE expected[2][4] = {{255, 0, 0, 255}, {0, 255, 0, 255}};
+        bool pixels = true;
+        for (UINT y = 0; y < 8; ++y)
+          for (UINT x = 0; x < 8; ++x)
+            pixels &= !std::memcmp(static_cast<const BYTE *>(mapped) +
+                                       footprint.Offset +
+                                       y * footprint.Footprint.RowPitch + 4 * x,
+                                   expected[i], 4);
+        const D3D12_RANGE no_write = {};
+        f.readback[i]->Unmap(0, &no_write);
+        std::cout << "small-msaa samples=" << samples
+                  << " offset=" << (i + 1) * small_alignment
+                  << " GPU readback=" << (pixels ? "PASS" : "FAIL") << "\n";
+        good &= pixels;
+      }
+    }
+  }
+  return good && cases > 0;
+}
+
 bool CheckTextureFormatDimensions(ID3D12Device *device, bool footprints_only) {
   struct Owners {
     ID3D12Heap *heap = nullptr;
@@ -868,6 +1123,17 @@ bool CheckDepthFormatFlags(ID3D12Device *device) {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && (!std::strcmp(argv[1], "--small-msaa") ||
+                   !std::strcmp(argv[1], "--small-msaa-info"))) {
+    ID3D12Device *device = nullptr;
+    if (!CheckHR("Small MSAA device", D3D12CreateDevice(
+                    nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))))
+      return 1;
+    const bool good = CheckSmallMSAAAllocation(device, !std::strcmp(argv[1], "--small-msaa-info"));
+    device->Release();
+    return good ? 0 : 1;
+  }
+
   if (argc == 2 && !std::strcmp(argv[1], "--depth-format-flags")) {
     ID3D12Device *device = nullptr;
     if (!CheckHR("D3D12CreateDevice",
@@ -4800,7 +5066,7 @@ int main(int argc, char **argv) {
 
   auto result = *static_cast<UINT32 *>(mapped);
   destination->Unmap(0, nullptr);
-  if (!CheckTextureFormatDimensions(device, false)) {
+  if (!CheckTextureFormatDimensions(device, false) || !CheckSmallMSAAAllocation(device, false)) {
     cleanup();
     return 1;
   }
