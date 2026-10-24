@@ -2305,11 +2305,85 @@ public:
   }
 };
 
+// Opt-in private-ABI probe for the actual queue validation call. Derive the
+// Itanium member-pointer slot from this build's header, rather than pinning a
+// vtable index. The scoped patch always forwards the original implementation.
+class SplitValidationTiming {
+  using List = dxmt::MTLD3D12GraphicsCommandList;
+  using Validation = dxmt::D3D12RecordedStateValidation;
+  using Function = HRESULT (*)(const List *, Validation &);
+  void **slot_ = nullptr;
+  inline static Function original_ = nullptr;
+  inline static thread_local bool armed_ = false;
+  static HRESULT Validate(const List *list, Validation &state) {
+    if (!armed_)
+      return original_(list, state);
+    ++calls;
+    QueryPerformanceCounter(&begin);
+    if (delay)
+      Sleep(1); // Explicit calibration mode, never a production timing sample.
+    const HRESULT hr = original_(list, state);
+    QueryPerformanceCounter(&end);
+    return hr;
+  }
+
+public:
+  inline static thread_local UINT calls = 0;
+  inline static thread_local bool delay = false;
+  inline static thread_local LARGE_INTEGER begin = {}, end = {};
+  bool Install(ID3D12GraphicsCommandList *list) {
+    const auto method = &List::ValidateRecordedResourceStates;
+    std::array<ptrdiff_t, 2> representation;
+    static_assert(sizeof(method) == sizeof(representation));
+    std::memcpy(representation.data(), &method, sizeof(method));
+    if (!(representation[0] & 1) || representation[1] || representation[0] < 1)
+      return false;
+    auto **table = *reinterpret_cast<void ***>(static_cast<List *>(list));
+    slot_ = table + (representation[0] - 1) / sizeof(void *);
+    DWORD protection;
+    if (!VirtualProtect(slot_, sizeof(*slot_), PAGE_READWRITE, &protection)) {
+      slot_ = nullptr;
+      return false;
+    }
+    original_ = reinterpret_cast<Function>(*slot_);
+    InterlockedExchangePointer(reinterpret_cast<void *volatile *>(slot_),
+                               reinterpret_cast<void *>(&Validate));
+    VirtualProtect(slot_, sizeof(*slot_), protection, &protection);
+    Validation state;
+    state.local_only = true;
+    Arm();
+    const HRESULT hr =
+        static_cast<List *>(list)->ValidateRecordedResourceStates(state);
+    Stop();
+    return SUCCEEDED(hr) && calls == 1 && state.states.empty() &&
+           state.splits.empty();
+  }
+  void Arm() {
+    calls = 0;
+    begin = end = {};
+    armed_ = true;
+  }
+  void Stop() { armed_ = false; }
+  ~SplitValidationTiming() {
+    Stop();
+    if (slot_) {
+      DWORD protection;
+      if (VirtualProtect(slot_, sizeof(*slot_), PAGE_READWRITE, &protection)) {
+        InterlockedExchangePointer(reinterpret_cast<void *volatile *>(slot_),
+                                   reinterpret_cast<void *>(original_));
+        VirtualProtect(slot_, sizeof(*slot_), protection, &protection);
+      }
+    }
+  }
+};
+
 bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
                        bool split_cost = false,
                        bool omit_second_submission = false,
                        bool alternating_resources = false,
-                       UINT pending_width = 0, bool reverse_pending = false) {
+                       UINT pending_width = 0, bool reverse_pending = false,
+                       bool validation_timing = false,
+                       bool validation_delay = false) {
   HANDLE event =
       late_event ? nullptr : CreateEventW(nullptr, FALSE, FALSE, nullptr);
   if (!late_event && !event)
@@ -2396,6 +2470,11 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
       return false;
   }
   if (split_cost && FAILED(list->QueryInterface(IID_PPV_ARGS(&list7.ptr))))
+    return false;
+  SplitValidationTiming timing;
+  if (validation_timing)
+    timing.delay = validation_delay;
+  if (validation_timing && !timing.Install(list.ptr))
     return false;
   D3D12_BUFFER_BARRIER begin = {};
   begin.SyncBefore = D3D12_BARRIER_SYNC_COPY;
@@ -2502,9 +2581,15 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
     ID3D12CommandList *batch[] = {list.ptr};
     // Test-only fault: exercise the readback oracle without issuing this
     // round's copy.
+    if (validation_timing)
+      timing.Arm();
     if (!omit_second_submission || round != 1)
       queue.ptr->ExecuteCommandLists(1, batch);
     QueryPerformanceCounter(&submitted);
+    if (validation_timing)
+      timing.Stop();
+    if (validation_timing && SplitValidationTiming::calls != 1)
+      return false;
     if (split_cost && BlitEncoderCounter::count != 2)
       return false;
     if (!CheckHR("SignalBlit", queue.ptr->Signal(fence.ptr, round + 1)) ||
@@ -2554,12 +2639,25 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
                      frequency.QuadPart
               << " native_encoders="
               << (split_cost ? BlitEncoderCounter::count : 0) << "\n";
+    if (validation_timing) {
+      const auto &a = SplitValidationTiming::begin;
+      const auto &b = SplitValidationTiming::end;
+      std::cout << "split_phase round=" << round
+                << " calls=" << SplitValidationTiming::calls
+                << " prefix_us=" << (a.QuadPart - closed.QuadPart) * 1e6 / frequency.QuadPart
+                << " validate_us=" << (b.QuadPart - a.QuadPart) * 1e6 / frequency.QuadPart
+                << " suffix_us=" << (submitted.QuadPart - b.QuadPart) * 1e6 / frequency.QuadPart
+                << " total_us=" << (submitted.QuadPart - closed.QuadPart) * 1e6 / frequency.QuadPart << "\n";
+    }
   }
   return true;
 }
 
 int main(int argc, char **argv) {
   if (argc == 3 && !std::strcmp(argv[1], "--split-cost")) {
+    if (!std::strcmp(argv[2], "phases") || !std::strcmp(argv[2], "phases-delay"))
+      return TestSmallBlitCost(false, true, true, false, false, 0, false, true,
+                              !std::strcmp(argv[2], "phases-delay")) ? 0 : 1;
     if (!std::strcmp(argv[2], "pending32"))
       return TestSmallBlitCost(false, true, true, false, false, 32) ? 0 : 1;
     if (!std::strcmp(argv[2], "pending512"))

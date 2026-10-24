@@ -2465,6 +2465,49 @@ local commit only. Evidence: `../dxmt-test/n12-split-ranges-20261024/`:
 `perf-identities.json`, `perf-results.json`, `perf-aggregate.json`,
 `extra-lookup-trial/`, scoped build logs and raw correctness/performance logs.
 
+### N13 — actual split submission validation boundary, 2026-10-24
+
+Base ec44a617. Previous split Submit p95+34.46% remains OPEN; this round changes
+only the existing command-list test runner and this ledger. New opt-in
+`--split-cost phases` forwards the actual queue virtual validation call through
+a scoped private-vtable timer. Slot derives from the current Itanium member
+pointer, not a hardcoded index; matching private ABI is required. Empty-state
+preflight and exactly1 call/submission guard the seam. Normal Close calls still
+forward, and the patch restores on scope exit. No production DLL/ABI/owner/
+layout/scheduling/capability change; staged DLLs match the prior N12 byte hashes.
+
+Explicit `phases-delay` calibration inserts Sleep(1) only in that opt-in wrapper:
+both DLLs pass25 rounds, validation minima1070.0/1542.8us and medians
+1546.1/1545.4us. Excluded from performance. Existing changing GPU payload,
+fence/device checks and exactly2 native blit encoders/round remain. Six
+validation-enabled correctness processes pass: two-sided phases/calibration,
+full command-list runner, enhanced six-subresource GPU readback. Scoped build
+and changed-TU no-private syntax pass. Full no-private runtime, native Windows,
+D3D11 rendering and T3/T4 NOT_RUN.
+
+AB/BA/AB plain/phases controls,12 processes, validation0/0/HUD1, same PE and
+dependencies.24 retained rounds/process,72/side/mode, median process p50/p95(us):
+plain Submit87.70/122.40->88.20/136.60(+0.57/+11.60%);
+profiled total90.35/137.30->90.80/146.00(+0.50/+6.34%);
+validation35.95/38.60->36.55/39.10(+1.67/+1.30%);
+post-validation suffix52.90/97.10->52.00/105.60(-1.70/+8.75%).
+In candidate slow-total samples, validation36.6..40.6us and suffix78.3..126.7us.
+Validation p95+0.5us does not explain the prior total p95+41.9us by itself.
+Suffix includes descriptor collection, native factory/encoding/commit and return
+cleanup, not exclusively Metal. Clocks measure wall time, not CPU self-time.
+
+Plain paired p95 directions are+,+,-; profiled+,-,+. No noise bound, causal
+native/OS claim or replacement performance acceptance. Instrumentation changes
+call shape and adds clocks. Historical warning/global Device/performance gates
+stay OPEN. Next meaningful measurement splits this exact suffix at existing
+descriptor/native factory/commit boundaries; do not optimize validation or rerun
+unchanged broad matrices based on the aggregate tail alone.
+Actual matched host/prefix same as prior N12; shared Wine and user .gitignore
+unchanged, EnhancedBarriersSupported FALSE, no FL/SM/Options/Tier promotion.
+Evidence: `../dxmt-test/n13-split-phases-20261024/`: `N13-split-phases.md`,
+`design.txt`, `manifest.json`, `identities.json`, `results.json`,
+`no-private.json`, `perf-results.json`, `aggregate.json`, scoped build and logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
