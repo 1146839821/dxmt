@@ -6752,12 +6752,14 @@ public:
       FailRecording(__func__, "unsupported or invalid barrier");
     };
 
-    auto emit_memory_barrier = [&](MTLD3D12Resource *resource, D3D12_RESOURCE_STATES before,
-                                   D3D12_RESOURCE_STATES after, bool force) {
-      if (before != after ||
-          (force && (before != D3D12_RESOURCE_STATE_COMMON || after != D3D12_RESOURCE_STATE_COMMON))) {
-        EncodeMemoryBarrier(resource_barrier_scope(resource), before, after);
-      }
+    auto emit_memory_barrier = [&](WMTBarrierScope scope, D3D12_RESOURCE_STATES before,
+                                   D3D12_RESOURCE_STATES after, D3D12_BARRIER_ACCESS access_before,
+                                   D3D12_BARRIER_ACCESS access_after, bool layout_transition = false) {
+      // COMMON means broad access, whereas NO_ACCESS means none. Both lower
+      // to legacy COMMON for stage selection; that zero is not an empty scope.
+      if (layout_transition || access_before != D3D12_BARRIER_ACCESS_NO_ACCESS ||
+          access_after != D3D12_BARRIER_ACCESS_NO_ACCESS)
+        EncodeMemoryBarrier(scope, before, after);
     };
 
     for (UINT32 group_index = 0; group_index < NumBarrierGroups; group_index++) {
@@ -6785,13 +6787,10 @@ public:
             continue;
           }
 
-          const auto before_access = static_cast<UINT32>(barrier.AccessBefore);
-          const auto after_access = static_cast<UINT32>(barrier.AccessAfter);
-          if (before_access != after_access || before != D3D12_RESOURCE_STATE_COMMON ||
-              after != D3D12_RESOURCE_STATE_COMMON)
-            EncodeMemoryBarrier(
-                WMTBarrierScopeBuffers | WMTBarrierScopeTextures | WMTBarrierScopeRenderTargets, before, after
-            );
+          emit_memory_barrier(
+              WMTBarrierScopeBuffers | WMTBarrierScopeTextures | WMTBarrierScopeRenderTargets, before, after,
+              barrier.AccessBefore, barrier.AccessAfter
+          );
         }
         break;
 
@@ -6847,9 +6846,7 @@ public:
           resource_state_transitions_.push_back({resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
               D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON, false});
           emit_memory_barrier(
-              resource, before, after,
-              static_cast<UINT32>(barrier.AccessBefore) != static_cast<UINT32>(barrier.AccessAfter) ||
-                  before != D3D12_RESOURCE_STATE_COMMON || after != D3D12_RESOURCE_STATE_COMMON
+              resource_barrier_scope(resource), before, after, barrier.AccessBefore, barrier.AccessAfter
           );
         }
         break;
@@ -6964,14 +6961,11 @@ public:
           }
 
           auto emit_subresource = [&](UINT subresource) {
-            if (before_layout != after_layout) {
-              EncodeMemoryBarrier(resource_barrier_scope(resource), before_layout, after_layout);
-            } else if (barrier.LayoutBefore != barrier.LayoutAfter ||
-                       static_cast<UINT32>(barrier.AccessBefore) != static_cast<UINT32>(barrier.AccessAfter) ||
-                       before_access != D3D12_RESOURCE_STATE_COMMON ||
-                       after_access != D3D12_RESOURCE_STATE_COMMON) {
-              EncodeMemoryBarrier(resource_barrier_scope(resource), before_access, after_access);
-            }
+            emit_memory_barrier(
+                resource_barrier_scope(resource), before_layout != after_layout ? before_layout : before_access,
+                before_layout != after_layout ? after_layout : after_access, barrier.AccessBefore,
+                barrier.AccessAfter, barrier.LayoutBefore != barrier.LayoutAfter
+            );
             // Access scopes do not replace the layout when interoping with legacy barriers.
             resource_state_transitions_.push_back({
                 resource, subresource, tracked_before_layout, tracked_after_layout, false, discard

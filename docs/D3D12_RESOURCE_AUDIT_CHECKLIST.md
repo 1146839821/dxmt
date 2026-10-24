@@ -2748,6 +2748,36 @@ requested Xcode26 NOT_RUN. User .gitignore/shared Wine unchanged. Evidence:
 `design.txt`, `manifest.json`, `build-commands.json`, `macro-census.json`,
 `results.json`, `perf-results.json`, `aggregate.json`, native imports and logs.
 
+### N12 — preserve COMMON enhanced access dependencies, 2026-10-25
+
+Base a037cdc0. Global/buffer/texture ordinary barriers confused raw COMMON
+with NO_ACCESS because both lower to legacy zero for stage selection. The
+existing shared emission lambda now uses raw access to preserve required
+memory dependencies; texture stage selection/layout tracking and split owner
+remain unchanged. No new production file/state/ABI/capability; Enhanced FALSE.
+
+Existing command-list runner covers three scopes × COMMON/UAV/NO_ACCESS.
+Same-encoder native oracle: COMMON0->1 packets, explicit UAV1->1, NO_ACCESS0->0.
+Six exact GPU readbacks pass (also passed before; no corruption claim); three
+no-resource controls are readback NOT_RUN. Full command-list/enhanced runners,
+range/complete-pair queue handoff/removal, small-MSAA and Device contract pass.
+Matched no-private focused/readback and FL11_0/logicOp0 contract pass. Staged
+PE/native paths and API/GPU1/1/HUD1 verified. Cross-queue half legality remains
+unresolved; Windows, other GPU, render-encoder COMMON, full T3/T4 NOT_RUN.
+
+Final same-PE cost: API/GPU0/0/HUD1, observer off,1000 barriers/round,25 rounds,
+AB/BA/AB,first round dropped,72 retained samples/cell/side. Required missing
+barriers incur real CPU cost versus broken baseline; completion includes Wine
+and fence latency, not isolated GPU time. All p50/p95 and controls retained;
+COMMON recording p50 adds10.2/10.3/14.3ns per global/buffer/texture call;
+1000-barrier Submit p50 adds34.15/34.38/31.82% versus broken baseline.
+Overall/historical performance gates remain OPEN. See external report for
+numbers, rejected harness/build/deployment attempts and explicit limitations.
+User .gitignore/shared Wine preserved; focused local commit only, no push.
+Evidence: `../dxmt-test/n12-common-access-20261024/N12-common-access.md`,
+`design.txt`, `hypotheses.txt`, `manifest.json`, `sources.json`, `results.json`,
+`perf-results.json`, `aggregate.json`, final build/runtime logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

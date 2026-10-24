@@ -2377,6 +2377,329 @@ public:
   }
 };
 
+// Observe the serialized native dependency between two dispatches, without
+// inserting a fence or otherwise changing the commands sent to Metal.
+class ComputeBarrierCounter {
+  DriverImportPatch patch_;
+  inline static void *original_ = nullptr;
+  inline static obj_handle_t first_encoder_ = 0;
+  static void Encode(obj_handle_t encoder, const wmtcmd_base *head) {
+    for (auto *command = head; command;
+         command = static_cast<const wmtcmd_base *>(command->next.ptr)) {
+      if (command->type == WMTComputeCommandDispatch ||
+          command->type == WMTComputeCommandDispatchThreads) {
+        if (!dispatches)
+          first_encoder_ = encoder;
+        else if (dispatches == 1)
+          same_encoder = encoder == first_encoder_;
+        ++dispatches;
+      } else if (command->type == WMTComputeCommandMemoryBarrier &&
+                 dispatches == 1) {
+        ++barriers;
+        scope |=
+            reinterpret_cast<const wmtcmd_compute_memory_barrier *>(command)
+                ->scope;
+      }
+    }
+    reinterpret_cast<decltype(&Encode)>(original_)(encoder, head);
+  }
+
+public:
+  inline static UINT dispatches = 0, barriers = 0, scope = 0;
+  inline static bool same_encoder = false;
+  bool Install() {
+    dispatches = barriers = scope = 0;
+    same_encoder = false;
+    first_encoder_ = 0;
+    return patch_.Install("MTLComputeCommandEncoder_encodeCommands",
+                          reinterpret_cast<void *>(&Encode), original_);
+  }
+};
+
+bool TestCommonAccessBarriers() {
+  struct Compiler {
+    HMODULE module = LoadLibraryA(D3DCOMPILER_DLL_A);
+    ~Compiler() {
+      if (module)
+        FreeLibrary(module);
+    }
+  } compiler;
+  auto compile = compiler.module ? reinterpret_cast<pD3DCompile>(GetProcAddress(
+                                       compiler.module, "D3DCompile"))
+                                 : nullptr;
+  Owned<ID3D12Device> device;
+  Owned<ID3D12RootSignature> root;
+  Owned<ID3D12PipelineState> pipelines[3];
+  Owned<ID3DBlob> serialized;
+  D3D12_DESCRIPTOR_RANGE range = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
+  D3D12_ROOT_PARAMETER parameters[2] = {};
+  parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  parameters[0].DescriptorTable = {1, &range};
+  parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  parameters[1].Constants = {0, 0, 1};
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {2, parameters, 0, nullptr,
+                                         D3D12_ROOT_SIGNATURE_FLAG_NONE};
+  if (!compile ||
+      !CheckHR("common access device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&device.ptr))) ||
+      !CheckHR("common access serialize",
+               D3D12SerializeRootSignature(&root_desc,
+                                           D3D_ROOT_SIGNATURE_VERSION_1,
+                                           &serialized.ptr, nullptr)) ||
+      !CheckHR("common access root",
+               device->CreateRootSignature(0, serialized->GetBufferPointer(),
+                                           serialized->GetBufferSize(),
+                                           IID_PPV_ARGS(&root.ptr))))
+    return false;
+  const char *shaders[] = {
+      "RWStructuredBuffer<uint> data:register(u0); cbuffer C:register(b0){uint "
+      "phase;}"
+      "[numthreads(8,8,1)] void main(uint3 p:SV_DispatchThreadID){uint "
+      "i=p.x+8*p.y;"
+      "if(!phase)data[i]=0x12345600u^i;else data[i]=3u*data[i]+7u;}",
+      "RWTexture2D<uint> data:register(u0); cbuffer C:register(b0){uint phase;}"
+      "[numthreads(8,8,1)] void main(uint3 p:SV_DispatchThreadID){uint "
+      "i=p.x+8*p.y;"
+      "if(!phase)data[p.xy]=0x12345600u^i;else data[p.xy]=3u*data[p.xy]+7u;}",
+      "[numthreads(8,8,1)] void main() {}"};
+  for (UINT i = 0; i < 3; ++i) {
+    Owned<ID3DBlob> code, errors;
+    if (!CheckHR("common access shader",
+                 compile(shaders[i], std::strlen(shaders[i]), nullptr, nullptr,
+                         nullptr, "main", "cs_5_0", 0, 0, &code.ptr,
+                         &errors.ptr)))
+      return false;
+    D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+    desc.pRootSignature = root.ptr;
+    desc.CS = {code->GetBufferPointer(), code->GetBufferSize()};
+    if (!CheckHR("common access PSO",
+                 device->CreateComputePipelineState(
+                     &desc, IID_PPV_ARGS(&pipelines[i].ptr))))
+      return false;
+  }
+  bool good = true;
+  for (UINT type = 0; type < 3; ++type) {
+    for (UINT mode = 0; mode < 3; ++mode) {
+      const bool texture = type == 2;
+      const bool no_access = mode == 2;
+      Owned<ID3D12Resource> resource, readback;
+      Owned<ID3D12DescriptorHeap> descriptors;
+      Owned<ID3D12CommandQueue> queue;
+      Owned<ID3D12CommandAllocator> allocator;
+      Owned<ID3D12GraphicsCommandList> list;
+      Owned<ID3D12GraphicsCommandList7> list7;
+      Owned<ID3D12Fence> fence;
+      struct Event {
+        HANDLE value = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        ~Event() {
+          if (value)
+            CloseHandle(value);
+        }
+      } event;
+      D3D12_HEAP_PROPERTIES heap = {};
+      heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+      heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+      D3D12_RESOURCE_DESC desc = {};
+      desc.Dimension = texture ? D3D12_RESOURCE_DIMENSION_TEXTURE2D
+                               : D3D12_RESOURCE_DIMENSION_BUFFER;
+      desc.Width = texture ? 8 : 64 * sizeof(UINT);
+      desc.Height = texture ? 8 : 1;
+      desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+      desc.Layout = texture ? D3D12_TEXTURE_LAYOUT_UNKNOWN
+                            : D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      desc.Format = texture ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_UNKNOWN;
+      desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+      D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+      D3D12_DESCRIPTOR_HEAP_DESC descriptor_desc = {};
+      descriptor_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+      descriptor_desc.NumDescriptors = 1;
+      descriptor_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+      if (!event.value ||
+          !CheckHR("common access resource",
+                   device->CreateCommittedResource(
+                       &heap, D3D12_HEAP_FLAG_NONE, &desc,
+                       D3D12_RESOURCE_STATE_COMMON, nullptr,
+                       IID_PPV_ARGS(&resource.ptr))) ||
+          !CheckHR("common access descriptors",
+                   device->CreateDescriptorHeap(
+                       &descriptor_desc, IID_PPV_ARGS(&descriptors.ptr))) ||
+          !CheckHR("common access queue",
+                   device->CreateCommandQueue(&queue_desc,
+                                              IID_PPV_ARGS(&queue.ptr))) ||
+          !CheckHR(
+              "common access allocator",
+              device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                             IID_PPV_ARGS(&allocator.ptr))) ||
+          !CheckHR("common access list",
+                   device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                             allocator.ptr, nullptr,
+                                             IID_PPV_ARGS(&list.ptr))) ||
+          !CheckHR("common access list7",
+                   list->QueryInterface(IID_PPV_ARGS(&list7.ptr))) ||
+          !CheckHR("common access fence",
+                   device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                       IID_PPV_ARGS(&fence.ptr))))
+        return false;
+      D3D12_UNORDERED_ACCESS_VIEW_DESC view = {};
+      view.Format = desc.Format;
+      view.ViewDimension =
+          texture ? D3D12_UAV_DIMENSION_TEXTURE2D : D3D12_UAV_DIMENSION_BUFFER;
+      if (!texture) {
+        view.Buffer.NumElements = 64;
+        view.Buffer.StructureByteStride = sizeof(UINT);
+      }
+      device->CreateUnorderedAccessView(
+          resource.ptr, nullptr, &view,
+          descriptors->GetCPUDescriptorHandleForHeapStart());
+      D3D12_TEXTURE_BARRIER texture_barrier = {};
+      texture_barrier.pResource = resource.ptr;
+      texture_barrier.Subresources.IndexOrFirstMipLevel =
+          D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      D3D12_BARRIER_GROUP group = {};
+      group.NumBarriers = 1;
+      if (texture && !no_access) {
+        texture_barrier.SyncBefore = D3D12_BARRIER_SYNC_NONE;
+        texture_barrier.SyncAfter = D3D12_BARRIER_SYNC_COMPUTE_SHADING;
+        texture_barrier.AccessBefore = D3D12_BARRIER_ACCESS_NO_ACCESS;
+        texture_barrier.AccessAfter = D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+        texture_barrier.LayoutBefore = D3D12_BARRIER_LAYOUT_COMMON;
+        texture_barrier.LayoutAfter = D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
+        group.Type = D3D12_BARRIER_TYPE_TEXTURE;
+        group.pTextureBarriers = &texture_barrier;
+        list7->Barrier(1, &group);
+      }
+      list->SetPipelineState(pipelines[no_access ? 2 : texture ? 1 : 0].ptr);
+      list->SetComputeRootSignature(root.ptr);
+      ID3D12DescriptorHeap *heaps[] = {descriptors.ptr};
+      list->SetDescriptorHeaps(1, heaps);
+      list->SetComputeRootDescriptorTable(
+          0, descriptors->GetGPUDescriptorHandleForHeapStart());
+      list->SetComputeRoot32BitConstant(1, 0, 0);
+      list->Dispatch(1, 1, 1);
+      const auto access = no_access   ? D3D12_BARRIER_ACCESS_NO_ACCESS
+                          : mode == 0 ? D3D12_BARRIER_ACCESS_COMMON
+                                      : D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+      const auto sync = no_access ? D3D12_BARRIER_SYNC_NONE
+                                  : D3D12_BARRIER_SYNC_COMPUTE_SHADING;
+      D3D12_GLOBAL_BARRIER global = {sync, sync, access, access};
+      D3D12_BUFFER_BARRIER buffer = {sync,         sync, access,    access,
+                                     resource.ptr, 0,    UINT64_MAX};
+      if (type == 0) {
+        group.Type = D3D12_BARRIER_TYPE_GLOBAL;
+        group.pGlobalBarriers = &global;
+      } else if (type == 1) {
+        group.Type = D3D12_BARRIER_TYPE_BUFFER;
+        group.pBufferBarriers = &buffer;
+      } else {
+        texture_barrier.SyncBefore = texture_barrier.SyncAfter = sync;
+        texture_barrier.AccessBefore = texture_barrier.AccessAfter = access;
+        texture_barrier.LayoutBefore = texture_barrier.LayoutAfter =
+            no_access ? D3D12_BARRIER_LAYOUT_COMMON
+                      : D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
+        group.Type = D3D12_BARRIER_TYPE_TEXTURE;
+        group.pTextureBarriers = &texture_barrier;
+      }
+      list7->Barrier(1, &group);
+      list->SetComputeRoot32BitConstant(1, 1, 0);
+      list->Dispatch(1, 1, 1);
+      D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+      UINT64 total = desc.Width;
+      if (!no_access) {
+        if (texture)
+          device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr,
+                                        nullptr, &total);
+        D3D12_RESOURCE_DESC readback_desc = {};
+        readback_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        readback_desc.Width = total;
+        readback_desc.Height = readback_desc.DepthOrArraySize =
+            readback_desc.MipLevels = readback_desc.SampleDesc.Count = 1;
+        readback_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        heap.Type = D3D12_HEAP_TYPE_READBACK;
+        if (!CheckHR("common access readback",
+                     device->CreateCommittedResource(
+                         &heap, D3D12_HEAP_FLAG_NONE, &readback_desc,
+                         D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                         IID_PPV_ARGS(&readback.ptr))))
+          return false;
+        if (texture) {
+          texture_barrier.SyncBefore = D3D12_BARRIER_SYNC_COMPUTE_SHADING;
+          texture_barrier.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+          texture_barrier.AccessBefore = D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+          texture_barrier.AccessAfter = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+          texture_barrier.LayoutAfter = D3D12_BARRIER_LAYOUT_COPY_SOURCE;
+          list7->Barrier(1, &group);
+          D3D12_TEXTURE_COPY_LOCATION source = {}, target = {};
+          source.pResource = resource.ptr;
+          source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+          target.pResource = readback.ptr;
+          target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+          target.PlacedFootprint = footprint;
+          list->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+        } else {
+          buffer.SyncBefore = D3D12_BARRIER_SYNC_COMPUTE_SHADING;
+          buffer.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+          buffer.AccessBefore = D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+          buffer.AccessAfter = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+          group.Type = D3D12_BARRIER_TYPE_BUFFER;
+          group.pBufferBarriers = &buffer;
+          list7->Barrier(1, &group);
+          list->CopyBufferRegion(readback.ptr, 0, resource.ptr, 0, total);
+        }
+      }
+      if (!CheckHR("common access Close", list->Close()))
+        return false;
+      ComputeBarrierCounter counter;
+      if (!counter.Install())
+        return false;
+      ID3D12CommandList *batch[] = {list.ptr};
+      queue->ExecuteCommandLists(1, batch);
+      if (!CheckHR("common access Signal", queue->Signal(fence.ptr, 1)) ||
+          !CheckHR("common access completion",
+                   fence->SetEventOnCompletion(1, event.value)) ||
+          WaitForSingleObject(event.value, 5000) != WAIT_OBJECT_0 ||
+          !CheckHR("common access device status",
+                   device->GetDeviceRemovedReason()))
+        return false;
+      bool pixels = true;
+      if (!no_access) {
+        void *mapped = nullptr;
+        if (!CheckHR("common access Map", readback->Map(0, nullptr, &mapped)))
+          return false;
+        for (UINT i = 0; i < 64; ++i) {
+          const auto offset =
+              texture ? footprint.Offset +
+                            (i / 8) * footprint.Footprint.RowPitch + (i % 8) * 4
+                      : i * 4;
+          UINT actual;
+          std::memcpy(&actual, static_cast<const BYTE *>(mapped) + offset,
+                      sizeof(actual));
+          pixels &= actual == 3u * (0x12345600u ^ i) + 7u;
+        }
+        const D3D12_RANGE no_write = {};
+        readback->Unmap(0, &no_write);
+      }
+      const UINT expected_scope =
+          texture ? WMTBarrierScopeTextures : WMTBarrierScopeBuffers;
+      const bool native = counter.dispatches == 2 && counter.same_encoder &&
+                          counter.barriers == (no_access ? 0u : 1u) &&
+                          (no_access || (counter.scope & expected_scope));
+      std::cout << "common-access type=" << type << " mode=" << mode
+                << " dispatches=" << counter.dispatches
+                << " same_encoder=" << counter.same_encoder
+                << " barriers=" << counter.barriers
+                << " scope=" << counter.scope << " native=" << native
+                << " readback="
+                << (no_access ? "NOT_RUN"
+                    : pixels  ? "PASS"
+                              : "FAIL")
+                << "\n";
+      good &= native && pixels;
+    }
+  }
+  return good;
+}
+
 bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
                        bool split_cost = false,
                        bool omit_second_submission = false,
@@ -2654,6 +2977,8 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
 }
 
 int main(int argc, char **argv) {
+  if (argc == 2 && !std::strcmp(argv[1], "--common-access-barriers"))
+    return TestCommonAccessBarriers() ? 0 : 1;
   if (argc == 3 && !std::strcmp(argv[1], "--split-cost")) {
     if (!std::strcmp(argv[2], "phases") || !std::strcmp(argv[2], "phases-delay"))
       return TestSmallBlitCost(false, true, true, false, false, 0, false, true,
@@ -2740,7 +3065,8 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
-  if (!TestMultipleFenceWaits() || !TestDeviceRemovalWaits() || !TestConcurrentRemovalListeners()) {
+  if (!TestCommonAccessBarriers() || !TestMultipleFenceWaits() || !TestDeviceRemovalWaits() ||
+      !TestConcurrentRemovalListeners()) {
     device->Release();
     return 1;
   }
