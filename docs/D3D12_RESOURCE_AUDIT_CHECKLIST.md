@@ -1880,6 +1880,38 @@ Evidence: `../dxmt-test/n02-bc-volume-20261024/N02-bc-volume.md`,
 `manifest.json`, `results.json`, `shader-builds.json`, `no-private.json`,
 `sources.json`, pinned source snapshots and native-load/validation logs.
 
+### N12 — consecutive resource validation locality, 2026-10-24
+
+One N12 node borrows the existing authoritative state-map entry for consecutive
+resource events in `ValidateRecordedResourceStates`, shared by Close and queue
+admission. Two stack pointers rebind on resource change; no persistent cache,
+second state owner, allocation, lock, ABI/object-layout or GPU scheduling change.
+All range/state/split/error checks and rollback remain. E map lookups become R
+consecutive-resource-run lookups; pending-split search complexity is unchanged.
+Existing runners add A→B→A valid/invalid local Close tests and an alternating
+resource timing control, with identical final test PEs on both DLLs.
+
+Scoped build and three DXMT_NO_PRIVATE_API syntax-only checks pass. All 34
+correctness processes pass under Metal API/GPU validation, including split
+order/replay/concurrency/isolation, allocation failures and exact GPU readback.
+All 32 timing processes pass with validation disabled and HUD enabled. Four
+paired runs retain 96 split/control/record samples and 240 ordinary-submit
+samples per side. Median process p95 Close is 158.15→41.70us (-73.63%) for
+consecutive same-resource events; alternating-resource Close is +0.16%, matching
+the locality model. Same-resource total p95 improves 22.10%.
+
+Ordinary-submit p95 rises 2.00%, with all four pairs positive; empty-transition
+Close p95 rises 0.45us. These signals remain unresolved. Recording gains are not
+attributed to a method outside the recording window. Accept only the measured
+target-path improvement; historical/global performance gate stays OPEN /
+INCONCLUSIVE. No capability promotion; EnhancedBarriersSupported stays FALSE.
+Full no-private runtime, native Windows, D3D11 rendering and T3/T4 NOT_RUN.
+
+Evidence: `../dxmt-test/n12-split-validation-cost-20261024/`:
+`N12-split-validation-cost.md`, `manifest.json`, `validation-results.json`,
+`perf-results.json`, `perf-aggregate.json`, `paired-comparisons.json`,
+`perf-identities.json`, `no-private.json`, `exports.json` and raw logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

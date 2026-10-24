@@ -1415,14 +1415,22 @@ public:
       return !(value & ~allowed) && (!writes || (value == writes && !(writes & (writes - 1))));
     };
     try {
+      MTLD3D12Resource *previous_resource = nullptr;
+      D3D12RecordedResourceStates::mapped_type *previous_states = nullptr;
       for (const auto &transition : resource_state_transitions_) {
         auto *resource = transition.resource.ptr();
-        if (resource->subresource_states.size() > std::numeric_limits<UINT>::max())
-          return E_INVALIDARG;
-        auto [it, inserted] = states.try_emplace(resource);
-        if (inserted)
-          it->second.resize(resource->subresource_states.size());
-        auto &current_states = it->second;
+        // Consecutive events borrow the same authoritative validation entry.
+        // Rebind on a resource change; no state survives this validation call.
+        if (resource != previous_resource) {
+          if (resource->subresource_states.size() > std::numeric_limits<UINT>::max())
+            return E_INVALIDARG;
+          auto [it, inserted] = states.try_emplace(resource);
+          if (inserted)
+            it->second.resize(resource->subresource_states.size());
+          previous_resource = resource;
+          previous_states = &it->second;
+        }
+        auto &current_states = *previous_states;
         const auto apply = [&](UINT subresource) {
           auto pending = std::find_if(splits.begin(), splits.end(), [&](const auto &entry) {
             return entry.barrier.resource == resource && entry.subresource == subresource;

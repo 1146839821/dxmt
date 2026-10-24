@@ -2307,7 +2307,8 @@ public:
 
 bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
                        bool split_cost = false,
-                       bool omit_second_submission = false) {
+                       bool omit_second_submission = false,
+                       bool alternating_resources = false) {
   HANDLE event = late_event ? nullptr : CreateEventW(nullptr, FALSE, FALSE, nullptr);
   if (!late_event && !event)
     return false;
@@ -2320,7 +2321,7 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
   Owned<ID3D12CommandAllocator> allocator;
   Owned<ID3D12GraphicsCommandList> list;
   Owned<ID3D12GraphicsCommandList7> list7;
-  Owned<ID3D12Resource> upload, readback;
+  Owned<ID3D12Resource> upload, readback, alternate_upload;
   Owned<ID3D12Fence> fence;
   if (!CheckHR("CreateDevice",
                D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
@@ -2352,6 +2353,13 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
                                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                    IID_PPV_ARGS(&upload.ptr))))
     return false;
+  if (alternating_resources &&
+      !CheckHR("CreateAlternateUpload",
+               device.ptr->CreateCommittedResource(
+                   &h, D3D12_HEAP_FLAG_NONE, &b,
+                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                   IID_PPV_ARGS(&alternate_upload.ptr))))
+    return false;
   h.Type = D3D12_HEAP_TYPE_READBACK;
   if (!CheckHR("CreateReadback",
                device.ptr->CreateCommittedResource(
@@ -2377,6 +2385,9 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
   auto end_barrier = begin;
   end_barrier.SyncBefore = D3D12_BARRIER_SYNC_SPLIT;
   end_barrier.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+  auto alternate_begin = begin;
+  auto alternate_end = end_barrier;
+  alternate_begin.pResource = alternate_end.pResource = alternate_upload.ptr;
   D3D12_BARRIER_GROUP group = {};
   group.Type = D3D12_BARRIER_TYPE_BUFFER;
   group.NumBarriers = 1;
@@ -2414,8 +2425,17 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
       for (UINT i = 0; i < copies; ++i) {
         group.pBufferBarriers = &begin;
         list7->Barrier(1, &group);
+        if (alternating_resources) {
+          group.pBufferBarriers = &alternate_begin;
+          list7->Barrier(1, &group);
+        }
         group.pBufferBarriers = &end_barrier;
         list7->Barrier(1, &group);
+        if (alternating_resources) {
+          group.pBufferBarriers = &alternate_end;
+          list7->Barrier(1, &group);
+          ++i; // Two pairs in A-BEGIN/B-BEGIN/A-END/B-END order.
+        }
       }
       list->CopyBufferRegion(readback.ptr, 0, upload.ptr, 0, 4);
     } else {
@@ -2451,7 +2471,8 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
       return false;
     }
     std::cout << (split_cost ? "split_cost round=" : "small_blit round=")
-              << round << " pairs=" << (split_cost ? copies : 0)
+              << round << " alternating=" << alternating_resources
+              << " pairs=" << (split_cost ? copies : 0)
               << " copies=" << (split_cost ? 2 : copies)
               << " late_event=" << late_event << " payload=" << payload
               << " native_buffers=" << CopyBufferCounter::count << " record_us="
@@ -2471,6 +2492,9 @@ int main(int argc, char **argv) {
   if (argc == 3 && !std::strcmp(argv[1], "--small-blit-cost") &&
       !std::strcmp(argv[2], "stale"))
     return TestSmallBlitCost(false, false, false, true) ? 0 : 1;
+  if (argc == 3 && !std::strcmp(argv[1], "--split-cost") &&
+      !std::strcmp(argv[2], "alternating"))
+    return TestSmallBlitCost(false, true, true, false, true) ? 0 : 1;
   if (argc == 2 && !std::strcmp(argv[1], "--split-cost"))
     return TestSmallBlitCost(false, true, true) ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--small-blit-cost") == 0)

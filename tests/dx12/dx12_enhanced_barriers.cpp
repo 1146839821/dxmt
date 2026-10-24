@@ -180,6 +180,39 @@ bool ExpectClose(ID3D12Device *device, const char *name, HRESULT expected, Recor
   return true;
 }
 
+bool TestInterleavedRecordedStates(ID3D12Device *device, ID3D12Resource *buffer,
+                                   ID3D12Resource *texture) {
+  bool passed = true;
+  for (bool mismatch : {false, true}) {
+    passed &= ExpectClose(
+        device,
+        mismatch ? "interleaved resource state mismatch"
+                 : "interleaved resource states",
+        mismatch ? E_INVALIDARG : S_OK, [&](auto *list) {
+          D3D12_RESOURCE_BARRIER barriers[3] = {};
+          for (auto &barrier : barriers) {
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.Subresource =
+                D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+          }
+          barriers[0].Transition.pResource = buffer;
+          barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+          barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+          barriers[1].Transition.pResource = texture;
+          barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+          barriers[1].Transition.StateAfter =
+              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+          barriers[2].Transition.pResource = buffer;
+          barriers[2].Transition.StateBefore =
+              mismatch ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                       : D3D12_RESOURCE_STATE_COPY_SOURCE;
+          barriers[2].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+          list->ResourceBarrier(3, barriers);
+        });
+  }
+  return passed;
+}
+
 bool TestValidSplitBarriers(ID3D12Device *device, ID3D12Resource *buffer, ID3D12Resource *texture) {
   const bool split_passed = ExpectClose(
       device, "valid buffer/texture split barriers", S_OK, [&](auto *list) {
@@ -712,6 +745,7 @@ int main(int argc, char **argv) {
     return 1;
 
   bool passed = TestValidSplitBarriers(device.ptr, buffer.ptr, texture.ptr);
+  passed &= TestInterleavedRecordedStates(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestCrossCommandListSplitBarriers(device.ptr, buffer.ptr);
   passed &= TestInvalidSplitBarriers(device.ptr, buffer.ptr, texture.ptr);
   if (!passed)
