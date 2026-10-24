@@ -1999,6 +1999,46 @@ Evidence: `../dxmt-test/n02-uav-report-admission-20261024/`:
 `perf-aggregate.json`, `paired-comparisons.json`, `perf-identities.json`, official
 source snapshots, pinned upstream source and raw logs.
 
+### N02 — typed-UAV GPU load/store oracle, 2026-10-24
+
+Base0ce5e12b. No production defect reproduced in the selected native Tier2 set;
+fix confirmed test false-positive: buffer and texture copies aliased readback
+at offset0. SAME external shader writes buffer0/texture255: original HEAD runner
+exits0 falsely, corrected runner exits1 with both distinct values. Readbacks now
+use offset0/512; add valid input/output transitions and checked completion/device
+status. Existing sampler runner/HLSL adds phase constants, two dispatches separated
+by UAV barrier, distinct 2x2 values, CPU before-load and physical after-store
+oracles. Independent test-only byte decoder; no runtime capability table.
+Three optional Meson variants reuse existing HLSL. No new source/header/runner.
+
+Final22 GPU processes pass:18 formats (3 R32 plus15 additional-set candidates),
+468 scalar load/store checks, and4 existing sampler modes. Three external shader
+mutations fail as expected (load, store, alias); three invalid CLI forms exit2.
+Adjacent feature69/69 and format58/58 pass. All GPU cases verify native stage DLL,
+API/GPU validation1/1/HUD1 and no validation/aborted-buffer errors. Immutable DLL
+b094fae2 is previous round's production candidate; test build regenerated version
+metadata in build-tree DLLs, which were not substituted. Scoped runner build and
+changed-TU no-private syntax check pass. Meson reconfigure and fixture dry-run
+pass; equivalent source/profile/define DXC commands executed using matched Wine;
+default fixture commands with older configured toolchain Wine NOT_RUN.
+
+Apple Tier2+Tier1 and Microsoft typed-UAV snapshots bound safe candidates; fresh
+M1Max native readWriteTextureSupport=2. Runtime GPU readback, not native support
+alone, establishes this limited evidence. Packed/RG/SNORM combined-read_write
+lowering remains UNVERIFIED; no unsafe dispatch. Vector shader research fixture
+is not a complete additional-formats gate. FL/SM/Options/Tiers unchanged, including
+TypedUAVLoadAdditionalFormats FALSE. No ABI/layout/runtime scheduling change.
+Performance NOT_RUN (production unchanged); retain prior query p50+7.43%/
+batch-p95+6.92% warning and OPEN global performance/Device/format/FL12_2 gates.
+Full no-private runtime/native Windows/D3D11 rendering/T3/T4 NOT_RUN.
+Actual macOS27.0.1/Xcode27.1/M1Max/Apple7/MSC4.0.1/Wine11/clang23.1.1;
+fixed isolated prefix, user .gitignore unchanged, no push.
+
+Evidence: `../dxmt-test/n02-typed-uav-gpu-20261024/`:
+`N02-typed-uav-gpu.md`, `manifest.json`, `validation-results.json`,
+`negative-results.json`, `baseline-alias.json`, `adjacent-results.json`,
+`no-private.json`, `sources.json`, `machine.log`, scoped build/DXC and raw logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

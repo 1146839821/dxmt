@@ -4,6 +4,8 @@
 #include <d3d12.h>
 
 #include <cstring>
+#include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -17,15 +19,154 @@ CheckHR(const char *name, HRESULT hr) {
   return true;
 }
 
+// Only the native Tier 2 read-write set is exercised here. This test table is
+// an independent byte-level oracle, not a runtime capability table.
+struct TypedFormat {
+  DXGI_FORMAT format;
+  unsigned components;
+  unsigned bytes;
+  char kind; // f: IEEE float, u: unsigned, i: signed, n: UNORM
+};
+
+static const TypedFormat typed_formats[] = {
+    {DXGI_FORMAT_R32G32B32A32_FLOAT, 4, 4, 'f'},
+    {DXGI_FORMAT_R32G32B32A32_UINT, 4, 4, 'u'},
+    {DXGI_FORMAT_R32G32B32A32_SINT, 4, 4, 'i'},
+    {DXGI_FORMAT_R16G16B16A16_FLOAT, 4, 2, 'f'},
+    {DXGI_FORMAT_R16G16B16A16_UINT, 4, 2, 'u'},
+    {DXGI_FORMAT_R16G16B16A16_SINT, 4, 2, 'i'},
+    {DXGI_FORMAT_R8G8B8A8_UNORM, 4, 1, 'n'},
+    {DXGI_FORMAT_R8G8B8A8_UINT, 4, 1, 'u'},
+    {DXGI_FORMAT_R8G8B8A8_SINT, 4, 1, 'i'},
+    {DXGI_FORMAT_R32_FLOAT, 1, 4, 'f'},
+    {DXGI_FORMAT_R32_UINT, 1, 4, 'u'},
+    {DXGI_FORMAT_R32_SINT, 1, 4, 'i'},
+    {DXGI_FORMAT_R16_FLOAT, 1, 2, 'f'},
+    {DXGI_FORMAT_R16_UINT, 1, 2, 'u'},
+    {DXGI_FORMAT_R16_SINT, 1, 2, 'i'},
+    {DXGI_FORMAT_R8_UNORM, 1, 1, 'n'},
+    {DXGI_FORMAT_R8_UINT, 1, 1, 'u'},
+    {DXGI_FORMAT_R8_SINT, 1, 1, 'i'},
+};
+
+static double InitialValue(const TypedFormat &format, unsigned pixel,
+                           unsigned component) {
+  const double initial[] = {3 + 4.0 * pixel, 5 + 4.0 * pixel, 7 + 4.0 * pixel,
+                            1};
+  const double floating[] = {0.25 + pixel / 16.0, 0.5 + pixel / 32.0,
+                             0.75 - pixel / 16.0, 1};
+  if (format.kind == 'n')
+    return std::round(floating[component] * 255) / 255;
+  if (format.kind == 'f')
+    return floating[component];
+  return format.kind == 'i' && (component == 0 || component == 2)
+             ? -initial[component]
+             : initial[component];
+}
+
+static double ReadComponent(const unsigned char *data, unsigned bytes,
+                            char kind) {
+  UINT bits = 0;
+  memcpy(&bits, data, bytes);
+  if (kind == 'n')
+    return bits / 255.0;
+  if (kind == 'u')
+    return bits;
+  if (kind == 'i') {
+    const int64_t sign = int64_t(1) << (bytes * 8 - 1);
+    return (int64_t(bits) ^ sign) - sign;
+  }
+  if (bytes == 4) {
+    float value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+  }
+  // Half precision values written by this fixture are finite and normalized.
+  if ((bits & 0x7c00) == 0x7c00)
+    return NAN;
+  const int exponent = (bits >> 10) & 31;
+  const double value =
+      exponent ? std::ldexp(1 + (bits & 1023) / 1024.0, exponent - 15)
+               : std::ldexp(double(bits & 1023), -24);
+  return bits & 0x8000 ? -value : value;
+}
+
+static bool
+CheckTypedReadback(const TypedFormat &format, const UINT *mapped,
+                   const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &footprint) {
+  unsigned checks = 0;
+  for (unsigned pixel = 0; pixel < 4; ++pixel) {
+    for (unsigned component = 0; component < 4; ++component) {
+      const bool present = component < format.components;
+      const double initial = present ? InitialValue(format, pixel, component)
+                             : component == 3 ? 1
+                                              : 0;
+      const char kind = format.kind == 'n' ? 'f' : format.kind;
+      const double loaded =
+          ReadComponent(reinterpret_cast<const unsigned char *>(
+                            &mapped[1 + 4 * pixel + component]),
+                        4, kind);
+      const double tolerance = format.kind == 'n' ? 1.0 / 255 + 1e-6 : 1e-6;
+      if (!std::isfinite(loaded) || std::abs(loaded - initial) > tolerance) {
+        std::cerr << "typed UAV load mismatch pixel=" << pixel
+                  << " component=" << component << " actual=" << loaded
+                  << " expected=" << initial << "\n";
+        return false;
+      }
+      ++checks;
+      if (!present)
+        continue;
+      double expected = initial;
+      if (format.kind == 'f' || format.kind == 'n')
+        expected *= component == 3 ? 1 : 0.5;
+      else if (component != 3)
+        expected +=
+            format.kind == 'i' && component == 1 ? -2.0 : component + 1.0;
+      if (format.kind == 'n')
+        expected = std::round(expected * 255) / 255;
+      const auto *data =
+          reinterpret_cast<const unsigned char *>(mapped) + footprint.Offset +
+          (pixel / 2) * footprint.Footprint.RowPitch +
+          ((pixel % 2) * format.components + component) * format.bytes;
+      const double stored = ReadComponent(data, format.bytes, format.kind);
+      if (!std::isfinite(stored) || std::abs(stored - expected) > tolerance) {
+        std::cerr << "typed UAV store mismatch pixel=" << pixel
+                  << " component=" << component << " actual=" << stored
+                  << " expected=" << expected << "\n";
+        return false;
+      }
+      ++checks;
+    }
+  }
+  std::cout << "typed UAV format=" << format.format
+            << " load/store checks=" << checks << " passed\n";
+  return true;
+}
+
 int
 main(int argc, char **argv) {
-  if (argc < 2 || argc > 3)
+  if (argc < 2 || argc > 4)
     return 2;
+  const TypedFormat *typed_format = nullptr;
+  if (argc == 4) {
+    if (strcmp(argv[2], "--typed-uav") != 0)
+      return 2;
+    char *end = nullptr;
+    const auto format = strtoul(argv[3], &end, 10);
+    if (!*argv[3] || *end)
+      return 2;
+    for (const auto &entry : typed_formats)
+      if (format == entry.format)
+        typed_format = &entry;
+    if (!typed_format)
+      return 2;
+  }
   const bool static_sampler = argc == 3 && strcmp(argv[2], "--static-sampler") == 0;
   const bool direct_indexed_uav_texture =
       argc == 3 && strcmp(argv[2], "--direct-indexed-uav-texture") == 0;
   const bool direct_indexed =
       argc == 3 && (strcmp(argv[2], "--direct-indexed") == 0 || direct_indexed_uav_texture);
+  const bool texture_uav = direct_indexed_uav_texture || typed_format;
   if (argc == 3 && !static_sampler && !direct_indexed)
     return 2;
 
@@ -65,7 +206,7 @@ main(int argc, char **argv) {
 
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   D3D12_DESCRIPTOR_RANGE ranges[3] = {};
-  D3D12_ROOT_PARAMETER root_parameters[3] = {};
+  D3D12_ROOT_PARAMETER root_parameters[4] = {};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
   D3D12_VERSIONED_ROOT_SIGNATURE_DESC versioned_root_desc = {};
   D3D12_STATIC_SAMPLER_DESC static_sampler_desc = {};
@@ -93,9 +234,26 @@ main(int argc, char **argv) {
   D3D12_COMPUTE_PIPELINE_STATE_DESC pso_desc = {};
   D3D12_TEXTURE_COPY_LOCATION texture_dst = {};
   D3D12_TEXTURE_COPY_LOCATION texture_src = {};
+  D3D12_RESOURCE_BARRIER barrier = {};
 
   if (!CheckHR("D3D12CreateDevice", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))))
     goto cleanup;
+  if (typed_format) {
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {typed_format->format};
+    const UINT required = D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD |
+                          D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE;
+    if (!CheckHR("TypedFormatSupport",
+                 device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                                             &support, sizeof(support))))
+      goto cleanup;
+    if (!(support.Support1 &
+          D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) ||
+        (support.Support2 & required) != required) {
+      std::cerr << "typed UAV format lacks reported view/load/store support: "
+                << typed_format->format << "\n";
+      goto cleanup;
+    }
+  }
   queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
   if (!CheckHR("CreateCommandQueue", device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue))))
     goto cleanup;
@@ -113,7 +271,8 @@ main(int argc, char **argv) {
     ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
     ranges[1] = {static_sampler ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV : D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
     if (!static_sampler)
-      ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
+      ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, typed_format ? 2u : 1u, 0,
+                   0, 0};
     root_parameter_count = static_sampler ? 2 : 3;
     for (unsigned i = 0; i < root_parameter_count; i++) {
       root_parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -122,6 +281,12 @@ main(int argc, char **argv) {
     }
     root_desc.NumParameters = root_parameter_count;
     root_desc.pParameters = root_parameters;
+    if (typed_format) {
+      root_parameters[3].ParameterType =
+          D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+      root_parameters[3].Constants = {0, 0, 1};
+      root_desc.NumParameters = 4;
+    }
   }
   if (static_sampler) {
     static_sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -151,7 +316,7 @@ main(int argc, char **argv) {
     goto cleanup;
 
   resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-  resource_heap_desc.NumDescriptors = direct_indexed_uav_texture ? 3 : 2;
+  resource_heap_desc.NumDescriptors = texture_uav ? 3 : 2;
   resource_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
   sampler_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
   sampler_heap_desc.NumDescriptors = 1;
@@ -221,9 +386,12 @@ main(int argc, char **argv) {
                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&output))))
     goto cleanup;
   device->CreateUnorderedAccessView(output, nullptr, &uav_desc, uav_cpu);
-  if (direct_indexed_uav_texture) {
+  if (texture_uav) {
     output_texture_desc = texture_desc;
-    output_texture_desc.Format = DXGI_FORMAT_R32_UINT;
+    output_texture_desc.Format =
+        typed_format ? typed_format->format : DXGI_FORMAT_R32_UINT;
+    output_texture_desc.Width = output_texture_desc.Height =
+        typed_format ? 2 : 1;
     output_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     if (!CheckHR(
             "CreateOutputTexture",
@@ -232,14 +400,14 @@ main(int argc, char **argv) {
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&output_texture))))
       goto cleanup;
     D3D12_UNORDERED_ACCESS_VIEW_DESC texture_uav_desc = {};
-    texture_uav_desc.Format = DXGI_FORMAT_R32_UINT;
+    texture_uav_desc.Format = output_texture_desc.Format;
     texture_uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     auto texture_uav_cpu = resource_cpu;
     texture_uav_cpu.ptr += descriptor_increment * 2;
     device->CreateUnorderedAccessView(output_texture, nullptr, &texture_uav_desc, texture_uav_cpu);
-    device->GetCopyableFootprints(
-        &output_texture_desc, 0, 1, 0, &output_texture_footprint, &row_count, &row_size, &total_size
-    );
+    device->GetCopyableFootprints(&output_texture_desc, 0, 1, 512,
+                                  &output_texture_footprint, &row_count,
+                                  &row_size, &total_size);
   }
 
   if (!static_sampler) {
@@ -256,6 +424,7 @@ main(int argc, char **argv) {
   readback_heap.CreationNodeMask = 1;
   readback_heap.VisibleNodeMask = 1;
   buffer_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+  buffer_desc.Width = texture_uav ? 1024 : 256;
   if (!CheckHR(
           "CreateReadbackBuffer",
           device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
@@ -278,6 +447,13 @@ main(int argc, char **argv) {
   texture_src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
   texture_src.PlacedFootprint = footprint;
   list->CopyTextureRegion(&texture_dst, 0, 0, 0, &texture_src, nullptr);
+  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barrier.Transition.pResource = texture;
+  barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  barrier.Transition.StateAfter =
+      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+  barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &barrier);
   heaps[0] = resource_heap;
   if (!static_sampler)
     heaps[1] = sampler_heap;
@@ -294,9 +470,23 @@ main(int argc, char **argv) {
       list->SetComputeRootDescriptorTable(2, resource_gpu);
     }
   }
+  if (typed_format)
+    list->SetComputeRoot32BitConstant(3, 0, 0);
   list->Dispatch(1, 1, 1);
-  list->CopyBufferRegion(readback, 0, output, 0, sizeof(UINT));
-  if (direct_indexed_uav_texture) {
+  if (typed_format) {
+    D3D12_RESOURCE_BARRIER uav_barrier = {};
+    uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    list->ResourceBarrier(1, &uav_barrier);
+    list->SetComputeRoot32BitConstant(3, 1, 0);
+    list->Dispatch(1, 1, 1);
+  }
+  barrier.Transition.pResource = output;
+  barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  list->ResourceBarrier(1, &barrier);
+  list->CopyBufferRegion(readback, 0, output, 0,
+                         (typed_format ? 17 : 1) * sizeof(UINT));
+  if (texture_uav) {
     D3D12_RESOURCE_BARRIER texture_barrier = {};
     texture_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     texture_barrier.Transition.pResource = output_texture;
@@ -324,10 +514,19 @@ main(int argc, char **argv) {
   event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
   if (!event || !CheckHR("SetEventOnCompletion", fence->SetEventOnCompletion(1, event)))
     goto cleanup;
-  WaitForSingleObject(event, INFINITE);
+  if (WaitForSingleObject(event, 30000) != WAIT_OBJECT_0 ||
+      !CheckHR("GetDeviceRemovedReason", device->GetDeviceRemovedReason())) {
+    std::cerr << "GPU completion failed\n";
+    goto cleanup;
+  }
   if (!CheckHR("MapReadback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
     goto cleanup;
   value = *mapped;
+  if (typed_format &&
+      !CheckTypedReadback(*typed_format, mapped, output_texture_footprint)) {
+    readback->Unmap(0, nullptr);
+    goto cleanup;
+  }
   texture_value = direct_indexed_uav_texture
                       ? *reinterpret_cast<UINT *>(reinterpret_cast<char *>(mapped) + output_texture_footprint.Offset)
                       : value;

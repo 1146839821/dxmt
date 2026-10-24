@@ -475,6 +475,14 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach kind : [ 'float', 'uint', 'sint' ]
+    custom_target('dx12_texture_sampler_typed_uav_' + kind + '_fixture',
+      input: 'texture_sampler.hlsl',
+      output: 'texture_sampler_typed_uav_' + kind + '.cs.cso',
+      command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '-D', 'TYPED_UAV_' + kind.to_upper() + '=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
   custom_target('dx12_texture_sampler_direct_indexed_fixture',
     input: 'texture_sampler_direct_indexed.hlsl',
     output: 'texture_sampler_direct_indexed.cs.cso',
