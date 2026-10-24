@@ -1738,6 +1738,48 @@ recording/submit regressions remain OPEN. Evidence:
 `../dxmt-test/n02-depth-ms-oracle-20261024/N02-depth-ms-oracle.md`,
 `results.json`, `shader-builds.json`, `no-private.json`, `manifest.json`.
 
+### N02 — no-match feature-level query result, 2026-10-24
+
+Base6d8b8e32. Nonempty FEATURE_LEVELS queries with a zero selected result
+returned E_FAIL before publishing output, retaining the caller sentinel0xb000.
+Same final PE + baseline DLL twice gives8 pass/3 fail (zero-only, unnamed high
+0xffff, known unsupported12_2). Remove the post-selection failure return;
+retain maximum-of-requested-numeric-levels selection and null/count/size guards.
+Now no-match returns S_OK and MaxSupportedFeatureLevel=0; device creation
+still rejects unsupported FL. No clamping to an unrequested supported level,
+stricter enum validation, new state/cache, source/header or capability promotion.
+
+Final11 matrix checks plus null-data guard pass; full feature65, format54,
+plane40, resource21 pass. Nine candidate processes exit0 with verified DLL and
+Metal API/GPU validation: depth/stencil reversed-family and ordinary typeless
+GPU readbacks11..99 plus two depth/stencil multi-copy rounds. Scoped regular
+build and both changed-TU no-private syntax pass; six export names/ordinals
+unchanged101..106. Native Windows differential, full no-private runtime and
+T3/T4 NOT_RUN. Pinned VKD3D device ef9a02e8 publishes zero and returns S_OK;
+its tests preserve numeric0x3000 compatibility. This is reference-source
+comparison, not a claimed native Windows run. Upstream DXMT a148782d clamps
+the requested maximum to11_1, which can produce an unrequested level; not copied.
+
+Main AB/BA/AB18-process timing (median process p50/p95, us): record
+3211.35/3388.00 ->3200.60/3365.60 (-0.33%/-0.66%); view
+1841.10/1914.50 ->1853.40/1907.90 (+0.67%/-0.34%); ordinary submit
+111.25/135.20 ->111.70/149.40 (+0.40%/+10.50%). Submit p95 triggers the
+warning threshold. Independent BA/AB/BA/AB eight-process submit recheck:
+125.825/156.65 ->119.125/163.25 (-5.32%/+4.21%). Main retain24 record/view
+or60 submit samples/process; recheck60. All26 processes exit0. Results show
+run-to-run absolute drift; the first signal is retained. Submit performance
+INCONCLUSIVE, not cleared or attributed to the removed query branch; historical
+performance/Device gates stay OPEN. Same workload PEs/DXGI/WMT and device,
+validation disabled for timings; recording verifies unique GPU payload and
+zero native staging buffers. No direct FEATURE_LEVELS latency benchmark.
+
+Actual macOS27.0.1/Xcode27.1(requested26 unavailable)/M1Max/Apple7/MSC4.0.1/
+Wine11/clang23.1.1. No ABI/layout/scheduling/FL/SM/Options/Tier change.
+Evidence: `../dxmt-test/n02-feature-level-contract-20261024/`
+`N02-feature-level-contract.md`, `manifest.json`, `red-results.json`,
+`validation-results.json`, `no-private.json`, `perf-aggregate.json`,
+`submit-recheck/perf-aggregate.json`, `sources.json`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

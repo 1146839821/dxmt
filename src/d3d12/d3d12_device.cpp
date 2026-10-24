@@ -736,8 +736,6 @@ public:
       for (unsigned i = 0; i < out->NumFeatureLevels; i++)
         if (out->pFeatureLevelsRequested[i] <= supported_level)
           max_level = std::max(out->pFeatureLevelsRequested[i], max_level);
-      if (!max_level)
-        return E_FAIL;
       out->MaxSupportedFeatureLevel = max_level;
       return S_OK;
     }

@@ -309,6 +309,73 @@ bool CheckDeviceIdentity(ID3D12Device *device) {
   return good;
 }
 
+bool CheckFeatureLevelQueries(ID3D12Device *device) {
+  constexpr D3D_FEATURE_LEVEL known[] = {
+      D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_12_0,
+      D3D_FEATURE_LEVEL_12_1, D3D_FEATURE_LEVEL_12_2};
+  D3D12_FEATURE_DATA_FEATURE_LEVELS maximum = {
+      static_cast<UINT>(std::size(known)), known, {}};
+  if (!CheckHR("Maximum feature level",
+               device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS,
+                                           &maximum, sizeof(maximum))))
+    return false;
+
+  bool good = true;
+  const auto check = [&](const char *name, const D3D_FEATURE_LEVEL *levels,
+                         UINT count, HRESULT expected_hr,
+                         D3D_FEATURE_LEVEL expected_level,
+                         UINT size =
+                             sizeof(D3D12_FEATURE_DATA_FEATURE_LEVELS)) {
+    D3D12_FEATURE_DATA_FEATURE_LEVELS query = {count, levels,
+                                               D3D_FEATURE_LEVEL_11_0};
+    const HRESULT hr =
+        device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &query, size);
+    const bool pass =
+        hr == expected_hr &&
+        (FAILED(hr) || query.MaxSupportedFeatureLevel == expected_level) &&
+        query.NumFeatureLevels == count &&
+        query.pFeatureLevelsRequested == levels;
+    std::cout << "feature-level-contract " << name << " hr=0x" << std::hex
+              << static_cast<UINT>(hr) << " maximum=0x"
+              << query.MaxSupportedFeatureLevel << std::dec << " pass=" << pass
+              << "\n";
+    good &= pass;
+  };
+  const D3D_FEATURE_LEVEL unordered[] = {
+      D3D_FEATURE_LEVEL_12_2, D3D_FEATURE_LEVEL_11_0,
+      maximum.MaxSupportedFeatureLevel, D3D_FEATURE_LEVEL_11_0};
+  check("unordered-duplicates", unordered,
+        static_cast<UINT>(std::size(unordered)), S_OK,
+        maximum.MaxSupportedFeatureLevel);
+  check("single-supported", &maximum.MaxSupportedFeatureLevel, 1, S_OK,
+        maximum.MaxSupportedFeatureLevel);
+  const D3D_FEATURE_LEVEL downlevel[] = {
+      D3D_FEATURE_LEVEL_9_1, D3D_FEATURE_LEVEL_9_3, D3D_FEATURE_LEVEL_9_2};
+  check("downlevel", downlevel, static_cast<UINT>(std::size(downlevel)), S_OK,
+        D3D_FEATURE_LEVEL_9_3);
+  const D3D_FEATURE_LEVEL numeric[] = {static_cast<D3D_FEATURE_LEVEL>(0),
+                                       static_cast<D3D_FEATURE_LEVEL>(0x3000)};
+  check("numeric-compatibility", numeric, 2, S_OK,
+        static_cast<D3D_FEATURE_LEVEL>(0x3000));
+  check("zero-result", numeric, 1, S_OK, static_cast<D3D_FEATURE_LEVEL>(0));
+  const D3D_FEATURE_LEVEL above = static_cast<D3D_FEATURE_LEVEL>(0xffff);
+  check("no-match", &above, 1, S_OK, static_cast<D3D_FEATURE_LEVEL>(0));
+  if (maximum.MaxSupportedFeatureLevel < D3D_FEATURE_LEVEL_12_2)
+    check("unsupported-known", &known[4], 1, S_OK,
+          static_cast<D3D_FEATURE_LEVEL>(0));
+  check("empty", known, 0, E_INVALIDARG, {});
+  check("null-list", nullptr, 1, E_INVALIDARG, {});
+  check("short", known, static_cast<UINT>(std::size(known)), E_INVALIDARG, {},
+        sizeof(D3D12_FEATURE_DATA_FEATURE_LEVELS) - 1);
+  check("long", known, static_cast<UINT>(std::size(known)), E_INVALIDARG, {},
+        sizeof(D3D12_FEATURE_DATA_FEATURE_LEVELS) + 1);
+  good &= CheckHR("Null feature level data",
+                  device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS,
+                                              nullptr, sizeof(maximum)),
+                  E_INVALIDARG);
+  return good;
+}
+
 bool CheckFormatSupportContract(ID3D12Device *device) {
   bool good = true;
   const auto check = [&](DXGI_FORMAT format, UINT required, UINT forbidden,
@@ -514,7 +581,8 @@ CheckShaderModelRequest(ID3D12Device *device, UINT requested, HRESULT expected_h
 
 int main(int argc, char **argv) {
   if (argc == 2 && (!std::strcmp(argv[1], "--format-support") ||
-                    !std::strcmp(argv[1], "--format-cost"))) {
+                    !std::strcmp(argv[1], "--format-cost") ||
+                    !std::strcmp(argv[1], "--feature-levels"))) {
     ID3D12Device *device = nullptr;
     if (!CheckHR("D3D12CreateDevice",
                  D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
@@ -522,6 +590,8 @@ int main(int argc, char **argv) {
       return 1;
     const bool good = !std::strcmp(argv[1], "--format-cost")
                           ? MeasureFormatSupportCost(device)
+                      : !std::strcmp(argv[1], "--feature-levels")
+                          ? CheckFeatureLevelQueries(device)
                           : CheckFormatSupportContract(device);
     Release(device);
     return good ? 0 : 1;
@@ -597,6 +667,8 @@ int main(int argc, char **argv) {
           device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &level_data, sizeof(level_data))
       ) || level_data.MaxSupportedFeatureLevel != expected_maximum)
     return fail("feature-level query does not match device creation support");
+  if (!CheckFeatureLevelQueries(device))
+    return fail("feature-level query edge contract mismatch");
 
   D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
   if (!CheckHR(
