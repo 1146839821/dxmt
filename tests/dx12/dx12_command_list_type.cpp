@@ -2416,6 +2416,364 @@ public:
   }
 };
 
+class RenderBarrierCounter {
+  DriverImportPatch patch_;
+  inline static void *original_ = nullptr;
+  inline static obj_handle_t first_encoder_ = 0;
+  static void Encode(obj_handle_t encoder, const wmtcmd_base *head) {
+    for (auto *command = head; command;
+         command = static_cast<const wmtcmd_base *>(command->next.ptr)) {
+      if (command->type == WMTRenderCommandDraw) {
+        if (!draws)
+          first_encoder_ = encoder;
+        else if (draws == 1)
+          same_encoder = encoder == first_encoder_;
+        ++draws;
+      } else if (command->type == WMTRenderCommandMemoryBarrier && draws == 1) {
+        const auto *barrier =
+            reinterpret_cast<const wmtcmd_render_memory_barrier *>(command);
+        if (barrier->scope & WMTBarrierScopeBuffers) {
+          ++barriers;
+          after |= barrier->stages_after;
+          before |= barrier->stages_before;
+        }
+      }
+    }
+    reinterpret_cast<decltype(&Encode)>(original_)(encoder, head);
+  }
+
+public:
+  inline static UINT draws = 0, barriers = 0, after = 0, before = 0;
+  inline static bool same_encoder = false;
+  bool Install() {
+    draws = barriers = after = before = 0;
+    same_encoder = false;
+    first_encoder_ = 0;
+    return patch_.Install("MTLRenderCommandEncoder_encodeCommands",
+                          reinterpret_cast<void *>(&Encode), original_);
+  }
+};
+
+bool TestConstantBufferBarrierStages() {
+  struct Compiler {
+    HMODULE value = LoadLibraryA(D3DCOMPILER_DLL_A);
+    ~Compiler() {
+      if (value)
+        FreeLibrary(value);
+    }
+  } compiler;
+  const auto compile = compiler.value
+                           ? reinterpret_cast<pD3DCompile>(
+                                 GetProcAddress(compiler.value, "D3DCompile"))
+                           : nullptr;
+  if (!compile)
+    return false;
+  Owned<ID3D12Device> device;
+  Owned<ID3D12RootSignature> root;
+  Owned<ID3D12PipelineState> pipeline, writer;
+  Owned<ID3DBlob> signature, vs, ps, write_ps, errors;
+  D3D12_ROOT_PARAMETER parameters[2] = {};
+  parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+  parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+  parameters[1].Descriptor.ShaderRegister = 1;
+  for (auto &parameter : parameters)
+    parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {2, parameters, 0, nullptr,
+                                         D3D12_ROOT_SIGNATURE_FLAG_NONE};
+  const char *vertex = "float4 main(uint i:SV_VertexID):SV_Position {return "
+                       "float4(i==2?3:-1,i==1?3:-1,0,1);}";
+  const char *pixel = "cbuffer C:register(b0){float4 color;} float4 "
+                      "main():SV_Target{return color;}";
+  const char *write_pixel =
+      "RWByteAddressBuffer data:register(u1); float4 main():SV_Target {"
+      "data.Store4(0,asuint(float4(0,0,1,1)));return float4(0,1,0,1);}";
+  if (!CheckHR("CBV stages device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&device.ptr))) ||
+      !CheckHR("CBV stages root serialization",
+               D3D12SerializeRootSignature(&root_desc,
+                                           D3D_ROOT_SIGNATURE_VERSION_1,
+                                           &signature.ptr, nullptr)) ||
+      !CheckHR("CBV stages root",
+               device->CreateRootSignature(0, signature->GetBufferPointer(),
+                                           signature->GetBufferSize(),
+                                           IID_PPV_ARGS(&root.ptr))) ||
+      !CheckHR("CBV stages VS",
+               compile(vertex, std::strlen(vertex), nullptr, nullptr, nullptr,
+                       "main", "vs_5_0", 0, 0, &vs.ptr, &errors.ptr)) ||
+      !CheckHR("CBV stages PS",
+               compile(pixel, std::strlen(pixel), nullptr, nullptr, nullptr,
+                       "main", "ps_5_0", 0, 0, &ps.ptr, &errors.ptr)))
+    return false;
+  if (!CheckHR("CBV stages writer PS",
+               compile(write_pixel, std::strlen(write_pixel), nullptr, nullptr,
+                       nullptr, "main", "ps_5_0", 0, 0, &write_ps.ptr,
+                       &errors.ptr))) {
+    if (errors.ptr)
+      std::cerr << static_cast<const char *>(errors->GetBufferPointer()) << "\n";
+    return false;
+  }
+  D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+  pso.pRootSignature = root.ptr;
+  pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+  pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+  pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+  pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+  pso.RasterizerState.DepthClipEnable = TRUE;
+  pso.BlendState.RenderTarget[0].RenderTargetWriteMask =
+      D3D12_COLOR_WRITE_ENABLE_ALL;
+  pso.SampleMask = UINT_MAX;
+  pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  pso.NumRenderTargets = 1;
+  pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+  pso.SampleDesc.Count = 1;
+  if (!CheckHR("CBV stages PSO", device->CreateGraphicsPipelineState(
+                                     &pso, IID_PPV_ARGS(&pipeline.ptr))))
+    return false;
+  pso.PS = {write_ps->GetBufferPointer(), write_ps->GetBufferSize()};
+  if (!CheckHR("CBV stages writer PSO", device->CreateGraphicsPipelineState(
+                                            &pso, IID_PPV_ARGS(&writer.ptr))))
+    return false;
+  bool good = true;
+  for (UINT mode = 0; mode < 4; ++mode) {
+    Owned<ID3D12Resource> constants, upload, target, readback;
+    Owned<ID3D12DescriptorHeap> rtvs;
+    Owned<ID3D12CommandQueue> queue;
+    Owned<ID3D12CommandAllocator> allocator;
+    Owned<ID3D12GraphicsCommandList> list;
+    Owned<ID3D12GraphicsCommandList7> list7;
+    Owned<ID3D12Fence> fence;
+    struct Event {
+      HANDLE value = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+      ~Event() {
+        if (value)
+          CloseHandle(value);
+      }
+    } event;
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC buffer = {};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = 256;
+    buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels =
+        buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    buffer.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (!event.value || !CheckHR("CBV stages constants",
+                                 device->CreateCommittedResource(
+                                     &heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                     IID_PPV_ARGS(&constants.ptr))))
+      return false;
+    buffer.Flags = D3D12_RESOURCE_FLAG_NONE;
+    heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    if (!CheckHR("CBV stages upload", device->CreateCommittedResource(
+                                          &heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                          D3D12_RESOURCE_STATE_GENERIC_READ,
+                                          nullptr, IID_PPV_ARGS(&upload.ptr))))
+      return false;
+    void *mapped = nullptr;
+    const float color[] = {0, 1, 0, 1};
+    const D3D12_RANGE no_read = {};
+    if (!CheckHR("CBV stages upload Map", upload->Map(0, &no_read, &mapped)))
+      return false;
+    std::memset(mapped, 0, 256);
+    std::memcpy(mapped, color, sizeof(color));
+    upload->Unmap(0, nullptr);
+    heap.Type = D3D12_HEAP_TYPE_READBACK;
+    buffer.Width = 512;
+    if (!CheckHR("CBV stages readback",
+                 device->CreateCommittedResource(
+                     &heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                     IID_PPV_ARGS(&readback.ptr))))
+      return false;
+    D3D12_RESOURCE_DESC texture = {};
+    texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texture.Width = 2;
+    texture.Height = texture.DepthOrArraySize = texture.MipLevels =
+        texture.SampleDesc.Count = 1;
+    texture.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_desc = {};
+    rtv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtv_desc.NumDescriptors = 1;
+    D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+    if (!CheckHR("CBV stages target",
+                 device->CreateCommittedResource(
+                     &heap, D3D12_HEAP_FLAG_NONE, &texture,
+                     D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                     IID_PPV_ARGS(&target.ptr))) ||
+        !CheckHR(
+            "CBV stages RTV heap",
+            device->CreateDescriptorHeap(&rtv_desc, IID_PPV_ARGS(&rtvs.ptr))) ||
+        !CheckHR("CBV stages queue",
+                 device->CreateCommandQueue(&queue_desc,
+                                            IID_PPV_ARGS(&queue.ptr))) ||
+        !CheckHR("CBV stages allocator", device->CreateCommandAllocator(
+                                             D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                             IID_PPV_ARGS(&allocator.ptr))) ||
+        !CheckHR("CBV stages list",
+                 device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                           allocator.ptr, pipeline.ptr,
+                                           IID_PPV_ARGS(&list.ptr))) ||
+        !CheckHR("CBV stages list7",
+                 list->QueryInterface(IID_PPV_ARGS(&list7.ptr))) ||
+        !CheckHR("CBV stages fence",
+                 device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                     IID_PPV_ARGS(&fence.ptr))))
+      return false;
+    const auto rtv = rtvs->GetCPUDescriptorHandleForHeapStart();
+    device->CreateRenderTargetView(target.ptr, nullptr, rtv);
+    list->CopyBufferRegion(constants.ptr, 0, upload.ptr, 0, 256);
+    const auto initial_state =
+        mode == 0   ? D3D12_RESOURCE_STATE_COMMON
+        : mode == 2 ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+        : mode == 3 ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                    : D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+    D3D12_RESOURCE_BARRIER transition = {};
+    transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    transition.Transition = {constants.ptr,
+                             D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                             D3D12_RESOURCE_STATE_COPY_DEST, initial_state};
+    list->ResourceBarrier(1, &transition);
+    if (mode == 0) {
+      D3D12_BUFFER_BARRIER initialize = {};
+      initialize.SyncBefore = D3D12_BARRIER_SYNC_COPY;
+      initialize.SyncAfter = D3D12_BARRIER_SYNC_PIXEL_SHADING;
+      initialize.AccessBefore = D3D12_BARRIER_ACCESS_COPY_DEST;
+      initialize.AccessAfter = D3D12_BARRIER_ACCESS_CONSTANT_BUFFER;
+      initialize.pResource = constants.ptr;
+      initialize.Size = UINT64_MAX;
+      D3D12_BARRIER_GROUP group = {};
+      group.Type = D3D12_BARRIER_TYPE_BUFFER;
+      group.NumBarriers = 1;
+      group.pBufferBarriers = &initialize;
+      list7->Barrier(1, &group);
+    }
+    list->SetGraphicsRootSignature(root.ptr);
+    list->SetGraphicsRootConstantBufferView(
+        0, (mode < 2 ? constants : upload)->GetGPUVirtualAddress());
+    list->SetGraphicsRootUnorderedAccessView(1,
+                                             constants->GetGPUVirtualAddress());
+    list->SetPipelineState(mode == 2 ? writer.ptr : pipeline.ptr);
+    list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    D3D12_VIEWPORT viewport = {0, 0, 1, 1, 0, 1};
+    const D3D12_RECT scissor = {0, 0, 2, 1};
+    list->RSSetViewports(1, &viewport);
+    list->RSSetScissorRects(1, &scissor);
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list->DrawInstanced(3, 1, 0, 0);
+    if (mode == 0) {
+      D3D12_BUFFER_BARRIER barrier = {};
+      barrier.SyncBefore = barrier.SyncAfter = D3D12_BARRIER_SYNC_PIXEL_SHADING;
+      barrier.AccessBefore = barrier.AccessAfter =
+          D3D12_BARRIER_ACCESS_CONSTANT_BUFFER;
+      barrier.pResource = constants.ptr;
+      barrier.Size = UINT64_MAX;
+      D3D12_BARRIER_GROUP group = {};
+      group.Type = D3D12_BARRIER_TYPE_BUFFER;
+      group.NumBarriers = 1;
+      group.pBufferBarriers = &barrier;
+      list7->Barrier(1, &group);
+    } else {
+      transition.Transition.StateBefore = initial_state;
+      transition.Transition.StateAfter =
+          mode == 2   ? D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
+          : mode == 1 ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                      : D3D12_RESOURCE_STATE_COPY_SOURCE;
+      list->ResourceBarrier(1, &transition);
+    }
+    list->SetGraphicsRootConstantBufferView(
+        0,
+        (mode == 0 || mode == 2 ? constants : upload)->GetGPUVirtualAddress());
+    list->SetPipelineState(mode == 1 ? writer.ptr : pipeline.ptr);
+    viewport.TopLeftX = 1;
+    list->RSSetViewports(1, &viewport);
+    list->DrawInstanced(3, 1, 0, 0);
+    if (mode == 0) {
+      D3D12_BUFFER_BARRIER finish = {};
+      finish.SyncBefore = D3D12_BARRIER_SYNC_PIXEL_SHADING;
+      finish.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+      finish.AccessBefore = D3D12_BARRIER_ACCESS_CONSTANT_BUFFER;
+      finish.AccessAfter = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+      finish.pResource = constants.ptr;
+      finish.Size = UINT64_MAX;
+      D3D12_BARRIER_GROUP group = {};
+      group.Type = D3D12_BARRIER_TYPE_BUFFER;
+      group.NumBarriers = 1;
+      group.pBufferBarriers = &finish;
+      list7->Barrier(1, &group);
+    } else if (mode != 3) {
+      transition.Transition.StateBefore =
+          mode == 1 ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                    : D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+      transition.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+      list->ResourceBarrier(1, &transition);
+    }
+    list->CopyBufferRegion(readback.ptr, 256, constants.ptr, 0, 16);
+    transition.Transition = {
+        target.ptr, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+        D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE};
+    list->ResourceBarrier(1, &transition);
+    D3D12_TEXTURE_COPY_LOCATION source = {}, destination = {};
+    source.pResource = target.ptr;
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    destination.pResource = readback.ptr;
+    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    destination.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, 2, 1,
+                                             1, 256};
+    list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+    if (!CheckHR("CBV stages Close", list->Close()))
+      return false;
+    RenderBarrierCounter counter;
+    if (!counter.Install())
+      return false;
+    ID3D12CommandList *batch[] = {list.ptr};
+    queue->ExecuteCommandLists(1, batch);
+    if (!CheckHR("CBV stages Signal", queue->Signal(fence.ptr, 1)) ||
+        !CheckHR("CBV stages wait",
+                 fence->SetEventOnCompletion(1, event.value)) ||
+        WaitForSingleObject(event.value, 5000) != WAIT_OBJECT_0 ||
+        !CheckHR("CBV stages device status", device->GetDeviceRemovedReason()))
+      return false;
+    if (!CheckHR("CBV stages pixel Map", readback->Map(0, nullptr, &mapped)))
+      return false;
+    UINT pixel_value = 0, second_pixel = 0;
+    float buffer_color[4] = {};
+    std::memcpy(&pixel_value, mapped, sizeof(pixel_value));
+    std::memcpy(&second_pixel, static_cast<const BYTE *>(mapped) + 4,
+                sizeof(second_pixel));
+    std::memcpy(buffer_color, static_cast<const BYTE *>(mapped) + 256,
+                sizeof(buffer_color));
+    readback->Unmap(0, &no_read);
+    const UINT all = WMTRenderStagePreRaster | WMTRenderStageFragment;
+    const bool native =
+        counter.draws == 2 && counter.same_encoder && counter.barriers == 1 &&
+        counter.after == (mode == 3 ? UINT(WMTRenderStagePreRaster) : all) &&
+        counter.before == all;
+    const bool written = mode == 1 || mode == 2;
+    const bool pixels =
+        pixel_value == 0xff00ff00u &&
+        second_pixel == (mode == 2 ? 0xffff0000u : 0xff00ff00u) &&
+        buffer_color[0] == 0 && buffer_color[1] == (written ? 0 : 1) &&
+        buffer_color[2] == (written ? 1 : 0) && buffer_color[3] == 1;
+    std::cout << "constant-stages mode=" << mode << " draws=" << counter.draws
+              << " same_encoder=" << counter.same_encoder
+              << " barriers=" << counter.barriers << " after=" << counter.after
+              << " before=" << counter.before << " native=" << native
+              << " pixel=0x" << std::hex << pixel_value << "/0x" << second_pixel
+              << std::dec << " buffer=" << buffer_color[0] << ","
+              << buffer_color[1] << "," << buffer_color[2] << ","
+              << buffer_color[3] << " readback=" << (pixels ? "PASS" : "FAIL")
+              << "\n";
+    good &= native && pixels;
+  }
+  return good;
+}
+
 bool TestCommonAccessBarriers() {
   struct Compiler {
     HMODULE module = LoadLibraryA(D3DCOMPILER_DLL_A);
@@ -2978,6 +3336,8 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
 }
 
 int main(int argc, char **argv) {
+  if (argc == 2 && !std::strcmp(argv[1], "--constant-buffer-barrier-stages"))
+    return TestConstantBufferBarrierStages() ? 0 : 1;
   if (argc == 2 && !std::strcmp(argv[1], "--common-access-barriers"))
     return TestCommonAccessBarriers() ? 0 : 1;
   if (argc == 3 && !std::strcmp(argv[1], "--split-cost")) {
@@ -3066,7 +3426,7 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
-  if (!TestCommonAccessBarriers() || !TestMultipleFenceWaits() || !TestDeviceRemovalWaits() ||
+  if (!TestConstantBufferBarrierStages() || !TestCommonAccessBarriers() || !TestMultipleFenceWaits() || !TestDeviceRemovalWaits() ||
       !TestConcurrentRemovalListeners()) {
     device->Release();
     return 1;

@@ -2840,6 +2840,44 @@ local focused commit only, no push. Evidence:
 `sources.json`, `design.txt`, `hypotheses.txt`, `results.json`, `perf-results.json`,
 `aggregate.json`, `ordinary-perf-results.json`, `ordinary-aggregate.json`, logs.
 
+### N12 fragment constant-buffer synchronization — 2026-10-25
+
+Base e99de894. Confirmed pixel corruption: shared render_stages_for_state omitted
+Fragment from VERTEX_AND_CONSTANT_BUFFER, which also represents pixel CBVs.
+Add that bit to the existing Fragment mask (25 -> 27); reuse legacy/enhanced/
+pending owners. No runtime state/cache/allocation/lock, ABI, scheduling or public
+capability change; Enhanced remains FALSE. Pure vertex use conservatively also
+includes Fragment. One N12 mechanism; no new production source/header.
+
+Existing command-list runner adds four same-encoder two-draw native/GPU cases:
+enhanced CBV self, legacy CBV->UAV, UAV->CBV, non-pixel control. Separate SM5
+reader/writer PSOs, root CBV b0/UAV u1; exact two pixels plus float4 buffer
+readback and fence/device status. Same final PE baseline twice misses three
+native Fragment scopes; CBV->UAV actually reads BLUE instead of GREEN before
+the later UAV write. Candidate twice passes all four native/data cases. Control
+scope remains25/27. Full command-list/enhanced,COMMON execution,complete queue
+handoff,feature contract pass. Independent no-private build focused four/full
+command-list+enhanced/FL11_0+logicOp0 pass. API/GPU1/1,Hud1,staged PE/native load
+paths checked; no Metal validation errors. This is bounded correctness evidence.
+
+Material performance OPEN: matched AB/BA/AB,25 rounds/dropfirst,72 retained/side,
+observer off/API+GPU0/0/Hud1. 1000 consecutive CBV self barriers: Submit p50
+411.25->6266.8 us; Execute-through-fence p50 3986.7->61682.4 us; recording/call
+.0721->.10645 us. Completion includes CPU/Wine/event wait, not isolated GPU.
+No intervening GPU work makes this redundant stress, not a representative frame.
+Ordinary50000-copy recording/Submit p95 +.098%/-1.356%; Close2.0->2.4 us (+20%).
+All historical/global cost gates remain OPEN. Future distinct N12 work may
+coalesce adjacent native dependencies while preserving correctness/validation.
+
+Rejected initialization,read-only fixture,SM5 u0 compile and stale benchmark
+attempts retained/excluded; final benchmark source/exe hashes verified. Full
+Windows/otherGPU/D3D11/T3/T4 and exhaustive queue/raw-sync/pending coverage NOT_RUN;
+cross-queue half legality unresolved. User .gitignore/shared Wine unchanged.
+Evidence: `../dxmt-test/n12-constant-stages-20261025/N12-constant-stages.md`,
+`manifest.json`, `sources.json`, `results.json`, final `aggregate.json`,
+`ordinary-aggregate.json`, build/runtime logs and excluded-trial directories.
+Local focused commit only, no push; overall goal remains active.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
