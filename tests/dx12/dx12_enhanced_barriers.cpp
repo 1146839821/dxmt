@@ -213,6 +213,73 @@ bool TestInterleavedRecordedStates(ID3D12Device *device, ID3D12Resource *buffer,
   return passed;
 }
 
+bool TestNoneSyncAccess(ID3D12Device *device, ID3D12Resource *buffer,
+                        ID3D12Resource *texture) {
+  struct Case {
+    const char *name;
+    D3D12_BARRIER_SYNC before, after;
+    D3D12_BARRIER_ACCESS access_before, access_after;
+    HRESULT expected;
+  };
+  const Case cases[] = {
+      {"none-common-before", D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_SYNC_ALL,
+       D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_COMMON, E_FAIL},
+      {"none-common-after", D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_NONE,
+       D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_COMMON, E_FAIL},
+      {"none-copy-before", D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_SYNC_COPY,
+       D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COPY_SOURCE,
+       E_FAIL},
+      {"none-copy-after", D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_NONE,
+       D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COPY_SOURCE,
+       E_FAIL},
+      {"all-common", D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_ALL,
+       D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_COMMON, S_OK},
+      {"none-no-access", D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_SYNC_NONE,
+       D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_ACCESS_NO_ACCESS, S_OK},
+      {"none-before", D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_SYNC_COPY,
+       D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_ACCESS_COPY_SOURCE, S_OK},
+      {"none-after", D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_NONE,
+       D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_NO_ACCESS, S_OK},
+      // NO_ACCESS does not require NONE in the reverse direction.
+      {"all-no-access", D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_ALL,
+       D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_ACCESS_NO_ACCESS, S_OK},
+  };
+  bool good = true;
+  for (const auto type : {D3D12_BARRIER_TYPE_GLOBAL, D3D12_BARRIER_TYPE_BUFFER,
+                          D3D12_BARRIER_TYPE_TEXTURE}) {
+    for (const auto &test : cases) {
+      const bool passed = ExpectClose(
+          device, test.name, test.expected,
+          [&](ID3D12GraphicsCommandList7 *list) {
+            D3D12_GLOBAL_BARRIER global;
+            D3D12_BUFFER_BARRIER buffer_barrier;
+            D3D12_TEXTURE_BARRIER texture_barrier;
+            if (type == D3D12_BARRIER_TYPE_GLOBAL) {
+              SetGlobal(global, test.before, test.after, test.access_before,
+                        test.access_after);
+              SubmitBarrier(list, type, &global);
+            } else if (type == D3D12_BARRIER_TYPE_BUFFER) {
+              SetBuffer(buffer_barrier, test.before, test.after,
+                        test.access_before, test.access_after, buffer, 0,
+                        UINT64_MAX);
+              SubmitBarrier(list, type, &buffer_barrier);
+            } else {
+              SetTexture(
+                  texture_barrier, test.before, test.after, test.access_before,
+                  test.access_after, D3D12_BARRIER_LAYOUT_COMMON,
+                  D3D12_BARRIER_LAYOUT_COMMON, texture,
+                  {D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, 0, 0, 0, 0, 0});
+              SubmitBarrier(list, type, &texture_barrier);
+            }
+          });
+      std::cout << "sync-none type=" << type << " case=" << test.name
+                << " pass=" << passed << "\n";
+      good &= passed;
+    }
+  }
+  return good;
+}
+
 bool TestValidSplitBarriers(ID3D12Device *device, ID3D12Resource *buffer, ID3D12Resource *texture) {
   const bool split_passed = ExpectClose(
       device, "valid buffer/texture split barriers", S_OK, [&](auto *list) {
@@ -1023,7 +1090,11 @@ int main(int argc, char **argv) {
   if (!CreateResources(device.ptr, buffer, texture))
     return 1;
 
-  bool passed = TestValidSplitBarriers(device.ptr, buffer.ptr, texture.ptr);
+  if (argc == 2 && !std::strcmp(argv[1], "--sync-none-access"))
+    return TestNoneSyncAccess(device.ptr, buffer.ptr, texture.ptr) ? 0 : 1;
+
+  bool passed = TestNoneSyncAccess(device.ptr, buffer.ptr, texture.ptr);
+  passed &= TestValidSplitBarriers(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestInterleavedRecordedStates(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestCrossCommandListSplitBarriers(device.ptr, buffer.ptr);
   passed &= TestInvalidSplitBarriers(device.ptr, buffer.ptr, texture.ptr);

@@ -2778,6 +2778,36 @@ Evidence: `../dxmt-test/n12-common-access-20261024/N12-common-access.md`,
 `design.txt`, `hypotheses.txt`, `manifest.json`, `sources.json`, `results.json`,
 `perf-results.json`, `aggregate.json`, final build/runtime logs.
 
+### N12 — ordinary NONE/access admission, 2026-10-25
+
+Base2534edf8. Three ordinary enhanced barrier kinds accepted SYNC_NONE with
+COMMON/COPY access. One shared side predicate enforces NONE->NO_ACCESS before
+resource admission/emission; reverse implication deliberately not imposed.
+Existing FailRecording/E_FAIL retained. No new file/state/lock/allocation/ABI,
+layout/scheduling/capability policy change; Enhanced remains FALSE.
+
+Existing enhanced runner27 cases: baseline twice12 invalid accepted/15 legal
+pass; candidate twice27/27. Full enhanced/command-list, COMMON native9/six exact
+GPU readbacks, range/complete-pair handoff/removal pass. Matched no-private
+27/full-enhanced/native9/sixGPU/Device FL11_0+logicOp0 pass. API/GPU1/1/HUD1,
+staged PE/native paths verified; no claim that CPU negatives are GPU tests.
+Initial test expected E_INVALIDARG; existing recording policy is E_FAIL. Trial
+retained, corrected same-PE red and candidate matrix rerun. No runtime HRESULT
+change. Full sync/access, queue scopes/NONE execution lifetime, native Windows,
+other devices/D3D11 rendering/T3/T4 NOT_RUN. Cross-queue half legality unresolved.
+
+AB/BA/AB,25 rounds/first dropped,72 retained rounds/side/cell,API/GPU0/0/HUD1.
+1000-barrier timing observer off; native counts/GPU data calibrated separately.
+Recording p95 per-cell delta-5.00..+4.08%, Submit-6.88..+3.09%. Ordinary50000-copy
+control p50/p95(us): Recording3473.75/3599.4->3239.35/3924.0(-6.75/+9.02%);
+Submit22088.25/22393.8->22239/23752.8(+0.68/+6.07%). Tail observations and all
+historical/global performance gates remain OPEN; no causal no-regression claim.
+No unchanged rerun loop. Cost: fixed side comparisons in barrier recording only.
+User .gitignore/shared Wine retained; local focused commit, no push.
+Evidence: `../dxmt-test/n12-sync-none-20261025/N12-sync-none.md`, `manifest.json`,
+`sources.json`, `design.txt`, `hypotheses.txt`, `results.json`, `perf-results.json`,
+`aggregate.json`, `ordinary-perf-results.json`, `ordinary-aggregate.json`, logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
