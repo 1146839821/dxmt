@@ -2480,9 +2480,10 @@ bool TestCommonAccessBarriers() {
   }
   bool good = true;
   for (UINT type = 0; type < 3; ++type) {
-    for (UINT mode = 0; mode < 3; ++mode) {
+    for (UINT mode = 0; mode < 4; ++mode) {
       const bool texture = type == 2;
-      const bool no_access = mode == 2;
+      // NONE/NO_ACCESS is empty; COMPUTE/NO_ACCESS still orders dispatches.
+      const bool no_access = mode >= 2;
       Owned<ID3D12Resource> resource, readback;
       Owned<ID3D12DescriptorHeap> descriptors;
       Owned<ID3D12CommandQueue> queue;
@@ -2580,7 +2581,7 @@ bool TestCommonAccessBarriers() {
       const auto access = no_access   ? D3D12_BARRIER_ACCESS_NO_ACCESS
                           : mode == 0 ? D3D12_BARRIER_ACCESS_COMMON
                                       : D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
-      const auto sync = no_access ? D3D12_BARRIER_SYNC_NONE
+      const auto sync = mode == 2 ? D3D12_BARRIER_SYNC_NONE
                                   : D3D12_BARRIER_SYNC_COMPUTE_SHADING;
       D3D12_GLOBAL_BARRIER global = {sync, sync, access, access};
       D3D12_BUFFER_BARRIER buffer = {sync,         sync, access,    access,
@@ -2682,8 +2683,8 @@ bool TestCommonAccessBarriers() {
       const UINT expected_scope =
           texture ? WMTBarrierScopeTextures : WMTBarrierScopeBuffers;
       const bool native = counter.dispatches == 2 && counter.same_encoder &&
-                          counter.barriers == (no_access ? 0u : 1u) &&
-                          (no_access || (counter.scope & expected_scope));
+                          counter.barriers == (mode == 2 ? 0u : 1u) &&
+                          (mode == 2 || (counter.scope & expected_scope));
       std::cout << "common-access type=" << type << " mode=" << mode
                 << " dispatches=" << counter.dispatches
                 << " same_encoder=" << counter.same_encoder

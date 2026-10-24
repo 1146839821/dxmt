@@ -6761,11 +6761,14 @@ public:
 
     auto emit_memory_barrier = [&](WMTBarrierScope scope, D3D12_RESOURCE_STATES before,
                                    D3D12_RESOURCE_STATES after, D3D12_BARRIER_ACCESS access_before,
-                                   D3D12_BARRIER_ACCESS access_after, bool layout_transition = false) {
+                                   D3D12_BARRIER_ACCESS access_after, D3D12_BARRIER_SYNC sync_before,
+                                   D3D12_BARRIER_SYNC sync_after, bool layout_transition = false) {
       // COMMON means broad access, whereas NO_ACCESS means none. Both lower
       // to legacy COMMON for stage selection; that zero is not an empty scope.
+      // Empty cache access does not cancel a nonempty execution dependency.
       if (layout_transition || access_before != D3D12_BARRIER_ACCESS_NO_ACCESS ||
-          access_after != D3D12_BARRIER_ACCESS_NO_ACCESS)
+          access_after != D3D12_BARRIER_ACCESS_NO_ACCESS ||
+          (sync_before != D3D12_BARRIER_SYNC_NONE && sync_after != D3D12_BARRIER_SYNC_NONE))
         EncodeMemoryBarrier(scope, before, after);
     };
 
@@ -6798,7 +6801,7 @@ public:
 
           emit_memory_barrier(
               WMTBarrierScopeBuffers | WMTBarrierScopeTextures | WMTBarrierScopeRenderTargets, before, after,
-              barrier.AccessBefore, barrier.AccessAfter
+              barrier.AccessBefore, barrier.AccessAfter, barrier.SyncBefore, barrier.SyncAfter
           );
         }
         break;
@@ -6857,7 +6860,8 @@ public:
           resource_state_transitions_.push_back({resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
               D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON, false});
           emit_memory_barrier(
-              resource_barrier_scope(resource), before, after, barrier.AccessBefore, barrier.AccessAfter
+              resource_barrier_scope(resource), before, after, barrier.AccessBefore, barrier.AccessAfter,
+              barrier.SyncBefore, barrier.SyncAfter
           );
         }
         break;
@@ -6977,7 +6981,7 @@ public:
             emit_memory_barrier(
                 resource_barrier_scope(resource), before_layout != after_layout ? before_layout : before_access,
                 before_layout != after_layout ? after_layout : after_access, barrier.AccessBefore,
-                barrier.AccessAfter, barrier.LayoutBefore != barrier.LayoutAfter
+                barrier.AccessAfter, barrier.SyncBefore, barrier.SyncAfter, barrier.LayoutBefore != barrier.LayoutAfter
             );
             // Access scopes do not replace the layout when interoping with legacy barriers.
             resource_state_transitions_.push_back({

@@ -2808,6 +2808,38 @@ Evidence: `../dxmt-test/n12-sync-none-20261025/N12-sync-none.md`, `manifest.json
 `sources.json`, `design.txt`, `hypotheses.txt`, `results.json`, `perf-results.json`,
 `aggregate.json`, `ordinary-perf-results.json`, `ordinary-aggregate.json`, logs.
 
+### N12 — execution synchronization with NO_ACCESS, 2026-10-25
+
+Basec51791ee. Shared ordinary emission elided both-NO_ACCESS barriers even with
+nonempty before/after compute execution scopes. Existing lambda now considers
+raw sync alongside access/layout for global/buffer/texture. Reuses conservative
+native memory-barrier/pending path; no new encoder,owner/state/lock/allocation,
+ABI/layout/queue policy/capability change. Enhanced remains FALSE.
+
+Existing command-list fixture12 cases: baseline twice three mode3 native
+failures/originalnine pass; candidate twice12 native pass. Six exact64-word GPU
+readbacks pass both sides; six no-resource NONE/COMPUTE controls explicitly mark
+readback NOT_RUN. Same-encoder two-dispatch packet/fence oracle confirms missing
+native dependency restoration, not observed data-corruption repair or full
+hardware execution-scope equivalence. Full command-list/enhanced,range/complete
+per-queue-pair handoff/removal,Device contract pass. Matched no-private12/sixGPU/
+full command-list+enhanced/FL11_0+logicOp0 pass. API/GPU1/1/Hud1,staged PE/native
+paths checked; no Metal validation errors.
+
+Cost: matched AB/BA/AB,25 rounds/first dropped,72 retained samples/side/cell;
+1000-barrier recording batch-average/call,observer off,API/GPU0/0/Hud1. Restored
+mode3 adds1000 required native commands versus broken baseline; stronger resource
+barrier cost retained, no causal optimization claim. Ordinary50000-copy control:
+record_us p50/p95 3220.45/3298.20->3131.30/3314.30 us (-2.77/+0.49%); submit_us p50/p95 22008.85/22754.00->22578.80/23098.40 us (+2.59/+1.51%).
+All historical/global performance gates remain OPEN; completion includes Wine/
+fence, not isolated GPU time. Full raw-sync/queue legality,NONE lifetime,aliasing
+data-discard proof,render-specific execution,Windows/otherGPU/D3D11/T3/T4 NOT_RUN.
+Cross-queue half-pair legality unresolved. User .gitignore/shared Wine unchanged;
+local focused commit only, no push. Evidence:
+`../dxmt-test/n12-execution-sync-20261025/N12-execution-sync.md`, `manifest.json`,
+`sources.json`, `design.txt`, `hypotheses.txt`, `results.json`, `perf-results.json`,
+`aggregate.json`, `ordinary-perf-results.json`, `ordinary-aggregate.json`, logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
