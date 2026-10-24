@@ -825,11 +825,11 @@ bool CheckTextureViewDimensions() {
   return good;
 }
 
-bool CheckTypedViewFormats(bool check_casts = false) {
+bool CheckTypedViewFormats(UINT mode = 0) {
   struct Objects {
     ID3D12Device *device = nullptr;
     ID3D12DescriptorHeap *heaps[3] = {};
-    ID3D12Resource *resources[16] = {};
+    ID3D12Resource *resources[19] = {};
     ~Objects() {
       for (auto &heap : heaps)
         Release(heap);
@@ -853,19 +853,21 @@ bool CheckTypedViewFormats(bool check_casts = false) {
       DXGI_FORMAT_D32_FLOAT,          DXGI_FORMAT_R32_FLOAT,
       DXGI_FORMAT_R8G8B8A8_SNORM,     DXGI_FORMAT_R32_UINT,
       DXGI_FORMAT_B8G8R8A8_TYPELESS,  DXGI_FORMAT_BC1_TYPELESS,
-      DXGI_FORMAT_BC4_TYPELESS,       DXGI_FORMAT_BC4_UNORM};
-  for (UINT i = 0; i < (check_casts ? 16u : 9u); i++) {
+      DXGI_FORMAT_BC4_TYPELESS,       DXGI_FORMAT_BC4_UNORM,
+      DXGI_FORMAT_R16_TYPELESS,       DXGI_FORMAT_D16_UNORM,
+      DXGI_FORMAT_R16_TYPELESS};
+  for (UINT i = 0; i < (mode == 2 ? 19u : mode == 1 ? 16u : 9u); i++) {
     auto desc =
         i == 5
             ? BufferDescription(256, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
             : RenderTargetDescription();
     desc.Format = formats[i];
-    if (i == 0 || i == 1 || i == 6 || (i >= 9 && i < 12))
+    if (i == 0 || i == 1 || i == 6 || (i >= 9 && i < 12) || i == 18)
       desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
                    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    if (i == 3 || i == 4 || i == 7 || i == 8)
+    if (i == 3 || i == 4 || i == 7 || i == 8 || i == 16 || i == 17)
       desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-    if (i >= 12) {
+    if (i >= 12 && i < 16) {
       desc.Width = desc.Height = 4;
       desc.Flags = D3D12_RESOURCE_FLAG_NONE;
     }
@@ -966,7 +968,91 @@ bool CheckTypedViewFormats(bool check_casts = false) {
       return nullptr;
     }
   };
-  if (check_casts) {
+  if (mode == 2) {
+    struct Role {
+      UINT kind, resource;
+      DXGI_FORMAT format;
+      UINT plane = 0;
+      bool defaults = false;
+    };
+    const Role invalid[] = {{0, 7, DXGI_FORMAT_D32_FLOAT},
+                            {0, 8, DXGI_FORMAT_D32_FLOAT},
+                            {0, 3, DXGI_FORMAT_D32_FLOAT_S8X24_UINT},
+                            {0, 4, DXGI_FORMAT_D24_UNORM_S8_UINT},
+                            {0, 16, DXGI_FORMAT_D16_UNORM},
+                            {0, 17, DXGI_FORMAT_D16_UNORM},
+                            {0, 8, DXGI_FORMAT_UNKNOWN, 0, true},
+                            {0, 17, DXGI_FORMAT_UNKNOWN, 0, true},
+                            {3, 7, DXGI_FORMAT_R32_FLOAT},
+                            {3, 16, DXGI_FORMAT_R16_UNORM},
+                            {3, 3, DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS},
+                            {3, 3, DXGI_FORMAT_X32_TYPELESS_G8X24_UINT},
+                            {3, 4, DXGI_FORMAT_R24_UNORM_X8_TYPELESS},
+                            {3, 4, DXGI_FORMAT_X24_TYPELESS_G8_UINT},
+                            {2, 1, DXGI_FORMAT_D32_FLOAT},
+                            {2, 18, DXGI_FORMAT_D16_UNORM},
+                            {1, 1, DXGI_FORMAT_D32_FLOAT},
+                            {1, 18, DXGI_FORMAT_D16_UNORM},
+                            {1, 0, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB},
+                            {1, 6, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB}};
+    bool good = true;
+    for (UINT i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+      const auto &c = invalid[i];
+      for (bool seeded : {false, true}) {
+        shader->ClearDescriptor(0);
+        rtv->AddRenderTarget(0, nullptr);
+        dsv->AddRenderTarget(0, nullptr);
+        if (seeded)
+          write(c.kind, c.kind == 3 ? 8 : (c.resource == 6 ? 0 : 6),
+                c.kind == 3 ? DXGI_FORMAT_D32_FLOAT
+                            : DXGI_FORMAT_R8G8B8A8_UNORM);
+        const void *before = identity(c.kind);
+        const auto type_before = ReadDescriptorFields(shader, 0).type;
+        write(c.kind, c.resource, c.format, false, c.plane, c.defaults);
+        const bool pass = identity(c.kind) == before && (!seeded || before) &&
+                          (c.kind >= 2 ||
+                           ReadDescriptorFields(shader, 0).type == type_before);
+        std::cout << "view_role invalid=" << i << " kind=" << c.kind
+                  << " seeded=" << seeded << " pass=" << pass << "\n";
+        good &= pass;
+      }
+    }
+    const Role valid[] = {{0, 7, DXGI_FORMAT_R32_FLOAT},
+                          {0, 16, DXGI_FORMAT_R16_UNORM},
+                          {0, 17, DXGI_FORMAT_R16_UNORM},
+                          {0, 3, DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS},
+                          {0, 3, DXGI_FORMAT_X32_TYPELESS_G8X24_UINT, 1},
+                          {0, 4, DXGI_FORMAT_R24_UNORM_X8_TYPELESS},
+                          {0, 4, DXGI_FORMAT_X24_TYPELESS_G8_UINT, 1},
+                          {3, 7, DXGI_FORMAT_D32_FLOAT},
+                          {3, 3, DXGI_FORMAT_D32_FLOAT_S8X24_UINT},
+                          {3, 4, DXGI_FORMAT_D24_UNORM_S8_UINT},
+                          {3, 16, DXGI_FORMAT_D16_UNORM},
+                          {3, 17, DXGI_FORMAT_UNKNOWN, 0, true},
+                          {0, 0, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB},
+                          {2, 0, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB},
+                          {1, 0, DXGI_FORMAT_R8G8B8A8_UINT},
+                          {1, 18, DXGI_FORMAT_R16_UNORM},
+                          {2, 18, DXGI_FORMAT_R16_UNORM},
+                          {0, 11, DXGI_FORMAT_R32_UINT},
+                          {2, 2, DXGI_FORMAT_R32G32B32_FLOAT}};
+    for (UINT i = 0; i < sizeof(valid) / sizeof(valid[0]); i++) {
+      const auto &c = valid[i];
+      shader->ClearDescriptor(0);
+      rtv->AddRenderTarget(0, nullptr);
+      dsv->AddRenderTarget(0, nullptr);
+      write(c.kind, c.resource, c.format, false, c.plane, c.defaults);
+      const bool pass =
+          identity(c.kind) ==
+          static_cast<dxmt::MTLD3D12Resource *>(o.resources[c.resource])
+              ->texture.ptr();
+      std::cout << "view_role valid=" << i << " kind=" << c.kind
+                << " pass=" << pass << "\n";
+      good &= pass;
+    }
+    return good;
+  }
+  if (mode == 1) {
     struct Cast {
       UINT resource;
       DXGI_FORMAT format;
@@ -1161,8 +1247,10 @@ bool CheckTypedViewFormats(bool check_casts = false) {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::string(argv[1]) == "--texture-view-roles")
+    return CheckTypedViewFormats(2) ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--texture-view-casts")
-    return CheckTypedViewFormats(true) ? 0 : 1;
+    return CheckTypedViewFormats(1) ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--typed-view-formats")
     return CheckTypedViewFormats() ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--texture-view-dimensions")

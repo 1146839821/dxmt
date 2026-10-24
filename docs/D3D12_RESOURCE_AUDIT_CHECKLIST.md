@@ -1545,6 +1545,50 @@ Evidence: `../dxmt-test/n09-view-format-families-20261024/N09-view-format-famili
 `red-results.json`, `validation-results.json`, `perf-aggregate.json`,
 `initial-perf-aggregate.json`, `family-metadata-crosscheck.json`, `manifest.json`.
 
+### N09 texture view format roles (2026-10-24)
+
+Baseline 7b577dc7, actual local feat/d3d12. Confirmed missing operation gate:
+final identical PE + old DLL twice fails all40 negative checks while19 legal
+controls pass. Candidate59/59 passes. The shared format predicate now checks
+family/type plus SRV/UAV/RTV/DSV use before native-view registration and heap
+publication. Logical DSV formats cannot become SRV/color views; color and
+selected-component formats cannot become DSV. RTV/UAV reuse device format
+capabilities; UAV matches the existing typed-store query boundary, preserving
+RGB96 exclusion and rejecting sRGB UAV despite native Apple texture Write.
+Integer Load, selected plane SRVs, sRGB SRV/RTV and RGB96 RTV remain legal.
+Four repeated guards and the separate RGB96 UAV guard converge here. Device
+capability getter uses one find instead of contains+at; no cache/table added.
+
+Thirteen final candidate processes exit0 with confirmed staged DLL paths and
+Metal API/GPU validation banners: roles59, casts97, typeless73, dimensions32,
+counter37, feature54, resource21, ownership, command/barrier, RGBA8/RGB96
+linear-filter GPU readbacks (11..99 exact), multi depth/stencil copy twice.
+Invalid-role checks inspect empty/distinct-seeded CPU descriptors, not invalid
+GPU work; preserved slots are DXMT's safety invariant, not a Windows invalid-
+input promise. Scoped build and all three changed-TU no-private syntax checks
+pass. Captured Microsoft DSV/planar-depth/casting sources govern the contract;
+pinned upstream a148782d native-format acceptance does not prove role legality.
+
+Two18-process alternating performance series retained. Initial record p50/p95
+-0.76%/+10.33%, views +4.23%/+0.62%, ordinary submit -1.28%/-2.42%.
+After single-lookup change, final record3194.05/3282.40 ->3185.00/3297.20us
+(-0.28%/+0.45%); 10000 mixed writes1839.75/1886.70 ->1899.95/1986.50us
+(+3.27%/+5.29%); ordinary submit111.70/145.40 ->114.00/152.90us
+(+2.06%/+5.16%). Median of3 process quantiles; record/view24 samples,
+ordinary60 after warmup. Final view cost +60.20us/10000 writes. Role checks
+add one immutable capability lookup to3/5 fixture writes, no allocation/lock
+or command/submit work. Not an isolated causal proof of the getter benefit.
+Performance gate OPEN; regressions are retained, not classified as noise.
+
+Same recorded macOS27.0.1/Xcode27.1/M1Max/Apple7/MSC4.0.1/Wine11/clang23.1.1.
+Exports/ABI, FL/SM/Options/Tiers unchanged. Native Windows differential, full
+no-private runtime, T3/T4 and exhaustive operation/plane combinations NOT_RUN.
+Remaining plane/default/API/capability audit and historical performance gates
+stay open. User .gitignore unchanged; no new source/header or push.
+Evidence: `../dxmt-test/n09-view-roles-20261024/N09-view-roles.md`,
+`red-results.json`, `validation-results.json`, `verification.json`,
+`perf-aggregate.json`, `initial-perf-aggregate.json`, `manifest.json`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

@@ -2185,9 +2185,8 @@ public:
   FormatCapability
   GetMTLPixelFormatCapability(WMTPixelFormat Format) final {
     Format = ORIGINAL_FORMAT(Format);
-    if (!format_capabilities_.textureCapabilities.contains(Format))
-      return FormatCapability(0);
-    return format_capabilities_.textureCapabilities.at(Format);
+    const auto it = format_capabilities_.textureCapabilities.find(Format);
+    return it == format_capabilities_.textureCapabilities.end() ? FormatCapability::None : it->second;
   }
 
   HRESULT STDMETHODCALLTYPE
