@@ -334,10 +334,11 @@ enum class TextureViewRole { ShaderResource, UnorderedAccess, RenderTarget, Dept
 
 bool
 IsTextureViewFormatSupported(
-    MTLD3D12Device *Device, DXGI_FORMAT ResourceFormat, DXGI_FORMAT ViewFormat, const MTL_DXGI_FORMAT_DESC &MetalFormat,
-    TextureViewRole Role
+    MTLD3D12Device *Device, const D3D12_RESOURCE_DESC &ResourceDesc, DXGI_FORMAT ViewFormat,
+    const MTL_DXGI_FORMAT_DESC &MetalFormat, TextureViewRole Role,
+    WMTPixelFormat ResourcePixelFormat = WMTPixelFormatInvalid
 ) {
-  if (IsFullyTypelessFormat(ViewFormat, MetalFormat) || !IsTextureViewFormatCompatible(ResourceFormat, ViewFormat))
+  if (IsFullyTypelessFormat(ViewFormat, MetalFormat) || !IsTextureViewFormatCompatible(ResourceDesc.Format, ViewFormat))
     return false;
   const bool depth_format = ViewFormat == DXGI_FORMAT_D16_UNORM || ViewFormat == DXGI_FORMAT_D32_FLOAT ||
                             ViewFormat == DXGI_FORMAT_D24_UNORM_S8_UINT ||
@@ -346,6 +347,17 @@ IsTextureViewFormatSupported(
   // Integer Load views need no filtering capability.
   if (Role == TextureViewRole::ShaderResource)
     return !depth_format;
+  // PopulateWMTTextureInfo already validated attachment capabilities for this
+  // resource's immutable flags and physical format. Reuse that result only for
+  // an exact format match; UAV typed-store support is not implied by creation.
+  if (MetalFormat.PixelFormat == ResourcePixelFormat) {
+    if (Role == TextureViewRole::DepthStencil && depth_format &&
+        (ResourceDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
+      return true;
+    if (Role == TextureViewRole::RenderTarget && !depth_format &&
+        (ResourceDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET))
+      return true;
+  }
   const auto capabilities = Device->GetMTLPixelFormatCapability(MetalFormat.PixelFormat);
   switch (Role) {
   case TextureViewRole::DepthStencil:
@@ -1186,9 +1198,7 @@ public:
     hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
     if (FAILED(hr))
       return hr;
-    if (!IsTextureViewFormatSupported(
-            device_, desc_.Format, ViewDesc.Format, metal_format, TextureViewRole::ShaderResource
-        ))
+    if (!IsTextureViewFormatSupported(device_, desc_, ViewDesc.Format, metal_format, TextureViewRole::ShaderResource))
       return E_INVALIDARG;
 
     UINT component_mapping = ViewDesc.Shader4ComponentMapping;
@@ -1397,9 +1407,7 @@ public:
     hr = QueryD3D12TextureFormat(device_->GetMTLDevice(), ViewDesc.Format, metal_format);
     if (FAILED(hr))
       return hr;
-    if (!IsTextureViewFormatSupported(
-            device_, desc_.Format, ViewDesc.Format, metal_format, TextureViewRole::UnorderedAccess
-        ))
+    if (!IsTextureViewFormatSupported(device_, desc_, ViewDesc.Format, metal_format, TextureViewRole::UnorderedAccess))
       return E_INVALIDARG;
 
     view_descriptor.format = metal_format.PixelFormat;
@@ -1506,7 +1514,7 @@ public:
     if (FAILED(hr))
       return hr;
     if (!IsTextureViewFormatSupported(
-            device_, desc_.Format, ViewDesc.Format, metal_format, TextureViewRole::RenderTarget
+            device_, desc_, ViewDesc.Format, metal_format, TextureViewRole::RenderTarget, texture->pixelFormat()
         ))
       return E_INVALIDARG;
 
@@ -1642,7 +1650,7 @@ public:
     if (FAILED(hr))
       return hr;
     if (!IsTextureViewFormatSupported(
-            device_, desc_.Format, ViewDesc.Format, metal_format, TextureViewRole::DepthStencil
+            device_, desc_, ViewDesc.Format, metal_format, TextureViewRole::DepthStencil, texture->pixelFormat()
         ))
       return E_INVALIDARG;
     view_descriptor.format = metal_format.PixelFormat;

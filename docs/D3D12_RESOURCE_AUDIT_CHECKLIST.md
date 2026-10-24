@@ -1589,6 +1589,57 @@ Evidence: `../dxmt-test/n09-view-roles-20261024/N09-view-roles.md`,
 `red-results.json`, `validation-results.json`, `verification.json`,
 `perf-aggregate.json`, `initial-perf-aggregate.json`, `manifest.json`.
 
+### N09 reuse validated attachment capabilities (2026-10-24)
+
+Baseline a07cea0b, actual feat/d3d12; previous round PROGRESS. Existing
+view-permission-cost reproduces legacy7b577dc7 ->a07 cost +3.04%/+3.36%
+p50/p95 across three alternating process pairs. Confirmed redundant ownership:
+committed/placed initialization passes PopulateWMTTextureInfo and validates
+Color/DepthStencil on the physical format before allocation; resource flags,
+physical format and per-device capability data remain immutable. Reserved
+creation also validates, while reserved attachment views remain E_NOTIMPL.
+
+The single format-role predicate now reuses this creation postcondition for
+RTV/DSV only when the physical format matches exactly, the corresponding
+ALLOW flag is set, and logical family/typed/role checks pass. Cross-format
+attachment and every UAV typed-store query remain. All later mip/array/plane/
+dimension checks and publication remain unchanged. No new capability cache,
+state, table, source/header, lock or allocation. Only existing texture code
+changes; helper assembly captures show the native-format/flag return paths
+before capability vcall. The existing five-write cost mix goes3 ->1 capability
+queries (6000 ->2000 per10000 writes); this is source/control-flow evidence.
+
+Fourteen candidate processes exit0 with Metal API/GPU validation banners and
+verified staged DLL loads: permissions11, roles59, casts97, typeless73,
+dimensions32, counter37, feature54, resource21, ownership, command/barrier,
+RGBA8/RGB96 linear-filter GPU readbacks (11..99 exact), multi depth/stencil
+copy twice. Same PE +legacy DLL remains red40/19; baseline and final both
+pass59; baseline permissions11 pass. Changed-TU no-private syntax-only and
+scoped regular build pass. Exports and public capabilities/ABI/layout/scheduling
+unchanged. Full no-private runtime, Windows differential, T3/T4 and exhaustive
+plane/default combinations NOT_RUN.
+
+Main18-process alternating comparison, median of3 process quantiles: record
+3197.60/3404.10 ->3213.35/3371.70us (+0.49%/-0.95%); 10000 mixed view writes
+1888.75/1959.70 ->1829.20/1861.10us (-3.15%/-5.03%); ordinary submit
+105.25/132.80 ->105.50/135.00us (+0.24%/+1.66%). Record/view retain24 rounds,
+ordinary60 after warmup. Main view median saves59.55us/10000 writes. Direct
+legacy/final six-process comparison1844.95/1949.90 ->1824.20/1876.40us
+(-1.12%/-3.77%). All30 timing processes across three series exit0; recording
+checks unique GPU payload and zero native staging buffers. Local fixture
+supports removing the role-admission cost; this does not erase historical
+recording/submit regressions or close the overall performance/Device gates.
+No claim of isolated instruction attribution or cross-GPU performance.
+
+Actual macOS27.0.1/Xcode27.1/M1Max/Apple7/MSC4.0.1/Wine11/clang23.1.1
+probed; existing WMT backend retained despite system Metal4 support. Next
+bounded candidate: Device format reporting versus plane/default admission.
+User .gitignore unchanged; no push. Evidence:
+`../dxmt-test/n09-view-capability-reuse-20261024/N09-view-capability-reuse.md`,
+`verification.json`, `baseline-validation.json`, `validation-results.json`,
+`perf-aggregate.json`, `repro-perf-aggregate.json`,
+`legacy-final-perf-aggregate.json`, `disassembly.json`, `manifest.json`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
