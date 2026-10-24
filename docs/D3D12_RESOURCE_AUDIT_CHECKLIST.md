@@ -2039,6 +2039,48 @@ Evidence: `../dxmt-test/n02-typed-uav-gpu-20261024/`:
 `negative-results.json`, `baseline-alias.json`, `adjacent-results.json`,
 `no-private.json`, `sources.json`, `machine.log`, scoped build/DXC and raw logs.
 
+### N02 — packed/RG/SNORM typed-UAV execution, 2026-10-24
+
+Base6e14e665. Resolve prior optional-format uncertainty using the existing
+sampler oracle. Actual runtime cached AIR uses one mode3 texture handle for
+load/store; this alone does not prove a format unsupported. Native CPU-only
+Metal preflight accepts R32 RW, RG16_FLOAT write/RW and RGB10A2_UNORM write/RW;
+no command-buffer commit exists in that probe. Legal RG16_FLOAT GPU pilot passes.
+
+Final43 GPU success processes:39 formats/1004 scalar checks (18 controls468 plus
+21 optional536), and4 original sampler modes. Optional RGB10A2 UNORM/UINT,
+R11G11B10_FLOAT, RG32/RG16/RG8, RGBA/R SNORM and16-bit UNORM prove before-load
+and independent physical after-store output on this device. Generalize existing
+test-only decoder for component widths, normalization/sign and packed fields.
+Packed UINT values exceed255 and cover alpha0..3. Existing HLSL/Meson add SNORM
+and packed-UINT variants; no new runner/source/header/framework/runtime table.
+Four packed/sign mutations and3 inherited shader mutations fail at exact CPU
+comparisons;3 parser negatives exit2. Adjacent feature69/format58 pass. Every GPU
+log verifies native stage DLL, API/GPU validation1/1/HUD1 and no validation/aborted
+buffer error. Wrong-output shaders remain valid and in bounds.
+
+The proposed unsupported-MSC inference is NOT REPRODUCED for these21 optional
+formats; preserve the verified functionality instead of clamping capability bits
+from static ReadOrWrite naming or the native Tier2 list. No production edit,
+ABI/layout/scheduling/compiler-option or public FL/SM/Options/Tier change.
+TypedUAVLoadAdditionalFormats remains FALSE; full gate not established here.
+Scoped build/no-private changed-runner syntax pass; registered shader fixture
+dry-run passes and equivalent DXC commands run with isolated matched Wine.
+Default fixture commands with older configured Wine and full no-private runtime
+NOT_RUN. Same immutable production DLL b094fae2; only build metadata regenerated.
+
+Runtime log4.0.1 is the compiled API/header contract; cached AIR compiler metadata
+is4.0.3. Actual macOS27.0.1/Xcode27.1/M1Max/Apple7/Wine11/clang23.1.1. Performance
+NOT_RUN (production unchanged); prior query p50+7.43%/batch-p95+6.92% warning and
+historical/global performance gates retained. A8/legacy formats, typed buffers/
+arrays/3D, special values/exhaustive boundaries, Windows/other devices/D3D11/T3/T4
+NOT_RUN. Device/format/FL12_2 remain OPEN. User .gitignore unchanged; no push.
+Evidence: `../dxmt-test/n02-uav-access-contract-20261024/`:
+`N02-uav-access-contract.md`, `manifest.json`, `validation-results.json`,
+`negative-results.json`, `legacy-negative-results.json`, `adjacent-results.json`,
+`native-preflight.json`, `cache-extract.json`, `no-private.json`, official source
+snapshots, scoped build/DXC logs and raw logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

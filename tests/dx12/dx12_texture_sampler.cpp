@@ -19,13 +19,14 @@ CheckHR(const char *name, HRESULT hr) {
   return true;
 }
 
-// Only the native Tier 2 read-write set is exercised here. This test table is
-// an independent byte-level oracle, not a runtime capability table.
+// Explicit format fixtures for the independent byte-level oracle. This is not
+// a runtime capability table; each GPU case also checks public format support.
 struct TypedFormat {
   DXGI_FORMAT format;
   unsigned components;
-  unsigned bytes;
-  char kind; // f: IEEE float, u: unsigned, i: signed, n: UNORM
+  unsigned bytes; // Bytes per component; zero for 32-bit packed texels.
+  // Scalar f/u/i, normalized n/s, packed UNORM/UINT10 p/q, UFLOAT11/10 h.
+  char kind;
 };
 
 static const TypedFormat typed_formats[] = {
@@ -35,6 +36,27 @@ static const TypedFormat typed_formats[] = {
     {DXGI_FORMAT_R16G16B16A16_FLOAT, 4, 2, 'f'},
     {DXGI_FORMAT_R16G16B16A16_UINT, 4, 2, 'u'},
     {DXGI_FORMAT_R16G16B16A16_SINT, 4, 2, 'i'},
+    {DXGI_FORMAT_R16G16_FLOAT, 2, 2, 'f'},
+    {DXGI_FORMAT_R16G16B16A16_UNORM, 4, 2, 'n'},
+    {DXGI_FORMAT_R16G16B16A16_SNORM, 4, 2, 's'},
+    {DXGI_FORMAT_R32G32_FLOAT, 2, 4, 'f'},
+    {DXGI_FORMAT_R32G32_UINT, 2, 4, 'u'},
+    {DXGI_FORMAT_R32G32_SINT, 2, 4, 'i'},
+    {DXGI_FORMAT_R10G10B10A2_UNORM, 4, 0, 'p'},
+    {DXGI_FORMAT_R10G10B10A2_UINT, 4, 0, 'q'},
+    {DXGI_FORMAT_R11G11B10_FLOAT, 3, 0, 'h'},
+    {DXGI_FORMAT_R8G8B8A8_SNORM, 4, 1, 's'},
+    {DXGI_FORMAT_R16G16_UNORM, 2, 2, 'n'},
+    {DXGI_FORMAT_R16G16_UINT, 2, 2, 'u'},
+    {DXGI_FORMAT_R16G16_SNORM, 2, 2, 's'},
+    {DXGI_FORMAT_R16G16_SINT, 2, 2, 'i'},
+    {DXGI_FORMAT_R8G8_UNORM, 2, 1, 'n'},
+    {DXGI_FORMAT_R8G8_UINT, 2, 1, 'u'},
+    {DXGI_FORMAT_R8G8_SNORM, 2, 1, 's'},
+    {DXGI_FORMAT_R8G8_SINT, 2, 1, 'i'},
+    {DXGI_FORMAT_R16_UNORM, 1, 2, 'n'},
+    {DXGI_FORMAT_R16_SNORM, 1, 2, 's'},
+    {DXGI_FORMAT_R8_SNORM, 1, 1, 's'},
     {DXGI_FORMAT_R8G8B8A8_UNORM, 4, 1, 'n'},
     {DXGI_FORMAT_R8G8B8A8_UINT, 4, 1, 'u'},
     {DXGI_FORMAT_R8G8B8A8_SINT, 4, 1, 'i'},
@@ -49,16 +71,38 @@ static const TypedFormat typed_formats[] = {
     {DXGI_FORMAT_R8_SINT, 1, 1, 'i'},
 };
 
+static bool IsFloatingPoint(const TypedFormat &format) {
+  return format.kind != 'u' && format.kind != 'i' && format.kind != 'q';
+}
+
+static double NormalizationScale(const TypedFormat &format,
+                                 unsigned component) {
+  if (format.kind == 'p')
+    return component == 3 ? 3 : 1023;
+  if (format.kind == 'n' || format.kind == 's')
+    return std::ldexp(1.0, format.bytes * 8 - (format.kind == 's' ? 1 : 0)) - 1;
+  return 0;
+}
+
 static double InitialValue(const TypedFormat &format, unsigned pixel,
                            unsigned component) {
   const double initial[] = {3 + 4.0 * pixel, 5 + 4.0 * pixel, 7 + 4.0 * pixel,
                             1};
   const double floating[] = {0.25 + pixel / 16.0, 0.5 + pixel / 32.0,
                              0.75 - pixel / 16.0, 1};
-  if (format.kind == 'n')
-    return std::round(floating[component] * 255) / 255;
-  if (format.kind == 'f')
-    return floating[component];
+  if (format.kind == 'q') {
+    const double packed[] = {257 + 128.0 * pixel, 513 + 64.0 * pixel,
+                             769 - 128.0 * pixel, double(pixel)};
+    return packed[component];
+  }
+  if (IsFloatingPoint(format)) {
+    const double value =
+        format.kind == 's' && (component == 0 || component == 2)
+            ? -floating[component]
+            : floating[component];
+    const double scale = NormalizationScale(format, component);
+    return scale ? std::round(value * scale) / scale : value;
+  }
   return format.kind == 'i' && (component == 0 || component == 2)
              ? -initial[component]
              : initial[component];
@@ -69,12 +113,13 @@ static double ReadComponent(const unsigned char *data, unsigned bytes,
   UINT bits = 0;
   memcpy(&bits, data, bytes);
   if (kind == 'n')
-    return bits / 255.0;
+    return bits / (std::ldexp(1.0, bytes * 8) - 1);
   if (kind == 'u')
     return bits;
-  if (kind == 'i') {
+  if (kind == 'i' || kind == 's') {
     const int64_t sign = int64_t(1) << (bytes * 8 - 1);
-    return (int64_t(bits) ^ sign) - sign;
+    const double value = (int64_t(bits) ^ sign) - sign;
+    return kind == 's' ? std::fmax(-1.0, value / (sign - 1)) : value;
   }
   if (bytes == 4) {
     float value;
@@ -91,6 +136,31 @@ static double ReadComponent(const unsigned char *data, unsigned bytes,
   return bits & 0x8000 ? -value : value;
 }
 
+static double ReadStoredComponent(const TypedFormat &format,
+                                  const unsigned char *texel,
+                                  unsigned component) {
+  if (format.bytes)
+    return ReadComponent(texel + component * format.bytes, format.bytes,
+                         format.kind);
+  UINT bits;
+  memcpy(&bits, texel, sizeof(bits));
+  if (format.kind == 'p' || format.kind == 'q') {
+    bits = (bits >> (component * 10)) & (component == 3 ? 3 : 1023);
+    return format.kind == 'p' ? bits / NormalizationScale(format, component)
+                              : bits;
+  }
+  // R11G11B10_FLOAT uses unsigned 5-bit exponents and 6/6/5-bit mantissas.
+  const unsigned mantissa_bits = component == 2 ? 5 : 6;
+  const unsigned mask = (1u << mantissa_bits) - 1;
+  bits >>= component == 2 ? 22 : component * 11;
+  const unsigned exponent = (bits >> mantissa_bits) & 31;
+  if (exponent == 31)
+    return NAN;
+  return exponent ? std::ldexp(1 + double(bits & mask) / (mask + 1),
+                               int(exponent) - 15)
+                  : std::ldexp(double(bits & mask), -14 - int(mantissa_bits));
+}
+
 static bool
 CheckTypedReadback(const TypedFormat &format, const UINT *mapped,
                    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &footprint) {
@@ -101,12 +171,16 @@ CheckTypedReadback(const TypedFormat &format, const UINT *mapped,
       const double initial = present ? InitialValue(format, pixel, component)
                              : component == 3 ? 1
                                               : 0;
-      const char kind = format.kind == 'n' ? 'f' : format.kind;
+      const char kind = IsFloatingPoint(format) ? 'f'
+                        : format.kind == 'i'    ? 'i'
+                                                : 'u';
       const double loaded =
           ReadComponent(reinterpret_cast<const unsigned char *>(
                             &mapped[1 + 4 * pixel + component]),
                         4, kind);
-      const double tolerance = format.kind == 'n' ? 1.0 / 255 + 1e-6 : 1e-6;
+      const double scale = NormalizationScale(format, component);
+      const double tolerance =
+          present && scale && std::abs(initial) != 1 ? 1 / scale + 1e-6 : 1e-6;
       if (!std::isfinite(loaded) || std::abs(loaded - initial) > tolerance) {
         std::cerr << "typed UAV load mismatch pixel=" << pixel
                   << " component=" << component << " actual=" << loaded
@@ -117,18 +191,18 @@ CheckTypedReadback(const TypedFormat &format, const UINT *mapped,
       if (!present)
         continue;
       double expected = initial;
-      if (format.kind == 'f' || format.kind == 'n')
+      if (IsFloatingPoint(format))
         expected *= component == 3 ? 1 : 0.5;
       else if (component != 3)
         expected +=
             format.kind == 'i' && component == 1 ? -2.0 : component + 1.0;
-      if (format.kind == 'n')
-        expected = std::round(expected * 255) / 255;
+      if (scale)
+        expected = std::round(expected * scale) / scale;
       const auto *data =
           reinterpret_cast<const unsigned char *>(mapped) + footprint.Offset +
           (pixel / 2) * footprint.Footprint.RowPitch +
-          ((pixel % 2) * format.components + component) * format.bytes;
-      const double stored = ReadComponent(data, format.bytes, format.kind);
+          (pixel % 2) * (format.bytes ? format.components * format.bytes : 4);
+      const double stored = ReadStoredComponent(format, data, component);
       if (!std::isfinite(stored) || std::abs(stored - expected) > tolerance) {
         std::cerr << "typed UAV store mismatch pixel=" << pixel
                   << " component=" << component << " actual=" << stored
