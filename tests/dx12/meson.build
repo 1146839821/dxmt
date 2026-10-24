@@ -475,7 +475,7 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
-  foreach kind : [ 'float', 'uint', 'sint', 'snorm', 'packed_uint' ]
+  foreach kind : [ 'float', 'uint', 'sint', 'snorm', 'packed_uint', 'alpha' ]
     custom_target('dx12_texture_sampler_typed_uav_' + kind + '_fixture',
       input: 'texture_sampler.hlsl',
       output: 'texture_sampler_typed_uav_' + kind + '.cs.cso',

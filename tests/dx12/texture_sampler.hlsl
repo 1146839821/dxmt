@@ -10,7 +10,7 @@ RWStructuredBuffer<uint> output : register(u0);
 #define UAV_VALUE float4
 #endif
 
-#if defined(TYPED_UAV_UINT) || defined(TYPED_UAV_SINT) || defined(TYPED_UAV_FLOAT) || defined(TYPED_UAV_SNORM) || defined(TYPED_UAV_PACKED_UINT)
+#if defined(TYPED_UAV_UINT) || defined(TYPED_UAV_SINT) || defined(TYPED_UAV_FLOAT) || defined(TYPED_UAV_SNORM) || defined(TYPED_UAV_PACKED_UINT) || defined(TYPED_UAV_ALPHA)
 #define TYPED_UAV
 RWTexture2D<UAV_VALUE> typed_output : register(u1);
 cbuffer Parameters : register(b0) { uint phase; };
@@ -20,7 +20,11 @@ cbuffer Parameters : register(b0) { uint phase; };
 void main(uint3 tid : SV_DispatchThreadID)
 {
     float4 value = input_texture.SampleLevel(input_sampler, float2(0.5, 0.5), 0.0);
-    output[0] = (uint)(value.x * 255.0 + 0.5);
+    float intensity = value.x;
+#if defined(TYPED_UAV_ALPHA)
+    intensity = all(value.rgb == 0) ? value.a * (255.0 / 128.0) : 0;
+#endif
+    output[0] = (uint)(intensity * 255.0 + 0.5);
 #if defined(TYPED_UAV)
     for (uint i = 0; i < 4; ++i) {
         uint2 location = uint2(i % 2, i / 2);
@@ -36,8 +40,11 @@ void main(uint3 tid : SV_DispatchThreadID)
 #if defined(TYPED_UAV_SNORM)
             initial.xz = -initial.xz;
 #endif
+#if defined(TYPED_UAV_ALPHA)
+            initial.a = (i + 1) * 0.25;
 #endif
-            typed_output[location] = initial * (UAV_VALUE)value.x;
+#endif
+            typed_output[location] = initial * (UAV_VALUE)intensity;
         } else {
             UAV_VALUE loaded = typed_output[location];
             for (uint component = 0; component < 4; ++component)
@@ -46,6 +53,8 @@ void main(uint3 tid : SV_DispatchThreadID)
             typed_output[location] = loaded + uint4(1, 2, 3, 0);
 #elif defined(TYPED_UAV_SINT)
             typed_output[location] = loaded + int4(1, -2, 3, 0);
+#elif defined(TYPED_UAV_ALPHA)
+            typed_output[location] = loaded * float4(1, 1, 1, 0.5);
 #else
             typed_output[location] = loaded * float4(0.5, 0.5, 0.5, 1);
 #endif

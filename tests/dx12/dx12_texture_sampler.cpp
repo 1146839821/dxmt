@@ -25,7 +25,8 @@ struct TypedFormat {
   DXGI_FORMAT format;
   unsigned components;
   unsigned bytes; // Bytes per component; zero for 32-bit packed texels.
-  // Scalar f/u/i, normalized n/s, packed UNORM/UINT10 p/q, UFLOAT11/10 h.
+  // Scalar f/u/i, normalized n/s/a (alpha), packed UNORM/UINT10 p/q,
+  // UFLOAT11/10 h.
   char kind;
 };
 
@@ -69,6 +70,7 @@ static const TypedFormat typed_formats[] = {
     {DXGI_FORMAT_R8_UNORM, 1, 1, 'n'},
     {DXGI_FORMAT_R8_UINT, 1, 1, 'u'},
     {DXGI_FORMAT_R8_SINT, 1, 1, 'i'},
+    {DXGI_FORMAT_A8_UNORM, 1, 1, 'a'},
 };
 
 static bool IsFloatingPoint(const TypedFormat &format) {
@@ -77,6 +79,8 @@ static bool IsFloatingPoint(const TypedFormat &format) {
 
 static double NormalizationScale(const TypedFormat &format,
                                  unsigned component) {
+  if (format.kind == 'a')
+    return 255;
   if (format.kind == 'p')
     return component == 3 ? 3 : 1023;
   if (format.kind == 'n' || format.kind == 's')
@@ -86,6 +90,8 @@ static double NormalizationScale(const TypedFormat &format,
 
 static double InitialValue(const TypedFormat &format, unsigned pixel,
                            unsigned component) {
+  if (format.kind == 'a')
+    return std::round((pixel + 1) / 4.0 * 255) / 255;
   const double initial[] = {3 + 4.0 * pixel, 5 + 4.0 * pixel, 7 + 4.0 * pixel,
                             1};
   const double floating[] = {0.25 + pixel / 16.0, 0.5 + pixel / 32.0,
@@ -139,6 +145,8 @@ static double ReadComponent(const unsigned char *data, unsigned bytes,
 static double ReadStoredComponent(const TypedFormat &format,
                                   const unsigned char *texel,
                                   unsigned component) {
+  if (format.kind == 'a')
+    return ReadComponent(texel, 1, 'n');
   if (format.bytes)
     return ReadComponent(texel + component * format.bytes, format.bytes,
                          format.kind);
@@ -167,7 +175,8 @@ CheckTypedReadback(const TypedFormat &format, const UINT *mapped,
   unsigned checks = 0;
   for (unsigned pixel = 0; pixel < 4; ++pixel) {
     for (unsigned component = 0; component < 4; ++component) {
-      const bool present = component < format.components;
+      const bool present =
+          format.kind == 'a' ? component == 3 : component < format.components;
       const double initial = present ? InitialValue(format, pixel, component)
                              : component == 3 ? 1
                                               : 0;
@@ -192,7 +201,7 @@ CheckTypedReadback(const TypedFormat &format, const UINT *mapped,
         continue;
       double expected = initial;
       if (IsFloatingPoint(format))
-        expected *= component == 3 ? 1 : 0.5;
+        expected *= component == 3 && format.kind != 'a' ? 1 : 0.5;
       else if (component != 3)
         expected +=
             format.kind == 'i' && component == 1 ? -2.0 : component + 1.0;
@@ -203,7 +212,10 @@ CheckTypedReadback(const TypedFormat &format, const UINT *mapped,
           (pixel / 2) * footprint.Footprint.RowPitch +
           (pixel % 2) * (format.bytes ? format.components * format.bytes : 4);
       const double stored = ReadStoredComponent(format, data, component);
-      if (!std::isfinite(stored) || std::abs(stored - expected) > tolerance) {
+      const double store_tolerance =
+          scale && std::abs(expected) != 1 ? 1 / scale + 1e-6 : 1e-6;
+      if (!std::isfinite(stored) ||
+          std::abs(stored - expected) > store_tolerance) {
         std::cerr << "typed UAV store mismatch pixel=" << pixel
                   << " component=" << component << " actual=" << stored
                   << " expected=" << expected << "\n";
@@ -219,10 +231,13 @@ CheckTypedReadback(const TypedFormat &format, const UINT *mapped,
 
 int
 main(int argc, char **argv) {
-  if (argc < 2 || argc > 4)
+  if (argc < 2 || argc > 5)
+    return 2;
+  const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
+  if (argc == 5 && !placed)
     return 2;
   const TypedFormat *typed_format = nullptr;
-  if (argc == 4) {
+  if (argc >= 4) {
     if (strcmp(argv[2], "--typed-uav") != 0)
       return 2;
     char *end = nullptr;
@@ -264,6 +279,7 @@ main(int argc, char **argv) {
   ID3D12Resource *upload = nullptr;
   ID3D12Resource *output = nullptr;
   ID3D12Resource *output_texture = nullptr;
+  ID3D12Heap *output_heap = nullptr;
   ID3D12Resource *readback = nullptr;
   ID3D12PipelineState *pso = nullptr;
   ID3D12GraphicsCommandList *list = nullptr;
@@ -410,7 +426,9 @@ main(int argc, char **argv) {
   texture_desc.Height = 1;
   texture_desc.DepthOrArraySize = 1;
   texture_desc.MipLevels = 1;
-  texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  texture_desc.Format = typed_format && typed_format->kind == 'a'
+                            ? DXGI_FORMAT_A8_UNORM
+                            : DXGI_FORMAT_R8G8B8A8_UNORM;
   texture_desc.SampleDesc.Count = 1;
   if (!CheckHR(
           "CreateTexture",
@@ -437,10 +455,13 @@ main(int argc, char **argv) {
   if (!CheckHR("MapUpload", upload->Map(0, nullptr, &upload_data)))
     goto cleanup;
   static const UINT pixel = 0xff0000ff;
-  memcpy(upload_data, &pixel, sizeof(pixel));
+  static const UINT alpha_pixel = 128;
+  memcpy(upload_data,
+         typed_format && typed_format->kind == 'a' ? &alpha_pixel : &pixel,
+         sizeof(pixel));
   upload->Unmap(0, nullptr);
 
-  srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  srv_desc.Format = texture_desc.Format;
   srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
   srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
   srv_desc.Texture2D.MipLevels = 1;
@@ -467,11 +488,38 @@ main(int argc, char **argv) {
     output_texture_desc.Width = output_texture_desc.Height =
         typed_format ? 2 : 1;
     output_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    if (!CheckHR(
-            "CreateOutputTexture",
-            device->CreateCommittedResource(
-                &default_heap, D3D12_HEAP_FLAG_NONE, &output_texture_desc,
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&output_texture))))
+    if (placed) {
+      const auto info =
+          device->GetResourceAllocationInfo(0, 1, &output_texture_desc);
+      if (!info.SizeInBytes || info.SizeInBytes == ~UINT64(0) ||
+          !info.Alignment || (info.Alignment & (info.Alignment - 1)) ||
+          info.Alignment > ~UINT64(0) - info.SizeInBytes) {
+        std::cerr << "Invalid texture allocation info\n";
+        goto cleanup;
+      }
+      D3D12_HEAP_DESC heap_desc = {};
+      heap_desc.SizeInBytes = info.SizeInBytes + info.Alignment;
+      heap_desc.Properties = default_heap;
+      heap_desc.Alignment = info.Alignment;
+      heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+      std::cout << "typed UAV placed size=" << info.SizeInBytes
+                << " alignment=" << info.Alignment
+                << " offset=" << info.Alignment << "\n";
+      if (!CheckHR(
+              "CreateOutputHeap",
+              device->CreateHeap(&heap_desc, IID_PPV_ARGS(&output_heap))) ||
+          !CheckHR("CreatePlacedOutputTexture",
+                   device->CreatePlacedResource(
+                       output_heap, info.Alignment, &output_texture_desc,
+                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                       IID_PPV_ARGS(&output_texture))))
+        goto cleanup;
+    } else if (!CheckHR("CreateOutputTexture",
+                        device->CreateCommittedResource(
+                            &default_heap, D3D12_HEAP_FLAG_NONE,
+                            &output_texture_desc,
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                            IID_PPV_ARGS(&output_texture))))
       goto cleanup;
     D3D12_UNORDERED_ACCESS_VIEW_DESC texture_uav_desc = {};
     texture_uav_desc.Format = output_texture_desc.Format;
@@ -482,6 +530,28 @@ main(int argc, char **argv) {
     device->GetCopyableFootprints(&output_texture_desc, 0, 1, 512,
                                   &output_texture_footprint, &row_count,
                                   &row_size, &total_size);
+    if (typed_format) {
+      const UINT64 expected_row =
+          2 * (typed_format->bytes
+                   ? typed_format->components * typed_format->bytes
+                   : 4);
+      if (output_texture_footprint.Offset != 512 ||
+          output_texture_footprint.Footprint.Format != typed_format->format ||
+          output_texture_footprint.Footprint.Width != 2 ||
+          output_texture_footprint.Footprint.Height != 2 ||
+          output_texture_footprint.Footprint.Depth != 1 || row_count != 2 ||
+          row_size != expected_row ||
+          output_texture_footprint.Footprint.RowPitch < expected_row ||
+          output_texture_footprint.Footprint.RowPitch %
+              D3D12_TEXTURE_DATA_PITCH_ALIGNMENT ||
+          !total_size || total_size > 1024 ||
+          output_texture_footprint.Offset +
+                  output_texture_footprint.Footprint.RowPitch + expected_row >
+              1024) {
+        std::cerr << "Invalid typed texture footprint\n";
+        goto cleanup;
+      }
+    }
   }
 
   if (!static_sampler) {
@@ -629,6 +699,8 @@ cleanup:
     output->Release();
   if (output_texture)
     output_texture->Release();
+  if (output_heap)
+    output_heap->Release();
   if (upload)
     upload->Release();
   if (texture)

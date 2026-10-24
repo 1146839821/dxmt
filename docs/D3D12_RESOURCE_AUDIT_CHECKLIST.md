@@ -2081,6 +2081,44 @@ Evidence: `../dxmt-test/n02-uav-access-contract-20261024/`:
 `native-preflight.json`, `cache-extract.json`, `no-private.json`, official source
 snapshots, scoped build/DXC logs and raw logs.
 
+### N02 — A8 alpha-only SRV/UAV and placed output, 2026-10-24
+
+Base2282f19f. No A8 production mismatch reproduced. Existing sampler oracle now
+expresses alpha-only channel3 presence, zero RGB defaults and independent raw
+alpha-byte storage. Source SRV also A8, uploads128 to defeat constant-one sampling;
+shader initializes four varying alphas, captures typed loads and halves alpha.
+Compute load/store quantization tolerances from respective values; no complete
+numeric conversion claim. Existing runner adds generic --placed, checks allocation
+info/overflow, creates output at nonzero alignment offset, and releases heap after
+resource. Footprint format/2x2 dimensions/row size/count/pitch/readback bounds checked.
+Meson adds alpha variant in existing foreach. No new runner/source/framework.
+
+Final12 normal GPU processes:200 scalar checks (A8 committed/placed40, R8 committed/
+placed40, RG8_UNORM24, RGBA8_UNORM32, packedUINT32, RGBA16_SNORM32), plus4 original
+sampler modes. A8 placed size/alignment/offset each65536. Five wrong-output shaders
+fail exact CPU comparisons (alpha-from-red, skipped placed alpha store, wrong SRV
+channel, wrong RGB default, constant-one sample);3 bad placed CLI forms exit2.
+Feature70/70 and format59/59 pass, each adds one A8 query. Observed A8 Support1
+0x274d3f0/Support2 0xc0, HRESULT0. Generic query test does not demand optional A8
+UAV bits universally; GPU runner checks current view/load/store claims first.
+All19 native-device logs verify immutable stage DLL, API/GPU validation1/1/HUD1
+and no validation/aborted-buffer errors. Final22 runtime processes match expected
+success/failure exits. Pilot and a stale external expected-count assertion are
+separate from final results. Scoped build,2 changed-TU no-private syntax and alpha
+fixture dry-run pass; equivalent cs_6_0 DXC command uses isolated matched Wine.
+Default fixture command with older configured Wine/full no-private runtime NOT_RUN.
+
+Same production DLL b094fae2; no production source/header/table/cache/state owner,
+ABI/layout/scheduling or public FL/SM/Options/Tier change. Actual macOS27.0.1/
+Xcode27.1/M1Max/Apple7/Wine11/clang23.1.1; compiled MSC API/header4.0.1, preceding
+round's compiler AIR4.0.3. Performance NOT_RUN; prior query p50+7.43%/batch-p95
++6.92% warning and historical/global gates retained. A8 RTV/MSAA, other shapes/
+stages/numeric edges, Windows/other devices/D3D11/T3/T4 NOT_RUN. Device/format/
+additional-UAV/FL12_2 gates remain OPEN, Options bit FALSE. User .gitignore unchanged;
+no push. Evidence: `../dxmt-test/n02-a8-uav-20261024/`: `N02-a8-uav.md`,
+`manifest.json`, `validation-results.json`, `negative-results.json`,
+`adjacent-results.json`, `no-private.json`, official sources and raw build/DXC/logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

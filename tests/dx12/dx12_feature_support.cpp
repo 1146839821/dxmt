@@ -448,6 +448,16 @@ bool CheckFormatSupportContract(ID3D12Device *device) {
     check(format, dimensions | D3D12_FORMAT_SUPPORT1_SHADER_LOAD,
           D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE |
               D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE_COMPARISON);
+  // Typed UAV loads are optional for A8; the GPU fixture checks the reported
+  // view/load/store bits before exercising them on the selected device.
+  check(DXGI_FORMAT_A8_UNORM,
+        dimensions | D3D12_FORMAT_SUPPORT1_SHADER_LOAD |
+            D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE,
+        D3D12_FORMAT_SUPPORT1_IA_VERTEX_BUFFER |
+            D3D12_FORMAT_SUPPORT1_IA_INDEX_BUFFER |
+            D3D12_FORMAT_SUPPORT1_SO_BUFFER |
+            D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL |
+            D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE_COMPARISON);
   for (const auto format :
        {DXGI_FORMAT_D16_UNORM, DXGI_FORMAT_D32_FLOAT,
         DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D32_FLOAT_S8X24_UINT})
