@@ -50,7 +50,12 @@ Texture2DMSArray<float4> texture_ms_array : register(t7);
 #endif
 Texture3D<float4> texture_3d : register(t8);
 SamplerState texture_sampler : register(s0);
+#ifdef MS_PIXEL_READ
+// Pixel UAV registers follow the color output for the SM5 compiler contract.
+RWStructuredBuffer<uint> output : register(u1);
+#else
 RWStructuredBuffer<uint> output : register(u0);
+#endif
 
 uint ToByte(float4 value, uint index) {
 #ifdef RGB96
@@ -190,7 +195,7 @@ bool CheckBC(uint index) {
 }
 #endif
 
-[numthreads(1, 1, 1)] void main() {
+void CheckDimensions() {
   output[0] = ToByte(texture_1d.SampleLevel(texture_sampler, 0.5, 0.0), 0);
   output[1] = ToByte(
       texture_1d_array.SampleLevel(texture_sampler, float2(0.5, 1.0), 0.0), 1);
@@ -274,5 +279,14 @@ bool CheckBC(uint index) {
     output[0] = 0;
 #endif
 }
+
+#ifdef MS_PIXEL_READ
+float4 pixel_main() : SV_Target {
+  CheckDimensions();
+  return float4(1, 1, 1, 1);
+}
+#else
+[numthreads(1, 1, 1)] void main() { CheckDimensions(); }
+#endif
 
 #endif // MS_WRITE

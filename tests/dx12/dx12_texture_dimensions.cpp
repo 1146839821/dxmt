@@ -238,6 +238,10 @@ void SetSrvDesc(D3D12_SHADER_RESOURCE_VIEW_DESC &desc, UINT index) {
 } // namespace
 
 int main(int argc, char **argv) {
+  const bool pixel_read =
+      argc > 2 && !std::strcmp(argv[argc - 1], "--pixel-read");
+  if (pixel_read)
+    --argc;
   UINT sample_count = 4;
   const bool explicit_samples =
       argc > 2 && !std::strncmp(argv[argc - 1], "--samples=", 10);
@@ -291,7 +295,7 @@ int main(int argc, char **argv) {
                     !std::strcmp(argv[2], "--bc3-typeless") ||
                     !std::strcmp(argv[2], "--bc1-srgb-typeless") ||
                     !std::strcmp(argv[2], "--bc3-srgb-typeless"));
-  if ((explicit_samples && !distinct_ms) ||
+  if (((explicit_samples || pixel_read) && !distinct_ms) ||
       (argc == 6 && !mask_all && !mask_zero) ||
       (argc != 2 && !typeless && !rgb96 && !depth_stencil_ms && !bc)) {
     std::cerr
@@ -302,8 +306,9 @@ int main(int argc, char **argv) {
            "--bc3|--bc3-srgb|--bc3-typeless|--bc3-srgb-typeless]\n"
            "Depth/stencil modes optionally take <write.vs.cso> "
            "<write.ps.cso> [--mask-all|--mask-zero] for distinct "
-           "sample/layer values, then [--samples=2|4|8] (default 4).\n"
-           "Match the compute fixture to the mask and sample count.\n";
+           "sample/layer values, then [--samples=2|4|8] (default 4)\n"
+           "and [--pixel-read] for a pixel reader. Match the reader fixture\n"
+           "to the stage, mask and sample count.\n";
     return 2;
   }
 
@@ -332,6 +337,9 @@ int main(int argc, char **argv) {
   Owned<ID3D12Resource> textures[9];
   Owned<ID3D12Resource> uploads[9];
   Owned<ID3D12Resource> output;
+  Owned<ID3D12Resource> output_seed;
+  Owned<ID3D12Resource> pixel_target;
+  Owned<ID3D12DescriptorHeap> pixel_heap;
   Owned<ID3D12Resource> readback;
   Owned<ID3D12PipelineState> pso;
   Owned<ID3D12PipelineState> sample_psos[2][8];
@@ -390,7 +398,7 @@ int main(int argc, char **argv) {
 
   ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 9, 0, 0, 0};
   ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
-  ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
+  ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, pixel_read ? 1u : 0u, 0, 0};
   for (UINT i = 0; i < 3; i++) {
     root_parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     root_parameters[i].DescriptorTable.NumDescriptorRanges = 1;
@@ -571,9 +579,12 @@ int main(int argc, char **argv) {
   auto output_cpu = resource_cpu;
   output_cpu.ptr += descriptor_increment * 9;
   const D3D12_RESOURCE_DESC output_desc = BufferDesc(256, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-  if (!CheckHR("CreateOutput", device.ptr->CreateCommittedResource(
-                                  &default_heap, D3D12_HEAP_FLAG_NONE, &output_desc,
-                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&output.ptr))))
+  if (!CheckHR("CreateOutput",
+               device.ptr->CreateCommittedResource(
+                   &default_heap, D3D12_HEAP_FLAG_NONE, &output_desc,
+                   pixel_read ? D3D12_RESOURCE_STATE_COPY_DEST
+                              : D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   nullptr, IID_PPV_ARGS(&output.ptr))))
     return 1;
   device.ptr->CreateUnorderedAccessView(output.ptr, nullptr, &uav_desc, output_cpu);
 
@@ -665,15 +676,81 @@ int main(int argc, char **argv) {
     }
   }
 
-  pso_desc.pRootSignature = root_signature.ptr;
-  pso_desc.CS.pShaderBytecode = shader.data();
-  pso_desc.CS.BytecodeLength = shader.size();
-  if (!CheckHR("CreateComputePipelineState", device.ptr->CreateComputePipelineState(
-                                                  &pso_desc, IID_PPV_ARGS(&pso.ptr))) ||
-      !CheckHR("CreateCommandList", device.ptr->CreateCommandList(
-                                      0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.ptr, pso.ptr,
-                                      IID_PPV_ARGS(&list.ptr))))
+  if (pixel_read) {
+    auto target_desc = texture_descs[2];
+    target_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_DESCRIPTOR_HEAP_DESC heap = {};
+    heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    heap.NumDescriptors = 1;
+    const auto seed_desc = BufferDesc(256, D3D12_RESOURCE_FLAG_NONE);
+    const auto upload_heap = UploadHeap();
+    if (!CheckHR("CreatePixelTarget",
+                 device.ptr->CreateCommittedResource(
+                     &default_heap, D3D12_HEAP_FLAG_NONE, &target_desc,
+                     D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                     IID_PPV_ARGS(&pixel_target.ptr))) ||
+        !CheckHR("CreatePixelHeap",
+                 device.ptr->CreateDescriptorHeap(
+                     &heap, IID_PPV_ARGS(&pixel_heap.ptr))) ||
+        !CheckHR("CreateOutputSeed",
+                 device.ptr->CreateCommittedResource(
+                     &upload_heap, D3D12_HEAP_FLAG_NONE, &seed_desc,
+                     D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                     IID_PPV_ARGS(&output_seed.ptr))))
+      return 1;
+    void *seed = nullptr;
+    if (!CheckHR("MapOutputSeed", output_seed.ptr->Map(0, nullptr, &seed)))
+      return 1;
+    std::memset(seed, 0, 256);
+    output_seed.ptr->Unmap(0, nullptr);
+    device.ptr->CreateRenderTargetView(
+        pixel_target.ptr, nullptr,
+        pixel_heap.ptr->GetCPUDescriptorHandleForHeapStart());
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC draw = {};
+    draw.pRootSignature = root_signature.ptr;
+    draw.VS = {vertex_shader.data(), vertex_shader.size()};
+    draw.PS = {shader.data(), shader.size()};
+    draw.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    draw.SampleDesc.Count = 1;
+    draw.SampleMask = UINT_MAX;
+    draw.NumRenderTargets = 1;
+    draw.RTVFormats[0] = target_desc.Format;
+    draw.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    draw.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    draw.RasterizerState.DepthClipEnable = TRUE;
+    draw.BlendState.RenderTarget[0].RenderTargetWriteMask =
+        D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (!CheckHR("CreatePixelReadPipeline",
+                 device.ptr->CreateGraphicsPipelineState(
+                     &draw, IID_PPV_ARGS(&pso.ptr))))
+      return 1;
+  } else {
+    pso_desc.pRootSignature = root_signature.ptr;
+    pso_desc.CS.pShaderBytecode = shader.data();
+    pso_desc.CS.BytecodeLength = shader.size();
+    if (!CheckHR("CreateComputePipelineState",
+                 device.ptr->CreateComputePipelineState(
+                     &pso_desc, IID_PPV_ARGS(&pso.ptr))))
+      return 1;
+  }
+  if (!CheckHR("CreateCommandList",
+               device.ptr->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                             allocator.ptr, pso.ptr,
+                                             IID_PPV_ARGS(&list.ptr))))
     return 1;
+
+  if (pixel_read) {
+    // A missing raster invocation must leave a failing value, never stale
+    // output.
+    list.ptr->CopyBufferRegion(output.ptr, 0, output_seed.ptr, 0, 256);
+    barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = output.ptr;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list.ptr->ResourceBarrier(1, &barrier);
+  }
 
   ID3D12DescriptorHeap *heaps[] = {resource_heap.ptr, sampler_heap.ptr};
   list.ptr->SetDescriptorHeaps(2, heaps);
@@ -737,7 +814,9 @@ int main(int argc, char **argv) {
       barrier.Transition.StateBefore = depth_stencil_ms
                                            ? D3D12_RESOURCE_STATE_DEPTH_WRITE
                                            : D3D12_RESOURCE_STATE_RENDER_TARGET;
-      barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+      barrier.Transition.StateAfter =
+          pixel_read ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+                     : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
       barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
       list.ptr->ResourceBarrier(1, &barrier);
       continue;
@@ -762,19 +841,41 @@ int main(int argc, char **argv) {
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = textures[i].ptr;
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    barrier.Transition.StateAfter =
+        pixel_read ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+                   : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     list.ptr->ResourceBarrier(1, &barrier);
   }
 
   list.ptr->SetPipelineState(pso.ptr);
-  list.ptr->SetComputeRootSignature(root_signature.ptr);
-  list.ptr->SetComputeRootDescriptorTable(0, resource_heap.ptr->GetGPUDescriptorHandleForHeapStart());
-  list.ptr->SetComputeRootDescriptorTable(1, sampler_heap.ptr->GetGPUDescriptorHandleForHeapStart());
   auto output_gpu = resource_heap.ptr->GetGPUDescriptorHandleForHeapStart();
   output_gpu.ptr += descriptor_increment * 9;
-  list.ptr->SetComputeRootDescriptorTable(2, output_gpu);
-  list.ptr->Dispatch(1, 1, 1);
+  if (pixel_read) {
+    const D3D12_VIEWPORT viewport = {0, 0, 1, 1, 0, 1};
+    const D3D12_RECT scissor = {0, 0, 1, 1};
+    const auto target = pixel_heap.ptr->GetCPUDescriptorHandleForHeapStart();
+    list.ptr->RSSetViewports(1, &viewport);
+    list.ptr->RSSetScissorRects(1, &scissor);
+    list.ptr->OMSetRenderTargets(1, &target, FALSE, nullptr);
+    list.ptr->SetGraphicsRootSignature(root_signature.ptr);
+    list.ptr->SetGraphicsRootDescriptorTable(
+        0, resource_heap.ptr->GetGPUDescriptorHandleForHeapStart());
+    list.ptr->SetGraphicsRootDescriptorTable(
+        1, sampler_heap.ptr->GetGPUDescriptorHandleForHeapStart());
+    list.ptr->SetGraphicsRootDescriptorTable(2, output_gpu);
+    list.ptr->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list.ptr->DrawInstanced(3, 1, 0, 0);
+    list.ptr->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+  } else {
+    list.ptr->SetComputeRootSignature(root_signature.ptr);
+    list.ptr->SetComputeRootDescriptorTable(
+        0, resource_heap.ptr->GetGPUDescriptorHandleForHeapStart());
+    list.ptr->SetComputeRootDescriptorTable(
+        1, sampler_heap.ptr->GetGPUDescriptorHandleForHeapStart());
+    list.ptr->SetComputeRootDescriptorTable(2, output_gpu);
+    list.ptr->Dispatch(1, 1, 1);
+  }
   barrier = {};
   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
   barrier.Transition.pResource = output.ptr;
@@ -799,7 +900,8 @@ int main(int argc, char **argv) {
   }
   readback.ptr->Unmap(0, nullptr);
   std::cout << "bc=" << bc << " bc3=" << bc3 << " srgb=" << srgb << "\n";
-  std::cout << "samples=" << sample_count << " distinct_ms=" << distinct_ms
+  std::cout << "reader=" << (pixel_read ? "pixel" : "compute")
+            << " samples=" << sample_count << " distinct_ms=" << distinct_ms
             << " sample_values_checked=" << (distinct_ms ? 3 * sample_count : 0)
             << " mask="
             << (mask_all    ? "all"

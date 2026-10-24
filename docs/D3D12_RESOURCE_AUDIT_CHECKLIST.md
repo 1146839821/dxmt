@@ -2311,6 +2311,72 @@ compute matrix. Evidence: `../dxmt-test/n02-component-msload-20261024/`
 `final-results.json`, `shader-builds.json`, `negative-builds.json`,
 `no-private.json`, environment/scripts and raw logs.
 
+### N02 — component MS_LOAD pixel milestone and report fix, 2026-10-24
+
+Base4fe09340; dedicated narrow format-report milestone after the preceding
+compute prerequisites. Four component SRVs21/22/46/47 missed MS_LOAD because
+their custom-swizzle keys were absent from the physical capability map.
+CheckFeatureSupport now chooses the native key for custom plane components,
+does one map lookup, keeps their logical role capabilities None and inherits
+only native MSAA -> MS_LOAD. Fully typeless storage and real DSV roles remain
+separate. No new capability table/cache/state/owner or runtime source/header.
+
+Same final feature PE on old DLL twice:55 pass/4 fail each; corrected DLLs:
+format59/59 and full feature70/70. Parent DSV MSRT gates each component's
+expected MS_LOAD; role negatives forbid DSV/RTV/blend/MSRT/resolve/UAV/filter/
+comparison/gather and Support2 bits. In the observed format fixture, exactly
+four values change0x1011a0 ->0x5011a0, Support2 stays0. Final single-lookup
+reports match the initial corrected trial. This closes the local component
+underreport; it does not certify the whole Device/format/FL12_2 gate.
+
+Existing texture runner adds --pixel-read, one1x color attachment and a
+zero-seeded UAV, sharing CheckDimensions with compute. Pixel UAV is u1 after
+RT0, compute remains u0. Matched SM5 VS/PS and matched SM6 VS/PS verify2x/4x,
+depth/stencil, both families, MS/MSArray and reversed pairings. Six PS fixture
+targets register2x/4x/8x;8x remains unsupported on this host. Initial compiler
+u0/RT0 conflict and mixed-family PSO rejection are preserved as fixture pilots,
+not runtime bugs; no workaround was added.
+
+Initial corrected two-lookup trial:31 expected-exit processes, including2 red
+queries,2 green query runs,16 pixel cases,4 legal wrong-count/index/layer/
+no-oracle controls,2 compute controls,8x skip, mixed-family/CLI rejects and
+plane/command-type regressions. Final single-lookup DLL adds9 successful
+format/feature,4 pixel,2 compute and plane runs. Positive component checks
+total216 sample/layer values across these accepted runs. Device correctness
+processes verify staged D3D12/native paths and API/GPU validation1/1/HUD1;
+no GPU validation error or aborted buffer observed. The no-oracle shader
+leaves initialized zeros and fails at dimension0, ruling out stale output.
+Both2x/4x qualities are1 and8x is0 for both DSV formats. No8x GPU claim.
+
+Scoped build, final3-TU no-private syntax,17 final fixture compiles (8 pixel
+readers,4 writers,2 compute,3 negative),6 target registrations/dry-runs,
+format/diff checks and unchanged D3D12 export names/ordinals pass. Configured
+Meson shader execution, full no-private runtime, native Windows and T3/T4
+NOT_RUN. Actual host remains macOS27.0.1/Xcode27.1/M1Max Apple7/Wine11 x64
+Rosetta/clang23.1.1; MSC actual version not remeasured. No production binding/
+COM/wire ABI, layout, scheduling or FL/SM/Options/Tier/validated-flag change.
+
+An initial extra-lookup trial measured query p50/p95+7.49%/+5.78% and ordinary
+Submit+0.11%/+15.10%; its DLL/patch/logs are retained. Final one-lookup code,
+four AB/BA/BA/AB pairs,24 processes, validation0/0/HUD1, median process us:
+query120000 calls3393.00/3421.95 ->3174.90/3198.45 (-6.43%/-6.53%);
+record50000 copies3037.05/3232.95 ->3016.40/3097.95 (-0.68%/-4.18%);
+ordinary Submit96.325/121.25 ->96.425/109.10 (+0.10%/-10.02%). Retain24
+of25 query/record batches and60 of70 ordinary rows, nearest-rank p95. All8
+full-submit processes also pass1680 GPU/counter cases. Query checksum deltas
+match the two changed component formats in that12-format workload. No new
+runtime allocation, lock or scan; one existing lookup per format query.
+Results do not prove Submit-tail causality or universal speedup; initial and
+historical warnings/global performance gates stay OPEN. No unchanged matrix
+repeat without a distinct reproducible owner/cost observation.
+
+Evidence: `../dxmt-test/n02-msload-pixel-20261024/N02-msload-pixel.md`,
+`manifest.json`, `red-results.json`, `validation-results.json`,
+`final-results.json`, `report-delta.json`, `perf-aggregate.json`,
+`extra-lookup-trial`, official sources, commands and raw logs. Other devices,
+additional stages, full D24 quantization/filter/comparison/resolve semantics
+and native differential remain unverified. Overall Device/FL12_2 gates OPEN.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

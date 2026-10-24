@@ -1040,10 +1040,18 @@ public:
           format_desc.PixelFormat == WMTPixelFormatInvalid)
         return E_INVALIDARG;
 
-      auto capability_it = format_capabilities_.textureCapabilities.find(format_desc.PixelFormat);
+      const auto native_format = ORIGINAL_FORMAT(format_desc.PixelFormat);
+      const bool component_view = native_format != format_desc.PixelFormat &&
+                                  (format_desc.Flag & (MTL_DXGI_FORMAT_DEPTH_PLANER | MTL_DXGI_FORMAT_STENCIL_PLANER));
+      const auto capability_it =
+          format_capabilities_.textureCapabilities.find(component_view ? native_format : format_desc.PixelFormat);
+      const auto native_capabilities = capability_it == format_capabilities_.textureCapabilities.end()
+                                           ? FormatCapability::None
+                                           : capability_it->second;
+      // A component view shares physical storage capabilities, not DSV/RTV/UAV roles.
+      const auto capabilities = component_view ? FormatCapability::None : native_capabilities;
       auto has_capability = [&](FormatCapability capability) {
-        return capability_it != format_capabilities_.textureCapabilities.end() &&
-               (static_cast<int>(capability_it->second) & static_cast<int>(capability));
+        return static_cast<int>(capabilities) & static_cast<int>(capability);
       };
 
       out->Support1 = GetTextureFormatDimensions(format_desc) | D3D12_FORMAT_SUPPORT1_MIP |
@@ -1091,10 +1099,10 @@ public:
         if (!depth_target)
           out->Support1 |= D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD;
       }
+      if (component_view && (static_cast<int>(native_capabilities) & static_cast<int>(FormatCapability::MSAA)))
+        out->Support1 |= D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD;
       // UAV operations require a creatable typed view. Native read-only texel
       // buffers (for example BGRA8) must not acquire UAV_TYPED_LOAD here.
-      const auto capabilities = capability_it == format_capabilities_.textureCapabilities.end() ? FormatCapability::None
-                                                                                                : capability_it->second;
       if (!SupportsTypedUnorderedAccessView(format_desc, capabilities))
         return S_OK;
       if (has_capability(FormatCapability::TextureBufferRead) ||

@@ -466,20 +466,44 @@ bool CheckFormatSupportContract(ID3D12Device *device) {
               D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE |
               D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE_COMPARISON |
               D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD);
-  // These contain TYPELESS in their name but have typed depth/stencil SRV
-  // components.
+  // Typed component SRVs inherit MS Load from the multisample depth/stencil
+  // allocation, without inheriting its attachment or filtering roles.
   for (const auto format :
        {DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS, DXGI_FORMAT_R24_UNORM_X8_TYPELESS,
-        DXGI_FORMAT_X32_TYPELESS_G8X24_UINT, DXGI_FORMAT_X24_TYPELESS_G8_UINT})
-    check(format, dimensions | D3D12_FORMAT_SUPPORT1_SHADER_LOAD,
+        DXGI_FORMAT_X32_TYPELESS_G8X24_UINT,
+        DXGI_FORMAT_X24_TYPELESS_G8_UINT}) {
+    const bool d32 = format == DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS ||
+                     format == DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT parent = {
+        d32 ? DXGI_FORMAT_D32_FLOAT_S8X24_UINT : DXGI_FORMAT_D24_UNORM_S8_UINT,
+        {},
+        {}};
+    if (!CheckHR("Component parent format",
+                 device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                                             &parent, sizeof(parent)),
+                 S_OK)) {
+      good = false;
+      continue;
+    }
+    const UINT ms_load =
+        (parent.Support1 & D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RENDERTARGET)
+            ? D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD
+            : 0;
+    check(format, dimensions | D3D12_FORMAT_SUPPORT1_SHADER_LOAD | ms_load,
           D3D12_FORMAT_SUPPORT1_TEXTURE3D |
               D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL |
               D3D12_FORMAT_SUPPORT1_RENDER_TARGET |
               D3D12_FORMAT_SUPPORT1_BLENDABLE |
+              D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE |
+              D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE_COMPARISON |
+              D3D12_FORMAT_SUPPORT1_SHADER_GATHER |
+              D3D12_FORMAT_SUPPORT1_SHADER_GATHER_COMPARISON |
               D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RENDERTARGET |
               D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RESOLVE |
-              D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW,
+              D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW |
+              (ms_load ? 0 : D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD),
           true);
+  }
   for (const auto format :
        {DXGI_FORMAT_BC1_UNORM, DXGI_FORMAT_BC3_UNORM, DXGI_FORMAT_BC7_UNORM}) {
     check(format,
