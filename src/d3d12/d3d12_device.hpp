@@ -829,6 +829,16 @@ IsFullyTypelessFormat(DXGI_FORMAT format, const MTL_DXGI_FORMAT_DESC &descriptio
          format != DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
 }
 
+// A readable native texel buffer alone is not a creatable D3D12 typed UAV.
+// Query reporting and texture-view admission use this same eligibility rule.
+inline bool
+SupportsTypedUnorderedAccessView(const MTL_DXGI_FORMAT_DESC &format, FormatCapability capabilities) {
+  const auto mask = static_cast<unsigned>(capabilities);
+  return format.BytesPerTexel != 12 && (mask & static_cast<unsigned>(FormatCapability::Write)) &&
+         (mask &
+          static_cast<unsigned>(FormatCapability::TextureBufferWrite | FormatCapability::TextureBufferReadWrite));
+}
+
 HRESULT QueryRGB96TextureFormat(WMT::Device device, DXGI_FORMAT format, MTL_DXGI_FORMAT_DESC &description);
 
 inline HRESULT

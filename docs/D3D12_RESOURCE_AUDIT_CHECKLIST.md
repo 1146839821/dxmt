@@ -1956,6 +1956,49 @@ Evidence: `../dxmt-test/n12-pending-split-removal-20261024/`:
 `perf-identities.json`, `no-private.json`, `exports.json`, official spec snapshot
 and raw logs. Pilot data is separate from final acceptance.
 
+### N02 — typed-UAV reporting matches texture-view eligibility, 2026-10-24
+
+Base8d2d51d5. Confirmed query/view contradiction: BGRA8 native TextureBufferRead
+alone yielded UAV_TYPED_LOAD without a creatable typed UAV. Existing pure header
+predicate now shares logical RGB96 exclusion, native Write and typed texel-buffer
+Write/ReadWrite eligibility between Device reporting and texture-view admission.
+Delete copied view predicate and repeated query write tests. Existing snapshot is
+the only capability owner; no new state/cache/table/lookup/allocation/lock/native
+operation, D3D12 source/header, ABI/layout or scheduling change. No promotion.
+
+Same final PE baseline57/58 versus candidate58/58. Across58 query tuples only
+format87 Support2 changes0x40→0; Support1 stays0x17cd3f2. Existing role fixture
+explicitly enables BGRA UAV/RT resource flags, tests empty/seeded rejection and
+legal UNORM/SRGB SRV/RTV identity; both DLLs67/67. Final18 processes:17 success,
+1 expected baseline failure, all native DLL loads and Metal API/GPU validation
+verified. Both DLLs pass typed/typeless nine-dimension GPU readback11..99 and
+full-submit210 FULL/221 EMPTY GPU/descriptor/lifetime/Fence checks. BGRA-specific
+GPU sampling/RT and exhaustive typed-UAV arithmetic are not claimed. Candidate
+feature69, resource21 and typed/cast/counter/plane/command/barrier controls pass.
+Scoped build and four changed-TU no-private syntax checks pass; full no-private
+runtime, native Windows, D3D11 rendering and T3/T4 NOT_RUN. Six exports unchanged.
+
+32-process AB/BA/BA/AB timing, median process p50/p95(us): format120000-query
+batch3167.70/3242.10→3402.95/3466.40 (+7.43%/+6.92%); view10000-writes
+1792.875/1863.90→1806.75/1872.60 (+0.77%/+0.47%); Recording
+3583.75/3676.00→3040.75/3385.80 (-15.15%/-7.89%); ordinary Submit
+108.90/140.45→111.425/143.60 (+2.32%/+2.24%). Format median rises in all
+four pairs, triggering the warning: retain and accept the quantified correctness
+cost (~1.96ns/query median,1.87ns/query from batch-p95 increment, not individual
+call p95). Fixed guard and shared predicate, no new hot-path state. Recording gain
+is not attributed to query/view code. Retain96 samples/side per format/view/record
+mode and240 ordinary. Historical/global performance gates OPEN/INCONCLUSIVE.
+
+Actual macOS27.0.1/Xcode27.1/M1Max/Apple7/MSC4.0.1/Wine11/clang23.1.1. Pinned
+historical upstream a148782 all-one format TODO is not adopted. FL/SM/Options/
+Tiers unchanged; EnhancedBarriersSupported FALSE. Plane MS_LOAD underreport and
+complete Device/format/FL12_2 gates remain OPEN. User .gitignore unchanged; no push.
+Evidence: `../dxmt-test/n02-uav-report-admission-20261024/`:
+`N02-uav-report-admission.md`, `manifest.json`, `validation-results.json`,
+`format-differential.json`, `shader-identities.json`, `no-private.json`,
+`perf-aggregate.json`, `paired-comparisons.json`, `perf-identities.json`, official
+source snapshots, pinned upstream source and raw logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

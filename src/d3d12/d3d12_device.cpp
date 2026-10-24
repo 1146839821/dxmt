@@ -1091,19 +1091,22 @@ public:
         if (!depth_target)
           out->Support1 |= D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD;
       }
-      // A physical RGBA32 backing does not make logical RGB96 a typed UAV.
-      if (format_desc.BytesPerTexel == 12)
+      // UAV operations require a creatable typed view. Native read-only texel
+      // buffers (for example BGRA8) must not acquire UAV_TYPED_LOAD here.
+      const auto capabilities = capability_it == format_capabilities_.textureCapabilities.end() ? FormatCapability::None
+                                                                                                : capability_it->second;
+      if (!SupportsTypedUnorderedAccessView(format_desc, capabilities))
         return S_OK;
-      if (has_capability(FormatCapability::TextureBufferRead) || has_capability(FormatCapability::TextureBufferReadWrite))
+      if (has_capability(FormatCapability::TextureBufferRead) ||
+          has_capability(FormatCapability::TextureBufferReadWrite))
         out->Support2 |= D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD;
-      if (has_capability(FormatCapability::TextureBufferWrite) || has_capability(FormatCapability::TextureBufferReadWrite))
-        out->Support1 |= D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW;
-      if (has_capability(FormatCapability::TextureBufferWrite) || has_capability(FormatCapability::TextureBufferReadWrite))
-        out->Support2 |= D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE;
+      out->Support1 |= D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW;
+      out->Support2 |= D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE;
       if (has_capability(FormatCapability::Atomic))
         out->Support2 |= D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_ADD | D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_BITWISE_OPS |
                          D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_COMPARE_STORE_OR_COMPARE_EXCHANGE |
-                         D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_EXCHANGE | D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_SIGNED_MIN_OR_MAX |
+                         D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_EXCHANGE |
+                         D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_SIGNED_MIN_OR_MAX |
                          D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_UNSIGNED_MIN_OR_MAX;
       return S_OK;
     }

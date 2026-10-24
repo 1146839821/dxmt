@@ -877,6 +877,9 @@ bool CheckTypedViewFormats(UINT mode = 0) {
       desc.Width = desc.Height = 4;
       desc.Flags = D3D12_RESOURCE_FLAG_NONE;
     }
+    if (mode == 2 && i == 12)
+      desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     if (i >= 19) {
       desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
       desc.SampleDesc.Count = 4;
@@ -1057,7 +1060,9 @@ bool CheckTypedViewFormats(UINT mode = 0) {
                             {1, 1, DXGI_FORMAT_D32_FLOAT},
                             {1, 18, DXGI_FORMAT_D16_UNORM},
                             {1, 0, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB},
-                            {1, 6, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB}};
+                            {1, 6, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB},
+                            {1, 12, DXGI_FORMAT_B8G8R8A8_UNORM},
+                            {1, 12, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB}};
     bool good = true;
     for (UINT i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
       const auto &c = invalid[i];
@@ -1098,7 +1103,11 @@ bool CheckTypedViewFormats(UINT mode = 0) {
                           {1, 18, DXGI_FORMAT_R16_UNORM},
                           {2, 18, DXGI_FORMAT_R16_UNORM},
                           {0, 11, DXGI_FORMAT_R32_UINT},
-                          {2, 2, DXGI_FORMAT_R32G32B32_FLOAT}};
+                          {2, 2, DXGI_FORMAT_R32G32B32_FLOAT},
+                          {0, 12, DXGI_FORMAT_B8G8R8A8_UNORM},
+                          {0, 12, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB},
+                          {2, 12, DXGI_FORMAT_B8G8R8A8_UNORM},
+                          {2, 12, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB}};
     for (UINT i = 0; i < sizeof(valid) / sizeof(valid[0]); i++) {
       const auto &c = valid[i];
       shader->ClearDescriptor(0);

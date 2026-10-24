@@ -365,12 +365,7 @@ IsTextureViewFormatSupported(
   case TextureViewRole::RenderTarget:
     return !depth_format && any_bit_set(capabilities & FormatCapability::Color);
   case TextureViewRole::UnorderedAccess:
-    // Match the existing typed-UAV feature query, including logical RGB96.
-    // Native texture Write alone also admits formats such as sRGB on Apple GPUs.
-    return !depth_format && MetalFormat.BytesPerTexel != 12 && any_bit_set(capabilities & FormatCapability::Write) &&
-           any_bit_set(
-               capabilities & (FormatCapability::TextureBufferWrite | FormatCapability::TextureBufferReadWrite)
-           );
+    return !depth_format && SupportsTypedUnorderedAccessView(MetalFormat, capabilities);
   default:
     return false;
   }

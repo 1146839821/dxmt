@@ -385,10 +385,21 @@ bool CheckFormatSupportContract(ID3D12Device *device) {
         static_cast<D3D12_FORMAT_SUPPORT2>(UINT_MAX)};
     const HRESULT hr = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
                                                    &query, sizeof(query));
-    const bool pass = hr == S_OK && query.Format == format &&
-                      (query.Support1 & required) == required &&
-                      !(query.Support1 & forbidden) &&
-                      (!no_support2 || !query.Support2);
+    constexpr UINT uav_operations =
+        D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD |
+        D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE |
+        D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_ADD |
+        D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_BITWISE_OPS |
+        D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_COMPARE_STORE_OR_COMPARE_EXCHANGE |
+        D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_EXCHANGE |
+        D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_SIGNED_MIN_OR_MAX |
+        D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_UNSIGNED_MIN_OR_MAX;
+    const bool pass =
+        hr == S_OK && query.Format == format &&
+        (query.Support1 & required) == required &&
+        !(query.Support1 & forbidden) && (!no_support2 || !query.Support2) &&
+        (!(query.Support2 & uav_operations) ||
+         (query.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW));
     std::cout << "format-contract format=" << format << " hr=0x" << std::hex
               << static_cast<UINT>(hr) << " support1=0x" << query.Support1
               << " support2=0x" << query.Support2 << std::dec
@@ -487,6 +498,13 @@ bool CheckFormatSupportContract(ID3D12Device *device) {
     good &= device->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes ==
             UINT64_MAX;
   }
+  // A native texel-buffer read capability does not imply that a typed UAV
+  // can be created for this format. BGRA is still a legal filtered SRV/RTV.
+  for (const auto format :
+       {DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8X8_UNORM,
+        DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8X8_UNORM_SRGB})
+    check(format, dimensions | D3D12_FORMAT_SUPPORT1_SHADER_LOAD,
+          D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW, true);
   check(DXGI_FORMAT_R8G8B8A8_UNORM,
         dimensions | D3D12_FORMAT_SUPPORT1_TEXTURE1D |
             D3D12_FORMAT_SUPPORT1_TEXTURE3D |
