@@ -2209,6 +2209,56 @@ Next: N13 ordinary Submit p95 investigation. Evidence:
 `red-results.json`, `green-results.json`, `results.json`, `final-results.json`,
 `missing-results.json`, `abi-results.json`, `perf-aggregate.json` and raw logs.
 
+### N13 — N07 Submit tail module attribution, 2026-10-24
+
+Base960ec7b0; evidence-only slice. The original immutable SM5 full-submit
+probe runs independently of the preceding PSO-cost/50000-copy workloads.
+Four balanced process orders cross old/new D3D12 PE with old/new matched
+Winemetal PE+Unix bridge; two additional orders compare byte-identical old
+modules at different paths. Common DXGI, probe, compiler DLL and Wine loader
+hashes are asserted before execution. Private Wine copies load the intended
+native companion; the original n15 installation remains unchanged. Crossover
+is limited to SM5 and does not validate the changed masked-SM6 protocol.
+
+The initial matrix had different DXGI bytes and is excluded from attribution;
+all initial logs/manifests remain under `rejected-dxgi-confound`. The corrected
+24 processes exit0:4 with API/GPU validation and dyld path checks,20 with
+validation0/0 and HUD1 for timing. All original descriptor mutation/lifetime,
+residency counters and GPU oracles pass:5040 full cases plus5304 empty
+submission/fence iterations. Correctness timings are excluded. QPC covers
+ExecuteCommandLists only; compilation, fence waits and readback are outside.
+Each process retains60 of70 rows per full scene and200 of221 empty rows;
+p95 uses nearest rank. No derived or instrumented probe was introduced.
+
+Median process p50/p95 us, four processes per crossed cell:
+
+| D3D12 / bridge | ordinary | exact | fallback | empty |
+|---|---|---|---|---|
+| old / old | 94.350/105.600 | 98.050/106.850 | 118.125/128.200 | 18.675/23.000 |
+| new / old | 93.650/102.400 | 97.000/106.450 | 117.950/130.950 | 18.600/23.100 |
+| old / new | 95.675/106.250 | 99.425/117.200 | 119.325/138.800 | 18.675/22.600 |
+| new / new | 94.275/104.750 | 97.800/107.200 | 117.375/131.850 | 18.500/22.900 |
+
+Ordinary new/new versus old/old paired p95 changes are +2.31%, -6.07%,
+-4.75%, +2.89%. Changing PE under old/new bridges gives paired medians
+-1.64%/-2.46%; changing bridge under old/new PE gives +3.90%/+0.05%.
+Same-binary A/A p95 changes +22.74%/+2.44% demonstrate variation, not a
+universal noise bound. These descriptive comparisons do not establish a
+stable positive module effect, prove scheduling/predecessor-workload causality,
+or certify regression-free performance. Historical N07 +11.17% alert retained;
+causality INCONCLUSIVE and global performance/Device gates OPEN.
+
+No runtime/test source, owner, synchronization, ABI, resource layout or public
+capability changes. No speculative queue optimization/rollback. Do not repeat
+this matrix on unchanged code; another N13 patch needs a distinct reproducible
+owner/call-cost observation. Next candidate: N02 component depth/stencil
+MS_LOAD consistency through the existing sample/layer oracle. Actual host
+remains macOS27.0.1/Xcode27.1/M1Max Apple7/Wine11 x64 Rosetta/clang23.1.1;
+MSC runtime version not remeasured. Build, no-private runtime, native Windows
+and T3/T4 NOT_RUN. Evidence: `../dxmt-test/n13-submit-tail-20261024/`
+`N13-submit-tail.md`, `manifest.json`, `probe-source.json`, `environment.json`,
+`results.json`, `aggregate.json`, `contrasts.json`, scripts and raw logs.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
