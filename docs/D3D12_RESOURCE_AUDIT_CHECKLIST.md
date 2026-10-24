@@ -1912,6 +1912,50 @@ Evidence: `../dxmt-test/n12-split-validation-cost-20261024/`:
 `perf-results.json`, `perf-aggregate.json`, `paired-comparisons.json`,
 `perf-identities.json`, `no-private.json`, `exports.json` and raw logs.
 
+### N12 — pending split removal cost, 2026-10-24
+
+Base55e1849c. One N12 slice replaces completed pending-entry suffix erase with
+at most one tail move and pop, guarded against Com self-move. Pending entries
+are keyed by resource/subresource; storage order is not recording event order.
+Existing states/splits remain sole owners. All pairing/range/state/error checks,
+queue admission and commit/rollback remain. No new allocation, lock, cache,
+source/header, ABI/object/resource layout, scheduling or capability change.
+Linear find_if remains; changing search positions can add lookup cost.
+
+Existing command-list benchmark adds peak32/512 independent-resource controls,
+forward/reverse completion, 2,048 pairs and exact unique per-resource/per-round
+GPU readback. Existing enhanced runner adds three distinct texture patterns,
+END order1,0,2 across submissions and BEGIN Reset after fence. All43 final
+correctness processes pass with Metal API/GPU validation, including mismatch,
+concurrency, queue isolation and allocation failures. Scoped build, three changed
+TU no-private syntax checks and six export identities pass. Full no-private
+runtime, native Windows, D3D11 rendering and T3/T4 NOT_RUN.
+
+Main48-process AB/BA/BA/AB series, median process p50/p95(us): pending512 Close
+1262.075/1352.40→455.750/495.20 (-63.89%/-63.38%); total p95 -45.23%.
+Pending32 Close p95 -39.43%. Reverse512 Close p50/p95 +4.10%/+1.34%, total
+p50+5.22%: retain the order-dependent cost. Main record p50/p95+0.37%/-2.28%;
+ordinary submit+7.24%/+1.05%; low-pending split submit p95+13.84% triggered
+performance warnings. Independent16-process adjacent-only series with identical
+DLLs/PEs yields ordinary+0.16%/-3.21%, split submit p95-17.76%. Both retained;
+large adjacent regression is not stable across workload schedules, cause remains
+unidentified. Accept target improvement only; global/historical performance gate
+OPEN/INCONCLUSIVE. No recording speedup attribution or all-order scaling claim.
+
+Each main split/control/record mode retains96 samples per side; ordinary240.
+Adjacent series retains96 split and240 ordinary per side separately. Timing
+validation0/0, correctness1/1, HUD1, fixed isolated Wine/device/cache. All64 timing
+processes exit0; per-resource payload/readback and two-encoder/zero-staging-buffer
+assertions remain. Actual macOS27.0.1/Xcode27.1/M1Max/Apple7/MSC4.0.1/Wine11/
+clang23.1.1. EnhancedBarriersSupported remains FALSE; Device/FL12_2 gates OPEN.
+User .gitignore unchanged. No push.
+
+Evidence: `../dxmt-test/n12-pending-split-removal-20261024/`:
+`N12-pending-split-removal.md`, `manifest.json`, `validation-results.json`,
+`perf-aggregate.json`, `adjacent-perf-aggregate.json`, both paired comparisons,
+`perf-identities.json`, `no-private.json`, `exports.json`, official spec snapshot
+and raw logs. Pilot data is separate from final acceptance.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

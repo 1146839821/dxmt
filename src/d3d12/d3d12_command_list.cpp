@@ -1455,7 +1455,11 @@ public:
                   (!pending->inherited &&
                    (begin.access_before != barrier.access_before || begin.access_after != barrier.access_after)))
                 return false;
-              splits.erase(pending);
+              // Pending entries are keyed by resource/subresource, not vector
+              // order. Preserve event order without shifting unrelated owners.
+              if (pending != splits.end() - 1)
+                *pending = std::move(splits.back());
+              splits.pop_back();
             } else if (
                 !validation.local_only && barrier.type == EnhancedSplitBarrierType::Texture &&
                 !(resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)

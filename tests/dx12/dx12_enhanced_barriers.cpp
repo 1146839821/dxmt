@@ -438,6 +438,127 @@ struct SplitProbeList {
   }
 };
 
+// Remove an inherited middle entry, then consume both surviving resource keys
+// in later submissions after resetting the original BEGIN recording.
+bool TestPendingTextureRemoval() {
+  Owned<ID3D12Device> device;
+  Owned<ID3D12Resource> unused_buffers[3], textures[3], upload, readback;
+  if (!CheckHR("pending device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&device.ptr))))
+    return false;
+  for (UINT index = 0; index < 3; ++index)
+    if (!CreateResources(device.ptr, unused_buffers[index], textures[index]))
+      return false;
+  const auto desc = TextureDesc();
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+  UINT64 size = 0;
+  device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr,
+                                &size);
+  const UINT64 stride = (size + 511) & ~UINT64(511);
+  const auto buffer_desc = BufferDesc(stride * 3);
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+  if (!CheckHR("pending upload", device->CreateCommittedResource(
+                                     &heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                     D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                     IID_PPV_ARGS(&upload.ptr))))
+    return false;
+  heap.Type = D3D12_HEAP_TYPE_READBACK;
+  if (!CheckHR("pending readback",
+               device->CreateCommittedResource(
+                   &heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                   IID_PPV_ARGS(&readback.ptr))))
+    return false;
+  void *mapped = nullptr;
+  const D3D12_RANGE no_read = {};
+  if (!CheckHR("pending upload Map", upload->Map(0, &no_read, &mapped)))
+    return false;
+  for (UINT index = 0; index < 3; ++index)
+    std::memset(static_cast<unsigned char *>(mapped) + index * stride,
+                0x31 + index, stride);
+  upload->Unmap(0, nullptr);
+  SplitProbeList lists[4];
+  for (auto &list : lists)
+    if (!list.Create(device.ptr))
+      return false;
+  const UINT end_order[] = {1, 0, 2};
+  for (UINT index = 0; index < 3; ++index) {
+    D3D12_RESOURCE_BARRIER initial = {};
+    initial.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    initial.Transition.pResource = textures[index].ptr;
+    initial.Transition.Subresource = 0;
+    initial.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    initial.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    lists[0].list->ResourceBarrier(1, &initial);
+    D3D12_TEXTURE_COPY_LOCATION source = {}, target = {};
+    source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    source.pResource = upload.ptr;
+    source.PlacedFootprint = footprint;
+    source.PlacedFootprint.Offset = index * stride;
+    target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    target.pResource = textures[index].ptr;
+    lists[0].list->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+    D3D12_TEXTURE_BARRIER barrier = {};
+    SetTexture(barrier, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_SPLIT,
+               D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COPY_SOURCE,
+               D3D12_BARRIER_LAYOUT_COPY_DEST, D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+               textures[index].ptr, {0, 1, 0, 1, 0, 1});
+    SubmitBarrier(lists[0].list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
+    UINT end_list = 1;
+    while (end_order[end_list - 1] != index)
+      ++end_list;
+    barrier.SyncBefore = D3D12_BARRIER_SYNC_SPLIT;
+    barrier.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+    SubmitBarrier(lists[end_list].list7.ptr, D3D12_BARRIER_TYPE_TEXTURE,
+                  &barrier);
+    source.pResource = readback.ptr;
+    lists[end_list].list->CopyTextureRegion(&source, 0, 0, 0, &target, nullptr);
+  }
+  for (auto &list : lists)
+    if (!CheckHR("pending Close", list.list->Close()))
+      return false;
+  Owned<ID3D12CommandQueue> queue;
+  Owned<ID3D12Fence> fence;
+  const D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  if (!CheckHR("pending queue", device->CreateCommandQueue(
+                                    &queue_desc, IID_PPV_ARGS(&queue.ptr))) ||
+      !CheckHR("pending fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                    IID_PPV_ARGS(&fence.ptr))))
+    return false;
+  for (UINT submission = 0; submission < 4; ++submission) {
+    ID3D12CommandList *command = lists[submission].list.ptr;
+    queue->ExecuteCommandLists(1, &command);
+    if (!CheckHR("pending Signal", queue->Signal(fence.ptr, submission + 1)) ||
+        !CheckHR("pending synchronous wait",
+                 fence->SetEventOnCompletion(submission + 1, nullptr)) ||
+        !CheckHR("pending device status", device->GetDeviceRemovedReason()))
+      return false;
+    if (submission == 0 &&
+        (!CheckHR("pending BEGIN allocator Reset",
+                  lists[0].allocator->Reset()) ||
+         !CheckHR("pending BEGIN list Reset",
+                  lists[0].list->Reset(lists[0].allocator.ptr, nullptr)) ||
+         !CheckHR("pending empty BEGIN Close", lists[0].list->Close())))
+      return false;
+  }
+  if (!CheckHR("pending readback Map", readback->Map(0, nullptr, &mapped)))
+    return false;
+  bool good = true;
+  for (UINT index = 0; index < 3; ++index)
+    for (UINT y = 0; y < desc.Height; ++y)
+      for (UINT x = 0; x < desc.Width * 4; ++x)
+        good &= static_cast<unsigned char *>(
+                    mapped)[index * stride + y * footprint.Footprint.RowPitch +
+                            x] == 0x31 + index;
+  readback->Unmap(0, &no_read);
+  std::cout << "pending texture removal order=1,0,2 GPU readback="
+            << (good ? "PASS" : "FAIL") << "\n";
+  return good;
+}
+
 bool TestSplitExecutionOrder(const char *mode) {
   const bool mismatch = !std::strcmp(mode, "mismatch");
   const bool equivalent = !std::strcmp(mode, "equivalent-range");
@@ -733,6 +854,9 @@ bool TestSplitExecutionOrder(const char *mode) {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 3 && !std::strcmp(argv[1], "--split-order-probe") &&
+      !std::strcmp(argv[2], "pending-removal"))
+    return TestPendingTextureRemoval() ? 0 : 1;
   if (argc == 3 && !std::strcmp(argv[1], "--split-order-probe"))
     return TestSplitExecutionOrder(argv[2]) ? 0 : 1;
   Owned<ID3D12Device> device;
