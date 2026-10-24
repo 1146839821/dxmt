@@ -1672,6 +1672,39 @@ Evidence: `../dxmt-test/n09-implicit-stencil-plane-20261024/`
 `N09-implicit-stencil-plane.md`, `manifest.json`, `validation-results.json`,
 `red-results.json`, `no-private-final.json`, `perf-aggregate.json`.
 
+### N02 — selected-plane reporting evidence and role guards, 2026-10-24
+
+Base43546dc1. Current four component-view FORMAT_SUPPORT queries return
+Support1=0x1011a0, Support2=0, excluding MULTISAMPLE_LOAD(0x400000).
+Current GPU stencil MS/MSArray fixture succeeds for X24_TYPELESS_G8_UINT and
+X32_TYPELESS_G8X24_UINT, all four samples and both array layers (77/88).
+This confirms a narrow conservative reporting gap, not permission to promote
+all component operations. Depth-component MS GPU Load, filtering/comparison,
+full sample-count/format combinations and native Windows differential remain
+UNVERIFIED/NOT_RUN. Overall Device/FL12_2 gates remain OPEN.
+
+Static root: FORMAT_SUPPORT looks up raw custom-swizzle PixelFormat keys at
+`d3d12_device.cpp:1045`; the shared capability accessor at2186 normalizes
+ORIGINAL_FORMAT. Both depth and stencil native entries have DepthStencil
+capability, so merely normalizing this query would incorrectly classify typed
+component SRVs as DSV and remove their SHADER_LOAD. No production fix or
+capability promotion is made in this evidence slice. Existing feature fixture
+now additionally forbids RTV/blend/MSRT/resolve/UAV and Support2 bits for all
+four component formats, preserving format-role separation for a future fix.
+Pinned upstream a148782d returns all-one masks (TODO), so is not adopted.
+
+Seven runtime processes exit0 (five original controls, two rebuilt feature
+runs). Final format54, feature54, plane40 and both nine-value GPU readbacks
+pass; verified staged DLL and API/GPU validation enabled. Scoped Meson build,
+changed-test-TU no-private syntax and formatting pass. Full no-private/runtime,
+T3/T4 NOT_RUN. This is a test/audit commit, not a runtime bug-fix claim; DLL
+hash7010449e... matches43546dc1. Performance NOT_RUN because production code
+is unchanged; earlier measured recording/submit regressions are not cleared.
+No ABI/layout/scheduling/FL/SM/Options/Tier change or new D3D12 source/header.
+Evidence: `../dxmt-test/n02-plane-capability-audit-20261024/`
+`N02-plane-capability-audit.md`, `manifest.json`, `results.json`,
+`final-results.json`, `no-private.json`, `sources.json`.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
