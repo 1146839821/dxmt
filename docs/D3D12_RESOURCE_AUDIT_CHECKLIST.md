@@ -3819,3 +3819,53 @@ and missing4064-byte local-record admission remain OPEN, with no capacity lift
 before this boundary. Mesh/RT runtime, native Windows and T3/T4 NOT_RUN;
 requested Xcode26 NOT_RUN(actual27.1). Broader G1/N06 remains incomplete.
 User staged .gitignore unchanged; local commit only, no push.
+
+### N06 local-root record capacity — 2026-10-25
+
+G1 slice on `5f6f4ede`, following global/local admission protection. The old
+64-parameter guard rejected legal local layouts while missing the separate
+local byte budget. Two baseline104-case runs each fail32 cases:22 false
+rejections and10 oversized accepts, covering RS1.0/1.1. A final identical-PE
+baseline run repeats32 failures after formatting. No invalid root is submitted.
+
+The existing creation-validation loop now applies parameter-count/global DWORD
+limits only to global roots. Local roots accumulate ordered record bytes:
+constants4-byte aligned, descriptors/table handles8-byte aligned, bounded by
+MAX_SHADER_RECORD_STRIDE(4096)-SHADER_IDENTIFIER_SIZE(32). Capacity division
+precedes DWORD multiplication; UINT_MAX/1<<30 constants are rejected without
+wraparound. No persistent footprint field, parser, extra scan or module.
+Global64-DWORD cost and existing CPU padded-qword layout remain distinct.
+4064 record bytes can legally occupy509 or1016 internal qwords; validation must
+not confuse these layouts. Static samplers cost no local argument bytes;
+unbounded table ranges still contribute one8-byte table handle.
+
+Both private/no-private builds pass. The existing root-budget gate grows42->104
+cases, adding local exact/over/overflow,65/508/1016 parameter and order/padding
+cases. Both configurations pass104 budget cases,58 root-kind cases and full
+ownership/range/metadata regression. Large legal local objects are also
+rejected at compute/graphics global binding before staging (Close E_FAIL,
+device remains S_OK). Eight adjacent GPU processes pass SM5/SM6 partial constant
+updates(4531 then204 in one list), graphics ExecuteIndirect and MSC RS1.1 table
+readback1554 across both configurations.23 runtime processes:20 successful,
+three expected baseline failures;17 API/GPU-validation-on and six timing-off.
+No Metal validation error/command-buffer abort. Exact commands and hashes:
+`../dxmt-test/n06-local-record-20261025/N06-local-record.md`.
+
+Creation-only ABBA: identical PE/native peers, two processes/DLL, four common
+legal RS1.1 cells,25 retained100-create/release batch means/process/cell;
+400 retained means/40000 calls. Global constants64 P50/P95(ns)473/505->481/567
+(+1.69/+12.28%); retain tail warning, attribution INCONCLUSIVE. Other cells'
+P95:local33CBV1685->1751(+3.92%), local1016constants423->421(-0.47%),
+global64padded1656->1680(+1.45%). Two candidate-only processes add200 means/
+20000 calls for newly admitted layouts; P95(ns)1016 constant parameters27112,
+508CBVs11321,508tables33537, mixed4064-byte record576. Old rejection cost is
+not a legitimate speedup baseline. New arithmetic is O(parameters) creation
+work; no bind/draw/submit change. Recording/Submit NOT_RUN, historical warnings
+remain OPEN; no overall performance acceptance claim.
+
+This closes local creation capacity admission, not DXR execution or a native
+shader-record ABI proof. Local MSC layout/RT dispatch, native Windows, other
+GPUs and T3/T4 NOT_RUN; broader N06/G1 remains incomplete. No COM/WMT/MSC ABI,
+resource layout, schedule or public capability change. Requested Xcode26
+NOT_RUN(actual27.1). User staged .gitignore/shared Wine preserved; focused local
+commit only, no push. Revert this commit if legal global admission regresses.

@@ -398,9 +398,11 @@ public:
     if (is_local && Flags != D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE)
       return E_INVALIDARG;
     UINT root_cost = 0;
+    UINT local_size = 0;
+    constexpr UINT local_limit = D3D12_RAYTRACING_MAX_SHADER_RECORD_STRIDE - D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
 
     if (desc.NumParameters) {
-      if (desc.NumParameters > D3D12_MAX_ROOT_COST)
+      if (!is_local && desc.NumParameters > D3D12_MAX_ROOT_COST)
         return E_INVALIDARG;
 
       for (unsigned i = 0; i < desc.NumParameters; i++) {
@@ -423,9 +425,17 @@ public:
         default:
           return E_INVALIDARG;
         }
-        // The global DWORD budget is independent of our padded qword layout.
-        // Local root signatures use the separate shader-record size limit.
-        if (!is_local) {
+        // Both API budgets are independent of our padded CPU qword layout.
+        if (is_local) {
+          const bool constants = parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+          // Constants pack as DWORDs; descriptors and table handles align to 8 bytes.
+          // local_size is already bounded by local_limit, which is 8-byte aligned.
+          local_size = align(local_size, constants ? 4u : 8u);
+          const UINT dwords = constants ? parameter_cost : 2;
+          if (dwords > (local_limit - local_size) / sizeof(uint32_t))
+            return E_INVALIDARG;
+          local_size += dwords * sizeof(uint32_t);
+        } else {
           if (parameter_cost > D3D12_MAX_ROOT_COST - root_cost)
             return E_INVALIDARG;
           root_cost += parameter_cost;

@@ -88,7 +88,7 @@ bool IsDescriptorTypeAt(
 }
 
 bool CheckRootSignatureBudget(ID3D12Device *device) {
-  D3D12_DESCRIPTOR_RANGE1 ranges[65] = {};
+  D3D12_DESCRIPTOR_RANGE1 ranges[509] = {};
   for (UINT i = 0; i < std::size(ranges); ++i) {
     ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     ranges[i].NumDescriptors = 1;
@@ -191,6 +191,32 @@ bool CheckRootSignatureBudget(ID3D12Device *device) {
           good &= metadata->UploadQwords == qwords &&
                   metadata->ParameterSlots == parameters.size() &&
                   metadata->NumStaticSamplers == sampler_count;
+        // Large local layouts must still be rejected before entering global
+        // staging.
+        if (local && SUCCEEDED(expected) &&
+            (parameters.size() > 64 || qwords > 64)) {
+          for (bool graphics : {false, true}) {
+            ID3D12CommandAllocator *allocator = nullptr;
+            ID3D12GraphicsCommandList *list = nullptr;
+            bool rejected = SUCCEEDED(device->CreateCommandAllocator(
+                D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)));
+            if (rejected)
+              rejected = SUCCEEDED(device->CreateCommandList(
+                  0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr,
+                  IID_PPV_ARGS(&list)));
+            if (rejected) {
+              if (graphics)
+                list->SetGraphicsRootSignature(root);
+              else
+                list->SetComputeRootSignature(root);
+              rejected = list->Close() == E_FAIL &&
+                         device->GetDeviceRemovedReason() == S_OK;
+            }
+            good &= rejected;
+            Release(list);
+            Release(allocator);
+          }
+        }
         root->Release();
       }
       Release(blob);
@@ -239,6 +265,78 @@ bool CheckRootSignatureBudget(ID3D12Device *device) {
     check("local-constants65", constants(1, 65), S_OK, 33, true);
     check("local-cbv33", descriptors(D3D12_ROOT_PARAMETER_TYPE_CBV, 33), S_OK,
           33, true);
+    check("local-empty", {}, S_OK, 0, true);
+    check("local-constants1015", constants(1, 1015), S_OK, 508, true);
+    check("local-constants1016", constants(1, 1016), S_OK, 508, true);
+    check("local-constants1017", constants(1, 1017), E_INVALIDARG, 0, true);
+    check("local-constants-overflow", constants(1, 1u << 30), E_INVALIDARG, 0,
+          true);
+    check("local-constants-max", constants(1, UINT_MAX), E_INVALIDARG, 0, true);
+    for (UINT count : {65u, 1016u, 1017u}) {
+      const auto name = "local-padded" + std::to_string(count);
+      check(name.c_str(), constants(count, 1),
+            count <= 1016 ? S_OK : E_INVALIDARG, count, true);
+    }
+    for (const auto type :
+         {D3D12_ROOT_PARAMETER_TYPE_CBV, D3D12_ROOT_PARAMETER_TYPE_SRV,
+          D3D12_ROOT_PARAMETER_TYPE_UAV}) {
+      for (UINT count : {65u, 508u, 509u}) {
+        const auto name = "local-descriptor" + std::to_string(type) + "-" +
+                          std::to_string(count);
+        check(name.c_str(), descriptors(type, count),
+              count <= 508 ? S_OK : E_INVALIDARG, count, true);
+      }
+    }
+    for (UINT count : {65u, 508u, 509u}) {
+      const auto name = "local-tables" + std::to_string(count);
+      check(name.c_str(), tables(count), count <= 508 ? S_OK : E_INVALIDARG,
+            count, true);
+    }
+    for (UINT tail : {1011u, 1012u, 1013u}) {
+      auto mixed = constants(1, 1);
+      auto descriptor = descriptors(D3D12_ROOT_PARAMETER_TYPE_CBV, 1)[0];
+      descriptor.Descriptor.ShaderRegister = 1;
+      mixed.push_back(descriptor);
+      auto last = constants(1, tail)[0];
+      last.Constants.ShaderRegister = 2;
+      mixed.push_back(last);
+      const auto name = "local-align8-tail" + std::to_string(tail);
+      check(name.c_str(), mixed, tail <= 1012 ? S_OK : E_INVALIDARG, 508, true);
+    }
+    {
+      // Consecutive constant parameters do not each incur 8-byte record
+      // padding.
+      auto mixed = constants(2, 1);
+      auto descriptor = descriptors(D3D12_ROOT_PARAMETER_TYPE_CBV, 1)[0];
+      descriptor.Descriptor.ShaderRegister = 2;
+      mixed.push_back(descriptor);
+      auto last = constants(1, 1012)[0];
+      last.Constants.ShaderRegister = 3;
+      mixed.push_back(last);
+      check("local-record4064-internal4072", mixed, S_OK, 509, true);
+    }
+    for (UINT tail : {1014u, 1015u}) {
+      auto mixed = descriptors(D3D12_ROOT_PARAMETER_TYPE_CBV, 1);
+      auto last = constants(1, tail)[0];
+      last.Constants.ShaderRegister = 1;
+      mixed.push_back(last);
+      const auto name = "local-descriptor-first" + std::to_string(tail);
+      check(name.c_str(), mixed, tail == 1014 ? S_OK : E_INVALIDARG, 508, true);
+    }
+    for (UINT count : {507u, 508u}) {
+      auto mixed = constants(1, 1);
+      auto rest = descriptors(D3D12_ROOT_PARAMETER_TYPE_CBV, count);
+      for (auto &parameter : rest)
+        ++parameter.Descriptor.ShaderRegister;
+      mixed.insert(mixed.end(), rest.begin(), rest.end());
+      const auto name =
+          "local-padding-before-descriptors" + std::to_string(count);
+      check(name.c_str(), mixed, count == 507 ? S_OK : E_INVALIDARG, 508, true);
+    }
+    ranges[0].NumDescriptors = UINT_MAX;
+    check("local-unbounded-table", tables(1), S_OK, 1, true);
+    ranges[0].NumDescriptors = 1;
+    check("local-constants1016-static", constants(1, 1016), S_OK, 508, true, 2);
   }
   std::cout << "root-budget cases=" << cases
             << " result=" << (passed ? "PASS" : "FAIL") << "\n";
