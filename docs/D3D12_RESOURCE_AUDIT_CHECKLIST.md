@@ -3402,6 +3402,50 @@ acceptance remains INCONCLUSIVE and the broader G1 gate remains OPEN.
 FL/SM/Options are unchanged. Next: N13 Submit tail/use-residency attribution.
 Revert this focused change if the internal controlling identity contract changes.
 
+### N13 ordinary-copy submission phase attribution — 2026-10-25
+
+Evidence-only slice on `4288a30b`; no production/test source, ABI, owner,
+state, synchronization, capability or scheduling change. Frozen A=`0813773e`
+and B=the DLL tested/committed as `4288a30b` use identical native peers and
+one staged path. The external current-runner derivative reuses the scoped
+validation/collector/native observer and forwards all original calls. This
+measures ordinary 1/1000/50000-copy scaling, not the earlier split/SM5 scenes.
+Record: `../dxmt-test/n13-ordinary-phases-20261025/N13-ordinary-phases.md`.
+
+36 successful processes each validate 25 changing GPU payloads (900 rounds):
+12 API/GPU-validation calibrations and 24 timed processes. Correctness packet
+walks confirm exactly 1/1000/50000 copies; timed modes never walk packets or
+clock individual copies. Profiled Execute has one validation, collector,
+factory, encoder and commit, three bridge encode calls (wait/stream/update),
+and one end. Four injected boundary-delay calibrations pass. Four additional
+omitted-submit oracle controls exit1 on stale readback as expected on both
+DLLs and both original/external runners; these are EXPECTED_FAIL, not timing
+passes. Two failed external source-generation trials are retained/excluded.
+
+ABBA, alternating counts/plain-profile order; each DLL/count/mode retains
+48 rounds in two processes. Median process profiled Submit/stream P50 at
+50000 copies is A=23354.05/23211.175 us, B=23312.15/23140 us. Per-row stream
+share medians are 99.31%/99.32%; eight slowest-row examples retain 98.96–99.22%.
+Validation/collection remain about 1–3 us. Stream slope from 1000 to50000 is
+.4645/.4627 us/copy. The bridge already sends a complete stream in one Unix
+call; this is not 50000 PE/native crossings. The measured interval includes
+transition/decoder/Metal API/scheduling, not GPU time or CPU self-time.
+
+Plain 50000-copy Submit P50/P95 A->B=22611.375/23284.1 ->23437.675/24762.9 us
+(+3.65%/+6.35%); one-copy=34.725/70.9 ->55.025/126.95 us (+58.46%/+79.06%).
+These observations and historical warnings remain OPEN, not dismissed as noise.
+Profiling perturbs calls/pacing; two processes per cell do not establish a
+stable DLL effect or replace acceptance timings. Factory/encoder fixed costs
+matter more at one copy. No descriptor/validation optimization, copy deletion,
+fence batching or backend migration is justified by this bulk result.
+No-private runtime/production build/native Windows/D3D11/T3/T4 NOT_RUN here.
+
+Stop unchanged Submit matrices. Native intervention would need thread CPU and
+finer decoder/API attribution. Next architectural work: select an unclosed N06
+binding ABI invariant after checking existing SM5/SM6 evidence, without redoing
+completed N09 mutation/replay/index slices. Broader G1/performance gates remain
+incomplete; all feature claims and the user's staged .gitignore stay unchanged.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
