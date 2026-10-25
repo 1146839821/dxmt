@@ -3242,6 +3242,43 @@ build/runtime logs and pre-append-trial. Local focused commit,no push;goal activ
 Next:first both-UNDEFINED texture no-layout recording/split/submit;tail-cost cause
 only with a distinct reproducible measurement slice.
 
+### 2026-10-25 — N12 texture access-only layout preservation (G1)
+
+Base6dbf90e6. Both UNDEFINED texture barriers now use an ordered access-only
+resource event. Existing split/range/lifetime checks retained; local validation
+and commit preserve layout, including unknown first layout. Shared predicate
+used at recording and Execute boundary; memory-only split halves carry no layout
+across full flush. That cross-Execute behavior is a specification inference;
+Windows native validation NOT_RUN. DISCARD plus both UNDEFINED remains backend
+unsupported, not established D3D12 illegality. No new src/header file, owner,
+cache, public ABI or capability promotion. Event stride32 unchanged in final PE.
+
+Final26-case CPU red repeated twice on baseline; GPU/split red reproduced.
+Both private/independent no-private:26 recording assertions, full enhanced and
+command-list/features PASS; new native4/GPU2 PASS (2 no-resource NOT_RUN), existing
+adjacent native16/GPU10 PASS (6 NOT_RUN), seven access-only split modes and queue
+handoff each6 exact GPU subresources PASS. API/GPU validation1/1;48 expected exits,
+staged PE/DLL/source hashes verified. Initial21-case trial retained/excluded.
+GPU data does not introspect global logical layout; commit branch also reviewed.
+
+Private same-PE AB/BA/AB,72 retained/side/scenario. Pressure Recording/call
+.0724/.0797=>.0666/.0766us;Submit372.9/476.1=>357.0/488.4us;
+Execute-through-fence2415.45/2691=>2381.55/2656us (P50/P95).
+Ordinary50000-copy Recording3048.3/3165.8=>3105.1/3249.3us;
+Close1.45/2=>1.5/2.1us;Submit22284.5/22671.9=>22290.05/22883.5us.
+Calibration1000 API=>1nativepacket,stages27/27,pixel/buffer PASS. Buffer/control
+costs do not isolate this new texture path or prove causal speedup. Tail/global
+performance gates OPEN;no-private/texture CPU timing NOT_RUN.
+
+M1 Max/macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1;Xcode26/Windows/otherGPU/
+D3D11/T3/T4 NOT_RUN. FL11_1/private,FL11_0/no-private,SM6_0,EnhancedFALSE
+unchanged. Full N12 resource/Resolve/SRS/split/lifetime coverage OPEN.
+User.gitignore/shared Wine/prefix preserved. Evidence:
+../dxmt-test/n12-no-layout-20261025/N12-no-layout.md,manifest/results/sources/
+red-summary/aggregates/transition-stride/build/runtime/verification logs.
+Local focused commit,no push;goal active. Next:first-use/submit layout
+reconciliation;distinct reproducible tail-cost diagnosis.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

@@ -806,8 +806,10 @@ public:
     }
 
     // Only non-simultaneous texture layouts persist across Execute boundaries.
+    // Memory-only texture halves have no layout to carry across the full flush.
     std::erase_if(recorded_states.splits, [](const auto &split) {
       return split.barrier.type == EnhancedSplitBarrierType::Buffer ||
+             IsTextureAccessOnly(split.barrier.layout_before, split.barrier.layout_after) ||
              (split.barrier.resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS);
     });
 

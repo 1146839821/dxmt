@@ -720,12 +720,12 @@ barrier_resource_access_mask(MTLD3D12Resource *resource, const D3D12_RESOURCE_DE
 inline bool
 valid_barrier_layout_access(
     D3D12_COMMAND_LIST_TYPE type, D3D12_BARRIER_LAYOUT layout, D3D12_BARRIER_ACCESS access,
-    const D3D12_RESOURCE_DESC &desc, UINT32 resource_access
+    const D3D12_RESOURCE_DESC &desc, UINT32 resource_access, bool access_only
 ) {
   // Check the original queue identity before ConvertBarrierLayout collapses
   // queue-specific layouts to a common legacy state. Video layouts stay unsupported.
   if (layout == D3D12_BARRIER_LAYOUT_UNDEFINED)
-    return access == D3D12_BARRIER_ACCESS_NO_ACCESS;
+    return access_only || access == D3D12_BARRIER_ACCESS_NO_ACCESS;
   if (type == D3D12_COMMAND_LIST_TYPE_COPY && layout != D3D12_BARRIER_LAYOUT_COMMON)
     return false;
   const bool direct_layout =
@@ -1032,6 +1032,9 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
     D3D12_RESOURCE_STATES after;
     bool split_begin;
     bool discard_before = false;
+    // An ordered resource use still participates in split validation/lifetime,
+    // but a memory-only barrier neither assumes nor commits a texture layout.
+    bool access_only = false;
     size_t split_index = std::numeric_limits<size_t>::max();
   };
   std::vector<ResourceStateTransition> resource_state_transitions_;
@@ -1551,7 +1554,7 @@ public:
       return;
     std::lock_guard lock(device_->GetResourceStateMutex());
     for (const auto &transition : resource_state_transitions_) {
-      if (transition.split_begin)
+      if (transition.split_begin || transition.access_only)
         continue;
       auto *resource = transition.resource.ptr();
       const auto state_matches = [&, resource](D3D12_RESOURCE_STATES current) {
@@ -1682,7 +1685,8 @@ public:
                 *pending = std::move(splits.back());
               splits.pop_back();
             } else if (
-                !validation.local_only && barrier->type == EnhancedSplitBarrierType::Texture &&
+                !validation.local_only && !transition.access_only &&
+                barrier->type == EnhancedSplitBarrierType::Texture &&
                 !(resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)
             ) {
               WARN(
@@ -1696,6 +1700,8 @@ public:
           } else if (pending != splits.end()) {
             return false;
           }
+          if (transition.access_only)
+            return true;
           auto &current = current_states[subresource];
           if (!transition.discard_before && current && *current != transition.before &&
               !(*current == D3D12_RESOURCE_STATE_COMMON && promotable(resource, transition.before))) {
@@ -2339,7 +2345,9 @@ public:
     const auto index = enhanced_split_barriers_.size();
     D3D12_RESOURCE_STATES tracked_before = D3D12_RESOURCE_STATE_COMMON;
     D3D12_RESOURCE_STATES tracked_after = D3D12_RESOURCE_STATE_COMMON;
-    if (state.type == EnhancedSplitBarrierType::Texture) {
+    const bool access_only =
+        state.type == EnhancedSplitBarrierType::Texture && IsTextureAccessOnly(state.layout_before, state.layout_after);
+    if (state.type == EnhancedSplitBarrierType::Texture && !access_only) {
       const auto dimension = state.resource->GetDesc().Dimension;
       if (!ConvertBarrierLayout(dimension, state.layout_before, &tracked_before) ||
           !ConvertBarrierLayout(dimension, state.layout_after, &tracked_after)) {
@@ -2370,7 +2378,7 @@ public:
       auto append = [&](UINT subresource) {
         resource_state_transitions_.push_back(
             {state.resource, subresource, tracked_before, tracked_after, phase == EnhancedSplitPhase::Begin, false,
-             index}
+             access_only, index}
         );
       };
       const auto &range = state.subresources;
@@ -7101,21 +7109,26 @@ public:
             continue;
           }
 
+          const bool access_only = IsTextureAccessOnly(barrier.LayoutBefore, barrier.LayoutAfter);
           const UINT32 resource_access = barrier_resource_access_mask(resource, desc);
           if (((static_cast<UINT32>(barrier.AccessBefore) | static_cast<UINT32>(barrier.AccessAfter)) &
                ~resource_access) ||
-              !valid_barrier_layout_access(type_, barrier.LayoutBefore, barrier.AccessBefore, desc, resource_access) ||
-              !valid_barrier_layout_access(type_, barrier.LayoutAfter, barrier.AccessAfter, desc, resource_access)) {
+              !valid_barrier_layout_access(
+                  type_, barrier.LayoutBefore, barrier.AccessBefore, desc, resource_access, access_only
+              ) ||
+              !valid_barrier_layout_access(
+                  type_, barrier.LayoutAfter, barrier.AccessAfter, desc, resource_access, access_only
+              )) {
             invalid_barrier();
             continue;
           }
 
           const auto &range = barrier.Subresources;
           const bool discard = barrier.Flags & D3D12_TEXTURE_BARRIER_FLAG_DISCARD;
-          if (discard &&
-              (split_phase != EnhancedSplitPhase::None || barrier.LayoutBefore != D3D12_BARRIER_LAYOUT_UNDEFINED ||
-               range.IndexOrFirstMipLevel != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES || range.NumMipLevels ||
-               range.FirstArraySlice || range.NumArraySlices || range.FirstPlane || range.NumPlanes)) {
+          if (discard && (access_only || split_phase != EnhancedSplitPhase::None ||
+                          barrier.LayoutBefore != D3D12_BARRIER_LAYOUT_UNDEFINED ||
+                          range.IndexOrFirstMipLevel != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES || range.NumMipLevels ||
+                          range.FirstArraySlice || range.NumArraySlices || range.FirstPlane || range.NumPlanes)) {
             // Discard initializes compression metadata for a complete resource;
             // it cannot be combined with a split transition or a subresource
             // range in this backend.
@@ -7125,14 +7138,19 @@ public:
 
           D3D12_RESOURCE_STATES before_layout = D3D12_RESOURCE_STATE_COMMON;
           D3D12_RESOURCE_STATES after_layout = D3D12_RESOURCE_STATE_COMMON;
-          if (discard && barrier.LayoutBefore == D3D12_BARRIER_LAYOUT_UNDEFINED) {
+          if (access_only) {
+            // COMMON values are unused placeholders in the ordered event;
+            // access-only validation/commit must preserve the existing layout.
+          } else if (discard && barrier.LayoutBefore == D3D12_BARRIER_LAYOUT_UNDEFINED) {
             before_layout = D3D12_RESOURCE_STATE_COMMON;
             if (!ConvertBarrierLayout(desc.Dimension, barrier.LayoutAfter, &after_layout)) {
               invalid_barrier();
               continue;
             }
-          } else if (!ConvertBarrierLayout(desc.Dimension, barrier.LayoutBefore, &before_layout) ||
-                     !ConvertBarrierLayout(desc.Dimension, barrier.LayoutAfter, &after_layout)) {
+          } else if (
+              !ConvertBarrierLayout(desc.Dimension, barrier.LayoutBefore, &before_layout) ||
+              !ConvertBarrierLayout(desc.Dimension, barrier.LayoutAfter, &after_layout)
+          ) {
             invalid_barrier();
             continue;
           }
@@ -7199,9 +7217,9 @@ public:
                 barrier.AccessAfter, barrier.SyncBefore, barrier.SyncAfter, barrier.LayoutBefore != barrier.LayoutAfter
             );
             // Access scopes do not replace the layout when interoping with legacy barriers.
-            resource_state_transitions_.push_back({
-                resource, subresource, tracked_before_layout, tracked_after_layout, false, discard
-            });
+            resource_state_transitions_.push_back(
+                {resource, subresource, tracked_before_layout, tracked_after_layout, false, discard, access_only}
+            );
           };
 
           if (!range.NumMipLevels) {

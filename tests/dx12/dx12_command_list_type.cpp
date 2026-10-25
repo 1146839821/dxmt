@@ -2835,7 +2835,7 @@ bool TestConstantBufferBarrierStages(bool adjacent = false) {
   return good;
 }
 
-bool TestCommonAccessBarriers(bool adjacent = false) {
+bool TestCommonAccessBarriers(bool adjacent = false, bool access_only = false) {
   struct Compiler {
     HMODULE module = LoadLibraryA(D3DCOMPILER_DLL_A);
     ~Compiler() {
@@ -2898,7 +2898,7 @@ bool TestCommonAccessBarriers(bool adjacent = false) {
       return false;
   }
   bool good = true;
-  for (UINT type = 0; type < 3; ++type) {
+  for (UINT type = access_only ? 2u : 0u; type < 3; ++type) {
     for (UINT mode = 0; mode < 4; ++mode) {
       const bool texture = type == 2;
       // NONE/NO_ACCESS is empty; COMPUTE/NO_ACCESS still orders dispatches.
@@ -3015,8 +3015,9 @@ bool TestCommonAccessBarriers(bool adjacent = false) {
         texture_barrier.SyncBefore = texture_barrier.SyncAfter = sync;
         texture_barrier.AccessBefore = texture_barrier.AccessAfter = access;
         texture_barrier.LayoutBefore = texture_barrier.LayoutAfter =
-            no_access ? D3D12_BARRIER_LAYOUT_COMMON
-                      : D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
+            access_only ? D3D12_BARRIER_LAYOUT_UNDEFINED
+            : no_access ? D3D12_BARRIER_LAYOUT_COMMON
+                        : D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
         group.Type = D3D12_BARRIER_TYPE_TEXTURE;
         group.pTextureBarriers = &texture_barrier;
       }
@@ -3067,6 +3068,7 @@ bool TestCommonAccessBarriers(bool adjacent = false) {
           texture_barrier.SyncAfter = D3D12_BARRIER_SYNC_COPY;
           texture_barrier.AccessBefore = D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
           texture_barrier.AccessAfter = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+          texture_barrier.LayoutBefore = D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
           texture_barrier.LayoutAfter = D3D12_BARRIER_LAYOUT_COPY_SOURCE;
           list7->Barrier(1, &group);
           D3D12_TEXTURE_COPY_LOCATION source = {}, target = {};
@@ -3132,6 +3134,7 @@ bool TestCommonAccessBarriers(bool adjacent = false) {
                                              WMTBarrierScopeTextures) &&
                            counter.second_scope == counter.scope))));
       std::cout << "common-access type=" << type << " mode=" << mode
+                << " access_only=" << access_only
                 << " dispatches=" << counter.dispatches
                 << " same_encoder=" << counter.same_encoder
                 << " barriers=" << counter.barriers
@@ -3426,6 +3429,8 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
 }
 
 int main(int argc, char **argv) {
+  if (argc == 2 && !std::strcmp(argv[1], "--texture-access-only-barriers"))
+    return TestCommonAccessBarriers(true, true) ? 0 : 1;
   if (argc == 2 && !std::strcmp(argv[1], "--adjacent-memory-barriers")) {
     const bool render = TestConstantBufferBarrierStages(true);
     const bool compute = TestCommonAccessBarriers(true);
@@ -3523,7 +3528,8 @@ int main(int argc, char **argv) {
   }
   if (!TestConstantBufferBarrierStages() || !TestCommonAccessBarriers() ||
       !TestConstantBufferBarrierStages(true) ||
-      !TestCommonAccessBarriers(true) || !TestMultipleFenceWaits() ||
+      !TestCommonAccessBarriers(true) ||
+      !TestCommonAccessBarriers(true, true) || !TestMultipleFenceWaits() ||
       !TestDeviceRemovalWaits() || !TestConcurrentRemovalListeners()) {
     device->Release();
     return 1;

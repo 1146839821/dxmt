@@ -434,6 +434,148 @@ bool TestResourceLayoutAccess(ID3D12Device *device) {
   return passed;
 }
 
+bool TestTextureAccessOnly(ID3D12Device *device, ID3D12Resource *texture) {
+  const auto undefined = D3D12_BARRIER_LAYOUT_UNDEFINED;
+  const D3D12_BARRIER_SUBRESOURCE_RANGE all = {
+      D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, 0, 0, 0, 0, 0};
+  auto record =
+      [&](ID3D12GraphicsCommandList7 *list, D3D12_BARRIER_LAYOUT before,
+          D3D12_BARRIER_LAYOUT after, D3D12_BARRIER_ACCESS access_before,
+          D3D12_BARRIER_ACCESS access_after,
+          D3D12_BARRIER_SYNC sync_before = D3D12_BARRIER_SYNC_ALL,
+          D3D12_BARRIER_SYNC sync_after = D3D12_BARRIER_SYNC_ALL,
+          D3D12_TEXTURE_BARRIER_FLAGS flags = D3D12_TEXTURE_BARRIER_FLAG_NONE) {
+        D3D12_TEXTURE_BARRIER barrier;
+        SetTexture(barrier, sync_before, sync_after, access_before,
+                   access_after, before, after, texture, all, flags);
+        SubmitBarrier(list, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
+      };
+  unsigned cases = 0;
+  bool passed = true;
+  for (auto queue :
+       {D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+        D3D12_COMMAND_LIST_TYPE_COPY}) {
+    for (auto access :
+         {D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_NO_ACCESS,
+          D3D12_BARRIER_ACCESS_COPY_SOURCE, D3D12_BARRIER_ACCESS_COPY_DEST}) {
+      passed &= ExpectClose(
+          device, "memory-only texture admission", S_OK,
+          [&](auto *list) {
+            record(list, undefined, undefined, access, access);
+          },
+          queue);
+      ++cases;
+    }
+  }
+  for (bool split : {false, true}) {
+    for (bool wrong_layout : {false, true}) {
+      passed &= ExpectClose(
+          device, "memory-only preserves known UAV layout",
+          wrong_layout ? E_INVALIDARG : S_OK, [&](auto *list) {
+            record(list, D3D12_BARRIER_LAYOUT_COMMON,
+                   D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS,
+                   D3D12_BARRIER_ACCESS_NO_ACCESS,
+                   D3D12_BARRIER_ACCESS_UNORDERED_ACCESS);
+            if (split) {
+              record(list, undefined, undefined,
+                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                     D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_SPLIT);
+              record(list, undefined, undefined,
+                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                     D3D12_BARRIER_SYNC_SPLIT, D3D12_BARRIER_SYNC_ALL);
+            } else {
+              record(list, undefined, undefined,
+                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS);
+            }
+            record(list,
+                   wrong_layout ? D3D12_BARRIER_LAYOUT_COMMON
+                                : D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS,
+                   D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+                   wrong_layout ? D3D12_BARRIER_ACCESS_COMMON
+                                : D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                   D3D12_BARRIER_ACCESS_SHADER_RESOURCE);
+          });
+      ++cases;
+    }
+  }
+  passed &= ExpectClose(device, "memory-only does not assume initial COMMON",
+                        S_OK, [&](auto *list) {
+                          record(list, undefined, undefined,
+                                 D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                 D3D12_BARRIER_ACCESS_UNORDERED_ACCESS);
+                          record(list, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS,
+                                 D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+                                 D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                 D3D12_BARRIER_ACCESS_SHADER_RESOURCE);
+                        });
+  ++cases;
+  for (bool interleave : {false, true}) {
+    passed &= ExpectClose(
+        device, "memory-only split matching remains ordered", E_INVALIDARG,
+        [&](auto *list) {
+          record(list, undefined, undefined, D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                 D3D12_BARRIER_ACCESS_COPY_SOURCE, D3D12_BARRIER_SYNC_ALL,
+                 D3D12_BARRIER_SYNC_SPLIT);
+          if (interleave)
+            record(list, undefined, undefined, D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                   D3D12_BARRIER_ACCESS_COPY_SOURCE);
+          record(list, undefined, undefined, D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                 interleave ? D3D12_BARRIER_ACCESS_COPY_SOURCE
+                            : D3D12_BARRIER_ACCESS_COPY_DEST,
+                 D3D12_BARRIER_SYNC_SPLIT, D3D12_BARRIER_SYNC_ALL);
+        });
+    ++cases;
+  }
+  for (auto access :
+       {D3D12_BARRIER_ACCESS_COPY_SOURCE, D3D12_BARRIER_ACCESS_NO_ACCESS}) {
+    passed &= ExpectClose(
+        device, "memory-only discard invalid", E_FAIL, [&](auto *list) {
+          record(list, undefined, undefined, access, access,
+                 D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_ALL,
+                 D3D12_TEXTURE_BARRIER_FLAG_DISCARD);
+        });
+    ++cases;
+  }
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    passed &= ExpectClose(
+        device, "memory-only split range",
+        mode == 0   ? S_OK
+        : mode == 1 ? E_INVALIDARG
+                    : E_FAIL,
+        [&](auto *list) {
+          D3D12_TEXTURE_BARRIER begin, end;
+          SetTexture(begin, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_SPLIT,
+                     D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                     D3D12_BARRIER_ACCESS_COPY_SOURCE, undefined, undefined,
+                     texture, {0, 0, 0, 0, 0, 0});
+          SetTexture(
+              end, D3D12_BARRIER_SYNC_SPLIT, D3D12_BARRIER_SYNC_ALL,
+              D3D12_BARRIER_ACCESS_COPY_SOURCE,
+              D3D12_BARRIER_ACCESS_COPY_SOURCE, undefined, undefined, texture,
+              mode == 0   ? D3D12_BARRIER_SUBRESOURCE_RANGE{0, 1, 0, 1, 0, 1}
+              : mode == 1 ? D3D12_BARRIER_SUBRESOURCE_RANGE{0, 2, 0, 1, 0, 1}
+                          : D3D12_BARRIER_SUBRESOURCE_RANGE{3, 1, 0, 1, 0, 1});
+          SubmitBarrier(list, D3D12_BARRIER_TYPE_TEXTURE, &begin);
+          SubmitBarrier(list, D3D12_BARRIER_TYPE_TEXTURE, &end);
+        });
+    ++cases;
+  }
+  for (auto access : {D3D12_BARRIER_ACCESS_VERTEX_BUFFER,
+                      D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ}) {
+    passed &= ExpectClose(device, "memory-only resource admission retained",
+                          E_FAIL, [&](auto *list) {
+                            record(list, undefined, undefined, access, access);
+                          });
+    ++cases;
+  }
+  std::cout << "texture-access-only cases=" << cases
+            << " result=" << (passed ? "PASS" : "FAIL") << "\n";
+  return passed;
+}
+
 bool TestInterleavedRecordedStates(ID3D12Device *device, ID3D12Resource *buffer,
                                    ID3D12Resource *texture) {
   bool passed = true;
@@ -1374,6 +1516,9 @@ bool TestPendingTextureRemoval(bool ranged = false) {
 bool TestSplitExecutionOrder(const char *mode) {
   // Contract probe: a nonzero result remains visible until cross-queue half
   // pairing has an authoritative contract and implementation.
+  const bool access_only = !std::strncmp(mode, "access-only-", 12);
+  const bool access_end = !std::strcmp(mode, "access-only-end");
+  const bool access_between = !std::strcmp(mode, "access-only-between-execute");
   const bool cross_queue_half = !std::strcmp(mode, "cross-queue-half");
   const bool handoff = !std::strcmp(mode, "queue-handoff") ||
                        !std::strcmp(mode, "queue-handoff-reset");
@@ -1382,15 +1527,22 @@ bool TestSplitExecutionOrder(const char *mode) {
   const bool cross = !std::strcmp(mode, "cross-execute-reset") ||
                      !std::strcmp(mode, "disjoint-cross-execute") ||
                      !std::strcmp(mode, "range-cross-execute") ||
-                     !std::strcmp(mode, "queue-handoff-reset");
-  const bool replay = !std::strcmp(mode, "replay");
+                     !std::strcmp(mode, "queue-handoff-reset") ||
+                     !std::strcmp(mode, "access-only-cross-execute") ||
+                     access_between;
+  const bool replay =
+      !std::strcmp(mode, "replay") || !std::strcmp(mode, "access-only-replay");
   const bool concurrent = !std::strcmp(mode, "concurrent");
   const bool queue_isolation = !std::strcmp(mode, "queue-isolation");
   const bool end_only = !std::strcmp(mode, "end-only");
-  const bool ordered = !std::strcmp(mode, "ordered");
+  const bool ordered = !std::strcmp(mode, "ordered") ||
+                       !std::strcmp(mode, "access-only-batch") || access_end;
   const bool reversed = !std::strcmp(mode, "reversed");
-  const bool threaded_reversed = !std::strcmp(mode, "threaded-reversed");
-  const bool same = !std::strcmp(mode, "same-list");
+  const bool threaded_reversed =
+      !std::strcmp(mode, "threaded-reversed") ||
+      !std::strcmp(mode, "access-only-reversed-record");
+  const bool same =
+      !std::strcmp(mode, "same-list") || !std::strcmp(mode, "access-only-same");
   const bool reset = !std::strcmp(mode, "reset-isolation");
   const bool clear = !std::strcmp(mode, "clear-state");
   const bool disjoint = !std::strcmp(mode, "disjoint");
@@ -1400,7 +1552,8 @@ bool TestSplitExecutionOrder(const char *mode) {
   const bool disjoint_submit = !std::strcmp(mode, "disjoint-submit") ||
                                !std::strcmp(mode, "disjoint-cross-execute");
   const bool ranged = !std::strcmp(mode, "range-gpu") ||
-                      !std::strcmp(mode, "range-cross-execute") || handoff || cross_queue_half;
+                      !std::strcmp(mode, "range-cross-execute") || handoff ||
+                      cross_queue_half || access_only;
   const bool global = !std::strcmp(mode, "global");
   if (!ordered && !reversed && !threaded_reversed && !same && !reset &&
       !clear && !disjoint && !global && !cross && !replay && !concurrent &&
@@ -1442,9 +1595,13 @@ bool TestSplitExecutionOrder(const char *mode) {
                begin ? D3D12_BARRIER_SYNC_COPY : D3D12_BARRIER_SYNC_SPLIT,
                begin ? D3D12_BARRIER_SYNC_SPLIT : D3D12_BARRIER_SYNC_COPY,
                D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COPY_SOURCE,
-               D3D12_BARRIER_LAYOUT_COPY_DEST, D3D12_BARRIER_LAYOUT_COPY_SOURCE,
-               texture.ptr, ranged ? D3D12_BARRIER_SUBRESOURCE_RANGE{0, 3, 0, 2, 0, 1}
-                                   : D3D12_BARRIER_SUBRESOURCE_RANGE{mip, 1, 0, 1, 0, 1});
+               access_only ? D3D12_BARRIER_LAYOUT_UNDEFINED
+                           : D3D12_BARRIER_LAYOUT_COPY_DEST,
+               access_only ? D3D12_BARRIER_LAYOUT_UNDEFINED
+                           : D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+               texture.ptr,
+               ranged ? D3D12_BARRIER_SUBRESOURCE_RANGE{0, 3, 0, 2, 0, 1}
+                      : D3D12_BARRIER_SUBRESOURCE_RANGE{mip, 1, 0, 1, 0, 1});
     SubmitBarrier(list.list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
   };
   if (mismatch || equivalent) {
@@ -1576,7 +1733,8 @@ bool TestSplitExecutionOrder(const char *mode) {
       copy_target.SubresourceIndex = index;
       first.list->CopyTextureRegion(&copy_target, 0, 0, 0, &copy_source, nullptr);
     }
-    split(first, true);
+    if (!access_end)
+      split(first, true);
   };
   auto record_readback = [&](SplitProbeList &list) {
     // Concurrent recording threads must not mutate shared copy locations.
@@ -1586,6 +1744,14 @@ bool TestSplitExecutionOrder(const char *mode) {
       copy_result.PlacedFootprint = footprints[index];
       copy_target.SubresourceIndex = index;
       list.list->CopyTextureRegion(&copy_result, 0, 0, 0, &copy_target, nullptr);
+    }
+    if (access_only) {
+      D3D12_TEXTURE_BARRIER restore;
+      SetTexture(restore, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_ALL,
+                 D3D12_BARRIER_ACCESS_COPY_SOURCE, D3D12_BARRIER_ACCESS_COMMON,
+                 D3D12_BARRIER_LAYOUT_COPY_SOURCE, D3D12_BARRIER_LAYOUT_COMMON,
+                 texture.ptr, {0, 3, 0, 2, 0, 1});
+      SubmitBarrier(list.list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &restore);
     }
   };
   auto record_end = [&](SplitProbeList &list) {
@@ -1598,6 +1764,17 @@ bool TestSplitExecutionOrder(const char *mode) {
       SubmitBarrier(list.list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
     }
     split(list, false);
+    if (access_only) {
+      // Memory-only synchronization cannot perform the layout change needed
+      // for the following copy reads. Keep that transition explicit.
+      D3D12_TEXTURE_BARRIER transition;
+      SetTexture(
+          transition, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_COPY,
+          D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COPY_SOURCE,
+          D3D12_BARRIER_LAYOUT_COPY_DEST, D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+          texture.ptr, {0, 3, 0, 2, 0, 1});
+      SubmitBarrier(list.list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &transition);
+    }
     if (!handoff)
       record_readback(list);
   };
@@ -1695,7 +1872,7 @@ bool TestSplitExecutionOrder(const char *mode) {
   }
   // Each queue completes its own split pair. The generic COPY_SOURCE layout
   // crosses queues via a fence; no cross-queue BEGIN/END pairing is assumed.
-  SplitProbeList consumer_begin, consumer_end;
+  SplitProbeList consumer_begin, consumer_end, between;
   Owned<ID3D12CommandQueue> consumer_queue, half_queue;
   Owned<ID3D12Fence> handoff_fence;
   if (handoff) {
@@ -1760,6 +1937,23 @@ bool TestSplitExecutionOrder(const char *mode) {
                  first.list->Reset(first.allocator.ptr, nullptr)) ||
         !CheckHR("reset empty begin Close", first.list->Close()))
       return false;
+    if (access_between) {
+      if (!between.Create(device.ptr))
+        return false;
+      D3D12_TEXTURE_BARRIER barrier;
+      SetTexture(barrier, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_COPY,
+                 D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COPY_DEST,
+                 D3D12_BARRIER_LAYOUT_COPY_DEST, D3D12_BARRIER_LAYOUT_COPY_DEST,
+                 texture.ptr, {0, 3, 0, 2, 0, 1});
+      SubmitBarrier(between.list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
+      if (!CheckHR("memory-only between-execute Close", between.list->Close()))
+        return false;
+      ID3D12CommandList *middle = between.list.ptr;
+      queue->ExecuteCommandLists(1, &middle);
+      if (!CheckHR("memory-only between-execute admission",
+                   device->GetDeviceRemovedReason()))
+        return false;
+    }
     queue->ExecuteCommandLists(1, lists + 1);
   } else {
     queue->ExecuteCommandLists(same || clear ? 1 : 2, lists);
@@ -1832,6 +2026,9 @@ int main(int argc, char **argv) {
   if (!CreateResources(device.ptr, buffer, texture))
     return 1;
 
+  if (argc == 2 && !std::strcmp(argv[1], "--texture-access-only"))
+    return TestTextureAccessOnly(device.ptr, texture.ptr) ? 0 : 1;
+
   if (argc == 2 && !std::strcmp(argv[1], "--resource-layout-access"))
     return TestResourceLayoutAccess(device.ptr) ? 0 : 1;
 
@@ -1847,7 +2044,8 @@ int main(int argc, char **argv) {
   if (argc == 2 && !std::strcmp(argv[1], "--sync-none-access"))
     return TestNoneSyncAccess(device.ptr, buffer.ptr, texture.ptr) ? 0 : 1;
 
-  bool passed = TestResourceLayoutAccess(device.ptr);
+  bool passed = TestTextureAccessOnly(device.ptr, texture.ptr);
+  passed &= TestResourceLayoutAccess(device.ptr);
   passed &= TestSyncAccessCompatibility(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestTransferSyncAccess(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestSyncScopeAdmission(device.ptr, buffer.ptr, texture.ptr);

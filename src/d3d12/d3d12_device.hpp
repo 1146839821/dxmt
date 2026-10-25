@@ -335,6 +335,11 @@ public:
   virtual const D3D12_HEAP_PROPERTIES *GetHeapPropertiesView() const = 0;
 };
 
+inline bool
+IsTextureAccessOnly(D3D12_BARRIER_LAYOUT before, D3D12_BARRIER_LAYOUT after) {
+  return before == D3D12_BARRIER_LAYOUT_UNDEFINED && after == D3D12_BARRIER_LAYOUT_UNDEFINED;
+}
+
 enum class EnhancedSplitBarrierType : uint8_t {
   Buffer,
   Texture,
