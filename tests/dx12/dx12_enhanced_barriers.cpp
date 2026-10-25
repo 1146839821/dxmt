@@ -434,6 +434,83 @@ bool TestResourceLayoutAccess(ID3D12Device *device) {
   return passed;
 }
 
+bool TestEnhancedLayoutPromotion(ID3D12Device *device,
+                                 ID3D12Resource *texture) {
+  // COMMON permits copy/SRV accesses without changing its enhanced layout.
+  // Only legacy StateBefore can account for implicit state promotion.
+  const D3D12_BARRIER_SUBRESOURCE_RANGE all = {
+      D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, 0, 0, 0, 0, 0};
+  struct Layout {
+    D3D12_BARRIER_LAYOUT layout;
+    D3D12_RESOURCE_STATES legacy;
+  };
+  const Layout layouts[] = {
+      {D3D12_BARRIER_LAYOUT_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE},
+      {D3D12_BARRIER_LAYOUT_COPY_DEST, D3D12_RESOURCE_STATE_COPY_DEST},
+      {D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE}};
+  bool passed = true;
+  unsigned cases = 0;
+  for (auto type :
+       {D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_TYPE_COMPUTE}) {
+    for (const auto &layout : layouts) {
+      for (unsigned mode = 0; mode < 3; ++mode) {
+        const bool legacy = mode == 2;
+        const bool split = mode == 1;
+        for (bool mismatch : {false, true}) {
+          passed &= ExpectClose(
+              device, "COMMON enhanced layout versus legacy promotion",
+              !legacy && mismatch ? E_INVALIDARG : S_OK,
+              [&](auto *list) {
+                D3D12_TEXTURE_BARRIER barrier;
+                SetTexture(
+                    barrier, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_ACCESS_NO_ACCESS,
+                    D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_LAYOUT_COMMON,
+                    D3D12_BARRIER_LAYOUT_COMMON, texture, all);
+                SubmitBarrier(list, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
+                if (legacy) {
+                  D3D12_RESOURCE_BARRIER old = {};
+                  old.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                  old.Transition.pResource = texture;
+                  old.Transition.Subresource =
+                      D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                  old.Transition.StateBefore =
+                      mismatch
+                          ? (type == D3D12_COMMAND_LIST_TYPE_COMPUTE &&
+                                     layout.layout ==
+                                         D3D12_BARRIER_LAYOUT_SHADER_RESOURCE
+                                 ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                                 : layout.legacy)
+                          : D3D12_RESOURCE_STATE_COMMON;
+                  old.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+                  list->ResourceBarrier(1, &old);
+                } else {
+                  barrier.LayoutBefore =
+                      mismatch ? layout.layout : D3D12_BARRIER_LAYOUT_COMMON;
+                  barrier.LayoutAfter = layout.layout;
+                  if (split)
+                    barrier.SyncAfter = D3D12_BARRIER_SYNC_SPLIT;
+                  SubmitBarrier(list, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
+                  if (split) {
+                    barrier.SyncBefore = D3D12_BARRIER_SYNC_SPLIT;
+                    barrier.SyncAfter = D3D12_BARRIER_SYNC_ALL;
+                    SubmitBarrier(list, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
+                  }
+                }
+              },
+              type);
+          ++cases;
+        }
+      }
+    }
+  }
+  std::cout << "enhanced-layout-promotion cases=" << cases
+            << " result=" << (passed ? "PASS" : "FAIL") << "\n";
+  return passed;
+}
+
 bool TestTextureAccessOnly(ID3D12Device *device, ID3D12Resource *texture) {
   const auto undefined = D3D12_BARRIER_LAYOUT_UNDEFINED;
   const D3D12_BARRIER_SUBRESOURCE_RANGE all = {
@@ -1516,6 +1593,11 @@ bool TestPendingTextureRemoval(bool ranged = false) {
 bool TestSplitExecutionOrder(const char *mode) {
   // Contract probe: a nonzero result remains visible until cross-queue half
   // pairing has an authoritative contract and implementation.
+  const bool common_layout = !std::strcmp(mode, "common-layout-same") ||
+                             !std::strcmp(mode, "common-layout-batch") ||
+                             !std::strcmp(mode, "common-layout-reversed") ||
+                             !std::strcmp(mode, "common-layout-wrong-batch");
+  const bool common_wrong = !std::strcmp(mode, "common-layout-wrong-batch");
   const bool access_only = !std::strncmp(mode, "access-only-", 12);
   const bool access_end = !std::strcmp(mode, "access-only-end");
   const bool access_between = !std::strcmp(mode, "access-only-between-execute");
@@ -1540,9 +1622,11 @@ bool TestSplitExecutionOrder(const char *mode) {
   const bool reversed = !std::strcmp(mode, "reversed");
   const bool threaded_reversed =
       !std::strcmp(mode, "threaded-reversed") ||
-      !std::strcmp(mode, "access-only-reversed-record");
-  const bool same =
-      !std::strcmp(mode, "same-list") || !std::strcmp(mode, "access-only-same");
+      !std::strcmp(mode, "access-only-reversed-record") ||
+      !std::strcmp(mode, "common-layout-reversed");
+  const bool same = !std::strcmp(mode, "same-list") ||
+                    !std::strcmp(mode, "access-only-same") ||
+                    !std::strcmp(mode, "common-layout-same");
   const bool reset = !std::strcmp(mode, "reset-isolation");
   const bool clear = !std::strcmp(mode, "clear-state");
   const bool disjoint = !std::strcmp(mode, "disjoint");
@@ -1553,7 +1637,7 @@ bool TestSplitExecutionOrder(const char *mode) {
                                !std::strcmp(mode, "disjoint-cross-execute");
   const bool ranged = !std::strcmp(mode, "range-gpu") ||
                       !std::strcmp(mode, "range-cross-execute") || handoff ||
-                      cross_queue_half || access_only;
+                      cross_queue_half || access_only || common_layout;
   const bool global = !std::strcmp(mode, "global");
   if (!ordered && !reversed && !threaded_reversed && !same && !reset &&
       !clear && !disjoint && !global && !cross && !replay && !concurrent &&
@@ -1591,17 +1675,18 @@ bool TestSplitExecutionOrder(const char *mode) {
   }
   auto split = [&](SplitProbeList &list, bool begin, UINT mip = 0) {
     D3D12_TEXTURE_BARRIER barrier;
-    SetTexture(barrier,
-               begin ? D3D12_BARRIER_SYNC_COPY : D3D12_BARRIER_SYNC_SPLIT,
-               begin ? D3D12_BARRIER_SYNC_SPLIT : D3D12_BARRIER_SYNC_COPY,
-               D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COPY_SOURCE,
-               access_only ? D3D12_BARRIER_LAYOUT_UNDEFINED
-                           : D3D12_BARRIER_LAYOUT_COPY_DEST,
-               access_only ? D3D12_BARRIER_LAYOUT_UNDEFINED
-                           : D3D12_BARRIER_LAYOUT_COPY_SOURCE,
-               texture.ptr,
-               ranged ? D3D12_BARRIER_SUBRESOURCE_RANGE{0, 3, 0, 2, 0, 1}
-                      : D3D12_BARRIER_SUBRESOURCE_RANGE{mip, 1, 0, 1, 0, 1});
+    SetTexture(
+        barrier, begin ? D3D12_BARRIER_SYNC_COPY : D3D12_BARRIER_SYNC_SPLIT,
+        begin ? D3D12_BARRIER_SYNC_SPLIT : D3D12_BARRIER_SYNC_COPY,
+        D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COPY_SOURCE,
+        access_only                      ? D3D12_BARRIER_LAYOUT_UNDEFINED
+        : common_layout && !common_wrong ? D3D12_BARRIER_LAYOUT_COMMON
+                                         : D3D12_BARRIER_LAYOUT_COPY_DEST,
+        access_only ? D3D12_BARRIER_LAYOUT_UNDEFINED
+                    : D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+        texture.ptr,
+        ranged ? D3D12_BARRIER_SUBRESOURCE_RANGE{0, 3, 0, 2, 0, 1}
+               : D3D12_BARRIER_SUBRESOURCE_RANGE{mip, 1, 0, 1, 0, 1});
     SubmitBarrier(list.list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
   };
   if (mismatch || equivalent) {
@@ -1724,16 +1809,19 @@ bool TestSplitExecutionOrder(const char *mode) {
     D3D12_TEXTURE_BARRIER initial;
     SetTexture(initial, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_COPY,
                D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_COPY_DEST,
-               D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_COPY_DEST,
-               texture.ptr, ranged ? D3D12_BARRIER_SUBRESOURCE_RANGE{0, 3, 0, 2, 0, 1}
-                                   : D3D12_BARRIER_SUBRESOURCE_RANGE{0, 1, 0, 1, 0, 1});
+               D3D12_BARRIER_LAYOUT_COMMON,
+               common_layout ? D3D12_BARRIER_LAYOUT_COMMON
+                             : D3D12_BARRIER_LAYOUT_COPY_DEST,
+               texture.ptr,
+               ranged ? D3D12_BARRIER_SUBRESOURCE_RANGE{0, 3, 0, 2, 0, 1}
+                      : D3D12_BARRIER_SUBRESOURCE_RANGE{0, 1, 0, 1, 0, 1});
     SubmitBarrier(first.list7.ptr, D3D12_BARRIER_TYPE_TEXTURE, &initial);
     for (UINT index = 0; index < subresource_count; ++index) {
       copy_source.PlacedFootprint = footprints[index];
       copy_target.SubresourceIndex = index;
       first.list->CopyTextureRegion(&copy_target, 0, 0, 0, &copy_source, nullptr);
     }
-    if (!access_end)
+    if (!access_end && !common_wrong)
       split(first, true);
   };
   auto record_readback = [&](SplitProbeList &list) {
@@ -1755,6 +1843,8 @@ bool TestSplitExecutionOrder(const char *mode) {
     }
   };
   auto record_end = [&](SplitProbeList &list) {
+    if (common_wrong)
+      split(list, true);
     if (disjoint_submit) {
       D3D12_TEXTURE_BARRIER barrier;
       SetTexture(barrier, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_COPY,
@@ -1958,6 +2048,12 @@ bool TestSplitExecutionOrder(const char *mode) {
   } else {
     queue->ExecuteCommandLists(same || clear ? 1 : 2, lists);
   }
+  if (common_wrong) {
+    const HRESULT hr = device->GetDeviceRemovedReason();
+    std::cout << "invalid COMMON layout batch status=0x" << std::hex
+              << static_cast<unsigned long>(hr) << std::dec << "\n";
+    return hr == DXGI_ERROR_INVALID_CALL;
+  }
   if (end_only || disjoint_submit) {
     const HRESULT hr = device->GetDeviceRemovedReason();
     std::cout << "invalid split admission status=0x" << std::hex
@@ -2026,6 +2122,9 @@ int main(int argc, char **argv) {
   if (!CreateResources(device.ptr, buffer, texture))
     return 1;
 
+  if (argc == 2 && !std::strcmp(argv[1], "--enhanced-layout-promotion"))
+    return TestEnhancedLayoutPromotion(device.ptr, texture.ptr) ? 0 : 1;
+
   if (argc == 2 && !std::strcmp(argv[1], "--texture-access-only"))
     return TestTextureAccessOnly(device.ptr, texture.ptr) ? 0 : 1;
 
@@ -2044,7 +2143,8 @@ int main(int argc, char **argv) {
   if (argc == 2 && !std::strcmp(argv[1], "--sync-none-access"))
     return TestNoneSyncAccess(device.ptr, buffer.ptr, texture.ptr) ? 0 : 1;
 
-  bool passed = TestTextureAccessOnly(device.ptr, texture.ptr);
+  bool passed = TestEnhancedLayoutPromotion(device.ptr, texture.ptr);
+  passed &= TestTextureAccessOnly(device.ptr, texture.ptr);
   passed &= TestResourceLayoutAccess(device.ptr);
   passed &= TestSyncAccessCompatibility(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestTransferSyncAccess(device.ptr, buffer.ptr, texture.ptr);

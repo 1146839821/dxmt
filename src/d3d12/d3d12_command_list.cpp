@@ -1035,6 +1035,8 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
     // An ordered resource use still participates in split validation/lifetime,
     // but a memory-only barrier neither assumes nor commits a texture layout.
     bool access_only = false;
+    // Enhanced layouts are explicit; only legacy StateBefore can promote COMMON.
+    bool enhanced_barrier = false;
     size_t split_index = std::numeric_limits<size_t>::max();
   };
   std::vector<ResourceStateTransition> resource_state_transitions_;
@@ -1704,7 +1706,8 @@ public:
             return true;
           auto &current = current_states[subresource];
           if (!transition.discard_before && current && *current != transition.before &&
-              !(*current == D3D12_RESOURCE_STATE_COMMON && promotable(resource, transition.before))) {
+              !(!transition.enhanced_barrier && *current == D3D12_RESOURCE_STATE_COMMON &&
+                promotable(resource, transition.before))) {
             WARN("D3D12 recorded transition mismatch: recording=", recording_id_, " subresource=", subresource,
                  " previous_after=0x", std::hex, *current, " before=0x", transition.before,
                  " after=0x", transition.after, std::dec);
@@ -2378,7 +2381,7 @@ public:
       auto append = [&](UINT subresource) {
         resource_state_transitions_.push_back(
             {state.resource, subresource, tracked_before, tracked_after, phase == EnhancedSplitPhase::Begin, false,
-             access_only, index}
+             access_only, true, index}
         );
       };
       const auto &range = state.subresources;
@@ -7218,7 +7221,7 @@ public:
             );
             // Access scopes do not replace the layout when interoping with legacy barriers.
             resource_state_transitions_.push_back(
-                {resource, subresource, tracked_before_layout, tracked_after_layout, false, discard, access_only}
+                {resource, subresource, tracked_before_layout, tracked_after_layout, false, discard, access_only, true}
             );
           };
 

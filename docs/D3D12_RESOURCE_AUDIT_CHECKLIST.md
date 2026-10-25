@@ -3279,6 +3279,57 @@ red-summary/aggregates/transition-stride/build/runtime/verification logs.
 Local focused commit,no push;goal active. Next:first-use/submit layout
 reconciliation;distinct reproducible tail-cost diagnosis.
 
+### 2026-10-25 — N12 explicit enhanced layouts versus legacy promotion (G1)
+
+Basef751d053. Confirmed:known COMMON wrongly admitted explicit enhanced
+COPY_SOURCE/COPY_DEST/SHADER_RESOURCE LayoutBefore because shared validation
+applied legacy promotion unconditionally. Final36-case same PE baseline twice:
+12 incorrect accepts/24 controls each;private/no-private36 PASS. Both ordinary
+and split enhanced reject mismatch;legacy promotion controls stay accepted.
+New cross-list negative:both Close S_OK,baseline Execute S_OK;final admission
+DXGI_ERROR_INVALID_CALL before translation. Initial unknown recording layout is
+still deliberately deferred;no guessed global state seeded at Close.
+
+Existing ordered event gains immutable enhanced_barrier provenance in padding;
+only legacy events can use COMMON promotion. Same validator at Close/Execute;
+no new state owner/cache/lock/scan/native encoder/barrier/public ABI/src file.
+Final event stride32 unchanged. Validation apply225=>227 static nonpadding
+instructions/18calls;Barrier1355/59 unchanged;split668=>673/46;Close154/13
+unchanged. Initial typed-flag candidate added out-of-line append;constant true
+for all enhanced split events removes per-event type query and restores prior
+inlining. Full prior candidate/tests/costs retained/excluded;final45 probes
+repeated after runtime change. Initial24-case red fixture retained separately.
+
+Both backends:three new legal COMMON-copy/split modes each6 exact GPU
+subresources PASS (same-list,batch,reversed CPU recording);four adjacent split/
+queue modes each6 PASS;full enhanced/features PASS. Adjacent native16/GPU10
+PASS,6 no-resource readbacks NOT_RUN;access-only native4/GPU2 PASS,2 NOT_RUN.
+Correctness API/GPU1/1,no Metal errors;staged/build PE/DLL hashes verified.
+Pressure calibration1000API=>1nativepacket,stages27/27,pixel/buffer PASS.
+
+Private same-PE AB/BA/AB,72 retained/side/scenario,P50/P95 us:
+Pressure Recording/call .06745/.0785=>.07085/.0781;
+Submit388/532.3=>353.4/469.5;Execute-fence2443.8/2700.3=>2375.35/2820.6.
+Ordinary50000-copy Recording3143.55/3260.4=>3327.55/3508.7;
+Close1.7/3.2=>1.95/2.4;Submit22365.15/22870.5=>22371.95/22724.6.
+Recording warnings +5.04% pressure P50 and +5.85/+7.62% ordinary P50/P95
+remain unresolved;completion P95+4.46%. INCONCLUSIVE,not a speedup claim.
+Static CopyBufferRegion162/13/entry address unchanged but call targets move;
+counts do not prove harmless noise or causality. Tail/global performance gates
+OPEN;no-private/new texture CPU timing NOT_RUN. Read-only inspection occurred
+during timing;no concurrent builds/correctness GPU probes.
+
+Environment refreshed:M1 Max Apple7/1007,macOS27.0.1,Xcode27.1,MSC4.0.1,
+Wine11,clang23.1.1. Xcode26/Windows/otherGPU/D3D11/T3/T4 NOT_RUN.
+FL11_1/private,FL11_0/no-private,SM6_0,EnhancedFALSE unchanged. Device QI
+unchanged. Full mixed-domain/global decay/queue-specific layout/Resolve/SRS/
+N12 coverage OPEN. User.gitignore/shared Wine/prefix preserved. Evidence:
+../dxmt-test/n12-layout-promotion-20261025/N12-layout-promotion.md,manifest/
+results/red-summary/sources/static-cost/aggregates/environment/verification/
+build/runtime logs,initial-24,typed-flag-trial. Focused local commit,no push;
+goal active. Next:isolate shared recording cost;global first-use/legacy decay
+reconciliation only with a complete execution-ordered oracle.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
