@@ -3080,6 +3080,65 @@ Local focused commit only,no push;overall goal active. Next:N12 shared sync/acce
 compatibility with this hoisted input;tail/layout investigation needs stronger
 causal evidence before further optimization.
 
+### N12 shared access/sync/queue admission — 2026-10-25
+
+Base8e408baf. The shared predicate checked sync domains and Copy/Resolve pairs,
+but other access/sync and queue/access combinations reached lowering unchecked.
+Unknown/mixed NO_ACCESS checks lived separately in lowering. Keep invariant sync
+mask calculation and add one invocation-local supported-access mask. One predicate
+now owns supported raw domains,unknown access,exclusive NO_ACCESS,NONE implication,
+queue compatibility and complete requested-access coverage. Readonly32-entry/128B
+sync-to-access table unions component/aggregate coverage;O(popcount(sync)) per side,
+normally1 lookup,at most32 iterations,fast ALL/COMMON/NO_ACCESS/deferred SPLIT.
+No allocation/lock/scan/cache/new state/owner/file/ABI/native-command/capability
+change. Pure access-to-legacy lowering drops duplicate admission and six
+unreachable video mappings. Unsupported RT access remains rejected;video is
+incompatible with these queue types. Existing split-phase/matching guards retained.
+
+Microsoft primary snapshot Access Bits Barrier Sync Compatibility + Command Queue
+Access Compatibility + aggregate hierarchy used;do not copy apparent reverse-list
+COMPUTE typo/omissions. NON_PIXEL inherits vertex/compute;DRAW inherits pixel,
+including shading-rate access. New existing-runner --sync-access-compatibility:
+33 access values x19 scopes x3queues x2sides=3762 global,78 combination and16
+buffer/texture side assertions,total3856. Independent inverse access->required-sync
+oracle;336 legal controls,unknown/RT/video/mixed-NO_ACCESS/partial-coverage/alias
+cases included. Same final PE baseline twice:940 unexpected S_OK (348 sync/access,
+584 queue-domain first violations,8 resource edges),336 legal/2580 already-invalid
+PASS. Final candidate twice3856 PASS. Full enhanced adds previous144/760/NONE/
+split/state/ownership cases;full command-list,complete queue handoff,feature
+contracts PASS. Adjacent native16/exact GPU10 PASS,six no-resource readbacks NOT_RUN.
+Independent no-private3856/full enhanced/native16+GPU10/full command-list/
+FL11_0+logicOp0 PASS. API/GPU1/1,staged DLL/native paths checked,no Metal errors.
+30 final probes/exits,source/PE/native/peer/macro/timing lineage verified.
+
+Initial matrix passed but full test rejected an existing invalid positive discard
+fixture:RT access paired PIXEL sync,texture lacked ALLOW_RENDER_TARGET. Preserve RT
+discard coverage with RENDER_TARGET sync and correct texture flag;do not relax
+validation. Wrong RT/pixel pair remains a negative matrix case. Initial source/PE/
+logs/results retained in initial-discard-fixture,excluded;final same PE rebuilt and
+rerun red/green twice. No performance samples existed before fixture correction.
+
+Costs same PE,AB/BA/AB,3processes/side,25rounds/dropfirst,72retained/scenario/side,
+median process p50/p95;observer/API/GPU off,Hud1,no concurrent builds/GPU probes,
+no unchanged retry. Calibration both sides1000CBV API calls=>ONE native barrier,
+stages27/27,exact pixels/buffer PASS. Recording/call .0598/.0644=>.0605/.0632 us
+(+1.171/-1.863%);Submit325.6/438.4=>325.65/439.8 us (+.015/+.319%);
+Execute-through-fence2242.5/2423.1=>2259.25/2381.8 us (+.747/-1.704%).
+Completion includes CPU/Wine/event,not isolated GPU. Ordinary50000-copy Recording
+3109.6/3207.5=>3189.6/3293.6 us (+2.573/+2.684%);Submit21908.75/22377.3=>
+22197.25/22628.8 us (+1.317/+1.124%);Close1.4/1.9 unchanged. All costs reported,
+no zero-cost/statistical-significance claim;historical/global performance gates OPEN.
+
+M1 Max/Apple7,macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1/clang23.1 unchanged;
+requested Xcode26 NOT_RUN. FL11_1/private,FL11_0/no-private,SM6_0,EnhancedFALSE
+unchanged. Full resource/layout legality,NONE lifetime,sequential/pending/alias/
+discard semantics,actual RT/video,Windows/otherGPU/D3D11/T3/T4 NOT_RUN;cross-queue
+half legality unresolved. User .gitignore/shared Wine/prefix preserved. Evidence:
+`../dxmt-test/n12-all-sync-access-20261025/N12-all-sync-access.md`,manifest/baseline/
+sources/red-summary/red-classification JSON,aggregate/ordinary-aggregate/results,
+build/runtime/verification logs and initial-discard-fixture. Local focused commit
+only,no push;overall goal active. Next:resource/layout/access admission at this owner.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

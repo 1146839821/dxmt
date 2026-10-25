@@ -27,6 +27,7 @@
 #include "dxmt_occlusion_query.hpp"
 #include <array>
 #include <atomic>
+#include <bit>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -527,43 +528,12 @@ render_stages_for_state(D3D12_RESOURCE_STATES state) {
   return stages;
 }
 
-inline bool
-barrier_access_to_state(D3D12_BARRIER_ACCESS access, D3D12_RESOURCE_STATES &state) {
+inline D3D12_RESOURCE_STATES
+barrier_access_to_state(D3D12_BARRIER_ACCESS access) {
+  // Access admission is owned by valid_barrier_sync_access. COMMON and
+  // NO_ACCESS both lower to COMMON here, but remain distinct for emission.
   const UINT32 value = static_cast<UINT32>(access);
-  constexpr UINT32 no_access = static_cast<UINT32>(D3D12_BARRIER_ACCESS_NO_ACCESS);
-  constexpr UINT32 supported =
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_VERTEX_BUFFER) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_CONSTANT_BUFFER) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_INDEX_BUFFER) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_RENDER_TARGET) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_UNORDERED_ACCESS) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_SHADER_RESOURCE) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_STREAM_OUTPUT) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_COPY_DEST) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_COPY_SOURCE) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_RESOLVE_DEST) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_RESOLVE_SOURCE) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_DECODE_READ) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_DECODE_WRITE) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_PROCESS_READ) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_PROCESS_WRITE) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_ENCODE_READ) |
-      static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_ENCODE_WRITE);
-
-  if (value & no_access) {
-    if (value != no_access)
-      return false;
-    state = D3D12_RESOURCE_STATE_COMMON;
-    return true;
-  }
-  if (value & ~supported)
-    return false;
-
-  state = D3D12_RESOURCE_STATE_COMMON;
+  D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
   if (value & (static_cast<UINT32>(D3D12_BARRIER_ACCESS_VERTEX_BUFFER) |
                static_cast<UINT32>(D3D12_BARRIER_ACCESS_CONSTANT_BUFFER)))
     state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
@@ -578,9 +548,8 @@ barrier_access_to_state(D3D12_BARRIER_ACCESS access, D3D12_RESOURCE_STATES &stat
   if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ))
     state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_DEPTH_READ);
   if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_SHADER_RESOURCE))
-    state = (D3D12_RESOURCE_STATES)(
-        state | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
-    );
+    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_STREAM_OUTPUT))
     state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_STREAM_OUT);
   if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT))
@@ -595,19 +564,7 @@ barrier_access_to_state(D3D12_BARRIER_ACCESS access, D3D12_RESOURCE_STATES &stat
     state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
   if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE))
     state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE);
-  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_DECODE_READ))
-    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_VIDEO_DECODE_READ);
-  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_DECODE_WRITE))
-    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE);
-  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_PROCESS_READ))
-    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_VIDEO_PROCESS_READ);
-  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_PROCESS_WRITE))
-    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_VIDEO_PROCESS_WRITE);
-  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_ENCODE_READ))
-    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
-  if (value & static_cast<UINT32>(D3D12_BARRIER_ACCESS_VIDEO_ENCODE_WRITE))
-    state = (D3D12_RESOURCE_STATES)(state | D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
-  return true;
+  return state;
 }
 
 inline UINT32
@@ -636,29 +593,93 @@ barrier_sync_mask(D3D12_COMMAND_LIST_TYPE type) {
                                                    : 0;
 }
 
+inline UINT32
+barrier_access_mask(D3D12_COMMAND_LIST_TYPE type) {
+  constexpr UINT32 copy =
+      D3D12_BARRIER_ACCESS_COPY_SOURCE | D3D12_BARRIER_ACCESS_COPY_DEST | D3D12_BARRIER_ACCESS_NO_ACCESS;
+  constexpr UINT32 compute = copy | D3D12_BARRIER_ACCESS_CONSTANT_BUFFER | D3D12_BARRIER_ACCESS_UNORDERED_ACCESS |
+                             D3D12_BARRIER_ACCESS_SHADER_RESOURCE | D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT;
+  constexpr UINT32 direct = compute | D3D12_BARRIER_ACCESS_VERTEX_BUFFER | D3D12_BARRIER_ACCESS_INDEX_BUFFER |
+                            D3D12_BARRIER_ACCESS_RENDER_TARGET | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE |
+                            D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ | D3D12_BARRIER_ACCESS_STREAM_OUTPUT |
+                            D3D12_BARRIER_ACCESS_RESOLVE_SOURCE | D3D12_BARRIER_ACCESS_RESOLVE_DEST |
+                            D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE;
+  // Raytracing access has no supported lowering yet. Video access is not
+  // compatible with these queue types; neither is admitted through ALL.
+  return type == D3D12_COMMAND_LIST_TYPE_DIRECT    ? direct
+         : type == D3D12_COMMAND_LIST_TYPE_COMPUTE ? compute
+         : type == D3D12_COMMAND_LIST_TYPE_COPY    ? copy
+                                                   : 0;
+}
+
 inline bool
-valid_barrier_sync_access(D3D12_BARRIER_SYNC sync, D3D12_BARRIER_ACCESS access, UINT32 supported) {
-  // NONE excludes accesses on this side of an ordinary Barrier. NO_ACCESS may
-  // also be paired with a nonempty sync scope, so this implication is one-way.
-  if (!supported || (static_cast<UINT32>(sync) & ~supported) ||
-      (sync == D3D12_BARRIER_SYNC_NONE && access != D3D12_BARRIER_ACCESS_NO_ACCESS))
-    return false;
-  // SPLIT denotes the deferred side of a paired barrier, not an execution
-  // scope. The other half validates its actual scope against these accesses.
-  if (sync == D3D12_BARRIER_SYNC_SPLIT)
-    return true;
+valid_barrier_sync_access(
+    D3D12_BARRIER_SYNC sync, D3D12_BARRIER_ACCESS access, UINT32 supported_sync, UINT32 supported_access
+) {
   const UINT32 sync_bits = static_cast<UINT32>(sync);
   const UINT32 access_bits = static_cast<UINT32>(access);
-  // Check each access family independently: a combined read mask needs both
-  // scopes, unless ALL covers them. Unrelated shading scopes cannot cover a
-  // copy or resolve operation.
-  if ((access_bits & (D3D12_BARRIER_ACCESS_COPY_SOURCE | D3D12_BARRIER_ACCESS_COPY_DEST)) &&
-      !(sync_bits & (D3D12_BARRIER_SYNC_ALL | D3D12_BARRIER_SYNC_COPY)))
+  constexpr UINT32 no_access = D3D12_BARRIER_ACCESS_NO_ACCESS;
+  if (!supported_sync || (sync_bits & ~supported_sync) || (access_bits & ~supported_access) ||
+      ((access_bits & no_access) && access_bits != no_access))
     return false;
-  if ((access_bits & (D3D12_BARRIER_ACCESS_RESOLVE_SOURCE | D3D12_BARRIER_ACCESS_RESOLVE_DEST)) &&
-      !(sync_bits & (D3D12_BARRIER_SYNC_ALL | D3D12_BARRIER_SYNC_RESOLVE)))
-    return false;
-  return true;
+  // NONE excludes accesses on this side of an ordinary Barrier. NO_ACCESS can
+  // also accompany nonempty execution scopes, so this implication is one-way.
+  if (sync == D3D12_BARRIER_SYNC_NONE)
+    return access == D3D12_BARRIER_ACCESS_NO_ACCESS;
+  // SPLIT defers this side to its matching half. COMMON denotes access
+  // compatible with the queue/sync/layout, while NO_ACCESS needs no cache scope.
+  if (sync == D3D12_BARRIER_SYNC_SPLIT || (sync_bits & D3D12_BARRIER_SYNC_ALL) ||
+      access == D3D12_BARRIER_ACCESS_COMMON || access == D3D12_BARRIER_ACCESS_NO_ACCESS)
+    return true;
+
+  constexpr UINT32 shader = D3D12_BARRIER_ACCESS_CONSTANT_BUFFER | D3D12_BARRIER_ACCESS_UNORDERED_ACCESS |
+                            D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
+  constexpr UINT32 vertex = shader | D3D12_BARRIER_ACCESS_VERTEX_BUFFER | D3D12_BARRIER_ACCESS_STREAM_OUTPUT;
+  constexpr UINT32 pixel = shader | D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE;
+  constexpr UINT32 draw = vertex | pixel | D3D12_BARRIER_ACCESS_INDEX_BUFFER | D3D12_BARRIER_ACCESS_RENDER_TARGET |
+                          D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ;
+  // Indexed by the SDK sync bit position. Aggregates include their component
+  // scopes. Unsupported/undefined bits have no entries and are rejected above;
+  // AS access itself stays unsupported even when its sync scope is recognized.
+  static constexpr UINT32 compatible_access[32] = {
+      0,
+      draw,
+      D3D12_BARRIER_ACCESS_INDEX_BUFFER,
+      vertex,
+      pixel,
+      D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ,
+      D3D12_BARRIER_ACCESS_RENDER_TARGET,
+      shader,
+      D3D12_BARRIER_ACCESS_UNORDERED_ACCESS | D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+      D3D12_BARRIER_ACCESS_COPY_SOURCE | D3D12_BARRIER_ACCESS_COPY_DEST,
+      D3D12_BARRIER_ACCESS_RESOLVE_SOURCE | D3D12_BARRIER_ACCESS_RESOLVE_DEST,
+      D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
+      vertex | pixel,
+      vertex,
+      D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+      D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+  };
+  UINT32 covered = 0;
+  for (UINT32 remaining = sync_bits; remaining; remaining &= remaining - 1)
+    covered |= compatible_access[std::countr_zero(remaining)];
+  // Every requested access must be covered, possibly by different sync bits.
+  return !(access_bits & ~covered);
 }
 
 enum class EnhancedSplitPhase : uint8_t {
@@ -6818,6 +6839,7 @@ public:
     // The command-list type is fixed for its lifetime. Share its sync domain
     // across both sides and all barriers in this call without caching state.
     const UINT32 supported_sync = barrier_sync_mask(type_);
+    const UINT32 supported_access = barrier_access_mask(type_);
     auto invalid_barrier = [&]() {
       WARN("D3D12 Barrier received an unsupported or invalid barrier");
       FailRecording(__func__, "unsupported or invalid barrier");
@@ -6849,19 +6871,14 @@ public:
         }
         for (UINT32 barrier_index = 0; barrier_index < group.NumBarriers; barrier_index++) {
           const auto &barrier = group.pGlobalBarriers[barrier_index];
-          if (!valid_barrier_sync_access(barrier.SyncBefore, barrier.AccessBefore, supported_sync) ||
-              !valid_barrier_sync_access(barrier.SyncAfter, barrier.AccessAfter, supported_sync) ||
+          if (!valid_barrier_sync_access(barrier.SyncBefore, barrier.AccessBefore, supported_sync, supported_access) ||
+              !valid_barrier_sync_access(barrier.SyncAfter, barrier.AccessAfter, supported_sync, supported_access) ||
               enhanced_split_phase(barrier.SyncBefore, barrier.SyncAfter) != EnhancedSplitPhase::None) {
             invalid_barrier();
             continue;
           }
-          D3D12_RESOURCE_STATES before = D3D12_RESOURCE_STATE_COMMON;
-          D3D12_RESOURCE_STATES after = D3D12_RESOURCE_STATE_COMMON;
-          if (!barrier_access_to_state(barrier.AccessBefore, before) ||
-              !barrier_access_to_state(barrier.AccessAfter, after)) {
-            invalid_barrier();
-            continue;
-          }
+          const auto before = barrier_access_to_state(barrier.AccessBefore);
+          const auto after = barrier_access_to_state(barrier.AccessAfter);
 
           emit_memory_barrier(
               WMTBarrierScopeBuffers | WMTBarrierScopeTextures | WMTBarrierScopeRenderTargets, before, after,
@@ -6878,8 +6895,8 @@ public:
         for (UINT32 barrier_index = 0; barrier_index < group.NumBarriers; barrier_index++) {
           const auto &barrier = group.pBufferBarriers[barrier_index];
           const auto split_phase = enhanced_split_phase(barrier.SyncBefore, barrier.SyncAfter);
-          if (!valid_barrier_sync_access(barrier.SyncBefore, barrier.AccessBefore, supported_sync) ||
-              !valid_barrier_sync_access(barrier.SyncAfter, barrier.AccessAfter, supported_sync) ||
+          if (!valid_barrier_sync_access(barrier.SyncBefore, barrier.AccessBefore, supported_sync, supported_access) ||
+              !valid_barrier_sync_access(barrier.SyncAfter, barrier.AccessAfter, supported_sync, supported_access) ||
               split_phase == EnhancedSplitPhase::Invalid || !barrier.pResource ||
               !IsSameDevice(device_, barrier.pResource)) {
             invalid_barrier();
@@ -6894,13 +6911,8 @@ public:
             continue;
           }
 
-          D3D12_RESOURCE_STATES before = D3D12_RESOURCE_STATE_COMMON;
-          D3D12_RESOURCE_STATES after = D3D12_RESOURCE_STATE_COMMON;
-          if (!barrier_access_to_state(barrier.AccessBefore, before) ||
-              !barrier_access_to_state(barrier.AccessAfter, after)) {
-            invalid_barrier();
-            continue;
-          }
+          const auto before = barrier_access_to_state(barrier.AccessBefore);
+          const auto after = barrier_access_to_state(barrier.AccessAfter);
 
           if (split_phase != EnhancedSplitPhase::None) {
             EnhancedSplitBarrier state{
@@ -6938,8 +6950,8 @@ public:
         for (UINT32 barrier_index = 0; barrier_index < group.NumBarriers; barrier_index++) {
           const auto &barrier = group.pTextureBarriers[barrier_index];
           const auto split_phase = enhanced_split_phase(barrier.SyncBefore, barrier.SyncAfter);
-          if (!valid_barrier_sync_access(barrier.SyncBefore, barrier.AccessBefore, supported_sync) ||
-              !valid_barrier_sync_access(barrier.SyncAfter, barrier.AccessAfter, supported_sync) ||
+          if (!valid_barrier_sync_access(barrier.SyncBefore, barrier.AccessBefore, supported_sync, supported_access) ||
+              !valid_barrier_sync_access(barrier.SyncAfter, barrier.AccessAfter, supported_sync, supported_access) ||
               split_phase == EnhancedSplitPhase::Invalid || !barrier.pResource ||
               !IsSameDevice(device_, barrier.pResource) ||
               (static_cast<UINT32>(barrier.Flags) & ~static_cast<UINT32>(D3D12_TEXTURE_BARRIER_FLAG_DISCARD))) {
@@ -6981,13 +6993,8 @@ public:
             continue;
           }
 
-          D3D12_RESOURCE_STATES before_access = D3D12_RESOURCE_STATE_COMMON;
-          D3D12_RESOURCE_STATES after_access = D3D12_RESOURCE_STATE_COMMON;
-          if (!barrier_access_to_state(barrier.AccessBefore, before_access) ||
-              !barrier_access_to_state(barrier.AccessAfter, after_access)) {
-            invalid_barrier();
-            continue;
-          }
+          const auto before_access = barrier_access_to_state(barrier.AccessBefore);
+          const auto after_access = barrier_access_to_state(barrier.AccessAfter);
 
           const auto tracked_before_layout = before_layout;
           const auto tracked_after_layout = after_layout;

@@ -70,6 +70,7 @@ D3D12_RESOURCE_DESC TextureDesc() {
   desc.MipLevels = 3;
   desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   desc.SampleDesc.Count = 1;
+  desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
   desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
   return desc;
 }
@@ -389,6 +390,228 @@ bool TestSyncScopeAdmission(ID3D12Device *device, ID3D12Resource *buffer,
          good;
 }
 
+bool TestSyncAccessCompatibility(ID3D12Device *device, ID3D12Resource *buffer,
+                                 ID3D12Resource *texture) {
+  // This oracle is access -> required sync, independently of the runtime's
+  // sync -> covered access mapping. Aggregates inherit their component scopes.
+  constexpr UINT32 all = D3D12_BARRIER_SYNC_ALL;
+  constexpr UINT32 vertex =
+      all | D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_DRAW |
+      D3D12_BARRIER_SYNC_ALL_SHADING | D3D12_BARRIER_SYNC_NON_PIXEL_SHADING;
+  constexpr UINT32 shader = vertex | D3D12_BARRIER_SYNC_PIXEL_SHADING |
+                            D3D12_BARRIER_SYNC_COMPUTE_SHADING;
+  struct AccessRule {
+    D3D12_BARRIER_ACCESS access;
+    UINT32 scopes, queues;
+  };
+  const AccessRule rules[] = {
+      {D3D12_BARRIER_ACCESS_COMMON, ~0u, 7},
+      {D3D12_BARRIER_ACCESS_NO_ACCESS, ~0u, 7},
+      {D3D12_BARRIER_ACCESS_VERTEX_BUFFER, vertex, 1},
+      {D3D12_BARRIER_ACCESS_CONSTANT_BUFFER, shader, 3},
+      {D3D12_BARRIER_ACCESS_INDEX_BUFFER,
+       all | D3D12_BARRIER_SYNC_DRAW | D3D12_BARRIER_SYNC_INDEX_INPUT, 1},
+      {D3D12_BARRIER_ACCESS_RENDER_TARGET,
+       all | D3D12_BARRIER_SYNC_DRAW | D3D12_BARRIER_SYNC_RENDER_TARGET, 1},
+      {D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+       shader | D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW |
+           D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO |
+           D3D12_BARRIER_SYNC_RAYTRACING,
+       3},
+      {D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
+       all | D3D12_BARRIER_SYNC_DRAW | D3D12_BARRIER_SYNC_DEPTH_STENCIL, 1},
+      {D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ,
+       all | D3D12_BARRIER_SYNC_DRAW | D3D12_BARRIER_SYNC_DEPTH_STENCIL, 1},
+      {D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+       shader | D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE |
+           D3D12_BARRIER_SYNC_RAYTRACING,
+       3},
+      {D3D12_BARRIER_ACCESS_STREAM_OUTPUT, vertex, 1},
+      {D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
+       all | D3D12_BARRIER_SYNC_EXECUTE_INDIRECT, 3},
+      {D3D12_BARRIER_ACCESS_COPY_SOURCE, all | D3D12_BARRIER_SYNC_COPY, 7},
+      {D3D12_BARRIER_ACCESS_COPY_DEST, all | D3D12_BARRIER_SYNC_COPY, 7},
+      {D3D12_BARRIER_ACCESS_RESOLVE_SOURCE, all | D3D12_BARRIER_SYNC_RESOLVE,
+       1},
+      {D3D12_BARRIER_ACCESS_RESOLVE_DEST, all | D3D12_BARRIER_SYNC_RESOLVE, 1},
+      {D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE,
+       all | D3D12_BARRIER_SYNC_PIXEL_SHADING | D3D12_BARRIER_SYNC_ALL_SHADING |
+           D3D12_BARRIER_SYNC_DRAW,
+       1},
+  };
+  struct Scope {
+    D3D12_BARRIER_SYNC value;
+    UINT32 queues;
+  };
+  const Scope scopes[] = {
+      {D3D12_BARRIER_SYNC_NONE, 7},
+      {D3D12_BARRIER_SYNC_ALL, 7},
+      {D3D12_BARRIER_SYNC_DRAW, 1},
+      {D3D12_BARRIER_SYNC_INDEX_INPUT, 1},
+      {D3D12_BARRIER_SYNC_VERTEX_SHADING, 1},
+      {D3D12_BARRIER_SYNC_PIXEL_SHADING, 1},
+      {D3D12_BARRIER_SYNC_DEPTH_STENCIL, 1},
+      {D3D12_BARRIER_SYNC_RENDER_TARGET, 1},
+      {D3D12_BARRIER_SYNC_COMPUTE_SHADING, 3},
+      {D3D12_BARRIER_SYNC_RAYTRACING, 3},
+      {D3D12_BARRIER_SYNC_COPY, 7},
+      {D3D12_BARRIER_SYNC_RESOLVE, 1},
+      {D3D12_BARRIER_SYNC_EXECUTE_INDIRECT, 3},
+      {D3D12_BARRIER_SYNC_ALL_SHADING, 3},
+      {D3D12_BARRIER_SYNC_NON_PIXEL_SHADING, 3},
+      {D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO,
+       3},
+      {D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW, 3},
+      {D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE, 3},
+      {D3D12_BARRIER_SYNC_COPY_RAYTRACING_ACCELERATION_STRUCTURE, 3},
+  };
+  auto record = [&](ID3D12GraphicsCommandList7 *list, D3D12_BARRIER_TYPE kind,
+                    D3D12_BARRIER_ACCESS access, D3D12_BARRIER_SYNC sync,
+                    bool before) {
+    const auto sb = before ? sync : D3D12_BARRIER_SYNC_ALL;
+    const auto sa = before ? D3D12_BARRIER_SYNC_ALL : sync;
+    D3D12_GLOBAL_BARRIER global;
+    D3D12_BUFFER_BARRIER b;
+    D3D12_TEXTURE_BARRIER t;
+    if (kind == D3D12_BARRIER_TYPE_GLOBAL) {
+      SetGlobal(global, sb, sa, access, access);
+      SubmitBarrier(list, kind, &global);
+    } else if (kind == D3D12_BARRIER_TYPE_BUFFER) {
+      SetBuffer(b, sb, sa, access, access, buffer, 0, UINT64_MAX);
+      SubmitBarrier(list, kind, &b);
+    } else {
+      SetTexture(t, sb, sa, access, access, D3D12_BARRIER_LAYOUT_GENERIC_READ,
+                 D3D12_BARRIER_LAYOUT_GENERIC_READ, texture,
+                 {D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, 0, 0, 0, 0, 0});
+      SubmitBarrier(list, kind, &t);
+    }
+  };
+  const D3D12_COMMAND_LIST_TYPE queues[] = {D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                            D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                            D3D12_COMMAND_LIST_TYPE_COPY};
+  bool good = true;
+  for (UINT q = 0; q != 3; ++q) {
+    for (UINT bit = 0; bit != 33; ++bit) {
+      const auto access =
+          static_cast<D3D12_BARRIER_ACCESS>(bit ? (1u << (bit - 1)) : 0);
+      UINT32 required = 0, access_queues = 0;
+      for (const auto &rule : rules)
+        if (rule.access == access) {
+          required = rule.scopes;
+          access_queues = rule.queues;
+        }
+      // RT access, video on these queues, and reserved access bits stay
+      // rejected.
+      for (const auto &scope : scopes) {
+        const bool allowed = (access_queues & (1u << q)) &&
+                             (scope.queues & (1u << q)) &&
+                             (scope.value == D3D12_BARRIER_SYNC_NONE
+                                  ? access == D3D12_BARRIER_ACCESS_NO_ACCESS
+                                  : (required & scope.value) != 0);
+        for (const bool before : {true, false}) {
+          const bool passed = ExpectClose(
+              device, "sync/access matrix", allowed ? S_OK : E_FAIL,
+              [&](auto *list) {
+                record(list, D3D12_BARRIER_TYPE_GLOBAL, access, scope.value,
+                       before);
+              },
+              queues[q]);
+          std::cout << "sync-access queue=" << queues[q]
+                    << " access=" << static_cast<UINT32>(access)
+                    << " sync=" << static_cast<UINT32>(scope.value)
+                    << " before=" << before << " allowed=" << allowed
+                    << " pass=" << passed << "\n";
+          good &= passed;
+        }
+      }
+    }
+  }
+  struct Combined {
+    UINT32 access, sync, queues;
+  };
+  const Combined combined[] = {
+      {D3D12_BARRIER_ACCESS_CONSTANT_BUFFER |
+           D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+       D3D12_BARRIER_SYNC_PIXEL_SHADING, 1},
+      {D3D12_BARRIER_ACCESS_CONSTANT_BUFFER |
+           D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+       D3D12_BARRIER_SYNC_COMPUTE_SHADING, 3},
+      {D3D12_BARRIER_ACCESS_CONSTANT_BUFFER |
+           D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+       D3D12_BARRIER_SYNC_COPY, 0},
+      {D3D12_BARRIER_ACCESS_INDEX_BUFFER | D3D12_BARRIER_ACCESS_CONSTANT_BUFFER,
+       D3D12_BARRIER_SYNC_DRAW, 1},
+      {D3D12_BARRIER_ACCESS_INDEX_BUFFER | D3D12_BARRIER_ACCESS_CONSTANT_BUFFER,
+       D3D12_BARRIER_SYNC_VERTEX_SHADING, 0},
+      {D3D12_BARRIER_ACCESS_VERTEX_BUFFER |
+           D3D12_BARRIER_ACCESS_CONSTANT_BUFFER,
+       D3D12_BARRIER_SYNC_ALL_SHADING, 1},
+      {D3D12_BARRIER_ACCESS_COPY_SOURCE | D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+       D3D12_BARRIER_SYNC_COPY | D3D12_BARRIER_SYNC_PIXEL_SHADING, 1},
+      {D3D12_BARRIER_ACCESS_COPY_SOURCE | D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+       D3D12_BARRIER_SYNC_COPY | D3D12_BARRIER_SYNC_COMPUTE_SHADING, 3},
+      {D3D12_BARRIER_ACCESS_COPY_SOURCE | D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+       D3D12_BARRIER_SYNC_COPY, 0},
+      {D3D12_BARRIER_ACCESS_COPY_SOURCE | D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+       D3D12_BARRIER_SYNC_PIXEL_SHADING, 0},
+      {D3D12_BARRIER_ACCESS_NO_ACCESS | D3D12_BARRIER_ACCESS_CONSTANT_BUFFER,
+       D3D12_BARRIER_SYNC_ALL, 0},
+      {(1u << 23) | D3D12_BARRIER_ACCESS_CONSTANT_BUFFER,
+       D3D12_BARRIER_SYNC_ALL, 0},
+      {D3D12_BARRIER_ACCESS_PREDICATION, D3D12_BARRIER_SYNC_PREDICATION, 3},
+  };
+  for (UINT q = 0; q != 3; ++q)
+    for (const auto &test : combined)
+      for (const bool before : {true, false}) {
+        const bool allowed = (test.queues & (1u << q)) != 0;
+        const bool passed = ExpectClose(
+            device, "combined sync/access", allowed ? S_OK : E_FAIL,
+            [&](auto *list) {
+              record(list, D3D12_BARRIER_TYPE_GLOBAL,
+                     static_cast<D3D12_BARRIER_ACCESS>(test.access),
+                     static_cast<D3D12_BARRIER_SYNC>(test.sync), before);
+            },
+            queues[q]);
+        std::cout << "sync-access-combined queue=" << queues[q]
+                  << " access=" << test.access << " sync=" << test.sync
+                  << " before=" << before << " allowed=" << allowed
+                  << " pass=" << passed << "\n";
+        good &= passed;
+      }
+  // Exercise the same admission owner through both resource-specific paths.
+  for (const auto kind :
+       {D3D12_BARRIER_TYPE_BUFFER, D3D12_BARRIER_TYPE_TEXTURE}) {
+    const auto access = kind == D3D12_BARRIER_TYPE_BUFFER
+                            ? D3D12_BARRIER_ACCESS_CONSTANT_BUFFER
+                            : D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
+    const auto shader_sync = kind == D3D12_BARRIER_TYPE_BUFFER
+                                 ? D3D12_BARRIER_SYNC_COMPUTE_SHADING
+                                 : D3D12_BARRIER_SYNC_PIXEL_SHADING;
+    for (UINT test = 0; test != 4; ++test)
+      for (const bool before : {true, false}) {
+        const auto a = static_cast<D3D12_BARRIER_ACCESS>(
+            access | (test >= 2 ? D3D12_BARRIER_ACCESS_COPY_SOURCE
+                                : D3D12_BARRIER_ACCESS_COMMON));
+        const auto sync = test == 0 ? shader_sync
+                          : test == 2
+                              ? static_cast<D3D12_BARRIER_SYNC>(
+                                    shader_sync | D3D12_BARRIER_SYNC_COPY)
+                              : D3D12_BARRIER_SYNC_COPY;
+        const bool allowed = test == 0 || test == 2;
+        const bool passed = ExpectClose(
+            device, "resource sync/access", allowed ? S_OK : E_FAIL,
+            [&](auto *list) { record(list, kind, a, sync, before); });
+        std::cout << "sync-access-resource kind=" << kind << " case=" << test
+                  << " before=" << before << " allowed=" << allowed
+                  << " pass=" << passed << "\n";
+        good &= passed;
+      }
+  }
+  return CheckHR("sync/access device status",
+                 device->GetDeviceRemovedReason()) &&
+         good;
+}
+
 bool TestTransferSyncAccess(ID3D12Device *device, ID3D12Resource *buffer,
                            ID3D12Resource *texture) {
   struct AccessCase {
@@ -595,7 +818,7 @@ bool TestValidSplitBarriers(ID3D12Device *device, ID3D12Resource *buffer, ID3D12
     };
     D3D12_TEXTURE_BARRIER discard = {};
     SetTexture(
-        discard, D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_ACCESS_NO_ACCESS,
+        discard, D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_NO_ACCESS,
         D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_UNDEFINED, D3D12_BARRIER_LAYOUT_RENDER_TARGET,
         texture, all_subresources, D3D12_TEXTURE_BARRIER_FLAG_DISCARD
     );
@@ -1356,6 +1579,9 @@ int main(int argc, char **argv) {
   if (!CreateResources(device.ptr, buffer, texture))
     return 1;
 
+  if (argc == 2 && !std::strcmp(argv[1], "--sync-access-compatibility"))
+    return TestSyncAccessCompatibility(device.ptr, buffer.ptr, texture.ptr) ? 0 : 1;
+
   if (argc == 2 && !std::strcmp(argv[1], "--transfer-sync-access"))
     return TestTransferSyncAccess(device.ptr, buffer.ptr, texture.ptr) ? 0 : 1;
 
@@ -1365,7 +1591,8 @@ int main(int argc, char **argv) {
   if (argc == 2 && !std::strcmp(argv[1], "--sync-none-access"))
     return TestNoneSyncAccess(device.ptr, buffer.ptr, texture.ptr) ? 0 : 1;
 
-  bool passed = TestTransferSyncAccess(device.ptr, buffer.ptr, texture.ptr);
+  bool passed = TestSyncAccessCompatibility(device.ptr, buffer.ptr, texture.ptr);
+  passed &= TestTransferSyncAccess(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestSyncScopeAdmission(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestNoneSyncAccess(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestValidSplitBarriers(device.ptr, buffer.ptr, texture.ptr);
