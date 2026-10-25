@@ -3869,3 +3869,48 @@ GPUs and T3/T4 NOT_RUN; broader N06/G1 remains incomplete. No COM/WMT/MSC ABI,
 resource layout, schedule or public capability change. Requested Xcode26
 NOT_RUN(actual27.1). User staged .gitignore/shared Wine preserved; focused local
 commit only, no push. Revert this commit if legal global admission regresses.
+
+### N06 implicit PSO root admission — 2026-10-25
+
+One creation-admission slice on07e6279c. Microsoft root-signature contract:
+explicit PSO root overrides embedded roots; without one every present shader
+must embed a matching root. MSC compute/graphics/mesh incorrectly tolerated
+missing-root E_FAIL. Existing extraction helper now returns E_INVALIDARG for
+absence; callers propagate all failures. Graphics uses its selected root
+fields instead of duplicate nullable reference state. Existing matching and
+local/global admission remain; no new parser/cache/state/module/ABI.
+
+Identical final external matrix PE on baseline reproduces6 bad SM6 accepts/42;
+formal container runner reproduces exactly2 bad accepts. Private/no-private
+builds pass, each passing42 SM5+42 SM6 RS1.0/1.1 matrix cases and full container/
+ownership regression (104 capacity,58 kind cases). Formal cases stay in existing
+container runner; ownership source unchanged. Default compute now creates/binds
+an explicit empty root. Persistence creates/passes/binds roots for graphics
+PSO/stream and creates a separate root on its second device; graphics fixtures
+opt into input assembly. Two initial persistence fixture failures remain logged
+and excluded, not claimed as passing tests.
+
+Eight implicit-root GPU processes cover compute777 and graphics0xff00ff00,
+both backends/configurations. Zero-constant oracle exits1 as expected. Four
+no-resource compute runs are SMOKE_ONLY; two persistence runs pass live and
+rehydrated compute/graphics execution.38 recorded processes:36 accepted outcomes
+(31 success, five expected failures), two excluded fixture failures.28 accepted
+API/GPU-validation-on runs plus eight timing-off; no accepted Metal validation
+error/command-buffer abort. Actual commands/hashes/logs and source snapshot:
+`../dxmt-test/n06-implicit-root-20261025/N06-implicit-root.md`.
+
+Creation-only ABBA per backend, four legal RS1.1 compute/graphics embedded/
+explicit cells,320 retained10-call batch means/3200 calls. Embedded P95(us):
+SM5 compute284.20->295.41(+3.94%), graphics710.11->748.20(+5.36%);
+SM6 compute401.24->412.15(+2.72%), graphics986.20->1015.67(+2.99%).
+Explicit P95 delta:SM5 compute-6.06%, graphics-4.14%; SM6 compute+0.31%,
+graphics+2.87%. Retain SM5 embedded-graphics tail warning OPEN, attribution
+INCONCLUSIVE. Existing cache reused; first-per-case timings are not cold-driver
+latency. No new per-bind/draw/submit scan/allocation/lock; Recording/Submit
+NOT_RUN and historical warnings remain OPEN. No overall performance claim.
+
+This closes missing-root admission, not all root/resource compatibility or
+mesh/RT execution. Mesh compiled only; GS runtime/native Windows/other GPUs/
+T3/T4 and requested Xcode26 NOT_RUN(actual27.1). Public capabilities unchanged;
+broader N06/G1/FL12_2 incomplete. User staged .gitignore/shared Wine preserved;
+focused local commit only, no push.

@@ -123,10 +123,11 @@ int main(int argc, char **argv) {
     std::cerr << "unknown test mode\n";
     return 2;
   }
-  const bool needs_root_signature =
-      root_uav || reserved_uav || reserved_srv || descriptor_uav || descriptor_table_resources ||
-      direct_indexed_resource_heap || root_cbv || root_constants || root_srv_mode;
-  const bool needs_output = needs_root_signature;
+  const bool has_root_arguments =
+      root_uav || reserved_uav || reserved_srv || descriptor_uav ||
+      descriptor_table_resources || direct_indexed_resource_heap || root_cbv ||
+      root_constants || root_srv_mode;
+  const bool needs_output = has_root_arguments;
 
   std::ifstream shader_file(argv[1], std::ios::binary | std::ios::ate);
   if (!shader_file) {
@@ -201,7 +202,7 @@ int main(int argc, char **argv) {
                                               IID_PPV_ARGS(&allocator))))
     goto cleanup;
 
-  if (needs_root_signature) {
+  if (has_root_arguments) {
     if (root_cbv || root_constants || root_srv_mode || reserved_srv) {
       if (root_cbv) {
         root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -313,20 +314,6 @@ int main(int argc, char **argv) {
       root_desc.NumParameters = 1;
       root_desc.pParameters = root_parameters;
     }
-    HRESULT serialize_hr =
-        descriptor_resources_1_1 || direct_indexed_resource_heap
-            ? D3D12SerializeVersionedRootSignature(&versioned_root_desc,
-                                                   &root_blob, &root_error)
-            : D3D12SerializeRootSignature(&root_desc,
-                                          D3D_ROOT_SIGNATURE_VERSION_1,
-                                          &root_blob, &root_error);
-    if (!CheckHR("D3D12SerializeRootSignature", serialize_hr))
-      goto cleanup;
-    if (!CheckHR("CreateRootSignature",
-                 device->CreateRootSignature(0, root_blob->GetBufferPointer(),
-                                             root_blob->GetBufferSize(),
-                                             IID_PPV_ARGS(&root_signature))))
-      goto cleanup;
 
     if (descriptor_uav || descriptor_table_resources || direct_indexed_resource_heap) {
       D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
@@ -570,6 +557,23 @@ int main(int argc, char **argv) {
       goto cleanup;
   }
 
+  {
+    HRESULT serialize_hr =
+        descriptor_resources_1_1 || direct_indexed_resource_heap
+            ? D3D12SerializeVersionedRootSignature(&versioned_root_desc,
+                                                   &root_blob, &root_error)
+            : D3D12SerializeRootSignature(&root_desc,
+                                          D3D_ROOT_SIGNATURE_VERSION_1,
+                                          &root_blob, &root_error);
+    if (!CheckHR("D3D12SerializeRootSignature", serialize_hr))
+      goto cleanup;
+    if (!CheckHR("CreateRootSignature",
+                 device->CreateRootSignature(0, root_blob->GetBufferPointer(),
+                                             root_blob->GetBufferSize(),
+                                             IID_PPV_ARGS(&root_signature))))
+      goto cleanup;
+  }
+
   pso_desc.pRootSignature = root_signature;
   pso_desc.CS.pShaderBytecode = shader.data();
   pso_desc.CS.BytecodeLength = shader.size();
@@ -611,13 +615,13 @@ int main(int argc, char **argv) {
                                          allocator, pso, IID_PPV_ARGS(&list))))
     goto cleanup;
 
-  if (needs_root_signature) {
-    // A directly indexed root signature must be set after its descriptor heap.
-    if (direct_indexed_resource_heap) {
-      ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
-      list->SetDescriptorHeaps(1, heaps);
-    }
-    list->SetComputeRootSignature(root_signature);
+  // A directly indexed root signature must be set after its descriptor heap.
+  if (direct_indexed_resource_heap) {
+    ID3D12DescriptorHeap *heaps[] = {descriptor_heap};
+    list->SetDescriptorHeaps(1, heaps);
+  }
+  list->SetComputeRootSignature(root_signature);
+  if (has_root_arguments) {
     if (direct_indexed_nonuniform_mixed)
       list->SetComputeRootDescriptorTable(
           0, descriptor_heap->GetGPUDescriptorHandleForHeapStart());

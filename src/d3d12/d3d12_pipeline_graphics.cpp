@@ -869,19 +869,10 @@ public:
     }
 
     if (!pDesc->pRootSignature) {
-      const void *reference_root_signature = nullptr;
-      size_t reference_root_signature_size = 0;
-      const HRESULT reference_hr = GetD3D12EmbeddedRootSignature(
-          pDesc->VS, vs_classification, &reference_root_signature, &reference_root_signature_size
-      );
-      const bool has_reference_root = SUCCEEDED(reference_hr);
-      if (FAILED(reference_hr) && (!use_msc || reference_hr != E_FAIL)) {
-        ERR("CreatePipelineState: VS has no usable embedded root signature, HRESULT=", reference_hr);
-        return reference_hr;
-      }
-      if (has_reference_root) {
-        root_signature = reference_root_signature;
-        root_signature_size = reference_root_signature_size;
+      hr = GetD3D12EmbeddedRootSignature(pDesc->VS, vs_classification, &root_signature, &root_signature_size);
+      if (FAILED(hr)) {
+        ERR("CreatePipelineState: VS has no usable embedded root signature, HRESULT=", hr);
+        return hr;
       }
 
       auto check_embedded_root_signature = [&](const D3D12_SHADER_BYTECODE &shader,
@@ -889,20 +880,16 @@ public:
                                                const char *stage) -> HRESULT {
         if (!shader.pShaderBytecode)
           return S_OK;
-        const void *root_signature = nullptr;
-        size_t root_signature_size = 0;
-        HRESULT root_hr = GetD3D12EmbeddedRootSignature(
-            shader, classification, &root_signature, &root_signature_size
-        );
+        const void *shader_root = nullptr;
+        size_t shader_root_size = 0;
+        HRESULT root_hr = GetD3D12EmbeddedRootSignature(shader, classification, &shader_root, &shader_root_size);
         if (FAILED(root_hr)) {
-          if (use_msc && !has_reference_root && root_hr == E_FAIL)
-            return S_OK;
           ERR("CreatePipelineState: ", stage,
               " has no usable embedded root signature, HRESULT=", root_hr);
           return root_hr;
         }
-        if (!has_reference_root || root_signature_size != reference_root_signature_size ||
-            std::memcmp(root_signature, reference_root_signature, root_signature_size) != 0) {
+        if (shader_root_size != root_signature_size ||
+            std::memcmp(shader_root, root_signature, root_signature_size) != 0) {
           ERR("CreatePipelineState: ", stage,
               " embedded root signature does not match VS");
           return E_INVALIDARG;
@@ -1717,9 +1704,8 @@ MTLD3D12GraphicsPipelineStateImpl::InitializeMesh(const D3D12PipelineStreamData 
     HRESULT hr = GetD3D12EmbeddedRootSignature(
         ms_bytecode, ms_classification, &root_signature, &root_signature_size
     );
-    if (FAILED(hr) && hr != E_FAIL)
+    if (FAILED(hr))
       return hr;
-    const bool has_reference_root = SUCCEEDED(hr);
     auto check_embedded_root_signature = [&](const D3D12_SHADER_BYTECODE &shader,
                                              const D3D12ShaderClassification &classification) -> HRESULT {
       if (!shader.pShaderBytecode)
@@ -1728,9 +1714,8 @@ MTLD3D12GraphicsPipelineStateImpl::InitializeMesh(const D3D12PipelineStreamData 
       size_t shader_root_size = 0;
       HRESULT root_hr = GetD3D12EmbeddedRootSignature(shader, classification, &shader_root, &shader_root_size);
       if (FAILED(root_hr))
-        return !has_reference_root && root_hr == E_FAIL ? S_OK : root_hr;
-      if (!has_reference_root || shader_root_size != root_signature_size ||
-          std::memcmp(shader_root, root_signature, root_signature_size) != 0)
+        return root_hr;
+      if (shader_root_size != root_signature_size || std::memcmp(shader_root, root_signature, root_signature_size) != 0)
         return E_INVALIDARG;
       return S_OK;
     };

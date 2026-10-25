@@ -89,7 +89,7 @@ public:
         HRESULT hr = GetD3D12EmbeddedRootSignature(
             pDesc->CS, classification, &root_signature, &root_signature_size
         );
-        if (FAILED(hr) && hr != E_FAIL)
+        if (FAILED(hr))
           return hr;
       }
 

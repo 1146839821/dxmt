@@ -1645,8 +1645,9 @@ GetD3D12EmbeddedRootSignature(
   *root_signature_size = 0;
   if (FAILED(classification.validation_hr))
     return classification.validation_hr;
+  // Without an explicit root, every PSO shader must carry a matching root signature.
   if (!classification.embedded_root_signature || !classification.embedded_root_signature_size)
-    return E_FAIL;
+    return E_INVALIDARG;
   if (classification.embedded_root_signature_size < sizeof(RawRootSignatureDesc))
     return E_INVALIDARG;
   RawRootSignatureDesc desc;

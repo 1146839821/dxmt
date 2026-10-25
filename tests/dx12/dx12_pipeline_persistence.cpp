@@ -159,7 +159,7 @@ cleanup:
 }
 
 bool RunGraphics(ID3D12Device *device, ID3D12PipelineState *pipeline,
-                 bool geometry) {
+                 ID3D12RootSignature *root_signature, bool geometry) {
   struct Vertex {
     float position[2];
     float color[4];
@@ -286,6 +286,7 @@ bool RunGraphics(ID3D12Device *device, ID3D12PipelineState *pipeline,
 
   list->RSSetViewports(1, &viewport);
   list->RSSetScissorRects(1, &scissor);
+  list->SetGraphicsRootSignature(root_signature);
   list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   list->IASetVertexBuffers(0, 1, &vertex_view);
   list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
@@ -346,6 +347,7 @@ struct UnsupportedGraphicsStream {
 };
 
 struct GraphicsStream {
+  StreamSubobject<ID3D12RootSignature *, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE> root_signature;
   StreamSubobject<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS> vs;
   StreamSubobject<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS> ps;
   StreamSubobject<D3D12_INPUT_LAYOUT_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT> input_layout;
@@ -390,6 +392,7 @@ main(int argc, char **argv) {
   ID3D12Device2 *device2 = nullptr;
   ID3D12Device *other_device = nullptr;
   ID3D12RootSignature *root_signature = nullptr;
+  ID3D12RootSignature *other_root_signature = nullptr;
   ID3DBlob *root_blob = nullptr;
   ID3DBlob *root_error = nullptr;
   ID3D12PipelineState *compute_pso = nullptr;
@@ -469,6 +472,7 @@ main(int argc, char **argv) {
     Release(canonical_disabled_blob);
     Release(inactive_graphics_changed_blob);
     Release(inactive_graphics_blob);
+    Release(other_root_signature);
     Release(other_device);
     Release(root_signature);
     Release(root_error);
@@ -491,6 +495,8 @@ main(int argc, char **argv) {
 
   root_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
   root_parameter.Descriptor.ShaderRegister = 0;
+  root_desc.Flags =
+      D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
   root_desc.NumParameters = 1;
   root_desc.pParameters = &root_parameter;
   if (!CheckHR(
@@ -547,6 +553,7 @@ main(int argc, char **argv) {
       ))
     return fail("stale token was not treated as a cache miss");
 
+  graphics_desc.pRootSignature = root_signature;
   graphics_desc.VS = {vertex_shader.data(), vertex_shader.size()};
   graphics_desc.PS = {pixel_shader.data(), pixel_shader.size()};
   if (geometry)
@@ -769,6 +776,7 @@ main(int argc, char **argv) {
       ))
     return fail("truncated unsupported stream was accepted");
 
+  graphics_stream.root_signature.value = root_signature;
   graphics_stream.vs.value = graphics_desc.VS;
   graphics_stream.ps.value = graphics_desc.PS;
   graphics_stream.input_layout.value = graphics_desc.InputLayout;
@@ -825,7 +833,7 @@ main(int argc, char **argv) {
     return fail("live library load failed");
   }
   if (!RunCompute(device, loaded_compute, root_signature) ||
-      !RunGraphics(device, loaded_graphics, geometry)) {
+      !RunGraphics(device, loaded_graphics, root_signature, geometry)) {
     Release(loaded_graphics);
     Release(loaded_compute);
     return fail("live library pipeline execution failed");
@@ -882,7 +890,7 @@ main(int argc, char **argv) {
     return fail("rehydrated library load failed");
   }
   if (!RunCompute(device, loaded_compute, root_signature) ||
-      !RunGraphics(device, loaded_graphics, geometry)) {
+      !RunGraphics(device, loaded_graphics, root_signature, geometry)) {
     Release(loaded_graphics);
     Release(loaded_compute);
     return fail("rehydrated pipeline execution failed");
@@ -917,8 +925,16 @@ main(int argc, char **argv) {
 
   if (!CheckHR("D3D12CreateDevice second", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&other_device))))
     return fail("second device creation failed");
+  if (!CheckHR(
+          "Create second-device root signature",
+          other_device->CreateRootSignature(
+              0, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
+              IID_PPV_ARGS(&other_root_signature)
+          )
+      ))
+    return fail("second-device root signature creation failed");
   auto other_compute_desc = compute_desc;
-  other_compute_desc.pRootSignature = nullptr;
+  other_compute_desc.pRootSignature = other_root_signature;
   if (!CheckHR(
           "Create second-device compute pipeline",
           other_device->CreateComputePipelineState(&other_compute_desc, IID_PPV_ARGS(&other_compute_pso))

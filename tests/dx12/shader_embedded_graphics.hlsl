@@ -10,7 +10,7 @@ struct VSOutput
     float4 color : COLOR;
 };
 
-[RootSignature("RootFlags(0)")]
+[RootSignature("RootFlags(ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT)")]
 VSOutput vs_main(VSInput input)
 {
     VSOutput output;
@@ -19,7 +19,7 @@ VSOutput vs_main(VSInput input)
     return output;
 }
 
-[RootSignature("RootFlags(0)")]
+[RootSignature("RootFlags(ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT)")]
 float4 ps_main(VSOutput input) : SV_Target0
 {
     return input.color;

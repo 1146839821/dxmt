@@ -130,6 +130,7 @@ bool ReadFile(const char *path, std::vector<uint8_t> &data) {
 
 bool CreateEmptyRootSignature(ID3D12Device *device, ID3D12RootSignature **root_signature) {
   D3D12_ROOT_SIGNATURE_DESC desc = {};
+  desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
   ID3DBlob *blob = nullptr;
   ID3DBlob *error = nullptr;
   HRESULT hr = D3D12SerializeRootSignature(
@@ -321,6 +322,20 @@ bool BuildContainer(
   const auto hash = dxmt::md5::hashDxbcBinary(container.data(), container.size());
   std::memcpy(container.data() + 4, hash.data.data(), hash.data.size());
   return true;
+}
+
+bool RemoveRootSignature(const std::vector<uint8_t> &source,
+                         std::vector<uint8_t> &result) {
+  std::vector<ContainerPart> parts;
+  if (!ReadContainerParts(source, parts))
+    return false;
+  parts.erase(std::remove_if(parts.begin(), parts.end(),
+                             [](const ContainerPart &part) {
+                               return part.fourcc ==
+                                      MakeFourCC('R', 'T', 'S', '0');
+                             }),
+              parts.end());
+  return BuildContainer(source, parts, result);
 }
 
 bool RemoveExecutableParts(const std::vector<uint8_t> &source, std::vector<uint8_t> &result) {
@@ -664,9 +679,43 @@ VSOutput ds_main(TessFactors factors, const OutputPatch<VSOutput, 3> patch, floa
           device, "dxil-embedded-compute-explicit-root", dxil_cs, empty_root_signature, true
       ) && passed;
       if (has_compute_without_root) {
+        passed = ExpectComputePSO(device, "dxil-no-embedded-compute-null-root",
+                                  dxil_cs_without_root, nullptr, false,
+                                  E_INVALIDARG) &&
+                 passed;
         passed = ExpectComputePSO(
-            device, "dxil-no-embedded-compute-null-root", dxil_cs_without_root, nullptr, true
-        ) && passed;
+                     device, "dxil-no-embedded-compute-explicit-root",
+                     dxil_cs_without_root, empty_root_signature, true) &&
+                 passed;
+        std::vector<uint8_t> vertex_without_root, pixel_without_root;
+        if (!RemoveRootSignature(dxil_vertex, vertex_without_root) ||
+            !RemoveRootSignature(dxil_pixel, pixel_without_root)) {
+          std::cerr << "failed to strip graphics root signatures\n";
+          passed = false;
+        } else {
+          const D3D12_SHADER_BYTECODE no_root_vs = {vertex_without_root.data(),
+                                                    vertex_without_root.size()};
+          const D3D12_SHADER_BYTECODE no_root_ps = {pixel_without_root.data(),
+                                                    pixel_without_root.size()};
+          passed =
+              ExpectGraphicsPSO(device, "dxil-no-embedded-graphics-null-root",
+                                no_root_vs, no_root_ps, nullptr, false, false,
+                                true, {}, {}, {}, E_INVALIDARG) &&
+              passed;
+          passed = ExpectGraphicsPSO(device,
+                                     "dxil-no-embedded-graphics-explicit-root",
+                                     no_root_vs, no_root_ps,
+                                     empty_root_signature, true, false, true) &&
+                   passed;
+          passed = ExpectGraphicsPSO(device, "dxil-no-embedded-vs-null-root",
+                                     no_root_vs, dxil_ps, nullptr, false, false,
+                                     true) &&
+                   passed;
+          passed = ExpectGraphicsPSO(device, "dxil-no-embedded-ps-null-root",
+                                     dxil_vs, no_root_ps, nullptr, false, false,
+                                     true) &&
+                   passed;
+        }
       }
       passed = ExpectGraphicsPSO(
           device, "dxil-embedded-graphics-matching-null-root", dxil_vs, dxil_ps, nullptr, true, false, true
