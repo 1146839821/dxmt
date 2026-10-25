@@ -636,8 +636,25 @@ valid_barrier_sync_access(D3D12_BARRIER_SYNC sync, D3D12_BARRIER_ACCESS access, 
                                                                      : 0;
   // NONE excludes accesses on this side of an ordinary Barrier. NO_ACCESS may
   // also be paired with a nonempty sync scope, so this implication is one-way.
-  return supported && !(static_cast<UINT32>(sync) & ~supported) &&
-         (sync != D3D12_BARRIER_SYNC_NONE || access == D3D12_BARRIER_ACCESS_NO_ACCESS);
+  if (!supported || (static_cast<UINT32>(sync) & ~supported) ||
+      (sync == D3D12_BARRIER_SYNC_NONE && access != D3D12_BARRIER_ACCESS_NO_ACCESS))
+    return false;
+  // SPLIT denotes the deferred side of a paired barrier, not an execution
+  // scope. The other half validates its actual scope against these accesses.
+  if (sync == D3D12_BARRIER_SYNC_SPLIT)
+    return true;
+  const UINT32 sync_bits = static_cast<UINT32>(sync);
+  const UINT32 access_bits = static_cast<UINT32>(access);
+  // Check each access family independently: a combined read mask needs both
+  // scopes, unless ALL covers them. Unrelated shading scopes cannot cover a
+  // copy or resolve operation.
+  if ((access_bits & (D3D12_BARRIER_ACCESS_COPY_SOURCE | D3D12_BARRIER_ACCESS_COPY_DEST)) &&
+      !(sync_bits & (D3D12_BARRIER_SYNC_ALL | D3D12_BARRIER_SYNC_COPY)))
+    return false;
+  if ((access_bits & (D3D12_BARRIER_ACCESS_RESOLVE_SOURCE | D3D12_BARRIER_ACCESS_RESOLVE_DEST)) &&
+      !(sync_bits & (D3D12_BARRIER_SYNC_ALL | D3D12_BARRIER_SYNC_RESOLVE)))
+    return false;
+  return true;
 }
 
 enum class EnhancedSplitPhase : uint8_t {

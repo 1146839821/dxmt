@@ -2979,6 +2979,52 @@ final aggregate/ordinary-aggregate JSON,build/runtime logs,initial-reset-expecta
 Local focused commit only,no push;overall goal active. Next candidate:N12
 sync/access compatibility at the same owner before any capability promotion.
 
+### N12 Copy/Resolve access and sync compatibility — 2026-10-25
+
+Base 663a7c3d. Shared valid_barrier_sync_access admitted recognized sync bits
+without transfer-access compatibility. Add COPY_SOURCE/DEST => ALL|COPY and
+RESOLVE_SOURCE/DEST => ALL|RESOLVE, checking each family in combined masks.
+Standalone SPLIT is deferred; existing phase/pair checks validate actual halves.
+NONE=>NO_ACCESS and raw-bit/list-type admission unchanged. Same six checks,
+no new owner/state/cache/file/ABI/native emission/capability change. Other access
+families and full layout/queue compatibility remain OPEN; Enhanced remains FALSE.
+
+Existing enhanced runner --transfer-sync-access/default adds144 Close assertions:
+64 legal/80 invalid, both sides, four accesses and combined read masks. Resolve
+uses global barriers to isolate access validation from resource/MSAA constraints;
+copy also covers buffer/texture. Same final PE twice on immutable baseline:
+62 unexpected S_OK,64 legal and18 existing invalid controls PASS. Candidate twice
+all144 PASS. Full enhanced (including prior760 scope assertions/NONE/split),full
+command-list,complete queue-handoff and feature contracts PASS. Adjacent native16
+and exact GPU10 PASS,six no-resource readbacks NOT_RUN. Independent no-private
+144/full enhanced/native16+GPU10/full command-list/FL11_0+logicOp0 PASS. API/GPU1/1,
+staged DLL/native load paths checked,no Metal validation errors.30 probes checked;
+source/PE/native hashes and no-private changed-TU macro verified. Private peer
+DXGI/WineMetal remain immutable/matched to prior manifest on both sides;they are
+not claimed identical to current build-directory PE copies. Initial overly strict
+peer verifier failure retained;corrected lineage check passes,without sample retry.
+
+Cost same PE,AB/BA/AB,3 processes/side,25 rounds/dropfirst,72 retained/side;
+median process p50/p95,observer/API/GPU off,Hud1. Calibration both sides1000CBV
+calls=>ONE native barrier/stages27/27,exact data PASS. Recording/call .0598/.0643
+=>.06915/.0734 us (+15.635/+14.152%);Submit369.2/462.3=>363.05/506.2 us
+(-1.666/+9.496%);Execute-through-fence2611.15/3186.9=>2618.85/3020.4 us
+(+.295/-5.225%). Completion includes CPU/Wine/event overhead,not isolated GPU.
+Ordinary50000-copy Recording3217.65/3507.4=>3610.55/3780.3 us
+(+12.211/+7.781%);Submit22369.45/23093=>22478.2/22905.9 us (+.486/-.810%).
+Close1.55/2.3=>1.65/2.2 us. Material recording/Submit-tail warnings retained;
+causes unproven,including ordinary path without this validator. Correctness fix
+has observed costs;current/historical performance gates OPEN,no free-validation
+or performance PASS claim. All samples retained;no unchanged matrix retry.
+
+Apple M1 Max/macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1;requested Xcode26 NOT_RUN.
+Full Enhanced conformance,NONE lifetime,pending/alias/discard,RT/video,Windows,
+otherGPU/D3D11/T3/T4 NOT_RUN;cross-queue half-pair legality unresolved. User
+.gitignore/shared Wine/prefix preserved. Evidence:
+`../dxmt-test/n12-sync-access-20261025/N12-sync-access.md`,manifest/baseline/sources,
+red-summary/results/aggregate/ordinary-aggregate JSON,build/runtime/verification
+logs. Local focused commit only,no push;overall goal remains active.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
