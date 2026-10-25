@@ -3190,6 +3190,58 @@ manifest/baseline/sources/red-summary/results/aggregates/verification and build/
 runtime logs. Local focused commit only,no push;overall goal active. Next:measure/
 reduce admission cost first;then texture no-layout recording/split/submit semantics.
 
+### 2026-10-25 — N12 borrow immutable heap properties for admission (G1)
+
+Base3c2abaa5. Prior resource/layout admission added9.15ns/call measured warning.
+Hypotheses:COM property-copy cost;duplicate GetDesc(falsified for buffers by
+existing scope fast path);code placement/system movement(unresolved control).
+Existing resource base gains internal const GetHeapPropertiesView,Buffer/Texture
+borrow owned heap_props_ or nullptr when reserved. Barrier replaces20B COM result
+initialization/copy/HRESULT with one scalar pointer-return virtual query. Same
+resource mask/flags/upload/readback/CUSTOM/reserved/sync/layout/split/state/native
+semantics retained. No copied/cached state,new field,lock,allocation,reference,
+lifetime extension or src/header file. Existing property owner remains resource;
+view used only in current call. Public COM getter source and buffer getter bytes
+unchanged. Query appended after old resource methods:PE vtables prove COM0..14
+and resource-base0..33 stable;two implementation destructor slots shift behind
+new query and all d3d12 units rebuilt. Public exports/data layout unchanged.
+Static Barrier1340=>1336 instructions,59calls both;COM getter15 unchanged,view5;
+ordinary CopyBuffer162/13 unchanged(excluding padding;not cycle proof).
+
+Existing enhanced test adds8 reserved-buffer side assertions:source/dest/SRV
+accepted,UAV without flag rejected,public heap query E_INVALIDARG required.
+Prior306+8=314 PASS baseline/private/no-private. Both full enhanced(prior3856/
+144/760/NONE/split/state),full command-list,features PASS. Both adjacent native16/
+GPU10 PASS,6 no-resource readbacks NOT_RUN;queue-handoff6 GPU subresources PASS.
+Pressure A/B calibration1000calls=>1nativepacket,stages27/27,pixels/buffer PASS.
+API/GPU1/1 correctness,no Metal errors;29 final probe exits/hashes/paths verified.
+Independent no-private matched its own DLL/native/PE. Changed-line clang-format/
+scoped builds PASS;144 warning occurrences/backend,none on changed lines.
+Initial internal-slot placement trial retained/excluded;after query append DLLs
+rebuilt and all final correctness/timing repeated,not an unchanged retry.
+
+Same-PE AB/BA/AB,3processes/side,25rounds/dropfirst,72retained/scenario/side,
+median process P50/P95. Buffer recording/call .07055/.0821=>.06455/.0740us
+(-8.50/-9.87%,P50-6ns);Submit375.15/456.7=>362.15/486.9us(-3.47/+6.61%);
+Execute-through-fence2460.85/2647.9=>2366.05/2744.1us(-3.85/+3.63%).
+Ordinary50000-copy Recording3249.3/3439.1=>3096.8/3254.4us(-4.69/-5.37%);
+Close1.8/2.5=>1.6/2.3us;Submit22255.35/23042=>22257.35/23014.2us.
+Recording improvement supports avoiding the property copy,not exclusive causal
+attribution:ordinary control also moves though it never calls new getter.
+Completion includes CPU/Wine/event,not isolated GPU. Tail warnings/historical/
+global performance gates OPEN;no-private/texture-specific timing NOT_RUN.
+
+Environment refreshed macOS27.0.1/Xcode27.1/M1 Max Apple7/MSC4.0.1/Wine11/
+clang23.1;Xcode26 NOT_RUN. FL11_1/private,FL11_0/no-private,SM6_0,EnhancedFALSE
+unchanged. Both-UNDEFINED valid-but-unimplemented path,full resource/Resolve/SRS/
+split/lifetime semantics,Windows/otherGPU/D3D11/T3/T4 remain OPEN/NOT_RUN.
+User.gitignore/shared Wine/prefix preserved. Evidence:
+../dxmt-test/n12-admission-cost-20261025/N12-admission-cost.md,manifest/baseline/
+results/aggregates/disassembly/vtable-symbols/warnings/environment/verification/
+build/runtime logs and pre-append-trial. Local focused commit,no push;goal active.
+Next:first both-UNDEFINED texture no-layout recording/split/submit;tail-cost cause
+only with a distinct reproducible measurement slice.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

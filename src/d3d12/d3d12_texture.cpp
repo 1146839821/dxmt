@@ -1158,6 +1158,11 @@ public:
     return S_OK;
   };
 
+  const D3D12_HEAP_PROPERTIES *
+  GetHeapPropertiesView() const override {
+    return reserved_ ? nullptr : &heap_props_;
+  }
+
   virtual HRESULT STDMETHODCALLTYPE
   GetHeapProperties(D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS *pFlags) {
     if (reserved_)

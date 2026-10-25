@@ -327,6 +327,12 @@ public:
   ) {
     return E_NOTIMPL;
   }
+
+  // Borrow the resource's immutable creation properties without a COM output
+  // copy. Reserved resources have no heap properties and return nullptr. The
+  // view remains valid for the resource's lifetime; it does not retain a heap.
+  // Append internal queries so existing resource virtual slots stay fixed.
+  virtual const D3D12_HEAP_PROPERTIES *GetHeapPropertiesView() const = 0;
 };
 
 enum class EnhancedSplitBarrierType : uint8_t {

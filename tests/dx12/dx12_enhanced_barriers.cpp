@@ -193,6 +193,7 @@ bool TestResourceLayoutAccess(ID3D12Device *device) {
     DenyBuffer,
     Upload,
     Readback,
+    ReservedBuffer,
     Color,
     UAVColor,
     RTColor,
@@ -228,6 +229,19 @@ bool TestResourceLayoutAccess(ID3D12Device *device) {
                    : i == Readback ? D3D12_RESOURCE_STATE_COPY_DEST
                                    : D3D12_RESOURCE_STATE_COMMON;
     std::cout << "creating resource/layout fixture=" << i << "\n";
+    if (i == ReservedBuffer) {
+      desc.Width = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+      if (!CheckHR(
+              "reserved buffer fixture",
+              device->CreateReservedResource(&desc, initial, nullptr,
+                                             IID_PPV_ARGS(&resources[i].ptr))))
+        return false;
+      D3D12_HEAP_PROPERTIES unavailable = {};
+      if (resources[i]->GetHeapProperties(&unavailable, nullptr) !=
+          E_INVALIDARG)
+        return false;
+      continue;
+    }
     if (!CheckHR("resource/layout fixture",
                  device->CreateCommittedResource(
                      &heap, D3D12_HEAP_FLAG_NONE, &desc, initial, nullptr,
@@ -247,6 +261,11 @@ bool TestResourceLayoutAccess(ID3D12Device *device) {
         D3D12_BARRIER_LAYOUT_##layout, accepted                                \
   }
   const Case cases[] = {
+      CASE("reserved copy source", ReservedBuffer, COPY_SOURCE, COMMON, true),
+      CASE("reserved copy dest", ReservedBuffer, COPY_DEST, COMMON, true),
+      CASE("reserved SRV", ReservedBuffer, SHADER_RESOURCE, COMMON, true),
+      CASE("reserved UAV missing flag", ReservedBuffer, UNORDERED_ACCESS,
+           COMMON, false),
       CASE("buffer vertex", Buffer, VERTEX_BUFFER, COMMON, true),
       CASE("buffer CBV", Buffer, CONSTANT_BUFFER, COMMON, true),
       CASE("buffer index", Buffer, INDEX_BUFFER, COMMON, true),

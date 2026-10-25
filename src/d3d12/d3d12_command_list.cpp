@@ -692,14 +692,13 @@ barrier_resource_access_mask(MTLD3D12Resource *resource, const D3D12_RESOURCE_DE
     mask |= D3D12_BARRIER_ACCESS_VERTEX_BUFFER | D3D12_BARRIER_ACCESS_CONSTANT_BUFFER |
             D3D12_BARRIER_ACCESS_INDEX_BUFFER | D3D12_BARRIER_ACCESS_SHADER_RESOURCE |
             D3D12_BARRIER_ACCESS_STREAM_OUTPUT | D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT;
-    D3D12_HEAP_PROPERTIES heap = {};
     // Reserved resources have no heap properties. Do not infer fixed upload or
     // readback semantics from CPU visibility, or reject reserved resources.
-    if (SUCCEEDED(resource->GetHeapProperties(&heap, nullptr))) {
-      if (heap.Type == D3D12_HEAP_TYPE_UPLOAD)
+    if (const auto *heap = resource->GetHeapPropertiesView()) {
+      if (heap->Type == D3D12_HEAP_TYPE_UPLOAD)
         return (mask & ~(D3D12_BARRIER_ACCESS_COPY_DEST | D3D12_BARRIER_ACCESS_STREAM_OUTPUT)) |
                D3D12_BARRIER_ACCESS_NO_ACCESS;
-      if (heap.Type == D3D12_HEAP_TYPE_READBACK)
+      if (heap->Type == D3D12_HEAP_TYPE_READBACK)
         return D3D12_BARRIER_ACCESS_COPY_DEST | D3D12_BARRIER_ACCESS_NO_ACCESS;
     }
   } else {
