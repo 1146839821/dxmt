@@ -610,8 +610,8 @@ barrier_access_to_state(D3D12_BARRIER_ACCESS access, D3D12_RESOURCE_STATES &stat
   return true;
 }
 
-inline bool
-valid_barrier_sync_access(D3D12_BARRIER_SYNC sync, D3D12_BARRIER_ACCESS access, D3D12_COMMAND_LIST_TYPE type) {
+inline UINT32
+barrier_sync_mask(D3D12_COMMAND_LIST_TYPE type) {
   constexpr UINT32 copy_sync = static_cast<UINT32>(D3D12_BARRIER_SYNC_ALL) |
                                static_cast<UINT32>(D3D12_BARRIER_SYNC_COPY) |
                                static_cast<UINT32>(D3D12_BARRIER_SYNC_SPLIT);
@@ -630,10 +630,14 @@ valid_barrier_sync_access(D3D12_BARRIER_SYNC sync, D3D12_BARRIER_ACCESS access, 
       static_cast<UINT32>(D3D12_BARRIER_SYNC_RENDER_TARGET) | static_cast<UINT32>(D3D12_BARRIER_SYNC_RESOLVE);
   // Validate every explicit bit, even when combined with ALL. Aggregate shading
   // scopes are valid on compute lists; bundles cannot record Barrier commands.
-  const UINT32 supported = type == D3D12_COMMAND_LIST_TYPE_DIRECT    ? direct_sync
-                           : type == D3D12_COMMAND_LIST_TYPE_COMPUTE ? compute_sync
-                           : type == D3D12_COMMAND_LIST_TYPE_COPY    ? copy_sync
-                                                                     : 0;
+  return type == D3D12_COMMAND_LIST_TYPE_DIRECT    ? direct_sync
+         : type == D3D12_COMMAND_LIST_TYPE_COMPUTE ? compute_sync
+         : type == D3D12_COMMAND_LIST_TYPE_COPY    ? copy_sync
+                                                   : 0;
+}
+
+inline bool
+valid_barrier_sync_access(D3D12_BARRIER_SYNC sync, D3D12_BARRIER_ACCESS access, UINT32 supported) {
   // NONE excludes accesses on this side of an ordinary Barrier. NO_ACCESS may
   // also be paired with a nonempty sync scope, so this implication is one-way.
   if (!supported || (static_cast<UINT32>(sync) & ~supported) ||
@@ -6811,6 +6815,9 @@ public:
       return;
     }
 
+    // The command-list type is fixed for its lifetime. Share its sync domain
+    // across both sides and all barriers in this call without caching state.
+    const UINT32 supported_sync = barrier_sync_mask(type_);
     auto invalid_barrier = [&]() {
       WARN("D3D12 Barrier received an unsupported or invalid barrier");
       FailRecording(__func__, "unsupported or invalid barrier");
@@ -6842,8 +6849,8 @@ public:
         }
         for (UINT32 barrier_index = 0; barrier_index < group.NumBarriers; barrier_index++) {
           const auto &barrier = group.pGlobalBarriers[barrier_index];
-          if (!valid_barrier_sync_access(barrier.SyncBefore, barrier.AccessBefore, type_) ||
-              !valid_barrier_sync_access(barrier.SyncAfter, barrier.AccessAfter, type_) ||
+          if (!valid_barrier_sync_access(barrier.SyncBefore, barrier.AccessBefore, supported_sync) ||
+              !valid_barrier_sync_access(barrier.SyncAfter, barrier.AccessAfter, supported_sync) ||
               enhanced_split_phase(barrier.SyncBefore, barrier.SyncAfter) != EnhancedSplitPhase::None) {
             invalid_barrier();
             continue;
@@ -6871,8 +6878,8 @@ public:
         for (UINT32 barrier_index = 0; barrier_index < group.NumBarriers; barrier_index++) {
           const auto &barrier = group.pBufferBarriers[barrier_index];
           const auto split_phase = enhanced_split_phase(barrier.SyncBefore, barrier.SyncAfter);
-          if (!valid_barrier_sync_access(barrier.SyncBefore, barrier.AccessBefore, type_) ||
-              !valid_barrier_sync_access(barrier.SyncAfter, barrier.AccessAfter, type_) ||
+          if (!valid_barrier_sync_access(barrier.SyncBefore, barrier.AccessBefore, supported_sync) ||
+              !valid_barrier_sync_access(barrier.SyncAfter, barrier.AccessAfter, supported_sync) ||
               split_phase == EnhancedSplitPhase::Invalid || !barrier.pResource ||
               !IsSameDevice(device_, barrier.pResource)) {
             invalid_barrier();
@@ -6931,8 +6938,8 @@ public:
         for (UINT32 barrier_index = 0; barrier_index < group.NumBarriers; barrier_index++) {
           const auto &barrier = group.pTextureBarriers[barrier_index];
           const auto split_phase = enhanced_split_phase(barrier.SyncBefore, barrier.SyncAfter);
-          if (!valid_barrier_sync_access(barrier.SyncBefore, barrier.AccessBefore, type_) ||
-              !valid_barrier_sync_access(barrier.SyncAfter, barrier.AccessAfter, type_) ||
+          if (!valid_barrier_sync_access(barrier.SyncBefore, barrier.AccessBefore, supported_sync) ||
+              !valid_barrier_sync_access(barrier.SyncAfter, barrier.AccessAfter, supported_sync) ||
               split_phase == EnhancedSplitPhase::Invalid || !barrier.pResource ||
               !IsSameDevice(device_, barrier.pResource) ||
               (static_cast<UINT32>(barrier.Flags) & ~static_cast<UINT32>(D3D12_TEXTURE_BARRIER_FLAG_DISCARD))) {

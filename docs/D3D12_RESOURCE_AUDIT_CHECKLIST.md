@@ -3025,6 +3025,61 @@ otherGPU/D3D11/T3/T4 NOT_RUN;cross-queue half-pair legality unresolved. User
 red-summary/results/aggregate/ordinary-aggregate JSON,build/runtime/verification
 logs. Local focused commit only,no push;overall goal remains active.
 
+### N12 invariant sync-domain decoding — 2026-10-25
+
+Base d083da18. The previous recording warning reproduces before edits:
+pressure.py seed reports +14.298% vs old663 in one process/side and exits1
+for its >5% diagnostic warning; both GPU/native calibrations PASS. Disassembly
+shows no extra out-of-line validator calls (Barrier1221 instructions/64 calls,
+old1129/64),but queue-type mask selection duplicated for both sides in each kind
+loop. Extract unchanged mask selection into barrier_sync_mask,compute once at
+Barrier entry,pass invocation-local UINT32 to existing six side checks. Complete
+validation body and mask constants byte-identical;no access/NONE/SPLIT/raw-domain
+check removed. No cached state/owner/lock/allocation/file/ABI/native/capability
+change. Candidate static Barrier1164 instructions/64 calls,one domain decode.
+CopyBufferRegion172 instructions/13 calls all variants,callee addresses shift.
+These are static counts,not executed instructions. Hoisting removes redundant
+work;it does not prove the cause of every prior warning,especially ordinary-copy
+recording that never invokes this predicate. Layout/Rosetta/cache causes OPEN.
+
+Existing144 transfer assertions twice/full enhanced (prior760/NONE/split/state),
+full command-list,complete queue handoff,feature contracts PASS. Adjacent native16
+and exact GPU10 PASS,six no-resource readbacks NOT_RUN. Independent no-private
+144/full enhanced/native16+GPU10/full command-list/FL11_0+logicOp0 PASS. API/GPU1/1,
+staged DLL/native paths checked,no Metal validation errors.36 probe exits0;
+source/equivalence/PE/native/no-private-macro/peer lineage verified. Existing tests
+unchanged;no new runner. Immutable private peer PE match prior stage,not claimed
+identical to current build-directory peer PE. User .gitignore/shared Wine/prefix
+preserved;both builds pass with five pre-existing warnings.
+
+Three-way rotating old663 diagnostic/d083 baseline/candidate,same PE/peers,
+3 processes/stage,25 rounds/dropfirst,72 retained/stage/scenario,median process
+p50/p95. First pressure rotation old/before precedes source edit;candidate follows
+build+functional checks. Remaining pressure rotations and entire ordinary matrix
+have no intervening builds;all seed/final samples retained. No unchanged retry.
+Observer/API/GPU off,Hud1 for timing;validated calibration both sides1000CBV
+calls=>ONE native barrier/stages27/27,exact data PASS. d083=>candidate pressure
+Recording/call .0678/.0723=>.0607/.0648 us (-10.472/-10.373%);Submit377.05/479.1
+=>356.8/480.7 us (-5.371/+.334%);Execute-through-fence2628.3/2948.7=>2618.2/3465.1
+us (-.384/+17.513%). Completion includes CPU/Wine/event,not isolated GPU time.
+Ordinary50000-copy Recording3614.05/3993.1=>3095.95/3259.6 us (-14.336/-18.369%);
+Submit22166.2/22957.2=>22332.6/22900.7 us (+.751/-.246%);Close1.5/2.1=>1.6/2.1.
+Recording vs old pressure-.164/+2.532%,ordinary-2.588/-2.123%;completion p95 vs
+old+20.643%. Recording recovers in measured fixtures;completion-tail and all
+historical/global performance gates remain OPEN. No game/whole-runtime speedup
+or regression-free claim. Ordinary path causal attribution remains unresolved.
+
+M1 Max/macOS27.0.1/Xcode27.1/Wine11/clang23.1 rechecked;existing Metal3/Apple7/
+MSC4.0.1 identity retained. Requested Xcode26 NOT_RUN. FL/SM/EnhancedFALSE unchanged.
+Full Enhanced/other access families/NONE lifetime/pending/alias/discard,RT/video,
+Windows/otherGPU/D3D11/T3/T4 NOT_RUN;cross-queue half legality unresolved.
+Evidence:`../dxmt-test/n12-sync-access-cost-20261025/N12-sync-access-cost.md`,
+manifest/baseline/semantic-equivalence/code-summary/seed-diagnostic JSON,raw asm,
+aggregate/ordinary-aggregate/perf-results JSON,build/runtime/verification logs.
+Local focused commit only,no push;overall goal active. Next:N12 shared sync/access
+compatibility with this hoisted input;tail/layout investigation needs stronger
+causal evidence before further optimization.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
