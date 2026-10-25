@@ -3330,6 +3330,36 @@ build/runtime logs,initial-24,typed-flag-trial. Focused local commit,no push;
 goal active. Next:isolate shared recording cost;global first-use/legacy decay
 reconciliation only with a complete execution-ordered oracle.
 
+### N12 recording-cost isolation — 2026-10-25
+
+Documentation-only follow-up to `0813773e`; no runtime, test-runner, ABI,
+owner, cache or capability change. External record:
+`../dxmt-test/n12-recording-isolation-20261025/N12-recording-isolation.md`.
+Four validated calibration processes and 64 timed processes cross frozen
+`f751d053`/`0813773e` DLLs between two directories, including same-DLL controls.
+All 68 processes pass their real readback checks. Each scenario/variant has
+16 processes, 384 retained rounds. Process/block-level log-ratio adjustment
+for directory and order estimates pressure recording P50 +5.98% (exploratory
+95% interval +4.61% to +7.28%) and ordinary P50 +6.54% (+5.43% to +7.68%).
+Both have eight of eight mixed-DLL pairs slower with B. Pressure also has a
+-3.52% directory effect; this is not solely a directory or noise explanation.
+Ordinary P95 +0.20% (-5.87% to +7.23%) does not establish the previous +7.62%
+tail warning as a stable DLL effect; that historical warning remains recorded.
+
+Pressure timing removes the native observer; ordinary timing retains its
+newBuffer allocation counter. Ordinary `native_buffers=0` denotes zero new
+buffers, not zero copies, and its uninstalled encoder observer is NOT_RUN.
+API/GPU validation is enabled in calibration and disabled for timed processes.
+The initial incorrect harness counter expectation is retained and excluded.
+Standalone actual IsSameDevice P50 changes only +0.49%; this does not explain
+the full recording regression. Native profiling yields opaque Rosetta JIT PCs.
+Guest RIP sampling maps leaf PCs to DLL symbols but A has one sampling error
+(exit 1), while B exits 0; it is diagnostic evidence, not a passed paired gate
+or causal attribution. No speculative identity/cache/alignment patch is made.
+Performance acceptance remains OPEN. Next: isolate full recording components
+and classify/repeat guest sampling errors. Exact commands, hashes, calibration,
+raw timing, null controls, rejected trials and profiling limits are external.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,
