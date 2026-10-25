@@ -2926,6 +2926,59 @@ mutation evidence;pre-union-strengthening matrices retained/excluded;
 red/green/no-private/build/perf logs. Next candidate:N12 queue-specific raw-sync
 admission with existing barrier oracle; no second mechanism started this round.
 
+### N12 enhanced-barrier sync-domain/list-type admission — 2026-10-25
+
+Baseb644d10a. Existing valid_barrier_sync_access checked only NONE=>NO_ACCESS;
+nonzero undefined/queue-incompatible sync flags were accepted. Extend this one
+pure predicate with type_: constexpr Copy/Compute/Direct allowed masks, reject
+explicit bits outside the queue domain (even with ALL),no mask for Bundle.
+All six global/buffer/texture side checks reuse it. Preserve aggregate shading
+scopes on Compute and PREDICATION/EXECUTE_INDIRECT alias. Existing NONE/access,
+split-phase/global-SPLIT/resource/layout guards retained. No stored masks/new
+owner/state/cache/allocation/lock/scan,production file,ABI/queue/layout/capability
+change. EnhancedFALSE/FL/SM unchanged. Errors follow existing FailRecording/
+Close E_FAIL before split/resource bookkeeping;no device removal.
+
+Existing enhanced runner --sync-scope-admission/default:41 finite bit-domain/
+combination cases xDirect/Compute/Copy x3 barrier kinds x2 sides=738,plus18
+nonempty Bundle cases. Fresh lists/NO_ACCESS/Common isolate sync admission;
+invalid recordings never submitted. Same final PE baseline twice:246 legal and
+66 existing invalid controls PASS,444 unexpected S_OK (210 undefined-domain,
+216 queue-incompatible,18 Bundle). Candidate twice756 PASS;four failed-Close
+sticky Reset/new-list-on-same-allocator/device-health controls PASS. Initial test
+wrongly expected Reset recovery;Microsoft requires failed Close's error to
+persist. Existing Reset correct;initial source/logs retained/excluded,oracle
+corrected without N10 production change. Final760 assertions all PASS.
+
+Private full enhanced (including27 NONE/access,split/ownership/interleaved),
+full command-list,complete queue-handoff,feature contract PASS. Existing adjacent
+oracle16native/10 exact GPU data PASS,six no-resource NOT_RUN. Matched independent
+no-private760 assertions/16native+10GPU/originalCBV4GPU/full command-list+enhanced/
+FL11_0+logicOp0 PASS. API/GPU1/1,Hud1,staged PE/native paths checked,no Metal
+validation errors.31 final probe exits/source/stage/SDK hashes/changed-TU macro
+verified. Legal raw scope admission is not full Enhanced Barrier conformance.
+
+Cost AB/BA/AB,25 rounds/dropfirst,72 retained/side,median process p50/p95;
+validation calibration thenobserver off/API+GPU0/0/Hud1. Unchanged tracked
+command-list input/cost source+PE hashes checked;no stale artifact or unchanged
+matrix retry.1000 validCBV API calls still ONE native barrier/stages27/27 BOTH
+sides. Recording/call .0693/.0718 ->.05855/.0631 us;Submit366.05/544.9 ->
+363.05/528.2 us;Execute-through-fence2602.35/3447.5 ->2650.5/3690.7 us
+(p95+7.054%). Completion includes CPU/Wine/event wait,not isolated GPU time.
+Ordinary50000-copy Recording p50/p95 3048.65/3300.4 ->3165.6/3492.8 us
+(+3.836/+5.830%);Submit22209.5/22773.7 ->22482.8/23532.9 us (+1.231/+3.334%).
+Close p95 2.1->2.1 us. Causes unproven;no validation-free/speedup/global cost PASS
+claim. Current/historical performance warnings remain OPEN.
+
+Full sync-access/layout/queue compatibility,NONE lifetime,pending/alias-discard,
+actual RT/video,Windows/otherGPU/D3D11/T3/T4 NOT_RUN;cross-queue half legality
+unresolved. Xcode27.1 actual,requested26 NOT_RUN. User .gitignore/shared Wine
+unchanged. Evidence:`../dxmt-test/n12-sync-scope-20261025/N12-sync-scope.md`,
+manifest/sources/environment-actual/final-selected-results JSON,red classification,
+final aggregate/ordinary-aggregate JSON,build/runtime logs,initial-reset-expectation.
+Local focused commit only,no push;overall goal active. Next candidate:N12
+sync/access compatibility at the same owner before any capability promotion.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

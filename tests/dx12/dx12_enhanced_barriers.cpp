@@ -33,20 +33,18 @@ bool CheckHR(const char *operation, HRESULT hr) {
 }
 
 bool CreateCommandList(
-    ID3D12Device *device, Owned<ID3D12CommandAllocator> &allocator, Owned<ID3D12GraphicsCommandList> &list,
-    Owned<ID3D12GraphicsCommandList7> &list7
-) {
+    ID3D12Device *device, Owned<ID3D12CommandAllocator> &allocator,
+    Owned<ID3D12GraphicsCommandList> &list,
+    Owned<ID3D12GraphicsCommandList7> &list7,
+    D3D12_COMMAND_LIST_TYPE type = D3D12_COMMAND_LIST_TYPE_DIRECT) {
   if (!CheckHR(
           "CreateCommandAllocator",
-          device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator.ptr))
-      ) ||
-      !CheckHR(
-          "CreateCommandList",
-          device->CreateCommandList(
-              0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.ptr, nullptr, IID_PPV_ARGS(&list.ptr)
-          )
-      ) ||
-      !CheckHR("QueryInterface(ID3D12GraphicsCommandList7)", list->QueryInterface(IID_PPV_ARGS(&list7.ptr))))
+          device->CreateCommandAllocator(type, IID_PPV_ARGS(&allocator.ptr))) ||
+      !CheckHR("CreateCommandList",
+               device->CreateCommandList(0, type, allocator.ptr, nullptr,
+                                         IID_PPV_ARGS(&list.ptr))) ||
+      !CheckHR("QueryInterface(ID3D12GraphicsCommandList7)",
+               list->QueryInterface(IID_PPV_ARGS(&list7.ptr))))
     return false;
   return list7.ptr != nullptr;
 }
@@ -164,11 +162,13 @@ void SubmitBarrier(ID3D12GraphicsCommandList7 *list, D3D12_BARRIER_TYPE type, co
 }
 
 template <typename Record>
-bool ExpectClose(ID3D12Device *device, const char *name, HRESULT expected, Record &&record) {
+bool ExpectClose(
+    ID3D12Device *device, const char *name, HRESULT expected, Record &&record,
+    D3D12_COMMAND_LIST_TYPE type = D3D12_COMMAND_LIST_TYPE_DIRECT) {
   Owned<ID3D12CommandAllocator> allocator;
   Owned<ID3D12GraphicsCommandList> list;
   Owned<ID3D12GraphicsCommandList7> list7;
-  if (!CreateCommandList(device, allocator, list, list7))
+  if (!CreateCommandList(device, allocator, list, list7, type))
     return false;
   record(list7.ptr);
   const HRESULT actual = list->Close();
@@ -211,6 +211,182 @@ bool TestInterleavedRecordedStates(ID3D12Device *device, ID3D12Resource *buffer,
         });
   }
   return passed;
+}
+
+bool TestSyncScopeAdmission(ID3D12Device *device, ID3D12Resource *buffer,
+                            ID3D12Resource *texture) {
+  // Queue masks are from the Enhanced Barriers command-queue sync table.
+  constexpr UINT direct = 1, compute = 2, copy = 4;
+  constexpr UINT all = direct | compute | copy;
+  struct Case {
+    const char *name;
+    UINT32 sync;
+    UINT queues;
+    UINT32 other = D3D12_BARRIER_SYNC_ALL;
+  };
+  const Case cases[] = {
+      {"none", D3D12_BARRIER_SYNC_NONE, all},
+      {"all", D3D12_BARRIER_SYNC_ALL, all},
+      {"draw", D3D12_BARRIER_SYNC_DRAW, direct},
+      {"index", D3D12_BARRIER_SYNC_INDEX_INPUT, direct},
+      {"vertex", D3D12_BARRIER_SYNC_VERTEX_SHADING, direct},
+      {"pixel", D3D12_BARRIER_SYNC_PIXEL_SHADING, direct},
+      {"depth", D3D12_BARRIER_SYNC_DEPTH_STENCIL, direct},
+      {"render-target", D3D12_BARRIER_SYNC_RENDER_TARGET, direct},
+      {"compute", D3D12_BARRIER_SYNC_COMPUTE_SHADING, direct | compute},
+      {"raytracing", D3D12_BARRIER_SYNC_RAYTRACING, direct | compute},
+      {"copy", D3D12_BARRIER_SYNC_COPY, all},
+      {"resolve", D3D12_BARRIER_SYNC_RESOLVE, direct},
+      {"indirect", D3D12_BARRIER_SYNC_EXECUTE_INDIRECT, direct | compute},
+      {"all-shading", D3D12_BARRIER_SYNC_ALL_SHADING, direct | compute},
+      {"non-pixel", D3D12_BARRIER_SYNC_NON_PIXEL_SHADING, direct | compute},
+      {"postbuild",
+       D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO,
+       direct | compute},
+      {"clear-uav", D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW,
+       direct | compute},
+      {"reserved16", 0x10000u, 0},
+      {"reserved17", 0x20000u, 0},
+      {"reserved18", 0x40000u, 0},
+      {"reserved19", 0x80000u, 0},
+      {"video-decode", D3D12_BARRIER_SYNC_VIDEO_DECODE, 0},
+      {"video-process", D3D12_BARRIER_SYNC_VIDEO_PROCESS, 0},
+      {"video-encode", D3D12_BARRIER_SYNC_VIDEO_ENCODE, 0},
+      {"build-as", D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+       direct | compute},
+      {"copy-as", D3D12_BARRIER_SYNC_COPY_RAYTRACING_ACCELERATION_STRUCTURE,
+       direct | compute},
+      {"reserved25", 0x2000000u, 0},
+      {"reserved26", 0x4000000u, 0},
+      {"reserved27", 0x8000000u, 0},
+      {"reserved28", 0x10000000u, 0},
+      {"reserved29", 0x20000000u, 0},
+      {"reserved30", 0x40000000u, 0},
+      {"split", D3D12_BARRIER_SYNC_SPLIT, all},
+      // PREDICATION aliases EXECUTE_INDIRECT, including on compute lists.
+      {"predication-alias", D3D12_BARRIER_SYNC_PREDICATION, direct | compute},
+      {"shading-aggregates",
+       UINT32(D3D12_BARRIER_SYNC_ALL_SHADING) |
+           UINT32(D3D12_BARRIER_SYNC_NON_PIXEL_SHADING),
+       direct | compute},
+      {"all-with-pixel",
+       UINT32(D3D12_BARRIER_SYNC_ALL) |
+           UINT32(D3D12_BARRIER_SYNC_PIXEL_SHADING),
+       direct},
+      {"all-with-reserved", UINT32(D3D12_BARRIER_SYNC_ALL) | 0x10000u, 0},
+      {"split-with-copy",
+       UINT32(D3D12_BARRIER_SYNC_SPLIT) | UINT32(D3D12_BARRIER_SYNC_COPY), 0},
+      {"split-with-reserved", UINT32(D3D12_BARRIER_SYNC_SPLIT) | 0x10000u, 0},
+      {"all-bits", 0xffffffffu, 0},
+      {"reserved-opposite-split", 0x10000u, 0, D3D12_BARRIER_SYNC_SPLIT},
+  };
+  struct Queue {
+    D3D12_COMMAND_LIST_TYPE type;
+    UINT bit;
+  };
+  const Queue queues[] = {{D3D12_COMMAND_LIST_TYPE_DIRECT, direct},
+                          {D3D12_COMMAND_LIST_TYPE_COMPUTE, compute},
+                          {D3D12_COMMAND_LIST_TYPE_COPY, copy},
+                          {D3D12_COMMAND_LIST_TYPE_BUNDLE, 0}};
+  bool good = true;
+  for (const auto &queue : queues) {
+    for (const auto kind :
+         {D3D12_BARRIER_TYPE_GLOBAL, D3D12_BARRIER_TYPE_BUFFER,
+          D3D12_BARRIER_TYPE_TEXTURE}) {
+      for (const auto &test : cases) {
+        if (queue.type == D3D12_COMMAND_LIST_TYPE_BUNDLE &&
+            test.sync != D3D12_BARRIER_SYNC_NONE &&
+            test.sync != D3D12_BARRIER_SYNC_ALL &&
+            test.sync != D3D12_BARRIER_SYNC_COPY)
+          continue;
+        for (UINT side = 0; side < 2; ++side) {
+          const auto before =
+              static_cast<D3D12_BARRIER_SYNC>(side ? test.other : test.sync);
+          const auto after =
+              static_cast<D3D12_BARRIER_SYNC>(side ? test.sync : test.other);
+          const bool split_global = kind == D3D12_BARRIER_TYPE_GLOBAL &&
+                                    (before == D3D12_BARRIER_SYNC_SPLIT ||
+                                     after == D3D12_BARRIER_SYNC_SPLIT);
+          const bool allowed = (queue.bit & test.queues) && !split_global;
+          const bool passed = ExpectClose(
+              device, test.name, allowed ? S_OK : E_FAIL,
+              [&](auto *list) {
+                D3D12_GLOBAL_BARRIER global;
+                D3D12_BUFFER_BARRIER buffer_barrier;
+                D3D12_TEXTURE_BARRIER texture_barrier;
+                if (kind == D3D12_BARRIER_TYPE_GLOBAL) {
+                  SetGlobal(global, before, after,
+                            D3D12_BARRIER_ACCESS_NO_ACCESS,
+                            D3D12_BARRIER_ACCESS_NO_ACCESS);
+                  SubmitBarrier(list, kind, &global);
+                } else if (kind == D3D12_BARRIER_TYPE_BUFFER) {
+                  SetBuffer(buffer_barrier, before, after,
+                            D3D12_BARRIER_ACCESS_NO_ACCESS,
+                            D3D12_BARRIER_ACCESS_NO_ACCESS, buffer, 0,
+                            UINT64_MAX);
+                  SubmitBarrier(list, kind, &buffer_barrier);
+                } else {
+                  SetTexture(
+                      texture_barrier, before, after,
+                      D3D12_BARRIER_ACCESS_NO_ACCESS,
+                      D3D12_BARRIER_ACCESS_NO_ACCESS,
+                      D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_COMMON,
+                      texture,
+                      {D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, 0, 0, 0, 0, 0});
+                  SubmitBarrier(list, kind, &texture_barrier);
+                }
+              },
+              queue.type);
+          std::cout << "sync-scope queue=" << queue.type << " kind=" << kind
+                    << " case=" << test.name << " side=" << side
+                    << " allowed=" << allowed << " pass=" << passed << "\n";
+          good &= passed;
+        }
+      }
+    }
+    Owned<ID3D12CommandAllocator> allocator;
+    Owned<ID3D12GraphicsCommandList> list;
+    Owned<ID3D12GraphicsCommandList7> list7;
+    if (!CreateCommandList(device, allocator, list, list7, queue.type))
+      return false;
+    D3D12_GLOBAL_BARRIER barrier;
+    SetGlobal(barrier, static_cast<D3D12_BARRIER_SYNC>(0x40000000u),
+              D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_NO_ACCESS,
+              D3D12_BARRIER_ACCESS_NO_ACCESS);
+    SubmitBarrier(list7.ptr, D3D12_BARRIER_TYPE_GLOBAL, &barrier);
+    const bool rejected = list->Close() == E_FAIL;
+    if (!CheckHR("sync scope allocator Reset", allocator->Reset()))
+      return false;
+    // A failed Close permanently poisons this list; Reset returns that failure.
+    const HRESULT reset = list->Reset(allocator.ptr, nullptr);
+    const bool sticky = reset == E_FAIL;
+    if (SUCCEEDED(reset) &&
+        !CheckHR("sync scope baseline reclose", list->Close()))
+      return false;
+    Owned<ID3D12GraphicsCommandList> fresh;
+    Owned<ID3D12GraphicsCommandList7> fresh7;
+    if (!CheckHR("sync scope fresh list",
+                 device->CreateCommandList(0, queue.type, allocator.ptr,
+                                           nullptr,
+                                           IID_PPV_ARGS(&fresh.ptr))) ||
+        !CheckHR("sync scope fresh list7",
+                 fresh->QueryInterface(IID_PPV_ARGS(&fresh7.ptr))))
+      return false;
+    if (queue.type != D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      SetGlobal(barrier, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_ACCESS_NO_ACCESS);
+      SubmitBarrier(fresh7.ptr, D3D12_BARRIER_TYPE_GLOBAL, &barrier);
+    }
+    const bool fresh_closed = fresh->Close() == S_OK;
+    std::cout << "sync-scope-reset queue=" << queue.type
+              << " rejected=" << rejected << " sticky=" << sticky
+              << " fresh=" << fresh_closed
+              << " pass=" << (rejected && sticky && fresh_closed) << "\n";
+    good &= rejected && sticky && fresh_closed;
+  }
+  return CheckHR("sync scope device status",
+                 device->GetDeviceRemovedReason()) &&
+         good;
 }
 
 bool TestNoneSyncAccess(ID3D12Device *device, ID3D12Resource *buffer,
@@ -1090,10 +1266,14 @@ int main(int argc, char **argv) {
   if (!CreateResources(device.ptr, buffer, texture))
     return 1;
 
+  if (argc == 2 && !std::strcmp(argv[1], "--sync-scope-admission"))
+    return TestSyncScopeAdmission(device.ptr, buffer.ptr, texture.ptr) ? 0 : 1;
+
   if (argc == 2 && !std::strcmp(argv[1], "--sync-none-access"))
     return TestNoneSyncAccess(device.ptr, buffer.ptr, texture.ptr) ? 0 : 1;
 
-  bool passed = TestNoneSyncAccess(device.ptr, buffer.ptr, texture.ptr);
+  bool passed = TestSyncScopeAdmission(device.ptr, buffer.ptr, texture.ptr);
+  passed &= TestNoneSyncAccess(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestValidSplitBarriers(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestInterleavedRecordedStates(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestCrossCommandListSplitBarriers(device.ptr, buffer.ptr);
