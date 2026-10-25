@@ -3914,3 +3914,51 @@ mesh/RT execution. Mesh compiled only; GS runtime/native Windows/other GPUs/
 T3/T4 and requested Xcode26 NOT_RUN(actual27.1). Public capabilities unchanged;
 broader N06/G1/FL12_2 incomplete. User staged .gitignore/shared Wine preserved;
 focused local commit only, no push.
+
+### N06 root-container caller extent — 2026-10-25
+
+On55c0b771, both public root deserializers discarded DataSize and trusted the
+DXBC header size. Identical final ownership PE on baseline reproduces20 bad
+accepts/24 advertised-length cases: RS1.0/1.1 x legacy/versioned APIs accept
+zero,1,31,one-byte-short and >UINT_MAX lengths for a fully backed valid blob.
+The backing bytes remain intact, so the baseline is a deterministic API failure
+without depending on a process crash. Exact-size controls remain valid.
+
+Existing root-signature module now shares GetRootSignatureData using the
+existing CDXBCParser::ReadDXBC with the actual caller extent. Null/over32-bit,
+malformed outer framing, absent RTS0 and undersized raw headers fail before
+raw deserialization. Device creation validates before its owned blob copy,
+then passes the extracted raw slice for immediate owned deserialization; no
+borrowed pointer persists, second container scan or new object owner is added.
+Both exported APIs use the same helper. No vendored parser or shared Airconv
+code is modified. This is caller-extent admission, not complete hardening:
+nested raw payload offsets/counts and the vendored framing parser's own
+malformed-index arithmetic remain OPEN for the next bounded-decoder slice.
+
+Private/no-private builds and full ownership/container regression pass; the
+existing ownership runner adds24 extent cases and input-mutation/owned-descriptor
+checks, plus exact device creation for both versions. External derivative adds
+42 guard-page/null/over32-bit checks per configuration across all three entry
+points, with no guard-page fault. Eight adjacent SM5/SM6 implicit-root compute/
+graphics GPU processes return777/0xff00ff00; two persistence runs pass live and
+rehydrated execution.21 processes:20 success, one expected baseline failure;
+17 API/GPU-validation-on, four timing-off. No unexpected runtime exit, Metal
+validation error or command-buffer abort. Initial macro-qualification build
+error is preserved and corrected; final builds pass. Commands/source/PE/DLL
+hashes and Microsoft primary-source snapshots:
+`../dxmt-test/n06-root-container-20261025/N06-root-container.md`.
+
+Same-PE creation/deserialization ABBA: RS1.0/1.1 x legacy/versioned/device,
+600 retained100-call batch means/60000 create-release calls. P95(ns), in that
+API order: RS1.0 358.55->362.75(+1.17%),318.10->325.10(+2.20%),
+479.10->494.65(+3.25%); RS1.1 309.00->312.95(+1.28%),
+318.55->351.50(+10.34%),485.65->488.00(+0.48%). Retain RS1.1 versioned
+P95 warning OPEN, attribution INCONCLUSIVE; its P50 decreases305->299ns.
+One existing O(container chunks) framing pass remains; extra constant-time
+extent/minimum checks, no bind/draw/submit scan/lock/allocation. Recording/
+Submit NOT_RUN, historical warnings OPEN; no overall performance acceptance.
+
+M1 Max/Apple7, macOS27.0.1, MSC4.0.1/Wine11, actual Xcode27.1; requested26,
+native Windows/other GPUs/mesh/RT/T3/T4 NOT_RUN. Public capabilities/ABI/
+root argument layout unchanged. Broader N06/G1/FL12_2 incomplete. User staged
+.gitignore/shared Wine preserved; local commit only, no push.

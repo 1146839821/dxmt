@@ -26,6 +26,7 @@
 #include "util_math.hpp"
 #include "util_md5.hpp"
 #include <cstring>
+#include <limits>
 #include <vector>
 #include "../d3d10/d3d10_blob.hpp"
 #include "../airconv/dxbc_root_signature.hpp"
@@ -242,6 +243,25 @@ D3D12SerializeRootSignature(
 #pragma endregion
 #pragma region Deserialization
 
+// All public root-container inputs must use the caller's extent, not the
+// container header's claimed size. Reuse the existing DXBC framing parser.
+static HRESULT
+GetRootSignatureData(const void *bytecode, SIZE_T size, const void **data, UINT *data_size) {
+  *data = nullptr;
+  *data_size = 0;
+  if (!bytecode || size > std::numeric_limits<UINT>::max())
+    return E_INVALIDARG;
+  microsoft::CDXBCParser parser;
+  if (FAILED(parser.ReadDXBC(bytecode, static_cast<UINT>(size))))
+    return E_INVALIDARG;
+  const UINT index = parser.FindNextMatchingBlob(microsoft::DXBC_RootSignature, 0);
+  if (index == DXBC_BLOB_NOT_FOUND || parser.GetBlobSize(index) < sizeof(RawRootSignatureDesc))
+    return E_INVALIDARG;
+  *data = parser.GetBlob(index);
+  *data_size = parser.GetBlobSize(index);
+  return S_OK;
+}
+
 template <typename Base> class MTLD3D12RootSignatureDeserializer : public ComObject<Base> {
 public:
   virtual HRESULT STDMETHODCALLTYPE
@@ -309,7 +329,7 @@ D3D12CreateVersionedRootSignatureDeserializer(
 
   const void *pRawRootSig;
   UINT RawRootSigSize;
-  HRESULT hr = microsoft::DXBCGetRootSignature(pBytecode, &pRawRootSig, &RawRootSigSize);
+  HRESULT hr = GetRootSignatureData(pBytecode, DataSize, &pRawRootSig, &RawRootSigSize);
   if (FAILED(hr))
     return hr;
 
@@ -326,7 +346,7 @@ D3D12CreateRootSignatureDeserializer(const void *pBytecode, SIZE_T DataSize, REF
 
   const void *pRawRootSig;
   UINT RawRootSigSize;
-  HRESULT hr = microsoft::DXBCGetRootSignature(pBytecode, &pRawRootSig, &RawRootSigSize);
+  HRESULT hr = GetRootSignatureData(pBytecode, DataSize, &pRawRootSig, &RawRootSigSize);
   if (FAILED(hr))
     return hr;
 
@@ -380,15 +400,9 @@ public:
   }
 
   HRESULT
-  Initialize() {
-    const void *pRawRootSig;
-    UINT RawRootSigSize;
-    HRESULT hr = microsoft::DXBCGetRootSignature(blob_.data(), &pRawRootSig, &RawRootSigSize);
-    if (FAILED(hr))
-      return hr;
-
+  Initialize(const void *raw, UINT raw_size) {
     RootSignatureDeserializer deserializer;
-    hr = deserializer.Deserialize(pRawRootSig, RawRootSigSize);
+    HRESULT hr = deserializer.Deserialize(raw, raw_size);
     if (FAILED(hr))
       return hr;
 
@@ -622,8 +636,13 @@ CreateRootSignature(
 ) {
   InitReturnPtr(ppRootSignature);
 
+  const void *raw;
+  UINT raw_size;
+  HRESULT hr = GetRootSignatureData(pBytecode, BytecodeLength, &raw, &raw_size);
+  if (FAILED(hr))
+    return hr;
   auto root_sig = Com(new MTLD3D12RootSignatureImpl(pDevice, pBytecode, BytecodeLength));
-  HRESULT hr = root_sig->Initialize();
+  hr = root_sig->Initialize(raw, raw_size);
   if (FAILED(hr))
     return hr;
   return root_sig->QueryInterface(riid, ppRootSignature);

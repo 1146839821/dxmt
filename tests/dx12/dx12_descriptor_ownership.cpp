@@ -87,6 +87,79 @@ bool IsDescriptorTypeAt(
   return false;
 }
 
+bool CheckRootContainerLengths(ID3D12Device *device) {
+  bool passed = true;
+  UINT cases = 0;
+  for (const auto version : {D3D_ROOT_SIGNATURE_VERSION_1_0,
+                             D3D_ROOT_SIGNATURE_VERSION_1_1}) {
+    D3D12_ROOT_PARAMETER parameter = {};
+    parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameter.Constants.Num32BitValues = 3;
+    D3D12_ROOT_PARAMETER1 parameter1 = {};
+    parameter1.ParameterType = parameter.ParameterType;
+    parameter1.Constants = parameter.Constants;
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc = {};
+    desc.Version = version;
+    if (version == D3D_ROOT_SIGNATURE_VERSION_1_0)
+      desc.Desc_1_0 = {1, &parameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    else
+      desc.Desc_1_1 = {1, &parameter1, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    ID3DBlob *blob = nullptr;
+    if (!CheckHR("Serialize container length fixture",
+                 D3D12SerializeVersionedRootSignature(&desc, &blob, nullptr)))
+      return false;
+    // Keep the backing allocation intact: only the API's advertised extent is
+    // truncated, so the old size-assuming reader fails without a crash oracle.
+    const SIZE_T sizes[] = {0, 1, 31, blob->GetBufferSize() - 1,
+                           SIZE_T(UINT_MAX) + 1, blob->GetBufferSize()};
+    for (bool versioned : {false, true}) {
+      for (SIZE_T size : sizes) {
+        ID3D12RootSignatureDeserializer *legacy = nullptr;
+        ID3D12VersionedRootSignatureDeserializer *modern = nullptr;
+        std::vector<uint8_t> input(blob->GetBufferSize());
+        memcpy(input.data(), blob->GetBufferPointer(), input.size());
+        HRESULT hr = versioned
+            ? D3D12CreateVersionedRootSignatureDeserializer(
+                  input.data(), size, IID_PPV_ARGS(&modern))
+            : D3D12CreateRootSignatureDeserializer(
+                  input.data(), size, IID_PPV_ARGS(&legacy));
+        const bool valid = size == blob->GetBufferSize();
+        bool good = valid ? hr == S_OK && (versioned ? modern != nullptr : legacy != nullptr)
+                          : FAILED(hr) && !legacy && !modern;
+        if (good && valid) {
+          std::fill(input.begin(), input.end(), 0);
+          const D3D12_ROOT_SIGNATURE_DESC *converted = nullptr;
+          if (versioned) {
+            const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *at_version = nullptr;
+            good &= modern->GetUnconvertedRootSignatureDesc()->Version == version;
+            good &= modern->GetRootSignatureDescAtVersion(
+                        D3D_ROOT_SIGNATURE_VERSION_1_0, &at_version) == S_OK;
+            if (at_version)
+              converted = &at_version->Desc_1_0;
+          } else
+            converted = legacy->GetRootSignatureDesc();
+          good &= converted && converted->NumParameters == 1 &&
+                  converted->pParameters[0].Constants.Num32BitValues == 3;
+        }
+        std::cout << "root-container version=" << version << " versioned=" << versioned
+                  << " size=" << size << " result=" << (good ? "PASS" : "FAIL") << "\n";
+        passed &= good;
+        ++cases;
+        Release(legacy);
+        Release(modern);
+      }
+    }
+    ID3D12RootSignature *root = nullptr;
+    passed &= CheckHR("Create exact root container",
+                      device->CreateRootSignature(0, blob->GetBufferPointer(),
+                                                  blob->GetBufferSize(), IID_PPV_ARGS(&root)));
+    Release(root);
+    Release(blob);
+  }
+  std::cout << "root-container cases=" << cases << " result=" << (passed ? "PASS" : "FAIL") << "\n";
+  return passed;
+}
+
 bool CheckRootSignatureBudget(ID3D12Device *device) {
   D3D12_DESCRIPTOR_RANGE1 ranges[509] = {};
   for (UINT i = 0; i < std::size(ranges); ++i) {
@@ -2055,6 +2128,16 @@ bool CheckTypedViewFormats(UINT mode = 0) {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::string(argv[1]) == "--root-container-lengths") {
+    ID3D12Device *device = nullptr;
+    if (!CheckHR("Root container device",
+                 D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))))
+      return 1;
+    const bool passed = CheckRootContainerLengths(device);
+    device->Release();
+    return passed ? 0 : 1;
+  }
+
   if (argc == 2 && std::string(argv[1]) == "--root-signature-kinds") {
     ID3D12Device *device = nullptr;
     if (!CheckHR("Root kind device",
@@ -2142,6 +2225,7 @@ int main(int argc, char **argv) {
       !CheckHR("D3D12CreateDevice B", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_b))))
     return abort();
 
+  passed &= CheckRootContainerLengths(device_a);
   passed &= CheckRootSignatureMetadata(device_a);
   passed &= CheckRootSignatureBudget(device_a);
   passed &= CheckRootArgumentRanges(device_a);
