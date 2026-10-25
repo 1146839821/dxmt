@@ -3139,6 +3139,57 @@ sources/red-summary/red-classification JSON,aggregate/ordinary-aggregate/results
 build/runtime/verification logs and initial-discard-fixture. Local focused commit
 only,no push;overall goal active. Next:resource/layout/access admission at this owner.
 
+### 2026-10-25 — N12 resource/access/raw layout admission (G1)
+
+Base9af126e8, one existing Barrier owner. Previously compatible queue/sync scopes
+could admit accesses unsupported by a resource's kind/flags/heap; raw direct/
+compute/video layout identities disappeared in legacy conversion. Add two pure
+local helpers before lowering and split/state recording: one immutable resource
+access mask shared by both sides, raw layout/access/queue check per texture side.
+RT/DS/UAV/texture-SRV flags, buffer-vs-texture access, upload/readback domains;
+Copy COMMON and direct/compute-specific layouts checked without alias erasure.
+Buffer DENY_SHADER_RESOURCE remains compatibility no-op, simultaneous COMMON
+UAV/RT and combined buffer read/write retained. One existing GetHeapProperties
+per buffer barrier; reserved E_INVALIDARG falls back to descriptor domain, CUSTOM
+not inferred from CPU visibility. No new src/header/state/cache/owner/ABI/native
+command/lock/allocation/capability, no change to creation/converter/legacy owners.
+
+Existing runner --resource-layout-access:60 authored cases x2 sides +31 SDK raw
+layouts x3queues x2sides=306. Same final private PE baseline twice190 unexpected
+accepts (66 resource/access/layout,124 queue-layout),116 accepted controls.
+Candidate twice306 and independent no-private twice306 PASS. Both full enhanced
+(includes prior3856/144/760/NONE/split/state),full command-list,features PASS;
+adjacent native16/GPU10 PASS,6 no-resource readbacks NOT_RUN;real queue-handoff6
+subresource readbacks PASS. API/GPU1/1,no Metal errors,32 final probe exits and
+source/DLL/PE/native/peer lineage verified. Independent no-private PE matched to
+its own build,not assumed byte-identical to private PE. First invalid deny-SRV
+color fixture corrected to legal depth texture;initial/156/pre-format evidence
+retained/excluded. Pre-format wrong queue-handoff harness route excluded,final
+uses enhanced runner --split-order-probe queue-handoff. Shared split positives
+now declare required UAV flags;dedicated no-flag negatives retained.
+
+Matched costs AB/BA/AB,3processes/side,25rounds/dropfirst,72retained/scenario/side,
+median process P50/P95. Buffer recording/call .0610/.0703=>.07015/.0790us
+(+15.00/+12.38%,P50+9.15ns);Submit370.7/526.1=>372.55/472.6us;
+Execute-through-fence2427.95/2707.3=>2442.1/2786.3us(+.58/+2.92%).
+Ordinary50000-copy Recording3144.15/3304.0=>3235.05/3438.1us(+2.89/+4.06%),
+Submit22330.55/22694.6=>22085.55/22542.1us;Close1.7/2.2=>1.65/2.4us.
+Validation/observer off timing,real GPU payload checked;calibration both sides
+1000barriers=>1nativepacket,stages27/27,pixels/buffer PASS. No isolated heap-query
+cost or ordinary-copy causal attribution;texture-specific timing NOT_RUN.
+Performance/history gates OPEN,not hidden by correctness.
+
+M1 Max/Apple7,macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1/clang23.1 confirmed;
+requested Xcode26 NOT_RUN. FL11_1/private,FL11_0/no-private,SM6_0,EnhancedFALSE
+unchanged. Full operation-specific Resolve/SRS/resource eligibility,both-UNDEFINED
+valid-but-unimplemented texture no-layout path,reserved/CUSTOM/placed runtime
+matrix,lifetime/discard/alias/pending/cross-queue completeness remain OPEN or
+NOT_RUN;Windows/otherGPU/D3D11/T3/T4 NOT_RUN. User.gitignore/shared Wine/prefix
+preserved. Evidence:../dxmt-test/n12-resource-layout-20261025/N12-resource-layout.md,
+manifest/baseline/sources/red-summary/results/aggregates/verification and build/
+runtime logs. Local focused commit only,no push;overall goal active. Next:measure/
+reduce admission cost first;then texture no-layout recording/split/submit semantics.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

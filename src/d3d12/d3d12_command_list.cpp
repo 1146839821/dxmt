@@ -682,6 +682,135 @@ valid_barrier_sync_access(
   return !(access_bits & ~covered);
 }
 
+// Enhanced accesses can combine reads and writes; legacy state exclusivity
+// rules do not apply. Restrict only the resource's immutable access domain.
+inline UINT32
+barrier_resource_access_mask(MTLD3D12Resource *resource, const D3D12_RESOURCE_DESC &desc) {
+  UINT32 mask = D3D12_BARRIER_ACCESS_COPY_SOURCE | D3D12_BARRIER_ACCESS_COPY_DEST;
+  if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+    // DENY_SHADER_RESOURCE is a compatibility no-op on buffers, as at creation.
+    mask |= D3D12_BARRIER_ACCESS_VERTEX_BUFFER | D3D12_BARRIER_ACCESS_CONSTANT_BUFFER |
+            D3D12_BARRIER_ACCESS_INDEX_BUFFER | D3D12_BARRIER_ACCESS_SHADER_RESOURCE |
+            D3D12_BARRIER_ACCESS_STREAM_OUTPUT | D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT;
+    D3D12_HEAP_PROPERTIES heap = {};
+    // Reserved resources have no heap properties. Do not infer fixed upload or
+    // readback semantics from CPU visibility, or reject reserved resources.
+    if (SUCCEEDED(resource->GetHeapProperties(&heap, nullptr))) {
+      if (heap.Type == D3D12_HEAP_TYPE_UPLOAD)
+        return (mask & ~(D3D12_BARRIER_ACCESS_COPY_DEST | D3D12_BARRIER_ACCESS_STREAM_OUTPUT)) |
+               D3D12_BARRIER_ACCESS_NO_ACCESS;
+      if (heap.Type == D3D12_HEAP_TYPE_READBACK)
+        return D3D12_BARRIER_ACCESS_COPY_DEST | D3D12_BARRIER_ACCESS_NO_ACCESS;
+    }
+  } else {
+    mask |= D3D12_BARRIER_ACCESS_RESOLVE_SOURCE | D3D12_BARRIER_ACCESS_RESOLVE_DEST |
+            D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE;
+    if (!(desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE))
+      mask |= D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
+    if (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
+      mask |= D3D12_BARRIER_ACCESS_RENDER_TARGET;
+    if (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
+      mask |= D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE;
+  }
+  if (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+    mask |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+  // Buffer Resolve access requires Sampler Feedback, which is not supported.
+  return mask | D3D12_BARRIER_ACCESS_NO_ACCESS;
+}
+
+inline bool
+valid_barrier_layout_access(
+    D3D12_COMMAND_LIST_TYPE type, D3D12_BARRIER_LAYOUT layout, D3D12_BARRIER_ACCESS access,
+    const D3D12_RESOURCE_DESC &desc, UINT32 resource_access
+) {
+  // Check the original queue identity before ConvertBarrierLayout collapses
+  // queue-specific layouts to a common legacy state. Video layouts stay unsupported.
+  if (layout == D3D12_BARRIER_LAYOUT_UNDEFINED)
+    return access == D3D12_BARRIER_ACCESS_NO_ACCESS;
+  if (type == D3D12_COMMAND_LIST_TYPE_COPY && layout != D3D12_BARRIER_LAYOUT_COMMON)
+    return false;
+  const bool direct_layout =
+      layout >= D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON && layout <= D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST;
+  const bool compute_layout =
+      layout >= D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON && layout <= D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_DEST;
+  if ((direct_layout && type != D3D12_COMMAND_LIST_TYPE_DIRECT) ||
+      (compute_layout && type != D3D12_COMMAND_LIST_TYPE_COMPUTE))
+    return false;
+
+  constexpr UINT32 common =
+      D3D12_BARRIER_ACCESS_SHADER_RESOURCE | D3D12_BARRIER_ACCESS_COPY_SOURCE | D3D12_BARRIER_ACCESS_COPY_DEST;
+  constexpr UINT32 read = D3D12_BARRIER_ACCESS_SHADER_RESOURCE | D3D12_BARRIER_ACCESS_COPY_SOURCE;
+  UINT32 compatible = 0;
+  switch (layout) {
+  case D3D12_BARRIER_LAYOUT_COMMON:
+    compatible = common;
+    if (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)
+      compatible |= D3D12_BARRIER_ACCESS_RENDER_TARGET | D3D12_BARRIER_ACCESS_UNORDERED_ACCESS |
+                    D3D12_BARRIER_ACCESS_RESOLVE_SOURCE | D3D12_BARRIER_ACCESS_RESOLVE_DEST;
+    break;
+  case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON:
+  case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON:
+    compatible = common | D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+    break;
+  case D3D12_BARRIER_LAYOUT_GENERIC_READ:
+  case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_GENERIC_READ:
+    compatible = read;
+    break;
+  case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ:
+    compatible = read | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ | D3D12_BARRIER_ACCESS_RESOLVE_SOURCE |
+                 D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE;
+    break;
+  case D3D12_BARRIER_LAYOUT_RENDER_TARGET:
+    if (type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+      return false;
+    compatible = D3D12_BARRIER_ACCESS_RENDER_TARGET;
+    break;
+  case D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS:
+  case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS:
+  case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_UNORDERED_ACCESS:
+    compatible = D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+    break;
+  case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE:
+  case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ:
+    if (type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+      return false;
+    compatible = D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ;
+    if (layout == D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE)
+      compatible |= D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE;
+    break;
+  case D3D12_BARRIER_LAYOUT_SHADER_RESOURCE:
+  case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE:
+  case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE:
+    compatible = D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
+    break;
+  case D3D12_BARRIER_LAYOUT_COPY_SOURCE:
+  case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE:
+  case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_SOURCE:
+    compatible = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+    break;
+  case D3D12_BARRIER_LAYOUT_COPY_DEST:
+  case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST:
+  case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_DEST:
+    compatible = D3D12_BARRIER_ACCESS_COPY_DEST;
+    break;
+  case D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE:
+  case D3D12_BARRIER_LAYOUT_RESOLVE_DEST:
+  case D3D12_BARRIER_LAYOUT_SHADING_RATE_SOURCE:
+    if (type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+      return false;
+    compatible = layout == D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE ? D3D12_BARRIER_ACCESS_RESOLVE_SOURCE
+                 : layout == D3D12_BARRIER_LAYOUT_RESOLVE_DEST ? D3D12_BARRIER_ACCESS_RESOLVE_DEST
+                                                               : D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE;
+    break;
+  default:
+    return false;
+  }
+  // Even NO_ACCESS or implicit COMMON needs a resource-compatible layout.
+  // Global sync/access admission already rejects mixed NO_ACCESS and unknown bits.
+  return (compatible & resource_access) &&
+         (access == D3D12_BARRIER_ACCESS_NO_ACCESS || !(static_cast<UINT32>(access) & ~compatible));
+}
+
 enum class EnhancedSplitPhase : uint8_t {
   None,
   Begin,
@@ -6911,6 +7040,13 @@ public:
             continue;
           }
 
+          const UINT32 resource_access = barrier_resource_access_mask(resource, desc);
+          if ((static_cast<UINT32>(barrier.AccessBefore) | static_cast<UINT32>(barrier.AccessAfter)) &
+              ~resource_access) {
+            invalid_barrier();
+            continue;
+          }
+
           const auto before = barrier_access_to_state(barrier.AccessBefore);
           const auto after = barrier_access_to_state(barrier.AccessAfter);
 
@@ -6962,6 +7098,15 @@ public:
           auto resource = static_cast<MTLD3D12Resource *>(barrier.pResource);
           const auto desc = resource->GetDesc();
           if (!resource->texture || desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+            invalid_barrier();
+            continue;
+          }
+
+          const UINT32 resource_access = barrier_resource_access_mask(resource, desc);
+          if (((static_cast<UINT32>(barrier.AccessBefore) | static_cast<UINT32>(barrier.AccessAfter)) &
+               ~resource_access) ||
+              !valid_barrier_layout_access(type_, barrier.LayoutBefore, barrier.AccessBefore, desc, resource_access) ||
+              !valid_barrier_layout_access(type_, barrier.LayoutAfter, barrier.AccessAfter, desc, resource_access)) {
             invalid_barrier();
             continue;
           }

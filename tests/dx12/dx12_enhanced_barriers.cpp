@@ -70,7 +70,8 @@ D3D12_RESOURCE_DESC TextureDesc() {
   desc.MipLevels = 3;
   desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   desc.SampleDesc.Count = 1;
-  desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+               D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
   return desc;
 }
@@ -82,7 +83,8 @@ bool CreateResources(
   properties.Type = D3D12_HEAP_TYPE_DEFAULT;
   properties.CreationNodeMask = 1;
   properties.VisibleNodeMask = 1;
-  const auto buffer_desc = BufferDesc(4096);
+  auto buffer_desc = BufferDesc(4096);
+  buffer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   const auto texture_desc = TextureDesc();
   return CheckHR(
              "CreateCommittedResource(buffer)",
@@ -179,6 +181,238 @@ bool ExpectClose(
     return false;
   }
   return true;
+}
+
+// Authored contract cases: expected outcomes are independent of the runtime's
+// access masks. Check each side separately, with ALL isolating resource/layout
+// admission from sync compatibility. These are recording tests, not GPU claims.
+bool TestResourceLayoutAccess(ID3D12Device *device) {
+  enum Resource {
+    Buffer,
+    UAVBuffer,
+    DenyBuffer,
+    Upload,
+    Readback,
+    Color,
+    UAVColor,
+    RTColor,
+    Depth,
+    DenyDepth,
+    Simultaneous,
+    Count
+  };
+  Owned<ID3D12Resource> resources[Count];
+  for (unsigned i = 0; i < Count; ++i) {
+    auto desc = i < Color ? BufferDesc(4096) : TextureDesc();
+    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    if (i == UAVBuffer || i == UAVColor)
+      desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (i == DenyBuffer || i == DenyDepth)
+      desc.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+    if (i == RTColor)
+      desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    if (i == Depth || i == DenyDepth) {
+      desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+      desc.Format = DXGI_FORMAT_D32_FLOAT;
+    }
+    if (i == Simultaneous)
+      desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS |
+                   D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = i == Upload     ? D3D12_HEAP_TYPE_UPLOAD
+                : i == Readback ? D3D12_HEAP_TYPE_READBACK
+                                : D3D12_HEAP_TYPE_DEFAULT;
+    heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+    auto initial = i == Upload     ? D3D12_RESOURCE_STATE_GENERIC_READ
+                   : i == Readback ? D3D12_RESOURCE_STATE_COPY_DEST
+                                   : D3D12_RESOURCE_STATE_COMMON;
+    std::cout << "creating resource/layout fixture=" << i << "\n";
+    if (!CheckHR("resource/layout fixture",
+                 device->CreateCommittedResource(
+                     &heap, D3D12_HEAP_FLAG_NONE, &desc, initial, nullptr,
+                     IID_PPV_ARGS(&resources[i].ptr))))
+      return false;
+  }
+  struct Case {
+    const char *name;
+    Resource resource;
+    D3D12_BARRIER_ACCESS access;
+    D3D12_BARRIER_LAYOUT layout;
+    bool accepted;
+  };
+#define CASE(name, resource, access, layout, accepted)                         \
+  {                                                                            \
+    name, resource, D3D12_BARRIER_ACCESS_##access,                             \
+        D3D12_BARRIER_LAYOUT_##layout, accepted                                \
+  }
+  const Case cases[] = {
+      CASE("buffer vertex", Buffer, VERTEX_BUFFER, COMMON, true),
+      CASE("buffer CBV", Buffer, CONSTANT_BUFFER, COMMON, true),
+      CASE("buffer index", Buffer, INDEX_BUFFER, COMMON, true),
+      CASE("buffer stream output", Buffer, STREAM_OUTPUT, COMMON, true),
+      CASE("buffer indirect", Buffer, INDIRECT_ARGUMENT, COMMON, true),
+      CASE("buffer SRV", Buffer, SHADER_RESOURCE, COMMON, true),
+      CASE("buffer deny-SRV compatibility", DenyBuffer, SHADER_RESOURCE, COMMON,
+           true),
+      CASE("buffer RT", Buffer, RENDER_TARGET, COMMON, false),
+      CASE("buffer depth read", Buffer, DEPTH_STENCIL_READ, COMMON, false),
+      CASE("buffer depth write", Buffer, DEPTH_STENCIL_WRITE, COMMON, false),
+      CASE("buffer resolve source", Buffer, RESOLVE_SOURCE, COMMON, false),
+      CASE("buffer resolve dest", Buffer, RESOLVE_DEST, COMMON, false),
+      CASE("buffer shading rate", Buffer, SHADING_RATE_SOURCE, COMMON, false),
+      CASE("buffer UAV missing flag", Buffer, UNORDERED_ACCESS, COMMON, false),
+      CASE("buffer UAV", UAVBuffer, UNORDERED_ACCESS, COMMON, true),
+      {"buffer concurrent read/write", UAVBuffer,
+       D3D12_BARRIER_ACCESS_UNORDERED_ACCESS |
+           D3D12_BARRIER_ACCESS_SHADER_RESOURCE |
+           D3D12_BARRIER_ACCESS_COPY_SOURCE,
+       D3D12_BARRIER_LAYOUT_COMMON, true},
+      {"upload combined reads", Upload,
+       D3D12_BARRIER_ACCESS_CONSTANT_BUFFER | D3D12_BARRIER_ACCESS_COPY_SOURCE,
+       D3D12_BARRIER_LAYOUT_COMMON, true},
+      {"upload mixed write", Upload,
+       D3D12_BARRIER_ACCESS_COPY_SOURCE | D3D12_BARRIER_ACCESS_COPY_DEST,
+       D3D12_BARRIER_LAYOUT_COMMON, false},
+      CASE("upload SRV", Upload, SHADER_RESOURCE, COMMON, true),
+      CASE("upload copy source", Upload, COPY_SOURCE, COMMON, true),
+      CASE("upload copy dest", Upload, COPY_DEST, COMMON, false),
+      CASE("upload stream output", Upload, STREAM_OUTPUT, COMMON, false),
+      CASE("readback copy dest", Readback, COPY_DEST, COMMON, true),
+      CASE("readback copy source", Readback, COPY_SOURCE, COMMON, false),
+      CASE("readback SRV", Readback, SHADER_RESOURCE, COMMON, false),
+      CASE("color vertex", Color, VERTEX_BUFFER, COMMON, false),
+      CASE("color CBV", Color, CONSTANT_BUFFER, COMMON, false),
+      CASE("color index", Color, INDEX_BUFFER, COMMON, false),
+      CASE("color stream output", Color, STREAM_OUTPUT, COMMON, false),
+      CASE("color indirect", Color, INDIRECT_ARGUMENT, COMMON, false),
+      CASE("color SRV", Color, SHADER_RESOURCE, SHADER_RESOURCE, true),
+      CASE("color copy source", Color, COPY_SOURCE, COPY_SOURCE, true),
+      CASE("color copy dest", Color, COPY_DEST, COPY_DEST, true),
+      CASE("color UAV missing flag", Color, UNORDERED_ACCESS, UNORDERED_ACCESS,
+           false),
+      CASE("color RT missing flag", Color, RENDER_TARGET, RENDER_TARGET, false),
+      CASE("color depth missing flag", Color, DEPTH_STENCIL_READ,
+           DEPTH_STENCIL_READ, false),
+      CASE("UAV color", UAVColor, UNORDERED_ACCESS, UNORDERED_ACCESS, true),
+      CASE("RT color", RTColor, RENDER_TARGET, RENDER_TARGET, true),
+      CASE("depth read", Depth, DEPTH_STENCIL_READ, DEPTH_STENCIL_READ, true),
+      CASE("depth write", Depth, DEPTH_STENCIL_WRITE, DEPTH_STENCIL_WRITE,
+           true),
+      CASE("depth read in write layout", Depth, DEPTH_STENCIL_READ,
+           DEPTH_STENCIL_WRITE, true),
+      CASE("depth write in read layout", Depth, DEPTH_STENCIL_WRITE,
+           DEPTH_STENCIL_READ, false),
+      CASE("deny SRV", DenyDepth, SHADER_RESOURCE, SHADER_RESOURCE, false),
+      CASE("deny SRV copy", DenyDepth, COPY_SOURCE, GENERIC_READ, true),
+      CASE("copy mismatched layout", Color, COPY_SOURCE, COPY_DEST, false),
+      CASE("SRV mismatched layout", Color, SHADER_RESOURCE, COPY_SOURCE, false),
+      CASE("UAV generic read", UAVColor, UNORDERED_ACCESS, GENERIC_READ, false),
+      CASE("UAV common", UAVColor, UNORDERED_ACCESS, COMMON, false),
+      CASE("UAV direct common", UAVColor, UNORDERED_ACCESS, DIRECT_QUEUE_COMMON,
+           true),
+      CASE("UAV compute common", UAVColor, UNORDERED_ACCESS,
+           COMPUTE_QUEUE_COMMON, false),
+      CASE("simultaneous common UAV", Simultaneous, UNORDERED_ACCESS, COMMON,
+           true),
+      CASE("simultaneous common RT", Simultaneous, RENDER_TARGET, COMMON, true),
+      CASE("empty UAV missing flag", Color, NO_ACCESS, UNORDERED_ACCESS, false),
+      CASE("empty RT missing flag", Color, NO_ACCESS, RENDER_TARGET, false),
+      CASE("empty SRV denied", DenyDepth, NO_ACCESS, SHADER_RESOURCE, false),
+      CASE("implicit UAV missing flag", Color, COMMON, UNORDERED_ACCESS, false),
+      CASE("implicit UAV", UAVColor, COMMON, UNORDERED_ACCESS, true),
+      CASE("empty direct copy", Color, NO_ACCESS, DIRECT_QUEUE_COPY_SOURCE,
+           true),
+      CASE("empty compute copy", Color, NO_ACCESS, COMPUTE_QUEUE_COPY_SOURCE,
+           false),
+      CASE("empty video common", Color, NO_ACCESS, VIDEO_QUEUE_COMMON, false),
+  };
+#undef CASE
+  bool passed = true;
+  unsigned total = 0;
+  for (const auto &test : cases) {
+    for (unsigned side = 0; side < 2; ++side) {
+      const bool result = ExpectClose(
+          device, test.name, test.accepted ? S_OK : E_FAIL, [&](auto *list) {
+            const auto before =
+                side == 0 ? test.access : D3D12_BARRIER_ACCESS_NO_ACCESS;
+            const auto after =
+                side == 1 ? test.access : D3D12_BARRIER_ACCESS_NO_ACCESS;
+            if (test.resource < Color) {
+              D3D12_BUFFER_BARRIER barrier;
+              SetBuffer(barrier, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_ALL,
+                        before, after, resources[test.resource].ptr, 0,
+                        UINT64_MAX);
+              SubmitBarrier(list, D3D12_BARRIER_TYPE_BUFFER, &barrier);
+            } else {
+              D3D12_TEXTURE_BARRIER barrier;
+              D3D12_BARRIER_SUBRESOURCE_RANGE range = {};
+              range.IndexOrFirstMipLevel =
+                  D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+              SetTexture(barrier, D3D12_BARRIER_SYNC_ALL,
+                         D3D12_BARRIER_SYNC_ALL, before, after,
+                         side == 0 ? test.layout : D3D12_BARRIER_LAYOUT_COMMON,
+                         side == 1 ? test.layout : D3D12_BARRIER_LAYOUT_COMMON,
+                         resources[test.resource].ptr, range);
+              SubmitBarrier(list, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
+            }
+          });
+      std::cout << "resource-layout case=" << test.name << " side=" << side
+                << " expected=" << (test.accepted ? "accept" : "reject")
+                << " result=" << (result ? "PASS" : "FAIL") << "\n";
+      passed &= result;
+      ++total;
+    }
+  }
+  // Raw queue identities must survive lowering. NO_ACCESS deliberately removes
+  // access-domain differences so the layout alone determines acceptance.
+  // SDK layouts 0..30: generic, video, direct-specific, compute-specific,
+  // video-common. These explicit truth rows come from the queue layout table.
+  const bool legal[3][31] = {
+      {true, true,  true,  true,  true,  true,  true,  true,  true, true, true,
+       true, false, false, false, false, false, false, true,  true, true, true,
+       true, true,  false, false, false, false, false, false, false},
+      {true,  true,  false, true,  false, false, true,  true,
+       true,  false, false, false, false, false, false, false,
+       false, false, false, false, false, false, false, false,
+       true,  true,  true,  true,  true,  true,  false},
+      {true,  false, false, false, false, false, false, false,
+       false, false, false, false, false, false, false, false,
+       false, false, false, false, false, false, false, false,
+       false, false, false, false, false, false, false}};
+  const D3D12_COMMAND_LIST_TYPE queues[] = {D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                            D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                            D3D12_COMMAND_LIST_TYPE_COPY};
+  for (unsigned q = 0; q < 3; ++q)
+    for (unsigned l = 0; l < 31; ++l)
+      for (unsigned side = 0; side < 2; ++side) {
+        passed &= ExpectClose(
+            device, "raw queue layout", legal[q][l] ? S_OK : E_FAIL,
+            [&](auto *list) {
+              D3D12_TEXTURE_BARRIER barrier;
+              D3D12_BARRIER_SUBRESOURCE_RANGE range = {};
+              range.IndexOrFirstMipLevel =
+                  D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+              SetTexture(barrier, D3D12_BARRIER_SYNC_ALL,
+                         D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_NO_ACCESS,
+                         D3D12_BARRIER_ACCESS_NO_ACCESS,
+                         side == 0 ? static_cast<D3D12_BARRIER_LAYOUT>(l)
+                                   : D3D12_BARRIER_LAYOUT_COMMON,
+                         side == 1 ? static_cast<D3D12_BARRIER_LAYOUT>(l)
+                                   : D3D12_BARRIER_LAYOUT_COMMON,
+                         resources[l == 4 || l == 5 ? Depth
+                                   : l == 2         ? RTColor
+                                                    : UAVColor]
+                             .ptr,
+                         range);
+              SubmitBarrier(list, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
+            },
+            queues[q]);
+        ++total;
+      }
+  std::cout << "resource/layout/access admission cases=" << total
+            << " result=" << (passed ? "PASS" : "FAIL") << "\n";
+  return passed;
 }
 
 bool TestInterleavedRecordedStates(ID3D12Device *device, ID3D12Resource *buffer,
@@ -1579,6 +1813,9 @@ int main(int argc, char **argv) {
   if (!CreateResources(device.ptr, buffer, texture))
     return 1;
 
+  if (argc == 2 && !std::strcmp(argv[1], "--resource-layout-access"))
+    return TestResourceLayoutAccess(device.ptr) ? 0 : 1;
+
   if (argc == 2 && !std::strcmp(argv[1], "--sync-access-compatibility"))
     return TestSyncAccessCompatibility(device.ptr, buffer.ptr, texture.ptr) ? 0 : 1;
 
@@ -1591,7 +1828,8 @@ int main(int argc, char **argv) {
   if (argc == 2 && !std::strcmp(argv[1], "--sync-none-access"))
     return TestNoneSyncAccess(device.ptr, buffer.ptr, texture.ptr) ? 0 : 1;
 
-  bool passed = TestSyncAccessCompatibility(device.ptr, buffer.ptr, texture.ptr);
+  bool passed = TestResourceLayoutAccess(device.ptr);
+  passed &= TestSyncAccessCompatibility(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestTransferSyncAccess(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestSyncScopeAdmission(device.ptr, buffer.ptr, texture.ptr);
   passed &= TestNoneSyncAccess(device.ptr, buffer.ptr, texture.ptr);
