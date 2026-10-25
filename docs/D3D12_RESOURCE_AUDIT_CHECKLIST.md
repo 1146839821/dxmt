@@ -3360,6 +3360,48 @@ Performance acceptance remains OPEN. Next: isolate full recording components
 and classify/repeat guest sampling errors. Exact commands, hashes, calibration,
 raw timing, null controls, rejected trials and profiling limits are external.
 
+### N12 shared ownership-query cost — 2026-10-25
+
+On `fda27428`, the shared `IsSameDevice` helper queried both the external
+child's canonical owner and the already-live internal Device's own IUnknown.
+`MTLD3D12DeviceImpl::QueryInterface` returns its primary Device for IUnknown;
+all helper callers supply the internal Device type. Borrow that controlling
+pointer, retaining the child's canonical query, failure handling and owned
+reference. This removes one QI/AddRef/Release pair per check, with no cache,
+new owner, ABI change or bypass of null/foreign-device validation. Existing
+feature tests now assert the DXMT primary/controlling-IUnknown invariant;
+the assertion passes on baseline and both candidate build variants. Device5–10
+remain grouped and legacy interfaces remain rejected. New src/d3d12 files: 0.
+
+External evidence: `../dxmt-test/n12-owner-borrow-20261025/N12-owner-borrow.md`.
+Both private/no-private builds and all 42 final processes pass: 18 validated
+correctness/calibration processes, 16 GPU timing processes and eight CPU-only
+helper/component probes. Full command-list tests retain foreign allocator
+rejection. Enhanced admission covers 36 cases per tested build; cross-Execute,
+legal COMMON batch, queue handoff and adjacent/access-only GPU readbacks pass.
+The real-helper CPU probes additionally cover null, own/foreign resources,
+canonical child query, GetDevice failure and balanced reference counts.
+These CPU/feature checks are not counted as GPU oracles. All 500 rounds in
+the 20 GPU timing/calibration processes validate their changing data output.
+
+Fixed-stage ABBAABBA, four processes per DLL/scenario, 25 rounds/drop first:
+ordinary recording median process P50/P95 is 3300.825/3420.9 -> 1879.5/2229.8
+us per 50,000 copies (-43.06%/-34.82%); pressure is .0747/.0847 ->
+.061875/.07185 us per barrier (-17.17%/-15.17%). All four adjacent paired P50
+comparisons improve in both scenarios. Actual helper P50 is 27.9044 -> 13.7695
+ns (-50.65%); separate QI/GetDevice/two-query controls remain within 0.67%.
+Two helper checks predict 28.27 ns saved/copy; the full path saves 28.43 ns.
+Pressure timing removes its observer; ordinary retains the native newBuffer
+allocation counter (zero allocations, encoder observer NOT_RUN).
+
+This demonstrates removal of redundant hot-path work; it does not establish
+the cause of the earlier ~6% binary-linked regression. Preserve that unresolved
+attribution and historical tail warnings. Pressure/ordinary Submit P95 changes
++5.37%/+3.48%, with mixed paired signs/outliers: Submit/completion performance
+acceptance remains INCONCLUSIVE and the broader G1 gate remains OPEN.
+FL/SM/Options are unchanged. Next: N13 Submit tail/use-residency attribution.
+Revert this focused change if the internal controlling identity contract changes.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

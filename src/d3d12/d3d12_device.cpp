@@ -2500,11 +2500,10 @@ IsSameDevice(MTLD3D12Device *device, ID3D12DeviceChild *child) {
     return false;
   Com<IUnknown> child_identity_ref = Com<IUnknown>::transfer(child_identity);
 
-  IUnknown *device_identity = nullptr;
-  if (FAILED(device->QueryInterface(__uuidof(IUnknown), reinterpret_cast<void **>(&device_identity))))
-    return false;
-  Com<IUnknown> device_identity_ref = Com<IUnknown>::transfer(device_identity);
-  return child_identity_ref.ptr() == device_identity_ref.ptr();
+  // MTLD3D12DeviceImpl exposes its primary Device interface as the controlling
+  // IUnknown. The caller already keeps this internal owner alive; only the
+  // externally supplied child's identity needs a query and an owned reference.
+  return child_identity_ref.ptr() == static_cast<IUnknown *>(device);
 }
 
 HRESULT

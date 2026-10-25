@@ -262,7 +262,9 @@ bool CheckDeviceIdentity(ID3D12Device *device) {
       __uuidof(ID3D12Device4), __uuidof(ID3D12Device5), __uuidof(ID3D12Device6),
       __uuidof(ID3D12Device7), __uuidof(ID3D12Device8), __uuidof(ID3D12Device9),
       __uuidof(ID3D12Device10)};
-  bool good = true;
+  // DXMT's primary Device interface is its controlling IUnknown. Internal
+  // ownership checks borrow this pointer instead of querying the live owner.
+  bool good = identity == static_cast<IUnknown *>(device);
   for (const auto &iid : interfaces) {
     IUnknown *view = nullptr;
     if (!CheckHR(
