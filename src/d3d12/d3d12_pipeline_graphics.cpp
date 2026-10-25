@@ -1933,6 +1933,10 @@ CreateMeshPipelineState(
     return E_POINTER;
   InitReturnPtr(ppPipelineState);
 
+  if (data.root_signature && (!IsSameDevice(pDevice, data.root_signature.ptr()) ||
+                              static_cast<MTLD3D12RootSignature *>(data.root_signature.ptr())->IsLocal()))
+    return E_INVALIDARG;
+
   auto pso = Com(new MTLD3D12GraphicsPipelineStateImpl(pDevice));
   HRESULT hr = pso->InitializeMesh(data);
   if (FAILED(hr))

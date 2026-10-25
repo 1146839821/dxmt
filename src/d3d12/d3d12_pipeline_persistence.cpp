@@ -226,6 +226,8 @@ PutRootSignature(ByteWriter &writer, MTLD3D12Device *device, ID3D12RootSignature
     return false;
 
   auto rootsig = static_cast<MTLD3D12RootSignature *>(root_signature);
+  if (rootsig->IsLocal())
+    return false;
   const void *blob = nullptr;
   UINT blob_size = rootsig->GetBlob(&blob);
   if (blob_size && !blob)

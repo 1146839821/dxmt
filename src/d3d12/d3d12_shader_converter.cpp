@@ -45,9 +45,9 @@ void MTLD3D12PipelineState::BuildDescriptorFootprint(
       (exact ? footprint_exact_psos : footprint_fallback_psos).fetch_add(1, std::memory_order_relaxed);
     }
   } counter{descriptor_footprint_exact};
-  if (root && root->ResourceHeapDirectlyIndexed)
+  if (root && root->IsResourceHeapDirectlyIndexed())
     footprint_direct_indexed.fetch_add(1, std::memory_order_relaxed);
-  if (!root || root->ResourceHeapDirectlyIndexed)
+  if (!root || root->IsResourceHeapDirectlyIndexed())
     return;
   const void *blob = nullptr;
   const auto size = root->GetBlob(&blob);
@@ -1647,6 +1647,13 @@ GetD3D12EmbeddedRootSignature(
     return classification.validation_hr;
   if (!classification.embedded_root_signature || !classification.embedded_root_signature_size)
     return E_FAIL;
+  if (classification.embedded_root_signature_size < sizeof(RawRootSignatureDesc))
+    return E_INVALIDARG;
+  RawRootSignatureDesc desc;
+  std::memcpy(&desc, classification.embedded_root_signature, sizeof(desc));
+  // This helper supplies global compute/graphics pipeline layouts, not shader records.
+  if (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE)
+    return E_INVALIDARG;
   *root_signature = classification.embedded_root_signature;
   *root_signature_size = classification.embedded_root_signature_size;
   return S_OK;

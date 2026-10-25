@@ -483,6 +483,8 @@ public:
       if (!IsSameDevice(device_, global_root_signature->pGlobalRootSignature))
         return E_INVALIDARG;
       auto *root = static_cast<MTLD3D12RootSignature *>(global_root_signature->pGlobalRootSignature);
+      if (root->IsLocal())
+        return E_INVALIDARG;
       HRESULT hr = root->InitializeMSCLayout();
       if (FAILED(hr))
         return hr;

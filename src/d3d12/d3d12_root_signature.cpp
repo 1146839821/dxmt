@@ -393,7 +393,10 @@ public:
       return hr;
 
     auto &desc = deserializer.desc_1_1_.Desc_1_1;
-    const bool is_local = desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE;
+    Flags = desc.Flags;
+    const bool is_local = IsLocal();
+    if (is_local && Flags != D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE)
+      return E_INVALIDARG;
     UINT root_cost = 0;
 
     if (desc.NumParameters) {
@@ -475,8 +478,6 @@ public:
     ParameterSlots = parameter_layout_.size();
     Parameters = parameter_layout_.data();
 
-    ResourceHeapDirectlyIndexed =
-        (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED) != 0;
     for (UINT parameter_index = 0; parameter_index < desc.NumParameters; parameter_index++) {
       const auto &parameter = desc.pParameters[parameter_index];
       const auto source_qword = parameter_layout_[parameter_index].source_qword;

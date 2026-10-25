@@ -495,7 +495,17 @@ public:
   RootDescriptorTableMetadata const *RootDescriptorTables = nullptr;
   UINT RootDescriptorRangeCount = 0;
   RootDescriptorRangeMetadata const *RootDescriptorRanges = nullptr;
-  bool ResourceHeapDirectlyIndexed = false;
+  D3D12_ROOT_SIGNATURE_FLAGS Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+
+  bool
+  IsLocal() const {
+    return (Flags & D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE) != 0;
+  }
+
+  bool
+  IsResourceHeapDirectlyIndexed() const {
+    return (Flags & D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED) != 0;
+  }
 
   size_t NumStaticSamplers;
   uint64_t const *EncodedStaticSamplers;

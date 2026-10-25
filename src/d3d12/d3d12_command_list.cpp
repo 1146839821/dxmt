@@ -3576,7 +3576,7 @@ public:
     if (!pRootSig || !pStaging || !descriptor_heap)
       return false;
 
-    if (!pRootSig->RootDescriptorTableCount && !pRootSig->ResourceHeapDirectlyIndexed)
+    if (!pRootSig->RootDescriptorTableCount && !pRootSig->IsResourceHeapDirectlyIndexed())
       return false;
 
     D3D12_GPU_DESCRIPTOR_HANDLE heap_start = {};
@@ -3662,7 +3662,7 @@ public:
     // A direct-indexed root signature has no descriptor-table ranges to
     // enumerate. Since the shader may select any CBV/SRV/UAV slot at runtime,
     // conservatively visit every populated resource descriptor.
-    if (pRootSig->ResourceHeapDirectlyIndexed) {
+    if (pRootSig->IsResourceHeapDirectlyIndexed()) {
       if (descriptor_stages) {
         airconv_residency_counters_.conservative_descriptor_slots += heap_desc.NumDescriptors;
         airconv_residency_counters_.shader_reachable_descriptor_slots += heap_desc.NumDescriptors;
@@ -3970,7 +3970,7 @@ public:
       return;
 
     airconv_residency_counters_.descriptor_requests++;
-    if (pRootSig->ResourceHeapDirectlyIndexed)
+    if (pRootSig->IsResourceHeapDirectlyIndexed())
       airconv_residency_counters_.direct_indexed_root_requests++;
 
     auto *pipeline = compute ? static_cast<MTLD3D12PipelineState *>(pso_compute_.ptr())
@@ -4028,7 +4028,7 @@ public:
     if (table_handles_changed)
       airconv_residency_counters_.table_handle_invalidations++;
 
-    if (!current_table_count && !pRootSig->ResourceHeapDirectlyIndexed) {
+    if (!current_table_count && !pRootSig->IsResourceHeapDirectlyIndexed()) {
       airconv_residency_counters_.descriptor_scan_skips++;
       cache.encoder = allocator_->encoder_current;
       cache.heap_generation = heap_generation;
@@ -4039,7 +4039,7 @@ public:
     }
 
     airconv_residency_counters_.descriptor_scans_executed++;
-    if (pRootSig->ResourceHeapDirectlyIndexed)
+    if (pRootSig->IsResourceHeapDirectlyIndexed())
       airconv_residency_counters_.direct_indexed_scans++;
 
     const auto sampled_read = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageSample);
@@ -4048,7 +4048,7 @@ public:
     auto descriptor_stages = stages;
     // Capture the intent even if the heap is entirely empty now. Applications
     // can populate its descriptors after Close and before Execute.
-    if (pRootSig->ResourceHeapDirectlyIndexed) {
+    if (pRootSig->IsResourceHeapDirectlyIndexed()) {
       size_t pending_index = 0;
       CaptureVolatileDescriptorUse(
           allocator_->encoder_current, descriptor_heap, UINT_MAX, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, true, compute,
@@ -5499,7 +5499,12 @@ public:
         FailRecording(__func__, "compute root signature belongs to another device");
         return;
       }
-      rootsig_compute_ = static_cast<MTLD3D12RootSignature *>(pRootSignature);
+      auto *root = static_cast<MTLD3D12RootSignature *>(pRootSignature);
+      if (root->IsLocal()) {
+        FailRecording(__func__, "local root signature cannot be bound as a global root signature");
+        return;
+      }
+      rootsig_compute_ = root;
       assert(rootsig_compute_->UploadQwords <= std::size(rootarg_compute_staging_));
     } else {
       rootsig_compute_ = nullptr;
@@ -5518,7 +5523,12 @@ public:
         FailRecording(__func__, "graphics root signature belongs to another device");
         return;
       }
-      rootsig_graphics_ = static_cast<MTLD3D12RootSignature *>(pRootSignature);
+      auto *root = static_cast<MTLD3D12RootSignature *>(pRootSignature);
+      if (root->IsLocal()) {
+        FailRecording(__func__, "local root signature cannot be bound as a global root signature");
+        return;
+      }
+      rootsig_graphics_ = root;
       assert(rootsig_graphics_->UploadQwords <= std::size(rootarg_graphics_staging_));
     } else {
       rootsig_graphics_ = nullptr;

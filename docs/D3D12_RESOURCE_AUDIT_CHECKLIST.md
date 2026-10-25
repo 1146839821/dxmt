@@ -3773,3 +3773,49 @@ the queued remap and reached `MapReadback: 0x887a0005`
 (`DXGI_ERROR_DEVICE_REMOVED`). That was invalid application lifetime ordering,
 not evidence that a final heap reference may be released while the GPU still
 uses the mapping; the fixture now releases heap B only after its fence.
+
+### N06 global/local root-signature admission — 2026-10-25
+
+G1 slice on `efc80ba4`: same-device ownership did not establish root kind.
+Two baseline runs each wrongly accepted28 of50 RS1.0/1.1 cases; adding genuine
+D3DSetBlobPart embedded roots produced32 bad accepts of58 in two more runs.
+Both empty and nonempty local roots entered compute/graphics bindings, explicit
+compute/graphics PSOs, compute streams and root-updating indirect signatures;
+local flags combined with graphics flags were accepted too. Invalid objects
+were created/closed for diagnosis, never dispatched or submitted.
+
+The existing root owner now retains canonical flags instead of a derived
+resource-direct-indexing bool. Inline kind/direct-index queries serve existing
+consumers. Binding rejects local roots before publishing them to64-qword global
+staging; indirect admission rejects before MSL generation. Shared pipeline-cache
+descriptor admission covers explicit compute/graphics/stream/library roots;
+mesh and RT global-root consumers also check kind. The shared embedded-global
+helper checks the existing raw header's flags before publishing its pointer.
+No second parser/state/cache, new source module, COM/WMT/MSC interface,
+capability, resource layout or GPU scheduling change. Internal CPU flags field
+changes from bool to enum; affected consumers were rebuilt.
+
+Private and no-private builds pass. Existing descriptor_ownership runner's58
+kind cases and full ownership/metadata/budget/range regression pass in both
+configurations; final PEs are rebuilt/retested after removing unrelated format
+changes. Eight GPU processes pass: SM5/Airconv and SM6/MSC partial constants
+(4531 then204 in one recording), graphics draw ExecuteIndirect, MSC RS1.1
+resource tables(1554), each configuration.22 runtime processes:18 success and
+four expected baseline failures;18 enable Metal API/GPU validation and four
+cost processes disable it. No Metal validation error/command-buffer abort.
+Initial harness unloaded the compiler while blobs remained alive; its crash
+is retained/excluded, fixed in the fixture, and is not DXMT failure evidence.
+
+ABBA uses identical PE/native peers, two processes/DLL,50 retained1000-call
+batch means/domain/process,400 means/400000 alternating-root binds. Compute
+P50/P95(ns)18.7/19.9->19.5/20.4(+4.28/+2.51%); graphics18.5/19.0->18.9/20.1
+(+2.16/+5.79%). One O(1) bit test per changed root bind, no new hot-path lock,
+allocation, scan or native call. Recording/Submit NOT_RUN; historical N12/N13
+warnings remain OPEN. Evidence, primary-source hashes and exact commands:
+`../dxmt-test/n06-local-root-capacity-20261025/N06-root-kind.md`.
+
+This closes global/local misuse, not local capacity: existing64-parameter cap
+and missing4064-byte local-record admission remain OPEN, with no capacity lift
+before this boundary. Mesh/RT runtime, native Windows and T3/T4 NOT_RUN;
+requested Xcode26 NOT_RUN(actual27.1). Broader G1/N06 remains incomplete.
+User staged .gitignore unchanged; local commit only, no push.

@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include <d3dcompiler.h>
 
 #include "d3d12_descriptor_heap.hpp"
 #include "d3d12_device.hpp"
@@ -475,6 +476,254 @@ bool CheckRootArgumentRanges(ID3D12Device *device) {
   return passed;
 }
 
+bool CheckRootSignatureKinds(ID3D12Device *device) {
+  HMODULE compiler = LoadLibraryA("d3dcompiler_47.dll");
+  auto compile = compiler ? reinterpret_cast<pD3DCompile>(
+                                GetProcAddress(compiler, "D3DCompile"))
+                          : nullptr;
+  using SetBlobPart =
+      HRESULT(WINAPI *)(const void *, SIZE_T, D3D_BLOB_PART, UINT, const void *,
+                        SIZE_T, ID3DBlob **);
+  auto set_part = compiler ? reinterpret_cast<SetBlobPart>(
+                                 GetProcAddress(compiler, "D3DSetBlobPart"))
+                           : nullptr;
+  if (!compile || !set_part) {
+    if (compiler)
+      FreeLibrary(compiler);
+    return false;
+  }
+  const char source[] = "[numthreads(1,1,1)] void main() {}";
+  ID3DBlob *shader = nullptr, *error = nullptr;
+  const HRESULT compiled =
+      compile(source, sizeof(source) - 1, "root-kind.hlsl", nullptr, nullptr,
+              "main", "cs_5_0", 0, 0, &shader, &error);
+  Release(error);
+  if (!CheckHR("Compile root kind fixture", compiled)) {
+    FreeLibrary(compiler);
+    return false;
+  }
+  const char graphics_source[] =
+      "float4 vs_main(uint id : SV_VertexID) : SV_Position { return "
+      "float4(0,0,0,1); } float4 ps_main() : SV_Target0 { return "
+      "float4(1,1,1,1); }";
+  ID3DBlob *vs = nullptr, *ps = nullptr;
+  if (FAILED(compile(graphics_source, sizeof(graphics_source) - 1,
+                     "root-kind.hlsl", nullptr, nullptr, "vs_main", "vs_5_0", 0,
+                     0, &vs, nullptr)) ||
+      FAILED(compile(graphics_source, sizeof(graphics_source) - 1,
+                     "root-kind.hlsl", nullptr, nullptr, "ps_main", "ps_5_0", 0,
+                     0, &ps, nullptr))) {
+    Release(shader);
+    Release(vs);
+    Release(ps);
+    FreeLibrary(compiler);
+    return false;
+  }
+  ID3D12Device2 *device2 = nullptr;
+  if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device2)))) {
+    Release(shader);
+    Release(vs);
+    Release(ps);
+    FreeLibrary(compiler);
+    return false;
+  }
+  bool passed = true;
+  UINT cases = 0;
+  for (const auto version :
+       {D3D_ROOT_SIGNATURE_VERSION_1_0, D3D_ROOT_SIGNATURE_VERSION_1_1}) {
+    for (bool empty : {false, true}) {
+      for (bool local : {false, true}) {
+        D3D12_ROOT_PARAMETER parameter = {};
+        parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        parameter.Constants = {0, 0, 1};
+        D3D12_ROOT_PARAMETER1 parameter1 = {};
+        parameter1.ParameterType = parameter.ParameterType;
+        parameter1.Constants = parameter.Constants;
+        const auto flags = local
+                               ? D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE
+                               : D3D12_ROOT_SIGNATURE_FLAG_NONE;
+        D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc = {};
+        desc.Version = version;
+        if (version == D3D_ROOT_SIGNATURE_VERSION_1_0)
+          desc.Desc_1_0 = {empty ? 0u : 1u, &parameter, 0, nullptr, flags};
+        else
+          desc.Desc_1_1 = {empty ? 0u : 1u, &parameter1, 0, nullptr, flags};
+        ID3DBlob *blob = nullptr;
+        ID3D12RootSignature *root = nullptr;
+        if (!CheckHR(
+                "Serialize root kind",
+                D3D12SerializeVersionedRootSignature(&desc, &blob, nullptr))) {
+          passed = false;
+          continue;
+        }
+        const HRESULT hr = device->CreateRootSignature(
+            0, blob->GetBufferPointer(), blob->GetBufferSize(),
+            IID_PPV_ARGS(&root));
+        if (!CheckHR("Create root kind", hr)) {
+          Release(blob);
+          passed = false;
+          continue;
+        }
+        auto record = [&](const char *name, bool good) {
+          std::cout << "root-kind version=" << version << " empty=" << empty
+                    << " local=" << local << " case=" << name
+                    << " result=" << (good ? "PASS" : "FAIL") << "\n";
+          ++cases;
+          passed &= good;
+        };
+        for (bool graphics : {false, true}) {
+          ID3D12CommandAllocator *allocator = nullptr;
+          ID3D12GraphicsCommandList *list = nullptr;
+          bool good = SUCCEEDED(device->CreateCommandAllocator(
+              D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)));
+          if (good)
+            good = SUCCEEDED(device->CreateCommandList(
+                0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr,
+                IID_PPV_ARGS(&list)));
+          if (good) {
+            if (graphics)
+              list->SetGraphicsRootSignature(root);
+            else
+              list->SetComputeRootSignature(root);
+            good = list->Close() == (local ? E_FAIL : S_OK) &&
+                   device->GetDeviceRemovedReason() == S_OK;
+          }
+          record(graphics ? "graphics-binding" : "compute-binding", good);
+          Release(list);
+          Release(allocator);
+        }
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pso_desc = {};
+        pso_desc.pRootSignature = root;
+        pso_desc.CS = {shader->GetBufferPointer(), shader->GetBufferSize()};
+        ID3D12PipelineState *pso = nullptr;
+        const HRESULT pso_hr =
+            device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso));
+        record("compute-pso", pso_hr == (local ? E_INVALIDARG : S_OK) &&
+                                  (local ? pso == nullptr : pso != nullptr));
+        std::cout << "kind-compute hr=0x" << std::hex
+                  << static_cast<UINT>(pso_hr) << std::dec << "\n";
+        Release(pso);
+        struct alignas(void *) RootSubobject {
+          D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type;
+          ID3D12RootSignature *root;
+        };
+        struct alignas(void *) CSSubobject {
+          D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type;
+          D3D12_SHADER_BYTECODE shader;
+        };
+        struct Stream {
+          RootSubobject root;
+          CSSubobject cs;
+        } stream = {{D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, root},
+                    {D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS, pso_desc.CS}};
+        const D3D12_PIPELINE_STATE_STREAM_DESC stream_desc = {sizeof(stream),
+                                                              &stream};
+        const HRESULT stream_hr =
+            device2->CreatePipelineState(&stream_desc, IID_PPV_ARGS(&pso));
+        record("compute-stream", stream_hr == (local ? E_INVALIDARG : S_OK) &&
+                                     (local ? pso == nullptr : pso != nullptr));
+        Release(pso);
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics_desc = {};
+        graphics_desc.pRootSignature = root;
+        graphics_desc.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+        graphics_desc.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+        graphics_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        graphics_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        graphics_desc.RasterizerState.DepthClipEnable = TRUE;
+        graphics_desc.BlendState.RenderTarget[0].RenderTargetWriteMask =
+            D3D12_COLOR_WRITE_ENABLE_ALL;
+        graphics_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+        graphics_desc.SampleMask = UINT_MAX;
+        graphics_desc.SampleDesc.Count = 1;
+        graphics_desc.PrimitiveTopologyType =
+            D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        graphics_desc.NumRenderTargets = 1;
+        graphics_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        const HRESULT graphics_hr = device->CreateGraphicsPipelineState(
+            &graphics_desc, IID_PPV_ARGS(&pso));
+        record("graphics-pso", graphics_hr == (local ? E_INVALIDARG : S_OK) &&
+                                   (local ? pso == nullptr : pso != nullptr));
+        Release(pso);
+        if (!empty) {
+          D3D12_INDIRECT_ARGUMENT_DESC args[2] = {};
+          args[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+          args[0].Constant = {0, 0, 1};
+          args[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+          const D3D12_COMMAND_SIGNATURE_DESC cmd_desc = {16, 2, args, 0};
+          ID3D12CommandSignature *command = nullptr;
+          const HRESULT cmd_hr = device->CreateCommandSignature(
+              &cmd_desc, root, IID_PPV_ARGS(&command));
+          record("indirect",
+                 cmd_hr == (local ? E_INVALIDARG : S_OK) &&
+                     (local ? command == nullptr : command != nullptr));
+          Release(command);
+        }
+        ID3DBlob *embedded = nullptr;
+        const HRESULT embed_hr =
+            set_part(shader->GetBufferPointer(), shader->GetBufferSize(),
+                     D3D_BLOB_ROOT_SIGNATURE, 0, blob->GetBufferPointer(),
+                     blob->GetBufferSize(), &embedded);
+        std::cout << "kind-embed hr=0x" << std::hex
+                  << static_cast<UINT>(embed_hr) << std::dec << "\n";
+        bool embedded_good = SUCCEEDED(embed_hr);
+        if (embedded_good) {
+          pso_desc.pRootSignature = nullptr;
+          pso_desc.CS = {embedded->GetBufferPointer(),
+                         embedded->GetBufferSize()};
+          const HRESULT embedded_hr =
+              device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso));
+          embedded_good = embedded_hr == (local ? E_INVALIDARG : S_OK) &&
+                          (local ? pso == nullptr : pso != nullptr);
+          Release(pso);
+        }
+        record("embedded-compute", embedded_good);
+        Release(embedded);
+        Release(blob);
+        Release(root);
+      }
+    }
+  }
+  for (const auto version :
+       {D3D_ROOT_SIGNATURE_VERSION_1_0, D3D_ROOT_SIGNATURE_VERSION_1_1}) {
+    for (const auto extra :
+         {D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
+          D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS,
+          D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED}) {
+      D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc = {};
+      desc.Version = version;
+      const auto flags = D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE | extra;
+      if (version == D3D_ROOT_SIGNATURE_VERSION_1_0)
+        desc.Desc_1_0.Flags = flags;
+      else
+        desc.Desc_1_1.Flags = flags;
+      ID3DBlob *blob = nullptr;
+      ID3D12RootSignature *root = nullptr;
+      bool good = SUCCEEDED(
+          D3D12SerializeVersionedRootSignature(&desc, &blob, nullptr));
+      if (good)
+        good = device->CreateRootSignature(
+                   0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                   IID_PPV_ARGS(&root)) == E_INVALIDARG &&
+               root == nullptr;
+      std::cout << "root-kind version=" << version
+                << " case=local-combined-flags-" << static_cast<UINT>(extra)
+                << " result=" << (good ? "PASS" : "FAIL") << "\n";
+      passed &= good;
+      ++cases;
+      Release(root);
+      Release(blob);
+    }
+  }
+  Release(device2);
+  Release(vs);
+  Release(ps);
+  Release(shader);
+  FreeLibrary(compiler);
+  std::cout << "root-kind cases=" << cases
+            << " result=" << (passed ? "PASS" : "FAIL") << "\n";
+  return passed;
+}
+
 bool CheckRootSignatureMetadata(ID3D12Device *device) {
   D3D12_DESCRIPTOR_RANGE1 ranges[3] = {};
   ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -551,13 +800,13 @@ bool CheckRootSignatureMetadata(ID3D12Device *device) {
     passed = metadata->RootResourceBindingCount == std::size(expected) && metadata->RootResourceBindings &&
              metadata->RootDescriptorTableCount == 1 && metadata->RootDescriptorTables &&
              metadata->RootDescriptorRangeCount == 3 && metadata->RootDescriptorRanges &&
-             metadata->ResourceHeapDirectlyIndexed ==
+             metadata->IsResourceHeapDirectlyIndexed() ==
                  ((canonical->Desc_1_1.Flags & D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED) != 0) &&
              metadata->NumStaticSamplers == canonical->Desc_1_1.NumStaticSamplers;
     if (!passed)
       std::cerr << "root metadata counts/flags mismatch: resources=" << metadata->RootResourceBindingCount
                 << " tables=" << metadata->RootDescriptorTableCount << " ranges=" << metadata->RootDescriptorRangeCount
-                << " direct=" << metadata->ResourceHeapDirectlyIndexed
+                << " direct=" << metadata->IsResourceHeapDirectlyIndexed()
                 << " samplers=" << metadata->NumStaticSamplers << "\n";
     for (size_t i = 0; passed && i < std::size(expected); ++i) {
       const auto &actual = metadata->RootResourceBindings[i];
@@ -633,7 +882,7 @@ bool CheckRootSignatureMetadata(ID3D12Device *device) {
              metadata->RootResourceBindings[0].parameter_index == 0 &&
              metadata->RootResourceBindings[0].type == D3D12_ROOT_PARAMETER_TYPE_CBV &&
              metadata->RootResourceBindings[0].visibility == D3D12_SHADER_VISIBILITY_VERTEX &&
-             metadata->RootDescriptorTableCount == 0 && !metadata->ResourceHeapDirectlyIndexed;
+             metadata->RootDescriptorTableCount == 0 && !metadata->IsResourceHeapDirectlyIndexed();
   }
   Release(root_signature);
   Release(errors);
@@ -652,7 +901,7 @@ bool CheckRootSignatureMetadata(ID3D12Device *device) {
     auto *metadata = static_cast<dxmt::MTLD3D12RootSignature *>(root_signature);
     passed = metadata->ParameterSlots == 0 && metadata->RootResourceBindingCount == 0 &&
              metadata->RootDescriptorTableCount == 0 && metadata->RootDescriptorRangeCount == 0 &&
-             !metadata->ResourceHeapDirectlyIndexed && metadata->NumStaticSamplers == 0;
+             !metadata->IsResourceHeapDirectlyIndexed() && metadata->NumStaticSamplers == 0;
   }
   Release(root_signature);
   Release(errors);
@@ -1708,6 +1957,17 @@ bool CheckTypedViewFormats(UINT mode = 0) {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::string(argv[1]) == "--root-signature-kinds") {
+    ID3D12Device *device = nullptr;
+    if (!CheckHR("Root kind device",
+                 D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                   IID_PPV_ARGS(&device))))
+      return 1;
+    const bool passed = CheckRootSignatureKinds(device);
+    device->Release();
+    return passed ? 0 : 1;
+  }
+
   if (argc == 2 && std::string(argv[1]) == "--root-argument-ranges") {
     ID3D12Device *device = nullptr;
     if (!CheckHR("Argument range device",
@@ -1787,6 +2047,7 @@ int main(int argc, char **argv) {
   passed &= CheckRootSignatureMetadata(device_a);
   passed &= CheckRootSignatureBudget(device_a);
   passed &= CheckRootArgumentRanges(device_a);
+  passed &= CheckRootSignatureKinds(device_a);
   if (!passed)
     return abort();
 

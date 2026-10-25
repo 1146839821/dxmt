@@ -101,6 +101,8 @@ public:
       return E_INVALIDARG;
 
     auto *rootsig = static_cast<MTLD3D12RootSignature *>(pRootSignature);
+    if (rootsig && rootsig->IsLocal())
+      return E_INVALIDARG;
     std::stringstream source;
     D3D12_INDIRECT_ARGUMENT_TYPE side_effect = ~(D3D12_INDIRECT_ARGUMENT_TYPE){};
     uint64_t argument_size = 0;
