@@ -3446,6 +3446,49 @@ binding ABI invariant after checking existing SM5/SM6 evidence, without redoing
 completed N09 mutation/replay/index slices. Broader G1/performance gates remain
 incomplete; all feature claims and the user's staged .gitignore stay unchanged.
 
+### N06 global root-signature DWORD admission — 2026-10-25
+
+G1 slice on `dfa5828c`: `MTLD3D12RootSignatureImpl::Initialize` checked only
+parameter count, accepting over-budget global signatures. Two baseline runs
+each wrongly accepted 14 of 42 RS1.0/1.1 creation cases; 28 controls passed.
+No invalid signature was bound or submitted. The existing validation loop now
+checks constants=N DWORDs, table=1, root CBV/SRV/UAV=2 with subtraction before
+addition, before native sampler allocation/layout publication. Local roots
+remain exempt from the global64 budget; their separate record-size admission
+and existing parameter-count restriction remain outside this slice.
+
+Do not equate DWORD cost with padded qwords: 64 tables/one-DWORD parameters
+legally occupy64 qwords; mixed61 constants+CBV+table costs64 and occupies33.
+No new state/owner/cache, stage-specific validator, source file, COM/WineMetal
+ABI, resource layout, command scheduling or capability change is introduced.
+Record and primary-source hashes:
+`../dxmt-test/n06-root-budget-20261025/N06-root-budget.md`.
+
+Both private/no-private builds pass. Existing descriptor_ownership runner's
+42 creation cases and full ownership regression pass in both configurations.
+16 original compute-runner GPU readbacks (two builds, SM5/Airconv and SM6/MSC,
+root constants/CBV/SRV/UAV) pass. Eight additional external existing-runner
+derivative processes validate exact64 cost (62 constants+root UAV), two input
+values777/999, both DLLs and backends, with actual GPU readback. These values
+change across processes, not within one recording. All correctness processes
+enable Metal API/GPU validation; no validation errors/command aborts found.
+34 total processes:32 successful, two expected baseline failures, including
+four creation timings. One unused-executable staging failure is retained and
+excluded. Exact commands, loaded paths and hashes are in results.json.
+
+Creation timing ABBA uses identical PE/native peers, two processes/DLL/cell,
+25 retained 100-call batch means/process, ten legal case/version cells.
+1000 retained means cover100000 timed Create+Release calls. Largest observed
+increase: RS1.0 padded64 P50/P95 1259/1313 ->1355.5/1435 ns (+7.66/+9.29%).
+This is added checked arithmetic in existing O(parameters) creation validation;
+no draw/dispatch/submit work is added. No speedup or universal tail claim.
+Recording/Submit performance is NOT_RUN; historical N12/N13 warnings stay OPEN.
+Actual Xcode27.1, requested26 NOT_RUN. Full N06 graphics/mesh/RT ABI, local-size
+validation, native Windows and T3/T4 remain OPEN/NOT_RUN. FL/SM/Options and the
+user's staged .gitignore remain unchanged. Next: parameter-specific root
+argument bounds/reconciliation with existing GPU fixtures. Revert this focused
+commit if legal global admission regresses; broader G1 remains incomplete.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

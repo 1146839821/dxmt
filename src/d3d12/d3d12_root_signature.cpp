@@ -406,6 +406,8 @@ public:
       return hr;
 
     auto &desc = deserializer.desc_1_1_.Desc_1_1;
+    const bool is_local = desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE;
+    UINT root_cost = 0;
 
     if (desc.NumParameters) {
       if (desc.NumParameters > D3D12_MAX_ROOT_COST)
@@ -415,6 +417,29 @@ public:
         if (!desc.pParameters)
           return E_INVALIDARG;
         auto &parameter = desc.pParameters[i];
+        UINT parameter_cost;
+        switch (parameter.ParameterType) {
+        case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:
+          parameter_cost = 1;
+          break;
+        case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
+          parameter_cost = parameter.Constants.Num32BitValues;
+          break;
+        case D3D12_ROOT_PARAMETER_TYPE_CBV:
+        case D3D12_ROOT_PARAMETER_TYPE_SRV:
+        case D3D12_ROOT_PARAMETER_TYPE_UAV:
+          parameter_cost = 2;
+          break;
+        default:
+          return E_INVALIDARG;
+        }
+        // The global DWORD budget is independent of our padded qword layout.
+        // Local root signatures use the separate shader-record size limit.
+        if (!is_local) {
+          if (parameter_cost > D3D12_MAX_ROOT_COST - root_cost)
+            return E_INVALIDARG;
+          root_cost += parameter_cost;
+        }
         if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
           bool is_normal_range = false, is_sampler_range = false;
           for (unsigned j = 0; j < parameter.DescriptorTable.NumDescriptorRanges; j++) {

@@ -86,6 +86,164 @@ bool IsDescriptorTypeAt(
   return false;
 }
 
+bool CheckRootSignatureBudget(ID3D12Device *device) {
+  D3D12_DESCRIPTOR_RANGE1 ranges[65] = {};
+  for (UINT i = 0; i < std::size(ranges); ++i) {
+    ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[i].NumDescriptors = 1;
+    ranges[i].BaseShaderRegister = i;
+  }
+  D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
+  for (UINT i = 0; i < std::size(samplers); ++i) {
+    auto &sampler = samplers[i];
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW =
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.MaxAnisotropy = 1;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = i;
+  }
+  const auto constants = [](UINT count, UINT values) {
+    std::vector<D3D12_ROOT_PARAMETER1> result(count);
+    for (UINT i = 0; i < count; ++i) {
+      result[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+      result[i].Constants = {i, 0, values};
+    }
+    return result;
+  };
+  const auto descriptors = [](D3D12_ROOT_PARAMETER_TYPE type, UINT count) {
+    std::vector<D3D12_ROOT_PARAMETER1> result(count);
+    for (UINT i = 0; i < count; ++i) {
+      result[i].ParameterType = type;
+      result[i].Descriptor.ShaderRegister = i;
+    }
+    return result;
+  };
+  const auto tables = [&](UINT count) {
+    std::vector<D3D12_ROOT_PARAMETER1> result(count);
+    for (UINT i = 0; i < count; ++i) {
+      result[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      result[i].DescriptorTable = {1, &ranges[i]};
+    }
+    return result;
+  };
+  bool passed = true;
+  UINT cases = 0;
+  for (const auto version :
+       {D3D_ROOT_SIGNATURE_VERSION_1_0, D3D_ROOT_SIGNATURE_VERSION_1_1}) {
+    const auto check = [&](const char *name,
+                           const std::vector<D3D12_ROOT_PARAMETER1> &parameters,
+                           HRESULT expected, UINT qwords = 0,
+                           bool local = false, UINT sampler_count = 0) {
+      D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc = {};
+      desc.Version = version;
+      const auto flags = local ? D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE
+                               : D3D12_ROOT_SIGNATURE_FLAG_NONE;
+      std::vector<D3D12_ROOT_PARAMETER> legacy(parameters.size());
+      std::vector<D3D12_DESCRIPTOR_RANGE> legacy_ranges(parameters.size());
+      if (version == D3D_ROOT_SIGNATURE_VERSION_1_0) {
+        for (UINT i = 0; i < parameters.size(); ++i) {
+          const auto &source = parameters[i];
+          auto &target = legacy[i];
+          target.ParameterType = source.ParameterType;
+          target.ShaderVisibility = source.ShaderVisibility;
+          if (source.ParameterType ==
+              D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            const auto &range = *source.DescriptorTable.pDescriptorRanges;
+            legacy_ranges[i] = {range.RangeType, range.NumDescriptors,
+                                range.BaseShaderRegister, range.RegisterSpace,
+                                range.OffsetInDescriptorsFromTableStart};
+            target.DescriptorTable = {1, &legacy_ranges[i]};
+          } else if (source.ParameterType ==
+                     D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+            target.Constants = source.Constants;
+          } else {
+            target.Descriptor = {source.Descriptor.ShaderRegister,
+                                 source.Descriptor.RegisterSpace};
+          }
+        }
+        desc.Desc_1_0 = {static_cast<UINT>(legacy.size()), legacy.data(),
+                         sampler_count, samplers, flags};
+      } else {
+        desc.Desc_1_1 = {static_cast<UINT>(parameters.size()),
+                         parameters.data(), sampler_count, samplers, flags};
+      }
+      ID3DBlob *blob = nullptr, *errors = nullptr;
+      const HRESULT serialized =
+          D3D12SerializeVersionedRootSignature(&desc, &blob, &errors);
+      Release(errors);
+      if (!CheckHR("Serialize root budget fixture", serialized)) {
+        Release(blob);
+        passed = false;
+        return;
+      }
+      auto *root = reinterpret_cast<ID3D12RootSignature *>(uintptr_t(1));
+      const HRESULT hr = device->CreateRootSignature(
+          0, blob->GetBufferPointer(), blob->GetBufferSize(),
+          IID_PPV_ARGS(&root));
+      bool good =
+          hr == expected && (SUCCEEDED(hr) ? root != nullptr : root == nullptr);
+      if (SUCCEEDED(hr) && root) {
+        auto *metadata = static_cast<dxmt::MTLD3D12RootSignature *>(root);
+        if (SUCCEEDED(expected))
+          good &= metadata->UploadQwords == qwords &&
+                  metadata->ParameterSlots == parameters.size() &&
+                  metadata->NumStaticSamplers == sampler_count;
+        root->Release();
+      }
+      Release(blob);
+      ++cases;
+      std::cout << "root-budget version=" << version << " case=" << name
+                << " hr=0x" << std::hex << static_cast<UINT>(hr) << std::dec
+                << " result=" << (good ? "PASS" : "FAIL") << "\n";
+      passed &= good;
+    };
+    check("empty", {}, S_OK);
+    check("constants63", constants(1, 63), S_OK, 32);
+    check("constants64", constants(1, 64), S_OK, 32);
+    check("constants65", constants(1, 65), E_INVALIDARG);
+    check("constants129", constants(1, 129), E_INVALIDARG);
+    check("constants-max", constants(1, UINT_MAX), E_INVALIDARG);
+    for (const auto type :
+         {D3D12_ROOT_PARAMETER_TYPE_CBV, D3D12_ROOT_PARAMETER_TYPE_SRV,
+          D3D12_ROOT_PARAMETER_TYPE_UAV}) {
+      check(type == D3D12_ROOT_PARAMETER_TYPE_CBV   ? "cbv32"
+            : type == D3D12_ROOT_PARAMETER_TYPE_SRV ? "srv32"
+                                                    : "uav32",
+            descriptors(type, 32), S_OK, 32);
+      check(type == D3D12_ROOT_PARAMETER_TYPE_CBV   ? "cbv33"
+            : type == D3D12_ROOT_PARAMETER_TYPE_SRV ? "srv33"
+                                                    : "uav33",
+            descriptors(type, 33), E_INVALIDARG);
+    }
+    check("tables64", tables(64), S_OK, 64);
+    check("tables65", tables(65), E_INVALIDARG);
+    check("padded-constants64", constants(64, 1), S_OK, 64);
+    for (UINT count : {61u, 62u}) {
+      auto mixed = constants(1, count);
+      auto descriptor = descriptors(D3D12_ROOT_PARAMETER_TYPE_CBV, 1)[0];
+      descriptor.Descriptor.ShaderRegister = 1;
+      mixed.push_back(descriptor);
+      mixed.push_back(tables(1)[0]);
+      check(count == 61 ? "mixed64" : "mixed65", mixed,
+            count == 61 ? S_OK : E_INVALIDARG, 33);
+    }
+    check("constants64-static", constants(1, 64), S_OK, 32, false, 2);
+    check("cbv32-static", descriptors(D3D12_ROOT_PARAMETER_TYPE_CBV, 32), S_OK,
+          32, false, 2);
+    // Local arguments live in shader records, not the global 64-DWORD budget.
+    // Creation controls only: do not bind these as a global signature or claim
+    // DXR execution.
+    check("local-constants65", constants(1, 65), S_OK, 33, true);
+    check("local-cbv33", descriptors(D3D12_ROOT_PARAMETER_TYPE_CBV, 33), S_OK,
+          33, true);
+  }
+  std::cout << "root-budget cases=" << cases
+            << " result=" << (passed ? "PASS" : "FAIL") << "\n";
+  return passed;
+}
+
 bool CheckRootSignatureMetadata(ID3D12Device *device) {
   D3D12_DESCRIPTOR_RANGE1 ranges[3] = {};
   ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -1319,6 +1477,15 @@ bool CheckTypedViewFormats(UINT mode = 0) {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::string(argv[1]) == "--root-signature-budget") {
+    ID3D12Device *device = nullptr;
+    if (!CheckHR("Root budget device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))))
+      return 1;
+    const bool passed = CheckRootSignatureBudget(device);
+    device->Release();
+    return passed ? 0 : 1;
+  }
+
   if (argc == 2 && std::string(argv[1]) == "--texture-view-planes")
     return CheckTypedViewFormats(3) ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--texture-view-roles")
@@ -1376,6 +1543,7 @@ int main(int argc, char **argv) {
     return abort();
 
   passed &= CheckRootSignatureMetadata(device_a);
+  passed &= CheckRootSignatureBudget(device_a);
   if (!passed)
     return abort();
 
