@@ -3489,6 +3489,55 @@ user's staged .gitignore remain unchanged. Next: parameter-specific root
 argument bounds/reconciliation with existing GPU fixtures. Revert this focused
 commit if legal global admission regresses; broader G1 remains incomplete.
 
+### N06 parameter-specific root argument admission — 2026-10-25
+
+G1 slice on `c63db037`: the old direct-write guard bounded only the whole
+staging/payload, permitting odd-constant padding, adjacent parameters and
+wrong parameter types. Missing signatures/indices/null data were silently
+ignored. Two calibrated baseline runs each wrongly accepted52 of96 direct
+cases. The indirect factory separately accepted18 of32 wrong type/range
+cases. Invalid recordings/signatures were never executed on the GPU.
+
+The root owner's offset vector is replaced by one immutable parameter layout
+(source qword, type, exact writable DWORD count). No second parameter array
+or per-command parser/cache is added. One checked-subtraction predicate now
+serves all12 direct setters and four indirect root-update argument kinds.
+Indirect validation precedes MSL source generation; duplicated later index
+checks are removed. Direct errors use existing FailRecording/Close E_FAIL,
+without device removal; indirect errors return E_INVALIDARG. These are DXMT
+diagnostic policies for invalid API use, not a universal Windows HRESULT claim.
+Failed Close continues to prohibit Reset with the same error. Two initial
+test-calibration runs had an incorrect recovery expectation and are excluded.
+
+Both private/no-private builds pass. Existing descriptor_ownership runner
+passes96 direct and32 indirect cases, full ownership/metadata tests and the
+prior42-case root-budget gate in both configurations. Final ownership PEs
+were rebuilt/retested after removing unrelated formatting.28 successful GPU
+processes cover SM5/SM6 partial constants, root CBV/SRV/UAV, graphics address
+mutation, draw ExecuteIndirect and MSC RS1.1 descriptor tables. The external
+current-compute-runner derivative records two dispatches in one list:
+initial{100,200,300}, single middle update777 ->4531; partial{9,11} at offset1
+preserves first100 ->204. Both backends/baseline and both candidate builds
+pass; two omitted-update/dispatch controls fail the readback oracle as expected.
+45 runtime processes:40 successful and five expected failures;41 enable Metal
+API/GPU validation and four setter timings disable it. No Metal validation
+errors/command-buffer aborts. Exact loaded paths/hashes, commands and primary
+Microsoft sources: `../dxmt-test/n06-root-argument-ranges-20261025/N06-root-argument-ranges.md`.
+
+ABBA setter timing: same PE/native peers, RS1.1, six operations x graphics/
+compute, two processes/DLL/cell;25 retained1000-call batch means/process,
+1200 means/1.2M timed calls. Most median increases are1–3 ns; largest is
+graphics UAV7.90->13.25 ns (+67.72%), P958.5->13.8 ns (+62.35%). Retain this
+observed cost of O(1) type/range checks; no speedup/full-performance PASS claim.
+Metadata records grow4->12 bytes, same vector; no setter lock/allocation or
+new native call. Recording/Submit and historical N12/N13 performance acceptance
+remain OPEN/NOT_RUN here. The private CPU record format changes and consumers
+are rebuilt; public COM/WMT/MSC binding ABI, serialization and capabilities
+remain unchanged. Native Windows, requested Xcode26 (actual27.1), D3D11/T3/T4,
+indirect root-update GPU execution and complete N06/DXR/local admission remain
+NOT_RUN/OPEN. Next: global/local root and PSO/root-binding reconciliation.
+Revert this focused commit on valid binding regressions; G1 is incomplete.
+
 ### Earlier validation notes
 
 - Build targets used for the current slice are `build`, `build-no-private`,

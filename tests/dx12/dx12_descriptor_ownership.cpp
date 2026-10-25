@@ -244,6 +244,237 @@ bool CheckRootSignatureBudget(ID3D12Device *device) {
   return passed;
 }
 
+bool CheckRootArgumentRanges(ID3D12Device *device) {
+  enum Operation { Single, Multiple, CBV, SRV, UAV, Table };
+  struct Case {
+    const char *name;
+    Operation operation;
+    UINT index, count, offset;
+    bool valid, bind = true, data = true;
+  };
+  const Case cases[] = {
+      {"first", Single, 0, 1, 0, true},
+      {"last", Single, 0, 1, 2, true},
+      {"partial", Multiple, 0, 2, 1, true},
+      {"second", Single, 1, 1, 0, true},
+      {"cbv", CBV, 2, 2, 0, true},
+      {"srv", SRV, 3, 2, 0, true},
+      {"uav", UAV, 4, 2, 0, true},
+      {"table", Table, 5, 2, 0, true},
+      {"zero-end", Multiple, 0, 0, 3, true},
+      {"odd-padding", Single, 0, 1, 3, false},
+      {"next-parameter", Single, 0, 1, 4, false},
+      {"multi-padding", Multiple, 0, 2, 2, false},
+      {"count-overflow", Multiple, 0, UINT_MAX, 0, false},
+      {"offset-overflow", Single, 0, 1, UINT_MAX, false},
+      {"second-padding", Single, 1, 1, 1, false},
+      {"constants-on-cbv", Single, 2, 1, 0, false},
+      {"cbv-on-constants", CBV, 0, 2, 0, false},
+      {"cbv-on-srv", CBV, 3, 2, 0, false},
+      {"srv-on-uav", SRV, 4, 2, 0, false},
+      {"uav-on-table", UAV, 5, 2, 0, false},
+      {"table-on-cbv", Table, 2, 2, 0, false},
+      {"bad-index", Single, 6, 1, 0, false},
+      {"missing-signature", Single, 0, 1, 0, false, false},
+      {"null-data", Multiple, 0, 1, 0, false, true, false},
+  };
+  bool passed = true, indirect_passed = true;
+  UINT total = 0, indirect_total = 0;
+  for (const auto version :
+       {D3D_ROOT_SIGNATURE_VERSION_1_0, D3D_ROOT_SIGNATURE_VERSION_1_1}) {
+    D3D12_DESCRIPTOR_RANGE range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1, 0,
+                                    0};
+    D3D12_ROOT_PARAMETER parameters[6] = {};
+    parameters[0].ParameterType = parameters[1].ParameterType =
+        D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[0].Constants = {0, 0, 3};
+    parameters[1].Constants = {1, 0, 1};
+    for (UINT i = 2; i < 5; ++i) {
+      parameters[i].ParameterType = static_cast<D3D12_ROOT_PARAMETER_TYPE>(
+          D3D12_ROOT_PARAMETER_TYPE_CBV + i - 2);
+      parameters[i].Descriptor.ShaderRegister = i == 2 ? 2 : 0;
+    }
+    parameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[5].DescriptorTable = {1, &range};
+    D3D12_ROOT_PARAMETER1 parameters1[6] = {};
+    D3D12_DESCRIPTOR_RANGE1 range1 = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV,  1, 1, 0,
+                                      D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 0};
+    for (UINT i = 0; i < 6; ++i) {
+      parameters1[i].ParameterType = parameters[i].ParameterType;
+      if (i < 2)
+        parameters1[i].Constants = parameters[i].Constants;
+      else if (i < 5)
+        parameters1[i].Descriptor = {parameters[i].Descriptor.ShaderRegister, 0,
+                                     D3D12_ROOT_DESCRIPTOR_FLAG_NONE};
+      else
+        parameters1[i].DescriptorTable = {1, &range1};
+    }
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc = {};
+    desc.Version = version;
+    if (version == D3D_ROOT_SIGNATURE_VERSION_1_0)
+      desc.Desc_1_0 = {6, parameters, 0, nullptr,
+                       D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    else
+      desc.Desc_1_1 = {6, parameters1, 0, nullptr,
+                       D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    ID3DBlob *blob = nullptr;
+    ID3D12RootSignature *root = nullptr;
+    if (!CheckHR("Serialize argument ranges",
+                 D3D12SerializeVersionedRootSignature(&desc, &blob, nullptr)))
+      return false;
+    const HRESULT created =
+        device->CreateRootSignature(0, blob->GetBufferPointer(),
+                                    blob->GetBufferSize(), IID_PPV_ARGS(&root));
+    Release(blob);
+    if (!CheckHR("Create argument ranges", created))
+      return false;
+    for (bool graphics : {false, true}) {
+      for (const auto &test : cases) {
+        ID3D12CommandAllocator *allocator = nullptr;
+        ID3D12GraphicsCommandList *list = nullptr;
+        bool good = CheckHR(
+            "Argument allocator",
+            device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                           IID_PPV_ARGS(&allocator)));
+        if (good)
+          good = CheckHR("Argument list",
+                         device->CreateCommandList(
+                             0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator,
+                             nullptr, IID_PPV_ARGS(&list)));
+        if (good) {
+          if (test.bind) {
+            if (graphics)
+              list->SetGraphicsRootSignature(root);
+            else
+              list->SetComputeRootSignature(root);
+          }
+          const UINT values[] = {17, 29, 41};
+          if (graphics) {
+            switch (test.operation) {
+            case Single:
+              list->SetGraphicsRoot32BitConstant(test.index, values[0],
+                                                 test.offset);
+              break;
+            case Multiple:
+              list->SetGraphicsRoot32BitConstants(test.index, test.count,
+                                                  test.data ? values : nullptr,
+                                                  test.offset);
+              break;
+            case CBV:
+              list->SetGraphicsRootConstantBufferView(test.index, 0);
+              break;
+            case SRV:
+              list->SetGraphicsRootShaderResourceView(test.index, 0);
+              break;
+            case UAV:
+              list->SetGraphicsRootUnorderedAccessView(test.index, 0);
+              break;
+            case Table:
+              list->SetGraphicsRootDescriptorTable(test.index, {});
+              break;
+            }
+          } else {
+            switch (test.operation) {
+            case Single:
+              list->SetComputeRoot32BitConstant(test.index, values[0],
+                                                test.offset);
+              break;
+            case Multiple:
+              list->SetComputeRoot32BitConstants(test.index, test.count,
+                                                 test.data ? values : nullptr,
+                                                 test.offset);
+              break;
+            case CBV:
+              list->SetComputeRootConstantBufferView(test.index, 0);
+              break;
+            case SRV:
+              list->SetComputeRootShaderResourceView(test.index, 0);
+              break;
+            case UAV:
+              list->SetComputeRootUnorderedAccessView(test.index, 0);
+              break;
+            case Table:
+              list->SetComputeRootDescriptorTable(test.index, {});
+              break;
+            }
+          }
+          const HRESULT closed = list->Close();
+          good = closed == (test.valid ? S_OK : E_FAIL) &&
+                 device->GetDeviceRemovedReason() == S_OK;
+          // D3D12 permanently rejects Reset after a failed Close.
+          if (FAILED(closed)) {
+            good &= list->Reset(allocator, nullptr) == closed;
+          } else if (SUCCEEDED(allocator->Reset()) &&
+                     SUCCEEDED(list->Reset(allocator, nullptr))) {
+            list->SetComputeRootSignature(root);
+            list->SetComputeRoot32BitConstants(0, 3, values, 0);
+            good &= list->Close() == S_OK;
+          } else
+            good = false;
+          std::cout << "root-range version=" << version
+                    << " graphics=" << graphics << " case=" << test.name
+                    << " close=0x" << std::hex << static_cast<UINT>(closed)
+                    << std::dec << " result=" << (good ? "PASS" : "FAIL")
+                    << "\n";
+        }
+        Release(list);
+        Release(allocator);
+        passed &= good;
+        ++total;
+      }
+    }
+    for (const auto &test : cases) {
+      const std::string name = test.name;
+      if (test.operation == Table || !test.count || !test.data ||
+          test.count == UINT_MAX || name == "first" || name == "second" ||
+          name == "offset-overflow" || name == "table-on-cbv")
+        continue;
+      D3D12_INDIRECT_ARGUMENT_DESC arguments[2] = {};
+      switch (test.operation) {
+      case Single:
+      case Multiple:
+        arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+        arguments[0].Constant = {test.index, test.offset, test.count};
+        break;
+      case CBV:
+        arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW;
+        arguments[0].ConstantBufferView.RootParameterIndex = test.index;
+        break;
+      case SRV:
+        arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
+        arguments[0].ShaderResourceView.RootParameterIndex = test.index;
+        break;
+      case UAV:
+        arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+        arguments[0].UnorderedAccessView.RootParameterIndex = test.index;
+        break;
+      case Table:
+        break;
+      }
+      arguments[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+      const D3D12_COMMAND_SIGNATURE_DESC command_desc = {64, 2, arguments, 0};
+      ID3D12CommandSignature *command = nullptr;
+      const HRESULT hr = device->CreateCommandSignature(
+          &command_desc, test.bind ? root : nullptr, IID_PPV_ARGS(&command));
+      const bool good = hr == (test.valid ? S_OK : E_INVALIDARG) &&
+                        (test.valid ? command != nullptr : command == nullptr);
+      std::cout << "root-indirect version=" << version << " case=" << test.name
+                << " hr=0x" << std::hex << static_cast<UINT>(hr) << std::dec
+                << " result=" << (good ? "PASS" : "FAIL") << "\n";
+      Release(command);
+      indirect_passed &= good;
+      ++indirect_total;
+    }
+    Release(root);
+  }
+  std::cout << "root-indirect cases=" << indirect_total
+            << " result=" << (indirect_passed ? "PASS" : "FAIL") << "\n";
+  passed &= indirect_passed;
+  std::cout << "root-range cases=" << total
+            << " result=" << (passed ? "PASS" : "FAIL") << "\n";
+  return passed;
+}
+
 bool CheckRootSignatureMetadata(ID3D12Device *device) {
   D3D12_DESCRIPTOR_RANGE1 ranges[3] = {};
   ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -313,9 +544,9 @@ bool CheckRootSignatureMetadata(ID3D12Device *device) {
   if (passed) {
     auto *metadata = static_cast<dxmt::MTLD3D12RootSignature *>(root_signature);
     const dxmt::MTLD3D12RootSignature::RootResourceBindingMetadata expected[] = {
-        {0, D3D12_ROOT_PARAMETER_TYPE_CBV, metadata->SlotQwordOffsets[0], D3D12_SHADER_VISIBILITY_VERTEX},
-        {1, D3D12_ROOT_PARAMETER_TYPE_SRV, metadata->SlotQwordOffsets[1], D3D12_SHADER_VISIBILITY_PIXEL},
-        {2, D3D12_ROOT_PARAMETER_TYPE_UAV, metadata->SlotQwordOffsets[2], D3D12_SHADER_VISIBILITY_GEOMETRY},
+        {0, D3D12_ROOT_PARAMETER_TYPE_CBV, metadata->Parameters[0].source_qword, D3D12_SHADER_VISIBILITY_VERTEX},
+        {1, D3D12_ROOT_PARAMETER_TYPE_SRV, metadata->Parameters[1].source_qword, D3D12_SHADER_VISIBILITY_PIXEL},
+        {2, D3D12_ROOT_PARAMETER_TYPE_UAV, metadata->Parameters[2].source_qword, D3D12_SHADER_VISIBILITY_GEOMETRY},
     };
     passed = metadata->RootResourceBindingCount == std::size(expected) && metadata->RootResourceBindings &&
              metadata->RootDescriptorTableCount == 1 && metadata->RootDescriptorTables &&
@@ -334,14 +565,14 @@ bool CheckRootSignatureMetadata(ID3D12Device *device) {
                actual.source_qword == expected[i].source_qword && actual.visibility == expected[i].visibility &&
                canonical->Desc_1_1.pParameters[actual.parameter_index].ParameterType == actual.type &&
                canonical->Desc_1_1.pParameters[actual.parameter_index].ShaderVisibility == actual.visibility &&
-               actual.source_qword == metadata->SlotQwordOffsets[actual.parameter_index];
+               actual.source_qword == metadata->Parameters[actual.parameter_index].source_qword;
       if (!passed)
         std::cerr << "root resource metadata mismatch at parameter " << i << "\n";
     }
     if (passed) {
       const auto &table = metadata->RootDescriptorTables[0];
       const auto &canonical_table = canonical->Desc_1_1.pParameters[3];
-      passed = table.parameter_index == 3 && table.source_qword == metadata->SlotQwordOffsets[3] &&
+      passed = table.parameter_index == 3 && table.source_qword == metadata->Parameters[3].source_qword &&
                table.first_range == 0 && table.range_count == 3 && table.visibility == D3D12_SHADER_VISIBILITY_ALL &&
                canonical_table.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE &&
                canonical_table.ShaderVisibility == table.visibility &&
@@ -1477,6 +1708,17 @@ bool CheckTypedViewFormats(UINT mode = 0) {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::string(argv[1]) == "--root-argument-ranges") {
+    ID3D12Device *device = nullptr;
+    if (!CheckHR("Argument range device",
+                 D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                   IID_PPV_ARGS(&device))))
+      return 1;
+    const bool passed = CheckRootArgumentRanges(device);
+    device->Release();
+    return passed ? 0 : 1;
+  }
+
   if (argc == 2 && std::string(argv[1]) == "--root-signature-budget") {
     ID3D12Device *device = nullptr;
     if (!CheckHR("Root budget device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))))
@@ -1544,6 +1786,7 @@ int main(int argc, char **argv) {
 
   passed &= CheckRootSignatureMetadata(device_a);
   passed &= CheckRootSignatureBudget(device_a);
+  passed &= CheckRootArgumentRanges(device_a);
   if (!passed)
     return abort();
 

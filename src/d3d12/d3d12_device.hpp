@@ -440,6 +440,13 @@ public:
 
 class MTLD3D12RootSignature : public ID3D12RootSignature {
 public:
+  struct RootParameterMetadata {
+    UINT source_qword;
+    D3D12_ROOT_PARAMETER_TYPE type;
+    // Writable DWORDs, independent of root-signature cost or alignment padding.
+    UINT dword_count;
+  };
+
   struct RootResourceBindingMetadata {
     UINT parameter_index;
     D3D12_ROOT_PARAMETER_TYPE type;
@@ -472,7 +479,15 @@ public:
 
   uint32_t UploadQwords;
   uint32_t ParameterSlots;
-  uint32_t const *SlotQwordOffsets;
+  RootParameterMetadata const *Parameters;
+
+  bool
+  IsArgumentRangeValid(UINT index, D3D12_ROOT_PARAMETER_TYPE type, UINT offset, UINT count) const {
+    if (index >= ParameterSlots)
+      return false;
+    const auto &parameter = Parameters[index];
+    return parameter.type == type && offset <= parameter.dword_count && count <= parameter.dword_count - offset;
+  }
 
   UINT RootResourceBindingCount = 0;
   RootResourceBindingMetadata const *RootResourceBindings = nullptr;

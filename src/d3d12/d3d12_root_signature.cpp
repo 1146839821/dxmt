@@ -339,37 +339,24 @@ D3D12CreateRootSignatureDeserializer(const void *pBytecode, SIZE_T DataSize, REF
 
 #pragma endregion
 
-inline std::pair<std::vector<uint32_t>, uint32_t>
-CalculateRootSignatureQwordOffsets(const D3D12_ROOT_SIGNATURE_DESC1 &Desc) {
+inline std::pair<std::vector<MTLD3D12RootSignature::RootParameterMetadata>, uint32_t>
+CalculateRootParameterLayout(const D3D12_ROOT_SIGNATURE_DESC1 &desc) {
   uint32_t current_offset = 0;
-  std::vector<uint32_t> out;
-
-  for (unsigned i = 0; i < Desc.NumParameters; i++) {
-    auto &Parameter = Desc.pParameters[i];
-
-    switch (Parameter.ParameterType) {
-    case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:
-      out.push_back(current_offset++);
-      break;
-    case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
-      out.push_back(current_offset);
-      current_offset += (Parameter.Constants.Num32BitValues / 2) + (Parameter.Constants.Num32BitValues & 1);
-      break;
-    case D3D12_ROOT_PARAMETER_TYPE_CBV:
-    case D3D12_ROOT_PARAMETER_TYPE_SRV:
-    case D3D12_ROOT_PARAMETER_TYPE_UAV:
-      out.push_back(current_offset++);
-      break;
-    }
+  std::vector<MTLD3D12RootSignature::RootParameterMetadata> out;
+  for (UINT i = 0; i < desc.NumParameters; ++i) {
+    const auto &parameter = desc.pParameters[i];
+    const UINT dwords =
+        parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS ? parameter.Constants.Num32BitValues : 2;
+    out.push_back({current_offset, parameter.ParameterType, dwords});
+    current_offset += dwords / 2 + (dwords & 1);
   }
-
-  return {out, current_offset};
+  return {std::move(out), current_offset};
 }
 
 class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignature> {
 
   std::vector<uint8_t> blob_;
-  std::vector<uint32_t> qword_offsets_;
+  std::vector<RootParameterMetadata> parameter_layout_;
   std::vector<RootResourceBindingMetadata> root_resource_bindings_;
   std::vector<RootDescriptorTableMetadata> root_descriptor_tables_;
   std::vector<RootDescriptorRangeMetadata> root_descriptor_ranges_;
@@ -482,17 +469,17 @@ public:
       EncodedStaticSamplers = static_samplers_encoded_.data();
     }
 
-    auto [offsets, total_qwords] = CalculateRootSignatureQwordOffsets(desc);
-    qword_offsets_ = offsets;
+    auto [layout, total_qwords] = CalculateRootParameterLayout(desc);
+    parameter_layout_ = std::move(layout);
     UploadQwords = total_qwords;
-    ParameterSlots = qword_offsets_.size();
-    SlotQwordOffsets = qword_offsets_.data();
+    ParameterSlots = parameter_layout_.size();
+    Parameters = parameter_layout_.data();
 
     ResourceHeapDirectlyIndexed =
         (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED) != 0;
     for (UINT parameter_index = 0; parameter_index < desc.NumParameters; parameter_index++) {
       const auto &parameter = desc.pParameters[parameter_index];
-      const auto source_qword = qword_offsets_[parameter_index];
+      const auto source_qword = parameter_layout_[parameter_index].source_qword;
       switch (parameter.ParameterType) {
       case D3D12_ROOT_PARAMETER_TYPE_CBV:
       case D3D12_ROOT_PARAMETER_TYPE_SRV:
