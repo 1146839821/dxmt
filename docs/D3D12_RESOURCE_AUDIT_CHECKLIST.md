@@ -3962,3 +3962,38 @@ M1 Max/Apple7, macOS27.0.1, MSC4.0.1/Wine11, actual Xcode27.1; requested26,
 native Windows/other GPUs/mesh/RT/T3/T4 NOT_RUN. Public capabilities/ABI/
 root argument layout unchanged. Broader N06/G1/FL12_2 incomplete. User staged
 .gitignore/shared Wine preserved; local commit only, no push.
+
+
+### N06 raw root payload bounds — 2026-10-26
+
+On dbce115d, the shared RootSignatureDeserializer accepted unchecked nested
+payload spans. Final same-PE baseline safe subset: 28 failures/40 checks;
+two minimal static-sampler probes also reproduce invalid S_OK. Existing decoder
+now bounds offsets/counts/alignment before pointer formation, checks allocation
+multiplication and discriminant/flag wire values, preserves modern SDK bits,
+and accepts empty ranges without false OOM. Empty-array offsets remain bounded.
+Microsoft DXC pinned serializer/validator support the latter contract; no new
+parser, owner, module, public ABI or binding layout. INV-06/12/15.
+
+Private/no-private builds pass. Each configuration passes168 raw-root cases
+and existing container/ownership regression.19 final candidate processes pass,
+16 API/GPU-validation-on: eight SM5/SM6 compute/graphics GPU runs read back
+777/0xff00ff00; two persistence runs pass live/rehydrated execution; D3D11
+boundary checks are CPU creation/rejection only. Native ASan/UBSan passes20149
+checks, including10000 deterministic mutations per version. Initial build and
+misconfigured harness attempts remain excluded; commands/hashes/source snapshots:
+`../dxmt-test/n06-raw-root-20261025/N06-raw-root.md` and final-manifest.json.
+
+Final-source creation ABBA covers18 cells,1800 retained100-call batch means,
+180000 timed calls. Largest P95 delta is +7.21%
+(174.00->186.55ns;
+version=1,kind=2,api=1; mapping/report above).
+Retain tail warnings OPEN, attribution INCONCLUSIVE, no overall perf acceptance.
+Checks add O(parameters+ranges) work inside existing decode loops; no new
+bind/draw/submit scan/lock/allocation. Recording/Submit NOT_RUN; prior warnings OPEN.
+
+M1 Max/Apple7/macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1. Requested Xcode26,
+native Windows/other GPUs/mesh/RT/T3/T4 NOT_RUN. Scalar semantic completeness
+and outer vendored DXBC index arithmetic remain OPEN. Capabilities unchanged;
+N06/G1/FL12_2 incomplete. User .gitignore is currently unstaged and preserved;
+focused local commit only, no push.

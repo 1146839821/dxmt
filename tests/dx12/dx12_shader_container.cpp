@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "../../src/util/util_md5.hpp"
+#include "../../src/airconv/dxbc_root_signature.hpp"
 
 namespace {
 
@@ -324,6 +325,241 @@ bool BuildContainer(
   return true;
 }
 
+bool CheckRawRootSignatures(ID3D12Device *device, bool safe_only = false) {
+  bool passed = true;
+  UINT cases = 0;
+  for (const auto version :
+       {D3D_ROOT_SIGNATURE_VERSION_1_0, D3D_ROOT_SIGNATURE_VERSION_1_1}) {
+    D3D12_DESCRIPTOR_RANGE ranges[2] = {
+        {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0},
+        {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 2, 1, 0,
+         D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND}};
+    D3D12_DESCRIPTOR_RANGE1 ranges1[2] = {};
+    D3D12_ROOT_PARAMETER parameters[3] = {};
+    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[1].Constants = {3, 0, 3};
+    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[2].DescriptorTable = {2, ranges};
+    D3D12_ROOT_PARAMETER1 parameters1[3] = {};
+    for (UINT i = 0; i < 3; ++i) {
+      parameters1[i].ParameterType = parameters[i].ParameterType;
+      if (i == 1)
+        parameters1[i].Constants = parameters[i].Constants;
+    }
+    for (UINT i = 0; i < 2; ++i)
+      ranges1[i] = {ranges[i].RangeType,
+                    ranges[i].NumDescriptors,
+                    ranges[i].BaseShaderRegister,
+                    ranges[i].RegisterSpace,
+                    D3D12_DESCRIPTOR_RANGE_FLAG_NONE,
+                    ranges[i].OffsetInDescriptorsFromTableStart};
+    parameters1[2].DescriptorTable = {2, ranges1};
+    D3D12_STATIC_SAMPLER_DESC sampler = {};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW =
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler.MaxAnisotropy = 1;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc = {};
+    desc.Version = version;
+    if (version == D3D_ROOT_SIGNATURE_VERSION_1_0)
+      desc.Desc_1_0 = {3, parameters, 1, &sampler,
+                       D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    else
+      desc.Desc_1_1 = {3, parameters1, 1, &sampler,
+                       D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    ID3DBlob *blob = nullptr;
+    if (FAILED(D3D12SerializeVersionedRootSignature(&desc, &blob, nullptr)))
+      return false;
+    std::vector<uint8_t> source(blob->GetBufferSize());
+    std::memcpy(source.data(), blob->GetBufferPointer(), source.size());
+    Release(blob);
+    std::vector<ContainerPart> parts;
+    if (!ReadContainerParts(source, parts))
+      return false;
+    const auto root_part =
+        std::find_if(parts.begin(), parts.end(), [](const ContainerPart &part) {
+          return part.fourcc == MakeFourCC('R', 'T', 'S', '0');
+        });
+    if (root_part == parts.end())
+      return false;
+    const auto original = root_part->payload;
+    dxmt::RawRootSignatureDesc header;
+    std::memcpy(&header, original.data(), sizeof(header));
+    dxmt::RawRootParameter raw_parameters[3];
+    std::memcpy(raw_parameters, original.data() + header.RootParametersOffset,
+                sizeof(raw_parameters));
+    dxmt::RawRootDescriptorTable table;
+    std::memcpy(&table, original.data() + raw_parameters[2].PayloadOffset,
+                sizeof(table));
+    struct Mutation {
+      const char *name;
+      size_t offset;
+      uint32_t value;
+      bool valid;
+      bool safe_baseline;
+      bool version_1_1_only = false;
+    };
+    const size_t parameter_offset = header.RootParametersOffset;
+    const size_t table_offset = raw_parameters[2].PayloadOffset;
+    const uint32_t short_offset = static_cast<uint32_t>(original.size() - 4);
+    const Mutation mutations[] = {
+        {"valid", offsetof(dxmt::RawRootSignatureDesc, Flags), header.Flags,
+         true, true},
+        {"parameter-offset",
+         offsetof(dxmt::RawRootSignatureDesc, RootParametersOffset), UINT_MAX,
+         false, false},
+        {"parameter-short",
+         offsetof(dxmt::RawRootSignatureDesc, RootParametersOffset),
+         short_offset, false, false},
+        {"parameter-alignment",
+         offsetof(dxmt::RawRootSignatureDesc, RootParametersOffset),
+         header.RootParametersOffset + 1, false, false},
+        {"parameter-count", offsetof(dxmt::RawRootSignatureDesc, NumParameters),
+         UINT_MAX, false, false},
+        {"sampler-offset",
+         offsetof(dxmt::RawRootSignatureDesc, StaticSamplersOffset), UINT_MAX,
+         false, true},
+        {"sampler-short",
+         offsetof(dxmt::RawRootSignatureDesc, StaticSamplersOffset),
+         short_offset, false, true},
+        {"sampler-alignment",
+         offsetof(dxmt::RawRootSignatureDesc, StaticSamplersOffset),
+         header.StaticSamplersOffset + 1, false, true},
+        {"sampler-count",
+         offsetof(dxmt::RawRootSignatureDesc, NumStaticSamplers), UINT_MAX,
+         false, true},
+        {"descriptor-short",
+         parameter_offset + offsetof(dxmt::RawRootParameter, PayloadOffset),
+         short_offset, false, false},
+        {"descriptor-alignment",
+         parameter_offset + offsetof(dxmt::RawRootParameter, PayloadOffset),
+         raw_parameters[0].PayloadOffset + 1, false, false},
+        {"constants-short",
+         parameter_offset + sizeof(dxmt::RawRootParameter) +
+             offsetof(dxmt::RawRootParameter, PayloadOffset),
+         short_offset, false, false},
+        {"table-short",
+         parameter_offset + 2 * sizeof(dxmt::RawRootParameter) +
+             offsetof(dxmt::RawRootParameter, PayloadOffset),
+         short_offset, false, false},
+        {"range-offset",
+         table_offset +
+             offsetof(dxmt::RawRootDescriptorTable, DescriptorRangesOffset),
+         UINT_MAX, false, false},
+        {"range-short",
+         table_offset +
+             offsetof(dxmt::RawRootDescriptorTable, DescriptorRangesOffset),
+         short_offset, false, false},
+        {"range-alignment",
+         table_offset +
+             offsetof(dxmt::RawRootDescriptorTable, DescriptorRangesOffset),
+         table.DescriptorRangesOffset + 1, false, false},
+        {"range-count",
+         table_offset +
+             offsetof(dxmt::RawRootDescriptorTable, NumDescriptorRanges),
+         UINT_MAX, false, false},
+        {"parameter-type",
+         parameter_offset + offsetof(dxmt::RawRootParameter, ParameterType),
+         UINT_MAX, false, true},
+        {"root-flags", offsetof(dxmt::RawRootSignatureDesc, Flags), UINT_MAX,
+         false, true},
+        {"visibility",
+         parameter_offset + offsetof(dxmt::RawRootParameter, ShaderVisibility),
+         UINT_MAX, false, false},
+        {"range-type",
+         table.DescriptorRangesOffset +
+             offsetof(D3D12_DESCRIPTOR_RANGE, RangeType),
+         UINT_MAX, false, false},
+        {"range-flags",
+         table.DescriptorRangesOffset +
+             offsetof(D3D12_DESCRIPTOR_RANGE1, Flags),
+         UINT_MAX, false, false, true},
+        {"descriptor-flags",
+         raw_parameters[0].PayloadOffset +
+             offsetof(D3D12_ROOT_DESCRIPTOR1, Flags),
+         UINT_MAX, false, false, true},
+        {"empty-ranges",
+         table_offset +
+             offsetof(dxmt::RawRootDescriptorTable, NumDescriptorRanges),
+         0, true, true},
+        {"empty-parameters",
+         offsetof(dxmt::RawRootSignatureDesc, NumParameters), 0, true, true},
+        {"empty-samplers",
+         offsetof(dxmt::RawRootSignatureDesc, NumStaticSamplers), 0, true,
+         true},
+        {"empty-ranges-overrun",
+         table_offset +
+             offsetof(dxmt::RawRootDescriptorTable, NumDescriptorRanges),
+         0, false, false},
+        {"empty-parameters-overrun",
+         offsetof(dxmt::RawRootSignatureDesc, NumParameters), 0, false, false},
+        {"empty-samplers-overrun",
+         offsetof(dxmt::RawRootSignatureDesc, NumStaticSamplers), 0, false,
+         false},
+    };
+    for (const auto &mutation : mutations) {
+      if ((safe_only && !mutation.safe_baseline) ||
+          (mutation.version_1_1_only &&
+           version != D3D_ROOT_SIGNATURE_VERSION_1_1))
+        continue;
+      root_part->payload = original;
+      std::memcpy(root_part->payload.data() + mutation.offset, &mutation.value,
+                  sizeof(mutation.value));
+      // Empty arrays form no typed pointer, but their offsets remain bounded.
+      const auto name = std::string(mutation.name);
+      size_t unused_offset = 0;
+      if (name.find("empty-ranges") == 0)
+        unused_offset = table_offset + offsetof(dxmt::RawRootDescriptorTable,
+                                                DescriptorRangesOffset);
+      else if (name.find("empty-parameters") == 0)
+        unused_offset =
+            offsetof(dxmt::RawRootSignatureDesc, RootParametersOffset);
+      else if (name.find("empty-samplers") == 0)
+        unused_offset =
+            offsetof(dxmt::RawRootSignatureDesc, StaticSamplersOffset);
+      if (unused_offset) {
+        const uint32_t offset = mutation.valid ? 0 : UINT_MAX;
+        std::memcpy(root_part->payload.data() + unused_offset, &offset,
+                    sizeof(offset));
+      }
+      std::vector<uint8_t> container;
+      if (!BuildContainer(source, parts, container))
+        return false;
+      for (UINT api = 0; api < (device ? 3u : 2u); ++api) {
+        IUnknown *object = nullptr;
+        const auto iid =
+            api == 0   ? __uuidof(ID3D12RootSignatureDeserializer)
+            : api == 1 ? __uuidof(ID3D12VersionedRootSignatureDeserializer)
+                       : __uuidof(ID3D12RootSignature);
+        HRESULT hr = api == 0   ? D3D12CreateRootSignatureDeserializer(
+                                      container.data(), container.size(), iid,
+                                      reinterpret_cast<void **>(&object))
+                     : api == 1 ? D3D12CreateVersionedRootSignatureDeserializer(
+                                      container.data(), container.size(), iid,
+                                      reinterpret_cast<void **>(&object))
+                                : device->CreateRootSignature(
+                                      0, container.data(), container.size(),
+                                      iid, reinterpret_cast<void **>(&object));
+        const bool good = mutation.valid ? hr == S_OK && object
+                                         : hr == E_INVALIDARG && !object;
+        std::cout << "raw-root version=" << version << " api=" << api
+                  << " case=" << mutation.name << " hr=0x" << std::hex
+                  << static_cast<UINT>(hr) << std::dec
+                  << " result=" << (good ? "PASS" : "FAIL") << "\n";
+        Release(object);
+        passed &= good;
+        ++cases;
+      }
+    }
+  }
+  std::cout << "raw-root cases=" << cases
+            << " result=" << (passed ? "PASS" : "FAIL") << "\n";
+  return passed;
+}
+
 bool RemoveRootSignature(const std::vector<uint8_t> &source,
                          std::vector<uint8_t> &result) {
   std::vector<ContainerPart> parts;
@@ -402,6 +638,9 @@ bool AddDXILExecutable(
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::string(argv[1]) == "--raw-roots-safe")
+    return CheckRawRootSignatures(nullptr, true) ? 0 : 1;
+
   if (argc != 1 && argc != 2 && argc != 5 && argc != 6 && argc != 7 && argc != 9)
     return 2;
 
@@ -520,7 +759,7 @@ VSOutput ds_main(TessFactors factors, const OutputPatch<VSOutput, 3> patch, floa
     return 1;
   }
 
-  bool passed = true;
+  bool passed = CheckRawRootSignatures(device);
   const D3D12_SHADER_BYTECODE legacy_cs = {legacy_compute.data(), legacy_compute.size()};
   const D3D12_SHADER_BYTECODE embedded_cs = {embedded_compute.data(), embedded_compute.size()};
   const D3D12_SHADER_BYTECODE legacy_vs = {legacy_vertex.data(), legacy_vertex.size()};
