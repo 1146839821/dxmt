@@ -3997,3 +3997,25 @@ native Windows/other GPUs/mesh/RT/T3/T4 NOT_RUN. Scalar semantic completeness
 and outer vendored DXBC index arithmetic remain OPEN. Capabilities unchanged;
 N06/G1/FL12_2 incomplete. User .gitignore is currently unstaged and preserved;
 focused local commit only, no push.
+
+
+### N14 concurrent multiple-fence notification — 2026-10-26
+
+On8d8c6f33, Device attachment B concurrency coverage gap confirmed: existing
+multi-wait test signals sources serially. Runtime defect Not Reproduced.
+Existing command-list runner adds opt-in --multiple-fences-concurrent;
+ALL/ANY x pre-registered/racing-registration x16 rounds x8 groups =512 groups
+per configuration. Four CPU Signal workers release together. ANY includes a
+fifth unsatisfied fence; subsequent rewind/signal must not re-notify. Existing
+scoped IAT observer counts forwarded SetEvent calls and owned event handles.
+Exactly512 notifications/duplicates/closes observed in each configuration.
+
+Private/no-private builds and four validation-on CPU processes pass: new
+concurrency checks plus existing null/duplicate/wide/six-OOM/96-abandonment
+cases. No production change, new runner framework or public capability/ABI.
+This is bounded opt-in concurrency evidence, not exhaustive interleaving/TSan
+or fullT4 proof. GPU readback/performance NOT_RUN for this test-only slice;
+historical warnings/Device/G1/FL12_2 remain OPEN. Actual Xcode27.1; requested26
+and native Windows NOT_RUN. User .gitignore preserved; local commit/no push.
+Commands/hashes/timing ownership table and source reference:
+`../dxmt-test/n14-concurrent-groups-20261026/N14-concurrent-groups.md`.

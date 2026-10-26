@@ -738,32 +738,52 @@ bool TestAllocatorRecordingGrowth(ID3D12Device *device) {
 }
 
 class FenceHandleProbe {
-  inline static BOOL (WINAPI *duplicate_)(HANDLE, HANDLE, HANDLE, LPHANDLE, DWORD, BOOL, DWORD) = nullptr;
-  inline static BOOL (WINAPI *close_)(HANDLE) = nullptr;
-  inline static std::atomic<unsigned> opened_{0}, closed_{0};
-  DriverImportPatch duplicate_patch_, close_patch_;
-  static BOOL WINAPI Duplicate(HANDLE a, HANDLE b, HANDLE c, LPHANDLE d, DWORD e, BOOL f, DWORD g) {
+  inline static BOOL(WINAPI *duplicate_)(HANDLE, HANDLE, HANDLE, LPHANDLE,
+                                         DWORD, BOOL, DWORD) = nullptr;
+  inline static BOOL(WINAPI *close_)(HANDLE) = nullptr;
+  inline static BOOL(WINAPI *signal_)(HANDLE) = nullptr;
+  inline static std::atomic<unsigned> opened_{0}, closed_{0}, signals_{0};
+  DriverImportPatch duplicate_patch_, close_patch_, signal_patch_;
+  static BOOL WINAPI Signal(HANDLE handle) {
+    signals_++;
+    return signal_(handle);
+  }
+  static BOOL WINAPI Duplicate(HANDLE a, HANDLE b, HANDLE c, LPHANDLE d,
+                               DWORD e, BOOL f, DWORD g) {
     BOOL ok = duplicate_(a, b, c, d, e, f, g);
-    if (ok) opened_++;
+    if (ok)
+      opened_++;
     return ok;
   }
   static BOOL WINAPI Close(HANDLE handle) {
     BOOL ok = close_(handle);
-    if (ok) closed_++;
+    if (ok)
+      closed_++;
     return ok;
   }
+
 public:
   bool Install() {
     void *original = nullptr;
-    opened_ = closed_ = 0;
-    if (!duplicate_patch_.Install("DuplicateHandle", reinterpret_cast<void *>(&Duplicate), original)) return false;
+    opened_ = closed_ = signals_ = 0;
+    if (!duplicate_patch_.Install(
+            "DuplicateHandle", reinterpret_cast<void *>(&Duplicate), original))
+      return false;
     duplicate_ = reinterpret_cast<decltype(duplicate_)>(original);
-    if (!close_patch_.Install("CloseHandle", reinterpret_cast<void *>(&Close), original)) return false;
+    if (!close_patch_.Install("CloseHandle", reinterpret_cast<void *>(&Close),
+                              original))
+      return false;
     close_ = reinterpret_cast<decltype(close_)>(original);
+    if (!signal_patch_.Install("SetEvent", reinterpret_cast<void *>(&Signal),
+                               original))
+      return false;
+    signal_ = reinterpret_cast<decltype(signal_)>(original);
     return true;
   }
+  unsigned Signals() const { return signals_.load(); }
   bool Balanced() const {
-    std::cout << "Fence handle duplicates=" << opened_ << " closes=" << closed_ << "\n";
+    std::cout << "Fence handle duplicates=" << opened_ << " closes=" << closed_
+              << "\n";
     return opened_ == closed_;
   }
 };
@@ -1215,6 +1235,112 @@ bool TestMultipleFenceWaits() {
   std::cout << "Multiple fence synchronous/duplicate/wide/OOM/abandonment passed; OOM sites="
             << failures << "\n";
   return true;
+}
+
+bool TestConcurrentMultipleFenceWaits() {
+  Owned<ID3D12Device1> device;
+  std::array<Owned<ID3D12Fence>, 5> owned;
+  std::array<ID3D12Fence *, 5> fences;
+  if (!CheckHR("Concurrent wait device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&device.ptr))))
+    return false;
+  for (unsigned i = 0; i < fences.size(); ++i) {
+    if (!CheckHR("Concurrent wait fence",
+                 device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                     IID_PPV_ARGS(&owned[i].ptr))))
+      return false;
+    fences[i] = owned[i].ptr;
+  }
+  struct EventOwner {
+    HANDLE handle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    ~EventOwner() {
+      if (handle)
+        CloseHandle(handle);
+    }
+  } start;
+  if (!start.handle)
+    return false;
+  FenceHandleProbe probe;
+  if (!probe.Install())
+    return false;
+  constexpr unsigned groups = 8, rounds = 16;
+  for (auto flags : {D3D12_MULTIPLE_FENCE_WAIT_FLAG_NONE,
+                     D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY}) {
+    for (bool racing_registration : {false, true}) {
+      for (unsigned round = 0; round < rounds; ++round) {
+        std::array<EventOwner, groups> events;
+        for (const auto &event : events)
+          if (!event.handle)
+            return false;
+        for (auto *fence : fences)
+          if (!CheckHR("Rewind concurrent fence", fence->Signal(0)))
+            return false;
+        ResetEvent(start.handle);
+        const unsigned before = probe.Signals();
+        const UINT64 values[] = {1, 1, 1, 1, 100};
+        const UINT count = flags == D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY ? 5 : 4;
+        std::atomic<bool> good{true};
+        auto register_groups = [&] {
+          for (const auto &event : events)
+            if (FAILED(device->SetEventOnMultipleFenceCompletion(
+                    fences.data(), values, count, flags, event.handle)))
+              good = false;
+        };
+        if (!racing_registration) {
+          register_groups();
+          for (const auto &event : events)
+            if (WaitForSingleObject(event.handle, 0) != WAIT_TIMEOUT)
+              good = false;
+        }
+        // Release completion workers and the optional registrar together.
+        // This exercises notifications both before and after group Arm.
+        std::array<std::thread, 4> workers;
+        for (unsigned i = 0; i < workers.size(); ++i)
+          workers[i] = std::thread([&, i] {
+            if (WaitForSingleObject(start.handle, 5000) != WAIT_OBJECT_0 ||
+                FAILED(fences[i]->Signal(1)))
+              good = false;
+          });
+        std::thread registrar;
+        if (racing_registration)
+          registrar = std::thread([&] {
+            if (WaitForSingleObject(start.handle, 5000) != WAIT_OBJECT_0)
+              good = false;
+            else
+              register_groups();
+          });
+        SetEvent(start.handle);
+        for (auto &worker : workers)
+          worker.join();
+        if (registrar.joinable())
+          registrar.join();
+        for (const auto &event : events) {
+          if (WaitForSingleObject(event.handle, 5000) != WAIT_OBJECT_0)
+            good = false;
+          ResetEvent(event.handle);
+        }
+        // ANY must cancel the fifth fence. Rewinding and signaling every
+        // source again must not notify completed groups a second time.
+        for (auto *fence : fences)
+          if (FAILED(fence->Signal(0)) || FAILED(fence->Signal(100)))
+            good = false;
+        for (const auto &event : events)
+          if (WaitForSingleObject(event.handle, 0) != WAIT_TIMEOUT)
+            good = false;
+        if (!good || probe.Signals() - before != groups) {
+          std::cerr << "Concurrent multiple wait failed: flags=" << flags
+                    << " racing=" << racing_registration << " round=" << round
+                    << " notifications=" << probe.Signals() - before << "\n";
+          return false;
+        }
+      }
+      std::cout << "Concurrent multiple wait flags=" << flags
+                << " racing=" << racing_registration
+                << " groups=" << groups * rounds << " passed\n";
+    }
+  }
+  return probe.Signals() == 4 * groups * rounds && probe.Balanced();
 }
 
 bool TestDeviceRemovalWaits() {
@@ -3473,6 +3599,8 @@ int main(int argc, char **argv) {
   }
   if (argc == 3 && std::strcmp(argv[1], "--copy-staging") == 0)
     return TestCopyStaging(argv[2]) ? 0 : 1;
+  if (argc == 2 && std::strcmp(argv[1], "--multiple-fences-concurrent") == 0)
+    return TestConcurrentMultipleFenceWaits() ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--multiple-fences") == 0)
     return TestMultipleFenceWaits() ? 0 : 1;
   if ((argc == 3 || argc == 4) && !std::strcmp(argv[1], "--split-failure")) {
