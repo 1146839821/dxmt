@@ -1290,6 +1290,90 @@ public:
 
 #pragma region DrawCall
 
+  bool
+  TryStreamOutputDraw(
+      bool indexed, UINT count, UINT instances, UINT first, INT base_vertex, UINT base_instance,
+      ID3D11Buffer *argument_buffer = nullptr, UINT argument_offset = 0
+  ) {
+    auto shader = state_.ShaderStages[PipelineStage::Geometry].Shader.ptr();
+    if (!shader || shader->GetManagedShader())
+      return false;
+    auto layout = com_cast<IMTLD3D11StreamOutputLayout>(shader);
+    if (!layout)
+      return false;
+    if (indexed && !state_.InputAssembler.IndexBuffer)
+      return true;
+    StreamOutputDraw arguments = {};
+    if (!GetStreamOutputPrimitiveLayout(state_.InputAssembler.Topology, arguments))
+      return true;
+    MTL_SHADER_STREAM_OUTPUT_ELEMENT_DESC *elements = nullptr;
+    uint32_t strides[4] = {};
+    layout->GetStreamOutputElements(&elements, strides);
+    arguments.stride = strides[0];
+    arguments.input_count = count;
+    arguments.instance_count = instances;
+    arguments.base_vertex = indexed ? static_cast<UINT>(base_vertex) : first;
+    arguments.base_instance = base_instance;
+    Rc<Buffer> indirect;
+    if (argument_buffer) {
+      auto resource = GetResourceCommon(argument_buffer);
+      if (!resource)
+        return true;
+      indirect = resource->buffer();
+      const UINT size = indexed ? 20 : 16;
+      if ((argument_offset & 3) || argument_offset > indirect->length() ||
+          size > indirect->length() - argument_offset) {
+        ERR("Invalid stream-output indirect arguments");
+        return true;
+      }
+    }
+    uint64_t index_offset = 0;
+    Rc<Buffer> scratch;
+    if (indexed) {
+      arguments.index_size = state_.InputAssembler.IndexBufferFormat == DXGI_FORMAT_R32_UINT ? 4 : 2;
+      index_offset = state_.InputAssembler.IndexBufferOffset;
+      const auto index_length = state_.InputAssembler.IndexBuffer->buffer()->length();
+      if (index_offset > index_length)
+        return true;
+      if (indirect)
+        arguments.input_count = UINT((index_length - index_offset) / arguments.index_size);
+      else {
+        index_offset += uint64_t(first) * arguments.index_size;
+        if (index_offset > index_length || uint64_t(count) * arguments.index_size > index_length - index_offset)
+          return true;
+      }
+      if (arguments.flags & kSOOverlapping) {
+        arguments.flags |= kSOHasCut;
+        arguments.cut_index = arguments.index_size == 2 ? 0xffffu : 0xffffffffu;
+        arguments.prefix_count = arguments.input_count;
+        if (arguments.input_count) {
+          StreamOutputScanLayout plan(arguments.input_count);
+          scratch = Rc(new Buffer(plan.size, device->GetMTLDevice()));
+          auto allocation = scratch->allocate({BufferAllocationFlag::GpuPrivate});
+          if (!allocation->buffer()) {
+            ERR("Stream-output scan allocation failed");
+            return true;
+          }
+          scratch->rename(std::move(allocation));
+          SwitchToComputeEncoder();
+          EmitOP([=](ArgumentEncodingContext &enc) {
+            enc.prepareStreamOutputIndexPrefix(arguments, index_offset, scratch, indirect, argument_offset);
+          });
+        }
+      }
+    }
+    const auto status = indexed ? PreDraw<true>(true) : PreDraw<false>(true);
+    if (status != DrawCallStatus::Ordinary)
+      return true;
+    const auto offset = PreAllocateArgumentBuffer(sizeof(StreamOutputDraw), 16);
+    EmitOP([=](ArgumentEncodingContext &enc) {
+      enc.bumpVisibilityResultOffset();
+      enc.resolveRenderPassBarrier();
+      enc.encodeStreamOutputDraw(arguments, offset, index_offset, scratch, indirect, argument_offset);
+    });
+    return true;
+  }
+
   void
   STDMETHODCALLTYPE
   Draw(UINT VertexCount, UINT StartVertexLocation) override {
@@ -1297,6 +1381,8 @@ public:
       return;
     std::lock_guard<mutex_t> lock(mutex);
 
+    if (TryStreamOutputDraw(false, VertexCount, 1, StartVertexLocation, 0, 0))
+      return;
     WMTPrimitiveType Primitive;
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
@@ -1330,6 +1416,8 @@ public:
       return;
     std::lock_guard<mutex_t> lock(mutex);
 
+    if (TryStreamOutputDraw(true, IndexCount, 1, StartIndexLocation, BaseVertexLocation, 0))
+      return;
     WMTPrimitiveType Primitive;
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
@@ -1373,6 +1461,10 @@ public:
       return;
     std::lock_guard<mutex_t> lock(mutex);
 
+    if (TryStreamOutputDraw(
+            false, VertexCountPerInstance, InstanceCount, StartVertexLocation, 0, StartInstanceLocation
+        ))
+      return;
     WMTPrimitiveType Primitive;
     uint32_t ControlPointCount;
     if (!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
@@ -1412,6 +1504,10 @@ public:
       return;
     std::lock_guard<mutex_t> lock(mutex);
 
+    if (TryStreamOutputDraw(
+            true, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation
+        ))
+      return;
     WMTPrimitiveType Primitive;
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
@@ -1612,6 +1708,8 @@ public:
   DrawIndexedInstancedIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs) override {
     std::lock_guard<mutex_t> lock(mutex);
 
+    if (TryStreamOutputDraw(true, 0, 0, 0, 0, 0, pBufferForArgs, AlignedByteOffsetForArgs))
+      return;
     WMTPrimitiveType Primitive;
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
@@ -1654,6 +1752,8 @@ public:
   DrawInstancedIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs) override {
     std::lock_guard<mutex_t> lock(mutex);
 
+    if (TryStreamOutputDraw(false, 0, 0, 0, 0, 0, pBufferForArgs, AlignedByteOffsetForArgs))
+      return;
     WMTPrimitiveType Primitive;
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
@@ -2269,7 +2369,7 @@ public:
         auto &entry = state_.StreamOutput.Targets.bind(slot, {pBuffer}, replaced);
         if (!replaced) {
           auto offset = pOffsets ? pOffsets[slot] : 0;
-          if (offset != entry.Offset) {
+          if (offset != UINT32_MAX || offset != entry.Offset) {
             state_.StreamOutput.Targets.set_dirty(slot);
             entry.Offset = offset;
             EmitST([=, buffer = pBuffer->buffer()](ArgumentEncodingContext &enc) mutable {
@@ -2289,8 +2389,11 @@ public:
          * - DSV can't even be a buffer
          * - RTV is questionable: we don't support buffer-backed RTV at the moment
          */
-        EmitST([=, buffer = pBuffer->buffer()](ArgumentEncodingContext &enc) mutable {
-          enc.bindStreamOutputBuffer(slot, entry.Offset, forward_rc(buffer), {});
+        auto buffer = pBuffer->buffer();
+        auto counter = buffer->streamOutputCounter();
+        EmitST([slot, offset = entry.Offset, buffer = std::move(buffer),
+                counter = std::move(counter)](ArgumentEncodingContext &enc) mutable {
+          enc.bindStreamOutputBuffer(slot, offset, forward_rc(buffer), forward_rc(counter));
         });
       } else {
         state_.StreamOutput.Targets.unbind(slot);
@@ -4496,17 +4599,20 @@ public:
         dsv_info.PixelFormat = state_.OutputMerger.DSV->pixelFormat();
         dsv_info.ReadOnlyFlags =  state_.OutputMerger.DSV->readonlyFlags();
       } else if (effective_render_target == 0) {
-        if (!state_.OutputMerger.UAVs.any_bound()) {
+        const bool stream_output_only =
+            bool(com_cast<IMTLD3D11StreamOutputLayout>(state_.ShaderStages[PipelineStage::Geometry].Shader.ptr()));
+        if (!state_.OutputMerger.UAVs.any_bound() && !stream_output_only) {
           DEBUG("No rendering attachment or uav is bounded");
           return false;
         }
-        D3D11_ASSERT(state_.Rasterizer.NumViewports);
+        D3D11_ASSERT(state_.Rasterizer.NumViewports || stream_output_only);
         IMTLD3D11RasterizerState *state =
             state_.Rasterizer.RasterizerState ? state_.Rasterizer.RasterizerState : default_rasterizer_state;
         auto &viewport = state_.Rasterizer.viewports[0];
-        render_target_width = viewport.Width;
-        render_target_height = viewport.Height;
-        sample_count = state->UAVOnlySampleCount();
+        render_target_width = stream_output_only ? std::max(1u, UINT(viewport.Width)) : UINT(viewport.Width);
+        render_target_height = stream_output_only ? std::max(1u, UINT(viewport.Height)) : UINT(viewport.Height);
+        render_target_array = std::max(1u, render_target_array);
+        sample_count = stream_output_only ? 1 : state->UAVOnlySampleCount();
         if (!(render_target_width && render_target_height)) {
           ERR("uav only rendering is enabled but viewport is empty");
           return false;
@@ -4659,7 +4765,8 @@ public:
     Desc.BlendState = state_.OutputMerger.BlendState ? state_.OutputMerger.BlendState : default_blend_state;
     Desc.DepthStencilFormat =
         state_.OutputMerger.DSV ? state_.OutputMerger.DSV->pixelFormat() : WMTPixelFormatInvalid;
-    Desc.TopologyClass = to_metal_primitive_topology(state_.InputAssembler.Topology);
+    Desc.TopologyClass =
+        Desc.SOLayout ? WMTPrimitiveTopologyClassPoint : to_metal_primitive_topology(state_.InputAssembler.Topology);
     bool ds_enabled =
         (state_.OutputMerger.DepthStencilState ? state_.OutputMerger.DepthStencilState : default_depth_stencil_state)
             ->IsEnabled();
@@ -4864,7 +4971,7 @@ public:
 
   template <bool IndexedDraw>
   DrawCallStatus
-  PreDraw() {
+  PreDraw(bool stream_output = false) {
     DrawCallStatus status;
     if constexpr (IndexedDraw) {
       if (!state_.InputAssembler.IndexBuffer)
@@ -4911,9 +5018,15 @@ public:
     IMTLD3D11RasterizerState *current_rs =
         state_.Rasterizer.RasterizerState ? state_.Rasterizer.RasterizerState : default_rasterizer_state;
     bool allow_scissor = current_rs->IsScissorEnabled();
+    const UINT viewport_count =
+        stream_output ? std::max(1u, state_.Rasterizer.NumViewports) : state_.Rasterizer.NumViewports;
     if (dirty_state.any(DirtyState::Viewport)) {
-      auto viewports = AllocateCommandData<WMTViewport>(state_.Rasterizer.NumViewports);
-      for (unsigned i = 0; i < state_.Rasterizer.NumViewports; i++) {
+      auto viewports = AllocateCommandData<WMTViewport>(viewport_count);
+      for (unsigned i = 0; i < viewport_count; i++) {
+        if (i >= state_.Rasterizer.NumViewports) {
+          viewports[i] = {0, 0, 1, 1, 0, 1};
+          continue;
+        }
         auto &d3dViewport = state_.Rasterizer.viewports[i];
         viewports[i] = {d3dViewport.TopLeftX, d3dViewport.TopLeftY, d3dViewport.Width,
                         d3dViewport.Height,   d3dViewport.MinDepth, d3dViewport.MaxDepth};
@@ -4932,8 +5045,8 @@ public:
       auto render_target_height = state_.OutputMerger.RenderTargetHeight == 0
                                       ? (UINT)state_.Rasterizer.viewports[0].Height
                                       : state_.OutputMerger.RenderTargetHeight;
-      auto scissors = AllocateCommandData<WMTScissorRect>(state_.Rasterizer.NumViewports);
-      for (unsigned i = 0; i < state_.Rasterizer.NumViewports; i++) {
+      auto scissors = AllocateCommandData<WMTScissorRect>(viewport_count);
+      for (unsigned i = 0; i < viewport_count; i++) {
         if (allow_scissor) {
           if (i < state_.Rasterizer.NumScissorRects) {
             auto &d3d_rect = state_.Rasterizer.scissor_rects[i];
@@ -5029,15 +5142,8 @@ public:
     if (!state_.StreamOutput.Targets.any_dirty())
       return;
 
-    auto offset = PreAllocateArgumentBuffer(16 /* size of two pointer */ * kStreamOutputSlots, 32);
-
-    if (cmdbuf_state == CommandBufferState::RenderPipelineReady)
-      EmitST([=](ArgumentEncodingContext &enc) { enc.encodeStreamOutputBuffers<PipelineKind::Ordinary>(offset); });
-    else if (cmdbuf_state == CommandBufferState::TessellationRenderPipelineReady)
-      EmitST([=](ArgumentEncodingContext &enc) { enc.encodeStreamOutputBuffers<PipelineKind::Tessellation>(offset); });
-    else if (cmdbuf_state == CommandBufferState::GeometryRenderPipelineReady)
-      EmitST([=](ArgumentEncodingContext &enc) { enc.encodeStreamOutputBuffers<PipelineKind::Geometry>(offset); });
-
+    if (cmdbuf_state != CommandBufferState::RenderPipelineReady)
+      ERR("Stream output from geometry/tessellation is unsupported");
     state_.StreamOutput.Targets.clear_dirty();
   }
 
@@ -5074,6 +5180,15 @@ public:
       EmitST([=, buffer = element.Buffer->buffer(), offset = element.Offset,
             stride = element.Stride](ArgumentEncodingContext &enc) mutable {
         enc.bindVertexBuffer(slot, offset, stride, forward_rc(buffer));
+      });
+    }
+
+    for (const auto &[slot, entry] : state_.StreamOutput.Targets) {
+      auto buffer = entry.Buffer->buffer();
+      auto counter = buffer->streamOutputCounter();
+      EmitST([slot, buffer = std::move(buffer), counter = std::move(counter)](ArgumentEncodingContext &enc) mutable {
+        // Restoring bindings preserves the resource's current GPU cursor.
+        enc.bindStreamOutputBuffer(slot, UINT32_MAX, forward_rc(buffer), forward_rc(counter));
       });
     }
 

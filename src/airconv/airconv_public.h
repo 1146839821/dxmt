@@ -6,7 +6,7 @@
 #define __AIRCONV_H
 
 /* 28 invalidates AIR caches containing old PointStream GS primitive-count/point-size code. */
-#define AIRCONV_VERSION 28
+#define AIRCONV_VERSION 29
 
 #ifdef __cplusplus
 #include <string>
@@ -236,6 +236,7 @@ enum SM50_SHADER_METAL_VERSION {
 enum SM50_SHADER_FLAG {
   SM50_SHADER_FLAG_SAMPLE_NAN_TO_ZERO = 1 << 0,
   SM50_SHADER_FLAG_DEFUSE_FMA = 1 << 1,
+  SM50_SHADER_FLAG_EMIT_SO_INDIRECT = 1 << 2,
 };
 
 struct SM50_SHADER_COMMON_DATA {

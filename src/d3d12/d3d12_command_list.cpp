@@ -911,7 +911,10 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   std::array<D3D12_STREAM_OUTPUT_BUFFER_VIEW, D3D12_SO_BUFFER_SLOT_COUNT> stream_output_views_;
 
   WMT::Reference<WMT::RenderPipelineState> airconv_geometry_marshal_pso_;
+  WMT::Reference<WMT::RenderPipelineState> stream_output_prepare_pso_;
+  WMT::Reference<WMT::ComputePipelineState> stream_output_scan_psos_[4];
   uint64_t index_buffer_address;
+  uint32_t index_buffer_size = 0;
   WMT::Buffer index_buffer;
   WMTIndexType index_type;
   uint64_t index_offset;
@@ -1234,6 +1237,7 @@ public:
     memset(stream_output_views_.data(), 0, sizeof(stream_output_views_));
 
     index_buffer_address = 0;
+    index_buffer_size = 0;
     index_buffer = {};
     index_type = {};
     index_offset = 0;
@@ -1753,6 +1757,7 @@ public:
     memset(vertex_buffers_.data(), 0, sizeof(vertex_buffers_));
     memset(stream_output_views_.data(), 0, sizeof(stream_output_views_));
     index_buffer_address = 0;
+    index_buffer_size = 0;
     index_buffer = {};
     index_type = {};
     index_offset = 0;
@@ -2426,7 +2431,7 @@ public:
   }
 
   std::tuple<uint64_t, uint64_t>
-  PopulateVertexBufferTable(uint32_t Count) {
+  PopulateVertexBufferTable(uint32_t Count, bool compute = false) {
     auto slot_mask = pso_graphics_ ? pso_graphics_->slot_mask : 0;
     if (!slot_mask)
       return {0, 0};
@@ -2474,8 +2479,12 @@ public:
         entries[index].stride = state.StrideInBytes;
         entries[index++].length = state.SizeInBytes;
 
-        if (allocation)
-          EncodeRenderResourceUse(allocation->buffer().handle, WMTResourceUsageRead, resource_stages);
+        if (allocation) {
+          if (compute)
+            EncodeComputeResourceUse(allocation->buffer().handle, WMTResourceUsageRead);
+          else
+            EncodeRenderResourceUse(allocation->buffer().handle, WMTResourceUsageRead, resource_stages);
+        }
       };
     }
 
@@ -2590,90 +2599,345 @@ public:
     cmd.index = SM50_BINDING_INDEX_VERTEX_BUFFER;
   }
 
-  bool
-  ValidateStreamOutputDraw(UINT vertex_count, UINT instance_count) {
-    if (!pso_graphics_ || !pso_graphics_->stream_output)
-      return true;
+  WMT::RenderPipelineState
+  GetStreamOutputPreparePSO() {
+    if (!stream_output_prepare_pso_) {
+      auto function = device_->GetLib().getLibrary().newFunction("so_prepare_arguments");
+      if (!function)
+        return {};
+      WMTRenderPipelineInfo info;
+      WMT::InitializeRenderPipelineInfo(info);
+      info.vertex_function = function;
+      info.rasterization_enabled = false;
+      info.input_primitive_topology = WMTPrimitiveTopologyClassPoint;
+      WMT::Reference<WMT::Error> error;
+      stream_output_prepare_pso_ = device_->GetMTLDevice().newRenderPipelineState(info, error);
+      if (!stream_output_prepare_pso_ && error)
+        ERR("Stream output preparation pipeline failed: ", error.description().getUTF8String());
+    }
+    return stream_output_prepare_pso_;
+  }
 
-    uint64_t output_count = vertex_count;
-    if (instance_count && output_count > std::numeric_limits<uint64_t>::max() / instance_count) {
-      FailRecording(__func__, "vertex count overflow vertices=", vertex_count, " instances=", instance_count);
+  bool
+  BindStreamOutputTarget(StreamOutputDraw &arguments, bool compute) {
+    const auto &view = stream_output_views_[0];
+    if (!view.SizeInBytes)
+      return true;
+    uint64_t buffer_offset = 0, counter_offset = 0;
+    auto buffer = device_->LookupBufferByVA(view.BufferLocation, &buffer_offset);
+    auto counter = device_->LookupBufferByVA(view.BufferFilledSizeLocation, &counter_offset);
+    if (!buffer || buffer_offset > buffer->length() || view.SizeInBytes > buffer->length() - buffer_offset ||
+        !view.BufferFilledSizeLocation || !counter || counter_offset > counter->length() ||
+        sizeof(UINT) > counter->length() - counter_offset || (view.BufferFilledSizeLocation & 3)) {
+      FailRecording(__func__, "invalid stream-output buffer or filled-size location");
       return false;
     }
-    output_count *= instance_count;
-    if (pso_graphics_->stream_output_stride &&
-        output_count > std::numeric_limits<uint64_t>::max() / pso_graphics_->stream_output_stride) {
-      FailRecording(__func__, "stream output size overflow count=", output_count,
-                    " stride=", pso_graphics_->stream_output_stride);
-      return false;
+    arguments.output_buffer = buffer->gpuAddress() + buffer_offset;
+    arguments.counter_buffer = counter->gpuAddress() + counter_offset;
+    arguments.output_size = view.SizeInBytes;
+    if (compute) {
+      EncodeComputeResourceUse(buffer->buffer().handle, WMTResourceUsageWrite);
+      EncodeComputeResourceUse(counter->buffer().handle, WMTResourceUsageRead | WMTResourceUsageWrite);
+    } else {
+      EncodeRenderResourceUse(buffer->buffer().handle, WMTResourceUsageWrite, WMTRenderStageVertex);
+      EncodeRenderResourceUse(
+          counter->buffer().handle, WMTResourceUsageRead | WMTResourceUsageWrite, WMTRenderStageVertex
+      );
     }
     return true;
   }
 
-  void
-  EncodeStreamOutputBuffers() {
-    if (!pso_graphics_ || !pso_graphics_->stream_output)
-      return;
-
-    struct SO_BUFFER_ENTRY {
-      uint64_t buffer_handle;
-      uint64_t counter_handle;
-      uint64_t size;
-    };
-    auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(SO_BUFFER_ENTRY) * D3D12_SO_BUFFER_SLOT_COUNT, 16);
-    if (!mapped) {
-      FailRecording(__func__, "GPU heap allocation failed");
-      return;
+  bool
+  EncodeStreamOutputIndirect(
+      MTLD3D12CommandSignature *signature, UINT count, uint64_t arguments_address, uint64_t count_address,
+      WMT::Buffer argument_buffer, WMT::Buffer count_buffer
+  ) {
+    StreamOutputDraw arguments = {};
+    if (!GetStreamOutputPrimitiveLayout(topology_, arguments)) {
+      FailRecording(__func__, "invalid stream-output topology");
+      return false;
     }
-    auto *entries = static_cast<SO_BUFFER_ENTRY *>(mapped);
-    std::memset(entries, 0, sizeof(SO_BUFFER_ENTRY) * D3D12_SO_BUFFER_SLOT_COUNT);
+    arguments.stride = pso_graphics_->stream_output_stride;
+    const bool indexed = signature->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+    const bool ordered = indexed && (arguments.flags & kSOOverlapping) &&
+                         pso_graphics_->stream_output_strip_cut != D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+    if (ordered) {
+      arguments.flags |= kSOHasCut;
+      arguments.cut_index =
+          pso_graphics_->stream_output_strip_cut == D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF ? 0xffffu : 0xffffffffu;
+    }
+    if (indexed) {
+      arguments.index_size = index_type == WMTIndexTypeUInt32 ? 4 : 2;
+      arguments.input_indices = index_buffer_address;
+      arguments.input_index_count = index_buffer_size / arguments.index_size;
+    }
+    auto pipeline = pso_graphics_->GetStreamOutputIndirectPipeline(ordered);
+    if (!pipeline) {
+      FailRecording(__func__, "stream-output indirect pipeline unavailable");
+      return false;
+    }
+    allocator_->InvalidateCurrentPass();
+    auto compute = allocator_->AllocatePass<ComputeEncoderData>();
+    if (!compute) {
+      FailRecording(__func__, "stream-output indirect encoder allocation failed");
+      return false;
+    }
+    ResetCurrentEncoderResourceUseState();
+    compute->type = EncoderType::Compute;
+    compute->cmd_head.type = WMTComputeCommandNop;
+    compute->cmd_head.next.set(0);
+    compute->cmd_tail = reinterpret_cast<wmtcmd_base *>(&compute->cmd_head);
+    try {
+      compute->pipeline_refs.emplace_back(pso_graphics_.ptr());
+    } catch (...) {
+      FailRecording(__func__, "stream-output pipeline retention failed");
+      return false;
+    }
+    if (!BindStreamOutputTarget(arguments, true))
+      return false;
+    EncodeComputeResourceUse(argument_buffer.handle, WMTResourceUsageRead);
+    if (count_buffer)
+      EncodeComputeResourceUse(count_buffer.handle, WMTResourceUsageRead);
+    if (indexed && index_buffer)
+      EncodeComputeResourceUse(index_buffer.handle, WMTResourceUsageRead);
+    EncodeComputeResourceUse(allocator_->gpu_heap_buffer_.handle, WMTResourceUsageRead | WMTResourceUsageWrite);
+    if (descriptor_heap_)
+      EncodeComputeResourceUse(descriptor_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
+    if (sampler_heap_)
+      EncodeComputeResourceUse(sampler_heap_->GetDescriptorHeapBuffer().handle, WMTResourceUsageRead);
+    EncodeIndirectResourceUses(
+        rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr(), true, false, pso_graphics_.ptr()
+    );
+    WMTBufferInfo info = {};
+    info.length = uint64_t(count) * sizeof(StreamOutputDraw);
+    info.options = WMTResourceStorageModePrivate | WMTResourceHazardTrackingModeTracked;
+    auto storage = device_->GetMTLDevice().newBuffer(info);
+    auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(arguments), 16);
+    if (!storage || !mapped) {
+      FailRecording(__func__, "stream-output indirect parameter allocation failed");
+      return false;
+    }
+    *static_cast<StreamOutputDraw *>(mapped) = arguments;
+    EncodeComputeResourceUse(storage.handle, WMTResourceUsageRead | WMTResourceUsageWrite);
+    auto command = allocator_->EncodeIndirectComputeCommand(
+        signature, pipeline, {pso_graphics_->stream_output_group_size, 1, 1}, count, true
+    );
+    if (!command) {
+      FailRecording(__func__, "stream-output indirect command allocation failed");
+      return false;
+    }
+    command->max_count_buffer = count_address;
+    command->argument_buffer = arguments_address;
+    command->so_template = allocator_->gpu_heap_buffer_address_ + offset;
+    command->so_arguments = info.gpu_address;
+    command->so_ordered = ordered;
+    command->index_buffer = index_buffer_address;
+    command->index_buffer_format = index_type == WMTIndexTypeUInt32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
+    if (rootsig_graphics_ && rootsig_graphics_->UploadQwords) {
+      auto root = EncodeRootArgument(
+          rootsig_graphics_.ptr(), rootarg_graphics_staging_, signature->UpdateRootArguments ? count : 1
+      );
+      command->rootsig_qwords = allocator_->gpu_heap_buffer_address_ + root;
+      command->rootsig_qwords_stride = signature->UpdateRootArguments ? rootsig_graphics_->UploadQwords : 0;
+    }
+    if (rootsig_graphics_ && rootsig_graphics_->NumStaticSamplers)
+      command->static_samplers = allocator_->gpu_heap_buffer_address_ + EncodeStaticSamplers(rootsig_graphics_.ptr());
+    auto [vb_offset, vb_stride] = PopulateVertexBufferTable(signature->UpdateVertexBuffers ? count : 1, true);
+    command->vertex_buffer = vb_stride ? allocator_->gpu_heap_buffer_address_ + vb_offset : 0;
+    command->vertex_argbuf_stride = signature->UpdateVertexBuffers ? vb_stride : 0;
+    command->vertex_slot_mask = pso_graphics_->slot_mask;
+    dirty_state_.set(
+        DirtyState::ComputePipelineState, DirtyState::ComputeRootArguments, DirtyState::ComputeRootSignature,
+        DirtyState::DescriptorHeaps
+    );
+    return !recording_failed_;
+  }
 
-    for (UINT slot = 0; slot < D3D12_SO_BUFFER_SLOT_COUNT; slot++) {
-      const auto &view = stream_output_views_[slot];
-      if (!view.SizeInBytes)
+  bool
+  EncodeStreamOutputDraw(UINT count, UINT instances, UINT first, INT base_vertex, UINT base_instance, bool indexed) {
+    if (!count || !instances)
+      return true;
+    StreamOutputDraw arguments = {};
+    WMT::Buffer prefix_buffer;
+    if (!GetStreamOutputPrimitiveLayout(topology_, arguments)) {
+      FailRecording(__func__, "invalid stream-output topology");
+      return false;
+    }
+    arguments.input_count = count;
+    arguments.instance_count = instances;
+    arguments.base_vertex = indexed ? static_cast<UINT>(base_vertex) : first;
+    arguments.base_instance = base_instance;
+    arguments.stride = pso_graphics_->stream_output_stride;
+    if (indexed) {
+      arguments.index_size = index_type == WMTIndexTypeUInt16 ? 2 : 4;
+      const uint64_t first_byte = uint64_t(first) * arguments.index_size;
+      if (index_buffer) {
+        uint64_t allocation_offset = 0;
+        auto allocation = device_->LookupBufferByVA(index_buffer_address, &allocation_offset);
+        if (!allocation || allocation_offset > allocation->length()) {
+          FailRecording(__func__, "invalid stream-output index binding");
+          return false;
+        }
+        arguments.input_indices = allocation->gpuAddress() + allocation_offset + first_byte;
+        arguments.input_index_count =
+            first_byte <= index_buffer_size ? (index_buffer_size - first_byte) / arguments.index_size : 0;
+      }
+      if ((arguments.flags & kSOOverlapping) &&
+          pso_graphics_->stream_output_strip_cut != D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED) {
+        arguments.flags |= kSOHasCut;
+        arguments.cut_index =
+            pso_graphics_->stream_output_strip_cut == D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF ? 0xffffu : 0xffffffffu;
+        // The index summary is encoded before the render pass below.
+        if (!EncodeStreamOutputIndexPrefix(arguments, prefix_buffer))
+          return false;
+      }
+    }
+    if (predication_buffer_) {
+      auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_DRAW_INDEXED_ARGUMENTS), 16);
+      if (!mapped) {
+        FailRecording(__func__, "stream-output predicate arguments allocation failed");
+        return false;
+      }
+      auto *data = static_cast<UINT *>(mapped);
+      data[0] = count;
+      data[1] = instances;
+      data[2] = first;
+      data[3] = indexed ? static_cast<UINT>(base_vertex) : base_instance;
+      data[4] = base_instance;
+      if (!EncodePredicationKernel(false, {}, 0, allocator_->gpu_heap_buffer_, offset))
+        return false;
+      arguments.input_arguments = allocator_->gpu_heap_buffer_address_ + offset;
+      if (indexed) {
+        arguments.input_indices -= uint64_t(first) * arguments.index_size;
+        arguments.input_index_count = index_buffer_size / arguments.index_size;
+        if (arguments.flags & kSOHasCut)
+          arguments.flags |= kSOFixedIndexSubrange;
+      }
+      allocator_->InvalidateCurrentPass();
+    }
+    if (PreDraw() == DrawCallStatus::Invalid)
+      return false;
+    if (!BindStreamOutputTarget(arguments, false))
+      return false;
+    if (indexed)
+      EncodeRenderResourceUse(index_buffer.handle, WMTResourceUsageRead, WMTRenderStageVertex);
+    if (prefix_buffer)
+      EncodeRenderResourceUse(prefix_buffer.handle, WMTResourceUsageRead, WMTRenderStageVertex);
+    auto prepare = GetStreamOutputPreparePSO();
+    auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(arguments), 16);
+    if (!prepare || !mapped) {
+      FailRecording(__func__, "stream-output preparation allocation failed");
+      return false;
+    }
+    *static_cast<StreamOutputDraw *>(mapped) = arguments;
+    auto &binding = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+    binding.type = WMTRenderCommandSetVertexBuffer;
+    binding.buffer = allocator_->gpu_heap_buffer_;
+    binding.offset = offset;
+    binding.index = SM50_BINDING_INDEX_STREAM_OUTPUT0;
+    EmitMemoryBarrier(WMTBarrierScopeBuffers, WMTRenderStageVertex, WMTRenderStageVertex);
+    auto &set_prepare = allocator_->EncodeRenderCommand<wmtcmd_render_setpso>();
+    set_prepare.type = WMTRenderCommandSetPSO;
+    set_prepare.pso = prepare;
+    auto &prepare_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw>();
+    prepare_draw.type = WMTRenderCommandDraw;
+    prepare_draw.primitive_type = WMTPrimitiveTypePoint;
+    prepare_draw.vertex_start = prepare_draw.base_instance = 0;
+    prepare_draw.vertex_count = prepare_draw.instance_count = 1;
+    EmitMemoryBarrier(WMTBarrierScopeBuffers, WMTRenderStageVertex, WMTRenderStageVertex);
+    auto &restore = allocator_->EncodeRenderCommand<wmtcmd_render_setpso>();
+    restore.type = WMTRenderCommandSetPSO;
+    restore.pso = pso_graphics_->pso;
+    auto &draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw_indirect>();
+    draw.type = WMTRenderCommandDrawIndirect;
+    draw.primitive_type = WMTPrimitiveTypePoint;
+    draw.indirect_args_buffer = allocator_->gpu_heap_buffer_;
+    draw.indirect_args_offset = offset + offsetof(StreamOutputDraw, capture_arguments);
+    EmitMemoryBarrier(WMTBarrierScopeBuffers, WMTRenderStageVertex, WMTRenderStageVertex);
+    return !recording_failed_;
+  }
+
+  bool
+  EncodeStreamOutputIndexPrefix(StreamOutputDraw &arguments, WMT::Buffer &prefix_buffer) {
+    StreamOutputScanLayout layout(arguments.input_count);
+    const char *names[] = {"so_index_segments", "so_scan_blocks", "so_scan_offsets", "so_index_primitives"};
+    for (UINT i = 0; i < 4; ++i) {
+      if (stream_output_scan_psos_[i])
         continue;
-
-      uint64_t buffer_offset = 0;
-      auto buffer = device_->LookupBufferByVA(view.BufferLocation, &buffer_offset);
-      if (!buffer || buffer_offset > buffer->length() || view.SizeInBytes > buffer->length() - buffer_offset ||
-          !view.BufferFilledSizeLocation) {
-        FailRecording(__func__, "invalid stream-output buffer slot=", slot, " location=0x", std::hex,
-                      view.BufferLocation, std::dec, " size=", view.SizeInBytes, " offset=", buffer_offset);
-        return;
+      auto function = device_->GetLib().getLibrary().newFunction(names[i]);
+      WMT::Reference<WMT::Error> error;
+      if (function)
+        stream_output_scan_psos_[i] = device_->GetMTLDevice().newComputePipelineState(function, error);
+      if (!stream_output_scan_psos_[i]) {
+        FailRecording(__func__, "stream-output scan pipeline unavailable: ", names[i]);
+        return false;
       }
-
-      uint64_t counter_offset = 0;
-      auto counter = device_->LookupBufferByVA(view.BufferFilledSizeLocation, &counter_offset);
-      if (!counter || counter_offset > counter->length() || sizeof(uint32_t) > counter->length() - counter_offset) {
-        FailRecording(__func__, "invalid stream-output counter slot=", slot, " location=0x", std::hex,
-                      view.BufferFilledSizeLocation, std::dec, " offset=", counter_offset);
-        return;
-      }
-
-      auto &buffer_use = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
-      buffer_use.type = WMTRenderCommandUseResource;
-      buffer_use.resource = buffer->buffer().handle;
-      buffer_use.usage = WMTResourceUsageWrite;
-      buffer_use.stages = WMTRenderStageVertex;
-
-      if (counter->buffer().handle != buffer->buffer().handle) {
-        auto &counter_use = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
-        counter_use.type = WMTRenderCommandUseResource;
-        counter_use.resource = counter->buffer().handle;
-        counter_use.usage = WMTResourceUsageWrite;
-        counter_use.stages = WMTRenderStageVertex;
-      }
-
-      entries[slot].buffer_handle = buffer->gpuAddress() + buffer_offset;
-      entries[slot].counter_handle = counter->gpuAddress() + counter_offset;
-      entries[slot].size = view.SizeInBytes;
     }
-
-    auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-    cmd.type = WMTRenderCommandSetVertexBuffer;
-    cmd.buffer = allocator_->gpu_heap_buffer_;
-    cmd.offset = offset;
-    cmd.index = SM50_BINDING_INDEX_STREAM_OUTPUT0;
+    WMTBufferInfo info = {};
+    info.length = layout.size;
+    info.options = WMTResourceStorageModePrivate | WMTResourceHazardTrackingModeTracked;
+    auto storage = device_->GetMTLDevice().newBuffer(info);
+    if (!storage) {
+      FailRecording(__func__, "stream-output index summary allocation failed bytes=", layout.size);
+      return false;
+    }
+    allocator_->InvalidateCurrentPass();
+    auto compute = allocator_->AllocatePass<ComputeEncoderData>();
+    if (!compute) {
+      FailRecording(__func__, "stream-output index summary encoder allocation failed");
+      return false;
+    }
+    ResetCurrentEncoderResourceUseState();
+    compute->type = EncoderType::Compute;
+    compute->cmd_head.type = WMTComputeCommandNop;
+    compute->cmd_head.next.set(0);
+    compute->cmd_tail = reinterpret_cast<wmtcmd_base *>(&compute->cmd_head);
+    EncodeComputeResourceUse(storage.handle, WMTResourceUsageRead | WMTResourceUsageWrite);
+    EncodeComputeResourceUse(index_buffer.handle, WMTResourceUsageRead);
+    auto binding = [&](uint64_t offset, UINT index) {
+      auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+      cmd.type = WMTComputeCommandSetBuffer;
+      cmd.buffer = storage;
+      cmd.offset = offset;
+      cmd.index = index;
+    };
+    auto bytes = [&](const void *source, UINT size) {
+      auto data = allocator_->AllocateCPUHeap(size, 8);
+      if (!data) {
+        FailRecording(__func__, "stream-output scan constants allocation failed");
+        return false;
+      }
+      std::memcpy(data, source, size);
+      auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_setbytes>();
+      cmd.type = WMTComputeCommandSetBytes;
+      cmd.bytes.set(data);
+      cmd.length = size;
+      cmd.index = 2;
+      return true;
+    };
+    auto dispatch = [&](UINT pipeline, UINT count) {
+      auto &pso = allocator_->EncodeComputeCommand<wmtcmd_compute_setpso>();
+      pso.type = WMTComputeCommandSetPSO;
+      pso.pso = stream_output_scan_psos_[pipeline];
+      pso.threadgroup_size = {kSOScanThreadgroupSize, 1, 1};
+      auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch>();
+      // Block scans require all256 lanes,including the final partial group.
+      cmd.type = pipeline == 1 ? WMTComputeCommandDispatch : WMTComputeCommandDispatchThreads;
+      cmd.size = {
+          pipeline == 1 ? (uint64_t(count) + kSOScanThreadgroupSize - 1) / kSOScanThreadgroupSize : count, 1, 1
+      };
+      EmitMemoryBarrier(WMTBarrierScopeBuffers, static_cast<WMTRenderStages>(0), static_cast<WMTRenderStages>(0));
+    };
+    if (!EncodeStreamOutputIndexScan(arguments, layout, binding, bytes, dispatch))
+      return false;
+    arguments.prefix = info.gpu_address;
+    arguments.prefix_count = arguments.input_count;
+    prefix_buffer = storage;
+    dirty_state_.set(
+        DirtyState::ComputePipelineState, DirtyState::ComputeRootArguments, DirtyState::ComputeRootSignature,
+        DirtyState::DescriptorHeaps
+    );
+    return !recording_failed_;
   }
 
   DrawCallStatus
@@ -2901,10 +3165,9 @@ public:
       EncodeRenderResourceUse(index_buffer.handle, WMTResourceUsageRead, index_stages);
     }
 
-    if (dirty_state_.test(DirtyState::StreamOutput)) {
-      EncodeStreamOutputBuffers();
-      dirty_state_.clr(DirtyState::StreamOutput);
-    }
+    // SO bindings are per draw: their cursor snapshot and input occurrence map
+    // cannot be cached with the logical SO target views.
+    dirty_state_.clr(DirtyState::StreamOutput);
 
     if (use_msc && dirty_state_.test(DirtyState::DescriptorHeaps)) {
       auto descriptor_buffer = descriptor_heap_ ? descriptor_heap_->GetMSCDescriptorHeapBuffer() : WMT::Buffer{};
@@ -3101,8 +3364,12 @@ public:
       FailRecording(__func__, "DrawInstanced requires a traditional graphics pipeline");
       return;
     }
-    if (!ValidateStreamOutputDraw(VertexCountPerInstance, InstanceCount))
+    if (pso_graphics_ && pso_graphics_->stream_output) {
+      EncodeStreamOutputDraw(
+          VertexCountPerInstance, InstanceCount, StartVertexLocation, 0, StartInstanceLocation, false
+      );
       return;
+    }
     WMTPrimitiveType primitive_type;
     uint32_t cp_count = 0;
     if (pso_graphics_ && pso_graphics_->airconv_geometry
@@ -3232,8 +3499,12 @@ public:
       FailRecording(__func__, "DrawIndexedInstanced requires a traditional graphics pipeline");
       return;
     }
-    if (!ValidateStreamOutputDraw(IndexCountPerInstance, InstanceCount))
+    if (pso_graphics_ && pso_graphics_->stream_output) {
+      EncodeStreamOutputDraw(
+          IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation, true
+      );
       return;
+    }
     WMTPrimitiveType primitive_type;
     uint32_t cp_count = 0;
     if (pso_graphics_ && pso_graphics_->airconv_geometry
@@ -3942,7 +4213,7 @@ public:
   void
   EncodeIndirectResourceUses(
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
-      bool compute = false, bool unchanged_state_fast_path = false
+      bool compute = false, bool unchanged_state_fast_path = false, MTLD3D12PipelineState *pipeline_override = nullptr
   ) {
     // Direct-indexed root signatures legitimately have no root parameters;
     // their resource heap still needs a residency walk below.
@@ -3970,8 +4241,9 @@ public:
     if (pRootSig->IsResourceHeapDirectlyIndexed())
       airconv_residency_counters_.direct_indexed_root_requests++;
 
-    auto *pipeline = compute ? static_cast<MTLD3D12PipelineState *>(pso_compute_.ptr())
-                             : static_cast<MTLD3D12PipelineState *>(pso_graphics_.ptr());
+    auto *pipeline = pipeline_override ? pipeline_override
+                     : compute         ? static_cast<MTLD3D12PipelineState *>(pso_compute_.ptr())
+                                       : static_cast<MTLD3D12PipelineState *>(pso_graphics_.ptr());
     const auto *footprint = pipeline && pipeline->shader_backend == D3D12ShaderBackend::Airconv &&
                                    pipeline->descriptor_footprint_exact && pipeline->descriptor_footprint_root.ptr() == pRootSig
                                ? pipeline : nullptr;
@@ -5717,6 +5989,7 @@ public:
   IASetIndexBuffer(const D3D12_INDEX_BUFFER_VIEW *pView) {
     auto clear_index_binding = [&] {
       index_buffer_address = 0;
+      index_buffer_size = 0;
       index_buffer = {};
       index_type = {};
       index_offset = 0;
@@ -5745,6 +6018,7 @@ public:
                     " size=", pView->SizeInBytes, " offset=", index_offset,
                     " allocation_length=", allocation ? allocation->length() : 0);
       index_buffer_address = 0;
+      index_buffer_size = 0;
       index_buffer = {};
       index_type = {};
       index_offset = {};
@@ -5752,6 +6026,7 @@ public:
     }
 
     index_buffer_address = pView->BufferLocation;
+    index_buffer_size = pView->SizeInBytes;
     index_buffer = allocation->buffer();
     index_type = pView->Format == DXGI_FORMAT_R32_UINT ? WMTIndexTypeUInt32 : WMTIndexTypeUInt16;
   };
@@ -6460,7 +6735,9 @@ public:
           EncodeComputeResourceUse(count_buffer->buffer->current()->buffer().handle, WMTResourceUsageRead);
       }
 
-      auto cmd = allocator_->EncodeIndirectComputeCommand(sig, pso_compute_.ptr(), MaxCommandCount);
+      auto cmd = allocator_->EncodeIndirectComputeCommand(
+          sig, pso_compute_->pso, pso_compute_->threadgroup_size, MaxCommandCount
+      );
       if (!cmd) {
         FailRecording(__func__, "indirect compute command allocation failed");
         return;
@@ -6479,6 +6756,20 @@ public:
       }
 
       ResetIndirectState(sig, true);
+      return;
+    }
+
+    if (pso_graphics_->stream_output) {
+      uint64_t filtered_count = CountBufferAddress;
+      if (predication_buffer_ &&
+          !EncodePredicationCount(count_buffer, CountBufferOffset, MaxCommandCount, filtered_count))
+        return;
+      if (!EncodeStreamOutputIndirect(
+              sig, MaxCommandCount, ArgBufferAddress, filtered_count, arg_buffer->buffer->current()->buffer(),
+              count_buffer ? count_buffer->buffer->current()->buffer() : WMT::Buffer{}
+          ))
+        return;
+      ResetIndirectState(sig, false);
       return;
     }
 

@@ -102,7 +102,6 @@ struct UnorderedAccessViewBinding {
 
 struct StreamOutputBinding {
   Rc<Buffer> buffer;
-  uint64_t offset;
   Rc<Buffer> counter;
 };
 
@@ -481,14 +480,29 @@ public:
   void bindStreamOutputBuffer(unsigned slot, unsigned offset, Rc<Buffer> &&buffer, Rc<Buffer> &&counter) {
     auto &entry = so_[slot];
     entry.buffer = std::move(buffer);
-    entry.offset = offset;
     entry.counter = std::move(counter);
+    bindStreamOutputBufferOffset(slot, offset);
   }
-  
+
   void bindStreamOutputBufferOffset(unsigned slot, unsigned offset) {
     auto &entry = so_[slot];
-    entry.offset = offset;
+    if (entry.counter && offset != UINT32_MAX) {
+      // A binding reset is ordered by the existing ST stream. Renaming keeps
+      // prior submitted draws' cursor allocation alive and avoids CPU/GPU races.
+      auto allocation = entry.counter->allocate({});
+      allocation->updateContents(0, &offset, sizeof(offset));
+      entry.counter->rename(std::move(allocation));
+    }
   }
+
+  void prepareStreamOutputIndexPrefix(
+      StreamOutputDraw arguments, uint64_t index_offset, Rc<Buffer> scratch, Rc<Buffer> indirect = {},
+      uint64_t indirect_offset = 0
+  );
+  void encodeStreamOutputDraw(
+      StreamOutputDraw arguments, uint64_t argument_offset, uint64_t index_offset, Rc<Buffer> scratch = {},
+      Rc<Buffer> indirect = {}, uint64_t indirect_offset = 0
+  );
 
   void
   bindVertexBuffer(unsigned slot, unsigned offset, unsigned stride, Rc<Buffer> &&buffer) {
@@ -518,6 +532,7 @@ public:
   };
 
   void clearState() {
+    so_ = {{}};
     vbuf_ = {{}};
     ibuf_ = {};
     cbuf_ = {{}};

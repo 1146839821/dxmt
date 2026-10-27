@@ -201,6 +201,8 @@ public:
 
   Rc<BufferAllocation> rename(Rc<BufferAllocation> &&newAllocation);
 
+  Rc<Buffer> streamOutputCounter();
+
   Buffer(uint64_t length, WMT::Device device) : length_(length), device_(device) {}
 
   WMT::Texture view(BufferViewKey key);
@@ -227,6 +229,7 @@ private:
   uint64_t length_;
 
   Rc<BufferAllocation> current_;
+  Rc<Buffer> stream_output_counter_;
   uint32_t version_ = 0;
   std::atomic<uint32_t> refcount_ = {0u};
 

@@ -1,3 +1,4 @@
+#include "../dxmt/dxmt_command_constants.hpp"
 #include "dxbc_converter.hpp"
 #include "DXBCParser/BlobContainer.h"
 #include "DXBCParser/ShaderBinary.h"
@@ -572,14 +573,14 @@ llvm::Error convert_dxbc_compute_shader(
   return llvm::Error::success();
 };
 
-llvm::Error convert_dxbc_vertex_shader(
-  SM50ShaderInternal *pShaderInternal, const char *name,
-  llvm::LLVMContext &context, llvm::Module &module,
-  SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs
+llvm::Error
+convert_dxbc_vertex_shader(
+    SM50ShaderInternal *pShaderInternal, const char *name, llvm::LLVMContext &context, llvm::Module &module,
+    SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs, bool so_compute = false
 ) {
   using namespace microsoft;
 
-  auto func_signature = pShaderInternal->func_signature; // copy
+  auto func_signature = so_compute ? air::FunctionSignatureBuilder{} : pShaderInternal->func_signature;
   auto shader_info = &(pShaderInternal->shader_info);
 
   uint32_t max_input_register = pShaderInternal->max_input_register;
@@ -625,116 +626,169 @@ llvm::Error convert_dxbc_vertex_shader(
       p(sig_ctx);
     }
 
-    for (auto& out : pShaderInternal->output_signature) {
-      if(out.isSystemValue()) continue;
-      func_signature.DefineOutput(air::OutputVertex{
-        .user = out.consistentAttributeName(),
-        .type = to_msl_type(out.componentType()),
-      });
-    }
-  }
-  if (vertex_so) {
-    auto bv = func_signature.DefineInput(air::InputBaseVertex{});
-    auto vid = func_signature.DefineInput(air::InputVertexID{});
-    auto so_table = func_signature.DefineInput(air::ArgumentBindingBuffer{
-      .buffer_size = {},
-      .location_index = SM50_BINDING_INDEX_STREAM_OUTPUT0,
-      .array_size = 0,
-      .memory_access = air::MemoryAccess::read,
-      .address_space = air::AddressSpace::constant,
-      .type = air::MSLUint{},
-      .arg_name = "stream_outputs",
-      .raster_order_group = {}
-    });
-    epilogue << make_irvalue([=](struct context ctx) {
-      auto &builder = ctx.builder;
-      auto base_vertex = ctx.function->getArg(bv);
-      auto vertex_id = ctx.function->getArg(vid);
-      auto so_entries_type = ctx.types._dxmt_stream_output_buffer_entry;
-      auto so_entries = builder.CreateBitCast(
-          ctx.function->getArg(so_table), so_entries_type->getPointerTo((uint32_t)air::AddressSpace::constant)
-      );
-      auto slot0_entry =
-          builder.CreateLoad(so_entries_type, builder.CreateConstInBoundsGEP1_32(so_entries_type, so_entries, 0));
-      auto slot0 = builder.CreateExtractValue(slot0_entry, {0});
-      auto slot0_counter = builder.CreateExtractValue(slot0_entry, {1});
-      auto slot0_size = builder.CreateExtractValue(slot0_entry, {2});
-      auto adjusted_vertex_id = builder.CreateSub(vertex_id, base_vertex);
-      auto output_regs = builder.CreateBitOrPointerCast(
-        ctx.resource.output.ptr_int4, llvm::PointerType::get(ctx.types._int, 0)
-      );
-
-      auto vertex_offset = builder.CreateMul(adjusted_vertex_id, builder.getInt32(vertex_so->strides[0]));
-      auto *write_block = llvm::BasicBlock::Create(ctx.llvm, "so.write", ctx.function);
-      auto *done_block = llvm::BasicBlock::Create(ctx.llvm, "so.done", ctx.function);
-      auto has_buffer = builder.CreateICmpNE(
-          slot0, llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(slot0->getType()))
-      );
-      builder.CreateCondBr(has_buffer, write_block, done_block);
-      builder.SetInsertPoint(write_block);
-
-      auto *counter_block = llvm::BasicBlock::Create(ctx.llvm, "so.counter", ctx.function);
-      auto *offset_block = llvm::BasicBlock::Create(ctx.llvm, "so.offset", ctx.function);
-      auto has_counter = builder.CreateICmpNE(
-          slot0_counter,
-          llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(slot0_counter->getType()))
-      );
-      builder.CreateCondBr(has_counter, counter_block, offset_block);
-
-      builder.SetInsertPoint(counter_block);
-      auto counter_offset = ctx.air.CreateAtomicRMW(
-          llvm::AtomicRMWInst::Add, slot0_counter, builder.getInt32(vertex_so->strides[0])
-      );
-      if (!counter_offset)
-        return nullptr;
-      builder.CreateBr(offset_block);
-
-      builder.SetInsertPoint(offset_block);
-      auto output_offset = builder.CreatePHI(ctx.types._int, 2);
-      output_offset->addIncoming(vertex_offset, write_block);
-      output_offset->addIncoming(counter_offset, counter_block);
-      auto output_offset_64 = builder.CreateZExt(output_offset, ctx.types._long);
-      uint32_t output_end = 0;
-      for (unsigned i = 0; i < vertex_so->num_elements; i++) {
-        auto &element = vertex_so->elements[i];
-        output_end = std::max(output_end, element.offset + static_cast<uint32_t>(sizeof(uint32_t)));
-      }
-      auto output_end_64 = builder.CreateAdd(output_offset_64, builder.getInt64(output_end));
-      auto output_in_bounds = builder.CreateICmpULE(output_end_64, slot0_size);
-      auto *store_block = llvm::BasicBlock::Create(ctx.llvm, "so.store", ctx.function);
-      builder.CreateCondBr(output_in_bounds, store_block, done_block);
-
-      builder.SetInsertPoint(store_block);
-      for (unsigned i = 0; i < vertex_so->num_elements; i++) {
-        auto &element = vertex_so->elements[i];
-        if (element.reg_id == 0xffffffff)
+    if (!so_compute)
+      for (auto &out : pShaderInternal->output_signature) {
+        if (out.isSystemValue())
           continue;
-        auto ptr = ctx.builder.CreateConstGEP1_32(
-          ctx.types._int, output_regs,
-          (unsigned)(element.reg_id * 4 + element.component)
-        );
-        auto target_offset = ctx.builder.CreateAdd(output_offset_64, ctx.builder.getInt64(element.offset));
-        auto target_ptr = ctx.builder.CreateGEP(
-          ctx.types._int, slot0, {ctx.builder.CreateLShr(target_offset, 2)}
-        );
-        ctx.builder.CreateStore(
-          ctx.builder.CreateLoad(ctx.types._int, ptr), target_ptr, true
+        func_signature.DefineOutput(
+            air::OutputVertex{
+                .user = out.consistentAttributeName(),
+                .type = to_msl_type(out.componentType()),
+            }
         );
       }
-      builder.CreateBr(done_block);
-      builder.SetInsertPoint(done_block);
+  }
+  uint32_t so_table_idx = UINT32_MAX, so_grid_idx = UINT32_MAX;
+  if (vertex_so) {
+    using dxmt::StreamOutputDraw;
+    if (vertex_so->num_elements > 128)
+      return llvm::make_error<UnsupportedFeature>("stream output exceeds the128-component declaration window");
+    auto vid = so_compute ? UINT32_MAX : func_signature.DefineInput(air::InputVertexID{});
+    auto iid = so_compute ? UINT32_MAX : func_signature.DefineInput(air::InputInstanceID{});
+    if (so_compute) {
+      so_grid_idx = func_signature.DefineInput(air::InputThreadPositionInGrid{});
+      uint32_t words = 0;
+      for (uint32_t i = 0; i < vertex_so->num_elements; ++i)
+        words += vertex_so->elements[i].reg_id != UINT32_MAX;
+      func_signature.UseMaxWorkgroupSize(dxmt::StreamOutputGroupSize(words));
+    }
+    so_table_idx = func_signature.DefineInput(
+        air::ArgumentBindingBuffer{
+            .buffer_size = {},
+            .location_index = SM50_BINDING_INDEX_STREAM_OUTPUT0,
+            .array_size = 0,
+            .memory_access = air::MemoryAccess::read,
+            .address_space = air::AddressSpace::constant,
+            .type = air::MSLUint{},
+            .arg_name = "stream_output_draw",
+            .raster_order_group = {}
+        }
+    );
+    epilogue << make_irvalue([=](struct context ctx) {
+      auto &b = ctx.builder;
+      auto data = b.CreateBitCast(
+          ctx.function->getArg(so_table_idx), b.getInt8Ty()->getPointerTo((uint32_t)air::AddressSpace::constant)
+      );
+      auto load = [&](uint32_t offset, llvm::Type *type) {
+        auto ptr = b.CreateConstGEP1_32(b.getInt8Ty(), data, offset);
+        return b.CreateLoad(type, b.CreateBitCast(ptr, type->getPointerTo((uint32_t)air::AddressSpace::constant)));
+      };
+      auto u32 = [&](uint32_t offset) { return load(offset, ctx.types._int); };
+      auto u64 = [&](uint32_t offset) { return load(offset, ctx.types._long); };
+      auto ordinal = so_compute ? b.CreateExtractElement(ctx.function->getArg(so_grid_idx), uint32_t(0))
+                                : ctx.function->getArg(vid);
+      auto instance = so_compute ? b.CreateExtractElement(ctx.function->getArg(so_grid_idx), uint32_t(1))
+                                 : ctx.function->getArg(iid);
+      auto input_count = u32(offsetof(StreamOutputDraw, input_count));
+      auto step = u32(offsetof(StreamOutputDraw, input_step));
+      auto window = u32(offsetof(StreamOutputDraw, input_window));
+      auto vertices = u32(offsetof(StreamOutputDraw, primitive_vertices));
+      auto core_first = u32(offsetof(StreamOutputDraw, core_first));
+      auto core_step = u32(offsetof(StreamOutputDraw, core_step));
+      auto flags = u32(offsetof(StreamOutputDraw, flags));
+      auto has_cut = b.CreateICmpNE(b.CreateAnd(flags, b.getInt32(dxmt::kSOHasCut)), b.getInt32(0));
+      auto prefix_type = llvm::FixedVectorType::get(ctx.types._int, 2);
+      auto prefix = b.CreateIntToPtr(
+          u64(offsetof(StreamOutputDraw, prefix)), prefix_type->getPointerTo((uint32_t)air::AddressSpace::device)
+      );
+      auto read_prefix = [&](llvm::Value *index) -> llvm::Value * {
+        auto before = b.GetInsertBlock();
+        auto active = llvm::BasicBlock::Create(ctx.llvm, "so.prefix", ctx.function);
+        auto done = llvm::BasicBlock::Create(ctx.llvm, "so.prefix.done", ctx.function);
+        b.CreateCondBr(has_cut, active, done);
+        b.SetInsertPoint(active);
+        auto value = b.CreateLoad(prefix_type, b.CreateGEP(prefix_type, prefix, index));
+        b.CreateBr(done);
+        b.SetInsertPoint(done);
+        auto result = b.CreatePHI(prefix_type, 2);
+        result->addIncoming(llvm::ConstantAggregateZero::get(prefix_type), before);
+        result->addIncoming(value, active);
+        return result;
+      };
+      auto segment = b.CreateExtractElement(read_prefix(ordinal), (uint32_t)0);
+      auto stride = b.CreateZExt(u32(offsetof(StreamOutputDraw, stride)), ctx.types._long);
+      auto base = u64(offsetof(StreamOutputDraw, base_offset));
+      auto budget = u64(offsetof(StreamOutputDraw, primitive_budget));
+      auto per_instance = u64(offsetof(StreamOutputDraw, primitives_per_instance));
+      auto output = b.CreateIntToPtr(
+          u64(offsetof(StreamOutputDraw, output_buffer)),
+          ctx.types._int->getPointerTo((uint32_t)air::AddressSpace::device)
+      );
+      auto output_regs = b.CreateBitOrPointerCast(ctx.resource.output.ptr_int4, ctx.types._int->getPointerTo());
+      // One VS result can occur in up to three expanded strip primitives.
+      // Each occurrence has one deterministic destination, regardless of execution order.
+      for (uint32_t corner = 0; corner < 3; ++corner) {
+        auto offset = b.CreateAdd(core_first, b.CreateMul(core_step, b.getInt32(corner)));
+        auto overlapping = b.CreateICmpNE(b.CreateAnd(flags, b.getInt32(dxmt::kSOOverlapping)), b.getInt32(0));
+        auto list_first = b.CreateMul(b.CreateUDiv(ordinal, step), step);
+        auto list_local = b.CreateSub(ordinal, list_first);
+        auto list_corner = b.CreateUDiv(b.CreateSub(list_local, core_first), core_step);
+        auto list_core = b.CreateAnd(b.CreateICmpUGE(list_local, core_first), b.CreateICmpULT(list_corner, vertices));
+        list_core = b.CreateAnd(
+            list_core, b.CreateICmpEQ(b.CreateURem(b.CreateSub(list_local, core_first), core_step), b.getInt32(0))
+        );
+        auto first = b.CreateSelect(overlapping, b.CreateSub(ordinal, offset), list_first);
+        auto relative = b.CreateSub(first, segment);
+        auto strip_candidate = b.CreateAnd(
+            b.CreateICmpULT(b.getInt32(corner), vertices),
+            b.CreateAnd(b.CreateICmpUGE(ordinal, offset), b.CreateICmpUGE(first, segment))
+        );
+        auto candidate = b.CreateSelect(overlapping, strip_candidate, b.CreateAnd(b.getInt1(corner == 0), list_core));
+        candidate = b.CreateAnd(candidate, b.CreateICmpULE(window, b.CreateSub(input_count, first)));
+        candidate = b.CreateAnd(candidate, b.CreateICmpEQ(b.CreateURem(relative, step), b.getInt32(0)));
+        auto check = llvm::BasicBlock::Create(ctx.llvm, "so.primitive", ctx.function);
+        auto done = llvm::BasicBlock::Create(ctx.llvm, "so.next", ctx.function);
+        b.CreateCondBr(candidate, check, done);
+        b.SetInsertPoint(check);
+        auto last = b.CreateSub(b.CreateAdd(first, window), b.getInt32(1));
+        auto end_segment = b.CreateExtractElement(read_prefix(last), (uint32_t)0);
+        auto prefix_count = b.CreateExtractElement(read_prefix(first), (uint32_t)1);
+        auto primitive_in_segment = b.CreateUDiv(relative, step);
+        auto primitive = b.CreateSelect(has_cut, b.CreateSub(prefix_count, b.getInt32(1)), primitive_in_segment);
+        auto global_primitive = b.CreateAdd(
+            b.CreateMul(b.CreateZExt(instance, ctx.types._long), per_instance), b.CreateZExt(primitive, ctx.types._long)
+        );
+        auto fits = b.CreateAnd(b.CreateICmpULT(global_primitive, budget), b.CreateICmpULE(end_segment, first));
+        auto store = llvm::BasicBlock::Create(ctx.llvm, "so.store", ctx.function);
+        b.CreateCondBr(fits, store, done);
+        b.SetInsertPoint(store);
+        llvm::Value *output_corner = b.CreateSelect(overlapping, b.getInt32(corner), list_corner);
+        if (corner) {
+          auto reverse = b.CreateAnd(
+              b.CreateICmpNE(b.CreateAnd(flags, b.getInt32(dxmt::kSOTriangleStrip)), b.getInt32(0)),
+              b.CreateICmpNE(b.CreateAnd(primitive_in_segment, b.getInt32(1)), b.getInt32(0))
+          );
+          output_corner = b.CreateSelect(reverse, b.getInt32(3 - corner), output_corner);
+        }
+        auto output_vertex = b.CreateAdd(
+            b.CreateMul(global_primitive, b.CreateZExt(vertices, ctx.types._long)),
+            b.CreateZExt(output_corner, ctx.types._long)
+        );
+        auto output_offset = b.CreateAdd(base, b.CreateMul(output_vertex, stride));
+        for (uint32_t i = 0; i < vertex_so->num_elements; ++i) {
+          const auto &element = vertex_so->elements[i];
+          if (element.reg_id == UINT32_MAX)
+            continue;
+          auto source = b.CreateConstGEP1_32(ctx.types._int, output_regs, element.reg_id * 4 + element.component);
+          auto destination = b.CreateGEP(
+              ctx.types._int, output, b.CreateLShr(b.CreateAdd(output_offset, b.getInt64(element.offset)), 2)
+          );
+          b.CreateStore(b.CreateLoad(ctx.types._int, source), destination);
+        }
+        b.CreateBr(done);
+        b.SetInsertPoint(done);
+      }
       return nullptr;
     });
   }
 
-  uint32_t vertex_idx = func_signature.DefineInput(air::InputVertexID{});
-  uint32_t base_vertex_idx = func_signature.DefineInput(air::InputBaseVertex{});
-  uint32_t instance_idx = func_signature.DefineInput(air::InputInstanceID{});
-  uint32_t base_instance_idx =
-    func_signature.DefineInput(air::InputBaseInstance{});
+  uint32_t vertex_idx = so_compute ? UINT32_MAX : func_signature.DefineInput(air::InputVertexID{});
+  uint32_t base_vertex_idx = so_compute ? UINT32_MAX : func_signature.DefineInput(air::InputBaseVertex{});
+  uint32_t instance_idx = so_compute ? UINT32_MAX : func_signature.DefineInput(air::InputInstanceID{});
+  uint32_t base_instance_idx = so_compute ? UINT32_MAX : func_signature.DefineInput(air::InputBaseInstance{});
 
   uint32_t clip_distance_out_idx = ~0u;
-  if (pShaderInternal->clip_distance_scalars.size()) {
+  if (pShaderInternal->clip_distance_scalars.size() && !rasterization_disabled) {
     clip_distance_out_idx = func_signature.DefineOutput(
       air::OutputClipDistance{pShaderInternal->clip_distance_scalars.size()}
     );
@@ -773,18 +827,110 @@ llvm::Error convert_dxbc_vertex_shader(
       builder, nulldbg
   );
 
-  setup_metal_version(module, metal_version);
+  if (!so_compute)
+    setup_metal_version(module, metal_version);
 
-  resource_map.vertex_id_with_base = function->getArg(vertex_idx);
-  resource_map.base_vertex_id = function->getArg(base_vertex_idx);
-  resource_map.instance_id_with_base = function->getArg(instance_idx);
-  resource_map.base_instance_id = function->getArg(base_instance_idx);
+  resource_map.vertex_id_with_base = so_compute
+                                         ? builder.CreateExtractElement(function->getArg(so_grid_idx), uint32_t(0))
+                                         : function->getArg(vertex_idx);
+  resource_map.base_vertex_id =
+      so_compute ? static_cast<llvm::Value *>(builder.getInt32(0)) : function->getArg(base_vertex_idx);
+  resource_map.instance_id_with_base = so_compute
+                                           ? builder.CreateExtractElement(function->getArg(so_grid_idx), uint32_t(1))
+                                           : function->getArg(instance_idx);
+  resource_map.base_instance_id =
+      so_compute ? static_cast<llvm::Value *>(builder.getInt32(0)) : function->getArg(base_instance_idx);
   resource_map.vertex_id = builder.CreateSub(
     resource_map.vertex_id_with_base, resource_map.base_vertex_id
   );
   resource_map.instance_id = builder.CreateSub(
     resource_map.instance_id_with_base, resource_map.base_instance_id
   );
+
+  if (vertex_so) {
+    using dxmt::StreamOutputDraw;
+    auto data = builder.CreateBitCast(
+        function->getArg(so_table_idx), builder.getInt8Ty()->getPointerTo((uint32_t)air::AddressSpace::constant)
+    );
+    auto load = [&](uint32_t offset, llvm::Type *type) {
+      return builder.CreateLoad(
+          type, builder.CreateBitCast(
+                    builder.CreateConstGEP1_32(builder.getInt8Ty(), data, offset),
+                    type->getPointerTo((uint32_t)air::AddressSpace::constant)
+                )
+      );
+    };
+    auto index_size = load(offsetof(StreamOutputDraw, index_size), types._int);
+    auto ordinal = so_compute ? builder.CreateExtractElement(function->getArg(so_grid_idx), uint32_t(0))
+                              : function->getArg(vertex_idx);
+    auto native_instance = so_compute ? builder.CreateExtractElement(function->getArg(so_grid_idx), uint32_t(1))
+                                      : function->getArg(instance_idx);
+    if (so_compute) {
+      auto active = llvm::BasicBlock::Create(context, "so.compute.active", function);
+      auto done = llvm::BasicBlock::Create(context, "so.compute.inactive", function);
+      auto valid = builder.CreateAnd(
+          builder.CreateICmpULT(ordinal, load(offsetof(StreamOutputDraw, input_count), types._int)),
+          builder.CreateICmpULT(native_instance, load(offsetof(StreamOutputDraw, instance_count), types._int))
+      );
+      builder.CreateCondBr(valid, active, done);
+      builder.SetInsertPoint(done);
+      builder.CreateRetVoid();
+      builder.SetInsertPoint(active);
+    }
+    auto direct_block = builder.GetInsertBlock();
+    auto indexed_block = llvm::BasicBlock::Create(context, "so.indexed", function);
+    auto index16_block = llvm::BasicBlock::Create(context, "so.index16", function);
+    auto index32_block = llvm::BasicBlock::Create(context, "so.index32", function);
+    auto indexed_done = llvm::BasicBlock::Create(context, "so.indexed.done", function);
+    auto index_done = llvm::BasicBlock::Create(context, "so.index.done", function);
+    auto indexed = builder.CreateICmpNE(index_size, builder.getInt32(0));
+    auto fallback_vertex = builder.CreateSelect(indexed, builder.getInt32(0), ordinal);
+    auto in_bounds = builder.CreateICmpULT(ordinal, load(offsetof(StreamOutputDraw, index_count), types._int));
+    builder.CreateCondBr(builder.CreateAnd(indexed, in_bounds), indexed_block, index_done);
+    builder.SetInsertPoint(indexed_block);
+    auto address = load(offsetof(StreamOutputDraw, indices), types._long);
+    builder.CreateCondBr(builder.CreateICmpEQ(index_size, builder.getInt32(2)), index16_block, index32_block);
+    builder.SetInsertPoint(index16_block);
+    auto ptr16 =
+        builder.CreateIntToPtr(address, builder.getInt16Ty()->getPointerTo((uint32_t)air::AddressSpace::device));
+    auto index16 = builder.CreateZExt(
+        builder.CreateLoad(builder.getInt16Ty(), builder.CreateGEP(builder.getInt16Ty(), ptr16, ordinal)), types._int
+    );
+    builder.CreateBr(indexed_done);
+    builder.SetInsertPoint(index32_block);
+    auto ptr32 = builder.CreateIntToPtr(address, types._int->getPointerTo((uint32_t)air::AddressSpace::device));
+    auto index32 = builder.CreateLoad(types._int, builder.CreateGEP(types._int, ptr32, ordinal));
+    builder.CreateBr(indexed_done);
+    builder.SetInsertPoint(indexed_done);
+    auto fetched = builder.CreatePHI(types._int, 2);
+    fetched->addIncoming(index16, index16_block);
+    fetched->addIncoming(index32, index32_block);
+    builder.CreateBr(index_done);
+    builder.SetInsertPoint(index_done);
+    auto source_vertex = builder.CreatePHI(types._int, 2);
+    source_vertex->addIncoming(fallback_vertex, direct_block);
+    source_vertex->addIncoming(fetched, indexed_done);
+    auto flags = load(offsetof(StreamOutputDraw, flags), types._int);
+    auto is_cut = builder.CreateAnd(
+        builder.CreateICmpNE(builder.CreateAnd(flags, builder.getInt32(dxmt::kSOHasCut)), builder.getInt32(0)),
+        builder.CreateICmpEQ(source_vertex, load(offsetof(StreamOutputDraw, cut_index), types._int))
+    );
+    auto cut_block = llvm::BasicBlock::Create(context, "so.cut", function);
+    auto active_block = llvm::BasicBlock::Create(context, "so.active", function);
+    builder.CreateCondBr(is_cut, cut_block, active_block);
+    builder.SetInsertPoint(cut_block);
+    if (function->getReturnType()->isVoidTy())
+      builder.CreateRetVoid();
+    else
+      builder.CreateRet(llvm::ConstantAggregateZero::get(function->getReturnType()));
+    builder.SetInsertPoint(active_block);
+    resource_map.base_vertex_id = load(offsetof(StreamOutputDraw, base_vertex), types._int);
+    resource_map.base_instance_id = load(offsetof(StreamOutputDraw, base_instance), types._int);
+    resource_map.vertex_id = source_vertex;
+    resource_map.vertex_id_with_base = builder.CreateAdd(source_vertex, resource_map.base_vertex_id);
+    resource_map.instance_id = native_instance;
+    resource_map.instance_id_with_base = builder.CreateAdd(resource_map.instance_id, resource_map.base_instance_id);
+  }
 
   resource_map.input.ptr_int4 =
     builder.CreateAlloca(llvm::ArrayType::get(types._int4, max_input_register));
@@ -837,7 +983,7 @@ llvm::Error convert_dxbc_vertex_shader(
   }
   auto value = epilogue_result.get();
 
-  if (pShaderInternal->clip_distance_scalars.size()) {
+  if (pShaderInternal->clip_distance_scalars.size() && !rasterization_disabled) {
     auto clip_distance_ty = llvm::ArrayType::get(
       types._float, pShaderInternal->clip_distance_scalars.size()
     );
@@ -892,9 +1038,428 @@ llvm::Error convert_dxbc_vertex_shader(
     builder.CreateRet(value);
   }
 
-  module.getOrInsertNamedMetadata("air.vertex")->addOperand(function_metadata);
+  module.getOrInsertNamedMetadata(so_compute ? "air.kernel" : "air.vertex")->addOperand(function_metadata);
   return llvm::Error::success();
 };
+
+// Indirect draws can change their index views and counts on the GPU. Process
+// each draw with bounded group storage rather than allocating from those counts.
+static llvm::Error
+convert_dxbc_stream_output_kernel(
+    SM50ShaderInternal *shader, const char *name, llvm::LLVMContext &llvm, llvm::Module &module,
+    SM50_SHADER_COMPILATION_ARGUMENT_DATA *args
+) {
+  using dxmt::StreamOutputDraw;
+  SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA *so = nullptr;
+  args_get_data<SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT, SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA>(args, &so);
+  if (!so || so->num_elements > 128)
+    return llvm::make_error<UnsupportedFeature>("invalid stream-output declaration window");
+  std::vector<SM50_STREAM_OUTPUT_ELEMENT> components;
+  for (uint32_t i = 0; i < so->num_elements; ++i)
+    if (so->elements[i].reg_id != UINT32_MAX)
+      components.push_back(so->elements[i]);
+  const uint32_t words = std::max(1u, uint32_t(components.size()));
+  const uint32_t group_size = dxmt::StreamOutputGroupSize(words);
+  SM50_SHADER_IA_INPUT_LAYOUT_DATA *ia = nullptr;
+  args_get_data<SM50_SHADER_IA_INPUT_LAYOUT, SM50_SHADER_IA_INPUT_LAYOUT_DATA>(args, &ia);
+  SM50_SHADER_ROOT_SIGNATURE_DATA *root = nullptr;
+  args_get_data<SM50_SHADER_ROOT_SIGNATURE, SM50_SHADER_ROOT_SIGNATURE_DATA>(args, &root);
+  SM50_SHADER_COMMON_DATA *common = nullptr;
+  args_get_data<SM50_SHADER_COMMON, SM50_SHADER_COMMON_DATA>(args, &common);
+  auto flags = common ? common->flags : SM50_SHADER_FLAG{};
+  air::FunctionSignatureBuilder signature;
+  signature.UseMaxWorkgroupSize(group_size);
+  io_binding_map resource;
+  air::AirType types(llvm);
+  IREffect prologue([](auto) { return std::monostate(); });
+  IRValue epilogue([](struct context) -> pvalue { return nullptr; });
+  SignatureContext sc(prologue, epilogue, signature, resource);
+  sc.ia_layout = ia;
+  sc.skip_vertex_output = true;
+  for (auto &handler : shader->signature_handlers)
+    handler(sc);
+  const auto lane_arg = signature.DefineInput(air::InputThreadIndexInThreadgroup{});
+  const auto params_arg = signature.DefineInput(
+      air::ArgumentBindingBuffer{
+          .buffer_size = {},
+          .location_index = SM50_BINDING_INDEX_STREAM_OUTPUT0,
+          .array_size = 0,
+          .memory_access = air::MemoryAccess::read,
+          .address_space = air::AddressSpace::constant,
+          .type = air::MSLUint{},
+          .arg_name = "stream_output_draw",
+          .raster_order_group = {}
+      }
+  );
+  auto bindings = root ? setup_binding_rootsig(
+                             &shader->shader_info, signature, module, microsoft::D3D10_SB_VERTEX_SHADER, root->bytecode,
+                             root->bytecode_length
+                         )
+                       : setup_binding_table2(&shader->shader_info, signature, module);
+  auto [function, metadata] = signature.CreateFunction(name, llvm, module, 0, true);
+  auto block = [&](const char *label) { return llvm::BasicBlock::Create(llvm, label, function); };
+  auto entry = block("entry"), counter_read = block("cursor.read"), counter_ready = block("cursor.ready");
+  auto instances = block("instances"), chunks = block("chunks"), fetch = block("fetch");
+  auto index16 = block("index16"), index32 = block("index32"), index_kind = block("index.kind"),
+       index_done = block("index.done");
+  auto body = block("vertex.body"), capture = block("capture"), write = block("primitive.write");
+  auto corners = block("corners"), corner_body = block("corner.store"), after_write = block("primitive.done");
+  auto carry_copy = block("carry.copy"), after_carry = block("carry.done"), instance_done = block("instance.done");
+  auto finish = block("finish"), counter_store = block("cursor.store"), done = block("done");
+  llvm::IRBuilder<> b(entry);
+  llvm::raw_null_ostream debug;
+  llvm::air::AIRBuilder air(
+      {.sampleNaNToZero = bool(flags & SM50_SHADER_FLAG_SAMPLE_NAN_TO_ZERO),
+       .defuseFma = bool(flags & SM50_SHADER_FLAG_DEFUSE_FMA)},
+      b, debug
+  );
+  const auto tg_space = uint32_t(air::AddressSpace::threadgroup), device_space = uint32_t(air::AddressSpace::device);
+  auto global = [&](const char *suffix, uint32_t count) {
+    auto type = llvm::ArrayType::get(types._int, count);
+    auto value = new llvm::GlobalVariable(
+        module, type, false, llvm::GlobalValue::InternalLinkage, llvm::UndefValue::get(type),
+        std::string(name) + suffix, nullptr, llvm::GlobalValue::NotThreadLocal, tg_space
+    );
+    value->setAlignment(llvm::Align(4));
+    return b.CreateBitCast(value, types._int->getPointerTo(tg_space));
+  };
+  auto data = global(".data", (group_size + 5) * words), markers = global(".cuts", group_size + 1),
+       counts = global(".counts", group_size);
+  auto lane = function->getArg(lane_arg);
+  auto params =
+      b.CreateBitCast(function->getArg(params_arg), b.getInt8Ty()->getPointerTo(uint32_t(air::AddressSpace::constant)));
+  auto load = [&](size_t offset, llvm::Type *type) {
+    return b.CreateLoad(
+        type, b.CreateBitCast(
+                  b.CreateConstGEP1_64(b.getInt8Ty(), params, offset),
+                  type->getPointerTo(uint32_t(air::AddressSpace::constant))
+              )
+    );
+  };
+  auto u32 = [&](size_t offset) { return load(offset, types._int); };
+  auto u64 = [&](size_t offset) { return load(offset, types._long); };
+  auto input_count = u32(offsetof(StreamOutputDraw, input_count)),
+       instance_count = u32(offsetof(StreamOutputDraw, instance_count));
+  auto base_vertex = u32(offsetof(StreamOutputDraw, base_vertex)),
+       base_instance = u32(offsetof(StreamOutputDraw, base_instance));
+  auto index_size = u32(offsetof(StreamOutputDraw, index_size)),
+       index_count = u32(offsetof(StreamOutputDraw, index_count));
+  auto indices = u64(offsetof(StreamOutputDraw, indices));
+  auto step = u32(offsetof(StreamOutputDraw, input_step)), window = u32(offsetof(StreamOutputDraw, input_window));
+  auto vertices = u32(offsetof(StreamOutputDraw, primitive_vertices)),
+       core_first = u32(offsetof(StreamOutputDraw, core_first));
+  auto core_step = u32(offsetof(StreamOutputDraw, core_step)), so_flags = u32(offsetof(StreamOutputDraw, flags));
+  auto stride = b.CreateZExt(u32(offsetof(StreamOutputDraw, stride)), types._long);
+  auto primitive_bytes = b.CreateMul(stride, b.CreateZExt(vertices, types._long));
+  auto output_size = u64(offsetof(StreamOutputDraw, output_size)),
+       output_address = u64(offsetof(StreamOutputDraw, output_buffer));
+  auto counter_address = u64(offsetof(StreamOutputDraw, counter_buffer));
+  auto output = b.CreateIntToPtr(output_address, types._int->getPointerTo(device_space));
+  auto counter = b.CreateIntToPtr(counter_address, types._int->getPointerTo(device_space));
+  auto target =
+      b.CreateAnd(b.CreateICmpNE(output_address, b.getInt64(0)), b.CreateICmpNE(counter_address, b.getInt64(0)));
+  auto has_cut = b.CreateICmpNE(b.CreateAnd(so_flags, b.getInt32(dxmt::kSOHasCut)), b.getInt32(0));
+  auto overlapping = b.CreateICmpNE(b.CreateAnd(so_flags, b.getInt32(dxmt::kSOOverlapping)), b.getInt32(0));
+  auto carry = b.CreateSelect(overlapping, b.CreateSub(window, b.getInt32(1)), b.getInt32(0));
+  auto chunk_step = b.CreateSelect(
+      overlapping, b.getInt32(group_size), b.CreateMul(b.CreateUDiv(b.getInt32(group_size), step), step)
+  );
+  auto cut_index = u32(offsetof(StreamOutputDraw, cut_index));
+  resource.input.ptr_int4 = b.CreateAlloca(llvm::ArrayType::get(types._int4, shader->max_input_register));
+  resource.input.ptr_float4 = b.CreateBitCast(
+      resource.input.ptr_int4, llvm::ArrayType::get(types._float4, shader->max_input_register)->getPointerTo()
+  );
+  resource.input_element_count = shader->max_input_register;
+  resource.output.ptr_int4 = b.CreateAlloca(llvm::ArrayType::get(types._int4, shader->max_output_register));
+  resource.output.ptr_float4 = b.CreateBitCast(
+      resource.output.ptr_int4, llvm::ArrayType::get(types._float4, shader->max_output_register)->getPointerTo()
+  );
+  resource.output_element_count = shader->max_output_register;
+  auto output_regs = b.CreateBitCast(resource.output.ptr_int4, types._int->getPointerTo());
+  setup_temp_register(&shader->shader_info, resource, types, module, b);
+  setup_immediate_constant_buffer(&shader->shader_info, resource, types, module, b);
+  auto tg_ptr = [&](llvm::Value *array, llvm::Value *index) { return b.CreateGEP(types._int, array, index); };
+  auto tg_load = [&](llvm::Value *array, llvm::Value *index) { return b.CreateLoad(types._int, tg_ptr(array, index)); };
+  auto sync = [&] { air.CreateBarrier(llvm::air::MemFlags::Threadgroup); };
+  b.CreateCondBr(target, counter_read, counter_ready);
+  b.SetInsertPoint(counter_read);
+  auto initial = b.CreateZExt(b.CreateLoad(types._int, counter), types._long);
+  b.CreateBr(counter_ready);
+  b.SetInsertPoint(counter_ready);
+  auto initial_cursor = b.CreatePHI(types._long, 2);
+  initial_cursor->addIncoming(b.getInt64(0), entry);
+  initial_cursor->addIncoming(initial, counter_read);
+  auto available_bytes = b.CreateSelect(
+      b.CreateAnd(target, b.CreateICmpULE(initial_cursor, output_size)), b.CreateSub(output_size, initial_cursor),
+      b.getInt64(0)
+  );
+  auto initial_budget = b.CreateUDiv(available_bytes, primitive_bytes);
+  b.CreateBr(instances);
+  b.SetInsertPoint(instances);
+  auto instance = b.CreatePHI(types._int, 2, "instance");
+  instance->addIncoming(b.getInt32(0), counter_ready);
+  auto instance_cursor = b.CreatePHI(types._long, 2, "instance.cursor");
+  instance_cursor->addIncoming(initial_cursor, counter_ready);
+  auto instance_budget = b.CreatePHI(types._long, 2, "instance.budget");
+  instance_budget->addIncoming(initial_budget, counter_ready);
+  b.CreateCondBr(b.CreateICmpULT(instance, instance_count), chunks, finish);
+  b.SetInsertPoint(chunks);
+  auto first = b.CreatePHI(types._long, 2, "chunk.first");
+  first->addIncoming(b.getInt64(0), instances);
+  auto cursor = b.CreatePHI(types._long, 2, "chunk.cursor");
+  cursor->addIncoming(instance_cursor, instances);
+  auto budget = b.CreatePHI(types._long, 2, "chunk.budget");
+  budget->addIncoming(instance_budget, instances);
+  auto previous_cut = b.CreatePHI(types._int, 2, "chunk.cut");
+  previous_cut->addIncoming(b.getInt32(0), instances);
+  b.CreateCondBr(b.CreateICmpULT(first, b.CreateZExt(input_count, types._long)), fetch, instance_done);
+  b.SetInsertPoint(fetch);
+  auto remaining = b.CreateSub(b.CreateZExt(input_count, types._long), first);
+  auto chunk_count = b.CreateTrunc(
+      b.CreateSelect(
+          b.CreateICmpULT(remaining, b.CreateZExt(chunk_step, types._long)), remaining,
+          b.CreateZExt(chunk_step, types._long)
+      ),
+      types._int
+  );
+  auto ordinal64 = b.CreateAdd(first, b.CreateZExt(lane, types._long));
+  auto ordinal = b.CreateTrunc(ordinal64, types._int);
+  auto active = b.CreateICmpULT(lane, chunk_count), indexed = b.CreateICmpNE(index_size, b.getInt32(0));
+  auto index_valid = b.CreateAnd(active, b.CreateAnd(indexed, b.CreateICmpULT(ordinal, index_count)));
+  auto fallback = b.CreateSelect(indexed, b.getInt32(0), ordinal);
+  b.CreateCondBr(index_valid, index_kind, index_done);
+  b.SetInsertPoint(index_kind);
+  b.CreateCondBr(b.CreateICmpEQ(index_size, b.getInt32(2)), index16, index32);
+  b.SetInsertPoint(index16);
+  auto p16 = b.CreateIntToPtr(indices, b.getInt16Ty()->getPointerTo(device_space));
+  auto v16 = b.CreateZExt(b.CreateLoad(b.getInt16Ty(), b.CreateGEP(b.getInt16Ty(), p16, ordinal)), types._int);
+  b.CreateBr(index_done);
+  b.SetInsertPoint(index32);
+  auto p32 = b.CreateIntToPtr(indices, types._int->getPointerTo(device_space));
+  auto v32 = b.CreateLoad(types._int, b.CreateGEP(types._int, p32, ordinal));
+  b.CreateBr(index_done);
+  b.SetInsertPoint(index_done);
+  auto source_vertex = b.CreatePHI(types._int, 3);
+  source_vertex->addIncoming(fallback, fetch);
+  source_vertex->addIncoming(v16, index16);
+  source_vertex->addIncoming(v32, index32);
+  auto is_cut = b.CreateAnd(active, b.CreateAnd(has_cut, b.CreateICmpEQ(source_vertex, cut_index)));
+  auto run = b.CreateAnd(active, b.CreateNot(is_cut));
+  resource.vertex_id = source_vertex;
+  resource.base_vertex_id = base_vertex;
+  resource.vertex_id_with_base = b.CreateAdd(source_vertex, base_vertex);
+  resource.instance_id = instance;
+  resource.base_instance_id = base_instance;
+  resource.instance_id_with_base = b.CreateAdd(instance, base_instance);
+  struct context ctx{
+      .builder = b,
+      .air = air,
+      .binding = *bindings,
+      .llvm = llvm,
+      .module = module,
+      .function = function,
+      .resource = resource,
+      .types = types,
+      .pso_sample_mask = UINT32_MAX,
+      .shader_type = shader->shader_type,
+      .metal_version = common ? common->metal_version : SM50_SHADER_METAL_310
+  };
+  b.CreateCondBr(run, body, capture);
+  b.SetInsertPoint(body);
+  if (auto err = prologue.build(ctx).takeError())
+    return err;
+  auto real_entry = convert_basicblocks(shader->entry(), ctx, capture);
+  if (auto err = real_entry.takeError())
+    return err;
+  b.CreateBr(real_entry.get());
+  b.SetInsertPoint(capture);
+  auto row = b.CreateAdd(carry, lane);
+  for (uint32_t i = 0; i < words; ++i) {
+    llvm::Value *value = b.getInt32(0);
+    if (i < components.size())
+      value = b.CreateSelect(
+          run,
+          b.CreateLoad(
+              types._int,
+              b.CreateConstGEP1_32(types._int, output_regs, components[i].reg_id * 4 + components[i].component)
+          ),
+          value
+      );
+    b.CreateStore(value, tg_ptr(data, b.CreateAdd(b.CreateMul(row, b.getInt32(words)), b.getInt32(i))));
+  }
+  // Cut-free chunks need no parallel scans. A local atomic only detects
+  // whether the general segmented path is necessary for this chunk.
+  auto initialize_cut = block("cut.initialize"), detect_cut = block("cut.detect"), publish_cut = block("cut.publish"),
+       cut_ready = block("cut.ready");
+  auto scan_cut = block("cut.scan"), plain = block("cut.none"), scan_ready = block("cut.scan.done");
+  b.CreateCondBr(b.CreateICmpEQ(lane, b.getInt32(0)), initialize_cut, detect_cut);
+  b.SetInsertPoint(initialize_cut);
+  b.CreateStore(previous_cut, tg_ptr(markers, b.getInt32(group_size)));
+  b.CreateBr(detect_cut);
+  b.SetInsertPoint(detect_cut);
+  sync();
+  b.CreateCondBr(is_cut, publish_cut, cut_ready);
+  b.SetInsertPoint(publish_cut);
+  air.CreateAtomicRMW(
+      llvm::AtomicRMWInst::UMax, tg_ptr(markers, b.getInt32(group_size)), b.CreateAdd(ordinal, b.getInt32(1))
+  );
+  b.CreateBr(cut_ready);
+  b.SetInsertPoint(cut_ready);
+  sync();
+  auto next_cut = tg_load(markers, b.getInt32(group_size));
+  b.CreateCondBr(b.CreateICmpNE(next_cut, previous_cut), scan_cut, plain);
+  b.SetInsertPoint(scan_cut);
+  llvm::Value *scan_marker = b.CreateSelect(is_cut, b.CreateAdd(ordinal, b.getInt32(1)), b.getInt32(0));
+  scan_marker = b.CreateSelect(b.CreateICmpUGT(scan_marker, previous_cut), scan_marker, previous_cut);
+  b.CreateStore(scan_marker, tg_ptr(markers, lane));
+  sync();
+  for (uint32_t offset = 1; offset < group_size; offset <<= 1) {
+    auto eligible = b.CreateICmpUGE(lane, b.getInt32(offset));
+    auto from = b.CreateSelect(eligible, b.CreateSub(lane, b.getInt32(offset)), b.getInt32(0));
+    auto neighbor = b.CreateSelect(eligible, tg_load(markers, from), b.getInt32(0));
+    sync();
+    scan_marker = b.CreateSelect(b.CreateICmpUGT(scan_marker, neighbor), scan_marker, neighbor);
+    b.CreateStore(scan_marker, tg_ptr(markers, lane));
+    sync();
+  }
+  auto scan_start = b.CreateSub(b.CreateAdd(ordinal, b.getInt32(1)), window);
+  auto scan_relative = b.CreateSub(scan_start, scan_marker);
+  auto scan_complete = b.CreateAnd(
+      active,
+      b.CreateAnd(
+          b.CreateICmpUGE(b.CreateAdd(ordinal64, b.getInt64(1)), b.CreateZExt(window, types._long)),
+          b.CreateAnd(
+              b.CreateICmpUGE(scan_start, scan_marker), b.CreateICmpEQ(b.CreateURem(scan_relative, step), b.getInt32(0))
+          )
+      )
+  );
+  llvm::Value *scan_prefix = b.CreateZExt(scan_complete, types._int);
+  b.CreateStore(scan_prefix, tg_ptr(counts, lane));
+  sync();
+  for (uint32_t offset = 1; offset < group_size; offset <<= 1) {
+    auto eligible = b.CreateICmpUGE(lane, b.getInt32(offset));
+    auto from = b.CreateSelect(eligible, b.CreateSub(lane, b.getInt32(offset)), b.getInt32(0));
+    auto neighbor = b.CreateSelect(eligible, tg_load(counts, from), b.getInt32(0));
+    sync();
+    scan_prefix = b.CreateAdd(scan_prefix, neighbor);
+    b.CreateStore(scan_prefix, tg_ptr(counts, lane));
+    sync();
+  }
+
+  auto scan_total = b.CreateZExt(tg_load(counts, b.getInt32(group_size - 1)), types._long);
+  auto scan_block = b.GetInsertBlock();
+  b.CreateBr(scan_ready);
+  b.SetInsertPoint(plain);
+  auto plain_start = b.CreateSub(b.CreateAdd(ordinal, b.getInt32(1)), window);
+  auto plain_relative = b.CreateSub(plain_start, previous_cut);
+  auto plain_complete = b.CreateAnd(
+      active, b.CreateAnd(
+                  b.CreateICmpUGE(b.CreateAdd(ordinal64, b.getInt64(1)), b.CreateZExt(window, types._long)),
+                  b.CreateAnd(
+                      b.CreateICmpUGE(plain_start, previous_cut),
+                      b.CreateICmpEQ(b.CreateURem(plain_relative, step), b.getInt32(0))
+                  )
+              )
+  );
+  auto through = [&](llvm::Value *end64) {
+    auto end = b.CreateTrunc(end64, types._int);
+    auto distance = b.CreateSub(end, previous_cut);
+    auto valid = b.CreateAnd(b.CreateICmpUGE(end, previous_cut), b.CreateICmpUGE(distance, window));
+    return b.CreateSelect(
+        valid, b.CreateAdd(b.CreateUDiv(b.CreateSub(distance, window), step), b.getInt32(1)), b.getInt32(0)
+    );
+  };
+  auto before = through(first), after = through(b.CreateAdd(first, b.CreateZExt(chunk_count, types._long)));
+  auto plain_total = b.CreateZExt(b.CreateSub(after, before), types._long);
+  auto plain_prefix = b.CreateAdd(b.CreateSub(b.CreateUDiv(plain_relative, step), before), b.getInt32(1));
+  auto plain_block = b.GetInsertBlock();
+  b.CreateBr(scan_ready);
+  b.SetInsertPoint(scan_ready);
+  auto marker = b.CreatePHI(types._int, 2);
+  marker->addIncoming(scan_marker, scan_block);
+  marker->addIncoming(previous_cut, plain_block);
+  auto complete = b.CreatePHI(b.getInt1Ty(), 2);
+  complete->addIncoming(scan_complete, scan_block);
+  complete->addIncoming(plain_complete, plain_block);
+  auto prefix = b.CreatePHI(types._int, 2);
+  prefix->addIncoming(scan_prefix, scan_block);
+  prefix->addIncoming(plain_prefix, plain_block);
+  auto total = b.CreatePHI(types._long, 2);
+  total->addIncoming(scan_total, scan_block);
+  total->addIncoming(plain_total, plain_block);
+  auto start = b.CreateSub(b.CreateAdd(ordinal, b.getInt32(1)), window);
+  auto relative = b.CreateSub(start, marker);
+
+  auto written = b.CreateSelect(b.CreateICmpULT(total, budget), total, budget);
+  auto next_budget = b.CreateSub(budget, written);
+  auto local_primitive = b.CreateZExt(b.CreateSub(prefix, b.getInt32(1)), types._long);
+  auto next_cursor = b.CreateAdd(cursor, b.CreateMul(written, primitive_bytes));
+  auto write_base = b.CreateAdd(cursor, b.CreateMul(local_primitive, primitive_bytes));
+  b.CreateCondBr(b.CreateAnd(complete, b.CreateICmpULT(local_primitive, written)), write, after_write);
+  b.SetInsertPoint(write);
+  b.CreateBr(corners);
+  b.SetInsertPoint(corners);
+  auto corner = b.CreatePHI(types._int, 2);
+  corner->addIncoming(b.getInt32(0), write);
+  b.CreateCondBr(b.CreateICmpULT(corner, vertices), corner_body, after_write);
+  b.SetInsertPoint(corner_body);
+  auto reverse = b.CreateAnd(
+      b.CreateICmpNE(b.CreateAnd(so_flags, b.getInt32(dxmt::kSOTriangleStrip)), b.getInt32(0)),
+      b.CreateAnd(
+          b.CreateICmpNE(corner, b.getInt32(0)),
+          b.CreateICmpNE(b.CreateAnd(b.CreateUDiv(relative, step), b.getInt32(1)), b.getInt32(0))
+      )
+  );
+  auto input_corner = b.CreateSelect(reverse, b.CreateSub(b.getInt32(3), corner), corner);
+  auto source_row = b.CreateAdd(
+      b.CreateSub(b.CreateAdd(carry, lane), b.CreateSub(window, b.getInt32(1))),
+      b.CreateAdd(core_first, b.CreateMul(input_corner, core_step))
+  );
+  auto target_vertex = b.CreateAdd(write_base, b.CreateMul(b.CreateZExt(corner, types._long), stride));
+  for (uint32_t i = 0; i < components.size(); ++i) {
+    auto value = tg_load(data, b.CreateAdd(b.CreateMul(source_row, b.getInt32(words)), b.getInt32(i)));
+    auto address = b.CreateLShr(b.CreateAdd(target_vertex, b.getInt64(components[i].offset)), 2);
+    b.CreateStore(value, b.CreateGEP(types._int, output, address));
+  }
+  auto next_corner = b.CreateAdd(corner, b.getInt32(1));
+  b.CreateBr(corners);
+  corner->addIncoming(next_corner, corner_body);
+  b.SetInsertPoint(after_write);
+  air.CreateBarrier(llvm::air::MemFlags::Threadgroup | llvm::air::MemFlags::Device);
+  auto next_first = b.CreateAdd(first, b.CreateZExt(chunk_count, types._long));
+  auto copy =
+      b.CreateAnd(b.CreateICmpULT(next_first, b.CreateZExt(input_count, types._long)), b.CreateICmpULT(lane, carry));
+  b.CreateCondBr(copy, carry_copy, after_carry);
+  b.SetInsertPoint(carry_copy);
+  for (uint32_t i = 0; i < words; ++i) {
+    auto value =
+        tg_load(data, b.CreateAdd(b.CreateMul(b.CreateAdd(chunk_count, lane), b.getInt32(words)), b.getInt32(i)));
+    b.CreateStore(value, tg_ptr(data, b.CreateAdd(b.CreateMul(lane, b.getInt32(words)), b.getInt32(i))));
+  }
+  b.CreateBr(after_carry);
+  b.SetInsertPoint(after_carry);
+  sync();
+  b.CreateBr(chunks);
+  first->addIncoming(next_first, after_carry);
+  cursor->addIncoming(next_cursor, after_carry);
+  budget->addIncoming(next_budget, after_carry);
+  previous_cut->addIncoming(next_cut, after_carry);
+  b.SetInsertPoint(instance_done);
+  auto next_instance = b.CreateAdd(instance, b.getInt32(1));
+  b.CreateBr(instances);
+  instance->addIncoming(next_instance, instance_done);
+  instance_cursor->addIncoming(cursor, instance_done);
+  instance_budget->addIncoming(budget, instance_done);
+  b.SetInsertPoint(finish);
+  b.CreateCondBr(b.CreateAnd(target, b.CreateICmpEQ(lane, b.getInt32(0))), counter_store, done);
+  b.SetInsertPoint(counter_store);
+  b.CreateStore(b.CreateTrunc(instance_cursor, types._int), counter);
+  b.CreateBr(done);
+  b.SetInsertPoint(done);
+  b.CreateRetVoid();
+  module.getOrInsertNamedMetadata("air.kernel")->addOperand(metadata);
+  return llvm::Error::success();
+}
 
 llvm::Error convertDXBC(
   sm50_shader_t pShader, const char *name, llvm::LLVMContext &context,
@@ -909,10 +1474,20 @@ llvm::Error convertDXBC(
     return convert_dxbc_pixel_shader(
       pShaderInternal, name, context, module, pArgs
     );
-  case microsoft::D3D10_SB_VERTEX_SHADER:
-    return convert_dxbc_vertex_shader(
-      pShaderInternal, name, context, module, pArgs
-    );
+  case microsoft::D3D10_SB_VERTEX_SHADER: {
+    if (auto err = convert_dxbc_vertex_shader(pShaderInternal, name, context, module, pArgs))
+      return err;
+    SM50_SHADER_COMMON_DATA *common = nullptr;
+    if (args_get_data<SM50_SHADER_COMMON, SM50_SHADER_COMMON_DATA>(pArgs, &common) &&
+        (common->flags & SM50_SHADER_FLAG_EMIT_SO_INDIRECT)) {
+      const auto parallel = std::string(name) + "_so_parallel";
+      if (auto err = convert_dxbc_vertex_shader(pShaderInternal, parallel.c_str(), context, module, pArgs, true))
+        return err;
+      const auto ordered = std::string(name) + "_so_ordered";
+      return convert_dxbc_stream_output_kernel(pShaderInternal, ordered.c_str(), context, module, pArgs);
+    }
+    return llvm::Error::success();
+  }
   case microsoft::D3D11_SB_COMPUTE_SHADER:
     return convert_dxbc_compute_shader(
       pShaderInternal, name, context, module, pArgs

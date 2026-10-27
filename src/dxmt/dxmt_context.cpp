@@ -119,42 +119,97 @@ ArgumentEncodingContext::encodeVertexBuffers(uint32_t slot_mask, uint64_t offset
       cmd.type = WMTRenderCommandSetVertexBufferOffset;
   }
 }
-struct SO_BUFFER_ENTRY {
-  uint64_t buffer_handle;
-  uint64_t counter_handle;
-  uint64_t size;
-};
-
-template <>
 void
-ArgumentEncodingContext::encodeStreamOutputBuffers<PipelineKind::Ordinary>(uint64_t offset) {
-
-  SO_BUFFER_ENTRY *entries = getMappedArgumentBuffer<SO_BUFFER_ENTRY>(offset);
-
-  for (unsigned slot = 0; slot < kStreamOutputSlots; slot++) {
-    auto &state = so_[slot];
-    auto &buffer = state.buffer;
-    if (!buffer.ptr()) {
-      entries[slot].buffer_handle = 0;
-      entries[slot].counter_handle = 0;
-      entries[slot].size = 0;
-      continue;
-    }
-    auto valid_length = buffer->length() > state.offset ? buffer->length() - state.offset : 0;
-    auto [buffer_alloc, buffer_offset] =
-        access<PipelineStage::Vertex>(buffer, state.offset, valid_length, ResourceAccess::Write);
-    entries[slot].buffer_handle = buffer_alloc->gpuAddress() + buffer_offset + state.offset;
-    entries[slot].counter_handle = 0; // TODO(stream-output): counter & buffer_filled_size
-    entries[slot].size = valid_length;
-    makeResident<PipelineStage::Vertex, PipelineKind::Ordinary>(buffer.ptr(), false, true);
-  };
-  {
-    auto &cmd = encodeRenderCommand<wmtcmd_render_setbufferoffset>();
-    cmd.offset = getFinalArgumentBufferOffset(offset);
-    cmd.index = SM50_BINDING_INDEX_STREAM_OUTPUT0;
-    cmd.type = WMTRenderCommandSetVertexBufferOffset;
+ArgumentEncodingContext::prepareStreamOutputIndexPrefix(
+    StreamOutputDraw arguments, uint64_t index_offset, Rc<Buffer> scratch, Rc<Buffer> indirect, uint64_t indirect_offset
+) {
+  auto [indices, index_sub] = access<PipelineStage::Compute>(ibuf_, 0, ibuf_->length(), ResourceAccess::Read);
+  makeResident<PipelineStage::Compute, PipelineKind::Ordinary>(ibuf_.ptr(), true, false);
+  arguments.input_indices = indices->gpuAddress() + index_sub + index_offset;
+  arguments.input_index_count =
+      index_offset <= ibuf_->length() ? (ibuf_->length() - index_offset) / arguments.index_size : 0;
+  arguments.prefix_count = arguments.input_count;
+  if (indirect) {
+    auto [data, sub] = access<PipelineStage::Compute>(indirect, indirect_offset, 20, ResourceAccess::Read);
+    makeResident<PipelineStage::Compute, PipelineKind::Ordinary>(indirect.ptr(), true, false);
+    arguments.input_arguments = data->gpuAddress() + sub + indirect_offset;
   }
+  auto [storage, sub] = access<PipelineStage::Compute>(scratch, 0, scratch->length(), ResourceAccess::Write);
+  makeResident<PipelineStage::Compute, PipelineKind::Ordinary>(scratch.ptr(), true, true);
+  if (!emulated_cmd.StreamOutputIndexPrefix(arguments, storage->buffer(), sub))
+    ERR("Failed to prepare stream-output index summary");
+}
 
+void
+ArgumentEncodingContext::encodeStreamOutputDraw(
+    StreamOutputDraw arguments, uint64_t argument_offset, uint64_t index_offset, Rc<Buffer> scratch,
+    Rc<Buffer> indirect, uint64_t indirect_offset
+) {
+  if (arguments.index_size) {
+    auto [indices, sub] = access<PipelineStage::Vertex>(ibuf_, 0, ibuf_->length(), ResourceAccess::Read);
+    makeResident<PipelineStage::Vertex, PipelineKind::Ordinary>(ibuf_.ptr(), true, false);
+    arguments.input_indices = indices->gpuAddress() + sub + index_offset;
+    arguments.input_index_count =
+        index_offset <= ibuf_->length() ? (ibuf_->length() - index_offset) / arguments.index_size : 0;
+  }
+  if (indirect) {
+    auto [data, sub] =
+        access<PipelineStage::Vertex>(indirect, indirect_offset, arguments.index_size ? 20 : 16, ResourceAccess::Read);
+    makeResident<PipelineStage::Vertex, PipelineKind::Ordinary>(indirect.ptr(), true, false);
+    arguments.input_arguments = data->gpuAddress() + sub + indirect_offset;
+  }
+  if (scratch) {
+    auto [storage, sub] = access<PipelineStage::Vertex>(scratch, 0, scratch->length(), ResourceAccess::Read);
+    makeResident<PipelineStage::Vertex, PipelineKind::Ordinary>(scratch.ptr(), true, false);
+    arguments.prefix = storage->gpuAddress() + sub;
+    arguments.prefix_count = arguments.input_count;
+  }
+  auto &target = so_[0];
+  if (target.buffer && target.counter) {
+    auto [buffer, sub] =
+        access<PipelineStage::Vertex>(target.buffer, 0, target.buffer->length(), ResourceAccess::Write);
+    auto [counter, counter_sub] =
+        access<PipelineStage::Vertex>(target.counter, 0, 4, ResourceAccess::Read | ResourceAccess::Write);
+    makeResident<PipelineStage::Vertex, PipelineKind::Ordinary>(target.buffer.ptr(), false, true);
+    makeResident<PipelineStage::Vertex, PipelineKind::Ordinary>(target.counter.ptr(), true, true);
+    arguments.output_buffer = buffer->gpuAddress() + sub;
+    arguments.counter_buffer = counter->gpuAddress() + counter_sub;
+    arguments.output_size = target.buffer->length();
+  }
+  auto prepare = emulated_cmd.GetStreamOutputPreparePSO();
+  if (!prepare)
+    return;
+  *getMappedArgumentBuffer<StreamOutputDraw>(argument_offset) = arguments;
+  auto &bind = encodeRenderCommand<wmtcmd_render_setbufferoffset>();
+  bind.type = WMTRenderCommandSetVertexBufferOffset;
+  bind.offset = getFinalArgumentBufferOffset(argument_offset);
+  bind.index = SM50_BINDING_INDEX_STREAM_OUTPUT0;
+  auto barrier = [&] {
+    auto &cmd = encodeRenderCommand<wmtcmd_render_memory_barrier>();
+    cmd.type = WMTRenderCommandMemoryBarrier;
+    cmd.scope = WMTBarrierScopeBuffers;
+    cmd.stages_before = cmd.stages_after = WMTRenderStageVertex;
+  };
+  barrier();
+  auto &set = encodeRenderCommand<wmtcmd_render_setpso>();
+  set.type = WMTRenderCommandSetPSO;
+  set.pso = prepare;
+  auto &prepare_draw = encodeRenderCommand<wmtcmd_render_draw>();
+  prepare_draw.type = WMTRenderCommandDraw;
+  prepare_draw.primitive_type = WMTPrimitiveTypePoint;
+  prepare_draw.vertex_start = prepare_draw.base_instance = 0;
+  prepare_draw.vertex_count = prepare_draw.instance_count = 1;
+  barrier();
+  auto &restore = encodeRenderCommand<wmtcmd_render_setpso>();
+  restore.type = WMTRenderCommandSetPSO;
+  restore.pso = currentRenderEncoder()->last_pso;
+  auto &draw = encodeRenderCommand<wmtcmd_render_draw_indirect>();
+  draw.type = WMTRenderCommandDrawIndirect;
+  draw.primitive_type = WMTPrimitiveTypePoint;
+  draw.indirect_args_buffer = getFinalArgumentBuffer();
+  draw.indirect_args_offset =
+      getFinalArgumentBufferOffset(argument_offset) + offsetof(StreamOutputDraw, capture_arguments);
+  barrier();
   currentRenderEncoder()->use_emulated_so = 1;
 }
 

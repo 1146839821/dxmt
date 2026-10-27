@@ -4737,3 +4737,82 @@ Windows,other GPUs,fullT3/T4 NOT_RUN. User .gitignore excluded. Full goal OPEN.
 Next priority:SO complete-primitive allocation/order/strip semantics,then zero
 complete D3D11 TS patch guard,adjacency strip lanes and MSC TS point/line output.
 MSC GS instancing,D3D12 GS+TS,and GS/MSC SO feature gaps remain OPEN.
+
+
+### N11 — Ordered complete-primitive VS stream output, 2026-10-28
+
+Closes new user finding3 within the existing AIRCONV ordinary-VS,stream0/slot0,
+no-raster SO range;base108a8cc1. Baseline point control passes,but a triangle in
+a buffer smaller than one complete primitive writes partial data and advances
+the cursor;cut-strip ordering also fails. D3D11 bare SO was rejected by its old
+no-attachment gate. One shared output mechanism now uses a per-draw GPU cursor
+snapshot and complete-primitive budget,deterministic input occurrences,manual
+index fetch,strip/list expansion,winding/leading-vertex preservation and adjacency
+discard. Gaps/padding remain untouched. D3D11 uses the existing Buffer/BufferAllocation
+owner for its cursor,ordered ST reset via rename,and append-preserving restoration.
+
+Existing internal library supplies preparation and bounded-work hierarchical index
+prefix kernels. Direct cut strips use the existing compute/render passes;ordinary
+SO adds a preparation draw and buffer barriers. GPU indirect counts/IBV updates
+cannot size prefix scratch on the CPU. Reuse the existing compute ICB allocator,
+executor and command-signature decoder:parallel occurrence kernels for non-cut
+work;an ordered bounded-memory workgroup plus native ICB barriers for cut strips.
+Shared storage derives from the legal SO declaration,not the GPU vertex count.
+32/96/256-thread cases pass;all1..128 component counts fit32KiB. Cut-free chunks
+skip scans;capacity division is outside chunk loops. No CPU readback executor,
+second binder,timeline or src/d3d12 source/header file introduced.
+
+Graphics PSOs retain an immutable SO compilation recipe and lazily create indirect
+entries/pipelines under the existing PSO mutex. Signature SO resolver compilation
+is lazy too. Existing encoder retention owns graphics PSOs and signatures in both
+physical encoder kinds. Paired CPU/MSL compute-command data now112 bytes (VB64,
+SO template96),SO draw data160 bytes (base112,capture136,indices152). Static asserts
+and actual GPU signature-update cases verify ABI. A multi-entry library exposed
+the existing MetallibWriter's single list-size prefix;native Xcode two-function
+output proves per-entry sizes. The writer now emits each size independently;
+single-entry serialization retains the same layout. AIRCONV28→29 invalidates old
+programs. Public FL/SM/Options/Tiers unchanged;GS/MSC SO gates stay explicit.
+
+Validation caught a real shared IA dependency:table length was unused,and compute
+SO read beyond a VB. The existing pull helper now checks the format extent against
+the view length and supplies missing-component defaults,keeping specified32-bit
+IA address wrapping. Preliminary matching output with validation errors is NOT
+accepted. D3D11 prefix preparation also supplies the same bound as capture.
+
+Final private/no-private acceptance94 processes:90 success,4 wrong-oracle negatives.
+222 SO payload/canary/cursor comparisons across initial submission,replay and fenced
+reset/rerecord cover all ordinary IA topologies including adjacency and patches,
+nonindexed/R16/R32,instances,cut/disabled-cut,short/tail/full buffers,gaps,append,
+root/static state preservation,predication,CPU/GPU zero counts,multiple indirect
+commands,sparse VBV/IBV/root updates,empty roots and indirect→direct work.96/32-thread
+wide declarations and66019-index three-level prefixes pass. D3D11 deferred replay,
+explicit same-offset reset and unbind/rebind append pass. Known D3D12 resources,
+PSO/root/signature application references are released under a queue gate;alternate
+buffers referenced only by GPU arguments stay held to completion. Pending allocator
+Reset rejects. Sixteen nearest ABI/binding/GS/stride/persistence/feature controls
+pass;all accepted Metal API/shader diagnostics clean. Mesh-ICB probe is a CPU-side
+validation rejection on Apple7,not a supported route;compute ICB barrier probe
+executes1000 ordered increments correctly.
+
+Performance:five interleaved private samples,validation/HUD off. Correct3-point
+control warm record41.4→46.0us;GPU timestamp span1440.21→1826.75us. Pipeline creation
+median11305.9→20568.9us,large overlapping P95;no regression-free or speedup claim.
+Candidate32771-input×3 instances:direct/indirect point warm GPU1815.185/429.2505us,
+CPU102.6/149.6us;direct/ordered-indirect cut strip1902.92/3276.355us,CPU138.4/167.5us.
+Ordered strip is a measured cost boundary;prior same-device median4443.955us is
+retained as diagnostic before optimization. Timestamp spans include sampling/pass
+boundaries,not isolated shader or full-game throughput. First-use conversion/resolver
+cost is separate from warm rerecord. No new lock on unaffected Draw paths or full-heap walk:SO cache locks
+are per SO indirect invocation;metadata allocation is per draw/call,cut summaries
+O(index count),ordered group storage O(declared components). T3/T4/other GPUs/Windows,
+DrawAuto,SO queries,multiple buffers/streams,rasterized SO and requested GS/MSC SO
+feature combinations remain OPEN/NOT_RUN,not implied by this bounded repair.
+
+Evidence:`../dxmt-test/n11-stream-output-20261027/N11-stream-output.md`,manifest,
+accepted-results,accepted-* logs,accepted artifacts,source diff,perf-accepted raw/
+summary,native metallib layout and hardware probes. Round began2026-10-27 and
+finished2026-10-28;M1Max/Apple7,macOS27.0.1,Xcode27.1(requested26 unavailable),Wine11
+x64/Rosetta,clang23.1.1,native LLVM15,MSC4.0.1. Prior Wine/native stages and user
+.gitignore preserved. Full goal OPEN. Next user priority:D3D11 zero-complete TS
+patch guards,then GS adjacency lanes and MSC TS point/line output;requested feature
+gaps remain implementation work.

@@ -17,13 +17,146 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <metal_common>
-#include <metal_texture>
-#include <metal_math>
+#include <metal_stdlib>
 #include "dxmt_command_constants.hpp"
 
 using namespace metal;
 using namespace dxmt;
+
+// A single preparation invocation snapshots the GPU cursor before parallel VS
+// writes. Its successor draw sees one immutable complete-primitive allocation.
+[[vertex]] void
+so_prepare_arguments(device StreamOutputDraw &p [[buffer(5)]]) {
+  p.indices = p.input_indices;
+  p.index_count = p.input_index_count;
+  if (p.input_arguments) {
+    device const uint *args = reinterpret_cast<device const uint *>(p.input_arguments);
+    p.input_count = args[0];
+    p.instance_count = args[1];
+    if (p.index_size) {
+      if ((p.flags & kSOHasCut) && (p.input_count > p.prefix_count ||
+                                    (!(p.flags & kSOFixedIndexSubrange) &&
+                                     (args[2] > p.prefix_count || p.input_count > p.prefix_count - args[2])))) {
+        p.capture_arguments[0] = p.capture_arguments[1] = 0;
+        p.primitive_budget = p.primitives_per_instance = 0;
+        return;
+      }
+      p.indices += ulong(args[2]) * p.index_size;
+      p.index_count = args[2] <= p.input_index_count ? p.input_index_count - args[2] : 0;
+      p.base_vertex = args[3];
+      p.base_instance = args[4];
+    } else {
+      p.base_vertex = args[2];
+      p.base_instance = args[3];
+    }
+  }
+  p.capture_arguments[0] = p.input_count;
+  p.capture_arguments[1] = p.instance_count;
+  p.capture_arguments[2] = p.capture_arguments[3] = 0;
+  p.primitives_per_instance =
+      p.input_count < p.input_window ? 0 : (ulong(p.input_count) - p.input_window) / p.input_step + 1;
+  if ((p.flags & kSOHasCut) && p.input_count)
+    p.primitives_per_instance = reinterpret_cast<device const uint2 *>(p.prefix)[p.input_count - 1].y;
+  p.base_offset = p.primitive_budget = 0;
+  if (!p.output_buffer || !p.counter_buffer || !p.stride || !p.primitive_vertices)
+    return;
+  device uint *counter = reinterpret_cast<device uint *>(p.counter_buffer);
+  const uint initial = *counter;
+  p.base_offset = initial;
+  if (initial <= p.output_size) {
+    const ulong primitive_bytes = ulong(p.stride) * p.primitive_vertices;
+    const ulong available = (p.output_size - initial) / primitive_bytes;
+    const ulong requested = p.primitives_per_instance * p.instance_count;
+    p.primitive_budget = available < requested ? available : requested;
+  }
+  *counter = uint(initial + p.primitive_budget * p.primitive_vertices * p.stride);
+}
+
+// Prefix summaries contain the first occurrence after the latest cut and the
+// inclusive number of complete primitives. The associative pair permits a
+// bounded-work parallel scan at every level; no input is scanned serially.
+inline void
+so_index_input(constant StreamOutputDraw &p, thread uint &count, thread ulong &indices, thread uint &bound) {
+  count = p.input_count;
+  indices = p.input_indices;
+  bound = p.input_index_count;
+  if (p.input_arguments) {
+    device const uint *args = reinterpret_cast<device const uint *>(p.input_arguments);
+    const uint first = args[2];
+    count = first <= p.prefix_count && args[0] <= p.prefix_count - first ? args[0] : 0;
+    indices += ulong(first) * p.index_size;
+    bound = first <= bound ? bound - first : 0;
+  }
+}
+
+[[kernel]] void
+so_index_segments(
+    device uint2 *values [[buffer(0)]], constant StreamOutputDraw &p [[buffer(2)]], uint i [[thread_position_in_grid]]
+) {
+  if (i >= p.input_count)
+    return;
+  uint count, bound;
+  ulong indices;
+  so_index_input(p, count, indices, bound);
+  uint marker = 0;
+  if (i < count) {
+    const uint index = i >= bound          ? 0
+                       : p.index_size == 2 ? uint(reinterpret_cast<device const ushort *>(indices)[i])
+                                           : reinterpret_cast<device const uint *>(indices)[i];
+    marker = index == p.cut_index ? i + 1 : 0;
+  }
+  values[i] = uint2(marker, 0);
+}
+
+[[kernel]] void
+so_index_primitives(
+    device uint2 *values [[buffer(0)]], constant StreamOutputDraw &p [[buffer(2)]], uint i [[thread_position_in_grid]]
+) {
+  if (i >= p.input_count)
+    return;
+  uint count, bound;
+  ulong indices;
+  so_index_input(p, count, indices, bound);
+  const uint segment = values[i].x;
+  const bool complete = i < count && p.input_window <= count - i;
+  const bool valid =
+      complete && i >= segment && (i - segment) % p.input_step == 0 && values[i + p.input_window - 1].x <= i;
+  values[i].y = valid ? 1 : 0;
+}
+
+[[kernel]] void
+so_scan_blocks(
+    device uint2 *values [[buffer(0)]], device uint2 *totals [[buffer(1)]], constant uint &count [[buffer(2)]],
+    uint lane [[thread_index_in_threadgroup]], uint3 group [[threadgroup_position_in_grid]]
+) {
+  threadgroup uint2 partial[kSOScanThreadgroupSize];
+  const ulong i = ulong(group.x) * kSOScanThreadgroupSize + lane;
+  uint2 value = i < count ? values[i] : uint2(0);
+  partial[lane] = value;
+  for (uint offset = 1; offset < kSOScanThreadgroupSize; offset <<= 1) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint2 previous = lane >= offset ? partial[lane - offset] : uint2(0);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    value = uint2(max(value.x, previous.x), value.y + previous.y);
+    partial[lane] = value;
+  }
+  if (i < count)
+    values[i] = value;
+  if (lane == kSOScanThreadgroupSize - 1)
+    totals[group.x] = value;
+}
+
+[[kernel]] void
+so_scan_offsets(
+    device uint2 *values [[buffer(0)]], device const uint2 *parents [[buffer(1)]], constant uint &count [[buffer(2)]],
+    uint i [[thread_position_in_grid]]
+) {
+  if (i >= count || i < kSOScanThreadgroupSize)
+    return;
+  const uint2 before = parents[i / kSOScanThreadgroupSize - 1];
+  const uint2 value = values[i];
+  values[i] = uint2(max(value.x, before.x), value.y + before.y);
+}
 
 // D3D12 RGB96 keeps packed three-word application rows but uses RGBA32 texels.
 struct DXMTRGB96Params {

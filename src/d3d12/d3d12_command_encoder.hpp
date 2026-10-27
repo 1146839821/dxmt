@@ -43,6 +43,8 @@ enum class EncoderType {
   AccelerationStructure,
 };
 
+class MTLD3D12CommandSignature;
+
 struct EncoderData {
   EncoderType type;
   EncoderData *next = nullptr;
@@ -52,6 +54,9 @@ struct EncoderData {
   // after Close() cannot invalidate the handle before ExecuteCommandLists
   // translates or completes the Metal command buffer.
   std::vector<WMT::Reference<WMT::Resource>> resource_refs;
+  // Graphics-owned variants may execute in an internal compute encoder too.
+  std::vector<Com<MTLD3D12GraphicsPipelineState, false>> pipeline_refs;
+  std::vector<Com<MTLD3D12CommandSignature, false>> signature_refs;
 };
 
 struct SubmissionResourceUse {
@@ -117,7 +122,6 @@ struct RenderEncoderStencilAttachmentData {
 struct RenderEncoderData : EncoderData {
   // Recorded native PSO handles (including stride variants and depth state) must
   // survive PSO switches, closed-list replay and pending submissions.
-  std::vector<Com<MTLD3D12GraphicsPipelineState, false>> pipeline_refs;
   WMT::RenderPipelineState current_pipeline = {};
   std::array<RenderEncoderColorAttachmentData, 8> colors;
   RenderEncoderDepthAttachmentData depth;

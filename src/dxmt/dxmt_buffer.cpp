@@ -65,6 +65,20 @@ BufferAllocation::free() {
   delete this;
 }
 
+Rc<Buffer>
+Buffer::streamOutputCounter() {
+  std::lock_guard<dxmt::mutex> lock(mutex_);
+  if (!stream_output_counter_) {
+    auto counter = Rc(new Buffer(sizeof(uint32_t), device_));
+    auto allocation = counter->allocate({});
+    const uint32_t initial = 0;
+    allocation->updateContents(0, &initial, sizeof(initial));
+    counter->rename(std::move(allocation));
+    stream_output_counter_ = std::move(counter);
+  }
+  return stream_output_counter_;
+}
+
 WMT::Texture
 Buffer::view(BufferViewKey key) {
   return view(key, current_.ptr());

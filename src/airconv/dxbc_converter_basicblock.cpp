@@ -428,12 +428,13 @@ IREffect pull_vertex_input(
     );
     auto base_addr = builder.CreateExtractValue(vertex_buffer_entry, {0});
     auto stride = builder.CreateExtractValue(vertex_buffer_entry, {1});
+    auto byte_length = builder.CreateExtractValue(vertex_buffer_entry, {2});
     auto byte_offset = builder.CreateAdd(
       builder.CreateMul(stride, index),
       builder.getInt32(element_info.aligned_byte_offset)
     );
     auto vec4 = co_yield air::pull_vec4_from_addr(
-      (air::MTLAttributeFormat)element_info.format, base_addr, byte_offset
+        (air::MTLAttributeFormat)element_info.format, base_addr, byte_offset, byte_length
     );
     if (vec4->getType() == types._float4) {
       co_yield store_at_vec4_array_masked(

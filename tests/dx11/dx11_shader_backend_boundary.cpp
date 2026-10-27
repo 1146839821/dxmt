@@ -457,9 +457,326 @@ bool CheckPointStream(const char *vs_path, const char *ps_path,
   return true;
 }
 
+bool RunStreamOutput(const char *kind, const char *index_mode,
+                     const char *option) {
+  using dxmt::Com;
+  const bool indexed = std::strcmp(index_mode, "none") != 0,
+             r16 = !std::strcmp(index_mode, "r16");
+  const bool partial = !std::strcmp(option, "partial");
+  const bool short_buffer = !std::strcmp(option, "short"),
+             indirect = !std::strcmp(option, "indirect"),
+             deferred = !std::strcmp(option, "deferred"),
+             reset = !std::strcmp(option, "reset"),
+             wrong = !std::strcmp(option, "wrong");
+  if ((indexed && !r16 && std::strcmp(index_mode, "r32")) ||
+      !(short_buffer || indirect || deferred || reset || wrong || partial ||
+        !std::strcmp(option, "full")))
+    return false;
+  D3D11_PRIMITIVE_TOPOLOGY topology;
+  UINT arity, step, window, core = 0, core_step = 1;
+  bool strip = false, tri_strip = false;
+  if (!std::strcmp(kind, "point")) {
+    topology = D3D11_PRIMITIVE_TOPOLOGY_POINTLIST;
+    arity = step = window = 1;
+  } else if (!std::strcmp(kind, "line")) {
+    topology = D3D11_PRIMITIVE_TOPOLOGY_LINELIST;
+    arity = step = window = 2;
+  } else if (!std::strcmp(kind, "triangle")) {
+    topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    arity = step = window = 3;
+  } else if (!std::strcmp(kind, "line-strip")) {
+    topology = D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP;
+    arity = window = 2;
+    step = 1;
+    strip = true;
+  } else if (!std::strcmp(kind, "triangle-strip")) {
+    topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+    arity = window = 3;
+    step = 1;
+    strip = tri_strip = true;
+  } else if (!std::strcmp(kind, "line-adj")) {
+    topology = D3D11_PRIMITIVE_TOPOLOGY_LINELIST_ADJ;
+    arity = 2;
+    step = window = 4;
+    core = 1;
+  } else if (!std::strcmp(kind, "triangle-adj")) {
+    topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ;
+    arity = 3;
+    step = window = 6;
+    core_step = 2;
+  } else if (!std::strcmp(kind, "line-strip-adj")) {
+    topology = D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ;
+    arity = 2;
+    window = 4;
+    step = 1;
+    core = 1;
+    strip = true;
+  } else if (!std::strcmp(kind, "triangle-strip-adj")) {
+    topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ;
+    arity = 3;
+    window = 6;
+    step = core_step = 2;
+    strip = tri_strip = true;
+  } else
+    return false;
+  if (reset && (topology != D3D11_PRIMITIVE_TOPOLOGY_POINTLIST || indexed))
+    return false;
+  auto check = [](const char *name, HRESULT hr) {
+    if (FAILED(hr))
+      std::cerr << name << " hr=0x" << std::hex << UINT(hr) << std::dec << "\n";
+    return SUCCEEDED(hr);
+  };
+  Com<ID3D11Device> device;
+  Com<ID3D11DeviceContext> immediate, context;
+  Com<ID3D11VertexShader> vertex;
+  Com<ID3D11GeometryShader> layout;
+  Com<ID3D11InputLayout> input;
+  Com<ID3D11Buffer> vb, ib, cb, args, output, readback;
+  Com<ID3DBlob> shader, errors;
+  const char source[] = R"(
+cbuffer Phase : register(b0) { uint4 phase; };
+struct Input { uint value : DATA; };
+struct Output { float4 position : SV_Position; uint4 value : DATA; };
+Output main(Input input,uint vertex : SV_VertexID,uint instance : SV_InstanceID) {
+  Output o; o.position=float4(0,0,0,1);o.value=uint4(input.value,vertex,instance,phase.x);return o;
+})";
+  const D3D_FEATURE_LEVEL requested = D3D_FEATURE_LEVEL_11_0;
+  D3D_FEATURE_LEVEL actual;
+  if (!check("SO11 compile",
+             D3DCompile(source, sizeof(source) - 1, "so11", nullptr, nullptr,
+                        "main", "vs_5_0", 0, 0, &shader, &errors)) ||
+      !check("SO11 device",
+             D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+                               &requested, 1, D3D11_SDK_VERSION, &device,
+                               &actual, &immediate)))
+    return false;
+  if (deferred) {
+    if (!check("SO11 deferred", device->CreateDeferredContext(0, &context)))
+      return false;
+  } else
+    context = immediate;
+  const D3D11_SO_DECLARATION_ENTRY decl = {
+      0, "DATA", 0, BYTE(partial ? 1 : 0), BYTE(partial ? 2 : 4), 0};
+  const UINT stride = 32, initial = 8, count = 773, instances = 2, first = 3,
+             base_vertex = 5, base_instance = 4;
+  const D3D11_INPUT_ELEMENT_DESC il = {
+      "DATA", 0, DXGI_FORMAT_R32_UINT, 3, 0, D3D11_INPUT_PER_VERTEX_DATA, 0};
+  if (!check("SO11 VS", device->CreateVertexShader(shader->GetBufferPointer(),
+                                                   shader->GetBufferSize(),
+                                                   nullptr, &vertex)) ||
+      !check("SO11 layout",
+             device->CreateGeometryShaderWithStreamOutput(
+                 shader->GetBufferPointer(), shader->GetBufferSize(), &decl, 1,
+                 &stride, 1, D3D11_SO_NO_RASTERIZED_STREAM, nullptr,
+                 &layout)) ||
+      !check("SO11 input",
+             device->CreateInputLayout(&il, 1, shader->GetBufferPointer(),
+                                       shader->GetBufferSize(), &input)))
+    return false;
+  std::vector<UINT> index(count + first + 8, 0);
+  for (UINT i = 0; i < count; ++i)
+    index[first + i] = (i * 17 + 11) % 127;
+  const UINT cut = r16 ? 0xffffu : 0xffffffffu;
+  if (indexed && strip)
+    for (UINT i : {1u, 4u, 255u, 256u, 511u, 512u, count - 1})
+      index[first + i] = cut;
+  std::vector<std::vector<UINT>> primitives;
+  std::vector<UINT> segment;
+  auto flush = [&] {
+    for (size_t p = 0; p + window <= segment.size(); p += step) {
+      std::vector<UINT> v;
+      for (UINT c = 0; c < arity; ++c)
+        v.push_back(segment[p + core + c * core_step]);
+      if (tri_strip && ((p / step) & 1))
+        std::swap(v[1], v[2]);
+      primitives.push_back(std::move(v));
+    }
+    segment.clear();
+  };
+  for (UINT i = 0; i < count; ++i) {
+    if (indexed && strip && index[first + i] == cut)
+      flush();
+    else
+      segment.push_back(i);
+  }
+  flush();
+  const UINT size =
+      short_buffer
+          ? initial + arity * stride - 4
+          : initial + UINT(primitives.size()) * instances * arity * stride * 2 +
+                16;
+  std::vector<BYTE> poison(size, 0xcd), vertices(1024 * 12 + 8, 0xcd),
+      index_bytes(index.size() * 4 + 8, 0xcd);
+  for (UINT i = 0; i < 1024; ++i) {
+    const UINT value = i * 37 + 13;
+    std::memcpy(vertices.data() + 8 + i * 12, &value, 4);
+  }
+  for (UINT i = 0; i < index.size(); ++i)
+    if (r16) {
+      const uint16_t v = uint16_t(index[i]);
+      std::memcpy(index_bytes.data() + 4 + i * 2, &v, 2);
+    } else
+      std::memcpy(index_bytes.data() + 4 + i * 4, &index[i], 4);
+  auto buffer = [&](UINT size, UINT bind, D3D11_USAGE usage, UINT cpu,
+                    const void *data, ID3D11Buffer **out) {
+    D3D11_BUFFER_DESC d = {size, usage, bind, cpu, 0, 0};
+    D3D11_SUBRESOURCE_DATA initial_data = {data, 0, 0};
+    return check("SO11 buffer",
+                 device->CreateBuffer(&d, data ? &initial_data : nullptr, out));
+  };
+  if (!buffer(UINT(vertices.size()), D3D11_BIND_VERTEX_BUFFER,
+              D3D11_USAGE_DEFAULT, 0, vertices.data(), &vb) ||
+      !buffer(UINT(index_bytes.size()), D3D11_BIND_INDEX_BUFFER,
+              D3D11_USAGE_DEFAULT, 0, index_bytes.data(), &ib) ||
+      !buffer(16, D3D11_BIND_CONSTANT_BUFFER, D3D11_USAGE_DEFAULT, 0, nullptr,
+              &cb) ||
+      !buffer(size, D3D11_BIND_STREAM_OUTPUT, D3D11_USAGE_DEFAULT, 0,
+              poison.data(), &output) ||
+      !buffer(size, 0, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, nullptr,
+              &readback))
+    return false;
+  if (indirect) {
+    D3D11_BUFFER_DESC d = {
+        32, D3D11_USAGE_DEFAULT, 0, 0, D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS,
+        0};
+    const UINT data[] = {
+        count,         instances, first, indexed ? base_vertex : base_instance,
+        base_instance, 0,         0,     0};
+    D3D11_SUBRESOURCE_DATA initial_data = {data, 0, 0};
+    if (!check("SO11 args", device->CreateBuffer(&d, &initial_data, &args)))
+      return false;
+  }
+  Com<ID3D11CommandList> commands;
+  for (UINT pass = 0; pass < 3; ++pass) {
+    const UINT phase = pass == 2 ? 31 : 7;
+    auto expected = poison;
+    UINT cursor = initial;
+    auto oracle = [&](UINT n, UINT ninstances, UINT start) {
+      std::vector<std::vector<UINT>> emitted = primitives;
+      if (n != count) {
+        emitted.clear();
+        for (UINT i = 0; i < n; ++i)
+          emitted.push_back({i});
+      }
+      for (UINT instance = 0; instance < ninstances; ++instance)
+        for (const auto &primitive : emitted) {
+          if (uint64_t(cursor) + arity * stride > size)
+            continue;
+          for (UINT ordinal : primitive) {
+            const UINT id = indexed ? index[first + ordinal] : ordinal;
+            const UINT fetched = id + (indexed ? base_vertex : start);
+            const UINT data[] = {fetched * 37 + 13, id, instance, phase};
+            std::memcpy(expected.data() + cursor, partial ? data + 1 : data,
+                        partial ? 8 : 16);
+            cursor += stride;
+          }
+        }
+    };
+    oracle(count, instances, first);
+    oracle(count, instances, first);
+    if (reset) {
+      cursor = 0;
+      oracle(1, 1, 5);
+      cursor = 0;
+      oracle(2, 1, 9);
+      oracle(1, 1, 13);
+    }
+    if (wrong)
+      expected[initial] ^= 1;
+    if (!deferred || pass != 1) {
+      context->UpdateSubresource(output.ptr(), 0, nullptr, poison.data(), 0, 0);
+      const UINT phase_data[] = {phase, 0, 0, 0};
+      context->UpdateSubresource(cb.ptr(), 0, nullptr, phase_data, 0, 0);
+      context->IASetInputLayout(input.ptr());
+      context->IASetPrimitiveTopology(topology);
+      ID3D11Buffer *v = vb.ptr();
+      const UINT vertex_stride = 12, vertex_offset = 8;
+      context->IASetVertexBuffers(3, 1, &v, &vertex_stride, &vertex_offset);
+      if (indexed)
+        context->IASetIndexBuffer(
+            ib.ptr(), r16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT, 4);
+      context->VSSetShader(vertex.ptr(), nullptr, 0);
+      context->GSSetShader(layout.ptr(), nullptr, 0);
+      ID3D11Buffer *c = cb.ptr();
+      context->VSSetConstantBuffers(0, 1, &c);
+      const D3D11_VIEWPORT viewport = {0, 0, 1, 1, 0, 1};
+      context->RSSetViewports(1, &viewport);
+      ID3D11Buffer *target = output.ptr();
+      context->SOSetTargets(1, &target, &initial);
+      for (UINT i = 0; i < 2; ++i) {
+        if (indirect) {
+          if (indexed)
+            context->DrawIndexedInstancedIndirect(args.ptr(), 0);
+          else
+            context->DrawInstancedIndirect(args.ptr(), 0);
+        } else if (indexed)
+          context->DrawIndexedInstanced(count, instances, first, base_vertex,
+                                        base_instance);
+        else
+          context->DrawInstanced(count, instances, first, base_instance);
+      }
+      if (reset) {
+        const UINT zero = 0, append = UINT32_MAX;
+        context->SOSetTargets(1, &target, &zero);
+        context->Draw(1, 5);
+        context->SOSetTargets(1, &target, &zero);
+        context->Draw(2, 9);
+        context->SOSetTargets(0, nullptr, nullptr);
+        context->SOSetTargets(1, &target, &append);
+        context->Draw(1, 13);
+      }
+      context->SOSetTargets(0, nullptr, nullptr);
+      context->CopyResource(readback.ptr(), output.ptr());
+      if (deferred) {
+        commands = nullptr;
+        if (!check("SO11 Finish", context->FinishCommandList(FALSE, &commands)))
+          return false;
+      }
+    }
+    if (deferred)
+      immediate->ExecuteCommandList(commands.ptr(), FALSE);
+    if (pass == 2) {
+      context->ClearState();
+      commands = nullptr;
+      vertex = nullptr;
+      layout = nullptr;
+      input = nullptr;
+      vb = nullptr;
+      ib = nullptr;
+      cb = nullptr;
+      output = nullptr;
+      args = nullptr;
+    }
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (!check("SO11 Map",
+               immediate->Map(readback.ptr(), 0, D3D11_MAP_READ, 0, &mapped)))
+      return false;
+    bool good = !std::memcmp(mapped.pData, expected.data(), size);
+    if (!good)
+      for (UINT i = 0; i < size; ++i)
+        if (static_cast<BYTE *>(mapped.pData)[i] != expected[i]) {
+          std::cerr << "FAIL SO11 kind=" << kind << " indices=" << index_mode
+                    << " option=" << option << " pass=" << pass << " byte=" << i
+                    << " actual=" << UINT(static_cast<BYTE *>(mapped.pData)[i])
+                    << " expected=" << UINT(expected[i]) << "\n";
+          break;
+        }
+    immediate->Unmap(readback.ptr(), 0);
+    if (!good)
+      return false;
+    std::cout << "SO11 kind=" << kind << " indices=" << index_mode
+              << " option=" << option << " pass=" << pass
+              << " exact_bytes=" << size << " passed\n";
+  }
+  return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  std::cout << std::unitbuf;
+  if (argc == 5 && !std::strcmp(argv[1], "--stream-output"))
+    return RunStreamOutput(argv[2], argv[3], argv[4]) ? 0 : 1;
   if ((argc == 7 || argc == 8) && !std::strcmp(argv[1], "--point-stream"))
     return CheckPointStream(argv[2], argv[3], argv[4],
                             UINT(std::strtoul(argv[5], nullptr, 10)), argv[6],

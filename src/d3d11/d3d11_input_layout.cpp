@@ -206,12 +206,11 @@ HRESULT ExtractMTLStreamOutputElements(
       ERR("CreateEmulatedVertexStreamOutputShader: only slot 0 supported");
       return E_INVALIDARG;
     }
-    if ((entry.ComponentCount - entry.StartComponent) < 0 ||
-        (entry.ComponentCount + entry.StartComponent) > 4) {
+    if (uint32_t(entry.ComponentCount) + entry.StartComponent > 4) {
       ERR("CreateEmulatedVertexStreamOutputShader: invalid components");
       return E_INVALIDARG;
     }
-    if ((entry.ComponentCount - entry.StartComponent) == 0) {
+    if (entry.ComponentCount == 0) {
       continue;
     }
     if (entry.SemanticName == nullptr) {

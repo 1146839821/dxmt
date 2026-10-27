@@ -88,8 +88,7 @@ enum class MTLAttributeFormat {
   FloatRGB9E5 = 55,
 };
 
-AIRBuilderResult pull_vec4_from_addr(
-  MTLAttributeFormat format, pvalue base_addr, pvalue byte_offset
-);
+AIRBuilderResult
+pull_vec4_from_addr(MTLAttributeFormat format, pvalue base_addr, pvalue byte_offset, pvalue byte_length = nullptr);
 
 }; // namespace dxmt::air

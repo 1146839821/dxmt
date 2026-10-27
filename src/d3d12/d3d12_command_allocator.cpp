@@ -245,9 +245,22 @@ MTLD3D12CommandAllocatorImpl::DiscardRecord() {
 }
 
 IndirectComputeCommandData *
-MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount) {
+MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(
+    MTLD3D12CommandSignature *pCmdSig, WMT::ComputePipelineState pipeline, WMTSize group_size, size_t MaxCount,
+    bool stream_output
+) {
+  try {
+    if (encoder_current->signature_refs.empty() || encoder_current->signature_refs.back().ptr() != pCmdSig)
+      encoder_current->signature_refs.emplace_back(pCmdSig);
+  } catch (...) {
+    cpu_allocation_failed_ = true;
+    return nullptr;
+  }
+  auto resolver = stream_output ? pCmdSig->GetStreamOutputResolver() : pCmdSig->compute_resolver;
+  if (!pipeline || !resolver)
+    return nullptr;
   WMTIndirectCommandBufferInfo info;
-  info.inherit_buffers = !pCmdSig->UpdateRootArguments;
+  info.inherit_buffers = !stream_output && !pCmdSig->UpdateRootArguments;
   info.inherit_pso = 1;
   info.inherit_cull_mode = 0;
   info.inherit_fill_mode = 0;
@@ -277,12 +290,13 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
     return nullptr;
 
   auto data = reinterpret_cast<IndirectComputeCommandData *>(Ptr);
+  *data = {};
 
   data->cmd_buf = info.gpu_resource_id;
   data->max_count = MaxCount;
-  data->tgsize_x = pPSO->threadgroup_size.width;
-  data->tgsize_y = pPSO->threadgroup_size.height;
-  data->tgsize_z = pPSO->threadgroup_size.depth;
+  data->tgsize_x = group_size.width;
+  data->tgsize_y = group_size.height;
+  data->tgsize_z = group_size.depth;
 
   {
     // populated outside
@@ -305,7 +319,7 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
 
     auto &cmd_setpso_res = EncodeComputeCommand<wmtcmd_compute_setpso>();
     cmd_setpso_res.type = WMTComputeCommandSetPSO;
-    cmd_setpso_res.pso = pCmdSig->compute_resolver;
+    cmd_setpso_res.pso = resolver;
     cmd_setpso_res.threadgroup_size = {1, 1, 1};
 
     auto &cmd_argbuf_res = EncodeComputeCommand<wmtcmd_compute_setbuffer>();
@@ -318,10 +332,14 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
     cmd_dispatch_res.type = WMTComputeCommandDispatch;
     cmd_dispatch_res.size = {1, 1, 1};
 
+    auto &barrier = EncodeComputeCommand<wmtcmd_compute_memory_barrier>();
+    barrier.type = WMTComputeCommandMemoryBarrier;
+    barrier.scope = WMTBarrierScopeBuffers;
+
     auto &cmd_setpso = EncodeComputeCommand<wmtcmd_compute_setpso>();
     cmd_setpso.type = WMTComputeCommandSetPSO;
-    cmd_setpso.pso = pPSO->pso;
-    cmd_setpso.threadgroup_size = pPSO->threadgroup_size; // not really used
+    cmd_setpso.pso = pipeline;
+    cmd_setpso.threadgroup_size = group_size; // not really used
   }
 
   auto &cmd = EncodeComputeCommand<wmtcmd_compute_executecommands>();
@@ -339,6 +357,13 @@ IndirectRenderCommandData *
 MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
     MTLD3D12CommandSignature *pCmdSig, WMT::RenderPipelineState pipeline, size_t MaxCount
 ) {
+  try {
+    if (encoder_current->signature_refs.empty() || encoder_current->signature_refs.back().ptr() != pCmdSig)
+      encoder_current->signature_refs.emplace_back(pCmdSig);
+  } catch (...) {
+    cpu_allocation_failed_ = true;
+    return nullptr;
+  }
   WMTIndirectCommandBufferInfo info;
   info.inherit_buffers = !(pCmdSig->UpdateVertexBuffers || pCmdSig->UpdateIndexBuffer || pCmdSig->UpdateRootArguments);
   info.inherit_pso = 1;

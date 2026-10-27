@@ -527,6 +527,7 @@ public:
 
   WMT::Reference<WMT::RenderPipelineState> render_resolver;
   WMT::Reference<WMT::ComputePipelineState> compute_resolver;
+  virtual WMT::ComputePipelineState GetStreamOutputResolver() = 0;
 
   virtual void AddRefPrivate() = 0;
   virtual void ReleasePrivate() = 0;
@@ -604,6 +605,9 @@ public:
   WMTPrimitiveType airconv_geometry_input_primitive = WMTPrimitiveTypePoint;
   bool stream_output = false;
   uint32_t stream_output_stride = 0;
+  uint32_t stream_output_group_size = 1;
+  virtual WMT::ComputePipelineState GetStreamOutputIndirectPipeline(bool ordered) = 0;
+  D3D12_INDEX_BUFFER_STRIP_CUT_VALUE stream_output_strip_cut = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
   enum WMTTriangleFillMode fill_mode;
   enum WMTCullMode cull_mode;
   enum WMTDepthClipMode depth_clip_mode;

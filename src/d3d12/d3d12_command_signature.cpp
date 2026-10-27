@@ -36,6 +36,14 @@ struct dxmt_compute_command_data {
   device ulong * rootsig_qwords;
   uint rootsig_qwords_stride;
   packed_uint3 tgsize;
+  device char *vertex_buffer;
+  device void *index_buffer;
+  uint index_buffer_format;
+  uint vertex_argbuf_stride;
+  uint vertex_slot_mask;
+  uint so_ordered;
+  device const char *so_template;
+  device char *so_arguments;
 };
 
 struct d3d12_draw_arguments {
@@ -90,8 +98,27 @@ struct dxmt_render_command_data {
 )";
 
 class MTLD3D12CommandSignatureImpl : public MTLD3D12Pageable<MTLD3D12CommandSignature> {
+  dxmt::mutex so_mutex_;
+  std::string so_source_;
+  WMT::Reference<WMT::ComputePipelineState> so_resolver_;
 
 public:
+  WMT::ComputePipelineState
+  GetStreamOutputResolver() override {
+    std::lock_guard lock(so_mutex_);
+    if (!so_resolver_ && !so_source_.empty()) {
+      WMT::Reference<WMT::Error> error;
+      auto library = device_->GetMTLDevice().newLibraryWithSource(so_source_, error);
+      auto function = library ? library.newFunction("resolve_indirect_commands") : WMT::Reference<WMT::Function>{};
+      if (function)
+        so_resolver_ = device_->GetMTLDevice().newComputePipelineState(function, error);
+      if (!so_resolver_)
+        ERR("Failed to compile stream-output command resolver: ",
+            error ? error.description().getUTF8String() : "unknown");
+    }
+    return so_resolver_;
+  }
+
   MTLD3D12CommandSignatureImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12CommandSignature>(pDevice) {}
 
   HRESULT
@@ -238,164 +265,265 @@ public:
     if (is_compute && (UpdateVertexBuffers || UpdateIndexBuffer))
       return E_INVALIDARG;
 
-    if (is_compute)
+    auto emit_so_draw = [&](bool indexed) {
+      const char *draw = indexed ? "arg.draw_indexed" : "arg.draw";
+      source << "device char *so = command_data.so_arguments + ulong(i)*" << sizeof(StreamOutputDraw) << ";\n";
       source
-          << "[[kernel]] void resolve_indirect_commands([[thread_position_in_grid]] uint x, constant dxmt_compute_command_data";
-    else
-      source << "[[vertex]] void resolve_indirect_commands(constant dxmt_render_command_data";
-    source << " &command_data [[buffer(30)]]) {\n";
-
-    if (is_compute)
-      source << "if (x !=0 ) return;\n";
-
-    source << "uint count = command_data.max_count_buffer ? "
-              "command_data.max_count_buffer[0] : command_data.max_count;\n";
-    source << "for (uint i = 0; i < command_data.max_count; i++) {\n";
-    source << "device d3d12_arguments& arg = reinterpret_cast<device d3d12_arguments *>("
-              "command_data.argument_buffer + i * "
-           << pDesc->ByteStride << ")[0];\n";
-    if (is_compute) {
-      source << "compute_command cmd(command_data.cmd_buf, i);\n";
-    } else {
-      source << "render_command cmd(command_data.cmd_buf, i);\n";
-    }
-    source << "cmd.reset();\n";
-    source << "if (i >= count) continue;\n";
-    source << "device ulong * rootsig_qwords = command_data.rootsig_qwords + "
-              "(i * command_data.rootsig_qwords_stride);\n";
-    if (!is_compute)
-      source << "device dxmt_vertex_buffer * vertex_buffer = "
-                "reinterpret_cast<device dxmt_vertex_buffer *>(command_data.vertex_buffer + "
-                "(i * command_data.vertex_argbuf_stride));\n";
-
-    if (UpdateRootArguments || UpdateVertexBuffers || UpdateIndexBuffer) {
-      if (!is_compute) {
-        source << "cmd.set_vertex_buffer(vertex_buffer," << SM50_BINDING_INDEX_VERTEX_BUFFER << ");\n";
-        source << "cmd.set_vertex_buffer(rootsig_qwords," << SM50_BINDING_INDEX_ROOT_ARGUMENTS << ");\n";
-        source << "cmd.set_vertex_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS << ");\n";
-        source << "cmd.set_fragment_buffer(rootsig_qwords," << SM50_BINDING_INDEX_ROOT_ARGUMENTS << ");\n";
-        source << "cmd.set_fragment_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS
-               << ");\n";
+          << "for(uint word=0;word<" << sizeof(StreamOutputDraw) / 8
+          << ";word++) "
+             "reinterpret_cast<device ulong*>(so)[word] = reinterpret_cast<device const ulong*>(command_data.so_template)[word];\n";
+      auto field32 = [&](size_t offset, const std::string &value) {
+        source << "*reinterpret_cast<device uint*>(so+" << offset << ")=" << value << ";\n";
+      };
+      auto field64 = [&](size_t offset, const std::string &value) {
+        source << "*reinterpret_cast<device ulong*>(so+" << offset << ")=" << value << ";\n";
+      };
+      const std::string count =
+          std::string(draw) + (indexed ? ".index_count_per_instance" : ".vertex_count_per_instance");
+      const std::string instances = std::string(draw) + ".instance_count";
+      field32(offsetof(StreamOutputDraw, input_count), count);
+      field32(offsetof(StreamOutputDraw, instance_count), instances);
+      field32(
+          offsetof(StreamOutputDraw, base_vertex),
+          std::string(draw) + (indexed ? ".base_vertex_location" : ".start_vertex_location")
+      );
+      field32(offsetof(StreamOutputDraw, base_instance), std::string(draw) + ".start_instance_location");
+      field64(offsetof(StreamOutputDraw, input_arguments), "reinterpret_cast<ulong>(&" + std::string(draw) + ")");
+      if (indexed) {
+        field32(offsetof(StreamOutputDraw, index_size), "ib32bit?4:2");
+        field32(offsetof(StreamOutputDraw, input_index_count), "ib_count");
+        field32(
+            offsetof(StreamOutputDraw, index_count),
+            "arg.draw_indexed.start_index_location<=ib_count?ib_count-arg.draw_indexed.start_index_location:0"
+        );
+        field64(
+            offsetof(StreamOutputDraw, indices),
+            "reinterpret_cast<ulong>(ib)+ulong(arg.draw_indexed.start_index_location)*(ib32bit?4:2)"
+        );
       } else {
-        source << "cmd.set_kernel_buffer(rootsig_qwords, " << SM50_BINDING_INDEX_ROOT_ARGUMENTS << ");\n";
-        source << "cmd.set_kernel_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS << ");\n";
+        field32(offsetof(StreamOutputDraw, index_size), "0");
+        field32(offsetof(StreamOutputDraw, index_count), "0");
       }
-    }
+      source << "cmd.set_kernel_buffer(so," << SM50_BINDING_INDEX_STREAM_OUTPUT0 << ");\n";
+      source << "if(command_data.so_ordered){\n"
+                "cmd.concurrent_dispatch_threadgroups(uint3(1),command_data.tgsize);cmd.set_barrier();\n"
+                "}else{\n";
+      source << "ulong n=" << count << ", instances=" << instances << ";\n";
+      source << "uint window=*reinterpret_cast<device uint*>(so+" << offsetof(StreamOutputDraw, input_window) << ");\n";
+      source << "uint step=*reinterpret_cast<device uint*>(so+" << offsetof(StreamOutputDraw, input_step) << ");\n";
+      source << "ulong primitive_bytes=ulong(*reinterpret_cast<device uint*>(so+"
+             << offsetof(StreamOutputDraw, primitive_vertices) << "))**reinterpret_cast<device uint*>(so+"
+             << offsetof(StreamOutputDraw, stride) << ");\n";
+      source << "ulong per_instance=n>=window?(n-window)/step+1:0;\n"
+                "ulong available=so_counter&&so_cursor<=so_size?(so_size-so_cursor)/primitive_bytes:0;\n"
+                "ulong written=min(available,per_instance*instances);\n";
+      field64(offsetof(StreamOutputDraw, base_offset), "so_cursor");
+      field64(offsetof(StreamOutputDraw, primitive_budget), "written");
+      field64(offsetof(StreamOutputDraw, primitives_per_instance), "per_instance");
+      source
+          << "so_cursor+=written*primitive_bytes;\n"
+             "if(n&&instances)cmd.concurrent_dispatch_threadgroups(uint3((n+command_data.tgsize.x-1)/command_data.tgsize.x,instances,1),command_data.tgsize);\n"
+             "}\n";
+    };
 
-    for (unsigned i = 0; i < pDesc->NumArgumentDescs; i++) {
-      auto &arg = pDesc->pArgumentDescs[i];
-      switch (arg.Type) {
-      case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW: {
-        source << "cmd.draw_primitives((primitive_type)command_data.primitive_type, "
-                  "arg.draw.start_vertex_location, "
-                  "arg.draw.vertex_count_per_instance, arg.draw.instance_count, "
-                  "arg.draw.start_instance_location);\n";
+    const auto argument_source = source.str();
+    for (bool so_mode : {false, true}) {
+      if (is_compute && so_mode)
         break;
+      source.str({});
+      source.clear();
+      source << argument_source;
+      if (is_compute || so_mode)
+        source
+            << "[[kernel]] void resolve_indirect_commands([[thread_position_in_grid]] uint x, constant dxmt_compute_command_data";
+      else
+        source << "[[vertex]] void resolve_indirect_commands(constant dxmt_render_command_data";
+      source << " &command_data [[buffer(30)]]) {\n";
+
+      if (is_compute || so_mode)
+        source << "if (x !=0 ) return;\n";
+
+      source << "uint count = command_data.max_count_buffer ? "
+                "command_data.max_count_buffer[0] : command_data.max_count;\n";
+      if (so_mode) {
+        source << "device uint *so_counter=nullptr;ulong so_cursor=0,so_size=0;\n";
+        source << "if(!command_data.so_ordered){\n";
+        source << "ulong output=*reinterpret_cast<device const ulong*>(command_data.so_template+"
+               << offsetof(StreamOutputDraw, output_buffer) << ");\n";
+        source << "ulong cursor=*reinterpret_cast<device const ulong*>(command_data.so_template+"
+               << offsetof(StreamOutputDraw, counter_buffer) << ");\n";
+        source << "if(output&&cursor){so_counter=reinterpret_cast<device uint*>(cursor);so_cursor=*so_counter;}\n";
+        source << "so_size=*reinterpret_cast<device const ulong*>(command_data.so_template+"
+               << offsetof(StreamOutputDraw, output_size) << ");}\n";
       }
-      case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED: {
-        if (ib_index == ~0u) {
-          source << "bool ib32bit = command_data.index_buffer_format == 42;\n";
-          source << "device void* ib = command_data.index_buffer;\n";
+      source << "for (uint i = 0; i < command_data.max_count; i++) {\n";
+      source << "device d3d12_arguments& arg = reinterpret_cast<device d3d12_arguments *>("
+                "command_data.argument_buffer + i * "
+             << pDesc->ByteStride << ")[0];\n";
+      if (is_compute || so_mode) {
+        source << "compute_command cmd(command_data.cmd_buf, i);\n";
+      } else {
+        source << "render_command cmd(command_data.cmd_buf, i);\n";
+      }
+      source << "cmd.reset();\n";
+      source << "if (i >= count) continue;\n";
+      source << "device ulong * rootsig_qwords = command_data.rootsig_qwords + "
+                "(i * command_data.rootsig_qwords_stride);\n";
+      if (!is_compute)
+        source << "device dxmt_vertex_buffer * vertex_buffer = "
+                  "reinterpret_cast<device dxmt_vertex_buffer *>(command_data.vertex_buffer + "
+                  "(i * command_data.vertex_argbuf_stride));\n";
+
+      if (UpdateRootArguments || UpdateVertexBuffers || UpdateIndexBuffer || so_mode) {
+        if (!is_compute && !so_mode) {
+          source << "cmd.set_vertex_buffer(vertex_buffer," << SM50_BINDING_INDEX_VERTEX_BUFFER << ");\n";
+          source << "cmd.set_vertex_buffer(rootsig_qwords," << SM50_BINDING_INDEX_ROOT_ARGUMENTS << ");\n";
+          source << "cmd.set_vertex_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS
+                 << ");\n";
+          source << "cmd.set_fragment_buffer(rootsig_qwords," << SM50_BINDING_INDEX_ROOT_ARGUMENTS << ");\n";
+          source << "cmd.set_fragment_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS
+                 << ");\n";
+        } else {
+          source << "cmd.set_kernel_buffer(rootsig_qwords, " << SM50_BINDING_INDEX_ROOT_ARGUMENTS << ");\n";
+          source << "cmd.set_kernel_buffer(command_data.static_samplers," << SM50_BINDING_INDEX_STATIC_SAMPLERS
+                 << ");\n";
+          if (so_mode)
+            source << "cmd.set_kernel_buffer(vertex_buffer," << SM50_BINDING_INDEX_VERTEX_BUFFER << ");\n";
         }
-        source << "if (ib32bit) {\n";
-        source << "cmd.draw_indexed_primitives((primitive_type)command_data.primitive_type, "
-                  "arg.draw_indexed.index_count_per_instance, "
-                  "reinterpret_cast<device uint *>(ib) + arg.draw_indexed.start_index_location, "
-                  "arg.draw_indexed.instance_count, arg.draw_indexed.base_vertex_location, "
-                  "arg.draw_indexed.start_instance_location);\n";
-        source << "} else {\n";
-        source << "cmd.draw_indexed_primitives((primitive_type)command_data.primitive_type, "
-                  "arg.draw_indexed.index_count_per_instance, "
-                  "reinterpret_cast<device ushort *>(ib) + arg.draw_indexed.start_index_location, "
-                  "arg.draw_indexed.instance_count, arg.draw_indexed.base_vertex_location, "
-                  "arg.draw_indexed.start_instance_location);\n";
-        source << "}\n";
-        break;
       }
-      case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH: {
-        source << "cmd.concurrent_dispatch_threadgroups(arg.dispatch, command_data.tgsize);\n";
-        break;
-      }
-      case D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW: {
-        auto slot = arg.VertexBuffer.Slot;
-        // The active PSO determines the compact table, not the command signature.
-        // Unused slots have no entry and must never write into the upload heap.
-        source << "if (command_data.vertex_slot_mask & " << (1u << slot) << "u) {\n";
-        source << "vertex_buffer[popcount(command_data.vertex_slot_mask & " << ((1u << slot) - 1u)
-               << "u)] = {arg.vb_" << i << ".buffer,arg.vb_" << i
-               << ".stride_in_bytes,arg.vb_" << i << ".size_in_bytes};\n}\n";
-        break;
-      }
-      case D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW: {
-        source << "bool ib32bit = arg.ib.format == 42;\n";
-        source << "device void* ib = arg.ib.buffer;\n";
-        break;
-      }
-      case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT: {
-        auto parameter_index = arg.Constant.RootParameterIndex;
-        auto offset = rootsig->Parameters[parameter_index].source_qword;
-        for (unsigned j = 0; j < arg.Constant.Num32BitValuesToSet; j++) {
-          source << "reinterpret_cast<device uint *>(rootsig_qwords + " << offset << ")["
-                 << (j + arg.Constant.DestOffsetIn32BitValues) << "] = arg.constant_" << i << "_" << j << ";\n";
+
+      for (unsigned i = 0; i < pDesc->NumArgumentDescs; i++) {
+        auto &arg = pDesc->pArgumentDescs[i];
+        switch (arg.Type) {
+        case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW: {
+          if (so_mode) {
+            emit_so_draw(false);
+            break;
+          }
+          source << "cmd.draw_primitives((primitive_type)command_data.primitive_type, "
+                    "arg.draw.start_vertex_location, "
+                    "arg.draw.vertex_count_per_instance, arg.draw.instance_count, "
+                    "arg.draw.start_instance_location);\n";
+          break;
         }
-        break;
+        case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED: {
+          if (ib_index == ~0u) {
+            source << "bool ib32bit = command_data.index_buffer_format == 42;\n";
+            source << "device void* ib = command_data.index_buffer;\n";
+            if (so_mode)
+              source << "uint ib_count=*reinterpret_cast<device const uint*>(command_data.so_template+"
+                     << offsetof(StreamOutputDraw, input_index_count) << ");\n";
+          }
+          if (so_mode) {
+            emit_so_draw(true);
+            break;
+          }
+          source << "if (ib32bit) {\n";
+          source << "cmd.draw_indexed_primitives((primitive_type)command_data.primitive_type, "
+                    "arg.draw_indexed.index_count_per_instance, "
+                    "reinterpret_cast<device uint *>(ib) + arg.draw_indexed.start_index_location, "
+                    "arg.draw_indexed.instance_count, arg.draw_indexed.base_vertex_location, "
+                    "arg.draw_indexed.start_instance_location);\n";
+          source << "} else {\n";
+          source << "cmd.draw_indexed_primitives((primitive_type)command_data.primitive_type, "
+                    "arg.draw_indexed.index_count_per_instance, "
+                    "reinterpret_cast<device ushort *>(ib) + arg.draw_indexed.start_index_location, "
+                    "arg.draw_indexed.instance_count, arg.draw_indexed.base_vertex_location, "
+                    "arg.draw_indexed.start_instance_location);\n";
+          source << "}\n";
+          break;
+        }
+        case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH: {
+          source << "cmd.concurrent_dispatch_threadgroups(arg.dispatch, command_data.tgsize);\n";
+          break;
+        }
+        case D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW: {
+          auto slot = arg.VertexBuffer.Slot;
+          // The active PSO determines the compact table, not the command signature.
+          // Unused slots have no entry and must never write into the upload heap.
+          source << "if (command_data.vertex_slot_mask & " << (1u << slot) << "u) {\n";
+          source << "vertex_buffer[popcount(command_data.vertex_slot_mask & " << ((1u << slot) - 1u) << "u)] = {arg.vb_"
+                 << i << ".buffer,arg.vb_" << i << ".stride_in_bytes,arg.vb_" << i << ".size_in_bytes};\n}\n";
+          break;
+        }
+        case D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW: {
+          source << "bool ib32bit = arg.ib.format == 42;\n";
+          source << "device void* ib = arg.ib.buffer;\n";
+          if (so_mode)
+            source << "uint ib_count=arg.ib.size_in_bytes/(ib32bit?4:2);\n";
+          break;
+        }
+        case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT: {
+          auto parameter_index = arg.Constant.RootParameterIndex;
+          auto offset = rootsig->Parameters[parameter_index].source_qword;
+          for (unsigned j = 0; j < arg.Constant.Num32BitValuesToSet; j++) {
+            source << "reinterpret_cast<device uint *>(rootsig_qwords + " << offset << ")["
+                   << (j + arg.Constant.DestOffsetIn32BitValues) << "] = arg.constant_" << i << "_" << j << ";\n";
+          }
+          break;
+        }
+        case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW: {
+          auto parameter_index = arg.ConstantBufferView.RootParameterIndex;
+          auto offset = rootsig->Parameters[parameter_index].source_qword;
+          source << "rootsig_qwords[" << offset << "] = arg.cb_" << i << ";\n";
+          break;
+        }
+        case D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW: {
+          auto parameter_index = arg.ShaderResourceView.RootParameterIndex;
+          auto offset = rootsig->Parameters[parameter_index].source_qword;
+          source << "rootsig_qwords[" << offset << "] = arg.srv_" << i << ";\n";
+          break;
+        }
+        case D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW: {
+          auto parameter_index = arg.UnorderedAccessView.RootParameterIndex;
+          auto offset = rootsig->Parameters[parameter_index].source_qword;
+          source << "rootsig_qwords[" << offset << "] = arg.uav_" << i << ";\n";
+          break;
+        }
+        default:
+          return E_INVALIDARG;
+        }
       }
-      case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW: {
-        auto parameter_index = arg.ConstantBufferView.RootParameterIndex;
-        auto offset = rootsig->Parameters[parameter_index].source_qword;
-        source << "rootsig_qwords[" << offset << "] = arg.cb_" << i << ";\n";
-        break;
+
+      source << "}\n";
+      if (so_mode)
+        source << "if(!command_data.so_ordered&&so_counter)*so_counter=uint(so_cursor);\n";
+      source << "};\n";
+      if (so_mode) {
+        so_source_ = source.str();
+        continue;
       }
-      case D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW: {
-        auto parameter_index = arg.ShaderResourceView.RootParameterIndex;
-        auto offset = rootsig->Parameters[parameter_index].source_qword;
-        source << "rootsig_qwords[" << offset << "] = arg.srv_" << i << ";\n";
-        break;
+
+      WMT::Reference<WMT::Error> err;
+      auto lib = device_->GetMTLDevice().newLibraryWithSource(source.view(), err);
+
+      if (!lib) {
+        ERR("Failed to compile command signature resolve shader: ", err.description().getUTF8String());
+        return E_FAIL;
       }
-      case D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW: {
-        auto parameter_index = arg.UnorderedAccessView.RootParameterIndex;
-        auto offset = rootsig->Parameters[parameter_index].source_qword;
-        source << "rootsig_qwords[" << offset << "] = arg.uav_" << i << ";\n";
-        break;
+
+      auto function = lib.newFunction("resolve_indirect_commands");
+
+      if (!function) {
+        ERR("Failed to create command signature resolve shader");
+        return E_FAIL;
       }
-      default:
-        return E_INVALIDARG;
+
+      if (is_compute) {
+        compute_resolver = device_->GetMTLDevice().newComputePipelineState(function, err);
+      } else {
+        WMTRenderPipelineInfo info;
+        WMT::InitializeRenderPipelineInfo(info);
+        info.rasterization_enabled = false;
+        info.vertex_function = function;
+        render_resolver = device_->GetMTLDevice().newRenderPipelineState(info, err);
+      }
+
+      if (err) {
+        ERR("Failed to compile command signature resolve pso: ", err.description().getUTF8String());
+        return E_FAIL;
       }
     }
-
-    source << "}\n"
-              "};\n";
-
-    WMT::Reference<WMT::Error> err;
-    auto lib = device_->GetMTLDevice().newLibraryWithSource(source.view(), err);
-
-    if (!lib) {
-      ERR("Failed to compile command signature resolve shader: ", err.description().getUTF8String());
-      return E_FAIL;
-    }
-
-    auto function = lib.newFunction("resolve_indirect_commands");
-
-    if (!function) {
-      ERR("Failed to create command signature resolve shader");
-      return E_FAIL;
-    }
-
-    if (is_compute) {
-      compute_resolver = device_->GetMTLDevice().newComputePipelineState(function, err);
-    } else {
-      WMTRenderPipelineInfo info;
-      WMT::InitializeRenderPipelineInfo(info);
-      info.rasterization_enabled = false;
-      info.vertex_function = function;
-      render_resolver = device_->GetMTLDevice().newRenderPipelineState(info, err);
-    }
-
-    if (err) {
-      ERR("Failed to compile command signature resolve pso: ", err.description().getUTF8String());
-      return E_FAIL;
-    }
-
     return S_OK;
   };
 

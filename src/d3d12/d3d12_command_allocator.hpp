@@ -53,7 +53,18 @@ struct IndirectComputeCommandData {
   uint32_t tgsize_x;
   uint32_t tgsize_y;
   uint32_t tgsize_z;
+  uint64_t vertex_buffer;
+  uint64_t index_buffer;
+  DXGI_FORMAT index_buffer_format;
+  uint32_t vertex_argbuf_stride;
+  uint32_t vertex_slot_mask;
+  uint32_t so_ordered;
+  uint64_t so_template;
+  uint64_t so_arguments;
 };
+static_assert(offsetof(IndirectComputeCommandData, vertex_buffer) == 64);
+static_assert(offsetof(IndirectComputeCommandData, so_template) == 96);
+static_assert(sizeof(IndirectComputeCommandData) == 112);
 
 struct IndirectRenderCommandData {
   uint64_t cmd_buf;
@@ -385,7 +396,10 @@ public:
     return {ptr_add(gpu_heap_, aligned), aligned};
   }
 
-  IndirectComputeCommandData *EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount);
+  IndirectComputeCommandData *EncodeIndirectComputeCommand(
+      MTLD3D12CommandSignature *pCmdSig, WMT::ComputePipelineState pipeline, WMTSize group_size, size_t MaxCount,
+      bool stream_output = false
+  );
 
   IndirectRenderCommandData *EncodeIndirectRenderCommand(MTLD3D12CommandSignature *pCmdSig, WMT::RenderPipelineState pipeline, size_t MaxCount);
 };

@@ -272,7 +272,8 @@ InitializeD3D12StreamOutput(
 ) {
   using namespace microsoft;
 
-  if (!desc.NumEntries || desc.NumStrides != 1 || !desc.pSODeclaration || !desc.pBufferStrides) {
+  if (!desc.NumEntries || desc.NumEntries > 128 || desc.NumStrides != 1 || !desc.pSODeclaration ||
+      !desc.pBufferStrides) {
     return E_INVALIDARG;
   }
   if (desc.RasterizedStream != D3D12_SO_NO_RASTERIZED_STREAM) {
@@ -330,7 +331,7 @@ InitializeD3D12StreamOutput(
     }
   }
 
-  if (!strides[0] || strides[0] < output_offset) {
+  if (!strides[0] || strides[0] > 2048 || (strides[0] & 3) || strides[0] < output_offset || output_offset > 512) {
     return E_INVALIDARG;
   }
   return S_OK;
@@ -462,6 +463,15 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
   WMT::Reference<WMT::Function> vertex_function_, fragment_function_;
   dxmt::mutex vertex_pipeline_mutex_;
   std::map<VertexStrides, WMT::Reference<WMT::RenderPipelineState>> vertex_pipelines_;
+  struct StreamOutputRecipe {
+    std::vector<SM50_IA_INPUT_ELEMENT> inputs;
+    std::vector<SM50_STREAM_OUTPUT_ELEMENT> outputs;
+    std::vector<uint8_t> root_signature;
+    SM50_SHADER_COMMON_DATA common = {};
+  };
+  std::unique_ptr<StreamOutputRecipe> stream_output_recipe_;
+  WMT::Reference<WMT::Function> stream_output_functions_[2];
+  WMT::Reference<WMT::ComputePipelineState> stream_output_pipelines_[2];
 
 public:
   MTLD3D12GraphicsPipelineStateImpl(MTLD3D12Device *pDevice) :
@@ -507,6 +517,72 @@ public:
       return {};
     }
     return vertex_pipelines_.emplace(strides, std::move(pipeline)).first->second;
+  }
+
+  WMT::ComputePipelineState
+  GetStreamOutputIndirectPipeline(bool ordered) override {
+    std::lock_guard lock(vertex_pipeline_mutex_);
+    if (!stream_output_functions_[ordered] && stream_output_recipe_) {
+      const auto &recipe = *stream_output_recipe_;
+      auto common = recipe.common;
+      common.next = nullptr;
+      common.flags = static_cast<SM50_SHADER_FLAG>(common.flags | SM50_SHADER_FLAG_EMIT_SO_INDIRECT);
+      SM50_SHADER_IA_INPUT_LAYOUT_DATA ia = {};
+      ia.type = SM50_SHADER_IA_INPUT_LAYOUT;
+      ia.next = &common;
+      ia.slot_mask = slot_mask;
+      ia.num_elements = recipe.inputs.size();
+      ia.elements = const_cast<SM50_IA_INPUT_ELEMENT *>(recipe.inputs.data());
+      SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA so = {};
+      so.type = SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT;
+      so.next = &ia;
+      so.num_output_slots = 1;
+      so.num_elements = recipe.outputs.size();
+      so.elements = const_cast<SM50_STREAM_OUTPUT_ELEMENT *>(recipe.outputs.data());
+      so.strides[0] = stream_output_stride;
+      SM50_SHADER_ROOT_SIGNATURE_DATA root = {};
+      root.type = SM50_SHADER_ROOT_SIGNATURE;
+      root.next = &so;
+      root.bytecode = recipe.root_signature.data();
+      root.bytecode_length = recipe.root_signature.size();
+      D3D12AirconvBitcode bitcode;
+      D3D12AirconvError failure;
+      if (SM50Compile(
+              shader_vs.get(), reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&root), "vs_main",
+              bitcode.out(), failure.out()
+          )) {
+        ERR("Stream-output indirect conversion failed: ", failure.message());
+        return {};
+      }
+      SM50_COMPILED_BITCODE compiled = {};
+      SM50GetCompiledBitcode(bitcode.get(), &compiled);
+      auto bytes = WMT::MakeDispatchData(compiled.Data, compiled.Size);
+      WMT::Reference<WMT::Error> error;
+      auto library = device_->GetMTLDevice().newLibrary(bytes, error);
+      if (!library) {
+        ERR("Stream-output indirect library failed: ", error ? error.description().getUTF8String() : "unknown");
+        return {};
+      }
+      stream_output_functions_[0] = library.newFunction("vs_main_so_parallel");
+      stream_output_functions_[1] = library.newFunction("vs_main_so_ordered");
+      if (!stream_output_functions_[0] || !stream_output_functions_[1]) {
+        ERR("Stream-output indirect library has missing entries");
+        return {};
+      }
+    }
+    auto &pipeline = stream_output_pipelines_[ordered];
+    if (!pipeline && stream_output_functions_[ordered]) {
+      WMTComputePipelineInfo info;
+      WMT::InitializeComputePipelineInfo(info);
+      info.compute_function = stream_output_functions_[ordered];
+      info.support_indirect_command_buffers = true;
+      info.tgsize_is_multiple_of_sgwidth = true;
+      WMT::Reference<WMT::Error> error;
+      pipeline = device_->GetMTLDevice().newComputePipelineState(info, error);
+      if (!pipeline && error)
+        ERR("Failed to create stream-output indirect pipeline: ", error.description().getUTF8String());
+    }
+    return pipeline;
   }
 
   bool
@@ -1142,8 +1218,24 @@ public:
           auto vs_data = WMT::MakeDispatchData(vs_bitcode_compiled.Data, vs_bitcode_compiled.Size);
           auto vs_lib = metal.newLibrary(vs_data, err);
           vs_func = vs_lib ? vs_lib.newFunction("vs_main") : WMT::Reference<WMT::Function>();
-          if (!vs_lib || !vs_func)
+          if (!vs_lib || !vs_func) {
+            ERR("AIRCONV vertex library/entry creation failed: ",
+                err ? err.description().getUTF8String() : "missing vs_main");
             return E_FAIL;
+          }
+          if (has_stream_output) {
+            stream_output_recipe_ = std::make_unique<StreamOutputRecipe>();
+            stream_output_recipe_->inputs = elements;
+            stream_output_recipe_->outputs = stream_output_elements;
+            const auto *root_bytes = static_cast<const uint8_t *>(rootsig.bytecode);
+            stream_output_recipe_->root_signature.assign(root_bytes, root_bytes + rootsig.bytecode_length);
+            stream_output_recipe_->common = common;
+            stream_output_recipe_->common.next = nullptr;
+            uint32_t words = 0;
+            for (const auto &element : stream_output_elements)
+              words += element.reg_id != UINT32_MAX;
+            stream_output_group_size = StreamOutputGroupSize(words);
+          }
       }
     }
 
@@ -1316,6 +1408,9 @@ public:
       default:
           break;
       }
+
+      if (has_stream_output)
+        info.input_primitive_topology = WMTPrimitiveTopologyClassPoint;
 
       info.raster_sample_count = pDesc->SampleDesc.Count;
       info.support_indirect_command_buffers = true;
@@ -1493,6 +1588,7 @@ public:
 
       stream_output = has_stream_output;
       stream_output_stride = has_stream_output ? stream_output_strides[0] : 0;
+      stream_output_strip_cut = pDesc->IBStripCutValue;
 
       if (!pso) {
         ERR("Failed to create PSO: ", err ? err.description().getUTF8String() : "unknown error");

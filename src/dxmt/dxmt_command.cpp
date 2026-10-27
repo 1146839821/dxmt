@@ -21,7 +21,11 @@ InternalCommandLibrary::InternalCommandLibrary(WMT::Device device) {
   }
 };
 
-EmulatedCommandContext::EmulatedCommandContext(WMT::Device device, InternalCommandLibrary &lib, ArgumentEncodingContext &ctx): ctx(ctx) {
+EmulatedCommandContext::EmulatedCommandContext(
+    WMT::Device device, InternalCommandLibrary &lib, ArgumentEncodingContext &ctx
+) :
+    ctx(ctx),
+    device_(device) {
   auto pool = WMT::MakeAutoreleasePool();
 
   auto library = lib.getLibrary();
@@ -60,6 +64,60 @@ EmulatedCommandContext::EmulatedCommandContext(WMT::Device device, InternalComma
     ts_marshal_pipeline.rasterization_enabled = false;
     ts_draw_arguments_marshal = device.newRenderPipelineState(ts_marshal_pipeline, error);
   }
+}
+
+WMT::RenderPipelineState
+EmulatedCommandContext::GetStreamOutputPreparePSO() {
+  if (!stream_output_prepare_) {
+    auto function = ctx.lib.getLibrary().newFunction("so_prepare_arguments");
+    WMTRenderPipelineInfo info;
+    WMT::InitializeRenderPipelineInfo(info);
+    info.vertex_function = function;
+    info.rasterization_enabled = false;
+    info.input_primitive_topology = WMTPrimitiveTopologyClassPoint;
+    WMT::Reference<WMT::Error> error;
+    if (function)
+      stream_output_prepare_ = device_.newRenderPipelineState(info, error);
+    if (!stream_output_prepare_)
+      ERR("Stream output preparation pipeline unavailable");
+  }
+  return stream_output_prepare_;
+}
+
+bool
+EmulatedCommandContext::StreamOutputIndexPrefix(
+    const StreamOutputDraw &arguments, WMT::Buffer storage, uint64_t offset
+) {
+  StreamOutputScanLayout layout(arguments.input_count);
+  const char *names[] = {"so_index_segments", "so_scan_blocks", "so_scan_offsets", "so_index_primitives"};
+  for (uint32_t i = 0; i < 4; ++i)
+    if (!stream_output_scan_[i]) {
+      auto function = ctx.lib.getLibrary().newFunction(names[i]);
+      WMT::Reference<WMT::Error> error;
+      if (function)
+        stream_output_scan_[i] = device_.newComputePipelineState(function, error);
+      if (!stream_output_scan_[i]) {
+        ERR("Stream output scan pipeline unavailable: ", names[i]);
+        return {};
+      }
+    }
+  auto binding = [&](uint64_t relative, uint32_t index) { setComputeBuffer(storage, offset + relative, index); };
+  auto dispatch = [&](uint32_t pipeline, uint32_t count) {
+    setComputePipelineState(stream_output_scan_[pipeline], {kSOScanThreadgroupSize, 1, 1});
+    auto &cmd = ctx.encodeComputeCommand<wmtcmd_compute_dispatch>();
+    cmd.type = pipeline == 1 ? WMTComputeCommandDispatch : WMTComputeCommandDispatchThreads;
+    cmd.size = {pipeline == 1 ? (uint64_t(count) + kSOScanThreadgroupSize - 1) / kSOScanThreadgroupSize : count, 1, 1};
+    auto &barrier = ctx.encodeComputeCommand<wmtcmd_compute_memory_barrier>();
+    barrier.type = WMTComputeCommandMemoryBarrier;
+    barrier.scope = WMTBarrierScopeBuffers;
+  };
+  auto bytes = [&](const void *source, uint32_t size) {
+    setComputeBytes(source, size, 2);
+    return true;
+  };
+  if (!EncodeStreamOutputIndexScan(arguments, layout, binding, bytes, dispatch))
+    return {};
+  return true;
 }
 
 void
