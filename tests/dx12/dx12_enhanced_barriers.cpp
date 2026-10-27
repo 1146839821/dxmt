@@ -1596,6 +1596,7 @@ bool TestSplitExecutionOrder(const char *mode) {
   const bool common_layout = !std::strcmp(mode, "common-layout-same") ||
                              !std::strcmp(mode, "common-layout-batch") ||
                              !std::strcmp(mode, "common-layout-reversed") ||
+                             !std::strcmp(mode, "common-layout-concurrent") ||
                              !std::strcmp(mode, "common-layout-wrong-batch");
   const bool common_wrong = !std::strcmp(mode, "common-layout-wrong-batch");
   const bool access_only = !std::strncmp(mode, "access-only-", 12);
@@ -1614,7 +1615,10 @@ bool TestSplitExecutionOrder(const char *mode) {
                      access_between;
   const bool replay =
       !std::strcmp(mode, "replay") || !std::strcmp(mode, "access-only-replay");
-  const bool concurrent = !std::strcmp(mode, "concurrent");
+  const bool concurrent = !std::strcmp(mode, "concurrent") ||
+                          !std::strcmp(mode, "range-concurrent") ||
+                          !std::strcmp(mode, "access-only-concurrent") ||
+                          !std::strcmp(mode, "common-layout-concurrent");
   const bool queue_isolation = !std::strcmp(mode, "queue-isolation");
   const bool end_only = !std::strcmp(mode, "end-only");
   const bool ordered = !std::strcmp(mode, "ordered") ||
@@ -1636,6 +1640,7 @@ bool TestSplitExecutionOrder(const char *mode) {
   const bool disjoint_submit = !std::strcmp(mode, "disjoint-submit") ||
                                !std::strcmp(mode, "disjoint-cross-execute");
   const bool ranged = !std::strcmp(mode, "range-gpu") ||
+                      !std::strcmp(mode, "range-concurrent") ||
                       !std::strcmp(mode, "range-cross-execute") || handoff ||
                       cross_queue_half || access_only || common_layout;
   const bool global = !std::strcmp(mode, "global");
@@ -1868,6 +1873,8 @@ bool TestSplitExecutionOrder(const char *mode) {
     if (!handoff)
       record_readback(list);
   };
+  HRESULT concurrent_begin_hr = E_FAIL;
+  HRESULT concurrent_end_hr = E_FAIL;
   if (end_only) {
     record_end(second);
   } else if (reversed) {
@@ -1880,10 +1887,12 @@ bool TestSplitExecutionOrder(const char *mode) {
     std::thread a([&] {
       WaitForSingleObject(start, INFINITE);
       record_begin();
+      concurrent_begin_hr = first.list->Close();
     });
     std::thread b([&] {
       WaitForSingleObject(start, INFINITE);
       record_end(second);
+      concurrent_end_hr = second.list->Close();
     });
     SetEvent(start);
     a.join();
@@ -1902,8 +1911,12 @@ bool TestSplitExecutionOrder(const char *mode) {
       first.list->ClearState(nullptr);
     record_end(same || clear ? first : second);
   }
-  const HRESULT first_hr = first.list->Close();
-  const HRESULT second_hr = second.list->Close();
+  // Joining publishes each thread's Close result. Recording and Close own
+  // separate lists/allocators; shared resource state is resolved at Execute.
+  const HRESULT first_hr =
+      concurrent ? concurrent_begin_hr : first.list->Close();
+  const HRESULT second_hr =
+      concurrent ? concurrent_end_hr : second.list->Close();
   std::cout << "split mode=" << mode << " BEGIN Close=0x" << std::hex
             << static_cast<unsigned long>(first_hr) << " END Close=0x"
             << static_cast<unsigned long>(second_hr) << std::dec << "\n";

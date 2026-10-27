@@ -4081,3 +4081,30 @@ Xcode27.1/Wine11/MSC4.0.1; requested Xcode26/native Windows/other GPUs/fullT3/T4
 NOT_RUN. No capability promotion; Device/G1/FL12_2 remain incomplete.
 Report, commands and artifact hashes:
 `../dxmt-test/n03-container-bounds-20261027/N03-container-bounds.md`.
+
+
+### N12 parallel texture-range split recording — 2026-10-27
+
+On1b4d7513, Device attachment D coverage gap confirmed: prior concurrent mode
+records one subresource, while full-range/access-only/COMMON-layout modes use
+serial or reversed recording. Runtime defect Not Reproduced. Extend existing
+TestSplitExecutionOrder mode predicates with range-concurrent,
+access-only-concurrent and common-layout-concurrent. Each records three mips
+and two array slices. Both recording threads now Close their own lists before
+joining; HRESULT storage is separate and read only after join. Existing local
+copy-location ownership and ordered BEGIN->END submission remain unchanged.
+
+Private/no-private scoped builds and final ten validation-on processes PASS:
+three new modes, existing single-subresource concurrent and queue-handoff in
+each configuration. Fifty exact GPU subresource readbacks, distinct per-index
+byte values; capability probe stays FALSE. Ten pre-format runs also pass and
+are kept separately. Final source rebuilt and final runner hashes verified.
+This is bounded scheduled concurrency coverage, not guaranteed overlap of every
+operation, exhaustive interleaving/TSan or complete Enhanced Barrier proof.
+
+No production source, public ABI, owner, capability, layout or scheduling
+change. Performance NOT_RUN for test-only work; prior warnings remain OPEN.
+M1Max/macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1; requested26/native Windows/other
+GPUs/fullT3/T4 NOT_RUN. Device/G1/FL12_2 remain incomplete. User .gitignore
+preserved, local commit/no push. Exact commands/results/hashes/report:
+`../dxmt-test/n12-parallel-ranges-20261027/N12-parallel-ranges.md`.
