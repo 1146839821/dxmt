@@ -27,6 +27,7 @@
 #include "util_md5.hpp"
 #include <cstring>
 #include <limits>
+#include <new>
 #include <vector>
 #include "../d3d10/d3d10_blob.hpp"
 #include "../airconv/dxbc_root_signature.hpp"
@@ -39,7 +40,7 @@ template <typename ROOT_SIGNATURE_DESC>
 HRESULT
 SerializeVersionedRootSignatureImpl(
     const ROOT_SIGNATURE_DESC *pDesc, D3D_ROOT_SIGNATURE_VERSION Version, ID3DBlob **ppBlob, ID3DBlob **ppErrorBlob
-) {
+) try {
   using ROOT_PARAMETER = GetType<ROOT_SIGNATURE_DESC>::ROOT_PARAMETER;
   using ROOT_DESCRIPTOR = GetType<ROOT_SIGNATURE_DESC>::ROOT_DESCRIPTOR;
   using DESCRIPTOR_RANGE = GetType<ROOT_SIGNATURE_DESC>::DESCRIPTOR_RANGE;
@@ -52,7 +53,8 @@ SerializeVersionedRootSignatureImpl(
       this->offset = offset;
       size_aligned = align(size, 4);
       ptr = malloc(size_aligned);
-      memset(ptr, 0, size_aligned);
+      if (ptr)
+        memset(ptr, 0, size_aligned);
     }
     ~segment() {
       free(ptr);
@@ -195,7 +197,9 @@ SerializeVersionedRootSignatureImpl(
 
   *ppBlob = blob;
   return hr;
-};
+} catch (const std::bad_alloc &) {
+  return E_OUTOFMEMORY;
+}
 
 extern "C" HRESULT WINAPI
 D3D12SerializeVersionedRootSignature(

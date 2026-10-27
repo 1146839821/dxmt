@@ -4132,3 +4132,41 @@ M1Max/macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1; requested26/native Windows/other
 GPUs/fullT3/T4 NOT_RUN. Complete N06/G1/Device/FL12_2 not claimed. User .gitignore
 preserved; local commit/no push. Microsoft COM contract, commands/hashes/report:
 `../dxmt-test/n06-deserializer-identity-20261027/N06-deserializer-identity.md`.
+
+
+### N06 root-serialization allocation failure — 2026-10-27
+
+On5c25510c, existing segment initialization dereferenced a failed malloc before
+its caller's null check, and vector/blob bad_alloc could escape serialization.
+The existing shared SerializeVersionedRootSignatureImpl now guards memset and
+translates bad_alloc to E_OUTOFMEMORY after segment RAII unwinds. Existing output
+preservation/error-output initialization retained; no new owner/source/header,
+public ABI, binding, scheduling or capability change.
+
+Existing command-list runner adds opt-in root-serialization-allocation-failure
+for legacy RS1.0 and versioned RS1.0/1.1. Driver-local thread-scoped injection
+covers malloc and optional calloc (compiler folded malloc+memset into calloc).
+Both configurations pass13 allocation failures per mode:78 failures total,
+each followed by byte-identical healthy serialization. Same final test PE with
+frozen d143af64 DLL exits1 on escaped bad_alloc at mode0/allocation1. Baseline
+DLL is retained from the previous slice, not a fresh5c25510c rebuild. Initial
+malloc-only pilots missed segment sites; corrected harness results retained
+separately. This does not measure exact frees or establish leak absence.
+
+Private/no-private scoped builds pass. Concurrent commits4f9596fc/e4681cee
+are preserved; both rebuilt/staged and the full matrix rerun after each. Final
+evidence uses e4681cee, with earlier runs retained separately. Later uncommitted
+winemetal NSError edits are preserved and outside this verification. Eleven final
+processes comprise the
+expected baseline failure and ten candidate successes: two CPU OOM processes,
+eight validation-on adjacent InfoQueue/container/compute processes. Existing
+InfoQueue11+5 failure sites and168 raw-root cases pass per configuration;
+four SM5/SM6 GPU readbacks777 pass. Loader/native paths and final build/stage
+hashes checked; no observed Metal validation errors. Existing build warnings
+remain OPEN. No performance rerun for off-hot-path creation; prior warnings OPEN.
+
+M1Max/macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1; requested Xcode26/native Windows/
+other GPUs/fullT3/T4 NOT_RUN. Full serializer input/extent validation and complete
+N06/G1/Device/FL12_2 remain OPEN. User .gitignore preserved; local commit/no push.
+Commands, baseline provenance, source/artifact hashes and report:
+`../dxmt-test/n06-serialize-oom-20261027/N06-serialize-oom.md`.

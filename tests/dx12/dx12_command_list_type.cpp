@@ -15,6 +15,7 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 
 namespace {
 
@@ -97,30 +98,43 @@ public:
 };
 
 // Opt-in, process-local fault injection: the driver DLL alone sees one failed
-// malloc on this thread. No real memory pressure or production test switch.
+// allocation on this thread. No real memory pressure or production test switch.
 class SubmissionAllocationFault {
   inline static void *(__cdecl *malloc_)(size_t) = nullptr;
+  inline static void *(__cdecl *calloc_)(size_t, size_t) = nullptr;
   inline static thread_local UINT remaining_ = 0, calls_ = 0;
   inline static thread_local bool hit_ = false;
-  DriverImportPatch patch_;
-  static void *__cdecl Allocate(size_t size) {
+  DriverImportPatch patch_, calloc_patch_;
+  static bool FailAllocation() {
     if (remaining_) {
       calls_++;
       if (!--remaining_) {
         hit_ = true;
-        return nullptr;
+        return true;
       }
     }
-    return malloc_(size);
+    return false;
+  }
+  static void *__cdecl Allocate(size_t size) {
+    return FailAllocation() ? nullptr : malloc_(size);
+  }
+  static void *__cdecl AllocateZeroed(size_t count, size_t size) {
+    return FailAllocation() ? nullptr : calloc_(count, size);
   }
 
 public:
-  bool Install() {
+  bool Install(bool include_calloc = false) {
     void *original = nullptr;
     if (!patch_.Install("malloc", reinterpret_cast<void *>(&Allocate),
                         original))
       return false;
     malloc_ = reinterpret_cast<decltype(malloc_)>(original);
+    if (include_calloc) {
+      if (!calloc_patch_.Install(
+              "calloc", reinterpret_cast<void *>(&AllocateZeroed), original))
+        return false;
+      calloc_ = reinterpret_cast<decltype(calloc_)>(original);
+    }
     return true;
   }
   void Arm(UINT allocation) {
@@ -1123,6 +1137,97 @@ bool TestInfoQueueGrowthAllocationFailure() {
   std::cout << "InfoQueue growth OOM boundaries=" << boundaries
             << " rollback sites=" << failures << " stored=" << count << "\n";
   return boundaries >= 3;
+}
+
+bool TestRootSerializationAllocationFailure() {
+  D3D12_DESCRIPTOR_RANGE range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, 0};
+  D3D12_DESCRIPTOR_RANGE1 range1 = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV,  2, 0, 0,
+                                    D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 0};
+  D3D12_ROOT_PARAMETER parameters[3] = {};
+  parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  parameters[0].DescriptorTable = {1, &range};
+  parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  parameters[1].Constants = {0, 0, 4};
+  parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+  parameters[2].Descriptor = {1, 0};
+  D3D12_ROOT_PARAMETER1 parameters1[3] = {};
+  for (UINT i = 0; i < 3; ++i)
+    parameters1[i].ParameterType = parameters[i].ParameterType;
+  parameters1[0].DescriptorTable = {1, &range1};
+  parameters1[1].Constants = parameters[1].Constants;
+  parameters1[2].Descriptor = {1, 0, D3D12_ROOT_DESCRIPTOR_FLAG_NONE};
+  D3D12_STATIC_SAMPLER_DESC sampler = {};
+  sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+  sampler.AddressU = sampler.AddressV = sampler.AddressW =
+      D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+  sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+  sampler.MaxAnisotropy = 1;
+  sampler.MaxLOD = D3D12_FLOAT32_MAX;
+  D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc = {};
+  for (UINT mode = 0; mode < 3; ++mode) {
+    desc.Version = mode == 2 ? D3D_ROOT_SIGNATURE_VERSION_1_1
+                             : D3D_ROOT_SIGNATURE_VERSION_1_0;
+    if (mode == 2)
+      desc.Desc_1_1 = {3, parameters1, 1, &sampler,
+                       D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    else
+      desc.Desc_1_0 = {3, parameters, 1, &sampler,
+                       D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    auto serialize = [&](ID3DBlob **blob, ID3DBlob **errors) {
+      return mode == 0
+                 ? D3D12SerializeRootSignature(&desc.Desc_1_0, desc.Version,
+                                               blob, errors)
+                 : D3D12SerializeVersionedRootSignature(&desc, blob, errors);
+    };
+    Owned<ID3DBlob> reference;
+    if (!CheckHR("serialization OOM reference",
+                 serialize(&reference.ptr, nullptr)))
+      return false;
+    auto matches = [&](ID3DBlob *blob) {
+      return blob && blob->GetBufferSize() == reference->GetBufferSize() &&
+             !std::memcmp(blob->GetBufferPointer(),
+                          reference->GetBufferPointer(), blob->GetBufferSize());
+    };
+    SubmissionAllocationFault fault;
+    if (!fault.Install(true))
+      return false;
+    UINT failures = 0;
+    bool completed = false;
+    for (UINT allocation = 1; allocation <= 64; ++allocation) {
+      // Existing serializer contract preserves the caller's output on failure.
+      ID3DBlob *output = reference.ptr, *errors = reference.ptr;
+      fault.Arm(allocation);
+      HRESULT hr;
+      try {
+        hr = serialize(&output, &errors);
+      } catch (const std::bad_alloc &) {
+        fault.Stop();
+        std::cerr << "root serialization leaked bad_alloc: mode=" << mode
+                  << " allocation=" << allocation << "\n";
+        return false;
+      }
+      fault.Stop();
+      if (!fault.Hit()) {
+        completed = hr == S_OK && !errors && matches(output);
+        if (output != reference.ptr && output)
+          output->Release();
+        break;
+      }
+      ++failures;
+      if (hr != E_OUTOFMEMORY || output != reference.ptr || errors)
+        return false;
+      Owned<ID3DBlob> recovered;
+      if (!CheckHR("serialization OOM recovery",
+                   serialize(&recovered.ptr, nullptr)) ||
+          !matches(recovered.ptr))
+        return false;
+    }
+    std::cout << "root serialization OOM mode=" << mode << " sites=" << failures
+              << " recovery=" << (completed ? "PASS" : "FAIL") << "\n";
+    if (!completed || failures < 7)
+      return false;
+  }
+  return true;
 }
 
 bool TestInfoQueueAllocationFailure() {
@@ -3697,6 +3802,8 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--infoqueue-debug-controls") == 0)
     return TestInfoQueueDebugControls() ? 0 : 1;
+  if (argc == 2 && std::strcmp(argv[1], "--root-serialization-allocation-failure") == 0)
+    return TestRootSerializationAllocationFailure() ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--infoqueue-allocation-failure") == 0)
     return TestInfoQueueAllocationFailure() ? 0 : 1;
   if (argc == 3 && std::strcmp(argv[1], "--encoder-creation-failure") == 0) {
