@@ -2,6 +2,8 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include "d3d12_device.hpp"
+#include <utility>
 
 #include <cstdint>
 #include <cstring>
@@ -21,9 +23,432 @@ bool CheckHR(const char *name, HRESULT hr) {
   return true;
 }
 
+// Compare every integer pixel, including suppressed primitives and strip gaps.
+bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
+                             const char *gs_path, const char *kind,
+                             const char *index_mode, const char *option) {
+  D3D_PRIMITIVE_TOPOLOGY topology;
+  UINT arity = 0, step = 0;
+  bool strip = false;
+  if (!strcmp(kind, "point")) {
+    topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
+    arity = step = 1;
+  } else if (!strcmp(kind, "line")) {
+    topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST;
+    arity = step = 2;
+  } else if (!strcmp(kind, "line-strip")) {
+    topology = D3D_PRIMITIVE_TOPOLOGY_LINESTRIP;
+    arity = 2;
+    step = 1;
+  } else if (!strcmp(kind, "line-adj")) {
+    topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST_ADJ;
+    arity = step = 4;
+  } else if (!strcmp(kind, "line-strip-adj")) {
+    topology = D3D_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ;
+    arity = 4;
+    step = 1;
+  } else if (!strcmp(kind, "triangle")) {
+    topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    arity = step = 3;
+  } else if (!strcmp(kind, "triangle-strip")) {
+    topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+    arity = 3;
+    step = 1;
+    strip = true;
+  } else if (!strcmp(kind, "triangle-adj")) {
+    topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ;
+    arity = step = 6;
+  } else
+    return false;
+  const bool indexed = strcmp(index_mode, "none") != 0;
+  const bool index32 = !strcmp(index_mode, "u32");
+  if (indexed && !index32 && strcmp(index_mode, "u16"))
+    return false;
+  const bool wrong = option && !strcmp(option, "--wrong-expected");
+  const UINT draw_start = option && !strcmp(option, "--draw-offset") ? 2 : 0;
+  const bool reject_so = option && !strcmp(option, "--stream-output-rejection");
+  const bool reject_topology =
+      option && !strcmp(option, "--topology-rejection");
+  if (option && !wrong && !reject_so && !reject_topology && !draw_start)
+    return false;
+  auto read = [](const char *path) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f || f.tellg() <= 0 || f.tellg() > 16 * 1024 * 1024)
+      return std::vector<char>{};
+    std::vector<char> data(static_cast<size_t>(f.tellg()));
+    f.seekg(0);
+    if (!f.read(data.data(), data.size()))
+      data.clear();
+    return data;
+  };
+  const auto vs = read(vs_path), ps = read(ps_path), gs = read(gs_path);
+  if (vs.empty() || ps.empty() || gs.empty())
+    return false;
+  struct Objects {
+    ID3D12Device *device = nullptr;
+    ID3D12CommandQueue *queue = nullptr;
+    ID3D12CommandAllocator *allocator = nullptr;
+    ID3D12GraphicsCommandList *list = nullptr;
+    ID3D12RootSignature *root = nullptr;
+    ID3D12PipelineState *pso = nullptr;
+    ID3D12DescriptorHeap *rtvs = nullptr;
+    ID3D12Resource *vb = nullptr, *ib = nullptr, *target = nullptr,
+                   *readback = nullptr;
+    ID3D12Fence *fence = nullptr, *gate = nullptr;
+    HANDLE event = nullptr;
+    void release_recording() {
+      if (list) {
+        list->Release();
+        list = nullptr;
+      }
+      if (allocator) {
+        allocator->Release();
+        allocator = nullptr;
+      }
+      if (pso) {
+        pso->Release();
+        pso = nullptr;
+      }
+      if (root) {
+        root->Release();
+        root = nullptr;
+      }
+      if (rtvs) {
+        rtvs->Release();
+        rtvs = nullptr;
+      }
+      if (vb) {
+        vb->Release();
+        vb = nullptr;
+      }
+      if (ib) {
+        ib->Release();
+        ib = nullptr;
+      }
+      if (target) {
+        target->Release();
+        target = nullptr;
+      }
+    }
+    ~Objects() {
+      if (gate)
+        gate->Signal(1);
+      release_recording();
+      if (readback)
+        readback->Release();
+      if (queue)
+        queue->Release();
+      if (fence)
+        fence->Release();
+      if (gate)
+        gate->Release();
+      if (event)
+        CloseHandle(event);
+      if (device)
+        device->Release();
+    }
+  } o;
+  if (!CheckHR("GS device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                              IID_PPV_ARGS(&o.device))))
+    return false;
+  D3D12_ROOT_PARAMETER parameter = {};
+  parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_GEOMETRY;
+  parameter.Constants = {0, 0, 1};
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {
+      1, &parameter, 0, nullptr,
+      D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT};
+  if (reject_so)
+    root_desc.Flags |= D3D12_ROOT_SIGNATURE_FLAG_ALLOW_STREAM_OUTPUT;
+  ID3DBlob *blob = nullptr;
+  if (!CheckHR("GS serialize root",
+               D3D12SerializeRootSignature(
+                   &root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, nullptr)))
+    return false;
+  HRESULT hr = o.device->CreateRootSignature(0, blob->GetBufferPointer(),
+                                             blob->GetBufferSize(),
+                                             IID_PPV_ARGS(&o.root));
+  blob->Release();
+  if (!CheckHR("GS root", hr))
+    return false;
+  const D3D12_INPUT_ELEMENT_DESC layout[] = {
+      {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0,
+       D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+      {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 8,
+       D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
+  D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+  desc.pRootSignature = o.root;
+  desc.VS = {vs.data(), vs.size()};
+  desc.PS = {ps.data(), ps.size()};
+  desc.GS = {gs.data(), gs.size()};
+  desc.InputLayout = {layout, 2};
+  desc.PrimitiveTopologyType = arity == 1 ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT
+                               : (arity == 2 || arity == 4)
+                                   ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
+                                   : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  if (reject_topology)
+    desc.PrimitiveTopologyType = arity == 1
+                                     ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE
+                                     : D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+  desc.NumRenderTargets = 1;
+  desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UINT;
+  desc.SampleDesc.Count = 1;
+  desc.SampleMask = UINT_MAX;
+  desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+  desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+  desc.RasterizerState.DepthClipEnable = TRUE;
+  desc.BlendState.RenderTarget[0].RenderTargetWriteMask =
+      D3D12_COLOR_WRITE_ENABLE_ALL;
+  const D3D12_SO_DECLARATION_ENTRY so = {0, "COLOR", 0, 0, 4, 0};
+  const UINT so_stride = 16;
+  if (reject_so)
+    desc.StreamOutput = {&so, 1, &so_stride, 1, D3D12_SO_NO_RASTERIZED_STREAM};
+  hr = o.device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&o.pso));
+  if (reject_so || reject_topology) {
+    bool correct = hr == (reject_so ? E_NOTIMPL : E_INVALIDARG) && !o.pso &&
+                   o.device->GetDeviceRemovedReason() == S_OK;
+    std::cout << "GS rejection kind=" << kind << " option=" << option
+              << " hr=0x" << std::hex << UINT(hr) << std::dec
+              << " correct=" << correct << " GPU_NOT_RUN\n";
+    return correct;
+  }
+  if (!CheckHR("GS differential PSO", hr))
+    return false;
+  auto *pipeline = static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(o.pso);
+  const auto config = pipeline->msc_geometry_config;
+  if (pipeline->shader_backend !=
+          dxmt::D3D12ShaderBackend::MetalShaderConverter ||
+      !pipeline->msc_geometry || !config.gs_vertex_size_in_bytes ||
+      !config.gs_max_input_primitives_per_mesh_threadgroup ||
+      config.gs_instance_count != 1)
+    return false;
+  std::cout << "GS MSC reflection vertex_bytes="
+            << config.gs_vertex_size_in_bytes << " max_primitives="
+            << config.gs_max_input_primitives_per_mesh_threadgroup
+            << " instances=" << config.gs_instance_count << "\n";
+  const UINT count = arity + step * 65;
+  constexpr UINT vertex_offset = 32, index_offset = 16, width = 256, height = 3;
+  struct Vertex {
+    float position[2];
+    float color[4];
+  };
+  static_assert(sizeof(Vertex) == 24);
+  std::vector<Vertex> vertices(512);
+  for (UINT i = 0; i < vertices.size(); ++i)
+    vertices[i] = {{0, 0}, {float((i * i * 13 + 7 * i + 11) % 251), 0, 0, 1}};
+  std::vector<UINT> ids(count);
+  for (UINT i = 0; i < count; ++i)
+    ids[i] = indexed ? (i * 7 + 3) % 397 + draw_start : i + draw_start;
+  auto buffer = [&](D3D12_HEAP_TYPE heap, UINT size,
+                    D3D12_RESOURCE_STATES state, ID3D12Resource **out) {
+    D3D12_HEAP_PROPERTIES properties = {};
+    properties.Type = heap;
+    properties.CreationNodeMask = properties.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC d = {};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = size;
+    d.Height = d.DepthOrArraySize = d.MipLevels = d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    return CheckHR("GS buffer", o.device->CreateCommittedResource(
+                                    &properties, D3D12_HEAP_FLAG_NONE, &d,
+                                    state, nullptr, IID_PPV_ARGS(out)));
+  };
+  if (!buffer(D3D12_HEAP_TYPE_UPLOAD,
+              vertex_offset + vertices.size() * sizeof(Vertex),
+              D3D12_RESOURCE_STATE_GENERIC_READ, &o.vb) ||
+      !buffer(D3D12_HEAP_TYPE_UPLOAD, index_offset + (count + 2) * 4,
+              D3D12_RESOURCE_STATE_GENERIC_READ, &o.ib) ||
+      !buffer(D3D12_HEAP_TYPE_READBACK, width * height * 4,
+              D3D12_RESOURCE_STATE_COPY_DEST, &o.readback))
+    return false;
+  void *mapped = nullptr;
+  if (!CheckHR("GS VB map", o.vb->Map(0, nullptr, &mapped)))
+    return false;
+  memset(mapped, 0xcd, vertex_offset);
+  memcpy(static_cast<BYTE *>(mapped) + vertex_offset, vertices.data(),
+         vertices.size() * sizeof(Vertex));
+  o.vb->Unmap(0, nullptr);
+  if (!CheckHR("GS IB map", o.ib->Map(0, nullptr, &mapped)))
+    return false;
+  memset(mapped, 0xcd, index_offset + (count + 2) * 4);
+  for (UINT i = 0; i < count; ++i) {
+    if (index32)
+      reinterpret_cast<UINT *>(static_cast<BYTE *>(mapped) +
+                               index_offset)[i + draw_start] =
+          ids[i] - draw_start;
+    else
+      reinterpret_cast<uint16_t *>(static_cast<BYTE *>(mapped) +
+                                   index_offset)[i + draw_start] =
+          static_cast<uint16_t>(ids[i] - draw_start);
+  }
+  o.ib->Unmap(0, nullptr);
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC texture = {};
+  texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  texture.Width = width;
+  texture.Height = height;
+  texture.DepthOrArraySize = texture.MipLevels = texture.SampleDesc.Count = 1;
+  texture.Format = DXGI_FORMAT_R8G8B8A8_UINT;
+  texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  D3D12_DESCRIPTOR_HEAP_DESC rtv_desc = {};
+  rtv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  rtv_desc.NumDescriptors = 1;
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  if (!CheckHR("GS target", o.device->CreateCommittedResource(
+                                &heap, D3D12_HEAP_FLAG_NONE, &texture,
+                                D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                                IID_PPV_ARGS(&o.target))) ||
+      !CheckHR("GS RTV heap", o.device->CreateDescriptorHeap(
+                                  &rtv_desc, IID_PPV_ARGS(&o.rtvs))) ||
+      !CheckHR("GS queue", o.device->CreateCommandQueue(
+                               &queue_desc, IID_PPV_ARGS(&o.queue))) ||
+      !CheckHR("GS allocator",
+               o.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                IID_PPV_ARGS(&o.allocator))) ||
+      !CheckHR("GS list", o.device->CreateCommandList(
+                              0, D3D12_COMMAND_LIST_TYPE_DIRECT, o.allocator,
+                              o.pso, IID_PPV_ARGS(&o.list))) ||
+      !CheckHR("GS fence", o.device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                 IID_PPV_ARGS(&o.fence))) ||
+      !CheckHR("GS gate", o.device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                IID_PPV_ARGS(&o.gate))))
+    return false;
+  o.event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+  if (!o.event)
+    return false;
+  const auto rtv = o.rtvs->GetCPUDescriptorHandleForHeapStart();
+  o.device->CreateRenderTargetView(o.target, nullptr, rtv);
+  const D3D12_VERTEX_BUFFER_VIEW vbv = {
+      o.vb->GetGPUVirtualAddress() + vertex_offset,
+      UINT(vertices.size() * sizeof(Vertex)), sizeof(Vertex)};
+  const D3D12_INDEX_BUFFER_VIEW ibv = {
+      o.ib->GetGPUVirtualAddress() + index_offset,
+      (count + 2) * (index32 ? 4u : 2u),
+      index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT};
+  // Draw offsets affect fetching, not the system VertexID. Triangle strips
+  // keep the leading vertex first and exchange the remaining two on odd
+  // primitives.
+  const UINT primitives = (count - arity) / step + 1;
+  for (UINT pass = 0; pass < 3; ++pass) {
+    const UINT phase = pass == 2 ? 31 : 7;
+    if (pass != 1) {
+      if (pass &&
+          (!CheckHR("GS allocator reset", o.allocator->Reset()) ||
+           !CheckHR("GS list reset", o.list->Reset(o.allocator, o.pso))))
+        return false;
+      o.list->SetGraphicsRootSignature(o.root);
+      o.list->SetGraphicsRoot32BitConstant(0, phase, 0);
+      o.list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+      const float clear[4] = {};
+      o.list->ClearRenderTargetView(rtv, clear, 0, nullptr);
+      const D3D12_VIEWPORT viewport = {0, 0, float(width), float(height), 0, 1};
+      const D3D12_RECT scissor = {0, 0, width, height};
+      o.list->RSSetViewports(1, &viewport);
+      o.list->RSSetScissorRects(1, &scissor);
+      o.list->IASetPrimitiveTopology(topology);
+      o.list->IASetVertexBuffers(0, 1, &vbv);
+      if (indexed) {
+        o.list->IASetIndexBuffer(&ibv);
+        o.list->DrawIndexedInstanced(count, 2, draw_start, draw_start, 0);
+      } else
+        o.list->DrawInstanced(count, 2, draw_start, 0);
+      o.list->SetGraphicsRoot32BitConstant(0, 222, 0);
+      D3D12_RESOURCE_BARRIER barrier = {};
+      barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      barrier.Transition = {o.target, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                            D3D12_RESOURCE_STATE_RENDER_TARGET,
+                            D3D12_RESOURCE_STATE_COPY_SOURCE};
+      o.list->ResourceBarrier(1, &barrier);
+      D3D12_TEXTURE_COPY_LOCATION source = {}, destination = {};
+      source.pResource = o.target;
+      source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      destination.pResource = o.readback;
+      destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      destination.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UINT, width,
+                                               height, 1, width * 4};
+      o.list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+      std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+      o.list->ResourceBarrier(1, &barrier);
+      if (!CheckHR("GS Close", o.list->Close()))
+        return false;
+    }
+    if (pass == 2 && !CheckHR("GS queue gate", o.queue->Wait(o.gate, 1)))
+      return false;
+    ID3D12CommandList *lists[] = {o.list};
+    o.queue->ExecuteCommandLists(1, lists);
+    if (pass == 2) {
+      if (SUCCEEDED(o.allocator->Reset())) {
+        std::cerr << "GS pending Reset incorrectly succeeded\n";
+        return false;
+      }
+      o.release_recording();
+      if (!CheckHR("GS signal gate", o.gate->Signal(1)))
+        return false;
+    }
+    if (!CheckHR("GS signal", o.queue->Signal(o.fence, pass + 1)) ||
+        !CheckHR("GS completion",
+                 o.fence->SetEventOnCompletion(pass + 1, o.event)) ||
+        WaitForSingleObject(o.event, 10000) != WAIT_OBJECT_0 ||
+        !CheckHR("GS device status", o.device->GetDeviceRemovedReason()))
+      return false;
+    std::vector<BYTE> expected(width * height * 4, 0);
+    for (UINT instance = 0; instance < 2; ++instance)
+      for (UINT primitive = 0; primitive < primitives; ++primitive) {
+        if (primitive == 1)
+          continue;
+        UINT hash = 0;
+        for (UINT j = 0; j < arity; ++j) {
+          const UINT local = strip && (primitive & 1) && j > 0 ? 3 - j : j;
+          const UINT id = ids[primitive * step + local];
+          hash +=
+              (j + 1) * (UINT(vertices[id].color[0]) + 3 * (id - draw_start));
+        }
+        for (UINT y : {0u, 2u}) {
+          BYTE *pixel =
+              expected.data() + 4 * (y * width + primitive + instance * 128);
+          pixel[0] = BYTE(primitive + 1);
+          pixel[1] = BYTE(hash + phase);
+          pixel[2] = BYTE(instance + 1);
+          pixel[3] = BYTE(y + arity);
+        }
+      }
+    if (wrong)
+      expected[0] ^= 1;
+    if (!CheckHR("GS readback", o.readback->Map(0, nullptr, &mapped)))
+      return false;
+    bool correct = true;
+    for (UINT i = 0; i < expected.size(); ++i)
+      if (static_cast<BYTE *>(mapped)[i] != expected[i]) {
+        std::cerr << "FAIL GS kind=" << kind << " index=" << index_mode
+                  << " pass=" << pass << " byte=" << i
+                  << " got=" << UINT(static_cast<BYTE *>(mapped)[i])
+                  << " expected=" << UINT(expected[i]) << "\n";
+        correct = false;
+        break;
+      }
+    o.readback->Unmap(0, nullptr);
+    if (!correct)
+      return false;
+    std::cout << "GS differential kind=" << kind << " index=" << index_mode
+              << " pass=" << pass << " primitives=" << primitives
+              << " draw_instances=2 exact_bytes=" << expected.size()
+              << " passed\n";
+  }
+  std::cout << "GS replay/fenced reset/pending reset rejection/released refs "
+               "passed\n";
+  return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  if ((argc == 7 || argc == 8) && !strcmp(argv[1], "--gs-differential"))
+    return RunGeometryDifferential(argv[2], argv[3], argv[4], argv[5], argv[6],
+                                   argc == 8 ? argv[7] : nullptr)
+               ? 0
+               : 1;
   if (argc < 3 || argc > 5)
     return 2;
   const bool geometry_adjacency_indexed =
@@ -38,12 +463,13 @@ int main(int argc, char **argv) {
   const bool geometry_indexed =
       argc == 5 && (strcmp(argv[3], "--geometry-indexed") == 0 ||
                     geometry_adjacency_indexed);
-  const bool geometry =
-      argc == 5 && (strcmp(argv[3], "--geometry") == 0 || geometry_indexed ||
-                    geometry_adjacency || geometry_root_cbv || geometry_instanced);
+  const bool geometry = argc == 5 && (strcmp(argv[3], "--geometry") == 0 ||
+                                      geometry_indexed || geometry_adjacency ||
+                                      geometry_root_cbv || geometry_instanced);
   const bool textured = argc == 4 && strcmp(argv[3], "--texture") == 0;
   const bool root_cbv = argc == 4 && strcmp(argv[3], "--root-cbv") == 0;
-  const bool root_constants = argc == 4 && strcmp(argv[3], "--root-constants") == 0;
+  const bool root_constants =
+      argc == 4 && strcmp(argv[3], "--root-constants") == 0;
   const bool root_srv = argc == 4 && strcmp(argv[3], "--root-srv") == 0;
   const bool root_uav = argc == 4 && strcmp(argv[3], "--root-uav") == 0;
   const bool textured_root_cbv = argc == 4 && strcmp(argv[3], "--texture-root-cbv") == 0;

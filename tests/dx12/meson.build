@@ -49,6 +49,13 @@ dx12_texture_dimensions = executable('dx12_texture_dimensions', 'dx12_texture_di
 )
 
 dx12_graphics_sm6 = executable('dx12_graphics_sm6', 'dx12_graphics_sm6.cpp',
+  include_directories: [
+    include_directories('../../src/airconv'),
+    include_directories('../../src/dxgi'),
+    include_directories('../../src/dxmt'),
+    include_directories('../../src/winemetal'),
+    include_directories('../../src/util'),
+  ],
   dependencies: [ d3d12_dep ],
 )
 
@@ -707,6 +714,18 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach input_count : ['1', '2', '3', '4', '6']
+    foreach stage : ['vs', 'gs', 'ps']
+      custom_target('dx12_geometry_differential_' + input_count + '_' + stage,
+        input: 'geometry_sm6.hlsl',
+        output: 'geometry_differential_' + input_count + '.' + stage + '.cso',
+        command: dxc_command + [ '-E', stage + '_main', '-T', stage + '_6_0',
+          '-D', 'GS_DIFFERENTIAL=1', '-D', 'GS_INPUT=' + input_count,
+          '@INPUT@', '-Fo', '@OUTPUT@' ],
+        build_by_default: false,
+      )
+    endforeach
+  endforeach
   custom_target('dx12_geometry_sm6_vs_fixture',
     input: 'geometry_sm6.hlsl',
     output: 'geometry_sm6.vs.cso',

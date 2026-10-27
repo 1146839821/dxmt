@@ -4479,3 +4479,50 @@ descriptor cost remain OPEN. Device/G1/FL12_2 incomplete. Evidence and commands:
 `../dxmt-test/n20-numeric-differential-20261027/N20-numeric-differential.md`,
 slice.md,manifest.json,results.json,fixtures.py,validate.py,conversion/reflection
 and logs. User .gitignore preserved; focused local commit/no push.
+
+### N20 — GS primitive assembly and submission differential, 2026-10-27
+
+Base97f85de4. Extend existing dx12_graphics_sm6 and geometry_sm6.hlsl; optional
+Meson fixtures for five GS input arities. No production changes/new src/d3d12
+files/capability promotion. Previous one-pixel tests do not distinguish vertex
+ordering, missing emissions or strip connections. New CPU oracle compares every
+byte of a256x3 RGBA8_UINT target. Nonlinear vertex values, VertexID, InstanceID,
+PrimitiveID and GS-visible root constant contribute to the output. Each input
+primitive emits two strips separated by a clear guard row; primitive1 emits none.
+
+Final private/no-private matrix:78 processes,72 success,6 deliberate wrong-reference
+failures at pass0/byte0.54 positive differential processes cover8 input topologies
+(point/list and strip line/line adjacency/triangle list and strip/triangle-list
+adjacency),nonindexed/R16/R32 indices,VB/IB offsets32/16 and draw/base offsets0/2.
+Each checks3 passes x3072 bytes;66 primitives x2 draw instances crosses reflected
+32-primitive mesh group capacity. Closed-list replay,fenced reset/rerecord,constant
+snapshot,pending Reset rejection and gated release of VB/IB/RT/PSO/root/allocator/
+list refs pass.10 prior GS GPU smoke controls,2 feature controls,2 GS-instance
+rejections,2 stream-output rejections and2 topology-mismatch rejections pass.
+Rejection checks are admission-only/GPU_NOT_RUN, not feature support evidence.
+
+Runtime MSC API4.0.1 backend/geometry config verified; offline CLI4.0.3 converts
+15 VS/GS/PS variants with reflection. Vertex output32 bytes,GS max primitives32,
+instance count1. Actual DXIL primitive/instance IDs,emit/cut and root loads saved.
+Offline automatic root layout remains separate from runtime explicit roots.
+Initial diagnostic mismatches were CPU-oracle errors:Draw offsets do not add to
+VertexID;odd triangle strips keep the leading vertex first. Corrected using
+Microsoft functional spec8.16/13.10 and its GS-input diagrams; all final cases
+use the corrected oracle and nonlinear input values. No observed final Metal
+API/GPU validation/native assertion/aborted-command errors; artifact hashes and
+loaded paths checked. M1Max/Apple7/macOS27.0.1/Xcode27.1/Wine11/clang23.1.1.
+
+Bounded GS acceptance complete; full GS feature coverage remains OPEN. Triangle
+strip adjacency,strip-cut indices,point/line GS output,multiple output streams,
+GS instancing execution,SO execution,tessellation+GS,indirect GS,viewport/layer
+semantics,native Windows/other GPUs/fullT3/T4 NOT_RUN. Performance NOT_MEASURED
+(tests only). Device/G1/FL12_2 and existing performance/typed-offset issues OPEN.
+
+User review backlog after numeric/GS acceptance:MSC actual VB stride variants;
+indirect sparse-slot vs compact-table mapping;empty-root zero upload;post-indirect
+modified VB/IB/root state reset+dirty flags. Corresponding regressions:padding/
+dynamic stride,sparse slots,empty root,indirect then direct draw/dispatch. These
+four findings remain deferred and unfixed in this slice. Evidence and commands:
+`../dxmt-test/n20-gs-differential-20261027/N20-gs-differential.md`,slice.md,
+manifest.json,results.json,validate.py,reflection/DXIL,primary snapshots and logs.
+User .gitignore preserved; focused local commit/no push.
