@@ -22,6 +22,7 @@
 #include "log/log.hpp"
 #include <algorithm>
 #include <list>
+#include <new>
 
 namespace dxmt {
 
@@ -148,13 +149,9 @@ public:
 
   HRESULT
   Initialize(UINT64 InitialValue) {
-    try {
-      state_ = std::make_shared<State>();
-      state_->completed_value = InitialValue;
-      return device_->RegisterRemovalListener(state_);
-    } catch (const std::bad_alloc &) {
-      return E_OUTOFMEMORY;
-    }
+    state_ = std::make_shared<State>();
+    state_->completed_value = InitialValue;
+    return device_->RegisterRemovalListener(state_);
   }
 
   HRESULT
@@ -262,7 +259,8 @@ public:
 };
 
 HRESULT
-CreateFence(MTLD3D12Device *pDevice, UINT64 InitialValue, D3D12_FENCE_FLAGS Flags, REFIID riid, void **ppFence) {
+CreateFence(MTLD3D12Device *pDevice, UINT64 InitialValue, D3D12_FENCE_FLAGS Flags, REFIID riid, void **ppFence) try {
+  InitReturnPtr(ppFence);
   auto fence = Com(new MTLD3D12FenceImpl(pDevice, Flags));
   HRESULT hr = fence->Initialize(InitialValue);
   if (FAILED(hr))
@@ -270,6 +268,8 @@ CreateFence(MTLD3D12Device *pDevice, UINT64 InitialValue, D3D12_FENCE_FLAGS Flag
   if (!ppFence)
     return S_FALSE;
   return fence->QueryInterface(riid, ppFence);
+} catch (const std::bad_alloc &) {
+  return E_OUTOFMEMORY;
 }
 
 }; // namespace dxmt

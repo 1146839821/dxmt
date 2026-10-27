@@ -4170,3 +4170,39 @@ other GPUs/fullT3/T4 NOT_RUN. Full serializer input/extent validation and comple
 N06/G1/Device/FL12_2 remain OPEN. User .gitignore preserved; local commit/no push.
 Commands, baseline provenance, source/artifact hashes and report:
 `../dxmt-test/n06-serialize-oom-20261027/N06-serialize-oom.md`.
+
+
+### N14 fence factory allocation boundary — 2026-10-27
+
+On426092a9, CreateFence allocated its COM object outside Initialize's bad_alloc
+handler; object allocation could escape HRESULT, while State/listener failures
+returned E_OUTOFMEMORY without clearing caller output. Same final test PE on
+freshly built baseline confirms these failures for Fence/Fence1 and the existing
+null-output validation path. Move the existing catch to the shared factory,
+initialize output before allocation, and remove the narrower duplicate catch.
+Existing Com/State/removal-listener ownership remains; no new source/header,
+object/state, public ABI, capability or GPU scheduling change.
+
+Existing command-list runner adds opt-in fence-creation-allocation-failure:
+three modes x three allocation sites x two configurations =18 failures handled,
+each followed by successful creation, initial-value/CPU-rewind checks, unsupported
+IID/null-output checks, and final fence/device Release==0. Fresh device per
+injection covers object, State and listener-vector allocations. This proves
+bounded observable lifetime recovery, not exact free-count/heap-leak absence.
+
+Private/no-private scoped builds and11 final validation-on processes pass their
+expected outcomes: one baseline exit1, ten candidate exit0. Adjacent ALL/ANY/
+null/duplicate/rewind/wide/six-OOM/abandonment checks,512 concurrent groups per
+configuration, removal/backpressure/destruction, and two depth/stencil GPU copy
+readback rounds per configuration pass. Existing removal helpers are exposed
+through one opt-in argument, avoiding a full unrelated runner traversal. Final
+source/PE/DLL/native hashes and staged loader paths verified; no observed Metal
+validation errors. Existing deprecation warnings remain.
+
+O(1) output initialization and relocated exception boundary are off recording/
+submit paths; performance NOT_RUN, prior warnings OPEN. M1Max/Apple7/macOS27.0.1/
+Xcode27.1/Wine11/MSC4.0.1; requested26/native Windows/other GPUs/fullT3/T4 NOT_RUN.
+Shared-fence interoperability and complete N14/Device/G1/FL12_2 remain OPEN.
+User .gitignore preserved; focused local commit, no push. Commands, primary
+CreateFence API reference, evidence classification and hashes:
+`../dxmt-test/n14-fence-create-oom-20261027/N14-fence-create-oom.md`.

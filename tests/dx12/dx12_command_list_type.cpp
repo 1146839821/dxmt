@@ -1286,6 +1286,85 @@ bool TestInfoQueueAllocationFailure() {
   return TestInfoQueueGrowthAllocationFailure();
 }
 
+bool TestFenceCreationAllocationFailure() {
+  SubmissionAllocationFault fault;
+  if (!fault.Install())
+    return false;
+  bool good = true;
+  for (UINT mode = 0; mode < 3; ++mode) {
+    unsigned failures = 0;
+    bool completed = false;
+    for (UINT allocation = 1; allocation <= 16; ++allocation) {
+      // Fresh devices include the removal-listener vector's first allocation.
+      Owned<ID3D12Device> device;
+      if (!CheckHR("Fence OOM device",
+                   D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                     IID_PPV_ARGS(&device.ptr))))
+        return false;
+      auto *sentinel = reinterpret_cast<ID3D12Fence *>(uintptr_t(1));
+      ID3D12Fence *output = sentinel;
+      const IID &iid =
+          mode == 1 ? __uuidof(ID3D12Fence1) : __uuidof(ID3D12Fence);
+      HRESULT hr = E_FAIL;
+      bool escaped = false;
+      fault.Arm(allocation);
+      try {
+        hr = device->CreateFence(
+            17, D3D12_FENCE_FLAG_NONE, iid,
+            mode == 2 ? nullptr : reinterpret_cast<void **>(&output));
+      } catch (const std::bad_alloc &) {
+        escaped = true;
+      }
+      fault.Stop();
+      const bool hit = fault.Hit();
+      if (hit) {
+        ++failures;
+        const bool passed =
+            !escaped && hr == E_OUTOFMEMORY && (mode == 2 || !output);
+        good &= passed;
+        std::cout << "Fence creation OOM mode=" << mode
+                  << " allocation=" << allocation << " escaped=" << escaped
+                  << " null-output=" << (mode == 2 || !output)
+                  << " result=" << (passed ? "PASS" : "FAIL") << "\n";
+      } else {
+        completed = !escaped && hr == (mode == 2 ? S_FALSE : S_OK) &&
+                    (mode == 2 || (output && output != sentinel &&
+                                   output->GetCompletedValue() == 17));
+        good &= completed;
+      }
+      if (mode != 2 && output && output != sentinel)
+        good &= output->Release() == 0;
+      // Recover after every failed allocation, then verify ordinary fence
+      // state.
+      Owned<ID3D12Fence> recovered;
+      if (!CheckHR("Fence OOM recovery",
+                   device->CreateFence(29, D3D12_FENCE_FLAG_NONE,
+                                       IID_PPV_ARGS(&recovered.ptr))))
+        return false;
+      good &= recovered->GetCompletedValue() == 29 &&
+              SUCCEEDED(recovered->Signal(7)) &&
+              recovered->GetCompletedValue() == 7;
+      good &= recovered.ptr->Release() == 0;
+      recovered.ptr = nullptr;
+      void *unsupported = sentinel;
+      good &= device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                  __uuidof(ID3D12Resource),
+                                  &unsupported) == E_NOINTERFACE &&
+              !unsupported;
+      // Failed and null-output factories must not retain their controlling
+      // device.
+      good &= device.ptr->Release() == 0;
+      device.ptr = nullptr;
+      if (!hit)
+        break;
+    }
+    std::cout << "Fence creation OOM mode=" << mode << " sites=" << failures
+              << " completed=" << completed << "\n";
+    good &= completed && failures >= 3;
+  }
+  return good;
+}
+
 bool TestMultipleFenceWaits() {
   Owned<ID3D12Device1> device;
   Owned<ID3D12Fence> first, second;
@@ -3792,6 +3871,10 @@ int main(int argc, char **argv) {
     return TestCopyStaging(argv[2]) ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--multiple-fences-concurrent") == 0)
     return TestConcurrentMultipleFenceWaits() ? 0 : 1;
+  if (argc == 2 && std::strcmp(argv[1], "--fence-creation-allocation-failure") == 0)
+    return TestFenceCreationAllocationFailure() ? 0 : 1;
+  if (argc == 2 && std::strcmp(argv[1], "--fence-removal") == 0)
+    return TestDeviceRemovalWaits() && TestConcurrentRemovalListeners() ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--multiple-fences") == 0)
     return TestMultipleFenceWaits() ? 0 : 1;
   if ((argc == 3 || argc == 4) && !std::strcmp(argv[1], "--split-failure")) {
