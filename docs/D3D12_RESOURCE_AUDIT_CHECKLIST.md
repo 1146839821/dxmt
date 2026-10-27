@@ -4635,3 +4635,53 @@ manifest.json,results.json,final-v2-* logs,perf-raw.json/perf-summary.json,
 accepted-artifacts and build logs. Same M1Max/macOS27.0.1/Xcode27.1/Wine11/clang23.1.1/
 MSC4.0.1 environment. User .gitignore excluded. Public FL11_1/SM6.0/Options/Tiers
 unchanged;MSC updating/emulated-GS indirect gates remain. Full goal stays OPEN.
+
+
+### N04 — AIRCONV PointStream primitive count and size, 2026-10-27
+
+First of user's new six findings,base8e809273. Current baseline D3D12 and D3D11
+ordinary/three-instance GS produce blank output. Point Emit increments
+next_write_vertex,but epilogue reads untouched primitive_count. Existing converter
+now selects point emitted count,retaining line/triangle accounting and point Cut
+no-op. Count-only repair exposed missing point size (unintended coverage);reuse
+existing mesh OutputPointSize/CreateSetMeshPointSize1.0,matching D3D11.3 spec3.4.6
+one-pixel points. No duplicate counter,backend,queue,binder or lifetime owner.
+
+AIRCONV_VERSION27→28 invalidates persisted bad programs through existing cache
+version authority. Same-directory upgrade retains cache_27 and adds cache_28 with
+three matching keys;correct candidate and warm reload pass. Actual cached AIR
+baseline has primitive_count0;candidate uses next_write_vertex and point_size1.
+LLVM23 disassembly is inspection only;production uses configured LLVM15.
+
+Existing geometry fixture and GS differential runner gain SM5 PointStream via
+external D3DCompile helper;existing D3D11 boundary runner renders same blobs.
+Full private/no-private matrix40 processes:32 success,8 deliberate wrong oracles.
+24 positive point processes compare6144 bytes three times each:66 input points,
+32-primitive group boundary,0/1/2 Emit,RestartStrip,draw instances2,GS instances1/3,
+nonindexed/R16/R32,PrimitiveID/VertexID/GSInstanceID,phases,replay/fenced reset,
+pending-reset rejection and D3D12 submission lifetime. D3D11 phase0 proves empty
+output. Eight AIRCONV/MSC/persistence/feature controls pass. Final logs have no
+Metal API/shader diagnostics or native assertions. Final timing-only/CLI-format
+runners additionally repeat instance3/R32 smokes;functional PEs archived.
+
+Two existing AIRCONV production files modified;new src/d3d12 files=0. Public
+FL/SM/Options/Tiers unchanged. Native stages own physical loader/ntdll and isolated
+winemetal.so to avoid loading old symlink targets;loaded paths/hashes checked.
+Prior Wine stages/native bridges and user .gitignore preserved.
+
+PSO conversion/native creation n=3,validation/HUD off:median30869.2→32543.6us,
+P9532957.7→111319us. INCONCLUSIVE (+5.4% median,first candidate native-cache outlier);
+no speedup claim. Incorrect baseline zero-point GPU timing is not comparable.
+No new per-draw CPU lock/encoder/barrier/allocation;point size adds an AIR output
+write per Emit. Max emission/other instances/topologies/MSAA/Windows/other GPUs,
+fullT3/T4 NOT_RUN. Full goal OPEN. Evidence:
+`../dxmt-test/n04-gs-pointstream-20261027/N04-gs-pointstream.md`,manifest/results,
+IR/cache-upgrade proof,perf data,build/validation logs and accepted artifacts.
+
+Prioritized remaining review queue (not closed by this round):N11 graphics stage
+layout root rebinding;SO complete-primitive allocation/order/strip expansion;
+D3D11 zero-complete TS patch guards in both draw paths (avoid unsafe GPU baseline);
+AIRCONV triangle-strip adjacency signed lane/mask correction;MSC TS point/line
+validation/output. Requested feature gaps remain OPEN implementation work:MSC GS
+instancing,D3D12 GS+TS,and GS/MSC SO combinations. Existing rejection paths are
+limits,not proof of implemented support. Next recommended slice:N11 stage binding.

@@ -5,8 +5,8 @@
 #ifndef __AIRCONV_H
 #define __AIRCONV_H
 
-/* 27 invalidates AIR caches after Round2 root-signature and firstbit_shi parity fixes. */
-#define AIRCONV_VERSION 27
+/* 28 invalidates AIR caches containing old PointStream GS primitive-count/point-size code. */
+#define AIRCONV_VERSION 28
 
 #ifdef __cplusplus
 #include <string>

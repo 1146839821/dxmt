@@ -31,7 +31,10 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
   D3D_PRIMITIVE_TOPOLOGY topology;
   UINT arity = 0, step = 0;
   bool strip = false;
-  if (!strcmp(kind, "point")) {
+  const bool point_output =
+      !strcmp(kind, "point-output") || !strcmp(kind, "point-output-instanced");
+  const UINT gs_instances = !strcmp(kind, "point-output-instanced") ? 3 : 1;
+  if (point_output || !strcmp(kind, "point")) {
     topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
     arity = step = 1;
   } else if (!strcmp(kind, "line")) {
@@ -204,7 +207,13 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
   const UINT so_stride = 16;
   if (reject_so)
     desc.StreamOutput = {&so, 1, &so_stride, 1, D3D12_SO_NO_RASTERIZED_STREAM};
+  const auto pso_start = std::chrono::steady_clock::now();
   hr = o.device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&o.pso));
+  if (point_output)
+    std::cout << "PointStream PSO creation us="
+              << std::chrono::duration<double, std::micro>(
+                     std::chrono::steady_clock::now() - pso_start).count()
+              << "\n";
   if (reject_so || reject_topology) {
     bool correct = hr == (reject_so ? E_NOTIMPL : E_INVALIDARG) && !o.pso &&
                    o.device->GetDeviceRemovedReason() == S_OK;
@@ -217,18 +226,26 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
     return false;
   auto *pipeline = static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(o.pso);
   const auto config = pipeline->msc_geometry_config;
-  if (pipeline->shader_backend !=
-          dxmt::D3D12ShaderBackend::MetalShaderConverter ||
-      !pipeline->msc_geometry || !config.gs_vertex_size_in_bytes ||
-      !config.gs_max_input_primitives_per_mesh_threadgroup ||
-      config.gs_instance_count != 1)
-    return false;
-  std::cout << "GS MSC reflection vertex_bytes="
-            << config.gs_vertex_size_in_bytes << " max_primitives="
-            << config.gs_max_input_primitives_per_mesh_threadgroup
-            << " instances=" << config.gs_instance_count << "\n";
+  if (point_output) {
+    if (pipeline->shader_backend != dxmt::D3D12ShaderBackend::Airconv ||
+        !pipeline->airconv_geometry)
+      return false;
+    std::cout << "GS AIRCONV point output instances=" << gs_instances << "\n";
+  } else {
+    if (pipeline->shader_backend !=
+            dxmt::D3D12ShaderBackend::MetalShaderConverter ||
+        !pipeline->msc_geometry || !config.gs_vertex_size_in_bytes ||
+        !config.gs_max_input_primitives_per_mesh_threadgroup ||
+        config.gs_instance_count != 1)
+      return false;
+    std::cout << "GS MSC reflection vertex_bytes="
+              << config.gs_vertex_size_in_bytes << " max_primitives="
+              << config.gs_max_input_primitives_per_mesh_threadgroup
+              << " instances=" << config.gs_instance_count << "\n";
+  }
   const UINT count = arity + step * 65;
-  constexpr UINT vertex_offset = 32, index_offset = 16, width = 256, height = 3;
+  constexpr UINT vertex_offset = 32, index_offset = 16, height = 3;
+  const UINT width = point_output ? 512 : 256;
   struct Vertex {
     float position[2];
     float color[4];
@@ -345,7 +362,7 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
       const float clear[4] = {};
       o.list->ClearRenderTargetView(rtv, clear, 0, nullptr);
       const D3D12_VIEWPORT viewport = {0, 0, float(width), float(height), 0, 1};
-      const D3D12_RECT scissor = {0, 0, width, height};
+      const D3D12_RECT scissor = {0, 0, LONG(width), LONG(height)};
       o.list->RSSetViewports(1, &viewport);
       o.list->RSSetScissorRects(1, &scissor);
       o.list->IASetPrimitiveTopology(topology);
@@ -395,26 +412,44 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
         !CheckHR("GS device status", o.device->GetDeviceRemovedReason()))
       return false;
     std::vector<BYTE> expected(width * height * 4, 0);
-    for (UINT instance = 0; instance < 2; ++instance)
-      for (UINT primitive = 0; primitive < primitives; ++primitive) {
-        if (primitive == 1)
-          continue;
-        UINT hash = 0;
-        for (UINT j = 0; j < arity; ++j) {
-          const UINT local = strip && (primitive & 1) && j > 0 ? 3 - j : j;
-          const UINT id = ids[primitive * step + local];
-          hash +=
-              (j + 1) * (UINT(vertices[id].color[0]) + 3 * (id - draw_start));
+    if (point_output) {
+      for (UINT instance = 0; instance < 2; ++instance)
+        for (UINT primitive = 0; primitive < primitives; ++primitive)
+          for (UINT gs_instance = 0; gs_instance < gs_instances; ++gs_instance)
+            for (UINT emit = 0; emit < primitive % 3; ++emit) {
+              const UINT id = ids[primitive];
+              const UINT tag =
+                  UINT(vertices[id].color[0]) + 3 * (id - draw_start);
+              auto pixel =
+                  expected.data() + 4 * (gs_instance * width + instance * 256 +
+                                         primitive * 2 + emit);
+              pixel[0] = BYTE(primitive + 1);
+              pixel[1] = BYTE(tag + phase + 17 * emit);
+              pixel[2] = BYTE(instance + 1);
+              pixel[3] = BYTE(gs_instance + 1);
+            }
+    } else {
+      for (UINT instance = 0; instance < 2; ++instance)
+        for (UINT primitive = 0; primitive < primitives; ++primitive) {
+          if (primitive == 1)
+            continue;
+          UINT hash = 0;
+          for (UINT j = 0; j < arity; ++j) {
+            const UINT local = strip && (primitive & 1) && j > 0 ? 3 - j : j;
+            const UINT id = ids[primitive * step + local];
+            hash +=
+                (j + 1) * (UINT(vertices[id].color[0]) + 3 * (id - draw_start));
+          }
+          for (UINT y : {0u, 2u}) {
+            BYTE *pixel =
+                expected.data() + 4 * (y * width + primitive + instance * 128);
+            pixel[0] = BYTE(primitive + 1);
+            pixel[1] = BYTE(hash + phase);
+            pixel[2] = BYTE(instance + 1);
+            pixel[3] = BYTE(y + arity);
+          }
         }
-        for (UINT y : {0u, 2u}) {
-          BYTE *pixel =
-              expected.data() + 4 * (y * width + primitive + instance * 128);
-          pixel[0] = BYTE(primitive + 1);
-          pixel[1] = BYTE(hash + phase);
-          pixel[2] = BYTE(instance + 1);
-          pixel[3] = BYTE(y + arity);
-        }
-      }
+    }
     if (wrong)
       expected[0] ^= 1;
     if (!CheckHR("GS readback", o.readback->Map(0, nullptr, &mapped)))

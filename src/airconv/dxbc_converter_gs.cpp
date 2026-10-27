@@ -157,6 +157,9 @@ convert_dxbc_geometry_shader(
     return llvm::make_error<UnsupportedFeature>("unsupported geometry shader output topology");
   }
 
+  if (topology == air::MeshOutputTopology::Point)
+    func_signature.DefineMeshVertexOutput(air::OutputPointSize{});
+
   uint32_t payload_idx = func_signature.DefineInput(air::InputPayload{.size = 16256});
   // it's intended to declare a bit more max primitive count
   auto mesh_idx = func_signature.DefineInput(air::InputMesh{(uint32_t)max_vertex_out, (uint32_t)max_vertex_out, topology});
@@ -326,6 +329,9 @@ convert_dxbc_geometry_shader(
       }
       emit_clip_distances(current_write_vertex);
       air.CreateSetMeshIndex(current_write_vertex, current_write_vertex);
+      // D3D10+ point primitives rasterize at one pixel, independent of the
+      // native mesh point-size default.
+      air.CreateSetMeshPointSize(current_write_vertex, air.getFloat(1.0));
       co_return {};
     };
     resource_map.call_cut = []() -> IREffect {
@@ -509,7 +515,10 @@ convert_dxbc_geometry_shader(
   if (auto err = resource_map.call_cut().build(ctx).takeError()) {
     return err;
   }
-  air.CreateSetMeshPrimitiveCount(builder.CreateLoad(types._int, primitive_count));
+  // Every emitted point is a complete primitive; RestartStrip does not commit
+  // a separate point count as it does for line/triangle strips.
+  auto output_count = topology == air::MeshOutputTopology::Point ? next_write_vertex : primitive_count;
+  air.CreateSetMeshPrimitiveCount(builder.CreateLoad(types._int, output_count));
 
   builder.CreateRetVoid();
   module.getOrInsertNamedMetadata("air.mesh")->addOperand(function_metadata);

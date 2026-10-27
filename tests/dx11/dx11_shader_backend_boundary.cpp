@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include "../../src/util/util_md5.hpp"
+#include "../../src/util/com/com_pointer.hpp"
 
 namespace {
 
@@ -284,9 +286,187 @@ bool CheckBufferViewUsage(const char *path) {
   return check("Buffer-view device status", o.device->GetDeviceRemovedReason());
 }
 
+bool CheckPointStream(const char *vs_path, const char *ps_path,
+                      const char *gs_path, UINT gs_instances,
+                      const char *index_mode, bool wrong) {
+  using dxmt::Com;
+  const bool indexed = std::strcmp(index_mode, "none") != 0;
+  const bool index32 = std::strcmp(index_mode, "u32") == 0;
+  if ((gs_instances != 1 && gs_instances != 3) ||
+      (indexed && !index32 && std::strcmp(index_mode, "u16")))
+    return false;
+  std::vector<uint8_t> vs, ps, gs;
+  if (!ReadFile(vs_path, vs) || !ReadFile(ps_path, ps) ||
+      !ReadFile(gs_path, gs))
+    return false;
+  auto check = [](const char *name, HRESULT hr) {
+    if (FAILED(hr))
+      std::cerr << name << " failed: 0x" << std::hex << UINT(hr) << std::dec
+                << "\n";
+    return SUCCEEDED(hr);
+  };
+  Com<ID3D11Device> device;
+  Com<ID3D11DeviceContext> context;
+  Com<ID3D11VertexShader> vertex;
+  Com<ID3D11PixelShader> pixel;
+  Com<ID3D11GeometryShader> geometry;
+  Com<ID3D11InputLayout> layout;
+  Com<ID3D11Buffer> vb, ib, constants;
+  Com<ID3D11Texture2D> target, readback;
+  Com<ID3D11RenderTargetView> rtv;
+  const D3D_FEATURE_LEVEL requested = D3D_FEATURE_LEVEL_11_0;
+  D3D_FEATURE_LEVEL actual;
+  if (!check("Point D3D11 device",
+             D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+                               &requested, 1, D3D11_SDK_VERSION, &device,
+                               &actual, &context)) ||
+      !check("Point VS", device->CreateVertexShader(vs.data(), vs.size(),
+                                                    nullptr, &vertex)) ||
+      !check("Point PS", device->CreatePixelShader(ps.data(), ps.size(),
+                                                   nullptr, &pixel)) ||
+      !check("Point GS", device->CreateGeometryShader(gs.data(), gs.size(),
+                                                      nullptr, &geometry)))
+    return false;
+  const D3D11_INPUT_ELEMENT_DESC elements[] = {
+      {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0,
+       D3D11_INPUT_PER_VERTEX_DATA, 0},
+      {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 8,
+       D3D11_INPUT_PER_VERTEX_DATA, 0}};
+  if (!check("Point layout", device->CreateInputLayout(elements, 2, vs.data(),
+                                                       vs.size(), &layout)))
+    return false;
+  constexpr UINT count = 66, width = 512, height = 3;
+  struct Vertex {
+    float position[2], color[4];
+  };
+  std::vector<Vertex> vertices(512);
+  for (UINT i = 0; i < vertices.size(); ++i)
+    vertices[i] = {{0, 0}, {float((i * i * 13 + 7 * i + 11) % 251), 0, 0, 1}};
+  std::vector<UINT> ids(count);
+  std::vector<UINT16> ids16(count);
+  for (UINT i = 0; i < count; ++i) {
+    ids[i] = indexed ? (i * 7 + 3) % 397 : i;
+    ids16[i] = UINT16(ids[i]);
+  }
+  D3D11_BUFFER_DESC b = {};
+  b.ByteWidth = UINT(vertices.size() * sizeof(Vertex));
+  b.Usage = D3D11_USAGE_IMMUTABLE;
+  b.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+  D3D11_SUBRESOURCE_DATA data = {vertices.data(), 0, 0};
+  if (!check("Point VB", device->CreateBuffer(&b, &data, &vb)))
+    return false;
+  b.ByteWidth = count * (index32 ? 4 : 2);
+  b.BindFlags = D3D11_BIND_INDEX_BUFFER;
+  data.pSysMem = index32 ? static_cast<const void *>(ids.data()) : ids16.data();
+  if (!check("Point IB", device->CreateBuffer(&b, &data, &ib)))
+    return false;
+  b = {};
+  b.ByteWidth = 16;
+  b.Usage = D3D11_USAGE_DEFAULT;
+  b.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+  if (!check("Point constants", device->CreateBuffer(&b, nullptr, &constants)))
+    return false;
+  D3D11_TEXTURE2D_DESC t = {};
+  t.Width = width;
+  t.Height = height;
+  t.MipLevels = t.ArraySize = t.SampleDesc.Count = 1;
+  t.Format = DXGI_FORMAT_R8G8B8A8_UINT;
+  t.BindFlags = D3D11_BIND_RENDER_TARGET;
+  if (!check("Point target", device->CreateTexture2D(&t, nullptr, &target)) ||
+      !check("Point RTV",
+             device->CreateRenderTargetView(target.ptr(), nullptr, &rtv)))
+    return false;
+  t.BindFlags = 0;
+  t.Usage = D3D11_USAGE_STAGING;
+  t.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  if (!check("Point staging", device->CreateTexture2D(&t, nullptr, &readback)))
+    return false;
+  context->IASetInputLayout(layout.ptr());
+  const UINT stride = sizeof(Vertex), offset = 0;
+  auto vb_ptr = vb.ptr();
+  context->IASetVertexBuffers(0, 1, &vb_ptr, &stride, &offset);
+  context->IASetIndexBuffer(
+      ib.ptr(), index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
+  context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+  context->VSSetShader(vertex.ptr(), nullptr, 0);
+  context->GSSetShader(geometry.ptr(), nullptr, 0);
+  context->PSSetShader(pixel.ptr(), nullptr, 0);
+  auto cb = constants.ptr();
+  context->GSSetConstantBuffers(0, 1, &cb);
+  auto view = rtv.ptr();
+  context->OMSetRenderTargets(1, &view, nullptr);
+  const D3D11_VIEWPORT viewport = {0, 0, float(width), float(height), 0, 1};
+  context->RSSetViewports(1, &viewport);
+  for (UINT phase : {0u, 7u, 31u}) {
+    const UINT values[] = {phase, 0, 0, 0};
+    context->UpdateSubresource(constants.ptr(), 0, nullptr, values, 0, 0);
+    const float clear[4] = {};
+    context->ClearRenderTargetView(rtv.ptr(), clear);
+    if (indexed)
+      context->DrawIndexedInstanced(count, 2, 0, 0, 0);
+    else
+      context->DrawInstanced(count, 2, 0, 0);
+    context->CopyResource(readback.ptr(), target.ptr());
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (!check("Point map",
+               context->Map(readback.ptr(), 0, D3D11_MAP_READ, 0, &mapped)))
+      return false;
+    std::vector<BYTE> expected(width * height * 4, 0);
+    if (phase)
+      for (UINT instance = 0; instance < 2; ++instance)
+        for (UINT primitive = 0; primitive < count; ++primitive)
+          for (UINT gs_instance = 0; gs_instance < gs_instances; ++gs_instance)
+            for (UINT emit = 0; emit < primitive % 3; ++emit) {
+              auto p =
+                  expected.data() + 4 * (gs_instance * width + instance * 256 +
+                                         primitive * 2 + emit);
+              p[0] = BYTE(primitive + 1);
+              p[1] = BYTE(UINT(vertices[ids[primitive]].color[0]) +
+                          3 * ids[primitive] + phase + 17 * emit);
+              p[2] = BYTE(instance + 1);
+              p[3] = BYTE(gs_instance + 1);
+            }
+    if (wrong && phase)
+      expected[0] ^= 1;
+    bool good = true;
+    for (UINT y = 0; y < height; ++y)
+      for (UINT x = 0; x < width * 4; ++x)
+        if (static_cast<const BYTE *>(mapped.pData)[y * mapped.RowPitch + x] !=
+                expected[y * width * 4 + x] &&
+            good) {
+          std::cerr << "FAIL D3D11 PointStream instances=" << gs_instances
+                    << " index=" << index_mode << " phase=" << phase
+                    << " byte=" << y * width * 4 + x << " actual="
+                    << UINT(static_cast<const BYTE *>(
+                           mapped.pData)[y * mapped.RowPitch + x])
+                    << " expected=" << UINT(expected[y * width * 4 + x])
+                    << "\n";
+          good = false;
+        }
+    context->Unmap(readback.ptr(), 0);
+    if (!good)
+      return false;
+    if (!check("Point device status", device->GetDeviceRemovedReason()))
+      return false;
+    std::cout << "D3D11 PointStream instances=" << gs_instances
+              << " index=" << index_mode << " phase=" << phase
+              << " exact_bytes=" << expected.size() << " passed\n";
+  }
+  context->ClearState();
+  context->Flush();
+  return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  if ((argc == 7 || argc == 8) && !std::strcmp(argv[1], "--point-stream"))
+    return CheckPointStream(argv[2], argv[3], argv[4],
+                            UINT(std::strtoul(argv[5], nullptr, 10)), argv[6],
+                            argc == 8 &&
+                                !std::strcmp(argv[7], "--wrong-expected"))
+               ? 0
+               : 1;
   if (argc == 3 && std::strcmp(argv[2], "--buffer-view-usage") == 0)
     return CheckBufferViewUsage(argv[1]) ? 0 : 1;
   if (argc != 2) {
