@@ -1,3 +1,93 @@
+#ifdef STAGE_BINDING_DIFFERENTIAL
+cbuffer Shared : register(b0) { uint4 values; };
+Texture2D<float4> source_texture : register(t0);
+SamplerState source_sampler : register(s0);
+struct StageVertex { float4 position : SV_Position; float4 color : COLOR; };
+float4 read_tag(uint stage)
+{
+    uint2 texel = uint2(round(source_texture.SampleLevel(source_sampler, float2(0.5, 0.5), 0).rg * 255));
+    return float4(values.x + texel.x, values.y + stage, values.z + texel.y, 255);
+}
+StageVertex vs_main(uint vertex : SV_VertexID)
+{
+    StageVertex o;
+    o.position = float4(vertex == 2 ? 3 : -1, vertex == 1 ? 3 : -1, 0, 1);
+    o.color = read_tag(1);
+    return o;
+}
+uint4 ps_main(StageVertex input) : SV_Target0 { return uint4(input.color); }
+[maxvertexcount(3)]
+void gs_main(triangle StageVertex input[3], inout TriangleStream<StageVertex> stream)
+{
+    for (uint i = 0; i < 3; ++i) {
+        StageVertex o = input[i];
+        o.color = read_tag(2);
+        o.color.x += input[i].color.x;
+        stream.Append(o);
+    }
+}
+struct StageFactors { float edge[3] : SV_TessFactor; float inside : SV_InsideTessFactor; };
+StageFactors hs_constants(InputPatch<StageVertex, 3> patch, uint primitive : SV_PrimitiveID)
+{
+    StageFactors factors = {{1, 1, 1}, 1};
+    return factors;
+}
+[domain("tri")]
+[partitioning("integer")]
+[outputtopology("triangle_cw")]
+[outputcontrolpoints(3)]
+[patchconstantfunc("hs_constants")]
+StageVertex hs_main(InputPatch<StageVertex, 3> patch, uint id : SV_OutputControlPointID)
+{
+    StageVertex o = patch[id];
+    o.color = read_tag(3);
+    o.color.x += patch[id].color.x;
+    return o;
+}
+[domain("tri")]
+StageVertex ds_main(StageFactors factors, const OutputPatch<StageVertex, 3> patch, float3 coord : SV_DomainLocation)
+{
+    StageVertex o;
+    o.position = patch[0].position * coord.x + patch[1].position * coord.y + patch[2].position * coord.z;
+    o.color = read_tag(4);
+    o.color.x += patch[0].color.x;
+    return o;
+}
+#ifndef STAGE_BINDING_SM5
+struct StagePayload { float4 color; };
+#ifdef STAGE_BINDING_AS_MESH
+[shader("amplification")]
+[numthreads(1, 1, 1)]
+void as_main()
+{
+    StagePayload payload;
+    payload.color = read_tag(6);
+    DispatchMesh(1, 1, 1, payload);
+}
+#endif
+[shader("mesh")]
+[outputtopology("triangle")]
+[numthreads(1, 1, 1)]
+void ms_main(
+#ifdef STAGE_BINDING_AS_MESH
+    in payload StagePayload payload,
+#endif
+    out vertices StageVertex vertices[3], out indices uint3 indices[1])
+{
+    SetMeshOutputCounts(3, 1);
+    float4 color = read_tag(5);
+#ifdef STAGE_BINDING_AS_MESH
+    color = read_tag(7);
+    color.x += payload.color.x;
+#endif
+    for (uint i = 0; i < 3; ++i) {
+        vertices[i].position = float4(i == 2 ? 3 : -1, i == 1 ? 3 : -1, 0, 1);
+        vertices[i].color = color;
+    }
+    indices[0] = uint3(0, 1, 2);
+}
+#endif
+#else
 struct VSOutput {
   float4 position : SV_Position;
 };
@@ -35,3 +125,5 @@ VSOutput ds_main(
   output.position = patch[0].position * coord.x + patch[1].position * coord.y + patch[2].position * coord.z;
   return output;
 }
+
+#endif

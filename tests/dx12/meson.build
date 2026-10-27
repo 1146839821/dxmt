@@ -248,6 +248,26 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach stage : ['vs', 'ps', 'gs', 'hs', 'ds', 'ms']
+    profile = stage == 'ms' ? 'ms_6_5' : stage + '_6_0'
+    custom_target('dx12_stage_binding_' + stage,
+      input: 'shader_backend_stages.hlsl',
+      output: 'stage_binding.' + stage + '.cso',
+      command: dxc_command + [ '-E', stage + '_main', '-T', profile,
+        '-D', 'STAGE_BINDING_DIFFERENTIAL=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  foreach stage : ['ms', 'as']
+    custom_target('dx12_stage_binding_as_' + stage,
+      input: 'shader_backend_stages.hlsl',
+      output: 'stage_binding_as.' + stage + '.cso',
+      command: dxc_command + [ '-E', stage + '_main', '-T', stage + '_6_5',
+        '-D', 'STAGE_BINDING_DIFFERENTIAL=1', '-D', 'STAGE_BINDING_AS_MESH=1',
+        '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
   custom_target('dx12_shader_backend_hull_fixture',
     input: 'shader_backend_stages.hlsl',
     output: 'shader_backend.tessellation.hs.cso',

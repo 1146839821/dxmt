@@ -11,6 +11,9 @@
 #include <iostream>
 #include <chrono>
 #include <vector>
+#include <fstream>
+#include <string>
+#include <algorithm>
 #include "airconv_public.h"
 #include "d3d12_command_allocator.hpp"
 #include <cstdint>
@@ -2398,6 +2401,786 @@ bool TestConcurrentCommandSubmission(ID3D12Device *device) {
   return cleanup();
 }
 
+// Test-only native safety guard: never execute a draw with missing/stale roots.
+class StageBindingObserver {
+  DriverImportPatch buffers_, render_, create_;
+  inline static void *buffers_original_ = nullptr, *render_original_ = nullptr,
+                     *create_original_ = nullptr;
+  struct Mapping {
+    obj_handle_t buffer;
+    const BYTE *data;
+    uint64_t size, gpu;
+  };
+  struct Binding {
+    obj_handle_t buffer;
+    uint64_t offset;
+  };
+  struct Encoder {
+    obj_handle_t handle, pipeline;
+    Binding buffers[4][32];
+  };
+  inline static std::array<Mapping, 64> mappings_ = {};
+  inline static std::array<Encoder, 32> encoders_ = {};
+  inline static UINT mapping_count_ = 0, encoder_count_ = 0;
+  inline static std::vector<std::pair<obj_handle_t, UINT>> pipeline_kinds_;
+  static obj_handle_t Buffer(obj_handle_t device, WMTBufferInfo *info) {
+    auto result =
+        reinterpret_cast<decltype(&Buffer)>(buffers_original_)(device, info);
+    if (result && info->memory.ptr && mapping_count_ < mappings_.size())
+      mappings_[mapping_count_++] = {result,
+                                     static_cast<BYTE *>(info->memory.ptr),
+                                     info->length, info->gpu_address};
+    return result;
+  }
+  static obj_handle_t EncoderCreate(obj_handle_t buffer,
+                                    WMTRenderPassInfo *info) {
+    auto result = reinterpret_cast<decltype(&EncoderCreate)>(create_original_)(
+        buffer, info);
+    if (encoder_count_ < encoders_.size())
+      encoders_[encoder_count_++] = {result};
+    else
+      failed = true;
+    ++native_encoders;
+    return result;
+  }
+  static bool Read(Binding binding, uint64_t offset, void *out, UINT size) {
+    for (UINT i = mapping_count_; i; --i) {
+      auto &m = mappings_[i - 1];
+      if (m.buffer == binding.buffer && binding.offset <= m.size &&
+          offset <= m.size - binding.offset &&
+          size <= m.size - binding.offset - offset) {
+        std::memcpy(out, m.data + binding.offset + offset, size);
+        return true;
+      }
+    }
+    return false;
+  }
+  static bool ReadGPU(uint64_t address, void *out, UINT size) {
+    for (UINT i = mapping_count_; i; --i) {
+      auto &m = mappings_[i - 1];
+      if (address >= m.gpu && address - m.gpu <= m.size &&
+          size <= m.size - (address - m.gpu)) {
+        std::memcpy(out, m.data + (address - m.gpu), size);
+        return true;
+      }
+    }
+    return false;
+  }
+  static bool IsDraw(UINT type) {
+    return type == WMTRenderCommandDraw ||
+           type == WMTRenderCommandDXMTGeometryDraw ||
+           type == WMTRenderCommandMSCGeometryDraw ||
+           type == WMTRenderCommandMSCTessellationDraw ||
+           type == WMTRenderCommandDrawMeshThreadgroups;
+  }
+  static void Render(obj_handle_t handle, const wmtcmd_base *head) {
+    if (failed)
+      return;
+    Encoder *state = nullptr;
+    for (UINT i = encoder_count_; i; --i)
+      if (encoders_[i - 1].handle == handle) {
+        state = &encoders_[i - 1];
+        break;
+      }
+    if (!state) {
+      failed = true;
+      return;
+    }
+    for (auto *cmd = head; cmd;
+         cmd = static_cast<const wmtcmd_base *>(cmd->next.ptr)) {
+      if (cmd->type == WMTRenderCommandSetPSO)
+        state->pipeline =
+            reinterpret_cast<const wmtcmd_render_setpso *>(cmd)->pso;
+      UINT stage = 4;
+      if (cmd->type == WMTRenderCommandSetVertexBuffer)
+        stage = 0;
+      if (cmd->type == WMTRenderCommandSetFragmentBuffer)
+        stage = 1;
+      if (cmd->type == WMTRenderCommandSetObjectBuffer)
+        stage = 2;
+      if (cmd->type == WMTRenderCommandSetMeshBuffer)
+        stage = 3;
+      if (stage < 4) {
+        auto *set = reinterpret_cast<const wmtcmd_render_setbuffer *>(cmd);
+        if (set->index < 32) {
+          state->buffers[stage][set->index] = {set->buffer, set->offset};
+          for (const auto &[pipeline, kind] : pipeline_kinds_)
+            if (pipeline == state->pipeline) {
+              if (set->index ==
+                      (kind < 2 ? UINT(SM50_BINDING_INDEX_ROOT_ARGUMENTS)
+                                : UINT(DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT)) ||
+                  (kind == 4 &&
+                   set->index ==
+                       DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT))
+                ++root_sets;
+              break;
+            }
+        }
+      }
+      if (!IsDraw(cmd->type))
+        continue;
+      bool known = false;
+      for (const auto &[pipeline, kind] : pipeline_kinds_)
+        known |= pipeline == state->pipeline;
+      if (!known)
+        continue;
+      if (cursor >= expected.size() ||
+          expected[cursor].pipeline != state->pipeline) {
+        failed = true;
+        break;
+      }
+      const auto &e = expected[cursor];
+      const bool airconv = e.kind < 2;
+      const bool mesh = e.kind == 1 || e.kind >= 3;
+      const UINT point = airconv ? UINT(SM50_BINDING_INDEX_ROOT_ARGUMENTS)
+                                 : UINT(DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
+      UINT missing = 0;
+      auto check = [&](UINT s, UINT slot, UINT bit) {
+        UINT values[4] = {};
+        uint64_t table = 0;
+        auto binding = state->buffers[s][slot];
+        bool good = Read(binding, airconv ? 0 : msc_constants_offset, values,
+                         sizeof(values)) &&
+                    !std::memcmp(values, e.values, sizeof(values));
+        good &= Read(binding, airconv ? 16 : msc_table_offset, &table, 8) &&
+                table == (airconv ? airconv_table : msc_table);
+        if (!airconv) {
+          uint64_t sampler = 0, words[3] = {};
+          good &= Read(binding, msc_sampler_offset, &sampler, 8) &&
+                  ReadGPU(sampler, words, sizeof(words));
+          good &= words[0] == sampler_words[0] && !words[1] &&
+                  words[2] == sampler_words[2];
+        }
+        if (!good)
+          missing |= 1u << bit;
+      };
+      check(1, point, 1);
+      if (mesh) {
+        check(2, point, 2);
+        check(3, point, 3);
+      } else
+        check(0, point, 0);
+      if (e.kind == 4) {
+        check(2, DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT, 4);
+        check(3, DXMT_MSC_ARGUMENT_BUFFER_HULL_DOMAIN_BIND_POINT, 5);
+      }
+      if (airconv) {
+        auto sampler = [&](UINT s, UINT bit) {
+          uint64_t words[4] = {};
+          if (!Read(state->buffers[s][SM50_BINDING_INDEX_STATIC_SAMPLERS], 0,
+                    words, sizeof(words)) ||
+              std::memcmp(words, sampler_words.data(), sizeof(words)))
+            missing |= 1u << bit;
+        };
+        sampler(1, 7);
+        if (mesh) {
+          sampler(2, 8);
+          sampler(3, 9);
+        } else
+          sampler(0, 6);
+      }
+      if (!airconv) {
+        auto heap = [&](UINT stage, UINT slot, obj_handle_t buffer, UINT bit) {
+          const auto bound = state->buffers[stage][slot];
+          if (bound.buffer != buffer || bound.offset != 0)
+            missing |= 1u << bit;
+        };
+        auto heaps = [&](UINT stage, UINT bit) {
+          heap(stage, DXMT_MSC_DESCRIPTOR_HEAP_BIND_POINT, resource_heap, bit);
+          heap(stage, DXMT_MSC_SAMPLER_HEAP_BIND_POINT, sampler_heap, bit + 1);
+        };
+        heaps(1, 10);
+        if (mesh) {
+          heaps(2, 12);
+          heaps(3, 14);
+        } else
+          heaps(0, 12);
+        if (e.kind == 4) {
+          heap(2, DXMT_MSC_RUNTIME_TESSELLATOR_TABLES_BIND_POINT,
+               e.tessellator_tables, 16);
+          heap(3, DXMT_MSC_RUNTIME_TESSELLATOR_TABLES_BIND_POINT,
+               e.tessellator_tables, 17);
+        }
+      }
+      if (missing) {
+        failed = true;
+        missing_mask = missing;
+        std::cerr << "Stage binding guard draw=" << cursor << " kind=" << e.kind
+                  << " missing_or_stale=0x" << std::hex << missing << std::dec
+                  << " GPU_DRAW_SUPPRESSED\n";
+        break;
+      }
+      ++cursor;
+    }
+    if (failed)
+      return;
+    const auto start = std::chrono::steady_clock::now();
+    reinterpret_cast<decltype(&Render)>(render_original_)(handle, head);
+    native_us += std::chrono::duration<double, std::micro>(
+                     std::chrono::steady_clock::now() - start)
+                     .count();
+  }
+
+public:
+  struct Expected {
+    obj_handle_t pipeline;
+    UINT kind;
+    UINT values[4];
+    obj_handle_t tessellator_tables;
+  };
+  inline static std::vector<Expected> expected;
+  inline static UINT cursor = 0, root_sets = 0, native_encoders = 0,
+                     missing_mask = 0;
+  inline static uint64_t msc_constants_offset = 0, msc_table_offset = 0,
+                         msc_sampler_offset = 0, airconv_table = 0,
+                         msc_table = 0;
+  inline static std::array<uint64_t, 4> sampler_words = {};
+  inline static obj_handle_t resource_heap = 0, sampler_heap = 0;
+  inline static bool failed = false;
+  inline static double native_us = 0;
+  bool Install() {
+    mapping_count_ = encoder_count_ = 0;
+    return buffers_.Install("MTLDevice_newBuffer",
+                            reinterpret_cast<void *>(&Buffer),
+                            buffers_original_) &&
+           render_.Install("MTLRenderCommandEncoder_encodeCommands",
+                           reinterpret_cast<void *>(&Render),
+                           render_original_) &&
+           create_.Install("MTLCommandBuffer_renderCommandEncoder",
+                           reinterpret_cast<void *>(&EncoderCreate),
+                           create_original_);
+  }
+  static void Begin(std::vector<Expected> draws) {
+    expected = std::move(draws);
+    pipeline_kinds_.clear();
+    for (const auto &draw : expected) {
+      const auto entry = std::pair{draw.pipeline, draw.kind};
+      if (std::find(pipeline_kinds_.begin(), pipeline_kinds_.end(), entry) ==
+          pipeline_kinds_.end())
+        pipeline_kinds_.push_back(entry);
+    }
+    cursor = root_sets = native_encoders = missing_mask = encoder_count_ = 0;
+    failed = false;
+    native_us = 0;
+  }
+};
+
+template <typename T, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Kind>
+struct alignas(void *) StageSubobject {
+  D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type = Kind;
+  T value = {};
+};
+struct StageMeshStream {
+  StageSubobject<ID3D12RootSignature *,
+                 D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE>
+      root;
+  StageSubobject<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS>
+      mesh;
+  StageSubobject<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS>
+      pixel;
+  StageSubobject<D3D12_RT_FORMAT_ARRAY,
+                 D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS>
+      targets;
+  StageSubobject<D3D12_RASTERIZER_DESC,
+                 D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER>
+      rasterizer;
+  StageSubobject<D3D12_BLEND_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND>
+      blend;
+  StageSubobject<D3D12_DEPTH_STENCIL_DESC,
+                 D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL>
+      depth;
+  StageSubobject<DXGI_SAMPLE_DESC,
+                 D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC>
+      samples;
+  StageSubobject<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS>
+      amplification;
+};
+
+bool TestStageBindings(const char *mode) {
+  using dxmt::Com;
+  const bool isolated = !std::strcmp(mode, "isolated"),
+             same_root = !std::strcmp(mode, "same-root"),
+             wrong = !std::strcmp(mode, "wrong"),
+             perf = !std::strcmp(mode, "perf");
+  std::vector<UINT> sequence;
+  if (!std::strcmp(mode, "airconv"))
+    sequence = {0, 7, 1, 0, 1};
+  else if (!std::strcmp(mode, "msc"))
+    sequence = {2, 8, 3, 2, 5, 2, 6, 2, 4};
+  else if (!std::strcmp(mode, "gs-ts"))
+    sequence = {3, 4, 3, 4};
+  else if (!std::strcmp(mode, "tess"))
+    sequence = {2, 4, 2, 4};
+  else if (!std::strcmp(mode, "mesh"))
+    sequence = {2, 5, 2, 5};
+  else if (!std::strcmp(mode, "as"))
+    sequence = {2, 6, 2, 6};
+  else if (!std::strcmp(mode, "gs-mesh"))
+    sequence = {3, 5, 6, 3, 6};
+  else if (!std::strcmp(mode, "ordinary"))
+    sequence = {2, 8, 2, 8};
+  else if (!std::strcmp(mode, "ordinary-airconv"))
+    sequence = {0, 7, 0, 7};
+  else if (perf)
+    sequence = {2, 8};
+  else if (isolated || same_root || wrong || !std::strcmp(mode, "mixed"))
+    sequence = {0, 2, 1, 3, 4, 5, 6, 0, 2};
+  else
+    return false;
+  Com<ID3D12Device> device;
+  Com<ID3D12Device2> device2;
+  Com<ID3D12RootSignature> root;
+  Com<ID3DBlob> root_blob;
+  Com<ID3D12DescriptorHeap> heap, samplers, rtvs;
+  Com<ID3D12Resource> source, upload, target, readback;
+  Com<ID3D12CommandAllocator> allocator;
+  Com<ID3D12GraphicsCommandList> list;
+  Com<ID3D12GraphicsCommandList6> list6;
+  Com<ID3D12CommandQueue> queue;
+  Com<ID3D12Fence> fence, gate;
+  struct Event {
+    HANDLE value = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    ~Event() {
+      if (value)
+        CloseHandle(value);
+    }
+  } event;
+  if (!event.value ||
+      !CheckHR("Stage device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&device))) ||
+      !CheckHR("Stage device2", device->QueryInterface(IID_PPV_ARGS(&device2))))
+    return false;
+  StageBindingObserver observer;
+  if (!observer.Install())
+    return false;
+  D3D12_DESCRIPTOR_RANGE range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
+  D3D12_ROOT_PARAMETER params[2] = {};
+  params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  params[0].Constants = {0, 0, 4};
+  params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  params[1].DescriptorTable = {1, &range};
+  D3D12_STATIC_SAMPLER_DESC sampler = {};
+  sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+  sampler.AddressU = sampler.AddressV = sampler.AddressW =
+      D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+  sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+  sampler.MaxLOD = D3D12_FLOAT32_MAX;
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {
+      2, params, 1, &sampler,
+      D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT};
+  if (!CheckHR("Stage serialize", D3D12SerializeRootSignature(
+                                      &root_desc, D3D_ROOT_SIGNATURE_VERSION_1,
+                                      &root_blob, nullptr)) ||
+      !CheckHR("Stage root",
+               device->CreateRootSignature(0, root_blob->GetBufferPointer(),
+                                           root_blob->GetBufferSize(),
+                                           IID_PPV_ARGS(&root))))
+    return false;
+  auto *metadata = static_cast<dxmt::MTLD3D12RootSignature *>(root.ptr());
+  if (!CheckHR("Stage MSC root layout", metadata->InitializeMSCLayout()) ||
+      metadata->NumStaticSamplers != 1)
+    return false;
+  std::memcpy(StageBindingObserver::sampler_words.data(),
+              metadata->EncodedStaticSamplers, 32);
+  bool found_constant = false, found_table = false, found_sampler = false;
+  for (UINT i = 0; i < metadata->MSCParameterCount; ++i) {
+    auto &layout = metadata->MSCParameterLayouts[i];
+    if (layout.parameter_index == 0) {
+      StageBindingObserver::msc_constants_offset = layout.top_level_offset;
+      found_constant = true;
+    }
+    if (layout.parameter_index == 1) {
+      StageBindingObserver::msc_table_offset = layout.top_level_offset;
+      found_table = true;
+    }
+    if (layout.resource_type == DXMT_MSC_RESOURCE_SAMPLER ||
+        (layout.parameter_index == UINT32_MAX &&
+         layout.resource_type == DXMT_MSC_RESOURCE_TABLE)) {
+      StageBindingObserver::msc_sampler_offset = layout.top_level_offset;
+      found_sampler = true;
+    }
+  }
+  if (!found_constant || !found_table || !found_sampler)
+    return false;
+  auto read = [](const std::string &file) {
+    std::ifstream f(file, std::ios::binary | std::ios::ate);
+    if (!f || f.tellg() <= 0 || f.tellg() > 16 * 1024 * 1024)
+      return std::vector<char>{};
+    std::vector<char> b(size_t(f.tellg()));
+    f.seekg(0);
+    if (!f.read(b.data(), b.size()))
+      b.clear();
+    return b;
+  };
+  std::array<Com<ID3D12PipelineState>, 9> pipelines;
+  const UINT kinds[] = {0, 1, 2, 3, 4, 5, 6, 0, 2};
+  std::vector<UINT> needed = sequence;
+  std::sort(needed.begin(), needed.end());
+  needed.erase(std::unique(needed.begin(), needed.end()), needed.end());
+  for (UINT slot : needed) {
+    const UINT kind = kinds[slot];
+    const bool airconv = kind < 2;
+    auto vs = read(airconv ? "stage_binding5.vs.cso" : "stage_binding.vs.cso");
+    auto ps = read(airconv ? "stage_binding5.ps.cso" : "stage_binding.ps.cso");
+    if (vs.empty() || ps.empty())
+      return false;
+    if (kind < 5) {
+      D3D12_GRAPHICS_PIPELINE_STATE_DESC d = {};
+      d.pRootSignature = root.ptr();
+      d.VS = {vs.data(), vs.size()};
+      d.PS = {ps.data(), ps.size()};
+      d.PrimitiveTopologyType = kind == 4
+                                    ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH
+                                    : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+      d.NumRenderTargets = 1;
+      d.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UINT;
+      d.SampleDesc.Count = 1;
+      d.SampleMask = UINT_MAX;
+      d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+      d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+      d.RasterizerState.DepthClipEnable = TRUE;
+      d.BlendState.RenderTarget[0].RenderTargetWriteMask =
+          D3D12_COLOR_WRITE_ENABLE_ALL;
+      auto gs =
+          read(airconv ? "stage_binding5.gs.cso" : "stage_binding.gs.cso");
+      auto hs = read("stage_binding.hs.cso"), ds = read("stage_binding.ds.cso");
+      if (kind == 1 || kind == 3)
+        d.GS = {gs.data(), gs.size()};
+      if (kind == 4) {
+        d.HS = {hs.data(), hs.size()};
+        d.DS = {ds.data(), ds.size()};
+      }
+      if (!CheckHR("Stage graphics PSO",
+                   device->CreateGraphicsPipelineState(
+                       &d, IID_PPV_ARGS(&pipelines[slot]))))
+        return false;
+    } else {
+      auto ms = read(kind == 6 ? "stage_binding_as.ms.cso"
+                               : "stage_binding.ms.cso"),
+           as = read("stage_binding_as.as.cso");
+      if (ms.empty() || (kind == 6 && as.empty()))
+        return false;
+      StageMeshStream stream;
+      stream.root.value = root.ptr();
+      stream.mesh.value = {ms.data(), ms.size()};
+      stream.pixel.value = {ps.data(), ps.size()};
+      stream.targets.value.NumRenderTargets = 1;
+      stream.targets.value.RTFormats[0] = DXGI_FORMAT_R8G8B8A8_UINT;
+      stream.rasterizer.value.FillMode = D3D12_FILL_MODE_SOLID;
+      stream.rasterizer.value.CullMode = D3D12_CULL_MODE_NONE;
+      stream.rasterizer.value.DepthClipEnable = TRUE;
+      stream.blend.value.RenderTarget[0].RenderTargetWriteMask =
+          D3D12_COLOR_WRITE_ENABLE_ALL;
+      stream.samples.value.Count = 1;
+      if (kind == 6)
+        stream.amplification.value = {as.data(), as.size()};
+      D3D12_PIPELINE_STATE_STREAM_DESC d = {
+          kind == 6 ? sizeof(stream) : offsetof(StageMeshStream, amplification),
+          &stream};
+      if (!CheckHR("Stage mesh PSO", device2->CreatePipelineState(
+                                         &d, IID_PPV_ARGS(&pipelines[slot]))))
+        return false;
+    }
+    auto *pso = static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(
+        pipelines[slot].ptr());
+    if (pso->shader_backend !=
+            (airconv ? dxmt::D3D12ShaderBackend::Airconv
+                     : dxmt::D3D12ShaderBackend::MetalShaderConverter) ||
+        pso->airconv_geometry != (kind == 1) ||
+        pso->msc_geometry != (kind == 3) ||
+        pso->msc_tessellation != (kind == 4) || pso->msc_mesh != (kind >= 5))
+      return false;
+  }
+  auto buffer = [&](D3D12_HEAP_TYPE type, UINT size,
+                    D3D12_RESOURCE_STATES state, ID3D12Resource **out) {
+    D3D12_HEAP_PROPERTIES h = {};
+    h.Type = type;
+    h.CreationNodeMask = h.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC d = {};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = size;
+    d.Height = d.DepthOrArraySize = d.MipLevels = d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    return CheckHR("Stage buffer", device->CreateCommittedResource(
+                                       &h, D3D12_HEAP_FLAG_NONE, &d, state,
+                                       nullptr, IID_PPV_ARGS(out)));
+  };
+  const UINT cycles = perf ? 1 : 2,
+             draws = perf ? 4096 : UINT(sequence.size()) * cycles,
+             width = perf ? 1 : draws;
+  if (!buffer(D3D12_HEAP_TYPE_UPLOAD, 256, D3D12_RESOURCE_STATE_GENERIC_READ,
+              &upload) ||
+      !buffer(D3D12_HEAP_TYPE_READBACK, 256, D3D12_RESOURCE_STATE_COPY_DEST,
+              &readback))
+    return false;
+  void *mapped = nullptr;
+  if (!CheckHR("Stage upload map", upload->Map(0, nullptr, &mapped)))
+    return false;
+  const BYTE color[] = {11, 13, 17, 255};
+  std::memcpy(mapped, color, 4);
+  upload->Unmap(0, nullptr);
+  D3D12_HEAP_PROPERTIES h = {};
+  h.Type = D3D12_HEAP_TYPE_DEFAULT;
+  h.CreationNodeMask = h.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC tex = {};
+  tex.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  tex.Width = 1;
+  tex.Height = tex.DepthOrArraySize = tex.MipLevels = tex.SampleDesc.Count = 1;
+  tex.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  if (!CheckHR("Stage source texture",
+               device->CreateCommittedResource(&h, D3D12_HEAP_FLAG_NONE, &tex,
+                                               D3D12_RESOURCE_STATE_COPY_DEST,
+                                               nullptr, IID_PPV_ARGS(&source))))
+    return false;
+  tex.Width = width;
+  tex.Format = DXGI_FORMAT_R8G8B8A8_UINT;
+  tex.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  if (!CheckHR("Stage target", device->CreateCommittedResource(
+                                   &h, D3D12_HEAP_FLAG_NONE, &tex,
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                                   IID_PPV_ARGS(&target))))
+    return false;
+  D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+  hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  hd.NumDescriptors = 1;
+  hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  if (!CheckHR("Stage resource heap",
+               device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap))))
+    return false;
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+  srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+  srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  srv.Texture2D.MipLevels = 1;
+  device->CreateShaderResourceView(source.ptr(), &srv,
+                                   heap->GetCPUDescriptorHandleForHeapStart());
+  const auto table = heap->GetGPUDescriptorHandleForHeapStart();
+  StageBindingObserver::airconv_table = table.ptr;
+  StageBindingObserver::msc_table =
+      static_cast<dxmt::MTLD3D12DescriptorHeap *>(heap.ptr())
+          ->GetMSCDescriptorTableAddress(table);
+  StageBindingObserver::resource_heap =
+      static_cast<dxmt::MTLD3D12DescriptorHeap *>(heap.ptr())
+          ->GetMSCDescriptorHeapBuffer()
+          .handle;
+  hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+  if (!CheckHR("Stage sampler heap",
+               device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&samplers))))
+    return false;
+  D3D12_SAMPLER_DESC dynamic_sampler = {};
+  dynamic_sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+  dynamic_sampler.AddressU = dynamic_sampler.AddressV =
+      dynamic_sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+  dynamic_sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+  dynamic_sampler.MaxLOD = D3D12_FLOAT32_MAX;
+  device->CreateSampler(&dynamic_sampler,
+                        samplers->GetCPUDescriptorHandleForHeapStart());
+  StageBindingObserver::sampler_heap =
+      static_cast<dxmt::MTLD3D12SamplerDescriptorHeap *>(samplers.ptr())
+          ->GetMSCDescriptorHeapBuffer()
+          .handle;
+  hd = {};
+  hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  hd.NumDescriptors = 1;
+  if (!CheckHR("Stage RTV heap",
+               device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&rtvs))))
+    return false;
+  const auto rtv = rtvs->GetCPUDescriptorHandleForHeapStart();
+  device->CreateRenderTargetView(target.ptr(), nullptr, rtv);
+  D3D12_COMMAND_QUEUE_DESC q = {};
+  if (!CheckHR("Stage queue",
+               device->CreateCommandQueue(&q, IID_PPV_ARGS(&queue))) ||
+      !CheckHR("Stage allocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                              IID_PPV_ARGS(&allocator))) ||
+      !CheckHR("Stage list",
+               device->CreateCommandList(
+                   0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.ptr(),
+                   pipelines[sequence[0]].ptr(), IID_PPV_ARGS(&list))) ||
+      !CheckHR("Stage list6", list->QueryInterface(IID_PPV_ARGS(&list6))) ||
+      !CheckHR("Stage fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                  IID_PPV_ARGS(&fence))) ||
+      !CheckHR("Stage gate", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                 IID_PPV_ARGS(&gate))))
+    return false;
+  struct Unblock {
+    ID3D12Fence *f;
+    ~Unblock() { f->Signal(1); }
+  } unblock{gate.ptr()};
+  for (UINT pass = 0; pass < 3; ++pass) {
+    const UINT base = pass == 2 ? 31 : 17;
+    std::vector<StageBindingObserver::Expected> expected;
+    expected.reserve(draws);
+    std::vector<BYTE> pixels(width * 4, 0);
+    for (UINT draw = 0; draw < draws; ++draw) {
+      const UINT slot = sequence[draw % sequence.size()], kind = kinds[slot],
+                 cycle = perf ? 0 : draw / UINT(sequence.size());
+      UINT values[] = {base + cycle * 12, 23, 31, 47};
+      auto *pso = static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(
+          pipelines[slot].ptr());
+      obj_handle_t native =
+          kind == 1
+              ? pso->airconv_geometry_psos[0][SM50_INDEX_BUFFER_FORMAT_NONE]
+                    .handle
+              : pso->pso.handle;
+      expected.push_back({native,
+                          kind,
+                          {values[0], values[1], values[2], values[3]},
+                          pso->msc_tessellator_tables.handle});
+      const UINT multiplier = kind == 1 || kind == 3 || kind == 6 ? 2
+                              : kind == 4                         ? 3
+                                                                  : 1,
+                 tag = kind == 1 || kind == 3 ? 2
+                       : kind == 4            ? 4
+                       : kind == 5            ? 5
+                       : kind == 6            ? 7
+                                              : 1;
+      auto *pixel = pixels.data() + 4 * (perf ? 0 : draw);
+      pixel[0] = BYTE(multiplier * (values[0] + 11));
+      pixel[1] = BYTE(23 + tag);
+      pixel[2] = 44;
+      pixel[3] = 255;
+    }
+    if (wrong)
+      pixels[0] ^= 1;
+    if (pass != 1) {
+      if (pass && (!CheckHR("Stage allocator reset", allocator->Reset()) ||
+                   !CheckHR("Stage list reset",
+                            list->Reset(allocator.ptr(),
+                                        pipelines[sequence[0]].ptr()))))
+        return false;
+      auto barrier = [&](ID3D12Resource *r, D3D12_RESOURCE_STATES a,
+                         D3D12_RESOURCE_STATES b) {
+        D3D12_RESOURCE_BARRIER x = {};
+        x.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        x.Transition = {r, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, a, b};
+        list->ResourceBarrier(1, &x);
+      };
+      {
+        D3D12_TEXTURE_COPY_LOCATION from = {}, to = {};
+        from.pResource = upload.ptr();
+        from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        from.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, 1, 1, 1,
+                                          256};
+        to.pResource = source.ptr();
+        list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        barrier(source.ptr(), D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+      }
+      list->SetGraphicsRootSignature(root.ptr());
+      ID3D12DescriptorHeap *heaps[] = {heap.ptr(), samplers.ptr()};
+      list->SetDescriptorHeaps(2, heaps);
+      list->SetGraphicsRootDescriptorTable(1, table);
+      list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+      const float clear[4] = {};
+      list->ClearRenderTargetView(rtv, clear, 0, nullptr);
+      const D3D12_RECT scissor = {0, 0, LONG(width), 1};
+      list->RSSetScissorRects(1, &scissor);
+      const auto start = std::chrono::steady_clock::now();
+      for (UINT draw = 0; draw < draws; ++draw) {
+        const UINT slot = sequence[draw % sequence.size()], kind = kinds[slot];
+        if (!draw || (!perf && draw % sequence.size() == 0))
+          list->SetGraphicsRoot32BitConstants(0, 4, expected[draw].values, 0);
+        list->SetPipelineState(pipelines[slot].ptr());
+        if (same_root)
+          list->SetGraphicsRootSignature(root.ptr());
+        if (isolated && draw) {
+          D3D12_RESOURCE_BARRIER b = {};
+          b.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+          list->ResourceBarrier(1, &b);
+        }
+        const D3D12_VIEWPORT viewport = {float(perf ? 0 : draw), 0, 1, 1, 0, 1};
+        list->RSSetViewports(1, &viewport);
+        list->IASetPrimitiveTopology(
+            kind == 4 ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST
+                      : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        if (kind >= 5)
+          list6->DispatchMesh(1, 1, 1);
+        else
+          list->DrawInstanced(3, 1, 0, 0);
+      }
+      std::cout << "Stage record mode=" << mode << " pass=" << pass
+                << " draws=" << draws << " us_per_draw="
+                << std::chrono::duration<double, std::micro>(
+                       std::chrono::steady_clock::now() - start)
+                           .count() /
+                       draws
+                << "\n";
+      barrier(target.ptr(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+              D3D12_RESOURCE_STATE_COPY_SOURCE);
+      D3D12_TEXTURE_COPY_LOCATION from = {}, to = {};
+      from.pResource = target.ptr();
+      to.pResource = readback.ptr();
+      to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      to.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UINT, width, 1, 1,
+                                      256};
+      list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+      barrier(target.ptr(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+              D3D12_RESOURCE_STATE_RENDER_TARGET);
+      barrier(source.ptr(),
+              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+              D3D12_RESOURCE_STATE_COPY_DEST);
+      if (!CheckHR("Stage Close", list->Close()))
+        return false;
+    }
+    StageBindingObserver::Begin(std::move(expected));
+    if (pass == 2 && !CheckHR("Stage gate wait", queue->Wait(gate.ptr(), 1)))
+      return false;
+    ID3D12CommandList *lists[] = {list.ptr()};
+    queue->ExecuteCommandLists(1, lists);
+    if (pass == 2) {
+      if (SUCCEEDED(allocator->Reset()))
+        return false;
+      if (!CheckHR("Stage gate signal", gate->Signal(1)))
+        return false;
+    }
+    if (!CheckHR("Stage signal", queue->Signal(fence.ptr(), pass + 1)) ||
+        !CheckHR("Stage wait",
+                 fence->SetEventOnCompletion(pass + 1, event.value)) ||
+        WaitForSingleObject(event.value, 20000) != WAIT_OBJECT_0 ||
+        !CheckHR("Stage device", device->GetDeviceRemovedReason()))
+      return false;
+    if (StageBindingObserver::failed || StageBindingObserver::cursor != draws) {
+      std::cerr << "Stage guard failed mode=" << mode
+                << " draw=" << StageBindingObserver::cursor
+                << " GPU_TRANSITION_NOT_RUN\n";
+      return false;
+    }
+    if ((perf || !std::strcmp(mode, "ordinary") ||
+         !std::strcmp(mode, "ordinary-airconv")) &&
+        StageBindingObserver::root_sets != (perf ? 2u : 4u)) {
+      std::cerr << "Unexpected same-layout root rebinds="
+                << StageBindingObserver::root_sets << "\n";
+      return false;
+    }
+    if (!CheckHR("Stage readback", readback->Map(0, nullptr, &mapped)))
+      return false;
+    bool good = !std::memcmp(mapped, pixels.data(), pixels.size());
+    if (!good) {
+      const auto *got = static_cast<const BYTE *>(mapped);
+      for (UINT i = 0; i < pixels.size(); ++i)
+        if (got[i] != pixels[i]) {
+          std::cerr << "FAIL stage mode=" << mode << " pass=" << pass
+                    << " byte=" << i << " actual=" << UINT(got[i])
+                    << " expected=" << UINT(pixels[i]) << "\n";
+          break;
+        }
+    }
+    readback->Unmap(0, nullptr);
+    if (!good)
+      return false;
+    std::cout << "Stage bindings mode=" << mode << " pass=" << pass
+              << " exact_bytes=" << pixels.size()
+              << " root_sets=" << StageBindingObserver::root_sets
+              << " encoders=" << StageBindingObserver::native_encoders
+              << " native_us=" << StageBindingObserver::native_us
+              << " passed\n";
+  }
+  return true;
+}
 
 // Observe the existing native upload seam without dereferencing NULL root
 // views.
@@ -5073,6 +5856,8 @@ bool TestWriteBufferImmediate(const char *mode) {
 }
 
 int main(int argc, char **argv) {
+  if (argc == 3 && !std::strcmp(argv[1], "--stage-bindings"))
+    return TestStageBindings(argv[2]) ? 0 : 1;
   if (argc == 3 && !std::strcmp(argv[1], "--indirect-bindings"))
     return TestIndirectBindings(argv[2]) ? 0 : 1;
   if (argc == 3 && !std::strcmp(argv[1], "--write-immediate-perf")) {

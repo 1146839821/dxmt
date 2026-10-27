@@ -4685,3 +4685,55 @@ AIRCONV triangle-strip adjacency signed lane/mask correction;MSC TS point/line
 validation/output. Requested feature gaps remain OPEN implementation work:MSC GS
 instancing,D3D12 GS+TS,and GS/MSC SO combinations. Existing rejection paths are
 limits,not proof of implemented support. Next recommended slice:N11 stage binding.
+
+
+### N11 — Graphics stage layout root rebinding, 2026-10-27
+
+Closes user finding2,base1c7c25b5. Existing SetPipelineState compares the old/new
+root binding layout:backend ABI,vertex versus object/mesh route,and MSC TS extra
+HullDomain binding. A changed layout dirties GraphicsRootArguments/Signature;
+logical roots and repeated same-signature no-op remain. Existing DescriptorHeaps
+dirty handling already rebinds native heaps/tessellator tables;no duplicate flag
+or new binding authority added. Same-layout PSO switches keep root uploads clean.
+PreDraw reuses its AIRCONV root lambda for vertex/fragment and removes unreachable
+MSC mesh branches inside the AIRCONV binder. One production file;new src/d3d12
+files=0;no cache/native ABI/lifetime owner or public capability changes.
+
+Existing command-list runner/stages fixture covers AIRCONV ordinary→GS,MSC
+ordinary→GS/TS/mesh/AS+mesh,GS→TS,cross-backend transitions,redundant same-RS calls,
+and same-layout GS/mesh/AS switches. Two root-value epochs keep the signature,
+descriptor table and static sampler unchanged through each sequence. A native
+safety observer checks actual root bytes,table address,static sampler encoding,
+MSC heap handles/offsets and TS runtime tables before forwarding each draw.
+Baseline missing/stale stage roots are observed and invalid batches suppressed:
+GPU transition output is NOT_RUN. Baseline isolated-encoder control passes GPU
+output,proving fixtures independently. An early expectation that root-only repair
+would miss heap bindings was disproved;existing unconditional heap dirty state
+was confirmed and the redundant candidate flag removed before final acceptance.
+
+Final private/no-private matrix52 processes:43 success,9 expected negatives
+(7 guarded baseline failures,2 wrong-image oracles). Stage modes compare81 exact
+GPU images across initial execution,closed-list replay and fenced reset/rerecord;
+application references remain held through completion. Pending allocator Reset
+rejects while queue is gated. Adjacent indirect root/compute/sparse/empty-root
+cases compare24 readbacks;stride/pure-indirect compare12 images. AIRCONV and
+feature controls pass. All52 final logs clean of native/API/shader diagnostics.
+
+Five interleaved same-layout4096-draw private samples,validation/HUD off:
+first recording median1.18633→1.19578us/draw(+0.8%);warm rerecord0.312769→0.311938
+(-0.3%);native encode2328.7→2261.5us/submit(-2.9%,15 submissions). INCONCLUSIVE,
+no speedup/regression-free claim. Two root sets and2 render encoders per submission
+remain equal. GS/mesh/AS same-layout sequence needs only6 root sets across2 root
+value epochs. O(1) layout comparison per changed PSO;changed layouts use existing
+root/static-sampler uploads. No new per-draw lock,heap walk,encoder or barrier.
+PSO creation and isolated GPU/full-game timing not measured by this microbenchmark.
+
+Evidence:`../dxmt-test/n11-stage-bindings-20261027/N11-stage-bindings.md`,
+manifest.json,final-results.json,final-v2-* logs,perf-v2 data,accepted-artifacts,
+accepted-source.diff and build logs. Same M1Max/Apple7,macOS27.0.1,Xcode27.1
+(requested26 unavailable),Wine11/Rosetta,clang23.1.1,MSC4.0.1 environment.
+Directly-indexed heap shader consumption,early application-reference release,
+Windows,other GPUs,fullT3/T4 NOT_RUN. User .gitignore excluded. Full goal OPEN.
+Next priority:SO complete-primitive allocation/order/strip semantics,then zero
+complete D3D11 TS patch guard,adjacency strip lanes and MSC TS point/line output.
+MSC GS instancing,D3D12 GS+TS,and GS/MSC SO feature gaps remain OPEN.

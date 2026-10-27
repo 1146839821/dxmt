@@ -31,6 +31,7 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <tuple>
 #include <utility>
 
 namespace dxmt {
@@ -2959,23 +2960,10 @@ public:
         if (use_airconv_geometry) {
           encode_root_argument(WMTRenderCommandSetObjectBuffer);
           encode_root_argument(WMTRenderCommandSetMeshBuffer);
-        } else if (use_msc_mesh) {
-          encode_root_argument(WMTRenderCommandSetObjectBuffer);
-          encode_root_argument(WMTRenderCommandSetMeshBuffer);
         } else {
-          auto &cmd_vsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-          cmd_vsargbuf.type = WMTRenderCommandSetVertexBuffer;
-          cmd_vsargbuf.buffer = allocator_->gpu_heap_buffer_;
-          cmd_vsargbuf.offset = Offset;
-          cmd_vsargbuf.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
-          auto &cmd_fsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-          cmd_fsargbuf.type = WMTRenderCommandSetFragmentBuffer;
-          cmd_fsargbuf.buffer = allocator_->gpu_heap_buffer_;
-          cmd_fsargbuf.offset = Offset;
-          cmd_fsargbuf.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
+          encode_root_argument(WMTRenderCommandSetVertexBuffer);
         }
-        if (use_airconv_geometry || use_msc_mesh)
-          encode_root_argument(WMTRenderCommandSetFragmentBuffer);
+        encode_root_argument(WMTRenderCommandSetFragmentBuffer);
       }
       dirty_state_.clr(DirtyState::GraphicsRootArguments);
     }
@@ -3013,7 +3001,7 @@ public:
           cmd.offset = Offset;
           cmd.index = SM50_BINDING_INDEX_STATIC_SAMPLERS;
         };
-        if (use_airconv_geometry || use_msc_mesh) {
+        if (use_airconv_geometry) {
           encode_static_samplers(WMTRenderCommandSetObjectBuffer);
           encode_static_samplers(WMTRenderCommandSetMeshBuffer);
         } else {
@@ -5390,6 +5378,15 @@ public:
       return;
     if (pso_graphics_.ptr() == graphics_pso)
       return;
+    const auto root_binding_layout = [](const MTLD3D12GraphicsPipelineState *pipeline) {
+      const bool mesh_stages =
+          pipeline->airconv_geometry || pipeline->msc_geometry || pipeline->msc_tessellation || pipeline->msc_mesh;
+      return std::tuple{pipeline->shader_backend, mesh_stages, pipeline->msc_tessellation};
+    };
+    // Logical roots remain valid across PSO changes, but their encoded ABI and
+    // destination stages can change, including the extra HS/DS TLAB binding.
+    if (!pso_graphics_ || root_binding_layout(pso_graphics_.ptr()) != root_binding_layout(graphics_pso))
+      dirty_state_.set(DirtyState::GraphicsRootArguments, DirtyState::GraphicsRootSignature);
     pso_graphics_ = graphics_pso;
     pso_compute_ = nullptr;
     dirty_state_.set(
