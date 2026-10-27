@@ -9,6 +9,10 @@
 #include "d3d12_device.hpp"
 
 #include <iostream>
+#include <chrono>
+#include <vector>
+#include "airconv_public.h"
+#include "d3d12_command_allocator.hpp"
 #include <cstdint>
 #include <thread>
 #include <atomic>
@@ -2394,6 +2398,776 @@ bool TestConcurrentCommandSubmission(ID3D12Device *device) {
   return cleanup();
 }
 
+
+// Observe the existing native upload seam without dereferencing NULL root
+// views.
+class IndirectBindingObserver {
+  DriverImportPatch buffer_patch_, render_patch_, compute_patch_,
+      render_create_, compute_create_, blit_create_;
+  inline static void *render_create_original_ = nullptr,
+                     *compute_create_original_ = nullptr,
+                     *blit_create_original_ = nullptr;
+  static obj_handle_t RenderEncoder(obj_handle_t buffer,
+                                    WMTRenderPassInfo *info) {
+    ++render_encoders;
+    return reinterpret_cast<decltype(&RenderEncoder)>(render_create_original_)(
+        buffer, info);
+  }
+  static obj_handle_t ComputeEncoder(obj_handle_t buffer, bool concurrent) {
+    ++compute_encoders;
+    return reinterpret_cast<decltype(&ComputeEncoder)>(
+        compute_create_original_)(buffer, concurrent);
+  }
+  static obj_handle_t BlitEncoder(obj_handle_t buffer) {
+    ++blit_encoders;
+    return reinterpret_cast<decltype(&BlitEncoder)>(blit_create_original_)(
+        buffer);
+  }
+  inline static void *buffer_original_ = nullptr, *render_original_ = nullptr,
+                     *compute_original_ = nullptr;
+  struct Mapping {
+    obj_handle_t buffer;
+    const BYTE *data;
+    uint64_t length;
+  };
+  inline static std::array<Mapping, 64> mappings_ = {};
+  inline static UINT mappings_count_ = 0;
+  static obj_handle_t NewBuffer(obj_handle_t device, WMTBufferInfo *info) {
+    auto result =
+        reinterpret_cast<decltype(&NewBuffer)>(buffer_original_)(device, info);
+    if (result && info->memory.ptr && mappings_count_ < mappings_.size())
+      mappings_[mappings_count_++] = {
+          result, static_cast<const BYTE *>(info->memory.ptr), info->length};
+    return result;
+  }
+  static bool Read(obj_handle_t buffer, uint64_t offset, void *destination,
+                   UINT size) {
+    for (UINT i = mappings_count_; i; --i) {
+      auto &mapping = mappings_[i - 1];
+      if (mapping.buffer == buffer && offset <= mapping.length &&
+          size <= mapping.length - offset) {
+        std::memcpy(destination, mapping.data + offset, size);
+        return true;
+      }
+    }
+    return false;
+  }
+  static void Capture(obj_handle_t buffer, uint64_t offset) {
+    captured = Read(buffer, offset, snapshot.data(), bytes);
+  }
+  static void Render(obj_handle_t encoder, const wmtcmd_base *head) {
+    ++encoders;
+    obj_handle_t root = 0;
+    uint64_t offset = 0;
+    for (auto *cmd = head; cmd;
+         cmd = static_cast<const wmtcmd_base *>(cmd->next.ptr)) {
+      if (cmd->type == WMTRenderCommandSetVertexBuffer) {
+        auto *set = reinterpret_cast<const wmtcmd_render_setbuffer *>(cmd);
+        if (set->index == SM50_BINDING_INDEX_ROOT_ARGUMENTS) {
+          root = set->buffer;
+          offset = set->offset;
+        }
+        if (watch_index && set->index == 30) {
+          dxmt::IndirectRenderCommandData data = {};
+          if (Read(set->buffer, set->offset, &data, sizeof(data))) {
+            index_seen = true;
+            last_index = data.index_buffer;
+          }
+        }
+      } else if (cmd->type == WMTRenderCommandDraw) {
+        ++draws;
+        if (root && bytes)
+          Capture(root, offset);
+      } else if (cmd->type == WMTRenderCommandExecuteCommandsInBuffer)
+        ++indirect;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    reinterpret_cast<decltype(&Render)>(render_original_)(encoder, head);
+    translate_us += std::chrono::duration<double, std::micro>(
+                        std::chrono::steady_clock::now() - start)
+                        .count();
+  }
+  static void Compute(obj_handle_t encoder, const wmtcmd_base *head) {
+    ++encoders;
+    obj_handle_t root = 0;
+    uint64_t offset = 0;
+    for (auto *cmd = head; cmd;
+         cmd = static_cast<const wmtcmd_base *>(cmd->next.ptr)) {
+      if (cmd->type == WMTComputeCommandSetBuffer) {
+        auto *set = reinterpret_cast<const wmtcmd_compute_setbuffer *>(cmd);
+        if (set->index == SM50_BINDING_INDEX_ROOT_ARGUMENTS) {
+          root = set->buffer;
+          offset = set->offset;
+        }
+      } else if (cmd->type == WMTComputeCommandDispatch) {
+        ++draws;
+        if (root && bytes)
+          Capture(root, offset);
+      } else if (cmd->type == WMTComputeCommandExecuteCommandsInBuffer)
+        ++indirect;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    reinterpret_cast<decltype(&Compute)>(compute_original_)(encoder, head);
+    translate_us += std::chrono::duration<double, std::micro>(
+                        std::chrono::steady_clock::now() - start)
+                        .count();
+  }
+
+public:
+  inline static std::array<BYTE, 512> snapshot = {};
+  inline static UINT bytes = 0, encoders = 0, draws = 0, indirect = 0;
+  inline static UINT render_encoders = 0, compute_encoders = 0,
+                     blit_encoders = 0;
+  inline static bool captured = false;
+  inline static double translate_us = 0;
+  inline static bool watch_index = false, index_seen = false;
+  inline static uint64_t last_index = 0;
+  bool Install(UINT upload_bytes) {
+    translate_us = 0;
+    render_encoders = compute_encoders = blit_encoders = 0;
+    bytes = upload_bytes;
+    mappings_count_ = encoders = draws = indirect = 0;
+    captured = false;
+    if (!render_create_.Install("MTLCommandBuffer_renderCommandEncoder",
+                                reinterpret_cast<void *>(&RenderEncoder),
+                                render_create_original_) ||
+        !compute_create_.Install("MTLCommandBuffer_computeCommandEncoder",
+                                 reinterpret_cast<void *>(&ComputeEncoder),
+                                 compute_create_original_) ||
+        !blit_create_.Install("MTLCommandBuffer_blitCommandEncoder",
+                              reinterpret_cast<void *>(&BlitEncoder),
+                              blit_create_original_))
+      return false;
+    return buffer_patch_.Install("MTLDevice_newBuffer",
+                                 reinterpret_cast<void *>(&NewBuffer),
+                                 buffer_original_) &&
+           render_patch_.Install("MTLRenderCommandEncoder_encodeCommands",
+                                 reinterpret_cast<void *>(&Render),
+                                 render_original_) &&
+           compute_patch_.Install("MTLComputeCommandEncoder_encodeCommands",
+                                  reinterpret_cast<void *>(&Compute),
+                                  compute_original_);
+  }
+};
+
+bool TestIndirectBindings(const char *mode) {
+  using dxmt::Com;
+  const char *modes[] = {
+      "admission",          "control",      "sparse",
+      "empty-root",         "unused",       "index",
+      "empty-index",        "root",         "compute",
+      "root-zero",          "compute-zero", "root-count-zero",
+      "compute-count-zero", "wrong"};
+  bool recognized = false;
+  for (const auto *name : modes)
+    recognized |= !std::strcmp(mode, name);
+  if (!recognized)
+    return false;
+  const bool compute = !std::strncmp(mode, "compute", 7);
+  const bool admission = !std::strcmp(mode, "admission");
+  const bool root_case = compute || !std::strncmp(mode, "root", 4) || admission;
+  const bool empty = !std::strncmp(mode, "empty", 5);
+  const bool indexed =
+      !std::strcmp(mode, "index") || !std::strcmp(mode, "empty-index");
+  const bool unused = !std::strcmp(mode, "unused");
+  const bool zero =
+      !std::strcmp(mode, "root-zero") || !std::strcmp(mode, "compute-zero");
+  const bool count_zero = !std::strcmp(mode, "root-count-zero") ||
+                          !std::strcmp(mode, "compute-count-zero");
+  const bool wrong = !std::strcmp(mode, "wrong");
+  const bool control = !std::strcmp(mode, "control");
+  const bool vertex = !root_case && !indexed;
+  struct Compiler {
+    HMODULE value = LoadLibraryA(D3DCOMPILER_DLL_A);
+    ~Compiler() {
+      if (value)
+        FreeLibrary(value);
+    }
+  } compiler;
+  auto compile = compiler.value ? reinterpret_cast<pD3DCompile>(GetProcAddress(
+                                      compiler.value, "D3DCompile"))
+                                : nullptr;
+  if (!compile)
+    return false;
+  Com<ID3D12Device> device;
+  Com<ID3D12RootSignature> root;
+  Com<ID3D12PipelineState> pipeline, unused_pipeline;
+  Com<ID3D12CommandQueue> queue;
+  Com<ID3D12CommandAllocator> allocator;
+  Com<ID3D12GraphicsCommandList> list;
+  Com<ID3D12CommandSignature> signature, index_probe;
+  Com<ID3D12Resource> vb, ib, arguments, constants, output, count_buffer,
+      target, readback;
+  Com<ID3D12DescriptorHeap> rtvs;
+  Com<ID3D12Fence> fence, gate;
+  Com<ID3DBlob> root_blob, vs, ps, cs;
+  struct Event {
+    HANDLE value = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    ~Event() {
+      if (value)
+        CloseHandle(value);
+    }
+  } event;
+  if (!event.value ||
+      !CheckHR("Indirect device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&device))))
+    return false;
+  D3D12_ROOT_PARAMETER parameters[6] = {};
+  parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  parameters[0].Constants = {0, 0, root_case ? 6u : 1u};
+  parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+  parameters[1].Descriptor.ShaderRegister = 1;
+  parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+  parameters[2].Descriptor.ShaderRegister = 0;
+  parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+  parameters[3].Descriptor.ShaderRegister = 1;
+  parameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+  parameters[4].Descriptor.ShaderRegister = 0;
+  parameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+  parameters[5].Descriptor.ShaderRegister = 2;
+  const D3D12_ROOT_SIGNATURE_DESC root_desc = {
+      empty       ? 0u
+      : root_case ? 6u
+                  : 1u,
+      empty ? nullptr : parameters, 0, nullptr,
+      D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT};
+  if (!CheckHR("Indirect serialize",
+               D3D12SerializeRootSignature(&root_desc,
+                                           D3D_ROOT_SIGNATURE_VERSION_1,
+                                           &root_blob, nullptr)) ||
+      !CheckHR("Indirect root",
+               device->CreateRootSignature(0, root_blob->GetBufferPointer(),
+                                           root_blob->GetBufferSize(),
+                                           IID_PPV_ARGS(&root))))
+    return false;
+  auto metadata = static_cast<dxmt::MTLD3D12RootSignature *>(root.ptr());
+  IndirectBindingObserver observer;
+  if (!observer.Install(root_case ? metadata->UploadQwords * 8 : 0))
+    return false;
+  IndirectBindingObserver::watch_index = indexed;
+  auto shader = [&](const char *text, const char *target, ID3DBlob **blob) {
+    Com<ID3DBlob> errors;
+    auto hr = compile(text, std::strlen(text), "indirect_bindings.hlsl",
+                      nullptr, nullptr, "main", target,
+                      D3DCOMPILE_ENABLE_STRICTNESS, 0, blob, &errors);
+    if (FAILED(hr) && errors)
+      std::cerr << static_cast<const char *>(errors->GetBufferPointer())
+                << "\n";
+    return CheckHR("Indirect shader", hr);
+  };
+  const char *vertex_text =
+      root_case
+          ? "cbuffer C:register(b0){uint a,b,c,d,e,f;} struct O{float4 "
+            "p:SV_Position;nointerpolation float4 c:COLOR;};"
+            "O main(){O o;o.p=float4(0,0,0,1);o.c=uint4(b,c,a,255);return o;}"
+      : vertex ? "struct O{float4 p:SV_Position;nointerpolation float4 "
+                 "c:COLOR;}; O main(float4 v:POSITION){O "
+                 "o;o.p=float4(0,0,0,1);o.c=uint4(uint3(v.xyz),255);return o;}"
+               : "struct O{float4 p:SV_Position;nointerpolation float4 "
+                 "c:COLOR;}; O main(uint id:SV_VertexID){O "
+                 "o;o.p=float4(0,0,0,1);o.c=uint4(17+id,31,47,255);return o;}";
+  if (compute) {
+    if (!shader("cbuffer C:register(b0){uint a,b,c,d,e,f;} RWByteAddressBuffer "
+                "result:register(u0); [numthreads(1,1,1)] void main(){uint "
+                "old;result.InterlockedAdd(0,b,old);result.InterlockedAdd(4,c,"
+                "old);result.InterlockedOr(8,a,old);}",
+                "cs_5_0", &cs))
+      return false;
+    D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+    desc.pRootSignature = root.ptr();
+    desc.CS = {cs->GetBufferPointer(), cs->GetBufferSize()};
+    if (!CheckHR("Indirect compute PSO", device->CreateComputePipelineState(
+                                             &desc, IID_PPV_ARGS(&pipeline))))
+      return false;
+  } else {
+    if (!shader(vertex_text, "vs_5_0", &vs) ||
+        !shader(
+            "struct I{float4 p:SV_Position;nointerpolation float4 c:COLOR;}; "
+            "uint4 main(I input):SV_Target{return uint4(input.c);}",
+            "ps_5_0", &ps))
+      return false;
+    D3D12_INPUT_ELEMENT_DESC input = {
+        "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT,
+        3,          0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+        0};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+    desc.pRootSignature = root.ptr();
+    desc.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    desc.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+    desc.InputLayout = {vertex ? &input : nullptr, vertex ? 1u : 0u};
+    desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+    desc.NumRenderTargets = 1;
+    desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UINT;
+    desc.SampleDesc.Count = 1;
+    desc.SampleMask = UINT_MAX;
+    desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    desc.BlendState.RenderTarget[0].RenderTargetWriteMask =
+        D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (!CheckHR("Indirect graphics PSO", device->CreateGraphicsPipelineState(
+                                              &desc, IID_PPV_ARGS(&pipeline))))
+      return false;
+    if (unused) {
+      input.InputSlot = 31;
+      if (!CheckHR("Indirect slot31 PSO",
+                   device->CreateGraphicsPipelineState(
+                       &desc, IID_PPV_ARGS(&unused_pipeline))))
+        return false;
+    }
+  }
+  if (static_cast<dxmt::MTLD3D12PipelineState *>(pipeline.ptr())
+          ->shader_backend != dxmt::D3D12ShaderBackend::Airconv)
+    return false;
+  auto buffer = [&](D3D12_HEAP_TYPE type, UINT size, D3D12_RESOURCE_FLAGS flags,
+                    D3D12_RESOURCE_STATES state, ID3D12Resource **out) {
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = type;
+    heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = size;
+    desc.Height = desc.DepthOrArraySize = desc.MipLevels =
+        desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    desc.Flags = flags;
+    return CheckHR("Indirect buffer", device->CreateCommittedResource(
+                                          &heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                          state, nullptr, IID_PPV_ARGS(out)));
+  };
+  auto upload = [&](UINT size, ID3D12Resource **out) {
+    return buffer(D3D12_HEAP_TYPE_UPLOAD, size, D3D12_RESOURCE_FLAG_NONE,
+                  D3D12_RESOURCE_STATE_GENERIC_READ, out);
+  };
+  if (!upload(1024, &constants) || !upload(256, &vb) || !upload(256, &ib) ||
+      !upload(256, &arguments) || !upload(256, &count_buffer) ||
+      !buffer(D3D12_HEAP_TYPE_DEFAULT, 512,
+              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+              D3D12_RESOURCE_STATE_COPY_DEST, &output) ||
+      !buffer(D3D12_HEAP_TYPE_READBACK, 256, D3D12_RESOURCE_FLAG_NONE,
+              D3D12_RESOURCE_STATE_COPY_DEST, &readback))
+    return false;
+  void *mapped = nullptr;
+  if (!CheckHR("Indirect constants map", constants->Map(0, nullptr, &mapped)))
+    return false;
+  std::memset(mapped, 0, 1024);
+  constants->Unmap(0, nullptr);
+  if (!CheckHR("Indirect VB map", vb->Map(0, nullptr, &mapped)))
+    return false;
+  const float colors[] = {3, 5, 7, 255, 17, 31, 47, 255};
+  std::memcpy(mapped, colors, sizeof(colors));
+  vb->Unmap(0, nullptr);
+  if (!CheckHR("Indirect IB map", ib->Map(0, nullptr, &mapped)))
+    return false;
+  std::memset(mapped, 0, 256);
+  *static_cast<UINT16 *>(mapped) = 1;
+  ib->Unmap(0, nullptr);
+  if (!CheckHR("Indirect count map", count_buffer->Map(0, nullptr, &mapped)))
+    return false;
+  *static_cast<UINT *>(mapped) = 0;
+  count_buffer->Unmap(0, nullptr);
+  D3D12_VERTEX_BUFFER_VIEW old_vb = {vb->GetGPUVirtualAddress(), 16, 16},
+                           new_vb = {vb->GetGPUVirtualAddress() + 16, 16, 16};
+  D3D12_INDEX_BUFFER_VIEW index_view = {ib->GetGPUVirtualAddress(), 2,
+                                        DXGI_FORMAT_R16_UINT};
+  D3D12_INDEX_BUFFER_VIEW new_index_view = {ib->GetGPUVirtualAddress() + 2, 2,
+                                            DXGI_FORMAT_R16_UINT};
+  std::vector<D3D12_INDIRECT_ARGUMENT_DESC> descriptors;
+  auto add = [&](D3D12_INDIRECT_ARGUMENT_TYPE type) {
+    D3D12_INDIRECT_ARGUMENT_DESC d = {};
+    d.Type = type;
+    descriptors.push_back(d);
+  };
+  if (root_case) {
+    add(D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT);
+    descriptors.back().Constant = {0, 1, 2};
+    add(D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW);
+    descriptors.back().ConstantBufferView.RootParameterIndex = 1;
+    add(D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW);
+    descriptors.back().ShaderResourceView.RootParameterIndex = 2;
+    add(D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW);
+    descriptors.back().UnorderedAccessView.RootParameterIndex = 3;
+  }
+  if (vertex && !control) {
+    add(D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW);
+    descriptors.back().VertexBuffer.Slot = 3;
+    if (unused) {
+      add(D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW);
+      descriptors.back().VertexBuffer.Slot = 31;
+    }
+  }
+  if (indexed)
+    add(D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW);
+  add(compute   ? D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH
+      : indexed ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED
+                : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW);
+  UINT stride = 0;
+  if (!CheckHR("Indirect args map", arguments->Map(0, nullptr, &mapped)))
+    return false;
+  for (UINT i = 0; i < 2; ++i) {
+    BYTE *start = static_cast<BYTE *>(mapped) + i * 96;
+    BYTE *p = start;
+    auto put = [&](const auto &value) {
+      std::memcpy(p, &value, sizeof(value));
+      p += sizeof(value);
+    };
+    if (root_case) {
+      put(UINT(71 + i * 10));
+      put(UINT(72 + i * 10));
+      put(constants->GetGPUVirtualAddress() + 256);
+      put(constants->GetGPUVirtualAddress() + 512);
+      put(output->GetGPUVirtualAddress() + 256);
+    }
+    if (vertex && !control) {
+      put(new_vb);
+      if (unused)
+        put(new_vb);
+    }
+    if (indexed)
+      put(new_index_view);
+    if (compute) {
+      const D3D12_DISPATCH_ARGUMENTS d = {1, 1, 1};
+      put(d);
+    } else if (indexed) {
+      const D3D12_DRAW_INDEXED_ARGUMENTS d = {1, 1, 0, 0, 0};
+      put(d);
+    } else {
+      const D3D12_DRAW_ARGUMENTS d = {1, 1, 0, 0};
+      put(d);
+    }
+    stride = UINT(p - start);
+  }
+  // Packed argument records are separated by an intentional stride gap.
+  arguments->Unmap(0, nullptr);
+  D3D12_COMMAND_SIGNATURE_DESC sig = {96, UINT(descriptors.size()),
+                                      descriptors.data(), 0};
+  if (stride > 96 ||
+      !CheckHR("Indirect signature", device->CreateCommandSignature(
+                                         &sig, root_case ? root.ptr() : nullptr,
+                                         IID_PPV_ARGS(&signature))))
+    return false;
+  if (indexed) {
+    D3D12_INDIRECT_ARGUMENT_DESC d = {};
+    d.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+    D3D12_COMMAND_SIGNATURE_DESC probe = {sizeof(D3D12_DRAW_INDEXED_ARGUMENTS),
+                                          1, &d, 0};
+    if (!CheckHR("Indirect index probe",
+                 device->CreateCommandSignature(&probe, nullptr,
+                                                IID_PPV_ARGS(&index_probe))))
+      return false;
+  }
+  if (admission) {
+    D3D12_INDIRECT_ARGUMENT_DESC illegal[2] = {};
+    illegal[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW;
+    illegal[0].VertexBuffer.Slot = 3;
+    illegal[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    D3D12_COMMAND_SIGNATURE_DESC bad = {32, 2, illegal, 0};
+    Com<ID3D12CommandSignature> rejected;
+    if (device->CreateCommandSignature(
+            &bad, nullptr, IID_PPV_ARGS(&rejected)) != E_INVALIDARG ||
+        rejected)
+      return false;
+    std::cout
+        << "Indirect compute VB signature E_INVALIDARG GPU_NOT_RUN passed\n";
+  }
+  D3D12_COMMAND_QUEUE_DESC q = {};
+  if (!CheckHR("Indirect queue",
+               device->CreateCommandQueue(&q, IID_PPV_ARGS(&queue))) ||
+      !CheckHR("Indirect allocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                              IID_PPV_ARGS(&allocator))) ||
+      !CheckHR("Indirect list",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                         allocator.ptr(), pipeline.ptr(),
+                                         IID_PPV_ARGS(&list))) ||
+      !CheckHR("Indirect fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                     IID_PPV_ARGS(&fence))) ||
+      !CheckHR("Indirect gate", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                    IID_PPV_ARGS(&gate))))
+    return false;
+  struct Unblock {
+    ID3D12Fence *f;
+    ~Unblock() { f->Signal(1); }
+  } unblock{gate.ptr()};
+  D3D12_CPU_DESCRIPTOR_HANDLE rtv = {};
+  if (!compute) {
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = 4;
+    desc.Height = desc.DepthOrArraySize = desc.MipLevels =
+        desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UINT;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    hd.NumDescriptors = 1;
+    if (!CheckHR("Indirect target", device->CreateCommittedResource(
+                                        &heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                        D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                        nullptr, IID_PPV_ARGS(&target))) ||
+        !CheckHR("Indirect RTV",
+                 device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&rtvs))))
+      return false;
+    rtv = rtvs->GetCPUDescriptorHandleForHeapStart();
+    device->CreateRenderTargetView(target.ptr(), nullptr, rtv);
+  }
+  if (admission) {
+    list->ExecuteIndirect(signature.ptr(), 1, arguments.ptr(), 0, nullptr, 0);
+    if (list->Close() != E_FAIL ||
+        list->Reset(allocator.ptr(), pipeline.ptr()) != E_FAIL ||
+        !CheckHR("Indirect missing-root device",
+                 device->GetDeviceRemovedReason()))
+      return false;
+    list = nullptr;
+    if (!CheckHR("Indirect missing-root allocator reuse", allocator->Reset()) ||
+        !CheckHR("Indirect replacement list",
+                 device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                           allocator.ptr(), pipeline.ptr(),
+                                           IID_PPV_ARGS(&list))))
+      return false;
+    std::cout << "Indirect missing root rejected at Close/Reset; fresh list "
+                 "reuses allocator "
+                 "GPU_NOT_RUN passed\n";
+  }
+  const UINT initial[] = {11, 22, 33, 44, 55, 66};
+  alignas(uint64_t) std::array<BYTE, 512> expected_upload = {};
+  if (root_case) {
+    std::memcpy(expected_upload.data(), initial, sizeof(initial));
+    reinterpret_cast<UINT *>(expected_upload.data())[1] = 0;
+    reinterpret_cast<UINT *>(expected_upload.data())[2] = 0;
+    auto words = reinterpret_cast<uint64_t *>(expected_upload.data());
+    words[metadata->Parameters[4].source_qword] =
+        output->GetGPUVirtualAddress();
+    words[metadata->Parameters[5].source_qword] =
+        constants->GetGPUVirtualAddress() + 768;
+  }
+  for (UINT pass = 0; pass < 3; ++pass) {
+    if (pass != 1) {
+      if (pass && (!CheckHR("Indirect allocator reset", allocator->Reset()) ||
+                   !CheckHR("Indirect list reset",
+                            list->Reset(allocator.ptr(), pipeline.ptr()))))
+        return false;
+      auto barrier = [&](ID3D12Resource *r, D3D12_RESOURCE_STATES a,
+                         D3D12_RESOURCE_STATES b) {
+        D3D12_RESOURCE_BARRIER d = {};
+        d.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        d.Transition = {r, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, a, b};
+        list->ResourceBarrier(1, &d);
+      };
+      if (compute) {
+        list->CopyBufferRegion(output.ptr(), 0, constants.ptr(), 0, 256);
+        barrier(output.ptr(), D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->SetComputeRootSignature(root.ptr());
+      } else {
+        list->SetGraphicsRootSignature(root.ptr());
+        list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        const float clear[4] = {};
+        list->ClearRenderTargetView(rtv, clear, 0, nullptr);
+        const D3D12_RECT scissor = {0, 0, 4, 1};
+        list->RSSetScissorRects(1, &scissor);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
+      }
+      if (root_case) {
+        if (compute) {
+          list->SetComputeRoot32BitConstants(0, 6, initial, 0);
+          list->SetComputeRootConstantBufferView(
+              1, constants->GetGPUVirtualAddress());
+          list->SetComputeRootShaderResourceView(
+              2, constants->GetGPUVirtualAddress() + 512);
+          list->SetComputeRootUnorderedAccessView(
+              3, output->GetGPUVirtualAddress() + 256);
+          list->SetComputeRootUnorderedAccessView(
+              4, output->GetGPUVirtualAddress());
+          list->SetComputeRootConstantBufferView(
+              5, constants->GetGPUVirtualAddress() + 768);
+        } else {
+          list->SetGraphicsRoot32BitConstants(0, 6, initial, 0);
+          list->SetGraphicsRootConstantBufferView(
+              1, constants->GetGPUVirtualAddress());
+          list->SetGraphicsRootShaderResourceView(
+              2, constants->GetGPUVirtualAddress() + 512);
+          list->SetGraphicsRootUnorderedAccessView(
+              3, output->GetGPUVirtualAddress() + 256);
+          list->SetGraphicsRootUnorderedAccessView(
+              4, output->GetGPUVirtualAddress());
+          list->SetGraphicsRootConstantBufferView(
+              5, constants->GetGPUVirtualAddress() + 768);
+        }
+      }
+      if (vertex) {
+        list->IASetVertexBuffers(3, 1, &old_vb);
+        if (unused)
+          list->IASetVertexBuffers(31, 1, &old_vb);
+      }
+      if (indexed)
+        list->IASetIndexBuffer(&index_view);
+      auto viewport = [&](UINT x) {
+        D3D12_VIEWPORT v = {float(x), 0, 1, 1, 0, 1};
+        list->RSSetViewports(1, &v);
+      };
+      auto direct = [&] {
+        if (compute)
+          list->Dispatch(1, 1, 1);
+        else if (indexed)
+          list->DrawIndexedInstanced(1, 1, 0, 0, 0);
+        else
+          list->DrawInstanced(1, 1, 0, 0);
+      };
+      if (!compute)
+        viewport(2);
+      direct();
+      if (!compute)
+        viewport(0);
+      auto start = std::chrono::steady_clock::now();
+      list->ExecuteIndirect(signature.ptr(), zero ? 0 : 2, arguments.ptr(), 0,
+                            count_zero ? count_buffer.ptr() : nullptr, 0);
+      std::cout << "Indirect record mode=" << mode << " us="
+                << std::chrono::duration<double, std::micro>(
+                       std::chrono::steady_clock::now() - start)
+                       .count()
+                << "\n";
+      if (compute) {
+        D3D12_RESOURCE_BARRIER u = {};
+        u.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        u.UAV.pResource = output.ptr();
+        list->ResourceBarrier(1, &u);
+      } else
+        viewport(1);
+      if (indexed) {
+        // A GPU-zero-count probe observes the CPU index binding without
+        // consuming a NULL IB.
+        list->ExecuteIndirect(index_probe.ptr(), 1, arguments.ptr(), 0,
+                              count_buffer.ptr(), 0);
+        list->DrawInstanced(1, 1, 0, 0);
+      } else
+        direct();
+      if (unused) {
+        list->SetPipelineState(unused_pipeline.ptr());
+        viewport(3);
+        direct();
+      }
+      if (compute) {
+        barrier(output.ptr(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_COPY_SOURCE);
+        list->CopyBufferRegion(readback.ptr(), 0, output.ptr(), 0, 12);
+        barrier(output.ptr(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                D3D12_RESOURCE_STATE_COPY_DEST);
+      } else {
+        barrier(target.ptr(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION source = {}, dest = {};
+        source.pResource = target.ptr();
+        dest.pResource = readback.ptr();
+        dest.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dest.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UINT, 4, 1, 1,
+                                          256};
+        list->CopyTextureRegion(&dest, 0, 0, 0, &source, nullptr);
+        barrier(target.ptr(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                D3D12_RESOURCE_STATE_RENDER_TARGET);
+      }
+      if (!CheckHR("Indirect Close", list->Close()))
+        return false;
+    }
+    IndirectBindingObserver::captured = false;
+    IndirectBindingObserver::index_seen = false;
+    if (pass == 2 && !CheckHR("Indirect gate wait", queue->Wait(gate.ptr(), 1)))
+      return false;
+    ID3D12CommandList *lists[] = {list.ptr()};
+    queue->ExecuteCommandLists(1, lists);
+    if (pass == 2) {
+      if (SUCCEEDED(allocator->Reset())) {
+        std::cerr << "Indirect pending reset admitted\n";
+        return false;
+      }
+      if (!CheckHR("Indirect gate signal", gate->Signal(1)))
+        return false;
+    }
+    if (!CheckHR("Indirect signal", queue->Signal(fence.ptr(), pass + 1)) ||
+        !CheckHR("Indirect wait",
+                 fence->SetEventOnCompletion(pass + 1, event.value)) ||
+        WaitForSingleObject(event.value, 10000) != WAIT_OBJECT_0 ||
+        !CheckHR("Indirect device status", device->GetDeviceRemovedReason()))
+      return false;
+    if (!CheckHR("Indirect readback", readback->Map(0, nullptr, &mapped)))
+      return false;
+    bool good = true;
+    if (compute) {
+      UINT expected[] = {22 + (zero || count_zero ? 0u : 152u),
+                         33 + (zero || count_zero ? 0u : 154u), 11};
+      if (wrong)
+        expected[0] ^= 1;
+      good = !std::memcmp(mapped, expected, sizeof(expected));
+    } else {
+      BYTE expected[16] = {};
+      auto pixel = [&](UINT x, UINT r, UINT g, UINT b, UINT a) {
+        expected[x * 4] = BYTE(r);
+        expected[x * 4 + 1] = BYTE(g);
+        expected[x * 4 + 2] = BYTE(b);
+        expected[x * 4 + 3] = BYTE(a);
+      };
+      if (root_case) {
+        if (!zero && !count_zero)
+          pixel(0, 81, 82, 11, 255);
+        pixel(1, 0, 0, 11, 255);
+        pixel(2, 22, 33, 11, 255);
+      } else {
+        pixel(0, control ? 3 : 17, control ? 5 : 31, control ? 7 : 47, 255);
+        if (!indexed)
+          pixel(1, control ? 3 : 0, control ? 5 : 0, control ? 7 : 0, 255);
+        else
+          pixel(1, 17, 31, 47, 255);
+        pixel(2, vertex ? 3 : 18, vertex ? 5 : 31, vertex ? 7 : 47, 255);
+        if (unused)
+          pixel(3, 0, 0, 0, 255);
+      }
+      if (wrong)
+        expected[0] ^= 1;
+      good = !std::memcmp(mapped, expected, sizeof(expected));
+    }
+    if (!good) {
+      auto b = static_cast<BYTE *>(mapped);
+      std::cerr << "FAIL indirect mode=" << mode << " pass=" << pass
+                << " GPU bytes:";
+      for (UINT i = 0; i < 16; ++i)
+        std::cerr << " " << UINT(b[i]);
+      std::cerr << "\n";
+    }
+    readback->Unmap(0, nullptr);
+    if (!good)
+      return false;
+    if (indexed && (!IndirectBindingObserver::index_seen ||
+                    IndirectBindingObserver::last_index)) {
+      std::cerr << "FAIL indirect NULL index state mode=" << mode
+                << " pass=" << pass << "\n";
+      return false;
+    }
+    if (root_case &&
+        (!IndirectBindingObserver::captured ||
+         std::memcmp(IndirectBindingObserver::snapshot.data(),
+                     expected_upload.data(), metadata->UploadQwords * 8))) {
+      std::cerr << "FAIL indirect root upload mode=" << mode << " pass=" << pass
+                << " captured=" << IndirectBindingObserver::captured << "\n";
+      return false;
+    }
+    std::cout << "Indirect bindings mode=" << mode << " pass=" << pass
+              << " exact GPU readback and root upload passed\n";
+  }
+  std::cout << "Indirect native render_encoders="
+            << IndirectBindingObserver::render_encoders
+            << " compute_encoders=" << IndirectBindingObserver::compute_encoders
+            << " blit_encoders=" << IndirectBindingObserver::blit_encoders
+            << " encode_batches=" << IndirectBindingObserver::encoders
+            << " draws_dispatches=" << IndirectBindingObserver::draws
+            << " ICB=" << IndirectBindingObserver::indirect
+            << " translate_us=" << IndirectBindingObserver::translate_us
+            << "\n";
+  return true;
+}
+
 } // namespace
 
 // Count only native allocations made while recording the copy fixture. The
@@ -4299,6 +5073,8 @@ bool TestWriteBufferImmediate(const char *mode) {
 }
 
 int main(int argc, char **argv) {
+  if (argc == 3 && !std::strcmp(argv[1], "--indirect-bindings"))
+    return TestIndirectBindings(argv[2]) ? 0 : 1;
   if (argc == 3 && !std::strcmp(argv[1], "--write-immediate-perf")) {
     if (std::strcmp(argv[2], "direct") && std::strcmp(argv[2], "copy-reference")) return 2;
     for (UINT i = 0; i < 16; ++i)

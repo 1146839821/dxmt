@@ -84,6 +84,7 @@ struct dxmt_render_command_data {
   device void * index_buffer;
   uint index_buffer_format;
   uint vertex_argbuf_stride;
+  uint vertex_slot_mask;
 };
 
 )";
@@ -108,8 +109,17 @@ public:
     uint64_t argument_size = 0;
     ByteStride = pDesc->ByteStride;
     UpdateRootArguments = false;
-    UpdateVertexBuffers = false;
+    UpdateVertexBuffers = 0;
     uint32_t ib_index = ~-0u;
+
+    auto mark_root_dwords = [&](UINT parameter, UINT offset, UINT count) {
+      const UINT first = rootsig->Parameters[parameter].source_qword * 2 + offset;
+      if (first > 128 || count > 128 - first)
+        return false;
+      for (UINT i = first; i < first + count; ++i)
+        RootArgumentDwords[i / 64] |= uint64_t(1) << (i % 64);
+      return true;
+    };
 
     source << kSharedHeader;
 
@@ -142,7 +152,7 @@ public:
         if (arg.VertexBuffer.Slot >= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT)
           return E_INVALIDARG;
         argument_size += sizeof(uint64_t) + sizeof(uint32_t) * 2;
-        UpdateVertexBuffers = true;
+        UpdateVertexBuffers |= 1u << arg.VertexBuffer.Slot;
         source << "d3d12_vertex_buffer_view vb_" << i << ";\n";
         break;
       }
@@ -162,6 +172,9 @@ public:
           return E_INVALIDARG;
         if (arg.Constant.Num32BitValuesToSet > (UINT64_MAX - argument_size) / sizeof(uint32_t))
           return E_INVALIDARG;
+        if (!mark_root_dwords(arg.Constant.RootParameterIndex, arg.Constant.DestOffsetIn32BitValues,
+                              arg.Constant.Num32BitValuesToSet))
+          return E_INVALIDARG;
         argument_size += uint64_t(arg.Constant.Num32BitValuesToSet) * sizeof(uint32_t);
         UpdateRootArguments = true;
         for (unsigned j = 0; j < arg.Constant.Num32BitValuesToSet; j++) {
@@ -174,6 +187,8 @@ public:
                             arg.ConstantBufferView.RootParameterIndex, D3D12_ROOT_PARAMETER_TYPE_CBV, 0, 2
                         ))
           return E_INVALIDARG;
+        if (!mark_root_dwords(arg.ConstantBufferView.RootParameterIndex, 0, 2))
+          return E_INVALIDARG;
         argument_size += sizeof(uint64_t);
         UpdateRootArguments = true;
         source << "ulong cb_" << i << ";\n";
@@ -184,6 +199,8 @@ public:
                             arg.ShaderResourceView.RootParameterIndex, D3D12_ROOT_PARAMETER_TYPE_SRV, 0, 2
                         ))
           return E_INVALIDARG;
+        if (!mark_root_dwords(arg.ShaderResourceView.RootParameterIndex, 0, 2))
+          return E_INVALIDARG;
         argument_size += sizeof(uint64_t);
         UpdateRootArguments = true;
         source << "ulong srv_" << i << ";\n";
@@ -193,6 +210,8 @@ public:
         if (!rootsig || !rootsig->IsArgumentRangeValid(
                             arg.UnorderedAccessView.RootParameterIndex, D3D12_ROOT_PARAMETER_TYPE_UAV, 0, 2
                         ))
+          return E_INVALIDARG;
+        if (!mark_root_dwords(arg.UnorderedAccessView.RootParameterIndex, 0, 2))
           return E_INVALIDARG;
         argument_size += sizeof(uint64_t);
         UpdateRootArguments = true;
@@ -216,6 +235,8 @@ public:
     bool is_compute = side_effect == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
     CommandType = side_effect;
     UpdateIndexBuffer = ib_index != ~0u;
+    if (is_compute && (UpdateVertexBuffers || UpdateIndexBuffer))
+      return E_INVALIDARG;
 
     if (is_compute)
       source
@@ -297,8 +318,12 @@ public:
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW: {
         auto slot = arg.VertexBuffer.Slot;
-        source << "vertex_buffer[" << slot << "] = {arg.vb_" << i << ".buffer,arg.vb_" << i
-               << ".stride_in_bytes,arg.vb_" << i << ".size_in_bytes};\n";
+        // The active PSO determines the compact table, not the command signature.
+        // Unused slots have no entry and must never write into the upload heap.
+        source << "if (command_data.vertex_slot_mask & " << (1u << slot) << "u) {\n";
+        source << "vertex_buffer[popcount(command_data.vertex_slot_mask & " << ((1u << slot) - 1u)
+               << "u)] = {arg.vb_" << i << ".buffer,arg.vb_" << i
+               << ".stride_in_bytes,arg.vb_" << i << ".size_in_bytes};\n}\n";
         break;
       }
       case D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW: {

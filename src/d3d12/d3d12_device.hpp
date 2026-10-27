@@ -520,7 +520,9 @@ public:
   D3D12_INDIRECT_ARGUMENT_TYPE CommandType;
   UINT ByteStride = 0;
   UINT UpdateRootArguments : 1;
-  UINT UpdateVertexBuffers : 1;
+  // Slots modified by the signature; zero also serves as the no-update fast path.
+  UINT UpdateVertexBuffers = 0;
+  uint64_t RootArgumentDwords[2] = {};
   UINT UpdateIndexBuffer   : 1;
 
   WMT::Reference<WMT::RenderPipelineState> render_resolver;

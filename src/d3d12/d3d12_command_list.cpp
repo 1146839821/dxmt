@@ -2435,7 +2435,7 @@ public:
       uint32_t stride;
       uint32_t length;
     };
-    auto stride = align(sizeof(VERTEX_BUFFER_ENTRY) * max_slot, 16);
+    auto stride = align(sizeof(VERTEX_BUFFER_ENTRY) * std::popcount(slot_mask), 16);
 
     if (!Count || stride > kGPUHeapSize / Count) {
       FailRecording(__func__, "invalid table size count=", Count, " stride=", stride);
@@ -3381,7 +3381,9 @@ public:
       return 0;
     }
     const auto qword_bytes = sizeof(uint64_t) * size_t(pRootSig->UploadQwords);
-    if (!qword_bytes || Count > std::numeric_limits<size_t>::max() / qword_bytes) {
+    if (!qword_bytes)
+      return 0;
+    if (Count > std::numeric_limits<size_t>::max() / qword_bytes) {
       FailRecording(__func__, "root argument allocation overflow count=", Count,
                     " qword_bytes=", qword_bytes);
       return 0;
@@ -6362,6 +6364,32 @@ public:
     return true;
   }
 
+  void
+  ResetIndirectState(const MTLD3D12CommandSignature *signature, bool compute) {
+    auto *dwords = reinterpret_cast<uint32_t *>(compute ? rootarg_compute_staging_ : rootarg_graphics_staging_);
+    if (signature->UpdateRootArguments) {
+      for (UINT word = 0; word < std::size(signature->RootArgumentDwords); ++word) {
+        auto mask = signature->RootArgumentDwords[word];
+        while (mask) {
+          const auto bit = std::countr_zero(mask);
+          dwords[word * 64 + bit] = 0;
+          mask &= mask - 1;
+        }
+      }
+      dirty_state_.set(compute ? DirtyState::ComputeRootArguments : DirtyState::GraphicsRootArguments);
+    }
+    auto slots = signature->UpdateVertexBuffers;
+    while (slots) {
+      const auto slot = std::countr_zero(slots);
+      vertex_buffers_[slot] = {};
+      slots &= slots - 1;
+    }
+    if (signature->UpdateVertexBuffers)
+      dirty_state_.set(DirtyState::VertexBuffer);
+    if (signature->UpdateIndexBuffer)
+      IASetIndexBuffer(nullptr);
+  }
+
   void STDMETHODCALLTYPE ExecuteIndirect(
       ID3D12CommandSignature *pCommandSignature, UINT MaxCommandCount, ID3D12Resource *pArgBuffer,
       UINT64 ArgBufferOffset, ID3D12Resource *pCountBuffer, UINT64 CountBufferOffset
@@ -6390,6 +6418,11 @@ public:
     } else if (!ValidateIndirectPipeline(pso_graphics_.ptr(), sig, "ExecuteIndirect(Draw)")) {
       return;
     }
+    if (sig->UpdateRootArguments &&
+        !(sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH ? rootsig_compute_ : rootsig_graphics_)) {
+      FailRecording(__func__, "root-updating indirect command has no bound root signature");
+      return;
+    }
     auto arg_buffer = static_cast<MTLD3D12Resource *>(pArgBuffer);
     if (!arg_buffer || !arg_buffer->buffer || sig->ByteStride == 0)
       return;
@@ -6411,6 +6444,10 @@ public:
         return;
       }
       CountBufferAddress = count_buffer->buffer->current()->gpuAddress() + CountBufferOffset;
+    }
+    if (!MaxCommandCount) {
+      ResetIndirectState(sig, sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH);
+      return;
     }
     if (sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH) {
       uint64_t filtered_count_buffer_address = CountBufferAddress;
@@ -6438,10 +6475,13 @@ public:
         cmd->rootsig_qwords = EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_, MaxCommandCount);
         cmd->rootsig_qwords += allocator_->gpu_heap_buffer_address_;
         cmd->rootsig_qwords_stride = rootsig_compute_->UploadQwords;
-        cmd->static_samplers = EncodeStaticSamplers(rootsig_compute_.ptr());
-        cmd->static_samplers += allocator_->gpu_heap_buffer_address_;
+        if (rootsig_compute_->NumStaticSamplers) {
+          cmd->static_samplers = EncodeStaticSamplers(rootsig_compute_.ptr());
+          cmd->static_samplers += allocator_->gpu_heap_buffer_address_;
+        }
       }
 
+      ResetIndirectState(sig, true);
       return;
     }
 
@@ -6450,8 +6490,6 @@ public:
         FailRecording(__func__, "predication with AIRCONV geometry is unsupported");
         return;
       }
-      if (!MaxCommandCount)
-        return;
       if ((sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW &&
            sig->CommandType != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED) ||
            MaxCommandCount != 1 || pCountBuffer || sig->UpdateRootArguments || sig->UpdateVertexBuffers ||
@@ -6523,14 +6561,20 @@ public:
     cmd->index_buffer_format = index_type == WMTIndexTypeUInt32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
     if (!encode_binding)
       return;
-    cmd->rootsig_qwords = EncodeRootArgument(rootsig_graphics_.ptr(), rootarg_graphics_staging_, MaxCommandCount);
-    cmd->rootsig_qwords += allocator_->gpu_heap_buffer_address_;
-    cmd->rootsig_qwords_stride = rootsig_graphics_->UploadQwords;
-    cmd->static_samplers = EncodeStaticSamplers(rootsig_graphics_.ptr());
-    cmd->static_samplers += allocator_->gpu_heap_buffer_address_;
+    if (rootsig_graphics_ && rootsig_graphics_->UploadQwords) {
+      cmd->rootsig_qwords = EncodeRootArgument(rootsig_graphics_.ptr(), rootarg_graphics_staging_, MaxCommandCount);
+      cmd->rootsig_qwords += allocator_->gpu_heap_buffer_address_;
+      cmd->rootsig_qwords_stride = rootsig_graphics_->UploadQwords;
+    }
+    if (rootsig_graphics_ && rootsig_graphics_->NumStaticSamplers) {
+      cmd->static_samplers = EncodeStaticSamplers(rootsig_graphics_.ptr());
+      cmd->static_samplers += allocator_->gpu_heap_buffer_address_;
+    }
     auto [VBOffset, VBStride] = PopulateVertexBufferTable(MaxCommandCount);
-    cmd->vertex_buffer = allocator_->gpu_heap_buffer_address_ + VBOffset;
+    cmd->vertex_buffer = VBStride ? allocator_->gpu_heap_buffer_address_ + VBOffset : 0;
     cmd->vertex_argbuf_stride = VBStride;
+    cmd->vertex_slot_mask = pso_graphics_->slot_mask;
+    ResetIndirectState(sig, false);
   };
 
   void STDMETHODCALLTYPE

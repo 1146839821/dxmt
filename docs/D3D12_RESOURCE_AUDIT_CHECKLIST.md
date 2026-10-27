@@ -4581,5 +4581,57 @@ manifest.json,results.json,baseline-and-candidate.json,final-v6-* logs,
 perf-v6-raw.json/perf-v6-summary.json and build logs. M1Max/Apple7,
 macOS27.0.1(26A434),Xcode27.1(27A9275;requested26 unavailable),Wine11 x64/Rosetta,
 clang23.1.1,MSC runtime4.0.1. User .gitignore excluded. Full goal remains OPEN.
-Next N10 shared indirect slice retains findings2–4:sparse compact VB slots,
+Next N11 shared indirect slice retains findings2–4:sparse compact VB slots,
 zero-length root upload and post-indirect modified-state reset/dirty tracking.
+
+
+### N11 — ExecuteIndirect compact VB ABI and post-state, 2026-10-27
+
+Closes user review findings2–4 after the N20 numeric/GS and N07 stride rounds.
+Workflow node is N11; prior next-step N10 label corrected. Five existing production
+files change; new src/d3d12 files=0. Existing signature owns modified VB slot and
+root DWORD masks. Existing resolver receives the active PSO mask and writes
+popcount(lower active slots),skipping inactive slots. CPU tables allocate only
+active entries. Paired internal CPU/MSL command data adds vertex_slot_mask;
+offset80/size88 checked. No public/WineMetal ABI or backend changes.
+
+Existing command-list helper clears signature-modified VB/IB/root DWORD state,
+marks graphics/compute root and VB dirty,and preserves untouched values. IB clear
+reuses the existing setter. MaxCount0 also resets state and skips ICB allocation;
+GPU count0 resets state after encoding. Empty root uploads and absent sampler
+uploads are skipped. Root-updating work without a bound root fails recording;
+compute signatures with VB/IB updates reject E_INVALIDARG. No new executor,
+lifetime owner,reset allocation/lock,encoder or barrier.
+
+Preserved baseline control passes; sparse slot3 reads old VB; empty-root Close
+fails; IB remains bound; graphics/compute direct work reuses old constants.
+Final private/no-private matrix:36 processes,34 success,2 wrong-oracle negatives.
+Twenty-six positive new-mode processes execute three exact readbacks each,
+covering sparse3,inactive31 plus later PSO31,empty VB/IB roots,partial constants,
+NULL CBV/SRV/UAV uploads,unmodified views,graphics/compute,CPU/GPU zero counts,
+closed-list replay,fenced reset/rerecord and pending-reset rejection. Admission
+checks reject invalid compute VB signature and missing roots without device loss;
+Close-failed lists retain E_FAIL on Reset and are replaced before allocator reuse.
+Four MSC stride/pure-indirect processes,two selected AIRCONV controls and two
+feature controls pass. All final logs are clean under Metal API/shader validation.
+
+Proof boundaries:root NULL view reset is verified in actual uploaded native
+argument bytes without NULL shader dereference. NULL IB address is observed in
+a later GPU-zero-count indirect command,then valid nonindexed direct work runs.
+Preliminary nil-index direct draw assertions and invalid failed-list Reset test
+expectations are retained as diagnostic history,not accepted passes.
+
+Five interleaved private-runtime perf samples:non-updating control first record
+566.6→618.6us(+9.2%),warm rerecord40.3→40.6us(+0.7%),native encode41.6→44.5us/submit
+(+7.0%). INCONCLUSIVE; no performance improvement or regression-free claim.
+Same control counts across3 submissions before/after:6 render,0 compute,3 blit,
+3 ICB. Root updating graphics has the same counts;compute0/3/6 encoders,3 ICB.
+No isolated GPU/full-game timing. Reset cost O(modified slots+DWORDs),no new
+per-draw lock or heap walk. Predication,upper root mask/multiple active sparse
+slots,overlap/concurrency/stress,Windows,other GPUs,fullT3/T4 NOT_RUN.
+
+Evidence:`../dxmt-test/n11-indirect-bindings-20261027/N11-indirect-bindings.md`,
+manifest.json,results.json,final-v2-* logs,perf-raw.json/perf-summary.json,
+accepted-artifacts and build logs. Same M1Max/macOS27.0.1/Xcode27.1/Wine11/clang23.1.1/
+MSC4.0.1 environment. User .gitignore excluded. Public FL11_1/SM6.0/Options/Tiers
+unchanged;MSC updating/emulated-GS indirect gates remain. Full goal stays OPEN.

@@ -68,7 +68,10 @@ struct IndirectRenderCommandData {
   uint64_t index_buffer;
   DXGI_FORMAT index_buffer_format;
   uint32_t vertex_argbuf_stride;
+  uint32_t vertex_slot_mask;
 };
+static_assert(offsetof(IndirectRenderCommandData, vertex_slot_mask) == 80);
+static_assert(sizeof(IndirectRenderCommandData) == 88);
 
 class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllocator> {
   friend class MTLD3D12GraphicsCommandListImpl;
