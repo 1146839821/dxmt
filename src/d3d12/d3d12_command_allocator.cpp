@@ -337,7 +337,7 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectComputeCommand(MTLD3D12CommandSignat
 
 IndirectRenderCommandData *
 MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
-    MTLD3D12CommandSignature *pCmdSig, MTLD3D12GraphicsPipelineState *pPSO, size_t MaxCount
+    MTLD3D12CommandSignature *pCmdSig, WMT::RenderPipelineState pipeline, size_t MaxCount
 ) {
   WMTIndirectCommandBufferInfo info;
   info.inherit_buffers = !(pCmdSig->UpdateVertexBuffers || pCmdSig->UpdateIndexBuffer || pCmdSig->UpdateRootArguments);
@@ -420,7 +420,7 @@ MTLD3D12CommandAllocatorImpl::EncodeIndirectRenderCommand(
 
     auto &cmd_setpso = EncodeRenderCommand<wmtcmd_render_setpso>();
     cmd_setpso.type = WMTRenderCommandSetPSO;
-    cmd_setpso.pso = pPSO->pso;
+    cmd_setpso.pso = pipeline;
   }
 
   auto &cmd = EncodeRenderCommand<wmtcmd_render_executecommands>();

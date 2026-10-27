@@ -5,6 +5,7 @@
 #include "d3d12_device.hpp"
 #include <utility>
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -441,9 +442,373 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
   return true;
 }
 
+bool RunVertexStride(const char *vs_path, const char *ps_path,
+                     const char *mode) {
+  using dxmt::Com;
+  const bool instanced =
+      !strcmp(mode, "instance") || !strcmp(mode, "instance-zero");
+  const bool instance_zero = !strcmp(mode, "instance-zero");
+  const bool indexed = !strcmp(mode, "indexed");
+  const bool indirect = !strcmp(mode, "indirect");
+  const bool performance =
+      !strcmp(mode, "perf-packed") || !strcmp(mode, "perf-vertex");
+  const bool packed = !strcmp(mode, "packed") || !strcmp(mode, "perf-packed");
+  const bool wrong = !strcmp(mode, "wrong");
+  const bool lifetime = !strcmp(mode, "lifetime");
+  if (!instanced && !packed && !wrong && !indexed && !indirect &&
+      !performance && !lifetime && strcmp(mode, "vertex"))
+    return false;
+  auto read = [](const char *path) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f || f.tellg() <= 0 || f.tellg() > 16 * 1024 * 1024)
+      return std::vector<char>{};
+    std::vector<char> data(static_cast<size_t>(f.tellg()));
+    f.seekg(0);
+    if (!f.read(data.data(), data.size()))
+      data.clear();
+    return data;
+  };
+  auto vs = read(vs_path), ps = read(ps_path);
+  if (vs.empty() || ps.empty())
+    return false;
+  Com<ID3D12Device> device;
+  Com<ID3D12RootSignature> root;
+  Com<ID3D12PipelineState> pso, second_pso;
+  Com<ID3D12CommandQueue> queue;
+  Com<ID3D12CommandAllocator> allocator;
+  Com<ID3D12GraphicsCommandList> list;
+  Com<ID3D12DescriptorHeap> rtvs;
+  Com<ID3D12Resource> vb, ib, arguments, target, readback;
+  Com<ID3D12CommandSignature> signature;
+  Com<ID3D12Fence> fence, gate;
+  Com<ID3DBlob> blob;
+  struct Event {
+    HANDLE value = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+    ~Event() {
+      if (value)
+        CloseHandle(value);
+    }
+  } event;
+  if (!event.value ||
+      !CheckHR("Stride device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&device))))
+    return false;
+  D3D12_ROOT_PARAMETER parameter = {};
+  parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  parameter.Constants = {0, 0, 1};
+  parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {
+      1, &parameter, 0, nullptr,
+      D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT};
+  if (!CheckHR("Stride serialize",
+               D3D12SerializeRootSignature(
+                   &root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, nullptr)) ||
+      !CheckHR("Stride root", device->CreateRootSignature(
+                                  0, blob->GetBufferPointer(),
+                                  blob->GetBufferSize(), IID_PPV_ARGS(&root))))
+    return false;
+  const D3D12_INPUT_ELEMENT_DESC layout = {
+      "POSITION",
+      0,
+      DXGI_FORMAT_R32G32B32_FLOAT,
+      3,
+      0,
+      instanced ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA
+                : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+      instanced && !instance_zero ? 2u : 0u};
+  D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+  desc.pRootSignature = root.ptr();
+  desc.VS = {vs.data(), vs.size()};
+  desc.PS = {ps.data(), ps.size()};
+  desc.InputLayout = {&layout, 1};
+  desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+  desc.NumRenderTargets = 1;
+  desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UINT;
+  desc.SampleDesc.Count = 1;
+  desc.SampleMask = UINT_MAX;
+  desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+  desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+  desc.RasterizerState.DepthClipEnable = TRUE;
+  desc.BlendState.RenderTarget[0].RenderTargetWriteMask =
+      D3D12_COLOR_WRITE_ENABLE_ALL;
+  auto create_pipelines = [&] {
+    return CheckHR("Stride PSO", device->CreateGraphicsPipelineState(
+                                     &desc, IID_PPV_ARGS(&pso))) &&
+           (!lifetime || CheckHR("Stride second PSO",
+                                 device->CreateGraphicsPipelineState(
+                                     &desc, IID_PPV_ARGS(&second_pso))));
+  };
+  if (!create_pipelines())
+    return false;
+  if (static_cast<dxmt::MTLD3D12PipelineState *>(pso.ptr())->shader_backend !=
+      dxmt::D3D12ShaderBackend::MetalShaderConverter)
+    return false;
+  const UINT width = 256, height = 4, count = 32, instances = 4;
+  UINT strides[] = {packed ? 12u : 16u, packed ? 12u : 32u, packed ? 12u : 16u,
+                    packed ? 12u : 0u};
+  auto make_buffer = [&](D3D12_HEAP_TYPE type, UINT size,
+                         D3D12_RESOURCE_STATES state, ID3D12Resource **out) {
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = type;
+    heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC d = {};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = size;
+    d.Height = d.DepthOrArraySize = d.MipLevels = d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    return CheckHR("Stride buffer", device->CreateCommittedResource(
+                                        &heap, D3D12_HEAP_FLAG_NONE, &d, state,
+                                        nullptr, IID_PPV_ARGS(out)));
+  };
+  if (!make_buffer(D3D12_HEAP_TYPE_UPLOAD, 8192,
+                   D3D12_RESOURCE_STATE_GENERIC_READ, &vb) ||
+      !make_buffer(D3D12_HEAP_TYPE_READBACK, width * height * 4,
+                   D3D12_RESOURCE_STATE_COPY_DEST, &readback))
+    return false;
+  void *mapped = nullptr;
+  if (!CheckHR("Stride map", vb->Map(0, nullptr, &mapped)))
+    return false;
+  memset(mapped, 0xcd, 8192);
+  for (UINT row = 0; row < height; ++row)
+    for (UINT i = 0; i < count; ++i) {
+      const float value[] = {float(i + row * 40 + 1), float(i * 3 + row + 2),
+                             float(i * 5 + row + 3)};
+      memcpy(static_cast<BYTE *>(mapped) + 32 + row * 2048 +
+                 i * (strides[row] ? strides[row] : 12),
+             value, 12);
+    }
+  vb->Unmap(0, nullptr);
+  if (indexed) {
+    if (!make_buffer(D3D12_HEAP_TYPE_UPLOAD, 128,
+                     D3D12_RESOURCE_STATE_GENERIC_READ, &ib) ||
+        !CheckHR("Stride IB map", ib->Map(0, nullptr, &mapped)))
+      return false;
+    auto indices = static_cast<UINT16 *>(mapped);
+    for (UINT i = 0; i < count; ++i)
+      indices[i] = UINT16(count - 1 - i);
+    ib->Unmap(0, nullptr);
+  }
+  if (indirect) {
+    if (!make_buffer(D3D12_HEAP_TYPE_UPLOAD, sizeof(D3D12_DRAW_ARGUMENTS),
+                     D3D12_RESOURCE_STATE_GENERIC_READ, &arguments) ||
+        !CheckHR("Stride args map", arguments->Map(0, nullptr, &mapped)))
+      return false;
+    const D3D12_DRAW_ARGUMENTS args = {count, instances, 0, 0};
+    memcpy(mapped, &args, sizeof(args));
+    arguments->Unmap(0, nullptr);
+    D3D12_INDIRECT_ARGUMENT_DESC argument = {};
+    argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+    D3D12_COMMAND_SIGNATURE_DESC sig = {sizeof(args), 1, &argument, 0};
+    if (!CheckHR("Stride signature",
+                 device->CreateCommandSignature(&sig, nullptr,
+                                                IID_PPV_ARGS(&signature))))
+      return false;
+  }
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC tex = {};
+  tex.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  tex.Width = width;
+  tex.Height = height;
+  tex.DepthOrArraySize = tex.MipLevels = tex.SampleDesc.Count = 1;
+  tex.Format = DXGI_FORMAT_R8G8B8A8_UINT;
+  tex.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  D3D12_DESCRIPTOR_HEAP_DESC rtv_desc = {};
+  rtv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  rtv_desc.NumDescriptors = 1;
+  D3D12_COMMAND_QUEUE_DESC q = {};
+  if (!CheckHR("Stride target", device->CreateCommittedResource(
+                                    &heap, D3D12_HEAP_FLAG_NONE, &tex,
+                                    D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                                    IID_PPV_ARGS(&target))) ||
+      !CheckHR("Stride rtv",
+               device->CreateDescriptorHeap(&rtv_desc, IID_PPV_ARGS(&rtvs))) ||
+      !CheckHR("Stride queue",
+               device->CreateCommandQueue(&q, IID_PPV_ARGS(&queue))) ||
+      !CheckHR("Stride allocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                              IID_PPV_ARGS(&allocator))) ||
+      !CheckHR("Stride list",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                         allocator.ptr(), pso.ptr(),
+                                         IID_PPV_ARGS(&list))) ||
+      !CheckHR("Stride fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                   IID_PPV_ARGS(&fence))) ||
+      !CheckHR("Stride gate", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                  IID_PPV_ARGS(&gate))))
+    return false;
+  struct Unblock {
+    ID3D12Fence *gate;
+    ~Unblock() { gate->Signal(1); }
+  } unblock{gate.ptr()};
+  auto rtv = rtvs->GetCPUDescriptorHandleForHeapStart();
+  device->CreateRenderTargetView(target.ptr(), nullptr, rtv);
+  for (UINT pass = 0; pass < 3; ++pass) {
+    if (pass != 1) {
+      if (pass && lifetime && !create_pipelines())
+        return false;
+      if (pass && (!CheckHR("Stride allocator reset", allocator->Reset()) ||
+                   !CheckHR("Stride list reset",
+                            list->Reset(allocator.ptr(), pso.ptr()))))
+        return false;
+      list->SetGraphicsRootSignature(root.ptr());
+      list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+      const float clear[4] = {};
+      list->ClearRenderTargetView(rtv, clear, 0, nullptr);
+      const D3D12_VIEWPORT viewport = {0, 0, float(width), float(height), 0, 1};
+      const D3D12_RECT scissor = {0, 0, width, height};
+      list->RSSetViewports(1, &viewport);
+      list->RSSetScissorRects(1, &scissor);
+      list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
+      using Clock = std::chrono::steady_clock;
+      const auto record_start = Clock::now();
+      auto warm_start = record_start;
+      const UINT draws = performance ? 4096u : height;
+      for (UINT draw = 0; draw < draws; ++draw) {
+        if (draw == height)
+          warm_start = Clock::now();
+        const UINT row = draw % height;
+        if (lifetime)
+          list->SetPipelineState(row < 2 ? pso.ptr() : second_pso.ptr());
+        D3D12_VERTEX_BUFFER_VIEW view = {
+            vb->GetGPUVirtualAddress() + 32 + row * 2048, 1024, strides[row]};
+        list->IASetVertexBuffers(3, 1, &view);
+        list->SetGraphicsRoot32BitConstant(0, row, 0);
+        if (indexed) {
+          const D3D12_INDEX_BUFFER_VIEW index_view = {
+              ib->GetGPUVirtualAddress(), 128, DXGI_FORMAT_R16_UINT};
+          list->IASetIndexBuffer(&index_view);
+          list->DrawIndexedInstanced(count, instances, 0, 0, 0);
+        } else if (indirect) {
+          list->ExecuteIndirect(signature.ptr(), 1, arguments.ptr(), 0, nullptr,
+                                0);
+        } else {
+          list->DrawInstanced(count, instances, 0, 0);
+        }
+      }
+      const auto record_end = Clock::now();
+      if (performance)
+        std::cout << "Stride perf pass=" << pass << " first4_us="
+                  << std::chrono::duration<double, std::micro>(warm_start -
+                                                               record_start)
+                         .count()
+                  << " warm_us_per_draw="
+                  << std::chrono::duration<double, std::micro>(record_end -
+                                                               warm_start)
+                             .count() /
+                         (draws - height)
+                  << "\n";
+      D3D12_RESOURCE_BARRIER barrier = {};
+      barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      barrier.Transition = {
+          target.ptr(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+          D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE};
+      list->ResourceBarrier(1, &barrier);
+      D3D12_TEXTURE_COPY_LOCATION source = {}, destination = {};
+      source.pResource = target.ptr();
+      source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      destination.pResource = readback.ptr();
+      destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      destination.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UINT, width,
+                                               height, 1, width * 4};
+      list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+      std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+      list->ResourceBarrier(1, &barrier);
+      if (!CheckHR("Stride Close", list->Close()))
+        return false;
+      // Only the recording owns the first PSO after the switch to the second.
+      // Release both public refs before execution and replay of the closed
+      // list.
+      if (lifetime) {
+        pso = nullptr;
+        second_pso = nullptr;
+      }
+    }
+    if (pass == 2 && !CheckHR("Stride gate wait", queue->Wait(gate.ptr(), 1)))
+      return false;
+    using Clock = std::chrono::steady_clock;
+    const auto submit_start = Clock::now();
+    ID3D12CommandList *lists[] = {list.ptr()};
+    queue->ExecuteCommandLists(1, lists);
+    const auto submit_end = Clock::now();
+    if (pass == 2) {
+      if (SUCCEEDED(allocator->Reset())) {
+        std::cerr << "Stride pending reset admitted\n";
+        return false;
+      }
+      list = nullptr;
+      allocator = nullptr;
+      pso = nullptr;
+      second_pso = nullptr;
+      root = nullptr;
+      rtvs = nullptr;
+      if (!CheckHR("Stride gate signal", gate->Signal(1)))
+        return false;
+    }
+    if (!CheckHR("Stride signal", queue->Signal(fence.ptr(), pass + 1)) ||
+        !CheckHR("Stride wait",
+                 fence->SetEventOnCompletion(pass + 1, event.value)) ||
+        WaitForSingleObject(event.value, 10000) != WAIT_OBJECT_0 ||
+        !CheckHR("Stride device status", device->GetDeviceRemovedReason()))
+      return false;
+    if (performance)
+      std::cout << "Stride submit pass=" << pass << " cpu_us="
+                << std::chrono::duration<double, std::micro>(submit_end -
+                                                             submit_start)
+                       .count()
+                << " wait_ms="
+                << std::chrono::duration<double, std::milli>(Clock::now() -
+                                                             submit_end)
+                       .count()
+                << "\n";
+    if (!CheckHR("Stride readback", readback->Map(0, nullptr, &mapped)))
+      return false;
+    bool correct = true;
+    for (UINT row = 0; row < height; ++row)
+      for (UINT x = 0; x < width; ++x) {
+        const UINT instance = x / 64, vertex = x % 64;
+        BYTE expected[4] = {};
+        if (instance < instances && vertex < count) {
+          const UINT i =
+              strides[row]
+                  ? (instanced ? (instance_zero ? 0 : instance / 2) : vertex)
+                  : 0;
+          expected[0] = BYTE(i + row * 40 + 1);
+          expected[1] = BYTE(i * 3 + row + 2);
+          expected[2] = BYTE(i * 5 + row + 3);
+          expected[3] = 255;
+        }
+        if (wrong && !row && !x)
+          expected[0] ^= 1;
+        const auto got = static_cast<BYTE *>(mapped) + 4 * (row * width + x);
+        if (memcmp(got, expected, 4) && correct) {
+          std::cerr << "FAIL stride mode=" << mode << " pass=" << pass
+                    << " row=" << row << " x=" << x
+                    << " actual=" << unsigned(got[0]) << "," << unsigned(got[1])
+                    << "," << unsigned(got[2])
+                    << " expected=" << unsigned(expected[0]) << ","
+                    << unsigned(expected[1]) << "," << unsigned(expected[2])
+                    << "\n";
+          correct = false;
+        }
+      }
+    readback->Unmap(0, nullptr);
+    if (!correct)
+      return false;
+    std::cout << "Vertex stride mode=" << mode << " pass=" << pass
+              << " exact_bytes=4096 passed\n";
+  }
+  std::cout << "Vertex stride replay/reset/released pipeline refs passed\n";
+  return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 5 && !strcmp(argv[1], "--vertex-stride"))
+    return RunVertexStride(argv[2], argv[3], argv[4]) ? 0 : 1;
   if ((argc == 7 || argc == 8) && !strcmp(argv[1], "--gs-differential"))
     return RunGeometryDifferential(argv[2], argv[3], argv[4], argv[5], argv[6],
                                    argc == 8 ? argv[7] : nullptr)

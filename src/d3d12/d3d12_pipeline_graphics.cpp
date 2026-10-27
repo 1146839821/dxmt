@@ -30,6 +30,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -456,10 +457,56 @@ class MTLD3D12GraphicsPipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Graphi
   MTL_SHADER_REFLECTION ref_ps = {};
   MTL_SHADER_REFLECTION ref_gs = {};
 
+  using VertexStrides = std::array<uint32_t, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT>;
+  WMTRenderPipelineInfo vertex_pipeline_info_ = {};
+  WMT::Reference<WMT::Function> vertex_function_, fragment_function_;
+  dxmt::mutex vertex_pipeline_mutex_;
+  std::map<VertexStrides, WMT::Reference<WMT::RenderPipelineState>> vertex_pipelines_;
+
 public:
   MTLD3D12GraphicsPipelineStateImpl(MTLD3D12Device *pDevice) :
       MTLD3D12Pageable<MTLD3D12GraphicsPipelineState>(pDevice) {
     IsComputePipelineState = FALSE;
+  }
+
+  WMT::RenderPipelineState
+  GetVertexStridePipeline(const D3D12_VERTEX_BUFFER_VIEW *views) override {
+    if (!msc_vertex_input)
+      return pso;
+
+    VertexStrides strides = {};
+    for (uint32_t i = 0; i < vertex_pipeline_info_.vertex_buffer_layout_count; ++i) {
+      const auto &layout = vertex_pipeline_info_.vertex_buffer_layouts[i];
+      const auto slot = layout.buffer_index - DXMT_MSC_VERTEX_BUFFER_BIND_POINT;
+      strides[slot] = views[slot].StrideInBytes;
+    }
+
+    // The PSO owns both the immutable recipe/functions and every native variant.
+    // Recording only reaches this cache when the PSO or an active stride changes.
+    std::lock_guard lock(vertex_pipeline_mutex_);
+    if (auto found = vertex_pipelines_.find(strides); found != vertex_pipelines_.end())
+      return found->second;
+    auto info = vertex_pipeline_info_;
+    for (uint32_t i = 0; i < info.vertex_buffer_layout_count; ++i) {
+      auto &layout = info.vertex_buffer_layouts[i];
+      const auto stride = strides[layout.buffer_index - DXMT_MSC_VERTEX_BUFFER_BIND_POINT];
+      if (!stride) {
+        // Metal requires a nonzero descriptor stride even for constant fetch.
+        // Keep the attribute extent but never advance the buffer address.
+        layout.step_function = WMTVertexStepFunctionConstant;
+        layout.step_rate = 0;
+      } else {
+        layout.stride = stride;
+      }
+    }
+    WMT::Reference<WMT::Error> error;
+    auto pipeline = device_->GetMTLDevice().newRenderPipelineState(info, error);
+    if (!pipeline) {
+      ERR("Failed to create MSC vertex stride pipeline: ",
+          error ? error.description().getUTF8String() : "unknown error");
+      return {};
+    }
+    return vertex_pipelines_.emplace(strides, std::move(pipeline)).first->second;
   }
 
   bool
@@ -526,6 +573,9 @@ public:
                                                                                   : WMTVertexStepFunctionPerVertex,
             element.step_rate,
         };
+        auto &layout = info.vertex_buffer_layouts[info.vertex_buffer_layout_count - 1];
+        if (layout.step_function == WMTVertexStepFunctionPerInstance && !layout.step_rate)
+          layout.step_function = WMTVertexStepFunctionConstant;
         layout_initialized[element.slot] = true;
       }
     }
@@ -1427,15 +1477,27 @@ public:
           return hr;
       } else {
         pso = metal.newRenderPipelineState(info, err);
+        if (pso && use_msc && info.vertex_buffer_layout_count) {
+          msc_vertex_input = true;
+          vertex_pipeline_info_ = info;
+          vertex_function_ = vs_func;
+          fragment_function_ = ps_func;
+          VertexStrides strides = {};
+          for (uint32_t i = 0; i < info.vertex_buffer_layout_count; ++i) {
+            const auto &layout = info.vertex_buffer_layouts[i];
+            strides[layout.buffer_index - DXMT_MSC_VERTEX_BUFFER_BIND_POINT] = layout.stride;
+          }
+          vertex_pipelines_.emplace(strides, pso);
+        }
       }
 
       stream_output = has_stream_output;
       stream_output_stride = has_stream_output ? stream_output_strides[0] : 0;
 
-       if (!pso) {
-         ERR("Failed to create PSO: ", err ? err.description().getUTF8String() : "unknown error");
-         return E_FAIL;
-       }
+      if (!pso) {
+        ERR("Failed to create PSO: ", err ? err.description().getUTF8String() : "unknown error");
+        return E_FAIL;
+      }
     }
 
     // DSSO

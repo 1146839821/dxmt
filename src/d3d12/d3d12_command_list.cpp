@@ -72,6 +72,7 @@ enum class DirtyState {
   BlendFactor,
   StencilRef,
   GraphicsPipelineState,
+  GraphicsVertexStride,
   ComputePipelineState,
 };
 
@@ -2865,13 +2866,18 @@ public:
       airconv_geometry_pso_variant_ = use_airconv_geometry
                                           ? (is_strip_topology(topology_) ? 3u : 0u) + airconv_index_format
                                           : UINT_MAX;
-      dirty_state_.clr(DirtyState::GraphicsPipelineState);
+      dirty_state_.clr(DirtyState::GraphicsPipelineState, DirtyState::GraphicsVertexStride);
     } else if (use_airconv_geometry) {
       const auto variant = (is_strip_topology(topology_) ? 3u : 0u) + airconv_index_format;
       if (variant != airconv_geometry_pso_variant_) {
         UpdateGraphicsPSO(pso_graphics_.ptr(), airconv_index_format);
         airconv_geometry_pso_variant_ = variant;
       }
+    }
+
+    if (dirty_state_.test(DirtyState::GraphicsVertexStride)) {
+      UpdateGraphicsPSO(pso_graphics_.ptr(), airconv_index_format, true);
+      dirty_state_.clr(DirtyState::GraphicsVertexStride);
     }
 
     const bool encode_msc_resource_uses =
@@ -5294,10 +5300,10 @@ public:
   void
   UpdateGraphicsPSO(
       MTLD3D12GraphicsPipelineState *pso_graphics,
-      SM50_INDEX_BUFFER_FORMAT airconv_index_format = SM50_INDEX_BUFFER_FORMAT_NONE
+      SM50_INDEX_BUFFER_FORMAT airconv_index_format = SM50_INDEX_BUFFER_FORMAT_NONE,
+      bool vertex_stride_only = false
   ) {
-    auto &cmd_setpso = allocator_->EncodeRenderCommand<wmtcmd_render_setpso>();
-    cmd_setpso.type = WMTRenderCommandSetPSO;
+    WMT::RenderPipelineState pipeline;
     if (pso_graphics->airconv_geometry) {
       const auto strip = is_strip_topology(topology_) ? 1u : 0u;
       const auto index = static_cast<unsigned>(airconv_index_format);
@@ -5305,14 +5311,36 @@ public:
         FailRecording(__func__, "invalid AIRCONV index format=", index);
         return;
       }
-      cmd_setpso.pso = pso_graphics->airconv_geometry_psos[strip][index];
+      pipeline = pso_graphics->airconv_geometry_psos[strip][index];
     } else {
-      cmd_setpso.pso = pso_graphics->pso;
+      try {
+        pipeline = pso_graphics->GetVertexStridePipeline(vertex_buffers_.data());
+      } catch (...) {
+        FailRecording(__func__, "graphics pipeline specialization allocation failed");
+        return;
+      }
     }
+    if (!pipeline) {
+      FailRecording(__func__, "graphics pipeline specialization failed");
+      return;
+    }
+    auto *render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
+    try {
+      if (render->pipeline_refs.empty() || render->pipeline_refs.back().ptr() != pso_graphics)
+        render->pipeline_refs.emplace_back(pso_graphics);
+    } catch (...) {
+      FailRecording(__func__, "graphics pipeline retention allocation failed");
+      return;
+    }
+    render->current_pipeline = pipeline;
+    auto &cmd_setpso = allocator_->EncodeRenderCommand<wmtcmd_render_setpso>();
+    cmd_setpso.type = WMTRenderCommandSetPSO;
+    cmd_setpso.pso = pipeline;
+    if (vertex_stride_only)
+      return;
 
     auto &cmd_setdsso = allocator_->EncodeRenderCommand<wmtcmd_render_setdepthstencilstate>();
     cmd_setdsso.type = WMTRenderCommandSetDepthStencilState;
-    auto *render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
     cmd_setdsso.depth_stencil_state =
         pso_graphics->GetDepthStencilState(render->dsv_planar_flags, render->dsv_readonly_flags);
 
@@ -5745,7 +5773,6 @@ public:
                         " size=", view.SizeInBytes);
           return;
         }
-        vertex_buffers_[Slot] = {};
         continue;
       }
       uint64_t buffer_offset = 0;
@@ -5759,6 +5786,9 @@ public:
     }
     
     for (unsigned Slot = StartSlot; Slot < StartSlot + Count; Slot++) {
+      if (pso_graphics_ && pso_graphics_->msc_vertex_input && (pso_graphics_->slot_mask & (1u << Slot)) &&
+          vertex_buffers_[Slot].StrideInBytes != Views[Slot - StartSlot].StrideInBytes)
+        dirty_state_.set(DirtyState::GraphicsVertexStride);
       vertex_buffers_[Slot] = Views[Slot - StartSlot];
     }
     dirty_state_.set(DirtyState::VertexBuffer);
@@ -6479,7 +6509,9 @@ public:
                                 WMTRenderStageVertex);
     }
 
-    auto cmd = allocator_->EncodeIndirectRenderCommand(sig, pso_graphics_.ptr(), MaxCommandCount);
+    auto cmd = allocator_->EncodeIndirectRenderCommand(
+        sig, static_cast<RenderEncoderData *>(allocator_->encoder_current)->current_pipeline, MaxCommandCount
+    );
     if (!cmd) {
       FailRecording(__func__, "indirect render command allocation failed");
       return;

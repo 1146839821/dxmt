@@ -4526,3 +4526,60 @@ four findings remain deferred and unfixed in this slice. Evidence and commands:
 `../dxmt-test/n20-gs-differential-20261027/N20-gs-differential.md`,slice.md,
 manifest.json,results.json,validate.py,reflection/DXIL,primary snapshots and logs.
 User .gitignore preserved; focused local commit/no push.
+
+
+### N07 — MSC bound vertex strides, 2026-10-27
+
+User review finding1: ordinary MSC input layouts inferred a packed stride from
+attribute extent, ignoring VBV.StrideInBytes. Preserved baseline packed12 passes;
+padded vertex/instance/indexed/pure-draw-indirect cases fail with the same runner.
+Prior numeric/GS differential rounds were completed before this implementation.
+
+Existing graphics PSO owns immutable native recipe, retained VS/PS functions and
+mutex-protected active-stride pipeline cache. Original packed pipeline seeds it;
+unused slots do not affect keys. Stride0 uses Constant stepping and a nonzero
+Metal descriptor extent; per-instance step0 is normalized to Constant. Nonzero
+instance divisors preserved. Full input-range validation precedes VB mutations.
+Command-list GraphicsVertexStride dirty state tracks actual active stride
+changes; unchanged strides avoid cache lookup/lock. Stride-only binds emit only
+the native pipeline, preserving existing depth/rasterizer state authority.
+
+Existing RenderEncoderData retains private refs to recorded graphics PSO owners
+until allocator encoder destruction/reset, preserving native variants across
+switches, Close/replay and queued submission. Native functions/variants remain
+owned by the PSO. Pure Draw indirect restores the selected variant after its
+resolver. Recording failures propagate through existing Close failure handling.
+Six existing production files modified; new src/d3d12 files=0. SM5→AIRCONV and
+SM6→MSC remain fixed; public FL11_1/SM6.0/Options/Tiers unchanged.
+
+Final private/no-private matrix:28 processes,26 success and2 deliberate wrong
+oracles correctly rejected. Fourteen positive stride processes each compare all
+4096 integer bytes across initial execution,replay and fenced reset/rerecord.
+Covers slot3,float3 plus padding16/32,zero stride,instance divisor2/0,reversed R16,
+pure Draw indirect and two PSOs released after Close before execution/replay.
+Pending allocator Reset rejected; list/allocator/PSO refs dropped during gated
+submission, with resource inputs retained through fence completion. Four GS
+point/triangle-strip-u16 controls compare3072 bytes three times each. Ordinary
+MSC,selected AIRCONV list/indexed/indirect/GS,loaded pipeline-cache compute/graphics
+readback and feature contracts pass. All accepted cases enable API/shader
+validation; final logs have no validation diagnostics or native assertions.
+Full SM5 --all has one existing Null texture access diagnostic also reproduced
+with baseline; those broad runs are not validation-clean passes.
+
+Five interleaved performance samples,4096 draws,validation/HUD off,readback on:
+fixed-stride warm CPU median0.243011→0.221457us/draw (P950.252859→0.264125);
+CPU submit6174.3→5928.2us. P95 increases4.5%; no speedup/regression conclusion from five samples. Candidate
+changing16/32/16/0 each draw costs0.281085us/draw (P950.292473),submit6326.2us.
+Native cache miss can hitch:prevalidation observed56.288ms first-four outlier;
+warmed final first-four median2739.0us does not establish fully cold compiler
+latency. Cache grows with distinct active stride tuples; no eviction/cap added.
+No extra encoder/barrier or unchanged-stride draw lock. Concurrent/many-stride
+stress,other GPUs,Windows reference,isolated GPU profiling,fullT3/T4 NOT_RUN.
+
+Evidence:`../dxmt-test/n07-vertex-stride-20261027/N07-vertex-stride.md`,
+manifest.json,results.json,baseline-and-candidate.json,final-v6-* logs,
+perf-v6-raw.json/perf-v6-summary.json and build logs. M1Max/Apple7,
+macOS27.0.1(26A434),Xcode27.1(27A9275;requested26 unavailable),Wine11 x64/Rosetta,
+clang23.1.1,MSC runtime4.0.1. User .gitignore excluded. Full goal remains OPEN.
+Next N10 shared indirect slice retains findings2–4:sparse compact VB slots,
+zero-length root upload and post-indirect modified-state reset/dirty tracking.

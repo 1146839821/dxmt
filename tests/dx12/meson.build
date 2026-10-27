@@ -714,6 +714,15 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach stage : ['vs', 'ps']
+    custom_target('dx12_vertex_stride_' + stage,
+      input: 'graphics_sm6.hlsl',
+      output: 'vertex_stride.' + stage + '.cso',
+      command: dxc_command + [ '-E', stage + '_main', '-T', stage + '_6_0',
+        '-D', 'VERTEX_STRIDE_DIFFERENTIAL=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
   foreach input_count : ['1', '2', '3', '4', '6']
     foreach stage : ['vs', 'gs', 'ps']
       custom_target('dx12_geometry_differential_' + input_count + '_' + stage,

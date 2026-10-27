@@ -28,6 +28,7 @@
 namespace dxmt {
 
 class MTLD3D12Resource;
+class MTLD3D12GraphicsPipelineState;
 
 enum class EncoderType {
   Null,
@@ -114,6 +115,10 @@ struct RenderEncoderStencilAttachmentData {
 };
 
 struct RenderEncoderData : EncoderData {
+  // Recorded native PSO handles (including stride variants and depth state) must
+  // survive PSO switches, closed-list replay and pending submissions.
+  std::vector<Com<MTLD3D12GraphicsPipelineState, false>> pipeline_refs;
+  WMT::RenderPipelineState current_pipeline = {};
   std::array<RenderEncoderColorAttachmentData, 8> colors;
   RenderEncoderDepthAttachmentData depth;
   RenderEncoderStencilAttachmentData stencil;

@@ -584,6 +584,9 @@ public:
   WMT::Reference<WMT::DepthStencilState> dsso_depth_readonly_stencil_disabled;
   WMT::Reference<WMT::DepthStencilState> dsso_stencil_readonly_depth_disabled;
   virtual WMT::DepthStencilState GetDepthStencilState(uint8_t planar_flags, uint8_t readonly_flags) const = 0;
+  // Ordinary MSC vertex fetch specializes the immutable Metal descriptor per VB stride.
+  bool msc_vertex_input = false;
+  virtual WMT::RenderPipelineState GetVertexStridePipeline(const D3D12_VERTEX_BUFFER_VIEW *views) = 0;
   uint32_t slot_mask = 0;
   bool msc_tessellation = false;
   WMT::Reference<WMT::Buffer> msc_tessellator_tables;
