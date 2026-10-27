@@ -449,6 +449,16 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-enable-16bit-types', '-E', 'main', '-T', 'cs_6_2', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach kind : ['int64', 'native16']
+    custom_target('dx12_compute_sm6_' + kind + '_differential_fixture',
+      input: 'compute_sm6_' + kind + '.hlsl',
+      output: 'compute_sm6_' + kind + '_differential.cs.cso',
+      command: dxc_command + (kind == 'native16' ? ['-enable-16bit-types'] : []) +
+        [ '-E', 'main', '-T', kind == 'native16' ? 'cs_6_2' : 'cs_6_0',
+          '-D', 'NUMERIC_DIFFERENTIAL=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
   custom_target('dx12_compute_sm6_native16_denorm_preserve_fixture',
     input: 'compute_sm6_native16.hlsl',
     output: 'compute_sm6_native16_denorm_preserve.cs.cso',

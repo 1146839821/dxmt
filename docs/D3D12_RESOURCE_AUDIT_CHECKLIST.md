@@ -4443,3 +4443,39 @@ next; SM6 typed-offset wrong-zero and WBI recording-cost regression remain OPEN.
 Device/G1/FL12_2 incomplete. Evidence:../dxmt-test/n06-append-consume-20261027/
 N06-append-consume.md,slice.md,results.json,performance.json,conversion/reflection,
 primary snapshots and logs. User .gitignore preserved; local commit/no push.
+
+### N20 — Int64/Native16 differential acceptance, 2026-10-27
+
+Initial base33b85f49; final production build base982e39fd includes concurrent
+Airconv/DXBCParser commits. Extend existing dx12_compute_sm6 runner and numeric
+HLSL fixtures with external input/reference bytes; old smoke modes preserved.
+DXIL container magic no longer mislabels the execution backend: inspect actual
+PSO backend. No production source changes/new src/d3d12 files/capability promotion.
+
+Deterministic independent CPU reference:two256-record datasets per type. Actual
+DXIL retains i64 arithmetic/division/remainder/shifts/comparisons and i16/half
+arithmetic,2-byte Native16 structured storage. DXC cs_6_0/cs_6_2 with native16
+flag; MSC CLI4.0.3 conversion/metallibs/reflection and runtime API4.0.1 separated.
+Runtime checks actual MSC backend and reflected1x1x1 group size. Offline automatic
+TLAB reflection is not evidence for the explicit runtime root-signature layout.
+
+Final private/no-private matrix:26 processes,18 success,8 deliberate wrong-reference
+failures detected at pass0/byte32. Eight positive root/table differential processes
+each check3 passes x256 records:24576 Int64 or8192 Native16 result bytes plus64
+guard bytes/pass. Nonzero input/output offsets16/32, post-Close descriptor copy,
+unchanged closed-list replay, fenced reset/rerecord, pending allocator Reset
+rejection and gated submission after releasing application refs pass. Eight old
+numeric smoke controls and two feature-contract controls pass. No observed final
+Metal API/GPU validation/native assertion/aborted-command errors; hashes and loaded
+paths recorded. Both Meson differential fixture targets build in both configurations.
+
+M1Max/Apple7/macOS27.0.1/Xcode27.1/Wine11/MSC runtime4.0.1/clang23.1.1; requested
+Xcode26 unavailable. Performance NOT_MEASURED:this slice changes tests only; single
+DXC invocation times are diagnostic, not a benchmark. No full Int64/Native16 claim:
+native Windows/other GPUs/NaN payloads/all operations/atomics/graphics stages/full
+T3/T4 NOT_RUN. int64_validated/native16_validated remain false. GS fine-grained
+differential is next; typed-offset wrong-zero,WBI recording cost and cached-counter
+descriptor cost remain OPEN. Device/G1/FL12_2 incomplete. Evidence and commands:
+`../dxmt-test/n20-numeric-differential-20261027/N20-numeric-differential.md`,
+slice.md,manifest.json,results.json,fixtures.py,validate.py,conversion/reflection
+and logs. User .gitignore preserved; focused local commit/no push.

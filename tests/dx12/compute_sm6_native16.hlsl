@@ -1,3 +1,33 @@
+#ifdef NUMERIC_DIFFERENTIAL
+StructuredBuffer<uint16_t> input : register(t0);
+RWStructuredBuffer<uint16_t> output : register(u0);
+
+[numthreads(1, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID)
+{
+    uint base = tid.x * 8;
+    uint16_t a = input[base], b = input[base + 1];
+    int16_t sa = int16_t(a);
+    int16_t sb = int16_t((b & uint16_t(0x7fff)) | uint16_t(1));
+    uint shift = uint(input[base + 2]) & 15;
+    half x = half(f16tof32(uint(input[base + 4])));
+    half y = half(f16tof32(uint(input[base + 5])));
+    precise half sum = x + y;
+    precise half product = x * y;
+    precise half quotient = x / y;
+    uint16_t values[16] = {
+        uint16_t(a + b), uint16_t(a - b), uint16_t(a * b),
+        uint16_t(sa / sb), uint16_t(sa % sb), uint16_t(a << shift),
+        uint16_t(a >> shift), uint16_t(sa >> shift),
+        uint16_t((a < b ? 1 : 0) | (sa < int16_t(b) ? 2 : 0) | (a == b ? 4 : 0)),
+        uint16_t(f32tof16(float(sum))), uint16_t(f32tof16(float(product))),
+        uint16_t(f32tof16(float(quotient))), uint16_t(f32tof16(float(half(sa)))),
+        uint16_t(a ^ b), input[base + 6], input[base + 7]
+    };
+    [unroll] for (uint i = 0; i < 16; ++i)
+        output[tid.x * 16 + i] = values[i];
+}
+#else
 StructuredBuffer<uint16_t> input : register(t0);
 RWStructuredBuffer<uint16_t> output : register(u0);
 
@@ -13,3 +43,5 @@ void main(uint3 tid : SV_DispatchThreadID)
                        vector_result.y == -40 && abs((float)half_result - 2.0f) < 0.001f;
     output[0] = valid ? uint16_t((uint)signed_sum + (uint)unsigned_sum + (uint)((float)half_result * 100.0f)) : 0;
 }
+
+#endif

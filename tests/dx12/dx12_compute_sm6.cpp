@@ -23,14 +23,392 @@ bool CheckHR(const char *name, HRESULT hr) {
   return true;
 }
 
+// External fixtures contain two equally sized input/reference datasets. Keeping
+// the CPU reference independent of HLSL catches conversion and storage errors.
+// Each dataset has N 16-byte records: Int64 is two little-endian uint64 operands;
+// Native16 is eight uint16 words (a,b,shift,reserved,half x,half y,guards[2]).
+// Expected records are 12 uint64 or 16 uint16 results in the HLSL array order.
+// The fixture's NUMERIC_DIFFERENTIAL variant uses one thread per group.
+bool RunNumericDifferential(const char *shader_path, bool native16, bool table,
+                            const char *input_path, const char *expected_path,
+                            bool wrong_expected) {
+  auto read = [](const char *path) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f || f.tellg() <= 0 || f.tellg() > 16 * 1024 * 1024)
+      return std::vector<uint8_t>{};
+    std::vector<uint8_t> bytes(static_cast<size_t>(f.tellg()));
+    f.seekg(0);
+    if (!f.read(reinterpret_cast<char *>(bytes.data()), bytes.size()))
+      bytes.clear();
+    return bytes;
+  };
+  const auto shader = read(shader_path);
+  const auto input = read(input_path);
+  auto expected = read(expected_path);
+  constexpr UINT input_offset = 16, output_offset = 32, guard_size = 32;
+  const UINT input_stride = native16 ? 2 : 16;
+  const UINT output_stride = native16 ? 2 : 8;
+  const UINT result_size = native16 ? 32 : 96;
+  if (shader.empty() || input.empty() || input.size() % 32 ||
+      expected.empty() ||
+      expected.size() != (input.size() / 16) * result_size) {
+    std::cerr << "Invalid numeric input/reference extent\n";
+    return false;
+  }
+  const UINT count = static_cast<UINT>(input.size() / 32);
+  if (count > 65535)
+    return false;
+  const UINT input_size = count * 16;
+  const UINT output_size = count * result_size;
+  const UINT buffer_size = output_offset + output_size + guard_size;
+  if (wrong_expected)
+    expected[output_size] ^= 1;
+  struct Objects {
+    ID3D12Device *device = nullptr;
+    ID3D12CommandQueue *queue = nullptr;
+    ID3D12CommandAllocator *allocator = nullptr;
+    ID3D12GraphicsCommandList *list = nullptr;
+    ID3D12RootSignature *root = nullptr;
+    ID3D12PipelineState *pso = nullptr;
+    ID3D12DescriptorHeap *heap = nullptr, *source = nullptr;
+    ID3D12Resource *inputs[2] = {}, *output = nullptr, *upload = nullptr,
+                   *readback = nullptr;
+    ID3D12Fence *fence = nullptr, *gate = nullptr;
+    HANDLE event = nullptr;
+    void release_recording() {
+      if (list) {
+        list->Release();
+        list = nullptr;
+      }
+      if (allocator) {
+        allocator->Release();
+        allocator = nullptr;
+      }
+      if (heap) {
+        heap->Release();
+        heap = nullptr;
+      }
+      if (source) {
+        source->Release();
+        source = nullptr;
+      }
+      for (auto &input : inputs)
+        if (input) {
+          input->Release();
+          input = nullptr;
+        }
+      if (output) {
+        output->Release();
+        output = nullptr;
+      }
+      if (upload) {
+        upload->Release();
+        upload = nullptr;
+      }
+      if (pso) {
+        pso->Release();
+        pso = nullptr;
+      }
+      if (root) {
+        root->Release();
+        root = nullptr;
+      }
+    }
+    ~Objects() {
+      if (gate)
+        gate->Signal(1);
+      release_recording();
+      if (readback)
+        readback->Release();
+      if (queue)
+        queue->Release();
+      if (fence)
+        fence->Release();
+      if (gate)
+        gate->Release();
+      if (event)
+        CloseHandle(event);
+      if (device)
+        device->Release();
+    }
+  } o;
+  if (!CheckHR("Numeric device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&o.device))))
+    return false;
+  const auto create_buffer = [&](D3D12_HEAP_TYPE heap, UINT size,
+                                 D3D12_RESOURCE_STATES state,
+                                 ID3D12Resource **out) {
+    D3D12_HEAP_PROPERTIES properties = {};
+    properties.Type = heap;
+    properties.CreationNodeMask = properties.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = size;
+    desc.Height = desc.DepthOrArraySize = desc.MipLevels =
+        desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (heap == D3D12_HEAP_TYPE_DEFAULT)
+      desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    return CheckHR("Numeric buffer",
+                   o.device->CreateCommittedResource(
+                       &properties, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr,
+                       IID_PPV_ARGS(out)));
+  };
+  for (UINT i = 0; i < 2; ++i) {
+    if (!create_buffer(D3D12_HEAP_TYPE_UPLOAD,
+                       input_offset + input_size + guard_size,
+                       D3D12_RESOURCE_STATE_GENERIC_READ, &o.inputs[i]))
+      return false;
+    void *mapped = nullptr;
+    if (!CheckHR("Map numeric input", o.inputs[i]->Map(0, nullptr, &mapped)))
+      return false;
+    std::memset(mapped, 0xcd, input_offset + input_size + guard_size);
+    std::memcpy(static_cast<uint8_t *>(mapped) + input_offset,
+                input.data() + i * input_size, input_size);
+    o.inputs[i]->Unmap(0, nullptr);
+  }
+  if (!create_buffer(D3D12_HEAP_TYPE_DEFAULT, buffer_size,
+                     D3D12_RESOURCE_STATE_COPY_DEST, &o.output) ||
+      !create_buffer(D3D12_HEAP_TYPE_UPLOAD, buffer_size,
+                     D3D12_RESOURCE_STATE_GENERIC_READ, &o.upload) ||
+      !create_buffer(D3D12_HEAP_TYPE_READBACK, buffer_size,
+                     D3D12_RESOURCE_STATE_COPY_DEST, &o.readback))
+    return false;
+  void *mapped = nullptr;
+  if (!CheckHR("Map numeric guard upload", o.upload->Map(0, nullptr, &mapped)))
+    return false;
+  std::memset(mapped, 0xcd, buffer_size);
+  o.upload->Unmap(0, nullptr);
+  D3D12_DESCRIPTOR_RANGE ranges[2] = {};
+  D3D12_ROOT_PARAMETER parameters[2] = {};
+  for (UINT i = 0; i < 2; ++i) {
+    ranges[i].RangeType =
+        i ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV : D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[i].NumDescriptors = 1;
+    parameters[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    parameters[i].ParameterType =
+        table ? D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE
+              : (i ? D3D12_ROOT_PARAMETER_TYPE_UAV
+                   : D3D12_ROOT_PARAMETER_TYPE_SRV);
+    if (table) {
+      parameters[i].DescriptorTable.NumDescriptorRanges = 1;
+      parameters[i].DescriptorTable.pDescriptorRanges = &ranges[i];
+    }
+  }
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+  root_desc.NumParameters = 2;
+  root_desc.pParameters = parameters;
+  ID3DBlob *blob = nullptr, *error = nullptr;
+  HRESULT hr = D3D12SerializeRootSignature(
+      &root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error);
+  if (error) {
+    std::cerr << static_cast<const char *>(error->GetBufferPointer());
+    error->Release();
+  }
+  if (!CheckHR("Serialize numeric root", hr))
+    return false;
+  hr = o.device->CreateRootSignature(0, blob->GetBufferPointer(),
+                                     blob->GetBufferSize(),
+                                     IID_PPV_ARGS(&o.root));
+  blob->Release();
+  if (!CheckHR("Create numeric root", hr))
+    return false;
+  D3D12_COMPUTE_PIPELINE_STATE_DESC pso_desc = {};
+  pso_desc.pRootSignature = o.root;
+  pso_desc.CS = {shader.data(), shader.size()};
+  if (!CheckHR("Numeric PSO", o.device->CreateComputePipelineState(
+                                  &pso_desc, IID_PPV_ARGS(&o.pso))))
+    return false;
+  auto *pipeline = static_cast<dxmt::MTLD3D12PipelineState *>(o.pso);
+  if (pipeline->shader_backend !=
+      dxmt::D3D12ShaderBackend::MetalShaderConverter) {
+    std::cerr << "Numeric differential requires actual DXIL/MSC backend\n";
+    return false;
+  }
+  const auto threads = static_cast<dxmt::MTLD3D12ComputePipelineState *>(o.pso)->threadgroup_size;
+  if (threads.width != 1 || threads.height != 1 || threads.depth != 1) {
+    std::cerr << "Numeric fixture requires reflected numthreads(1,1,1)\n";
+    return false;
+  }
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  if (!CheckHR("Numeric queue", o.device->CreateCommandQueue(
+                                    &queue_desc, IID_PPV_ARGS(&o.queue))) ||
+      !CheckHR("Numeric allocator",
+               o.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                IID_PPV_ARGS(&o.allocator))) ||
+      !CheckHR("Numeric list",
+               o.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                           o.allocator, o.pso,
+                                           IID_PPV_ARGS(&o.list))) ||
+      !CheckHR("Numeric fence",
+               o.device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                     IID_PPV_ARGS(&o.fence))) ||
+      !CheckHR("Numeric gate", o.device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                     IID_PPV_ARGS(&o.gate))))
+    return false;
+  o.event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+  if (!o.event)
+    return false;
+  D3D12_CPU_DESCRIPTOR_HANDLE cpu = {}, source_cpu = {};
+  D3D12_GPU_DESCRIPTOR_HANDLE gpu = {};
+  UINT increment = 0;
+  if (table) {
+    D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+    desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    desc.NumDescriptors = 2;
+    desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (!CheckHR("Numeric heap",
+                 o.device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&o.heap))))
+      return false;
+    desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    if (!CheckHR("Numeric source heap", o.device->CreateDescriptorHeap(
+                                            &desc, IID_PPV_ARGS(&o.source))))
+      return false;
+    increment = o.device->GetDescriptorHandleIncrementSize(desc.Type);
+    cpu = o.heap->GetCPUDescriptorHandleForHeapStart();
+    gpu = o.heap->GetGPUDescriptorHandleForHeapStart();
+    source_cpu = o.source->GetCPUDescriptorHandleForHeapStart();
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
+    uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    uav.Buffer.FirstElement = output_offset / output_stride;
+    uav.Buffer.NumElements = output_size / output_stride;
+    uav.Buffer.StructureByteStride = output_stride;
+    o.device->CreateUnorderedAccessView(o.output, nullptr, &uav,
+                                        {cpu.ptr + increment});
+  }
+  const auto write_srv = [&](UINT index, D3D12_CPU_DESCRIPTOR_HANDLE handle) {
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srv.Buffer.FirstElement = input_offset / input_stride;
+    srv.Buffer.NumElements = input_size / input_stride;
+    srv.Buffer.StructureByteStride = input_stride;
+    o.device->CreateShaderResourceView(o.inputs[index], &srv, handle);
+  };
+  const auto transition = [&](D3D12_RESOURCE_STATES before,
+                              D3D12_RESOURCE_STATES after) {
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition = {o.output, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before,
+                    after};
+    o.list->ResourceBarrier(1, &b);
+  };
+  for (UINT pass = 0; pass < 3; ++pass) {
+    const UINT recorded_input = pass == 2 ? 1 : 0;
+    const UINT submitted_input = 1 - recorded_input;
+    // Pass 1 replays the unchanged closed list; pass 2 resets and re-records.
+    if (pass != 1) {
+      if (pass &&
+          (!CheckHR("Numeric reset allocator", o.allocator->Reset()) ||
+           !CheckHR("Numeric reset list", o.list->Reset(o.allocator, o.pso))))
+        return false;
+      o.list->CopyBufferRegion(o.output, 0, o.upload, 0, buffer_size);
+      transition(D3D12_RESOURCE_STATE_COPY_DEST,
+                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      o.list->SetComputeRootSignature(o.root);
+      if (table) {
+        write_srv(recorded_input, cpu);
+        o.list->SetDescriptorHeaps(1, &o.heap);
+        o.list->SetComputeRootDescriptorTable(0, gpu);
+        o.list->SetComputeRootDescriptorTable(1, {gpu.ptr + increment});
+      } else {
+        o.list->SetComputeRootShaderResourceView(
+            0,
+            o.inputs[submitted_input]->GetGPUVirtualAddress() + input_offset);
+        o.list->SetComputeRootUnorderedAccessView(
+            1, o.output->GetGPUVirtualAddress() + output_offset);
+      }
+      o.list->Dispatch(count, 1, 1);
+      transition(D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                 D3D12_RESOURCE_STATE_COPY_SOURCE);
+      o.list->CopyBufferRegion(o.readback, 0, o.output, 0, buffer_size);
+      transition(D3D12_RESOURCE_STATE_COPY_SOURCE,
+                 D3D12_RESOURCE_STATE_COPY_DEST);
+      if (!CheckHR("Numeric Close", o.list->Close()))
+        return false;
+      if (table) {
+        write_srv(submitted_input, source_cpu);
+        o.device->CopyDescriptorsSimple(1, cpu, source_cpu,
+                                        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+      }
+    }
+    if (pass == 2 && !CheckHR("Numeric queue wait", o.queue->Wait(o.gate, 1)))
+      return false;
+    ID3D12CommandList *lists[] = {o.list};
+    o.queue->ExecuteCommandLists(1, lists);
+    if (pass == 2) {
+      if (SUCCEEDED(o.allocator->Reset())) {
+        o.gate->Signal(1);
+        std::cerr << "FAIL numeric pending allocator Reset admitted\n";
+        return false;
+      }
+      o.release_recording();
+      if (!CheckHR("Numeric gate signal", o.gate->Signal(1)))
+        return false;
+    }
+    if (!CheckHR("Numeric queue signal", o.queue->Signal(o.fence, pass + 1)) ||
+        !CheckHR("Numeric completion event",
+                 o.fence->SetEventOnCompletion(pass + 1, o.event)) ||
+        WaitForSingleObject(o.event, 10000) != WAIT_OBJECT_0 ||
+        !CheckHR("Numeric device status", o.device->GetDeviceRemovedReason()))
+      return false;
+    if (!CheckHR("Numeric map readback", o.readback->Map(0, nullptr, &mapped)))
+      return false;
+    bool correct = true;
+    for (UINT i = 0; i < buffer_size; ++i) {
+      const uint8_t want =
+          i < output_offset || i >= output_offset + output_size
+              ? 0xcd
+              : expected[submitted_input * output_size + i - output_offset];
+      const auto got = static_cast<const uint8_t *>(mapped)[i];
+      if (got != want) {
+        std::cerr << "FAIL numeric kind=" << (native16 ? "native16" : "int64")
+                  << " binding=" << (table ? "table" : "root")
+                  << " pass=" << pass << " byte=" << i
+                  << " actual=" << unsigned(got)
+                  << " expected=" << unsigned(want) << '\n';
+        correct = false;
+        break;
+      }
+    }
+    o.readback->Unmap(0, nullptr);
+    if (!correct)
+      return false;
+    std::cout << "MSC numeric kind=" << (native16 ? "native16" : "int64")
+              << " binding=" << (table ? "table" : "root") << " pass=" << pass
+              << " cases=" << count << " exact_bytes=" << output_size
+              << " guards=64 passed\n";
+  }
+  std::cout << "Numeric closed-list replay/fenced reset/pending reset "
+               "rejection/release passed\n";
+  return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  if ((argc == 7 || argc == 8) &&
+      strcmp(argv[2], "--numeric-differential") == 0) {
+    if ((strcmp(argv[3], "int64") && strcmp(argv[3], "native16")) ||
+        (strcmp(argv[4], "root") && strcmp(argv[4], "table")) ||
+        (argc == 8 && strcmp(argv[7], "--wrong-expected")))
+      return 2;
+    return RunNumericDifferential(argv[1], !strcmp(argv[3], "native16"),
+                                  !strcmp(argv[4], "table"), argv[5], argv[6],
+                                  argc == 8)
+               ? 0
+               : 1;
+  }
   if (argc == 3 && strcmp(argv[2], "--append-consume-unsupported") == 0) {
     std::cerr << "Use --append-consume-conversion for PSO admission, or the counter-pair GPU runner.\n";
     return 2;
   }
   if (argc < 2 || argc > 3) {
+    std::cerr << "numeric usage: dx12_compute_sm6 <shader.cso> "
+                 "--numeric-differential "
+                 "<int64|native16> <root|table> <input.bin> <expected.bin> "
+                 "[--wrong-expected]\n";
     std::cerr << "usage: dx12_compute_sm6 <shader.cso> "
                  "[--root-uav|--reserved-uav|--reserved-srv|--descriptor-uav|--descriptor-resources|--"
                  "descriptor-resources-space|--descriptor-typed-resources|--descriptor-typed-offset|--descriptor-structured-offset|--descriptor-bgra|--root-cbv|--root-constants|--"
@@ -156,7 +534,6 @@ int main(int argc, char **argv) {
   shader_file.seekg(0);
   std::vector<char> shader(static_cast<size_t>(shader_size));
   shader_file.read(shader.data(), shader.size());
-  const bool is_dxbc = shader.size() >= 4 && memcmp(shader.data(), "DXBC", 4) == 0;
 
   ID3D12Device *device = nullptr;
   ID3D12CommandQueue *queue = nullptr;
@@ -1051,34 +1428,45 @@ int main(int argc, char **argv) {
       std::cerr << "packed unsigned dot readback mismatch: " << packed_dot_unsigned << " expected 139\n";
       goto cleanup;
     }
-    std::cout << (is_dxbc ? "DXBC" : "DXIL")
-              << (packed_dot_ops || compute_derivatives || nan_inf_ops || direct_indexed_resource_heap || unbounded_resources
-                      ? " cs_6_6 "
-                  : wave_ops
-                      ? " cs_6_5 "
-                  : native16_mode
-                      ? " cs_6_2 "
-                      : " cs_6_0 ")
-              << (root_cbv                     ? "root CBV"
-                  : root_constants              ? "root constants"
-                  : int64_mode                  ? (int64_descriptor_ops ? "int64 descriptor ops" : "int64 ops")
-                  : (root_srv || reserved_srv) ? "root SRV"
-                  : direct_indexed_resources || direct_indexed_resources_lifetime
-                                                  ? "direct indexed resources"
-                  : direct_indexed_nonuniform    ? "direct indexed non-uniform"
-                  : direct_indexed               ? "direct indexed"
-                  : unbounded_resources          ? "unbounded resources"
-                  : wave_ops                    ? "wave ops"
-                  : native16_mode               ? (native16_descriptor_ops ? "native16 descriptor ops" : "native16 ops")
-                  : descriptor_table_resources  ? "descriptor resources"
-                  : packed_dot_ops              ? "packed dot ops"
-                  : compute_derivatives         ? "compute derivatives"
-                  : nan_inf_ops                 ? "nan/inf ops"
-                  : global_coherent              ? "globally coherent"
-                                                : "root UAV")
-              << " readback passed: " << output_value << "\n";
+    std::cout
+        << (static_cast<dxmt::MTLD3D12PipelineState *>(pso)->shader_backend ==
+                    dxmt::D3D12ShaderBackend::MetalShaderConverter
+                ? "DXIL/MSC"
+                : "DXBC/Airconv")
+        << (packed_dot_ops || compute_derivatives || nan_inf_ops ||
+                    direct_indexed_resource_heap || unbounded_resources
+                ? " cs_6_6 "
+            : wave_ops      ? " cs_6_5 "
+            : native16_mode ? " cs_6_2 "
+                            : " cs_6_0 ")
+        << (root_cbv         ? "root CBV"
+            : root_constants ? "root constants"
+            : int64_mode
+                ? (int64_descriptor_ops ? "int64 descriptor ops" : "int64 ops")
+            : (root_srv || reserved_srv) ? "root SRV"
+            : direct_indexed_resources || direct_indexed_resources_lifetime
+                ? "direct indexed resources"
+            : direct_indexed_nonuniform ? "direct indexed non-uniform"
+            : direct_indexed            ? "direct indexed"
+            : unbounded_resources       ? "unbounded resources"
+            : wave_ops                  ? "wave ops"
+            : native16_mode
+                ? (native16_descriptor_ops ? "native16 descriptor ops"
+                                           : "native16 ops")
+            : descriptor_table_resources ? "descriptor resources"
+            : packed_dot_ops             ? "packed dot ops"
+            : compute_derivatives        ? "compute derivatives"
+            : nan_inf_ops                ? "nan/inf ops"
+            : global_coherent            ? "globally coherent"
+                                         : "root UAV")
+        << " readback passed: " << output_value << "\n";
   } else {
-    std::cout << (is_dxbc ? "DXBC" : "DXIL") << " cs_6_0 no-resource Dispatch passed\n";
+    std::cout
+        << (static_cast<dxmt::MTLD3D12PipelineState *>(pso)->shader_backend ==
+                    dxmt::D3D12ShaderBackend::MetalShaderConverter
+                ? "DXIL/MSC"
+                : "DXBC/Airconv")
+        << " cs_6_0 no-resource Dispatch passed\n";
   }
   result = 0;
 
