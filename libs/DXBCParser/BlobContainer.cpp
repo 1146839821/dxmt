@@ -39,51 +39,31 @@ HRESULT CDXBCParser::ReadDXBC( const void* pContainer, UINT ContainerSizeInBytes
     {
         return E_FAIL;
     }
-    const void* pContainerEnd = ((const BYTE*)pHeader + ContainerSizeInBytes);
-    if (pContainerEnd < pContainer)
+    // Bound the index before multiplying its count or reading any entry.
+    const UINT HeaderSize = sizeof( DXBCHeader );
+    if (pHeader->BlobCount > (ContainerSizeInBytes - HeaderSize) / sizeof( UINT ))
     {
         return E_FAIL;
     }
-    UINT* pIndex = (UINT*)((BYTE*)pHeader + sizeof( DXBCHeader ));
-    if ((const BYTE*)pContainer + sizeof( UINT ) * pHeader->BlobCount < (const BYTE*)pContainer)
-    {
-        return E_FAIL; // overflow would break the calculation of OffsetOfCurrentSegmentEnd below
-    }
-    UINT OffsetOfCurrentSegmentEnd = (UINT)((BYTE*)pIndex - (const BYTE*)pContainer + sizeof( UINT ) * pHeader->BlobCount - 1);
-    // Is the entire index within the container?
-    if (OffsetOfCurrentSegmentEnd > ContainerSizeInBytes)
-    {
-        return E_FAIL;
-    }
-    // Is each blob in the index directly after the previous entry and not past the end of the container?
-    UINT OffsetOfLastSegmentEnd = OffsetOfCurrentSegmentEnd;
+    const UINT* pIndex = (const UINT*)((const BYTE*)pHeader + HeaderSize);
+    UINT NextOffset = HeaderSize + sizeof( UINT ) * pHeader->BlobCount;
     for (UINT b = 0; b < pHeader->BlobCount; b++)
     {
-        DXBCBlobHeader* pBlobHeader = (DXBCBlobHeader*)((const BYTE*)pContainer + pIndex[b]);
-        DXBCBlobHeader* pAfterBlobHeader = pBlobHeader + 1;
-
-        if (pAfterBlobHeader < pBlobHeader || pAfterBlobHeader > pContainerEnd)
+        // Keep the contiguous layout contract. Validate offsets as integers
+        // before forming pointers, and use exclusive ends throughout.
+        if (pIndex[b] != NextOffset ||
+            sizeof( DXBCBlobHeader ) > ContainerSizeInBytes - NextOffset)
         {
             return E_FAIL;
         }
-        if (((BYTE*)pBlobHeader < (const BYTE*)pContainer) || (pIndex[b] + sizeof( DXBCBlobHeader ) < pIndex[b]))
-        {
-            return E_FAIL; // overflow because of bad pIndex[b] value
-        }
-        if (pIndex[b] + sizeof( DXBCBlobHeader ) + pBlobHeader->BlobSize < pIndex[b])
-        {
-            return E_FAIL; // overflow because of bad pBlobHeader->BlobSize value
-        }
-        OffsetOfCurrentSegmentEnd = pIndex[b] + sizeof( DXBCBlobHeader ) + pBlobHeader->BlobSize - 1;
-        if (OffsetOfCurrentSegmentEnd > ContainerSizeInBytes)
+        const DXBCBlobHeader* pBlobHeader =
+            (const DXBCBlobHeader*)((const BYTE*)pContainer + NextOffset);
+        NextOffset += sizeof( DXBCBlobHeader );
+        if (pBlobHeader->BlobSize > ContainerSizeInBytes - NextOffset)
         {
             return E_FAIL;
         }
-        if (OffsetOfLastSegmentEnd != pIndex[b] - 1)
-        {
-            return E_FAIL;
-        }
-        OffsetOfLastSegmentEnd = OffsetOfCurrentSegmentEnd;
+        NextOffset += pBlobHeader->BlobSize;
     }
 
     // Ok, satisfied with integrity of container, store info.

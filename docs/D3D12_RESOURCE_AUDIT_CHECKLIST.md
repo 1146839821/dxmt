@@ -4054,3 +4054,30 @@ resource layout/scheduling unchanged; complete debug layer/Device/G1/FL12_2
 not claimed. User .gitignore preserved; local commit/no push. Commands/hashes,
 primary source, all28 process records and performance scope:
 `../dxmt-test/n02-infoqueue-retention-20261026/N02-infoqueue-retention.md`.
+
+
+### N03 shared DXBC container bounds — 2026-10-27
+
+On342ecf6e, static inspection found inclusive-end extent comparisons and
+index-size narrowing in ReadDXBC. The existing shared parser now bounds the
+index count by remaining bytes, checks contiguous offsets before pointer
+construction, and advances exclusive ends only after subtraction-based checks.
+NextOffset starts within ContainerSizeInBytes and remains within it after each
+header/payload advance. Minimal correction in the existing Microsoft-derived
+owner avoids a second D3D12 parser; no allocation, lock, state or ABI added.
+Zero-size chunks, trailing bytes and failure-state semantics are preserved.
+
+Private/no-private PE/native builds and targeted validation-on execution pass:
+existing shader-container negatives and168 raw-root cases per configuration;
+six additional legal metadata-boundary cases per configuration; SM5 andSM6
+compute readbacks777 in both; D3D11 SHDR/SHEX acceptance and DXIL/hybrid/no-code
+rejection. Final container binaries rerun after guarding empty test payloads.
+These are bounded compatibility/regression checks, not exploit reproduction,
+full parser fuzzing, alignment-contract verification or exhaustive N03 proof.
+
+Cost remains O(blob count), no per-draw/submit path change. Performance not
+remeasured; existing performance warnings remain OPEN. M1Max/macOS27.0.1,
+Xcode27.1/Wine11/MSC4.0.1; requested Xcode26/native Windows/other GPUs/fullT3/T4
+NOT_RUN. No capability promotion; Device/G1/FL12_2 remain incomplete.
+Report, commands and artifact hashes:
+`../dxmt-test/n03-container-bounds-20261027/N03-container-bounds.md`.

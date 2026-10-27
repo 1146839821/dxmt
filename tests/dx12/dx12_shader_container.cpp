@@ -317,7 +317,8 @@ bool BuildContainer(
     write_u32(container.data() + 32 + i * sizeof(uint32_t), static_cast<uint32_t>(output_offset));
     write_u32(container.data() + output_offset, parts[i].fourcc);
     write_u32(container.data() + output_offset + 4, static_cast<uint32_t>(parts[i].payload.size()));
-    std::memcpy(container.data() + output_offset + 8, parts[i].payload.data(), parts[i].payload.size());
+    if (!parts[i].payload.empty())
+      std::memcpy(container.data() + output_offset + 8, parts[i].payload.data(), parts[i].payload.size());
     output_offset += 8 + parts[i].payload.size();
   }
   const auto hash = dxmt::md5::hashDxbcBinary(container.data(), container.size());
@@ -379,6 +380,35 @@ bool CheckRawRootSignatures(ID3D12Device *device, bool safe_only = false) {
     std::vector<ContainerPart> parts;
     if (!ReadContainerParts(source, parts))
       return false;
+    // Unknown metadata, including empty chunks at either boundary, must not
+    // change root-signature decoding through the shared container parser.
+    for (UINT position = 0; position < 3; ++position) {
+      auto padded_parts = parts;
+      ContainerPart metadata = {MakeFourCC('T', 'E', 'S', 'T'), {}};
+      if (position == 2)
+        metadata.payload.resize(16, 0x5a);
+      padded_parts.insert(
+          position == 0 ? padded_parts.begin() : padded_parts.end(), metadata);
+      std::vector<uint8_t> padded;
+      if (!BuildContainer(source, padded_parts, padded))
+        return false;
+      ID3D12VersionedRootSignatureDeserializer *deserializer = nullptr;
+      const HRESULT hr = D3D12CreateVersionedRootSignatureDeserializer(
+          padded.data(), padded.size(), IID_PPV_ARGS(&deserializer));
+      bool good = hr == S_OK && deserializer;
+      if (good) {
+        const auto *decoded = deserializer->GetUnconvertedRootSignatureDesc();
+        good = decoded && decoded->Version == version &&
+               (version == D3D_ROOT_SIGNATURE_VERSION_1_0
+                    ? decoded->Desc_1_0.NumParameters
+                    : decoded->Desc_1_1.NumParameters) == 3;
+      }
+      std::cout << "container-metadata version=" << version
+                << " position=" << position
+                << " result=" << (good ? "PASS" : "FAIL") << "\n";
+      Release(deserializer);
+      passed &= good;
+    }
     const auto root_part =
         std::find_if(parts.begin(), parts.end(), [](const ContainerPart &part) {
           return part.fourcc == MakeFourCC('R', 'T', 'S', '0');
