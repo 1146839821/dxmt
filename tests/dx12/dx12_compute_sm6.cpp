@@ -29,7 +29,7 @@ int main(int argc, char **argv) {
   if (argc < 2 || argc > 3) {
     std::cerr << "usage: dx12_compute_sm6 <shader.cso> "
                  "[--root-uav|--reserved-uav|--reserved-srv|--descriptor-uav|--descriptor-resources|--"
-                 "descriptor-resources-space|--descriptor-typed-resources|--descriptor-bgra|--root-cbv|--root-constants|--"
+                 "descriptor-resources-space|--descriptor-typed-resources|--descriptor-typed-offset|--descriptor-structured-offset|--descriptor-bgra|--root-cbv|--root-constants|--"
                  "descriptor-resources-1-1|--descriptor-null-cbv|--direct-indexed|--root-srv|--"
                  "direct-indexed-resources|--direct-indexed-resources-lifetime|"
                  "--direct-indexed-nonuniform|--direct-indexed-nonuniform-mixed|"
@@ -82,13 +82,19 @@ int main(int argc, char **argv) {
                               (strcmp(argv[2], "--descriptor-uav") == 0 || append_consume_unsupported);
   const bool descriptor_bgra =
       argc == 3 && strcmp(argv[2], "--descriptor-bgra") == 0;
+  const bool descriptor_typed_offset =
+      argc == 3 && strcmp(argv[2], "--descriptor-typed-offset") == 0;
+  const bool descriptor_structured_offset =
+      argc == 3 && strcmp(argv[2], "--descriptor-structured-offset") == 0;
+  const bool descriptor_offset =
+      descriptor_typed_offset || descriptor_structured_offset;
   const bool descriptor_typed_resources =
-      descriptor_bgra ||
+      descriptor_bgra || descriptor_typed_offset ||
       (argc == 3 && strcmp(argv[2], "--descriptor-typed-resources") == 0);
   const bool descriptor_resources =
-      argc == 3 &&
-      (strcmp(argv[2], "--descriptor-resources") == 0 || int64_descriptor_ops ||
-       native16_descriptor_ops || descriptor_typed_resources);
+      argc == 3 && (strcmp(argv[2], "--descriptor-resources") == 0 ||
+                    descriptor_structured_offset || int64_descriptor_ops ||
+                    native16_descriptor_ops || descriptor_typed_resources);
   const bool descriptor_resources_space =
       argc == 3 && strcmp(argv[2], "--descriptor-resources-space") == 0;
   const bool descriptor_resources_1_1 =
@@ -372,6 +378,8 @@ int main(int argc, char **argv) {
         const UINT pixels[] = {0xc7834d1f, 0x11223344, 0xff0080ff, 0x00ff0000};
         memcpy(mapped_input, pixels, sizeof(pixels));
       }
+      if (descriptor_offset)
+        static_cast<UINT *>(mapped_input)[63] = input_value + 111;
       input_buffer->Unmap(0, nullptr);
       if (descriptor_bgra) {
         auto private_heap = upload_heap;
@@ -442,6 +450,10 @@ int main(int argc, char **argv) {
           srv_desc.Buffer.StructureByteStride = 0;
         }
         srv_desc.Buffer.FirstElement = 0;
+        if (descriptor_offset) {
+          srv_desc.Buffer.FirstElement = 63;
+          srv_desc.Buffer.NumElements = 1;
+        }
         device->CreateShaderResourceView(descriptor_bgra ? private_input
                                                          : input_buffer,
                                          &srv_desc, descriptor_cpu);
@@ -550,6 +562,10 @@ int main(int argc, char **argv) {
       if (descriptor_typed_resources) {
         uav_desc.Format = DXGI_FORMAT_R32_UINT;
         uav_desc.Buffer.StructureByteStride = 0;
+      }
+      if (descriptor_offset) {
+        uav_desc.Buffer.FirstElement = 63;
+        uav_desc.Buffer.NumElements = 1;
       }
       descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
       if (descriptor_table_resources || direct_indexed_resources || direct_indexed_resources_lifetime ||
@@ -751,7 +767,8 @@ int main(int argc, char **argv) {
                                     : int64_mode
                                         ? sizeof(UINT) * 2
                                         : sizeof(UINT);
-      if (direct_indexed_nonuniform || descriptor_typed_resources) {
+      if (direct_indexed_nonuniform || descriptor_typed_resources ||
+          descriptor_offset) {
         D3D12_RESOURCE_BARRIER transition = {};
         transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         transition.Transition.pResource = output_buffer;
@@ -761,7 +778,8 @@ int main(int argc, char **argv) {
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         transition.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
         list->ResourceBarrier(1, &transition);
-        list->CopyBufferRegion(readback_buffer, 0, output_buffer, 0,
+        list->CopyBufferRegion(readback_buffer, 0, output_buffer,
+                               descriptor_offset ? 63 * sizeof(UINT) : 0,
                                output_copy_size);
         std::swap(transition.Transition.StateBefore,
                   transition.Transition.StateAfter);
@@ -972,6 +990,8 @@ int main(int argc, char **argv) {
       expected_value = 62200;
     else if (descriptor_bgra)
       expected_value = 0xc71f4d83;
+    else if (descriptor_offset)
+      expected_value = input_value * 2 + 111;
     else if (descriptor_table_resources)
       expected_value = input_value * 2;
     else if (packed_dot_ops)

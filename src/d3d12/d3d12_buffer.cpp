@@ -45,8 +45,9 @@ ClearResourceTiling(
 }
 
 bool
-MakeBufferSlice(UINT first_element, UINT element_count, uint64_t element_stride, uint64_t buffer_size,
-                BufferSlice &slice) {
+MakeBufferSlice(
+    UINT64 first_element, UINT element_count, uint64_t element_stride, uint64_t buffer_size, BufferSlice &slice
+) {
   if (!element_stride || first_element > UINT64_MAX / element_stride ||
       element_count > UINT64_MAX / element_stride)
     return false;
@@ -57,7 +58,8 @@ MakeBufferSlice(UINT first_element, UINT element_count, uint64_t element_stride,
       byte_length > UINT32_MAX)
     return false;
 
-  slice.firstElement = first_element;
+  // A nonzero stride and the checked byte range also bound the element index.
+  slice.firstElement = static_cast<uint32_t>(first_element);
   slice.elementCount = element_count;
   slice.byteOffset = static_cast<uint32_t>(byte_offset);
   slice.byteLength = static_cast<uint32_t>(byte_length);

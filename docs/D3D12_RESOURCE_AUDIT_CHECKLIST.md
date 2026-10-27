@@ -4324,3 +4324,47 @@ resolved; typed BUFFER report/RGB96/Device/G1/FL12_2 remain incomplete. No publi
 capability promotion. User .gitignore preserved; local commit/no push. Evidence:
 `../dxmt-test/n09-buffer-usage-20261027/N09-buffer-usage.md`, manifest.json,
 results.json, shader-identities.json, performance.json and raw logs.
+
+
+### N09 — preserve 64-bit buffer-view range admission, 2026-10-27
+
+Baseef12e6e0. Public SRV/UAV FirstElement is UINT64 but shared MakeBufferSlice
+accepted UINT, discarding high bits before overflow/resource-range checks. A
+256-byte buffer view at2^32 therefore aliased element0 and published a descriptor.
+The helper preserves UINT64 through validation, then narrows only after the
+existing nonzero-stride and32-bit byte-range checks prove representability.
+Four typed/RAW/structured callers share the fix. No new table/state/owner/lock,
+allocation, production file, public ABI/layout/capability or scheduling change.
+Existing internal32-bit BufferSlice limits remain; >4GiB view support is not added.
+
+Same final PE: baseline144 cases with48 high-bit failures, both candidates144/144.
+Three view modes xSRV/UAV xempty/seeded destination x12 ranges verify exact valid
+slice/owner/type and bytewise+generation preservation on rejection. No invalid
+view is dispatched. UINT64 multiplication and end-range overflow are covered.
+Existing GPU runner gains typed/structured offset modes at last element63.
+SM5 typed and dual-backend structured read1665 on baseline/private/no-private
+(9 successful GPU runs). Missing-SRV mutation reads777 and fails both candidates.
+
+New independent OPEN defect: SM6 typed offset reads0 on baseline and both
+candidates;3 runs explicitly EXPECTED_FAIL, not GPU semantic PASS. Clean Metal
+validation does not establish correct output. MSC typed-view binding/offset
+contract is the next priority. RGB96 buffer execution and typed BUFFER reporting
+remain UNVERIFIED/OPEN; no claim is promoted to mask these gaps.
+
+Both scoped builds pass. Nearest buffer formats/cache, counter, full ownership,
+feature, BGRA SM5/SM6 GPU readbacks and4 depth/stencil copy rounds pass. Final31
+validation-on processes:25 successes,1 baseline truncation failure,3 existing
+SM6 typed-offset failures,2 deliberate wrong-output failures. No observed Metal
+API/GPU validation errors. Loaded DLL/native/PE and final source hashes checked.
+Preliminary diagnostic failures kept separately. D3D11/shared production unchanged;
+D3D11 runtime/raw-view GPU/native Windows/other GPUs/fullT3/T4 NOT_RUN.
+
+AB/BA/AB/BA8 processes;10000 writes/batch;96 retained samples/side. Median process
+p50/p95 us2310.225/2349.850 ->2244.375/2327.050 (-2.85%/-0.97%). No regression
+observed in this microbenchmark, no causal speedup claim. No recording/submit work
+added; Recording/ordinarySubmit p95 and global performance gate remain OPEN.
+M1Max/Apple7/macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1/clang23.1.1; requested26
+unavailable. Device/G1/FL12_2 incomplete; public FL/SM/Options unchanged.
+User .gitignore preserved; focused local commit/no push. Evidence and commands:
+`../dxmt-test/n09-buffer-range-20261027/N09-buffer-range.md`, manifest.json,
+results.json, performance.json, official source snapshots and raw logs.

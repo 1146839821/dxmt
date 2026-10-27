@@ -1634,6 +1634,130 @@ bool CheckTextureViewDimensions() {
   return good;
 }
 
+bool CheckBufferViewRanges() {
+  struct Objects {
+    ID3D12Device *device = nullptr;
+    ID3D12Resource *buffer = nullptr;
+    ID3D12DescriptorHeap *heap = nullptr;
+    ~Objects() {
+      Release(heap);
+      Release(buffer);
+      Release(device);
+    }
+  } o;
+  const auto properties = DefaultHeap();
+  const auto desc =
+      BufferDescription(256, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
+  heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  heap_desc.NumDescriptors = 1;
+  if (!CheckHR("Buffer range device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&o.device))) ||
+      !CheckHR("Buffer range resource",
+               o.device->CreateCommittedResource(
+                   &properties, D3D12_HEAP_FLAG_NONE, &desc,
+                   D3D12_RESOURCE_STATE_COMMON, nullptr,
+                   IID_PPV_ARGS(&o.buffer))) ||
+      !CheckHR("Buffer range heap", o.device->CreateDescriptorHeap(
+                                        &heap_desc, IID_PPV_ARGS(&o.heap))))
+    return false;
+  auto *heap = static_cast<dxmt::MTLD3D12DescriptorHeap *>(o.heap);
+  auto *buffer = static_cast<dxmt::MTLD3D12Resource *>(o.buffer)->buffer.ptr();
+  const auto handle = o.heap->GetCPUDescriptorHandleForHeapStart();
+  bool good = true;
+  for (UINT mode = 0; mode < 3; mode++) {
+    const UINT stride = mode == 2 ? 16 : 4;
+    const UINT64 last = desc.Width / stride - 1;
+    struct Range {
+      UINT64 first;
+      UINT count;
+      bool valid;
+    };
+    const Range cases[] = {{0, 1, true},
+                           {1, 1, true},
+                           {last, 1, true},
+                           {0, UINT(last + 1), true},
+                           {last, 2, false},
+                           {last + 1, 1, false},
+                           {0, UINT_MAX, false},
+                           {UINT64(1) << 32, 1, false},
+                           {(UINT64(1) << 32) + 1, 1, false},
+                           {(UINT64(1) << 32) + last, 1, false},
+                           {UINT64(1) << 62, 1, false},
+                           {UINT64_MAX, 1, false}};
+    for (UINT kind = 0; kind < 2; kind++) {
+      const auto write = [&](UINT64 first, UINT count) {
+        const DXGI_FORMAT format = mode == 0   ? DXGI_FORMAT_R32_UINT
+                                   : mode == 1 ? DXGI_FORMAT_R32_TYPELESS
+                                               : DXGI_FORMAT_UNKNOWN;
+        if (!kind) {
+          D3D12_SHADER_RESOURCE_VIEW_DESC v = {};
+          v.Format = format;
+          v.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+          v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+          v.Buffer.FirstElement = first;
+          v.Buffer.NumElements = count;
+          v.Buffer.StructureByteStride = mode == 2 ? stride : 0;
+          v.Buffer.Flags = mode == 1 ? D3D12_BUFFER_SRV_FLAG_RAW
+                                     : D3D12_BUFFER_SRV_FLAG_NONE;
+          o.device->CreateShaderResourceView(o.buffer, &v, handle);
+        } else {
+          D3D12_UNORDERED_ACCESS_VIEW_DESC v = {};
+          v.Format = format;
+          v.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+          v.Buffer.FirstElement = first;
+          v.Buffer.NumElements = count;
+          v.Buffer.StructureByteStride = mode == 2 ? stride : 0;
+          v.Buffer.Flags = mode == 1 ? D3D12_BUFFER_UAV_FLAG_RAW
+                                     : D3D12_BUFFER_UAV_FLAG_NONE;
+          o.device->CreateUnorderedAccessView(o.buffer, nullptr, &v, handle);
+        }
+      };
+      for (bool seeded : {false, true}) {
+        for (const auto &c : cases) {
+          heap->ClearDescriptor(0);
+          if (seeded)
+            write(1, 2);
+          const auto before = ReadDescriptorFields(heap, 0);
+          const auto generation = heap->GetMutationGeneration();
+          write(c.first, c.count);
+          const auto after = ReadDescriptorFields(heap, 0);
+          bool pass;
+          if (c.valid) {
+            const auto expected_type =
+                !mode
+                    ? (!kind
+                           ? dxmt::ShaderVisibleDescriptorType::SRVTexelBuffer
+                           : dxmt::ShaderVisibleDescriptorType::UAVTexelBuffer)
+                    : (!kind ? dxmt::ShaderVisibleDescriptorType::SRVBuffer
+                             : dxmt::ShaderVisibleDescriptorType::UAVBuffer);
+            const auto slice =
+                !mode ? after.SRVTexelBuffer.slice : after.SRVBuffer.slice;
+            const auto target =
+                !mode ? after.SRVTexelBuffer.buffer : after.SRVBuffer.buffer;
+            pass = after.type == expected_type && target == buffer &&
+                   slice.firstElement == c.first &&
+                   slice.elementCount == c.count &&
+                   slice.byteOffset == c.first * stride &&
+                   slice.byteLength == UINT64(c.count) * stride &&
+                   heap->GetMutationGeneration() == generation + 1;
+          } else {
+            pass = !std::memcmp(&before, &after, sizeof(before)) &&
+                   heap->GetMutationGeneration() == generation;
+          }
+          std::cout << "buffer_range mode=" << mode << " kind=" << kind
+                    << " seeded=" << seeded << " first=" << c.first
+                    << " count=" << c.count << " valid=" << c.valid
+                    << " pass=" << pass << "\n";
+          good &= pass;
+        }
+      }
+    }
+  }
+  return good;
+}
+
 bool CheckTypedViewFormats(UINT mode = 0, bool cost = false) {
   struct Objects {
     ID3D12Device *device = nullptr;
@@ -2232,6 +2356,8 @@ bool CheckTypedViewFormats(UINT mode = 0, bool cost = false) {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::string(argv[1]) == "--buffer-view-ranges")
+    return CheckBufferViewRanges() ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--root-container-lengths") {
     ID3D12Device *device = nullptr;
     if (!CheckHR("Root container device",
