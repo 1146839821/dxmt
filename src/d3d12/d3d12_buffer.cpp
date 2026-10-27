@@ -316,7 +316,11 @@ public:
       ERR("D3D12Buffer::CreateShaderResourceView: not an ordinary or packed format: ", ViewDesc.Format);
       return E_FAIL;
     }
-    if (IsFullyTypelessFormat(ViewDesc.Format, Format))
+    if (IsFullyTypelessFormat(ViewDesc.Format, Format) ||
+        (Format.Flag & (MTL_DXGI_FORMAT_DEPTH_PLANER | MTL_DXGI_FORMAT_STENCIL_PLANER)))
+      return E_INVALIDARG;
+    const auto capabilities = device_->GetMTLPixelFormatCapability(Format.PixelFormat);
+    if (!any_bit_set(capabilities & (FormatCapability::TextureBufferRead | FormatCapability::TextureBufferReadWrite)))
       return E_INVALIDARG;
     BufferViewDescriptor view_descriptor{Format.PixelFormat};
     if (!MakeBufferSlice(ViewDesc.Buffer.FirstElement, ViewDesc.Buffer.NumElements, Format.BytesPerTexel, desc_.Width, Slice))
@@ -389,7 +393,11 @@ public:
     }
     if (pCounter)
       return E_INVALIDARG;
-    if (IsFullyTypelessFormat(ViewDesc.Format, Format))
+    if (IsFullyTypelessFormat(ViewDesc.Format, Format) ||
+        (Format.Flag & (MTL_DXGI_FORMAT_DEPTH_PLANER | MTL_DXGI_FORMAT_STENCIL_PLANER)))
+      return E_INVALIDARG;
+    const auto capabilities = device_->GetMTLPixelFormatCapability(Format.PixelFormat);
+    if (!any_bit_set(capabilities & (FormatCapability::TextureBufferWrite | FormatCapability::TextureBufferReadWrite)))
       return E_INVALIDARG;
     BufferViewDescriptor view_descriptor{Format.PixelFormat};
     if (!MakeBufferSlice(ViewDesc.Buffer.FirstElement, ViewDesc.Buffer.NumElements, Format.BytesPerTexel, desc_.Width, Slice))

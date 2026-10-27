@@ -1634,7 +1634,7 @@ bool CheckTextureViewDimensions() {
   return good;
 }
 
-bool CheckTypedViewFormats(UINT mode = 0) {
+bool CheckTypedViewFormats(UINT mode = 0, bool cost = false) {
   struct Objects {
     ID3D12Device *device = nullptr;
     ID3D12DescriptorHeap *heaps[3] = {};
@@ -1802,6 +1802,98 @@ bool CheckTypedViewFormats(UINT mode = 0) {
       return nullptr;
     }
   };
+  if (mode == 4) {
+    if (cost) {
+      for (UINT round = 0; round < 25; round++) {
+        const auto start = std::chrono::steady_clock::now();
+        for (UINT repeat = 0; repeat < 5000; repeat++) {
+          write(0, 5, DXGI_FORMAT_R32_UINT);
+          write(1, 5, DXGI_FORMAT_R32_UINT);
+        }
+        const double us = std::chrono::duration<double, std::micro>(
+                              std::chrono::steady_clock::now() - start)
+                              .count();
+        if (ReadDescriptorFields(shader, 0).type !=
+                dxmt::ShaderVisibleDescriptorType::UAVTexelBuffer ||
+            identity(1) != static_cast<dxmt::MTLD3D12Resource *>(o.resources[5])
+                               ->buffer.ptr())
+          return false;
+        std::cout << "buffer_view_cost round=" << round
+                  << " writes=10000 write_us=" << us << "\n";
+      }
+      return true;
+    }
+    struct BufferFormat {
+      DXGI_FORMAT format;
+      // BGRA SRV on private buffers still inherits ShaderWrite usage.
+      // Leave that separate legal-path defect outside this slice (-1).
+      int srv, uav;
+    };
+    const BufferFormat cases[] = {
+        {DXGI_FORMAT_R32_UINT, true, true},
+        {DXGI_FORMAT_R32_FLOAT, true, true},
+        {DXGI_FORMAT_R8G8B8A8_UNORM, true, true},
+        {DXGI_FORMAT_B8G8R8A8_UNORM, -1, false},
+        {DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, false, false},
+        {DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, false, false},
+        {DXGI_FORMAT_D16_UNORM, false, false},
+        {DXGI_FORMAT_D32_FLOAT, false, false},
+        {DXGI_FORMAT_D24_UNORM_S8_UINT, false, false},
+        {DXGI_FORMAT_D32_FLOAT_S8X24_UINT, false, false},
+        {DXGI_FORMAT_R24_UNORM_X8_TYPELESS, false, false},
+        {DXGI_FORMAT_X24_TYPELESS_G8_UINT, false, false},
+        {DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS, false, false},
+        {DXGI_FORMAT_X32_TYPELESS_G8X24_UINT, false, false},
+        {DXGI_FORMAT_BC1_UNORM, false, false},
+        {DXGI_FORMAT_BC7_UNORM, false, false},
+        {DXGI_FORMAT_R32_TYPELESS, false, false}};
+    bool good = true;
+    for (const auto &c : cases)
+      for (UINT kind : {0u, 1u})
+        for (bool seeded : {false, true}) {
+          if ((kind == 0 ? c.srv : c.uav) < 0)
+            continue;
+          shader->ClearDescriptor(0);
+          if (seeded)
+            write(kind, 5, DXGI_FORMAT_R32_UINT);
+          const auto before = ReadDescriptorFields(shader, 0);
+          const auto generation = shader->GetMutationGeneration();
+          write(kind, 5, c.format);
+          const auto after = ReadDescriptorFields(shader, 0);
+          const bool valid = kind == 0 ? c.srv : c.uav;
+          const bool pass =
+              valid
+                  ? after.type == (kind == 0
+                                       ? dxmt::ShaderVisibleDescriptorType::
+                                             SRVTexelBuffer
+                                       : dxmt::ShaderVisibleDescriptorType::
+                                             UAVTexelBuffer) &&
+                        identity(kind) == static_cast<dxmt::MTLD3D12Resource *>(
+                                              o.resources[5])
+                                              ->buffer.ptr()
+                  : !std::memcmp(&before, &after, sizeof(before)) &&
+                        shader->GetMutationGeneration() == generation;
+          std::cout << "buffer_format format=" << c.format << " kind=" << kind
+                    << " seeded=" << seeded << " valid=" << valid
+                    << " pass=" << pass << std::endl;
+          good &= pass;
+          if (!pass)
+            return false;
+        }
+    for (UINT kind : {0u, 1u})
+      for (bool raw : {false, true}) {
+        write(kind, 5, raw ? DXGI_FORMAT_R32_TYPELESS : DXGI_FORMAT_UNKNOWN,
+              raw);
+        const bool pass =
+            ReadDescriptorFields(shader, 0).type ==
+            (kind == 0 ? dxmt::ShaderVisibleDescriptorType::SRVBuffer
+                       : dxmt::ShaderVisibleDescriptorType::UAVBuffer);
+        std::cout << "buffer_format raw=" << raw << " kind=" << kind
+                  << " pass=" << pass << "\n";
+        good &= pass;
+      }
+    return good;
+  }
   if (mode == 3) {
     const DXGI_FORMAT planes[] = {DXGI_FORMAT_R24_UNORM_X8_TYPELESS,
                                   DXGI_FORMAT_X24_TYPELESS_G8_UINT,
@@ -2169,6 +2261,12 @@ int main(int argc, char **argv) {
     return passed ? 0 : 1;
   }
 
+  if (argc == 2 && (std::string(argv[1]) == "--buffer-view-formats" ||
+                    std::string(argv[1]) == "--buffer-view-cost"))
+    return CheckTypedViewFormats(4,
+                                 std::string(argv[1]) == "--buffer-view-cost")
+               ? 0
+               : 1;
   if (argc == 2 && std::string(argv[1]) == "--texture-view-planes")
     return CheckTypedViewFormats(3) ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--texture-view-roles")

@@ -289,6 +289,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_compute_sm6_descriptor_typed_resources_fixture',
+    input: 'compute_sm6_descriptor_resources.hlsl',
+    output: 'compute_sm6_descriptor_typed_resources.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '-D', 'TYPED_BUFFER=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_compute_sm6_descriptor_resources_space_fixture',
     input: 'compute_sm6_descriptor_resources_space.hlsl',
     output: 'compute_sm6_descriptor_resources_space.cs.cso',

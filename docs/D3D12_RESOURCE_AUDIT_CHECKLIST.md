@@ -56,6 +56,10 @@ and does not justify another unchanged local MS_LOAD or Submit timing matrix.
 
 ## Completed Slices
 
+- [x] N09 typed-buffer format admission rejects unsupported native SRV/UAV
+  formats before publication. See the 2026-10-27 slice below; BGRA SRV usage,
+  RGB96 execution and BUFFER query reporting remain separate OPEN items.
+
 - [x] Capability boundary and feature-level contract. `D3D12CreateDevice`
   keeps the supported maximum at FL11_1 on Apple 7 hardware and does not claim
   tiled-resource Tier 2 support. Established before this audit.
@@ -4241,3 +4245,42 @@ MSC4.0.1; requested26/native Windows/other GPUs/fullT3/T4 NOT_RUN. N14/Device/G1
 FL12_2 remain incomplete. User .gitignore preserved; local commit/no push.
 Commands, source references, hashes and evidence:
 `../dxmt-test/n14-fence-flags-20261027/N14-fence-flags.md`.
+
+### N09 — typed-buffer format admission, 2026-10-27
+
+Base4b4e70d2. Native format mapping was incorrectly treated as texel-buffer
+eligibility. Existing buffer SRV/UAV entrypoints now reject depth/stencil
+component views and consult the existing immutable native TextureBufferRead/
+Write/ReadWrite capabilities before view creation/publication. No new table,
+owner/cache/lock, production file, ABI, scheduling or public capability change.
+RAW R32_TYPELESS and structured UNKNOWN keep their existing path.
+
+Same final PE baseline rejects the test at BGRA UAV: descriptor published plus
+Metal unsupported-write message. This one negative baseline uses documented
+validation nslog mode; no illegal GPU dispatch. Both candidates use default
+assert mode and pass70 checks each:54 empty/seeded rejections including bytewise
+descriptor and generation preservation,12 legal typed,4 RAW/structured controls.
+Full ownership, typed-view, texture-role, counter and feature regressions pass
+in both configurations. R32_UINT typed SRV/UAV GPU readback1554 succeeds through
+SM5/SHEX and SM6/DXIL on baseline/private/no-private, six runs total. A missing-SRV
+shader produces777 and fails. Four existing depth/stencil GPU copy rounds pass.
+Final22 validation-on processes:20 successes and2 expected failures. DLL/native
+loader paths and hashes checked. Early unsafe baseline timeout, unproven RGB96
+test expectation, test-edit build failures and driver-parser errors are retained
+but excluded from final acceptance. Both final builds pass.
+
+AB/BA/AB/BA8 processes,10000 typed-view writes/batch,96 retained samples/side:
+median process p50/p95 us2164.225/2229.150 ->2245.775/2305.400 (+3.77%/+3.42%).
+One snapshot lookup per typed view; approx8.155ns/write median-batch increment.
+No speedup claim; existing recording/submit warnings and globalperf gate OPEN.
+No draw/submit code change. BGRA legal private-buffer SRV inherits ShaderWrite
+in shared native view creation: observed and still OPEN, explicitly excluded
+from this admission slice. RGB96 typed-buffer shader semantics and missing typed
+BUFFER query bits remain UNVERIFIED/OPEN; no speculative restriction/promotion.
+
+M1Max/Apple7/macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1/clang23.1.1. Requested
+Xcode26/nativeWindows/otherGPUs/D3D11rendering/fullT3/T4 NOT_RUN. Device/G1/
+FL12_2 incomplete; EnhancedBarriersSupported and additional typed-UAV Options
+remain FALSE. User .gitignore preserved, local commit/no push. Evidence:
+`../dxmt-test/n09-buffer-format-20261027/N09-buffer-format.md`, manifest.json,
+results.json, shader-identities.json, performance.json and raw logs.

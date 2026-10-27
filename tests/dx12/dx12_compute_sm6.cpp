@@ -29,7 +29,7 @@ int main(int argc, char **argv) {
   if (argc < 2 || argc > 3) {
     std::cerr << "usage: dx12_compute_sm6 <shader.cso> "
                  "[--root-uav|--reserved-uav|--reserved-srv|--descriptor-uav|--descriptor-resources|--"
-                 "descriptor-resources-space|--root-cbv|--root-constants|--"
+                 "descriptor-resources-space|--descriptor-typed-resources|--root-cbv|--root-constants|--"
                  "descriptor-resources-1-1|--descriptor-null-cbv|--direct-indexed|--root-srv|--"
                  "direct-indexed-resources|--direct-indexed-resources-lifetime|"
                  "--direct-indexed-nonuniform|--direct-indexed-nonuniform-mixed|"
@@ -80,9 +80,12 @@ int main(int argc, char **argv) {
   const bool reserved_srv = argc == 3 && strcmp(argv[2], "--reserved-srv") == 0;
   const bool descriptor_uav = argc == 3 &&
                               (strcmp(argv[2], "--descriptor-uav") == 0 || append_consume_unsupported);
+  const bool descriptor_typed_resources =
+      argc == 3 && strcmp(argv[2], "--descriptor-typed-resources") == 0;
   const bool descriptor_resources =
-      argc == 3 && (strcmp(argv[2], "--descriptor-resources") == 0 || int64_descriptor_ops ||
-                    native16_descriptor_ops);
+      argc == 3 &&
+      (strcmp(argv[2], "--descriptor-resources") == 0 || int64_descriptor_ops ||
+       native16_descriptor_ops || descriptor_typed_resources);
   const bool descriptor_resources_space =
       argc == 3 && strcmp(argv[2], "--descriptor-resources-space") == 0;
   const bool descriptor_resources_1_1 =
@@ -415,6 +418,10 @@ int main(int argc, char **argv) {
             D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv_desc.Buffer.NumElements = direct_indexed_nonuniform ? 1 : 64;
         srv_desc.Buffer.StructureByteStride = native16_mode ? sizeof(uint16_t) : sizeof(UINT);
+        if (descriptor_typed_resources) {
+          srv_desc.Format = DXGI_FORMAT_R32_UINT;
+          srv_desc.Buffer.StructureByteStride = 0;
+        }
         srv_desc.Buffer.FirstElement = 0;
         device->CreateShaderResourceView(input_buffer, &srv_desc,
                                          descriptor_cpu);
@@ -520,6 +527,10 @@ int main(int argc, char **argv) {
       uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
       uav_desc.Buffer.NumElements = 64;
       uav_desc.Buffer.StructureByteStride = native16_mode ? sizeof(uint16_t) : sizeof(UINT);
+      if (descriptor_typed_resources) {
+        uav_desc.Format = DXGI_FORMAT_R32_UINT;
+        uav_desc.Buffer.StructureByteStride = 0;
+      }
       descriptor_cpu = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
       if (descriptor_table_resources || direct_indexed_resources || direct_indexed_resources_lifetime ||
           direct_indexed_nonuniform)
@@ -708,7 +719,7 @@ int main(int argc, char **argv) {
                                     : int64_mode
                                         ? sizeof(UINT) * 2
                                         : sizeof(UINT);
-      if (direct_indexed_nonuniform) {
+      if (direct_indexed_nonuniform || descriptor_typed_resources) {
         D3D12_RESOURCE_BARRIER transition = {};
         transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         transition.Transition.pResource = output_buffer;
