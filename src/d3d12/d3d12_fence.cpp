@@ -261,6 +261,15 @@ public:
 HRESULT
 CreateFence(MTLD3D12Device *pDevice, UINT64 InitialValue, D3D12_FENCE_FLAGS Flags, REFIID riid, void **ppFence) try {
   InitReturnPtr(ppFence);
+  // NON_MONITORED is not declared by the bundled D3D12 headers. Recognize
+  // the public bit without treating the local software timeline as that mode.
+  constexpr UINT non_monitored = 0x4;
+  constexpr UINT known_flags = D3D12_FENCE_FLAG_SHARED | D3D12_FENCE_FLAG_SHARED_CROSS_ADAPTER | non_monitored;
+  if (static_cast<UINT>(Flags) & ~known_flags)
+    return E_INVALIDARG;
+  // Shared handle export/import and non-monitored fences are not implemented.
+  if (Flags != D3D12_FENCE_FLAG_NONE)
+    return E_NOTIMPL;
   auto fence = Com(new MTLD3D12FenceImpl(pDevice, Flags));
   HRESULT hr = fence->Initialize(InitialValue);
   if (FAILED(hr))

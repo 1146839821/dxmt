@@ -1286,6 +1286,83 @@ bool TestInfoQueueAllocationFailure() {
   return TestInfoQueueGrowthAllocationFailure();
 }
 
+bool TestFenceCreationFlags() {
+  Owned<ID3D12Device> device;
+  if (!CheckHR("Fence flags device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&device.ptr))))
+    return false;
+  // NON_MONITORED (0x4) is documented by Microsoft but absent from this SDK.
+  const UINT flags[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0x80000000u, UINT_MAX};
+  SubmissionAllocationFault fault;
+  if (!fault.Install())
+    return false;
+  bool good = true;
+  for (UINT bits : flags) {
+    const HRESULT expected = bits & ~7u ? E_INVALIDARG
+                             : bits     ? E_NOTIMPL
+                                        : S_OK;
+    for (bool null_output : {false, true}) {
+      auto *sentinel = reinterpret_cast<ID3D12Fence1 *>(uintptr_t(1));
+      ID3D12Fence1 *fence = sentinel;
+      const HRESULT hr = device->CreateFence(
+          17, static_cast<D3D12_FENCE_FLAGS>(bits), __uuidof(ID3D12Fence1),
+          null_output ? nullptr : reinterpret_cast<void **>(&fence));
+      bool passed = hr == (bits == 0 && null_output ? S_FALSE : expected);
+      if (!null_output) {
+        if (SUCCEEDED(hr) && fence && fence != sentinel) {
+          passed &= fence->GetCreationFlags() ==
+                        static_cast<D3D12_FENCE_FLAGS>(bits) &&
+                    fence->GetCompletedValue() == 17;
+          if (bits & D3D12_FENCE_FLAG_SHARED) {
+            HANDLE handle = reinterpret_cast<HANDLE>(uintptr_t(1));
+            const HRESULT exported = device->CreateSharedHandle(
+                fence, nullptr, GENERIC_ALL, nullptr, &handle);
+            std::cout << "Fence accepted shared flags=" << bits << " export=0x"
+                      << std::hex << static_cast<unsigned long>(exported)
+                      << std::dec << "\n";
+            if (SUCCEEDED(exported) && handle &&
+                handle != reinterpret_cast<HANDLE>(uintptr_t(1)))
+              CloseHandle(handle);
+          }
+          passed &= fence->Release() == 0;
+        } else {
+          passed &= bits != 0 && !fence;
+        }
+      }
+      good &= passed;
+      std::cout << "Fence flags=" << bits << " null=" << null_output
+                << " result=" << (passed ? "PASS" : "FAIL") << "\n";
+    }
+    if (!bits)
+      continue;
+    void *output = reinterpret_cast<void *>(uintptr_t(1));
+    fault.Arm(1);
+    const HRESULT hr =
+        device->CreateFence(0, static_cast<D3D12_FENCE_FLAGS>(bits),
+                            __uuidof(ID3D12Fence), &output);
+    fault.Stop();
+    const bool allocation_free = !fault.Hit() && hr == expected && !output;
+    good &= allocation_free;
+    std::cout << "Fence flags=" << bits
+              << " allocation-free=" << allocation_free << "\n";
+  }
+  Owned<ID3D12Fence> recovered;
+  if (!CheckHR("Fence flags recovery",
+               device->CreateFence(29, D3D12_FENCE_FLAG_NONE,
+                                   IID_PPV_ARGS(&recovered.ptr))))
+    return false;
+  good &=
+      SUCCEEDED(recovered->Signal(7)) && recovered->GetCompletedValue() == 7;
+  good &= recovered.ptr->Release() == 0;
+  recovered.ptr = nullptr;
+  good &= device.ptr->Release() == 0;
+  device.ptr = nullptr;
+  std::cout << "Fence flag admission/recovery result="
+            << (good ? "PASS" : "FAIL") << "\n";
+  return good;
+}
+
 bool TestFenceCreationAllocationFailure() {
   SubmissionAllocationFault fault;
   if (!fault.Install())
@@ -3873,6 +3950,8 @@ int main(int argc, char **argv) {
     return TestConcurrentMultipleFenceWaits() ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--fence-creation-allocation-failure") == 0)
     return TestFenceCreationAllocationFailure() ? 0 : 1;
+  if (argc == 2 && std::strcmp(argv[1], "--fence-creation-flags") == 0)
+    return TestFenceCreationFlags() ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--fence-removal") == 0)
     return TestDeviceRemovalWaits() && TestConcurrentRemovalListeners() ? 0 : 1;
   if (argc == 2 && std::strcmp(argv[1], "--multiple-fences") == 0)

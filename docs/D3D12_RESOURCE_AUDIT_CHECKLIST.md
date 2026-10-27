@@ -4206,3 +4206,38 @@ Shared-fence interoperability and complete N14/Device/G1/FL12_2 remain OPEN.
 User .gitignore preserved; focused local commit, no push. Commands, primary
 CreateFence API reference, evidence classification and hashes:
 `../dxmt-test/n14-fence-create-oom-20261027/N14-fence-create-oom.md`.
+
+
+### N14 fence creation flag admission — 2026-10-27
+
+On93433e53, CreateFence stored arbitrary flags and returned success although
+CreateSharedHandle/OpenSharedHandle are E_NOTIMPL and the fence owns a local
+software timeline. Same final PE baseline confirms SHARED creation succeeds
+then export returns0x80004001; unknown masks are also accepted. Existing factory
+now clears output, rejects unknown bits with E_INVALIDARG and recognized but
+unimplemented shared/cross-adapter/non-monitored modes with E_NOTIMPL before
+allocation. Microsoft documents NON_MONITORED=0x4; bundled headers omit it, so
+the existing source uses a named constant without modifying SDK headers.
+
+This is truthful unsupported admission, not shared-fence implementation or
+feature completion. Nonzero recognized combinations use the project's current
+unsupported result; exact Windows flag-combination precedence is NOT_RUN.
+D3D11's shared-event/KMT path is not copied into D3D12: sharing that event alone
+would not share the authoritative rewind value and latched wait registrations.
+The full cross-process ownership/notification protocol remains OPEN.
+
+Private/no-private scoped builds pass. Eleven final validation-on processes:
+one expected baseline exit1 and ten candidate exit0. Each configuration checks
+24 output/null-output cases,11 allocation-free rejection cases and ordinary
+fence recovery; existing9 creation-OOM sites, multiple-wait6 OOM sites, removal/
+backpressure/destruction and two depth/stencil GPU copy rounds pass. Final
+source/PE/DLL/native hashes and loader paths checked; no observed Metal validation
+errors. One earlier baseline run is retained separately. No new production file,
+owner, public ABI, layout, scheduling or FL/SM/Options bit change.
+
+Two constant-time factory checks; no recording/submit work added. Performance
+NOT_RUN and prior warnings OPEN. M1Max/Apple7/macOS27.0.1/Xcode27.1/Wine11/
+MSC4.0.1; requested26/native Windows/other GPUs/fullT3/T4 NOT_RUN. N14/Device/G1/
+FL12_2 remain incomplete. User .gitignore preserved; local commit/no push.
+Commands, source references, hashes and evidence:
+`../dxmt-test/n14-fence-flags-20261027/N14-fence-flags.md`.
