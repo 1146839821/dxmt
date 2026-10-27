@@ -183,6 +183,90 @@ bool CheckInfoQueueMessages(ID3D12Device *device) {
   return good;
 }
 
+bool CheckInfoQueueRetention(ID3D12Device *device, bool measure = false) {
+  ID3D12InfoQueue *queue = nullptr;
+  if (!CheckHR("Retention queue", device->QueryInterface(IID_PPV_ARGS(&queue))))
+    return false;
+  queue->SetMuteDebugOutput(TRUE);
+  queue->ClearStorageFilter();
+  queue->ClearRetrievalFilter();
+  bool good = true;
+  const auto capacities = measure ? std::array<UINT, 3>{256, 4096, 16384}
+                                  : std::array<UINT, 3>{1, 37, 513};
+  for (UINT capacity : capacities) {
+    for (UINT round = 0; round < (measure ? 9u : 1u); ++round) {
+      queue->ClearStoredMessages();
+      good &=
+          CheckHR("Retention capacity", queue->SetMessageCountLimit(capacity));
+      const UINT extra = measure ? 1024 : capacity + 7;
+      auto add = [&](UINT value) {
+        const auto text = std::to_string(value);
+        return CheckHR("Retention add",
+                       queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO,
+                                                    text.c_str()));
+      };
+      auto check_message = [&](UINT index, UINT expected) {
+        alignas(D3D12_MESSAGE) std::array<unsigned char, 128> bytes = {};
+        auto *message = reinterpret_cast<D3D12_MESSAGE *>(bytes.data());
+        SIZE_T size = bytes.size();
+        return CheckHR("Retention message",
+                       queue->GetMessage(index, message, &size)) &&
+               message->ID == D3D12_MESSAGE_ID_STRING_FROM_APPLICATION &&
+               !std::strcmp(message->pDescription,
+                            std::to_string(expected).c_str());
+      };
+      for (UINT i = 0; i < capacity; ++i)
+        good &= add(i);
+      const auto begin = std::chrono::steady_clock::now();
+      for (UINT i = 0; i < extra; ++i)
+        good &= add(capacity + i);
+      const auto appended = std::chrono::steady_clock::now();
+      good &=
+          queue->GetNumStoredMessages() == capacity &&
+          queue->GetNumMessagesAllowedByStorageFilter() == capacity + extra &&
+          queue->GetNumMessagesDiscardedByMessageCountLimit() == extra;
+      good &= check_message(0, extra) &&
+              check_message(capacity / 2, extra + capacity / 2) &&
+              check_message(capacity - 1, extra + capacity - 1);
+      const UINT keep = capacity < 16 ? capacity : 16;
+      const auto shrink_begin = std::chrono::steady_clock::now();
+      good &= CheckHR("Retention shrink", queue->SetMessageCountLimit(keep));
+      const auto shrunk = std::chrono::steady_clock::now();
+      good &= queue->GetNumStoredMessages() == keep &&
+              queue->GetNumMessagesDiscardedByMessageCountLimit() ==
+                  capacity + extra - keep;
+      good &= check_message(0, capacity + extra - keep) &&
+              check_message(keep - 1, capacity + extra - 1);
+      good &=
+          CheckHR("Retention zero", queue->SetMessageCountLimit(0)) && add(0);
+      good &= queue->GetNumStoredMessages() == 0 &&
+              queue->GetNumMessagesDiscardedByMessageCountLimit() ==
+                  capacity + extra + 1;
+      good &= CheckHR("Retention unlimited",
+                      queue->SetMessageCountLimit(UINT64_MAX));
+      queue->ClearStoredMessages();
+      good &= add(123) && check_message(0, 123) &&
+              queue->GetNumMessagesAllowedByStorageFilter() == 1 &&
+              queue->GetNumMessagesDiscardedByMessageCountLimit() == 0;
+      std::cout << "infoqueue-retention capacity=" << capacity
+                << " round=" << round << " append_ns="
+                << std::chrono::duration<double, std::nano>(appended - begin)
+                           .count() /
+                       extra
+                << " shrink_ns="
+                << std::chrono::duration<double, std::nano>(shrunk -
+                                                            shrink_begin)
+                       .count()
+                << " result=" << (good ? "PASS" : "FAIL") << "\n";
+    }
+  }
+  queue->ClearStoredMessages();
+  queue->SetMessageCountLimit(1024);
+  queue->SetMuteDebugOutput(FALSE);
+  Release(queue);
+  return good;
+}
+
 bool CheckInfoQueueIdentity(ID3D12Device *device) {
   ID3D12InfoQueue *first = nullptr, *second = nullptr;
   IUnknown *identity = nullptr, *view_identity = nullptr;
@@ -640,6 +724,14 @@ CheckShaderModelRequest(ID3D12Device *device, UINT requested, HRESULT expected_h
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && !std::strcmp(argv[1], "--infoqueue-retention")) {
+    ID3D12Device *device = nullptr;
+    if (!CheckHR("Retention device", D3D12CreateDevice(
+            nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) return 1;
+    const bool good = CheckInfoQueueRetention(device, true);
+    Release(device);
+    return good ? 0 : 1;
+  }
   if (argc == 2 && (!std::strcmp(argv[1], "--format-support") ||
                     !std::strcmp(argv[1], "--format-cost") ||
                     !std::strcmp(argv[1], "--feature-levels"))) {
@@ -706,7 +798,8 @@ int main(int argc, char **argv) {
       ))
     return fail("device creation failed");
 
-  if (!CheckDeviceIdentity(device) || !CheckInfoQueueIdentity(device) || !CheckInfoQueueMessages(device))
+  if (!CheckDeviceIdentity(device) || !CheckInfoQueueIdentity(device) || !CheckInfoQueueMessages(device) ||
+      !CheckInfoQueueRetention(device))
     return fail("device identity query failed");
 
   D3D12_FEATURE_DATA_SHADER_MODEL maximum_shader_model = {D3D_SHADER_MODEL_6_0};

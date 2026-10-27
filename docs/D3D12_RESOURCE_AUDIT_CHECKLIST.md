@@ -4019,3 +4019,38 @@ historical warnings/Device/G1/FL12_2 remain OPEN. Actual Xcode27.1; requested26
 and native Windows NOT_RUN. User .gitignore preserved; local commit/no push.
 Commands/hashes/timing ownership table and source reference:
 `../dxmt-test/n14-concurrent-groups-20261026/N14-concurrent-groups.md`.
+
+
+### N02 InfoQueue FIFO retention cost — 2026-10-27
+
+On47d89d73, message semantics pass but vector front erasure moves all retained
+messages per full-queue append and repeatedly during shrink (quadratic).
+Existing InfoQueue owner now uses deque/pop_front; insertion still precedes
+counter update/eviction, with the same mutex/COM identity/filters. No extra
+state/index/cache/owner/new source file. Append/eviction amortized O(1), shrink
+O(n); retrieval scans remain. Microsoft SetMessageCountLimit FIFO contract kept.
+
+Private/no-private builds pass.12 final validation-on processes cover full
+feature/InfoQueue, retention order/counters/zero/unlimited/reuse, debugger output,
+OOM and four SM5/SM6 GPU readbacks777. Existing11 allocation-failure sites plus
+five new container-growth sites pass per config: nonempty counts101/203/305,
+rollback2/2/1, original counters and first/last messages survive then recover.
+
+Same-PE ABBA retention16 samples/cell/variant,1024 append calls/sample;
+16384-capacity append P50/P95(ns)19092.25/19396->62.60/67.38;
+shrink-to16 P50/P95(ns)148145500/151071000->35700/49200.
+Copy Recording48 samples/variant initially+7.58%/+13.55% P50/P95;
+ordinary copy Submit+0.65%/+1.01%. One bounded B-A-A-B copy-only control
+removes retention workload from sequence: Recording+3.25%/-3.08%,
+Submit+2.53%/+1.34%. Keep both observations; Recording warning OPEN,
+attribution INCONCLUSIVE, no overall performance acceptance. Eight accepted
+copy processes validate200 changing payloads; no speculative runtime workaround.
+Old full-submit fixture exits1 on baseline before N13_FULL; excluded, cause
+not established. Three successful pilots outside final comparison retained.
+
+Actual M1Max/macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1. Requested26/native
+Windows/other GPUs/D3D11 rendering/fullT3/T4 NOT_RUN. Public ABI/capabilities/
+resource layout/scheduling unchanged; complete debug layer/Device/G1/FL12_2
+not claimed. User .gitignore preserved; local commit/no push. Commands/hashes,
+primary source, all28 process records and performance scope:
+`../dxmt-test/n02-infoqueue-retention-20261026/N02-infoqueue-retention.md`.

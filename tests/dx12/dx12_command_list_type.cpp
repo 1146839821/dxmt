@@ -1039,6 +1039,92 @@ bool TestSplitFailure(const char *mode, unsigned allocation) {
   return observer.refs == 1;
 }
 
+bool TestInfoQueueGrowthAllocationFailure() {
+  Owned<ID3D12Device> device;
+  Owned<ID3D12InfoQueue> queue;
+  if (!CheckHR("Growth OOM device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&device.ptr))) ||
+      !CheckHR("Growth OOM queue",
+               device->QueryInterface(IID_PPV_ARGS(&queue.ptr))))
+    return false;
+  queue->SetMuteDebugOutput(TRUE);
+  if (!CheckHR("Growth OOM limit", queue->SetMessageCountLimit(UINT64_MAX)))
+    return false;
+  auto text_for = [](unsigned index) {
+    return std::array<char, 7>{'m',
+                               's',
+                               'g',
+                               char('0' + index / 100),
+                               char('0' + index / 10 % 10),
+                               char('0' + index % 10),
+                               '\0'};
+  };
+  auto matches = [&](unsigned index) {
+    alignas(D3D12_MESSAGE) std::array<unsigned char, sizeof(D3D12_MESSAGE) + 7>
+        bytes = {};
+    auto *message = reinterpret_cast<D3D12_MESSAGE *>(bytes.data());
+    SIZE_T size = bytes.size();
+    const auto text = text_for(index);
+    return SUCCEEDED(queue->GetMessage(index, message, &size)) &&
+           message->Category == D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED &&
+           message->Severity == D3D12_MESSAGE_SEVERITY_INFO &&
+           message->ID == D3D12_MESSAGE_ID_STRING_FROM_APPLICATION &&
+           message->DescriptionByteLength == text.size() &&
+           !std::strcmp(message->pDescription, text.data());
+  };
+  auto unchanged = [&](unsigned count) {
+    return queue->GetNumStoredMessages() == count &&
+           queue->GetNumMessagesAllowedByStorageFilter() == count &&
+           queue->GetNumMessagesDeniedByStorageFilter() == 0 &&
+           queue->GetNumMessagesDiscardedByMessageCountLimit() == 0 &&
+           matches(0) && matches(count - 1);
+  };
+  const auto first = text_for(0);
+  if (!CheckHR("Growth OOM initial message",
+               queue->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO,
+                                            first.data())))
+    return false;
+  SubmissionAllocationFault fault;
+  if (!fault.Install())
+    return false;
+  unsigned boundaries = 0, failures = 0, count = 1;
+  // Short messages isolate container growth from string allocation. Discover
+  // growth through the public API, without assuming a vector/deque block size.
+  for (; count < 512 && boundaries < 3; ++count) {
+    const auto text = text_for(count);
+    unsigned boundary_failures = 0;
+    bool appended = false;
+    for (unsigned allocation = 1; allocation <= 8; ++allocation) {
+      fault.Arm(allocation);
+      const HRESULT hr = queue->AddApplicationMessage(
+          D3D12_MESSAGE_SEVERITY_INFO, text.data());
+      fault.Stop();
+      if (!fault.Hit()) {
+        appended = hr == S_OK && unchanged(count + 1);
+        break;
+      }
+      ++boundary_failures;
+      ++failures;
+      if (hr != E_OUTOFMEMORY || !unchanged(count)) {
+        std::cerr << "InfoQueue growth rollback failed: count=" << count
+                  << " allocation=" << allocation << "\n";
+        return false;
+      }
+    }
+    if (!appended)
+      return false;
+    if (boundary_failures) {
+      ++boundaries;
+      std::cout << "InfoQueue growth OOM count=" << count
+                << " rollback sites=" << boundary_failures << " recovered\n";
+    }
+  }
+  std::cout << "InfoQueue growth OOM boundaries=" << boundaries
+            << " rollback sites=" << failures << " stored=" << count << "\n";
+  return boundaries >= 3;
+}
+
 bool TestInfoQueueAllocationFailure() {
   for (unsigned mode = 0; mode < 4; mode++) {
     unsigned failures = 0;
@@ -1092,7 +1178,7 @@ bool TestInfoQueueAllocationFailure() {
     }
     std::cout << "InfoQueue OOM mode=" << mode << " rollback sites=" << failures << "\n";
   }
-  return true;
+  return TestInfoQueueGrowthAllocationFailure();
 }
 
 bool TestMultipleFenceWaits() {

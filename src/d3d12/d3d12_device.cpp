@@ -34,6 +34,7 @@
 #include <atomic>
 #include <map>
 #include <vector>
+#include <deque>
 
 namespace dxmt {
 
@@ -189,7 +190,7 @@ public:
   HRESULT STDMETHODCALLTYPE SetMessageCountLimit(UINT64 limit) override { std::lock_guard lock(mutex_);
     message_count_limit_ = limit;
     while (messages_.size() > limit) {
-      messages_.erase(messages_.begin());
+      messages_.pop_front();
       discarded_++;
     }
     return S_OK;
@@ -325,7 +326,7 @@ public:
         messages_.push_back({category, severity, id, text});
         allowed_++;
         if (messages_.size() > message_count_limit_) {
-          messages_.erase(messages_.begin());
+          messages_.pop_front();
           discarded_++;
         }
       }
@@ -474,7 +475,8 @@ private:
     std::string text;
   };
   std::mutex mutex_;
-  std::vector<Message> messages_;
+  // FIFO eviction must not move every retained message while holding mutex_.
+  std::deque<Message> messages_;
   UINT64 allowed_ = 0, denied_ = 0, discarded_ = 0;
   UINT64 message_count_limit_ = 1024;
   std::vector<Filter> storage_filters_{1}, retrieval_filters_{1};
