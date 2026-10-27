@@ -269,7 +269,8 @@ public:
     if (ppvObject == nullptr)
       return E_POINTER;
 
-    if (riid == __uuidof(Base)) {
+    *ppvObject = nullptr;
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(Base)) {
       *ppvObject = ref_and_cast<Base>(this);
       return S_OK;
     }

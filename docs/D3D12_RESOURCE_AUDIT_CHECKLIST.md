@@ -4108,3 +4108,27 @@ M1Max/macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1; requested26/native Windows/other
 GPUs/fullT3/T4 NOT_RUN. Device/G1/FL12_2 remain incomplete. User .gitignore
 preserved, local commit/no push. Exact commands/results/hashes/report:
 `../dxmt-test/n12-parallel-ranges-20261027/N12-parallel-ranges.md`.
+
+
+### N06 root-deserializer COM identity — 2026-10-27
+
+Onbf5be300, both root-deserializer types rejected IUnknown and left unsupported
+QI output unchanged. Existing templated QueryInterface now clears output and
+accepts IUnknown alongside Base through the same ref_and_cast/reference owner.
+No object layout, public COM/WMT/MSC ABI, cache, binding or capability change.
+The 4064-byte local-record admission was already fixed; not repeated here.
+
+Existing shader-container runner adds shared COM checks for RS1.0/1.1 and both
+factories: repeated identity, typed roundtrip, unsupported/null output, factory
+IUnknown and queried-interface survival after original release. Same final PE
+baseline exits1 with all four groups FAIL. Both candidate configurations pass
+all four in CPU and full-container runs;40/168 existing raw cases also PASS.
+Four SM5/SM6 GPU readbacks777 PASS. Nine total process records: expected baseline
+failure, two CPU candidate checks, six validation-on container/compute checks.
+Scoped builds/diff pass, final staged/build hashes match; no Metal errors.
+
+No performance rerun for this O(1) off-hot-path query fix; prior warnings OPEN.
+M1Max/macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1; requested26/native Windows/other
+GPUs/fullT3/T4 NOT_RUN. Complete N06/G1/Device/FL12_2 not claimed. User .gitignore
+preserved; local commit/no push. Microsoft COM contract, commands/hashes/report:
+`../dxmt-test/n06-deserializer-identity-20261027/N06-deserializer-identity.md`.

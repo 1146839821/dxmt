@@ -326,6 +326,60 @@ bool BuildContainer(
   return true;
 }
 
+template <typename Interface>
+bool CheckRootDeserializerIdentity(const std::vector<uint8_t> &source,
+                                   HRESULT(WINAPI *create)(const void *, SIZE_T,
+                                                           REFIID, void **)) {
+  Interface *object = nullptr;
+  if (create(source.data(), source.size(), IID_PPV_ARGS(&object)) != S_OK ||
+      !object)
+    return false;
+  IUnknown *identity = nullptr, *again = nullptr;
+  Interface *roundtrip = nullptr;
+  bool good =
+      object->QueryInterface(IID_PPV_ARGS(&identity)) == S_OK && identity;
+  good &=
+      object->QueryInterface(IID_PPV_ARGS(&again)) == S_OK && again == identity;
+  void *unsupported = object;
+  good &= object->QueryInterface(__uuidof(ID3D12Device), &unsupported) ==
+              E_NOINTERFACE &&
+          !unsupported;
+  good &= object->QueryInterface(__uuidof(IUnknown), nullptr) == E_POINTER;
+  if (identity)
+    good &=
+        identity->QueryInterface(IID_PPV_ARGS(&roundtrip)) == S_OK && roundtrip;
+  else
+    good = false;
+  Release(object);
+  Release(again);
+  // The queried interfaces must keep the object alive after its factory
+  // reference is released, and still lead to the same controlling IUnknown.
+  if (roundtrip) {
+    good &= roundtrip->QueryInterface(IID_PPV_ARGS(&again)) == S_OK &&
+            again == identity;
+    Release(again);
+  }
+  Release(roundtrip);
+  Release(identity);
+
+  // Factories also accept IUnknown directly, then permit the typed round trip.
+  const HRESULT hr =
+      create(source.data(), source.size(), IID_PPV_ARGS(&identity));
+  good &= hr == S_OK && identity;
+  if (identity) {
+    good &=
+        identity->QueryInterface(IID_PPV_ARGS(&roundtrip)) == S_OK && roundtrip;
+    Release(identity);
+    if (roundtrip)
+      good &= roundtrip->QueryInterface(IID_PPV_ARGS(&again)) == S_OK && again;
+    Release(again);
+    Release(roundtrip);
+  }
+  std::cout << "root-deserializer COM result=" << (good ? "PASS" : "FAIL")
+            << "\n";
+  return good;
+}
+
 bool CheckRawRootSignatures(ID3D12Device *device, bool safe_only = false) {
   bool passed = true;
   UINT cases = 0;
@@ -377,6 +431,11 @@ bool CheckRawRootSignatures(ID3D12Device *device, bool safe_only = false) {
     std::vector<uint8_t> source(blob->GetBufferSize());
     std::memcpy(source.data(), blob->GetBufferPointer(), source.size());
     Release(blob);
+    passed &= CheckRootDeserializerIdentity<ID3D12RootSignatureDeserializer>(
+        source, D3D12CreateRootSignatureDeserializer);
+    passed &=
+        CheckRootDeserializerIdentity<ID3D12VersionedRootSignatureDeserializer>(
+            source, D3D12CreateVersionedRootSignatureDeserializer);
     std::vector<ContainerPart> parts;
     if (!ReadContainerParts(source, parts))
       return false;
