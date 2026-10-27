@@ -4284,3 +4284,43 @@ FL12_2 incomplete; EnhancedBarriersSupported and additional typed-UAV Options
 remain FALSE. User .gitignore preserved, local commit/no push. Evidence:
 `../dxmt-test/n09-buffer-format-20261027/N09-buffer-format.md`, manifest.json,
 results.json, shader-identities.json, performance.json and raw logs.
+
+
+### N09 — read-only typed-buffer native usage, 2026-10-27
+
+Base6d9f18e3. Legal BGRA SRV inherited ShaderWrite from managed/private
+allocation flags in shared Buffer::prepareAllocationViews. Same final PE baseline
+reports API success but native Metal unsupported-write validation. Baseline
+observation alone uses nslog, with no illegal GPU dispatch. Existing descriptor
+now carries read_only in its existing cache key; D3D11/D3D12 derive the restriction
+from immutable native capability data. Writable formats retain SRV/UAV sharing.
+GpuReadonly allocation/tracking flags remain unchanged. No new owner/cache/lock,
+production file, public capability or PE/native ABI change. Internal descriptor
+layout changes; matching shared consumers rebuilt.
+
+Both scoped builds pass. Each configuration passes72 format cases and8 cache
+checks. BGRA DEFAULT-buffer GPU readback matches four channel values through
+SM5/SHEX and SM6/DXIL. D3D11 managed/private/immutable inputs each run two passes,
+including rotated UpdateSubresource data on mutable inputs:24 comparisons per
+configuration. R32 controls read1554 in6 baseline/private/no-private backend runs.
+Wrong-channel SM6 mutation fails both candidates as expected. Existing D3D11
+backend boundary, D3D12 ownership/roles/formats/counter/feature controls and4
+depth/stencil GPU copy rounds pass. Final31 validation-on processes comprise28
+candidate processes (26 success,2 expected wrong-output failures),1 baseline
+expected native error and2 baseline R32 successes. No candidate Metal API/GPU
+validation errors; loader paths, container chunks and source/PE/DLL/native hashes
+checked. Preliminary runs and removed test-link error excluded from final counts.
+
+AB/BA/AB/BA8 processes,10000 writes/batch,96 retained samples/side: process-median
+p50/p95 us2167.025/2269.800 ->2245.000/2332.050 (+3.60%/+2.74%). Observed overhead,
+not a speedup; approx7.80ns/write median difference. Existing cache adds one
+boolean comparison, D3D11 adds one capability lookup at view creation; D3D12
+reuses its lookup. No draw/submit work added. D3D11 creation/first-view cost and
+recording/submit/presentation performance NOT_RUN; global performance gate OPEN.
+
+M1Max/Apple7/macOS27.0.1/Xcode27.1/Wine11/MSC4.0.1/clang23.1.1. Requested26,
+native Windows/other GPUs/fullT3/T4/broadD3D11rendering NOT_RUN. BGRA SRV usage
+resolved; typed BUFFER report/RGB96/Device/G1/FL12_2 remain incomplete. No public
+capability promotion. User .gitignore preserved; local commit/no push. Evidence:
+`../dxmt-test/n09-buffer-usage-20261027/N09-buffer-usage.md`, manifest.json,
+results.json, shader-identities.json, performance.json and raw logs.

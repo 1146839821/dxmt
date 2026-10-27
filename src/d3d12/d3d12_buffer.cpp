@@ -322,7 +322,12 @@ public:
     const auto capabilities = device_->GetMTLPixelFormatCapability(Format.PixelFormat);
     if (!any_bit_set(capabilities & (FormatCapability::TextureBufferRead | FormatCapability::TextureBufferReadWrite)))
       return E_INVALIDARG;
-    BufferViewDescriptor view_descriptor{Format.PixelFormat};
+    // Keep writable formats shared with UAVs; a read-only native format must
+    // not inherit ShaderWrite merely because its backing allocation is private.
+    BufferViewDescriptor view_descriptor{
+        Format.PixelFormat,
+        !any_bit_set(capabilities & (FormatCapability::TextureBufferWrite | FormatCapability::TextureBufferReadWrite))
+    };
     if (!MakeBufferSlice(ViewDesc.Buffer.FirstElement, ViewDesc.Buffer.NumElements, Format.BytesPerTexel, desc_.Width, Slice))
       return E_INVALIDARG;
 

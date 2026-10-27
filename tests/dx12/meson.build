@@ -301,6 +301,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_compute_sm6_descriptor_bgra_fixture',
+    input: 'compute_sm6_descriptor_resources.hlsl',
+    output: 'compute_sm6_descriptor_bgra.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '-D', 'BGRA_BUFFER=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_compute_sm6_unbounded_resources_fixture',
     input: 'compute_sm6_unbounded_resources.hlsl',
     output: 'compute_sm6_unbounded_resources.cs.cso',

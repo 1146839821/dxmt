@@ -29,7 +29,7 @@ int main(int argc, char **argv) {
   if (argc < 2 || argc > 3) {
     std::cerr << "usage: dx12_compute_sm6 <shader.cso> "
                  "[--root-uav|--reserved-uav|--reserved-srv|--descriptor-uav|--descriptor-resources|--"
-                 "descriptor-resources-space|--descriptor-typed-resources|--root-cbv|--root-constants|--"
+                 "descriptor-resources-space|--descriptor-typed-resources|--descriptor-bgra|--root-cbv|--root-constants|--"
                  "descriptor-resources-1-1|--descriptor-null-cbv|--direct-indexed|--root-srv|--"
                  "direct-indexed-resources|--direct-indexed-resources-lifetime|"
                  "--direct-indexed-nonuniform|--direct-indexed-nonuniform-mixed|"
@@ -80,8 +80,11 @@ int main(int argc, char **argv) {
   const bool reserved_srv = argc == 3 && strcmp(argv[2], "--reserved-srv") == 0;
   const bool descriptor_uav = argc == 3 &&
                               (strcmp(argv[2], "--descriptor-uav") == 0 || append_consume_unsupported);
+  const bool descriptor_bgra =
+      argc == 3 && strcmp(argv[2], "--descriptor-bgra") == 0;
   const bool descriptor_typed_resources =
-      argc == 3 && strcmp(argv[2], "--descriptor-typed-resources") == 0;
+      descriptor_bgra ||
+      (argc == 3 && strcmp(argv[2], "--descriptor-typed-resources") == 0);
   const bool descriptor_resources =
       argc == 3 &&
       (strcmp(argv[2], "--descriptor-resources") == 0 || int64_descriptor_ops ||
@@ -152,6 +155,7 @@ int main(int argc, char **argv) {
   ID3D12DescriptorHeap *descriptor_heap = nullptr;
   ID3D12DescriptorHeap *nonuniform_source_heap = nullptr;
   ID3D12Resource *input_buffer = nullptr;
+  ID3D12Resource *private_input = nullptr;
   ID3D12Resource *nonuniform_input = nullptr;
   ID3D12Resource *output_buffer = nullptr;
   ID3D12Resource *readback_buffer = nullptr;
@@ -364,7 +368,21 @@ int main(int argc, char **argv) {
       } else {
         memcpy(mapped_input, &input_value, sizeof(input_value));
       }
+      if (descriptor_bgra) {
+        const UINT pixels[] = {0xc7834d1f, 0x11223344, 0xff0080ff, 0x00ff0000};
+        memcpy(mapped_input, pixels, sizeof(pixels));
+      }
       input_buffer->Unmap(0, nullptr);
+      if (descriptor_bgra) {
+        auto private_heap = upload_heap;
+        private_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        if (!CheckHR("CreatePrivateTypedInput",
+                     device->CreateCommittedResource(
+                         &private_heap, D3D12_HEAP_FLAG_NONE, &input_desc,
+                         D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                         IID_PPV_ARGS(&private_input))))
+          goto cleanup;
+      }
 
       if (direct_indexed_nonuniform) {
         if (!CheckHR("CreateNonuniformInput",
@@ -419,12 +437,14 @@ int main(int argc, char **argv) {
         srv_desc.Buffer.NumElements = direct_indexed_nonuniform ? 1 : 64;
         srv_desc.Buffer.StructureByteStride = native16_mode ? sizeof(uint16_t) : sizeof(UINT);
         if (descriptor_typed_resources) {
-          srv_desc.Format = DXGI_FORMAT_R32_UINT;
+          srv_desc.Format = descriptor_bgra ? DXGI_FORMAT_B8G8R8A8_UNORM
+                                            : DXGI_FORMAT_R32_UINT;
           srv_desc.Buffer.StructureByteStride = 0;
         }
         srv_desc.Buffer.FirstElement = 0;
-        device->CreateShaderResourceView(input_buffer, &srv_desc,
-                                         descriptor_cpu);
+        device->CreateShaderResourceView(descriptor_bgra ? private_input
+                                                         : input_buffer,
+                                         &srv_desc, descriptor_cpu);
         if (direct_indexed_nonuniform) {
           descriptor_cpu.ptr += descriptor_increment;
           srv_desc.Buffer.FirstElement = 1;
@@ -670,6 +690,16 @@ int main(int argc, char **argv) {
           0, descriptor_heap->GetGPUDescriptorHandleForHeapStart());
     }
   }
+  if (descriptor_bgra) {
+    list->CopyBufferRegion(private_input, 0, input_buffer, 0, input_desc.Width);
+    D3D12_RESOURCE_BARRIER transition = {};
+    transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    transition.Transition = {private_input,
+                             D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                             D3D12_RESOURCE_STATE_COPY_DEST,
+                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+    list->ResourceBarrier(1, &transition);
+  }
   if (reserved_srv) {
     D3D12_RESOURCE_BARRIER rb = {};
     rb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -706,7 +736,9 @@ int main(int argc, char **argv) {
       D3D12_TILE_REGION_SIZE region = {}; region.NumTiles = 1;
       list->CopyTiles(output_buffer, &coord, &region, readback_buffer, 0, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
     } else {
-      const UINT output_copy_size = wave_ops
+      const UINT output_copy_size = descriptor_bgra
+                                        ? sizeof(UINT) * 4
+                                    : wave_ops
                                         ? sizeof(UINT) * 6
                                     : packed_dot_ops
                                         ? sizeof(UINT) * 3
@@ -874,6 +906,20 @@ int main(int argc, char **argv) {
                                       reinterpret_cast<void **>(&mapped))))
       goto cleanup;
     output_value = *mapped;
+    if (descriptor_bgra) {
+      const UINT expected[] = {0xc71f4d83, 0x11443322, 0xffff8000, 0x000000ff};
+      bool correct = true;
+      for (UINT i = 0; i < 4; i++) {
+        std::cout << "BGRA typed-buffer pixel=" << i << " actual=0x" << std::hex
+                  << mapped[i] << " expected=0x" << expected[i] << std::dec
+                  << "\n";
+        correct &= mapped[i] == expected[i];
+      }
+      if (!correct) {
+        readback_buffer->Unmap(0, nullptr);
+        goto cleanup;
+      }
+    }
     UINT wave_prefix_product = 0;
     UINT wave_prefix_sum = 0;
     UINT wave_match = 0;
@@ -924,6 +970,8 @@ int main(int argc, char **argv) {
       expected_value = 782;
     else if (native16_mode)
       expected_value = 62200;
+    else if (descriptor_bgra)
+      expected_value = 0xc71f4d83;
     else if (descriptor_table_resources)
       expected_value = input_value * 2;
     else if (packed_dot_ops)
@@ -1015,6 +1063,8 @@ cleanup:
     readback_buffer->Release();
   if (input_buffer && input_buffer != reserved_input)
     input_buffer->Release();
+  if (private_input)
+    private_input->Release();
   if (nonuniform_input)
     nonuniform_input->Release();
   if (output_buffer && output_buffer != reserved_buffer)

@@ -68,6 +68,8 @@ struct BufferViewKey {
 
 struct BufferViewDescriptor {
   WMTPixelFormat format;
+  // Restrict native view usage without changing allocation tracking flags.
+  bool read_only = false;
 };
 
 class Buffer;

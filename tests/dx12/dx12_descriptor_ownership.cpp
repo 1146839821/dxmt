@@ -1825,15 +1825,13 @@ bool CheckTypedViewFormats(UINT mode = 0, bool cost = false) {
     }
     struct BufferFormat {
       DXGI_FORMAT format;
-      // BGRA SRV on private buffers still inherits ShaderWrite usage.
-      // Leave that separate legal-path defect outside this slice (-1).
-      int srv, uav;
+      bool srv, uav;
     };
     const BufferFormat cases[] = {
         {DXGI_FORMAT_R32_UINT, true, true},
         {DXGI_FORMAT_R32_FLOAT, true, true},
         {DXGI_FORMAT_R8G8B8A8_UNORM, true, true},
-        {DXGI_FORMAT_B8G8R8A8_UNORM, -1, false},
+        {DXGI_FORMAT_B8G8R8A8_UNORM, true, false},
         {DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, false, false},
         {DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, false, false},
         {DXGI_FORMAT_D16_UNORM, false, false},
@@ -1851,8 +1849,6 @@ bool CheckTypedViewFormats(UINT mode = 0, bool cost = false) {
     for (const auto &c : cases)
       for (UINT kind : {0u, 1u})
         for (bool seeded : {false, true}) {
-          if ((kind == 0 ? c.srv : c.uav) < 0)
-            continue;
           shader->ClearDescriptor(0);
           if (seeded)
             write(kind, 5, DXGI_FORMAT_R32_UINT);
@@ -1892,6 +1888,22 @@ bool CheckTypedViewFormats(UINT mode = 0, bool cost = false) {
                   << " pass=" << pass << "\n";
         good &= pass;
       }
+    write(0, 5, DXGI_FORMAT_B8G8R8A8_UNORM);
+    const auto bgra_view = ReadDescriptorFields(shader, 0).SRVTexelBuffer.view;
+    write(0, 5, DXGI_FORMAT_R32_UINT);
+    const auto r32_view = ReadDescriptorFields(shader, 0).SRVTexelBuffer.view;
+    for (UINT repeat = 0; repeat < 8; repeat++) {
+      write(0, 5, DXGI_FORMAT_B8G8R8A8_UNORM);
+      const bool bgra_reused =
+          ReadDescriptorFields(shader, 0).SRVTexelBuffer.view == bgra_view;
+      write(1, 5, DXGI_FORMAT_R32_UINT);
+      const bool r32_shared =
+          ReadDescriptorFields(shader, 0).UAVTexelBuffer.view == r32_view;
+      const bool pass = bgra_reused && r32_shared && bgra_view != r32_view;
+      std::cout << "buffer_view_cache repeat=" << repeat << " pass=" << pass
+                << "\n";
+      good &= pass;
+    }
     return good;
   }
   if (mode == 3) {

@@ -121,8 +121,9 @@ Buffer::prepareAllocationViews(BufferAllocation *allocation) {
     info.pixel_format = format;
     info.options = allocation->info_.options;
     auto usage = WMTTextureUsageShaderRead;
-    if (!allocation->flags().test(BufferAllocationFlag::GpuReadonly) &&
-       ( allocation->flags().test(BufferAllocationFlag::GpuManaged) ||  allocation->flags().test(BufferAllocationFlag::GpuPrivate))) {
+    if (!viewDescriptors_[version].read_only && !allocation->flags().test(BufferAllocationFlag::GpuReadonly) &&
+        (allocation->flags().test(BufferAllocationFlag::GpuManaged) ||
+         allocation->flags().test(BufferAllocationFlag::GpuPrivate))) {
       usage |= WMTTextureUsageShaderWrite;
       if (format == WMTPixelFormatR32Uint || format == WMTPixelFormatR32Sint ||
           (format == WMTPixelFormatRG32Uint && device_.supportsFamily(WMTGPUFamilyApple8))) {
@@ -145,7 +146,7 @@ Buffer::createView(BufferViewDescriptor const &descriptor) {
   std::unique_lock<dxmt::mutex> lock(mutex_);
   unsigned i = 0;
   for (; i < version_; i++) {
-    if (viewDescriptors_[i].format == descriptor.format) {
+    if (viewDescriptors_[i].format == descriptor.format && viewDescriptors_[i].read_only == descriptor.read_only) {
       return BufferViewKey(i, std::nullopt);
     }
   }

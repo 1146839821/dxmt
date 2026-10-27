@@ -152,11 +152,147 @@ bool ExpectComputeShader(ID3D11Device *device, const char *name, const std::vect
   return passed;
 }
 
+bool CheckBufferViewUsage(const char *path) {
+  std::vector<uint8_t> bytecode;
+  if (!ReadFile(path, bytecode))
+    return false;
+  struct DeviceObjects {
+    ID3D11Device *device = nullptr;
+    ID3D11DeviceContext *context = nullptr;
+    ID3D11ComputeShader *shader = nullptr;
+    ~DeviceObjects() {
+      if (context)
+        context->ClearState();
+      Release(shader);
+      Release(context);
+      Release(device);
+    }
+  } o;
+  const auto check = [](const char *label, HRESULT hr) {
+    if (FAILED(hr))
+      std::cerr << label << " failed: 0x" << std::hex
+                << static_cast<unsigned long>(hr) << std::dec << "\n";
+    return SUCCEEDED(hr);
+  };
+  const D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
+  if (!check("Create buffer-view device",
+             D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+                               &level, 1, D3D11_SDK_VERSION, &o.device, nullptr,
+                               &o.context)) ||
+      !check("Create buffer-view shader",
+             o.device->CreateComputeShader(bytecode.data(), bytecode.size(),
+                                           nullptr, &o.shader)))
+    return false;
+  o.context->CSSetShader(o.shader, nullptr, 0);
+  for (UINT mode = 0; mode < 3; mode++) {
+    struct BufferObjects {
+      ID3D11Buffer *input = nullptr, *upload = nullptr, *output = nullptr,
+                   *readback = nullptr;
+      ID3D11ShaderResourceView *srv = nullptr, *r32_srv = nullptr;
+      ID3D11UnorderedAccessView *uav = nullptr;
+      ~BufferObjects() {
+        Release(srv);
+        Release(r32_srv);
+        Release(uav);
+        Release(input);
+        Release(upload);
+        Release(output);
+        Release(readback);
+      }
+    } b;
+    UINT pixels[64] = {0xc7834d1f, 0x11223344, 0xff0080ff, 0x00ff0000};
+    const UINT expected[] = {0xc71f4d83, 0x11443322, 0xffff8000, 0x000000ff};
+    D3D11_SUBRESOURCE_DATA data = {pixels, 0, 0};
+    D3D11_BUFFER_DESC desc = {};
+    desc.ByteWidth = sizeof(pixels);
+    desc.Usage = mode == 2 ? D3D11_USAGE_IMMUTABLE : D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE |
+                     (mode == 1 ? D3D11_BIND_UNORDERED_ACCESS : 0);
+    if (!check("Create BGRA input",
+               o.device->CreateBuffer(&desc, mode == 1 ? nullptr : &data,
+                                      &b.input)))
+      return false;
+    if (mode == 1) {
+      desc.Usage = D3D11_USAGE_IMMUTABLE;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      if (!check("Create input upload",
+                 o.device->CreateBuffer(&desc, &data, &b.upload)))
+        return false;
+      o.context->CopyResource(b.input, b.upload);
+    }
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    if (!check("Create R32 output",
+               o.device->CreateBuffer(&desc, nullptr, &b.output)))
+      return false;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (!check("Create readback",
+               o.device->CreateBuffer(&desc, nullptr, &b.readback)))
+      return false;
+    D3D11_UNORDERED_ACCESS_VIEW_DESC uav = {};
+    uav.Format = DXGI_FORMAT_R32_UINT;
+    uav.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+    uav.Buffer.NumElements = 64;
+    if (!check("Create R32 UAV",
+               o.device->CreateUnorderedAccessView(b.output, &uav, &b.uav)))
+      return false;
+    D3D11_SHADER_RESOURCE_VIEW_DESC srv = {};
+    srv.Format = DXGI_FORMAT_R32_UINT;
+    srv.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+    srv.Buffer.NumElements = 64;
+    if (!check("Create R32 SRV control",
+               o.device->CreateShaderResourceView(b.input, &srv, &b.r32_srv)))
+      return false;
+    srv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    for (UINT repeat = 0; repeat < 2; repeat++) {
+      Release(b.srv);
+      if (!check("Create BGRA SRV",
+                 o.device->CreateShaderResourceView(b.input, &srv, &b.srv)))
+        return false;
+      if (repeat && mode != 2) {
+        std::rotate(pixels, pixels + 1, pixels + 4);
+        o.context->UpdateSubresource(b.input, 0, nullptr, pixels, 0, 0);
+      }
+      o.context->CSSetShaderResources(0, 1, &b.srv);
+      o.context->CSSetUnorderedAccessViews(0, 1, &b.uav, nullptr);
+      o.context->Dispatch(1, 1, 1);
+      ID3D11ShaderResourceView *null_srv = nullptr;
+      ID3D11UnorderedAccessView *null_uav = nullptr;
+      o.context->CSSetShaderResources(0, 1, &null_srv);
+      o.context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+      o.context->CopyResource(b.readback, b.output);
+      D3D11_MAPPED_SUBRESOURCE mapped = {};
+      if (!check("Map BGRA readback",
+                 o.context->Map(b.readback, 0, D3D11_MAP_READ, 0, &mapped)))
+        return false;
+      bool correct = true;
+      const auto *actual = static_cast<const UINT *>(mapped.pData);
+      for (UINT i = 0; i < 4; i++) {
+        const UINT want = expected[(i + (mode != 2 ? repeat : 0)) % 4];
+        std::cout << "D3D11 BGRA mode=" << mode << " repeat=" << repeat
+                  << " pixel=" << i << " actual=0x" << std::hex << actual[i]
+                  << " expected=0x" << want << std::dec << "\n";
+        correct &= actual[i] == want;
+      }
+      o.context->Unmap(b.readback, 0);
+      if (!correct)
+        return false;
+    }
+  }
+  return check("Buffer-view device status", o.device->GetDeviceRemovedReason());
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 3 && std::strcmp(argv[2], "--buffer-view-usage") == 0)
+    return CheckBufferViewUsage(argv[1]) ? 0 : 1;
   if (argc != 2) {
-    std::cerr << "usage: dx11_shader_backend_boundary <dxil-compute-fixture>\n";
+    std::cerr << "usage: dx11_shader_backend_boundary <dxil-compute-fixture>\n"
+                 "   or: dx11_shader_backend_boundary <SM5 BGRA_BUFFER "
+                 "fixture> --buffer-view-usage\n";
     return 2;
   }
 
