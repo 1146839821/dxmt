@@ -893,7 +893,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   VisibilityResultOffsetBumpState visibility_offsets_;
   WMT::Reference<WMT::ComputePipelineState> visibility_sum_pso_;
   WMT::Reference<WMT::ComputePipelineState> rgb96_pso_;
-  HRESULT query_recording_error_ = S_OK;
+  HRESULT recording_error_ = S_OK;
   Com<MTLD3D12Resource, false> predication_buffer_;
   UINT64 predication_offset_ = 0;
   D3D12_PREDICATION_OP predication_op_ = D3D12_PREDICATION_OP_EQUAL_ZERO;
@@ -1263,7 +1263,7 @@ public:
     visibility_segment_dirty_ = false;
     visibility_chunks_.clear();
     visibility_offsets_.reset();
-    query_recording_error_ = S_OK;
+    recording_error_ = S_OK;
     pending_barrier_scope_ = (WMTBarrierScope)0;
     pending_barrier_stages_after_ = (WMTRenderStages)0;
     pending_barrier_stages_before_ = (WMTRenderStages)0;
@@ -1525,8 +1525,8 @@ public:
     if (!recording_failed_ && !allocator_->CPUAllocationFailed())
       FlushPendingVisibilityQueries();
     HRESULT validation = S_OK;
-    if (FAILED(query_recording_error_)) {
-      validation = query_recording_error_;
+    if (FAILED(recording_error_)) {
+      validation = recording_error_;
     } else if (allocator_->CPUAllocationFailed()) {
       FailRecording(__func__, "command allocator CPU recording allocation failed");
       validation = E_OUTOFMEMORY;
@@ -1925,7 +1925,7 @@ public:
         info.options = WMTResourceStorageModeShared | WMTResourceHazardTrackingModeUntracked;
         auto buffer = device_->GetMTLDevice().newBuffer(info);
         if (!buffer || !info.gpu_address) {
-          query_recording_error_ = E_OUTOFMEMORY;
+          recording_error_ = E_OUTOFMEMORY;
           FailRecording(__func__, "visibility buffer allocation failed");
           return false;
         }
@@ -1938,7 +1938,7 @@ public:
       for (auto &query : active_occlusion_queries_)
         query.segments.push_back(segment);
     } catch (...) {
-      query_recording_error_ = E_OUTOFMEMORY;
+      recording_error_ = E_OUTOFMEMORY;
       FailRecording(__func__, "visibility segment allocation failed");
       return false;
     }
@@ -1983,13 +1983,13 @@ public:
       return false;
     }
     if (query.segments.size() > UINT_MAX) {
-      query_recording_error_ = E_OUTOFMEMORY;
+      recording_error_ = E_OUTOFMEMORY;
       FailRecording(__func__, "too many visibility segments");
       return false;
     }
     auto [mapped, offset] = allocator_->AllocateGPUHeap(query.segments.size() * sizeof(uint64_t), alignof(uint64_t));
     if (!mapped) {
-      query_recording_error_ = E_OUTOFMEMORY;
+      recording_error_ = E_OUTOFMEMORY;
       FailRecording(__func__, "visibility segment table allocation failed");
       return false;
     }
@@ -6054,7 +6054,7 @@ public:
     try {
       active_occlusion_queries_.push_back({query, Index, Type, {}});
     } catch (...) {
-      query_recording_error_ = E_OUTOFMEMORY;
+      recording_error_ = E_OUTOFMEMORY;
       FailRecording(__func__, "active query allocation failed");
       return;
     }
@@ -6112,7 +6112,7 @@ public:
       active_occlusion_queries_.erase(active);
       visibility_segment_dirty_ = true;
     } catch (...) {
-      query_recording_error_ = E_OUTOFMEMORY;
+      recording_error_ = E_OUTOFMEMORY;
       FailRecording(__func__, "completed query allocation failed");
     }
   };
@@ -6541,7 +6541,89 @@ public:
   WriteBufferImmediate(
       UINT Count, const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER *pParams, const D3D12_WRITEBUFFERIMMEDIATE_MODE *pModes
   ) {
-    MarkUnsupportedCommand("WriteBufferImmediate");
+    if (recording_failed_ || allocator_->CPUAllocationFailed() || !ValidateCommand(SupportsCopy(), __func__) || !Count)
+      return;
+    if (!pParams) {
+      recording_error_ = E_INVALIDARG;
+      FailRecording(__func__, "nonzero count requires parameters");
+      return;
+    }
+    if (!PreBlit())
+      return;
+
+    // Keep WBI out of the argument arena beyond its first 64KiB. Spill into
+    // immutable chunks owned by the existing blit encoder; never reuse scratch
+    // storage whose bytes can change before execution or command-list replay.
+    constexpr size_t chunk_bytes = 65536;
+    constexpr UINT chunk_words = chunk_bytes / sizeof(UINT);
+    auto *encoder = static_cast<BlitEncoderData *>(allocator_->encoder_current);
+    obj_handle_t retained_destination = 0;
+    for (UINT first = 0; first < Count;) {
+      const UINT count = std::min(Count - first, chunk_words);
+      const size_t bytes = size_t(count) * sizeof(UINT);
+      void *mapped = nullptr;
+      size_t source_offset = 0;
+      WMT::Buffer source = allocator_->gpu_heap_buffer_;
+      if (allocator_->gpu_heap_offset_ <= chunk_bytes && bytes <= chunk_bytes - allocator_->gpu_heap_offset_)
+        std::tie(mapped, source_offset) = allocator_->AllocateGPUHeap(bytes, alignof(UINT));
+      if (!mapped) {
+        if (!encoder->immediate_buffer || bytes > chunk_bytes - encoder->immediate_offset) {
+          WMTBufferInfo info = {};
+          info.length = chunk_bytes;
+          info.options = WMTResourceStorageModeShared | WMTResourceHazardTrackingModeUntracked;
+          auto buffer = device_->GetMTLDevice().newBuffer(info);
+          if (!buffer || !info.memory.ptr) {
+            recording_error_ = E_OUTOFMEMORY;
+            FailRecording(__func__, "immediate payload allocation failed");
+            return;
+          }
+          RetainResourceForCurrentEncoder(buffer.handle);
+          if (recording_failed_)
+            return;
+          encoder->immediate_buffer = buffer;
+          encoder->immediate_mapping = info.memory.ptr;
+          encoder->immediate_offset = 0;
+        }
+        source = encoder->immediate_buffer;
+        source_offset = encoder->immediate_offset;
+        mapped = ptr_add(encoder->immediate_mapping, source_offset);
+        encoder->immediate_offset += bytes;
+      }
+      auto *values = static_cast<UINT *>(mapped);
+      for (UINT i = 0; i < count; ++i) {
+        const auto &param = pParams[first + i];
+        const auto mode = pModes ? pModes[first + i] : D3D12_WRITEBUFFERIMMEDIATE_MODE_DEFAULT;
+        uint64_t offset = 0;
+        auto *resource = resolve_resource(device_, param.Dest, offset);
+        if ((param.Dest & (sizeof(UINT) - 1)) || !buffer_range_in_bounds(resource, offset, sizeof(UINT)) ||
+            (mode != D3D12_WRITEBUFFERIMMEDIATE_MODE_DEFAULT && mode != D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_IN &&
+             mode != D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT)) {
+          recording_error_ = E_INVALIDARG;
+          FailRecording(__func__, "invalid destination or mode at index=", first + i);
+          return;
+        }
+        auto destination = resource->buffer->current()->buffer();
+        if (destination.handle != retained_destination) {
+          RetainResourceForCurrentEncoder(destination.handle);
+          retained_destination = destination.handle;
+        }
+        if (recording_failed_ || allocator_->CPUAllocationFailed())
+          return;
+        values[i] = param.Value;
+        auto &copy = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
+        copy.type = WMTBlitCommandCopyFromBufferToBuffer;
+        copy.src = source;
+        copy.src_offset = source_offset + size_t(i) * sizeof(UINT);
+        copy.dst = destination;
+        copy.dst_offset = offset;
+        copy.copy_length = sizeof(UINT);
+      }
+      first += count;
+    }
+    // The existing queue fence chain orders this blit after preceding encoders;
+    // blit commands preserve overlap order within the encoder. This conservative
+    // fallback also satisfies MARKER_IN/OUT ordering, without a CPU wait or a
+    // separate submission. It does not exploit the markers' permitted overlap.
   }
 
   void STDMETHODCALLTYPE

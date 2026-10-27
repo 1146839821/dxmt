@@ -135,6 +135,11 @@ struct RenderEncoderData : EncoderData {
 struct BlitEncoderData : EncoderData {
   wmtcmd_blit_nop cmd_head;
   wmtcmd_base *cmd_tail;
+  // Immutable immediate values share a bounded bump buffer. resource_refs owns
+  // every completed chunk as well as this current one until allocator reset.
+  WMT::Buffer immediate_buffer = {};
+  void *immediate_mapping = nullptr;
+  size_t immediate_offset = 0;
 };
 
 struct CopyTilesEncoderData : EncoderData {

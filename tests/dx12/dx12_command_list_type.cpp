@@ -2935,7 +2935,7 @@ public:
   }
 };
 
-bool TestConstantBufferBarrierStages(bool adjacent = false) {
+bool TestConstantBufferBarrierStages(bool adjacent = false, bool immediate = false) {
   struct Compiler {
     HMODULE value = LoadLibraryA(D3DCOMPILER_DLL_A);
     ~Compiler() {
@@ -3147,6 +3147,11 @@ bool TestConstantBufferBarrierStages(bool adjacent = false) {
     list->RSSetScissorRects(1, &scissor);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     list->DrawInstanced(3, 1, 0, 0);
+    if (immediate) {
+      const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER marker = {readback->GetGPUVirtualAddress() + 272, 0xbeef0000u + mode};
+      const auto marker_mode = static_cast<D3D12_WRITEBUFFERIMMEDIATE_MODE>(mode % 3);
+      list7->WriteBufferImmediate(1, &marker, &marker_mode);
+    }
     if (mode == 0) {
       D3D12_BUFFER_BARRIER barrier = {};
       barrier.SyncBefore = barrier.SyncAfter = D3D12_BARRIER_SYNC_PIXEL_SHADING;
@@ -3271,9 +3276,11 @@ bool TestConstantBufferBarrierStages(bool adjacent = false) {
                 sizeof(second_pixel));
     std::memcpy(buffer_color, static_cast<const BYTE *>(mapped) + 256,
                 sizeof(buffer_color));
+    UINT marker = 0;
+    std::memcpy(&marker, static_cast<const BYTE *>(mapped) + 272, sizeof(marker));
     readback->Unmap(0, &no_read);
     const UINT all = WMTRenderStagePreRaster | WMTRenderStageFragment;
-    const bool native =
+    const bool native = immediate ? counter.draws == 2 && !counter.same_encoder :
         counter.draws == (adjacent ? 3u : 2u) && counter.same_encoder &&
         counter.barriers == 1 &&
         counter.after ==
@@ -3290,8 +3297,10 @@ bool TestConstantBufferBarrierStages(bool adjacent = false) {
         pixel_value == 0xff00ff00u &&
         second_pixel == (mode == 2 ? 0xffff0000u : 0xff00ff00u) &&
         buffer_color[0] == 0 && buffer_color[1] == (written ? 0 : 1) &&
-        buffer_color[2] == (written ? 1 : 0) && buffer_color[3] == 1;
+        buffer_color[2] == (written ? 1 : 0) && buffer_color[3] == 1 &&
+        (!immediate || marker == 0xbeef0000u + mode);
     std::cout << "constant-stages mode=" << mode << " draws=" << counter.draws
+              << " immediate=" << immediate << " marker=" << marker
               << " same_encoder=" << counter.same_encoder
               << " barriers=" << counter.barriers << " after=" << counter.after
               << " before=" << counter.before << " adjacent=" << adjacent
@@ -3901,7 +3910,405 @@ bool TestSmallBlitCost(bool late_event = false, bool long_batch = false,
   return true;
 }
 
+
+bool TestWriteBufferImmediate(const char *mode) {
+  const bool ordering =
+      !std::strcmp(mode, "ordering") || !std::strcmp(mode, "ordering-compute");
+  const bool mutation = !std::strcmp(mode, "wrong-value");
+  const bool reference = !std::strcmp(mode, "copy-reference");
+  const bool invalid = !std::strcmp(mode, "invalid");
+  const bool large = !std::strcmp(mode, "large");
+  const bool allocation_failure = !std::strcmp(mode, "allocation-failure");
+  const bool lifetime = !std::strcmp(mode, "lifetime");
+  const auto type =
+      (!std::strcmp(mode, "compute") || !std::strcmp(mode, "ordering-compute"))
+          ? D3D12_COMMAND_LIST_TYPE_COMPUTE
+      : !std::strcmp(mode, "copy") ? D3D12_COMMAND_LIST_TYPE_COPY
+                                   : D3D12_COMMAND_LIST_TYPE_DIRECT;
+  Owned<ID3D12Device> device;
+  Owned<ID3D12CommandQueue> queue;
+  Owned<ID3D12CommandAllocator> allocator;
+  Owned<ID3D12GraphicsCommandList2> list;
+  Owned<ID3D12Resource> upload, target, readback;
+  Owned<ID3D12Fence> fence, gate;
+  if (!CheckHR("WBI device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                               IID_PPV_ARGS(&device.ptr))))
+    return false;
+  D3D12_COMMAND_QUEUE_DESC q = {};
+  q.Type = type;
+  if (!CheckHR("WBI queue",
+               device->CreateCommandQueue(&q, IID_PPV_ARGS(&queue.ptr))) ||
+      !CheckHR("WBI allocator", device->CreateCommandAllocator(
+                                    type, IID_PPV_ARGS(&allocator.ptr))) ||
+      !CheckHR("WBI list",
+               device->CreateCommandList(0, type, allocator.ptr, nullptr,
+                                         IID_PPV_ARGS(&list.ptr))) ||
+      !CheckHR("WBI fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                IID_PPV_ARGS(&fence.ptr))) ||
+      !CheckHR("WBI gate", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                               IID_PPV_ARGS(&gate.ptr))))
+    return false;
+  constexpr UINT words = 256;
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  desc.Width = words * sizeof(UINT);
+  desc.Height = desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count =
+      1;
+  desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  const auto create = [&](D3D12_HEAP_TYPE heap_type,
+                          D3D12_RESOURCE_STATES state, ID3D12Resource **out) {
+    heap.Type = heap_type;
+    return CheckHR("WBI buffer", device->CreateCommittedResource(
+                                     &heap, D3D12_HEAP_FLAG_NONE, &desc, state,
+                                     nullptr, __uuidof(ID3D12Resource),
+                                     reinterpret_cast<void **>(out)));
+  };
+  if (!create(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ,
+              &upload.ptr))
+    return false;
+  desc.Flags = ordering ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+                        : D3D12_RESOURCE_FLAG_NONE;
+  if (!create(D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST,
+              &target.ptr))
+    return false;
+  desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+  desc.Width += sizeof(UINT);
+  if (!create(D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
+              &readback.ptr))
+    return false;
+  desc.Width -= sizeof(UINT);
+  Owned<ID3D12RootSignature> root;
+  Owned<ID3D12PipelineState> pipeline;
+  if (ordering) {
+    struct Compiler {
+      HMODULE module = LoadLibraryA(D3DCOMPILER_DLL_A);
+      ~Compiler() {
+        if (module)
+          FreeLibrary(module);
+      }
+    } compiler;
+    const auto compile =
+        compiler.module ? reinterpret_cast<pD3DCompile>(
+                              GetProcAddress(compiler.module, "D3DCompile"))
+                        : nullptr;
+    D3D12_ROOT_PARAMETER parameter = {};
+    parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    D3D12_ROOT_SIGNATURE_DESC signature = {1, &parameter, 0, nullptr,
+                                           D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    Owned<ID3DBlob> serialized, shader, errors;
+    const char *source =
+        "RWByteAddressBuffer data:register(u0); [numthreads(64,1,1)] void "
+        "main(uint3 i:SV_DispatchThreadID){uint o=4*i.x; "
+        "data.Store(o,3*data.Load(o)+7);}";
+    if (!compile ||
+        !CheckHR("WBI root serialize",
+                 D3D12SerializeRootSignature(&signature,
+                                             D3D_ROOT_SIGNATURE_VERSION_1,
+                                             &serialized.ptr, nullptr)) ||
+        !CheckHR("WBI root",
+                 device->CreateRootSignature(0, serialized->GetBufferPointer(),
+                                             serialized->GetBufferSize(),
+                                             IID_PPV_ARGS(&root.ptr))) ||
+        !CheckHR("WBI shader",
+                 compile(source, std::strlen(source), nullptr, nullptr, nullptr,
+                         "main", "cs_5_0", 0, 0, &shader.ptr, &errors.ptr)))
+      return false;
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = root.ptr;
+    pso.CS = {shader->GetBufferPointer(), shader->GetBufferSize()};
+    if (!CheckHR("WBI PSO", device->CreateComputePipelineState(
+                                &pso, IID_PPV_ARGS(&pipeline.ptr))))
+      return false;
+  }
+  const auto address = target->GetGPUVirtualAddress();
+  if (invalid) {
+    Owned<ID3D12Device> other_device;
+    Owned<ID3D12Resource> foreign;
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    if (!CheckHR("WBI foreign device",
+                 D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                   IID_PPV_ARGS(&other_device.ptr))) ||
+        !CheckHR("WBI foreign resource",
+                 other_device->CreateCommittedResource(
+                     &heap, D3D12_HEAP_FLAG_NONE, &desc,
+                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                     IID_PPV_ARGS(&foreign.ptr))))
+      return false;
+    for (UINT test = 0; test < 6; ++test) {
+      D3D12_WRITEBUFFERIMMEDIATE_PARAMETER params[] = {{address, 0x12345678},
+                                                       {address + 4, 9}};
+      D3D12_WRITEBUFFERIMMEDIATE_MODE modes[] = {
+          D3D12_WRITEBUFFERIMMEDIATE_MODE_DEFAULT,
+          D3D12_WRITEBUFFERIMMEDIATE_MODE_DEFAULT};
+      if (test == 0)
+        params[1].Dest = address + 1;
+      if (test == 1)
+        params[1].Dest = address + desc.Width;
+      if (test == 2)
+        params[1].Dest = 0;
+      if (test == 5)
+        params[1].Dest = foreign->GetGPUVirtualAddress();
+      if (test == 3)
+        modes[1] = static_cast<D3D12_WRITEBUFFERIMMEDIATE_MODE>(3);
+      list->WriteBufferImmediate(2, test == 4 ? nullptr : params, modes);
+      const HRESULT hr = list->Close();
+      if (hr != E_INVALIDARG || device->GetDeviceRemovedReason() != S_OK) {
+        std::cerr << "WBI invalid case=" << test << " close=0x" << std::hex
+                  << hr << std::dec << "\n";
+        return false;
+      }
+      // Failed Close poisons this command list. Recreate it for the next case.
+      list.ptr->Release();
+      list.ptr = nullptr;
+      if (!CheckHR("WBI reset invalid allocator", allocator->Reset()) ||
+          !CheckHR("WBI recreate invalid list",
+                   device->CreateCommandList(0, type, allocator.ptr, nullptr,
+                                             IID_PPV_ARGS(&list.ptr))))
+        return false;
+    }
+    list->WriteBufferImmediate(0, nullptr, nullptr);
+    if (!CheckHR("WBI empty close", list->Close()))
+      return false;
+    Owned<ID3D12CommandAllocator> bundle_allocator;
+    Owned<ID3D12GraphicsCommandList2> bundle;
+    if (!CheckHR("WBI bundle allocator",
+                 device->CreateCommandAllocator(
+                     D3D12_COMMAND_LIST_TYPE_BUNDLE,
+                     IID_PPV_ARGS(&bundle_allocator.ptr))) ||
+        !CheckHR("WBI bundle",
+                 device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_BUNDLE,
+                                           bundle_allocator.ptr, nullptr,
+                                           IID_PPV_ARGS(&bundle.ptr))))
+      return false;
+    D3D12_WRITEBUFFERIMMEDIATE_PARAMETER param = {address, 1};
+    bundle->WriteBufferImmediate(1, &param, nullptr);
+    if (SUCCEEDED(bundle->Close()))
+      return false;
+    std::cout << "WBI invalid/alignment/range/null/mode/bundle and empty count "
+                 "passed\n";
+    return true;
+  }
+  UINT *mapped = nullptr;
+  if (!CheckHR("WBI map upload",
+               upload->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+    return false;
+  for (UINT i = 0; i < words; ++i)
+    mapped[i] = 0x9e377900u + i;
+  upload->Unmap(0, nullptr);
+  std::array<UINT, words> expected;
+  for (UINT i = 0; i < words; ++i)
+    expected[i] = 0x9e377900u + i;
+  D3D12_RESOURCE_BARRIER barrier = {};
+  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barrier.Transition.pResource = target.ptr;
+  barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  const auto transition = [&](D3D12_RESOURCE_STATES before,
+                              D3D12_RESOURCE_STATES after) {
+    barrier.Transition.StateBefore = before;
+    barrier.Transition.StateAfter = after;
+    list->ResourceBarrier(1, &barrier);
+  };
+  LARGE_INTEGER frequency, begin, recorded;
+  QueryPerformanceFrequency(&frequency);
+  QueryPerformanceCounter(&begin);
+  CopyBufferCounter counter;
+  if (!counter.Install())
+    return false;
+  CopyBufferCounter::fail = allocation_failure;
+  const UINT batches = large ? 8193 : allocation_failure ? 4097 : 128;
+  list->CopyBufferRegion(target.ptr, 0, upload.ptr, 0, desc.Width);
+  // Overwrite caller arrays before Close; repeatedly target the last word and
+  // leave other words untouched to detect corruption and incorrect coalescing.
+  for (UINT batch = 0; batch < batches; ++batch) {
+    D3D12_WRITEBUFFERIMMEDIATE_PARAMETER params[4];
+    D3D12_WRITEBUFFERIMMEDIATE_MODE modes[4];
+    for (UINT i = 0; i < 4; ++i) {
+      const UINT index = i == 3 ? 255 : (batch * 7 + i * 13) % 255;
+      const UINT value_index = (batch + i) % words;
+      params[i] = {address + index * sizeof(UINT), 0x9e377900u + value_index};
+      modes[i] = static_cast<D3D12_WRITEBUFFERIMMEDIATE_MODE>((batch + i) % 3);
+      expected[index] = params[i].Value;
+      if (reference)
+        list->CopyBufferRegion(target.ptr, index * 4, upload.ptr,
+                               value_index * 4, 4);
+    }
+    if (!reference)
+      list->WriteBufferImmediate(4, params, batch % 2 ? modes : nullptr);
+    std::memset(params, 0, sizeof(params));
+    std::memset(modes, 0xff, sizeof(modes));
+  }
+  if (large) {
+    // Cross the payload chunk boundary in one API call, with all modes and
+    // repeated destinations in the same batch. Last array entry must win.
+    std::vector<D3D12_WRITEBUFFERIMMEDIATE_PARAMETER> params(16385);
+    std::vector<D3D12_WRITEBUFFERIMMEDIATE_MODE> modes(params.size());
+    for (UINT i = 0; i < params.size(); ++i) {
+      const UINT index = i % words;
+      params[i] = {address + index * sizeof(UINT), 0x12340000u + i};
+      modes[i] = static_cast<D3D12_WRITEBUFFERIMMEDIATE_MODE>(i % 3);
+      expected[index] = params[i].Value;
+    }
+    list->WriteBufferImmediate(static_cast<UINT>(params.size()), params.data(),
+                               modes.data());
+    std::memset(params.data(), 0, params.size() * sizeof(params[0]));
+  }
+  if (mutation) {
+    // Deliberately corrupt the last word while retaining the expected oracle.
+    D3D12_WRITEBUFFERIMMEDIATE_PARAMETER param = {address + desc.Width - 4, 0};
+    list->WriteBufferImmediate(1, &param, nullptr);
+  }
+  if (allocation_failure) {
+    const HRESULT hr = list->Close();
+    CopyBufferCounter::fail = false;
+    std::cout << "WBI allocation failure close=0x" << std::hex << hr << std::dec
+              << " native_buffers=" << CopyBufferCounter::count << "\n";
+    return hr == E_OUTOFMEMORY && CopyBufferCounter::count == 1 &&
+           device->GetDeviceRemovedReason() == S_OK;
+  }
+  if (CopyBufferCounter::count != (large ? 4u : 0u))
+    return false;
+  if (ordering) {
+    transition(D3D12_RESOURCE_STATE_COPY_DEST,
+               D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    list->SetComputeRootSignature(root.ptr);
+    list->SetPipelineState(pipeline.ptr);
+    list->SetComputeRootUnorderedAccessView(0, address);
+    for (UINT i = 0; i < 3; ++i) {
+      list->Dispatch(4, 1, 1);
+      for (auto &value : expected)
+        value = 3 * value + 7;
+      const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER marker = {
+          readback->GetGPUVirtualAddress() + desc.Width, 0xd00d0000u + i};
+      const auto marker_mode = static_cast<D3D12_WRITEBUFFERIMMEDIATE_MODE>(i);
+      list->WriteBufferImmediate(1, &marker, &marker_mode);
+      // Required UAV dependency; the next dispatch must restore PSO/root state
+      // after WBI interrupts the encoder, without application rebinding.
+      D3D12_RESOURCE_BARRIER uav = {};
+      uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+      uav.UAV.pResource = target.ptr;
+      list->ResourceBarrier(1, &uav);
+    }
+    transition(D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+               D3D12_RESOURCE_STATE_COPY_SOURCE);
+  } else {
+    transition(D3D12_RESOURCE_STATE_COPY_DEST,
+               D3D12_RESOURCE_STATE_COPY_SOURCE);
+  }
+  list->CopyBufferRegion(readback.ptr, 0, target.ptr, 0, desc.Width);
+  transition(D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+  QueryPerformanceCounter(&recorded);
+  const auto native_buffers = CopyBufferCounter::count;
+  if (!CheckHR("WBI close", list->Close()))
+    return false;
+  if (!CheckHR("WBI map sentinel",
+               readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+    return false;
+  std::memset(mapped, 0, desc.Width);
+  readback->Unmap(0, nullptr);
+  HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!event)
+    return false;
+  struct CloseEvent {
+    HANDLE value;
+    ~CloseEvent() { CloseHandle(value); }
+  } close_event{event};
+  double submit_us = 0, completion_us = 0;
+  const auto submit = [&](UINT64 value, bool release_recording) {
+    ID3D12CommandList *lists[] = {list.ptr};
+    if (!CheckHR("WBI gated queue", queue->Wait(gate.ptr, value)))
+      return false;
+    LARGE_INTEGER submitted_begin, submitted_end, completed;
+    QueryPerformanceCounter(&submitted_begin);
+    queue->ExecuteCommandLists(1, lists);
+    QueryPerformanceCounter(&submitted_end);
+    submit_us += (submitted_end.QuadPart - submitted_begin.QuadPart) * 1e6 /
+                 frequency.QuadPart;
+    if (!CheckHR("WBI queue signal", queue->Signal(fence.ptr, value))) {
+      gate->Signal(value);
+      return false;
+    }
+    if (allocator->Reset() != E_FAIL) {
+      gate->Signal(value);
+      return false;
+    }
+    if (!CheckHR(
+            "WBI pending map",
+            readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped)))) {
+      gate->Signal(value);
+      return false;
+    }
+    bool unchanged = true;
+    for (UINT i = 0; i < words; ++i)
+      unchanged &= mapped[i] == 0;
+    readback->Unmap(0, nullptr);
+    if (release_recording) {
+      list.ptr->Release();
+      list.ptr = nullptr;
+      allocator.ptr->Release();
+      allocator.ptr = nullptr;
+      target.ptr->Release();
+      target.ptr = nullptr;
+    }
+    QueryPerformanceCounter(&submitted_begin);
+    if (!CheckHR("WBI release gate", gate->Signal(value)) || !unchanged ||
+        !CheckHR("WBI completion", fence->SetEventOnCompletion(value, event)) ||
+        WaitForSingleObject(event, 5000) != WAIT_OBJECT_0)
+      return false;
+    QueryPerformanceCounter(&completed);
+    completion_us += (completed.QuadPart - submitted_begin.QuadPart) * 1e6 /
+                     frequency.QuadPart;
+    if (!CheckHR("WBI readback",
+                 readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+      return false;
+    bool ok = true;
+    for (UINT i = 0; i < words; ++i)
+      if (mapped[i] != expected[i]) {
+        std::cerr << "WBI word=" << i << " actual=" << mapped[i]
+                  << " expected=" << expected[i] << "\n";
+        ok = false;
+        break;
+      }
+    if (ordering && mapped[words] != 0xd00d0002u) {
+      std::cerr << "WBI final marker=" << mapped[words] << "\n";
+      ok = false;
+    }
+    std::memset(mapped, 0, desc.Width);
+    readback->Unmap(0, nullptr);
+    return ok;
+  };
+  if (!submit(1, lifetime) || (!lifetime && !submit(2, false)))
+    return false;
+  if (!lifetime) {
+    if (!CheckHR("WBI completed reset", allocator->Reset()) ||
+        !CheckHR("WBI fresh recording", list->Reset(allocator.ptr, nullptr)))
+      return false;
+    if (!reference)
+      list->WriteBufferImmediate(0, nullptr, nullptr);
+    if (!CheckHR("WBI fresh close", list->Close()))
+      return false;
+  }
+  std::cout << "WBI " << mode << " GPU readback passed words=" << words
+            << " writes=" << (batches * 4 + (large ? 16385 : 0) + (ordering ? 3 : 0))
+            << " native_buffers=" << native_buffers << " record_us="
+            << (recorded.QuadPart - begin.QuadPart) * 1e6 / frequency.QuadPart
+            << " submit_us=" << submit_us / (lifetime ? 1 : 2)
+            << " completion_us=" << completion_us / (lifetime ? 1 : 2) << "\n";
+  return device->GetDeviceRemovedReason() == S_OK;
+}
+
 int main(int argc, char **argv) {
+  if (argc == 3 && !std::strcmp(argv[1], "--write-immediate-perf")) {
+    if (std::strcmp(argv[2], "direct") && std::strcmp(argv[2], "copy-reference")) return 2;
+    for (UINT i = 0; i < 16; ++i)
+      if (!TestWriteBufferImmediate(argv[2])) return 1;
+    return 0;
+  }
+  if (argc == 3 && !std::strcmp(argv[1], "--write-immediate") && !std::strcmp(argv[2], "render"))
+    return TestConstantBufferBarrierStages(false, true) ? 0 : 1;
+  if (argc == 3 && !std::strcmp(argv[1], "--write-immediate"))
+    return TestWriteBufferImmediate(argv[2]) ? 0 : 1;
   if (argc == 2 && !std::strcmp(argv[1], "--texture-access-only-barriers"))
     return TestCommonAccessBarriers(true, true) ? 0 : 1;
   if (argc == 2 && !std::strcmp(argv[1], "--adjacent-memory-barriers")) {

@@ -4368,3 +4368,43 @@ unavailable. Device/G1/FL12_2 incomplete; public FL/SM/Options unchanged.
 User .gitignore preserved; focused local commit/no push. Evidence and commands:
 `../dxmt-test/n09-buffer-range-20261027/N09-buffer-range.md`, manifest.json,
 results.json, performance.json, official source snapshots and raw logs.
+
+### N11 — WriteBufferImmediate recording and lifetime, 2026-10-27
+
+Base136b56ca. Replace unsupported stub with existing PreBlit/native buffer-copy
+recording. Device-local VA checks null/alignment/logical bounds/mode; Close returns
+E_INVALIDARG, or E_OUTOFMEMORY for payload allocation failure. Rename/reuse query
+recording HRESULT as shared recording error. Immutable values use at most argument
+arena first64KiB, then encoder-owned64KiB chunks. Existing resource_refs retains
+chunks/destinations through recording/submission/completion. No new src/d3d12
+file, scheduler, binder, resource-state authority or public ABI.
+
+DIRECT/COMPUTE/COPY GPU readbacks, caller mutation, overlap, replay,49157-write
+chunk overflow, allocation-failure injection, pending-reset rejection and released
+application refs pass private/no-private. Dispatch→WBI→Dispatch restores root/PSO;
+4 graphics cases preserve earlier pixels across encoder split. Invalid tests
+include foreign VA/bundle. Wrong-value oracle fails both at word255. Existing
+command-list lifecycle, adjacent barriers, feature and depth/stencil copy pass.
+30 verified processes:28 success,2 expected oracle failures; reporting correction
+rechecks8 candidate anchors and2 baseline failures. Production hashes unchanged;
+no observed Metal API/GPU validation errors. Logs/hashes outside repository.
+
+Conservative marker fallback uses existing fences; native overlap/crash-progress
+NOT_VERIFIED. COPY_DEST is caller contract; no new command state validator.
+Public WBI mask stays NONE; no FL/SM/Options promotion. Native Windows/other GPUs/
+SM6 interleaving/sparse/fullT3/T4 NOT_RUN.
+
+Performance OPEN:512 writes vs baseline prefilled copy,24 samples/side, recording
+p50/p95 us49.55/55.90->288.60/301.10; submit409.10/472.05->432.375/476.65.
+10000-copy control ABBA/BAAB,20 samples/side: recording380.25/404.40->490.75/518.40
+(+29.1%/+28.2%,~11ns/copy median), submit4807.20/5047.60->4760.95/4969.50.
+Recording regression repeats; root cause unresolved despite unchanged hot-path
+call sequence. No unrelated optimization/zero-cost claim. M1Max/Apple7/macOS27.0.1/
+Xcode27.1/Wine11/MSC4.0.1/clang23.1.1; requested Xcode26 unavailable.
+
+Next priority: DXIL Append/Consume MSC counter binding ABI, conversion, GPU
+counter/payload differential and submission lifetime; GS details/Int64/Native16
+in differential acceptance. Existing SM6 typed-offset wrong-zero stays OPEN.
+Device/G1/FL12_2 incomplete. Evidence: ../dxmt-test/n11-write-immediate-20261027/
+N11-write-immediate.md, slice.md, manifest.json, results.json, performance.json,
+official snapshots and raw logs. User .gitignore preserved; local commit/no push.
