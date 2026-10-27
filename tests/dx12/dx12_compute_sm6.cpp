@@ -26,6 +26,10 @@ bool CheckHR(const char *name, HRESULT hr) {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 3 && strcmp(argv[2], "--append-consume-unsupported") == 0) {
+    std::cerr << "Use --append-consume-conversion for PSO admission, or the counter-pair GPU runner.\n";
+    return 2;
+  }
   if (argc < 2 || argc > 3) {
     std::cerr << "usage: dx12_compute_sm6 <shader.cso> "
                  "[--root-uav|--reserved-uav|--reserved-srv|--descriptor-uav|--descriptor-resources|--"
@@ -34,7 +38,7 @@ int main(int argc, char **argv) {
                  "direct-indexed-resources|--direct-indexed-resources-lifetime|"
                  "--direct-indexed-nonuniform|--direct-indexed-nonuniform-mixed|"
                  "--unbounded-resources|"
-                 "--append-consume-unsupported|"
+                 "--append-consume-conversion|"
                  "--nan-inf-ops|"
                  "cache-probe|--wave-ops|--wave-size-unsupported|--int64-ops|--int64-descriptor-ops|"
                  "--native16-ops|--native16-descriptor-ops|"
@@ -68,7 +72,8 @@ int main(int argc, char **argv) {
       argc == 3 && strcmp(argv[2], "--sampler-feedback-unsupported") == 0;
   const bool ray_payload_qualifiers_unsupported =
       argc == 3 && strcmp(argv[2], "--ray-payload-qualifiers-unsupported") == 0;
-  const bool append_consume_unsupported = argc == 3 && strcmp(argv[2], "--append-consume-unsupported") == 0;
+  const bool append_consume_conversion =
+      argc == 3 && strcmp(argv[2], "--append-consume-conversion") == 0;
   const bool nan_inf_ops = argc == 3 && strcmp(argv[2], "--nan-inf-ops") == 0;
   const bool global_coherent = argc == 3 && strcmp(argv[2], "--global-coherent") == 0;
   const bool root_uav = argc == 3 &&
@@ -78,8 +83,9 @@ int main(int argc, char **argv) {
                          atomic64_unsupported || nan_inf_ops || global_coherent);
   const bool reserved_uav = argc == 3 && strcmp(argv[2], "--reserved-uav") == 0;
   const bool reserved_srv = argc == 3 && strcmp(argv[2], "--reserved-srv") == 0;
-  const bool descriptor_uav = argc == 3 &&
-                              (strcmp(argv[2], "--descriptor-uav") == 0 || append_consume_unsupported);
+  const bool descriptor_uav =
+      argc == 3 &&
+      (strcmp(argv[2], "--descriptor-uav") == 0 || append_consume_conversion);
   const bool descriptor_bgra =
       argc == 3 && strcmp(argv[2], "--descriptor-bgra") == 0;
   const bool descriptor_typed_offset =
@@ -625,8 +631,9 @@ int main(int argc, char **argv) {
   pso_desc.CS.pShaderBytecode = shader.data();
   pso_desc.CS.BytecodeLength = shader.size();
   if (wave_size_unsupported || denorm_unsupported || pack_unpack_unsupported ||
-      compute_derivatives_unsupported || atomic64_unsupported || library_subobjects_unsupported ||
-      append_consume_unsupported || sampler_feedback_unsupported || ray_payload_qualifiers_unsupported) {
+      compute_derivatives_unsupported || atomic64_unsupported ||
+      library_subobjects_unsupported || sampler_feedback_unsupported ||
+      ray_payload_qualifiers_unsupported) {
     const HRESULT unsupported_hr = device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso));
     if (unsupported_hr != E_NOTIMPL) {
       std::cerr << "unsupported shader feature expected E_NOTIMPL, got 0x" << std::hex
@@ -639,7 +646,6 @@ int main(int argc, char **argv) {
                   : pack_unpack_unsupported ? "pack/unpack"
                   : compute_derivatives_unsupported ? "compute derivatives"
                   : atomic64_unsupported ? "64-bit atomics"
-                  : append_consume_unsupported ? "Append/Consume buffers"
                   : sampler_feedback_unsupported ? "sampler feedback"
                   : ray_payload_qualifiers_unsupported ? "ray payload qualifiers"
                                                         : "library subobjects")
@@ -652,6 +658,14 @@ int main(int argc, char **argv) {
           "CreateComputePipelineState",
           device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso))))
     goto cleanup;
+  if (append_consume_conversion) {
+    // Counter-backed GPU execution is covered by the paired SM5/SM6 residency
+    // runner; this probe only verifies conversion and native PSO admission.
+    std::cout << "DXIL Append/Consume conversion and PSO creation passed (GPU "
+                 "NOT_RUN)\n";
+    result = 0;
+    goto cleanup;
+  }
   if (cache_probe &&
       !CheckHR("CreateCachedComputePipelineState",
                device->CreateComputePipelineState(&pso_desc,

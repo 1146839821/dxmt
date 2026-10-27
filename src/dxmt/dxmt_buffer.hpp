@@ -70,6 +70,9 @@ struct BufferViewDescriptor {
   WMTPixelFormat format;
   // Restrict native view usage without changing allocation tracking flags.
   bool read_only = false;
+  // Zero length preserves the whole-allocation view used by ordinary buffers.
+  uint64_t byte_offset = 0;
+  uint64_t byte_length = 0;
 };
 
 class Buffer;

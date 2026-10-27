@@ -3844,7 +3844,8 @@ public:
             return false;
           auto *counter = descriptor.UAVBuffer.counter;
           if (counter && counter->current())
-            return add(counter->current()->buffer().handle, read_write);
+            return add(counter->current()->buffer().handle, read_write) &&
+                   add(counter->view(descriptor.UAVBuffer.counter_view).handle, read_write);
         }
         break;
       case ShaderVisibleDescriptorType::Null:
@@ -4153,8 +4154,10 @@ public:
             !descriptor.UAVBuffer.buffer->current())
           return;
         encode_resource(descriptor.UAVBuffer.buffer->current()->buffer().handle, read_write);
-        if (auto *counter = descriptor.UAVBuffer.counter; counter && counter->current())
+        if (auto *counter = descriptor.UAVBuffer.counter; counter && counter->current()) {
           encode_resource(counter->current()->buffer().handle, read_write);
+          encode_resource(counter->view(descriptor.UAVBuffer.counter_view).handle, read_write);
+        }
         break;
       }
       case ShaderVisibleDescriptorType::Null:

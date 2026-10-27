@@ -123,6 +123,7 @@ struct UAVBufferCPUStorage {
   BufferSlice slice{};
   // The heap owns this identity through counter_resources_, including copies.
   Buffer *counter = nullptr;
+  BufferViewKey counter_view{};
 };
 
 using SRVBufferCPUStorage = UAVBufferCPUStorage;
@@ -278,7 +279,7 @@ public:
   virtual HRESULT AddUnorderedAccessView(UINT Index, Buffer *Buffer, BufferViewKey View, BufferSlice Slice) = 0;
 
   virtual HRESULT AddUnorderedAccessView(
-      UINT Index, Buffer *UAVBuffer, BufferSlice Slice, Buffer *Counter, UINT CounterOffsetInBytes
+      UINT Index, Buffer *UAVBuffer, BufferSlice Slice, Buffer *Counter, UINT64 CounterOffsetInBytes
   ) = 0;
 
   virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferViewKey View, BufferSlice Slice) = 0;

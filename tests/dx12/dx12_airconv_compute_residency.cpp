@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <fstream>
+#include <iterator>
 #include <vector>
 
 namespace {
@@ -215,17 +217,17 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
   return !bytecode.empty();
 }
 
-bool CreateRootSignature(
-    ID3D12Device *device, ID3D12RootSignature **root_signature, bool extended,
-    bool directly_indexed = false, bool ambiguous = false
-) {
+bool CreateRootSignature(ID3D12Device *device,
+                         ID3D12RootSignature **root_signature, bool extended,
+                         bool directly_indexed = false, bool ambiguous = false,
+                         UINT uav_count = 1) {
   D3D12_DESCRIPTOR_RANGE ranges[3] = {};
   ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
   ranges[0].NumDescriptors = 1;
   ranges[0].BaseShaderRegister = 0;
   ranges[0].OffsetInDescriptorsFromTableStart = 0;
   ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-  ranges[1].NumDescriptors = 1;
+  ranges[1].NumDescriptors = uav_count;
   ranges[1].BaseShaderRegister = 0;
   ranges[1].OffsetInDescriptorsFromTableStart = 0;
 
@@ -976,9 +978,384 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
   return true;
 }
 
+// The same oracle runs DXBC/Airconv and DXIL/MSC. Missing MSC counter
+// texture handles fail before any append/consume dispatch reaches the GPU.
+bool TestAppendConsume(ID3D12Device *device, const char *append_path,
+                       const char *consume_path, UINT counter_offset,
+                       UINT first_element, bool wrong_expected) {
+  std::vector<uint8_t> bytecode[2];
+  ComPtr<ID3D12RootSignature> root;
+  if (!CreateRootSignature(device, root.put(), false, false, false, 2))
+    return false;
+  ComPtr<ID3D12PipelineState> psos[2];
+  const char *paths[] = {append_path, consume_path};
+  for (UINT i = 0; i < 2; ++i) {
+    std::ifstream file(paths[i], std::ios::binary);
+    bytecode[i].assign(std::istreambuf_iterator<char>(file), {});
+    if (bytecode[i].empty())
+      return false;
+    D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+    desc.pRootSignature = root.get();
+    desc.CS = {bytecode[i].data(), bytecode[i].size()};
+    if (!CheckHR("Create append/consume PSO",
+                 device->CreateComputePipelineState(
+                     &desc, IID_PPV_ARGS(psos[i].put()))))
+      return false;
+  }
+  const auto backend =
+      static_cast<dxmt::MTLD3D12PipelineState *>(psos[0].get())->shader_backend;
+  if (static_cast<dxmt::MTLD3D12PipelineState *>(psos[1].get())
+          ->shader_backend != backend)
+    return false;
+  const bool msc = backend == dxmt::D3D12ShaderBackend::MetalShaderConverter;
+  constexpr uint32_t guard = 0x13579bdf;
+  const UINT payload_size = (first_element + 5) * 4;
+  constexpr UINT counter_size = 8192 + 8;
+  const UINT readback_size = payload_size + 16 + counter_size * 3;
+  ComPtr<ID3D12Resource> payload, consumed, counters[2], upload, readback;
+  if (!CreateBuffer(device, D3D12_HEAP_TYPE_DEFAULT, payload_size,
+                    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_COPY_DEST, payload.put()) ||
+      !CreateBuffer(device, D3D12_HEAP_TYPE_DEFAULT, 16,
+                    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, consumed.put()) ||
+      !CreateBuffer(device, D3D12_HEAP_TYPE_UPLOAD,
+                    std::max(payload_size, counter_size),
+                    D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ,
+                    upload.put()) ||
+      !CreateBuffer(device, D3D12_HEAP_TYPE_READBACK, readback_size,
+                    D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
+                    readback.put()))
+    return false;
+  for (auto &counter : counters)
+    if (!CreateBuffer(device, D3D12_HEAP_TYPE_DEFAULT, counter_size,
+                      D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                      D3D12_RESOURCE_STATE_COPY_DEST, counter.put()))
+      return false;
+  void *mapped = nullptr;
+  if (!CheckHR("Map guarded upload", upload.get()->Map(0, nullptr, &mapped)))
+    return false;
+  std::fill_n(static_cast<uint32_t *>(mapped),
+              std::max(payload_size, counter_size) / 4, guard);
+  upload.get()->Unmap(0, nullptr);
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  ComPtr<ID3D12CommandQueue> queue;
+  ComPtr<ID3D12CommandAllocator> allocator;
+  ComPtr<ID3D12GraphicsCommandList> list;
+  if (!CheckHR(
+          "Create append queue",
+          device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(queue.put()))) ||
+      !CheckHR("Create append allocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                              IID_PPV_ARGS(allocator.put()))) ||
+      !CheckHR("Create append list",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                         allocator.get(), nullptr,
+                                         IID_PPV_ARGS(list.put()))))
+    return false;
+  auto execute = [&] {
+    if (!CheckHR("Close initialization", list.get()->Close()))
+      return false;
+    ID3D12CommandList *lists[] = {list.get()};
+    queue.get()->ExecuteCommandLists(1, lists);
+    return WaitForQueue(device, queue.get());
+  };
+  list.get()->CopyBufferRegion(payload.get(), 0, upload.get(), 0, payload_size);
+  for (auto &counter : counters)
+    list.get()->CopyBufferRegion(counter.get(), 0, upload.get(), 0,
+                                 counter_size);
+  if (!execute() ||
+      !CheckHR("Map counter zeros", upload.get()->Map(0, nullptr, &mapped)))
+    return false;
+  *static_cast<uint32_t *>(mapped) = 0;
+  upload.get()->Unmap(0, nullptr);
+  if (!CheckHR("Reset initialization allocator", allocator.get()->Reset()) ||
+      !CheckHR("Reset initialization list",
+               list.get()->Reset(allocator.get(), nullptr)))
+    return false;
+  for (auto &counter : counters) {
+    list.get()->CopyBufferRegion(counter.get(), counter_offset, upload.get(), 0,
+                                 4);
+    Transition(list.get(), counter.get(), D3D12_RESOURCE_STATE_COPY_DEST,
+               D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  }
+  Transition(list.get(), payload.get(), D3D12_RESOURCE_STATE_COPY_DEST,
+             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  if (!execute())
+    return false;
+  upload.reset();
+  D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
+  heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  heap_desc.NumDescriptors = 2;
+  heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  ComPtr<ID3D12DescriptorHeap> heap, source_heap;
+  if (!CheckHR("Create append heap", device->CreateDescriptorHeap(
+                                         &heap_desc, IID_PPV_ARGS(heap.put()))))
+    return false;
+  heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+  if (!CheckHR("Create source heap",
+               device->CreateDescriptorHeap(&heap_desc,
+                                            IID_PPV_ARGS(source_heap.put()))))
+    return false;
+  const auto cpu = heap.get()->GetCPUDescriptorHandleForHeapStart();
+  const auto source_cpu =
+      source_heap.get()->GetCPUDescriptorHandleForHeapStart();
+  auto output_cpu = cpu;
+  output_cpu.ptr += device->GetDescriptorHandleIncrementSize(heap_desc.Type);
+  D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
+  uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+  uav.Buffer.NumElements = 4;
+  uav.Buffer.StructureByteStride = 4;
+  device->CreateUnorderedAccessView(consumed.get(), nullptr, &uav, output_cpu);
+  uav.Buffer.FirstElement = first_element;
+  uav.Buffer.CounterOffsetInBytes = counter_offset;
+  auto write = [&](UINT i, D3D12_CPU_DESCRIPTOR_HANDLE handle) {
+    device->CreateUnorderedAccessView(payload.get(), counters[i].get(), &uav,
+                                      handle);
+  };
+  auto entry = [&] {
+    auto *internal_heap =
+        static_cast<dxmt::MTLD3D12DescriptorHeap *>(heap.get());
+    const auto address = internal_heap->GetMSCDescriptorTableAddress(
+        heap.get()->GetGPUDescriptorHandleForHeapStart());
+    uint64_t offset = 0;
+    auto *allocation =
+        static_cast<dxmt::MTLD3D12Device *>(device)->LookupBufferByVA(address,
+                                                                      &offset);
+    dxmt_msc_descriptor_entry descriptor{};
+    if (allocation)
+      std::memcpy(&descriptor,
+                  static_cast<const uint8_t *>(allocation->mappedMemory(0)) +
+                      offset,
+                  sizeof(descriptor));
+    return descriptor;
+  };
+  write(0, cpu);
+  const auto original_entry = entry();
+  if (msc && (!original_entry.texture_view_id ||
+              original_entry.gpu_va !=
+                  payload.get()->GetGPUVirtualAddress() + first_element * 4 ||
+              original_entry.metadata != 16)) {
+    std::cerr << "FAIL MSC counter ABI preflight: texture="
+              << original_entry.texture_view_id
+              << " metadata=" << original_entry.metadata
+              << " offset=" << counter_offset << '\n';
+    return false;
+  }
+  // Different offsets in one allocation must not alias one cached texture.
+  auto alternate = uav;
+  alternate.Buffer.CounterOffsetInBytes = counter_offset ? 0 : 4096;
+  device->CreateUnorderedAccessView(payload.get(), counters[0].get(),
+                                    &alternate, cpu);
+  if (msc && (!entry().texture_view_id ||
+              entry().texture_view_id == original_entry.texture_view_id)) {
+    std::cerr << "FAIL distinct counter offsets share a texture view\n";
+    return false;
+  }
+  write(0, cpu);
+  if (entry().texture_view_id != original_entry.texture_view_id)
+    return false;
+  auto copy_readback = [&](ID3D12Resource *source, UINT offset, UINT length) {
+    Transition(list.get(), source, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+               D3D12_RESOURCE_STATE_COPY_SOURCE);
+    list.get()->CopyBufferRegion(readback.get(), offset, source, 0, length);
+    Transition(list.get(), source, D3D12_RESOURCE_STATE_COPY_SOURCE,
+               D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  };
+  // Slot reuse follows a fence. Final application object release happens while
+  // a queue wait deliberately keeps the submission in flight.
+  for (UINT pass = 0; pass < 2; ++pass) {
+    if (!CheckHR("Reset append allocator", allocator.get()->Reset()) ||
+        !CheckHR("Reset append list",
+                 list.get()->Reset(allocator.get(), psos[0].get())))
+      return false;
+    write(pass, cpu);
+    ID3D12DescriptorHeap *heaps[] = {heap.get()};
+    list.get()->SetDescriptorHeaps(1, heaps);
+    list.get()->SetComputeRootSignature(root.get());
+    list.get()->SetComputeRootDescriptorTable(
+        0, heap.get()->GetGPUDescriptorHandleForHeapStart());
+    list.get()->SetComputeRootDescriptorTable(
+        1, heap.get()->GetGPUDescriptorHandleForHeapStart());
+    list.get()->Dispatch(4, 1, 1);
+    copy_readback(payload.get(), 0, payload_size);
+    for (UINT i = 0; i < 2; ++i) {
+      Transition(list.get(), counters[i].get(),
+                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                 D3D12_RESOURCE_STATE_COPY_SOURCE);
+      if (i == 1 - pass)
+        list.get()->CopyBufferRegion(readback.get(), payload_size + 16,
+                                     counters[i].get(), 0, counter_size);
+      Transition(list.get(), counters[i].get(),
+                 D3D12_RESOURCE_STATE_COPY_SOURCE,
+                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+    list.get()->SetPipelineState(psos[1].get());
+    list.get()->Dispatch(4, 1, 1);
+    copy_readback(consumed.get(), payload_size, 16);
+    for (UINT i = 0; i < 2; ++i)
+      copy_readback(counters[i].get(),
+                    payload_size + 16 + (i + 1) * counter_size, counter_size);
+    if (!CheckHR("Close append/consume", list.get()->Close()))
+      return false;
+    if (!pass) {
+      write(1, source_cpu);
+      device->CopyDescriptorsSimple(1, cpu, source_cpu, heap_desc.Type);
+      source_heap.reset();
+    } else {
+      auto no_counter = uav;
+      no_counter.Buffer.CounterOffsetInBytes = 0;
+      device->CreateUnorderedAccessView(payload.get(), nullptr, &no_counter,
+                                        cpu);
+      if (entry().texture_view_id) {
+        std::cerr << "FAIL stale MSC counter after counterless replacement\n";
+        return false;
+      }
+      write(0, cpu);
+      if (entry().texture_view_id != original_entry.texture_view_id) {
+        std::cerr << "FAIL counter view cache identity\n";
+        return false;
+      }
+    }
+    if (msc && !entry().texture_view_id)
+      return false;
+    auto *internal =
+        static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list.get());
+    std::vector<dxmt::SubmissionResourceUse> uses;
+    std::vector<WMT::Reference<WMT::Resource>> resources;
+    if (!CheckHR("Collect counter submission",
+                 internal->CollectResourceUsesForSubmission(uses, resources)))
+      return false;
+    const auto native =
+        static_cast<dxmt::MTLD3D12Resource *>(counters[1 - pass].get())
+            ->buffer->current()
+            ->buffer()
+            .handle;
+    const auto read_write = WMTResourceUsageRead | WMTResourceUsageWrite;
+    if (!std::any_of(uses.begin(), uses.end(), [&](const auto &use) {
+          return use.resource.handle == native &&
+                 (use.usage & read_write) == read_write;
+        })) {
+      std::cerr << "FAIL missing latest counter submission residency\n";
+      return false;
+    }
+    if (msc) {
+      // This fixture has no UAV textures except the indirect counter view.
+      // Check both compute encoders and retained native resources, without
+      // extending the DLL interface to expose the internal view cache.
+      const obj_handle_t buffers[] = {
+          static_cast<dxmt::MTLD3D12Resource *>(payload.get())
+              ->buffer->current()
+              ->buffer()
+              .handle,
+          static_cast<dxmt::MTLD3D12Resource *>(consumed.get())
+              ->buffer->current()
+              ->buffer()
+              .handle,
+          native};
+      UINT counter_texture_uses = 0;
+      for (const auto &use : uses) {
+        if ((use.usage & read_write) != read_write ||
+            std::find(std::begin(buffers), std::end(buffers),
+                      use.resource.handle) != std::end(buffers))
+          continue;
+        const bool retained = std::any_of(
+            resources.begin(), resources.end(), [&](const auto &resource) {
+              return resource.handle == use.resource.handle;
+            });
+        if (!retained)
+          return false;
+        counter_texture_uses++;
+      }
+      if (counter_texture_uses != 2) {
+        std::cerr << "FAIL counter texture submission uses="
+                  << counter_texture_uses << '\n';
+        return false;
+      }
+    }
+    uses.clear();
+    resources.clear();
+    ComPtr<ID3D12Fence> gate;
+    if (pass &&
+        (!CheckHR("Create counter gate",
+                  device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                      IID_PPV_ARGS(gate.put()))) ||
+         !CheckHR("Queue counter gate", queue.get()->Wait(gate.get(), 1))))
+      return false;
+    ID3D12CommandList *lists[] = {list.get()};
+    queue.get()->ExecuteCommandLists(1, lists);
+    if (pass) {
+      list.reset();
+      allocator.reset();
+      heap.reset();
+      payload.reset();
+      consumed.reset();
+      for (auto &counter : counters)
+        counter.reset();
+      for (auto &pso : psos)
+        pso.reset();
+      root.reset();
+      if (!CheckHR("Release counter gate", gate.get()->Signal(1)))
+        return false;
+    }
+    if (!WaitForQueue(device, queue.get()) ||
+        !CheckHR("Map counter results",
+                 readback.get()->Map(0, nullptr, &mapped)))
+      return false;
+    std::vector<uint32_t> values(readback_size / 4);
+    std::memcpy(values.data(), mapped, readback_size);
+    readback.get()->Unmap(0, nullptr);
+    std::sort(values.begin() + first_element,
+              values.begin() + first_element + 4);
+    std::sort(values.begin() + payload_size / 4,
+              values.begin() + payload_size / 4 + 4);
+    std::vector<uint32_t> expected(values.size(), guard);
+    for (UINT i = 0; i < 4; ++i) {
+      expected[first_element + i] = 100 + i;
+      expected[payload_size / 4 + i] = 100 + i;
+    }
+    for (UINT i = 0; i < 3; ++i)
+      expected[(payload_size + 16 + i * counter_size + counter_offset) / 4] =
+          i == 0 ? 4 : 0;
+    if (wrong_expected)
+      expected[first_element]++;
+    if (values != expected) {
+      for (size_t i = 0; i < values.size(); ++i)
+        if (values[i] != expected[i]) {
+          std::cerr << "FAIL counter GPU word=" << i << " actual=" << values[i]
+                    << " expected=" << expected[i] << " pass=" << pass << '\n';
+          break;
+        }
+      return false;
+    }
+  }
+  std::cout << (msc ? "MSC" : "AIRCONV")
+            << " Append/Consume GPU payload/counters/guards passed offset="
+            << counter_offset << " first=" << first_element
+            << " copy/mutation/reuse/pending-release passed\n";
+  return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  if ((argc == 6 || argc == 7) && std::strcmp(argv[1], "--counter-pair") == 0) {
+    const UINT offset = std::strtoul(argv[4], nullptr, 10);
+    const UINT first = std::strtoul(argv[5], nullptr, 10);
+    if (offset > 8192 || offset % D3D12_UAV_COUNTER_PLACEMENT_ALIGNMENT ||
+        first > 8 ||
+        (argc == 7 && std::strcmp(argv[6], "--wrong-expected") != 0))
+      return 2;
+    ComPtr<ID3D12Device> device;
+    if (!CheckHR("D3D12CreateDevice",
+                 D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                   IID_PPV_ARGS(device.put()))))
+      return 1;
+    return TestAppendConsume(device.get(), argv[2], argv[3], offset, first,
+                             argc == 7)
+               ? 0
+               : 1;
+  }
   if (argc > 2 || (argc == 2 && std::strcmp(argv[1], "--clear-residency-override") != 0))
     return 2;
   if (argc == 2)

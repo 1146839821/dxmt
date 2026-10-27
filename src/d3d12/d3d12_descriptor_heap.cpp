@@ -545,9 +545,23 @@ public:
   }
 
   virtual HRESULT
-  AddUnorderedAccessView(UINT Index, Buffer *UAVBuffer, BufferSlice Slice, Buffer *Counter, UINT CounterOffsetInBytes) {
+  AddUnorderedAccessView(
+      UINT Index, Buffer *UAVBuffer, BufferSlice Slice, Buffer *Counter, UINT64 CounterOffsetInBytes
+  ) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    // MSC implements bufferUpdateCounter with texture atomics. Keep a one-word
+    // R32Uint view at the D3D12 counter offset: the companion ABI only has eight
+    // bits for the texture-relative element offset, not the full buffer offset.
+    BufferViewKey counter_view{};
+    uint64_t counter_resource_id = 0;
+    if (Counter) {
+      counter_view = Counter->createView({WMTPixelFormatR32Uint, false, CounterOffsetInBytes, sizeof(UINT)});
+      const auto &view = Counter->view_(counter_view);
+      if (!view.texture || !view.gpu_resource_id)
+        return E_OUTOFMEMORY;
+      counter_resource_id = view.gpu_resource_id;
+    }
     std::lock_guard lock(descriptor_mutex_);
     ReleaseDescriptorResources(Index);
     buffer_resources_[Index] = UAVBuffer;
@@ -557,13 +571,14 @@ public:
     cpu_storage.UAVBuffer.buffer = UAVBuffer;
     cpu_storage.UAVBuffer.slice = Slice;
     cpu_storage.UAVBuffer.counter = Counter;
+    cpu_storage.UAVBuffer.counter_view = counter_view;
     if (mapped_argument_buffer_) {
       auto &gpu_storage = mapped_argument_buffer_[Index];
       if (UAVBuffer) {
         gpu_storage.UAVBuffer.pointer = UAVBuffer->current()->gpuAddress() + Slice.byteOffset;
         gpu_storage.UAVBuffer.metadata = Slice.byteLength;
         gpu_storage.UAVBuffer.counter_pointer = Counter ? Counter->current()->gpuAddress() + CounterOffsetInBytes : 0;
-        SetMSCDescriptor(Index, {gpu_storage.UAVBuffer.pointer, 0, Slice.byteLength});
+        SetMSCDescriptor(Index, {gpu_storage.UAVBuffer.pointer, counter_resource_id, Slice.byteLength});
       } else {
         gpu_storage.UAVBuffer.pointer = 0;
         gpu_storage.UAVBuffer.metadata = 0;
@@ -620,6 +635,7 @@ public:
     cpu_storage.SRVBuffer.buffer = Buffer;
     cpu_storage.SRVBuffer.slice = Slice;
     cpu_storage.SRVBuffer.counter = nullptr;
+    cpu_storage.SRVBuffer.counter_view = {};
     if (mapped_argument_buffer_) {
       auto &gpu_storage = mapped_argument_buffer_[Index];
       if (Buffer) {

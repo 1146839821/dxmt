@@ -105,14 +105,17 @@ void
 Buffer::prepareAllocationViews(BufferAllocation *allocation) {
   std::unique_lock<dxmt::mutex> lock(mutex_);
   for (unsigned version = allocation->version_; version < version_; version++) {
-    auto format = viewDescriptors_[version].format;
+    const auto &descriptor = viewDescriptors_[version];
+    auto format = descriptor.format;
     auto texel_size = MTLGetTexelSize(format);
     assert(texel_size);
     assert(!(allocation->suballocation_size_ & (texel_size - 1)));
     auto total_length = allocation->suballocation_size_ * allocation->suballocation_count_;
-    WMTTextureInfo info;
+    const auto view_length = descriptor.byte_length ? descriptor.byte_length : total_length;
+    assert(descriptor.byte_offset <= total_length && view_length <= total_length - descriptor.byte_offset);
+    WMTTextureInfo info{};
     info.type = WMTTextureTypeTextureBuffer;
-    info.width = total_length / (uint64_t)texel_size;
+    info.width = view_length / (uint64_t)texel_size;
     info.height = 1;
     info.depth = 1;
     info.array_length = 1;
@@ -132,7 +135,7 @@ Buffer::prepareAllocationViews(BufferAllocation *allocation) {
     }
     info.usage = usage;
 
-    auto view = allocation->obj_.newTexture(info, 0, total_length);
+    auto view = allocation->obj_.newTexture(info, descriptor.byte_offset, view_length);
 
     allocation->cached_view_.push_back(std::make_unique<BufferView>(
         std::move(view), info.gpu_resource_id, allocation->suballocation_size_ / texel_size
@@ -146,7 +149,9 @@ Buffer::createView(BufferViewDescriptor const &descriptor) {
   std::unique_lock<dxmt::mutex> lock(mutex_);
   unsigned i = 0;
   for (; i < version_; i++) {
-    if (viewDescriptors_[i].format == descriptor.format && viewDescriptors_[i].read_only == descriptor.read_only) {
+    if (viewDescriptors_[i].format == descriptor.format && viewDescriptors_[i].read_only == descriptor.read_only &&
+        viewDescriptors_[i].byte_offset == descriptor.byte_offset &&
+        viewDescriptors_[i].byte_length == descriptor.byte_length) {
       return BufferViewKey(i, std::nullopt);
     }
   }

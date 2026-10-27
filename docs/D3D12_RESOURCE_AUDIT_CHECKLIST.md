@@ -4408,3 +4408,38 @@ in differential acceptance. Existing SM6 typed-offset wrong-zero stays OPEN.
 Device/G1/FL12_2 incomplete. Evidence: ../dxmt-test/n11-write-immediate-20261027/
 N11-write-immediate.md, slice.md, manifest.json, results.json, performance.json,
 official snapshots and raw logs. User .gitignore preserved; local commit/no push.
+
+### N06 — MSC Append/Consume counter binding, 2026-10-27
+
+Base38668511. Baseline rejects bufferUpdateCounter at conversion; gate-only
+external diagnostic then fails safe ABI preflight (texture ID0). Existing
+Airconv counter pointer was present, MSC counter texture absent. Extend existing
+BufferViewDescriptor cache with optional byte range: one R32Uint element at the
+counter offset, with relative MSC offset0 (ABI field only8 bits). Keep full UINT64
+counter offset. Descriptor counter owner/key copies and resets with existing
+heap mechanics. Existing recording/submission read-write resource uses retain
+both native counter buffer and texture. Remove blanket Append/Consume rejection;
+other gates and public FL/SM/Options unchanged. No new src/d3d12 module/owner.
+
+Final private/no-private:28 processes,24 success,4 deliberate wrong-value failures.
+SM5/SM6 Append→Consume GPU payload/count/guards pass counter offsets0/4096/8192,
+payload FirstElement0/3/8, distinct cached range IDs, copied CPU heap destruction,
+post-Close mutation, counterless replacement, fenced reuse and application object
+release during gated submission. MSC submission retains2 read-write counter
+texture uses. Conversion-only probe explicitly separates GPU NOT_RUN. Full
+ownership, existing Airconv counter/residency, D3D11 BGRA24-value controls and
+feature checks pass. Earlier format/range controls pass. No final Metal API/GPU
+validation/native assertion/aborted-command errors. DXC opcode70 +/-1, MSC CLI4.0.3
+metallibs/reflection and runtime API4.0.1 distinguished. M1Max/Apple7/macOS27.0.1/
+Xcode27.1/Wine11; requested Xcode26 unavailable.
+
+Final ABBA cost,24 samples/side,20000 cached writes:counterless p50/p95 us
+2596.70/2683.20->2481.25/2554.00;counter-bearing3333.05/3428.30->3947.95/4018.90
+(+18.4% median,~30.7ns/write). No zero-cost/global-performance claim. No counter
+submit/GPU timing claim. Graphics/mesh/RT, dynamic counter arrays, same-resource
+payload/counter, non-default heaps, sparse/>4GiB offsets, allocation fault injection,
+native Windows/other GPUs/fullT3/T4 NOT_RUN. GS/Int64/Native16 differential remains
+next; SM6 typed-offset wrong-zero and WBI recording-cost regression remain OPEN.
+Device/G1/FL12_2 incomplete. Evidence:../dxmt-test/n06-append-consume-20261027/
+N06-append-consume.md,slice.md,results.json,performance.json,conversion/reflection,
+primary snapshots and logs. User .gitignore preserved; local commit/no push.

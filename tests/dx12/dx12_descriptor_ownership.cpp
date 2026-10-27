@@ -1277,7 +1277,7 @@ bool CheckViewPermissions(bool cost = false) {
   return good;
 }
 
-bool CheckUAVCounterContract() {
+bool CheckUAVCounterContract(bool measure_cost = false) {
   struct Objects {
     ID3D12Device *device = nullptr;
     ID3D12DescriptorHeap *heap = nullptr;
@@ -1455,6 +1455,24 @@ bool CheckUAVCounterContract() {
   const bool null_pass = ReadDescriptorFields(heap, 0).type ==
                          dxmt::ShaderVisibleDescriptorType::Null;
   std::cout << "counter_contract valid_null pass=" << null_pass << "\n";
+  if (measure_cost && good && null_pass) {
+    constexpr UINT iterations = 20000;
+    for (bool counter_bearing : {false, true}) {
+      auto view = structured;
+      view.Buffer.CounterOffsetInBytes = counter_bearing ? 4096 : 0;
+      for (UINT trial = 0; trial < 16; ++trial) {
+        const auto start = std::chrono::steady_clock::now();
+        for (UINT i = 0; i < iterations; ++i)
+          write(o.buffer, counter_bearing ? o.counter : nullptr, &view);
+        const double us = std::chrono::duration<double, std::micro>(
+                              std::chrono::steady_clock::now() - start)
+                              .count();
+        std::cout << "counter_cost counter=" << counter_bearing
+                  << " trial=" << trial << " count=" << iterations
+                  << " us=" << us << "\n";
+      }
+    }
+  }
   return good && null_pass;
 }
 
@@ -2415,8 +2433,11 @@ int main(int argc, char **argv) {
     return CheckTypedViewFormats() ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--texture-view-dimensions")
     return CheckTextureViewDimensions() ? 0 : 1;
-  if (argc == 2 && std::string(argv[1]) == "--uav-counter-contract")
-    return CheckUAVCounterContract() ? 0 : 1;
+  if (argc == 2 && (std::string(argv[1]) == "--uav-counter-contract" ||
+                    std::string(argv[1]) == "--uav-counter-cost"))
+    return CheckUAVCounterContract(std::string(argv[1]) == "--uav-counter-cost")
+               ? 0
+               : 1;
   if (argc == 2 && (std::string(argv[1]) == "--view-permissions" ||
                     std::string(argv[1]) == "--view-permission-cost"))
     return CheckViewPermissions(std::string(argv[1]) ==

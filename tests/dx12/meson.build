@@ -319,6 +319,16 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_6', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach operation : ['append', 'consume']
+    custom_target('dx12_' + operation + '_counter_fixture',
+      input: 'append_consume.hlsl',
+      output: operation + '_counter.cs.cso',
+      command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '-D',
+        operation == 'consume' ? 'COUNTER_CONSUME=1' : 'COUNTER_APPEND=1',
+        '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
   custom_target('dx12_compute_sm6_sampler_feedback_fixture',
     input: 'compute_sm6_sampler_feedback.hlsl',
     output: 'compute_sm6_sampler_feedback.cs.cso',
