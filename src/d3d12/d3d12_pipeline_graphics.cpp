@@ -1529,8 +1529,11 @@ public:
         if (!MapMSCGeometryInputPrimitive(converted_gs.reflection.gs_input_primitive, geometry_input_primitive) ||
             !converted_vs.reflection.vertex_output_size_in_bytes ||
             !converted_gs.reflection.gs_max_input_primitives_per_mesh_threadgroup ||
-            !converted_gs.reflection.gs_instance_count)
+            !converted_gs.reflection.gs_instance_count || converted_gs.reflection.gs_instance_count > 32)
           return E_INVALIDARG;
+        // MSC PointStream output is not yet correct for instanced shaders.
+        // Do not enable other instanced output paths without a reliable way to
+        // distinguish the compiled geometry output topology.
         if (converted_gs.reflection.gs_instance_count != 1) {
           ERR("CreatePipelineState: instanced geometry shaders are not supported");
           return E_NOTIMPL;

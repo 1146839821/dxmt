@@ -31,9 +31,24 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
   D3D_PRIMITIVE_TOPOLOGY topology;
   UINT arity = 0, step = 0;
   bool strip = false;
-  const bool point_output =
-      !strcmp(kind, "point-output") || !strcmp(kind, "point-output-instanced");
-  const UINT gs_instances = !strcmp(kind, "point-output-instanced") ? 3 : 1;
+  const bool msc_point_output = !strcmp(kind, "msc-point-output") ||
+                                !strcmp(kind, "msc-point-output-instanced");
+  const bool point_output = !strcmp(kind, "point-output") ||
+                            !strcmp(kind, "point-output-instanced") ||
+                            msc_point_output;
+  const bool geometry_instanced = !strcmp(kind, "triangle-instanced") ||
+                                  !strcmp(kind, "triangle-instanced-2") ||
+                                  !strcmp(kind, "triangle-instanced-32");
+  const bool forced_three_instances =
+      option && !strcmp(option, "--gs-instances-3");
+  const UINT gs_instances =
+      forced_three_instances                   ? 3
+      : !strcmp(kind, "triangle-instanced-2")  ? 2
+      : !strcmp(kind, "triangle-instanced-32") ? 32
+      : !strcmp(kind, "point-output-instanced") ||
+              !strcmp(kind, "msc-point-output-instanced") || geometry_instanced
+          ? 3
+          : 1;
   if (point_output || !strcmp(kind, "point")) {
     topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
     arity = step = 1;
@@ -51,7 +66,7 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
     topology = D3D_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ;
     arity = 4;
     step = 1;
-  } else if (!strcmp(kind, "triangle")) {
+  } else if (!strcmp(kind, "triangle") || geometry_instanced) {
     topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
     arity = step = 3;
   } else if (!strcmp(kind, "triangle-strip")) {
@@ -68,12 +83,31 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
   const bool index32 = !strcmp(index_mode, "u32");
   if (indexed && !index32 && strcmp(index_mode, "u16"))
     return false;
+  const bool performance = option && !strcmp(option, "--performance");
   const bool wrong = option && !strcmp(option, "--wrong-expected");
-  const UINT draw_start = option && !strcmp(option, "--draw-offset") ? 2 : 0;
+  const bool wrong_count =
+      option && !strcmp(option, "--invocation-count-wrong");
+  const bool invocation_count =
+      option && (!strcmp(option, "--invocation-count") ||
+                 !strcmp(option, "--invocation-count-offset") ||
+                 !strcmp(option, "--invocation-count-single") || wrong_count);
+  const bool single_draw_instance =
+      option && (!strcmp(option, "--draw-one-instance") ||
+                 !strcmp(option, "--invocation-count-single"));
+  const UINT draw_instances = single_draw_instance ? 1 : 2;
+  const UINT draw_start =
+      option && (!strcmp(option, "--draw-offset") ||
+                 !strcmp(option, "--invocation-count-offset"))
+          ? 2
+          : 0;
   const bool reject_so = option && !strcmp(option, "--stream-output-rejection");
   const bool reject_topology =
       option && !strcmp(option, "--topology-rejection");
-  if (option && !wrong && !reject_so && !reject_topology && !draw_start)
+  const bool reject_instancing =
+      option && !strcmp(option, "--instancing-rejection");
+  if (option && !performance && !wrong && !reject_so && !reject_topology &&
+      !reject_instancing && !draw_start && !single_draw_instance &&
+      !forced_three_instances && !invocation_count)
     return false;
   auto read = [](const char *path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -97,7 +131,8 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
     ID3D12PipelineState *pso = nullptr;
     ID3D12DescriptorHeap *rtvs = nullptr;
     ID3D12Resource *vb = nullptr, *ib = nullptr, *target = nullptr,
-                   *readback = nullptr;
+                   *readback = nullptr, *counter = nullptr,
+                   *counter_zero = nullptr, *counter_readback = nullptr;
     ID3D12Fence *fence = nullptr, *gate = nullptr;
     HANDLE event = nullptr;
     void release_recording() {
@@ -133,6 +168,14 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
         target->Release();
         target = nullptr;
       }
+      if (counter) {
+        counter->Release();
+        counter = nullptr;
+      }
+      if (counter_zero) {
+        counter_zero->Release();
+        counter_zero = nullptr;
+      }
     }
     ~Objects() {
       if (gate)
@@ -140,6 +183,8 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
       release_recording();
       if (readback)
         readback->Release();
+      if (counter_readback)
+        counter_readback->Release();
       if (queue)
         queue->Release();
       if (fence)
@@ -155,12 +200,15 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
   if (!CheckHR("GS device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                               IID_PPV_ARGS(&o.device))))
     return false;
-  D3D12_ROOT_PARAMETER parameter = {};
-  parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-  parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_GEOMETRY;
-  parameter.Constants = {0, 0, 1};
+  D3D12_ROOT_PARAMETER parameters[2] = {};
+  parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_GEOMETRY;
+  parameters[0].Constants = {0, 0, 1};
+  parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+  parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_GEOMETRY;
+  parameters[1].Descriptor = {0, 0};
   D3D12_ROOT_SIGNATURE_DESC root_desc = {
-      1, &parameter, 0, nullptr,
+      invocation_count ? 2u : 1u, parameters, 0, nullptr,
       D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT};
   if (reject_so)
     root_desc.Flags |= D3D12_ROOT_SIGNATURE_FLAG_ALLOW_STREAM_OUTPUT;
@@ -212,11 +260,13 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
   if (point_output)
     std::cout << "PointStream PSO creation us="
               << std::chrono::duration<double, std::micro>(
-                     std::chrono::steady_clock::now() - pso_start).count()
+                     std::chrono::steady_clock::now() - pso_start)
+                     .count()
               << "\n";
-  if (reject_so || reject_topology) {
-    bool correct = hr == (reject_so ? E_NOTIMPL : E_INVALIDARG) && !o.pso &&
-                   o.device->GetDeviceRemovedReason() == S_OK;
+  if (reject_so || reject_topology || reject_instancing) {
+    bool correct =
+        hr == (reject_so || reject_instancing ? E_NOTIMPL : E_INVALIDARG) &&
+        !o.pso && o.device->GetDeviceRemovedReason() == S_OK;
     std::cout << "GS rejection kind=" << kind << " option=" << option
               << " hr=0x" << std::hex << UINT(hr) << std::dec
               << " correct=" << correct << " GPU_NOT_RUN\n";
@@ -226,7 +276,7 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
     return false;
   auto *pipeline = static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(o.pso);
   const auto config = pipeline->msc_geometry_config;
-  if (point_output) {
+  if (point_output && !msc_point_output) {
     if (pipeline->shader_backend != dxmt::D3D12ShaderBackend::Airconv ||
         !pipeline->airconv_geometry)
       return false;
@@ -236,7 +286,7 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
             dxmt::D3D12ShaderBackend::MetalShaderConverter ||
         !pipeline->msc_geometry || !config.gs_vertex_size_in_bytes ||
         !config.gs_max_input_primitives_per_mesh_threadgroup ||
-        config.gs_instance_count != 1)
+        config.gs_instance_count != gs_instances)
       return false;
     std::cout << "GS MSC reflection vertex_bytes="
               << config.gs_vertex_size_in_bytes << " max_primitives="
@@ -244,7 +294,8 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
               << " instances=" << config.gs_instance_count << "\n";
   }
   const UINT count = arity + step * 65;
-  constexpr UINT vertex_offset = 32, index_offset = 16, height = 3;
+  constexpr UINT vertex_offset = 32, index_offset = 16;
+  const UINT height = point_output ? 3 : 3 * gs_instances;
   const UINT width = point_output ? 512 : 256;
   struct Vertex {
     float position[2];
@@ -267,6 +318,8 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
     d.Width = size;
     d.Height = d.DepthOrArraySize = d.MipLevels = d.SampleDesc.Count = 1;
     d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (heap == D3D12_HEAP_TYPE_DEFAULT)
+      d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     return CheckHR("GS buffer", o.device->CreateCommittedResource(
                                     &properties, D3D12_HEAP_FLAG_NONE, &d,
                                     state, nullptr, IID_PPV_ARGS(out)));
@@ -280,6 +333,19 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
               D3D12_RESOURCE_STATE_COPY_DEST, &o.readback))
     return false;
   void *mapped = nullptr;
+  if (invocation_count) {
+    if (!buffer(D3D12_HEAP_TYPE_DEFAULT, 256, D3D12_RESOURCE_STATE_COPY_DEST,
+                &o.counter) ||
+        !buffer(D3D12_HEAP_TYPE_UPLOAD, 256, D3D12_RESOURCE_STATE_GENERIC_READ,
+                &o.counter_zero) ||
+        !buffer(D3D12_HEAP_TYPE_READBACK, 256, D3D12_RESOURCE_STATE_COPY_DEST,
+                &o.counter_readback) ||
+        !CheckHR("GS counter upload map",
+                 o.counter_zero->Map(0, nullptr, &mapped)))
+      return false;
+    std::memset(mapped, 0, 256);
+    o.counter_zero->Unmap(0, nullptr);
+  }
   if (!CheckHR("GS VB map", o.vb->Map(0, nullptr, &mapped)))
     return false;
   memset(mapped, 0xcd, vertex_offset);
@@ -356,8 +422,21 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
           (!CheckHR("GS allocator reset", o.allocator->Reset()) ||
            !CheckHR("GS list reset", o.list->Reset(o.allocator, o.pso))))
         return false;
+      if (invocation_count) {
+        o.list->CopyBufferRegion(o.counter, 0, o.counter_zero, 0, 4);
+        D3D12_RESOURCE_BARRIER counter_barrier = {};
+        counter_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        counter_barrier.Transition = {o.counter,
+                                      D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                      D3D12_RESOURCE_STATE_COPY_DEST,
+                                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+        o.list->ResourceBarrier(1, &counter_barrier);
+      }
       o.list->SetGraphicsRootSignature(o.root);
       o.list->SetGraphicsRoot32BitConstant(0, phase, 0);
+      if (invocation_count)
+        o.list->SetGraphicsRootUnorderedAccessView(
+            1, o.counter->GetGPUVirtualAddress());
       o.list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
       const float clear[4] = {};
       o.list->ClearRenderTargetView(rtv, clear, 0, nullptr);
@@ -367,12 +446,38 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
       o.list->RSSetScissorRects(1, &scissor);
       o.list->IASetPrimitiveTopology(topology);
       o.list->IASetVertexBuffers(0, 1, &vbv);
-      if (indexed) {
+      if (indexed)
         o.list->IASetIndexBuffer(&ibv);
-        o.list->DrawIndexedInstanced(count, 2, draw_start, draw_start, 0);
-      } else
-        o.list->DrawInstanced(count, 2, draw_start, 0);
+      const UINT repetitions = performance ? 128 : 1;
+      const auto record_start = std::chrono::steady_clock::now();
+      for (UINT i = 0; i < repetitions; ++i) {
+        if (indexed)
+          o.list->DrawIndexedInstanced(count, draw_instances, draw_start,
+                                       draw_start, 0);
+        else
+          o.list->DrawInstanced(count, draw_instances, draw_start, 0);
+      }
+      if (performance)
+        std::cout << "GS performance record_us_per_draw="
+                  << std::chrono::duration<double, std::micro>(
+                         std::chrono::steady_clock::now() - record_start)
+                             .count() /
+                         repetitions
+                  << "\n";
       o.list->SetGraphicsRoot32BitConstant(0, 222, 0);
+      if (invocation_count) {
+        D3D12_RESOURCE_BARRIER counter_barrier = {};
+        counter_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        counter_barrier.Transition = {o.counter,
+                                      D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                      D3D12_RESOURCE_STATE_COPY_SOURCE};
+        o.list->ResourceBarrier(1, &counter_barrier);
+        o.list->CopyBufferRegion(o.counter_readback, 0, o.counter, 0, 4);
+        std::swap(counter_barrier.Transition.StateBefore,
+                  counter_barrier.Transition.StateAfter);
+        o.list->ResourceBarrier(1, &counter_barrier);
+      }
       D3D12_RESOURCE_BARRIER barrier = {};
       barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
       barrier.Transition = {o.target, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
@@ -395,6 +500,7 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
     if (pass == 2 && !CheckHR("GS queue gate", o.queue->Wait(o.gate, 1)))
       return false;
     ID3D12CommandList *lists[] = {o.list};
+    const auto submit_start = std::chrono::steady_clock::now();
     o.queue->ExecuteCommandLists(1, lists);
     if (pass == 2) {
       if (SUCCEEDED(o.allocator->Reset())) {
@@ -411,9 +517,30 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
         WaitForSingleObject(o.event, 10000) != WAIT_OBJECT_0 ||
         !CheckHR("GS device status", o.device->GetDeviceRemovedReason()))
       return false;
+    if (performance)
+      std::cout << "GS performance submit_fence_us_per_draw="
+                << std::chrono::duration<double, std::micro>(
+                       std::chrono::steady_clock::now() - submit_start)
+                           .count() /
+                       128
+                << "\n";
+    if (invocation_count) {
+      void *counter_data = nullptr;
+      if (!CheckHR("GS counter readback",
+                   o.counter_readback->Map(0, nullptr, &counter_data)))
+        return false;
+      const UINT observed = *static_cast<const UINT *>(counter_data);
+      o.counter_readback->Unmap(0, nullptr);
+      const UINT expected_count =
+          primitives * draw_instances * gs_instances + (wrong_count ? 1 : 0);
+      std::cout << "GS invocation count observed=" << observed
+                << " expected=" << expected_count << "\n";
+      if (observed != expected_count)
+        return false;
+    }
     std::vector<BYTE> expected(width * height * 4, 0);
     if (point_output) {
-      for (UINT instance = 0; instance < 2; ++instance)
+      for (UINT instance = 0; instance < draw_instances; ++instance)
         for (UINT primitive = 0; primitive < primitives; ++primitive)
           for (UINT gs_instance = 0; gs_instance < gs_instances; ++gs_instance)
             for (UINT emit = 0; emit < primitive % 3; ++emit) {
@@ -429,7 +556,7 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
               pixel[3] = BYTE(gs_instance + 1);
             }
     } else {
-      for (UINT instance = 0; instance < 2; ++instance)
+      for (UINT instance = 0; instance < draw_instances; ++instance)
         for (UINT primitive = 0; primitive < primitives; ++primitive) {
           if (primitive == 1)
             continue;
@@ -440,14 +567,16 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
             hash +=
                 (j + 1) * (UINT(vertices[id].color[0]) + 3 * (id - draw_start));
           }
-          for (UINT y : {0u, 2u}) {
-            BYTE *pixel =
-                expected.data() + 4 * (y * width + primitive + instance * 128);
-            pixel[0] = BYTE(primitive + 1);
-            pixel[1] = BYTE(hash + phase);
-            pixel[2] = BYTE(instance + 1);
-            pixel[3] = BYTE(y + arity);
-          }
+          for (UINT gs_instance = 0; gs_instance < gs_instances; ++gs_instance)
+            for (UINT local_y : {0u, 2u}) {
+              const UINT y = local_y + gs_instance * 3;
+              BYTE *pixel =
+                  expected.data() + 4 * (y * width + primitive + instance * 128);
+              pixel[0] = BYTE(primitive + 1);
+              pixel[1] = BYTE(hash + phase);
+              pixel[2] = BYTE(instance + 1);
+              pixel[3] = BYTE(y + arity);
+            }
         }
     }
     if (wrong)
@@ -469,7 +598,7 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
       return false;
     std::cout << "GS differential kind=" << kind << " index=" << index_mode
               << " pass=" << pass << " primitives=" << primitives
-              << " draw_instances=2 exact_bytes=" << expected.size()
+              << " draw_instances=" << draw_instances << " exact_bytes=" << expected.size()
               << " passed\n";
   }
   std::cout << "GS replay/fenced reset/pending reset rejection/released refs "

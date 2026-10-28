@@ -827,6 +827,78 @@ if dxc_command.length() > 0
       )
     endforeach
   endforeach
+  foreach stage : ['vs', 'gs', 'ps']
+    custom_target('dx12_geometry_instanced_differential_' + stage,
+      input: 'geometry_sm6.hlsl',
+      output: 'geometry_instanced_differential.' + stage + '.cso',
+      command: dxc_command + [ '-E', stage + '_main', '-T', stage + '_6_0',
+        '-D', 'GS_DIFFERENTIAL=1', '-D', 'GS_INPUT=3', '-D', 'GS_INSTANCES=3',
+        '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  foreach instances : ['2', '32']
+    foreach stage : ['vs', 'gs', 'ps']
+      custom_target('dx12_geometry_instanced_differential_' + instances + '_' + stage,
+        input: 'geometry_sm6.hlsl',
+        output: 'geometry_instanced_differential_' + instances + '.' + stage + '.cso',
+        command: dxc_command + [ '-E', stage + '_main', '-T', stage + '_6_0',
+          '-D', 'GS_DIFFERENTIAL=1', '-D', 'GS_INPUT=3', '-D', 'GS_INSTANCES=' + instances,
+          '@INPUT@', '-Fo', '@OUTPUT@' ],
+        build_by_default: false,
+      )
+    endforeach
+  endforeach
+  foreach input_count : ['1', '2', '4', '6']
+    foreach stage : ['vs', 'gs', 'ps']
+      custom_target('dx12_geometry_instanced_input_' + input_count + '_' + stage,
+        input: 'geometry_sm6.hlsl',
+        output: 'geometry_instanced_input_' + input_count + '.' + stage + '.cso',
+        command: dxc_command + [ '-E', stage + '_main', '-T', stage + '_6_0',
+          '-D', 'GS_DIFFERENTIAL=1', '-D', 'GS_INPUT=' + input_count, '-D', 'GS_INSTANCES=3',
+          '@INPUT@', '-Fo', '@OUTPUT@' ],
+        build_by_default: false,
+      )
+    endforeach
+  endforeach
+  custom_target('dx12_geometry_instanced_max_output_gs',
+    input: 'geometry_sm6.hlsl',
+    output: 'geometry_instanced_differential_32_max.gs.cso',
+    command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0',
+      '-D', 'GS_DIFFERENTIAL=1', '-D', 'GS_INPUT=3', '-D', 'GS_INSTANCES=32',
+      '-D', 'GS_MAX_OUTPUT=128', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  foreach instances : ['1', '3']
+    foreach stage : ['vs', 'gs', 'ps']
+      custom_target('dx12_geometry_msc_point_' + instances + '_' + stage,
+        input: 'geometry_sm6.hlsl',
+        output: 'geometry_msc_point_' + instances + '.' + stage + '.cso',
+        command: dxc_command + [ '-E', stage + '_main', '-T', stage + '_6_0',
+          '-D', 'POINT_STREAM_DIFFERENTIAL=1', '-D', 'GS_INSTANCES=' + instances,
+          '@INPUT@', '-Fo', '@OUTPUT@' ],
+        build_by_default: false,
+      )
+    endforeach
+  endforeach
+  foreach instances : ['1', '3']
+    custom_target('dx12_geometry_msc_point_nocut_' + instances + '_gs',
+      input: 'geometry_sm6.hlsl',
+      output: 'geometry_msc_point_nocut_' + instances + '.gs.cso',
+      command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0',
+        '-D', 'POINT_STREAM_DIFFERENTIAL=1', '-D', 'GS_INSTANCES=' + instances,
+        '-D', 'POINT_STREAM_NO_CUT=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_geometry_invocation_counter_gs',
+    input: 'geometry_sm6.hlsl',
+    output: 'geometry_invocation_counter.gs.cso',
+    command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0',
+      '-D', 'GS_DIFFERENTIAL=1', '-D', 'GS_INPUT=3', '-D', 'GS_INVOCATION_COUNTER=1',
+      '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_geometry_sm6_vs_fixture',
     input: 'geometry_sm6.hlsl',
     output: 'geometry_sm6.vs.cso',

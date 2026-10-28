@@ -4988,3 +4988,25 @@ This records rasterized outputs, not domain-shader invocation side effects.
 Actual point support and broader factor/domain/lifetime coverage remain OPEN.
 Reproduction, preliminary controls and exact artifacts:
 `../dxmt-test/n11-msc-ts-point-grid-20261028/N11-point-grid.md`.
+
+### MSC geometry invocation count and instancing boundary (2026-10-28)
+
+The companion geometry draw helper previously put the D3D draw instance count
+in `gsInstanceCount`. A GS root-UAV atomic exposed the error: 66 primitives ×
+2 draw instances × 1 GS instance executed 264 times instead of 132. The bridge
+now supplies the reflected GS instance count while preserving the draw count
+for the object grid and arguments. It uses the existing MSC calculations and
+encoder bindings, with no new allocation or ownership path. Direct, R16/R32,
+nonzero offsets, eight input topologies, replay and fenced resource-release
+checks passed on private and no-private builds; a wrong-count reference failed.
+
+A guard-removed diagnostic additionally passed triangle-output GS instances
+2/3/32 and exercised mesh-grid subdivision, but MSC PointStream output failed
+both the original single-instance and diagnostic multi-instance paths, with and
+without `RestartStrip`. Therefore production still rejects GS instances > 1.
+An inconsistent PSV0 topology was accepted by the converter, so PSV0 alone is
+not a safe basis for selectively enabling instanced output. MSC PointStream,
+instancing and other previously recorded gaps remain OPEN; no capability was
+promoted. Five interleaved timing pairs were noisy and compared workloads with
+different invocation counts; no speedup claim. Commands, hashes, diagnostics,
+validation and timing: `../dxmt-test/n11-msc-gs-instance-20261028/N11-msc-gs-invocation.md`.

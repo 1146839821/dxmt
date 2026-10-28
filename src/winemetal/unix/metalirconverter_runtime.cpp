@@ -204,14 +204,70 @@ dxmt_msc_draw_indexed_patches(
   );
 }
 
+// The MSC runtime's geometry draw helpers use the draw instance count for
+// IRRuntimeDrawInfo::gsInstanceCount. D3D draw instances and GS invocations
+// are independent, so build the same draw parameters with the reflected GS
+// instance count instead.
+static void
+dxmt_msc_encode_geometry_draw(
+    MTL::RenderCommandEncoder *encoder, IRRuntimePrimitiveType primitive, MTL::IndexType index_type,
+    MTL::Buffer *index_buffer, const WMTMSCGeometryPipelineConfig *config, uint32_t instance_count,
+    uint32_t vertex_or_index_count, uint32_t start_index, uint32_t start_vertex, int32_t base_vertex,
+    uint32_t base_instance
+) {
+  const bool indexed = index_buffer != nullptr;
+  IRRuntimeDrawInfo draw_info = IRRuntimeCalculateDrawInfoForGSEmulation(
+      primitive, indexed ? index_type : static_cast<MTL::IndexType>(-1), config->gs_vertex_size_in_bytes,
+      config->gs_max_input_primitives_per_mesh_threadgroup, config->gs_instance_count
+  );
+  if (!indexed)
+    draw_info.indexType = kIRNonIndexedDraw;
+  else
+    draw_info.indexBuffer = index_buffer->gpuAddress();
+
+  // Each GS instance creates a separate mesh grid row. Limit the object
+  // threadgroup's primitive count so their combined grid fits the 1024 mesh
+  // threadgroups assumed by the runtime helper.
+  if (config->gs_instance_count > 1) {
+    const uint32_t max_mesh_groups = 1024 / config->gs_instance_count;
+    const uint64_t max_primitives = uint64_t(max_mesh_groups) * config->gs_max_input_primitives_per_mesh_threadgroup;
+    if (draw_info.patchesPerObjectThreadgroup > max_primitives) {
+      draw_info.patchesPerObjectThreadgroup = static_cast<uint16_t>(max_primitives);
+      draw_info.objectThreadgroupVertexStride =
+          draw_info.patchesPerObjectThreadgroup * IRRuntimePrimitiveTypeVertexCount(primitive);
+    }
+  }
+
+  const auto object_groups = IRRuntimeCalculateObjectTgCountForTessellationAndGeometryEmulation(
+      vertex_or_index_count, draw_info.objectThreadgroupVertexStride, primitive, instance_count
+  );
+  uint32_t object_size, mesh_size;
+  IRRuntimeCalculateThreadgroupSizeForGeometry(
+      primitive, config->gs_max_input_primitives_per_mesh_threadgroup, draw_info.objectThreadgroupVertexStride,
+      &object_size, &mesh_size
+  );
+  IRRuntimeDrawParams params = {};
+  if (indexed) {
+    params.drawIndexed = {vertex_or_index_count, instance_count, start_index, base_vertex, base_instance};
+  } else {
+    params.draw = {vertex_or_index_count, instance_count, start_vertex, base_instance};
+  }
+  encoder->setObjectBytes(&draw_info, sizeof(draw_info), kIRArgumentBufferUniformsBindPoint);
+  encoder->setMeshBytes(&draw_info, sizeof(draw_info), kIRArgumentBufferUniformsBindPoint);
+  encoder->setObjectBytes(&params, sizeof(params), kIRArgumentBufferDrawArgumentsBindPoint);
+  encoder->setMeshBytes(&params, sizeof(params), kIRArgumentBufferDrawArgumentsBindPoint);
+  encoder->drawMeshThreadgroups(object_groups, MTL::Size::Make(object_size, 1, 1), MTL::Size::Make(mesh_size, 1, 1));
+}
+
 void
 dxmt_msc_draw_geometry(
     obj_handle_t encoder, uint32_t primitive_topology, const struct WMTMSCGeometryPipelineConfig *config,
     uint32_t instance_count, uint32_t vertex_count_per_instance, uint32_t base_instance, uint32_t base_vertex
 ) {
-  IRRuntimeDrawPrimitivesGeometryEmulation(
+  dxmt_msc_encode_geometry_draw(
       dxmt_msc_object<MTL::RenderCommandEncoder>(encoder), (IRRuntimePrimitiveType)primitive_topology,
-      dxmt_msc_geometry_config(config), instance_count, vertex_count_per_instance, base_vertex, base_instance
+      static_cast<MTL::IndexType>(-1), nullptr, config, instance_count, vertex_count_per_instance, 0, base_vertex, 0,
+      base_instance
   );
 }
 
@@ -221,9 +277,9 @@ dxmt_msc_draw_indexed_geometry(
     const struct WMTMSCGeometryPipelineConfig *config, uint32_t instance_count, uint32_t index_count_per_instance,
     uint32_t base_instance, int32_t base_vertex, uint32_t start_index
 ) {
-  IRRuntimeDrawIndexedPrimitivesGeometryEmulation(
+  dxmt_msc_encode_geometry_draw(
       dxmt_msc_object<MTL::RenderCommandEncoder>(encoder), (IRRuntimePrimitiveType)primitive_topology,
-      (MTL::IndexType)index_type, dxmt_msc_object<MTL::Buffer>(index_buffer), dxmt_msc_geometry_config(config),
-      instance_count, index_count_per_instance, start_index, base_vertex, base_instance
+      (MTL::IndexType)index_type, dxmt_msc_object<MTL::Buffer>(index_buffer), config, instance_count,
+      index_count_per_instance, start_index, 0, base_vertex, base_instance
   );
 }
