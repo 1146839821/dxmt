@@ -5103,3 +5103,24 @@ limits, bound every summary read, carry metadata into the mesh stage with an
 object-data barrier, account for the 16,256-byte payload limit, and use the
 existing resource/encoder ownership and indirect argument paths. The shared scan
 is still not bound to geometry and restart support remains OPEN.
+
+### Restart assembly GPU prototype (2026-10-29)
+
+A standalone Metal compute prototype now consumes the existing production scan
+output and emulates 24 candidate primitives with 32 shared-memory vertex lanes.
+An independent sequential CPU reference checks the valid flag, PrimitiveID and
+all six input indices for each candidate. Private and no-private metallibs each
+passed 112 cases covering R16/R32, enabled/disabled cut, direct/indirect scan
+arguments and counts through 66,019, with Metal API and shader validation. A
+mutant using the wrong final adjacency failed the reference as expected. Input
+and argument buffers were copied to private GPU buffers by blit; this does not
+establish shader-produced index or full command-list lifecycle behavior.
+
+This prototype is not part of the runtime: it uses a compute threadgroup rather
+than actual object/mesh stages, and receives a CPU-provided assembly count. It
+therefore does not resolve geometry restart, indirect dispatch, payload visibility,
+resource binding, ordering, or performance. Source, commands, hashes and logs:
+`../dxmt-test/n11-adj-restart-20261028/assembly-prototype.metal`,
+`assembly-probe.mm`, `assembly-prototype-private.log`,
+`assembly-prototype-no-private.log`, and `assembly-negative.log`. Restart stays
+OPEN until the production pipeline is wired and verified end to end.
