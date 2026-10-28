@@ -4951,3 +4951,22 @@ A per-stream-index diagnostic observed 15 emitted entries with seven distinct
 quantized color codes; those colors do not prove exact coordinates. Point
 support remains OPEN. Reference, commands, raw logs and limits:
 `../dxmt-test/n11-msc-ts-point-20261028/N11-msc-point-diagnostic.md`.
+
+### MSC point input topology and stream flags (2026-10-28)
+
+A test-only MSC proxy set `IRCompilerSetInputTopology` after enabling GS/TS
+emulation. Both point and patch settings preserved the factor-1 and factor-2
+point failures; their four generated point-domain AIR modules were byte-identical
+with the default conversion. The line-image control passed in each setting.
+This experiment sets a topology on all emulation-stage compilers and does not
+exclude other per-stage configurations. Setting point globally also broke an
+ordinary triangle pipeline, so it is not a safe general substitution.
+
+For the factor-2 triangle diagnostic, probing the two tessellator flag fields
+showed that field 3's low bit selected six distinct boundary color codes while
+omitting the center; field 4 also selected duplicate boundary codes. This
+quantized, single-factor observation does not establish general flag semantics.
+Neither bit alone provides the required unique-point stream. Point output and
+previously listed feature gaps remain OPEN; no product code was changed.
+Reproduction, hashes, validation and limitations:
+`../dxmt-test/n11-msc-ts-point-topology-20261028/N11-input-topology-and-flags.md`.
