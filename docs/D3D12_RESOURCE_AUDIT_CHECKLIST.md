@@ -4844,3 +4844,38 @@ or encoder boundary. Evidence, commands, environment and limitations:
 `../dxmt-test/n11-zero-ts-patch-20261028/N11-zero-ts-patch.md`. Remaining user
 priorities: GS adjacency and MSC TS point/line, then the requested feature gaps;
 the overall goal remains open.
+
+### AIRCONV triangle-strip adjacency assembly (2026-10-28)
+
+For strips without index cut, the shared object/mesh shader assembly now maps
+primitive-zero previous adjacency to payload lane 31 in both mesh loads and the
+object validity mask. Tail groups reject incomplete interior triangles, and an
+odd dangling input no longer replaces the last adjacency. Group offsets use
+64-bit intermediates. AIRCONV cache version 29→30; no public capability, ABI,
+resource ownership or submission changes. An isolated cache-29 database gained
+cache-30 entries for the same keys and the corrected GPU result, confirming old
+shader results are not reused.
+
+Baseline D3D11/D3D12 GPU tests read vertex 2 instead of 1 for the official
+10-input example; D3D11 also emitted nonexistent tail primitives. Final D3D11
+private/no-private passed 32 image cases, four additional no-private-EXE cases,
+and rejected one wrong oracle. Final D3D12 private and no-private each passed
+18 cases and rejected one wrong oracle. Tests compare all six GS inputs and
+additively count each primitive across indexed/nonindexed, two draw instances,
+GS instances, odd tails and group boundaries, with Metal API/GPU validation.
+Two ordinary PointStream controls passed. D3D12 here tested a single submission
+and fence completion, not replay or delayed release. CPU model covers all counts
+0–999 and samples 32-bit boundaries, not a substitute for a huge GPU draw.
+
+Five interleaved warm samples of 1000 draws had CPU submit medians 72.4→75.5 us;
+Copy/Map waits were noisy and not GPU timestamps. Baseline emitted 56 GS
+invocations versus the correct 36, so GPU work is unequal and no GPU performance
+conclusion follows. No extra lock, allocation or encoder boundary; this topology
+adds fixed validity checks and 64-bit indexing. Old shaders require one-time
+reconversion. Full games, cold compilation and other GPUs remain NOT_RUN.
+
+Strip cut/restart still needs cross-group segment boundaries, winding and
+primitive-ID prefixes and is explicitly OPEN, as are the separately requested
+GS/TS/SO combinations. This node does not claim arbitrary restarted strips.
+Evidence and commands: `../dxmt-test/n11-triangle-adj-20261028/N11-triangle-adj.md`.
+Next requested item: MSC tessellation point/line output validation.

@@ -5,7 +5,9 @@
 #include <d3dcompiler.h>
 #include "d3d12_device.hpp"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -1220,9 +1222,266 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
   return true;
 }
 
+bool RunTriangleStripAdjacency(pD3DCompile compiler, const char *index_mode,
+                               UINT count, UINT gs_instances, bool wrong) {
+  using dxmt::Com;
+  const bool indexed = std::strcmp(index_mode, "none") != 0;
+  const bool index32 = std::strcmp(index_mode, "u32") == 0;
+  if ((indexed && !index32 && std::strcmp(index_mode, "u16")) || count > 96 ||
+      (gs_instances != 1 && gs_instances != 3))
+    return false;
+  std::string source =
+      std::string("#define GS_COUNT ") + std::to_string(gs_instances) + R"HLSL(
+struct V { float4 position : SV_Position; nointerpolation uint id : TEXCOORD0; nointerpolation uint instance : TEXCOORD1; };
+struct O { float4 position : SV_Position; nointerpolation float4 value : TEXCOORD0; };
+V vs_main(uint id : SV_VertexID, uint instance : SV_InstanceID) {
+  V v; v.position = float4(0,0,0,1); v.id = id; v.instance = instance; return v;
+}
+[instance(GS_COUNT)] [maxvertexcount(7)]
+void gs_main(triangleadj V input[6], uint primitive : SV_PrimitiveID,
+             uint gs_instance : SV_GSInstanceID, inout PointStream<O> output) {
+  for (uint k = 0; k < 7; ++k) {
+    uint x = primitive * 7 + k;
+    uint y = input[0].instance * GS_COUNT + gs_instance;
+    O o; o.position = float4((float(x)+0.5)/512.0*2.0-1.0,
+                             1.0-(float(y)+0.5)/(2.0*GS_COUNT)*2.0,0,1);
+    o.value = float4(k < 6 ? float(input[min(k, 5u)].id + 1) : 1.0, 1, 1, 1);
+    output.Append(o);
+  }
+}
+float4 ps_main(O input) : SV_Target { return input.value; }
+)HLSL";
+  std::vector<uint8_t> vs, gs, ps;
+  if (!CompileShader(compiler, source.c_str(), "adj_dx12", "vs_main", "vs_5_0",
+                     vs) ||
+      !CompileShader(compiler, source.c_str(), "adj_dx12", "gs_main", "gs_5_0",
+                     gs) ||
+      !CompileShader(compiler, source.c_str(), "adj_dx12", "ps_main", "ps_5_0",
+                     ps))
+    return false;
+  Com<ID3D12Device> device;
+  Com<ID3D12CommandQueue> queue;
+  Com<ID3D12CommandAllocator> allocator;
+  Com<ID3D12GraphicsCommandList> list;
+  Com<ID3D12RootSignature> root;
+  Com<ID3D12PipelineState> pso;
+  Com<ID3D12DescriptorHeap> rtvs;
+  Com<ID3D12Resource> ib, target, readback;
+  Com<ID3D12Fence> fence;
+  Com<ID3DBlob> blob;
+  if (!CheckHR("adj device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                               IID_PPV_ARGS(&device))))
+    return false;
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+  root_desc.Flags =
+      D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+  if (!CheckHR("adj root serialize",
+               D3D12SerializeRootSignature(
+                   &root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, nullptr)) ||
+      !CheckHR("adj root", device->CreateRootSignature(
+                               0, blob->GetBufferPointer(),
+                               blob->GetBufferSize(), IID_PPV_ARGS(&root))))
+    return false;
+  D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+  desc.pRootSignature = root.ptr();
+  desc.VS = {vs.data(), vs.size()};
+  desc.GS = {gs.data(), gs.size()};
+  desc.PS = {ps.data(), ps.size()};
+  desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  desc.NumRenderTargets = 1;
+  desc.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
+  desc.SampleDesc.Count = 1;
+  desc.SampleMask = ~0u;
+  desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+  desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+  desc.RasterizerState.DepthClipEnable = TRUE;
+  auto &blend = desc.BlendState.RenderTarget[0];
+  blend.BlendEnable = TRUE;
+  blend.SrcBlend = blend.DestBlend = D3D12_BLEND_ONE;
+  blend.BlendOp = D3D12_BLEND_OP_ADD;
+  blend.SrcBlendAlpha = blend.DestBlendAlpha = D3D12_BLEND_ONE;
+  blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+  blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+  if (!CheckHR("adj PSO",
+               device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso))))
+    return false;
+  auto *pipeline =
+      static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(pso.ptr());
+  if (pipeline->shader_backend != dxmt::D3D12ShaderBackend::Airconv ||
+      !pipeline->airconv_geometry)
+    return false;
+  constexpr UINT width = 512, first = 3, base = 5;
+  const UINT height = 2 * gs_instances, pitch = width * 16;
+  std::vector<UINT> indices(first + std::max(count, 1u));
+  for (UINT i = 0; i < count; ++i)
+    indices[first + i] = (i * 7 + 3) % 251;
+  auto upload = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
+  auto readback_heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
+  auto default_heap = HeapProperties(D3D12_HEAP_TYPE_DEFAULT);
+  auto ib_desc = BufferDescription(indices.size() * (index32 ? 4 : 2));
+  auto readback_desc = BufferDescription(UINT64(pitch) * height);
+  D3D12_RESOURCE_DESC tex = {};
+  tex.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  tex.Width = width;
+  tex.Height = height;
+  tex.DepthOrArraySize = tex.MipLevels = tex.SampleDesc.Count = 1;
+  tex.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+  tex.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  if (!CheckHR("adj IB", device->CreateCommittedResource(
+                             &upload, D3D12_HEAP_FLAG_NONE, &ib_desc,
+                             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                             IID_PPV_ARGS(&ib))) ||
+      !CheckHR("adj readback",
+               device->CreateCommittedResource(
+                   &readback_heap, D3D12_HEAP_FLAG_NONE, &readback_desc,
+                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                   IID_PPV_ARGS(&readback))) ||
+      !CheckHR("adj target", device->CreateCommittedResource(
+                                 &default_heap, D3D12_HEAP_FLAG_NONE, &tex,
+                                 D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                                 IID_PPV_ARGS(&target))))
+    return false;
+  void *mapped = nullptr;
+  if (!CheckHR("adj map IB", ib->Map(0, nullptr, &mapped)))
+    return false;
+  for (UINT i = 0; i < indices.size(); ++i)
+    if (index32)
+      static_cast<UINT *>(mapped)[i] = indices[i];
+    else
+      static_cast<uint16_t *>(mapped)[i] = uint16_t(indices[i]);
+  ib->Unmap(0, nullptr);
+  D3D12_DESCRIPTOR_HEAP_DESC rtv_desc = {};
+  rtv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  rtv_desc.NumDescriptors = 1;
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  if (!CheckHR("adj RTV heap",
+               device->CreateDescriptorHeap(&rtv_desc, IID_PPV_ARGS(&rtvs))) ||
+      !CheckHR("adj queue",
+               device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue))) ||
+      !CheckHR("adj allocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                              IID_PPV_ARGS(&allocator))) ||
+      !CheckHR("adj list",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                         allocator.ptr(), pso.ptr(),
+                                         IID_PPV_ARGS(&list))) ||
+      !CheckHR("adj fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                IID_PPV_ARGS(&fence))))
+    return false;
+  auto rtv = rtvs->GetCPUDescriptorHandleForHeapStart();
+  device->CreateRenderTargetView(target.ptr(), nullptr, rtv);
+  list->SetGraphicsRootSignature(root.ptr());
+  list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+  float clear[] = {0, 0, 0, 0};
+  list->ClearRenderTargetView(rtv, clear, 0, nullptr);
+  D3D12_VIEWPORT viewport = {0, 0, float(width), float(height), 0, 1};
+  D3D12_RECT scissor = {0, 0, LONG(width), LONG(height)};
+  list->RSSetViewports(1, &viewport);
+  list->RSSetScissorRects(1, &scissor);
+  list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ);
+  if (indexed) {
+    D3D12_INDEX_BUFFER_VIEW view = {
+        ib->GetGPUVirtualAddress(), UINT(ib_desc.Width),
+        index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT};
+    list->IASetIndexBuffer(&view);
+    list->DrawIndexedInstanced(count, 2, first, base, 0);
+  } else
+    list->DrawInstanced(count, 2, base, 0);
+  D3D12_RESOURCE_BARRIER barrier = {};
+  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barrier.Transition = {target.ptr(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                        D3D12_RESOURCE_STATE_RENDER_TARGET,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE};
+  list->ResourceBarrier(1, &barrier);
+  D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+  src.pResource = target.ptr();
+  src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  dst.pResource = readback.ptr();
+  dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  dst.PlacedFootprint.Footprint = {DXGI_FORMAT_R32G32B32A32_FLOAT, width,
+                                   height, 1, pitch};
+  list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+  if (!CheckHR("adj close", list->Close()))
+    return false;
+  ID3D12CommandList *lists[] = {list.ptr()};
+  queue->ExecuteCommandLists(1, lists);
+  HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+  if (!event)
+    return false;
+  bool done =
+      CheckHR("adj signal", queue->Signal(fence.ptr(), 1)) &&
+      CheckHR("adj completion", fence->SetEventOnCompletion(1, event)) &&
+      WaitForSingleObject(event, 30000) == WAIT_OBJECT_0;
+  CloseHandle(event);
+  if (!done || !CheckHR("adj status", device->GetDeviceRemovedReason()))
+    return false;
+  std::vector<float> expected(width * height * 4, 0);
+  const UINT completed = count & ~1u;
+  const UINT primitives = completed >= 6 ? (completed - 4) / 2 : 0;
+  for (UINT instance = 0; instance < 2; ++instance)
+    for (UINT g = 0; g < gs_instances; ++g)
+      for (UINT p = 0; p < primitives; ++p) {
+        const UINT odd = p & 1, lead = 2 * p;
+        const UINT inputs[] = {lead,
+                               odd ? lead + 3 : (p ? lead - 2 : 1),
+                               2 * (p + 1 + odd),
+                               p + 1 == primitives ? completed - 1 : lead + 6,
+                               2 * (p + 2 - odd),
+                               odd ? lead - 2 : lead + 3};
+        for (UINT k = 0; k < 7; ++k) {
+          float *out =
+              &expected[((instance * gs_instances + g) * width + p * 7 + k) *
+                        4];
+          out[0] =
+              k == 6
+                  ? 1.0f
+                  : float((indexed ? indices[first + inputs[k]] : inputs[k]) +
+                          1);
+          out[1] = out[2] = out[3] = 1;
+        }
+      }
+  if (wrong && primitives)
+    expected[0] += 1;
+  if (!CheckHR("adj readback map", readback->Map(0, nullptr, &mapped)))
+    return false;
+  bool ok = true;
+  for (UINT i = 0; i < expected.size(); ++i)
+    if (static_cast<const float *>(mapped)[i] != expected[i]) {
+      std::cerr << "FAIL D3D12 TRIANGLESTRIP_ADJ mode=" << index_mode
+                << " count=" << count << " gs=" << gs_instances
+                << " element=" << i
+                << " got=" << static_cast<const float *>(mapped)[i]
+                << " expected=" << expected[i] << "\n";
+      ok = false;
+      break;
+    }
+  readback->Unmap(0, nullptr);
+  if (ok)
+    std::cout << "D3D12 TRIANGLESTRIP_ADJ mode=" << index_mode
+              << " count=" << count << " gs=" << gs_instances
+              << " primitives=" << primitives
+              << " checked_pixels=" << width * height << " PASS\n";
+  return ok;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  if ((argc == 5 || argc == 6) && !std::strcmp(argv[1], "--tri-strip-adj")) {
+    HMODULE module = LoadLibraryA(D3DCOMPILER_DLL_A);
+    if (!module)
+      return 1;
+    auto compiler =
+        reinterpret_cast<pD3DCompile>(GetProcAddress(module, "D3DCompile"));
+    const bool ok =
+        compiler &&
+        RunTriangleStripAdjacency(
+            compiler, argv[2], UINT(std::strtoul(argv[3], nullptr, 10)),
+            UINT(std::strtoul(argv[4], nullptr, 10)),
+            argc == 6 && !std::strcmp(argv[5], "--wrong-expected"));
+    FreeLibrary(module);
+    return ok ? 0 : 1;
+  }
   static constexpr TestCase wide_case = [] {
     TestCase test{};
     test.name = "descriptor-wide-footprint";

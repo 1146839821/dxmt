@@ -5,8 +5,8 @@
 #ifndef __AIRCONV_H
 #define __AIRCONV_H
 
-/* 28 invalidates AIR caches containing old PointStream GS primitive-count/point-size code. */
-#define AIRCONV_VERSION 29
+/* 30 invalidates AIR caches containing old triangle-strip adjacency assembly. */
+#define AIRCONV_VERSION 30
 
 #ifdef __cplusplus
 #include <string>

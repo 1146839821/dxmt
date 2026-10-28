@@ -774,6 +774,258 @@ Output main(Input input,uint vertex : SV_VertexID,uint instance : SV_InstanceID)
   return true;
 }
 
+bool CheckTriangleStripAdjacency(const char *index_mode, UINT count,
+                                 UINT gs_instances, bool wrong,
+                                 bool counts_only, bool perf) {
+  using dxmt::Com;
+  const bool indexed = std::strcmp(index_mode, "none") != 0;
+  const bool index32 = std::strcmp(index_mode, "u32") == 0;
+  if ((indexed && !index32 && std::strcmp(index_mode, "u16")) || count > 96 ||
+      (gs_instances != 1 && gs_instances != 3) ||
+      (perf && (indexed || count != 40 || gs_instances != 1)))
+    return false;
+  // Seven point pixels per GS invocation make duplicates observable through
+  // additive blending, including primitives incorrectly created in a tail.
+  static constexpr char source[] = R"HLSL(
+struct V { float4 position : SV_Position; nointerpolation uint id : TEXCOORD0; nointerpolation uint instance : TEXCOORD1; };
+struct O { float4 position : SV_Position; nointerpolation float4 value : TEXCOORD0; };
+V vs_main(uint id : SV_VertexID, uint instance : SV_InstanceID) {
+  V v; v.position = float4(0,0,0,1); v.id = id; v.instance = instance; return v;
+}
+[instance(GS_COUNT)] [maxvertexcount(7)]
+void gs_main(triangleadj V input[6], uint primitive : SV_PrimitiveID,
+             uint gs_instance : SV_GSInstanceID, inout PointStream<O> output) {
+  for (uint k = 0; k < 7; ++k) {
+    uint x = primitive * 7 + k;
+    uint y = input[0].instance * GS_COUNT + gs_instance;
+    O o; o.position = float4((float(x)+0.5)/512.0*2.0-1.0,
+                             1.0-(float(y)+0.5)/(2.0*GS_COUNT)*2.0,0,1);
+    o.value = float4(k < 6 ? float(input[min(k, 5u)].id + 1) : 1.0, 1, 1, 1);
+    output.Append(o);
+  }
+}
+float4 ps_main(O input) : SV_Target { return input.value; }
+)HLSL";
+  auto check = [](const char *name, HRESULT hr) {
+    if (FAILED(hr))
+      std::cerr << name << " failed 0x" << std::hex << UINT(hr) << std::dec
+                << "\n";
+    return SUCCEEDED(hr);
+  };
+  const D3D_SHADER_MACRO macros[] = {
+      {"GS_COUNT", gs_instances == 1 ? "1" : "3"}, {nullptr, nullptr}};
+  Com<ID3DBlob> vs, gs, ps;
+  auto compile = [&](const char *entry, const char *target,
+                     Com<ID3DBlob> &blob) {
+    ID3DBlob *errors = nullptr;
+    auto hr = D3DCompile(source, sizeof(source) - 1, "tri_strip_adj.hlsl",
+                         macros, nullptr, entry, target,
+                         D3DCOMPILE_ENABLE_STRICTNESS, 0, &blob, &errors);
+    if (errors) {
+      std::cerr << static_cast<const char *>(errors->GetBufferPointer())
+                << "\n";
+      errors->Release();
+    }
+    return check(entry, hr);
+  };
+  if (!compile("vs_main", "vs_5_0", vs) || !compile("gs_main", "gs_5_0", gs) ||
+      !compile("ps_main", "ps_5_0", ps))
+    return false;
+  Com<ID3D11Device> device;
+  Com<ID3D11DeviceContext> context;
+  D3D_FEATURE_LEVEL requested = D3D_FEATURE_LEVEL_11_0, actual;
+  if (!check("adj device",
+             D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+                               &requested, 1, D3D11_SDK_VERSION, &device,
+                               &actual, &context)))
+    return false;
+  Com<ID3D11VertexShader> vertex;
+  Com<ID3D11GeometryShader> geometry;
+  Com<ID3D11PixelShader> pixel;
+  if (!check("adj VS", device->CreateVertexShader(vs->GetBufferPointer(),
+                                                  vs->GetBufferSize(), nullptr,
+                                                  &vertex)) ||
+      !check("adj GS", device->CreateGeometryShader(gs->GetBufferPointer(),
+                                                    gs->GetBufferSize(),
+                                                    nullptr, &geometry)) ||
+      !check("adj PS",
+             device->CreatePixelShader(ps->GetBufferPointer(),
+                                       ps->GetBufferSize(), nullptr, &pixel)))
+    return false;
+  constexpr UINT width = 512, first = 3, base = 5;
+  const UINT height = 2 * gs_instances;
+  std::vector<UINT> indices(first + std::max(count, 1u));
+  std::vector<UINT16> indices16(indices.size());
+  for (UINT i = 0; i < count; ++i) {
+    indices[first + i] = (i * 7 + 3) % 251;
+    indices16[first + i] = UINT16(indices[first + i]);
+  }
+  D3D11_BUFFER_DESC b = {};
+  b.ByteWidth = UINT(indices.size()) * (index32 ? 4 : 2);
+  b.Usage = D3D11_USAGE_IMMUTABLE;
+  b.BindFlags = D3D11_BIND_INDEX_BUFFER;
+  D3D11_SUBRESOURCE_DATA data = {
+      index32 ? static_cast<const void *>(indices.data()) : indices16.data(), 0,
+      0};
+  Com<ID3D11Buffer> ib;
+  if (!check("adj IB", device->CreateBuffer(&b, &data, &ib)))
+    return false;
+  D3D11_TEXTURE2D_DESC t = {};
+  t.Width = width;
+  t.Height = height;
+  t.MipLevels = t.ArraySize = t.SampleDesc.Count = 1;
+  t.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+  t.BindFlags = D3D11_BIND_RENDER_TARGET;
+  Com<ID3D11Texture2D> target, readback;
+  Com<ID3D11RenderTargetView> rtv;
+  if (!check("adj target", device->CreateTexture2D(&t, nullptr, &target)) ||
+      !check("adj RTV",
+             device->CreateRenderTargetView(target.ptr(), nullptr, &rtv)))
+    return false;
+  t.BindFlags = 0;
+  t.Usage = D3D11_USAGE_STAGING;
+  t.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  if (!check("adj staging", device->CreateTexture2D(&t, nullptr, &readback)))
+    return false;
+  D3D11_BLEND_DESC blend_desc = {};
+  auto &rt = blend_desc.RenderTarget[0];
+  rt.BlendEnable = TRUE;
+  rt.SrcBlend = rt.DestBlend = D3D11_BLEND_ONE;
+  rt.BlendOp = D3D11_BLEND_OP_ADD;
+  rt.SrcBlendAlpha = rt.DestBlendAlpha = D3D11_BLEND_ONE;
+  rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+  rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+  Com<ID3D11BlendState> blend;
+  if (!check("adj blend", device->CreateBlendState(&blend_desc, &blend)))
+    return false;
+  context->IASetInputLayout(nullptr);
+  context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ);
+  context->IASetIndexBuffer(
+      ib.ptr(), index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
+  context->VSSetShader(vertex.ptr(), nullptr, 0);
+  context->GSSetShader(geometry.ptr(), nullptr, 0);
+  context->PSSetShader(pixel.ptr(), nullptr, 0);
+  auto view = rtv.ptr();
+  context->OMSetRenderTargets(1, &view, nullptr);
+  const float factors[] = {0, 0, 0, 0};
+  context->OMSetBlendState(blend.ptr(), factors, ~0u);
+  const D3D11_VIEWPORT viewport = {0, 0, float(width), float(height), 0, 1};
+  context->RSSetViewports(1, &viewport);
+  const float clear[] = {0, 0, 0, 0};
+  context->ClearRenderTargetView(rtv.ptr(), clear);
+  if (indexed)
+    context->DrawIndexedInstanced(count, 2, first, base, 0);
+  else
+    context->DrawInstanced(count, 2, base, 0);
+  context->CopyResource(readback.ptr(), target.ptr());
+  D3D11_MAPPED_SUBRESOURCE mapped = {};
+  if (!check("adj map",
+             context->Map(readback.ptr(), 0, D3D11_MAP_READ, 0, &mapped)))
+    return false;
+  std::vector<float> expected(width * height * 4, 0);
+  // The IA discards an odd dangling vertex. Boundary adjacency is the last
+  // vertex in the completed strip, not the dangling vertex.
+  const UINT completed = count & ~1u;
+  const UINT primitives = completed >= 6 ? (completed - 4) / 2 : 0;
+  for (UINT instance = 0; instance < 2; ++instance) {
+    for (UINT gs_instance = 0; gs_instance < gs_instances; ++gs_instance) {
+      for (UINT p = 0; p < primitives; ++p) {
+        const UINT odd = p & 1, lead = 2 * p;
+        const UINT inputs[] = {lead,
+                               odd ? lead + 3 : (p ? lead - 2 : 1),
+                               2 * (p + 1 + odd),
+                               p + 1 == primitives ? completed - 1 : lead + 6,
+                               2 * (p + 2 - odd),
+                               odd ? lead - 2 : lead + 3};
+        for (UINT k = 0; k < 7; ++k) {
+          auto *out =
+              &expected[((instance * gs_instances + gs_instance) * width +
+                         p * 7 + k) *
+                        4];
+          out[0] =
+              k == 6
+                  ? 1.0f
+                  : float((indexed ? indices[first + inputs[k]] : inputs[k]) +
+                          1);
+          out[1] = out[2] = out[3] = 1;
+        }
+      }
+    }
+  }
+  if (wrong && primitives)
+    expected[0] += 1;
+  bool ok = true;
+  for (UINT y = 0; y < height && ok; ++y) {
+    auto *row = reinterpret_cast<const float *>(
+        static_cast<const BYTE *>(mapped.pData) + y * mapped.RowPitch);
+    for (UINT i = 0; i < width * 4; ++i) {
+      if ((!counts_only || i % 4) && row[i] != expected[y * width * 4 + i]) {
+        std::cerr << "FAIL tri-strip-adj index=" << index_mode
+                  << " count=" << count << " gs=" << gs_instances << " y=" << y
+                  << " x=" << i / 4 << " component=" << i % 4
+                  << " actual=" << row[i]
+                  << " expected=" << expected[y * width * 4 + i] << "\n";
+        ok = false;
+        break;
+      }
+    }
+  }
+  float observed_invocations = 0;
+  if (perf) {
+    for (UINT y = 0; y < height; ++y) {
+      const auto *row = reinterpret_cast<const float *>(
+          static_cast<const BYTE *>(mapped.pData) + y * mapped.RowPitch);
+      for (UINT x = 6; x < width; x += 7)
+        observed_invocations += row[x * 4 + 1];
+    }
+  }
+  context->Unmap(readback.ptr(), 0);
+  if (perf) {
+    // The baseline has incorrect pixels and may emit more invocations. Report
+    // that count with timing, which is not a correctness or throughput oracle.
+    for (unsigned i = 0; i < 32; ++i)
+      context->DrawInstanced(count, 2, base, 0);
+    context->CopyResource(readback.ptr(), target.ptr());
+    if (!check("adj warm map",
+               context->Map(readback.ptr(), 0, D3D11_MAP_READ, 0, &mapped)))
+      return false;
+    context->Unmap(readback.ptr(), 0);
+    const auto start = std::chrono::steady_clock::now();
+    constexpr unsigned iterations = 1000;
+    for (unsigned i = 0; i < iterations; ++i)
+      context->DrawInstanced(count, 2, base, 0);
+    context->Flush();
+    const auto submitted = std::chrono::steady_clock::now();
+    context->CopyResource(readback.ptr(), target.ptr());
+    if (!check("adj timed map",
+               context->Map(readback.ptr(), 0, D3D11_MAP_READ, 0, &mapped)))
+      return false;
+    const auto completed = std::chrono::steady_clock::now();
+    context->Unmap(readback.ptr(), 0);
+    std::cout
+        << "ADJ_PERF iterations=" << iterations << " submit_us="
+        << std::chrono::duration<double, std::micro>(submitted - start).count()
+        << " completion_wait_us="
+        << std::chrono::duration<double, std::micro>(completed - submitted)
+               .count()
+        << " invocations=" << observed_invocations
+        << " expected_invocations=" << 2 * gs_instances * primitives
+        << " oracle=" << (ok ? "PASS" : "FAIL") << "\n";
+    context->ClearState();
+    context->Flush();
+    return check("adj device status", device->GetDeviceRemovedReason());
+  }
+  if (!ok || !check("adj device status", device->GetDeviceRemovedReason()))
+    return false;
+  std::cout << "TRIANGLESTRIP_ADJ index=" << index_mode << " count=" << count
+            << " gs=" << gs_instances << " counts_only=" << counts_only
+            << " primitives=" << primitives
+            << " checked_pixels=" << width * height << " PASS\n";
+  context->ClearState();
+  context->Flush();
+  return true;
+}
+
 // Intercept before the native encoder receives an erroneous huge direct
 // dispatch. The baseline indirect marshal can also generate huge dispatches, so
 // indirect tests have an explicit observe-only mode that never submits them to
@@ -1105,6 +1357,15 @@ float4 ps_main(V v) : SV_Target { return float4(0,1,0,1); }
 
 int main(int argc, char **argv) {
   std::cout << std::unitbuf;
+  if ((argc == 5 || argc == 6) && !std::strcmp(argv[1], "--tri-strip-adj"))
+    return CheckTriangleStripAdjacency(
+               argv[2], UINT(std::strtoul(argv[3], nullptr, 10)),
+               UINT(std::strtoul(argv[4], nullptr, 10)),
+               argc == 6 && !std::strcmp(argv[5], "--wrong-expected"),
+               argc == 6 && !std::strcmp(argv[5], "--counts-only"),
+               argc == 6 && !std::strcmp(argv[5], "--perf"))
+               ? 0
+               : 1;
   if ((argc == 4 || argc == 5) && !std::strcmp(argv[1], "--tessellation-patch"))
     return CheckTessellationPatch(
                argv[2], UINT(std::strtoul(argv[3], nullptr, 10)),

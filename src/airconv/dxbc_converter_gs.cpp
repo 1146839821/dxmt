@@ -467,7 +467,13 @@ convert_dxbc_geometry_shader(
       auto _2np3 = builder.CreateAdd(_2n, builder.getInt32(3));
       auto _2nm2 = builder.CreateSub(_2n, two_const);
       auto is_odd = builder.CreateICmpEQ(odd_bit, one_const);
-      load_vertex(builder.CreateURem(builder.CreateSelect(is_odd, _2np3, _2nm2), builder.getInt32(33)), 1);
+      // Lane 31 holds the vertex preceding this group (or the first
+      // boundary-adjacent vertex). Unsigned remainder cannot wrap -2 to 31.
+      auto outer1 = builder.CreateSelect(
+          is_odd, _2np3,
+          builder.CreateSelect(builder.CreateICmpEQ(leading_vertex_index, zero_const), builder.getInt32(31), _2nm2)
+      );
+      load_vertex(outer1, 1);
       load_vertex(builder.CreateURem(builder.CreateAdd(_2n, builder.getInt32(6)), builder.getInt32(31)), 3);
       load_vertex(builder.CreateSelect(is_odd, _2nm2, _2np3), 5);
       break;
@@ -715,25 +721,26 @@ convert_dxbc_vertex_for_geometry_shader(
 
   if (is_triadj_strip) {
     // 2nd and 32th vertex are not read but 33th and -2th (or 1st) are.
-    auto const one_const = builder.getInt32(1);
-    auto signed_max = [&](pvalue a, pvalue b) {
-      return builder.CreateSelect(builder.CreateICmpSLT(a, b), b, a);
-    };
-    auto signed_min = [&](pvalue a, pvalue b) {
-      return builder.CreateSelect(builder.CreateICmpSLT(a, b), a, b);
-    };
-
-    auto is_second_thread = builder.CreateICmpEQ(warp_vertex_id, one_const);
-    global_index_id = builder.CreateSelect(
-      is_second_thread,
-      builder.CreateAdd(global_index_id, builder.getInt32(31)), global_index_id
+    // A dangling final vertex does not belong to this topology. Use 64-bit
+    // offsets so the last group cannot wrap before it is clamped.
+    auto count = builder.CreateZExt(builder.CreateAnd(vertex_count, builder.getInt32(~1u)), types._long);
+    auto last = builder.CreateSelect(
+        builder.CreateICmpNE(count, builder.getInt64(0)), builder.CreateSub(count, builder.getInt64(1)),
+        builder.getInt64(0)
     );
+    auto index = builder.CreateAdd(
+        builder.CreateMul(builder.CreateZExt(warp_id, types._long), builder.getInt64(warp_vertex_count)),
+        builder.CreateZExt(warp_vertex_id, types._long)
+    );
+    auto is_second_thread = builder.CreateICmpEQ(warp_vertex_id, builder.getInt32(1));
+    index = builder.CreateSelect(is_second_thread, builder.CreateAdd(index, builder.getInt64(31)), index);
     auto is_last_thread = builder.CreateICmpEQ(warp_vertex_id, builder.getInt32(31));
-    global_index_id = builder.CreateSelect(
-      is_last_thread,
-      signed_max(one_const, builder.CreateSub(global_index_id, builder.getInt32(33))),
-      signed_min(global_index_id, builder.CreateSub(vertex_count, one_const)) // may degenerate
+    auto previous = builder.CreateSelect(
+        builder.CreateICmpUGT(index, builder.getInt64(34)), builder.CreateSub(index, builder.getInt64(33)),
+        builder.getInt64(1)
     );
+    auto bounded = builder.CreateSelect(builder.CreateICmpULT(index, last), index, last);
+    global_index_id = builder.CreateTrunc(builder.CreateSelect(is_last_thread, previous, bounded), types._int);
   }
 
   // explicit initialization
@@ -821,6 +828,19 @@ convert_dxbc_vertex_for_geometry_shader(
 
   pvalue valid_primitive_mask = builder.getInt32(0);
   auto valid_vertex_result = builder.CreateLoad(types._int, valid_vertex_mask);
+  pvalue triadj_primitive_count = nullptr;
+  pvalue triadj_primitive_base = nullptr;
+  if (is_triadj_strip) {
+    auto pairs = builder.CreateLShr(vertex_count, builder.getInt32(1));
+    auto count = builder.CreateSelect(
+        builder.CreateICmpUGE(pairs, builder.getInt32(3)), builder.CreateSub(pairs, builder.getInt32(2)),
+        builder.getInt32(0)
+    );
+    triadj_primitive_count = builder.CreateZExt(count, types._long);
+    triadj_primitive_base = builder.CreateMul(
+        builder.CreateZExt(warp_id, types._long), builder.getInt64(warp_primitive_count)
+    );
+  }
 
   for (unsigned primitive_id = 0; primitive_id < warp_primitive_count; primitive_id++) {
     pvalue primitive_valid_result = builder.getInt1(1);
@@ -843,12 +863,12 @@ convert_dxbc_vertex_for_geometry_shader(
       case microsoft::D3D10_SB_PRIMITIVE_TRIANGLE_ADJ: {
         auto odd_primitive = primitive_id & 1;
         auto _2n = primitive_id << 1;
-        primitive_vertices_mask |= 1 << 2 * primitive_id;
-        primitive_vertices_mask |= 1 << 2 * (primitive_id + 1 + odd_primitive);
-        primitive_vertices_mask |= 1 << 2 * (primitive_id + 2 - odd_primitive);
-        primitive_vertices_mask |= 1 << ((odd_primitive ? _2n + 3 : _2n - 2) % 33);
-        primitive_vertices_mask |= 1 << ((6 + 2 * primitive_id) % 31);
-        primitive_vertices_mask |= 1 << (odd_primitive ? _2n - 2 : _2n + 3);
+        primitive_vertices_mask |= 1u << 2 * primitive_id;
+        primitive_vertices_mask |= 1u << 2 * (primitive_id + 1 + odd_primitive);
+        primitive_vertices_mask |= 1u << 2 * (primitive_id + 2 - odd_primitive);
+        primitive_vertices_mask |= 1u << (odd_primitive ? _2n + 3 : (primitive_id ? _2n - 2 : 31));
+        primitive_vertices_mask |= 1u << ((6 + 2 * primitive_id) % 31);
+        primitive_vertices_mask |= 1u << (odd_primitive ? _2n - 2 : _2n + 3);
         break;
       }
       default:
@@ -866,6 +886,14 @@ convert_dxbc_vertex_for_geometry_shader(
         builder.CreateAnd(builder.getInt32(primitive_vertices_mask), valid_vertex_result),
         builder.getInt32(primitive_vertices_mask)
     );
+    if (is_triadj_strip) {
+      // The boundary adjacency lanes are clamped, but that must not make an
+      // incomplete interior triangle in the final group appear valid.
+      auto global_primitive = builder.CreateAdd(triadj_primitive_base, builder.getInt64(primitive_id));
+      primitive_valid_result = builder.CreateAnd(
+          primitive_valid_result, builder.CreateICmpULT(global_primitive, triadj_primitive_count)
+      );
+    }
 
     valid_primitive_mask = builder.CreateOr(
         valid_primitive_mask,
