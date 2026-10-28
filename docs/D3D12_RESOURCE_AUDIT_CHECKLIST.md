@@ -4879,3 +4879,36 @@ primitive-ID prefixes and is explicitly OPEN, as are the separately requested
 GS/TS/SO combinations. This node does not claim arbitrary restarted strips.
 Evidence and commands: `../dxmt-test/n11-triangle-adj-20261028/N11-triangle-adj.md`.
 Next requested item: MSC tessellation point/line output validation.
+
+### MSC tessellation topology validation: line fixed, point OPEN (2026-10-28)
+
+The previous PSO always validated the tessellator output as triangle. The
+existing HS reflection now selects the matching point/line/triangle geometry
+input; invalid types and mismatched HS/DS still reject. Legal isoline/line now
+creates and runs. The required enum header was already tracked at the requested
+`include/metal_shader_converter/ir_tessellator_output_primitive.h` path and is
+referenced there. No conversion ABI or feature-level promotion.
+
+Final private/no-private: 16 cases covering line nonindexed/R16/R32, 8×8 exact
+image, CW/CCW triangle controls, HS/DS mismatch and point rejection. Additional
+final binary checks include point-vs-line mismatch and two wrong-oracle line
+images, which correctly failed. Three submissions exercise replay and a fenced
+reset/rerecord; application resource release under the gate was not tested.
+Metal API/GPU validation and native PE/dylib path checks were clean.
+
+**Point is not complete.** An externally retained diagnostic build without its
+guard produced three point outputs for tri factor1 but domain-coordinate sum
+(1,2,0) rather than (1,1,1); tri factor2 produced 15 points rather than 6. The
+actual runtime's generated AIR includes a point-passthrough index-to-zero
+fallback on a tessellator flag; this is a plausible duplicate mechanism, not a
+complete proof of the internal cause. The production PSO returns E_NOTIMPL for
+point to prevent silent incorrect rendering. Point fixtures and failing oracles
+are retained for a future general unique-point solution that respects existing
+MSC ownership/ABI and is validated across factors, domains and lifecycle.
+
+Five interleaved warm triangle-control PSO creation samples: baseline/candidate
+medians 9198.5/8224.5 us, overlapping and noisy; no per-draw or GPU performance
+claim. This change only adds a constant-time validation switch at PSO creation.
+Detailed reproduction, diagnostics, unsafe diagnostic artifact, exact hashes,
+performance and limits: `../dxmt-test/n11-msc-ts-output-20261028/N11-msc-ts-output.md`.
+Point output, GS/TS/SO combinations and strip restart remain OPEN.

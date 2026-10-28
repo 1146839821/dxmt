@@ -258,6 +258,48 @@ if dxc_command.length() > 0
       build_by_default: false,
     )
   endforeach
+  foreach topology : ['point', 'line', 'ccw']
+    foreach stage : ['hs', 'ds']
+      custom_target('dx12_stage_binding_tess_' + topology + '_' + stage,
+        input: 'shader_backend_stages.hlsl',
+        output: 'stage_binding_' + topology + '.' + stage + '.cso',
+        command: dxc_command + [ '-E', stage + '_main', '-T', stage + '_6_0',
+          '-D', 'STAGE_BINDING_DIFFERENTIAL=1', '-D', 'STAGE_TESS_' + topology.to_upper() + '=1',
+          '@INPUT@', '-Fo', '@OUTPUT@' ],
+        build_by_default: false,
+      )
+    endforeach
+  endforeach
+  foreach topology : ['point', 'line']
+    foreach stage : ['hs', 'ds']
+      custom_target('dx12_stage_binding_tess_' + topology + '_image_' + stage,
+        input: 'shader_backend_stages.hlsl',
+        output: 'stage_binding_' + topology + '_image.' + stage + '.cso',
+        command: dxc_command + [ '-E', stage + '_main', '-T', stage + '_6_0',
+          '-D', 'STAGE_BINDING_DIFFERENTIAL=1', '-D', 'STAGE_TESS_' + topology.to_upper() + '=1',
+          '-D', 'STAGE_TESS_IMAGE=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+        build_by_default: false,
+      )
+    endforeach
+  endforeach
+  custom_target('dx12_stage_binding_tess_count_ps',
+    input: 'shader_backend_stages.hlsl',
+    output: 'stage_binding_count.ps.cso',
+    command: dxc_command + [ '-E', 'ps_main', '-T', 'ps_6_0',
+      '-D', 'STAGE_BINDING_DIFFERENTIAL=1', '-D', 'STAGE_TESS_COUNT=1',
+      '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  foreach stage : ['hs', 'ds']
+    custom_target('dx12_stage_binding_tess_point_coord_' + stage,
+      input: 'shader_backend_stages.hlsl',
+      output: 'stage_binding_point_coord.' + stage + '.cso',
+      command: dxc_command + [ '-E', stage + '_main', '-T', stage + '_6_0',
+        '-D', 'STAGE_BINDING_DIFFERENTIAL=1', '-D', 'STAGE_TESS_POINT=1',
+        '-D', 'STAGE_TESS_COORD=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
   foreach stage : ['ms', 'as']
     custom_target('dx12_stage_binding_as_' + stage,
       input: 'shader_backend_stages.hlsl',

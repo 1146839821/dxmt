@@ -24,6 +24,7 @@
 #include "com/com_pointer.hpp"
 #include "sha1/sha1_util.hpp"
 #include "airconv_public.h"
+#include "../../include/metal_shader_converter/ir_tessellator_output_primitive.h"
 #include "DXBCParser/DXBCUtils.h"
 
 #include <algorithm>
@@ -239,6 +240,24 @@ ExtractMTLInputLayoutElements(
   *pNumElementsOut = attribute_count;
 
   return S_OK;
+}
+
+static bool
+MapMSCTessellatorOutputPrimitive(uint32_t output_primitive, WMTPrimitiveType &primitive) {
+  switch (output_primitive) {
+  case IRTessellatorOutputPoint:
+    primitive = WMTPrimitiveTypePoint;
+    return true;
+  case IRTessellatorOutputLine:
+    primitive = WMTPrimitiveTypeLine;
+    return true;
+  case IRTessellatorOutputTriangleCW:
+  case IRTessellatorOutputTriangleCCW:
+    primitive = WMTPrimitiveTypeTriangle;
+    return true;
+  default:
+    return false;
+  }
 }
 
 static bool
@@ -1428,21 +1447,29 @@ public:
 
         const auto &hs = converted_hs.reflection;
         const auto &ds = converted_ds.reflection;
-        if (!MTLValidateMSCTessellationPipeline(
-                hs.hs_tessellator_output_primitive, WMTPrimitiveTypeTriangle, hs.hs_output_control_point_size,
+        WMTPrimitiveType passthrough_input;
+        if (!MapMSCTessellatorOutputPrimitive(hs.hs_tessellator_output_primitive, passthrough_input) ||
+            !MTLValidateMSCTessellationPipeline(
+                hs.hs_tessellator_output_primitive, passthrough_input, hs.hs_output_control_point_size,
                 ds.ds_input_control_point_size, hs.hs_patch_constants_size, ds.ds_patch_constants_size,
                 hs.hs_output_control_point_count, ds.ds_input_control_point_count
             ) ||
             !converted_vs.reflection.vertex_output_size_in_bytes || !hs.hs_output_control_point_size ||
-            !ds.ds_input_control_point_size ||
-            hs.hs_output_control_point_size != ds.ds_input_control_point_size ||
+            !ds.ds_input_control_point_size || hs.hs_output_control_point_size != ds.ds_input_control_point_size ||
             hs.hs_patch_constants_size != ds.ds_patch_constants_size ||
             hs.hs_output_control_point_count != ds.ds_input_control_point_count ||
             hs.hs_tessellator_domain != ds.ds_tessellator_domain ||
-            hs.hs_tessellation_type_half != ds.ds_tessellation_type_half ||
-            !hs.hs_max_patches_per_object_threadgroup || !hs.hs_max_object_threads_per_patch ||
-            !ds.ds_max_input_prims_per_mesh_threadgroup || !hs.hs_max_tessellation_factor)
+            hs.hs_tessellation_type_half != ds.ds_tessellation_type_half || !hs.hs_max_patches_per_object_threadgroup ||
+            !hs.hs_max_object_threads_per_patch || !ds.ds_max_input_prims_per_mesh_threadgroup ||
+            !hs.hs_max_tessellation_factor)
           return E_INVALIDARG;
+
+        // The MSC point passthrough can emit duplicate domain points. Keep
+        // point output rejected until unique-point semantics are implemented.
+        if (hs.hs_tessellator_output_primitive == IRTessellatorOutputPoint) {
+          ERR("CreatePipelineState: MSC tessellation point output is unsupported");
+          return E_NOTIMPL;
+        }
 
         WMTMSCTessellationPipelineInfo tess_info;
         WMT::InitializeMSCTessellationPipelineInfo(tess_info);

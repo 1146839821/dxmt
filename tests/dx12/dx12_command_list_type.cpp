@@ -2471,6 +2471,7 @@ class StageBindingObserver {
            type == WMTRenderCommandDXMTGeometryDraw ||
            type == WMTRenderCommandMSCGeometryDraw ||
            type == WMTRenderCommandMSCTessellationDraw ||
+           type == WMTRenderCommandMSCTessellationDrawIndexed ||
            type == WMTRenderCommandDrawMeshThreadgroups;
   }
   static void Render(obj_handle_t handle, const wmtcmd_base *head) {
@@ -2700,8 +2701,33 @@ bool TestStageBindings(const char *mode) {
   using dxmt::Com;
   const bool isolated = !std::strcmp(mode, "isolated"),
              same_root = !std::strcmp(mode, "same-root"),
-             wrong = !std::strcmp(mode, "wrong"),
+             wrong = !std::strcmp(mode, "wrong") ||
+                     !std::strcmp(mode, "tess-line-image-wrong"),
              perf = !std::strcmp(mode, "perf");
+  const bool tess_index16 = std::strstr(mode, "-u16") != nullptr,
+             tess_index32 = std::strstr(mode, "-u32") != nullptr,
+             tess_point = !std::strcmp(mode, "tess-point") ||
+                          !std::strcmp(mode, "tess-point-u16") ||
+                          !std::strcmp(mode, "tess-point-u32") ||
+                          !std::strcmp(mode, "tess-point-image") ||
+                          !std::strcmp(mode, "tess-point-count") ||
+                          !std::strcmp(mode, "tess-point-coord") ||
+                          !std::strcmp(mode, "tess-point-rejected") ||
+                          !std::strcmp(mode, "tess-point-mismatch"),
+             tess_line = !std::strcmp(mode, "tess-line") ||
+                         !std::strcmp(mode, "tess-line-u16") ||
+                         !std::strcmp(mode, "tess-line-u32") ||
+                         !std::strcmp(mode, "tess-line-image") ||
+                         !std::strcmp(mode, "tess-line-image-wrong"),
+             tess_ccw = !std::strcmp(mode, "tess-ccw"),
+             tess_mismatch = !std::strcmp(mode, "tess-mismatch") ||
+                             !std::strcmp(mode, "tess-point-mismatch"),
+             tess_point_rejected = !std::strcmp(mode, "tess-point-rejected"),
+             tess_image = !std::strcmp(mode, "tess-point-image") ||
+                          !std::strcmp(mode, "tess-line-image") ||
+                          !std::strcmp(mode, "tess-line-image-wrong"),
+             tess_coord = !std::strcmp(mode, "tess-point-coord"),
+             tess_count = !std::strcmp(mode, "tess-point-count") || tess_coord;
   std::vector<UINT> sequence;
   if (!std::strcmp(mode, "airconv"))
     sequence = {0, 7, 1, 0, 1};
@@ -2709,7 +2735,8 @@ bool TestStageBindings(const char *mode) {
     sequence = {2, 8, 3, 2, 5, 2, 6, 2, 4};
   else if (!std::strcmp(mode, "gs-ts"))
     sequence = {3, 4, 3, 4};
-  else if (!std::strcmp(mode, "tess"))
+  else if (!std::strcmp(mode, "tess") || tess_point || tess_line || tess_ccw ||
+           tess_mismatch)
     sequence = {2, 4, 2, 4};
   else if (!std::strcmp(mode, "mesh"))
     sequence = {2, 5, 2, 5};
@@ -2732,7 +2759,7 @@ bool TestStageBindings(const char *mode) {
   Com<ID3D12RootSignature> root;
   Com<ID3DBlob> root_blob;
   Com<ID3D12DescriptorHeap> heap, samplers, rtvs;
-  Com<ID3D12Resource> source, upload, target, readback;
+  Com<ID3D12Resource> source, upload, target, readback, index_buffer;
   Com<ID3D12CommandAllocator> allocator;
   Com<ID3D12GraphicsCommandList> list;
   Com<ID3D12GraphicsCommandList6> list6;
@@ -2822,7 +2849,9 @@ bool TestStageBindings(const char *mode) {
     const UINT kind = kinds[slot];
     const bool airconv = kind < 2;
     auto vs = read(airconv ? "stage_binding5.vs.cso" : "stage_binding.vs.cso");
-    auto ps = read(airconv ? "stage_binding5.ps.cso" : "stage_binding.ps.cso");
+    auto ps = read(tess_count ? "stage_binding_count.ps.cso"
+                   : airconv  ? "stage_binding5.ps.cso"
+                              : "stage_binding.ps.cso");
     if (vs.empty() || ps.empty())
       return false;
     if (kind < 5) {
@@ -2834,7 +2863,8 @@ bool TestStageBindings(const char *mode) {
                                     ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH
                                     : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
       d.NumRenderTargets = 1;
-      d.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UINT;
+      d.RTVFormats[0] = tess_count ? DXGI_FORMAT_R32G32B32A32_FLOAT
+                                   : DXGI_FORMAT_R8G8B8A8_UINT;
       d.SampleDesc.Count = 1;
       d.SampleMask = UINT_MAX;
       d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
@@ -2842,18 +2872,59 @@ bool TestStageBindings(const char *mode) {
       d.RasterizerState.DepthClipEnable = TRUE;
       d.BlendState.RenderTarget[0].RenderTargetWriteMask =
           D3D12_COLOR_WRITE_ENABLE_ALL;
+      if (tess_count) {
+        auto &blend = d.BlendState.RenderTarget[0];
+        blend.BlendEnable = TRUE;
+        blend.SrcBlend = blend.DestBlend = D3D12_BLEND_ONE;
+        blend.BlendOp = D3D12_BLEND_OP_ADD;
+        blend.SrcBlendAlpha = blend.DestBlendAlpha = D3D12_BLEND_ONE;
+        blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+      }
       auto gs =
           read(airconv ? "stage_binding5.gs.cso" : "stage_binding.gs.cso");
-      auto hs = read("stage_binding.hs.cso"), ds = read("stage_binding.ds.cso");
+      const char *tess_variant = tess_coord                  ? "point_coord"
+                                 : tess_image && tess_point  ? "point_image"
+                                 : tess_image && tess_line   ? "line_image"
+                                 : tess_point                ? "point"
+                                 : tess_line                 ? "line"
+                                 : tess_ccw || tess_mismatch ? "ccw"
+                                                             : nullptr;
+      auto hs = read(tess_variant ? std::string("stage_binding_") +
+                                        tess_variant + ".hs.cso"
+                                  : "stage_binding.hs.cso"),
+           ds = read(tess_variant ? std::string("stage_binding_") +
+                                        tess_variant + ".ds.cso"
+                                  : "stage_binding.ds.cso");
+      if (tess_mismatch)
+        ds = read("stage_binding_line.ds.cso");
       if (kind == 1 || kind == 3)
         d.GS = {gs.data(), gs.size()};
       if (kind == 4) {
         d.HS = {hs.data(), hs.size()};
         d.DS = {ds.data(), ds.size()};
       }
-      if (!CheckHR("Stage graphics PSO",
-                   device->CreateGraphicsPipelineState(
-                       &d, IID_PPV_ARGS(&pipelines[slot]))))
+      const auto pso_start = std::chrono::steady_clock::now();
+      const HRESULT hr = device->CreateGraphicsPipelineState(
+          &d, IID_PPV_ARGS(&pipelines[slot]));
+      if (kind == 4)
+        std::cout << "Stage tessellation PSO mode=" << mode << " us="
+                  << std::chrono::duration<double, std::micro>(
+                         std::chrono::steady_clock::now() - pso_start)
+                         .count()
+                  << "\n";
+      if (tess_point_rejected && kind == 4) {
+        if (hr != E_NOTIMPL || pipelines[slot])
+          return false;
+        std::cout << "Stage point output explicitly unsupported\n";
+        return true;
+      }
+      if (tess_mismatch && kind == 4) {
+        if (hr != E_INVALIDARG || pipelines[slot])
+          return false;
+        std::cout << "Stage incompatible HS/DS rejected\n";
+        return true;
+      }
+      if (!CheckHR("Stage graphics PSO", hr))
         return false;
     } else {
       auto ms = read(kind == 6 ? "stage_binding_as.ms.cso"
@@ -2908,11 +2979,11 @@ bool TestStageBindings(const char *mode) {
   };
   const UINT cycles = perf ? 1 : 2,
              draws = perf ? 4096 : UINT(sequence.size()) * cycles,
-             width = perf ? 1 : draws;
+             width = perf ? 1 : draws, height = tess_image ? 8 : 1;
   if (!buffer(D3D12_HEAP_TYPE_UPLOAD, 256, D3D12_RESOURCE_STATE_GENERIC_READ,
               &upload) ||
-      !buffer(D3D12_HEAP_TYPE_READBACK, 256, D3D12_RESOURCE_STATE_COPY_DEST,
-              &readback))
+      !buffer(D3D12_HEAP_TYPE_READBACK, 256 * height,
+              D3D12_RESOURCE_STATE_COPY_DEST, &readback))
     return false;
   void *mapped = nullptr;
   if (!CheckHR("Stage upload map", upload->Map(0, nullptr, &mapped)))
@@ -2920,6 +2991,21 @@ bool TestStageBindings(const char *mode) {
   const BYTE color[] = {11, 13, 17, 255};
   std::memcpy(mapped, color, 4);
   upload->Unmap(0, nullptr);
+  if (tess_index16 || tess_index32) {
+    if (!buffer(D3D12_HEAP_TYPE_UPLOAD, 32, D3D12_RESOURCE_STATE_GENERIC_READ,
+                &index_buffer) ||
+        !CheckHR("Stage index map", index_buffer->Map(0, nullptr, &mapped)))
+      return false;
+    if (tess_index32) {
+      const uint32_t indices[] = {99, 0, 1, 2};
+      std::memcpy(mapped, indices, sizeof(indices));
+    } else {
+      const uint16_t indices[] = {99, 0, 1, 2};
+      std::memcpy(mapped, indices, sizeof(indices));
+    }
+    index_buffer->Unmap(0, nullptr);
+    mapped = nullptr;
+  }
   D3D12_HEAP_PROPERTIES h = {};
   h.Type = D3D12_HEAP_TYPE_DEFAULT;
   h.CreationNodeMask = h.VisibleNodeMask = 1;
@@ -2934,7 +3020,9 @@ bool TestStageBindings(const char *mode) {
                                                nullptr, IID_PPV_ARGS(&source))))
     return false;
   tex.Width = width;
-  tex.Format = DXGI_FORMAT_R8G8B8A8_UINT;
+  tex.Height = height;
+  tex.Format =
+      tess_count ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R8G8B8A8_UINT;
   tex.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
   if (!CheckHR("Stage target", device->CreateCommittedResource(
                                    &h, D3D12_HEAP_FLAG_NONE, &tex,
@@ -3012,7 +3100,8 @@ bool TestStageBindings(const char *mode) {
     const UINT base = pass == 2 ? 31 : 17;
     std::vector<StageBindingObserver::Expected> expected;
     expected.reserve(draws);
-    std::vector<BYTE> pixels(width * 4, 0);
+    std::vector<BYTE> pixels(width * height * 4, 0);
+    std::vector<float> count_pixels(width * 4, 0);
     for (UINT draw = 0; draw < draws; ++draw) {
       const UINT slot = sequence[draw % sequence.size()], kind = kinds[slot],
                  cycle = perf ? 0 : draw / UINT(sequence.size());
@@ -3036,14 +3125,30 @@ bool TestStageBindings(const char *mode) {
                        : kind == 5            ? 5
                        : kind == 6            ? 7
                                               : 1;
-      auto *pixel = pixels.data() + 4 * (perf ? 0 : draw);
-      pixel[0] = BYTE(multiplier * (values[0] + 11));
-      pixel[1] = BYTE(23 + tag);
-      pixel[2] = 44;
-      pixel[3] = 255;
+      for (UINT y = 0; y < height; ++y) {
+        if (tess_image && tess_point && kind == 4 && y != 1 && y != 3 && y != 6)
+          continue;
+        auto *pixel = pixels.data() + 4 * (y * width + (perf ? 0 : draw));
+        pixel[0] = BYTE(multiplier * (values[0] + 11));
+        pixel[1] = BYTE(23 + tag);
+        pixel[2] = 44;
+        pixel[3] = 255;
+      }
+      if (tess_count) {
+        const float n = kind == 4 ? 3.0f : 1.0f;
+        auto *pixel = count_pixels.data() + 4 * draw;
+        pixel[0] = n * multiplier * (values[0] + 11);
+        pixel[1] = n * (23 + tag);
+        pixel[2] = n * 44;
+        pixel[3] = n * 255;
+        if (tess_coord && kind == 4) {
+          pixel[0] = pixel[1] = pixel[2] = 1;
+          pixel[3] = 3;
+        }
+      }
     }
     if (wrong)
-      pixels[0] ^= 1;
+      pixels[tess_image ? 4 : 0] ^= 1;
     if (pass != 1) {
       if (pass && (!CheckHR("Stage allocator reset", allocator->Reset()) ||
                    !CheckHR("Stage list reset",
@@ -3076,7 +3181,7 @@ bool TestStageBindings(const char *mode) {
       list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
       const float clear[4] = {};
       list->ClearRenderTargetView(rtv, clear, 0, nullptr);
-      const D3D12_RECT scissor = {0, 0, LONG(width), 1};
+      const D3D12_RECT scissor = {0, 0, LONG(width), LONG(height)};
       list->RSSetScissorRects(1, &scissor);
       const auto start = std::chrono::steady_clock::now();
       for (UINT draw = 0; draw < draws; ++draw) {
@@ -3091,14 +3196,21 @@ bool TestStageBindings(const char *mode) {
           b.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
           list->ResourceBarrier(1, &b);
         }
-        const D3D12_VIEWPORT viewport = {float(perf ? 0 : draw), 0, 1, 1, 0, 1};
+        const D3D12_VIEWPORT viewport = {float(perf ? 0 : draw), 0, 1,
+                                         float(height),          0, 1};
         list->RSSetViewports(1, &viewport);
         list->IASetPrimitiveTopology(
             kind == 4 ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST
                       : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         if (kind >= 5)
           list6->DispatchMesh(1, 1, 1);
-        else
+        else if (kind == 4 && index_buffer) {
+          D3D12_INDEX_BUFFER_VIEW view = {
+              index_buffer->GetGPUVirtualAddress(), 32,
+              tess_index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT};
+          list->IASetIndexBuffer(&view);
+          list->DrawIndexedInstanced(3, 1, 1, 0, 0);
+        } else
           list->DrawInstanced(3, 1, 0, 0);
       }
       std::cout << "Stage record mode=" << mode << " pass=" << pass
@@ -3114,8 +3226,10 @@ bool TestStageBindings(const char *mode) {
       from.pResource = target.ptr();
       to.pResource = readback.ptr();
       to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-      to.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UINT, width, 1, 1,
-                                      256};
+      to.PlacedFootprint.Footprint = {tess_count
+                                          ? DXGI_FORMAT_R32G32B32A32_FLOAT
+                                          : DXGI_FORMAT_R8G8B8A8_UINT,
+                                      width, height, 1, 256};
       list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
       barrier(target.ptr(), D3D12_RESOURCE_STATE_COPY_SOURCE,
               D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -3158,13 +3272,39 @@ bool TestStageBindings(const char *mode) {
     }
     if (!CheckHR("Stage readback", readback->Map(0, nullptr, &mapped)))
       return false;
-    bool good = !std::memcmp(mapped, pixels.data(), pixels.size());
+    bool good = true;
+    if (tess_count) {
+      const auto *got = static_cast<const float *>(mapped);
+      for (UINT i = 0; i < count_pixels.size(); ++i)
+        if (got[i] != count_pixels[i]) {
+          std::cerr << "Stage point count element=" << i << " actual=" << got[i]
+                    << " expected=" << count_pixels[i]
+                    << " vector=" << got[i / 4 * 4] << ',' << got[i / 4 * 4 + 1]
+                    << ',' << got[i / 4 * 4 + 2] << ',' << got[i / 4 * 4 + 3]
+                    << "\n";
+          good = false;
+          break;
+        }
+    } else {
+      for (UINT y = 0; y < height; ++y)
+        good &= !std::memcmp(static_cast<const BYTE *>(mapped) + y * 256,
+                             pixels.data() + y * width * 4, width * 4);
+    }
     if (!good) {
       const auto *got = static_cast<const BYTE *>(mapped);
-      for (UINT i = 0; i < pixels.size(); ++i)
-        if (got[i] != pixels[i]) {
+      if (tess_image) {
+        for (UINT y = 0; y < height; ++y) {
+          std::cerr << "Stage image row=" << y << " actual:";
+          for (UINT x = 0; x < width; ++x)
+            std::cerr << ' ' << UINT(got[y * 256 + x * 4]);
+          std::cerr << "\n";
+        }
+      }
+      for (UINT i = 0; !tess_count && i < pixels.size(); ++i)
+        if (got[(i / (width * 4)) * 256 + i % (width * 4)] != pixels[i]) {
           std::cerr << "FAIL stage mode=" << mode << " pass=" << pass
-                    << " byte=" << i << " actual=" << UINT(got[i])
+                    << " byte=" << i << " actual="
+                    << UINT(got[(i / (width * 4)) * 256 + i % (width * 4)])
                     << " expected=" << UINT(pixels[i]) << "\n";
           break;
         }

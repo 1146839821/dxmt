@@ -15,7 +15,11 @@ StageVertex vs_main(uint vertex : SV_VertexID)
     o.color = read_tag(1);
     return o;
 }
+#ifdef STAGE_TESS_COUNT
+float4 ps_main(StageVertex input) : SV_Target0 { return input.color; }
+#else
 uint4 ps_main(StageVertex input) : SV_Target0 { return uint4(input.color); }
+#endif
 [maxvertexcount(3)]
 void gs_main(triangle StageVertex input[3], inout TriangleStream<StageVertex> stream)
 {
@@ -26,6 +30,17 @@ void gs_main(triangle StageVertex input[3], inout TriangleStream<StageVertex> st
         stream.Append(o);
     }
 }
+#ifdef STAGE_TESS_LINE
+struct StageFactors { float edge[2] : SV_TessFactor; };
+StageFactors hs_constants(InputPatch<StageVertex, 3> patch, uint primitive : SV_PrimitiveID)
+{
+    StageFactors factors = {{1, 1}};
+    return factors;
+}
+[domain("isoline")]
+[partitioning("integer")]
+[outputtopology("line")]
+#else
 struct StageFactors { float edge[3] : SV_TessFactor; float inside : SV_InsideTessFactor; };
 StageFactors hs_constants(InputPatch<StageVertex, 3> patch, uint primitive : SV_PrimitiveID)
 {
@@ -34,7 +49,14 @@ StageFactors hs_constants(InputPatch<StageVertex, 3> patch, uint primitive : SV_
 }
 [domain("tri")]
 [partitioning("integer")]
+#ifdef STAGE_TESS_POINT
+[outputtopology("point")]
+#elif defined(STAGE_TESS_CCW)
+[outputtopology("triangle_ccw")]
+#else
 [outputtopology("triangle_cw")]
+#endif
+#endif
 [outputcontrolpoints(3)]
 [patchconstantfunc("hs_constants")]
 StageVertex hs_main(InputPatch<StageVertex, 3> patch, uint id : SV_OutputControlPointID)
@@ -44,13 +66,36 @@ StageVertex hs_main(InputPatch<StageVertex, 3> patch, uint id : SV_OutputControl
     o.color.x += patch[id].color.x;
     return o;
 }
+#ifdef STAGE_TESS_LINE
+[domain("isoline")]
+StageVertex ds_main(StageFactors factors, const OutputPatch<StageVertex, 3> patch, float2 coord : SV_DomainLocation)
+#else
 [domain("tri")]
 StageVertex ds_main(StageFactors factors, const OutputPatch<StageVertex, 3> patch, float3 coord : SV_DomainLocation)
+#endif
 {
     StageVertex o;
+#ifdef STAGE_TESS_POINT
+#ifdef STAGE_TESS_IMAGE
+    o.position = float4(0, coord.x * 1.25 + coord.y * 0.75 - 0.625, 0, 1);
+#else
+    o.position = float4(0, 0, 0, 1);
+#endif
+#elif defined(STAGE_TESS_LINE)
+#ifdef STAGE_TESS_IMAGE
+    o.position = float4(0, 2 - coord.x * 4, 0, 1);
+#else
+    o.position = float4(coord.x * 2 - 1, 0, 0, 1);
+#endif
+#else
     o.position = patch[0].position * coord.x + patch[1].position * coord.y + patch[2].position * coord.z;
+#endif
+#ifdef STAGE_TESS_COORD
+    o.color = float4(coord, 1);
+#else
     o.color = read_tag(4);
     o.color.x += patch[0].color.x;
+#endif
     return o;
 }
 #ifndef STAGE_BINDING_SM5
