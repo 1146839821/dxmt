@@ -759,20 +759,22 @@ convert_dxbc_vertex_for_geometry_shader(
         index_buffer_element_type,
         builder.CreateGEP(index_buffer_element_type, index_buffer, {builder.CreateAdd(start_index, global_index_id)})
     );
-    // so 0xFFFF is mapped to 0xFFFFFFFF, other values are zero-extended
-    resource_map.vertex_id = builder.CreateSub(
-      builder.CreateZExt(
-        builder.CreateAdd(
-          vertex_id, llvm::ConstantInt::get(index_buffer_element_type, 1)
-        ),
-        types._int
-      ),
-      llvm::ConstantInt::get(types._int, 1)
-    );
+    resource_map.vertex_id = builder.CreateZExtOrTrunc(vertex_id, types._int);
 
-    builder.CreateCondBr(
-        builder.CreateICmp(llvm::CmpInst::ICMP_NE, builder.getInt32(-1), resource_map.vertex_id), active, will_dispatch
-    );
+    // D3D11 reserves the index-format maximum for indexed draws, including
+    // lists. D3D12 chooses a cut value (or disables it) in the graphics PSO.
+    if (!(shader_flags & SM50_SHADER_FLAG_GEOMETRY_CUT_DISABLED)) {
+      uint32_t cut = ia_layout->index_buffer_format == SM50_INDEX_BUFFER_FORMAT_UINT16 ? 0xffffu : 0xffffffffu;
+      if (shader_flags & SM50_SHADER_FLAG_GEOMETRY_CUT_16)
+        cut = 0xffffu;
+      else if (shader_flags & SM50_SHADER_FLAG_GEOMETRY_CUT_32)
+        cut = 0xffffffffu;
+      builder.CreateCondBr(
+          builder.CreateICmpNE(resource_map.vertex_id, builder.getInt32(cut)), active, will_dispatch
+      );
+    } else {
+      builder.CreateBr(active);
+    }
   } else {
     resource_map.vertex_id = global_index_id;
     builder.CreateBr(active);

@@ -783,7 +783,7 @@ bool CheckTriangleStripAdjacency(const char *index_mode, UINT count,
   const bool index32 = std::strcmp(index_mode, "u32") == 0;
   if ((indexed && !index32 && std::strcmp(index_mode, "u16")) || count > 280 ||
       (gs_instances != 1 && gs_instances != 3) || (cut_pattern && !indexed) ||
-      (perf && (indexed || count != 40 || gs_instances != 1)))
+      (perf && (count != 40 || gs_instances != 1)))
     return false;
   // Seven point pixels per GS invocation make duplicates observable through
   // additive blending, including primitives incorrectly created in a tail.
@@ -862,7 +862,8 @@ float4 ps_main(O input) : SV_Target { return input.value; }
     if ((cut_pattern == 1 &&
          (i == 7 || i == 18 || i == 19 || i == 27 || i == 56)) ||
         (cut_pattern == 2 && (i == 27 || i == 28 || i == 55)) ||
-        (cut_pattern == 3 && (i == 255 || i == 256 || i == 257)))
+        (cut_pattern == 3 && (i == 255 || i == 256 || i == 257)) ||
+        (cut_pattern == 5 && i == 6))
       indices[first + i] = index32 ? ~0u : 0xffffu;
     indices16[first + i] = UINT16(indices[first + i]);
   }
@@ -905,7 +906,9 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   if (!check("adj blend", device->CreateBlendState(&blend_desc, &blend)))
     return false;
   context->IASetInputLayout(nullptr);
-  context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ);
+  context->IASetPrimitiveTopology(
+      cut_pattern == 5 ? D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ
+                       : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ);
   context->IASetIndexBuffer(
       ib.ptr(), index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
   context->VSSetShader(vertex.ptr(), nullptr, 0);
@@ -941,6 +944,12 @@ float4 ps_main(O input) : SV_Target { return input.value; }
     while (end < count && (!cut_pattern || indices[first + end] != cut))
       ++end;
     const UINT complete = (end - begin) & ~1u;
+    if (cut_pattern == 5) {
+      for (UINT i = begin; i + 6 <= end; i += 6)
+        assembled.push_back({{i, i + 1, i + 2, i + 3, i + 4, i + 5}});
+      begin = end < count ? end + 1 : count;
+      continue;
+    }
     const UINT segment_primitives = complete >= 6 ? (complete - 4) / 2 : 0;
     for (UINT p = 0; p < segment_primitives; ++p) {
       const UINT odd = p & 1, lead = 2 * p;
@@ -997,10 +1006,15 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   }
   context->Unmap(readback.ptr(), 0);
   if (perf) {
-    // The baseline has incorrect pixels and may emit more invocations. Report
-    // that count with timing, which is not a correctness or throughput oracle.
+    // Report the observed invocation count alongside wall-clock timings.
+    auto draw = [&] {
+      if (indexed)
+        context->DrawIndexedInstanced(count, 2, first, base, 0);
+      else
+        context->DrawInstanced(count, 2, base, 0);
+    };
     for (unsigned i = 0; i < 32; ++i)
-      context->DrawInstanced(count, 2, base, 0);
+      draw();
     context->CopyResource(readback.ptr(), target.ptr());
     if (!check("adj warm map",
                context->Map(readback.ptr(), 0, D3D11_MAP_READ, 0, &mapped)))
@@ -1009,7 +1023,7 @@ float4 ps_main(O input) : SV_Target { return input.value; }
     const auto start = std::chrono::steady_clock::now();
     constexpr unsigned iterations = 1000;
     for (unsigned i = 0; i < iterations; ++i)
-      context->DrawInstanced(count, 2, base, 0);
+      draw();
     context->Flush();
     const auto submitted = std::chrono::steady_clock::now();
     context->CopyResource(readback.ptr(), target.ptr());
@@ -1384,6 +1398,7 @@ int main(int argc, char **argv) {
                argc == 6 && !std::strcmp(argv[5], "--cuts")            ? 1
                : argc == 6 && !std::strcmp(argv[5], "--cuts-boundary") ? 2
                : argc == 6 && !std::strcmp(argv[5], "--cuts-scan")     ? 3
+               : argc == 6 && !std::strcmp(argv[5], "--list-cut")      ? 5
                                                                        : 0)
                ? 0
                : 1;

@@ -99,7 +99,9 @@ so_index_segments(
   ulong indices;
   so_index_input(p, count, indices, bound);
   uint marker = 0;
-  if (i < count) {
+  // With strip cut disabled, every index is vertex data and the first scan
+  // has no segment markers; avoid reading the input buffer at all.
+  if ((p.flags & kSOHasCut) && i < count) {
     const uint index = i >= bound          ? 0
                        : p.index_size == 2 ? uint(reinterpret_cast<device const ushort *>(indices)[i])
                                            : reinterpret_cast<device const uint *>(indices)[i];

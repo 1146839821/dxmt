@@ -5058,3 +5058,29 @@ bounds, indirect/predication, and lifetime/barrier handling in both APIs. The
 existing stream-output parallel index scan is a candidate to share; its binding,
 resource and indirect semantics must be verified before reuse. Detailed evidence:
 `../dxmt-test/n11-adj-restart-20261028/N11-adj-restart.md`.
+
+### AIRCONV geometry index cut mode (2026-10-29)
+
+D3D12 AIRCONV geometry now passes the PSO's disabled/16-bit/32-bit cut mode to
+object shader conversion. A disabled cut leaves maximum indices as vertex data;
+D3D11 continues to use the index-format maximum even for list topologies, as
+specified in D3D11.3 section 8.12. The shared GPU index scan also honors its
+cut-enable flag, so it can summarize an uncut indexed draw without treating a
+maximum index as a segment boundary. AIRCONV cache version 30→32 invalidates
+previous geometry conversions (31 was used only during local development). A
+version-30 cache produced version-32 entries for three matching shader keys.
+
+The D3D12 adjacency image probe now covers maximum indices with cut disabled,
+including list topology and a single-command indexed ExecuteIndirect. On both
+index widths these failed on the old build and passed on the private and
+no-private candidate. D3D11 list cut at a primitive
+boundary remains a passing control. Native Metal scan comparisons cover both
+index widths, enabled/disabled cut, direct/indirect arguments and three-level
+scans; existing D3D11/D3D12 stream-output controls pass. Metal API and GPU
+validation were enabled. The work and its limits are recorded in
+`../dxmt-test/n11-adj-restart-20261028/N11-cut-mode.md`.
+
+**General strip restart remains OPEN:** segment prefixes are not yet connected
+to geometry assembly, so odd cut positions, winding, adjacency and continuous
+PrimitiveID after cuts remain incorrect. The narrowly tested D3D11 list control
+does not establish arbitrary list restart support. No capability is promoted.

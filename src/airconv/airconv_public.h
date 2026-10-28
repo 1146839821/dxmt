@@ -5,8 +5,8 @@
 #ifndef __AIRCONV_H
 #define __AIRCONV_H
 
-/* 30 invalidates AIR caches containing old triangle-strip adjacency assembly. */
-#define AIRCONV_VERSION 30
+/* 32 invalidates AIR caches containing old geometry index-cut handling. */
+#define AIRCONV_VERSION 32
 
 #ifdef __cplusplus
 #include <string>
@@ -237,6 +237,11 @@ enum SM50_SHADER_FLAG {
   SM50_SHADER_FLAG_SAMPLE_NAN_TO_ZERO = 1 << 0,
   SM50_SHADER_FLAG_DEFUSE_FMA = 1 << 1,
   SM50_SHADER_FLAG_EMIT_SO_INDIRECT = 1 << 2,
+  // D3D12 geometry PSOs specify the cut value independently of index format.
+  // With none of these flags, indexed D3D11 draws use their format maximum.
+  SM50_SHADER_FLAG_GEOMETRY_CUT_DISABLED = 1 << 3,
+  SM50_SHADER_FLAG_GEOMETRY_CUT_16 = 1 << 4,
+  SM50_SHADER_FLAG_GEOMETRY_CUT_32 = 1 << 5,
 };
 
 struct SM50_SHADER_COMMON_DATA {

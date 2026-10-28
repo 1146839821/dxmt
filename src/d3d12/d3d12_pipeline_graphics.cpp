@@ -728,6 +728,19 @@ public:
     SM50_SHADER_COMMON_DATA common = {};
     common.type = SM50_SHADER_COMMON;
     common.metal_version = SM50_SHADER_METAL_310;
+    switch (pDesc->IBStripCutValue) {
+    case D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED:
+      common.flags = SM50_SHADER_FLAG_GEOMETRY_CUT_DISABLED;
+      break;
+    case D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF:
+      common.flags = SM50_SHADER_FLAG_GEOMETRY_CUT_16;
+      break;
+    case D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF:
+      common.flags = SM50_SHADER_FLAG_GEOMETRY_CUT_32;
+      break;
+    default:
+      return E_INVALIDARG;
+    }
 
     const void *root_signature = nullptr;
     size_t root_signature_size = 0;

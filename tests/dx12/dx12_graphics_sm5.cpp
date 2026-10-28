@@ -1267,7 +1267,8 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   Com<ID3D12RootSignature> root;
   Com<ID3D12PipelineState> pso;
   Com<ID3D12DescriptorHeap> rtvs;
-  Com<ID3D12Resource> ib, target, readback;
+  Com<ID3D12Resource> ib, target, readback, indirect_args;
+  Com<ID3D12CommandSignature> indirect_signature;
   Com<ID3D12Fence> fence;
   Com<ID3DBlob> blob;
   if (!CheckHR("adj device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
@@ -1289,7 +1290,8 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   desc.GS = {gs.data(), gs.size()};
   desc.PS = {ps.data(), ps.size()};
   desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-  if (cut_pattern)
+  const bool cut_enabled = cut_pattern && cut_pattern < 4;
+  if (cut_enabled)
     desc.IBStripCutValue = index32
                                ? D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF
                                : D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
@@ -1323,7 +1325,8 @@ float4 ps_main(O input) : SV_Target { return input.value; }
     if ((cut_pattern == 1 &&
          (i == 7 || i == 18 || i == 19 || i == 27 || i == 56)) ||
         (cut_pattern == 2 && (i == 27 || i == 28 || i == 55)) ||
-        (cut_pattern == 3 && (i == 255 || i == 256 || i == 257)))
+        (cut_pattern == 3 && (i == 255 || i == 256 || i == 257)) ||
+        ((cut_pattern == 4 || cut_pattern == 5 || cut_pattern == 6) && i == 10))
       indices[first + i] = index32 ? ~0u : 0xffffu;
   }
   auto upload = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
@@ -1389,13 +1392,42 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   D3D12_RECT scissor = {0, 0, LONG(width), LONG(height)};
   list->RSSetViewports(1, &viewport);
   list->RSSetScissorRects(1, &scissor);
-  list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ);
+  list->IASetPrimitiveTopology(cut_pattern == 5
+                                   ? D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ
+                                   : D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ);
   if (indexed) {
     D3D12_INDEX_BUFFER_VIEW view = {
         ib->GetGPUVirtualAddress(), UINT(ib_desc.Width),
         index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT};
     list->IASetIndexBuffer(&view);
-    list->DrawIndexedInstanced(count, 2, first, base, 0);
+    if (cut_pattern == 6) {
+      D3D12_INDIRECT_ARGUMENT_DESC argument_desc = {};
+      argument_desc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+      D3D12_COMMAND_SIGNATURE_DESC signature_desc = {};
+      signature_desc.ByteStride = sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);
+      signature_desc.NumArgumentDescs = 1;
+      signature_desc.pArgumentDescs = &argument_desc;
+      auto argument_buffer_desc =
+          BufferDescription(sizeof(D3D12_DRAW_INDEXED_ARGUMENTS));
+      if (!CheckHR("adj indirect signature",
+                   device->CreateCommandSignature(
+                       &signature_desc, nullptr,
+                       IID_PPV_ARGS(&indirect_signature))) ||
+          !CheckHR("adj indirect buffer",
+                   device->CreateCommittedResource(
+                       &upload, D3D12_HEAP_FLAG_NONE, &argument_buffer_desc,
+                       D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                       IID_PPV_ARGS(&indirect_args))) ||
+          !CheckHR("adj indirect map", indirect_args->Map(0, nullptr, &mapped)))
+        return false;
+      *static_cast<D3D12_DRAW_INDEXED_ARGUMENTS *>(mapped) = {count, 2, first,
+                                                              INT(base), 0};
+      indirect_args->Unmap(0, nullptr);
+      list->ExecuteIndirect(indirect_signature.ptr(), 1, indirect_args.ptr(), 0,
+                            nullptr, 0);
+    } else {
+      list->DrawIndexedInstanced(count, 2, first, base, 0);
+    }
   } else
     list->DrawInstanced(count, 2, base, 0);
   D3D12_RESOURCE_BARRIER barrier = {};
@@ -1433,10 +1465,14 @@ float4 ps_main(O input) : SV_Target { return input.value; }
     UINT input[6];
   };
   std::vector<Primitive> assembled;
-  for (UINT begin = 0; begin < count;) {
+  if (cut_pattern == 5) {
+    for (UINT i = 0; i + 6 <= count; i += 6)
+      assembled.push_back({{i, i + 1, i + 2, i + 3, i + 4, i + 5}});
+  }
+  for (UINT begin = 0; cut_pattern != 5 && begin < count;) {
     UINT end = begin;
     const UINT cut = index32 ? ~0u : 0xffffu;
-    while (end < count && (!cut_pattern || indices[first + end] != cut))
+    while (end < count && (!cut_enabled || indices[first + end] != cut))
       ++end;
     const UINT complete = (end - begin) & ~1u;
     const UINT segment_primitives = complete >= 6 ? (complete - 4) / 2 : 0;
@@ -1504,10 +1540,13 @@ int main(int argc, char **argv) {
             compiler, argv[2], UINT(std::strtoul(argv[3], nullptr, 10)),
             UINT(std::strtoul(argv[4], nullptr, 10)),
             argc == 6 && !std::strcmp(argv[5], "--wrong-expected"),
-            argc == 6 && !std::strcmp(argv[5], "--cuts")            ? 1
-            : argc == 6 && !std::strcmp(argv[5], "--cuts-boundary") ? 2
-            : argc == 6 && !std::strcmp(argv[5], "--cuts-scan")     ? 3
-                                                                    : 0);
+            argc == 6 && !std::strcmp(argv[5], "--cuts")                  ? 1
+            : argc == 6 && !std::strcmp(argv[5], "--cuts-boundary")       ? 2
+            : argc == 6 && !std::strcmp(argv[5], "--cuts-scan")           ? 3
+            : argc == 6 && !std::strcmp(argv[5], "--no-cut-max")          ? 4
+            : argc == 6 && !std::strcmp(argv[5], "--list-max")            ? 5
+            : argc == 6 && !std::strcmp(argv[5], "--no-cut-max-indirect") ? 6
+                                                                          : 0);
     FreeLibrary(module);
     return ok ? 0 : 1;
   }
