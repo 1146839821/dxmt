@@ -1223,12 +1223,13 @@ bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &tes
 }
 
 bool RunTriangleStripAdjacency(pD3DCompile compiler, const char *index_mode,
-                               UINT count, UINT gs_instances, bool wrong) {
+                               UINT count, UINT gs_instances, bool wrong,
+                               UINT cut_pattern) {
   using dxmt::Com;
   const bool indexed = std::strcmp(index_mode, "none") != 0;
   const bool index32 = std::strcmp(index_mode, "u32") == 0;
-  if ((indexed && !index32 && std::strcmp(index_mode, "u16")) || count > 96 ||
-      (gs_instances != 1 && gs_instances != 3))
+  if ((indexed && !index32 && std::strcmp(index_mode, "u16")) || count > 280 ||
+      (gs_instances != 1 && gs_instances != 3) || (cut_pattern && !indexed))
     return false;
   std::string source =
       std::string("#define GS_COUNT ") + std::to_string(gs_instances) + R"HLSL(
@@ -1243,7 +1244,7 @@ void gs_main(triangleadj V input[6], uint primitive : SV_PrimitiveID,
   for (uint k = 0; k < 7; ++k) {
     uint x = primitive * 7 + k;
     uint y = input[0].instance * GS_COUNT + gs_instance;
-    O o; o.position = float4((float(x)+0.5)/512.0*2.0-1.0,
+    O o; o.position = float4((float(x)+0.5)/1024.0*2.0-1.0,
                              1.0-(float(y)+0.5)/(2.0*GS_COUNT)*2.0,0,1);
     o.value = float4(k < 6 ? float(input[min(k, 5u)].id + 1) : 1.0, 1, 1, 1);
     output.Append(o);
@@ -1288,6 +1289,10 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   desc.GS = {gs.data(), gs.size()};
   desc.PS = {ps.data(), ps.size()};
   desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  if (cut_pattern)
+    desc.IBStripCutValue = index32
+                               ? D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF
+                               : D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
   desc.NumRenderTargets = 1;
   desc.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
   desc.SampleDesc.Count = 1;
@@ -1310,11 +1315,17 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   if (pipeline->shader_backend != dxmt::D3D12ShaderBackend::Airconv ||
       !pipeline->airconv_geometry)
     return false;
-  constexpr UINT width = 512, first = 3, base = 5;
+  constexpr UINT width = 1024, first = 3, base = 5;
   const UINT height = 2 * gs_instances, pitch = width * 16;
   std::vector<UINT> indices(first + std::max(count, 1u));
-  for (UINT i = 0; i < count; ++i)
+  for (UINT i = 0; i < count; ++i) {
     indices[first + i] = (i * 7 + 3) % 251;
+    if ((cut_pattern == 1 &&
+         (i == 7 || i == 18 || i == 19 || i == 27 || i == 56)) ||
+        (cut_pattern == 2 && (i == 27 || i == 28 || i == 55)) ||
+        (cut_pattern == 3 && (i == 255 || i == 256 || i == 257)))
+      indices[first + i] = index32 ? ~0u : 0xffffu;
+  }
   auto upload = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
   auto readback_heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
   auto default_heap = HeapProperties(D3D12_HEAP_TYPE_DEFAULT);
@@ -1416,30 +1427,44 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   if (!done || !CheckHR("adj status", device->GetDeviceRemovedReason()))
     return false;
   std::vector<float> expected(width * height * 4, 0);
-  const UINT completed = count & ~1u;
-  const UINT primitives = completed >= 6 ? (completed - 4) / 2 : 0;
+  // Segment the input independently of the GPU assembly path. Primitive IDs
+  // continue across cuts and restart for each draw instance.
+  struct Primitive {
+    UINT input[6];
+  };
+  std::vector<Primitive> assembled;
+  for (UINT begin = 0; begin < count;) {
+    UINT end = begin;
+    const UINT cut = index32 ? ~0u : 0xffffu;
+    while (end < count && (!cut_pattern || indices[first + end] != cut))
+      ++end;
+    const UINT complete = (end - begin) & ~1u;
+    const UINT segment_primitives = complete >= 6 ? (complete - 4) / 2 : 0;
+    for (UINT p = 0; p < segment_primitives; ++p) {
+      const UINT odd = p & 1, lead = 2 * p;
+      assembled.push_back(
+          {{begin + lead, begin + (odd ? lead + 3 : (p ? lead - 2 : 1)),
+            begin + 2 * (p + 1 + odd),
+            begin + (p + 1 == segment_primitives ? complete - 1 : lead + 6),
+            begin + 2 * (p + 2 - odd), begin + (odd ? lead - 2 : lead + 3)}});
+    }
+    begin = end < count ? end + 1 : count;
+  }
+  const UINT primitives = UINT(assembled.size());
   for (UINT instance = 0; instance < 2; ++instance)
     for (UINT g = 0; g < gs_instances; ++g)
-      for (UINT p = 0; p < primitives; ++p) {
-        const UINT odd = p & 1, lead = 2 * p;
-        const UINT inputs[] = {lead,
-                               odd ? lead + 3 : (p ? lead - 2 : 1),
-                               2 * (p + 1 + odd),
-                               p + 1 == primitives ? completed - 1 : lead + 6,
-                               2 * (p + 2 - odd),
-                               odd ? lead - 2 : lead + 3};
+      for (UINT p = 0; p < primitives; ++p)
         for (UINT k = 0; k < 7; ++k) {
           float *out =
               &expected[((instance * gs_instances + g) * width + p * 7 + k) *
                         4];
-          out[0] =
-              k == 6
-                  ? 1.0f
-                  : float((indexed ? indices[first + inputs[k]] : inputs[k]) +
-                          1);
+          out[0] = k == 6
+                       ? 1.0f
+                       : float((indexed ? indices[first + assembled[p].input[k]]
+                                        : assembled[p].input[k]) +
+                               1);
           out[1] = out[2] = out[3] = 1;
         }
-      }
   if (wrong && primitives)
     expected[0] += 1;
   if (!CheckHR("adj readback map", readback->Map(0, nullptr, &mapped)))
@@ -1449,7 +1474,7 @@ float4 ps_main(O input) : SV_Target { return input.value; }
     if (static_cast<const float *>(mapped)[i] != expected[i]) {
       std::cerr << "FAIL D3D12 TRIANGLESTRIP_ADJ mode=" << index_mode
                 << " count=" << count << " gs=" << gs_instances
-                << " element=" << i
+                << " cut_pattern=" << cut_pattern << " element=" << i
                 << " got=" << static_cast<const float *>(mapped)[i]
                 << " expected=" << expected[i] << "\n";
       ok = false;
@@ -1459,7 +1484,7 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   if (ok)
     std::cout << "D3D12 TRIANGLESTRIP_ADJ mode=" << index_mode
               << " count=" << count << " gs=" << gs_instances
-              << " primitives=" << primitives
+              << " cut_pattern=" << cut_pattern << " primitives=" << primitives
               << " checked_pixels=" << width * height << " PASS\n";
   return ok;
 }
@@ -1478,7 +1503,11 @@ int main(int argc, char **argv) {
         RunTriangleStripAdjacency(
             compiler, argv[2], UINT(std::strtoul(argv[3], nullptr, 10)),
             UINT(std::strtoul(argv[4], nullptr, 10)),
-            argc == 6 && !std::strcmp(argv[5], "--wrong-expected"));
+            argc == 6 && !std::strcmp(argv[5], "--wrong-expected"),
+            argc == 6 && !std::strcmp(argv[5], "--cuts")            ? 1
+            : argc == 6 && !std::strcmp(argv[5], "--cuts-boundary") ? 2
+            : argc == 6 && !std::strcmp(argv[5], "--cuts-scan")     ? 3
+                                                                    : 0);
     FreeLibrary(module);
     return ok ? 0 : 1;
   }

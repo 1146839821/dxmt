@@ -5030,3 +5030,31 @@ established query, ordering, clipping or stream-output semantics; it is not a
 production workaround. PointStream, GS instancing and prior gaps remain OPEN.
 Reproduction, controls, native validation, hashes and limitations:
 `../dxmt-test/n11-msc-point-stream-20261028/N11-msc-point-stream.md`.
+
+### AIRCONV triangle-strip adjacency restart regression (2026-10-28)
+
+The existing D3D11 and D3D12 image probes now independently segment indexed
+strips at restart indices, retain consecutive and short segments, reset winding
+within each segment and assign consecutive PrimitiveIDs across segments. The
+D3D11.3 indexed-draw pseudocode resets PrimitiveID per draw instance, not at a
+cut. The D3D12 probe explicitly enables the matching 16/32-bit strip-cut value.
+The optional `--cuts`, `--cuts-boundary` and `--cuts-scan` cases exercise cuts at
+odd/even positions, around the 28-vertex object group boundary, and around the
+256-index scan boundary. Each GS invocation records all six adjacency inputs
+and an additive invocation count for two draw instances; GS instance count 3 is
+also exercised. A deliberately wrong reference checks the oracle.
+
+**Restart remains OPEN.** Each of the private and no-private matrices has ten
+passing no-cut controls, four deliberately wrong references that fail, and twelve
+cut cases that fail on the unchanged implementation. Both matrices cover D3D11
+and D3D12 with both index widths and pass the native-loading and Metal validation
+checks.
+For example, the first boundary case reads 46 where the independently assembled
+reference expects 39. This test-only change does not alter the runtime or claim
+that cut/restart, indirect arguments, GPU-written indices, or output ordering
+are fixed. A production solution must account for GPU-visible segment metadata,
+per-segment winding and boundary adjacency, PrimitiveID prefixes, indexed draw
+bounds, indirect/predication, and lifetime/barrier handling in both APIs. The
+existing stream-output parallel index scan is a candidate to share; its binding,
+resource and indirect semantics must be verified before reuse. Detailed evidence:
+`../dxmt-test/n11-adj-restart-20261028/N11-adj-restart.md`.
