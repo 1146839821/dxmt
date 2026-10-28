@@ -5,6 +5,8 @@
 #include <d3dcompiler.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -14,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "../../src/winemetal/winemetal.h"
 #include "../../src/util/util_md5.hpp"
 #include "../../src/util/com/com_pointer.hpp"
 
@@ -771,10 +774,345 @@ Output main(Input input,uint vertex : SV_VertexID,uint instance : SV_InstanceID)
   return true;
 }
 
+// Intercept before the native encoder receives an erroneous huge direct
+// dispatch. The baseline indirect marshal can also generate huge dispatches, so
+// indirect tests have an explicit observe-only mode that never submits them to
+// Metal.
+class TessellationDispatchObserver {
+  ULONG_PTR *entry_ = nullptr;
+  void *original_ = nullptr;
+  inline static void *render_ = nullptr;
+  inline static std::atomic<unsigned> draws_{0}, rejected_{0};
+  inline static bool block_indirect_ = false;
+  static void Render(obj_handle_t encoder, const wmtcmd_base *head) {
+    bool reject = false;
+    for (auto *cmd = head; cmd;
+         cmd = static_cast<const wmtcmd_base *>(cmd->next.ptr)) {
+      uint32_t groups = 0;
+      if (cmd->type == WMTRenderCommandDXMTTessellationMeshDraw) {
+        groups =
+            reinterpret_cast<const wmtcmd_render_dxmt_tessellation_mesh_draw *>(
+                cmd)
+                ->patch_per_mesh_instance;
+        ++draws_;
+      } else if (cmd->type == WMTRenderCommandDXMTTessellationMeshDrawIndexed) {
+        groups =
+            reinterpret_cast<
+                const wmtcmd_render_dxmt_tessellation_mesh_draw_indexed *>(cmd)
+                ->patch_per_mesh_instance;
+        ++draws_;
+      } else if (cmd->type ==
+                     WMTRenderCommandDXMTTessellationMeshDrawIndirect ||
+                 cmd->type ==
+                     WMTRenderCommandDXMTTessellationMeshDrawIndexedIndirect) {
+        ++draws_;
+        reject |= block_indirect_;
+      }
+      if (groups > 16) {
+        std::cerr << "unsafe tessellation object groups=" << groups
+                  << " GPU_DRAW_SUPPRESSED\n";
+        reject = true;
+      }
+    }
+    if (reject) {
+      ++rejected_;
+      return;
+    }
+    reinterpret_cast<decltype(&Render)>(render_)(encoder, head);
+  }
+
+public:
+  bool Install(bool block_indirect) {
+    auto *base = reinterpret_cast<BYTE *>(GetModuleHandleA("d3d11.dll"));
+    if (!base)
+      return false;
+    auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
+    auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+    auto *imports = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR *>(
+        base + nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT]
+                   .VirtualAddress);
+    for (; imports->Name; ++imports) {
+      if (!imports->OriginalFirstThunk)
+        continue;
+      auto *names = reinterpret_cast<IMAGE_THUNK_DATA *>(
+          base + imports->OriginalFirstThunk);
+      auto *iat =
+          reinterpret_cast<IMAGE_THUNK_DATA *>(base + imports->FirstThunk);
+      for (; names->u1.AddressOfData; ++names, ++iat) {
+        if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal))
+          continue;
+        auto *name = reinterpret_cast<IMAGE_IMPORT_BY_NAME *>(
+            base + names->u1.AddressOfData);
+        if (std::strcmp(reinterpret_cast<const char *>(name->Name),
+                        "MTLRenderCommandEncoder_encodeCommands"))
+          continue;
+        DWORD old;
+        if (!VirtualProtect(&iat->u1.Function, sizeof(iat->u1.Function),
+                            PAGE_READWRITE, &old))
+          return false;
+        original_ = reinterpret_cast<void *>(iat->u1.Function);
+        render_ = original_;
+        entry_ = &iat->u1.Function;
+        block_indirect_ = block_indirect;
+        draws_ = rejected_ = 0;
+        InterlockedExchangePointer(reinterpret_cast<void *volatile *>(entry_),
+                                   reinterpret_cast<void *>(&Render));
+        VirtualProtect(entry_, sizeof(*entry_), old, &old);
+        return true;
+      }
+    }
+    return false;
+  }
+  unsigned Draws() const { return draws_; }
+  unsigned Rejected() const { return rejected_; }
+  ~TessellationDispatchObserver() {
+    if (entry_) {
+      DWORD old;
+      if (VirtualProtect(entry_, sizeof(*entry_), PAGE_READWRITE, &old)) {
+        InterlockedExchangePointer(reinterpret_cast<void *volatile *>(entry_),
+                                   original_);
+        VirtualProtect(entry_, sizeof(*entry_), old, &old);
+      }
+    }
+  }
+};
+
+bool CheckTessellationPatch(const char *api, UINT count, bool observe_only,
+                            bool non_patch, bool perf) {
+  using dxmt::Com;
+  bool indirect =
+      !std::strcmp(api, "indirect") || !std::strcmp(api, "indexed-indirect");
+  bool indexed = !std::strcmp(api, "indexed") ||
+                 !std::strcmp(api, "indexed-instanced") ||
+                 !std::strcmp(api, "indexed-indirect");
+  bool instanced =
+      !std::strcmp(api, "instanced") || !std::strcmp(api, "indexed-instanced");
+  if (!indirect && !indexed && !instanced && std::strcmp(api, "direct"))
+    return false;
+  if (count < 1 || count > 7 || (observe_only && !indirect) ||
+      (perf && (std::strcmp(api, "direct") || count != 3 || non_patch)))
+    return false;
+  static constexpr char source[] = R"HLSL(
+struct V { float4 pos : SV_Position; };
+V vs_main(uint id : SV_VertexID) {
+  V v; uint i = id % 3;
+  v.pos = i == 0 ? float4(-1,-1,0,1) : i == 1 ? float4(-1,3,0,1) : float4(3,-1,0,1); return v;
+}
+struct Factors { float edge[3] : SV_TessFactor; float inside : SV_InsideTessFactor; };
+Factors constants(InputPatch<V,3> p, uint id : SV_PrimitiveID) { Factors f = {{1,1,1},1}; return f; }
+[domain("tri")][partitioning("integer")][outputtopology("triangle_cw")]
+[outputcontrolpoints(3)][patchconstantfunc("constants")]
+V hs_main(InputPatch<V,3> p, uint id : SV_OutputControlPointID) { return p[id]; }
+[domain("tri")]
+V ds_main(Factors f, const OutputPatch<V,3> p, float3 coord : SV_DomainLocation) {
+  V v; v.pos = p[0].pos * coord.x + p[1].pos * coord.y + p[2].pos * coord.z; return v;
+}
+float4 ps_main(V v) : SV_Target { return float4(0,1,0,1); }
+)HLSL";
+  auto check = [](const char *label, HRESULT hr) {
+    if (FAILED(hr))
+      std::cerr << label << " failed 0x" << std::hex << UINT(hr) << std::dec
+                << "\n";
+    return SUCCEEDED(hr);
+  };
+  Com<ID3DBlob> vs, hs, ds, ps, errors;
+  auto compile = [&](const char *entry, const char *target,
+                     Com<ID3DBlob> &out) {
+    ID3DBlob *error = nullptr;
+    HRESULT hr = D3DCompile(source, sizeof(source) - 1, "zero_patch.hlsl",
+                            nullptr, nullptr, entry, target,
+                            D3DCOMPILE_ENABLE_STRICTNESS, 0, &out, &error);
+    if (error) {
+      std::cerr << static_cast<const char *>(error->GetBufferPointer()) << "\n";
+      error->Release();
+    }
+    return check(entry, hr);
+  };
+  if (!compile("vs_main", "vs_5_0", vs) || !compile("hs_main", "hs_5_0", hs) ||
+      !compile("ds_main", "ds_5_0", ds) || !compile("ps_main", "ps_5_0", ps))
+    return false;
+  Com<ID3D11Device> device;
+  Com<ID3D11DeviceContext> context;
+  D3D_FEATURE_LEVEL feature = D3D_FEATURE_LEVEL_11_0, actual;
+  if (!check("device",
+             D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+                               &feature, 1, D3D11_SDK_VERSION, &device, &actual,
+                               &context)))
+    return false;
+  TessellationDispatchObserver observer;
+  if (!observer.Install(observe_only)) {
+    std::cerr << "cannot install safe tessellation observer\n";
+    return false;
+  }
+  Com<ID3D11VertexShader> vertex;
+  Com<ID3D11HullShader> hull;
+  Com<ID3D11DomainShader> domain;
+  Com<ID3D11PixelShader> pixel;
+  if (!check("VS", device->CreateVertexShader(vs->GetBufferPointer(),
+                                              vs->GetBufferSize(), nullptr,
+                                              &vertex)) ||
+      !check("HS",
+             device->CreateHullShader(hs->GetBufferPointer(),
+                                      hs->GetBufferSize(), nullptr, &hull)) ||
+      !check("DS", device->CreateDomainShader(ds->GetBufferPointer(),
+                                              ds->GetBufferSize(), nullptr,
+                                              &domain)) ||
+      !check("PS",
+             device->CreatePixelShader(ps->GetBufferPointer(),
+                                       ps->GetBufferSize(), nullptr, &pixel)))
+    return false;
+  constexpr UINT width = 32, height = 32;
+  D3D11_TEXTURE2D_DESC t = {};
+  t.Width = width;
+  t.Height = height;
+  t.MipLevels = t.ArraySize = t.SampleDesc.Count = 1;
+  t.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  t.BindFlags = D3D11_BIND_RENDER_TARGET;
+  Com<ID3D11Texture2D> target, staging;
+  Com<ID3D11RenderTargetView> rtv;
+  if (!check("target", device->CreateTexture2D(&t, nullptr, &target)) ||
+      !check("rtv",
+             device->CreateRenderTargetView(target.ptr(), nullptr, &rtv)))
+    return false;
+  t.BindFlags = 0;
+  t.Usage = D3D11_USAGE_STAGING;
+  t.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  if (!check("staging", device->CreateTexture2D(&t, nullptr, &staging)))
+    return false;
+  Com<ID3D11RasterizerState> rasterizer;
+  D3D11_RASTERIZER_DESC rd = {};
+  rd.FillMode = D3D11_FILL_SOLID;
+  rd.CullMode = D3D11_CULL_NONE;
+  rd.DepthClipEnable = TRUE;
+  if (!check("rasterizer", device->CreateRasterizerState(&rd, &rasterizer)))
+    return false;
+  const UINT16 indices[] = {0, 1, 2, 0, 1, 2, 0};
+  D3D11_BUFFER_DESC b = {};
+  b.ByteWidth = sizeof(indices);
+  b.Usage = D3D11_USAGE_IMMUTABLE;
+  b.BindFlags = D3D11_BIND_INDEX_BUFFER;
+  D3D11_SUBRESOURCE_DATA init = {indices, 0, 0};
+  Com<ID3D11Buffer> ib, args;
+  if (!check("IB", device->CreateBuffer(&b, &init, &ib)))
+    return false;
+  UINT indirect_args[] = {count, 1, 0, 0, 0};
+  b = {};
+  b.ByteWidth = sizeof(indirect_args);
+  b.Usage = D3D11_USAGE_DEFAULT;
+  b.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+  init.pSysMem = indirect_args;
+  if (!check("arguments", device->CreateBuffer(&b, &init, &args)))
+    return false;
+  context->IASetPrimitiveTopology(
+      non_patch ? D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST
+                : D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+  context->IASetIndexBuffer(ib.ptr(), DXGI_FORMAT_R16_UINT, 0);
+  context->VSSetShader(vertex.ptr(), nullptr, 0);
+  context->HSSetShader(hull.ptr(), nullptr, 0);
+  context->DSSetShader(domain.ptr(), nullptr, 0);
+  context->PSSetShader(pixel.ptr(), nullptr, 0);
+  auto view = rtv.ptr();
+  context->OMSetRenderTargets(1, &view, nullptr);
+  D3D11_VIEWPORT vp = {0, 0, float(width), float(height), 0, 1};
+  context->RSSetViewports(1, &vp);
+  context->RSSetState(rasterizer.ptr());
+  const float clear[] = {0, 0, 0, 0};
+  context->ClearRenderTargetView(rtv.ptr(), clear);
+  if (indirect) {
+    if (indexed)
+      context->DrawIndexedInstancedIndirect(args.ptr(), 0);
+    else
+      context->DrawInstancedIndirect(args.ptr(), 0);
+  } else if (indexed) {
+    if (instanced)
+      context->DrawIndexedInstanced(count, 2, 0, 0, 0);
+    else
+      context->DrawIndexed(count, 0, 0);
+  } else if (instanced)
+    context->DrawInstanced(count, 2, 0, 0);
+  else
+    context->Draw(count, 0);
+  context->CopyResource(staging.ptr(), target.ptr());
+  D3D11_MAPPED_SUBRESOURCE mapped = {};
+  if (!check("Map", context->Map(staging.ptr(), 0, D3D11_MAP_READ, 0, &mapped)))
+    return false;
+  bool pixels_ok = true;
+  if (!observe_only && !observer.Rejected()) {
+    const BYTE expected[] = {0, BYTE(count >= 3 && !non_patch ? 255 : 0), 0,
+                             BYTE(count >= 3 && !non_patch ? 255 : 0)};
+    for (UINT y = 0; y < height; ++y)
+      for (UINT x = 0; x < width; ++x) {
+        auto *p = static_cast<const BYTE *>(mapped.pData) +
+                  y * mapped.RowPitch + x * 4;
+        if (std::memcmp(p, expected, 4)) {
+          pixels_ok = false;
+          break;
+        }
+      }
+  }
+  context->Unmap(staging.ptr(), 0);
+  const unsigned expected_draws =
+      non_patch ? 0 : (indirect || count >= 3 ? 1 : 0);
+  const bool accepted =
+      !observer.Rejected() && pixels_ok && observer.Draws() == expected_draws;
+  if (perf && accepted) {
+    // Compile/encode and drain a warm batch before timing the same PSO and IA
+    // state.
+    for (unsigned i = 0; i < 32; ++i)
+      context->Draw(3, 0);
+    context->CopyResource(staging.ptr(), target.ptr());
+    if (!check("warm Map",
+               context->Map(staging.ptr(), 0, D3D11_MAP_READ, 0, &mapped)))
+      return false;
+    context->Unmap(staging.ptr(), 0);
+    constexpr unsigned iterations = 1000;
+    const auto start = std::chrono::steady_clock::now();
+    for (unsigned i = 0; i < iterations; ++i)
+      context->Draw(3, 0);
+    context->Flush();
+    const auto submitted = std::chrono::steady_clock::now();
+    context->CopyResource(staging.ptr(), target.ptr());
+    if (!check("timed Map",
+               context->Map(staging.ptr(), 0, D3D11_MAP_READ, 0, &mapped)))
+      return false;
+    const auto completed = std::chrono::steady_clock::now();
+    context->Unmap(staging.ptr(), 0);
+    const auto submit_us =
+        std::chrono::duration<double, std::micro>(submitted - start).count();
+    const auto wait_us =
+        std::chrono::duration<double, std::micro>(completed - submitted)
+            .count();
+    std::cout << "TS perf iterations=" << iterations
+              << " submit_us=" << submit_us << " completion_wait_us=" << wait_us
+              << "\n";
+  }
+  std::cout << "TS api=" << api << " count=" << count
+            << " non_patch=" << non_patch
+            << " draw_commands=" << observer.Draws()
+            << " suppressed=" << observer.Rejected() << " pixels="
+            << (observe_only || observer.Rejected() ? "NOT_RUN"
+                : pixels_ok                         ? "PASS"
+                                                    : "FAIL")
+            << "\n";
+  context->ClearState();
+  context->Flush();
+  if (observe_only)
+    return observer.Draws() == 1 && observer.Rejected() == 1;
+  return accepted;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
   std::cout << std::unitbuf;
+  if ((argc == 4 || argc == 5) && !std::strcmp(argv[1], "--tessellation-patch"))
+    return CheckTessellationPatch(
+               argv[2], UINT(std::strtoul(argv[3], nullptr, 10)),
+               argc == 5 && !std::strcmp(argv[4], "--observe-only"),
+               argc == 5 && !std::strcmp(argv[4], "--non-patch"),
+               argc == 5 && !std::strcmp(argv[4], "--perf"))
+               ? 0
+               : 1;
   if (argc == 5 && !std::strcmp(argv[1], "--stream-output"))
     return RunStreamOutput(argv[2], argv[3], argv[4]) ? 0 : 1;
   if ((argc == 7 || argc == 8) && !std::strcmp(argv[1], "--point-stream"))

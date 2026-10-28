@@ -4816,3 +4816,31 @@ x64/Rosetta,clang23.1.1,native LLVM15,MSC4.0.1. Prior Wine/native stages and use
 .gitignore preserved. Full goal OPEN. Next user priority:D3D11 zero-complete TS
 patch guards,then GS adjacency lanes and MSC TS point/line output;requested feature
 gaps remain implementation work.
+
+### D3D11 TS incomplete patch dispatch (2026-10-28)
+
+Direct and indexed tessellation draws now return before parameter allocation for
+zero complete patches; indirect draws share the corrected GPU marshal, which
+writes zero dispatch for zero complete patches or instances. Zero control-point
+(non-patch) topology is rejected in both paths. Full patches with trailing
+incomplete control points retain floor division. Group-limit multiplication is
+64-bit; no public capability, shader ABI, backend or owner changes. The existing
+Apple7+ UINT64_MAX group limit remains, so this is not general work throttling.
+
+Baseline direct/indexed/instanced variants were intercepted before Metal with
+1,073,741,824 groups. A standalone run of the actual baseline GPU marshal read
+(536870912,1,1) for one or two vertices at four threads/patch without executing
+that indirect dispatch. The candidate passed all ten GPU marshal boundary cases.
+Native-loaded D3D11 passed 34 private and 22 no-private image/encoding cases,
+with Metal API and GPU validation, plus two three-pass SO controls. Inherited
+Wine builtin resolution ran old implementation despite the PE pathname and is
+excluded; the accepted override is `d3d11,d3d12,dxgi=n;winemetal=b`.
+
+Five interleaved warm samples of 1000 normal direct draws plus Flush: CPU submit
+median 72.3→68.9 us; subsequent copy/map completion wait 12741.3→14652.5 us,
+noisy wall-clock values, not GPU timestamps. Cold/other GPU/per-application
+performance NOT_RUN. Checks and products are O(1), with no new allocation, lock
+or encoder boundary. Evidence, commands, environment and limitations:
+`../dxmt-test/n11-zero-ts-patch-20261028/N11-zero-ts-patch.md`. Remaining user
+priorities: GS adjacency and MSC TS point/line, then the requested feature gaps;
+the overall goal remains open.

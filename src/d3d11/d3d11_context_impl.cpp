@@ -1554,6 +1554,12 @@ public:
       UINT NumControlPoint, UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation,
       UINT StartInstanceLocation
   ) {
+    if (!NumControlPoint)
+      return;
+    const auto PatchCountPerInstance = VertexCountPerInstance / NumControlPoint;
+    if (!PatchCountPerInstance)
+      return;
+
     auto draw_arguments_offset = PreAllocateArgumentBuffer(sizeof(DXMT_DRAW_ARGUMENTS), 32);
     auto max_object_threadgroups = max_object_threadgroups_;
     EmitOP([=](ArgumentEncodingContext &enc) {
@@ -1563,12 +1569,11 @@ public:
       draw_argument->InstanceCount = InstanceCount;
       draw_argument->StartInstance = StartInstanceLocation;
 
-      auto PatchCountPerInstance = VertexCountPerInstance / NumControlPoint;
       auto PatchPerGroup = 32 / enc.tess_threads_per_patch;
       auto ThreadsPerPatch = enc.tess_threads_per_patch;
       auto PatchPerObjectInstance = (PatchCountPerInstance - 1) / PatchPerGroup + 1;
 
-      if (PatchPerObjectInstance * InstanceCount > max_object_threadgroups) {
+      if (uint64_t(PatchPerObjectInstance) * InstanceCount > max_object_threadgroups) {
         WARN(
             "Omitted mesh draw (TS) because of too many object threadgroups (", PatchPerObjectInstance, "x",
             InstanceCount, ")"
@@ -1593,6 +1598,12 @@ public:
       UINT NumControlPoint, UINT IndexCountPerInstance, UINT StartIndexLocation, INT BaseVertexLocation,
       UINT InstanceCount, UINT BaseInstance
   ) {
+    if (!NumControlPoint)
+      return;
+    const auto PatchCountPerInstance = IndexCountPerInstance / NumControlPoint;
+    if (!PatchCountPerInstance)
+      return;
+
     auto IndexBufferOffset = state_.InputAssembler.IndexBufferOffset;
     auto draw_arguments_offset = PreAllocateArgumentBuffer(sizeof(DXMT_DRAW_INDEXED_ARGUMENTS), 32);
     auto max_object_threadgroups = max_object_threadgroups_;
@@ -1604,12 +1615,11 @@ public:
       draw_argument->InstanceCount = InstanceCount;
       draw_argument->StartInstance = BaseInstance;
 
-      auto PatchCountPerInstance = IndexCountPerInstance / NumControlPoint;
       auto PatchPerGroup = 32 / enc.tess_threads_per_patch;
       auto ThreadsPerPatch = enc.tess_threads_per_patch;
       auto PatchPerObjectInstance = (PatchCountPerInstance - 1) / PatchPerGroup + 1;
 
-      if (PatchPerObjectInstance * InstanceCount > max_object_threadgroups) {
+      if (uint64_t(PatchPerObjectInstance) * InstanceCount > max_object_threadgroups) {
         WARN(
             "Omitted mesh draw (TS) because of too many object threadgroups (", PatchPerObjectInstance, "x",
             InstanceCount, ")"
@@ -1856,6 +1866,8 @@ public:
   TessellationDrawIndirect(
     UINT NumControlPoint, ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs
   ) {
+    if (!NumControlPoint)
+      return;
     auto max_object_threadgroups = max_object_threadgroups_;
     if (auto bindable = GetResourceCommon(pBufferForArgs)) {
       EmitOP([=, ArgBuffer = bindable->buffer()](ArgumentEncodingContext &enc) {
@@ -1891,6 +1903,8 @@ public:
   TessellationDrawIndexedIndirect(
     UINT NumControlPoint, ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs
   ) {
+    if (!NumControlPoint)
+      return;
     auto IndexBufferOffset = state_.InputAssembler.IndexBufferOffset;
     auto max_object_threadgroups = max_object_threadgroups_;
 
