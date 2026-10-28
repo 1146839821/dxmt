@@ -6,6 +6,9 @@ struct VSInput { float2 position : POSITION; float4 color : COLOR; };
 struct VSOutput { float4 position : SV_Position; nointerpolation float4 tag : TAG; };
 struct GSOutput { float4 position : SV_Position; nointerpolation float4 value : COLOR; };
 cbuffer GeometryConstants : register(b0) { uint phase; };
+#ifdef POINT_STREAM_INVOCATION_MAP
+RWByteAddressBuffer point_invocation_map : register(u0);
+#endif
 VSOutput vs_main(VSInput input, uint vertex : SV_VertexID, uint instance : SV_InstanceID)
 {
     VSOutput o;
@@ -16,11 +19,23 @@ VSOutput vs_main(VSInput input, uint vertex : SV_VertexID, uint instance : SV_In
 #if GS_INSTANCES > 1
 [instance(GS_INSTANCES)]
 #endif
-[maxvertexcount(2)]
+#ifndef POINT_STREAM_MAX_OUTPUT
+#define POINT_STREAM_MAX_OUTPUT 2
+#endif
+[maxvertexcount(POINT_STREAM_MAX_OUTPUT)]
 void gs_main(point VSOutput input[1], uint primitive : SV_PrimitiveID,
              uint gs_instance : SV_GSInstanceID, inout PointStream<GSOutput> stream)
 {
+#ifdef POINT_STREAM_INVOCATION_MAP
+    uint previous_count;
+    uint slot = uint(input[0].tag.y) * 128 + primitive;
+    point_invocation_map.InterlockedAdd(slot * 4, 1, previous_count);
+#endif
+#ifdef POINT_STREAM_FORCE_EMIT
+    uint count = phase ? POINT_STREAM_FORCE_EMIT : 0;
+#else
     uint count = phase ? primitive % 3 : 0;
+#endif
     for (uint emit = 0; emit < count; ++emit)
     {
         GSOutput o;

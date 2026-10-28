@@ -899,6 +899,42 @@ if dxc_command.length() > 0
       '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_geometry_msc_point_invocation_map_gs',
+    input: 'geometry_sm6.hlsl',
+    output: 'geometry_msc_point_invocation_map.gs.cso',
+    command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0',
+      '-D', 'POINT_STREAM_DIFFERENTIAL=1', '-D', 'GS_INSTANCES=1',
+      '-D', 'POINT_STREAM_INVOCATION_MAP=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  foreach count : ['1', '2']
+    custom_target('dx12_geometry_msc_point_fixed_' + count + '_gs',
+      input: 'geometry_sm6.hlsl',
+      output: 'geometry_msc_point_fixed_' + count + '.gs.cso',
+      command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0',
+        '-D', 'POINT_STREAM_DIFFERENTIAL=1', '-D', 'GS_INSTANCES=1',
+        '-D', 'POINT_STREAM_FORCE_EMIT=' + count, '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_geometry_msc_point_fixed_1_max_1_gs',
+    input: 'geometry_sm6.hlsl',
+    output: 'geometry_msc_point_fixed_1_max_1.gs.cso',
+    command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0',
+      '-D', 'POINT_STREAM_DIFFERENTIAL=1', '-D', 'GS_INSTANCES=1',
+      '-D', 'POINT_STREAM_FORCE_EMIT=1', '-D', 'POINT_STREAM_MAX_OUTPUT=1',
+      '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_geometry_msc_point_invocation_map_fixed_2_gs',
+    input: 'geometry_sm6.hlsl',
+    output: 'geometry_msc_point_invocation_map_fixed_2.gs.cso',
+    command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0',
+      '-D', 'POINT_STREAM_DIFFERENTIAL=1', '-D', 'GS_INSTANCES=1',
+      '-D', 'POINT_STREAM_INVOCATION_MAP=1', '-D', 'POINT_STREAM_FORCE_EMIT=2',
+      '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_geometry_sm6_vs_fixture',
     input: 'geometry_sm6.hlsl',
     output: 'geometry_sm6.vs.cso',

@@ -5010,3 +5010,23 @@ instancing and other previously recorded gaps remain OPEN; no capability was
 promoted. Five interleaved timing pairs were noisy and compared workloads with
 different invocation counts; no speedup claim. Commands, hashes, diagnostics,
 validation and timing: `../dxmt-test/n11-msc-gs-instance-20261028/N11-msc-gs-invocation.md`.
+
+### MSC PointStream output and native point culling (2026-10-28)
+
+A per-primitive root-UAV map verifies all 132 GS calls occur once for 66 input
+points × 2 draw instances. Variable 0/1/2 PointStream emission still produced
+only 56 expected 132 raster pixels; a fixed one-of-two output produced 88/132.
+Filling all output slots (one-of-one or two-of-two) passed private/no-private
+image, indexed, replay and fenced-reference-release controls. A wrong map
+reference failed. This identifies a post-invocation discrepancy, not a fix.
+
+A separately compiled native Metal point mesh, bypassing Wine, DXMT and MSC,
+reproduced incorrect per-point `primitive_culled` behavior with all vertices
+and indices initialized: culling slot 0/1/2 removed pixels 0–2/3–5/6–8. The
+same mismatch appeared at tested primitive counts from 32 through 256. The
+observation is limited to this Apple7 device and OS. An offscreen dummy-point
+experiment passed a pixel oracle but changes the primitive stream and has not
+established query, ordering, clipping or stream-output semantics; it is not a
+production workaround. PointStream, GS instancing and prior gaps remain OPEN.
+Reproduction, controls, native validation, hashes and limitations:
+`../dxmt-test/n11-msc-point-stream-20261028/N11-msc-point-stream.md`.

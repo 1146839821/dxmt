@@ -85,12 +85,26 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
     return false;
   const bool performance = option && !strcmp(option, "--performance");
   const bool wrong = option && !strcmp(option, "--wrong-expected");
+  const bool wrong_point_map =
+      option && !strcmp(option, "--point-invocation-map-fixed-two-wrong");
+  const bool point_invocation_map =
+      option &&
+      (!strcmp(option, "--point-invocation-map") ||
+       !strcmp(option, "--point-invocation-map-fixed-two") || wrong_point_map);
+  const UINT point_fixed_count =
+      option && !strcmp(option, "--point-fixed-one") ? 1
+      : option && (!strcmp(option, "--point-fixed-two") ||
+                   !strcmp(option, "--point-invocation-map-fixed-two") ||
+                   wrong_point_map)
+          ? 2
+          : 0;
   const bool wrong_count =
       option && !strcmp(option, "--invocation-count-wrong");
   const bool invocation_count =
       option && (!strcmp(option, "--invocation-count") ||
                  !strcmp(option, "--invocation-count-offset") ||
-                 !strcmp(option, "--invocation-count-single") || wrong_count);
+                 !strcmp(option, "--invocation-count-single") || wrong_count ||
+                 point_invocation_map);
   const bool single_draw_instance =
       option && (!strcmp(option, "--draw-one-instance") ||
                  !strcmp(option, "--invocation-count-single"));
@@ -107,7 +121,7 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
       option && !strcmp(option, "--instancing-rejection");
   if (option && !performance && !wrong && !reject_so && !reject_topology &&
       !reject_instancing && !draw_start && !single_draw_instance &&
-      !forced_three_instances && !invocation_count)
+      !forced_three_instances && !invocation_count && !point_fixed_count)
     return false;
   auto read = [](const char *path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -333,17 +347,18 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
               D3D12_RESOURCE_STATE_COPY_DEST, &o.readback))
     return false;
   void *mapped = nullptr;
+  const UINT counter_size = point_invocation_map ? 1024 : 256;
   if (invocation_count) {
-    if (!buffer(D3D12_HEAP_TYPE_DEFAULT, 256, D3D12_RESOURCE_STATE_COPY_DEST,
-                &o.counter) ||
-        !buffer(D3D12_HEAP_TYPE_UPLOAD, 256, D3D12_RESOURCE_STATE_GENERIC_READ,
-                &o.counter_zero) ||
-        !buffer(D3D12_HEAP_TYPE_READBACK, 256, D3D12_RESOURCE_STATE_COPY_DEST,
-                &o.counter_readback) ||
+    if (!buffer(D3D12_HEAP_TYPE_DEFAULT, counter_size,
+                D3D12_RESOURCE_STATE_COPY_DEST, &o.counter) ||
+        !buffer(D3D12_HEAP_TYPE_UPLOAD, counter_size,
+                D3D12_RESOURCE_STATE_GENERIC_READ, &o.counter_zero) ||
+        !buffer(D3D12_HEAP_TYPE_READBACK, counter_size,
+                D3D12_RESOURCE_STATE_COPY_DEST, &o.counter_readback) ||
         !CheckHR("GS counter upload map",
                  o.counter_zero->Map(0, nullptr, &mapped)))
       return false;
-    std::memset(mapped, 0, 256);
+    std::memset(mapped, 0, counter_size);
     o.counter_zero->Unmap(0, nullptr);
   }
   if (!CheckHR("GS VB map", o.vb->Map(0, nullptr, &mapped)))
@@ -423,7 +438,7 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
            !CheckHR("GS list reset", o.list->Reset(o.allocator, o.pso))))
         return false;
       if (invocation_count) {
-        o.list->CopyBufferRegion(o.counter, 0, o.counter_zero, 0, 4);
+        o.list->CopyBufferRegion(o.counter, 0, o.counter_zero, 0, counter_size);
         D3D12_RESOURCE_BARRIER counter_barrier = {};
         counter_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         counter_barrier.Transition = {o.counter,
@@ -473,7 +488,8 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
                                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                       D3D12_RESOURCE_STATE_COPY_SOURCE};
         o.list->ResourceBarrier(1, &counter_barrier);
-        o.list->CopyBufferRegion(o.counter_readback, 0, o.counter, 0, 4);
+        o.list->CopyBufferRegion(o.counter_readback, 0, o.counter, 0,
+                                 counter_size);
         std::swap(counter_barrier.Transition.StateBefore,
                   counter_barrier.Transition.StateAfter);
         o.list->ResourceBarrier(1, &counter_barrier);
@@ -529,21 +545,48 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
       if (!CheckHR("GS counter readback",
                    o.counter_readback->Map(0, nullptr, &counter_data)))
         return false;
-      const UINT observed = *static_cast<const UINT *>(counter_data);
-      o.counter_readback->Unmap(0, nullptr);
-      const UINT expected_count =
-          primitives * draw_instances * gs_instances + (wrong_count ? 1 : 0);
-      std::cout << "GS invocation count observed=" << observed
-                << " expected=" << expected_count << "\n";
-      if (observed != expected_count)
-        return false;
+      if (point_invocation_map) {
+        const auto *counts = static_cast<const UINT *>(counter_data);
+        bool valid = true;
+        UINT total = 0;
+        for (UINT slot = 0; slot < counter_size / 4; ++slot) {
+          const UINT instance = slot / 128, primitive = slot % 128;
+          const UINT expected_count =
+              (instance < draw_instances && primitive < primitives ? 1 : 0) +
+              (wrong_point_map && slot == 0 ? 1 : 0);
+          total += counts[slot];
+          if (counts[slot] != expected_count) {
+            std::cerr << "GS invocation map slot=" << slot
+                      << " actual=" << counts[slot]
+                      << " expected=" << expected_count << "\n";
+            valid = false;
+          }
+        }
+        o.counter_readback->Unmap(0, nullptr);
+        std::cout << "GS invocation map total=" << total
+                  << " expected=" << primitives * draw_instances
+                  << " valid=" << valid << "\n";
+        if (!valid)
+          return false;
+      } else {
+        const UINT observed = *static_cast<const UINT *>(counter_data);
+        o.counter_readback->Unmap(0, nullptr);
+        const UINT expected_count =
+            primitives * draw_instances * gs_instances + (wrong_count ? 1 : 0);
+        std::cout << "GS invocation count observed=" << observed
+                  << " expected=" << expected_count << "\n";
+        if (observed != expected_count)
+          return false;
+      }
     }
     std::vector<BYTE> expected(width * height * 4, 0);
     if (point_output) {
       for (UINT instance = 0; instance < draw_instances; ++instance)
         for (UINT primitive = 0; primitive < primitives; ++primitive)
           for (UINT gs_instance = 0; gs_instance < gs_instances; ++gs_instance)
-            for (UINT emit = 0; emit < primitive % 3; ++emit) {
+            for (UINT emit = 0;
+                 emit < (point_fixed_count ? point_fixed_count : primitive % 3);
+                 ++emit) {
               const UINT id = ids[primitive];
               const UINT tag =
                   UINT(vertices[id].color[0]) + 3 * (id - draw_start);
@@ -570,8 +613,8 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
           for (UINT gs_instance = 0; gs_instance < gs_instances; ++gs_instance)
             for (UINT local_y : {0u, 2u}) {
               const UINT y = local_y + gs_instance * 3;
-              BYTE *pixel =
-                  expected.data() + 4 * (y * width + primitive + instance * 128);
+              BYTE *pixel = expected.data() +
+                            4 * (y * width + primitive + instance * 128);
               pixel[0] = BYTE(primitive + 1);
               pixel[1] = BYTE(hash + phase);
               pixel[2] = BYTE(instance + 1);
@@ -593,13 +636,30 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
         correct = false;
         break;
       }
+    if (!correct && point_output) {
+      const auto *actual = static_cast<const BYTE *>(mapped);
+      UINT nonzero = 0;
+      for (UINT y = 0; y < height; ++y)
+        for (UINT x = 0; x < width; ++x) {
+          const BYTE *pixel = actual + 4 * (y * width + x);
+          if (pixel[0] || pixel[1] || pixel[2] || pixel[3]) {
+            if (nonzero < 16)
+              std::cerr << "GS point pixel x=" << x << " y=" << y
+                        << " rgba=" << UINT(pixel[0]) << ',' << UINT(pixel[1])
+                        << ',' << UINT(pixel[2]) << ',' << UINT(pixel[3])
+                        << "\n";
+            ++nonzero;
+          }
+        }
+      std::cerr << "GS point nonzero pixels=" << nonzero << "\n";
+    }
     o.readback->Unmap(0, nullptr);
     if (!correct)
       return false;
     std::cout << "GS differential kind=" << kind << " index=" << index_mode
               << " pass=" << pass << " primitives=" << primitives
-              << " draw_instances=" << draw_instances << " exact_bytes=" << expected.size()
-              << " passed\n";
+              << " draw_instances=" << draw_instances
+              << " exact_bytes=" << expected.size() << " passed\n";
   }
   std::cout << "GS replay/fenced reset/pending reset rejection/released refs "
                "passed\n";
