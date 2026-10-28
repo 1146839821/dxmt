@@ -2703,8 +2703,17 @@ bool TestStageBindings(const char *mode) {
   const bool isolated = !std::strcmp(mode, "isolated"),
              same_root = !std::strcmp(mode, "same-root"),
              wrong = !std::strcmp(mode, "wrong") ||
-                     !std::strcmp(mode, "tess-line-image-wrong"),
+                     !std::strcmp(mode, "tess-line-image-wrong") ||
+                     !std::strcmp(mode, "tess-point-grid-control-wrong"),
              perf = !std::strcmp(mode, "perf");
+  const bool tess_grid_duplicate =
+                 !std::strcmp(mode, "tess-point-grid-control-duplicate"),
+             tess_grid_control =
+                 !std::strcmp(mode, "tess-point-grid-control") ||
+                 !std::strcmp(mode, "tess-point-grid-control-wrong") ||
+                 tess_grid_duplicate,
+             tess_grid = tess_grid_control ||
+                         !std::strcmp(mode, "tess-point-grid-factor2");
   const bool tess_index16 = std::strstr(mode, "-u16") != nullptr,
              tess_index32 = std::strstr(mode, "-u32") != nullptr,
              tess_point = !std::strcmp(mode, "tess-point") ||
@@ -2714,6 +2723,7 @@ bool TestStageBindings(const char *mode) {
                           !std::strcmp(mode, "tess-point-count") ||
                           !std::strcmp(mode, "tess-point-coord") ||
                           !std::strcmp(mode, "tess-point-coord-factor2") ||
+                          !std::strcmp(mode, "tess-point-grid-factor2") ||
                           !std::strcmp(mode, "tess-point-rejected") ||
                           !std::strcmp(mode, "tess-point-mismatch"),
              tess_line = !std::strcmp(mode, "tess-line") ||
@@ -2728,11 +2738,15 @@ bool TestStageBindings(const char *mode) {
              tess_image = !std::strcmp(mode, "tess-point-image") ||
                           !std::strcmp(mode, "tess-line-image") ||
                           !std::strcmp(mode, "tess-line-image-wrong"),
-             tess_factor2 = !std::strcmp(mode, "tess-point-coord-factor2"),
-             tess_coord = !std::strcmp(mode, "tess-point-coord") || tess_factor2,
+             tess_factor2 =
+                 !std::strcmp(mode, "tess-point-coord-factor2") || tess_grid,
+             tess_coord =
+                 !std::strcmp(mode, "tess-point-coord") || tess_factor2,
              tess_count = !std::strcmp(mode, "tess-point-count") || tess_coord;
   std::vector<UINT> sequence;
-  if (!std::strcmp(mode, "airconv"))
+  if (tess_grid_control)
+    sequence = {2, 8, 2, 8};
+  else if (!std::strcmp(mode, "airconv"))
     sequence = {0, 7, 1, 0, 1};
   else if (!std::strcmp(mode, "msc"))
     sequence = {2, 8, 3, 2, 5, 2, 6, 2, 4};
@@ -2851,7 +2865,11 @@ bool TestStageBindings(const char *mode) {
   for (UINT slot : needed) {
     const UINT kind = kinds[slot];
     const bool airconv = kind < 2;
-    auto vs = read(airconv ? "stage_binding5.vs.cso" : "stage_binding.vs.cso");
+    const bool grid_control_points = tess_grid_control && slot == 8;
+    auto vs =
+        read(grid_control_points ? "stage_binding_point_grid_control.vs.cso"
+             : airconv           ? "stage_binding5.vs.cso"
+                                 : "stage_binding.vs.cso");
     auto ps = read(tess_count ? "stage_binding_count.ps.cso"
                    : airconv  ? "stage_binding5.ps.cso"
                               : "stage_binding.ps.cso");
@@ -2862,8 +2880,9 @@ bool TestStageBindings(const char *mode) {
       d.pRootSignature = root.ptr();
       d.VS = {vs.data(), vs.size()};
       d.PS = {ps.data(), ps.size()};
-      d.PrimitiveTopologyType = kind == 4
-                                    ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH
+      d.PrimitiveTopologyType = kind == 4 ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH
+                                : grid_control_points
+                                    ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT
                                     : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
       d.NumRenderTargets = 1;
       d.RTVFormats[0] = tess_count ? DXGI_FORMAT_R32G32B32A32_FLOAT
@@ -2885,8 +2904,9 @@ bool TestStageBindings(const char *mode) {
       }
       auto gs =
           read(airconv ? "stage_binding5.gs.cso" : "stage_binding.gs.cso");
-      const char *tess_variant = tess_factor2                ? "point_coord_factor2"
-                                 : tess_coord                  ? "point_coord"
+      const char *tess_variant = tess_grid      ? "point_grid_factor2"
+                                 : tess_factor2 ? "point_coord_factor2"
+                                 : tess_coord   ? "point_coord"
                                  : tess_image && tess_point  ? "point_image"
                                  : tess_image && tess_line   ? "line_image"
                                  : tess_point                ? "point"
@@ -2983,7 +3003,7 @@ bool TestStageBindings(const char *mode) {
   };
   const UINT cycles = perf ? 1 : 2,
              draws = perf ? 4096 : UINT(sequence.size()) * cycles,
-             width = perf ? 1 : draws, height = tess_image ? 8 : 1;
+             width = perf ? 1 : draws, height = tess_image || tess_grid ? 8 : 1;
   if (!buffer(D3D12_HEAP_TYPE_UPLOAD, 256, D3D12_RESOURCE_STATE_GENERIC_READ,
               &upload) ||
       !buffer(D3D12_HEAP_TYPE_READBACK, 256 * height,
@@ -3105,7 +3125,7 @@ bool TestStageBindings(const char *mode) {
     std::vector<StageBindingObserver::Expected> expected;
     expected.reserve(draws);
     std::vector<BYTE> pixels(width * height * 4, 0);
-    std::vector<float> count_pixels(width * 4, 0);
+    std::vector<float> count_pixels(width * height * 4, 0);
     for (UINT draw = 0; draw < draws; ++draw) {
       const UINT slot = sequence[draw % sequence.size()], kind = kinds[slot],
                  cycle = perf ? 0 : draw / UINT(sequence.size());
@@ -3138,7 +3158,27 @@ bool TestStageBindings(const char *mode) {
         pixel[2] = 44;
         pixel[3] = 255;
       }
-      if (tess_count) {
+      if (tess_grid) {
+        constexpr float q = 21845.0f / 65536.0f;
+        const float coordinates[7][3] = {
+            {1, 0, 0},       {0, 1, 0},       {0, 0, 1},        {0.5f, 0.5f, 0},
+            {0, 0.5f, 0.5f}, {0.5f, 0, 0.5f}, {q, q, 1 - 2 * q}};
+        const bool points = kind == 4 || (tess_grid_control && slot == 8);
+        for (UINT y = 0; y < height; ++y) {
+          auto *pixel = count_pixels.data() + 4 * (y * width + draw);
+          if (points) {
+            if (y < 7) {
+              std::copy_n(coordinates[y], 3, pixel);
+              pixel[3] = 1;
+            }
+          } else {
+            pixel[0] = multiplier * (values[0] + 11);
+            pixel[1] = 23 + tag;
+            pixel[2] = 44;
+            pixel[3] = 255;
+          }
+        }
+      } else if (tess_count) {
         const float n = kind == 4 ? 3.0f : 1.0f;
         auto *pixel = count_pixels.data() + 4 * draw;
         pixel[0] = n * multiplier * (values[0] + 11);
@@ -3148,14 +3188,19 @@ bool TestStageBindings(const char *mode) {
         if (tess_coord && kind == 4) {
           // The even factor-2 triangle has six boundary points and a center.
           // The reference tessellator stores the center in 16-bit fractions.
-          pixel[0] = pixel[1] = tess_factor2 ? 2.0f + 21845.0f / 65536.0f : 1.0f;
+          pixel[0] = pixel[1] =
+              tess_factor2 ? 2.0f + 21845.0f / 65536.0f : 1.0f;
           pixel[2] = tess_factor2 ? 2.0f + 21846.0f / 65536.0f : 1.0f;
           pixel[3] = tess_factor2 ? 7.0f : 3.0f;
         }
       }
     }
-    if (wrong)
-      pixels[tess_image ? 4 : 0] ^= 1;
+    if (wrong) {
+      if (tess_grid)
+        count_pixels[4] += 0.25f;
+      else
+        pixels[tess_image ? 4 : 0] ^= 1;
+    }
     if (pass != 1) {
       if (pass && (!CheckHR("Stage allocator reset", allocator->Reset()) ||
                    !CheckHR("Stage list reset",
@@ -3208,7 +3253,9 @@ bool TestStageBindings(const char *mode) {
         list->RSSetViewports(1, &viewport);
         list->IASetPrimitiveTopology(
             kind == 4 ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST
-                      : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            : tess_grid_control && slot == 8
+                ? D3D_PRIMITIVE_TOPOLOGY_POINTLIST
+                : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         if (kind >= 5)
           list6->DispatchMesh(1, 1, 1);
         else if (kind == 4 && index_buffer) {
@@ -3218,7 +3265,10 @@ bool TestStageBindings(const char *mode) {
           list->IASetIndexBuffer(&view);
           list->DrawIndexedInstanced(3, 1, 1, 0, 0);
         } else
-          list->DrawInstanced(3, 1, 0, 0);
+          list->DrawInstanced(tess_grid_control && slot == 8
+                                  ? (tess_grid_duplicate ? 8 : 7)
+                                  : 3,
+                              1, 0, 0);
       }
       std::cout << "Stage record mode=" << mode << " pass=" << pass
                 << " draws=" << draws << " us_per_draw="
@@ -3280,7 +3330,26 @@ bool TestStageBindings(const char *mode) {
     if (!CheckHR("Stage readback", readback->Map(0, nullptr, &mapped)))
       return false;
     bool good = true;
-    if (tess_count) {
+    if (tess_grid) {
+      for (UINT y = 0; y < height && good; ++y) {
+        const auto *got = reinterpret_cast<const float *>(
+            static_cast<const BYTE *>(mapped) + y * 256);
+        for (UINT x = 0; x < width && good; ++x)
+          for (UINT c = 0; c < 4; ++c) {
+            const float expected_value = count_pixels[4 * (y * width + x) + c];
+            if (!(std::fabs(got[4 * x + c] - expected_value) <= 0.0001f)) {
+              std::cerr << "Stage point grid x=" << x << " row=" << y
+                        << " component=" << c << " actual=" << got[4 * x + c]
+                        << " expected=" << expected_value
+                        << " vector=" << got[4 * x] << ',' << got[4 * x + 1]
+                        << ',' << got[4 * x + 2] << ',' << got[4 * x + 3]
+                        << "\n";
+              good = false;
+              break;
+            }
+          }
+      }
+    } else if (tess_count) {
       const auto *got = static_cast<const float *>(mapped);
       for (UINT i = 0; i < count_pixels.size(); ++i)
         if (tess_factor2 ? !(std::fabs(got[i] - count_pixels[i]) <= 0.0001f)
@@ -3300,6 +3369,14 @@ bool TestStageBindings(const char *mode) {
     }
     if (!good) {
       const auto *got = static_cast<const BYTE *>(mapped);
+      if (tess_grid) {
+        for (UINT y = 0; y < height; ++y) {
+          const auto *row = reinterpret_cast<const float *>(got + y * 256);
+          std::cerr << "Stage point grid row=" << y
+                    << " column=1 vector=" << row[4] << ',' << row[5] << ','
+                    << row[6] << ',' << row[7] << "\n";
+        }
+      }
       if (tess_image) {
         for (UINT y = 0; y < height; ++y) {
           std::cerr << "Stage image row=" << y << " actual:";

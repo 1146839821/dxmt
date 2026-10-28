@@ -15,6 +15,24 @@ StageVertex vs_main(uint vertex : SV_VertexID)
     o.color = read_tag(1);
     return o;
 }
+#ifdef STAGE_TESS_GRID_CONTROL
+StageVertex vs_grid_main(uint vertex : SV_VertexID)
+{
+    const float q = 21845.0 / 65536.0;
+    vertex = min(vertex, 6);
+    float3 coord = vertex == 0 ? float3(1, 0, 0) :
+                   vertex == 1 ? float3(0, 1, 0) :
+                   vertex == 2 ? float3(0, 0, 1) :
+                   vertex == 3 ? float3(0.5, 0.5, 0) :
+                   vertex == 4 ? float3(0, 0.5, 0.5) :
+                   vertex == 5 ? float3(0.5, 0, 0.5) :
+                                 float3(q, q, 1.0 - 2.0 * q);
+    StageVertex o;
+    o.position = float4(0, 0.875 - 0.25 * vertex, 0, 1);
+    o.color = float4(coord, 1);
+    return o;
+}
+#endif
 #ifdef STAGE_TESS_COUNT
 float4 ps_main(StageVertex input) : SV_Target0 { return input.color; }
 #else
@@ -80,7 +98,11 @@ StageVertex ds_main(StageFactors factors, const OutputPatch<StageVertex, 3> patc
 {
     StageVertex o;
 #ifdef STAGE_TESS_POINT
-#ifdef STAGE_TESS_IMAGE
+#ifdef STAGE_TESS_GRID
+    uint row = coord.x > 0.9 ? 0 : coord.y > 0.9 ? 1 : coord.z > 0.9 ? 2 :
+               coord.z < 0.05 ? 3 : coord.x < 0.05 ? 4 : coord.y < 0.05 ? 5 : 6;
+    o.position = float4(0, 0.875 - 0.25 * row, 0, 1);
+#elif defined(STAGE_TESS_IMAGE)
     o.position = float4(0, coord.x * 1.25 + coord.y * 0.75 - 0.625, 0, 1);
 #else
     o.position = float4(0, 0, 0, 1);

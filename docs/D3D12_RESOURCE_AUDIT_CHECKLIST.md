@@ -4970,3 +4970,21 @@ Neither bit alone provides the required unique-point stream. Point output and
 previously listed feature gaps remain OPEN; no product code was changed.
 Reproduction, hashes, validation and limitations:
 `../dxmt-test/n11-msc-ts-point-topology-20261028/N11-input-topology-and-flags.md`.
+
+### MSC point factor-2 per-position regression (2026-10-28)
+
+The optional `tess-point-grid-factor2` probe separates the six boundary points
+and the center into seven image rows. Additive floating-point output checks the
+full domain-coordinate vector and raster count per row, with a zero sentinel.
+A seven-point ordinary point-list control passed three submission/replay/reset
+passes in private and no-private configurations; a deliberately wrong reference
+and an eighth point duplicating the center failed as intended. Metal API/GPU
+validation and PE/native path checks were enabled. Both line controls and point
+rejection controls passed.
+
+The test-only DLL without the guard failed: row counts for one tessellated draw
+were (1,10,1,1,1,1,0), omitting the center and repeating one boundary point.
+This records rasterized outputs, not domain-shader invocation side effects.
+Actual point support and broader factor/domain/lifetime coverage remain OPEN.
+Reproduction, preliminary controls and exact artifacts:
+`../dxmt-test/n11-msc-ts-point-grid-20261028/N11-point-grid.md`.
