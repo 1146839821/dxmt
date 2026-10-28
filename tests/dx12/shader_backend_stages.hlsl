@@ -44,7 +44,11 @@ StageFactors hs_constants(InputPatch<StageVertex, 3> patch, uint primitive : SV_
 struct StageFactors { float edge[3] : SV_TessFactor; float inside : SV_InsideTessFactor; };
 StageFactors hs_constants(InputPatch<StageVertex, 3> patch, uint primitive : SV_PrimitiveID)
 {
+#ifdef STAGE_TESS_FACTOR2
+    StageFactors factors = {{2, 2, 2}, 2};
+#else
     StageFactors factors = {{1, 1, 1}, 1};
+#endif
     return factors;
 }
 [domain("tri")]

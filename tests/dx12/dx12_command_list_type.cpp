@@ -10,6 +10,7 @@
 
 #include <iostream>
 #include <chrono>
+#include <cmath>
 #include <vector>
 #include <fstream>
 #include <string>
@@ -2712,6 +2713,7 @@ bool TestStageBindings(const char *mode) {
                           !std::strcmp(mode, "tess-point-image") ||
                           !std::strcmp(mode, "tess-point-count") ||
                           !std::strcmp(mode, "tess-point-coord") ||
+                          !std::strcmp(mode, "tess-point-coord-factor2") ||
                           !std::strcmp(mode, "tess-point-rejected") ||
                           !std::strcmp(mode, "tess-point-mismatch"),
              tess_line = !std::strcmp(mode, "tess-line") ||
@@ -2726,7 +2728,8 @@ bool TestStageBindings(const char *mode) {
              tess_image = !std::strcmp(mode, "tess-point-image") ||
                           !std::strcmp(mode, "tess-line-image") ||
                           !std::strcmp(mode, "tess-line-image-wrong"),
-             tess_coord = !std::strcmp(mode, "tess-point-coord"),
+             tess_factor2 = !std::strcmp(mode, "tess-point-coord-factor2"),
+             tess_coord = !std::strcmp(mode, "tess-point-coord") || tess_factor2,
              tess_count = !std::strcmp(mode, "tess-point-count") || tess_coord;
   std::vector<UINT> sequence;
   if (!std::strcmp(mode, "airconv"))
@@ -2882,7 +2885,8 @@ bool TestStageBindings(const char *mode) {
       }
       auto gs =
           read(airconv ? "stage_binding5.gs.cso" : "stage_binding.gs.cso");
-      const char *tess_variant = tess_coord                  ? "point_coord"
+      const char *tess_variant = tess_factor2                ? "point_coord_factor2"
+                                 : tess_coord                  ? "point_coord"
                                  : tess_image && tess_point  ? "point_image"
                                  : tess_image && tess_line   ? "line_image"
                                  : tess_point                ? "point"
@@ -3142,8 +3146,11 @@ bool TestStageBindings(const char *mode) {
         pixel[2] = n * 44;
         pixel[3] = n * 255;
         if (tess_coord && kind == 4) {
-          pixel[0] = pixel[1] = pixel[2] = 1;
-          pixel[3] = 3;
+          // The even factor-2 triangle has six boundary points and a center.
+          // The reference tessellator stores the center in 16-bit fractions.
+          pixel[0] = pixel[1] = tess_factor2 ? 2.0f + 21845.0f / 65536.0f : 1.0f;
+          pixel[2] = tess_factor2 ? 2.0f + 21846.0f / 65536.0f : 1.0f;
+          pixel[3] = tess_factor2 ? 7.0f : 3.0f;
         }
       }
     }
@@ -3276,7 +3283,8 @@ bool TestStageBindings(const char *mode) {
     if (tess_count) {
       const auto *got = static_cast<const float *>(mapped);
       for (UINT i = 0; i < count_pixels.size(); ++i)
-        if (got[i] != count_pixels[i]) {
+        if (tess_factor2 ? !(std::fabs(got[i] - count_pixels[i]) <= 0.0001f)
+                         : got[i] != count_pixels[i]) {
           std::cerr << "Stage point count element=" << i << " actual=" << got[i]
                     << " expected=" << count_pixels[i]
                     << " vector=" << got[i / 4 * 4] << ',' << got[i / 4 * 4 + 1]

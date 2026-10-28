@@ -4898,8 +4898,8 @@ Metal API/GPU validation and native PE/dylib path checks were clean.
 
 **Point is not complete.** An externally retained diagnostic build without its
 guard produced three point outputs for tri factor1 but domain-coordinate sum
-(1,2,0) rather than (1,1,1); tri factor2 produced 15 points rather than 6. The
-actual runtime's generated AIR includes a point-passthrough index-to-zero
+(1,2,0) rather than (1,1,1); tri factor2 produced 15 points rather than the 7
+reference vertices. The actual runtime's generated AIR includes a point-passthrough index-to-zero
 fallback on a tessellator flag; this is a plausible duplicate mechanism, not a
 complete proof of the internal cause. The production PSO returns E_NOTIMPL for
 point to prevent silent incorrect rendering. Point fixtures and failing oracles
@@ -4920,12 +4920,34 @@ The requested enum header remains tracked in `include/metal_shader_converter/`
 In a separate test-only runtime cache, changing the generated passthrough's
 index-to-zero fallback to the current vertex index corrected the tri factor-1
 coordinate sum for submission, replay and reset. It did not make factor 2
-unique: the observed sum/count was approximately (5,5,5,15), versus the six
-unique points' (2,2,2,6). An identity-repack control retained the original
-failure. Thus the index fallback and the repeated tessellated stream require
+unique: the observed sum/count was approximately (5,5,5,15), versus the seven
+reference points' approximately (7/3,7/3,7/3,7). The seventh point is the
+interior center; the earlier six-point expectation was incorrect. An
+identity-repack control retained the original failure. Thus the index fallback and the repeated tessellated stream require
 separate treatment; neither this experiment nor a second field test establishes
 a general deduplication algorithm. No-op LLVM/AIR reassembly also caused a
 Metal compiler XPC interruption in this environment, with its cause unknown.
 No binary mutation was added to the product. Point and other previously listed
 feature gaps remain OPEN. Exact artifacts, hashes, controls and limits:
+`../dxmt-test/n11-msc-ts-point-20261028/N11-msc-point-diagnostic.md`.
+
+### Corrected factor-2 point oracle (2026-10-28)
+
+The earlier six-vertex factor-2 expectation omitted the center. The Microsoft
+D3D11 reference tessellator, as preserved in the Mesa source mirror, creates
+six boundary vertices and one interior center for an integer tri patch with
+all factors 2. A new optional `tess-point-coord-factor2` probe uses the seven
+points' fixed-fraction coordinate sum and count, with 0.0001 float tolerance.
+This aggregate oracle detects these observed failures but does not establish
+the complete vertex set or domain shader side effects.
+
+The guard-removed diagnostic DLL fails this oracle with (2,11,2,15); the
+shipping DLL explicitly rejects the PSO. The private and no-private guard
+controls and line-image controls passed; line exercised three submission,
+replay and reset passes with Metal validation. A factor-1 control
+failed on the original diagnostic DLL and passed all three passes with the
+isolated index-only experiment. That experiment remains outside product code.
+A per-stream-index diagnostic observed 15 emitted entries with seven distinct
+quantized color codes; those colors do not prove exact coordinates. Point
+support remains OPEN. Reference, commands, raw logs and limits:
 `../dxmt-test/n11-msc-ts-point-20261028/N11-msc-point-diagnostic.md`.
