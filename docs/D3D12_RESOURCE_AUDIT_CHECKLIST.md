@@ -4912,3 +4912,20 @@ claim. This change only adds a constant-time validation switch at PSO creation.
 Detailed reproduction, diagnostics, unsafe diagnostic artifact, exact hashes,
 performance and limits: `../dxmt-test/n11-msc-ts-output-20261028/N11-msc-ts-output.md`.
 Point output, GS/TS/SO combinations and strip restart remain OPEN.
+
+### MSC point topology: isolated AIR diagnostic (2026-10-28)
+
+The requested enum header remains tracked in `include/metal_shader_converter/`
+(the include resolves to that file). The production point-output guard remains.
+In a separate test-only runtime cache, changing the generated passthrough's
+index-to-zero fallback to the current vertex index corrected the tri factor-1
+coordinate sum for submission, replay and reset. It did not make factor 2
+unique: the observed sum/count was approximately (5,5,5,15), versus the six
+unique points' (2,2,2,6). An identity-repack control retained the original
+failure. Thus the index fallback and the repeated tessellated stream require
+separate treatment; neither this experiment nor a second field test establishes
+a general deduplication algorithm. No-op LLVM/AIR reassembly also caused a
+Metal compiler XPC interruption in this environment, with its cause unknown.
+No binary mutation was added to the product. Point and other previously listed
+feature gaps remain OPEN. Exact artifacts, hashes, controls and limits:
+`../dxmt-test/n11-msc-ts-point-20261028/N11-msc-point-diagnostic.md`.
