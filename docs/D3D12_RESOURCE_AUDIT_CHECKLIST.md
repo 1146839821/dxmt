@@ -5084,3 +5084,22 @@ validation were enabled. The work and its limits are recorded in
 to geometry assembly, so odd cut positions, winding, adjacency and continuous
 PrimitiveID after cuts remain incorrect. The narrowly tested D3D11 list control
 does not establish arbitrary list restart support. No capability is promoted.
+
+### Restart assembly candidate model (2026-10-29)
+
+A separate CPU experiment compares a sequential segment-by-segment reference
+with a proposed 24-candidate object group using 32 vertex lanes (two preceding
+lanes and six following lanes). The candidate uses the existing scan's segment
+start and inclusive primitive prefix to select winding, first/last adjacency and
+continuous PrimitiveID. It matched 4,430 deterministic cases, including odd
+and consecutive cuts, disabled cut, 24/256/65536 boundaries and 66,019 indices.
+The complete model, seed and output are in
+`../dxmt-test/n11-adj-restart-20261028/assembly-model.py` and
+`assembly-model.log`.
+
+This is a feasibility check only, not an implementation or GPU acceptance.
+The next integration must preserve 64-bit address arithmetic near 32-bit count
+limits, bound every summary read, carry metadata into the mesh stage with an
+object-data barrier, account for the 16,256-byte payload limit, and use the
+existing resource/encoder ownership and indirect argument paths. The shared scan
+is still not bound to geometry and restart support remains OPEN.
