@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d12.h>
 
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -132,7 +133,7 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource,
                               nullptr, IID_PPV_ARGS(&resource.ptr)));
 }
 
-int Run(const char *shader_path) {
+int Run(const char *shader_path, bool full_mips) {
   const auto shader = ReadShader(shader_path);
 
   Owned<ID3D12Device> device;
@@ -154,7 +155,9 @@ int Run(const char *shader_path) {
   std::cout << "Tier2 mixed-mip array rejection: E_INVALIDARG\n";
 
   Owned<ID3D12Resource> texture;
-  const auto texture_desc = MixedTextureDescription(1);
+  auto texture_desc = MixedTextureDescription(1);
+  if (full_mips)
+    texture_desc.MipLevels = 0;
   const HRESULT reserved_hr = device->CreateReservedResource(
       &texture_desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
       IID_PPV_ARGS(&texture.ptr));
@@ -163,12 +166,17 @@ int Run(const char *shader_path) {
     return 77;
   }
   Check("CreateReservedResource", reserved_hr);
+  if (full_mips) {
+    texture_desc = texture->GetDesc();
+    if (texture_desc.MipLevels != 8)
+      throw std::runtime_error("implicit mixed full-chain mip count mismatch");
+  }
 
   UINT total_tile_count = 0;
   UINT subresource_tiling_count = texture_desc.MipLevels;
   D3D12_PACKED_MIP_INFO packed_mip_info = {};
   D3D12_TILE_SHAPE standard_tile_shape = {};
-  D3D12_SUBRESOURCE_TILING subresource_tilings[2] = {};
+  D3D12_SUBRESOURCE_TILING subresource_tilings[8] = {};
   device->GetResourceTiling(texture.ptr, &total_tile_count, &packed_mip_info,
                              &standard_tile_shape, &subresource_tiling_count, 0,
                              subresource_tilings);
@@ -179,8 +187,9 @@ int Run(const char *shader_path) {
             << " shape=" << standard_tile_shape.WidthInTexels << "x"
             << standard_tile_shape.HeightInTexels << "x"
             << standard_tile_shape.DepthInTexels << "\n";
-  if (packed_mip_info.NumStandardMips != 1 || packed_mip_info.NumPackedMips != 1 ||
-      packed_mip_info.NumTilesForPackedMips != 1 || subresource_tiling_count != 2 ||
+  if (packed_mip_info.NumStandardMips != 1 ||
+      packed_mip_info.NumPackedMips != texture_desc.MipLevels - 1 ||
+      packed_mip_info.NumTilesForPackedMips != 1 || subresource_tiling_count != texture_desc.MipLevels ||
       subresource_tilings[0].WidthInTiles != 2 || subresource_tilings[0].HeightInTiles != 1) {
     std::cerr << "mixed texture did not produce the expected standard+packed test shape\n";
     return 77;
@@ -357,12 +366,13 @@ int Run(const char *shader_path) {
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 2) {
-    std::cerr << "usage: dx12_reserved_texture_view_range <shader.cs.cso>\n";
+  const bool full_mips = argc == 3 && std::strcmp(argv[2], "--full-mips") == 0;
+  if (argc != 2 && !full_mips) {
+    std::cerr << "usage: dx12_reserved_texture_view_range <shader.cs.cso> [--full-mips]\n";
     return 2;
   }
   try {
-    return Run(argv[1]);
+    return Run(argv[1], full_mips);
   } catch (const std::exception &error) {
     std::cerr << error.what() << "\n";
     return 1;

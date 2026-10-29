@@ -701,13 +701,18 @@ public:
       return E_NOTIMPL;
     if (!pDesc->Width || !pDesc->Height || !pDesc->DepthOrArraySize)
       return E_INVALIDARG;
-    if (pDesc->Width > std::numeric_limits<UINT>::max() || !pDesc->MipLevels || pDesc->MipLevels > 31 ||
+    if (pDesc->Width > std::numeric_limits<UINT>::max() || pDesc->MipLevels > 31 ||
         pDesc->SampleDesc.Count != 1 || pDesc->SampleDesc.Quality != 0)
       return E_NOTIMPL;
     if (pDesc->Layout != D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE)
       return E_INVALIDARG;
     if (pDesc->Alignment && pDesc->Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)
       return E_INVALIDARG;
+
+    D3D12_RESOURCE_DESC normalized_desc = *pDesc;
+    if (!normalized_desc.MipLevels)
+      normalized_desc.MipLevels = 32 - __builtin_clz(static_cast<UINT>(normalized_desc.Width) | normalized_desc.Height);
+    pDesc = &normalized_desc;
 
     D3D12_HEAP_PROPERTIES default_heap = {};
     default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;

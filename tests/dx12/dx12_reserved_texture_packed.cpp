@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d12.h>
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -121,7 +122,7 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource, UINT64 
 }
 
 int Run(const char *read_path, const char *write_a_path,
-        const char *write_b_path, bool copy_upload) {
+        const char *write_b_path, bool copy_upload, bool full_mips, bool metadata_only) {
   const auto read_shader = ReadShader(read_path);
   const auto write_a_shader = ReadShader(write_a_path);
   const auto write_b_shader = ReadShader(write_b_path);
@@ -138,15 +139,72 @@ int Run(const char *read_path, const char *write_a_path,
   Check("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.ptr)));
 
   Owned<ID3D12Resource> texture;
-  const auto texture_desc = PackedTextureDesc(copy_upload);
+  auto texture_desc = PackedTextureDesc(copy_upload);
+  Owned<ID3D12Resource> explicit_texture;
+  if (full_mips) {
+    texture_desc.MipLevels = 7;
+    const HRESULT explicit_hr = device->CreateReservedResource(
+        &texture_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&explicit_texture.ptr));
+    if (explicit_hr == E_NOTIMPL || explicit_hr == E_NOINTERFACE || explicit_hr == DXGI_ERROR_UNSUPPORTED) {
+      std::cout << "SKIP: explicit full-chain reserved texture is unavailable\n";
+      return 77;
+    }
+    Check("Create explicit full-chain reserved texture", explicit_hr);
+    texture_desc.MipLevels = 0;
+    const HRESULT probe = device->CreateReservedResource(
+        &texture_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource), nullptr);
+    if (probe != S_FALSE)
+      throw std::runtime_error("implicit full-chain capability probe did not return S_FALSE");
+  }
   const HRESULT reserved_hr = device->CreateReservedResource(
       &texture_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&texture.ptr));
-  if (FAILED(reserved_hr) &&
+  if (!full_mips && FAILED(reserved_hr) &&
       (reserved_hr == E_NOTIMPL || reserved_hr == E_NOINTERFACE || reserved_hr == DXGI_ERROR_UNSUPPORTED)) {
     std::cout << "SKIP: packed reserved texture is unavailable\n";
     return 77;
   }
   Check("CreateReservedResource", reserved_hr);
+  if (full_mips) {
+    const auto actual_desc = texture->GetDesc();
+    if (actual_desc.MipLevels != 7)
+      throw std::runtime_error("implicit full-chain GetDesc mip count mismatch");
+    UINT implicit_total = 0, explicit_total = 0, implicit_count = 7, explicit_count = 7;
+    D3D12_PACKED_MIP_INFO implicit_packed = {}, explicit_packed = {};
+    D3D12_TILE_SHAPE implicit_shape = {}, explicit_shape = {};
+    std::array<D3D12_SUBRESOURCE_TILING, 7> implicit_tilings = {}, explicit_tilings = {};
+    device->GetResourceTiling(texture.ptr, &implicit_total, &implicit_packed, &implicit_shape,
+                              &implicit_count, 0, implicit_tilings.data());
+    device->GetResourceTiling(explicit_texture.ptr, &explicit_total, &explicit_packed, &explicit_shape,
+                              &explicit_count, 0, explicit_tilings.data());
+    if (implicit_total != explicit_total || implicit_count != explicit_count || implicit_count != 7 ||
+        implicit_packed.NumStandardMips != explicit_packed.NumStandardMips ||
+        implicit_packed.NumPackedMips != explicit_packed.NumPackedMips ||
+        implicit_packed.NumTilesForPackedMips != explicit_packed.NumTilesForPackedMips ||
+        implicit_packed.StartTileIndexInOverallResource != explicit_packed.StartTileIndexInOverallResource ||
+        implicit_shape.WidthInTexels != explicit_shape.WidthInTexels ||
+        implicit_shape.HeightInTexels != explicit_shape.HeightInTexels ||
+        implicit_shape.DepthInTexels != explicit_shape.DepthInTexels)
+      throw std::runtime_error("implicit full-chain tiling mismatch");
+    for (UINT i = 0; i < implicit_count; ++i) {
+      const auto &a = implicit_tilings[i];
+      const auto &b = explicit_tilings[i];
+      if (a.WidthInTiles != b.WidthInTiles || a.HeightInTiles != b.HeightInTiles ||
+          a.DepthInTiles != b.DepthInTiles || a.StartTileIndexInOverallResource != b.StartTileIndexInOverallResource)
+        throw std::runtime_error("implicit full-chain subresource tiling mismatch");
+    }
+    auto single_desc = texture_desc;
+    single_desc.Width = single_desc.Height = 1;
+    Owned<ID3D12Resource> single_mip;
+    Check("Create single-mip implicit chain", device->CreateReservedResource(
+        &single_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&single_mip.ptr)));
+    if (single_mip->GetDesc().MipLevels != 1)
+      throw std::runtime_error("single-texel implicit mip count mismatch");
+    if (metadata_only) {
+      std::cout << "implicit and explicit full-chain packed tiling match\n";
+      return 0;
+    }
+    texture_desc.MipLevels = actual_desc.MipLevels;
+  }
 
   UINT total_tiles = 0;
   D3D12_PACKED_MIP_INFO packed_info = {};
@@ -398,15 +456,26 @@ int Run(const char *read_path, const char *write_a_path,
 } // namespace
 
 int main(int argc, char **argv) {
-  const bool copy_upload =
-      argc == 5 && std::strcmp(argv[4], "--copy-upload") == 0;
-  if (argc != 4 && !copy_upload) {
+  bool copy_upload = false, full_mips = false, metadata_only = false;
+  for (int i = 4; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--copy-upload") == 0)
+      copy_upload = true;
+    else if (std::strcmp(argv[i], "--full-mips") == 0)
+      full_mips = true;
+    else if (std::strcmp(argv[i], "--metadata-only") == 0)
+      metadata_only = true;
+    else {
+      std::cerr << "unknown option: " << argv[i] << "\n";
+      return 2;
+    }
+  }
+  if (argc < 4 || (metadata_only && !full_mips)) {
     std::cerr << "usage: dx12_reserved_texture_packed <read.cso> <write_a.cso> "
-                 "<write_b.cso> [--copy-upload]\n";
+                 "<write_b.cso> [--copy-upload] [--full-mips] [--metadata-only]\n";
     return 2;
   }
   try {
-    return Run(argv[1], argv[2], argv[3], copy_upload);
+    return Run(argv[1], argv[2], argv[3], copy_upload, full_mips, metadata_only);
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;
