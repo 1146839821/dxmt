@@ -133,7 +133,7 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource,
                               nullptr, IID_PPV_ARGS(&resource.ptr)));
 }
 
-int Run(const char *shader_path, bool full_mips) {
+int Run(const char *shader_path, bool full_mips, bool uav_short) {
   const auto shader = ReadShader(shader_path);
 
   Owned<ID3D12Device> device;
@@ -158,6 +158,8 @@ int Run(const char *shader_path, bool full_mips) {
   auto texture_desc = MixedTextureDescription(1);
   if (full_mips)
     texture_desc.MipLevels = 0;
+  if (uav_short)
+    texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   const HRESULT reserved_hr = device->CreateReservedResource(
       &texture_desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
       IID_PPV_ARGS(&texture.ptr));
@@ -187,9 +189,11 @@ int Run(const char *shader_path, bool full_mips) {
             << " shape=" << standard_tile_shape.WidthInTexels << "x"
             << standard_tile_shape.HeightInTexels << "x"
             << standard_tile_shape.DepthInTexels << "\n";
-  if (packed_mip_info.NumStandardMips != 1 ||
-      packed_mip_info.NumPackedMips != texture_desc.MipLevels - 1 ||
-      packed_mip_info.NumTilesForPackedMips != 1 || subresource_tiling_count != texture_desc.MipLevels ||
+  if ((!uav_short && packed_mip_info.NumStandardMips != 1) ||
+      (uav_short && (packed_mip_info.NumStandardMips < 1 || packed_mip_info.NumStandardMips > 2)) ||
+      packed_mip_info.NumPackedMips != texture_desc.MipLevels - packed_mip_info.NumStandardMips ||
+      packed_mip_info.NumTilesForPackedMips != (packed_mip_info.NumPackedMips ? 1 : 0) ||
+      subresource_tiling_count != texture_desc.MipLevels ||
       subresource_tilings[0].WidthInTiles != 2 || subresource_tilings[0].HeightInTiles != 1) {
     std::cerr << "mixed texture did not produce the expected standard+packed test shape\n";
     return 77;
@@ -367,12 +371,13 @@ int Run(const char *shader_path, bool full_mips) {
 
 int main(int argc, char **argv) {
   const bool full_mips = argc == 3 && std::strcmp(argv[2], "--full-mips") == 0;
-  if (argc != 2 && !full_mips) {
-    std::cerr << "usage: dx12_reserved_texture_view_range <shader.cs.cso> [--full-mips]\n";
+  const bool uav_short = argc == 3 && std::strcmp(argv[2], "--uav-short") == 0;
+  if (argc != 2 && !full_mips && !uav_short) {
+    std::cerr << "usage: dx12_reserved_texture_view_range <shader.cs.cso> [--full-mips|--uav-short]\n";
     return 2;
   }
   try {
-    return Run(argv[1], full_mips);
+    return Run(argv[1], full_mips, uav_short);
   } catch (const std::exception &error) {
     std::cerr << error.what() << "\n";
     return 1;

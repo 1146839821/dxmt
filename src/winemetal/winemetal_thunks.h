@@ -51,7 +51,18 @@ enum winemetal_unixcall {
   unix_mtlcomputecommandencoder_setvisiblefunctiontable,
   unix_mtlcomputecommandencoder_setintersectionfunctiontable,
   unix_mtldevice_supportsargumentbufferstier2 = 194,
+  unix_mtldevice_sparsetexturetilesize = 196,
 };
+
+struct unixcall_mtldevice_sparsetexturetilesize {
+  obj_handle_t device;
+  uint64_t texture_type;
+  uint64_t pixel_format;
+  uint64_t sample_count;
+  uint64_t page_size;
+  struct WMTSize result;
+};
+STATIC_ASSERT(sizeof(struct unixcall_mtldevice_sparsetexturetilesize) == 64);
 
 struct unixcall_mtldevice_newmscgeometrypso {
   obj_handle_t device;

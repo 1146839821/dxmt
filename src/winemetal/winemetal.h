@@ -2406,6 +2406,10 @@ enum WMTSparsePageSize : uint32_t {
   WMTSparsePageSize64 = 102,
   WMTSparsePageSize256 = 103,
 };
+WINEMETAL_API struct WMTSize MTLDevice_sparseTextureTileSize(
+    obj_handle_t device, enum WMTTextureType type, enum WMTPixelFormat format,
+    uint64_t sample_count, enum WMTSparsePageSize page_size
+);
 struct WMTHeapInfo {
   uint64_t size;
   enum WMTResourceOptions options;

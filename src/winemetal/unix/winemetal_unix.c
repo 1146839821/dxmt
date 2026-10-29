@@ -1946,6 +1946,19 @@ _MTLDevice_supportsPlacementSparse(void *obj) {
 }
 
 static NTSTATUS
+_MTLDevice_sparseTextureTileSize(void *obj) {
+  struct unixcall_mtldevice_sparsetexturetilesize *params = obj;
+  params->result = (struct WMTSize){0};
+  if (@available(macOS 13.0, *)) {
+    MTLSize size = [(id<MTLDevice>)params->device sparseTileSizeWithTextureType:(MTLTextureType)params->texture_type
+        pixelFormat:(MTLPixelFormat)params->pixel_format sampleCount:params->sample_count
+        sparsePageSize:(MTLSparsePageSize)params->page_size];
+    params->result = (struct WMTSize){size.width, size.height, size.depth};
+  }
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 _MTLDevice_newSparseMappingQueue(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
   params->ret = 0;
@@ -4520,6 +4533,7 @@ const void *__wine_unix_call_funcs[] = {
     &thunk_DXMTMSCSynthesizeRayIntersection,
     &_MTLDevice_supportsArgumentBuffersTier2,
     &thunk_SM50GetResourceRanges,
+    &_MTLDevice_sparseTextureTileSize,
 };
 
 #ifndef DXMT_NATIVE
@@ -4720,5 +4734,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &thunk32_DXMTMSCSynthesizeRayIntersection,
     &_MTLDevice_supportsArgumentBuffersTier2,
     &thunk32_SM50GetResourceRanges,
+    &_MTLDevice_sparseTextureTileSize,
 };
 #endif

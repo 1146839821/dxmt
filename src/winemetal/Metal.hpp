@@ -1215,6 +1215,11 @@ public:
     return MTLDevice_supportsPlacementSparse(handle);
   }
 
+  WMTSize
+  sparseTextureTileSize(WMTTextureType type, WMTPixelFormat format, uint64_t sample_count, WMTSparsePageSize page_size) {
+    return MTLDevice_sparseTextureTileSize(handle, type, format, sample_count, page_size);
+  }
+
   Reference<SparseMappingQueue>
   newSparseMappingQueue() {
     return Reference<SparseMappingQueue>(MTLDevice_newSparseMappingQueue(handle));

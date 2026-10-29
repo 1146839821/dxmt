@@ -748,9 +748,44 @@ public:
         break;
       standard_mip_count++;
     }
-    const UINT packed_mip_count = pDesc->MipLevels - standard_mip_count;
-    if (pDesc->DepthOrArraySize > 1 && packed_mip_count)
+    if (pDesc->DepthOrArraySize > 1 && standard_mip_count != pDesc->MipLevels)
       return E_INVALIDARG;
+
+    uint64_t metal_tail_size = 0;
+    if (device_->GetMTLDevice().supportsPlacementSparse()) {
+      texture = new Texture(texture_info, device_->GetMTLDevice());
+      Flags<TextureAllocationFlag> flags;
+      flags.set(TextureAllocationFlag::CpuInvisible);
+      auto allocation = texture->allocatePlacementSparse(flags);
+      if (!allocation || !allocation->texture())
+        return E_OUTOFMEMORY;
+      texture->rename(std::move(allocation));
+      device_->RegisterResidency(texture->current()->texture());
+      sparse_first_mipmap_in_tail_ = static_cast<UINT>(texture->current()->texture().firstMipmapInTail());
+      metal_tail_size = texture->current()->texture().tailSizeInBytes();
+
+      // Small D3D mips may use standard tiles instead of being packed. Match
+      // Metal's later tail boundary only when its standard tile shape and the
+      // complete tail size agree with the D3D layout we can expose.
+      const auto native_shape = device_->GetMTLDevice().sparseTextureTileSize(
+          texture_info.type, texture_info.pixel_format, 1, WMTSparsePageSize64
+      );
+      if (native_shape.width == tile_shape_.WidthInTexels && native_shape.height == tile_shape_.HeightInTexels &&
+          native_shape.depth == tile_shape_.DepthInTexels && sparse_first_mipmap_in_tail_ > standard_mip_count &&
+          sparse_first_mipmap_in_tail_ <= pDesc->MipLevels) {
+        uint64_t candidate_bytes = 0;
+        for (UINT mip = sparse_first_mipmap_in_tail_; mip < pDesc->MipLevels; ++mip) {
+          const auto extent = GetResourceExtent(*pDesc, mip);
+          candidate_bytes += uint64_t(extent.right) * extent.bottom * format.BytesPerTexel;
+        }
+        const uint64_t candidate_size = candidate_bytes ? ((candidate_bytes - 1) / kD3D12TileSize + 1) * kD3D12TileSize : 0;
+        // Metal may report a nonzero tail allocation size even when its
+        // first tail index is past every mip in this particular texture.
+        if (sparse_first_mipmap_in_tail_ == pDesc->MipLevels || metal_tail_size == candidate_size)
+          standard_mip_count = sparse_first_mipmap_in_tail_;
+      }
+    }
+    const UINT packed_mip_count = pDesc->MipLevels - standard_mip_count;
 
     uint64_t standard_tiles_per_array = 0;
     uint64_t packed_mip_bytes = 0;
@@ -830,16 +865,7 @@ public:
     tiles_per_array_ = static_cast<UINT>(tiles_per_array);
     subresource_tilings_ = std::move(subresource_tilings);
 
-    if (device_->GetMTLDevice().supportsPlacementSparse()) {
-      texture = new Texture(texture_info, device_->GetMTLDevice());
-      Flags<TextureAllocationFlag> flags;
-      flags.set(TextureAllocationFlag::CpuInvisible);
-      auto allocation = texture->allocatePlacementSparse(flags);
-      if (!allocation || !allocation->texture())
-        return E_OUTOFMEMORY;
-      texture->rename(std::move(allocation));
-      sparse_first_mipmap_in_tail_ = static_cast<UINT>(texture->current()->texture().firstMipmapInTail());
-      const uint64_t metal_tail_size = texture->current()->texture().tailSizeInBytes();
+    if (texture) {
       const uint64_t expected_tail_size = uint64_t(packed_tile_count_per_array_) * kD3D12TileSize;
       packed_tail_mapping_supported_ =
           packed_mip_count_ && sparse_first_mipmap_in_tail_ == standard_mip_count_ &&
@@ -850,7 +876,6 @@ public:
             " metal_first=", sparse_first_mipmap_in_tail_, " d3d_tail_bytes=", expected_tail_size,
             " metal_tail_bytes=", metal_tail_size
         );
-      device_->RegisterResidency(texture->current()->texture());
     }
 
     tile_mappings_.resize(total_tile_count_);

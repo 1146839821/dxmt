@@ -730,6 +730,21 @@ MTLDevice_supportsPlacementSparse(obj_handle_t device) {
   return params.ret;
 }
 
+WINEMETAL_API struct WMTSize
+MTLDevice_sparseTextureTileSize(
+    obj_handle_t device, enum WMTTextureType type, enum WMTPixelFormat format,
+    uint64_t sample_count, enum WMTSparsePageSize page_size
+) {
+  struct unixcall_mtldevice_sparsetexturetilesize params = {0};
+  params.device = device;
+  params.texture_type = type;
+  params.pixel_format = format;
+  params.sample_count = sample_count;
+  params.page_size = page_size;
+  UNIX_CALL(unix_mtldevice_sparsetexturetilesize, &params);
+  return params.result;
+}
+
 WINEMETAL_API bool
 MTLDevice_supportsBCTextureCompression(obj_handle_t device) {
   struct unixcall_generic_obj_uint64_ret params;

@@ -14,7 +14,6 @@
 namespace {
 
 constexpr UINT TileBytes = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
-constexpr UINT PackedTileCount = 1;
 constexpr UINT ValueA = 0x11112222;
 constexpr UINT ValueB = 0x33334444;
 
@@ -213,13 +212,25 @@ int Run(const char *read_path, const char *write_a_path,
   std::vector<D3D12_SUBRESOURCE_TILING> tilings(subresource_count);
   device->GetResourceTiling(texture.ptr, &total_tiles, &packed_info, &tile_shape, &subresource_count, 0,
                             tilings.data());
-  if (total_tiles != 1 || packed_info.NumStandardMips != 0 || packed_info.NumPackedMips != 4 ||
-      packed_info.NumTilesForPackedMips != PackedTileCount || packed_info.StartTileIndexInOverallResource != 0 ||
-      tile_shape.WidthInTexels || tile_shape.HeightInTexels || tile_shape.DepthInTexels ||
+  std::cout << "texture tiling: total=" << total_tiles
+            << " standard_mips=" << static_cast<unsigned>(packed_info.NumStandardMips)
+            << " packed_mips=" << static_cast<unsigned>(packed_info.NumPackedMips)
+            << " packed_tiles=" << packed_info.NumTilesForPackedMips << "\n";
+  if (!packed_info.NumPackedMips || packed_info.NumPackedMips + packed_info.NumStandardMips != texture_desc.MipLevels ||
+      packed_info.NumTilesForPackedMips != 1 ||
+      packed_info.StartTileIndexInOverallResource != packed_info.NumStandardMips ||
+      total_tiles != packed_info.NumStandardMips + packed_info.NumTilesForPackedMips ||
       subresource_count != texture_desc.MipLevels) {
     throw std::runtime_error("packed texture tiling matrix mismatch");
   }
   for (UINT mip = 0; mip < texture_desc.MipLevels; mip++) {
+    if (mip < packed_info.NumStandardMips) {
+      if (!tile_shape.WidthInTexels || !tile_shape.HeightInTexels || tile_shape.DepthInTexels != 1 ||
+          tilings[mip].WidthInTiles != 1 || tilings[mip].HeightInTiles != 1 || tilings[mip].DepthInTiles != 1 ||
+          tilings[mip].StartTileIndexInOverallResource != mip)
+        throw std::runtime_error("standard texture subresource tiling mismatch");
+      continue;
+    }
     if (tilings[mip].WidthInTiles || tilings[mip].HeightInTiles || tilings[mip].DepthInTiles ||
         tilings[mip].StartTileIndexInOverallResource != ~static_cast<UINT>(0))
       throw std::runtime_error("packed texture subresource tiling mismatch");
@@ -322,7 +333,7 @@ int Run(const char *read_path, const char *write_a_path,
   Owned<ID3D12Heap> heap_a;
   Owned<ID3D12Heap> heap_b;
   D3D12_HEAP_DESC heap_desc = {};
-  heap_desc.SizeInBytes = UINT64(PackedTileCount) * TileBytes;
+  heap_desc.SizeInBytes = UINT64(total_tiles) * TileBytes;
   heap_desc.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
   heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
   Check("CreatePackedHeapA", device->CreateHeap(&heap_desc, IID_PPV_ARGS(&heap_a.ptr)));
@@ -333,7 +344,7 @@ int Run(const char *read_path, const char *write_a_path,
   D3D12_TILED_RESOURCE_COORDINATE coordinate = {};
   coordinate.Subresource = 0;
   D3D12_TILE_REGION_SIZE region = {};
-  region.NumTiles = PackedTileCount;
+  region.NumTiles = total_tiles;
   UINT heap_tile = 0;
 
   auto map_tail = [&](ID3D12Heap *heap) {
@@ -347,6 +358,52 @@ int Run(const char *read_path, const char *write_a_path,
   // Create both views before the first mapping. The physical mapping must not
   // alter the descriptor's virtual resource identity.
   map_tail(heap_a.ptr);
+  if (packed_info.NumStandardMips) {
+    Owned<ID3D12Resource> tile_upload, tile_readback;
+    CreateBuffer(device.ptr, tile_upload, TileBytes, D3D12_HEAP_TYPE_UPLOAD,
+                 D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+    CreateBuffer(device.ptr, tile_readback, TileBytes, D3D12_HEAP_TYPE_READBACK,
+                 D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+    UINT *data = nullptr;
+    Check("Map standard tile upload", tile_upload->Map(0, nullptr, reinterpret_cast<void **>(&data)));
+    for (UINT i = 0; i < TileBytes / sizeof(UINT); ++i)
+      data[i] = 0x76543210u + i;
+    tile_upload->Unmap(0, nullptr);
+
+    Owned<ID3D12CommandAllocator> tile_allocator;
+    Owned<ID3D12GraphicsCommandList> tile_list;
+    Check("Create tile allocator", device->CreateCommandAllocator(
+        D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&tile_allocator.ptr)));
+    Check("Create tile list", device->CreateCommandList(
+        0, D3D12_COMMAND_LIST_TYPE_DIRECT, tile_allocator.ptr, nullptr, IID_PPV_ARGS(&tile_list.ptr)));
+    D3D12_TILE_REGION_SIZE single_tile = {};
+    single_tile.NumTiles = 1;
+    Transition(tile_list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+    tile_list->CopyTiles(texture.ptr, &coordinate, &single_tile, tile_upload.ptr, 0,
+                         D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
+    Transition(tile_list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    tile_list->CopyTiles(texture.ptr, &coordinate, &single_tile, tile_readback.ptr, 0,
+                         D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
+    Transition(tile_list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+    Check("Close standard tile list", tile_list->Close());
+    ID3D12CommandList *tile_lists[] = {tile_list.ptr};
+    queue->ExecuteCommandLists(1, tile_lists);
+    Owned<ID3D12Fence> tile_fence;
+    Check("Create standard tile fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&tile_fence.ptr)));
+    Check("Signal standard tile fence", queue->Signal(tile_fence.ptr, 1));
+    Wait(tile_fence.ptr, 1);
+    Check("Map standard tile readback", tile_readback->Map(0, nullptr, reinterpret_cast<void **>(&data)));
+    bool valid = true;
+    for (UINT y = 0; y < 64; ++y)
+      for (UINT x = 0; x < 64; ++x) {
+        const UINT index = y * tile_shape.WidthInTexels + x;
+        valid &= data[index] == 0x76543210u + index;
+      }
+    tile_readback->Unmap(0, nullptr);
+    if (!valid)
+      throw std::runtime_error("small standard mip CopyTiles readback mismatch");
+    std::cout << "small standard mip CopyTiles readback passed\n";
+  }
   const ULONG heap_a_public_ref_after_mapping = heap_a->AddRef();
   heap_a->Release();
   if (heap_a_public_ref_after_mapping != heap_a_public_ref_after_create) {
