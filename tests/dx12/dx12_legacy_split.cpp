@@ -1,10 +1,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d12.h>
+#include <d3d12sdklayers.h>
 #include <array>
 #include <cstring>
 #include <cstdio>
 #include <iostream>
+#include <vector>
 #include "../../src/util/com/com_pointer.hpp"
 using dxmt::Com;
 
@@ -216,7 +218,71 @@ bool SubresourceCases(ID3D12Device *device, const char *mode) {
   return true;
 }
 
+class ReferenceDiagnostics {
+  ID3D12Device *device_;
+  bool reported_ = false;
+
+public:
+  explicit ReferenceDiagnostics(ID3D12Device *device) : device_(device) {}
+  ~ReferenceDiagnostics() {
+    if (device_ && !reported_)
+      Report();
+  }
+  bool Report() {
+    reported_ = true;
+    Com<ID3D12InfoQueue> info;
+    const HRESULT info_hr = device_->QueryInterface(IID_PPV_ARGS(&info));
+    if (FAILED(info_hr) || !info) {
+      std::cout << "REFERENCE info queue unavailable hr=0x" << std::hex
+                << static_cast<unsigned long>(info_hr) << std::dec << '\n';
+    } else {
+      const UINT64 count = info->GetNumStoredMessagesAllowedByRetrievalFilter();
+      bool errors = false;
+      std::cout << "REFERENCE info messages=" << count << '\n';
+      for (UINT64 i = 0; i < count; ++i) {
+        SIZE_T bytes = 0;
+        if (FAILED(info->GetMessage(i, nullptr, &bytes)) || !bytes)
+          return false;
+        std::vector<unsigned char> storage(bytes);
+        auto *message = reinterpret_cast<D3D12_MESSAGE *>(storage.data());
+        if (FAILED(info->GetMessage(i, message, &bytes)))
+          return false;
+        std::cout << "REFERENCE message severity=" << message->Severity
+                  << " id=" << message->ID << " " << message->pDescription
+                  << '\n';
+        errors |= message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION ||
+                  message->Severity == D3D12_MESSAGE_SEVERITY_ERROR;
+      }
+      if (errors) {
+        std::cerr << "FAIL reference debug layer reported errors\n";
+        return false;
+      }
+    }
+    return true;
+  }
+};
+
 int main(int argc, char **argv) {
+  const bool reference_cross =
+      argc > 1 && !strcmp(argv[1], "--reference-cross-queue");
+  const bool reference_reverse =
+      argc > 1 && !strcmp(argv[1], "--reference-reverse-queue");
+  const bool reference = reference_cross || reference_reverse;
+  if (reference) {
+    Com<ID3D12Debug> debug;
+    using GetDebugInterface = HRESULT(WINAPI *)(REFIID, void **);
+    const auto get_debug = reinterpret_cast<GetDebugInterface>(GetProcAddress(
+        GetModuleHandleA("d3d12.dll"), "D3D12GetDebugInterface"));
+    const HRESULT hr =
+        get_debug ? get_debug(IID_PPV_ARGS(&debug)) : E_NOINTERFACE;
+    if (SUCCEEDED(hr) && debug) {
+      debug->EnableDebugLayer();
+      std::cout << "REFERENCE debug layer enabled\n";
+    } else {
+      std::cout << "REFERENCE debug layer unavailable hr=0x" << std::hex
+                << static_cast<unsigned long>(hr) << std::dec << '\n';
+    }
+  }
   const bool bad_oracle = argc > 1 && !strcmp(argv[1], "--bad-oracle");
   const bool oom_snapshot = argc > 1 && !strcmp(argv[1], "--oom-snapshot");
   const bool oom_signal = argc > 1 && !strcmp(argv[1], "--oom-signal");
@@ -244,9 +310,10 @@ int main(int argc, char **argv) {
   const bool mismatch_submissions =
       mismatch_signal ||
       (argc > 1 && !strcmp(argv[1], "--mismatch-submissions"));
-  const bool reverse_queue = argc > 1 && !strcmp(argv[1], "--reverse-queue");
+  const bool reverse_queue =
+      reference_reverse || (argc > 1 && !strcmp(argv[1], "--reverse-queue"));
   const bool cross_return = argc > 1 && !strcmp(argv[1], "--cross-return");
-  const bool cross_queue = reverse_queue || cross_return ||
+  const bool cross_queue = reference_cross || reverse_queue || cross_return ||
                            (argc > 1 && !strcmp(argv[1], "--cross-queue"));
   const bool separate = oom_snapshot || signal_submissions ||
                         mismatch_submissions || mismatch_lists || cross_queue ||
@@ -268,6 +335,7 @@ int main(int argc, char **argv) {
                                IID_PPV_ARGS(&device)),
              "CreateDevice"))
     return 1;
+  ReferenceDiagnostics diagnostics(reference ? device.ptr() : nullptr);
   if (argc > 1 &&
       (!strcmp(argv[1], "--subresources") ||
        !strcmp(argv[1], "--disjoint-transition") ||
@@ -299,7 +367,7 @@ int main(int argc, char **argv) {
                    readback))
     return 1;
   bool destroyed = false;
-  if (cross_queue) {
+  if (cross_queue && !reference) {
     const GUID marker_id{0xb962ba32,
                          0xe7ad,
                          0x4f10,
@@ -583,7 +651,7 @@ int main(int argc, char **argv) {
         !check(device->GetDeviceRemovedReason(), "Return queue device status"))
       return 1;
   }
-  if (cross_queue) {
+  if (cross_queue && !reference) {
     first = nullptr;
     second = nullptr;
     first_allocator = nullptr;
@@ -596,6 +664,8 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
+  if (reference && !diagnostics.Report())
+    return 1;
   std::cout << "PASS legacy split exact readback mode="
             << (signal_submissions ? "signal-submissions"
                 : reverse_queue    ? "reverse-queue"
