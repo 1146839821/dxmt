@@ -1019,10 +1019,6 @@ public:
     const uint32_t msc_emulation_flags = use_msc_tessellation ? DXMT_MSC_COMPILE_FLAG_TESSELLATION_EMULATION
                                          : use_msc_geometry   ? DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION
                                                               : 0;
-    if (has_geometry && (has_hull || has_domain)) {
-      ERR("CreatePipelineState: geometry and tessellation emulation are not combined");
-      return E_NOTIMPL;
-    }
     if ((has_hull || has_domain) && !use_msc_tessellation) {
       ERR("CreatePipelineState: legacy DXBC tessellation is not implemented in the D3D12 AIRCONV path");
       return E_NOTIMPL;
@@ -1460,6 +1456,21 @@ public:
           pDesc->BlendState.AlphaToCoverageEnable && pDesc->PS.pShaderBytecode &&
           (use_msc || !ref_ps.PixelShader.HasCoverageOutput);
 
+      WMTPrimitiveType geometry_input_primitive = WMTPrimitiveTypeTriangle;
+      if (use_msc_geometry) {
+        if (!MapMSCGeometryInputPrimitive(converted_gs.reflection.gs_input_primitive, geometry_input_primitive) ||
+            !converted_vs.reflection.vertex_output_size_in_bytes ||
+            !converted_gs.reflection.gs_max_input_primitives_per_mesh_threadgroup ||
+            !converted_gs.reflection.gs_instance_count || converted_gs.reflection.gs_instance_count > 32)
+          return E_INVALIDARG;
+        // MSC PointStream output is not yet correct for instanced shaders.
+        // Keep the same limit for standalone and tessellated geometry stages.
+        if (converted_gs.reflection.gs_instance_count != 1) {
+          ERR("CreatePipelineState: instanced geometry shaders are not supported");
+          return E_NOTIMPL;
+        }
+      }
+
       if (use_msc_tessellation) {
         if (pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH)
           return E_INVALIDARG;
@@ -1469,7 +1480,8 @@ public:
         WMTPrimitiveType passthrough_input;
         if (!MapMSCTessellatorOutputPrimitive(hs.hs_tessellator_output_primitive, passthrough_input) ||
             !MTLValidateMSCTessellationPipeline(
-                hs.hs_tessellator_output_primitive, passthrough_input, hs.hs_output_control_point_size,
+                hs.hs_tessellator_output_primitive, use_msc_geometry ? geometry_input_primitive : passthrough_input,
+                hs.hs_output_control_point_size,
                 ds.ds_input_control_point_size, hs.hs_patch_constants_size, ds.ds_patch_constants_size,
                 hs.hs_output_control_point_count, ds.ds_input_control_point_count
             ) ||
@@ -1487,6 +1499,13 @@ public:
         // point output rejected until unique-point semantics are implemented.
         if (hs.hs_tessellator_output_primitive == IRTessellatorOutputPoint) {
           ERR("CreatePipelineState: MSC tessellation point output is unsupported");
+          return E_NOTIMPL;
+        }
+
+        // The generated line-input GS currently drops tessellated isolines.
+        // Keep this combination explicit until its primitive assembly is correct.
+        if (use_msc_geometry && hs.hs_tessellator_output_primitive == IRTessellatorOutputLine) {
+          ERR("CreatePipelineState: MSC tessellation with a line-input GS is unsupported");
           return E_NOTIMPL;
         }
 
@@ -1525,12 +1544,21 @@ public:
         );
         tess_info.config.output_primitive_type = hs.hs_tessellator_output_primitive;
         tess_info.config.vs_output_size_in_bytes = converted_vs.reflection.vertex_output_size_in_bytes;
-        tess_info.config.gs_max_input_primitives_per_mesh_threadgroup = ds.ds_max_input_prims_per_mesh_threadgroup;
+        tess_info.config.gs_max_input_primitives_per_mesh_threadgroup = use_msc_geometry
+            ? converted_gs.reflection.gs_max_input_primitives_per_mesh_threadgroup
+            : ds.ds_max_input_prims_per_mesh_threadgroup;
         tess_info.config.hs_max_patches_per_object_threadgroup = hs.hs_max_patches_per_object_threadgroup;
         tess_info.config.hs_input_control_point_count = hs.hs_input_control_point_count;
         tess_info.config.hs_max_object_threads_per_threadgroup = hs.hs_max_object_threads_per_patch;
         tess_info.config.hs_max_tessellation_factor = hs.hs_max_tessellation_factor;
-        tess_info.config.gs_instance_count = 1;
+        tess_info.config.gs_instance_count = use_msc_geometry ? converted_gs.reflection.gs_instance_count : 1;
+        if (use_msc_geometry) {
+          tess_info.geometry_library = gs_lib.handle;
+          std::strncpy(
+              tess_info.geometry_function_name, converted_gs.entry_point.c_str(),
+              sizeof(tess_info.geometry_function_name) - 1
+          );
+        }
 
         pso = metal.newMSCTessellationPipelineState(tess_info, err);
         if (pso)
@@ -1544,20 +1572,6 @@ public:
         msc_tessellation = true;
         msc_tessellation_config = tess_info.config;
       } else if (use_msc_geometry) {
-        WMTPrimitiveType geometry_input_primitive;
-        if (!MapMSCGeometryInputPrimitive(converted_gs.reflection.gs_input_primitive, geometry_input_primitive) ||
-            !converted_vs.reflection.vertex_output_size_in_bytes ||
-            !converted_gs.reflection.gs_max_input_primitives_per_mesh_threadgroup ||
-            !converted_gs.reflection.gs_instance_count || converted_gs.reflection.gs_instance_count > 32)
-          return E_INVALIDARG;
-        // MSC PointStream output is not yet correct for instanced shaders.
-        // Do not enable other instanced output paths without a reliable way to
-        // distinguish the compiled geometry output topology.
-        if (converted_gs.reflection.gs_instance_count != 1) {
-          ERR("CreatePipelineState: instanced geometry shaders are not supported");
-          return E_NOTIMPL;
-        }
-
         switch (geometry_input_primitive) {
         case WMTPrimitiveTypePoint:
           if (pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT)

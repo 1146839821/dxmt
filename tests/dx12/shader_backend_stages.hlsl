@@ -56,10 +56,17 @@ float4 ps_main(StageVertex input) : SV_Target0 { return input.color; }
 #else
 uint4 ps_main(StageVertex input) : SV_Target0 { return uint4(input.color); }
 #endif
+#ifdef STAGE_GEOMETRY_LINE
+#define STAGE_GS_INPUT_VERTICES 2
+[maxvertexcount(2)]
+void gs_main(line StageVertex input[2], inout LineStream<StageVertex> stream)
+#else
+#define STAGE_GS_INPUT_VERTICES 3
 [maxvertexcount(3)]
 void gs_main(triangle StageVertex input[3], inout TriangleStream<StageVertex> stream)
+#endif
 {
-    for (uint i = 0; i < 3; ++i) {
+    for (uint i = 0; i < STAGE_GS_INPUT_VERTICES; ++i) {
         StageVertex o = input[i];
         o.color = read_tag(2);
         o.color.x += input[i].color.x;
@@ -80,7 +87,9 @@ StageFactors hs_constants(InputPatch<StageVertex, 3> patch, uint primitive : SV_
 struct StageFactors { float edge[3] : SV_TessFactor; float inside : SV_InsideTessFactor; };
 StageFactors hs_constants(InputPatch<StageVertex, 3> patch, uint primitive : SV_PrimitiveID)
 {
-#ifdef STAGE_TESS_FACTOR2
+#ifdef STAGE_TESS_FACTOR16
+    StageFactors factors = {{16, 16, 16}, 16};
+#elif defined(STAGE_TESS_FACTOR2)
     StageFactors factors = {{2, 2, 2}, 2};
 #else
     StageFactors factors = {{1, 1, 1}, 1};

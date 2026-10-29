@@ -111,7 +111,8 @@ dxmt_msc_new_tessellation_pipeline(
     pipeline.hullFunctionName = info->hull_function_name;
     pipeline.domainLibrary = dxmt_msc_object<MTL::Library>(info->domain_library);
     pipeline.domainFunctionName = info->domain_function_name;
-    pipeline.geometryFunctionName = geometry_function;
+    pipeline.geometryLibrary = dxmt_msc_object<MTL::Library>(info->geometry_library);
+    pipeline.geometryFunctionName = info->geometry_library ? info->geometry_function_name : geometry_function;
     pipeline.fragmentLibrary = dxmt_msc_object<MTL::Library>(info->fragment_library);
     pipeline.fragmentFunctionName = info->fragment_function_name;
     pipeline.basePipelineDescriptor = base_descriptor;

@@ -2704,8 +2704,23 @@ bool TestStageBindings(const char *mode) {
              same_root = !std::strcmp(mode, "same-root"),
              wrong = !std::strcmp(mode, "wrong") ||
                      !std::strcmp(mode, "tess-line-image-wrong") ||
+                     !std::strcmp(mode, "tess-gs-wrong") ||
                      !std::strcmp(mode, "tess-point-grid-control-wrong"),
              perf = !std::strcmp(mode, "perf");
+  const bool tess_gs = !std::strcmp(mode, "tess-gs") ||
+                       !std::strcmp(mode, "tess-gs-u16") ||
+                       !std::strcmp(mode, "tess-gs-u32") ||
+                       !std::strcmp(mode, "tess-gs-line") ||
+                       !std::strcmp(mode, "tess-gs-line-rejected") ||
+                       !std::strcmp(mode, "tess-gs-factor16") ||
+                       !std::strcmp(mode, "tess-gs-lifetime") ||
+                       !std::strcmp(mode, "tess-gs-wrong") ||
+                       !std::strcmp(mode, "tess-gs-mismatch"),
+             tess_gs_mismatch = !std::strcmp(mode, "tess-gs-mismatch"),
+             tess_gs_line_rejected =
+                 !std::strcmp(mode, "tess-gs-line-rejected"),
+             tess_gs_factor16 = !std::strcmp(mode, "tess-gs-factor16"),
+             tess_gs_lifetime = !std::strcmp(mode, "tess-gs-lifetime");
   const bool invocations_control =
                  !std::strcmp(mode, "tess-point-invocations-control") ||
                  !std::strcmp(mode, "tess-point-invocations-control-wrong"),
@@ -2734,16 +2749,20 @@ bool TestStageBindings(const char *mode) {
                           !std::strcmp(mode, "tess-point-grid-factor2") ||
                           !std::strcmp(mode, "tess-point-rejected") ||
                           !std::strcmp(mode, "tess-point-mismatch"),
-             tess_line = !std::strcmp(mode, "tess-line") ||
+             tess_line = tess_gs_line_rejected ||
+                         !std::strcmp(mode, "tess-gs-line") ||
+                         !std::strcmp(mode, "tess-line") ||
                          !std::strcmp(mode, "tess-line-u16") ||
                          !std::strcmp(mode, "tess-line-u32") ||
                          !std::strcmp(mode, "tess-line-image") ||
                          !std::strcmp(mode, "tess-line-image-wrong"),
              tess_ccw = !std::strcmp(mode, "tess-ccw"),
-             tess_mismatch = !std::strcmp(mode, "tess-mismatch") ||
+             tess_mismatch = tess_gs_mismatch ||
+                             !std::strcmp(mode, "tess-mismatch") ||
                              !std::strcmp(mode, "tess-point-mismatch"),
              tess_point_rejected = !std::strcmp(mode, "tess-point-rejected"),
-             tess_image = !std::strcmp(mode, "tess-point-image") ||
+             tess_image = !std::strcmp(mode, "tess-gs-line") ||
+                          !std::strcmp(mode, "tess-point-image") ||
                           !std::strcmp(mode, "tess-line-image") ||
                           !std::strcmp(mode, "tess-line-image-wrong"),
              tess_factor2 =
@@ -2760,6 +2779,8 @@ bool TestStageBindings(const char *mode) {
     sequence = {2, 8, 3, 2, 5, 2, 6, 2, 4};
   else if (!std::strcmp(mode, "gs-ts"))
     sequence = {3, 4, 3, 4};
+  else if (tess_gs)
+    sequence = {2, 4, 3, 4};
   else if (!std::strcmp(mode, "tess") || tess_point || tess_line || tess_ccw ||
            tess_mismatch)
     sequence = {2, 4, 2, 4};
@@ -2915,12 +2936,15 @@ bool TestStageBindings(const char *mode) {
         blend.SrcBlendAlpha = blend.DestBlendAlpha = D3D12_BLEND_ONE;
         blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
       }
-      auto gs =
-          read(airconv ? "stage_binding5.gs.cso" : "stage_binding.gs.cso");
-      const char *tess_variant = invocations    ? "point_invocations"
-                                 : tess_grid    ? "point_grid_factor2"
-                                 : tess_factor2 ? "point_coord_factor2"
-                                 : tess_coord   ? "point_coord"
+      auto gs = read(tess_gs && kind == 4 && (tess_line || tess_gs_mismatch)
+                         ? "stage_binding_line.gs.cso"
+                     : airconv ? "stage_binding5.gs.cso"
+                               : "stage_binding.gs.cso");
+      const char *tess_variant = tess_gs_factor16 ? "factor16"
+                                 : invocations    ? "point_invocations"
+                                 : tess_grid      ? "point_grid_factor2"
+                                 : tess_factor2   ? "point_coord_factor2"
+                                 : tess_coord     ? "point_coord"
                                  : tess_image && tess_point  ? "point_image"
                                  : tess_image && tess_line   ? "line_image"
                                  : tess_point                ? "point"
@@ -2933,9 +2957,9 @@ bool TestStageBindings(const char *mode) {
            ds = read(tess_variant ? std::string("stage_binding_") +
                                         tess_variant + ".ds.cso"
                                   : "stage_binding.ds.cso");
-      if (tess_mismatch)
+      if (tess_mismatch && !tess_gs_mismatch)
         ds = read("stage_binding_line.ds.cso");
-      if (kind == 1 || kind == 3)
+      if (kind == 1 || kind == 3 || (tess_gs && kind == 4))
         d.GS = {gs.data(), gs.size()};
       if (kind == 4) {
         d.HS = {hs.data(), hs.size()};
@@ -2950,16 +2974,17 @@ bool TestStageBindings(const char *mode) {
                          std::chrono::steady_clock::now() - pso_start)
                          .count()
                   << "\n";
-      if (tess_point_rejected && kind == 4) {
+      if ((tess_point_rejected || tess_gs_line_rejected) && kind == 4) {
         if (hr != E_NOTIMPL || pipelines[slot])
           return false;
-        std::cout << "Stage point output explicitly unsupported\n";
+        std::cout << "Stage requested tessellation combination explicitly "
+                     "unsupported\n";
         return true;
       }
       if (tess_mismatch && kind == 4) {
         if (hr != E_INVALIDARG || pipelines[slot])
           return false;
-        std::cout << "Stage incompatible HS/DS rejected\n";
+        std::cout << "Stage incompatible tessellation stages rejected\n";
         return true;
       }
       if (!CheckHR("Stage graphics PSO", hr))
@@ -3019,7 +3044,8 @@ bool TestStageBindings(const char *mode) {
   };
   const UINT cycles = perf ? 1 : 2,
              draws = perf ? 4096 : UINT(sequence.size()) * cycles,
-             width = perf ? 1 : draws, height = tess_image || tess_grid ? 8 : 1;
+             width = perf ? 1 : draws,
+             height = tess_image || tess_grid || tess_gs ? 8 : 1;
   if (!buffer(D3D12_HEAP_TYPE_UPLOAD, 256, D3D12_RESOURCE_STATE_GENERIC_READ,
               &upload) ||
       !buffer(D3D12_HEAP_TYPE_READBACK, 256 * height,
@@ -3178,14 +3204,15 @@ bool TestStageBindings(const char *mode) {
                           kind,
                           {values[0], values[1], values[2], values[3]},
                           pso->msc_tessellator_tables.handle});
-      const UINT multiplier = kind == 1 || kind == 3 || kind == 6 ? 2
-                              : kind == 4                         ? 3
-                                                                  : 1,
-                 tag = kind == 1 || kind == 3 ? 2
-                       : kind == 4            ? 4
-                       : kind == 5            ? 5
-                       : kind == 6            ? 7
-                                              : 1;
+      const UINT multiplier = tess_gs && kind == 4                  ? 4
+                              : kind == 1 || kind == 3 || kind == 6 ? 2
+                              : kind == 4                           ? 3
+                                                                    : 1,
+                 tag = (tess_gs && kind == 4) || kind == 1 || kind == 3 ? 2
+                       : kind == 4                                      ? 4
+                       : kind == 5                                      ? 5
+                       : kind == 6                                      ? 7
+                                                                        : 1;
       for (UINT y = 0; y < height; ++y) {
         if (tess_image && tess_point && kind == 4 && y != 1 && y != 3 && y != 6)
           continue;
@@ -3362,6 +3389,21 @@ bool TestStageBindings(const char *mode) {
     if (pass == 2) {
       if (SUCCEEDED(allocator->Reset()))
         return false;
+      if (tess_gs_lifetime) {
+        list6 = nullptr;
+        list = nullptr;
+        allocator = nullptr;
+        for (auto &pipeline : pipelines)
+          pipeline = nullptr;
+        root = nullptr;
+        source = nullptr;
+        upload = nullptr;
+        target = nullptr;
+        heap = nullptr;
+        samplers = nullptr;
+        rtvs = nullptr;
+        index_buffer = nullptr;
+      }
       if (!CheckHR("Stage gate signal", gate->Signal(1)))
         return false;
     }

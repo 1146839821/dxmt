@@ -939,6 +939,8 @@ struct WMTMSCTessellationPipelineInfo {
   char domain_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
   char fragment_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
   struct WMTMSCTessellationPipelineConfig config;
+  obj_handle_t geometry_library; // Optional; zero selects the domain passthrough.
+  char geometry_function_name[WMT_MSC_FUNCTION_NAME_CAPACITY];
 };
 
 struct WMTMSCGeometryPipelineConfig {

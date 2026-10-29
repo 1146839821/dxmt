@@ -282,6 +282,24 @@ if dxc_command.length() > 0
       )
     endforeach
   endforeach
+  foreach stage : ['hs', 'ds']
+    custom_target('dx12_stage_binding_factor16_' + stage,
+      input: 'shader_backend_stages.hlsl',
+      output: 'stage_binding_factor16.' + stage + '.cso',
+      command: dxc_command + [ '-E', stage + '_main', '-T', stage + '_6_0',
+        '-D', 'STAGE_BINDING_DIFFERENTIAL=1', '-D', 'STAGE_TESS_FACTOR16=1',
+        '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_stage_binding_line_gs',
+    input: 'shader_backend_stages.hlsl',
+    output: 'stage_binding_line.gs.cso',
+    command: dxc_command + [ '-E', 'gs_main', '-T', 'gs_6_0',
+      '-D', 'STAGE_BINDING_DIFFERENTIAL=1', '-D', 'STAGE_GEOMETRY_LINE=1',
+      '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_stage_binding_tess_count_ps',
     input: 'shader_backend_stages.hlsl',
     output: 'stage_binding_count.ps.cso',

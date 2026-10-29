@@ -5213,3 +5213,38 @@ MSC ABI is adopted, and this factor-2 probe does not establish other domains,
 partitioning, patch/group boundaries or performance. Evidence, commands, hashes
 and six final process results:
 `../dxmt-test/n11-msc-ts-invocations-20261029/N11-domain-invocations.md`.
+
+### MSC triangle tessellation with an application GS (2026-10-29)
+
+The existing tessellation PSO now passes the optional application GS library and
+entry point through `WMTMSCTessellationPipelineInfo` to the MSC runtime. HS output
+is validated against the actual GS input topology, and the GS reflection supplies
+the mesh workgroup limit. The existing tessellation draw, root binding, residency
+and completion owners remain in use; no draw-path allocation or encoder change
+was introduced. The internal descriptor extension requires matching D3D12 and
+WineMetal binaries. The tessellator enum header is taken from the tracked
+`include/metal_shader_converter` copy, verified identical to the local SDK.
+
+On M1 Max / macOS 27.0.1 / Xcode 27.1 / Wine 11 x64 / MSC CLI 4.0.3
+(runtime API 4.0.1), private and no-private configurations each passed ten
+expected-result cases with Metal API/GPU validation and native loading checks.
+Triangle HS+DS+GS produces the exact 8x8 integer stage-tag image for direct,
+16/32-bit indexed and factor-16 draws, including unchanged-root stage switches,
+closed-list replay and fenced reset/rerecord. A gated submission also passes
+after dropping the application's list, allocator, PSO, root and resource
+references. A mismatched GS input is rejected, and an intentionally wrong image
+oracle fails. Ordinary line TS and point rejection remain adjacent controls.
+
+An unguarded line HS+DS+GS diagnostic creates a PSO but emits no expected pixels;
+explicit compiler line input topology also fails this oracle. The product
+therefore retains E_NOTIMPL for line-input GS+TS and point TS. GS instancing,
+stream output and AIRCONV tessellation remain open; this slice does not claim
+full GS+TS conformance or change FL/SM/Tier reporting.
+
+Three interleaved baseline/current ordinary `tess` runs measured warmed CPU
+recording medians of 3.9625/4.15 us per draw and native observer medians of
+1184.3/1136.8 us. The small, validation-enabled samples overlap; GPU performance
+is INCONCLUSIVE. Initial PSO timing had asymmetric cache state and is not used
+as a speedup comparison. Evidence, commands, binary hashes, diagnostic limits
+and post-header rebuild checks are recorded in
+`../dxmt-test/n11-msc-gs-ts-20261029/N11-gs-ts-link.md`.
