@@ -5995,9 +5995,9 @@ bool TestWriteBufferImmediate(const char *mode) {
       return false;
     D3D12_WRITEBUFFERIMMEDIATE_PARAMETER param = {address, 1};
     bundle->WriteBufferImmediate(1, &param, nullptr);
-    if (SUCCEEDED(bundle->Close()))
+    if (!CheckHR("WBI bundle close", bundle->Close()))
       return false;
-    std::cout << "WBI invalid/alignment/range/null/mode/bundle and empty count "
+    std::cout << "WBI invalid/alignment/range/null/mode, valid bundle and empty count "
                  "passed\n";
     return true;
   }
@@ -6439,8 +6439,8 @@ int main(int argc, char **argv) {
     result = 1;
   } else {
     parent_list->ExecuteBundle(bundle_list);
-    if (parent_list->Close() != E_FAIL) {
-      std::cerr << "unsupported ExecuteBundle was silently accepted\n";
+    if (parent_list->Close() != S_OK) {
+      std::cerr << "empty ExecuteBundle was rejected\n";
       result = 1;
     }
   }

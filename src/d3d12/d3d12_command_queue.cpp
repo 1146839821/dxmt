@@ -854,7 +854,7 @@ public:
       command_list.recording_id = pCommandList->GetRecordingId();
       for (auto *encoder = pCommandList->entry; encoder; encoder = encoder->next)
         command_list.encoders.push_back({encoder->type, encoder->id});
-      submission.allocators.emplace_back(pCommandList->GetAllocator());
+      pCommandList->CollectAllocatorsForSubmission(submission.allocators);
     }
     for (auto &allocator : submission.allocators)
       allocator->MarkSubmissionSubmitted();

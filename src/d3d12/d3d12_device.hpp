@@ -150,6 +150,7 @@ public:
 
   virtual MTLD3D12CommandAllocator *GetAllocator() = 0;
   virtual bool IsAllocatorRecordingValid() const = 0;
+  virtual void CollectAllocatorsForSubmission(std::vector<Com<MTLD3D12CommandAllocator, false>> &allocators) const = 0;
   virtual std::shared_ptr<D3D12CommandListRecording> GetRecordingState() const = 0;
   virtual HRESULT GetCloseResult() const = 0;
   virtual uint64_t GetRecordingId() const = 0;
@@ -576,6 +577,17 @@ public:
 
 class MTLD3D12GraphicsPipelineState : public MTLD3D12PipelineState {
 public:
+  struct RenderTargetLayout {
+    std::array<DXGI_FORMAT, D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT> formats{};
+    DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN;
+    UINT count = 0;
+    UINT sample_count = 1;
+    UINT sample_quality = 0;
+    bool operator==(const RenderTargetLayout &) const = default;
+  };
+  // Immutable API formats, retained for the bundle-wide PSO compatibility rule.
+  RenderTargetLayout render_target_layout;
+
   WMT::Reference<WMT::RenderPipelineState> pso;
   WMT::Reference<WMT::DepthStencilState> dsso;
   WMT::Reference<WMT::DepthStencilState> dsso_stencil_disabled;

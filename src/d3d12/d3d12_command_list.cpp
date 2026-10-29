@@ -28,6 +28,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <functional>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -1061,6 +1062,16 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   FLOAT blend_factor_[4];
   UINT8 stencil_ref_;
 
+  using BundleCommand = std::function<void(MTLD3D12GraphicsCommandListImpl &)>;
+  std::vector<BundleCommand> bundle_commands_;
+  Com<MTLD3D12PipelineState> bundle_initial_pipeline_;
+  std::optional<MTLD3D12GraphicsPipelineState::RenderTargetLayout> bundle_render_target_layout_;
+  struct BundleAllocatorDependency {
+    Com<MTLD3D12CommandAllocatorImpl, false> allocator;
+    uint64_t generation;
+  };
+  std::vector<BundleAllocatorDependency> bundle_allocators_;
+
 public:
   MTLD3D12GraphicsCommandListImpl(MTLD3D12Device *pDevice, D3D12_COMMAND_LIST_TYPE type) :
       MTLD3D12DeviceChild<MTLD3D12GraphicsCommandList>(pDevice), type_(type), recording_failed_(false) {}
@@ -1283,6 +1294,14 @@ public:
     pending_barrier_stages_after_ = (WMTRenderStages)0;
     pending_barrier_stages_before_ = (WMTRenderStages)0;
     resource_state_transitions_.clear();
+    bundle_commands_.clear();
+    bundle_allocators_.clear();
+    bundle_render_target_layout_.reset();
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE && pso_graphics_)
+      bundle_render_target_layout_ = pso_graphics_->render_target_layout;
+    bundle_initial_pipeline_ = type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE
+                                   ? static_cast<MTLD3D12PipelineState *>(pInitialPipelineState)
+                                   : nullptr;
 
     entry = recording_entry;
     recording_state_ = std::move(recording);
@@ -1506,7 +1525,20 @@ public:
   }
 
   bool IsAllocatorRecordingValid() const final {
-    return allocator_ && allocator_reset_generation_ == allocator_->GetResetGeneration();
+    if (!allocator_ || allocator_reset_generation_ != allocator_->GetResetGeneration())
+      return false;
+    for (const auto &dependency : bundle_allocators_)
+      if (dependency.generation != dependency.allocator->GetResetGeneration())
+        return false;
+    return true;
+  }
+
+  void CollectAllocatorsForSubmission(std::vector<Com<MTLD3D12CommandAllocator, false>> &allocators) const final {
+    allocators.emplace_back(allocator_.ptr());
+    // The queue marks each retained allocator, without applying the direct-list
+    // recording admission to bundles shared by multiple parent submissions.
+    for (const auto &dependency : bundle_allocators_)
+      allocators.emplace_back(dependency.allocator.ptr());
   }
 
   std::shared_ptr<D3D12CommandListRecording> GetRecordingState() const final {
@@ -1747,6 +1779,8 @@ public:
 
   void STDMETHODCALLTYPE
   ClearState(ID3D12PipelineState *pPipelineState) {
+    if (DropBundleCommand(__func__))
+      return;
     allocator_->InvalidateCurrentPass();
 
     pso_graphics_ = nullptr;
@@ -1799,7 +1833,8 @@ public:
     if (valid)
       return true;
     WARN("D3D12 command list type ", type_, " cannot execute ", name);
-    FailRecording(name, "unsupported command list type=", type_);
+    if (type_ != D3D12_COMMAND_LIST_TYPE_BUNDLE)
+      FailRecording(name, "unsupported command list type=", type_);
     return false;
   }
 
@@ -1821,6 +1856,28 @@ public:
   bool
   SupportsTimestamp() const {
     return type_ != D3D12_COMMAND_LIST_TYPE_BUNDLE;
+  }
+
+  bool DropBundleCommand(const char *name) {
+    if (type_ != D3D12_COMMAND_LIST_TYPE_BUNDLE)
+      return false;
+    WARN("D3D12 bundle drops unsupported command ", name);
+    return true;
+  }
+
+  template <typename Command>
+  bool RecordBundleCommand(Command command, const char *name) {
+    if (recording_failed_)
+      return false;
+    try {
+      // Conversion to std::function may allocate and must remain in this try.
+      bundle_commands_.emplace_back(std::move(command));
+      return true;
+    } catch (const std::bad_alloc &) {
+      recording_error_ = E_OUTOFMEMORY;
+      FailRecording(name, "bundle command allocation failed");
+      return false;
+    }
   }
 
   bool
@@ -3421,6 +3478,15 @@ public:
 
   void STDMETHODCALLTYPE
   DrawInstanced(UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [=](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.DrawInstanced(VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
+          },
+          __func__
+      );
+      return;
+    }
     static uint32_t trace_draw_count = 0;
     uint32_t trace_draw_id = trace_draw_count++;
     if (trace_draw_id < 32)
@@ -3557,6 +3623,17 @@ public:
       UINT IndexCountPerInstance, UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation,
       UINT StartInstanceLocation
   ) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [=](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.DrawIndexedInstanced(
+                IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation
+            );
+          },
+          __func__
+      );
+      return;
+    }
     static uint32_t trace_draw_indexed_count = 0;
     uint32_t trace_draw_indexed_id = trace_draw_indexed_count++;
     if (trace_draw_indexed_id < 32)
@@ -4723,6 +4800,10 @@ public:
 
   void STDMETHODCALLTYPE
   Dispatch(UINT X, UINT Y, UINT Z) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand([=](MTLD3D12GraphicsCommandListImpl &parent) { parent.Dispatch(X, Y, Z); }, __func__);
+      return;
+    }
     if (!ValidateCommand(SupportsCompute(), "Dispatch"))
       return;
 
@@ -5589,11 +5670,19 @@ public:
 
   void STDMETHODCALLTYPE
   IASetPrimitiveTopology(D3D12_PRIMITIVE_TOPOLOGY Topology) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [=](MTLD3D12GraphicsCommandListImpl &parent) { parent.IASetPrimitiveTopology(Topology); }, __func__
+      );
+      return;
+    }
     topology_ = Topology;
   };
 
   void STDMETHODCALLTYPE
   RSSetViewports(UINT NumViewports, const D3D12_VIEWPORT *pViewports) {
+    if (DropBundleCommand(__func__))
+      return;
     if (NumViewports > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE ||
         (NumViewports && !pViewports)) {
       FailRecording(__func__, "invalid viewport list count=", NumViewports);
@@ -5608,6 +5697,8 @@ public:
 
   void STDMETHODCALLTYPE
   RSSetScissorRects(UINT NumRects, const D3D12_RECT *rects) {
+    if (DropBundleCommand(__func__))
+      return;
     if (NumRects > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE || (NumRects && !rects)) {
       FailRecording(__func__, "invalid scissor list count=", NumRects);
       return;
@@ -5621,6 +5712,15 @@ public:
 
   void STDMETHODCALLTYPE
   OMSetBlendFactor(const FLOAT BlendFactors[4]) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      std::array<FLOAT, 4> factors = {1.0f, 1.0f, 1.0f, 1.0f};
+      if (BlendFactors)
+        std::copy_n(BlendFactors, factors.size(), factors.begin());
+      RecordBundleCommand(
+          [factors](MTLD3D12GraphicsCommandListImpl &parent) { parent.OMSetBlendFactor(factors.data()); }, __func__
+      );
+      return;
+    }
     if (BlendFactors) {
       memcpy(blend_factor_, BlendFactors, std::size(blend_factor_) * sizeof(blend_factor_[0]));
     } else {
@@ -5634,6 +5734,12 @@ public:
 
   void STDMETHODCALLTYPE
   OMSetStencilRef(UINT StencilRef) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [=](MTLD3D12GraphicsCommandListImpl &parent) { parent.OMSetStencilRef(StencilRef); }, __func__
+      );
+      return;
+    }
     const auto new_stencil_ref = static_cast<UINT8>(StencilRef);
     if (stencil_ref_ == new_stencil_ref)
       return;
@@ -5701,6 +5807,29 @@ public:
 
   void STDMETHODCALLTYPE
   SetPipelineState(ID3D12PipelineState *pPSO) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      if (pPSO && !IsSameDevice(device_, pPSO)) {
+        FailRecording(__func__, "pipeline state belongs to another device");
+        return;
+      }
+      Com<MTLD3D12PipelineState, true> pipeline = pPSO ? static_cast<MTLD3D12PipelineState *>(pPSO) : nullptr;
+      if (pipeline && !pipeline->IsComputePipelineState) {
+        const auto &layout = static_cast<MTLD3D12GraphicsPipelineState *>(pPSO)->render_target_layout;
+        if (bundle_render_target_layout_ && *bundle_render_target_layout_ != layout) {
+          recording_error_ = E_INVALIDARG;
+          FailRecording(__func__, "bundle pipelines require identical render-target formats and sample descriptions");
+          return;
+        }
+        bundle_render_target_layout_ = layout;
+      }
+      RecordBundleCommand(
+          [pipeline = std::move(pipeline)](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.SetPipelineState(pipeline.ptr());
+          },
+          __func__
+      );
+      return;
+    }
     if (!pPSO) {
       pso_graphics_ = nullptr;
       pso_compute_ = nullptr;
@@ -5751,6 +5880,8 @@ public:
   };
 
   void STDMETHODCALLTYPE ResourceBarrier(UINT Count, const D3D12_RESOURCE_BARRIER *barriers) {
+    if (DropBundleCommand(__func__))
+      return;
     if (!Count || !barriers)
       return;
 
@@ -5815,12 +5946,34 @@ public:
 
   void STDMETHODCALLTYPE ExecuteBundle(ID3D12GraphicsCommandList *CommandList) {
     if (type_ != D3D12_COMMAND_LIST_TYPE_DIRECT || !CommandList ||
-        CommandList->GetType() != D3D12_COMMAND_LIST_TYPE_BUNDLE) {
-      WARN("D3D12 ExecuteBundle received an invalid command list");
-    } else {
-      WARN("D3D12 ExecuteBundle is not implemented");
+        !IsSameDevice(device_, CommandList) || CommandList->GetType() != D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      recording_error_ = E_INVALIDARG;
+      FailRecording(__func__, "caller must be direct and callee must be a same-device bundle");
+      return;
     }
-    FailRecording(__func__, "ExecuteBundle is unsupported");
+    auto *bundle = static_cast<MTLD3D12GraphicsCommandListImpl *>(CommandList);
+    if (bundle == this || bundle->encoder_count == std::numeric_limits<size_t>::max() ||
+        FAILED(bundle->close_result_) || !bundle->IsAllocatorRecordingValid()) {
+      recording_error_ = E_INVALIDARG;
+      FailRecording(__func__, "bundle is open, failed, reset, or self-referential");
+      return;
+    }
+    try {
+      bundle_allocators_.push_back({bundle->allocator_, bundle->allocator_reset_generation_});
+    } catch (const std::bad_alloc &) {
+      recording_error_ = E_OUTOFMEMORY;
+      FailRecording(__func__, "bundle allocator dependency allocation failed");
+      return;
+    }
+    // These two states are not inherited. All other state comes from this
+    // parent, and the replayed changes intentionally remain after execution.
+    SetPipelineState(bundle->bundle_initial_pipeline_.ptr());
+    IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_UNDEFINED);
+    for (const auto &command : bundle->bundle_commands_) {
+      if (recording_failed_ || allocator_->CPUAllocationFailed())
+        break;
+      command(*this);
+    }
   };
 
   void STDMETHODCALLTYPE SetDescriptorHeaps(UINT HeapCount, ID3D12DescriptorHeap *const *Heaps) {
@@ -5869,11 +6022,37 @@ public:
         return;
       }
     }
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [resources = descriptor_heap_, samplers = sampler_heap_](MTLD3D12GraphicsCommandListImpl &parent) {
+            if (parent.descriptor_heap_ != resources || parent.sampler_heap_ != samplers) {
+              parent.recording_error_ = E_INVALIDARG;
+              parent.FailRecording("ExecuteBundle", "bundle descriptor heaps differ from parent heaps");
+            }
+          }, __func__
+      );
+      return;
+    }
     dirty_state_.set(DirtyState::DescriptorHeaps);
   };
 
   void STDMETHODCALLTYPE
   SetComputeRootSignature(ID3D12RootSignature *pRootSignature) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      if (pRootSignature && !IsSameDevice(device_, pRootSignature)) {
+        FailRecording(__func__, "compute root signature belongs to another device");
+        return;
+      }
+      Com<MTLD3D12RootSignature, true> root =
+          pRootSignature ? static_cast<MTLD3D12RootSignature *>(pRootSignature) : nullptr;
+      RecordBundleCommand(
+          [root = std::move(root)](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.SetComputeRootSignature(root.ptr());
+          },
+          __func__
+      );
+      return;
+    }
     if (rootsig_compute_.ptr() == pRootSignature)
       return;
     root_resource_residency_cache_.valid = false;
@@ -5898,6 +6077,21 @@ public:
 
   void STDMETHODCALLTYPE
   SetGraphicsRootSignature(ID3D12RootSignature *pRootSignature) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      if (pRootSignature && !IsSameDevice(device_, pRootSignature)) {
+        FailRecording(__func__, "graphics root signature belongs to another device");
+        return;
+      }
+      Com<MTLD3D12RootSignature, true> root =
+          pRootSignature ? static_cast<MTLD3D12RootSignature *>(pRootSignature) : nullptr;
+      RecordBundleCommand(
+          [root = std::move(root)](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.SetGraphicsRootSignature(root.ptr());
+          },
+          __func__
+      );
+      return;
+    }
     if (rootsig_graphics_.ptr() == pRootSignature)
       return;
     root_resource_residency_cache_.valid = false;
@@ -5921,6 +6115,15 @@ public:
   };
 
   void STDMETHODCALLTYPE SetComputeRootDescriptorTable(UINT Index, D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [=](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.SetComputeRootDescriptorTable(Index, BaseDescriptor);
+          },
+          __func__
+      );
+      return;
+    }
     if (!ValidateRootArgumentRange(
             rootsig_compute_.ptr(), Index, 0, 2, D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
             "SetComputeRootDescriptorTable"
@@ -5932,6 +6135,15 @@ public:
 
   void STDMETHODCALLTYPE
   SetGraphicsRootDescriptorTable(UINT Index, D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [=](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.SetGraphicsRootDescriptorTable(Index, BaseDescriptor);
+          },
+          __func__
+      );
+      return;
+    }
     if (!ValidateRootArgumentRange(
             rootsig_graphics_.ptr(), Index, 0, 2, D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
             "SetGraphicsRootDescriptorTable"
@@ -5942,6 +6154,15 @@ public:
   };
 
   void STDMETHODCALLTYPE SetComputeRoot32BitConstant(UINT Index, UINT Data, UINT DstOffset) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [=](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.SetComputeRoot32BitConstant(Index, Data, DstOffset);
+          },
+          __func__
+      );
+      return;
+    }
     if (!ValidateRootArgumentRange(
             rootsig_compute_.ptr(), Index, DstOffset, 1, D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
             "SetComputeRoot32BitConstant"
@@ -5955,6 +6176,15 @@ public:
 
   void STDMETHODCALLTYPE
   SetGraphicsRoot32BitConstant(UINT Index, UINT Data, UINT DstOffset) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [=](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.SetGraphicsRoot32BitConstant(Index, Data, DstOffset);
+          },
+          __func__
+      );
+      return;
+    }
     if (!ValidateRootArgumentRange(
             rootsig_graphics_.ptr(), Index, DstOffset, 1, D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
             "SetGraphicsRoot32BitConstant"
@@ -5968,6 +6198,24 @@ public:
 
   void STDMETHODCALLTYPE
   SetComputeRoot32BitConstants(UINT Index, UINT ConstantCount, const void *pData, UINT DstOffset) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      if (ConstantCount > D3D12_MAX_ROOT_COST || (ConstantCount && !pData)) {
+        FailRecording(__func__, "invalid root constant count or data");
+        return;
+      }
+      std::array<UINT, D3D12_MAX_ROOT_COST> constants{};
+      if (ConstantCount)
+        std::memcpy(constants.data(), pData, sizeof(UINT) * ConstantCount);
+      RecordBundleCommand(
+          [Index, ConstantCount, constants = std::move(constants), DstOffset](
+              MTLD3D12GraphicsCommandListImpl &parent
+          ) {
+            parent.SetComputeRoot32BitConstants(Index, ConstantCount, constants.data(), DstOffset);
+          },
+          __func__
+      );
+      return;
+    }
     if (ConstantCount && !pData) {
       FailRecording("SetComputeRoot32BitConstants", "root constants data is null");
       return;
@@ -5990,6 +6238,24 @@ public:
 
   void STDMETHODCALLTYPE
   SetGraphicsRoot32BitConstants(UINT Index, UINT ConstantCount, const void *pData, UINT DstOffset) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      if (ConstantCount > D3D12_MAX_ROOT_COST || (ConstantCount && !pData)) {
+        FailRecording(__func__, "invalid root constant count or data");
+        return;
+      }
+      std::array<UINT, D3D12_MAX_ROOT_COST> constants{};
+      if (ConstantCount)
+        std::memcpy(constants.data(), pData, sizeof(UINT) * ConstantCount);
+      RecordBundleCommand(
+          [Index, ConstantCount, constants = std::move(constants), DstOffset](
+              MTLD3D12GraphicsCommandListImpl &parent
+          ) {
+            parent.SetGraphicsRoot32BitConstants(Index, ConstantCount, constants.data(), DstOffset);
+          },
+          __func__
+      );
+      return;
+    }
     if (ConstantCount && !pData) {
       FailRecording("SetGraphicsRoot32BitConstants", "root constants data is null");
       return;
@@ -6011,6 +6277,15 @@ public:
   };
 
   void STDMETHODCALLTYPE SetComputeRootConstantBufferView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [=](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.SetComputeRootConstantBufferView(Index, VA);
+          },
+          __func__
+      );
+      return;
+    }
     if (!ValidateRootArgumentRange(
             rootsig_compute_.ptr(), Index, 0, 2, D3D12_ROOT_PARAMETER_TYPE_CBV, "SetComputeRootConstantBufferView"
         ))
@@ -6021,6 +6296,15 @@ public:
 
   void STDMETHODCALLTYPE
   SetGraphicsRootConstantBufferView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [=](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.SetGraphicsRootConstantBufferView(Index, VA);
+          },
+          __func__
+      );
+      return;
+    }
     if (!ValidateRootArgumentRange(
             rootsig_graphics_.ptr(), Index, 0, 2, D3D12_ROOT_PARAMETER_TYPE_CBV, "SetGraphicsRootConstantBufferView"
         ))
@@ -6030,6 +6314,15 @@ public:
   };
 
   void STDMETHODCALLTYPE SetComputeRootShaderResourceView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [=](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.SetComputeRootShaderResourceView(Index, VA);
+          },
+          __func__
+      );
+      return;
+    }
     if (!ValidateRootArgumentRange(
             rootsig_compute_.ptr(), Index, 0, 2, D3D12_ROOT_PARAMETER_TYPE_SRV, "SetComputeRootShaderResourceView"
         ))
@@ -6040,6 +6333,15 @@ public:
 
   void STDMETHODCALLTYPE
   SetGraphicsRootShaderResourceView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [=](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.SetGraphicsRootShaderResourceView(Index, VA);
+          },
+          __func__
+      );
+      return;
+    }
     if (!ValidateRootArgumentRange(
             rootsig_graphics_.ptr(), Index, 0, 2, D3D12_ROOT_PARAMETER_TYPE_SRV, "SetGraphicsRootShaderResourceView"
         ))
@@ -6049,6 +6351,15 @@ public:
   };
 
   void STDMETHODCALLTYPE SetComputeRootUnorderedAccessView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [=](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.SetComputeRootUnorderedAccessView(Index, VA);
+          },
+          __func__
+      );
+      return;
+    }
     if (!ValidateRootArgumentRange(
             rootsig_compute_.ptr(), Index, 0, 2, D3D12_ROOT_PARAMETER_TYPE_UAV, "SetComputeRootUnorderedAccessView"
         ))
@@ -6059,6 +6370,15 @@ public:
 
   void STDMETHODCALLTYPE
   SetGraphicsRootUnorderedAccessView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand(
+          [=](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.SetGraphicsRootUnorderedAccessView(Index, VA);
+          },
+          __func__
+      );
+      return;
+    }
     if (!ValidateRootArgumentRange(
             rootsig_graphics_.ptr(), Index, 0, 2, D3D12_ROOT_PARAMETER_TYPE_UAV, "SetGraphicsRootUnorderedAccessView"
         ))
@@ -6069,6 +6389,16 @@ public:
 
   void STDMETHODCALLTYPE
   IASetIndexBuffer(const D3D12_INDEX_BUFFER_VIEW *pView) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      const std::optional<D3D12_INDEX_BUFFER_VIEW> view = pView ? std::optional(*pView) : std::nullopt;
+      RecordBundleCommand(
+          [view](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.IASetIndexBuffer(view ? &*view : nullptr);
+          },
+          __func__
+      );
+      return;
+    }
     auto clear_index_binding = [&] {
       index_buffer_address = 0;
       index_buffer_size = 0;
@@ -6115,6 +6445,23 @@ public:
 
   void STDMETHODCALLTYPE
   IASetVertexBuffers(UINT StartSlot, UINT Count, const D3D12_VERTEX_BUFFER_VIEW *Views) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      if (StartSlot > D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT ||
+          Count > D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT - StartSlot || (Count && !Views)) {
+        FailRecording(__func__, "invalid vertex buffer range start=", StartSlot, " count=", Count);
+        return;
+      }
+      std::array<D3D12_VERTEX_BUFFER_VIEW, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> views{};
+      if (Count)
+        std::copy_n(Views, Count, views.begin());
+      RecordBundleCommand(
+          [StartSlot, Count, views = std::move(views)](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.IASetVertexBuffers(StartSlot, Count, views.data());
+          },
+          __func__
+      );
+      return;
+    }
     if (StartSlot > D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT ||
         Count > D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT - StartSlot || (Count && !Views)) {
       FailRecording(__func__, "invalid vertex buffer range start=", StartSlot, " count=", Count);
@@ -6151,6 +6498,8 @@ public:
   };
 
   void STDMETHODCALLTYPE SOSetTargets(UINT StartSlot, UINT Count, const D3D12_STREAM_OUTPUT_BUFFER_VIEW *Views) {
+    if (DropBundleCommand(__func__))
+      return;
     if (StartSlot > D3D12_SO_BUFFER_SLOT_COUNT || Count > D3D12_SO_BUFFER_SLOT_COUNT - StartSlot ||
         (Count && !Views)) {
       FailRecording(__func__, "invalid stream-output range start=", StartSlot, " count=", Count);
@@ -6166,6 +6515,8 @@ public:
       UINT NumRTV, const D3D12_CPU_DESCRIPTOR_HANDLE *RTVs, WINBOOL SingleDescriptor,
       const D3D12_CPU_DESCRIPTOR_HANDLE *DSV
   ) {
+    if (DropBundleCommand(__func__))
+      return;
     if (NumRTV > std::size(rtvs) || (NumRTV && !RTVs)) {
       FailRecording(__func__, "invalid render-target list count=", NumRTV);
       return;
@@ -6186,6 +6537,8 @@ public:
       D3D12_CPU_DESCRIPTOR_HANDLE DSV, D3D12_CLEAR_FLAGS Flags, FLOAT Depth, UINT8 Stencil, UINT RectCount,
       const D3D12_RECT *Rects
   ) {
+    if (DropBundleCommand(__func__))
+      return;
     if ((Flags & 3) == 0)
       return;
     if (RectCount && !Rects) {
@@ -6244,6 +6597,8 @@ public:
   ClearRenderTargetView(
       D3D12_CPU_DESCRIPTOR_HANDLE RTV, const FLOAT Color[4], UINT RectCount, const D3D12_RECT *Rects
   ) {
+    if (DropBundleCommand(__func__))
+      return;
     if (!Color)
       return;
     if (RectCount && !Rects) {
@@ -6300,6 +6655,8 @@ public:
       D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle, D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle, ID3D12Resource *pResource,
       const UINT Values[4], UINT RectCount, const D3D12_RECT *pRects
   ) {
+    if (DropBundleCommand(__func__))
+      return;
     auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, CpuHandle);
     if (!Heap || !Values || (RectCount && !pRects))
       return;
@@ -6357,6 +6714,8 @@ public:
       D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle, D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle, ID3D12Resource *pResource,
       const float Values[4], UINT RectCount, const D3D12_RECT *pRects
   ) {
+    if (DropBundleCommand(__func__))
+      return;
     auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, CpuHandle);
     if (!Heap || !Values || (RectCount && !pRects))
       return;
@@ -6410,6 +6769,8 @@ public:
   };
 
   void STDMETHODCALLTYPE DiscardResource(ID3D12Resource *pResource, const D3D12_DISCARD_REGION *pRegion) {
+    if (DropBundleCommand(__func__))
+      return;
     if (!pResource || !IsSameDevice(device_, pResource))
       FailRecording(__func__, "resource is null or belongs to another device");
     // DiscardResource is an optimization hint. Metal manages resource contents
@@ -6418,6 +6779,8 @@ public:
 
   void STDMETHODCALLTYPE
   BeginQuery(ID3D12QueryHeap *pHeap, D3D12_QUERY_TYPE Type, UINT Index) {
+    if (DropBundleCommand(__func__))
+      return;
     if (Type == D3D12_QUERY_TYPE_TIMESTAMP) {
       FailRecording(__func__, "timestamp queries are unsupported in BeginQuery");
       return;
@@ -6454,6 +6817,8 @@ public:
 
   void STDMETHODCALLTYPE
   EndQuery(ID3D12QueryHeap *pHeap, D3D12_QUERY_TYPE Type, UINT Index) {
+    if (DropBundleCommand(__func__))
+      return;
     if (Type == D3D12_QUERY_TYPE_TIMESTAMP) {
       if (!ValidateCommand(SupportsTimestamp(), "EndQuery(Timestamp)"))
         return;
@@ -6577,6 +6942,8 @@ public:
   };
 
   void STDMETHODCALLTYPE SetPredication(ID3D12Resource *pBuffer, UINT64 AlignedBufferOffset, D3D12_PREDICATION_OP Op) {
+    if (DropBundleCommand(__func__))
+      return;
     if (!pBuffer) {
       predication_buffer_ = nullptr;
       predication_offset_ = 0;
@@ -6764,6 +7131,21 @@ public:
     auto sig = static_cast<MTLD3D12CommandSignature *>(pCommandSignature);
     if (!sig)
       return;
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      if (pCountBuffer || sig->UpdateRootArguments || sig->UpdateVertexBuffers || sig->UpdateIndexBuffer) {
+        recording_error_ = E_INVALIDARG;
+        FailRecording(__func__, "bundle indirect execution requires one operation and no count buffer");
+        return;
+      }
+      RecordBundleCommand(
+          [signature = Com<ID3D12CommandSignature>(pCommandSignature),
+           arguments = Com<ID3D12Resource>(pArgBuffer), MaxCommandCount, ArgBufferOffset, CountBufferOffset]
+          (MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.ExecuteIndirect(signature.ptr(), MaxCommandCount, arguments.ptr(), ArgBufferOffset, nullptr, CountBufferOffset);
+          }, __func__
+      );
+      return;
+    }
     static uint32_t trace_indirect_count = 0;
     if (trace_indirect_count++ < 32)
       DEBUG("[DEBUG-ICB] ExecuteIndirect: max_count=", MaxCommandCount, " type=", sig->CommandType,
@@ -6980,6 +7362,8 @@ public:
       ID3D12Resource *pDstBuffer, UINT64 DstOffset, ID3D12Resource *pSrcBuffer, UINT64 SrcOffset, UINT Dependencies,
       ID3D12Resource *const *ppDependentResources, const D3D12_SUBRESOURCE_RANGE_UINT64 *pDependentSubresourceRanges
   ) {
+    if (DropBundleCommand(__func__))
+      return;
     MarkUnsupportedCommand("AtomicCopyBufferUINT");
   }
 
@@ -6988,6 +7372,8 @@ public:
       ID3D12Resource *pDstBuffer, UINT64 DstOffset, ID3D12Resource *pSrcBuffer, UINT64 SrcOffset, UINT Dependencies,
       ID3D12Resource *const *ppDependentResources, const D3D12_SUBRESOURCE_RANGE_UINT64 *pDependentSubresourceRanges
   ) {
+    if (DropBundleCommand(__func__))
+      return;
     MarkUnsupportedCommand("AtomicCopyBufferUINT64");
   }
 
@@ -7006,6 +7392,8 @@ public:
       ID3D12Resource *pDstResource, UINT DstSubresource, UINT DstX, UINT DstY, ID3D12Resource *pSrcResource,
       UINT SrcSubresource, D3D12_RECT *pSrcRect, DXGI_FORMAT Format, D3D12_RESOLVE_MODE ResolveMode
   ) {
+    if (DropBundleCommand(__func__))
+      return;
     MarkUnsupportedCommand("ResolveSubresourceRegion");
   }
 
@@ -7018,6 +7406,30 @@ public:
   WriteBufferImmediate(
       UINT Count, const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER *pParams, const D3D12_WRITEBUFFERIMMEDIATE_MODE *pModes
   ) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      if (!Count || recording_failed_)
+        return;
+      if (!pParams) {
+        recording_error_ = E_INVALIDARG;
+        FailRecording(__func__, "nonzero count requires parameters");
+        return;
+      }
+      try {
+        std::vector<D3D12_WRITEBUFFERIMMEDIATE_PARAMETER> params(pParams, pParams + Count);
+        std::vector<D3D12_WRITEBUFFERIMMEDIATE_MODE> modes;
+        if (pModes)
+          modes.assign(pModes, pModes + Count);
+        RecordBundleCommand(
+            [Count, params = std::move(params), modes = std::move(modes)](MTLD3D12GraphicsCommandListImpl &parent) {
+              parent.WriteBufferImmediate(Count, params.data(), modes.empty() ? nullptr : modes.data());
+            }, __func__
+        );
+      } catch (const std::bad_alloc &) {
+        recording_error_ = E_OUTOFMEMORY;
+        FailRecording(__func__, "bundle immediate-write allocation failed");
+      }
+      return;
+    }
     if (recording_failed_ || allocator_->CPUAllocationFailed() || !ValidateCommand(SupportsCopy(), __func__) || !Count)
       return;
     if (!pParams) {
@@ -7105,6 +7517,8 @@ public:
 
   void STDMETHODCALLTYPE
   SetProtectedResourceSession(ID3D12ProtectedResourceSession *pProtectedResourceSession) {
+    if (DropBundleCommand(__func__))
+      return;
     if (pProtectedResourceSession)
       MarkUnsupportedCommand("SetProtectedResourceSession");
   }
@@ -7113,10 +7527,14 @@ public:
       UINT NumRenderTargets, const D3D12_RENDER_PASS_RENDER_TARGET_DESC *pRenderTargets,
       const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC *pDepthStencil, D3D12_RENDER_PASS_FLAGS Flags
   ) {
+    if (DropBundleCommand(__func__))
+      return;
     MarkUnsupportedCommand("BeginRenderPass");
   }
 
   void STDMETHODCALLTYPE EndRenderPass() {
+    if (DropBundleCommand(__func__))
+      return;
     MarkUnsupportedCommand("EndRenderPass");
   }
 
@@ -7124,6 +7542,8 @@ public:
       ID3D12MetaCommand *pMetaCommand, const void *pInitializationParametersData,
       SIZE_T InitializationParametersDataSizeInBytes
   ) {
+    if (DropBundleCommand(__func__))
+      return;
     MarkUnsupportedCommand("InitializeMetaCommand");
   }
 
@@ -7131,6 +7551,8 @@ public:
       ID3D12MetaCommand *pMetaCommand, const void *pExecutionParametersData,
       SIZE_T ExecutionParametersDataSizeInBytes
   ) {
+    if (DropBundleCommand(__func__))
+      return;
     MarkUnsupportedCommand("ExecuteMetaCommand");
   }
 
@@ -7373,6 +7795,18 @@ public:
   }
 
   void STDMETHODCALLTYPE SetPipelineState1(ID3D12StateObject *pStateObject) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      if (pStateObject && !IsSameDevice(device_, pStateObject)) {
+        FailRecording(__func__, "state object belongs to another device");
+        return;
+      }
+      RecordBundleCommand(
+          [state = Com<ID3D12StateObject>(pStateObject)](MTLD3D12GraphicsCommandListImpl &parent) {
+            parent.SetPipelineState1(state.ptr());
+          }, __func__
+      );
+      return;
+    }
     if (!ValidateCommand(SupportsCompute(), "SetPipelineState1"))
       return;
     if (!pStateObject) {
@@ -7393,6 +7827,14 @@ public:
   }
 
   void STDMETHODCALLTYPE DispatchRays(const D3D12_DISPATCH_RAYS_DESC *pDesc) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      if (!pDesc) {
+        FailRecording(__func__, "dispatch description is null");
+        return;
+      }
+      RecordBundleCommand([desc = *pDesc](MTLD3D12GraphicsCommandListImpl &parent) { parent.DispatchRays(&desc); }, __func__);
+      return;
+    }
     if (!ValidateCommand(SupportsCompute(), "DispatchRays"))
       return;
     if (!pDesc) {
@@ -7570,6 +8012,10 @@ public:
   }
 
   void STDMETHODCALLTYPE DispatchMesh(UINT ThreadGroupCountX, UINT ThreadGroupCountY, UINT ThreadGroupCountZ) {
+    if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      RecordBundleCommand([=](MTLD3D12GraphicsCommandListImpl &parent) { parent.DispatchMesh(ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ); }, __func__);
+      return;
+    }
     if (!ValidateCommand(SupportsGraphics(), "DispatchMesh"))
       return;
     if (!pso_graphics_ || !pso_graphics_->msc_mesh) {
@@ -7587,6 +8033,8 @@ public:
   }
 
   void STDMETHODCALLTYPE Barrier(UINT32 NumBarrierGroups, const D3D12_BARRIER_GROUP *pBarrierGroups) {
+    if (DropBundleCommand(__func__))
+      return;
     if (!NumBarrierGroups)
       return;
     if (!pBarrierGroups) {

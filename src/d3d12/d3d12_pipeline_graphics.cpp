@@ -927,6 +927,13 @@ public:
 
   HRESULT
   Initialize(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) {
+    if (pDesc->NumRenderTargets > render_target_layout.formats.size())
+      return E_INVALIDARG;
+    render_target_layout.count = pDesc->NumRenderTargets;
+    std::copy_n(pDesc->RTVFormats, pDesc->NumRenderTargets, render_target_layout.formats.begin());
+    render_target_layout.depth_format = pDesc->DSVFormat;
+    render_target_layout.sample_count = pDesc->SampleDesc.Count;
+    render_target_layout.sample_quality = pDesc->SampleDesc.Quality;
     const bool has_stream_output = pDesc->StreamOutput.NumEntries != 0;
     const bool has_hull = pDesc->HS.pShaderBytecode != nullptr;
     const bool has_domain = pDesc->DS.pShaderBytecode != nullptr;
@@ -1865,6 +1872,13 @@ public:
 
 HRESULT
 MTLD3D12GraphicsPipelineStateImpl::InitializeMesh(const D3D12PipelineStreamData &data) {
+  if (data.num_render_targets > render_target_layout.formats.size())
+    return E_INVALIDARG;
+  render_target_layout.count = data.num_render_targets;
+  std::copy_n(data.render_target_formats.begin(), data.num_render_targets, render_target_layout.formats.begin());
+  render_target_layout.depth_format = data.depth_stencil_format;
+  render_target_layout.sample_count = data.sample_desc.Count;
+  render_target_layout.sample_quality = data.sample_desc.Quality;
   if (data.mesh_shader.empty())
     return E_INVALIDARG;
 
