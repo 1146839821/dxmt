@@ -197,6 +197,11 @@ public:
   uint64_t acceleration_structure_header_gpu_address = 0;
   D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
   std::vector<D3D12_RESOURCE_STATES> subresource_states;
+  // Diagnostics use scalar identities and never retain the resource.
+  inline static std::atomic<uint64_t> next_legacy_diagnostic_id{1};
+  const uint64_t legacy_diagnostic_id = next_legacy_diagnostic_id.fetch_add(1, std::memory_order_relaxed);
+  std::atomic<uint64_t> legacy_first_queue_id{0};
+  std::atomic<bool> legacy_seen_multiple_queues{false};
 
   void
   InitializeStateTracking(const D3D12_RESOURCE_DESC &desc, WMT::Device device) {
@@ -372,9 +377,20 @@ struct D3D12PendingEnhancedSplit {
   Com<MTLD3D12Resource, false> retained_resource;
 };
 
+struct D3D12PendingLegacySplit {
+  uint64_t resource_id;
+  UINT subresource;
+  UINT original_subresource;
+  D3D12_RESOURCE_STATES before;
+  D3D12_RESOURCE_STATES after;
+  bool inherited = false;
+};
+
 struct D3D12RecordedStateValidation {
   D3D12RecordedResourceStates states;
   std::vector<D3D12PendingEnhancedSplit> splits;
+  std::vector<D3D12PendingLegacySplit> legacy_splits;
+  uint64_t diagnostic_queue_id = 0;
   bool local_only = false;
 };
 
@@ -409,6 +425,9 @@ private:
 
 // A wait latches once, independently of subsequent changes to the logical fence.
 struct D3D12FenceWait {
+  // Latched under the fence mutex at registration; this wait cannot become
+  // unsatisfied even if a later signal rewinds the fence value.
+  bool satisfied_at_registration = false;
   WMT::Reference<WMT::SharedEvent> event;
   HANDLE handle = nullptr;
   std::shared_ptr<D3D12FenceWaitGroup> group;
@@ -432,6 +451,8 @@ struct D3D12DeviceRemovalListener {
 
 class MTLD3D12Fence : public ID3D12Fence1 {
 public:
+  inline static std::atomic<uint64_t> next_diagnostic_fence_id{1};
+  const uint64_t diagnostic_fence_id = next_diagnostic_fence_id.fetch_add(1, std::memory_order_relaxed);
   virtual HRESULT RegisterWait(
       UINT64 value, HANDLE event, std::shared_ptr<D3D12FenceWait> &wait,
       const std::shared_ptr<D3D12FenceWaitGroup> &group = {}

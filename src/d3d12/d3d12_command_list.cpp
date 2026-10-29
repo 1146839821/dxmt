@@ -1051,6 +1051,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
     // Enhanced layouts are explicit; only legacy StateBefore can promote COMMON.
     bool enhanced_barrier = false;
     size_t split_index = std::numeric_limits<size_t>::max();
+    D3D12_RESOURCE_BARRIER_FLAGS legacy_split = D3D12_RESOURCE_BARRIER_FLAG_NONE;
   };
   std::vector<ResourceStateTransition> resource_state_transitions_;
 
@@ -1673,6 +1674,13 @@ public:
       const EnhancedSplitBarrier *previous_split = nullptr;
       for (const auto &transition : resource_state_transitions_) {
         auto *resource = transition.resource.ptr();
+        if (validation.diagnostic_queue_id) {
+          uint64_t expected_queue = 0;
+          if (!resource->legacy_first_queue_id.compare_exchange_strong(
+                  expected_queue, validation.diagnostic_queue_id, std::memory_order_relaxed) &&
+              expected_queue != validation.diagnostic_queue_id)
+            resource->legacy_seen_multiple_queues.store(true, std::memory_order_relaxed);
+        }
         // Consecutive events borrow the same authoritative validation entry.
         // Rebind on a resource change; no state survives this validation call.
         if (resource != previous_resource) {
@@ -1685,6 +1693,52 @@ public:
           previous_states = &it->second;
         }
         auto &current_states = *previous_states;
+        if (resource->legacy_seen_multiple_queues.load(std::memory_order_relaxed)) {
+          // Once another queue is observed, CPU submission order alone cannot
+          // establish which half runs first. Keep local batch checks only.
+          std::erase_if(validation.legacy_splits, [&](const auto &entry) {
+            return entry.inherited && entry.resource_id == resource->legacy_diagnostic_id;
+          });
+        }
+        // Legacy split pairs in this validation batch are keyed by the actual
+        // subresource. Cross-submission halves use conservative barriers and
+        // are not assumed to execute in CPU submission order.
+        if (transition.legacy_split != D3D12_RESOURCE_BARRIER_FLAG_NONE) {
+          const UINT first = transition.subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES
+                                 ? 0 : transition.subresource;
+          const UINT end = transition.subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES
+                               ? static_cast<UINT>(current_states.size()) : first + 1;
+          if (first >= current_states.size() || end > current_states.size())
+            return E_INVALIDARG;
+          for (UINT sub = first; sub < end; ++sub) {
+            auto &legacy = validation.legacy_splits;
+            auto pending_legacy = std::find_if(legacy.begin(), legacy.end(), [&](const auto &entry) {
+              return entry.resource_id == resource->legacy_diagnostic_id && entry.subresource == sub;
+            });
+            const auto enhanced_pending = std::find_if(splits.begin(), splits.end(), [&](const auto &entry) {
+              return entry.barrier.resource == resource && entry.subresource == sub;
+            });
+            if (enhanced_pending != splits.end())
+              return E_INVALIDARG;
+            if (transition.legacy_split == D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY) {
+              if (pending_legacy != legacy.end())
+                return E_INVALIDARG;
+              legacy.push_back({resource->legacy_diagnostic_id, sub, transition.subresource, transition.before, transition.after});
+            } else if (pending_legacy != legacy.end()) {
+              if (pending_legacy->original_subresource != transition.subresource ||
+                  pending_legacy->before != transition.before || pending_legacy->after != transition.after)
+                return E_INVALIDARG;
+              legacy.erase(pending_legacy);
+            }
+            auto &current = current_states[sub];
+            if (current && *current != transition.before &&
+                !(*current == D3D12_RESOURCE_STATE_COMMON && promotable(resource, transition.before)))
+              return E_INVALIDARG;
+            current = transition.split_begin ? transition.before : transition.after;
+          }
+          previous_split = nullptr;
+          continue;
+        }
         const auto *barrier = transition.split_index == std::numeric_limits<size_t>::max()
                                   ? nullptr
                                   : &enhanced_split_barriers_[transition.split_index];
@@ -1722,6 +1776,10 @@ public:
         }
         previous_split = barrier;
         const auto apply = [&](UINT subresource) {
+          if (std::any_of(validation.legacy_splits.begin(), validation.legacy_splits.end(), [&](const auto &entry) {
+                return entry.resource_id == resource->legacy_diagnostic_id && entry.subresource == subresource;
+              }))
+            return false;
           if (transition.split_index != std::numeric_limits<size_t>::max()) {
             if (transition.split_begin) {
               if (pending != splits.end())
@@ -5891,6 +5949,8 @@ public:
       switch (barrier.Type) {
       case D3D12_RESOURCE_BARRIER_TYPE_TRANSITION: {
         if (!IsSameDevice(device_, barrier.Transition.pResource)) {
+          if (barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE)
+            recording_error_ = E_INVALIDARG;
           FailRecording(__func__, "transition resource belongs to another device");
           continue;
         }
@@ -5899,24 +5959,89 @@ public:
           FailRecording(__func__, "transition resource is invalid");
           continue;
         }
-        if (barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) {
-          FailRecording(__func__, "legacy split transition requires an explicit paired barrier");
+        if (barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE &&
+            barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY &&
+            barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_END_ONLY) {
+          recording_error_ = E_INVALIDARG;
+          FailRecording(__func__, "invalid legacy transition flags");
           continue;
         }
 
         const auto subresource = barrier.Transition.Subresource;
         if (subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES && !resource->HasSubresource(subresource)) {
-          WARN("D3D12 ResourceBarrier subresource is out of range");
+          if (barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) {
+            recording_error_ = E_INVALIDARG;
+            FailRecording(__func__, "split transition subresource is out of range");
+          } else {
+            WARN("D3D12 ResourceBarrier subresource is out of range");
+          }
           continue;
+        }
+        if (barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE &&
+            barrier.Transition.StateBefore == barrier.Transition.StateAfter) {
+          recording_error_ = E_INVALIDARG;
+          FailRecording(__func__, "split transition before and after states are identical");
+          continue;
+        }
+
+        if (barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) {
+          const auto desc = resource->GetDesc();
+          const auto valid_state = [&](D3D12_RESOURCE_STATES state) {
+            constexpr UINT read_states = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
+                D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_DEPTH_READ |
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT | D3D12_RESOURCE_STATE_COPY_SOURCE |
+                D3D12_RESOURCE_STATE_RESOLVE_SOURCE | D3D12_RESOURCE_STATE_VIDEO_DECODE_READ |
+                D3D12_RESOURCE_STATE_VIDEO_PROCESS_READ | D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ |
+                0x01000000u; // SHADING_RATE_SOURCE
+            constexpr UINT write_states = D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS |
+                D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_STREAM_OUT | D3D12_RESOURCE_STATE_COPY_DEST |
+                D3D12_RESOURCE_STATE_RESOLVE_DEST | D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE |
+                D3D12_RESOURCE_STATE_VIDEO_PROCESS_WRITE | D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE;
+            const UINT value = static_cast<UINT>(state);
+            const UINT writes = value & write_states;
+            if ((value & ~(read_states | write_states)) || (writes && (value != writes || (writes & (writes - 1)))))
+              return false;
+            if ((value & D3D12_RESOURCE_STATE_RENDER_TARGET) && !(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET))
+              return false;
+            if ((value & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) && !(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
+              return false;
+            if ((value & (D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE)) &&
+                !(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
+              return false;
+            if ((value & (D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)) &&
+                (desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE))
+              return false;
+            if ((value & D3D12_RESOURCE_STATE_RESOLVE_SOURCE) && desc.SampleDesc.Count <= 1)
+              return false;
+            if ((value & D3D12_RESOURCE_STATE_RESOLVE_DEST) && desc.SampleDesc.Count != 1)
+              return false;
+            return true;
+          };
+          if (!valid_state(barrier.Transition.StateBefore) || !valid_state(barrier.Transition.StateAfter)) {
+            recording_error_ = E_INVALIDARG;
+            FailRecording(__func__, "invalid split transition resource states");
+            continue;
+          }
         }
 
         if (barrier.Transition.StateBefore != barrier.Transition.StateAfter)
           EncodeMemoryBarrier(
               resource_barrier_scope(resource), barrier.Transition.StateBefore, barrier.Transition.StateAfter
           );
-        resource_state_transitions_.push_back(
-            {resource, subresource, barrier.Transition.StateBefore, barrier.Transition.StateAfter, false}
-        );
+        try {
+          ResourceStateTransition transition{resource, subresource, barrier.Transition.StateBefore,
+                                             barrier.Transition.StateAfter,
+                                             barrier.Flags == D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY};
+          transition.legacy_split = barrier.Flags;
+          resource_state_transitions_.push_back(std::move(transition));
+        } catch (const std::bad_alloc &) {
+          recording_error_ = E_OUTOFMEMORY;
+          FailRecording(__func__, "legacy transition recording allocation failed");
+          return;
+        }
+        if (barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE)
+          allocator_->InvalidateCurrentPass();
         break;
       }
       case D3D12_RESOURCE_BARRIER_TYPE_UAV:

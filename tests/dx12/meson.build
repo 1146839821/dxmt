@@ -78,6 +78,10 @@ dx12_feature_support = executable('dx12_feature_support', 'dx12_feature_support.
   dependencies: [ d3d12_dep ],
 )
 
+dx12_legacy_split = executable('dx12_legacy_split', 'dx12_legacy_split.cpp',
+  dependencies: [ d3d12_dep ],
+)
+
 dx12_bundle = executable('dx12_bundle', 'dx12_bundle.cpp',
   dependencies: [ d3d12_dep ],
 )

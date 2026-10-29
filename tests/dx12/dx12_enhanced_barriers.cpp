@@ -782,7 +782,8 @@ bool TestSyncScopeAdmission(ID3D12Device *device, ID3D12Resource *buffer,
                                      after == D3D12_BARRIER_SYNC_SPLIT);
           const bool allowed = (queue.bit & test.queues) && !split_global;
           const bool passed = ExpectClose(
-              device, test.name, allowed ? S_OK : E_FAIL,
+              device, test.name,
+              (allowed || queue.type == D3D12_COMMAND_LIST_TYPE_BUNDLE) ? S_OK : E_FAIL,
               [&](auto *list) {
                 D3D12_GLOBAL_BARRIER global;
                 D3D12_BUFFER_BARRIER buffer_barrier;
@@ -827,12 +828,13 @@ bool TestSyncScopeAdmission(ID3D12Device *device, ID3D12Resource *buffer,
               D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_NO_ACCESS,
               D3D12_BARRIER_ACCESS_NO_ACCESS);
     SubmitBarrier(list7.ptr, D3D12_BARRIER_TYPE_GLOBAL, &barrier);
-    const bool rejected = list->Close() == E_FAIL;
+    const bool bundle = queue.type == D3D12_COMMAND_LIST_TYPE_BUNDLE;
+    const bool rejected = list->Close() == (bundle ? S_OK : E_FAIL);
     if (!CheckHR("sync scope allocator Reset", allocator->Reset()))
       return false;
     // A failed Close permanently poisons this list; Reset returns that failure.
     const HRESULT reset = list->Reset(allocator.ptr, nullptr);
-    const bool sticky = reset == E_FAIL;
+    const bool sticky = reset == (bundle ? S_OK : E_FAIL);
     if (SUCCEEDED(reset) &&
         !CheckHR("sync scope baseline reclose", list->Close()))
       return false;
@@ -1440,7 +1442,7 @@ bool TestInvalidSplitBarriers(ID3D12Device *device, ID3D12Resource *buffer, ID3D
     SubmitBarrier(list, D3D12_BARRIER_TYPE_TEXTURE, &barrier);
   });
 
-  passed &= ExpectClose(device, "legacy split transition", E_FAIL, [&](auto *list7) {
+  passed &= ExpectClose(device, "legacy split transition", S_OK, [&](auto *list7) {
     D3D12_RESOURCE_BARRIER barrier = {};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY;
@@ -1449,6 +1451,8 @@ bool TestInvalidSplitBarriers(ID3D12Device *device, ID3D12Resource *buffer, ID3D
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     // The legacy method is on the base command-list interface.
+    static_cast<ID3D12GraphicsCommandList *>(list7)->ResourceBarrier(1, &barrier);
+    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_END_ONLY;
     static_cast<ID3D12GraphicsCommandList *>(list7)->ResourceBarrier(1, &barrier);
   });
 

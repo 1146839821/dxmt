@@ -239,6 +239,7 @@ public:
         if (!complete)
           state_->waits.push_back({value, pending});
       }
+      pending->satisfied_at_registration = complete;
       if (complete)
         CompleteWait(*pending);
       wait = std::move(pending);

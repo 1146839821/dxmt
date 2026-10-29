@@ -29,6 +29,8 @@
 #include <array>
 #include <cassert>
 #include <chrono>
+#include <cstdio>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -36,6 +38,31 @@
 namespace dxmt {
 
 constexpr auto kCommandQueueSize = 32u;
+
+static void
+PauseLegacySignalForTesting() {
+  char enabled[2] = {};
+  if (!GetEnvironmentVariableA("DXMT_TEST_PAUSE_LEGACY_SIGNAL", enabled, sizeof(enabled)))
+    return;
+  char entered_name[80], resume_name[80];
+  std::snprintf(entered_name, sizeof(entered_name), "DXMT.Test.LegacySignalEntered.%lu", GetCurrentProcessId());
+  std::snprintf(resume_name, sizeof(resume_name), "DXMT.Test.LegacySignalResume.%lu", GetCurrentProcessId());
+  HANDLE entered = OpenEventA(EVENT_MODIFY_STATE, FALSE, entered_name);
+  HANDLE resume = OpenEventA(SYNCHRONIZE, FALSE, resume_name);
+  if (entered && resume) {
+    SetEvent(entered);
+    WaitForSingleObject(resume, 30000);
+  }
+  if (entered) CloseHandle(entered);
+  if (resume) CloseHandle(resume);
+}
+
+static bool
+FailLegacyDiagnosticAllocationForTesting(const char *phase) {
+  char selected[32] = {};
+  const DWORD length = GetEnvironmentVariableA("DXMT_TEST_LEGACY_DIAGNOSTIC_OOM", selected, sizeof(selected));
+  return length && length < sizeof(selected) && std::strcmp(selected, phase) == 0;
+}
 
 class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, IMTLSwapChainFactory> {
 
@@ -66,12 +93,24 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     std::vector<WMT::Reference<WMT::Resource>> descriptor_resource_refs;
     Com<MTLD3D12Fence> signal_fence;
     UINT64 signal_value = 0;
+    std::shared_ptr<std::atomic<bool>> diagnostic_signal_complete;
     Com<MTLD3D12Fence> wait_fence;
     std::shared_ptr<D3D12FenceWait> fence_wait;
     HANDLE latency_waitable = nullptr;
   };
 
   dxmt::mutex commit_mutex_;
+  inline static std::atomic<uint64_t> next_legacy_queue_id_{1};
+  const uint64_t legacy_queue_id_ = next_legacy_queue_id_.fetch_add(1, std::memory_order_relaxed);
+  bool legacy_diagnostics_uncertain_ = false;
+  // Non-owning scalar snapshots; protected by commit_mutex_.
+  std::vector<D3D12PendingLegacySplit> pending_legacy_diagnostics_;
+  struct DiagnosticSignal {
+    uint64_t fence_id;
+    UINT64 value;
+    std::weak_ptr<std::atomic<bool>> complete;
+  };
+  std::vector<DiagnosticSignal> diagnostic_signals_;
   struct SubmissionState : D3D12DeviceRemovalListener {
     dxmt::mutex mutex;
     dxmt::condition_variable ready;
@@ -437,8 +476,12 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
 
       // Publish before retiring the next submission on this queue. A wait on
       // another queue latches this value even if a later signal rewinds it.
+      if (submission.diagnostic_signal_complete)
+        PauseLegacySignalForTesting();
       if (submission.signal_fence && submission.command_buffer.status() == WMTCommandBufferStatusCompleted)
         submission.signal_fence->Signal(submission.signal_value);
+      if (submission.diagnostic_signal_complete)
+        submission.diagnostic_signal_complete->store(true, std::memory_order_release);
       if (submission.wait_fence)
         submission.wait_fence->CancelWait(submission.fence_wait);
 
@@ -789,6 +832,22 @@ public:
     }
 
     D3D12RecordedStateValidation recorded_states;
+    recorded_states.diagnostic_queue_id = legacy_queue_id_;
+    try {
+      if (!legacy_diagnostics_uncertain_) {
+        if (!pending_legacy_diagnostics_.empty() && FailLegacyDiagnosticAllocationForTesting("snapshot"))
+          throw std::bad_alloc();
+        recorded_states.legacy_splits = pending_legacy_diagnostics_;
+      }
+    } catch (const std::bad_alloc &) {
+      // Optional cross-batch diagnostics must never prevent valid GPU work.
+      WARN("D3D12 legacy split diagnostics disabled: snapshot allocation failed");
+      legacy_diagnostics_uncertain_ = true;
+      pending_legacy_diagnostics_.clear();
+      recorded_states.legacy_splits.clear();
+    }
+    for (auto &split : recorded_states.legacy_splits)
+      split.inherited = true;
     {
       std::lock_guard lock(submission_state_->mutex);
       recorded_states.splits = submission_state_->pending_splits;
@@ -1533,6 +1592,15 @@ public:
     }
     if (!CommitSubmissionLocked(submission, &recorded_states.splits))
       return;
+    if (!legacy_diagnostics_uncertain_) {
+      constexpr size_t max_legacy_diagnostics = 4096;
+      if (recorded_states.legacy_splits.size() > max_legacy_diagnostics) {
+        legacy_diagnostics_uncertain_ = true;
+        pending_legacy_diagnostics_.clear();
+      } else {
+        pending_legacy_diagnostics_.swap(recorded_states.legacy_splits);
+      }
+    }
     translation_lifetime.allocator_marks_pending = false;
     for (unsigned i = 0; i < Count; i++) {
       static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->CommitResourceStates();
@@ -1568,8 +1636,30 @@ public:
     submission.command_buffer = cmdbuf;
     submission.signal_fence = static_cast<MTLD3D12Fence *>(pFence);
     submission.signal_value = Value;
-    if (!CommitSubmissionLocked(submission))
+    bool recorded_probe = false;
+    if (!legacy_diagnostics_uncertain_ && !pending_legacy_diagnostics_.empty()) {
+      try {
+        std::erase_if(diagnostic_signals_, [](const auto &entry) { return entry.complete.expired(); });
+        if (FailLegacyDiagnosticAllocationForTesting("signal"))
+          throw std::bad_alloc();
+        submission.diagnostic_signal_complete = std::make_shared<std::atomic<bool>>(false);
+        diagnostic_signals_.push_back({submission.signal_fence->diagnostic_fence_id, Value,
+                                       submission.diagnostic_signal_complete});
+        recorded_probe = true;
+      } catch (const std::bad_alloc &) {
+        // A best-effort diagnostic probe must not make Signal fail.
+        WARN("D3D12 legacy split diagnostics disabled: signal probe allocation failed");
+        legacy_diagnostics_uncertain_ = true;
+        pending_legacy_diagnostics_.clear();
+        diagnostic_signals_.clear();
+        submission.diagnostic_signal_complete.reset();
+      }
+    }
+    if (!CommitSubmissionLocked(submission)) {
+      if (recorded_probe)
+        diagnostic_signals_.pop_back();
       return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
+    }
     return S_OK;
   };
 
@@ -1592,11 +1682,26 @@ public:
     const HRESULT wait_hr = submission.wait_fence->RegisterWait(Value, nullptr, submission.fence_wait);
     if (FAILED(wait_hr))
       return wait_hr;
+    bool known_order = submission.fence_wait->satisfied_at_registration;
+    for (const auto &probe : diagnostic_signals_) {
+      if (probe.fence_id != submission.wait_fence->diagnostic_fence_id || probe.value < Value)
+        continue;
+      if (auto complete = probe.complete.lock(); complete && !complete->load(std::memory_order_acquire)) {
+        known_order = true;
+        break;
+      }
+    }
     cmdbuf.encodeWaitForEvent(submission.fence_wait->event, 1);
     submission.command_buffer = cmdbuf;
     if (!CommitSubmissionLocked(submission)) {
       submission.wait_fence->CancelWait(submission.fence_wait);
       return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
+    }
+    // Only infer order for a latched wait or an earlier, still-pending signal
+    // from this queue. An external dependency can be submitted later.
+    if (!known_order) {
+      legacy_diagnostics_uncertain_ = true;
+      pending_legacy_diagnostics_.clear();
     }
     return S_OK;
   };
