@@ -24,7 +24,7 @@
 #include "com/com_pointer.hpp"
 #include "sha1/sha1_util.hpp"
 #include "airconv_public.h"
-#include "../../include/metal_shader_converter/ir_tessellator_output_primitive.h"
+#include "metal_shader_converter/ir_tessellator_output_primitive.h"
 #include "DXBCParser/DXBCUtils.h"
 
 #include <algorithm>
