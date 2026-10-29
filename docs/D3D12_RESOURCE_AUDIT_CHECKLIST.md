@@ -5172,3 +5172,17 @@ unique points before domain execution and preserve the linked shader ABI,
 dynamic factors, partitioning and submission lifetime. Source, reflection,
 AIR, hashes and verification are in
 `../dxmt-test/n11-msc-ts-point-link-20261029/N11-point-gs-link.md`.
+
+### MSC point tessellation: linked GS GPU controls (2026-10-29)
+
+An isolated copy of the pipeline and Metal bridge linked a test point GS to the
+MSC tessellation pipeline, without modifying the production guard. On the
+factor-2 seven-position oracle, both an unconditional GS and a factor-specific
+`SV_PrimitiveID` filter emitted only three expected positions; an always-empty
+GS emitted none. The original point passthrough reproduced the prior repeated
+point result. A line tessellation control and the real production point
+rejection passed, with Metal API/GPU validation. These narrow GPU observations
+show that the three tested GS variants do not fix the problem; domain side
+effects and other converter versions remain unmeasured. Exact commands, hashes,
+rows, and diagnostic limitations are in
+`../dxmt-test/n11-msc-ts-point-link-20261029/N11-point-gs-link.md`.
