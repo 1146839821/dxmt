@@ -5152,3 +5152,23 @@ non-updating draw signature; predication and unsupported GS/TS combinations
 remain separate limitations. Writable buffers, indirect draws, deferred contexts
 and D3D12 currently rescan rather than reuse D3D11's immutable-buffer summary;
 repeated-draw performance outside that optimization remains a known cost.
+
+### MSC point tessellation: custom GS linkage probe (2026-10-29)
+
+A factor-2-specific, point-input GS was compiled to DXIL and converted with
+MSC 4.0.3 geometry/tessellation emulation. Static inspection of the generated
+mesh AIR shows that its tessellation path invokes the linked domain shader
+before the tessellator-flag branch and the application's GS filter. In this
+sample, the GS `SV_PrimitiveID` comes from the patch index plus patch offset,
+not the tessellator's stream-local index. This narrows the viable approach:
+filtering the resulting GS output cannot establish unique domain invocations.
+The conclusion is limited to this generated module; no GPU linkage or general
+compiler-version behavior is claimed.
+
+Microsoft's D3D11.3 functional specification requires point topology to emit
+unique points within a patch and specifies a domain invocation for each
+generated point. The production E_NOTIMPL guard remains; a fix must enumerate
+unique points before domain execution and preserve the linked shader ABI,
+dynamic factors, partitioning and submission lifetime. Source, reflection,
+AIR, hashes and verification are in
+`../dxmt-test/n11-msc-ts-point-link-20261029/N11-point-gs-link.md`.
