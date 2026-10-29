@@ -5186,3 +5186,30 @@ show that the three tested GS variants do not fix the problem; domain side
 effects and other converter versions remain unmeasured. Exact commands, hashes,
 rows, and diagnostic limitations are in
 `../dxmt-test/n11-msc-ts-point-link-20261029/N11-point-gs-link.md`.
+
+### Point tessellation: domain invocation side effects (2026-10-29)
+
+The existing stage-binding runner now has `tess-point-invocations`, a tri
+integer factor-2 regression that checks DS UAV atomics as well as the seven-row
+image. Seven exact coordinate bins, an unexpected-coordinate bin, ordinary-draw
+zero ranges and trailing canaries are checked. Each draw binds a separate root
+UAV range; copies/transitions reset counters on replay. The point VS control
+executes the same counter function independently of tessellation; a deliberately
+wrong center count verifies that counter failure is independent of image success.
+
+Current private/no-private builds pass the control's initial submission, replay
+and fenced reset/rerecord. The current private line-image and point-rejection
+controls pass; the wrong counter oracle fails at the intended word. The isolated
+point diagnostic using the stock MSC passthrough produces DS counts
+`(2,2,2,1,1,1,6,0)` in all four point draws: 15 observable invocations rather than
+seven. Ordinary ranges and canaries remain intact. Metal API/GPU validation is
+clean and native binary loading is checked. The diagnostic exits after its first
+failing submission; its replay/reset is NOT_RUN.
+
+This adds GPU evidence that output-index/GS filtering alone cannot restore point
+semantics: repeated DS side effects already occurred. A unique point stream must
+precede application DS invocation. The product point guard remains, no generated
+MSC ABI is adopted, and this factor-2 probe does not establish other domains,
+partitioning, patch/group boundaries or performance. Evidence, commands, hashes
+and six final process results:
+`../dxmt-test/n11-msc-ts-invocations-20261029/N11-domain-invocations.md`.

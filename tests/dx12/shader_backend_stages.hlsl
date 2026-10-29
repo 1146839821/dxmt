@@ -3,6 +3,21 @@ cbuffer Shared : register(b0) { uint4 values; };
 Texture2D<float4> source_texture : register(t0);
 SamplerState source_sampler : register(s0);
 struct StageVertex { float4 position : SV_Position; float4 color : COLOR; };
+#ifdef STAGE_TESS_INVOCATIONS
+RWByteAddressBuffer domain_invocations : register(u0);
+void count_domain_point(float3 coord)
+{
+    // Exact 16-bit tessellator coordinates; bin 7 catches all other points.
+    uint bin = all(coord == float3(1, 0, 0)) ? 0 :
+               all(coord == float3(0, 1, 0)) ? 1 :
+               all(coord == float3(0, 0, 1)) ? 2 :
+               all(coord == float3(0.5, 0.5, 0)) ? 3 :
+               all(coord == float3(0, 0.5, 0.5)) ? 4 :
+               all(coord == float3(0.5, 0, 0.5)) ? 5 :
+               all(coord == float3(21845, 21845, 21846) / 65536.0) ? 6 : 7;
+    domain_invocations.InterlockedAdd(4 * bin, 1);
+}
+#endif
 float4 read_tag(uint stage)
 {
     uint2 texel = uint2(round(source_texture.SampleLevel(source_sampler, float2(0.5, 0.5), 0).rg * 255));
@@ -30,6 +45,9 @@ StageVertex vs_grid_main(uint vertex : SV_VertexID)
     StageVertex o;
     o.position = float4(0, 0.875 - 0.25 * vertex, 0, 1);
     o.color = float4(coord, 1);
+#ifdef STAGE_TESS_INVOCATIONS
+    count_domain_point(coord);
+#endif
     return o;
 }
 #endif
@@ -97,6 +115,9 @@ StageVertex ds_main(StageFactors factors, const OutputPatch<StageVertex, 3> patc
 #endif
 {
     StageVertex o;
+#if defined(STAGE_TESS_POINT) && defined(STAGE_TESS_INVOCATIONS)
+    count_domain_point(coord);
+#endif
 #ifdef STAGE_TESS_POINT
 #ifdef STAGE_TESS_GRID
     uint row = coord.x > 0.9 ? 0 : coord.y > 0.9 ? 1 : coord.z > 0.9 ? 2 :

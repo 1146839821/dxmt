@@ -330,6 +330,26 @@ if dxc_command.length() > 0
       '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach stage : ['hs', 'ds']
+    custom_target('dx12_stage_binding_point_invocations_' + stage,
+      input: 'shader_backend_stages.hlsl',
+      output: 'stage_binding_point_invocations.' + stage + '.cso',
+      command: dxc_command + [ '-E', stage + '_main', '-T', stage + '_6_0',
+        '-D', 'STAGE_BINDING_DIFFERENTIAL=1', '-D', 'STAGE_TESS_POINT=1',
+        '-D', 'STAGE_TESS_COORD=1', '-D', 'STAGE_TESS_FACTOR2=1',
+        '-D', 'STAGE_TESS_GRID=1', '-D', 'STAGE_TESS_INVOCATIONS=1',
+        '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
+  custom_target('dx12_stage_binding_point_invocations_control_vs',
+    input: 'shader_backend_stages.hlsl',
+    output: 'stage_binding_point_invocations_control.vs.cso',
+    command: dxc_command + [ '-E', 'vs_grid_main', '-T', 'vs_6_0',
+      '-D', 'STAGE_BINDING_DIFFERENTIAL=1', '-D', 'STAGE_TESS_GRID_CONTROL=1',
+      '-D', 'STAGE_TESS_INVOCATIONS=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   foreach stage : ['ms', 'as']
     custom_target('dx12_stage_binding_as_' + stage,
       input: 'shader_backend_stages.hlsl',

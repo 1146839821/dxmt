@@ -2706,17 +2706,25 @@ bool TestStageBindings(const char *mode) {
                      !std::strcmp(mode, "tess-line-image-wrong") ||
                      !std::strcmp(mode, "tess-point-grid-control-wrong"),
              perf = !std::strcmp(mode, "perf");
+  const bool invocations_control =
+                 !std::strcmp(mode, "tess-point-invocations-control") ||
+                 !std::strcmp(mode, "tess-point-invocations-control-wrong"),
+             invocations_wrong =
+                 !std::strcmp(mode, "tess-point-invocations-control-wrong"),
+             invocations = invocations_control ||
+                           !std::strcmp(mode, "tess-point-invocations");
   const bool tess_grid_duplicate =
                  !std::strcmp(mode, "tess-point-grid-control-duplicate"),
              tess_grid_control =
                  !std::strcmp(mode, "tess-point-grid-control") ||
                  !std::strcmp(mode, "tess-point-grid-control-wrong") ||
-                 tess_grid_duplicate,
-             tess_grid = tess_grid_control ||
+                 tess_grid_duplicate || invocations_control,
+             tess_grid = tess_grid_control || invocations ||
                          !std::strcmp(mode, "tess-point-grid-factor2");
   const bool tess_index16 = std::strstr(mode, "-u16") != nullptr,
              tess_index32 = std::strstr(mode, "-u32") != nullptr,
-             tess_point = !std::strcmp(mode, "tess-point") ||
+             tess_point = (invocations && !invocations_control) ||
+                          !std::strcmp(mode, "tess-point") ||
                           !std::strcmp(mode, "tess-point-u16") ||
                           !std::strcmp(mode, "tess-point-u32") ||
                           !std::strcmp(mode, "tess-point-image") ||
@@ -2777,6 +2785,7 @@ bool TestStageBindings(const char *mode) {
   Com<ID3DBlob> root_blob;
   Com<ID3D12DescriptorHeap> heap, samplers, rtvs;
   Com<ID3D12Resource> source, upload, target, readback, index_buffer;
+  Com<ID3D12Resource> invocation_buffer, invocation_upload, invocation_readback;
   Com<ID3D12CommandAllocator> allocator;
   Com<ID3D12GraphicsCommandList> list;
   Com<ID3D12GraphicsCommandList6> list6;
@@ -2799,11 +2808,13 @@ bool TestStageBindings(const char *mode) {
   if (!observer.Install())
     return false;
   D3D12_DESCRIPTOR_RANGE range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
-  D3D12_ROOT_PARAMETER params[2] = {};
+  D3D12_ROOT_PARAMETER params[3] = {};
   params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
   params[0].Constants = {0, 0, 4};
   params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
   params[1].DescriptorTable = {1, &range};
+  params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+  params[2].Descriptor = {0, 0};
   D3D12_STATIC_SAMPLER_DESC sampler = {};
   sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
   sampler.AddressU = sampler.AddressV = sampler.AddressW =
@@ -2811,7 +2822,7 @@ bool TestStageBindings(const char *mode) {
   sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
   sampler.MaxLOD = D3D12_FLOAT32_MAX;
   D3D12_ROOT_SIGNATURE_DESC root_desc = {
-      2, params, 1, &sampler,
+      invocations ? 3u : 2u, params, 1, &sampler,
       D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT};
   if (!CheckHR("Stage serialize", D3D12SerializeRootSignature(
                                       &root_desc, D3D_ROOT_SIGNATURE_VERSION_1,
@@ -2867,9 +2878,11 @@ bool TestStageBindings(const char *mode) {
     const bool airconv = kind < 2;
     const bool grid_control_points = tess_grid_control && slot == 8;
     auto vs =
-        read(grid_control_points ? "stage_binding_point_grid_control.vs.cso"
-             : airconv           ? "stage_binding5.vs.cso"
-                                 : "stage_binding.vs.cso");
+        read(grid_control_points && invocations
+                 ? "stage_binding_point_invocations_control.vs.cso"
+             : grid_control_points ? "stage_binding_point_grid_control.vs.cso"
+             : airconv             ? "stage_binding5.vs.cso"
+                                   : "stage_binding.vs.cso");
     auto ps = read(tess_count ? "stage_binding_count.ps.cso"
                    : airconv  ? "stage_binding5.ps.cso"
                               : "stage_binding.ps.cso");
@@ -2904,7 +2917,8 @@ bool TestStageBindings(const char *mode) {
       }
       auto gs =
           read(airconv ? "stage_binding5.gs.cso" : "stage_binding.gs.cso");
-      const char *tess_variant = tess_grid      ? "point_grid_factor2"
+      const char *tess_variant = invocations    ? "point_invocations"
+                                 : tess_grid    ? "point_grid_factor2"
                                  : tess_factor2 ? "point_coord_factor2"
                                  : tess_coord   ? "point_coord"
                                  : tess_image && tess_point  ? "point_image"
@@ -2988,7 +3002,8 @@ bool TestStageBindings(const char *mode) {
       return false;
   }
   auto buffer = [&](D3D12_HEAP_TYPE type, UINT size,
-                    D3D12_RESOURCE_STATES state, ID3D12Resource **out) {
+                    D3D12_RESOURCE_STATES state, ID3D12Resource **out,
+                    D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE) {
     D3D12_HEAP_PROPERTIES h = {};
     h.Type = type;
     h.CreationNodeMask = h.VisibleNodeMask = 1;
@@ -2997,6 +3012,7 @@ bool TestStageBindings(const char *mode) {
     d.Width = size;
     d.Height = d.DepthOrArraySize = d.MipLevels = d.SampleDesc.Count = 1;
     d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    d.Flags = flags;
     return CheckHR("Stage buffer", device->CreateCommittedResource(
                                        &h, D3D12_HEAP_FLAG_NONE, &d, state,
                                        nullptr, IID_PPV_ARGS(out)));
@@ -3028,6 +3044,27 @@ bool TestStageBindings(const char *mode) {
       std::memcpy(mapped, indices, sizeof(indices));
     }
     index_buffer->Unmap(0, nullptr);
+    mapped = nullptr;
+  }
+  constexpr UINT invocation_stride = 64, invocation_canary = 0xdecafbad;
+  if (invocations) {
+    const UINT bytes = draws * invocation_stride;
+    if (!buffer(D3D12_HEAP_TYPE_DEFAULT, bytes, D3D12_RESOURCE_STATE_COPY_DEST,
+                &invocation_buffer,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) ||
+        !buffer(D3D12_HEAP_TYPE_UPLOAD, bytes,
+                D3D12_RESOURCE_STATE_GENERIC_READ, &invocation_upload) ||
+        !buffer(D3D12_HEAP_TYPE_READBACK, bytes, D3D12_RESOURCE_STATE_COPY_DEST,
+                &invocation_readback) ||
+        !CheckHR("Invocation upload",
+                 invocation_upload->Map(0, nullptr, &mapped)))
+      return false;
+    auto *words = static_cast<UINT *>(mapped);
+    for (UINT draw = 0; draw < draws; ++draw) {
+      std::fill_n(words + draw * 16, 8, 0);
+      std::fill_n(words + draw * 16 + 8, 8, invocation_canary);
+    }
+    invocation_upload->Unmap(0, nullptr);
     mapped = nullptr;
   }
   D3D12_HEAP_PROPERTIES h = {};
@@ -3226,6 +3263,13 @@ bool TestStageBindings(const char *mode) {
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
                     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
       }
+      if (invocations) {
+        list->CopyBufferRegion(invocation_buffer.ptr(), 0,
+                               invocation_upload.ptr(), 0,
+                               draws * invocation_stride);
+        barrier(invocation_buffer.ptr(), D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      }
       list->SetGraphicsRootSignature(root.ptr());
       ID3D12DescriptorHeap *heaps[] = {heap.ptr(), samplers.ptr()};
       list->SetDescriptorHeaps(2, heaps);
@@ -3240,6 +3284,10 @@ bool TestStageBindings(const char *mode) {
         const UINT slot = sequence[draw % sequence.size()], kind = kinds[slot];
         if (!draw || (!perf && draw % sequence.size() == 0))
           list->SetGraphicsRoot32BitConstants(0, 4, expected[draw].values, 0);
+        if (invocations)
+          list->SetGraphicsRootUnorderedAccessView(
+              2, invocation_buffer->GetGPUVirtualAddress() +
+                     draw * invocation_stride);
         list->SetPipelineState(pipelines[slot].ptr());
         if (same_root)
           list->SetGraphicsRootSignature(root.ptr());
@@ -3294,6 +3342,15 @@ bool TestStageBindings(const char *mode) {
               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
               D3D12_RESOURCE_STATE_COPY_DEST);
+      if (invocations) {
+        barrier(invocation_buffer.ptr(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_COPY_SOURCE);
+        list->CopyBufferRegion(invocation_readback.ptr(), 0,
+                               invocation_buffer.ptr(), 0,
+                               draws * invocation_stride);
+        barrier(invocation_buffer.ptr(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                D3D12_RESOURCE_STATE_COPY_DEST);
+      }
       if (!CheckHR("Stage Close", list->Close()))
         return false;
     }
@@ -3326,6 +3383,36 @@ bool TestStageBindings(const char *mode) {
       std::cerr << "Unexpected same-layout root rebinds="
                 << StageBindingObserver::root_sets << "\n";
       return false;
+    }
+    bool invocation_good = true;
+    if (invocations) {
+      if (!CheckHR("Invocation readback",
+                   invocation_readback->Map(0, nullptr, &mapped)))
+        return false;
+      const auto *words = static_cast<const UINT *>(mapped);
+      for (UINT draw = 0; draw < draws; ++draw) {
+        const UINT slot = sequence[draw % sequence.size()];
+        const bool points =
+            kinds[slot] == 4 || (invocations_control && slot == 8);
+        std::cout << "Stage invocations pass=" << pass << " draw=" << draw
+                  << " bins=";
+        for (UINT bin = 0; bin < 8; ++bin)
+          std::cout << (bin ? "," : "") << words[draw * 16 + bin];
+        std::cout << "\n";
+        for (UINT bin = 0; bin < 16; ++bin) {
+          UINT expected_value =
+              bin >= 8 ? invocation_canary : UINT(points && bin < 7);
+          if (invocations_wrong && draw == 1 && bin == 6)
+            ++expected_value;
+          const UINT actual = words[draw * 16 + bin];
+          invocation_good &= actual == expected_value;
+          if (actual != expected_value)
+            std::cerr << "Stage invocation mismatch draw=" << draw
+                      << " bin=" << bin << " actual=" << actual
+                      << " expected=" << expected_value << "\n";
+        }
+      }
+      invocation_readback->Unmap(0, nullptr);
     }
     if (!CheckHR("Stage readback", readback->Map(0, nullptr, &mapped)))
       return false;
@@ -3395,7 +3482,7 @@ bool TestStageBindings(const char *mode) {
         }
     }
     readback->Unmap(0, nullptr);
-    if (!good)
+    if (!good || !invocation_good)
       return false;
     std::cout << "Stage bindings mode=" << mode << " pass=" << pass
               << " exact_bytes=" << pixels.size()
