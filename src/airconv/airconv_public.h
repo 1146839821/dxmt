@@ -6,7 +6,8 @@
 #define __AIRCONV_H
 
 /* 32 invalidates AIR caches containing old geometry index-cut handling. */
-#define AIRCONV_VERSION 32
+#define AIRCONV_VERSION 33
+#define SM50_ADJ_RESTART_EXPERIMENTAL 1
 
 #ifdef __cplusplus
 #include <string>
@@ -242,6 +243,8 @@ enum SM50_SHADER_FLAG {
   SM50_SHADER_FLAG_GEOMETRY_CUT_DISABLED = 1 << 3,
   SM50_SHADER_FLAG_GEOMETRY_CUT_16 = 1 << 4,
   SM50_SHADER_FLAG_GEOMETRY_CUT_32 = 1 << 5,
+  SM50_SHADER_FLAG_GEOMETRY_ADJ_RESTART = 1 << 6,
+  SM50_SHADER_FLAG_GEOMETRY_INDEX_OOB_ZERO = 1 << 7,
 };
 
 struct SM50_SHADER_COMMON_DATA {

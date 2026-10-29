@@ -201,7 +201,7 @@ get_gs_vertex_count(D3D11_PRIMITIVE_TOPOLOGY primitive) {
   case D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ:
     return {30, 30};
   case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ:
-    return {32, 28};
+    return {32, SM50_ADJ_RESTART_EXPERIMENTAL ? 24 : 28};
   case D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST:
   return {32, 32};
   case D3D_PRIMITIVE_TOPOLOGY_2_CONTROL_POINT_PATCHLIST:
@@ -1374,6 +1374,66 @@ public:
     return true;
   }
 
+  bool
+  UseGeometryRestart() {
+    auto gs = GetManagedShader<PipelineStage::Geometry>();
+    return SM50_ADJ_RESTART_EXPERIMENTAL &&
+        state_.InputAssembler.Topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ && gs &&
+        gs->reflection().GeometryShader.GSPassThrough == ~0u &&
+        !GetManagedShader<PipelineStage::Hull>();
+  }
+
+  Rc<Buffer>
+  PrepareGeometryRestartPrefix(UINT count, UINT first, Rc<Buffer> indirect = {}, UINT indirect_offset = 0) {
+    if (!state_.InputAssembler.IndexBuffer)
+      return {};
+    StreamOutputDraw arguments = {};
+    arguments.index_size = state_.InputAssembler.IndexBufferFormat == DXGI_FORMAT_R32_UINT ? 4 : 2;
+    const uint64_t offset = uint64_t(state_.InputAssembler.IndexBufferOffset) + uint64_t(first) * arguments.index_size;
+    const uint64_t length = state_.InputAssembler.IndexBuffer->buffer()->length();
+    D3D11_BUFFER_DESC desc = {};
+    state_.InputAssembler.IndexBuffer->GetDesc(&desc);
+    const bool reusable = !indirect && GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE &&
+        desc.Usage == D3D11_USAGE_IMMUTABLE && !desc.MiscFlags;
+    if (reusable && geometry_restart_cache_.resource == state_.InputAssembler.IndexBuffer &&
+        geometry_restart_cache_.offset == offset && geometry_restart_cache_.count == count &&
+        geometry_restart_cache_.index_size == arguments.index_size)
+      return geometry_restart_cache_.prefix;
+    if (indirect) {
+      if ((indirect_offset & 3) || indirect_offset > indirect->length() ||
+          sizeof(DXMT_DRAW_INDEXED_ARGUMENTS) > indirect->length() - indirect_offset ||
+          (offset <= length && (length - offset) / arguments.index_size > UINT_MAX))
+        return {};
+      count = offset <= length ? UINT((length - offset) / arguments.index_size) : 0;
+      count = std::max(count, 1u);
+    }
+    if (!count)
+      return {};
+    arguments.input_count = count;
+    arguments.input_step = 2;
+    arguments.input_window = 6;
+    arguments.flags = kSOHasCut | kSOGeometryRestart | (indirect ? kSOAllowIndexOOB : 0);
+    arguments.cut_index = arguments.index_size == 2 ? 0xffffu : 0xffffffffu;
+    StreamOutputScanLayout plan(count);
+    Rc<Buffer> scratch(new Buffer(plan.size, device->GetMTLDevice()));
+    auto allocation = scratch->allocate({BufferAllocationFlag::GpuPrivate});
+    if (!allocation->buffer())
+      return {};
+    scratch->rename(std::move(allocation));
+    SwitchToComputeEncoder();
+    EmitOP([=](ArgumentEncodingContext &enc) {
+      enc.prepareStreamOutputIndexPrefix(arguments, offset, scratch, indirect, indirect_offset);
+    });
+    if (reusable) {
+      geometry_restart_cache_.resource = state_.InputAssembler.IndexBuffer;
+      geometry_restart_cache_.prefix = scratch;
+      geometry_restart_cache_.offset = offset;
+      geometry_restart_cache_.count = count;
+      geometry_restart_cache_.index_size = arguments.index_size;
+    }
+    return scratch;
+  }
+
   void
   STDMETHODCALLTYPE
   Draw(UINT VertexCount, UINT StartVertexLocation) override {
@@ -1422,11 +1482,18 @@ public:
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
       return;
+    const bool restart = UseGeometryRestart();
+    Rc<Buffer> restart_prefix;
+    if (restart) {
+      restart_prefix = PrepareGeometryRestartPrefix(IndexCount, StartIndexLocation);
+      if (!restart_prefix)
+        return;
+    }
     DrawCallStatus status = PreDraw<true>();
     if (status == DrawCallStatus::Invalid)
       return;
     if (status == DrawCallStatus::Geometry) {
-      return GeometryDrawIndexed(IndexCount, StartIndexLocation, BaseVertexLocation, 1, 0);
+      return GeometryDrawIndexed(IndexCount, StartIndexLocation, BaseVertexLocation, 1, 0, restart_prefix);
     }
     if (status == DrawCallStatus::Tessellation) {
       return TessellationDrawIndexed(ControlPointCount, IndexCount, StartIndexLocation, BaseVertexLocation, 1, 0);
@@ -1512,12 +1579,19 @@ public:
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
       return;
+    const bool restart = UseGeometryRestart();
+    Rc<Buffer> restart_prefix;
+    if (restart) {
+      restart_prefix = PrepareGeometryRestartPrefix(IndexCountPerInstance, StartIndexLocation);
+      if (!restart_prefix)
+        return;
+    }
     DrawCallStatus status = PreDraw<true>();
     if (status == DrawCallStatus::Invalid)
       return;
     if (status == DrawCallStatus::Geometry) {
       return GeometryDrawIndexed(
-          IndexCountPerInstance, StartIndexLocation, BaseVertexLocation, InstanceCount, StartInstanceLocation
+          IndexCountPerInstance, StartIndexLocation, BaseVertexLocation, InstanceCount, StartInstanceLocation, restart_prefix
       );
     }
     if (status == DrawCallStatus::Tessellation) {
@@ -1678,9 +1752,13 @@ public:
   void
   GeometryDrawIndexed(
       UINT IndexCountPerInstance, UINT StartIndexLocation, INT BaseVertexLocation,
-      UINT InstanceCount, UINT BaseInstance
+      UINT InstanceCount, UINT BaseInstance, Rc<Buffer> restart_prefix
   ) {
     auto IndexBufferOffset = state_.InputAssembler.IndexBufferOffset;
+    const auto descriptor_offset = restart_prefix ? PreAllocateArgumentBuffer(16, 16) : 0;
+    const uint64_t index_length = restart_prefix ? state_.InputAssembler.IndexBuffer->buffer()->length() : 0;
+    const uint32_t index_count = index_length > IndexBufferOffset ? UINT((index_length - IndexBufferOffset) /
+        (state_.InputAssembler.IndexBufferFormat == DXGI_FORMAT_R32_UINT ? 4 : 2)) : 0;
     auto draw_arguments_offset = PreAllocateArgumentBuffer(sizeof(DXMT_DRAW_INDEXED_ARGUMENTS), 32);
     auto max_object_threadgroups = max_object_threadgroups_;
     EmitOP([=, topo = state_.InputAssembler.Topology](ArgumentEncodingContext &enc) {
@@ -1702,6 +1780,8 @@ public:
 
       enc.bumpVisibilityResultOffset();
       enc.resolveRenderPassBarrier();
+      if (restart_prefix)
+        enc.bindGeometryIndexPrefix(restart_prefix, descriptor_offset, IndexCountPerInstance, index_count);
       auto &cmd = enc.encodeRenderCommand<wmtcmd_render_dxmt_geometry_draw_indexed>();
       cmd.type = WMTRenderCommandDXMTGeometryDrawIndexed;
       cmd.draw_arguments_offset = enc.getFinalArgumentBufferOffset(draw_arguments_offset);
@@ -1724,11 +1804,20 @@ public:
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
       return;
+    Rc<Buffer> restart_prefix;
+    if (UseGeometryRestart()) {
+      auto arg = GetResourceCommon(pBufferForArgs);
+      if (!arg)
+        return;
+      restart_prefix = PrepareGeometryRestartPrefix(0, 0, arg->buffer(), AlignedByteOffsetForArgs);
+      if (!restart_prefix)
+        return;
+    }
     DrawCallStatus status = PreDraw<true>();
     if (status == DrawCallStatus::Invalid)
       return;
     if (status == DrawCallStatus::Geometry) {
-      return GeometryDrawIndexedIndirect(pBufferForArgs, AlignedByteOffsetForArgs);
+      return GeometryDrawIndexedIndirect(pBufferForArgs, AlignedByteOffsetForArgs, restart_prefix);
     }
     if (status == DrawCallStatus::Tessellation) {
       return TessellationDrawIndexedIndirect(ControlPointCount ,pBufferForArgs, AlignedByteOffsetForArgs);
@@ -1827,10 +1916,14 @@ public:
 
   void
   GeometryDrawIndexedIndirect(
-    ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs
+    ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs, Rc<Buffer> restart_prefix
   ) {
     auto IndexBufferOffset = state_.InputAssembler.IndexBufferOffset;
     auto max_object_threadgroups = max_object_threadgroups_;
+    const auto descriptor_offset = restart_prefix ? PreAllocateArgumentBuffer(16, 16) : 0;
+    const uint64_t index_length = restart_prefix ? state_.InputAssembler.IndexBuffer->buffer()->length() : 0;
+    const UINT index_count = restart_prefix && IndexBufferOffset <= index_length
+        ? UINT((index_length - IndexBufferOffset) / (state_.InputAssembler.IndexBufferFormat == DXGI_FORMAT_R32_UINT ? 4 : 2)) : 0;
 
     if (auto bindable = GetResourceCommon(pBufferForArgs)) {
       EmitOP([=, topo = state_.InputAssembler.Topology, ArgBuffer = bindable->buffer()](ArgumentEncodingContext &enc) {
@@ -1843,11 +1936,19 @@ public:
         auto [index_buffer, index_sub_offset] = enc.currentIndexBuffer();
   
         enc.bumpVisibilityResultOffset();
-        enc.encodeGSDispatchArgumentsMarshal(
-          buffer->buffer(), buffer->gpuAddress() + buffer_offset, AlignedByteOffsetForArgs, vertex_increment_per_wrap,
-          dispatch_arg.gpu_buffer, dispatch_arg.gpu_address, dispatch_arg.offset, max_object_threadgroups
-        );
+        if (restart_prefix)
+          enc.encodeGSIndexedRestartArgumentsMarshal(
+              buffer->buffer(), buffer->gpuAddress() + buffer_offset + AlignedByteOffsetForArgs,
+              vertex_increment_per_wrap, dispatch_arg.gpu_buffer, dispatch_arg.gpu_address + dispatch_arg.offset,
+              max_object_threadgroups, index_count);
+        else
+          enc.encodeGSDispatchArgumentsMarshal(
+              buffer->buffer(), buffer->gpuAddress() + buffer_offset, AlignedByteOffsetForArgs, vertex_increment_per_wrap,
+              dispatch_arg.gpu_buffer, dispatch_arg.gpu_address, dispatch_arg.offset, max_object_threadgroups
+          );
         enc.resolveRenderPassBarrier();
+        if (restart_prefix)
+          enc.bindGeometryIndexPrefix(restart_prefix, descriptor_offset, std::max(index_count, 1u), index_count);
         auto &cmd = enc.encodeRenderCommand<wmtcmd_render_dxmt_geometry_draw_indexed_indirect>();
         cmd.type = WMTRenderCommandDXMTGeometryDrawIndexedIndirect;
         cmd.dispatch_args_buffer = dispatch_arg.gpu_buffer;
@@ -2086,12 +2187,19 @@ public:
     std::lock_guard<mutex_t> lock(mutex);
 
     auto pBuffer = GetResourceCommon(pIndexBuffer);
+    if (geometry_restart_cache_.resource.ptr() != pBuffer ||
+        state_.InputAssembler.IndexBufferFormat != Format || state_.InputAssembler.IndexBufferOffset != Offset) {
+      geometry_restart_cache_.resource = nullptr;
+      geometry_restart_cache_.prefix = {};
+    }
     if (pBuffer && (pBuffer->bindFlags() & D3D11_BIND_INDEX_BUFFER) && ValidateIAHazard(pBuffer)) {
       state_.InputAssembler.IndexBuffer = pBuffer;
       EmitST([buffer = state_.InputAssembler.IndexBuffer->buffer()](ArgumentEncodingContext &enc) mutable {
         enc.bindIndexBuffer(forward_rc(buffer));
       });
     } else {
+      geometry_restart_cache_.resource = nullptr;
+      geometry_restart_cache_.prefix = {};
       state_.InputAssembler.IndexBuffer = nullptr;
       EmitST([](ArgumentEncodingContext &enc) { enc.bindIndexBuffer({}); });
     }
@@ -2914,6 +3022,8 @@ public:
 
     if (pViewOrBuffer->bindFlags() & D3D11_BIND_INDEX_BUFFER) {
       if (CheckOverlap(state_.InputAssembler.IndexBuffer.ptr(), pViewOrBuffer)) {
+        geometry_restart_cache_.resource = nullptr;
+        geometry_restart_cache_.prefix = {};
         state_.InputAssembler.IndexBuffer = nullptr;
         state_.InputAssembler.IndexBufferFormat = DXGI_FORMAT_UNKNOWN;
         state_.InputAssembler.IndexBufferOffset = 0;
@@ -5258,6 +5368,8 @@ public:
   }
 
   void ResetD3D11ContextState() {
+    geometry_restart_cache_.resource = nullptr;
+    geometry_restart_cache_.prefix = {};
     state_ = {};
   }
 
@@ -5287,6 +5399,12 @@ public:
 
 protected:
   D3D11ContextState state_;
+  struct {
+    Com<D3D11ResourceCommon, false> resource;
+    Rc<Buffer> prefix;
+    uint64_t offset = 0;
+    UINT count = 0, index_size = 0;
+  } geometry_restart_cache_;
   D3D11UserDefinedAnnotation annotation_;
   MTLD3D11ContextExt<ContextInternalState> ext_;
   uint64_t max_object_threadgroups_;

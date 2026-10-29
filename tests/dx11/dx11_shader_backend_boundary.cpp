@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_4.h>
 #include <d3dcompiler.h>
 
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include "../../src/winemetal/winemetal.h"
 #include "../../src/util/util_md5.hpp"
 #include "../../src/util/com/com_pointer.hpp"
+#include "../../src/d3d11/d3d11_fence.hpp"
 
 namespace {
 
@@ -806,6 +808,28 @@ void gs_main(triangleadj V input[6], uint primitive : SV_PrimitiveID,
   }
 }
 float4 ps_main(O input) : SV_Target { return input.value; }
+RWByteAddressBuffer indirect_out : register(u0);
+[numthreads(1,1,1)] void cs_args() {
+  indirect_out.Store(0, 70); indirect_out.Store(4, 2);
+  indirect_out.Store(8, 3); indirect_out.Store(12, 5); indirect_out.Store(16, 0);
+}
+uint index_value(uint n) {
+  if (n < 3 || n >= 23) return 0;
+  uint i = n - 3;
+  if (i == 7 || i == 18 || i == 19) return INDEX32 ? 0xffffffffu : 0xffffu;
+  return (i * 7 + 3) % 251;
+}
+[numthreads(1,1,1)] void cs_indices() {
+  if (INDEX32) {
+    for (uint n = 0; n < 23; ++n) indirect_out.Store(n * 4, index_value(n));
+  } else {
+    for (uint n = 0; n < 24; n += 2)
+      indirect_out.Store(n * 2, index_value(n) | (index_value(n + 1) << 16));
+  }
+}
+[numthreads(1,1,1)] void cs_zero_indices() {
+  for (uint n = 0; n < (INDEX32 ? 23 : 12); ++n) indirect_out.Store(n * 4, 0);
+}
 )HLSL";
   auto check = [](const char *name, HRESULT hr) {
     if (FAILED(hr))
@@ -814,7 +838,7 @@ float4 ps_main(O input) : SV_Target { return input.value; }
     return SUCCEEDED(hr);
   };
   const D3D_SHADER_MACRO macros[] = {
-      {"GS_COUNT", gs_instances == 1 ? "1" : "3"}, {nullptr, nullptr}};
+      {"GS_COUNT", gs_instances == 1 ? "1" : "3"}, {"INDEX32", index32 ? "1" : "0"}, {nullptr, nullptr}};
   Com<ID3DBlob> vs, gs, ps;
   auto compile = [&](const char *entry, const char *target,
                      Com<ID3DBlob> &blob) {
@@ -840,6 +864,28 @@ float4 ps_main(O input) : SV_Target { return input.value; }
                                &requested, 1, D3D11_SDK_VERSION, &device,
                                &actual, &context)))
     return false;
+  Com<ID3D11Device5> device5;
+  Com<ID3D11DeviceContext4> context4;
+  Com<ID3D11Fence> gate, before_gate, completion;
+  using SignalNativeEvent = void (*)(obj_handle_t, uint64_t);
+  struct GateRelease {
+    SignalNativeEvent signal = nullptr;
+    obj_handle_t event = 0;
+    bool armed = false;
+    ~GateRelease() { if (armed) signal(event, 1); }
+  } gate_release;
+  if (cut_pattern == 22 || cut_pattern == 23) {
+    auto module = GetModuleHandleW(L"winemetal.dll");
+    gate_release.signal = module ? reinterpret_cast<SignalNativeEvent>(GetProcAddress(module, "MTLSharedEvent_signalValue")) : nullptr;
+    if (!gate_release.signal ||
+        !check("adj device5", device->QueryInterface(__uuidof(ID3D11Device5), reinterpret_cast<void **>(&device5))) ||
+        !check("adj context4", context->QueryInterface(__uuidof(ID3D11DeviceContext4), reinterpret_cast<void **>(&context4))) ||
+        !check("adj gate", device5->CreateFence(0, D3D11_FENCE_FLAG_NONE, __uuidof(ID3D11Fence), reinterpret_cast<void **>(&gate))) ||
+        !check("adj before gate", device5->CreateFence(0, D3D11_FENCE_FLAG_NONE, __uuidof(ID3D11Fence), reinterpret_cast<void **>(&before_gate))) ||
+        !check("adj completion", device5->CreateFence(0, D3D11_FENCE_FLAG_NONE, __uuidof(ID3D11Fence), reinterpret_cast<void **>(&completion))))
+      return false;
+    gate_release.event = static_cast<dxmt::MTLD3D11Fence *>(gate.ptr())->event.handle;
+  }
   Com<ID3D11VertexShader> vertex;
   Com<ID3D11GeometryShader> geometry;
   Com<ID3D11PixelShader> pixel;
@@ -859,23 +905,34 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   std::vector<UINT16> indices16(indices.size());
   for (UINT i = 0; i < count; ++i) {
     indices[first + i] = (i * 7 + 3) % 251;
-    if ((cut_pattern == 1 &&
+    if (((cut_pattern == 1 || cut_pattern == 7 || cut_pattern == 13 || cut_pattern == 14 || cut_pattern == 16 || cut_pattern == 18 || cut_pattern == 19 || cut_pattern == 20 || cut_pattern == 22 || cut_pattern == 23) &&
          (i == 7 || i == 18 || i == 19 || i == 27 || i == 56)) ||
         (cut_pattern == 2 && (i == 27 || i == 28 || i == 55)) ||
         (cut_pattern == 3 && (i == 255 || i == 256 || i == 257)) ||
         (cut_pattern == 5 && i == 6))
       indices[first + i] = index32 ? ~0u : 0xffffu;
+    if (((cut_pattern == 13 || cut_pattern == 14 || cut_pattern == 16 || cut_pattern == 18 || cut_pattern == 19 || cut_pattern == 20 || cut_pattern == 22 || cut_pattern == 23) && i >= 20) || cut_pattern == 15 || cut_pattern == 17 || cut_pattern == 21)
+      indices[first + i] = 0; // D3D11 out-of-bounds index fetch returns zero.
     indices16[first + i] = UINT16(indices[first + i]);
   }
   D3D11_BUFFER_DESC b = {};
-  b.ByteWidth = UINT(indices.size()) * (index32 ? 4 : 2);
+  b.ByteWidth = UINT((cut_pattern >= 13 && cut_pattern <= 23) ? first + std::min(count, 20u) : indices.size()) * (index32 ? 4 : 2);
+  if ((cut_pattern == 18 || cut_pattern == 21) && !index32)
+    b.ByteWidth += 2; // Raw UAVs require a whole number of 32-bit words.
   b.Usage = D3D11_USAGE_IMMUTABLE;
   b.BindFlags = D3D11_BIND_INDEX_BUFFER;
+  if (cut_pattern == 18 || cut_pattern == 21) {
+    if (count != 70)
+      return false;
+    b.Usage = D3D11_USAGE_DEFAULT;
+    b.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+    b.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+  }
   D3D11_SUBRESOURCE_DATA data = {
       index32 ? static_cast<const void *>(indices.data()) : indices16.data(), 0,
       0};
   Com<ID3D11Buffer> ib;
-  if (!check("adj IB", device->CreateBuffer(&b, &data, &ib)))
+  if (!check("adj IB", device->CreateBuffer(&b, (cut_pattern == 18 || cut_pattern == 21) ? nullptr : &data, &ib)))
     return false;
   D3D11_TEXTURE2D_DESC t = {};
   t.Width = width;
@@ -905,28 +962,178 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   Com<ID3D11BlendState> blend;
   if (!check("adj blend", device->CreateBlendState(&blend_desc, &blend)))
     return false;
-  context->IASetInputLayout(nullptr);
-  context->IASetPrimitiveTopology(
+  Com<ID3D11Texture2D> first_readback;
+  if (cut_pattern == 23) {
+    if (!check("adj first staging", device->CreateTexture2D(&t, nullptr, &first_readback)) ||
+        !check("adj before gate signal", context4->Signal(before_gate.ptr(), 1)))
+      return false;
+    gate_release.armed = true;
+    if (!check("adj queue gate", context4->Wait(gate.ptr(), 1)))
+      return false;
+  }
+  Com<ID3D11DeviceContext> deferred;
+  if ((cut_pattern == 19 || cut_pattern == 22) && !check("adj deferred context", device->CreateDeferredContext(0, &deferred)))
+    return false;
+  ID3D11DeviceContext *record = deferred ? deferred.ptr() : context.ptr();
+  record->IASetInputLayout(nullptr);
+  record->IASetPrimitiveTopology(
       cut_pattern == 5 ? D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ
                        : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ);
-  context->IASetIndexBuffer(
-      ib.ptr(), index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
-  context->VSSetShader(vertex.ptr(), nullptr, 0);
-  context->GSSetShader(geometry.ptr(), nullptr, 0);
-  context->PSSetShader(pixel.ptr(), nullptr, 0);
+  record->IASetIndexBuffer(
+      ib.ptr(), index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, cut_pattern == 17 ? b.ByteWidth : 0);
+  record->VSSetShader(vertex.ptr(), nullptr, 0);
+  record->GSSetShader(geometry.ptr(), nullptr, 0);
+  record->PSSetShader(pixel.ptr(), nullptr, 0);
   auto view = rtv.ptr();
-  context->OMSetRenderTargets(1, &view, nullptr);
+  record->OMSetRenderTargets(1, &view, nullptr);
   const float factors[] = {0, 0, 0, 0};
-  context->OMSetBlendState(blend.ptr(), factors, ~0u);
+  record->OMSetBlendState(blend.ptr(), factors, ~0u);
   const D3D11_VIEWPORT viewport = {0, 0, float(width), float(height), 0, 1};
-  context->RSSetViewports(1, &viewport);
+  record->RSSetViewports(1, &viewport);
   const float clear[] = {0, 0, 0, 0};
-  context->ClearRenderTargetView(rtv.ptr(), clear);
-  if (indexed)
-    context->DrawIndexedInstanced(count, 2, first, base, 0);
+  record->ClearRenderTargetView(rtv.ptr(), clear);
+  Com<ID3D11Buffer> indirect_arguments;
+  if (indexed && (cut_pattern == 7 || (cut_pattern >= 14 && cut_pattern <= 19) || cut_pattern == 21 || cut_pattern == 22)) {
+    UINT args[] = {count, 2, cut_pattern == 15 ? first + count + 1 : (cut_pattern == 17 ? 0 : first), base, 0};
+    if (cut_pattern == 16)
+      args[0] = 0; // Only the GPU dispatch makes this draw nonempty.
+    D3D11_BUFFER_DESC indirect_desc = {};
+    indirect_desc.ByteWidth = sizeof(args);
+    indirect_desc.Usage = D3D11_USAGE_DEFAULT;
+    indirect_desc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+    if (cut_pattern == 16) {
+      if (count != 70)
+        return false;
+      indirect_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+      indirect_desc.MiscFlags |= D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+    }
+    D3D11_SUBRESOURCE_DATA initial = {args, 0, 0};
+    if (!check("adj indirect args", device->CreateBuffer(&indirect_desc, &initial, &indirect_arguments)))
+      return false;
+    if (cut_pattern == 16 || cut_pattern == 18 || cut_pattern == 21) {
+      Com<ID3DBlob> cs;
+      Com<ID3D11ComputeShader> compute;
+      Com<ID3D11UnorderedAccessView> uav;
+      D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+      uav_desc.Format = DXGI_FORMAT_R32_TYPELESS;
+      uav_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+      uav_desc.Buffer.NumElements = cut_pattern == 16 ? 5 : b.ByteWidth / 4;
+      uav_desc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+      if (!compile(cut_pattern == 16 ? "cs_args" : "cs_indices", "cs_5_0", cs) ||
+          !check("adj CS", device->CreateComputeShader(cs->GetBufferPointer(), cs->GetBufferSize(), nullptr, &compute)) ||
+          !check("adj UAV", device->CreateUnorderedAccessView(cut_pattern == 16 ? indirect_arguments.ptr() : ib.ptr(), &uav_desc, &uav)))
+        return false;
+      auto raw_uav = uav.ptr();
+      record->CSSetShader(compute.ptr(), nullptr, 0);
+      record->CSSetUnorderedAccessViews(0, 1, &raw_uav, nullptr);
+      record->Dispatch(1, 1, 1);
+      raw_uav = nullptr;
+      record->CSSetUnorderedAccessViews(0, 1, &raw_uav, nullptr);
+      record->CSSetShader(nullptr, nullptr, 0);
+      if (cut_pattern == 18 || cut_pattern == 21)
+        record->IASetIndexBuffer(ib.ptr(), index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
+      if (cut_pattern == 21) {
+        record->DrawIndexedInstanced(count, 2, first, base, 0);
+        Com<ID3DBlob> zero_cs;
+        Com<ID3D11ComputeShader> zero_compute;
+        if (!compile("cs_zero_indices", "cs_5_0", zero_cs) ||
+            !check("adj zero CS", device->CreateComputeShader(zero_cs->GetBufferPointer(), zero_cs->GetBufferSize(), nullptr, &zero_compute)))
+          return false;
+        raw_uav = uav.ptr();
+        record->CSSetShader(zero_compute.ptr(), nullptr, 0);
+        record->CSSetUnorderedAccessViews(0, 1, &raw_uav, nullptr);
+        record->Dispatch(1, 1, 1);
+        raw_uav = nullptr;
+        record->CSSetUnorderedAccessViews(0, 1, &raw_uav, nullptr);
+        record->CSSetShader(nullptr, nullptr, 0);
+        record->IASetIndexBuffer(ib.ptr(), index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
+        record->ClearRenderTargetView(rtv.ptr(), clear);
+      }
+    }
+    if (cut_pattern == 21)
+      record->DrawIndexedInstanced(count, 2, first, base, 0);
+    else
+      record->DrawIndexedInstancedIndirect(indirect_arguments.ptr(), 0);
+  } else if (indexed && cut_pattern == 23) {
+    record->DrawIndexedInstanced(count, 2, first, base, 0);
+    record->CopyResource(first_readback.ptr(), target.ptr());
+    record->ClearRenderTargetView(rtv.ptr(), clear);
+    record->DrawIndexedInstanced(count, 2, first, base, 0);
+    record->ClearState();
+    ib = nullptr;
+    vertex = nullptr;
+    geometry = nullptr;
+    pixel = nullptr;
+    blend = nullptr;
+    rtv = nullptr;
+  } else if (indexed && cut_pattern == 20) {
+    if (count < 7)
+      return false;
+    record->DrawIndexedInstanced(count, 2, first, base, 0);
+    record->DrawIndexedInstanced(count, 2, first, base, 0);
+    record->Flush();
+    record->DrawIndexedInstanced(count - 1, 2, first, base, 0);
+    std::vector<BYTE> zero_indices(b.ByteWidth, 0);
+    D3D11_SUBRESOURCE_DATA zero_data = {zero_indices.data(), 0, 0};
+    Com<ID3D11Buffer> alternate;
+    if (!check("adj alternate IB", device->CreateBuffer(&b, &zero_data, &alternate)))
+      return false;
+    record->IASetIndexBuffer(alternate.ptr(), index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
+    record->DrawIndexedInstanced(count, 2, first, base, 0);
+    record->IASetIndexBuffer(ib.ptr(), index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
+    record->ClearRenderTargetView(rtv.ptr(), clear);
+    record->DrawIndexedInstanced(count, 2, first, base, 0);
+  } else if (indexed)
+    record->DrawIndexedInstanced(count, 2, first, base, 0);
   else
-    context->DrawInstanced(count, 2, base, 0);
+    record->DrawInstanced(count, 2, base, 0);
+  if (deferred) {
+    Com<ID3D11CommandList> commands;
+    if (!check("adj first staging", device->CreateTexture2D(&t, nullptr, &first_readback)) ||
+        !check("adj finish command list", deferred->FinishCommandList(FALSE, &commands)))
+      return false;
+    deferred = nullptr;
+    ib = nullptr;
+    indirect_arguments = nullptr;
+    vertex = nullptr;
+    geometry = nullptr;
+    pixel = nullptr;
+    blend = nullptr;
+    rtv = nullptr;
+    if (cut_pattern == 22) {
+      if (!check("adj before gate signal", context4->Signal(before_gate.ptr(), 1)))
+        return false;
+      gate_release.armed = true;
+      if (!check("adj queue gate", context4->Wait(gate.ptr(), 1)))
+        return false;
+    }
+    context->ExecuteCommandList(commands.ptr(), FALSE);
+    context->CopyResource(first_readback.ptr(), target.ptr());
+    context->ExecuteCommandList(commands.ptr(), FALSE);
+    commands = nullptr;
+  }
   context->CopyResource(readback.ptr(), target.ptr());
+  if (cut_pattern == 22 || cut_pattern == 23) {
+    if (!check("adj queue completion", context4->Signal(completion.ptr(), 1)))
+      return false;
+    HANDLE reached = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!reached)
+      return false;
+    const HRESULT event_status = before_gate->SetEventOnCompletion(1, reached);
+    const DWORD waited = SUCCEEDED(event_status) ? WaitForSingleObject(reached, 5000) : WAIT_FAILED;
+    CloseHandle(reached);
+    if (!check("adj before gate event", event_status) || waited != WAIT_OBJECT_0 || before_gate->GetCompletedValue() < 1) {
+      std::cerr << "FAIL adj queue did not reach gate\n";
+      return false;
+    }
+    if (completion->GetCompletedValue() != 0) {
+      std::cerr << "FAIL adj completion passed unsignaled gate\n";
+      return false;
+    }
+    gate_release.signal(gate_release.event, 1);
+    gate_release.armed = false;
+    std::cout << "D3D11 adj gated submission and released references PASS\n";
+  }
   D3D11_MAPPED_SUBRESOURCE mapped = {};
   if (!check("adj map",
              context->Map(readback.ptr(), 0, D3D11_MAP_READ, 0, &mapped)))
@@ -1005,6 +1212,20 @@ float4 ps_main(O input) : SV_Target { return input.value; }
     }
   }
   context->Unmap(readback.ptr(), 0);
+  if (first_readback) {
+    if (!check("adj first replay map", context->Map(first_readback.ptr(), 0, D3D11_MAP_READ, 0, &mapped)))
+      return false;
+    for (UINT y = 0; y < height && ok; ++y) {
+      auto *row = reinterpret_cast<const float *>(static_cast<const BYTE *>(mapped.pData) + y * mapped.RowPitch);
+      for (UINT i = 0; i < width * 4; ++i)
+        if (row[i] != expected[y * width * 4 + i]) {
+          std::cerr << "FAIL first deferred replay y=" << y << " x=" << i / 4 << " component=" << i % 4 << "\n";
+          ok = false;
+          break;
+        }
+    }
+    context->Unmap(first_readback.ptr(), 0);
+  }
   if (perf) {
     // Report the observed invocation count alongside wall-clock timings.
     auto draw = [&] {
@@ -1399,6 +1620,18 @@ int main(int argc, char **argv) {
                : argc == 6 && !std::strcmp(argv[5], "--cuts-boundary") ? 2
                : argc == 6 && !std::strcmp(argv[5], "--cuts-scan")     ? 3
                : argc == 6 && !std::strcmp(argv[5], "--list-cut")      ? 5
+               : argc == 6 && !std::strcmp(argv[5], "--cuts-indirect") ? 7
+               : argc == 6 && !std::strcmp(argv[5], "--short-ib") ? 13
+               : argc == 6 && !std::strcmp(argv[5], "--short-ib-indirect") ? 14
+               : argc == 6 && !std::strcmp(argv[5], "--first-oob-indirect") ? 15
+               : argc == 6 && !std::strcmp(argv[5], "--gpu-args-indirect") ? 16
+               : argc == 6 && !std::strcmp(argv[5], "--empty-view-indirect") ? 17
+               : argc == 6 && !std::strcmp(argv[5], "--gpu-index-indirect") ? 18
+               : argc == 6 && !std::strcmp(argv[5], "--deferred-indirect") ? 19
+               : argc == 6 && !std::strcmp(argv[5], "--immutable-reuse") ? 20
+               : argc == 6 && !std::strcmp(argv[5], "--gpu-mutate-direct") ? 21
+               : argc == 6 && !std::strcmp(argv[5], "--gated-deferred") ? 22
+               : argc == 6 && !std::strcmp(argv[5], "--gated-reuse") ? 23
                                                                        : 0)
                ? 0
                : 1;

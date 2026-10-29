@@ -5124,3 +5124,31 @@ resource binding, ordering, or performance. Source, commands, hashes and logs:
 `assembly-probe.mm`, `assembly-prototype-private.log`,
 `assembly-prototype-no-private.log`, and `assembly-negative.log`. Restart stays
 OPEN until the production pipeline is wired and verified end to end.
+
+### AIRCONV triangle-adjacency strip restart integration (2026-10-29)
+
+The D3D11 and D3D12 AIRCONV object/mesh path now uses GPU prefix summaries for
+indexed TRIANGLESTRIP_ADJ restart. It tracks segment boundaries, winding and
+continuous PrimitiveID; D3D11 also zero-fills out-of-range index reads. D3D12
+honors the PSO strip-cut mode. Summaries share the existing stream-output scan;
+small geometry scans use one threadgroup, and D3D11 immediate direct draws may
+reuse one summary for an immutable, non-shared index buffer. AIRCONV cache
+version 33 separates the new conversion from older cached shaders.
+
+Enabled private and no-private builds each passed 26 GPU image cases with
+Metal API and shader validation: both index widths, direct and indirect draws,
+GPU-produced arguments or indices, cut/scan boundaries, nonindexed controls,
+and gated lifetime tests. Six stream-output controls and four MSC geometry or
+vertex-stride controls passed in each configuration. Four deliberately wrong
+image references per configuration failed as intended. Additional version-33
+cache coexistence, zero-count/instance, and 255/256/257 boundary evidence is in
+`../dxmt-test/n11-adj-restart-20261028/indirect-oob-progress-20261029.md` and
+its linked JSON/log artifacts. The validation machine was Apple M1 Max,
+macOS 27.0.1 (26A434), Wine 11 x64 through Rosetta.
+
+These tests do not establish full GS conformance or promote a feature level.
+D3D12 AIRCONV geometry ExecuteIndirect still accepts only its existing single,
+non-updating draw signature; predication and unsupported GS/TS combinations
+remain separate limitations. Writable buffers, indirect draws, deferred contexts
+and D3D12 currently rescan rather than reuse D3D11's immutable-buffer summary;
+repeated-draw performance outside that optimization remains a known cost.

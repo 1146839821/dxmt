@@ -125,7 +125,8 @@ ArgumentEncodingContext::prepareStreamOutputIndexPrefix(
 ) {
   auto [indices, index_sub] = access<PipelineStage::Compute>(ibuf_, 0, ibuf_->length(), ResourceAccess::Read);
   makeResident<PipelineStage::Compute, PipelineKind::Ordinary>(ibuf_.ptr(), true, false);
-  arguments.input_indices = indices->gpuAddress() + index_sub + index_offset;
+  const uint64_t bounded_index_offset = std::min(index_offset, uint64_t(ibuf_->length()));
+  arguments.input_indices = indices->gpuAddress() + index_sub + bounded_index_offset;
   arguments.input_index_count =
       index_offset <= ibuf_->length() ? (ibuf_->length() - index_offset) / arguments.index_size : 0;
   arguments.prefix_count = arguments.input_count;
@@ -136,8 +137,28 @@ ArgumentEncodingContext::prepareStreamOutputIndexPrefix(
   }
   auto [storage, sub] = access<PipelineStage::Compute>(scratch, 0, scratch->length(), ResourceAccess::Write);
   makeResident<PipelineStage::Compute, PipelineKind::Ordinary>(scratch.ptr(), true, true);
+  // The argument or index buffer may have been written by an earlier compute
+  // dispatch in this encoder. Resolve that dependency before the scan reads it.
+  resolveComputePassBarrier();
   if (!emulated_cmd.StreamOutputIndexPrefix(arguments, storage->buffer(), sub))
     ERR("Failed to prepare stream-output index summary");
+}
+
+void
+ArgumentEncodingContext::bindGeometryIndexPrefix(
+    Rc<Buffer> scratch, uint64_t descriptor_offset, uint32_t summary_count, uint32_t index_count
+) {
+  struct PrefixDescriptor { uint64_t address; uint32_t summary_count, index_count; };
+  auto [storage, sub] = access<PipelineStage::Vertex>(scratch, 0, scratch->length(), ResourceAccess::Read);
+  makeResident<PipelineStage::Vertex, PipelineKind::Geometry>(scratch.ptr(), true, false);
+  *getMappedArgumentBuffer<PrefixDescriptor>(descriptor_offset) = {
+      storage->gpuAddress() + sub, summary_count, index_count
+  };
+  auto &cmd = encodeRenderCommand<wmtcmd_render_setbuffer>();
+  cmd.type = WMTRenderCommandSetObjectBuffer;
+  cmd.buffer = getFinalArgumentBuffer();
+  cmd.offset = getFinalArgumentBufferOffset(descriptor_offset);
+  cmd.index = SM50_BINDING_INDEX_STREAM_OUTPUT0;
 }
 
 void
@@ -1077,6 +1098,24 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
         tasks_data[task_count - 1].end_of_command = 1;
         emulated_cmd.MarshalGSDispatchArguments(encoder, task_data_buffer, task_data_buffer_offset);
       }
+      if (!data->gs_bounded_arg_marshal_tasks.empty()) {
+        struct GS_BOUNDED_TASK {
+          uint64_t draw_args, dispatch_args_out, max_object_threadgroups;
+          uint32_t vertex_count_per_warp, end_of_command, index_count, reserved;
+        };
+        static_assert(sizeof(GS_BOUNDED_TASK) == 40);
+        const auto count = data->gs_bounded_arg_marshal_tasks.size();
+        auto [mapped, buffer, offset] = queue_.AllocateArgumentBuffer(seq_id_, sizeof(GS_BOUNDED_TASK) * count);
+        auto *tasks = static_cast<GS_BOUNDED_TASK *>(mapped);
+        for (size_t i = 0; i < count; ++i) {
+          auto &task = data->gs_bounded_arg_marshal_tasks[i];
+          tasks[i] = {task.draw_arguments_va, task.dispatch_arguments_va, task.max_object_threadgroups,
+                      task.vertex_count_per_warp, 1, task.index_count, 1};
+          encoder.useResource(task.draw_arguments, WMTResourceUsageRead, WMTRenderStageVertex);
+          encoder.useResource(task.dispatch_arguments_buffer, WMTResourceUsageWrite, WMTRenderStageVertex);
+          emulated_cmd.MarshalGSIndexedRestartArguments(encoder, buffer, offset + i * sizeof(GS_BOUNDED_TASK));
+        }
+      }
       if (data->ts_arg_marshal_tasks.size()) {
         auto task_count = data->ts_arg_marshal_tasks.size();
         struct TS_MARSHAL_TASK {
@@ -1104,7 +1143,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
         tasks_data[task_count - 1].end_of_command = 1;
         emulated_cmd.MarshalTSDispatchArguments(encoder, task_data_buffer, task_data_buffer_offset);
       }
-      if (data->gs_arg_marshal_tasks.size() > 0 || data->ts_arg_marshal_tasks.size() > 0) {
+      if (!data->gs_arg_marshal_tasks.empty() || !data->gs_bounded_arg_marshal_tasks.empty() ||
+          !data->ts_arg_marshal_tasks.empty()) {
         encoder.memoryBarrier(
             WMTBarrierScopeBuffers, WMTRenderStageVertex,
             WMTRenderStageVertex | WMTRenderStageMesh | WMTRenderStageObject
@@ -1483,6 +1523,9 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
         r1->ts_arg_marshal_tasks.end(),
         std::back_inserter(r0->ts_arg_marshal_tasks)
       );
+      std::move(r1->gs_bounded_arg_marshal_tasks.begin(), r1->gs_bounded_arg_marshal_tasks.end(),
+                std::back_inserter(r0->gs_bounded_arg_marshal_tasks));
+      r1->gs_bounded_arg_marshal_tasks = std::move(r0->gs_bounded_arg_marshal_tasks);
       r1->gs_arg_marshal_tasks = std::move(r0->gs_arg_marshal_tasks);
       r1->ts_arg_marshal_tasks = std::move(r0->ts_arg_marshal_tasks);
       r1->use_visibility_result = r0->use_visibility_result || r1->use_visibility_result;

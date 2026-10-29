@@ -120,6 +120,9 @@ convert_dxbc_geometry_shader(
   }
   SM50_SHADER_ROOT_SIGNATURE_DATA *rootsig = nullptr;
   args_get_data<SM50_SHADER_ROOT_SIGNATURE, SM50_SHADER_ROOT_SIGNATURE_DATA>(pArgs, &rootsig);
+  const bool restart_adjacency = is_strip &&
+      pShaderInternal->gs_input_primitive == D3D10_SB_PRIMITIVE_TRIANGLE_ADJ &&
+      (shader_flags & SM50_SHADER_FLAG_GEOMETRY_ADJ_RESTART);
 
   IREffect prologue([](auto) { return std::monostate(); });
   IRValue epilogue([](struct context ctx) -> pvalue { return nullptr; });
@@ -346,7 +349,12 @@ convert_dxbc_geometry_shader(
   auto warp_id =
       builder.CreateLoad(types._int, builder.CreateConstInBoundsGEP1_32(types._int, payload, 2));
 
-  resource_map.patch_id = builder.CreateAdd(builder.CreateMul(warp_id, builder.getInt32(warp_primitive_count)), primitive_id_in_warp);
+  if (restart_adjacency) {
+    auto metadata_index = builder.CreateAdd(builder.getInt32(5), builder.CreateMul(primitive_id_in_warp, two_const));
+    resource_map.patch_id = builder.CreateLoad(types._int, builder.CreateGEP(types._int, payload, metadata_index));
+  } else {
+    resource_map.patch_id = builder.CreateAdd(builder.CreateMul(warp_id, builder.getInt32(warp_primitive_count)), primitive_id_in_warp);
+  }
 
   auto input_per_vertex_type = llvm::ArrayType::get(types._int4, pVertexStage->max_output_register);
   auto input_per_vertex_type_float = llvm::ArrayType::get(types._float4, pVertexStage->max_output_register);
@@ -377,7 +385,7 @@ convert_dxbc_geometry_shader(
   builder.SetInsertPoint(active_);
 
   auto vertices_ptr = builder.CreateBitCast(
-      builder.CreateConstInBoundsGEP1_32(types._int, function->getArg(payload_idx), 4),
+      builder.CreateConstInBoundsGEP1_32(types._int, function->getArg(payload_idx), restart_adjacency ? 52 : 4),
       types._int4->getPointerTo((uint32_t)air::AddressSpace::object_data)
   );
 
@@ -458,6 +466,22 @@ convert_dxbc_geometry_shader(
       primitive n (outer2): {-, -, -, 6 + 2n, -, -} mod 15 (16 mapped to 1)
       primitive n (outer3): {-, -, -, -, -, is_even(n) ? 2n + 3: 2n - 2}
       */
+      if (restart_adjacency) {
+        auto meta_index = builder.CreateAdd(builder.getInt32(4), builder.CreateMul(leading_vertex_index, two_const));
+        auto flags = builder.CreateLoad(types._int, builder.CreateGEP(types._int, payload, meta_index));
+        auto odd = builder.CreateICmpNE(builder.CreateAnd(flags, one_const), zero_const);
+        auto first = builder.CreateICmpNE(builder.CreateAnd(flags, two_const), zero_const);
+        auto last = builder.CreateICmpNE(builder.CreateAnd(flags, builder.getInt32(4)), zero_const);
+        auto lane = leading_vertex_index;
+        auto add = [&](uint32_t offset) { return builder.CreateAdd(lane, builder.getInt32(offset)); };
+        load_vertex(add(2), 0);
+        load_vertex(builder.CreateSelect(odd, add(5), builder.CreateSelect(first, add(3), lane)), 1);
+        load_vertex(builder.CreateSelect(odd, add(6), add(4)), 2);
+        load_vertex(builder.CreateSelect(last, add(7), add(8)), 3);
+        load_vertex(builder.CreateSelect(odd, add(4), add(6)), 4);
+        load_vertex(builder.CreateSelect(odd, lane, add(5)), 5);
+        break;
+      }
       auto double_ = [&](pvalue val) { return builder.CreateMul(two_const, val);};
       auto odd_bit = builder.CreateAnd(leading_vertex_index, one_const);
       auto _2n = double_(leading_vertex_index);
@@ -562,6 +586,9 @@ convert_dxbc_vertex_for_geometry_shader(
 
   bool is_triadj_strip = is_strip && pGeometryStage->gs_input_primitive == D3D10_SB_PRIMITIVE_TRIANGLE_ADJ;
   bool is_indexed_draw = ia_layout && ia_layout->index_buffer_format > 0;
+  const bool restart_adjacency = is_triadj_strip && (shader_flags & SM50_SHADER_FLAG_GEOMETRY_ADJ_RESTART);
+  if (restart_adjacency && uint64_t(52) * 4 + uint64_t(32) * 16 * max_output_register > 16256)
+    return llvm::make_error<UnsupportedFeature>("geometry restart payload exceeds Metal object data limit");
 
   IREffect prologue([](auto) { return std::monostate(); });
   IRValue epilogue([](struct context ctx) -> pvalue {
@@ -624,6 +651,15 @@ convert_dxbc_vertex_for_geometry_shader(
     });
   }
 
+  uint32_t prefix_buffer_idx = ~0u;
+  if (restart_adjacency && is_indexed_draw) {
+    prefix_buffer_idx = func_signature.DefineInput(air::ArgumentBindingBuffer{
+        .buffer_size = {}, .location_index = SM50_BINDING_INDEX_STREAM_OUTPUT0, .array_size = 0,
+        .memory_access = air::MemoryAccess::read, .address_space = air::AddressSpace::device,
+        .type = air::MSLUint{}, .raster_order_group = {}
+    });
+  }
+
   auto [function, function_metadata] = func_signature.CreateFunction(name, context, module, 0, true);
 
   auto entry_bb = llvm::BasicBlock::Create(context, "entry", function);
@@ -661,6 +697,29 @@ convert_dxbc_vertex_for_geometry_shader(
   );
 
   auto vertex_count = builder.CreateExtractValue(draw_arguments, 0);
+  pvalue restart_draw_in_range = builder.getInt1(true);
+  pvalue restart_prefix = nullptr;
+  pvalue restart_index_count = nullptr;
+  pvalue restart_summary_count = nullptr;
+  if (restart_adjacency && is_indexed_draw) {
+    auto descriptor = function->getArg(prefix_buffer_idx);
+    auto address_ptr = builder.CreateBitCast(descriptor, types._long->getPointerTo((uint32_t)air::AddressSpace::device));
+    auto address = builder.CreateLoad(types._long, address_ptr);
+    restart_prefix = builder.CreateIntToPtr(address, types._int->getPointerTo((uint32_t)air::AddressSpace::device));
+    auto summary_count = builder.CreateLoad(types._int, builder.CreateConstGEP1_32(types._int, descriptor, 2));
+    restart_summary_count = builder.CreateZExt(summary_count, types._long);
+    auto index_count = builder.CreateLoad(types._int, builder.CreateConstGEP1_32(types._int, descriptor, 3));
+    restart_index_count = index_count;
+    auto first = builder.CreateZExt(builder.CreateExtractValue(draw_arguments, 2), types._long);
+    auto count64 = builder.CreateZExt(vertex_count, types._long);
+    restart_draw_in_range = builder.CreateICmpNE(summary_count, builder.getInt32(0));
+    if (!(shader_flags & SM50_SHADER_FLAG_GEOMETRY_INDEX_OOB_ZERO)) {
+      restart_draw_in_range = builder.CreateAnd(
+          builder.CreateAnd(restart_draw_in_range, builder.CreateICmpULE(count64, restart_summary_count)),
+          builder.CreateICmpULE(builder.CreateAdd(first, count64), builder.CreateZExt(index_count, types._long))
+      );
+    }
+  }
 
   resource_map.input.ptr_int4 = builder.CreateAlloca(llvm::ArrayType::get(types._int4, max_input_register));
   resource_map.input.ptr_float4 = builder.CreateBitCast(
@@ -670,9 +729,13 @@ convert_dxbc_vertex_for_geometry_shader(
 
   auto [warp_vertex_count, warp_primitive_count, vertex_per_primitive] =
       get_vertex_primitive_count_in_warp(pGeometryStage->gs_input_primitive, is_strip);
+  if (restart_adjacency) {
+    warp_vertex_count = 24;
+    warp_primitive_count = 24;
+  }
 
   auto payload_output_ptr = builder.CreateConstInBoundsGEP1_32(
-      types._int, payload, 4
+      types._int, payload, restart_adjacency ? 52 : 4
   );
 
   resource_map.output.ptr_int4 = builder.CreateBitCast(
@@ -719,7 +782,18 @@ convert_dxbc_vertex_for_geometry_shader(
   auto global_index_id =
       builder.CreateAdd(builder.CreateMul(warp_id, builder.getInt32(warp_vertex_count)), warp_vertex_id);
 
-  if (is_triadj_strip) {
+  pvalue restart_lane_in_range = builder.getInt1(true);
+  if (restart_adjacency) {
+    auto shifted = builder.CreateAdd(
+        builder.CreateMul(builder.CreateZExt(warp_id, types._long), builder.getInt64(24)),
+        builder.CreateZExt(warp_vertex_id, types._long)
+    );
+    restart_lane_in_range = builder.CreateAnd(
+        builder.CreateICmpUGE(shifted, builder.getInt64(2)),
+        builder.CreateICmpULT(shifted, builder.CreateAdd(builder.CreateZExt(vertex_count, types._long), builder.getInt64(2)))
+    );
+    global_index_id = builder.CreateTrunc(builder.CreateSub(shifted, builder.getInt64(2)), types._int);
+  } else if (is_triadj_strip) {
     // 2nd and 32th vertex are not read but 33th and -2th (or 1st) are.
     // A dangling final vertex does not belong to this topology. Use 64-bit
     // offsets so the last group cannot wrap before it is clamped.
@@ -747,7 +821,8 @@ convert_dxbc_vertex_for_geometry_shader(
   air.CreateAtomicRMW(llvm::AtomicRMWInst::BinOp::And, valid_vertex_mask, builder.getInt32(0));
 
   builder.CreateCondBr(
-      builder.CreateICmp(llvm::CmpInst::ICMP_ULT, global_index_id, vertex_count), index_check, will_dispatch
+      builder.CreateAnd(restart_draw_in_range, builder.CreateAnd(restart_lane_in_range, builder.CreateICmp(llvm::CmpInst::ICMP_ULT, global_index_id, vertex_count))),
+      index_check, will_dispatch
   );
   builder.SetInsertPoint(index_check);
 
@@ -755,10 +830,32 @@ convert_dxbc_vertex_for_geometry_shader(
     auto start_index = builder.CreateExtractValue(draw_arguments, 2);
     auto index_buffer = function->getArg(index_buffer_idx);
     auto index_buffer_element_type = index_buffer->getType()->getNonOpaquePointerElementType();
-    auto vertex_id = builder.CreateLoad(
-        index_buffer_element_type,
-        builder.CreateGEP(index_buffer_element_type, index_buffer, {builder.CreateAdd(start_index, global_index_id)})
-    );
+    pvalue vertex_id;
+    if (restart_adjacency && (shader_flags & SM50_SHADER_FLAG_GEOMETRY_INDEX_OOB_ZERO)) {
+      auto fetch = llvm::BasicBlock::Create(context, "restart_index_fetch", function);
+      auto missing = llvm::BasicBlock::Create(context, "restart_index_oob", function);
+      auto merge = llvm::BasicBlock::Create(context, "restart_index_merge", function);
+      auto address = builder.CreateAdd(builder.CreateZExt(start_index, types._long),
+                                       builder.CreateZExt(global_index_id, types._long));
+      builder.CreateCondBr(builder.CreateICmpULT(address, builder.CreateZExt(restart_index_count, types._long)),
+                           fetch, missing);
+      builder.SetInsertPoint(fetch);
+      auto loaded = builder.CreateLoad(index_buffer_element_type,
+                                      builder.CreateGEP(index_buffer_element_type, index_buffer, address));
+      builder.CreateBr(merge);
+      builder.SetInsertPoint(missing);
+      builder.CreateBr(merge);
+      builder.SetInsertPoint(merge);
+      auto value = builder.CreatePHI(index_buffer_element_type, 2);
+      value->addIncoming(loaded, fetch);
+      value->addIncoming(llvm::ConstantInt::get(index_buffer_element_type, 0), missing);
+      vertex_id = value;
+    } else {
+      vertex_id = builder.CreateLoad(
+          index_buffer_element_type,
+          builder.CreateGEP(index_buffer_element_type, index_buffer, {builder.CreateAdd(start_index, global_index_id)})
+      );
+    }
     resource_map.vertex_id = builder.CreateZExtOrTrunc(vertex_id, types._int);
 
     // D3D11 reserves the index-format maximum for indexed draws, including
@@ -829,6 +926,63 @@ convert_dxbc_vertex_for_geometry_shader(
    */
 
   pvalue valid_primitive_mask = builder.getInt32(0);
+  if (restart_adjacency) {
+    auto process = llvm::BasicBlock::Create(context, "restart_process", function);
+    builder.CreateCondBr(builder.CreateAnd(restart_draw_in_range, builder.CreateICmpNE(vertex_count, builder.getInt32(0))), process, return_);
+    builder.SetInsertPoint(process);
+    auto count64 = builder.CreateZExt(vertex_count, types._long);
+    auto final_index = builder.CreateSub(count64, builder.getInt64(1));
+    auto base = builder.CreateMul(builder.CreateZExt(warp_id, types._long), builder.getInt64(24));
+    auto bounded = [&](pvalue index) {
+      return builder.CreateSelect(builder.CreateICmpULT(index, count64), index, final_index);
+    };
+    auto summary = [&](pvalue index, unsigned component) -> pvalue {
+      auto last_summary = builder.CreateSub(restart_summary_count, builder.getInt64(1));
+      auto clamped = bounded(index);
+      clamped = builder.CreateSelect(builder.CreateICmpULT(clamped, restart_summary_count), clamped, last_summary);
+      auto element = builder.CreateAdd(builder.CreateMul(clamped, builder.getInt64(2)), builder.getInt64(component));
+      return builder.CreateLoad(types._int, builder.CreateGEP(types._int, restart_prefix, element));
+    };
+    for (unsigned lane = 0; lane < 24; ++lane) {
+      auto candidate = builder.CreateAdd(base, builder.getInt64(lane));
+      pvalue segment = is_indexed_draw ? builder.CreateZExt(summary(candidate, 0), types._long) : builder.getInt64(0);
+      pvalue prefix = is_indexed_draw ? summary(candidate, 1) :
+          builder.CreateTrunc(builder.CreateAdd(builder.CreateLShr(candidate, builder.getInt64(1)), builder.getInt64(1)), types._int);
+      if (is_indexed_draw && (shader_flags & SM50_SHADER_FLAG_GEOMETRY_INDEX_OOB_ZERO)) {
+        // Beyond the scanned physical buffer every index is zero, so the last
+        // segment continues without further cuts. Extend its primitive count.
+        auto first_tail = builder.CreateAdd(restart_summary_count,
+            builder.CreateAnd(builder.CreateSub(restart_summary_count, segment), builder.getInt64(1)));
+        auto last_complete = builder.CreateSelect(builder.CreateICmpUGE(count64, builder.getInt64(6)),
+            builder.CreateSub(count64, builder.getInt64(6)), builder.getInt64(0));
+        auto last = builder.CreateSelect(builder.CreateICmpULT(candidate, last_complete), candidate, last_complete);
+        auto has_tail = builder.CreateAnd(builder.CreateICmpUGE(count64, builder.getInt64(6)),
+            builder.CreateICmpUGE(last, first_tail));
+        auto tail_count = builder.CreateSelect(has_tail,
+            builder.CreateAdd(builder.CreateLShr(builder.CreateSub(last, first_tail), builder.getInt64(1)), builder.getInt64(1)),
+            builder.getInt64(0));
+        prefix = builder.CreateAdd(prefix, builder.CreateTrunc(tail_count, types._int));
+      }
+      pvalue end_segment = is_indexed_draw ? builder.CreateZExt(summary(builder.CreateAdd(candidate, builder.getInt64(5)), 0), types._long) : builder.getInt64(0);
+      auto valid = builder.CreateAnd(
+          builder.CreateICmpULE(builder.CreateAdd(candidate, builder.getInt64(6)), count64),
+          builder.CreateAnd(builder.CreateICmpUGE(candidate, segment),
+              builder.CreateAnd(builder.CreateICmpEQ(builder.CreateAnd(builder.CreateSub(candidate, segment), builder.getInt64(1)), builder.getInt64(0)),
+                                builder.CreateICmpULE(end_segment, candidate)))
+      );
+      auto odd = builder.CreateICmpNE(builder.CreateAnd(builder.CreateLShr(builder.CreateSub(candidate, segment), builder.getInt64(1)), builder.getInt64(1)), builder.getInt64(0));
+      auto first = builder.CreateICmpEQ(candidate, segment);
+      pvalue next_segment = is_indexed_draw ? builder.CreateZExt(summary(builder.CreateAdd(candidate, builder.getInt64(7)), 0), types._long) : builder.getInt64(0);
+      auto last = builder.CreateOr(builder.CreateICmpUGE(builder.CreateAdd(candidate, builder.getInt64(7)), count64), builder.CreateICmpUGT(next_segment, candidate));
+      auto flags = builder.CreateOr(builder.CreateZExt(odd, types._int),
+          builder.CreateOr(builder.CreateShl(builder.CreateZExt(first, types._int), builder.getInt32(1)),
+                           builder.CreateShl(builder.CreateZExt(last, types._int), builder.getInt32(2))));
+      builder.CreateStore(flags, builder.CreateConstInBoundsGEP1_32(types._int, payload, 4 + lane * 2));
+      builder.CreateStore(builder.CreateSub(prefix, builder.getInt32(1)), builder.CreateConstInBoundsGEP1_32(types._int, payload, 5 + lane * 2));
+      valid_primitive_mask = builder.CreateOr(valid_primitive_mask,
+          builder.CreateShl(builder.CreateZExt(valid, types._int), builder.getInt32(lane)));
+    }
+  } else {
   auto valid_vertex_result = builder.CreateLoad(types._int, valid_vertex_mask);
   pvalue triadj_primitive_count = nullptr;
   pvalue triadj_primitive_base = nullptr;
@@ -903,6 +1057,7 @@ convert_dxbc_vertex_for_geometry_shader(
     );
   }
 
+  }
   builder.CreateStore(instance_id, builder.CreateConstInBoundsGEP1_32(types._int, payload, 0));
 
   builder.CreateStore(valid_primitive_mask, builder.CreateConstInBoundsGEP1_32(types._int, payload, 1));

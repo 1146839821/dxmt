@@ -603,6 +603,8 @@ public:
   bool airconv_geometry = false;
   WMT::Reference<WMT::RenderPipelineState> airconv_geometry_psos[2][3];
   WMTPrimitiveType airconv_geometry_input_primitive = WMTPrimitiveTypePoint;
+  bool airconv_geometry_restart = false;
+  D3D12_INDEX_BUFFER_STRIP_CUT_VALUE airconv_geometry_strip_cut = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
   bool stream_output = false;
   uint32_t stream_output_stride = 0;
   uint32_t stream_output_group_size = 1;

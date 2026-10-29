@@ -1252,6 +1252,16 @@ void gs_main(triangleadj V input[6], uint primitive : SV_PrimitiveID,
 }
 float4 ps_main(O input) : SV_Target { return input.value; }
 )HLSL";
+  if (cut_pattern == 25) {
+    auto pos = source.find("triangleadj V input[6]");
+    if (pos == std::string::npos)
+      return false;
+    source.replace(pos, std::strlen("triangleadj V input[6]"), "triangle V input[3]");
+    pos = source.find("min(k, 5u)");
+    if (pos == std::string::npos)
+      return false;
+    source.replace(pos, std::strlen("min(k, 5u)"), "min(k, 2u)");
+  }
   std::vector<uint8_t> vs, gs, ps;
   if (!CompileShader(compiler, source.c_str(), "adj_dx12", "vs_main", "vs_5_0",
                      vs) ||
@@ -1267,8 +1277,10 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   Com<ID3D12RootSignature> root;
   Com<ID3D12PipelineState> pso;
   Com<ID3D12DescriptorHeap> rtvs;
-  Com<ID3D12Resource> ib, target, readback, indirect_args;
+  Com<ID3D12Resource> ib, target, readback, indirect_args, gpu_ib, gpu_args;
   Com<ID3D12CommandSignature> indirect_signature;
+  Com<ID3D12RootSignature> compute_root;
+  Com<ID3D12PipelineState> compute_pso;
   Com<ID3D12Fence> fence;
   Com<ID3DBlob> blob;
   if (!CheckHR("adj device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
@@ -1290,7 +1302,8 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   desc.GS = {gs.data(), gs.size()};
   desc.PS = {ps.data(), ps.size()};
   desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-  const bool cut_enabled = cut_pattern && cut_pattern < 4;
+  const bool cut_enabled = (cut_pattern && cut_pattern < 4) || cut_pattern == 7 ||
+                           cut_pattern == 11 || cut_pattern == 12 || cut_pattern == 24 || cut_pattern == 26 || cut_pattern == 27;
   if (cut_enabled)
     desc.IBStripCutValue = index32
                                ? D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF
@@ -1317,12 +1330,14 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   if (pipeline->shader_backend != dxmt::D3D12ShaderBackend::Airconv ||
       !pipeline->airconv_geometry)
     return false;
+  if (cut_pattern == 25 && pipeline->airconv_geometry_restart)
+    return false;
   constexpr UINT width = 1024, first = 3, base = 5;
   const UINT height = 2 * gs_instances, pitch = width * 16;
   std::vector<UINT> indices(first + std::max(count, 1u));
   for (UINT i = 0; i < count; ++i) {
     indices[first + i] = (i * 7 + 3) % 251;
-    if ((cut_pattern == 1 &&
+    if (((cut_pattern == 1 || cut_pattern == 7 || cut_pattern == 11 || cut_pattern == 12 || cut_pattern == 26 || cut_pattern == 27) &&
          (i == 7 || i == 18 || i == 19 || i == 27 || i == 56)) ||
         (cut_pattern == 2 && (i == 27 || i == 28 || i == 55)) ||
         (cut_pattern == 3 && (i == 255 || i == 256 || i == 257)) ||
@@ -1364,6 +1379,19 @@ float4 ps_main(O input) : SV_Target { return input.value; }
     else
       static_cast<uint16_t *>(mapped)[i] = uint16_t(indices[i]);
   ib->Unmap(0, nullptr);
+  if (cut_pattern == 26 || cut_pattern == 27) {
+    if (cut_pattern == 27 && count != 70)
+      return false;
+    auto gpu_ib_desc = ib_desc;
+    if (cut_pattern == 27) {
+      gpu_ib_desc.Width = (gpu_ib_desc.Width + 3) & ~UINT64(3);
+      gpu_ib_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
+    if (!CheckHR("adj GPU IB", device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &gpu_ib_desc,
+            cut_pattern == 27 ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr, IID_PPV_ARGS(&gpu_ib))))
+      return false;
+  }
   D3D12_DESCRIPTOR_HEAP_DESC rtv_desc = {};
   rtv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
   rtv_desc.NumDescriptors = 1;
@@ -1384,6 +1412,14 @@ float4 ps_main(O input) : SV_Target { return input.value; }
     return false;
   auto rtv = rtvs->GetCPUDescriptorHandleForHeapStart();
   device->CreateRenderTargetView(target.ptr(), nullptr, rtv);
+  if (cut_pattern == 26) {
+    list->CopyBufferRegion(gpu_ib.ptr(), 0, ib.ptr(), 0, ib_desc.Width);
+    D3D12_RESOURCE_BARRIER ready = {};
+    ready.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    ready.Transition = {gpu_ib.ptr(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDEX_BUFFER};
+    list->ResourceBarrier(1, &ready);
+  }
   list->SetGraphicsRootSignature(root.ptr());
   list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
   float clear[] = {0, 0, 0, 0};
@@ -1397,10 +1433,11 @@ float4 ps_main(O input) : SV_Target { return input.value; }
                                    : D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ);
   if (indexed) {
     D3D12_INDEX_BUFFER_VIEW view = {
-        ib->GetGPUVirtualAddress(), UINT(ib_desc.Width),
+        (gpu_ib ? gpu_ib.ptr() : ib.ptr())->GetGPUVirtualAddress(), cut_pattern == 25 ? 6u * (index32 ? 4u : 2u) : UINT(ib_desc.Width),
         index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT};
     list->IASetIndexBuffer(&view);
-    if (cut_pattern == 6) {
+    if (cut_pattern == 6 || cut_pattern == 7 || cut_pattern == 8 ||
+        cut_pattern == 9 || cut_pattern == 10 || cut_pattern == 12 || cut_pattern == 26 || cut_pattern == 27) {
       D3D12_INDIRECT_ARGUMENT_DESC argument_desc = {};
       argument_desc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
       D3D12_COMMAND_SIGNATURE_DESC signature_desc = {};
@@ -1420,13 +1457,77 @@ float4 ps_main(O input) : SV_Target { return input.value; }
                        IID_PPV_ARGS(&indirect_args))) ||
           !CheckHR("adj indirect map", indirect_args->Map(0, nullptr, &mapped)))
         return false;
-      *static_cast<D3D12_DRAW_INDEXED_ARGUMENTS *>(mapped) = {count, 2, first,
-                                                              INT(base), 0};
+      *static_cast<D3D12_DRAW_INDEXED_ARGUMENTS *>(mapped) = {
+          cut_pattern == 9 ? ~0u : (cut_pattern == 10 ? 1u : (cut_pattern == 8 ? count + 10 : count)),
+          2, cut_pattern == 10 ? ~0u : first, INT(base), 0};
       indirect_args->Unmap(0, nullptr);
-      list->ExecuteIndirect(indirect_signature.ptr(), 1, indirect_args.ptr(), 0,
+      if (cut_pattern == 26 || cut_pattern == 27) {
+        auto gpu_args_desc = argument_buffer_desc;
+        if (cut_pattern == 27)
+          gpu_args_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        if (!CheckHR("adj GPU args", device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE,
+            &gpu_args_desc, cut_pattern == 27 ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr, IID_PPV_ARGS(&gpu_args))))
+          return false;
+        if (cut_pattern == 27) {
+          D3D12_ROOT_PARAMETER params[2] = {};
+          for (UINT i = 0; i < 2; ++i) {
+            params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+            params[i].Descriptor.ShaderRegister = i;
+            params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+          }
+          D3D12_ROOT_SIGNATURE_DESC compute_root_desc = {};
+          compute_root_desc.NumParameters = 2;
+          compute_root_desc.pParameters = params;
+          Com<ID3DBlob> compute_blob;
+          if (!CheckHR("adj compute root serialize", D3D12SerializeRootSignature(&compute_root_desc,
+                  D3D_ROOT_SIGNATURE_VERSION_1, &compute_blob, nullptr)) ||
+              !CheckHR("adj compute root", device->CreateRootSignature(0, compute_blob->GetBufferPointer(),
+                  compute_blob->GetBufferSize(), IID_PPV_ARGS(&compute_root))))
+            return false;
+          std::string cs_source = std::string("#define INDEX32 ") + (index32 ? "1\n" : "0\n") + R"HLSL(
+RWByteAddressBuffer ib : register(u0); RWByteAddressBuffer args : register(u1);
+uint value(uint n) { if (n < 3 || n >= 73) return 0; uint i=n-3;
+  if (i==7 || i==18 || i==19 || i==27 || i==56) return INDEX32 ? 0xffffffffu : 0xffffu;
+  return (i*7+3)%251; }
+[numthreads(1,1,1)] void main() {
+  if (INDEX32) { for (uint n=0;n<73;++n) ib.Store(n*4,value(n)); }
+  else { for (uint n=0;n<74;n+=2) ib.Store(n*2,value(n)|(value(n+1)<<16)); }
+  args.Store(0,70); args.Store(4,2); args.Store(8,3); args.Store(12,5); args.Store(16,0);
+})HLSL";
+          std::vector<uint8_t> cs;
+          if (!CompileShader(compiler, cs_source.c_str(), "adj_gpu_writer", "main", "cs_5_0", cs))
+            return false;
+          D3D12_COMPUTE_PIPELINE_STATE_DESC compute_desc = {};
+          compute_desc.pRootSignature = compute_root.ptr();
+          compute_desc.CS = {cs.data(), cs.size()};
+          if (!CheckHR("adj compute PSO", device->CreateComputePipelineState(&compute_desc, IID_PPV_ARGS(&compute_pso))))
+            return false;
+          list->SetPipelineState(compute_pso.ptr());
+          list->SetComputeRootSignature(compute_root.ptr());
+          list->SetComputeRootUnorderedAccessView(0, gpu_ib->GetGPUVirtualAddress());
+          list->SetComputeRootUnorderedAccessView(1, gpu_args->GetGPUVirtualAddress());
+          list->Dispatch(1, 1, 1);
+          D3D12_RESOURCE_BARRIER ib_ready = {};
+          ib_ready.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+          ib_ready.Transition = {gpu_ib.ptr(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_INDEX_BUFFER};
+          list->ResourceBarrier(1, &ib_ready);
+          list->SetPipelineState(pso.ptr());
+        } else {
+          list->CopyBufferRegion(gpu_args.ptr(), 0, indirect_args.ptr(), 0, sizeof(D3D12_DRAW_INDEXED_ARGUMENTS));
+        }
+        D3D12_RESOURCE_BARRIER ready = {};
+        ready.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        ready.Transition = {gpu_args.ptr(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                            cut_pattern == 27 ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_COPY_DEST,
+                            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT};
+        list->ResourceBarrier(1, &ready);
+      }
+      list->ExecuteIndirect(indirect_signature.ptr(), 1, gpu_args ? gpu_args.ptr() : indirect_args.ptr(), 0,
                             nullptr, 0);
     } else {
-      list->DrawIndexedInstanced(count, 2, first, base, 0);
+      list->DrawIndexedInstanced(count, cut_pattern == 24 ? 0 : 2, first, base, 0);
     }
   } else
     list->DrawInstanced(count, 2, base, 0);
@@ -1444,6 +1545,11 @@ float4 ps_main(O input) : SV_Target { return input.value; }
   dst.PlacedFootprint.Footprint = {DXGI_FORMAT_R32G32B32A32_FLOAT, width,
                                    height, 1, pitch};
   list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+  if (cut_pattern == 11 || cut_pattern == 12) {
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    list->ResourceBarrier(1, &barrier);
+  }
   if (!CheckHR("adj close", list->Close()))
     return false;
   ID3D12CommandList *lists[] = {list.ptr()};
@@ -1469,7 +1575,7 @@ float4 ps_main(O input) : SV_Target { return input.value; }
     for (UINT i = 0; i + 6 <= count; i += 6)
       assembled.push_back({{i, i + 1, i + 2, i + 3, i + 4, i + 5}});
   }
-  for (UINT begin = 0; cut_pattern != 5 && begin < count;) {
+  for (UINT begin = 0; cut_pattern != 5 && cut_pattern != 8 && cut_pattern != 9 && cut_pattern != 10 && cut_pattern != 24 && cut_pattern != 25 && begin < count;) {
     UINT end = begin;
     const UINT cut = index32 ? ~0u : 0xffffu;
     while (end < count && (!cut_enabled || indices[first + end] != cut))
@@ -1517,6 +1623,57 @@ float4 ps_main(O input) : SV_Target { return input.value; }
       break;
     }
   readback->Unmap(0, nullptr);
+  if (ok && (cut_pattern == 11 || cut_pattern == 12)) {
+    Com<ID3D12Fence> gate;
+    if (!CheckHR("adj lifetime gate", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))))
+      return false;
+    struct Unblock { ID3D12Fence *gate; ~Unblock() { gate->Signal(1); } } unblock{gate.ptr()};
+    HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+    if (!event)
+      return false;
+    for (UINT pass = 2; pass <= 3 && ok; ++pass) {
+      if (pass == 3 && !CheckHR("adj queue gate", queue->Wait(gate.ptr(), 1))) {
+        ok = false;
+        break;
+      }
+      ID3D12CommandList *replay[] = {list.ptr()};
+      queue->ExecuteCommandLists(1, replay);
+      if (pass == 3) {
+        if (SUCCEEDED(allocator->Reset())) {
+          std::cerr << "FAIL adj pending allocator reset accepted\n";
+          ok = false;
+          break;
+        }
+        list = nullptr; allocator = nullptr; pso = nullptr; root = nullptr;
+        ib = nullptr; target = nullptr; rtvs = nullptr;
+        indirect_args = nullptr; indirect_signature = nullptr;
+        if (!CheckHR("adj release gate", gate->Signal(1))) {
+          ok = false;
+          break;
+        }
+      }
+      if (!CheckHR("adj replay signal", queue->Signal(fence.ptr(), pass)) ||
+          !CheckHR("adj replay fence", fence->SetEventOnCompletion(pass, event)) ||
+          WaitForSingleObject(event, 30000) != WAIT_OBJECT_0 ||
+          !CheckHR("adj replay status", device->GetDeviceRemovedReason()) ||
+          !CheckHR("adj replay map", readback->Map(0, nullptr, &mapped))) {
+        ok = false;
+        break;
+      }
+      for (UINT i = 0; i < expected.size(); ++i)
+        if (static_cast<const float *>(mapped)[i] != expected[i]) {
+          std::cerr << "FAIL adj replay pass=" << pass << " element=" << i
+                    << " got=" << static_cast<const float *>(mapped)[i]
+                    << " expected=" << expected[i] << "\n";
+          ok = false;
+          break;
+        }
+      readback->Unmap(0, nullptr);
+    }
+    CloseHandle(event);
+    if (ok)
+      std::cout << "D3D12 adj replay and gated release PASS\n";
+  }
   if (ok)
     std::cout << "D3D12 TRIANGLESTRIP_ADJ mode=" << index_mode
               << " count=" << count << " gs=" << gs_instances
@@ -1546,6 +1703,16 @@ int main(int argc, char **argv) {
             : argc == 6 && !std::strcmp(argv[5], "--no-cut-max")          ? 4
             : argc == 6 && !std::strcmp(argv[5], "--list-max")            ? 5
             : argc == 6 && !std::strcmp(argv[5], "--no-cut-max-indirect") ? 6
+            : argc == 6 && !std::strcmp(argv[5], "--cuts-indirect")       ? 7
+            : argc == 6 && !std::strcmp(argv[5], "--indirect-oob")        ? 8
+            : argc == 6 && !std::strcmp(argv[5], "--indirect-huge") ? 9
+            : argc == 6 && !std::strcmp(argv[5], "--indirect-first-huge") ? 10
+            : argc == 6 && !std::strcmp(argv[5], "--lifetime-cuts") ? 11
+            : argc == 6 && !std::strcmp(argv[5], "--lifetime-indirect-cuts") ? 12
+            : argc == 6 && !std::strcmp(argv[5], "--zero-instance") ? 24
+            : argc == 6 && !std::strcmp(argv[5], "--mismatched-gs") ? 25
+            : argc == 6 && !std::strcmp(argv[5], "--gpu-copy-indirect") ? 26
+            : argc == 6 && !std::strcmp(argv[5], "--gpu-compute-indirect") ? 27
                                                                           : 0);
     FreeLibrary(module);
     return ok ? 0 : 1;

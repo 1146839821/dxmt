@@ -136,6 +136,7 @@ struct GSDispatchArgumentsMarshal {
   WMT::Buffer dispatch_arguments_buffer;
   uint64_t dispatch_arguments_va;
   uint32_t vertex_count_per_warp;
+  uint32_t index_count = 0;
 };
 
 struct TSDispatchArgumentsMarshal {
@@ -191,6 +192,7 @@ struct RenderEncoderData : EncoderData {
   uint32_t render_target_height;
   uint32_t render_target_width;
   std::vector<GSDispatchArgumentsMarshal> gs_arg_marshal_tasks;
+  std::vector<GSDispatchArgumentsMarshal> gs_bounded_arg_marshal_tasks;
   std::vector<TSDispatchArgumentsMarshal> ts_arg_marshal_tasks;
   wmtcmd_render_nop cmd_head;
   wmtcmd_base *cmd_tail;
@@ -499,6 +501,8 @@ public:
       StreamOutputDraw arguments, uint64_t index_offset, Rc<Buffer> scratch, Rc<Buffer> indirect = {},
       uint64_t indirect_offset = 0
   );
+  void bindGeometryIndexPrefix(Rc<Buffer> scratch, uint64_t descriptor_offset,
+                               uint32_t summary_count, uint32_t index_count);
   void encodeStreamOutputDraw(
       StreamOutputDraw arguments, uint64_t argument_offset, uint64_t index_offset, Rc<Buffer> scratch = {},
       Rc<Buffer> indirect = {}, uint64_t indirect_offset = 0
@@ -638,6 +642,18 @@ public:
         {draw_args, draw_args_resource_id + draw_args_offset, max_object_threadgroups, dispatch_args,
          dispatch_args_resource_id + write_offset, vertex_count_per_warp}
     );
+  }
+
+  void
+  encodeGSIndexedRestartArgumentsMarshal(
+      WMT::Buffer draw_args, uint64_t draw_args_address, uint32_t vertex_count_per_warp,
+      WMT::Buffer dispatch_args, uint64_t dispatch_address, uint64_t max_object_threadgroups, uint32_t index_count
+  ) {
+    assert(encoder_current->type == EncoderType::Render);
+    auto data = static_cast<RenderEncoderData *>(encoder_current);
+    data->gs_bounded_arg_marshal_tasks.push_back(
+        {draw_args, draw_args_address, max_object_threadgroups, dispatch_args, dispatch_address,
+         vertex_count_per_warp, index_count});
   }
 
   void

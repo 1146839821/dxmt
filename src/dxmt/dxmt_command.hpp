@@ -125,6 +125,13 @@ EncodeStreamOutputIndexScan(
     Dispatch dispatch
 ) {
   const auto &levels = layout.levels;
+  if ((arguments.flags & kSOGeometryRestart) && arguments.input_count && arguments.input_count <= kSOScanThreadgroupSize) {
+    binding(0, 0);
+    if (!bytes(&arguments, sizeof(arguments)))
+      return false;
+    dispatch(4, arguments.input_count);
+    return true;
+  }
   auto scan = [&] {
     for (size_t i = 0; i + 1 < levels.size(); ++i) {
       binding(levels[i].offset, 0);
@@ -288,6 +295,14 @@ public:
   }
 
   void
+  MarshalGSIndexedRestartArguments(WMT::RenderCommandEncoder encoder, WMT::Buffer commands, uint32_t commands_offset) {
+    encoder.setRenderPipelineState(gs_indexed_restart_marshal);
+    encoder.setVertexBuffer(commands, commands_offset, kCustomBufferArgumentIndex0);
+    encoder.drawPrimitives(WMTPrimitiveTypePoint, 0, 1);
+    encoder.setVertexBuffer({}, 0, kCustomBufferArgumentIndex0);
+  }
+
+  void
   MarshalTSDispatchArguments(WMT::RenderCommandEncoder encoder, WMT::Buffer commands, uint32_t commands_offset) {
     encoder.setRenderPipelineState(ts_draw_arguments_marshal);
     encoder.setVertexBuffer(commands, commands_offset, kCustomBufferArgumentIndex0);
@@ -309,7 +324,7 @@ private:
   ArgumentEncodingContext &ctx;
   WMT::Device device_;
   WMT::Reference<WMT::RenderPipelineState> stream_output_prepare_;
-  WMT::Reference<WMT::ComputePipelineState> stream_output_scan_[4];
+  WMT::Reference<WMT::ComputePipelineState> stream_output_scan_[5];
   WMT::Reference<WMT::ComputePipelineState> clear_texture_1d_uint_pipeline;
   WMT::Reference<WMT::ComputePipelineState> clear_texture_1d_array_uint_pipeline;
   WMT::Reference<WMT::ComputePipelineState> clear_texture_2d_uint_pipeline;
@@ -325,6 +340,7 @@ private:
   WMT::Reference<WMT::ComputePipelineState> clear_texture_buffer_float_pipeline;
 
   WMT::Reference<WMT::RenderPipelineState> gs_draw_arguments_marshal;
+  WMT::Reference<WMT::RenderPipelineState> gs_indexed_restart_marshal;
   WMT::Reference<WMT::RenderPipelineState> ts_draw_arguments_marshal;
 };
 

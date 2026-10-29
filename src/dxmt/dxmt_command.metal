@@ -83,8 +83,9 @@ so_index_input(constant StreamOutputDraw &p, thread uint &count, thread ulong &i
   if (p.input_arguments) {
     device const uint *args = reinterpret_cast<device const uint *>(p.input_arguments);
     const uint first = args[2];
-    count = first <= p.prefix_count && args[0] <= p.prefix_count - first ? args[0] : 0;
-    indices += ulong(first) * p.index_size;
+    count = (p.flags & kSOAllowIndexOOB) ? args[0] :
+        (first <= p.prefix_count && args[0] <= p.prefix_count - first ? args[0] : 0);
+    indices += ulong(min(first, bound)) * p.index_size;
     bound = first <= bound ? bound - first : 0;
   }
 }
@@ -121,9 +122,52 @@ so_index_primitives(
   so_index_input(p, count, indices, bound);
   const uint segment = values[i].x;
   const bool complete = i < count && p.input_window <= count - i;
+  const uint end = min(ulong(i) + p.input_window - 1, ulong(p.input_count - 1));
   const bool valid =
-      complete && i >= segment && (i - segment) % p.input_step == 0 && values[i + p.input_window - 1].x <= i;
+      complete && i >= segment && (i - segment) % p.input_step == 0 && values[end].x <= i;
   values[i].y = valid ? 1 : 0;
+}
+
+[[kernel]] void
+so_index_small(
+    device uint2 *values [[buffer(0)]], constant StreamOutputDraw &p [[buffer(2)]],
+    uint lane [[thread_index_in_threadgroup]]
+) {
+  threadgroup uint2 partial[kSOScanThreadgroupSize];
+  uint count, bound;
+  ulong indices;
+  so_index_input(p, count, indices, bound);
+  uint marker = 0;
+  if (lane < p.input_count && lane < count && (p.flags & kSOHasCut)) {
+    const uint index = lane >= bound ? 0 : p.index_size == 2
+        ? uint(reinterpret_cast<device const ushort *>(indices)[lane])
+        : reinterpret_cast<device const uint *>(indices)[lane];
+    marker = index == p.cut_index ? lane + 1 : 0;
+  }
+  partial[lane] = uint2(marker, 0);
+  for (uint offset = 1; offset < kSOScanThreadgroupSize; offset <<= 1) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint previous = lane >= offset ? partial[lane - offset].x : 0;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    marker = max(marker, previous);
+    partial[lane].x = marker;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const bool complete = lane < p.input_count && lane < count && p.input_window <= count - lane;
+  const uint end = uint(min(ulong(lane) + p.input_window - 1, ulong(p.input_count - 1)));
+  const bool valid = complete && lane >= marker && (lane - marker) % p.input_step == 0 && partial[end].x <= lane;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  uint primitives = valid ? 1 : 0;
+  partial[lane].y = primitives;
+  for (uint offset = 1; offset < kSOScanThreadgroupSize; offset <<= 1) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint previous = lane >= offset ? partial[lane - offset].y : 0;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    primitives += previous;
+    partial[lane].y = primitives;
+  }
+  if (lane < p.input_count)
+    values[lane] = uint2(marker, primitives);
 }
 
 [[kernel]] void
@@ -664,6 +708,32 @@ struct DXMTGSDispatchMarshal {
       break;
     index++;
   };
+}
+
+// The restarted adjacency path scans a bounded index view before dispatching.
+// Invalid GPU arguments must not launch object groups that could read past it.
+struct DXMTGSIndexedRestartMarshal {
+  constant uint *draw_arguments;
+  device DXMTDispatchArguments *dispatch_arguments_out;
+  ulong max_object_threadgroups;
+  uint vertex_count_per_warp;
+  uint end_of_command;
+  uint index_count;
+  uint reserved;
+};
+[[vertex]] void gs_indexed_restart_arguments_marshal(
+    constant DXMTGSIndexedRestartMarshal *task [[buffer(kCustomBufferArgumentIndex0)]]
+) {
+  uint count = task->draw_arguments[0];
+  uint instances = task->draw_arguments[1];
+  uint first = task->draw_arguments[2];
+  bool valid = (task->reserved || (first <= task->index_count && count <= task->index_count - first)) &&
+               count != 0 && instances != 0 && task->vertex_count_per_warp != 0;
+  ulong groups = valid ? (ulong(count) + task->vertex_count_per_warp - 1) / task->vertex_count_per_warp : 0;
+  if (!valid || groups * ulong(instances) > task->max_object_threadgroups)
+    *task->dispatch_arguments_out = {0, 0, 0};
+  else
+    *task->dispatch_arguments_out = {uint(groups), instances, 1};
 }
 
 struct depth_stencil_out {

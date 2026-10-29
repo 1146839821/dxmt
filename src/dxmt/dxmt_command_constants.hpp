@@ -36,6 +36,8 @@ constexpr CONSTANT SOUInt kSOTriangleStrip = 2;
 constexpr CONSTANT SOUInt kSOOverlapping = 4;
 constexpr CONSTANT SOUInt kSOScanThreadgroupSize = 256;
 constexpr CONSTANT SOUInt kSOFixedIndexSubrange = 8;
+constexpr CONSTANT SOUInt kSOAllowIndexOOB = 16;
+constexpr CONSTANT SOUInt kSOGeometryRestart = 32;
 constexpr SOUInt
 StreamOutputGroupSize(SOUInt components) {
   const SOUInt words = components ? components : 1;

@@ -728,6 +728,7 @@ public:
     SM50_SHADER_COMMON_DATA common = {};
     common.type = SM50_SHADER_COMMON;
     common.metal_version = SM50_SHADER_METAL_310;
+    airconv_geometry_strip_cut = pDesc->IBStripCutValue;
     switch (pDesc->IBStripCutValue) {
     case D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED:
       common.flags = SM50_SHADER_FLAG_GEOMETRY_CUT_DISABLED;
@@ -741,6 +742,9 @@ public:
     default:
       return E_INVALIDARG;
     }
+
+    if (SM50_ADJ_RESTART_EXPERIMENTAL)
+      common.flags = static_cast<SM50_SHADER_FLAG>(common.flags | SM50_SHADER_FLAG_GEOMETRY_ADJ_RESTART);
 
     const void *root_signature = nullptr;
     size_t root_signature_size = 0;
@@ -781,6 +785,8 @@ public:
     WMTPrimitiveType geometry_input_primitive;
     if (!MapMSCGeometryInputPrimitive(ref_gs.GeometryShader.Primitive, geometry_input_primitive))
       return E_INVALIDARG;
+    airconv_geometry_restart = SM50_ADJ_RESTART_EXPERIMENTAL &&
+        geometry_input_primitive == WMTPrimitiveTypeTriangleWithAdj;
     switch (geometry_input_primitive) {
     case WMTPrimitiveTypePoint:
       if (pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT)

@@ -32,5 +32,6 @@ executable('dx11_hdr_pq', ['dx11_hdr_pq.cpp'],
 
 executable('dx11_shader_backend_boundary',
   ['dx11_shader_backend_boundary.cpp', '../../src/util/util_md5.cpp'],
+  include_directories: [dxmt_include_path, include_directories('../../src/util', '../../src/dxmt', '../../src/winemetal', '../../src/dxgi', '../../src/airconv')],
   dependencies: [ lib_d3d11, lib_d3dcompiler ],
 )

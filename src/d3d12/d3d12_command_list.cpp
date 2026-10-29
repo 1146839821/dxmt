@@ -282,6 +282,12 @@ struct DXMT_GS_DISPATCH_MARSHAL {
   uint32_t vertex_count_per_warp;
   uint32_t end_of_command;
 };
+struct DXMT_GS_INDEXED_RESTART_MARSHAL {
+  DXMT_GS_DISPATCH_MARSHAL base;
+  uint32_t index_count;
+  uint32_t reserved;
+};
+static_assert(sizeof(DXMT_GS_INDEXED_RESTART_MARSHAL) == 40);
 
 /* FIXME: it's not *public* */
 unsigned getPlanarCount(WMTPixelFormat format);
@@ -911,8 +917,9 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   std::array<D3D12_STREAM_OUTPUT_BUFFER_VIEW, D3D12_SO_BUFFER_SLOT_COUNT> stream_output_views_;
 
   WMT::Reference<WMT::RenderPipelineState> airconv_geometry_marshal_pso_;
+  WMT::Reference<WMT::RenderPipelineState> airconv_geometry_indexed_restart_marshal_pso_;
   WMT::Reference<WMT::RenderPipelineState> stream_output_prepare_pso_;
-  WMT::Reference<WMT::ComputePipelineState> stream_output_scan_psos_[4];
+  WMT::Reference<WMT::ComputePipelineState> stream_output_scan_psos_[5];
   uint64_t index_buffer_address;
   uint32_t index_buffer_size = 0;
   WMT::Buffer index_buffer;
@@ -1064,11 +1071,13 @@ public:
   }
 
   WMT::RenderPipelineState
-  GetAirconvGeometryMarshalPSO() {
-    if (airconv_geometry_marshal_pso_)
-      return airconv_geometry_marshal_pso_;
+  GetAirconvGeometryMarshalPSO(bool bounded_restart) {
+    auto &pipeline = bounded_restart ? airconv_geometry_indexed_restart_marshal_pso_ : airconv_geometry_marshal_pso_;
+    if (pipeline)
+      return pipeline;
 
-    auto function = device_->GetLib().getLibrary().newFunction("gs_draw_arguments_marshal");
+    auto function = device_->GetLib().getLibrary().newFunction(
+        bounded_restart ? "gs_indexed_restart_arguments_marshal" : "gs_draw_arguments_marshal");
     if (!function)
       return {};
 
@@ -1077,10 +1086,10 @@ public:
     info.vertex_function = function;
     info.rasterization_enabled = false;
     WMT::Reference<WMT::Error> error;
-    airconv_geometry_marshal_pso_ = device_->GetMTLDevice().newRenderPipelineState(info, error);
-    if (!airconv_geometry_marshal_pso_ && error)
+    pipeline = device_->GetMTLDevice().newRenderPipelineState(info, error);
+    if (!pipeline && error)
       ERR("Failed to create AIRCONV geometry indirect marshal PSO: ", error.description().getUTF8String());
-    return airconv_geometry_marshal_pso_;
+    return pipeline;
   }
 
   WMT::Reference<WMT::ComputePipelineState>
@@ -2858,10 +2867,15 @@ public:
   }
 
   bool
-  EncodeStreamOutputIndexPrefix(StreamOutputDraw &arguments, WMT::Buffer &prefix_buffer) {
+  EncodeStreamOutputIndexPrefix(StreamOutputDraw &arguments, WMT::Buffer &prefix_buffer,
+                                WMT::Buffer indirect_args = {}) {
     StreamOutputScanLayout layout(arguments.input_count);
-    const char *names[] = {"so_index_segments", "so_scan_blocks", "so_scan_offsets", "so_index_primitives"};
-    for (UINT i = 0; i < 4; ++i) {
+    const char *names[] = {"so_index_segments", "so_scan_blocks", "so_scan_offsets", "so_index_primitives", "so_index_small"};
+    const bool small = (arguments.flags & kSOGeometryRestart) && arguments.input_count &&
+        arguments.input_count <= kSOScanThreadgroupSize;
+    for (UINT i = 0; i < 5; ++i) {
+      if (small != (i == 4))
+        continue;
       if (stream_output_scan_psos_[i])
         continue;
       auto function = device_->GetLib().getLibrary().newFunction(names[i]);
@@ -2894,6 +2908,8 @@ public:
     compute->cmd_tail = reinterpret_cast<wmtcmd_base *>(&compute->cmd_head);
     EncodeComputeResourceUse(storage.handle, WMTResourceUsageRead | WMTResourceUsageWrite);
     EncodeComputeResourceUse(index_buffer.handle, WMTResourceUsageRead);
+    if (indirect_args)
+      EncodeComputeResourceUse(indirect_args.handle, WMTResourceUsageRead);
     auto binding = [&](uint64_t offset, UINT index) {
       auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
       cmd.type = WMTComputeCommandSetBuffer;
@@ -2922,9 +2938,9 @@ public:
       pso.threadgroup_size = {kSOScanThreadgroupSize, 1, 1};
       auto &cmd = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch>();
       // Block scans require all256 lanes,including the final partial group.
-      cmd.type = pipeline == 1 ? WMTComputeCommandDispatch : WMTComputeCommandDispatchThreads;
+      cmd.type = pipeline == 1 || pipeline == 4 ? WMTComputeCommandDispatch : WMTComputeCommandDispatchThreads;
       cmd.size = {
-          pipeline == 1 ? (uint64_t(count) + kSOScanThreadgroupSize - 1) / kSOScanThreadgroupSize : count, 1, 1
+          pipeline == 4 ? 1 : pipeline == 1 ? (uint64_t(count) + kSOScanThreadgroupSize - 1) / kSOScanThreadgroupSize : count, 1, 1
       };
       EmitMemoryBarrier(WMTBarrierScopeBuffers, static_cast<WMTRenderStages>(0), static_cast<WMTRenderStages>(0));
     };
@@ -2937,6 +2953,58 @@ public:
         DirtyState::ComputePipelineState, DirtyState::ComputeRootArguments, DirtyState::ComputeRootSignature,
         DirtyState::DescriptorHeaps
     );
+    return !recording_failed_;
+  }
+
+  bool
+  PrepareGeometryIndexPrefix(UINT count, UINT first, WMT::Buffer &prefix_buffer, uint64_t &prefix_address,
+                             WMT::Buffer indirect_args = {}, uint64_t indirect_address = 0) {
+    StreamOutputDraw arguments = {};
+    arguments.input_count = count;
+    arguments.index_size = index_type == WMTIndexTypeUInt16 ? 2 : 4;
+    arguments.input_step = 2;
+    arguments.input_window = 6;
+    arguments.flags = kSOGeometryRestart;
+    if (pso_graphics_->airconv_geometry_strip_cut != D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED) {
+      arguments.flags |= kSOHasCut;
+      arguments.cut_index = pso_graphics_->airconv_geometry_strip_cut == D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF
+                                ? 0xffffu : 0xffffffffu;
+    }
+    uint64_t allocation_offset = 0;
+    auto allocation = device_->LookupBufferByVA(index_buffer_address, &allocation_offset);
+    const uint64_t first_byte = uint64_t(first) * arguments.index_size;
+    if (!allocation || allocation_offset > allocation->length() || first_byte > index_buffer_size ||
+        uint64_t(count) * arguments.index_size > index_buffer_size - first_byte) {
+      FailRecording(__func__, "invalid geometry index range");
+      return false;
+    }
+    arguments.input_indices = allocation->gpuAddress() + allocation_offset + first_byte;
+    arguments.input_index_count = (index_buffer_size - first_byte) / arguments.index_size;
+    arguments.prefix_count = arguments.input_count;
+    arguments.input_arguments = indirect_address;
+    if (!EncodeStreamOutputIndexPrefix(arguments, prefix_buffer, indirect_args))
+      return false;
+    prefix_address = arguments.prefix;
+    return true;
+  }
+
+  bool
+  BindGeometryIndexPrefix(WMT::Buffer buffer, uint64_t address, UINT summary_count) {
+    struct PrefixDescriptor { uint64_t address; uint32_t summary_count, index_count; };
+    auto [mapped, offset] = allocator_->AllocateGPUHeap(sizeof(PrefixDescriptor), 16);
+    if (!mapped) {
+      FailRecording(__func__, "geometry prefix descriptor allocation failed");
+      return false;
+    }
+    *static_cast<PrefixDescriptor *>(mapped) = {
+        address, summary_count, index_buffer_size / (index_type == WMTIndexTypeUInt16 ? 2u : 4u)
+    };
+    EncodeRenderResourceUse(buffer.handle, WMTResourceUsageRead, WMTRenderStageObject);
+    auto &prefix = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+    prefix.type = WMTRenderCommandSetObjectBuffer;
+    prefix.buffer = allocator_->gpu_heap_buffer_;
+    prefix.offset = offset;
+    prefix.index = SM50_BINDING_INDEX_STREAM_OUTPUT0;
     return !recording_failed_;
   }
 
@@ -3438,6 +3506,8 @@ public:
       if (!geometry_primitive_matches(primitive_type, pso_graphics_->airconv_geometry_input_primitive))
         return;
       auto [vertex_per_warp, vertex_increment_per_warp] = get_airconv_geometry_vertex_count(topology_);
+      if (pso_graphics_->airconv_geometry_restart && topology_ == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ)
+        vertex_increment_per_warp = 24;
       if (!vertex_increment_per_warp)
         return;
       if (!VertexCountPerInstance || !InstanceCount)
@@ -3535,6 +3605,13 @@ public:
       allocator_->InvalidateCurrentPass();
       predication_args_offset = offset;
     }
+    WMT::Buffer geometry_prefix;
+    uint64_t geometry_prefix_address = 0;
+    const bool restart_adjacency = pso_graphics_ && pso_graphics_->airconv_geometry && pso_graphics_->airconv_geometry_restart &&
+        topology_ == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ;
+    if (restart_adjacency && IndexCountPerInstance && InstanceCount &&
+        !PrepareGeometryIndexPrefix(IndexCountPerInstance, StartIndexLocation, geometry_prefix, geometry_prefix_address))
+      return;
     DrawCallStatus status = PreDraw(false, to_airconv_index_format(index_type));
     if (status == DrawCallStatus::Invalid) {
       if (trace_draw_indexed_id < 32)
@@ -3580,10 +3657,15 @@ public:
     if (status == DrawCallStatus::AirconvGeometry) {
       if (!index_buffer || !geometry_primitive_matches(primitive_type, pso_graphics_->airconv_geometry_input_primitive))
         return;
-      auto [vertex_per_warp, vertex_increment_per_warp] = get_airconv_geometry_vertex_count(topology_);
-      if (!vertex_increment_per_warp)
-        return;
       if (!IndexCountPerInstance || !InstanceCount)
+        return;
+      auto [vertex_per_warp, vertex_increment_per_warp] = get_airconv_geometry_vertex_count(topology_);
+      if (restart_adjacency) {
+        vertex_increment_per_warp = 24;
+        if (!BindGeometryIndexPrefix(geometry_prefix, geometry_prefix_address, IndexCountPerInstance))
+          return;
+      }
+      if (!vertex_increment_per_warp)
         return;
       auto [mapped, draw_arguments_offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_DRAW_INDEXED_ARGUMENTS), 32);
       if (!mapped)
@@ -6549,11 +6631,14 @@ public:
     if (!pso_graphics_ || !indirect_args_buffer || index >= 3 || !vertex_per_warp || !vertex_increment_per_warp)
       return false;
 
-    auto marshal_pso = GetAirconvGeometryMarshalPSO();
+    const bool bounded_restart = indexed && pso_graphics_->airconv_geometry_restart &&
+        topology_ == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ;
+    auto marshal_pso = GetAirconvGeometryMarshalPSO(bounded_restart);
     if (!marshal_pso)
       return false;
 
-    auto [task_mapping, task_offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_GS_DISPATCH_MARSHAL), 16);
+    auto [task_mapping, task_offset] = allocator_->AllocateGPUHeap(
+        bounded_restart ? sizeof(DXMT_GS_INDEXED_RESTART_MARSHAL) : sizeof(DXMT_GS_DISPATCH_MARSHAL), 16);
     auto [dispatch_mapping, dispatch_offset] = allocator_->AllocateGPUHeap(sizeof(DXMT_DISPATCH_ARGUMENTS), 4);
     if (!task_mapping || !dispatch_mapping)
       return false;
@@ -6565,6 +6650,11 @@ public:
         device_->GetMSCCapabilities().apple7_or_newer ? UINT64_MAX : 1024;
     task->vertex_count_per_warp = vertex_increment_per_warp;
     task->end_of_command = 1;
+    if (bounded_restart) {
+      auto *bounded = static_cast<DXMT_GS_INDEXED_RESTART_MARSHAL *>(task_mapping);
+      bounded->index_count = index_buffer_size / (index_type == WMTIndexTypeUInt16 ? 2u : 4u);
+      bounded->reserved = 0;
+    }
 
     auto &draw_args_use = allocator_->EncodeRenderCommand<wmtcmd_render_useresource>();
     draw_args_use.type = WMTRenderCommandUseResource;
@@ -6792,6 +6882,19 @@ public:
         return;
       const bool indexed = sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
       const auto index_format = indexed ? to_airconv_index_format(index_type) : SM50_INDEX_BUFFER_FORMAT_NONE;
+      WMT::Buffer geometry_prefix;
+      uint64_t geometry_prefix_address = 0;
+      UINT geometry_prefix_count = 0;
+      const bool restart_adjacency = pso_graphics_->airconv_geometry_restart &&
+          topology_ == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ;
+      if (restart_adjacency && indexed) {
+        const UINT index_size = index_type == WMTIndexTypeUInt16 ? 2 : 4;
+        const UINT count_bound = index_buffer_size / index_size;
+        geometry_prefix_count = count_bound;
+        if (!count_bound || !PrepareGeometryIndexPrefix(count_bound, 0, geometry_prefix, geometry_prefix_address,
+                arg_buffer->buffer->current()->buffer(), ArgBufferAddress))
+          return;
+      }
       const auto status = PreDraw(false, index_format);
       if (status != DrawCallStatus::AirconvGeometry ||
           !geometry_primitive_matches(primitive_type, pso_graphics_->airconv_geometry_input_primitive))
@@ -6799,6 +6902,13 @@ public:
       if (indexed && !index_buffer)
         return;
       auto [vertex_per_warp, vertex_increment_per_warp] = get_airconv_geometry_vertex_count(topology_);
+      if (restart_adjacency) {
+        vertex_increment_per_warp = 24;
+        if (indexed) {
+          if (!BindGeometryIndexPrefix(geometry_prefix, geometry_prefix_address, geometry_prefix_count))
+            return;
+        }
+      }
       if (!vertex_increment_per_warp)
         return;
       if (!EncodeAirconvGeometryIndirect(
