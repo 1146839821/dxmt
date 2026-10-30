@@ -271,7 +271,8 @@ void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Ow
 }
 
 std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
-                              const std::vector<uint8_t> &shader, bool reserved, bool expect_unsupported) {
+                              const std::vector<uint8_t> &shader, bool reserved, bool expect_unsupported,
+                              bool late_load = false) {
   constexpr UINT mip_levels = 3;
   const auto desc = reserved ? TextureDesc(256, 256, 2, D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE)
                              : TextureDesc(512, 512, mip_levels, D3D12_TEXTURE_LAYOUT_UNKNOWN);
@@ -331,7 +332,8 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   const UINT stride = device->GetDescriptorHandleIncrementSize(descriptor_desc.Type);
   auto cpu = descriptors->GetCPUDescriptorHandleForHeapStart();
 
-  const float clamps[] = {expect_unsupported ? 1.0f : 0.0f, 0.5f, 1.0f, 1.5f};
+  const float clamps[] = {expect_unsupported ? 1.0f : 0.0f, late_load ? 0.0f : 0.5f,
+                          late_load ? 0.0f : 1.0f, late_load ? 0.0f : 1.5f};
   for (UINT index = 0; index < 5; index++) {
     D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
     srv.Format = DXGI_FORMAT_R32_FLOAT;
@@ -382,6 +384,16 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
   Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
   Check("CloseLODCommandList", list->Close());
+  if (late_load) {
+    // Root signature 1.0 descriptors can be changed after recording, before submission.
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+    srv.Format = DXGI_FORMAT_R32_FLOAT;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = case_mips;
+    srv.Texture2D.ResourceMinLODClamp = 1.0f;
+    device->CreateShaderResourceView(texture.ptr, &srv, descriptors->GetCPUDescriptorHandleForHeapStart());
+  }
   ID3D12CommandList *lists[] = {list.ptr};
   queue->ExecuteCommandLists(1, lists);
   Check("SignalLOD", queue->Signal(fence.ptr, 2));
@@ -419,8 +431,9 @@ bool CheckCase(const char *name, const std::vector<uint32_t> &actual, const std:
 
 int main(int argc, char **argv) {
   const bool unsupported_read = argc == 3 && strcmp(argv[2], "--load-unsupported") == 0;
-  if (argc != 2 && !unsupported_read) {
-    std::cerr << "usage: dx12_texture_lod_clamp <shader.cs.cso> [--load-unsupported]\n";
+  const bool late_load = argc == 3 && strcmp(argv[2], "--load-late") == 0;
+  if (argc != 2 && !unsupported_read && !late_load) {
+    std::cerr << "usage: dx12_texture_lod_clamp <shader.cs.cso> [--load-unsupported|--load-late]\n";
     return 2;
   }
 
@@ -435,6 +448,16 @@ int main(int argc, char **argv) {
     if (unsupported_read) {
       RunCase(device.ptr, queue.ptr, shader, false, true);
       std::cout << "Texture.Load with non-zero ResourceMinLODClamp rejected\n";
+      return 0;
+    }
+    if (late_load) {
+      const auto result = RunCase(device.ptr, queue.ptr, shader, false, false, true);
+      if (result.empty() || result[0] != 0) {
+        std::cerr << "late ResourceMinLODClamp Texture.Load mip 0 expected 0, got 0x" << std::hex
+                  << (result.empty() ? 0xffffffffu : result[0]) << std::dec << "\n";
+        return 1;
+      }
+      std::cout << "late ResourceMinLODClamp Texture.Load passed\n";
       return 0;
     }
     const std::vector<uint32_t> ordinary_expected = {0x3f800000, 0x40000000, 0x40400000, 0x40800000, 0x40400000};
