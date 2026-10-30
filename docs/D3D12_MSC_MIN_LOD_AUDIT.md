@@ -55,6 +55,24 @@ cross-version strategy, plus correct descriptor mutation and lifetime handling.
 Do not remove the current load rejection or promote feature claims solely on
 these observations.
 
+## Experimental AIR rewrite
+
+An isolated prototype extracted the converter's AIR, used LLVM 15 to insert a
+descriptor metadata load and clamp the explicit level for each of the five
+known 2D sample calls, and rebuilt a metallib with the existing DXMT writer.
+The input fixture uses explicit level 0; its fifth SRV has a view-relative
+negative clamp. In a native Metal harness with the matching descriptor table,
+ordinary texture and API/shader validation enabled, the unchanged metallib
+returned `1, 1, 1, 1, 3` and failed the oracle; the rewritten metallib returned
+`1, 2, 3, 4, 3` and passed. Both runs used the same harness and inputs.
+
+This demonstrates a possible repair mechanism for one fixed AIR shape, not a
+production implementation. The prototype does not handle general LOD values,
+empty mip intersections, status results, texture dimensions, descriptor
+indexing or alternate AIR versions. It also has not been integrated or tested
+through DXMT, shader caching, reserved textures, or descriptor lifetime. The
+`n22-lod-air-prototype-20261030` artifacts contain the prototype and both logs.
+
 The local reproduction artifacts, converted AIR and binary identities are in
 `dxmt-test/n19-metal-minlod-20261030`, `n20-lod-sample-20261030`, and
 `n21-lod-compiler-20261030` alongside this checkout.
