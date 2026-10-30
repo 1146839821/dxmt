@@ -95,6 +95,69 @@ int main() {
   SM50_MSC_LOD_SIDECAR_TABLE abi_tables[] = {{8, 16}};
   sm50_bitcode_t patched_metal = nullptr;
   if (SM50PatchMetalLibSampleLevelLOD(
+          original_metal.data(), original_metal.size(),
+          SM50_MSC_LOD_AUTO_ROOT_ARGUMENT, 16, abi_tables, 1,
+          &patched_metal) != SM50_MSC_LOD_UNSUPPORTED ||
+      patched_metal)
+    return 1;
+  std::string with_metadata(ir);
+  with_metadata += R"IR(
+!air.kernel = !{!0}
+!0 = !{void (i8 addrspace(2)*, i64)* @main, !1, !2}
+!1 = !{}
+!2 = !{!3}
+!3 = !{i32 0, !"air.indirect_buffer", !"air.location_index", i32 2}
+)IR";
+  auto with_root = parse(context, with_metadata);
+  if (!with_root)
+    return 1;
+  llvm::SmallVector<char, 0> root_metal;
+  llvm::raw_svector_ostream root_stream(root_metal);
+  writer.Write(*with_root, root_stream);
+  if (SM50PatchMetalLibSampleLevelLOD(
+          root_metal.data(), root_metal.size(), SM50_MSC_LOD_AUTO_ROOT_ARGUMENT,
+          16, abi_tables, 1, &patched_metal) != SM50_MSC_LOD_PATCHED ||
+      !patched_metal)
+    return 1;
+  delete static_cast<SM50CompiledBitcodeInternal *>(patched_metal);
+  patched_metal = nullptr;
+  const auto argument_list = with_metadata.find("!2 = !{!3}");
+  if (argument_list == std::string::npos)
+    return 1;
+  with_metadata.replace(argument_list, std::string("!2 = !{!3}").size(),
+                        "!2 = !{!3, !3}");
+  auto ambiguous = parse(context, with_metadata);
+  if (!ambiguous)
+    return 1;
+  llvm::SmallVector<char, 0> ambiguous_metal;
+  llvm::raw_svector_ostream ambiguous_stream(ambiguous_metal);
+  writer.Write(*ambiguous, ambiguous_stream);
+  if (SM50PatchMetalLibSampleLevelLOD(
+          ambiguous_metal.data(), ambiguous_metal.size(),
+          SM50_MSC_LOD_AUTO_ROOT_ARGUMENT, 16, abi_tables, 1,
+          &patched_metal) != SM50_MSC_LOD_UNSUPPORTED ||
+      patched_metal)
+    return 1;
+  with_metadata.replace(argument_list, std::string("!2 = !{!3, !3}").size(),
+                        "!2 = !{!3}");
+  const auto location = with_metadata.find(", !\"air.location_index\", i32 2");
+  if (location == std::string::npos)
+    return 1;
+  with_metadata.erase(location,
+                      std::string(", !\"air.location_index\", i32 2").size());
+  auto missing_location = parse(context, with_metadata);
+  if (!missing_location)
+    return 1;
+  llvm::SmallVector<char, 0> missing_location_metal;
+  llvm::raw_svector_ostream missing_location_stream(missing_location_metal);
+  writer.Write(*missing_location, missing_location_stream);
+  if (SM50PatchMetalLibSampleLevelLOD(
+          missing_location_metal.data(), missing_location_metal.size(),
+          SM50_MSC_LOD_AUTO_ROOT_ARGUMENT, 16, abi_tables, 1,
+          &patched_metal) != SM50_MSC_LOD_UNSUPPORTED ||
+      patched_metal)
+    return 1;
+  if (SM50PatchMetalLibSampleLevelLOD(
           original_metal.data(), original_metal.size(), 0, 16, abi_tables, 1,
           &patched_metal) != SM50_MSC_LOD_PATCHED ||
       !patched_metal)

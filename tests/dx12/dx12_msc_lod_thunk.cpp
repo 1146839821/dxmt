@@ -34,6 +34,14 @@ int main() {
   if (DXMTMSCPatchSamplerLOD(&params) != DXMT_MSC_SUCCESS ||
       params.patch_status != DXMT_MSC_LOD_PATCHED || params.output_size != size)
     return 1;
+  std::vector<uint8_t> inferred(size);
+  params.root_argument_index = UINT32_MAX;
+  params.output = inferred.data();
+  params.output_capacity = inferred.size();
+  if (DXMTMSCPatchSamplerLOD(&params) != DXMT_MSC_SUCCESS ||
+      params.patch_status != DXMT_MSC_LOD_PATCHED ||
+      params.output_size != size || inferred != output)
+    return 1;
   std::ofstream out("patched.metallib", std::ios::binary);
   out.write(reinterpret_cast<const char *>(output.data()), output.size());
   out.close();

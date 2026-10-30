@@ -121,6 +121,15 @@ AIR shape; it does not prove converter-version compatibility or the semantics
 of unknown external helpers, null descriptors, status values, or numeric edge
 cases. The runtime does not yet request this preflight or use its output.
 
+The experimental patch API also accepts an auto-detection sentinel for a
+single compute entry point. It identifies the AIR argument tagged as an
+indirect buffer at the MSC argument-buffer binding point; missing, malformed,
+or ambiguous metadata is rejected. The argument ordinal is not a fixed ABI:
+it varies with the shader. This discovery is currently limited to compute and
+does not establish compatibility with arbitrary MSC versions or helper calls.
+It is not connected to production compilation, cache keys, or argument-buffer
+uploads; unsupported shaders must not silently use a mismatched layout.
+
 ## Rejected shortcuts
 
 - A record-time snapshot of dynamic descriptors misses legal pre-submission

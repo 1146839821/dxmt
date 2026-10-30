@@ -342,6 +342,9 @@ enum SM50_MSC_LOD_PATCH_RESULT {
   SM50_MSC_LOD_UNSUPPORTED = 2,
   SM50_MSC_LOD_UNCHANGED = 3,
 };
+/* Infer the compute root argument from AIR entry metadata; reject ambiguity. */
+#define SM50_MSC_LOD_AUTO_ROOT_ARGUMENT UINT32_MAX
+#define SM50_MSC_ARGUMENT_BUFFER_BIND_POINT 2u
 AIRCONV_API int SM50PatchMetalLibSampleLevelLOD(
   const void *Data, size_t Size, uint32_t RootArgumentIndex, uint32_t OriginalRootSize,
   const struct SM50_MSC_LOD_SIDECAR_TABLE *Tables, size_t TableCount, sm50_bitcode_t *pPatched

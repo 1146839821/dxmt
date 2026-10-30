@@ -643,6 +643,8 @@ _Static_assert(DXMT_MSC_LOD_PATCHED == SM50_MSC_LOD_PATCHED &&
                DXMT_MSC_LOD_INVALID_INPUT == SM50_MSC_LOD_INVALID_INPUT &&
                DXMT_MSC_LOD_UNSUPPORTED == SM50_MSC_LOD_UNSUPPORTED &&
                DXMT_MSC_LOD_UNCHANGED == SM50_MSC_LOD_UNCHANGED, "sampler LOD status ABI mismatch");
+_Static_assert(DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT == SM50_MSC_ARGUMENT_BUFFER_BIND_POINT,
+               "MSC argument buffer binding mismatch");
 
 int
 dxmt_msc_patch_sampler_lod(struct dxmt_msc_patch_lod_params *params) {
