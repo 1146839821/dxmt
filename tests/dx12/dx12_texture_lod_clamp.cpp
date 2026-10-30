@@ -272,7 +272,7 @@ void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Ow
 
 std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
                               const std::vector<uint8_t> &shader, bool reserved, bool expect_unsupported,
-                              bool late_load = false) {
+                              bool late_load = false, bool empty_sample = false) {
   constexpr UINT mip_levels = 3;
   const auto desc = reserved ? TextureDesc(256, 256, 2, D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE)
                              : TextureDesc(512, 512, mip_levels, D3D12_TEXTURE_LAYOUT_UNKNOWN);
@@ -333,7 +333,8 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   auto cpu = descriptors->GetCPUDescriptorHandleForHeapStart();
 
   const float clamps[] = {expect_unsupported ? 1.0f : 0.0f, late_load ? 0.0f : 0.5f,
-                          late_load ? 0.0f : 1.0f, late_load ? 0.0f : 1.5f};
+                          late_load ? 0.0f : 1.0f,
+                          late_load ? 0.0f : empty_sample ? float(case_mips) - 0.5f : 1.5f};
   for (UINT index = 0; index < 5; index++) {
     D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
     srv.Format = DXGI_FORMAT_R32_FLOAT;
@@ -432,8 +433,9 @@ bool CheckCase(const char *name, const std::vector<uint32_t> &actual, const std:
 int main(int argc, char **argv) {
   const bool unsupported_read = argc == 3 && strcmp(argv[2], "--load-unsupported") == 0;
   const bool late_load = argc == 3 && strcmp(argv[2], "--load-late") == 0;
-  if (argc != 2 && !unsupported_read && !late_load) {
-    std::cerr << "usage: dx12_texture_lod_clamp <shader.cs.cso> [--load-unsupported|--load-late]\n";
+  const bool empty_sample = argc == 3 && strcmp(argv[2], "--sample-empty") == 0;
+  if (argc != 2 && !unsupported_read && !late_load && !empty_sample) {
+    std::cerr << "usage: dx12_texture_lod_clamp <shader.cs.cso> [--load-unsupported|--load-late|--sample-empty]\n";
     return 2;
   }
 
@@ -460,11 +462,13 @@ int main(int argc, char **argv) {
       std::cout << "late ResourceMinLODClamp Texture.Load passed\n";
       return 0;
     }
-    const std::vector<uint32_t> ordinary_expected = {0x3f800000, 0x40000000, 0x40400000, 0x40800000, 0x40400000};
-    const std::vector<uint32_t> reserved_expected = {0x3f800000, 0x40000000, 0x40400000, 0x40400000, 0x40400000};
-    const auto ordinary = RunCase(device.ptr, queue.ptr, shader, false, false);
+    const std::vector<uint32_t> ordinary_expected = {0x3f800000, 0x40000000, 0x40400000,
+                                                      empty_sample ? 0u : 0x40800000, 0x40400000};
+    const std::vector<uint32_t> reserved_expected = {0x3f800000, 0x40000000, 0x40400000,
+                                                      empty_sample ? 0u : 0x40400000, 0x40400000};
+    const auto ordinary = RunCase(device.ptr, queue.ptr, shader, false, false, false, empty_sample);
     const bool ordinary_pass = CheckCase("ordinary ResourceMinLODClamp", ordinary, ordinary_expected);
-    const auto reserved = RunCase(device.ptr, queue.ptr, shader, true, false);
+    const auto reserved = RunCase(device.ptr, queue.ptr, shader, true, false, false, empty_sample);
     if (reserved.empty())
       return 77;
     const bool reserved_pass = CheckCase("reserved standard-mip ResourceMinLODClamp", reserved, reserved_expected);

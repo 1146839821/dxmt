@@ -73,6 +73,19 @@ indexing or alternate AIR versions. It also has not been integrated or tested
 through DXMT, shader caching, reserved textures, or descriptor lifetime. The
 `n22-lod-air-prototype-20261030` artifacts contain the prototype and both logs.
 
+## Empty view intersection
+
+The `--sample-empty` mode sets the fourth SRV's resource clamp above the last
+mip visible in its view. The expected R32 result is zero. On the same M1 Max
+runtime, both SampleLevel and SampleGrad return nonzero results for ordinary
+and reserved textures. SampleGrad still passes the nonempty matrix in a
+separate control. The experimental AIR rewrite likewise returns the last mip
+instead of zero when its minimum exceeds the last visible mip. The fix must
+therefore handle the empty intersection as well as the explicit LOD calculation;
+simply taking the maximum of the LOD and clamp is insufficient. Missing
+component defaults and view swizzles require separate coverage. Results are in
+`dxmt-test/n23-lod-empty-20261030`.
+
 The local reproduction artifacts, converted AIR and binary identities are in
 `dxmt-test/n19-metal-minlod-20261030`, `n20-lod-sample-20261030`, and
 `n21-lod-compiler-20261030` alongside this checkout.
