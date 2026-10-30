@@ -116,9 +116,21 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
                                      IID_PPV_ARGS(&fence.ptr)));
   D3D12_RESOURCE_DESC d = {};
   d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  const UINT bytes_per_texel = format == DXGI_FORMAT_R8_UINT             ? 1
+                               : format == DXGI_FORMAT_R16_UINT          ? 2
+                               : format == DXGI_FORMAT_R32G32_UINT       ? 8
+                               : format == DXGI_FORMAT_R32G32B32A32_UINT ? 16
+                                                                         : 4;
+  const UINT tile_width = bytes_per_texel <= 2    ? 256
+                          : bytes_per_texel == 16 ? 64
+                                                  : 128;
+  const UINT tile_height = bytes_per_texel == 1 ? 256
+                           : bytes_per_texel == 8 || bytes_per_texel == 16
+                               ? 64
+                               : 128;
   // The last tile is half-width, so readback padding is observable.
-  d.Width = 320;
-  d.Height = 128;
+  d.Width = tile_width * 5 / 2;
+  d.Height = tile_height;
   d.DepthOrArraySize = 1;
   d.MipLevels = 1;
   d.Format = format;
@@ -134,8 +146,8 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
   D3D12_SUBRESOURCE_TILING tiling = {};
   device->GetResourceTiling(texture.ptr, &total, nullptr, &shape, &count, 0,
                             &tiling);
-  if (total != 3 || count != 1 || shape.WidthInTexels != 128 ||
-      shape.HeightInTexels != 128 || tiling.WidthInTiles != 3 ||
+  if (total != 3 || count != 1 || shape.WidthInTexels != tile_width ||
+      shape.HeightInTexels != tile_height || tiling.WidthInTiles != 3 ||
       tiling.HeightInTiles != 1)
     throw std::runtime_error("unexpected texture tile shape");
   D3D12_HEAP_DESC hd = {};
@@ -216,7 +228,8 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
                 << " expected=0x" << expected[i] << std::dec << "\n";
       ok &= actual == expected[i];
     }
-    const UINT padding = data[2 * (kTileBytes / 4) + 64];
+    const UINT padding =
+        data[2 * (kTileBytes / 4) + tile_width * bytes_per_texel / 8];
     std::cout << name << " edge padding=0x" << std::hex << padding << std::dec
               << "\n";
     ok &= padding == 0;
@@ -342,7 +355,12 @@ int main(int argc, char **argv) {
   const bool rg16 = is("--rg16");
   const bool rgb10a2 = is("--rgb10a2");
   const bool bgrx = is("--bgrx");
-  const bool format_case = rgba8 || rg16 || rgb10a2 || bgrx;
+  const bool r8 = is("--r8") || is("--bad-r8");
+  const bool r16 = is("--r16");
+  const bool rg32 = is("--rg32");
+  const bool rgba32 = is("--rgba32");
+  const bool format_case =
+      rgba8 || rg16 || rgb10a2 || bgrx || r8 || r16 || rg32 || rgba32;
   const bool bad = is("--bad-oracle");
   const bool cross = is("--cross-resource");
   const bool bad_cross = is("--bad-cross-oracle");
@@ -351,14 +369,18 @@ int main(int argc, char **argv) {
       format_case || is("--early-work") || is("--bad-early-work");
   const bool cross_queue = early_work || reverse_queue || is("--cross-queue") ||
                            is("--bad-queue-oracle");
-  const bool bad_queue =
-      is("--bad-rgba8") || is("--bad-queue-oracle") || is("--bad-early-work");
+  const bool bad_queue = is("--bad-rgba8") || is("--bad-r8") ||
+                         is("--bad-queue-oracle") || is("--bad-early-work");
   if (argc == 2 && !bad && !cross && !bad_cross && !cross_queue)
     return 2;
   const DXGI_FORMAT format = rgba8     ? DXGI_FORMAT_R8G8B8A8_UNORM
                              : rg16    ? DXGI_FORMAT_R16G16_UNORM
                              : rgb10a2 ? DXGI_FORMAT_R10G10B10A2_UNORM
                              : bgrx    ? DXGI_FORMAT_B8G8R8X8_UNORM
+                             : r8      ? DXGI_FORMAT_R8_UINT
+                             : r16     ? DXGI_FORMAT_R16_UINT
+                             : rg32    ? DXGI_FORMAT_R32G32_UINT
+                             : rgba32  ? DXGI_FORMAT_R32G32B32A32_UINT
                                        : DXGI_FORMAT_R32_UINT;
   try {
     return Run(bad, cross || bad_cross || cross_queue, bad_cross || bad_queue,
