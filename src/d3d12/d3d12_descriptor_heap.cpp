@@ -850,6 +850,9 @@ class MTLD3D12SamplerDescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12Sample
 
   std::vector<Rc<Sampler>> samplers_;
   std::vector<D3D12SamplerLODRange> sampler_lod_ranges_;
+  std::vector<WMT::Reference<WMT::SamplerState>> relaxed_samplers_;
+  std::vector<uint64_t> relaxed_sampler_ids_;
+  mutable std::mutex sampler_mutex_;
 
   Rc<Buffer> buffer_;
   SamplerGPUStorage *mapped_argument_buffer_ = nullptr;
@@ -882,6 +885,8 @@ public:
     }
     samplers_.resize(pDesc->NumDescriptors);
     sampler_lod_ranges_.resize(pDesc->NumDescriptors);
+    relaxed_samplers_.resize(pDesc->NumDescriptors);
+    relaxed_sampler_ids_.resize(pDesc->NumDescriptors);
 
     if (pDesc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
       buffer_ = new Buffer(samplers_.size() * sizeof(SamplerGPUStorage), device_->GetMTLDevice());
@@ -996,9 +1001,27 @@ public:
 
   bool
   GetSamplerLODRange(UINT Index, D3D12SamplerLODRange &Range) const override {
+    std::lock_guard lock(sampler_mutex_);
     if (Index >= samplers_.size() || !samplers_[Index])
       return false;
     Range = sampler_lod_ranges_[Index];
+    return true;
+  }
+
+  bool
+  GetSamplerLODSidecarEntry(UINT Index, D3D12SamplerLODSidecarEntry &Entry) override {
+    std::lock_guard lock(sampler_mutex_);
+    if (Index >= samplers_.size() || !samplers_[Index])
+      return false;
+    if (!relaxed_samplers_[Index]) {
+      uint64_t id = 0;
+      auto state = samplers_[Index]->createLODUnclampedState(device_->GetMTLDevice(), id);
+      if (!state || !id)
+        return false;
+      relaxed_samplers_[Index] = std::move(state);
+      relaxed_sampler_ids_[Index] = id;
+    }
+    Entry = {relaxed_sampler_ids_[Index], sampler_lod_ranges_[Index].minimum, sampler_lod_ranges_[Index].maximum};
     return true;
   }
 
@@ -1016,8 +1039,11 @@ public:
     if (!sampler)
       return E_FAIL;
 
+    std::lock_guard lock(sampler_mutex_);
     samplers_[Index] = sampler;
     sampler_lod_ranges_[Index] = {pDesc->MinLOD, pDesc->MaxLOD};
+    relaxed_samplers_[Index] = nullptr;
+    relaxed_sampler_ids_[Index] = 0;
     if (mapped_argument_buffer_) {
       auto &gpu_storage = mapped_argument_buffer_[Index];
       gpu_storage.sampler = sampler->sampler_state_handle;
@@ -1035,9 +1061,22 @@ public:
     if (!heap_to || From > samplers_.size() || CopyCount > samplers_.size() - From ||
         DescriptorTo > heap_to->samplers_.size() || CopyCount > heap_to->samplers_.size() - DescriptorTo)
       return;
+    std::unique_lock source_lock(sampler_mutex_, std::defer_lock);
+    std::unique_lock destination_lock(heap_to->sampler_mutex_, std::defer_lock);
+    if (heap_to == this)
+      source_lock.lock();
+    else
+      std::lock(source_lock, destination_lock);
     for (unsigned i = 0; i < CopyCount; i++) {
+      if (heap_to == this && From + i == DescriptorTo + i)
+        continue;
       heap_to->samplers_[DescriptorTo + i] = samplers_[From + i];
       heap_to->sampler_lod_ranges_[DescriptorTo + i] = sampler_lod_ranges_[From + i];
+      if (relaxed_samplers_[From + i])
+        heap_to->relaxed_samplers_[DescriptorTo + i] = relaxed_samplers_[From + i];
+      else
+        heap_to->relaxed_samplers_[DescriptorTo + i] = nullptr;
+      heap_to->relaxed_sampler_ids_[DescriptorTo + i] = relaxed_sampler_ids_[From + i];
       if (mapped_argument_buffer_ && heap_to->mapped_argument_buffer_)
         heap_to->mapped_argument_buffer_[DescriptorTo + i] = mapped_argument_buffer_[From + i];
       if (mapped_msc_argument_buffer_ && heap_to->mapped_msc_argument_buffer_)

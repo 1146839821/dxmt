@@ -6,8 +6,10 @@ design does not claim that ResourceMinLODClamp is implemented.
 
 The subsequent sampler metadata slice preserves the original static and dynamic
 sampler LOD ranges and copies dynamic ranges with descriptors. It does not yet
-create a relaxed sampler or GPU sidecar, bind either object, or prove their
-submission lifetime. The GPU sidecar ABI described below remains a proposal.
+bind a GPU sidecar or prove submission lifetime. Relaxed Metal sampler states
+are created lazily and retained by the owning descriptor heap or root signature;
+descriptor copies retain the state when already created. The GPU sidecar buffer
+and its submission ownership described below remain a proposal.
 
 ## Goal and evidence
 

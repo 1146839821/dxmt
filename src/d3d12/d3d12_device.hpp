@@ -495,6 +495,7 @@ public:
 
   virtual UINT GetBlob(const void **ppBlob) = 0;
   virtual HRESULT InitializeMSCLayout() = 0;
+  virtual bool GetStaticSamplerLODSidecarEntry(UINT Index, D3D12SamplerLODSidecarEntry &Entry) = 0;
 
   virtual void AddRefPrivate() = 0;
   virtual void ReleasePrivate() = 0;

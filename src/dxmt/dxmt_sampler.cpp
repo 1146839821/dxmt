@@ -1,7 +1,18 @@
 #include "dxmt_sampler.hpp"
 #include "winemetal.h"
+#include <limits>
 
 namespace dxmt {
+
+WMT::Reference<WMT::SamplerState>
+Sampler::createLODUnclampedState(WMT::Device device, uint64_t &resource_id) const {
+  auto info = info_;
+  info.lod_min_clamp = 0.0f;
+  info.lod_max_clamp = std::numeric_limits<float>::max();
+  auto result = device.newSamplerState(info);
+  resource_id = result ? info.gpu_resource_id : 0;
+  return result;
+}
 
 void
 Sampler::incRef() {

@@ -23,6 +23,7 @@
 #include "metalirconverter_thunks.h"
 #include <atomic>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 
@@ -304,12 +305,22 @@ struct D3D12SamplerLODRange {
   float maximum = 0;
 };
 
+struct D3D12SamplerLODSidecarEntry {
+  uint64_t sampler = 0;
+  float minimum = 0;
+  float maximum = 0;
+};
+static_assert(sizeof(D3D12SamplerLODSidecarEntry) == 16);
+static_assert(offsetof(D3D12SamplerLODSidecarEntry, minimum) == 8);
+static_assert(offsetof(D3D12SamplerLODSidecarEntry, maximum) == 12);
+
 class MTLD3D12SamplerDescriptorHeap : public ID3D12DescriptorHeap {
 public:
   virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
   virtual WMT::Buffer GetDescriptorHeapBuffer() = 0;
   virtual WMT::Buffer GetMSCDescriptorHeapBuffer() = 0;
   virtual bool GetSamplerLODRange(UINT Index, D3D12SamplerLODRange &Range) const = 0;
+  virtual bool GetSamplerLODSidecarEntry(UINT Index, D3D12SamplerLODSidecarEntry &Entry) = 0;
 
   virtual HRESULT AddSampler(UINT Index, const D3D12_SAMPLER_DESC *Desc) = 0;
 

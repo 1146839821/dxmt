@@ -4,6 +4,8 @@
 #include "d3d12_device.hpp"
 
 #include <iostream>
+#include <thread>
+#include <vector>
 
 template <typename T> struct Owned {
   T *p = nullptr;
@@ -47,12 +49,29 @@ int main() {
   desc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
   desc.MinLOD = 0.25f;
   desc.MaxLOD = 2.75f;
+  device.p->CreateSampler(&desc, src);
+  device.p->CopyDescriptorsSimple(1, dst, src, hd.Type);
   auto source = src;
   source.ptr += stride;
   device.p->CreateSampler(&desc, source);
+  auto *cpu_impl = static_cast<dxmt::MTLD3D12SamplerDescriptorHeap *>(cpu.p);
+  auto *gpu_impl = static_cast<dxmt::MTLD3D12SamplerDescriptorHeap *>(gpu.p);
+  dxmt::D3D12SamplerLODSidecarEntry first{}, copied{}, again{};
+  if (!gpu_impl->GetSamplerLODSidecarEntry(0, copied) || !copied.sampler ||
+      copied.minimum != .25f || copied.maximum != 2.75f)
+    return 1;
+  if (!cpu_impl->GetSamplerLODSidecarEntry(1, first) || !first.sampler ||
+      first.minimum != .25f || first.maximum != 2.75f ||
+      !cpu_impl->GetSamplerLODSidecarEntry(1, again) ||
+      again.sampler != first.sampler ||
+      cpu_impl->GetSamplerLODSidecarEntry(4, again))
+    return 1;
   auto destination = dst;
   destination.ptr += 2 * stride;
   device.p->CopyDescriptorsSimple(1, destination, source, hd.Type);
+  if (!gpu_impl->GetSamplerLODSidecarEntry(2, copied) ||
+      copied.sampler != first.sampler)
+    return 1;
   if (!check_range(cpu.p, 1, true, .25f, 2.75f) ||
       !check_range(gpu.p, 2, true, .25f, 2.75f) ||
       !check_range(gpu.p, 4, false, 0, 0) ||
@@ -61,10 +80,19 @@ int main() {
   desc.MinLOD = 1.5f;
   desc.MaxLOD = 5.5f;
   device.p->CreateSampler(&desc, source);
+  if (!cpu_impl->GetSamplerLODSidecarEntry(1, again) || !again.sampler ||
+      again.minimum != 1.5f || again.maximum != 5.5f)
+    return 1;
   if (!check_range(gpu.p, 2, true, .25f, 2.75f))
     return 1;
   device.p->CopyDescriptorsSimple(1, destination, source, hd.Type);
+  if (!gpu_impl->GetSamplerLODSidecarEntry(2, copied) ||
+      copied.sampler != again.sampler)
+    return 1;
   if (!check_range(gpu.p, 2, true, 1.5f, 5.5f))
+    return 1;
+  if (!gpu_impl->GetSamplerLODSidecarEntry(2, copied) ||
+      copied.sampler != again.sampler)
     return 1;
   cpu.p->Release();
   cpu.p = nullptr;
@@ -97,6 +125,28 @@ int main() {
   if (internal->NumStaticSamplers != 1 || !internal->StaticSamplerLODRanges ||
       internal->StaticSamplerLODRanges[0].minimum != .5f ||
       internal->StaticSamplerLODRanges[0].maximum != 3.5f)
+    return 1;
+  dxmt::D3D12SamplerLODSidecarEntry static_entry{}, static_again{};
+  std::vector<dxmt::D3D12SamplerLODSidecarEntry> concurrent_entries(8);
+  std::vector<std::thread> workers;
+  std::vector<int> succeeded(8);
+  for (size_t i = 0; i < concurrent_entries.size(); ++i)
+    workers.emplace_back([&, i] {
+      succeeded[i] =
+          internal->GetStaticSamplerLODSidecarEntry(0, concurrent_entries[i]);
+    });
+  for (auto &worker : workers)
+    worker.join();
+  for (size_t i = 0; i < concurrent_entries.size(); ++i)
+    if (!succeeded[i] || !concurrent_entries[i].sampler ||
+        concurrent_entries[i].sampler != concurrent_entries[0].sampler)
+      return 1;
+  if (!internal->GetStaticSamplerLODSidecarEntry(0, static_entry) ||
+      !static_entry.sampler || static_entry.minimum != .5f ||
+      static_entry.maximum != 3.5f ||
+      !internal->GetStaticSamplerLODSidecarEntry(0, static_again) ||
+      static_again.sampler != static_entry.sampler ||
+      internal->GetStaticSamplerLODSidecarEntry(1, static_again))
     return 1;
   std::cout << "sampler LOD metadata passed\n";
   return 0;

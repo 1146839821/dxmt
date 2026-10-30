@@ -388,6 +388,9 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
 
   std::vector<Rc<Sampler>> static_samplers_; // which is not really "static"
   std::vector<D3D12SamplerLODRange> static_sampler_lod_ranges_;
+  std::vector<WMT::Reference<WMT::SamplerState>> relaxed_static_samplers_;
+  std::vector<uint64_t> relaxed_static_sampler_ids_;
+  std::mutex static_sampler_mutex_;
   /**
   It's supposed to be implemented by `constexpr sampler` in Metal shader, but
   for unknown reason it lacks of `mirrored_clamp_to_edge` address mode.
@@ -399,6 +402,24 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
   bool msc_layout_initialized_ = false;
 
 public:
+  bool
+  GetStaticSamplerLODSidecarEntry(UINT Index, D3D12SamplerLODSidecarEntry &Entry) override {
+    std::lock_guard lock(static_sampler_mutex_);
+    if (Index >= static_samplers_.size())
+      return false;
+    if (!relaxed_static_samplers_[Index]) {
+      uint64_t id = 0;
+      auto state = static_samplers_[Index]->createLODUnclampedState(device_->GetMTLDevice(), id);
+      if (!state || !id)
+        return false;
+      relaxed_static_samplers_[Index] = std::move(state);
+      relaxed_static_sampler_ids_[Index] = id;
+    }
+    Entry = {relaxed_static_sampler_ids_[Index], static_sampler_lod_ranges_[Index].minimum,
+             static_sampler_lod_ranges_[Index].maximum};
+    return true;
+  }
+
   MTLD3D12RootSignatureImpl(MTLD3D12Device *pDevice, const void *pBytecode, SIZE_T BytecodeLength) :
       MTLD3D12DeviceChild<MTLD3D12RootSignature>(pDevice) {
     blob_.resize(BytecodeLength);
@@ -504,6 +525,8 @@ public:
       }
       EncodedStaticSamplers = static_samplers_encoded_.data();
       StaticSamplerLODRanges = static_sampler_lod_ranges_.data();
+      relaxed_static_samplers_.resize(NumStaticSamplers);
+      relaxed_static_sampler_ids_.resize(NumStaticSamplers);
     }
 
     auto [layout, total_qwords] = CalculateRootParameterLayout(desc);
