@@ -145,6 +145,16 @@ prototype is not safe to reserve in DXMT without a binding-layout design.
 Gradient, comparison and implicit-LOD sampling remain unimplemented. Artifacts
 and positive/negative logs are in `dxmt-test/n28-lod-abi-20261030`.
 
+A follow-up prototype uses the dynamically selected sampler-table index to
+select a corresponding range from a separate table. Two samplers with different
+mip filters and maximum LODs are selected nonuniformly in one dispatch. The
+five expected outputs, including an empty view, matched; swapping the two range
+entries made the oracle fail. The MSC sampler descriptors remained unchanged.
+This only tests a single sampler table and a hand-added root-buffer slot; it
+does not solve descriptor-table rebasing, multiple tables, updates after Close,
+or management of original and relaxed sampler variants. See
+`dxmt-test/n29-lod-dynamic-sampler-20261030` for artifacts.
+
 The local reproduction artifacts, converted AIR and binary identities are in
 `dxmt-test/n19-metal-minlod-20261030`, `n20-lod-sample-20261030`, and
 `n21-lod-compiler-20261030` alongside this checkout.
