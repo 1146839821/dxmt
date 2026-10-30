@@ -1031,6 +1031,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   Com<ID3D12StateObject> raytracing_state_object_;
   Com<MTLD3D12DescriptorHeap, true> descriptor_heap_;
   Com<MTLD3D12SamplerDescriptorHeap, true> sampler_heap_;
+  std::vector<Com<MTLD3D12SamplerDescriptorHeap, true>> recorded_sampler_heaps_;
   WMT::Reference<WMT::Buffer> msc_dummy_buffer_;
   uint64_t rootarg_compute_staging_[64];
   bool airconv_compute_residency_ = false;
@@ -1221,6 +1222,7 @@ public:
     pending_submission_order_.clear();
     pending_descriptor_use_indices_.clear();
     pending_descriptor_heaps_.clear();
+    recorded_sampler_heaps_.clear();
     if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState)) {
       if (!pso->IsComputePipelineState)
         pso_graphics_ = static_cast<MTLD3D12GraphicsPipelineState *>(pInitialPipelineState);
@@ -1540,6 +1542,10 @@ public:
     // recording admission to bundles shared by multiple parent submissions.
     for (const auto &dependency : bundle_allocators_)
       allocators.emplace_back(dependency.allocator.ptr());
+  }
+
+  void CollectSamplerHeapsForSubmission(std::vector<Com<MTLD3D12SamplerDescriptorHeap, true>> &heaps) const final {
+    heaps.insert(heaps.end(), recorded_sampler_heaps_.begin(), recorded_sampler_heaps_.end());
   }
 
   std::shared_ptr<D3D12CommandListRecording> GetRecordingState() const final {
@@ -6157,6 +6163,18 @@ public:
           }, __func__
       );
       return;
+    }
+    if (sampler_heap_) {
+      try {
+        const auto found = std::find_if(recorded_sampler_heaps_.begin(), recorded_sampler_heaps_.end(),
+                                        [&](const auto &heap) { return heap.ptr() == sampler_heap_.ptr(); });
+        if (found == recorded_sampler_heaps_.end())
+          recorded_sampler_heaps_.emplace_back(sampler_heap_.ptr());
+      } catch (const std::bad_alloc &) {
+        recording_error_ = E_OUTOFMEMORY;
+        FailRecording(__func__, "sampler heap retention allocation failed");
+        return;
+      }
     }
     dirty_state_.set(DirtyState::DescriptorHeaps);
   };

@@ -89,6 +89,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     };
     std::vector<CommandList> command_lists;
     std::vector<Com<MTLD3D12CommandAllocator, false>> allocators;
+    std::vector<Com<MTLD3D12SamplerDescriptorHeap, true>> sampler_heaps;
     std::unordered_map<EncoderData *, std::vector<SubmissionResourceUse>> descriptor_resource_uses;
     std::vector<WMT::Reference<WMT::Resource>> descriptor_resource_refs;
     Com<MTLD3D12Fence> signal_fence;
@@ -914,6 +915,7 @@ public:
       for (auto *encoder = pCommandList->entry; encoder; encoder = encoder->next)
         command_list.encoders.push_back({encoder->type, encoder->id});
       pCommandList->CollectAllocatorsForSubmission(submission.allocators);
+      pCommandList->CollectSamplerHeapsForSubmission(submission.sampler_heaps);
     }
     for (auto &allocator : submission.allocators)
       allocator->MarkSubmissionSubmitted();

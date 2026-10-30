@@ -11,8 +11,11 @@ are created lazily and retained by the owning descriptor heap or root signature;
 descriptor copies retain the state when already created. A shader-visible
 sampler heap can now allocate a separate, stable-address sidecar buffer on
 request and keep its entries synchronized with descriptor writes and copies.
-The heap owns the buffer and relaxed states. Submission ownership, static
-sampler uploads and binding the sidecar remain unimplemented.
+The heap owns the buffer and relaxed states. A recording retains each bound
+sampler heap, and each queue submission retains those heaps until its GPU
+command buffer completes, including after command-list reset. Static sampler
+uploads, sidecar binding, and submission-time sidecar validation remain
+unimplemented; actual shader access and residency are not yet verified.
 
 An update that cannot create a relaxed sampler clears that sidecar entry and
 marks the heap sidecar invalid; preparation must be repeated successfully before

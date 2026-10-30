@@ -1288,3 +1288,15 @@ dx12_sampler_lod_metadata = executable('dx12_sampler_lod_metadata', 'dx12_sample
   ],
   dependencies: [ d3d12_dep, winemetal_dep ],
 )
+
+dx12_sampler_heap_lifetime = executable('dx12_sampler_heap_lifetime', 'dx12_sampler_heap_lifetime.cpp',
+  include_directories: [
+    include_directories('../../src/d3d12'),
+    include_directories('../../src/airconv'),
+    include_directories('../../src/dxgi'),
+    include_directories('../../src/dxmt'),
+    include_directories('../../src/winemetal'),
+    include_directories('../../src/util'),
+  ],
+  dependencies: [ d3d12_dep, winemetal_dep ],
+)
