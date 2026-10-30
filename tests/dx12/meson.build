@@ -1266,3 +1266,5 @@ if python.found()
     command: [python, files('dx12_tiled_tier2_gate'), '--build-dir', meson.current_build_dir()],
   )
 endif
+
+dx12_reserved_texture_overlap = executable('dx12_reserved_texture_overlap', 'dx12_reserved_texture_overlap.cpp', dependencies: [ d3d12_dep ])

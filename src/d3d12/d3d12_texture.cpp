@@ -2149,11 +2149,33 @@ public:
       for (size_t i = 0; i < destination_tiles.size(); i++)
         tile_mappings_[destination_tiles[i]] = copied[i];
     }
-    if (sparse_mapping_queue)
-      sparse_mapping_queue.copyTextureMappings(
-          source->texture->current()->texture(), texture->current()->texture(), mapping_operations.data(),
-          mapping_operations.size()
-      );
+    if (sparse_mapping_queue) {
+      if (source == this) {
+        // Metal's individual copy operations can observe earlier writes when
+        // regions overlap. Reapply the saved heap mappings instead, so every
+        // destination uses the original source snapshot required by D3D12.
+        for (size_t i = 0; i < mapping_operations.size(); ++i) {
+          const size_t index = i < destination_packed_start ? i : destination_packed_start;
+          const auto &saved = copied[index];
+          const auto &copy = mapping_operations[i];
+          WMTUpdateSparseTextureMappingOperation update = {};
+          update.mode = saved.heap ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
+          update.texture_region.origin = copy.destination_origin;
+          update.texture_region.size = copy.source_region.size;
+          update.texture_level = copy.destination_level;
+          update.texture_slice = copy.destination_slice;
+          update.heap_offset = saved.heap_tile;
+          sparse_mapping_queue.updateTextureMappings(
+              texture->current()->texture(), saved.heap ? saved.heap->GetMetalHeap() : WMT::Heap{}, &update, 1
+          );
+        }
+      } else {
+        sparse_mapping_queue.copyTextureMappings(
+            source->texture->current()->texture(), texture->current()->texture(), mapping_operations.data(),
+            mapping_operations.size()
+        );
+      }
+    }
     return S_OK;
   }
 };
