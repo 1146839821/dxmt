@@ -7,6 +7,7 @@
 #include <array>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 
 namespace {
 
@@ -90,7 +91,7 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource,
                             state, nullptr, IID_PPV_ARGS(&resource.ptr)));
 }
 
-int Run(bool bad_oracle) {
+int Run(bool bad_oracle, bool cross_resource, bool bad_cross) {
   Owned<ID3D12Device> device;
   Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                     IID_PPV_ARGS(&device.ptr)));
@@ -219,16 +220,41 @@ int Run(bool bad_oracle) {
   queue->CopyTileMappings(texture.ptr, &dst, texture.ptr, &src, &pair,
                           D3D12_TILE_MAPPING_FLAG_NONE);
   verify("null", {values[0], values[0], 0});
+  if (cross_resource) {
+    map_all();
+    Owned<ID3D12Resource> destination;
+    Check("cross-resource destination",
+          device->CreateReservedResource(&d, D3D12_RESOURCE_STATE_COMMON,
+                                         nullptr,
+                                         IID_PPV_ARGS(&destination.ptr)));
+    if (!destination->GetGPUVirtualAddress())
+      throw std::runtime_error("destination has no sparse buffer backing");
+    queue->CopyTileMappings(destination.ptr, &zero, texture.ptr, &zero, &all,
+                            D3D12_TILE_MAPPING_FLAG_NONE);
+    std::swap(texture.ptr, destination.ptr);
+    verify("cross copied",
+           {values[0], bad_cross ? values[0] : values[1], values[2]});
+    queue->UpdateTileMappings(destination.ptr, 1, &one, &single, nullptr, 1,
+                              &null_flag, &offset, nullptr,
+                              D3D12_TILE_MAPPING_FLAG_NONE);
+    verify("cross independent", {values[0], values[1], values[2]});
+    queue->CopyTileMappings(texture.ptr, &one, destination.ptr, &one, &single,
+                            D3D12_TILE_MAPPING_FLAG_NONE);
+    verify("cross null", {values[0], 0, values[2]});
+    std::cout << "cross-resource buffer mapping readback passed\n";
+  }
   std::cout << "buffer overlap mapping readback passed\n";
   return 0;
 }
 } // namespace
 int main(int argc, char **argv) {
   bool bad = argc == 2 && std::strcmp(argv[1], "--bad-oracle") == 0;
-  if (argc > 2 || (argc == 2 && !bad))
+  bool cross = argc == 2 && std::strcmp(argv[1], "--cross-resource") == 0;
+  bool bad_cross = argc == 2 && std::strcmp(argv[1], "--bad-cross-oracle") == 0;
+  if (argc > 2 || (argc == 2 && !bad && !cross && !bad_cross))
     return 2;
   try {
-    return Run(bad);
+    return Run(bad, cross || bad_cross, bad_cross);
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;
