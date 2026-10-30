@@ -155,6 +155,17 @@ does not solve descriptor-table rebasing, multiple tables, updates after Close,
 or management of original and relaxed sampler variants. See
 `dxmt-test/n29-lod-dynamic-sampler-20261030` for artifacts.
 
+The experimental AIR pass additionally uses a sidecar entry containing a
+relaxed sampler handle and the original range, leaving the MSC sampler table
+available to unmodified operations. In a native mixed SampleLevel/SampleGrad
+test, replacing the original sampler and its sidecar range after encoding but
+before command-buffer submission produced the expected six values. Omitting
+the sidecar update made the explicit-level oracle fail while the original
+gradient sampler observed the updated state. This establishes the need to
+update both representations together; it does not establish DXMT queue,
+descriptor-copy or in-flight lifetime correctness. Artifacts and logs are in
+`dxmt-test/n32-lod-volatile-sidecar-20261030`.
+
 The local reproduction artifacts, converted AIR and binary identities are in
 `dxmt-test/n19-metal-minlod-20261030`, `n20-lod-sample-20261030`, and
 `n21-lod-compiler-20261030` alongside this checkout.
