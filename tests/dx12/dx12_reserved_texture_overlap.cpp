@@ -93,7 +93,7 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource,
 }
 
 int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
-        bool reverse_queue, bool early_work) {
+        bool reverse_queue, bool early_work, DXGI_FORMAT format) {
   Owned<ID3D12Device> device;
   Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                     IID_PPV_ARGS(&device.ptr)));
@@ -121,7 +121,8 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
   d.Height = 128;
   d.DepthOrArraySize = 1;
   d.MipLevels = 1;
-  d.Format = DXGI_FORMAT_R32_UINT;
+  d.Format = format;
+  std::cout << "texture format=" << static_cast<unsigned>(format) << "\n";
   d.SampleDesc.Count = 1;
   d.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
   Owned<ID3D12Resource> texture;
@@ -333,28 +334,35 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
 }
 } // namespace
 int main(int argc, char **argv) {
-  bool bad = argc == 2 && std::strcmp(argv[1], "--bad-oracle") == 0;
-  bool cross = argc == 2 && std::strcmp(argv[1], "--cross-resource") == 0;
-  bool bad_cross = argc == 2 && std::strcmp(argv[1], "--bad-cross-oracle") == 0;
-  bool cross_queue =
-      argc == 2 && (std::strcmp(argv[1], "--cross-queue") == 0 ||
-                    std::strcmp(argv[1], "--reverse-queue") == 0 ||
-                    std::strcmp(argv[1], "--early-work") == 0 ||
-                    std::strcmp(argv[1], "--bad-early-work") == 0 ||
-                    std::strcmp(argv[1], "--bad-queue-oracle") == 0);
-  bool reverse_queue =
-      argc == 2 && std::strcmp(argv[1], "--reverse-queue") == 0;
-  bool bad_queue =
-      argc == 2 && (std::strcmp(argv[1], "--bad-queue-oracle") == 0 ||
-                    std::strcmp(argv[1], "--bad-early-work") == 0);
-  bool early_work =
-      argc == 2 && (std::strcmp(argv[1], "--early-work") == 0 ||
-                    std::strcmp(argv[1], "--bad-early-work") == 0);
-  if (argc > 2 || (argc == 2 && !bad && !cross && !bad_cross && !cross_queue))
+  if (argc > 2)
     return 2;
+  const char *arg = argc == 2 ? argv[1] : "";
+  const auto is = [&](const char *name) { return std::strcmp(arg, name) == 0; };
+  const bool rgba8 = is("--rgba8") || is("--bad-rgba8");
+  const bool rg16 = is("--rg16");
+  const bool rgb10a2 = is("--rgb10a2");
+  const bool bgrx = is("--bgrx");
+  const bool format_case = rgba8 || rg16 || rgb10a2 || bgrx;
+  const bool bad = is("--bad-oracle");
+  const bool cross = is("--cross-resource");
+  const bool bad_cross = is("--bad-cross-oracle");
+  const bool reverse_queue = is("--reverse-queue");
+  const bool early_work =
+      format_case || is("--early-work") || is("--bad-early-work");
+  const bool cross_queue = early_work || reverse_queue || is("--cross-queue") ||
+                           is("--bad-queue-oracle");
+  const bool bad_queue =
+      is("--bad-rgba8") || is("--bad-queue-oracle") || is("--bad-early-work");
+  if (argc == 2 && !bad && !cross && !bad_cross && !cross_queue)
+    return 2;
+  const DXGI_FORMAT format = rgba8     ? DXGI_FORMAT_R8G8B8A8_UNORM
+                             : rg16    ? DXGI_FORMAT_R16G16_UNORM
+                             : rgb10a2 ? DXGI_FORMAT_R10G10B10A2_UNORM
+                             : bgrx    ? DXGI_FORMAT_B8G8R8X8_UNORM
+                                       : DXGI_FORMAT_R32_UINT;
   try {
     return Run(bad, cross || bad_cross || cross_queue, bad_cross || bad_queue,
-               cross_queue, reverse_queue, early_work);
+               cross_queue, reverse_queue, early_work, format);
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;
