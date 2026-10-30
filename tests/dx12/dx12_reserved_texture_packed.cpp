@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -121,7 +122,8 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource, UINT64 
 }
 
 int Run(const char *read_path, const char *write_a_path,
-        const char *write_b_path, bool copy_upload, bool full_mips, bool metadata_only) {
+        const char *write_b_path, bool copy_upload, bool full_mips, bool metadata_only, bool copy_mappings,
+        bool bad_alias_oracle) {
   const auto read_shader = ReadShader(read_path);
   const auto write_a_shader = ReadShader(write_a_path);
   const auto write_b_shader = ReadShader(write_b_path);
@@ -499,12 +501,133 @@ int Run(const char *read_path, const char *write_a_path,
   map_tail(nullptr);
   if (!submit("unmapped packed tail reads zero", read_pso.ptr, true, 0))
     throw std::runtime_error("unmapped packed tail GPU result mismatch");
-  heap_b.ptr->Release();
-  heap_b.ptr = nullptr;
-
+  if (!copy_mappings) {
+    heap_b.ptr->Release();
+    heap_b.ptr = nullptr;
+  }
   map_tail(heap_a.ptr);
   if (!submit("packed tail remap to heap A preserves data", read_pso.ptr, true, ValueA)) {
     throw std::runtime_error("packed tail remap GPU result mismatch");
+  }
+  if (copy_mappings) {
+    Owned<ID3D12Resource> other;
+    Check("Create matching alias texture", device->CreateReservedResource(
+        &texture_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&other.ptr)));
+    queue->CopyTileMappings(other.ptr, &coordinate, texture.ptr, &coordinate, &region, D3D12_TILE_MAPPING_FLAG_NONE);
+
+    const auto switch_alias = [&](ID3D12Resource *before, ID3D12Resource *after, bool update_views = true) {
+      Owned<ID3D12CommandAllocator> alias_allocator;
+      Owned<ID3D12GraphicsCommandList> alias_list;
+      Check("Create alias allocator", device->CreateCommandAllocator(
+          D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alias_allocator.ptr)));
+      Check("Create alias list", device->CreateCommandList(
+          0, D3D12_COMMAND_LIST_TYPE_DIRECT, alias_allocator.ptr, nullptr, IID_PPV_ARGS(&alias_list.ptr)));
+      D3D12_RESOURCE_BARRIER barrier = {};
+      barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+      barrier.Aliasing = {before, after};
+      alias_list->ResourceBarrier(1, &barrier);
+      Check("Close alias list", alias_list->Close());
+      ID3D12CommandList *lists[] = {alias_list.ptr};
+      queue->ExecuteCommandLists(1, lists);
+      Owned<ID3D12Fence> alias_fence;
+      Check("Create alias fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&alias_fence.ptr)));
+      Check("Signal alias fence", queue->Signal(alias_fence.ptr, 1));
+      Wait(alias_fence.ptr, 1);
+      Check("Alias device status", device->GetDeviceRemovedReason());
+      if (update_views) {
+        std::swap(texture.ptr, other.ptr);
+        auto cpu = descriptors->GetCPUDescriptorHandleForHeapStart();
+        device->CreateShaderResourceView(texture.ptr, &srv, cpu);
+        cpu.ptr += 2 * descriptor_stride;
+        device->CreateUnorderedAccessView(copy_upload ? nullptr : texture.ptr, nullptr, &tail_uav, cpu);
+      }
+    };
+
+    if (!copy_upload) {
+      // Exercise the barrier within one command list: no CPU fence separates
+      // the source write and the destination read.
+      Owned<ID3D12DescriptorHeap> alias_descriptors;
+      Check("Create alias descriptors", device->CreateDescriptorHeap(&descriptor_desc, IID_PPV_ARGS(&alias_descriptors.ptr)));
+      auto cpu = alias_descriptors->GetCPUDescriptorHandleForHeapStart();
+      device->CreateShaderResourceView(other.ptr, &srv, cpu);
+      cpu.ptr += descriptor_stride;
+      device->CreateUnorderedAccessView(output.ptr, nullptr, &output_uav, cpu);
+      cpu.ptr += descriptor_stride;
+      device->CreateUnorderedAccessView(other.ptr, nullptr, &tail_uav, cpu);
+
+      Owned<ID3D12CommandAllocator> allocator;
+      Owned<ID3D12GraphicsCommandList> list;
+      Check("Create inline alias allocator", device->CreateCommandAllocator(
+          D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator.ptr)));
+      Check("Create inline alias list", device->CreateCommandList(
+          0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.ptr, write_b_pso.ptr, IID_PPV_ARGS(&list.ptr)));
+      list->SetComputeRootSignature(root.ptr);
+      ID3D12DescriptorHeap *source_heaps[] = {descriptors.ptr};
+      list->SetDescriptorHeaps(1, source_heaps);
+      list->SetComputeRootDescriptorTable(0, descriptors->GetGPUDescriptorHandleForHeapStart());
+      Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      list->Dispatch(1, 1, 1);
+      Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+      D3D12_RESOURCE_BARRIER alias = {};
+      alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+      alias.Aliasing = {texture.ptr, other.ptr};
+      list->ResourceBarrier(1, &alias);
+      Transition(list.ptr, other.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      ID3D12DescriptorHeap *destination_heaps[] = {alias_descriptors.ptr};
+      list->SetDescriptorHeaps(1, destination_heaps);
+      list->SetComputeRootDescriptorTable(0, alias_descriptors->GetGPUDescriptorHandleForHeapStart());
+      list->SetPipelineState(read_pso.ptr);
+      list->Dispatch(1, 1, 1);
+      Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+      list->CopyBufferRegion(readback.ptr, 0, output.ptr, 0, 2 * sizeof(UINT));
+      Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+      Transition(list.ptr, other.ptr, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+      Check("Close inline alias list", list->Close());
+      ID3D12CommandList *lists[] = {list.ptr};
+      queue->ExecuteCommandLists(1, lists);
+      Owned<ID3D12Fence> inline_fence;
+      Check("Create inline alias fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&inline_fence.ptr)));
+      Check("Signal inline alias fence", queue->Signal(inline_fence.ptr, 1));
+      Wait(inline_fence.ptr, 1);
+      UINT *mapped = nullptr;
+      Check("Map inline alias readback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped)));
+      const bool correct = mapped[0] == ValueB && mapped[1] == ValueB;
+      readback->Unmap(0, nullptr);
+      if (!correct)
+        throw std::runtime_error("single-list alias visibility mismatch");
+      std::cout << "single-list alias write/read passed\n";
+      switch_alias(other.ptr, texture.ptr, false);
+      if (!submit("restore source value", write_a_pso.ptr, false, ValueA))
+        throw std::runtime_error("restore alias source failed");
+    }
+
+    switch_alias(texture.ptr, other.ptr);
+    const UINT inherited_expected = bad_alias_oracle ? ValueA ^ 1u : ValueA;
+    if (!submit("copied mapping inherits heap A", read_pso.ptr, true, inherited_expected) ||
+        !submit("write copied mapping", write_b_pso.ptr, false, ValueB) ||
+        !submit("read copied mapping", read_pso.ptr, true, ValueB))
+      throw std::runtime_error("copied mapping GPU result mismatch");
+    switch_alias(texture.ptr, other.ptr);
+    if (!submit("original mapping inherits alias write", read_pso.ptr, true, ValueB))
+      throw std::runtime_error("reverse alias data inheritance mismatch");
+    // A mapping copy is a snapshot: remapping the source must not alter the
+    // destination's existing mapping to heap A.
+    map_tail(heap_b.ptr);
+    if (!submit("write remapped source", write_a_pso.ptr, false, ValueA) ||
+        !submit("read remapped source", read_pso.ptr, true, ValueA))
+      throw std::runtime_error("source remapping GPU result mismatch");
+    switch_alias(texture.ptr, other.ptr);
+    if (!submit("copied mapping survives source remap", read_pso.ptr, true, ValueB))
+      throw std::runtime_error("copied mapping changed with source remap");
+
+    const D3D12_TILE_RANGE_FLAGS null_range = D3D12_TILE_RANGE_FLAG_NULL;
+    queue->UpdateTileMappings(other.ptr, 1, &coordinate, &region, nullptr, 1,
+                              &null_range, &heap_tile, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+    queue->CopyTileMappings(texture.ptr, &coordinate, other.ptr, &coordinate, &region, D3D12_TILE_MAPPING_FLAG_NONE);
+    if (!submit("copied NULL mapping reads zero", read_pso.ptr, true, 0))
+      throw std::runtime_error("copied NULL mapping GPU result mismatch");
+    std::cout << "packed mapping copy and bidirectional alias inheritance passed\n";
   }
   std::cout << "Packed mip sparse-tail mapping, remap, and lifetime tests passed\n";
   return 0;
@@ -513,7 +636,7 @@ int Run(const char *read_path, const char *write_a_path,
 } // namespace
 
 int main(int argc, char **argv) {
-  bool copy_upload = false, full_mips = false, metadata_only = false;
+  bool copy_upload = false, full_mips = false, metadata_only = false, copy_mappings = false, bad_alias_oracle = false;
   for (int i = 4; i < argc; ++i) {
     if (std::strcmp(argv[i], "--copy-upload") == 0)
       copy_upload = true;
@@ -521,18 +644,22 @@ int main(int argc, char **argv) {
       full_mips = true;
     else if (std::strcmp(argv[i], "--metadata-only") == 0)
       metadata_only = true;
+    else if (std::strcmp(argv[i], "--copy-mappings") == 0)
+      copy_mappings = true;
+    else if (std::strcmp(argv[i], "--bad-alias-oracle") == 0)
+      bad_alias_oracle = copy_mappings = true;
     else {
       std::cerr << "unknown option: " << argv[i] << "\n";
       return 2;
     }
   }
-  if (argc < 4 || (metadata_only && !full_mips)) {
+  if (argc < 4 || (metadata_only && (!full_mips || copy_mappings))) {
     std::cerr << "usage: dx12_reserved_texture_packed <read.cso> <write_a.cso> "
-                 "<write_b.cso> [--copy-upload] [--full-mips] [--metadata-only]\n";
+                 "<write_b.cso> [--copy-upload] [--full-mips] [--metadata-only|--copy-mappings|--bad-alias-oracle]\n";
     return 2;
   }
   try {
-    return Run(argv[1], argv[2], argv[3], copy_upload, full_mips, metadata_only);
+    return Run(argv[1], argv[2], argv[3], copy_upload, full_mips, metadata_only, copy_mappings, bad_alias_oracle);
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;
