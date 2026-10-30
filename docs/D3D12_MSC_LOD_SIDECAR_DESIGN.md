@@ -115,11 +115,12 @@ on the current return value. Empty views, swizzles, status results, null
 descriptors, sampler bias and LOD edge cases need independent validation.
 
 The transform also provides an opt-in conservative preflight that rejects
-indirect calls, non-call invocations, other AIR texture/sample/gather calls,
-and implicit-level calls before modifying a module. This restricts the accepted
-AIR shape; it does not prove converter-version compatibility or the semantics
-of unknown external helpers, null descriptors, status values, or numeric edge
-cases. The runtime does not yet request this preflight or use its output.
+indirect calls, non-call invocations, implicit-level calls, and external calls
+other than the recognized sample and LLVM intrinsics before modifying a module.
+Defined helpers are scanned too. This deliberately rejects other AIR intrinsics
+until their behavior is established. It does not prove converter-version
+compatibility or the semantics of null descriptors, status values, or numeric
+edge cases. The runtime does not yet request this preflight or use its output.
 
 The experimental patch API also accepts an auto-detection sentinel for a
 single compute entry point. It identifies the AIR argument tagged as an

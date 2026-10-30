@@ -107,6 +107,14 @@ patchMSCSampleLevelLOD(llvm::Module &module, MSCSamplerSidecarLayout layout) {
         auto *target = call_base ? call_base->getCalledFunction() : nullptr;
         if (layout.require_exclusive_texture_operations && call_base && (!call || !target))
           return MSCSampleLevelLODResult::Unsupported;
+        // Only the recognized sample intrinsic and LLVM intrinsics are known
+        // external calls here. An opaque helper could hide texture operations.
+        if (layout.require_exclusive_texture_operations && target && target->isDeclaration() &&
+            !target->isIntrinsic() && target->getName() != "air.sample_texture_2d.v4f32")
+          return MSCSampleLevelLODResult::Unsupported;
+        if (layout.require_exclusive_texture_operations && target && !target->isDeclaration() &&
+            target->getName() == "air.sample_texture_2d.v4f32")
+          return MSCSampleLevelLODResult::Unsupported;
         if (!target || target->getName() != "air.sample_texture_2d.v4f32") {
           if (layout.require_exclusive_texture_operations && target && target->getName().startswith("air.") &&
               (target->getName().contains("texture") || target->getName().startswith("air.sample") ||

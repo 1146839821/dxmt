@@ -244,8 +244,9 @@ int main() {
           MSCSampleLevelLODResult::Patched ||
       llvm::verifyModule(*strict, &llvm::errs()))
     return 1;
-  for (const char *name : {"air.read_texture_2d", "air.sample_texture_3d.v4f32",
-                           "air.gather_texture_2d"}) {
+  for (const char *name :
+       {"air.read_texture_2d", "air.sample_texture_3d.v4f32",
+        "air.gather_texture_2d", "opaque_helper", "air.unrecognized_helper"}) {
     std::string mixed_ir(ir);
     const auto position = mixed_ir.find("  ret void");
     mixed_ir.insert(position, std::string("  call void @") + name + "()\n");
