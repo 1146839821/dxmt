@@ -18,6 +18,7 @@ airconv_src = files([
  'nt/dxbc_converter_base.cpp',
  'transforms/lower_16bit_texread.cpp',
  'transforms/lower_unsupported_double.cpp',
+ 'transforms/msc_sample_level_lod.cpp',
  'transforms/simdgroup_implicit_membarrier.cpp',
 ])
 
