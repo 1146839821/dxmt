@@ -93,7 +93,8 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource,
 }
 
 int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
-        bool reverse_queue, bool early_work, DXGI_FORMAT format) {
+        bool reverse_queue, bool early_work, DXGI_FORMAT format,
+        bool bad_edge) {
   Owned<ID3D12Device> device;
   Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                     IID_PPV_ARGS(&device.ptr)));
@@ -228,11 +229,27 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
                 << " expected=0x" << expected[i] << std::dec << "\n";
       ok &= actual == expected[i];
     }
-    const UINT padding =
-        data[2 * (kTileBytes / 4) + tile_width * bytes_per_texel / 8];
-    std::cout << name << " edge padding=0x" << std::hex << padding << std::dec
-              << "\n";
-    ok &= padding == 0;
+    const UINT row_words = tile_width * bytes_per_texel / sizeof(UINT);
+    for (UINT y = 0; y < tile_height; ++y) {
+      for (UINT x = 0; x < row_words; ++x) {
+        UINT wanted = x < row_words / 2 ? expected[2] : 0;
+        if (bad_edge && std::strcmp(name, "forward") == 0 &&
+            y == tile_height - 1 && x == row_words / 2 - 1)
+          wanted ^= 1u;
+        const UINT actual = data[2 * (kTileBytes / 4) + y * row_words + x];
+        if (actual != wanted) {
+          std::cerr << name << " edge mismatch row=" << y << " word=" << x
+                    << " actual=0x" << std::hex << actual << " expected=0x"
+                    << wanted << std::dec << "\n";
+          ok = false;
+          break;
+        }
+      }
+      if (!ok)
+        break;
+    }
+    if (ok)
+      std::cout << name << " full edge and padding passed\n";
     readback->Unmap(0, nullptr);
     if (!ok)
       throw std::runtime_error(name);
@@ -355,7 +372,8 @@ int main(int argc, char **argv) {
   const bool rg16 = is("--rg16");
   const bool rgb10a2 = is("--rgb10a2");
   const bool bgrx = is("--bgrx");
-  const bool r8 = is("--r8") || is("--bad-r8");
+  const bool bad_edge = is("--bad-edge-r8");
+  const bool r8 = is("--r8") || is("--bad-r8") || bad_edge;
   const bool r16 = is("--r16");
   const bool rg32 = is("--rg32");
   const bool rgba32 = is("--rgba32");
@@ -384,7 +402,7 @@ int main(int argc, char **argv) {
                                        : DXGI_FORMAT_R32_UINT;
   try {
     return Run(bad, cross || bad_cross || cross_queue, bad_cross || bad_queue,
-               cross_queue, reverse_queue, early_work, format);
+               cross_queue, reverse_queue, early_work, format, bad_edge);
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;
