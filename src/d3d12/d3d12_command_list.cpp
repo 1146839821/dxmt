@@ -1032,6 +1032,7 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   Com<MTLD3D12DescriptorHeap, true> descriptor_heap_;
   Com<MTLD3D12SamplerDescriptorHeap, true> sampler_heap_;
   std::vector<Com<MTLD3D12SamplerDescriptorHeap, true>> recorded_sampler_heaps_;
+  std::vector<Com<MTLD3D12RootSignature, false>> recorded_static_sampler_roots_;
   struct RecordedSamplerLODSidecar {
     Com<MTLD3D12SamplerDescriptorHeap, true> heap;
     D3D12_GPU_DESCRIPTOR_HANDLE table;
@@ -1229,6 +1230,7 @@ public:
     pending_descriptor_use_indices_.clear();
     pending_descriptor_heaps_.clear();
     recorded_sampler_heaps_.clear();
+    recorded_static_sampler_roots_.clear();
     recorded_sampler_lod_sidecars_.clear();
     if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState)) {
       if (!pso->IsComputePipelineState)
@@ -1553,6 +1555,10 @@ public:
 
   void CollectSamplerHeapsForSubmission(std::vector<Com<MTLD3D12SamplerDescriptorHeap, true>> &heaps) const final {
     heaps.insert(heaps.end(), recorded_sampler_heaps_.begin(), recorded_sampler_heaps_.end());
+  }
+
+  void CollectStaticSamplerRootsForSubmission(std::vector<Com<MTLD3D12RootSignature, false>> &roots) const final {
+    roots.insert(roots.end(), recorded_static_sampler_roots_.begin(), recorded_static_sampler_roots_.end());
   }
 
   HRESULT TrackSamplerLODSidecar(MTLD3D12SamplerDescriptorHeap *heap, D3D12_GPU_DESCRIPTOR_HANDLE table) final {
@@ -3989,9 +3995,26 @@ public:
     cache.valid = true;
   }
 
+  bool
+  RetainStaticSamplerRoot(MTLD3D12RootSignature *root) {
+    try {
+      const auto found = std::find_if(recorded_static_sampler_roots_.begin(), recorded_static_sampler_roots_.end(),
+                                      [&](const auto &recorded) { return recorded.ptr() == root; });
+      if (found == recorded_static_sampler_roots_.end())
+        recorded_static_sampler_roots_.emplace_back(root);
+      return true;
+    } catch (const std::bad_alloc &) {
+      recording_error_ = E_OUTOFMEMORY;
+      FailRecording(__func__, "static sampler root retention allocation failed");
+      return false;
+    }
+  }
+
   uint64_t
   EncodeMSCStaticSamplers(MTLD3D12RootSignature *pRootSig) {
     if (!pRootSig->NumStaticSamplers || !pRootSig->EncodedStaticSamplers)
+      return 0;
+    if (!RetainStaticSamplerRoot(pRootSig))
       return 0;
 
     auto table_size = sizeof(dxmt_msc_descriptor_entry) * pRootSig->NumStaticSamplers;
@@ -4077,6 +4100,8 @@ public:
   EncodeStaticSamplers(MTLD3D12RootSignature *pRootSig) {
     auto static_sampler_encode_size = sizeof(uint64_t) * pRootSig->NumStaticSamplers * 4;
     if (!static_sampler_encode_size)
+      return 0;
+    if (!RetainStaticSamplerRoot(pRootSig))
       return 0;
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(static_sampler_encode_size, 64);
     if (!Ptr) {

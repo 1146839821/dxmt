@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d12.h>
 
+#include <atomic>
 #include <cstring>
 #include <cmath>
 #include <cstdint>
@@ -10,6 +11,36 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+
+class LifetimeMarker : public IUnknown {
+  std::atomic<ULONG> refs_{1};
+  std::atomic<bool> &destroyed_;
+
+public:
+  explicit LifetimeMarker(std::atomic<bool> &destroyed) : destroyed_(destroyed) {}
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override {
+    if (!out)
+      return E_POINTER;
+    *out = nullptr;
+    if (iid != IID_IUnknown)
+      return E_NOINTERFACE;
+    *out = static_cast<IUnknown *>(this);
+    AddRef();
+    return S_OK;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const auto count = --refs_;
+    if (!count) {
+      destroyed_ = true;
+      delete this;
+    }
+    return count;
+  }
+};
+static const GUID lifetime_marker_guid = {
+    0x8570ff24, 0xd1a9, 0x4149, {0xa2, 0x73, 0xf7, 0x29, 0x8e, 0x41, 0xd3, 0x01}
+};
 
 static bool
 CheckHR(const char *name, HRESULT hr) {
@@ -251,7 +282,8 @@ main(int argc, char **argv) {
     if (!typed_format)
       return 2;
   }
-  const bool static_sampler = argc == 3 && strcmp(argv[2], "--static-sampler") == 0;
+  const bool static_lifetime = argc == 3 && strcmp(argv[2], "--static-lifetime") == 0;
+  const bool static_sampler = static_lifetime || (argc == 3 && strcmp(argv[2], "--static-sampler") == 0);
   const bool direct_indexed_uav_texture =
       argc == 3 && strcmp(argv[2], "--direct-indexed-uav-texture") == 0;
   const bool direct_indexed =
@@ -285,6 +317,9 @@ main(int argc, char **argv) {
   ID3D12PipelineState *pso = nullptr;
   ID3D12GraphicsCommandList *list = nullptr;
   ID3D12Fence *fence = nullptr;
+  ID3D12Fence *gate = nullptr;
+  ID3D12CommandAllocator *reset_allocator = nullptr;
+  static std::atomic<bool> marker_destroyed{false};
   HANDLE event = nullptr;
   ID3D12CommandList *lists[1] = {};
   UINT *mapped = nullptr;
@@ -405,6 +440,21 @@ main(int argc, char **argv) {
           device->CreateRootSignature(0, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
                                        IID_PPV_ARGS(&root_signature))))
     goto cleanup;
+
+  if (static_lifetime) {
+    auto *marker = new LifetimeMarker(marker_destroyed);
+    const HRESULT hr = root_signature->SetPrivateDataInterface(lifetime_marker_guid, marker);
+    marker->Release();
+    if (marker_destroyed.load()) {
+      std::cerr << "static sampler marker was not retained by root signature\n";
+      goto cleanup;
+    }
+    if (!CheckHR("SetPrivateDataInterface", hr) ||
+        !CheckHR("CreateGate", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))) ||
+        !CheckHR("CreateResetAllocator", device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                         IID_PPV_ARGS(&reset_allocator))))
+      goto cleanup;
+  }
 
   resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
   resource_heap_desc.NumDescriptors = texture_uav ? 3 : 2;
@@ -650,8 +700,22 @@ main(int argc, char **argv) {
   }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
+  if (static_lifetime && !CheckHR("WaitGate", queue->Wait(gate, 1)))
+    goto cleanup;
   lists[0] = list;
   queue->ExecuteCommandLists(1, lists);
+  if (static_lifetime) {
+    root_signature->Release();
+    root_signature = nullptr;
+    pso->Release();
+    pso = nullptr;
+    if (!CheckHR("ResetAfterSubmit", list->Reset(reset_allocator, nullptr)) || marker_destroyed.load()) {
+      std::cerr << "static sampler root released before GPU completion\n";
+      goto cleanup;
+    }
+    if (!CheckHR("ReleaseGate", gate->Signal(1)))
+      goto cleanup;
+  }
   if (!CheckHR("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
     goto cleanup;
   if (!CheckHR("Signal", queue->Signal(fence, 1)))
@@ -662,6 +726,10 @@ main(int argc, char **argv) {
   if (WaitForSingleObject(event, 30000) != WAIT_OBJECT_0 ||
       !CheckHR("GetDeviceRemovedReason", device->GetDeviceRemovedReason())) {
     std::cerr << "GPU completion failed\n";
+    goto cleanup;
+  }
+  if (static_lifetime && !marker_destroyed.load()) {
+    std::cerr << "static sampler root retained after GPU completion\n";
     goto cleanup;
   }
   if (!CheckHR("MapReadback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
@@ -686,6 +754,12 @@ main(int argc, char **argv) {
   result = 0;
 
 cleanup:
+  if (gate) {
+    gate->Signal(1);
+    gate->Release();
+  }
+  if (reset_allocator)
+    reset_allocator->Release();
   if (event)
     CloseHandle(event);
   if (fence)

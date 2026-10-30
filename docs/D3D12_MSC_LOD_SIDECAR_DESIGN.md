@@ -17,6 +17,10 @@ command buffer completes, including after command-list reset. Static sampler
 uploads and sidecar binding remain unimplemented; actual shader access and
 residency are not yet verified. An internal recording hook records sidecar
 addresses for submission-time checks, but no shader binding path calls it yet.
+Recordings also retain root signatures used to encode static samplers, and
+submissions retain them through GPU completion. This preserves both ordinary
+static sampler states and any relaxed states owned by those roots, but does not
+itself upload or bind a static-sampler LOD sidecar.
 
 An update that cannot create a relaxed sampler clears that sidecar entry and
 marks the heap sidecar invalid; preparation must be repeated successfully before
