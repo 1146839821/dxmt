@@ -15,6 +15,8 @@ namespace {
 constexpr UINT kTileBytes = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
 constexpr UINT kValue = 0x12345678;
 
+UINT TileWord(UINT value, UINT word) { return value ^ (word * 0x9e3779b9u); }
+
 template <typename T> struct Owned {
   T *ptr = nullptr;
 
@@ -93,8 +95,8 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource,
 }
 
 int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
-        bool reverse_queue, bool early_work, DXGI_FORMAT format,
-        bool bad_edge) {
+        bool reverse_queue, bool early_work, DXGI_FORMAT format, bool bad_edge,
+        bool bad_position) {
   Owned<ID3D12Device> device;
   Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                     IID_PPV_ARGS(&device.ptr)));
@@ -169,7 +171,7 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
   const std::array<UINT, 3> values{0x11112222, 0x33334444, 0x55556666};
   for (UINT i = 0; i < 3; i++)
     for (UINT j = 0; j < kTileBytes / 4; j++)
-      data[i * (kTileBytes / 4) + j] = values[i];
+      data[i * (kTileBytes / 4) + j] = TileWord(values[i], j);
   upload->Unmap(0, nullptr);
   D3D12_TILED_RESOURCE_COORDINATE zero = {};
   D3D12_TILE_REGION_SIZE all = {};
@@ -232,7 +234,12 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
     const UINT row_words = tile_width * bytes_per_texel / sizeof(UINT);
     for (UINT y = 0; y < tile_height; ++y) {
       for (UINT x = 0; x < row_words; ++x) {
-        UINT wanted = x < row_words / 2 ? expected[2] : 0;
+        UINT word = y * row_words + x;
+        if (bad_position && std::strcmp(name, "forward") == 0 &&
+            y == tile_height - 1 && x == row_words / 2 - 1)
+          word -= row_words;
+        UINT wanted =
+            x < row_words / 2 && expected[2] ? TileWord(expected[2], word) : 0;
         if (bad_edge && std::strcmp(name, "forward") == 0 &&
             y == tile_height - 1 && x == row_words / 2 - 1)
           wanted ^= 1u;
@@ -373,7 +380,8 @@ int main(int argc, char **argv) {
   const bool rgb10a2 = is("--rgb10a2");
   const bool bgrx = is("--bgrx");
   const bool bad_edge = is("--bad-edge-r8");
-  const bool r8 = is("--r8") || is("--bad-r8") || bad_edge;
+  const bool bad_position = is("--bad-position-r8");
+  const bool r8 = is("--r8") || is("--bad-r8") || bad_edge || bad_position;
   const bool r16 = is("--r16");
   const bool rg32 = is("--rg32");
   const bool rgba32 = is("--rgba32");
@@ -402,7 +410,8 @@ int main(int argc, char **argv) {
                                        : DXGI_FORMAT_R32_UINT;
   try {
     return Run(bad, cross || bad_cross || cross_queue, bad_cross || bad_queue,
-               cross_queue, reverse_queue, early_work, format, bad_edge);
+               cross_queue, reverse_queue, early_work, format, bad_edge,
+               bad_position);
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;
