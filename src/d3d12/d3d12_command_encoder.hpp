@@ -22,10 +22,29 @@
 #include "dxmt_texture.hpp"
 #include "dxmt_scaler.hpp"
 #include "com/com_pointer.hpp"
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
 namespace dxmt {
+
+struct IndirectRenderCommandData {
+  uint64_t cmd_buf;
+  uint64_t max_count;
+  uint64_t max_count_buffer;
+  uint64_t argument_buffer;
+  uint64_t static_samplers;
+  uint64_t rootsig_qwords;
+  uint32_t rootsig_qwords_stride;
+  uint32_t primitive_type;
+  uint64_t vertex_buffer;
+  uint64_t index_buffer;
+  DXGI_FORMAT index_buffer_format;
+  uint32_t vertex_argbuf_stride;
+  uint32_t vertex_slot_mask;
+};
+static_assert(offsetof(IndirectRenderCommandData, vertex_slot_mask) == 80);
+static_assert(sizeof(IndirectRenderCommandData) == 88);
 
 class MTLD3D12Resource;
 class MTLD3D12GraphicsPipelineState;

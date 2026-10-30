@@ -16,7 +16,7 @@
 #include <string>
 #include <algorithm>
 #include "airconv_public.h"
-#include "d3d12_command_allocator.hpp"
+#include "d3d12_command_encoder.hpp"
 #include <cstdint>
 #include <thread>
 #include <atomic>

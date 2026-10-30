@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include "d3d12_command_encoder.hpp"
 #include "d3d12_pageable.hpp"
 #include "dxmt_command_clear.hpp"
 #include <atomic>
@@ -65,24 +66,6 @@ struct IndirectComputeCommandData {
 static_assert(offsetof(IndirectComputeCommandData, vertex_buffer) == 64);
 static_assert(offsetof(IndirectComputeCommandData, so_template) == 96);
 static_assert(sizeof(IndirectComputeCommandData) == 112);
-
-struct IndirectRenderCommandData {
-  uint64_t cmd_buf;
-  uint64_t max_count;
-  uint64_t max_count_buffer;
-  uint64_t argument_buffer;
-  uint64_t static_samplers;
-  uint64_t rootsig_qwords;
-  uint32_t rootsig_qwords_stride;
-  uint32_t primitive_type;
-  uint64_t vertex_buffer;
-  uint64_t index_buffer;
-  DXGI_FORMAT index_buffer_format;
-  uint32_t vertex_argbuf_stride;
-  uint32_t vertex_slot_mask;
-};
-static_assert(offsetof(IndirectRenderCommandData, vertex_slot_mask) == 80);
-static_assert(sizeof(IndirectRenderCommandData) == 88);
 
 class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllocator> {
   friend class MTLD3D12GraphicsCommandListImpl;
