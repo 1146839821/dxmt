@@ -86,6 +86,25 @@ simply taking the maximum of the LOD and clamp is insufficient. Missing
 component defaults and view swizzles require separate coverage. Results are in
 `dxmt-test/n23-lod-empty-20261030`.
 
+## Experimental empty-intersection result
+
+On the same M1 Max, a native Metal test performed an out-of-bounds texture
+read with API and shader validation enabled. R32 and RGBA32 views returned
+their respective missing-channel defaults, and two swizzled views produced the
+expected mapped values. Apple's [Metal Shading Language specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)
+describes out-of-bounds texture-read component defaults in the texture
+functions section.
+
+An isolated extension of the fixed 2D AIR prototype checks the view's mip count
+and selects an out-of-bounds read for an empty intersection. It passed both
+the nonempty and empty R32 native harness cases with Metal validation enabled.
+This is a candidate mechanism, not a production patch: it performs the
+out-of-bounds read even for nonempty views and does not establish correctness
+for other texture types, comparison sampling, status values, null descriptors,
+all swizzles or shader stages. Metal and D3D component mapping and descriptor
+lifetime also require end-to-end verification. Artifacts and logs are in
+`dxmt-test/n24-lod-oob-20261030`.
+
 The local reproduction artifacts, converted AIR and binary identities are in
 `dxmt-test/n19-metal-minlod-20261030`, `n20-lod-sample-20261030`, and
 `n21-lod-compiler-20261030` alongside this checkout.
