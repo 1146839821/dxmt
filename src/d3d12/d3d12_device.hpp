@@ -531,6 +531,7 @@ public:
 
   size_t NumStaticSamplers;
   uint64_t const *EncodedStaticSamplers;
+  D3D12SamplerLODRange const *StaticSamplerLODRanges = nullptr;
 
   uint64_t MSCArgumentBufferSize = 0;
   uint32_t MSCParameterCount = 0;

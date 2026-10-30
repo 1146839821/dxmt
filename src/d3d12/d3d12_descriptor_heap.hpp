@@ -297,11 +297,19 @@ public:
   virtual void CopyDescriptors(UINT From, MTLD3D12DescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;
 };
 
+// Original D3D sampler limits, retained separately from the MSC descriptor.
+// This is CPU metadata, not the experimental GPU sidecar ABI.
+struct D3D12SamplerLODRange {
+  float minimum = 0;
+  float maximum = 0;
+};
+
 class MTLD3D12SamplerDescriptorHeap : public ID3D12DescriptorHeap {
 public:
   virtual uint64_t GetMSCDescriptorTableAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
   virtual WMT::Buffer GetDescriptorHeapBuffer() = 0;
   virtual WMT::Buffer GetMSCDescriptorHeapBuffer() = 0;
+  virtual bool GetSamplerLODRange(UINT Index, D3D12SamplerLODRange &Range) const = 0;
 
   virtual HRESULT AddSampler(UINT Index, const D3D12_SAMPLER_DESC *Desc) = 0;
 

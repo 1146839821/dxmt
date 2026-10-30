@@ -4,6 +4,11 @@ Status: design only, 2026-10-30. Baseline `d8eb1bbd` on `feat/d3d12`.
 The experimental AIR transform is not called by runtime compilation. This
 design does not claim that ResourceMinLODClamp is implemented.
 
+The subsequent sampler metadata slice preserves the original static and dynamic
+sampler LOD ranges and copies dynamic ranges with descriptors. It does not yet
+create a relaxed sampler or GPU sidecar, bind either object, or prove their
+submission lifetime. The GPU sidecar ABI described below remains a proposal.
+
 ## Goal and evidence
 
 Enable correct sampler and SRV minimum-LOD ordering for the explicitly

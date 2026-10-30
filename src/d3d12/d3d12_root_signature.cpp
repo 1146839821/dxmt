@@ -387,6 +387,7 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
   std::vector<RootDescriptorRangeMetadata> root_descriptor_ranges_;
 
   std::vector<Rc<Sampler>> static_samplers_; // which is not really "static"
+  std::vector<D3D12SamplerLODRange> static_sampler_lod_ranges_;
   /**
   It's supposed to be implemented by `constexpr sampler` in Metal shader, but
   for unknown reason it lacks of `mirrored_clamp_to_edge` address mode.
@@ -491,14 +492,18 @@ public:
         PopulateWMTSamplerInfo(device_->GetMTLDevice(), info, desc.pStaticSamplers[i]);
 
         auto sampler = Sampler::createSampler(device_->GetMTLDevice(), info, desc.pStaticSamplers[i].MipLODBias);
+        if (!sampler)
+          return E_FAIL;
         static_samplers_encoded_.push_back(sampler->sampler_state_handle);
         static_samplers_encoded_.push_back(sampler->sampler_state_cube_handle);
         static_samplers_encoded_.push_back((uint64_t)std::bit_cast<uint32_t>(sampler->lod_bias));
         static_samplers_encoded_.push_back(0 /* padding */);
 
         static_samplers_.emplace_back(std::move(sampler));
+        static_sampler_lod_ranges_.push_back({desc.pStaticSamplers[i].MinLOD, desc.pStaticSamplers[i].MaxLOD});
       }
       EncodedStaticSamplers = static_samplers_encoded_.data();
+      StaticSamplerLODRanges = static_sampler_lod_ranges_.data();
     }
 
     auto [layout, total_qwords] = CalculateRootParameterLayout(desc);
