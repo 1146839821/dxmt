@@ -4,6 +4,7 @@
 #include <d3d12.h>
 
 #include <cstring>
+#include <functional>
 #include <array>
 #include <iostream>
 #include <stdexcept>
@@ -92,7 +93,7 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource,
 }
 
 int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
-        bool reverse_queue) {
+        bool reverse_queue, bool early_work) {
   Owned<ID3D12Device> device;
   Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                     IID_PPV_ARGS(&device.ptr)));
@@ -109,6 +110,7 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
                                                IID_PPV_ARGS(&handoff.ptr)));
   }
   ID3D12CommandQueue *active_queue = queue.ptr;
+  std::function<void()> after_submission;
   Owned<ID3D12Fence> fence;
   Check("fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
                                      IID_PPV_ARGS(&fence.ptr)));
@@ -182,6 +184,11 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
     Check("close", list->Close());
     ID3D12CommandList *lists[] = {list.ptr};
     active_queue->ExecuteCommandLists(1, lists);
+    if (after_submission) {
+      auto action = std::move(after_submission);
+      after_submission = {};
+      action();
+    }
     Check("signal", active_queue->Signal(fence.ptr, ++serial));
     Wait(fence.ptr, serial);
     Check("device status", device->GetDeviceRemovedReason());
@@ -230,6 +237,34 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
   queue->CopyTileMappings(texture.ptr, &dst, texture.ptr, &src, &pair,
                           D3D12_TILE_MAPPING_FLAG_NONE);
   verify("null", {values[0], values[0], 0});
+  // Writing an unbacked sparse tile must be discarded, not affect the heap.
+  {
+    Owned<ID3D12CommandAllocator> allocator;
+    Owned<ID3D12GraphicsCommandList> list;
+    Check("null write allocator",
+          device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                         IID_PPV_ARGS(&allocator.ptr)));
+    Check("null write list",
+          device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                    allocator.ptr, nullptr,
+                                    IID_PPV_ARGS(&list.ptr)));
+    D3D12_TILED_RESOURCE_COORDINATE null_tile = {};
+    null_tile.X = 2;
+    Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COMMON,
+               D3D12_RESOURCE_STATE_COPY_DEST);
+    list->CopyTiles(
+        texture.ptr, &null_tile, &single, upload.ptr, 0,
+        D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
+    Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COPY_DEST,
+               D3D12_RESOURCE_STATE_COMMON);
+    Check("null write close", list->Close());
+    ID3D12CommandList *lists[] = {list.ptr};
+    queue->ExecuteCommandLists(1, lists);
+    Check("null write signal", queue->Signal(fence.ptr, ++serial));
+    Wait(fence.ptr, serial);
+  }
+  map_all();
+  verify("null write discarded", values);
   if (cross_resource) {
     map_all();
     Owned<ID3D12Resource> destination;
@@ -239,10 +274,11 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
                                          IID_PPV_ARGS(&destination.ptr)));
     if (!destination->GetGPUVirtualAddress())
       throw std::runtime_error("destination has no sparse buffer backing");
-    if (reverse_queue)
+    if (reverse_queue || early_work)
       Check("early consumer wait", consumer->Wait(handoff.ptr, 1));
-    queue->CopyTileMappings(destination.ptr, &zero, texture.ptr, &zero, &all,
-                            D3D12_TILE_MAPPING_FLAG_NONE);
+    if (!early_work)
+      queue->CopyTileMappings(destination.ptr, &zero, texture.ptr, &zero, &all,
+                              D3D12_TILE_MAPPING_FLAG_NONE);
     UINT64 handoff_value = 0;
     const auto synchronize = [&] {
       if (!cross_queue)
@@ -250,14 +286,22 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
       ++handoff_value;
       Check("producer handoff signal",
             queue->Signal(handoff.ptr, handoff_value));
-      if (!(reverse_queue && handoff_value == 1))
+      if (!((reverse_queue || early_work) && handoff_value == 1))
         Check("consumer handoff wait",
               consumer->Wait(handoff.ptr, handoff_value));
     };
-    synchronize();
+    if (!early_work)
+      synchronize();
     if (cross_queue)
       active_queue = consumer.ptr;
     std::swap(texture.ptr, destination.ptr);
+    if (early_work) {
+      after_submission = [&] {
+        queue->CopyTileMappings(texture.ptr, &zero, destination.ptr, &zero,
+                                &all, D3D12_TILE_MAPPING_FLAG_NONE);
+        synchronize();
+      };
+    }
     verify("cross copied",
            {values[0], bad_cross ? values[0] : values[1], values[2]});
     queue->UpdateTileMappings(destination.ptr, 1, &one, &single, nullptr, 1,
@@ -282,15 +326,22 @@ int main(int argc, char **argv) {
   bool cross_queue =
       argc == 2 && (std::strcmp(argv[1], "--cross-queue") == 0 ||
                     std::strcmp(argv[1], "--reverse-queue") == 0 ||
+                    std::strcmp(argv[1], "--early-work") == 0 ||
+                    std::strcmp(argv[1], "--bad-early-work") == 0 ||
                     std::strcmp(argv[1], "--bad-queue-oracle") == 0);
   bool reverse_queue =
       argc == 2 && std::strcmp(argv[1], "--reverse-queue") == 0;
-  bool bad_queue = argc == 2 && std::strcmp(argv[1], "--bad-queue-oracle") == 0;
+  bool bad_queue =
+      argc == 2 && (std::strcmp(argv[1], "--bad-queue-oracle") == 0 ||
+                    std::strcmp(argv[1], "--bad-early-work") == 0);
+  bool early_work =
+      argc == 2 && (std::strcmp(argv[1], "--early-work") == 0 ||
+                    std::strcmp(argv[1], "--bad-early-work") == 0);
   if (argc > 2 || (argc == 2 && !bad && !cross && !bad_cross && !cross_queue))
     return 2;
   try {
     return Run(bad, cross || bad_cross || cross_queue, bad_cross || bad_queue,
-               cross_queue, reverse_queue);
+               cross_queue, reverse_queue, early_work);
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;

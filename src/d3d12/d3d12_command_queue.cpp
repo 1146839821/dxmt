@@ -982,10 +982,11 @@ public:
               const UINT tile_index = tile_indices[index];
               const UINT64 linear_offset = data->buffer_offset + index * tile_size;
               const UINT64 sparse_offset = uint64_t(tile_index) * tile_size;
-              const bool mapped = tiled->IsTileMapped(tile_index);
+              // Placement-sparse buffers have Metal sparse tier 1 semantics:
+              // unbacked reads return zero and writes are discarded. Resolve
+              // mappings on the GPU after queue waits rather than snapshotting
+              // CPU mapping state before an upstream queue has run.
               if (data->buffer_to_tiled) {
-                if (!mapped)
-                  continue;
                 wmtcmd_blit_copy_from_buffer_to_buffer copy = {};
                 copy.type = WMTBlitCommandCopyFromBufferToBuffer;
                 copy.src = linear_buffer;
@@ -999,17 +1000,6 @@ public:
 
               if (!data->tiled_to_buffer)
                 continue;
-              if (!mapped) {
-                wmtcmd_blit_fillbuffer fill = {};
-                fill.type = WMTBlitCommandFillBuffer;
-                fill.buffer = linear_buffer;
-                fill.offset = linear_offset;
-                fill.length = tile_size;
-                fill.value = 0;
-                MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
-                continue;
-              }
-
               wmtcmd_blit_copy_from_buffer_to_buffer copy = {};
               copy.type = WMTBlitCommandCopyFromBufferToBuffer;
               copy.src = sparse_buffer;
