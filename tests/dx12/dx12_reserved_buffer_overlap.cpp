@@ -91,7 +91,8 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource,
                             state, nullptr, IID_PPV_ARGS(&resource.ptr)));
 }
 
-int Run(bool bad_oracle, bool cross_resource, bool bad_cross) {
+int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
+        bool reverse_queue) {
   Owned<ID3D12Device> device;
   Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                     IID_PPV_ARGS(&device.ptr)));
@@ -99,6 +100,15 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross) {
   D3D12_COMMAND_QUEUE_DESC q = {};
   q.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
   Check("queue", device->CreateCommandQueue(&q, IID_PPV_ARGS(&queue.ptr)));
+  Owned<ID3D12CommandQueue> consumer;
+  Owned<ID3D12Fence> handoff;
+  if (cross_queue) {
+    Check("consumer queue",
+          device->CreateCommandQueue(&q, IID_PPV_ARGS(&consumer.ptr)));
+    Check("handoff fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                               IID_PPV_ARGS(&handoff.ptr)));
+  }
+  ID3D12CommandQueue *active_queue = queue.ptr;
   Owned<ID3D12Fence> fence;
   Check("fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
                                      IID_PPV_ARGS(&fence.ptr)));
@@ -171,8 +181,8 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross) {
                D3D12_RESOURCE_STATE_COMMON);
     Check("close", list->Close());
     ID3D12CommandList *lists[] = {list.ptr};
-    queue->ExecuteCommandLists(1, lists);
-    Check("signal", queue->Signal(fence.ptr, ++serial));
+    active_queue->ExecuteCommandLists(1, lists);
+    Check("signal", active_queue->Signal(fence.ptr, ++serial));
     Wait(fence.ptr, serial);
     Check("device status", device->GetDeviceRemovedReason());
   };
@@ -229,17 +239,35 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross) {
                                          IID_PPV_ARGS(&destination.ptr)));
     if (!destination->GetGPUVirtualAddress())
       throw std::runtime_error("destination has no sparse buffer backing");
+    if (reverse_queue)
+      Check("early consumer wait", consumer->Wait(handoff.ptr, 1));
     queue->CopyTileMappings(destination.ptr, &zero, texture.ptr, &zero, &all,
                             D3D12_TILE_MAPPING_FLAG_NONE);
+    UINT64 handoff_value = 0;
+    const auto synchronize = [&] {
+      if (!cross_queue)
+        return;
+      ++handoff_value;
+      Check("producer handoff signal",
+            queue->Signal(handoff.ptr, handoff_value));
+      if (!(reverse_queue && handoff_value == 1))
+        Check("consumer handoff wait",
+              consumer->Wait(handoff.ptr, handoff_value));
+    };
+    synchronize();
+    if (cross_queue)
+      active_queue = consumer.ptr;
     std::swap(texture.ptr, destination.ptr);
     verify("cross copied",
            {values[0], bad_cross ? values[0] : values[1], values[2]});
     queue->UpdateTileMappings(destination.ptr, 1, &one, &single, nullptr, 1,
                               &null_flag, &offset, nullptr,
                               D3D12_TILE_MAPPING_FLAG_NONE);
+    synchronize();
     verify("cross independent", {values[0], values[1], values[2]});
     queue->CopyTileMappings(texture.ptr, &one, destination.ptr, &one, &single,
                             D3D12_TILE_MAPPING_FLAG_NONE);
+    synchronize();
     verify("cross null", {values[0], 0, values[2]});
     std::cout << "cross-resource buffer mapping readback passed\n";
   }
@@ -251,10 +279,18 @@ int main(int argc, char **argv) {
   bool bad = argc == 2 && std::strcmp(argv[1], "--bad-oracle") == 0;
   bool cross = argc == 2 && std::strcmp(argv[1], "--cross-resource") == 0;
   bool bad_cross = argc == 2 && std::strcmp(argv[1], "--bad-cross-oracle") == 0;
-  if (argc > 2 || (argc == 2 && !bad && !cross && !bad_cross))
+  bool cross_queue =
+      argc == 2 && (std::strcmp(argv[1], "--cross-queue") == 0 ||
+                    std::strcmp(argv[1], "--reverse-queue") == 0 ||
+                    std::strcmp(argv[1], "--bad-queue-oracle") == 0);
+  bool reverse_queue =
+      argc == 2 && std::strcmp(argv[1], "--reverse-queue") == 0;
+  bool bad_queue = argc == 2 && std::strcmp(argv[1], "--bad-queue-oracle") == 0;
+  if (argc > 2 || (argc == 2 && !bad && !cross && !bad_cross && !cross_queue))
     return 2;
   try {
-    return Run(bad, cross || bad_cross, bad_cross);
+    return Run(bad, cross || bad_cross || cross_queue, bad_cross || bad_queue,
+               cross_queue, reverse_queue);
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;
