@@ -35,6 +35,12 @@ type is also accepted by the AIR transform. The extension sorts offsets and
 appends aligned pointer slots; local roots, directly indexed sampler heaps and
 ambiguous mappings are rejected. Neither shader compilation nor command
 encoding consumes this layout yet, and no pipeline cache version has changed.
+An experimental AIRCONV C entry point now accepts table offsets and applies the
+strict transform to an MSC metallib, distinguishing unsupported, unchanged,
+and invalid input. It is not called by the WineMetal compilation path. The
+native AIRCONV build disables C++ exceptions; allocation-failure behavior of
+the LLVM transformation and metallib writer remains unverified and must be
+addressed before a runtime caller relies on this path.
 
 ## Goal and evidence
 

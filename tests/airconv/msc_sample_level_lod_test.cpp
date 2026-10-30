@@ -1,4 +1,7 @@
 #include "transforms/msc_sample_level_lod.hpp"
+#include "airconv_public.h"
+#include "compiled_bitcode.hpp"
+#include "metallib_writer.hpp"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -83,6 +86,50 @@ int main() {
     return 1;
   MSCSamplerSidecarTable tables[] = {{8, 16}};
   auto module = parse(context, ir);
+  if (!module)
+    return 1;
+  llvm::SmallVector<char, 0> original_metal;
+  llvm::raw_svector_ostream original_stream(original_metal);
+  dxmt::metallib::MetallibWriter writer;
+  writer.Write(*module, original_stream);
+  SM50_MSC_LOD_SIDECAR_TABLE abi_tables[] = {{8, 16}};
+  sm50_bitcode_t patched_metal = nullptr;
+  if (SM50PatchMetalLibSampleLevelLOD(
+          original_metal.data(), original_metal.size(), 0, 16, abi_tables, 1,
+          &patched_metal) != SM50_MSC_LOD_PATCHED ||
+      !patched_metal)
+    return 1;
+  delete static_cast<SM50CompiledBitcodeInternal *>(patched_metal);
+  patched_metal = reinterpret_cast<void *>(1);
+  if (SM50PatchMetalLibSampleLevelLOD(
+          original_metal.data(), original_metal.size(), 0, 16, nullptr, 1,
+          &patched_metal) != SM50_MSC_LOD_INVALID_INPUT ||
+      patched_metal)
+    return 1;
+  if (SM50PatchMetalLibSampleLevelLOD("bad", 3, 0, 16, abi_tables, 1,
+                                      &patched_metal) !=
+          SM50_MSC_LOD_INVALID_INPUT ||
+      patched_metal ||
+      SM50PatchMetalLibSampleLevelLOD(
+          original_metal.data(), original_metal.size(), 0, 16, abi_tables, 66,
+          &patched_metal) != SM50_MSC_LOD_INVALID_INPUT ||
+      patched_metal)
+    return 1;
+  SM50_MSC_LOD_SIDECAR_TABLE invalid_abi[] = {{8, 8}};
+  if (SM50PatchMetalLibSampleLevelLOD(
+          original_metal.data(), original_metal.size(), 0, 16, invalid_abi, 1,
+          &patched_metal) != SM50_MSC_LOD_UNSUPPORTED ||
+      patched_metal)
+    return 1;
+  llvm::Module empty("empty", context);
+  llvm::SmallVector<char, 0> empty_metal;
+  llvm::raw_svector_ostream empty_stream(empty_metal);
+  writer.Write(empty, empty_stream);
+  if (SM50PatchMetalLibSampleLevelLOD(empty_metal.data(), empty_metal.size(), 0,
+                                      16, abi_tables, 1, &patched_metal) !=
+          SM50_MSC_LOD_UNCHANGED ||
+      patched_metal)
+    return 1;
   if (!module ||
       patchMSCSampleLevelLOD(*module, {0, 16, tables, 1}) !=
           MSCSampleLevelLODResult::Patched ||

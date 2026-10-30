@@ -56,7 +56,8 @@ if get_option('enable_tests')
   test('airconv lower unsupported double', lower_unsupported_double_test)
 
   msc_sample_level_lod_test = executable('msc-sample-level-lod-test',
-    files('../../../tests/airconv/msc_sample_level_lod_test.cpp', '../transforms/msc_sample_level_lod.cpp'),
+    files('../../../tests/airconv/msc_sample_level_lod_test.cpp', '../transforms/msc_sample_level_lod.cpp',
+          '../transforms/lower_unsupported_double.cpp', '../metallib_patch.cpp', '../metallib_writer.cpp'),
     include_directories : [ include_directories('..'), llvm_include_path_darwin ],
     cpp_args            : [ airconv_args ],
     link_args           : [ llvm_ld_flags_darwin, llvm_deps ],

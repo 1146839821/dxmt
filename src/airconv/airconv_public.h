@@ -331,6 +331,21 @@ AIRCONV_API int SM50Compile(
 AIRCONV_API int SM50PatchMetalLibUnsupportedDouble(
   const void *Data, size_t Size, sm50_bitcode_t *pPatched
 );
+/* Experimental, strict AIR shape only. No runtime caller is enabled yet. */
+struct SM50_MSC_LOD_SIDECAR_TABLE {
+  uint32_t sampler_table_offset;
+  uint32_t sidecar_offset;
+};
+enum SM50_MSC_LOD_PATCH_RESULT {
+  SM50_MSC_LOD_PATCHED = 0,
+  SM50_MSC_LOD_INVALID_INPUT = 1,
+  SM50_MSC_LOD_UNSUPPORTED = 2,
+  SM50_MSC_LOD_UNCHANGED = 3,
+};
+AIRCONV_API int SM50PatchMetalLibSampleLevelLOD(
+  const void *Data, size_t Size, uint32_t RootArgumentIndex, uint32_t OriginalRootSize,
+  const struct SM50_MSC_LOD_SIDECAR_TABLE *Tables, size_t TableCount, sm50_bitcode_t *pPatched
+);
 AIRCONV_API void SM50GetCompiledBitcode(
   sm50_bitcode_t pBitcode, struct SM50_COMPILED_BITCODE *pData
 );
