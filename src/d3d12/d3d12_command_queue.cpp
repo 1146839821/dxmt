@@ -1046,22 +1046,8 @@ public:
               return;
             encoder.waitForFence(fence_);
             for (size_t index = 0; index < tile_indices.size(); index++) {
-              const UINT tile_index = tile_indices[index];
               const UINT64 linear_offset = data->buffer_offset + index * tile_size;
               const auto &copy_info = copy_infos[index];
-              if (!tiled->IsTileMapped(tile_index)) {
-                if (data->tiled_to_buffer) {
-                  wmtcmd_blit_fillbuffer fill = {};
-                  fill.type = WMTBlitCommandFillBuffer;
-                  fill.buffer = linear_buffer;
-                  fill.offset = linear_offset;
-                  fill.length = tile_size;
-                  fill.value = 0;
-                  MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
-                }
-                continue;
-              }
-
               if (data->buffer_to_tiled) {
                 wmtcmd_blit_copy_from_buffer_to_texture copy = {};
                 copy.type = WMTBlitCommandCopyFromBufferToTexture;
@@ -1078,6 +1064,16 @@ public:
                 continue;
               }
 
+              // The texture may cover only part of a D3D tile at its edges.
+              // Initialize the whole output tile before the sparse blit so
+              // unbacked texels and out-of-resource padding are deterministic.
+              wmtcmd_blit_fillbuffer fill = {};
+              fill.type = WMTBlitCommandFillBuffer;
+              fill.buffer = linear_buffer;
+              fill.offset = linear_offset;
+              fill.length = tile_size;
+              fill.value = 0;
+              MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
               wmtcmd_blit_copy_from_texture_to_buffer copy = {};
               copy.type = WMTBlitCommandCopyFromTextureToBuffer;
               copy.src = sparse_texture;
