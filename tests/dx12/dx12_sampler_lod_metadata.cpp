@@ -160,8 +160,21 @@ int main() {
   stat.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
   stat.MinLOD = .5f;
   stat.MaxLOD = 3.5f;
+  stat.ShaderRegister = 2;
   stat.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+  D3D12_DESCRIPTOR_RANGE ranges[2]{};
+  D3D12_ROOT_PARAMETER params[2]{};
+  for (UINT i = 0; i < 2; ++i) {
+    ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+    ranges[i].NumDescriptors = 1;
+    ranges[i].BaseShaderRegister = i;
+    params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[i].DescriptorTable = {1, &ranges[i]};
+    params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+  }
   D3D12_ROOT_SIGNATURE_DESC root_desc{};
+  root_desc.NumParameters = 2;
+  root_desc.pParameters = params;
   root_desc.NumStaticSamplers = 1;
   root_desc.pStaticSamplers = &stat;
   Owned<ID3DBlob> blob, error;
@@ -174,6 +187,28 @@ int main() {
                                            IID_PPV_ARGS(&root.p))))
     return 1;
   auto *internal = static_cast<dxmt::MTLD3D12RootSignature *>(root.p);
+  std::vector<int> layout_results(8);
+  std::vector<std::thread> layout_threads;
+  for (size_t i = 0; i < layout_results.size(); ++i)
+    layout_threads.emplace_back([&, i] {
+      layout_results[i] = SUCCEEDED(internal->InitializeMSCLodSidecarLayout());
+    });
+  for (auto &worker : layout_threads)
+    worker.join();
+  for (auto result : layout_results)
+    if (!result)
+      return 1;
+  if (FAILED(internal->InitializeMSCLodSidecarLayout()) ||
+      internal->MSCLODSidecarTableCount != 3 ||
+      internal->MSCLODSidecarBufferSize != 48)
+    return 1;
+  for (unsigned i = 0; i < internal->MSCLODSidecarTableCount; ++i) {
+    const auto &table = internal->MSCLODSidecarTables[i];
+    if (table.sampler_table_offset != i * 8 ||
+        table.sidecar_offset != 24 + i * 8 ||
+        table.parameter_index != (i == 2 ? UINT_MAX : i))
+      return 1;
+  }
   if (internal->NumStaticSamplers != 1 || !internal->StaticSamplerLODRanges ||
       internal->StaticSamplerLODRanges[0].minimum != .5f ||
       internal->StaticSamplerLODRanges[0].maximum != 3.5f)

@@ -29,6 +29,13 @@ entry can conservatively reject a recorded table. Submission failure follows
 the queue's existing device-removal policy. Bundle replay must record uses on
 the parent; the hook itself rejects bundle command lists.
 
+The root signature can derive an experimental sidecar extension from reflected
+MSC top-level offsets and its parsed sampler-table ranges. The shared layout
+type is also accepted by the AIR transform. The extension sorts offsets and
+appends aligned pointer slots; local roots, directly indexed sampler heaps and
+ambiguous mappings are rejected. Neither shader compilation nor command
+encoding consumes this layout yet, and no pipeline cache version has changed.
+
 ## Goal and evidence
 
 Enable correct sampler and SRV minimum-LOD ordering for the explicitly

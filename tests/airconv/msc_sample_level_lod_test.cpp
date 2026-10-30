@@ -54,6 +54,33 @@ int main() {
   using namespace dxmt::air;
   llvm::LLVMContext context;
   context.setOpaquePointers(false);
+  std::vector<MSCSamplerSidecarTable> inputs = {{16, 0, 2}, {8, 0, 1}}, built;
+  unsigned extended = 0;
+  if (!buildMSCSamplerSidecarLayout(24, inputs, built, extended) ||
+      extended != 40 || built.size() != 2 ||
+      built[0].sampler_table_offset != 8 || built[0].sidecar_offset != 24 ||
+      built[0].parameter_index != 1 || built[1].sampler_table_offset != 16 ||
+      built[1].sidecar_offset != 32 || built[1].parameter_index != 2)
+    return 1;
+  auto duplicate_input = inputs;
+  duplicate_input[0].sampler_table_offset = 8;
+  if (buildMSCSamplerSidecarLayout(24, duplicate_input, built, extended) ||
+      extended != 40 || built.size() != 2 || built[0].sidecar_offset != 24 ||
+      buildMSCSamplerSidecarLayout(UINT32_MAX, inputs, built, extended))
+    return 1;
+  std::vector<MSCSamplerSidecarTable> unaligned = {{1, 0, 1}};
+  std::vector<MSCSamplerSidecarTable> outside = {{24, 0, 1}};
+  if (buildMSCSamplerSidecarLayout(24, unaligned, built, extended) ||
+      buildMSCSamplerSidecarLayout(24, outside, built, extended) ||
+      extended != 40)
+    return 1;
+  std::vector<MSCSamplerSidecarTable> aligned_input = {{0, 0, 1}},
+                                      aligned_output;
+  unsigned aligned_size = 0;
+  if (!buildMSCSamplerSidecarLayout(9, aligned_input, aligned_output,
+                                    aligned_size) ||
+      aligned_size != 24 || aligned_output[0].sidecar_offset != 16)
+    return 1;
   MSCSamplerSidecarTable tables[] = {{8, 16}};
   auto module = parse(context, ir);
   if (!module ||

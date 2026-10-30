@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../msc_lod_layout.hpp"
 #include <cstddef>
 
 namespace llvm {
@@ -13,10 +14,6 @@ namespace dxmt::air {
 // recognized 2D explicit-level operation is inspected. Unchanged or Patched
 // does not establish that other sampling operations in the module are safe.
 enum class MSCSampleLevelLODResult { Unchanged, Patched, Unsupported };
-struct MSCSamplerSidecarTable {
-  unsigned sampler_table_offset;
-  unsigned sidecar_offset;
-};
 struct MSCSamplerSidecarLayout {
   unsigned root_argument_index;
   unsigned original_root_size;

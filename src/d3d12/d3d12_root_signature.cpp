@@ -399,7 +399,11 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
   */
   std::vector<uint64_t> static_samplers_encoded_;
   std::vector<dxmt_msc_root_parameter_layout> msc_layout_;
+  std::vector<air::MSCSamplerSidecarTable> msc_lod_sidecar_tables_;
+  std::mutex msc_layout_mutex_;
+  std::mutex msc_lod_layout_mutex_;
   bool msc_layout_initialized_ = false;
+  bool msc_lod_layout_initialized_ = false;
 
 public:
   bool
@@ -581,7 +585,73 @@ public:
   }
 
   HRESULT
+  InitializeMSCLodSidecarLayout() override {
+    std::lock_guard lock(msc_lod_layout_mutex_);
+    if (msc_lod_layout_initialized_)
+      return S_OK;
+    // Heap-directly-indexed samplers have no reflected table mapping here.
+    if (IsLocal() || (static_cast<uint32_t>(Flags) & 0x800u))
+      return E_NOTIMPL;
+    auto hr = InitializeMSCLayout();
+    if (FAILED(hr))
+      return hr;
+    try {
+      std::vector<air::MSCSamplerSidecarTable> candidates;
+      for (const auto &layout : msc_layout_) {
+        bool sampler_table = false;
+        if (layout.parameter_index == UINT32_MAX) {
+          sampler_table = NumStaticSamplers &&
+                          (layout.resource_type == DXMT_MSC_RESOURCE_TABLE ||
+                           layout.resource_type == DXMT_MSC_RESOURCE_SAMPLER);
+        } else if (layout.resource_type == DXMT_MSC_RESOURCE_TABLE) {
+          for (const auto &table : root_descriptor_tables_) {
+            if (table.parameter_index != layout.parameter_index)
+              continue;
+            for (UINT i = 0; i < table.range_count; ++i)
+              sampler_table |= root_descriptor_ranges_[table.first_range + i].type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+            break;
+          }
+        }
+        if (!sampler_table)
+          continue;
+        if (layout.size_bytes != sizeof(uint64_t) || layout.top_level_offset > UINT32_MAX)
+          return E_NOTIMPL;
+        candidates.push_back({static_cast<unsigned>(layout.top_level_offset), 0, layout.parameter_index});
+      }
+      unsigned expected_tables = NumStaticSamplers ? 1 : 0;
+      for (const auto &table : root_descriptor_tables_) {
+        bool sampler_table = false;
+        for (UINT i = 0; i < table.range_count; ++i)
+          sampler_table |= root_descriptor_ranges_[table.first_range + i].type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+        if (!sampler_table)
+          continue;
+        ++expected_tables;
+        unsigned matches = 0;
+        for (const auto &candidate : candidates)
+          matches += candidate.parameter_index == table.parameter_index;
+        if (matches != 1)
+          return E_NOTIMPL;
+      }
+      if (candidates.size() != expected_tables)
+        return E_NOTIMPL;
+      unsigned size = 0;
+      std::vector<air::MSCSamplerSidecarTable> tables;
+      if (!air::buildMSCSamplerSidecarLayout(MSCArgumentBufferSize, candidates, tables, size))
+        return E_NOTIMPL;
+      msc_lod_sidecar_tables_ = std::move(tables);
+      MSCLODSidecarBufferSize = size;
+      MSCLODSidecarTableCount = static_cast<unsigned>(msc_lod_sidecar_tables_.size());
+      MSCLODSidecarTables = msc_lod_sidecar_tables_.data();
+      msc_lod_layout_initialized_ = true;
+      return S_OK;
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
+  }
+
+  HRESULT
   InitializeMSCLayout() override {
+    std::lock_guard lock(msc_layout_mutex_);
     if (msc_layout_initialized_)
       return S_OK;
     if (!device_->GetMSCCapabilities().CoreShaderPathUsable())
