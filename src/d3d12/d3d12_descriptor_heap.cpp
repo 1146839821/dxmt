@@ -870,6 +870,9 @@ class MTLD3D12SamplerDescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12Sample
     if (!samplers_[index])
       return true;
     if (!relaxed_samplers_[index]) {
+      char fail[2];
+      if (GetEnvironmentVariableA("DXMT_TEST_FAIL_SAMPLER_LOD", fail, sizeof(fail)) == 1 && fail[0] == '1')
+        return false;
       uint64_t id = 0;
       auto state = samplers_[index]->createLODUnclampedState(device_->GetMTLDevice(), id);
       if (!state || !id)

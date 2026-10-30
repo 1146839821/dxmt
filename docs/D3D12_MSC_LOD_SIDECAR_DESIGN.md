@@ -6,7 +6,7 @@ design does not claim that ResourceMinLODClamp is implemented.
 
 The subsequent sampler metadata slice preserves the original static and dynamic
 sampler LOD ranges and copies dynamic ranges with descriptors. It does not yet
-bind a GPU sidecar or prove submission lifetime. Relaxed Metal sampler states
+bind a GPU sidecar. Relaxed Metal sampler states
 are created lazily and retained by the owning descriptor heap or root signature;
 descriptor copies retain the state when already created. A shader-visible
 sampler heap can now allocate a separate, stable-address sidecar buffer on
@@ -14,14 +14,20 @@ request and keep its entries synchronized with descriptor writes and copies.
 The heap owns the buffer and relaxed states. A recording retains each bound
 sampler heap, and each queue submission retains those heaps until its GPU
 command buffer completes, including after command-list reset. Static sampler
-uploads, sidecar binding, and submission-time sidecar validation remain
-unimplemented; actual shader access and residency are not yet verified.
+uploads and sidecar binding remain unimplemented; actual shader access and
+residency are not yet verified. An internal recording hook records sidecar
+addresses for submission-time checks, but no shader binding path calls it yet.
 
 An update that cannot create a relaxed sampler clears that sidecar entry and
 marks the heap sidecar invalid; preparation must be repeated successfully before
 using it. Since an already encoded GPU address cannot report such a later
-failure on its own, future integration must validate again at submission and
-must retain the heap through GPU completion. Do not bind this buffer yet.
+failure on its own, future integration must invoke the recording hook when it
+binds the sidecar. The queue validates recorded addresses before submission;
+lists without recorded sidecars are unaffected. Do not bind this buffer yet.
+The current validity flag covers the entire heap, so failure of an unrelated
+entry can conservatively reject a recorded table. Submission failure follows
+the queue's existing device-removal policy. Bundle replay must record uses on
+the parent; the hook itself rejects bundle command lists.
 
 ## Goal and evidence
 

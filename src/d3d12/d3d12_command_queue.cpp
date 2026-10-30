@@ -882,6 +882,12 @@ public:
     const bool residency_stats_enabled = ResidencyStatsEnabled();
     for (UINT i = 0; i < Count; i++) {
       auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i]);
+      const auto sidecar_hr = pCommandList->ValidateSamplerLODSidecarsForSubmission();
+      if (FAILED(sidecar_hr)) {
+        WARN("D3D12 ExecuteCommandLists rejected an invalid sampler LOD sidecar");
+        device_->MarkDeviceRemoved(sidecar_hr);
+        return;
+      }
       const auto hr = pCommandList->CollectResourceUsesForSubmission(
           descriptor_resource_uses, descriptor_resource_refs
       );

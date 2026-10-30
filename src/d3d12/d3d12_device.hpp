@@ -152,6 +152,8 @@ public:
   virtual bool IsAllocatorRecordingValid() const = 0;
   virtual void CollectAllocatorsForSubmission(std::vector<Com<MTLD3D12CommandAllocator, false>> &allocators) const = 0;
   virtual void CollectSamplerHeapsForSubmission(std::vector<Com<MTLD3D12SamplerDescriptorHeap, true>> &heaps) const = 0;
+  virtual HRESULT TrackSamplerLODSidecar(MTLD3D12SamplerDescriptorHeap *heap, D3D12_GPU_DESCRIPTOR_HANDLE table) = 0;
+  virtual HRESULT ValidateSamplerLODSidecarsForSubmission() const = 0;
   virtual std::shared_ptr<D3D12CommandListRecording> GetRecordingState() const = 0;
   virtual HRESULT GetCloseResult() const = 0;
   virtual uint64_t GetRecordingId() const = 0;

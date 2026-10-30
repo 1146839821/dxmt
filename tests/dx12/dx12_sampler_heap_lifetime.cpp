@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <d3d12.h>
 #include "d3d12_device.hpp"
+#include <cstring>
 #include <iostream>
 
 template <typename T> struct Owned {
@@ -17,7 +18,10 @@ template <typename T> struct Owned {
   }
 };
 
-int main() {
+int main(int argc, char **argv) {
+  const bool invalid = argc == 2 && !std::strcmp(argv[1], "--invalid");
+  const bool untracked = argc == 2 && !std::strcmp(argv[1], "--untracked");
+  const bool late = argc == 2 && !std::strcmp(argv[1], "--late");
   Owned<ID3D12Device> device;
   Owned<ID3D12CommandQueue> queue;
   Owned<ID3D12CommandAllocator> allocator, reset_allocator;
@@ -66,9 +70,52 @@ int main() {
     return 1;
   ID3D12DescriptorHeap *heaps[] = {first.p};
   list.p->SetDescriptorHeaps(1, heaps);
+  auto *internal_list =
+      static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list.p);
+  if (internal_list->TrackSamplerLODSidecar(
+          second_impl, second.p->GetGPUDescriptorHandleForHeapStart()) !=
+      E_INVALIDARG)
+    return 1;
+  if (!untracked &&
+      FAILED(internal_list->TrackSamplerLODSidecar(
+          first_impl, first.p->GetGPUDescriptorHandleForHeapStart())))
+    return 1;
+  if (!untracked &&
+      FAILED(internal_list->TrackSamplerLODSidecar(
+          first_impl, first.p->GetGPUDescriptorHandleForHeapStart())))
+    return 1;
   heaps[0] = second.p;
   list.p->SetDescriptorHeaps(1, heaps);
-  if (FAILED(list.p->Close()) || FAILED(queue.p->Wait(gate.p, 1)))
+  if (!untracked &&
+      FAILED(internal_list->TrackSamplerLODSidecar(
+          second_impl, second.p->GetGPUDescriptorHandleForHeapStart())))
+    return 1;
+  if (FAILED(list.p->Close()))
+    return 1;
+  if (invalid || untracked || late) {
+    D3D12_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW =
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.MaxAnisotropy = 1;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    if (!late)
+      SetEnvironmentVariableA("DXMT_TEST_FAIL_SAMPLER_LOD", "1");
+    device.p->CreateSampler(&sampler,
+                            first.p->GetCPUDescriptorHandleForHeapStart());
+    SetEnvironmentVariableA("DXMT_TEST_FAIL_SAMPLER_LOD", nullptr);
+    if ((!first_impl->GetSamplerLODSidecarAddress(
+            first.p->GetGPUDescriptorHandleForHeapStart())) != !late)
+      return 1;
+    ID3D12CommandList *lists[] = {list.p};
+    queue.p->ExecuteCommandLists(1, lists);
+    const auto reason = device.p->GetDeviceRemovedReason();
+    std::cout << "device_reason=0x" << std::hex
+              << static_cast<unsigned long>(reason) << std::dec << "\n";
+    return reason == (invalid ? E_FAIL : S_OK) ? 0 : 1;
+  }
+  if (FAILED(queue.p->Wait(gate.p, 1)))
     return 1;
   struct GateGuard {
     ID3D12Fence *fence;
