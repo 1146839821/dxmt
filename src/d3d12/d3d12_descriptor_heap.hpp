@@ -321,6 +321,9 @@ public:
   virtual WMT::Buffer GetMSCDescriptorHeapBuffer() = 0;
   virtual bool GetSamplerLODRange(UINT Index, D3D12SamplerLODRange &Range) const = 0;
   virtual bool GetSamplerLODSidecarEntry(UINT Index, D3D12SamplerLODSidecarEntry &Entry) = 0;
+  virtual HRESULT PrepareSamplerLODSidecar() = 0;
+  virtual uint64_t GetSamplerLODSidecarAddress(D3D12_GPU_DESCRIPTOR_HANDLE Handle) = 0;
+  virtual WMT::Buffer GetSamplerLODSidecarBuffer() = 0;
 
   virtual HRESULT AddSampler(UINT Index, const D3D12_SAMPLER_DESC *Desc) = 0;
 

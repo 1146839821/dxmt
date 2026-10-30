@@ -860,6 +860,41 @@ class MTLD3D12SamplerDescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12Sample
   Rc<Buffer> msc_buffer_;
   dxmt_msc_descriptor_entry *mapped_msc_argument_buffer_ = nullptr;
   uint64_t msc_argument_buffer_gpu_address_ = 0;
+  Rc<Buffer> lod_sidecar_buffer_;
+  D3D12SamplerLODSidecarEntry *mapped_lod_sidecar_ = nullptr;
+  bool lod_sidecar_valid_ = false;
+
+  bool
+  MakeLODSidecarEntry(UINT index, D3D12SamplerLODSidecarEntry &entry) {
+    entry = {};
+    if (!samplers_[index])
+      return true;
+    if (!relaxed_samplers_[index]) {
+      uint64_t id = 0;
+      auto state = samplers_[index]->createLODUnclampedState(device_->GetMTLDevice(), id);
+      if (!state || !id)
+        return false;
+      relaxed_samplers_[index] = std::move(state);
+      relaxed_sampler_ids_[index] = id;
+    }
+    entry = {relaxed_sampler_ids_[index], sampler_lod_ranges_[index].minimum, sampler_lod_ranges_[index].maximum};
+    return true;
+  }
+
+  void
+  UpdateLODSidecarEntry(UINT index) {
+    if (!mapped_lod_sidecar_)
+      return;
+    D3D12SamplerLODSidecarEntry entry{};
+    try {
+      if (!MakeLODSidecarEntry(index, entry))
+        lod_sidecar_valid_ = false;
+    } catch (const std::bad_alloc &) {
+      lod_sidecar_valid_ = false;
+      entry = {};
+    }
+    mapped_lod_sidecar_[index] = entry;
+  }
 
   void
   SetMSCDescriptor(UINT Index, dxmt_msc_descriptor_entry Entry) {
@@ -926,6 +961,8 @@ public:
 
   ~MTLD3D12SamplerDescriptorHeapImpl() {
     UnregisterDescriptorHeap(this);
+    if (lod_sidecar_buffer_ && lod_sidecar_buffer_->current())
+      device_->UnregisterResidencyAndVA(lod_sidecar_buffer_->current());
     if (buffer_) {
       if (buffer_->current())
         device_->UnregisterResidencyAndVA(buffer_->current());
@@ -1013,16 +1050,63 @@ public:
     std::lock_guard lock(sampler_mutex_);
     if (Index >= samplers_.size() || !samplers_[Index])
       return false;
-    if (!relaxed_samplers_[Index]) {
-      uint64_t id = 0;
-      auto state = samplers_[Index]->createLODUnclampedState(device_->GetMTLDevice(), id);
-      if (!state || !id)
-        return false;
-      relaxed_samplers_[Index] = std::move(state);
-      relaxed_sampler_ids_[Index] = id;
+    return MakeLODSidecarEntry(Index, Entry);
+  }
+
+  HRESULT
+  PrepareSamplerLODSidecar() override {
+    std::lock_guard lock(sampler_mutex_);
+    if (!(desc_.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) || samplers_.empty())
+      return E_INVALIDARG;
+    try {
+      std::vector<D3D12SamplerLODSidecarEntry> entries(samplers_.size());
+      for (UINT i = 0; i < samplers_.size(); ++i)
+        if (!MakeLODSidecarEntry(i, entries[i])) {
+          lod_sidecar_valid_ = false;
+          return E_FAIL;
+        }
+      if (!lod_sidecar_buffer_) {
+        Rc<Buffer> candidate = new Buffer(entries.size() * sizeof(entries[0]), device_->GetMTLDevice());
+        Flags<BufferAllocationFlag> flags;
+#ifdef __i386__
+        flags.set(BufferAllocationFlag::CpuPlaced);
+#endif
+        candidate->rename(candidate->allocate(flags));
+        if (!candidate->current() || !candidate->current()->mappedMemory(0))
+          return E_OUTOFMEMORY;
+        auto *mapped = reinterpret_cast<D3D12SamplerLODSidecarEntry *>(candidate->current()->mappedMemory(0));
+        memcpy(mapped, entries.data(), entries.size() * sizeof(entries[0]));
+        if (FAILED(device_->RegisterResidencyAndVA(candidate->current())))
+          return E_FAIL;
+        lod_sidecar_buffer_ = std::move(candidate);
+        mapped_lod_sidecar_ = mapped;
+      } else {
+        memcpy(mapped_lod_sidecar_, entries.data(), entries.size() * sizeof(entries[0]));
+      }
+      lod_sidecar_valid_ = true;
+      return S_OK;
+    } catch (const std::bad_alloc &) {
+      lod_sidecar_valid_ = false;
+      return E_OUTOFMEMORY;
     }
-    Entry = {relaxed_sampler_ids_[Index], sampler_lod_ranges_[Index].minimum, sampler_lod_ranges_[Index].maximum};
-    return true;
+  }
+
+  uint64_t
+  GetSamplerLODSidecarAddress(D3D12_GPU_DESCRIPTOR_HANDLE handle) override {
+    std::lock_guard lock(sampler_mutex_);
+    if (!lod_sidecar_valid_ || !lod_sidecar_buffer_ || handle.ptr < argument_buffer_gpu_address_)
+      return 0;
+    const auto offset = handle.ptr - argument_buffer_gpu_address_;
+    if (offset % sizeof(SamplerGPUStorage) || offset / sizeof(SamplerGPUStorage) >= samplers_.size())
+      return 0;
+    return lod_sidecar_buffer_->current()->gpuAddress() +
+           (offset / sizeof(SamplerGPUStorage)) * sizeof(D3D12SamplerLODSidecarEntry);
+  }
+
+  WMT::Buffer
+  GetSamplerLODSidecarBuffer() override {
+    std::lock_guard lock(sampler_mutex_);
+    return lod_sidecar_valid_ && lod_sidecar_buffer_ ? lod_sidecar_buffer_->current()->buffer() : WMT::Buffer{};
   }
 
 
@@ -1051,6 +1135,7 @@ public:
       gpu_storage.metadata = (uint64_t)std::bit_cast<uint32_t>(sampler->lod_bias);
     }
     SetMSCDescriptor(Index, {sampler->sampler_state_handle, 0, std::bit_cast<uint32_t>(sampler->lod_bias)});
+    UpdateLODSidecarEntry(Index);
 
     return S_OK;
   }
@@ -1081,6 +1166,7 @@ public:
         heap_to->mapped_argument_buffer_[DescriptorTo + i] = mapped_argument_buffer_[From + i];
       if (mapped_msc_argument_buffer_ && heap_to->mapped_msc_argument_buffer_)
         heap_to->mapped_msc_argument_buffer_[DescriptorTo + i] = mapped_msc_argument_buffer_[From + i];
+      heap_to->UpdateLODSidecarEntry(DescriptorTo + i);
     }
   }
 };

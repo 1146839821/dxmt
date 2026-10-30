@@ -8,8 +8,17 @@ The subsequent sampler metadata slice preserves the original static and dynamic
 sampler LOD ranges and copies dynamic ranges with descriptors. It does not yet
 bind a GPU sidecar or prove submission lifetime. Relaxed Metal sampler states
 are created lazily and retained by the owning descriptor heap or root signature;
-descriptor copies retain the state when already created. The GPU sidecar buffer
-and its submission ownership described below remain a proposal.
+descriptor copies retain the state when already created. A shader-visible
+sampler heap can now allocate a separate, stable-address sidecar buffer on
+request and keep its entries synchronized with descriptor writes and copies.
+The heap owns the buffer and relaxed states. Submission ownership, static
+sampler uploads and binding the sidecar remain unimplemented.
+
+An update that cannot create a relaxed sampler clears that sidecar entry and
+marks the heap sidecar invalid; preparation must be repeated successfully before
+using it. Since an already encoded GPU address cannot report such a later
+failure on its own, future integration must validate again at submission and
+must retain the heap through GPU completion. Do not bind this buffer yet.
 
 ## Goal and evidence
 

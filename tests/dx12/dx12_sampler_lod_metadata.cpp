@@ -4,6 +4,7 @@
 #include "d3d12_device.hpp"
 
 #include <iostream>
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -56,6 +57,37 @@ int main() {
   device.p->CreateSampler(&desc, source);
   auto *cpu_impl = static_cast<dxmt::MTLD3D12SamplerDescriptorHeap *>(cpu.p);
   auto *gpu_impl = static_cast<dxmt::MTLD3D12SamplerDescriptorHeap *>(gpu.p);
+  if (cpu_impl->PrepareSamplerLODSidecar() != E_INVALIDARG ||
+      FAILED(gpu_impl->PrepareSamplerLODSidecar()))
+    return 1;
+  auto gpu_handle = gpu.p->GetGPUDescriptorHandleForHeapStart();
+  const auto sidecar_base = gpu_impl->GetSamplerLODSidecarAddress(gpu_handle);
+  if (!sidecar_base || !gpu_impl->GetSamplerLODSidecarBuffer())
+    return 1;
+  auto read_sidecar = [&](UINT index) {
+    auto handle = gpu_handle;
+    handle.ptr += index * stride;
+    const auto address = gpu_impl->GetSamplerLODSidecarAddress(handle);
+    uint64_t offset = 0;
+    auto *allocation =
+        static_cast<dxmt::MTLD3D12Device *>(device.p)->LookupBufferByVA(
+            address, &offset);
+    dxmt::D3D12SamplerLODSidecarEntry entry{};
+    if (allocation)
+      std::memcpy(&entry,
+                  static_cast<const uint8_t *>(allocation->mappedMemory(0)) +
+                      offset,
+                  sizeof(entry));
+    return entry;
+  };
+  auto invalid_handle = gpu_handle;
+  invalid_handle.ptr += 4 * stride;
+  if (gpu_impl->GetSamplerLODSidecarAddress(invalid_handle))
+    return 1;
+  invalid_handle = gpu_handle;
+  ++invalid_handle.ptr;
+  if (gpu_impl->GetSamplerLODSidecarAddress(invalid_handle))
+    return 1;
   dxmt::D3D12SamplerLODSidecarEntry first{}, copied{}, again{};
   if (!gpu_impl->GetSamplerLODSidecarEntry(0, copied) || !copied.sampler ||
       copied.minimum != .25f || copied.maximum != 2.75f)
@@ -71,6 +103,10 @@ int main() {
   device.p->CopyDescriptorsSimple(1, destination, source, hd.Type);
   if (!gpu_impl->GetSamplerLODSidecarEntry(2, copied) ||
       copied.sampler != first.sampler)
+    return 1;
+  auto stored = read_sidecar(2);
+  if (stored.sampler != first.sampler || stored.minimum != .25f ||
+      stored.maximum != 2.75f)
     return 1;
   if (!check_range(cpu.p, 1, true, .25f, 2.75f) ||
       !check_range(gpu.p, 2, true, .25f, 2.75f) ||
@@ -89,6 +125,11 @@ int main() {
   if (!gpu_impl->GetSamplerLODSidecarEntry(2, copied) ||
       copied.sampler != again.sampler)
     return 1;
+  stored = read_sidecar(2);
+  if (stored.sampler != again.sampler || stored.minimum != 1.5f ||
+      stored.maximum != 5.5f ||
+      gpu_impl->GetSamplerLODSidecarAddress(gpu_handle) != sidecar_base)
+    return 1;
   if (!check_range(gpu.p, 2, true, 1.5f, 5.5f))
     return 1;
   if (!gpu_impl->GetSamplerLODSidecarEntry(2, copied) ||
@@ -97,6 +138,17 @@ int main() {
   cpu.p->Release();
   cpu.p = nullptr;
   if (!check_range(gpu.p, 2, true, 1.5f, 5.5f))
+    return 1;
+  desc.MinLOD = 2.0f;
+  desc.MaxLOD = 6.0f;
+  device.p->CreateSampler(&desc, destination);
+  stored = read_sidecar(2);
+  if (!stored.sampler || stored.minimum != 2.0f || stored.maximum != 6.0f ||
+      gpu_impl->GetSamplerLODSidecarAddress(gpu_handle) != sidecar_base)
+    return 1;
+  if (FAILED(gpu_impl->PrepareSamplerLODSidecar()) ||
+      gpu_impl->GetSamplerLODSidecarAddress(gpu_handle) != sidecar_base ||
+      read_sidecar(2).sampler != stored.sampler)
     return 1;
 
   D3D12_STATIC_SAMPLER_DESC stat{};
@@ -147,6 +199,12 @@ int main() {
       !internal->GetStaticSamplerLODSidecarEntry(0, static_again) ||
       static_again.sampler != static_entry.sampler ||
       internal->GetStaticSamplerLODSidecarEntry(1, static_again))
+    return 1;
+  gpu.p->Release();
+  gpu.p = nullptr;
+  uint64_t released_offset = 0;
+  if (static_cast<dxmt::MTLD3D12Device *>(device.p)->LookupBufferByVA(
+          sidecar_base, &released_offset))
     return 1;
   std::cout << "sampler LOD metadata passed\n";
   return 0;
