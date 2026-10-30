@@ -225,9 +225,34 @@ enum dxmt_msc_unixcall {
   unix_dxmt_msc_get_capabilities = 169,
   unix_dxmt_msc_synthesize_ray_dispatch = 192,
   unix_dxmt_msc_synthesize_ray_intersection,
+  unix_dxmt_msc_patch_sampler_lod = 197,
 };
 
 #pragma pack(push, 8)
+
+struct dxmt_msc_lod_table { uint32_t sampler_table_offset, sidecar_offset; };
+enum dxmt_msc_lod_patch_status {
+  DXMT_MSC_LOD_PATCHED = 0,
+  DXMT_MSC_LOD_INVALID_INPUT = 1,
+  DXMT_MSC_LOD_UNSUPPORTED = 2,
+  DXMT_MSC_LOD_UNCHANGED = 3,
+};
+struct dxmt_msc_patch_lod_params {
+  const void *metallib;
+  size_t metallib_size;
+  const struct dxmt_msc_lod_table *tables;
+  uint32_t table_count, root_argument_index, original_root_size;
+  void *output;
+  size_t output_capacity, output_size;
+  uint32_t patch_status;
+  int32_t ret;
+};
+struct dxmt_msc_patch_lod_params32 {
+  uint32_t metallib, metallib_size, tables;
+  uint32_t table_count, root_argument_index, original_root_size;
+  uint32_t output, output_capacity, output_size, patch_status;
+  int32_t ret;
+};
 
 struct dxmt_msc_compile_dxil_params {
   const void *dxil;
@@ -480,6 +505,7 @@ WINEMETAL_API int DXMTMSCIsAvailable(void);
 WINEMETAL_API int DXMTMSCGetCapabilities(struct dxmt_msc_capabilities *capabilities);
 
 WINEMETAL_API int DXMTMSCCompileDXIL(struct dxmt_msc_compile_dxil_params *params);
+WINEMETAL_API int DXMTMSCPatchSamplerLOD(struct dxmt_msc_patch_lod_params *params);
 
 WINEMETAL_API int DXMTMSCSynthesizeRayDispatch(struct dxmt_msc_synthesize_ray_dispatch_params *params);
 

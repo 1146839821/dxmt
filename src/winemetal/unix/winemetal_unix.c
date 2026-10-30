@@ -2561,6 +2561,13 @@ thunk_DXMTMSCGetRootLayout(void *args) {
 }
 
 static NTSTATUS
+thunk_DXMTMSCPatchSamplerLOD(void *args) {
+  struct dxmt_msc_patch_lod_params *params = args;
+  params->ret = dxmt_msc_patch_sampler_lod(params);
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 thunk_DXMTMSCGetCapabilities(void *args) {
   struct dxmt_msc_capabilities *params = args;
   params->ret = dxmt_msc_get_capabilities(params);
@@ -2696,6 +2703,30 @@ thunk32_DXMTMSCSynthesizeRayIntersection(void *args) {
   src->metallib_size = (uint32_t)params.metallib_size;
   src->error_message_size = (uint32_t)params.error_message_size;
   src->ret = params.ret;
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk32_DXMTMSCPatchSamplerLOD(void *args) {
+  struct dxmt_msc_patch_lod_params32 *src = args;
+  struct dxmt_msc_patch_lod_params params = {};
+  params.metallib = UInt32ToPtr(src->metallib);
+  params.metallib_size = src->metallib_size;
+  params.tables = UInt32ToPtr(src->tables);
+  params.table_count = src->table_count;
+  params.root_argument_index = src->root_argument_index;
+  params.original_root_size = src->original_root_size;
+  params.output = UInt32ToPtr(src->output);
+  params.output_capacity = src->output_capacity;
+  params.ret = dxmt_msc_patch_sampler_lod(&params);
+  if (params.output_size > UINT32_MAX) {
+    src->output_size = 0;
+    src->ret = DXMT_MSC_ERROR_OUTPUT_TOO_SMALL;
+  } else {
+    src->output_size = (uint32_t)params.output_size;
+    src->ret = params.ret;
+  }
+  src->patch_status = params.patch_status;
   return STATUS_SUCCESS;
 }
 
@@ -4534,6 +4565,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLDevice_supportsArgumentBuffersTier2,
     &thunk_SM50GetResourceRanges,
     &_MTLDevice_sparseTextureTileSize,
+    &thunk_DXMTMSCPatchSamplerLOD,
 };
 
 #ifndef DXMT_NATIVE
@@ -4735,5 +4767,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_supportsArgumentBuffersTier2,
     &thunk32_SM50GetResourceRanges,
     &_MTLDevice_sparseTextureTileSize,
+    &thunk32_DXMTMSCPatchSamplerLOD,
 };
 #endif

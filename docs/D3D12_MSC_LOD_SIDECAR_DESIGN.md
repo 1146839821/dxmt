@@ -41,6 +41,11 @@ and invalid input. It is not called by the WineMetal compilation path. The
 native AIRCONV build disables C++ exceptions; allocation-failure behavior of
 the LLVM transformation and metallib writer remains unverified and must be
 addressed before a runtime caller relies on this path.
+An explicit WineMetal thunk now transports the offsets and copies the patch
+result using a size-query protocol; it does not use the shader cache or alter
+normal compilation. Both 64-bit and WOW64 thunk paths have been exercised with
+the same real MSC metallib; their resulting bytecode hashes match. This does
+not validate DXMT pipeline cache integration or end-to-end shader binding.
 
 ## Goal and evidence
 

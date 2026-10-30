@@ -639,6 +639,45 @@ dxmt_msc_to_ir_stage(uint32_t stage) {
   }
 }
 
+_Static_assert(DXMT_MSC_LOD_PATCHED == SM50_MSC_LOD_PATCHED &&
+               DXMT_MSC_LOD_INVALID_INPUT == SM50_MSC_LOD_INVALID_INPUT &&
+               DXMT_MSC_LOD_UNSUPPORTED == SM50_MSC_LOD_UNSUPPORTED &&
+               DXMT_MSC_LOD_UNCHANGED == SM50_MSC_LOD_UNCHANGED, "sampler LOD status ABI mismatch");
+
+int
+dxmt_msc_patch_sampler_lod(struct dxmt_msc_patch_lod_params *params) {
+  if (!params)
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  params->output_size = 0;
+  params->patch_status = DXMT_MSC_LOD_INVALID_INPUT;
+  if (!params->metallib || !params->metallib_size || params->table_count > 65 ||
+      (params->table_count && !params->tables) || (!params->output && params->output_capacity))
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  struct SM50_MSC_LOD_SIDECAR_TABLE tables[65];
+  for (uint32_t i = 0; i < params->table_count; ++i) {
+    tables[i].sampler_table_offset = params->tables[i].sampler_table_offset;
+    tables[i].sidecar_offset = params->tables[i].sidecar_offset;
+  }
+  sm50_bitcode_t output = {0};
+  int status = SM50PatchMetalLibSampleLevelLOD(params->metallib, params->metallib_size,
+      params->root_argument_index, params->original_root_size, tables, params->table_count, &output);
+  params->patch_status = status;
+  if (status == SM50_MSC_LOD_INVALID_INPUT)
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  if (status != SM50_MSC_LOD_PATCHED)
+    return DXMT_MSC_SUCCESS;
+  struct SM50_COMPILED_BITCODE data = {0};
+  SM50GetCompiledBitcode(output, &data);
+  params->output_size = data.Size;
+  int result = DXMT_MSC_SUCCESS;
+  if (params->output && params->output_capacity < data.Size)
+    result = DXMT_MSC_ERROR_OUTPUT_TOO_SMALL;
+  else if (params->output)
+    memcpy(params->output, data.Data, data.Size);
+  SM50DestroyBitcode(output);
+  return result;
+}
+
 int
 dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   IRObject *input = NULL;

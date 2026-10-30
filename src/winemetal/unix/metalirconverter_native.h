@@ -16,6 +16,7 @@ int dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params);
 int dxmt_msc_synthesize_ray_dispatch(struct dxmt_msc_synthesize_ray_dispatch_params *params);
 int dxmt_msc_synthesize_ray_intersection(struct dxmt_msc_synthesize_ray_intersection_params *params);
 int dxmt_msc_get_root_layout(struct dxmt_msc_get_root_layout_params *params);
+int dxmt_msc_patch_sampler_lod(struct dxmt_msc_patch_lod_params *params);
 
 struct WMTMSCTessellationPipelineInfo;
 struct WMTMSCTessellationPipelineConfig;

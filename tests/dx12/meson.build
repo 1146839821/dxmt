@@ -1300,3 +1300,8 @@ dx12_sampler_heap_lifetime = executable('dx12_sampler_heap_lifetime', 'dx12_samp
   ],
   dependencies: [ d3d12_dep, winemetal_dep ],
 )
+
+dx12_msc_lod_thunk = executable('dx12_msc_lod_thunk', 'dx12_msc_lod_thunk.cpp',
+  include_directories: [include_directories('../../src/winemetal')],
+  dependencies: [winemetal_dep],
+)
