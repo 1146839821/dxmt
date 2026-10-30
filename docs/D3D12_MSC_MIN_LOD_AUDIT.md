@@ -123,6 +123,28 @@ explicit LOD is insufficient. Do not use fields documented as reserved in
 MSC's descriptor ABI without a compatibility design. The native and DXMT
 results are in `dxmt-test/n27-lod-sampler-20261030`.
 
+## Experimental sampler-range sidecar
+
+A native proof used a separate two-float buffer for the original sampler
+minimum and maximum, plus a Metal sampler with a relaxed LOD range. Modified
+AIR first clamps the explicit LOD to the stored sampler range and then applies
+the SRV minimum. With one static sampler, dynamic texture indexing, explicit
+LOD 1.25, sampler maximum 0.25, several resource clamps and an empty view, the
+five exact outputs matched the D3D ordering. Changing the stored sampler
+maximum to 0.75 made the unchanged oracle fail. Metal API and shader
+validation were enabled. This prototype used an extra root-buffer slot for the
+sidecar; it did not change the MSC descriptor entry format.
+
+The experiment does not establish a production ABI. Dynamic sampler arrays,
+multiple samplers, descriptor copies and post-Close mutations require a stable
+mapping from the selected sampler to its range and relaxed sampler. Static and
+dynamic variants, original sampler behavior for other shader operations,
+resource retention, submission synchronization, root-buffer size and shader
+cache versioning must be handled together. The fixed root slot used by the
+prototype is not safe to reserve in DXMT without a binding-layout design.
+Gradient, comparison and implicit-LOD sampling remain unimplemented. Artifacts
+and positive/negative logs are in `dxmt-test/n28-lod-abi-20261030`.
+
 The local reproduction artifacts, converted AIR and binary identities are in
 `dxmt-test/n19-metal-minlod-20261030`, `n20-lod-sample-20261030`, and
 `n21-lod-compiler-20261030` alongside this checkout.
