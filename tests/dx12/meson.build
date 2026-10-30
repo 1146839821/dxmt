@@ -1268,3 +1268,5 @@ if python.found()
 endif
 
 dx12_reserved_texture_overlap = executable('dx12_reserved_texture_overlap', 'dx12_reserved_texture_overlap.cpp', dependencies: [ d3d12_dep ])
+
+dx12_reserved_buffer_overlap = executable('dx12_reserved_buffer_overlap', 'dx12_reserved_buffer_overlap.cpp', dependencies: [ d3d12_dep ])

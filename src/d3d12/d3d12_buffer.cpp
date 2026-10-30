@@ -674,6 +674,22 @@ public:
     }
 
     if (sparse_mapping_queue) {
+      if (source == this) {
+        // Metal's sequential mapping copies can overwrite a later source.
+        // Apply the saved mappings so overlapping copies use a snapshot.
+        for (UINT tile = 0; tile < tile_count; ++tile) {
+          const auto &saved = copied[tile];
+          WMTUpdateSparseBufferMappingOperation update = {};
+          update.mode = saved.heap ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
+          update.buffer_range.location = dst_coordinate.X + tile;
+          update.buffer_range.length = 1;
+          update.heap_offset = saved.heap_tile;
+          sparse_mapping_queue.updateBufferMappings(
+              buffer->current()->buffer(), saved.heap ? saved.heap->GetMetalHeap() : WMT::Heap{}, &update, 1
+          );
+        }
+        return S_OK;
+      }
       std::vector<WMTCopySparseBufferMappingOperation> mapping_operations;
       mapping_operations.reserve(tile_count);
       for (UINT tile = 0; tile < tile_count; tile++) {
