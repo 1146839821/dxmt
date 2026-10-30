@@ -22,6 +22,9 @@ struct MSCSamplerSidecarLayout {
   unsigned original_root_size;
   const MSCSamplerSidecarTable *tables;
   std::size_t table_count;
+  // Conservative preflight for a future opt-in integration. Even success does
+  // not establish null-descriptor, numeric-edge or backend-version correctness.
+  bool require_exclusive_texture_operations = false;
 };
 MSCSampleLevelLODResult patchMSCSampleLevelLOD(llvm::Module &module, MSCSamplerSidecarLayout layout);
 } // namespace dxmt::air

@@ -100,6 +100,41 @@ int main() {
           MSCSampleLevelLODResult::Unsupported ||
       partial_before != dump(*partial))
     return 1;
+
+  auto strict = parse(context, ir);
+  if (!strict ||
+      patchMSCSampleLevelLOD(*strict, {0, 16, tables, 1, true}) !=
+          MSCSampleLevelLODResult::Patched ||
+      llvm::verifyModule(*strict, &llvm::errs()))
+    return 1;
+  for (const char *name : {"air.read_texture_2d", "air.sample_texture_3d.v4f32",
+                           "air.gather_texture_2d"}) {
+    std::string mixed_ir(ir);
+    const auto position = mixed_ir.find("  ret void");
+    mixed_ir.insert(position, std::string("  call void @") + name + "()\n");
+    mixed_ir += std::string("\ndeclare void @") + name + "()\n";
+    auto mixed = parse(context, mixed_ir);
+    if (!mixed)
+      return 1;
+    const auto original = dump(*mixed);
+    if (patchMSCSampleLevelLOD(*mixed, {0, 16, tables, 1, true}) !=
+            MSCSampleLevelLODResult::Unsupported ||
+        original != dump(*mixed))
+      return 1;
+  }
+  std::string implicit_ir(ir);
+  const auto flag = implicit_ir.find("i1 true, float 1.250000e+00");
+  if (flag == std::string::npos)
+    return 1;
+  implicit_ir.replace(flag, 7, "i1 false");
+  auto implicit = parse(context, implicit_ir);
+  if (!implicit)
+    return 1;
+  const auto implicit_before = dump(*implicit);
+  if (patchMSCSampleLevelLOD(*implicit, {0, 16, tables, 1, true}) !=
+          MSCSampleLevelLODResult::Unsupported ||
+      implicit_before != dump(*implicit))
+    return 1;
   std::cout << "MSC sample-level LOD pass validation passed\n";
   return 0;
 }

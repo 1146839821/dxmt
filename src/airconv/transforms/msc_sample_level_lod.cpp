@@ -102,14 +102,24 @@ patchMSCSampleLevelLOD(llvm::Module &module, MSCSamplerSidecarLayout layout) {
   for (auto &function : module)
     for (auto &block : function)
       for (auto &inst : block) {
+        auto *call_base = llvm::dyn_cast<llvm::CallBase>(&inst);
         auto *call = llvm::dyn_cast<llvm::CallInst>(&inst);
-        auto *target = call ? call->getCalledFunction() : nullptr;
-        if (!target || target->getName() != "air.sample_texture_2d.v4f32")
+        auto *target = call_base ? call_base->getCalledFunction() : nullptr;
+        if (layout.require_exclusive_texture_operations && call_base && (!call || !target))
+          return MSCSampleLevelLODResult::Unsupported;
+        if (!target || target->getName() != "air.sample_texture_2d.v4f32") {
+          if (layout.require_exclusive_texture_operations && target && target->getName().startswith("air.") &&
+              (target->getName().contains("texture") || target->getName().startswith("air.sample") ||
+               target->getName().startswith("air.gather")))
+            return MSCSampleLevelLODResult::Unsupported;
           continue;
+        }
         if (call->arg_size() != 9)
           return MSCSampleLevelLODResult::Unsupported;
         auto *explicit_level = llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(5));
         if (!explicit_level)
+          return MSCSampleLevelLODResult::Unsupported;
+        if (explicit_level->isZero() && layout.require_exclusive_texture_operations)
           return MSCSampleLevelLODResult::Unsupported;
         if (explicit_level->isZero())
           continue;
