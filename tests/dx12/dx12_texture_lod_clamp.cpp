@@ -228,7 +228,7 @@ bool InitializeReservedTexture(ID3D12Device *device, ID3D12CommandQueue *queue, 
 }
 
 void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Owned<ID3D12RootSignature> &root,
-                    Owned<ID3D12PipelineState> &pipeline) {
+                    Owned<ID3D12PipelineState> &pipeline, bool limit_sampler_max) {
   D3D12_DESCRIPTOR_RANGE ranges[2] = {};
   ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 0, 0};
   ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 5};
@@ -245,7 +245,7 @@ void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Ow
   sampler.MaxAnisotropy = 1;
   sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
   sampler.MinLOD = 0;
-  sampler.MaxLOD = D3D12_FLOAT32_MAX;
+  sampler.MaxLOD = limit_sampler_max ? 0.25f : D3D12_FLOAT32_MAX;
   sampler.ShaderRegister = 0;
   sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
@@ -272,7 +272,7 @@ void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Ow
 
 std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
                               const std::vector<uint8_t> &shader, bool reserved, bool expect_unsupported,
-                              bool late_load = false, bool empty_sample = false) {
+                              bool late_load = false, bool empty_sample = false, bool limit_sampler_max = false) {
   constexpr UINT mip_levels = 3;
   const auto desc = reserved ? TextureDesc(256, 256, 2, D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE)
                              : TextureDesc(512, 512, mip_levels, D3D12_TEXTURE_LAYOUT_UNKNOWN);
@@ -356,7 +356,7 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
 
   Owned<ID3D12RootSignature> root;
   Owned<ID3D12PipelineState> pipeline;
-  CreatePipeline(device, shader, root, pipeline);
+  CreatePipeline(device, shader, root, pipeline, limit_sampler_max);
   Owned<ID3D12CommandAllocator> allocator;
   Owned<ID3D12GraphicsCommandList> list;
   Check("CreateLODCommandAllocator", device->CreateCommandAllocator(
@@ -434,8 +434,9 @@ int main(int argc, char **argv) {
   const bool unsupported_read = argc == 3 && strcmp(argv[2], "--load-unsupported") == 0;
   const bool late_load = argc == 3 && strcmp(argv[2], "--load-late") == 0;
   const bool empty_sample = argc == 3 && strcmp(argv[2], "--sample-empty") == 0;
-  if (argc != 2 && !unsupported_read && !late_load && !empty_sample) {
-    std::cerr << "usage: dx12_texture_lod_clamp <shader.cs.cso> [--load-unsupported|--load-late|--sample-empty]\n";
+  const bool limit_sampler_max = argc == 3 && strcmp(argv[2], "--sampler-max") == 0;
+  if (argc != 2 && !unsupported_read && !late_load && !empty_sample && !limit_sampler_max) {
+    std::cerr << "usage: dx12_texture_lod_clamp <shader.cs.cso> [--load-unsupported|--load-late|--sample-empty|--sampler-max]\n";
     return 2;
   }
 
@@ -466,9 +467,9 @@ int main(int argc, char **argv) {
                                                       empty_sample ? 0u : 0x40800000, 0x40400000};
     const std::vector<uint32_t> reserved_expected = {0x3f800000, 0x40000000, 0x40400000,
                                                       empty_sample ? 0u : 0x40400000, 0x40400000};
-    const auto ordinary = RunCase(device.ptr, queue.ptr, shader, false, false, false, empty_sample);
+    const auto ordinary = RunCase(device.ptr, queue.ptr, shader, false, false, false, empty_sample, limit_sampler_max);
     const bool ordinary_pass = CheckCase("ordinary ResourceMinLODClamp", ordinary, ordinary_expected);
-    const auto reserved = RunCase(device.ptr, queue.ptr, shader, true, false, false, empty_sample);
+    const auto reserved = RunCase(device.ptr, queue.ptr, shader, true, false, false, empty_sample, limit_sampler_max);
     if (reserved.empty())
       return 77;
     const bool reserved_pass = CheckCase("reserved standard-mip ResourceMinLODClamp", reserved, reserved_expected);

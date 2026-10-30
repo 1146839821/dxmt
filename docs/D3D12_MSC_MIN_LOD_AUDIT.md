@@ -105,6 +105,24 @@ all swizzles or shader stages. Metal and D3D component mapping and descriptor
 lifetime also require end-to-end verification. Artifacts and logs are in
 `dxmt-test/n24-lod-oob-20261030`.
 
+## Sampler maximum LOD ordering
+
+The D3D specification's section 5.8.6.2 applies the sampler's LOD range
+before the resource minimum, even when the resource minimum exceeds the
+sampler maximum. A native Metal experiment with sampler MaxLOD 0.25 showed
+that the prototype's `max(explicitLOD, resourceMinLOD)` is subsequently
+clamped by the Metal sampler: resource minima 0.5, 1 and 1.5 all returned the
+0.25 mip blend. The expected values are the resource-clamped mip blends.
+
+The `--sampler-max` test mode reproduces this failure through DXMT for both
+SampleLevel and SampleGrad, with an unrestricted-sampler SampleGrad control
+passing. Thus sampler ordering is a blocker for both the draft AIR rewrite and
+the existing gradient path. Correct handling needs access to the sampler range
+and an execution strategy that respects D3D's ordering; simply modifying the
+explicit LOD is insufficient. Do not use fields documented as reserved in
+MSC's descriptor ABI without a compatibility design. The native and DXMT
+results are in `dxmt-test/n27-lod-sampler-20261030`.
+
 The local reproduction artifacts, converted AIR and binary identities are in
 `dxmt-test/n19-metal-minlod-20261030`, `n20-lod-sample-20261030`, and
 `n21-lod-compiler-20261030` alongside this checkout.
