@@ -13,7 +13,7 @@ ffffffff 3f800000
 7fffffff 7f800000
 12345678 7fc00000
 0000002a 7fc00001
-"""
+""" + b"".join(f"{4096+i:016x} {128+i%8:02x}\n".encode() for i in range(16))
 
 
 def run(*args):
@@ -25,6 +25,15 @@ def main():
     with tempfile.TemporaryDirectory(prefix="dxmt-icb-differential-") as directory:
         output = pathlib.Path(directory) / "rewritten.ll"
         run(rewriter, "--rewrite-ir", fixture, str(output))
+        rewritten_ir = output.read_text()
+        for name in ("read_i4", "read_i8"):
+            function = rewritten_ir.split(f"@{name}(", 1)[1].split("\n}", 1)[0]
+            if "icb.constant.inrange" not in function:
+                raise AssertionError(f"{name} was not transformed")
+        for name in ("reject_i4", "reject_single", "reject_oversized", "reject_volatile"):
+            function = rewritten_ir.split(f"@{name}(", 1)[1].split("\n}", 1)[0]
+            if "icb.constant.inrange" in function:
+                raise AssertionError(f"unsupported shape {name} was transformed")
         original = run(lli, fixture)
         rewritten = run(lli, str(output))
         if original != EXPECTED or rewritten != EXPECTED:
