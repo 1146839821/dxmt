@@ -284,6 +284,49 @@ Direct/indirect pipeline selection design card:
   array cases are observed failures with validation on, not passing tests.
   Recheck other OS/GPU/MSC versions and D3D12 native behavior before making a
   general claim. Rollback is removal of this test extension and design card.
+
+Bounded AIR constant-array experiment design card:
+
+- Goal: test whether an offline, constrained AIR rewrite can avoid the local
+  ICB validation failure, including the real DXMT GPU indirect resolver.
+- Baseline: `7689f25b`. The affected MSC vertex metallib contains an internal
+  address-space-2 constant float array read through two dynamic scalar GEPs.
+- Scope: the test-only `msc-icb-constant-experiment` accepts a metallib and
+  rewrites only direct scalar loads from 2–16 element local immutable
+  `ConstantDataArray` globals. Volatile/atomic loads, externally initialized
+  globals, unsupported element shapes, oversized arrays and narrow signed
+  indices or pointer index widths whose valid bit patterns would be negative
+  are left unchanged.
+- Semantics: an unsigned in-range guard selects exact element constants;
+  out-of-range indices execute the original GEP/load. This preserves the
+  original fallback rather than inventing a value. LLVM's
+  [GEP index rules](https://llvm.org/docs/LangRef.html#getelementptr-instruction)
+  require signed extension or truncation; the narrow-index restriction avoids
+  treating negative indices as positive. Structural tests verify all in-range
+  constants and the fallback control flow, but do not execute invalid loads.
+- Local evidence: the original vertex metallib with the array failed the
+  `ExecuteIndirect` probe under Metal shader validation. Two rewritten loads
+  produced a metallib that passed a native Metal ICB draw and both direct and
+  `ExecuteIndirect` DXMT probes with exact ordinary/reserved output. The DXMT
+  test used a dedicated modified conversion-cache snapshot, and debug logs
+  confirmed persistent-cache hits and the GPU ICB path. No production cache or
+  runtime conversion is modified.
+- Reproducibility: run the native experiment tool on the exact original
+  metallib; use `tests/airconv/prepare_icb_experiment_cache.py` with its cache
+  key and expected original SHA-256 to create a **new isolated** cache; pass
+  that file via `run_msc_lod_experiment.py --seed-cache` together with the
+  `fragment-vertexid` and `fragment-vertexid-indirect` cases. Never use the
+  modified cache as a production cache.
+- Risks and remaining work: the proof covers one compiler output, GPU and OS;
+  general array/aggregate forms, bounds behavior on GPU, performance, other
+  shader stages, cache versioning and runtime integration remain unverified.
+  A no-match rewrite returns failure in this offline probe. Production must
+  retain untouched behavior for unsupported forms and handle allocation and
+  conversion failures explicitly before any opt-in integration is considered.
+- Rollback: remove the test-only tool, cache preparer, runner/test additions
+  and this card. Definition of done for this slice is the documented offline
+  differential, structural controls and actual direct/indirect GPU checks,
+  not a claim that general shader support is complete.
 With the test-only patched path, injecting relaxed-sampler creation failure
 after Close invalidated the recorded sidecar and queue submission rejected the
 list with E_FAIL. An unpatched control did not register a sidecar and failed

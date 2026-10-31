@@ -66,3 +66,14 @@ if get_option('enable_tests')
 
   test('airconv msc sample-level lod', msc_sample_level_lod_test)
 endif
+
+if get_option('enable_tests')
+  msc_icb_constant_experiment = executable('msc-icb-constant-experiment',
+    files('../../../tests/airconv/msc_icb_constant_experiment.cpp', '../metallib_writer.cpp'),
+    include_directories: [ include_directories('..'), llvm_include_path_darwin ],
+    cpp_args: [ airconv_args ],
+    link_args: [ llvm_ld_flags_darwin, llvm_deps ],
+    native: dxmt_crossbuild
+  )
+  test('airconv msc icb constant experiment', msc_icb_constant_experiment, args: ['--self-test'])
+endif

@@ -369,7 +369,8 @@ struct RunOptions {
 
 std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
                               const std::vector<uint8_t> &shader, const RunOptions &options,
-                              const std::vector<uint8_t> *vertex_shader = nullptr, bool no_vertex_input = false) {
+                              const std::vector<uint8_t> *vertex_shader = nullptr, bool no_vertex_input = false,
+                              bool indirect_draw = false) {
   const auto &[reserved, expect_unsupported, late_load, empty_sample, limit_sampler_max, mismatch_root, same_root,
                switch_pipeline, dynamic_sampler, skip_sampler_update, multi_sampler, swap_sampler_tables, heap_rebind,
                same_heap_range, resubmit, resubmit_control, cache_guard, fail_late_sampler, recover_late_sampler,
@@ -597,6 +598,21 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   }
   Owned<ID3D12CommandAllocator> allocator;
   Owned<ID3D12GraphicsCommandList> list;
+  Owned<ID3D12Resource> indirect_arguments;
+  Owned<ID3D12CommandSignature> indirect_signature;
+  if (indirect_draw) {
+    CreateBuffer(device, indirect_arguments, sizeof(D3D12_DRAW_ARGUMENTS), D3D12_HEAP_TYPE_UPLOAD,
+                 D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+    D3D12_DRAW_ARGUMENTS *mapped = nullptr;
+    Check("MapIndirectLOD", indirect_arguments->Map(0, nullptr, reinterpret_cast<void **>(&mapped)));
+    *mapped = {3, 1, 0, 0};
+    indirect_arguments->Unmap(0, nullptr);
+    D3D12_INDIRECT_ARGUMENT_DESC argument = {};
+    argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+    D3D12_COMMAND_SIGNATURE_DESC desc = {sizeof(D3D12_DRAW_ARGUMENTS), 1, &argument, 0};
+    Check("CreateIndirectLODSignature", device->CreateCommandSignature(&desc, nullptr,
+                                                                       IID_PPV_ARGS(&indirect_signature.ptr)));
+  }
   Owned<ID3D12Resource> render_target, vertex_buffer;
   Owned<ID3D12DescriptorHeap> rtv_heap;
   if (vertex_shader && !no_vertex_input) {
@@ -683,7 +699,9 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
     rebound_gpu.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
     list->SetComputeRootDescriptorTable(1, rebound_gpu);
   }
-  if (vertex_shader)
+  if (vertex_shader && indirect_draw)
+    list->ExecuteIndirect(indirect_signature.ptr, 1, indirect_arguments.ptr, 0, nullptr, 0);
+  else if (vertex_shader)
     list->DrawInstanced(3, 1, 0, 0);
   else
     list->Dispatch(1, 1, 1);
@@ -876,7 +894,8 @@ int main(int argc, char **argv) {
   const bool fragment_control = vertexid_unpatched || (argc == 4 && strcmp(argv[2], "--fragment-control") == 0);
   const bool fragment_mismatch = argc == 4 && strcmp(argv[2], "--fragment-mismatch") == 0;
   const bool fragment_switch = argc == 4 && strcmp(argv[2], "--fragment-switch") == 0;
-  const bool fragment_vertexid = vertexid_unpatched || (argc == 4 && strcmp(argv[2], "--fragment-vertexid") == 0);
+  const bool vertexid_indirect = argc == 4 && strcmp(argv[2], "--fragment-vertexid-indirect") == 0;
+  const bool fragment_vertexid = vertexid_unpatched || vertexid_indirect || (argc == 4 && strcmp(argv[2], "--fragment-vertexid") == 0);
   const bool fragment_case = fragment_control || fragment_mismatch || fragment_switch || fragment_vertexid || (argc == 4 && strcmp(argv[2], "--fragment-lod") == 0);
   const bool unsupported_read = argc == 3 && strcmp(argv[2], "--load-unsupported") == 0;
   const bool late_load = argc == 3 && strcmp(argv[2], "--load-late") == 0;
@@ -932,11 +951,11 @@ int main(int argc, char **argv) {
         std::cout << "fragment root mismatch rejected\n";
         return 0;
       }
-      const auto ordinary = RunCase(device.ptr, queue.ptr, shader, options, &vertex_shader, fragment_vertexid);
+      const auto ordinary = RunCase(device.ptr, queue.ptr, shader, options, &vertex_shader, fragment_vertexid, vertexid_indirect);
       const bool ordinary_pass = CheckCase("fragment ordinary", ordinary,
           {0x3f800000, 0x40000000, 0x40400000, 0x40800000, 0x40400000});
       options.reserved = true;
-      const auto reserved = RunCase(device.ptr, queue.ptr, shader, options, &vertex_shader, fragment_vertexid);
+      const auto reserved = RunCase(device.ptr, queue.ptr, shader, options, &vertex_shader, fragment_vertexid, vertexid_indirect);
       if (reserved.empty())
         return 77;
       const bool reserved_pass = CheckCase("fragment reserved", reserved,

@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import sqlite3
 import struct
 import subprocess
 import tempfile
@@ -82,6 +83,7 @@ def main():
     parser.add_argument("--fragment-ps")
     parser.add_argument("--fragment-vs")
     parser.add_argument("--vertexid-vs")
+    parser.add_argument("--seed-cache", type=Path, help="copy a read-only SQLite cache snapshot into the isolated run")
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--case", action="append", help="run only the named case; may be repeated")
     args = parser.parse_args()
@@ -118,6 +120,16 @@ def main():
         raise SystemExit(f"cannot verify PE exports: {exc}") from exc
     args.logs.mkdir(parents=True, exist_ok=True)
     logdir = Path(tempfile.mkdtemp(prefix="msc-lod-", dir=args.logs.resolve()))
+    if args.seed_cache:
+        cache_path = args.seed_cache.resolve(strict=True)
+        (logdir / "cache").mkdir()
+        source = sqlite3.connect(cache_path.as_uri() + "?mode=ro", uri=True)
+        destination = sqlite3.connect(logdir / "cache" / "shaders_320.db")
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+            source.close()
     cases = [
         ("sample", args.sample, None, 0, "matrix passed"),
         ("empty", args.sample, "--sample-empty", 0, "matrix passed"),
@@ -151,6 +163,7 @@ def main():
         ]
     if args.vertexid_vs:
         cases.append(("fragment-vertexid", args.fragment_ps, ("--fragment-vertexid", args.vertexid_vs), 0, "fragment LOD matrix passed"))
+        cases.append(("fragment-vertexid-indirect", args.fragment_ps, ("--fragment-vertexid-indirect", args.vertexid_vs), 0, "fragment LOD matrix passed"))
     if args.case:
         unknown = set(args.case) - {case[0] for case in cases}
         if unknown:
@@ -214,6 +227,8 @@ def main():
                                     "fragment_vs": sha256(stage / args.fragment_vs)})
     if args.vertexid_vs:
         summary["fixtures"]["vertexid_vs"] = sha256(stage / args.vertexid_vs)
+    if args.seed_cache:
+        summary["seed_cache_sha256"] = sha256(cache_path)
     (logdir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"logs: {logdir}")
     return 0 if all(result["pass"] for result in results) else 1
