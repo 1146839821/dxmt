@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 
+sys.dont_write_bytecode = True
 from test_darwin_loaded_image_identity import data_section
 
 
