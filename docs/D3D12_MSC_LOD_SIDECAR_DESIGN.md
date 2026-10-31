@@ -97,6 +97,19 @@ Another compute test submitted the same closed list twice, waited for the
 first GPU completion, changed a dynamic sampler, and verified both readbacks.
 Omitting the change failed the oracle. This does not exercise simultaneous
 execution or mutation while a submission is in flight.
+
+The opt-in regression matrix can be run with
+`python3 tests/dx12/run_msc_lod_experiment.py --stage <stage> --prefix <prefix> --build <build> --logs <logs>`.
+The caller must prepare an isolated Wine stage and prefix using
+`docs/DEVELOPMENT.md`, populate it with the matching build's executable,
+D3D12/DXGI and WineMetal PE/Unix pair, and provide `sample.cso`, `multi.cso`,
+and `grad.cso` (or override their names). D3D12 and DXGI must be native PE
+images rather than Wine-builtin-marked images. The runner checks hashes,
+loaded paths, and the first 16 loaded bytes of one D3D12 and one WineMetal
+export against their staged PE images, along with validation activation,
+expected output, and negative controls;
+it writes logs to a new directory and does not install binaries. A skipped
+reserved-texture case is reported as a failure, not as a pass.
 With the test-only patched path, injecting relaxed-sampler creation failure
 after Close invalidated the recorded sidecar and queue submission rejected the
 list with E_FAIL. An unpatched control did not register a sidecar and failed

@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -658,6 +659,24 @@ bool CheckCase(const char *name, const std::vector<uint32_t> &actual, const std:
 } // namespace
 
 int main(int argc, char **argv) {
+  char identity_requested[2] = {};
+  if (GetEnvironmentVariableA("DXMT_TEST_PRINT_LOADED_CODE", identity_requested, sizeof(identity_requested)) == 1 &&
+      identity_requested[0] == '1') {
+    for (const auto &[module_name, symbol] : {std::pair{"d3d12.dll", "D3D12CreateDevice"},
+                                              std::pair{"winemetal.dll", "DXMTMSCPatchSamplerLOD"}}) {
+      auto module = GetModuleHandleA(module_name);
+      auto address = module ? reinterpret_cast<const unsigned char *>(GetProcAddress(module, symbol)) : nullptr;
+      if (!address) {
+        std::cerr << "loaded code identity unavailable for " << symbol << "\n";
+        return 1;
+      }
+      static const char hex[] = "0123456789abcdef";
+      std::cout << "LOADED_CODE " << module_name << " " << symbol << " ";
+      for (unsigned i = 0; i < 16; ++i)
+        std::cout << hex[address[i] >> 4] << hex[address[i] & 15];
+      std::cout << "\n";
+    }
+  }
   const bool unsupported_read = argc == 3 && strcmp(argv[2], "--load-unsupported") == 0;
   const bool late_load = argc == 3 && strcmp(argv[2], "--load-late") == 0;
   const bool empty_sample = argc == 3 && strcmp(argv[2], "--sample-empty") == 0;
