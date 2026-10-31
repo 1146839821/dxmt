@@ -214,6 +214,36 @@ Experimental fragment pipeline design card:
   explicit vertex buffer. Native Windows and other shader stages are untested.
 - Rollback: revert the opt-in PSO/command/cache changes and the test together.
 - Done: the scoped GPU cases and negative controls pass with validation enabled.
+
+Vertex ID / ICB validation investigation:
+
+- Baseline `bbb1f2e3`; `--fragment-vertexid` with the array fixture in
+  `texture_lod_vertexid.hlsl` reproduces the invalid vertex load and zero
+  output under Metal shader validation. A mathematically equivalent vertex
+  shader using conditionals instead of an indexed constant array passes.
+- The failure also occurs without the experimental LOD patch, including with
+  a non-sampling pixel shader and in the separate bundle probe. The converted
+  vertex AIR contains a module-level constant array indexed by the vertex ID.
+- On macOS 27.0.1 / Apple M1 Max, `metal_icb_constant_repro.mm` reproduces the
+  same symptom without Wine, DXMT, or MSC: a Metal-source vertex shader using
+  an indexed constant array renders correctly with shader validation and ICB
+  support disabled, and with ICB support enabled and shader validation
+  disabled; it reports an invalid load and renders zero with both enabled.
+  An MSC metallib extracted from the DXMT cache exhibits the same differential.
+  This identifies a local Metal validation/ICB interaction; it does not prove
+  behavior on other OS/GPU combinations or establish its internal root cause.
+- Build the standalone control with `xcrun clang++ -fobjc-arc -framework
+  Foundation -framework Metal tests/dx12/metal_icb_constant_repro.mm -o
+  <output>`. Run it with `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1
+  MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1` first without arguments and then
+  with `--icb`. The second case is an observed failure on the machine above;
+  the probe intentionally returns failure on incorrect pixels. The same ICB
+  invocation can be repeated with `MTL_SHADER_VALIDATION=0` as a differential.
+- Do not remove `supportIndirectCommandBuffers`: DXMT uses ICBs for
+  `ExecuteIndirect`. A dual-PSO approach would need stage- and stride-aware
+  selection, correct transitions between direct and indirect commands, ICB
+  lifetime and cache handling, and an indirect validation strategy. It remains
+  a separate design/implementation task rather than a verified fix here.
 With the test-only patched path, injecting relaxed-sampler creation failure
 after Close invalidated the recorded sidecar and queue submission rejected the
 list with E_FAIL. An unpatched control did not register a sidecar and failed

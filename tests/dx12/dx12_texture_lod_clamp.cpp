@@ -262,7 +262,7 @@ bool InitializeReservedTexture(ID3D12Device *device, ID3D12CommandQueue *queue, 
 void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Owned<ID3D12RootSignature> &root,
                     Owned<ID3D12PipelineState> &pipeline, bool limit_sampler_max, bool dynamic_sampler = false,
                     bool multi_sampler = false, bool expect_patch_rejection = false,
-                    const std::vector<uint8_t> *vertex_shader = nullptr) {
+                    const std::vector<uint8_t> *vertex_shader = nullptr, bool no_vertex_input = false) {
   D3D12_DESCRIPTOR_RANGE ranges[2] = {};
   ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 0, 0};
   ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 5};
@@ -319,7 +319,8 @@ void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Ow
     graphics.PS = {shader.data(), shader.size()};
     D3D12_INPUT_ELEMENT_DESC input_element = {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0,
                                                D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0};
-    graphics.InputLayout = {&input_element, 1};
+    if (!no_vertex_input)
+      graphics.InputLayout = {&input_element, 1};
     graphics.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     graphics.SampleMask = UINT_MAX;
     graphics.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
@@ -368,7 +369,7 @@ struct RunOptions {
 
 std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
                               const std::vector<uint8_t> &shader, const RunOptions &options,
-                              const std::vector<uint8_t> *vertex_shader = nullptr) {
+                              const std::vector<uint8_t> *vertex_shader = nullptr, bool no_vertex_input = false) {
   const auto &[reserved, expect_unsupported, late_load, empty_sample, limit_sampler_max, mismatch_root, same_root,
                switch_pipeline, dynamic_sampler, skip_sampler_update, multi_sampler, swap_sampler_tables, heap_rebind,
                same_heap_range, resubmit, resubmit_control, cache_guard, fail_late_sampler, recover_late_sampler,
@@ -536,7 +537,7 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   Owned<ID3D12RootSignature> root;
   Owned<ID3D12PipelineState> pipeline;
   CreatePipeline(device, shader, root, pipeline, limit_sampler_max, dynamic_sampler, multi_sampler,
-                 expect_patch_rejection, vertex_shader);
+                 expect_patch_rejection, vertex_shader, no_vertex_input);
   if (expect_patch_rejection)
     return {};
   if (cache_guard) {
@@ -598,7 +599,7 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   Owned<ID3D12GraphicsCommandList> list;
   Owned<ID3D12Resource> render_target, vertex_buffer;
   Owned<ID3D12DescriptorHeap> rtv_heap;
-  if (vertex_shader) {
+  if (vertex_shader && !no_vertex_input) {
     CreateBuffer(device, vertex_buffer, 6 * sizeof(float), D3D12_HEAP_TYPE_UPLOAD,
                  D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
     float *vertices = nullptr;
@@ -606,6 +607,8 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
     const float positions[] = {-1, -1, -1, 3, 3, -1};
     memcpy(vertices, positions, sizeof(positions));
     vertex_buffer->Unmap(0, nullptr);
+  }
+  if (vertex_shader) {
     auto render_desc = TextureDesc(1, 1, 1, D3D12_TEXTURE_LAYOUT_UNKNOWN);
     render_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     render_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
@@ -636,8 +639,10 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
     list->RSSetViewports(1, &viewport);
     list->RSSetScissorRects(1, &scissor);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    D3D12_VERTEX_BUFFER_VIEW vb = {vertex_buffer->GetGPUVirtualAddress(), 6 * sizeof(float), 2 * sizeof(float)};
-    list->IASetVertexBuffers(0, 1, &vb);
+    if (!no_vertex_input) {
+      D3D12_VERTEX_BUFFER_VIEW vb = {vertex_buffer->GetGPUVirtualAddress(), 6 * sizeof(float), 2 * sizeof(float)};
+      list->IASetVertexBuffers(0, 1, &vb);
+    }
   } else {
     list->SetComputeRootSignature((mismatch_root || same_root || switch_pipeline) ? alternate_root.ptr : root.ptr);
   }
@@ -867,10 +872,12 @@ int main(int argc, char **argv) {
       std::cout << "\n";
     }
   }
-  const bool fragment_control = argc == 4 && strcmp(argv[2], "--fragment-control") == 0;
+  const bool vertexid_unpatched = argc == 4 && strcmp(argv[2], "--vertexid-unpatched") == 0;
+  const bool fragment_control = vertexid_unpatched || (argc == 4 && strcmp(argv[2], "--fragment-control") == 0);
   const bool fragment_mismatch = argc == 4 && strcmp(argv[2], "--fragment-mismatch") == 0;
   const bool fragment_switch = argc == 4 && strcmp(argv[2], "--fragment-switch") == 0;
-  const bool fragment_case = fragment_control || fragment_mismatch || fragment_switch || (argc == 4 && strcmp(argv[2], "--fragment-lod") == 0);
+  const bool fragment_vertexid = vertexid_unpatched || (argc == 4 && strcmp(argv[2], "--fragment-vertexid") == 0);
+  const bool fragment_case = fragment_control || fragment_mismatch || fragment_switch || fragment_vertexid || (argc == 4 && strcmp(argv[2], "--fragment-lod") == 0);
   const bool unsupported_read = argc == 3 && strcmp(argv[2], "--load-unsupported") == 0;
   const bool late_load = argc == 3 && strcmp(argv[2], "--load-late") == 0;
   const bool empty_sample = argc == 3 && strcmp(argv[2], "--sample-empty") == 0;
@@ -925,11 +932,11 @@ int main(int argc, char **argv) {
         std::cout << "fragment root mismatch rejected\n";
         return 0;
       }
-      const auto ordinary = RunCase(device.ptr, queue.ptr, shader, options, &vertex_shader);
+      const auto ordinary = RunCase(device.ptr, queue.ptr, shader, options, &vertex_shader, fragment_vertexid);
       const bool ordinary_pass = CheckCase("fragment ordinary", ordinary,
           {0x3f800000, 0x40000000, 0x40400000, 0x40800000, 0x40400000});
       options.reserved = true;
-      const auto reserved = RunCase(device.ptr, queue.ptr, shader, options, &vertex_shader);
+      const auto reserved = RunCase(device.ptr, queue.ptr, shader, options, &vertex_shader, fragment_vertexid);
       if (reserved.empty())
         return 77;
       const bool reserved_pass = CheckCase("fragment reserved", reserved,

@@ -81,6 +81,7 @@ def main():
     parser.add_argument("--grad", default="grad.cso")
     parser.add_argument("--fragment-ps")
     parser.add_argument("--fragment-vs")
+    parser.add_argument("--vertexid-vs")
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--case", action="append", help="run only the named case; may be repeated")
     args = parser.parse_args()
@@ -88,6 +89,8 @@ def main():
         parser.error("--timeout must be positive")
     if bool(args.fragment_ps) != bool(args.fragment_vs):
         parser.error("--fragment-ps and --fragment-vs must be supplied together")
+    if args.vertexid_vs and not args.fragment_ps:
+        parser.error("--vertexid-vs requires --fragment-ps and --fragment-vs")
     stage, prefix, build = (path.resolve(strict=True) for path in (args.stage, args.prefix, args.build))
     wine = stage / "wine/bin/wine"
     pairs = {
@@ -103,6 +106,8 @@ def main():
     inputs = [wine, stage / args.sample, stage / args.multi, stage / args.grad]
     if args.fragment_ps:
         inputs += [stage / args.fragment_ps, stage / args.fragment_vs]
+    if args.vertexid_vs:
+        inputs.append(stage / args.vertexid_vs)
     for path in inputs:
         if not path.is_file():
             raise SystemExit(f"missing input: {path}")
@@ -144,6 +149,8 @@ def main():
             ("fragment-mismatch", args.fragment_ps, ("--fragment-mismatch", args.fragment_vs), 0, "fragment root mismatch rejected"),
             ("fragment-switch", args.fragment_ps, ("--fragment-switch", args.fragment_vs), 0, "fragment LOD matrix passed"),
         ]
+    if args.vertexid_vs:
+        cases.append(("fragment-vertexid", args.fragment_ps, ("--fragment-vertexid", args.vertexid_vs), 0, "fragment LOD matrix passed"))
     if args.case:
         unknown = set(args.case) - {case[0] for case in cases}
         if unknown:
@@ -205,6 +212,8 @@ def main():
     if args.fragment_ps:
         summary["fixtures"].update({"fragment_ps": sha256(stage / args.fragment_ps),
                                     "fragment_vs": sha256(stage / args.fragment_vs)})
+    if args.vertexid_vs:
+        summary["fixtures"]["vertexid_vs"] = sha256(stage / args.vertexid_vs)
     (logdir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"logs: {logdir}")
     return 0 if all(result["pass"] for result in results) else 1
