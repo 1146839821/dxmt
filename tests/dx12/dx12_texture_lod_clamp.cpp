@@ -323,7 +323,7 @@ struct RunOptions {
   bool dynamic_sampler = false, skip_sampler_update = false, multi_sampler = false, swap_sampler_tables = false;
   bool heap_rebind = false, same_heap_range = false, resubmit = false, resubmit_control = false;
   bool cache_guard = false, fail_late_sampler = false, recover_late_sampler = false, sampler_lifetime = false;
-  bool expect_patch_rejection = false;
+  bool expect_patch_rejection = false, multi_queue = false;
 };
 
 std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
@@ -331,7 +331,7 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   const auto &[reserved, expect_unsupported, late_load, empty_sample, limit_sampler_max, mismatch_root, same_root,
                switch_pipeline, dynamic_sampler, skip_sampler_update, multi_sampler, swap_sampler_tables, heap_rebind,
                same_heap_range, resubmit, resubmit_control, cache_guard, fail_late_sampler, recover_late_sampler,
-               sampler_lifetime, expect_patch_rejection] = options;
+               sampler_lifetime, expect_patch_rejection, multi_queue] = options;
   constexpr UINT mip_levels = 3;
   const auto desc = reserved ? TextureDesc(256, 256, 2, D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE)
                              : TextureDesc(512, 512, mip_levels, D3D12_TEXTURE_LAYOUT_UNKNOWN);
@@ -375,6 +375,21 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
     InitializeOrdinaryTexture(device, queue, texture.ptr, desc, values, fence.ptr);
   }
 
+  if (multi_queue) {
+    Owned<ID3D12CommandAllocator> setup_allocator;
+    Owned<ID3D12GraphicsCommandList> setup_list;
+    Check("CreateQueueSetupAllocator", device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                       IID_PPV_ARGS(&setup_allocator.ptr)));
+    Check("CreateQueueSetupList", device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                           setup_allocator.ptr, nullptr, IID_PPV_ARGS(&setup_list.ptr)));
+    Transition(setup_list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Check("CloseQueueSetupList", setup_list->Close());
+    ID3D12CommandList *setup_lists[] = {setup_list.ptr};
+    queue->ExecuteCommandLists(1, setup_lists);
+    Check("SignalQueueSetup", queue->Signal(fence.ptr, 2));
+    Wait(fence.ptr, 2);
+  }
+
   Owned<ID3D12Resource> output;
   Owned<ID3D12Resource> readback;
   CreateBuffer(device, output, OutputCount * sizeof(uint32_t), D3D12_HEAP_TYPE_DEFAULT,
@@ -411,11 +426,13 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
     sampler_heap_desc.NumDescriptors = multi_sampler ? 4 : 2;
     sampler_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     Check("CreateLODSamplerHeap", device->CreateDescriptorHeap(&sampler_heap_desc, IID_PPV_ARGS(&sampler_heap.ptr)));
-    if (sampler_lifetime) {
-      auto *marker = new HeapLifetimeMarker(heap_marker_destroyed);
-      const auto marker_hr = sampler_heap->SetPrivateDataInterface(heap_marker_guid, marker);
-      marker->Release();
-      Check("SetHeapMarker", marker_hr);
+    if (sampler_lifetime || multi_queue) {
+      if (sampler_lifetime) {
+        auto *marker = new HeapLifetimeMarker(heap_marker_destroyed);
+        const auto marker_hr = sampler_heap->SetPrivateDataInterface(heap_marker_guid, marker);
+        marker->Release();
+        Check("SetHeapMarker", marker_hr);
+      }
       Check("CreateLifetimeGate", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&lifetime_gate.ptr)));
       gate_guard.fence = lifetime_gate.ptr;
       Check("CreateLifetimeAllocator", device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -520,7 +537,8 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   Check("CreateLODCommandList", device->CreateCommandList(
                                      0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.ptr, pipeline.ptr,
                                      IID_PPV_ARGS(&list.ptr)));
-  Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  if (!multi_queue)
+    Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   list->SetComputeRootSignature((mismatch_root || same_root || switch_pipeline) ? alternate_root.ptr : root.ptr);
   ID3D12DescriptorHeap *heap_list[] = {descriptors.ptr, sampler_heap.ptr};
@@ -569,7 +587,8 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
   list->CopyBufferRegion(readback.ptr, 0, output.ptr, 0, OutputCount * sizeof(uint32_t));
   Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
-  Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+  if (!multi_queue)
+    Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
   Check("CloseLODCommandList", list->Close());
   if (dynamic_sampler && !skip_sampler_update && !multi_sampler && !heap_rebind) {
     // Root signature 1.0 permits descriptor replacement before submission.
@@ -591,6 +610,63 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
     srv.Texture2D.MipLevels = case_mips;
     srv.Texture2D.ResourceMinLODClamp = 1.0f;
     device->CreateShaderResourceView(texture.ptr, &srv, descriptors->GetCPUDescriptorHandleForHeapStart());
+  }
+  if (multi_queue) {
+    Owned<ID3D12CommandQueue> second_queue;
+    D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+    queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    Check("CreateSecondLODQueue", device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&second_queue.ptr)));
+    Owned<ID3D12Fence> second_fence;
+    Check("CreateSecondLODFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&second_fence.ptr)));
+    Owned<ID3D12Resource> second_output, second_readback;
+    CreateBuffer(device, second_output, OutputCount * sizeof(uint32_t), D3D12_HEAP_TYPE_DEFAULT,
+                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+    CreateBuffer(device, second_readback, OutputCount * sizeof(uint32_t), D3D12_HEAP_TYPE_READBACK,
+                 D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+    Owned<ID3D12DescriptorHeap> second_descriptors;
+    Check("CreateSecondLODHeap", device->CreateDescriptorHeap(&descriptor_desc, IID_PPV_ARGS(&second_descriptors.ptr)));
+    auto second_cpu = second_descriptors->GetCPUDescriptorHandleForHeapStart();
+    device->CopyDescriptorsSimple(5, second_cpu, descriptors->GetCPUDescriptorHandleForHeapStart(), descriptor_desc.Type);
+    second_cpu.ptr += 5 * stride;
+    device->CreateUnorderedAccessView(second_output.ptr, nullptr, &uav, second_cpu);
+    Owned<ID3D12CommandAllocator> second_allocator, second_reset_allocator;
+    Owned<ID3D12GraphicsCommandList> second_list;
+    Check("CreateSecondLODAllocator", device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                      IID_PPV_ARGS(&second_allocator.ptr)));
+    Check("CreateSecondResetAllocator", device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                        IID_PPV_ARGS(&second_reset_allocator.ptr)));
+    Check("CreateSecondLODList", device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, second_allocator.ptr,
+                                                            pipeline.ptr, IID_PPV_ARGS(&second_list.ptr)));
+    Transition(second_list.ptr, second_output.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    second_list->SetComputeRootSignature(root.ptr);
+    ID3D12DescriptorHeap *second_heaps[] = {second_descriptors.ptr, sampler_heap.ptr};
+    second_list->SetDescriptorHeaps(2, second_heaps);
+    second_list->SetComputeRootDescriptorTable(0, second_descriptors->GetGPUDescriptorHandleForHeapStart());
+    second_list->SetComputeRootDescriptorTable(1, sampler_gpu);
+    second_list->Dispatch(1, 1, 1);
+    Transition(second_list.ptr, second_output.ptr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    second_list->CopyBufferRegion(second_readback.ptr, 0, second_output.ptr, 0, OutputCount * sizeof(uint32_t));
+    Check("CloseSecondLODList", second_list->Close());
+    Check("WaitSecondQueueGate", second_queue->Wait(lifetime_gate.ptr, 1));
+    ID3D12CommandList *second_lists[] = {second_list.ptr};
+    second_queue->ExecuteCommandLists(1, second_lists);
+    ID3D12CommandList *first_lists[] = {list.ptr};
+    queue->ExecuteCommandLists(1, first_lists);
+    Check("ResetFirstQueuedList", list->Reset(lifetime_allocator.ptr, nullptr));
+    Check("ResetSecondQueuedList", second_list->Reset(second_reset_allocator.ptr, nullptr));
+    Check("SignalFirstQueue", queue->Signal(fence.ptr, 3));
+    Wait(fence.ptr, 3);
+    Check("SignalSecondQueue", second_queue->Signal(second_fence.ptr, 1));
+    Check("ReleaseSecondQueueGate", lifetime_gate->Signal(1));
+    Wait(second_fence.ptr, 1);
+    std::vector<uint32_t> result;
+    for (ID3D12Resource *buffer : {readback.ptr, second_readback.ptr}) {
+      uint32_t *mapped = nullptr;
+      Check("MapMultiQueueReadback", buffer->Map(0, nullptr, reinterpret_cast<void **>(&mapped)));
+      result.insert(result.end(), mapped, mapped + OutputCount);
+      buffer->Unmap(0, nullptr);
+    }
+    return result;
   }
   ID3D12CommandList *lists[] = {list.ptr};
   if (sampler_lifetime)
@@ -694,9 +770,11 @@ int main(int argc, char **argv) {
   const bool fail_late_sampler = argc == 3 && strcmp(argv[2], "--dynamic-fail-late") == 0;
   const bool recover_late_sampler = argc == 3 && strcmp(argv[2], "--dynamic-recover") == 0;
   const bool sampler_lifetime = argc == 3 && strcmp(argv[2], "--dynamic-lifetime") == 0;
+  const bool multi_queue_control = argc == 3 && strcmp(argv[2], "--multi-queue-control") == 0;
+  const bool multi_queue = multi_queue_control || (argc == 3 && strcmp(argv[2], "--multi-queue") == 0);
   const bool patch_rejection = argc == 3 && strcmp(argv[2], "--patch-unsupported") == 0;
   const bool resubmit = resubmit_control || (argc == 3 && strcmp(argv[2], "--resubmit") == 0);
-  const bool dynamic_sampler = sampler_lifetime || recover_late_sampler || fail_late_sampler || resubmit || heap_rebind || multi_sampler || skip_sampler_update || (argc == 3 && strcmp(argv[2], "--dynamic-late") == 0);
+  const bool dynamic_sampler = multi_queue || sampler_lifetime || recover_late_sampler || fail_late_sampler || resubmit || heap_rebind || multi_sampler || skip_sampler_update || (argc == 3 && strcmp(argv[2], "--dynamic-late") == 0);
   if (argc != 2 && !unsupported_read && !late_load && !empty_sample && !limit_sampler_max && !mismatch_root &&
       !same_root && !switch_pipeline && !dynamic_sampler && !cache_guard && !patch_rejection) {
     std::cerr << "usage: dx12_texture_lod_clamp <shader.cs.cso> [mode]\n"
@@ -704,7 +782,7 @@ int main(int argc, char **argv) {
                  "       --same-root --pso-switch --dynamic-late --dynamic-stale --dynamic-fail-late\n"
                  "       --dynamic-recover --dynamic-lifetime --multi-sampler --multi-swapped\n"
                  "       --heap-rebind --heap-rebind-control --resubmit --resubmit-control --cache-guard\n"
-                 "       --patch-unsupported\n";
+                 "       --patch-unsupported --multi-queue --multi-queue-control\n";
     return 2;
   }
 
@@ -759,7 +837,7 @@ int main(int argc, char **argv) {
       std::cout << "late ResourceMinLODClamp Texture.Load passed\n";
       return 0;
     }
-    const std::vector<uint32_t> ordinary_expected = (heap_rebind || resubmit)
+    std::vector<uint32_t> ordinary_expected = (heap_rebind || resubmit)
         ? std::vector<uint32_t>{0x40400000, 0x40400000, 0x40400000, 0x40800000, 0x40a00000,
                                 0x3f800000, 0x40000000, 0x40400000, 0x40800000, 0x40400000}
         : multi_sampler
@@ -768,11 +846,21 @@ int main(int argc, char **argv) {
                                 empty_sample ? 0u : 0x40800000, 0x40400000};
     // This two-mip view ends at LOD 1; a resource clamp of 1.5 is
     // beyond its final mip and therefore produces the out-of-bounds value.
-    const std::vector<uint32_t> reserved_expected = (heap_rebind || resubmit)
+    std::vector<uint32_t> reserved_expected = (heap_rebind || resubmit)
         ? std::vector<uint32_t>{0x40400000, 0x40400000, 0x40400000, 0u, 0x40400000,
                                 0x3f800000, 0x40000000, 0x40400000, 0u, 0x40400000}
         : std::vector<uint32_t>{0x3f800000, multi_sampler ? 0x40400000u : 0x40000000u,
                                 0x40400000, 0u, 0x40400000};
+    if (multi_queue) {
+      const auto ordinary_copy = ordinary_expected;
+      const auto reserved_copy = reserved_expected;
+      ordinary_expected.insert(ordinary_expected.end(), ordinary_copy.begin(), ordinary_copy.end());
+      reserved_expected.insert(reserved_expected.end(), reserved_copy.begin(), reserved_copy.end());
+      if (multi_queue_control) {
+        ordinary_expected[OutputCount] = 0;
+        reserved_expected[OutputCount] = 0;
+      }
+    }
     options.empty_sample = empty_sample;
     options.limit_sampler_max = limit_sampler_max;
     options.same_root = same_root;
@@ -787,6 +875,7 @@ int main(int argc, char **argv) {
     options.resubmit_control = resubmit_control;
     options.recover_late_sampler = recover_late_sampler;
     options.sampler_lifetime = sampler_lifetime;
+    options.multi_queue = multi_queue;
     const auto ordinary = RunCase(device.ptr, queue.ptr, shader, options);
     const bool ordinary_pass = CheckCase("ordinary ResourceMinLODClamp", ordinary, ordinary_expected);
     options.reserved = true;

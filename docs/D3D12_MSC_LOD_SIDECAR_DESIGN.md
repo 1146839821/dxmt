@@ -110,6 +110,39 @@ export against their staged PE images, along with validation activation,
 expected output, and negative controls;
 it writes logs to a new directory and does not install binaries. A skipped
 reserved-texture case is reported as a failure, not as a pass.
+
+The multi-queue experiment records two independent direct lists with separate
+UAVs and readbacks, sharing a read-only texture and sampler heap. A CPU fence
+holds the second queue while the first completes; both lists are reset with
+independent allocators and the application retains the sampler heap until
+both submissions complete. Both readbacks are checked. This demonstrates overlapping outstanding work,
+not simultaneous GPU execution. The control deliberately corrupts the second
+expected output. The runner accepts repeated `--case` options to select cases.
+The test does not mutate descriptors while either queue may use them and does
+not submit a command list again while it is in flight, consistent with the
+[D3D12 command-list execution rules](https://learn.microsoft.com/en-us/windows/win32/direct3d12/design-philosophy-of-command-queues-and-command-lists)
+and [descriptor-table lifetime rules](https://learn.microsoft.com/en-us/windows/win32/direct3d12/advanced-use-of-descriptor-tables).
+Native Windows behavior and simultaneous GPU execution are not verified here.
+
+Multi-queue test design card:
+
+- Goal: validate experimental sidecar use by two outstanding queue submissions.
+- Baseline: `3609008e`; the previous probe covered only one queue at a time.
+- Evidence: the Microsoft command-list and descriptor rules linked above;
+  Mullion `b580492a` has independent D3D12 queue tests, but was not used as a
+  normative oracle for this experiment.
+- Scope and boundary: test-only compute probe and runner; independent lists,
+  allocators, output buffers, and readbacks; one shared read-only texture and
+  sampler heap. Production shader and queue behavior are unchanged.
+- Non-scope: parallel GPU execution, descriptor mutation in flight, Windows
+  native behavior, graphics stages, and public capability promotion.
+- Validation: exact ordinary/reserved outputs and a deliberately wrong oracle,
+  matching runtime identities, Metal API and shader validation, and builds.
+- Risk: a blocked submission proves overlapping outstanding work, not actual
+  concurrent hardware scheduling; a passing test covers this shader shape only.
+- Rollback: revert the test, runner, and this documentation together.
+- Done: both output sets match, the negative control fails, validation is active,
+  and the test and existing relevant regressions build and run successfully.
 With the test-only patched path, injecting relaxed-sampler creation failure
 after Close invalidated the recorded sidecar and queue submission rejected the
 list with E_FAIL. An unpatched control did not register a sidecar and failed

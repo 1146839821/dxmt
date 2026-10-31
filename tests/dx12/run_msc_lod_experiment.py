@@ -80,6 +80,7 @@ def main():
     parser.add_argument("--multi", default="multi.cso")
     parser.add_argument("--grad", default="grad.cso")
     parser.add_argument("--timeout", type=int, default=90)
+    parser.add_argument("--case", action="append", help="run only the named case; may be repeated")
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
@@ -116,6 +117,8 @@ def main():
         ("dynamic-recover", args.sample, "--dynamic-recover", 0, "matrix passed"),
         ("dynamic-fail", args.sample, "--dynamic-fail-late", 0, "late sampler sidecar failure rejected"),
         ("dynamic-lifetime", args.sample, "--dynamic-lifetime", 0, "matrix passed"),
+        ("multi-queue", args.sample, "--multi-queue", 0, "matrix passed"),
+        ("multi-queue-control", args.sample, "--multi-queue-control", 1, "expected:"),
         ("heap-rebind", args.sample, "--heap-rebind", 0, "matrix passed"),
         ("heap-control", args.sample, "--heap-rebind-control", 1, "expected:"),
         ("resubmit", args.sample, "--resubmit", 0, "matrix passed"),
@@ -127,6 +130,11 @@ def main():
         ("unsupported", args.grad, "--patch-unsupported", 0, "unsupported shader patch rejected"),
         ("unsupported-control", args.sample, "--patch-unsupported", 1, "unsupported shader was not rejected"),
     ]
+    if args.case:
+        unknown = set(args.case) - {case[0] for case in cases}
+        if unknown:
+            parser.error("unknown case(s): " + ", ".join(sorted(unknown)))
+        cases = [case for case in cases if case[0] in args.case]
     env = os.environ.copy()
     env.update({
         "WINEPREFIX": str(prefix), "WINEDLLPATH": str(stage / "wine/lib/wine"),
