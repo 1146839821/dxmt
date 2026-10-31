@@ -236,11 +236,14 @@ int main(int argc, char **argv) {
     return output.has_error() ? 6 : 0;
   }
   if (argc != 3) {
-    std::cerr << "usage: msc-icb-constant-experiment input.metallib "
-                 "output.metallib\n";
+    std::cerr
+        << "usage: msc-icb-constant-experiment input.metallib "
+           "output.metallib\n"
+           "       msc-icb-constant-experiment --inspect input.metallib\n";
     return 2;
   }
-  std::ifstream in(argv[1], std::ios::binary);
+  const bool inspect = std::strcmp(argv[1], "--inspect") == 0;
+  std::ifstream in(inspect ? argv[2] : argv[1], std::ios::binary);
   std::vector<char> bytes((std::istreambuf_iterator<char>(in)), {});
   if (bytes.size() < sizeof(dxmt::metallib::MTLBHeader))
     return 3;
@@ -260,6 +263,37 @@ int main(int argc, char **argv) {
     return 4;
   }
   auto module = std::move(*parsed);
+  if (inspect) {
+    unsigned dynamic_loads = 0;
+    unsigned direct_global_loads = 0;
+    for (auto &fn : *module)
+      for (auto &block : fn)
+        for (auto &inst : block) {
+          auto *load = llvm::dyn_cast<llvm::LoadInst>(&inst);
+          auto *gep = load ? llvm::dyn_cast<llvm::GetElementPtrInst>(
+                                 load->getPointerOperand())
+                           : nullptr;
+          if (!gep || gep->getPointerAddressSpace() != 2 ||
+              gep->getNumIndices() != 2 ||
+              llvm::isa<llvm::Constant>(gep->getOperand(2)))
+            continue;
+          ++dynamic_loads;
+          if (llvm::isa<llvm::GlobalVariable>(gep->getPointerOperand()))
+            ++direct_global_loads;
+        }
+    const unsigned rewritten = transform(*module);
+    if (llvm::verifyModule(*module, &llvm::errs()))
+      return 5;
+    llvm::outs() << "target: " << module->getTargetTriple()
+                 << "\nlayout: " << module->getDataLayoutStr()
+                 << "\naddress-space-2 pointer index bits: "
+                 << module->getDataLayout().getIndexSizeInBits(2)
+                 << "\ndynamic address-space-2 GEP loads: " << dynamic_loads
+                 << "\ndirect-global dynamic GEP loads: " << direct_global_loads
+                 << "\nloads eligible for experimental rewrite: " << rewritten
+                 << "\n";
+    return 0;
+  }
   auto count = transform(*module);
   if (!count || llvm::verifyModule(*module, &llvm::errs()))
     return 5;
