@@ -77,11 +77,17 @@ if get_option('enable_tests')
   )
   test('airconv msc icb constant experiment', msc_icb_constant_experiment, args: ['--self-test'])
   icb_experiment_lli = find_program('lli', required: false, native: true)
+  icb_experiment_opt = find_program('opt', required: false, native: true)
   icb_experiment_python = find_program('python3', required: false, native: true)
   if icb_experiment_python.found()
     test('airconv msc icb isolated cache', icb_experiment_python,
       args: [files('../../../tests/airconv/test_prepare_icb_experiment_cache.py'),
              files('../../../tests/airconv/prepare_icb_experiment_cache.py')])
+  endif
+  if icb_experiment_opt.found() and icb_experiment_python.found()
+    test('airconv msc icb index layout', icb_experiment_python,
+      args: [files('../../../tests/airconv/test_msc_icb_index_layout.py'),
+             msc_icb_constant_experiment, icb_experiment_opt.full_path()])
   endif
   if icb_experiment_lli.found() and icb_experiment_python.found()
     test('airconv msc icb constant differential', icb_experiment_python,
