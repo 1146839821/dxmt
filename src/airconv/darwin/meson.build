@@ -83,6 +83,9 @@ if get_option('enable_tests')
     test('airconv msc icb isolated cache', icb_experiment_python,
       args: [files('../../../tests/airconv/test_prepare_icb_experiment_cache.py'),
              files('../../../tests/airconv/prepare_icb_experiment_cache.py')])
+    test('airconv darwin loaded image identity', icb_experiment_python,
+      args: [files('../../../tests/airconv/test_darwin_loaded_image_identity.py'),
+             files('../../../tests/airconv/darwin_loaded_image_probe.c')])
   endif
   if icb_experiment_opt.found() and icb_experiment_python.found()
     test('airconv msc icb index layout', icb_experiment_python,

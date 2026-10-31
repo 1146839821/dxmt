@@ -70,3 +70,19 @@ verified. Proceeding with a path hash or UUID alone would leave the original
 identity gap in another form. The next implementation step is a small Darwin
 identity probe and adversarial replacement tests, followed by the bridge and
 cache change once the probe meets the acceptance conditions above.
+
+## Loaded-image replacement probe
+
+`tests/airconv/test_darwin_loaded_image_identity.py` builds two test-only native
+dylibs and a process that reports the mapped image's UUID and calls its
+exported function. In an isolated temporary directory it atomically replaces
+the loaded pathname, then confirms that the existing process still executes the
+original mapping while the path has different bytes. It repeats the replacement
+with the second dylib's UUID deliberately changed to match the first; the second
+image is ad-hoc signed and independently loaded before replacement. Thus the
+control demonstrates two loadable, different local binaries with the same UUID.
+
+This probe passed locally on macOS 27.0.1 under x86_64/Rosetta and native arm64. It demonstrates
+why path-only hashing and UUID-only keys are insufficient; it does not establish
+a safe way to bind a full file digest to the actual loaded image, and it does
+not test a production MSC library or the D3D12 cache. Concurrent replacement and loaded-content hashing remain unverified.
