@@ -143,6 +143,29 @@ Multi-queue test design card:
 - Rollback: revert the test, runner, and this documentation together.
 - Done: both output sets match, the negative control fails, validation is active,
   and the test and existing relevant regressions build and run successfully.
+
+Fragment conversion probe design card:
+
+- Goal: determine whether a real MSC fragment `SampleLevel` metallib can pass
+  the experimental transform before planning graphics-stage integration.
+- Baseline: `294b3aae`; the auto root argument discovery accepts only one
+  `air.kernel`, and the opt-in patch and sidecar upload are compute-only.
+- Scope: compile `msc_lod_fragment.hlsl` as `ps_6_0`, serialize a two-table
+  root signature, obtain MSC's reflected offsets, and invoke the existing
+  WineMetal transform through `dx12_msc_lod_fragment`. No graphics PSO or
+  production path is modified.
+- Evidence: on MSC API 4.0.1 the fragment was rejected by auto-discovery;
+  exactly one explicit index in 0..31 passed the strict transform and an
+  overlapping sidecar layout was rejected. A compute shader supplied as a
+  fragment was rejected by MSC. These are local conversion observations, not
+  proof of ABI correctness or rendered pixel behavior.
+- Risk: a structurally accepted explicit index is not a safe substitute for
+  stage-aware metadata validation. Root identity, stage visibility, residency,
+  dirty-state transitions, and cache compatibility still need design and GPU
+  verification. Native Windows and other MSC versions were not tested.
+- Rollback: remove the probe, fixture, build target, and this card together.
+- Done: real fragment conversion, strict auto rejection, explicit transform,
+  invalid-layout control, matching runtime identity, and build checks complete.
 With the test-only patched path, injecting relaxed-sampler creation failure
 after Close invalidated the recorded sidecar and queue submission rejected the
 list with E_FAIL. An unpatched control did not register a sidecar and failed
