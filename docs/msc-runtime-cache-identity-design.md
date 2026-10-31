@@ -253,3 +253,21 @@ PE/old Unix, and the old PE capability query against new Unix. The new x64 and
 used the x86_64 Unix bridge. These observations cover the tested artifacts,
 not every historical or future version combination. WineMetal PE and Unix
 libraries should normally be deployed as a matched pair.
+
+## Opt-in runtime diagnostic integration
+
+The native identity component is linked into WineMetal. Only when
+`DXMT_TEST_MSC_IDENTITY_SNAPSHOT=1` and an absolute
+`DXMT_METALIRCONVERTER_PATH` is supplied does the loader pre-open and hash the
+candidate; after `dlopen` it compares the mapping and revalidates. The V1
+query serializes diagnostic revalidation through a mutex, closes an invalid
+snapshot, and still returns unavailable with a zero digest. Normal loading does
+not perform the snapshot. The diagnostic deliberately does not establish a
+cache-safe identity or enable persistent caching.
+
+`tests/dx12/run_msc_identity_diagnostic.py` copies a converter to a new isolated
+output directory, checks stage/build hashes and loaded export bytes, then tests
+stable and changed-metadata cases. A local Wine run passed both, including
+repeated queries; a separate normal fragment GPU run passed with diagnostics
+disabled. This covers one paired x64 WineMetal build and one local converter,
+not concurrent modification across the converter's lifetime or other loaders.

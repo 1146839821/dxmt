@@ -9,7 +9,7 @@ static_assert(offsetof(dxmt_msc_identity_v1, sha256) == 16);
 
 int main(int argc, char **argv) {
   if (argc != 2 || (std::strcmp(argv[1], "new") && std::strcmp(argv[1], "old") &&
-                    std::strcmp(argv[1], "legacy-pe")))
+                    std::strcmp(argv[1], "legacy-pe") && std::strcmp(argv[1], "new-wait")))
     return 1;
   HMODULE bridge = LoadLibraryA("winemetal.dll");
   if (!bridge)
@@ -39,8 +39,14 @@ int main(int argc, char **argv) {
   if (caps(&capability) != DXMT_MSC_SUCCESS)
     return 4;
   bool advertised = (capability.optional_symbols & DXMT_MSC_RUNTIME_BRIDGE_IDENTITY_V1) != 0;
-  if (advertised != (std::strcmp(argv[1], "new") == 0))
+  if (advertised != (std::strcmp(argv[1], "old") != 0))
     return 5;
+  if (!std::strcmp(argv[1], "new-wait")) {
+    std::puts("IDENTITY_WAIT");
+    std::fflush(stdout);
+    if (std::getchar() == EOF)
+      return 13;
+  }
   if (query(nullptr) != DXMT_MSC_ERROR_INVALID_ARGUMENT)
     return 6;
   dxmt_msc_identity_v1 identity = {};
@@ -67,6 +73,12 @@ int main(int argc, char **argv) {
   sentinel = identity;
   if (query(&identity) != DXMT_MSC_ERROR_INVALID_ARGUMENT || std::memcmp(&identity, &sentinel, sizeof(identity)))
     return 11;
+  identity.reserved = 0;
+  if (query(&identity) != DXMT_MSC_ERROR_UNAVAILABLE || identity.ret != DXMT_MSC_ERROR_UNAVAILABLE)
+    return 14;
+  for (auto byte : identity.sha256)
+    if (byte)
+      return 15;
   std::puts("MSC identity bridge unavailable and version checks passed");
   return 0;
 }

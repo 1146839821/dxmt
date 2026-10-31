@@ -1,5 +1,6 @@
 #include "metalirconverter_native.h"
 #include "airconv_public.h"
+#include "msc_image_identity.h"
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -108,6 +109,9 @@ static void *g_msc_library;
 static int g_msc_available;
 static uint64_t g_msc_optional_symbols;
 static pthread_once_t g_msc_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t g_msc_identity_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct dxmt_msc_image_identity g_msc_identity = DXMT_MSC_IMAGE_IDENTITY_INIT;
+static bool g_msc_identity_diagnostic;
 
 static void
 dxmt_msc_set_error(struct dxmt_msc_compile_dxil_params *params, uint32_t code, const char *message) {
@@ -534,6 +538,10 @@ dxmt_msc_load_symbols(void) {
 static void
 dxmt_msc_initialize(void) {
   const char *environment_path = getenv("DXMT_METALIRCONVERTER_PATH");
+  const char *identity_test = getenv("DXMT_TEST_MSC_IDENTITY_SNAPSHOT");
+  g_msc_identity_diagnostic = identity_test && !strcmp(identity_test, "1");
+  if (g_msc_identity_diagnostic && environment_path && environment_path[0] == '/')
+    (void)dxmt_msc_image_identity_open(&g_msc_identity, environment_path);
   const char *default_paths[] = {
       "@loader_path/../../libmetalirconverter.dylib",
       "libmetalirconverter.dylib",
@@ -551,6 +559,7 @@ dxmt_msc_initialize(void) {
   }
 
   if (!g_msc_library) {
+    dxmt_msc_image_identity_close(&g_msc_identity);
     for (size_t i = 0; i < sizeof(default_paths) / sizeof(default_paths[0]); i++) {
       g_msc_library = dlopen(default_paths[i], RTLD_NOW | RTLD_LOCAL);
       if (g_msc_library) {
@@ -566,6 +575,7 @@ dxmt_msc_initialize(void) {
   }
 
   if (!dxmt_msc_load_symbols()) {
+    dxmt_msc_image_identity_close(&g_msc_identity);
     dlclose(g_msc_library);
     g_msc_library = NULL;
     fprintf(stderr, "[WARN] DXMT: Metal Shader Converter has an incompatible runtime\n");
@@ -573,10 +583,35 @@ dxmt_msc_initialize(void) {
   }
 
   g_msc_available = 1;
+  if (g_msc_identity_diagnostic) {
+    Dl_info info;
+    void *symbol = dlsym(g_msc_library, "IRCompilerCreate");
+    bool bound = symbol && dladdr(symbol, &info) &&
+                 dxmt_msc_image_identity_matches_mapping(&g_msc_identity, info.dli_fbase) &&
+                 dxmt_msc_image_identity_revalidate(&g_msc_identity);
+    if (!bound)
+      dxmt_msc_image_identity_close(&g_msc_identity);
+    fprintf(stderr, "[INFO] DXMT: MSC identity diagnostic snapshot %s\n", bound ? "bound" : "unavailable");
+  }
   fprintf(
       stderr, "[INFO] DXMT: Metal Shader Converter runtime loaded: %s (API %d.%d.%d)\n", loaded_path,
       IR_VERSION_MAJOR, IR_VERSION_MINOR, IR_VERSION_PATCH
   );
+}
+
+int
+dxmt_msc_identity_diagnostic(void) {
+  pthread_once(&g_msc_once, dxmt_msc_initialize);
+  if (g_msc_identity_diagnostic) {
+    pthread_mutex_lock(&g_msc_identity_mutex);
+    bool valid = dxmt_msc_image_identity_revalidate(&g_msc_identity);
+    if (!valid)
+      dxmt_msc_image_identity_close(&g_msc_identity);
+    fprintf(stderr, "[INFO] DXMT: MSC identity diagnostic revalidation %s\n", valid ? "stable" : "unavailable");
+    pthread_mutex_unlock(&g_msc_identity_mutex);
+  }
+  /* Diagnostic observations do not prove a cache-safe runtime identity. */
+  return DXMT_MSC_ERROR_UNAVAILABLE;
 }
 
 int

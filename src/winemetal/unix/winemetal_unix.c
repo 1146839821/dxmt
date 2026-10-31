@@ -2584,7 +2584,7 @@ thunk_DXMTMSCGetIdentityV1(void *args) {
       params->reserved)
     return STATUS_UNSUCCESSFUL;
   memset(params->sha256, 0, sizeof(params->sha256));
-  params->ret = DXMT_MSC_ERROR_UNAVAILABLE;
+  params->ret = dxmt_msc_identity_diagnostic();
   return STATUS_SUCCESS;
 }
 

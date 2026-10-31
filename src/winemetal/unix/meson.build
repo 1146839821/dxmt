@@ -2,6 +2,7 @@ winemetal_unix_src = [
   'winemetal_unix.c',
   'cache.c',
   'metalirconverter.c',
+  'msc_image_identity.c',
   'metalirconverter_runtime.cpp',
 ]
 
