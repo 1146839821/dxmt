@@ -207,3 +207,21 @@ not a proof that filesystem timestamps are a universal concurrency primitive.
 The test cannot rule out content changes after the last validation or establish
 immutable loaded pages for the converter's entire lifetime. Production
 persistent caching remains fail-closed.
+
+## Candidate native component
+
+`src/winemetal/unix/msc_image_identity.{h,c}` extracts the pre-open, full-file
+hash, vnode comparison and revalidation logic into a candidate component.
+It is not linked to WineMetal or the MSC loader and cannot enable the persistent
+cache. Its open operation requires a regular readable file, hashes from a pinned
+file descriptor with metadata checks on both sides, and leaves failures
+unavailable; its separate mapping and revalidation calls are exercised by
+`tests/airconv/test_msc_image_identity_component.py`.
+
+The local component tests cover normal binding, atomic replacement before
+loading, in-place mutation after binding (including restored mtime), invalid
+paths and repeated close on x86_64/Rosetta and arm64. A manually invoked driver
+also bound and revalidated the current installed MSC dylib on both
+architectures. These tests do not prove atomicity over a converter's lifetime,
+identify transitive dependencies, or validate mixed PE/Unix versions; the
+helper must not be interpreted as sufficient to enable cache reuse yet.

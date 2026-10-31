@@ -89,6 +89,10 @@ if get_option('enable_tests')
     test('airconv darwin pinned image identity', icb_experiment_python,
       args: [files('../../../tests/airconv/test_darwin_pinned_image.py'),
              files('../../../tests/airconv/darwin_pinned_image_probe.c')])
+    test('airconv msc image identity component', icb_experiment_python,
+      args: [files('../../../tests/airconv/test_msc_image_identity_component.py'),
+             files('../../../tests/airconv/darwin_image_identity_component_probe.c'),
+             files('../../winemetal/unix/msc_image_identity.c')])
   endif
   if icb_experiment_opt.found() and icb_experiment_python.found()
     test('airconv msc icb index layout', icb_experiment_python,
