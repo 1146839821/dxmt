@@ -1,12 +1,16 @@
 // A test-only process that keeps a dylib mapped while its pathname is replaced.
 #include <dlfcn.h>
 #include <CommonCrypto/CommonDigest.h>
+#include <libproc.h>
 #include <mach-o/loader.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/proc_info.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static int snapshot(int (*marker)(void)) {
   Dl_info info;
@@ -79,7 +83,16 @@ static int snapshot(int (*marker)(void)) {
   printf(" ");
   for (int n = 0; n < CC_SHA256_DIGEST_LENGTH; ++n)
     printf("%02x", signature_digest[n]);
-  printf(" %s\n", info.dli_fname);
+  struct proc_regionwithpathinfo mapping = {0};
+  struct stat disk = {0};
+  if (proc_pidinfo(getpid(), PROC_PIDREGIONPATHINFO, (uint64_t)header, &mapping,
+                   sizeof(mapping)) != (int)sizeof(mapping) ||
+      stat(info.dli_fname, &disk))
+    return 10;
+  printf(" %s %u %llu %u %llu\n", info.dli_fname,
+         mapping.prp_vip.vip_vi.vi_stat.vst_dev,
+         (unsigned long long)mapping.prp_vip.vip_vi.vi_stat.vst_ino,
+         (unsigned)disk.st_dev, (unsigned long long)disk.st_ino);
   fflush(stdout);
   return 0;
 }

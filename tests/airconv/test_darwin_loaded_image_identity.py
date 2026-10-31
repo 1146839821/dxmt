@@ -102,8 +102,13 @@ def main():
             if process.returncode:
                 raise AssertionError(f"probe failed: {process.returncode}, {stderr}")
             second = stdout.strip()
-            if first != second or first != f"11 {auuid.hex()} {original_hash} {original_signature} {live}":
+            prior = first.split()
+            current = second.split()
+            if (len(prior) != 9 or len(current) != 9 or prior[:5] != current[:5] or
+                    prior[:5] != ["11", auuid.hex(), original_hash, original_signature, str(live)]):
                 raise AssertionError(f"mapped image changed unexpectedly: {first!r}, {second!r}")
+            if prior[5:7] != prior[7:9] or current[5:7] != prior[5:7] or current[7:9] == current[5:7]:
+                raise AssertionError(f"mapped and replaced file identities were not distinguished: {first!r}, {second!r}")
             on_disk = live.read_bytes()
             disk_uuid = on_disk[uuid_offset(on_disk):uuid_offset(on_disk) + 16]
             if before == after or (disk_uuid == auuid) != same_uuid:
@@ -145,6 +150,35 @@ def main():
             raise AssertionError("data-only control did not preserve UUID and __TEXT digest")
         if outputs[0][3] == outputs[1][3]:
             raise AssertionError("mapped signature did not distinguish changed initialized data")
+        # In-place writes retain the inode even though the file contents differ.
+        inplace = root / "inplace.dylib"
+        shutil.copyfile(data_a, inplace)
+        mapped = subprocess.Popen([str(probe), str(inplace)], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        initial = mapped.stdout.readline().strip().split()
+        if len(initial) != 9 or initial[5:7] != initial[7:9]:
+            mapped.kill()
+            mapped.wait()
+            raise AssertionError("in-place fixture was not mapped from its original inode")
+        identity_before = inplace.stat()
+        hash_before = digest(inplace)
+        with inplace.open("r+b") as writable:
+            writable.seek(location)
+            writable.write(struct.pack("<I", 22))
+            writable.flush()
+            os.fsync(writable.fileno())
+        identity_after = inplace.stat()
+        if ((identity_before.st_dev, identity_before.st_ino) != (identity_after.st_dev, identity_after.st_ino)
+                or hash_before == digest(inplace)):
+            raise AssertionError("in-place control did not preserve inode and alter contents")
+        post_output, _ = mapped.communicate("\n", timeout=20)
+        if mapped.returncode == 0:
+            post = post_output.strip().split()
+            if len(post) != 9 or post[5:7] != initial[5:7] or post[5:7] != post[7:9]:
+                raise AssertionError("in-place mapping unexpectedly changed device or inode")
+            print(f"in-place write preserved inode; marker changed {initial[0]} -> {post[0]}")
+        else:
+            print(f"in-place write preserved inode; mapped child exit={mapped.returncode}")
         print("mapped signatures stable across processes and distinguish changed initialized data")
 
 

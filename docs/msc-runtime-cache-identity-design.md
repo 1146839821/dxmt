@@ -156,3 +156,21 @@ about every entitlement, macOS release or MSC binary. It rules out relying on
 mapped signature bytes alone without separately validating their relationship
 to the actual loaded code and initialized data. The production persistent-cache
 guard remains enabled.
+
+## Mapping vnode identity experiment
+
+On the local macOS 27.0.1 machine, `proc_pidinfo` with
+`PROC_PIDREGIONPATHINFO` returned a device and inode for the loaded test
+libraries and for the actual MSC image. In the atomic replacement controls,
+the mapped region retained the original device/inode while `stat` on the
+original path reported the replacement inode. This passed under x86_64/Rosetta
+and native arm64. It is a useful replacement check, not a content identity.
+
+A further control modified a loaded test file in place: the on-disk hash
+changed while the device/inode remained unchanged; the running test process
+continued to return the old mapped value on both local architectures. This
+shows that even a matching pathname and mapping inode does not establish that
+subsequently read file bytes represent the already loaded contents. The test
+does not prove the behavior of all filesystems, shared-cache images, process
+security policies, or concurrent modifications. Persistent MSC caching remains
+disabled pending a complete, validated binding strategy.
