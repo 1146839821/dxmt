@@ -98,3 +98,22 @@ their mapped `__TEXT` fingerprints match. This control passed on x86_64/Rosetta
 and native arm64. A `__TEXT` digest, even combined with UUID, therefore does
 not establish full converter identity; no production key should use it alone.
 These are synthetic libraries, not evidence about MSC's specific data layout.
+
+## Temporary fail-closed guard
+
+Until a validated runtime identity exists, the MSC conversion path skips both
+persistent cache lookup and insertion while keeping its process-local cache.
+This can increase shader conversion work across process launches. The guard is
+not a library-identity implementation and does not repair the known ICB
+validation issue. Existing persistent records are left untouched.
+
+A local isolated test with paired WineMetal artifacts and Metal API/GPU
+validation used a seeded cache containing the earlier experimental ICB rewrite.
+The normal fragment case passed; the vertex-ID case produced the previously
+observed unpatched GPU validation failure. The seeded MSC table's keys and
+value hashes were unchanged in both runs. The latter is a negative control, not
+an application pass or by itself proof that the same key would have matched.
+`tests/dx12/check_msc_cache_guard.py` checks recorded run identities, expected
+outcomes and cache contents. The local logs are in
+`dxmt-test/n87-msc-cache-guard/msc-lod-7r6_vwsr` and
+`dxmt-test/n87-msc-cache-guard/msc-lod-p6r1ehey`.

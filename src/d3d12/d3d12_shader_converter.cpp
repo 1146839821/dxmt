@@ -197,6 +197,11 @@ constexpr uint64_t kDXILAtomic64OnHeapResource = 0x10000000;
 // that can change the generated metallib. Bump the version when the ABI or
 // converter defaults change.
 constexpr uint32_t kMSCConversionCacheVersion = 12;
+// The current capability snapshot identifies the headers, not the loaded MSC
+// dylib. Until the loaded library has a validated content identity, a disk hit
+// could reuse a conversion produced by a different compiler implementation.
+// Keep the process-local cache, but do not read or write persistent entries.
+constexpr bool kMSCConversionPersistentCacheEnabled = false;
 constexpr uint32_t kMSCConverterAPIVersion = 0x040001;
 constexpr uint32_t kMSCMetalTargetVersion = 0;
 constexpr uint32_t kMSCCompileFlags = 0;
@@ -1813,7 +1818,7 @@ ConvertD3D12ShaderInternal(
       return S_OK;
     }
   }
-  if (LoadPersistentMSCConversion(cache_key, converted)) {
+  if (kMSCConversionPersistentCacheEnabled && LoadPersistentMSCConversion(cache_key, converted)) {
     std::unique_lock<std::shared_mutex> lock(cache.mutex);
     cache.entries.emplace(cache_key, converted);
     DEBUG("MSC shader persistent cache hit");
@@ -1867,7 +1872,8 @@ ConvertD3D12ShaderInternal(
     std::unique_lock<std::shared_mutex> lock(cache.mutex);
     cache.entries.emplace(cache_key, converted);
   }
-  StorePersistentMSCConversion(cache_key, converted);
+  if (kMSCConversionPersistentCacheEnabled)
+    StorePersistentMSCConversion(cache_key, converted);
   return S_OK;
 }
 
