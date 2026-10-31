@@ -86,3 +86,15 @@ This probe passed locally on macOS 27.0.1 under x86_64/Rosetta and native arm64.
 why path-only hashing and UUID-only keys are insufficient; it does not establish
 a safe way to bind a full file digest to the actual loaded image, and it does
 not test a production MSC library or the D3D12 cache. Concurrent replacement and loaded-content hashing remain unverified.
+
+## Mapped `__TEXT` fingerprint control
+
+The probe also computes SHA-256 over the loaded `__TEXT` file-backed bytes.
+For the test libraries this fingerprint remained stable across processes and
+pathname replacement and distinguished changed executable code. However, a
+second control modifies an initialized `__DATA` value, preserves the UUID,
+and re-signs the image. Both binaries load and return different values while
+their mapped `__TEXT` fingerprints match. This control passed on x86_64/Rosetta
+and native arm64. A `__TEXT` digest, even combined with UUID, therefore does
+not establish full converter identity; no production key should use it alone.
+These are synthetic libraries, not evidence about MSC's specific data layout.
