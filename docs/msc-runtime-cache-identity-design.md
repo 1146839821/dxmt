@@ -288,3 +288,21 @@ These are isolated local observations, not a proof of race freedom, fd handling
 on every failure path, or production identity safety. The diagnostic remains
 opt-in and the persistent cache remains disabled. The local run's artifacts
 are under `dxmt-test/n89-identity-diag/concurrency3`.
+
+### Dependency-only replacement control
+
+`test_msc_identity_dependencies.py` builds a primary dylib whose exported
+function calls a second dylib, then replaces only that dependency between fresh
+processes. On local x86_64/Rosetta and arm64 runs, the function returned 11
+then 22 while the primary file SHA-256, UUID, mapped `__TEXT` hash and mapped
+signature hash stayed equal. The candidate primary-image component reported
+both snapshots bound and stable. Thus a validated primary image alone cannot
+identify arbitrary dynamically linked behavior.
+
+`otool -L` on the currently installed MSC dylib lists libbz2, CoreFoundation,
+libarchive, libc++ and libSystem for both slices. This is a static dependency
+observation, not a complete record of runtime-loaded libraries or evidence
+that any of these system dependencies changed. The cache key already includes
+OS information, but no test here establishes that OS version alone fully
+identifies the dependency closure. The diagnostic V1 response and persistent
+cache remain unavailable pending a defensible scope for those dependencies.
