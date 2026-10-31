@@ -236,3 +236,20 @@ descriptor. The candidate uses nonblocking open and rejects non-regular files,
 so a FIFO cannot block the caller before the type check. A failed revalidation
 invalidates the binding until close and a fresh open. These are component
 contracts, not evidence that a bridged runtime or persistent cache is safe.
+
+## Versioned bridge skeleton
+
+`DXMTMSCGetIdentityV1` is a new, pointer-free, 48-byte PE/Unix request. The
+new PE side checks the existing capability response for a dedicated bridge
+feature bit before calling the appended Unix ordinal; a Unix bridge without the
+bit is treated as unavailable. The Unix side validates size, version and
+reserved fields. Both x64 and WOW64 dispatch tables have compile-time ordinal
+checks. The current implementation intentionally returns unavailable and a
+zero digest: it does not expose the candidate helper or enable disk caching.
+
+In an isolated local Wine 11.0 stage, tests passed for new PE/new Unix, new
+PE/old Unix, and the old PE capability query against new Unix. The new x64 and
+32-bit PE export bytes were compared against the built files; the WOW64 run
+used the x86_64 Unix bridge. These observations cover the tested artifacts,
+not every historical or future version combination. WineMetal PE and Unix
+libraries should normally be deployed as a matched pair.

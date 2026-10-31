@@ -2574,6 +2574,20 @@ thunk_DXMTMSCGetCapabilities(void *args) {
   return STATUS_SUCCESS;
 }
 
+/* The candidate identity mechanism is not yet trusted for cache reuse. */
+_Static_assert(sizeof(struct dxmt_msc_identity_v1) == 48 && offsetof(struct dxmt_msc_identity_v1, sha256) == 16,
+               "MSC identity V1 layout mismatch");
+static NTSTATUS
+thunk_DXMTMSCGetIdentityV1(void *args) {
+  struct dxmt_msc_identity_v1 *params = args;
+  if (!params || params->size != sizeof(*params) || params->version != DXMT_MSC_IDENTITY_VERSION_1 ||
+      params->reserved)
+    return STATUS_UNSUCCESSFUL;
+  memset(params->sha256, 0, sizeof(params->sha256));
+  params->ret = DXMT_MSC_ERROR_UNAVAILABLE;
+  return STATUS_SUCCESS;
+}
+
 static inline void *
 UInt32ToPtr(uint32_t v) {
   return (void *)(uint64_t)v;
@@ -4566,7 +4580,11 @@ const void *__wine_unix_call_funcs[] = {
     &thunk_SM50GetResourceRanges,
     &_MTLDevice_sparseTextureTileSize,
     &thunk_DXMTMSCPatchSamplerLOD,
+    &thunk_DXMTMSCGetIdentityV1,
 };
+_Static_assert(sizeof(__wine_unix_call_funcs) / sizeof(__wine_unix_call_funcs[0]) ==
+                   unix_dxmt_msc_get_identity_v1 + 1,
+               "MSC identity Unix-call ordinal mismatch");
 
 #ifndef DXMT_NATIVE
 const void *__wine_unix_call_wow64_funcs[] = {
@@ -4768,5 +4786,9 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &thunk32_SM50GetResourceRanges,
     &_MTLDevice_sparseTextureTileSize,
     &thunk32_DXMTMSCPatchSamplerLOD,
+    &thunk_DXMTMSCGetIdentityV1,
 };
+_Static_assert(sizeof(__wine_unix_call_wow64_funcs) / sizeof(__wine_unix_call_wow64_funcs[0]) ==
+                   unix_dxmt_msc_get_identity_v1 + 1,
+               "MSC identity WOW64 ordinal mismatch");
 #endif

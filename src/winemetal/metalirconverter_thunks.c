@@ -7,6 +7,7 @@
 
 #include "wineunixlib.h"
 #include "metalirconverter_thunks.h"
+#include <string.h>
 
 WINEMETAL_API int
 DXMTMSCIsAvailable(void) {
@@ -30,6 +31,21 @@ DXMTMSCGetCapabilities(struct dxmt_msc_capabilities *capabilities) {
   if (status)
     return -1;
   return capabilities->ret;
+}
+
+WINEMETAL_API int
+DXMTMSCGetIdentityV1(struct dxmt_msc_identity_v1 *identity) {
+  if (!identity || identity->size != sizeof(*identity) || identity->version != DXMT_MSC_IDENTITY_VERSION_1 ||
+      identity->reserved)
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  memset(identity->sha256, 0, sizeof(identity->sha256));
+  identity->ret = DXMT_MSC_ERROR_UNAVAILABLE;
+  struct dxmt_msc_capabilities capabilities = {0};
+  if (DXMTMSCGetCapabilities(&capabilities) != DXMT_MSC_SUCCESS ||
+      !(capabilities.optional_symbols & DXMT_MSC_RUNTIME_BRIDGE_IDENTITY_V1))
+    return identity->ret;
+  NTSTATUS status = WINE_UNIX_CALL(unix_dxmt_msc_get_identity_v1, identity);
+  return status ? DXMT_MSC_ERROR_UNAVAILABLE : identity->ret;
 }
 
 WINEMETAL_API int

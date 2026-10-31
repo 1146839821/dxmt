@@ -1316,3 +1316,7 @@ dx12_msc_lod_fragment = executable('dx12_msc_lod_fragment', 'dx12_msc_lod_fragme
   include_directories: [include_directories('../../src/winemetal')],
   dependencies: [d3d12_dep, winemetal_dep],
 )
+
+dx12_msc_identity_thunk = executable('dx12_msc_identity_thunk', 'dx12_msc_identity_thunk.cpp',
+  include_directories: [include_directories('../../src/winemetal')],
+)

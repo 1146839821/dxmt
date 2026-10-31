@@ -114,6 +114,8 @@ enum dxmt_msc_validation_flags {
 #define DXMT_MSC_RUNTIME_SYMBOL_TESSELLATION_REFLECTION (UINT64_C(1) << 25)
 #define DXMT_MSC_RUNTIME_SYMBOL_FUNCTION_CONSTANT_REFLECTION (UINT64_C(1) << 26)
 #define DXMT_MSC_RUNTIME_SYMBOL_SAMPLE_MASK (UINT64_C(1) << 27)
+/* WineMetal bridge capability, not an MSC-exported symbol. */
+#define DXMT_MSC_RUNTIME_BRIDGE_IDENTITY_V1 (UINT64_C(1) << 28)
 
 #pragma pack(push, 8)
 
@@ -125,6 +127,16 @@ struct dxmt_msc_capabilities {
   uint64_t optional_symbols;
   int32_t ret;
 };
+
+/* V1 is pointer-free and has the same layout in native and WOW64 callers. */
+struct dxmt_msc_identity_v1 {
+  uint32_t size;
+  uint32_t version;
+  int32_t ret;
+  uint32_t reserved;
+  uint8_t sha256[32];
+};
+#define DXMT_MSC_IDENTITY_VERSION_1 1u
 
 #pragma pack(pop)
 
@@ -226,6 +238,7 @@ enum dxmt_msc_unixcall {
   unix_dxmt_msc_synthesize_ray_dispatch = 192,
   unix_dxmt_msc_synthesize_ray_intersection,
   unix_dxmt_msc_patch_sampler_lod = 197,
+  unix_dxmt_msc_get_identity_v1 = 198,
 };
 
 #pragma pack(push, 8)
@@ -503,6 +516,7 @@ struct dxmt_msc_get_root_layout_params32 {
 WINEMETAL_API int DXMTMSCIsAvailable(void);
 
 WINEMETAL_API int DXMTMSCGetCapabilities(struct dxmt_msc_capabilities *capabilities);
+WINEMETAL_API int DXMTMSCGetIdentityV1(struct dxmt_msc_identity_v1 *identity);
 
 WINEMETAL_API int DXMTMSCCompileDXIL(struct dxmt_msc_compile_dxil_params *params);
 WINEMETAL_API int DXMTMSCPatchSamplerLOD(struct dxmt_msc_patch_lod_params *params);
