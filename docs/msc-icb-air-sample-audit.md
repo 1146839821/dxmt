@@ -28,3 +28,21 @@ and record their identities before extending these conclusions.
 Prior GPU validation of the first sample's rewritten metallib covered direct
 and indirect rendering under Metal validation. It does not establish GPU
 behavior for all array shapes, out-of-range inputs, or converter versions.
+
+## Reproducible CLI corpus
+
+`tests/airconv/run_msc_icb_corpus.py` compiles three checked-in vertex shaders
+with `vs_6_0`, both `-O0` and `-O3`, and invokes MSC with its default CLI
+options. It creates a new output directory and records the exact command
+arguments, source and binary hashes, tool hashes, versions and inspector output
+in `manifest.json`. It requires a prepared isolated Wine prefix and does not
+install DLLs. Failed runs may leave partial files in their new output directory.
+
+A local run with Wine 11.0, DXC 1.9.2602.17 and metal-irconverter 4.0.3
+produced six metallibs targeting `air64-apple-macosx14.0.0`. Both
+`texture_lod_vertexid.hlsl` variants had two eligible loads; both variants of
+`texture_dimensions_sm6.hlsl` (compiled with `MS_WRITE=1`) and `dx12_hdr.hlsl`
+had none. The detailed local manifest is at
+`dxmt-test/n85-msc-corpus/repro2/manifest.json`. These are compile-and-inspect
+results, not GPU execution results, and the CLI converter settings do not prove
+identity with DXMT's runtime MSC configuration.
