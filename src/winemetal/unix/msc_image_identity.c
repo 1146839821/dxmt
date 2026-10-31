@@ -39,13 +39,13 @@ hash_file(int fd, uint8_t *digest) {
 
 bool
 dxmt_msc_image_identity_open(struct dxmt_msc_image_identity *identity, const char *path) {
-  if (!identity)
+  if (!identity || identity->fd != -1)
     return false;
   memset(identity, 0, sizeof(*identity));
   identity->fd = -1;
   if (!path)
     return false;
-  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
   struct stat after;
   if (fd < 0)
     return false;
@@ -64,7 +64,7 @@ dxmt_msc_image_identity_matches_mapping(struct dxmt_msc_image_identity *identity
   if (!identity)
     return false;
   identity->bound = false;
-  if (identity->fd < 0 || !image_base)
+  if (identity->fd < 0 || identity->invalidated || !image_base)
     return false;
   struct proc_regionwithpathinfo mapping = {0};
   struct stat after;
@@ -77,14 +77,19 @@ dxmt_msc_image_identity_matches_mapping(struct dxmt_msc_image_identity *identity
 }
 
 bool
-dxmt_msc_image_identity_revalidate(const struct dxmt_msc_image_identity *identity) {
+dxmt_msc_image_identity_revalidate(struct dxmt_msc_image_identity *identity) {
   if (!identity || identity->fd < 0 || !identity->bound)
     return false;
   struct stat before, after;
   uint8_t digest[CC_SHA256_DIGEST_LENGTH];
-  return fstat(identity->fd, &before) == 0 && same_stat(&identity->initial, &before) &&
-         hash_file(identity->fd, digest) && fstat(identity->fd, &after) == 0 && same_stat(&identity->initial, &after) &&
-         memcmp(identity->sha256, digest, sizeof(digest)) == 0;
+  bool valid = fstat(identity->fd, &before) == 0 && same_stat(&identity->initial, &before) &&
+               hash_file(identity->fd, digest) && fstat(identity->fd, &after) == 0 &&
+               same_stat(&identity->initial, &after) && memcmp(identity->sha256, digest, sizeof(digest)) == 0;
+  if (!valid) {
+    identity->bound = false;
+    identity->invalidated = true;
+  }
+  return valid;
 }
 
 void
@@ -93,6 +98,7 @@ dxmt_msc_image_identity_close(struct dxmt_msc_image_identity *identity) {
     close(identity->fd);
     identity->fd = -1;
     identity->bound = false;
+    identity->invalidated = false;
     memset(identity->sha256, 0, sizeof(identity->sha256));
   }
 }

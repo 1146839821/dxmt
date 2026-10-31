@@ -6,9 +6,13 @@
 int main(int argc, char **argv) {
   if (argc != 3)
     return 1;
-  struct dxmt_msc_image_identity identity;
+  struct dxmt_msc_image_identity identity = DXMT_MSC_IMAGE_IDENTITY_INIT;
   if (!dxmt_msc_image_identity_open(&identity, argv[1]))
     return 2;
+  int original_fd = identity.fd;
+  if (dxmt_msc_image_identity_open(&identity, argv[1]) ||
+      identity.fd != original_fd)
+    return 8;
   if (dxmt_msc_image_identity_revalidate(&identity))
     return 7;
   printf("OPEN ");
@@ -30,8 +34,14 @@ int main(int argc, char **argv) {
   fflush(stdout);
   if (getchar() == EOF)
     return 6;
-  printf("STABLE %d\n", dxmt_msc_image_identity_revalidate(&identity));
+  bool stable = dxmt_msc_image_identity_revalidate(&identity);
+  if (!stable &&
+      dxmt_msc_image_identity_matches_mapping(&identity, info.dli_fbase))
+    return 9;
+  printf("STABLE %d\n", stable);
   dxmt_msc_image_identity_close(&identity);
+  if (dxmt_msc_image_identity_revalidate(&identity))
+    return 10;
   dxmt_msc_image_identity_close(&identity);
   dlclose(library);
   return 0;

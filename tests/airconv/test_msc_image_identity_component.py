@@ -57,9 +57,11 @@ def main():
         os.utime(live, ns=(initial.st_atime_ns, initial.st_mtime_ns))
         if finish(p) != "STABLE 0":
             raise AssertionError("in-place mutation was accepted")
-        for invalid in (root, root / "missing"):
+        fifo = root / "blocked.fifo"
+        os.mkfifo(fifo)
+        for invalid in (root, root / "missing", fifo):
             result = subprocess.run([str(probe), str(invalid), "marker"], input=b"\n\n",
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
             if result.returncode != 2 or b"BOUND 1" in result.stdout:
                 raise AssertionError("invalid input produced an accepted identity")
         print("candidate identity component accepted stable and rejected modified images")

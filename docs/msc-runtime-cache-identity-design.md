@@ -225,3 +225,14 @@ also bound and revalidated the current installed MSC dylib on both
 architectures. These tests do not prove atomicity over a converter's lifetime,
 identify transitive dependencies, or validate mixed PE/Unix versions; the
 helper must not be interpreted as sufficient to enable cache reuse yet.
+
+### Candidate ownership contract
+
+The candidate object must be initialized using
+`DXMT_MSC_IMAGE_IDENTITY_INIT`; it owns one file descriptor and cannot be
+copied while open. Calls on the same object, including close, require external
+serialization. Opening an already-open object is rejected without losing its
+descriptor. The candidate uses nonblocking open and rejects non-regular files,
+so a FIFO cannot block the caller before the type check. A failed revalidation
+invalidates the binding until close and a fresh open. These are component
+contracts, not evidence that a bridged runtime or persistent cache is safe.
