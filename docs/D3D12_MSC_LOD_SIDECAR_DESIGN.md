@@ -244,6 +244,46 @@ Vertex ID / ICB validation investigation:
   selection, correct transitions between direct and indirect commands, ICB
   lifetime and cache handling, and an indirect validation strategy. It remains
   a separate design/implementation task rather than a verified fix here.
+
+Direct/indirect pipeline selection design card:
+
+- Goal: evaluate whether direct and ICB-compatible render PSOs can be selected
+  safely while retaining `ExecuteIndirect` behavior.
+- Baseline: `24037cfe`. Ordinary render PSOs enable ICB support; the MSC
+  vertex-stride cache owns specialized PSOs, and `PreDraw` binds the active
+  variant. `EncodeIndirectRenderCommand` encodes a resolver draw, restores
+  that variant and executes an ICB that inherits its parent pipeline.
+  [Metal's ICB inheritance contract](https://developer.apple.com/documentation/metal/mtlindirectcommandbufferdescriptor/inheritpipelinestate)
+  requires the pipeline to be set on the parent encoder for inherited PSOs;
+  [D3D12 indirect drawing](https://learn.microsoft.com/en-us/windows/win32/direct3d12/indirect-drawing)
+  allows argument data generated on the GPU, so a CPU-only fallback is not
+  generally equivalent.
+- Evidence: the native probe's `--execute-icb` encodes and executes an actual
+  CPU-encoded Metal indirect command; it does not test DXMT's GPU-generated
+  resolver or D3D12 `ExecuteIndirect`. On Apple M1 Max / macOS 27.0.1, shader validation reports
+  an invalid load and the result is zero; disabling shader validation produces
+  the expected pixel. In a single render encoder, `--switch` exercises direct
+  PSO → ICB-compatible PSO → direct PSO using a non-array shader and checks
+  three independent pixels. It passes with API and shader validation. The
+  analogous `--switch-array` with validation renders pixels 0 and 2 correctly
+  and pixel 1 as zero; all three pass without shader validation.
+- Candidate boundary: preserve the ICB-capable PSO for indirect commands;
+  cache a separate direct PSO keyed by actual vertex strides; track the active
+  variant per render encoder; restore the correct PSO after the ICB resolver
+  and after transitions to direct draws. Retain both variants for recorded and
+  in-flight work. AIRCONV geometry, tessellation, mesh, stream output, and
+  pipeline persistence require explicit compatibility decisions.
+- Decision: defer implementation. Two PSOs can avoid the observed validation
+  issue for direct draws but cannot fix the actual ICB draw shown above. A
+  correct mitigation must also address indirect shader constant access without
+  disabling validation, removing ICB support, or assuming CPU-visible arguments.
+  Investigate a bounded, semantics-preserving AIR lowering or an upstream Metal
+  fix before changing production PSO selection.
+- Validation: build the standalone probe as above; compare `--execute-icb`,
+  `--switch`, and `--switch-array` with shader validation on and off. The two
+  array cases are observed failures with validation on, not passing tests.
+  Recheck other OS/GPU/MSC versions and D3D12 native behavior before making a
+  general claim. Rollback is removal of this test extension and design card.
 With the test-only patched path, injecting relaxed-sampler creation failure
 after Close invalidated the recorded sidecar and queue submission rejected the
 list with E_FAIL. An unpatched control did not register a sidecar and failed
