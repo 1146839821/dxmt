@@ -271,3 +271,20 @@ stable and changed-metadata cases. A local Wine run passed both, including
 repeated queries; a separate normal fragment GPU run passed with diagnostics
 disabled. This covers one paired x64 WineMetal build and one local converter,
 not concurrent modification across the converter's lifetime or other loaders.
+
+### Diagnostic concurrency and failed-loader controls
+
+The local x64 Wine diagnostic runner starts four threads together before the
+first capability query; eight V1 calls returned unavailable, one snapshot was
+created, and eight serialized revalidations were observed. Separate runs tested
+an invalid selected dylib followed by fallback, and a loadable dylib missing
+required MSC symbols. The former retained no candidate identity; the latter
+returned unavailable. While the failed-symbol process remained alive, `lsof`
+showed no open descriptor for the rejected dylib. A positive control confirmed
+that the same descriptor inspection observed the retained snapshot in the
+normal case. The tests check loaded bridge export bytes and Unix library path.
+
+These are isolated local observations, not a proof of race freedom, fd handling
+on every failure path, or production identity safety. The diagnostic remains
+opt-in and the persistent cache remains disabled. The local run's artifacts
+are under `dxmt-test/n89-identity-diag/concurrency3`.
