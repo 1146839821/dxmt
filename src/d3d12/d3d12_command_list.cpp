@@ -3178,6 +3178,16 @@ public:
       return DrawCallStatus::Invalid;
 
     const bool use_msc = pso_graphics_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
+    if (pso_graphics_->msc_test_lod_patch) {
+      const void *blob = nullptr;
+      const size_t size = rootsig_graphics_ ? rootsig_graphics_->GetBlob(&blob) : 0;
+      const auto &expected = pso_graphics_->msc_test_lod_root_signature;
+      if (!blob || size != expected.size() || std::memcmp(blob, expected.data(), size) != 0) {
+        recording_error_ = E_INVALIDARG;
+        FailRecording(__func__, "patched MSC fragment root signature mismatch");
+        return DrawCallStatus::Invalid;
+      }
+    }
     const bool use_msc_tessellation = pso_graphics_->msc_tessellation;
     const bool use_msc_geometry = pso_graphics_->msc_geometry;
     const bool use_msc_mesh = pso_graphics_->msc_mesh;
@@ -3428,7 +3438,8 @@ public:
       if (use_msc) {
         auto offset = rootsig_graphics_ && rootsig_graphics_->MSCArgumentBufferSize
                           ? EncodeMSCArgumentBuffer(
-                                rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr()
+                                rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr(),
+                                pso_graphics_->msc_test_lod_patch, false, msc_render_stages
                             )
                           : 0;
         auto buffer = rootsig_graphics_ && rootsig_graphics_->MSCArgumentBufferSize
@@ -6077,7 +6088,7 @@ public:
     const auto root_binding_layout = [](const MTLD3D12GraphicsPipelineState *pipeline) {
       const bool mesh_stages =
           pipeline->airconv_geometry || pipeline->msc_geometry || pipeline->msc_tessellation || pipeline->msc_mesh;
-      return std::tuple{pipeline->shader_backend, mesh_stages, pipeline->msc_tessellation};
+      return std::tuple{pipeline->shader_backend, mesh_stages, pipeline->msc_tessellation, pipeline->msc_test_lod_patch};
     };
     // Logical roots remain valid across PSO changes, but their encoded ABI and
     // destination stages can change, including the extra HS/DS TLAB binding.

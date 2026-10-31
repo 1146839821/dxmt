@@ -1019,6 +1019,18 @@ public:
     const bool use_msc_tessellation = use_msc && has_hull && has_domain;
     const bool use_msc_geometry = use_msc && has_geometry;
     const bool use_airconv_geometry = !use_msc && has_geometry;
+    char lod_patch_test[2] = {};
+    const bool test_lod_patch = use_msc &&
+        GetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", lod_patch_test, sizeof(lod_patch_test)) == 1 &&
+        lod_patch_test[0] == '1';
+    if (test_lod_patch) {
+      auto *root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+      if (!root || !(root->Flags & D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS) ||
+          root->IsResourceHeapDirectlyIndexed() ||
+          has_hull || has_domain || has_geometry || !has_pixel_shader || has_stream_output ||
+          FAILED(root->InitializeMSCLodSidecarLayout()) || root->MSCArgumentBufferSize > UINT32_MAX)
+        return E_NOTIMPL;
+    }
     if (has_stream_output && (use_msc || has_geometry || has_hull || has_domain)) {
       ERR("CreatePipelineState: Stream Output requires an ordinary VS without GS or tessellation");
       return E_NOTIMPL;
@@ -1129,6 +1141,38 @@ public:
                 )
             )) {
           return hr;
+        }
+        if (test_lod_patch) {
+          auto *root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+          try {
+            std::vector<dxmt_msc_lod_table> tables;
+            for (unsigned i = 0; i < root->MSCLODSidecarTableCount; ++i) {
+              const auto &table = root->MSCLODSidecarTables[i];
+              tables.push_back({table.sampler_table_offset, table.sidecar_offset});
+            }
+            dxmt_msc_patch_lod_params params = {};
+            params.metallib = converted_ps.metallib.data();
+            params.metallib_size = converted_ps.metallib.size();
+            params.tables = tables.data();
+            params.table_count = static_cast<uint32_t>(tables.size());
+            params.root_argument_index = UINT32_MAX;
+            params.original_root_size = static_cast<uint32_t>(root->MSCArgumentBufferSize);
+            if (DXMTMSCPatchSamplerLOD(&params) != DXMT_MSC_SUCCESS ||
+                params.patch_status != DXMT_MSC_LOD_PATCHED || !params.output_size)
+              return E_NOTIMPL;
+            std::vector<uint8_t> patched(params.output_size);
+            params.output = patched.data();
+            params.output_capacity = patched.size();
+            if (DXMTMSCPatchSamplerLOD(&params) != DXMT_MSC_SUCCESS ||
+                params.patch_status != DXMT_MSC_LOD_PATCHED || params.output_size != patched.size())
+              return E_FAIL;
+            converted_ps.metallib = std::move(patched);
+            const auto *root_bytes = static_cast<const uint8_t *>(root_signature);
+            msc_test_lod_root_signature.assign(root_bytes, root_bytes + root_signature_size);
+            msc_test_lod_patch = true;
+          } catch (const std::bad_alloc &) {
+            return E_OUTOFMEMORY;
+          }
         }
         ps_lib = metal.newLibrary(converted_ps.metallib.data(), converted_ps.metallib.size(), err);
         if (!ps_lib)
@@ -1866,12 +1910,22 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   GetCachedBlob(ID3DBlob **blob) {
+    if (msc_test_lod_patch) {
+      if (!blob)
+        return E_POINTER;
+      *blob = nullptr;
+      return E_NOTIMPL;
+    }
     return CreateD3D12CachedBlob(pipeline_cache, blob);
   }
 };
 
 HRESULT
 MTLD3D12GraphicsPipelineStateImpl::InitializeMesh(const D3D12PipelineStreamData &data) {
+  char lod_patch_test[2] = {};
+  if (GetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", lod_patch_test, sizeof(lod_patch_test)) == 1 &&
+      lod_patch_test[0] == '1')
+    return E_NOTIMPL;
   if (data.num_render_targets > render_target_layout.formats.size())
     return E_INVALIDARG;
   render_target_layout.count = data.num_render_targets;

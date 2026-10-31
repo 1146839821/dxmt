@@ -79,11 +79,15 @@ def main():
     parser.add_argument("--sample", default="sample.cso")
     parser.add_argument("--multi", default="multi.cso")
     parser.add_argument("--grad", default="grad.cso")
+    parser.add_argument("--fragment-ps")
+    parser.add_argument("--fragment-vs")
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--case", action="append", help="run only the named case; may be repeated")
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
+    if bool(args.fragment_ps) != bool(args.fragment_vs):
+        parser.error("--fragment-ps and --fragment-vs must be supplied together")
     stage, prefix, build = (path.resolve(strict=True) for path in (args.stage, args.prefix, args.build))
     wine = stage / "wine/bin/wine"
     pairs = {
@@ -96,7 +100,10 @@ def main():
     for label, (deployed, built) in pairs.items():
         if not deployed.is_file() or not built.is_file() or sha256(deployed) != sha256(built):
             raise SystemExit(f"{label}: missing or mismatched stage/build binary")
-    for path in (wine, stage / args.sample, stage / args.multi, stage / args.grad):
+    inputs = [wine, stage / args.sample, stage / args.multi, stage / args.grad]
+    if args.fragment_ps:
+        inputs += [stage / args.fragment_ps, stage / args.fragment_vs]
+    for path in inputs:
         if not path.is_file():
             raise SystemExit(f"missing input: {path}")
     try:
@@ -130,6 +137,13 @@ def main():
         ("unsupported", args.grad, "--patch-unsupported", 0, "unsupported shader patch rejected"),
         ("unsupported-control", args.sample, "--patch-unsupported", 1, "unsupported shader was not rejected"),
     ]
+    if args.fragment_ps:
+        cases += [
+            ("fragment", args.fragment_ps, ("--fragment-lod", args.fragment_vs), 0, "fragment LOD matrix passed"),
+            ("fragment-control", args.fragment_ps, ("--fragment-control", args.fragment_vs), 1, "fragment ordinary expected:"),
+            ("fragment-mismatch", args.fragment_ps, ("--fragment-mismatch", args.fragment_vs), 0, "fragment root mismatch rejected"),
+            ("fragment-switch", args.fragment_ps, ("--fragment-switch", args.fragment_vs), 0, "fragment LOD matrix passed"),
+        ]
     if args.case:
         unknown = set(args.case) - {case[0] for case in cases}
         if unknown:
@@ -148,7 +162,7 @@ def main():
     env.pop("DXMT_TEST_FAIL_SAMPLER_LOD", None)
     results = []
     for name, shader, mode, expected, marker in cases:
-        command = [str(wine), "./dx12_texture_lod_clamp.exe", shader] + ([mode] if mode else [])
+        command = [str(wine), "./dx12_texture_lod_clamp.exe", shader] + (list(mode) if isinstance(mode, tuple) else [mode] if mode else [])
         try:
             completed = subprocess.run(command, cwd=stage, env=env, stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT, timeout=args.timeout, check=False)
@@ -171,7 +185,7 @@ def main():
         bridge_loaded = any(bridge_marker in line.lower() and ': builtin' in line.lower() for line in output.splitlines())
         unix_loaded = str(pairs["winemetal_unix"][0]) in output
         validation = "Metal API Validation Enabled" in output and "Metal GPU Validation Enabled" in output
-        validation_error = re.search(r"(?i)(metal (?:api|gpu|shader) validation error|validation error:)", output)
+        validation_error = re.search(r"(?i)(metal (?:api|gpu|shader) validation error|validation error:|invalid metal usage:|error detected in (?:draw|dispatch))", output)
         code_matches = all(f"LOADED_CODE {name} {code}" in output for name, code in identities.items())
         ok = (exit_code == expected and marker in output and pe_loaded and dxgi_loaded and bridge_loaded and unix_loaded and code_matches
               and validation and not validation_error)
@@ -188,6 +202,9 @@ def main():
                "fixtures": {name: sha256(stage / path) for name, path in
                             (("sample", args.sample), ("multi", args.multi), ("grad", args.grad))},
                "results": results, "stage": str(stage), "prefix": str(prefix)}
+    if args.fragment_ps:
+        summary["fixtures"].update({"fragment_ps": sha256(stage / args.fragment_ps),
+                                    "fragment_vs": sha256(stage / args.fragment_vs)})
     (logdir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"logs: {logdir}")
     return 0 if all(result["pass"] for result in results) else 1

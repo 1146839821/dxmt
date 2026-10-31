@@ -1087,6 +1087,10 @@ public:
     *pipeline_state = nullptr;
     if (!desc)
       return E_INVALIDARG;
+    char lod_patch_test[2] = {};
+    if (GetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", lod_patch_test, sizeof(lod_patch_test)) == 1 &&
+        lod_patch_test[0] == '1')
+      return E_NOTIMPL;
 
     D3D12PipelineCacheData data;
     HRESULT hr = BuildD3D12PipelineCacheData(device_, *desc, data);

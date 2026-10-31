@@ -110,6 +110,9 @@ export against their staged PE images, along with validation activation,
 expected output, and negative controls;
 it writes logs to a new directory and does not install binaries. A skipped
 reserved-texture case is reported as a failure, not as a pass.
+Pass `--fragment-ps <ps.cso> --fragment-vs <vs.cso>` to include the experimental
+graphics cases; compile the corresponding `texture_lod_clamp_fragment.hlsl`
+and `texture_lod_clamp_vertex.hlsl` with DXC as `ps_6_0` and `vs_6_0`.
 
 The multi-queue experiment records two independent direct lists with separate
 UAVs and readbacks, sharing a read-only texture and sampler heap. A CPU fence
@@ -187,6 +190,30 @@ Fragment metadata discovery design card:
 - Rollback: revert discovery and associated tests together.
 - Done: the real fragment fixture and relevant negative/compute controls pass,
   along with the build and runtime identity checks.
+
+Experimental fragment pipeline design card:
+
+- Goal: validate patched fragment `SampleLevel` through an ordinary MSC draw.
+- Baseline: `dd139876`; fragment metadata discovery is available, but graphics
+  pipelines did not patch the fragment or bind its sidecar.
+- Scope: opt-in `DXMT_TEST_MSC_LOD_PATCH=1`, ordinary MSC vertex/fragment PSOs
+  with an explicit root signature denying vertex root access. Patch only the
+  fragment; reject missing root, missing pixel shader, GS/TS/mesh, stream output,
+  unsupported transform, and unavailable sidecar layout. Existing production
+  behavior and public capability declarations remain unchanged.
+- Boundary: patch the private metallib after conversion cache lookup; retain
+  the root blob identity, reject mismatched roots at draw, force argument
+  re-encoding when switching patched status, bind sidecars with render-stage
+  residency, and reject pipeline cache export and library loading in test mode.
+- Validation: exact ordinary/reserved readbacks, unpatched control, mismatch
+  rejection, cache guards, patched/unpatched PSO transition, and compute
+  regression with Metal API and shader validation and runtime identity checks.
+- Risk: this covers only one explicit-level fragment shader shape; it does not
+  establish general graphics support. The initial `SV_VertexID`-only fixture
+  triggered a Metal vertex invalid-load error; the validated fixture uses an
+  explicit vertex buffer. Native Windows and other shader stages are untested.
+- Rollback: revert the opt-in PSO/command/cache changes and the test together.
+- Done: the scoped GPU cases and negative controls pass with validation enabled.
 With the test-only patched path, injecting relaxed-sampler creation failure
 after Close invalidated the recorded sidecar and queue submission rejected the
 list with E_FAIL. An unpatched control did not register a sidecar and failed

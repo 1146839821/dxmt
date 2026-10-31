@@ -611,6 +611,7 @@ public:
 
 class MTLD3D12GraphicsPipelineState : public MTLD3D12PipelineState {
 public:
+  std::vector<uint8_t> msc_test_lod_root_signature;
   struct RenderTargetLayout {
     std::array<DXGI_FORMAT, D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT> formats{};
     DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN;

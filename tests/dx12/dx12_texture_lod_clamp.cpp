@@ -261,7 +261,8 @@ bool InitializeReservedTexture(ID3D12Device *device, ID3D12CommandQueue *queue, 
 
 void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Owned<ID3D12RootSignature> &root,
                     Owned<ID3D12PipelineState> &pipeline, bool limit_sampler_max, bool dynamic_sampler = false,
-                    bool multi_sampler = false, bool expect_patch_rejection = false) {
+                    bool multi_sampler = false, bool expect_patch_rejection = false,
+                    const std::vector<uint8_t> *vertex_shader = nullptr) {
   D3D12_DESCRIPTOR_RANGE ranges[2] = {};
   ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 0, 0};
   ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 5};
@@ -295,6 +296,8 @@ void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Ow
   root_desc.pParameters = parameters;
   root_desc.NumStaticSamplers = dynamic_sampler ? 0 : 1;
   root_desc.pStaticSamplers = dynamic_sampler ? nullptr : &sampler;
+  if (vertex_shader)
+    root_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS;
   Owned<ID3DBlob> root_blob;
   Owned<ID3DBlob> root_errors;
   Check("SerializeLODRootSignature", D3D12SerializeRootSignature(
@@ -308,7 +311,44 @@ void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Ow
   pipeline_desc.pRootSignature = root.ptr;
   pipeline_desc.CS.pShaderBytecode = shader.data();
   pipeline_desc.CS.BytecodeLength = shader.size();
-  const auto hr = device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&pipeline.ptr));
+  HRESULT hr;
+  if (vertex_shader) {
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics = {};
+    graphics.pRootSignature = root.ptr;
+    graphics.VS = {vertex_shader->data(), vertex_shader->size()};
+    graphics.PS = {shader.data(), shader.size()};
+    D3D12_INPUT_ELEMENT_DESC input_element = {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0,
+                                               D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0};
+    graphics.InputLayout = {&input_element, 1};
+    graphics.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    graphics.SampleMask = UINT_MAX;
+    graphics.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    graphics.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    graphics.RasterizerState.DepthClipEnable = TRUE;
+    graphics.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    graphics.NumRenderTargets = 1;
+    graphics.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    graphics.SampleDesc.Count = 1;
+    hr = device->CreateGraphicsPipelineState(&graphics, IID_PPV_ARGS(&pipeline.ptr));
+    char enabled[2] = {};
+    if (SUCCEEDED(hr) && GetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", enabled, sizeof(enabled)) == 1 &&
+        enabled[0] == '1') {
+      Owned<ID3DBlob> cache_blob;
+      if (pipeline->GetCachedBlob(&cache_blob.ptr) != E_NOTIMPL || cache_blob.ptr)
+        throw std::runtime_error("patched graphics pipeline exposed cached blob");
+      Owned<ID3D12Device1> device1;
+      Check("QueryGraphicsDevice1", device->QueryInterface(IID_PPV_ARGS(&device1.ptr)));
+      Owned<ID3D12PipelineLibrary> library;
+      Check("CreateGraphicsPipelineLibrary", device1->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(&library.ptr)));
+      if (library->StorePipeline(L"patched", pipeline.ptr) != E_NOTIMPL)
+        throw std::runtime_error("pipeline library accepted patched graphics pipeline");
+      Owned<ID3D12PipelineState> loaded;
+      if (library->LoadGraphicsPipeline(L"missing", &graphics, IID_PPV_ARGS(&loaded.ptr)) != E_NOTIMPL || loaded.ptr)
+        throw std::runtime_error("experimental graphics mode allowed library loading");
+    }
+  } else {
+    hr = device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&pipeline.ptr));
+  }
   if (expect_patch_rejection) {
     if (hr != E_NOTIMPL || pipeline.ptr)
       throw std::runtime_error("unsupported shader was not rejected by experimental patch");
@@ -327,7 +367,8 @@ struct RunOptions {
 };
 
 std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
-                              const std::vector<uint8_t> &shader, const RunOptions &options) {
+                              const std::vector<uint8_t> &shader, const RunOptions &options,
+                              const std::vector<uint8_t> *vertex_shader = nullptr) {
   const auto &[reserved, expect_unsupported, late_load, empty_sample, limit_sampler_max, mismatch_root, same_root,
                switch_pipeline, dynamic_sampler, skip_sampler_update, multi_sampler, swap_sampler_tables, heap_rebind,
                same_heap_range, resubmit, resubmit_control, cache_guard, fail_late_sampler, recover_late_sampler,
@@ -494,7 +535,8 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
 
   Owned<ID3D12RootSignature> root;
   Owned<ID3D12PipelineState> pipeline;
-  CreatePipeline(device, shader, root, pipeline, limit_sampler_max, dynamic_sampler, multi_sampler, expect_patch_rejection);
+  CreatePipeline(device, shader, root, pipeline, limit_sampler_max, dynamic_sampler, multi_sampler,
+                 expect_patch_rejection, vertex_shader);
   if (expect_patch_rejection)
     return {};
   if (cache_guard) {
@@ -524,33 +566,100 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   Owned<ID3D12RootSignature> alternate_root;
   Owned<ID3D12PipelineState> alternate_pipeline;
   if (mismatch_root || same_root || switch_pipeline) {
-    if (switch_pipeline)
-      SetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", nullptr);
-    CreatePipeline(device, shader, alternate_root, alternate_pipeline, mismatch_root ? !limit_sampler_max : limit_sampler_max);
-    if (switch_pipeline)
-      SetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", "1");
+    if (vertex_shader && mismatch_root) {
+      D3D12_DESCRIPTOR_RANGE ranges[3] = {
+          {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 0, 0},
+          {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 5},
+          {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0}};
+      D3D12_ROOT_PARAMETER params[2] = {};
+      params[0].ParameterType = params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      params[0].DescriptorTable = {2, ranges};
+      params[1].DescriptorTable = {1, ranges + 2};
+      D3D12_ROOT_SIGNATURE_DESC empty = {};
+      empty.NumParameters = 2;
+      empty.pParameters = params;
+      empty.Flags = static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                                                            D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS);
+      Owned<ID3DBlob> blob, errors;
+      Check("SerializeMismatchRoot", D3D12SerializeRootSignature(&empty, D3D_ROOT_SIGNATURE_VERSION_1,
+                                                                 &blob.ptr, &errors.ptr));
+      Check("CreateMismatchRoot", device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                                               IID_PPV_ARGS(&alternate_root.ptr)));
+    } else {
+      if (switch_pipeline)
+        SetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", nullptr);
+      CreatePipeline(device, shader, alternate_root, alternate_pipeline, mismatch_root ? !limit_sampler_max : limit_sampler_max,
+                     vertex_shader ? dynamic_sampler : false, false, false, vertex_shader);
+      if (switch_pipeline)
+        SetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", "1");
+    }
   }
   Owned<ID3D12CommandAllocator> allocator;
   Owned<ID3D12GraphicsCommandList> list;
+  Owned<ID3D12Resource> render_target, vertex_buffer;
+  Owned<ID3D12DescriptorHeap> rtv_heap;
+  if (vertex_shader) {
+    CreateBuffer(device, vertex_buffer, 6 * sizeof(float), D3D12_HEAP_TYPE_UPLOAD,
+                 D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+    float *vertices = nullptr;
+    Check("MapLODVertices", vertex_buffer->Map(0, nullptr, reinterpret_cast<void **>(&vertices)));
+    const float positions[] = {-1, -1, -1, 3, 3, -1};
+    memcpy(vertices, positions, sizeof(positions));
+    vertex_buffer->Unmap(0, nullptr);
+    auto render_desc = TextureDesc(1, 1, 1, D3D12_TEXTURE_LAYOUT_UNKNOWN);
+    render_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    render_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    auto properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
+    Check("CreateLODRenderTarget", device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &render_desc,
+                         D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(&render_target.ptr)));
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_desc = {};
+    rtv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtv_desc.NumDescriptors = 1;
+    Check("CreateLODRTVHeap", device->CreateDescriptorHeap(&rtv_desc, IID_PPV_ARGS(&rtv_heap.ptr)));
+    device->CreateRenderTargetView(render_target.ptr, nullptr, rtv_heap->GetCPUDescriptorHandleForHeapStart());
+  }
   Check("CreateLODCommandAllocator", device->CreateCommandAllocator(
                                            D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator.ptr)));
   Check("CreateLODCommandList", device->CreateCommandList(
                                      0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.ptr, pipeline.ptr,
                                      IID_PPV_ARGS(&list.ptr)));
   if (!multi_queue)
-    Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COMMON,
+               vertex_shader ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  list->SetComputeRootSignature((mismatch_root || same_root || switch_pipeline) ? alternate_root.ptr : root.ptr);
+  if (vertex_shader) {
+    list->SetGraphicsRootSignature(mismatch_root ? alternate_root.ptr : root.ptr);
+    auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    D3D12_VIEWPORT viewport = {0, 0, 1, 1, 0, 1};
+    D3D12_RECT scissor = {0, 0, 1, 1};
+    list->RSSetViewports(1, &viewport);
+    list->RSSetScissorRects(1, &scissor);
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    D3D12_VERTEX_BUFFER_VIEW vb = {vertex_buffer->GetGPUVirtualAddress(), 6 * sizeof(float), 2 * sizeof(float)};
+    list->IASetVertexBuffers(0, 1, &vb);
+  } else {
+    list->SetComputeRootSignature((mismatch_root || same_root || switch_pipeline) ? alternate_root.ptr : root.ptr);
+  }
   ID3D12DescriptorHeap *heap_list[] = {descriptors.ptr, sampler_heap.ptr};
   list->SetDescriptorHeaps(dynamic_sampler ? 2 : 1, heap_list);
-  list->SetComputeRootDescriptorTable(0, descriptors->GetGPUDescriptorHandleForHeapStart());
-  if (dynamic_sampler)
-    list->SetComputeRootDescriptorTable(1, swap_sampler_tables ? sampler_gpu_second : sampler_gpu);
+  if (vertex_shader) {
+    list->SetGraphicsRootDescriptorTable(0, descriptors->GetGPUDescriptorHandleForHeapStart());
+    if (dynamic_sampler)
+      list->SetGraphicsRootDescriptorTable(1, sampler_gpu);
+  } else {
+    list->SetComputeRootDescriptorTable(0, descriptors->GetGPUDescriptorHandleForHeapStart());
+    if (dynamic_sampler)
+      list->SetComputeRootDescriptorTable(1, swap_sampler_tables ? sampler_gpu_second : sampler_gpu);
+  }
   if (multi_sampler)
     list->SetComputeRootDescriptorTable(2, swap_sampler_tables ? sampler_gpu : sampler_gpu_second);
   if (switch_pipeline) {
     list->SetPipelineState(alternate_pipeline.ptr);
-    list->Dispatch(1, 1, 1);
+    if (vertex_shader)
+      list->DrawInstanced(3, 1, 0, 0);
+    else
+      list->Dispatch(1, 1, 1);
     D3D12_RESOURCE_BARRIER barrier = {};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     barrier.UAV.pResource = output.ptr;
@@ -569,7 +678,10 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
     rebound_gpu.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
     list->SetComputeRootDescriptorTable(1, rebound_gpu);
   }
-  list->Dispatch(1, 1, 1);
+  if (vertex_shader)
+    list->DrawInstanced(3, 1, 0, 0);
+  else
+    list->Dispatch(1, 1, 1);
   if (mismatch_root) {
     if (list->Close() != E_INVALIDARG)
       throw std::runtime_error("patched pipeline root signature mismatch was not rejected");
@@ -588,7 +700,9 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   list->CopyBufferRegion(readback.ptr, 0, output.ptr, 0, OutputCount * sizeof(uint32_t));
   Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
   if (!multi_queue)
-    Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+    Transition(list.ptr, texture.ptr,
+               vertex_shader ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+               D3D12_RESOURCE_STATE_COMMON);
   Check("CloseLODCommandList", list->Close());
   if (dynamic_sampler && !skip_sampler_update && !multi_sampler && !heap_rebind) {
     // Root signature 1.0 permits descriptor replacement before submission.
@@ -753,6 +867,10 @@ int main(int argc, char **argv) {
       std::cout << "\n";
     }
   }
+  const bool fragment_control = argc == 4 && strcmp(argv[2], "--fragment-control") == 0;
+  const bool fragment_mismatch = argc == 4 && strcmp(argv[2], "--fragment-mismatch") == 0;
+  const bool fragment_switch = argc == 4 && strcmp(argv[2], "--fragment-switch") == 0;
+  const bool fragment_case = fragment_control || fragment_mismatch || fragment_switch || (argc == 4 && strcmp(argv[2], "--fragment-lod") == 0);
   const bool unsupported_read = argc == 3 && strcmp(argv[2], "--load-unsupported") == 0;
   const bool late_load = argc == 3 && strcmp(argv[2], "--load-late") == 0;
   const bool empty_sample = argc == 3 && strcmp(argv[2], "--sample-empty") == 0;
@@ -775,7 +893,7 @@ int main(int argc, char **argv) {
   const bool patch_rejection = argc == 3 && strcmp(argv[2], "--patch-unsupported") == 0;
   const bool resubmit = resubmit_control || (argc == 3 && strcmp(argv[2], "--resubmit") == 0);
   const bool dynamic_sampler = multi_queue || sampler_lifetime || recover_late_sampler || fail_late_sampler || resubmit || heap_rebind || multi_sampler || skip_sampler_update || (argc == 3 && strcmp(argv[2], "--dynamic-late") == 0);
-  if (argc != 2 && !unsupported_read && !late_load && !empty_sample && !limit_sampler_max && !mismatch_root &&
+  if (argc != 2 && !fragment_case && !unsupported_read && !late_load && !empty_sample && !limit_sampler_max && !mismatch_root &&
       !same_root && !switch_pipeline && !dynamic_sampler && !cache_guard && !patch_rejection) {
     std::cerr << "usage: dx12_texture_lod_clamp <shader.cs.cso> [mode]\n"
                  "modes: --load-unsupported --load-late --sample-empty --sampler-max --mismatch-root\n"
@@ -795,6 +913,32 @@ int main(int argc, char **argv) {
     Owned<ID3D12CommandQueue> queue;
     Check("CreateLODQueue", device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue.ptr)));
     RunOptions options;
+    if (fragment_case) {
+      auto vertex_shader = ReadFile(argv[3]);
+      if (fragment_control)
+        SetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", nullptr);
+      options.dynamic_sampler = true;
+      options.switch_pipeline = fragment_switch;
+      if (fragment_mismatch) {
+        options.mismatch_root = true;
+        RunCase(device.ptr, queue.ptr, shader, options, &vertex_shader);
+        std::cout << "fragment root mismatch rejected\n";
+        return 0;
+      }
+      const auto ordinary = RunCase(device.ptr, queue.ptr, shader, options, &vertex_shader);
+      const bool ordinary_pass = CheckCase("fragment ordinary", ordinary,
+          {0x3f800000, 0x40000000, 0x40400000, 0x40800000, 0x40400000});
+      options.reserved = true;
+      const auto reserved = RunCase(device.ptr, queue.ptr, shader, options, &vertex_shader);
+      if (reserved.empty())
+        return 77;
+      const bool reserved_pass = CheckCase("fragment reserved", reserved,
+          {0x3f800000, 0x40000000, 0x40400000, 0u, 0x40400000});
+      if (!ordinary_pass || !reserved_pass)
+        return 1;
+      std::cout << "fragment LOD matrix passed\n";
+      return 0;
+    }
     if (patch_rejection) {
       options.expect_patch_rejection = true;
       RunCase(device.ptr, queue.ptr, shader, options);
