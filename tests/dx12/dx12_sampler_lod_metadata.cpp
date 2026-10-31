@@ -151,6 +151,39 @@ int main() {
       read_sidecar(2).sampler != stored.sampler)
     return 1;
 
+  // A repeated prepare must not rewrite slots that may be read by a GPU
+  // submission. The marker is restored before any shader can use the table.
+  uint64_t marker_offset = 0;
+  auto *marker_allocation =
+      static_cast<dxmt::MTLD3D12Device *>(device.p)->LookupBufferByVA(
+          sidecar_base, &marker_offset);
+  if (!marker_allocation)
+    return 1;
+  auto *marker =
+      static_cast<dxmt::D3D12SamplerLODSidecarEntry *>(static_cast<void *>(
+          static_cast<uint8_t *>(marker_allocation->mappedMemory(0)) +
+          marker_offset));
+  const auto saved_marker = *marker;
+  marker->sampler = 0x123456789abcdef0ull;
+  if (FAILED(gpu_impl->PrepareSamplerLODSidecar()) ||
+      marker->sampler != 0x123456789abcdef0ull) {
+    std::cerr << "repeated prepare overwrote unrelated slot\n";
+    return 1;
+  }
+
+  SetEnvironmentVariableA("DXMT_TEST_FAIL_SAMPLER_LOD", "1");
+  desc.MinLOD = 3.0f;
+  device.p->CreateSampler(&desc, destination);
+  SetEnvironmentVariableA("DXMT_TEST_FAIL_SAMPLER_LOD", nullptr);
+  if (gpu_impl->GetSamplerLODSidecarAddress(gpu_handle) ||
+      FAILED(gpu_impl->PrepareSamplerLODSidecar()) ||
+      marker->sampler != 0x123456789abcdef0ull ||
+      read_sidecar(2).minimum != 3.0f) {
+    std::cerr << "sidecar slot recovery failed or overwrote unrelated slot\n";
+    return 1;
+  }
+  *marker = saved_marker;
+
   D3D12_STATIC_SAMPLER_DESC stat{};
   stat.Filter = desc.Filter;
   stat.AddressU = desc.AddressU;

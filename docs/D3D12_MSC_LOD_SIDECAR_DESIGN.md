@@ -22,6 +22,9 @@ submissions retain them through GPU completion. This preserves both ordinary
 static sampler states and any relaxed states owned by those roots, but does not
 itself upload or bind a static-sampler LOD sidecar.
 
+Preparing an already valid sidecar does not rewrite its GPU-visible entries.
+When preparation recovers from an update failure, it rewrites only failed
+slots, avoiding writes to unrelated slots that may be in use by the GPU.
 An update that cannot create a relaxed sampler clears that sidecar entry and
 marks the heap sidecar invalid; preparation must be repeated successfully before
 using it. Since an already encoded GPU address cannot report such a later

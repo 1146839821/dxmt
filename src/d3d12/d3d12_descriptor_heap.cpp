@@ -863,6 +863,8 @@ class MTLD3D12SamplerDescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12Sample
   Rc<Buffer> lod_sidecar_buffer_;
   D3D12SamplerLODSidecarEntry *mapped_lod_sidecar_ = nullptr;
   bool lod_sidecar_valid_ = false;
+  std::vector<uint8_t> lod_sidecar_invalid_entries_;
+  size_t lod_sidecar_invalid_count_ = 0;
 
   bool
   MakeLODSidecarEntry(UINT index, D3D12SamplerLODSidecarEntry &entry) {
@@ -889,13 +891,20 @@ class MTLD3D12SamplerDescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12Sample
     if (!mapped_lod_sidecar_)
       return;
     D3D12SamplerLODSidecarEntry entry{};
+    bool valid = false;
     try {
-      if (!MakeLODSidecarEntry(index, entry))
-        lod_sidecar_valid_ = false;
+      valid = MakeLODSidecarEntry(index, entry);
     } catch (const std::bad_alloc &) {
-      lod_sidecar_valid_ = false;
       entry = {};
     }
+    if (!valid && !lod_sidecar_invalid_entries_[index]) {
+      lod_sidecar_invalid_entries_[index] = 1;
+      ++lod_sidecar_invalid_count_;
+    } else if (valid && lod_sidecar_invalid_entries_[index]) {
+      lod_sidecar_invalid_entries_[index] = 0;
+      --lod_sidecar_invalid_count_;
+    }
+    lod_sidecar_valid_ = lod_sidecar_invalid_count_ == 0;
     mapped_lod_sidecar_[index] = entry;
   }
 
@@ -925,6 +934,7 @@ public:
     sampler_lod_ranges_.resize(pDesc->NumDescriptors);
     relaxed_samplers_.resize(pDesc->NumDescriptors);
     relaxed_sampler_ids_.resize(pDesc->NumDescriptors);
+    lod_sidecar_invalid_entries_.resize(pDesc->NumDescriptors);
 
     if (pDesc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
       buffer_ = new Buffer(samplers_.size() * sizeof(SamplerGPUStorage), device_->GetMTLDevice());
@@ -1061,7 +1071,23 @@ public:
     std::lock_guard lock(sampler_mutex_);
     if (!(desc_.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) || samplers_.empty())
       return E_INVALIDARG;
+    if (lod_sidecar_valid_)
+      return S_OK;
     try {
+      if (lod_sidecar_buffer_) {
+        for (UINT i = 0; i < samplers_.size(); ++i) {
+          if (!lod_sidecar_invalid_entries_[i])
+            continue;
+          D3D12SamplerLODSidecarEntry entry{};
+          if (!MakeLODSidecarEntry(i, entry))
+            return E_FAIL;
+          mapped_lod_sidecar_[i] = entry;
+          lod_sidecar_invalid_entries_[i] = 0;
+          --lod_sidecar_invalid_count_;
+        }
+        lod_sidecar_valid_ = lod_sidecar_invalid_count_ == 0;
+        return lod_sidecar_valid_ ? S_OK : E_FAIL;
+      }
       std::vector<D3D12SamplerLODSidecarEntry> entries(samplers_.size());
       for (UINT i = 0; i < samplers_.size(); ++i)
         if (!MakeLODSidecarEntry(i, entries[i])) {
@@ -1083,8 +1109,6 @@ public:
           return E_FAIL;
         lod_sidecar_buffer_ = std::move(candidate);
         mapped_lod_sidecar_ = mapped;
-      } else {
-        memcpy(mapped_lod_sidecar_, entries.data(), entries.size() * sizeof(entries[0]));
       }
       lod_sidecar_valid_ = true;
       return S_OK;
