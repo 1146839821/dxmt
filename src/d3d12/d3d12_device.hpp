@@ -586,6 +586,7 @@ public:
   UINT IsComputePipelineState;
   D3D12ShaderBackend shader_backend = D3D12ShaderBackend::None;
   bool msc_uses_texture_load = false;
+  bool msc_test_lod_patch = false;
   D3D12PipelineCacheData pipeline_cache;
 
   struct DescriptorFootprintRange {
@@ -672,6 +673,7 @@ class MTLD3D12ComputePipelineState : public MTLD3D12PipelineState {
 public:
   WMT::Reference<WMT::ComputePipelineState> pso;
   WMTSize threadgroup_size;
+  std::vector<uint8_t> msc_test_lod_root_signature;
 
   virtual void AddRefPrivate() = 0;
   virtual void ReleasePrivate() = 0;

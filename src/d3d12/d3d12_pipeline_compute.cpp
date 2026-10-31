@@ -100,6 +100,45 @@ public:
       if (FAILED(hr))
         return hr;
 
+      // Test-only end-to-end validation. Patch the private conversion result
+      // after cache lookup so the shared conversion cache remains unmodified.
+      char patch_test[2] = {};
+      if (GetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", patch_test, sizeof(patch_test)) == 1 &&
+          patch_test[0] == '1') {
+        auto *root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+        if (!root || FAILED(root->InitializeMSCLodSidecarLayout()) || root->MSCArgumentBufferSize > UINT32_MAX)
+          return E_NOTIMPL;
+        try {
+          std::vector<dxmt_msc_lod_table> tables;
+          for (unsigned i = 0; i < root->MSCLODSidecarTableCount; ++i) {
+            const auto &table = root->MSCLODSidecarTables[i];
+            tables.push_back({table.sampler_table_offset, table.sidecar_offset});
+          }
+          dxmt_msc_patch_lod_params params = {};
+          params.metallib = converted.metallib.data();
+          params.metallib_size = converted.metallib.size();
+          params.tables = tables.data();
+          params.table_count = static_cast<uint32_t>(tables.size());
+          params.root_argument_index = UINT32_MAX;
+          params.original_root_size = static_cast<uint32_t>(root->MSCArgumentBufferSize);
+          if (DXMTMSCPatchSamplerLOD(&params) != DXMT_MSC_SUCCESS ||
+              params.patch_status != DXMT_MSC_LOD_PATCHED || !params.output_size)
+            return E_NOTIMPL;
+          std::vector<uint8_t> patched(params.output_size);
+          params.output = patched.data();
+          params.output_capacity = patched.size();
+          if (DXMTMSCPatchSamplerLOD(&params) != DXMT_MSC_SUCCESS ||
+              params.patch_status != DXMT_MSC_LOD_PATCHED || params.output_size != patched.size())
+            return E_FAIL;
+          converted.metallib = std::move(patched);
+          const auto *root_bytes = static_cast<const uint8_t *>(root_signature);
+          msc_test_lod_root_signature.assign(root_bytes, root_bytes + root_signature_size);
+          msc_test_lod_patch = true;
+        } catch (const std::bad_alloc &) {
+          return E_OUTOFMEMORY;
+        }
+      }
+
       threadgroup_size = {
           converted.threadgroup_size[0], converted.threadgroup_size[1], converted.threadgroup_size[2]
       };
@@ -210,6 +249,12 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   GetCachedBlob(ID3DBlob **blob) {
+    if (msc_test_lod_patch) {
+      if (!blob)
+        return E_POINTER;
+      *blob = nullptr;
+      return E_NOTIMPL;
+    }
     return CreateD3D12CachedBlob(pipeline_cache, blob);
   }
 };

@@ -1196,6 +1196,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_texture_lod_clamp_multi_fixture',
+    input: 'texture_lod_clamp_multi.hlsl',
+    output: 'texture_lod_clamp_multi.cs.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_texture_lod_clamp_read_fixture',
     input: 'texture_lod_clamp_read.hlsl',
     output: 'texture_lod_clamp_read.cs.cso',

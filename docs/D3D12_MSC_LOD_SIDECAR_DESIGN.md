@@ -1,12 +1,13 @@
 # MSC SampleLevel minimum LOD: runtime sidecar design
 
-Status: design only, 2026-10-30. Baseline `d8eb1bbd` on `feat/d3d12`.
-The experimental AIR transform is not called by runtime compilation. This
-design does not claim that ResourceMinLODClamp is implemented.
+Status: experimental compute-only test path, 2026-10-31. Original design
+baseline `d8eb1bbd` on `feat/d3d12`. The AIR transform is used only when the
+explicit test switch is set; ordinary runtime compilation remains unchanged.
+This does not claim that ResourceMinLODClamp is implemented.
 
 The subsequent sampler metadata slice preserves the original static and dynamic
-sampler LOD ranges and copies dynamic ranges with descriptors. It does not yet
-bind a GPU sidecar. Relaxed Metal sampler states
+sampler LOD ranges and copies dynamic ranges with descriptors. Normal runtime
+execution does not bind a GPU sidecar. Relaxed Metal sampler states
 are created lazily and retained by the owning descriptor heap or root signature;
 descriptor copies retain the state when already created. A shader-visible
 sampler heap can now allocate a separate, stable-address sidecar buffer on
@@ -14,9 +15,9 @@ request and keep its entries synchronized with descriptor writes and copies.
 The heap owns the buffer and relaxed states. A recording retains each bound
 sampler heap, and each queue submission retains those heaps until its GPU
 command buffer completes, including after command-list reset. Static sampler
-uploads and sidecar binding remain unimplemented; actual shader access and
-residency are not yet verified. An internal recording hook records sidecar
-addresses for submission-time checks, but no shader binding path calls it yet.
+uploads and sidecar binding are implemented only in the test compute path;
+broader shader access and residency remain unverified. An internal recording
+hook records sidecar addresses for submission-time checks.
 Recordings also retain root signatures used to encode static samplers, and
 submissions retain them through GPU completion. This preserves both ordinary
 static sampler states and any relaxed states owned by those roots, but does not
@@ -40,8 +41,8 @@ The root signature can derive an experimental sidecar extension from reflected
 MSC top-level offsets and its parsed sampler-table ranges. The shared layout
 type is also accepted by the AIR transform. The extension sorts offsets and
 appends aligned pointer slots; local roots, directly indexed sampler heaps and
-ambiguous mappings are rejected. Neither shader compilation nor command
-encoding consumes this layout yet, and no pipeline cache version has changed.
+ambiguous mappings are rejected. Only the test compute path consumes this
+layout; no production pipeline cache version has changed.
 An experimental AIRCONV C entry point now accepts table offsets and applies the
 strict transform to an MSC metallib, distinguishing unsupported, unchanged,
 and invalid input. It is not called by the WineMetal compilation path. The
@@ -55,6 +56,59 @@ the same real MSC metallib; their resulting bytecode hashes match. This does
 not validate DXMT pipeline cache integration or end-to-end shader binding.
 
 ## Goal and evidence
+
+The test-only compute integration on 2026-10-31 patched a real
+MSC shader after conversion-cache lookup and bound the sidecar through DXMT.
+On the local Apple M1 Max, the ordinary SampleLevel clamp matrix and the
+ordinary/reserved empty-view matrix matched their expected values with Metal
+validation enabled. The two-mip reserved case returned zero for clamp 1.5;
+the previous test expected 3.0, but the D3D functional specification defines
+an empty view when the resource clamp exceeds the final view mip. The test
+oracle was corrected accordingly. With the patch disabled, the ordinary clamp
+matrix failed. This is evidence for the tested paths only, not a production
+feature. See [D3D11.3 functional specification, empty-set cases](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm#58-per-resource-mipmap-clamping).
+The test-only patched compute PSO now snapshots its serialized root signature
+and rejects dispatch with a different or missing signature; switching between
+patched and unpatched compute PSOs dirties root arguments. This conservative
+identity check is not a substitute for a production cache and ABI design.
+Experimental patched compute PSOs reject cached-blob export and pipeline
+library storage; while the patch test switch is enabled, compute pipeline
+library loading is rejected to avoid reusing an unpatched in-memory PSO. The
+normal conversion cache holds only the original MSC output. This is a test
+guard, not a versioned production cache key or a serialized patched pipeline.
+Local compute tests also passed with separately created root-signature objects
+containing the same serialized data, and after switching from an unpatched PSO
+to a patched PSO without resetting the root arguments. These cases exercised
+ordinary and reserved textures; a reverse switch and bundle replay remain
+unverified.
+The test-only compute path also passed with a dynamic sampler table at a
+nonzero heap offset after replacing its descriptor between Close and queue
+submission. Omitting the replacement changed the readback and failed the same
+oracle. This does not cover multiple tables, concurrent submissions, or all
+descriptor mutation and failure cases.
+An additional compute test uses two independent sampler root tables at
+nonzero offsets in the same heap, with different LOD ranges. Ordinary and
+reserved texture readbacks matched; swapping the table handles failed the
+oracle. A separate test switched between two sampler heaps within one command
+list, rebound the descriptor tables, and verified both dispatch outputs;
+using identical ranges in both heaps failed the distinguishing oracle.
+Concurrent submission semantics remain unverified.
+Another compute test submitted the same closed list twice, waited for the
+first GPU completion, changed a dynamic sampler, and verified both readbacks.
+Omitting the change failed the oracle. This does not exercise simultaneous
+execution or mutation while a submission is in flight.
+With the test-only patched path, injecting relaxed-sampler creation failure
+after Close invalidated the recorded sidecar and queue submission rejected the
+list with E_FAIL. An unpatched control did not register a sidecar and failed
+the rejection oracle, as expected.
+A retry of that descriptor update before submission restored the sidecar and
+both ordinary and reserved compute readbacks passed. The paired no-retry case
+was rejected at submission.
+With GPU execution gated, another test submitted a patched compute list,
+reset and released the list, and released the application's sampler heap
+reference. A private-data marker remained alive until completion and was then
+released; ordinary and reserved texture readbacks matched. This tests one
+in-flight submission, not concurrent submissions on multiple queues.
 
 Enable correct sampler and SRV minimum-LOD ordering for the explicitly
 validated 2D SampleLevel AIR form, while preserving descriptor mutation before
@@ -127,7 +181,7 @@ other than the recognized sample and LLVM intrinsics before modifying a module.
 Defined helpers are scanned too. This deliberately rejects other AIR intrinsics
 until their behavior is established. It does not prove converter-version
 compatibility or the semantics of null descriptors, status values, or numeric
-edge cases. The runtime does not yet request this preflight or use its output.
+edge cases. Only the test compute path requests this preflight.
 
 The experimental patch API also accepts an auto-detection sentinel for a
 single compute entry point. It identifies the AIR argument tagged as an

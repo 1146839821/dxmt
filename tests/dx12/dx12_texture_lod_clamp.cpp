@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d12.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -14,6 +15,36 @@ namespace {
 
 constexpr UINT TileBytes = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
 constexpr UINT OutputCount = 5;
+
+class HeapLifetimeMarker : public IUnknown {
+  std::atomic<ULONG> refs_{1};
+  std::atomic<bool> &destroyed_;
+
+public:
+  explicit HeapLifetimeMarker(std::atomic<bool> &destroyed) : destroyed_(destroyed) {}
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override {
+    if (!out)
+      return E_POINTER;
+    *out = nullptr;
+    if (iid != IID_IUnknown)
+      return E_NOINTERFACE;
+    *out = static_cast<IUnknown *>(this);
+    AddRef();
+    return S_OK;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const auto count = --refs_;
+    if (!count) {
+      destroyed_ = true;
+      delete this;
+    }
+    return count;
+  }
+};
+const GUID heap_marker_guid = {
+    0xf7a42dc1, 0x57d1, 0x46a8, {0xb1, 0x1e, 0x54, 0x8d, 0x3a, 0x5d, 0x17, 0x82}
+};
 
 template <typename T> struct Owned {
   T *ptr = nullptr;
@@ -228,14 +259,23 @@ bool InitializeReservedTexture(ID3D12Device *device, ID3D12CommandQueue *queue, 
 }
 
 void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Owned<ID3D12RootSignature> &root,
-                    Owned<ID3D12PipelineState> &pipeline, bool limit_sampler_max) {
+                    Owned<ID3D12PipelineState> &pipeline, bool limit_sampler_max, bool dynamic_sampler = false,
+                    bool multi_sampler = false) {
   D3D12_DESCRIPTOR_RANGE ranges[2] = {};
   ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 0, 0};
   ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 5};
-  D3D12_ROOT_PARAMETER parameter = {};
-  parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-  parameter.DescriptorTable.NumDescriptorRanges = 2;
-  parameter.DescriptorTable.pDescriptorRanges = ranges;
+  D3D12_DESCRIPTOR_RANGE sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
+  D3D12_DESCRIPTOR_RANGE second_sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 1, 0, 0};
+  D3D12_ROOT_PARAMETER parameters[3] = {};
+  parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  parameters[0].DescriptorTable.NumDescriptorRanges = 2;
+  parameters[0].DescriptorTable.pDescriptorRanges = ranges;
+  parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  parameters[1].DescriptorTable.NumDescriptorRanges = 1;
+  parameters[1].DescriptorTable.pDescriptorRanges = &sampler_range;
+  parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  parameters[2].DescriptorTable.NumDescriptorRanges = 1;
+  parameters[2].DescriptorTable.pDescriptorRanges = &second_sampler_range;
 
   D3D12_STATIC_SAMPLER_DESC sampler = {};
   sampler.Filter = D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR;
@@ -250,10 +290,10 @@ void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Ow
   sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
   D3D12_ROOT_SIGNATURE_DESC root_desc = {};
-  root_desc.NumParameters = 1;
-  root_desc.pParameters = &parameter;
-  root_desc.NumStaticSamplers = 1;
-  root_desc.pStaticSamplers = &sampler;
+  root_desc.NumParameters = multi_sampler ? 3 : dynamic_sampler ? 2 : 1;
+  root_desc.pParameters = parameters;
+  root_desc.NumStaticSamplers = dynamic_sampler ? 0 : 1;
+  root_desc.pStaticSamplers = dynamic_sampler ? nullptr : &sampler;
   Owned<ID3DBlob> root_blob;
   Owned<ID3DBlob> root_errors;
   Check("SerializeLODRootSignature", D3D12SerializeRootSignature(
@@ -270,9 +310,20 @@ void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Ow
   Check("CreateLODPipeline", device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&pipeline.ptr)));
 }
 
+struct RunOptions {
+  bool reserved = false, expect_unsupported = false, late_load = false, empty_sample = false;
+  bool limit_sampler_max = false, mismatch_root = false, same_root = false, switch_pipeline = false;
+  bool dynamic_sampler = false, skip_sampler_update = false, multi_sampler = false, swap_sampler_tables = false;
+  bool heap_rebind = false, same_heap_range = false, resubmit = false, resubmit_control = false;
+  bool cache_guard = false, fail_late_sampler = false, recover_late_sampler = false, sampler_lifetime = false;
+};
+
 std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
-                              const std::vector<uint8_t> &shader, bool reserved, bool expect_unsupported,
-                              bool late_load = false, bool empty_sample = false, bool limit_sampler_max = false) {
+                              const std::vector<uint8_t> &shader, const RunOptions &options) {
+  const auto &[reserved, expect_unsupported, late_load, empty_sample, limit_sampler_max, mismatch_root, same_root,
+               switch_pipeline, dynamic_sampler, skip_sampler_update, multi_sampler, swap_sampler_tables, heap_rebind,
+               same_heap_range, resubmit, resubmit_control, cache_guard, fail_late_sampler, recover_late_sampler,
+               sampler_lifetime] = options;
   constexpr UINT mip_levels = 3;
   const auto desc = reserved ? TextureDesc(256, 256, 2, D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE)
                              : TextureDesc(512, 512, mip_levels, D3D12_TEXTURE_LAYOUT_UNKNOWN);
@@ -320,7 +371,7 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   Owned<ID3D12Resource> readback;
   CreateBuffer(device, output, OutputCount * sizeof(uint32_t), D3D12_HEAP_TYPE_DEFAULT,
                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-  CreateBuffer(device, readback, OutputCount * sizeof(uint32_t), D3D12_HEAP_TYPE_READBACK,
+  CreateBuffer(device, readback, OutputCount * sizeof(uint32_t) * (heap_rebind ? 2 : 1), D3D12_HEAP_TYPE_READBACK,
                D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
 
   Owned<ID3D12DescriptorHeap> descriptors;
@@ -329,6 +380,68 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   descriptor_desc.NumDescriptors = 6;
   descriptor_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
   Check("CreateLODDescriptorHeap", device->CreateDescriptorHeap(&descriptor_desc, IID_PPV_ARGS(&descriptors.ptr)));
+  Owned<ID3D12DescriptorHeap> sampler_heap;
+  Owned<ID3D12DescriptorHeap> rebound_sampler_heap;
+  static std::atomic<bool> heap_marker_destroyed{false};
+  heap_marker_destroyed = false;
+  Owned<ID3D12Fence> lifetime_gate;
+  Owned<ID3D12CommandAllocator> lifetime_allocator;
+  struct GateGuard {
+    ID3D12Fence *fence = nullptr;
+    ~GateGuard() {
+      if (fence)
+        fence->Signal(1);
+    }
+  } gate_guard;
+  D3D12_SAMPLER_DESC dynamic_desc = {};
+  D3D12_CPU_DESCRIPTOR_HANDLE sampler_cpu = {};
+  D3D12_GPU_DESCRIPTOR_HANDLE sampler_gpu = {};
+  D3D12_GPU_DESCRIPTOR_HANDLE sampler_gpu_second = {};
+  if (dynamic_sampler) {
+    D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_desc = {};
+    sampler_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+    sampler_heap_desc.NumDescriptors = multi_sampler ? 4 : 2;
+    sampler_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    Check("CreateLODSamplerHeap", device->CreateDescriptorHeap(&sampler_heap_desc, IID_PPV_ARGS(&sampler_heap.ptr)));
+    if (sampler_lifetime) {
+      auto *marker = new HeapLifetimeMarker(heap_marker_destroyed);
+      const auto marker_hr = sampler_heap->SetPrivateDataInterface(heap_marker_guid, marker);
+      marker->Release();
+      Check("SetHeapMarker", marker_hr);
+      Check("CreateLifetimeGate", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&lifetime_gate.ptr)));
+      gate_guard.fence = lifetime_gate.ptr;
+      Check("CreateLifetimeAllocator", device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                        IID_PPV_ARGS(&lifetime_allocator.ptr)));
+    }
+    const auto sampler_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    sampler_cpu = sampler_heap->GetCPUDescriptorHandleForHeapStart();
+    sampler_cpu.ptr += sampler_stride;
+    sampler_gpu = sampler_heap->GetGPUDescriptorHandleForHeapStart();
+    sampler_gpu.ptr += sampler_stride;
+    dynamic_desc.Filter = D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR;
+    dynamic_desc.AddressU = dynamic_desc.AddressV = dynamic_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    dynamic_desc.MaxAnisotropy = 1;
+    dynamic_desc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    dynamic_desc.MinLOD = (multi_sampler || heap_rebind) ? 0.0f : 1.0f;
+    dynamic_desc.MaxLOD = multi_sampler ? 0.0f : D3D12_FLOAT32_MAX;
+    device->CreateSampler(&dynamic_desc, sampler_cpu);
+    if (heap_rebind) {
+      Check("CreateReboundSamplerHeap", device->CreateDescriptorHeap(&sampler_heap_desc, IID_PPV_ARGS(&rebound_sampler_heap.ptr)));
+      auto rebound_cpu = rebound_sampler_heap->GetCPUDescriptorHandleForHeapStart();
+      rebound_cpu.ptr += sampler_stride;
+      dynamic_desc.MinLOD = same_heap_range ? 0.0f : 1.0f;
+      device->CreateSampler(&dynamic_desc, rebound_cpu);
+    }
+    if (multi_sampler) {
+      auto second_cpu = sampler_cpu;
+      second_cpu.ptr += 2 * sampler_stride;
+      sampler_gpu_second = sampler_gpu;
+      sampler_gpu_second.ptr += 2 * sampler_stride;
+      dynamic_desc.MinLOD = 1.5f;
+      dynamic_desc.MaxLOD = D3D12_FLOAT32_MAX;
+      device->CreateSampler(&dynamic_desc, second_cpu);
+    }
+  }
   const UINT stride = device->GetDescriptorHandleIncrementSize(descriptor_desc.Type);
   auto cpu = descriptors->GetCPUDescriptorHandleForHeapStart();
 
@@ -356,7 +469,40 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
 
   Owned<ID3D12RootSignature> root;
   Owned<ID3D12PipelineState> pipeline;
-  CreatePipeline(device, shader, root, pipeline, limit_sampler_max);
+  CreatePipeline(device, shader, root, pipeline, limit_sampler_max, dynamic_sampler, multi_sampler);
+  if (cache_guard) {
+    Owned<ID3DBlob> blob;
+    if (pipeline->GetCachedBlob(&blob.ptr) != E_NOTIMPL || blob.ptr)
+      throw std::runtime_error("patched pipeline exposed cached blob");
+    Owned<ID3D12Device1> device1;
+    Check("QueryDevice1", device->QueryInterface(IID_PPV_ARGS(&device1.ptr)));
+    Owned<ID3D12PipelineLibrary> library;
+    Check("CreatePipelineLibrary", device1->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(&library.ptr)));
+    if (library->StorePipeline(L"patched", pipeline.ptr) != E_NOTIMPL)
+      throw std::runtime_error("pipeline library accepted patched pipeline");
+    SetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", nullptr);
+    Owned<ID3D12RootSignature> normal_root;
+    Owned<ID3D12PipelineState> normal_pipeline;
+    CreatePipeline(device, shader, normal_root, normal_pipeline, limit_sampler_max, dynamic_sampler, multi_sampler);
+    Check("StoreNormalPipeline", library->StorePipeline(L"normal", normal_pipeline.ptr));
+    SetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", "1");
+    D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+    desc.pRootSignature = normal_root.ptr;
+    desc.CS = {shader.data(), shader.size()};
+    Owned<ID3D12PipelineState> loaded;
+    if (library->LoadComputePipeline(L"normal", &desc, IID_PPV_ARGS(&loaded.ptr)) != E_NOTIMPL || loaded.ptr)
+      throw std::runtime_error("experimental mode reused a library pipeline");
+    return {};
+  }
+  Owned<ID3D12RootSignature> alternate_root;
+  Owned<ID3D12PipelineState> alternate_pipeline;
+  if (mismatch_root || same_root || switch_pipeline) {
+    if (switch_pipeline)
+      SetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", nullptr);
+    CreatePipeline(device, shader, alternate_root, alternate_pipeline, mismatch_root ? !limit_sampler_max : limit_sampler_max);
+    if (switch_pipeline)
+      SetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", "1");
+  }
   Owned<ID3D12CommandAllocator> allocator;
   Owned<ID3D12GraphicsCommandList> list;
   Check("CreateLODCommandAllocator", device->CreateCommandAllocator(
@@ -366,11 +512,41 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
                                      IID_PPV_ARGS(&list.ptr)));
   Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  list->SetComputeRootSignature(root.ptr);
-  ID3D12DescriptorHeap *heap_list[] = {descriptors.ptr};
-  list->SetDescriptorHeaps(1, heap_list);
+  list->SetComputeRootSignature((mismatch_root || same_root || switch_pipeline) ? alternate_root.ptr : root.ptr);
+  ID3D12DescriptorHeap *heap_list[] = {descriptors.ptr, sampler_heap.ptr};
+  list->SetDescriptorHeaps(dynamic_sampler ? 2 : 1, heap_list);
   list->SetComputeRootDescriptorTable(0, descriptors->GetGPUDescriptorHandleForHeapStart());
+  if (dynamic_sampler)
+    list->SetComputeRootDescriptorTable(1, swap_sampler_tables ? sampler_gpu_second : sampler_gpu);
+  if (multi_sampler)
+    list->SetComputeRootDescriptorTable(2, swap_sampler_tables ? sampler_gpu : sampler_gpu_second);
+  if (switch_pipeline) {
+    list->SetPipelineState(alternate_pipeline.ptr);
+    list->Dispatch(1, 1, 1);
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barrier.UAV.pResource = output.ptr;
+    list->ResourceBarrier(1, &barrier);
+    list->SetPipelineState(pipeline.ptr);
+  }
+  if (heap_rebind) {
+    list->Dispatch(1, 1, 1);
+    Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    list->CopyBufferRegion(readback.ptr, OutputCount * sizeof(uint32_t), output.ptr, 0, OutputCount * sizeof(uint32_t));
+    Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    heap_list[1] = rebound_sampler_heap.ptr;
+    list->SetDescriptorHeaps(2, heap_list);
+    list->SetComputeRootDescriptorTable(0, descriptors->GetGPUDescriptorHandleForHeapStart());
+    auto rebound_gpu = rebound_sampler_heap->GetGPUDescriptorHandleForHeapStart();
+    rebound_gpu.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    list->SetComputeRootDescriptorTable(1, rebound_gpu);
+  }
   list->Dispatch(1, 1, 1);
+  if (mismatch_root) {
+    if (list->Close() != E_INVALIDARG)
+      throw std::runtime_error("patched pipeline root signature mismatch was not rejected");
+    return {};
+  }
   if (expect_unsupported) {
     const HRESULT close_hr = list->Close();
     if (close_hr != E_FAIL) {
@@ -385,6 +561,17 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
   Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
   Check("CloseLODCommandList", list->Close());
+  if (dynamic_sampler && !skip_sampler_update && !multi_sampler && !heap_rebind) {
+    // Root signature 1.0 permits descriptor replacement before submission.
+    if (fail_late_sampler || recover_late_sampler)
+      SetEnvironmentVariableA("DXMT_TEST_FAIL_SAMPLER_LOD", "1");
+    dynamic_desc.MinLOD = 0.0f;
+    device->CreateSampler(&dynamic_desc, sampler_cpu);
+    if (fail_late_sampler || recover_late_sampler)
+      SetEnvironmentVariableA("DXMT_TEST_FAIL_SAMPLER_LOD", nullptr);
+    if (recover_late_sampler)
+      device->CreateSampler(&dynamic_desc, sampler_cpu);
+  }
   if (late_load) {
     // Root signature 1.0 descriptors can be changed after recording, before submission.
     D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
@@ -396,14 +583,45 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
     device->CreateShaderResourceView(texture.ptr, &srv, descriptors->GetCPUDescriptorHandleForHeapStart());
   }
   ID3D12CommandList *lists[] = {list.ptr};
+  if (sampler_lifetime)
+    Check("WaitLifetimeGate", queue->Wait(lifetime_gate.ptr, 1));
   queue->ExecuteCommandLists(1, lists);
+  if (fail_late_sampler) {
+    if (device->GetDeviceRemovedReason() != E_FAIL)
+      throw std::runtime_error("invalid sampler sidecar was not rejected at submission");
+    return {};
+  }
+  if (sampler_lifetime) {
+    Check("ResetLODList", list->Reset(lifetime_allocator.ptr, nullptr));
+    list.ptr->Release();
+    list.ptr = nullptr;
+    sampler_heap.ptr->Release();
+    sampler_heap.ptr = nullptr;
+    if (heap_marker_destroyed.load())
+      throw std::runtime_error("sampler heap released before GPU completion");
+    Check("SignalLifetimeGate", lifetime_gate->Signal(1));
+  }
   Check("SignalLOD", queue->Signal(fence.ptr, 2));
   Wait(fence.ptr, 2);
+  if (sampler_lifetime && !heap_marker_destroyed.load())
+    throw std::runtime_error("sampler heap retained after GPU completion");
 
   uint32_t *mapped = nullptr;
   Check("MapLODReadback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped)));
-  std::vector<uint32_t> result(mapped, mapped + OutputCount);
+  std::vector<uint32_t> result(mapped, mapped + OutputCount * (heap_rebind ? 2 : 1));
   readback->Unmap(0, nullptr);
+  if (resubmit) {
+    if (!resubmit_control) {
+      dynamic_desc.MinLOD = 1.0f;
+      device->CreateSampler(&dynamic_desc, sampler_cpu);
+    }
+    queue->ExecuteCommandLists(1, lists);
+    Check("SignalLODResubmit", queue->Signal(fence.ptr, 3));
+    Wait(fence.ptr, 3);
+    Check("MapLODResubmit", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped)));
+    result.insert(result.begin(), mapped, mapped + OutputCount);
+    readback->Unmap(0, nullptr);
+  }
   return result;
 }
 
@@ -435,8 +653,28 @@ int main(int argc, char **argv) {
   const bool late_load = argc == 3 && strcmp(argv[2], "--load-late") == 0;
   const bool empty_sample = argc == 3 && strcmp(argv[2], "--sample-empty") == 0;
   const bool limit_sampler_max = argc == 3 && strcmp(argv[2], "--sampler-max") == 0;
-  if (argc != 2 && !unsupported_read && !late_load && !empty_sample && !limit_sampler_max) {
-    std::cerr << "usage: dx12_texture_lod_clamp <shader.cs.cso> [--load-unsupported|--load-late|--sample-empty|--sampler-max]\n";
+  const bool mismatch_root = argc == 3 && strcmp(argv[2], "--mismatch-root") == 0;
+  const bool same_root = argc == 3 && strcmp(argv[2], "--same-root") == 0;
+  const bool switch_pipeline = argc == 3 && strcmp(argv[2], "--pso-switch") == 0;
+  const bool skip_sampler_update = argc == 3 && strcmp(argv[2], "--dynamic-stale") == 0;
+  const bool swap_sampler_tables = argc == 3 && strcmp(argv[2], "--multi-swapped") == 0;
+  const bool multi_sampler = swap_sampler_tables || (argc == 3 && strcmp(argv[2], "--multi-sampler") == 0);
+  const bool same_heap_range = argc == 3 && strcmp(argv[2], "--heap-rebind-control") == 0;
+  const bool heap_rebind = same_heap_range || (argc == 3 && strcmp(argv[2], "--heap-rebind") == 0);
+  const bool resubmit_control = argc == 3 && strcmp(argv[2], "--resubmit-control") == 0;
+  const bool cache_guard = argc == 3 && strcmp(argv[2], "--cache-guard") == 0;
+  const bool fail_late_sampler = argc == 3 && strcmp(argv[2], "--dynamic-fail-late") == 0;
+  const bool recover_late_sampler = argc == 3 && strcmp(argv[2], "--dynamic-recover") == 0;
+  const bool sampler_lifetime = argc == 3 && strcmp(argv[2], "--dynamic-lifetime") == 0;
+  const bool resubmit = resubmit_control || (argc == 3 && strcmp(argv[2], "--resubmit") == 0);
+  const bool dynamic_sampler = sampler_lifetime || recover_late_sampler || fail_late_sampler || resubmit || heap_rebind || multi_sampler || skip_sampler_update || (argc == 3 && strcmp(argv[2], "--dynamic-late") == 0);
+  if (argc != 2 && !unsupported_read && !late_load && !empty_sample && !limit_sampler_max && !mismatch_root &&
+      !same_root && !switch_pipeline && !dynamic_sampler && !cache_guard) {
+    std::cerr << "usage: dx12_texture_lod_clamp <shader.cs.cso> [mode]\n"
+                 "modes: --load-unsupported --load-late --sample-empty --sampler-max --mismatch-root\n"
+                 "       --same-root --pso-switch --dynamic-late --dynamic-stale --dynamic-fail-late\n"
+                 "       --dynamic-recover --dynamic-lifetime --multi-sampler --multi-swapped\n"
+                 "       --heap-rebind --heap-rebind-control --resubmit --resubmit-control --cache-guard\n";
     return 2;
   }
 
@@ -448,13 +686,35 @@ int main(int argc, char **argv) {
     queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     Owned<ID3D12CommandQueue> queue;
     Check("CreateLODQueue", device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue.ptr)));
+    RunOptions options;
+    if (fail_late_sampler) {
+      options.dynamic_sampler = true;
+      options.fail_late_sampler = true;
+      RunCase(device.ptr, queue.ptr, shader, options);
+      std::cout << "late sampler sidecar failure rejected\n";
+      return 0;
+    }
+    if (cache_guard) {
+      options.cache_guard = true;
+      RunCase(device.ptr, queue.ptr, shader, options);
+      std::cout << "experimental pipeline cache guards passed\n";
+      return 0;
+    }
+    if (mismatch_root) {
+      options.mismatch_root = true;
+      RunCase(device.ptr, queue.ptr, shader, options);
+      std::cout << "patched pipeline root mismatch rejected\n";
+      return 0;
+    }
     if (unsupported_read) {
-      RunCase(device.ptr, queue.ptr, shader, false, true);
+      options.expect_unsupported = true;
+      RunCase(device.ptr, queue.ptr, shader, options);
       std::cout << "Texture.Load with non-zero ResourceMinLODClamp rejected\n";
       return 0;
     }
     if (late_load) {
-      const auto result = RunCase(device.ptr, queue.ptr, shader, false, false, true);
+      options.late_load = true;
+      const auto result = RunCase(device.ptr, queue.ptr, shader, options);
       if (result.empty() || result[0] != 0) {
         std::cerr << "late ResourceMinLODClamp Texture.Load mip 0 expected 0, got 0x" << std::hex
                   << (result.empty() ? 0xffffffffu : result[0]) << std::dec << "\n";
@@ -463,14 +723,38 @@ int main(int argc, char **argv) {
       std::cout << "late ResourceMinLODClamp Texture.Load passed\n";
       return 0;
     }
-    const std::vector<uint32_t> ordinary_expected = {0x3f800000, 0x40000000, 0x40400000,
-                                                      empty_sample ? 0u : 0x40800000, 0x40400000};
+    const std::vector<uint32_t> ordinary_expected = (heap_rebind || resubmit)
+        ? std::vector<uint32_t>{0x40400000, 0x40400000, 0x40400000, 0x40800000, 0x40a00000,
+                                0x3f800000, 0x40000000, 0x40400000, 0x40800000, 0x40400000}
+        : multi_sampler
+        ? std::vector<uint32_t>{0x3f800000, 0x40800000, 0x40400000, 0x40800000, 0x40400000}
+        : std::vector<uint32_t>{0x3f800000, 0x40000000, 0x40400000,
+                                empty_sample ? 0u : 0x40800000, 0x40400000};
     // This two-mip view ends at LOD 1; a resource clamp of 1.5 is
     // beyond its final mip and therefore produces the out-of-bounds value.
-    const std::vector<uint32_t> reserved_expected = {0x3f800000, 0x40000000, 0x40400000, 0u, 0x40400000};
-    const auto ordinary = RunCase(device.ptr, queue.ptr, shader, false, false, false, empty_sample, limit_sampler_max);
+    const std::vector<uint32_t> reserved_expected = (heap_rebind || resubmit)
+        ? std::vector<uint32_t>{0x40400000, 0x40400000, 0x40400000, 0u, 0x40400000,
+                                0x3f800000, 0x40000000, 0x40400000, 0u, 0x40400000}
+        : std::vector<uint32_t>{0x3f800000, multi_sampler ? 0x40400000u : 0x40000000u,
+                                0x40400000, 0u, 0x40400000};
+    options.empty_sample = empty_sample;
+    options.limit_sampler_max = limit_sampler_max;
+    options.same_root = same_root;
+    options.switch_pipeline = switch_pipeline;
+    options.dynamic_sampler = dynamic_sampler;
+    options.skip_sampler_update = skip_sampler_update;
+    options.multi_sampler = multi_sampler;
+    options.swap_sampler_tables = swap_sampler_tables;
+    options.heap_rebind = heap_rebind;
+    options.same_heap_range = same_heap_range;
+    options.resubmit = resubmit;
+    options.resubmit_control = resubmit_control;
+    options.recover_late_sampler = recover_late_sampler;
+    options.sampler_lifetime = sampler_lifetime;
+    const auto ordinary = RunCase(device.ptr, queue.ptr, shader, options);
     const bool ordinary_pass = CheckCase("ordinary ResourceMinLODClamp", ordinary, ordinary_expected);
-    const auto reserved = RunCase(device.ptr, queue.ptr, shader, true, false, false, empty_sample, limit_sampler_max);
+    options.reserved = true;
+    const auto reserved = RunCase(device.ptr, queue.ptr, shader, options);
     if (reserved.empty())
       return 77;
     const bool reserved_pass = CheckCase("reserved standard-mip ResourceMinLODClamp", reserved, reserved_expected);

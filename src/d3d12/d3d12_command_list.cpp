@@ -4034,17 +4034,28 @@ public:
   uint64_t
   EncodeMSCArgumentBuffer(
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
-      MTLD3D12SamplerDescriptorHeap *sampler_heap
+      MTLD3D12SamplerDescriptorHeap *sampler_heap, bool use_lod_sidecar = false, bool compute = false,
+      WMTRenderStages render_stages = static_cast<WMTRenderStages>(0)
   ) {
     if (!pRootSig->MSCArgumentBufferSize)
       return 0;
 
-    auto [Ptr, Offset] = allocator_->AllocateGPUHeap(pRootSig->MSCArgumentBufferSize, 16);
+    uint64_t allocation_size = pRootSig->MSCArgumentBufferSize;
+    if (use_lod_sidecar) {
+      auto hr = pRootSig->InitializeMSCLodSidecarLayout();
+      if (FAILED(hr)) {
+        recording_error_ = hr;
+        FailRecording(__func__, "MSC sampler LOD layout unavailable");
+        return 0;
+      }
+      allocation_size = pRootSig->MSCLODSidecarBufferSize;
+    }
+    auto [Ptr, Offset] = allocator_->AllocateGPUHeap(allocation_size, 16);
     if (!Ptr) {
-      FailRecording(__func__, "MSC argument GPU heap allocation failed size=", pRootSig->MSCArgumentBufferSize);
+      FailRecording(__func__, "MSC argument GPU heap allocation failed size=", allocation_size);
       return 0;
     }
-    memset(Ptr, 0, pRootSig->MSCArgumentBufferSize);
+    memset(Ptr, 0, allocation_size);
     uint64_t static_sampler_table_address = 0;
 
     for (uint32_t i = 0; i < pRootSig->MSCParameterCount; i++) {
@@ -4062,6 +4073,10 @@ public:
           static_sampler_table_address = EncodeMSCStaticSamplers(pRootSig);
         if (!static_sampler_table_address) {
           ERR("MSC static sampler table is unavailable");
+          if (use_lod_sidecar) {
+            FailRecording(__func__, "MSC static sampler table unavailable for LOD sidecar");
+            return 0;
+          }
           continue;
         }
         memcpy(destination, &static_sampler_table_address, std::min<size_t>(layout.size_bytes, sizeof(uint64_t)));
@@ -4093,6 +4108,66 @@ public:
       memcpy(destination, source, copy_size);
     }
 
+    if (use_lod_sidecar) {
+      EncodeMSCBufferResourceUse(allocator_->gpu_heap_buffer_.handle, compute, render_stages);
+      for (unsigned i = 0; i < pRootSig->MSCLODSidecarTableCount; ++i) {
+        const auto &table = pRootSig->MSCLODSidecarTables[i];
+        if (table.sidecar_offset > allocation_size || sizeof(uint64_t) > allocation_size - table.sidecar_offset) {
+          FailRecording(__func__, "invalid sampler LOD sidecar offset");
+          return 0;
+        }
+        uint64_t address = 0;
+        if (table.parameter_index == UINT32_MAX) {
+          const auto count = pRootSig->NumStaticSamplers;
+          if (!count || count > UINT_MAX || count > SIZE_MAX / sizeof(D3D12SamplerLODSidecarEntry) ||
+              !RetainStaticSamplerRoot(pRootSig)) {
+            FailRecording(__func__, "invalid static sampler LOD table");
+            return 0;
+          }
+          auto [entries_ptr, entries_offset] = allocator_->AllocateGPUHeap(count * sizeof(D3D12SamplerLODSidecarEntry), 16);
+          if (!entries_ptr) {
+            FailRecording(__func__, "static sampler LOD allocation failed");
+            return 0;
+          }
+          auto *entries = static_cast<D3D12SamplerLODSidecarEntry *>(entries_ptr);
+          try {
+            for (size_t j = 0; j < count; ++j) {
+              if (!pRootSig->GetStaticSamplerLODSidecarEntry(static_cast<UINT>(j), entries[j])) {
+                FailRecording(__func__, "static sampler LOD entry unavailable");
+                return 0;
+              }
+            }
+          } catch (const std::bad_alloc &) {
+            recording_error_ = E_OUTOFMEMORY;
+            FailRecording(__func__, "static sampler LOD entry allocation failed");
+            return 0;
+          }
+          address = allocator_->gpu_heap_buffer_address_ + entries_offset;
+        } else {
+          if (!sampler_heap || table.parameter_index >= pRootSig->ParameterSlots ||
+              pRootSig->Parameters[table.parameter_index].source_qword >= pRootSig->UploadQwords) {
+            FailRecording(__func__, "sampler LOD descriptor table unavailable");
+            return 0;
+          }
+          D3D12_GPU_DESCRIPTOR_HANDLE handle = {pStaging[pRootSig->Parameters[table.parameter_index].source_qword]};
+          auto hr = sampler_heap->PrepareSamplerLODSidecar();
+          if (SUCCEEDED(hr))
+            hr = TrackSamplerLODSidecar(sampler_heap, handle);
+          if (FAILED(hr) || !(address = sampler_heap->GetSamplerLODSidecarAddress(handle))) {
+            recording_error_ = FAILED(hr) ? hr : E_FAIL;
+            FailRecording(__func__, "sampler LOD sidecar unavailable");
+            return 0;
+          }
+          auto buffer = sampler_heap->GetSamplerLODSidecarBuffer();
+          if (!buffer) {
+            FailRecording(__func__, "sampler LOD sidecar buffer unavailable");
+            return 0;
+          }
+          EncodeMSCBufferResourceUse(buffer.handle, compute, render_stages);
+        }
+        memcpy(static_cast<uint8_t *>(Ptr) + table.sidecar_offset, &address, sizeof(address));
+      }
+    }
     return Offset;
   }
 
@@ -4798,6 +4873,16 @@ public:
       return false;
 
     const bool use_msc = pso_compute_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
+    if (pso_compute_->msc_test_lod_patch) {
+      const void *blob = nullptr;
+      const size_t size = rootsig_compute_ ? rootsig_compute_->GetBlob(&blob) : 0;
+      const auto &expected = pso_compute_->msc_test_lod_root_signature;
+      if (!blob || size != expected.size() || std::memcmp(blob, expected.data(), size) != 0) {
+        recording_error_ = E_INVALIDARG;
+        FailRecording(__func__, "patched MSC shader root signature mismatch");
+        return false;
+      }
+    }
     static std::atomic<uint32_t> compute_trace_count{0};
     compute_trace_id_ = compute_trace_ ? compute_trace_count.fetch_add(1, std::memory_order_relaxed) : UINT_MAX;
     if (compute_trace_id_ < 4096) {
@@ -4865,9 +4950,14 @@ public:
 
     if (dirty_state_.test(DirtyState::ComputeRootArguments) && !SkipResourceBinding) {
       if (rootsig_compute_ && (use_msc ? rootsig_compute_->MSCArgumentBufferSize : rootsig_compute_->UploadQwords)) {
+        char lod_upload_test[2] = {};
+        const bool test_lod_upload = use_msc && (pso_compute_->msc_test_lod_patch ||
+            (GetEnvironmentVariableA("DXMT_TEST_MSC_LOD_UPLOAD", lod_upload_test, sizeof(lod_upload_test)) == 1 &&
+             lod_upload_test[0] == '1'));
         auto Offset = use_msc
                           ? EncodeMSCArgumentBuffer(
-                                rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr()
+                                rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr(),
+                                test_lod_upload, true
                             )
                           : EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_);
         if (!use_msc || rootsig_compute_->MSCArgumentBufferSize) {
@@ -5969,6 +6059,8 @@ public:
       auto compute_pso = static_cast<MTLD3D12ComputePipelineState *>(pPSO);
       if (pso_compute_.ptr() == compute_pso)
         return;
+      if (!pso_compute_ || pso_compute_->msc_test_lod_patch != compute_pso->msc_test_lod_patch)
+        dirty_state_.set(DirtyState::ComputeRootArguments);
       pso_compute_ = compute_pso;
       pso_graphics_ = nullptr;
       dirty_state_.set(
