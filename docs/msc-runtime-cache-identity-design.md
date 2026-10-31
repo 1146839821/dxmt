@@ -117,3 +117,25 @@ an application pass or by itself proof that the same key would have matched.
 outcomes and cache contents. The local logs are in
 `dxmt-test/n87-msc-cache-guard/msc-lod-7r6_vwsr` and
 `dxmt-test/n87-msc-cache-guard/msc-lod-p6r1ehey`.
+
+## Mapped code-signature experiment
+
+Apple's [TN3126](https://developer.apple.com/documentation/technotes/tn3126-inside-code-signing-hashes)
+describes the Code Directory's page hashes and separate per-architecture
+signatures. The test-only `darwin_mapped_signature_probe.c` checks whether the
+`LC_CODE_SIGNATURE` range is readable in the loaded `__LINKEDIT` mapping and
+hashes that mapped range. It does not parse or verify the signature and is not
+a production identity API.
+
+On the current machine `/usr/local/lib/libmetalirconverter.dylib` exposed a
+readable embedded-signature range in both architectures. Two independent loads
+per architecture yielded the same range hash: x86_64
+`e04105fce5839eaad91ed35889e4abdf2e6acc4ad7d1c8c36103d0001c5acb07`;
+arm64 `0f24d6ea538604ef61008e429d14cc61ebe73b62f081757a82c7d42cdc20afc1`.
+The synthetic test also found distinct mapped signature hashes for the
+re-signed initialized-data variants with identical UUID and `__TEXT` hash;
+the original mapped signature hash remained stable after pathname replacement.
+These are observations, not proof that all signed images are verified, that
+all pages are covered, or that every dyld mapping exposes a signature. In
+particular, unsupported, unsigned, shared-cache, malformed or unverifiable
+images must remain fail-closed until a validated identity scheme is implemented.

@@ -62,6 +62,7 @@ def main():
             source = root / f"{name}.c"
             source.write_text(f"int marker(void) {{ return {value}; }}\n")
             run("xcrun", "clang", "-dynamiclib", "-o", str(root / f"{name}.dylib"), str(source))
+            run("codesign", "--force", "--sign", "-", str(root / f"{name}.dylib"))
         a = (root / "a.dylib").read_bytes()
         b = bytearray((root / "b.dylib").read_bytes())
         auuid = a[uuid_offset(a):uuid_offset(a) + 16]
@@ -71,6 +72,7 @@ def main():
         controls = [run(str(probe), str(root / "a.dylib"), input=b"\n").stdout.decode().splitlines()[0]
                     for _ in range(2)]
         original_hash = controls[0].split()[2]
+        original_signature = controls[0].split()[3]
         if controls[0] != controls[1]:
             raise AssertionError("mapped text fingerprint changed between processes")
         for same_uuid in (False, True):
@@ -100,7 +102,7 @@ def main():
             if process.returncode:
                 raise AssertionError(f"probe failed: {process.returncode}, {stderr}")
             second = stdout.strip()
-            if first != second or first != f"11 {auuid.hex()} {original_hash} {live}":
+            if first != second or first != f"11 {auuid.hex()} {original_hash} {original_signature} {live}":
                 raise AssertionError(f"mapped image changed unexpectedly: {first!r}, {second!r}")
             on_disk = live.read_bytes()
             disk_uuid = on_disk[uuid_offset(on_disk):uuid_offset(on_disk) + 16]
@@ -125,7 +127,9 @@ def main():
                    for path in (data_a, data_b)]
         if [int(row[0]) for row in outputs] != [11, 22] or outputs[0][1:3] != outputs[1][1:3]:
             raise AssertionError("data-only control did not preserve UUID and __TEXT digest")
-        print("mapped text stable across processes but cannot distinguish changed data")
+        if outputs[0][3] == outputs[1][3]:
+            raise AssertionError("mapped signature did not distinguish changed initialized data")
+        print("mapped signatures stable across processes and distinguish changed initialized data")
 
 
 if __name__ == "__main__":
