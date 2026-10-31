@@ -1,0 +1,32 @@
+; Defined, in-range inputs only: compare stdout before and after rewriting.
+@ints = internal addrspace(2) constant [7 x i32] [i32 0, i32 1, i32 -1, i32 -2147483648, i32 2147483647, i32 305419896, i32 42]
+@floats = internal addrspace(2) constant [7 x float] [float 0.0, float -0.0, float 1.0, float -1.0, float 0x7FF0000000000000, float 0x7FF8000000000000, float 0x7FF8000020000000]
+@fmt = private unnamed_addr constant [11 x i8] c"%08x %08x\0A\00"
+declare i32 @printf(i8*, ...)
+
+define i32 @read_int(i64 %i) {
+  %ptr = getelementptr [7 x i32], [7 x i32] addrspace(2)* @ints, i64 0, i64 %i
+  %value = load i32, i32 addrspace(2)* %ptr
+  ret i32 %value
+}
+define float @read_float(i64 %i) {
+  %ptr = getelementptr [7 x float], [7 x float] addrspace(2)* @floats, i64 0, i64 %i
+  %value = load float, float addrspace(2)* %ptr
+  ret float %value
+}
+define i32 @main() {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [0, %entry], [%next, %loop]
+  %a = call i32 @read_int(i64 %i)
+  %b = call float @read_float(i64 %i)
+  %bits = bitcast float %b to i32
+  %fmtptr = getelementptr [11 x i8], [11 x i8]* @fmt, i64 0, i64 0
+  %printed = call i32 (i8*, ...) @printf(i8* %fmtptr, i32 %a, i32 %bits)
+  %next = add i64 %i, 1
+  %more = icmp ult i64 %next, 7
+  br i1 %more, label %loop, label %done
+done:
+  ret i32 0
+}

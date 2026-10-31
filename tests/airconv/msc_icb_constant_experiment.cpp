@@ -23,7 +23,8 @@ static unsigned transform(llvm::Module &module) {
     for (auto &block : fn)
       for (auto &inst : block) {
         auto *load = llvm::dyn_cast<llvm::LoadInst>(&inst);
-        if (!load || load->isVolatile() || load->isAtomic())
+        if (!load || load->isVolatile() || load->isAtomic() ||
+            load->getMetadata("dxmt.icb.constant.fallback"))
           continue;
         auto *gep =
             llvm::dyn_cast<llvm::GetElementPtrInst>(load->getPointerOperand());
@@ -74,6 +75,8 @@ static unsigned transform(llvm::Module &module) {
     auto *fallback = llvm::BasicBlock::Create(
         module.getContext(), "icb.constant.fallback", function, continuation);
     load->removeFromParent();
+    load->setMetadata("dxmt.icb.constant.fallback",
+                      llvm::MDNode::get(module.getContext(), {}));
     fallback->getInstList().push_back(load);
     llvm::IRBuilder<> fallback_builder(fallback);
     fallback_builder.CreateBr(continuation);
@@ -145,7 +148,8 @@ define i32 @external_init_read(i64 %index) {
     error.print("msc-icb-constant-experiment", llvm::errs());
     return false;
   }
-  if (transform(*module) != 1 || llvm::verifyModule(*module, &llvm::errs()))
+  if (transform(*module) != 1 || transform(*module) != 0 ||
+      llvm::verifyModule(*module, &llvm::errs()))
     return false;
   auto *function = module->getFunction("read");
   llvm::PHINode *phi = nullptr;
@@ -209,6 +213,27 @@ int main(int argc, char **argv) {
       return 1;
     std::cout << "constant rewrite structural controls passed\n";
     return 0;
+  }
+  if (argc == 4 && std::strcmp(argv[1], "--rewrite-ir") == 0) {
+    llvm::LLVMContext context;
+    context.setOpaquePointers(false);
+    llvm::SMDiagnostic error;
+    auto module = llvm::parseAssemblyFile(argv[2], error, context);
+    if (!module) {
+      error.print("msc-icb-constant-experiment", llvm::errs());
+      return 3;
+    }
+    const unsigned count = transform(*module);
+    if (!count || transform(*module) != 0 ||
+        llvm::verifyModule(*module, &llvm::errs()))
+      return 5;
+    std::error_code ec;
+    llvm::raw_fd_ostream output(argv[3], ec);
+    if (ec)
+      return 6;
+    module->print(output, nullptr);
+    output.flush();
+    return output.has_error() ? 6 : 0;
   }
   if (argc != 3) {
     std::cerr << "usage: msc-icb-constant-experiment input.metallib "
