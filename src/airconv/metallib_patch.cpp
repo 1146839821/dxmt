@@ -24,18 +24,21 @@ copyMetalLib(const void *data, size_t size, SM50CompiledBitcodeInternal &output)
 }
 
 bool
-findComputeRootArgument(llvm::Module &module, uint32_t &index) {
+findRootArgument(llvm::Module &module, uint32_t &index) {
   auto *kernels = module.getNamedMetadata("air.kernel");
-  if (!kernels || kernels->getNumOperands() != 1 || module.getNamedMetadata("air.vertex") ||
-      module.getNamedMetadata("air.fragment") || module.getNamedMetadata("air.mesh") ||
-      module.getNamedMetadata("air.object"))
+  auto *fragments = module.getNamedMetadata("air.fragment");
+  if (!!kernels == !!fragments || module.getNamedMetadata("air.vertex") ||
+      module.getNamedMetadata("air.mesh") || module.getNamedMetadata("air.object"))
     return false;
-  auto *kernel = kernels->getOperand(0);
-  if (!kernel || kernel->getNumOperands() < 3)
+  auto *entrypoints = kernels ? kernels : fragments;
+  if (entrypoints->getNumOperands() != 1)
     return false;
-  auto *function_md = llvm::dyn_cast_or_null<llvm::ValueAsMetadata>(kernel->getOperand(0));
+  auto *entry = entrypoints->getOperand(0);
+  if (!entry || entry->getNumOperands() < 3)
+    return false;
+  auto *function_md = llvm::dyn_cast_or_null<llvm::ValueAsMetadata>(entry->getOperand(0));
   auto *function = function_md ? llvm::dyn_cast<llvm::Function>(function_md->getValue()) : nullptr;
-  auto *arguments = llvm::dyn_cast_or_null<llvm::MDNode>(kernel->getOperand(2));
+  auto *arguments = llvm::dyn_cast_or_null<llvm::MDNode>(entry->getOperand(2));
   if (!function || function->isDeclaration() || !arguments)
     return false;
   for (auto &other : module) {
@@ -125,7 +128,7 @@ SM50PatchMetalLibSampleLevelLOD(
   for (size_t i = 0; i < table_count; ++i)
     mapping.push_back({tables[i].sampler_table_offset, tables[i].sidecar_offset});
   auto module = std::move(*module_or_error);
-  if (root_argument_index == SM50_MSC_LOD_AUTO_ROOT_ARGUMENT && !findComputeRootArgument(*module, root_argument_index))
+  if (root_argument_index == SM50_MSC_LOD_AUTO_ROOT_ARGUMENT && !findRootArgument(*module, root_argument_index))
     return SM50_MSC_LOD_UNSUPPORTED;
   const auto result = dxmt::air::patchMSCSampleLevelLOD(
       *module, {root_argument_index, original_root_size, mapping.data(), mapping.size(), true}

@@ -10,7 +10,7 @@
 #include <vector>
 
 int main(int argc, char **argv) {
-  if (argc != 2)
+  if (argc != 2 && argc != 3)
     return 2;
   for (const auto &entry :
        {std::pair{"d3d12.dll", "D3D12CreateDevice"},
@@ -114,6 +114,14 @@ int main(int argc, char **argv) {
     root->Release();
     return 6;
   }
+  if (argc == 3) {
+    std::ofstream out(argv[2], std::ios::binary);
+    out.write(reinterpret_cast<const char *>(metallib.data()), metallib.size());
+    if (!out) {
+      root->Release();
+      return 6;
+    }
+  }
   root->Release();
   dxmt_msc_patch_lod_params patch = {};
   patch.metallib = metallib.data();
@@ -123,11 +131,20 @@ int main(int argc, char **argv) {
   patch.original_root_size = static_cast<uint32_t>(layout.argument_buffer_size);
   patch.root_argument_index = UINT32_MAX;
   if (DXMTMSCPatchSamplerLOD(&patch) != DXMT_MSC_SUCCESS ||
-      patch.patch_status != DXMT_MSC_LOD_UNSUPPORTED || patch.output_size) {
-    std::cerr << "fragment auto-discovery did not reject\n";
+      patch.patch_status != DXMT_MSC_LOD_PATCHED || !patch.output_size) {
+    std::cerr << "fragment auto-discovery failed\n";
     return 7;
   }
-  std::cout << "fragment auto-discovery rejected; root size="
+  std::vector<uint8_t> automatic(patch.output_size);
+  patch.output = automatic.data();
+  patch.output_capacity = automatic.size();
+  if (DXMTMSCPatchSamplerLOD(&patch) != DXMT_MSC_SUCCESS ||
+      patch.patch_status != DXMT_MSC_LOD_PATCHED ||
+      patch.output_size != automatic.size())
+    return 7;
+  patch.output = nullptr;
+  patch.output_capacity = 0;
+  std::cout << "fragment auto-discovery patched; root size="
             << layout.argument_buffer_size
             << ", sampler offset=" << table.sampler_table_offset << '\n';
   unsigned patched_count = 0;
@@ -155,12 +172,13 @@ int main(int argc, char **argv) {
   patch.output_capacity = output.size();
   if (DXMTMSCPatchSamplerLOD(&patch) != DXMT_MSC_SUCCESS ||
       patch.patch_status != DXMT_MSC_LOD_PATCHED ||
-      patch.output_size != output.size())
+      patch.output_size != output.size() || output != automatic)
     return 11;
   table.sidecar_offset = table.sampler_table_offset;
   if (DXMTMSCPatchSamplerLOD(&patch) != DXMT_MSC_SUCCESS ||
       patch.patch_status != DXMT_MSC_LOD_UNSUPPORTED || patch.output_size)
     return 12;
-  std::cout << "fragment explicit patch and invalid layout control passed\n";
+  std::cout
+      << "fragment auto and explicit patch match; invalid layout rejected\n";
   return 0;
 }

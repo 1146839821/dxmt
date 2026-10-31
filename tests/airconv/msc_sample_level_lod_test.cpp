@@ -121,6 +121,59 @@ int main() {
     return 1;
   delete static_cast<SM50CompiledBitcodeInternal *>(patched_metal);
   patched_metal = nullptr;
+  const auto metadata_pos = with_metadata.find("!air.kernel");
+  if (metadata_pos == std::string::npos)
+    return 1;
+  auto fragment_metadata = with_metadata;
+  fragment_metadata.replace(metadata_pos, std::string("!air.kernel").size(), "!air.fragment");
+  auto verify_auto = [&](const std::string &source, int expected) {
+    auto test_module = parse(context, source);
+    if (!test_module)
+      return false;
+    llvm::SmallVector<char, 0> bytes;
+    llvm::raw_svector_ostream stream(bytes);
+    writer.Write(*test_module, stream);
+    sm50_bitcode_t result = nullptr;
+    const int status = SM50PatchMetalLibSampleLevelLOD(
+        bytes.data(), bytes.size(), SM50_MSC_LOD_AUTO_ROOT_ARGUMENT, 16, abi_tables, 1, &result);
+    const bool valid = status == expected && (result != nullptr) == (expected == SM50_MSC_LOD_PATCHED);
+    delete static_cast<SM50CompiledBitcodeInternal *>(result);
+    return valid;
+  };
+  if (!verify_auto(fragment_metadata, SM50_MSC_LOD_PATCHED) ||
+      !verify_auto(fragment_metadata + "\n!air.kernel = !{!0}\n", SM50_MSC_LOD_UNSUPPORTED) ||
+      !verify_auto(fragment_metadata + "\n!air.vertex = !{!0}\n", SM50_MSC_LOD_UNSUPPORTED))
+    return 1;
+  auto fragment_ambiguous = fragment_metadata;
+  const auto fragment_args = fragment_ambiguous.find("!2 = !{!3}");
+  if (fragment_args == std::string::npos)
+    return 1;
+  fragment_ambiguous.replace(fragment_args, std::string("!2 = !{!3}").size(), "!2 = !{!3, !3}");
+  if (!verify_auto(fragment_ambiguous, SM50_MSC_LOD_UNSUPPORTED))
+    return 1;
+  auto fragment_wrong_location = fragment_metadata;
+  const auto fragment_location = fragment_wrong_location.find("!\"air.location_index\", i32 2");
+  if (fragment_location == std::string::npos)
+    return 1;
+  fragment_wrong_location.replace(fragment_location, std::string("!\"air.location_index\", i32 2").size(),
+                                  "!\"air.location_index\", i32 1");
+  if (!verify_auto(fragment_wrong_location, SM50_MSC_LOD_UNSUPPORTED))
+    return 1;
+  auto fragment_wrong_type = fragment_metadata;
+  const auto root_index = fragment_wrong_type.find("!3 = !{i32 0,");
+  if (root_index == std::string::npos)
+    return 1;
+  fragment_wrong_type.replace(root_index, std::string("!3 = !{i32 0,").size(), "!3 = !{i32 1,");
+  if (!verify_auto(fragment_wrong_type, SM50_MSC_LOD_UNSUPPORTED))
+    return 1;
+  auto fragment_multiple = fragment_metadata;
+  const auto entry_list = fragment_multiple.find("!air.fragment = !{!0}");
+  if (entry_list == std::string::npos)
+    return 1;
+  fragment_multiple.replace(entry_list, std::string("!air.fragment = !{!0}").size(),
+                            "!air.fragment = !{!0, !0}");
+  if (!verify_auto(fragment_multiple, SM50_MSC_LOD_UNSUPPORTED))
+    return 1;
   const auto argument_list = with_metadata.find("!2 = !{!3}");
   if (argument_list == std::string::npos)
     return 1;

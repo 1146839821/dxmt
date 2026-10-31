@@ -166,6 +166,27 @@ Fragment conversion probe design card:
 - Rollback: remove the probe, fixture, build target, and this card together.
 - Done: real fragment conversion, strict auto rejection, explicit transform,
   invalid-layout control, matching runtime identity, and build checks complete.
+
+Fragment metadata discovery design card:
+
+- Goal: identify a fragment shader's root argument from its AIR entry metadata
+  without guessing an argument index.
+- Baseline: `7ffc4fe0`. On MSC API 4.0.1, the fragment has one `air.fragment`
+  entry whose input metadata identifies an indirect buffer at binding 2.
+- Scope: extend the existing strict single-entry discovery to accept either one
+  kernel or one fragment. Reject mixed stages, multiple entries, duplicate
+  binding locations, missing location, non-constant-address-space pointers,
+  and sampling hidden in another function. Preserve the compute checks.
+- Non-scope: graphics PSO integration, vertex/mesh stages, actual rendering,
+  descriptor binding, and public capability claims.
+- Validation: synthetic malformed metadata and compute regressions; an MSC
+  `ps_6_0` fixture must produce identical automatic and explicit patched
+  metallibs. Run the existing compute experiment with matching runtime images.
+- Risk: MSC metadata varies across versions; unknown forms fail closed. A
+  successful transform does not verify rendering or sidecar lifetime.
+- Rollback: revert discovery and associated tests together.
+- Done: the real fragment fixture and relevant negative/compute controls pass,
+  along with the build and runtime identity checks.
 With the test-only patched path, injecting relaxed-sampler creation failure
 after Close invalidated the recorded sidecar and queue submission rejected the
 list with E_FAIL. An unpatched control did not register a sidecar and failed
