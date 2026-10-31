@@ -174,3 +174,24 @@ subsequently read file bytes represent the already loaded contents. The test
 does not prove the behavior of all filesystems, shared-cache images, process
 security policies, or concurrent modifications. Persistent MSC caching remains
 disabled pending a complete, validated binding strategy.
+
+## Pre-opened descriptor experiment
+
+The test-only `darwin_pinned_image_probe.c` opens the candidate before `dlopen`,
+checks file metadata before and after hashing, then compares the opened file's
+device/inode with the loaded image's mapped vnode. The probe rechecks metadata
+and the full-file SHA-256 after loading. In controlled local tests, stable
+files and a symlink alias bound successfully; replacement between open and
+`dlopen` failed binding; an in-place data edit after loading was detected even
+after restoring mtime. These tests passed under x86_64/Rosetta and native
+arm64. The current installed MSC dylib also produced `BOUND 1` and `STABLE 1`
+for both architectures, with full-file hash
+`cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4`.
+
+This is evidence for a candidate approach, not a race-free proof. Metadata
+semantics and inode reuse, filesystem behavior, modifications during or after
+validation, dyld aliases/shared-cache images, unsigned or inaccessible files,
+dependencies, and PE/Unix mixed-version compatibility still need explicit
+handling. The prototype hashes the entire universal file, not only the active
+slice. It does not expose an identity to the production cache and the existing
+fail-closed guard remains in effect.
