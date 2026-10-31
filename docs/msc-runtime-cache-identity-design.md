@@ -139,3 +139,20 @@ These are observations, not proof that all signed images are verified, that
 all pages are covered, or that every dyld mapping exposes a signature. In
 particular, unsupported, unsigned, shared-cache, malformed or unverifiable
 images must remain fail-closed until a validated identity scheme is implemented.
+
+## Invalid-signature negative control
+
+Apple's [TN3126 per-page discussion](https://developer.apple.com/documentation/technotes/tn3126-inside-code-signing-hashes)
+states that macOS does not always check code as it is paged in. The synthetic
+probe now modifies a signed dylib's initialized data without re-signing.
+`codesign --verify` rejects the modified file, yet on this local macOS 27.0.1
+machine a separate process loaded it and observed the changed data under both
+x86_64/Rosetta and native arm64. The loaded UUID, mapped `__TEXT` hash and
+mapped signature hash all matched the original. Re-signing the modified image
+changed the signature hash as expected.
+
+This is a local observation for the test process and libraries, not a claim
+about every entitlement, macOS release or MSC binary. It rules out relying on
+mapped signature bytes alone without separately validating their relationship
+to the actual loaded code and initialized data. The production persistent-cache
+guard remains enabled.

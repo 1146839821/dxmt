@@ -122,6 +122,22 @@ def main():
             raise AssertionError("initialized data fixture not found")
         image[location:location + 4] = struct.pack("<I", 22)
         data_b.write_bytes(image)
+        # The signature remains unchanged but no longer seals the file. Whether
+        # dyld accepts this depends on architecture and process security mode.
+        invalid = subprocess.run(["codesign", "--verify", str(data_b)],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if invalid.returncode == 0:
+            raise AssertionError("modified fixture unexpectedly has a valid signature")
+        tampered = subprocess.run([str(probe), str(data_b)], input=b"\n",
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        original = run(str(probe), str(data_a), input=b"\n").stdout.decode().splitlines()[0].split()
+        if tampered.returncode == 0:
+            unsafe = tampered.stdout.decode().splitlines()[0].split()
+            if int(unsafe[0]) != 22 or unsafe[1:4] != original[1:4]:
+                raise AssertionError("tampered image did not preserve the expected mapped identifiers")
+            print("tampered signed image loaded with unchanged mapped signature")
+        else:
+            print("tampered signed image rejected by loader or platform")
         run("codesign", "--force", "--sign", "-", str(data_b))
         outputs = [run(str(probe), str(path), input=b"\n").stdout.decode().splitlines()[0].split()
                    for path in (data_a, data_b)]
