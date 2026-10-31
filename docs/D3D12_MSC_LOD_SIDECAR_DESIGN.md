@@ -181,7 +181,10 @@ other than the recognized sample and LLVM intrinsics before modifying a module.
 Defined helpers are scanned too. This deliberately rejects other AIR intrinsics
 until their behavior is established. It does not prove converter-version
 compatibility or the semantics of null descriptors, status values, or numeric
-edge cases. Only the test compute path requests this preflight.
+edge cases. Only the test compute path requests this preflight. A compute
+pipeline containing SampleGrad was rejected with E_NOTIMPL under the test
+switch; an unpatched SampleGrad pipeline and a patchable SampleLevel pipeline
+both failed the rejection oracle, as expected.
 
 The experimental patch API also accepts an auto-detection sentinel for a
 single compute entry point. It identifies the AIR argument tagged as an

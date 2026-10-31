@@ -260,7 +260,7 @@ bool InitializeReservedTexture(ID3D12Device *device, ID3D12CommandQueue *queue, 
 
 void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Owned<ID3D12RootSignature> &root,
                     Owned<ID3D12PipelineState> &pipeline, bool limit_sampler_max, bool dynamic_sampler = false,
-                    bool multi_sampler = false) {
+                    bool multi_sampler = false, bool expect_patch_rejection = false) {
   D3D12_DESCRIPTOR_RANGE ranges[2] = {};
   ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 0, 0};
   ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 5};
@@ -307,7 +307,13 @@ void CreatePipeline(ID3D12Device *device, const std::vector<uint8_t> &shader, Ow
   pipeline_desc.pRootSignature = root.ptr;
   pipeline_desc.CS.pShaderBytecode = shader.data();
   pipeline_desc.CS.BytecodeLength = shader.size();
-  Check("CreateLODPipeline", device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&pipeline.ptr)));
+  const auto hr = device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&pipeline.ptr));
+  if (expect_patch_rejection) {
+    if (hr != E_NOTIMPL || pipeline.ptr)
+      throw std::runtime_error("unsupported shader was not rejected by experimental patch");
+    return;
+  }
+  Check("CreateLODPipeline", hr);
 }
 
 struct RunOptions {
@@ -316,6 +322,7 @@ struct RunOptions {
   bool dynamic_sampler = false, skip_sampler_update = false, multi_sampler = false, swap_sampler_tables = false;
   bool heap_rebind = false, same_heap_range = false, resubmit = false, resubmit_control = false;
   bool cache_guard = false, fail_late_sampler = false, recover_late_sampler = false, sampler_lifetime = false;
+  bool expect_patch_rejection = false;
 };
 
 std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
@@ -323,7 +330,7 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
   const auto &[reserved, expect_unsupported, late_load, empty_sample, limit_sampler_max, mismatch_root, same_root,
                switch_pipeline, dynamic_sampler, skip_sampler_update, multi_sampler, swap_sampler_tables, heap_rebind,
                same_heap_range, resubmit, resubmit_control, cache_guard, fail_late_sampler, recover_late_sampler,
-               sampler_lifetime] = options;
+               sampler_lifetime, expect_patch_rejection] = options;
   constexpr UINT mip_levels = 3;
   const auto desc = reserved ? TextureDesc(256, 256, 2, D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE)
                              : TextureDesc(512, 512, mip_levels, D3D12_TEXTURE_LAYOUT_UNKNOWN);
@@ -469,7 +476,9 @@ std::vector<uint32_t> RunCase(ID3D12Device *device, ID3D12CommandQueue *queue,
 
   Owned<ID3D12RootSignature> root;
   Owned<ID3D12PipelineState> pipeline;
-  CreatePipeline(device, shader, root, pipeline, limit_sampler_max, dynamic_sampler, multi_sampler);
+  CreatePipeline(device, shader, root, pipeline, limit_sampler_max, dynamic_sampler, multi_sampler, expect_patch_rejection);
+  if (expect_patch_rejection)
+    return {};
   if (cache_guard) {
     Owned<ID3DBlob> blob;
     if (pipeline->GetCachedBlob(&blob.ptr) != E_NOTIMPL || blob.ptr)
@@ -666,15 +675,17 @@ int main(int argc, char **argv) {
   const bool fail_late_sampler = argc == 3 && strcmp(argv[2], "--dynamic-fail-late") == 0;
   const bool recover_late_sampler = argc == 3 && strcmp(argv[2], "--dynamic-recover") == 0;
   const bool sampler_lifetime = argc == 3 && strcmp(argv[2], "--dynamic-lifetime") == 0;
+  const bool patch_rejection = argc == 3 && strcmp(argv[2], "--patch-unsupported") == 0;
   const bool resubmit = resubmit_control || (argc == 3 && strcmp(argv[2], "--resubmit") == 0);
   const bool dynamic_sampler = sampler_lifetime || recover_late_sampler || fail_late_sampler || resubmit || heap_rebind || multi_sampler || skip_sampler_update || (argc == 3 && strcmp(argv[2], "--dynamic-late") == 0);
   if (argc != 2 && !unsupported_read && !late_load && !empty_sample && !limit_sampler_max && !mismatch_root &&
-      !same_root && !switch_pipeline && !dynamic_sampler && !cache_guard) {
+      !same_root && !switch_pipeline && !dynamic_sampler && !cache_guard && !patch_rejection) {
     std::cerr << "usage: dx12_texture_lod_clamp <shader.cs.cso> [mode]\n"
                  "modes: --load-unsupported --load-late --sample-empty --sampler-max --mismatch-root\n"
                  "       --same-root --pso-switch --dynamic-late --dynamic-stale --dynamic-fail-late\n"
                  "       --dynamic-recover --dynamic-lifetime --multi-sampler --multi-swapped\n"
-                 "       --heap-rebind --heap-rebind-control --resubmit --resubmit-control --cache-guard\n";
+                 "       --heap-rebind --heap-rebind-control --resubmit --resubmit-control --cache-guard\n"
+                 "       --patch-unsupported\n";
     return 2;
   }
 
@@ -687,6 +698,12 @@ int main(int argc, char **argv) {
     Owned<ID3D12CommandQueue> queue;
     Check("CreateLODQueue", device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue.ptr)));
     RunOptions options;
+    if (patch_rejection) {
+      options.expect_patch_rejection = true;
+      RunCase(device.ptr, queue.ptr, shader, options);
+      std::cout << "unsupported shader patch rejected\n";
+      return 0;
+    }
     if (fail_late_sampler) {
       options.dynamic_sampler = true;
       options.fail_late_sampler = true;
