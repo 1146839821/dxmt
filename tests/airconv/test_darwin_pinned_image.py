@@ -91,6 +91,32 @@ def main():
         os.utime(live, ns=(initial.st_atime_ns, initial.st_mtime_ns))
         if finish(p) != "STABLE 0":
             raise AssertionError("in-place modification escaped status and hash checks")
+
+        shutil.copyfile(original, live)
+        p = subprocess.Popen([str(probe), str(live), "marker", "--pause-hash"], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if p.stdout.readline().strip() != "HASH_PAUSED":
+            raise AssertionError("hashing did not reach the synchronization point")
+        initial = live.stat()
+        with live.open("r+b") as stream:
+            stream.seek(position)
+            stream.write(struct.pack("<I", 22))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.utime(live, ns=(initial.st_atime_ns, initial.st_mtime_ns))
+        output, _ = p.communicate("\n", timeout=20)
+        if p.returncode != 2 or "OPEN " in output:
+            raise AssertionError("concurrent write during hashing was accepted")
+
+        for invalid in (root / "missing.dylib", root):
+            result = subprocess.run([str(probe), str(invalid), "marker"], input=b"\n\n",
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode != 2 or b"BOUND 1" in result.stdout:
+                raise AssertionError("missing or non-regular input produced an identity")
+        result = subprocess.run([str(probe), str(original), "missing_symbol"], input=b"\n\n",
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 5 or b"BOUND 1" in result.stdout:
+            raise AssertionError("missing symbol produced an identity")
         print("pre-open binding accepts stable image and rejects both replacement controls")
 
 

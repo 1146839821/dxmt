@@ -21,26 +21,36 @@ static bool same_stat(const struct stat *a, const struct stat *b) {
          a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
 }
 
-static bool hash_file(int fd, unsigned char *digest) {
+static bool hash_file(int fd, unsigned char *digest,
+                      bool pause_after_first_read) {
   CC_SHA256_CTX ctx;
   if (lseek(fd, 0, SEEK_SET) < 0 || !CC_SHA256_Init(&ctx))
     return false;
   unsigned char bytes[65536];
   ssize_t n;
-  while ((n = read(fd, bytes, sizeof(bytes))) > 0)
+  while ((n = read(fd, bytes, sizeof(bytes))) > 0) {
     if (!CC_SHA256_Update(&ctx, bytes, (CC_LONG)n))
       return false;
+    if (pause_after_first_read) {
+      puts("HASH_PAUSED");
+      fflush(stdout);
+      if (getchar() == EOF)
+        return false;
+      pause_after_first_read = false;
+    }
+  }
   return n == 0 && CC_SHA256_Final(digest, &ctx);
 }
 
 int main(int argc, char **argv) {
-  if (argc != 3)
+  if (argc != 3 && (argc != 4 || strcmp(argv[3], "--pause-hash")))
     return 1;
   int fd = open(argv[1], O_RDONLY);
   struct stat initial, after_hash;
   unsigned char hash[CC_SHA256_DIGEST_LENGTH];
-  if (fd < 0 || fstat(fd, &initial) || !hash_file(fd, hash) ||
-      fstat(fd, &after_hash) || !same_stat(&initial, &after_hash))
+  if (fd < 0 || fstat(fd, &initial) || !S_ISREG(initial.st_mode) ||
+      !hash_file(fd, hash, argc == 4) || fstat(fd, &after_hash) ||
+      !same_stat(&initial, &after_hash))
     return 2;
   printf("OPEN ");
   for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; ++i)
@@ -73,7 +83,7 @@ int main(int argc, char **argv) {
   struct stat final, final_after_hash;
   unsigned char final_hash[CC_SHA256_DIGEST_LENGTH];
   bool stable = fstat(fd, &final) == 0 && same_stat(&initial, &final) &&
-                hash_file(fd, final_hash) &&
+                hash_file(fd, final_hash, false) &&
                 fstat(fd, &final_after_hash) == 0 &&
                 same_stat(&initial, &final_after_hash) &&
                 memcmp(hash, final_hash, sizeof(hash)) == 0;

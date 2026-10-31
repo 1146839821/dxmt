@@ -195,3 +195,15 @@ dependencies, and PE/Unix mixed-version compatibility still need explicit
 handling. The prototype hashes the entire universal file, not only the active
 slice. It does not expose an identity to the production cache and the existing
 fail-closed guard remains in effect.
+
+### Concurrent mutation and unavailable identity controls
+
+The pre-open test has a synchronization point after its first hash read. On the
+local APFS test directory, a second process modified the file at that point
+and restored its mtime; both x86_64/Rosetta and arm64 probes rejected the
+snapshot before emitting an identity. Missing files, non-regular inputs and a
+missing symbol also produced no accepted binding. These are controlled cases,
+not a proof that filesystem timestamps are a universal concurrency primitive.
+The test cannot rule out content changes after the last validation or establish
+immutable loaded pages for the converter's entire lifetime. Production
+persistent caching remains fail-closed.
