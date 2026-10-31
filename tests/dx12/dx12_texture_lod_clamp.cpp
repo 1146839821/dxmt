@@ -465,8 +465,9 @@ int main(int argc, char **argv) {
     }
     const std::vector<uint32_t> ordinary_expected = {0x3f800000, 0x40000000, 0x40400000,
                                                       empty_sample ? 0u : 0x40800000, 0x40400000};
-    const std::vector<uint32_t> reserved_expected = {0x3f800000, 0x40000000, 0x40400000,
-                                                      empty_sample ? 0u : 0x40400000, 0x40400000};
+    // This two-mip view ends at LOD 1; a resource clamp of 1.5 is
+    // beyond its final mip and therefore produces the out-of-bounds value.
+    const std::vector<uint32_t> reserved_expected = {0x3f800000, 0x40000000, 0x40400000, 0u, 0x40400000};
     const auto ordinary = RunCase(device.ptr, queue.ptr, shader, false, false, false, empty_sample, limit_sampler_max);
     const bool ordinary_pass = CheckCase("ordinary ResourceMinLODClamp", ordinary, ordinary_expected);
     const auto reserved = RunCase(device.ptr, queue.ptr, shader, true, false, false, empty_sample, limit_sampler_max);
