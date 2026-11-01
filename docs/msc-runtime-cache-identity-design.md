@@ -318,3 +318,23 @@ through that dependency. Both images loaded, while the root snapshot and V1
 query remained unavailable. The reproducible diagnostic runner now includes
 this control. This checks the provider mismatch path, not the identity of all
 transitive or late-loaded dependencies.
+
+### Candidate dyld event epoch
+
+`msc_image_epoch.{h,c}` is an unintegrated process-wide change detector. It
+registers the remove callback before the add callback, increments a lock-free
+atomic counter in callbacks, and makes snapshots unavailable if the counter
+saturates. The containing image must remain loaded for the process lifetime:
+dyld callback registration has no corresponding unregister API in this design.
+Apple's [dyld(3) documentation](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/dyld.3.html)
+notes that iterating the image count is not thread-safe; this candidate avoids
+using that iteration as its event detector.
+
+Synthetic local tests passed on x86_64/Rosetta and arm64 for concurrent
+registration, load, unload, concurrent image activity and saturation. An
+epoch is neither a dependency list nor a content identity: it may invalidate
+for unrelated images, cannot detect in-place file modifications, and has not
+been proven to form an atomic transaction with MSC conversion or cache I/O.
+An isolated test also appends a byte to a loaded fixture and observes that the
+epoch remains unchanged; it does not establish how mapped pages behave.
+It is not linked into WineMetal and does not change the persistent-cache guard.
