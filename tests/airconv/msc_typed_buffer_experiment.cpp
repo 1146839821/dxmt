@@ -256,10 +256,11 @@ void patch(const std::vector<Operation> &operations, bool sidecar) {
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc < 3 || (argc - 3) % 3)
+  const bool passthrough = argc == 4 && std::string(argv[3]) == "--unpatched";
+  if (argc < 3 || (!passthrough && (argc - 3) % 3))
     return 2;
   std::vector<TableMapping> mappings;
-  for (int i = 3; i < argc; i += 3) {
+  for (int i = 3; !passthrough && i < argc; i += 3) {
     if (std::string(argv[i]) != "--sidecar")
       return 2;
     char *end = nullptr;
@@ -289,11 +290,12 @@ int main(int argc, char **argv) {
     return 3;
   }
   std::vector<Operation> operations;
-  if (!collect(*module, operations, mappings)) {
+  if (!passthrough && !collect(*module, operations, mappings)) {
     llvm::errs() << "unsupported typed-buffer AIR\n";
     return 4;
   }
-  patch(operations, !mappings.empty());
+  if (!passthrough)
+    patch(operations, !mappings.empty());
   if (llvm::verifyModule(*module, &llvm::errs()))
     return 5;
   std::error_code error;

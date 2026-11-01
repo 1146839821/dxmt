@@ -318,3 +318,21 @@ This is a conservative experimental restriction, not an implementation of
 sparse-resource status or proof of all out-of-bounds semantics. Shader
 validation was enabled for the native run but offline metallib instrumentation
 is unverified. Production conversion and capability declarations are unchanged.
+
+### Reproducible R32_SINT out-of-bounds GPU control
+
+`tests/airconv/run_msc_typed_buffer_gpu_oob.py --rewriter
+build/src/airconv/darwin/msc-typed-buffer-experiment` compiles a native Metal
+probe, rewrites the checked-in MSC 4.0.1 compute AIR fixture and compares exact
+GPU results. Two descriptor tables and four textures are used; one invocation
+reads and writes in range, and another indexes element 1 of a one-element
+view. On the local M1 Max the patched result was `out=51,2
+values=11,20,32,40`: the out-of-range reads contributed zero and the two
+out-of-range writes preserved their sentinel values. The wrong-expected control
+failed as intended; an unmodified AIR control also failed (`out=1024,1024`).
+Metal API and shader validation were enabled; offline metallib shader
+instrumentation is not established. This covers scalar R32_SINT values only,
+not missing format components, other formats, sparse status, Wine/D3D12
+submission, or production sidecar binding. The test is opt-in because it
+requires a local Metal device. Its HLSL input is retained beside the captured
+AIR; recompilation with other MSC versions may produce different AIR shapes.
