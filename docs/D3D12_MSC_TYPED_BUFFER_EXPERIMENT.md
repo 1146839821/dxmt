@@ -205,3 +205,18 @@ threads and compares the root-owned result with an independently built layout.
 This does not allocate or bind a combined GPU argument buffer. Runtime usage,
 residency, lifetime and GPU correctness remain unverified. Rollback removes the
 root-owned combined state and its test while preserving the existing layouts.
+
+### Resource address write experiment
+
+An isolated helper validates the combined layout, staging bounds and membership
+of nonzero GPU descriptor handles in the bound shader-visible resource heap,
+then writes the original GPU handle into each resource sidecar slot. Validation
+is completed before writes so invalid inputs leave the allocation unchanged.
+A mixed-root test uses an actual command allocator GPU-heap allocation and
+resource descriptor heap, checking distinct table addresses, null handles,
+invalid or unaligned handles, short staging/allocation and untouched sampler
+slots and guard bytes. This is CPU-side inspection of mapped allocation memory,
+not GPU readback. It does not validate table range lengths, descriptor updates,
+heap residency, submission lifetime, GPU execution or root-argument rebinding.
+The helper is not called by the production command encoder. Rollback removes the
+helper and probe without changing the existing command path.

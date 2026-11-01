@@ -3,6 +3,8 @@
 #include <d3d12.h>
 #include "d3d12_device.hpp"
 #include "msc_combined_sidecar_layout.hpp"
+#include "d3d12_msc_resource_sidecar.hpp"
+#include "d3d12_command_allocator.hpp"
 
 #include <iostream>
 #include <cstring>
@@ -165,6 +167,82 @@ static int check_resource_layout() {
       return 1;
   if (owned->samplers[0].sidecar_offset != combined.samplers[0].sidecar_offset)
     return 1;
+  {
+    Owned<ID3D12DescriptorHeap> heap;
+    Owned<ID3D12CommandAllocator> allocator;
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heap_desc.NumDescriptors = 4;
+    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(device.p->CreateDescriptorHeap(&heap_desc,
+                                              IID_PPV_ARGS(&heap.p))) ||
+        FAILED(device.p->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                IID_PPV_ARGS(&allocator.p))))
+      return 1;
+    auto *internal_heap = static_cast<dxmt::MTLD3D12DescriptorHeap *>(heap.p);
+    auto *internal_allocator =
+        static_cast<dxmt::MTLD3D12CommandAllocatorImpl *>(allocator.p);
+    auto [memory, offset] =
+        internal_allocator->AllocateGPUHeap(owned->buffer_size + 8, 16);
+    if (!memory)
+      return 1;
+    std::memset(memory, 0xa5, owned->buffer_size + 8);
+    uint64_t staging[64]{};
+    auto handle = heap.p->GetGPUDescriptorHandleForHeapStart();
+    const auto stride =
+        device.p->GetDescriptorHandleIncrementSize(heap_desc.Type);
+    staging[internal->Parameters[0].source_qword] = handle.ptr;
+    staging[internal->Parameters[2].source_qword] = handle.ptr + 2 * stride;
+    if (!dxmt::writeMSCResourceSidecars(*internal, internal_heap, staging, 64,
+                                        memory, owned->buffer_size))
+      return 1;
+    for (const auto &table : owned->resources) {
+      uint64_t value = 0;
+      std::memcpy(&value, static_cast<uint8_t *>(memory) + table.sidecar_offset,
+                  sizeof(value));
+      if (value !=
+          staging[internal->Parameters[table.parameter_index].source_qword])
+        return 1;
+    }
+    const auto before = std::vector<uint8_t>(static_cast<uint8_t *>(memory),
+                                             static_cast<uint8_t *>(memory) +
+                                                 owned->buffer_size + 8);
+    for (const auto &table : owned->samplers)
+      for (unsigned j = 0; j < sizeof(uint64_t); ++j)
+        if (before[table.sidecar_offset + j] != 0xa5)
+          return 1;
+    staging[internal->Parameters[2].source_qword] = handle.ptr + 4 * stride;
+    if (dxmt::writeMSCResourceSidecars(*internal, internal_heap, staging, 64,
+                                       memory, owned->buffer_size) ||
+        std::memcmp(before.data(), memory, before.size()) != 0 ||
+        dxmt::writeMSCResourceSidecars(*internal, internal_heap, staging, 64,
+                                       memory, owned->buffer_size - 1))
+      return 1;
+    staging[internal->Parameters[2].source_qword] = handle.ptr + 1;
+    if (dxmt::writeMSCResourceSidecars(*internal, internal_heap, staging, 64,
+                                       memory, owned->buffer_size) ||
+        dxmt::writeMSCResourceSidecars(*internal, internal_heap, staging, 0,
+                                       memory, owned->buffer_size) ||
+        dxmt::writeMSCResourceSidecars(*internal, nullptr, staging, 64, memory,
+                                       owned->buffer_size) ||
+        std::memcmp(before.data(), memory, before.size()) != 0)
+      return 1;
+    staging[internal->Parameters[2].source_qword] = 0;
+    if (!dxmt::writeMSCResourceSidecars(*internal, internal_heap, staging, 64,
+                                        memory, owned->buffer_size))
+      return 1;
+    uint64_t value = ~uint64_t(0);
+    for (const auto &table : owned->resources)
+      if (table.parameter_index == 2)
+        std::memcpy(&value,
+                    static_cast<uint8_t *>(memory) + table.sidecar_offset,
+                    sizeof(value));
+    if (value != 0 ||
+        std::memcmp(static_cast<uint8_t *>(memory) + owned->buffer_size,
+                    before.data() + owned->buffer_size, 8))
+      return 1;
+    (void)offset;
+  }
   for (unsigned i = 0; i < 2; ++i)
     if (combined.resources[i].resource_table_offset !=
             resources[i].resource_table_offset ||
