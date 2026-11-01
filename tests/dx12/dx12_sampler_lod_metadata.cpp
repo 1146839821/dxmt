@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <d3d12.h>
 #include "d3d12_device.hpp"
+#include "msc_combined_sidecar_layout.hpp"
 
 #include <iostream>
 #include <cstring>
@@ -124,8 +125,54 @@ static int check_resource_layout() {
   }
   if (!seen[0] || !seen[2])
     return 1;
+  if (FAILED(internal->InitializeMSCLodSidecarLayout()) ||
+      internal->MSCLODSidecarTableCount != 1)
+    return 1;
+  std::vector<dxmt::air::MSCSamplerSidecarTable> samplers(
+      internal->MSCLODSidecarTables,
+      internal->MSCLODSidecarTables + internal->MSCLODSidecarTableCount);
+  std::vector<dxmt::air::MSCResourceSidecarTable> resources(
+      internal->MSCResourceSidecarTables,
+      internal->MSCResourceSidecarTables +
+          internal->MSCResourceSidecarTableCount);
+  dxmt::air::MSCCombinedSidecarLayout combined;
+  if (!dxmt::air::buildMSCCombinedSidecarLayout(
+          internal->MSCArgumentBufferSize, samplers, resources, combined) ||
+      combined.samplers.size() != 1 || combined.resources.size() != 2 ||
+      combined.samplers[0].sidecar_offset != samplers[0].sidecar_offset ||
+      combined.resources[0].sidecar_offset !=
+          internal->MSCLODSidecarBufferSize ||
+      combined.resources[1].sidecar_offset !=
+          internal->MSCLODSidecarBufferSize + 8 ||
+      combined.buffer_size != internal->MSCLODSidecarBufferSize + 16)
+    return 1;
+  for (unsigned i = 0; i < 2; ++i)
+    if (combined.resources[i].resource_table_offset !=
+            resources[i].resource_table_offset ||
+        combined.resources[i].parameter_index != resources[i].parameter_index)
+      return 1;
+  const auto saved_size = combined.buffer_size;
+  auto collision = resources;
+  collision[0].resource_table_offset = samplers[0].sampler_table_offset;
+  if (dxmt::air::buildMSCCombinedSidecarLayout(internal->MSCArgumentBufferSize,
+                                               samplers, collision, combined) ||
+      combined.buffer_size != saved_size || combined.resources.size() != 2)
+    return 1;
+  collision = resources;
+  collision[0].parameter_index = samplers[0].parameter_index;
+  if (dxmt::air::buildMSCCombinedSidecarLayout(internal->MSCArgumentBufferSize,
+                                               samplers, collision, combined) ||
+      combined.buffer_size != saved_size || combined.resources.size() != 2)
+    return 1;
+  dxmt::air::MSCCombinedSidecarLayout empty;
+  if (!dxmt::air::buildMSCCombinedSidecarLayout(12, {}, {}, empty) ||
+      empty.buffer_size != 16 || !empty.resources.empty() ||
+      !empty.samplers.empty() ||
+      dxmt::air::buildMSCCombinedSidecarLayout(UINT32_MAX, {}, {}, empty) ||
+      empty.buffer_size != 16)
+    return 1;
   std::cout << "MSC resource sidecar reflection and concurrent initialization "
-               "passed\n";
+               "and combined layout passed\n";
   return 0;
 }
 
@@ -347,6 +394,21 @@ int main(int argc, char **argv) {
         table.sidecar_offset != 24 + i * 8 ||
         table.parameter_index != (i == 2 ? UINT_MAX : i))
       return 1;
+  }
+  {
+    std::vector<dxmt::air::MSCSamplerSidecarTable> samplers(
+        internal->MSCLODSidecarTables,
+        internal->MSCLODSidecarTables + internal->MSCLODSidecarTableCount);
+    dxmt::air::MSCCombinedSidecarLayout combined;
+    if (!dxmt::air::buildMSCCombinedSidecarLayout(
+            internal->MSCArgumentBufferSize, samplers, {}, combined) ||
+        combined.buffer_size != internal->MSCLODSidecarBufferSize ||
+        combined.samplers.size() != samplers.size())
+      return 1;
+    for (unsigned i = 0; i < samplers.size(); ++i)
+      if (combined.samplers[i].sidecar_offset != samplers[i].sidecar_offset ||
+          combined.samplers[i].parameter_index != samplers[i].parameter_index)
+        return 1;
   }
   if (internal->NumStaticSamplers != 1 || !internal->StaticSamplerLODRanges ||
       internal->StaticSamplerLODRanges[0].minimum != .5f ||

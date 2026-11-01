@@ -166,16 +166,29 @@ root-parameter identities; MSC reflection supplies each table's TLAB offset.
 The builder requires exactly one 8-byte reflected resource-table entry per
 candidate, validates bounds, alignment and uniqueness, and orders extension
 slots by reflected offset. It publishes output only on success. A shared
-lock makes lazy initialization idempotent. The existing sampler layout and
-this resource layout both start after the original reflected TLAB: **they
-cannot be used together without a coordinated combined layout**. Neither this
-layout nor the standalone AIR experiment is wired into production binding.
+lock makes lazy initialization idempotent. The individual sampler and resource layouts both start after the reflected
+TLAB and overlap. The combined-layout builder preserves sampler slots and
+appends resource slots, checking reflected-table collisions and overflow.
+Neither the combined layout nor the standalone AIR experiment is wired into
+production binding.
 
 **Validation and risks.** The `dx12_sampler_lod_metadata
 --resource-sidecar-layout` probe constructs mixed SRV, UAV, sampler and
 CBV-only tables, compares against actual reflection, checks concurrent calls
 and malformed layout inputs, and was run locally with an isolated Wine prefix
 and verified module paths. It does not execute a shader. Residency, descriptor
-lifetime, dynamic descriptor selection, direct indexing and simultaneous
+lifetime, dynamic descriptor selection, direct indexing and runtime use of simultaneous
 sampler sidecars remain integration blockers. Rollback removes the independent
 layout method, helper and probe; no capability declaration needs reverting.
+
+### Combined sidecar layout slice
+
+The pure combined builder consumes both table lists from one reflected root
+signature. It revalidates each list, rejects a reflected entry claimed by both
+classes, preserves the existing sampler ABI and allocates resource slots after
+the sampler extension. An error leaves the output unchanged. The mixed-table
+reflection probe checks those properties, empty input, collision and overflow;
+the existing static-sampler probe checks sampler-only compatibility. This is
+layout evidence, not GPU evidence. It does not bind a combined allocation,
+select a combined pipeline variant, or establish residency or lifetime.
+Rollback removes the helper and its tests without changing runtime behavior.
