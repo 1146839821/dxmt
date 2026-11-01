@@ -45,6 +45,20 @@ executable('airconv', airconv_src + airconv_cli_src,
 )
 
 if get_option('enable_tests')
+  msc_typed_buffer_experiment = executable('msc-typed-buffer-experiment',
+    files('../../../tests/airconv/msc_typed_buffer_experiment.cpp', '../metallib_writer.cpp'),
+    include_directories : [ include_directories('..'), llvm_include_path_darwin ],
+    cpp_args            : [ airconv_args ],
+    link_args           : [ llvm_ld_flags_darwin, llvm_deps ],
+    native              : dxmt_crossbuild,
+    build_by_default    : false
+  )
+  msc_typed_buffer_python = find_program('python3', required : false)
+  if msc_typed_buffer_python.found()
+    test('airconv msc typed buffer experiment', msc_typed_buffer_python,
+      args : [files('../../../tests/airconv/test_msc_typed_buffer_experiment.py'),
+              msc_typed_buffer_experiment, files('../../../tests/airconv/msc_typed_buffer_experiment.ir')])
+  endif
   lower_unsupported_double_test = executable('lower-unsupported-double-test',
     files('../tests/lower_unsupported_double.cpp', '../transforms/lower_unsupported_double.cpp'),
     include_directories : [ include_directories('..'), llvm_include_path_darwin ],
