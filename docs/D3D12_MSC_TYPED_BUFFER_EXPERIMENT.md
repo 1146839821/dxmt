@@ -21,14 +21,20 @@ an experimental texel-size byte in metadata bits 40–47; production descriptors
 **do not provide this field**, and no claim is made that MSC reserves those
 bits for this purpose. Do not use its output as a production shader.
 
-The optional `--sidecar <table-offset> <sidecar-offset>` experiment instead
-matches the root argument and the specified descriptor-table offset, then
+The optional repeatable `--sidecar <table-offset> <sidecar-offset>` experiment
+instead matches the root argument and each specified descriptor-table offset, then
 loads `(FirstElement, NumElements)` from the second qword of a 32-byte-stride
 sidecar using the same dynamic index. The caller is responsible for extending
 and binding the root argument and retaining/residenting the sidecar. A table
-offset mismatch, unaligned sidecar offset, unknown buffer instruction or
-unrecognized handle form is rejected. This single-table matcher does not prove
+offset mismatch, duplicate or overlapping mappings, unaligned sidecar offset,
+unknown buffer instruction or unrecognized handle form is rejected. This matcher does not prove
 root argument identity against reflection and cannot handle all AIR forms.
+
+A native Metal experiment with two UAV descriptor tables, independently
+selected dynamic descriptors and different sidecar ranges passed GPU
+read/write and dimensions checks; the unpatched AIR failed the same oracle.
+The offline metallib has not been shown to contain shader-validation
+instrumentation, and this experiment does not exercise D3D12 root binding.
 
 The tool maps out-of-view indices to the maximum unsigned index and uses the
 experimental texel size and byte length to compute dimensions. A zero size

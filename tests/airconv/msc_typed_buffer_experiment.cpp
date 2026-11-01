@@ -14,6 +14,7 @@
 #include <vector>
 #include <cstdlib>
 #include <string>
+#include <algorithm>
 
 namespace {
 struct Operation {
@@ -22,10 +23,16 @@ struct Operation {
   unsigned index;
   bool width;
   llvm::Argument *root = nullptr;
+  uint64_t sidecar_offset = 0;
+};
+
+struct TableMapping {
+  uint64_t table_offset;
+  uint64_t sidecar_offset;
 };
 
 bool collect(llvm::Module &module, std::vector<Operation> &operations,
-             bool sidecar, uint64_t table_offset) {
+             const std::vector<TableMapping> &mappings) {
   for (auto &function : module)
     for (auto &block : function)
       for (auto &instruction : block) {
@@ -74,7 +81,8 @@ bool collect(llvm::Module &module, std::vector<Operation> &operations,
         } else if (!call->getType()->isIntegerTy(32))
           return false;
         llvm::Argument *root = nullptr;
-        if (sidecar) {
+        uint64_t sidecar_offset = 0;
+        if (!mappings.empty()) {
           auto *table =
               llvm::dyn_cast<llvm::LoadInst>(gep->getPointerOperand());
           if (!table)
@@ -86,23 +94,29 @@ bool collect(llvm::Module &module, std::vector<Operation> &operations,
           root = llvm::dyn_cast<llvm::Argument>(base);
           if (!root || root->getParent() != &function ||
               root->getType()->getPointerAddressSpace() != 2 ||
-              offset.getZExtValue() != table_offset ||
               !gep->getOperand(1)->getType()->isIntegerTy())
             return false;
+          const auto match = std::find_if(
+              mappings.begin(), mappings.end(), [&](const TableMapping &m) {
+                return m.table_offset == offset.getZExtValue();
+              });
+          if (match == mappings.end())
+            return false;
+          sidecar_offset = match->sidecar_offset;
         }
-        operations.push_back({direct, gep, index, width, root});
+        operations.push_back({direct, gep, index, width, root, sidecar_offset});
       }
   return !operations.empty();
 }
 
-void patch(const std::vector<Operation> &operations, bool sidecar,
-           uint64_t sidecar_offset) {
+void patch(const std::vector<Operation> &operations, bool sidecar) {
   for (const auto &op : operations) {
     llvm::IRBuilder<> b(op.call);
     llvm::Value *offset = nullptr, *count = nullptr;
     if (sidecar) {
       auto *root = b.CreateBitCast(op.root, b.getInt8PtrTy(2));
-      auto *slot = b.CreateGEP(b.getInt8Ty(), root, b.getInt64(sidecar_offset));
+      auto *slot =
+          b.CreateGEP(b.getInt8Ty(), root, b.getInt64(op.sidecar_offset));
       auto *sidecar_ptr_type = b.getInt64Ty()->getPointerTo(2);
       auto *slot_ptr = b.CreateBitCast(slot, sidecar_ptr_type->getPointerTo(2));
       auto *table = b.CreateLoad(sidecar_ptr_type, slot_ptr, "dxmt.sidecar");
@@ -149,22 +163,30 @@ void patch(const std::vector<Operation> &operations, bool sidecar,
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 3 && argc != 6)
+  if (argc < 3 || (argc - 3) % 3)
     return 2;
-  bool sidecar = argc == 6;
-  uint64_t table_offset = 0, sidecar_offset = 0;
-  if (sidecar) {
-    if (std::string(argv[3]) != "--sidecar")
+  std::vector<TableMapping> mappings;
+  for (int i = 3; i < argc; i += 3) {
+    if (std::string(argv[i]) != "--sidecar")
       return 2;
     char *end = nullptr;
-    table_offset = std::strtoull(argv[4], &end, 0);
-    if (!*argv[4] || *argv[4] == '-' || *end || table_offset > UINT32_MAX)
+    uint64_t table_offset = std::strtoull(argv[i + 1], &end, 0);
+    if (!*argv[i + 1] || *argv[i + 1] == '-' || *end ||
+        table_offset > UINT32_MAX || table_offset % 8)
       return 2;
-    sidecar_offset = std::strtoull(argv[5], &end, 0);
-    if (!*argv[5] || *argv[5] == '-' || *end || sidecar_offset > UINT32_MAX ||
-        sidecar_offset % 8 || table_offset == sidecar_offset)
+    uint64_t sidecar_offset = std::strtoull(argv[i + 2], &end, 0);
+    if (!*argv[i + 2] || *argv[i + 2] == '-' || *end ||
+        sidecar_offset > UINT32_MAX || sidecar_offset % 8)
       return 2;
+    mappings.push_back({table_offset, sidecar_offset});
   }
+  for (size_t i = 0; i < mappings.size(); ++i)
+    for (size_t j = 0; j < mappings.size(); ++j)
+      if (mappings[i].table_offset == mappings[j].sidecar_offset ||
+          (i != j &&
+           (mappings[i].table_offset == mappings[j].table_offset ||
+            mappings[i].sidecar_offset == mappings[j].sidecar_offset)))
+        return 2;
   llvm::LLVMContext context;
   context.setOpaquePointers(false);
   llvm::SMDiagnostic diagnostic;
@@ -174,11 +196,11 @@ int main(int argc, char **argv) {
     return 3;
   }
   std::vector<Operation> operations;
-  if (!collect(*module, operations, sidecar, table_offset)) {
+  if (!collect(*module, operations, mappings)) {
     llvm::errs() << "unsupported typed-buffer AIR\n";
     return 4;
   }
-  patch(operations, sidecar, sidecar_offset);
+  patch(operations, !mappings.empty());
   if (llvm::verifyModule(*module, &llvm::errs()))
     return 5;
   std::error_code error;

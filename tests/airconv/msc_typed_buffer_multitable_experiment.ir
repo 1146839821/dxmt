@@ -1,0 +1,27 @@
+target datalayout = "e-p:64:64:64-p1:64:64:64-p2:64:64:64"
+%tex = type opaque
+%desc = type { %tex addrspace(1)*, %tex addrspace(1)*, i64 }
+define i32 @main(i8 addrspace(2)* %root, i64 %slot, i32 %index) {
+  %table_slot = bitcast i8 addrspace(2)* %root to %desc addrspace(2)* addrspace(2)*
+  %table = load %desc addrspace(2)*, %desc addrspace(2)* addrspace(2)* %table_slot
+  %ptr = getelementptr %desc, %desc addrspace(2)* %table, i64 %slot, i32 1
+  %texture = load %tex addrspace(1)*, %tex addrspace(1)* addrspace(2)* %ptr
+  %width = call i32 @air.get_width_texture_buffer_1d(%tex addrspace(1)* %texture)
+  %data = call { <4 x i32>, i8 } @air.read_texture_buffer_1d.s.v4i32(%tex addrspace(1)* %texture, i32 %index, i32 3)
+  %vector = extractvalue { <4 x i32>, i8 } %data, 0
+  call void @air.write_texture_buffer_1d.s.v4i32(%tex addrspace(1)* %texture, i32 %index, <4 x i32> %vector, i32 3)
+  %root2 = getelementptr i8, i8 addrspace(2)* %root, i64 8
+  %table_slot2 = bitcast i8 addrspace(2)* %root2 to %desc addrspace(2)* addrspace(2)*
+  %table2 = load %desc addrspace(2)*, %desc addrspace(2)* addrspace(2)* %table_slot2
+  %ptr2 = getelementptr %desc, %desc addrspace(2)* %table2, i64 %slot, i32 1
+  %texture2 = load %tex addrspace(1)*, %tex addrspace(1)* addrspace(2)* %ptr2
+  %width2 = call i32 @air.get_width_texture_buffer_1d(%tex addrspace(1)* %texture2)
+  %data2 = call { <4 x i32>, i8 } @air.read_texture_buffer_1d.s.v4i32(%tex addrspace(1)* %texture2, i32 %index, i32 3)
+  %vector2 = extractvalue { <4 x i32>, i8 } %data2, 0
+  call void @air.write_texture_buffer_1d.s.v4i32(%tex addrspace(1)* %texture2, i32 %index, <4 x i32> %vector2, i32 3)
+  %sum = add i32 %width, %width2
+  ret i32 %sum
+}
+declare i32 @air.get_width_texture_buffer_1d(%tex addrspace(1)*)
+declare { <4 x i32>, i8 } @air.read_texture_buffer_1d.s.v4i32(%tex addrspace(1)*, i32, i32)
+declare void @air.write_texture_buffer_1d.s.v4i32(%tex addrspace(1)*, i32, <4 x i32>, i32)
