@@ -220,3 +220,47 @@ not GPU readback. It does not validate table range lengths, descriptor updates,
 heap residency, submission lifetime, GPU execution or root-argument rebinding.
 The helper is not called by the production command encoder. Rollback removes the
 helper and probe without changing the existing command path.
+
+### Sidecar residency and lifetime integration audit
+
+**SPEC_REQUIRED.** [Microsoft descriptor-table guidance](https://learn.microsoft.com/en-us/windows/win32/direct3d12/advanced-use-of-descriptor-tables)
+requires applications to avoid modifying GPU-referenced descriptor entries
+while they are in use. [Apple's argument-buffer residency guidance](https://developer.apple.com/documentation/metal/tracking-the-resource-residency-of-argument-buffers)
+requires declaring indirectly accessed resources to the relevant encoder.
+
+**SOURCE_OBSERVED at 98757cb7.** `GetDescriptorHeapBuffer()` returns the
+32-byte AIRCONV allocation while `GetMSCDescriptorHeapBuffer()` returns the
+separate MSC allocation (`src/d3d12/d3d12_descriptor_heap.cpp:361-378`). MSC
+graphics and compute bind the latter (`d3d12_command_list.cpp:3409-3421`,
+`4934-4952`); this cannot make the former resident. Resource-use encoding
+merges usage/stages per encoder and retains the Metal resource in its encoder
+(`d3d12_command_list.cpp:2059-2069`, `2255-2304`;
+`d3d12_command_encoder.hpp:75`). Submission retains command allocators until
+completion (`d3d12_command_queue.cpp:916-929`, `480-491`), and allocator
+cleanup destroys encoder-owned references (`d3d12_command_allocator.cpp:217`).
+Pending descriptor uses also retain resource-heap COM objects for submission
+resolution (`d3d12_command_list.cpp:1022-1028`, `4320-4331`). These facts do
+not establish GPU correctness for the new sidecar: its helper currently has no
+production caller and does not itself declare the 32-byte allocation resident.
+
+**LOCAL_PASS, AIRCONV only.** On the current local build, the existing
+`dx12_airconv_compute_residency.exe --clear-residency-override` passed GPU
+readback, filtered and conservative descriptor-footprint cases, and UAV
+counter copy/mutation/fenced reuse with Metal API and shader validation enabled.
+The executable matched the build by SHA-256; loader logs identify the isolated
+D3D12 and WineMetal paths. Log:
+`dxmt-test/n95-capability-gate/run-sidecar-write/airconv-residency.log`.
+This does not exercise MSC sidecar residency, heap switching, or early object
+release. The earlier fixed-shape patched MSC diagnostic explicitly declared
+the 32-byte buffer resident, but is not a production-path lifetime test.
+
+**Next implementation gate.** When a shader variant actually consumes resource
+sidecars, declare the bound 32-byte resource heap allocation as read on every
+relevant compute or render encoder and stage, retain it through encoder lifetime,
+and regenerate the declaration after heap switches and encoder boundaries.
+Keep both descriptor heap objects and allocator-backed argument storage valid
+through the applicable submission lifetime. Test two heaps and multiple tables,
+pre-submit descriptor replacement, encoder breaks, multiple submissions and
+fenced reuse using exact GPU readback and negative controls. Test with Metal
+validation and verify loaded artifacts. Do not infer in-flight mutation safety
+or support for direct heap indexing from this result.
