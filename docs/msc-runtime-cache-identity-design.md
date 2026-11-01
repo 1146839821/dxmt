@@ -385,3 +385,22 @@ test runners now select the Python process architecture explicitly; all five
 were rerun successfully for both architectures on this machine. The broader
 historical observations about separately built binaries remain limited to their
 recorded artifact identities.
+
+### Shared-cache membership versus actual provider
+
+`test_msc_cache_provider.py` launches a native test executable twice with a
+cleaned dyld environment. It resolves `BZ2_bzlibVersion` from the libbz2 system
+path, then repeats with a separately built fixture in `DYLD_LIBRARY_PATH`.
+It observes the symbol provider with `dladdr` and calls the symbol. On local
+macOS 27.0.1, both x86_64/Rosetta and arm64 reported the system path as a
+shared-cache member in both runs; the second process instead resolved the
+symbol from the fixture and returned its distinct sentinel. The fixture and
+environment exist only in that child test process. Systems whose loader policy
+ignores the override report SKIP, not PASS for the override case.
+
+This confirms the path-membership API cannot on its own classify the actual
+provider, even with a shared-cache UUID. It does not identify all functions
+used by MSC, test an MSC conversion with the fixture, or validate cache bytes.
+Apple's [dynamic library usage guide](https://developer.apple.com/library/archive/documentation/DeveloperTools/Conceptual/DynamicLibraries/100-Articles/DynamicLibraryUsageGuidelines.html)
+describes search-path overrides; actual behavior depends on process policy.
+The production persistent-cache guard remains in place.
