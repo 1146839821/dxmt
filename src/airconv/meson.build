@@ -19,6 +19,7 @@ airconv_src = files([
  'transforms/lower_16bit_texread.cpp',
  'transforms/lower_unsupported_double.cpp',
  'transforms/msc_sample_level_lod.cpp',
+ 'transforms/msc_typed_buffer_sidecar.cpp',
  'transforms/simdgroup_implicit_membarrier.cpp',
 ])
 

@@ -350,3 +350,18 @@ describes zero for missing components except integer alpha one. This result is
 an observed Metal AIR experiment, not a Windows-native or production D3D12
 conformance result. Other formats, sparse status and validation instrumentation
 of the offline metallib remain unverified.
+
+### Reusable sidecar transformation
+
+The sidecar-only AIR pass now lives in `src/airconv/transforms` and is linked
+into AIRCONV, but no production conversion or pipeline calls it. The offline
+experiment invokes the same pass; the obsolete metadata-bit mode stays in the
+test executable only. The pass validates table mappings and collects all
+supported operations before mutating the module. Existing synthetic rejection
+cases and the opt-in Metal GPU bounds/default-component regression pass using
+this extracted pass. This is not production enablement: descriptor provenance,
+additional AIR overloads, sparse status, root upload, resource residency and
+in-flight lifetimes remain integration gates. The sample and typed-buffer AIR
+metadata scanners are currently separate and should be reconciled before a
+shared public conversion ABI is introduced. Rollback removes the new transform
+and restores the experiment-local implementation.

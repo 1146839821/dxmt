@@ -2,6 +2,7 @@
 // It assumes the MSC 4.x three-qword descriptor ABI and an EXPERIMENTAL
 // texel-size byte in metadata bits 40..47. Production does not encode it.
 #include "metallib_writer.hpp"
+#include "transforms/msc_typed_buffer_sidecar.hpp"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
@@ -22,8 +23,6 @@ struct Operation {
   llvm::GetElementPtrInst *handle;
   unsigned index;
   bool width;
-  llvm::Argument *root = nullptr;
-  uint64_t sidecar_offset = 0;
 };
 
 struct TableMapping {
@@ -31,76 +30,7 @@ struct TableMapping {
   uint64_t sidecar_offset;
 };
 
-// MSC identifies the TLAB by AIR binding metadata, not its position or name.
-// Reject other entrypoint forms until their ABI is explicitly verified.
-llvm::Argument *find_tlab(llvm::Module &module) {
-  auto *kernel = module.getNamedMetadata("air.kernel");
-  auto *fragment = module.getNamedMetadata("air.fragment");
-  if (!!kernel == !!fragment || module.getNamedMetadata("air.vertex") ||
-      module.getNamedMetadata("air.mesh") ||
-      module.getNamedMetadata("air.object"))
-    return nullptr;
-  auto *entries = kernel ? kernel : fragment;
-  if (entries->getNumOperands() != 1)
-    return nullptr;
-  auto *entry = entries->getOperand(0);
-  if (!entry || entry->getNumOperands() < 3)
-    return nullptr;
-  auto *fm =
-      llvm::dyn_cast_or_null<llvm::ValueAsMetadata>(entry->getOperand(0));
-  auto *function =
-      fm ? llvm::dyn_cast<llvm::Function>(fm->getValue()) : nullptr;
-  auto *args = llvm::dyn_cast_or_null<llvm::MDNode>(entry->getOperand(2));
-  if (!function || function->isDeclaration() || !args)
-    return nullptr;
-  llvm::Argument *result = nullptr;
-  for (const auto &operand : args->operands()) {
-    auto *arg = llvm::dyn_cast_or_null<llvm::MDNode>(operand);
-    if (!arg || !arg->getNumOperands())
-      return nullptr;
-    bool indirect = false, has_location = false;
-    uint64_t location = 0;
-    for (unsigned i = 1; i < arg->getNumOperands(); ++i) {
-      auto *tag = llvm::dyn_cast_or_null<llvm::MDString>(arg->getOperand(i));
-      if (!tag)
-        continue;
-      if (tag->getString() == "air.indirect_buffer") {
-        if (indirect)
-          return nullptr;
-        indirect = true;
-      } else if (tag->getString() == "air.location_index") {
-        if (has_location || i + 1 >= arg->getNumOperands())
-          return nullptr;
-        auto *number = llvm::mdconst::dyn_extract<llvm::ConstantInt>(
-            arg->getOperand(i + 1).get());
-        if (!number || number->getBitWidth() > 64)
-          return nullptr;
-        location = number->getZExtValue();
-        has_location = true;
-      }
-    }
-    if (indirect && !has_location)
-      return nullptr;
-    if (!indirect || location != 2)
-      continue;
-    auto *index =
-        llvm::mdconst::dyn_extract<llvm::ConstantInt>(arg->getOperand(0).get());
-    if (result || !index || index->getBitWidth() > 32 ||
-        index->getZExtValue() >= function->arg_size())
-      return nullptr;
-    result = function->getArg(index->getZExtValue());
-    if (!result->getType()->isPointerTy() ||
-        result->getType()->getPointerAddressSpace() != 2)
-      return nullptr;
-  }
-  return result;
-}
-
-bool collect(llvm::Module &module, std::vector<Operation> &operations,
-             const std::vector<TableMapping> &mappings) {
-  auto *tlab = mappings.empty() ? nullptr : find_tlab(module);
-  if (!mappings.empty() && !tlab)
-    return false;
+bool collect(llvm::Module &module, std::vector<Operation> &operations) {
   for (auto &function : module)
     for (auto &block : function)
       for (auto &instruction : block) {
@@ -123,21 +53,6 @@ bool collect(llvm::Module &module, std::vector<Operation> &operations,
         auto *direct = llvm::dyn_cast<llvm::CallInst>(call);
         if ((!width && !access) || !direct || call->arg_empty())
           return false;
-        if (read && !mappings.empty()) {
-          auto *result = llvm::dyn_cast<llvm::StructType>(call->getType());
-          if (!result || result->getNumElements() != 2 ||
-              !result->getElementType(1)->isIntegerTy(8))
-            return false;
-          // The second component's sparse-resource status semantics have not
-          // been established after index remapping. Only value-only uses are
-          // currently safe to investigate.
-          for (const auto *user : call->users()) {
-            auto *extract = llvm::dyn_cast<llvm::ExtractValueInst>(user);
-            if (!extract || extract->getNumIndices() != 1 ||
-                *extract->idx_begin() != 0)
-              return false;
-          }
-        }
         auto *load = llvm::dyn_cast<llvm::LoadInst>(call->getArgOperand(0));
         auto *gep = load ? llvm::dyn_cast<llvm::GetElementPtrInst>(
                                load->getPointerOperand())
@@ -173,72 +88,31 @@ bool collect(llvm::Module &module, std::vector<Operation> &operations,
           index = 1;
         } else if (call->arg_size() != 1 || !call->getType()->isIntegerTy(32))
           return false;
-        llvm::Argument *root = nullptr;
-        uint64_t sidecar_offset = 0;
-        if (!mappings.empty()) {
-          auto *table =
-              llvm::dyn_cast<llvm::LoadInst>(gep->getPointerOperand());
-          if (!table || table->isVolatile() || table->isAtomic())
-            return false;
-          llvm::APInt offset(64, 0);
-          auto *base =
-              table->getPointerOperand()->stripAndAccumulateConstantOffsets(
-                  module.getDataLayout(), offset, true);
-          root = llvm::dyn_cast<llvm::Argument>(base);
-          if (!root || root != tlab || root->getParent() != &function ||
-              root->getType()->getPointerAddressSpace() != 2 ||
-              !gep->getOperand(1)->getType()->isIntegerTy())
-            return false;
-          const auto match = std::find_if(
-              mappings.begin(), mappings.end(), [&](const TableMapping &m) {
-                return m.table_offset == offset.getZExtValue();
-              });
-          if (match == mappings.end())
-            return false;
-          sidecar_offset = match->sidecar_offset;
-        }
-        operations.push_back({direct, gep, index, width, root, sidecar_offset});
+        operations.push_back({direct, gep, index, width});
       }
   return !operations.empty();
 }
 
-void patch(const std::vector<Operation> &operations, bool sidecar) {
+void patch(const std::vector<Operation> &operations) {
   for (const auto &op : operations) {
     llvm::IRBuilder<> b(op.call);
     llvm::Value *offset = nullptr, *count = nullptr;
-    if (sidecar) {
-      auto *root = b.CreateBitCast(op.root, b.getInt8PtrTy(2));
-      auto *slot =
-          b.CreateGEP(b.getInt8Ty(), root, b.getInt64(op.sidecar_offset));
-      auto *sidecar_ptr_type = b.getInt64Ty()->getPointerTo(2);
-      auto *slot_ptr = b.CreateBitCast(slot, sidecar_ptr_type->getPointerTo(2));
-      auto *table = b.CreateLoad(sidecar_ptr_type, slot_ptr, "dxmt.sidecar");
-      auto *index =
-          b.CreateSExtOrTrunc(op.handle->getOperand(1), b.getInt64Ty());
-      auto *word =
-          b.CreateAdd(b.CreateMul(index, b.getInt64(4)), b.getInt64(1));
-      auto *entry_ptr = b.CreateGEP(b.getInt64Ty(), table, word);
-      auto *entry = b.CreateLoad(b.getInt64Ty(), entry_ptr, "dxmt.entry");
-      offset = b.CreateTrunc(entry, b.getInt32Ty());
-      count = b.CreateTrunc(b.CreateLShr(entry, 32), b.getInt32Ty());
-    } else {
-      llvm::SmallVector<llvm::Value *, 4> indices;
-      for (auto it = op.handle->idx_begin(); it != op.handle->idx_end(); ++it)
-        indices.push_back(it->get());
-      indices.back() = b.getInt32(2);
-      auto *ptr = b.CreateGEP(op.handle->getSourceElementType(),
-                              op.handle->getPointerOperand(), indices);
-      auto *metadata = b.CreateLoad(b.getInt64Ty(), ptr, "dxmt.metadata");
-      offset = b.CreateTrunc(b.CreateAnd(b.CreateLShr(metadata, 32), 255),
-                             b.getInt32Ty());
-      auto *bytes = b.CreateTrunc(metadata, b.getInt32Ty());
-      auto *size = b.CreateTrunc(b.CreateAnd(b.CreateLShr(metadata, 40), 255),
-                                 b.getInt32Ty());
-      auto *nonzero = b.CreateICmpNE(size, b.getInt32(0));
-      auto *safe_size = b.CreateSelect(nonzero, size, b.getInt32(1));
-      count = b.CreateSelect(nonzero, b.CreateUDiv(bytes, safe_size),
-                             b.getInt32(0), "dxmt.count");
-    }
+    llvm::SmallVector<llvm::Value *, 4> indices;
+    for (auto it = op.handle->idx_begin(); it != op.handle->idx_end(); ++it)
+      indices.push_back(it->get());
+    indices.back() = b.getInt32(2);
+    auto *ptr = b.CreateGEP(op.handle->getSourceElementType(),
+                            op.handle->getPointerOperand(), indices);
+    auto *metadata = b.CreateLoad(b.getInt64Ty(), ptr, "dxmt.metadata");
+    offset = b.CreateTrunc(b.CreateAnd(b.CreateLShr(metadata, 32), 255),
+                           b.getInt32Ty());
+    auto *bytes = b.CreateTrunc(metadata, b.getInt32Ty());
+    auto *size = b.CreateTrunc(b.CreateAnd(b.CreateLShr(metadata, 40), 255),
+                               b.getInt32Ty());
+    auto *nonzero = b.CreateICmpNE(size, b.getInt32(0));
+    auto *safe_size = b.CreateSelect(nonzero, size, b.getInt32(1));
+    count = b.CreateSelect(nonzero, b.CreateUDiv(bytes, safe_size),
+                           b.getInt32(0), "dxmt.count");
     if (op.width) {
       op.call->replaceAllUsesWith(count);
       op.call->eraseFromParent();
@@ -290,12 +164,23 @@ int main(int argc, char **argv) {
     return 3;
   }
   std::vector<Operation> operations;
-  if (!passthrough && !collect(*module, operations, mappings)) {
+  size_t count = 0;
+  std::vector<dxmt::air::MSCTypedBufferTableMapping> sidecar_tables;
+  for (const auto &mapping : mappings)
+    sidecar_tables.push_back({mapping.table_offset, mapping.sidecar_offset});
+  if (!passthrough && !mappings.empty() &&
+      !dxmt::air::patchMSCTypedBufferSidecar(*module, sidecar_tables, count)) {
     llvm::errs() << "unsupported typed-buffer AIR\n";
     return 4;
   }
-  if (!passthrough)
-    patch(operations, !mappings.empty());
+  if (!passthrough && mappings.empty() && !collect(*module, operations)) {
+    llvm::errs() << "unsupported typed-buffer AIR\n";
+    return 4;
+  }
+  if (!passthrough && mappings.empty()) {
+    patch(operations);
+    count = operations.size();
+  }
   if (llvm::verifyModule(*module, &llvm::errs()))
     return 5;
   std::error_code error;
@@ -304,7 +189,6 @@ int main(int argc, char **argv) {
     return 6;
   dxmt::metallib::MetallibWriter writer;
   writer.Write(*module, out);
-  llvm::outs() << "patched " << operations.size()
-               << " typed-buffer operations\n";
+  llvm::outs() << "patched " << count << " typed-buffer operations\n";
   return 0;
 }
