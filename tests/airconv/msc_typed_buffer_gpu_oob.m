@@ -109,16 +109,27 @@ int main(int argc, char **argv) {
            ((unsigned *)out.contents)[1], ((int *)buf[0].contents)[260],
            ((int *)buf[1].contents)[262], ((int *)buf[2].contents)[270],
            ((int *)buf[3].contents)[272]);
-    if (argc == 3 && strcmp(argv[2], "--wrong-expected") != 0)
+    int *components = (int *)out.contents + 8;
+    printf("components=%d,%d,%d,%d;%d,%d,%d,%d\n", components[0], components[1],
+           components[2], components[3], components[4], components[5],
+           components[6], components[7]);
+    if (argc == 3 && strcmp(argv[2], "--wrong-expected") != 0 &&
+        strcmp(argv[2], "--wrong-components") != 0)
       return 2;
-    bool pass = (((unsigned *)out.contents)[0] == 51 &&
-                 ((unsigned *)out.contents)[1] == 2 &&
-                 ((int *)buf[0].contents)[260] == 11 &&
-                 ((int *)buf[1].contents)[262] == 20 &&
-                 ((int *)buf[2].contents)[270] == 32 &&
-                 ((int *)buf[3].contents)[272] == 40);
-    if (argc == 3)
+    bool pass =
+        (((unsigned *)out.contents)[0] == 51 &&
+         ((unsigned *)out.contents)[1] == 2 &&
+         ((int *)buf[0].contents)[260] == 11 &&
+         ((int *)buf[1].contents)[262] == 20 &&
+         ((int *)buf[2].contents)[270] == 32 &&
+         ((int *)buf[3].contents)[272] == 40 && components[0] == 10 &&
+         components[1] == 0 && components[2] == 0 && components[3] == 1 &&
+         components[4] == 0 && components[5] == 0 && components[6] == 0 &&
+         components[7] == 1);
+    if (argc == 3 && strcmp(argv[2], "--wrong-expected") == 0)
       pass = pass && ((unsigned *)out.contents)[1] == 71;
+    if (argc == 3 && strcmp(argv[2], "--wrong-components") == 0)
+      pass = pass && components[7] == 0;
     return pass ? 0 : 1;
   }
 }

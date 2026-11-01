@@ -336,3 +336,17 @@ not missing format components, other formats, sparse status, Wine/D3D12
 submission, or production sidecar binding. The test is opt-in because it
 requires a local Metal device. Its HLSL input is retained beside the captured
 AIR; recompilation with other MSC versions may produce different AIR shapes.
+
+### R32_SINT missing-component observation
+
+The GPU bounds runner now instruments the checked-in MSC AIR to store all four
+components of its first texture-buffer read. This instrumentation is added to
+AIR after compilation; the original HLSL uses only the scalar x component. On
+the local M1 Max, the patched shader returned `(10,0,0,1)` for an in-range
+R32_SINT read and `(0,0,0,1)` for an out-of-range read. A deliberately wrong
+alpha expectation fails, as do the previous scalar and unpatched controls.
+[Direct3D 11.3 functional specification section 19.1.3.3](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm)
+describes zero for missing components except integer alpha one. This result is
+an observed Metal AIR experiment, not a Windows-native or production D3D12
+conformance result. Other formats, sparse status and validation instrumentation
+of the offline metallib remain unverified.
