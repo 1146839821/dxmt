@@ -5,6 +5,7 @@
 
 #include <array>
 #include <iostream>
+#include <utility>
 
 namespace {
 
@@ -90,6 +91,12 @@ bool CheckFeatureLevelObligations(
     const D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT &gpu_va,
     bool report = true) {
   bool good = true;
+  if (maximum >= D3D_FEATURE_LEVEL_11_0) {
+    good &= shader_model >= D3D_SHADER_MODEL_5_1;
+    good &= options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_1;
+  }
+  if (maximum >= D3D_FEATURE_LEVEL_11_1)
+    good &= options.OutputMergerLogicOp == TRUE;
   if (maximum >= D3D_FEATURE_LEVEL_12_0) {
     good &= options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_2;
     good &= options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_2;
@@ -137,6 +144,38 @@ bool CheckFeatureLevelObligations(
     std::cerr << "feature-level obligations are not satisfied by reported "
                  "capabilities\n";
   return good;
+}
+
+bool Check11NegativeControls() {
+  D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
+  D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1 = {};
+  D3D12_FEATURE_DATA_D3D12_OPTIONS2 options2 = {};
+  D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3 = {};
+  D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5 = {};
+  D3D12_FEATURE_DATA_D3D12_OPTIONS6 options6 = {};
+  D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7 = {};
+  D3D12_FEATURE_DATA_D3D12_OPTIONS8 options8 = {};
+  D3D12_FEATURE_DATA_ROOT_SIGNATURE root = {};
+  D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT va = {};
+  auto check = [&](D3D_FEATURE_LEVEL level, D3D_SHADER_MODEL model) {
+    return CheckFeatureLevelObligations(level, model, options, options1, options2, options3, options5, options6,
+                                        options7, options8, root, va, false);
+  };
+  options.ResourceBindingTier = D3D12_RESOURCE_BINDING_TIER_1;
+  if (!check(D3D_FEATURE_LEVEL_11_0, D3D_SHADER_MODEL_5_1) ||
+      check(D3D_FEATURE_LEVEL_11_0, static_cast<D3D_SHADER_MODEL>(0x50)))
+    return false;
+  options.ResourceBindingTier = static_cast<D3D12_RESOURCE_BINDING_TIER>(0);
+  if (check(D3D_FEATURE_LEVEL_11_0, D3D_SHADER_MODEL_5_1))
+    return false;
+  options.ResourceBindingTier = D3D12_RESOURCE_BINDING_TIER_1;
+  if (check(D3D_FEATURE_LEVEL_11_1, D3D_SHADER_MODEL_5_1))
+    return false;
+  options.OutputMergerLogicOp = TRUE;
+  if (!check(D3D_FEATURE_LEVEL_11_1, D3D_SHADER_MODEL_5_1))
+    return false;
+  std::cout << "11_0/11_1 synthetic positive and negative controls passed\n";
+  return true;
 }
 
 bool Check12_2NegativeControls() {
@@ -241,6 +280,22 @@ bool CheckInterfaceCoupling(ID3D12Device *device, REFIID iid, const char *name,
 } // namespace
 
 int main() {
+  char identity_requested[2] = {};
+  if (GetEnvironmentVariableA("DXMT_TEST_PRINT_LOADED_CODE", identity_requested, sizeof(identity_requested)) == 1 &&
+      identity_requested[0] == '1') {
+    for (const auto &[module_name, symbol] : {std::pair{"d3d12.dll", "D3D12CreateDevice"},
+                                              std::pair{"winemetal.dll", "DXMTMSCPatchSamplerLOD"}}) {
+      auto module = GetModuleHandleA(module_name);
+      auto address = module ? reinterpret_cast<const unsigned char *>(GetProcAddress(module, symbol)) : nullptr;
+      if (!address)
+        return 1;
+      static const char hex[] = "0123456789abcdef";
+      std::cout << "LOADED_CODE " << module_name << " " << symbol << " ";
+      for (unsigned i = 0; i < 16; ++i)
+        std::cout << hex[address[i] >> 4] << hex[address[i] & 15];
+      std::cout << "\n";
+    }
+  }
   ID3D12Device *device = nullptr;
   if (!CheckHR("D3D12CreateDevice",
                D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
@@ -251,6 +306,7 @@ int main() {
   D3D_SHADER_MODEL maximum_shader_model = {};
   bool good = CheckFeatureLevels(device, maximum_feature_level);
   good &= CheckShaderModels(device, maximum_shader_model);
+  good &= Check11NegativeControls();
   good &= Check12_2NegativeControls();
 
   D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
@@ -317,6 +373,7 @@ int main() {
 
   std::cout << "capability.options.resource_binding_tier="
             << static_cast<unsigned>(options.ResourceBindingTier) << "\n";
+  std::cout << "capability.options.output_merger_logic_op=" << options.OutputMergerLogicOp << "\n";
   std::cout << "capability.options.tiled_resources_tier="
             << static_cast<unsigned>(options.TiledResourcesTier) << "\n";
   std::cout << "capability.options.raytracing_tier="
