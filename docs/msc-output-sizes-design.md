@@ -53,3 +53,16 @@ The bounded retry cases, including staggered size reports and a successful
 query with no stage-in storage, passed on both architectures. The normal Wine
 fragment readback and negative control also passed after the retry change;
 the isolated artifacts are in `dxmt-test/n92-conversion-trace/msc-output-retry`.
+
+The Wine trace wrapper now also returns a shorter entry-point name only on the
+first reflection query, then forwards the actual name. With the pre-retry
+build, the next bridge call failed with `DXMT_MSC_ERROR_OUTPUT_TOO_SMALL` and
+the fragment pipeline failed. With the retry build, the same control performed
+five successful MSC compilations rather than the baseline's four and passed
+both exact GPU readback and the deliberately incorrect-output control under
+Metal validation. The wrapper and loaded converter identities and stage/build
+artifacts are checked by the runner; logs are under
+`dxmt-test/n92-conversion-trace/msc-output-before-retry` and
+`dxmt-test/n92-conversion-trace/msc-output-forced-growth`. This verifies a
+forced entry-point size increase, not naturally variable MSC output or every
+output type.

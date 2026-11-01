@@ -19,6 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("stage", "prefix", "build", "converter", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--mode", action="append", choices=("baseline", "late", "grow"))
     args = parser.parse_args()
     stage, prefix, build, converter = (getattr(args, name).resolve(strict=True)
                                        for name in ("stage", "prefix", "build", "converter"))
@@ -54,7 +55,7 @@ def main():
             "--fragment-ps", "lod_ps.cso", "--fragment-vs", "lod_vs.cso",
             "--case", "fragment", "--case", "fragment-control"]
     observations = {}
-    for mode in ("baseline", "late"):
+    for mode in args.mode or ("baseline", "late", "grow"):
         logs = root / mode
         env = {key: value for key, value in os.environ.items() if not key.startswith("DYLD_")}
         env["DXMT_METALIRCONVERTER_PATH"] = str(wrapper)
@@ -62,6 +63,10 @@ def main():
             env["DXMT_TEST_TRACE_LATE_IMAGE"] = str(late)
         else:
             env.pop("DXMT_TEST_TRACE_LATE_IMAGE", None)
+        if mode == "grow":
+            env["DXMT_TEST_TRACE_GROW_ENTRY"] = "1"
+        else:
+            env.pop("DXMT_TEST_TRACE_GROW_ENTRY", None)
         result = subprocess.run(base + ["--logs", str(logs)], env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=180, text=True)
         (root / (mode + ".runner.log")).write_text(result.stdout)
@@ -76,6 +81,8 @@ def main():
         intervals = re.findall(r"DXMT_MSC_TRACE_BEGIN\n(.*?)DXMT_MSC_TRACE_END ok", log, flags=re.S)
         if not intervals:
             raise AssertionError(f"{mode}: no successful real conversion was observed")
+        if mode == "grow" and ("DXMT_MSC_TRACE_SHORT_ENTRY" not in log or len(intervals) < 5):
+            raise AssertionError("grow: no forced undersized query and retry were observed")
         late_in_interval = any(str(late) in interval for interval in intervals)
         if late_in_interval != (mode == "late"):
             raise AssertionError(f"{mode}: unexpected late-load observation")
