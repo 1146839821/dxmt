@@ -9,6 +9,11 @@ exe, fixture, sidecar_fixture, multi_fixture = (Path(arg).resolve() for arg in s
 source = fixture.read_text()
 sidecar_source = sidecar_fixture.read_text()
 multi_source = multi_fixture.read_text()
+wrong_pointer = (sidecar_source.replace('i8 addrspace(2)* %root, i64 %slot',
+                                        'i8 addrspace(2)* %root, i8 addrspace(2)* %other, i64 %slot')
+                 .replace('i32 (i8 addrspace(2)*, i64, i32)* @main',
+                          'i32 (i8 addrspace(2)*, i8 addrspace(2)*, i64, i32)* @main')
+                 .replace('!3 = !{i32 0,', '!3 = !{i32 1,'))
 with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
     root = Path(temp)
     cases = [
@@ -17,6 +22,17 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
                                     "air.unknown_texture_buffer_1d"), 4, []),
         ("bad_field", source.replace("i64 %slot, i32 1", "i64 %slot, i32 0"), 4, []),
         ("sidecar_dynamic", sidecar_source, 0, ["--sidecar", "0", "8"]),
+        ("sidecar_no_metadata", sidecar_source.split("!air.kernel")[0], 4, ["--sidecar", "0", "8"]),
+        ("sidecar_wrong_binding", sidecar_source.replace('!"air.location_index", i32 2',
+                                                        '!"air.location_index", i32 1'), 4,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_wrong_argument", sidecar_source.replace('!3 = !{i32 0,', '!3 = !{i32 1,'), 4,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_wrong_pointer", wrong_pointer, 4, ["--sidecar", "0", "8"]),
+        ("sidecar_ambiguous_binding", sidecar_source.replace('!2 = !{!3}', '!2 = !{!3, !3}'), 4,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_multiple_stages", sidecar_source + '\n!air.fragment = !{!0}\n', 4,
+         ["--sidecar", "0", "8"]),
         ("sidecar_wrong_table", sidecar_source, 4, ["--sidecar", "16", "8"]),
         ("sidecar_unaligned", sidecar_source, 2, ["--sidecar", "0", "7"]),
         ("sidecar_negative", sidecar_source, 2, ["--sidecar", "0", "-8"]),

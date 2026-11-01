@@ -264,3 +264,24 @@ pre-submit descriptor replacement, encoder breaks, multiple submissions and
 fenced reuse using exact GPU readback and negative controls. Test with Metal
 validation and verify loaded artifacts. Do not infer in-flight mutation safety
 or support for direct heap indexing from this result.
+
+### AIR entrypoint and TLAB identity gate
+
+The sidecar mode of the offline rewrite now requires exactly one compute or
+fragment AIR entrypoint and identifies the TLAB argument from its
+`air.indirect_buffer` binding at location 2. Every rewritten texture-buffer
+operation must derive its descriptor table from that exact argument; metadata
+that is absent, ambiguous, malformed, attached to another argument, or uses a
+different binding is rejected before output. Vertex, mesh and object stages
+remain unsupported by this experimental gate. Legacy metadata-bit mode is
+unchanged and remains unsuitable for production.
+
+The synthetic suite checks missing metadata, duplicate binding, wrong binding,
+wrong scalar or pointer argument and multiple stages. A real MSC-generated
+multi-table compute AIR module also passed the gate; its rewritten offline
+metallib produced the expected two-descriptor GPU readback with Metal API and
+shader validation enabled. The offline metallib's shader-validation
+instrumentation is unverified. This confirms identification for that module,
+not arbitrary MSC versions, helper-function forms, descriptor provenance,
+null table semantics, or production integration. Rollback removes the
+experimental metadata gate and fixtures without changing runtime behavior.
