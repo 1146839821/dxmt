@@ -22,6 +22,17 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
                                     "air.unknown_texture_buffer_1d"), 4, []),
         ("bad_field", source.replace("i64 %slot, i32 1", "i64 %slot, i32 0"), 4, []),
         ("sidecar_dynamic", sidecar_source, 0, ["--sidecar", "0", "8"]),
+        ("sidecar_status_used", sidecar_source.replace(
+            '%vector = extractvalue { <4 x i32>, i8 } %data, 0',
+            '%status = extractvalue { <4 x i32>, i8 } %data, 1\n'
+            '  %vector = extractvalue { <4 x i32>, i8 } %data, 0'), 4,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_aggregate_used", sidecar_source.replace(
+            '%vector = extractvalue { <4 x i32>, i8 } %data, 0',
+            '%slot_result = alloca { <4 x i32>, i8 }\n'
+            '  store { <4 x i32>, i8 } %data, { <4 x i32>, i8 }* %slot_result\n'
+            '  %vector = extractvalue { <4 x i32>, i8 } %data, 0'), 4,
+         ["--sidecar", "0", "8"]),
         ("sidecar_bad_stride", sidecar_source.replace(
             '%desc = type { %tex addrspace(1)*, %tex addrspace(1)*, i64 }',
             '%desc = type { [2 x i64], %tex addrspace(1)*, i64 }'), 4,

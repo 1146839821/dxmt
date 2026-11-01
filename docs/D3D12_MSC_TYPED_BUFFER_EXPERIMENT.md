@@ -302,3 +302,19 @@ metadata, descriptor provenance, bounds, null, helper-call or status semantics.
 In particular, its resource index and supported return forms still need a
 complete ABI audit before production use. Rollback removes the added offline
 checks and their tests without changing production behavior.
+
+### Sparse-status gate
+
+[Microsoft's CheckAccessFullyMapped contract](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/checkaccessfullymapped)
+defines its status in terms of tiled-resource mapping. The existing rewrite's
+out-of-range sentinel has not been shown to preserve that status. It must not
+be assumed that a zero data result implies a correct status result.
+
+Sidecar-mode preflight now requires a two-component read result with an i8
+status and rejects uses of that status or of the complete aggregate. A
+synthetic negative case checks rejection before output; the existing value-only
+real MSC multi-table shader still passes the offline native Metal GPU readback.
+This is a conservative experimental restriction, not an implementation of
+sparse-resource status or proof of all out-of-bounds semantics. Shader
+validation was enabled for the native run but offline metallib instrumentation
+is unverified. Production conversion and capability declarations are unchanged.

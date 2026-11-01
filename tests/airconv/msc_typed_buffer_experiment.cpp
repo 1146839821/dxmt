@@ -123,6 +123,21 @@ bool collect(llvm::Module &module, std::vector<Operation> &operations,
         auto *direct = llvm::dyn_cast<llvm::CallInst>(call);
         if ((!width && !access) || !direct || call->arg_empty())
           return false;
+        if (read && !mappings.empty()) {
+          auto *result = llvm::dyn_cast<llvm::StructType>(call->getType());
+          if (!result || result->getNumElements() != 2 ||
+              !result->getElementType(1)->isIntegerTy(8))
+            return false;
+          // The second component's sparse-resource status semantics have not
+          // been established after index remapping. Only value-only uses are
+          // currently safe to investigate.
+          for (const auto *user : call->users()) {
+            auto *extract = llvm::dyn_cast<llvm::ExtractValueInst>(user);
+            if (!extract || extract->getNumIndices() != 1 ||
+                *extract->idx_begin() != 0)
+              return false;
+          }
+        }
         auto *load = llvm::dyn_cast<llvm::LoadInst>(call->getArgOperand(0));
         auto *gep = load ? llvm::dyn_cast<llvm::GetElementPtrInst>(
                                load->getPointerOperand())
