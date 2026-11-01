@@ -26,6 +26,7 @@
 #include "airconv_public.h"
 #include "msc_lod_layout.hpp"
 #include "msc_resource_layout.hpp"
+#include "msc_combined_sidecar_layout.hpp"
 #include "dxmt_buffer.hpp"
 #include "dxmt_command.hpp"
 #include "dxmt_format.hpp"
@@ -504,6 +505,7 @@ public:
   virtual HRESULT InitializeMSCLayout() = 0;
   virtual HRESULT InitializeMSCLodSidecarLayout() = 0;
   virtual HRESULT InitializeMSCResourceSidecarLayout() = 0;
+  virtual HRESULT InitializeMSCCombinedSidecarLayout() = 0;
   virtual bool GetStaticSamplerLODSidecarEntry(UINT Index, D3D12SamplerLODSidecarEntry &Entry) = 0;
 
   virtual void AddRefPrivate() = 0;
@@ -552,6 +554,7 @@ public:
   unsigned MSCResourceSidecarBufferSize = 0;
   unsigned MSCResourceSidecarTableCount = 0;
   const dxmt::air::MSCResourceSidecarTable *MSCResourceSidecarTables = nullptr;
+  const dxmt::air::MSCCombinedSidecarLayout *MSCCombinedSidecarLayout = nullptr;
 };
 
 class MTLD3D12CommandSignature : public ID3D12CommandSignature {

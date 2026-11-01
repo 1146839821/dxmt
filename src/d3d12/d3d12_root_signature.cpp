@@ -401,12 +401,15 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
   std::vector<dxmt_msc_root_parameter_layout> msc_layout_;
   std::vector<air::MSCSamplerSidecarTable> msc_lod_sidecar_tables_;
   std::vector<air::MSCResourceSidecarTable> msc_resource_sidecar_tables_;
+  air::MSCCombinedSidecarLayout msc_combined_sidecar_layout_;
   std::mutex msc_layout_mutex_;
   std::mutex msc_lod_layout_mutex_;
   std::mutex msc_resource_layout_mutex_;
+  std::mutex msc_combined_layout_mutex_;
   bool msc_layout_initialized_ = false;
   bool msc_lod_layout_initialized_ = false;
   bool msc_resource_layout_initialized_ = false;
+  bool msc_combined_layout_initialized_ = false;
 
 public:
   bool
@@ -694,6 +697,32 @@ public:
       MSCResourceSidecarTableCount = static_cast<unsigned>(msc_resource_sidecar_tables_.size());
       MSCResourceSidecarTables = msc_resource_sidecar_tables_.data();
       msc_resource_layout_initialized_ = true;
+      return S_OK;
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
+  }
+
+  HRESULT
+  InitializeMSCCombinedSidecarLayout() override {
+    std::lock_guard lock(msc_combined_layout_mutex_);
+    if (msc_combined_layout_initialized_)
+      return S_OK;
+    auto hr = InitializeMSCLodSidecarLayout();
+    if (FAILED(hr))
+      return hr;
+    hr = InitializeMSCResourceSidecarLayout();
+    if (FAILED(hr))
+      return hr;
+    try {
+      air::MSCCombinedSidecarLayout layout;
+      if (!air::buildMSCCombinedSidecarLayout(
+              MSCArgumentBufferSize, msc_lod_sidecar_tables_, msc_resource_sidecar_tables_, layout
+          ))
+        return E_NOTIMPL;
+      msc_combined_sidecar_layout_ = std::move(layout);
+      MSCCombinedSidecarLayout = &msc_combined_sidecar_layout_;
+      msc_combined_layout_initialized_ = true;
       return S_OK;
     } catch (const std::bad_alloc &) {
       return E_OUTOFMEMORY;

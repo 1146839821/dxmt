@@ -90,7 +90,9 @@ static int check_resource_layout() {
   std::vector<std::thread> workers;
   for (size_t i = 0; i < results.size(); ++i)
     workers.emplace_back([&, i] {
-      results[i] = SUCCEEDED(internal->InitializeMSCResourceSidecarLayout());
+      results[i] =
+          SUCCEEDED(i % 2 ? internal->InitializeMSCResourceSidecarLayout()
+                          : internal->InitializeMSCCombinedSidecarLayout());
     });
   for (auto &worker : workers)
     worker.join();
@@ -145,6 +147,23 @@ static int check_resource_layout() {
       combined.resources[1].sidecar_offset !=
           internal->MSCLODSidecarBufferSize + 8 ||
       combined.buffer_size != internal->MSCLODSidecarBufferSize + 16)
+    return 1;
+  const auto *owned = internal->MSCCombinedSidecarLayout;
+  if (!owned || FAILED(internal->InitializeMSCCombinedSidecarLayout()) ||
+      owned != internal->MSCCombinedSidecarLayout ||
+      owned->buffer_size != combined.buffer_size ||
+      owned->samplers.size() != combined.samplers.size() ||
+      owned->resources.size() != combined.resources.size())
+    return 1;
+  for (unsigned i = 0; i < owned->resources.size(); ++i)
+    if (owned->resources[i].sidecar_offset !=
+            combined.resources[i].sidecar_offset ||
+        owned->resources[i].resource_table_offset !=
+            combined.resources[i].resource_table_offset ||
+        owned->resources[i].parameter_index !=
+            combined.resources[i].parameter_index)
+      return 1;
+  if (owned->samplers[0].sidecar_offset != combined.samplers[0].sidecar_offset)
     return 1;
   for (unsigned i = 0; i < 2; ++i)
     if (combined.resources[i].resource_table_offset !=
@@ -387,6 +406,11 @@ int main(int argc, char **argv) {
   if (FAILED(internal->InitializeMSCLodSidecarLayout()) ||
       internal->MSCLODSidecarTableCount != 3 ||
       internal->MSCLODSidecarBufferSize != 48)
+    return 1;
+  if (FAILED(internal->InitializeMSCCombinedSidecarLayout()) || !internal->MSCCombinedSidecarLayout ||
+      internal->MSCCombinedSidecarLayout->buffer_size != internal->MSCLODSidecarBufferSize ||
+      !internal->MSCCombinedSidecarLayout->resources.empty() ||
+      internal->MSCCombinedSidecarLayout->samplers.size() != 3)
     return 1;
   for (unsigned i = 0; i < internal->MSCLODSidecarTableCount; ++i) {
     const auto &table = internal->MSCLODSidecarTables[i];

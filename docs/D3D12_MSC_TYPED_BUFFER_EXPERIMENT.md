@@ -192,3 +192,16 @@ the existing static-sampler probe checks sampler-only compatibility. This is
 layout evidence, not GPU evidence. It does not bind a combined allocation,
 select a combined pipeline variant, or establish residency or lifetime.
 Rollback removes the helper and its tests without changing runtime behavior.
+
+### Root-owned combined layout
+
+The root signature lazily owns a combined layout. Initialization serializes
+publication, initializes both existing reflected layouts, and publishes only a
+complete successful result. Repeated calls return the same root-owned object;
+the individual sampler layout is unchanged. A local root or direct-indexed
+resource or sampler heap remains unsupported by the corresponding component.
+The mixed-table probe interleaves combined and resource initialization across
+threads and compares the root-owned result with an independently built layout.
+This does not allocate or bind a combined GPU argument buffer. Runtime usage,
+residency, lifetime and GPU correctness remain unverified. Rollback removes the
+root-owned combined state and its test while preserving the existing layouts.
