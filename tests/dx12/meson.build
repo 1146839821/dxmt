@@ -21,6 +21,9 @@ dx12_shader_validation = executable('dx12_shader_validation', 'dx12_shader_valid
   dependencies: [ d3d12_dep ],
 )
 
+dx12_msc_output = executable('dx12_msc_output', 'dx12_msc_output.cpp', native: true)
+test('dx12 msc output sizes', dx12_msc_output)
+
 dx12_airconv_compute_residency = executable('dx12_airconv_compute_residency', 'dx12_airconv_compute_residency.cpp',
   include_directories: [
     include_directories('../../src/airconv'),

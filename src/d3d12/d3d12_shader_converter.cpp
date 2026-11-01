@@ -15,6 +15,7 @@
 #include "DXBCParser/BlobContainer.h"
 #include "DXBCParser/DXBCUtils.h"
 #include "d3d12_msc_capabilities.hpp"
+#include "d3d12_msc_output.hpp"
 #include "dxmt_shader_cache.hpp"
 #include "log/log.hpp"
 #include "metalirconverter_thunks.h"
@@ -1858,12 +1859,13 @@ ConvertD3D12ShaderInternal(
   if (result != DXMT_MSC_SUCCESS)
     return MSCResultToHRESULT(result);
 
-  if (entry_point_size == 0 || entry_point[entry_point_size - 1] != '\0') {
-    ERR("DXIL conversion returned an invalid entry point");
+  if (!FinalizeMSCOutputBuffers(
+          converted.metallib, converted.stage_in_metallib, entry_point, metallib_size, stage_in_metallib_size,
+          entry_point_size, converted.entry_point
+      )) {
+    ERR("DXIL conversion returned invalid output sizes or entry point");
     return E_FAIL;
   }
-
-  converted.entry_point.assign(entry_point.data(), entry_point_size - 1);
   converted.threadgroup_size = threadgroup_size;
   converted.reflection = reflection;
   converted.backend = D3D12ShaderBackend::MetalShaderConverter;
