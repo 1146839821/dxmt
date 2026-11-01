@@ -3,6 +3,7 @@
 import hashlib
 import os
 from pathlib import Path
+import platform
 import shutil
 import struct
 import subprocess
@@ -14,6 +15,8 @@ from test_darwin_loaded_image_identity import data_section
 
 
 def run(*args):
+    if args[:2] == ("xcrun", "clang"):
+        args = args[:2] + ("-arch", platform.machine()) + args[2:]
     return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 

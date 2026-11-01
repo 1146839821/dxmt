@@ -358,3 +358,30 @@ provides each converter symbol. It shows that hashing only openable dylib
 paths cannot describe the actual dependency set in this environment. The
 shared-cache provenance and lifetime, dynamic loading, and in-place mutation
 remain unverified; persistent MSC caching stays disabled.
+
+### Shared-cache observations and architecture control
+
+The system-dependency probe now asks `_dyld_shared_cache_contains_path` about
+each listed path and attempts to obtain the actual dlopen image header's
+region filename. On this machine both architectures reported all five paths
+in the active shared cache, while `proc_regionfilename` returned no filename
+for those headers. The path query alone does not prove which image supplies a
+particular binding; Apple notes that [cached libraries may be overridden](https://github.com/apple-oss-distributions/dyld/blob/main/include/objc-shared-cache.h).
+
+A separate single-threaded test reads `sharedCacheUUID` from the current
+process's `TASK_DYLD_INFO`, checking the reported structure version, size and
+detached state. Before and after loading a generated file-backed library, two
+fresh runs agreed locally: x86_64/Rosetta
+`16939cfbccad3a9b926e5cc5b2d2cb56`; arm64
+`c284a291b68b3d0da1a03f866f87efdc`. This is a process metadata observation,
+not a guarantee of a full content digest, dependency provenance or stable
+identity throughout conversion. Apple describes the shared cache as potentially
+multiple files in its [cache layout documentation](https://github.com/apple-oss-distributions/dyld/blob/main/doc/CacheLayout.md).
+
+Earlier native test drivers did not explicitly pass `-arch` to clang, so a
+Rosetta-hosted Python process alone was insufficient evidence that its child
+executables used x86_64. The identity, pinned-file, dependency and event-epoch
+test runners now select the Python process architecture explicitly; all five
+were rerun successfully for both architectures on this machine. The broader
+historical observations about separately built binaries remain limited to their
+recorded artifact identities.

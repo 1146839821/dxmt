@@ -101,7 +101,8 @@ if get_option('enable_tests')
     test('airconv msc system dependency identity', icb_experiment_python,
       args: [files('../../../tests/airconv/test_msc_system_dependencies.py'),
              files('../../../tests/airconv/darwin_image_identity_component_probe.c'),
-             files('../../winemetal/unix/msc_image_identity.c')])
+             files('../../winemetal/unix/msc_image_identity.c'),
+             files('../../../tests/airconv/darwin_shared_cache_probe.c')])
     test('airconv msc image epoch', icb_experiment_python,
       args: [files('../../../tests/airconv/test_msc_image_epoch.py'),
              files('../../../tests/airconv/darwin_image_epoch_probe.c'),

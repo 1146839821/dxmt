@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Compile independent test images and exercise the dyld event counter."""
 from pathlib import Path
+import platform
 import subprocess
 import sys
 import tempfile
 
 
 def run(*args):
+    if args[:2] == ("xcrun", "clang"):
+        args = args[:2] + ("-arch", platform.machine()) + args[2:]
     return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 

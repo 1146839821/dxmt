@@ -3,12 +3,15 @@
 import hashlib
 import os
 from pathlib import Path
+import platform
 import subprocess
 import sys
 import tempfile
 
 
 def run(*args, input=None):
+    if args[:2] == ("xcrun", "clang"):
+        args = args[:2] + ("-arch", platform.machine()) + args[2:]
     return subprocess.run(args, input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 
 
