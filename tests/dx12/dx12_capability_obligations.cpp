@@ -178,6 +178,50 @@ bool Check11NegativeControls() {
   return true;
 }
 
+// D3D12 requires typed UAV loads for all three R32 formats. This checks the
+// advertised format support only; actual shader behavior needs GPU tests.
+bool HasRequiredR32UAVSupport(const D3D12_FEATURE_DATA_FORMAT_SUPPORT &support) {
+  return (support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) &&
+         (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD);
+}
+
+bool CheckRequiredR32UAVSupport(ID3D12Device *device) {
+  constexpr std::array formats = {DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_UINT,
+                                  DXGI_FORMAT_R32_SINT};
+  D3D12_FEATURE_DATA_FORMAT_SUPPORT control = {
+      formats[0], D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW,
+      D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD};
+  if (!HasRequiredR32UAVSupport(control))
+    return false;
+  control.Support1 = D3D12_FORMAT_SUPPORT1_NONE;
+  if (HasRequiredR32UAVSupport(control))
+    return false;
+  control.Support1 = D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW;
+  control.Support2 = D3D12_FORMAT_SUPPORT2_NONE;
+  if (HasRequiredR32UAVSupport(control))
+    return false;
+  std::cout << "R32 typed UAV synthetic positive and negative controls passed\n";
+
+  bool good = true;
+  for (auto format : formats) {
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {format, {}, {}};
+    const HRESULT hr = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                                                    &support, sizeof(support));
+    std::cout << "capability.r32_uav.format=" << static_cast<unsigned>(format)
+              << " hr=0x" << std::hex << static_cast<unsigned long>(hr)
+              << " support1=0x" << static_cast<unsigned>(support.Support1)
+              << " support2=0x" << static_cast<unsigned>(support.Support2)
+              << std::dec << "\n";
+    if (!CheckHR("CheckFeatureSupport(FORMAT_SUPPORT)", hr) ||
+        !HasRequiredR32UAVSupport(support)) {
+      std::cerr << "required R32 typed UAV load support missing for format "
+                << static_cast<unsigned>(format) << "\n";
+      good = false;
+    }
+  }
+  return good;
+}
+
 bool Check12_2NegativeControls() {
   D3D12_FEATURE_DATA_D3D12_OPTIONS o = {};
   D3D12_FEATURE_DATA_D3D12_OPTIONS1 o1 = {};
@@ -308,6 +352,7 @@ int main() {
   good &= CheckShaderModels(device, maximum_shader_model);
   good &= Check11NegativeControls();
   good &= Check12_2NegativeControls();
+  good &= CheckRequiredR32UAVSupport(device);
 
   D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
   D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1 = {};

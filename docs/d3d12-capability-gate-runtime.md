@@ -15,6 +15,13 @@ lists binding tiers and logic operations; its accompanying note describes
 shader model 5.1 support on hardware used through the D3D12 API. These are
 reported-capability checks, not proof of implementation.
 
+The gate also checks the typed UAV view and typed load format-support bits for
+R32_FLOAT, R32_UINT and R32_SINT. Microsoft requires typed UAV loads for these
+[three formats on all D3D12 hardware](https://learn.microsoft.com/en-us/windows/win32/direct3d12/typed-unordered-access-view-loads).
+Synthetic controls independently remove each required bit. This checks the
+reported format capabilities only, not shader loads or stores on the GPU, and
+does not cover the remaining mandatory format operations.
+
 ## Reproducibility and limits
 
 `tests/dx12/run_capability_obligations.py` requires an explicitly prepared
@@ -31,6 +38,9 @@ FL 11_1 and SM 6_0; binding tier 2 and logic-op support were reported, while
 tiled resources, raytracing, mesh shaders and enhanced barriers were reported
 unsupported. Both the 11_0/11_1 and existing 12_2 synthetic controls passed.
 See `dxmt-test/n95-capability-gate/run3` for artifact identities and logs.
+With the R32 checks added, the same machine reported the required bits for all
+three formats; `dxmt-test/n95-capability-gate/run-r32-final` records the run and
+artifact identities. GPU behavior for these formats remains unverified here.
 Other hardware, Windows reference,
 the no-private-API configuration and GPU execution conformance remain
 unverified. No public capability was promoted by this test.
