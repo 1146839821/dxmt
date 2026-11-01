@@ -338,3 +338,23 @@ been proven to form an atomic transaction with MSC conversion or cache I/O.
 An isolated test also appends a byte to a loaded fixture and observes that the
 epoch remains unchanged; it does not establish how mapped pages behave.
 It is not linked into WineMetal and does not change the persistent-cache guard.
+
+### Direct system dependency file-identity probe
+
+`test_msc_system_dependencies.py` attempts to load selected system libraries,
+then separately applies the candidate file-identity probe. A generated
+file-backed dylib is the positive binding and revalidation control. The test
+does not require an MSC installation; the optional
+`DXMT_TEST_MSC_SYSTEM_DEPENDENCY_ROOT` loads a specified converter first.
+
+On macOS 27.0.1 (26A434), with the installed MSC dylib loaded in the test
+process, both native arm64 and x86_64/Rosetta loaded the five direct system
+dependencies listed by `otool -L`: libbz2, CoreFoundation, libarchive,
+libc++, and libSystem. Their listed paths did not name regular files, and
+the candidate helper rejected all five at open. This is a local observation;
+the test does not assert that those paths are unavailable on every OS version,
+identify the transitive dependency closure, or establish which loaded image
+provides each converter symbol. It shows that hashing only openable dylib
+paths cannot describe the actual dependency set in this environment. The
+shared-cache provenance and lifetime, dynamic loading, and in-place mutation
+remain unverified; persistent MSC caching stays disabled.
