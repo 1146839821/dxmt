@@ -22,6 +22,10 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
                                     "air.unknown_texture_buffer_1d"), 4, []),
         ("bad_field", source.replace("i64 %slot, i32 1", "i64 %slot, i32 0"), 4, []),
         ("sidecar_dynamic", sidecar_source, 0, ["--sidecar", "0", "8"]),
+        ("metallib_api", sidecar_source, 0, ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("metallib_api_small", sidecar_source, 4, ["--metallib-api", "8", "8", "--sidecar", "0", "8"]),
+        ("metallib_api_no_root", sidecar_source.split("!air.kernel")[0], 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
         ("sidecar_status_used", sidecar_source.replace(
             '%vector = extractvalue { <4 x i32>, i8 } %data, 0',
             '%status = extractvalue { <4 x i32>, i8 } %data, 1\n'
@@ -79,6 +83,7 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
         if (output.exists() and output.stat().st_size > 0) != (expected == 0):
             raise SystemExit(f"{name}: unexpected output state")
         count = 6 if name == "multi" else 3
-        if expected == 0 and f"patched {count} typed-buffer operations" not in result.stdout:
+        marker = 'metallib API patched' if name == 'metallib_api' else f'patched {count} typed-buffer operations'
+        if expected == 0 and marker not in result.stdout:
             raise SystemExit(f"{name}: unexpected operation count: {result.stdout}")
         print(name, "passed")

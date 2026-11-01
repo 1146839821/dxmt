@@ -36,7 +36,7 @@ with tempfile.TemporaryDirectory(prefix='dxmt-msc-buffer-oob-') as directory:
     fixture.write_text(original.replace(anchor, anchor + extra))
     subprocess.run(['clang', '-fobjc-arc', '-framework', 'Foundation', '-framework', 'Metal',
                     str(here / 'msc_typed_buffer_gpu_oob.m'), '-o', str(exe)], check=True)
-    subprocess.run([str(rewriter), str(fixture), str(library),
+    subprocess.run([str(rewriter), str(fixture), str(library), '--metallib-api', '24', '40',
                     '--sidecar', '0', '24', '--sidecar', '8', '32'], check=True)
     subprocess.run([str(rewriter), str(fixture), str(baseline),
                     '--unpatched'], check=True)

@@ -393,6 +393,19 @@ bitcode and finding a sidecar load. It checks short and corrupt inputs,
 misaligned, overlapping, duplicate and out-of-bounds mappings, excessive table
 count, and an unsupported table association. The existing sampler and
 experimental transform suites pass. This is not a WineMetal thunk or pipeline
-integration; no runtime path invokes the new interface, and no GPU test used
-its generated metallib in this slice. Capability declarations are unchanged.
+integration; no runtime path invokes the new interface. The following offline GPU test
+uses its generated metallib. Capability declarations are unchanged.
 Rollback removes the interface, implementation and test.
+
+
+### Metallib interface GPU check
+
+The opt-in `run_msc_typed_buffer_gpu_oob.py` now produces its patched metallib
+through `SM50PatchMetalLibTypedBufferSidecar`, rather than invoking the AIR
+pass directly. The R32_SINT multi-table in-bounds, out-of-bounds and default
+component checks pass on the local Metal device. Wrong-value, wrong-component
+and unpatched controls fail as intended; invalid interface input does not
+produce an output file. Metal validation was enabled, but instrumentation of
+the offline metallib is unverified. This does not exercise WineMetal thunks,
+D3D12 command binding, resource residency or submission lifetime. No production
+path has been enabled. Rollback restores the direct-pass test invocation.

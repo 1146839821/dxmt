@@ -2,6 +2,8 @@
 // It assumes the MSC 4.x three-qword descriptor ABI and an EXPERIMENTAL
 // texel-size byte in metadata bits 40..47. Production does not encode it.
 #include "metallib_writer.hpp"
+#include "airconv_public.h"
+#include "compiled_bitcode.hpp"
 #include "transforms/msc_typed_buffer_sidecar.hpp"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -131,10 +133,25 @@ void patch(const std::vector<Operation> &operations) {
 
 int main(int argc, char **argv) {
   const bool passthrough = argc == 4 && std::string(argv[3]) == "--unpatched";
-  if (argc < 3 || (!passthrough && (argc - 3) % 3))
+  const bool use_api = argc >= 6 && std::string(argv[3]) == "--metallib-api";
+  const int first_mapping = use_api ? 6 : 3;
+  if (argc < 3 || (!passthrough && (argc - first_mapping) % 3))
     return 2;
+  uint32_t original_size = 0, extended_size = 0;
+  if (use_api) {
+    char *end = nullptr;
+    auto parse = [&](const char *value, uint32_t &result) {
+      const auto n = std::strtoull(value, &end, 0);
+      if (!*value || *value == '-' || *end || n > UINT32_MAX)
+        return false;
+      result = static_cast<uint32_t>(n);
+      return true;
+    };
+    if (!parse(argv[4], original_size) || !parse(argv[5], extended_size))
+      return 2;
+  }
   std::vector<TableMapping> mappings;
-  for (int i = 3; !passthrough && i < argc; i += 3) {
+  for (int i = first_mapping; !passthrough && i < argc; i += 3) {
     if (std::string(argv[i]) != "--sidecar")
       return 2;
     char *end = nullptr;
@@ -162,6 +179,32 @@ int main(int argc, char **argv) {
   if (!module) {
     diagnostic.print(argv[0], llvm::errs());
     return 3;
+  }
+  if (use_api) {
+    llvm::SmallVector<char, 0> input;
+    llvm::raw_svector_ostream input_stream(input);
+    dxmt::metallib::MetallibWriter writer;
+    writer.Write(*module, input_stream);
+    std::vector<SM50_MSC_TYPED_BUFFER_TABLE> tables;
+    for (const auto &mapping : mappings)
+      tables.push_back({static_cast<uint32_t>(mapping.table_offset),
+                        static_cast<uint32_t>(mapping.sidecar_offset)});
+    sm50_bitcode_t output = nullptr;
+    const int status = SM50PatchMetalLibTypedBufferSidecar(
+        input.data(), input.size(), original_size, extended_size, tables.data(),
+        tables.size(), &output);
+    if (status != SM50_MSC_TYPED_BUFFER_PATCHED || !output)
+      return 4;
+    auto *compiled = static_cast<SM50CompiledBitcodeInternal *>(output);
+    std::error_code error;
+    llvm::raw_fd_ostream out(argv[2], error);
+    if (!error)
+      out.write(compiled->vec.data(), compiled->vec.size());
+    delete compiled;
+    if (error || out.has_error())
+      return 6;
+    llvm::outs() << "metallib API patched\n";
+    return 0;
   }
   std::vector<Operation> operations;
   size_t count = 0;
