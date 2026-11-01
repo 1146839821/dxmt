@@ -57,7 +57,8 @@ if get_option('enable_tests')
   if msc_typed_buffer_python.found()
     test('airconv msc typed buffer experiment', msc_typed_buffer_python,
       args : [files('../../../tests/airconv/test_msc_typed_buffer_experiment.py'),
-              msc_typed_buffer_experiment, files('../../../tests/airconv/msc_typed_buffer_experiment.ir')])
+              msc_typed_buffer_experiment, files('../../../tests/airconv/msc_typed_buffer_experiment.ir'),
+              files('../../../tests/airconv/msc_typed_buffer_sidecar_experiment.ir')])
   endif
   lower_unsupported_double_test = executable('lower-unsupported-double-test',
     files('../tests/lower_unsupported_double.cpp', '../transforms/lower_unsupported_double.cpp'),

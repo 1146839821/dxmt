@@ -21,6 +21,15 @@ an experimental texel-size byte in metadata bits 40–47; production descriptors
 **do not provide this field**, and no claim is made that MSC reserves those
 bits for this purpose. Do not use its output as a production shader.
 
+The optional `--sidecar <table-offset> <sidecar-offset>` experiment instead
+matches the root argument and the specified descriptor-table offset, then
+loads `(FirstElement, NumElements)` from the second qword of a 32-byte-stride
+sidecar using the same dynamic index. The caller is responsible for extending
+and binding the root argument and retaining/residenting the sidecar. A table
+offset mismatch, unaligned sidecar offset, unknown buffer instruction or
+unrecognized handle form is rejected. This single-table matcher does not prove
+root argument identity against reflection and cannot handle all AIR forms.
+
 The tool maps out-of-view indices to the maximum unsigned index and uses the
 experimental texel size and byte length to compute dimensions. A zero size
 produces a zero count. The approach is not approved for production: descriptor
@@ -106,6 +115,17 @@ must explicitly address residency and in-flight lifetime. Root-signature table
 offsets, heap switching, null and overwrite handling, descriptor-copy timing,
 validation instrumentation, and concurrent submission are also unverified.
 The production path remains unchanged.
+
+An additional fixed-shape Wine diagnostic supplied the real D3D12 heap's
+descriptor-table address in an extended root argument, and declared that heap
+allocation resident. For R32_SINT, tests passed when a descriptor was changed
+after `Close()` and before submission, both by direct rewrite and CPU-heap
+copy. The unmodified runtime failed the late-copy control. The injected offline
+metallib has not been shown to contain shader-validation instrumentation;
+the diagnostic does not cover resource replacement, update after submission,
+heap switches, multiple tables or generic root layout. Logs are in
+`dxmt-test/n95-capability-gate/run-generic-sidecar-late-final` and
+`dxmt-test/n95-capability-gate/run-sidecar-late-baseline`.
 
 `dx12_descriptor_ownership --typed-buffer-sidecar` verifies the real mapped
 shader-visible descriptor allocation on the local Wine/DXMT build. It checks

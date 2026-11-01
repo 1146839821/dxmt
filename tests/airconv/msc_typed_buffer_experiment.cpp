@@ -7,10 +7,13 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 #include <vector>
+#include <cstdlib>
+#include <string>
 
 namespace {
 struct Operation {
@@ -18,9 +21,11 @@ struct Operation {
   llvm::GetElementPtrInst *handle;
   unsigned index;
   bool width;
+  llvm::Argument *root = nullptr;
 };
 
-bool collect(llvm::Module &module, std::vector<Operation> &operations) {
+bool collect(llvm::Module &module, std::vector<Operation> &operations,
+             bool sidecar, uint64_t table_offset) {
   for (auto &function : module)
     for (auto &block : function)
       for (auto &instruction : block) {
@@ -68,30 +73,65 @@ bool collect(llvm::Module &module, std::vector<Operation> &operations) {
             return false;
         } else if (!call->getType()->isIntegerTy(32))
           return false;
-        operations.push_back({direct, gep, index, width});
+        llvm::Argument *root = nullptr;
+        if (sidecar) {
+          auto *table =
+              llvm::dyn_cast<llvm::LoadInst>(gep->getPointerOperand());
+          if (!table)
+            return false;
+          llvm::APInt offset(64, 0);
+          auto *base =
+              table->getPointerOperand()->stripAndAccumulateConstantOffsets(
+                  module.getDataLayout(), offset, true);
+          root = llvm::dyn_cast<llvm::Argument>(base);
+          if (!root || root->getParent() != &function ||
+              root->getType()->getPointerAddressSpace() != 2 ||
+              offset.getZExtValue() != table_offset ||
+              !gep->getOperand(1)->getType()->isIntegerTy())
+            return false;
+        }
+        operations.push_back({direct, gep, index, width, root});
       }
   return !operations.empty();
 }
 
-void patch(const std::vector<Operation> &operations) {
+void patch(const std::vector<Operation> &operations, bool sidecar,
+           uint64_t sidecar_offset) {
   for (const auto &op : operations) {
     llvm::IRBuilder<> b(op.call);
-    llvm::SmallVector<llvm::Value *, 4> indices;
-    for (auto it = op.handle->idx_begin(); it != op.handle->idx_end(); ++it)
-      indices.push_back(it->get());
-    indices.back() = b.getInt32(2);
-    auto *ptr = b.CreateGEP(op.handle->getSourceElementType(),
-                            op.handle->getPointerOperand(), indices);
-    auto *metadata = b.CreateLoad(b.getInt64Ty(), ptr, "dxmt.metadata");
-    auto *offset = b.CreateTrunc(b.CreateAnd(b.CreateLShr(metadata, 32), 255),
+    llvm::Value *offset = nullptr, *count = nullptr;
+    if (sidecar) {
+      auto *root = b.CreateBitCast(op.root, b.getInt8PtrTy(2));
+      auto *slot = b.CreateGEP(b.getInt8Ty(), root, b.getInt64(sidecar_offset));
+      auto *sidecar_ptr_type = b.getInt64Ty()->getPointerTo(2);
+      auto *slot_ptr = b.CreateBitCast(slot, sidecar_ptr_type->getPointerTo(2));
+      auto *table = b.CreateLoad(sidecar_ptr_type, slot_ptr, "dxmt.sidecar");
+      auto *index =
+          b.CreateSExtOrTrunc(op.handle->getOperand(1), b.getInt64Ty());
+      auto *word =
+          b.CreateAdd(b.CreateMul(index, b.getInt64(4)), b.getInt64(1));
+      auto *entry_ptr = b.CreateGEP(b.getInt64Ty(), table, word);
+      auto *entry = b.CreateLoad(b.getInt64Ty(), entry_ptr, "dxmt.entry");
+      offset = b.CreateTrunc(entry, b.getInt32Ty());
+      count = b.CreateTrunc(b.CreateLShr(entry, 32), b.getInt32Ty());
+    } else {
+      llvm::SmallVector<llvm::Value *, 4> indices;
+      for (auto it = op.handle->idx_begin(); it != op.handle->idx_end(); ++it)
+        indices.push_back(it->get());
+      indices.back() = b.getInt32(2);
+      auto *ptr = b.CreateGEP(op.handle->getSourceElementType(),
+                              op.handle->getPointerOperand(), indices);
+      auto *metadata = b.CreateLoad(b.getInt64Ty(), ptr, "dxmt.metadata");
+      offset = b.CreateTrunc(b.CreateAnd(b.CreateLShr(metadata, 32), 255),
+                             b.getInt32Ty());
+      auto *bytes = b.CreateTrunc(metadata, b.getInt32Ty());
+      auto *size = b.CreateTrunc(b.CreateAnd(b.CreateLShr(metadata, 40), 255),
                                  b.getInt32Ty());
-    auto *bytes = b.CreateTrunc(metadata, b.getInt32Ty());
-    auto *size = b.CreateTrunc(b.CreateAnd(b.CreateLShr(metadata, 40), 255),
-                               b.getInt32Ty());
-    auto *nonzero = b.CreateICmpNE(size, b.getInt32(0));
-    auto *safe_size = b.CreateSelect(nonzero, size, b.getInt32(1));
-    auto *count = b.CreateSelect(nonzero, b.CreateUDiv(bytes, safe_size),
-                                 b.getInt32(0), "dxmt.count");
+      auto *nonzero = b.CreateICmpNE(size, b.getInt32(0));
+      auto *safe_size = b.CreateSelect(nonzero, size, b.getInt32(1));
+      count = b.CreateSelect(nonzero, b.CreateUDiv(bytes, safe_size),
+                             b.getInt32(0), "dxmt.count");
+    }
     if (op.width) {
       op.call->replaceAllUsesWith(count);
       op.call->eraseFromParent();
@@ -99,16 +139,32 @@ void patch(const std::vector<Operation> &operations) {
       auto *old = op.call->getArgOperand(op.index);
       auto *in_bounds = b.CreateICmpULT(old, count);
       auto *adjusted = b.CreateAdd(old, offset);
-      op.call->setArgOperand(op.index, b.CreateSelect(in_bounds, adjusted,
-                                                      b.getInt32(UINT32_MAX)));
+      auto *no_wrap = b.CreateICmpUGE(adjusted, offset);
+      op.call->setArgOperand(op.index,
+                             b.CreateSelect(b.CreateAnd(in_bounds, no_wrap),
+                                            adjusted, b.getInt32(UINT32_MAX)));
     }
   }
 }
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 3)
+  if (argc != 3 && argc != 6)
     return 2;
+  bool sidecar = argc == 6;
+  uint64_t table_offset = 0, sidecar_offset = 0;
+  if (sidecar) {
+    if (std::string(argv[3]) != "--sidecar")
+      return 2;
+    char *end = nullptr;
+    table_offset = std::strtoull(argv[4], &end, 0);
+    if (!*argv[4] || *argv[4] == '-' || *end || table_offset > UINT32_MAX)
+      return 2;
+    sidecar_offset = std::strtoull(argv[5], &end, 0);
+    if (!*argv[5] || *argv[5] == '-' || *end || sidecar_offset > UINT32_MAX ||
+        sidecar_offset % 8 || table_offset == sidecar_offset)
+      return 2;
+  }
   llvm::LLVMContext context;
   context.setOpaquePointers(false);
   llvm::SMDiagnostic diagnostic;
@@ -118,11 +174,11 @@ int main(int argc, char **argv) {
     return 3;
   }
   std::vector<Operation> operations;
-  if (!collect(*module, operations)) {
+  if (!collect(*module, operations, sidecar, table_offset)) {
     llvm::errs() << "unsupported typed-buffer AIR\n";
     return 4;
   }
-  patch(operations);
+  patch(operations, sidecar, sidecar_offset);
   if (llvm::verifyModule(*module, &llvm::errs()))
     return 5;
   std::error_code error;
