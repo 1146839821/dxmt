@@ -22,6 +22,18 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
                                     "air.unknown_texture_buffer_1d"), 4, []),
         ("bad_field", source.replace("i64 %slot, i32 1", "i64 %slot, i32 0"), 4, []),
         ("sidecar_dynamic", sidecar_source, 0, ["--sidecar", "0", "8"]),
+        ("sidecar_bad_stride", sidecar_source.replace(
+            '%desc = type { %tex addrspace(1)*, %tex addrspace(1)*, i64 }',
+            '%desc = type { [2 x i64], %tex addrspace(1)*, i64 }'), 4,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_volatile", sidecar_source.replace('%texture = load %tex',
+                                                     '%texture = load volatile %tex'), 4,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_bad_index_type", sidecar_source.replace(
+            '%texture, i32 %index, i32 3)', '%texture, i64 0, i32 3)').replace(
+            '@air.read_texture_buffer_1d.s.v4i32(%tex addrspace(1)*, i32, i32)',
+            '@air.read_texture_buffer_1d.s.v4i32(%tex addrspace(1)*, i64, i32)'), 4,
+         ["--sidecar", "0", "8"]),
         ("sidecar_no_metadata", sidecar_source.split("!air.kernel")[0], 4, ["--sidecar", "0", "8"]),
         ("sidecar_wrong_binding", sidecar_source.replace('!"air.location_index", i32 2',
                                                         '!"air.location_index", i32 1'), 4,

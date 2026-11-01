@@ -285,3 +285,20 @@ instrumentation is unverified. This confirms identification for that module,
 not arbitrary MSC versions, helper-function forms, descriptor provenance,
 null table semantics, or production integration. Rollback removes the
 experimental metadata gate and fixtures without changing runtime behavior.
+
+### Descriptor and intrinsic shape gate
+
+The offline matcher now validates the actual 24-byte descriptor structure
+layout and offsets, checks the supported read/write argument counts and the
+fixed index position and type, and rejects volatile or atomic descriptor and
+table loads. Synthetic tests cover a 32-byte descriptor, volatile loads and an
+unexpected index type, as well as prior invalid provenance cases. A real MSC
+multi-table module still rewrote and passed the existing native Metal GPU
+readback (`out=51,71 values=11,21,32,42`). Validation layers were enabled;
+instrumentation of the offline metallib remains unverified.
+
+This gate is experimental and does not establish complete intrinsic overload,
+metadata, descriptor provenance, bounds, null, helper-call or status semantics.
+In particular, its resource index and supported return forms still need a
+complete ABI audit before production use. Rollback removes the added offline
+checks and their tests without changing production behavior.

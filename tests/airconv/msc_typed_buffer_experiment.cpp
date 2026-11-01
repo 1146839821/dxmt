@@ -117,8 +117,9 @@ bool collect(llvm::Module &module, std::vector<Operation> &operations,
             name == "air.is_null_texture_buffer_1d")
           continue;
         const bool width = name == "air.get_width_texture_buffer_1d";
-        const bool access = name.startswith("air.read_texture_buffer_1d.") ||
-                            name.startswith("air.write_texture_buffer_1d.");
+        const bool read = name.startswith("air.read_texture_buffer_1d.");
+        const bool write = name.startswith("air.write_texture_buffer_1d.");
+        const bool access = read || write;
         auto *direct = llvm::dyn_cast<llvm::CallInst>(call);
         if ((!width && !access) || !direct || call->arg_empty())
           return false;
@@ -129,9 +130,17 @@ bool collect(llvm::Module &module, std::vector<Operation> &operations,
         auto *type =
             gep ? llvm::dyn_cast<llvm::StructType>(gep->getSourceElementType())
                 : nullptr;
-        if (!gep || !type || type->getNumElements() != 3 ||
+        if (!gep || !type || !type->isSized() || type->getNumElements() != 3 ||
             !type->getElementType(2)->isIntegerTy(64) ||
             gep->getNumIndices() != 2 || gep->getPointerAddressSpace() != 2)
+          return false;
+        const auto *descriptor = module.getDataLayout().getStructLayout(type);
+        if (descriptor->getSizeInBytes() != 24 ||
+            descriptor->getElementOffset(0) != 0 ||
+            descriptor->getElementOffset(1) != 8 ||
+            descriptor->getElementOffset(2) != 16 ||
+            !type->getElementType(1)->isPointerTy() || load->isVolatile() ||
+            load->isAtomic())
           return false;
         auto *field = llvm::dyn_cast<llvm::ConstantInt>(
             gep->getOperand(gep->getNumOperands() - 1));
@@ -139,21 +148,22 @@ bool collect(llvm::Module &module, std::vector<Operation> &operations,
           return false;
         unsigned index = 0;
         if (access) {
-          for (unsigned i = 1; i < call->arg_size(); ++i)
-            if (call->getArgOperand(i)->getType()->isIntegerTy(32)) {
-              index = i;
-              break;
-            }
-          if (!index)
+          if (call->arg_size() != (read ? 3u : 4u) ||
+              !call->getArgOperand(1)->getType()->isIntegerTy(32) ||
+              !call->getArgOperand(call->arg_size() - 1)
+                   ->getType()
+                   ->isIntegerTy(32) ||
+              (write && !call->getType()->isVoidTy()))
             return false;
-        } else if (!call->getType()->isIntegerTy(32))
+          index = 1;
+        } else if (call->arg_size() != 1 || !call->getType()->isIntegerTy(32))
           return false;
         llvm::Argument *root = nullptr;
         uint64_t sidecar_offset = 0;
         if (!mappings.empty()) {
           auto *table =
               llvm::dyn_cast<llvm::LoadInst>(gep->getPointerOperand());
-          if (!table)
+          if (!table || table->isVolatile() || table->isAtomic())
             return false;
           llvm::APInt offset(64, 0);
           auto *base =
