@@ -43,3 +43,52 @@ instrumentation has not been established.
 
 Rollback is limited to the optional Meson target and files in `tests/airconv`.
 No feature level, shader model or tier is promoted by this experiment.
+
+## Sidecar design candidate
+
+**Goal.** Preserve the full D3D12 typed-buffer view offset and element count
+without changing the MSC descriptor ABI. This remains a design candidate; it
+is not wired into production.
+
+**Entry.** A separate eight-byte entry per CBV/SRV/UAV heap slot can hold
+`FirstElement` in the low 32 bits and `NumElements` in the high 32 bits. Null
+and non-typed slots use zero. This avoids deriving element size from reserved
+MSC metadata bits and represents offsets beyond the MSC eight-bit padding
+field. The existing checked `BufferSlice` bounds remain the authority for
+whether an entry is valid. Indices and offset arithmetic must be checked before
+addition, including the largest representable index.
+
+**Data flow.** The heap must update each sidecar entry together with its
+descriptor while holding the same lock, and copy it for every supported
+CPU-to-CPU and CPU-to-shader-visible descriptor copy. Heap binding must make
+the backing allocation resident and keep it alive through GPU completion.
+Each root descriptor table needs a sidecar pointer adjusted to the same heap
+slot as its MSC table pointer; dynamic descriptor indexing must use the same
+index for both tables. Directly indexed heaps require a separate complete
+binding strategy. Shader transforms must fail closed for a resource origin or
+operation they cannot prove, rather than silently emitting uncorrected AIR.
+
+The existing resource descriptor copy in `d3d12_descriptor_heap.cpp` and MSC
+table-address translation in that file are starting points. The sampler LOD
+sidecar demonstrates extra root-argument layout work but is experimental and
+is not proof that a resource sidecar has correct lifetimes or all binding
+semantics. `d3d12_command_list.cpp` binds descriptor-heap buffers and handles
+root argument uploads; graphics, compute, indirect execution and all active
+shader stages need corresponding validation.
+
+**Prototype evidence.** An isolated native Metal experiment with two dynamic
+descriptors used separate sidecar entries `(260, 4)` and `(261, 4)` and left
+the MSC descriptor layout unchanged. R16_SINT and R32_SINT returned and wrote
+the expected data; a zero-count control returned zero without modifying the
+buffers. This validates only that experimental data flow on the local machine,
+not production descriptor copying, GPU completion lifetime, Metal shader
+validation instrumentation, or Windows behavior. Details and artifact hashes
+are in `dxmt-test/n95-capability-gate/msc-buffer-air/evidence.md`.
+
+**Acceptance before integration.** Verify descriptor copies and overwrites,
+heap switching and table offsets, nulls and zero lengths, dynamic and direct
+indexing, in-flight submission lifetime, resource residency, overflow and
+out-of-bounds loads/stores, format conversion, `GetDimensions`, atomics,
+unsupported AIR shapes and both shader backends. The runtime path must remain
+unchanged until these contracts are met. Rollback removes the isolated
+sidecar work without changing the public feature declaration.
