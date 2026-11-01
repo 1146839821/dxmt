@@ -24,6 +24,11 @@ dx12_shader_validation = executable('dx12_shader_validation', 'dx12_shader_valid
 dx12_msc_output = executable('dx12_msc_output', 'dx12_msc_output.cpp', native: true)
 test('dx12 msc output sizes', dx12_msc_output)
 
+dx12_msc_single_flight = executable('dx12_msc_single_flight', 'dx12_msc_single_flight.cpp', native: true)
+test('dx12 msc single flight', dx12_msc_single_flight, timeout: 15)
+
+dx12_msc_concurrent = executable('dx12_msc_concurrent', 'dx12_msc_concurrent.cpp', dependencies: [d3d12_dep])
+
 dx12_airconv_compute_residency = executable('dx12_airconv_compute_residency', 'dx12_airconv_compute_residency.cpp',
   include_directories: [
     include_directories('../../src/airconv'),

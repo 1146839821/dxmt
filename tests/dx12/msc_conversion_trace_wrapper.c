@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 IRCompiler *dxmt_test_force_msc_dependency(void) { return IRCompilerCreate(); }
 
@@ -108,6 +109,14 @@ IRObject *IRCompilerAllocCompileAndLink(IRCompiler *compiler, const char *entry,
   if (!real)
     return NULL;
   fprintf(stderr, "DXMT_MSC_TRACE_BEGIN\n");
+  if (getenv("DXMT_TEST_TRACE_DELAY"))
+    usleep(150000);
+  static _Atomic unsigned failed_once;
+  if (getenv("DXMT_TEST_TRACE_FAIL_FIRST") &&
+      atomic_fetch_add(&failed_once, 1) == 0) {
+    fprintf(stderr, "DXMT_MSC_TRACE_FORCED_FAILURE\n");
+    return NULL;
+  }
   const char *late = getenv("DXMT_TEST_TRACE_LATE_IMAGE");
   if (late && !dlopen(late, RTLD_NOW | RTLD_LOCAL)) {
     fprintf(stderr, "DXMT_MSC_TRACE_LATE_FAILED\n");

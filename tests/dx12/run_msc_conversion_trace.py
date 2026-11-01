@@ -57,9 +57,8 @@ def main():
     observations = {}
     for mode in args.mode or ("baseline", "late", "grow"):
         logs = root / mode
-        env = {key: value for key, value in os.environ.items() if not key.startswith("DYLD_")}
-        env.pop("DXMT_TEST_TRACE_SMALL_METALLIB", None)
-        env.pop("DXMT_TEST_TRACE_GROW_STAGE_IN", None)
+        env = {key: value for key, value in os.environ.items() if not key.startswith("DYLD_") and
+               not key.startswith("DXMT_TEST_TRACE_")}
         env["DXMT_METALIRCONVERTER_PATH"] = str(wrapper)
         if mode == "late":
             env["DXMT_TEST_TRACE_LATE_IMAGE"] = str(late)

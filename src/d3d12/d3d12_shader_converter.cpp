@@ -16,6 +16,7 @@
 #include "DXBCParser/DXBCUtils.h"
 #include "d3d12_msc_capabilities.hpp"
 #include "d3d12_msc_output.hpp"
+#include "d3d12_msc_single_flight.hpp"
 #include "dxmt_shader_cache.hpp"
 #include "log/log.hpp"
 #include "metalirconverter_thunks.h"
@@ -225,6 +226,7 @@ struct MSCSerializedCacheHeader {
 struct MSCConversionCache {
   std::shared_mutex mutex;
   std::unordered_map<Sha1Digest, D3D12ConvertedShader> entries;
+  MSCFlightTable<Sha1Digest> flights;
 };
 
 MSCConversionCache &
@@ -1816,6 +1818,16 @@ ConvertD3D12ShaderInternal(
     if (cached != cache.entries.end()) {
       converted = cached->second;
       DEBUG("MSC shader conversion cache hit");
+      return S_OK;
+    }
+  }
+  MSCFlightTable<Sha1Digest>::Guard flight(cache.flights, cache_key);
+  {
+    std::shared_lock<std::shared_mutex> lock(cache.mutex);
+    auto cached = cache.entries.find(cache_key);
+    if (cached != cache.entries.end()) {
+      converted = cached->second;
+      DEBUG("MSC shader conversion cache hit after wait");
       return S_OK;
     }
   }

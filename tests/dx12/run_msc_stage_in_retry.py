@@ -47,7 +47,8 @@ def main():
                     "-Wl,-rpath," + str(converter.parent), "-o", str(wrapper)], check=True, timeout=30)
     symbols = (("d3d12.dll", "D3D12CreateDevice"), ("winemetal.dll", "DXMTMSCPatchSamplerLOD"))
     identities = [f"LOADED_CODE {dll} {symbol} {pe_export_bytes(stage / dll, symbol)}" for dll, symbol in symbols]
-    env = {key: value for key, value in os.environ.items() if not key.startswith("DYLD_")}
+    env = {key: value for key, value in os.environ.items() if not key.startswith("DYLD_") and
+           not key.startswith("DXMT_TEST_TRACE_")}
     env.update(WINEPREFIX=str(prefix), WINEDLLPATH=str(stage / "wine/lib/wine"),
                WINEDLLOVERRIDES="d3d12=n;dxgi=n;winemetal=b", WINEDEBUG="+loaddll",
                DXMT_METALIRCONVERTER_PATH=str(wrapper), DXMT_TEST_PRINT_LOADED_CODE="1",
