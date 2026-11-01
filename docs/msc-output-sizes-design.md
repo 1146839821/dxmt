@@ -19,18 +19,24 @@ from the current call chain.
 - **Scope:** Validate second-pass sizes against allocated capacities, require a
   nonempty metallib and a bounded, terminated entry point, and shrink buffers
   to the actual sizes. Do not change the public bridge's size-query contract.
-- **Non-scope:** Make the two independent compilations atomic, retry a growing
-  output, alter MSC caching identity, or change feature declarations.
+- **Non-scope:** Make independent compilations atomic, alter MSC caching
+  identity, or change feature declarations.
 - **Boundary:** `FinalizeMSCOutputBuffers` owns final validation of the three
   returned lengths. A failure returns `E_FAIL` before cache insertion.
 - **Tests:** Exercise equal/smaller output, each oversized result, zero-length
   stage-in followed by nonzero output, zero metallib, and invalid entry point.
   Run the existing fragment GPU readback regression and both full builds.
-- **Risk:** A nondeterministic converter whose second output grows will fail
-  safely rather than retry. Reflection comes from the second compilation.
+- **Risk:** Repeatedly growing or internally inconsistent output eventually
+  fails safely. Reflection comes from the successful final compilation.
 - **Rollback:** Revert the helper, caller change and focused tests together.
 - **Done:** Bounds tests, builds and the available runtime regression pass;
   unsupported scenarios are reported explicitly.
+
+If an output grows, the caller now retries up to three fill compilations,
+preserving previously allocated capacities when an unsuccessful bridge call
+has not yet reported all required sizes. A successful size-query response for
+an initially absent stage-in buffer is also retried with storage. Repeated
+growth or a too-small result that reports no growth fails without caching.
 
 ## Validation
 
@@ -42,3 +48,8 @@ shader validation enabled. The run checked deployed artifact identities and
 is recorded under `dxmt-test/n92-conversion-trace/msc-output-fix`. The size
 change scenarios are synthetic tests of the caller's finalization logic; the
 GPU run does not demonstrate a naturally varying MSC output size.
+
+The bounded retry cases, including staggered size reports and a successful
+query with no stage-in storage, passed on both architectures. The normal Wine
+fragment readback and negative control also passed after the retry change;
+the isolated artifacts are in `dxmt-test/n92-conversion-trace/msc-output-retry`.

@@ -1424,7 +1424,7 @@ CompileDXIL(
   }
   if (reflection)
     *reflection = params.reflection;
-  if (result != DXMT_MSC_SUCCESS)
+  if (result != DXMT_MSC_SUCCESS && result != DXMT_MSC_ERROR_OUTPUT_TOO_SMALL)
     LogMSCFailure(params, result);
   return result;
 }
@@ -1847,23 +1847,23 @@ ConvertD3D12ShaderInternal(
   converted.metallib.resize(metallib_size);
   converted.stage_in_metallib.resize(stage_in_metallib_size);
   std::vector<char> entry_point(entry_point_size);
-  error_message[0] = '\0';
-
-  result = CompileDXIL(
-      shader, stage, requested_entry_point, root_signature, root_signature_size, local_root_signature,
-      local_root_signature_size, input_layout, compile_flags, converted.metallib.data(), converted.metallib.size(),
-      entry_point.data(), entry_point.size(), &metallib_size, &entry_point_size, &threadgroup_size,
-      converted.stage_in_metallib.data(), converted.stage_in_metallib.size(), &stage_in_metallib_size, &reflection,
-      error_message, sizeof(error_message), msc_capabilities, sample_mask
+  const auto completion = CompleteMSCOutputBuffers(
+      converted.metallib, converted.stage_in_metallib, entry_point, converted.entry_point, DXMT_MSC_SUCCESS,
+      DXMT_MSC_ERROR_OUTPUT_TOO_SMALL, result,
+      [&](auto &metallib, auto &stage_in, auto &entry, MSCOutputSizes &sizes) {
+        error_message[0] = '\0';
+        return CompileDXIL(
+            shader, stage, requested_entry_point, root_signature, root_signature_size, local_root_signature,
+            local_root_signature_size, input_layout, compile_flags, metallib.data(), metallib.size(), entry.data(),
+            entry.size(), &sizes.metallib, &sizes.entry, &threadgroup_size, stage_in.data(), stage_in.size(),
+            &sizes.stage_in, &reflection, error_message, sizeof(error_message), msc_capabilities, sample_mask
+        );
+      }
   );
-  if (result != DXMT_MSC_SUCCESS)
+  if (completion == MSCOutputCompletion::CallFailed)
     return MSCResultToHRESULT(result);
-
-  if (!FinalizeMSCOutputBuffers(
-          converted.metallib, converted.stage_in_metallib, entry_point, metallib_size, stage_in_metallib_size,
-          entry_point_size, converted.entry_point
-      )) {
-    ERR("DXIL conversion returned invalid output sizes or entry point");
+  if (completion != MSCOutputCompletion::Complete) {
+    ERR("DXIL conversion returned unstable output sizes or an invalid entry point");
     return E_FAIL;
   }
   converted.threadgroup_size = threadgroup_size;
