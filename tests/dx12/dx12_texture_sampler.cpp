@@ -263,6 +263,25 @@ CheckTypedReadback(const TypedFormat &format, const UINT *mapped,
 
 int
 main(int argc, char **argv) {
+  char identity_requested[2] = {};
+  if (GetEnvironmentVariableA("DXMT_TEST_PRINT_LOADED_CODE", identity_requested,
+                              sizeof(identity_requested)) == 1 &&
+      identity_requested[0] == '1') {
+    for (const auto &entry : {std::pair{"d3d12.dll", "D3D12CreateDevice"},
+                              std::pair{"winemetal.dll", "DXMTMSCPatchSamplerLOD"}}) {
+      const auto module = GetModuleHandleA(entry.first);
+      const auto address = module ? reinterpret_cast<const unsigned char *>(
+                                        GetProcAddress(module, entry.second))
+                                  : nullptr;
+      if (!address)
+        return 1;
+      static constexpr char hex[] = "0123456789abcdef";
+      std::cout << "LOADED_CODE " << entry.first << " " << entry.second << " ";
+      for (unsigned i = 0; i < 16; ++i)
+        std::cout << hex[address[i] >> 4] << hex[address[i] & 15];
+      std::cout << "\n";
+    }
+  }
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
