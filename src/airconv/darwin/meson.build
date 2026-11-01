@@ -45,6 +45,16 @@ executable('airconv', airconv_src + airconv_cli_src,
 )
 
 if get_option('enable_tests')
+  msc_typed_buffer_metallib_test = executable('msc-typed-buffer-metallib-test',
+    files('../../../tests/airconv/msc_typed_buffer_metallib_test.cpp', '../msc_typed_buffer_metallib.cpp',
+          '../metallib_writer.cpp', '../transforms/msc_typed_buffer_sidecar.cpp'),
+    include_directories : [ include_directories('..'), llvm_include_path_darwin ],
+    cpp_args : [ airconv_args ],
+    link_args : [ llvm_ld_flags_darwin, llvm_deps ],
+    native : dxmt_crossbuild
+  )
+  test('airconv msc typed buffer metallib', msc_typed_buffer_metallib_test,
+    args : [files('../../../tests/airconv/msc_typed_buffer_sidecar_experiment.ir')])
   msc_typed_buffer_experiment = executable('msc-typed-buffer-experiment',
     files('../../../tests/airconv/msc_typed_buffer_experiment.cpp', '../metallib_writer.cpp',
           '../transforms/msc_typed_buffer_sidecar.cpp'),

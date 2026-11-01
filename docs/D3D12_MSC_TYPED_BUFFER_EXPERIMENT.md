@@ -377,3 +377,22 @@ and the typed-buffer native Metal readback with negative controls pass. A full
 Wine sampler GPU run was not performed in this slice. The typed-buffer pass
 remains unconnected to production conversion; no capability is promoted.
 Rollback restores the two prior parsers and removes the shared header.
+
+### Experimental metallib interface
+
+`SM50PatchMetalLibTypedBufferSidecar` accepts a metallib and reflected original
+and extended TLAB sizes, validates up to 64 mappings and their alignment,
+bounds and uniqueness, parses and verifies bitcode, applies the sidecar pass,
+and returns a newly owned metallib only on success. Invalid input and
+unsupported AIR return distinct codes with a null output; the caller decides
+whether to use the original. AIRCONV is built with C++ exceptions disabled, so
+allocation exhaustion is not guaranteed to produce a recoverable error.
+
+A native test checks successful output by parsing and verifying the resulting
+bitcode and finding a sidecar load. It checks short and corrupt inputs,
+misaligned, overlapping, duplicate and out-of-bounds mappings, excessive table
+count, and an unsupported table association. The existing sampler and
+experimental transform suites pass. This is not a WineMetal thunk or pipeline
+integration; no runtime path invokes the new interface, and no GPU test used
+its generated metallib in this slice. Capability declarations are unchanged.
+Rollback removes the interface, implementation and test.
