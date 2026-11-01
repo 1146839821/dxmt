@@ -443,3 +443,26 @@ sample; the wrapper control increased it during conversion on both. This does
 not cover other shader stages, configurations, threads, in-place modifications
 or the DXMT/Wine conversion path, and does not identify the dependency closure.
 The component remains unintegrated and persistent MSC caching remains disabled.
+
+### DXMT/Wine conversion trace
+
+`run_msc_conversion_trace.py` uses a test-only forwarding dylib to mark calls
+to the real MSC compiler within an isolated Wine/DXMT D3D12 fragment test.
+It verifies the paired WineMetal artifacts, loaded PE export bytes and Unix
+library path, and requires Metal API and shader validation and exact readback.
+A deliberately wrong expected-output control must fail as expected. The test
+also runs a separate process whose wrapper loads an unrelated test dylib inside
+the marked conversion window; the dyld load log must show that image there.
+For the native D3D12/DXGI override, the test checks that the staged binaries
+differ from the full-build artifacts only in the 16-byte Wine builtin DOS-stub
+marker. No built artifact or user Wine installation is modified.
+
+On the local Apple M1 Max, Wine 11.0 x86_64/Rosetta and macOS 27.0.1,
+four successful conversions were observed in each of the baseline and
+late-load runs; the baseline emitted no dyld load lines between the markers,
+and the late-load control emitted the expected image. Both fragment readback
+and its negative control passed under validation. Artifacts, hashes and logs
+are in `dxmt-test/n92-conversion-trace/results3`. The wrapper means this is
+not an uninstrumented converter; the log is process-wide, can interleave
+threads, does not cover unloads or in-place changes, and does not establish a
+dependency identity or atomic cache transaction. The cache guard is unchanged.
