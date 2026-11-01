@@ -136,6 +136,36 @@ def main():
             raise AssertionError("missing symbol rejection evidence missing")
         evidence["runs"][mode] = {"exit": result.returncode}
 
+    # The handle may resolve required MSC symbols from a dependent image.
+    # The root file must not be accepted as the provider in that case.
+    forward_source = output / "forward.c"
+    forward_source.write_text("extern void *IRCompilerCreate(void); void *force_dependency(void) { return IRCompilerCreate(); }\n")
+    forward = output / "forward.dylib"
+    subprocess.run(["xcrun", "clang", "-arch", "x86_64", "-dynamiclib", str(forward_source), str(converter),
+                    "-Wl,-rpath," + str(converter.parent), "-o", str(forward)],
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["codesign", "--force", "--sign", "-", str(forward)],
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    defined = subprocess.check_output(["nm", "-gU", str(forward)], text=True)
+    undefined = subprocess.check_output(["nm", "-u", str(forward)], text=True)
+    if "_IRCompilerCreate" in defined or "_IRCompilerCreate" not in undefined:
+        raise AssertionError("wrapper unexpectedly defines the converter symbol")
+    forward_env = environment.copy()
+    forward_env["DXMT_METALIRCONVERTER_PATH"] = str(forward)
+    result = subprocess.run([str(stage / "wine/bin/wine"), "dx12_msc_identity_thunk.exe", "new"],
+                            cwd=stage, env=forward_env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=120)
+    stdout, log = result.stdout.decode(errors="replace"), result.stderr.decode(errors="replace")
+    (output / "forward.stdout.log").write_text(stdout)
+    (output / "forward.stderr.log").write_text(log)
+    if (result.returncode != 0 or "QUERY_CODE " + export_bytes not in stdout or
+            "MSC identity bridge unavailable and version checks passed" not in stdout or
+            str(pairs[1][0]) not in log or str(forward) not in log or str(converter) not in log or
+            "MSC identity diagnostic snapshot unavailable" not in log or
+            log.count("MSC identity diagnostic revalidation unavailable") < 2):
+        raise AssertionError("dependency-provided converter symbol was not safely rejected")
+    evidence["runs"]["dependency_provider"] = {"exit": result.returncode, "wrapper_sha256": sha(forward)}
+
     # First establish that lsof observes the deliberately retained snapshot.
     with (output / "descriptor-positive.stderr.log").open("w") as stderr:
         process = subprocess.Popen([str(stage / "wine/bin/wine"), "dx12_msc_identity_thunk.exe", "new-wait"],

@@ -306,3 +306,15 @@ that any of these system dependencies changed. The cache key already includes
 OS information, but no test here establishes that OS version alone fully
 identifies the dependency closure. The diagnostic V1 response and persistent
 cache remain unavailable pending a defensible scope for those dependencies.
+
+### Symbols resolved from a dependency
+
+The dependency regression also loads a root dylib that does not export
+`marker` itself. On both local architectures, `dlsym` resolved `marker` from
+the dependency and the candidate root identity rejected the provider mapping
+(`BOUND 0`, `STABLE 0`). In a separate x64 Wine diagnostic control, an isolated
+wrapper linked to the local MSC library supplied the bridge's required symbols
+through that dependency. Both images loaded, while the root snapshot and V1
+query remained unavailable. The reproducible diagnostic runner now includes
+this control. This checks the provider mismatch path, not the identity of all
+transitive or late-loaded dependencies.

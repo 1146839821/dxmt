@@ -46,7 +46,29 @@ def main():
             results.append(observed)
         if results[0][1:4] != results[1][1:4] or hashlib.sha256(primary.read_bytes()).hexdigest() != digest:
             raise AssertionError("primary image changed during dependency-only control")
-        print("primary identity remained equal while dependency changed its behavior")
+
+        # dlsym(handle, name) can resolve an export from a dependency instead
+        # of the explicitly opened image. The provider must not bind as root.
+        forward_source = root / "forward.c"
+        forward_source.write_text("int marker(void) { return 33; }\n")
+        provider = root / "libprovider.dylib"
+        run("xcrun", "clang", "-dynamiclib", "-Wl,-install_name,@rpath/libprovider.dylib",
+            "-o", str(provider), str(forward_source))
+        run("codesign", "--force", "--sign", "-", str(provider))
+        forward_root = root / "forward-root.c"
+        forward_root.write_text("extern int marker(void); int root_function(void) { return marker(); }\n")
+        forward = root / "forward-root.dylib"
+        run("xcrun", "clang", "-dynamiclib", "-Wl,-rpath,@loader_path", "-L", str(root),
+            "-o", str(forward), str(forward_root), "-lprovider")
+        run("codesign", "--force", "--sign", "-", str(forward))
+        provider_observed = run(str(inspect), str(forward), input=b"\n").stdout.decode().splitlines()[0].split()
+        forward_digest = hashlib.sha256(forward.read_bytes()).hexdigest()
+        binding = run(str(identity), str(forward), "marker", input=b"\n\n").stdout.decode().splitlines()
+        if provider_observed[0] != "33" or Path(provider_observed[4]).resolve() != provider:
+            raise AssertionError(f"symbol was not resolved from expected dependency: {provider_observed!r}")
+        if binding != ["OPEN " + forward_digest, "BOUND 0", "STABLE 0"]:
+            raise AssertionError(f"dependency-provided symbol incorrectly bound as root: {binding!r}")
+        print("dependency changes behavior; dependency-provided symbols do not bind as root")
 
 
 if __name__ == "__main__":
