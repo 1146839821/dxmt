@@ -66,3 +66,15 @@ artifacts are checked by the runner; logs are under
 `dxmt-test/n92-conversion-trace/msc-output-forced-growth`. This verifies a
 forced entry-point size increase, not naturally variable MSC output or every
 output type.
+
+The stage-in path has a separate Wine geometry regression. A test wrapper
+reports zero bytes only for the first synthesized stage-in metallib, then
+reports the real 3,292-byte result. The pre-retry build rejects the second
+conversion as invalid and fails PSO creation. The current build recompiles,
+performs seven successful MSC compilations instead of the baseline's six,
+and passes three exact 3,072-byte geometry readbacks. A deliberately wrong
+first pixel fails as expected. Both Metal validation layers, deployed image
+hashes, loaded PE export bytes, and Unix bridge path are checked. Evidence is
+under `dxmt-test/n93-stage-in/{before,baseline,grow-verified}`. This is a
+test-induced stage-in size change on one Wine x86_64 geometry configuration;
+it does not demonstrate a naturally variable converter or main metallib growth.

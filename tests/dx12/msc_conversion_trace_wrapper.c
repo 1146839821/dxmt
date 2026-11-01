@@ -8,6 +8,34 @@
 
 IRCompiler *dxmt_test_force_msc_dependency(void) { return IRCompilerCreate(); }
 
+static _Thread_local IRMetalLibBinary *stage_in_binary;
+
+bool IRMetalLibSynthesizeStageInFunction(
+    const IRCompiler *compiler, const IRShaderReflection *reflection,
+    const IRVersionedInputLayoutDescriptor *layout, IRMetalLibBinary *binary) {
+  typedef bool (*synthesize_fn)(const IRCompiler *, const IRShaderReflection *,
+                                const IRVersionedInputLayoutDescriptor *,
+                                IRMetalLibBinary *);
+  synthesize_fn real =
+      (synthesize_fn)dlsym(RTLD_NEXT, "IRMetalLibSynthesizeStageInFunction");
+  bool success = real && real(compiler, reflection, layout, binary);
+  stage_in_binary = success ? binary : NULL;
+  return success;
+}
+
+size_t IRMetalLibGetBytecodeSize(const IRMetalLibBinary *binary) {
+  typedef size_t (*size_fn)(const IRMetalLibBinary *);
+  static _Atomic unsigned stage_calls;
+  size_fn real = (size_fn)dlsym(RTLD_NEXT, "IRMetalLibGetBytecodeSize");
+  size_t actual = real ? real(binary) : 0;
+  if (getenv("DXMT_TEST_TRACE_GROW_STAGE_IN") && binary == stage_in_binary &&
+      actual && atomic_fetch_add(&stage_calls, 1) == 0) {
+    fprintf(stderr, "DXMT_MSC_TRACE_ZERO_STAGE_IN %zu\n", actual);
+    return 0;
+  }
+  return actual;
+}
+
 const char *IRShaderReflectionGetEntryPointFunctionName(
     const IRShaderReflection *reflection) {
   typedef const char *(*entry_fn)(const IRShaderReflection *);

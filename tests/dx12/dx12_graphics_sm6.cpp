@@ -1031,6 +1031,24 @@ bool RunVertexStride(const char *vs_path, const char *ps_path,
 } // namespace
 
 int main(int argc, char **argv) {
+  char identity_requested[2] = {};
+  if (GetEnvironmentVariableA("DXMT_TEST_PRINT_LOADED_CODE", identity_requested, sizeof(identity_requested)) == 1 &&
+      identity_requested[0] == '1') {
+    for (const auto &[module_name, symbol] : {std::pair{"d3d12.dll", "D3D12CreateDevice"},
+                                              std::pair{"winemetal.dll", "DXMTMSCPatchSamplerLOD"}}) {
+      auto module = GetModuleHandleA(module_name);
+      auto address = module ? reinterpret_cast<const unsigned char *>(GetProcAddress(module, symbol)) : nullptr;
+      if (!address) {
+        std::cerr << "loaded code identity unavailable for " << symbol << "\n";
+        return 1;
+      }
+      static const char hex[] = "0123456789abcdef";
+      std::cout << "LOADED_CODE " << module_name << " " << symbol << " ";
+      for (unsigned i = 0; i < 16; ++i)
+        std::cout << hex[address[i] >> 4] << hex[address[i] & 15];
+      std::cout << "\n";
+    }
+  }
   if (argc == 5 && !strcmp(argv[1], "--vertex-stride"))
     return RunVertexStride(argv[2], argv[3], argv[4]) ? 0 : 1;
   if ((argc == 7 || argc == 8) && !strcmp(argv[1], "--gs-differential"))
