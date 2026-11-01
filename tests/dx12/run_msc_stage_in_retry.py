@@ -22,10 +22,10 @@ def main():
     for name in ("stage", "prefix", "build", "converter", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--mode", choices=("baseline", "grow", "metallib"), required=True)
-    parser.add_argument("--small-metallib", type=Path)
+    parser.add_argument("--large-metallib", type=Path)
     args = parser.parse_args()
-    if (args.mode == "metallib") != bool(args.small_metallib):
-        parser.error("--small-metallib is required only for metallib mode")
+    if (args.mode == "metallib") != bool(args.large_metallib):
+        parser.error("--large-metallib is required only for metallib mode")
     stage, prefix, build, converter = (getattr(args, name).resolve(strict=True)
                                        for name in ("stage", "prefix", "build", "converter"))
     output = args.output.absolute()
@@ -62,7 +62,7 @@ def main():
     else:
         env.pop("DXMT_TEST_TRACE_GROW_STAGE_IN", None)
     if args.mode == "metallib":
-        small = args.small_metallib.resolve(strict=True)
+        small = args.large_metallib.resolve(strict=True)
         verifier = output / "verify-metallib"
         subprocess.run(["xcrun", "clang", "-arch", "x86_64", "-framework", "Foundation", "-framework", "Metal",
                         str(repository / "tests/dx12/validate_test_metallib.m"), "-o", str(verifier)],
@@ -70,9 +70,9 @@ def main():
         result = subprocess.run([str(verifier), str(small)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 timeout=30, check=True)
         (output / "verify-metallib.log").write_bytes(result.stdout)
-        env["DXMT_TEST_TRACE_SMALL_METALLIB"] = str(small)
+        env["DXMT_TEST_TRACE_LARGE_METALLIB"] = str(small)
     else:
-        env.pop("DXMT_TEST_TRACE_SMALL_METALLIB", None)
+        env.pop("DXMT_TEST_TRACE_LARGE_METALLIB", None)
     command = [str(stage / "wine/bin/wine"), "dx12_graphics_sm6.exe", "--gs-differential",
                "geometry_differential_3.vs.cso", "geometry_differential_3.ps.cso",
                "geometry_differential_3.gs.cso", "triangle", "none"]
@@ -98,13 +98,13 @@ def main():
             raise AssertionError("exact geometry readback did not pass")
         if label == "wrong" and "FAIL GS kind=triangle index=none pass=0 byte=0 got=1 expected=0" not in log:
             raise AssertionError("deliberately wrong readback was not rejected")
-        injected = "DXMT_MSC_TRACE_ZERO_STAGE_IN" in log
+        injected = "DXMT_MSC_TRACE_LARGE_STAGE_IN" in log
         if injected != (args.mode == "grow"):
             raise AssertionError(f"{label}: stage-in size control was not observed")
-        small_injected = "DXMT_MSC_TRACE_SMALL_METALLIB" in log
+        small_injected = "DXMT_MSC_TRACE_LARGE_METALLIB" in log
         if small_injected != (args.mode == "metallib"):
             raise AssertionError(f"{label}: metallib size control was not observed")
-        if log.count("DXMT_MSC_TRACE_END ok") < (7 if injected or small_injected else 6):
+        if log.count("DXMT_MSC_TRACE_END ok") < (4 if injected or small_injected else 3):
             raise AssertionError(f"{label}: expected compilation and retry count was not observed")
         results.append({"case": label, "exit": result.returncode, "stage_in_injected": injected,
                         "metallib_injected": small_injected,
@@ -112,7 +112,7 @@ def main():
     (output / "summary.json").write_text(json.dumps({"mode": args.mode, "converter_sha256": sha(converter),
         "wrapper_sha256": sha(wrapper), "artifacts": {path: sha(stage / path) for _, path in pairs},
         "fixtures": {name: sha(stage / name) for name in command[3:6]},
-        "small_metallib_sha256": sha(small) if args.mode == "metallib" else None, "results": results}, indent=2) + "\n")
+        "large_metallib_sha256": sha(small) if args.mode == "metallib" else None, "results": results}, indent=2) + "\n")
     print("MSC stage-in", args.mode, "passed:", output)
 
 

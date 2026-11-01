@@ -33,7 +33,7 @@ size_t IRMetalLibGetBytecodeSize(const IRMetalLibBinary *binary) {
   static _Atomic unsigned stage_calls;
   size_fn real = (size_fn)dlsym(RTLD_NEXT, "IRMetalLibGetBytecodeSize");
   size_t actual = real ? real(binary) : 0;
-  const char *small_path = getenv("DXMT_TEST_TRACE_SMALL_METALLIB");
+  const char *small_path = getenv("DXMT_TEST_TRACE_LARGE_METALLIB");
   static _Atomic unsigned main_calls;
   if (small_path && binary != stage_in_binary && actual &&
       atomic_fetch_add(&main_calls, 1) == 0) {
@@ -41,7 +41,7 @@ size_t IRMetalLibGetBytecodeSize(const IRMetalLibBinary *binary) {
     if (!file || fseek(file, 0, SEEK_END))
       return 0;
     long length = ftell(file);
-    if (length <= 0 || (size_t)length >= actual || fseek(file, 0, SEEK_SET)) {
+    if (length <= 65536 || fseek(file, 0, SEEK_SET)) {
       fclose(file);
       return 0;
     }
@@ -59,14 +59,14 @@ size_t IRMetalLibGetBytecodeSize(const IRMetalLibBinary *binary) {
     }
     substitute_binary = binary;
     substitute_size = (size_t)length;
-    fprintf(stderr, "DXMT_MSC_TRACE_SMALL_METALLIB %zu %zu\n", substitute_size,
+    fprintf(stderr, "DXMT_MSC_TRACE_LARGE_METALLIB %zu %zu\n", substitute_size,
             actual);
     return substitute_size;
   }
   if (getenv("DXMT_TEST_TRACE_GROW_STAGE_IN") && binary == stage_in_binary &&
       actual && atomic_fetch_add(&stage_calls, 1) == 0) {
-    fprintf(stderr, "DXMT_MSC_TRACE_ZERO_STAGE_IN %zu\n", actual);
-    return 0;
+    fprintf(stderr, "DXMT_MSC_TRACE_LARGE_STAGE_IN %zu\n", actual);
+    return actual + 65536;
   }
   return actual;
 }
@@ -94,8 +94,11 @@ const char *IRShaderReflectionGetEntryPointFunctionName(
   const char *name = real ? real(reflection) : NULL;
   if (getenv("DXMT_TEST_TRACE_GROW_ENTRY") && name && strlen(name) > 1 &&
       atomic_fetch_add(&calls, 1) == 0) {
-    fprintf(stderr, "DXMT_MSC_TRACE_SHORT_ENTRY\n");
-    return "x";
+    static char long_name[513];
+    memset(long_name, 'x', sizeof(long_name) - 1);
+    long_name[sizeof(long_name) - 1] = '\0';
+    fprintf(stderr, "DXMT_MSC_TRACE_LONG_ENTRY\n");
+    return long_name;
   }
   return name;
 }

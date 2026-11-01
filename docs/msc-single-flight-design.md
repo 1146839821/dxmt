@@ -40,8 +40,8 @@ The change does not share an `IRCompiler` object between threads.
 
 The native tests passed on arm64 and x86_64 for same-key serialization,
 different-key parallelism and failure release. On the same instrumented Wine
-test, eight successful PSOs required two MSC calls (the existing size and fill
-passes), rather than 16. A forced first compile failure produced one failed
+test before the single-call fast path, eight successful PSOs required two MSC
+calls (size and fill passes), rather than 16. A forced first compile failure produced one failed
 PSO, then seven successful PSOs and two successful MSC calls. Stage/build
 hashes and loaded WineMetal export bytes and Unix path were checked. The
 artifacts are under `dxmt-test/n94-single-flight/{before,after-final,fail-first}`.
@@ -59,3 +59,8 @@ hashes, PE export bytes and loaded Unix path are checked; logs are under
 `dxmt-test/n94-single-flight/{two-shaders-verified,two-shaders-serial,same-key-recheck}`.
 These observations validate this particular workload, not an application-wide
 performance claim.
+
+After the single-call fast path, the same instrumented workload used one MSC
+call for eight matching PSOs and two overlapping calls for two distinct
+shaders. The forced-first-failure control continued to recover. Evidence is
+under `dxmt-test/n94-single-flight/{one-pass,one-pass-failure,one-pass-parallel}`.

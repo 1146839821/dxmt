@@ -82,8 +82,8 @@ def main():
         intervals = re.findall(r"DXMT_MSC_TRACE_BEGIN\n(.*?)DXMT_MSC_TRACE_END ok", log, flags=re.S)
         if not intervals:
             raise AssertionError(f"{mode}: no successful real conversion was observed")
-        if mode == "grow" and ("DXMT_MSC_TRACE_SHORT_ENTRY" not in log or len(intervals) < 5):
-            raise AssertionError("grow: no forced undersized query and retry were observed")
+        if mode == "grow" and ("DXMT_MSC_TRACE_LONG_ENTRY" not in log or len(intervals) < 3):
+            raise AssertionError("grow: no forced oversized entry and retry were observed")
         late_in_interval = any(str(late) in interval for interval in intervals)
         if late_in_interval != (mode == "late"):
             raise AssertionError(f"{mode}: unexpected late-load observation")

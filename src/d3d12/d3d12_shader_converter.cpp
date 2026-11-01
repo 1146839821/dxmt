@@ -1839,26 +1839,17 @@ ConvertD3D12ShaderInternal(
   }
 
   char error_message[1024] = {};
-  size_t metallib_size = 0;
-  size_t stage_in_metallib_size = 0;
-  size_t entry_point_size = 0;
   std::array<uint32_t, 3> threadgroup_size = {};
   dxmt_msc_shader_reflection reflection = {};
-
-  int result = CompileDXIL(
-      shader, stage, requested_entry_point, root_signature, root_signature_size, local_root_signature,
-      local_root_signature_size, input_layout, compile_flags, nullptr, 0, nullptr, 0, &metallib_size, &entry_point_size,
-      &threadgroup_size, nullptr, 0, &stage_in_metallib_size, &reflection, error_message, sizeof(error_message),
-      msc_capabilities, sample_mask
-  );
-  if (result != DXMT_MSC_SUCCESS)
-    return MSCResultToHRESULT(result);
-  if (!metallib_size || !entry_point_size)
-    return E_FAIL;
-
-  converted.metallib.resize(metallib_size);
-  converted.stage_in_metallib.resize(stage_in_metallib_size);
-  std::vector<char> entry_point(entry_point_size);
+  // Most conversions fit in one call; the bounded helper grows these buffers
+  // using the bridge's reported sizes when a larger output is required.
+  constexpr size_t initial_metallib_capacity = 64 * 1024;
+  constexpr size_t initial_stage_in_capacity = 16 * 1024;
+  constexpr size_t initial_entry_capacity = 256;
+  converted.metallib.resize(initial_metallib_capacity);
+  converted.stage_in_metallib.resize(input_layout ? initial_stage_in_capacity : 0);
+  std::vector<char> entry_point(initial_entry_capacity);
+  int result = DXMT_MSC_SUCCESS;
   const auto completion = CompleteMSCOutputBuffers(
       converted.metallib, converted.stage_in_metallib, entry_point, converted.entry_point, DXMT_MSC_SUCCESS,
       DXMT_MSC_ERROR_OUTPUT_TOO_SMALL, result,

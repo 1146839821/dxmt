@@ -2,7 +2,7 @@
 
 ## Baseline and evidence
 
-`ConvertD3D12ShaderInternal` performs two separate MSC compilations: one to
+Before the single-call fast path, `ConvertD3D12ShaderInternal` performed two separate MSC compilations: one to
 obtain sizes and another to fill allocated buffers. The Unix bridge treats a
 null output pointer with zero capacity as a size query, including for the
 optional stage-in metallib. Thus, if the first pass reports zero stage-in bytes
@@ -89,3 +89,24 @@ of six and passed the exact geometry readback and wrong-pixel control with
 both Metal validation modes. Artifact, fixture and loaded-runtime identities
 are recorded in `dxmt-test/n93-stage-in/metallib-{before,verified2}`. This is
 test-injected growth, not an observation of naturally varying MSC output.
+
+## Single-call fast path
+
+The caller now supplies initial buffers of 64 KiB for the main metallib,
+16 KiB for stage-in when requested, and 256 bytes for the entry point. Most
+shaders can therefore be converted once. The bounded retry logic grows any
+insufficient buffers from bridge-reported requirements. The first compile is
+no longer merely a query; tests that force oversized output must cause the
+bridge to reject that first call rather than substitute data that would be
+accepted as a finished shader. These capacities are heuristics, not limits.
+They add temporary allocation overhead, particularly for concurrent distinct
+shaders; unusually large outputs still require additional conversions.
+
+On the local Wine x86_64 tests, the common compute case used one MSC call
+instead of two; a vertex/geometry/fragment pipeline used three instead of six.
+Tests injected an entry point over 256 bytes, a stage-in over 16 KiB, and a
+separately Metal-validated metallib over 64 KiB. Each required an extra compile
+and passed exact GPU readback and the incorrect-output control. Logs are under
+`dxmt-test/n94-single-flight/one-pass-entry-growth` and
+`dxmt-test/n93-stage-in/one-pass-{baseline,stage-growth,metallib-growth}`.
+These instrumented results count calls, not application performance.
