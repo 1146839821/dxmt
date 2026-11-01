@@ -110,6 +110,11 @@ if get_option('enable_tests')
       args: [files('../../../tests/airconv/test_msc_image_epoch.py'),
              files('../../../tests/airconv/darwin_image_epoch_probe.c'),
              files('../../winemetal/unix/msc_image_epoch.c')])
+    test('airconv msc conversion image epoch', icb_experiment_python,
+      args: [files('../../../tests/airconv/test_msc_conversion_epoch.py'),
+             files('../../../tests/airconv/darwin_msc_conversion_epoch.c'),
+             files('../../winemetal/unix/msc_image_epoch.c'),
+             meson.project_source_root() / 'include'])
   endif
   if icb_experiment_opt.found() and icb_experiment_python.found()
     test('airconv msc icb index layout', icb_experiment_python,

@@ -423,3 +423,23 @@ The runner verifies the PE export bytes, PE/Unix artifact hashes, and loaded
 Unix bridge path. This is a check of exported API entry-point providers, not of
 the internal dependencies or late loads of the converter. The V1 identity
 query still reports unavailable and MSC persistent caching remains disabled.
+
+### Real conversion event observation
+
+`test_msc_conversion_epoch.py` is an opt-in standalone native probe, enabled
+with `DXMT_TEST_MSC_RUNTIME_IMAGE` and `DXMT_TEST_MSC_DXIL`. It explicitly
+compiles for the Python process architecture, checks the converter's loaded
+path and file hash, requires a nonempty metallib, and rejects an invalid DXIL
+control. A test-only wrapper performs a deliberate late `dlopen` during a real
+MSC compile; the event counter must increase for that positive control.
+
+On local macOS 27.0.1, using converter SHA-256
+`cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4` and
+fragment DXIL SHA-256
+`62217eddf6f94fddd38ef8086768dd64ae5b87443d53267f8db9b08320ef7695`,
+both x86_64/Rosetta and arm64 produced a 4,828-byte metallib. The observed
+epoch did not change between the post-load snapshot and completion in that
+sample; the wrapper control increased it during conversion on both. This does
+not cover other shader stages, configurations, threads, in-place modifications
+or the DXMT/Wine conversion path, and does not identify the dependency closure.
+The component remains unintegrated and persistent MSC caching remains disabled.
