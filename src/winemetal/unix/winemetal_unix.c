@@ -2567,6 +2567,17 @@ thunk_DXMTMSCPatchSamplerLOD(void *args) {
   return STATUS_SUCCESS;
 }
 
+_Static_assert(sizeof(struct dxmt_msc_patch_typed_buffer_params32) == 44 &&
+               offsetof(struct dxmt_msc_patch_typed_buffer_params32, output_size) == 32,
+               "typed buffer WOW64 ABI mismatch");
+
+static NTSTATUS
+thunk_DXMTMSCPatchTypedBuffer(void *args) {
+  struct dxmt_msc_patch_typed_buffer_params *params = args;
+  params->ret = dxmt_msc_patch_typed_buffer(params);
+  return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 thunk_DXMTMSCGetCapabilities(void *args) {
   struct dxmt_msc_capabilities *params = args;
@@ -2733,6 +2744,30 @@ thunk32_DXMTMSCPatchSamplerLOD(void *args) {
   params.output = UInt32ToPtr(src->output);
   params.output_capacity = src->output_capacity;
   params.ret = dxmt_msc_patch_sampler_lod(&params);
+  if (params.output_size > UINT32_MAX) {
+    src->output_size = 0;
+    src->ret = DXMT_MSC_ERROR_OUTPUT_TOO_SMALL;
+  } else {
+    src->output_size = (uint32_t)params.output_size;
+    src->ret = params.ret;
+  }
+  src->patch_status = params.patch_status;
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk32_DXMTMSCPatchTypedBuffer(void *args) {
+  struct dxmt_msc_patch_typed_buffer_params32 *src = args;
+  struct dxmt_msc_patch_typed_buffer_params params = {};
+  params.metallib = UInt32ToPtr(src->metallib);
+  params.metallib_size = src->metallib_size;
+  params.tables = UInt32ToPtr(src->tables);
+  params.table_count = src->table_count;
+  params.original_root_size = src->original_root_size;
+  params.extended_root_size = src->extended_root_size;
+  params.output = UInt32ToPtr(src->output);
+  params.output_capacity = src->output_capacity;
+  params.ret = dxmt_msc_patch_typed_buffer(&params);
   if (params.output_size > UINT32_MAX) {
     src->output_size = 0;
     src->ret = DXMT_MSC_ERROR_OUTPUT_TOO_SMALL;
@@ -4581,9 +4616,10 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLDevice_sparseTextureTileSize,
     &thunk_DXMTMSCPatchSamplerLOD,
     &thunk_DXMTMSCGetIdentityV1,
+    &thunk_DXMTMSCPatchTypedBuffer,
 };
 _Static_assert(sizeof(__wine_unix_call_funcs) / sizeof(__wine_unix_call_funcs[0]) ==
-                   unix_dxmt_msc_get_identity_v1 + 1,
+                   unix_dxmt_msc_patch_typed_buffer + 1,
                "MSC identity Unix-call ordinal mismatch");
 
 #ifndef DXMT_NATIVE
@@ -4787,8 +4823,9 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_sparseTextureTileSize,
     &thunk32_DXMTMSCPatchSamplerLOD,
     &thunk_DXMTMSCGetIdentityV1,
+    &thunk32_DXMTMSCPatchTypedBuffer,
 };
 _Static_assert(sizeof(__wine_unix_call_wow64_funcs) / sizeof(__wine_unix_call_wow64_funcs[0]) ==
-                   unix_dxmt_msc_get_identity_v1 + 1,
+                   unix_dxmt_msc_patch_typed_buffer + 1,
                "MSC identity WOW64 ordinal mismatch");
 #endif

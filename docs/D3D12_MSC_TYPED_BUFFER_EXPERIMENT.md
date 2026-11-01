@@ -409,3 +409,26 @@ produce an output file. Metal validation was enabled, but instrumentation of
 the offline metallib is unverified. This does not exercise WineMetal thunks,
 D3D12 command binding, resource residency or submission lifetime. No production
 path has been enabled. Rollback restores the direct-pass test invocation.
+
+### Experimental WineMetal typed-buffer bridge
+
+`DXMTMSCPatchTypedBuffer` adds Unix-call ordinal 199 after the existing
+ordinals, plus a WOW64 structure and conversion thunk. It mirrors the sampler
+bridge's size-query and caller-owned output convention. Invalid parameters
+return an error with zero output size; unsupported AIR returns success with an
+explicit unsupported patch status; an undersized output buffer is not written.
+The bridge is not called by D3D12 pipeline creation.
+
+On local 64-bit Wine, the targeted thunk test passed size query, undersized
+buffer and sentinel preservation, successful output, invalid mapping,
+unsupported mapping and excessive table count. It verified the loaded export
+bytes and Unix library path against the task-specific staged build. The
+resulting metallib also passed the existing native Metal multi-table GPU probe
+(`out=51,71 values=11,21,32,42`), with API and GPU validation enabled; offline
+metallib shader-validation instrumentation remains unverified. The original
+prefix and deployment were preserved. The first test attempt loaded an older
+WineMetal PE from the copied stage's Wine library directory and failed with an
+unimplemented export; the final isolated run used matching PE and Unix builds.
+The WOW64 structure has a compile-time size/offset check and the x86 PE build
+passes, but a 32-bit Wine execution was not performed. Pipeline integration,
+GPU sidecar binding, residency and submission lifetimes remain unverified.

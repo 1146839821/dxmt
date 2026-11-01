@@ -239,9 +239,33 @@ enum dxmt_msc_unixcall {
   unix_dxmt_msc_synthesize_ray_intersection,
   unix_dxmt_msc_patch_sampler_lod = 197,
   unix_dxmt_msc_get_identity_v1 = 198,
+  unix_dxmt_msc_patch_typed_buffer = 199,
 };
 
 #pragma pack(push, 8)
+
+struct dxmt_msc_typed_buffer_table { uint32_t table_offset, sidecar_offset; };
+enum dxmt_msc_typed_buffer_patch_status {
+  DXMT_MSC_TYPED_BUFFER_PATCHED = 0,
+  DXMT_MSC_TYPED_BUFFER_INVALID_INPUT = 1,
+  DXMT_MSC_TYPED_BUFFER_UNSUPPORTED = 2,
+};
+struct dxmt_msc_patch_typed_buffer_params {
+  const void *metallib;
+  size_t metallib_size;
+  const struct dxmt_msc_typed_buffer_table *tables;
+  uint32_t table_count, original_root_size, extended_root_size;
+  void *output;
+  size_t output_capacity, output_size;
+  uint32_t patch_status;
+  int32_t ret;
+};
+struct dxmt_msc_patch_typed_buffer_params32 {
+  uint32_t metallib, metallib_size, tables;
+  uint32_t table_count, original_root_size, extended_root_size;
+  uint32_t output, output_capacity, output_size, patch_status;
+  int32_t ret;
+};
 
 struct dxmt_msc_lod_table { uint32_t sampler_table_offset, sidecar_offset; };
 enum dxmt_msc_lod_patch_status {
@@ -520,6 +544,7 @@ WINEMETAL_API int DXMTMSCGetIdentityV1(struct dxmt_msc_identity_v1 *identity);
 
 WINEMETAL_API int DXMTMSCCompileDXIL(struct dxmt_msc_compile_dxil_params *params);
 WINEMETAL_API int DXMTMSCPatchSamplerLOD(struct dxmt_msc_patch_lod_params *params);
+WINEMETAL_API int DXMTMSCPatchTypedBuffer(struct dxmt_msc_patch_typed_buffer_params *params);
 
 WINEMETAL_API int DXMTMSCSynthesizeRayDispatch(struct dxmt_msc_synthesize_ray_dispatch_params *params);
 

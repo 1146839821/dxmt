@@ -68,6 +68,14 @@ DXMTMSCPatchSamplerLOD(struct dxmt_msc_patch_lod_params *params) {
 }
 
 WINEMETAL_API int
+DXMTMSCPatchTypedBuffer(struct dxmt_msc_patch_typed_buffer_params *params) {
+  if (!params)
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  NTSTATUS status = WINE_UNIX_CALL(unix_dxmt_msc_patch_typed_buffer, params);
+  return status ? DXMT_MSC_ERROR_UNAVAILABLE : params->ret;
+}
+
+WINEMETAL_API int
 DXMTMSCSynthesizeRayDispatch(struct dxmt_msc_synthesize_ray_dispatch_params *params) {
   if (!params)
     return DXMT_MSC_ERROR_INVALID_ARGUMENT;
