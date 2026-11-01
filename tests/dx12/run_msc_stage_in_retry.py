@@ -21,8 +21,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("stage", "prefix", "build", "converter", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
-    parser.add_argument("--mode", choices=("baseline", "grow"), required=True)
+    parser.add_argument("--mode", choices=("baseline", "grow", "metallib"), required=True)
+    parser.add_argument("--small-metallib", type=Path)
     args = parser.parse_args()
+    if (args.mode == "metallib") != bool(args.small_metallib):
+        parser.error("--small-metallib is required only for metallib mode")
     stage, prefix, build, converter = (getattr(args, name).resolve(strict=True)
                                        for name in ("stage", "prefix", "build", "converter"))
     output = args.output.absolute()
@@ -57,6 +60,18 @@ def main():
         env["DXMT_TEST_TRACE_GROW_STAGE_IN"] = "1"
     else:
         env.pop("DXMT_TEST_TRACE_GROW_STAGE_IN", None)
+    if args.mode == "metallib":
+        small = args.small_metallib.resolve(strict=True)
+        verifier = output / "verify-metallib"
+        subprocess.run(["xcrun", "clang", "-arch", "x86_64", "-framework", "Foundation", "-framework", "Metal",
+                        str(repository / "tests/dx12/validate_test_metallib.m"), "-o", str(verifier)],
+                       check=True, timeout=30)
+        result = subprocess.run([str(verifier), str(small)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                timeout=30, check=True)
+        (output / "verify-metallib.log").write_bytes(result.stdout)
+        env["DXMT_TEST_TRACE_SMALL_METALLIB"] = str(small)
+    else:
+        env.pop("DXMT_TEST_TRACE_SMALL_METALLIB", None)
     command = [str(stage / "wine/bin/wine"), "dx12_graphics_sm6.exe", "--gs-differential",
                "geometry_differential_3.vs.cso", "geometry_differential_3.ps.cso",
                "geometry_differential_3.gs.cso", "triangle", "none"]
@@ -85,13 +100,18 @@ def main():
         injected = "DXMT_MSC_TRACE_ZERO_STAGE_IN" in log
         if injected != (args.mode == "grow"):
             raise AssertionError(f"{label}: stage-in size control was not observed")
-        if log.count("DXMT_MSC_TRACE_END ok") < (7 if injected else 6):
+        small_injected = "DXMT_MSC_TRACE_SMALL_METALLIB" in log
+        if small_injected != (args.mode == "metallib"):
+            raise AssertionError(f"{label}: metallib size control was not observed")
+        if log.count("DXMT_MSC_TRACE_END ok") < (7 if injected or small_injected else 6):
             raise AssertionError(f"{label}: expected compilation and retry count was not observed")
         results.append({"case": label, "exit": result.returncode, "stage_in_injected": injected,
+                        "metallib_injected": small_injected,
                         "successful_conversions": log.count("DXMT_MSC_TRACE_END ok")})
     (output / "summary.json").write_text(json.dumps({"mode": args.mode, "converter_sha256": sha(converter),
         "wrapper_sha256": sha(wrapper), "artifacts": {path: sha(stage / path) for _, path in pairs},
-        "fixtures": {name: sha(stage / name) for name in command[3:6]}, "results": results}, indent=2) + "\n")
+        "fixtures": {name: sha(stage / name) for name in command[3:6]},
+        "small_metallib_sha256": sha(small) if args.mode == "metallib" else None, "results": results}, indent=2) + "\n")
     print("MSC stage-in", args.mode, "passed:", output)
 
 

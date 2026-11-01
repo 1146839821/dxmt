@@ -78,3 +78,14 @@ hashes, loaded PE export bytes, and Unix bridge path are checked. Evidence is
 under `dxmt-test/n93-stage-in/{before,baseline,grow-verified}`. This is a
 test-induced stage-in size change on one Wine x86_64 geometry configuration;
 it does not demonstrate a naturally variable converter or main metallib growth.
+
+The same geometry regression can inject a main-metallib increase: the first
+sizing pass receives a separate 4,788-byte metallib, and the next pass returns
+the real 20,020-byte result. The fixture is independently loaded through
+`MTLDevice` and must contain a function; it is used only during the discarded
+sizing pass. On local Wine x86_64, the pre-retry build returned output-too-small
+and failed PSO creation. The retry build performed seven conversions instead
+of six and passed the exact geometry readback and wrong-pixel control with
+both Metal validation modes. Artifact, fixture and loaded-runtime identities
+are recorded in `dxmt-test/n93-stage-in/metallib-{before,verified2}`. This is
+test-injected growth, not an observation of naturally varying MSC output.

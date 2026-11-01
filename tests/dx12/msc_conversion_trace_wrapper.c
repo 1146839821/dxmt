@@ -9,6 +9,9 @@
 IRCompiler *dxmt_test_force_msc_dependency(void) { return IRCompilerCreate(); }
 
 static _Thread_local IRMetalLibBinary *stage_in_binary;
+static _Thread_local const IRMetalLibBinary *substitute_binary;
+static _Thread_local unsigned char *substitute_bytes;
+static _Thread_local size_t substitute_size;
 
 bool IRMetalLibSynthesizeStageInFunction(
     const IRCompiler *compiler, const IRShaderReflection *reflection,
@@ -28,12 +31,56 @@ size_t IRMetalLibGetBytecodeSize(const IRMetalLibBinary *binary) {
   static _Atomic unsigned stage_calls;
   size_fn real = (size_fn)dlsym(RTLD_NEXT, "IRMetalLibGetBytecodeSize");
   size_t actual = real ? real(binary) : 0;
+  const char *small_path = getenv("DXMT_TEST_TRACE_SMALL_METALLIB");
+  static _Atomic unsigned main_calls;
+  if (small_path && binary != stage_in_binary && actual &&
+      atomic_fetch_add(&main_calls, 1) == 0) {
+    FILE *file = fopen(small_path, "rb");
+    if (!file || fseek(file, 0, SEEK_END))
+      return 0;
+    long length = ftell(file);
+    if (length <= 0 || (size_t)length >= actual || fseek(file, 0, SEEK_SET)) {
+      fclose(file);
+      return 0;
+    }
+    substitute_bytes = malloc((size_t)length);
+    if (!substitute_bytes) {
+      fclose(file);
+      return 0;
+    }
+    size_t read_size = fread(substitute_bytes, 1, (size_t)length, file);
+    int close_result = fclose(file);
+    if (read_size != (size_t)length || close_result) {
+      free(substitute_bytes);
+      substitute_bytes = NULL;
+      return 0;
+    }
+    substitute_binary = binary;
+    substitute_size = (size_t)length;
+    fprintf(stderr, "DXMT_MSC_TRACE_SMALL_METALLIB %zu %zu\n", substitute_size,
+            actual);
+    return substitute_size;
+  }
   if (getenv("DXMT_TEST_TRACE_GROW_STAGE_IN") && binary == stage_in_binary &&
       actual && atomic_fetch_add(&stage_calls, 1) == 0) {
     fprintf(stderr, "DXMT_MSC_TRACE_ZERO_STAGE_IN %zu\n", actual);
     return 0;
   }
   return actual;
+}
+
+size_t IRMetalLibGetBytecode(const IRMetalLibBinary *binary, uint8_t *output) {
+  typedef size_t (*bytecode_fn)(const IRMetalLibBinary *, uint8_t *);
+  if (binary == substitute_binary && substitute_bytes) {
+    memcpy(output, substitute_bytes, substitute_size);
+    size_t result = substitute_size;
+    free(substitute_bytes);
+    substitute_bytes = NULL;
+    substitute_binary = NULL;
+    return result;
+  }
+  bytecode_fn real = (bytecode_fn)dlsym(RTLD_NEXT, "IRMetalLibGetBytecode");
+  return real ? real(binary, output) : 0;
 }
 
 const char *IRShaderReflectionGetEntryPointFunctionName(
