@@ -400,10 +400,13 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
   std::vector<uint64_t> static_samplers_encoded_;
   std::vector<dxmt_msc_root_parameter_layout> msc_layout_;
   std::vector<air::MSCSamplerSidecarTable> msc_lod_sidecar_tables_;
+  std::vector<air::MSCResourceSidecarTable> msc_resource_sidecar_tables_;
   std::mutex msc_layout_mutex_;
   std::mutex msc_lod_layout_mutex_;
+  std::mutex msc_resource_layout_mutex_;
   bool msc_layout_initialized_ = false;
   bool msc_lod_layout_initialized_ = false;
+  bool msc_resource_layout_initialized_ = false;
 
 public:
   bool
@@ -643,6 +646,54 @@ public:
       MSCLODSidecarTableCount = static_cast<unsigned>(msc_lod_sidecar_tables_.size());
       MSCLODSidecarTables = msc_lod_sidecar_tables_.data();
       msc_lod_layout_initialized_ = true;
+      return S_OK;
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
+  }
+
+  HRESULT
+  InitializeMSCResourceSidecarLayout() override {
+    std::lock_guard lock(msc_resource_layout_mutex_);
+    if (msc_resource_layout_initialized_)
+      return S_OK;
+    // A local root or directly indexed heap needs a different mapping.
+    if (IsLocal() || IsResourceHeapDirectlyIndexed())
+      return E_NOTIMPL;
+    auto hr = InitializeMSCLayout();
+    if (FAILED(hr))
+      return hr;
+    try {
+      std::vector<air::MSCResourceSidecarTable> candidates;
+      for (const auto &table : root_descriptor_tables_) {
+        bool has_resource = false;
+        for (UINT i = 0; i < table.range_count; ++i) {
+          const auto type = root_descriptor_ranges_[table.first_range + i].type;
+          has_resource |= type == D3D12_DESCRIPTOR_RANGE_TYPE_SRV || type == D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        }
+        if (!has_resource)
+          continue;
+        unsigned matches = 0;
+        for (const auto &layout : msc_layout_) {
+          if (layout.parameter_index != table.parameter_index || layout.resource_type != DXMT_MSC_RESOURCE_TABLE)
+            continue;
+          if (layout.size_bytes != sizeof(uint64_t) || layout.top_level_offset > UINT32_MAX)
+            return E_NOTIMPL;
+          candidates.push_back({static_cast<unsigned>(layout.top_level_offset), 0, table.parameter_index});
+          ++matches;
+        }
+        if (matches != 1)
+          return E_NOTIMPL;
+      }
+      unsigned size = 0;
+      std::vector<air::MSCResourceSidecarTable> tables;
+      if (!air::buildMSCResourceSidecarLayout(MSCArgumentBufferSize, candidates, tables, size))
+        return E_NOTIMPL;
+      msc_resource_sidecar_tables_ = std::move(tables);
+      MSCResourceSidecarBufferSize = size;
+      MSCResourceSidecarTableCount = static_cast<unsigned>(msc_resource_sidecar_tables_.size());
+      MSCResourceSidecarTables = msc_resource_sidecar_tables_.data();
+      msc_resource_layout_initialized_ = true;
       return S_OK;
     } catch (const std::bad_alloc &) {
       return E_OUTOFMEMORY;

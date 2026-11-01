@@ -150,3 +150,32 @@ out-of-bounds loads/stores, format conversion, `GetDimensions`, atomics,
 unsupported AIR shapes and both shader backends. The runtime path must remain
 unchanged until these contracts are met. Rollback removes the isolated
 sidecar work without changing the public feature declaration.
+
+### Resource-table reflection layout slice
+
+**Goal and boundary.** Derive a deterministic candidate sidecar slot for each
+root descriptor table containing an SRV or UAV from MSC's actual root-signature
+reflection. CBV-only and sampler tables need no typed-buffer metadata. This
+is an explicitly requested, lazy layout calculation; it does not bind the
+sidecar, rewrite AIR, or change advertised capabilities. Local roots and
+resource-heap direct indexing return `E_NOTIMPL` because their mappings require
+separate designs.
+
+**Evidence and design.** Existing DXMT root metadata associates ranges with
+root-parameter identities; MSC reflection supplies each table's TLAB offset.
+The builder requires exactly one 8-byte reflected resource-table entry per
+candidate, validates bounds, alignment and uniqueness, and orders extension
+slots by reflected offset. It publishes output only on success. A shared
+lock makes lazy initialization idempotent. The existing sampler layout and
+this resource layout both start after the original reflected TLAB: **they
+cannot be used together without a coordinated combined layout**. Neither this
+layout nor the standalone AIR experiment is wired into production binding.
+
+**Validation and risks.** The `dx12_sampler_lod_metadata
+--resource-sidecar-layout` probe constructs mixed SRV, UAV, sampler and
+CBV-only tables, compares against actual reflection, checks concurrent calls
+and malformed layout inputs, and was run locally with an isolated Wine prefix
+and verified module paths. It does not execute a shader. Residency, descriptor
+lifetime, dynamic descriptor selection, direct indexing and simultaneous
+sampler sidecars remain integration blockers. Rollback removes the independent
+layout method, helper and probe; no capability declaration needs reverting.

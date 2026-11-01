@@ -5,6 +5,7 @@
 
 #include <iostream>
 #include <cstring>
+#include <cstdlib>
 #include <thread>
 #include <vector>
 
@@ -25,7 +26,112 @@ static bool check_range(ID3D12DescriptorHeap *heap, UINT index, bool valid,
          (!valid || (range.minimum == min && range.maximum == max));
 }
 
-int main() {
+static int check_resource_layout() {
+  Owned<ID3D12Device> device;
+  Owned<ID3DBlob> blob, error;
+  Owned<ID3D12RootSignature> root;
+  if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                               IID_PPV_ARGS(&device.p))))
+    return 1;
+  if (std::getenv("DXMT_TEST_PRINT_LOADED_CODE")) {
+    const char *modules[] = {"d3d12.dll", "winemetal.dll"};
+    const char *symbols[] = {"D3D12CreateDevice", "DXMTMSCPatchSamplerLOD"};
+    for (unsigned i = 0; i != 2; ++i) {
+      auto module = GetModuleHandleA(modules[i]);
+      auto address = module ? reinterpret_cast<const unsigned char *>(
+                                  GetProcAddress(module, symbols[i]))
+                            : nullptr;
+      if (!address)
+        return 1;
+      static constexpr char hex[] = "0123456789abcdef";
+      std::cout << "LOADED_CODE " << modules[i] << " " << symbols[i] << " ";
+      for (unsigned n = 0; n != 16; ++n)
+        std::cout << hex[address[n] >> 4] << hex[address[n] & 15];
+      std::cout << "\n";
+    }
+  }
+  {
+    using dxmt::air::MSCResourceSidecarTable;
+    std::vector<MSCResourceSidecarTable> out{{123, 456, 789}};
+    unsigned size = 999;
+    for (const auto &bad : std::vector<std::vector<MSCResourceSidecarTable>>{
+             {{1, 0, 0}},
+             {{0, 0, 0}, {0, 0, 1}},
+             {{0, 0, 0}, {8, 0, 0}},
+             {{16, 0, 0}}}) {
+      if (dxmt::air::buildMSCResourceSidecarLayout(16, bad, out, size) ||
+          out.size() != 1 || out[0].resource_table_offset != 123 || size != 999)
+        return 1;
+    }
+  }
+  D3D12_DESCRIPTOR_RANGE ranges[4] = {};
+  const D3D12_DESCRIPTOR_RANGE_TYPE types[] = {
+      D3D12_DESCRIPTOR_RANGE_TYPE_SRV, D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+      D3D12_DESCRIPTOR_RANGE_TYPE_UAV, D3D12_DESCRIPTOR_RANGE_TYPE_CBV};
+  D3D12_ROOT_PARAMETER parameters[4] = {};
+  for (unsigned i = 0; i < 4; ++i) {
+    ranges[i] = {types[i], 1, 0, 0, 0};
+    parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[i].DescriptorTable = {1, &ranges[i]};
+    parameters[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+  }
+  D3D12_ROOT_SIGNATURE_DESC desc = {};
+  desc.NumParameters = 4;
+  desc.pParameters = parameters;
+  if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1,
+                                         &blob.p, &error.p)) ||
+      FAILED(device.p->CreateRootSignature(0, blob.p->GetBufferPointer(),
+                                           blob.p->GetBufferSize(),
+                                           IID_PPV_ARGS(&root.p))))
+    return 1;
+  auto *internal = static_cast<dxmt::MTLD3D12RootSignature *>(root.p);
+  std::vector<int> results(8);
+  std::vector<std::thread> workers;
+  for (size_t i = 0; i < results.size(); ++i)
+    workers.emplace_back([&, i] {
+      results[i] = SUCCEEDED(internal->InitializeMSCResourceSidecarLayout());
+    });
+  for (auto &worker : workers)
+    worker.join();
+  for (auto result : results)
+    if (!result)
+      return 1;
+  if (internal->MSCResourceSidecarTableCount != 2)
+    return 1;
+  const uint64_t base = (internal->MSCArgumentBufferSize + 7) & ~uint64_t(7);
+  if (internal->MSCResourceSidecarBufferSize != base + 16)
+    return 1;
+  bool seen[4] = {};
+  for (unsigned i = 0; i < 2; ++i) {
+    const auto &table = internal->MSCResourceSidecarTables[i];
+    if ((table.parameter_index != 0 && table.parameter_index != 2) ||
+        seen[table.parameter_index] || table.sidecar_offset != base + 8 * i ||
+        (i &&
+         table.resource_table_offset <=
+             internal->MSCResourceSidecarTables[i - 1].resource_table_offset))
+      return 1;
+    seen[table.parameter_index] = true;
+    unsigned matches = 0;
+    for (unsigned j = 0; j < internal->MSCParameterCount; ++j) {
+      const auto &entry = internal->MSCParameterLayouts[j];
+      matches += entry.parameter_index == table.parameter_index &&
+                 entry.resource_type == DXMT_MSC_RESOURCE_TABLE &&
+                 entry.top_level_offset == table.resource_table_offset &&
+                 entry.size_bytes == 8;
+    }
+    if (matches != 1)
+      return 1;
+  }
+  if (!seen[0] || !seen[2])
+    return 1;
+  std::cout << "MSC resource sidecar reflection and concurrent initialization "
+               "passed\n";
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  if (argc == 2 && std::strcmp(argv[1], "--resource-sidecar-layout") == 0)
+    return check_resource_layout();
   Owned<ID3D12Device> device;
   Owned<ID3D12DescriptorHeap> cpu, gpu;
   if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
