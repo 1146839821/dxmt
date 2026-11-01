@@ -1,6 +1,7 @@
 // Test-only wrapper. It forwards conversion to a real MSC dependency.
 #include "metal_shader_converter/metal_irconverter.h"
 #include <dlfcn.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -108,6 +109,10 @@ IRObject *IRCompilerAllocCompileAndLink(IRCompiler *compiler, const char *entry,
       (compile_fn)dlsym(RTLD_NEXT, "IRCompilerAllocCompileAndLink");
   if (!real)
     return NULL;
+  static pthread_mutex_t serial_mutex = PTHREAD_MUTEX_INITIALIZER;
+  const bool serial = getenv("DXMT_TEST_TRACE_FORCE_SERIAL") != NULL;
+  if (serial)
+    pthread_mutex_lock(&serial_mutex);
   fprintf(stderr, "DXMT_MSC_TRACE_BEGIN\n");
   if (getenv("DXMT_TEST_TRACE_DELAY"))
     usleep(150000);
@@ -115,14 +120,20 @@ IRObject *IRCompilerAllocCompileAndLink(IRCompiler *compiler, const char *entry,
   if (getenv("DXMT_TEST_TRACE_FAIL_FIRST") &&
       atomic_fetch_add(&failed_once, 1) == 0) {
     fprintf(stderr, "DXMT_MSC_TRACE_FORCED_FAILURE\n");
+    if (serial)
+      pthread_mutex_unlock(&serial_mutex);
     return NULL;
   }
   const char *late = getenv("DXMT_TEST_TRACE_LATE_IMAGE");
   if (late && !dlopen(late, RTLD_NOW | RTLD_LOCAL)) {
     fprintf(stderr, "DXMT_MSC_TRACE_LATE_FAILED\n");
+    if (serial)
+      pthread_mutex_unlock(&serial_mutex);
     return NULL;
   }
   IRObject *result = real(compiler, entry, input, error);
   fprintf(stderr, "DXMT_MSC_TRACE_END %s\n", result ? "ok" : "failed");
+  if (serial)
+    pthread_mutex_unlock(&serial_mutex);
   return result;
 }

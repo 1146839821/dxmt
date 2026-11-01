@@ -49,3 +49,13 @@ This does not measure production frame times or establish persistent identity.
 An isolated Wine fragment GPU readback and deliberately wrong expected-output
 control also passed with Metal API and shader validation; the logs are under
 `dxmt-test/n94-single-flight/gpu`.
+
+The real Wine test also launches eight PSO creations split between two
+different DXIL compute shaders. With the same test-only delay, it observes
+four compiler calls and a maximum of two overlapping calls. As a negative
+control, a test-only global mutex reduces the maximum to one while preserving
+four calls. The normal same-key test still observes two calls. The stage/build
+hashes, PE export bytes and loaded Unix path are checked; logs are under
+`dxmt-test/n94-single-flight/{two-shaders-verified,two-shaders-serial,same-key-recheck}`.
+These observations validate this particular workload, not an application-wide
+performance claim.

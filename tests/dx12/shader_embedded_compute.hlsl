@@ -1,5 +1,8 @@
 [RootSignature("RootFlags(0)")]
-[numthreads(1, 1, 1)]
+#ifndef DXMT_TEST_THREADS
+#define DXMT_TEST_THREADS 1
+#endif
+[numthreads(DXMT_TEST_THREADS, 1, 1)]
 void cs_main(uint3 tid : SV_DispatchThreadID)
 {
 }

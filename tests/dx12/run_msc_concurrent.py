@@ -22,7 +22,13 @@ def main():
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--expected-calls", type=int, required=True)
     parser.add_argument("--fail-first", action="store_true")
+    parser.add_argument("--two-shaders", action="store_true")
+    parser.add_argument("--force-serial", action="store_true")
     args = parser.parse_args()
+    if args.fail_first and args.two_shaders:
+        parser.error("--fail-first and --two-shaders are separate controls")
+    if args.force_serial and not args.two_shaders:
+        parser.error("--force-serial requires --two-shaders")
     stage, prefix, build, converter = (getattr(args, name).resolve(strict=True)
                                        for name in ("stage", "prefix", "build", "converter"))
     output = args.output.absolute()
@@ -33,6 +39,8 @@ def main():
              ("src/winemetal/unix/winemetal.so", "wine/lib/wine/x86_64-unix/winemetal.so"),
              ("tests/dx12/dx12_msc_concurrent.exe", "dx12_msc_concurrent.exe"),
              ("tests/dx12/shader_embedded.compute.cs.cso", "shader_embedded.compute.cs.cso"))
+    if args.two_shaders:
+        pairs += (("tests/dx12/shader_embedded.compute.second.cs.cso", "shader_embedded.compute.second.cs.cso"),)
     for relative, deployed in pairs:
         built = (build / relative).read_bytes()
         if relative in ("src/d3d12/d3d12.dll", "src/dxgi/dxgi.dll") and built[64:80] == b"Wine builtin DLL":
@@ -51,9 +59,13 @@ def main():
                DXMT_SHADER_CACHE_PATH=str(output / "cache"), DXMT_LOG_PATH=str(output))
     if args.fail_first:
         env["DXMT_TEST_TRACE_FAIL_FIRST"] = "1"
+    if args.force_serial:
+        env["DXMT_TEST_TRACE_FORCE_SERIAL"] = "1"
     command = [str(stage / "wine/bin/wine"), "dx12_msc_concurrent.exe", "shader_embedded.compute.cs.cso"]
     if args.fail_first:
         command.append("--fail-first")
+    if args.two_shaders:
+        command.extend(("--second", "shader_embedded.compute.second.cs.cso"))
     result = subprocess.run(command,
                             cwd=stage, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
     log = result.stdout.decode(errors="replace")
@@ -66,14 +78,24 @@ def main():
         loaded.append(any(('loaded l"' + path + '"') in line.lower() and (": " + load_type) in line.lower()
                           for line in log.splitlines()))
     calls = log.count("DXMT_MSC_TRACE_END ok")
+    active = max_active = 0
+    for line in log.splitlines():
+        if line == "DXMT_MSC_TRACE_BEGIN":
+            active += 1
+            max_active = max(max_active, active)
+        elif line.startswith("DXMT_MSC_TRACE_END ") or line == "DXMT_MSC_TRACE_FORCED_FAILURE":
+            active -= 1
     expected_failures = 1 if args.fail_first else 0
     if (result.returncode or f"concurrent MSC PSOs=8 failures={expected_failures}" not in log or
             any(value not in log for value in identities) or not all(loaded) or
             str(stage / "wine/lib/wine/x86_64-unix/winemetal.so") not in log or
             str(wrapper) not in log or str(converter) not in log or calls != args.expected_calls or
-            log.count("DXMT_MSC_TRACE_FORCED_FAILURE") != expected_failures):
+            log.count("DXMT_MSC_TRACE_FORCED_FAILURE") != expected_failures or active != 0 or
+            (args.two_shaders and not args.force_serial and max_active < 2) or
+            (args.force_serial and max_active != 1)):
         raise AssertionError(f"concurrent test failed: exit={result.returncode}, compile calls={calls}")
-    (output / "summary.json").write_text(json.dumps({"compile_calls": calls, "exit": result.returncode,
+    (output / "summary.json").write_text(json.dumps({"compile_calls": calls, "max_overlapping_calls": max_active,
+        "exit": result.returncode,
         "converter_sha256": sha(converter), "wrapper_sha256": sha(wrapper),
         "artifacts": {path: sha(stage / path) for _, path in pairs}}, indent=2) + "\n")
     print(f"eight concurrent PSOs: {calls} real MSC compilation calls")

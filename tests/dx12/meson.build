@@ -244,6 +244,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'cs_main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_shader_embedded_compute_second_fixture',
+    input: 'shader_embedded_compute.hlsl',
+    output: 'shader_embedded.compute.second.cs.cso',
+    command: dxc_command + [ '-D', 'DXMT_TEST_THREADS=2', '-E', 'cs_main', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_shader_embedded_graphics_vs_fixture',
     input: 'shader_embedded_graphics.hlsl',
     output: 'shader_embedded.graphics.vs.cso',

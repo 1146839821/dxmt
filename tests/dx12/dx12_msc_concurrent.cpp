@@ -11,11 +11,12 @@
 #include <vector>
 
 int main(int argc, char **argv) {
-  if (argc != 2 && argc != 3)
+  if (argc != 2 && argc != 3 && argc != 4)
     return 2;
   const bool expect_failure =
       argc == 3 && std::string(argv[2]) == "--fail-first";
-  if (argc == 3 && !expect_failure)
+  const bool two_shaders = argc == 4 && std::string(argv[2]) == "--second";
+  if ((argc == 3 && !expect_failure) || (argc == 4 && !two_shaders))
     return 2;
   for (const auto &[module_name, symbol] :
        {std::pair{"d3d12.dll", "D3D12CreateDevice"},
@@ -37,6 +38,14 @@ int main(int argc, char **argv) {
                            std::istreambuf_iterator<char>());
   if (shader.empty())
     return 2;
+  std::vector<char> second_shader;
+  if (two_shaders) {
+    std::ifstream second_file(argv[3], std::ios::binary);
+    second_shader.assign(std::istreambuf_iterator<char>(second_file),
+                         std::istreambuf_iterator<char>());
+    if (second_shader.empty() || second_shader == shader)
+      return 2;
+  }
   ID3D12Device *device = nullptr;
   if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                IID_PPV_ARGS(&device))))
@@ -57,10 +66,11 @@ int main(int argc, char **argv) {
   std::atomic<bool> go{false};
   std::vector<std::thread> threads;
   for (unsigned i = 0; i < thread_count; ++i)
-    threads.emplace_back([&] {
+    threads.emplace_back([&, i] {
       D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline = {};
       pipeline.pRootSignature = root;
-      pipeline.CS = {shader.data(), shader.size()};
+      const auto &selected = two_shaders && i % 2 ? second_shader : shader;
+      pipeline.CS = {selected.data(), selected.size()};
       ++ready;
       while (!go.load())
         std::this_thread::yield();
