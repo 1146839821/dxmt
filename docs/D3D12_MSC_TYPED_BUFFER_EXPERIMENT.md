@@ -107,6 +107,16 @@ offsets, heap switching, null and overwrite handling, descriptor-copy timing,
 validation instrumentation, and concurrent submission are also unverified.
 The production path remains unchanged.
 
+`dx12_descriptor_ownership --typed-buffer-sidecar` verifies the real mapped
+shader-visible descriptor allocation on the local Wine/DXMT build. It checks
+direct typed SRV/UAV writes, CPU-heap-to-visible copies, copying updated
+entries, independent slots, explicit clearing and copying a cleared slot.
+Large `FirstElement` values are included. The isolated run with module-identity
+checks and Metal validation enabled passed; see
+`dxmt-test/n95-capability-gate/run-typed-sidecar-heap-final`. This is a CPU
+read of the GPU allocation, not a GPU execution, heap-switch or in-flight
+lifetime test.
+
 **Acceptance before integration.** Verify descriptor copies and overwrites,
 heap switching and table offsets, nulls and zero lengths, dynamic and direct
 indexing, in-flight submission lifetime, resource residency, overflow and

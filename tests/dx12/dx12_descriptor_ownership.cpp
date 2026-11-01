@@ -9,6 +9,7 @@
 
 #include <iostream>
 #include <chrono>
+#include <cstring>
 #include <string>
 #include <set>
 #include <thread>
@@ -2371,9 +2372,127 @@ bool CheckTypedViewFormats(UINT mode = 0, bool cost = false) {
   return good;
 }
 
+bool CheckTypedBufferSidecarMetadata() {
+  struct Objects {
+    ID3D12Device *device = nullptr;
+    ID3D12Resource *buffer = nullptr;
+    ID3D12DescriptorHeap *source = nullptr, *visible = nullptr;
+    ~Objects() {
+      Release(visible);
+      Release(source);
+      Release(buffer);
+      Release(device);
+    }
+  } o;
+  if (!CheckHR("sidecar device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&o.device))))
+    return false;
+  auto properties = DefaultHeap();
+  auto desc =
+      BufferDescription(2048, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  if (!CheckHR("sidecar buffer", o.device->CreateCommittedResource(
+                                     &properties, D3D12_HEAP_FLAG_NONE, &desc,
+                                     D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                     IID_PPV_ARGS(&o.buffer))))
+    return false;
+  D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+  hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  hd.NumDescriptors = 4;
+  if (!CheckHR("sidecar CPU heap",
+               o.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&o.source))))
+    return false;
+  hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  if (!CheckHR("sidecar GPU heap",
+               o.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&o.visible))))
+    return false;
+  const auto stride = o.device->GetDescriptorHandleIncrementSize(hd.Type);
+  auto source = o.source->GetCPUDescriptorHandleForHeapStart();
+  auto destination = o.visible->GetCPUDescriptorHandleForHeapStart();
+  const auto gpu = o.visible->GetGPUDescriptorHandleForHeapStart();
+  uint64_t allocation_offset = 0;
+  auto *allocation =
+      static_cast<dxmt::MTLD3D12Device *>(o.device)->LookupBufferByVA(
+          gpu.ptr, &allocation_offset);
+  if (!allocation || !allocation->mappedMemory(0))
+    return false;
+  auto *bytes = static_cast<const uint8_t *>(allocation->mappedMemory(0)) +
+                allocation_offset;
+  const auto check = [&](UINT slot, UINT first, UINT count) {
+    uint64_t value = 0;
+    std::memcpy(&value, bytes + slot * stride + 8, sizeof(value));
+    const uint64_t expected = (uint64_t(count) << 32) | first;
+    if (value != expected)
+      std::cerr << "sidecar slot=" << slot << " actual=0x" << std::hex << value
+                << " expected=0x" << expected << std::dec << "\n";
+    return value == expected;
+  };
+  auto at = [&](D3D12_CPU_DESCRIPTOR_HANDLE h, UINT index) {
+    h.ptr += index * stride;
+    return h;
+  };
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+  srv.Format = DXGI_FORMAT_R32_UINT;
+  srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+  srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  srv.Buffer.FirstElement = 260;
+  srv.Buffer.NumElements = 4;
+  o.device->CreateShaderResourceView(o.buffer, &srv, at(destination, 0));
+  o.device->CreateShaderResourceView(o.buffer, &srv, source);
+  o.device->CopyDescriptorsSimple(1, at(destination, 1), source, hd.Type);
+  bool good = check(0, 260, 4) && check(1, 260, 4);
+  srv.Buffer.FirstElement = 261;
+  srv.Buffer.NumElements = 3;
+  o.device->CreateShaderResourceView(o.buffer, &srv, source);
+  o.device->CopyDescriptorsSimple(1, at(destination, 2), source, hd.Type);
+  good &= check(1, 260, 4) && check(2, 261, 3);
+  D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
+  uav.Format = DXGI_FORMAT_R32_UINT;
+  uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+  uav.Buffer.FirstElement = 263;
+  uav.Buffer.NumElements = 2;
+  o.device->CreateUnorderedAccessView(o.buffer, nullptr, &uav,
+                                      at(destination, 3));
+  o.device->CreateUnorderedAccessView(o.buffer, nullptr, &uav, source);
+  o.device->CopyDescriptorsSimple(1, at(destination, 2), source, hd.Type);
+  good &= check(2, 263, 2) && check(3, 263, 2);
+  o.device->CreateConstantBufferView(nullptr, at(destination, 1));
+  good &= check(1, 0, 0) && check(2, 263, 2);
+  o.device->CreateConstantBufferView(nullptr, at(source, 3));
+  o.device->CopyDescriptorsSimple(1, at(destination, 2), at(source, 3),
+                                  hd.Type);
+  good &= check(2, 0, 0);
+  if (good)
+    std::cout
+        << "typed buffer sidecar metadata writes, copies and clears passed\n";
+  return good;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  char print_code[2] = {};
+  if (GetEnvironmentVariableA("DXMT_TEST_PRINT_LOADED_CODE", print_code,
+                              sizeof(print_code)) == 1 &&
+      print_code[0] == '1') {
+    const char *modules[] = {"d3d12.dll", "winemetal.dll"};
+    const char *symbols[] = {"D3D12CreateDevice", "DXMTMSCPatchSamplerLOD"};
+    for (unsigned i = 0; i != 2; ++i) {
+      auto module = GetModuleHandleA(modules[i]);
+      auto address = module ? reinterpret_cast<const unsigned char *>(
+                                  GetProcAddress(module, symbols[i]))
+                            : nullptr;
+      if (!address)
+        return 1;
+      static constexpr char hex[] = "0123456789abcdef";
+      std::cout << "LOADED_CODE " << modules[i] << " " << symbols[i] << " ";
+      for (unsigned n = 0; n != 16; ++n)
+        std::cout << hex[address[n] >> 4] << hex[address[n] & 15];
+      std::cout << "\n";
+    }
+  }
+  if (argc == 2 && std::string(argv[1]) == "--typed-buffer-sidecar")
+    return CheckTypedBufferSidecarMetadata() ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--buffer-view-ranges")
     return CheckBufferViewRanges() ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--root-container-lengths") {
