@@ -3,6 +3,7 @@
 #include "metallib_writer.hpp"
 #include "transforms/lower_unsupported_double.hpp"
 #include "transforms/msc_sample_level_lod.hpp"
+#include "transforms/msc_root_argument.hpp"
 
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/IR/Constants.h"
@@ -25,24 +26,11 @@ copyMetalLib(const void *data, size_t size, SM50CompiledBitcodeInternal &output)
 
 bool
 findRootArgument(llvm::Module &module, uint32_t &index) {
-  auto *kernels = module.getNamedMetadata("air.kernel");
-  auto *fragments = module.getNamedMetadata("air.fragment");
-  if (!!kernels == !!fragments || module.getNamedMetadata("air.vertex") ||
-      module.getNamedMetadata("air.mesh") || module.getNamedMetadata("air.object"))
-    return false;
-  auto *entrypoints = kernels ? kernels : fragments;
-  if (entrypoints->getNumOperands() != 1)
-    return false;
-  auto *entry = entrypoints->getOperand(0);
-  if (!entry || entry->getNumOperands() < 3)
-    return false;
-  auto *function_md = llvm::dyn_cast_or_null<llvm::ValueAsMetadata>(entry->getOperand(0));
-  auto *function = function_md ? llvm::dyn_cast<llvm::Function>(function_md->getValue()) : nullptr;
-  auto *arguments = llvm::dyn_cast_or_null<llvm::MDNode>(entry->getOperand(2));
-  if (!function || function->isDeclaration() || !arguments)
+  auto *root = dxmt::air::findMSCRootArgument(module);
+  if (!root)
     return false;
   for (auto &other : module) {
-    if (&other == function)
+    if (&other == root->getParent())
       continue;
     for (auto &block : other)
       for (auto &instruction : block)
@@ -51,47 +39,8 @@ findRootArgument(llvm::Module &module, uint32_t &index) {
             if (target->getName() == "air.sample_texture_2d.v4f32")
               return false;
   }
-  bool found = false;
-  for (const auto &operand : arguments->operands()) {
-    auto *arg = llvm::dyn_cast_or_null<llvm::MDNode>(operand);
-    if (!arg || !arg->getNumOperands())
-      return false;
-    bool indirect = false, location_found = false;
-    uint64_t location = 0;
-    for (unsigned i = 1; i < arg->getNumOperands(); ++i) {
-      auto *tag = llvm::dyn_cast_or_null<llvm::MDString>(arg->getOperand(i));
-      if (!tag)
-        continue;
-      if (tag->getString() == "air.indirect_buffer") {
-        if (indirect)
-          return false;
-        indirect = true;
-      }
-      if (tag->getString() == "air.location_index") {
-        if (location_found || i + 1 >= arg->getNumOperands())
-          return false;
-        auto *number = llvm::mdconst::dyn_extract<llvm::ConstantInt>(arg->getOperand(i + 1).get());
-        if (!number || number->getBitWidth() > 64)
-          return false;
-        location = number->getZExtValue();
-        location_found = true;
-      }
-    }
-    if (indirect && !location_found)
-      return false;
-    if (!indirect || location != SM50_MSC_ARGUMENT_BUFFER_BIND_POINT)
-      continue;
-    auto *number = llvm::mdconst::dyn_extract<llvm::ConstantInt>(arg->getOperand(0).get());
-    if (found || !number || number->getBitWidth() > 32 || number->getZExtValue() >= function->arg_size())
-      return false;
-    const auto candidate = static_cast<uint32_t>(number->getZExtValue());
-    auto *type = function->getArg(candidate)->getType();
-    if (!type->isPointerTy() || type->getPointerAddressSpace() != 2)
-      return false;
-    index = candidate;
-    found = true;
-  }
-  return found;
+  index = root->getArgNo();
+  return true;
 }
 
 } // namespace

@@ -361,7 +361,19 @@ supported operations before mutating the module. Existing synthetic rejection
 cases and the opt-in Metal GPU bounds/default-component regression pass using
 this extracted pass. This is not production enablement: descriptor provenance,
 additional AIR overloads, sparse status, root upload, resource residency and
-in-flight lifetimes remain integration gates. The sample and typed-buffer AIR
-metadata scanners are currently separate and should be reconciled before a
-shared public conversion ABI is introduced. Rollback removes the new transform
+in-flight lifetimes remain integration gates. The sample and typed-buffer passes share the AIR entrypoint and root-argument
+metadata scanner; sample-specific rejection remains in the sample path. Rollback removes the new transform
 and restores the experiment-local implementation.
+
+
+### Shared MSC root argument recognition
+
+The sampler patch and experimental typed-buffer pass now share one AIR
+entrypoint metadata parser. It identifies the argument bound to the MSC TLAB
+slot, rejects malformed or ambiguous metadata and accepts only the existing
+compute and fragment forms. The sampler path retains its separate rejection of
+sample instructions in other functions. Both existing synthetic test suites
+and the typed-buffer native Metal readback with negative controls pass. A full
+Wine sampler GPU run was not performed in this slice. The typed-buffer pass
+remains unconnected to production conversion; no capability is promoted.
+Rollback restores the two prior parsers and removes the shared header.
