@@ -166,6 +166,37 @@ def main():
         raise AssertionError("dependency-provided converter symbol was not safely rejected")
     evidence["runs"]["dependency_provider"] = {"exit": result.returncode, "wrapper_sha256": sha(forward)}
 
+    # The first required symbol can be local while later ones come from a
+    # dependency. The diagnostic must not treat that mixed API as one image.
+    mixed_source = output / "mixed.c"
+    mixed_source.write_text("extern void IRCompilerDestroy(void *);\n"
+                            "void *IRCompilerCreate(void) { return 0; }\n"
+                            "void force_dependency(void *p) { IRCompilerDestroy(p); }\n")
+    mixed = output / "mixed.dylib"
+    subprocess.run(["xcrun", "clang", "-arch", "x86_64", "-dynamiclib", str(mixed_source), str(converter),
+                    "-Wl,-rpath," + str(converter.parent), "-o", str(mixed)],
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["codesign", "--force", "--sign", "-", str(mixed)],
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    defined = subprocess.check_output(["nm", "-gU", str(mixed)], text=True)
+    undefined = subprocess.check_output(["nm", "-u", str(mixed)], text=True)
+    if "_IRCompilerCreate" not in defined or "_IRCompilerDestroy" not in undefined:
+        raise AssertionError("mixed wrapper does not have the intended symbol ownership")
+    mixed_env = environment.copy()
+    mixed_env["DXMT_METALIRCONVERTER_PATH"] = str(mixed)
+    result = subprocess.run([str(stage / "wine/bin/wine"), "dx12_msc_identity_thunk.exe", "new"],
+                            cwd=stage, env=mixed_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+    stdout, log = result.stdout.decode(errors="replace"), result.stderr.decode(errors="replace")
+    (output / "mixed.stdout.log").write_text(stdout)
+    (output / "mixed.stderr.log").write_text(log)
+    if (result.returncode != 0 or "QUERY_CODE " + export_bytes not in stdout or
+            str(pairs[1][0]) not in log or str(mixed) not in log or str(converter) not in log or
+            "MSC identity diagnostic provider unavailable for IRCompilerDestroy" not in log or
+            "MSC identity diagnostic snapshot unavailable" not in log or
+            log.count("MSC identity diagnostic revalidation unavailable") < 2):
+        raise AssertionError("mixed MSC symbol providers were not safely rejected")
+    evidence["runs"]["mixed_providers"] = {"exit": result.returncode, "wrapper_sha256": sha(mixed)}
+
     # First establish that lsof observes the deliberately retained snapshot.
     with (output / "descriptor-positive.stderr.log").open("w") as stderr:
         process = subprocess.Popen([str(stage / "wine/bin/wine"), "dx12_msc_identity_thunk.exe", "new-wait"],

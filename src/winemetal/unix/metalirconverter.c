@@ -300,10 +300,24 @@ dxmt_msc_set_root_ire_error(struct dxmt_msc_get_root_layout_params *params, cons
 }
 
 static bool
+dxmt_msc_diagnostic_symbol_provider(void *symbol, const char *name) {
+  if (!g_msc_identity_diagnostic || g_msc_identity.fd < 0)
+    return true;
+  Dl_info info;
+  if (dladdr(symbol, &info) && dxmt_msc_image_identity_matches_mapping(&g_msc_identity, info.dli_fbase))
+    return true;
+  fprintf(stderr, "[INFO] DXMT: MSC identity diagnostic provider unavailable for %s\n", name);
+  dxmt_msc_image_identity_close(&g_msc_identity);
+  return false;
+}
+
+static bool
 dxmt_msc_load_symbol(void **destination, const char *name) {
   *destination = dlsym(g_msc_library, name);
-  if (*destination)
+  if (*destination) {
+    (void)dxmt_msc_diagnostic_symbol_provider(*destination, name);
     return true;
+  }
 
   fprintf(stderr, "[WARN] DXMT: Metal Shader Converter is missing symbol %s\n", name);
   return false;
@@ -312,6 +326,8 @@ dxmt_msc_load_symbol(void **destination, const char *name) {
 static bool
 dxmt_msc_load_optional_symbol(void **destination, const char *name) {
   *destination = dlsym(g_msc_library, name);
+  if (*destination)
+    (void)dxmt_msc_diagnostic_symbol_provider(*destination, name);
   return *destination != NULL;
 }
 
@@ -584,11 +600,7 @@ dxmt_msc_initialize(void) {
 
   g_msc_available = 1;
   if (g_msc_identity_diagnostic) {
-    Dl_info info;
-    void *symbol = dlsym(g_msc_library, "IRCompilerCreate");
-    bool bound = symbol && dladdr(symbol, &info) &&
-                 dxmt_msc_image_identity_matches_mapping(&g_msc_identity, info.dli_fbase) &&
-                 dxmt_msc_image_identity_revalidate(&g_msc_identity);
+    bool bound = dxmt_msc_image_identity_revalidate(&g_msc_identity);
     if (!bound)
       dxmt_msc_image_identity_close(&g_msc_identity);
     fprintf(stderr, "[INFO] DXMT: MSC identity diagnostic snapshot %s\n", bound ? "bound" : "unavailable");

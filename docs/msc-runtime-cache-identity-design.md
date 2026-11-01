@@ -404,3 +404,22 @@ used by MSC, test an MSC conversion with the fixture, or validate cache bytes.
 Apple's [dynamic library usage guide](https://developer.apple.com/library/archive/documentation/DeveloperTools/Conceptual/DynamicLibraries/100-Articles/DynamicLibraryUsageGuidelines.html)
 describes search-path overrides; actual behavior depends on process policy.
 The production persistent-cache guard remains in place.
+
+### Mixed MSC entry-point providers
+
+The opt-in root-image diagnostic previously checked only the provider of
+`IRCompilerCreate`. A wrapper defining that function while resolving
+`IRCompilerDestroy` and other functions from the real converter was reported
+as `bound` and `stable` in an isolated x86_64 Wine test. The diagnostic now
+checks each successfully resolved required or optional MSC entry point against
+the pinned root mapping. A mismatch or unidentifiable provider closes the
+snapshot; converter availability is not changed. The runner tests both the
+mixed case and the earlier all-forwarded case, as well as a normal converter,
+mutation, concurrency, fallback and descriptor cleanup.
+
+The mixed-provider control failed with the old bridge and passed with the new
+one in `dxmt-test/n91-mixed-provider/{before,after}` using a fresh Wine prefix.
+The runner verifies the PE export bytes, PE/Unix artifact hashes, and loaded
+Unix bridge path. This is a check of exported API entry-point providers, not of
+the internal dependencies or late loads of the converter. The V1 identity
+query still reports unavailable and MSC persistent caching remains disabled.
