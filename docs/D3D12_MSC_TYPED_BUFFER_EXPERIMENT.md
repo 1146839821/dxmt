@@ -85,6 +85,28 @@ not production descriptor copying, GPU completion lifetime, Metal shader
 validation instrumentation, or Windows behavior. Details and artifact hashes
 are in `dxmt-test/n95-capability-gate/msc-buffer-air/evidence.md`.
 
+### Existing AIRCONV heap as candidate sidecar
+
+The existing 32-byte `ShaderVisibleDescriptorGPUStorage` entries already
+store typed buffer `FirstElement` and `NumElements` in their second qword.
+Both typed SRV and UAV writes populate that field, and `CopyDescriptors`
+copies the entire entry under the descriptor heap locks. For a shader-visible
+resource heap, its GPU descriptor handle is already an address into this
+allocation. A candidate implementation could pass the original table handle
+as the sidecar table pointer and index its second qword with a 32-byte stride.
+This avoids allocating a second descriptor mirror and leaves MSC's 24-byte
+descriptor table unchanged.
+
+An isolated native Metal prototype using this 32-byte layout passed dynamic
+R16_SINT and R32_SINT accesses at element offsets 260 and 261. This does not
+establish that the existing allocation is retained or resident at every MSC
+graphics, compute, indirect or direct-indexed use. In particular, MSC currently
+binds the separate MSC heap buffer; any use of the AIRCONV heap allocation
+must explicitly address residency and in-flight lifetime. Root-signature table
+offsets, heap switching, null and overwrite handling, descriptor-copy timing,
+validation instrumentation, and concurrent submission are also unverified.
+The production path remains unchanged.
+
 **Acceptance before integration.** Verify descriptor copies and overwrites,
 heap switching and table offsets, nulls and zero lengths, dynamic and direct
 indexing, in-flight submission lifetime, resource residency, overflow and
