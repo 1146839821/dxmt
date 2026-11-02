@@ -285,8 +285,12 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
-  const bool srv_live = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-live") == 0;
-  const bool srv_null = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null") == 0;
+  const bool srv_to_live_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-skip") == 0;
+  const bool srv_to_null_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-live-to-null-skip") == 0;
+  const bool srv_to_live = srv_to_live_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live") == 0);
+  const bool srv_to_null = srv_to_null_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-live-to-null") == 0);
+  const bool srv_live = srv_to_live || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-live") == 0);
+  const bool srv_null = srv_to_null || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null") == 0);
   const bool typed_srv = srv_live || srv_null;
   const bool null_uav_live = argc == 4 && strcmp(argv[2], "--typed-buffer-null-live") == 0;
   const bool null_uav = null_uav_live || (argc == 4 && strcmp(argv[2], "--typed-buffer-null") == 0);
@@ -668,7 +672,8 @@ main(int argc, char **argv) {
       typed_srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
       typed_srv_desc.Buffer.FirstElement = 4;
       typed_srv_desc.Buffer.NumElements = 4;
-      device->CreateShaderResourceView(srv_null ? nullptr : output_texture, &typed_srv_desc, resource_cpu);
+      device->CreateShaderResourceView((srv_to_live || (srv_null && !srv_to_null)) ? nullptr : output_texture,
+                                       &typed_srv_desc, resource_cpu);
     }
     if (typed_buffer) {
       output_texture_footprint.Offset = zero_offset_buffer ? 512 : (unaligned_buffer || late_buffer) ? 532 : 528;
@@ -901,6 +906,15 @@ main(int argc, char **argv) {
   }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
+  if ((srv_to_live && !srv_to_live_skip) || (srv_to_null && !srv_to_null_skip)) {
+    D3D12_SHADER_RESOURCE_VIEW_DESC updated = {};
+    updated.Format = typed_format->format;
+    updated.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    updated.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    updated.Buffer.FirstElement = 4;
+    updated.Buffer.NumElements = 4;
+    device->CreateShaderResourceView(srv_to_null ? nullptr : output_texture, &updated, resource_cpu);
+  }
   if (late_buffer) {
     D3D12_UNORDERED_ACCESS_VIEW_DESC updated = {};
     updated.Format = typed_format->format;
@@ -1025,7 +1039,8 @@ main(int argc, char **argv) {
       readback->Unmap(0, nullptr);
       goto cleanup;
     }
-    std::cout << (srv_live ? "live" : "null") << " typed SRV read and dimensions passed\n";
+    std::cout << (srv_to_live ? "null-to-live" : srv_to_null ? "live-to-null" : srv_live ? "live" : "null")
+              << " typed SRV read and dimensions passed\n";
     readback->Unmap(0, nullptr);
     result = 0;
     goto cleanup;

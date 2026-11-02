@@ -847,3 +847,23 @@ metallib shader-validation instrumentation is not independently verified.
 Windows native behavior, other typed formats, indirect SRV indexing, and
 post-recording descriptor changes remain unverified. No default behavior or
 capability declaration changed.
+
+### Typed SRV descriptor updates after Close
+
+For Root Signature 1.0, descriptors may be changed after recording and before
+submission ([Root Signature Version 1.1: DESCRIPTORS_VOLATILE](https://learn.microsoft.com/en-us/windows/win32/direct3d12/root-signature-version-1-1)).
+The typed SRV probe now creates either a null or a live R32 view, records and
+closes the command list, replaces that same descriptor with the other view,
+and then submits. FLOAT, UINT, and SINT pass readback, runtime identity and
+Metal validation in `result-srv-late-null-to-live` and
+`result-srv-late-live-to-null` under n95. Skipping the descriptor update in
+`result-srv-late-null-to-live-skip` and `result-srv-late-live-to-null-skip`
+produces the original descriptor's values and fails the expected-result oracle
+for all three formats.
+
+The backing buffer is also referenced by explicit copies and barriers in this
+probe, so these results do not independently validate residency or resource
+lifetime when a late descriptor is its only reference. CopyDescriptors, updates
+while submitted, other formats and Windows native behavior were not tested.
+Shader validation instrumentation of the rewritten metallib remains unverified.
+The experiment and these observations do not change advertised capabilities.

@@ -47,7 +47,7 @@ def main():
     parser.add_argument("--indirect-math-wrong", action="store_true", help="negative control with wrong reversebits result")
     parser.add_argument("--null-uav", action="store_true", help="verify null typed UAV reads and discarded writes")
     parser.add_argument("--null-uav-live", action="store_true", help="negative control using a live UAV")
-    parser.add_argument("--srv", choices=("null", "live"), help="test a null or live typed SRV")
+    parser.add_argument("--srv", choices=("null", "live", "null-to-live", "live-to-null", "null-to-live-skip", "live-to-null-skip"), help="test a typed SRV and optional post-Close update")
     args = parser.parse_args()
     if args.srv and (not args.buffer or not args.scalar or any(getattr(args, name) for name in (
         "null_uav", "null_uav_live", "unaligned", "zero_offset", "late_copy", "heap_switch",
@@ -133,7 +133,7 @@ def main():
         if args.null_uav or args.null_uav_live:
             passed = result.returncode == 0 and "null UAV reads=0 dimensions=0 guard unchanged passed" in log
         if args.srv:
-            passed = result.returncode == 0 and f"{args.srv} typed SRV read and dimensions passed" in log
+            passed = result.returncode == 0 and f"{args.srv.removesuffix('-skip')} typed SRV read and dimensions passed" in log
         rows.append(dict(kind=kind, format=fmt, exit=result.returncode, readback_pass=passed,
                          identity_pass=identity, validation_pass=validation))
         print(rows[-1], flush=True)
