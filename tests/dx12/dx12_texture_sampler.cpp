@@ -298,11 +298,13 @@ main(int argc, char **argv) {
   const bool indirect_pending = rerecord || indirect_pending_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-pending") == 0);
   const bool pending_reset = indirect_pending || (argc == 4 && strcmp(argv[2], "--typed-buffer-pending-reset") == 0);
   const bool indirect_reject = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-reject") == 0;
-  const bool indirect = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect") == 0;
+  const bool indirect_heap_wrong = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-heap-wrong") == 0;
+  const bool indirect_heap = indirect_heap_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-heap") == 0);
+  const bool indirect = indirect_heap || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect") == 0);
   const bool indirect_count_wrong = indirect_pending_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-count-wrong") == 0);
   const bool indirect_count = indirect_late || indirect_pending || indirect_count_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-count") == 0);
-  const bool wrong_heap_expected = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-wrong") == 0;
-  const bool encoder_break = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-encoder") == 0;
+  const bool wrong_heap_expected = indirect_heap_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-wrong") == 0);
+  const bool encoder_break = indirect_heap || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-encoder") == 0);
   const bool heap_switch = wrong_heap_expected || encoder_break || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch") == 0);
   const bool typed_buffer = unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || pending_reset || indirect_reject || indirect || indirect_count || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
   if (argc == 5 && !placed)
@@ -831,7 +833,10 @@ main(int argc, char **argv) {
     desc.Buffer.NumElements = 2;
     device->CreateUnorderedAccessView(output_texture, nullptr, &desc, view);
     list->SetComputeRoot32BitConstant(3, 2, 0);
-    list->Dispatch(1, 1, 1);
+    if (indirect_heap)
+      list->ExecuteIndirect(work_signature, 1, upload, 128, nullptr, 0);
+    else
+      list->Dispatch(1, 1, 1);
     if (encoder_break)
       list->CopyBufferRegion(readback, 256, upload, 0, sizeof(UINT));
     heaps[0] = second_resource_heap;
@@ -842,7 +847,10 @@ main(int argc, char **argv) {
     second_gpu.ptr += descriptor_increment;
     list->SetComputeRootDescriptorTable(2, second_gpu);
     list->SetComputeRoot32BitConstant(3, 3, 0);
-    list->Dispatch(1, 1, 1);
+    if (indirect_heap)
+      list->ExecuteIndirect(work_signature, 1, upload, 128, nullptr, 0);
+    else
+      list->Dispatch(1, 1, 1);
   }
   barrier.Transition.pResource = output;
   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;

@@ -584,6 +584,17 @@ reads the sidecar table at execution; no descriptor is mutated while submitted
 work is in flight. This does not cover root signature 1.1 static descriptors,
 post-submission mutations, or all descriptor/residency lifetime combinations.
 
+The `--indirect-heap` mode uses indirect dispatch for both typed UAV access and
+the dimensions queries, with a buffer copy between the latter two dispatches
+and a switch to a second descriptor heap with a two-element view. The local
+R32 FLOAT, UINT, and SINT runs read dimensions 4 then 2 and checked the copy
+sentinel. Incorrect expected dimensions and disabling the experimental patch
+both failed. Evidence and runtime identity are in `result-indirect-heap`,
+`result-indirect-heap-wrong`, and `result-indirect-heap-no-patch` under n95.
+The command recording path switches to a copy encoder and back; this test does
+not independently inspect a GPU capture of encoder boundaries, nor cover every
+heap or indirect-signature combination.
+
 When a signature changes root arguments, `PreDispatch` skips normal binding and
 indirect encoding uses the ordinary root-argument layout without the sidecar.
 The existing MSC pipeline validation rejects such signatures and `Close` returns
