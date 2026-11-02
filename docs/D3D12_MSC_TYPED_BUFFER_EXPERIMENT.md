@@ -469,3 +469,19 @@ The same command without `--experimental-patch` failed readback for all three,
 as expected; the ordinary R32 texture tests passed. The offline patched shader
 instrumentation is unverified and this does not prove graphics, multiple heaps
 or in-flight submission lifetime. Experimental compute is still opt-in.
+
+### Compute view-offset boundary checks
+
+The committed opt-in R32 regression was rerun against the current build with
+`--buffer --scalar --experimental-patch --unaligned` and separately with
+`--zero-offset`. FLOAT, UINT and SINT all passed GPU readback, dimensions,
+view guards, loaded-module identity and enabled validation checks. Results are
+in `dxmt-test/n95-capability-gate/run-typed-auto-unaligned2` and
+`run-typed-auto-zero2`. The first attempted run correctly rejected a stale
+staged D3D12 DLL; a fresh isolated stage was prepared before testing. Offline
+metallib shader-validation instrumentation is unverified.
+
+These tests use one resource descriptor heap and do not validate heap switching
+or in-flight lifetime. A meaningful switch test must use different view
+metadata and distinct readback expectations for each heap; merely copying the
+same descriptor to another heap cannot detect a stale sidecar pointer.
