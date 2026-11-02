@@ -859,7 +859,7 @@ main(int argc, char **argv) {
   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
   list->ResourceBarrier(1, &barrier);
   list->CopyBufferRegion(readback, 0, output, 0,
-                         (indirect_count ? 25 : indirect_math ? 24 : heap_switch ? 22 : typed_buffer ? 20 : typed_format ? 17 : 1) * sizeof(UINT));
+                         (indirect_count ? 25 : indirect_math ? 26 : heap_switch ? 22 : typed_buffer ? 20 : typed_format ? 17 : 1) * sizeof(UINT));
   if (rerecord)
     list->CopyBufferRegion(readback, 25 * sizeof(UINT), upload, 0, sizeof(UINT));
   if (texture_uav) {
@@ -1009,13 +1009,17 @@ main(int argc, char **argv) {
     goto cleanup;
   }
   if (typed_buffer) {
-    if (indirect_math && (mapped[22] != 1 || mapped[23] != (indirect_math_wrong ? 2u : 1u))) {
-      std::cerr << "indirect math mismatch: " << mapped[22] << "," << mapped[23] << "\n";
+    if (indirect_math && (mapped[22] != 1 || mapped[23] != 1 || mapped[24] != 0x20000000u ||
+                          mapped[25] != (indirect_math_wrong ? 0x20000000u : 0x40000000u))) {
+      std::cerr << "indirect math mismatch: " << mapped[22] << "," << mapped[23] << ",0x" << std::hex
+                << mapped[24] << ",0x" << mapped[25] << std::dec << "\n";
       readback->Unmap(0, nullptr);
       goto cleanup;
     }
     if (indirect_math)
       std::cout << "indirect countbits=1,1 passed\n";
+    if (indirect_math)
+      std::cout << "indirect reversebits=20000000,40000000 passed\n";
     if (rerecord && mapped[25] != (rerecord_wrong ? 4u : 2u)) {
       std::cerr << "rerecord dimensions expected=" << (rerecord_wrong ? 4 : 2) << " got=" << mapped[25] << "\n";
       readback->Unmap(0, nullptr);

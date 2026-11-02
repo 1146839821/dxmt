@@ -661,3 +661,27 @@ and no-patch controls failed. Evidence and runtime artifact hashes are in
 the runtime converter run; its exact AIR was not captured from that run. Metal
 validation was enabled but instrumentation of rewritten metallib remains
 unverified. This does not enable the experiment by default or promote capability.
+
+### `air.reverse_bits.i32` classification
+
+MSC CLI 4.0.3 compiled the `reversebits` DXIL fixture into a direct
+`i32 @air.reverse_bits.i32(i32)` call. The extracted AIR and metallib are in
+`msc-reversebits/float.ll` and `msc-reversebits/float.metallib` under n95;
+the metallib SHA-256 is
+`07c19848da0d5bfe278c03ca02ba462180625be69d429cef84e6770b308cf965`.
+[Microsoft's reversebits specification](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/reversebits)
+defines bit reversal per component. The experimental analysis accepts only a
+direct call to that exact external declaration with one i32 argument and an
+i32 result. Similar names, other widths and incompatible signatures remain
+unsupported.
+
+Synthetic no-op and mixed typed-buffer AIR tests cover the accepted signature
+and rejection cases. Isolated 64-bit Wine GPU tests combine this operation with
+indirect typed-buffer accesses, `countbits`, heap switches and a copy; the
+expected reversed results for 4 and 2 are `0x20000000` and `0x40000000`.
+R32 FLOAT/UINT/SINT pass; wrong-expectation and no-patch controls fail. Logs
+and artifact identity are in `result-typed-reversebits`,
+`result-typed-reversebits-wrong`, and `result-typed-reversebits-no-patch` under
+n95. The CLI capture is distinct from runtime conversion, whose AIR was not
+captured. Metal validation was enabled but rewritten-metallib shader-validation
+instrumentation is unverified. No default behavior or capability is promoted.

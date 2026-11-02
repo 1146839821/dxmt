@@ -43,8 +43,8 @@ def main():
     parser.add_argument("--indirect-late-skip", action="store_true", help="negative control without the late descriptor copy")
     parser.add_argument("--indirect-heap", action="store_true", help="indirect dispatch across heap switch and encoder break")
     parser.add_argument("--indirect-heap-wrong", action="store_true", help="negative control with wrong heap dimension")
-    parser.add_argument("--indirect-math", action="store_true", help="run countbits during indirect heap transitions")
-    parser.add_argument("--indirect-math-wrong", action="store_true", help="negative control with wrong countbits result")
+    parser.add_argument("--indirect-math", action="store_true", help="run bit operations during indirect heap transitions")
+    parser.add_argument("--indirect-math-wrong", action="store_true", help="negative control with wrong reversebits result")
     args = parser.parse_args()
     if (args.scalar or args.unaligned or args.zero_offset or args.experimental_patch or args.late_copy or args.heap_switch or args.pending_reset or args.indirect_reject or args.indirect or args.indirect_count or args.indirect_count_wrong or args.indirect_pending or args.indirect_pending_wrong or args.rerecord or args.rerecord_wrong or args.rerecord_zero or args.indirect_late or args.indirect_late_skip or args.indirect_heap or args.indirect_heap_wrong or args.indirect_math or args.indirect_math_wrong) and not args.buffer:
         parser.error("--scalar, --unaligned and --zero-offset require --buffer")
@@ -111,6 +111,7 @@ def main():
             passed = passed and "rerecord dimensions=2 passed" in log
         if args.indirect_math or args.indirect_math_wrong:
             passed = passed and "indirect countbits=1,1 passed" in log
+            passed = passed and "indirect reversebits=20000000,40000000 passed" in log
         if args.indirect_count or args.indirect_count_wrong or args.indirect_pending or args.indirect_pending_wrong or args.rerecord or args.rerecord_wrong or args.rerecord_zero or args.indirect_late or args.indirect_late_skip:
             passed = passed and "indirect count sums=0,4,8,8,8 passed" in log
         if args.indirect_reject:

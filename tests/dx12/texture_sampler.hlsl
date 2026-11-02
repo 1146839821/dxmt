@@ -51,6 +51,7 @@ void main(uint3 tid : SV_DispatchThreadID)
         output[20 + (phase - 2)] = heap_count;
 #if defined(TYPED_BUFFER_MATH)
         output[22 + (phase - 2)] = countbits(heap_count);
+        output[24 + (phase - 2)] = reversebits(heap_count);
 #endif
         return;
     }

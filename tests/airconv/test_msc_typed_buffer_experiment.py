@@ -43,6 +43,18 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
         ("air_popcount_unknown", "declare i32 @air.popcount.other(i32)\n"
                                  "define i32 @main(i32 %x) { %y = call i32 @air.popcount.other(i32 %x) ret i32 %y }\n", 4,
          ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
+        ("air_reverse", "declare i32 @air.reverse_bits.i32(i32)\n"
+                        "define i32 @main(i32 %x) { %y = call i32 @air.reverse_bits.i32(i32 %x) ret i32 %y }\n", 7,
+         ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
+        ("air_reverse_bad_type", "declare i64 @air.reverse_bits.i32(i64)\n"
+                                 "define i64 @main(i64 %x) { %y = call i64 @air.reverse_bits.i32(i64 %x) ret i64 %y }\n", 4,
+         ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
+        ("air_reverse_unknown", "declare i32 @air.reverse_bits.other(i32)\n"
+                                "define i32 @main(i32 %x) { %y = call i32 @air.reverse_bits.other(i32 %x) ret i32 %y }\n", 4,
+         ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
+        ("air_reverse_vararg", "declare i32 @air.reverse_bits.i32(i32, ...)\n"
+                               "define i32 @main(i32 %x) { %y = call i32 (i32, ...) @air.reverse_bits.i32(i32 %x) ret i32 %y }\n", 4,
+         ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
         ("unclassified_intrinsic", "declare i32 @llvm.ctpop.i32(i32)\n"
                                    "define i32 @main(i32 %x) { %y = call i32 @llvm.ctpop.i32(i32 %x) ret i32 %y }\n", 4,
          ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
@@ -73,6 +85,14 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
         ("mixed_popcount_bad", sidecar_source.replace('  %data = call',
                                                      '  %bits = call i64 @air.popcount.i32(i64 1)\n  %data = call') +
                                '\ndeclare i64 @air.popcount.i32(i64)\n', 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_reverse", sidecar_source.replace('  %data = call',
+                                                '  %bits = call i32 @air.reverse_bits.i32(i32 %index)\n  %data = call') +
+                          '\ndeclare i32 @air.reverse_bits.i32(i32)\n', 0,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_reverse_bad", sidecar_source.replace('  %data = call',
+                                                    '  %bits = call i64 @air.reverse_bits.i32(i64 1)\n  %data = call') +
+                              '\ndeclare i64 @air.reverse_bits.i32(i64)\n', 4,
          ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
         ("dynamic", source, 0, []),
         ("unknown", source.replace("air.get_width_texture_buffer_1d",
