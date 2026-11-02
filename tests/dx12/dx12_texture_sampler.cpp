@@ -285,6 +285,9 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
+  const bool srv_multi_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi-skip") == 0;
+  const bool srv_multi_wrong = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi-wrong") == 0;
+  const bool srv_multi = srv_multi_skip || srv_multi_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi") == 0);
   const bool srv_copy_live_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-copy-to-live-skip") == 0;
   const bool srv_copy_null_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-copy-to-null-skip") == 0;
   const bool srv_copy_live = srv_copy_live_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-copy-to-live") == 0);
@@ -295,7 +298,7 @@ main(int argc, char **argv) {
   const bool srv_pending_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-pending-skip") == 0;
   const bool srv_pending = srv_rerecord || srv_pending_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-pending") == 0);
   const bool srv_only_skip = srv_pending_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-skip") == 0);
-  const bool srv_only = srv_copy || srv_pending || srv_only_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only") == 0);
+  const bool srv_only = srv_multi || srv_copy || srv_pending || srv_only_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only") == 0);
   const bool srv_to_live_skip = srv_only_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-skip") == 0);
   const bool srv_to_null_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-live-to-null-skip") == 0;
   const bool srv_to_live = (srv_only && !srv_copy_null) || srv_to_live_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live") == 0);
@@ -466,7 +469,7 @@ main(int argc, char **argv) {
         D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
         D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED;
   } else {
-    ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
+    ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, srv_multi ? 2u : 1u, 0, 0, 0};
     ranges[1] = {static_sampler ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV : D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
     if (!static_sampler)
       ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, typed_format ? 2u : 1u, 0,
@@ -537,7 +540,7 @@ main(int argc, char **argv) {
     goto cleanup;
 
   resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-  resource_heap_desc.NumDescriptors = texture_uav ? 3 : 2;
+  resource_heap_desc.NumDescriptors = texture_uav ? (srv_multi ? 4 : 3) : 2;
   resource_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
   sampler_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
   sampler_heap_desc.NumDescriptors = 1;
@@ -633,7 +636,7 @@ main(int argc, char **argv) {
   uav_desc.Buffer.NumElements = 64;
   uav_desc.Buffer.StructureByteStride = sizeof(UINT);
   uav_cpu = resource_cpu;
-  uav_cpu.ptr += descriptor_increment;
+  uav_cpu.ptr += descriptor_increment * (srv_multi ? 2 : 1);
   buffer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   if (!CheckHR(
           "CreateOutputBuffer",
@@ -692,7 +695,7 @@ main(int argc, char **argv) {
       texture_uav_desc.Buffer.NumElements = indirect_late ? 2 : 4;
     }
     auto texture_uav_cpu = resource_cpu;
-    texture_uav_cpu.ptr += descriptor_increment * 2;
+    texture_uav_cpu.ptr += descriptor_increment * (srv_multi ? 3 : 2);
     device->CreateUnorderedAccessView(null_uav && !null_uav_live ? nullptr : output_texture, nullptr, &texture_uav_desc, texture_uav_cpu);
     if (typed_srv) {
       D3D12_SHADER_RESOURCE_VIEW_DESC typed_srv_desc = {};
@@ -703,6 +706,11 @@ main(int argc, char **argv) {
       typed_srv_desc.Buffer.NumElements = 4;
       device->CreateShaderResourceView((srv_to_live || (srv_null && !srv_to_null)) ? nullptr : srv_only ? srv_only_resource : output_texture,
                                        &typed_srv_desc, resource_cpu);
+      if (srv_multi) {
+        auto second = resource_cpu;
+        second.ptr += descriptor_increment;
+        device->CreateShaderResourceView(nullptr, &typed_srv_desc, second);
+      }
     }
     if (typed_buffer) {
       output_texture_footprint.Offset = zero_offset_buffer ? 512 : (unaligned_buffer || late_buffer) ? 532 : 528;
@@ -798,7 +806,7 @@ main(int argc, char **argv) {
   if (!direct_indexed) {
     list->SetComputeRootDescriptorTable(0, resource_heap->GetGPUDescriptorHandleForHeapStart());
     resource_gpu = resource_heap->GetGPUDescriptorHandleForHeapStart();
-    resource_gpu.ptr += descriptor_increment;
+    resource_gpu.ptr += descriptor_increment * (srv_multi ? 2 : 1);
     if (static_sampler) {
       list->SetComputeRootDescriptorTable(1, resource_gpu);
     } else {
@@ -935,7 +943,7 @@ main(int argc, char **argv) {
   }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
-  if ((srv_to_live && !srv_to_live_skip) || (srv_to_null && !srv_to_null_skip)) {
+  if (!srv_multi && ((srv_to_live && !srv_to_live_skip) || (srv_to_null && !srv_to_null_skip))) {
     D3D12_SHADER_RESOURCE_VIEW_DESC updated = {};
     updated.Format = typed_format->format;
     updated.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -959,6 +967,36 @@ main(int argc, char **argv) {
       device->CreateShaderResourceView(srv_to_null ? nullptr : srv_only ? srv_only_resource : output_texture,
                                        &updated, resource_cpu);
     }
+  }
+  if (srv_multi) {
+    D3D12_DESCRIPTOR_HEAP_DESC source_desc = {};
+    source_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    source_desc.NumDescriptors = 3;
+    if (!CheckHR("CreateSRVMultiSource", device->CreateDescriptorHeap(&source_desc, IID_PPV_ARGS(&late_source_heap))))
+      goto cleanup;
+    auto source0 = late_source_heap->GetCPUDescriptorHandleForHeapStart();
+    auto source2 = source0;
+    source2.ptr += 2 * descriptor_increment;
+    D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
+    desc.Format = typed_format->format;
+    desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    desc.Buffer.FirstElement = 4;
+    desc.Buffer.NumElements = 4;
+    device->CreateShaderResourceView(srv_only_resource, &desc, source0);
+    desc.Buffer.FirstElement = 5;
+    desc.Buffer.NumElements = 2;
+    device->CreateShaderResourceView(srv_only_resource, &desc, source2);
+    D3D12_CPU_DESCRIPTOR_HANDLE destinations[] = {resource_cpu, resource_cpu};
+    destinations[0].ptr += descriptor_increment;
+    D3D12_CPU_DESCRIPTOR_HANDLE sources[] = {source0, source2};
+    const UINT sizes[] = {1, 1};
+    if (!srv_multi_skip)
+      device->CopyDescriptors(2, destinations, sizes, 2, sources, sizes, source_desc.Type);
+    device->CreateShaderResourceView(nullptr, &desc, source0);
+    device->CreateShaderResourceView(nullptr, &desc, source2);
+    late_source_heap->Release();
+    late_source_heap = nullptr;
   }
   if (late_buffer) {
     D3D12_UNORDERED_ACCESS_VIEW_DESC updated = {};
@@ -1143,19 +1181,22 @@ main(int argc, char **argv) {
     bool unchanged = true;
     for (unsigned i = 0; i < 16; ++i)
       unchanged = unchanged && guard[i] == 0xa5a5a5a5u;
-    if (mapped[0] != (srv_live ? 0xa5a5a5a5u : 0u) || mapped[1] != 0 ||
-        mapped[2] != (srv_live ? 4u : 0u) || !unchanged ||
+    if (mapped[0] != (srv_multi ? (srv_multi_wrong ? 0xa5a5a5a5u : 0x3f800000u) : srv_live ? 0xa5a5a5a5u : 0u) || mapped[1] != 0 ||
+        mapped[2] != (srv_multi ? 2u : srv_live ? 4u : 0u) || !unchanged ||
+        (srv_multi && (mapped[3] != 0xa5a5a5a5u || mapped[4] != 4u || mapped[5] != 0)) ||
         (srv_rerecord && (mapped[20] != (srv_rerecord_wrong ? 0xa5a5a5a5u : 0x3f800000u) ||
                           mapped[21] != 0 || mapped[22] != 2))) {
       std::cerr << "typed SRV mismatch: read=" << mapped[0] << " oob=" << mapped[1]
                 << " dimensions=" << mapped[2] << " guard=" << unchanged;
       if (srv_rerecord)
         std::cerr << " rerecord=" << mapped[20] << "," << mapped[21] << "," << mapped[22];
+      if (srv_multi)
+        std::cerr << " second=" << mapped[3] << "," << mapped[4] << "," << mapped[5];
       std::cerr << "\n";
       readback->Unmap(0, nullptr);
       goto cleanup;
     }
-    std::cout << (srv_copy_live ? "copy-to-live" : srv_copy_null ? "copy-to-null" : srv_rerecord ? "null-to-live-only-rerecord" : srv_pending ? "null-to-live-only-pending" : srv_only ? "null-to-live-only" : srv_to_live ? "null-to-live" : srv_to_null ? "live-to-null" : srv_live ? "live" : "null")
+    std::cout << (srv_multi ? "multi" : srv_copy_live ? "copy-to-live" : srv_copy_null ? "copy-to-null" : srv_rerecord ? "null-to-live-only-rerecord" : srv_pending ? "null-to-live-only-pending" : srv_only ? "null-to-live-only" : srv_to_live ? "null-to-live" : srv_to_null ? "live-to-null" : srv_live ? "live" : "null")
               << " typed SRV read and dimensions passed\n";
     readback->Unmap(0, nullptr);
     result = 0;

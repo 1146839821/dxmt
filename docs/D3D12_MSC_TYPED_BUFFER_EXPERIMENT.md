@@ -950,3 +950,23 @@ oracle for all three formats. This covers one `CopyDescriptorsSimple` entry;
 multiple ranges, `CopyDescriptors`, and copy/update during submitted execution
 are not covered. Rewritten-metallib shader-validation instrumentation remains
 unverified. No capability declaration or default runtime path changed.
+
+### Multiple typed SRV descriptor-copy ranges
+
+The `multi` probe records two typed SRV slots initially containing null views.
+After Close, it uses [CopyDescriptors](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-copydescriptors)
+with two noncontiguous source ranges in a non-shader-visible heap and two
+destination ranges in reverse slot order. Source view A begins at element 4
+with length 4; view B begins at element 5 with length 2. The shader reads both
+slots and their dimensions and performs an out-of-bounds read on each. The
+source descriptors are overwritten and the source heap released before submit.
+
+R32 FLOAT, UINT and SINT passed readback, runtime identity, and enabled Metal
+validation in `result-srv-multicopy-final-multi` under n95. The two slots read
+`0x3f800000`/2 and `0xa5a5a5a5`/4 respectively, with zero out-of-bounds
+reads. Skipping the copy (`result-srv-multicopy-final-multi-skip`) and expecting
+the wrong first value (`result-srv-multicopy-final-multi-wrong`) both failed as
+expected in all three formats. Each range has one descriptor; unequal-sized
+ranges, overlapping ranges, and source/destination changes after submission are
+not covered. Shader validation instrumentation of the rewritten metallib remains
+unverified; no capability reporting or default runtime path changed.
