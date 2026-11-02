@@ -6,6 +6,29 @@
 #include <iterator>
 #include <vector>
 
+static int test_typed_noop() {
+  std::ifstream file("typed-noop.metallib", std::ios::binary);
+  std::vector<char> data((std::istreambuf_iterator<char>(file)), {});
+  if (data.empty())
+    return 1;
+  dxmt_msc_typed_buffer_table table{0, 8};
+  dxmt_msc_patch_typed_buffer_params params{};
+  params.metallib = data.data();
+  params.metallib_size = data.size();
+  params.tables = &table;
+  params.table_count = 1;
+  params.original_root_size = 8;
+  params.extended_root_size = 16;
+  uint8_t sentinel = 0x73;
+  params.output = &sentinel;
+  params.output_capacity = 1;
+  if (DXMTMSCPatchTypedBuffer(&params) != DXMT_MSC_SUCCESS ||
+      params.patch_status != DXMT_MSC_TYPED_BUFFER_NOT_APPLICABLE || params.output_size || sentinel != 0x73)
+    return 1;
+  std::cout << "typed-buffer WineMetal no-op status passed\n";
+  return 0;
+}
+
 static int test_typed() {
   auto module = GetModuleHandleA("winemetal.dll");
   auto address = module ? reinterpret_cast<const unsigned char *>(
@@ -73,6 +96,8 @@ static int test_typed() {
 }
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::string(argv[1]) == "--typed-buffer-noop")
+    return test_typed_noop();
   if (argc == 2 && std::string(argv[1]) == "--typed-buffer")
     return test_typed();
   if (argc != 1)

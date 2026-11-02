@@ -49,6 +49,8 @@ SM50PatchMetalLibTypedBufferSidecar(
   auto module = std::move(*parsed);
   if (llvm::verifyModule(*module))
     return SM50_MSC_TYPED_BUFFER_INVALID_INPUT;
+  if (dxmt::air::definitelyNoMSCTypedBufferAccess(*module))
+    return SM50_MSC_TYPED_BUFFER_NOT_APPLICABLE;
   std::vector<dxmt::air::MSCTypedBufferTableMapping> mappings;
   mappings.reserve(table_count);
   for (size_t i = 0; i < table_count; ++i)

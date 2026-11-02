@@ -349,7 +349,7 @@ AIRCONV_API int SM50PatchMetalLibSampleLevelLOD(
   const void *Data, size_t Size, uint32_t RootArgumentIndex, uint32_t OriginalRootSize,
   const struct SM50_MSC_LOD_SIDECAR_TABLE *Tables, size_t TableCount, sm50_bitcode_t *pPatched
 );
-/* Experimental typed-buffer sidecar rewrite. No runtime path enables it. */
+/* Experimental typed-buffer sidecar rewrite; the runtime path is opt-in. */
 struct SM50_MSC_TYPED_BUFFER_TABLE {
   uint32_t table_offset;
   uint32_t sidecar_offset;
@@ -358,6 +358,7 @@ enum SM50_MSC_TYPED_BUFFER_PATCH_RESULT {
   SM50_MSC_TYPED_BUFFER_PATCHED = 0,
   SM50_MSC_TYPED_BUFFER_INVALID_INPUT = 1,
   SM50_MSC_TYPED_BUFFER_UNSUPPORTED = 2,
+  SM50_MSC_TYPED_BUFFER_NOT_APPLICABLE = 3,
 };
 AIRCONV_API int SM50PatchMetalLibTypedBufferSidecar(
   const void *Data, size_t Size, uint32_t OriginalRootSize, uint32_t ExtendedRootSize,

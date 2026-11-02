@@ -609,3 +609,30 @@ implemented Mullion `ExecuteIndirect` path. The last is a reference, not the
 binding ABI used here. Local results and loaded-runtime identity are recorded in
 the n95 `result-indirect-dispatch-final2` and `result-indirect-reject-final2`
 directories. The no-patch GPU control is in `result-indirect-control-final`.
+
+### Conservative no-op classification
+
+The experimental metallib API now distinguishes `NOT_APPLICABLE` (numeric 3)
+from `UNSUPPORTED` (2), retaining all existing numeric status values. It emits no
+metallib for the new status. To prove a no-op, the module must contain a
+function definition, no indirect or external call, and no AIR intrinsic call;
+`llvm.bswap` is the only permitted external intrinsic. All functions are
+scanned, including helpers. Unknown calls and fence/null-only AIR remain
+unsupported. For modules with candidate typed-buffer operations the preflight
+also rejects unknown external calls; the current narrow allowlist for unrelated
+intrinsics is deliberately incomplete and can reject previously accepted
+experimental shaders. No-op does not bypass input/mapping validation, and the
+opt-in compute path still rejects non-patched results. Default runtime behavior
+and advertised capabilities are unchanged.
+
+Synthetic AIR and metallib tests cover no-op, internal calls, the intrinsic
+allowlist, unknown external/AIR calls, indirect calls, fence/null-only calls,
+mixed known and unknown operations, malformed mappings and failure atomicity.
+The isolated 64-bit Wine thunk verifies status and untouched output on a no-op
+(`typed-classify-thunk-final3.log`). R32 GPU regression and no-patch controls
+are in `result-typed-classify-positive-final3` and
+`result-typed-classify-control-final3`. This is not a proof for every MSC AIR
+version, shader stage, or intrinsic; the restricted allowlist and the missing
+production fallback policy remain promotion blockers. Shader-validation
+instrumentation of the rewritten metallib and 32-bit Wine runtime remain
+unverified.

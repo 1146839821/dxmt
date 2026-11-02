@@ -249,6 +249,7 @@ enum dxmt_msc_typed_buffer_patch_status {
   DXMT_MSC_TYPED_BUFFER_PATCHED = 0,
   DXMT_MSC_TYPED_BUFFER_INVALID_INPUT = 1,
   DXMT_MSC_TYPED_BUFFER_UNSUPPORTED = 2,
+  DXMT_MSC_TYPED_BUFFER_NOT_APPLICABLE = 3,
 };
 struct dxmt_msc_patch_typed_buffer_params {
   const void *metallib;

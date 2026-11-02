@@ -33,8 +33,23 @@ collect(llvm::Module &module, std::vector<Operation> &operations, const std::vec
         auto *target = call->getCalledFunction();
         if (!target)
           return false;
-        if (!target->getName().contains("texture_buffer_1d"))
+        if (target->isDeclaration() && !target->isIntrinsic() && !target->getName().startswith("air."))
+          return false;
+        if (!target->getName().contains("texture_buffer_1d")) {
+          // Other AIR calls are not automatically safe: an unknown intrinsic
+          // could hide an operation that this transform must account for.
+          if (target->isDeclaration()) {
+            if (target->isIntrinsic()) {
+              if (!target->getName().startswith("llvm.bswap."))
+                return false;
+            } else if (target->getName() != "air.get_read_sampler" &&
+                       target->getName() != "air.atomic.global.add.s.i32" &&
+                       !target->getName().startswith("air.sample_texture_2d.")) {
+              return false;
+            }
+          }
           continue;
+        }
         const auto name = target->getName();
         if (name == "air.fence_texture_buffer_1d" || name == "air.is_null_texture_buffer_1d")
           continue;
@@ -147,6 +162,28 @@ patch(const std::vector<Operation> &operations) {
   }
 }
 } // namespace
+
+bool
+definitelyNoMSCTypedBufferAccess(const llvm::Module &module) {
+  bool has_definition = false;
+  for (const auto &function : module) {
+    if (function.isDeclaration())
+      continue;
+    has_definition = true;
+    for (const auto &block : function)
+      for (const auto &instruction : block) {
+        const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+        if (!call)
+          continue;
+        const auto *target = call->getCalledFunction();
+        if (!target || target->getName().startswith("air.") ||
+            (target->isDeclaration() &&
+             !(target->isIntrinsic() && target->getName().startswith("llvm.bswap."))))
+          return false;
+      }
+  }
+  return has_definition;
+}
 
 bool
 patchMSCTypedBufferSidecar(

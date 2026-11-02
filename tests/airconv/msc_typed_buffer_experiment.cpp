@@ -133,7 +133,8 @@ void patch(const std::vector<Operation> &operations) {
 
 int main(int argc, char **argv) {
   const bool passthrough = argc == 4 && std::string(argv[3]) == "--unpatched";
-  const bool use_api = argc >= 6 && std::string(argv[3]) == "--metallib-api";
+  const bool use_api = argc >= 6 && (std::string(argv[3]) == "--metallib-api" ||
+                                     std::string(argv[3]) == "--metallib-classify");
   const int first_mapping = use_api ? 6 : 3;
   if (argc < 3 || (!passthrough && (argc - first_mapping) % 3))
     return 2;
@@ -193,6 +194,10 @@ int main(int argc, char **argv) {
     const int status = SM50PatchMetalLibTypedBufferSidecar(
         input.data(), input.size(), original_size, extended_size, tables.data(),
         tables.size(), &output);
+    if (status == SM50_MSC_TYPED_BUFFER_NOT_APPLICABLE && !output) {
+      llvm::outs() << "metallib API not applicable\n";
+      return 7;
+    }
     if (status != SM50_MSC_TYPED_BUFFER_PATCHED || !output)
       return 4;
     auto *compiled = static_cast<SM50CompiledBitcodeInternal *>(output);
@@ -211,10 +216,21 @@ int main(int argc, char **argv) {
   std::vector<dxmt::air::MSCTypedBufferTableMapping> sidecar_tables;
   for (const auto &mapping : mappings)
     sidecar_tables.push_back({mapping.table_offset, mapping.sidecar_offset});
-  if (!passthrough && !mappings.empty() &&
-      !dxmt::air::patchMSCTypedBufferSidecar(*module, sidecar_tables, count)) {
-    llvm::errs() << "unsupported typed-buffer AIR\n";
-    return 4;
+  if (!passthrough && !mappings.empty()) {
+    std::string before;
+    llvm::raw_string_ostream before_stream(before);
+    module->print(before_stream, nullptr);
+    before_stream.flush();
+    if (!dxmt::air::patchMSCTypedBufferSidecar(*module, sidecar_tables, count)) {
+      std::string after;
+      llvm::raw_string_ostream after_stream(after);
+      module->print(after_stream, nullptr);
+      after_stream.flush();
+      if (before != after)
+        return 8;
+      llvm::errs() << "unsupported typed-buffer AIR\n";
+      return 4;
+    }
   }
   if (!passthrough && mappings.empty() && !collect(*module, operations)) {
     llvm::errs() << "unsupported typed-buffer AIR\n";

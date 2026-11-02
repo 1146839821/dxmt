@@ -729,7 +729,8 @@ dxmt_msc_patch_sampler_lod(struct dxmt_msc_patch_lod_params *params) {
 
 _Static_assert((int)DXMT_MSC_TYPED_BUFFER_PATCHED == (int)SM50_MSC_TYPED_BUFFER_PATCHED &&
                (int)DXMT_MSC_TYPED_BUFFER_INVALID_INPUT == (int)SM50_MSC_TYPED_BUFFER_INVALID_INPUT &&
-               (int)DXMT_MSC_TYPED_BUFFER_UNSUPPORTED == (int)SM50_MSC_TYPED_BUFFER_UNSUPPORTED,
+               (int)DXMT_MSC_TYPED_BUFFER_UNSUPPORTED == (int)SM50_MSC_TYPED_BUFFER_UNSUPPORTED &&
+               (int)DXMT_MSC_TYPED_BUFFER_NOT_APPLICABLE == (int)SM50_MSC_TYPED_BUFFER_NOT_APPLICABLE,
                "typed buffer patch status ABI mismatch");
 
 int
