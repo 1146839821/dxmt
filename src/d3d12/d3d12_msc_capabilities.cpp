@@ -162,8 +162,8 @@ GetMaximumD3D12ShaderModel(const DXMTMSCCapabilities &capabilities) {
 void
 LogDXMTMSCCapabilities(const DXMTMSCCapabilities &capabilities) {
   Logger::info(str::format(
-      "D3D12 MSC capability snapshot: compiled SDK headers ", capabilities.ir_version_major, ".", capabilities.ir_version_minor, ".",
-      capabilities.ir_version_patch, ", runtime version unknown, core=", capabilities.core_converter, ", symbols=", capabilities.runtime_symbols,
+      "D3D12 MSC capability snapshot: compiled SDK API ", capabilities.ir_version_major, ".", capabilities.ir_version_minor, ".",
+      capabilities.ir_version_patch, ", runtime product version unknown, core=", capabilities.core_converter, ", symbols=", capabilities.runtime_symbols,
       ", macOS=", capabilities.os_major, ".", capabilities.os_minor, ".", capabilities.os_patch,
       ", AppleFamily=", capabilities.highest_apple_gpu_family, ", argumentBuffersTier2=",
       capabilities.argument_buffers_tier2, ", maxShaderModel=", static_cast<unsigned>(capabilities.maximum_shader_model),

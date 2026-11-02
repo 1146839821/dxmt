@@ -39,6 +39,7 @@ typedef MTL::MeshRenderPipelineDescriptor*  meshpipelinedescriptor_t;
 typedef MTL::Device*                        device_t;
 typedef MTL::ResourceID                     resourceid_t;
 typedef NS::UInteger                        uinteger_t;
+
 #ifdef IR_RUNTIME_METAL4
 typedef MTL4::RenderCommandEncoder*         mtl4renderencoder_t;
 typedef MTL4::ArgumentTable*                mtl4argumenttable_t;
@@ -60,6 +61,7 @@ typedef MTLMeshRenderPipelineDescriptor*    meshpipelinedescriptor_t;
 typedef id<MTLDevice>                       device_t;
 typedef MTLResourceID                       resourceid_t;
 typedef NSUInteger                          uinteger_t;
+
 #ifdef IR_RUNTIME_METAL4
 typedef id<MTL4RenderCommandEncoder>        mtl4renderencoder_t;
 typedef id<MTL4ArgumentTable>               mtl4argumenttable_t;
@@ -453,16 +455,6 @@ void IRRuntimeDrawIndexedPrimitives(renderencoder_t enc, primitivetype_t primiti
  * You need to bind your vertex arrays and strides before issuing this call.
  * Bind a buffer with IRRuntimeVertexBuffers at index 0 for the object stage,
  * You need to manually flag residency for all referenced vertex buffers and for the index buffer.
- * @param enc the render command encoder
- * @param primitiveType the primitive type to draw
- * @param indexType the data type of the indices.
- * @param indexBuffer a buffer that contains indices to the vertices.
- * @param geometryPipelineConfig pipeline configuration from the geometry shader
- * @param instanceCount the number of instances to draw
- * @param indexCountPerInstance the index count
- * @param startIndex the first index to draw.
- * @param baseVertex the first vertex to draw.
- * @param baseInstance the first instance to draw.
  */
 void IRRuntimeDrawIndexedPrimitivesGeometryEmulation(renderencoder_t enc,
                                                      IRRuntimePrimitiveType primitiveType,
@@ -480,13 +472,6 @@ void IRRuntimeDrawIndexedPrimitivesGeometryEmulation(renderencoder_t enc,
  * You need to bind your vertex arrays and strides before issuing this call.
  * Bind a buffer with IRRuntimeVertexBuffers at index 0 for the object stage,
  * You need to manually flag residency for all referenced vertex buffers.
- * @param enc the render command encoder
- * @param primitiveType the primitive type to draw
- * @param geometryPipelineConfig pipeline configuration from the geometry shader
- * @param instanceCount the number of instances to draw
- * @param vertexCountPerInstance the vertex count
- * @param baseVertex the first vertex to draw.
- * @param baseInstance the first instance to draw.
  */
 void IRRuntimeDrawPrimitivesGeometryEmulation(renderencoder_t enc,
                                               IRRuntimePrimitiveType primitiveType,
@@ -497,20 +482,10 @@ void IRRuntimeDrawPrimitivesGeometryEmulation(renderencoder_t enc,
                                               uint32_t baseInstance);
 
 /**
- * Draw indexed primitives using an emulated geometry/tessellation pipeline.
+ * * Draw indexed primitives using an emulated geometry/tessellation pipeline.
  * You need to bind your vertex arrays and strides before issuing this call.
  * Bind a buffer with IRRuntimeVertexBuffers at index 0 for the object stage,
  * You need to manually flag residency for all referenced vertex buffers and for the index buffer.
- * @param enc the render command encoder
- * @param primitiveTopology the primitive topology
- * @param indexType the data type of the indices.
- * @param indexBuffer a buffer that contains indices to the vertices.
- * @param tessellationPipelineConfig pipeline configuration from the tessellation shader
- * @param instanceCount the number of instances to draw
- * @param indexCountPerInstance the index count
- * @param baseInstance the first instance to draw.
- * @param baseVertex the first vertex to draw.
- * @param startIndex the first index to draw.
  */
 void IRRuntimeDrawIndexedPatchesTessellationEmulation(renderencoder_t enc,
                                                       IRRuntimePrimitiveType primitiveTopology,
@@ -528,13 +503,6 @@ void IRRuntimeDrawIndexedPatchesTessellationEmulation(renderencoder_t enc,
  * You need to bind your vertex arrays and strides before issuing this call.
  * Bind a buffer with IRRuntimeVertexBuffers at index 0 for the object stage,
  * You need to manually flag residency for all referenced vertex buffers.
- * @param enc the render command encoder
- * @param primitiveTopology the primitive topology
- * @param tessellationPipelineConfig pipeline configuration from the tessellation shader
- * @param instanceCount the number of instances to draw
- * @param vertexCountPerInstance the vertex count
- * @param baseInstance the first instance to draw.
- * @param baseVertex the first vertex to draw.
  */
 void IRRuntimeDrawPatchesTessellationEmulation(renderencoder_t enc,
                                                IRRuntimePrimitiveType primitiveTopology,
@@ -720,6 +688,7 @@ void IRRuntime4DrawIndexedPatchesTessellationEmulation(mtl4renderencoder_t enc, 
 
 
 #endif
+
 #ifdef IR_PRIVATE_IMPLEMENTATION
 
 #ifndef IR_RUNTIME_METALCPP
@@ -2030,6 +1999,7 @@ exit_stagein_function_error:
 
 #endif // IR_RUNTIME_METALCPP
 }
+
 
 #ifdef IR_RUNTIME_METAL4
     IR_INLINE

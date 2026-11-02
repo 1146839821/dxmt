@@ -20,6 +20,7 @@
 #include "dxmt_shader_cache.hpp"
 #include "log/log.hpp"
 #include "metalirconverter_thunks.h"
+#include "metal_shader_converter/ir_version.h"
 #include "sha1/sha1_util.hpp"
 
 namespace dxmt {
@@ -204,7 +205,8 @@ constexpr uint32_t kMSCConversionCacheVersion = 12;
 // could reuse a conversion produced by a different compiler implementation.
 // Keep the process-local cache, but do not read or write persistent entries.
 constexpr bool kMSCConversionPersistentCacheEnabled = false;
-constexpr uint32_t kMSCConverterAPIVersion = 0x040001;
+constexpr uint32_t kMSCConverterAPIVersion =
+    (IR_VERSION_MAJOR << 16) | (IR_VERSION_MINOR << 8) | IR_VERSION_PATCH;
 constexpr uint32_t kMSCMetalTargetVersion = 0;
 constexpr uint32_t kMSCCompileFlags = 0;
 constexpr uint32_t kMSCBindingLayoutVersion = 1;
