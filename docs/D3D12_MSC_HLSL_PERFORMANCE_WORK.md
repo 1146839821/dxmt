@@ -227,3 +227,43 @@ python3 tests/dx12/run_metal_hlsl_gpu_timing.py --stage STAGE --prefix PREFIX --
 The captured samples are in `result-metal-hlsl-timing-20261102/summary.json`
 and the validation log is in the same isolated result directory.
 Apple documents the [GPU start/end timestamp contract](https://developer.apple.com/documentation/metal/mtlcommandbuffer/gpustarttime): values are read after completion and their difference describes command-buffer execution duration.
+
+## HLSL constant comparison slice (2026-11-02)
+
+**Goal and design:** compare a float4 HLSL cbuffer, an HLSL runtime branch
+selecting two colors, and an `MTL_FUNCTION_CONSTANT` with equivalent outputs.
+The first two use four D3D12 root constants in a cbuffer; the test serializes an
+explicit root signature and writes the constant data inline at the offset
+returned by `DXMTMSCGetRootSignatureLayout`. It checks both colors on the GPU.
+Specialization uses the same values as opaque `UInt4` function constants. This
+is an opt-in WineMetal test, not an automatic conversion of game CBVs. The
+benchmark records function creation, render-PSO creation and command-buffer
+GPU duration independently, plus actual loaded-code identity and hashes.
+The wrong-pixel control must fail and API/GPU validation must pass separately.
+
+**Scope and risks:** the 4×4 test uses root constants rather than a CBV
+resource, creates one PSO per value for all modes, uses a fixed mode order,
+and samples only two colors. It is not an update-frequency benchmark, cache
+reuse study, memory measurement, representative workload or proof of a game
+speedup. Timings have validation disabled, and the validation run is separate.
+Rollback removes the standalone tests and fixture targets; production behavior
+and capability declarations are unchanged.
+
+Five separate process runs passed both pixels for each variant; a separate run
+with Metal API/GPU validation and the deliberately incorrect expected pixel
+control also behaved as expected. Function creation for the first value had
+median/p95 0.0168/0.0176 ms for the direct cbuffer, 0.0111/0.0153 ms for the
+HLSL branch, and 0.1571/1.4401 ms for specialization. The first render PSO
+median/p95 was 1.8419/11.1864, 0.1739/4.8011, and 0.1276/2.7964 ms,
+respectively. GPU timing had large outliers (including 205,666 ns and 410,500
+ns in the specialization samples). Mode order and driver caches confound these
+numbers, so no relative performance conclusion is justified; the HLSL branch
+may also be flattened by compilation. All individual samples and the second
+value's results are in `result-msc-cbuffer-compare/summary.json` and `.md`.
+
+Reproduction requires the same isolated paired stage and fresh output directory:
+
+```sh
+meson compile -C build dx12_msc_cbuffer_compare dx12_metal_hlsl_dynamic_main dx12_metal_hlsl_dynamic_branch_main dx12_metal_hlsl_constants_fixture
+python3 tests/dx12/run_msc_cbuffer_compare.py --stage STAGE --prefix PREFIX --build build --converter /usr/local/lib/libmetalirconverter.dylib --output NEW_OUTPUT --processes 5
+```

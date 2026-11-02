@@ -154,6 +154,12 @@ dx12_metal_hlsl_gpu = executable('dx12_metal_hlsl_gpu', 'dx12_metal_hlsl_gpu.cpp
   build_by_default: false,
 )
 
+dx12_msc_cbuffer_compare = executable('dx12_msc_cbuffer_compare', 'dx12_msc_cbuffer_compare.cpp',
+  include_directories: [ include_directories('../../src/winemetal') ],
+  dependencies: [ d3d12_dep, winemetal_dep ],
+  build_by_default: false,
+)
+
 dx12_msc_debug_validation = executable('dx12_msc_debug_validation', 'dx12_msc_debug_validation.cpp',
   include_directories: [ include_directories('../../src/winemetal') ],
   dependencies: [ d3d12_dep ],
@@ -244,6 +250,14 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  foreach shader_entry : ['main', 'branch_main']
+    custom_target('dx12_metal_hlsl_dynamic_' + shader_entry,
+      input: 'metal_hlsl_dynamic.hlsl',
+      output: 'metal_hlsl_dynamic_' + shader_entry + '.ps.cso',
+      command: dxc_command + [ '-E', shader_entry, '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
+  endforeach
   custom_target('dx12_metal_hlsl_framebuffer_fixture',
     input: 'metal_hlsl_framebuffer.hlsl',
     output: 'metal_hlsl_framebuffer.ps.cso',
