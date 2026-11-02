@@ -189,3 +189,41 @@ Reference: [Apple Metal shader converter documentation](https://developer.apple.
 describes the DXIL-to-metallib path and lists Function Constants and Framebuffer
 Fetch as converter features. Availability in that documentation is not proof
 that DXMT exposes either feature to normal D3D12 applications.
+
+## GPU timing slice (2026-11-02)
+
+**Design card.** Goal: add reproducible GPU command-buffer duration samples to
+the existing fetch-versus-two-pass correctness probe. The existing WineMetal
+`MTLCommandBuffer_property` exposes both GPU start and end timestamps; use it
+only after completion and reject zero or non-monotonic timestamps. No bridge
+ABI or production pipeline changes. Each process performs the existing
+correctness draws, then 25 pairs, alternating the order; each draw is checked
+by pixel readback and the first five pairs are excluded as warm-up. The runner
+checks deployed binaries and actual loaded paths, records hashes and all raw
+samples, and runs without validation. A separate validation-enabled run checks
+both Metal layers and all 25 pairs. Rollback removes the test-only timing mode
+and runner. Definition of done: positive timings, pixel correctness, runtime
+identity, separate validation, full build, and recorded limits.
+
+On Apple M1 Max/macOS 27.0.1 with the same dylib hash recorded above, three
+processes produced 60 post-warm-up samples per path. Single pass: median
+32,229 ns, p95 46,000 ns, range 24,083–990,750 ns. Two passes: median
+69,000 ns, p95 79,791 ns, range 51,208–104,667 ns. The separate API and GPU
+validation run passed all 25 pairs and produced no matching validation errors.
+These are **whole command-buffer GPU durations**, not fragment-only timing,
+GPU frame time or bandwidth. The workload is a 4×4 RGBA8 target, different
+MSC/native fragment implementations, with synchronous CPU readback between
+samples; one large single-pass outlier illustrates noise. Results justify no
+production optimization or game-FPS claim. CPU encoding, memory and GPU counter
+measurements remain NOT_RUN.
+
+Reproduce after staging the paired build artifacts:
+
+```sh
+meson compile -C build dx12_metal_hlsl_gpu
+python3 tests/dx12/run_metal_hlsl_gpu_timing.py --stage STAGE --prefix PREFIX --build build --converter /usr/local/lib/libmetalirconverter.dylib --output NEW_OUTPUT --processes 3
+```
+
+The captured samples are in `result-metal-hlsl-timing-20261102/summary.json`
+and the validation log is in the same isolated result directory.
+Apple documents the [GPU start/end timestamp contract](https://developer.apple.com/documentation/metal/mtlcommandbuffer/gpustarttime): values are read after completion and their difference describes command-buffer execution duration.

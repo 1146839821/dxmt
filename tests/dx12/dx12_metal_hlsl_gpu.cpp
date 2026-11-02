@@ -94,7 +94,7 @@ pipeline(WMT::Device device, WMT::Function vs, WMT::Function ps) {
 static bool draw(WMT::Device device, WMT::CommandQueue queue,
                  WMT::RenderPipelineState initial,
                  WMT::RenderPipelineState tested, const uint8_t expected[4],
-                 bool wrong) {
+                 bool wrong, uint64_t *gpu_time = nullptr) {
   WMTTextureInfo texture_info{};
   texture_info.pixel_format = WMTPixelFormatRGBA8Unorm;
   texture_info.width = 4;
@@ -132,6 +132,15 @@ static bool draw(WMT::Device device, WMT::CommandQueue queue,
     std::cerr << "GPU command failed\n";
     return false;
   }
+  if (gpu_time) {
+    uint64_t start = MTLCommandBuffer_property(
+        command.handle, WMTCommandBufferPropertyGPUStartTime);
+    uint64_t end = MTLCommandBuffer_property(
+        command.handle, WMTCommandBufferPropertyGPUEndTime);
+    if (!start || end <= start)
+      return false;
+    *gpu_time = end - start;
+  }
   uint8_t pixels[64]{};
   texture.getBytes({0, 0, 0}, {4, 4, 1}, 0, 0, pixels, 16, 64);
   const uint8_t *pixel = pixels + (2 * 4 + 2) * 4;
@@ -146,7 +155,8 @@ static bool draw(WMT::Device device, WMT::CommandQueue queue,
 
 static bool draw_two_pass(WMT::Device device, WMT::CommandQueue queue,
                           WMT::RenderPipelineState initial,
-                          WMT::RenderPipelineState sampled) {
+                          WMT::RenderPipelineState sampled,
+                          uint64_t *gpu_time = nullptr) {
   WMTTextureInfo info{};
   info.pixel_format = WMTPixelFormatRGBA8Unorm;
   info.width = 4;
@@ -191,6 +201,15 @@ static bool draw_two_pass(WMT::Device device, WMT::CommandQueue queue,
   command.waitUntilCompleted();
   if (command.status() != WMTCommandBufferStatusCompleted)
     return false;
+  if (gpu_time) {
+    uint64_t start = MTLCommandBuffer_property(
+        command.handle, WMTCommandBufferPropertyGPUStartTime);
+    uint64_t end = MTLCommandBuffer_property(
+        command.handle, WMTCommandBufferPropertyGPUEndTime);
+    if (!start || end <= start)
+      return false;
+    *gpu_time = end - start;
+  }
   uint8_t pixels[64]{};
   output.getBytes({0, 0, 0}, {4, 4, 1}, 0, 0, pixels, 16, 64);
   const uint8_t *pixel = pixels + (2 * 4 + 2) * 4;
@@ -207,7 +226,8 @@ static bool draw_two_pass(WMT::Device device, WMT::CommandQueue queue,
 int main(int argc, char **argv) {
   if (argc != 3 && !(argc == 4 && (std::strcmp(argv[3], "--wrong") == 0 ||
                                    std::strcmp(argv[3], "--zero-flags") == 0 ||
-                                   std::strcmp(argv[3], "--legacy-zero") == 0)))
+                                   std::strcmp(argv[3], "--legacy-zero") == 0 ||
+                                   std::strcmp(argv[3], "--benchmark") == 0)))
     return 2;
   auto module = GetModuleHandleA("winemetal.dll");
   auto code = module ? reinterpret_cast<const unsigned char *>(
@@ -291,6 +311,21 @@ fragment float4 sample_main(float4 pos [[position]], texture2d<float, access::re
     return 11;
   if (!draw_two_pass(device, queue, base_pso, sample_pso))
     return 12;
+  if (argc == 4 && std::strcmp(argv[3], "--benchmark") == 0) {
+    for (unsigned i = 0; i < 25; ++i) {
+      uint64_t one = 0, two = 0;
+      auto single = [&] {
+        return draw(device, queue, base_pso, fetch_pso, fetch_expected, false,
+                    &one);
+      };
+      auto multi = [&] {
+        return draw_two_pass(device, queue, base_pso, sample_pso, &two);
+      };
+      if (!(i % 2 ? multi() && single() : single() && multi()))
+        return 13;
+      std::cout << "GPU_NS " << i << " " << one << " " << two << "\n";
+    }
+  }
   std::cout
       << "Metal HLSL function constants and framebuffer fetch GPU passed\n";
   return 0;
