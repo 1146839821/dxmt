@@ -529,3 +529,20 @@ This checks one pending submission and list reset, not application-initiated
 resource destruction, multiple simultaneous queues or submissions, or all
 Metal resource lifetime cases. Offline metallib shader-validation
 instrumentation remains unverified. No production capability is promoted.
+
+### Experimental compute sidecar and ExecuteIndirect
+
+The opt-in typed-buffer compute path does not yet support indirect dispatch.
+`PreDispatch` skips normal binding when a signature changes root arguments, while
+indirect encoding creates the ordinary root-argument layout, without the MSC
+sidecar extension. Dispatch-only signatures have not been validated either.
+Until both cases have a verified binding and lifetime implementation, a compute
+PSO using this experiment rejects indirect dispatch and `Close` returns
+`E_NOTIMPL`. This guard does not change ordinary PSOs or advertised capability.
+
+The `--buffer --scalar --experimental-patch --indirect-reject` runner mode
+checks that result for R32 FLOAT, UINT, and SINT; it does not submit GPU work.
+Running that mode without the experimental switch is a negative control and is
+expected to fail the rejection assertion. A separate ordinary direct-dispatch
+run verifies GPU readback. Metal validation being enabled does not establish
+that the rewritten metallib was shader-validation instrumented.
