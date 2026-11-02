@@ -867,3 +867,24 @@ lifetime when a late descriptor is its only reference. CopyDescriptors, updates
 while submitted, other formats and Windows native behavior were not tested.
 Shader validation instrumentation of the rewritten metallib remains unverified.
 The experiment and these observations do not change advertised capabilities.
+
+### Late typed SRV with a descriptor-only resource
+
+`null-to-live-only` starts with a null descriptor and replaces it after `Close`
+with a typed SRV of a separately allocated upload buffer. The buffer is CPU
+initialized, never passed to a command-list copy or barrier, and kept alive by
+the application until GPU completion. Its element 4 alone contains the expected
+sentinel, so the read also exercises a nonzero view offset. FLOAT, UINT and SINT
+passed readback, runtime identity and enabled Metal validation in
+`result-srv-only-null-to-live-only` under n95. Skipping the replacement produced
+zero reads and dimensions and failed the live-view oracle for all three formats
+in `result-srv-only-null-to-live-only-skip`.
+
+Static inspection shows `ResolveVolatileDescriptorUses` resolves the current
+SRV texel-buffer descriptor and registers its underlying buffer for submission.
+The local success is consistent with that path but does not prove which Metal
+residency mechanism supplied the allocation, nor does it establish resource
+lifetime across arbitrary asynchronous scheduling. The application retains the
+D3D12 resource throughout execution; early release would not be a valid D3D12
+lifetime test. Rewritten-metallib shader-validation instrumentation remains
+unverified. Default behavior and capability reporting are unchanged.

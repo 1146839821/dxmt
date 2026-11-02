@@ -285,9 +285,11 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
-  const bool srv_to_live_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-skip") == 0;
+  const bool srv_only_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-skip") == 0;
+  const bool srv_only = srv_only_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only") == 0);
+  const bool srv_to_live_skip = srv_only_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-skip") == 0);
   const bool srv_to_null_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-live-to-null-skip") == 0;
-  const bool srv_to_live = srv_to_live_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live") == 0);
+  const bool srv_to_live = srv_only || srv_to_live_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live") == 0);
   const bool srv_to_null = srv_to_null_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-live-to-null") == 0);
   const bool srv_live = srv_to_live || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-live") == 0);
   const bool srv_null = srv_to_null || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null") == 0);
@@ -371,6 +373,7 @@ main(int argc, char **argv) {
   ID3D12Resource *upload = nullptr;
   ID3D12Resource *output = nullptr;
   ID3D12Resource *output_texture = nullptr;
+  ID3D12Resource *srv_only_resource = nullptr;
   ID3D12Heap *output_heap = nullptr;
   ID3D12Resource *readback = nullptr;
   ID3D12PipelineState *pso = nullptr;
@@ -566,6 +569,18 @@ main(int argc, char **argv) {
           device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
                                            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload))))
     goto cleanup;
+  if (srv_only) {
+    if (!CheckHR("CreateSRVOnlyBuffer", device->CreateCommittedResource(
+            &upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc, D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr, IID_PPV_ARGS(&srv_only_resource))))
+      goto cleanup;
+    void *data = nullptr;
+    if (!CheckHR("MapSRVOnlyBuffer", srv_only_resource->Map(0, nullptr, &data)))
+      goto cleanup;
+    memset(data, 0, 64);
+    static_cast<UINT *>(data)[4] = 0xa5a5a5a5u;
+    srv_only_resource->Unmap(0, nullptr);
+  }
   device->GetCopyableFootprints(&texture_desc, 0, 1, 0, &footprint, &row_count, &row_size, &total_size);
   if (!CheckHR("MapUpload", upload->Map(0, nullptr, &upload_data)))
     goto cleanup;
@@ -913,7 +928,8 @@ main(int argc, char **argv) {
     updated.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     updated.Buffer.FirstElement = 4;
     updated.Buffer.NumElements = 4;
-    device->CreateShaderResourceView(srv_to_null ? nullptr : output_texture, &updated, resource_cpu);
+    device->CreateShaderResourceView(srv_to_null ? nullptr : srv_only ? srv_only_resource : output_texture,
+                                     &updated, resource_cpu);
   }
   if (late_buffer) {
     D3D12_UNORDERED_ACCESS_VIEW_DESC updated = {};
@@ -1039,7 +1055,7 @@ main(int argc, char **argv) {
       readback->Unmap(0, nullptr);
       goto cleanup;
     }
-    std::cout << (srv_to_live ? "null-to-live" : srv_to_null ? "live-to-null" : srv_live ? "live" : "null")
+    std::cout << (srv_only ? "null-to-live-only" : srv_to_live ? "null-to-live" : srv_to_null ? "live-to-null" : srv_live ? "live" : "null")
               << " typed SRV read and dimensions passed\n";
     readback->Unmap(0, nullptr);
     result = 0;
@@ -1182,6 +1198,8 @@ cleanup:
     output->Release();
   if (output_texture)
     output_texture->Release();
+  if (srv_only_resource)
+    srv_only_resource->Release();
   if (output_heap)
     output_heap->Release();
   if (upload)
