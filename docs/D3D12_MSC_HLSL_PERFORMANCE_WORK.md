@@ -345,3 +345,43 @@ Reproduce with a paired isolated stage and a new output directory:
 ```sh
 python3 tests/dx12/run_msc_lod_flags.py --stage STAGE --prefix PREFIX --build build --converter /usr/local/lib/libmetalirconverter.dylib --output NEW_OUTPUT --repeats 3
 ```
+
+## MSC minimum GPU target comparison (2026-11-02)
+
+**Design card:** on a device that reports support for Apple6 and Apple7, set
+only the opt-in HLSL probe's minimum family to 1006 or 1007. Verify that the
+MSC runtime exposes the target setter and that the selected Metal device
+supports the requested family; otherwise report a skip before conversion. A
+test-only forwarding dylib records the actual `IRCompilerSetMinimumGPUFamily`
+arguments. Each setting compiles identical Function Constant and framebuffer
+fetch DXIL, checks both specialized colors and framebuffer pixels, and records
+conversion and 25 paired GPU command-buffer samples (first five discarded for
+GPU summaries). Run each in separate processes with validation disabled for
+measurement, then run separately with API and GPU validation. An Apple9 probe
+checks unsupported-device skip on this Apple7 device. Existing ordinary GPU
+probe and intentional bad-pixel control are rerun. No production target choice,
+cache key, user device requirement or public capability changes. Rollback
+removes only this test mode, wrapper and runner.
+
+On M1 Max/macOS 27.0.1, three processes per supported target passed all pixels;
+validation runs passed and the Apple9 probe skipped as unsupported. Both
+reported 4840-byte Function Constant and 4452-byte framebuffer metallibs;
+identical sizes do not establish identical binaries. Whole GPU command-buffer
+duration for the 4×4 single-pass fetch had Apple6 median/p95 33,250.5/38,500
+ns and Apple7 33,083.5/40,833 ns (60 pooled post-warm-up samples per target).
+The Apple7 samples contained large outliers. Conversion timing, min/max and raw
+samples are in `result-msc-gpu-target/summary.json` and `.md`; there are only
+three process-cold conversion samples per target. The workload uses fixed target
+order, synchronous readback and test-only tracing; it is not representative of
+game frame time or evidence for a production target change. OS deployment
+target comparison, actual cross-device reuse, cache invalidation execution,
+memory and GPU counters remain NOT_RUN. The source cache key records both GPU
+family and OS fields (`d3d12_shader_converter.cpp:269-305`), but source
+inspection is not a cross-device cache correctness test.
+
+Reproduce with a paired isolated stage and fresh output:
+
+```sh
+meson compile -C build dx12_metal_hlsl_gpu dx12_metal_hlsl_constants_fixture dx12_metal_hlsl_framebuffer_fixture
+python3 tests/dx12/run_msc_gpu_target_compare.py --stage STAGE --prefix PREFIX --build build --converter /usr/local/lib/libmetalirconverter.dylib --output NEW_OUTPUT --repeats 3
+```

@@ -17,7 +17,7 @@ struct Converted {
 };
 
 static bool convert(const char *path, bool constants, bool explicit_zero,
-                    bool legacy_zero, Converted &out) {
+                    bool legacy_zero, uint32_t gpu_family, Converted &out) {
   std::ifstream file(path, std::ios::binary);
   std::vector<char> dxil((std::istreambuf_iterator<char>(file)), {});
   if (dxil.empty())
@@ -27,6 +27,7 @@ static bool convert(const char *path, bool constants, bool explicit_zero,
   p.dxil = dxil.data();
   p.dxil_size = dxil.size();
   p.stage = DXMT_MSC_STAGE_FRAGMENT;
+  p.minimum_gpu_family = gpu_family;
   if (explicit_zero)
     p.reserved = DXMT_MSC_COMPILE_FLAG_EXPLICIT_COMPATIBILITY;
   else if (!legacy_zero)
@@ -227,7 +228,10 @@ int main(int argc, char **argv) {
   if (argc != 3 && !(argc == 4 && (std::strcmp(argv[3], "--wrong") == 0 ||
                                    std::strcmp(argv[3], "--zero-flags") == 0 ||
                                    std::strcmp(argv[3], "--legacy-zero") == 0 ||
-                                   std::strcmp(argv[3], "--benchmark") == 0)))
+                                   std::strcmp(argv[3], "--benchmark") == 0 ||
+                                   std::strcmp(argv[3], "--gpu6") == 0 ||
+                                   std::strcmp(argv[3], "--gpu7") == 0 ||
+                                   std::strcmp(argv[3], "--gpu9") == 0)))
     return 2;
   auto module = GetModuleHandleA("winemetal.dll");
   auto code = module ? reinterpret_cast<const unsigned char *>(
@@ -245,9 +249,35 @@ int main(int argc, char **argv) {
       argc == 4 && std::strcmp(argv[3], "--zero-flags") == 0;
   const bool legacy_zero =
       argc == 4 && std::strcmp(argv[3], "--legacy-zero") == 0;
+  const uint32_t gpu_family =
+      argc == 4 && std::strcmp(argv[3], "--gpu6") == 0   ? 1006
+      : argc == 4 && std::strcmp(argv[3], "--gpu7") == 0 ? 1007
+      : argc == 4 && std::strcmp(argv[3], "--gpu9") == 0 ? 1009
+                                                         : 0;
+  auto devices = WMT::CopyAllDevices();
+  if (!devices || !devices.count())
+    return 5;
+  WMT::Device device = devices.object(0);
+  if (gpu_family) {
+    dxmt_msc_capabilities capabilities{};
+    if (DXMTMSCGetCapabilities(&capabilities) != DXMT_MSC_SUCCESS ||
+        !(capabilities.optional_symbols &
+          DXMT_MSC_RUNTIME_SYMBOL_MINIMUM_GPU_FAMILY)) {
+      std::cout << "GPU_TARGET_SKIP missing MSC target API\n";
+      return 77;
+    }
+    auto family = gpu_family == 1006   ? WMTGPUFamilyApple6
+                  : gpu_family == 1007 ? WMTGPUFamilyApple7
+                                       : WMTGPUFamilyApple9;
+    if (!device.supportsFamily(family)) {
+      std::cout << "GPU_TARGET_SKIP unsupported " << gpu_family << "\n";
+      return 77;
+    }
+    std::cout << "GPU_TARGET " << gpu_family << "\n";
+  }
   Converted fc, fetch;
-  if (!convert(argv[1], true, explicit_zero, legacy_zero, fc) ||
-      !convert(argv[2], false, explicit_zero, legacy_zero, fetch))
+  if (!convert(argv[1], true, explicit_zero, legacy_zero, gpu_family, fc) ||
+      !convert(argv[2], false, explicit_zero, legacy_zero, gpu_family, fetch))
     return 3;
   if (!fc.reflection.needs_function_constants ||
       fc.reflection.function_constant_count != 1 ||
@@ -255,10 +285,6 @@ int main(int argc, char **argv) {
       fc.reflection.function_constants[0].type != 32 ||
       std::strcmp(fc.reflection.function_constants[0].name, "MSC_FC_0") != 0)
     return 4;
-  auto devices = WMT::CopyAllDevices();
-  if (!devices || !devices.count())
-    return 5;
-  WMT::Device device = devices.object(0);
   WMT::Error error;
   const char *native = R"(
 #include <metal_stdlib>
@@ -311,7 +337,7 @@ fragment float4 sample_main(float4 pos [[position]], texture2d<float, access::re
     return 11;
   if (!draw_two_pass(device, queue, base_pso, sample_pso))
     return 12;
-  if (argc == 4 && std::strcmp(argv[3], "--benchmark") == 0) {
+  if (gpu_family || (argc == 4 && std::strcmp(argv[3], "--benchmark") == 0)) {
     for (unsigned i = 0; i < 25; ++i) {
       uint64_t one = 0, two = 0;
       auto single = [&] {
