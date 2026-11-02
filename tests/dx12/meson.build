@@ -263,6 +263,16 @@ if dxc_command.length() > 0
       command: dxc_command + [ '-E', shader_entry, '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
       build_by_default: false,
     )
+    foreach opt_level : ['Od', 'O3', 'OdDbg']
+      debug_args = opt_level == 'OdDbg' ? ['-Zi', '-Qembed_debug'] : []
+      optimization = opt_level == 'OdDbg' ? '-Od' : '-' + opt_level
+      custom_target('dx12_metal_hlsl_dynamic_' + shader_entry + '_' + opt_level,
+        input: 'metal_hlsl_dynamic.hlsl',
+        output: 'metal_hlsl_dynamic_' + shader_entry + '_' + opt_level + '.ps.cso',
+        command: dxc_command + [ '-E', shader_entry, '-T', 'ps_6_0', optimization ] + debug_args + [ '@INPUT@', '-Fo', '@OUTPUT@' ],
+        build_by_default: false,
+      )
+    endforeach
   endforeach
   custom_target('dx12_metal_hlsl_framebuffer_fixture',
     input: 'metal_hlsl_framebuffer.hlsl',

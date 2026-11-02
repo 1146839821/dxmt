@@ -12,7 +12,8 @@
 #include "metalirconverter_thunks.h"
 
 static bool compile(const char *file, ID3DBlob *root, bool constants,
-                    std::vector<uint8_t> &data, std::string &entry) {
+                    bool ignore_debug, std::vector<uint8_t> &data,
+                    std::string &entry) {
   std::ifstream input(file, std::ios::binary);
   std::vector<char> dxil((std::istreambuf_iterator<char>(input)), {});
   if (dxil.empty())
@@ -25,14 +26,26 @@ static bool compile(const char *file, ID3DBlob *root, bool constants,
   p.root_signature = root->GetBufferPointer();
   p.root_signature_size = root->GetBufferSize();
   p.compatibility_flags = DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
+  p.ignore_debug_information = ignore_debug ? 1u : 0u;
   p.function_constant_resource_space =
       constants ? 2147420894u : DXMT_MSC_RESOURCE_SPACE_DISABLED;
   p.framebuffer_fetch_resource_space = DXMT_MSC_RESOURCE_SPACE_DISABLED;
   p.error_message = error;
   p.error_message_capacity = sizeof(error);
-  if (DXMTMSCCompileDXIL(&p) != DXMT_MSC_SUCCESS || !p.metallib_size ||
-      !p.entry_point_size) {
-    std::cerr << "compile sizing: " << error << '\n';
+  LARGE_INTEGER frequency{}, start{}, finish{};
+  if (!QueryPerformanceFrequency(&frequency) ||
+      !QueryPerformanceCounter(&start))
+    return false;
+  int rc = DXMTMSCCompileDXIL(&p);
+  if (!QueryPerformanceCounter(&finish))
+    return false;
+  std::cout << "CONVERT_MS " << file << " sizing "
+            << (1000.0 * (finish.QuadPart - start.QuadPart) /
+                frequency.QuadPart)
+            << " " << p.metallib_size << "\n";
+  if (rc != DXMT_MSC_SUCCESS || !p.metallib_size || !p.entry_point_size) {
+    std::cerr << "compile sizing: rc=" << rc << " code=" << p.error_code << " "
+              << error << '\n';
     return false;
   }
   data.resize(p.metallib_size);
@@ -41,9 +54,18 @@ static bool compile(const char *file, ID3DBlob *root, bool constants,
   p.metallib_capacity = data.size();
   p.entry_point_out = entry.data();
   p.entry_point_capacity = entry.size();
-  if (DXMTMSCCompileDXIL(&p) != DXMT_MSC_SUCCESS || !p.entry_point_size ||
-      entry.back() != '\0') {
-    std::cerr << "compile output: " << error << '\n';
+  if (!QueryPerformanceCounter(&start))
+    return false;
+  rc = DXMTMSCCompileDXIL(&p);
+  if (!QueryPerformanceCounter(&finish))
+    return false;
+  std::cout << "CONVERT_MS " << file << " output "
+            << (1000.0 * (finish.QuadPart - start.QuadPart) /
+                frequency.QuadPart)
+            << " " << p.metallib_size << "\n";
+  if (rc != DXMT_MSC_SUCCESS || !p.entry_point_size || entry.back() != '\0') {
+    std::cerr << "compile output: rc=" << rc << " code=" << p.error_code << " "
+              << error << '\n';
     return false;
   }
   entry.resize(p.entry_point_size - 1);
@@ -54,7 +76,9 @@ int main(int argc, char **argv) {
   if (argc != 4 &&
       !(argc == 5 && (std::strcmp(argv[4], "--wrong") == 0 ||
                       std::strcmp(argv[4], "--frequency") == 0 ||
-                      std::strcmp(argv[4], "--frequency-wrong") == 0)))
+                      std::strcmp(argv[4], "--frequency-wrong") == 0 ||
+                      std::strcmp(argv[4], "--ignore-debug") == 0 ||
+                      std::strcmp(argv[4], "--ignore-debug-wrong") == 0)))
     return 2;
   for (const auto &symbol :
        {std::pair{"d3d12.dll", "D3D12CreateDevice"},
@@ -108,9 +132,21 @@ int main(int argc, char **argv) {
   std::vector<uint8_t> tlab(layout.argument_buffer_size);
   std::vector<uint8_t> shader[3];
   std::string entry[3];
-  if (!compile(argv[1], root, false, shader[0], entry[0]) ||
-      !compile(argv[2], root, false, shader[1], entry[1]) ||
-      !compile(argv[3], root, true, shader[2], entry[2]))
+  const bool ignore_debug =
+      argc == 5 && (std::strcmp(argv[4], "--ignore-debug") == 0 ||
+                    std::strcmp(argv[4], "--ignore-debug-wrong") == 0);
+  if (ignore_debug) {
+    dxmt_msc_capabilities capabilities{};
+    if (DXMTMSCGetCapabilities(&capabilities) != DXMT_MSC_SUCCESS ||
+        !(capabilities.optional_symbols &
+          DXMT_MSC_RUNTIME_SYMBOL_IGNORE_DEBUG_INFORMATION)) {
+      std::cout << "IGNORE_DEBUG_SKIP missing MSC setter\n";
+      return 77;
+    }
+  }
+  if (!compile(argv[1], root, false, ignore_debug, shader[0], entry[0]) ||
+      !compile(argv[2], root, false, ignore_debug, shader[1], entry[1]) ||
+      !compile(argv[3], root, true, ignore_debug, shader[2], entry[2]))
     return 6;
   root->Release();
   auto devices = WMT::CopyAllDevices();
@@ -219,8 +255,10 @@ vertex float4 vertex_main(uint i [[vertex_id]]) { const float2 p[3] = {float2(-1
       const uint8_t expected[2][4] = {{255, 0, 0, 255}, {0, 255, 0, 255}};
       for (unsigned j = 0; j < 4; ++j)
         if (std::abs(int(pixel[j]) - int(expected[i][j])) > 1 ||
-            (argc == 5 && std::strcmp(argv[4], "--wrong") == 0 && mode == 2 &&
-             i == 0 && j == 0 && pixel[j] != 0))
+            (argc == 5 &&
+             (std::strcmp(argv[4], "--wrong") == 0 ||
+              std::strcmp(argv[4], "--ignore-debug-wrong") == 0) &&
+             mode == 2 && i == 0 && j == 0 && pixel[j] != 0))
           return 14;
       std::cout << "CBUFFER_PIXEL " << mode << " " << i << " "
                 << unsigned(pixel[0]) << "," << unsigned(pixel[1]) << ","

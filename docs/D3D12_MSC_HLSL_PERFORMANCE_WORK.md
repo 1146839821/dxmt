@@ -426,3 +426,49 @@ Reproduce with a paired isolated stage and fresh output:
 meson compile -C build dx12_msc_root_validation_compare dx12_metal_hlsl_dynamic_main
 python3 tests/dx12/run_msc_root_validation_compare.py --stage STAGE --prefix PREFIX --build build --converter /usr/local/lib/libmetalirconverter.dylib --output NEW_OUTPUT --processes 3
 ```
+
+## Input DXIL optimization and debug information (2026-11-02)
+
+**Design card:** compile the same repository-owned cbuffer and branch HLSL as
+`-Od`, `-O3`, and `-Od -Zi -Qembed_debug`; compare the first two using the
+existing root-constant Metal GPU probe and exact pixel checks. Time the two
+separate `DXMTMSCCompileDXIL` sizing/output calls and record DXIL/metallib
+sizes. Test embedded-debug input separately, both with and without the MSC
+ignore-debug option; check that the latter setter exists before requesting it.
+Use paired isolated runtime files, preserve negative controls and run Metal
+validation separately. Do not rewrite application DXIL or change production
+ignore-debug defaults. Rollback removes test fixture variants and measurements.
+
+Three independent processes each for `-Od` and `-O3` passed all pixel checks,
+validation and the incorrect-pixel control. For the direct cbuffer fixture,
+DXIL sizes were 3132 and 3028 bytes; metallib was 4484 bytes for both. Branch
+fixture DXIL sizes were 3284 and 3088 bytes; metallib sizes were 4472 and 4440
+bytes. Equal sizes are not bytecode identity. Median/p95 of the direct cbuffer
+sizing call were 4.0246/4.2985 ms for `-Od` and 3.8063/3.9304 ms for `-O3`;
+output-call medians/p95 were 1.0399/1.0788 and 0.8993/0.9603 ms. Each call
+performs a full conversion; samples are separate processes in fixed order,
+not disjoint phases. Three samples and a trivial shader cannot establish a
+meaningful performance advantage; GPU timings, raw samples and the branch
+results are in `result-dxil-od/` and `result-dxil-o3/`.
+
+**FAIL observed:** with `-Od -Zi -Qembed_debug`, conversion of the direct
+cbuffer input failed before GPU execution. The isolated run returned 6 from
+the test (bridge call returned -1 with error code 0) and logged the LLVM
+`MetadataLoader.cpp` `PlaceholderQueue` assertion. This occurred in two
+separate runs; the log alone does not establish which component owns the root
+cause. With the optional MSC ignore-debug setter available and requested, two
+processes, the Metal validation run and bad-pixel negative control passed on
+both embedded-debug fixtures. This is evidence for the tested input/runtime,
+not authorization to enable ignore-debug for all games; other debug shaders
+and runtime versions remain unverified. Keep the failure logs at
+`result-dxil-debug-final-failure/` and the successful opt-in logs at
+`result-dxil-debug-ignore-final/`. Normal D3D12 paths and capability reporting
+are unchanged.
+
+Reproduce using the paired isolated stage and fresh output directories:
+
+```sh
+meson compile -C build dx12_msc_cbuffer_compare dx12_metal_hlsl_dynamic_main_Od dx12_metal_hlsl_dynamic_branch_main_Od dx12_metal_hlsl_dynamic_main_O3 dx12_metal_hlsl_dynamic_branch_main_O3 dx12_metal_hlsl_dynamic_main_OdDbg dx12_metal_hlsl_dynamic_branch_main_OdDbg
+python3 tests/dx12/run_msc_cbuffer_compare.py --stage STAGE --prefix PREFIX --build build --converter /usr/local/lib/libmetalirconverter.dylib --output NEW_OUTPUT --processes 3 --main-fixture metal_hlsl_dynamic_main_Od.ps.cso --branch-fixture metal_hlsl_dynamic_branch_main_Od.ps.cso
+# Repeat with the O3 fixtures; for embedded debug, use OdDbg fixtures and add --ignore-debug.
+```

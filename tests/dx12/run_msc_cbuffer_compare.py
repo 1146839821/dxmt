@@ -21,14 +21,21 @@ def main():
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--processes', type=int, default=5)
     parser.add_argument('--frequency', action='store_true', help='run repeated low/high update sequences')
+    parser.add_argument('--ignore-debug', action='store_true', help='ask MSC to ignore debug information')
+    parser.add_argument('--main-fixture', default='metal_hlsl_dynamic_main.ps.cso')
+    parser.add_argument('--branch-fixture', default='metal_hlsl_dynamic_branch_main.ps.cso')
     args = parser.parse_args()
     if not 2 <= args.processes <= 20:
         parser.error('processes must be 2..20')
+    if args.frequency and args.ignore_debug:
+        parser.error('--frequency and --ignore-debug are separate experiments')
+    if any(Path(name).name != name for name in (args.main_fixture, args.branch_fixture)):
+        parser.error('fixture names must be basenames')
     stage, prefix, build, converter = (getattr(args, n).resolve(strict=True) for n in ('stage', 'prefix', 'build', 'converter'))
     pairs = [('src/d3d12/d3d12.dll', 'd3d12.dll'), ('src/dxgi/dxgi.dll', 'dxgi.dll'),
              ('src/winemetal/winemetal.dll', 'winemetal.dll'), ('src/winemetal/unix/winemetal.so', 'wine/lib/wine/x86_64-unix/winemetal.so')]
-    pairs += [('tests/dx12/' + n, n) for n in ('dx12_msc_cbuffer_compare.exe', 'metal_hlsl_dynamic_main.ps.cso',
-              'metal_hlsl_dynamic_branch_main.ps.cso', 'metal_hlsl_constants.ps.cso')]
+    pairs += [('tests/dx12/' + n, n) for n in ('dx12_msc_cbuffer_compare.exe', args.main_fixture,
+              args.branch_fixture, 'metal_hlsl_constants.ps.cso')]
     for src, dst in pairs:
         data = (build / src).read_bytes()
         if src in ('src/d3d12/d3d12.dll', 'src/dxgi/dxgi.dll') and data[64:80] == b'Wine builtin DLL':
@@ -39,8 +46,8 @@ def main():
     env = {k: v for k, v in os.environ.items() if not k.startswith(('DYLD_', 'DXMT_TEST_', 'MTL_DEBUG_', 'MTL_SHADER_VALIDATION'))}
     env.update(WINEPREFIX=str(prefix), WINEDLLPATH=str(stage / 'wine/lib/wine'), WINEDLLOVERRIDES='d3d12=n;dxgi=n;winemetal=b',
                WINEDEBUG='+loaddll', DXMT_METALIRCONVERTER_PATH=str(converter), DYLD_PRINT_LIBRARIES='1')
-    cmd = [str(stage / 'wine/bin/wine'), 'dx12_msc_cbuffer_compare.exe', 'metal_hlsl_dynamic_main.ps.cso',
-           'metal_hlsl_dynamic_branch_main.ps.cso', 'metal_hlsl_constants.ps.cso']
+    cmd = [str(stage / 'wine/bin/wine'), 'dx12_msc_cbuffer_compare.exe', args.main_fixture,
+           args.branch_fixture, 'metal_hlsl_constants.ps.cso']
     identity = [f'LOADED_CODE {dll} {symbol} {pe_export_bytes(stage / dll, symbol)}' for dll, symbol in
                 [('d3d12.dll', 'D3D12CreateDevice'), ('winemetal.dll', 'DXMTMSCCompileDXIL')]]
     samples = []
@@ -51,7 +58,9 @@ def main():
         runenv = dict(env)
         if validation:
             runenv.update(MTL_DEBUG_LAYER='1', MTL_SHADER_VALIDATION='1', MTL_SHADER_VALIDATION_REPORT_TO_STDERR='1')
-        extra = (['--frequency-wrong'] if name == 'frequency-wrong' else ['--wrong']) if wrong else (['--frequency'] if args.frequency else [])
+        extra = (['--ignore-debug-wrong'] if args.ignore_debug else
+                 (['--frequency-wrong'] if name == 'frequency-wrong' else ['--wrong'])) if wrong else (
+                     ['--frequency'] if args.frequency else ['--ignore-debug'] if args.ignore_debug else [])
         run = subprocess.run(cmd + extra, cwd=stage, env=runenv,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180, text=True, errors='replace')
         log = run.stdout; (output / f'{name}.log').write_text(log)
@@ -59,6 +68,7 @@ def main():
                            enumerate(('255,0,0,255', '0,255,0,255'))]
         if name == 'wrong': expected_pixels = expected_pixels[:4]
         rows = re.findall(r'^(FUNCTION_MS|PIPELINE_MS|GPU_NS) (\d+) (\d+) ([0-9.eE+-]+)\s*$', log, re.M)
+        conversion = re.findall(r'^CONVERT_MS (\S+) (sizing|output) ([0-9.eE+-]+) (\d+)\s*$', log, re.M)
         frequency = re.findall(r'^FREQUENCY (\d+) (\d+) (\d+) (\d+) ([0-9.eE+-]+) (\d+)\s*$', log, re.M)
         paths = []
         for dll, kind in [('d3d12.dll','native'), ('dxgi.dll','native'), ('winemetal.dll','builtin')]:
@@ -66,7 +76,7 @@ def main():
             paths.append(any(('loaded l"' + path + '"') in line.lower() and ': ' + kind in line.lower() for line in log.splitlines()))
         checks = [run.returncode == (14 if wrong else 0), all(s in log for s in identity), all(paths),
                   str(converter) in log, str(stage / 'wine/lib/wine/x86_64-unix/winemetal.so') in log,
-                  all(s in log for s in expected_pixels), len(rows) == (15 if name == 'wrong' else 18),
+                  all(s in log for s in expected_pixels), len(rows) == (15 if name == 'wrong' else 18), len(conversion) == 6,
                   not re.search(r'(?i)metal (?:api|gpu|shader) validation (?:error|warning)|failed assertion', log)]
         if validation: checks += ['Metal API Validation Enabled' in log, 'Metal GPU Validation Enabled' in log]
         else: checks += ['Metal API Validation Enabled' not in log, 'Metal GPU Validation Enabled' not in log]
@@ -77,7 +87,7 @@ def main():
         if name == 'frequency-wrong':
             checks += ['FREQUENCY_MISMATCH 2 0 0' in log, len(frequency) == 64]
         if not all(checks): raise SystemExit(f'{name}: failed {checks}; exit={run.returncode}, see {output}/{name}.log')
-        if name.startswith('run-'): samples.append({'timings': rows, 'frequency': frequency})
+        if name.startswith('run-'): samples.append({'timings': rows, 'frequency': frequency, 'conversion':conversion})
         print(name + ': passed', flush=True)
     summaries = {}
     for phase in ('FUNCTION_MS', 'PIPELINE_MS', 'GPU_NS'):
@@ -87,6 +97,12 @@ def main():
                 summaries[f'{phase}_{mode}_{index}'] = {'n':len(v), 'median':statistics.median(v),
                     'p95':v[math.ceil(.95*len(v))-1], 'min':v[0], 'max':v[-1]}
     sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+    for fixture, label in ((args.main_fixture, 'main'), (args.branch_fixture, 'branch'), ('metal_hlsl_constants.ps.cso', 'specialized')):
+        for phase in ('sizing', 'output'):
+            v = sorted(float(t) for run in samples for name, part, t, size in run['conversion'] if name == fixture and part == phase)
+            if len(v) != len(samples): raise SystemExit(f'missing conversion timings for {fixture} {phase}')
+            summaries[f'CONVERT_MS_{label}_{phase}'] = {'n':len(v), 'median':statistics.median(v),
+                'p95':v[math.ceil(.95*len(v))-1], 'min':v[0], 'max':v[-1]}
     if args.frequency:
         for mode in range(3):
             for policy in range(2):
@@ -95,7 +111,7 @@ def main():
                                if int(row[0]) == mode and int(row[1]) == policy and int(row[2]) >= 2)
                     summaries[f'{name}_{mode}_{policy}'] = {'n':len(v), 'median':statistics.median(v),
                         'p95':v[math.ceil(.95*len(v))-1], 'min':v[0], 'max':v[-1]}
-    result = {'samples':samples, 'summaries':summaries, 'command':cmd + (['--frequency'] if args.frequency else []), 'converter_sha256':sha(converter),
+    result = {'samples':samples, 'summaries':summaries, 'command':cmd + (['--frequency'] if args.frequency else ['--ignore-debug'] if args.ignore_debug else []), 'converter_sha256':sha(converter),
               'artifacts':{dst:sha(stage / dst) for _, dst in pairs},
               'hardware':subprocess.check_output(['sysctl','-n','machdep.cpu.brand_string'],text=True).strip(),
               'macos':subprocess.check_output(['sw_vers','-productVersion'],text=True).strip(),
