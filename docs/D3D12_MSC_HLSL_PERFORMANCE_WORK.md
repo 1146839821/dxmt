@@ -472,3 +472,52 @@ meson compile -C build dx12_msc_cbuffer_compare dx12_metal_hlsl_dynamic_main_Od 
 python3 tests/dx12/run_msc_cbuffer_compare.py --stage STAGE --prefix PREFIX --build build --converter /usr/local/lib/libmetalirconverter.dylib --output NEW_OUTPUT --processes 3 --main-fixture metal_hlsl_dynamic_main_Od.ps.cso --branch-fixture metal_hlsl_dynamic_branch_main_Od.ps.cso
 # Repeat with the O3 fixtures; for embedded debug, use OdDbg fixtures and add --ignore-debug.
 ```
+
+## Embedded debug metallib failure isolation (2026-11-02)
+
+**Diagnostic slice:** use the same generated `-Od -Zi -Qembed_debug` fixture,
+MSC dylib SHA-256 recorded above, paired isolated Wine stage, and a test-only
+forwarding library to save MSC's extracted metallib with exclusive file
+creation. Compare a native probe of DXMT's existing
+`SM50PatchMetalLibUnsupportedDouble` against an ordinary optimized metallib;
+no production flags or patch semantics change. The probe is opt-in and its
+failure is a real diagnostic failure, not a passing regression test.
+
+**Evidence:** Apple `metal-shaderconverter` CLI completed the debug DXIL in
+both arm64 and x86_64 modes, but it is a separate executable and does not prove
+the loaded dylib's identity. With the loaded dylib, the forwarding trace shows
+`DEBUG_MSC_COMPILE_END ok`, then `DEBUG_METALLIB_EXTRACTED 5860`, and only
+then the LLVM assertion. The extracted metallib SHA-256 is
+`e3d6b10745c740e85830a794e73a159911165fb3bfe07a8296cab0f142aa78e1`.
+Running the native x86_64 probe directly on those bytes, without Wine or MSC,
+reproduces signal 6 / exit 134; an optimized CLI metallib passed. LLDB stopped
+at `__assert_rtn`: its stack passes through
+`llvm::MetadataLoader::MetadataLoaderImpl::parseMetadata`,
+`llvm::parseBitcodeFile` and `SM50PatchMetalLibUnsupportedDouble`. The build's
+LLVM headers report 15.0.7. An independently installed LLVM 15 `llvm-dis`
+returns `Invalid record` on the extracted AIR bitcode, whereas a newer LLVM
+`llvm-dis` reads it and shows debug metadata. This establishes a failure in
+DXMT's LLVM 15 AIR parsing path for this particular output; it does not prove
+all debug metadata or all LLVM 15 builds are affected.
+
+A separate LLVM 15 prototype using lazy metadata, `StripDebugInfo`, then
+`materializeAll` still returned `Invalid record`; it is not a viable fix.
+Do not bypass the double-precision lowering for all debug inputs or silently
+strip app debug data: either would change semantics without proof. The known
+crash is **unfixed**. A follow-up must investigate a compatible metadata
+reader/backport or another semantics-preserving approach, then test original
+DXIL, normal and double-bearing shaders, preserved debug information, errors,
+concurrency and D3D10/11 regressions. Logs, extracted AIR and LLDB backtrace
+are in `msc-debug-isolation/` outside the repository.
+
+The probe is built explicitly and is expected to fail on the captured debug
+metallib until fixed:
+
+```sh
+meson compile -C build msc-debug-metallib-probe
+build/src/airconv/darwin/msc-debug-metallib-probe CAPTURED.metallib
+```
+
+`tests/airconv/msc_debug_metallib_trace.c` is a test-only MSC forwarding dylib;
+set `DXMT_TEST_EXTRACT_METALLIB` to a new path in an isolated test run to
+capture the input. Never inject it into a game or share its output path.
