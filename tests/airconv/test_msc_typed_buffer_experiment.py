@@ -9,6 +9,15 @@ exe, fixture, sidecar_fixture, multi_fixture = (Path(arg).resolve() for arg in s
 source = fixture.read_text()
 sidecar_source = sidecar_fixture.read_text()
 multi_source = multi_fixture.read_text()
+sampler_source = (sidecar_source.replace('%tex = type opaque', '%tex = type opaque\n%sampler = type opaque')
+                  .replace('  %data = call { <4 x i32>, i8 }',
+                           '  %sampler = call %sampler addrspace(2)* @air.get_read_sampler()\n'
+                           '  %data = call { <4 x i32>, i8 }')
+                  .replace('(%tex addrspace(1)* %texture, i32 %index, i32 3)',
+                           '(%tex addrspace(1)* %texture, %sampler addrspace(2)* %sampler, i32 %index, i32 3)')
+                  .replace('@air.read_texture_buffer_1d.s.v4i32(%tex addrspace(1)*, i32, i32)',
+                           '@air.read_texture_buffer_1d.s.v4i32(%tex addrspace(1)*, %sampler addrspace(2)*, i32, i32)')
+                  + '\ndeclare %sampler addrspace(2)* @air.get_read_sampler()\n')
 wrong_pointer = (sidecar_source.replace('i8 addrspace(2)* %root, i64 %slot',
                                         'i8 addrspace(2)* %root, i8 addrspace(2)* %other, i64 %slot')
                  .replace('i32 (i8 addrspace(2)*, i64, i32)* @main',
@@ -22,6 +31,9 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
                                     "air.unknown_texture_buffer_1d"), 4, []),
         ("bad_field", source.replace("i64 %slot, i32 1", "i64 %slot, i32 0"), 4, []),
         ("sidecar_dynamic", sidecar_source, 0, ["--sidecar", "0", "8"]),
+        ("sidecar_read_sampler", sampler_source, 0, ["--sidecar", "0", "8"]),
+        ("sidecar_read_sampler_unknown", sampler_source.replace('air.get_read_sampler', 'air.unknown_sampler'), 4,
+         ["--sidecar", "0", "8"]),
         ("metallib_api", sidecar_source, 0, ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
         ("metallib_api_small", sidecar_source, 4, ["--metallib-api", "8", "8", "--sidecar", "0", "8"]),
         ("metallib_api_no_root", sidecar_source.split("!air.kernel")[0], 4,

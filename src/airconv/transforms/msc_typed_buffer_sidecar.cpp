@@ -75,11 +75,20 @@ collect(llvm::Module &module, std::vector<Operation> &operations, const std::vec
           return false;
         unsigned index = 0;
         if (access) {
-          if (call->arg_size() != (read ? 3u : 4u) || !call->getArgOperand(1)->getType()->isIntegerTy(32) ||
+          const bool read_sampler = read && call->arg_size() == 4;
+          if (read_sampler) {
+            auto *sampler = llvm::dyn_cast<llvm::CallInst>(call->getArgOperand(1));
+            auto *sampler_fn = sampler ? sampler->getCalledFunction() : nullptr;
+            if (!sampler_fn || sampler_fn->getName() != "air.get_read_sampler" || !sampler->arg_empty() ||
+                !sampler->getType()->isPointerTy() || sampler->getType()->getPointerAddressSpace() != 2)
+              return false;
+          }
+          index = read_sampler ? 2 : 1;
+          if ((!read_sampler && call->arg_size() != (read ? 3u : 4u)) ||
+              !call->getArgOperand(index)->getType()->isIntegerTy(32) ||
               !call->getArgOperand(call->arg_size() - 1)->getType()->isIntegerTy(32) ||
               (write && !call->getType()->isVoidTy()))
             return false;
-          index = 1;
         } else if (call->arg_size() != 1 || !call->getType()->isIntegerTy(32))
           return false;
         llvm::Argument *root = nullptr;

@@ -595,6 +595,7 @@ public:
   D3D12ShaderBackend shader_backend = D3D12ShaderBackend::None;
   bool msc_uses_texture_load = false;
   bool msc_test_lod_patch = false;
+  bool msc_test_typed_buffer_patch = false;
   D3D12PipelineCacheData pipeline_cache;
 
   struct DescriptorFootprintRange {

@@ -17,6 +17,7 @@
  */
 
 #include "d3d12_command_allocator.hpp"
+#include "d3d12_msc_resource_sidecar.hpp"
 #include "d3d12_raytracing_dispatch.hpp"
 #include "d3d12_raytracing_pipeline.hpp"
 #include "d3d12_raytracing.hpp"
@@ -4046,12 +4047,21 @@ public:
   EncodeMSCArgumentBuffer(
       MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], MTLD3D12DescriptorHeap *descriptor_heap,
       MTLD3D12SamplerDescriptorHeap *sampler_heap, bool use_lod_sidecar = false, bool compute = false,
-      WMTRenderStages render_stages = static_cast<WMTRenderStages>(0)
+      WMTRenderStages render_stages = static_cast<WMTRenderStages>(0), bool use_typed_sidecar = false
   ) {
     if (!pRootSig->MSCArgumentBufferSize)
       return 0;
 
     uint64_t allocation_size = pRootSig->MSCArgumentBufferSize;
+    if (use_typed_sidecar) {
+      auto hr = pRootSig->InitializeMSCCombinedSidecarLayout();
+      if (FAILED(hr) || !pRootSig->MSCCombinedSidecarLayout) {
+        recording_error_ = FAILED(hr) ? hr : E_FAIL;
+        FailRecording(__func__, "MSC typed buffer layout unavailable");
+        return 0;
+      }
+      allocation_size = pRootSig->MSCCombinedSidecarLayout->buffer_size;
+    }
     if (use_lod_sidecar) {
       auto hr = pRootSig->InitializeMSCLodSidecarLayout();
       if (FAILED(hr)) {
@@ -4059,7 +4069,8 @@ public:
         FailRecording(__func__, "MSC sampler LOD layout unavailable");
         return 0;
       }
-      allocation_size = pRootSig->MSCLODSidecarBufferSize;
+      if (!use_typed_sidecar)
+        allocation_size = pRootSig->MSCLODSidecarBufferSize;
     }
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(allocation_size, 16);
     if (!Ptr) {
@@ -4119,6 +4130,20 @@ public:
       memcpy(destination, source, copy_size);
     }
 
+    if (use_typed_sidecar) {
+      if (!descriptor_heap || !writeMSCResourceSidecars(*pRootSig, descriptor_heap, pStaging, 64, Ptr, allocation_size)) {
+        recording_error_ = E_INVALIDARG;
+        FailRecording(__func__, "MSC typed buffer sidecar table unavailable");
+        return 0;
+      }
+      auto buffer = descriptor_heap->GetDescriptorHeapBuffer();
+      if (!buffer) {
+        FailRecording(__func__, "MSC typed buffer sidecar heap unavailable");
+        return 0;
+      }
+      EncodeMSCBufferResourceUse(buffer.handle, compute, render_stages);
+      EncodeMSCBufferResourceUse(allocator_->gpu_heap_buffer_.handle, compute, render_stages);
+    }
     if (use_lod_sidecar) {
       EncodeMSCBufferResourceUse(allocator_->gpu_heap_buffer_.handle, compute, render_stages);
       for (unsigned i = 0; i < pRootSig->MSCLODSidecarTableCount; ++i) {
@@ -4884,7 +4909,7 @@ public:
       return false;
 
     const bool use_msc = pso_compute_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
-    if (pso_compute_->msc_test_lod_patch) {
+    if (pso_compute_->msc_test_lod_patch || pso_compute_->msc_test_typed_buffer_patch) {
       const void *blob = nullptr;
       const size_t size = rootsig_compute_ ? rootsig_compute_->GetBlob(&blob) : 0;
       const auto &expected = pso_compute_->msc_test_lod_root_signature;
@@ -4968,7 +4993,7 @@ public:
         auto Offset = use_msc
                           ? EncodeMSCArgumentBuffer(
                                 rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr(),
-                                test_lod_upload, true
+                                test_lod_upload, true, static_cast<WMTRenderStages>(0), pso_compute_->msc_test_typed_buffer_patch
                             )
                           : EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_);
         if (!use_msc || rootsig_compute_->MSCArgumentBufferSize) {
@@ -6070,7 +6095,8 @@ public:
       auto compute_pso = static_cast<MTLD3D12ComputePipelineState *>(pPSO);
       if (pso_compute_.ptr() == compute_pso)
         return;
-      if (!pso_compute_ || pso_compute_->msc_test_lod_patch != compute_pso->msc_test_lod_patch)
+      if (!pso_compute_ || pso_compute_->msc_test_lod_patch != compute_pso->msc_test_lod_patch ||
+          pso_compute_->msc_test_typed_buffer_patch != compute_pso->msc_test_typed_buffer_patch)
         dirty_state_.set(DirtyState::ComputeRootArguments);
       pso_compute_ = compute_pso;
       pso_graphics_ = nullptr;

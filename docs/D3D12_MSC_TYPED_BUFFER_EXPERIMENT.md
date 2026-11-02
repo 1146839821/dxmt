@@ -432,3 +432,27 @@ unimplemented export; the final isolated run used matching PE and Unix builds.
 The WOW64 structure has a compile-time size/offset check and the x86 PE build
 passes, but a 32-bit Wine execution was not performed. Pipeline integration,
 GPU sidecar binding, residency and submission lifetimes remain unverified.
+
+### Opt-in compute integration experiment
+
+With `DXMT_TEST_MSC_TYPED_BUFFER_PATCH=1`, compute pipeline creation uses the
+WineMetal patch bridge and the reflected combined root layout. Command recording
+uploads sidecar table addresses and declares the original 32-byte resource heap
+buffer resident for the compute encoder. Pipeline root mismatch and unsupported
+AIR fail explicitly; experimental PSOs do not expose a cached blob and library
+loading is disabled with the flag. The default production path is unchanged.
+The currently validated path is compute only and cannot be combined with the
+sampler LOD test patch.
+
+In isolated 64-bit Wine with MSC 4.0.1 and Metal API/GPU validation enabled,
+R32_SINT direct and CPU-heap-copy descriptor updates after Close and before
+submission passed GPU readback, dimensions and guard checks. R32_FLOAT and
+R32_UINT late-copy checks passed after explicitly rebuilding their opt-in HLSL
+fixtures; the first runs used stale fixtures and failed the dimensions check.
+The no-patch R32_SINT control failed as expected. The targeted test source and
+shader changes remain uncommitted, so this is local evidence rather than a
+self-contained committed regression. The patched metallib's shader validation
+instrumentation is unverified. Graphics, multiple resource heaps, in-flight
+lifetimes, sparse status, indirect commands and broader formats remain
+unverified; no public capability was promoted. Logs reside under
+`dxmt-test/n95-capability-gate/run-typed-pipeline`.

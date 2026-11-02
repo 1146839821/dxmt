@@ -100,11 +100,55 @@ public:
       if (FAILED(hr))
         return hr;
 
+      char typed_patch_test[2] = {};
+      if (GetEnvironmentVariableA("DXMT_TEST_MSC_TYPED_BUFFER_PATCH", typed_patch_test, sizeof(typed_patch_test)) == 1 &&
+          typed_patch_test[0] == '1') {
+        auto *root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+        const HRESULT layout_hr = root ? root->InitializeMSCCombinedSidecarLayout() : E_INVALIDARG;
+        if (!root || FAILED(layout_hr) || root->MSCArgumentBufferSize > UINT32_MAX || !root->MSCCombinedSidecarLayout) {
+          ERR("MSC typed-buffer test layout rejected: hr=", std::hex, layout_hr, std::dec);
+          return E_NOTIMPL;
+        }
+        try {
+          std::vector<dxmt_msc_typed_buffer_table> tables;
+          for (const auto &table : root->MSCCombinedSidecarLayout->resources)
+            tables.push_back({table.resource_table_offset, table.sidecar_offset});
+          dxmt_msc_patch_typed_buffer_params params{};
+          params.metallib = converted.metallib.data();
+          params.metallib_size = converted.metallib.size();
+          params.tables = tables.data();
+          params.table_count = static_cast<uint32_t>(tables.size());
+          params.original_root_size = static_cast<uint32_t>(root->MSCArgumentBufferSize);
+          params.extended_root_size = root->MSCCombinedSidecarLayout->buffer_size;
+          const auto patch_result = DXMTMSCPatchTypedBuffer(&params);
+          if (patch_result != DXMT_MSC_SUCCESS ||
+              params.patch_status != DXMT_MSC_TYPED_BUFFER_PATCHED || !params.output_size) {
+            ERR("MSC typed-buffer test patch rejected: result=", patch_result, " status=", params.patch_status,
+                " tables=", params.table_count, " root=", params.original_root_size,
+                " extended=", params.extended_root_size);
+            return E_NOTIMPL;
+          }
+          std::vector<uint8_t> patched(params.output_size);
+          params.output = patched.data();
+          params.output_capacity = patched.size();
+          if (DXMTMSCPatchTypedBuffer(&params) != DXMT_MSC_SUCCESS ||
+              params.patch_status != DXMT_MSC_TYPED_BUFFER_PATCHED || params.output_size != patched.size())
+            return E_FAIL;
+          converted.metallib = std::move(patched);
+          const auto *root_bytes = static_cast<const uint8_t *>(root_signature);
+          msc_test_lod_root_signature.assign(root_bytes, root_bytes + root_signature_size);
+          msc_test_typed_buffer_patch = true;
+        } catch (const std::bad_alloc &) {
+          return E_OUTOFMEMORY;
+        }
+      }
       // Test-only end-to-end validation. Patch the private conversion result
       // after cache lookup so the shared conversion cache remains unmodified.
       char patch_test[2] = {};
       if (GetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", patch_test, sizeof(patch_test)) == 1 &&
           patch_test[0] == '1') {
+        if (msc_test_typed_buffer_patch)
+          return E_NOTIMPL;
         auto *root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
         if (!root || FAILED(root->InitializeMSCLodSidecarLayout()) || root->MSCArgumentBufferSize > UINT32_MAX)
           return E_NOTIMPL;
@@ -249,7 +293,7 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   GetCachedBlob(ID3DBlob **blob) {
-    if (msc_test_lod_patch) {
+    if (msc_test_lod_patch || msc_test_typed_buffer_patch) {
       if (!blob)
         return E_POINTER;
       *blob = nullptr;
