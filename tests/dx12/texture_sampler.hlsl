@@ -12,7 +12,21 @@ RWStructuredBuffer<uint> output : register(u0);
 
 #if defined(TYPED_UAV_UINT) || defined(TYPED_UAV_SINT) || defined(TYPED_UAV_FLOAT) || defined(TYPED_UAV_SNORM) || defined(TYPED_UAV_PACKED_UINT) || defined(TYPED_UAV_ALPHA)
 #define TYPED_UAV
+#if defined(TYPED_BUFFER_UAV)
+#if defined(TYPED_BUFFER_SCALAR)
+#if defined(TYPED_UAV_UINT)
+RWBuffer<uint> typed_output : register(u1);
+#elif defined(TYPED_UAV_SINT)
+RWBuffer<int> typed_output : register(u1);
+#else
+RWBuffer<float> typed_output : register(u1);
+#endif
+#else
+RWBuffer<UAV_VALUE> typed_output : register(u1);
+#endif
+#else
 RWTexture2D<UAV_VALUE> typed_output : register(u1);
+#endif
 cbuffer Parameters : register(b0) { uint phase; };
 #endif
 
@@ -27,7 +41,11 @@ void main(uint3 tid : SV_DispatchThreadID)
     output[0] = (uint)(intensity * 255.0 + 0.5);
 #if defined(TYPED_UAV)
     for (uint i = 0; i < 4; ++i) {
+#if defined(TYPED_BUFFER_UAV)
+        uint location = i;
+#else
         uint2 location = uint2(i % 2, i / 2);
+#endif
         if (phase == 0) {
 #if defined(TYPED_UAV_PACKED_UINT)
             UAV_VALUE initial = uint4(257 + 128 * i, 513 + 64 * i, 769 - 128 * i, i);
@@ -44,12 +62,26 @@ void main(uint3 tid : SV_DispatchThreadID)
             initial.a = (i + 1) * 0.25;
 #endif
 #endif
+#if defined(TYPED_BUFFER_SCALAR)
+            typed_output[location] = (initial * (UAV_VALUE)intensity).x;
+#else
             typed_output[location] = initial * (UAV_VALUE)intensity;
+#endif
         } else {
+#if defined(TYPED_BUFFER_SCALAR)
+            UAV_VALUE loaded = UAV_VALUE(typed_output[location], 0, 0, 1);
+#else
             UAV_VALUE loaded = typed_output[location];
+#endif
             for (uint component = 0; component < 4; ++component)
                 output[1 + 4 * i + component] = asuint(loaded[component]);
-#if defined(TYPED_UAV_UINT) || defined(TYPED_UAV_PACKED_UINT)
+#if defined(TYPED_BUFFER_SCALAR)
+#if defined(TYPED_UAV_UINT) || defined(TYPED_UAV_SINT)
+            typed_output[location] = loaded.x + 1;
+#else
+            typed_output[location] = loaded.x * 0.5;
+#endif
+#elif defined(TYPED_UAV_UINT) || defined(TYPED_UAV_PACKED_UINT)
             typed_output[location] = loaded + uint4(1, 2, 3, 0);
 #elif defined(TYPED_UAV_SINT)
             typed_output[location] = loaded + int4(1, -2, 3, 0);
@@ -60,5 +92,21 @@ void main(uint3 tid : SV_DispatchThreadID)
 #endif
         }
     }
+#if defined(TYPED_BUFFER_UAV)
+    if (phase == 1) {
+        uint element_count;
+        typed_output.GetDimensions(element_count);
+        output[18] = element_count;
+#if defined(TYPED_BUFFER_SCALAR)
+        typed_output[4] = 42;
+        output[17] = asuint(typed_output[4]);
+        output[19] = asuint(typed_output[0xffffffffu]);
+#else
+        typed_output[4] = (UAV_VALUE)42;
+        output[17] = asuint(typed_output[4].x);
+        output[19] = asuint(typed_output[0xffffffffu].x);
+#endif
+    }
+#endif
 #endif
 }

@@ -449,10 +449,23 @@ R32_SINT direct and CPU-heap-copy descriptor updates after Close and before
 submission passed GPU readback, dimensions and guard checks. R32_FLOAT and
 R32_UINT late-copy checks passed after explicitly rebuilding their opt-in HLSL
 fixtures; the first runs used stale fixtures and failed the dimensions check.
-The no-patch R32_SINT control failed as expected. The targeted test source and
-shader changes remain uncommitted, so this is local evidence rather than a
-self-contained committed regression. The patched metallib's shader validation
+The no-patch R32_SINT control failed as expected. The targeted test source, HLSL and runner are retained as an opt-in
+regression; fixtures must be explicitly built before staging. The patched metallib's shader validation
 instrumentation is unverified. Graphics, multiple resource heaps, in-flight
 lifetimes, sparse status, indirect commands and broader formats remain
 unverified; no public capability was promoted. Logs reside under
 `dxmt-test/n95-capability-gate/run-typed-pipeline`.
+
+
+### Reproducible compute integration regression
+
+Build `dx12_typed_buffer_scalar_float_fixture`,
+`dx12_typed_buffer_scalar_uint_fixture`, `dx12_typed_buffer_scalar_sint_fixture`
+and `dx12_texture_sampler` explicitly, then use the staged and matching runtime
+with `run_r32_typed_uav.py --buffer --scalar --experimental-patch --late-copy`.
+On the local M1 Max / Wine 11 environment, all three formats passed readback,
+late descriptor copy, bounds guards, loader identity and enabled validation.
+The same command without `--experimental-patch` failed readback for all three,
+as expected; the ordinary R32 texture tests passed. The offline patched shader
+instrumentation is unverified and this does not prove graphics, multiple heaps
+or in-flight submission lifetime. Experimental compute is still opt-in.

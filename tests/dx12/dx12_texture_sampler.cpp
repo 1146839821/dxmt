@@ -285,11 +285,16 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
+  const bool unaligned_buffer = argc == 4 && strcmp(argv[2], "--typed-buffer-unaligned") == 0;
+  const bool late_copy = argc == 4 && strcmp(argv[2], "--typed-buffer-late-copy") == 0;
+  const bool late_buffer = late_copy || (argc == 4 && strcmp(argv[2], "--typed-buffer-late") == 0);
+  const bool zero_offset_buffer = argc == 4 && strcmp(argv[2], "--typed-buffer-zero") == 0;
+  const bool typed_buffer = unaligned_buffer || late_buffer || zero_offset_buffer || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
   if (argc == 5 && !placed)
     return 2;
   const TypedFormat *typed_format = nullptr;
   if (argc >= 4) {
-    if (strcmp(argv[2], "--typed-uav") != 0)
+    if (strcmp(argv[2], "--typed-uav") != 0 && !typed_buffer)
       return 2;
     char *end = nullptr;
     const auto format = strtoul(argv[3], &end, 10);
@@ -299,6 +304,9 @@ main(int argc, char **argv) {
       if (format == entry.format)
         typed_format = &entry;
     if (!typed_format)
+      return 2;
+    if (typed_buffer && format != DXGI_FORMAT_R32_FLOAT &&
+        format != DXGI_FORMAT_R32_UINT && format != DXGI_FORMAT_R32_SINT)
       return 2;
   }
   const bool static_lifetime = argc == 3 && strcmp(argv[2], "--static-lifetime") == 0;
@@ -326,6 +334,7 @@ main(int argc, char **argv) {
   ID3DBlob *root_blob = nullptr;
   ID3DBlob *root_error = nullptr;
   ID3D12DescriptorHeap *resource_heap = nullptr;
+  ID3D12DescriptorHeap *late_source_heap = nullptr;
   ID3D12DescriptorHeap *sampler_heap = nullptr;
   ID3D12Resource *texture = nullptr;
   ID3D12Resource *upload = nullptr;
@@ -529,6 +538,8 @@ main(int argc, char **argv) {
   memcpy(upload_data,
          typed_format && typed_format->kind == 'a' ? &alpha_pixel : &pixel,
          sizeof(pixel));
+  if (typed_buffer)
+    memset(static_cast<char *>(upload_data) + 64, 0xa5, 64);
   upload->Unmap(0, nullptr);
 
   srv_desc.Format = texture_desc.Format;
@@ -552,11 +563,13 @@ main(int argc, char **argv) {
     goto cleanup;
   device->CreateUnorderedAccessView(output, nullptr, &uav_desc, uav_cpu);
   if (texture_uav) {
-    output_texture_desc = texture_desc;
-    output_texture_desc.Format =
-        typed_format ? typed_format->format : DXGI_FORMAT_R32_UINT;
-    output_texture_desc.Width = output_texture_desc.Height =
-        typed_format ? 2 : 1;
+    output_texture_desc = typed_buffer ? buffer_desc : texture_desc;
+    if (!typed_buffer) {
+      output_texture_desc.Format =
+          typed_format ? typed_format->format : DXGI_FORMAT_R32_UINT;
+      output_texture_desc.Width = output_texture_desc.Height =
+          typed_format ? 2 : 1;
+    }
     output_texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     if (placed) {
       const auto info =
@@ -588,19 +601,29 @@ main(int argc, char **argv) {
                         device->CreateCommittedResource(
                             &default_heap, D3D12_HEAP_FLAG_NONE,
                             &output_texture_desc,
-                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                            typed_buffer ? D3D12_RESOURCE_STATE_COPY_DEST
+                                         : D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
                             IID_PPV_ARGS(&output_texture))))
       goto cleanup;
     D3D12_UNORDERED_ACCESS_VIEW_DESC texture_uav_desc = {};
-    texture_uav_desc.Format = output_texture_desc.Format;
-    texture_uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    texture_uav_desc.Format = typed_buffer ? typed_format->format : output_texture_desc.Format;
+    texture_uav_desc.ViewDimension = typed_buffer ? D3D12_UAV_DIMENSION_BUFFER : D3D12_UAV_DIMENSION_TEXTURE2D;
+    if (typed_buffer) {
+      texture_uav_desc.Buffer.FirstElement = zero_offset_buffer ? 0 : unaligned_buffer ? 5 : 4;
+      texture_uav_desc.Buffer.NumElements = 4;
+    }
     auto texture_uav_cpu = resource_cpu;
     texture_uav_cpu.ptr += descriptor_increment * 2;
     device->CreateUnorderedAccessView(output_texture, nullptr, &texture_uav_desc, texture_uav_cpu);
-    device->GetCopyableFootprints(&output_texture_desc, 0, 1, 512,
-                                  &output_texture_footprint, &row_count,
-                                  &row_size, &total_size);
-    if (typed_format) {
+    if (typed_buffer) {
+      output_texture_footprint.Offset = zero_offset_buffer ? 512 : (unaligned_buffer || late_buffer) ? 532 : 528;
+      output_texture_footprint.Footprint.RowPitch = 8;
+    } else {
+      device->GetCopyableFootprints(&output_texture_desc, 0, 1, 512,
+                                    &output_texture_footprint, &row_count,
+                                    &row_size, &total_size);
+    }
+    if (typed_format && !typed_buffer) {
       const UINT64 expected_row =
           2 * (typed_format->bytes
                    ? typed_format->components * typed_format->bytes
@@ -661,6 +684,15 @@ main(int argc, char **argv) {
   texture_src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
   texture_src.PlacedFootprint = footprint;
   list->CopyTextureRegion(&texture_dst, 0, 0, 0, &texture_src, nullptr);
+  if (typed_buffer) {
+    list->CopyBufferRegion(output_texture, 0, upload, 64, 64);
+    D3D12_RESOURCE_BARRIER buffer_barrier = {};
+    buffer_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    buffer_barrier.Transition = {output_texture, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                 D3D12_RESOURCE_STATE_COPY_DEST,
+                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+    list->ResourceBarrier(1, &buffer_barrier);
+  }
   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
   barrier.Transition.pResource = texture;
   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
@@ -699,7 +731,7 @@ main(int argc, char **argv) {
   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
   list->ResourceBarrier(1, &barrier);
   list->CopyBufferRegion(readback, 0, output, 0,
-                         (typed_format ? 17 : 1) * sizeof(UINT));
+                         (typed_buffer ? 20 : typed_format ? 17 : 1) * sizeof(UINT));
   if (texture_uav) {
     D3D12_RESOURCE_BARRIER texture_barrier = {};
     texture_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -708,6 +740,9 @@ main(int argc, char **argv) {
     texture_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
     texture_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     list->ResourceBarrier(1, &texture_barrier);
+    if (typed_buffer) {
+      list->CopyBufferRegion(readback, 512, output_texture, 0, 64);
+    } else {
     D3D12_TEXTURE_COPY_LOCATION texture_readback = {};
     texture_readback.pResource = readback;
     texture_readback.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
@@ -716,9 +751,31 @@ main(int argc, char **argv) {
     texture_source.pResource = output_texture;
     texture_source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     list->CopyTextureRegion(&texture_readback, 0, 0, 0, &texture_source, nullptr);
+    }
   }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
+  if (late_buffer) {
+    D3D12_UNORDERED_ACCESS_VIEW_DESC updated = {};
+    updated.Format = typed_format->format;
+    updated.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    updated.Buffer.FirstElement = 5;
+    updated.Buffer.NumElements = 4;
+    auto handle = resource_cpu;
+    handle.ptr += descriptor_increment * 2;
+    if (late_copy) {
+      D3D12_DESCRIPTOR_HEAP_DESC source_desc = {};
+      source_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+      source_desc.NumDescriptors = 1;
+      if (!CheckHR("LateDescriptorHeap", device->CreateDescriptorHeap(&source_desc, IID_PPV_ARGS(&late_source_heap))))
+        goto cleanup;
+      const auto source = late_source_heap->GetCPUDescriptorHandleForHeapStart();
+      device->CreateUnorderedAccessView(output_texture, nullptr, &updated, source);
+      device->CopyDescriptorsSimple(1, handle, source, source_desc.Type);
+    } else {
+      device->CreateUnorderedAccessView(output_texture, nullptr, &updated, handle);
+    }
+  }
   if (static_lifetime && !CheckHR("WaitGate", queue->Wait(gate, 1)))
     goto cleanup;
   lists[0] = list;
@@ -756,8 +813,40 @@ main(int argc, char **argv) {
   value = *mapped;
   if (typed_format &&
       !CheckTypedReadback(*typed_format, mapped, output_texture_footprint)) {
+    if (typed_buffer) {
+      const auto *words = reinterpret_cast<const UINT *>(reinterpret_cast<const char *>(mapped) + 512);
+      for (unsigned i = 0; i < 16; ++i)
+        std::cerr << "typed buffer word " << i << "=0x" << std::hex << words[i] << std::dec << "\n";
+    }
     readback->Unmap(0, nullptr);
     goto cleanup;
+  }
+  if (typed_buffer) {
+    bool valid_bounds = true;
+    if (mapped[17] != 0) {
+      std::cerr << "typed buffer out-of-bounds load mismatch: 0x" << std::hex
+                << mapped[17] << std::dec << "\n";
+      valid_bounds = false;
+    }
+    if (mapped[18] != 4 || mapped[19] != 0) {
+      std::cerr << "typed buffer dimensions/max-index mismatch: count=" << mapped[18]
+                << " value=0x" << std::hex << mapped[19] << std::dec << "\n";
+      valid_bounds = false;
+    }
+    if (!valid_bounds) {
+      readback->Unmap(0, nullptr);
+      goto cleanup;
+    }
+    const auto *guard = reinterpret_cast<const UINT *>(reinterpret_cast<const char *>(mapped) + 512);
+    for (unsigned i = 0; i < 16; ++i) {
+      const unsigned start = zero_offset_buffer ? 0 : (unaligned_buffer || late_buffer) ? 5 : 4;
+      if ((i < start || i >= start + 4) && guard[i] != 0xa5a5a5a5u) {
+        std::cerr << "typed buffer guard mismatch at " << i << "\n";
+        readback->Unmap(0, nullptr);
+        goto cleanup;
+      }
+    }
+    std::cout << "typed buffer guards and out-of-bounds load passed\n";
   }
   texture_value = direct_indexed_uav_texture
                       ? *reinterpret_cast<UINT *>(reinterpret_cast<char *>(mapped) + output_texture_footprint.Offset)
@@ -803,6 +892,8 @@ cleanup:
     sampler_heap->Release();
   if (resource_heap)
     resource_heap->Release();
+  if (late_source_heap)
+    late_source_heap->Release();
   if (root_signature)
     root_signature->Release();
   if (root_blob)

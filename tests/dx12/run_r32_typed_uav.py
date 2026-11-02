@@ -21,7 +21,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("stage", "prefix", "build", "converter", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--buffer", action="store_true", help="test typed buffer UAVs instead of textures")
+    parser.add_argument("--scalar", action="store_true", help="use scalar buffer shader declarations")
+    parser.add_argument("--unaligned", action="store_true", help="use an offset within the aligned texture view")
+    parser.add_argument("--zero-offset", action="store_true", help="use a zero-offset texture view")
+    parser.add_argument("--experimental-patch", action="store_true", help="enable the experimental MSC sidecar path")
+    parser.add_argument("--late-copy", action="store_true", help="copy the buffer view after Close and before submission")
     args = parser.parse_args()
+    if (args.scalar or args.unaligned or args.zero_offset or args.experimental_patch or args.late_copy) and not args.buffer:
+        parser.error("--scalar, --unaligned and --zero-offset require --buffer")
+    if sum((args.zero_offset, args.unaligned, args.late_copy)) > 1:
+        parser.error("--zero-offset, --unaligned and --late-copy are mutually exclusive")
     stage, prefix, build, converter = (getattr(args, name).resolve(strict=True)
                                        for name in ("stage", "prefix", "build", "converter"))
     pairs = [("src/d3d12/d3d12.dll", "d3d12.dll"), ("src/dxgi/dxgi.dll", "dxgi.dll"),
@@ -29,8 +39,9 @@ def main():
              ("src/winemetal/unix/winemetal.so", "wine/lib/wine/x86_64-unix/winemetal.so"),
              ("tests/dx12/dx12_texture_sampler.exe", "dx12_texture_sampler.exe")]
     cases = [("float", 41), ("uint", 42), ("sint", 43)]
-    pairs += [(f"tests/dx12/texture_sampler_typed_uav_{kind}.cs.cso",
-               f"texture_sampler_typed_uav_{kind}.cs.cso") for kind, _ in cases]
+    prefix_name = "typed_buffer_scalar" if args.scalar else "typed_buffer_uav" if args.buffer else "texture_sampler_typed_uav"
+    pairs += [(f"tests/dx12/{prefix_name}_{kind}.cs.cso",
+               f"{prefix_name}_{kind}.cs.cso") for kind, _ in cases]
     for source, target in pairs:
         expected = (build / source).read_bytes()
         if source in ("src/d3d12/d3d12.dll", "src/dxgi/dxgi.dll") and expected[64:80] == b"Wine builtin DLL":
@@ -45,6 +56,8 @@ def main():
                DXMT_METALIRCONVERTER_PATH=str(converter), DXMT_TEST_PRINT_LOADED_CODE="1",
                MTL_DEBUG_LAYER="1", MTL_SHADER_VALIDATION="1", MTL_SHADER_VALIDATION_REPORT_TO_STDERR="1",
                DYLD_PRINT_LIBRARIES="1")
+    if args.experimental_patch:
+        env["DXMT_TEST_MSC_TYPED_BUFFER_PATCH"] = "1"
     identities = [f"LOADED_CODE {dll} {symbol} {pe_export_bytes(stage / dll, symbol)}" for dll, symbol in
                   (("d3d12.dll", "D3D12CreateDevice"), ("winemetal.dll", "DXMTMSCPatchSamplerLOD"))]
     rows = []
@@ -52,7 +65,7 @@ def main():
         env["DXMT_SHADER_CACHE_PATH"] = str(output / f"cache-{kind}")
         env["DXMT_LOG_PATH"] = str(output)
         command = [str(stage / "wine/bin/wine"), "dx12_texture_sampler.exe",
-                   f"texture_sampler_typed_uav_{kind}.cs.cso", "--typed-uav", str(fmt)]
+                   f"{prefix_name}_{kind}.cs.cso", "--typed-buffer-late-copy" if args.late_copy else "--typed-buffer-zero" if args.zero_offset else "--typed-buffer-unaligned" if args.unaligned else "--typed-buffer" if args.buffer else "--typed-uav", str(fmt)]
         result = subprocess.run(command, cwd=stage, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=120)
         log = result.stdout.decode(errors="replace")
@@ -67,7 +80,7 @@ def main():
         validation = ("Metal API Validation Enabled" in log and "Metal GPU Validation Enabled" in log and
                       not re.search(r"(?i)(validation error|invalid metal usage:|execution of the command buffer was aborted)", log))
         expected = f"typed UAV format={fmt} load/store checks=20 passed"
-        passed = result.returncode == 0 and expected in log
+        passed = result.returncode == 0 and expected in log and (not args.buffer or "typed buffer guards and out-of-bounds load passed" in log)
         rows.append(dict(kind=kind, format=fmt, exit=result.returncode, readback_pass=passed,
                          identity_pass=identity, validation_pass=validation))
         print(rows[-1], flush=True)
