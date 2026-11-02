@@ -908,3 +908,25 @@ submitted descriptor. The wait timing is an observation of non-completion, not
 a measurement of GPU scheduling or a proof of individual Metal residency calls.
 Instrumentation of rewritten metallib shader validation remains unverified.
 No default behavior or capability declaration changed.
+
+### Rerecord descriptor-only SRV while submission waits
+
+[Command-list Reset](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-reset)
+may be called while the previous execution is pending; the allocator still in
+use must not be reset. This probe submits the first descriptor-only SRV behind a
+queue fence, verifies that completion is pending, then resets the command list
+with a separate allocator and records a second dispatch using a separate heap.
+The first submission completes before the second is submitted. The original
+resource, descriptor heap and allocator are retained until execution completes.
+The first view reads `0xa5a5a5a5` with length 4; the second reads `0x3f800000`
+with length 2. Both outputs are copied to distinct readback locations.
+
+FLOAT, UINT, and SINT passed the rerecord and wait checks, both readbacks,
+runtime identity, and enabled Metal validation in
+`result-srv-rerecord-final` under n95. Deliberately
+expecting the first sentinel for the second read in
+`result-srv-rerecord-final-wrong` failed all three formats with the actual
+second sentinel and length. This tests sequential execution of
+the same direct command list, not concurrent execution or descriptor mutation
+while submitted. Rewritten-metallib shader-validation instrumentation remains
+unverified; capability reporting is unchanged.

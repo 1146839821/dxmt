@@ -285,8 +285,10 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
+  const bool srv_rerecord_wrong = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-rerecord-wrong") == 0;
+  const bool srv_rerecord = srv_rerecord_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-rerecord") == 0);
   const bool srv_pending_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-pending-skip") == 0;
-  const bool srv_pending = srv_pending_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-pending") == 0);
+  const bool srv_pending = srv_rerecord || srv_pending_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-pending") == 0);
   const bool srv_only_skip = srv_pending_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-skip") == 0);
   const bool srv_only = srv_pending || srv_only_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only") == 0);
   const bool srv_to_live_skip = srv_only_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-skip") == 0);
@@ -525,6 +527,9 @@ main(int argc, char **argv) {
        !CheckHR("CreateResetAllocator", device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                                                        IID_PPV_ARGS(&reset_allocator)))))
     goto cleanup;
+  if (srv_rerecord && !CheckHR("CreateSRVResetAllocator", device->CreateCommandAllocator(
+          D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&reset_allocator))))
+    goto cleanup;
 
   resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
   resource_heap_desc.NumDescriptors = texture_uav ? 3 : 2;
@@ -582,6 +587,7 @@ main(int argc, char **argv) {
       goto cleanup;
     memset(data, 0, 64);
     static_cast<UINT *>(data)[4] = 0xa5a5a5a5u;
+    static_cast<UINT *>(data)[5] = 0x3f800000u;
     srv_only_resource->Unmap(0, nullptr);
   }
   device->GetCopyableFootprints(&texture_desc, 0, 1, 0, &footprint, &row_count, &row_size, &total_size);
@@ -974,10 +980,50 @@ main(int argc, char **argv) {
                 CheckHR("SRVPendingEvent", srv_pending_fence->SetEventOnCompletion(1, event)) &&
                 WaitForSingleObject(event, 100) == WAIT_TIMEOUT &&
                 srv_pending_fence->GetCompletedValue() == 0;
-    if (!held || !CheckHR("ReleaseSRVGate", gate->Signal(1))) {
+    if (!held) {
       std::cerr << "SRV pending gate check failed\n";
       goto cleanup;
     }
+    if (srv_rerecord) {
+      if (!CheckHR("CreateSRVRerecordHeap", device->CreateDescriptorHeap(&resource_heap_desc, IID_PPV_ARGS(&second_resource_heap))) ||
+          !CheckHR("ResetSRVWhilePending", list->Reset(reset_allocator, pso)))
+        goto cleanup;
+      auto cpu = second_resource_heap->GetCPUDescriptorHandleForHeapStart();
+      D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
+      desc.Format = typed_format->format;
+      desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+      desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+      desc.Buffer.FirstElement = 5;
+      desc.Buffer.NumElements = 2;
+      device->CreateShaderResourceView(srv_only_resource, &desc, cpu);
+      cpu.ptr += descriptor_increment;
+      device->CreateUnorderedAccessView(output, nullptr, &uav_desc, cpu);
+      cpu.ptr += descriptor_increment;
+      device->CreateUnorderedAccessView(nullptr, nullptr, &uav_desc, cpu);
+      ID3D12DescriptorHeap *second_heaps[] = {second_resource_heap, sampler_heap};
+      list->SetDescriptorHeaps(2, second_heaps);
+      list->SetComputeRootSignature(root_signature);
+      auto gpu = second_resource_heap->GetGPUDescriptorHandleForHeapStart();
+      list->SetComputeRootDescriptorTable(0, gpu);
+      list->SetComputeRootDescriptorTable(1, sampler_heap->GetGPUDescriptorHandleForHeapStart());
+      gpu.ptr += descriptor_increment;
+      list->SetComputeRootDescriptorTable(2, gpu);
+      D3D12_RESOURCE_BARRIER transition = {};
+      transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      transition.Transition = {output, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                               D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+      list->ResourceBarrier(1, &transition);
+      list->Dispatch(1, 1, 1);
+      transition.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      transition.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+      list->ResourceBarrier(1, &transition);
+      list->CopyBufferRegion(readback, 80, output, 0, 3 * sizeof(UINT));
+      if (!CheckHR("CloseSRVRerecord", list->Close()) || srv_pending_fence->GetCompletedValue() != 0)
+        goto cleanup;
+      std::cout << "SRV rerecorded while pending passed\n";
+    }
+    if (!CheckHR("ReleaseSRVGate", gate->Signal(1)))
+      goto cleanup;
     if (WaitForSingleObject(event, 30000) != WAIT_OBJECT_0) {
       std::cerr << "SRV pending completion failed\n";
       goto cleanup;
@@ -985,6 +1031,8 @@ main(int argc, char **argv) {
     CloseHandle(event);
     event = nullptr;
     std::cout << "SRV pending gate held passed\n";
+    if (srv_rerecord)
+      queue->ExecuteCommandLists(1, lists);
   }
   if (pending_reset) {
     if (!CheckHR("PendingSignal", queue->Signal(fence, 1)) || fence->GetCompletedValue() != 0 ||
@@ -1076,13 +1124,18 @@ main(int argc, char **argv) {
     for (unsigned i = 0; i < 16; ++i)
       unchanged = unchanged && guard[i] == 0xa5a5a5a5u;
     if (mapped[0] != (srv_live ? 0xa5a5a5a5u : 0u) || mapped[1] != 0 ||
-        mapped[2] != (srv_live ? 4u : 0u) || !unchanged) {
+        mapped[2] != (srv_live ? 4u : 0u) || !unchanged ||
+        (srv_rerecord && (mapped[20] != (srv_rerecord_wrong ? 0xa5a5a5a5u : 0x3f800000u) ||
+                          mapped[21] != 0 || mapped[22] != 2))) {
       std::cerr << "typed SRV mismatch: read=" << mapped[0] << " oob=" << mapped[1]
-                << " dimensions=" << mapped[2] << " guard=" << unchanged << "\n";
+                << " dimensions=" << mapped[2] << " guard=" << unchanged;
+      if (srv_rerecord)
+        std::cerr << " rerecord=" << mapped[20] << "," << mapped[21] << "," << mapped[22];
+      std::cerr << "\n";
       readback->Unmap(0, nullptr);
       goto cleanup;
     }
-    std::cout << (srv_pending ? "null-to-live-only-pending" : srv_only ? "null-to-live-only" : srv_to_live ? "null-to-live" : srv_to_null ? "live-to-null" : srv_live ? "live" : "null")
+    std::cout << (srv_rerecord ? "null-to-live-only-rerecord" : srv_pending ? "null-to-live-only-pending" : srv_only ? "null-to-live-only" : srv_to_live ? "null-to-live" : srv_to_null ? "live-to-null" : srv_live ? "live" : "null")
               << " typed SRV read and dimensions passed\n";
     readback->Unmap(0, nullptr);
     result = 0;
