@@ -31,10 +31,11 @@ def main():
     parser.add_argument("--encoder-break", action="store_true", help="insert a blit between the two heap-switch dispatches")
     parser.add_argument("--pending-reset", action="store_true", help="reset the list while its submission waits on a fence")
     parser.add_argument("--indirect-reject", action="store_true", help="verify experimental indirect dispatch fails explicitly")
+    parser.add_argument("--indirect", action="store_true", help="execute the scalar workload with indirect dispatch")
     args = parser.parse_args()
-    if (args.scalar or args.unaligned or args.zero_offset or args.experimental_patch or args.late_copy or args.heap_switch or args.pending_reset or args.indirect_reject) and not args.buffer:
+    if (args.scalar or args.unaligned or args.zero_offset or args.experimental_patch or args.late_copy or args.heap_switch or args.pending_reset or args.indirect_reject or args.indirect) and not args.buffer:
         parser.error("--scalar, --unaligned and --zero-offset require --buffer")
-    if sum((args.zero_offset, args.unaligned, args.late_copy, args.heap_switch, args.pending_reset, args.indirect_reject)) > 1:
+    if sum((args.zero_offset, args.unaligned, args.late_copy, args.heap_switch, args.pending_reset, args.indirect_reject, args.indirect)) > 1:
         parser.error("offset, late-copy and heap-switch modes are mutually exclusive")
     if args.encoder_break and not args.heap_switch:
         parser.error("--encoder-break requires --heap-switch")
@@ -71,7 +72,7 @@ def main():
         env["DXMT_SHADER_CACHE_PATH"] = str(output / f"cache-{kind}")
         env["DXMT_LOG_PATH"] = str(output)
         command = [str(stage / "wine/bin/wine"), "dx12_texture_sampler.exe",
-                   f"{prefix_name}_{kind}.cs.cso", "--typed-buffer-indirect-reject" if args.indirect_reject else "--typed-buffer-pending-reset" if args.pending_reset else "--typed-buffer-heap-switch-encoder" if args.encoder_break else "--typed-buffer-heap-switch" if args.heap_switch else "--typed-buffer-late-copy" if args.late_copy else "--typed-buffer-zero" if args.zero_offset else "--typed-buffer-unaligned" if args.unaligned else "--typed-buffer" if args.buffer else "--typed-uav", str(fmt)]
+                   f"{prefix_name}_{kind}.cs.cso", "--typed-buffer-indirect-reject" if args.indirect_reject else "--typed-buffer-indirect" if args.indirect else "--typed-buffer-pending-reset" if args.pending_reset else "--typed-buffer-heap-switch-encoder" if args.encoder_break else "--typed-buffer-heap-switch" if args.heap_switch else "--typed-buffer-late-copy" if args.late_copy else "--typed-buffer-zero" if args.zero_offset else "--typed-buffer-unaligned" if args.unaligned else "--typed-buffer" if args.buffer else "--typed-uav", str(fmt)]
         result = subprocess.run(command, cwd=stage, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=120)
         log = result.stdout.decode(errors="replace")

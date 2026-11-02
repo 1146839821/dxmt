@@ -291,10 +291,11 @@ main(int argc, char **argv) {
   const bool zero_offset_buffer = argc == 4 && strcmp(argv[2], "--typed-buffer-zero") == 0;
   const bool pending_reset = argc == 4 && strcmp(argv[2], "--typed-buffer-pending-reset") == 0;
   const bool indirect_reject = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-reject") == 0;
+  const bool indirect = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect") == 0;
   const bool wrong_heap_expected = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-wrong") == 0;
   const bool encoder_break = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-encoder") == 0;
   const bool heap_switch = wrong_heap_expected || encoder_break || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch") == 0);
-  const bool typed_buffer = unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || pending_reset || indirect_reject || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
+  const bool typed_buffer = unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || pending_reset || indirect_reject || indirect || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
   if (argc == 5 && !placed)
     return 2;
   const TypedFormat *typed_format = nullptr;
@@ -551,6 +552,10 @@ main(int argc, char **argv) {
          sizeof(pixel));
   if (typed_buffer)
     memset(static_cast<char *>(upload_data) + 64, 0xa5, 64);
+  if (indirect) {
+    const D3D12_DISPATCH_ARGUMENTS dispatch = {1, 1, 1};
+    memcpy(static_cast<char *>(upload_data) + 128, &dispatch, sizeof(dispatch));
+  }
   upload->Unmap(0, nullptr);
 
   srv_desc.Format = texture_desc.Format;
@@ -729,29 +734,44 @@ main(int argc, char **argv) {
   }
   if (typed_format)
     list->SetComputeRoot32BitConstant(3, 0, 0);
-  if (indirect_reject) {
-    D3D12_INDIRECT_ARGUMENT_DESC argument{};
-    argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+  if (indirect_reject || indirect) {
+    D3D12_INDIRECT_ARGUMENT_DESC arguments[2]{};
+    arguments[0].Type = indirect_reject ? D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT : D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    if (indirect_reject) {
+      arguments[0].Constant.RootParameterIndex = 3;
+      arguments[0].Constant.Num32BitValuesToSet = 1;
+    }
+    arguments[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
     D3D12_COMMAND_SIGNATURE_DESC signature_desc{};
-    signature_desc.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
-    signature_desc.NumArgumentDescs = 1;
-    signature_desc.pArgumentDescs = &argument;
+    signature_desc.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS) + (indirect_reject ? sizeof(UINT) : 0);
+    signature_desc.NumArgumentDescs = indirect_reject ? 2 : 1;
+    signature_desc.pArgumentDescs = arguments;
     ID3D12CommandSignature *signature = nullptr;
-    if (!CheckHR("CreateIndirectSignature", device->CreateCommandSignature(&signature_desc, nullptr, IID_PPV_ARGS(&signature))))
+    if (!CheckHR("CreateIndirectSignature", device->CreateCommandSignature(&signature_desc, indirect_reject ? root_signature : nullptr, IID_PPV_ARGS(&signature))))
       goto cleanup;
-    list->ExecuteIndirect(signature, 1, upload, 0, nullptr, 0);
+    list->ExecuteIndirect(signature, 1, upload, 128, nullptr, 0);
+    if (indirect) {
+      D3D12_RESOURCE_BARRIER uav_barrier = {};
+      uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+      list->ResourceBarrier(1, &uav_barrier);
+      list->SetComputeRoot32BitConstant(3, 1, 0);
+      list->ExecuteIndirect(signature, 1, upload, 128, nullptr, 0);
+    }
     signature->Release();
-    const HRESULT close_hr = list->Close();
-    if (close_hr != E_NOTIMPL) {
-      std::cerr << "typed buffer indirect expected E_NOTIMPL, got 0x" << std::hex << close_hr << std::dec << "\n";
+    if (indirect_reject) {
+      const HRESULT close_hr = list->Close();
+      if (close_hr != E_FAIL) {
+        std::cerr << "typed buffer indirect expected E_FAIL, got 0x" << std::hex << close_hr << std::dec << "\n";
+        goto cleanup;
+      }
+      std::cout << "typed buffer indirect rejected explicitly\n";
+      result = 0;
       goto cleanup;
     }
-    std::cout << "typed buffer indirect rejected explicitly\n";
-    result = 0;
-    goto cleanup;
   }
-  list->Dispatch(1, 1, 1);
-  if (typed_format) {
+  if (!indirect)
+    list->Dispatch(1, 1, 1);
+  if (typed_format && !indirect) {
     D3D12_RESOURCE_BARRIER uav_barrier = {};
     uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     list->ResourceBarrier(1, &uav_barrier);

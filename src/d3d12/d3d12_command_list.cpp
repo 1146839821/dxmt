@@ -7523,12 +7523,6 @@ public:
       return;
     }
     if (sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH) {
-      if (pso_compute_ && pso_compute_->msc_test_typed_buffer_patch) {
-        if (SUCCEEDED(recording_error_))
-          recording_error_ = E_NOTIMPL;
-        FailRecording(__func__, "experimental typed-buffer sidecar indirect dispatch is unsupported");
-        return;
-      }
       uint64_t filtered_count_buffer_address = CountBufferAddress;
       if (predication_buffer_ &&
           !EncodePredicationCount(count_buffer, CountBufferOffset, MaxCommandCount, filtered_count_buffer_address))

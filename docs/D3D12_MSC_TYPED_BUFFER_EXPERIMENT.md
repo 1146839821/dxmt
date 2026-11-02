@@ -532,17 +532,24 @@ instrumentation remains unverified. No production capability is promoted.
 
 ### Experimental compute sidecar and ExecuteIndirect
 
-The opt-in typed-buffer compute path does not yet support indirect dispatch.
-`PreDispatch` skips normal binding when a signature changes root arguments, while
-indirect encoding creates the ordinary root-argument layout, without the MSC
-sidecar extension. Dispatch-only signatures have not been validated either.
-Until both cases have a verified binding and lifetime implementation, a compute
-PSO using this experiment rejects indirect dispatch and `Close` returns
-`E_NOTIMPL`. This guard does not change ordinary PSOs or advertised capability.
+Dispatch-only indirect signatures inherit the parent compute encoder's buffers,
+including the MSC argument buffer and experimental sidecar. The runner's
+`--buffer --scalar --experimental-patch --indirect` mode performs two indirect
+dispatches with a root constant changed between them and checks GPU readback.
+It covers one command per call without a count buffer; other indirect cases and
+submission lifetime combinations remain unverified.
 
-The `--buffer --scalar --experimental-patch --indirect-reject` runner mode
-checks that result for R32 FLOAT, UINT, and SINT; it does not submit GPU work.
-Running that mode without the experimental switch is a negative control and is
-expected to fail the rejection assertion. A separate ordinary direct-dispatch
-run verifies GPU readback. Metal validation being enabled does not establish
-that the rewritten metallib was shader-validation instrumented.
+When a signature changes root arguments, `PreDispatch` skips normal binding and
+indirect encoding uses the ordinary root-argument layout without the sidecar.
+The existing MSC pipeline validation rejects such signatures and `Close` returns
+`E_FAIL`. The `--indirect-reject` mode checks that rejection for R32 FLOAT, UINT,
+and SINT without submitting GPU work. This slice does not change advertised
+capability. Metal validation being enabled does not establish that the rewritten
+metallib was shader-validation instrumented.
+
+Design references: [Microsoft ExecuteIndirect](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-executeindirect),
+`EncodeIndirectComputeCommand`'s `inherit_buffers` decision, and the independently
+implemented Mullion `ExecuteIndirect` path. The last is a reference, not the
+binding ABI used here. Local results and loaded-runtime identity are recorded in
+the n95 `result-indirect-dispatch-final2` and `result-indirect-reject-final2`
+directories. The no-patch GPU control is in `result-indirect-control-final`.
