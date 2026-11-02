@@ -23,6 +23,12 @@ wrong_pointer = (sidecar_source.replace('i8 addrspace(2)* %root, i64 %slot',
                  .replace('i32 (i8 addrspace(2)*, i64, i32)* @main',
                           'i32 (i8 addrspace(2)*, i8 addrspace(2)*, i64, i32)* @main')
                  .replace('!3 = !{i32 0,', '!3 = !{i32 1,'))
+sample_call = ('  %sample = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32('
+               '%tex addrspace(1)* null, i8 addrspace(2)* null, <2 x float> zeroinitializer, '
+               'i1 true, <2 x i32> zeroinitializer, i1 true, float 0.0, float 0.0, i32 0)\n')
+sample_decl = ('\ndeclare { <4 x float>, i8 } @air.sample_texture_2d.v4f32('
+               '%tex addrspace(1)*, i8 addrspace(2)*, <2 x float>, i1, <2 x i32>, i1, float, float, i32)\n')
+mixed_sample = sidecar_source.replace('  %data = call', sample_call + '  %data = call') + sample_decl
 with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
     root = Path(temp)
     cases = [
@@ -93,6 +99,16 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
         ("mixed_reverse_bad", sidecar_source.replace('  %data = call',
                                                     '  %bits = call i64 @air.reverse_bits.i32(i64 1)\n  %data = call') +
                               '\ndeclare i64 @air.reverse_bits.i32(i64)\n', 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_sample", mixed_sample, 0, ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_sample_unknown", mixed_sample.replace('air.sample_texture_2d.v4f32', 'air.sample_texture_2d.unknown'), 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_sample_bad_address_space", mixed_sample.replace('i8 addrspace(2)* null', 'i8 addrspace(1)* null').replace(
+            '%tex addrspace(1)*, i8 addrspace(2)*, <2 x float>', '%tex addrspace(1)*, i8 addrspace(1)*, <2 x float>'), 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_sample_bad_return", mixed_sample.replace('{ <4 x float>, i8 }', '{ <4 x float>, i32 }'), 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_sample_packed_return", mixed_sample.replace('{ <4 x float>, i8 }', '<{ <4 x float>, i8 }>'), 4,
          ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
         ("dynamic", source, 0, []),
         ("unknown", source.replace("air.get_width_texture_buffer_1d",

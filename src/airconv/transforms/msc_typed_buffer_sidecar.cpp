@@ -30,6 +30,27 @@ isSafeIntegerBitOp(const llvm::CallBase &call) {
 }
 
 bool
+isSafeSample2D(const llvm::CallBase &call) {
+  const auto *target = call.getCalledFunction();
+  if (!llvm::isa<llvm::CallInst>(call) || !target || !target->isDeclaration() || target->isVarArg() ||
+      target->getName() != "air.sample_texture_2d.v4f32" || call.arg_size() != 9)
+    return false;
+  auto &context = call.getContext();
+  auto *result = llvm::dyn_cast<llvm::StructType>(call.getType());
+  auto *texture = llvm::dyn_cast<llvm::PointerType>(call.getArgOperand(0)->getType());
+  auto *sampler = llvm::dyn_cast<llvm::PointerType>(call.getArgOperand(1)->getType());
+  return result && !result->isPacked() && result->getNumElements() == 2 &&
+         result->getElementType(0) == llvm::FixedVectorType::get(llvm::Type::getFloatTy(context), 4) &&
+         result->getElementType(1)->isIntegerTy(8) && texture && texture->getAddressSpace() == 1 &&
+         sampler && sampler->getAddressSpace() == 2 &&
+         call.getArgOperand(2)->getType() == llvm::FixedVectorType::get(llvm::Type::getFloatTy(context), 2) &&
+         call.getArgOperand(3)->getType()->isIntegerTy(1) &&
+         call.getArgOperand(4)->getType() == llvm::FixedVectorType::get(llvm::Type::getInt32Ty(context), 2) &&
+         call.getArgOperand(5)->getType()->isIntegerTy(1) && call.getArgOperand(6)->getType()->isFloatTy() &&
+         call.getArgOperand(7)->getType()->isFloatTy() && call.getArgOperand(8)->getType()->isIntegerTy(32);
+}
+
+bool
 collect(llvm::Module &module, std::vector<Operation> &operations, const std::vector<TableMapping> &mappings) {
   auto *tlab = mappings.empty() ? nullptr : findMSCRootArgument(module);
   if (!mappings.empty() && !tlab)
@@ -54,7 +75,7 @@ collect(llvm::Module &module, std::vector<Operation> &operations, const std::vec
                 return false;
             } else if (!isSafeIntegerBitOp(*call) && target->getName() != "air.get_read_sampler" &&
                        target->getName() != "air.atomic.global.add.s.i32" &&
-                       !target->getName().startswith("air.sample_texture_2d.")) {
+                       !isSafeSample2D(*call)) {
               return false;
             }
           }

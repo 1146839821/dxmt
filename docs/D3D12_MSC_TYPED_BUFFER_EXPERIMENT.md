@@ -685,3 +685,29 @@ and artifact identity are in `result-typed-reversebits`,
 n95. The CLI capture is distinct from runtime conversion, whose AIR was not
 captured. Metal validation was enabled but rewritten-metallib shader-validation
 instrumentation is unverified. No default behavior or capability is promoted.
+
+### Typed-buffer preflight: 2D sampling signature
+
+The previous preflight accepted any declaration whose name started with
+`air.sample_texture_2d.`. This did not check whether its call shape matched the
+captured 2D sampler operation. It now accepts only a direct non-variadic
+`air.sample_texture_2d.v4f32` declaration and the observed nine-argument shape:
+address-space 1 texture pointer, address-space 2 sampler pointer, float2, i1,
+int2, i1, float, float, i32, returning an unpacked `{float4, i8}`. Unknown
+suffixes and other shapes remain unsupported. The check validates pointer
+address spaces but does not prove the provenance or texture type of each pointer;
+this is not a general AIR verifier or promotion of other sample overloads.
+Sample-only modules still follow the conservative no-op policy.
+
+The signature was observed in the previously captured MSC runtime AIR
+`msc-buffer-air/runtime15.ll` and the separate MSC CLI 4.0.3 capture
+`msc-reversebits/float.ll` under n95. Synthetic mixed typed-buffer/sampler tests
+accept the matching shape and reject unknown suffixes, wrong pointer address
+space, wrong return component type and packed return structure without producing
+output. Isolated Wine GPU tests using R32 FLOAT/UINT/SINT plus sample and bit
+operations are recorded in `result-typed-sample-guard-final`; wrong-result and
+no-patch controls are in `result-typed-sample-guard-wrong-final` and
+`result-typed-sample-guard-no-patch-final`. This check does not yet constrain
+other previously allowed calls such as global atomic add or get-read-sampler.
+Metal validation was enabled; rewritten-metallib instrumentation is unverified.
+Default behavior and public capabilities are unchanged.
