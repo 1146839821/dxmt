@@ -805,3 +805,24 @@ responsible is unconfirmed. The current sidecar transform remaps access indices
 but does not guard null texture reads, writes, or fences; addressing those paths
 requires a separate change and validation. Null typed UAV support is not established;
 default behavior and capability reporting are unchanged.
+
+### Experimental null texture guard
+
+The experimental sidecar rewrite now checks the texture handle with the observed
+`air.is_null_texture_buffer_1d` intrinsic before each rewritten texture-buffer
+read or write and each texture-buffer fence. Null reads produce a zero aggregate;
+null writes and fences are skipped. Non-null calls retain their existing index
+remapping. Preflight rejects incompatible existing null-intrinsic declarations,
+name collisions, or inconsistent handle types before changing the module. Sparse
+status uses remain rejected by the existing preflight, so the zero aggregate is
+only relied on for value-only reads.
+
+The isolated 64-bit Wine tests in `result-null-guard-null` under n95 now pass
+readback, runtime identity, and the enabled Metal validation checks for R32
+FLOAT, UINT, and SINT. `result-null-guard-live` is a deliberately failing
+live-UAV control; `result-null-guard-regression` passes non-null indirect-count
+coverage. The separate sentinel caveat above still applies, and shader validation
+instrumentation of the rewritten metallib is not independently established.
+This is experimental coverage, not a capability promotion: SRVs, other formats,
+Windows native comparison, and null descriptors changed after recording remain
+unverified. Default behavior and capability reporting are unchanged.

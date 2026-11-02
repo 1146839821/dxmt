@@ -73,7 +73,8 @@ isSafeGlobalAtomicAdd(const llvm::CallBase &call) {
 }
 
 bool
-collect(llvm::Module &module, std::vector<Operation> &operations, const std::vector<TableMapping> &mappings) {
+collect(llvm::Module &module, std::vector<Operation> &operations, std::vector<llvm::CallInst *> &fences,
+        const std::vector<TableMapping> &mappings) {
   auto *tlab = mappings.empty() ? nullptr : findMSCRootArgument(module);
   if (!mappings.empty() && !tlab)
     return false;
@@ -117,6 +118,8 @@ collect(llvm::Module &module, std::vector<Operation> &operations, const std::vec
         if (fence || is_null) {
           if (call->arg_size() != 1 || (fence ? !call->getType()->isVoidTy() : !call->getType()->isIntegerTy(1)))
             return false;
+          if (fence)
+            fences.push_back(direct);
           continue;
         }
         const bool width = name == "air.get_width_texture_buffer_1d";
@@ -203,7 +206,25 @@ collect(llvm::Module &module, std::vector<Operation> &operations, const std::vec
 }
 
 void
-patch(const std::vector<Operation> &operations) {
+guardNullTexture(llvm::CallInst *call, llvm::Function *is_null) {
+  auto *before = call->getParent();
+  auto *execute = before->splitBasicBlock(call, "dxmt.texture.execute");
+  auto *after = execute->splitBasicBlock(call->getNextNode(), "dxmt.texture.after");
+  before->getTerminator()->eraseFromParent();
+  llvm::IRBuilder<> builder(before);
+  auto *null = builder.CreateCall(is_null, {call->getArgOperand(0)}, "dxmt.texture.null");
+  builder.CreateCondBr(null, after, execute);
+  if (!call->getType()->isVoidTy()) {
+    auto *result = llvm::PHINode::Create(call->getType(), 2, "dxmt.texture.result", &after->front());
+    call->replaceAllUsesWith(result);
+    result->addIncoming(llvm::Constant::getNullValue(call->getType()), before);
+    result->addIncoming(call, execute);
+  }
+}
+
+void
+patch(const std::vector<Operation> &operations, const std::vector<llvm::CallInst *> &fences,
+      llvm::Function *is_null) {
   for (const auto &op : operations) {
     llvm::IRBuilder<> b(op.call);
     llvm::Value *offset = nullptr, *count = nullptr;
@@ -229,8 +250,11 @@ patch(const std::vector<Operation> &operations) {
       op.call->setArgOperand(
           op.index, b.CreateSelect(b.CreateAnd(in_bounds, no_wrap), adjusted, b.getInt32(UINT32_MAX))
       );
+      guardNullTexture(op.call, is_null);
     }
   }
+  for (auto *fence : fences)
+    guardNullTexture(fence, is_null);
 }
 } // namespace
 
@@ -275,9 +299,35 @@ patchMSCTypedBufferSidecar(
         return false;
   }
   std::vector<Operation> operations;
-  if (!collect(module, operations, mappings))
+  std::vector<llvm::CallInst *> fences;
+  if (!collect(module, operations, fences, mappings))
     return false;
-  patch(operations);
+  llvm::Type *texture_type = nullptr;
+  for (const auto &op : operations)
+    if (!op.width) {
+      auto *type = op.call->getArgOperand(0)->getType();
+      if (texture_type && texture_type != type)
+        return false;
+      texture_type = type;
+    }
+  for (const auto *fence : fences) {
+    auto *type = fence->getArgOperand(0)->getType();
+    if (texture_type && texture_type != type)
+      return false;
+    texture_type = type;
+  }
+  llvm::Function *is_null = nullptr;
+  if (texture_type) {
+    auto *type = llvm::FunctionType::get(llvm::Type::getInt1Ty(module.getContext()), {texture_type}, false);
+    is_null = module.getFunction("air.is_null_texture_buffer_1d");
+    if (!is_null && module.getNamedValue("air.is_null_texture_buffer_1d"))
+      return false;
+    if (is_null && (!is_null->isDeclaration() || is_null->getFunctionType() != type))
+      return false;
+    if (!is_null)
+      is_null = llvm::Function::Create(type, llvm::Function::ExternalLinkage, "air.is_null_texture_buffer_1d", module);
+  }
+  patch(operations, fences, is_null);
   count = operations.size();
   return true;
 }

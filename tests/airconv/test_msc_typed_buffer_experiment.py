@@ -242,6 +242,12 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
             '  %null_test = call i32 @air.is_null_texture_buffer_1d(%tex addrspace(1)* %texture)\n  %data = call') +
             '\ndeclare i32 @air.is_null_texture_buffer_1d(%tex addrspace(1)*)\n', 4,
          ["--sidecar", "0", "8"]),
+        ("sidecar_null_unused_bad", sidecar_source +
+            '\ndeclare i32 @air.is_null_texture_buffer_1d(%tex addrspace(1)*)\n', 4,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_null_name_global", sidecar_source +
+            '\n@air.is_null_texture_buffer_1d = external global i8\n', 4,
+         ["--sidecar", "0", "8"]),
         ("multi", multi_source, 0, ["--sidecar", "0", "16", "--sidecar", "8", "24"]),
         ("multi_missing", multi_source, 4, ["--sidecar", "0", "16"]),
         ("multi_duplicate_table", multi_source, 2, ["--sidecar", "0", "16", "--sidecar", "0", "24"]),
