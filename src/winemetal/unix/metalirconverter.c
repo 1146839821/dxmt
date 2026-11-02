@@ -606,7 +606,7 @@ dxmt_msc_initialize(void) {
     fprintf(stderr, "[INFO] DXMT: MSC identity diagnostic snapshot %s\n", bound ? "bound" : "unavailable");
   }
   fprintf(
-      stderr, "[INFO] DXMT: Metal Shader Converter runtime loaded: %s (API %d.%d.%d)\n", loaded_path,
+      stderr, "[INFO] DXMT: Metal Shader Converter runtime loaded: %s (compiled SDK headers %d.%d.%d; runtime version unknown)\n", loaded_path,
       IR_VERSION_MAJOR, IR_VERSION_MINOR, IR_VERSION_PATCH
   );
 }

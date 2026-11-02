@@ -120,6 +120,7 @@ enum dxmt_msc_validation_flags {
 #pragma pack(push, 8)
 
 struct dxmt_msc_capabilities {
+  /* Compile-time header version, not the dynamically loaded library version. */
   uint32_t ir_version_major;
   uint32_t ir_version_minor;
   uint32_t ir_version_patch;

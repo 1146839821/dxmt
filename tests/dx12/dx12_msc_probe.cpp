@@ -47,7 +47,7 @@ main() {
     return 1;
   }
 
-  std::cout << "msc.version=" << runtime.ir_version_major << "." << runtime.ir_version_minor << "."
+  std::cout << "msc.compiled_sdk_headers=" << runtime.ir_version_major << "." << runtime.ir_version_minor << "."
             << runtime.ir_version_patch << "\n";
   std::cout << "msc.core=" << runtime.core_converter << "\n";
   std::cout << "msc.optional_symbols=0x" << std::hex << runtime.optional_symbols << std::dec << "\n";

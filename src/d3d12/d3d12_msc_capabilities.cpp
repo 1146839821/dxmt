@@ -153,7 +153,7 @@ QueryDXMTMSCCapabilities(WMT::Device device) {
 D3D_SHADER_MODEL
 GetMaximumD3D12ShaderModel(const DXMTMSCCapabilities &capabilities) {
   /* MSC API 4 is the current DXIL integration floor; this is deliberately
-   * independent from the converter's own 4.0.1 version and from D3D shader
+   * independent from the dynamically loaded runtime version and from D3D shader
    * model numbering.  Higher shader models remain unclaimed until fixtures
    * prove their complete runtime path. */
   return capabilities.CoreShaderPathUsable() ? D3D_SHADER_MODEL_6_0 : D3D_SHADER_MODEL_5_1;
@@ -162,8 +162,8 @@ GetMaximumD3D12ShaderModel(const DXMTMSCCapabilities &capabilities) {
 void
 LogDXMTMSCCapabilities(const DXMTMSCCapabilities &capabilities) {
   Logger::info(str::format(
-      "D3D12 MSC capability snapshot: API ", capabilities.ir_version_major, ".", capabilities.ir_version_minor, ".",
-      capabilities.ir_version_patch, ", core=", capabilities.core_converter, ", symbols=", capabilities.runtime_symbols,
+      "D3D12 MSC capability snapshot: compiled SDK headers ", capabilities.ir_version_major, ".", capabilities.ir_version_minor, ".",
+      capabilities.ir_version_patch, ", runtime version unknown, core=", capabilities.core_converter, ", symbols=", capabilities.runtime_symbols,
       ", macOS=", capabilities.os_major, ".", capabilities.os_minor, ".", capabilities.os_patch,
       ", AppleFamily=", capabilities.highest_apple_gpu_family, ", argumentBuffersTier2=",
       capabilities.argument_buffers_tier2, ", maxShaderModel=", static_cast<unsigned>(capabilities.maximum_shader_model),
