@@ -605,3 +605,30 @@ its output was byte-identical to the unsupported input. This confirms its
 existing fallback does not guarantee that required lowering has happened;
 changing production failure policy requires examining caller compatibility and
 must not be conflated with the metadata reader candidate.
+
+### Parse-status visibility slice
+
+**Goal and baseline:** expose an uninspected AIR pass-through without changing
+the established compatibility fallback. `SM50PatchMetalLibUnsupportedDouble`
+previously returned zero for both successfully parsed AIR and parse failures;
+WineMetal could not tell these outcomes apart. This is an internal safety and
+diagnostics change, not a D3D12 capability promotion.
+
+**Design:** a new extended entry point reports whether LLVM parsed the AIR;
+the existing entry point delegates to it with its original return contract.
+WineMetal logs an explicit warning for pass-through. Parsing failures continue
+to pass through, since rejecting all AIR unsupported by LLVM 15 would be a
+separate compatibility policy change. Neither this status nor the warning
+protects against assertions inside the LLVM reader. The candidate metadata
+backport remains separate and disabled. Rollback removes the extended entry
+point, its caller and test, leaving the original processing behavior.
+
+**Validation scope:** the native `airconv msc double parse status` test checks
+invalid arguments, a short input, a malformed bitcode payload and a valid
+LLVM 15 module. It checks the returned status and that pass-through bytes are
+unchanged. This does not prove behavior on every MSC AIR version or that an
+unparsed shader is safe to execute. On the current macOS build configuration,
+the status test, `airconv lower unsupported double` and
+`airconv msc sample-level lod` passed; full `meson compile -C build` and
+`meson compile -C build-X86` passed. The WineMetal warning was not separately
+exercised through an isolated Wine deployment in this slice.

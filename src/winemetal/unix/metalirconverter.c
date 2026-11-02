@@ -1074,13 +1074,16 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     result = DXMT_MSC_ERROR_METALLIB;
     goto cleanup;
   }
-  if (SM50PatchMetalLibUnsupportedDouble(
-          original_metallib, original_metallib_size, &patched_metallib
+  uint32_t double_air_parsed = 0;
+  if (SM50PatchMetalLibUnsupportedDoubleEx(
+          original_metallib, original_metallib_size, &patched_metallib, &double_air_parsed
       )) {
     dxmt_msc_set_error(params, DXMT_MSC_ERROR_METALLIB, "failed to patch unsupported double precision AIR");
     result = DXMT_MSC_ERROR_METALLIB;
     goto cleanup;
   }
+  if (!double_air_parsed)
+    fprintf(stderr, "[WARN] DXMT: MSC AIR could not be inspected for unsupported double precision; passing original metallib through\n");
   SM50GetCompiledBitcode(patched_metallib, &patched_data);
   params->metallib_size = patched_data.Size;
 

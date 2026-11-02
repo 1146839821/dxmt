@@ -96,8 +96,12 @@ SM50PatchMetalLibSampleLevelLOD(
 }
 
 AIRCONV_API int
-SM50PatchMetalLibUnsupportedDouble(const void *data, size_t size, sm50_bitcode_t *patched) {
-  if (!data || !size || !patched)
+SM50PatchMetalLibUnsupportedDoubleEx(const void *data, size_t size, sm50_bitcode_t *patched, uint32_t *parsed) {
+  if (!patched || !parsed)
+    return 1;
+  *patched = {};
+  *parsed = 0;
+  if (!data || !size)
     return 1;
 
   auto output = std::make_unique<SM50CompiledBitcodeInternal>();
@@ -129,6 +133,7 @@ SM50PatchMetalLibUnsupportedDouble(const void *data, size_t size, sm50_bitcode_t
   }
 
   auto module = std::move(*module_or_error);
+  *parsed = 1;
   if (!dxmt::air::lowerUnsupportedDoublePrecision(*module)) {
     copyMetalLib(data, size, *output);
   } else {
@@ -139,4 +144,10 @@ SM50PatchMetalLibUnsupportedDouble(const void *data, size_t size, sm50_bitcode_t
 
   *patched = output.release();
   return 0;
+}
+
+AIRCONV_API int
+SM50PatchMetalLibUnsupportedDouble(const void *data, size_t size, sm50_bitcode_t *patched) {
+  uint32_t parsed;
+  return SM50PatchMetalLibUnsupportedDoubleEx(data, size, patched, &parsed);
 }

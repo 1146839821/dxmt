@@ -93,6 +93,16 @@ if get_option('enable_tests')
 
   test('airconv msc sample-level lod', msc_sample_level_lod_test)
 
+  msc_double_parse_status = executable('msc-double-parse-status',
+    files('../../../tests/airconv/msc_double_parse_status.cpp', '../transforms/msc_sample_level_lod.cpp',
+          '../transforms/lower_unsupported_double.cpp', '../metallib_patch.cpp', '../metallib_writer.cpp'),
+    include_directories : [ include_directories('..'), llvm_include_path_darwin ],
+    cpp_args : [ airconv_args ],
+    link_args : [ llvm_ld_flags_darwin, llvm_deps ],
+    native : dxmt_crossbuild
+  )
+  test('airconv msc double parse status', msc_double_parse_status)
+
   executable('msc-debug-metallib-probe',
     files('../../../tests/airconv/msc_debug_metallib_probe.cpp', '../transforms/msc_sample_level_lod.cpp',
           '../transforms/lower_unsupported_double.cpp', '../metallib_patch.cpp', '../metallib_writer.cpp'),

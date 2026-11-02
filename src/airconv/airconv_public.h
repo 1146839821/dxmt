@@ -331,6 +331,10 @@ AIRCONV_API int SM50Compile(
 AIRCONV_API int SM50PatchMetalLibUnsupportedDouble(
   const void *Data, size_t Size, sm50_bitcode_t *pPatched
 );
+/* Parsed is zero when the input was passed through without inspecting AIR. */
+AIRCONV_API int SM50PatchMetalLibUnsupportedDoubleEx(
+  const void *Data, size_t Size, sm50_bitcode_t *pPatched, uint32_t *Parsed
+);
 /* Experimental, strict AIR shape only. No runtime caller is enabled yet. */
 struct SM50_MSC_LOD_SIDECAR_TABLE {
   uint32_t sampler_table_offset;
