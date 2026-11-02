@@ -208,6 +208,40 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
         ("sidecar_unknown", sidecar_source.replace("air.get_width_texture_buffer_1d",
                                                     "air.unknown_texture_buffer_1d"), 4,
          ["--sidecar", "0", "8"]),
+        ("sidecar_unknown_read", sidecar_source.replace('air.read_texture_buffer_1d.s.v4i32',
+                                                        'air.read_texture_buffer_1d.unknown'), 4,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_width_bad_return", sidecar_source.replace('call i32 @air.get_width_texture_buffer_1d',
+            'call i64 @air.get_width_texture_buffer_1d').replace('declare i32 @air.get_width_texture_buffer_1d',
+            'declare i64 @air.get_width_texture_buffer_1d').replace('ret i32 %width', 'ret i32 0'), 4,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_unknown_write", sidecar_source.replace('air.write_texture_buffer_1d.s.v4i32',
+                                                         'air.write_texture_buffer_1d.unknown'), 4,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_read_bad_vector", sidecar_source.replace('{ <4 x i32>, i8 }', '{ <4 x float>, i8 }').replace(
+            '%vector = extractvalue { <4 x float>, i8 } %data, 0',
+            '%unused = extractvalue { <4 x float>, i8 } %data, 0\n  %vector = insertelement <4 x i32> zeroinitializer, i32 0, i32 0'), 4,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_read_packed", sidecar_source.replace('{ <4 x i32>, i8 }', '<{ <4 x i32>, i8 }>'), 4,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_write_bad_vector", sidecar_source.replace('<4 x i32> %vector, i32 3)', '<2 x i32> zeroinitializer, i32 3)').replace(
+            '@air.write_texture_buffer_1d.s.v4i32(%tex addrspace(1)*, i32, <4 x i32>, i32)',
+            '@air.write_texture_buffer_1d.s.v4i32(%tex addrspace(1)*, i32, <2 x i32>, i32)'), 4,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_fence_null", sidecar_source.replace('  %data = call',
+            '  call void @air.fence_texture_buffer_1d(%tex addrspace(1)* %texture)\n'
+            '  %null_test = call i1 @air.is_null_texture_buffer_1d(%tex addrspace(1)* %texture)\n  %data = call') +
+            '\ndeclare void @air.fence_texture_buffer_1d(%tex addrspace(1)*)\n'
+            'declare i1 @air.is_null_texture_buffer_1d(%tex addrspace(1)*)\n', 0,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_fence_bad", sidecar_source.replace('  %data = call',
+            '  call void @air.fence_texture_buffer_1d(i32 0)\n  %data = call') +
+            '\ndeclare void @air.fence_texture_buffer_1d(i32)\n', 4,
+         ["--sidecar", "0", "8"]),
+        ("sidecar_null_bad", sidecar_source.replace('  %data = call',
+            '  %null_test = call i32 @air.is_null_texture_buffer_1d(%tex addrspace(1)* %texture)\n  %data = call') +
+            '\ndeclare i32 @air.is_null_texture_buffer_1d(%tex addrspace(1)*)\n', 4,
+         ["--sidecar", "0", "8"]),
         ("multi", multi_source, 0, ["--sidecar", "0", "16", "--sidecar", "8", "24"]),
         ("multi_missing", multi_source, 4, ["--sidecar", "0", "16"]),
         ("multi_duplicate_table", multi_source, 2, ["--sidecar", "0", "16", "--sidecar", "0", "24"]),

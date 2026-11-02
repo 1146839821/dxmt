@@ -106,18 +106,36 @@ collect(llvm::Module &module, std::vector<Operation> &operations, const std::vec
           continue;
         }
         const auto name = target->getName();
-        if (name == "air.fence_texture_buffer_1d" || name == "air.is_null_texture_buffer_1d")
-          continue;
-        const bool width = name == "air.get_width_texture_buffer_1d";
-        const bool read = name.startswith("air.read_texture_buffer_1d.");
-        const bool write = name.startswith("air.write_texture_buffer_1d.");
-        const bool access = read || write;
+        const bool fence = name == "air.fence_texture_buffer_1d";
+        const bool is_null = name == "air.is_null_texture_buffer_1d";
         auto *direct = llvm::dyn_cast<llvm::CallInst>(call);
-        if ((!width && !access) || !direct || call->arg_empty())
+        if (!direct || !target->isDeclaration() || target->isVarArg() || call->arg_empty())
           return false;
-        if (read && !mappings.empty()) {
+        const auto *texture_ptr = llvm::dyn_cast<llvm::PointerType>(call->getArgOperand(0)->getType());
+        if (!texture_ptr || texture_ptr->getAddressSpace() != 1)
+          return false;
+        if (fence || is_null) {
+          if (call->arg_size() != 1 || (fence ? !call->getType()->isVoidTy() : !call->getType()->isIntegerTy(1)))
+            return false;
+          continue;
+        }
+        const bool width = name == "air.get_width_texture_buffer_1d";
+        const bool read = name == "air.read_texture_buffer_1d.s.v4i32" ||
+                          name == "air.read_texture_buffer_1d.u.v4i32" ||
+                          name == "air.read_texture_buffer_1d.v4f32";
+        const bool write = name == "air.write_texture_buffer_1d.s.v4i32" ||
+                           name == "air.write_texture_buffer_1d.u.v4i32" ||
+                           name == "air.write_texture_buffer_1d.v4f32";
+        const bool access = read || write;
+        if (!width && !access)
+          return false;
+        auto *element = name.endswith("v4f32") ? llvm::Type::getFloatTy(module.getContext())
+                                               : llvm::Type::getInt32Ty(module.getContext());
+        auto *vector = llvm::FixedVectorType::get(element, 4);
+        if (read) {
           auto *result = llvm::dyn_cast<llvm::StructType>(call->getType());
-          if (!result || result->getNumElements() != 2 || !result->getElementType(1)->isIntegerTy(8))
+          if (!result || result->isPacked() || result->getNumElements() != 2 ||
+              result->getElementType(0) != vector || !result->getElementType(1)->isIntegerTy(8))
             return false;
           // The second component's sparse-resource status semantics have not
           // been established after index remapping. Only value-only uses are
@@ -155,7 +173,7 @@ collect(llvm::Module &module, std::vector<Operation> &operations, const std::vec
           if ((!read_sampler && call->arg_size() != (read ? 3u : 4u)) ||
               !call->getArgOperand(index)->getType()->isIntegerTy(32) ||
               !call->getArgOperand(call->arg_size() - 1)->getType()->isIntegerTy(32) ||
-              (write && !call->getType()->isVoidTy()))
+              (write && (!call->getType()->isVoidTy() || call->getArgOperand(2)->getType() != vector)))
             return false;
         } else if (call->arg_size() != 1 || !call->getType()->isIntegerTy(32))
           return false;

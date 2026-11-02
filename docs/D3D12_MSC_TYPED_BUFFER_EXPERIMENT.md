@@ -756,3 +756,28 @@ The runtime AIR capture is earlier evidence; this run did not independently dump
 its AIR. Metal validation was enabled, but rewritten-metallib shader-validation
 instrumentation remains unverified. Default behavior and capability reporting
 are unchanged.
+
+### Typed-buffer access intrinsic preflight
+
+The experimental transformer formerly accepted any AIR read/write name with a
+matching prefix, and skipped fence/null calls without checking their shapes. It
+now permits only the observed `s.v4i32`, `u.v4i32`, and `v4f32` read/write
+names. Read results must be an unpacked matching four-element vector plus i8;
+write values must be the corresponding vector. Texture arguments must be
+address-space 1 pointers, and calls must target non-variadic declarations.
+Width, fence, and null calls require their observed argument and return shapes.
+Unsupported overloads fail before mutation; this narrows experimental coverage
+and does not establish that every format represented by an accepted AIR name is
+supported. Pointer provenance, null-resource behavior and sparse status remain
+separate unverified requirements.
+
+The name and call shapes were compared against captured CLI and Wine AIR in
+`msc-buffer-air/*.ll` and `msc-reversebits/float.ll` under n95. Synthetic AIR
+tests cover supported calls, unknown suffixes, incorrect width and read/write
+vector returns, packed read returns, and malformed fence/null calls, with
+failure atomicity checks. Local 64-bit Wine GPU R32 FLOAT/UINT/SINT regression
+results are in `result-typed-access-guard`; wrong-result and no-patch controls
+are in `result-typed-access-guard-wrong` and
+`result-typed-access-guard-no-patch`. This run did not independently dump its
+runtime AIR. Metal validation was enabled; instrumentation of the rewritten
+metallib is unverified. Default behavior and capability reporting are unchanged.
