@@ -572,6 +572,18 @@ controls must fail. Local three-format evidence is in `result-typed-rerecord-fin
 `result-typed-rerecord-no-patch-final`.
 This does not establish simultaneous submissions or native Windows behavior.
 
+The `--indirect-late` mode records indirect typed reads, writes, and dimensions
+queries against a two-element buffer UAV, then uses `CopyDescriptorsSimple`
+after `Close` and before submission to replace it with a four-element view at a
+different first element. The root signature is version 1.0. In local 64-bit
+Wine, R32 FLOAT, UINT, and SINT passed typed readback, guards, bounds and the
+indirect count/dimension sums; skipping the descriptor copy and disabling the
+patch each failed. Evidence is under n95 in `result-indirect-late`,
+`result-indirect-late-skip`, and `result-indirect-late-no-patch`. The shader
+reads the sidecar table at execution; no descriptor is mutated while submitted
+work is in flight. This does not cover root signature 1.1 static descriptors,
+post-submission mutations, or all descriptor/residency lifetime combinations.
+
 When a signature changes root arguments, `PreDispatch` skips normal binding and
 indirect encoding uses the ordinary root-argument layout without the sidecar.
 The existing MSC pipeline validation rejects such signatures and `Close` returns

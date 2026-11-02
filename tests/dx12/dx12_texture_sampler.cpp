@@ -286,7 +286,9 @@ main(int argc, char **argv) {
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
   const bool unaligned_buffer = argc == 4 && strcmp(argv[2], "--typed-buffer-unaligned") == 0;
-  const bool late_copy = argc == 4 && strcmp(argv[2], "--typed-buffer-late-copy") == 0;
+  const bool indirect_late_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-late-skip") == 0;
+  const bool indirect_late = indirect_late_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-late") == 0);
+  const bool late_copy = indirect_late || (argc == 4 && strcmp(argv[2], "--typed-buffer-late-copy") == 0);
   const bool late_buffer = late_copy || (argc == 4 && strcmp(argv[2], "--typed-buffer-late") == 0);
   const bool zero_offset_buffer = argc == 4 && strcmp(argv[2], "--typed-buffer-zero") == 0;
   const bool rerecord_wrong = argc == 4 && strcmp(argv[2], "--typed-buffer-rerecord-wrong") == 0;
@@ -298,7 +300,7 @@ main(int argc, char **argv) {
   const bool indirect_reject = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-reject") == 0;
   const bool indirect = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect") == 0;
   const bool indirect_count_wrong = indirect_pending_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-count-wrong") == 0);
-  const bool indirect_count = indirect_pending || indirect_count_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-count") == 0);
+  const bool indirect_count = indirect_late || indirect_pending || indirect_count_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-count") == 0);
   const bool wrong_heap_expected = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-wrong") == 0;
   const bool encoder_break = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-encoder") == 0;
   const bool heap_switch = wrong_heap_expected || encoder_break || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch") == 0);
@@ -344,6 +346,7 @@ main(int argc, char **argv) {
   ID3D12CommandQueue *queue = nullptr;
   ID3D12CommandAllocator *allocator = nullptr;
   ID3D12CommandSignature *count_signature = nullptr;
+  ID3D12CommandSignature *work_signature = nullptr;
   ID3D12RootSignature *root_signature = nullptr;
   ID3DBlob *root_blob = nullptr;
   ID3DBlob *root_error = nullptr;
@@ -644,7 +647,7 @@ main(int argc, char **argv) {
     texture_uav_desc.ViewDimension = typed_buffer ? D3D12_UAV_DIMENSION_BUFFER : D3D12_UAV_DIMENSION_TEXTURE2D;
     if (typed_buffer) {
       texture_uav_desc.Buffer.FirstElement = zero_offset_buffer ? 0 : unaligned_buffer ? 5 : 4;
-      texture_uav_desc.Buffer.NumElements = 4;
+      texture_uav_desc.Buffer.NumElements = indirect_late ? 2 : 4;
     }
     auto texture_uav_cpu = resource_cpu;
     texture_uav_cpu.ptr += descriptor_increment * 2;
@@ -752,7 +755,7 @@ main(int argc, char **argv) {
   }
   if (typed_format)
     list->SetComputeRoot32BitConstant(3, 0, 0);
-  if (indirect_reject || indirect) {
+  if (indirect_reject || indirect || indirect_late) {
     D3D12_INDIRECT_ARGUMENT_DESC arguments[2]{};
     arguments[0].Type = indirect_reject ? D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT : D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
     if (indirect_reject) {
@@ -764,18 +767,16 @@ main(int argc, char **argv) {
     signature_desc.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS) + (indirect_reject ? sizeof(UINT) : 0);
     signature_desc.NumArgumentDescs = indirect_reject ? 2 : 1;
     signature_desc.pArgumentDescs = arguments;
-    ID3D12CommandSignature *signature = nullptr;
-    if (!CheckHR("CreateIndirectSignature", device->CreateCommandSignature(&signature_desc, indirect_reject ? root_signature : nullptr, IID_PPV_ARGS(&signature))))
+    if (!CheckHR("CreateIndirectSignature", device->CreateCommandSignature(&signature_desc, indirect_reject ? root_signature : nullptr, IID_PPV_ARGS(&work_signature))))
       goto cleanup;
-    list->ExecuteIndirect(signature, 1, upload, 128, nullptr, 0);
-    if (indirect) {
+    list->ExecuteIndirect(work_signature, 1, upload, 128, nullptr, 0);
+    if (indirect || indirect_late) {
       D3D12_RESOURCE_BARRIER uav_barrier = {};
       uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
       list->ResourceBarrier(1, &uav_barrier);
       list->SetComputeRoot32BitConstant(3, 1, 0);
-      list->ExecuteIndirect(signature, 1, upload, 128, nullptr, 0);
+      list->ExecuteIndirect(work_signature, 1, upload, 128, nullptr, 0);
     }
-    signature->Release();
     if (indirect_reject) {
       const HRESULT close_hr = list->Close();
       if (close_hr != E_FAIL) {
@@ -787,9 +788,9 @@ main(int argc, char **argv) {
       goto cleanup;
     }
   }
-  if (!indirect)
+  if (!indirect && !indirect_late)
     list->Dispatch(1, 1, 1);
-  if (typed_format && !indirect) {
+  if (typed_format && !indirect && !indirect_late) {
     D3D12_RESOURCE_BARRIER uav_barrier = {};
     uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     list->ResourceBarrier(1, &uav_barrier);
@@ -890,7 +891,8 @@ main(int argc, char **argv) {
         goto cleanup;
       const auto source = late_source_heap->GetCPUDescriptorHandleForHeapStart();
       device->CreateUnorderedAccessView(output_texture, nullptr, &updated, source);
-      device->CopyDescriptorsSimple(1, handle, source, source_desc.Type);
+      if (!indirect_late_skip)
+        device->CopyDescriptorsSimple(1, handle, source, source_desc.Type);
     } else {
       device->CreateUnorderedAccessView(output_texture, nullptr, &updated, handle);
     }
@@ -1077,6 +1079,8 @@ cleanup:
   }
   if (count_signature)
     count_signature->Release();
+  if (work_signature)
+    work_signature->Release();
   if (reset_allocator)
     reset_allocator->Release();
   if (event)
