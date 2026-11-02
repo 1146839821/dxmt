@@ -289,8 +289,11 @@ main(int argc, char **argv) {
   const bool late_copy = argc == 4 && strcmp(argv[2], "--typed-buffer-late-copy") == 0;
   const bool late_buffer = late_copy || (argc == 4 && strcmp(argv[2], "--typed-buffer-late") == 0);
   const bool zero_offset_buffer = argc == 4 && strcmp(argv[2], "--typed-buffer-zero") == 0;
+  const bool rerecord_wrong = argc == 4 && strcmp(argv[2], "--typed-buffer-rerecord-wrong") == 0;
+  const bool rerecord_zero = argc == 4 && strcmp(argv[2], "--typed-buffer-rerecord-zero") == 0;
+  const bool rerecord = rerecord_wrong || rerecord_zero || (argc == 4 && strcmp(argv[2], "--typed-buffer-rerecord") == 0);
   const bool indirect_pending_wrong = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-pending-wrong") == 0;
-  const bool indirect_pending = indirect_pending_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-pending") == 0);
+  const bool indirect_pending = rerecord || indirect_pending_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-pending") == 0);
   const bool pending_reset = indirect_pending || (argc == 4 && strcmp(argv[2], "--typed-buffer-pending-reset") == 0);
   const bool indirect_reject = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-reject") == 0;
   const bool indirect = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect") == 0;
@@ -564,6 +567,11 @@ main(int argc, char **argv) {
       memcpy(static_cast<char *>(upload_data) + 140, &dispatch, sizeof(dispatch));
       const UINT counts[] = {0, 1, 2, 3};
       memcpy(static_cast<char *>(upload_data) + 160, counts, sizeof(counts));
+      if (rerecord) {
+        memcpy(static_cast<char *>(upload_data) + 176, &dispatch, sizeof(dispatch));
+        const UINT one = 1;
+        memcpy(static_cast<char *>(upload_data) + 188, &one, sizeof(one));
+      }
     }
   }
   upload->Unmap(0, nullptr);
@@ -841,6 +849,8 @@ main(int argc, char **argv) {
   list->ResourceBarrier(1, &barrier);
   list->CopyBufferRegion(readback, 0, output, 0,
                          (indirect_count ? 25 : heap_switch ? 22 : typed_buffer ? 20 : typed_format ? 17 : 1) * sizeof(UINT));
+  if (rerecord)
+    list->CopyBufferRegion(readback, 25 * sizeof(UINT), upload, 0, sizeof(UINT));
   if (texture_uav) {
     D3D12_RESOURCE_BARRIER texture_barrier = {};
     texture_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -893,8 +903,48 @@ main(int argc, char **argv) {
   queue->ExecuteCommandLists(1, lists);
   if (pending_reset) {
     if (!CheckHR("PendingSignal", queue->Signal(fence, 1)) || fence->GetCompletedValue() != 0 ||
-        !CheckHR("ResetWhilePending", list->Reset(reset_allocator, nullptr)) || fence->GetCompletedValue() != 0 ||
-        !CheckHR("ReleasePendingGate", gate->Signal(1)))
+        !CheckHR("ResetWhilePending", list->Reset(reset_allocator, nullptr)) || fence->GetCompletedValue() != 0)
+      goto cleanup;
+    if (rerecord) {
+      if (!CheckHR("CreateRerecordHeap", device->CreateDescriptorHeap(&resource_heap_desc, IID_PPV_ARGS(&second_resource_heap))))
+        goto cleanup;
+      auto second_cpu = second_resource_heap->GetCPUDescriptorHandleForHeapStart();
+      device->CopyDescriptorsSimple(3, second_cpu, resource_cpu, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+      auto view = second_cpu;
+      view.ptr += 2 * descriptor_increment;
+      D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
+      desc.Format = typed_format->format;
+      desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+      desc.Buffer.FirstElement = 4;
+      desc.Buffer.NumElements = 2;
+      device->CreateUnorderedAccessView(output_texture, nullptr, &desc, view);
+      list->SetPipelineState(pso);
+      ID3D12DescriptorHeap *new_heaps[] = {second_resource_heap, sampler_heap};
+      list->SetDescriptorHeaps(2, new_heaps);
+      list->SetComputeRootSignature(root_signature);
+      auto gpu = second_resource_heap->GetGPUDescriptorHandleForHeapStart();
+      list->SetComputeRootDescriptorTable(0, gpu);
+      list->SetComputeRootDescriptorTable(1, sampler_heap->GetGPUDescriptorHandleForHeapStart());
+      gpu.ptr += descriptor_increment;
+      list->SetComputeRootDescriptorTable(2, gpu);
+      list->SetComputeRoot32BitConstant(3, 3, 0);
+      D3D12_RESOURCE_BARRIER transition{};
+      transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      transition.Transition = {output, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                               D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+      list->ResourceBarrier(1, &transition);
+      transition.Transition.pResource = output_texture;
+      list->ResourceBarrier(1, &transition);
+      list->ExecuteIndirect(count_signature, 1, upload, 176, upload, rerecord_zero ? 160 : 188);
+      transition.Transition.pResource = output;
+      transition.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      transition.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+      list->ResourceBarrier(1, &transition);
+      list->CopyBufferRegion(readback, 25 * sizeof(UINT), output, 21 * sizeof(UINT), sizeof(UINT));
+      if (!CheckHR("CloseRerecordWhilePending", list->Close()) || fence->GetCompletedValue() != 0)
+        goto cleanup;
+    }
+    if (!CheckHR("ReleasePendingGate", gate->Signal(1)))
       goto cleanup;
   }
   if (static_lifetime) {
@@ -921,6 +971,14 @@ main(int argc, char **argv) {
     std::cerr << "GPU completion failed\n";
     goto cleanup;
   }
+  if (rerecord) {
+    queue->ExecuteCommandLists(1, lists);
+    if (!CheckHR("RerecordSignal", queue->Signal(fence, 2)) ||
+        !CheckHR("RerecordEvent", fence->SetEventOnCompletion(2, event)) ||
+        WaitForSingleObject(event, 30000) != WAIT_OBJECT_0 ||
+        !CheckHR("RerecordDevice", device->GetDeviceRemovedReason()))
+      goto cleanup;
+  }
   if (static_lifetime && !marker_destroyed.load()) {
     std::cerr << "static sampler root retained after GPU completion\n";
     goto cleanup;
@@ -939,6 +997,13 @@ main(int argc, char **argv) {
     goto cleanup;
   }
   if (typed_buffer) {
+    if (rerecord && mapped[25] != (rerecord_wrong ? 4u : 2u)) {
+      std::cerr << "rerecord dimensions expected=" << (rerecord_wrong ? 4 : 2) << " got=" << mapped[25] << "\n";
+      readback->Unmap(0, nullptr);
+      goto cleanup;
+    }
+    if (rerecord)
+      std::cout << "rerecord dimensions=2 passed\n";
     if (indirect_count) {
       const UINT expected[] = {0, 4, 8, 8, indirect_count_wrong ? 4u : 8u};
       for (unsigned i = 0; i < 5; ++i) {

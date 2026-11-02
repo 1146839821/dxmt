@@ -558,6 +558,20 @@ in `result-indirect-pending-wrong-final` and `result-indirect-pending-no-patch-f
 This does not test simultaneous submissions, re-recorded work, resource release
 before completion, or native Windows behavior.
 
+The `--rerecord` mode records a second workload on the reset list while the first
+submission is blocked. It uses a separate descriptor heap with a two-element
+view and different indirect argument and count offsets. It closes the new list
+while the first completion fence remains zero, releases the gate, waits for the
+first fence, and only then submits the re-recorded list. This respects the
+[ExecuteCommandLists requirement](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12commandqueue-executecommandlists)
+that the GPU no longer reads the previously submitted list. The first readback
+must remain `0, 4, 8, 8, 8`; the second must read view dimension 2. A sentinel
+initializes the second readback location, and zero-count and wrong-expectation
+controls must fail. Local three-format evidence is in `result-typed-rerecord-final`,
+`result-typed-rerecord-zero-final`, `result-typed-rerecord-wrong-final`, and
+`result-typed-rerecord-no-patch-final`.
+This does not establish simultaneous submissions or native Windows behavior.
+
 When a signature changes root arguments, `PreDispatch` skips normal binding and
 indirect encoding uses the ordinary root-argument layout without the sidecar.
 The existing MSC pipeline validation rejects such signatures and `Close` returns

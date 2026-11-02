@@ -36,10 +36,13 @@ def main():
     parser.add_argument("--indirect-count-wrong", action="store_true", help="negative control with deliberately wrong expected count")
     parser.add_argument("--indirect-pending", action="store_true", help="reset a pending multi-command indirect submission")
     parser.add_argument("--indirect-pending-wrong", action="store_true", help="pending submission with deliberately wrong expected count")
+    parser.add_argument("--rerecord", action="store_true", help="re-record while pending and submit after completion")
+    parser.add_argument("--rerecord-wrong", action="store_true", help="use a deliberately wrong second view dimension")
+    parser.add_argument("--rerecord-zero", action="store_true", help="negative control with zero indirect command count")
     args = parser.parse_args()
-    if (args.scalar or args.unaligned or args.zero_offset or args.experimental_patch or args.late_copy or args.heap_switch or args.pending_reset or args.indirect_reject or args.indirect or args.indirect_count or args.indirect_count_wrong or args.indirect_pending or args.indirect_pending_wrong) and not args.buffer:
+    if (args.scalar or args.unaligned or args.zero_offset or args.experimental_patch or args.late_copy or args.heap_switch or args.pending_reset or args.indirect_reject or args.indirect or args.indirect_count or args.indirect_count_wrong or args.indirect_pending or args.indirect_pending_wrong or args.rerecord or args.rerecord_wrong or args.rerecord_zero) and not args.buffer:
         parser.error("--scalar, --unaligned and --zero-offset require --buffer")
-    if sum((args.zero_offset, args.unaligned, args.late_copy, args.heap_switch, args.pending_reset, args.indirect_reject, args.indirect, args.indirect_count, args.indirect_count_wrong, args.indirect_pending, args.indirect_pending_wrong)) > 1:
+    if sum((args.zero_offset, args.unaligned, args.late_copy, args.heap_switch, args.pending_reset, args.indirect_reject, args.indirect, args.indirect_count, args.indirect_count_wrong, args.indirect_pending, args.indirect_pending_wrong, args.rerecord, args.rerecord_wrong, args.rerecord_zero)) > 1:
         parser.error("offset, late-copy and heap-switch modes are mutually exclusive")
     if args.encoder_break and not args.heap_switch:
         parser.error("--encoder-break requires --heap-switch")
@@ -76,7 +79,7 @@ def main():
         env["DXMT_SHADER_CACHE_PATH"] = str(output / f"cache-{kind}")
         env["DXMT_LOG_PATH"] = str(output)
         command = [str(stage / "wine/bin/wine"), "dx12_texture_sampler.exe",
-                   f"{prefix_name}_{kind}.cs.cso", "--typed-buffer-indirect-pending-wrong" if args.indirect_pending_wrong else "--typed-buffer-indirect-pending" if args.indirect_pending else "--typed-buffer-indirect-count-wrong" if args.indirect_count_wrong else "--typed-buffer-indirect-count" if args.indirect_count else "--typed-buffer-indirect-reject" if args.indirect_reject else "--typed-buffer-indirect" if args.indirect else "--typed-buffer-pending-reset" if args.pending_reset else "--typed-buffer-heap-switch-encoder" if args.encoder_break else "--typed-buffer-heap-switch" if args.heap_switch else "--typed-buffer-late-copy" if args.late_copy else "--typed-buffer-zero" if args.zero_offset else "--typed-buffer-unaligned" if args.unaligned else "--typed-buffer" if args.buffer else "--typed-uav", str(fmt)]
+                   f"{prefix_name}_{kind}.cs.cso", "--typed-buffer-rerecord-zero" if args.rerecord_zero else "--typed-buffer-rerecord-wrong" if args.rerecord_wrong else "--typed-buffer-rerecord" if args.rerecord else "--typed-buffer-indirect-pending-wrong" if args.indirect_pending_wrong else "--typed-buffer-indirect-pending" if args.indirect_pending else "--typed-buffer-indirect-count-wrong" if args.indirect_count_wrong else "--typed-buffer-indirect-count" if args.indirect_count else "--typed-buffer-indirect-reject" if args.indirect_reject else "--typed-buffer-indirect" if args.indirect else "--typed-buffer-pending-reset" if args.pending_reset else "--typed-buffer-heap-switch-encoder" if args.encoder_break else "--typed-buffer-heap-switch" if args.heap_switch else "--typed-buffer-late-copy" if args.late_copy else "--typed-buffer-zero" if args.zero_offset else "--typed-buffer-unaligned" if args.unaligned else "--typed-buffer" if args.buffer else "--typed-uav", str(fmt)]
         result = subprocess.run(command, cwd=stage, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=120)
         log = result.stdout.decode(errors="replace")
@@ -95,8 +98,10 @@ def main():
                   (not args.buffer or "typed buffer guards and out-of-bounds load passed" in log) and
                   (not args.heap_switch or "heap switch dimensions=4,2 passed" in log) and
                   (not args.encoder_break or "encoder break copy passed" in log) and
-                  (not (args.pending_reset or args.indirect_pending or args.indirect_pending_wrong) or "pending reset fence passed" in log))
-        if args.indirect_count or args.indirect_count_wrong or args.indirect_pending or args.indirect_pending_wrong:
+                  (not (args.pending_reset or args.indirect_pending or args.indirect_pending_wrong or args.rerecord or args.rerecord_wrong or args.rerecord_zero) or "pending reset fence passed" in log))
+        if args.rerecord or args.rerecord_wrong or args.rerecord_zero:
+            passed = passed and "rerecord dimensions=2 passed" in log
+        if args.indirect_count or args.indirect_count_wrong or args.indirect_pending or args.indirect_pending_wrong or args.rerecord or args.rerecord_wrong or args.rerecord_zero:
             passed = passed and "indirect count sums=0,4,8,8,8 passed" in log
         if args.indirect_reject:
             passed = result.returncode == 0 and "typed buffer indirect rejected explicitly" in log
