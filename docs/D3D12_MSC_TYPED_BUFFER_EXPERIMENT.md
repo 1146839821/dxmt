@@ -513,3 +513,19 @@ Wine/Metal setup, with module identity and validation checks; logs are in
 recorded compute-to-blit-to-compute sequence, not concurrent submission,
 resource destruction or all encoder transitions. Shader-validation
 instrumentation of the offline metallib remains unverified.
+
+### Pending submission and command-list reset
+
+The R32 runner's `--pending-reset` mode queues a wait on an unsignaled gate,
+submits the workload and a completion fence, checks that the completion fence
+is still zero, and resets the command list using a different allocator before
+releasing the gate. Descriptor heaps and resources remain alive throughout, as
+required by the application contract. All three R32 formats passed GPU readback
+and guard checks on local 64-bit Wine with the experimental patch and validation
+enabled; the same cases without the patch failed as expected. Logs are in
+`run-typed-pending` and `run-typed-pending-control` under the n95 stage.
+
+This checks one pending submission and list reset, not application-initiated
+resource destruction, multiple simultaneous queues or submissions, or all
+Metal resource lifetime cases. Offline metallib shader-validation
+instrumentation remains unverified. No production capability is promoted.

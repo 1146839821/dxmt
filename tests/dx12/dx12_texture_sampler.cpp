@@ -289,10 +289,11 @@ main(int argc, char **argv) {
   const bool late_copy = argc == 4 && strcmp(argv[2], "--typed-buffer-late-copy") == 0;
   const bool late_buffer = late_copy || (argc == 4 && strcmp(argv[2], "--typed-buffer-late") == 0);
   const bool zero_offset_buffer = argc == 4 && strcmp(argv[2], "--typed-buffer-zero") == 0;
+  const bool pending_reset = argc == 4 && strcmp(argv[2], "--typed-buffer-pending-reset") == 0;
   const bool wrong_heap_expected = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-wrong") == 0;
   const bool encoder_break = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-encoder") == 0;
   const bool heap_switch = wrong_heap_expected || encoder_break || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch") == 0);
-  const bool typed_buffer = unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
+  const bool typed_buffer = unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || pending_reset || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
   if (argc == 5 && !placed)
     return 2;
   const TypedFormat *typed_format = nullptr;
@@ -487,6 +488,11 @@ main(int argc, char **argv) {
                                                                          IID_PPV_ARGS(&reset_allocator))))
       goto cleanup;
   }
+  if (pending_reset &&
+      (!CheckHR("CreateGate", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))) ||
+       !CheckHR("CreateResetAllocator", device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                       IID_PPV_ARGS(&reset_allocator)))))
+    goto cleanup;
 
   resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
   resource_heap_desc.NumDescriptors = texture_uav ? 3 : 2;
@@ -808,10 +814,18 @@ main(int argc, char **argv) {
       device->CreateUnorderedAccessView(output_texture, nullptr, &updated, handle);
     }
   }
-  if (static_lifetime && !CheckHR("WaitGate", queue->Wait(gate, 1)))
+  if ((static_lifetime || pending_reset) && !CheckHR("WaitGate", queue->Wait(gate, 1)))
+    goto cleanup;
+  if (pending_reset && !CheckHR("CreatePendingFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
     goto cleanup;
   lists[0] = list;
   queue->ExecuteCommandLists(1, lists);
+  if (pending_reset) {
+    if (!CheckHR("PendingSignal", queue->Signal(fence, 1)) || fence->GetCompletedValue() != 0 ||
+        !CheckHR("ResetWhilePending", list->Reset(reset_allocator, nullptr)) || fence->GetCompletedValue() != 0 ||
+        !CheckHR("ReleasePendingGate", gate->Signal(1)))
+      goto cleanup;
+  }
   if (static_lifetime) {
     root_signature->Release();
     root_signature = nullptr;
@@ -824,9 +838,9 @@ main(int argc, char **argv) {
     if (!CheckHR("ReleaseGate", gate->Signal(1)))
       goto cleanup;
   }
-  if (!CheckHR("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
+  if (!pending_reset && !CheckHR("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
     goto cleanup;
-  if (!CheckHR("Signal", queue->Signal(fence, 1)))
+  if (!pending_reset && !CheckHR("Signal", queue->Signal(fence, 1)))
     goto cleanup;
   event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
   if (!event || !CheckHR("SetEventOnCompletion", fence->SetEventOnCompletion(1, event)))
@@ -854,6 +868,8 @@ main(int argc, char **argv) {
     goto cleanup;
   }
   if (typed_buffer) {
+    if (pending_reset)
+      std::cout << "pending reset fence passed\n";
     if (heap_switch && (mapped[20] != 4 || mapped[21] != (wrong_heap_expected ? 4u : 2u))) {
       std::cerr << "heap switch dimensions mismatch: " << mapped[20] << "," << mapped[21] << "\n";
       readback->Unmap(0, nullptr);
