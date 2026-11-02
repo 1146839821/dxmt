@@ -303,3 +303,45 @@ intended. Full samples, exact artifact hashes and logs are in
 Reproduce with the existing comparison runner's `--frequency` switch and a
 fresh output directory. Ordinary paths are not modified, and D3D12 PSO cache
 identity and resident memory remain NOT_RUN.
+
+## MinLOD compatibility flag comparison (2026-11-02)
+
+**Design card:** use the existing fragment SampleLevel LOD GPU regression and
+its intentionally failing unpatched control under a test-only forwarding MSC
+library. The wrapper records both DXMT's requested flags and the value actually
+passed to MSC; in the experimental mode it forwards zero instead of 4. Each
+mode runs in separate fresh Wine processes and isolated shader-cache paths.
+The wrapper also records individual `IRCompilerAllocCompileAndLink` durations
+and metallib bytecode sizes. Actual PE and Unix bridge paths, exported code and
+hashes are checked by the existing LOD runner. This deliberately overrides the
+compiler after DXMT chooses its production cache key; it is only valid as a
+separate-process experiment and must not be used as a production flag switch.
+No game path, resource barrier, residency or public capability is changed.
+Rollback removes the experimental wrapper and runner.
+
+Three runs per mode passed the normal and negative fragment oracles with Metal
+API and GPU validation. The fragment case samples a five-entry matrix with
+ResourceMinLODClamp 0, 0.5, 1 and 1.5 and a MostDetailedMip=1 view; it checks
+both ordinary and reserved textures. Under **the enabled test-only sampler LOD
+patch**, default and forced-zero results matched exactly: ordinary float-bit
+outputs `3f800000 40000000 40400000 40800000 40400000`, reserved
+`3f800000 40000000 40400000 00000000 40400000`. The test intercept confirmed
+4→4 and 4→0 respectively. Both produced converter-reported metallib sizes
+5500 and 5308 bytes for the two ordered compilation calls; identical size does
+not imply identical bytecode.
+
+The first and second ordered compile calls in each fragment run had default
+median/p95 3.410/3.721 ms and 1.813/1.964 ms; forced-zero 3.557/3.603 ms and
+1.695/1.779 ms. These are three samples, with validation enabled and unlabelled
+vertex/fragment compilation order, not a performance conclusion. GPU time,
+memory, implicit derivatives, other shader operations, devices and unsupported
+cases remain NOT_RUN. The tested patch may itself supply necessary LOD
+semantics, so this does not prove the flag is redundant generally; leave the
+production MinLOD compatibility flag enabled. Raw outputs, hashes and negative
+controls are retained in `result-msc-lod-flags-final/`.
+
+Reproduce with a paired isolated stage and a new output directory:
+
+```sh
+python3 tests/dx12/run_msc_lod_flags.py --stage STAGE --prefix PREFIX --build build --converter /usr/local/lib/libmetalirconverter.dylib --output NEW_OUTPUT --repeats 3
+```
