@@ -572,8 +572,7 @@ one truncation before, zero after, and a debug compile unit in both modules.
 This proves that this particular fixture was parsed and transformed; it does
 not establish complete debug-information equivalence. Serialization by LLVM
 15 also means the fixture does not combine the original 15-operand metadata
-record with double instructions. GPU execution of the transformed fixture and
-non-fast double cases remain untested.
+record with double instructions. Non-fast double cases remain untested.
 
 ```sh
 probe-verified CAPTURED.metallib FIXTURE.metallib --make-double
@@ -583,3 +582,26 @@ probe-verified FIXTURE.metallib LOWERED.metallib --expect-lowered
 `probe-verified` in this example is the isolated test executable linked with
 the candidate object, not the normal build target. The normal LLVM 15 reader
 still fails on the captured MSC AIR; no toolchain files were replaced.
+
+On Apple M1 Max, macOS 27.0.1, the transformed fixture was loaded directly
+by Metal and rendered into an RGBA8 texture. With Metal API and GPU validation
+enabled before device creation, readback was `(255, 0, 0, 255)` and a
+deliberately wrong expected-result control exited 8. This is a native Metal
+test of the transformed synthetic fixture, not a Wine or game test. The
+fixture's SHA-256 was
+`b9a395234ef8004b1172fcf42e5e8adf51ecac1ae07a612fc0c9b49983246a6e`.
+The test can be reproduced with:
+
+```sh
+xcrun clang -fobjc-arc -Wall -Wextra -framework Foundation -framework Metal \
+  tests/airconv/msc_debug_metallib_render.m -o /tmp/msc-debug-render
+MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 \
+  /tmp/msc-debug-render LOWERED.metallib correct
+```
+
+An additional error-path control passed an opaque-pointer AIR fixture that the
+LLVM 15 reader rejects. `SM50PatchMetalLibUnsupportedDouble` returned zero and
+its output was byte-identical to the unsupported input. This confirms its
+existing fallback does not guarantee that required lowering has happened;
+changing production failure policy requires examining caller compatibility and
+must not be conflated with the metadata reader candidate.
