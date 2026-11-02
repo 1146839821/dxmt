@@ -103,6 +103,15 @@ if get_option('enable_tests')
   )
   test('airconv msc double parse status', msc_double_parse_status)
 
+  executable('llvm-metadata-error-stress',
+    files('../../../tests/airconv/llvm_metadata_error_stress.cpp'),
+    include_directories : [ llvm_include_path_darwin ],
+    cpp_args : [ airconv_args ],
+    link_args : [ llvm_ld_flags_darwin, llvm_deps ],
+    native : dxmt_crossbuild,
+    build_by_default : false
+  )
+
   executable('msc-debug-metallib-probe',
     files('../../../tests/airconv/msc_debug_metallib_probe.cpp', '../transforms/msc_sample_level_lod.cpp',
           '../transforms/lower_unsupported_double.cpp', '../metallib_patch.cpp', '../metallib_writer.cpp'),

@@ -1,0 +1,25 @@
+--- a/llvm/lib/Bitcode/Reader/MetadataLoader.cpp
++++ b/llvm/lib/Bitcode/Reader/MetadataLoader.cpp
+@@ -17,0 +18 @@
++#include "llvm/ADT/ScopeExit.h"
+@@ -354,0 +356,6 @@
++  void abandon() {
++    while (!PHs.empty()) {
++      PHs.front().replaceUseWith(nullptr);
++      PHs.pop_front();
++    }
++  }
+@@ -969,0 +977,2 @@
++  bool Success = false;
++  auto Cleanup = make_scope_exit([&] { if (!Success) Placeholders.abandon(); });
+@@ -1004,0 +1014 @@
++        Success = true;
+@@ -1006,0 +1017 @@
++      Success = true;
+@@ -1026,0 +1038 @@
++      Success = true;
+@@ -2200,0 +2213,2 @@
++  bool Success = false;
++  auto Cleanup = make_scope_exit([&] { if (!Success) Placeholders.abandon(); });
+@@ -2212,0 +2227 @@
++      Success = true;

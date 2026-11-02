@@ -632,3 +632,34 @@ the status test, `airconv lower unsupported double` and
 `airconv msc sample-level lod` passed; full `meson compile -C build` and
 `meson compile -C build-X86` passed. The WineMetal warning was not separately
 exercised through an isolated Wine deployment in this slice.
+
+### LLVM 15 placeholder cleanup candidate
+
+**Goal and scope:** investigate the process abort during metadata parsing;
+leave the installed toolchain and production behavior unchanged. LLVM 15's
+`PlaceholderQueue` requires an empty queue at destruction, but an early
+`parseOneMetadata` error can leave entries in it. LLVM has an independently
+reported instance of this error path: [LLVM issue 151250](https://github.com/llvm/llvm-project/issues/151250).
+
+`patches/llvm/experimental-llvm15-placeholder-cleanup.patch` is an isolated
+candidate that untracks queued placeholder uses and replaces them with null
+on error exits from the metadata and attachment parsers; successful exits
+retain the original empty-queue assertion. A separately compiled LLVM 15.0.7 metadata-reader
+object with this candidate was linked ahead of the repository's unchanged
+static libraries. The original reader aborted on the captured 15-operand
+debug AIR; the candidate returned a parse error. A stress program alternated
+the failing input with a valid optimized AIR input in the same LLVM context
+for 1,000 iterations, verifying the successful module each time; it passed.
+The original executable failed with SIGABRT on the first iteration. A second
+run passed with AddressSanitizer enabled for the candidate reader object;
+the prebuilt LLVM static libraries were not instrumented, so this is limited
+memory-safety evidence.
+
+`llvm-metadata-error-stress` is an opt-in test executable taking the failing
+and valid raw AIR files in that order. The candidate object and captured inputs
+remain in `msc-debug-isolation/` outside the repository. Merely building the
+test against the normal toolchain does not apply the candidate and is expected
+to abort on the captured failing input. A production fix still needs broader
+memory-safety and concurrent malformed-input testing,
+coverage of other error paths including LLVM fatal errors, and integration
+with a reproducible toolchain build. The candidate is not enabled by default.
