@@ -930,3 +930,23 @@ second sentinel and length. This tests sequential execution of
 the same direct command list, not concurrent execution or descriptor mutation
 while submitted. Rewritten-metallib shader-validation instrumentation remains
 unverified; capability reporting is unchanged.
+
+### Late typed SRV descriptor copy
+
+[CopyDescriptorsSimple](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-copydescriptorssimple)
+requires a non-shader-visible source heap of the same descriptor type. With a
+Root Signature 1.0 descriptor table, this probe closes a command list, creates
+a null or live typed SRV in such a source heap, copies it into the bound
+shader-visible heap, then overwrites and releases the source heap before
+submission. The live resource is a CPU-initialized upload buffer referenced by
+the GPU only through the descriptor and retained through completion.
+
+Both null-to-live and live-to-null passed readback, loaded-runtime identity and
+enabled Metal validation for R32 FLOAT, UINT and SINT in
+`result-srv-copy-final-copy-to-live` and `result-srv-copy-final-copy-to-null`
+under n95. Skipping the copy in the corresponding `-skip` result directories
+left the original descriptor's value in place and failed the expected-result
+oracle for all three formats. This covers one `CopyDescriptorsSimple` entry;
+multiple ranges, `CopyDescriptors`, and copy/update during submitted execution
+are not covered. Rewritten-metallib shader-validation instrumentation remains
+unverified. No capability declaration or default runtime path changed.

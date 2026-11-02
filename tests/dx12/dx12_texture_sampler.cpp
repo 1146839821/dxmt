@@ -285,16 +285,21 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
+  const bool srv_copy_live_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-copy-to-live-skip") == 0;
+  const bool srv_copy_null_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-copy-to-null-skip") == 0;
+  const bool srv_copy_live = srv_copy_live_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-copy-to-live") == 0);
+  const bool srv_copy_null = srv_copy_null_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-copy-to-null") == 0);
+  const bool srv_copy = srv_copy_live || srv_copy_null;
   const bool srv_rerecord_wrong = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-rerecord-wrong") == 0;
   const bool srv_rerecord = srv_rerecord_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-rerecord") == 0);
   const bool srv_pending_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-pending-skip") == 0;
   const bool srv_pending = srv_rerecord || srv_pending_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-pending") == 0);
   const bool srv_only_skip = srv_pending_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-skip") == 0);
-  const bool srv_only = srv_pending || srv_only_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only") == 0);
+  const bool srv_only = srv_copy || srv_pending || srv_only_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only") == 0);
   const bool srv_to_live_skip = srv_only_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-skip") == 0);
   const bool srv_to_null_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-live-to-null-skip") == 0;
-  const bool srv_to_live = srv_only || srv_to_live_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live") == 0);
-  const bool srv_to_null = srv_to_null_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-live-to-null") == 0);
+  const bool srv_to_live = (srv_only && !srv_copy_null) || srv_to_live_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live") == 0);
+  const bool srv_to_null = srv_copy_null || srv_to_null_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-live-to-null") == 0);
   const bool srv_live = srv_to_live || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-live") == 0);
   const bool srv_null = srv_to_null || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null") == 0);
   const bool typed_srv = srv_live || srv_null;
@@ -696,7 +701,7 @@ main(int argc, char **argv) {
       typed_srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
       typed_srv_desc.Buffer.FirstElement = 4;
       typed_srv_desc.Buffer.NumElements = 4;
-      device->CreateShaderResourceView((srv_to_live || (srv_null && !srv_to_null)) ? nullptr : output_texture,
+      device->CreateShaderResourceView((srv_to_live || (srv_null && !srv_to_null)) ? nullptr : srv_only ? srv_only_resource : output_texture,
                                        &typed_srv_desc, resource_cpu);
     }
     if (typed_buffer) {
@@ -937,8 +942,23 @@ main(int argc, char **argv) {
     updated.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     updated.Buffer.FirstElement = 4;
     updated.Buffer.NumElements = 4;
-    device->CreateShaderResourceView(srv_to_null ? nullptr : srv_only ? srv_only_resource : output_texture,
-                                     &updated, resource_cpu);
+    if (srv_copy) {
+      D3D12_DESCRIPTOR_HEAP_DESC source_desc = {};
+      source_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+      source_desc.NumDescriptors = 1;
+      if (!CheckHR("CreateSRVCopySource", device->CreateDescriptorHeap(&source_desc, IID_PPV_ARGS(&late_source_heap))))
+        goto cleanup;
+      auto source = late_source_heap->GetCPUDescriptorHandleForHeapStart();
+      device->CreateShaderResourceView(srv_to_null ? nullptr : srv_only_resource, &updated, source);
+      if (!srv_copy_live_skip && !srv_copy_null_skip)
+        device->CopyDescriptorsSimple(1, resource_cpu, source, source_desc.Type);
+      device->CreateShaderResourceView(srv_to_null ? srv_only_resource : nullptr, &updated, source);
+      late_source_heap->Release();
+      late_source_heap = nullptr;
+    } else {
+      device->CreateShaderResourceView(srv_to_null ? nullptr : srv_only ? srv_only_resource : output_texture,
+                                       &updated, resource_cpu);
+    }
   }
   if (late_buffer) {
     D3D12_UNORDERED_ACCESS_VIEW_DESC updated = {};
@@ -1135,7 +1155,7 @@ main(int argc, char **argv) {
       readback->Unmap(0, nullptr);
       goto cleanup;
     }
-    std::cout << (srv_rerecord ? "null-to-live-only-rerecord" : srv_pending ? "null-to-live-only-pending" : srv_only ? "null-to-live-only" : srv_to_live ? "null-to-live" : srv_to_null ? "live-to-null" : srv_live ? "live" : "null")
+    std::cout << (srv_copy_live ? "copy-to-live" : srv_copy_null ? "copy-to-null" : srv_rerecord ? "null-to-live-only-rerecord" : srv_pending ? "null-to-live-only-pending" : srv_only ? "null-to-live-only" : srv_to_live ? "null-to-live" : srv_to_null ? "live-to-null" : srv_live ? "live" : "null")
               << " typed SRV read and dimensions passed\n";
     readback->Unmap(0, nullptr);
     result = 0;

@@ -47,7 +47,7 @@ def main():
     parser.add_argument("--indirect-math-wrong", action="store_true", help="negative control with wrong reversebits result")
     parser.add_argument("--null-uav", action="store_true", help="verify null typed UAV reads and discarded writes")
     parser.add_argument("--null-uav-live", action="store_true", help="negative control using a live UAV")
-    parser.add_argument("--srv", choices=("null", "live", "null-to-live", "live-to-null", "null-to-live-skip", "live-to-null-skip", "null-to-live-only", "null-to-live-only-skip", "null-to-live-only-pending", "null-to-live-only-pending-skip", "null-to-live-only-rerecord", "null-to-live-only-rerecord-wrong"), help="test a typed SRV and optional post-Close update")
+    parser.add_argument("--srv", choices=("null", "live", "null-to-live", "live-to-null", "null-to-live-skip", "live-to-null-skip", "null-to-live-only", "null-to-live-only-skip", "null-to-live-only-pending", "null-to-live-only-pending-skip", "null-to-live-only-rerecord", "null-to-live-only-rerecord-wrong", "copy-to-live", "copy-to-null", "copy-to-live-skip", "copy-to-null-skip"), help="test a typed SRV and optional post-Close update")
     args = parser.parse_args()
     if args.srv and (not args.buffer or not args.scalar or any(getattr(args, name) for name in (
         "null_uav", "null_uav_live", "unaligned", "zero_offset", "late_copy", "heap_switch",
