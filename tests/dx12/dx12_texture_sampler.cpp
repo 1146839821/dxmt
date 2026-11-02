@@ -292,10 +292,12 @@ main(int argc, char **argv) {
   const bool pending_reset = argc == 4 && strcmp(argv[2], "--typed-buffer-pending-reset") == 0;
   const bool indirect_reject = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-reject") == 0;
   const bool indirect = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect") == 0;
+  const bool indirect_count_wrong = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-count-wrong") == 0;
+  const bool indirect_count = indirect_count_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-count") == 0);
   const bool wrong_heap_expected = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-wrong") == 0;
   const bool encoder_break = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-encoder") == 0;
   const bool heap_switch = wrong_heap_expected || encoder_break || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch") == 0);
-  const bool typed_buffer = unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || pending_reset || indirect_reject || indirect || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
+  const bool typed_buffer = unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || pending_reset || indirect_reject || indirect || indirect_count || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
   if (argc == 5 && !placed)
     return 2;
   const TypedFormat *typed_format = nullptr;
@@ -552,9 +554,14 @@ main(int argc, char **argv) {
          sizeof(pixel));
   if (typed_buffer)
     memset(static_cast<char *>(upload_data) + 64, 0xa5, 64);
-  if (indirect) {
+  if (indirect || indirect_count) {
     const D3D12_DISPATCH_ARGUMENTS dispatch = {1, 1, 1};
     memcpy(static_cast<char *>(upload_data) + 128, &dispatch, sizeof(dispatch));
+    if (indirect_count) {
+      memcpy(static_cast<char *>(upload_data) + 140, &dispatch, sizeof(dispatch));
+      const UINT counts[] = {0, 1, 2, 3};
+      memcpy(static_cast<char *>(upload_data) + 160, counts, sizeof(counts));
+    }
   }
   upload->Unmap(0, nullptr);
 
@@ -778,6 +785,27 @@ main(int argc, char **argv) {
     list->SetComputeRoot32BitConstant(3, 1, 0);
     list->Dispatch(1, 1, 1);
   }
+  if (indirect_count) {
+    D3D12_INDIRECT_ARGUMENT_DESC argument{};
+    argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    D3D12_COMMAND_SIGNATURE_DESC signature_desc{};
+    signature_desc.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
+    signature_desc.NumArgumentDescs = 1;
+    signature_desc.pArgumentDescs = &argument;
+    ID3D12CommandSignature *signature = nullptr;
+    if (!CheckHR("CreateCountSignature", device->CreateCommandSignature(&signature_desc, nullptr, IID_PPV_ARGS(&signature))))
+      goto cleanup;
+    list->SetComputeRoot32BitConstant(3, 4, 0);
+    list->Dispatch(1, 1, 1);
+    D3D12_RESOURCE_BARRIER uav_barrier{};
+    uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    list->ResourceBarrier(1, &uav_barrier);
+    for (UINT i = 0; i < 5; ++i) {
+      list->SetComputeRoot32BitConstant(3, 5 + i, 0);
+      list->ExecuteIndirect(signature, 2, upload, 128, i < 4 ? upload : nullptr, i < 4 ? 160 + i * 4 : 0);
+    }
+    signature->Release();
+  }
   if (heap_switch) {
     // A and B use different view lengths, so a stale sidecar is observable.
     if (!CheckHR("CreateSecondHeap", device->CreateDescriptorHeap(&resource_heap_desc, IID_PPV_ARGS(&second_resource_heap))))
@@ -811,7 +839,7 @@ main(int argc, char **argv) {
   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
   list->ResourceBarrier(1, &barrier);
   list->CopyBufferRegion(readback, 0, output, 0,
-                         (heap_switch ? 22 : typed_buffer ? 20 : typed_format ? 17 : 1) * sizeof(UINT));
+                         (indirect_count ? 25 : heap_switch ? 22 : typed_buffer ? 20 : typed_format ? 17 : 1) * sizeof(UINT));
   if (texture_uav) {
     D3D12_RESOURCE_BARRIER texture_barrier = {};
     texture_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -910,6 +938,17 @@ main(int argc, char **argv) {
     goto cleanup;
   }
   if (typed_buffer) {
+    if (indirect_count) {
+      const UINT expected[] = {0, 4, 8, 8, indirect_count_wrong ? 4u : 8u};
+      for (unsigned i = 0; i < 5; ++i) {
+        if (mapped[20 + i] != expected[i]) {
+          std::cerr << "indirect count " << i << " expected=" << expected[i] << " got=" << mapped[20 + i] << "\n";
+          readback->Unmap(0, nullptr);
+          goto cleanup;
+        }
+      }
+      std::cout << "indirect count sums=0,4,8,8,8 passed\n";
+    }
     if (pending_reset)
       std::cout << "pending reset fence passed\n";
     if (heap_switch && (mapped[20] != 4 || mapped[21] != (wrong_heap_expected ? 4u : 2u))) {

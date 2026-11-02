@@ -32,10 +32,12 @@ def main():
     parser.add_argument("--pending-reset", action="store_true", help="reset the list while its submission waits on a fence")
     parser.add_argument("--indirect-reject", action="store_true", help="verify experimental indirect dispatch fails explicitly")
     parser.add_argument("--indirect", action="store_true", help="execute the scalar workload with indirect dispatch")
+    parser.add_argument("--indirect-count", action="store_true", help="check multi-command and count-buffer dispatch")
+    parser.add_argument("--indirect-count-wrong", action="store_true", help="negative control with deliberately wrong expected count")
     args = parser.parse_args()
-    if (args.scalar or args.unaligned or args.zero_offset or args.experimental_patch or args.late_copy or args.heap_switch or args.pending_reset or args.indirect_reject or args.indirect) and not args.buffer:
+    if (args.scalar or args.unaligned or args.zero_offset or args.experimental_patch or args.late_copy or args.heap_switch or args.pending_reset or args.indirect_reject or args.indirect or args.indirect_count or args.indirect_count_wrong) and not args.buffer:
         parser.error("--scalar, --unaligned and --zero-offset require --buffer")
-    if sum((args.zero_offset, args.unaligned, args.late_copy, args.heap_switch, args.pending_reset, args.indirect_reject, args.indirect)) > 1:
+    if sum((args.zero_offset, args.unaligned, args.late_copy, args.heap_switch, args.pending_reset, args.indirect_reject, args.indirect, args.indirect_count, args.indirect_count_wrong)) > 1:
         parser.error("offset, late-copy and heap-switch modes are mutually exclusive")
     if args.encoder_break and not args.heap_switch:
         parser.error("--encoder-break requires --heap-switch")
@@ -72,7 +74,7 @@ def main():
         env["DXMT_SHADER_CACHE_PATH"] = str(output / f"cache-{kind}")
         env["DXMT_LOG_PATH"] = str(output)
         command = [str(stage / "wine/bin/wine"), "dx12_texture_sampler.exe",
-                   f"{prefix_name}_{kind}.cs.cso", "--typed-buffer-indirect-reject" if args.indirect_reject else "--typed-buffer-indirect" if args.indirect else "--typed-buffer-pending-reset" if args.pending_reset else "--typed-buffer-heap-switch-encoder" if args.encoder_break else "--typed-buffer-heap-switch" if args.heap_switch else "--typed-buffer-late-copy" if args.late_copy else "--typed-buffer-zero" if args.zero_offset else "--typed-buffer-unaligned" if args.unaligned else "--typed-buffer" if args.buffer else "--typed-uav", str(fmt)]
+                   f"{prefix_name}_{kind}.cs.cso", "--typed-buffer-indirect-count-wrong" if args.indirect_count_wrong else "--typed-buffer-indirect-count" if args.indirect_count else "--typed-buffer-indirect-reject" if args.indirect_reject else "--typed-buffer-indirect" if args.indirect else "--typed-buffer-pending-reset" if args.pending_reset else "--typed-buffer-heap-switch-encoder" if args.encoder_break else "--typed-buffer-heap-switch" if args.heap_switch else "--typed-buffer-late-copy" if args.late_copy else "--typed-buffer-zero" if args.zero_offset else "--typed-buffer-unaligned" if args.unaligned else "--typed-buffer" if args.buffer else "--typed-uav", str(fmt)]
         result = subprocess.run(command, cwd=stage, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=120)
         log = result.stdout.decode(errors="replace")
@@ -92,6 +94,8 @@ def main():
                   (not args.heap_switch or "heap switch dimensions=4,2 passed" in log) and
                   (not args.encoder_break or "encoder break copy passed" in log) and
                   (not args.pending_reset or "pending reset fence passed" in log))
+        if args.indirect_count or args.indirect_count_wrong:
+            passed = passed and "indirect count sums=0,4,8,8,8 passed" in log
         if args.indirect_reject:
             passed = result.returncode == 0 and "typed buffer indirect rejected explicitly" in log
         rows.append(dict(kind=kind, format=fmt, exit=result.returncode, readback_pass=passed,

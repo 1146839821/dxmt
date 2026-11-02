@@ -536,8 +536,15 @@ Dispatch-only indirect signatures inherit the parent compute encoder's buffers,
 including the MSC argument buffer and experimental sidecar. The runner's
 `--buffer --scalar --experimental-patch --indirect` mode performs two indirect
 dispatches with a root constant changed between them and checks GPU readback.
-It covers one command per call without a count buffer; other indirect cases and
-submission lifetime combinations remain unverified.
+The `--indirect-count` mode also checks two-command calls with count-buffer
+values 0, 1, 2 and 3 (clamped to the maximum of 2), and a two-command call
+without a count buffer. Each execution atomically adds the typed view's element
+count to a separate result; the expected sums are 0, 4, 8, 8 and 8. On local
+64-bit Wine, R32 FLOAT, UINT and SINT passed; a deliberately wrong expected sum
+and a run without the experimental patch failed. Logs and runtime identity are
+in `result-indirect-count`, `result-indirect-count-wrong`, and
+`result-indirect-count-no-patch` under the n95 stage. This does not cover every
+indirect signature or submission lifetime combination.
 
 When a signature changes root arguments, `PreDispatch` skips normal binding and
 indirect encoding uses the ordinary root-argument layout without the sidecar.

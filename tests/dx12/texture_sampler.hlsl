@@ -34,6 +34,17 @@ cbuffer Parameters : register(b0) { uint phase; };
 void main(uint3 tid : SV_DispatchThreadID)
 {
 #if defined(TYPED_BUFFER_UAV)
+    if (phase == 4) {
+        for (uint i = 0; i < 5; ++i)
+            output[20 + i] = 0;
+        return;
+    }
+    if (phase >= 5) {
+        uint count;
+        typed_output.GetDimensions(count);
+        InterlockedAdd(output[20 + phase - 5], count);
+        return;
+    }
     if (phase >= 2) {
         uint heap_count;
         typed_output.GetDimensions(heap_count);
