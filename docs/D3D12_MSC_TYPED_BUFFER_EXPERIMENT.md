@@ -970,3 +970,21 @@ expected in all three formats. Each range has one descriptor; unequal-sized
 ranges, overlapping ranges, and source/destination changes after submission are
 not covered. Shader validation instrumentation of the rewritten metallib remains
 unverified; no capability reporting or default runtime path changed.
+
+### Unequal descriptor-copy range shapes
+
+The existing two-SRV probe also covers two unequal range decompositions of the
+same two-descriptor copy. `multi-merge` copies two noncontiguous single-entry
+source ranges into one contiguous two-entry destination range. `multi-split`
+copies one contiguous two-entry source range into two single-entry destination
+ranges in reverse slot order. Both use a non-shader-visible source heap, which
+is overwritten and released after the copy and before submission.
+
+For R32 FLOAT, UINT and SINT, both variants passed the two independent values,
+view lengths and out-of-bounds checks, runtime identity, and enabled Metal
+validation in `result-srv-range-shape-multi-merge` and
+`result-srv-range-shape-multi-split` under n95. The matching `-skip` controls
+left both slots null and failed the live-view oracle. These tests cover range
+sizes 1+1 versus 2, not arbitrary range counts, overlapping copies, or
+submitted-heap mutation. Shader-validation instrumentation of the rewritten
+metallib remains unverified; capability reporting is unchanged.

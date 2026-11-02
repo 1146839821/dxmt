@@ -285,9 +285,13 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
-  const bool srv_multi_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi-skip") == 0;
+  const bool srv_merge_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi-merge-skip") == 0;
+  const bool srv_split_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi-split-skip") == 0;
+  const bool srv_merge = srv_merge_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi-merge") == 0);
+  const bool srv_split = srv_split_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi-split") == 0);
+  const bool srv_multi_skip = srv_merge_skip || srv_split_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi-skip") == 0);
   const bool srv_multi_wrong = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi-wrong") == 0;
-  const bool srv_multi = srv_multi_skip || srv_multi_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi") == 0);
+  const bool srv_multi = srv_merge || srv_split || srv_multi_skip || srv_multi_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi") == 0);
   const bool srv_copy_live_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-copy-to-live-skip") == 0;
   const bool srv_copy_null_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-copy-to-null-skip") == 0;
   const bool srv_copy_live = srv_copy_live_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-copy-to-live") == 0);
@@ -976,7 +980,7 @@ main(int argc, char **argv) {
       goto cleanup;
     auto source0 = late_source_heap->GetCPUDescriptorHandleForHeapStart();
     auto source2 = source0;
-    source2.ptr += 2 * descriptor_increment;
+    source2.ptr += (srv_split ? 1 : 2) * descriptor_increment;
     D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
     desc.Format = typed_format->format;
     desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -991,8 +995,15 @@ main(int argc, char **argv) {
     destinations[0].ptr += descriptor_increment;
     D3D12_CPU_DESCRIPTOR_HANDLE sources[] = {source0, source2};
     const UINT sizes[] = {1, 1};
-    if (!srv_multi_skip)
-      device->CopyDescriptors(2, destinations, sizes, 2, sources, sizes, source_desc.Type);
+    if (!srv_multi_skip) {
+      const UINT two = 2;
+      if (srv_merge)
+        device->CopyDescriptors(1, &destinations[1], &two, 2, sources, sizes, source_desc.Type);
+      else if (srv_split)
+        device->CopyDescriptors(2, destinations, sizes, 1, &source0, &two, source_desc.Type);
+      else
+        device->CopyDescriptors(2, destinations, sizes, 2, sources, sizes, source_desc.Type);
+    }
     device->CreateShaderResourceView(nullptr, &desc, source0);
     device->CreateShaderResourceView(nullptr, &desc, source2);
     late_source_heap->Release();
@@ -1181,9 +1192,9 @@ main(int argc, char **argv) {
     bool unchanged = true;
     for (unsigned i = 0; i < 16; ++i)
       unchanged = unchanged && guard[i] == 0xa5a5a5a5u;
-    if (mapped[0] != (srv_multi ? (srv_multi_wrong ? 0xa5a5a5a5u : 0x3f800000u) : srv_live ? 0xa5a5a5a5u : 0u) || mapped[1] != 0 ||
-        mapped[2] != (srv_multi ? 2u : srv_live ? 4u : 0u) || !unchanged ||
-        (srv_multi && (mapped[3] != 0xa5a5a5a5u || mapped[4] != 4u || mapped[5] != 0)) ||
+    if (mapped[0] != (srv_multi ? ((srv_multi_wrong || srv_merge) ? 0xa5a5a5a5u : 0x3f800000u) : srv_live ? 0xa5a5a5a5u : 0u) || mapped[1] != 0 ||
+        mapped[2] != (srv_multi ? (srv_merge ? 4u : 2u) : srv_live ? 4u : 0u) || !unchanged ||
+        (srv_multi && (mapped[3] != (srv_merge ? 0x3f800000u : 0xa5a5a5a5u) || mapped[4] != (srv_merge ? 2u : 4u) || mapped[5] != 0)) ||
         (srv_rerecord && (mapped[20] != (srv_rerecord_wrong ? 0xa5a5a5a5u : 0x3f800000u) ||
                           mapped[21] != 0 || mapped[22] != 2))) {
       std::cerr << "typed SRV mismatch: read=" << mapped[0] << " oob=" << mapped[1]
@@ -1196,7 +1207,7 @@ main(int argc, char **argv) {
       readback->Unmap(0, nullptr);
       goto cleanup;
     }
-    std::cout << (srv_multi ? "multi" : srv_copy_live ? "copy-to-live" : srv_copy_null ? "copy-to-null" : srv_rerecord ? "null-to-live-only-rerecord" : srv_pending ? "null-to-live-only-pending" : srv_only ? "null-to-live-only" : srv_to_live ? "null-to-live" : srv_to_null ? "live-to-null" : srv_live ? "live" : "null")
+    std::cout << (srv_merge ? "multi-merge" : srv_split ? "multi-split" : srv_multi ? "multi" : srv_copy_live ? "copy-to-live" : srv_copy_null ? "copy-to-null" : srv_rerecord ? "null-to-live-only-rerecord" : srv_pending ? "null-to-live-only-pending" : srv_only ? "null-to-live-only" : srv_to_live ? "null-to-live" : srv_to_null ? "live-to-null" : srv_live ? "live" : "null")
               << " typed SRV read and dimensions passed\n";
     readback->Unmap(0, nullptr);
     result = 0;
