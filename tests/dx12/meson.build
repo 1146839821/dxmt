@@ -733,6 +733,12 @@ if dxc_command.length() > 0
     )
   endforeach
   foreach kind : [ 'float', 'uint', 'sint' ]
+    custom_target('dx12_typed_buffer_srv_' + kind + '_fixture',
+      input: 'typed_buffer_srv.hlsl',
+      output: 'typed_buffer_srv_' + kind + '.cs.cso',
+      command: dxc_command + [ '-E', 'main', '-T', 'cs_6_0', '-D', 'TYPED_SRV_' + kind.to_upper() + '=1', '@INPUT@', '-Fo', '@OUTPUT@' ],
+      build_by_default: false,
+    )
     custom_target('dx12_typed_buffer_uav_' + kind + '_fixture',
       input: 'texture_sampler.hlsl',
       output: 'typed_buffer_uav_' + kind + '.cs.cso',

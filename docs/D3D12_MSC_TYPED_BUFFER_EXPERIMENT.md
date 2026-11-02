@@ -826,3 +826,24 @@ instrumentation of the rewritten metallib is not independently established.
 This is experimental coverage, not a capability promotion: SRVs, other formats,
 Windows native comparison, and null descriptors changed after recording remain
 unverified. Default behavior and capability reporting are unchanged.
+
+### Null typed SRV
+
+[CreateShaderResourceView](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createshaderresourceview)
+requires zero reads from a null descriptor created with a valid view description.
+A descriptor-table compute probe covers R32 FLOAT, UINT and SINT with a buffer
+view at element 4 of a 16-element sentinel buffer. For the null resource it
+checks a read at zero, an out-of-bounds read, and GetDimensions; for a live
+resource it expects the sentinel, zero out-of-bounds, and a view length of four.
+The zero dimension of the null view is recorded as a local observation.
+
+With the experimental sidecar enabled, the isolated Wine GPU runs in
+`result-typed-srv-final-null` and `result-typed-srv-final-live` under n95 passed
+readback, runtime identity and enabled Metal validation checks. The live-view
+control with the patch disabled (`result-typed-srv-live-no-patch`) failed all
+three formats: the observed dimensions were 64 rather than 4. The preceding
+null-UAV regression passed in `result-typed-srv-uav-regression`. Rewritten
+metallib shader-validation instrumentation is not independently verified.
+Windows native behavior, other typed formats, indirect SRV indexing, and
+post-recording descriptor changes remain unverified. No default behavior or
+capability declaration changed.

@@ -285,6 +285,9 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
+  const bool srv_live = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-live") == 0;
+  const bool srv_null = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null") == 0;
+  const bool typed_srv = srv_live || srv_null;
   const bool null_uav_live = argc == 4 && strcmp(argv[2], "--typed-buffer-null-live") == 0;
   const bool null_uav = null_uav_live || (argc == 4 && strcmp(argv[2], "--typed-buffer-null") == 0);
   const bool unaligned_buffer = argc == 4 && strcmp(argv[2], "--typed-buffer-unaligned") == 0;
@@ -310,7 +313,7 @@ main(int argc, char **argv) {
   const bool wrong_heap_expected = indirect_heap_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-wrong") == 0);
   const bool encoder_break = indirect_heap || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-encoder") == 0);
   const bool heap_switch = wrong_heap_expected || encoder_break || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch") == 0);
-  const bool typed_buffer = null_uav || unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || pending_reset || indirect_reject || indirect || indirect_count || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
+  const bool typed_buffer = typed_srv || null_uav || unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || pending_reset || indirect_reject || indirect || indirect_count || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
   if (argc == 5 && !placed)
     return 2;
   const TypedFormat *typed_format = nullptr;
@@ -658,6 +661,15 @@ main(int argc, char **argv) {
     auto texture_uav_cpu = resource_cpu;
     texture_uav_cpu.ptr += descriptor_increment * 2;
     device->CreateUnorderedAccessView(null_uav && !null_uav_live ? nullptr : output_texture, nullptr, &texture_uav_desc, texture_uav_cpu);
+    if (typed_srv) {
+      D3D12_SHADER_RESOURCE_VIEW_DESC typed_srv_desc = {};
+      typed_srv_desc.Format = typed_format->format;
+      typed_srv_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+      typed_srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+      typed_srv_desc.Buffer.FirstElement = 4;
+      typed_srv_desc.Buffer.NumElements = 4;
+      device->CreateShaderResourceView(srv_null ? nullptr : output_texture, &typed_srv_desc, resource_cpu);
+    }
     if (typed_buffer) {
       output_texture_footprint.Offset = zero_offset_buffer ? 512 : (unaligned_buffer || late_buffer) ? 532 : 528;
       output_texture_footprint.Footprint.RowPitch = 8;
@@ -733,7 +745,8 @@ main(int argc, char **argv) {
     buffer_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     buffer_barrier.Transition = {output_texture, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                                  D3D12_RESOURCE_STATE_COPY_DEST,
-                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+                                 typed_srv ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                                           : D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
     list->ResourceBarrier(1, &buffer_barrier);
   }
   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -796,7 +809,7 @@ main(int argc, char **argv) {
   }
   if (!indirect && !indirect_late)
     list->Dispatch(1, 1, 1);
-  if (typed_format && !indirect && !indirect_late && !null_uav) {
+  if (typed_format && !indirect && !indirect_late && !null_uav && !typed_srv) {
     D3D12_RESOURCE_BARRIER uav_barrier = {};
     uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     list->ResourceBarrier(1, &uav_barrier);
@@ -868,7 +881,8 @@ main(int argc, char **argv) {
     D3D12_RESOURCE_BARRIER texture_barrier = {};
     texture_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     texture_barrier.Transition.pResource = output_texture;
-    texture_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    texture_barrier.Transition.StateBefore = typed_srv ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                                                       : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     texture_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
     texture_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     list->ResourceBarrier(1, &texture_barrier);
@@ -999,6 +1013,23 @@ main(int argc, char **argv) {
   }
   if (!CheckHR("MapReadback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
     goto cleanup;
+  if (typed_srv) {
+    const auto *guard = reinterpret_cast<const UINT *>(reinterpret_cast<const char *>(mapped) + 512);
+    bool unchanged = true;
+    for (unsigned i = 0; i < 16; ++i)
+      unchanged = unchanged && guard[i] == 0xa5a5a5a5u;
+    if (mapped[0] != (srv_live ? 0xa5a5a5a5u : 0u) || mapped[1] != 0 ||
+        mapped[2] != (srv_live ? 4u : 0u) || !unchanged) {
+      std::cerr << "typed SRV mismatch: read=" << mapped[0] << " oob=" << mapped[1]
+                << " dimensions=" << mapped[2] << " guard=" << unchanged << "\n";
+      readback->Unmap(0, nullptr);
+      goto cleanup;
+    }
+    std::cout << (srv_live ? "live" : "null") << " typed SRV read and dimensions passed\n";
+    readback->Unmap(0, nullptr);
+    result = 0;
+    goto cleanup;
+  }
   if (null_uav) {
     const auto *guard = reinterpret_cast<const UINT *>(reinterpret_cast<const char *>(mapped) + 512);
     bool unchanged = true;
