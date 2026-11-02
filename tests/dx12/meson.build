@@ -143,6 +143,17 @@ dx12_msc_function_constants = executable('dx12_msc_function_constants', 'dx12_ms
   dependencies: [ d3d12_dep ],
 )
 
+dx12_msc_pso_benchmark = executable('dx12_msc_pso_benchmark', 'dx12_msc_pso_benchmark.cpp',
+  dependencies: [ d3d12_dep ],
+  build_by_default: false,
+)
+
+dx12_metal_hlsl_gpu = executable('dx12_metal_hlsl_gpu', 'dx12_metal_hlsl_gpu.cpp',
+  include_directories: [ include_directories('../../src/winemetal') ],
+  dependencies: [ winemetal_dep ],
+  build_by_default: false,
+)
+
 dx12_msc_debug_validation = executable('dx12_msc_debug_validation', 'dx12_msc_debug_validation.cpp',
   include_directories: [ include_directories('../../src/winemetal') ],
   dependencies: [ d3d12_dep ],
@@ -223,6 +234,20 @@ if dxc_command.length() > 0
   custom_target('dx12_function_constants_sm6_fixture',
     input: 'function_constants_sm6.hlsl',
     output: 'function_constants_sm6.ps.cso',
+    command: dxc_command + [ '-E', 'main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_metal_hlsl_constants_fixture',
+    input: 'metal_hlsl_constants.hlsl',
+    output: 'metal_hlsl_constants.ps.cso',
+    depend_files: files('../../include/metal_shader_converter/Metal_HLSL.inc'),
+    command: dxc_command + [ '-E', 'main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
+  custom_target('dx12_metal_hlsl_framebuffer_fixture',
+    input: 'metal_hlsl_framebuffer.hlsl',
+    output: 'metal_hlsl_framebuffer.ps.cso',
+    depend_files: files('../../include/metal_shader_converter/Metal_HLSL.inc'),
     command: dxc_command + [ '-E', 'main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )

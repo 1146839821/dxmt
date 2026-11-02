@@ -52,7 +52,7 @@ CheckReflection(const dxmt_msc_shader_reflection &reflection) {
 
 int
 main(int argc, char **argv) {
-  if (argc != 2) {
+  if (argc != 2 && !(argc == 3 && std::strcmp(argv[2], "--metal-hlsl") == 0)) {
     std::cerr << "usage: dx12_msc_function_constants <shader.ps.cso>\n";
     return 2;
   }
@@ -81,7 +81,8 @@ main(int argc, char **argv) {
   params.dxil_size = shader.size();
   params.stage = DXMT_MSC_STAGE_FRAGMENT;
   params.compatibility_flags = DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
-  params.function_constant_resource_space = 7;
+  params.function_constant_resource_space = argc == 3 ? 2147420894u : 7u;
+  params.framebuffer_fetch_resource_space = DXMT_MSC_RESOURCE_SPACE_DISABLED;
   params.error_message = error_message;
   params.error_message_capacity = sizeof(error_message);
 

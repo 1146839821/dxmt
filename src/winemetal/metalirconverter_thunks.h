@@ -67,6 +67,8 @@ enum dxmt_msc_compile_flags {
   DXMT_MSC_COMPILE_FLAG_SYNTHESIZE_STAGE_IN = 1u << 1,
   DXMT_MSC_COMPILE_FLAG_GEOMETRY_EMULATION = 1u << 2,
   DXMT_MSC_COMPILE_FLAG_SAMPLE_MASK = 1u << 3,
+  /* Preserve legacy zero-as-default unless a caller explicitly supplies flags. */
+  DXMT_MSC_COMPILE_FLAG_EXPLICIT_COMPATIBILITY = 1u << 4,
 };
 
 /* MSC uses UINT32_MAX to disable extension resource-space interpretation. */

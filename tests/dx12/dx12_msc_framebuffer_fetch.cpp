@@ -27,13 +27,14 @@ ReadFile(const char *path, std::vector<uint8_t> &data) {
 }
 
 bool
-Compile(CompileProc compile, const std::vector<uint8_t> &shader, std::vector<uint8_t> &metallib, std::string &entry_point) {
+Compile(CompileProc compile, const std::vector<uint8_t> &shader, std::vector<uint8_t> &metallib, std::string &entry_point, bool metal_hlsl) {
   char error_message[1024] = {};
   dxmt_msc_compile_dxil_params params = {};
   params.dxil = shader.data();
   params.dxil_size = shader.size();
   params.stage = DXMT_MSC_STAGE_FRAGMENT;
-  params.framebuffer_fetch_resource_space = 7;
+  params.framebuffer_fetch_resource_space = metal_hlsl ? 2147420893u : 7u;
+  params.function_constant_resource_space = DXMT_MSC_RESOURCE_SPACE_DISABLED;
   params.error_message = error_message;
   params.error_message_capacity = sizeof(error_message);
 
@@ -72,7 +73,7 @@ Compile(CompileProc compile, const std::vector<uint8_t> &shader, std::vector<uin
 
 int
 main(int argc, char **argv) {
-  if (argc != 2) {
+  if (argc != 2 && !(argc == 3 && std::string(argv[2]) == "--metal-hlsl")) {
     std::cerr << "usage: dx12_msc_framebuffer_fetch <shader.ps.cso>\n";
     return 2;
   }
@@ -97,9 +98,9 @@ main(int argc, char **argv) {
 
   std::vector<uint8_t> metallib;
   std::string entry_point;
-  const bool passed = Compile(compile, shader, metallib, entry_point);
+  const bool passed = Compile(compile, shader, metallib, entry_point, argc == 3);
   if (passed)
-    std::cout << "MSC framebuffer fetch conversion passed: types=4,attachments=0-3,size=" << metallib.size()
+    std::cout << "MSC framebuffer fetch conversion passed: " << (argc == 3 ? "types=1,attachments=0" : "types=4,attachments=0-3") << ",size=" << metallib.size()
               << ",entry=" << entry_point << "\n";
   FreeLibrary(winemetal);
   return passed ? 0 : 6;

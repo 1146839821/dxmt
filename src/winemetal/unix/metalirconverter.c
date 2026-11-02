@@ -249,9 +249,10 @@ dxmt_msc_result_from_error(const IRError *error) {
 
 static void
 dxmt_msc_set_compiler_configuration(IRCompiler *compiler, const struct dxmt_msc_compile_dxil_params *params) {
-  const uint32_t compatibility_flags = params->compatibility_flags
-                                           ? params->compatibility_flags
-                                           : DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
+  const bool flags_supplied = (params->reserved & DXMT_MSC_COMPILE_FLAG_EXPLICIT_COMPATIBILITY) ||
+                              params->compatibility_flags;
+  const uint32_t compatibility_flags = flags_supplied ? params->compatibility_flags
+                                                      : DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
   if (g_msc_api.IRCompilerSetCompatibilityFlags)
     g_msc_api.IRCompilerSetCompatibilityFlags(compiler, (IRCompatibilityFlags)compatibility_flags);
 
@@ -826,6 +827,12 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   if (!dxmt_msc_is_available()) {
     dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNAVAILABLE, "Metal Shader Converter runtime is unavailable");
     return DXMT_MSC_ERROR_UNAVAILABLE;
+  }
+
+  if ((params->reserved & DXMT_MSC_COMPILE_FLAG_EXPLICIT_COMPATIBILITY) &&
+      !g_msc_api.IRCompilerSetCompatibilityFlags) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC compatibility flags are unavailable");
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
   }
 
   IRShaderStage ir_stage = dxmt_msc_to_ir_stage(params->stage);
