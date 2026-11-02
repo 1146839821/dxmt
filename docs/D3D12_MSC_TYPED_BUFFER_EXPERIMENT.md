@@ -734,3 +734,25 @@ provenance of the pointer or the semantics of all order/flag values. Other
 atomic intrinsics remain unsupported. Metal validation was enabled but rewritten
 metallib shader-validation instrumentation remains unverified; default runtime
 behavior and advertised capability are unchanged.
+
+### Typed-buffer preflight: read sampler call shape
+
+The previously captured Wine runtime AIR `msc-buffer-air/runtime15.ll` under
+n95 contains `air.get_read_sampler()` returning an address-space 2 sampler
+pointer, passed to `air.read_texture_buffer_1d`. The preflight now uses one
+check both for independent calls and for that read operand: it must be a direct,
+non-variadic call to the exact external declaration with zero arguments and a
+pointer result in address space 2. An internal definition with the same name
+is rejected. The check does not prove the opaque pointer's resource provenance.
+
+Synthetic AIR tests cover an independent call, the typed-buffer read operand,
+wrong address space, wrong return type, arguments, a function definition, and a
+variadic declaration. The existing experiment remains fail-closed for other
+shapes; no-op classification is unchanged. Isolated Wine GPU R32 FLOAT/UINT/SINT
+indirect read/write/count tests passed in `result-typed-read-sampler`, while
+wrong-expectation and no-patch controls are recorded in
+`result-typed-read-sampler-wrong` and `result-typed-read-sampler-no-patch`.
+The runtime AIR capture is earlier evidence; this run did not independently dump
+its AIR. Metal validation was enabled, but rewritten-metallib shader-validation
+instrumentation remains unverified. Default behavior and capability reporting
+are unchanged.

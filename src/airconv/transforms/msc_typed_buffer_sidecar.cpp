@@ -20,6 +20,14 @@ struct Operation {
 using TableMapping = MSCTypedBufferTableMapping;
 
 bool
+isSafeReadSampler(const llvm::CallBase &call) {
+  const auto *target = call.getCalledFunction();
+  const auto *pointer = llvm::dyn_cast<llvm::PointerType>(call.getType());
+  return llvm::isa<llvm::CallInst>(call) && target && target->isDeclaration() && !target->isVarArg() &&
+         target->getName() == "air.get_read_sampler" && call.arg_empty() && pointer && pointer->getAddressSpace() == 2;
+}
+
+bool
 isSafeIntegerBitOp(const llvm::CallBase &call) {
   const auto *target = call.getCalledFunction();
   return llvm::isa<llvm::CallInst>(call) && target && target->isDeclaration() &&
@@ -78,6 +86,8 @@ collect(llvm::Module &module, std::vector<Operation> &operations, const std::vec
         auto *target = call->getCalledFunction();
         if (!target)
           return false;
+        if (target->getName() == "air.get_read_sampler" && !isSafeReadSampler(*call))
+          return false;
         if (target->isDeclaration() && !target->isIntrinsic() && !target->getName().startswith("air."))
           return false;
         if (!target->getName().contains("texture_buffer_1d")) {
@@ -87,7 +97,7 @@ collect(llvm::Module &module, std::vector<Operation> &operations, const std::vec
             if (target->isIntrinsic()) {
               if (!target->getName().startswith("llvm.bswap."))
                 return false;
-            } else if (!isSafeIntegerBitOp(*call) && target->getName() != "air.get_read_sampler" &&
+            } else if (!isSafeIntegerBitOp(*call) && !isSafeReadSampler(*call) &&
                        !isSafeGlobalAtomicAdd(*call) &&
                        !isSafeSample2D(*call)) {
               return false;
@@ -138,9 +148,7 @@ collect(llvm::Module &module, std::vector<Operation> &operations, const std::vec
           const bool read_sampler = read && call->arg_size() == 4;
           if (read_sampler) {
             auto *sampler = llvm::dyn_cast<llvm::CallInst>(call->getArgOperand(1));
-            auto *sampler_fn = sampler ? sampler->getCalledFunction() : nullptr;
-            if (!sampler_fn || sampler_fn->getName() != "air.get_read_sampler" || !sampler->arg_empty() ||
-                !sampler->getType()->isPointerTy() || sampler->getType()->getPointerAddressSpace() != 2)
+            if (!sampler || !isSafeReadSampler(*sampler))
               return false;
           }
           index = read_sampler ? 2 : 1;

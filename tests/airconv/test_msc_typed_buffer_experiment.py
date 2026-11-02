@@ -32,6 +32,10 @@ mixed_sample = sidecar_source.replace('  %data = call', sample_call + '  %data =
 atomic_call = '  %atomic = call i32 @air.atomic.global.add.s.i32(i32 addrspace(1)* null, i32 1, i32 0, i32 2, i1 true)\n'
 atomic_decl = '\ndeclare i32 @air.atomic.global.add.s.i32(i32 addrspace(1)*, i32, i32, i32, i1)\n'
 mixed_atomic = sidecar_source.replace('  %data = call', atomic_call + '  %data = call') + atomic_decl
+standalone_sampler = (sidecar_source.replace('%tex = type opaque', '%tex = type opaque\n%sampler = type opaque')
+                      .replace('  %data = call',
+                               '  %extra = call %sampler addrspace(2)* @air.get_read_sampler()\n  %data = call')
+                      + '\ndeclare %sampler addrspace(2)* @air.get_read_sampler()\n')
 with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
     root = Path(temp)
     cases = [
@@ -137,6 +141,26 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
         ("bad_field", source.replace("i64 %slot, i32 1", "i64 %slot, i32 0"), 4, []),
         ("sidecar_dynamic", sidecar_source, 0, ["--sidecar", "0", "8"]),
         ("sidecar_read_sampler", sampler_source, 0, ["--sidecar", "0", "8"]),
+        ("standalone_read_sampler", standalone_sampler, 0, ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("standalone_sampler_wrong_space", standalone_sampler.replace('%sampler addrspace(2)*', '%sampler addrspace(1)*'), 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("standalone_sampler_wrong_return", standalone_sampler.replace('%sampler addrspace(2)*', 'i32'), 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("standalone_sampler_argument", standalone_sampler.replace('@air.get_read_sampler()', '@air.get_read_sampler(i32 1)', 1).replace(
+            'declare %sampler addrspace(2)* @air.get_read_sampler()', 'declare %sampler addrspace(2)* @air.get_read_sampler(i32)'), 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("standalone_sampler_defined", standalone_sampler.replace(
+            'declare %sampler addrspace(2)* @air.get_read_sampler()',
+            'define %sampler addrspace(2)* @air.get_read_sampler() { ret %sampler addrspace(2)* null }'), 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("standalone_sampler_vararg", standalone_sampler.replace(
+            'call %sampler addrspace(2)* @air.get_read_sampler()',
+            'call %sampler addrspace(2)* (...) @air.get_read_sampler()').replace(
+            'declare %sampler addrspace(2)* @air.get_read_sampler()',
+            'declare %sampler addrspace(2)* @air.get_read_sampler(...)'), 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("read_sampler_wrong_space", sampler_source.replace('%sampler addrspace(2)*', '%sampler addrspace(1)*'), 4,
+         ["--sidecar", "0", "8"]),
         ("sidecar_read_sampler_unknown", sampler_source.replace('air.get_read_sampler', 'air.unknown_sampler'), 4,
          ["--sidecar", "0", "8"]),
         ("metallib_api", sidecar_source, 0, ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
