@@ -521,3 +521,37 @@ build/src/airconv/darwin/msc-debug-metallib-probe CAPTURED.metallib
 `tests/airconv/msc_debug_metallib_trace.c` is a test-only MSC forwarding dylib;
 set `DXMT_TEST_EXTRACT_METALLIB` to a new path in an isolated test run to
 capture the input. Never inject it into a game or share its output path.
+
+## LLVM 15 compatibility candidate (2026-11-02)
+
+The build and native reproducer use the repository's
+`toolchains/llvm-darwin` (LLVM 15.0.7); the user's existing toolchain is viable
+for a targeted backport. The extracted AIR's `METADATA_DERIVED_TYPE` records
+have 15 operands. LLVM 15 accepts at most 14; LLVM 22 accepts 15 and treats the
+last as optional pointer-authentication data. In this captured shader the last
+operand is zero, and the newer size-as-metadata flag is absent. References:
+[LLVM 15 reader](https://github.com/llvm/llvm-project/blob/llvmorg-15.0.7/llvm/lib/Bitcode/Reader/MetadataLoader.cpp)
+and [LLVM 22 reader](https://github.com/llvm/llvm-project/blob/llvmorg-22.1.0/llvm/lib/Bitcode/Reader/MetadataLoader.cpp).
+
+`patches/llvm/experimental-llvm15-empty-ptrauth.patch` is a **candidate**, not
+applied by the normal build. It accepts a 15-operand record only when the new
+pointer-authentication field is zero and the new size flag is absent. A clean
+LLVM 15.0.7 source-file copy accepted the patch in dry run. In a separate test
+directory, the patched `MetadataLoader.cpp` was compiled against the repo LLVM
+headers and linked ahead of the unchanged repo static libraries; the original
+`toolchains/llvm-darwin` was not modified. The native AIR postprocessing probe
+then passed both the previously crashing 5860-byte debug metallib and the
+ordinary optimized metallib. An isolated WineMetal Unix library relinked with
+that object loaded the actual MSC dylib and passed both debug-HLSL color paths,
+specialization, and the deliberately wrong-pixel negative control with Metal
+API/GPU validation. The guarded candidate's WineMetal SHA-256 was
+`a98c9cc52686bfea785cdccf9df0349b820a2c19c8ab5ef4d4f5b483ff98b5cf`.
+Original logs and artifacts are under `msc-debug-isolation/` and
+`stage-msc-debug-backport/`, outside the repository.
+
+**Not production-ready:** LLVM 15 cannot represent nonzero new metadata fields;
+the candidate rejects them, but the underlying assertion-on-error problem can
+still abort. Other debug record forms, double-lowering with debug metadata,
+error containment, original clean build integration, concurrency, other host
+architectures and D3D10/11 regressions remain unverified. The experimental
+patch is therefore not automatically applied, and this issue remains open.
