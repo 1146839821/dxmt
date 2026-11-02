@@ -385,3 +385,44 @@ Reproduce with a paired isolated stage and fresh output:
 meson compile -C build dx12_metal_hlsl_gpu dx12_metal_hlsl_constants_fixture dx12_metal_hlsl_framebuffer_fixture
 python3 tests/dx12/run_msc_gpu_target_compare.py --stage STAGE --prefix PREFIX --build build --converter /usr/local/lib/libmetalirconverter.dylib --output NEW_OUTPUT --repeats 3
 ```
+
+## Root signature validation flags (2026-11-02)
+
+**Design card:** compare three MSC compiler states with the same cbuffer
+fragment DXIL and explicitly serialized root signatures: a matching 4-dword
+`b0` root constant and an empty root signature that cannot provide `b0`. A
+test-only forwarding library distinguishes omitting the validation setter,
+setting `IRCompilerValidationFlagNone` and setting
+`IRCompilerValidationFlagValidateAllResourcesBound`. The DXMT bridge normally
+calls the setter with zero; the test wrapper changes only the isolated process.
+Every compilation creates a fresh MSC compiler. The runner checks loaded
+PE/Unix/MSC paths and hashes, records all results and timing, and requires the
+valid root to compile and the missing-resource root to fail. No production
+flag, root-signature behavior or cache is changed. Rollback removes only the
+standalone test and forwarding wrapper.
+
+On M1 Max/macOS 27.0.1 with the recorded MSC dylib SHA-256, three processes per
+mode each ran six missing-resource and six valid-root conversions. The valid
+root compiled in every case. Missing `b0` was rejected in all cases but the
+reported error differed: omitting the setter and enabling the bound-resource
+flag returned DXMT error 5 / MSC `IRErrorCode=4` (root signature error);
+explicit zero returned DXMT error 4 / MSC `IRErrorCode=7` (unsupported shader
+feature). This is a current-runtime observation for one shader and malformed
+binding layout, not a guarantee about every invalid root signature or the SDK's
+default in other versions. It shows that omitted and explicit zero are not
+interchangeable for error reporting, and that zero did not permit this shader
+to compile successfully. Retain current production behavior.
+
+After excluding each root's first call in each process, valid-root sizing-call
+median/p95 were unset 0.8442/1.0011 ms, zero 0.8355/1.3347 ms, and bound
+0.8382/1.1543 ms (15 pooled samples per mode). Fixed mode order, repeated same
+input and small sample size preclude a claim of meaningful performance
+improvement. Invalid-root samples, raw logs and identities are recorded in
+`result-msc-root-validation/`; GPU execution, memory and game FPS are NOT_RUN.
+
+Reproduce with a paired isolated stage and fresh output:
+
+```sh
+meson compile -C build dx12_msc_root_validation_compare dx12_metal_hlsl_dynamic_main
+python3 tests/dx12/run_msc_root_validation_compare.py --stage STAGE --prefix PREFIX --build build --converter /usr/local/lib/libmetalirconverter.dylib --output NEW_OUTPUT --processes 3
+```

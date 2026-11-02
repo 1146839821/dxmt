@@ -160,6 +160,12 @@ dx12_msc_cbuffer_compare = executable('dx12_msc_cbuffer_compare', 'dx12_msc_cbuf
   build_by_default: false,
 )
 
+dx12_msc_root_validation_compare = executable('dx12_msc_root_validation_compare', 'dx12_msc_root_validation_compare.cpp',
+  include_directories: [ include_directories('../../src/winemetal') ],
+  dependencies: [ d3d12_dep, winemetal_dep ],
+  build_by_default: false,
+)
+
 dx12_msc_debug_validation = executable('dx12_msc_debug_validation', 'dx12_msc_debug_validation.cpp',
   include_directories: [ include_directories('../../src/winemetal') ],
   dependencies: [ d3d12_dep ],
