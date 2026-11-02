@@ -289,11 +289,13 @@ main(int argc, char **argv) {
   const bool late_copy = argc == 4 && strcmp(argv[2], "--typed-buffer-late-copy") == 0;
   const bool late_buffer = late_copy || (argc == 4 && strcmp(argv[2], "--typed-buffer-late") == 0);
   const bool zero_offset_buffer = argc == 4 && strcmp(argv[2], "--typed-buffer-zero") == 0;
-  const bool pending_reset = argc == 4 && strcmp(argv[2], "--typed-buffer-pending-reset") == 0;
+  const bool indirect_pending_wrong = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-pending-wrong") == 0;
+  const bool indirect_pending = indirect_pending_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-pending") == 0);
+  const bool pending_reset = indirect_pending || (argc == 4 && strcmp(argv[2], "--typed-buffer-pending-reset") == 0);
   const bool indirect_reject = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-reject") == 0;
   const bool indirect = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect") == 0;
-  const bool indirect_count_wrong = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-count-wrong") == 0;
-  const bool indirect_count = indirect_count_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-count") == 0);
+  const bool indirect_count_wrong = indirect_pending_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-count-wrong") == 0);
+  const bool indirect_count = indirect_pending || indirect_count_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-count") == 0);
   const bool wrong_heap_expected = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-wrong") == 0;
   const bool encoder_break = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-encoder") == 0;
   const bool heap_switch = wrong_heap_expected || encoder_break || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch") == 0);
@@ -338,6 +340,7 @@ main(int argc, char **argv) {
   ID3D12Device *device = nullptr;
   ID3D12CommandQueue *queue = nullptr;
   ID3D12CommandAllocator *allocator = nullptr;
+  ID3D12CommandSignature *count_signature = nullptr;
   ID3D12RootSignature *root_signature = nullptr;
   ID3DBlob *root_blob = nullptr;
   ID3DBlob *root_error = nullptr;
@@ -792,8 +795,7 @@ main(int argc, char **argv) {
     signature_desc.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
     signature_desc.NumArgumentDescs = 1;
     signature_desc.pArgumentDescs = &argument;
-    ID3D12CommandSignature *signature = nullptr;
-    if (!CheckHR("CreateCountSignature", device->CreateCommandSignature(&signature_desc, nullptr, IID_PPV_ARGS(&signature))))
+    if (!CheckHR("CreateCountSignature", device->CreateCommandSignature(&signature_desc, nullptr, IID_PPV_ARGS(&count_signature))))
       goto cleanup;
     list->SetComputeRoot32BitConstant(3, 4, 0);
     list->Dispatch(1, 1, 1);
@@ -802,9 +804,8 @@ main(int argc, char **argv) {
     list->ResourceBarrier(1, &uav_barrier);
     for (UINT i = 0; i < 5; ++i) {
       list->SetComputeRoot32BitConstant(3, 5 + i, 0);
-      list->ExecuteIndirect(signature, 2, upload, 128, i < 4 ? upload : nullptr, i < 4 ? 160 + i * 4 : 0);
+      list->ExecuteIndirect(count_signature, 2, upload, 128, i < 4 ? upload : nullptr, i < 4 ? 160 + i * 4 : 0);
     }
-    signature->Release();
   }
   if (heap_switch) {
     // A and B use different view lengths, so a stale sidecar is observable.
@@ -1009,6 +1010,8 @@ cleanup:
     gate->Signal(1);
     gate->Release();
   }
+  if (count_signature)
+    count_signature->Release();
   if (reset_allocator)
     reset_allocator->Release();
   if (event)

@@ -546,6 +546,18 @@ in `result-indirect-count`, `result-indirect-count-wrong`, and
 `result-indirect-count-no-patch` under the n95 stage. This does not cover every
 indirect signature or submission lifetime combination.
 
+The `--indirect-pending` mode combines that multi-command/count workload with a
+queue wait and resets the submitted command list using a different allocator
+while the completion fence is still zero. The application holds the command
+signature, original allocator, heaps, and resources through completion. This
+tests the permission in [ID3D12GraphicsCommandList::Reset](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-reset)
+to reset a list while it executes; it does not reset its in-flight allocator.
+Local three-format results and runtime identities are recorded in
+`result-indirect-pending-final`; the wrong-expectation and no-patch controls are
+in `result-indirect-pending-wrong-final` and `result-indirect-pending-no-patch-final`.
+This does not test simultaneous submissions, re-recorded work, resource release
+before completion, or native Windows behavior.
+
 When a signature changes root arguments, `PreDispatch` skips normal binding and
 indirect encoding uses the ordinary root-argument layout without the sidecar.
 The existing MSC pipeline validation rejects such signatures and `Close` returns
