@@ -888,3 +888,23 @@ lifetime across arbitrary asynchronous scheduling. The application retains the
 D3D12 resource throughout execution; early release would not be a valid D3D12
 lifetime test. Rewritten-metallib shader-validation instrumentation remains
 unverified. Default behavior and capability reporting are unchanged.
+
+### Descriptor-only typed SRV behind a queue wait
+
+The `null-to-live-only-pending` variant records the same descriptor-only upload
+buffer access, updates its descriptor after Close, and submits behind a queue
+wait on an unsignaled fence. A queue completion signal remains incomplete for a
+100 ms event wait; the CPU then signals the gate, waits for completion, and
+checks the typed SRV read and dimension. The application retains the resource,
+descriptor heap, command list and allocator until completion. FLOAT, UINT, and
+SINT passed this check, runtime identity, and enabled Metal validation in
+`result-srv-pending-null-to-live-only-pending` under n95. Skipping the late
+update in `result-srv-pending-null-to-live-only-pending-skip` also confirmed the
+queue wait but failed the live-result oracle for all three formats.
+
+This confirms the tested queued execution and externally held lifetime; it does
+not establish an internal retention mechanism or permit modification of the
+submitted descriptor. The wait timing is an observation of non-completion, not
+a measurement of GPU scheduling or a proof of individual Metal residency calls.
+Instrumentation of rewritten metallib shader validation remains unverified.
+No default behavior or capability declaration changed.

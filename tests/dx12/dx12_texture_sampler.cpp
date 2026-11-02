@@ -285,8 +285,10 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
-  const bool srv_only_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-skip") == 0;
-  const bool srv_only = srv_only_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only") == 0);
+  const bool srv_pending_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-pending-skip") == 0;
+  const bool srv_pending = srv_pending_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-pending") == 0);
+  const bool srv_only_skip = srv_pending_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only-skip") == 0);
+  const bool srv_only = srv_pending || srv_only_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-only") == 0);
   const bool srv_to_live_skip = srv_only_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live-skip") == 0);
   const bool srv_to_null_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-live-to-null-skip") == 0;
   const bool srv_to_live = srv_only || srv_to_live_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-null-to-live") == 0);
@@ -380,6 +382,7 @@ main(int argc, char **argv) {
   ID3D12GraphicsCommandList *list = nullptr;
   ID3D12Fence *fence = nullptr;
   ID3D12Fence *gate = nullptr;
+  ID3D12Fence *srv_pending_fence = nullptr;
   ID3D12CommandAllocator *reset_allocator = nullptr;
   static std::atomic<bool> marker_destroyed{false};
   HANDLE event = nullptr;
@@ -953,12 +956,36 @@ main(int argc, char **argv) {
       device->CreateUnorderedAccessView(output_texture, nullptr, &updated, handle);
     }
   }
-  if ((static_lifetime || pending_reset) && !CheckHR("WaitGate", queue->Wait(gate, 1)))
+  if (srv_pending &&
+      (!CheckHR("CreateSRVGate", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))) ||
+       !CheckHR("CreateSRVPendingFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&srv_pending_fence)))))
+    goto cleanup;
+  if ((static_lifetime || pending_reset || srv_pending) && !CheckHR("WaitGate", queue->Wait(gate, 1)))
     goto cleanup;
   if (pending_reset && !CheckHR("CreatePendingFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
     goto cleanup;
   lists[0] = list;
   queue->ExecuteCommandLists(1, lists);
+  if (srv_pending) {
+    event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+    if (!event)
+      goto cleanup;
+    bool held = CheckHR("SRVPendingSignal", queue->Signal(srv_pending_fence, 1)) &&
+                CheckHR("SRVPendingEvent", srv_pending_fence->SetEventOnCompletion(1, event)) &&
+                WaitForSingleObject(event, 100) == WAIT_TIMEOUT &&
+                srv_pending_fence->GetCompletedValue() == 0;
+    if (!held || !CheckHR("ReleaseSRVGate", gate->Signal(1))) {
+      std::cerr << "SRV pending gate check failed\n";
+      goto cleanup;
+    }
+    if (WaitForSingleObject(event, 30000) != WAIT_OBJECT_0) {
+      std::cerr << "SRV pending completion failed\n";
+      goto cleanup;
+    }
+    CloseHandle(event);
+    event = nullptr;
+    std::cout << "SRV pending gate held passed\n";
+  }
   if (pending_reset) {
     if (!CheckHR("PendingSignal", queue->Signal(fence, 1)) || fence->GetCompletedValue() != 0 ||
         !CheckHR("ResetWhilePending", list->Reset(reset_allocator, nullptr)) || fence->GetCompletedValue() != 0)
@@ -1055,7 +1082,7 @@ main(int argc, char **argv) {
       readback->Unmap(0, nullptr);
       goto cleanup;
     }
-    std::cout << (srv_only ? "null-to-live-only" : srv_to_live ? "null-to-live" : srv_to_null ? "live-to-null" : srv_live ? "live" : "null")
+    std::cout << (srv_pending ? "null-to-live-only-pending" : srv_only ? "null-to-live-only" : srv_to_live ? "null-to-live" : srv_to_null ? "live-to-null" : srv_live ? "live" : "null")
               << " typed SRV read and dimensions passed\n";
     readback->Unmap(0, nullptr);
     result = 0;
@@ -1178,6 +1205,8 @@ cleanup:
     gate->Signal(1);
     gate->Release();
   }
+  if (srv_pending_fence)
+    srv_pending_fence->Release();
   if (count_signature)
     count_signature->Release();
   if (work_signature)
