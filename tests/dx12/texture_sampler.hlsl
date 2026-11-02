@@ -34,6 +34,18 @@ cbuffer Parameters : register(b0) { uint phase; };
 void main(uint3 tid : SV_DispatchThreadID)
 {
 #if defined(TYPED_BUFFER_UAV)
+#if defined(TYPED_BUFFER_SCALAR)
+    if (phase == 10) {
+        output[0] = asuint(typed_output[0]);
+        typed_output[0] = 42;
+        output[1] = asuint(typed_output[0]);
+        typed_output[0xffffffffu] = 42;
+        uint null_count;
+        typed_output.GetDimensions(null_count);
+        output[2] = null_count;
+        return;
+    }
+#endif
     if (phase == 4) {
         for (uint i = 0; i < 5; ++i)
             output[20 + i] = 0;

@@ -285,6 +285,8 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
+  const bool null_uav_live = argc == 4 && strcmp(argv[2], "--typed-buffer-null-live") == 0;
+  const bool null_uav = null_uav_live || (argc == 4 && strcmp(argv[2], "--typed-buffer-null") == 0);
   const bool unaligned_buffer = argc == 4 && strcmp(argv[2], "--typed-buffer-unaligned") == 0;
   const bool indirect_late_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-late-skip") == 0;
   const bool indirect_late = indirect_late_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-late") == 0);
@@ -308,7 +310,7 @@ main(int argc, char **argv) {
   const bool wrong_heap_expected = indirect_heap_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-wrong") == 0);
   const bool encoder_break = indirect_heap || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-encoder") == 0);
   const bool heap_switch = wrong_heap_expected || encoder_break || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch") == 0);
-  const bool typed_buffer = unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || pending_reset || indirect_reject || indirect || indirect_count || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
+  const bool typed_buffer = null_uav || unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || pending_reset || indirect_reject || indirect || indirect_count || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
   if (argc == 5 && !placed)
     return 2;
   const TypedFormat *typed_format = nullptr;
@@ -655,7 +657,7 @@ main(int argc, char **argv) {
     }
     auto texture_uav_cpu = resource_cpu;
     texture_uav_cpu.ptr += descriptor_increment * 2;
-    device->CreateUnorderedAccessView(output_texture, nullptr, &texture_uav_desc, texture_uav_cpu);
+    device->CreateUnorderedAccessView(null_uav && !null_uav_live ? nullptr : output_texture, nullptr, &texture_uav_desc, texture_uav_cpu);
     if (typed_buffer) {
       output_texture_footprint.Offset = zero_offset_buffer ? 512 : (unaligned_buffer || late_buffer) ? 532 : 528;
       output_texture_footprint.Footprint.RowPitch = 8;
@@ -758,7 +760,7 @@ main(int argc, char **argv) {
     }
   }
   if (typed_format)
-    list->SetComputeRoot32BitConstant(3, 0, 0);
+    list->SetComputeRoot32BitConstant(3, null_uav ? 10 : 0, 0);
   if (indirect_reject || indirect || indirect_late) {
     D3D12_INDIRECT_ARGUMENT_DESC arguments[2]{};
     arguments[0].Type = indirect_reject ? D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT : D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
@@ -794,7 +796,7 @@ main(int argc, char **argv) {
   }
   if (!indirect && !indirect_late)
     list->Dispatch(1, 1, 1);
-  if (typed_format && !indirect && !indirect_late) {
+  if (typed_format && !indirect && !indirect_late && !null_uav) {
     D3D12_RESOURCE_BARRIER uav_barrier = {};
     uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     list->ResourceBarrier(1, &uav_barrier);
@@ -997,6 +999,22 @@ main(int argc, char **argv) {
   }
   if (!CheckHR("MapReadback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
     goto cleanup;
+  if (null_uav) {
+    const auto *guard = reinterpret_cast<const UINT *>(reinterpret_cast<const char *>(mapped) + 512);
+    bool unchanged = true;
+    for (unsigned i = 0; i < 16; ++i)
+      unchanged = unchanged && guard[i] == 0xa5a5a5a5u;
+    if (mapped[0] != 0 || mapped[1] != 0 || mapped[2] != 0 || !unchanged) {
+      std::cerr << "null UAV mismatch: read=" << mapped[0] << " after=" << mapped[1]
+                << " dimensions=" << mapped[2] << " guard=" << unchanged << "\n";
+      readback->Unmap(0, nullptr);
+      goto cleanup;
+    }
+    std::cout << "null UAV reads=0 dimensions=0 guard unchanged passed\n";
+    readback->Unmap(0, nullptr);
+    result = 0;
+    goto cleanup;
+  }
   value = *mapped;
   if (typed_format &&
       !CheckTypedReadback(*typed_format, mapped, output_texture_footprint)) {

@@ -781,3 +781,27 @@ are in `result-typed-access-guard-wrong` and
 `result-typed-access-guard-no-patch`. This run did not independently dump its
 runtime AIR. Metal validation was enabled; instrumentation of the rewritten
 metallib is unverified. Default behavior and capability reporting are unchanged.
+
+### Null typed UAV: validation failure
+
+Microsoft specifies zero reads and discarded writes for a null UAV created with
+an appropriate view description ([CreateUnorderedAccessView](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createunorderedaccessview)).
+The isolated 64-bit Wine experiment creates a valid R32 buffer UAV description
+with a null resource, binds it through a descriptor table, and reads, writes,
+queries dimensions, and checks a separate sentinel buffer. With the experimental
+sidecar enabled, FLOAT, UINT, and SINT all returned zero for both reads and
+GetDimensions, and left the sentinel unchanged, but **all three failed Metal
+validation with `Invalid Metal usage: Null texture access`**. Zero dimensions is
+only a local observation here. The sentinel is not bound by the null descriptor,
+so its preservation alone does not prove that arbitrary memory was untouched.
+
+Results and loaded-runtime identity checks are in `result-typed-null` under n95.
+A live-UAV control (`result-typed-null-live`) failed the null-result oracle for
+all three formats as expected. The existing indirect-count typed-buffer
+regression passed in `result-typed-null-regression`. Metal validation was enabled;
+instrumentation of the rewritten metallib is not independently verified. The
+validation diagnostic lacks line information, so the specific AIR instruction
+responsible is unconfirmed. The current sidecar transform remaps access indices
+but does not guard null texture reads, writes, or fences; addressing those paths
+requires a separate change and validation. Null typed UAV support is not established;
+default behavior and capability reporting are unchanged.
