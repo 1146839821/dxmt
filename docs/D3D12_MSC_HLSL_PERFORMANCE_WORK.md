@@ -555,3 +555,31 @@ still abort. Other debug record forms, double-lowering with debug metadata,
 error containment, original clean build integration, concurrency, other host
 architectures and D3D10/11 regressions remain unverified. The experimental
 patch is therefore not automatically applied, and this issue remains open.
+
+### Double-lowering diagnostic follow-up
+
+The postprocessing entry point can return success while copying its input after
+an AIR parse error. Therefore a successful return alone is not evidence that
+lowering occurred. The opt-in probe now has `--expect-lowered`, which parses
+and verifies both modules and checks that a double-to-float truncation was
+removed and `llvm.dbg.cu` remains present. An LLVM 22-generated opaque-pointer
+input was rejected by that check (exit 6), rather than counted as a pass.
+
+Using the isolated guarded LLVM 15 object, `--make-double` parsed the captured
+MSC AIR, inserted a fast double multiply and a truncation into a float store,
+and serialized a fixture. The subsequent `--expect-lowered` check reported
+one truncation before, zero after, and a debug compile unit in both modules.
+This proves that this particular fixture was parsed and transformed; it does
+not establish complete debug-information equivalence. Serialization by LLVM
+15 also means the fixture does not combine the original 15-operand metadata
+record with double instructions. GPU execution of the transformed fixture and
+non-fast double cases remain untested.
+
+```sh
+probe-verified CAPTURED.metallib FIXTURE.metallib --make-double
+probe-verified FIXTURE.metallib LOWERED.metallib --expect-lowered
+```
+
+`probe-verified` in this example is the isolated test executable linked with
+the candidate object, not the normal build target. The normal LLVM 15 reader
+still fails on the captured MSC AIR; no toolchain files were replaced.
