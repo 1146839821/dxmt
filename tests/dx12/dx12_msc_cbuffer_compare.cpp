@@ -51,7 +51,10 @@ static bool compile(const char *file, ID3DBlob *root, bool constants,
 }
 
 int main(int argc, char **argv) {
-  if (argc != 4 && !(argc == 5 && std::strcmp(argv[4], "--wrong") == 0))
+  if (argc != 4 &&
+      !(argc == 5 && (std::strcmp(argv[4], "--wrong") == 0 ||
+                      std::strcmp(argv[4], "--frequency") == 0 ||
+                      std::strcmp(argv[4], "--frequency-wrong") == 0)))
     return 2;
   for (const auto &symbol :
        {std::pair{"d3d12.dll", "D3D12CreateDevice"},
@@ -135,6 +138,7 @@ vertex float4 vertex_main(uint i [[vertex_id]]) { const float2 p[3] = {float2(-1
     auto lib = device.newLibrary(shader[mode].data(), shader[mode].size(), err);
     if (!lib)
       return 9;
+    std::vector<WMT::Reference<WMT::RenderPipelineState>> pipelines;
     for (unsigned i = 0; i < 2; ++i) {
       LARGE_INTEGER start{}, end{};
       WMTFunctionConstant constant{};
@@ -166,6 +170,7 @@ vertex float4 vertex_main(uint i [[vertex_id]]) { const float2 p[3] = {float2(-1
                 << "\n";
       if (!pipeline)
         return 10;
+      pipelines.push_back(pipeline);
       WMTTextureInfo ti{};
       ti.pixel_format = WMTPixelFormatRGBA8Unorm;
       ti.width = 4;
@@ -214,11 +219,83 @@ vertex float4 vertex_main(uint i [[vertex_id]]) { const float2 p[3] = {float2(-1
       const uint8_t expected[2][4] = {{255, 0, 0, 255}, {0, 255, 0, 255}};
       for (unsigned j = 0; j < 4; ++j)
         if (std::abs(int(pixel[j]) - int(expected[i][j])) > 1 ||
-            (argc == 5 && mode == 2 && i == 0 && j == 0 && pixel[j] != 0))
+            (argc == 5 && std::strcmp(argv[4], "--wrong") == 0 && mode == 2 &&
+             i == 0 && j == 0 && pixel[j] != 0))
           return 14;
       std::cout << "CBUFFER_PIXEL " << mode << " " << i << " "
                 << unsigned(pixel[0]) << "," << unsigned(pixel[1]) << ","
                 << unsigned(pixel[2]) << "," << unsigned(pixel[3]) << "\n";
+    }
+    if (argc == 5 && (std::strcmp(argv[4], "--frequency") == 0 ||
+                      std::strcmp(argv[4], "--frequency-wrong") == 0)) {
+      for (unsigned policy = 0; policy < 2; ++policy) {
+        for (unsigned n = 0; n < 16; ++n) {
+          const unsigned i = policy == 0 ? (n / 8) % 2 : n % 2;
+          WMTTextureInfo ti{};
+          ti.pixel_format = WMTPixelFormatRGBA8Unorm;
+          ti.width = 4;
+          ti.height = 4;
+          ti.depth = 1;
+          ti.array_length = 1;
+          ti.type = WMTTextureType2D;
+          ti.mipmap_level_count = 1;
+          ti.sample_count = 1;
+          ti.usage = WMTTextureUsageRenderTarget;
+          ti.options = WMTResourceStorageModeShared;
+          auto texture = device.newTexture(ti);
+          if (!texture)
+            return 11;
+          WMTRenderPassInfo pass;
+          WMT::InitializeRenderPassInfo(pass);
+          pass.colors[0].texture = texture.handle;
+          pass.colors[0].load_action = WMTLoadActionClear;
+          pass.colors[0].store_action = WMTStoreActionStore;
+          std::memcpy(tlab.data() + item.top_level_offset, values[i], 16);
+          auto command = queue.commandBuffer();
+          LARGE_INTEGER start{}, end{};
+          if (!QueryPerformanceCounter(&start))
+            return 15;
+          auto encoder = command.renderCommandEncoder(pass);
+          if (!encoder)
+            return 12;
+          unsigned selected = mode == 2 ? i : 0;
+          if (std::strcmp(argv[4], "--frequency-wrong") == 0 && mode == 2 &&
+              policy == 0 && n == 0)
+            selected = 1;
+          encoder.setRenderPipelineState(pipelines[selected]);
+          if (mode != 2)
+            encoder.setFragmentBytes(tlab.data(), tlab.size(),
+                                     DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
+          encoder.drawPrimitives(WMTPrimitiveTypeTriangle, 0, 3);
+          encoder.endEncoding();
+          if (!QueryPerformanceCounter(&end))
+            return 15;
+          command.commit();
+          command.waitUntilCompleted();
+          if (command.status() != WMTCommandBufferStatusCompleted)
+            return 13;
+          uint64_t gpu_start = MTLCommandBuffer_property(
+              command.handle, WMTCommandBufferPropertyGPUStartTime);
+          uint64_t gpu_end = MTLCommandBuffer_property(
+              command.handle, WMTCommandBufferPropertyGPUEndTime);
+          if (!gpu_start || gpu_end <= gpu_start)
+            return 13;
+          uint8_t pixels[64]{};
+          texture.getBytes({0, 0, 0}, {4, 4, 1}, 0, 0, pixels, 16, 64);
+          const uint8_t expected[2][4] = {{255, 0, 0, 255}, {0, 255, 0, 255}};
+          for (unsigned j = 0; j < 4; ++j)
+            if (std::abs(int(pixels[40 + j]) - int(expected[i][j])) > 1) {
+              std::cerr << "FREQUENCY_MISMATCH " << mode << " " << policy << " "
+                        << n << "\n";
+              return 14;
+            }
+          std::cout << "FREQUENCY " << mode << " " << policy << " " << n << " "
+                    << i << " "
+                    << (1000000.0 * (end.QuadPart - start.QuadPart) /
+                        frequency.QuadPart)
+                    << " " << (gpu_end - gpu_start) << "\n";
+        }
+      }
     }
   }
   std::cout << "MSC cbuffer, dynamic branch and specialization GPU passed\n";

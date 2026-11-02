@@ -267,3 +267,39 @@ Reproduction requires the same isolated paired stage and fresh output directory:
 meson compile -C build dx12_msc_cbuffer_compare dx12_metal_hlsl_dynamic_main dx12_metal_hlsl_dynamic_branch_main dx12_metal_hlsl_constants_fixture
 python3 tests/dx12/run_msc_cbuffer_compare.py --stage STAGE --prefix PREFIX --build build --converter /usr/local/lib/libmetalirconverter.dylib --output NEW_OUTPUT --processes 5
 ```
+
+## Constant update frequency slice (2026-11-02)
+
+**Design card:** extend the opt-in constant comparison without touching the
+D3D12 or WineMetal implementations. Create and retain two specialized Metal
+PSOs, one for each value; the dynamic paths reuse one PSO. Compare 16 draws per
+mode for low variation (eight identical values, then eight of the other value)
+and high variation (alternate values every draw). Every draw copies the
+current value into the root-constant TLAB on dynamic paths and validates the
+pixel. This models explicit two-entry Metal PSO reuse, not DXMT's D3D12 PSO
+cache. The runner records CPU encoder construction/commands and completed GPU
+command-buffer time, with separate validation and a deliberately swapped
+specialized PSO negative control. It drops the first two samples of each
+sequence for summary, while retaining all samples. Fixed mode/policy order,
+per-draw texture creation and synchronous pixel readback confound performance;
+4×4 rendering and this small pool of values are not game workloads. CPU time
+excludes parameter memcpy, submission, synchronization, PSO lookup/creation,
+readback and resource allocation; GPU time is the whole command buffer. Memory,
+cache hit rates and production behavior remain unmeasured. Rollback removes
+this optional test mode.
+
+Five processes produced 70 post-warm-up samples per mode/policy. Direct cbuffer
+GPU median/p95: low 31,979/35,584 ns, high 30,937.5/33,542 ns. Dynamic
+branch: low 33,000/39,417 ns, high 33,416.5/39,166 ns. Reused specialized
+PSOs: low 32,770.5/39,458 ns, high 32,479.5/36,625 ns. CPU encoding median/
+p95 (µs): cbuffer low 25.15/35.0, high 23.8/32.0; branch low 25.45/75.6,
+high 23.2/37.9; specialization low 23.1/36.0, high 22.0/26.5. Samples are
+pooled within each process, not independent processes; outliers and fixed order
+preclude a general performance claim. Correct pixels passed on all draws; both
+validation layers passed and the deliberate mismatched-PSO control failed as
+intended. Full samples, exact artifact hashes and logs are in
+`result-msc-frequency-final/` outside the repository.
+
+Reproduce with the existing comparison runner's `--frequency` switch and a
+fresh output directory. Ordinary paths are not modified, and D3D12 PSO cache
+identity and resident memory remain NOT_RUN.
