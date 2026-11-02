@@ -27,11 +27,12 @@ def main():
     parser.add_argument("--zero-offset", action="store_true", help="use a zero-offset texture view")
     parser.add_argument("--experimental-patch", action="store_true", help="enable the experimental MSC sidecar path")
     parser.add_argument("--late-copy", action="store_true", help="copy the buffer view after Close and before submission")
+    parser.add_argument("--heap-switch", action="store_true", help="switch between heaps with distinct view lengths")
     args = parser.parse_args()
-    if (args.scalar or args.unaligned or args.zero_offset or args.experimental_patch or args.late_copy) and not args.buffer:
+    if (args.scalar or args.unaligned or args.zero_offset or args.experimental_patch or args.late_copy or args.heap_switch) and not args.buffer:
         parser.error("--scalar, --unaligned and --zero-offset require --buffer")
-    if sum((args.zero_offset, args.unaligned, args.late_copy)) > 1:
-        parser.error("--zero-offset, --unaligned and --late-copy are mutually exclusive")
+    if sum((args.zero_offset, args.unaligned, args.late_copy, args.heap_switch)) > 1:
+        parser.error("offset, late-copy and heap-switch modes are mutually exclusive")
     stage, prefix, build, converter = (getattr(args, name).resolve(strict=True)
                                        for name in ("stage", "prefix", "build", "converter"))
     pairs = [("src/d3d12/d3d12.dll", "d3d12.dll"), ("src/dxgi/dxgi.dll", "dxgi.dll"),
@@ -65,7 +66,7 @@ def main():
         env["DXMT_SHADER_CACHE_PATH"] = str(output / f"cache-{kind}")
         env["DXMT_LOG_PATH"] = str(output)
         command = [str(stage / "wine/bin/wine"), "dx12_texture_sampler.exe",
-                   f"{prefix_name}_{kind}.cs.cso", "--typed-buffer-late-copy" if args.late_copy else "--typed-buffer-zero" if args.zero_offset else "--typed-buffer-unaligned" if args.unaligned else "--typed-buffer" if args.buffer else "--typed-uav", str(fmt)]
+                   f"{prefix_name}_{kind}.cs.cso", "--typed-buffer-heap-switch" if args.heap_switch else "--typed-buffer-late-copy" if args.late_copy else "--typed-buffer-zero" if args.zero_offset else "--typed-buffer-unaligned" if args.unaligned else "--typed-buffer" if args.buffer else "--typed-uav", str(fmt)]
         result = subprocess.run(command, cwd=stage, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=120)
         log = result.stdout.decode(errors="replace")
@@ -80,7 +81,9 @@ def main():
         validation = ("Metal API Validation Enabled" in log and "Metal GPU Validation Enabled" in log and
                       not re.search(r"(?i)(validation error|invalid metal usage:|execution of the command buffer was aborted)", log))
         expected = f"typed UAV format={fmt} load/store checks=20 passed"
-        passed = result.returncode == 0 and expected in log and (not args.buffer or "typed buffer guards and out-of-bounds load passed" in log)
+        passed = (result.returncode == 0 and expected in log and
+                  (not args.buffer or "typed buffer guards and out-of-bounds load passed" in log) and
+                  (not args.heap_switch or "heap switch dimensions=4,2 passed" in log))
         rows.append(dict(kind=kind, format=fmt, exit=result.returncode, readback_pass=passed,
                          identity_pass=identity, validation_pass=validation))
         print(rows[-1], flush=True)

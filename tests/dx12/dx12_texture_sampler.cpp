@@ -289,7 +289,9 @@ main(int argc, char **argv) {
   const bool late_copy = argc == 4 && strcmp(argv[2], "--typed-buffer-late-copy") == 0;
   const bool late_buffer = late_copy || (argc == 4 && strcmp(argv[2], "--typed-buffer-late") == 0);
   const bool zero_offset_buffer = argc == 4 && strcmp(argv[2], "--typed-buffer-zero") == 0;
-  const bool typed_buffer = unaligned_buffer || late_buffer || zero_offset_buffer || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
+  const bool wrong_heap_expected = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-wrong") == 0;
+  const bool heap_switch = wrong_heap_expected || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch") == 0);
+  const bool typed_buffer = unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
   if (argc == 5 && !placed)
     return 2;
   const TypedFormat *typed_format = nullptr;
@@ -334,6 +336,7 @@ main(int argc, char **argv) {
   ID3DBlob *root_blob = nullptr;
   ID3DBlob *root_error = nullptr;
   ID3D12DescriptorHeap *resource_heap = nullptr;
+  ID3D12DescriptorHeap *second_resource_heap = nullptr;
   ID3D12DescriptorHeap *late_source_heap = nullptr;
   ID3D12DescriptorHeap *sampler_heap = nullptr;
   ID3D12Resource *texture = nullptr;
@@ -726,12 +729,38 @@ main(int argc, char **argv) {
     list->SetComputeRoot32BitConstant(3, 1, 0);
     list->Dispatch(1, 1, 1);
   }
+  if (heap_switch) {
+    // A and B use different view lengths, so a stale sidecar is observable.
+    if (!CheckHR("CreateSecondHeap", device->CreateDescriptorHeap(&resource_heap_desc, IID_PPV_ARGS(&second_resource_heap))))
+      goto cleanup;
+    const auto second_cpu = second_resource_heap->GetCPUDescriptorHandleForHeapStart();
+    device->CopyDescriptorsSimple(3, second_cpu, resource_cpu, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    auto view = second_cpu;
+    view.ptr += 2 * descriptor_increment;
+    D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
+    desc.Format = typed_format->format;
+    desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    desc.Buffer.FirstElement = 4;
+    desc.Buffer.NumElements = 2;
+    device->CreateUnorderedAccessView(output_texture, nullptr, &desc, view);
+    list->SetComputeRoot32BitConstant(3, 2, 0);
+    list->Dispatch(1, 1, 1);
+    heaps[0] = second_resource_heap;
+    list->SetDescriptorHeaps(2, heaps);
+    auto second_gpu = second_resource_heap->GetGPUDescriptorHandleForHeapStart();
+    list->SetComputeRootDescriptorTable(0, second_gpu);
+    list->SetComputeRootDescriptorTable(1, sampler_heap->GetGPUDescriptorHandleForHeapStart());
+    second_gpu.ptr += descriptor_increment;
+    list->SetComputeRootDescriptorTable(2, second_gpu);
+    list->SetComputeRoot32BitConstant(3, 3, 0);
+    list->Dispatch(1, 1, 1);
+  }
   barrier.Transition.pResource = output;
   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
   list->ResourceBarrier(1, &barrier);
   list->CopyBufferRegion(readback, 0, output, 0,
-                         (typed_buffer ? 20 : typed_format ? 17 : 1) * sizeof(UINT));
+                         (heap_switch ? 22 : typed_buffer ? 20 : typed_format ? 17 : 1) * sizeof(UINT));
   if (texture_uav) {
     D3D12_RESOURCE_BARRIER texture_barrier = {};
     texture_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -822,6 +851,13 @@ main(int argc, char **argv) {
     goto cleanup;
   }
   if (typed_buffer) {
+    if (heap_switch && (mapped[20] != 4 || mapped[21] != (wrong_heap_expected ? 4u : 2u))) {
+      std::cerr << "heap switch dimensions mismatch: " << mapped[20] << "," << mapped[21] << "\n";
+      readback->Unmap(0, nullptr);
+      goto cleanup;
+    }
+    if (heap_switch)
+      std::cout << "heap switch dimensions=4,2 passed\n";
     bool valid_bounds = true;
     if (mapped[17] != 0) {
       std::cerr << "typed buffer out-of-bounds load mismatch: 0x" << std::hex
@@ -892,6 +928,8 @@ cleanup:
     sampler_heap->Release();
   if (resource_heap)
     resource_heap->Release();
+  if (second_resource_heap)
+    second_resource_heap->Release();
   if (late_source_heap)
     late_source_heap->Release();
   if (root_signature)

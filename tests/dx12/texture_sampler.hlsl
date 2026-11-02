@@ -33,6 +33,14 @@ cbuffer Parameters : register(b0) { uint phase; };
 [numthreads(1, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID)
 {
+#if defined(TYPED_BUFFER_UAV)
+    if (phase >= 2) {
+        uint heap_count;
+        typed_output.GetDimensions(heap_count);
+        output[20 + (phase - 2)] = heap_count;
+        return;
+    }
+#endif
     float4 value = input_texture.SampleLevel(input_sampler, float2(0.5, 0.5), 0.0);
     float intensity = value.x;
 #if defined(TYPED_UAV_ALPHA)

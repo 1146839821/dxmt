@@ -485,3 +485,20 @@ These tests use one resource descriptor heap and do not validate heap switching
 or in-flight lifetime. A meaningful switch test must use different view
 metadata and distinct readback expectations for each heap; merely copying the
 same descriptor to another heap cannot detect a stale sidecar pointer.
+
+### Compute heap-switch regression
+
+The opt-in R32 runner's `--heap-switch` mode records two extra compute
+invocations in the same command list. Heap A's typed view has four elements;
+heap B has two. After changing heaps, the test rebinds both descriptor tables
+and requires the GPU to report lengths 4 and 2. This distinguishes a stale
+sidecar from the new heap. FLOAT, UINT and SINT passed on local 64-bit Wine
+with API and GPU validation enabled and verified module identities. A SINT
+negative control expecting the stale length 4 failed and reported `4,2`.
+The opt-in shader fixtures must be explicitly rebuilt before running.
+
+This validates a recorded heap switch and the resulting two readback values,
+not heap destruction, concurrent submissions, indirect execution, graphics,
+or all encoder-transition and in-flight lifetime cases. Offline metallib
+shader-validation instrumentation is unverified. Production enablement and
+capability declarations are unchanged.
