@@ -51,6 +51,20 @@ isSafeSample2D(const llvm::CallBase &call) {
 }
 
 bool
+isSafeGlobalAtomicAdd(const llvm::CallBase &call) {
+  const auto *target = call.getCalledFunction();
+  if (!llvm::isa<llvm::CallInst>(call) || !target || !target->isDeclaration() || target->isVarArg() ||
+      target->getName() != "air.atomic.global.add.s.i32" || (call.arg_size() != 5 && call.arg_size() != 6) ||
+      !call.getType()->isIntegerTy(32))
+    return false;
+  const auto *pointer = llvm::dyn_cast<llvm::PointerType>(call.getArgOperand(0)->getType());
+  return pointer && pointer->getAddressSpace() == 1 && call.getArgOperand(1)->getType()->isIntegerTy(32) &&
+         call.getArgOperand(2)->getType()->isIntegerTy(32) && call.getArgOperand(3)->getType()->isIntegerTy(32) &&
+         (call.arg_size() == 5 || call.getArgOperand(4)->getType()->isIntegerTy(32)) &&
+         call.getArgOperand(call.arg_size() - 1)->getType()->isIntegerTy(1);
+}
+
+bool
 collect(llvm::Module &module, std::vector<Operation> &operations, const std::vector<TableMapping> &mappings) {
   auto *tlab = mappings.empty() ? nullptr : findMSCRootArgument(module);
   if (!mappings.empty() && !tlab)
@@ -74,7 +88,7 @@ collect(llvm::Module &module, std::vector<Operation> &operations, const std::vec
               if (!target->getName().startswith("llvm.bswap."))
                 return false;
             } else if (!isSafeIntegerBitOp(*call) && target->getName() != "air.get_read_sampler" &&
-                       target->getName() != "air.atomic.global.add.s.i32" &&
+                       !isSafeGlobalAtomicAdd(*call) &&
                        !isSafeSample2D(*call)) {
               return false;
             }

@@ -711,3 +711,26 @@ no-patch controls are in `result-typed-sample-guard-wrong-final` and
 other previously allowed calls such as global atomic add or get-read-sampler.
 Metal validation was enabled; rewritten-metallib instrumentation is unverified.
 Default behavior and public capabilities are unchanged.
+
+### Typed-buffer preflight: global atomic add signature
+
+The prior experimental preflight accepted `air.atomic.global.add.s.i32` solely
+by name. It now requires a direct, non-variadic declaration returning i32 with
+an address-space 1 pointer, three i32 operands, and either an i1 operand or an
+additional i32 followed by i1. The five-argument form was observed in the MSC
+CLI 4.0.3 capture `msc-reversebits/float.ll`; a temporary diagnostic of the Wine
+runtime conversion observed the six-argument form in
+`result-typed-atomic-diagnostic/float.log` under n95. The temporary logging was
+removed. The evidence does not establish why the converter forms differ.
+
+Synthetic mixed typed-buffer AIR tests cover both forms and reject other names,
+address spaces, flag/result types, and an i64 extra operand. The isolated Wine
+GPU test executes atomic additions while checking indirect command counts and
+R32 FLOAT/UINT/SINT typed-buffer results; results are in
+`result-typed-atomic-guard-final`, with wrong-expectation and no-patch controls
+in `result-typed-atomic-guard-wrong-final` and
+`result-typed-atomic-guard-no-patch-final`. This checks the call shape, not the
+provenance of the pointer or the semantics of all order/flag values. Other
+atomic intrinsics remain unsupported. Metal validation was enabled but rewritten
+metallib shader-validation instrumentation remains unverified; default runtime
+behavior and advertised capability are unchanged.

@@ -29,6 +29,9 @@ sample_call = ('  %sample = call { <4 x float>, i8 } @air.sample_texture_2d.v4f3
 sample_decl = ('\ndeclare { <4 x float>, i8 } @air.sample_texture_2d.v4f32('
                '%tex addrspace(1)*, i8 addrspace(2)*, <2 x float>, i1, <2 x i32>, i1, float, float, i32)\n')
 mixed_sample = sidecar_source.replace('  %data = call', sample_call + '  %data = call') + sample_decl
+atomic_call = '  %atomic = call i32 @air.atomic.global.add.s.i32(i32 addrspace(1)* null, i32 1, i32 0, i32 2, i1 true)\n'
+atomic_decl = '\ndeclare i32 @air.atomic.global.add.s.i32(i32 addrspace(1)*, i32, i32, i32, i1)\n'
+mixed_atomic = sidecar_source.replace('  %data = call', atomic_call + '  %data = call') + atomic_decl
 with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
     root = Path(temp)
     cases = [
@@ -76,6 +79,8 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
          ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
         ("unknown_air", "declare void @air.unknown()\n define void @main() { call void @air.unknown() ret void }\n", 4,
          ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
+        ("atomic_only", atomic_decl + "define i32 @main() { " + atomic_call + "ret i32 %atomic }\n", 4,
+         ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
         ("mixed_unknown_external", sidecar_source.replace('  %data = call',
                                                           '  call void @external()\n  %data = call') +
                                    '\ndeclare void @external()\n', 4,
@@ -109,6 +114,22 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
         ("mixed_sample_bad_return", mixed_sample.replace('{ <4 x float>, i8 }', '{ <4 x float>, i32 }'), 4,
          ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
         ("mixed_sample_packed_return", mixed_sample.replace('{ <4 x float>, i8 }', '<{ <4 x float>, i8 }>'), 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_atomic", mixed_atomic, 0, ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_atomic_six_args", mixed_atomic.replace('i32 2, i1 true', 'i32 2, i32 1, i1 true').replace(
+            'i32, i32, i32, i1)', 'i32, i32, i32, i32, i1)'), 0,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_atomic_bad_extra", mixed_atomic.replace('i32 2, i1 true', 'i32 2, i64 1, i1 true').replace(
+            'i32, i32, i32, i1)', 'i32, i32, i32, i64, i1)'), 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_atomic_unknown", mixed_atomic.replace('air.atomic.global.add.s.i32', 'air.atomic.global.add.u.i32'), 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_atomic_address_space", mixed_atomic.replace('i32 addrspace(1)*', 'i32 addrspace(2)*'), 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_atomic_bad_flag", mixed_atomic.replace('i1 true', 'i32 1').replace('i32, i1)', 'i32, i32)'), 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_atomic_bad_result", mixed_atomic.replace('call i32 @air.atomic', 'call i64 @air.atomic').replace(
+            'declare i32 @air.atomic', 'declare i64 @air.atomic'), 4,
          ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
         ("dynamic", source, 0, []),
         ("unknown", source.replace("air.get_width_texture_buffer_1d",
