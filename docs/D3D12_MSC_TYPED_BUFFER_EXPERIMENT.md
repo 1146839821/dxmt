@@ -502,3 +502,14 @@ not heap destruction, concurrent submissions, indirect execution, graphics,
 or all encoder-transition and in-flight lifetime cases. Offline metallib
 shader-validation instrumentation is unverified. Production enablement and
 capability declarations are unchanged.
+
+### Compute to blit to compute boundary
+
+The heap-switch runner also accepts `--encoder-break`, inserting a buffer copy
+between the two dispatches. It checks the copy sentinel as well as the two
+heap-specific view lengths. FLOAT, UINT and SINT passed on the local isolated
+Wine/Metal setup, with module identity and validation checks; logs are in
+`dxmt-test/n95-capability-gate/run-typed-encoder-final`. This covers one
+recorded compute-to-blit-to-compute sequence, not concurrent submission,
+resource destruction or all encoder transitions. Shader-validation
+instrumentation of the offline metallib remains unverified.

@@ -290,7 +290,8 @@ main(int argc, char **argv) {
   const bool late_buffer = late_copy || (argc == 4 && strcmp(argv[2], "--typed-buffer-late") == 0);
   const bool zero_offset_buffer = argc == 4 && strcmp(argv[2], "--typed-buffer-zero") == 0;
   const bool wrong_heap_expected = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-wrong") == 0;
-  const bool heap_switch = wrong_heap_expected || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch") == 0);
+  const bool encoder_break = argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-encoder") == 0;
+  const bool heap_switch = wrong_heap_expected || encoder_break || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch") == 0);
   const bool typed_buffer = unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
   if (argc == 5 && !placed)
     return 2;
@@ -745,6 +746,8 @@ main(int argc, char **argv) {
     device->CreateUnorderedAccessView(output_texture, nullptr, &desc, view);
     list->SetComputeRoot32BitConstant(3, 2, 0);
     list->Dispatch(1, 1, 1);
+    if (encoder_break)
+      list->CopyBufferRegion(readback, 256, upload, 0, sizeof(UINT));
     heaps[0] = second_resource_heap;
     list->SetDescriptorHeaps(2, heaps);
     auto second_gpu = second_resource_heap->GetGPUDescriptorHandleForHeapStart();
@@ -856,6 +859,13 @@ main(int argc, char **argv) {
       readback->Unmap(0, nullptr);
       goto cleanup;
     }
+    if (encoder_break && mapped[64] != 0xff0000ffu) {
+      std::cerr << "encoder break copy mismatch: 0x" << std::hex << mapped[64] << std::dec << "\n";
+      readback->Unmap(0, nullptr);
+      goto cleanup;
+    }
+    if (encoder_break)
+      std::cout << "encoder break copy passed\n";
     if (heap_switch)
       std::cout << "heap switch dimensions=4,2 passed\n";
     bool valid_bounds = true;
