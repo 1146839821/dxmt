@@ -20,6 +20,15 @@ struct Operation {
 using TableMapping = MSCTypedBufferTableMapping;
 
 bool
+isSafePopcount(const llvm::CallBase &call) {
+  const auto *target = call.getCalledFunction();
+  return llvm::isa<llvm::CallInst>(call) && target && target->isDeclaration() &&
+         target->getName() == "air.popcount.i32" && call.arg_size() == 1 &&
+         call.getType()->isIntegerTy(32) && call.getArgOperand(0)->getType()->isIntegerTy(32) &&
+         !target->isVarArg();
+}
+
+bool
 collect(llvm::Module &module, std::vector<Operation> &operations, const std::vector<TableMapping> &mappings) {
   auto *tlab = mappings.empty() ? nullptr : findMSCRootArgument(module);
   if (!mappings.empty() && !tlab)
@@ -42,7 +51,7 @@ collect(llvm::Module &module, std::vector<Operation> &operations, const std::vec
             if (target->isIntrinsic()) {
               if (!target->getName().startswith("llvm.bswap."))
                 return false;
-            } else if (target->getName() != "air.get_read_sampler" &&
+            } else if (!isSafePopcount(*call) && target->getName() != "air.get_read_sampler" &&
                        target->getName() != "air.atomic.global.add.s.i32" &&
                        !target->getName().startswith("air.sample_texture_2d.")) {
               return false;
@@ -176,6 +185,8 @@ definitelyNoMSCTypedBufferAccess(const llvm::Module &module) {
         if (!call)
           continue;
         const auto *target = call->getCalledFunction();
+        if (isSafePopcount(*call))
+          continue;
         if (!target || target->getName().startswith("air.") ||
             (target->isDeclaration() &&
              !(target->isIntrinsic() && target->getName().startswith("llvm.bswap."))))

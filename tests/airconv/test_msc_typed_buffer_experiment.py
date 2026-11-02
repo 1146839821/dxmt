@@ -34,6 +34,15 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
         ("llvm_intrinsic", "declare i32 @llvm.bswap.i32(i32)\n"
                            "define i32 @main(i32 %x) { %y = call i32 @llvm.bswap.i32(i32 %x) ret i32 %y }\n", 7,
          ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
+        ("air_popcount", "declare i32 @air.popcount.i32(i32)\n"
+                         "define i32 @main(i32 %x) { %y = call i32 @air.popcount.i32(i32 %x) ret i32 %y }\n", 7,
+         ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
+        ("air_popcount_bad_type", "declare i64 @air.popcount.i32(i64)\n"
+                                  "define i64 @main(i64 %x) { %y = call i64 @air.popcount.i32(i64 %x) ret i64 %y }\n", 4,
+         ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
+        ("air_popcount_unknown", "declare i32 @air.popcount.other(i32)\n"
+                                 "define i32 @main(i32 %x) { %y = call i32 @air.popcount.other(i32 %x) ret i32 %y }\n", 4,
+         ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
         ("unclassified_intrinsic", "declare i32 @llvm.ctpop.i32(i32)\n"
                                    "define i32 @main(i32 %x) { %y = call i32 @llvm.ctpop.i32(i32 %x) ret i32 %y }\n", 4,
          ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
@@ -57,6 +66,14 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
                                                      '  call void @air.unknown()\n  %data = call') +
                               '\ndeclare void @air.unknown()\n', 4,
          ["--metallib-classify", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_popcount", sidecar_source.replace('  %data = call',
+                                                 '  %bits = call i32 @air.popcount.i32(i32 %index)\n  %data = call') +
+                           '\ndeclare i32 @air.popcount.i32(i32)\n', 0,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
+        ("mixed_popcount_bad", sidecar_source.replace('  %data = call',
+                                                     '  %bits = call i64 @air.popcount.i32(i64 1)\n  %data = call') +
+                               '\ndeclare i64 @air.popcount.i32(i64)\n', 4,
+         ["--metallib-api", "8", "16", "--sidecar", "0", "8"]),
         ("dynamic", source, 0, []),
         ("unknown", source.replace("air.get_width_texture_buffer_1d",
                                     "air.unknown_texture_buffer_1d"), 4, []),
@@ -128,7 +145,7 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
         if (output.exists() and output.stat().st_size > 0) != (expected == 0):
             raise SystemExit(f"{name}: unexpected output state")
         count = 6 if name == "multi" else 3
-        marker = 'metallib API patched' if name == 'metallib_api' else f'patched {count} typed-buffer operations'
+        marker = 'metallib API patched' if '--metallib-api' in options else f'patched {count} typed-buffer operations'
         if expected == 0 and marker not in result.stdout:
             raise SystemExit(f"{name}: unexpected operation count: {result.stdout}")
         print(name, "passed")

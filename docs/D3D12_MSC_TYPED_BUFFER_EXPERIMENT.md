@@ -636,3 +636,28 @@ version, shader stage, or intrinsic; the restricted allowlist and the missing
 production fallback policy remain promotion blockers. Shader-validation
 instrumentation of the rewritten metallib and 32-bit Wine runtime remain
 unverified.
+
+### `air.popcount.i32` classification
+
+A DXIL `countbits` fixture compiled with the locally installed MSC CLI 4.0.3
+produced a direct declaration and call `i32 @air.popcount.i32(i32)`; the
+extracted AIR and metallib are in `msc-countbits/float.ll` and
+`msc-countbits/float.metallib` under n95. The CLI's SHA-256 was
+`f05e0ebefc08a79fa339335310be678df39ed9e2c55c02c31ea0263b135c8f2c`;
+the generated metallib's was
+`0be5801956d9a3518bed159108b1c4aee5032cf9745c0204353b1b7904f68650`.
+Microsoft specifies [countbits](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/countbits---sm5---asm-)
+as counting set bits. The no-op analysis and typed-buffer preflight accept only
+this exact declaration and direct i32-to-i32 call, not variants with similar
+names or incompatible signatures. Other unclassified AIR remains rejected.
+
+Synthetic tests check this operation both alone and combined with a typed-buffer
+rewrite, and reject wrong signatures and names. The isolated Wine runtime
+compiled `typed_buffer_math_{float,uint,sint}.cs.cso`, then passed GPU readback
+of countbits, typed buffer bounds and 4-to-2 heap transitions; wrong expectations
+and no-patch controls failed. Evidence and runtime artifact hashes are in
+`result-typed-popcount`, `result-typed-popcount-wrong`, and
+`result-typed-popcount-no-patch` under n95. The CLI AIR capture is separate from
+the runtime converter run; its exact AIR was not captured from that run. Metal
+validation was enabled but instrumentation of rewritten metallib remains
+unverified. This does not enable the experiment by default or promote capability.

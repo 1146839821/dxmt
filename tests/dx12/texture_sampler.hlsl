@@ -49,6 +49,9 @@ void main(uint3 tid : SV_DispatchThreadID)
         uint heap_count;
         typed_output.GetDimensions(heap_count);
         output[20 + (phase - 2)] = heap_count;
+#if defined(TYPED_BUFFER_MATH)
+        output[22 + (phase - 2)] = countbits(heap_count);
+#endif
         return;
     }
 #endif
