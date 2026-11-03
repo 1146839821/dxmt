@@ -89,3 +89,22 @@ latencies or an application speedup. One process per condition cannot establish
 a performance distribution. Memory growth and real-world hit rates remain
 unmeasured. Run `tests/dx12/run_msc_concurrent.py --help` for the required
 isolated stage, prefix, build and converter arguments.
+
+The runner's `--no-delay` mode omits the injected sleep for the identical
+shader case while retaining the conversion trace wrapper and its logging.
+Five separate Wine processes each created eight concurrent and eight repeated
+PSOs. Each process recorded exactly one real MSC conversion and no further
+conversion in the repeated phase. On the M1 Max/macOS 27.2 test host, the five
+per-process concurrent medians were 9.804, 9.3755, 11.484, 12.2875 and
+10.529 ms; the corresponding repeat medians were 0.348, 0.3595, 0.351, 0.367
+and 0.339 ms. Across the 40 samples per phase, pooled median/P95/min/max were
+11.2185/15.729/9.078/17.252 ms for concurrent PSOs and
+0.3575/0.494/0.328/0.514 ms for repeated PSOs. Raw samples and identities are
+in `result-concurrent-no-delay-20261103-{1..5}` under the n95 test directory.
+
+These are complete PSO calls, with tracing and shared OS/driver caches still
+active; concurrent samples within each process are dependent. A process-first
+call is not necessarily a driver-cold compile. The result does not isolate
+cache lookup, actual single-flight waiting, memory use, GPU output or game
+performance. This is a baseline for one fixture and one device, not evidence
+to change the cache policy.

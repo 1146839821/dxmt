@@ -26,11 +26,14 @@ def main():
     parser.add_argument("--fail-first", action="store_true")
     parser.add_argument("--two-shaders", action="store_true")
     parser.add_argument("--force-serial", action="store_true")
+    parser.add_argument("--no-delay", action="store_true", help="omit the test-only compiler delay")
     args = parser.parse_args()
     if args.fail_first and args.two_shaders:
         parser.error("--fail-first and --two-shaders are separate controls")
     if args.force_serial and not args.two_shaders:
         parser.error("--force-serial requires --two-shaders")
+    if args.no_delay and (args.fail_first or args.two_shaders or args.force_serial):
+        parser.error("--no-delay is only supported by the identical-shader timing case")
     stage, prefix, build, converter = (getattr(args, name).resolve(strict=True)
                                        for name in ("stage", "prefix", "build", "converter"))
     output = args.output.absolute()
@@ -57,8 +60,10 @@ def main():
            not key.startswith("DXMT_TEST_TRACE_")}
     env.update(WINEPREFIX=str(prefix), WINEDLLPATH=str(stage / "wine/lib/wine"),
                WINEDLLOVERRIDES="d3d12=n;dxgi=n;winemetal=b", WINEDEBUG="+loaddll",
-               DXMT_METALIRCONVERTER_PATH=str(wrapper), DXMT_TEST_TRACE_DELAY="1", DYLD_PRINT_LIBRARIES="1",
+               DXMT_METALIRCONVERTER_PATH=str(wrapper), DYLD_PRINT_LIBRARIES="1",
                DXMT_SHADER_CACHE_PATH=str(output / "cache"), DXMT_LOG_PATH=str(output))
+    if not args.no_delay:
+        env["DXMT_TEST_TRACE_DELAY"] = "1"
     if args.fail_first:
         env["DXMT_TEST_TRACE_FAIL_FIRST"] = "1"
     if args.force_serial:
@@ -111,7 +116,7 @@ def main():
             (args.force_serial and max_active != 1)):
         raise AssertionError(f"concurrent test failed: exit={result.returncode}, compile calls={calls}")
     (output / "summary.json").write_text(json.dumps({"compile_calls": calls, "max_overlapping_calls": max_active,
-        "exit": result.returncode, "pso_creation_timing": timings,
+        "exit": result.returncode, "injected_delay": not args.no_delay, "pso_creation_timing": timings,
         "converter_sha256": sha(converter), "wrapper_sha256": sha(wrapper),
         "artifacts": {path: sha(stage / path) for _, path in pairs}}, indent=2) + "\n")
     print(f"eight concurrent PSOs: {calls} real MSC compilation calls")
