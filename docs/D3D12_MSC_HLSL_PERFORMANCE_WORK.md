@@ -687,3 +687,21 @@ The combined patch is still experimental. In particular, 15-operand records
 with nonzero pointer-authentication data, other malformed metadata records,
 concurrent execution and a complete clean LLVM rebuild remain unverified.
 No change was made to the production toolchain or capability declarations.
+
+### Metadata rejection and cleanup control (2026-11-03)
+
+`tests/airconv/make_llvm15_ptrauth_rejection.py` makes a synthetic negative
+fixture from the captured AIR by changing operand 14 of one uniquely matched
+unabbreviated `METADATA_DERIVED_TYPE` record from zero to one. The bitstream
+dump confirms the changed record; this deliberately unsupported fixture does
+not establish that the operand references valid pointer-authentication data.
+The combined candidate rejected it and then parsed the original captured AIR
+1,000 times in alternating sequence in the same contexts. An otherwise
+identical candidate linked with the format compatibility patch but without
+placeholder cleanup aborted at the original queue assertion. Thus this
+fixture exercises the combined candidate's metadata rejection and cleanup
+path, unlike the opaque-pointer control.
+
+The test only covers one synthetic record and sequential execution. The
+candidate remains experimental; concurrent and broader malformed inputs,
+complete toolchain rebuilding and actual application behavior are unverified.
