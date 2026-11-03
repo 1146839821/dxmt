@@ -813,3 +813,18 @@ with 1,000 synthetic metadata rejection and valid captured-AIR parse pairs
 each. The build and test artifacts are in `llvm-script-arm64-20261103/`
 outside the repository. This verifies the reader in a native diagnostic, not
 an arm64 DXMT/Wine runtime or general shader compatibility.
+
+### Derived-type size flag guard
+
+LLVM 22 interprets bit 1 of the derived-type record's first operand as a
+size/offset metadata flag even when the record has 14 operands. The original
+candidate checked this flag only on 15-operand records. A synthetic 14-operand
+fixture with the flag set was incorrectly accepted by that candidate. The
+guard now rejects unsupported first-operand bits for every accepted length,
+while retaining the separate nonzero pointer-authentication check on length 15.
+The fixture generator supports `--size-flag-14`; combined candidates rejected
+both negative fixtures and parsed their unmodified counterparts in eight
+threads with 1,000 iterations each. The debug double lowering fixture also
+passed. The new patch changes the CI cache hash. This guard addresses derived
+types only: newer flags and records elsewhere need separate analysis, and
+unparsed AIR still follows the existing warning and pass-through policy.

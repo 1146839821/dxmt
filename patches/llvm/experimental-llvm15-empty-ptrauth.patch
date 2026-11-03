@@ -3,5 +3,5 @@
 @@ -1443,3 +1443,3 @@
    case bitc::METADATA_DERIVED_TYPE: {
 -    if (Record.size() < 12 || Record.size() > 14)
-+    if (Record.size() < 12 || Record.size() > 15 || (Record.size() == 15 && (Record[14] != 0 || Record[0] > 1)))
++    if (Record.size() < 12 || Record.size() > 15 || Record[0] > 1 || (Record.size() == 15 && Record[14] != 0))
        return error("Invalid record");
