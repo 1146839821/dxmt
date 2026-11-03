@@ -722,3 +722,30 @@ parse probe passed again, and the debug double fixture reported one truncation
 before and zero after with `llvm.dbg.cu` present. This is a clean LLVM library
 rebuild and native diagnostic, not a full DXMT build or Wine runtime test
 using the new LLVM installation. The production toolchain was not replaced.
+
+### Isolated DXMT and Wine run with the combined LLVM candidate
+
+A separate `release`, x86_64 Wine cross-build was configured with D3D12 and
+tests enabled, using `llvm-combined-full-20261103/install` as its native LLVM
+path. The build completed and the WineMetal link command names this install's
+library directory. This was not a clean Metal build: the active Xcode reports
+the Metal Toolchain missing. In the isolated generated `build.ninja`, seven
+AIR generation edges and one metallib edge were changed to copy their existing
+outputs from the normal build. No generated build files or artifacts in the
+normal build were changed. The copied AIR outputs represent three distinct
+shaders; their SHA-256 values are `5a6375b498024ed045f2fdab235026ba2b7c3eabee3dce26bde40ccbc6e81ed6`,
+`dbfd94d834433bb550287b28fc9d59a1a6d0d4cbd18c54ab214c0bfe73e39662` and
+`ae022464178f5a7fc4646eaf939e1e128e0c73a77d5754ab2cc4364f605402c8`;
+the copied `dxmt_command.metallib` SHA-256 is
+`a8240aed9ee15666fa85200eec19d71a4448fe7a68b6e273d1c1e04b359f17ec`.
+
+With a separate copied Wine stage and prefix, the `-Od -Zi -Qembed_debug`
+main and branch fixtures completed two normal runs, a Metal API/GPU validation
+run, and the wrong-pixel negative control, without requesting MSC ignore-debug.
+The test runner checked loaded PE/Unix paths, MSC library path, artifact hashes
+and pixel results. The isolated `winemetal.so` SHA-256 was
+`f548b31f9103f1e0537cb23b5cae162440d4964defc0a72d18093a01adc9c06a`.
+Logs and exact results are in `result-llvm-combined-debug-20261103/` outside
+the repository. This is evidence for these fixtures, not a clean Metal
+toolchain build, comprehensive debug metadata support, or game compatibility.
+The candidate remains experimental and the production toolchain is unchanged.
