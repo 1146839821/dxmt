@@ -530,6 +530,12 @@ jobs:
           meson compile -C build
           meson install -C build
 
+      - name: Test LLVM metadata compatibility
+        run: |
+          meson configure build -Denable_tests=true
+          meson compile -C build llvm-metadata-selftest
+          ./build/src/airconv/darwin/llvm-metadata-selftest
+
       - name: Upload
         uses: actions/upload-artifact@v6
         with:

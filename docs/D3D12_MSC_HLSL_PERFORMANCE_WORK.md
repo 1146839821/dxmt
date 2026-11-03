@@ -899,3 +899,13 @@ match specific known records and do not cover arbitrary AIR. Results are in
 `llvm-regression-versioned-20261103/` and
 `llvm-regression-negative-20261103.log` outside the repository. This runner is
 not yet registered as an automatic CI test.
+
+The separate `llvm-metadata-selftest` target is self-contained: it builds a
+small LLVM 15 string-type module in memory and checks the unmodified module,
+a size-flag mutation and an unknown-code mutation. It needs no MSC library,
+external captured shader or `llvm-as`. A candidate-linked native executable
+passed; the unpatched LLVM 15 executable returned the expected failure. CI's
+x86_64 clang release job now builds and runs this target against its patched
+toolchain. The target is opt-in because an unpatched local LLVM is expected to
+fail it. GitHub Actions has not yet run this change; the test checks only these
+two record shapes and does not replace the broader captured-AIR regression.
