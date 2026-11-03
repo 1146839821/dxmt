@@ -35,6 +35,9 @@ def main():
              ("src/winemetal/winemetal.dll", "winemetal.dll"),
              ("src/winemetal/unix/winemetal.so", "wine/lib/wine/x86_64-unix/winemetal.so"),
              ("tests/dx12/dx12_graphics_sm6.exe", "dx12_graphics_sm6.exe"))
+    pairs += tuple(("tests/dx12/geometry_differential_3." + stage_name + ".cso",
+                    "geometry_differential_3." + stage_name + ".cso")
+                   for stage_name in ("vs", "ps", "gs"))
     for relative, deployed in pairs:
         built = (build / relative).read_bytes()
         if relative in ("src/d3d12/d3d12.dll", "src/dxgi/dxgi.dll") and built[64:80] == b"Wine builtin DLL":

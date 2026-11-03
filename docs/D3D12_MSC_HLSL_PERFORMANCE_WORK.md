@@ -184,6 +184,18 @@ passed; a Wine/GPU run of the newly built bridge was not yet run. The test
 includes the bridge implementation in a separate native executable, and does
 not change the installed MSC library or add a production injection switch.
 
+At `c24cfbb1`, the current patched-LLVM x86_64 build also passed the existing
+MSC triangle geometry differential test in isolated Wine with Metal API and
+GPU validation. Both baseline and injected stage-in buffer-growth modes
+produced three exact 3,072-byte readbacks and passed reference-release checks;
+the deliberately wrong reference was rejected in each mode. The runner now
+checks all three shader fixtures against the build as well as the bridge and
+PE files. A one-byte modification to the staged geometry fixture was rejected
+before launch. Logs, hashes and results are in
+`result-msc-gs-{baseline,grow}-current-20261103/` outside the repository.
+This is one triangle GS configuration on one device; it does not establish
+other GS topologies, tessellation or other GPU/OS configurations.
+
 Follow-up runtime regression at `37894c62`: rebuilt the isolated x86_64
 patched-LLVM configuration, staged its paired WineMetal PE/Unix files in a
 new Wine copy, and used a new Wine prefix. With Metal API and GPU validation,
