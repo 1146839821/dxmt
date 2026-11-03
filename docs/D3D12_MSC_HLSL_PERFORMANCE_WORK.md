@@ -768,3 +768,21 @@ was `244728f943d818e2fdf00edb1daa3ae90c6e81546298e7c07c6e50c3dc461c7e`;
 the WineMetal Unix library is the candidate identified above. The full log is
 `dx11-llvm-combined-20261103.log` outside the repository. This single D3D11
 compute/readback case does not establish general D3D10/11 compatibility.
+
+### Clean Metal 27.2 build and debug runtime
+
+After the system upgrade, macOS 27.2 (26B123), Xcode 27.2 (27B52),
+`metal` 32023.922 and the Metal Toolchain 27.2 `metallib` were available.
+A new isolated x86_64 release DXMT build with the combined candidate LLVM
+completed without reusing Metal AIR or metallib outputs. Build log:
+`clean-metal272-build.log` outside the repository. The resulting WineMetal
+Unix library SHA-256 was
+`d2452fd04dc4e88e46defdc05fcdef957a1a14a1d8e1d6b313a0f25ba7b024fa`.
+
+With a separately copied Wine stage and prefix and no ignore-debug option, the
+embedded-debug main and branch fixtures passed two normal runs, Metal API/GPU
+validation and the deliberately wrong-pixel control. The runner checked the
+loaded PE/Unix paths, MSC path and artifact identities. Results are in
+`result-clean-metal272-debug-20261103/` outside the repository. The candidate
+LLVM patches remain experimental and are not applied to production builds;
+this result does not establish compatibility for all shader inputs.
