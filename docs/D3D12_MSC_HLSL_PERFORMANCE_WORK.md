@@ -196,6 +196,17 @@ before launch. Logs, hashes and results are in
 This is one triangle GS configuration on one device; it does not establish
 other GS topologies, tessellation or other GPU/OS configurations.
 
+At `f84bad16`, a separate build using the repository's llvm-mingw toolchain
+and the patched native LLVM compiled the current internal command-list probe
+and line tessellation shaders. In isolated Wine, the MSC line-output image
+test passed three exact 256-byte readbacks with Metal API and GPU validation;
+the intentionally wrong pixel reference failed at the expected byte. The
+reusable `tests/dx12/run_msc_tessellation_regression.py` checks staged build
+bytes, loaded PE/Unix/MSC paths and both validation layers, and writes hashes
+and logs. A modified hull shader was rejected by the build-pair check. Results
+are in `result-msc-tess-runner-20261103/` outside the repository. This does
+not verify all tessellation topologies, factor combinations or hardware.
+
 Follow-up runtime regression at `37894c62`: rebuilt the isolated x86_64
 patched-LLVM configuration, staged its paired WineMetal PE/Unix files in a
 new Wine copy, and used a new Wine prefix. With Metal API and GPU validation,
