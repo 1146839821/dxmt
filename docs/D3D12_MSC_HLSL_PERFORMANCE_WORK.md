@@ -786,3 +786,20 @@ loaded PE/Unix paths, MSC path and artifact identities. Results are in
 `result-clean-metal272-debug-20261103/` outside the repository. The candidate
 LLVM patches remain experimental and are not applied to production builds;
 this result does not establish compatibility for all shader inputs.
+
+### Reproducible candidate toolchain
+
+`tests/airconv/build_llvm15_candidate_toolchain.sh LLVM_SOURCE NEW_OUTPUT`
+builds the experimental x86_64 toolchain in a new directory using the same
+LLVM version, patches and CMake settings as the isolated validation. It
+rejects an existing output directory and does not alter the source checkout
+or the production toolchain. Its complete build was verified in
+`llvm-script-20261103/`; a linker map confirmed the stress executable used
+that installation's `MetadataLoader.cpp.o`, and eight threads each passed
+1,000 synthetic rejection/valid parse pairs. `bash -n` and the existing-output
+negative check passed; `shellcheck` was not available.
+
+The script is opt-in. Production CI still uses unmodified LLVM: changing it
+requires cache keys that include both patches, arm64 validation, and a decision
+on unsupported AIR fallback semantics. Existing version-only cache restore
+keys must not be used for a patched toolchain.
