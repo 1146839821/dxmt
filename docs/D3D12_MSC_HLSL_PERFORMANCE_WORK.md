@@ -1013,6 +1013,28 @@ test covers only this SRV/UAV configuration, not WineMetal D3D12 descriptor
 semantics, bindless access, other resource types or performance. No timing or
 production layout optimization is claimed.
 
+The same native probe now has an opt-in `--timed` runner mode. First, both
+layouts execute the two input sets and wrong-reference controls with Metal API
+and GPU validation. Then three separate processes per layout execute 30
+command buffers each without validation, alternating process order and
+discarding the first five samples per process. Every sample checks the output.
+On the same M1 Max/macOS 27.2 system, the final run's pooled 75-sample
+median/P95 (nearest rank), in microseconds, were: linear CPU encoder setup
+3.500/4.709, root CPU encoder setup 3.583/5.458; linear GPU command-buffer
+duration 9.875/13.875, root GPU command-buffer duration 11.792/15.625. GPU
+maxima were 14.250 and 969.125 microseconds respectively. An earlier run had
+millisecond-scale outliers in both modes and reversed the GPU median ordering.
+
+CPU timing covers encoder creation, binding/useResource calls and dispatch
+encoding; descriptors and buffers were allocated and filled before the timer.
+GPU time is the whole command buffer, not isolated shader execution. Inputs are
+tiny, each sample waits for completion, and samples within a process are not
+independent. Three processes and substantial variability do not support a
+general performance conclusion or production layout change. Allocation cost,
+memory footprint, larger resource sets, D3D12 binding overhead and game-level
+effects remain unmeasured. Raw data is in
+`result-msc-linear-timing-final-20261103/` outside the repository.
+
 The separate `llvm-metadata-selftest` target is self-contained: it builds a
 small LLVM 15 string-type module in memory and checks the unmodified module,
 a size-flag mutation and an unknown-code mutation. It needs no MSC library,

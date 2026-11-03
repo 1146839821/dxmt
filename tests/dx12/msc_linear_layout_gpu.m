@@ -3,11 +3,18 @@
 #define IR_PRIVATE_IMPLEMENTATION
 #include "metal_shader_converter/metal_irconverter_runtime.h"
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 typedef IRDescriptorTableEntry Descriptor;
 int main(int argc, const char **argv) {
   @autoreleasepool {
-    if (argc != 6 || (strcmp(argv[5], "linear") && strcmp(argv[5], "root")))
+    if ((argc != 6 && argc != 7) ||
+        (strcmp(argv[5], "linear") && strcmp(argv[5], "root")))
+      return 2;
+    char *end = NULL;
+    unsigned long samples = argc == 7 ? strtoul(argv[6], &end, 10) : 1;
+    if (!samples || samples > 1000 || (argc == 7 && (!end || *end)))
       return 2;
     NSError *err = nil;
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
@@ -91,27 +98,38 @@ int main(int argc, const char **argv) {
       }
     }
     id<MTLCommandQueue> queue = [dev newCommandQueue];
-    id<MTLCommandBuffer> cb = [queue commandBuffer];
-    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-    [enc setComputePipelineState:pso];
-    [enc setBuffer:top offset:0 atIndex:kIRArgumentBufferBindPoint];
-    [enc useResource:input usage:MTLResourceUsageRead];
-    [enc useResource:output usage:MTLResourceUsageWrite];
-    for (int i = 0; i < 2; i++)
-      if (tables[i])
-        [enc useResource:tables[i] usage:MTLResourceUsageRead];
-    [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-    [enc endEncoding];
-    [cb commit];
-    [cb waitUntilCompleted];
-    if (cb.status != MTLCommandBufferStatusCompleted) {
-      fprintf(stderr, "GPU %s\n", cb.error.localizedDescription.UTF8String);
-      return 10;
-    }
-    if (memcmp(output.contents, expected.bytes, groups * 96)) {
-      fprintf(stderr, "MISMATCH\n");
-      return 11;
+    for (unsigned long sample = 0; sample < samples; ++sample) {
+      memset(output.contents, 0xcd, output.length);
+      id<MTLCommandBuffer> cb = [queue commandBuffer];
+      uint64_t begin = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:pso];
+      [enc setBuffer:top offset:0 atIndex:kIRArgumentBufferBindPoint];
+      [enc useResource:input usage:MTLResourceUsageRead];
+      [enc useResource:output usage:MTLResourceUsageWrite];
+      for (int i = 0; i < 2; i++)
+        if (tables[i])
+          [enc useResource:tables[i] usage:MTLResourceUsageRead];
+      [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+          threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+      [enc endEncoding];
+      uint64_t cpu_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - begin;
+      [cb commit];
+      [cb waitUntilCompleted];
+      if (cb.status != MTLCommandBufferStatusCompleted) {
+        fprintf(stderr, "GPU %s\n", cb.error.localizedDescription.UTF8String);
+        return 10;
+      }
+      if (memcmp(output.contents, expected.bytes, groups * 96)) {
+        fprintf(stderr, "MISMATCH\n");
+        return 11;
+      }
+      if (argc == 7) {
+        if (cb.GPUEndTime <= cb.GPUStartTime || cb.GPUStartTime <= 0)
+          return 12;
+        printf("SAMPLE %lu %llu %.0f\n", sample, (unsigned long long)cpu_ns,
+               (cb.GPUEndTime - cb.GPUStartTime) * 1e9);
+      }
     }
     fprintf(stderr, "PASS %s groups=%lu bytes=%lu\n", argv[5],
             (unsigned long)groups, (unsigned long)(groups * 96));
