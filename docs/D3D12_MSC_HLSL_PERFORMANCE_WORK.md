@@ -931,6 +931,27 @@ compile `dx12_compute_sm6_threadgroup_coherency_fixture` and
 `--wrong-expected` for the negative control. Use a paired isolated Wine stage
 and prefix as in the other tests.
 
+### Threadgroup compatibility flag A/B correctness
+
+`tests/dx12/run_msc_threadgroup_flags.py` compiles a test-only forwarding
+library that records MSC's requested flags and, only in the enabled test mode,
+adds `IRCompatibilityFlagEnsureTGMemoryCoherency`. It verifies staged artifacts
+against the build, uses isolated Wine, disables the DXMT shader cache, checks
+the forwarded flag values and actual loaded library paths, and enables Metal
+API and GPU validation. The forwarder is only used through the test process's
+explicit converter path; production compiler settings remain unchanged.
+
+On Apple M1 Max / macOS 27.2, the clean Metal 27.2 candidate-LLVM stage passed
+both root and descriptor-table outputs with original flags 4 and with flags
+1028 (4 | 1024). Each successful run checked three readback cycles, two input
+sets and guard bytes. Wrong-expected controls failed as expected in both flag
+modes. Two sequential full A/B runs passed; logs, executable/library hashes and
+inputs are in `result-threadgroup-flags-final-20261103/` and its adjacent log.
+This demonstrates equivalent outputs for this synchronized test only: it does
+not establish that the flag fixes a real game or improves performance. No GPU
+timing or unsynchronized data-race claim was made, and the flag stays disabled
+by default.
+
 The separate `llvm-metadata-selftest` target is self-contained: it builds a
 small LLVM 15 string-type module in memory and checks the unmodified module,
 a size-flag mutation and an unknown-code mutation. It needs no MSC library,
