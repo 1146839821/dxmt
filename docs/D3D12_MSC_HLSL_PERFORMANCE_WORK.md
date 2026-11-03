@@ -1072,3 +1072,17 @@ prebuilt LLVM is not automatically replaced by the CI change. A separate-build
 example is documented in `docs/DEVELOPMENT.md`; this is not a claim that all
 metadata versions or the Wine runtime have been validated with the latest
 patch set.
+
+The complete current patch set was subsequently used in a separate clean
+x86_64 DXMT build under `dxmt-current-patches-20261103/`, with the native LLVM
+path set to the rebuilt installation. The full build and the metadata
+self-test passed. In a new isolated Wine stage and prefix, the embedded-debug
+main and branch fixtures passed two normal runs, Metal API/GPU validation and
+the deliberately wrong-pixel control without ignore-debug. The runner checked
+the staged PE and Unix paths and actual MSC path. The linked WineMetal Unix
+library SHA-256 was
+`563c717a8132b4ffce19c1e9d1a11b655e1f3df66758a5220134116d883a1bb7`;
+the link command used `llvm-current-patches-20261103/install/lib`. Results and
+identities are in `result-current-patches-debug-20261103/` outside the
+repository. This covers the current patch set on these x86_64 Wine fixtures;
+it does not establish arm64 Wine runtime or arbitrary metadata compatibility.
