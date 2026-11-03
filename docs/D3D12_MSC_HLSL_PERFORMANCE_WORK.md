@@ -854,3 +854,16 @@ successful parse pairs each. The basic-type and derived-type negative cases
 and debug double lowering control also passed. This checks one record shape;
 the existing unparsed AIR pass-through policy and other metadata types remain
 unchanged. CI will use a new patch hash but has not run this revision.
+
+### String-type size flag guard
+
+LLVM 22 uses bit 1 of `METADATA_STRING_TYPE` operand 0 for metadata-valued
+size. LLVM 15 instead treats that operand as a distinct flag. A synthetic
+size-flag input, based on LLVM 15's `distringtype-backward.ll` test assembled
+with LLVM 15, was accepted by the earlier candidate. The candidate now rejects
+operand values above 1 after its existing record-length check. Eight threads
+each passed 1,000 rejection/original-parse pairs; the existing composite,
+basic, derived and pointer-auth negative fixtures and debug double lowering
+control passed. `--string-size-flag` generates this synthetic case. Other
+records and unparsed AIR fallback behavior remain unchanged; CI has not run
+the updated patch hash.
