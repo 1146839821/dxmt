@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import struct
 from pathlib import Path
 import subprocess
 import sys
@@ -45,6 +46,24 @@ def main():
         cases.append((f'invalid-{size}', 'invalid', converter, 'Z:' + str(fixture).replace('/', '\\')))
         if size == 1:
             cases.append(('incompatible-short', 'incompatible', fake, 'Z:' + str(fixture).replace('/', '\\')))
+    shader = (build / 'tests/dx12/compute_sm6.cs.cso').read_bytes()
+    if shader[:4] != b'DXBC' or len(shader) < 40:
+        raise SystemExit('expected a DXBC-wrapped DXIL fixture')
+    malformed = {f'container-short-{size}': shader[:size] for size in (4, 8, 16, 31, 32)}
+    for label, offset, value in (('bad-size', 24, len(shader) + 1),
+                                  ('bad-count', 28, 0xffffffff),
+                                  ('bad-offset', 32, 0xffffffff)):
+        data = bytearray(shader)
+        struct.pack_into('<I', data, offset, value)
+        malformed[label] = data
+    data = bytearray(shader)
+    first_offset = struct.unpack_from('<I', data, 32)[0]
+    struct.pack_into('<I', data, first_offset + 4, 0xffffffff)
+    malformed['bad-part-size'] = data
+    for label, data in malformed.items():
+        fixture = output / (label + '.dxil')
+        fixture.write_bytes(data)
+        cases.append((label, 'invalid', converter, 'Z:' + str(fixture).replace('/', '\\')))
     for label, mode, library, fixture in cases:
         env['DXMT_METALIRCONVERTER_PATH'] = str(library)
         result = subprocess.run([str(stage / 'wine/bin/wine'), 'dx12_msc_unavailable.exe', mode, fixture],

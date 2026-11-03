@@ -220,6 +220,18 @@ with both Metal validation layers. Results are in
 `result-msc-truncated-hlsl-20261103/`. This minimum-size guard does not
 validate larger malformed containers or prove MSC cannot fault on other input.
 
+Subsequent Wine tests showed the same access violation for `DXBC`-prefixed
+4-, 8-, 16- and 31-byte inputs. The bridge now checks DXBC container size,
+part-table bounds and each part's header and payload bounds before calling
+MSC. It preserves the existing non-DXBC path and does not validate DXIL
+instructions, hashes, overlapping parts or semantics. Wine regression cases
+cover truncated headers and mutated container size, part count, offset and
+payload length, plus valid DXIL and incompatible-runtime controls. All passed;
+the HLSL GPU positive and wrong-oracle controls also passed with Metal API/GPU
+validation. Evidence is under `result-msc-container-bounds-20261103/` and
+`result-msc-container-bounds-hlsl-20261103/` outside the repository. The
+guard is not a proof that all other malformed bytecode is safe to submit.
+
 At `c24cfbb1`, the current patched-LLVM x86_64 build also passed the existing
 MSC triangle geometry differential test in isolated Wine with Metal API and
 GPU validation. Both baseline and injected stage-in buffer-growth modes

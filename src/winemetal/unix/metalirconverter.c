@@ -247,6 +247,32 @@ dxmt_msc_result_from_error(const IRError *error) {
   }
 }
 
+/* Validate container bounds before passing DXBC-wrapped DXIL to MSC.  Keep
+ * non-container bytecode on the existing path; this is not a DXIL validator. */
+static bool
+dxmt_msc_dxbc_bounds_valid(const uint8_t *bytes, size_t size) {
+  if (size < 4 || memcmp(bytes, "DXBC", 4))
+    return true;
+  if (size < 32 || size > UINT32_MAX)
+    return false;
+  uint32_t declared_size, count;
+  memcpy(&declared_size, bytes + 24, sizeof(declared_size));
+  memcpy(&count, bytes + 28, sizeof(count));
+  if (declared_size != size || count > (size - 32) / 4)
+    return false;
+  const size_t table_end = 32 + (size_t)count * 4;
+  for (uint32_t i = 0; i < count; ++i) {
+    uint32_t offset, length;
+    memcpy(&offset, bytes + 32 + (size_t)i * 4, sizeof(offset));
+    if (offset < table_end || offset > size || size - offset < 8)
+      return false;
+    memcpy(&length, bytes + offset + 4, sizeof(length));
+    if (length > size - offset - 8)
+      return false;
+  }
+  return true;
+}
+
 static void
 dxmt_msc_set_compiler_configuration(IRCompiler *compiler, const struct dxmt_msc_compile_dxil_params *params) {
   const bool flags_supplied = (params->reserved & DXMT_MSC_COMPILE_FLAG_EXPLICIT_COMPATIBILITY) ||
@@ -830,8 +856,8 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
   }
 
   /* Neither a DXIL container nor LLVM bitcode can fit in fewer than four bytes. */
-  if (params->dxil_size < 4) {
-    dxmt_msc_set_error(params, DXMT_MSC_ERROR_INVALID_DXIL, "DXIL input is truncated");
+  if (params->dxil_size < 4 || !dxmt_msc_dxbc_bounds_valid(params->dxil, params->dxil_size)) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_INVALID_DXIL, "DXIL input is truncated or malformed");
     return DXMT_MSC_ERROR_INVALID_DXIL;
   }
 
