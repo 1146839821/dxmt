@@ -253,6 +253,21 @@ existing behavior; in particular the four-zero-byte Wine fault remains an
 open issue. No general malformed-bitcode safety claim or validation-default
 change follows from these checks.
 
+On the installed MSC runtime, the compute fixture's extracted raw LLVM bitcode
+and its unwrapped DXIL program section both faulted through Wine with explicit
+zero validation flags, like a four-zero-byte input. With the explicit
+`IRCompilerValidationFlagValidateDXIL` flag, each returned the bridge's
+invalid-DXIL error instead. The reusable Wine test now generates and checks
+all three inputs with validation enabled, alongside the existing valid and
+malformed container controls. Results are in
+`result-msc-raw-validation-20261103/`; stage/build hashes and actual loaded
+bridge/runtime identities are checked. This is one MSC version and one
+fixture, and does not establish which raw inputs other versions accept. The
+explicit zero-flag non-container fault remains unresolved: silently forcing a
+validation flag would alter the caller's requested configuration, and
+rejecting all non-container input would require a proven API compatibility
+contract. No production configuration is changed by this experiment.
+
 At `c24cfbb1`, the current patched-LLVM x86_64 build also passed the existing
 MSC triangle geometry differential test in isolated Wine with Metal API and
 GPU validation. Both baseline and injected stage-in buffer-growth modes

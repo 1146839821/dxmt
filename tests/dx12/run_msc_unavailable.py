@@ -67,6 +67,17 @@ def main():
     offsets = [struct.unpack_from('<I', shader, 32 + i * 4)[0]
                for i in range(struct.unpack_from('<I', shader, 28)[0])]
     dxil = next(offset for offset in offsets if shader[offset:offset + 4] == b'DXIL')
+    dxil_length = struct.unpack_from('<I', shader, dxil + 4)[0]
+    bitcode_offset, bitcode_size = struct.unpack_from('<II', shader, dxil + 24)
+    raw_inputs = {
+        'validated-zero': b'\0' * 4,
+        'validated-program': shader[dxil + 8:dxil + 8 + dxil_length],
+        'validated-bitcode': shader[dxil + 16 + bitcode_offset:dxil + 16 + bitcode_offset + bitcode_size],
+    }
+    for label, data in raw_inputs.items():
+        fixture = output / (label + '.dxil')
+        fixture.write_bytes(data)
+        cases.append((label, 'validated-invalid', converter, 'Z:' + str(fixture).replace('/', '\\')))
     for label, field, value in (('bad-dxil-magic', dxil + 16, 0),
                                  ('bad-bitcode-offset', dxil + 24, 0xffffffff),
                                  ('bad-bitcode-size', dxil + 28, 0xffffffff)):
