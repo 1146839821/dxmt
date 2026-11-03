@@ -867,3 +867,24 @@ basic, derived and pointer-auth negative fixtures and debug double lowering
 control passed. `--string-size-flag` generates this synthetic case. Other
 records and unparsed AIR fallback behavior remain unchanged; CI has not run
 the updated patch hash.
+
+### Unknown metadata records and patch application
+
+LLVM 15's `parseOneMetadata` ignores unknown record codes. Replacing a known
+string-type record code with synthetic code 47 caused the candidate reader to
+abort later while resolving a metadata reference. The candidate now returns an
+error for unknown codes above LLVM 15's last defined code (`METADATA_ARG_LIST`,
+46), retaining the old handling of reserved or known lower codes. Eight threads
+each passed 1,000 rejection/original-parse pairs; five existing synthetic
+metadata controls and the debug double lowering control also passed. This
+tests the eager parsing path, not every LLVM lazy-load fatal-error path, and
+does not change the WineMetal pass-through policy for unparsed AIR.
+
+The previous patch files used zero-context hunks. A later patch revision
+shifted line positions and demonstrated that applying the cleanup patch after
+the compatibility patch could insert code incorrectly and fail compilation.
+Both patches now use context hunks and were applied in CI order to a fresh
+isolated reader, compiled and tested. `patches/llvm/.gitattributes` disables
+the trailing-space check for patch files because blank unified-diff context
+lines must contain a leading space. The changed content invalidates the CI
+cache; this revision has not run on GitHub Actions.

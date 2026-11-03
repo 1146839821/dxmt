@@ -1,25 +1,68 @@
 --- a/llvm/lib/Bitcode/Reader/MetadataLoader.cpp
 +++ b/llvm/lib/Bitcode/Reader/MetadataLoader.cpp
-@@ -17,0 +18 @@
+@@ -15,6 +15,7 @@
+ #include "llvm/ADT/DenseMap.h"
+ #include "llvm/ADT/DenseSet.h"
+ #include "llvm/ADT/None.h"
 +#include "llvm/ADT/ScopeExit.h"
-@@ -354,0 +356,6 @@
+ #include "llvm/ADT/Optional.h"
+ #include "llvm/ADT/STLFunctionalExtras.h"
+ #include "llvm/ADT/SmallString.h"
+@@ -352,6 +353,12 @@
+            "PlaceholderQueue hasn't been flushed before being destroyed");
+   }
+   bool empty() const { return PHs.empty(); }
 +  void abandon() {
 +    while (!PHs.empty()) {
 +      PHs.front().replaceUseWith(nullptr);
 +      PHs.pop_front();
 +    }
 +  }
-@@ -969,0 +977,2 @@
+   DistinctMDOperandPlaceholder &getPlaceholderOp(unsigned ID);
+   void flush(BitcodeReaderMetadataList &MetadataList);
+ 
+@@ -967,6 +974,8 @@
+ 
+   SmallVector<uint64_t, 64> Record;
+   PlaceholderQueue Placeholders;
 +  bool Success = false;
 +  auto Cleanup = make_scope_exit([&] { if (!Success) Placeholders.abandon(); });
-@@ -1004,0 +1014 @@
+ 
+   // We lazy-load module-level metadata: we build an index for each record, and
+   // then load individual record as needed, starting with the named metadata.
+@@ -1002,8 +1011,10 @@
+         // FIXME this drops the error on the floor, which
+         // ThinLTO/X86/debuginfo-cu-import.ll relies on.
+         consumeError(std::move(Err));
 +        Success = true;
-@@ -1006,0 +1017 @@
+         return Error::success();
+       }
 +      Success = true;
-@@ -1026,0 +1038 @@
+       return Error::success();
+     }
+     // Couldn't load an index, fallback to loading all the block "old-style".
+@@ -1024,6 +1035,7 @@
+     case BitstreamEntry::EndBlock:
+       resolveForwardRefsAndPlaceholders(Placeholders);
+       upgradeDebugInfo();
 +      Success = true;
-@@ -2200,0 +2213,2 @@
+       return Error::success();
+     case BitstreamEntry::Record:
+       // The interesting case.
+@@ -2198,6 +2210,8 @@
+ 
+   SmallVector<uint64_t, 64> Record;
+   PlaceholderQueue Placeholders;
 +  bool Success = false;
 +  auto Cleanup = make_scope_exit([&] { if (!Success) Placeholders.abandon(); });
-@@ -2212,0 +2227 @@
+ 
+   while (true) {
+     BitstreamEntry Entry;
+@@ -2210,6 +2224,7 @@
+       return error("Malformed block");
+     case BitstreamEntry::EndBlock:
+       resolveForwardRefsAndPlaceholders(Placeholders);
 +      Success = true;
+       return Error::success();
+     case BitstreamEntry::Record:
+       // The interesting case.

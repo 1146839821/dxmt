@@ -31,17 +31,20 @@ def main():
                        help='set the size-as-metadata flag on a known composite type')
     modes.add_argument('--string-size-flag', action='store_true',
                        help='set the size-as-metadata flag on a known string type')
+    modes.add_argument('--unknown-string-record', action='store_true',
+                       help='change a known string record code from 41 to 47')
     args = parser.parse_args()
     data = bytearray(args.input.read_bytes())
     bits = [(byte >> bit) & 1 for byte in data for bit in range(8)]
-    operands = ((0, 18, 9, 0, 26, 0, 0, 0, 0) if args.string_size_flag else
+    string_record = args.string_size_flag or args.unknown_string_record
+    operands = ((0, 18, 9, 0, 26, 0, 0, 0, 0) if string_record else
                 (2, 2, 5, 65, 2, 0, 0, 128, 32, 0, 0, 73, 0, 0, 77, 0, 0, 0, 0, 0, 0, 0)
                 if args.composite_size_flag else
                 (0, 36, 7, 32, 32, 4, 0) if args.basic_size_flag else
                 (0, 13, 6, 65, 2, 78, 68, 32, 32, 0, 3, 0, 0, 0))
-    if not (args.size_flag_14 or args.basic_size_flag or args.composite_size_flag or args.string_size_flag):
+    if not (args.size_flag_14 or args.basic_size_flag or args.composite_size_flag or string_record):
         operands += (0,)
-    record_code = 41 if args.string_size_flag else 18 if args.composite_size_flag else 15 if args.basic_size_flag else 17
+    record_code = 41 if string_record else 18 if args.composite_size_flag else 15 if args.basic_size_flag else 17
     pattern = [1, 1, 0, 0] + vbr6(record_code) + vbr6(len(operands))
     for operand in operands:
         pattern.extend(vbr6(operand))
@@ -49,6 +52,14 @@ def main():
                if bits[offset:offset + len(pattern)] == pattern]
     if len(matches) != 1:
         raise SystemExit(f'expected exactly one known metadata record, found {len(matches)}')
+    if args.unknown_string_record:
+        for offset in (1, 2):
+            bit = matches[0] + 4 + offset
+            data[bit // 8] ^= 1 << (bit % 8)
+        with args.output.open('xb') as output:
+            output.write(data)
+        print('Changed metadata record code from 41 to 47')
+        return
     flag_mode = args.size_flag_14 or args.basic_size_flag or args.composite_size_flag or args.string_size_flag
     bit = (matches[0] + 4 + len(vbr6(record_code)) + len(vbr6(len(operands))) +
            (2 if args.composite_size_flag else 1)
