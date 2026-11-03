@@ -2,8 +2,13 @@
 # Experimental LLVM 15 candidate: build into a new isolated directory only.
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  printf 'Usage: %s LLVM_SOURCE NEW_OUTPUT_DIRECTORY\n' "$0" >&2
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+  printf 'Usage: %s LLVM_SOURCE NEW_OUTPUT_DIRECTORY [x86_64|arm64]\n' "$0" >&2
+  exit 2
+fi
+arch=${3:-x86_64}
+if [[ "$arch" != x86_64 && "$arch" != arm64 ]]; then
+  printf 'Unsupported architecture: %s\n' "$arch" >&2
   exit 2
 fi
 repo_dir=$(cd "$(dirname "$0")/../.." && pwd -P)
@@ -25,8 +30,8 @@ for patch_file in experimental-llvm15-empty-ptrauth.patch experimental-llvm15-pl
 done
 cmake -B "$output_dir/build" -S "$output_dir/source/llvm" \
   -DCMAKE_INSTALL_PREFIX="$output_dir/install" \
-  -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-  -DLLVM_HOST_TRIPLE=x86_64-apple-darwin \
+  -DCMAKE_OSX_ARCHITECTURES="$arch" \
+  -DLLVM_HOST_TRIPLE="$arch-apple-darwin" \
   -DLLVM_ENABLE_ASSERTIONS=On -DLLVM_ENABLE_ZSTD=Off \
   -DCMAKE_BUILD_TYPE=Release -DLLVM_TARGETS_TO_BUILD= -DLLVM_BUILD_TOOLS=Off \
   -DBUG_REPORT_URL=https://github.com/3Shain/dxmt -DPACKAGE_VENDOR=DXMT \

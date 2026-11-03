@@ -803,3 +803,13 @@ The script is opt-in. Production CI still uses unmodified LLVM: changing it
 requires cache keys that include both patches, arm64 validation, and a decision
 on unsupported AIR fallback semantics. Existing version-only cache restore
 keys must not be used for a patched toolchain.
+
+The candidate toolchain script also accepts a third argument `arm64` (the
+default remains `x86_64`). On Apple M1 Max, a complete isolated arm64 LLVM
+15.0.7 build and install succeeded. A native arm64 stress executable linked
+against that installation, confirmed by its linker map, passed eight threads
+with 1,000 synthetic metadata rejection and valid captured-AIR parse pairs
+each. The build and test artifacts are in `llvm-script-arm64-20261103/`
+outside the repository. This verifies the reader in a native diagnostic, not
+an arm64 DXMT/Wine runtime or general shader compatibility. CI remains
+unchanged.
