@@ -85,7 +85,7 @@ def main():
     if args.timed:
         timing_env = {k: v for k, v in env.items()
                       if not k.startswith(('MTL_DEBUG_', 'MTL_SHADER_VALIDATION'))}
-        results = {mode: {'cpu': [], 'gpu': []} for mode in ('linear', 'root')}
+        results = {mode: {'setup': [], 'cpu': [], 'gpu': []} for mode in ('linear', 'root')}
         for process in range(3):
             for mode in (('linear', 'root') if process % 2 == 0 else ('root', 'linear')):
                 cmd = [str(executable), str(output / (mode + '.metallib')),
@@ -95,18 +95,19 @@ def main():
                 log = (result.stdout + result.stderr).decode('utf-8', errors='replace')
                 label = f'{mode}-timed-{process}'
                 (output / (label + '.log')).write_text(log)
-                rows = re.findall(r'^SAMPLE (\d+) (\d+) (\d+)$', log, re.M)
+                rows = re.findall(r'^SAMPLE (\d+) (\d+) (\d+) (\d+)$', log, re.M)
                 if (result.returncode or 'PASS ' + mode not in log or len(rows) != 30 or
                         [int(row[0]) for row in rows] != list(range(30)) or
                         'Metal API Validation Enabled' in log or 'Metal GPU Validation Enabled' in log or
-                        any(int(row[1]) <= 0 or int(row[2]) <= 0 for row in rows)):
+                        any(int(row[1]) <= 0 or int(row[2]) <= 0 or int(row[3]) <= 0 for row in rows)):
                     raise SystemExit(f'{label} failed; see {output / (label + ".log")}')
-                for _, cpu, gpu in rows[5:]:
+                for _, setup, cpu, gpu in rows[5:]:
+                    results[mode]['setup'].append(int(setup))
                     results[mode]['cpu'].append(int(cpu))
                     results[mode]['gpu'].append(int(gpu))
                 print(label, 'PASS', flush=True)
         for mode in ('linear', 'root'):
-            for kind in ('cpu', 'gpu'):
+            for kind in ('setup', 'cpu', 'gpu'):
                 values = sorted(results[mode][kind])
                 print('TIMING_NS', mode, kind, 'n', len(values), 'median', statistics.median(values),
                       'p95_nearest_rank', values[math.ceil(.95 * len(values)) - 1],

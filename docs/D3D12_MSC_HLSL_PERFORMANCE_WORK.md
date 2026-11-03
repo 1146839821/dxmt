@@ -1035,6 +1035,23 @@ memory footprint, larger resource sets, D3D12 binding overhead and game-level
 effects remain unmeasured. Raw data is in
 `result-msc-linear-timing-final-20261103/` outside the repository.
 
+The probe additionally times rewriting the two already-allocated resource
+descriptors before each command buffer. Linear writes two descriptors into
+the top-level buffer; explicit layout writes two descriptors into separate
+tables and updates two top-level table addresses. With the same validation
+controls, three processes and 25 post-warm-up samples each, descriptor-update
+median/P95 were 125/291 ns for linear and 166/292 ns for explicit tables.
+The corresponding command-encoding medians/P95 were 3.583/7.042 µs and
+3.625/6.209 µs. The GPU command-buffer medians/P95 were 9.500/14.125 µs and
+11.625/13.958 µs; the linear run included a 995 µs maximum outlier. Every
+sample checked GPU output. Raw logs and hashes are in
+`result-msc-linear-setup-20261103/` outside the repository.
+
+This measures repeated writes of a tiny, already allocated two-resource set;
+it excludes allocation, descriptor heap management, synchronization and the
+WineMetal D3D12 binding path. The nanosecond-scale CPU differences are close to
+timer and call overhead and cannot justify a production optimization.
+
 The separate `llvm-metadata-selftest` target is self-contained: it builds a
 small LLVM 15 string-type module in memory and checks the unmodified module,
 a size-flag mutation and an unknown-code mutation. It needs no MSC library,

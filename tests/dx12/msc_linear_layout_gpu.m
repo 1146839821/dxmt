@@ -65,11 +65,13 @@ int main(int argc, const char **argv) {
     if (!input || !output || !top)
       return 6;
     id<MTLBuffer> tables[2] = {nil, nil};
+    NSUInteger offsets[2] = {};
     memset(top.contents, 0, 256);
     BOOL linear = !strcmp(argv[5], "linear");
     for (unsigned i = 0; i < 2; i++) {
       NSDictionary *item = args[i];
       NSUInteger offset = [item[@"EltOffset"] unsignedIntegerValue];
+      offsets[i] = offset;
       NSString *type = item[@"Type"];
       if (offset + 24 > 256)
         return 7;
@@ -100,6 +102,21 @@ int main(int argc, const char **argv) {
     id<MTLCommandQueue> queue = [dev newCommandQueue];
     for (unsigned long sample = 0; sample < samples; ++sample) {
       memset(output.contents, 0xcd, output.length);
+      uint64_t setup_begin = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+      for (unsigned i = 0; i < 2; ++i) {
+        Descriptor desc = {};
+        IRDescriptorTableSetBuffer(&desc,
+                                   i ? output.gpuAddress : input.gpuAddress,
+                                   i ? output.length : input.length);
+        if (linear) {
+          memcpy((char *)top.contents + offsets[i], &desc, sizeof(desc));
+        } else {
+          memcpy(tables[i].contents, &desc, sizeof(desc));
+          uint64_t address = tables[i].gpuAddress;
+          memcpy((char *)top.contents + offsets[i], &address, sizeof(address));
+        }
+      }
+      uint64_t setup_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - setup_begin;
       id<MTLCommandBuffer> cb = [queue commandBuffer];
       uint64_t begin = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
       id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
@@ -127,7 +144,8 @@ int main(int argc, const char **argv) {
       if (argc == 7) {
         if (cb.GPUEndTime <= cb.GPUStartTime || cb.GPUStartTime <= 0)
           return 12;
-        printf("SAMPLE %lu %llu %.0f\n", sample, (unsigned long long)cpu_ns,
+        printf("SAMPLE %lu %llu %llu %.0f\n", sample,
+               (unsigned long long)setup_ns, (unsigned long long)cpu_ns,
                (cb.GPUEndTime - cb.GPUStartTime) * 1e9);
       }
     }
