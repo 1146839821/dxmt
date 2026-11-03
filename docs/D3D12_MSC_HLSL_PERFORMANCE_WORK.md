@@ -749,3 +749,11 @@ Logs and exact results are in `result-llvm-combined-debug-20261103/` outside
 the repository. This is evidence for these fixtures, not a clean Metal
 toolchain build, comprehensive debug metadata support, or game compatibility.
 The candidate remains experimental and the production toolchain is unchanged.
+
+The same isolated DXMT/LLVM stage was subsequently exercised with both `-Od`
+and `-O3` variants of the main and branch fixtures. For each configuration,
+two normal runs, Metal API/GPU validation and the deliberately wrong-pixel
+control passed. The runner verified the same PE/Unix and MSC loaded paths and
+artifact identities. Results are in `result-llvm-combined-od-20261103/` and
+`result-llvm-combined-o3-20261103/`; this does not cover D3D10/11 or arbitrary
+shader operations.
