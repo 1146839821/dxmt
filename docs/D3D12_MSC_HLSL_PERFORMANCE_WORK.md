@@ -705,3 +705,20 @@ path, unlike the opaque-pointer control.
 The test only covers one synthetic record and sequential execution. The
 candidate remains experimental; concurrent and broader malformed inputs,
 complete toolchain rebuilding and actual application behavior are unverified.
+
+An extended stress probe ran eight threads, each with its own LLVM context and
+1,000 alternating synthetic rejection and successful captured-AIR parses,
+against the combined reader candidate. All 8,000 pairs passed. This covers
+concurrency for this one input pair, not arbitrary malformed metadata or
+sharing a single LLVM context between threads.
+
+An isolated clone of LLVM `llvmorg-15.0.7` with both candidate patches was
+configured, fully built and installed using the x86_64 assertion-enabled
+configuration in `docs/DEVELOPMENT.md`. The install is under
+`llvm-combined-full-20261103/`, outside the repository. Diagnostic executables
+were relinked against that install; the linker map identifies its
+`libLLVMBitReader.a(MetadataLoader.cpp.o)`. The eight-thread rejection/valid
+parse probe passed again, and the debug double fixture reported one truncation
+before and zero after with `llvm.dbg.cu` present. This is a clean LLVM library
+rebuild and native diagnostic, not a full DXMT build or Wine runtime test
+using the new LLVM installation. The production toolchain was not replaced.
