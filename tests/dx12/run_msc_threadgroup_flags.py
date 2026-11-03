@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import shlex
+import statistics
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +21,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('stage', 'prefix', 'build', 'converter', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--timed', action='store_true', help='collect validation-enabled GPU timestamps')
+    parser.add_argument('--repeats', type=int, default=1)
     args = parser.parse_args()
+    if args.repeats < 1 or args.repeats > 20:
+        parser.error('--repeats must be between 1 and 20')
     stage, prefix, build, converter = (getattr(args, n).resolve(strict=True)
                                        for n in ('stage', 'prefix', 'build', 'converter'))
     out = args.output.absolute()
@@ -49,14 +54,18 @@ def main():
     print('converter sha256', sha(converter), 'wrapper sha256', sha(wrapper), flush=True)
     for _, target in pairs:
         print(target, sha(stage / target), flush=True)
-    cases = [('baseline', 'root', False), ('enabled', 'root', False),
-             ('enabled', 'table', False), ('baseline', 'table', False),
-             ('baseline', 'root', True), ('enabled', 'root', True)]
-    for mode, binding, wrong in cases:
+    base_cases = [('baseline', 'root', False), ('enabled', 'root', False),
+                  ('enabled', 'table', False), ('baseline', 'table', False)]
+    cases = [(mode, binding, wrong, index) for index in range(args.repeats)
+             for mode, binding, wrong in (base_cases if index % 2 == 0 else list(reversed(base_cases)))]
+    cases += [('baseline', 'root', True, 0), ('enabled', 'root', True, 0)]
+    samples = {}
+    for mode, binding, wrong, index in cases:
         env['DXMT_TEST_THREADGROUP_FLAGS'] = mode
-        label = mode + '-' + binding + ('-wrong' if wrong else '')
+        label = mode + '-' + binding + ('-wrong' if wrong else '-' + str(index))
         cmd = [stage / 'wine/bin/wine', stage / 'dx12_compute_sm6.exe', stage / 'threadgroup.cs.cso',
-               '--threadgroup-differential', binding, out / 'fixtures/inputs.bin', out / 'fixtures/expected.bin']
+               '--threadgroup-timed' if args.timed else '--threadgroup-differential',
+               binding, out / 'fixtures/inputs.bin', out / 'fixtures/expected.bin']
         if wrong:
             cmd.append('--wrong-expected')
         print('+', shlex.join(map(str, cmd)), flush=True)
@@ -65,6 +74,7 @@ def main():
         (out / (label + '.log')).write_text(log)
         flags = re.findall(r'DXMT_TEST_THREADGROUP_FLAGS (\d+) (\d+)', log)
         rows = re.findall(r'MSC numeric kind=int64 binding=' + binding + r' pass=\d cases=32 exact_bytes=3072 guards=64 passed', log)
+        gpu_times = re.findall(r'THREADGROUP_GPU_NS (\d) ([0-9.eE+-]+)', log)
         paths = [str(converter), str(wrapper), str(stage / 'wine/lib/wine/x86_64-unix/winemetal.so')]
         loaded = []
         for dll, kind in [('d3d12.dll', 'native'), ('dxgi.dll', 'native'), ('winemetal.dll', 'builtin')]:
@@ -77,9 +87,20 @@ def main():
                   'Metal GPU Validation Enabled' in log,
                   not re.search(r'(?i)metal (?:api|gpu|shader) validation (?:error|warning)|failed assertion', log),
                   all(x.lower() in log.lower() for x in paths), all(loaded)]
+        if args.timed:
+            checks.append(len(gpu_times) == (1 if wrong else 3) and
+                          [int(index) for index, _ in gpu_times] ==
+                          ([0] if wrong else [0, 1, 2]) and
+                          all(float(value) > 0 for _, value in gpu_times))
         if not all(checks):
             raise SystemExit(f'{label} failed {checks}; see {out / (label + ".log")}')
         print(label, 'PASS', flush=True)
+        if args.timed and not wrong:
+            samples.setdefault((mode, binding), []).append(float(gpu_times[1][1]))
+    for (mode, binding), values in sorted(samples.items()):
+        print('GPU_NS_REPLAY', mode, binding, 'n', len(values),
+              'median', statistics.median(values), 'min', min(values),
+              'max', max(values), 'validation enabled', flush=True)
 
 
 if __name__ == '__main__':

@@ -952,6 +952,25 @@ not establish that the flag fixes a real game or improves performance. No GPU
 timing or unsynchronized data-race claim was made, and the flag stays disabled
 by default.
 
+### Threadgroup timestamp exploration
+
+The differential executor now has a test-only `--threadgroup-timed` mode.
+It places D3D12 timestamp queries around the dispatch while retaining exact
+output and guard checks. The A/B runner accepts `--timed --repeats N`,
+alternates case order, checks each timestamp and reports the second execution
+of the recorded list. Metal API/GPU validation remains enabled throughout.
+
+For three process samples per mode on the same M1 Max, replay timestamp spans
+in microseconds (median; min–max) were: root flags 4: 99.625; 63.334–1345.420;
+root flags 1028: 224.792; 127.083–583.250; table flags 4: 252.708;
+230.750–548.333; table flags 1028: 784.625; 454.167–883.875. All output and
+wrong-expected checks passed. These are not isolated shader durations: DXMT's
+timestamp implementation uses separate blit encoders and fence operations, and
+validation is enabled. The high spread and three samples do not justify P95,
+performance claims, or changing the default flag. Raw logs and hashes are in
+`result-threadgroup-timed-20261103/` and its adjacent log. GPU counters,
+validation-disabled timing, memory impact, and game-level effects are NOT_RUN.
+
 The separate `llvm-metadata-selftest` target is self-contained: it builds a
 small LLVM 15 string-type module in memory and checks the unmodified module,
 a size-flag mutation and an unknown-code mutation. It needs no MSC library,

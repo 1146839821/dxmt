@@ -31,7 +31,8 @@ bool CheckHR(const char *name, HRESULT hr) {
 // The fixture's NUMERIC_DIFFERENTIAL variant uses one thread per group.
 bool RunNumericDifferential(const char *shader_path, bool native16, bool table,
                             const char *input_path, const char *expected_path,
-                            bool wrong_expected, bool threadgroup = false) {
+                            bool wrong_expected, bool threadgroup = false,
+                            bool timed = false) {
   auto read = [](const char *path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f || f.tellg() <= 0 || f.tellg() > 16 * 1024 * 1024)
@@ -74,6 +75,8 @@ bool RunNumericDifferential(const char *shader_path, bool native16, bool table,
     ID3D12Resource *inputs[2] = {}, *output = nullptr, *upload = nullptr,
                    *readback = nullptr;
     ID3D12Fence *fence = nullptr, *gate = nullptr;
+    ID3D12QueryHeap *timestamps = nullptr;
+    ID3D12Resource *timestamp_readback = nullptr;
     HANDLE event = nullptr;
     void release_recording() {
       if (list) {
@@ -120,6 +123,10 @@ bool RunNumericDifferential(const char *shader_path, bool native16, bool table,
       release_recording();
       if (readback)
         readback->Release();
+      if (timestamps)
+        timestamps->Release();
+      if (timestamp_readback)
+        timestamp_readback->Release();
       if (queue)
         queue->Release();
       if (fence)
@@ -251,6 +258,18 @@ bool RunNumericDifferential(const char *shader_path, bool native16, bool table,
   o.event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
   if (!o.event)
     return false;
+  UINT64 timestamp_frequency = 0;
+  if (timed) {
+    D3D12_QUERY_HEAP_DESC query = {D3D12_QUERY_HEAP_TYPE_TIMESTAMP, 2, 0};
+    if (!CheckHR("Threadgroup timestamp heap",
+                 o.device->CreateQueryHeap(&query, IID_PPV_ARGS(&o.timestamps))) ||
+        !CheckHR("Threadgroup timestamp frequency",
+                 o.queue->GetTimestampFrequency(&timestamp_frequency)) ||
+        !timestamp_frequency ||
+        !create_buffer(D3D12_HEAP_TYPE_READBACK, 2 * sizeof(UINT64),
+                       D3D12_RESOURCE_STATE_COPY_DEST, &o.timestamp_readback))
+      return false;
+  }
   D3D12_CPU_DESCRIPTOR_HANDLE cpu = {}, source_cpu = {};
   D3D12_GPU_DESCRIPTOR_HANDLE gpu = {};
   UINT increment = 0;
@@ -320,7 +339,14 @@ bool RunNumericDifferential(const char *shader_path, bool native16, bool table,
         o.list->SetComputeRootUnorderedAccessView(
             1, o.output->GetGPUVirtualAddress() + output_offset);
       }
+      if (timed)
+        o.list->EndQuery(o.timestamps, D3D12_QUERY_TYPE_TIMESTAMP, 0);
       o.list->Dispatch(count, 1, 1);
+      if (timed) {
+        o.list->EndQuery(o.timestamps, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+        o.list->ResolveQueryData(o.timestamps, D3D12_QUERY_TYPE_TIMESTAMP, 0,
+                                 2, o.timestamp_readback, 0);
+      }
       transition(D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                  D3D12_RESOURCE_STATE_COPY_SOURCE);
       o.list->CopyBufferRegion(o.readback, 0, o.output, 0, buffer_size);
@@ -354,6 +380,22 @@ bool RunNumericDifferential(const char *shader_path, bool native16, bool table,
         WaitForSingleObject(o.event, 10000) != WAIT_OBJECT_0 ||
         !CheckHR("Numeric device status", o.device->GetDeviceRemovedReason()))
       return false;
+    if (timed) {
+      UINT64 *times = nullptr;
+      if (!CheckHR("Threadgroup timestamp map",
+                   o.timestamp_readback->Map(0, nullptr,
+                                             reinterpret_cast<void **>(&times))))
+        return false;
+      const UINT64 begin = times[0], end = times[1];
+      o.timestamp_readback->Unmap(0, nullptr);
+      if (end <= begin) {
+        std::cerr << "Invalid threadgroup timestamps\n";
+        return false;
+      }
+      std::cout << "THREADGROUP_GPU_NS " << pass << " "
+                << (double(end - begin) * 1e9 / double(timestamp_frequency))
+                << "\n";
+    }
     if (!CheckHR("Numeric map readback", o.readback->Map(0, nullptr, &mapped)))
       return false;
     bool correct = true;
@@ -390,12 +432,14 @@ bool RunNumericDifferential(const char *shader_path, bool native16, bool table,
 
 int main(int argc, char **argv) {
   if ((argc == 6 || argc == 7) &&
-      strcmp(argv[2], "--threadgroup-differential") == 0) {
+      (!strcmp(argv[2], "--threadgroup-differential") ||
+       !strcmp(argv[2], "--threadgroup-timed"))) {
     if ((strcmp(argv[3], "root") && strcmp(argv[3], "table")) ||
         (argc == 7 && strcmp(argv[6], "--wrong-expected")))
       return 2;
     return RunNumericDifferential(argv[1], false, !strcmp(argv[3], "table"),
-                                  argv[4], argv[5], argc == 7, true)
+                                  argv[4], argv[5], argc == 7, true,
+                                  !strcmp(argv[2], "--threadgroup-timed"))
                ? 0
                : 1;
   }
