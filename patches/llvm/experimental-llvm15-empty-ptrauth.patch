@@ -1,7 +1,8 @@
 --- a/llvm/lib/Bitcode/Reader/MetadataLoader.cpp
 +++ b/llvm/lib/Bitcode/Reader/MetadataLoader.cpp
-@@ -1443,3 +1443,3 @@
-   case bitc::METADATA_DERIVED_TYPE: {
+@@ -1407 +1407 @@
+-    if (Record.size() < 6 || Record.size() > 7)
++    if (Record.size() < 6 || Record.size() > 7 || Record[0] > 1)
+@@ -1444 +1444 @@
 -    if (Record.size() < 12 || Record.size() > 14)
 +    if (Record.size() < 12 || Record.size() > 15 || Record[0] > 1 || (Record.size() == 15 && Record[14] != 0))
-       return error("Invalid record");

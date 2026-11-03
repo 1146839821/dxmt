@@ -828,3 +828,17 @@ threads with 1,000 iterations each. The debug double lowering fixture also
 passed. The new patch changes the CI cache hash. This guard addresses derived
 types only: newer flags and records elsewhere need separate analysis, and
 unparsed AIR still follows the existing warning and pass-through policy.
+
+### Basic-type size flag guard
+
+LLVM 22 also uses bit 1 of `METADATA_BASIC_TYPE` operand 0 to indicate a
+metadata-valued size. LLVM 15 treats that operand as the distinct flag and
+would accept a synthetic record carrying the newer bit with the wrong meaning.
+The candidate now rejects values other than 0 or 1 for this operand. The
+fixture generator's `--basic-size-flag` produces the synthetic case from the
+LLVM 15-serialized debug AIR; the previous candidate accepted it, while the
+updated candidate rejected it and parsed the original in eight threads with
+1,000 pairs each. The derived-type negative cases and debug double lowering
+control also passed. Other metadata record types remain to be audited, and
+this does not change the existing unparsed AIR pass-through policy. The
+modified patch changes the CI cache identity; CI has not run this revision.
