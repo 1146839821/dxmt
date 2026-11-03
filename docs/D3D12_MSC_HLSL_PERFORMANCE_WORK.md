@@ -784,8 +784,8 @@ embedded-debug main and branch fixtures passed two normal runs, Metal API/GPU
 validation and the deliberately wrong-pixel control. The runner checked the
 loaded PE/Unix paths, MSC path and artifact identities. Results are in
 `result-clean-metal272-debug-20261103/` outside the repository. The candidate
-LLVM patches remain experimental and are not applied to production builds;
-this result does not establish compatibility for all shader inputs.
+LLVM patches require the patched CI toolchain or an explicit local candidate
+build; this result does not establish compatibility for all shader inputs.
 
 ### Reproducible candidate toolchain
 
@@ -799,10 +799,11 @@ that installation's `MetadataLoader.cpp.o`, and eight threads each passed
 1,000 synthetic rejection/valid parse pairs. `bash -n` and the existing-output
 negative check passed; `shellcheck` was not available.
 
-The script is opt-in. Production CI still uses unmodified LLVM: changing it
-requires cache keys that include both patches, arm64 validation, and a decision
-on unsupported AIR fallback semantics. Existing version-only cache restore
-keys must not be used for a patched toolchain.
+The script is opt-in. CI now applies both patches when building Darwin LLVM and
+keys its x86_64 and arm64 caches by both patch contents, without falling back to
+version-only Darwin caches. This CI change has not yet run. Local prebuilt
+toolchains are not automatically patched, and unsupported AIR fallback
+semantics remain unchanged.
 
 The candidate toolchain script also accepts a third argument `arm64` (the
 default remains `x86_64`). On Apple M1 Max, a complete isolated arm64 LLVM
@@ -811,5 +812,4 @@ against that installation, confirmed by its linker map, passed eight threads
 with 1,000 synthetic metadata rejection and valid captured-AIR parse pairs
 each. The build and test artifacts are in `llvm-script-arm64-20261103/`
 outside the repository. This verifies the reader in a native diagnostic, not
-an arm64 DXMT/Wine runtime or general shader compatibility. CI remains
-unchanged.
+an arm64 DXMT/Wine runtime or general shader compatibility.

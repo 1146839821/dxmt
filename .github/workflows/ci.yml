@@ -196,13 +196,14 @@ jobs:
     runs-on: macos-26
     needs: setup-llvm-project
     steps:
+      - name: Checkout LLVM patches
+        uses: actions/checkout@v6
+
       - name: Cache LLVM Darwin Build
         id: cache-llvm-darwin
         uses: actions/cache@v5
         with:
-          key: llvm-darwin-${{ env.LLVM_VERSION }}-x86_64-macos
-          restore-keys: |
-            llvm-darwin-${{ env.LLVM_VERSION }}-x86_64-
+          key: llvm-darwin-${{ env.LLVM_VERSION }}-x86_64-macos-${{ hashFiles('patches/llvm/experimental-llvm15-empty-ptrauth.patch', 'patches/llvm/experimental-llvm15-placeholder-cleanup.patch') }}
           lookup-only: true
           path: ./toolchains/llvm-darwin
 
@@ -216,6 +217,8 @@ jobs:
       - name: Build LLVM for Darwin (x86_64)
         if: steps.cache-llvm-darwin.outputs.cache-hit != 'true'
         run: |
+          patch --batch -p1 -d ./toolchains/llvm-project < patches/llvm/experimental-llvm15-empty-ptrauth.patch
+          patch --batch -p1 -d ./toolchains/llvm-project < patches/llvm/experimental-llvm15-placeholder-cleanup.patch
           mkdir -p ./toolchains/llvm-darwin-build
           cmake -B ./toolchains/llvm-darwin-build -S ./toolchains/llvm-project/llvm \
             -DCMAKE_INSTALL_PREFIX="$(pwd)/toolchains/llvm-darwin" \
@@ -239,7 +242,7 @@ jobs:
         if: steps.cache-llvm-darwin.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
-          key: llvm-darwin-${{ env.LLVM_VERSION }}-x86_64-macos
+          key: llvm-darwin-${{ env.LLVM_VERSION }}-x86_64-macos-${{ hashFiles('patches/llvm/experimental-llvm15-empty-ptrauth.patch', 'patches/llvm/experimental-llvm15-placeholder-cleanup.patch') }}
           path: ./toolchains/llvm-darwin
 
   setup-llvm-win:
@@ -304,13 +307,14 @@ jobs:
     runs-on: macos-26
     needs: setup-llvm-project
     steps:
+      - name: Checkout LLVM patches
+        uses: actions/checkout@v6
+
       - name: Cache LLVM Darwin Build (ARM64)
         id: cache-llvm-darwin-arm64
         uses: actions/cache@v5
         with:
-          key: llvm-darwin-${{ env.LLVM_VERSION }}-arm64-macos
-          restore-keys: |
-            llvm-darwin-${{ env.LLVM_VERSION }}-arm64-
+          key: llvm-darwin-${{ env.LLVM_VERSION }}-arm64-macos-${{ hashFiles('patches/llvm/experimental-llvm15-empty-ptrauth.patch', 'patches/llvm/experimental-llvm15-placeholder-cleanup.patch') }}
           lookup-only: true
           path: ./toolchains/llvm-darwin-arm64
 
@@ -324,6 +328,8 @@ jobs:
       - name: Build LLVM for Darwin (arm64)
         if: steps.cache-llvm-darwin-arm64.outputs.cache-hit != 'true'
         run: |
+          patch --batch -p1 -d ./toolchains/llvm-project < patches/llvm/experimental-llvm15-empty-ptrauth.patch
+          patch --batch -p1 -d ./toolchains/llvm-project < patches/llvm/experimental-llvm15-placeholder-cleanup.patch
           mkdir -p ./toolchains/llvm-darwin-arm64-build
           cmake -B ./toolchains/llvm-darwin-arm64-build -S ./toolchains/llvm-project/llvm \
             -DCMAKE_INSTALL_PREFIX="$(pwd)/toolchains/llvm-darwin-arm64" \
@@ -347,7 +353,7 @@ jobs:
         if: steps.cache-llvm-darwin-arm64.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
-          key: llvm-darwin-${{ env.LLVM_VERSION }}-arm64-macos
+          key: llvm-darwin-${{ env.LLVM_VERSION }}-arm64-macos-${{ hashFiles('patches/llvm/experimental-llvm15-empty-ptrauth.patch', 'patches/llvm/experimental-llvm15-placeholder-cleanup.patch') }}
           path: ./toolchains/llvm-darwin-arm64
 
   build-gcc-release-x86_64-windows-cross:
@@ -373,7 +379,7 @@ jobs:
       - name: Restore LLVM Darwin Cache
         uses: actions/cache/restore@v5
         with:
-          key: llvm-darwin-${{ env.LLVM_VERSION }}-x86_64-macos
+          key: llvm-darwin-${{ env.LLVM_VERSION }}-x86_64-macos-${{ hashFiles('patches/llvm/experimental-llvm15-empty-ptrauth.patch', 'patches/llvm/experimental-llvm15-placeholder-cleanup.patch') }}
           path: ./toolchains/llvm-darwin
 
       - name: Select Xcode Version
@@ -456,7 +462,7 @@ jobs:
       - name: Restore LLVM Darwin Cache
         uses: actions/cache/restore@v5
         with:
-          key: llvm-darwin-${{ env.LLVM_VERSION }}-x86_64-macos
+          key: llvm-darwin-${{ env.LLVM_VERSION }}-x86_64-macos-${{ hashFiles('patches/llvm/experimental-llvm15-empty-ptrauth.patch', 'patches/llvm/experimental-llvm15-placeholder-cleanup.patch') }}
           path: ./toolchains/llvm-darwin
 
       - name: Restore LLVM Windows Cache
@@ -508,7 +514,7 @@ jobs:
       - name: Restore LLVM Darwin Cache
         uses: actions/cache/restore@v5
         with:
-          key: llvm-darwin-${{ env.LLVM_VERSION }}-x86_64-macos
+          key: llvm-darwin-${{ env.LLVM_VERSION }}-x86_64-macos-${{ hashFiles('patches/llvm/experimental-llvm15-empty-ptrauth.patch', 'patches/llvm/experimental-llvm15-placeholder-cleanup.patch') }}
           path: ./toolchains/llvm-darwin
 
       - name: Select Xcode Version
@@ -594,7 +600,7 @@ jobs:
       - name: Restore LLVM Darwin ARM64 Cache
         uses: actions/cache/restore@v5
         with:
-          key: llvm-darwin-${{ env.LLVM_VERSION }}-arm64-macos
+          key: llvm-darwin-${{ env.LLVM_VERSION }}-arm64-macos-${{ hashFiles('patches/llvm/experimental-llvm15-empty-ptrauth.patch', 'patches/llvm/experimental-llvm15-placeholder-cleanup.patch') }}
           path: ./toolchains/llvm-darwin-arm64
 
       - name: Select Xcode Version
@@ -640,7 +646,7 @@ jobs:
       - name: Restore LLVM Darwin ARM64 Cache
         uses: actions/cache/restore@v5
         with:
-          key: llvm-darwin-${{ env.LLVM_VERSION }}-arm64-macos
+          key: llvm-darwin-${{ env.LLVM_VERSION }}-arm64-macos-${{ hashFiles('patches/llvm/experimental-llvm15-empty-ptrauth.patch', 'patches/llvm/experimental-llvm15-placeholder-cleanup.patch') }}
           path: ./toolchains/llvm-darwin-arm64
 
       - name: Select Xcode Version
@@ -674,7 +680,7 @@ jobs:
       - name: Restore LLVM Darwin Native Cache
         uses: actions/cache/restore@v5
         with:
-          key: llvm-darwin-${{ env.LLVM_VERSION }}-arm64-macos
+          key: llvm-darwin-${{ env.LLVM_VERSION }}-arm64-macos-${{ hashFiles('patches/llvm/experimental-llvm15-empty-ptrauth.patch', 'patches/llvm/experimental-llvm15-placeholder-cleanup.patch') }}
           path: ./toolchains/llvm-darwin-arm64
 
       - name: Select Xcode Version
