@@ -1052,6 +1052,19 @@ it excludes allocation, descriptor heap management, synchronization and the
 WineMetal D3D12 binding path. The nanosecond-scale CPU differences are close to
 timer and call overhead and cannot justify a production optimization.
 
+The runner also accepts `--groups` (1–4096, default 32). At 1,024 groups
+per input set, both layouts passed both inputs and the deliberately wrong
+reference control with Metal API and GPU validation enabled. Three processes
+per layout each provided 25 post-warm-up samples without validation, checking
+output every time. Linear versus explicit-table median/P95 command-buffer GPU
+times were 13.375/292.375 µs versus 13.125/344.958 µs; maxima were 874.958
+and 858.500 µs. Median descriptor updates were 166 and 167 ns, respectively.
+An initial run reported a zero-nanosecond descriptor update: this is permitted
+because a single update can be below the clock resolution, and is not evidence
+of zero cost. Raw results are in `result-msc-linear-1024-retry-20261103/`.
+The larger dispatch still uses only one SRV and one UAV; the long tails and
+small number of processes preclude a general performance conclusion.
+
 The separate `llvm-metadata-selftest` target is self-contained: it builds a
 small LLVM 15 string-type module in memory and checks the unmodified module,
 a size-flag mutation and an unknown-code mutation. It needs no MSC library,

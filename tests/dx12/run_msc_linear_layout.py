@@ -34,14 +34,19 @@ def main():
                         help='new output directory')
     parser.add_argument('--timed', action='store_true',
                         help='after validation, run separate timing samples without validation')
+    parser.add_argument('--groups', type=int, default=32,
+                        help='threadgroups per input set')
     args = parser.parse_args()
+    if not 1 <= args.groups <= 4096:
+        parser.error('--groups must be between 1 and 4096')
     shader, converter = args.shader.resolve(strict=True), args.converter.resolve(strict=True)
     output = args.output.absolute()
     output.mkdir(parents=True)
     clean_env = {k: v for k, v in os.environ.items()
                  if not k.startswith(('DYLD_', 'DXMT_TEST_', 'MTL_DEBUG_', 'MTL_SHADER_VALIDATION'))}
     fixtures = output / 'fixtures'
-    run([sys.executable, REPO / 'tests/dx12/make_threadgroup_coherency_fixtures.py', fixtures])
+    run([sys.executable, REPO / 'tests/dx12/make_threadgroup_coherency_fixtures.py',
+         fixtures, '--groups', str(args.groups)])
     for name in ('inputs.bin', 'expected.bin'):
         data = (fixtures / name).read_bytes()
         half = len(data) // 2
@@ -96,10 +101,11 @@ def main():
                 label = f'{mode}-timed-{process}'
                 (output / (label + '.log')).write_text(log)
                 rows = re.findall(r'^SAMPLE (\d+) (\d+) (\d+) (\d+)$', log, re.M)
+                # Descriptor updates can be shorter than the host clock resolution.
                 if (result.returncode or 'PASS ' + mode not in log or len(rows) != 30 or
                         [int(row[0]) for row in rows] != list(range(30)) or
                         'Metal API Validation Enabled' in log or 'Metal GPU Validation Enabled' in log or
-                        any(int(row[1]) <= 0 or int(row[2]) <= 0 or int(row[3]) <= 0 for row in rows)):
+                        any(int(row[2]) <= 0 or int(row[3]) <= 0 for row in rows)):
                     raise SystemExit(f'{label} failed; see {output / (label + ".log")}')
                 for _, setup, cpu, gpu in rows[5:]:
                     results[mode]['setup'].append(int(setup))
