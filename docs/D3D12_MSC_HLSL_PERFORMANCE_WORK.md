@@ -138,6 +138,38 @@ semantically equivalent benchmarks and error/fallback tests establish safety.
 
 ## Design card: private compatibility configuration and GPU probes
 
+### Follow-up design card: missing extension setters
+
+**Goal and baseline:** At `c1bfd313`, `dxmt_msc_load_symbols` treats the
+function-constant and framebuffer-fetch space setters as optional. The compile
+configuration skips a missing setter without checking whether the caller asked
+for a special space (`src/winemetal/unix/metalirconverter.c:280-284,415-420`).
+The ordinary D3D12 converter explicitly uses the disabled sentinel
+(`src/d3d12/d3d12_shader_converter.cpp:1403-1404`), while the controlled HLSL
+tests request non-disabled spaces. This is a static observation: behavior with
+a runtime missing either symbol remains **UNVERIFIED**.
+
+**Scope and boundary:** Check the private WineMetal compile contract and its
+32-bit thunk before rejecting an explicitly requested but unavailable setter.
+Preserve the disabled-space ordinary path and existing PE/Unix ABI. In
+particular, audit zero-initialized callers and whether register space zero is a
+valid explicit request before assigning it any new meaning. A missing optional
+setter must not be simulated by changing the user's installed MSC library.
+
+**Proposed verification:** Use a task-local simulated incomplete runtime or
+an isolated symbol-resolution test to exercise each missing setter, each
+enabled/disabled space, and the error code and message. Include a control with
+the installed complete runtime, then run existing ordinary DXIL and HLSL GPU
+tests with paired PE/Unix builds. Any inability to simulate a missing symbol is
+reported as NOT_RUN; a setter's presence alone is not an end-to-end result.
+
+**Risks and rollback:** Rejecting a zero-initialized legacy caller without
+establishing its ABI semantics could introduce a regression. Keep the change
+local to compile validation, retain the existing disabled sentinel, and revert
+the validation and its test together if compatibility cannot be established.
+Done means both negative paths and the ordinary disabled path are verified;
+no feature-level or shader-model claim changes.
+
 **Goal:** distinguish unspecified compatibility from explicitly supplied zero,
 while validating SDK Metal HLSL extensions without changing ordinary D3D12.
 **Baseline:** legacy `compatibility_flags == 0` selects MinLOD; both extension
