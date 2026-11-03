@@ -6,3 +6,6 @@
 @@ -1444 +1444 @@
 -    if (Record.size() < 12 || Record.size() > 14)
 +    if (Record.size() < 12 || Record.size() > 15 || Record[0] > 1 || (Record.size() == 15 && Record[14] != 0))
+@@ -1472 +1472 @@
+-    if (Record.size() < 16 || Record.size() > 22)
++    if (Record.size() < 16 || Record.size() > 22 || Record[0] > 3)

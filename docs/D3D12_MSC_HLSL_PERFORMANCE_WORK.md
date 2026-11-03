@@ -842,3 +842,15 @@ updated candidate rejected it and parsed the original in eight threads with
 control also passed. Other metadata record types remain to be audited, and
 this does not change the existing unparsed AIR pass-through policy. The
 modified patch changes the CI cache identity; CI has not run this revision.
+
+### Composite-type size flag guard
+
+LLVM 15 uses bits 0 and 1 of `METADATA_COMPOSITE_TYPE` operand 0; LLVM 22
+adds bit 2 for metadata-valued size and offset. The captured fixture uses the
+old bit 1. A synthetic input retaining bit 1 and adding bit 2 was accepted by
+the previous candidate; the new guard rejects operand values above 3 while
+continuing to parse the original. Eight threads completed 1,000 rejection and
+successful parse pairs each. The basic-type and derived-type negative cases
+and debug double lowering control also passed. This checks one record shape;
+the existing unparsed AIR pass-through policy and other metadata types remain
+unchanged. CI will use a new patch hash but has not run this revision.
