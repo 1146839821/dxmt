@@ -31,7 +31,7 @@ bool CheckHR(const char *name, HRESULT hr) {
 // The fixture's NUMERIC_DIFFERENTIAL variant uses one thread per group.
 bool RunNumericDifferential(const char *shader_path, bool native16, bool table,
                             const char *input_path, const char *expected_path,
-                            bool wrong_expected) {
+                            bool wrong_expected, bool threadgroup = false) {
   auto read = [](const char *path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f || f.tellg() <= 0 || f.tellg() > 16 * 1024 * 1024)
@@ -227,8 +227,9 @@ bool RunNumericDifferential(const char *shader_path, bool native16, bool table,
     return false;
   }
   const auto threads = static_cast<dxmt::MTLD3D12ComputePipelineState *>(o.pso)->threadgroup_size;
-  if (threads.width != 1 || threads.height != 1 || threads.depth != 1) {
-    std::cerr << "Numeric fixture requires reflected numthreads(1,1,1)\n";
+  if (threads.width != (threadgroup ? 64u : 1u) || threads.height != 1 ||
+      threads.depth != 1) {
+    std::cerr << "Differential fixture has unexpected reflected numthreads\n";
     return false;
   }
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
@@ -388,6 +389,16 @@ bool RunNumericDifferential(const char *shader_path, bool native16, bool table,
 } // namespace
 
 int main(int argc, char **argv) {
+  if ((argc == 6 || argc == 7) &&
+      strcmp(argv[2], "--threadgroup-differential") == 0) {
+    if ((strcmp(argv[3], "root") && strcmp(argv[3], "table")) ||
+        (argc == 7 && strcmp(argv[6], "--wrong-expected")))
+      return 2;
+    return RunNumericDifferential(argv[1], false, !strcmp(argv[3], "table"),
+                                  argv[4], argv[5], argc == 7, true)
+               ? 0
+               : 1;
+  }
   if ((argc == 7 || argc == 8) &&
       strcmp(argv[2], "--numeric-differential") == 0) {
     if ((strcmp(argv[3], "int64") && strcmp(argv[3], "native16")) ||

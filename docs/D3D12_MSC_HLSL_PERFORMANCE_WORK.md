@@ -900,6 +900,37 @@ match specific known records and do not cover arbitrary AIR. Results are in
 `llvm-regression-negative-20261103.log` outside the repository. This runner is
 not yet registered as an automatic CI test.
 
+### Threadgroup memory correctness baseline
+
+**Goal:** prepare a cross-lane GPU correctness control for a future explicit
+`IRCompatibilityFlagEnsureTGMemoryCoherency` A/B test. The existing atomic64
+fixture has one thread and does not exercise cross-lane visibility. **Scope:**
+a 64-thread compute group writes separate `groupshared` elements, executes
+`GroupMemoryBarrierWithGroupSync`, and reads other lanes. Two independent
+32-group input sets have CPU-generated expected values. The existing numeric
+differential executor gained a separate 64-thread mode; its original one-thread
+numeric mode is unchanged. **Rollback:** remove this fixture, generator and
+test-only executor mode. No production flag, capability or binding changed.
+
+On Apple M1 Max, macOS 27.2, isolated Wine and the clean Metal 27.2 build with
+the then-current candidate LLVM, both root-descriptor and descriptor-table
+paths passed three dispatch/readback cycles for both input sets, including byte
+guards. Metal API and GPU validation were enabled; loaded D3D12, WineMetal Unix
+and MSC paths were checked. A deliberately wrong expected-output control
+returned failure. Raw inputs, expected bytes and logs are under
+`threadgroup-baseline-20261103/` outside the repository. This is a baseline
+only: the flag was not enabled or compared, and GPU timing was not measured.
+The pre-existing int64 numeric differential root-descriptor case also passed
+with Metal validation using the same test executable.
+
+Generate the CPU reference with
+`python3 tests/dx12/make_threadgroup_coherency_fixtures.py NEW_DIRECTORY`;
+compile `dx12_compute_sm6_threadgroup_coherency_fixture` and
+`dx12_compute_sm6`, then run the latter with
+`SHADER --threadgroup-differential root INPUT EXPECTED` (or `table`). Append
+`--wrong-expected` for the negative control. Use a paired isolated Wine stage
+and prefix as in the other tests.
+
 The separate `llvm-metadata-selftest` target is self-contained: it builds a
 small LLVM 15 string-type module in memory and checks the unmodified module,
 a size-flag mutation and an unknown-code mutation. It needs no MSC library,
