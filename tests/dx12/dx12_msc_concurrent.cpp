@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <atomic>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -63,6 +64,7 @@ int main(int argc, char **argv) {
   blob->Release();
   constexpr unsigned thread_count = 8;
   std::atomic<unsigned> ready{0}, failures{0};
+  uint64_t elapsed_ns[thread_count] = {};
   std::atomic<bool> go{false};
   std::vector<std::thread> threads;
   for (unsigned i = 0; i < thread_count; ++i)
@@ -75,9 +77,12 @@ int main(int argc, char **argv) {
       while (!go.load())
         std::this_thread::yield();
       ID3D12PipelineState *state = nullptr;
+      const auto start = std::chrono::steady_clock::now();
       if (FAILED(device->CreateComputePipelineState(&pipeline,
                                                     IID_PPV_ARGS(&state))))
         ++failures;
+      elapsed_ns[i] = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now() - start).count();
       if (state)
         state->Release();
     });
@@ -86,6 +91,23 @@ int main(int argc, char **argv) {
   go = true;
   for (auto &thread : threads)
     thread.join();
+  for (unsigned i = 0; i < thread_count; ++i)
+    std::cout << "PSO_CONCURRENT_NS " << i << " " << elapsed_ns[i] << "\n";
+  for (unsigned i = 0; i < thread_count; ++i) {
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline = {};
+    pipeline.pRootSignature = root;
+    pipeline.CS = {shader.data(), shader.size()};
+    ID3D12PipelineState *state = nullptr;
+    const auto start = std::chrono::steady_clock::now();
+    HRESULT hr = device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&state));
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now() - start).count();
+    if (state)
+      state->Release();
+    if (FAILED(hr))
+      ++failures;
+    std::cout << "PSO_REPEAT_NS " << i << " " << elapsed << "\n";
+  }
   root->Release();
   device->Release();
   std::cout << "concurrent MSC PSOs=" << thread_count

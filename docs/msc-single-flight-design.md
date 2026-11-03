@@ -64,3 +64,28 @@ After the single-call fast path, the same instrumented workload used one MSC
 call for eight matching PSOs and two overlapping calls for two distinct
 shaders. The forced-first-failure control continued to recover. Evidence is
 under `dxmt-test/n94-single-flight/{one-pass,one-pass-failure,one-pass-parallel}`.
+
+## PSO timing and repeated-creation control
+
+The isolated concurrent probe records each of eight complete
+`CreateComputePipelineState` calls and then eight sequential creations using
+the first shader in the same process. The runner saves all samples and
+median/P95/min/max in `summary.json` and checks that no traced MSC conversion
+occurs after the concurrent phase. A same-shader run produced one real MSC
+call for eight concurrent creations and no additional call for the eight
+repeated creations. A forced first failure produced one failed initial PSO,
+then successful recovery and repeated creations. Two distinct shaders
+produced two real MSC calls, with two overlapping calls. A forced-serialization
+control reduced the maximum overlap to one. Stage/build hashes, export bytes
+and actual bridge/runtime paths were checked. Results are in
+`dxmt-test/n95-capability-gate/result-concurrent-timing{,-failure,-two,-serial}-20261103`.
+
+The wrapper intentionally delays compilation to make overlap observable. In
+the same-shader run concurrent PSO median/P95 were 188.064/192.158 ms and
+repeated PSO median/P95 were 0.3985/0.570 ms; P95 of eight samples is the
+maximum. These are complete PSO creation times under an artificial delay, not
+isolated cache lookup or single-flight wait times, GPU timings, production
+latencies or an application speedup. One process per condition cannot establish
+a performance distribution. Memory growth and real-world hit rates remain
+unmeasured. Run `tests/dx12/run_msc_concurrent.py --help` for the required
+isolated stage, prefix, build and converter arguments.

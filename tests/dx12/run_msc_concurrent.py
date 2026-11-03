@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import statistics
 from pathlib import Path
 import subprocess
 import sys
@@ -78,6 +80,19 @@ def main():
         loaded.append(any(('loaded l"' + path + '"') in line.lower() and (": " + load_type) in line.lower()
                           for line in log.splitlines()))
     calls = log.count("DXMT_MSC_TRACE_END ok")
+    timings = {}
+    for phase in ("CONCURRENT", "REPEAT"):
+        matches = re.findall(r'^PSO_' + phase + r'_NS (\d+) (\d+)\s*$', log, re.M)
+        if [int(index) for index, _ in matches] != list(range(8)):
+            raise AssertionError(f"missing {phase} PSO timing samples")
+        values = [int(value) for _, value in matches]
+        if any(value <= 0 for value in values):
+            raise AssertionError(f"invalid {phase} PSO timing sample")
+        ordered = sorted(values)
+        timings[phase.lower()] = {"samples_ns": values, "median_ns": statistics.median(values),
+                                  "p95_nearest_rank_ns": ordered[-1],
+                                  "min_ns": ordered[0], "max_ns": ordered[-1]}
+    after_concurrent = log.split("PSO_CONCURRENT_NS 7 ", 1)[1]
     active = max_active = 0
     for line in log.splitlines():
         if line == "DXMT_MSC_TRACE_BEGIN":
@@ -90,12 +105,13 @@ def main():
             any(value not in log for value in identities) or not all(loaded) or
             str(stage / "wine/lib/wine/x86_64-unix/winemetal.so") not in log or
             str(wrapper) not in log or str(converter) not in log or calls != args.expected_calls or
+            "DXMT_MSC_TRACE_BEGIN" in after_concurrent or
             log.count("DXMT_MSC_TRACE_FORCED_FAILURE") != expected_failures or active != 0 or
             (args.two_shaders and not args.force_serial and max_active < 2) or
             (args.force_serial and max_active != 1)):
         raise AssertionError(f"concurrent test failed: exit={result.returncode}, compile calls={calls}")
     (output / "summary.json").write_text(json.dumps({"compile_calls": calls, "max_overlapping_calls": max_active,
-        "exit": result.returncode,
+        "exit": result.returncode, "pso_creation_timing": timings,
         "converter_sha256": sha(converter), "wrapper_sha256": sha(wrapper),
         "artifacts": {path: sha(stage / path) for _, path in pairs}}, indent=2) + "\n")
     print(f"eight concurrent PSOs: {calls} real MSC compilation calls")
