@@ -757,3 +757,14 @@ control passed. The runner verified the same PE/Unix and MSC loaded paths and
 artifact identities. Results are in `result-llvm-combined-od-20261103/` and
 `result-llvm-combined-o3-20261103/`; this does not cover D3D10/11 or arbitrary
 shader operations.
+
+For a D3D11 regression, the candidate LLVM stage also ran
+`dx11_shader_backend_boundary.exe bgra-sm5.cso --buffer-view-usage` with
+Metal API and GPU validation enabled. All 24 reported BGRA values across three
+resource usage modes and two repetitions matched the test's expected values;
+the process exited zero. Wine and dyld logs identify the isolated stage's
+`d3d11.dll`, `winemetal.dll` and `winemetal.so`. The staged D3D11 DLL SHA-256
+was `244728f943d818e2fdf00edb1daa3ae90c6e81546298e7c07c6e50c3dc461c7e`;
+the WineMetal Unix library is the candidate identified above. The full log is
+`dx11-llvm-combined-20261103.log` outside the repository. This single D3D11
+compute/readback case does not establish general D3D10/11 compatibility.
