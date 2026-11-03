@@ -232,6 +232,27 @@ validation. Evidence is under `result-msc-container-bounds-20261103/` and
 `result-msc-container-bounds-hlsl-20261103/` outside the repository. The
 guard is not a proof that all other malformed bytecode is safe to submit.
 
+Further isolation found that a four-zero-byte input and a structurally bounded
+empty DXBC container still faulted through Wine. A native x86_64 MSC harness
+returned an IRError with the default validation state but faulted when
+`IRCompilerSetValidationFlags(..., 0)` was explicitly set; disabling only
+the debug-information option did not remove the fault. A forwarding trace in
+Wine observed input-object creation complete and the fault during
+`IRCompilerAllocCompileAndLink`. The faulting inner function was not
+symbolized. Microsoft documents the DXIL program and bitcode layout in its
+[DXIL specification](https://github.com/microsoft/DirectXShaderCompiler/blob/main/docs/DXIL.rst).
+
+For DXBC-wrapped inputs, the bridge now also requires a DXIL part with a
+complete program header, `DXIL` magic, and bounded bitcode range. Native
+boundary controls, the current staged shader corpus, Wine valid and malformed
+controls, and HLSL GPU positive/wrong-oracle checks passed. The first Wine
+attempt timed out; a separate retry completed. Results are in
+`result-msc-program-bounds-retry-20261103/` and
+`result-msc-program-bounds-hlsl-20261103/`. Raw non-DXBC inputs retain their
+existing behavior; in particular the four-zero-byte Wine fault remains an
+open issue. No general malformed-bitcode safety claim or validation-default
+change follows from these checks.
+
 At `c24cfbb1`, the current patched-LLVM x86_64 build also passed the existing
 MSC triangle geometry differential test in isolated Wine with Metal API and
 GPU validation. Both baseline and injected stage-in buffer-growth modes

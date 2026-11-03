@@ -9,6 +9,32 @@ reject_input(const uint8_t *bytes, size_t size, IRBytecodeOwnership ownership) {
 }
 
 static int
+check_dxil_program_bounds(void) {
+  uint8_t bytes[72] = {0};
+  uint32_t value;
+  memcpy(bytes, "DXBC", 4);
+  value = sizeof(bytes); memcpy(bytes + 24, &value, 4);
+  value = 1; memcpy(bytes + 28, &value, 4);
+  value = 36; memcpy(bytes + 32, &value, 4);
+  memcpy(bytes + 36, "DXIL", 4);
+  value = 28; memcpy(bytes + 40, &value, 4);
+  memcpy(bytes + 52, "DXIL", 4);
+  value = 16; memcpy(bytes + 60, &value, 4);
+  value = 4; memcpy(bytes + 64, &value, 4);
+  if (!dxmt_msc_dxbc_bounds_valid(bytes, sizeof(bytes)))
+    return 1;
+  value = UINT32_MAX; memcpy(bytes + 60, &value, 4);
+  if (dxmt_msc_dxbc_bounds_valid(bytes, sizeof(bytes)))
+    return 1;
+  value = 16; memcpy(bytes + 60, &value, 4);
+  value = UINT32_MAX; memcpy(bytes + 64, &value, 4);
+  if (dxmt_msc_dxbc_bounds_valid(bytes, sizeof(bytes)))
+    return 1;
+  value = 0; memcpy(bytes + 28, &value, 4);
+  return dxmt_msc_dxbc_bounds_valid(bytes, sizeof(bytes)) ? 1 : 0;
+}
+
+static int
 check(uint32_t constants, uint32_t fetch, int expected, const char *message) {
   const uint8_t input[4] = {0};
   char error[256] = {0};
@@ -30,6 +56,25 @@ check(uint32_t constants, uint32_t fetch, int expected, const char *message) {
 
 int
 main(int argc, char **argv) {
+  if (check_dxil_program_bounds()) {
+    fprintf(stderr, "DXIL program bounds check failed\n");
+    return 1;
+  }
+  if (argc >= 3 && !strcmp(argv[1], "--validate-container")) {
+    for (int i = 2; i < argc; ++i) {
+      FILE *file = fopen(argv[i], "rb");
+      if (!file || fseek(file, 0, SEEK_END)) return 2;
+      long size = ftell(file);
+      if (size <= 0 || fseek(file, 0, SEEK_SET)) return 2;
+      uint8_t *bytes = malloc((size_t)size);
+      if (!bytes || fread(bytes, 1, (size_t)size, file) != (size_t)size) return 2;
+      fclose(file);
+      bool valid = dxmt_msc_dxbc_bounds_valid(bytes, (size_t)size);
+      free(bytes);
+      if (!valid) { fprintf(stderr, "invalid: %s\n", argv[i]); return 1; }
+    }
+    return 0;
+  }
   if (argc == 2 && !strcmp(argv[1], "--expect-unavailable")) {
     if (dxmt_msc_is_available() || !g_msc_api.IRCompilerCreate || g_msc_api.IRCompilerDestroy ||
         check(DXMT_MSC_RESOURCE_SPACE_DISABLED, DXMT_MSC_RESOURCE_SPACE_DISABLED,

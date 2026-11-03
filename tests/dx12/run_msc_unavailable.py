@@ -60,6 +60,19 @@ def main():
     first_offset = struct.unpack_from('<I', data, 32)[0]
     struct.pack_into('<I', data, first_offset + 4, 0xffffffff)
     malformed['bad-part-size'] = data
+    empty = bytearray(32)
+    empty[:4] = b'DXBC'
+    struct.pack_into('<II', empty, 20, 1, len(empty))
+    malformed['empty-container'] = empty
+    offsets = [struct.unpack_from('<I', shader, 32 + i * 4)[0]
+               for i in range(struct.unpack_from('<I', shader, 28)[0])]
+    dxil = next(offset for offset in offsets if shader[offset:offset + 4] == b'DXIL')
+    for label, field, value in (('bad-dxil-magic', dxil + 16, 0),
+                                 ('bad-bitcode-offset', dxil + 24, 0xffffffff),
+                                 ('bad-bitcode-size', dxil + 28, 0xffffffff)):
+        data = bytearray(shader)
+        struct.pack_into('<I', data, field, value)
+        malformed[label] = data
     for label, data in malformed.items():
         fixture = output / (label + '.dxil')
         fixture.write_bytes(data)

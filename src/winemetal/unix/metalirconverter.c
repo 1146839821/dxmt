@@ -261,6 +261,7 @@ dxmt_msc_dxbc_bounds_valid(const uint8_t *bytes, size_t size) {
   if (declared_size != size || count > (size - 32) / 4)
     return false;
   const size_t table_end = 32 + (size_t)count * 4;
+  bool has_dxil = false;
   for (uint32_t i = 0; i < count; ++i) {
     uint32_t offset, length;
     memcpy(&offset, bytes + 32 + (size_t)i * 4, sizeof(offset));
@@ -269,8 +270,19 @@ dxmt_msc_dxbc_bounds_valid(const uint8_t *bytes, size_t size) {
     memcpy(&length, bytes + offset + 4, sizeof(length));
     if (length > size - offset - 8)
       return false;
+    if (!memcmp(bytes + offset, "DXIL", 4)) {
+      uint32_t bitcode_offset, bitcode_size;
+      if (length < 24 || memcmp(bytes + offset + 16, "DXIL", 4))
+        return false;
+      memcpy(&bitcode_offset, bytes + offset + 24, sizeof(bitcode_offset));
+      memcpy(&bitcode_size, bytes + offset + 28, sizeof(bitcode_size));
+      if (bitcode_offset < 16 || bitcode_offset > length - 8 ||
+          bitcode_size > length - 8 - bitcode_offset)
+        return false;
+      has_dxil = true;
+    }
   }
-  return true;
+  return has_dxil;
 }
 
 static void
