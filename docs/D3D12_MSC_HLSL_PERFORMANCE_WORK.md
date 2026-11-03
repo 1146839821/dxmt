@@ -888,3 +888,14 @@ isolated reader, compiled and tested. `patches/llvm/.gitattributes` disables
 the trailing-space check for patch files because blank unified-diff context
 lines must contain a leading space. The changed content invalidates the CI
 cache; this revision has not run on GitHub Actions.
+
+`tests/airconv/run_llvm15_candidate_regression.py` runs the six synthetic
+metadata controls and debug double lowering check from a captured metallib,
+an LLVM 15.0.7 `llvm-as`, and LLVM's `distringtype-backward.ll` fixture. It
+requires a new output directory and checks each subprocess result. A complete
+run passed with the isolated context-patch candidate; a negative run using
+the unpatched reader failed on the expected assertion. The generated fixtures
+match specific known records and do not cover arbitrary AIR. Results are in
+`llvm-regression-versioned-20261103/` and
+`llvm-regression-negative-20261103.log` outside the repository. This runner is
+not yet registered as an automatic CI test.
