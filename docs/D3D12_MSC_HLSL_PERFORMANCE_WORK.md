@@ -663,3 +663,27 @@ to abort on the captured failing input. A production fix still needs broader
 memory-safety and concurrent malformed-input testing,
 coverage of other error paths including LLVM fatal errors, and integration
 with a reproducible toolchain build. The candidate is not enabled by default.
+
+### Combined candidate build (2026-11-03)
+
+`tests/airconv/build_llvm15_candidate.py` copies the LLVM 15.0.7 reader into a
+new output directory, applies both experimental patches, and links diagnostic
+executables against the resulting object and the existing LLVM libraries. It
+checks the source tag and reader file status; it does not replace the LLVM
+checkout or installed libraries. It does build probe targets in the specified
+Meson build directory.
+
+The combined candidate parsed the captured 15-operand debug AIR. A separately
+serialized debug fixture with fast double instructions reported one
+double-to-float truncation before lowering and zero after, retaining an
+`llvm.dbg.cu` node. Metal API and GPU validation on Apple M1 Max returned the
+expected red pixel for the lowered fixture. An LLVM 22 opaque-pointer input
+was rejected by the parser, and a stress probe alternated this rejected input
+with the captured parseable AIR 1,000 times. The opaque-pointer rejection
+occurs before metadata parsing, so it does not validate placeholder cleanup in
+the combined build. The older cleanup-only test exercises that path.
+
+The combined patch is still experimental. In particular, 15-operand records
+with nonzero pointer-authentication data, other malformed metadata records,
+concurrent execution and a complete clean LLVM rebuild remain unverified.
+No change was made to the production toolchain or capability declarations.
