@@ -969,7 +969,22 @@ timestamp implementation uses separate blit encoders and fence operations, and
 validation is enabled. The high spread and three samples do not justify P95,
 performance claims, or changing the default flag. Raw logs and hashes are in
 `result-threadgroup-timed-20261103/` and its adjacent log. GPU counters,
-validation-disabled timing, memory impact, and game-level effects are NOT_RUN.
+memory impact, and game-level effects were not measured in that run.
+
+For a follow-up with 1,024 groups per input set, the same A/B output and
+negative controls passed with Metal API/GPU validation enabled. A separate
+five-process-per-mode run disabled validation, alternated mode order and still
+checked exact outputs. Replay timestamp spans in microseconds
+(median; min–max) were: root flags 4, 39.875; 28.500–978.791; root flags
+1028, 32.750; 28.209–372.041; table flags 4, 328.625; 29.959–2171.250;
+table flags 1028, 45.917; 30.708–1529.830. With only five samples, the
+nearest-rank P95 equals the listed maximum and is not a reliable percentile.
+These intervals include timestamp/blit/fence overhead and scheduling, not
+isolated shader execution. The broad ranges do not support a performance
+conclusion; the flag remains disabled. Results and exact fixture hashes are in
+`result-threadgroup-1024-validation-20261103/` and
+`result-threadgroup-1024-timing-20261103/` outside the repository. Memory,
+GPU counters and game-level effects were not measured.
 
 The separate `llvm-metadata-selftest` target is self-contained: it builds a
 small LLVM 15 string-type module in memory and checks the unmodified module,
