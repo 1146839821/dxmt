@@ -34,6 +34,15 @@ if build_machine.system() == 'darwin'
                 '-Wl,-undefined,dynamic_lookup'],
   )
   test('msc missing extension setters', msc_missing_setters)
+  msc_incomplete_runtime = shared_library('msc_incomplete_runtime', 'msc_incomplete_runtime.c',
+    native: true,
+    link_args: ['-arch', build_machine.cpu_family() == 'aarch64' ? 'arm64' : 'x86_64'],
+  )
+  test('msc incompatible runtime', msc_missing_setters,
+    args: ['--expect-unavailable'],
+    env: ['DXMT_METALIRCONVERTER_PATH=' + msc_incomplete_runtime.full_path()],
+    depends: msc_incomplete_runtime,
+  )
 endif
 
 dx12_msc_single_flight = executable('dx12_msc_single_flight', 'dx12_msc_single_flight.cpp', native: true)

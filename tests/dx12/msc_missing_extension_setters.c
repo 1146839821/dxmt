@@ -29,7 +29,17 @@ check(uint32_t constants, uint32_t fetch, int expected, const char *message) {
 }
 
 int
-main(void) {
+main(int argc, char **argv) {
+  if (argc == 2 && !strcmp(argv[1], "--expect-unavailable")) {
+    if (dxmt_msc_is_available() || !g_msc_api.IRCompilerCreate || g_msc_api.IRCompilerDestroy ||
+        check(DXMT_MSC_RESOURCE_SPACE_DISABLED, DXMT_MSC_RESOURCE_SPACE_DISABLED,
+              DXMT_MSC_ERROR_UNAVAILABLE, "runtime is unavailable"))
+      return 1;
+    puts("PASS: incompatible MSC runtime rejected");
+    return 0;
+  }
+  if (argc != 1)
+    return 2;
   if (!dxmt_msc_is_available() || !g_msc_api.IRCompilerSetFunctionConstantResourceSpace ||
       !g_msc_api.IRCompilerSetFramebufferFetchResourceSpace) {
     fprintf(stderr, "SKIP: complete MSC runtime unavailable\n");

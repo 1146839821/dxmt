@@ -184,6 +184,17 @@ passed; a Wine/GPU run of the newly built bridge was not yet run. The test
 includes the bridge implementation in a separate native executable, and does
 not change the installed MSC library or add a production injection switch.
 
+The native bridge test also loads a separately built, deliberately incomplete
+test dylib through `DXMT_METALIRCONVERTER_PATH`. It verifies that the first
+required symbol resolves, the next required symbol is absent, availability is
+false, and a compile request returns `DXMT_MSC_ERROR_UNAVAILABLE`. Meson runs
+this as `msc incompatible runtime`; the complete installed runtime remains the
+positive control. Both tests and the existing `build` and `build-X86` full
+builds passed. This exercises an incompatible library in the native bridge,
+not Wine thunk propagation or the absence of every library search path. A
+nonexistent environment path is not equivalent: the loader falls back to its
+default search paths when `dlopen` of that path fails.
+
 At `c24cfbb1`, the current patched-LLVM x86_64 build also passed the existing
 MSC triangle geometry differential test in isolated Wine with Metal API and
 GPU validation. Both baseline and injected stage-in buffer-growth modes
