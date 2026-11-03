@@ -1065,6 +1065,17 @@ of zero cost. Raw results are in `result-msc-linear-1024-retry-20261103/`.
 The larger dispatch still uses only one SRV and one UAV; the long tails and
 small number of processes preclude a general performance conclusion.
 
+Each successful layout run now writes `summary.json` in its new output directory.
+It records CLI and input identities, generated artifact hashes, correctness
+controls and, when requested, every post-warm-up timing sample and its summary.
+The CLI version is not a runtime dylib identity; the latter is marked
+`NOT_MEASURED`. GPU counters, memory footprint and DXMT D3D12 binding cost
+are also explicitly unmeasured. Failed runs retain their logs and do not emit
+a successful summary. The timed JSON was independently checked against all six
+raw timing logs and generated artifact hashes; the untimed path was checked
+separately. Example results are in `result-msc-linear-json-final-20261103/`
+and `result-msc-linear-json-untimed-20261103/` outside the repository.
+
 The separate `llvm-metadata-selftest` target is self-contained: it builds a
 small LLVM 15 string-type module in memory and checks the unmodified module,
 a size-flag mutation and an unknown-code mutation. It needs no MSC library,

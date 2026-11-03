@@ -2,8 +2,10 @@
 """Compare reflected MSC linear and explicit descriptor-table GPU layouts."""
 import argparse
 import hashlib
+import json
 import math
 import os
+import platform
 import re
 import shlex
 import statistics
@@ -60,7 +62,23 @@ def main():
     run(['xcrun', 'clang', '-fobjc-arc', '-Wall', '-Wextra', '-Werror', '-I', REPO / 'include', '-framework', 'Foundation',
          '-framework', 'Metal', REPO / 'tests/dx12/msc_linear_layout_gpu.m', '-o', executable], env=clean_env)
     print('converter sha256', sha(converter), 'shader sha256', sha(shader), flush=True)
-    run([converter, '--version'], env=clean_env)
+    version = run([converter, '--version'], env=clean_env, capture_output=True, text=True).stdout.strip()
+    print(version, flush=True)
+    report = {
+        'schema_version': 1,
+        'scope': 'native Metal offline CLI layout comparison; not the DXMT D3D12 runtime',
+        'platform': platform.platform(),
+        'converter': {'path': str(converter), 'sha256': sha(converter), 'cli_version': version,
+                      'loaded_runtime_dylib': 'NOT_MEASURED'},
+        'shader': {'path': str(shader), 'sha256': sha(shader)},
+        'groups_per_input': args.groups,
+        'artifacts_sha256': {'probe': sha(executable), 'input': sha(fixtures / 'inputs.bin'),
+                             'expected': sha(fixtures / 'expected.bin'),
+                             'root_signature': sha(REPO / 'tests/dx12/msc_linear_layout_root.json')},
+        'validation': {},
+        'timing': None,
+        'not_measured': ['GPU counters', 'memory footprint', 'DXMT D3D12 binding overhead'],
+    }
     env = dict(clean_env)
     env.update(MTL_DEBUG_LAYER='1', MTL_SHADER_VALIDATION='1', MTL_SHADER_VALIDATION_REPORT_TO_STDERR='1')
     for mode in ('linear', 'root'):
@@ -69,6 +87,8 @@ def main():
         if mode == 'root':
             cmd.append('--root-signature=' + str(REPO / 'tests/dx12/msc_linear_layout_root.json'))
         run(cmd, env=clean_env)
+        report['artifacts_sha256'][mode + '_metallib'] = sha(library)
+        report['artifacts_sha256'][mode + '_reflection'] = sha(reflection)
         print(mode, 'metallib sha256', sha(library), 'reflection sha256', sha(reflection), flush=True)
         for dataset, wrong in [('first', False), ('second', False), ('first', True)]:
             inputs = fixtures / 'inputs.bin' if dataset == 'first' else output / 'rotated-inputs.bin'
@@ -86,6 +106,7 @@ def main():
                       not re.search(r'(?i)metal (?:api|gpu|shader) validation (?:error|warning)|failed assertion', log)]
             if not all(checks):
                 raise SystemExit(f'{label} failed {checks}; see {output / (label + ".log")}')
+            report['validation'][label] = 'PASS'
             print(label, 'PASS', flush=True)
     if args.timed:
         timing_env = {k: v for k, v in env.items()
@@ -112,12 +133,22 @@ def main():
                     results[mode]['cpu'].append(int(cpu))
                     results[mode]['gpu'].append(int(gpu))
                 print(label, 'PASS', flush=True)
+        report['timing'] = {'unit': 'ns', 'processes_per_layout': 3,
+                            'samples_per_process': 30, 'warmup_discarded': 5,
+                            'validation_enabled': False, 'layouts': {}}
         for mode in ('linear', 'root'):
+            report['timing']['layouts'][mode] = {}
             for kind in ('setup', 'cpu', 'gpu'):
                 values = sorted(results[mode][kind])
+                report['timing']['layouts'][mode][kind] = {
+                    'samples': results[mode][kind], 'median': statistics.median(values),
+                    'p95_nearest_rank': values[math.ceil(.95 * len(values)) - 1],
+                    'min': values[0], 'max': values[-1],
+                }
                 print('TIMING_NS', mode, kind, 'n', len(values), 'median', statistics.median(values),
                       'p95_nearest_rank', values[math.ceil(.95 * len(values)) - 1],
                       'min', values[0], 'max', values[-1], flush=True)
+    (output / 'summary.json').write_text(json.dumps(report, indent=2) + '\n')
 
 
 if __name__ == '__main__':
