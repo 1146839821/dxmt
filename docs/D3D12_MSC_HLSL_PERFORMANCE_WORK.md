@@ -180,9 +180,30 @@ the DXIL creation callback with a rejection stub, so it verifies bridge
 validation and control flow, not shader conversion or GPU output. Run it with
 `meson test -C build 'msc missing extension setters' --print-errorlogs`.
 The test and full builds of the existing `build` and `build-X86` configurations
-passed; a Wine/GPU run of the newly built bridge remains NOT_RUN. The test
+passed; a Wine/GPU run of the newly built bridge was not yet run. The test
 includes the bridge implementation in a separate native executable, and does
 not change the installed MSC library or add a production injection switch.
+
+Follow-up runtime regression at `37894c62`: rebuilt the isolated x86_64
+patched-LLVM configuration, staged its paired WineMetal PE/Unix files in a
+new Wine copy, and used a new Wine prefix. With Metal API and GPU validation,
+two runs each of the default, explicit-zero and legacy-zero compatibility
+settings passed the function-constant and framebuffer-fetch pixel checks;
+the deliberately wrong pixel oracle failed as expected. The runner checked
+the staged files against the build, PE export bytes and loaded PE/Unix/MSC
+paths. The ordinary D3D12 `compute_sm6_root_uav` fixture also read back 1234
+through DXIL/MSC, with the staged D3D12, DXGI and WineMetal paths and both
+validation layers visible in the log. Its initial launch failed because the
+Wine builtin D3D12/DXGI DLLs were incorrectly forced to native; the retry
+used builtin overrides and passed. No validation warning was found in that
+retry. The tested Unix library SHA-256 was
+`c5ee25fa4bc73d49dd3b34a519462c848edb3d75c20f7550fdc39399c5c9b9f1`;
+the MSC file SHA-256 was
+`cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4`.
+Logs and manifests are under `result-extension-setter-hlsl-20261103/` and
+`result-extension-setter-compute-retry-20261103.log` outside the repository.
+This tests the complete installed runtime on one device, not an older runtime
+with missing exports or all D3D12 binding combinations.
 
 **Goal:** distinguish unspecified compatibility from explicitly supplied zero,
 while validating SDK Metal HLSL extensions without changing ordinary D3D12.
