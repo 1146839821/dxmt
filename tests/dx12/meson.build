@@ -24,6 +24,18 @@ dx12_shader_validation = executable('dx12_shader_validation', 'dx12_shader_valid
 dx12_msc_output = executable('dx12_msc_output', 'dx12_msc_output.cpp', native: true)
 test('dx12 msc output sizes', dx12_msc_output)
 
+if build_machine.system() == 'darwin'
+  msc_missing_setters = executable('msc_missing_extension_setters',
+    'msc_missing_extension_setters.c', '../../src/winemetal/unix/msc_image_identity.c',
+    native: true,
+    include_directories: [include_directories('../../include'), include_directories('../../src/airconv')],
+    c_args: ['-fblocks', '-Wno-deprecated-declarations'],
+    link_args: ['-arch', build_machine.cpu_family() == 'aarch64' ? 'arm64' : 'x86_64',
+                '-Wl,-undefined,dynamic_lookup'],
+  )
+  test('msc missing extension setters', msc_missing_setters)
+endif
+
 dx12_msc_single_flight = executable('dx12_msc_single_flight', 'dx12_msc_single_flight.cpp', native: true)
 test('dx12 msc single flight', dx12_msc_single_flight, timeout: 15)
 

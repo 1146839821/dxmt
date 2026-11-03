@@ -835,6 +835,17 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
   }
 
+  if (params->function_constant_resource_space != DXMT_MSC_RESOURCE_SPACE_DISABLED &&
+      !g_msc_api.IRCompilerSetFunctionConstantResourceSpace) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC function constant resource space is unavailable");
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  }
+  if (params->framebuffer_fetch_resource_space != DXMT_MSC_RESOURCE_SPACE_DISABLED &&
+      !g_msc_api.IRCompilerSetFramebufferFetchResourceSpace) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC framebuffer fetch resource space is unavailable");
+    return DXMT_MSC_ERROR_UNSUPPORTED_FEATURE;
+  }
+
   IRShaderStage ir_stage = dxmt_msc_to_ir_stage(params->stage);
   if (ir_stage == IRShaderStageInvalid) {
     dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_SHADER, "shader stage is not supported by MSC runtime");

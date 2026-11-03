@@ -170,6 +170,20 @@ the validation and its test together if compatibility cannot be established.
 Done means both negative paths and the ordinary disabled path are verified;
 no feature-level or shader-model claim changes.
 
+The compile entry now rejects a requested non-disabled extension space when
+its setter is unavailable. Space zero remains a valid request; the ordinary
+disabled sentinel does not require the corresponding optional setter. An
+isolated native test loads the installed MSC, then masks each resolved setter
+inside its own process and checks both zero and test-specific spaces, the
+unrelated setter, disabled spaces, error code and message. The test replaces
+the DXIL creation callback with a rejection stub, so it verifies bridge
+validation and control flow, not shader conversion or GPU output. Run it with
+`meson test -C build 'msc missing extension setters' --print-errorlogs`.
+The test and full builds of the existing `build` and `build-X86` configurations
+passed; a Wine/GPU run of the newly built bridge remains NOT_RUN. The test
+includes the bridge implementation in a separate native executable, and does
+not change the installed MSC library or add a production injection switch.
+
 **Goal:** distinguish unspecified compatibility from explicitly supplied zero,
 while validating SDK Metal HLSL extensions without changing ordinary D3D12.
 **Baseline:** legacy `compatibility_flags == 0` selects MinLOD; both extension
