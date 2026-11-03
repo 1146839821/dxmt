@@ -124,6 +124,11 @@ dx12_msc_probe = executable('dx12_msc_probe', 'dx12_msc_probe.cpp',
   dependencies: [ d3d12_dep ],
 )
 
+dx12_msc_unavailable = executable('dx12_msc_unavailable', 'dx12_msc_unavailable.cpp',
+  include_directories: [include_directories('../../src/winemetal')],
+  dependencies: [winemetal_dep],
+)
+
 dx12_msc_capability_gate = executable('dx12_msc_capability_gate', 'dx12_msc_capability_gate.cpp',
   include_directories: [ include_directories('../../src/winemetal') ],
   dependencies: [ d3d12_dep ],

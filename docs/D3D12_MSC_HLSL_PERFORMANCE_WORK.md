@@ -195,6 +195,18 @@ not Wine thunk propagation or the absence of every library search path. A
 nonexistent environment path is not equivalent: the loader falls back to its
 default search paths when `dlopen` of that path fails.
 
+The Wine thunk now has a separate end-to-end regression probe. With an
+incomplete test dylib, the PE caller observes `DXMTMSCIsAvailable() == 0`,
+an unavailable capability result and `DXMT_MSC_ERROR_UNAVAILABLE` with its
+message for a valid DXIL request. With the installed converter the same DXIL
+returns a successful nonzero metallib sizing result. The runner checks the
+paired build, loaded PE export bytes, Unix library and actual converter paths;
+results are in `result-msc-unavailable-thunk-final-20261103/`. This does not
+test all absent search paths or GPU execution. An earlier control using a
+single zero byte as DXIL returned `-1` at the thunk with no bridge error in
+the complete-runtime case; this malformed-input behavior needs independent
+investigation and is not treated as a successful invalid-DXIL test.
+
 At `c24cfbb1`, the current patched-LLVM x86_64 build also passed the existing
 MSC triangle geometry differential test in isolated Wine with Metal API and
 GPU validation. Both baseline and injected stage-in buffer-growth modes
