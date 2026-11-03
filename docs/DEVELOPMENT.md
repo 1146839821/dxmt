@@ -47,6 +47,27 @@ cmake --install ./toolchains/llvm-build
 
 Then `./toolchains/llvm` contains what we need later.
 
+For the experimental MSC debug-metadata compatibility patches, build a
+separate LLVM toolchain and a separate DXMT directory. The output directory
+passed to the script must not already exist; the source checkout and existing
+toolchains are not modified. For example, from the repository root:
+
+```sh
+bash tests/airconv/build_llvm15_candidate_toolchain.sh \
+  toolchains/llvm-project /absolute/path/to/new-llvm-candidate
+meson setup /absolute/path/to/new-dxmt-build --cross-file build-win64.txt \
+  -Denable_nvapi=true -Denable_nvngx=true -Denable_d3d12=true -Denable_tests=true \
+  -Dnative_llvm_path=/absolute/path/to/new-llvm-candidate/install \
+  -Dwine_install_path=toolchains/wine --buildtype release
+meson compile -C /absolute/path/to/new-dxmt-build
+meson compile -C /absolute/path/to/new-dxmt-build llvm-metadata-selftest
+/absolute/path/to/new-dxmt-build/src/airconv/darwin/llvm-metadata-selftest
+```
+
+This does not switch an existing `build` directory or install into Wine.
+The self-test checks only a subset of metadata compatibility; consult
+`docs/D3D12_MSC_HLSL_PERFORMANCE_WORK.md` for the remaining limitations.
+
 For `arm64` target, just replace any occurance of `x86_64` to `arm64` above.
 
 ## Setup Wine

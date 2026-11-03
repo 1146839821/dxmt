@@ -1061,3 +1061,14 @@ x86_64 clang release job now builds and runs this target against its patched
 toolchain. The target is opt-in because an unpatched local LLVM is expected to
 fail it. GitHub Actions has not yet run this change; the test checks only these
 two record shapes and does not replace the broader captured-AIR regression.
+
+The complete current patch set was rebuilt using the candidate toolchain script
+into `llvm-current-patches-20261103/` outside the repository. A linker map
+confirmed its `libLLVMBitReader.a(MetadataLoader.cpp.o)` was used by the
+self-test, which passed; the eight-thread unknown-record rejection/recovery
+stress test also passed. By contrast, the existing local `build` configured
+with `toolchains/llvm-darwin` returned exit 4 from the same self-test. Local
+prebuilt LLVM is not automatically replaced by the CI change. A separate-build
+example is documented in `docs/DEVELOPMENT.md`; this is not a claim that all
+metadata versions or the Wine runtime have been validated with the latest
+patch set.
