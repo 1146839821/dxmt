@@ -986,6 +986,33 @@ conclusion; the flag remains disabled. Results and exact fixture hashes are in
 `result-threadgroup-1024-timing-20261103/` outside the repository. Memory,
 GPU counters and game-level effects were not measured.
 
+### Linear versus explicit layout: isolated binding control
+
+**Goal:** establish one equivalent resource-binding case before considering a
+performance comparison. The same 64-thread DXIL fixture is compiled twice
+with the MSC CLI: automatic linear layout and an explicit signature with one
+SRV table and one UAV table. A native Metal probe uses the generated reflection
+offsets and MSC runtime descriptor helpers, makes indirect resources resident,
+and compares GPU output to independent CPU references. This is test-only; no
+D3D12 root-signature, descriptor, residency or production conversion changes.
+Rollback removes the probe, JSON signature and runner.
+
+On Apple M1 Max/macOS 27.2 with Metal API and GPU validation, each layout
+passed both 32-group input sets (3,072 output bytes each); deliberately wrong
+reference data failed in both modes. MSC CLI reported 4.0.3, and the runner
+records the CLI and shader SHA-256. Reflection reported linear SRV/UAV entries
+at offsets 0/24 (24 bytes each), versus explicit table pointers at offsets
+0/8. These are observed offsets for this conversion, not a hardcoded ABI or a
+runtime dylib version claim. Exact reflections, binaries and logs are in
+`result-msc-linear-layout-final-20261103/` outside the repository.
+
+Reproduce with `python3 tests/dx12/run_msc_linear_layout.py --shader DXIL
+--converter MSC_CLI --output NEW_DIRECTORY`; the shader is produced by the
+`dx12_compute_sm6_threadgroup_coherency_fixture` target. This native Metal
+test covers only this SRV/UAV configuration, not WineMetal D3D12 descriptor
+semantics, bindless access, other resource types or performance. No timing or
+production layout optimization is claimed.
+
 The separate `llvm-metadata-selftest` target is self-contained: it builds a
 small LLVM 15 string-type module in memory and checks the unmodified module,
 a size-flag mutation and an unknown-code mutation. It needs no MSC library,
