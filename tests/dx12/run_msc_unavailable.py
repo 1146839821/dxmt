@@ -37,18 +37,25 @@ def main():
                WINEDLLOVERRIDES='winemetal=b', WINEDEBUG='+loaddll', DYLD_PRINT_LIBRARIES='1')
     identity = 'LOADED_CODE winemetal.dll DXMTMSCCompileDXIL ' + pe_export_bytes(stage / 'winemetal.dll', 'DXMTMSCCompileDXIL')
     path = ('Z:' + str(stage / 'winemetal.dll').replace('/', '\\')).replace('\\', '\\\\').lower()
-    for label, library in (('available', converter), ('incompatible', fake)):
+    cases = [('available', 'available', converter, 'compute_sm6.cs.cso'),
+             ('incompatible', 'incompatible', fake, 'compute_sm6.cs.cso')]
+    for size in (1, 2, 3):
+        fixture = output / f'truncated-{size}.dxil'
+        fixture.write_bytes(b'\0' * size)
+        cases.append((f'invalid-{size}', 'invalid', converter, 'Z:' + str(fixture).replace('/', '\\')))
+        if size == 1:
+            cases.append(('incompatible-short', 'incompatible', fake, 'Z:' + str(fixture).replace('/', '\\')))
+    for label, mode, library, fixture in cases:
         env['DXMT_METALIRCONVERTER_PATH'] = str(library)
-        result = subprocess.run([str(stage / 'wine/bin/wine'), 'dx12_msc_unavailable.exe', label,
-                                 'compute_sm6.cs.cso'],
+        result = subprocess.run([str(stage / 'wine/bin/wine'), 'dx12_msc_unavailable.exe', mode, fixture],
                                 cwd=stage, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
         log = result.stdout.decode(errors='replace')
         (output / (label + '.log')).write_text(log)
         checks = [identity in log, str(stage / 'wine/lib/wine/x86_64-unix/winemetal.so') in log,
-                  str(library) in log, 'MSC thunk ' + label + ' PASS' in log,
+                  str(library) in log, 'MSC thunk ' + mode + ' PASS' in log,
                   any(('loaded l"' + path + '"') in line.lower() and ': builtin' in line.lower()
                       for line in log.splitlines())]
-        if label == 'incompatible':
+        if mode == 'incompatible':
             checks.append('missing symbol IRCompilerDestroy' in log and 'incompatible runtime' in log)
         if result.returncode or not all(checks):
             raise SystemExit(f'{label}: exit={result.returncode} checks={checks}; see {output / (label + ".log")}')

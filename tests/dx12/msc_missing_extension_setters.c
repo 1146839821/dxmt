@@ -10,11 +10,11 @@ reject_input(const uint8_t *bytes, size_t size, IRBytecodeOwnership ownership) {
 
 static int
 check(uint32_t constants, uint32_t fetch, int expected, const char *message) {
-  const uint8_t input = 0;
+  const uint8_t input[4] = {0};
   char error[256] = {0};
   struct dxmt_msc_compile_dxil_params params = {0};
-  params.dxil = &input;
-  params.dxil_size = 1;
+  params.dxil = input;
+  params.dxil_size = sizeof(input);
   params.stage = DXMT_MSC_STAGE_FRAGMENT;
   params.function_constant_resource_space = constants;
   params.framebuffer_fetch_resource_space = fetch;

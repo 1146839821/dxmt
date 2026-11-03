@@ -8,7 +8,8 @@
 #include "metalirconverter_thunks.h"
 
 int main(int argc, char **argv) {
-  if (argc != 3 || (std::strcmp(argv[1], "available") && std::strcmp(argv[1], "incompatible")))
+  if (argc != 3 || (std::strcmp(argv[1], "available") && std::strcmp(argv[1], "incompatible") &&
+                    std::strcmp(argv[1], "invalid")))
     return 2;
   auto module = GetModuleHandleA("winemetal.dll");
   auto address = module ? reinterpret_cast<const unsigned char *>(GetProcAddress(module, "DXMTMSCCompileDXIL")) : nullptr;
@@ -19,7 +20,8 @@ int main(int argc, char **argv) {
   for (unsigned i = 0; i < 16; ++i)
     std::cout << hex[address[i] >> 4] << hex[address[i] & 15];
   std::cout << '\n';
-  const bool available = !std::strcmp(argv[1], "available");
+  const bool invalid = !std::strcmp(argv[1], "invalid");
+  const bool available = invalid || !std::strcmp(argv[1], "available");
   dxmt_msc_capabilities capabilities{};
   const int query = DXMTMSCGetCapabilities(&capabilities);
   if (DXMTMSCIsAvailable() != int(available) || capabilities.core_converter != unsigned(available) ||
@@ -40,9 +42,12 @@ int main(int argc, char **argv) {
   params.error_message = error;
   params.error_message_capacity = sizeof(error);
   const int result = DXMTMSCCompileDXIL(&params);
-  const int expected = available ? DXMT_MSC_SUCCESS : DXMT_MSC_ERROR_UNAVAILABLE;
+  const int expected = invalid ? DXMT_MSC_ERROR_INVALID_DXIL
+                       : available ? DXMT_MSC_SUCCESS : DXMT_MSC_ERROR_UNAVAILABLE;
   if (result != expected || params.error_code != unsigned(expected) ||
-      (available && !params.metallib_size) || (!available && !std::strstr(error, "runtime is unavailable"))) {
+      (available && !invalid && !params.metallib_size) ||
+      (!available && !std::strstr(error, "runtime is unavailable")) ||
+      (invalid && !std::strstr(error, "DXIL input is truncated"))) {
     std::cerr << "compile=" << result << " error=" << params.error_code << " message=" << error << '\n';
     return 4;
   }

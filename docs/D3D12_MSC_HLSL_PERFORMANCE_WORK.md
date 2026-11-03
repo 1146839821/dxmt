@@ -207,6 +207,19 @@ single zero byte as DXIL returned `-1` at the thunk with no bridge error in
 the complete-runtime case; this malformed-input behavior needs independent
 investigation and is not treated as a successful invalid-DXIL test.
 
+Follow-up: the one-byte case reproduced with Wine SEH tracing: an access
+violation occurred during the Unix call, which returned `-1` with no populated
+bridge error. The exact faulting function was not symbolized. The bridge now
+rejects inputs shorter than four bytes as `DXMT_MSC_ERROR_INVALID_DXIL` after
+the runtime-availability check and before passing them to MSC. The existing
+PE/Unix runner verified lengths 1, 2 and 3, successful valid DXIL sizing, and
+an incompatible-runtime/short-input control. A paired WineMetal GPU run also
+passed the HLSL positive, explicit-zero, legacy-zero and wrong-oracle cases
+with both Metal validation layers. Results are in
+`result-msc-truncated-complete-20261103/` and
+`result-msc-truncated-hlsl-20261103/`. This minimum-size guard does not
+validate larger malformed containers or prove MSC cannot fault on other input.
+
 At `c24cfbb1`, the current patched-LLVM x86_64 build also passed the existing
 MSC triangle geometry differential test in isolated Wine with Metal API and
 GPU validation. Both baseline and injected stage-in buffer-growth modes

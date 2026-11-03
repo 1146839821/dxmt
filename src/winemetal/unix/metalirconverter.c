@@ -829,6 +829,12 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     return DXMT_MSC_ERROR_UNAVAILABLE;
   }
 
+  /* Neither a DXIL container nor LLVM bitcode can fit in fewer than four bytes. */
+  if (params->dxil_size < 4) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_INVALID_DXIL, "DXIL input is truncated");
+    return DXMT_MSC_ERROR_INVALID_DXIL;
+  }
+
   if ((params->reserved & DXMT_MSC_COMPILE_FLAG_EXPLICIT_COMPATIBILITY) &&
       !g_msc_api.IRCompilerSetCompatibilityFlags) {
     dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC compatibility flags are unavailable");
