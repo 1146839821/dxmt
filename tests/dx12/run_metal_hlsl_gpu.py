@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import statistics
+import struct
 import math
 import subprocess
 import sys
@@ -24,23 +25,36 @@ def main():
     parser.add_argument('--trace-dxil-validation', action='store_true', help='enable DXIL validation through a test wrapper')
     parser.add_argument('--both-spaces', action='store_true', help='enable both distinct extension spaces')
     parser.add_argument('--combined', action='store_true', help='use one shader containing both extensions')
+    parser.add_argument('--combined-root', action='store_true', help='use combined shader with embedded root signature')
     args = parser.parse_args()
     if args.trace_config and args.trace_dxil_validation:
         parser.error('trace options are mutually exclusive')
-    if args.combined and args.both_spaces:
-        parser.error('--combined and --both-spaces are separate modes')
+    if sum((args.combined, args.combined_root, args.both_spaces)) > 1:
+        parser.error('combined, combined-root and both-spaces are separate modes')
+    combined = args.combined or args.combined_root
     if not 1 <= args.repeats <= 20:
         parser.error('--repeats must be in 1..20')
     stage, prefix, build, converter = (getattr(args, name).resolve(strict=True)
                                         for name in ('stage', 'prefix', 'build', 'converter'))
     pairs = [('src/winemetal/winemetal.dll', 'winemetal.dll'),
              ('src/winemetal/unix/winemetal.so', 'wine/lib/wine/x86_64-unix/winemetal.so')]
-    fragment = 'metal_hlsl_combined.ps.cso' if args.combined else 'metal_hlsl_framebuffer.ps.cso'
+    fragment = ('metal_hlsl_combined_root.ps.cso' if args.combined_root else
+                'metal_hlsl_combined.ps.cso' if args.combined else 'metal_hlsl_framebuffer.ps.cso')
     pairs += [('tests/dx12/' + name, name) for name in
               ('dx12_metal_hlsl_gpu.exe', 'metal_hlsl_constants.ps.cso', fragment)]
     for source, target in pairs:
         if (build / source).read_bytes() != (stage / target).read_bytes():
             raise SystemExit('stage/build mismatch: ' + target)
+    if args.combined_root:
+        data = (stage / fragment).read_bytes()
+        if len(data) < 32 or data[:4] != b'DXBC':
+            raise SystemExit('combined-root fixture is not a DXBC container')
+        count = struct.unpack_from('<I', data, 28)[0]
+        if count > (len(data) - 32) // 4:
+            raise SystemExit('invalid combined-root part table')
+        offsets = [struct.unpack_from('<I', data, 32 + 4 * i)[0] for i in range(count)]
+        if not any(offset <= len(data) - 4 and data[offset:offset + 4] == b'RTS0' for offset in offsets):
+            raise SystemExit('combined-root fixture lacks an embedded root signature')
     output = args.output.absolute()
     output.mkdir(parents=True, exist_ok=False)
     wrapper = None
@@ -64,8 +78,8 @@ def main():
                'metal_hlsl_constants.ps.cso', fragment]
     results = []
     cases = []
-    if args.both_spaces or args.combined:
-        option = '--combined' if args.combined else '--both-spaces'
+    if args.both_spaces or combined:
+        option = '--combined' if combined else '--both-spaces'
         cases = [(f'positive-{i}', [option], 0) for i in range(args.repeats)]
         cases += [('wrong-oracle', [option + '-wrong'], 10)]
     else:
@@ -89,7 +103,7 @@ def main():
             checks += ['PIXEL 0,255,0,255' in log, 'PIXEL 64,64,0,128' in log,
                        'MULTIPASS_PIXEL 64,64,0,128' in log,
                        'Metal HLSL function constants and framebuffer fetch GPU passed' in log]
-            if args.combined:
+            if combined:
                 checks += ['PIXEL 0,128,0,128' in log]
         if args.trace_config:
             flags = re.findall(r'^DXMT_TEST_COMPATIBILITY_FLAGS (\d+)\s*$', log, re.M)
@@ -105,7 +119,7 @@ def main():
         results.append({'case': name, 'exit': result.returncode, 'timings': timings})
         print(name + ': passed', flush=True)
     summaries = {}
-    for case in (('positive',) if args.both_spaces or args.combined else ('positive', 'explicit-zero', 'legacy-zero')):
+    for case in (('positive',) if args.both_spaces or combined else ('positive', 'explicit-zero', 'legacy-zero')):
         for stage_name in ('SIZING', 'OUTPUT'):
             for shader in ('constants', 'fetch'):
                 values = [float(value) for result in results if result['case'].startswith(case + '-')

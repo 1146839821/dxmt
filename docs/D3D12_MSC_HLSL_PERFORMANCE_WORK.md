@@ -319,6 +319,17 @@ controls also passed. Evidence is in `result-msc-combined-two-values-20261104/`
 and `result-msc-combined-normal-20261104/` outside the repository. This is a
 test-only hybrid path, not production D3D12 exposure or PSO-cache validation.
 
+An additional combined fixture uses the HLSL root-signature attribute and
+declares both special spaces in its descriptor table. Its DXIL container was
+checked for an `RTS0` part. On the same isolated Wine/Metal setup, two initial
+processes and one runner recheck passed both specialized pixel values; the
+deliberately wrong expected pixel was rejected with Metal API/GPU validation.
+Results are in `result-msc-combined-root-20261104/` and
+`result-msc-combined-root-final-20261104/`. The bridge was not passed an
+explicit root-signature blob in this test; successful output and the embedded
+part's presence do not independently prove how MSC consumed that embedded
+signature or prove application descriptor collision behavior.
+
 The root-validation comparison now includes `ValidateDXIL`, alongside unset,
 zero and bound-resource validation. Three processes per mode each compiled six
 valid and six missing-resource instances. All valid roots compiled and all
