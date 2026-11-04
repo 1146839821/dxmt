@@ -64,6 +64,14 @@ FailLegacyDiagnosticAllocationForTesting(const char *phase) {
   return length && length < sizeof(selected) && std::strcmp(selected, phase) == 0;
 }
 
+// Test only: simulate a missing prerequisite without changing device capabilities.
+static bool
+FailSparseQueueAllocationForTesting(const char *object) {
+  char selected[16] = {};
+  const DWORD length = GetEnvironmentVariableA("DXMT_TEST_SPARSE_QUEUE_INIT_FAILURE", selected, sizeof(selected));
+  return length && length < sizeof(selected) && (!std::strcmp(selected, object) || !std::strcmp(selected, "both"));
+}
+
 class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, IMTLSwapChainFactory> {
 
   D3D12_COMMAND_QUEUE_DESC desc_;
@@ -636,14 +644,16 @@ public:
     queue_.addResidencySet(device_->GetGlobalResidencySet());
 
     if (metal_device.supportsPlacementSparse()) {
-      sparse_mapping_queue_ = metal_device.newSparseMappingQueue();
-      sparse_event_ = metal_device.newSharedEvent();
-      if (sparse_mapping_queue_ && sparse_event_)
-        sparse_mapping_queue_.addResidencySet(device_->GetGlobalResidencySet());
-      else {
-        sparse_mapping_queue_ = {};
-        sparse_event_ = {};
-      }
+      if (!FailSparseQueueAllocationForTesting("queue"))
+        sparse_mapping_queue_ = metal_device.newSparseMappingQueue();
+      if (!FailSparseQueueAllocationForTesting("event"))
+        sparse_event_ = metal_device.newSharedEvent();
+      // Reserved resources independently select native sparse backing from the
+      // device capability. Publishing a queue without its mapping prerequisites
+      // would silently update only their CPU mapping tables.
+      if (!sparse_mapping_queue_ || !sparse_event_)
+        return E_OUTOFMEMORY;
+      sparse_mapping_queue_.addResidencySet(device_->GetGlobalResidencySet());
     }
 
     fence_ = metal_device.newFence();

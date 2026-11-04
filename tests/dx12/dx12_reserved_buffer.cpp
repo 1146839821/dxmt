@@ -68,6 +68,73 @@ void Wait(ID3D12Fence *fence, UINT64 value) {
     ExitProcess(1);
   }
 }
+void CheckSparseQueueAdmission(ID3D12Device *device) {
+  if (!GetModuleHandleA("winemetal.dll"))
+    throw std::runtime_error("fault probe requires DXMT");
+  constexpr const char *variable = "DXMT_TEST_SPARSE_QUEUE_INIT_FAILURE";
+  struct RestoreEnvironment {
+    const char *name;
+    char saved[128] = {};
+    DWORD length;
+    RestoreEnvironment(const char *n)
+        : name(n), length(GetEnvironmentVariableA(n, saved, sizeof(saved))) {
+      if (length >= sizeof(saved))
+        throw std::runtime_error("fault setting too long");
+    }
+    ~RestoreEnvironment() {
+      SetEnvironmentVariableA(name, length ? saved : nullptr);
+    }
+  } restore(variable);
+  Owned<ID3D12Device9> device9;
+  Check("device9", device->QueryInterface(IID_PPV_ARGS(&device9.ptr)));
+  for (auto type :
+       {D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+        D3D12_COMMAND_LIST_TYPE_COPY}) {
+    D3D12_COMMAND_QUEUE_DESC desc = {};
+    desc.Type = type;
+    for (const char *missing : {"queue", "event", "both"}) {
+      for (bool version1 : {false, true}) {
+        if (!SetEnvironmentVariableA(variable, missing))
+          throw std::runtime_error("set failure hook");
+        auto *queue = reinterpret_cast<ID3D12CommandQueue *>(uintptr_t(1));
+        HRESULT hr = version1 ? device9->CreateCommandQueue1(
+                                    &desc, __uuidof(ID3D12Device),
+                                    __uuidof(ID3D12CommandQueue),
+                                    reinterpret_cast<void **>(&queue))
+                              : device->CreateCommandQueue(
+                                    &desc, __uuidof(ID3D12CommandQueue),
+                                    reinterpret_cast<void **>(&queue));
+        if (!SetEnvironmentVariableA(variable, nullptr))
+          throw std::runtime_error("clear failure hook");
+        if (hr != E_OUTOFMEMORY || queue) {
+          if (queue &&
+              queue != reinterpret_cast<ID3D12CommandQueue *>(uintptr_t(1)))
+            queue->Release();
+          throw std::runtime_error(
+              "missing sparse prerequisite was not rejected");
+        }
+        Check("device healthy after failed creation",
+              device->GetDeviceRemovedReason());
+        Owned<ID3D12CommandQueue> recovered;
+        Check("queue creation recovery",
+              version1
+                  ? device9->CreateCommandQueue1(&desc, __uuidof(ID3D12Device),
+                                                 IID_PPV_ARGS(&recovered.ptr))
+                  : device->CreateCommandQueue(&desc,
+                                               IID_PPV_ARGS(&recovered.ptr)));
+        Owned<ID3D12Fence> completed;
+        Check("recovery fence",
+              device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                  IID_PPV_ARGS(&completed.ptr)));
+        Check("recovered queue signal", recovered->Signal(completed.ptr, 1));
+        Wait(completed.ptr, 1);
+        std::cout << "SPARSE_QUEUE_ADMISSION type=" << type
+                  << " missing=" << missing << " api=" << (version1 ? 1 : 0)
+                  << " rejected=E_OUTOFMEMORY output=NULL recovery=PASS\n";
+      }
+    }
+  }
+}
 UINT Pattern(UINT seed, UINT page, UINT index) {
   const UINT base = page ? B : A;
   if (index == 0 || index == TileBytes / 4 - 1)
@@ -77,7 +144,7 @@ UINT Pattern(UINT seed, UINT page, UINT index) {
   return base ^ (seed * 0x9e3779b9u) ^ (index * 0x85ebca6bu);
 }
 int Run(const char *read_path, const char *write_path, UINT seed,
-        bool wrong_oracle) {
+        bool wrong_oracle, bool queue_failure) {
   auto read_shader = ReadShader(read_path),
        write_shader = ReadShader(write_path);
   Owned<ID3D12Device> device;
@@ -138,6 +205,7 @@ int Run(const char *read_path, const char *write_path, UINT seed,
     return 77;
   }
   const auto stable_va = sparse->GetGPUVirtualAddress();
+  if (queue_failure) CheckSparseQueueAdmission(device.ptr);
   auto create = [&](Owned<ID3D12Resource> &r, UINT bytes, D3D12_HEAP_TYPE type,
                     D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state) {
     auto props = Properties(type);
@@ -369,17 +437,21 @@ int Run(const char *read_path, const char *write_path, UINT seed,
 int main(int argc, char **argv) {
   if (argc != 3 && argc != 5 && argc != 6) {
     std::cerr << "usage: dx12_reserved_buffer <probe_read.cso> "
-                 "<probe_write.cso> [seed rounds [wrong-oracle]]\n";
+                 "<probe_write.cso> [seed rounds [wrong-oracle|queue-init-failure]]\n";
     return 2;
   }
   try {
     const UINT seed = argc >= 5 ? std::stoul(argv[3]) : 0;
     const UINT rounds = argc >= 5 ? std::stoul(argv[4]) : 1;
     if (rounds == 0 || rounds > 64 ||
-        (argc == 6 && std::strcmp(argv[5], "wrong-oracle")))
+        (argc == 6 && std::strcmp(argv[5], "wrong-oracle") &&
+         std::strcmp(argv[5], "queue-init-failure")))
       return 2;
     for (UINT round = 0; round < rounds; ++round) {
-      int result = Run(argv[1], argv[2], seed + round, argc == 6);
+      int result =
+          Run(argv[1], argv[2], seed + round,
+              argc == 6 && !std::strcmp(argv[5], "wrong-oracle"),
+              argc == 6 && !std::strcmp(argv[5], "queue-init-failure"));
       if (result)
         return result;
     }
