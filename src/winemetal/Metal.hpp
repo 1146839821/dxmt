@@ -954,6 +954,13 @@ public:
     SparseMappingQueue_updateTextureMappings(handle, texture.handle, heap.handle, operations, count);
   }
 
+  bool
+  tryUpdateTextureMappings(
+      Texture texture, Heap heap, const WMTUpdateSparseTextureMappingOperation *operations, uint64_t count
+  ) {
+    return SparseMappingQueue_tryUpdateTextureMappings(handle, texture.handle, heap.handle, operations, count) != 0;
+  }
+
   void
   copyBufferMappings(
       Buffer source, Buffer destination, const WMTCopySparseBufferMappingOperation *operations, uint64_t count

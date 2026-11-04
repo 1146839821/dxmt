@@ -22,8 +22,10 @@
 #include "com/com_pointer.hpp"
 #include "log/log.hpp"
 #include <atomic>
+#include <cstring>
 #include <limits>
 #include <mutex>
+#include <new>
 
 namespace dxmt {
 
@@ -31,6 +33,24 @@ static std::atomic<unsigned> texture_debug_count = 0;
 static std::atomic<unsigned> texture_srv_debug_count = 0;
 static constexpr uint64_t kD3D12TileSize = 64ull * 1024;
 static constexpr UINT kD3D12PackedTile = ~static_cast<UINT>(0);
+
+static void
+FailTextureUpdatePreparationForTesting() {
+  char phase[16] = {}, at[16] = {};
+  const DWORD length = GetEnvironmentVariableA("DXMT_TEST_SPARSE_TEXTURE_UPDATE_FAILURE", phase, sizeof(phase));
+  if (!length || length >= sizeof(phase) || std::strcmp(phase, "prepare"))
+    return;
+  const DWORD at_length = GetEnvironmentVariableA("DXMT_TEST_SPARSE_TEXTURE_UPDATE_FAIL_AT", at, sizeof(at));
+  if (at_length >= sizeof(at) || (at_length && std::strcmp(at, "1") && std::strcmp(at, "2")))
+    return;
+  const uint64_t target = at_length && !std::strcmp(at, "2") ? 2 : 1;
+  static std::atomic<uint64_t> calls{0};
+  const auto call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (call == target) {
+    ERR("DXMT_TEST_SPARSE_TEXTURE_UPDATE_FAILURE phase=prepare call=", call);
+    throw std::bad_alloc();
+  }
+}
 
 struct TextureTransferLayout {
   uint64_t row_size;
@@ -1908,7 +1928,7 @@ public:
       const D3D12_TILE_REGION_SIZE *pResourceRegionSizes, ID3D12Heap *pHeap, UINT NumRanges,
       const D3D12_TILE_RANGE_FLAGS *pRangeFlags, const UINT *pHeapRangeStartOffsets, const UINT *pRangeTileCounts,
       D3D12_TILE_MAPPING_FLAGS Flags, WMT::SparseMappingQueue sparse_mapping_queue
-  ) override {
+  ) override try {
     if (!reserved_ || (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD) || !NumRanges)
       return E_INVALIDARG;
 
@@ -2012,6 +2032,8 @@ public:
     if (sparse_mapping_queue) {
       if (!texture || !texture->current())
         return E_OUTOFMEMORY;
+      if (!updates.empty())
+        FailTextureUpdatePreparationForTesting();
       std::vector<WMTUpdateSparseTextureMappingOperation> mapping_operations;
       mapping_operations.reserve(updates.size());
       for (const auto &update : updates) {
@@ -2035,16 +2057,19 @@ public:
         operation.texture_slice = 0;
         operation.heap_offset = mapped ? heap_tile_start : 0;
       }
-      sparse_mapping_queue.updateTextureMappings(
-          texture->current()->texture(), pHeap ? static_cast<MTLD3D12Heap *>(pHeap)->GetMetalHeap() : WMT::Heap{},
-          mapping_operations.data(), mapping_operations.size()
-      );
+      if (!sparse_mapping_queue.tryUpdateTextureMappings(
+              texture->current()->texture(), pHeap ? static_cast<MTLD3D12Heap *>(pHeap)->GetMetalHeap() : WMT::Heap{},
+              mapping_operations.data(), mapping_operations.size()
+          ))
+        return DXGI_ERROR_DEVICE_REMOVED; // Do not publish a failed native update.
     }
 
     std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
     for (const auto &update : updates)
       tile_mappings_[update.resource_tile] = {update.heap, update.heap_tile};
     return S_OK;
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
   }
 
   HRESULT

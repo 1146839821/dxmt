@@ -2491,6 +2491,12 @@ WINEMETAL_API void SparseMappingQueue_updateTextureMappings(
     const struct WMTUpdateSparseTextureMappingOperation *operations, uint64_t count
 );
 
+// Additive checked entry: 1 means synchronous preparation/issuance succeeded.
+WINEMETAL_API uint32_t SparseMappingQueue_tryUpdateTextureMappings(
+    obj_handle_t queue, obj_handle_t texture, obj_handle_t heap,
+    const struct WMTUpdateSparseTextureMappingOperation *operations, uint64_t count
+);
+
 WINEMETAL_API void SparseMappingQueue_copyBufferMappings(
     obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
     const struct WMTCopySparseBufferMappingOperation *operations, uint64_t count

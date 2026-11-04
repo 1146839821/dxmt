@@ -1642,6 +1642,20 @@ SparseMappingQueue_updateTextureMappings(
   UNIX_CALL(unix_sparsemappingqueue_updatetexturemappings, &params);
 }
 
+WINEMETAL_API uint32_t
+SparseMappingQueue_tryUpdateTextureMappings(
+    obj_handle_t queue, obj_handle_t texture, obj_handle_t heap,
+    const struct WMTUpdateSparseTextureMappingOperation *operations, uint64_t count
+) {
+  struct unixcall_sparsemappingqueue_mappings params;
+  params.queue = queue;
+  params.resource = texture;
+  params.heap = heap;
+  WMT_MEMPTR_SET(params.operations, operations);
+  params.count = count;
+  return WINE_UNIX_CALL(unix_sparsemappingqueue_updatetexturemappings, &params) == 0;
+}
+
 WINEMETAL_API void
 SparseMappingQueue_copyBufferMappings(
     obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
