@@ -6,10 +6,9 @@ void main() {
 }
 
 RWByteAddressBuffer sparse_write : register(u1);
-[numthreads(1, 1, 1)]
-void probe_read() {
-  output_buffer.Store(0, input_buffer.Load(0) + 1);
-  output_buffer.Store(4, input_buffer.Load(65532) + 1);
+[numthreads(64, 1, 1)]
+void probe_read(uint3 id : SV_DispatchThreadID) {
+  output_buffer.Store(id.x * 4, input_buffer.Load(id.x * 4) + 1);
 }
 [numthreads(1, 1, 1)]
 void probe_write() {

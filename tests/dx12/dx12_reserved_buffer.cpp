@@ -2,10 +2,13 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <cstring>
+#include <cstdio>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
+#include <utility>
 
 namespace {
 constexpr UINT TileBytes = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
@@ -56,7 +59,8 @@ void Wait(ID3D12Fence *fence, UINT64 value) {
   HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
   if (!event) throw std::runtime_error("CreateEvent");
   HRESULT hr = fence->SetEventOnCompletion(value, event);
-  DWORD status = SUCCEEDED(hr) ? WaitForSingleObject(event, 30000) : WAIT_FAILED;
+  DWORD status =
+      SUCCEEDED(hr) ? WaitForSingleObject(event, 30000) : WAIT_FAILED;
   CloseHandle(event);
   if (status != WAIT_OBJECT_0) {
     // Do not destroy allocations still referenced by GPU work after a timeout.
@@ -64,31 +68,71 @@ void Wait(ID3D12Fence *fence, UINT64 value) {
     ExitProcess(1);
   }
 }
-int Run(const char *read_path, const char *write_path) {
-  auto read_shader = ReadShader(read_path), write_shader = ReadShader(write_path);
+UINT Pattern(UINT seed, UINT page, UINT index) {
+  const UINT base = page ? B : A;
+  if (index == 0 || index == TileBytes / 4 - 1)
+    return base ^ seed;
+  if (index == TileBytes / 8)
+    return 0;
+  return base ^ (seed * 0x9e3779b9u) ^ (index * 0x85ebca6bu);
+}
+int Run(const char *read_path, const char *write_path, UINT seed,
+        bool wrong_oracle) {
+  auto read_shader = ReadShader(read_path),
+       write_shader = ReadShader(write_path);
   Owned<ID3D12Device> device;
-  Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.ptr)));
+  Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                    IID_PPV_ARGS(&device.ptr)));
+  for (auto [dll, symbol] :
+       {std::pair{"d3d12.dll", "D3D12CreateDevice"},
+        std::pair{"winemetal.dll", "DXMTMSCGetCapabilities"}}) {
+    auto module = GetModuleHandleA(dll);
+    auto code =
+        module
+            ? reinterpret_cast<const uint8_t *>(GetProcAddress(module, symbol))
+            : nullptr;
+    if (!module && !std::strcmp(dll, "winemetal.dll"))
+      continue; // Windows native reference.
+    if (!code)
+      throw std::runtime_error("identity export missing");
+    char path[32768] = {};
+    if (!GetModuleFileNameA(module, path, sizeof(path)))
+      throw std::runtime_error("module path missing");
+    std::cout << "LOADED_MODULE " << dll << " " << path << "\n";
+    std::printf("LOADED_CODE %s %s ", dll, symbol);
+    for (UINT i = 0; i < 16; ++i)
+      std::printf("%02x", code[i]);
+    std::printf("\n");
+  }
   Owned<ID3D12CommandQueue> direct, compute;
   D3D12_COMMAND_QUEUE_DESC q = {};
   q.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-  Check("direct queue", device->CreateCommandQueue(&q, IID_PPV_ARGS(&direct.ptr)));
+  Check("direct queue",
+        device->CreateCommandQueue(&q, IID_PPV_ARGS(&direct.ptr)));
   q.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
-  Check("compute queue", device->CreateCommandQueue(&q, IID_PPV_ARGS(&compute.ptr)));
+  Check("compute queue",
+        device->CreateCommandQueue(&q, IID_PPV_ARGS(&compute.ptr)));
   Owned<ID3D12Fence> mapping_done, compute_done, gate;
-  Check("mapping fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&mapping_done.ptr)));
-  Check("compute fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&compute_done.ptr)));
-  Check("gate fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate.ptr)));
+  Check("mapping fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                             IID_PPV_ARGS(&mapping_done.ptr)));
+  Check("compute fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                             IID_PPV_ARGS(&compute_done.ptr)));
+  Check("gate fence",
+        device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate.ptr)));
   Owned<ID3D12Heap> heap;
   D3D12_HEAP_DESC hd = {};
-  hd.SizeInBytes = 2 * TileBytes; hd.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
+  hd.SizeInBytes = 2 * TileBytes;
+  hd.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
   hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
   Check("tile heap", device->CreateHeap(&hd, IID_PPV_ARGS(&heap.ptr)));
   const ULONG heap_public_ref_after_create = heap->AddRef();
   heap->Release();
   Owned<ID3D12Resource> sparse, upload, output, readback;
-  auto d = BufferDesc(2 * TileBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-  Check("reserved buffer", device->CreateReservedResource(&d, D3D12_RESOURCE_STATE_COMMON,
-                                                          nullptr, IID_PPV_ARGS(&sparse.ptr)));
+  auto d =
+      BufferDesc(2 * TileBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  Check("reserved buffer",
+        device->CreateReservedResource(&d, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                       IID_PPV_ARGS(&sparse.ptr)));
   if (!sparse->GetGPUVirtualAddress()) {
     std::cout << "SKIP: reserved buffer has no shader-visible backing\n";
     return 77;
@@ -96,16 +140,22 @@ int Run(const char *read_path, const char *write_path) {
   const auto stable_va = sparse->GetGPUVirtualAddress();
   auto create = [&](Owned<ID3D12Resource> &r, UINT bytes, D3D12_HEAP_TYPE type,
                     D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state) {
-    auto props = Properties(type); auto desc = BufferDesc(bytes, flags);
-    Check("committed buffer", device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE,
-          &desc, state, nullptr, IID_PPV_ARGS(&r.ptr)));
+    auto props = Properties(type);
+    auto desc = BufferDesc(bytes, flags);
+    Check("committed buffer", device->CreateCommittedResource(
+                                  &props, D3D12_HEAP_FLAG_NONE, &desc, state,
+                                  nullptr, IID_PPV_ARGS(&r.ptr)));
   };
-  create(upload, 2 * TileBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-  create(output, 256, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-  create(readback, TileBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+  create(upload, 2 * TileBytes, D3D12_HEAP_TYPE_UPLOAD,
+         D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+  create(output, TileBytes, D3D12_HEAP_TYPE_DEFAULT,
+         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+         D3D12_RESOURCE_STATE_COMMON);
+  create(readback, 2 * TileBytes, D3D12_HEAP_TYPE_READBACK,
+         D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
   UINT *data = nullptr;
   Check("upload map", upload->Map(0, nullptr, reinterpret_cast<void **>(&data)));
-  for (UINT i = 0; i < 2 * TileBytes / sizeof(UINT); ++i) data[i] = i < TileBytes / sizeof(UINT) ? A : B;
+  for (UINT i = 0; i < 2 * TileBytes / sizeof(UINT); ++i) data[i] = Pattern(seed, i / (TileBytes / 4), i % (TileBytes / 4));
   upload->Unmap(0, nullptr);
 
   // Create all descriptors before mapping. Never rewrite them during any phase.
@@ -123,7 +173,7 @@ int Run(const char *read_path, const char *write_path) {
   device->CreateShaderResourceView(sparse.ptr, &srv, cpu);
   D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
   uav.Format = DXGI_FORMAT_R32_TYPELESS; uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-  uav.Buffer.NumElements = 64; uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+  uav.Buffer.NumElements = TileBytes / 4; uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
   cpu.ptr += stride; device->CreateUnorderedAccessView(output.ptr, nullptr, &uav, cpu);
   uav.Buffer.NumElements = TileBytes / 4;
   cpu.ptr += stride; device->CreateUnorderedAccessView(sparse.ptr, nullptr, &uav, cpu);
@@ -170,9 +220,15 @@ int Run(const char *read_path, const char *write_path) {
   Check("init signal", direct->Signal(mapping_done.ptr, 1));
   UINT64 serial = 1;
   region.NumTiles = 1;
-  auto phase = [&](const char *name, int tile, bool write, UINT expected, bool delayed = false) {
-    if (serial > 1) Check("direct waits previous compute", direct->Wait(compute_done.ptr, serial - 1));
-    if (delayed) Check("hold mapping queue", direct->Wait(gate.ptr, 1));
+  bool written[2] = {};
+  UINT64 words_checked = 0;
+  auto phase = [&](const char *name, int tile, bool write, UINT expected,
+                   bool delayed = false) {
+    if (serial > 1)
+      Check("direct waits previous compute",
+            direct->Wait(compute_done.ptr, serial - 1));
+    if (delayed)
+      Check("hold mapping queue", direct->Wait(gate.ptr, 1));
     D3D12_TILE_RANGE_FLAGS flags = tile < 0 ? D3D12_TILE_RANGE_FLAG_NULL : D3D12_TILE_RANGE_FLAG_NONE;
     UINT heap_tile = tile < 0 ? 0 : static_cast<UINT>(tile);
     direct->UpdateTileMappings(sparse.ptr, 1, &coord, &region, tile < 0 ? nullptr : heap.ptr,
@@ -197,55 +253,139 @@ int Run(const char *read_path, const char *write_path) {
     phase_list->SetComputeRootDescriptorTable(0, descriptors->GetGPUDescriptorHandleForHeapStart());
     const auto access = write ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     Transition(phase_list.ptr, sparse.ptr, D3D12_RESOURCE_STATE_COMMON, access);
-    if (!write) Transition(phase_list.ptr, output.ptr, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    phase_list->Dispatch(1, 1, 1);
+    if (!write)
+      Transition(phase_list.ptr, output.ptr, D3D12_RESOURCE_STATE_COMMON,
+                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    phase_list->Dispatch(write ? 1 : TileBytes / (4 * 64), 1, 1);
     if (!write) {
       Transition(phase_list.ptr, output.ptr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-      phase_list->CopyBufferRegion(readback.ptr, 0, output.ptr, 0, 2 * sizeof(UINT));
+      phase_list->CopyBufferRegion(readback.ptr, 0, output.ptr, 0, TileBytes);
       Transition(phase_list.ptr, output.ptr, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
-    } else if (tile >= 0) {
-      Transition(phase_list.ptr, sparse.ptr, access, D3D12_RESOURCE_STATE_COPY_SOURCE);
-      phase_list->CopyTiles(sparse.ptr, &coord, &region, readback.ptr, 0, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
     }
-    Transition(phase_list.ptr, sparse.ptr, write && tile >= 0 ? D3D12_RESOURCE_STATE_COPY_SOURCE : access, D3D12_RESOURCE_STATE_COMMON);
+    if (tile >= 0) {
+      Transition(phase_list.ptr, sparse.ptr, access, D3D12_RESOURCE_STATE_COPY_SOURCE);
+      phase_list->CopyTiles(sparse.ptr, &coord, &region, readback.ptr, TileBytes, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
+      if (write)
+        written[tile] = true;
+    }
+    Transition(phase_list.ptr, sparse.ptr,
+               tile >= 0 ? D3D12_RESOURCE_STATE_COPY_SOURCE : access,
+               D3D12_RESOURCE_STATE_COMMON);
     Check("phase close", phase_list->Close());
     ID3D12CommandList *lists[] = {phase_list.ptr};
     compute->ExecuteCommandLists(1, lists);
     Check("compute signal", compute->Signal(compute_done.ptr, serial));
-    if (delayed) Check("release mapping queue", gate->Signal(1));
+    if (delayed)
+      Check("release mapping queue", gate->Signal(1));
     Wait(compute_done.ptr, serial++);
     if (!write || tile >= 0) {
-      Check("readback map", readback->Map(0, nullptr, reinterpret_cast<void **>(&data)));
-      UINT first = data[0], last = data[write ? TileBytes / sizeof(UINT) - 1 : 1];
-      readback->Unmap(0, nullptr);
-      if (first != expected || last != expected) {
-        std::cerr << name << " expected 0x" << std::hex << expected << ", got 0x" << first << "/0x" << last << std::dec << "\n";
-        throw std::runtime_error("shader result mismatch");
+      Check("readback map",
+            readback->Map(0, nullptr, reinterpret_cast<void **>(&data)));
+      bool mismatch = false;
+      if (!write) {
+        for (UINT i = 0; i < TileBytes / 4; ++i) {
+          UINT wanted = tile < 0 ? 0
+                        : written[tile] && (i == 0 || i == TileBytes / 4 - 1)
+                            ? Written
+                            : Pattern(seed, tile, i);
+          ++wanted; // Shader deliberately adds one, including for NULL and
+                    // mapped zero.
+          if (i == 0 && wanted != expected)
+            throw std::runtime_error("invalid test expectation");
+          if (data[i] != wanted) {
+            if (!mismatch)
+              std::cerr << name << " shader word=" << i
+                        << " expected=" << wanted << " got=" << data[i] << "\n";
+            mismatch = true;
+          }
+          ++words_checked;
+        }
       }
+      if (tile >= 0) {
+        for (UINT i = 0; i < TileBytes / 4; ++i) {
+          UINT wanted = written[tile] && (i == 0 || i == TileBytes / 4 - 1)
+                            ? Written
+                            : Pattern(seed, tile, i);
+          if (wrong_oracle && serial == 2 && i == 0)
+            wanted ^= 1;
+          if (data[TileBytes / 4 + i] != wanted) {
+            if (!mismatch)
+              std::cerr << name << " word=" << i << " expected=" << wanted
+                        << " got=" << data[TileBytes / 4 + i] << "\n";
+            mismatch = true;
+          }
+          ++words_checked;
+        }
+      }
+      readback->Unmap(0, nullptr);
+      if (mismatch)
+        throw std::runtime_error("shader/full-page result mismatch");
     }
-    if (sparse->GetGPUVirtualAddress() != stable_va) throw std::runtime_error("VA changed on remap");
+    // Check the first result before replay so a later successful submission
+    // cannot hide an earlier failure. Keep the closed list and allocator alive.
+    if (serial == 2) {
+      Owned<ID3D12Fence> replay_done;
+      Check("replay fence",
+            device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                IID_PPV_ARGS(&replay_done.ptr)));
+      compute->ExecuteCommandLists(1, lists);
+      Check("replay signal", compute->Signal(replay_done.ptr, 1));
+      Wait(replay_done.ptr, 1);
+      Check("replay map",
+            readback->Map(0, nullptr, reinterpret_cast<void **>(&data)));
+      bool mismatch = false;
+      for (UINT i = 0; i < TileBytes / 4; ++i) {
+        UINT wanted = Pattern(seed, 0, i);
+        mismatch |= data[i] != wanted + 1 || data[TileBytes / 4 + i] != wanted;
+        words_checked += 2;
+      }
+      readback->Unmap(0, nullptr);
+      if (mismatch)
+        throw std::runtime_error("closed-list replay mismatch");
+      std::cout << "closed-list replay passed\n";
+    }
+    if (sparse->GetGPUVirtualAddress() != stable_va)
+      throw std::runtime_error("VA changed on remap");
     std::cout << name << " passed\n";
   };
-  phase("nonzero backing A / descriptors before map", 0, false, A + 1);
-  phase("remap A to B / delayed direct-to-compute wait", 1, false, B + 1, true);
-  phase("remap back to A preserves contents", 0, false, A + 1);
+  phase("nonzero backing A / descriptors before map", 0, false, (A ^ seed) + 1);
+  phase("remap A to B / delayed direct-to-compute wait", 1, false,
+        (B ^ seed) + 1, true);
+  phase("remap back to A preserves contents", 0, false, (A ^ seed) + 1);
   phase("NULL SRV reads zero", -1, false, 1);
   phase("NULL UAV write completes", -1, true, 0);
   phase("NULL SRV remains zero after write", -1, false, 1);
-  phase("NULL write leaves backing A intact", 0, false, A + 1);
-  phase("NULL write leaves backing B intact", 1, false, B + 1);
+  phase("NULL write leaves backing A intact", 0, false, (A ^ seed) + 1);
+  phase("NULL write leaves backing B intact", 1, false, (B ^ seed) + 1);
   phase("mapped UAV write and CopyTiles readback", 1, true, Written);
   phase("SRV sees mapped UAV write", 1, false, Written + 1);
-  phase("mapped write leaves other backing intact", 0, false, A + 1);
-  std::cout << "Reserved buffer shader, remap, NULL and cross-queue tests passed\n";
+  phase("mapped write leaves other backing intact", 0, false, (A ^ seed) + 1);
+  std::cout << "Reserved buffer shader, remap, NULL and cross-queue tests "
+               "passed seed="
+            << seed << " words=" << words_checked << "\n";
   return 0;
 }
 } // namespace
 int main(int argc, char **argv) {
-  if (argc != 3) {
-    std::cerr << "usage: dx12_reserved_buffer <probe_read.cso> <probe_write.cso>\n";
+  if (argc != 3 && argc != 5 && argc != 6) {
+    std::cerr << "usage: dx12_reserved_buffer <probe_read.cso> "
+                 "<probe_write.cso> [seed rounds [wrong-oracle]]\n";
     return 2;
   }
-  try { return Run(argv[1], argv[2]); }
-  catch (const std::exception &e) { std::cerr << e.what() << "\n"; return 1; }
+  try {
+    const UINT seed = argc >= 5 ? std::stoul(argv[3]) : 0;
+    const UINT rounds = argc >= 5 ? std::stoul(argv[4]) : 1;
+    if (rounds == 0 || rounds > 64 ||
+        (argc == 6 && std::strcmp(argv[5], "wrong-oracle")))
+      return 2;
+    for (UINT round = 0; round < rounds; ++round) {
+      int result = Run(argv[1], argv[2], seed + round, argc == 6);
+      if (result)
+        return result;
+    }
+    return 0;
+  } catch (const std::exception &e) {
+    std::cerr << e.what() << "\n";
+    return 1;
+  }
 }
